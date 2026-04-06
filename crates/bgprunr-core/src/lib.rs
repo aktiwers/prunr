@@ -1,14 +1,15 @@
 pub mod engine;
 pub mod types;
-// Stub module declarations — implemented in later plans
 pub mod pipeline;
 pub mod preprocess;
 pub mod postprocess;
 pub mod batch;
 pub mod formats;
 
-pub use engine::InferenceEngine;
+pub use engine::{InferenceEngine, OrtEngine};
 pub use types::{
     CoreError, ModelKind, ProgressStage, ProcessResult,
     LARGE_IMAGE_LIMIT, DOWNSCALE_TARGET,
 };
+pub use pipeline::process_image;
+pub use formats::{load_image_from_path, load_image_from_bytes, check_large_image, downscale_image, encode_rgba_png};

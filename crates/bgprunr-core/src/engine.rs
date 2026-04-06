@@ -1,3 +1,5 @@
+use std::sync::Mutex;
+
 use crate::types::{CoreError, ModelKind};
 use ort::{
     execution_providers::CPUExecutionProvider,
@@ -13,8 +15,12 @@ pub trait InferenceEngine: Send + Sync {
 
 /// ORT-backed inference engine. Holds one Session per model selection.
 /// Create once per model; reuse across all images — never instantiate per-image.
+///
+/// The session is behind a Mutex because ort's `Session::run()` takes `&mut self`
+/// internally (ORT updates state during inference). The Mutex enables shared `&OrtEngine`
+/// references while still satisfying ort's mutability requirement.
 pub struct OrtEngine {
-    session: Session,
+    session: Mutex<Session>,
     provider_name: String,
 }
 
@@ -76,7 +82,10 @@ impl OrtEngine {
         // at session init (visible in development). This matches rembg's approach.
         let provider_name = Self::detect_active_provider();
 
-        Ok(Self { session, provider_name })
+        Ok(Self {
+            session: Mutex::new(session),
+            provider_name,
+        })
     }
 
     /// Infer the active provider name from compile-time feature flags.
@@ -94,10 +103,18 @@ impl OrtEngine {
         "CPU".to_string()
     }
 
-    /// Access the underlying ORT Session for inference.
+    /// Lock the underlying ORT Session for inference.
     /// Used by pipeline.rs — not part of the public trait API.
-    pub(crate) fn session(&self) -> &Session {
-        &self.session
+    /// ORT requires &mut Session for run(); Mutex provides interior mutability.
+    pub(crate) fn with_session<T, F>(&self, f: F) -> Result<T, CoreError>
+    where
+        F: FnOnce(&mut Session) -> Result<T, CoreError>,
+    {
+        let mut session = self
+            .session
+            .lock()
+            .map_err(|e| CoreError::Inference(format!("Session mutex poisoned: {e}")))?;
+        f(&mut session)
     }
 }
 
@@ -123,7 +140,7 @@ mod tests {
     }
 
     // Integration tests require dev-models feature and downloaded models.
-    // Run with: cargo test -p bgprunr-core --features bgprunr-models/dev-models
+    // Run with: cargo test -p bgprunr-core --features dev-models
     #[cfg(feature = "dev-models")]
     #[test]
     fn test_ort_engine_silueta_active_provider_non_empty() {
