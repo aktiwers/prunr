@@ -1,0 +1,76 @@
+# BgPrunR
+
+## What This Is
+
+BgPrunR is a desktop application that removes backgrounds from images using AI, running entirely on the user's machine. It provides both a CLI for scripting/batch workflows and a GUI for interactive use. Drop a photo in, click a button, get a transparent PNG — no internet, no cloud, no subscriptions.
+
+## Core Value
+
+One-click local background removal that is fast, private, and works offline — your photos never leave your machine.
+
+## Requirements
+
+### Validated
+
+(None yet — ship to validate)
+
+### Active
+
+- [ ] Local AI inference using ONNX Runtime (U2-Net / silueta models)
+- [ ] GPU acceleration (CUDA/Metal/Vulkan) with automatic CPU fallback
+- [ ] egui-based GUI with drag-and-drop, zoom, pan, before/after comparison
+- [ ] CLI mode sharing the same core inference engine
+- [ ] Batch processing with parallel inference across thread pool
+- [ ] Single-binary distribution with embedded models and assets
+- [ ] Support PNG, JPEG, WebP, BMP input; SVG rasterized on load via resvg
+- [ ] PNG output with transparency
+- [ ] Cross-platform: Linux, macOS, Windows
+- [ ] Keyboard shortcuts for all major actions
+- [ ] Copy result to clipboard
+- [ ] Settings dialog (auto-remove, model selection, parallelism)
+- [ ] Two bundled models: silueta (~4MB, fast) and u2net (~170MB, best quality)
+- [ ] Large image warning/downscale prompt (over 8000px)
+- [ ] Progress indication during inference
+
+### Out of Scope
+
+- Cloud/server processing — violates core privacy principle
+- Web UI or embedded web server — pure native Rust only
+- Video background removal — image-only for v1
+- Real-time camera feed — desktop file processing only
+- Plugin/extension system — keep it simple and self-contained
+- Custom model training — use pre-trained ONNX models only
+
+## Context
+
+**Inspiration:** Python rembg library (github.com/danielgatis/rembg) which wraps ONNX Runtime + U2-Net models. BgPrunR replicates the same inference pipeline in pure Rust using the `ort` crate (Rust ONNX Runtime bindings), eliminating the Python dependency entirely.
+
+**Inference pipeline:** Input image → resize to 320×320 → normalize (mean/std per rembg spec) → ONNX inference → sigmoid → threshold → resize mask to original dimensions → apply alpha channel. This must match rembg's preprocessing exactly for equivalent output quality.
+
+**Model bundling:** Both silueta (~4MB) and u2net (~170MB) ONNX models are embedded in the binary at compile time. The user selects which model to use in settings. Silueta is the default for speed; u2net available for maximum quality.
+
+**GPU strategy:** The `ort` crate supports CUDA (Linux/Windows), CoreML/Metal (macOS), and DirectML (Windows) execution providers. Build with feature flags to enable platform-appropriate GPU backends. CPU is always available as fallback.
+
+## Constraints
+
+- **Tech stack**: Pure Rust — Cargo workspace with `ort` (ONNX), `egui`/`eframe` (GUI), `image` (decode/encode), `clap` (CLI), `rayon` (parallelism), `resvg` (SVG)
+- **Distribution**: Single self-contained binary per platform, no runtime dependencies for end users
+- **Binary size**: ~180MB acceptable (dominated by u2net model), compress with `include_bytes!` + zstd decompression
+- **Performance**: Inference should utilize all available CPU cores; batch processing parallelized across images
+- **Compatibility**: Must build and run on Linux (x86_64), macOS (x86_64 + aarch64), Windows (x86_64)
+- **Privacy**: Zero network access — no telemetry, no update checks, no model downloads at runtime
+
+## Key Decisions
+
+| Decision | Rationale | Outcome |
+|----------|-----------|---------|
+| egui over iced/Slint | Best for image tools: built-in textures, zoom/pan, immediate mode simplifies state, GPU-rendered | — Pending |
+| ort over tract/candle | Direct ONNX Runtime bindings = exact rembg model compatibility, mature GPU support | — Pending |
+| Embed models in binary | User downloads nothing extra; single-file distribution; trade binary size for UX | — Pending |
+| GPU + CPU fallback | Best performance when GPU available, universal compatibility via CPU fallback | — Pending |
+| rayon for batch parallelism | Proven work-stealing thread pool, zero-config parallelism across images | — Pending |
+| resvg for SVG | Rasterize SVG on load — simple, reliable, avoids complex vector pipeline | — Pending |
+| Cargo workspace | Shared core between CLI and GUI binaries, clean separation of concerns | — Pending |
+
+---
+*Last updated: 2026-04-06 after initialization*
