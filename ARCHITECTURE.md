@@ -17,36 +17,41 @@ bgprunr/
 ├── crates/
 │   ├── bgprunr-core/             # Library: inference pipeline, image I/O
 │   │   └── src/
-│   │       ├── lib.rs            # Public API surface
-│   │       ├── engine.rs         # ORT session management, EP negotiation
+│   │       ├── lib.rs            # Public API surface + trait definitions
+│   │       ├── engine.rs         # InferenceEngine trait + ORT implementation
 │   │       ├── pipeline.rs       # Pre-process → infer → post-process → alpha
 │   │       ├── batch.rs          # Parallel batch via rayon, progress callbacks
 │   │       ├── formats.rs        # Image decode/encode (image crate + resvg)
-│   │       └── types.rs          # Shared types: ProcessResult, Progress, Error
+│   │       └── types.rs          # Shared types: ProcessResult, Progress, Error (thiserror)
 │   │
 │   ├── bgprunr-models/           # Library: model embedding (isolated for build speed)
 │   │   └── src/lib.rs            # include_bytes_zstd! for silueta + u2net
 │   │                             # Dev feature: load from filesystem
 │   │
-│   ├── bgprunr-cli/              # Binary: CLI interface
-│   │   └── src/main.rs           # clap args → core::pipeline, indicatif progress
-│   │
-│   └── bgprunr-gui/              # Binary: GUI application
+│   └── bgprunr-app/              # Binary: single binary for both CLI and GUI
 │       └── src/
-│           ├── main.rs           # eframe::run_native entry point
-│           ├── app.rs            # App struct, eframe::App impl, message routing
-│           ├── worker.rs         # Background inference thread + mpsc channels
-│           ├── state.rs          # Application state machine (Idle → Loading → Processing → Done)
-│           ├── views/
-│           │   ├── canvas.rs     # Image viewer: textures, zoom, pan, checkerboard
-│           │   ├── sidebar.rs    # Batch queue: thumbnails, drag-reorder
-│           │   ├── toolbar.rs    # Action buttons, progress bar
-│           │   ├── settings.rs   # Settings dialog
-│           │   ├── shortcuts.rs  # ? help overlay
-│           │   └── animation.rs  # Reveal animation: mask dissolve/particle effect
-│           └── input.rs          # Keyboard/mouse input handling, shortcut dispatch
+│           ├── main.rs           # Entry point: no args → GUI, subcommands → CLI
+│           ├── cli.rs            # clap subcommands: remove, batch (indicatif progress)
+│           ├── gui/
+│           │   ├── mod.rs        # eframe::run_native entry point
+│           │   ├── app.rs        # App struct, eframe::App impl, message routing
+│           │   ├── worker.rs     # Background inference thread + mpsc channels
+│           │   ├── state.rs      # Application state machine (Idle → Loading → Processing → Done)
+│           │   ├── views/
+│           │   │   ├── canvas.rs     # Image viewer: textures, zoom, pan, checkerboard
+│           │   │   ├── sidebar.rs    # Batch queue: thumbnails, drag-reorder
+│           │   │   ├── toolbar.rs    # Action buttons, progress bar
+│           │   │   ├── settings.rs   # Settings dialog
+│           │   │   ├── shortcuts.rs  # ? help overlay
+│           │   │   └── animation.rs  # Reveal animation: mask dissolve/particle effect
+│           │   └── input.rs      # Keyboard/mouse input handling, shortcut dispatch
+│           └── shared.rs         # Common utilities between CLI and GUI paths
 │
-├── models/                       # ONNX model files (git-lfs or downloaded by build script)
+├── xtask/                        # Developer tooling
+│   ├── Cargo.toml
+│   └── src/main.rs               # cargo xtask fetch-models (SHA256-verified download)
+│
+├── models/                       # ONNX model files (.gitignored, fetched via xtask)
 │   ├── silueta.onnx              # ~4MB — fast model, default
 │   └── u2net.onnx                # ~170MB — quality model
 │
@@ -63,15 +68,16 @@ bgprunr-models  (no deps on other workspace crates)
       ▼
 bgprunr-core    (depends on: bgprunr-models)
       │
-   ┌──┴──┐
-   ▼     ▼
- cli    gui     (both depend on: bgprunr-core)
+      ▼
+bgprunr-app     (single binary: CLI + GUI, depends on: bgprunr-core)
 ```
+
+**Single binary architecture:** `bgprunr` (no args) opens the GUI. `bgprunr remove ...` runs CLI mode. One binary to distribute.
 
 **Why this matters:**
 - `bgprunr-models` compiles independently. Its 170MB embed only recompiles when model files change, not on every source edit.
-- `bgprunr-core` owns all inference logic. CLI and GUI are thin presentation layers.
-- CLI and GUI can build in parallel after core is ready.
+- `bgprunr-core` owns all inference logic. The app binary is a thin presentation layer.
+- `bgprunr-app` contains both CLI and GUI code in one binary — `bgprunr` (no args) = GUI, `bgprunr remove ...` = CLI.
 
 ## Data Flow
 
@@ -279,3 +285,4 @@ if ui.input(|i| i.modifiers.ctrl && i.key_pressed(Key::O)) { /* open */ }
 | Date | Change | Reason |
 |------|--------|--------|
 | 2026-04-06 | Initial architecture | Project initialization |
+| 2026-04-06 | Single binary (CLI+GUI), xtask model fetch, thiserror errors | Phase 1 discussion decisions |
