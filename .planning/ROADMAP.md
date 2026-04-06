@@ -48,7 +48,15 @@ Plans:
   3. When CUDA/CoreML/DirectML hardware is present, the active execution provider name is logged at session initialization and queryable via the public API (not silently falling back without notice)
   4. Calling `process_image()` on an image exceeding 8000px in either dimension returns a warning/prompt result rather than silently processing a huge tensor
   5. `batch_process()` accepts a progress callback and processes multiple images using a rayon thread pool with no thread oversubscription against ORT's intra-op pool
-**Plans**: TBD
+**Plans**: 6 plans
+
+Plans:
+- [ ] 02-01-PLAN.md — Types foundation: CoreError variants, ModelKind, ProgressStage, ProcessResult, Cargo deps
+- [ ] 02-02-PLAN.md — Pure pipeline modules: preprocess.rs (rembg-exact Lanczos3 + max-pixel norm), postprocess.rs (min-max, no sigmoid), formats.rs
+- [ ] 02-03-PLAN.md — OrtEngine session management + process_image() orchestration with progress callback
+- [ ] 02-04-PLAN.md — batch_process() with rayon thread pool and ORT intra-op thread balancing
+- [ ] 02-05-PLAN.md — Reference test infrastructure: scripts/generate_references.py, test image directories
+- [ ] 02-06-PLAN.md — Integration test suite: CORE-05 pixel-accuracy hard gate + all requirement tests
 
 ### Phase 3: CLI Binary
 **Goal**: A user with no GUI can process single images and batches via the terminal, select models, tune parallelism, and get correct exit codes — the full core API is exercised under real scripting conditions
@@ -106,7 +114,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Workspace Scaffolding | 4/4 | Complete   | 2026-04-06 |
-| 2. Core Inference Engine | 0/TBD | Not started | - |
+| 2. Core Inference Engine | 0/6 | Not started | - |
 | 3. CLI Binary | 0/TBD | Not started | - |
 | 4. GUI Foundation | 0/TBD | Not started | - |
 | 5. GUI Feature Completeness | 0/TBD | Not started | - |
