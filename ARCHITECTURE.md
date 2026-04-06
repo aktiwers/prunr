@@ -253,6 +253,18 @@ pub fn load_model(name: &str) -> Vec<u8> {
 | `include-bytes-zstd` | 0.2 | Build-time model compression |
 | `rfd` | 0.15 | Native file dialogs (open/save) |
 
+## Keyboard Shortcuts — Platform Modifier
+
+All shortcuts use Ctrl on Linux/Windows and Cmd (⌘) on macOS. In code, use egui's `Modifiers::command` (not `ctrl`) which maps to the correct platform modifier automatically.
+
+```rust
+// Correct — platform-aware
+if ui.input(|i| i.modifiers.command && i.key_pressed(Key::O)) { /* open */ }
+
+// Wrong — Ctrl on macOS feels alien
+if ui.input(|i| i.modifiers.ctrl && i.key_pressed(Key::O)) { /* open */ }
+```
+
 ## Platform-Specific Notes
 
 | Platform | GPU EP | Clipboard | File dialogs | Notes |

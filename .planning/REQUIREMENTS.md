@@ -67,8 +67,8 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### Settings & UX
 
-- [ ] **UX-01**: All keyboard shortcuts work as specified (Ctrl+O, Ctrl+R, Ctrl+S, Ctrl+C, B, [/], scroll, Space+drag, Ctrl+0, Ctrl+1, Escape, Ctrl+,, ?)
-- [ ] **UX-02**: User can open settings dialog (Ctrl+,) to configure model, auto-remove, parallelism
+- [ ] **UX-01**: All keyboard shortcuts work as specified (Ctrl/Cmd+O, Ctrl/Cmd+R, Ctrl/Cmd+S, Ctrl/Cmd+C, B, [/], scroll, Space+drag, Ctrl/Cmd+0, Ctrl/Cmd+1, Escape, Ctrl/Cmd+,, ?) — Cmd on macOS, Ctrl on Linux/Windows
+- [ ] **UX-02**: User can open settings dialog (Ctrl/Cmd+,) to configure model, auto-remove, parallelism
 - [ ] **UX-03**: User can cancel in-progress inference with Escape
 - [ ] **UX-04**: User can press ? to see all keyboard shortcuts
 - [ ] **UX-05**: User can navigate between images with [ and ] keys

@@ -61,10 +61,10 @@ Decimal phases appear between their surrounding integers in numeric order.
 **Depends on**: Phase 3
 **Requirements**: LOAD-01, LOAD-02, OUT-01, OUT-02, UX-01, UX-03, UX-04
 **Success Criteria** (what must be TRUE):
-  1. Dropping an image file onto the app window loads it without any dialog; using Ctrl+O opens a file picker — both paths result in the image appearing in the viewer
-  2. Pressing Ctrl+R (or the Remove button) dispatches inference to a background worker thread; the UI remains responsive and shows a progress spinner for the full duration of inference — the window never freezes or appears crashed
-  3. When inference completes, pressing Ctrl+S opens a save dialog and writes a transparent PNG to the chosen location
-  4. Pressing Ctrl+C copies the processed image to the system clipboard and the result can be pasted into another application (including on Wayland)
+  1. Dropping an image file onto the app window loads it without any dialog; using Ctrl/Cmd+O opens a file picker — both paths result in the image appearing in the viewer
+  2. Pressing Ctrl/Cmd+R (or the Remove button) dispatches inference to a background worker thread; the UI remains responsive and shows a progress spinner for the full duration of inference — the window never freezes or appears crashed
+  3. When inference completes, pressing Ctrl/Cmd+S opens a save dialog and writes a transparent PNG to the chosen location
+  4. Pressing Ctrl/Cmd+C copies the processed image to the system clipboard and the result can be pasted into another application (including on Wayland)
   5. Pressing Escape during active inference cancels it; pressing ? shows a keyboard shortcut reference overlay
 **Plans**: TBD
 
@@ -73,11 +73,11 @@ Decimal phases appear between their surrounding integers in numeric order.
 **Depends on**: Phase 4
 **Requirements**: VIEW-01, VIEW-02, VIEW-03, VIEW-04, VIEW-05, ANIM-01, ANIM-02, ANIM-03, BATCH-01, BATCH-02, BATCH-03, BATCH-04, BATCH-05, BATCH-06, UX-02, UX-05
 **Success Criteria** (what must be TRUE):
-  1. Scrolling the mouse wheel zooms in/out on the image canvas; holding Space and dragging pans the view; Ctrl+0 fits the image to the window and Ctrl+1 shows it at 1:1 pixel size
+  1. Scrolling the mouse wheel zooms in/out on the image canvas; holding Space and dragging pans the view; Ctrl/Cmd+0 fits the image to the window and Ctrl/Cmd+1 shows it at 1:1 pixel size
   2. Pressing B toggles between the original and processed image; the transparency areas of the processed image are shown as a checkerboard pattern (not white or black)
   3. When background removal completes, removed pixels dissolve away in a 0.5–1s particle animation before settling into the checkerboard transparency view; pressing any key or clicking skips the animation immediately
   4. Dropping multiple images at once populates a sidebar queue; clicking a sidebar thumbnail switches the main view to that image without re-running inference; dragging items in the sidebar reorders them; pressing [ or ] navigates between images
-  5. Ctrl+, opens a settings dialog where the user can switch between silueta and u2net models, toggle auto-remove on import, and set the number of parallel inference jobs; the active inference backend (e.g., "CUDA (GPU)" or "CPU") is visible in the dialog
+  5. Ctrl/Cmd+, opens a settings dialog where the user can switch between silueta and u2net models, toggle auto-remove on import, and set the number of parallel inference jobs; the active inference backend (e.g., "CUDA (GPU)" or "CPU") is visible in the dialog
 **Plans**: TBD
 
 ### Phase 6: Distribution and Packaging
