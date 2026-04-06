@@ -1,11 +1,110 @@
-#[allow(unused_imports)]
-use crate::types::CoreError;
+use crate::types::{CoreError, ModelKind};
+use ort::{
+    execution_providers::CPUExecutionProvider,
+    session::{Session, builder::GraphOptimizationLevel},
+};
 
-/// Trait for inference backends. Implemented by the ORT backend in Phase 2.
-/// Send + Sync required because the worker thread owns the engine.
+/// Trait for inference backends. Implemented by OrtEngine.
+/// Send + Sync required because worker threads own the engine instance.
 pub trait InferenceEngine: Send + Sync {
     /// Returns the name of the active execution provider (e.g., "CUDA", "CoreML", "CPU").
     fn active_provider(&self) -> &str;
+}
+
+/// ORT-backed inference engine. Holds one Session per model selection.
+/// Create once per model; reuse across all images — never instantiate per-image.
+pub struct OrtEngine {
+    session: Session,
+    provider_name: String,
+}
+
+impl OrtEngine {
+    /// Create a new OrtEngine for the given model.
+    ///
+    /// - `model`: Which ONNX model to load (Silueta = ~4MB fast, U2net = ~170MB quality)
+    /// - `intra_threads`: ORT intra-op thread count. For batch use: num_cpus / rayon_workers.
+    ///   Pass 1 for single-image use; the thread count is set at session creation time.
+    ///
+    /// Execution providers are registered in priority order: CUDA → CoreML → DirectML → CPU.
+    /// ORT silently selects the first available EP. Call active_provider() after creation
+    /// to confirm which EP was selected.
+    pub fn new(model: ModelKind, intra_threads: usize) -> Result<Self, CoreError> {
+        #[cfg(feature = "dev-models")]
+        {
+            let bytes = match model {
+                ModelKind::Silueta => bgprunr_models::silueta_bytes(),
+                ModelKind::U2net => bgprunr_models::u2net_bytes(),
+            };
+            return Self::new_from_bytes(&bytes, intra_threads);
+        }
+
+        #[cfg(not(feature = "dev-models"))]
+        {
+            let model_bytes: &[u8] = match model {
+                ModelKind::Silueta => bgprunr_models::SILUETA_BYTES,
+                ModelKind::U2net => bgprunr_models::U2NET_BYTES,
+            };
+            Self::new_from_bytes(model_bytes, intra_threads)
+        }
+    }
+
+    fn new_from_bytes(model_bytes: &[u8], intra_threads: usize) -> Result<Self, CoreError> {
+        let mut builder = Session::builder()
+            .map_err(|e| CoreError::Inference(format!("ORT builder init failed: {e}")))?
+            .with_optimization_level(GraphOptimizationLevel::Level3)
+            .map_err(|e| CoreError::Inference(format!("ORT set optimization level failed: {e}")))?
+            .with_intra_threads(intra_threads.max(1))
+            .map_err(|e| CoreError::Inference(format!("ORT set intra threads failed: {e}")))?
+            .with_execution_providers([
+                #[cfg(all(feature = "cuda", not(target_os = "macos")))]
+                ort::execution_providers::CUDAExecutionProvider::default().build(),
+                #[cfg(target_os = "macos")]
+                ort::execution_providers::CoreMLExecutionProvider::default().build(),
+                #[cfg(windows)]
+                ort::execution_providers::DirectMLExecutionProvider::default().build(),
+                CPUExecutionProvider::default().build(),
+            ])
+            .map_err(|e| CoreError::Inference(format!("ORT set execution providers failed: {e}")))?;
+
+        let session = builder
+            .commit_from_memory(model_bytes)
+            .map_err(|e| CoreError::Inference(format!("ORT session creation failed: {e}")))?;
+
+        // Determine which EP ORT selected.
+        // ORT 2.0-rc.12 does not expose a direct "active EP" query API.
+        // We infer it from compile-time feature flags. ORT logs the selected EP to stderr
+        // at session init (visible in development). This matches rembg's approach.
+        let provider_name = Self::detect_active_provider();
+
+        Ok(Self { session, provider_name })
+    }
+
+    /// Infer the active provider name from compile-time feature flags.
+    /// On a standard Linux build without CUDA feature, returns "CPU".
+    fn detect_active_provider() -> String {
+        #[cfg(target_os = "macos")]
+        { return "CoreML".to_string(); }
+
+        #[cfg(all(feature = "cuda", not(target_os = "macos")))]
+        { return "CUDA".to_string(); }
+
+        #[cfg(windows)]
+        { return "DirectML".to_string(); }
+
+        "CPU".to_string()
+    }
+
+    /// Access the underlying ORT Session for inference.
+    /// Used by pipeline.rs — not part of the public trait API.
+    pub(crate) fn session(&self) -> &Session {
+        &self.session
+    }
+}
+
+impl InferenceEngine for OrtEngine {
+    fn active_provider(&self) -> &str {
+        &self.provider_name
+    }
 }
 
 #[cfg(test)]
@@ -14,14 +113,32 @@ mod tests {
 
     struct MockEngine;
     impl InferenceEngine for MockEngine {
-        fn active_provider(&self) -> &str {
-            "CPU"
-        }
+        fn active_provider(&self) -> &str { "CPU" }
     }
 
     #[test]
     fn test_inference_engine_trait_is_object_safe() {
         let engine: Box<dyn InferenceEngine> = Box::new(MockEngine);
         assert_eq!(engine.active_provider(), "CPU");
+    }
+
+    // Integration tests require dev-models feature and downloaded models.
+    // Run with: cargo test -p bgprunr-core --features bgprunr-models/dev-models
+    #[cfg(feature = "dev-models")]
+    #[test]
+    fn test_ort_engine_silueta_active_provider_non_empty() {
+        let engine = OrtEngine::new(ModelKind::Silueta, 1)
+            .expect("OrtEngine::new should succeed with dev-models and downloaded models");
+        let provider = engine.active_provider();
+        assert!(!provider.is_empty(), "active_provider() returned empty string");
+    }
+
+    #[cfg(feature = "dev-models")]
+    #[test]
+    fn test_ort_engine_u2net_creates_session() {
+        let engine = OrtEngine::new(ModelKind::U2net, 1)
+            .expect("OrtEngine::new(U2net) should succeed with dev-models");
+        let provider = engine.active_provider();
+        assert!(!provider.is_empty());
     }
 }
