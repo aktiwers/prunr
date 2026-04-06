@@ -3,13 +3,13 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: unknown
-stopped_at: Completed 02-04-PLAN.md
-last_updated: "2026-04-06T23:29:52.646Z"
+stopped_at: Completed 02-05-PLAN.md
+last_updated: "2026-04-06T23:32:57.419Z"
 progress:
   total_phases: 6
   completed_phases: 1
   total_plans: 10
-  completed_plans: 8
+  completed_plans: 9
 ---
 
 # Project State
@@ -53,6 +53,7 @@ Plan: 5 of 6
 | Phase 02 P01 | 4 | 2 tasks | 10 files |
 | Phase 02 P02 | 5 | 2 tasks | 4 files |
 | Phase 02 P04 | 2 | 1 tasks | 2 files |
+| Phase 02 P05 | 2 | 1 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -84,6 +85,9 @@ Recent decisions affecting current work:
 - [Phase 02]: Each rayon worker creates its own OrtEngine::new() — no Arc<Mutex<Session>> sharing, avoids contention
 - [Phase 02]: ort_intra_threads = (num_cpus / jobs).max(1) — balances ORT and rayon thread counts to prevent CPU oversubscription
 - [Phase 02]: [Phase 02-04]: Results collected as indexed (usize, Result) pairs then assigned to pre-allocated Vec to preserve input order with rayon work-stealing
+- [Phase 02]: Test images not committed (copyrighted rembg assets, .gitignore excluded); only generated reference masks committed as ground truth
+- [Phase 02]: [Phase 02-05]: generate_references.py locks alpha_matting=False, post_process_mask=False, model=u2net — exact rembg defaults required for valid CORE-05 comparison
+- [Phase 02]: [Phase 02-05]: VERSIONS.txt written alongside masks by generate_references.py to capture rembg version at generation time
 
 ### Pending Todos
 
@@ -97,6 +101,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-04-06T23:29:52.642Z
-Stopped at: Completed 02-04-PLAN.md
+Last session: 2026-04-06T23:32:57.413Z
+Stopped at: Completed 02-05-PLAN.md
 Resume file: None
