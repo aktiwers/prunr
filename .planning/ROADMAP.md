@@ -12,7 +12,7 @@ BgPrunR ships in six phases that follow the hard dependency graph imposed by the
 
 Decimal phases appear between their surrounding integers in numeric order.
 
-- [ ] **Phase 1: Workspace Scaffolding** - Cargo workspace, CI matrix, model crate, and build pipeline foundation
+- [x] **Phase 1: Workspace Scaffolding** - Cargo workspace, CI matrix, model crate, and build pipeline foundation (completed 2026-04-06)
 - [ ] **Phase 2: Core Inference Engine** - ONNX inference pipeline verified correct against rembg, GPU + CPU fallback, batch API
 - [ ] **Phase 3: CLI Binary** - Full-featured CLI exercising the core API with batch, parallelism, and model selection
 - [ ] **Phase 4: GUI Foundation** - egui app with worker-thread architecture, drag-and-drop, progress, save, copy, keyboard shortcuts
@@ -105,7 +105,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Workspace Scaffolding | 3/4 | In Progress|  |
+| 1. Workspace Scaffolding | 4/4 | Complete   | 2026-04-06 |
 | 2. Core Inference Engine | 0/TBD | Not started | - |
 | 3. CLI Binary | 0/TBD | Not started | - |
 | 4. GUI Foundation | 0/TBD | Not started | - |

@@ -3,13 +3,13 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: unknown
-stopped_at: Completed 01-02-PLAN.md
-last_updated: "2026-04-06T21:05:13.431Z"
+stopped_at: "Checkpoint: 01-04 Task 3 — awaiting GitHub CI green on all four platforms"
+last_updated: "2026-04-06T21:07:57.121Z"
 progress:
   total_phases: 6
-  completed_phases: 0
+  completed_phases: 1
   total_plans: 4
-  completed_plans: 3
+  completed_plans: 4
 ---
 
 # Project State
@@ -49,6 +49,7 @@ Plan: 3 of 4
 | Phase 01 P01 | 8 | 2 tasks | 14 files |
 | Phase 01 P03 | 3 | 1 tasks | 1 files |
 | Phase 01 P02 | 1 | 1 tasks | 1 files |
+| Phase 01 P04 | 525537 | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -67,6 +68,8 @@ Recent decisions affecting current work:
 - [Phase 01]: [Phase 01-03]: fail-fast: false in CI matrix so each platform failure is independently reported
 - [Phase 01]: Bootstrap SHA256 mode: empty string constant skips verification and prints hash — developer hardens after first run by replacing empty strings with the printed SHA256 values
 - [Phase 01]: rembg GitHub releases as model source (danielgatis/rembg/releases/download/v0.0.0/) — exact same models rembg uses for compatibility
+- [Phase 01]: [Phase 01-04]: Manually authored release.yml for cargo-dist 0.31.0 rather than running cargo dist init interactively (no local install)
+- [Phase 01]: [Phase 01-04]: release.yml mirrors ci.yml model cache pattern (hashFiles xtask/src/main.rs) for consistency
 
 ### Pending Todos
 
@@ -80,6 +83,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-04-06T21:05:13.426Z
-Stopped at: Completed 01-02-PLAN.md
+Last session: 2026-04-06T21:07:57.116Z
+Stopped at: Checkpoint: 01-04 Task 3 — awaiting GitHub CI green on all four platforms
 Resume file: None
