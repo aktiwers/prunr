@@ -12,7 +12,8 @@ One-click local background removal that is fast, private, and works offline — 
 
 ### Validated
 
-(None yet — ship to validate)
+- ✓ Single-binary distribution with embedded models and assets — Validated in Phase 1
+- ✓ Cross-platform: Linux, macOS, Windows — Validated in Phase 1 (CI green on all 4 targets)
 
 ### Active
 
@@ -74,4 +75,4 @@ One-click local background removal that is fast, private, and works offline — 
 | Cargo workspace | Shared core between CLI and GUI binaries, clean separation of concerns | — Pending |
 
 ---
-*Last updated: 2026-04-06 after initialization*
+*Last updated: 2026-04-07 after Phase 1 completion*
