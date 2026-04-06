@@ -3,13 +3,13 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: unknown
-stopped_at: Completed 02-03-PLAN.md
-last_updated: "2026-04-06T23:24:48Z"
+stopped_at: Completed 02-04-PLAN.md
+last_updated: "2026-04-06T23:29:52.646Z"
 progress:
   total_phases: 6
   completed_phases: 1
   total_plans: 10
-  completed_plans: 6
+  completed_plans: 8
 ---
 
 # Project State
@@ -24,7 +24,7 @@ See: .planning/PROJECT.md (updated 2026-04-06)
 ## Current Position
 
 Phase: 02 (core-inference-engine) — EXECUTING
-Plan: 4 of 6
+Plan: 5 of 6
 
 ## Performance Metrics
 
@@ -52,6 +52,7 @@ Plan: 4 of 6
 | Phase 01 P04 | 525537 | 2 tasks | 2 files |
 | Phase 02 P01 | 4 | 2 tasks | 10 files |
 | Phase 02 P02 | 5 | 2 tasks | 4 files |
+| Phase 02 P04 | 2 | 1 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -80,6 +81,9 @@ Recent decisions affecting current work:
 - [Phase 02]: [Phase 02-03]: OrtEngine wraps Mutex<Session> because ort::Session::run() requires &mut self — Mutex enables shared &OrtEngine references while satisfying mutability
 - [Phase 02]: [Phase 02-03]: ndarray upgraded from 0.16 to 0.17 in workspace Cargo.toml to match ort 2.0-rc.12 dependency requirement
 - [Phase 02]: [Phase 02-03]: dev-models and cuda features added to bgprunr-core Cargo.toml to propagate bgprunr-models feature flags properly
+- [Phase 02]: Each rayon worker creates its own OrtEngine::new() — no Arc<Mutex<Session>> sharing, avoids contention
+- [Phase 02]: ort_intra_threads = (num_cpus / jobs).max(1) — balances ORT and rayon thread counts to prevent CPU oversubscription
+- [Phase 02]: [Phase 02-04]: Results collected as indexed (usize, Result) pairs then assigned to pre-allocated Vec to preserve input order with rayon work-stealing
 
 ### Pending Todos
 
@@ -93,6 +97,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-04-06T23:14:04Z
-Stopped at: Completed 02-02-PLAN.md
+Last session: 2026-04-06T23:29:52.642Z
+Stopped at: Completed 02-04-PLAN.md
 Resume file: None
