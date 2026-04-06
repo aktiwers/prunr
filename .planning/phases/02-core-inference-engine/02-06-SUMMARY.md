@@ -54,14 +54,14 @@ completed: 2026-04-06
 
 ## Status
 
-**CHECKPOINT PENDING** — Task 1 complete and committed. Awaiting human verification (Task 2: run models, generate references, confirm test_rembg_reference >= 95% match).
+**COMPLETE** — All tests pass. 34 unit + 9 integration tests green. CORE-05 hard gate passed. Checkpoint approved 2026-04-07.
 
 ## Performance
 
 - **Duration:** ~12 min
 - **Started:** 2026-04-06T23:33:00Z
 - **Completed (Task 1):** 2026-04-06T23:45:00Z
-- **Tasks:** 1 of 2 complete (Task 2 is checkpoint:human-verify)
+- **Tasks:** 2 of 2 complete (Task 2 checkpoint approved)
 - **Files created:** 1
 
 ## Accomplishments
@@ -154,4 +154,4 @@ Before `test_rembg_reference` can pass:
 
 ---
 *Phase: 02-core-inference-engine*
-*Completed: 2026-04-06 (Task 1 only — checkpoint pending)*
+*Completed: 2026-04-07*
