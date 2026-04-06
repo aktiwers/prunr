@@ -6,3 +6,11 @@ edition.workspace = true
 [dependencies]
 bgprunr-models = { path = "../bgprunr-models" }
 thiserror = { workspace = true }
+ort = { workspace = true }
+ndarray = { workspace = true }
+image = { workspace = true }
+rayon = { workspace = true }
+num_cpus = "1"
+
+[dev-dependencies]
+bgprunr-models = { path = "../bgprunr-models", features = ["dev-models"] }
