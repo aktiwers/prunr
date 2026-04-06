@@ -1,0 +1,11 @@
+[package]
+name = "bgprunr-models"
+version.workspace = true
+edition.workspace = true
+
+[features]
+default = []
+dev-models = []
+
+[build-dependencies]
+include-bytes-zstd = { workspace = true }

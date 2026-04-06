@@ -1,0 +1,11 @@
+[package]
+name = "bgprunr-app"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "bgprunr"
+path = "src/main.rs"
+
+[dependencies]
+bgprunr-core = { path = "../bgprunr-core" }
