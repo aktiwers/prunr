@@ -13,7 +13,7 @@ Requirements for initial release. Each maps to roadmap phases.
 - [x] **CORE-02**: User can select between silueta (fast, ~4MB) and u2net (quality, ~170MB) models
 - [x] **CORE-03**: Inference automatically uses GPU (CUDA/Metal/DirectML) when available, falls back to CPU
 - [x] **CORE-04**: User sees a progress indicator while inference is running
-- [ ] **CORE-05**: Inference pipeline produces pixel-accurate results matching rembg Python output for the same model
+- [x] **CORE-05**: Inference pipeline produces pixel-accurate results matching rembg Python output for the same model
 
 ### GUI - Image Loading
 
@@ -121,7 +121,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | CORE-02 | Phase 2 | Complete |
 | CORE-03 | Phase 2 | Complete |
 | CORE-04 | Phase 2 | Complete |
-| CORE-05 | Phase 2 | Pending |
+| CORE-05 | Phase 2 | Complete |
 | LOAD-03 | Phase 2 (PNG/JPEG/WebP/BMP); Phase 6 (SVG via resvg) | Complete |
 | LOAD-04 | Phase 2 | Complete |
 | CLI-01 | Phase 3 | Pending |
