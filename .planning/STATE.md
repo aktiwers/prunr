@@ -3,13 +3,13 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: unknown
-stopped_at: Completed 02-05-PLAN.md
-last_updated: "2026-04-06T23:32:57.419Z"
+stopped_at: Completed 02-06-PLAN.md Task 1 — checkpoint pending human verification
+last_updated: "2026-04-06T23:38:37.212Z"
 progress:
   total_phases: 6
-  completed_phases: 1
+  completed_phases: 2
   total_plans: 10
-  completed_plans: 9
+  completed_plans: 10
 ---
 
 # Project State
@@ -54,6 +54,7 @@ Plan: 5 of 6
 | Phase 02 P02 | 5 | 2 tasks | 4 files |
 | Phase 02 P04 | 2 | 1 tasks | 2 files |
 | Phase 02 P05 | 2 | 1 tasks | 4 files |
+| Phase 02 P06 | 12 | 1 tasks | 1 files |
 
 ## Accumulated Context
 
@@ -88,6 +89,8 @@ Recent decisions affecting current work:
 - [Phase 02]: Test images not committed (copyrighted rembg assets, .gitignore excluded); only generated reference masks committed as ground truth
 - [Phase 02]: [Phase 02-05]: generate_references.py locks alpha_matting=False, post_process_mask=False, model=u2net — exact rembg defaults required for valid CORE-05 comparison
 - [Phase 02]: [Phase 02-05]: VERSIONS.txt written alongside masks by generate_references.py to capture rembg version at generation time
+- [Phase Phase 02]: Import InferenceEngine trait explicitly in integration tests — active_provider() only accessible when trait is in scope
+- [Phase Phase 02]: Reference mask resize with FilterType::Nearest for pixel-accurate comparison when rembg output dimensions differ from bgprunr output
 
 ### Pending Todos
 
@@ -101,6 +104,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-04-06T23:32:57.413Z
-Stopped at: Completed 02-05-PLAN.md
+Last session: 2026-04-06T23:38:37.207Z
+Stopped at: Completed 02-06-PLAN.md Task 1 — checkpoint pending human verification
 Resume file: None
