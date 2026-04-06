@@ -3,8 +3,8 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: unknown
-stopped_at: Completed 02-01-PLAN.md
-last_updated: "2026-04-06T23:08:28.673Z"
+stopped_at: Completed 02-02-PLAN.md
+last_updated: "2026-04-06T23:14:04Z"
 progress:
   total_phases: 6
   completed_phases: 1
@@ -24,7 +24,7 @@ See: .planning/PROJECT.md (updated 2026-04-06)
 ## Current Position
 
 Phase: 02 (core-inference-engine) — EXECUTING
-Plan: 2 of 6
+Plan: 3 of 6
 
 ## Performance Metrics
 
@@ -51,6 +51,7 @@ Plan: 2 of 6
 | Phase 01 P02 | 1 | 1 tasks | 1 files |
 | Phase 01 P04 | 525537 | 2 tasks | 2 files |
 | Phase 02 P01 | 4 | 2 tasks | 10 files |
+| Phase 02 P02 | 5 | 2 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -74,6 +75,8 @@ Recent decisions affecting current work:
 - [Phase 02]: include-bytes-zstd moved from build-dependencies to dependencies in bgprunr-models (proc-macro crate, not build script dep)
 - [Phase 02]: ProgressStage uses Postprocess not Sigmoid — matches rembg min-max normalization per RESEARCH.md
 - [Phase 02]: Dev workflow for bgprunr-core requires --features bgprunr-models/dev-models; production build needs xtask fetch-models to be run first
+- [Phase 02-02]: From<image::ImageError> for CoreError implemented as inline impl mapping to ImageFormat(String) — required by formats.rs image loading
+- [Phase 02-02]: DOWNSCALE_TARGET imported explicitly in test module rather than re-exported from formats.rs to avoid unused import lint
 
 ### Pending Todos
 
@@ -87,6 +90,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-04-06T23:08:28.669Z
-Stopped at: Completed 02-01-PLAN.md
+Last session: 2026-04-06T23:14:04Z
+Stopped at: Completed 02-02-PLAN.md
 Resume file: None
