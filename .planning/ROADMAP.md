@@ -30,7 +30,13 @@ Decimal phases appear between their surrounding integers in numeric order.
   2. GitHub Actions CI builds and tests all three platform targets in a single workflow run
   3. Model bytes are embedded via `include-bytes-zstd` in a dedicated `bgprunr-models` crate; a development feature flag loads models from the filesystem instead to avoid recompilation cost during development
   4. `cargo-dist` release pipeline produces a per-platform binary artifact in CI (even if the binary is a placeholder)
-**Plans**: TBD
+**Plans**: 4 plans
+
+Plans:
+- [ ] 01-01-PLAN.md — Workspace manifests and crate stubs (Cargo.toml, bgprunr-core traits, bgprunr-models feature gate, placeholder binary)
+- [ ] 01-02-PLAN.md — xtask fetch-models with SHA256 verification
+- [ ] 01-03-PLAN.md — GitHub Actions CI matrix workflow (4 native platform targets)
+- [ ] 01-04-PLAN.md — cargo-dist release pipeline + CI human verification gate
 
 ### Phase 2: Core Inference Engine
 **Goal**: Users (and the CLI/GUI) can call `process_image()` and receive a pixel-accurate transparent PNG whose mask matches rembg Python output on the same input, with GPU used automatically when available
@@ -99,7 +105,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Workspace Scaffolding | 0/TBD | Not started | - |
+| 1. Workspace Scaffolding | 1/4 | In Progress|  |
 | 2. Core Inference Engine | 0/TBD | Not started | - |
 | 3. CLI Binary | 0/TBD | Not started | - |
 | 4. GUI Foundation | 0/TBD | Not started | - |

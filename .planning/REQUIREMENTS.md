@@ -61,9 +61,9 @@ Requirements for initial release. Each maps to roadmap phases.
 ### Distribution
 
 - [ ] **DIST-01**: Application is distributed as a single self-contained binary per platform
-- [ ] **DIST-02**: Both ONNX models (silueta + u2net) are embedded in the binary
+- [x] **DIST-02**: Both ONNX models (silueta + u2net) are embedded in the binary
 - [ ] **DIST-03**: Binary runs on Linux x86_64, macOS x86_64 + aarch64, Windows x86_64
-- [ ] **DIST-04**: No runtime dependencies — user downloads one file and runs it
+- [x] **DIST-04**: No runtime dependencies — user downloads one file and runs it
 
 ### Settings & UX
 
@@ -114,9 +114,9 @@ Which phases cover which requirements. Updated during roadmap creation.
 | Requirement | Phase | Status |
 |-------------|-------|--------|
 | DIST-01 | Phase 1 | Pending |
-| DIST-02 | Phase 1 | Pending |
+| DIST-02 | Phase 1 | Complete |
 | DIST-03 | Phase 1 | Pending |
-| DIST-04 | Phase 1 | Pending |
+| DIST-04 | Phase 1 | Complete |
 | CORE-01 | Phase 2 | Pending |
 | CORE-02 | Phase 2 | Pending |
 | CORE-03 | Phase 2 | Pending |
