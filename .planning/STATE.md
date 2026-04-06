@@ -3,13 +3,13 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: unknown
-stopped_at: Completed 02-02-PLAN.md
-last_updated: "2026-04-06T23:14:04Z"
+stopped_at: Completed 02-03-PLAN.md
+last_updated: "2026-04-06T23:24:48Z"
 progress:
   total_phases: 6
   completed_phases: 1
   total_plans: 10
-  completed_plans: 5
+  completed_plans: 6
 ---
 
 # Project State
@@ -24,7 +24,7 @@ See: .planning/PROJECT.md (updated 2026-04-06)
 ## Current Position
 
 Phase: 02 (core-inference-engine) — EXECUTING
-Plan: 3 of 6
+Plan: 4 of 6
 
 ## Performance Metrics
 
@@ -77,6 +77,9 @@ Recent decisions affecting current work:
 - [Phase 02]: Dev workflow for bgprunr-core requires --features bgprunr-models/dev-models; production build needs xtask fetch-models to be run first
 - [Phase 02-02]: From<image::ImageError> for CoreError implemented as inline impl mapping to ImageFormat(String) — required by formats.rs image loading
 - [Phase 02-02]: DOWNSCALE_TARGET imported explicitly in test module rather than re-exported from formats.rs to avoid unused import lint
+- [Phase 02]: [Phase 02-03]: OrtEngine wraps Mutex<Session> because ort::Session::run() requires &mut self — Mutex enables shared &OrtEngine references while satisfying mutability
+- [Phase 02]: [Phase 02-03]: ndarray upgraded from 0.16 to 0.17 in workspace Cargo.toml to match ort 2.0-rc.12 dependency requirement
+- [Phase 02]: [Phase 02-03]: dev-models and cuda features added to bgprunr-core Cargo.toml to propagate bgprunr-models feature flags properly
 
 ### Pending Todos
 
