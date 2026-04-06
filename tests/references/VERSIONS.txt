@@ -1,0 +1,13 @@
+# rembg version used to generate these references
+# Re-run generate_references.py if rembg is updated
+
+Name: rembg
+Version: 2.0.74
+Summary: Remove image background
+Home-page: https://github.com/danielgatis/rembg
+Author: Daniel Gatis
+Author-email: danielgatis@gmail.com
+License: MIT
+Location: /home/linuxbrew/.linuxbrew/lib/python3.14/site-packages
+Requires: jsonschema, numpy, pillow, pooch, pymatting, scikit-image, scipy, tqdm
+Required-by: 

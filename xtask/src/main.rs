@@ -12,12 +12,12 @@ const MODELS: &[ModelSpec] = &[
     ModelSpec {
         name: "silueta.onnx",
         url: "https://github.com/danielgatis/rembg/releases/download/v0.0.0/silueta.onnx",
-        sha256: "",
+        sha256: "75da6c8d2f8096ec743d071951be73b4a8bc7b3e51d9a6625d63644f90ffeedb",
     },
     ModelSpec {
         name: "u2net.onnx",
         url: "https://github.com/danielgatis/rembg/releases/download/v0.0.0/u2net.onnx",
-        sha256: "",
+        sha256: "8d10d2f3bb75ae3b6d527c77944fc5e7dcd94b29809d47a739a7a728a912b491",
     },
 ];
 
