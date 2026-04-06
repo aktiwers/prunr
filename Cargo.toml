@@ -23,6 +23,7 @@ ort = { version = "=2.0.0-rc.12", features = ["cuda", "coreml", "directml", "nda
 ndarray = "0.16"
 image = { version = "0.25", features = ["jpeg", "png", "webp", "bmp"] }
 rayon = "1.11"
+num_cpus = "1"
 egui = "0.34"
 eframe = { version = "0.34", default-features = true }
 egui_extras = { version = "0.34", features = ["all_loaders"] }
