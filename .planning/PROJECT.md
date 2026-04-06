@@ -56,7 +56,8 @@ One-click local background removal that is fast, private, and works offline — 
 - **Tech stack**: Pure Rust — Cargo workspace with `ort` (ONNX), `egui`/`eframe` (GUI), `image` (decode/encode), `clap` (CLI), `rayon` (parallelism), `resvg` (SVG)
 - **Distribution**: Single self-contained binary per platform, no runtime dependencies for end users
 - **Binary size**: ~180MB acceptable (dominated by u2net model), compress with `include_bytes!` + zstd decompression
-- **Performance**: Inference should utilize all available CPU cores; batch processing parallelized across images
+- **Performance**: Blazing fast, fully non-blocking architecture — UI thread never waits on inference, all I/O and inference is async/threaded, batch processing parallelized across images
+- **Architecture**: SOLID principles — single responsibility crates, trait-based abstractions for inference backends, dependency inversion between core/GUI/CLI
 - **Compatibility**: Must build and run on Linux (x86_64), macOS (x86_64 + aarch64), Windows (x86_64)
 - **Privacy**: Zero network access — no telemetry, no update checks, no model downloads at runtime
 
