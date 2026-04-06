@@ -105,7 +105,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Workspace Scaffolding | 1/4 | In Progress|  |
+| 1. Workspace Scaffolding | 3/4 | In Progress|  |
 | 2. Core Inference Engine | 0/TBD | Not started | - |
 | 3. CLI Binary | 0/TBD | Not started | - |
 | 4. GUI Foundation | 0/TBD | Not started | - |

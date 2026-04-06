@@ -3,13 +3,13 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: unknown
-stopped_at: Completed 01-01-PLAN.md
-last_updated: "2026-04-06T21:02:11.214Z"
+stopped_at: Completed 01-03-PLAN.md
+last_updated: "2026-04-06T21:05:10.411Z"
 progress:
   total_phases: 6
   completed_phases: 0
   total_plans: 4
-  completed_plans: 1
+  completed_plans: 3
 ---
 
 # Project State
@@ -24,7 +24,7 @@ See: .planning/PROJECT.md (updated 2026-04-06)
 ## Current Position
 
 Phase: 01 (workspace-scaffolding) — EXECUTING
-Plan: 2 of 4
+Plan: 3 of 4
 
 ## Performance Metrics
 
@@ -47,6 +47,8 @@ Plan: 2 of 4
 
 *Updated after each plan completion*
 | Phase 01 P01 | 8 | 2 tasks | 14 files |
+| Phase 01 P03 | 3 | 1 tasks | 1 files |
+| Phase 01 P02 | 1 | 1 tasks | 1 files |
 
 ## Accumulated Context
 
@@ -61,6 +63,10 @@ Recent decisions affecting current work:
 - Pre-roadmap: rayon for batch parallelism (no async runtime — inference is CPU/GPU-bound)
 - Pre-roadmap: Cargo workspace with bgprunr-core, bgprunr-gui, bgprunr-cli crates
 - [Phase 01]: Added #[allow(unused_imports)] to engine.rs — import required by spec but unused in stub; will be used in Phase 2 inference backend
+- [Phase 01]: [Phase 01-03]: dtolnay/rust-toolchain used instead of deprecated actions-rs/toolchain in CI
+- [Phase 01]: [Phase 01-03]: fail-fast: false in CI matrix so each platform failure is independently reported
+- [Phase 01]: Bootstrap SHA256 mode: empty string constant skips verification and prints hash — developer hardens after first run by replacing empty strings with the printed SHA256 values
+- [Phase 01]: rembg GitHub releases as model source (danielgatis/rembg/releases/download/v0.0.0/) — exact same models rembg uses for compatibility
 
 ### Pending Todos
 
@@ -74,6 +80,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-04-06T21:02:11.209Z
-Stopped at: Completed 01-01-PLAN.md
+Last session: 2026-04-06T21:06:30Z
+Stopped at: Completed 01-03-PLAN.md
 Resume file: None
