@@ -3,13 +3,13 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: unknown
-stopped_at: Phase 2 context gathered
-last_updated: "2026-04-06T22:36:12.097Z"
+stopped_at: Completed 02-01-PLAN.md
+last_updated: "2026-04-06T23:08:28.673Z"
 progress:
   total_phases: 6
   completed_phases: 1
-  total_plans: 4
-  completed_plans: 4
+  total_plans: 10
+  completed_plans: 5
 ---
 
 # Project State
@@ -19,12 +19,12 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-06)
 
 **Core value:** One-click local background removal that is fast, private, and works offline — your photos never leave your machine
-**Current focus:** Phase 01 — workspace-scaffolding
+**Current focus:** Phase 02 — core-inference-engine
 
 ## Current Position
 
-Phase: 01 (workspace-scaffolding) — EXECUTING
-Plan: 3 of 4
+Phase: 02 (core-inference-engine) — EXECUTING
+Plan: 2 of 6
 
 ## Performance Metrics
 
@@ -50,6 +50,7 @@ Plan: 3 of 4
 | Phase 01 P03 | 3 | 1 tasks | 1 files |
 | Phase 01 P02 | 1 | 1 tasks | 1 files |
 | Phase 01 P04 | 525537 | 2 tasks | 2 files |
+| Phase 02 P01 | 4 | 2 tasks | 10 files |
 
 ## Accumulated Context
 
@@ -70,6 +71,9 @@ Recent decisions affecting current work:
 - [Phase 01]: rembg GitHub releases as model source (danielgatis/rembg/releases/download/v0.0.0/) — exact same models rembg uses for compatibility
 - [Phase 01]: [Phase 01-04]: Manually authored release.yml for cargo-dist 0.31.0 rather than running cargo dist init interactively (no local install)
 - [Phase 01]: [Phase 01-04]: release.yml mirrors ci.yml model cache pattern (hashFiles xtask/src/main.rs) for consistency
+- [Phase 02]: include-bytes-zstd moved from build-dependencies to dependencies in bgprunr-models (proc-macro crate, not build script dep)
+- [Phase 02]: ProgressStage uses Postprocess not Sigmoid — matches rembg min-max normalization per RESEARCH.md
+- [Phase 02]: Dev workflow for bgprunr-core requires --features bgprunr-models/dev-models; production build needs xtask fetch-models to be run first
 
 ### Pending Todos
 
@@ -83,6 +87,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-04-06T22:36:12.092Z
-Stopped at: Phase 2 context gathered
-Resume file: .planning/phases/02-core-inference-engine/02-CONTEXT.md
+Last session: 2026-04-06T23:08:28.669Z
+Stopped at: Completed 02-01-PLAN.md
+Resume file: None

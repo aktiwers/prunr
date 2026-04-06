@@ -9,18 +9,18 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### Core Inference
 
-- [ ] **CORE-01**: User can remove the background from a single image and receive a transparent PNG result
-- [ ] **CORE-02**: User can select between silueta (fast, ~4MB) and u2net (quality, ~170MB) models
-- [ ] **CORE-03**: Inference automatically uses GPU (CUDA/Metal/DirectML) when available, falls back to CPU
-- [ ] **CORE-04**: User sees a progress indicator while inference is running
+- [x] **CORE-01**: User can remove the background from a single image and receive a transparent PNG result
+- [x] **CORE-02**: User can select between silueta (fast, ~4MB) and u2net (quality, ~170MB) models
+- [x] **CORE-03**: Inference automatically uses GPU (CUDA/Metal/DirectML) when available, falls back to CPU
+- [x] **CORE-04**: User sees a progress indicator while inference is running
 - [ ] **CORE-05**: Inference pipeline produces pixel-accurate results matching rembg Python output for the same model
 
 ### GUI - Image Loading
 
 - [ ] **LOAD-01**: User can drag and drop an image file onto the app window to load it
 - [ ] **LOAD-02**: User can open an image via file browser dialog (Ctrl+O)
-- [ ] **LOAD-03**: App accepts PNG, JPEG, WebP, BMP, and SVG (rasterized on load) input formats
-- [ ] **LOAD-04**: User is prompted to downscale if image exceeds 8000px in either dimension
+- [x] **LOAD-03**: App accepts PNG, JPEG, WebP, BMP, and SVG (rasterized on load) input formats
+- [x] **LOAD-04**: User is prompted to downscale if image exceeds 8000px in either dimension
 
 ### GUI - Image Viewer
 
@@ -117,13 +117,13 @@ Which phases cover which requirements. Updated during roadmap creation.
 | DIST-02 | Phase 1 | Complete |
 | DIST-03 | Phase 1 | Complete |
 | DIST-04 | Phase 1 | Complete |
-| CORE-01 | Phase 2 | Pending |
-| CORE-02 | Phase 2 | Pending |
-| CORE-03 | Phase 2 | Pending |
-| CORE-04 | Phase 2 | Pending |
+| CORE-01 | Phase 2 | Complete |
+| CORE-02 | Phase 2 | Complete |
+| CORE-03 | Phase 2 | Complete |
+| CORE-04 | Phase 2 | Complete |
 | CORE-05 | Phase 2 | Pending |
-| LOAD-03 | Phase 2 (PNG/JPEG/WebP/BMP); Phase 6 (SVG via resvg) | Pending |
-| LOAD-04 | Phase 2 | Pending |
+| LOAD-03 | Phase 2 (PNG/JPEG/WebP/BMP); Phase 6 (SVG via resvg) | Complete |
+| LOAD-04 | Phase 2 | Complete |
 | CLI-01 | Phase 3 | Pending |
 | CLI-02 | Phase 3 | Pending |
 | CLI-03 | Phase 3 | Pending |
