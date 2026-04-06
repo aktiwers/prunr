@@ -113,13 +113,53 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| (Updated by roadmap) | | |
+| DIST-01 | Phase 1 | Pending |
+| DIST-02 | Phase 1 | Pending |
+| DIST-03 | Phase 1 | Pending |
+| DIST-04 | Phase 1 | Pending |
+| CORE-01 | Phase 2 | Pending |
+| CORE-02 | Phase 2 | Pending |
+| CORE-03 | Phase 2 | Pending |
+| CORE-04 | Phase 2 | Pending |
+| CORE-05 | Phase 2 | Pending |
+| LOAD-03 | Phase 2 (PNG/JPEG/WebP/BMP); Phase 6 (SVG via resvg) | Pending |
+| LOAD-04 | Phase 2 | Pending |
+| CLI-01 | Phase 3 | Pending |
+| CLI-02 | Phase 3 | Pending |
+| CLI-03 | Phase 3 | Pending |
+| CLI-04 | Phase 3 | Pending |
+| CLI-05 | Phase 3 | Pending |
+| LOAD-01 | Phase 4 | Pending |
+| LOAD-02 | Phase 4 | Pending |
+| OUT-01 | Phase 4 | Pending |
+| OUT-02 | Phase 4 | Pending |
+| UX-01 | Phase 4 | Pending |
+| UX-03 | Phase 4 | Pending |
+| UX-04 | Phase 4 | Pending |
+| VIEW-01 | Phase 5 | Pending |
+| VIEW-02 | Phase 5 | Pending |
+| VIEW-03 | Phase 5 | Pending |
+| VIEW-04 | Phase 5 | Pending |
+| VIEW-05 | Phase 5 | Pending |
+| ANIM-01 | Phase 5 | Pending |
+| ANIM-02 | Phase 5 | Pending |
+| ANIM-03 | Phase 5 | Pending |
+| BATCH-01 | Phase 5 | Pending |
+| BATCH-02 | Phase 5 | Pending |
+| BATCH-03 | Phase 5 | Pending |
+| BATCH-04 | Phase 5 | Pending |
+| BATCH-05 | Phase 5 | Pending |
+| BATCH-06 | Phase 5 | Pending |
+| UX-02 | Phase 5 | Pending |
+| UX-05 | Phase 5 | Pending |
 
 **Coverage:**
-- v1 requirements: 32 total
-- Mapped to phases: 0
-- Unmapped: 32
+- v1 requirements: 39 total
+- Mapped to phases: 39
+- Unmapped: 0
+
+**Note on LOAD-03:** PNG, JPEG, WebP, and BMP formats are delivered in Phase 2 (core image I/O via the `image` crate). SVG rasterization via resvg is delivered in Phase 6 alongside clean-VM distribution verification where the added dependency is tested end-to-end.
 
 ---
 *Requirements defined: 2026-04-06*
-*Last updated: 2026-04-06 after initial definition*
+*Last updated: 2026-04-06 — traceability populated after roadmap creation*
