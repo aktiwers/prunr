@@ -14,6 +14,12 @@ pub enum CoreError {
     LargeImage { width: u32, height: u32, limit: u32 },
 }
 
+impl From<image::ImageError> for CoreError {
+    fn from(e: image::ImageError) -> Self {
+        CoreError::ImageFormat(e.to_string())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModelKind {
     Silueta,
