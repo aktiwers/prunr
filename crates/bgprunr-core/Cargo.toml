@@ -3,6 +3,16 @@ name = "bgprunr-core"
 version.workspace = true
 edition.workspace = true
 
+[features]
+# Enable runtime model loading from filesystem (for development without embedding ONNX files).
+# Activates bgprunr-models/dev-models which provides silueta_bytes()/u2net_bytes() functions
+# instead of SILUETA_BYTES/U2NET_BYTES statics that require models at compile time.
+# Usage: cargo test -p bgprunr-core --features dev-models
+dev-models = ["bgprunr-models/dev-models"]
+
+# CUDA execution provider (requires CUDA toolkit at link time)
+cuda = []
+
 [dependencies]
 bgprunr-models = { path = "../bgprunr-models" }
 thiserror = { workspace = true }
