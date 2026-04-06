@@ -1,2 +1,9 @@
 /target
 /models/
+
+# Test images — not committed (copyrighted assets from rembg repo, fetched on demand)
+tests/test_images/*.jpg
+tests/test_images/*.jpeg
+tests/test_images/*.png
+tests/test_images/*.webp
+tests/test_images/*.bmp
