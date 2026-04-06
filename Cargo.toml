@@ -1,0 +1,42 @@
+[workspace]
+members = [
+    "crates/bgprunr-core",
+    "crates/bgprunr-models",
+    "crates/bgprunr-app",
+    "xtask",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/yourname/bgprunr"
+
+[workspace.dependencies]
+# Phase 1 — active
+thiserror = "2.0"
+include-bytes-zstd = { git = "https://github.com/daac-tools/include-bytes-zstd" }
+
+# Phase 2+ — declared for consistent pinning, not used yet
+ort = { version = "=2.0.0-rc.12", features = ["cuda", "coreml", "directml", "ndarray", "download-binaries"] }
+ndarray = "0.16"
+image = { version = "0.25", features = ["jpeg", "png", "webp", "bmp"] }
+rayon = "1.11"
+egui = "0.34"
+eframe = { version = "0.34", default-features = true }
+egui_extras = { version = "0.34", features = ["all_loaders"] }
+clap = { version = "4.5", features = ["derive"] }
+arboard = { version = "3.6", features = ["wayland-data-control"] }
+resvg = "0.47"
+indicatif = "0.17"
+rfd = "0.15"
+zstd = "0.13"
+
+[profile.release]
+strip = true
+lto = "thin"
+opt-level = 3
+
+[profile.dist]
+inherits = "release"

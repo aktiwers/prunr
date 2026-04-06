@@ -1,0 +1,8 @@
+[package]
+name = "bgprunr-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+bgprunr-models = { path = "../bgprunr-models" }
+thiserror = { workspace = true }
