@@ -102,7 +102,12 @@ Plans:
   3. When background removal completes, removed pixels dissolve away in a 0.5–1s particle animation before settling into the checkerboard transparency view; pressing any key or clicking skips the animation immediately
   4. Dropping multiple images at once populates a sidebar queue; clicking a sidebar thumbnail switches the main view to that image without re-running inference; dragging items in the sidebar reorders them; pressing [ or ] navigates between images
   5. Ctrl/Cmd+, opens a settings dialog where the user can switch between silueta and u2net models, toggle auto-remove on import, and set the number of parallel inference jobs; the active inference backend (e.g., "CUDA (GPU)" or "CPU") is visible in the dialog
-**Plans**: TBD
+**Plans**: 3 plans
+
+Plans:
+- [ ] 05-01-PLAN.md — Foundation types, zoom/pan canvas rework, before/after toggle
+- [ ] 05-02-PLAN.md — Settings dialog and reveal animation
+- [ ] 05-03-PLAN.md — Batch sidebar, batch processing, queue management
 
 ### Phase 6: Distribution and Packaging
 **Goal**: A user on a clean Linux, macOS, or Windows machine with no Rust, no ONNX Runtime, and no other prerequisites can download one binary, run it, and remove image backgrounds — the product is shippable
@@ -127,5 +132,5 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 | 2. Core Inference Engine | 6/6 | Complete   | 2026-04-06 |
 | 3. CLI Binary | 2/3 | In Progress|  |
 | 4. GUI Foundation | 2/3 | In Progress|  |
-| 5. GUI Feature Completeness | 0/TBD | Not started | - |
+| 5. GUI Feature Completeness | 0/3 | Not started | - |
 | 6. Distribution and Packaging | 0/TBD | Not started | - |
