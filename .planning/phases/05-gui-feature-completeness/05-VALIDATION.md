@@ -38,24 +38,16 @@ created: 2026-04-07
 
 | Task ID | Plan | Wave | Requirement | Test Type | Automated Command | File Exists | Status |
 |---------|------|------|-------------|-----------|-------------------|-------------|--------|
-| 05-01-01 | 01 | 1 | VIEW-01 | unit | `cargo test -p bgprunr-app --lib zoom` | ❌ W0 | ⬜ pending |
-| 05-01-02 | 01 | 1 | VIEW-02 | unit | `cargo test -p bgprunr-app --lib pan` | ❌ W0 | ⬜ pending |
-| 05-01-03 | 01 | 1 | VIEW-05 | unit | `cargo test -p bgprunr-app --lib fit_zoom` | ❌ W0 | ⬜ pending |
-| 05-02-01 | 02 | 1 | VIEW-03 | unit | `cargo test -p bgprunr-app --lib canvas` | ❌ W0 | ⬜ pending |
-| 05-02-02 | 02 | 1 | VIEW-04 | unit | `cargo test -p bgprunr-app --lib before_after` | ❌ W0 | ⬜ pending |
-| 05-03-01 | 03 | 2 | ANIM-01 | unit | `cargo test -p bgprunr-app --lib state` | ❌ W0 | ⬜ pending |
-| 05-03-02 | 03 | 2 | ANIM-02 | unit | `cargo test -p bgprunr-app --lib anim` | ❌ W0 | ⬜ pending |
-| 05-03-03 | 03 | 2 | ANIM-03 | unit | `cargo test -p bgprunr-app --lib anim_skip` | ❌ W0 | ⬜ pending |
-| 05-04-01 | 04 | 2 | BATCH-01 | unit | `cargo test -p bgprunr-app --lib batch` | ❌ W0 | ⬜ pending |
-| 05-04-02 | 04 | 2 | BATCH-02 | unit | `cargo test -p bgprunr-app --lib batch_select` | ❌ W0 | ⬜ pending |
-| 05-04-03 | 04 | 2 | BATCH-03 | unit | `cargo test -p bgprunr-app --lib batch_reorder` | ❌ W0 | ⬜ pending |
-| 05-04-04 | 04 | 2 | BATCH-04 | unit | `cargo test -p bgprunr-app --lib worker` | ❌ W0 | ⬜ pending |
-| 05-04-05 | 04 | 2 | BATCH-05 | unit | `cargo test -p bgprunr-app --lib batch_cache` | ❌ W0 | ⬜ pending |
-| 05-04-06 | 04 | 2 | BATCH-06 | unit | `cargo test -p bgprunr-app --lib auto_remove` | ❌ W0 | ⬜ pending |
-| 05-05-01 | 05 | 3 | UX-02 | unit | `cargo test -p bgprunr-app --lib settings` | ❌ W0 | ⬜ pending |
-| 05-05-02 | 05 | 3 | UX-05 | unit | `cargo test -p bgprunr-app --lib nav_keys` | ❌ W0 | ⬜ pending |
+| 05-01-01 | 01 | 1 | VIEW-01 | unit | `cargo test -p bgprunr-app --lib zoom` | W0 | pending |
+| 05-01-02 | 01 | 1 | VIEW-02 | unit | `cargo test -p bgprunr-app --lib pan` | W0 | pending |
+| 05-01-03 | 01 | 1 | VIEW-03, VIEW-04, VIEW-05 | unit | `cargo test -p bgprunr-app --lib fit_zoom` | W0 | pending |
+| 05-02-01 | 02 | 2 | UX-02 | unit | `cargo test -p bgprunr-app --lib settings` | W0 | pending |
+| 05-02-02 | 02 | 2 | ANIM-01, ANIM-02, ANIM-03 | unit | `cargo test -p bgprunr-app --lib anim` | W0 | pending |
+| 05-03-01 | 03 | 3 | BATCH-01, BATCH-02, BATCH-03 | unit | `cargo test -p bgprunr-app --lib batch` | W0 | pending |
+| 05-03-02 | 03 | 3 | BATCH-04, BATCH-05, BATCH-06 | unit | `cargo test -p bgprunr-app --lib worker` | W0 | pending |
+| 05-03-03 | 03 | 3 | UX-05 | unit | `cargo test -p bgprunr-app --lib nav_keys` | W0 | pending |
 
-*Status: ⬜ pending · ✅ green · ❌ red · ⚠️ flaky*
+*Status: pending / green / red / flaky*
 
 ---
 
