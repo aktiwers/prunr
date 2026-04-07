@@ -1,4 +1,4 @@
-/// Application state machine: Empty -> Loaded -> Processing -> Done
+/// Application state machine: Empty -> Loaded -> Processing -> Animating -> Done
 /// Can also transition Done -> Loaded (load new image) or Processing -> Loaded (cancel)
 #[derive(Debug, Clone, PartialEq)]
 pub enum AppState {
@@ -8,6 +8,8 @@ pub enum AppState {
     Loaded,
     /// Inference running on worker thread.
     Processing,
+    /// Reveal animation playing after inference completes.
+    Animating,
     /// Inference complete. Result available.
     Done,
 }

@@ -8,10 +8,30 @@ use image::GenericImageView;
 
 use bgprunr_core::{ModelKind, ProgressStage};
 
+use super::settings::Settings;
 use super::state::AppState;
 use super::theme;
 use super::worker::{WorkerMessage, WorkerResult, spawn_worker};
 use super::views::{canvas, shortcuts, statusbar, toolbar};
+
+pub(crate) struct BatchItem {
+    pub id: u64,
+    pub filename: String,
+    pub source_bytes: Vec<u8>,
+    pub source_texture: Option<egui::TextureHandle>,
+    pub thumb_texture: Option<egui::TextureHandle>,
+    pub result_rgba: Option<image::RgbaImage>,
+    pub result_texture: Option<egui::TextureHandle>,
+    pub status: BatchStatus,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum BatchStatus {
+    Pending,
+    Processing,
+    Done,
+    Error(String),
+}
 
 pub struct BgPrunrApp {
     // State
@@ -49,6 +69,33 @@ pub struct BgPrunrApp {
 
     // Set by raw_input_hook — egui converts Ctrl+C to Event::Copy before we see it
     pending_copy: bool,
+
+    // Zoom/Pan state
+    pub(crate) zoom: f32,
+    pub(crate) pan_offset: egui::Vec2,
+    pub(crate) previous_zoom: f32,
+    pub(crate) is_panning: bool,
+
+    // Before/After toggle
+    pub(crate) show_original: bool,
+
+    // Animation state
+    pub(crate) anim_progress: f32,
+    pub(crate) anim_mask: Option<Vec<u8>>,
+
+    // Batch items
+    pub(crate) batch_items: Vec<BatchItem>,
+    pub(crate) selected_batch_index: usize,
+    pub(crate) show_sidebar: bool,
+    pub(crate) next_batch_id: u64,
+
+    // Settings
+    pub(crate) show_settings: bool,
+    pub(crate) settings: Settings,
+
+    // Pending zoom actions (flags consumed by canvas.rs)
+    pub(crate) pending_fit_zoom: bool,
+    pub(crate) pending_actual_size: bool,
 }
 
 impl BgPrunrApp {
@@ -82,6 +129,8 @@ impl BgPrunrApp {
 
         let clipboard = arboard::Clipboard::new().ok();
 
+        let settings = Settings::default();
+        let selected_model = settings.model.into();
         Self {
             state: AppState::Empty,
             loaded_filename: None,
@@ -100,9 +149,24 @@ impl BgPrunrApp {
             result_rgba: None,
             clipboard,
             show_shortcuts: false,
-            selected_model: ModelKind::Silueta,
+            selected_model,
             active_backend: "CPU".to_string(),
             pending_copy: false,
+            zoom: 1.0,
+            pan_offset: egui::Vec2::ZERO,
+            previous_zoom: 1.0,
+            is_panning: false,
+            show_original: false,
+            anim_progress: 0.0,
+            anim_mask: None,
+            batch_items: Vec::new(),
+            selected_batch_index: 0,
+            show_sidebar: false,
+            next_batch_id: 0,
+            show_settings: false,
+            settings,
+            pending_fit_zoom: false,
+            pending_actual_size: false,
         }
     }
 
@@ -111,6 +175,8 @@ impl BgPrunrApp {
     pub fn new_for_test() -> Self {
         let (worker_tx, _worker_msg_rx) = mpsc::channel::<WorkerMessage>();
         let (_result_tx, worker_rx) = mpsc::channel::<WorkerResult>();
+        let settings = Settings::default();
+        let selected_model = settings.model.into();
         Self {
             state: AppState::Empty,
             loaded_filename: None,
@@ -129,9 +195,24 @@ impl BgPrunrApp {
             result_rgba: None,
             clipboard: None,
             show_shortcuts: false,
-            selected_model: ModelKind::Silueta,
+            selected_model,
             active_backend: "CPU".to_string(),
             pending_copy: false,
+            zoom: 1.0,
+            pan_offset: egui::Vec2::ZERO,
+            previous_zoom: 1.0,
+            is_panning: false,
+            show_original: false,
+            anim_progress: 0.0,
+            anim_mask: None,
+            batch_items: Vec::new(),
+            selected_batch_index: 0,
+            show_sidebar: false,
+            next_batch_id: 0,
+            show_settings: false,
+            settings,
+            pending_fit_zoom: false,
+            pending_actual_size: false,
         }
     }
 
@@ -152,6 +233,11 @@ impl BgPrunrApp {
                 self.result_rgba = None;
                 self.state = AppState::Loaded;
                 self.status_text = "Ready".to_string();
+                // Reset zoom/pan for new image
+                self.zoom = 1.0;
+                self.pan_offset = egui::Vec2::ZERO;
+                self.previous_zoom = 1.0;
+                self.show_original = false;
             }
             Err(e) => {
                 self.set_temporary_status(format!("Could not load image: {e}"));
@@ -374,6 +460,7 @@ impl eframe::App for BgPrunrApp {
         let (mut open_requested, mut remove_requested, mut save_requested) =
             (false, false, false);
         let (mut cancel_requested, mut toggle_shortcuts) = (false, false);
+        let (mut toggle_before_after, mut fit_to_window, mut actual_size) = (false, false, false);
 
         ctx.input(|i| {
             if i.modifiers.command && i.key_pressed(Key::O) {
@@ -391,6 +478,15 @@ impl eframe::App for BgPrunrApp {
             if i.key_pressed(Key::F1) {
                 toggle_shortcuts = true;
             }
+            if i.key_pressed(Key::B) {
+                toggle_before_after = true;
+            }
+            if i.modifiers.command && i.key_pressed(Key::Num0) {
+                fit_to_window = true;
+            }
+            if i.modifiers.command && i.key_pressed(Key::Num1) {
+                actual_size = true;
+            }
         });
 
         let copy_requested = std::mem::take(&mut self.pending_copy);
@@ -407,10 +503,24 @@ impl eframe::App for BgPrunrApp {
         if copy_requested && self.state == AppState::Done {
             self.handle_copy();
         }
-        if cancel_requested && self.state == AppState::Processing {
+        if toggle_before_after && self.state == AppState::Done {
+            self.show_original = !self.show_original;
+        }
+        if fit_to_window {
+            self.pending_fit_zoom = true;
+        }
+        if actual_size {
+            self.pending_actual_size = true;
+        }
+        if cancel_requested && self.state == AppState::Animating {
+            self.state = AppState::Done;
+            self.anim_progress = 0.0;
+        } else if cancel_requested && self.state == AppState::Processing {
             self.handle_cancel();
             self.state = AppState::Loaded;
             self.status_text = "Cancelled".to_string();
+        } else if cancel_requested && self.show_settings {
+            self.show_settings = false;
         } else if cancel_requested && self.show_shortcuts {
             self.show_shortcuts = false;
         }

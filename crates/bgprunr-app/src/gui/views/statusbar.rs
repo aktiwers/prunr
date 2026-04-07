@@ -20,7 +20,7 @@ pub fn render(ui: &mut egui::Ui, app: &BgPrunrApp) {
             AppState::Processing => {
                 format!("Processing... {}", app.progress_stage)
             }
-            AppState::Done => app.status_text.clone(),
+            AppState::Animating | AppState::Done => app.status_text.clone(),
         };
 
         ui.label(RichText::new(&status_text).color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY));
