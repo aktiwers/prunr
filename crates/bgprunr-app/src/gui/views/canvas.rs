@@ -4,11 +4,71 @@ use crate::gui::app::BgPrunrApp;
 use crate::gui::state::AppState;
 use crate::gui::theme;
 
-pub fn render(ui: &mut egui::Ui, app: &BgPrunrApp) {
+pub fn render(ui: &mut egui::Ui, app: &mut BgPrunrApp) {
     // Set background
     let avail_rect = ui.available_rect_before_wrap();
     ui.painter()
         .rect_filled(avail_rect, 0.0, theme::BG_PRIMARY);
+
+    let canvas_rect = ui.available_rect_before_wrap();
+
+    // Handle scroll-wheel zoom (cursor-centered)
+    ui.ctx().input(|i| {
+        for event in &i.events {
+            if let egui::Event::MouseWheel { delta, modifiers, .. } = event {
+                if !modifiers.any() {
+                    let scroll_y = delta.y;
+                    let zoom_delta = theme::ZOOM_STEP.powf(scroll_y);
+                    let new_zoom = (app.zoom * zoom_delta).clamp(theme::ZOOM_MIN, theme::ZOOM_MAX);
+                    if let Some(cursor) = i.pointer.hover_pos() {
+                        if canvas_rect.contains(cursor) {
+                            let cursor_rel = cursor - canvas_rect.center();
+                            app.pan_offset =
+                                cursor_rel / app.zoom - cursor_rel / new_zoom + app.pan_offset;
+                            app.zoom = new_zoom;
+                        }
+                    }
+                }
+            }
+        }
+        // Space+drag pan
+        let space_held = i.keys_down.contains(&egui::Key::Space);
+        let dragging = i.pointer.primary_down();
+        if space_held && dragging {
+            app.pan_offset += i.pointer.delta();
+            app.is_panning = true;
+        } else {
+            app.is_panning = false;
+        }
+    });
+
+    // Handle pending Ctrl+0 (fit to window) / Ctrl+1 (actual size)
+    if let Some(ref tex) = app.source_texture {
+        let tex_size = tex.size_vec2();
+        let canvas_size = canvas_rect.size();
+
+        if app.pending_fit_zoom {
+            app.pending_fit_zoom = false;
+            let fit = fit_zoom(canvas_size, tex_size);
+            if (app.zoom - fit).abs() < 0.001 {
+                app.zoom = app.previous_zoom;
+            } else {
+                app.previous_zoom = app.zoom;
+                app.zoom = fit;
+                app.pan_offset = Vec2::ZERO;
+            }
+        }
+        if app.pending_actual_size {
+            app.pending_actual_size = false;
+            if (app.zoom - 1.0).abs() < 0.001 {
+                app.zoom = app.previous_zoom;
+            } else {
+                app.previous_zoom = app.zoom;
+                app.zoom = 1.0;
+                app.pan_offset = Vec2::ZERO;
+            }
+        }
+    }
 
     match app.state {
         AppState::Empty => render_empty(ui, app),
@@ -17,6 +77,20 @@ pub fn render(ui: &mut egui::Ui, app: &BgPrunrApp) {
         AppState::Animating => render_done(ui, app), // placeholder until animation.rs is wired
         AppState::Done => render_done(ui, app),
     }
+}
+
+/// Compute the image rectangle given canvas bounds, texture size, zoom, and pan offset.
+fn compute_img_rect(canvas_rect: Rect, tex_size: Vec2, zoom: f32, pan: Vec2) -> Rect {
+    let img_size = tex_size * zoom;
+    let center = canvas_rect.center() + pan;
+    Rect::from_center_size(center, img_size)
+}
+
+/// Compute fit-to-window zoom (never upscale beyond 1:1).
+fn fit_zoom(canvas_size: Vec2, tex_size: Vec2) -> f32 {
+    (canvas_size.x / tex_size.x)
+        .min(canvas_size.y / tex_size.y)
+        .min(1.0)
 }
 
 fn render_empty(ui: &mut egui::Ui, _app: &BgPrunrApp) {
@@ -80,13 +154,27 @@ fn render_empty(ui: &mut egui::Ui, _app: &BgPrunrApp) {
 
 fn render_loaded(ui: &mut egui::Ui, app: &BgPrunrApp) {
     if let Some(ref texture) = app.source_texture {
-        render_image_centered(ui, texture, 1.0);
+        let canvas_rect = ui.available_rect_before_wrap();
+        let img_rect = compute_img_rect(canvas_rect, texture.size_vec2(), app.zoom, app.pan_offset);
+        ui.painter().image(
+            texture.id(),
+            img_rect,
+            Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+            Color32::WHITE,
+        );
     }
 }
 
 fn render_processing(ui: &mut egui::Ui, app: &BgPrunrApp) {
     if let Some(ref texture) = app.source_texture {
-        render_image_centered(ui, texture, 0.5);
+        let canvas_rect = ui.available_rect_before_wrap();
+        let img_rect = compute_img_rect(canvas_rect, texture.size_vec2(), app.zoom, app.pan_offset);
+        ui.painter().image(
+            texture.id(),
+            img_rect,
+            Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+            Color32::from_rgba_unmultiplied(255, 255, 255, 128),
+        );
     }
 
     // Center overlay text
@@ -101,41 +189,42 @@ fn render_processing(ui: &mut egui::Ui, app: &BgPrunrApp) {
 }
 
 fn render_done(ui: &mut egui::Ui, app: &BgPrunrApp) {
-    if let Some(ref texture) = app.result_texture {
-        let avail = ui.available_size();
-        let tex_size = texture.size_vec2();
-        let scale = (avail.x / tex_size.x).min(avail.y / tex_size.y).min(1.0);
-        let img_size = tex_size * scale;
-        let center = ui.available_rect_before_wrap().center();
-        let img_rect = Rect::from_center_size(center, img_size);
-
-        // Draw checkerboard pattern within image bounds
-        draw_checkerboard(ui, img_rect);
-
-        // Draw result image on top
-        ui.painter().image(
-            texture.id(),
-            img_rect,
-            Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-            Color32::WHITE,
-        );
+    let canvas_rect = ui.available_rect_before_wrap();
+    if app.show_original {
+        // Show original image without checkerboard
+        if let Some(ref texture) = app.source_texture {
+            let img_rect =
+                compute_img_rect(canvas_rect, texture.size_vec2(), app.zoom, app.pan_offset);
+            ui.painter().image(
+                texture.id(),
+                img_rect,
+                Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                Color32::WHITE,
+            );
+        }
+    } else {
+        // Show result with checkerboard
+        if let Some(ref texture) = app.result_texture {
+            let img_rect =
+                compute_img_rect(canvas_rect, texture.size_vec2(), app.zoom, app.pan_offset);
+            draw_checkerboard(ui, img_rect);
+            ui.painter().image(
+                texture.id(),
+                img_rect,
+                Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                Color32::WHITE,
+            );
+        }
     }
-}
 
-fn render_image_centered(ui: &mut egui::Ui, texture: &egui::TextureHandle, opacity: f32) {
-    let avail = ui.available_size();
-    let tex_size = texture.size_vec2();
-    let scale = (avail.x / tex_size.x).min(avail.y / tex_size.y).min(1.0);
-    let img_size = tex_size * scale;
-    let center = ui.available_rect_before_wrap().center();
-    let img_rect = Rect::from_center_size(center, img_size);
-
-    let alpha = (opacity * 255.0) as u8;
-    ui.painter().image(
-        texture.id(),
-        img_rect,
-        Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-        Color32::from_rgba_unmultiplied(255, 255, 255, alpha),
+    // Before/after indicator label in top-left of canvas
+    let label = if app.show_original { "Original" } else { "Result" };
+    ui.painter().text(
+        canvas_rect.min + Vec2::new(theme::SPACE_SM, theme::SPACE_SM),
+        egui::Align2::LEFT_TOP,
+        label,
+        egui::FontId::monospace(theme::FONT_SIZE_MONO),
+        theme::TEXT_SECONDARY,
     );
 }
 
