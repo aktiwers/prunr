@@ -1,3 +1,4 @@
+use image::DynamicImage;
 use ort::{inputs, value::Tensor};
 
 use crate::{
@@ -44,6 +45,53 @@ where
     if let Some(err) = check_large_image(&img) {
         return Err(err);
     }
+
+    process_image_from_decoded(img, engine, progress)
+}
+
+/// Process a single image without the large-image size guard.
+///
+/// Use only when the caller has already handled the size check
+/// (e.g., `--large-image=process` CLI flag). Skips the 8000px dimension guard
+/// and proceeds directly to inference on the original image.
+///
+/// # Arguments
+/// - `img_bytes`: Raw image bytes (PNG, JPEG, WebP, or BMP)
+/// - `engine`: OrtEngine with a loaded session. Create once, reuse across images.
+/// - `progress`: Optional progress callback. Called at each pipeline stage.
+///
+/// # Errors
+/// - `CoreError::ImageFormat` if the bytes cannot be decoded as a supported format
+/// - `CoreError::Inference` if ORT inference fails
+pub fn process_image_unchecked<F>(
+    img_bytes: &[u8],
+    engine: &OrtEngine,
+    progress: Option<F>,
+) -> Result<ProcessResult, CoreError>
+where
+    F: Fn(ProgressStage, f32),
+{
+    let img = load_image_from_bytes(img_bytes)?;
+    process_image_from_decoded(img, engine, progress)
+}
+
+/// Internal helper: run the full pipeline on an already-decoded image.
+///
+/// Called by both `process_image` (after the large-image guard) and
+/// `process_image_unchecked` (bypassing the guard).
+fn process_image_from_decoded<F>(
+    img: DynamicImage,
+    engine: &OrtEngine,
+    progress: Option<F>,
+) -> Result<ProcessResult, CoreError>
+where
+    F: Fn(ProgressStage, f32),
+{
+    let report = |stage: ProgressStage, pct: f32| {
+        if let Some(ref cb) = progress {
+            cb(stage, pct);
+        }
+    };
 
     // Stage 2: Resize (happens inside preprocess)
     report(ProgressStage::Resize, 0.2);
