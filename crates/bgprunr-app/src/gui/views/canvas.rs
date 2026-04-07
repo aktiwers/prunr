@@ -1,9 +1,12 @@
+use std::sync::LazyLock;
 use egui::{Color32, Pos2, Rect, Stroke, Vec2};
 
 use crate::gui::app::BgPrunrApp;
 use crate::gui::state::AppState;
 use crate::gui::theme;
 use super::animation;
+
+static IS_WAYLAND: LazyLock<bool> = LazyLock::new(|| std::env::var_os("WAYLAND_DISPLAY").is_some());
 
 pub fn render(ui: &mut egui::Ui, app: &mut BgPrunrApp) {
     // Set background
@@ -142,7 +145,7 @@ fn render_empty(ui: &mut egui::Ui, _app: &BgPrunrApp) {
     );
 
     // Wayland DnD caveat
-    if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+    if *IS_WAYLAND {
         painter.text(
             center + Vec2::new(0.0, 55.0),
             egui::Align2::CENTER_CENTER,
@@ -232,17 +235,17 @@ fn render_done(ui: &mut egui::Ui, app: &BgPrunrApp) {
 fn render_animating(ui: &mut egui::Ui, app: &mut BgPrunrApp) {
     let canvas_rect = ui.available_rect_before_wrap();
 
-    // Need source image for animation blending
-    let source_rgba = {
+    // Populate cache if empty (decoded once, reused every frame)
+    if app.source_rgba_cache.is_none() {
         if let Some(ref bytes) = app.source_bytes {
-            image::load_from_memory(bytes).ok().map(|img| img.to_rgba8())
-        } else {
-            None
+            app.source_rgba_cache = image::load_from_memory(bytes)
+                .ok()
+                .map(|img| img.to_rgba8());
         }
-    };
+    }
 
-    if let (Some(source), Some(ref result), Some(ref mask)) =
-        (source_rgba, &app.result_rgba, &app.anim_mask)
+    if let (Some(ref source), Some(ref result), Some(ref mask)) =
+        (&app.source_rgba_cache, &app.result_rgba, &app.anim_mask)
     {
         // Cap animation texture to canvas size for performance
         let max_w = canvas_rect.width() as u32;
