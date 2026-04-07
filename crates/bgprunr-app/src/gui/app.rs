@@ -12,7 +12,7 @@ use super::settings::Settings;
 use super::state::AppState;
 use super::theme;
 use super::worker::{WorkerMessage, WorkerResult, spawn_worker};
-use super::views::{canvas, settings, shortcuts, statusbar, toolbar};
+use super::views::{canvas, settings, shortcuts, sidebar, statusbar, toolbar};
 
 pub(crate) struct BatchItem {
     pub id: u64,
@@ -376,6 +376,157 @@ impl BgPrunrApp {
     pub fn handle_cancel(&mut self) {
         self.cancel_flag.store(true, Ordering::Relaxed);
     }
+
+    pub fn add_to_batch(&mut self, bytes: Vec<u8>, filename: String, ctx: &egui::Context) {
+        // Validate it's a loadable image
+        let img = match image::load_from_memory(&bytes) {
+            Ok(img) => img,
+            Err(_) => return,
+        };
+
+        // If this is the first batch item and there's already a single image loaded,
+        // migrate the single image to batch as item 0 first
+        if self.batch_items.is_empty() {
+            if let Some(ref existing_bytes) = self.source_bytes.clone() {
+                let existing_name = self.loaded_filename.clone().unwrap_or_else(|| "image".into());
+                if let Ok(ei) = image::load_from_memory(existing_bytes) {
+                    let eid = self.next_batch_id;
+                    self.next_batch_id += 1;
+                    let et = image::imageops::thumbnail(&ei.to_rgba8(), 80, 80);
+                    let (etw, eth) = (et.width(), et.height());
+                    let etc = egui::ColorImage::from_rgba_unmultiplied(
+                        [etw as usize, eth as usize],
+                        et.as_flat_samples().as_slice(),
+                    );
+                    let etex = ctx.load_texture(format!("thumb_{eid}"), etc, egui::TextureOptions::LINEAR);
+
+                    let existing_item = BatchItem {
+                        id: eid,
+                        filename: existing_name,
+                        source_bytes: existing_bytes.clone(),
+                        source_texture: self.source_texture.take(),
+                        thumb_texture: Some(etex),
+                        result_rgba: self.result_rgba.take(),
+                        result_texture: self.result_texture.take(),
+                        status: if self.state == AppState::Done { BatchStatus::Done } else { BatchStatus::Pending },
+                    };
+                    self.batch_items.insert(0, existing_item);
+                    self.selected_batch_index = 0;
+                }
+            }
+        }
+
+        let id = self.next_batch_id;
+        self.next_batch_id += 1;
+
+        // Generate thumbnail (80x80 max)
+        let thumb = image::imageops::thumbnail(&img.to_rgba8(), 80, 80);
+        let (tw, th) = (thumb.width(), thumb.height());
+        let thumb_color = egui::ColorImage::from_rgba_unmultiplied(
+            [tw as usize, th as usize],
+            thumb.as_flat_samples().as_slice(),
+        );
+        let thumb_tex = ctx.load_texture(
+            format!("thumb_{id}"),
+            thumb_color,
+            egui::TextureOptions::LINEAR,
+        );
+
+        let item = BatchItem {
+            id,
+            filename,
+            source_bytes: bytes,
+            source_texture: None, // loaded lazily when selected
+            thumb_texture: Some(thumb_tex),
+            result_rgba: None,
+            result_texture: None,
+            status: BatchStatus::Pending,
+        };
+
+        self.batch_items.push(item);
+
+        // Update state to Loaded if was Empty
+        if self.state == AppState::Empty {
+            self.state = AppState::Loaded;
+        }
+        // NOTE: Auto-remove (BATCH-06) is triggered from the drop handler, AFTER all files are queued.
+    }
+
+    pub fn handle_process_all(&mut self) {
+        let pending_items: Vec<(u64, Vec<u8>)> = self.batch_items.iter()
+            .filter(|item| item.status == BatchStatus::Pending)
+            .map(|item| (item.id, item.source_bytes.clone()))
+            .collect();
+
+        if pending_items.is_empty() {
+            return;
+        }
+
+        // Mark pending items as processing
+        for item in &mut self.batch_items {
+            if item.status == BatchStatus::Pending {
+                item.status = BatchStatus::Processing;
+            }
+        }
+
+        self.cancel_flag.store(false, Ordering::Relaxed);
+        let _ = self.worker_tx.send(WorkerMessage::BatchProcess {
+            items: pending_items,
+            model: self.settings.model.into(),
+            jobs: self.settings.parallel_jobs,
+            cancel: self.cancel_flag.clone(),
+        });
+    }
+
+    fn sync_selected_batch_textures(&mut self, ctx: &egui::Context) {
+        if self.batch_items.is_empty() { return; }
+        let idx = self.selected_batch_index.min(self.batch_items.len() - 1);
+
+        // Load source texture lazily
+        if self.batch_items[idx].source_texture.is_none() {
+            let source_bytes = self.batch_items[idx].source_bytes.clone();
+            if let Ok(img) = image::load_from_memory(&source_bytes) {
+                let rgba = img.to_rgba8();
+                let (w, h) = (rgba.width(), rgba.height());
+                let ci = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], rgba.as_flat_samples().as_slice());
+                let item_id = self.batch_items[idx].id;
+                self.batch_items[idx].source_texture = Some(ctx.load_texture(format!("source_{item_id}"), ci, egui::TextureOptions::default()));
+            }
+        }
+
+        // Load result texture lazily
+        if self.batch_items[idx].result_texture.is_none() {
+            if let Some(ref rgba) = self.batch_items[idx].result_rgba.clone() {
+                let (w, h) = (rgba.width(), rgba.height());
+                let ci = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], rgba.as_flat_samples().as_slice());
+                let item_id = self.batch_items[idx].id;
+                self.batch_items[idx].result_texture = Some(ctx.load_texture(format!("result_{item_id}"), ci, egui::TextureOptions::default()));
+            }
+        }
+
+        // Sync app-level textures for canvas rendering
+        let item = &self.batch_items[idx];
+        self.source_texture = item.source_texture.clone();
+        self.source_bytes = Some(item.source_bytes.clone());
+        self.loaded_filename = Some(item.filename.clone());
+        self.image_dimensions = image::load_from_memory(&item.source_bytes).ok().map(|img| img.dimensions());
+        let is_done = item.status == BatchStatus::Done;
+        let result_rgba = item.result_rgba.clone();
+        let result_texture = item.result_texture.clone();
+        if is_done {
+            self.result_texture = result_texture;
+            self.result_rgba = result_rgba;
+            if self.state != AppState::Processing && self.state != AppState::Animating {
+                self.state = AppState::Done;
+            }
+        } else {
+            self.result_texture = None;
+            self.result_rgba = None;
+            if self.state != AppState::Processing {
+                self.state = AppState::Loaded;
+            }
+        }
+    }
 }
 
 impl eframe::App for BgPrunrApp {
@@ -451,19 +602,71 @@ impl eframe::App for BgPrunrApp {
                         "Processing failed. Try a different image or restart the app.".to_string();
                     eprintln!("Worker error: {msg}");
                 }
+                WorkerResult::BatchItemDone { item_id, result } => {
+                    if let Some(item) = self.batch_items.iter_mut().find(|b| b.id == item_id) {
+                        match result {
+                            Ok(pr) => {
+                                if let Ok(img) = image::load_from_memory(&pr.rgba_bytes) {
+                                    let rgba = img.to_rgba8();
+                                    item.result_rgba = Some(rgba);
+                                    item.status = BatchStatus::Done;
+                                }
+                                self.active_backend = pr.active_provider.clone();
+                                self.settings.active_backend = pr.active_provider;
+                            }
+                            Err(e) => {
+                                item.status = BatchStatus::Error(e);
+                            }
+                        }
+                    }
+                    // If currently selected item just completed, load its result texture
+                    self.sync_selected_batch_textures(ctx);
+                }
+                WorkerResult::BatchComplete => {
+                    let done = self.batch_items.iter().filter(|i| i.status == BatchStatus::Done).count();
+                    let total = self.batch_items.len();
+                    let failed = self.batch_items.iter().filter(|i| matches!(i.status, BatchStatus::Error(_))).count();
+                    if failed > 0 {
+                        self.status_text = format!("{failed} image(s) failed to process. Check the status icons in the sidebar.");
+                    } else {
+                        self.status_text = format!("All done \u{2014} {done} images processed");
+                    }
+                    self.state = AppState::Done;
+                }
             }
         }
 
         // b. Handle drag-and-drop (works on X11; no-op on native Wayland — winit#1881)
         let dropped = ctx.input(|i| i.raw.dropped_files.clone());
-        for file in dropped {
-            if let Some(path) = file.path {
-                self.handle_open_path(path);
-            } else if let Some(bytes) = file.bytes {
-                self.handle_open_bytes(
-                    bytes.to_vec(),
-                    file.name.clone(),
-                );
+        if !dropped.is_empty() {
+            let mut new_items: Vec<(Vec<u8>, String)> = Vec::new();
+            for file in dropped {
+                if let Some(path) = file.path {
+                    if let Ok(bytes) = std::fs::read(&path) {
+                        let name = path.file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("untitled")
+                            .to_string();
+                        new_items.push((bytes, name));
+                    }
+                } else if let Some(bytes) = file.bytes {
+                    new_items.push((bytes.to_vec(), file.name.clone()));
+                }
+            }
+
+            if new_items.len() == 1 && self.batch_items.is_empty() {
+                // Single image, no existing batch — use single-image flow
+                let (bytes, name) = new_items.into_iter().next().unwrap();
+                self.handle_open_bytes(bytes, name);
+            } else {
+                // Multiple images OR existing batch — add to batch queue
+                for (bytes, name) in new_items {
+                    self.add_to_batch(bytes, name, ctx);
+                }
+                // Auto-remove on import
+                if self.settings.auto_remove_on_import && self.batch_items.iter().any(|i| i.status == BatchStatus::Pending) {
+                    self.handle_process_all();
+                }
             }
         }
 
@@ -494,6 +697,7 @@ impl eframe::App for BgPrunrApp {
         let (mut cancel_requested, mut toggle_shortcuts) = (false, false);
         let (mut toggle_before_after, mut fit_to_window, mut actual_size) = (false, false, false);
         let mut toggle_settings = false;
+        let (mut nav_prev, mut nav_next, mut toggle_sidebar) = (false, false, false);
 
         ctx.input(|i| {
             if i.modifiers.command && i.key_pressed(Key::O) {
@@ -523,6 +727,15 @@ impl eframe::App for BgPrunrApp {
             if i.modifiers.command && i.key_pressed(Key::Comma) {
                 toggle_settings = true;
             }
+            if i.key_pressed(Key::OpenBracket) {
+                nav_prev = true;
+            }
+            if i.key_pressed(Key::CloseBracket) {
+                nav_next = true;
+            }
+            if i.key_pressed(Key::Tab) {
+                toggle_sidebar = true;
+            }
         });
 
         let copy_requested = std::mem::take(&mut self.pending_copy);
@@ -548,7 +761,16 @@ impl eframe::App for BgPrunrApp {
         if actual_size {
             self.pending_actual_size = true;
         }
-        if cancel_requested && self.state == AppState::Animating {
+        // Cancel batch processing
+        let batch_processing = self.batch_items.iter().any(|i| i.status == BatchStatus::Processing);
+        if cancel_requested && batch_processing {
+            self.handle_cancel();
+            for item in &mut self.batch_items {
+                if item.status == BatchStatus::Processing {
+                    item.status = BatchStatus::Pending;
+                }
+            }
+        } else if cancel_requested && self.state == AppState::Animating {
             self.state = AppState::Done;
             self.anim_progress = 0.0;
         } else if cancel_requested && self.state == AppState::Processing {
@@ -566,14 +788,35 @@ impl eframe::App for BgPrunrApp {
         if toggle_settings {
             self.show_settings = !self.show_settings;
         }
+        if nav_prev && !self.batch_items.is_empty() {
+            if self.selected_batch_index == 0 {
+                self.selected_batch_index = self.batch_items.len() - 1;
+            } else {
+                self.selected_batch_index -= 1;
+            }
+            self.sync_selected_batch_textures(ctx);
+            self.show_original = false;
+        }
+        if nav_next && !self.batch_items.is_empty() {
+            self.selected_batch_index = (self.selected_batch_index + 1) % self.batch_items.len();
+            self.sync_selected_batch_textures(ctx);
+            self.show_original = false;
+        }
+        if toggle_sidebar {
+            self.show_sidebar = !self.show_sidebar;
+        }
 
         // Sync settings model with selected_model
         self.selected_model = self.settings.model.into();
 
         // d. Update window title
-        let title = match &self.loaded_filename {
-            Some(name) => format!("BgPrunR \u{2014} {name}"),
-            None => "BgPrunR".to_string(),
+        let title = if self.batch_items.len() >= 2 {
+            format!("BgPrunR \u{2014} {} images", self.batch_items.len())
+        } else {
+            match &self.loaded_filename {
+                Some(name) => format!("BgPrunR \u{2014} {name}"),
+                None => "BgPrunR".to_string(),
+            }
         };
         ctx.send_viewport_cmd(ViewportCommand::Title(title));
 
@@ -616,6 +859,14 @@ impl eframe::App for BgPrunrApp {
         egui::Panel::bottom("statusbar")
             .exact_size(theme::STATUS_BAR_HEIGHT)
             .show_inside(ui, |ui| statusbar::render(ui, self));
+
+        let sidebar_visible = self.show_sidebar || self.batch_items.len() >= 2;
+        if sidebar_visible {
+            egui::Panel::left("sidebar")
+                .exact_width(theme::SIDEBAR_WIDTH)
+                .resizable(false)
+                .show_inside(ui, |ui| sidebar::render(ui, self));
+        }
 
         egui::CentralPanel::default().show_inside(ui, |ui| canvas::render(ui, self));
 
