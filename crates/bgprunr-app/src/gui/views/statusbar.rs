@@ -63,6 +63,17 @@ pub fn render(ui: &mut egui::Ui, app: &BgPrunrApp) {
                     .color(theme::TEXT_SECONDARY),
             );
 
+            // Zoom percentage (right of dimensions, left of backend badge)
+            if app.state != AppState::Empty {
+                ui.add_space(theme::SPACE_SM);
+                let zoom_pct = (app.zoom * 100.0).round() as u32;
+                ui.label(
+                    RichText::new(format!("{zoom_pct}%"))
+                        .size(theme::FONT_SIZE_BODY)
+                        .color(theme::TEXT_SECONDARY),
+                );
+            }
+
             // Image dimensions
             if let Some((w, h)) = app.image_dimensions {
                 ui.add_space(theme::SPACE_SM);
