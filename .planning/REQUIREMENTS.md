@@ -17,8 +17,8 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### GUI - Image Loading
 
-- [ ] **LOAD-01**: User can drag and drop an image file onto the app window to load it
-- [ ] **LOAD-02**: User can open an image via file browser dialog (Ctrl+O)
+- [x] **LOAD-01**: User can drag and drop an image file onto the app window to load it
+- [x] **LOAD-02**: User can open an image via file browser dialog (Ctrl+O)
 - [x] **LOAD-03**: App accepts PNG, JPEG, WebP, BMP, and SVG (rasterized on load) input formats
 - [x] **LOAD-04**: User is prompted to downscale if image exceeds 8000px in either dimension
 
@@ -38,8 +38,8 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### GUI - Output
 
-- [ ] **OUT-01**: User can save the processed image as PNG with transparency (Ctrl+S)
-- [ ] **OUT-02**: User can copy the processed image to clipboard (Ctrl+C)
+- [x] **OUT-01**: User can save the processed image as PNG with transparency (Ctrl+S)
+- [x] **OUT-02**: User can copy the processed image to clipboard (Ctrl+C)
 
 ### Batch Processing
 
@@ -67,10 +67,10 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### Settings & UX
 
-- [ ] **UX-01**: All keyboard shortcuts work as specified (Ctrl/Cmd+O, Ctrl/Cmd+R, Ctrl/Cmd+S, Ctrl/Cmd+C, B, [/], scroll, Space+drag, Ctrl/Cmd+0, Ctrl/Cmd+1, Escape, Ctrl/Cmd+,, ?) — Cmd on macOS, Ctrl on Linux/Windows
+- [x] **UX-01**: All keyboard shortcuts work as specified (Ctrl/Cmd+O, Ctrl/Cmd+R, Ctrl/Cmd+S, Ctrl/Cmd+C, B, [/], scroll, Space+drag, Ctrl/Cmd+0, Ctrl/Cmd+1, Escape, Ctrl/Cmd+,, ?) — Cmd on macOS, Ctrl on Linux/Windows
 - [ ] **UX-02**: User can open settings dialog (Ctrl/Cmd+,) to configure model, auto-remove, parallelism
 - [x] **UX-03**: User can cancel in-progress inference with Escape
-- [ ] **UX-04**: User can press ? to see all keyboard shortcuts
+- [x] **UX-04**: User can press ? to see all keyboard shortcuts
 - [ ] **UX-05**: User can navigate between images with [ and ] keys
 
 ## v2 Requirements
@@ -129,13 +129,13 @@ Which phases cover which requirements. Updated during roadmap creation.
 | CLI-03 | Phase 3 | Complete |
 | CLI-04 | Phase 3 | Complete |
 | CLI-05 | Phase 3 | Complete |
-| LOAD-01 | Phase 4 | Pending |
-| LOAD-02 | Phase 4 | Pending |
-| OUT-01 | Phase 4 | Pending |
-| OUT-02 | Phase 4 | Pending |
-| UX-01 | Phase 4 | Pending |
+| LOAD-01 | Phase 4 | Complete |
+| LOAD-02 | Phase 4 | Complete |
+| OUT-01 | Phase 4 | Complete |
+| OUT-02 | Phase 4 | Complete |
+| UX-01 | Phase 4 | Complete |
 | UX-03 | Phase 4 | Complete |
-| UX-04 | Phase 4 | Pending |
+| UX-04 | Phase 4 | Complete |
 | VIEW-01 | Phase 5 | Pending |
 | VIEW-02 | Phase 5 | Pending |
 | VIEW-03 | Phase 5 | Pending |
