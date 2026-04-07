@@ -3,13 +3,13 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: unknown
-stopped_at: "Completed 04-01-PLAN.md"
-last_updated: "2026-04-07T07:37:11Z"
+stopped_at: Completed 04-02-PLAN.md
+last_updated: "2026-04-07T07:46:21.305Z"
 progress:
   total_phases: 6
   completed_phases: 3
   total_plans: 16
-  completed_plans: 14
+  completed_plans: 15
 ---
 
 # Project State
@@ -57,6 +57,7 @@ Plan: 2 of 3
 | Phase 02 P06 | 12 | 1 tasks | 1 files |
 | Phase 03 P01 | 77 | 2 tasks | 5 files |
 | Phase 03 P02 | 2 | 2 tasks | 2 files |
+| Phase 04 P02 | 4 | 2 tasks | 11 files |
 
 ## Accumulated Context
 
@@ -101,6 +102,11 @@ Recent decisions affecting current work:
 - [Phase 04-01]: lib.rs + [lib] section added to bgprunr-app so cargo test --lib works; crate was binary-only before this plan
 - [Phase 04-01]: OrtEngine::new(model, 1) used in GUI worker — plan showed 1-arg call but actual signature requires intra_threads param; 1 = single-image GUI context
 - [Phase 04-01]: Worker creates OrtEngine per ProcessImage invocation — consistent with Phase 2/3 each-worker-creates-own pattern, no Arc<Mutex<Session>> contention
+- [Phase 04-02]: egui 0.34 API renames applied: Panel::top/bottom, exact_size, corner_radius, CornerRadius, global_style/set_global_style
+- [Phase 04-02]: image crate added to bgprunr-app Cargo.toml for direct RgbaImage loading and test support
+- [Phase 04-02]: BgPrunrApp::new_for_test() constructor added (cfg test) since eframe::CreationContext only available inside run_native
+- [Phase 04-02]: cancel_flag made pub(crate) to enable test assertions on AtomicBool state
+- [Phase 04-02]: Source texture loaded lazily in logic() since egui Context unavailable in handle_open_path()
 
 ### Pending Todos
 
@@ -114,6 +120,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-04-07T07:37:11Z
-Stopped at: Completed 04-01-PLAN.md
-Resume file: .planning/phases/04-gui-foundation/04-02-PLAN.md
+Last session: 2026-04-07T07:46:21.301Z
+Stopped at: Completed 04-02-PLAN.md
+Resume file: None
