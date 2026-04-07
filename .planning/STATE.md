@@ -3,13 +3,13 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: unknown
-stopped_at: Phase 3 context gathered
-last_updated: "2026-04-07T00:18:39.033Z"
+stopped_at: Completed 03-01-PLAN.md
+last_updated: "2026-04-07T02:15:17.603Z"
 progress:
   total_phases: 6
   completed_phases: 2
-  total_plans: 10
-  completed_plans: 10
+  total_plans: 13
+  completed_plans: 11
 ---
 
 # Project State
@@ -19,12 +19,12 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-06)
 
 **Core value:** One-click local background removal that is fast, private, and works offline — your photos never leave your machine
-**Current focus:** Phase 02 — core-inference-engine
+**Current focus:** Phase 03 — cli-binary
 
 ## Current Position
 
-Phase: 02 (core-inference-engine) — EXECUTING
-Plan: 5 of 6
+Phase: 03 (cli-binary) — EXECUTING
+Plan: 1 of 3
 
 ## Performance Metrics
 
@@ -55,6 +55,7 @@ Plan: 5 of 6
 | Phase 02 P04 | 2 | 1 tasks | 2 files |
 | Phase 02 P05 | 2 | 1 tasks | 4 files |
 | Phase 02 P06 | 12 | 1 tasks | 1 files |
+| Phase 03 P01 | 77 | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -91,6 +92,9 @@ Recent decisions affecting current work:
 - [Phase 02]: [Phase 02-05]: VERSIONS.txt written alongside masks by generate_references.py to capture rembg version at generation time
 - [Phase Phase 02]: Import InferenceEngine trait explicitly in integration tests — active_provider() only accessible when trait is in scope
 - [Phase Phase 02]: Reference mask resize with FilterType::Nearest for pixel-accurate comparison when rembg output dimensions differ from bgprunr output
+- [Phase 03]: dev-models feature added to bgprunr-app (propagates bgprunr-core/dev-models) to avoid OOM from model-embedding proc macro during cargo check
+- [Phase 03]: CliModel defined separately from ModelKind with From impl for decoupled CLI/core type boundary
+- [Phase 03]: process_image_from_decoded private helper shares pipeline body between checked and unchecked variants
 
 ### Pending Todos
 
@@ -104,6 +108,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-04-07T00:18:39.029Z
-Stopped at: Phase 3 context gathered
-Resume file: .planning/phases/03-cli-binary/03-CONTEXT.md
+Last session: 2026-04-07T02:15:17.600Z
+Stopped at: Completed 03-01-PLAN.md
+Resume file: None

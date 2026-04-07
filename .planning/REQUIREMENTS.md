@@ -52,10 +52,10 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### CLI
 
-- [ ] **CLI-01**: User can process a single image via `bgprunr input.jpg -o output.png`
-- [ ] **CLI-02**: User can batch process via glob/directory: `bgprunr *.jpg --output-dir ./results/`
-- [ ] **CLI-03**: User can select model with `--model silueta|u2net`
-- [ ] **CLI-04**: User can control parallelism with `--jobs N`
+- [x] **CLI-01**: User can process a single image via `bgprunr input.jpg -o output.png`
+- [x] **CLI-02**: User can batch process via glob/directory: `bgprunr *.jpg --output-dir ./results/`
+- [x] **CLI-03**: User can select model with `--model silueta|u2net`
+- [x] **CLI-04**: User can control parallelism with `--jobs N`
 - [ ] **CLI-05**: CLI exits with appropriate exit codes (0 success, 1 error, 2 partial failure in batch)
 
 ### Distribution
@@ -124,10 +124,10 @@ Which phases cover which requirements. Updated during roadmap creation.
 | CORE-05 | Phase 2 | Complete |
 | LOAD-03 | Phase 2 (PNG/JPEG/WebP/BMP); Phase 6 (SVG via resvg) | Complete |
 | LOAD-04 | Phase 2 | Complete |
-| CLI-01 | Phase 3 | Pending |
-| CLI-02 | Phase 3 | Pending |
-| CLI-03 | Phase 3 | Pending |
-| CLI-04 | Phase 3 | Pending |
+| CLI-01 | Phase 3 | Complete |
+| CLI-02 | Phase 3 | Complete |
+| CLI-03 | Phase 3 | Complete |
+| CLI-04 | Phase 3 | Complete |
 | CLI-05 | Phase 3 | Pending |
 | LOAD-01 | Phase 4 | Pending |
 | LOAD-02 | Phase 4 | Pending |
