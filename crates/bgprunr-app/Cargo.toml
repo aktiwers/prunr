@@ -25,3 +25,6 @@ eframe = { workspace = true }
 arboard = { workspace = true }
 rfd = { workspace = true }
 image = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+num_cpus = { workspace = true }
