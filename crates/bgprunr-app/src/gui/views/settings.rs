@@ -1,34 +1,18 @@
-use egui::{Align2, RichText, Stroke};
+use egui::{Align2, RichText};
 
 use crate::gui::app::BgPrunrApp;
 use crate::gui::settings::SettingsModel;
 use crate::gui::theme;
 
 pub fn render(ctx: &egui::Context, app: &mut BgPrunrApp) {
-    // Draw semi-transparent backdrop to dim the app
-    let screen_rect = ctx.content_rect();
-    let painter = ctx.layer_painter(egui::LayerId::new(
-        egui::Order::Background,
-        egui::Id::new("settings_backdrop"),
-    ));
-    painter.rect_filled(
-        screen_rect,
-        0.0,
-        egui::Color32::from_rgba_unmultiplied(0, 0, 0, 180),
-    );
+    theme::draw_modal_backdrop(ctx, "settings_backdrop");
 
     egui::Window::new("Settings")
         .collapsible(false)
         .resizable(false)
         .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
         .fixed_size([theme::SETTINGS_DIALOG_WIDTH, theme::SETTINGS_DIALOG_HEIGHT])
-        .frame(egui::Frame {
-            fill: theme::OVERLAY_BG,
-            stroke: Stroke::new(1.0, theme::OVERLAY_BORDER),
-            corner_radius: egui::CornerRadius::same(8),
-            inner_margin: egui::Margin::same(theme::SPACE_MD as i8),
-            ..Default::default()
-        })
+        .frame(theme::overlay_frame())
         .show(ctx, |ui| {
             ui.vertical(|ui| {
                 // Title row with close button
