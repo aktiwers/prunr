@@ -19,3 +19,11 @@ fn app_state_has_four_variants() {
         }
     }
 }
+
+#[test]
+fn animating_state_exists_and_is_distinct() {
+    let state = AppState::Animating;
+    assert_ne!(state, AppState::Processing);
+    assert_ne!(state, AppState::Done);
+    assert_eq!(state, AppState::Animating);
+}
