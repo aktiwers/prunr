@@ -1,22 +1,30 @@
-// Production: models are zstd-compressed at build time and decompressed at startup.
+// Production: models are embedded as pre-compressed zstd blobs and decompressed at runtime.
 // Development: --features dev-models loads from the filesystem so model changes
 // do not trigger recompilation of the bgprunr-models crate.
 //
 // IMPORTANT: This crate has NO dependencies on other workspace crates.
 // The dependency arrow is bgprunr-app -> bgprunr-core -> bgprunr-models (never in reverse).
 
+/// Embedded pre-compressed model data (plain include_bytes — no compile-time decompression).
+#[cfg(not(feature = "dev-models"))]
+static SILUETA_ZST: &[u8] = include_bytes!("../../../models/silueta.onnx.zst");
+#[cfg(not(feature = "dev-models"))]
+static U2NET_ZST: &[u8] = include_bytes!("../../../models/u2net.onnx.zst");
+
 /// Load Silueta model bytes. In dev-models mode reads from filesystem;
-/// in release mode returns embedded zstd-decompressed bytes.
+/// in release mode decompresses the embedded zstd blob (~200ms).
 #[cfg(not(feature = "dev-models"))]
 pub fn silueta_bytes() -> Vec<u8> {
-    include_bytes_zstd::include_bytes_zstd!("../../models/silueta.onnx", 19)
+    zstd::bulk::decompress(SILUETA_ZST, 50 * 1024 * 1024)
+        .expect("failed to decompress embedded silueta model")
 }
 
 /// Load U2Net model bytes. In dev-models mode reads from filesystem;
-/// in release mode returns embedded zstd-decompressed bytes.
+/// in release mode decompresses the embedded zstd blob (~200ms).
 #[cfg(not(feature = "dev-models"))]
 pub fn u2net_bytes() -> Vec<u8> {
-    include_bytes_zstd::include_bytes_zstd!("../../models/u2net.onnx", 19)
+    zstd::bulk::decompress(U2NET_ZST, 200 * 1024 * 1024)
+        .expect("failed to decompress embedded u2net model")
 }
 
 #[cfg(feature = "dev-models")]

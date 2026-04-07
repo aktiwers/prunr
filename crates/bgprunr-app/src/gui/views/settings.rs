@@ -7,7 +7,9 @@ use crate::gui::theme;
 pub fn render(ctx: &egui::Context, app: &mut BgPrunrApp) {
     theme::draw_modal_backdrop(ctx, "settings_backdrop");
 
+    let mut open = true;
     egui::Window::new("Settings")
+        .open(&mut open)
         .collapsible(false)
         .resizable(false)
         .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
@@ -15,23 +17,6 @@ pub fn render(ctx: &egui::Context, app: &mut BgPrunrApp) {
         .frame(theme::overlay_frame())
         .show(ctx, |ui| {
             ui.vertical(|ui| {
-                // Title row with close button
-                ui.horizontal(|ui| {
-                    ui.label(
-                        RichText::new("Settings")
-                            .size(theme::FONT_SIZE_HEADING)
-                            .strong()
-                            .color(theme::TEXT_PRIMARY),
-                    );
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("✕").clicked() {
-                            app.show_settings = false;
-                        }
-                    });
-                });
-                ui.separator();
-                ui.add_space(theme::SPACE_SM);
-
                 // Row 1 — Model selection
                 ui.horizontal(|ui| {
                     ui.label(
@@ -63,26 +48,22 @@ pub fn render(ctx: &egui::Context, app: &mut BgPrunrApp) {
                 ui.add_space(theme::SPACE_SM);
 
                 // Row 2 — Auto-remove on import
-                ui.horizontal(|ui| {
-                    ui.checkbox(&mut app.settings.auto_remove_on_import, "");
-                    ui.vertical(|ui| {
-                        ui.label(
-                            RichText::new("Auto-remove on import")
-                                .color(theme::TEXT_PRIMARY)
-                                .size(theme::FONT_SIZE_BODY),
-                        );
-                        ui.label(
-                            RichText::new(
-                                "Automatically process images when added to the queue",
-                            )
-                            .color(theme::TEXT_SECONDARY)
-                            .size(theme::FONT_SIZE_MONO),
-                        );
-                    });
-                });
+                ui.checkbox(
+                    &mut app.settings.auto_remove_on_import,
+                    RichText::new("Auto-remove on import")
+                        .color(theme::TEXT_PRIMARY)
+                        .size(theme::FONT_SIZE_BODY),
+                );
+                ui.label(
+                    RichText::new(
+                        "Automatically process images when added to the queue",
+                    )
+                    .color(theme::TEXT_SECONDARY)
+                    .size(theme::FONT_SIZE_MONO),
+                );
                 ui.add_space(theme::SPACE_SM);
 
-                // Row 3 — Parallel jobs slider
+                // Row 3 — Parallel jobs
                 let max_jobs = num_cpus::get();
                 ui.horizontal(|ui| {
                     ui.label(
@@ -91,10 +72,29 @@ pub fn render(ctx: &egui::Context, app: &mut BgPrunrApp) {
                             .size(theme::FONT_SIZE_BODY),
                     );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.add(
-                            egui::Slider::new(&mut app.settings.parallel_jobs, 1..=max_jobs)
-                                .integer(),
+                        // + button
+                        if ui.add_enabled(
+                            app.settings.parallel_jobs < max_jobs,
+                            egui::Button::new(RichText::new("+").color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY))
+                                .fill(theme::BG_SECONDARY).min_size(egui::vec2(28.0, 28.0)),
+                        ).clicked() {
+                            app.settings.parallel_jobs += 1;
+                        }
+                        // Value display
+                        ui.label(
+                            RichText::new(format!("{}", app.settings.parallel_jobs))
+                                .color(theme::TEXT_PRIMARY)
+                                .size(theme::FONT_SIZE_BODY)
+                                .strong(),
                         );
+                        // - button
+                        if ui.add_enabled(
+                            app.settings.parallel_jobs > 1,
+                            egui::Button::new(RichText::new("\u{2212}").color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY))
+                                .fill(theme::BG_SECONDARY).min_size(egui::vec2(28.0, 28.0)),
+                        ).clicked() {
+                            app.settings.parallel_jobs -= 1;
+                        }
                     });
                 });
                 ui.label(
@@ -107,23 +107,19 @@ pub fn render(ctx: &egui::Context, app: &mut BgPrunrApp) {
                 ui.add_space(theme::SPACE_SM);
 
                 // Row 4 — Reveal animation toggle
-                ui.horizontal(|ui| {
-                    ui.checkbox(&mut app.settings.reveal_animation_enabled, "");
-                    ui.vertical(|ui| {
-                        ui.label(
-                            RichText::new("Reveal animation")
-                                .color(theme::TEXT_PRIMARY)
-                                .size(theme::FONT_SIZE_BODY),
-                        );
-                        ui.label(
-                            RichText::new(
-                                "Play dissolve effect when background removal completes",
-                            )
-                            .color(theme::TEXT_SECONDARY)
-                            .size(theme::FONT_SIZE_MONO),
-                        );
-                    });
-                });
+                ui.checkbox(
+                    &mut app.settings.reveal_animation_enabled,
+                    RichText::new("Reveal animation")
+                        .color(theme::TEXT_PRIMARY)
+                        .size(theme::FONT_SIZE_BODY),
+                );
+                ui.label(
+                    RichText::new(
+                        "Play dissolve effect when background removal completes",
+                    )
+                    .color(theme::TEXT_SECONDARY)
+                    .size(theme::FONT_SIZE_MONO),
+                );
                 ui.add_space(theme::SPACE_SM);
 
                 // Row 5 — Inference backend (read-only)
@@ -144,4 +140,7 @@ pub fn render(ctx: &egui::Context, app: &mut BgPrunrApp) {
                 });
             });
         });
+    if !open {
+        app.show_settings = false;
+    }
 }
