@@ -69,7 +69,7 @@ Requirements for initial release. Each maps to roadmap phases.
 
 - [ ] **UX-01**: All keyboard shortcuts work as specified (Ctrl/Cmd+O, Ctrl/Cmd+R, Ctrl/Cmd+S, Ctrl/Cmd+C, B, [/], scroll, Space+drag, Ctrl/Cmd+0, Ctrl/Cmd+1, Escape, Ctrl/Cmd+,, ?) — Cmd on macOS, Ctrl on Linux/Windows
 - [ ] **UX-02**: User can open settings dialog (Ctrl/Cmd+,) to configure model, auto-remove, parallelism
-- [ ] **UX-03**: User can cancel in-progress inference with Escape
+- [x] **UX-03**: User can cancel in-progress inference with Escape
 - [ ] **UX-04**: User can press ? to see all keyboard shortcuts
 - [ ] **UX-05**: User can navigate between images with [ and ] keys
 
@@ -134,7 +134,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | OUT-01 | Phase 4 | Pending |
 | OUT-02 | Phase 4 | Pending |
 | UX-01 | Phase 4 | Pending |
-| UX-03 | Phase 4 | Pending |
+| UX-03 | Phase 4 | Complete |
 | UX-04 | Phase 4 | Pending |
 | VIEW-01 | Phase 5 | Pending |
 | VIEW-02 | Phase 5 | Pending |
