@@ -69,7 +69,7 @@ pub fn render(ui: &mut egui::Ui, app: &BgPrunrApp) {
 
             // Backend badge
             ui.label(
-                RichText::new(&app.active_backend)
+                RichText::new(&app.settings.active_backend)
                     .monospace()
                     .size(theme::FONT_SIZE_MONO)
                     .color(theme::TEXT_SECONDARY),

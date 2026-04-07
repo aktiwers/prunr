@@ -1,8 +1,7 @@
 use egui::{Color32, RichText};
 
-use bgprunr_core::ModelKind;
-
 use crate::gui::app::{BgPrunrApp, BatchStatus};
+use crate::gui::settings::SettingsModel;
 use crate::gui::state::AppState;
 use crate::gui::theme;
 
@@ -34,12 +33,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut BgPrunrApp) {
         let remove_fill = if can_remove {
             theme::ACCENT
         } else {
-            Color32::from_rgba_unmultiplied(
-                theme::ACCENT.r(),
-                theme::ACCENT.g(),
-                theme::ACCENT.b(),
-                102, // ~40% opacity
-            )
+            theme::ACCENT_DISABLED
         };
         let remove_btn = egui::Button::new(remove_text)
             .fill(remove_fill)
@@ -58,7 +52,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut BgPrunrApp) {
             let process_all_fill = if process_all_enabled {
                 theme::ACCENT
             } else {
-                Color32::from_rgba_unmultiplied(theme::ACCENT.r(), theme::ACCENT.g(), theme::ACCENT.b(), 102)
+                theme::ACCENT_DISABLED
             };
             let process_all_btn = egui::Button::new(
                 RichText::new("Process All").color(Color32::WHITE),
@@ -83,21 +77,21 @@ pub fn render(ui: &mut egui::Ui, app: &mut BgPrunrApp) {
         // Model selector -- disabled during processing
         ui.add_enabled_ui(!is_processing, |ui| {
             ui.label(RichText::new("Model:").color(theme::TEXT_SECONDARY));
-            let model_text = match app.selected_model {
-                ModelKind::Silueta => "silueta (fast)",
-                ModelKind::U2net => "u2net (quality)",
+            let model_text = match app.settings.model {
+                SettingsModel::Silueta => "silueta (fast)",
+                SettingsModel::U2net => "u2net (quality)",
             };
             egui::ComboBox::from_id_salt("model")
                 .selected_text(model_text)
                 .show_ui(ui, |ui| {
                     ui.selectable_value(
-                        &mut app.selected_model,
-                        ModelKind::Silueta,
+                        &mut app.settings.model,
+                        SettingsModel::Silueta,
                         "silueta (fast)",
                     );
                     ui.selectable_value(
-                        &mut app.selected_model,
-                        ModelKind::U2net,
+                        &mut app.settings.model,
+                        SettingsModel::U2net,
                         "u2net (quality)",
                     );
                 });
