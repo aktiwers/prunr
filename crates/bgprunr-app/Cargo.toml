@@ -7,5 +7,12 @@ edition.workspace = true
 name = "bgprunr"
 path = "src/main.rs"
 
+[features]
+# Enable runtime model loading from filesystem (for development without embedding ONNX files).
+# Usage: cargo check -p bgprunr-app --features dev-models
+dev-models = ["bgprunr-core/dev-models"]
+
 [dependencies]
 bgprunr-core = { path = "../bgprunr-core" }
+clap = { workspace = true }
+indicatif = { workspace = true }
