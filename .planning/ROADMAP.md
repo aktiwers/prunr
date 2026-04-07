@@ -16,7 +16,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 2: Core Inference Engine** - ONNX inference pipeline verified correct against rembg, GPU + CPU fallback, batch API (completed 2026-04-06)
 - [ ] **Phase 3: CLI Binary** - Full-featured CLI exercising the core API with batch, parallelism, and model selection
 - [ ] **Phase 4: GUI Foundation** - egui app with worker-thread architecture, drag-and-drop, progress, save, copy, keyboard shortcuts
-- [ ] **Phase 5: GUI Feature Completeness** - Before/after view, zoom/pan, batch sidebar, settings dialog, reveal animation
+- [x] **Phase 5: GUI Feature Completeness** - Before/after view, zoom/pan, batch sidebar, settings dialog, reveal animation (completed 2026-04-07)
 - [ ] **Phase 6: Distribution and Packaging** - Single-binary verification on clean VMs, SVG input, settings persistence, release artifacts
 
 ## Phase Details
@@ -132,5 +132,5 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 | 2. Core Inference Engine | 6/6 | Complete   | 2026-04-06 |
 | 3. CLI Binary | 2/3 | In Progress|  |
 | 4. GUI Foundation | 2/3 | In Progress|  |
-| 5. GUI Feature Completeness | 2/3 | In Progress|  |
+| 5. GUI Feature Completeness | 3/3 | Complete   | 2026-04-07 |
 | 6. Distribution and Packaging | 0/TBD | Not started | - |

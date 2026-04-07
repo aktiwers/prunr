@@ -43,12 +43,12 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### Batch Processing
 
-- [ ] **BATCH-01**: User can drop multiple images at once; they appear in a sidebar queue
-- [ ] **BATCH-02**: User can click between images in the sidebar to view each one
-- [ ] **BATCH-03**: User can reorder images by dragging items in the sidebar
-- [ ] **BATCH-04**: User can process all queued images at once with parallel inference
-- [ ] **BATCH-05**: Results are cached — switching between images does not re-process
-- [ ] **BATCH-06**: User can enable auto-remove in Settings to process images automatically on import
+- [x] **BATCH-01**: User can drop multiple images at once; they appear in a sidebar queue
+- [x] **BATCH-02**: User can click between images in the sidebar to view each one
+- [x] **BATCH-03**: User can reorder images by dragging items in the sidebar
+- [x] **BATCH-04**: User can process all queued images at once with parallel inference
+- [x] **BATCH-05**: Results are cached — switching between images does not re-process
+- [x] **BATCH-06**: User can enable auto-remove in Settings to process images automatically on import
 
 ### CLI
 
@@ -71,7 +71,7 @@ Requirements for initial release. Each maps to roadmap phases.
 - [x] **UX-02**: User can open settings dialog (Ctrl/Cmd+,) to configure model, auto-remove, parallelism
 - [x] **UX-03**: User can cancel in-progress inference with Escape
 - [x] **UX-04**: User can press ? to see all keyboard shortcuts
-- [ ] **UX-05**: User can navigate between images with [ and ] keys
+- [x] **UX-05**: User can navigate between images with [ and ] keys
 
 ## v2 Requirements
 
@@ -144,14 +144,14 @@ Which phases cover which requirements. Updated during roadmap creation.
 | ANIM-01 | Phase 5 | Complete |
 | ANIM-02 | Phase 5 | Complete |
 | ANIM-03 | Phase 5 | Complete |
-| BATCH-01 | Phase 5 | Pending |
-| BATCH-02 | Phase 5 | Pending |
-| BATCH-03 | Phase 5 | Pending |
-| BATCH-04 | Phase 5 | Pending |
-| BATCH-05 | Phase 5 | Pending |
-| BATCH-06 | Phase 5 | Pending |
+| BATCH-01 | Phase 5 | Complete |
+| BATCH-02 | Phase 5 | Complete |
+| BATCH-03 | Phase 5 | Complete |
+| BATCH-04 | Phase 5 | Complete |
+| BATCH-05 | Phase 5 | Complete |
+| BATCH-06 | Phase 5 | Complete |
 | UX-02 | Phase 5 | Complete |
-| UX-05 | Phase 5 | Pending |
+| UX-05 | Phase 5 | Complete |
 
 **Coverage:**
 - v1 requirements: 39 total

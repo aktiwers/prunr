@@ -3,13 +3,13 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: unknown
-stopped_at: Completed 05-02-PLAN.md
-last_updated: "2026-04-07T15:23:59.393Z"
+stopped_at: Completed 05-03-PLAN.md
+last_updated: "2026-04-07T15:32:56.736Z"
 progress:
   total_phases: 6
-  completed_phases: 3
+  completed_phases: 4
   total_plans: 19
-  completed_plans: 17
+  completed_plans: 18
 ---
 
 # Project State
@@ -60,6 +60,7 @@ Plan: 1 of 3
 | Phase 04 P02 | 4 | 2 tasks | 11 files |
 | Phase 05 P01 | 25 | 3 tasks | 12 files |
 | Phase 05 P02 | 4 | 2 tasks | 8 files |
+| Phase 05 P03 | 35 | 3 tasks | 10 files |
 
 ## Accumulated Context
 
@@ -115,6 +116,10 @@ Recent decisions affecting current work:
 - [Phase 05]: egui InputState has no keys_pressed field — use i.events.iter().any(Event::Key pressed) for any-key detection in animation skip
 - [Phase 05]: ColorImage in epaint-0.34 requires source_size: Vec2 field alongside size and pixels
 - [Phase 05]: Animation frame downscaled to canvas size for GPU performance — avoids uploading multi-megapixel ColorImage each render tick
+- [Phase 05]: rayon ThreadPoolBuilder with num_threads(jobs) used for batch in bgprunr-app — mirrors bgprunr-core batch processing pattern
+- [Phase 05]: add_to_batch() migrates existing single image to batch slot 0 when first batch item added — preserves loaded state
+- [Phase 05]: sync_selected_batch_textures() centralizes lazy texture loading and app-level canvas sync for batch navigation
+- [Phase 05]: Drop handler: single file + empty batch uses single-image flow; multiple files OR existing batch uses add_to_batch() for all
 
 ### Pending Todos
 
@@ -128,6 +133,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-04-07T15:23:59.390Z
-Stopped at: Completed 05-02-PLAN.md
+Last session: 2026-04-07T15:32:56.732Z
+Stopped at: Completed 05-03-PLAN.md
 Resume file: None
