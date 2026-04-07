@@ -35,23 +35,11 @@ impl OrtEngine {
     /// ORT silently selects the first available EP. Call active_provider() after creation
     /// to confirm which EP was selected.
     pub fn new(model: ModelKind, intra_threads: usize) -> Result<Self, CoreError> {
-        #[cfg(feature = "dev-models")]
-        {
-            let bytes = match model {
-                ModelKind::Silueta => bgprunr_models::silueta_bytes(),
-                ModelKind::U2net => bgprunr_models::u2net_bytes(),
-            };
-            return Self::new_from_bytes(&bytes, intra_threads);
-        }
-
-        #[cfg(not(feature = "dev-models"))]
-        {
-            let model_bytes: &[u8] = match model {
-                ModelKind::Silueta => bgprunr_models::SILUETA_BYTES,
-                ModelKind::U2net => bgprunr_models::U2NET_BYTES,
-            };
-            Self::new_from_bytes(model_bytes, intra_threads)
-        }
+        let bytes = match model {
+            ModelKind::Silueta => bgprunr_models::silueta_bytes(),
+            ModelKind::U2net => bgprunr_models::u2net_bytes(),
+        };
+        Self::new_from_bytes(&bytes, intra_threads)
     }
 
     fn new_from_bytes(model_bytes: &[u8], intra_threads: usize) -> Result<Self, CoreError> {

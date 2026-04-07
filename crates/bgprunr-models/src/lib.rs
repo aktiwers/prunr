@@ -6,12 +6,26 @@
 // The dependency arrow is bgprunr-app -> bgprunr-core -> bgprunr-models (never in reverse).
 
 #[cfg(not(feature = "dev-models"))]
-pub static SILUETA_BYTES: &[u8] =
+static SILUETA_BYTES: &[u8] =
     include_bytes_zstd::include_bytes_zstd!("../../models/silueta.onnx", 19);
 
 #[cfg(not(feature = "dev-models"))]
-pub static U2NET_BYTES: &[u8] =
+static U2NET_BYTES: &[u8] =
     include_bytes_zstd::include_bytes_zstd!("../../models/u2net.onnx", 19);
+
+/// Load Silueta model bytes. In dev-models mode reads from filesystem;
+/// in release mode returns embedded zstd-decompressed bytes.
+#[cfg(not(feature = "dev-models"))]
+pub fn silueta_bytes() -> Vec<u8> {
+    SILUETA_BYTES.to_vec()
+}
+
+/// Load U2Net model bytes. In dev-models mode reads from filesystem;
+/// in release mode returns embedded zstd-decompressed bytes.
+#[cfg(not(feature = "dev-models"))]
+pub fn u2net_bytes() -> Vec<u8> {
+    U2NET_BYTES.to_vec()
+}
 
 #[cfg(feature = "dev-models")]
 pub fn silueta_bytes() -> Vec<u8> {
@@ -49,9 +63,9 @@ mod tests {
         }
         #[cfg(not(feature = "dev-models"))]
         {
-            // Verify static refs are accessible.
-            let _: &[u8] = super::SILUETA_BYTES;
-            let _: &[u8] = super::U2NET_BYTES;
+            // Verify function API works in release mode too.
+            let _: fn() -> Vec<u8> = super::silueta_bytes;
+            let _: fn() -> Vec<u8> = super::u2net_bytes;
         }
     }
 }
