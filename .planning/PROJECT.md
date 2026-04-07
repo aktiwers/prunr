@@ -17,6 +17,7 @@ One-click local background removal that is fast, private, and works offline — 
 - ✓ Local AI inference using ONNX Runtime (U2-Net / silueta models) — Validated in Phase 2 (43 tests pass, CORE-05 reference test green)
 - ✓ Batch processing with parallel inference across thread pool — Validated in Phase 2
 - ✓ Large image warning/downscale prompt (over 8000px) — Validated in Phase 2
+- ✓ CLI mode sharing the same core inference engine — Validated in Phase 3 (single, batch, model select, exit codes all working)
 
 ### Active
 
@@ -78,4 +79,4 @@ One-click local background removal that is fast, private, and works offline — 
 | Cargo workspace | Shared core between CLI and GUI binaries, clean separation of concerns | — Pending |
 
 ---
-*Last updated: 2026-04-07 after Phase 2 completion*
+*Last updated: 2026-04-07 after Phase 3 completion*
