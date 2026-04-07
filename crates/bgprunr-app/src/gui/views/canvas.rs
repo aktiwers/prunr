@@ -14,6 +14,7 @@ pub fn render(ui: &mut egui::Ui, app: &BgPrunrApp) {
         AppState::Empty => render_empty(ui, app),
         AppState::Loaded => render_loaded(ui, app),
         AppState::Processing => render_processing(ui, app),
+        AppState::Animating => render_done(ui, app), // placeholder until animation.rs is wired
         AppState::Done => render_done(ui, app),
     }
 }
@@ -64,6 +65,17 @@ fn render_empty(ui: &mut egui::Ui, _app: &BgPrunrApp) {
         egui::FontId::proportional(theme::FONT_SIZE_BODY),
         theme::TEXT_SECONDARY,
     );
+
+    // Wayland DnD caveat
+    if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        painter.text(
+            center + Vec2::new(0.0, 55.0),
+            egui::Align2::CENTER_CENTER,
+            "(Drag and drop not supported in Wayland yet)",
+            egui::FontId::proportional(theme::FONT_SIZE_BODY * 0.85),
+            theme::TEXT_SECONDARY,
+        );
+    }
 }
 
 fn render_loaded(ui: &mut egui::Ui, app: &BgPrunrApp) {
