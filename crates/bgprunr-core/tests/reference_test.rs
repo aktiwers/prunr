@@ -14,6 +14,8 @@ use bgprunr_core::{
     process_image, batch_process,
     check_large_image, downscale_image,
 };
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use image::{DynamicImage, RgbaImage};
 use std::path::{Path, PathBuf};
 
@@ -105,7 +107,7 @@ fn test_rembg_reference() {
         let img_bytes = std::fs::read(&image_path)
             .expect("Failed to read test image");
 
-        let result = process_image(&img_bytes, &engine, None::<fn(ProgressStage, f32)>)
+        let result = process_image(&img_bytes, &engine, None::<fn(ProgressStage, f32)>, None::<Arc<AtomicBool>>)
             .unwrap_or_else(|e| panic!("process_image failed for {stem}: {e}"));
 
         let our_rgba = image::load_from_memory(&result.rgba_bytes)
@@ -159,7 +161,7 @@ fn test_process_image_produces_valid_rgba_png() {
     }
 
     let img_bytes = std::fs::read(&image_path).unwrap();
-    let result = process_image(&img_bytes, &engine, None::<fn(ProgressStage, f32)>)
+    let result = process_image(&img_bytes, &engine, None::<fn(ProgressStage, f32)>, None::<Arc<AtomicBool>>)
         .expect("process_image should succeed");
 
     // Verify output is valid PNG bytes
@@ -223,7 +225,7 @@ fn test_progress_callback_all_stages() {
     let _ = process_image(&img_bytes, &engine, Some(move |stage, pct| {
         stages_clone.lock().unwrap().push(stage);
         assert!(pct >= 0.0 && pct <= 1.0, "Progress pct must be in [0.0, 1.0], got {pct}");
-    }));
+    }), None::<Arc<AtomicBool>>);
 
     let recorded = stages.lock().unwrap();
     assert!(recorded.len() >= 5, "Expected at least 5 progress stages, got {}", recorded.len());
@@ -258,7 +260,7 @@ fn test_format_support_png_jpeg_webp_bmp() {
         let mut buf = Vec::new();
         test_img.write_to(&mut Cursor::new(&mut buf), *fmt).unwrap();
 
-        let result = process_image(&buf, &engine, None::<fn(ProgressStage, f32)>);
+        let result = process_image(&buf, &engine, None::<fn(ProgressStage, f32)>, None::<Arc<AtomicBool>>);
         assert!(result.is_ok(), "Format {name} should be supported: {:?}", result.err());
     }
 
@@ -268,7 +270,7 @@ fn test_format_support_png_jpeg_webp_bmp() {
         let mut buf = Vec::new();
         test_img.write_to(&mut Cursor::new(&mut buf), image::ImageFormat::WebP)
             .expect("WebP encode should work with image 0.25 webp feature");
-        let result = process_image(&buf, &engine, None::<fn(ProgressStage, f32)>);
+        let result = process_image(&buf, &engine, None::<fn(ProgressStage, f32)>, None::<Arc<AtomicBool>>);
         assert!(result.is_ok(), "WebP format should be supported: {:?}", result.err());
     }
 }
