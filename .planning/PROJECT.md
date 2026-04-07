@@ -18,23 +18,21 @@ One-click local background removal that is fast, private, and works offline — 
 - ✓ Batch processing with parallel inference across thread pool — Validated in Phase 2
 - ✓ Large image warning/downscale prompt (over 8000px) — Validated in Phase 2
 - ✓ CLI mode sharing the same core inference engine — Validated in Phase 3 (single, batch, model select, exit codes all working)
+- ✓ egui-based GUI with drag-and-drop, zoom, pan, before/after comparison — Validated in Phase 5 (cursor-centered zoom, space+drag pan, B-key toggle)
+- ✓ Keyboard shortcuts for all major actions — Validated in Phase 5 (14 shortcuts including Ctrl+0/1, Tab, [/], Ctrl+,)
+- ✓ Settings dialog (auto-remove, model selection, parallelism) — Validated in Phase 5 (5-field dialog with Ctrl+, shortcut)
+- ✓ Reveal animation on background removal completion — Validated in Phase 5 (ease-out cubic fade, skippable)
+- ✓ Batch sidebar for multi-image workflows — Validated in Phase 5 (thumbnails, DnD reorder, Process All, auto-remove)
 
 ### Active
 
-- [ ] Local AI inference using ONNX Runtime (U2-Net / silueta models)
 - [ ] GPU acceleration (CUDA/Metal/Vulkan) with automatic CPU fallback
-- [ ] egui-based GUI with drag-and-drop, zoom, pan, before/after comparison
-- [ ] CLI mode sharing the same core inference engine
-- [ ] Batch processing with parallel inference across thread pool
-- [ ] Single-binary distribution with embedded models and assets
 - [ ] Support PNG, JPEG, WebP, BMP input; SVG rasterized on load via resvg
 - [ ] PNG output with transparency
+- [ ] Single-binary distribution with embedded models and assets
 - [ ] Cross-platform: Linux, macOS, Windows
-- [ ] Keyboard shortcuts for all major actions
 - [ ] Copy result to clipboard
-- [ ] Settings dialog (auto-remove, model selection, parallelism)
 - [ ] Two bundled models: silueta (~4MB, fast) and u2net (~170MB, best quality)
-- [ ] Large image warning/downscale prompt (over 8000px)
 - [ ] Progress indication during inference
 
 ### Out of Scope
@@ -79,4 +77,4 @@ One-click local background removal that is fast, private, and works offline — 
 | Cargo workspace | Shared core between CLI and GUI binaries, clean separation of concerns | — Pending |
 
 ---
-*Last updated: 2026-04-07 after Phase 3 completion*
+*Last updated: 2026-04-07 after Phase 5 completion*
