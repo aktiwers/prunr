@@ -3,13 +3,13 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: unknown
-stopped_at: Phase 4 context gathered
-last_updated: "2026-04-07T06:42:25.317Z"
+stopped_at: "Completed 04-01-PLAN.md"
+last_updated: "2026-04-07T07:37:11Z"
 progress:
   total_phases: 6
   completed_phases: 3
-  total_plans: 13
-  completed_plans: 13
+  total_plans: 16
+  completed_plans: 14
 ---
 
 # Project State
@@ -19,12 +19,12 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-06)
 
 **Core value:** One-click local background removal that is fast, private, and works offline — your photos never leave your machine
-**Current focus:** Phase 03 — cli-binary
+**Current focus:** Phase 04 — gui-foundation
 
 ## Current Position
 
-Phase: 03 (cli-binary) — EXECUTING
-Plan: 1 of 3
+Phase: 04 (gui-foundation) — EXECUTING
+Plan: 2 of 3
 
 ## Performance Metrics
 
@@ -98,6 +98,9 @@ Recent decisions affecting current work:
 - [Phase 03]: process_image_from_decoded private helper shares pipeline body between checked and unchecked variants
 - [Phase 03]: load_with_policy() encode round-trip: DynamicImage -> PNG bytes before process_image to avoid changing core API signature
 - [Phase 03]: Arc<Vec<Option<ProgressBar>>> pattern makes batch progress callback Send + Sync for rayon without shared mutable state
+- [Phase 04-01]: lib.rs + [lib] section added to bgprunr-app so cargo test --lib works; crate was binary-only before this plan
+- [Phase 04-01]: OrtEngine::new(model, 1) used in GUI worker — plan showed 1-arg call but actual signature requires intra_threads param; 1 = single-image GUI context
+- [Phase 04-01]: Worker creates OrtEngine per ProcessImage invocation — consistent with Phase 2/3 each-worker-creates-own pattern, no Arc<Mutex<Session>> contention
 
 ### Pending Todos
 
@@ -111,6 +114,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-04-07T06:42:25.313Z
-Stopped at: Phase 4 context gathered
-Resume file: .planning/phases/04-gui-foundation/04-CONTEXT.md
+Last session: 2026-04-07T07:37:11Z
+Stopped at: Completed 04-01-PLAN.md
+Resume file: .planning/phases/04-gui-foundation/04-02-PLAN.md
