@@ -12,7 +12,7 @@ use super::settings::Settings;
 use super::state::AppState;
 use super::theme;
 use super::worker::{WorkerMessage, WorkerResult, spawn_worker};
-use super::views::{canvas, shortcuts, statusbar, toolbar};
+use super::views::{canvas, settings, shortcuts, statusbar, toolbar};
 
 pub(crate) struct BatchItem {
     pub id: u64,
@@ -423,7 +423,8 @@ impl eframe::App for BgPrunrApp {
                         ));
                         self.result_rgba = Some(rgba_img);
                     }
-                    self.active_backend = result.active_provider;
+                    self.active_backend = result.active_provider.clone();
+                    self.settings.active_backend = result.active_provider;
                     self.state = AppState::Done;
                     self.status_text = "Done".to_string();
                 }
@@ -461,6 +462,7 @@ impl eframe::App for BgPrunrApp {
             (false, false, false);
         let (mut cancel_requested, mut toggle_shortcuts) = (false, false);
         let (mut toggle_before_after, mut fit_to_window, mut actual_size) = (false, false, false);
+        let mut toggle_settings = false;
 
         ctx.input(|i| {
             if i.modifiers.command && i.key_pressed(Key::O) {
@@ -486,6 +488,9 @@ impl eframe::App for BgPrunrApp {
             }
             if i.modifiers.command && i.key_pressed(Key::Num1) {
                 actual_size = true;
+            }
+            if i.modifiers.command && i.key_pressed(Key::Comma) {
+                toggle_settings = true;
             }
         });
 
@@ -527,6 +532,12 @@ impl eframe::App for BgPrunrApp {
         if toggle_shortcuts {
             self.show_shortcuts = !self.show_shortcuts;
         }
+        if toggle_settings {
+            self.show_settings = !self.show_settings;
+        }
+
+        // Sync settings model with selected_model
+        self.selected_model = self.settings.model.into();
 
         // d. Update window title
         let title = match &self.loaded_filename {
@@ -579,6 +590,9 @@ impl eframe::App for BgPrunrApp {
 
         if self.show_shortcuts {
             shortcuts::render(ui.ctx());
+        }
+        if self.show_settings {
+            settings::render(ui.ctx(), self);
         }
     }
 }
