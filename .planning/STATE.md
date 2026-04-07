@@ -3,13 +3,13 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: unknown
-stopped_at: Completed 03-01-PLAN.md
-last_updated: "2026-04-07T02:15:17.603Z"
+stopped_at: Completed 03-02-PLAN.md
+last_updated: "2026-04-07T02:20:09.713Z"
 progress:
   total_phases: 6
   completed_phases: 2
   total_plans: 13
-  completed_plans: 11
+  completed_plans: 12
 ---
 
 # Project State
@@ -56,6 +56,7 @@ Plan: 1 of 3
 | Phase 02 P05 | 2 | 1 tasks | 4 files |
 | Phase 02 P06 | 12 | 1 tasks | 1 files |
 | Phase 03 P01 | 77 | 2 tasks | 5 files |
+| Phase 03 P02 | 2 | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -95,6 +96,8 @@ Recent decisions affecting current work:
 - [Phase 03]: dev-models feature added to bgprunr-app (propagates bgprunr-core/dev-models) to avoid OOM from model-embedding proc macro during cargo check
 - [Phase 03]: CliModel defined separately from ModelKind with From impl for decoupled CLI/core type boundary
 - [Phase 03]: process_image_from_decoded private helper shares pipeline body between checked and unchecked variants
+- [Phase 03]: load_with_policy() encode round-trip: DynamicImage -> PNG bytes before process_image to avoid changing core API signature
+- [Phase 03]: Arc<Vec<Option<ProgressBar>>> pattern makes batch progress callback Send + Sync for rayon without shared mutable state
 
 ### Pending Todos
 
@@ -108,6 +111,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-04-07T02:15:17.600Z
-Stopped at: Completed 03-01-PLAN.md
+Last session: 2026-04-07T02:20:09.710Z
+Stopped at: Completed 03-02-PLAN.md
 Resume file: None
