@@ -1,4 +1,29 @@
-use egui::Color32;
+use egui::{Color32, Stroke};
+
+/// Draw a semi-transparent backdrop to dim the app behind a modal overlay.
+pub fn draw_modal_backdrop(ctx: &egui::Context, id: &str) {
+    let screen_rect = ctx.content_rect();
+    let painter = ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Background,
+        egui::Id::new(id),
+    ));
+    painter.rect_filled(
+        screen_rect,
+        0.0,
+        Color32::from_rgba_unmultiplied(0, 0, 0, 180),
+    );
+}
+
+/// Standard frame for modal overlay windows.
+pub fn overlay_frame() -> egui::Frame {
+    egui::Frame {
+        fill: OVERLAY_BG,
+        stroke: Stroke::new(1.0, OVERLAY_BORDER),
+        corner_radius: egui::CornerRadius::same(8),
+        inner_margin: egui::Margin::same(SPACE_MD as i8),
+        ..Default::default()
+    }
+}
 
 // === Colors (from UI-SPEC) ===
 
@@ -55,8 +80,9 @@ pub const BUTTON_ROUNDING: f32 = 4.0;
 pub const DROP_ZONE_ROUNDING: f32 = 8.0;
 pub const DROP_ZONE_BORDER_WIDTH: f32 = 2.0;
 
-/// Disabled button opacity (40%)
-pub const DISABLED_OPACITY: f32 = 0.4;
+/// Accent color at ~40% opacity for disabled buttons
+/// Premultiplied: 0x3b*102/255=24, 0x82*102/255=52, 0xf6*102/255=98
+pub const ACCENT_DISABLED: Color32 = Color32::from_rgba_premultiplied(24, 52, 98, 102);
 
 // === Window ===
 
@@ -99,7 +125,6 @@ pub const SIDEBAR_SELECTED_BORDER: Color32 = Color32::from_rgb(0x3b, 0x82, 0xf6)
 pub const STATUS_ICON_PENDING: Color32 = Color32::from_rgb(0x88, 0x88, 0x88);
 pub const STATUS_ICON_PROCESSING: Color32 = Color32::from_rgb(0x3b, 0x82, 0xf6);
 pub const STATUS_ICON_DONE: Color32 = Color32::from_rgb(0x22, 0xc5, 0x5e);
-pub const DRAG_GHOST_ALPHA: u8 = 0x80;
 pub const INSERTION_LINE: Color32 = Color32::from_rgb(0x3b, 0x82, 0xf6);
 
 // === Phase 5: Animation ===

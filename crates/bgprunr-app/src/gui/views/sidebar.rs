@@ -89,9 +89,11 @@ pub fn render(ui: &mut egui::Ui, app: &mut BgPrunrApp) {
                     swap_to = Some(i);
                 }
 
-                // Click to select
-                if item_response.clicked() {
+                // Click to select — deferred sync happens in logic()
+                if item_response.clicked() && app.selected_batch_index != i {
                     app.selected_batch_index = i;
+                    app.show_original = false;
+                    app.pending_batch_sync = true;
                 }
 
                 // Hover insertion line for DnD
