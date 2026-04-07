@@ -608,7 +608,10 @@ dependencies = [
  "egui",
  "image",
  "indicatif",
+ "num_cpus",
  "rfd",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
