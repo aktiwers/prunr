@@ -2,7 +2,7 @@ use egui::{Color32, RichText};
 
 use bgprunr_core::ModelKind;
 
-use crate::gui::app::BgPrunrApp;
+use crate::gui::app::{BgPrunrApp, BatchStatus};
 use crate::gui::state::AppState;
 use crate::gui::theme;
 
@@ -47,6 +47,26 @@ pub fn render(ui: &mut egui::Ui, app: &mut BgPrunrApp) {
 
         if ui.add_enabled(can_remove, remove_btn).clicked() {
             app.handle_remove_bg();
+        }
+
+        // Process All button — only shown when batch items exist
+        if app.batch_items.len() >= 2 {
+            let has_pending = app.batch_items.iter().any(|i| i.status == BatchStatus::Pending);
+            let is_batch_processing = app.batch_items.iter().any(|i| i.status == BatchStatus::Processing);
+            let process_all_enabled = has_pending && !is_batch_processing;
+
+            let process_all_fill = if process_all_enabled {
+                theme::ACCENT
+            } else {
+                Color32::from_rgba_unmultiplied(theme::ACCENT.r(), theme::ACCENT.g(), theme::ACCENT.b(), 102)
+            };
+            let process_all_btn = egui::Button::new(
+                RichText::new("Process All").color(Color32::WHITE),
+            ).fill(process_all_fill).corner_radius(theme::BUTTON_ROUNDING);
+
+            if ui.add_enabled(process_all_enabled, process_all_btn).clicked() {
+                app.handle_process_all();
+            }
         }
 
         // Spacer to push right-side items to the right
