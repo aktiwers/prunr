@@ -54,7 +54,9 @@ pub fn render(ui: &mut egui::Ui, app: &mut BgPrunrApp) {
         if app.pending_fit_zoom {
             app.pending_fit_zoom = false;
             let fit = fit_zoom(canvas_size, tex_size);
-            if (app.zoom - fit).abs() < 0.001 {
+            // Only toggle back if zoom is already at fit (keyboard shortcut).
+            // previous_zoom == 1.0 means this is a fresh image switch — always fit.
+            if (app.zoom - fit).abs() < 0.001 && app.previous_zoom != 1.0 {
                 app.zoom = app.previous_zoom;
             } else {
                 app.previous_zoom = app.zoom;

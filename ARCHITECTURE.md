@@ -1,6 +1,6 @@
 # BgPrunR Architecture
 
-> Living document — updated as the codebase evolves. Last updated: 2026-04-06.
+> Living document — updated as the codebase evolves. Last updated: 2026-04-08.
 
 ## Design Principles
 
@@ -25,7 +25,7 @@ bgprunr/
 │   │       └── types.rs          # Shared types: ProcessResult, Progress, Error (thiserror)
 │   │
 │   ├── bgprunr-models/           # Library: model embedding (isolated for build speed)
-│   │   └── src/lib.rs            # include_bytes_zstd! for silueta + u2net
+│   │   └── src/lib.rs            # include_bytes! + zstd::bulk::decompress for silueta + u2net
 │   │                             # Dev feature: load from filesystem
 │   │
 │   └── bgprunr-app/              # Binary: single binary for both CLI and GUI
@@ -34,17 +34,19 @@ bgprunr/
 │           ├── cli.rs            # clap subcommands: remove, batch (indicatif progress)
 │           ├── gui/
 │           │   ├── mod.rs        # eframe::run_native entry point
-│           │   ├── app.rs        # App struct, eframe::App impl, message routing
+│           │   ├── app.rs        # App struct, eframe::App impl, message routing, batch sync
 │           │   ├── worker.rs     # Background inference thread + mpsc channels
-│           │   ├── state.rs      # Application state machine (Idle → Loading → Processing → Done)
+│           │   ├── state.rs      # Application state machine (Empty → Loaded → Processing → Done)
+│           │   ├── settings.rs   # Settings model (persisted preferences)
+│           │   ├── theme.rs      # Design tokens: colors, spacing, fonts, sizes
 │           │   ├── views/
-│           │   │   ├── canvas.rs     # Image viewer: textures, zoom, pan, checkerboard
-│           │   │   ├── sidebar.rs    # Batch queue: thumbnails, drag-reorder
-│           │   │   ├── toolbar.rs    # Action buttons, progress bar
-│           │   │   ├── settings.rs   # Settings dialog
-│           │   │   ├── shortcuts.rs  # ? help overlay
-│           │   │   └── animation.rs  # Reveal animation: mask dissolve/particle effect
-│           │   └── input.rs      # Keyboard/mouse input handling, shortcut dispatch
+│           │   │   ├── canvas.rs     # Image viewer: textures, zoom/pan, fit-to-window, checkerboard
+│           │   │   ├── sidebar.rs    # Batch queue: lazy thumbnails, drag-reorder, click-to-switch
+│           │   │   ├── toolbar.rs    # Open/Remove/Process All/Save/Copy/Save All/Settings buttons
+│           │   │   ├── statusbar.rs  # Status text + progress bar
+│           │   │   ├── settings.rs   # Settings modal dialog (model, jobs, animation, backend)
+│           │   │   ├── shortcuts.rs  # ? keyboard shortcuts overlay
+│           │   │   └── animation.rs  # Reveal animation: mask-based dissolve effect
 │           └── shared.rs         # Common utilities between CLI and GUI paths
 │
 ├── xtask/                        # Developer tooling
@@ -107,22 +109,28 @@ User drops image
 ### Batch Processing (GUI)
 
 ```
-User drops N images
+User opens N images (file dialog or drag-and-drop)
        │
        ▼
-  [UI Thread]  ──populate sidebar queue──►  Vec<QueueItem>
+  [File Load Thread]  ──std::fs::read per file──►  send (bytes, name) via mpsc
        │
-       │  send batch request via channel
+       │  UI drains max 5 files per frame (non-blocking)
+       ▼
+  [UI Thread]  ──add_to_batch()──►  Vec<BatchItem> (dims via ImageReader header-only)
+       │                             Thumbnails created lazily (1 per frame in sidebar)
+       │
+       │  "Process All" sends batch request via channel
        ▼
   [Worker Thread]  ──rayon::par_iter──►  N images processed in parallel
        │                                   (thread pool sized to avoid
        │                                    oversubscription with ORT)
        │
-       │  send per-image results via channel
+       │  send BatchItemDone per image via channel
        │  call ctx.request_repaint() on each completion
        ▼
-  [UI Thread]  ──cache results──►  HashMap<ImageId, ProcessResult>
-                                   (switching images = cache lookup, no re-inference)
+  [UI Thread]  ──cache results on BatchItem──►  result_rgba + result_texture
+               ──if viewed item: play reveal animation──►  or sync to canvas
+               (switching images = batch item lookup, no re-inference)
 ```
 
 ### CLI
@@ -143,8 +151,9 @@ Args parsed (clap)
 
 | Thread | Responsibility | Never does |
 |--------|---------------|------------|
-| **UI thread** (egui render loop) | Renders frames, handles input, polls channels via `try_recv()` | Blocks on inference, file I/O, or any operation >1ms |
+| **UI thread** (egui render loop) | Renders frames, handles input, polls channels via `try_recv()`, lazy thumbnail decode (1/frame) | Blocks on inference, bulk file I/O, or any operation >16ms |
 | **Worker thread** (single, long-lived) | Runs inference, image decode/encode | Touches egui state directly (sends via channel) |
+| **File loader thread** (short-lived, per open dialog) | Reads image files from disk, sends `(bytes, name)` via mpsc | UI thread drains max 5 per frame |
 | **Rayon pool** (batch only) | Parallel image processing | Conflicts with ORT intra-op threads (pool sized accordingly) |
 
 ### Thread Oversubscription Prevention
@@ -197,21 +206,28 @@ SessionBuilder::new()?
 ```rust
 // bgprunr-models/src/lib.rs
 
+// Pre-compressed .zst blobs embedded via plain include_bytes!
 #[cfg(not(feature = "dev-models"))]
-pub static SILUETA_BYTES: &[u8] = include_bytes_zstd!("../../models/silueta.onnx", 19);
+static SILUETA_ZST: &[u8] = include_bytes!("../../../models/silueta.onnx.zst");
+#[cfg(not(feature = "dev-models"))]
+static U2NET_ZST: &[u8] = include_bytes!("../../../models/u2net.onnx.zst");
 
+// Runtime decompression via zstd::bulk::decompress
 #[cfg(not(feature = "dev-models"))]
-pub static U2NET_BYTES: &[u8] = include_bytes_zstd!("../../models/u2net.onnx", 19);
+pub fn silueta_bytes() -> Vec<u8> {
+    zstd::bulk::decompress(SILUETA_ZST, 50 * 1024 * 1024).expect("decompress failed")
+}
 
 #[cfg(feature = "dev-models")]
-pub fn load_model(name: &str) -> Vec<u8> {
-    std::fs::read(format!("models/{name}.onnx")).expect("model file not found")
+pub fn silueta_bytes() -> Vec<u8> {
+    std::fs::read("models/silueta.onnx").expect("model not found")
 }
 ```
 
-- Production: zstd-compressed at build time (level 19), decompressed once at startup
+- Production: models stored as pre-compressed `.onnx.zst` files, embedded via `include_bytes!`, decompressed at runtime via `zstd::bulk::decompress`
 - Development: `--features dev-models` loads from filesystem (no recompilation on model changes)
 - Isolated crate: changing source code in core/gui/cli does not trigger model recompilation
+- Dependency changed from `include-bytes-zstd` (compile-time macro) to `zstd` (runtime decompression) for simpler builds
 
 ## State Machine (GUI)
 
@@ -219,12 +235,12 @@ pub fn load_model(name: &str) -> Vec<u8> {
         ┌───────────┐
         │   Empty   │  (app just launched, no image loaded)
         └─────┬─────┘
-              │ load image
+              │ load image (open dialog, drag-drop, or batch file channel)
               ▼
         ┌───────────┐
         │  Loaded    │  (image displayed, ready to process)
         └─────┬─────┘
-              │ user clicks Remove / Ctrl+R
+              │ user clicks Remove BG / Process All / Ctrl+R
               ▼
         ┌───────────┐
         │ Processing │  (worker thread running, progress shown)
@@ -232,16 +248,21 @@ pub fn load_model(name: &str) -> Vec<u8> {
               │ inference complete
               ▼
         ┌───────────┐
-        │ Animating  │  (reveal animation playing)
+        │ Animating  │  (reveal animation playing, if enabled in settings)
         └─────┬─────┘
-              │ animation done / skipped
+              │ animation done / skipped / click
               ▼
         ┌───────────┐
-        │   Done     │  (result displayed, can save/copy/compare)
+        │   Done     │  (result displayed, can save/copy/compare/save all)
         └─────┴─────┘
               │ load new image → back to Loaded
               │ Escape during Processing → back to Loaded
+              │ Click different batch item → state follows that item's status
 ```
+
+**Batch state**: In batch mode, switching sidebar items sets `AppState` to match the *viewed item's*
+`BatchStatus` (Pending→Loaded, Processing→Processing, Done→Done). The global state reflects
+the currently viewed image, not the overall batch progress.
 
 ## Key Crate Dependencies
 
@@ -256,8 +277,9 @@ pub fn load_model(name: &str) -> Vec<u8> {
 | `resvg` | 0.47 | SVG → raster conversion |
 | `arboard` | 3.4 | Clipboard (with `wayland-data-control` feature) |
 | `indicatif` | 0.17 | CLI progress bars |
-| `include-bytes-zstd` | 0.2 | Build-time model compression |
-| `rfd` | 0.15 | Native file dialogs (open/save) |
+| `zstd` | 0.13 | Runtime model decompression (replaced include-bytes-zstd) |
+| `rfd` | 0.15 | Native file dialogs (open/save/folder picker) |
+| `num_cpus` | 1.x | Detect CPU count for parallel jobs setting |
 
 ## Keyboard Shortcuts — Platform Modifier
 
@@ -286,3 +308,10 @@ if ui.input(|i| i.modifiers.ctrl && i.key_pressed(Key::O)) { /* open */ }
 |------|--------|--------|
 | 2026-04-06 | Initial architecture | Project initialization |
 | 2026-04-06 | Single binary (CLI+GUI), xtask model fetch, thiserror errors | Phase 1 discussion decisions |
+| 2026-04-08 | Multi-select open dialog, background file loading thread | Batch UX improvement |
+| 2026-04-08 | Sidebar moved to right, lazy thumbnail decode (1/frame) | UI polish |
+| 2026-04-08 | Replaced include-bytes-zstd with zstd runtime decompression | Simpler build, no proc-macro dependency |
+| 2026-04-08 | Settings modal: .open() close button, stepper for parallel jobs | Settings UI overhaul |
+| 2026-04-08 | Save All button + folder picker for batch export | Batch workflow completion |
+| 2026-04-08 | Reveal animation for batch items, dimension safety check | Batch animation support |
+| 2026-04-08 | Fit-to-window zoom on image load/switch | Large image UX |
