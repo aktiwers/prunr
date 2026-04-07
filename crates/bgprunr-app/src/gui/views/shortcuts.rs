@@ -51,6 +51,14 @@ pub fn render(ctx: &egui::Context) {
                         shortcut_row(ui, &format!("{modifier}+C"), "Copy result");
                         shortcut_row(ui, "Escape", "Cancel / Close");
                         shortcut_row(ui, "F1", "Show this help");
+                        shortcut_row(ui, "B", "Toggle before/after");
+                        shortcut_row(ui, "[ / ]", "Previous / Next image");
+                        shortcut_row(ui, &format!("{modifier}+0"), "Fit to window");
+                        shortcut_row(ui, &format!("{modifier}+1"), "Actual size");
+                        shortcut_row(ui, "Tab", "Show/hide queue");
+                        shortcut_row(ui, &format!("{modifier}+,"), "Settings");
+                        shortcut_row(ui, "Space+drag", "Pan image");
+                        shortcut_row(ui, "Scroll", "Zoom in/out");
                     });
             });
         });
