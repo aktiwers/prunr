@@ -16,3 +16,7 @@ dev-models = ["bgprunr-core/dev-models"]
 bgprunr-core = { path = "../bgprunr-core" }
 clap = { workspace = true }
 indicatif = { workspace = true }
+egui = { workspace = true }
+eframe = { workspace = true }
+arboard = { workspace = true }
+rfd = { workspace = true }
