@@ -1,6 +1,6 @@
 use egui::{Pos2, Rect, RichText};
 
-use crate::gui::app::BgPrunrApp;
+use crate::gui::app::{BgPrunrApp, BatchStatus};
 use crate::gui::state::AppState;
 use crate::gui::theme;
 
@@ -9,18 +9,30 @@ pub fn render(ui: &mut egui::Ui, app: &BgPrunrApp) {
         ui.add_space(theme::SPACE_SM);
 
         // Left side: status text
-        let status_text = match app.state {
-            AppState::Empty | AppState::Loaded => {
-                if app.status_is_temporary {
-                    app.status_text.clone()
-                } else {
-                    "Ready".to_string()
+        let batch_processing = app.batch_items.iter().any(|i| i.status == BatchStatus::Processing);
+        let batch_done_count = app.batch_items.iter().filter(|i| i.status == BatchStatus::Done).count();
+        let batch_total = app.batch_items.len();
+
+        let status_text = if batch_processing {
+            format!("Processing {batch_done_count}/{batch_total} images...")
+        } else if batch_total >= 2 && batch_done_count == batch_total {
+            format!("All done \u{2014} {batch_total} images processed")
+        } else if batch_total >= 2 && batch_done_count > 0 {
+            format!("{batch_done_count} of {batch_total} images processed")
+        } else {
+            match app.state {
+                AppState::Empty | AppState::Loaded => {
+                    if app.status_is_temporary {
+                        app.status_text.clone()
+                    } else {
+                        "Ready".to_string()
+                    }
                 }
+                AppState::Processing => {
+                    format!("Processing... {}", app.progress_stage)
+                }
+                AppState::Animating | AppState::Done => app.status_text.clone(),
             }
-            AppState::Processing => {
-                format!("Processing... {}", app.progress_stage)
-            }
-            AppState::Animating | AppState::Done => app.status_text.clone(),
         };
 
         ui.label(RichText::new(&status_text).color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY));
