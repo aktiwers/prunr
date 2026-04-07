@@ -5,26 +5,18 @@
 // IMPORTANT: This crate has NO dependencies on other workspace crates.
 // The dependency arrow is bgprunr-app -> bgprunr-core -> bgprunr-models (never in reverse).
 
-#[cfg(not(feature = "dev-models"))]
-static SILUETA_BYTES: &[u8] =
-    include_bytes_zstd::include_bytes_zstd!("../../models/silueta.onnx", 19);
-
-#[cfg(not(feature = "dev-models"))]
-static U2NET_BYTES: &[u8] =
-    include_bytes_zstd::include_bytes_zstd!("../../models/u2net.onnx", 19);
-
 /// Load Silueta model bytes. In dev-models mode reads from filesystem;
 /// in release mode returns embedded zstd-decompressed bytes.
 #[cfg(not(feature = "dev-models"))]
 pub fn silueta_bytes() -> Vec<u8> {
-    SILUETA_BYTES.to_vec()
+    include_bytes_zstd::include_bytes_zstd!("../../models/silueta.onnx", 19)
 }
 
 /// Load U2Net model bytes. In dev-models mode reads from filesystem;
 /// in release mode returns embedded zstd-decompressed bytes.
 #[cfg(not(feature = "dev-models"))]
 pub fn u2net_bytes() -> Vec<u8> {
-    U2NET_BYTES.to_vec()
+    include_bytes_zstd::include_bytes_zstd!("../../models/u2net.onnx", 19)
 }
 
 #[cfg(feature = "dev-models")]
