@@ -3,6 +3,7 @@ use egui::{Color32, Pos2, Rect, Stroke, Vec2};
 use crate::gui::app::BgPrunrApp;
 use crate::gui::state::AppState;
 use crate::gui::theme;
+use super::animation;
 
 pub fn render(ui: &mut egui::Ui, app: &mut BgPrunrApp) {
     // Set background
@@ -74,7 +75,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut BgPrunrApp) {
         AppState::Empty => render_empty(ui, app),
         AppState::Loaded => render_loaded(ui, app),
         AppState::Processing => render_processing(ui, app),
-        AppState::Animating => render_done(ui, app), // placeholder until animation.rs is wired
+        AppState::Animating => render_animating(ui, app),
         AppState::Done => render_done(ui, app),
     }
 }
@@ -226,6 +227,55 @@ fn render_done(ui: &mut egui::Ui, app: &BgPrunrApp) {
         egui::FontId::monospace(theme::FONT_SIZE_MONO),
         theme::TEXT_SECONDARY,
     );
+}
+
+fn render_animating(ui: &mut egui::Ui, app: &mut BgPrunrApp) {
+    let canvas_rect = ui.available_rect_before_wrap();
+
+    // Need source image for animation blending
+    let source_rgba = {
+        if let Some(ref bytes) = app.source_bytes {
+            image::load_from_memory(bytes).ok().map(|img| img.to_rgba8())
+        } else {
+            None
+        }
+    };
+
+    if let (Some(source), Some(ref result), Some(ref mask)) =
+        (source_rgba, &app.result_rgba, &app.anim_mask)
+    {
+        // Cap animation texture to canvas size for performance
+        let max_w = canvas_rect.width() as u32;
+        let max_h = canvas_rect.height() as u32;
+
+        let frame = animation::build_animation_frame(
+            &source, result, mask, app.anim_progress, max_w, max_h,
+        );
+
+        // Compute image rect with fit zoom (ignore user zoom to keep it simple during animation)
+        let tex_size = egui::Vec2::new(frame.size[0] as f32, frame.size[1] as f32);
+        let fit = fit_zoom(canvas_rect.size(), tex_size);
+        let img_rect = Rect::from_center_size(canvas_rect.center(), tex_size * fit);
+
+        // Draw checkerboard behind (visible through fading background)
+        draw_checkerboard(ui, img_rect);
+
+        // Upload animation frame as texture
+        let anim_texture = ui.ctx().load_texture(
+            "anim_frame",
+            frame,
+            egui::TextureOptions::LINEAR,
+        );
+        ui.painter().image(
+            anim_texture.id(),
+            img_rect,
+            Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+            Color32::WHITE,
+        );
+    } else {
+        // Fallback: just show result
+        render_done(ui, app);
+    }
 }
 
 fn draw_checkerboard(ui: &egui::Ui, bounds: Rect) {
