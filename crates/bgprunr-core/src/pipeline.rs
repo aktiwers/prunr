@@ -1,3 +1,6 @@
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
 use image::DynamicImage;
 use ort::{inputs, value::Tensor};
 
@@ -27,6 +30,7 @@ pub fn process_image<F>(
     img_bytes: &[u8],
     engine: &OrtEngine,
     progress: Option<F>,
+    cancel: Option<Arc<AtomicBool>>,
 ) -> Result<ProcessResult, CoreError>
 where
     F: Fn(ProgressStage, f32),
@@ -46,7 +50,7 @@ where
         return Err(err);
     }
 
-    process_image_from_decoded(img, engine, progress)
+    process_image_from_decoded(img, engine, progress, cancel)
 }
 
 /// Process a single image without the large-image size guard.
@@ -67,12 +71,13 @@ pub fn process_image_unchecked<F>(
     img_bytes: &[u8],
     engine: &OrtEngine,
     progress: Option<F>,
+    cancel: Option<Arc<AtomicBool>>,
 ) -> Result<ProcessResult, CoreError>
 where
     F: Fn(ProgressStage, f32),
 {
     let img = load_image_from_bytes(img_bytes)?;
-    process_image_from_decoded(img, engine, progress)
+    process_image_from_decoded(img, engine, progress, cancel)
 }
 
 /// Internal helper: run the full pipeline on an already-decoded image.
@@ -83,10 +88,17 @@ fn process_image_from_decoded<F>(
     img: DynamicImage,
     engine: &OrtEngine,
     progress: Option<F>,
+    cancel: Option<Arc<AtomicBool>>,
 ) -> Result<ProcessResult, CoreError>
 where
     F: Fn(ProgressStage, f32),
 {
+    let is_cancelled = || {
+        cancel
+            .as_ref()
+            .is_some_and(|c| c.load(Ordering::Relaxed))
+    };
+
     let report = |stage: ProgressStage, pct: f32| {
         if let Some(ref cb) = progress {
             cb(stage, pct);
@@ -95,10 +107,17 @@ where
 
     // Stage 2: Resize (happens inside preprocess)
     report(ProgressStage::Resize, 0.2);
+    if is_cancelled() {
+        return Err(CoreError::Cancelled);
+    }
 
     // Stage 3: Normalize (happens inside preprocess, reported before the call)
     report(ProgressStage::Normalize, 0.4);
     let input_array = preprocess(&img);
+
+    if is_cancelled() {
+        return Err(CoreError::Cancelled);
+    }
 
     // Stage 4: Inference
     report(ProgressStage::Infer, 0.5);
@@ -123,6 +142,10 @@ where
 
         Ok(raw)
     })?;
+
+    if is_cancelled() {
+        return Err(CoreError::Cancelled);
+    }
 
     // Stage 5: Postprocess (min-max normalize → grayscale mask → resize to original dims)
     report(ProgressStage::Postprocess, 0.8);
@@ -191,7 +214,7 @@ mod tests {
             .expect("Need downloaded models — run `cargo xtask fetch-models`");
 
         let png_bytes = make_png(64, 64);
-        let result = process_image(&png_bytes, &engine, None::<fn(ProgressStage, f32)>);
+        let result = process_image(&png_bytes, &engine, None::<fn(ProgressStage, f32)>, None);
         assert!(result.is_ok(), "process_image failed: {:?}", result.err());
         let pr = result.unwrap();
         assert!(!pr.rgba_bytes.is_empty(), "rgba_bytes must not be empty");
@@ -214,7 +237,7 @@ mod tests {
         let png_bytes = make_png(64, 64);
         let _ = process_image(&png_bytes, &engine, Some(move |stage, _pct| {
             stages_clone.lock().unwrap().push(stage);
-        }));
+        }), None);
 
         let recorded = stages.lock().unwrap();
         assert!(
