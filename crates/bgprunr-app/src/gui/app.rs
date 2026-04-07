@@ -421,12 +421,23 @@ impl eframe::App for BgPrunrApp {
                             color_image,
                             egui::TextureOptions::default(),
                         ));
+                        // Extract alpha mask for animation
+                        let alpha_mask: Vec<u8> = rgba_img.pixels().map(|p| p[3]).collect();
+                        self.anim_mask = Some(alpha_mask);
                         self.result_rgba = Some(rgba_img);
                     }
                     self.active_backend = result.active_provider.clone();
                     self.settings.active_backend = result.active_provider;
-                    self.state = AppState::Done;
-                    self.status_text = "Done".to_string();
+
+                    // Transition to Animating if enabled, else straight to Done
+                    if self.settings.reveal_animation_enabled {
+                        self.state = AppState::Animating;
+                        self.anim_progress = 0.0;
+                        self.show_original = false;
+                    } else {
+                        self.state = AppState::Done;
+                        self.status_text = "Done".to_string();
+                    }
                 }
                 WorkerResult::Cancelled => {
                     if self.state == AppState::Processing {
@@ -453,6 +464,26 @@ impl eframe::App for BgPrunrApp {
                     bytes.to_vec(),
                     file.name.clone(),
                 );
+            }
+        }
+
+        // b2. Advance animation
+        if self.state == AppState::Animating {
+            let dt = ctx.input(|i| i.stable_dt);
+            self.anim_progress = (self.anim_progress + dt / theme::ANIM_DURATION_SECS).min(1.0);
+
+            // Check for skip (any key or mouse click)
+            let skip = ctx.input(|i| {
+                let any_key = i.events.iter().any(|e| matches!(e, egui::Event::Key { pressed: true, .. }));
+                i.pointer.any_pressed() || any_key
+            });
+
+            if skip || self.anim_progress >= 1.0 {
+                self.state = AppState::Done;
+                self.anim_progress = 0.0;
+                self.status_text = "Done".to_string();
+            } else {
+                ctx.request_repaint(); // keep animation loop running
             }
         }
 
