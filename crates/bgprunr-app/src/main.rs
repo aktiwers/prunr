@@ -1,4 +1,5 @@
 mod cli;
+mod gui;
 
 use clap::Parser;
 use cli::{Cli, Commands};
@@ -11,10 +12,10 @@ fn main() {
             std::process::exit(exit_code);
         }
         None => {
-            // Phase 4 will replace this with eframe::run_native(...)
-            eprintln!("bgprunr: no subcommand given. Run `bgprunr remove --help` for CLI usage.");
-            eprintln!("GUI mode is not yet implemented (Phase 4).");
-            std::process::exit(0);
+            if let Err(e) = gui::run() {
+                eprintln!("bgprunr: GUI error: {e}");
+                std::process::exit(1);
+            }
         }
     }
 }

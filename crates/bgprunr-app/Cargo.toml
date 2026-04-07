@@ -24,3 +24,4 @@ egui = { workspace = true }
 eframe = { workspace = true }
 arboard = { workspace = true }
 rfd = { workspace = true }
+image = { workspace = true }
