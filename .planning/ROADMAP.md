@@ -85,7 +85,12 @@ Plans:
   3. When inference completes, pressing Ctrl/Cmd+S opens a save dialog and writes a transparent PNG to the chosen location
   4. Pressing Ctrl/Cmd+C copies the processed image to the system clipboard and the result can be pasted into another application (including on Wayland)
   5. Pressing Escape during active inference cancels it; pressing ? shows a keyboard shortcut reference overlay
-**Plans**: TBD
+**Plans**: 3 plans
+
+Plans:
+- [ ] 04-01-PLAN.md — GUI module foundation: state machine, worker thread, theme constants, Cargo deps
+- [ ] 04-02-PLAN.md — BgPrunrApp eframe integration, toolbar, canvas, status bar, shortcuts overlay, main.rs launch
+- [ ] 04-03-PLAN.md — Human verification checkpoint: end-to-end GUI testing of all Phase 4 requirements
 
 ### Phase 5: GUI Feature Completeness
 **Goal**: Users have the full interactive experience — before/after comparison, zoom and pan for edge inspection, batch sidebar for multi-image workflows, settings control, model selection, and the reveal animation on completion
@@ -121,6 +126,6 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 | 1. Workspace Scaffolding | 4/4 | Complete   | 2026-04-06 |
 | 2. Core Inference Engine | 6/6 | Complete   | 2026-04-06 |
 | 3. CLI Binary | 2/3 | In Progress|  |
-| 4. GUI Foundation | 0/TBD | Not started | - |
+| 4. GUI Foundation | 0/3 | Not started | - |
 | 5. GUI Feature Completeness | 0/TBD | Not started | - |
 | 6. Distribution and Packaging | 0/TBD | Not started | - |
