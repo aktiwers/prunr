@@ -68,7 +68,12 @@ Plans:
   3. `--model silueta` and `--model u2net` both select the correct embedded model and produce visibly different quality on a complex image
   4. `--jobs N` controls rayon parallelism and the binary does not spawn more threads than requested
   5. A progress bar (indicatif) updates per image during batch processing so the user knows the job is running
-**Plans**: TBD
+**Plans**: 3 plans
+
+Plans:
+- [ ] 03-01-PLAN.md — Cargo deps + clap structs (Cli, Commands, RemoveArgs, CliModel, LargeImagePolicy) + process_image_unchecked core extension
+- [ ] 03-02-PLAN.md — main.rs dispatch + run_remove() single-image and batch execution paths with indicatif progress + exit codes
+- [ ] 03-03-PLAN.md — Human verification checkpoint: real-image end-to-end test of all CLI flags and exit codes
 
 ### Phase 4: GUI Foundation
 **Goal**: A user can open the GUI, load an image by drag-and-drop or file picker, trigger inference, watch a progress indicator, and save or copy the result — the worker-thread threading architecture is in place and the UI never freezes
@@ -115,7 +120,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 |-------|----------------|--------|-----------|
 | 1. Workspace Scaffolding | 4/4 | Complete   | 2026-04-06 |
 | 2. Core Inference Engine | 6/6 | Complete   | 2026-04-06 |
-| 3. CLI Binary | 0/TBD | Not started | - |
+| 3. CLI Binary | 0/3 | Not started | - |
 | 4. GUI Foundation | 0/TBD | Not started | - |
 | 5. GUI Feature Completeness | 0/TBD | Not started | - |
 | 6. Distribution and Packaging | 0/TBD | Not started | - |
