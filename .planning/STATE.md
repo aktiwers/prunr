@@ -3,13 +3,13 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: unknown
-stopped_at: Completed 05-01-PLAN.md
-last_updated: "2026-04-07T15:17:42.799Z"
+stopped_at: Completed 05-02-PLAN.md
+last_updated: "2026-04-07T15:23:59.393Z"
 progress:
   total_phases: 6
   completed_phases: 3
   total_plans: 19
-  completed_plans: 16
+  completed_plans: 17
 ---
 
 # Project State
@@ -59,6 +59,7 @@ Plan: 1 of 3
 | Phase 03 P02 | 2 | 2 tasks | 2 files |
 | Phase 04 P02 | 4 | 2 tasks | 11 files |
 | Phase 05 P01 | 25 | 3 tasks | 12 files |
+| Phase 05 P02 | 4 | 2 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -111,6 +112,9 @@ Recent decisions affecting current work:
 - [Phase 05]: canvas::render takes &mut BgPrunrApp so zoom/pan state is mutated during the render pass itself
 - [Phase 05]: pending_fit_zoom and pending_actual_size flags bridge logic()-side keyboard detection to canvas-side geometry computation
 - [Phase 05]: fit_zoom() caps at 1.0 to never upscale images smaller than canvas
+- [Phase 05]: egui InputState has no keys_pressed field — use i.events.iter().any(Event::Key pressed) for any-key detection in animation skip
+- [Phase 05]: ColorImage in epaint-0.34 requires source_size: Vec2 field alongside size and pixels
+- [Phase 05]: Animation frame downscaled to canvas size for GPU performance — avoids uploading multi-megapixel ColorImage each render tick
 
 ### Pending Todos
 
@@ -124,6 +128,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-04-07T15:17:42.795Z
-Stopped at: Completed 05-01-PLAN.md
+Last session: 2026-04-07T15:23:59.390Z
+Stopped at: Completed 05-02-PLAN.md
 Resume file: None

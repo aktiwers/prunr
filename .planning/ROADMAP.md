@@ -132,5 +132,5 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 | 2. Core Inference Engine | 6/6 | Complete   | 2026-04-06 |
 | 3. CLI Binary | 2/3 | In Progress|  |
 | 4. GUI Foundation | 2/3 | In Progress|  |
-| 5. GUI Feature Completeness | 1/3 | In Progress|  |
+| 5. GUI Feature Completeness | 2/3 | In Progress|  |
 | 6. Distribution and Packaging | 0/TBD | Not started | - |
