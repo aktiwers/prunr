@@ -97,6 +97,14 @@ pub fn run_remove(args: RemoveArgs) -> i32 {
         return 1;
     }
 
+    // Ensure output directory exists if specified
+    if let Some(ref dir) = args.output_dir {
+        if let Err(e) = std::fs::create_dir_all(dir) {
+            eprintln!("error: cannot create output directory {}: {e}", dir.display());
+            return 1;
+        }
+    }
+
     if args.inputs.len() == 1 {
         run_single(&args)
     } else {
