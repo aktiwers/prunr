@@ -20,6 +20,17 @@ pub fn build_animation_frame(
     max_height: u32,
 ) -> ColorImage {
     let (src_w, src_h) = (source_rgba.width(), source_rgba.height());
+    let (res_w, res_h) = (result_rgba.width(), result_rgba.height());
+
+    // Bail if dimensions don't match (can happen during batch switching)
+    if src_w != res_w || src_h != res_h || anim_mask.len() != (src_w * src_h) as usize {
+        // Return a transparent 1x1 image as fallback
+        return ColorImage {
+            size: [1, 1],
+            source_size: Vec2::new(1.0, 1.0),
+            pixels: vec![Color32::TRANSPARENT],
+        };
+    }
 
     // Determine output size (downscale if source is larger than canvas)
     let scale = (max_width as f32 / src_w as f32)

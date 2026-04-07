@@ -50,7 +50,7 @@ pub fn render(ui: &mut egui::Ui, app: &BgPrunrApp) {
             );
 
             // Background
-            ui.painter().rect_filled(rect, 2.0, egui::Color32::from_rgb(0x30, 0x30, 0x30));
+            ui.painter().rect_filled(rect, 2.0, theme::PROGRESS_BAR_BG);
 
             // Fill
             let fill_w = rect.width() * app.progress_pct.clamp(0.0, 1.0);

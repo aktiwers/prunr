@@ -16,13 +16,6 @@ pub fn render(ctx: &egui::Context) {
         .show(ctx, |ui| {
             ui.vertical(|ui| {
                 ui.add_space(theme::SPACE_SM);
-                ui.label(
-                    RichText::new("Keyboard Shortcuts")
-                        .size(theme::FONT_SIZE_HEADING)
-                        .strong()
-                        .color(theme::TEXT_PRIMARY),
-                );
-                ui.add_space(theme::SPACE_MD);
 
                 egui::Grid::new("shortcuts_grid")
                     .num_columns(2)

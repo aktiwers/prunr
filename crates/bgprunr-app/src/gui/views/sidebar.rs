@@ -5,13 +5,16 @@ use crate::gui::theme;
 pub fn render(ui: &mut egui::Ui, app: &mut BgPrunrApp) {
     ui.vertical(|ui| {
         if app.batch_items.is_empty() {
-            // Empty state
-            let avail = ui.available_size();
-            ui.allocate_space(Vec2::new(avail.x, avail.y / 2.0 - 20.0));
-            ui.label(
-                RichText::new("Drop images here\nto queue them")
-                    .size(theme::FONT_SIZE_MONO)
-                    .color(theme::TEXT_SECONDARY),
+            // Empty state — centered
+            ui.with_layout(
+                egui::Layout::centered_and_justified(egui::Direction::TopDown),
+                |ui| {
+                    ui.label(
+                        RichText::new("Drop images here\nto queue them")
+                            .size(theme::FONT_SIZE_MONO)
+                            .color(theme::TEXT_SECONDARY),
+                    );
+                },
             );
             return;
         }
@@ -19,6 +22,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut BgPrunrApp) {
         // Thumbnail list with drag-to-reorder
         let mut swap_from: Option<usize> = None;
         let mut swap_to: Option<usize> = None;
+        let mut decoded_this_frame = false; // limit to 1 thumbnail decode per frame
         let item_width = theme::SIDEBAR_WIDTH - theme::SPACE_SM * 2.0;
         let item_height = theme::THUMBNAIL_SIZE + theme::SPACE_SM;
 
@@ -49,12 +53,41 @@ pub fn render(ui: &mut egui::Ui, app: &mut BgPrunrApp) {
                     );
                 }
 
-                // Draw thumbnail if available
-                let thumb_rect = Rect::from_center_size(
-                    item_rect.center(),
-                    Vec2::splat(theme::THUMBNAIL_SIZE),
-                );
+                // Lazily create thumbnail (max 1 decode per frame to stay responsive)
+                // Use result image if available, otherwise source
+                if app.batch_items[i].thumb_texture.is_none() && !decoded_this_frame {
+                    let rgba = if let Some(ref result) = app.batch_items[i].result_rgba {
+                        decoded_this_frame = true;
+                        Some(image::imageops::thumbnail(result, 80, 80))
+                    } else if let Ok(img) = image::load_from_memory(&app.batch_items[i].source_bytes) {
+                        decoded_this_frame = true;
+                        Some(image::imageops::thumbnail(&img.to_rgba8(), 80, 80))
+                    } else {
+                        None
+                    };
+                    if let Some(thumb) = rgba {
+                        let (tw, th) = (thumb.width(), thumb.height());
+                        let ci = egui::ColorImage::from_rgba_unmultiplied(
+                            [tw as usize, th as usize],
+                            thumb.as_flat_samples().as_slice(),
+                        );
+                        let id = app.batch_items[i].id;
+                        app.batch_items[i].thumb_texture = Some(
+                            ui.ctx().load_texture(format!("thumb_{id}"), ci, egui::TextureOptions::LINEAR),
+                        );
+                    }
+                }
+
+                // Draw thumbnail if available (preserve aspect ratio)
                 if let Some(ref thumb_tex) = app.batch_items[i].thumb_texture {
+                    let tex_size = thumb_tex.size_vec2();
+                    let scale = (theme::THUMBNAIL_SIZE / tex_size.x)
+                        .min(theme::THUMBNAIL_SIZE / tex_size.y);
+                    let fitted = tex_size * scale;
+                    let thumb_rect = Rect::from_center_size(
+                        item_rect.center(),
+                        fitted,
+                    );
                     ui.painter().image(
                         thumb_tex.id(), thumb_rect,
                         Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
@@ -89,11 +122,11 @@ pub fn render(ui: &mut egui::Ui, app: &mut BgPrunrApp) {
                     swap_to = Some(i);
                 }
 
-                // Click to select — deferred sync happens in logic()
+                // Click to select — sync immediately (no frame delay)
                 if item_response.clicked() && app.selected_batch_index != i {
                     app.selected_batch_index = i;
-                    app.show_original = false;
-                    app.pending_batch_sync = true;
+                    let ctx = ui.ctx().clone();
+                    app.sync_selected_batch_textures(&ctx);
                 }
 
                 // Hover insertion line for DnD
@@ -108,9 +141,14 @@ pub fn render(ui: &mut egui::Ui, app: &mut BgPrunrApp) {
                     );
                 }
 
-                ui.add_space(2.0); // gap between items
+                ui.add_space(theme::SPACE_XS); // gap between items
             }
         });
+
+        // If we decoded a thumbnail this frame, request repaint for the next ones
+        if decoded_this_frame && app.batch_items.iter().any(|i| i.thumb_texture.is_none()) {
+            ui.ctx().request_repaint();
+        }
 
         // Apply reorder after iteration
         if let (Some(from), Some(to)) = (swap_from, swap_to) {
