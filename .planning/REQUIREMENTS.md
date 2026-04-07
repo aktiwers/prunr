@@ -32,9 +32,9 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### GUI - Reveal Animation
 
-- [ ] **ANIM-01**: When background removal completes, the removed areas dissolve/particle away while the subject stays sharp
-- [ ] **ANIM-02**: The animation plays over ~0.5-1s and transitions smoothly to the checkerboard transparency view
-- [ ] **ANIM-03**: User can skip the animation by pressing any key or clicking
+- [x] **ANIM-01**: When background removal completes, the removed areas dissolve/particle away while the subject stays sharp
+- [x] **ANIM-02**: The animation plays over ~0.5-1s and transitions smoothly to the checkerboard transparency view
+- [x] **ANIM-03**: User can skip the animation by pressing any key or clicking
 
 ### GUI - Output
 
@@ -68,7 +68,7 @@ Requirements for initial release. Each maps to roadmap phases.
 ### Settings & UX
 
 - [x] **UX-01**: All keyboard shortcuts work as specified (Ctrl/Cmd+O, Ctrl/Cmd+R, Ctrl/Cmd+S, Ctrl/Cmd+C, B, [/], scroll, Space+drag, Ctrl/Cmd+0, Ctrl/Cmd+1, Escape, Ctrl/Cmd+,, ?) — Cmd on macOS, Ctrl on Linux/Windows
-- [ ] **UX-02**: User can open settings dialog (Ctrl/Cmd+,) to configure model, auto-remove, parallelism
+- [x] **UX-02**: User can open settings dialog (Ctrl/Cmd+,) to configure model, auto-remove, parallelism
 - [x] **UX-03**: User can cancel in-progress inference with Escape
 - [x] **UX-04**: User can press ? to see all keyboard shortcuts
 - [ ] **UX-05**: User can navigate between images with [ and ] keys
@@ -141,16 +141,16 @@ Which phases cover which requirements. Updated during roadmap creation.
 | VIEW-03 | Phase 5 | Complete |
 | VIEW-04 | Phase 5 | Complete |
 | VIEW-05 | Phase 5 | Complete |
-| ANIM-01 | Phase 5 | Pending |
-| ANIM-02 | Phase 5 | Pending |
-| ANIM-03 | Phase 5 | Pending |
+| ANIM-01 | Phase 5 | Complete |
+| ANIM-02 | Phase 5 | Complete |
+| ANIM-03 | Phase 5 | Complete |
 | BATCH-01 | Phase 5 | Pending |
 | BATCH-02 | Phase 5 | Pending |
 | BATCH-03 | Phase 5 | Pending |
 | BATCH-04 | Phase 5 | Pending |
 | BATCH-05 | Phase 5 | Pending |
 | BATCH-06 | Phase 5 | Pending |
-| UX-02 | Phase 5 | Pending |
+| UX-02 | Phase 5 | Complete |
 | UX-05 | Phase 5 | Pending |
 
 **Coverage:**
