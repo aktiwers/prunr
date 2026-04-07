@@ -48,9 +48,9 @@ pub fn render(ctx: &egui::Context) {
                         shortcut_row(ui, &format!("{modifier}+O"), "Open file");
                         shortcut_row(ui, &format!("{modifier}+R"), "Remove background");
                         shortcut_row(ui, &format!("{modifier}+S"), "Save result");
-                        shortcut_row(ui, &format!("{modifier}+C"), "Copy to clipboard");
+                        shortcut_row(ui, &format!("{modifier}+C"), "Copy result");
                         shortcut_row(ui, "Escape", "Cancel / Close");
-                        shortcut_row(ui, "?", "Show this help");
+                        shortcut_row(ui, "F1", "Show this help");
                     });
             });
         });

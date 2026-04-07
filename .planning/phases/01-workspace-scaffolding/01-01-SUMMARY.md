@@ -93,7 +93,7 @@ Each task was committed atomically:
 1. **Task 1: Workspace manifests and crate skeletons** - `37d8b46` (feat)
 2. **Task 2: Source stubs — traits, types, model embedding, placeholder binary** - `044436a` (feat)
 
-**Plan metadata:** _(docs commit follows)_
+**Plan metadata:** `8add3d5` (docs: complete workspace-scaffolding plan 01)
 
 ## Files Created/Modified
 

@@ -54,6 +54,7 @@ pub fn spawn_worker(
                                     ctx_clone.request_repaint();
                                 }
                             }),
+                            Some(cancel.clone()),
                         );
 
                         if cancel.load(Ordering::Relaxed) {
@@ -61,6 +62,9 @@ pub fn spawn_worker(
                         } else {
                             match result {
                                 Ok(r) => { let _ = res_tx.send(WorkerResult::Done(r)); }
+                                Err(bgprunr_core::CoreError::Cancelled) => {
+                                    let _ = res_tx.send(WorkerResult::Cancelled);
+                                }
                                 Err(e) => { let _ = res_tx.send(WorkerResult::Error(e.to_string())); }
                             }
                         }

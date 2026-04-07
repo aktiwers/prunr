@@ -12,6 +12,8 @@ pub enum CoreError {
     ImageFormat(String),
     #[error("Image too large: {width}x{height} exceeds {limit}px limit")]
     LargeImage { width: u32, height: u32, limit: u32 },
+    #[error("Processing cancelled")]
+    Cancelled,
 }
 
 impl From<image::ImageError> for CoreError {
