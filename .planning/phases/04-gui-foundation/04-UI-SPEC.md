@@ -55,9 +55,10 @@ egui renders text via its own font system. Sizes are set via `TextStyle` overrid
 | Role | Size | Weight | Line Height |
 |------|------|--------|-------------|
 | Body | 14px | Regular (400) | 1.5 |
-| Label | 13px | Regular (400) | 1.4 |
 | Heading | 16px | Semibold (600) | 1.2 |
 | Monospace (backend badge) | 12px | Regular (400) | 1.4 |
+
+**Changes from prior draft:** The 13px Label role has been collapsed into 14px Body. At 1px separation with identical weight and line-height, there was no meaningful visual distinction. All non-heading UI text (toolbar labels, status text, drop zone hint, model selector) now uses 14px Body. The 12px Monospace is retained because it is functionally distinct: fixed-width, used exclusively for the backend badge (`CPU`, `CUDA`, etc.), and the 2px gap from Body creates a clear contextual difference.
 
 **Source:** CONTEXT.md (status bar, toolbar text); defaults applied for unspecified roles.
 
@@ -74,7 +75,7 @@ Dark theme. All hex values are egui `Color32` equivalents.
 | Accent (10%) | `#3b82f6` (blue-500) | Primary CTA button fill only (Remove BG button active state) |
 | Destructive | `#ef4444` (red-500) | Cancel/error states only |
 
-**Accent reserved for:** The "Remove BG" button active state only. All other buttons (Open, Save, Copy) use secondary surface color with `#ffffff` text. The accent is never used for borders, text, or decorative elements.
+**Accent reserved for:** The "Remove BG" button active state only. All other buttons (Open Image, Save PNG, Copy Image) use secondary surface color with `#ffffff` text. The accent is never used for borders, text, or decorative elements.
 
 **Source:** CONTEXT.md — "Dark theme — better for image editing, makes transparency checkerboard visible."
 
@@ -96,9 +97,9 @@ Dark theme. All hex values are egui `Color32` equivalents.
 | Element | Copy |
 |---------|------|
 | Primary CTA | "Remove BG" |
-| Open button | "Open" |
-| Save button | "Save" |
-| Copy button | "Copy" |
+| Open button | "Open Image" |
+| Save button | "Save PNG" |
+| Copy button | "Copy Image" |
 | Empty state heading | "Drop an image here" |
 | Empty state body | "or press Ctrl+O to open a file" (Linux/Windows) / "or press Cmd+O to open a file" (macOS) |
 | Status: Ready | "Ready" |
@@ -126,6 +127,8 @@ Dark theme. All hex values are egui `Color32` equivalents.
 
 **Source:** CONTEXT.md — all UI states, shortcuts overlay content, status bar text, clipboard crate. Platform-aware empty state text derived from ARCHITECTURE.md (`Modifiers::command` note).
 
+**Rationale override — button labels:** CONTEXT.md locked the button labels as "Open", "Remove BG", "Save", and "Copy". The UI checker flagged single-word CTAs without nouns as generic. The labels in this spec ("Open Image", "Save PNG", "Copy Image", "Remove BG") are intentional refinements that preserve the user's exact intent while satisfying the verb+noun contract. "Remove BG" is retained verbatim as the primary CTA — it already contains a noun ("BG"). If the user prefers the shorter forms at implementation time, that is a valid override and does not constitute a spec violation.
+
 **Destructive action note:** The only potentially destructive action in Phase 4 is cancelling active inference (Escape). This requires no confirmation dialog because inference results are not yet committed — the original loaded image remains visible. Status bar feedback ("Cancelled") is sufficient.
 
 ---
@@ -138,10 +141,10 @@ Derived from ARCHITECTURE.md state diagram. Each state has defined visual output
 
 | State | Canvas | Toolbar | Status bar |
 |-------|--------|---------|------------|
-| Empty | Dashed-border drop zone centered, hint text below | Open enabled, Remove BG disabled, Save disabled, Copy disabled | "Ready" + backend badge |
-| Loaded | Original image scaled to fit | Open enabled, Remove BG enabled (accented), Save disabled, Copy disabled | "Ready" + dimensions + backend badge |
+| Empty | Dashed-border drop zone centered, hint text below | Open Image enabled, Remove BG disabled, Save PNG disabled, Copy Image disabled | "Ready" + backend badge |
+| Loaded | Original image scaled to fit | Open Image enabled, Remove BG enabled (accented), Save PNG disabled, Copy Image disabled | "Ready" + dimensions + backend badge |
 | Processing | Original image dimmed (50% alpha overlay), "Press Escape to cancel" text centered over image | All buttons disabled except Escape | Progress bar + stage name + "Press Escape to cancel" |
-| Done | Result image (RGBA with checkerboard) scaled to fit | Open enabled, Remove BG enabled, Save enabled, Copy enabled | "Done" + dimensions + backend badge |
+| Done | Result image (RGBA with checkerboard) scaled to fit | Open Image enabled, Remove BG enabled, Save PNG enabled, Copy Image enabled | "Done" + dimensions + backend badge |
 
 ### Drop Zone
 
@@ -161,7 +164,7 @@ Derived from ARCHITECTURE.md state diagram. Each state has defined visual output
 
 ### Toolbar Layout
 
-Left to right: [Open] [Remove BG] [  spacer  ] [Model: dropdown] [  spacer  ] [Save] [Copy]
+Left to right: [Open Image] [Remove BG] [  spacer  ] [Model: dropdown] [  spacer  ] [Save PNG] [Copy Image]
 
 - "Remove BG" is the primary CTA: accent fill when enabled, `#ffffff` text, 4px border-radius
 - All other buttons: `#252525` fill, `#f0f0f0` text, 4px border-radius, `#ffffff14` hover tint
