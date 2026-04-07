@@ -24,11 +24,11 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### GUI - Image Viewer
 
-- [ ] **VIEW-01**: User can zoom in/out with scroll wheel
-- [ ] **VIEW-02**: User can pan by holding Space and dragging
-- [ ] **VIEW-03**: Transparency is displayed as a checkerboard pattern
-- [ ] **VIEW-04**: User can toggle between original and processed image (Before/After with B key)
-- [ ] **VIEW-05**: User can fit image to window (Ctrl+0) or view at actual size (Ctrl+1)
+- [x] **VIEW-01**: User can zoom in/out with scroll wheel
+- [x] **VIEW-02**: User can pan by holding Space and dragging
+- [x] **VIEW-03**: Transparency is displayed as a checkerboard pattern
+- [x] **VIEW-04**: User can toggle between original and processed image (Before/After with B key)
+- [x] **VIEW-05**: User can fit image to window (Ctrl+0) or view at actual size (Ctrl+1)
 
 ### GUI - Reveal Animation
 
@@ -136,11 +136,11 @@ Which phases cover which requirements. Updated during roadmap creation.
 | UX-01 | Phase 4 | Complete |
 | UX-03 | Phase 4 | Complete |
 | UX-04 | Phase 4 | Complete |
-| VIEW-01 | Phase 5 | Pending |
-| VIEW-02 | Phase 5 | Pending |
-| VIEW-03 | Phase 5 | Pending |
-| VIEW-04 | Phase 5 | Pending |
-| VIEW-05 | Phase 5 | Pending |
+| VIEW-01 | Phase 5 | Complete |
+| VIEW-02 | Phase 5 | Complete |
+| VIEW-03 | Phase 5 | Complete |
+| VIEW-04 | Phase 5 | Complete |
+| VIEW-05 | Phase 5 | Complete |
 | ANIM-01 | Phase 5 | Pending |
 | ANIM-02 | Phase 5 | Pending |
 | ANIM-03 | Phase 5 | Pending |

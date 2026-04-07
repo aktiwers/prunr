@@ -3,13 +3,13 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: unknown
-stopped_at: Phase 5 context gathered
-last_updated: "2026-04-07T14:15:01.512Z"
+stopped_at: Completed 05-01-PLAN.md
+last_updated: "2026-04-07T15:17:42.799Z"
 progress:
   total_phases: 6
   completed_phases: 3
-  total_plans: 16
-  completed_plans: 15
+  total_plans: 19
+  completed_plans: 16
 ---
 
 # Project State
@@ -19,12 +19,12 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-06)
 
 **Core value:** One-click local background removal that is fast, private, and works offline — your photos never leave your machine
-**Current focus:** Phase 04 — gui-foundation
+**Current focus:** Phase 05 — gui-feature-completeness
 
 ## Current Position
 
-Phase: 04 (gui-foundation) — EXECUTING
-Plan: 2 of 3
+Phase: 05 (gui-feature-completeness) — EXECUTING
+Plan: 1 of 3
 
 ## Performance Metrics
 
@@ -58,6 +58,7 @@ Plan: 2 of 3
 | Phase 03 P01 | 77 | 2 tasks | 5 files |
 | Phase 03 P02 | 2 | 2 tasks | 2 files |
 | Phase 04 P02 | 4 | 2 tasks | 11 files |
+| Phase 05 P01 | 25 | 3 tasks | 12 files |
 
 ## Accumulated Context
 
@@ -107,6 +108,9 @@ Recent decisions affecting current work:
 - [Phase 04-02]: BgPrunrApp::new_for_test() constructor added (cfg test) since eframe::CreationContext only available inside run_native
 - [Phase 04-02]: cancel_flag made pub(crate) to enable test assertions on AtomicBool state
 - [Phase 04-02]: Source texture loaded lazily in logic() since egui Context unavailable in handle_open_path()
+- [Phase 05]: canvas::render takes &mut BgPrunrApp so zoom/pan state is mutated during the render pass itself
+- [Phase 05]: pending_fit_zoom and pending_actual_size flags bridge logic()-side keyboard detection to canvas-side geometry computation
+- [Phase 05]: fit_zoom() caps at 1.0 to never upscale images smaller than canvas
 
 ### Pending Todos
 
@@ -120,6 +124,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-04-07T14:15:01.507Z
-Stopped at: Phase 5 context gathered
-Resume file: .planning/phases/05-gui-feature-completeness/05-CONTEXT.md
+Last session: 2026-04-07T15:17:42.795Z
+Stopped at: Completed 05-01-PLAN.md
+Resume file: None
