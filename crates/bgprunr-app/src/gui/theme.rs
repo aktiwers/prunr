@@ -4,13 +4,13 @@ use egui::{Color32, Stroke};
 pub fn draw_modal_backdrop(ctx: &egui::Context, id: &str) {
     let screen_rect = ctx.content_rect();
     let painter = ctx.layer_painter(egui::LayerId::new(
-        egui::Order::Background,
+        egui::Order::Foreground,
         egui::Id::new(id),
     ));
     painter.rect_filled(
         screen_rect,
         0.0,
-        Color32::from_rgba_unmultiplied(0, 0, 0, 180),
+        Color32::from_rgba_unmultiplied(0, 0, 0, 100),
     );
 }
 
@@ -76,6 +76,7 @@ pub const SPACE_XL: f32 = 32.0;
 pub const TOOLBAR_HEIGHT: f32 = 36.0;
 pub const STATUS_BAR_HEIGHT: f32 = 24.0;
 pub const PROGRESS_BAR_HEIGHT: f32 = 4.0;
+pub const PROGRESS_BAR_BG: Color32 = Color32::from_rgb(0x30, 0x30, 0x30);
 pub const BUTTON_ROUNDING: f32 = 4.0;
 pub const DROP_ZONE_ROUNDING: f32 = 8.0;
 pub const DROP_ZONE_BORDER_WIDTH: f32 = 2.0;
@@ -100,7 +101,7 @@ pub const FONT_SIZE_MONO: f32 = 12.0;
 pub const SHORTCUT_OVERLAY_WIDTH: f32 = 320.0;
 pub const SHORTCUT_OVERLAY_HEIGHT: f32 = 420.0;
 /// Overlay background: #1a1a1a at 95% alpha
-pub const OVERLAY_BG: Color32 = Color32::from_rgba_premultiplied(0x1a, 0x1a, 0x1a, 0xf2);
+pub const OVERLAY_BG: Color32 = Color32::from_rgba_premultiplied(0x3a, 0x3a, 0x3a, 0xf8);
 /// Overlay border: #ffffff20 (white 12.5%)
 pub const OVERLAY_BORDER: Color32 = Color32::from_rgba_premultiplied(0xff, 0xff, 0xff, 0x20);
 
