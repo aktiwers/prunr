@@ -4,3 +4,4 @@ pub mod statusbar;
 pub mod shortcuts;
 pub mod settings;
 pub mod animation;
+pub mod sidebar;
