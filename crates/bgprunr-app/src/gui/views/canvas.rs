@@ -41,17 +41,17 @@ fn render_empty(ui: &mut egui::Ui, _app: &BgPrunrApp) {
         egui::StrokeKind::Outside,
     );
 
-    // Center text: "Drop an image here"
     let painter = ui.painter();
+
+    let heading = "Drop an image here";
     painter.text(
         center - Vec2::new(0.0, 20.0),
         egui::Align2::CENTER_CENTER,
-        "Drop an image here",
+        heading,
         egui::FontId::proportional(theme::FONT_SIZE_HEADING),
         theme::TEXT_PRIMARY,
     );
 
-    // Platform hint
     let hint = if cfg!(target_os = "macos") {
         "or press Cmd+O to open a file"
     } else {

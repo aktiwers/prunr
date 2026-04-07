@@ -1,5 +1,5 @@
 use std::borrow::Cow;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
 
@@ -46,6 +46,9 @@ pub struct BgPrunrApp {
     pub(crate) show_shortcuts: bool,
     pub(crate) selected_model: ModelKind,
     pub(crate) active_backend: String,
+
+    // Set by raw_input_hook — egui converts Ctrl+C to Event::Copy before we see it
+    pending_copy: bool,
 }
 
 impl BgPrunrApp {
@@ -99,6 +102,7 @@ impl BgPrunrApp {
             show_shortcuts: false,
             selected_model: ModelKind::Silueta,
             active_backend: "CPU".to_string(),
+            pending_copy: false,
         }
     }
 
@@ -127,6 +131,7 @@ impl BgPrunrApp {
             show_shortcuts: false,
             selected_model: ModelKind::Silueta,
             active_backend: "CPU".to_string(),
+            pending_copy: false,
         }
     }
 
@@ -136,36 +141,41 @@ impl BgPrunrApp {
         self.status_set_at = Some(std::time::Instant::now());
     }
 
+    fn load_image(&mut self, bytes: Vec<u8>, filename: Option<String>) {
+        match image::load_from_memory(&bytes) {
+            Ok(img) => {
+                self.image_dimensions = Some(img.dimensions());
+                self.source_bytes = Some(bytes);
+                self.loaded_filename = filename;
+                self.source_texture = None;
+                self.result_texture = None;
+                self.result_rgba = None;
+                self.state = AppState::Loaded;
+                self.status_text = "Ready".to_string();
+            }
+            Err(e) => {
+                self.set_temporary_status(format!("Could not load image: {e}"));
+            }
+        }
+    }
+
     pub fn handle_open_path(&mut self, path: PathBuf) {
         match std::fs::read(&path) {
             Ok(bytes) => {
-                match image::load_from_memory(&bytes) {
-                    Ok(img) => {
-                        let (w, h) = img.dimensions();
-                        self.image_dimensions = Some((w, h));
-                        self.source_bytes = Some(bytes);
-                        self.loaded_filename = path
-                            .file_name()
-                            .and_then(|n| n.to_str())
-                            .map(|s| s.to_string());
-                        // Texture will be created lazily in canvas render or we create it here
-                        // We store the raw rgba for texture creation; canvas will create textures
-                        // Since we don't have egui context here, store dims; canvas creates texture on first paint
-                        self.source_texture = None; // reset so canvas re-creates
-                        self.result_texture = None;
-                        self.result_rgba = None;
-                        self.state = AppState::Loaded;
-                        self.status_text = "Ready".to_string();
-                    }
-                    Err(e) => {
-                        self.set_temporary_status(format!("Could not load image: {e}"));
-                    }
-                }
+                let filename = path.file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|s| s.to_string());
+                self.load_image(bytes, filename);
             }
             Err(e) => {
                 self.set_temporary_status(format!("Could not read file: {e}"));
             }
         }
+    }
+
+    pub fn handle_open_bytes(&mut self, bytes: Vec<u8>, name: String) {
+        let filename = if name.is_empty() { None } else { Some(name) };
+        self.load_image(bytes, filename);
     }
 
     pub fn handle_open_dialog(&mut self) {
@@ -194,9 +204,15 @@ impl BgPrunrApp {
 
     pub fn handle_save(&mut self) {
         if let Some(ref rgba) = self.result_rgba {
+            let default_name = self
+                .loaded_filename
+                .as_deref()
+                .and_then(|name| Path::new(name).file_stem()?.to_str())
+                .map(|stem| format!("{stem}-nobg.png"))
+                .unwrap_or_else(|| "result-nobg.png".to_string());
             if let Some(path) = rfd::FileDialog::new()
                 .add_filter("PNG Image", &["png"])
-                .set_file_name("result.png")
+                .set_file_name(&default_name)
                 .set_title("Save PNG")
                 .save_file()
             {
@@ -238,12 +254,58 @@ impl BgPrunrApp {
         }
     }
 
+    pub fn handle_paste(&mut self) {
+        if let Some(ref mut clipboard) = self.clipboard {
+            match clipboard.get_image() {
+                Ok(img_data) => {
+                    let rgba = image::RgbaImage::from_raw(
+                        img_data.width as u32,
+                        img_data.height as u32,
+                        img_data.bytes.into_owned(),
+                    );
+                    if let Some(rgba) = rgba {
+                        let mut png_bytes = Vec::new();
+                        if image::DynamicImage::ImageRgba8(rgba)
+                            .write_to(
+                                &mut std::io::Cursor::new(&mut png_bytes),
+                                image::ImageFormat::Png,
+                            )
+                            .is_ok()
+                        {
+                            self.load_image(png_bytes, Some("pasted-image.png".to_string()));
+                            return;
+                        }
+                    }
+                    self.set_temporary_status("Could not decode clipboard image");
+                }
+                Err(_) => {
+                    self.set_temporary_status("No image in clipboard");
+                }
+            }
+        } else {
+            self.set_temporary_status("Clipboard not available");
+        }
+    }
+
     pub fn handle_cancel(&mut self) {
         self.cancel_flag.store(true, Ordering::Relaxed);
     }
 }
 
 impl eframe::App for BgPrunrApp {
+    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        // egui_winit converts Ctrl+C to Event::Copy. Intercept it so we can
+        // use it for image clipboard copy (egui's Copy is for text widgets).
+        raw_input.events.retain(|event| {
+            if matches!(event, egui::Event::Copy) {
+                self.pending_copy = true;
+                false
+            } else {
+                true
+            }
+        });
+    }
+
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // a. Poll worker channel
         while let Ok(msg) = self.worker_rx.try_recv() {
@@ -280,8 +342,10 @@ impl eframe::App for BgPrunrApp {
                     self.status_text = "Done".to_string();
                 }
                 WorkerResult::Cancelled => {
-                    self.state = AppState::Loaded;
-                    self.status_text = "Cancelled".to_string();
+                    if self.state == AppState::Processing {
+                        self.state = AppState::Loaded;
+                        self.status_text = "Cancelled".to_string();
+                    }
                 }
                 WorkerResult::Error(msg) => {
                     self.state = AppState::Loaded;
@@ -292,17 +356,23 @@ impl eframe::App for BgPrunrApp {
             }
         }
 
-        // b. Handle drag-and-drop
+        // b. Handle drag-and-drop (works on X11; no-op on native Wayland — winit#1881)
         let dropped = ctx.input(|i| i.raw.dropped_files.clone());
         for file in dropped {
             if let Some(path) = file.path {
                 self.handle_open_path(path);
+            } else if let Some(bytes) = file.bytes {
+                self.handle_open_bytes(
+                    bytes.to_vec(),
+                    file.name.clone(),
+                );
             }
         }
 
-        // c. Keyboard shortcut detection via bool flags (CRITICAL: no blocking calls inside closure)
-        let (mut open_requested, mut remove_requested, mut save_requested, mut copy_requested) =
-            (false, false, false, false);
+        // c. Keyboard shortcuts
+        // Ctrl+C is intercepted via raw_input_hook (egui converts it to Event::Copy).
+        let (mut open_requested, mut remove_requested, mut save_requested) =
+            (false, false, false);
         let (mut cancel_requested, mut toggle_shortcuts) = (false, false);
 
         ctx.input(|i| {
@@ -315,19 +385,16 @@ impl eframe::App for BgPrunrApp {
             if i.modifiers.command && i.key_pressed(Key::S) {
                 save_requested = true;
             }
-            if i.modifiers.command && i.key_pressed(Key::C) {
-                copy_requested = true;
-            }
             if i.key_pressed(Key::Escape) {
                 cancel_requested = true;
             }
-            // '?' key
-            if i.key_pressed(Key::Questionmark) {
+            if i.key_pressed(Key::F1) {
                 toggle_shortcuts = true;
             }
         });
 
-        // Act on flags AFTER input closure has returned
+        let copy_requested = std::mem::take(&mut self.pending_copy);
+
         if open_requested {
             self.handle_open_dialog();
         }
@@ -340,12 +407,12 @@ impl eframe::App for BgPrunrApp {
         if copy_requested && self.state == AppState::Done {
             self.handle_copy();
         }
-        if cancel_requested {
-            if self.state == AppState::Processing {
-                self.handle_cancel();
-            } else if self.show_shortcuts {
-                self.show_shortcuts = false;
-            }
+        if cancel_requested && self.state == AppState::Processing {
+            self.handle_cancel();
+            self.state = AppState::Loaded;
+            self.status_text = "Cancelled".to_string();
+        } else if cancel_requested && self.show_shortcuts {
+            self.show_shortcuts = false;
         }
         if toggle_shortcuts {
             self.show_shortcuts = !self.show_shortcuts;
@@ -371,7 +438,7 @@ impl eframe::App for BgPrunrApp {
 
         // Load source texture if we have bytes but no texture yet
         if self.source_texture.is_none() {
-            if let Some(ref bytes) = self.source_bytes.clone() {
+            if let Some(ref bytes) = self.source_bytes {
                 if let Ok(img) = image::load_from_memory(bytes) {
                     let rgba = img.to_rgba8();
                     let (w, h) = (rgba.width(), rgba.height());

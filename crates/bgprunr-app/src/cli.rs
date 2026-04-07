@@ -250,9 +250,9 @@ fn run_single(args: &RemoveArgs) -> i32 {
     });
 
     let result = if args.large_image == LargeImagePolicy::Process {
-        process_image_unchecked(&img_bytes, &engine, progress)
+        process_image_unchecked(&img_bytes, &engine, progress, None)
     } else {
-        process_image(&img_bytes, &engine, progress)
+        process_image(&img_bytes, &engine, progress, None)
     };
 
     if let Some(pb) = &spinner { pb.finish_and_clear(); }

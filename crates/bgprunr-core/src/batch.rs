@@ -81,7 +81,7 @@ where
                         move |stage: ProgressStage, pct: f32| f(idx, stage, pct)
                     });
 
-                    let result = process_image(img_bytes, &engine, cb);
+                    let result = process_image(img_bytes, &engine, cb, None);
                     (idx, result)
                 })
                 .collect();
