@@ -6,8 +6,8 @@ use std::sync::{mpsc, Arc};
 use egui::{Key, ViewportCommand};
 use image::GenericImageView;
 
-use bgprunr_core::ProgressStage;
 
+use bgprunr_core::ProgressStage;
 use super::settings::Settings;
 use super::state::AppState;
 use super::theme;
@@ -101,6 +101,9 @@ pub struct BgPrunrApp {
     pub(crate) show_settings: bool,
     pub(crate) settings: Settings,
 
+    // Canvas fade-in: incremented on every image switch
+    pub(crate) canvas_switch_id: u64,
+
     // Pending zoom actions (flags consumed by canvas.rs)
     pub(crate) pending_fit_zoom: bool,
     pub(crate) pending_actual_size: bool,
@@ -120,9 +123,16 @@ pub struct BgPrunrApp {
     decode_tx: mpsc::Sender<(u64, image::RgbaImage)>,
     /// Channel for background save completion notifications
     save_done_rx: mpsc::Receiver<String>,
-    save_done_tx: mpsc::Sender<String>,
+    pub(crate) save_done_tx: mpsc::Sender<String>,
     /// Toast notification system
     pub(crate) toasts: egui_notify::Toasts,
+}
+
+/// Compute dimensions that fit within max_w x max_h preserving aspect ratio.
+fn fit_dimensions(src_w: u32, src_h: u32, max_w: u32, max_h: u32) -> (u32, u32) {
+    let scale = (max_w as f32 / src_w as f32).min(max_h as f32 / src_h as f32).min(1.0);
+    ((src_w as f32 * scale).round().max(1.0) as u32,
+     (src_h as f32 * scale).round().max(1.0) as u32)
 }
 
 /// Convert an RgbaImage to an egui TextureHandle.
@@ -226,6 +236,7 @@ impl BgPrunrApp {
             next_batch_id: 0,
             show_settings: false,
             settings: Settings::default(),
+            canvas_switch_id: 0,
             pending_fit_zoom: false,
             pending_actual_size: false,
             pending_batch_sync: false,
@@ -285,6 +296,7 @@ impl BgPrunrApp {
             next_batch_id: 0,
             show_settings: false,
             settings: Settings::default(),
+            canvas_switch_id: 0,
             pending_fit_zoom: false,
             pending_actual_size: false,
             pending_batch_sync: false,
@@ -382,6 +394,7 @@ impl BgPrunrApp {
         self.source_rgba_cache = None;
         self.state = AppState::Loaded;
         self.status_text = "Ready".to_string();
+        self.canvas_switch_id += 1;
         self.pan_offset = egui::Vec2::ZERO;
         self.previous_zoom = 1.0;
         self.pending_fit_zoom = true;
@@ -438,24 +451,13 @@ impl BgPrunrApp {
     pub fn handle_remove_bg(&mut self) {
         let has_selected = self.batch_items.iter().any(|i| i.selected);
         if has_selected {
-            // Process all checked items via batch
             self.process_items(|item| item.selected);
         } else {
-            // No checkboxes — process current image only
-            if let Some(ref bytes) = self.source_bytes {
-                self.cancel_flag.store(false, Ordering::Relaxed);
-                self.state = AppState::Processing;
-                self.progress_pct = 0.0;
-                self.progress_stage = "Starting".to_string();
-                if !self.batch_items.is_empty() {
-                    let idx = self.selected_batch_index.min(self.batch_items.len() - 1);
-                    self.batch_items[idx].status = BatchStatus::Processing;
-                }
-                let _ = self.worker_tx.send(WorkerMessage::ProcessImage {
-                    img_bytes: bytes.clone(),
-                    model: self.settings.model.into(),
-                    cancel: self.cancel_flag.clone(),
-                });
+            // Process current image via batch path (item_id tracking ensures
+            // result goes to correct image even if user switches during processing)
+            let idx = self.selected_batch_index.min(self.batch_items.len().saturating_sub(1));
+            if let Some(target_id) = self.batch_items.get(idx).map(|b| b.id) {
+                self.process_items(|item| item.id == target_id);
             }
         }
     }
@@ -474,6 +476,8 @@ impl BgPrunrApp {
         }
         self.cancel_flag.store(false, Ordering::Relaxed);
         self.state = AppState::Processing;
+        self.progress_pct = 0.0;
+        self.progress_stage = "Starting".to_string();
         let _ = self.worker_tx.send(WorkerMessage::BatchProcess {
             items,
             model: self.settings.model.into(),
@@ -754,14 +758,17 @@ impl BgPrunrApp {
         if let Some(rgba) = result_rgba {
             let rgba = rgba.clone();
             std::thread::spawn(move || {
-                let thumb = image::imageops::thumbnail(&rgba, 160, 160);
+                let (w, h) = fit_dimensions(rgba.width(), rgba.height(), 160, 160);
+                let thumb = image::imageops::resize(&rgba, w, h, image::imageops::FilterType::Triangle);
                 let _ = tx.send((item_id, thumb.width(), thumb.height(), thumb.into_raw()));
             });
         } else {
             let bytes = source_bytes.to_vec();
             std::thread::spawn(move || {
                 if let Ok(img) = image::load_from_memory(&bytes) {
-                    let thumb = image::imageops::thumbnail(&img.to_rgba8(), 160, 160);
+                    let rgba = img.to_rgba8();
+                    let (w, h) = fit_dimensions(rgba.width(), rgba.height(), 160, 160);
+                    let thumb = image::imageops::resize(&rgba, w, h, image::imageops::FilterType::Triangle);
                     let _ = tx.send((item_id, thumb.width(), thumb.height(), thumb.into_raw()));
                 }
             });
@@ -833,7 +840,6 @@ impl BgPrunrApp {
         self.anim_mask = None;
         self.anim_progress = 0.0;
 
-        // Reset zoom/pan — canvas will apply fit-to-window on same frame
         self.pan_offset = egui::Vec2::ZERO;
         self.previous_zoom = 1.0;
         self.zoom = 1.0;
@@ -882,50 +888,21 @@ impl eframe::App for BgPrunrApp {
         // a. Poll worker channel
         while let Ok(msg) = self.worker_rx.try_recv() {
             match msg {
-                WorkerResult::Progress(stage, pct) => {
-                    self.progress_stage = match stage {
-                        ProgressStage::Decode | ProgressStage::Resize | ProgressStage::Normalize => {
-                            "Preprocessing".to_string()
-                        }
-                        ProgressStage::Infer => "Inferring".to_string(),
-                        ProgressStage::Postprocess | ProgressStage::Alpha => {
-                            "Applying alpha".to_string()
-                        }
-                    };
-                    self.progress_pct = pct;
-                }
-                WorkerResult::Done(result) => {
-                    let rgba_img = result.rgba_image;
-                    if self.settings.reveal_animation_enabled {
-                        self.setup_reveal_animation(&rgba_img, ctx);
-                    } else {
-                        self.result_texture = Some(rgba_to_texture(&rgba_img, "result", ctx));
-                        self.result_rgba = Some(rgba_img.clone());
-                        self.state = AppState::Done;
-                        self.status_text = "Done".to_string();
-                        self.toasts.success("Background removed");
+                WorkerResult::BatchProgress { item_id, stage, pct } => {
+                    // Update progress if this is the currently viewed item
+                    let is_selected = self.batch_items.get(self.selected_batch_index)
+                        .map_or(false, |b| b.id == item_id);
+                    if is_selected {
+                        self.progress_stage = match stage {
+                            ProgressStage::Decode => "Decoding image".into(),
+                            ProgressStage::Resize => "Resizing to 320\u{00d7}320".into(),
+                            ProgressStage::Normalize => "Normalizing pixels".into(),
+                            ProgressStage::Infer => "Running AI model".into(),
+                            ProgressStage::Postprocess => "Building mask".into(),
+                            ProgressStage::Alpha => "Applying transparency".into(),
+                        };
+                        self.progress_pct = pct;
                     }
-                    if !self.batch_items.is_empty() {
-                        let idx = self.selected_batch_index.min(self.batch_items.len() - 1);
-                        self.batch_items[idx].result_rgba = Some(rgba_img);
-                        self.batch_items[idx].result_texture = self.result_texture.clone();
-                        self.batch_items[idx].status = BatchStatus::Done;
-                        self.batch_items[idx].thumb_texture = None;
-                        self.batch_items[idx].thumb_pending = false;
-                    }
-                    self.settings.active_backend = result.active_provider;
-                }
-                WorkerResult::Cancelled => {
-                    if self.state == AppState::Processing {
-                        self.state = AppState::Loaded;
-                        self.status_text = "Cancelled".to_string();
-                    }
-                }
-                WorkerResult::Error(msg) => {
-                    self.state = AppState::Loaded;
-                    self.status_text =
-                        "Processing failed. Try a different image or restart the app.".to_string();
-                    eprintln!("Worker error: {msg}");
                 }
                 WorkerResult::BatchItemDone { item_id, result } => {
                     let is_selected = self.batch_items.get(self.selected_batch_index)
@@ -950,6 +927,17 @@ impl eframe::App for BgPrunrApp {
                             }
                         }
                     }
+                    // Update progress info
+                    let done = self.batch_items.iter().filter(|i| i.status == BatchStatus::Done).count();
+                    let total = self.batch_items.len();
+                    let processing = self.batch_items.iter().filter(|i| i.status == BatchStatus::Processing).count();
+                    if processing > 0 {
+                        self.progress_stage = format!("Processing {done}/{total}");
+                    } else {
+                        self.progress_stage = "Finishing up".to_string();
+                    }
+                    self.progress_pct = done as f32 / total.max(1) as f32;
+
                     if let Some(rgba) = animate_rgba {
                         self.setup_reveal_animation(&rgba, ctx);
                     } else if is_selected {
@@ -959,16 +947,33 @@ impl eframe::App for BgPrunrApp {
                 WorkerResult::BatchComplete => {
                     let done = self.batch_items.iter().filter(|i| i.status == BatchStatus::Done).count();
                     let failed = self.batch_items.iter().filter(|i| matches!(i.status, BatchStatus::Error(_))).count();
+                    let still_processing = self.batch_items.iter().any(|i| i.status == BatchStatus::Processing);
                     if failed > 0 {
                         let msg = format!("{failed} image(s) failed to process");
                         self.status_text = msg.clone();
                         self.toasts.warning(msg);
-                    } else {
+                    } else if !still_processing {
                         let msg = format!("All done \u{2014} {done} images processed");
                         self.status_text = msg.clone();
                         self.toasts.success(msg);
                     }
-                    self.state = AppState::Done;
+                    // Update app state to match viewed item (textures already synced by BatchItemDone)
+                    if !still_processing {
+                        let idx = self.selected_batch_index.min(self.batch_items.len().saturating_sub(1));
+                        if let Some(item) = self.batch_items.get(idx) {
+                            match item.status {
+                                BatchStatus::Done => self.state = AppState::Done,
+                                BatchStatus::Processing => self.state = AppState::Processing,
+                                _ => self.state = AppState::Loaded,
+                            }
+                        }
+                    }
+                }
+                WorkerResult::Cancelled => {
+                    if self.state == AppState::Processing {
+                        self.state = AppState::Loaded;
+                        self.status_text = "Cancelled".to_string();
+                    }
                 }
             }
         }

@@ -1,56 +1,57 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
-/// BgPrunR — local background removal
+/// BgPrunR — local AI background removal.
+///
+/// No arguments launches the GUI. Pass image files directly to process them:
+///   bgprunr photo.jpg              # removes background, saves photo_nobg.png
+///   bgprunr *.jpg -o clean/        # batch to folder
+///   bgprunr -m u2net portrait.jpg  # use quality model
 #[derive(Parser, Debug)]
 #[command(name = "bgprunr", version, about, long_about = None)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Commands>,
+
+    /// Input image file(s).
+    pub inputs: Vec<PathBuf>,
+
+    /// Output path. File for single image, directory for batch.
+    #[arg(short = 'o', long, global = true)]
+    pub output: Option<PathBuf>,
+
+    /// Model: silueta (fast, default) or u2net (quality).
+    #[arg(short = 'm', long, default_value = "silueta", global = true)]
+    pub model: CliModel,
+
+    /// Number of parallel jobs for batch processing.
+    #[arg(short = 'j', long, default_value_t = 1, global = true)]
+    pub jobs: usize,
+
+    /// How to handle images exceeding 8000px in either dimension.
+    #[arg(long, default_value = "downscale", global = true)]
+    pub large_image: LargeImagePolicy,
+
+    /// Overwrite existing output files.
+    #[arg(short = 'f', long, global = true)]
+    pub force: bool,
+
+    /// Suppress progress output (errors still go to stderr).
+    #[arg(short = 'q', long, global = true)]
+    pub quiet: bool,
 }
 
 #[derive(Subcommand, Debug)]
 pub enum Commands {
-    /// Remove background from one or more images
-    Remove(RemoveArgs),
+    /// Remove background from one or more images (same as passing files directly).
+    Remove(RemoveSubArgs),
 }
 
+/// Subcommand args — only inputs, inherits everything else from parent Cli.
 #[derive(clap::Args, Debug)]
-pub struct RemoveArgs {
-    /// Input image file(s). Pass multiple paths for batch mode.
-    /// Shell globs are expanded by the shell before bgprunr sees them.
+pub struct RemoveSubArgs {
+    /// Input image file(s).
     pub inputs: Vec<PathBuf>,
-
-    /// Output file path. Only valid for single-image mode.
-    /// Mutually exclusive with --output-dir.
-    #[arg(short = 'o', long, conflicts_with = "output_dir")]
-    pub output: Option<PathBuf>,
-
-    /// Output directory for batch mode.
-    /// Files are named {stem}_nobg.png inside this directory.
-    #[arg(long, conflicts_with = "output")]
-    pub output_dir: Option<PathBuf>,
-
-    /// Model to use for inference.
-    #[arg(long, default_value = "silueta")]
-    pub model: CliModel,
-
-    /// Number of parallel inference jobs (batch mode only).
-    /// Default 1 (sequential). Each job creates its own ORT session.
-    #[arg(long, default_value_t = 1)]
-    pub jobs: usize,
-
-    /// How to handle images exceeding 8000px in either dimension.
-    #[arg(long, default_value = "downscale")]
-    pub large_image: LargeImagePolicy,
-
-    /// Overwrite existing output files without prompting.
-    #[arg(long)]
-    pub force: bool,
-
-    /// Suppress all progress output. Errors still go to stderr.
-    #[arg(long)]
-    pub quiet: bool,
 }
 
 /// Model selection
@@ -90,44 +91,44 @@ use bgprunr_core::{
     load_image_from_path, check_large_image, downscale_image, encode_rgba_png,
 };
 
-/// Entry point for the `remove` subcommand. Returns exit code (0/1/2).
-pub fn run_remove(args: RemoveArgs) -> i32 {
+/// Entry point for processing. Returns exit code (0/1/2).
+pub fn run_remove(args: &Cli) -> i32 {
     if args.inputs.is_empty() {
-        eprintln!("error: no input files specified. Run `bgprunr remove --help`.");
+        eprintln!("error: no input files specified. Usage: bgprunr <images...> [options]");
+        eprintln!("Run `bgprunr --help` for more info.");
         return 1;
     }
 
-    // Ensure output directory exists if specified
-    if let Some(ref dir) = args.output_dir {
-        if let Err(e) = std::fs::create_dir_all(dir) {
-            eprintln!("error: cannot create output directory {}: {e}", dir.display());
-            return 1;
+    // Ensure output directory exists if -o points to a dir (create eagerly, handle error)
+    if let Some(ref out) = args.output {
+        if args.inputs.len() > 1 {
+            if let Err(e) = std::fs::create_dir_all(out) {
+                eprintln!("error: cannot create output directory {}: {e}", out.display());
+                return 1;
+            }
         }
     }
 
     if args.inputs.len() == 1 {
-        run_single(&args)
+        run_single(args)
     } else {
-        run_batch(&args)
+        run_batch(args)
     }
 }
 
 // ── Output path helpers ──────────────────────────────────────────────────────
 
-/// Compute output path for a single input using {stem}_nobg.png convention.
-/// With -o: use that path directly.
-/// With --output-dir DIR: write into DIR/{stem}_nobg.png.
-/// Without either: write alongside input as {input_dir}/{stem}_nobg.png.
-fn output_path(input: &std::path::Path, args: &RemoveArgs) -> std::path::PathBuf {
-    if let Some(ref out) = args.output {
-        return out.clone();
-    }
+/// Compute output path for an input image.
+/// Batch mode or -o is a directory: write {stem}_nobg.png into that directory.
+/// Single mode with -o file.png: use that path directly.
+/// No -o: write alongside input as {input_dir}/{stem}_nobg.png.
+fn output_path(input: &std::path::Path, output: &Option<PathBuf>, is_batch: bool) -> std::path::PathBuf {
     let stem = input.file_stem().unwrap_or_default().to_string_lossy();
-    let filename = format!("{stem}_nobg.png");
-    if let Some(ref dir) = args.output_dir {
-        dir.join(&filename)
-    } else {
-        input.with_file_name(&filename)
+    let nobg_name = format!("{stem}_nobg.png");
+    match output {
+        Some(out) if is_batch || out.is_dir() => out.join(nobg_name),
+        Some(out) => out.clone(),
+        None => input.with_file_name(nobg_name),
     }
 }
 
@@ -200,9 +201,9 @@ fn stage_label(stage: ProgressStage) -> &'static str {
 
 // ── Single-image execution path ──────────────────────────────────────────────
 
-fn run_single(args: &RemoveArgs) -> i32 {
+fn run_single(args: &Cli) -> i32 {
     let input = &args.inputs[0];
-    let out_path = output_path(input, args);
+    let out_path = output_path(input, &args.output, false);
 
     if let Err(msg) = check_overwrite(&out_path, args.force) {
         eprintln!("error: {msg}");
@@ -277,7 +278,7 @@ fn run_single(args: &RemoveArgs) -> i32 {
 
 // ── Batch execution path ─────────────────────────────────────────────────────
 
-fn run_batch(args: &RemoveArgs) -> i32 {
+fn run_batch(args: &Cli) -> i32 {
     let mp = if !args.quiet { Some(MultiProgress::new()) } else { None };
 
     // Overall progress bar: "3/10 images"
@@ -381,7 +382,7 @@ fn run_batch(args: &RemoveArgs) -> i32 {
         let original_idx = valid_indices[batch_idx];
         let input = &args.inputs[original_idx];
         let elapsed = start_times[original_idx].elapsed();
-        let out_path = output_path(input, args);
+        let out_path = output_path(input, &args.output, true);
 
         let spinner_opt = spinners_arc.get(original_idx).and_then(|o| o.as_ref());
 

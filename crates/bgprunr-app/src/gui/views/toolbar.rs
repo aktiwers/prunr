@@ -77,12 +77,15 @@ pub fn render(ui: &mut egui::Ui, app: &mut BgPrunrApp) {
 
         // Right-aligned group: settings + model selector + save/copy
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let btn_height = ui.spacing().interact_size.y;
+
             // Settings gear button
             let gear_btn = egui::Button::new(
-                RichText::new(ICON_SETTINGS.codepoint).size(18.0).color(theme::TEXT_PRIMARY),
+                RichText::new(ICON_SETTINGS.codepoint).size(theme::FONT_SIZE_BODY).color(theme::TEXT_PRIMARY),
             )
             .fill(theme::BG_SECONDARY)
-            .corner_radius(theme::BUTTON_ROUNDING);
+            .corner_radius(theme::BUTTON_ROUNDING)
+            .min_size(egui::vec2(0.0, btn_height));
             if ui.add(gear_btn).on_hover_text("Settings (Ctrl+,)").clicked() {
                 app.show_settings = !app.show_settings;
             }
