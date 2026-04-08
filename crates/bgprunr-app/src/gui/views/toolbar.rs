@@ -24,13 +24,20 @@ pub fn render(ui: &mut egui::Ui, app: &mut BgPrunrApp) {
             app.pending_open_dialog = true;
         }
 
-        // Remove BG button -- primary CTA, enabled only when Loaded or Done
-        let remove_text = if is_processing {
-            RichText::new("Remove BG").color(Color32::from_rgba_unmultiplied(255, 255, 255, 102))
+        // Remove BG button — processes checked items, or current if none checked
+        let has_selected = app.batch_items.iter().any(|i| i.selected);
+        let has_processable = if has_selected {
+            app.batch_items.iter().any(|i| i.selected && matches!(i.status, BatchStatus::Pending | BatchStatus::Error(_)))
         } else {
-            RichText::new("Remove BG").color(Color32::WHITE)
+            can_remove
         };
-        let remove_fill = if can_remove {
+        let remove_label = if has_selected { "Remove BG Selected" } else { "Remove BG" };
+        let remove_text = if !has_processable || is_processing {
+            RichText::new(remove_label).color(Color32::from_rgba_unmultiplied(255, 255, 255, 102))
+        } else {
+            RichText::new(remove_label).color(Color32::WHITE)
+        };
+        let remove_fill = if has_processable && !is_processing {
             theme::ACCENT
         } else {
             theme::ACCENT_DISABLED
@@ -39,7 +46,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut BgPrunrApp) {
             .fill(remove_fill)
             .corner_radius(theme::BUTTON_ROUNDING);
 
-        if ui.add_enabled(can_remove, remove_btn).clicked() {
+        if ui.add_enabled(has_processable && !is_processing, remove_btn).clicked() {
             app.handle_remove_bg();
         }
 
@@ -78,12 +85,23 @@ pub fn render(ui: &mut egui::Ui, app: &mut BgPrunrApp) {
             if ui.add(gear_btn).on_hover_text("Settings (Ctrl+,)").clicked() {
                 app.show_settings = !app.show_settings;
             }
-            // Save All button — only shown when batch has done items
+            if has_selected {
+                let remove_sel_btn = egui::Button::new(
+                    RichText::new("Remove Selected").color(Color32::WHITE),
+                )
+                .fill(theme::DESTRUCTIVE)
+                .corner_radius(theme::BUTTON_ROUNDING);
+                if ui.add(remove_sel_btn).clicked() {
+                    app.remove_selected();
+                }
+            }
+
+            // Save All button — only shown when batch has 2+ done items
             {
-                let has_done_batch = app.batch_items.iter()
+                let done_count = app.batch_items.iter()
                     .filter(|i| i.status == BatchStatus::Done && i.result_rgba.is_some())
-                    .count() >= 2;
-                if has_done_batch {
+                    .count();
+                if done_count >= 2 {
                     let save_all_btn = egui::Button::new(
                         RichText::new("Save All").color(Color32::WHITE),
                     )
@@ -95,7 +113,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut BgPrunrApp) {
                 }
             }
 
-            // Copy Image button -- enabled only when Done
+            // Copy Image button
             let copy_btn = egui::Button::new(
                 RichText::new("Copy Image").color(theme::TEXT_PRIMARY),
             )
@@ -105,14 +123,15 @@ pub fn render(ui: &mut egui::Ui, app: &mut BgPrunrApp) {
                 app.handle_copy();
             }
 
-            // Save PNG button -- enabled only when Done
+            // Save Selected button (saves current if none checked, or all checked)
+            let save_label = if has_selected { "Save Selected" } else { "Save" };
             let save_btn = egui::Button::new(
-                RichText::new("Save PNG").color(theme::TEXT_PRIMARY),
+                RichText::new(save_label).color(theme::TEXT_PRIMARY),
             )
             .fill(theme::BG_SECONDARY)
             .corner_radius(theme::BUTTON_ROUNDING);
-            if ui.add_enabled(can_save_copy, save_btn).clicked() {
-                app.handle_save();
+            if ui.add_enabled(can_save_copy || has_selected, save_btn).clicked() {
+                app.handle_save_selected();
             }
 
             // Model selector -- disabled during processing

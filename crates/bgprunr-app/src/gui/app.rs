@@ -21,9 +21,11 @@ pub(crate) struct BatchItem {
     pub dimensions: (u32, u32),
     pub source_texture: Option<egui::TextureHandle>,
     pub thumb_texture: Option<egui::TextureHandle>,
+    pub thumb_pending: bool,
     pub result_rgba: Option<image::RgbaImage>,
     pub result_texture: Option<egui::TextureHandle>,
     pub status: BatchStatus,
+    pub selected: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -107,6 +109,10 @@ pub struct BgPrunrApp {
     /// Channel for receiving files loaded by background thread
     file_load_rx: mpsc::Receiver<(Vec<u8>, String)>,
     file_load_tx: mpsc::Sender<(Vec<u8>, String)>,
+    /// Channel for receiving decoded thumbnails from background thread
+    /// (batch_item_id, width, height, rgba_pixels)
+    pub(crate) thumb_rx: mpsc::Receiver<(u64, u32, u32, Vec<u8>)>,
+    thumb_tx: mpsc::Sender<(u64, u32, u32, Vec<u8>)>,
 }
 
 /// Convert an RgbaImage to an egui TextureHandle.
@@ -131,13 +137,21 @@ impl BgPrunrApp {
         // Set dark visuals
         cc.egui_ctx.set_visuals(egui::Visuals::dark());
 
-        // Customize visuals
+        // Customize visuals — suppress all bright/red borders
         let mut visuals = cc.egui_ctx.global_style().visuals.clone();
         visuals.window_fill = theme::BG_PRIMARY;
         visuals.panel_fill = theme::BG_SECONDARY;
+        let subtle = egui::Stroke::new(1.0, egui::Color32::from_rgb(0x3a, 0x3a, 0x3a));
+        visuals.widgets.noninteractive.bg_stroke = subtle;
+        visuals.widgets.inactive.bg_stroke = subtle;
+        visuals.widgets.active.bg_stroke = egui::Stroke::new(1.0, theme::ACCENT);
+        visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(0x50, 0x50, 0x50));
+        visuals.widgets.open.bg_stroke = subtle; // ComboBox "open" state
+        visuals.window_stroke = subtle;
+        visuals.error_fg_color = theme::DESTRUCTIVE; // keep red for actual errors only
         cc.egui_ctx.set_visuals(visuals);
 
-        // Override font sizes
+        // Override font sizes and suppress debug red-border warnings
         let mut style = (*cc.egui_ctx.global_style()).clone();
         style.text_styles.insert(
             egui::TextStyle::Body,
@@ -151,10 +165,17 @@ impl BgPrunrApp {
             egui::TextStyle::Monospace,
             egui::FontId::monospace(theme::FONT_SIZE_MONO),
         );
+        // Disable debug red-border warnings that fire on layout shifts
+        // (e.g. sidebar appearing after file-open changes widget rects between frames).
+        #[cfg(debug_assertions)]
+        {
+            style.debug.warn_if_rect_changes_id = false;
+        }
         cc.egui_ctx.set_global_style(style);
 
         let clipboard = arboard::Clipboard::new().ok();
         let (file_load_tx, file_load_rx) = mpsc::channel();
+        let (thumb_tx, thumb_rx) = mpsc::channel();
 
         Self {
             state: AppState::Empty,
@@ -196,6 +217,8 @@ impl BgPrunrApp {
             pending_open_dialog: false,
             file_load_tx,
             file_load_rx,
+            thumb_tx,
+            thumb_rx,
         }
     }
 
@@ -205,6 +228,7 @@ impl BgPrunrApp {
         let (worker_tx, _worker_msg_rx) = mpsc::channel::<WorkerMessage>();
         let (_result_tx, worker_rx) = mpsc::channel::<WorkerResult>();
         let (file_load_tx, file_load_rx) = mpsc::channel();
+        let (thumb_tx, thumb_rx) = mpsc::channel();
         Self {
             state: AppState::Empty,
             loaded_filename: None,
@@ -245,6 +269,8 @@ impl BgPrunrApp {
             pending_open_dialog: false,
             file_load_tx,
             file_load_rx,
+            thumb_tx,
+            thumb_rx,
         }
     }
 
@@ -254,27 +280,75 @@ impl BgPrunrApp {
         self.status_set_at = Some(std::time::Instant::now());
     }
 
-    fn load_image(&mut self, bytes: Vec<u8>, filename: Option<String>) {
-        match image::load_from_memory(&bytes) {
-            Ok(img) => {
-                self.image_dimensions = Some(img.dimensions());
-                self.source_bytes = Some(bytes);
-                self.loaded_filename = filename;
-                self.source_texture = None;
-                self.result_texture = None;
-                self.result_rgba = None;
-                self.source_rgba_cache = None;
-                self.state = AppState::Loaded;
-                self.status_text = "Ready".to_string();
-                self.pan_offset = egui::Vec2::ZERO;
-                self.previous_zoom = 1.0;
-                self.pending_fit_zoom = true;
-                self.show_original = false;
-            }
-            Err(e) => {
-                self.set_temporary_status(format!("Could not load image: {e}"));
-            }
+    /// Reset app state after all batch items are removed.
+    fn clear_to_empty(&mut self) {
+        self.source_bytes = None;
+        self.source_texture = None;
+        self.result_texture = None;
+        self.result_rgba = None;
+        self.loaded_filename = None;
+        self.image_dimensions = None;
+        self.state = AppState::Empty;
+        self.selected_batch_index = 0;
+    }
+
+    /// Sync after batch modification — clamp index and refresh canvas.
+    fn sync_after_batch_change(&mut self) {
+        if self.batch_items.is_empty() {
+            self.clear_to_empty();
+        } else {
+            self.selected_batch_index = self.selected_batch_index.min(self.batch_items.len() - 1);
+            self.pending_batch_sync = true;
         }
+    }
+
+    fn load_image(&mut self, bytes: Vec<u8>, filename: Option<String>) {
+        let dims = match image::ImageReader::new(std::io::Cursor::new(&bytes))
+            .with_guessed_format()
+            .ok()
+            .and_then(|r| r.into_dimensions().ok())
+        {
+            Some(d) => d,
+            None => {
+                self.set_temporary_status("Could not load image");
+                return;
+            }
+        };
+
+        let name = filename.unwrap_or_else(|| "image".into());
+
+        // Add to batch so it appears in the sidebar
+        let id = self.next_batch_id;
+        self.next_batch_id += 1;
+        self.batch_items.push(BatchItem {
+            id,
+            filename: name.clone(),
+            source_bytes: bytes.clone(),
+            dimensions: dims,
+            source_texture: None,
+            thumb_texture: None,
+            thumb_pending: false,
+            result_rgba: None,
+            result_texture: None,
+            status: BatchStatus::Pending,
+            selected: false,
+        });
+        self.selected_batch_index = self.batch_items.len() - 1;
+
+        // Set app-level state for canvas
+        self.image_dimensions = Some(dims);
+        self.source_bytes = Some(bytes);
+        self.loaded_filename = Some(name);
+        self.source_texture = None;
+        self.result_texture = None;
+        self.result_rgba = None;
+        self.source_rgba_cache = None;
+        self.state = AppState::Loaded;
+        self.status_text = "Ready".to_string();
+        self.pan_offset = egui::Vec2::ZERO;
+        self.previous_zoom = 1.0;
+        self.pending_fit_zoom = true;
+        self.show_original = false;
     }
 
     pub fn handle_open_path(&mut self, path: PathBuf) {
@@ -325,61 +399,94 @@ impl BgPrunrApp {
     }
 
     pub fn handle_remove_bg(&mut self) {
-        if let Some(ref bytes) = self.source_bytes {
-            self.cancel_flag.store(false, Ordering::Relaxed);
-            self.state = AppState::Processing;
-            self.progress_pct = 0.0;
-            self.progress_stage = "Starting".to_string();
-            let _ = self.worker_tx.send(WorkerMessage::ProcessImage {
-                img_bytes: bytes.clone(),
-                model: self.settings.model.into(),
-                cancel: self.cancel_flag.clone(),
-            });
-        }
-    }
-
-    pub fn handle_save(&mut self) {
-        if let Some(ref rgba) = self.result_rgba {
-            let default_name = self
-                .loaded_filename
-                .as_deref()
-                .and_then(|name| Path::new(name).file_stem()?.to_str())
-                .map(|stem| format!("{stem}-nobg.png"))
-                .unwrap_or_else(|| "result-nobg.png".to_string());
-            if let Some(path) = rfd::FileDialog::new()
-                .add_filter("PNG Image", &["png"])
-                .set_file_name(&default_name)
-                .set_title("Save PNG")
-                .save_file()
-            {
-                match bgprunr_core::encode_rgba_png(rgba) {
-                    Ok(png_bytes) => match std::fs::write(&path, &png_bytes) {
-                        Ok(()) => self.set_temporary_status("Saved"),
-                        Err(_) => self.set_temporary_status(
-                            "Could not save file. Check disk space and permissions.",
-                        ),
-                    },
-                    Err(_) => self.set_temporary_status(
-                        "Could not save file. Check disk space and permissions.",
-                    ),
+        let has_selected = self.batch_items.iter().any(|i| i.selected);
+        if has_selected {
+            // Process all checked items via batch
+            self.process_items(|item| item.selected);
+        } else {
+            // No checkboxes — process current image only
+            if let Some(ref bytes) = self.source_bytes {
+                self.cancel_flag.store(false, Ordering::Relaxed);
+                self.state = AppState::Processing;
+                self.progress_pct = 0.0;
+                self.progress_stage = "Starting".to_string();
+                if !self.batch_items.is_empty() {
+                    let idx = self.selected_batch_index.min(self.batch_items.len() - 1);
+                    self.batch_items[idx].status = BatchStatus::Processing;
                 }
+                let _ = self.worker_tx.send(WorkerMessage::ProcessImage {
+                    img_bytes: bytes.clone(),
+                    model: self.settings.model.into(),
+                    cancel: self.cancel_flag.clone(),
+                });
             }
         }
     }
 
-    pub fn handle_save_all(&mut self) {
-        let done_items: Vec<_> = self.batch_items.iter()
-            .filter(|i| i.status == BatchStatus::Done && i.result_rgba.is_some())
+    /// Collect and send batch items matching `filter` for processing.
+    fn process_items(&mut self, filter: impl Fn(&BatchItem) -> bool) {
+        let items: Vec<(u64, Vec<u8>)> = self.batch_items.iter()
+            .filter(|i| filter(i) && matches!(i.status, BatchStatus::Pending | BatchStatus::Error(_)))
+            .map(|i| (i.id, i.source_bytes.clone()))
             .collect();
-        if done_items.is_empty() { return; }
+        if items.is_empty() { return; }
+        for item in &mut self.batch_items {
+            if filter(item) && matches!(item.status, BatchStatus::Pending | BatchStatus::Error(_)) {
+                item.status = BatchStatus::Processing;
+            }
+        }
+        self.cancel_flag.store(false, Ordering::Relaxed);
+        self.state = AppState::Processing;
+        let _ = self.worker_tx.send(WorkerMessage::BatchProcess {
+            items,
+            model: self.settings.model.into(),
+            jobs: self.settings.parallel_jobs,
+            cancel: self.cancel_flag.clone(),
+        });
+    }
 
+    /// Save selected images (or current image if none selected).
+    /// Single selection → save-as dialog; multiple → folder picker.
+    pub fn handle_save_selected(&mut self) {
+        let selected: Vec<_> = self.batch_items.iter()
+            .filter(|i| i.selected && i.status == BatchStatus::Done && i.result_rgba.is_some())
+            .collect();
+
+        if selected.is_empty() {
+            // No checkboxes selected — save current image via save-as dialog
+            if let Some(ref rgba) = self.result_rgba {
+                let default_name = self
+                    .loaded_filename
+                    .as_deref()
+                    .and_then(|name| Path::new(name).file_stem()?.to_str())
+                    .map(|stem| format!("{stem}-nobg.png"))
+                    .unwrap_or_else(|| "result-nobg.png".to_string());
+                if let Some(path) = rfd::FileDialog::new()
+                    .add_filter("PNG Image", &["png"])
+                    .set_file_name(&default_name)
+                    .set_title("Save PNG")
+                    .save_file()
+                {
+                    match bgprunr_core::encode_rgba_png(rgba) {
+                        Ok(png_bytes) => match std::fs::write(&path, &png_bytes) {
+                            Ok(()) => self.set_temporary_status("Saved"),
+                            Err(_) => self.set_temporary_status("Could not save file"),
+                        },
+                        Err(_) => self.set_temporary_status("Could not save file"),
+                    }
+                }
+            }
+            return;
+        }
+
+        // Multiple selected — folder picker
         if let Some(folder) = rfd::FileDialog::new()
-            .set_title("Save All — Choose Folder")
+            .set_title("Save Selected — Choose Folder")
             .pick_folder()
         {
             let mut saved = 0usize;
             let mut failed = 0usize;
-            for item in &done_items {
+            for item in &selected {
                 if let Some(ref rgba) = item.result_rgba {
                     let stem = Path::new(&item.filename)
                         .file_stem()
@@ -401,6 +508,25 @@ impl BgPrunrApp {
                 self.set_temporary_status(format!("Saved {saved} image(s)"));
             }
         }
+    }
+
+    pub fn handle_save_all(&mut self) {
+        // Select all done items, then delegate to save_selected
+        for item in &mut self.batch_items {
+            if item.status == BatchStatus::Done && item.result_rgba.is_some() {
+                item.selected = true;
+            }
+        }
+        self.handle_save_selected();
+        // Deselect after save
+        for item in &mut self.batch_items {
+            item.selected = false;
+        }
+    }
+
+    pub fn remove_selected(&mut self) {
+        self.batch_items.retain(|item| !item.selected);
+        self.sync_after_batch_change();
     }
 
     pub fn handle_copy(&mut self) {
@@ -487,10 +613,12 @@ impl BgPrunrApp {
                     source_bytes: existing_bytes,
                     dimensions: existing_dims,
                     source_texture: self.source_texture.take(),
-                    thumb_texture: None, // created lazily in sidebar
+                    thumb_texture: None,
+                    thumb_pending: false,
                     result_rgba: self.result_rgba.take(),
                     result_texture: self.result_texture.take(),
                     status: if self.state == AppState::Done { BatchStatus::Done } else { BatchStatus::Pending },
+                    selected: false,
                 };
                 self.batch_items.insert(0, existing_item);
                 self.selected_batch_index = 0;
@@ -506,10 +634,12 @@ impl BgPrunrApp {
             source_bytes: bytes,
             dimensions: dims,
             source_texture: None,
-            thumb_texture: None, // created lazily in sidebar
+            thumb_texture: None,
+            thumb_pending: false,
             result_rgba: None,
             result_texture: None,
             status: BatchStatus::Pending,
+            selected: false,
         });
 
         if self.state == AppState::Empty {
@@ -518,30 +648,35 @@ impl BgPrunrApp {
         self.pending_batch_sync = true;
     }
 
+    /// Request thumbnail generation on a background thread for a batch item.
+    /// If result_rgba is Some, thumbnails from result; otherwise decodes source bytes.
+    pub(crate) fn request_thumbnail(&self, item_id: u64, source_bytes: &[u8], result_rgba: Option<&image::RgbaImage>) {
+        let tx = self.thumb_tx.clone();
+        if let Some(rgba) = result_rgba {
+            let rgba = rgba.clone();
+            std::thread::spawn(move || {
+                let thumb = image::imageops::thumbnail(&rgba, 160, 160);
+                let _ = tx.send((item_id, thumb.width(), thumb.height(), thumb.into_raw()));
+            });
+        } else {
+            let bytes = source_bytes.to_vec();
+            std::thread::spawn(move || {
+                if let Ok(img) = image::load_from_memory(&bytes) {
+                    let thumb = image::imageops::thumbnail(&img.to_rgba8(), 160, 160);
+                    let _ = tx.send((item_id, thumb.width(), thumb.height(), thumb.into_raw()));
+                }
+            });
+        }
+    }
+
+    pub fn remove_batch_item(&mut self, idx: usize) {
+        if idx >= self.batch_items.len() { return; }
+        self.batch_items.remove(idx);
+        self.sync_after_batch_change();
+    }
+
     pub fn handle_process_all(&mut self) {
-        let pending_items: Vec<(u64, Vec<u8>)> = self.batch_items.iter()
-            .filter(|item| item.status == BatchStatus::Pending)
-            .map(|item| (item.id, item.source_bytes.clone()))
-            .collect();
-
-        if pending_items.is_empty() {
-            return;
-        }
-
-        // Mark pending items as processing
-        for item in &mut self.batch_items {
-            if item.status == BatchStatus::Pending {
-                item.status = BatchStatus::Processing;
-            }
-        }
-
-        self.cancel_flag.store(false, Ordering::Relaxed);
-        let _ = self.worker_tx.send(WorkerMessage::BatchProcess {
-            items: pending_items,
-            model: self.settings.model.into(),
-            jobs: self.settings.parallel_jobs,
-            cancel: self.cancel_flag.clone(),
-        });
+        self.process_items(|_| true);
     }
 
     /// Set up reveal animation state from a completed result image.
@@ -678,6 +813,7 @@ impl eframe::App for BgPrunrApp {
                             self.batch_items[idx].result_texture = self.result_texture.clone();
                             self.batch_items[idx].status = BatchStatus::Done;
                             self.batch_items[idx].thumb_texture = None;
+                            self.batch_items[idx].thumb_pending = false;
                         }
                     }
                     self.settings.active_backend = result.active_provider;
@@ -710,6 +846,7 @@ impl eframe::App for BgPrunrApp {
                                     item.result_rgba = Some(rgba);
                                     item.status = BatchStatus::Done;
                                     item.thumb_texture = None;
+                                    item.thumb_pending = false;
                                 }
                                 self.settings.active_backend = pr.active_provider;
                             }
@@ -848,7 +985,7 @@ impl eframe::App for BgPrunrApp {
             self.handle_remove_bg();
         }
         if save_requested && self.state == AppState::Done {
-            self.handle_save();
+            self.handle_save_selected();
         }
         if copy_requested && self.state == AppState::Done {
             self.handle_copy();
@@ -969,15 +1106,23 @@ impl eframe::App for BgPrunrApp {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let panel_frame = egui::Frame {
+            fill: theme::BG_SECONDARY,
+            stroke: egui::Stroke::new(1.0, egui::Color32::from_rgb(0x2a, 0x2a, 0x2a)),
+            inner_margin: egui::Margin::symmetric(theme::SPACE_SM as i8, 0),
+            ..Default::default()
+        };
         egui::Panel::top("toolbar")
             .exact_size(theme::TOOLBAR_HEIGHT)
+            .frame(panel_frame)
             .show_inside(ui, |ui| toolbar::render(ui, self));
 
         egui::Panel::bottom("statusbar")
             .exact_size(theme::STATUS_BAR_HEIGHT)
+            .frame(panel_frame)
             .show_inside(ui, |ui| statusbar::render(ui, self));
 
-        let sidebar_visible = self.show_sidebar || self.batch_items.len() >= 2;
+        let sidebar_visible = self.show_sidebar || !self.batch_items.is_empty();
         if sidebar_visible {
             egui::Panel::right("sidebar")
                 .exact_size(theme::SIDEBAR_WIDTH)
@@ -988,7 +1133,9 @@ impl eframe::App for BgPrunrApp {
         egui::CentralPanel::default().show_inside(ui, |ui| canvas::render(ui, self));
 
         if self.show_shortcuts {
-            shortcuts::render(ui.ctx());
+            if shortcuts::render(ui.ctx()) {
+                self.show_shortcuts = false;
+            }
         }
         if self.show_settings {
             settings::render(ui.ctx(), self);
