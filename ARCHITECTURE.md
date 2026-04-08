@@ -322,3 +322,11 @@ if ui.input(|i| i.modifiers.ctrl && i.key_pressed(Key::O)) { /* open */ }
 | 2026-04-08 | Interactive modal backdrop (click outside to close), fixed Settings button | Modal UX |
 | 2026-04-08 | Processing animations: shimmer sweep + pulsing border on thumbnails/canvas | Visual feedback |
 | 2026-04-08 | Extracted process_items(), clear_to_empty(), sync_after_batch_change() helpers | Code cleanup |
+| 2026-04-08 | ProcessResult carries raw rgba_image — eliminates UI-thread PNG decode (50-200ms) | Performance |
+| 2026-04-08 | Arc<Vec<u8>> for source_bytes — eliminates multi-MB clones on click/send | Performance |
+| 2026-04-08 | Background thread save (encode+write off UI thread) with save_done channel | Performance |
+| 2026-04-08 | Removed all UI-thread image::load_from_memory fallbacks | Performance |
+| 2026-04-08 | Cow::Borrowed for clipboard copy, fixed paste encode roundtrip | Performance |
+| 2026-04-08 | Added egui_material_icons, egui-notify, egui_animation dependencies | UI polish |
+| 2026-04-08 | Material Design icons on all toolbar buttons, toast notifications | UI polish |
+| 2026-04-08 | Pre-decoded source images via background thread for instant switching | Performance |
