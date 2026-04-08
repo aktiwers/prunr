@@ -1,0 +1,35 @@
+[package]
+name = "prunr-app"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "prunr"
+path = "src/main.rs"
+
+[lib]
+name = "prunr_app"
+path = "src/lib.rs"
+
+[features]
+# Enable runtime model loading from filesystem (for development without embedding ONNX files).
+# Usage: cargo check -p prunr-app --features dev-models
+dev-models = ["prunr-core/dev-models"]
+
+[dependencies]
+prunr-core = { path = "../prunr-core" }
+clap = { workspace = true }
+indicatif = { workspace = true }
+egui = { workspace = true }
+eframe = { workspace = true }
+egui_extras = { workspace = true }
+arboard = { workspace = true }
+rfd = { workspace = true }
+image = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+num_cpus = { workspace = true }
+rayon = { workspace = true }
+egui-notify = { workspace = true }
+egui_material_icons = { workspace = true }
+egui_animation = { workspace = true }
