@@ -1,4 +1,5 @@
 use egui::{Color32, RichText};
+use egui_material_icons::icons::*;
 
 use crate::gui::app::{BgPrunrApp, BatchStatus};
 use crate::gui::settings::SettingsModel;
@@ -8,14 +9,14 @@ use crate::gui::theme;
 pub fn render(ui: &mut egui::Ui, app: &mut BgPrunrApp) {
     ui.horizontal_centered(|ui| {
         ui.spacing_mut().item_spacing.x = theme::SPACE_SM;
+        ui.spacing_mut().button_padding = egui::vec2(8.0, 4.0);
 
         let is_processing = app.state == AppState::Processing;
         let can_remove = matches!(app.state, AppState::Loaded | AppState::Done);
         let can_save_copy = app.state == AppState::Done;
 
-        // Open Image button -- always enabled
         let open_btn = egui::Button::new(
-            RichText::new("Open Image").color(theme::TEXT_PRIMARY),
+            RichText::new(format!("{} Open", ICON_FOLDER_OPEN.codepoint)).color(theme::TEXT_PRIMARY),
         )
         .fill(theme::BG_SECONDARY)
         .corner_radius(theme::BUTTON_ROUNDING);
@@ -78,7 +79,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut BgPrunrApp) {
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             // Settings gear button
             let gear_btn = egui::Button::new(
-                RichText::new("\u{2699}").size(18.0).color(theme::TEXT_PRIMARY),
+                RichText::new(ICON_SETTINGS.codepoint).size(18.0).color(theme::TEXT_PRIMARY),
             )
             .fill(theme::BG_SECONDARY)
             .corner_radius(theme::BUTTON_ROUNDING);
@@ -87,7 +88,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut BgPrunrApp) {
             }
             if has_selected {
                 let remove_sel_btn = egui::Button::new(
-                    RichText::new("Remove Selected").color(Color32::WHITE),
+                    RichText::new(format!("{} Remove Selected", ICON_DELETE.codepoint)).color(Color32::WHITE),
                 )
                 .fill(theme::DESTRUCTIVE)
                 .corner_radius(theme::BUTTON_ROUNDING);
@@ -103,7 +104,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut BgPrunrApp) {
                     .count();
                 if done_count >= 2 {
                     let save_all_btn = egui::Button::new(
-                        RichText::new("Save All").color(Color32::WHITE),
+                        RichText::new(format!("{} Save All", ICON_SAVE.codepoint)).color(Color32::WHITE),
                     )
                     .fill(theme::ACCENT)
                     .corner_radius(theme::BUTTON_ROUNDING);
@@ -113,18 +114,9 @@ pub fn render(ui: &mut egui::Ui, app: &mut BgPrunrApp) {
                 }
             }
 
-            // Copy Image button
-            let copy_btn = egui::Button::new(
-                RichText::new("Copy Image").color(theme::TEXT_PRIMARY),
-            )
-            .fill(theme::BG_SECONDARY)
-            .corner_radius(theme::BUTTON_ROUNDING);
-            if ui.add_enabled(can_save_copy, copy_btn).clicked() {
-                app.handle_copy();
-            }
-
             // Save Selected button (saves current if none checked, or all checked)
-            let save_label = if has_selected { "Save Selected" } else { "Save" };
+            let save_icon = ICON_SAVE.codepoint;
+            let save_label = if has_selected { format!("{save_icon} Save Selected") } else { format!("{save_icon} Save") };
             let save_btn = egui::Button::new(
                 RichText::new(save_label).color(theme::TEXT_PRIMARY),
             )

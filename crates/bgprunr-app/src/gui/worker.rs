@@ -5,12 +5,12 @@ use bgprunr_core::{ModelKind, OrtEngine, ProgressStage, ProcessResult, process_i
 
 pub enum WorkerMessage {
     ProcessImage {
-        img_bytes: Vec<u8>,
+        img_bytes: Arc<Vec<u8>>,
         model: ModelKind,
         cancel: Arc<AtomicBool>,
     },
     BatchProcess {
-        items: Vec<(u64, Vec<u8>)>, // (batch_item_id, img_bytes)
+        items: Vec<(u64, Arc<Vec<u8>>)>,
         model: ModelKind,
         jobs: usize,
         cancel: Arc<AtomicBool>,

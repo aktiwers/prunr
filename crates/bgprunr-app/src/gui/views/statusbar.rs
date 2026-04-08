@@ -80,7 +80,7 @@ pub fn render(ui: &mut egui::Ui, app: &BgPrunrApp) {
                 ui.add_space(theme::SPACE_SM);
                 let zoom_pct = (app.zoom * 100.0).round() as u32;
                 ui.label(
-                    RichText::new(format!("\u{1F50D} {zoom_pct}%"))
+                    RichText::new(format!("{} {zoom_pct}%", egui_material_icons::icons::ICON_SEARCH.codepoint))
                         .size(theme::FONT_SIZE_BODY)
                         .color(theme::TEXT_SECONDARY),
                 );
