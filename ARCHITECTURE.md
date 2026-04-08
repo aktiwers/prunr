@@ -151,10 +151,13 @@ Args parsed (clap)
 
 | Thread | Responsibility | Never does |
 |--------|---------------|------------|
-| **UI thread** (egui render loop) | Renders frames, handles input, polls channels via `try_recv()`, lazy thumbnail decode (1/frame) | Blocks on inference, bulk file I/O, or any operation >16ms |
-| **Worker thread** (single, long-lived) | Runs inference, image decode/encode | Touches egui state directly (sends via channel) |
-| **File loader thread** (short-lived, per open dialog) | Reads image files from disk, sends `(bytes, name)` via mpsc | UI thread drains max 5 per frame |
-| **Rayon pool** (batch only) | Parallel image processing | Conflicts with ORT intra-op threads (pool sized accordingly) |
+| **UI thread** (egui render loop) | Renders frames, handles input, polls channels via `try_recv()` | Blocks on inference, file I/O, image decode, or any operation >16ms |
+| **Worker dispatch** (single, long-lived) | Receives `BatchProcess` messages, spawns processing threads | Blocks on inference (delegates immediately) |
+| **Processing threads** (per batch, short-lived) | Each spawns a rayon pool for parallel inference, sends `BatchItemDone`/`BatchProgress` per image | Multiple batches can run concurrently |
+| **File loader thread** (per open dialog) | Reads image files from disk, sends `(bytes, name)` via mpsc | UI drains max 5 per frame |
+| **Thumbnail threads** (per image) | Decodes + resizes source images to 160px thumbnails | Sends `(id, w, h, pixels)` via channel |
+| **Decode threads** (per image) | Pre-decodes source `RgbaImage` for instant canvas switching | Sends `(id, RgbaImage)` via channel |
+| **Save thread** (per save operation) | PNG encode + `fs::write`, sends completion via `save_done` channel | UI shows "Saving..." toast, receives result |
 
 ### Thread Oversubscription Prevention
 
@@ -330,3 +333,12 @@ if ui.input(|i| i.modifiers.ctrl && i.key_pressed(Key::O)) { /* open */ }
 | 2026-04-08 | Added egui_material_icons, egui-notify, egui_animation dependencies | UI polish |
 | 2026-04-08 | Material Design icons on all toolbar buttons, toast notifications | UI polish |
 | 2026-04-08 | Pre-decoded source images via background thread for instant switching | Performance |
+| 2026-04-08 | Plum purple theme from logo (#7B2D8E accent, #5B8C3E leaf green) | Branding |
+| 2026-04-08 | Eliminated ProcessImage path — all processing via BatchProcess with item_id | Architecture |
+| 2026-04-08 | Worker spawns threads per batch for true parallel concurrent processing | Architecture |
+| 2026-04-08 | Per-stage progress via BatchProgress (6 stages reported to UI) | UX |
+| 2026-04-08 | Sidebar hover actions: trash icon (delete), save icon (per-item save) | UX |
+| 2026-04-08 | Simplified CLI: bgprunr photo.jpg works without subcommand, short flags | CLI |
+| 2026-04-08 | Canvas fade-in (200ms) on image switch, thumbnail fade-in on load | UI polish |
+| 2026-04-08 | Non-interactive settings backdrop (fixes frozen settings modal) | Bug fix |
+| 2026-04-08 | Fixed concurrent processing: results tracked by item_id not selected index | Bug fix |
