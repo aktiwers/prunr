@@ -66,7 +66,7 @@ completed: 2026-04-06
 
 - Created `.github/workflows/ci.yml` with a 4-runner matrix covering all DIST-03 platform targets
 - Model cache invalidation tied to `hashFiles('xtask/src/main.rs')` — changes to model URLs/checksums automatically bust the cache
-- Build step uses real fetched models; test step uses `--features bgprunr-models/dev-models` to run fast without embed-time model files
+- Build step uses real fetched models; test step uses `--features prunr-models/dev-models` to run fast without embed-time model files
 
 ## Task Commits
 
@@ -84,7 +84,7 @@ Each task was committed atomically:
 
 - Used `dtolnay/rust-toolchain@stable` (not `actions-rs/toolchain` which has been unmaintained since 2022)
 - `fail-fast: false` ensures a Windows failure doesn't cancel the macOS jobs — each platform's failure report is independently valuable
-- Build step intentionally does NOT use `--features bgprunr-models/dev-models` so the CI validates the real model embedding pipeline; test step uses `dev-models` to avoid embed-time model dependency in tests
+- Build step intentionally does NOT use `--features prunr-models/dev-models` so the CI validates the real model embedding pipeline; test step uses `dev-models` to avoid embed-time model dependency in tests
 
 ## Deviations from Plan
 

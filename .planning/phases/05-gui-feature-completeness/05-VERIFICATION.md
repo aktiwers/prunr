@@ -43,31 +43,31 @@ re_verification: false
 
 | Artifact | Expected | Status | Details |
 |----------|----------|--------|---------|
-| `crates/bgprunr-app/src/gui/settings.rs` | Settings struct with serde derives and Default | VERIFIED | `pub struct Settings` with all 4 fields + serde; Default impl with num_cpus |
-| `crates/bgprunr-app/src/gui/state.rs` | AppState with Animating variant | VERIFIED | 5-variant enum; Animating documented as "Reveal animation playing" |
-| `crates/bgprunr-app/src/gui/theme.rs` | Phase 5 layout/color constants | VERIFIED | SIDEBAR_WIDTH present (confirmed by sidebar.rs imports) |
-| `crates/bgprunr-app/src/gui/views/canvas.rs` | Zoom/pan/before-after rendering | VERIFIED | `compute_img_rect`, scroll handler, pending flag consumption, render_done with toggle, render_animating |
-| `crates/bgprunr-app/src/gui/views/statusbar.rs` | Zoom percentage display | VERIFIED | `{zoom_pct}%` label at line 83 |
-| `crates/bgprunr-app/src/gui/app.rs` | Pending zoom flags | VERIFIED | `pending_fit_zoom`, `pending_actual_size` fields at lines 97-98 |
-| `crates/bgprunr-app/src/gui/views/settings.rs` | Settings modal dialog rendering | VERIFIED | `pub fn render(ctx, app)` with Window anchor CENTER_CENTER, all 5 rows |
-| `crates/bgprunr-app/src/gui/views/animation.rs` | Reveal animation frame rendering | VERIFIED | `pub fn build_animation_frame` with mask threshold, ease-out cubic, faded_alpha |
-| `crates/bgprunr-app/src/gui/views/sidebar.rs` | Batch queue sidebar | VERIFIED | `pub fn render` with thumbnails, DnD, status icons, click select |
-| `crates/bgprunr-app/src/gui/worker.rs` | Extended worker with BatchProcess | VERIFIED | BatchProcess message, rayon pool, BatchItemDone/BatchComplete results |
-| `crates/bgprunr-app/src/gui/tests/settings_tests.rs` | 7 settings unit tests | VERIFIED | All 7 test functions present including serialization roundtrip |
-| `crates/bgprunr-app/src/gui/tests/anim_tests.rs` | Animation unit tests | VERIFIED | 6 tests including progress advance, skip, disabled path |
-| `crates/bgprunr-app/src/gui/tests/batch_tests.rs` | 10 batch unit tests | VERIFIED | 10 test functions covering nav, reorder, status, defaults |
+| `crates/prunr-app/src/gui/settings.rs` | Settings struct with serde derives and Default | VERIFIED | `pub struct Settings` with all 4 fields + serde; Default impl with num_cpus |
+| `crates/prunr-app/src/gui/state.rs` | AppState with Animating variant | VERIFIED | 5-variant enum; Animating documented as "Reveal animation playing" |
+| `crates/prunr-app/src/gui/theme.rs` | Phase 5 layout/color constants | VERIFIED | SIDEBAR_WIDTH present (confirmed by sidebar.rs imports) |
+| `crates/prunr-app/src/gui/views/canvas.rs` | Zoom/pan/before-after rendering | VERIFIED | `compute_img_rect`, scroll handler, pending flag consumption, render_done with toggle, render_animating |
+| `crates/prunr-app/src/gui/views/statusbar.rs` | Zoom percentage display | VERIFIED | `{zoom_pct}%` label at line 83 |
+| `crates/prunr-app/src/gui/app.rs` | Pending zoom flags | VERIFIED | `pending_fit_zoom`, `pending_actual_size` fields at lines 97-98 |
+| `crates/prunr-app/src/gui/views/settings.rs` | Settings modal dialog rendering | VERIFIED | `pub fn render(ctx, app)` with Window anchor CENTER_CENTER, all 5 rows |
+| `crates/prunr-app/src/gui/views/animation.rs` | Reveal animation frame rendering | VERIFIED | `pub fn build_animation_frame` with mask threshold, ease-out cubic, faded_alpha |
+| `crates/prunr-app/src/gui/views/sidebar.rs` | Batch queue sidebar | VERIFIED | `pub fn render` with thumbnails, DnD, status icons, click select |
+| `crates/prunr-app/src/gui/worker.rs` | Extended worker with BatchProcess | VERIFIED | BatchProcess message, rayon pool, BatchItemDone/BatchComplete results |
+| `crates/prunr-app/src/gui/tests/settings_tests.rs` | 7 settings unit tests | VERIFIED | All 7 test functions present including serialization roundtrip |
+| `crates/prunr-app/src/gui/tests/anim_tests.rs` | Animation unit tests | VERIFIED | 6 tests including progress advance, skip, disabled path |
+| `crates/prunr-app/src/gui/tests/batch_tests.rs` | 10 batch unit tests | VERIFIED | 10 test functions covering nav, reorder, status, defaults |
 
 ### Key Link Verification
 
 | From | To | Via | Status | Details |
 |------|----|-----|--------|---------|
-| canvas.rs | app.rs (zoom/pan) | app.zoom, app.pan_offset | WIRED | canvas.rs mutates app.zoom/pan_offset directly; `use crate::gui::app::BgPrunrApp` |
+| canvas.rs | app.rs (zoom/pan) | app.zoom, app.pan_offset | WIRED | canvas.rs mutates app.zoom/pan_offset directly; `use crate::gui::app::PrunrApp` |
 | statusbar.rs | app.rs (zoom) | app.zoom field | WIRED | `app.zoom * 100.0` at statusbar.rs:81 |
 | settings.rs | app.rs (settings fields) | `app.settings.*` mutations | WIRED | `&mut app.settings.model`, `auto_remove_on_import`, `parallel_jobs`, `reveal_animation_enabled`, `active_backend` all present |
 | animation.rs | app.rs (anim state) | app.anim_progress | WIRED | app.rs:676 advances anim_progress; canvas.rs:252 calls build_animation_frame with app.anim_progress |
 | app.rs | state.rs | AppState::Animating transition | WIRED | `self.state = AppState::Animating` at app.rs:585 in WorkerResult::Done handler |
 | sidebar.rs | app.rs (batch_items) | app.batch_items | WIRED | sidebar.rs:2 imports BatchStatus from app; iterates `app.batch_items` throughout |
-| worker.rs | bgprunr-core | process_image() called per batch item | WIRED | worker.rs:4 imports `process_image`; called at line 118 per rayon task |
+| worker.rs | prunr-core | process_image() called per batch item | WIRED | worker.rs:4 imports `process_image`; called at line 118 per rayon task |
 | app.rs | sidebar.rs | Panel::left renders sidebar | WIRED | `sidebar::render(ui, self)` at app.rs:868 inside Panel::left |
 | views/mod.rs | all view modules | pub mod declarations | WIRED | All 7 modules declared: toolbar, canvas, statusbar, shortcuts, settings, animation, sidebar |
 

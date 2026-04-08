@@ -31,7 +31,7 @@ None — discussion stayed within phase scope
 | ID | Description | Research Support |
 |----|-------------|-----------------|
 | CORE-01 | User can remove background from a single image and receive a transparent PNG | `process_image()` API, `image` crate RGBA encode, postprocess → alpha merge |
-| CORE-02 | User can select between silueta (fast) and u2net (quality) models | `ModelKind` enum, `bgprunr-models` already provides bytes for both via `silueta_bytes()` / `u2net_bytes()` |
+| CORE-02 | User can select between silueta (fast) and u2net (quality) models | `ModelKind` enum, `prunr-models` already provides bytes for both via `silueta_bytes()` / `u2net_bytes()` |
 | CORE-03 | Inference automatically uses GPU when available, falls back to CPU | ort EP priority list: CUDA → CoreML → DirectML → CPU; `active_provider()` method already on trait |
 | CORE-04 | User sees a progress indicator while inference is running | Callback closure pattern `process_image(img, callback)`, fine-grained stage enum |
 | CORE-05 | Inference pipeline produces pixel-accurate results matching rembg Python output | Exact rembg preprocessing pipeline verified from source (see Critical Finding below) |
@@ -43,7 +43,7 @@ None — discussion stayed within phase scope
 
 ## Summary
 
-Phase 2 builds the complete ONNX inference pipeline in `bgprunr-core`: from raw image bytes to a pixel-accurate transparent PNG. The pipeline is a pure library with no GUI or CLI concerns.
+Phase 2 builds the complete ONNX inference pipeline in `prunr-core`: from raw image bytes to a pixel-accurate transparent PNG. The pipeline is a pure library with no GUI or CLI concerns.
 
 The most critical finding from research is a **discrepancy between the project's ARCHITECTURE.md and rembg's actual source code** in two places: (1) rembg uses LANCZOS resampling (not bilinear) for the resize-to-320x320 step, and (2) rembg normalizes by `max(np.max(pixel_array), 1e-6)` rather than a fixed `/255.0`, then applies ImageNet mean/std. For typical photos with a max pixel value of 255 these are identical, but the implementation must use the rembg formula exactly. Additionally, rembg's postprocessing does **not** apply sigmoid — it applies min-max normalization to the raw model output and uses the result directly as a grayscale alpha mask.
 
@@ -55,7 +55,7 @@ The ort 2.0.0-rc.12 API is well-understood. Sessions are created with `Session::
 
 ## Standard Stack
 
-### Core (Phase 2 additions to bgprunr-core)
+### Core (Phase 2 additions to prunr-core)
 
 | Library | Version | Purpose | Why Standard |
 |---------|---------|---------|--------------|
@@ -69,14 +69,14 @@ The ort 2.0.0-rc.12 API is well-understood. Sessions are created with `Session::
 
 | Library | Version | Purpose | When to Use |
 |---------|---------|---------|-------------|
-| `bgprunr-models` | workspace | Provides model bytes (`silueta_bytes()`, `u2net_bytes()`) | Already a dependency of bgprunr-core; use `dev-models` feature in tests |
+| `prunr-models` | workspace | Provides model bytes (`silueta_bytes()`, `u2net_bytes()`) | Already a dependency of prunr-core; use `dev-models` feature in tests |
 | `thiserror` | `2.0` | Error enum derive | Already used in types.rs; continue pattern for new error variants |
 
-### New Cargo.toml additions for bgprunr-core
+### New Cargo.toml additions for prunr-core
 
 ```toml
 [dependencies]
-bgprunr-models = { path = "../bgprunr-models" }
+prunr-models = { path = "../prunr-models" }
 thiserror = { workspace = true }
 ort = { workspace = true }
 ndarray = { workspace = true }
@@ -85,7 +85,7 @@ rayon = { workspace = true }
 num_cpus = "1"
 
 [dev-dependencies]
-bgprunr-models = { path = "../bgprunr-models", features = ["dev-models"] }
+prunr-models = { path = "../prunr-models", features = ["dev-models"] }
 ```
 
 **Note:** `num_cpus` is not in the workspace Cargo.toml yet — add it. It is a lightweight crate with no transitive heavy deps.
@@ -97,7 +97,7 @@ bgprunr-models = { path = "../bgprunr-models", features = ["dev-models"] }
 ### Recommended Module Structure
 
 ```
-crates/bgprunr-core/src/
+crates/prunr-core/src/
 ├── lib.rs          # Public exports: process_image, batch_process, ModelKind, ProcessResult, CoreError
 ├── engine.rs       # InferenceEngine trait + OrtEngine impl (Session lifecycle, EP setup)
 ├── pipeline.rs     # process_image() — orchestrates pre → infer → post + callback
@@ -134,7 +134,7 @@ fn create_session(model_bytes: &[u8]) -> ort::Result<Session> {
 ```
 
 **Notes:**
-- `commit_from_memory` takes `&[u8]` — pass the static bytes from bgprunr-models directly.
+- `commit_from_memory` takes `&[u8]` — pass the static bytes from prunr-models directly.
 - `ort::init().commit()` is optional when calling `Session::builder()` directly; it is only needed if you want global EP registration. Prefer per-session EP configuration for clarity.
 - `GraphOptimizationLevel::Level3` = full graph optimizations. Recommended for production.
 - Store the session in `OrtEngine` and reuse across all images — never create a session per-image.
@@ -597,20 +597,20 @@ pub fn downscale_image(img: DynamicImage, max_dim: u32) -> DynamicImage {
 |----------|-------|
 | Framework | Rust built-in `cargo test` |
 | Config file | None (workspace Cargo.toml `[profile.test]` if needed) |
-| Quick run command | `cargo test -p bgprunr-core --features bgprunr-models/dev-models` |
-| Full suite command | `cargo test -p bgprunr-core --features bgprunr-models/dev-models -- --include-ignored` |
+| Quick run command | `cargo test -p prunr-core --features prunr-models/dev-models` |
+| Full suite command | `cargo test -p prunr-core --features prunr-models/dev-models -- --include-ignored` |
 
 ### Phase Requirements → Test Map
 
 | Req ID | Behavior | Test Type | Automated Command | File Exists? |
 |--------|----------|-----------|-------------------|-------------|
-| CORE-01 | `process_image()` returns RGBA PNG with transparent background | integration | `cargo test -p bgprunr-core --test integration -- process_single_image` | ❌ Wave 0 |
-| CORE-02 | Both silueta and u2net models produce valid masks | integration | `cargo test -p bgprunr-core --test integration -- model_silueta model_u2net` | ❌ Wave 0 |
-| CORE-03 | `active_provider()` returns non-empty string; session created without panic | unit | `cargo test -p bgprunr-core -- engine::tests` | ❌ Wave 0 |
-| CORE-04 | Progress callback called for each of 7 stages with monotonic pct | unit | `cargo test -p bgprunr-core -- pipeline::tests::progress_callback` | ❌ Wave 0 |
-| CORE-05 | Pixel match ≥ 95% against rembg reference masks on 3 test images | integration (reference) | `cargo test -p bgprunr-core --test reference -- --ignored` | ❌ Wave 0 |
-| LOAD-03 | PNG, JPEG, WebP, BMP all load without error | unit | `cargo test -p bgprunr-core -- formats::tests` | ❌ Wave 0 |
-| LOAD-04 | Image >8000px returns `CoreError::LargeImage`; `downscale_image()` produces correct dimensions | unit | `cargo test -p bgprunr-core -- pipeline::tests::large_image` | ❌ Wave 0 |
+| CORE-01 | `process_image()` returns RGBA PNG with transparent background | integration | `cargo test -p prunr-core --test integration -- process_single_image` | ❌ Wave 0 |
+| CORE-02 | Both silueta and u2net models produce valid masks | integration | `cargo test -p prunr-core --test integration -- model_silueta model_u2net` | ❌ Wave 0 |
+| CORE-03 | `active_provider()` returns non-empty string; session created without panic | unit | `cargo test -p prunr-core -- engine::tests` | ❌ Wave 0 |
+| CORE-04 | Progress callback called for each of 7 stages with monotonic pct | unit | `cargo test -p prunr-core -- pipeline::tests::progress_callback` | ❌ Wave 0 |
+| CORE-05 | Pixel match ≥ 95% against rembg reference masks on 3 test images | integration (reference) | `cargo test -p prunr-core --test reference -- --ignored` | ❌ Wave 0 |
+| LOAD-03 | PNG, JPEG, WebP, BMP all load without error | unit | `cargo test -p prunr-core -- formats::tests` | ❌ Wave 0 |
+| LOAD-04 | Image >8000px returns `CoreError::LargeImage`; `downscale_image()` produces correct dimensions | unit | `cargo test -p prunr-core -- pipeline::tests::large_image` | ❌ Wave 0 |
 
 **Reference test detail (CORE-05):**
 The reference test is marked `#[ignore]` so it only runs on `--include-ignored`. It requires:
@@ -621,18 +621,18 @@ The quick run command excludes ignored tests so CI can run unit tests without mo
 
 ### Sampling Rate
 
-- **Per task commit:** `cargo test -p bgprunr-core --features bgprunr-models/dev-models`
-- **Per wave merge:** `cargo test -p bgprunr-core --features bgprunr-models/dev-models -- --include-ignored` (requires models on disk)
+- **Per task commit:** `cargo test -p prunr-core --features prunr-models/dev-models`
+- **Per wave merge:** `cargo test -p prunr-core --features prunr-models/dev-models -- --include-ignored` (requires models on disk)
 - **Phase gate:** Full suite green (including reference tests) before Phase 3 begins
 
 ### Wave 0 Gaps
 
-- [ ] `crates/bgprunr-core/tests/integration.rs` — covers CORE-01, CORE-02, CORE-03, CORE-04, LOAD-03
-- [ ] `crates/bgprunr-core/tests/reference.rs` — covers CORE-05 (marked `#[ignore]`, requires model files)
+- [ ] `crates/prunr-core/tests/integration.rs` — covers CORE-01, CORE-02, CORE-03, CORE-04, LOAD-03
+- [ ] `crates/prunr-core/tests/reference.rs` — covers CORE-05 (marked `#[ignore]`, requires model files)
 - [ ] `scripts/generate_references.py` — Python script that runs rembg defaults on test images, saves mask PNGs to `tests/references/`
 - [ ] `tests/fixtures/` — 3 test images from rembg's GitHub repo (small/medium/large)
 - [ ] `tests/references/` — generated reference masks (committed to repo)
-- [ ] `num_cpus = "1"` added to workspace Cargo.toml and bgprunr-core Cargo.toml
+- [ ] `num_cpus = "1"` added to workspace Cargo.toml and prunr-core Cargo.toml
 
 ---
 

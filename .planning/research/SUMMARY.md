@@ -1,13 +1,13 @@
 # Project Research Summary
 
-**Project:** BgPrunR
+**Project:** Prunr
 **Domain:** Pure Rust desktop AI background removal — local inference, CLI + GUI, single-binary distribution
 **Researched:** 2026-04-06
 **Confidence:** HIGH
 
 ## Executive Summary
 
-BgPrunR is a local-first AI background removal desktop application that uses ONNX Runtime (via the `ort` crate) to run U2-Net/silueta models entirely on the user's machine, with no cloud dependency. Research confirms this is a well-understood problem domain: rembg (Python) has validated the model pipeline, the ONNX preprocessing contract is documented, and the Rust ecosystem now has production-ready bindings to make a pure-Rust implementation practical. The recommended architecture is a Cargo workspace with three crates — a shared inference core library, an egui/eframe GUI binary, and a clap CLI binary — structured so the inference pipeline is built and tested first, then wrapped in presentation layers.
+Prunr is a local-first AI background removal desktop application that uses ONNX Runtime (via the `ort` crate) to run U2-Net/silueta models entirely on the user's machine, with no cloud dependency. Research confirms this is a well-understood problem domain: rembg (Python) has validated the model pipeline, the ONNX preprocessing contract is documented, and the Rust ecosystem now has production-ready bindings to make a pure-Rust implementation practical. The recommended architecture is a Cargo workspace with three crates — a shared inference core library, an egui/eframe GUI binary, and a clap CLI binary — structured so the inference pipeline is built and tested first, then wrapped in presentation layers.
 
 The critical risk in this project is not the technology selection but the implementation order and correctness of the inference preprocessing pipeline. The ONNX models are sensitive to exact normalization constants, tensor layout (NCHW not NHWC), and pixel scaling order. Getting this wrong produces silently garbage output — the model runs but removes nothing useful. The mitigation is straightforward: build the core inference pipeline as an isolated, fully unit-tested library first, with a reference-comparison test against rembg's Python output on known images, before any GUI work begins. Architectural decisions that protect this boundary (worker threads for GUI, direct calls for CLI, no inference on the render thread) must be made from day one — retrofitting them is high-cost.
 
@@ -72,12 +72,12 @@ See `.planning/research/FEATURES.md` for full competitor analysis and feature de
 
 ### Architecture Approach
 
-The architecture is a three-crate Cargo workspace: `bgprunr-core` (shared inference library with no binary targets), `bgprunr-gui` (egui/eframe desktop application), and `bgprunr-cli` (clap binary). The core library exposes two public functions — `process_image()` and `batch_process()` — and contains all inference logic, preprocessing, postprocessing, image I/O, and model management. The GUI dispatches all inference work to a background worker thread via mpsc channels, polling results with non-blocking `try_recv()` in the egui `update()` loop. The CLI calls core functions directly on the main thread (blocking is fine without a render loop), using rayon for batch parallelism. ONNX sessions are created once per model kind (lazy on first use) and reused across all inference calls — never created per image.
+The architecture is a three-crate Cargo workspace: `prunr-core` (shared inference library with no binary targets), `prunr-gui` (egui/eframe desktop application), and `prunr-cli` (clap binary). The core library exposes two public functions — `process_image()` and `batch_process()` — and contains all inference logic, preprocessing, postprocessing, image I/O, and model management. The GUI dispatches all inference work to a background worker thread via mpsc channels, polling results with non-blocking `try_recv()` in the egui `update()` loop. The CLI calls core functions directly on the main thread (blocking is fine without a render loop), using rayon for batch parallelism. ONNX sessions are created once per model kind (lazy on first use) and reused across all inference calls — never created per image.
 
 **Major components:**
-1. `bgprunr-core` (lib crate) — inference pipeline, image I/O, model bytes, preprocessing, postprocessing, batch coordination
-2. `bgprunr-gui` (bin crate) — egui/eframe app state, worker thread + mpsc channels, texture caching, UI panels
-3. `bgprunr-cli` (bin crate) — clap arg parsing, direct core calls, indicatif progress bar, batch dispatch via rayon
+1. `prunr-core` (lib crate) — inference pipeline, image I/O, model bytes, preprocessing, postprocessing, batch coordination
+2. `prunr-gui` (bin crate) — egui/eframe app state, worker thread + mpsc channels, texture caching, UI panels
+3. `prunr-cli` (bin crate) — clap arg parsing, direct core calls, indicatif progress bar, batch dispatch via rayon
 4. `InferenceEngine` (in core) — ort Session lifecycle, execution provider negotiation (CUDA→CoreML→DirectML→CPU), session pool
 5. `PreProcessor` / `PostProcessor` (in core) — isolated, independently testable pipeline stages; preprocessing is the correctness-critical component
 6. `ModelRegistry` (in core) — static zstd-compressed model bytes via `include_bytes_zstd`, lazy session init
@@ -86,7 +86,7 @@ See `.planning/research/ARCHITECTURE.md` for data flow diagrams, code sketches f
 
 ### Critical Pitfalls
 
-1. **Preprocessing pipeline mismatch against rembg** — The model expects exact: decode → resize 320x320 bilinear → f32 → /255.0 → subtract ImageNet mean → /std → transpose HWC→CHW → batch dim → [1,3,320,320] tensor. Any deviation (wrong order, missing /255, wrong axis layout) produces silently garbage masks. Mitigation: build a unit test that compares BgPrunR's output mask pixel-by-pixel against rembg's Python output on 3 known test images — this test must pass before any GUI work begins.
+1. **Preprocessing pipeline mismatch against rembg** — The model expects exact: decode → resize 320x320 bilinear → f32 → /255.0 → subtract ImageNet mean → /std → transpose HWC→CHW → batch dim → [1,3,320,320] tensor. Any deviation (wrong order, missing /255, wrong axis layout) produces silently garbage masks. Mitigation: build a unit test that compares Prunr's output mask pixel-by-pixel against rembg's Python output on 3 known test images — this test must pass before any GUI work begins.
 
 2. **GPU execution provider silently falls back to CPU** — `ort` silently drops EPs it cannot initialize; no error is raised. Users with NVIDIA hardware get no benefit and cannot diagnose why. Mitigation: log the active EP name at session initialization, and surface it visibly in the GUI settings dialog as "Inference: CUDA (GPU)" or "Inference: CPU (no GPU detected)".
 
@@ -98,7 +98,7 @@ See `.planning/research/ARCHITECTURE.md` for data flow diagrams, code sketches f
 
 6. **Windows DLL hell** — System32 may contain an incompatible `onnxruntime.dll`. Binary works on dev machine but fails on clean Windows installs. Mitigation: use `ort`'s `copy-dylibs` feature or prefer static linking; test distribution on a clean Windows VM with no prerequisites installed.
 
-7. **include_bytes! compile time with 170MB u2net model** — Embedding a 170MB blob causes minutes-long CI rebuilds even for small source changes. Mitigation: isolate model bytes in a dedicated `bgprunr-models` crate (recompiles only when model files change), use `include-bytes-zstd`, and cache that crate artifact in CI.
+7. **include_bytes! compile time with 170MB u2net model** — Embedding a 170MB blob causes minutes-long CI rebuilds even for small source changes. Mitigation: isolate model bytes in a dedicated `prunr-models` crate (recompiles only when model files change), use `include-bytes-zstd`, and cache that crate artifact in CI.
 
 See `.planning/research/PITFALLS.md` for full pitfall descriptions, warning signs, recovery costs, and the pitfall-to-phase mapping.
 
@@ -117,15 +117,15 @@ Based on combined research, the build order is dictated by hard dependencies: co
 ### Phase 1: Core Inference Engine
 
 **Rationale:** This is the highest-risk phase and the foundation of everything else. The preprocessing correctness must be locked in with a reference test before any GUI or CLI work begins. Architecture research explicitly states "Phase 1 (core inference) must be fully functional before any GUI or CLI work begins." Both the GPU EP silent fallback pitfall and the preprocessing mismatch pitfall are addressed here.
-**Delivers:** `bgprunr-core` library with working `process_image()` on silueta model (CPU), verified against rembg Python output; active EP logged and queryable; `batch_process()` with progress callback; large image guard.
+**Delivers:** `prunr-core` library with working `process_image()` on silueta model (CPU), verified against rembg Python output; active EP logged and queryable; `batch_process()` with progress callback; large image guard.
 **Addresses:** ONNX inference pipeline (P1); GPU acceleration + CPU fallback (P1); large image warning (P1).
 **Avoids:** Preprocessing mismatch (Pitfall 1 — critical); GPU silent fallback (Pitfall 2); session-per-image anti-pattern (Architecture Anti-Pattern 1); thread oversubscription (Pitfall 5 — design decision made here).
 **Research flag:** Needs careful verification — preprocessing constants must match rembg exactly. Reference test against Python output is mandatory gate before Phase 2.
 
 ### Phase 2: CLI Binary
 
-**Rationale:** The CLI is simpler than the GUI (no threading complexity, no texture management) and exercises the full `bgprunr-core` API under real conditions. Building CLI before GUI provides a working, distributable tool early and validates the core API boundary. Any API design problems surface here at low cost, before the GUI adds complexity.
-**Delivers:** `bgprunr-cli` binary with single-image and batch commands, indicatif progress bar, model selection flag, cross-platform release artifacts.
+**Rationale:** The CLI is simpler than the GUI (no threading complexity, no texture management) and exercises the full `prunr-core` API under real conditions. Building CLI before GUI provides a working, distributable tool early and validates the core API boundary. Any API design problems surface here at low cost, before the GUI adds complexity.
+**Delivers:** `prunr-cli` binary with single-image and batch commands, indicatif progress bar, model selection flag, cross-platform release artifacts.
 **Addresses:** CLI mode (P1); batch processing (P1); cross-platform builds (P1).
 **Avoids:** Tight coupling of core to any GUI-specific types (Architecture pattern: CLI direct-call with no channels).
 **Research flag:** Standard patterns — clap + rayon batch CLI is well-documented. No additional research needed.
@@ -133,7 +133,7 @@ Based on combined research, the build order is dictated by hard dependencies: co
 ### Phase 3: GUI Foundation (Threading Architecture)
 
 **Rationale:** The GUI must be built with the worker thread + mpsc channel pattern from day one. The blocking egui update loop pitfall has HIGH recovery cost if retrofitted. The texture caching pattern must also be established before the before/after view is added (which doubles the texture complexity). This phase delivers a working GUI with drag-and-drop, inference dispatch, progress display, and result display — but not yet the full comparison view.
-**Delivers:** `bgprunr-gui` binary with: drag-and-drop + file picker, worker thread + mpsc channels, `InferenceState` enum, progress spinner, result display with TextureHandle caching, basic save/copy to clipboard, keyboard shortcuts.
+**Delivers:** `prunr-gui` binary with: drag-and-drop + file picker, worker thread + mpsc channels, `InferenceState` enum, progress spinner, result display with TextureHandle caching, basic save/copy to clipboard, keyboard shortcuts.
 **Addresses:** Drag-and-drop (P1); progress indication (P1); copy to clipboard (P1); save output file (P1); keyboard shortcuts (P1).
 **Avoids:** Blocking egui update loop (Pitfall 3 — HIGH recovery cost); texture re-upload every frame (Pitfall 4); Wayland clipboard failure (Pitfall 8 — arboard setup done here).
 **Research flag:** Standard patterns — egui worker thread + mpsc is well-documented with existing examples. Wayland clipboard testing requires explicit manual verification on a Wayland session.
@@ -156,7 +156,7 @@ Based on combined research, the build order is dictated by hard dependencies: co
 
 ### Phase Ordering Rationale
 
-- **Core before CLI before GUI:** Hard dependency graph from the Cargo workspace — `bgprunr-core` must compile before either binary target. CLI exercises the API with less complexity than GUI, surfacing design problems cheaply.
+- **Core before CLI before GUI:** Hard dependency graph from the Cargo workspace — `prunr-core` must compile before either binary target. CLI exercises the API with less complexity than GUI, surfacing design problems cheaply.
 - **Threading architecture in GUI Phase 3 before feature additions in Phase 4:** The blocking-update-loop pitfall has HIGH recovery cost. All GUI features assume the threading model is already in place.
 - **Workspace scaffolding before any code (Phase 0):** The model crate isolation must predate any model embedding; retrofitting is disruptive.
 - **Distribution verification last (Phase 5):** Clean-VM testing makes sense only after features are complete; but the DLL bundling configuration should be scaffolded in Phase 0.

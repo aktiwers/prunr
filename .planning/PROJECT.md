@@ -1,8 +1,8 @@
-# BgPrunR
+# Prunr
 
 ## What This Is
 
-BgPrunR is a desktop application that removes backgrounds from images using AI, running entirely on the user's machine. It provides both a CLI for scripting/batch workflows and a GUI for interactive use. Drop a photo in, click a button, get a transparent PNG — no internet, no cloud, no subscriptions.
+Prunr is a desktop application that removes backgrounds from images using AI, running entirely on the user's machine. It provides both a CLI for scripting/batch workflows and a GUI for interactive use. Drop a photo in, click a button, get a transparent PNG — no internet, no cloud, no subscriptions.
 
 ## Core Value
 
@@ -46,7 +46,7 @@ One-click local background removal that is fast, private, and works offline — 
 
 ## Context
 
-**Inspiration:** Python rembg library (github.com/danielgatis/rembg) which wraps ONNX Runtime + U2-Net models. BgPrunR replicates the same inference pipeline in pure Rust using the `ort` crate (Rust ONNX Runtime bindings), eliminating the Python dependency entirely.
+**Inspiration:** Python rembg library (github.com/danielgatis/rembg) which wraps ONNX Runtime + U2-Net models. Prunr replicates the same inference pipeline in pure Rust using the `ort` crate (Rust ONNX Runtime bindings), eliminating the Python dependency entirely.
 
 **Inference pipeline:** Input image → resize to 320×320 → normalize (mean/std per rembg spec) → ONNX inference → sigmoid → threshold → resize mask to original dimensions → apply alpha channel. This must match rembg's preprocessing exactly for equivalent output quality.
 

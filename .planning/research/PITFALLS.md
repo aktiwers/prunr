@@ -160,10 +160,10 @@ Every incremental build recompiles the crate containing the `include_bytes!` cal
 `include_bytes!` copies the entire file into the compilation unit at compile time. The compiler has to process and emit the blob as part of the object file. This is an O(size) operation that does not cache separately from the Rust source. On a cold CI runner this means 170MB of I/O plus LLVM processing time on every build.
 
 **How to avoid:**
-- Put the model embedding in a dedicated, isolated crate (e.g., `bgprunr-models`) with no other code. This crate only recompiles when the model files change, not when app logic changes.
+- Put the model embedding in a dedicated, isolated crate (e.g., `prunr-models`) with no other code. This crate only recompiles when the model files change, not when app logic changes.
 - Use `include_flate` or a similar crate that compresses the blob at compile time and decompresses at runtime. This reduces the compilation I/O and the binary size at the cost of ~50ms startup decompression.
 - For CI, consider separating a "fast build" (no models embedded, loads from filesystem) from a "release build" (models embedded). Use Cargo features: `default = ["embedded-models"]` and `[cfg(feature = "embedded-models")]` guards around the include calls.
-- Cache the compiled `bgprunr-models` artifact in CI using `sccache` or GitHub Actions cache keyed on the model file hash.
+- Cache the compiled `prunr-models` artifact in CI using `sccache` or GitHub Actions cache keyed on the model file hash.
 
 **Warning signs:**
 - `cargo build --timings` shows the model crate taking >30 seconds even on small source changes.

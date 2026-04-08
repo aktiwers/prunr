@@ -34,7 +34,7 @@
 
 | Tool | Purpose | Notes |
 |------|---------|-------|
-| `cargo` workspace | Shared core between `bgprunr-cli` and `bgprunr-gui` binaries | Workspace `Cargo.toml` with `[workspace.dependencies]` for shared version pinning (Rust 2024 edition resolver v3 via rustc 1.84+). Structure: `crates/core` (lib), `crates/cli` (bin), `crates/gui` (bin). |
+| `cargo` workspace | Shared core between `prunr-cli` and `prunr-gui` binaries | Workspace `Cargo.toml` with `[workspace.dependencies]` for shared version pinning (Rust 2024 edition resolver v3 via rustc 1.84+). Structure: `crates/core` (lib), `crates/cli` (bin), `crates/gui` (bin). |
 | `cargo-cross` | Cross-compilation via Docker | For building Linux → Windows or Linux → macOS (note: Apple SDK licensing means macOS cross-compilation requires `osxcross` image). Use native CI runners per platform instead for release builds to avoid SDK issues. |
 | GitHub Actions (or similar CI) | Per-platform release builds | Run native Linux/macOS/Windows runners in CI. Native builds avoid cross-compilation SDK headaches, especially for macOS. Produce three binaries for release. |
 | `cargo-bloat` | Binary size analysis | Diagnose what's contributing to binary size. Useful when fine-tuning the embedded model compression strategy. |
@@ -101,7 +101,7 @@ zstd = "0.13"
 |-------|-----|-------------|
 | `onnxruntime` crate (crates.io) | Unmaintained wrapper targeting ORT 1.8 (2021). No GPU support, no 2.x API. | `ort` 2.0-rc.12 |
 | `wonnx` | WebGPU-only ONNX runtime in pure Rust. No CUDA, no CoreML, no CPU fallback for arbitrary models. U2-Net not validated. | `ort` |
-| `rembg-rs` crate | Thin wrapper with limited maintenance. Rolling your own inference pipeline via `ort` directly gives full control over preprocessing, model switching, and batch parallelism — which BgPrunR requires. | Direct `ort` + `ndarray` pipeline |
+| `rembg-rs` crate | Thin wrapper with limited maintenance. Rolling your own inference pipeline via `ort` directly gives full control over preprocessing, model switching, and batch parallelism — which Prunr requires. | Direct `ort` + `ndarray` pipeline |
 | Global `ORT_DYLIB_PATH` env var at runtime | Breaks the single-binary distribution goal. Users should not need to set environment variables. | `download-binaries` feature at build time; libraries bundled via `copy-dylibs` feature or static linking |
 | `glow` backend in eframe | OpenGL/glow is now opt-in in eframe 0.34. wgpu (default) supports Vulkan/Metal/DX12/WebGPU, giving better GPU texture upload performance for displaying inference output. | Default eframe (wgpu) |
 | Async everywhere (`tokio`) | Inference is synchronous and CPU/GPU-bound. Async overhead and complexity brings no benefit. Rayon covers batch parallelism. | `rayon` |
@@ -121,7 +121,7 @@ zstd = "0.13"
 
 **Development build:**
 - Use `ORT_STRATEGY=download` (default) — ort fetches prebuilt ONNX Runtime so developers need zero system-level setup
-- Combine with `cargo run --bin bgprunr-gui`
+- Combine with `cargo run --bin prunr-gui`
 
 **Release build:**
 - Static link where possible, or bundle the ORT dylib alongside the binary via `copy-dylibs`
@@ -163,5 +163,5 @@ zstd = "0.13"
 
 ---
 
-*Stack research for: Pure Rust desktop AI background removal (BgPrunR)*
+*Stack research for: Pure Rust desktop AI background removal (Prunr)*
 *Researched: 2026-04-06*

@@ -37,7 +37,7 @@ fn main() -> anyhow::Result<()> {
 fn fetch_models() -> anyhow::Result<()> {
     std::fs::create_dir_all("models")?;
     let client = reqwest::blocking::Client::builder()
-        .user_agent("bgprunr-xtask/0.1")
+        .user_agent("prunr-xtask/0.1")
         .build()?;
 
     for spec in MODELS {

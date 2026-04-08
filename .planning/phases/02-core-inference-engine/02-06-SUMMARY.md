@@ -12,7 +12,7 @@ requires:
     provides: generate_references.py, tests/test_images structure, tests/references layout
 
 provides:
-  - crates/bgprunr-core/tests/reference_test.rs — integration test suite covering CORE-01 through CORE-05, LOAD-03, LOAD-04
+  - crates/prunr-core/tests/reference_test.rs — integration test suite covering CORE-01 through CORE-05, LOAD-03, LOAD-04
   - CORE-05 hard gate (test_rembg_reference): 95% pixel match vs rembg Python reference masks
   - All 9 test functions covering every phase requirement
 
@@ -22,14 +22,14 @@ affects: [03-cli, 04-gui]
 tech-stack:
   added: []
   patterns:
-    - Integration test file in crates/bgprunr-core/tests/ (Cargo integration test convention)
+    - Integration test file in crates/prunr-core/tests/ (Cargo integration test convention)
     - InferenceEngine trait must be in scope for active_provider() — import explicitly in test files
     - pixel_match_percent helper: |our_alpha - ref_alpha| <= 5 tolerance, returns f64 percentage
     - Reference mask resize fallback: if dimensions differ, resize with FilterType::Nearest before comparing
 
 key-files:
   created:
-    - crates/bgprunr-core/tests/reference_test.rs
+    - crates/prunr-core/tests/reference_test.rs
   modified: []
 
 key-decisions:
@@ -66,7 +66,7 @@ completed: 2026-04-06
 
 ## Accomplishments
 
-- Created `crates/bgprunr-core/tests/reference_test.rs` with all 9 test functions
+- Created `crates/prunr-core/tests/reference_test.rs` with all 9 test functions
 - Model-independent tests pass immediately: `test_large_image_warning`, `test_downscale_image_preserves_aspect_ratio`, `test_batch_process_multiple_images` (graceful skip if no images)
 - All 6 model-dependent tests compile and run; fail with clear error message pointing to `cargo xtask fetch-models`
 - CORE-05 reference test implements pixel_match_percent helper with ±5/255 tolerance and automatic reference mask resize fallback
@@ -79,13 +79,13 @@ completed: 2026-04-06
 
 ## Files Created/Modified
 
-- `crates/bgprunr-core/tests/reference_test.rs` — 9-function integration test suite covering CORE-01 through CORE-05, LOAD-03, LOAD-04
+- `crates/prunr-core/tests/reference_test.rs` — 9-function integration test suite covering CORE-01 through CORE-05, LOAD-03, LOAD-04
 
 ## Decisions Made
 
 - Import `InferenceEngine` trait explicitly in integration tests — required for `active_provider()` method to be callable on `OrtEngine`
 - Removed `ProcessResult` and `GenericImageView` from top-level imports to eliminate unused import warnings
-- Reference mask resize uses `FilterType::Nearest` for pixel-accurate comparison when rembg output dimensions differ from bgprunr output
+- Reference mask resize uses `FilterType::Nearest` for pixel-accurate comparison when rembg output dimensions differ from prunr output
 
 ## Deviations from Plan
 
@@ -94,8 +94,8 @@ completed: 2026-04-06
 **1. [Rule 1 - Bug] Fixed missing InferenceEngine trait import**
 - **Found during:** Task 1 (compilation)
 - **Issue:** `engine.active_provider()` failed with E0599 — trait method not accessible without trait in scope
-- **Fix:** Added `InferenceEngine` to the `use bgprunr_core::{}` import block
-- **Files modified:** crates/bgprunr-core/tests/reference_test.rs
+- **Fix:** Added `InferenceEngine` to the `use prunr_core::{}` import block
+- **Files modified:** crates/prunr-core/tests/reference_test.rs
 - **Verification:** Compiled cleanly after fix
 - **Committed in:** f14b3cf (Task 1 commit)
 
@@ -103,7 +103,7 @@ completed: 2026-04-06
 - **Found during:** Task 1 (compilation)
 - **Issue:** `ProcessResult` and `GenericImageView` imported but not directly referenced in test functions
 - **Fix:** Removed both from the top-level use statement; `ProcessResult` fields are accessed via inference, not named type
-- **Files modified:** crates/bgprunr-core/tests/reference_test.rs
+- **Files modified:** crates/prunr-core/tests/reference_test.rs
 - **Verification:** Compiled without warnings
 - **Committed in:** f14b3cf (Task 1 commit)
 
@@ -143,7 +143,7 @@ Before `test_rembg_reference` can pass:
 
 4. **Run full test suite:**
    ```
-   cargo test -p bgprunr-core --features dev-models
+   cargo test -p prunr-core --features dev-models
    ```
 
 ## Next Phase Readiness

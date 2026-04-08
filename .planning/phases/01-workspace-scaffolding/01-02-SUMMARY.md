@@ -14,7 +14,7 @@ provides:
   - Idempotent model caching: skips re-download when checksum matches existing file
 affects:
   - 01-03 (CI workflow — uses cargo xtask fetch-models before build)
-  - 01-04 (bgprunr-models embed — depends on models/ populated by xtask)
+  - 01-04 (prunr-models embed — depends on models/ populated by xtask)
   - Phase 2 (inference engine — depends on silueta.onnx and u2net.onnx being present)
 
 # Tech tracking
@@ -93,7 +93,7 @@ Developers must run `cargo xtask fetch-models` after cloning to populate `models
 ## Next Phase Readiness
 - `cargo xtask fetch-models` is ready for use by CI (Plan 01-03) and developers
 - The bootstrap SHA256 constants in `xtask/src/main.rs` still need to be hardened (replaced with actual SHA256 values after first download) — this is expected and the tool guides the developer through it
-- Models directory will be populated on first `cargo xtask fetch-models` run, enabling bgprunr-models embed (Plan 01-04)
+- Models directory will be populated on first `cargo xtask fetch-models` run, enabling prunr-models embed (Plan 01-04)
 
 ## Self-Check: PASSED
 

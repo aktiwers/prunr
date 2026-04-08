@@ -24,29 +24,29 @@ affects: [phase-06-packaging]
 
 # Tech tracking
 tech-stack:
-  added: [rayon (bgprunr-app Cargo.toml)]
+  added: [rayon (prunr-app Cargo.toml)]
   patterns:
-    - "rayon::ThreadPoolBuilder::new().num_threads(jobs) for batch parallelism — mirrors bgprunr-core pattern"
+    - "rayon::ThreadPoolBuilder::new().num_threads(jobs) for batch parallelism — mirrors prunr-core pattern"
     - "Each rayon worker creates its own OrtEngine::new(model, intra_threads) — no Mutex contention"
     - "sync_selected_batch_textures() bridges batch item state to app-level canvas textures"
     - "add_to_batch() migrates existing single-image to first batch slot when transitioning to batch mode"
 
 key-files:
   created:
-    - crates/bgprunr-app/src/gui/views/sidebar.rs
-    - crates/bgprunr-app/src/gui/tests/batch_tests.rs
+    - crates/prunr-app/src/gui/views/sidebar.rs
+    - crates/prunr-app/src/gui/tests/batch_tests.rs
   modified:
-    - crates/bgprunr-app/src/gui/worker.rs
-    - crates/bgprunr-app/src/gui/app.rs
-    - crates/bgprunr-app/src/gui/views/mod.rs
-    - crates/bgprunr-app/src/gui/views/toolbar.rs
-    - crates/bgprunr-app/src/gui/views/statusbar.rs
-    - crates/bgprunr-app/src/gui/views/shortcuts.rs
-    - crates/bgprunr-app/src/gui/tests/mod.rs
-    - crates/bgprunr-app/Cargo.toml
+    - crates/prunr-app/src/gui/worker.rs
+    - crates/prunr-app/src/gui/app.rs
+    - crates/prunr-app/src/gui/views/mod.rs
+    - crates/prunr-app/src/gui/views/toolbar.rs
+    - crates/prunr-app/src/gui/views/statusbar.rs
+    - crates/prunr-app/src/gui/views/shortcuts.rs
+    - crates/prunr-app/src/gui/tests/mod.rs
+    - crates/prunr-app/Cargo.toml
 
 key-decisions:
-  - "rayon ThreadPoolBuilder with num_threads(jobs) used for batch — same pattern as bgprunr-core batch processing"
+  - "rayon ThreadPoolBuilder with num_threads(jobs) used for batch — same pattern as prunr-core batch processing"
   - "add_to_batch() migrates the existing single image to batch slot 0 when first batch item is added — preserves loaded state"
   - "sync_selected_batch_textures() lazily loads source/result textures for selected batch item and syncs app-level fields for canvas"
   - "Drop handler: single file + empty batch uses single-image flow; multiple files OR existing batch uses add_to_batch() for all"
@@ -97,20 +97,20 @@ Each task was committed atomically:
 
 ## Files Created/Modified
 
-- `crates/bgprunr-app/src/gui/views/sidebar.rs` — New: thumbnail list with DnD reorder, status icons, selection highlight
-- `crates/bgprunr-app/src/gui/worker.rs` — Extended with BatchProcess/BatchItemDone/BatchComplete + rayon parallel handler
-- `crates/bgprunr-app/src/gui/app.rs` — add_to_batch(), handle_process_all(), sync_selected_batch_textures(); batch-aware drop handler, keyboard shortcuts, window title, sidebar panel wiring
-- `crates/bgprunr-app/src/gui/views/toolbar.rs` — Process All button for 2+ batch items
-- `crates/bgprunr-app/src/gui/views/statusbar.rs` — Batch progress display (N/M images processing)
-- `crates/bgprunr-app/src/gui/views/shortcuts.rs` — 14-row shortcuts grid (was 6 rows)
-- `crates/bgprunr-app/src/gui/views/mod.rs` — Added `pub mod sidebar`
-- `crates/bgprunr-app/src/gui/tests/batch_tests.rs` — New: 10 batch unit tests
-- `crates/bgprunr-app/src/gui/tests/mod.rs` — Added `mod batch_tests`
-- `crates/bgprunr-app/Cargo.toml` — Added rayon dependency
+- `crates/prunr-app/src/gui/views/sidebar.rs` — New: thumbnail list with DnD reorder, status icons, selection highlight
+- `crates/prunr-app/src/gui/worker.rs` — Extended with BatchProcess/BatchItemDone/BatchComplete + rayon parallel handler
+- `crates/prunr-app/src/gui/app.rs` — add_to_batch(), handle_process_all(), sync_selected_batch_textures(); batch-aware drop handler, keyboard shortcuts, window title, sidebar panel wiring
+- `crates/prunr-app/src/gui/views/toolbar.rs` — Process All button for 2+ batch items
+- `crates/prunr-app/src/gui/views/statusbar.rs` — Batch progress display (N/M images processing)
+- `crates/prunr-app/src/gui/views/shortcuts.rs` — 14-row shortcuts grid (was 6 rows)
+- `crates/prunr-app/src/gui/views/mod.rs` — Added `pub mod sidebar`
+- `crates/prunr-app/src/gui/tests/batch_tests.rs` — New: 10 batch unit tests
+- `crates/prunr-app/src/gui/tests/mod.rs` — Added `mod batch_tests`
+- `crates/prunr-app/Cargo.toml` — Added rayon dependency
 
 ## Decisions Made
 
-- rayon ThreadPoolBuilder with num_threads(jobs) used for batch — mirrors bgprunr-core batch processing pattern exactly
+- rayon ThreadPoolBuilder with num_threads(jobs) used for batch — mirrors prunr-core batch processing pattern exactly
 - add_to_batch() migrates the existing single image to batch slot 0 when first batch item is added — existing work is preserved
 - sync_selected_batch_textures() centralizes lazy loading and app-level texture sync for the canvas rendering path
 - Drop handler splits on: single file + empty batch = single-image flow; otherwise batch flow for all files

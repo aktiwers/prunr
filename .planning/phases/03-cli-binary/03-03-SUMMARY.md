@@ -42,8 +42,8 @@ completed: 2026-04-07
 - **Files modified:** 1 (bug fix: auto-create output dir)
 
 ## Accomplishments
-- `bgprunr remove car-1.jpg --force` produces transparent PNG (CLI-01)
-- `bgprunr remove *.jpg --output-dir /tmp/out --force` batch processes 3 images (CLI-02)
+- `prunr remove car-1.jpg --force` produces transparent PNG (CLI-01)
+- `prunr remove *.jpg --output-dir /tmp/out --force` batch processes 3 images (CLI-02)
 - `--model u2net` and `--model silueta` both work (CLI-03)
 - `--jobs N` controls parallelism (CLI-04)
 - Exit codes: 0 (success), 1 (failure on missing file) verified (CLI-05)

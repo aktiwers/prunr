@@ -6,7 +6,7 @@
 <domain>
 ## Phase Boundary
 
-ONNX inference pipeline in bgprunr-core: `process_image()` returns a pixel-accurate transparent PNG whose mask matches rembg Python output on the same input. GPU acceleration with CPU fallback. Batch API with parallel processing. Large image handling. No CLI or GUI — this is the shared library that both consume.
+ONNX inference pipeline in prunr-core: `process_image()` returns a pixel-accurate transparent PNG whose mask matches rembg Python output on the same input. GPU acceleration with CPU fallback. Batch API with parallel processing. Large image handling. No CLI or GUI — this is the shared library that both consume.
 
 </domain>
 
@@ -58,10 +58,10 @@ ONNX inference pipeline in bgprunr-core: `process_image()` returns a pixel-accur
 - `ARCHITECTURE.md` — Inference pipeline detail (step 1-10), GPU EP strategy, threading model, data flow diagrams
 
 ### Existing Code
-- `crates/bgprunr-core/src/engine.rs` — InferenceEngine trait (currently just `active_provider()`, needs `process_image()` and `batch_process()` methods)
-- `crates/bgprunr-core/src/types.rs` — CoreError enum (needs inference-specific variants)
-- `crates/bgprunr-core/src/lib.rs` — Module exports
-- `crates/bgprunr-models/src/lib.rs` — Model byte loading (SILUETA_BYTES, U2NET_BYTES + dev-models feature)
+- `crates/prunr-core/src/engine.rs` — InferenceEngine trait (currently just `active_provider()`, needs `process_image()` and `batch_process()` methods)
+- `crates/prunr-core/src/types.rs` — CoreError enum (needs inference-specific variants)
+- `crates/prunr-core/src/lib.rs` — Module exports
+- `crates/prunr-models/src/lib.rs` — Model byte loading (SILUETA_BYTES, U2NET_BYTES + dev-models feature)
 
 ### Research
 - `.planning/research/STACK.md` — ort 2.0.0-rc.12 API, ndarray 0.16, execution provider feature flags
@@ -79,7 +79,7 @@ ONNX inference pipeline in bgprunr-core: `process_image()` returns a pixel-accur
 ### Reusable Assets
 - `InferenceEngine` trait in `engine.rs`: Currently has `active_provider() -> &str`. Phase 2 adds `process_image()` and `batch_process()` methods.
 - `CoreError` in `types.rs`: Has `Io` and `Model` variants. Phase 2 adds `Inference`, `ImageFormat`, `LargeImage` variants.
-- `bgprunr-models` crate: `model_bytes(name: &str) -> &[u8]` function already provides model bytes. Phase 2 uses this to create ORT sessions.
+- `prunr-models` crate: `model_bytes(name: &str) -> &[u8]` function already provides model bytes. Phase 2 uses this to create ORT sessions.
 
 ### Established Patterns
 - thiserror enums with `#[from]` conversions — follow this pattern for new error types
@@ -87,7 +87,7 @@ ONNX inference pipeline in bgprunr-core: `process_image()` returns a pixel-accur
 - `dev-models` feature flag — tests use filesystem models, production uses embedded
 
 ### Integration Points
-- `bgprunr-core` is consumed by `bgprunr-app` (the single binary) — Phase 3 (CLI) and Phase 4 (GUI) depend on the API designed here
+- `prunr-core` is consumed by `prunr-app` (the single binary) — Phase 3 (CLI) and Phase 4 (GUI) depend on the API designed here
 - `process_image()` signature must work for both single-image CLI and GUI worker thread use cases
 - `batch_process()` must work for both CLI batch mode and GUI batch queue
 

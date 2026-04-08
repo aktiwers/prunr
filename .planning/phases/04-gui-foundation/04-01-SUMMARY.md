@@ -8,7 +8,7 @@ requires:
   - phase: 02-inference-core
     provides: OrtEngine, process_image, ProcessResult, ProgressStage, ModelKind
   - phase: 03-cli-integration
-    provides: bgprunr-app crate structure, cli.rs, main.rs
+    provides: prunr-app crate structure, cli.rs, main.rs
 
 provides:
   - gui/state.rs with AppState enum (Empty/Loaded/Processing/Done)
@@ -16,7 +16,7 @@ provides:
   - gui/theme.rs with full UI-SPEC color, spacing, layout constants
   - gui/mod.rs with module declarations and test wiring
   - gui/tests/ with state_tests (2 passing), input_tests stub, clipboard_tests stub
-  - bgprunr_app lib target enabling --lib test runs
+  - prunr_app lib target enabling --lib test runs
 
 affects: [04-gui-foundation plan 02, 04-gui-foundation plan 03]
 
@@ -31,20 +31,20 @@ tech-stack:
 
 key-files:
   created:
-    - crates/bgprunr-app/src/gui/mod.rs
-    - crates/bgprunr-app/src/gui/state.rs
-    - crates/bgprunr-app/src/gui/worker.rs
-    - crates/bgprunr-app/src/gui/theme.rs
-    - crates/bgprunr-app/src/gui/tests/mod.rs
-    - crates/bgprunr-app/src/gui/tests/state_tests.rs
-    - crates/bgprunr-app/src/gui/tests/input_tests.rs
-    - crates/bgprunr-app/src/gui/tests/clipboard_tests.rs
-    - crates/bgprunr-app/src/lib.rs
+    - crates/prunr-app/src/gui/mod.rs
+    - crates/prunr-app/src/gui/state.rs
+    - crates/prunr-app/src/gui/worker.rs
+    - crates/prunr-app/src/gui/theme.rs
+    - crates/prunr-app/src/gui/tests/mod.rs
+    - crates/prunr-app/src/gui/tests/state_tests.rs
+    - crates/prunr-app/src/gui/tests/input_tests.rs
+    - crates/prunr-app/src/gui/tests/clipboard_tests.rs
+    - crates/prunr-app/src/lib.rs
   modified:
-    - crates/bgprunr-app/Cargo.toml
+    - crates/prunr-app/Cargo.toml
 
 key-decisions:
-  - "lib.rs + [lib] section added to bgprunr-app so cargo test --lib works; plan used --lib flag but crate was binary-only"
+  - "lib.rs + [lib] section added to prunr-app so cargo test --lib works; plan used --lib flag but crate was binary-only"
   - "OrtEngine::new(model, 1) used in worker — plan showed 1-arg call but actual signature requires intra_threads param"
   - "Worker creates OrtEngine per ProcessImage invocation (consistent with Phase 2/3 each-worker-creates-own pattern)"
 
@@ -86,19 +86,19 @@ completed: 2026-04-07
 **Plan metadata:** (created after this summary)
 
 ## Files Created/Modified
-- `crates/bgprunr-app/src/gui/mod.rs` - Module declarations for state, worker, theme + test module
-- `crates/bgprunr-app/src/gui/state.rs` - AppState enum (Empty/Loaded/Processing/Done) with Default impl
-- `crates/bgprunr-app/src/gui/worker.rs` - WorkerMessage/WorkerResult enums, spawn_worker() with cancel support
-- `crates/bgprunr-app/src/gui/theme.rs` - All UI-SPEC color/spacing/layout constants as Color32 and f32
-- `crates/bgprunr-app/src/gui/tests/mod.rs` - Test module declarations
-- `crates/bgprunr-app/src/gui/tests/state_tests.rs` - 2 passing AppState tests
-- `crates/bgprunr-app/src/gui/tests/input_tests.rs` - Stub for Plan 02 keyboard tests
-- `crates/bgprunr-app/src/gui/tests/clipboard_tests.rs` - Stub for Plan 02 clipboard tests
-- `crates/bgprunr-app/src/lib.rs` - Exposes gui module as lib target
-- `crates/bgprunr-app/Cargo.toml` - Added egui, eframe, arboard, rfd deps + [lib] section
+- `crates/prunr-app/src/gui/mod.rs` - Module declarations for state, worker, theme + test module
+- `crates/prunr-app/src/gui/state.rs` - AppState enum (Empty/Loaded/Processing/Done) with Default impl
+- `crates/prunr-app/src/gui/worker.rs` - WorkerMessage/WorkerResult enums, spawn_worker() with cancel support
+- `crates/prunr-app/src/gui/theme.rs` - All UI-SPEC color/spacing/layout constants as Color32 and f32
+- `crates/prunr-app/src/gui/tests/mod.rs` - Test module declarations
+- `crates/prunr-app/src/gui/tests/state_tests.rs` - 2 passing AppState tests
+- `crates/prunr-app/src/gui/tests/input_tests.rs` - Stub for Plan 02 keyboard tests
+- `crates/prunr-app/src/gui/tests/clipboard_tests.rs` - Stub for Plan 02 clipboard tests
+- `crates/prunr-app/src/lib.rs` - Exposes gui module as lib target
+- `crates/prunr-app/Cargo.toml` - Added egui, eframe, arboard, rfd deps + [lib] section
 
 ## Decisions Made
-- Added `[lib]` section to Cargo.toml and `lib.rs` so `cargo test --lib` works. The plan specified `--lib` flag but bgprunr-app was binary-only. Adding a lib target is the standard Rust solution (no API changes needed).
+- Added `[lib]` section to Cargo.toml and `lib.rs` so `cargo test --lib` works. The plan specified `--lib` flag but prunr-app was binary-only. Adding a lib target is the standard Rust solution (no API changes needed).
 - `OrtEngine::new(model, 1)` used in worker.rs — the plan showed a 1-arg call but the actual engine signature requires `intra_threads: usize`. Using `1` matches single-image GUI use.
 
 ## Deviations from Plan
@@ -109,16 +109,16 @@ completed: 2026-04-07
 - **Found during:** Task 2 (worker.rs implementation)
 - **Issue:** Plan showed `OrtEngine::new(model)` with 1 argument but actual signature is `OrtEngine::new(model, intra_threads: usize)`
 - **Fix:** Used `OrtEngine::new(model, 1)` — single thread appropriate for GUI use (no rayon batch context)
-- **Files modified:** crates/bgprunr-app/src/gui/worker.rs
-- **Verification:** `cargo check -p bgprunr-app --features dev-models` exits 0
+- **Files modified:** crates/prunr-app/src/gui/worker.rs
+- **Verification:** `cargo check -p prunr-app --features dev-models` exits 0
 - **Committed in:** ee9f0fd (Task 2 commit)
 
 **2. [Rule 3 - Blocking] Added lib target so --lib test flag works**
 - **Found during:** Task 2 (verification step)
 - **Issue:** Plan's verification command `cargo test --lib gui::tests::state_tests` fails on binary-only crate
 - **Fix:** Added `[lib]` section to Cargo.toml and `src/lib.rs` declaring `pub mod gui`
-- **Files modified:** crates/bgprunr-app/Cargo.toml, crates/bgprunr-app/src/lib.rs
-- **Verification:** `cargo test -p bgprunr-app --features dev-models --lib gui::tests::state_tests` passes 2 tests
+- **Files modified:** crates/prunr-app/Cargo.toml, crates/prunr-app/src/lib.rs
+- **Verification:** `cargo test -p prunr-app --features dev-models --lib gui::tests::state_tests` passes 2 tests
 - **Committed in:** ee9f0fd (Task 2 commit)
 
 ---
@@ -131,7 +131,7 @@ completed: 2026-04-07
 
 ## Next Phase Readiness
 - gui/state.rs, gui/worker.rs, gui/theme.rs all compile cleanly
-- spawn_worker() is ready for BgPrunrApp struct integration in Plan 02
+- spawn_worker() is ready for PrunrApp struct integration in Plan 02
 - Test targets exist and state tests pass; input/clipboard stubs ready for Plan 02 population
 - No blockers for Plan 02
 

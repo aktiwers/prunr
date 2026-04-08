@@ -20,7 +20,7 @@ Cargo workspace structure, CI pipeline, model embedding foundation, and release 
 - SHA256 checksums hardcoded in xtask — verified on download
 - At compile time, `include-bytes-zstd` embeds models into the binary (level 19 compression)
 - `dev-models` feature flag loads from filesystem instead (avoids recompilation during development)
-- `bgprunr-models` is an isolated crate so model embedding only recompiles when model files change
+- `prunr-models` is an isolated crate so model embedding only recompiles when model files change
 
 ### CI Strategy
 - GitHub Actions with native runners for all platforms
@@ -36,11 +36,11 @@ Cargo workspace structure, CI pipeline, model embedding foundation, and release 
 - Single workspace version via `workspace.package.version` — all crates share one version
 
 ### Crate API Surface
-- **Single binary with mode flag**: `bgprunr` with no args opens GUI; `bgprunr remove ...` runs CLI mode. One binary to distribute, not two.
-- This means the workspace has: `bgprunr` (binary crate), `bgprunr-core` (lib), `bgprunr-models` (lib)
-- Key traits defined in bgprunr-core: `InferenceEngine`, `ImageProcessor` — but only the ORT concrete implementation exists. SOLID-ready without over-engineering.
+- **Single binary with mode flag**: `prunr` with no args opens GUI; `prunr remove ...` runs CLI mode. One binary to distribute, not two.
+- This means the workspace has: `prunr` (binary crate), `prunr-core` (lib), `prunr-models` (lib)
+- Key traits defined in prunr-core: `InferenceEngine`, `ImageProcessor` — but only the ORT concrete implementation exists. SOLID-ready without over-engineering.
 - Error handling: `thiserror` enums per crate with `#[from]` conversions. Typed errors throughout.
-- Binary name: `bgprunr` (lowercase)
+- Binary name: `prunr` (lowercase)
 
 ### Claude's Discretion
 - Exact xtask implementation details (reqwest vs ureq for download)
@@ -76,7 +76,7 @@ Cargo workspace structure, CI pipeline, model embedding foundation, and release 
 
 ### Integration Points
 - This phase creates the workspace that all subsequent phases build on
-- bgprunr-core's trait definitions will be the API contract for Phase 2 (inference engine)
+- prunr-core's trait definitions will be the API contract for Phase 2 (inference engine)
 - The single-binary architecture means CLI and GUI code live in the same binary crate, dispatched by clap subcommands
 
 </code_context>
@@ -84,7 +84,7 @@ Cargo workspace structure, CI pipeline, model embedding foundation, and release 
 <specifics>
 ## Specific Ideas
 
-- Single binary approach: `bgprunr` (no args) = GUI, `bgprunr remove input.jpg -o output.png` = CLI mode. User distributes and downloads one file that does both.
+- Single binary approach: `prunr` (no args) = GUI, `prunr remove input.jpg -o output.png` = CLI mode. User distributes and downloads one file that does both.
 - SOLID from day one: traits for inference engine abstraction even though only ORT backend exists. This is for clean architecture, not premature flexibility.
 - The `xtask` pattern (cargo xtask fetch-models) is preferred over build.rs for model fetching because build.rs runs on every build — xtask is explicit and one-time.
 

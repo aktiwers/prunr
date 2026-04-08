@@ -6,7 +6,7 @@
 <domain>
 ## Phase Boundary
 
-CLI mode of the `bgprunr` binary — `bgprunr remove` subcommand for single image and batch processing. Exercises the full bgprunr-core API under real scripting conditions. No GUI work — that's Phase 4.
+CLI mode of the `prunr` binary — `prunr remove` subcommand for single image and batch processing. Exercises the full prunr-core API under real scripting conditions. No GUI work — that's Phase 4.
 
 </domain>
 
@@ -14,8 +14,8 @@ CLI mode of the `bgprunr` binary — `bgprunr remove` subcommand for single imag
 ## Implementation Decisions
 
 ### Command Structure
-- **Subcommand**: `bgprunr remove input.jpg -o output.png` for single image
-- **Batch**: `bgprunr remove *.jpg --output-dir ./results/` for batch processing
+- **Subcommand**: `prunr remove input.jpg -o output.png` for single image
+- **Batch**: `prunr remove *.jpg --output-dir ./results/` for batch processing
 - **No args**: launches GUI (Phase 4 — already decided in Phase 1)
 - **Default model**: silueta (fast). Override with `--model u2net`
 - Flags: `--model silueta|u2net`, `--jobs N` (default 1), `--large-image=downscale|process`, `--output-dir DIR`, `--force`, `--quiet`
@@ -55,12 +55,12 @@ CLI mode of the `bgprunr` binary — `bgprunr remove` subcommand for single imag
 - `ARCHITECTURE.md` — CLI data flow diagram, single-binary dispatch pattern
 
 ### Existing Code
-- `crates/bgprunr-app/src/main.rs` — Current placeholder (prints version). This becomes the CLI entry point.
-- `crates/bgprunr-core/src/lib.rs` — Public API: `process_image()`, `batch_process()`, `OrtEngine`, `ModelKind`, etc.
-- `crates/bgprunr-core/src/pipeline.rs` — `process_image()` with callback closure
-- `crates/bgprunr-core/src/batch.rs` — `batch_process()` with per-image callback
-- `crates/bgprunr-core/src/formats.rs` — `load_image_from_path()`, `check_large_image()`, `downscale_image()`, `encode_rgba_png()`
-- `crates/bgprunr-core/src/types.rs` — `ModelKind`, `ProgressStage`, `ProcessResult`, `CoreError`
+- `crates/prunr-app/src/main.rs` — Current placeholder (prints version). This becomes the CLI entry point.
+- `crates/prunr-core/src/lib.rs` — Public API: `process_image()`, `batch_process()`, `OrtEngine`, `ModelKind`, etc.
+- `crates/prunr-core/src/pipeline.rs` — `process_image()` with callback closure
+- `crates/prunr-core/src/batch.rs` — `batch_process()` with per-image callback
+- `crates/prunr-core/src/formats.rs` — `load_image_from_path()`, `check_large_image()`, `downscale_image()`, `encode_rgba_png()`
+- `crates/prunr-core/src/types.rs` — `ModelKind`, `ProgressStage`, `ProcessResult`, `CoreError`
 
 ### Research
 - `.planning/research/STACK.md` — clap 4.5, indicatif 0.17
@@ -71,13 +71,13 @@ CLI mode of the `bgprunr` binary — `bgprunr remove` subcommand for single imag
 ## Existing Code Insights
 
 ### Reusable Assets
-- `bgprunr_core::process_image()` — single image with progress callback
-- `bgprunr_core::batch_process()` — parallel batch with per-image callback, `--jobs N`
-- `bgprunr_core::OrtEngine::new()` — model loading with ModelKind enum
-- `bgprunr_core::formats::load_image_from_path()` — image loading from filesystem
-- `bgprunr_core::formats::check_large_image()` — returns bool for >8000px check
-- `bgprunr_core::formats::downscale_image()` — downscale to max dimension
-- `bgprunr_core::formats::encode_rgba_png()` — RGBA to PNG bytes
+- `prunr_core::process_image()` — single image with progress callback
+- `prunr_core::batch_process()` — parallel batch with per-image callback, `--jobs N`
+- `prunr_core::OrtEngine::new()` — model loading with ModelKind enum
+- `prunr_core::formats::load_image_from_path()` — image loading from filesystem
+- `prunr_core::formats::check_large_image()` — returns bool for >8000px check
+- `prunr_core::formats::downscale_image()` — downscale to max dimension
+- `prunr_core::formats::encode_rgba_png()` — RGBA to PNG bytes
 
 ### Established Patterns
 - Callback closures for progress: `|stage: ProgressStage, pct: f32|`
@@ -87,7 +87,7 @@ CLI mode of the `bgprunr` binary — `bgprunr remove` subcommand for single imag
 
 ### Integration Points
 - `main.rs` dispatches: no args → GUI (Phase 4), `remove` subcommand → CLI processing
-- CLI uses the same `bgprunr_core` API that GUI will use in Phase 4
+- CLI uses the same `prunr_core` API that GUI will use in Phase 4
 - clap `Parser` derive macro on a `Cli` struct with `Subcommand` enum
 
 </code_context>

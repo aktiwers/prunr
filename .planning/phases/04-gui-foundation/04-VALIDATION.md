@@ -19,7 +19,7 @@ created: 2026-04-07
 |----------|-------|
 | **Framework** | cargo test (Rust built-in) |
 | **Config file** | Cargo.toml workspace |
-| **Quick run command** | `cargo test -p bgprunr-app --lib` |
+| **Quick run command** | `cargo test -p prunr-app --lib` |
 | **Full suite command** | `cargo test --workspace` |
 | **Estimated runtime** | ~15 seconds |
 
@@ -27,7 +27,7 @@ created: 2026-04-07
 
 ## Sampling Rate
 
-- **After every task commit:** Run `cargo test -p bgprunr-app --lib`
+- **After every task commit:** Run `cargo test -p prunr-app --lib`
 - **After every plan wave:** Run `cargo test --workspace`
 - **Before `/gsd:verify-work`:** Full suite must be green
 - **Max feedback latency:** 15 seconds
@@ -38,13 +38,13 @@ created: 2026-04-07
 
 | Task ID | Plan | Wave | Requirement | Test Type | Automated Command | File Exists | Status |
 |---------|------|------|-------------|-----------|-------------------|-------------|--------|
-| TBD | TBD | TBD | LOAD-01 | integration | `cargo test -p bgprunr-app test_load_image` | ❌ W0 | ⬜ pending |
-| TBD | TBD | TBD | LOAD-02 | integration | `cargo test -p bgprunr-app test_drag_drop` | ❌ W0 | ⬜ pending |
-| TBD | TBD | TBD | OUT-01 | integration | `cargo test -p bgprunr-app test_save_png` | ❌ W0 | ⬜ pending |
-| TBD | TBD | TBD | OUT-02 | integration | `cargo test -p bgprunr-app test_clipboard` | ❌ W0 | ⬜ pending |
-| TBD | TBD | TBD | UX-01 | unit | `cargo test -p bgprunr-app test_state_machine` | ❌ W0 | ⬜ pending |
-| TBD | TBD | TBD | UX-03 | unit | `cargo test -p bgprunr-app test_cancel` | ❌ W0 | ⬜ pending |
-| TBD | TBD | TBD | UX-04 | unit | `cargo test -p bgprunr-app test_shortcuts` | ❌ W0 | ⬜ pending |
+| TBD | TBD | TBD | LOAD-01 | integration | `cargo test -p prunr-app test_load_image` | ❌ W0 | ⬜ pending |
+| TBD | TBD | TBD | LOAD-02 | integration | `cargo test -p prunr-app test_drag_drop` | ❌ W0 | ⬜ pending |
+| TBD | TBD | TBD | OUT-01 | integration | `cargo test -p prunr-app test_save_png` | ❌ W0 | ⬜ pending |
+| TBD | TBD | TBD | OUT-02 | integration | `cargo test -p prunr-app test_clipboard` | ❌ W0 | ⬜ pending |
+| TBD | TBD | TBD | UX-01 | unit | `cargo test -p prunr-app test_state_machine` | ❌ W0 | ⬜ pending |
+| TBD | TBD | TBD | UX-03 | unit | `cargo test -p prunr-app test_cancel` | ❌ W0 | ⬜ pending |
+| TBD | TBD | TBD | UX-04 | unit | `cargo test -p prunr-app test_shortcuts` | ❌ W0 | ⬜ pending |
 
 *Status: ⬜ pending · ✅ green · ❌ red · ⚠️ flaky*
 
@@ -52,8 +52,8 @@ created: 2026-04-07
 
 ## Wave 0 Requirements
 
-- [ ] `crates/bgprunr-app/src/state.rs` — state machine unit tests (transitions, cancel)
-- [ ] `crates/bgprunr-app/tests/` — integration test stubs for load/save/clipboard
+- [ ] `crates/prunr-app/src/state.rs` — state machine unit tests (transitions, cancel)
+- [ ] `crates/prunr-app/tests/` — integration test stubs for load/save/clipboard
 - [ ] Test fixtures: sample PNG/JPEG images for load testing
 
 *Note: egui does not support headless rendering — UI interaction tests are manual-only. Logic tests target the state machine and worker channel.*

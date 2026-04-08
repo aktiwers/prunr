@@ -27,7 +27,7 @@ created: 2026-04-07
 | Icon library | none — status icons rendered as Unicode glyphs (○ ◆ ✓) in sidebar thumbnails |
 | Font | egui default proportional font (system sans-serif) |
 
-**Note:** Native Rust desktop application. shadcn, Tailwind, and React-ecosystem tooling do not apply. All design tokens are `Color32` constants and `Visuals` overrides in `crates/bgprunr-app/src/gui/theme.rs`.
+**Note:** Native Rust desktop application. shadcn, Tailwind, and React-ecosystem tooling do not apply. All design tokens are `Color32` constants and `Visuals` overrides in `crates/prunr-app/src/gui/theme.rs`.
 
 ---
 
@@ -263,8 +263,8 @@ Settings field layout order (top to bottom):
 
 ### Window Title
 
-Inherited: "BgPrunR — {filename}" when single image loaded.
-Phase 5 extension: "BgPrunR — {N} images" when multiple images are in the queue (N = total count, not selected index).
+Inherited: "Prunr — {filename}" when single image loaded.
+Phase 5 extension: "Prunr — {N} images" when multiple images are in the queue (N = total count, not selected index).
 
 ---
 

@@ -18,8 +18,8 @@ created: 2026-04-07
 | Property | Value |
 |----------|-------|
 | **Framework** | Rust built-in test (`cargo test`) |
-| **Config file** | `[lib]` section in bgprunr-app/Cargo.toml with `src/lib.rs` |
-| **Quick run command** | `cargo test -p bgprunr-app --lib 2>&1 \| tail -20` |
+| **Config file** | `[lib]` section in prunr-app/Cargo.toml with `src/lib.rs` |
+| **Quick run command** | `cargo test -p prunr-app --lib 2>&1 \| tail -20` |
 | **Full suite command** | `cargo test --workspace --lib 2>&1 \| tail -30` |
 | **Estimated runtime** | ~5 seconds |
 
@@ -27,7 +27,7 @@ created: 2026-04-07
 
 ## Sampling Rate
 
-- **After every task commit:** Run `cargo test -p bgprunr-app --lib 2>&1 | tail -20`
+- **After every task commit:** Run `cargo test -p prunr-app --lib 2>&1 | tail -20`
 - **After every plan wave:** Run `cargo test --workspace --lib 2>&1 | tail -30`
 - **Before `/gsd:verify-work`:** Full suite must be green
 - **Max feedback latency:** 10 seconds
@@ -38,14 +38,14 @@ created: 2026-04-07
 
 | Task ID | Plan | Wave | Requirement | Test Type | Automated Command | File Exists | Status |
 |---------|------|------|-------------|-----------|-------------------|-------------|--------|
-| 05-01-01 | 01 | 1 | VIEW-01 | unit | `cargo test -p bgprunr-app --lib zoom` | W0 | pending |
-| 05-01-02 | 01 | 1 | VIEW-02 | unit | `cargo test -p bgprunr-app --lib pan` | W0 | pending |
-| 05-01-03 | 01 | 1 | VIEW-03, VIEW-04, VIEW-05 | unit | `cargo test -p bgprunr-app --lib fit_zoom` | W0 | pending |
-| 05-02-01 | 02 | 2 | UX-02 | unit | `cargo test -p bgprunr-app --lib settings` | W0 | pending |
-| 05-02-02 | 02 | 2 | ANIM-01, ANIM-02, ANIM-03 | unit | `cargo test -p bgprunr-app --lib anim` | W0 | pending |
-| 05-03-01 | 03 | 3 | BATCH-01, BATCH-02, BATCH-03 | unit | `cargo test -p bgprunr-app --lib batch` | W0 | pending |
-| 05-03-02 | 03 | 3 | BATCH-04, BATCH-05, BATCH-06 | unit | `cargo test -p bgprunr-app --lib worker` | W0 | pending |
-| 05-03-03 | 03 | 3 | UX-05 | unit | `cargo test -p bgprunr-app --lib nav_keys` | W0 | pending |
+| 05-01-01 | 01 | 1 | VIEW-01 | unit | `cargo test -p prunr-app --lib zoom` | W0 | pending |
+| 05-01-02 | 01 | 1 | VIEW-02 | unit | `cargo test -p prunr-app --lib pan` | W0 | pending |
+| 05-01-03 | 01 | 1 | VIEW-03, VIEW-04, VIEW-05 | unit | `cargo test -p prunr-app --lib fit_zoom` | W0 | pending |
+| 05-02-01 | 02 | 2 | UX-02 | unit | `cargo test -p prunr-app --lib settings` | W0 | pending |
+| 05-02-02 | 02 | 2 | ANIM-01, ANIM-02, ANIM-03 | unit | `cargo test -p prunr-app --lib anim` | W0 | pending |
+| 05-03-01 | 03 | 3 | BATCH-01, BATCH-02, BATCH-03 | unit | `cargo test -p prunr-app --lib batch` | W0 | pending |
+| 05-03-02 | 03 | 3 | BATCH-04, BATCH-05, BATCH-06 | unit | `cargo test -p prunr-app --lib worker` | W0 | pending |
+| 05-03-03 | 03 | 3 | UX-05 | unit | `cargo test -p prunr-app --lib nav_keys` | W0 | pending |
 
 *Status: pending / green / red / flaky*
 
@@ -53,11 +53,11 @@ created: 2026-04-07
 
 ## Wave 0 Requirements
 
-- [ ] `crates/bgprunr-app/src/gui/tests/zoom_pan_tests.rs` — stubs for VIEW-01, VIEW-02, VIEW-05
-- [ ] `crates/bgprunr-app/src/gui/tests/batch_tests.rs` — stubs for BATCH-01 through BATCH-06, UX-05
-- [ ] `crates/bgprunr-app/src/gui/tests/anim_tests.rs` — stubs for ANIM-01, ANIM-02, ANIM-03
-- [ ] `crates/bgprunr-app/src/gui/tests/settings_tests.rs` — stubs for UX-02
-- [ ] Extend `crates/bgprunr-app/src/gui/tests/state_tests.rs` — add Animating variant test
+- [ ] `crates/prunr-app/src/gui/tests/zoom_pan_tests.rs` — stubs for VIEW-01, VIEW-02, VIEW-05
+- [ ] `crates/prunr-app/src/gui/tests/batch_tests.rs` — stubs for BATCH-01 through BATCH-06, UX-05
+- [ ] `crates/prunr-app/src/gui/tests/anim_tests.rs` — stubs for ANIM-01, ANIM-02, ANIM-03
+- [ ] `crates/prunr-app/src/gui/tests/settings_tests.rs` — stubs for UX-02
+- [ ] Extend `crates/prunr-app/src/gui/tests/state_tests.rs` — add Animating variant test
 
 *Existing infrastructure (`tests/mod.rs`, `tests/state_tests.rs`, `tests/input_tests.rs`, `tests/clipboard_tests.rs`) provides the pattern.*
 

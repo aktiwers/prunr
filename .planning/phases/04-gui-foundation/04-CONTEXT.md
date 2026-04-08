@@ -20,7 +20,7 @@ egui desktop GUI foundation — window, toolbar, image viewer, worker-thread inf
 - **Dark theme** — better for image editing, makes transparency checkerboard visible
 - Default window size: 1280×800
 - Remember last window size/position (store locally, Phase 6 adds full settings persistence)
-- Window title: "BgPrunR" → "BgPrunR — filename.jpg" when image loaded
+- Window title: "Prunr" → "Prunr — filename.jpg" when image loaded
 
 ### Image Display
 - **Empty state**: Centered drop zone hint with dashed border — "Drop an image here or press Ctrl+O"
@@ -76,10 +76,10 @@ egui desktop GUI foundation — window, toolbar, image viewer, worker-thread inf
 - `ARCHITECTURE.md` — GUI data flow (Single Image section), state machine diagram (Empty→Loaded→Processing→Done), threading model, keyboard shortcuts platform modifier section
 
 ### Existing Code
-- `crates/bgprunr-app/src/main.rs` — Current dispatch: `None => GUI stub`. Phase 4 replaces the stub with eframe::run_native
-- `crates/bgprunr-app/src/cli.rs` — CLI module (stays as-is, GUI is a separate code path)
-- `crates/bgprunr-app/Cargo.toml` — Needs eframe, arboard, rfd dependencies
-- `crates/bgprunr-core/src/lib.rs` — Public API: process_image, OrtEngine, ModelKind, ProgressStage, ProcessResult
+- `crates/prunr-app/src/main.rs` — Current dispatch: `None => GUI stub`. Phase 4 replaces the stub with eframe::run_native
+- `crates/prunr-app/src/cli.rs` — CLI module (stays as-is, GUI is a separate code path)
+- `crates/prunr-app/Cargo.toml` — Needs eframe, arboard, rfd dependencies
+- `crates/prunr-core/src/lib.rs` — Public API: process_image, OrtEngine, ModelKind, ProgressStage, ProcessResult
 
 ### Research
 - `.planning/research/STACK.md` — egui/eframe 0.34.1, arboard 3.4
@@ -91,10 +91,10 @@ egui desktop GUI foundation — window, toolbar, image viewer, worker-thread inf
 ## Existing Code Insights
 
 ### Reusable Assets
-- `bgprunr_core::process_image()` — takes `&[u8]` image bytes, returns `ProcessResult` with progress callback
-- `bgprunr_core::OrtEngine::new()` — model loading
-- `bgprunr_core::formats::load_image_from_path()` — file loading
-- `bgprunr_core::formats::encode_rgba_png()` — PNG encoding for save
+- `prunr_core::process_image()` — takes `&[u8]` image bytes, returns `ProcessResult` with progress callback
+- `prunr_core::OrtEngine::new()` — model loading
+- `prunr_core::formats::load_image_from_path()` — file loading
+- `prunr_core::formats::encode_rgba_png()` — PNG encoding for save
 - CLI `main.rs` dispatch pattern — `None => { /* GUI */ }` branch already exists
 
 ### Established Patterns
@@ -105,7 +105,7 @@ egui desktop GUI foundation — window, toolbar, image viewer, worker-thread inf
 ### Integration Points
 - `main.rs` `None` arm: replace stub with `eframe::run_native()` call
 - GUI module (`gui/mod.rs`) created alongside existing `cli.rs`
-- Worker thread uses the same `bgprunr_core::process_image()` that CLI uses
+- Worker thread uses the same `prunr_core::process_image()` that CLI uses
 - `rfd` for native file dialogs (open/save)
 
 </code_context>

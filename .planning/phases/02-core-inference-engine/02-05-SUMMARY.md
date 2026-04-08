@@ -121,9 +121,9 @@ None.
 
 ## Next Phase Readiness
 
-- Plan 06 (reference test in Rust) can be authored — it will read from tests/references/ and compare against bgprunr-core output
+- Plan 06 (reference test in Rust) can be authored — it will read from tests/references/ and compare against prunr-core output
 - The CORE-05 hard gate cannot be cleared until the user runs the steps above and commits the masks
-- Once masks are committed, `cargo test -p bgprunr-core --features dev-models test_rembg_reference` becomes runnable
+- Once masks are committed, `cargo test -p prunr-core --features dev-models test_rembg_reference` becomes runnable
 
 ---
 *Phase: 02-core-inference-engine*

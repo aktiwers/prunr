@@ -18,7 +18,7 @@
 - Dark theme — better for image editing, makes transparency checkerboard visible
 - Default window size: 1280×800
 - Remember last window size/position (store locally, Phase 6 adds full settings persistence)
-- Window title: "BgPrunR" → "BgPrunR — filename.jpg" when image loaded
+- Window title: "Prunr" → "Prunr — filename.jpg" when image loaded
 
 **Image Display**
 - Empty state: Centered drop zone hint with dashed border — "Drop an image here or press Ctrl+O"
@@ -69,7 +69,7 @@ None — discussion stayed within phase scope
 |----|-------------|-----------------|
 | LOAD-01 | User can drag and drop an image file onto the app window to load it | eframe ViewportBuilder::with_drag_and_drop(true) + egui RawInput::dropped_files pattern |
 | LOAD-02 | User can open an image via file browser dialog (Ctrl+O) | rfd 0.15.4 FileDialog::pick_file() with add_filter for image types; Modifiers::command + Key::O |
-| OUT-01 | User can save the processed image as PNG with transparency (Ctrl+S) | rfd FileDialog::save_file() + bgprunr_core::encode_rgba_png(); only enabled in Done state |
+| OUT-01 | User can save the processed image as PNG with transparency (Ctrl+S) | rfd FileDialog::save_file() + prunr_core::encode_rgba_png(); only enabled in Done state |
 | OUT-02 | User can copy the processed image to clipboard (Ctrl+C) | arboard 3.6.1 Clipboard::set_image(ImageData) with wayland-data-control feature; Clipboard stored on App struct |
 | UX-01 | All keyboard shortcuts work as specified (Ctrl/Cmd+O, +R, +S, +C, Escape, ?) | egui Modifiers::command (not .ctrl) for cross-platform; all 6 shortcuts dispatched in logic() or input handler |
 | UX-03 | User can cancel in-progress inference with Escape | WorkerMessage::Cancel sent via mpsc; AtomicBool cancel_flag polled between pipeline stages |
@@ -100,7 +100,7 @@ The rfd file dialog is synchronous (blocking), which is correct for this use cas
 | `eframe` | 0.34.1 | Native window harness, wgpu renderer, winit integration | Already in workspace; must match egui version exactly |
 | `rfd` | 0.15.4 | Native file open/save dialogs | Already in workspace (pinned at "0.15", resolves to 0.15.4); synchronous FileDialog API; no tokio needed |
 | `arboard` | 3.6.1 | Cross-platform clipboard image copy | Already in workspace with wayland-data-control feature; 1Password-maintained |
-| `bgprunr-core` | workspace | Inference pipeline, image I/O | Already complete from Phase 2; process_image(), encode_rgba_png(), load_image_from_path() |
+| `prunr-core` | workspace | Inference pipeline, image I/O | Already complete from Phase 2; process_image(), encode_rgba_png(), load_image_from_path() |
 
 ### Supporting
 
@@ -118,10 +118,10 @@ The rfd file dialog is synchronous (blocking), which is correct for this use cas
 | `rfd` sync `FileDialog` | `rfd` async `AsyncFileDialog` | Async requires tokio or async-std runtime; project explicitly avoids tokio; sync is fine for modal dialogs |
 | Manual `ColorImage` construction | `egui_extras::install_image_loaders` | install_image_loaders decodes at render time, harder to control caching; manual construction gives explicit texture lifecycle control |
 
-**Installation (additions needed to bgprunr-app/Cargo.toml):**
+**Installation (additions needed to prunr-app/Cargo.toml):**
 ```toml
 [dependencies]
-bgprunr-core = { path = "../bgprunr-core" }
+prunr-core = { path = "../prunr-core" }
 clap = { workspace = true }
 indicatif = { workspace = true }
 egui = { workspace = true }
@@ -144,12 +144,12 @@ All versions are already pinned in the workspace `Cargo.toml`. No new workspace 
 ### Recommended Project Structure
 
 ```
-crates/bgprunr-app/src/
+crates/prunr-app/src/
 ├── main.rs          # Entry: no args → GUI via eframe::run_native
 ├── cli.rs           # Existing CLI module (unchanged)
 └── gui/
     ├── mod.rs       # eframe::run_native entry + NativeOptions setup
-    ├── app.rs       # BgPrunrApp struct + eframe::App impl (ui + logic)
+    ├── app.rs       # PrunrApp struct + eframe::App impl (ui + logic)
     ├── worker.rs    # WorkerMessage / WorkerResult enums + spawn_worker()
     ├── state.rs     # AppState enum: Empty / Loaded / Processing / Done
     └── views/
@@ -168,7 +168,7 @@ crates/bgprunr-app/src/
 **Example:**
 ```rust
 // Source: docs.rs/eframe/0.34.1/eframe/trait.App.html
-impl eframe::App for BgPrunrApp {
+impl eframe::App for PrunrApp {
     // Called before each ui() frame, also when UI is hidden.
     // MAY NOT render any widgets or paint.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
@@ -277,8 +277,8 @@ pub fn spawn_worker(ctx: egui::Context) -> (Sender<WorkerMessage>, Receiver<Work
 let dropped: Vec<egui::DroppedFile> = ctx.input(|i| i.raw.dropped_files.clone());
 for file in dropped {
     if let Some(path) = file.path {
-        // load_image_from_path is available from bgprunr_core
-        match bgprunr_core::load_image_from_path(&path) {
+        // load_image_from_path is available from prunr_core
+        match prunr_core::load_image_from_path(&path) {
             Ok(img) => { self.load_image(img, path); }
             Err(e) => { self.state = AppState::Error(e.to_string()); }
         }
@@ -305,7 +305,7 @@ if let Some(path) = rfd::FileDialog::new()
     .set_title("Open Image")
     .pick_file()
 {
-    match bgprunr_core::load_image_from_path(&path) {
+    match prunr_core::load_image_from_path(&path) {
         Ok(img) => self.load_image(img, path),
         Err(e) => self.state = AppState::Error(e.to_string()),
     }
@@ -319,7 +319,7 @@ if let Some(path) = rfd::FileDialog::new()
     .save_file()
 {
     if let AppState::Done(ref result) = self.state {
-        let bytes = bgprunr_core::encode_rgba_png(&result.rgba_image).unwrap();
+        let bytes = prunr_core::encode_rgba_png(&result.rgba_image).unwrap();
         std::fs::write(&path, bytes).unwrap();
     }
 }
@@ -413,12 +413,12 @@ ctx.input(|i| {
 |---------|-------------|-------------|-----|
 | Native file open/save dialogs | Custom file browser widget | `rfd::FileDialog` | Platform-native look, correct macOS NSOpenPanel / Windows IFileDialog behavior, portal support on Linux Wayland |
 | Clipboard image copy | Raw X11/Wayland protocol calls | `arboard::Clipboard::set_image()` | Wayland ownership model (compositor serves paste requests from your process) is non-trivial; arboard handles it |
-| Image format detection and decoding | Custom decoder | `bgprunr_core::load_image_from_path()` — already exists | Already handles PNG/JPEG/WebP/BMP, large-image check, downscale prompt; do not duplicate |
-| PNG encoding for save | Manual PNG encoder | `bgprunr_core::encode_rgba_png()` — already exists | Already encodes RGBA with correct alpha channel |
+| Image format detection and decoding | Custom decoder | `prunr_core::load_image_from_path()` — already exists | Already handles PNG/JPEG/WebP/BMP, large-image check, downscale prompt; do not duplicate |
+| PNG encoding for save | Manual PNG encoder | `prunr_core::encode_rgba_png()` — already exists | Already encodes RGBA with correct alpha channel |
 | GPU texture management | Manual wgpu texture upload | `egui::Context::load_texture()` + `TextureHandle` | Handles GPU upload, mip-mapping, format conversion |
 | Cross-platform keyboard modifier mapping | if cfg!(target_os = "macos") checks | `egui::Modifiers::command` | Already maps Ctrl → Cmd correctly per platform |
 
-**Key insight:** The inference, image I/O, and encoding pipeline is entirely implemented in `bgprunr-core`. Phase 4 is a pure GUI layer — every computation delegates to the existing core.
+**Key insight:** The inference, image I/O, and encoding pipeline is entirely implemented in `prunr-core`. Phase 4 is a pure GUI layer — every computation delegates to the existing core.
 
 ---
 
@@ -456,7 +456,7 @@ ctx.input(|i| {
 
 **Why it happens:** `arboard::Clipboard` dropped immediately after `set_image()`. On Wayland, the clipboard "server" is the app itself; dropping it ends the server.
 
-**How to avoid:** `arboard::Clipboard` must be a field on `BgPrunrApp`. Initialize in `new()`, keep alive for app lifetime. The `wayland-data-control` feature must be enabled (it is in the workspace Cargo.toml).
+**How to avoid:** `arboard::Clipboard` must be a field on `PrunrApp`. Initialize in `new()`, keep alive for app lifetime. The `wayland-data-control` feature must be enabled (it is in the workspace Cargo.toml).
 
 ### Pitfall 5: Drag-and-Drop Silently Disabled on Windows
 
@@ -480,7 +480,7 @@ let native_options = eframe::NativeOptions {
 
 **What goes wrong:** Escape sends cancel but inference continues to completion anyway.
 
-**Why it happens:** `bgprunr_core::process_image()` takes a progress callback but the current design does not thread a cancellation signal into that callback.
+**Why it happens:** `prunr_core::process_image()` takes a progress callback but the current design does not thread a cancellation signal into that callback.
 
 **How to avoid:** Pass an `Arc<AtomicBool>` cancel flag into the worker. In the progress callback closure, check `cancel.load(Ordering::Relaxed)`. After `process_image()` returns, check the flag again before sending `WorkerResult::Done`. If cancelled, send `WorkerResult::Cancelled` instead. UI resets to `AppState::Loaded` on receiving `Cancelled`.
 
@@ -488,7 +488,7 @@ let native_options = eframe::NativeOptions {
 
 ### Pitfall 7: Window Title Not Updating When Image Loaded
 
-**What goes wrong:** Title stays "BgPrunR" even when an image is loaded.
+**What goes wrong:** Title stays "Prunr" even when an image is loaded.
 
 **Why it happens:** Window title in eframe 0.34 must be set via `ViewportCommand::Title` sent each frame, or the title is only set at creation.
 
@@ -496,7 +496,7 @@ let native_options = eframe::NativeOptions {
 ```rust
 // In ui() when title needs updating:
 ctx.send_viewport_cmd(egui::ViewportCommand::Title(
-    format!("BgPrunR — {}", self.loaded_filename)
+    format!("Prunr — {}", self.loaded_filename)
 ));
 ```
 
@@ -511,16 +511,16 @@ ctx.send_viewport_cmd(egui::ViewportCommand::Title(
 fn main() -> eframe::Result {
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("BgPrunR")
+            .with_title("Prunr")
             .with_inner_size([1280.0, 800.0])
             .with_min_inner_size([640.0, 480.0])
             .with_drag_and_drop(true),
         ..Default::default()
     };
     eframe::run_native(
-        "bgprunr",   // app_id — used for Wayland window grouping
+        "prunr",   // app_id — used for Wayland window grouping
         native_options,
-        Box::new(|cc| Ok(Box::new(BgPrunrApp::new(cc))))
+        Box::new(|cc| Ok(Box::new(PrunrApp::new(cc))))
     )
 }
 ```
@@ -528,7 +528,7 @@ fn main() -> eframe::Result {
 ### App Struct Fields
 
 ```rust
-struct BgPrunrApp {
+struct PrunrApp {
     // State
     state: AppState,
     loaded_filename: Option<String>,
@@ -552,7 +552,7 @@ struct BgPrunrApp {
 
     // UI state
     show_shortcuts: bool,
-    selected_model: bgprunr_core::ModelKind,
+    selected_model: prunr_core::ModelKind,
     active_backend: String,
 }
 ```
@@ -641,35 +641,35 @@ let is_hovered = ctx.input(|i| !i.raw.hovered_files.is_empty());
 |----------|-------|
 | Framework | Rust built-in `cargo test` (no external test framework) |
 | Config file | none — standard cargo test discovery |
-| Quick run command | `cargo test -p bgprunr-app --features dev-models` |
+| Quick run command | `cargo test -p prunr-app --features dev-models` |
 | Full suite command | `cargo test --workspace --features dev-models` |
 
 ### Phase Requirements → Test Map
 
 | Req ID | Behavior | Test Type | Automated Command | File Exists? |
 |--------|----------|-----------|-------------------|-------------|
-| LOAD-01 | Dropped file path is parsed and image is loaded | unit | `cargo test -p bgprunr-app --features dev-models test_drop_zone_accepts_image_path` | ❌ Wave 0 |
-| LOAD-02 | Keyboard shortcut Ctrl+O dispatches open action | unit (input handler) | `cargo test -p bgprunr-app --features dev-models test_ctrl_o_dispatches_open` | ❌ Wave 0 |
-| OUT-01 | Save action writes valid RGBA PNG to temp path | unit | `cargo test -p bgprunr-app --features dev-models test_save_writes_png` | ❌ Wave 0 |
-| OUT-02 | Clipboard copy constructs correct ImageData dimensions | unit | `cargo test -p bgprunr-app --features dev-models test_clipboard_image_data` | ❌ Wave 0 |
-| UX-01 | All 6 shortcuts are dispatched correctly | unit (input handler) | `cargo test -p bgprunr-app --features dev-models test_keyboard_shortcuts` | ❌ Wave 0 |
-| UX-03 | Escape during Processing sets cancel_flag and transitions to Loaded | unit (state machine) | `cargo test -p bgprunr-app --features dev-models test_escape_cancels_processing` | ❌ Wave 0 |
-| UX-04 | `?` key toggles show_shortcuts bool | unit (state) | `cargo test -p bgprunr-app --features dev-models test_question_mark_toggles_overlay` | ❌ Wave 0 |
+| LOAD-01 | Dropped file path is parsed and image is loaded | unit | `cargo test -p prunr-app --features dev-models test_drop_zone_accepts_image_path` | ❌ Wave 0 |
+| LOAD-02 | Keyboard shortcut Ctrl+O dispatches open action | unit (input handler) | `cargo test -p prunr-app --features dev-models test_ctrl_o_dispatches_open` | ❌ Wave 0 |
+| OUT-01 | Save action writes valid RGBA PNG to temp path | unit | `cargo test -p prunr-app --features dev-models test_save_writes_png` | ❌ Wave 0 |
+| OUT-02 | Clipboard copy constructs correct ImageData dimensions | unit | `cargo test -p prunr-app --features dev-models test_clipboard_image_data` | ❌ Wave 0 |
+| UX-01 | All 6 shortcuts are dispatched correctly | unit (input handler) | `cargo test -p prunr-app --features dev-models test_keyboard_shortcuts` | ❌ Wave 0 |
+| UX-03 | Escape during Processing sets cancel_flag and transitions to Loaded | unit (state machine) | `cargo test -p prunr-app --features dev-models test_escape_cancels_processing` | ❌ Wave 0 |
+| UX-04 | `?` key toggles show_shortcuts bool | unit (state) | `cargo test -p prunr-app --features dev-models test_question_mark_toggles_overlay` | ❌ Wave 0 |
 
-**Note on GUI testing:** egui does not support headless rendering in unit tests. The above tests are for pure logic — state machine transitions, input dispatch, data conversion — not for rendered output. Test functions will construct `BgPrunrApp` with a mock `egui::Context` where possible. Keyboard shortcut handling extracted to a `handle_input()` function makes it testable without egui context.
+**Note on GUI testing:** egui does not support headless rendering in unit tests. The above tests are for pure logic — state machine transitions, input dispatch, data conversion — not for rendered output. Test functions will construct `PrunrApp` with a mock `egui::Context` where possible. Keyboard shortcut handling extracted to a `handle_input()` function makes it testable without egui context.
 
 ### Sampling Rate
 
-- **Per task commit:** `cargo test -p bgprunr-app --features dev-models`
+- **Per task commit:** `cargo test -p prunr-app --features dev-models`
 - **Per wave merge:** `cargo test --workspace --features dev-models`
 - **Phase gate:** Full suite green before `/gsd:verify-work`
 
 ### Wave 0 Gaps
 
-- [ ] `crates/bgprunr-app/src/gui/tests/mod.rs` — test module for GUI logic covering all Phase 4 reqs
-- [ ] `crates/bgprunr-app/src/gui/tests/state_tests.rs` — AppState transitions (Empty→Loaded→Processing→Done→Loaded)
-- [ ] `crates/bgprunr-app/src/gui/tests/input_tests.rs` — keyboard shortcut dispatch, cancel, shortcut overlay
-- [ ] `crates/bgprunr-app/src/gui/tests/clipboard_tests.rs` — ImageData construction from RgbaImage
+- [ ] `crates/prunr-app/src/gui/tests/mod.rs` — test module for GUI logic covering all Phase 4 reqs
+- [ ] `crates/prunr-app/src/gui/tests/state_tests.rs` — AppState transitions (Empty→Loaded→Processing→Done→Loaded)
+- [ ] `crates/prunr-app/src/gui/tests/input_tests.rs` — keyboard shortcut dispatch, cancel, shortcut overlay
+- [ ] `crates/prunr-app/src/gui/tests/clipboard_tests.rs` — ImageData construction from RgbaImage
 - [ ] Worker thread integration test file if one does not exist
 
 ---

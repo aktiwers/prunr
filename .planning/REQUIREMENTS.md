@@ -1,4 +1,4 @@
-# Requirements: BgPrunR
+# Requirements: Prunr
 
 **Defined:** 2026-04-06
 **Core Value:** One-click local background removal that is fast, private, and works offline
@@ -52,8 +52,8 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### CLI
 
-- [x] **CLI-01**: User can process a single image via `bgprunr input.jpg -o output.png`
-- [x] **CLI-02**: User can batch process via glob/directory: `bgprunr *.jpg --output-dir ./results/`
+- [x] **CLI-01**: User can process a single image via `prunr input.jpg -o output.png`
+- [x] **CLI-02**: User can batch process via glob/directory: `prunr *.jpg --output-dir ./results/`
 - [x] **CLI-03**: User can select model with `--model silueta|u2net`
 - [x] **CLI-04**: User can control parallelism with `--jobs N`
 - [x] **CLI-05**: CLI exits with appropriate exit codes (0 success, 1 error, 2 partial failure in batch)

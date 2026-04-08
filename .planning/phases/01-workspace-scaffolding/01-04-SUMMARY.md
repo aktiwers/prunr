@@ -87,7 +87,7 @@ None.
 
 **Human verification required.** Push the repository to GitHub and confirm all four CI matrix jobs pass:
 
-1. Initialize/push: `cd /media/bolli/5c607cb1-5a5c-4c1b-a74a-d3060d86c222/Coding/Vibe/Private/BgPrunr && git remote add origin https://github.com/YOUR_USERNAME/bgprunr.git && git push -u origin master`
+1. Initialize/push: `cd /media/bolli/5c607cb1-5a5c-4c1b-a74a-d3060d86c222/Coding/Vibe/Private/BgPrunr && git remote add origin https://github.com/YOUR_USERNAME/prunr.git && git push -u origin master`
 2. Visit the Actions tab and confirm all four Build jobs are green (Linux x86_64, macOS x86_64, macOS aarch64, Windows x86_64)
 3. Optional release test: `git tag v0.1.0 && git push --tags` to verify a GitHub Release with four binary artifacts is created
 
