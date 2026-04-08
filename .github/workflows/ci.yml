@@ -51,4 +51,4 @@ jobs:
         run: cargo build --target ${{ matrix.target }}
 
       - name: Test
-        run: cargo test --target ${{ matrix.target }} --features bgprunr-models/dev-models
+        run: cargo test --target ${{ matrix.target }} --features prunr-models/dev-models
