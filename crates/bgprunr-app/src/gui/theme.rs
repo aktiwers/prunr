@@ -1,17 +1,23 @@
 use egui::{Color32, Stroke};
 
 /// Draw a semi-transparent backdrop to dim the app behind a modal overlay.
-pub fn draw_modal_backdrop(ctx: &egui::Context, id: &str) {
+/// Returns true if the backdrop itself was clicked (for close-on-click-outside).
+pub fn draw_modal_backdrop(ctx: &egui::Context, id: &str) -> bool {
     let screen_rect = ctx.content_rect();
-    let painter = ctx.layer_painter(egui::LayerId::new(
-        egui::Order::Foreground,
-        egui::Id::new(id),
-    ));
-    painter.rect_filled(
-        screen_rect,
-        0.0,
-        Color32::from_rgba_unmultiplied(0, 0, 0, 100),
-    );
+
+    // Use an Area to make the backdrop interactive
+    let backdrop_response = egui::Area::new(egui::Id::new(id))
+        .fixed_pos(screen_rect.min)
+        .order(egui::Order::Foreground)
+        .interactable(true)
+        .show(ctx, |ui| {
+            let (_, response) = ui.allocate_exact_size(screen_rect.size(), egui::Sense::click());
+            ui.painter().rect_filled(screen_rect, 0.0,
+                Color32::from_rgba_unmultiplied(0, 0, 0, 100));
+            response.clicked()
+        });
+
+    backdrop_response.inner
 }
 
 /// Standard frame for modal overlay windows.
@@ -111,8 +117,8 @@ pub const OVERLAY_BORDER: Color32 = Color32::from_rgba_premultiplied(0xff, 0xff,
 pub const CHECKER_SIZE: f32 = 16.0;
 
 // === Phase 5: Sidebar ===
-pub const SIDEBAR_WIDTH: f32 = 96.0;
-pub const THUMBNAIL_SIZE: f32 = 80.0;
+pub const SIDEBAR_WIDTH: f32 = 140.0;
+pub const THUMBNAIL_SIZE: f32 = 120.0;
 pub const THUMBNAIL_ROUNDING: f32 = 4.0;
 
 // === Phase 5: Settings Dialog ===

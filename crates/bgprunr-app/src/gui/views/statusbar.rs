@@ -69,18 +69,18 @@ pub fn render(ui: &mut egui::Ui, app: &BgPrunrApp) {
 
             // Backend badge
             ui.label(
-                RichText::new(&app.settings.active_backend)
+                RichText::new(format!("Backend: {}", app.settings.active_backend))
                     .monospace()
                     .size(theme::FONT_SIZE_MONO)
                     .color(theme::TEXT_SECONDARY),
             );
 
-            // Zoom percentage (right of dimensions, left of backend badge)
+            // Zoom percentage with magnifier icon
             if app.state != AppState::Empty {
                 ui.add_space(theme::SPACE_SM);
                 let zoom_pct = (app.zoom * 100.0).round() as u32;
                 ui.label(
-                    RichText::new(format!("{zoom_pct}%"))
+                    RichText::new(format!("\u{1F50D} {zoom_pct}%"))
                         .size(theme::FONT_SIZE_BODY)
                         .color(theme::TEXT_SECONDARY),
                 );
