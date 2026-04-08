@@ -5,7 +5,7 @@ use crate::gui::settings::SettingsModel;
 use crate::gui::theme;
 
 pub fn render(ctx: &egui::Context, app: &mut BgPrunrApp) {
-    let backdrop_clicked = theme::draw_modal_backdrop(ctx, "settings_backdrop");
+    theme::draw_modal_backdrop_ex(ctx, "settings_backdrop", false);
 
     let mut open = true;
     egui::Window::new("Settings")
@@ -149,7 +149,7 @@ pub fn render(ctx: &egui::Context, app: &mut BgPrunrApp) {
                 });
             });
         });
-    if !open || backdrop_clicked {
+    if !open {
         app.show_settings = false;
     }
 }

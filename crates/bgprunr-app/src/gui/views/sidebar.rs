@@ -1,4 +1,5 @@
 use egui::{Color32, Pos2, Rect, RichText, Stroke, Vec2};
+use egui_material_icons::icons::*;
 use crate::gui::app::{BgPrunrApp, BatchStatus};
 use crate::gui::theme;
 
@@ -51,6 +52,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut BgPrunrApp) {
         let mut swap_from: Option<usize> = None;
         let mut swap_to: Option<usize> = None;
         let mut remove_idx: Option<usize> = None;
+        let mut save_idx: Option<usize> = None;
         let item_width = ui.available_width() - theme::SPACE_SM;
         let item_height = theme::THUMBNAIL_SIZE + theme::SPACE_SM;
 
@@ -110,21 +112,37 @@ pub fn render(ui: &mut egui::Ui, app: &mut BgPrunrApp) {
                     needs_repaint = true;
                 }
 
-                // Draw thumbnail if available (preserve aspect ratio)
+                // Loading spinner while thumbnail is being generated
+                if app.batch_items[i].thumb_texture.is_none() && app.batch_items[i].thumb_pending {
+                    let spinner_rect = Rect::from_center_size(item_rect.center(), Vec2::splat(20.0));
+                    ui.put(spinner_rect, egui::Spinner::new().size(20.0).color(theme::ACCENT));
+                    needs_repaint = true;
+                }
+
+                // Draw thumbnail with fade-in
+                let has_thumb = app.batch_items[i].thumb_texture.is_some();
+                let fade = ui.ctx().animate_bool_with_time(
+                    egui::Id::new(("thumb_fade", app.batch_items[i].id)),
+                    has_thumb,
+                    0.2,
+                );
                 if let Some(ref thumb_tex) = app.batch_items[i].thumb_texture {
                     let tex_size = thumb_tex.size_vec2();
                     let scale = (item_width / tex_size.x)
-                        .min(item_height / tex_size.y);
+                        .min(item_height / tex_size.y)
+                        .min(1.0);
                     let fitted = tex_size * scale;
                     let thumb_rect = Rect::from_center_size(
                         item_rect.center(),
                         fitted,
                     );
+                    let alpha = (fade * 255.0) as u8;
                     ui.painter().image(
                         thumb_tex.id(), thumb_rect,
                         Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-                        Color32::WHITE,
+                        Color32::from_rgba_unmultiplied(255, 255, 255, alpha),
                     );
+                    if fade < 1.0 { needs_repaint = true; }
                 }
 
                 // Selection checkbox — top-left corner
@@ -151,11 +169,11 @@ pub fn render(ui: &mut egui::Ui, app: &mut BgPrunrApp) {
                     };
                     ui.painter().rect_filled(cb_rect, 3.0, cb_bg);
                     ui.painter().rect_stroke(cb_rect, 3.0,
-                        Stroke::new(1.0, Color32::from_rgb(0x70, 0x70, 0x70)),
+                        Stroke::new(1.0, theme::TEXT_SECONDARY),
                         egui::StrokeKind::Outside);
                     if app.batch_items[i].selected {
                         ui.painter().text(cb_center, egui::Align2::CENTER_CENTER,
-                            "\u{2713}", egui::FontId::proportional(11.0), Color32::WHITE);
+                            ICON_CHECK.codepoint, egui::FontId::proportional(12.0), Color32::WHITE);
                     }
                 }
 
@@ -169,77 +187,95 @@ pub fn render(ui: &mut egui::Ui, app: &mut BgPrunrApp) {
                     ).intersect(item_rect);
                     if shimmer.width() > 0.0 {
                         ui.painter().rect_filled(shimmer, theme::THUMBNAIL_ROUNDING,
-                            Color32::from_rgba_unmultiplied(0x3b, 0x82, 0xf6, 50));
+                            Color32::from_rgba_unmultiplied(0x7b, 0x2d, 0x8e, 50));
                     }
                     // Pulsing blue border
                     let pulse = (anim_time * 2.5).sin() * 0.5 + 0.5;
                     let border_alpha = (40.0 + pulse * 80.0) as u8;
                     ui.painter().rect_stroke(
                         item_rect, theme::THUMBNAIL_ROUNDING,
-                        Stroke::new(2.0, Color32::from_rgba_unmultiplied(0x3b, 0x82, 0xf6, border_alpha)),
+                        Stroke::new(2.0, Color32::from_rgba_unmultiplied(0x7b, 0x2d, 0x8e, border_alpha)),
                         egui::StrokeKind::Inside,
                     );
                     needs_repaint = true;
                 }
 
-                // Status badge — colored dot with pill background in bottom-right
-                {
-                    let badge_radius = 5.0;
-                    let badge_center = Pos2::new(
-                        item_rect.max.x - theme::SPACE_SM - badge_radius,
-                        item_rect.max.y - theme::SPACE_SM - badge_radius,
-                    );
-                    let (dot_color, show_ring) = match &app.batch_items[i].status {
-                        BatchStatus::Pending => (theme::STATUS_ICON_PENDING, false),
-                        BatchStatus::Processing => (theme::STATUS_ICON_PROCESSING, true),
-                        BatchStatus::Done => (theme::STATUS_ICON_DONE, false),
-                        BatchStatus::Error(_) => (theme::DESTRUCTIVE, false),
-                    };
-                    ui.painter().circle_filled(badge_center, badge_radius + 3.0,
-                        Color32::from_rgba_unmultiplied(0, 0, 0, 180));
-                    ui.painter().circle_filled(badge_center, badge_radius, dot_color);
-                    if show_ring {
+                // Status indicator — bottom-right corner, minimal design
+                match &app.batch_items[i].status {
+                    BatchStatus::Pending => {
+                        // Small gray dot
+                        let dot = Pos2::new(item_rect.max.x - 8.0, item_rect.max.y - 8.0);
+                        ui.painter().circle_filled(dot, 3.0, theme::STATUS_ICON_PENDING);
+                    }
+                    BatchStatus::Processing => {
+                        // Pulsing purple dot
+                        let dot = Pos2::new(item_rect.max.x - 8.0, item_rect.max.y - 8.0);
                         let pulse = (anim_time * 3.0).sin() * 0.5 + 0.5;
-                        let ring_alpha = (pulse * 180.0) as u8;
-                        let ring_color = Color32::from_rgba_unmultiplied(0x3b, 0x82, 0xf6, ring_alpha);
-                        ui.painter().circle_stroke(badge_center, badge_radius + 3.0,
-                            Stroke::new(1.5, ring_color));
+                        let size = 3.0 + pulse * 2.0;
+                        ui.painter().circle_filled(dot, size, theme::ACCENT);
                         needs_repaint = true;
                     }
-                    if matches!(app.batch_items[i].status, BatchStatus::Done) {
-                        ui.painter().text(badge_center, egui::Align2::CENTER_CENTER,
-                            "\u{2713}", egui::FontId::proportional(9.0), Color32::WHITE);
+                    BatchStatus::Done => {
+                        // Green checkmark icon (no circle background)
+                        let pos = Pos2::new(item_rect.max.x - 10.0, item_rect.max.y - 10.0);
+                        ui.painter().text(pos, egui::Align2::CENTER_CENTER,
+                            ICON_CHECK.codepoint, egui::FontId::proportional(14.0),
+                            theme::ACCENT_GREEN);
                     }
-                    if matches!(app.batch_items[i].status, BatchStatus::Error(_)) {
-                        ui.painter().text(badge_center, egui::Align2::CENTER_CENTER,
-                            "\u{2715}", egui::FontId::proportional(9.0), Color32::WHITE);
+                    BatchStatus::Error(_) => {
+                        // Red X icon
+                        let pos = Pos2::new(item_rect.max.x - 10.0, item_rect.max.y - 10.0);
+                        ui.painter().text(pos, egui::Align2::CENTER_CENTER,
+                            ICON_ERROR.codepoint, egui::FontId::proportional(14.0),
+                            theme::DESTRUCTIVE);
                     }
                 }
 
-                // Remove button — top-right, shown on hover (manual hit test)
+                // Hover action buttons (delete top-right, save bottom-left)
                 let mut close_clicked = false;
                 if item_response.hovered() && ui.ctx().dragged_id().is_none() {
-                    let btn_size = 18.0;
-                    let btn_center = Pos2::new(
+                    let btn_size = 20.0;
+
+                    // Delete button — top-right (trash icon)
+                    let del_center = Pos2::new(
                         item_rect.max.x - 4.0 - btn_size * 0.5,
                         item_rect.min.y + 4.0 + btn_size * 0.5,
                     );
-                    let btn_rect = Rect::from_center_size(btn_center, Vec2::splat(btn_size));
-
-                    let (btn_hovered, btn_pressed) = hit_test(ui, btn_rect);
-
-                    let bg = if btn_hovered {
-                        Color32::from_rgb(0xdc, 0x26, 0x26)
+                    let del_rect = Rect::from_center_size(del_center, Vec2::splat(btn_size));
+                    let (del_hover, del_press) = hit_test(ui, del_rect);
+                    let del_bg = if del_hover {
+                        theme::DESTRUCTIVE
                     } else {
                         Color32::from_rgba_unmultiplied(0, 0, 0, 200)
                     };
-                    ui.painter().circle_filled(btn_center, btn_size * 0.5, bg);
-                    ui.painter().text(btn_center, egui::Align2::CENTER_CENTER,
-                        "\u{2715}", egui::FontId::proportional(10.0), Color32::WHITE);
-
-                    if btn_pressed {
+                    ui.painter().circle_filled(del_center, btn_size * 0.5, del_bg);
+                    ui.painter().text(del_center, egui::Align2::CENTER_CENTER,
+                        ICON_DELETE.codepoint, egui::FontId::proportional(12.0), Color32::WHITE);
+                    if del_press {
                         remove_idx = Some(i);
                         close_clicked = true;
+                    }
+
+                    // Save button — bottom-left (only for Done items)
+                    if matches!(app.batch_items[i].status, BatchStatus::Done) {
+                        let save_center = Pos2::new(
+                            item_rect.min.x + 4.0 + btn_size * 0.5,
+                            item_rect.max.y - 4.0 - btn_size * 0.5,
+                        );
+                        let save_rect = Rect::from_center_size(save_center, Vec2::splat(btn_size));
+                        let (save_hover, save_press) = hit_test(ui, save_rect);
+                        let save_bg = if save_hover {
+                            theme::ACCENT
+                        } else {
+                            Color32::from_rgba_unmultiplied(0, 0, 0, 200)
+                        };
+                        ui.painter().circle_filled(save_center, btn_size * 0.5, save_bg);
+                        ui.painter().text(save_center, egui::Align2::CENTER_CENTER,
+                            ICON_SAVE.codepoint, egui::FontId::proportional(12.0), Color32::WHITE);
+                        if save_press {
+                            save_idx = Some(i);
+                            close_clicked = true;
+                        }
                     }
                 }
 
@@ -255,6 +291,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut BgPrunrApp) {
                 // Click to select (skip if close button was clicked)
                 if !close_clicked && item_response.clicked() && app.selected_batch_index != i {
                     app.selected_batch_index = i;
+                    app.canvas_switch_id += 1; // trigger canvas fade-in
                     let ctx = ui.ctx().clone();
                     app.sync_selected_batch_textures(&ctx);
                 }
@@ -283,6 +320,39 @@ pub fn render(ui: &mut egui::Ui, app: &mut BgPrunrApp) {
         // Apply remove
         if let Some(idx) = remove_idx {
             app.remove_batch_item(idx);
+        }
+
+        // Apply save single item
+        if let Some(idx) = save_idx {
+            if idx < app.batch_items.len() {
+                if let Some(ref rgba) = app.batch_items[idx].result_rgba {
+                    let stem = std::path::Path::new(&app.batch_items[idx].filename)
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("image");
+                    let default_name = format!("{stem}-nobg.png");
+                    if let Some(path) = rfd::FileDialog::new()
+                        .add_filter("PNG Image", &["png"])
+                        .set_file_name(&default_name)
+                        .set_title("Save PNG")
+                        .save_file()
+                    {
+                        let rgba = rgba.clone();
+                        let tx = app.save_done_tx.clone();
+                        app.toasts.info("Saving...");
+                        std::thread::spawn(move || {
+                            let msg = match bgprunr_core::encode_rgba_png(&rgba) {
+                                Ok(png_bytes) => match std::fs::write(&path, &png_bytes) {
+                                    Ok(()) => "Saved".into(),
+                                    Err(e) => format!("Save failed: {e}"),
+                                },
+                                Err(e) => format!("Save failed: {e}"),
+                            };
+                            let _ = tx.send(msg);
+                        });
+                    }
+                }
+            }
         }
 
         // Apply reorder after iteration

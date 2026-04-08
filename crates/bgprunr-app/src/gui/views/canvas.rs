@@ -166,11 +166,19 @@ fn render_loaded(ui: &mut egui::Ui, app: &BgPrunrApp) {
     if let Some(ref texture) = app.source_texture {
         let canvas_rect = ui.available_rect_before_wrap();
         let img_rect = compute_img_rect(canvas_rect, texture.size_vec2(), app.zoom, app.pan_offset);
+        // Fade-in on image switch (200ms), keyed on switch counter
+        let fade = ui.ctx().animate_bool_with_time(
+            egui::Id::new(("canvas_fade", app.canvas_switch_id)),
+            true,
+            0.2,
+        );
+        let alpha = (fade * 255.0) as u8;
+        if fade < 1.0 { ui.ctx().request_repaint(); }
         ui.painter().image(
             texture.id(),
             img_rect,
             Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-            Color32::WHITE,
+            Color32::from_rgba_unmultiplied(255, 255, 255, alpha),
         );
     }
 }
@@ -181,15 +189,21 @@ fn render_processing(ui: &mut egui::Ui, app: &BgPrunrApp) {
     let t = ui.ctx().input(|i| i.time) as f32;
 
     if let Some(ref texture) = app.source_texture {
-        let img_rect = compute_img_rect(canvas_rect, texture.size_vec2(), app.zoom, app.pan_offset);
+        let tex_size = texture.size_vec2();
+        // Gentle wiggle/breathing effect on background image
+        let wiggle_zoom = 1.0 + (t * 1.5).sin() * 0.003;
+        let wiggle_x = (t * 0.8).sin() * 2.0;
+        let wiggle_y = (t * 1.1).cos() * 1.5;
+        let wiggle_offset = app.pan_offset + Vec2::new(wiggle_x, wiggle_y);
+        let img_rect = compute_img_rect(canvas_rect, tex_size, app.zoom * wiggle_zoom, wiggle_offset);
         ui.painter().image(
             texture.id(),
             img_rect,
             Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-            Color32::from_rgba_unmultiplied(255, 255, 255, 160),
+            Color32::from_rgba_unmultiplied(255, 255, 255, 140),
         );
 
-        // Shimmer sweep effect over image
+        // Shimmer sweep
         let sweep_x = ((t * 0.6).fract()) * (img_rect.width() + 80.0) - 40.0 + img_rect.min.x;
         let shimmer_rect = Rect::from_min_max(
             Pos2::new(sweep_x - 40.0, img_rect.min.y),
@@ -204,22 +218,27 @@ fn render_processing(ui: &mut egui::Ui, app: &BgPrunrApp) {
     let dots = ".".repeat(((t * 2.0) as usize % 4) + 1);
     let center = canvas_rect.center();
 
-    // Pulsing glow behind text
-    let pulse = (t * 2.5).sin() * 0.5 + 0.5;
-    let glow_alpha = (pulse * 40.0) as u8;
-    let glow_rect = Rect::from_center_size(center, Vec2::new(260.0, 50.0));
-    ui.painter().rect_filled(glow_rect, 12.0,
-        Color32::from_rgba_unmultiplied(0x3b, 0x82, 0xf6, glow_alpha));
+    // Dark pill behind text
+    let pill_rect = Rect::from_center_size(center + Vec2::new(0.0, 14.0), Vec2::new(280.0, 80.0));
+    ui.painter().rect_filled(pill_rect, 14.0,
+        Color32::from_rgba_unmultiplied(0, 0, 0, 180));
 
     ui.painter().text(
-        center,
+        center - Vec2::new(0.0, 6.0),
         egui::Align2::CENTER_CENTER,
         format!("Processing{dots}"),
         egui::FontId::proportional(theme::FONT_SIZE_HEADING),
         theme::TEXT_PRIMARY,
     );
     ui.painter().text(
-        center + Vec2::new(0.0, 24.0),
+        center + Vec2::new(0.0, 14.0),
+        egui::Align2::CENTER_CENTER,
+        &app.progress_stage,
+        egui::FontId::proportional(theme::FONT_SIZE_BODY),
+        theme::TEXT_SECONDARY,
+    );
+    ui.painter().text(
+        center + Vec2::new(0.0, 34.0),
         egui::Align2::CENTER_CENTER,
         "Press Escape to cancel",
         egui::FontId::proportional(theme::FONT_SIZE_MONO),
