@@ -6,10 +6,11 @@ BgPrunR removes backgrounds from images using ONNX neural networks running entir
 
 ## Features
 
-- **GUI and CLI** in one binary — `bgprunr` opens the GUI, `bgprunr remove` runs headless
+- **GUI and CLI** in one binary — `bgprunr` opens the GUI, `bgprunr photo.jpg` runs headless
 - **Two bundled models** — Silueta (~4 MB, fast) and U2Net (~170 MB, higher quality)
 - **GPU acceleration** — CUDA (Linux/Windows), CoreML (macOS), DirectML (Windows), with automatic CPU fallback
-- **Batch processing** — open multiple images, process all in parallel, save all to a folder
+- **Batch processing** — open multiple images, process in parallel, save all to a folder
+- **True parallel processing** — start processing multiple images independently, switch between them while AI works
 - **Reveal animation** — dissolve effect when background removal completes (toggle in settings)
 - **Drag-and-drop** — drop images onto the window to queue them (X11; Wayland pending winit support)
 - **Toast notifications** — animated feedback for save, copy, process complete, errors
@@ -52,13 +53,12 @@ bgprunr
 
 | Button | Description |
 |--------|-------------|
-| **Open Image** | Open one or more images (multi-select supported) |
-| **Remove BG** | Remove background from current image; if checkboxes are selected, processes all selected |
+| **Open** | Open one or more images (multi-select supported) |
+| **Remove BG** / **Remove BG Selected** | Process current image, or all checked images in parallel |
 | **Process All** | Process all queued images in parallel (appears with 2+ images) |
-| **Save** / **Save Selected** | Save current result; if checkboxes are selected, saves all selected to a folder |
+| **Save** / **Save Selected** | Save current result, or all checked results to a folder |
 | **Save All** | Save all processed images to a folder (appears with 2+ done) |
 | **Remove Selected** | Remove all checked images from the sidebar (appears when any are checked) |
-| **Copy Image** | Copy result to clipboard |
 | **Model** | Switch between Silueta (fast) and U2Net (quality) |
 | **Settings** | Open settings dialog |
 
@@ -66,14 +66,17 @@ bgprunr
 
 The sidebar appears on the right when any images are loaded. Each thumbnail shows:
 
-- **Status badge** (bottom-right) — gray dot (pending), pulsing blue dot (processing), green checkmark (done), red X (error)
-- **Selection checkbox** (top-left) — check to include in batch operations (Remove BG Selected, Save Selected, Remove Selected)
-- **Remove button** (top-right, on hover) — click X to remove individual image
-- **Processing animation** — blue shimmer sweep + pulsing border while AI is working
+- **Status indicator** (bottom-right) — gray dot (pending), pulsing purple dot (processing), green checkmark (done), red error icon
+- **Selection checkbox** (top-left) — check to include in batch operations
+- **Delete button** (top-right, on hover) — trash icon to remove individual image
+- **Save button** (bottom-left, on hover) — save icon to export individual processed image
+- **Processing animation** — purple shimmer sweep + pulsing border while AI is working
+- **Loading spinner** — shown while thumbnail is being decoded in background
+- **Fade-in** — 200ms fade when thumbnail loads or image switches
 
 At the top: **Select All** checkbox and **Clear** button for quick batch selection.
 
-Click a thumbnail to view it on the canvas. Drag to reorder. Thumbnails update to show the result after processing.
+Click a thumbnail to view it on the canvas with a smooth fade transition. Drag to reorder. Thumbnails update to show the result after processing.
 
 ### Settings
 
@@ -110,66 +113,49 @@ On macOS, replace `Ctrl` with `Cmd`.
 
 ## CLI
 
-### Remove background from a single image
+Pass image files directly — no subcommand needed:
 
 ```bash
-bgprunr remove photo.jpg
-# Output: photo_nobg.png (same directory)
-
-bgprunr remove photo.jpg -o result.png
-# Output: result.png
-```
-
-### Batch processing
-
-```bash
-bgprunr remove *.jpg --output-dir ./results/
-# Output: results/photo1_nobg.png, results/photo2_nobg.png, ...
-
-bgprunr remove *.jpg --output-dir ./results/ --jobs 4
-# Process 4 images in parallel
+bgprunr photo.jpg                    # saves photo_nobg.png alongside input
+bgprunr photo.jpg -o result.png      # custom output path
+bgprunr *.jpg -o clean/              # batch to folder
+bgprunr -m u2net portrait.jpg        # use quality model
+bgprunr -j 4 *.jpg -o out/           # 4 parallel jobs
+bgprunr remove photo.jpg             # backward compatible subcommand
 ```
 
 ### Full CLI Reference
 
 ```
-bgprunr remove [OPTIONS] [INPUTS]...
+bgprunr [OPTIONS] [INPUTS]...
 ```
-
-**Arguments:**
-
-| Argument | Description |
-|----------|-------------|
-| `INPUTS...` | Input image file(s). Pass multiple paths for batch mode. |
-
-**Options:**
 
 | Option | Description |
 |--------|-------------|
-| `-o, --output <PATH>` | Output file path (single-image mode only) |
-| `--output-dir <DIR>` | Output directory for batch mode. Files named `{stem}_nobg.png` |
-| `--model <MODEL>` | `silueta` (default, fast) or `u2net` (quality) |
-| `--jobs <N>` | Parallel inference jobs for batch mode (default: 1) |
-| `--large-image <MODE>` | `downscale` (default, cap at 4096px) or `process` (full size) |
-| `--force` | Overwrite existing output files without prompting |
-| `--quiet` | Suppress progress output (errors still go to stderr) |
+| `[INPUTS]...` | Input image file(s) |
+| `-o, --output <PATH>` | Output file (single) or directory (batch) |
+| `-m, --model <MODEL>` | `silueta` (default, fast) or `u2net` (quality) |
+| `-j, --jobs <N>` | Parallel inference jobs (default: 1) |
+| `--large-image <MODE>` | `downscale` (default) or `process` (full size) |
+| `-f, --force` | Overwrite existing output files |
+| `-q, --quiet` | Suppress progress output |
 | `-h, --help` | Print help |
 | `-V, --version` | Print version |
 
 ### Examples
 
 ```bash
-# High-quality processing with U2Net
-bgprunr remove portrait.jpg --model u2net
+# Single image with quality model
+bgprunr -m u2net portrait.jpg
 
-# Batch with parallel jobs, overwriting existing
-bgprunr remove photos/*.jpg --output-dir clean/ --jobs 8 --force
+# Batch with parallel jobs, force overwrite
+bgprunr -j 8 -f photos/*.jpg -o clean/
 
-# Process a very large image at full resolution
-bgprunr remove poster.png --large-image process
+# Large image at full resolution
+bgprunr --large-image process poster.png
 
 # Quiet mode for scripting
-bgprunr remove input.jpg -o output.png --quiet
+bgprunr -q photo.jpg -o output.png
 ```
 
 ## Project Structure
