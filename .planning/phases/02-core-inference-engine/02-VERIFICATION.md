@@ -31,19 +31,19 @@ re_verification: false
 
 | Artifact | Expected | Status | Details |
 |----------|----------|--------|---------|
-| `crates/bgprunr-core/src/types.rs` | CoreError, ModelKind, ProgressStage, ProcessResult, constants | VERIFIED | 5 CoreError variants (Io, Model, Inference, ImageFormat, LargeImage), ModelKind (Silueta/U2net), ProgressStage (6 variants), ProcessResult (rgba_bytes/active_provider), LARGE_IMAGE_LIMIT=8000, DOWNSCALE_TARGET=4096 |
-| `crates/bgprunr-core/src/preprocess.rs` | preprocess() → Array4<f32> [1,3,320,320] | VERIFIED | Lanczos3 resize, max(max_pixel, 1e-6) normalization, NCHW layout, 4 passing unit tests |
-| `crates/bgprunr-core/src/postprocess.rs` | postprocess() → RgbaImage at original dims | VERIFIED | Min-max normalization only (no sigmoid, no threshold), Lanczos3 mask resize, 4 unit tests; "NO sigmoid" documented in code comments |
-| `crates/bgprunr-core/src/formats.rs` | load_image_from_{path,bytes}, check_large_image, downscale_image, encode_rgba_png | VERIFIED | All 5 functions present, magic-byte format detection, aspect-ratio-preserving Lanczos3 downscale, PNG magic byte validation in test |
-| `crates/bgprunr-core/src/engine.rs` | OrtEngine with session management, active_provider(), InferenceEngine trait | VERIFIED | Session behind Mutex<Session> (soundness improvement over plan's session() accessor), with_session() closure API, cfg-chain EP detection, InferenceEngine trait impl |
-| `crates/bgprunr-core/src/pipeline.rs` | process_image() orchestration with 6 progress stages | VERIFIED | All 6 ProgressStage variants reported in order, check_large_image guard before tensor allocation, input name queried at runtime via session.inputs()[0].name() |
-| `crates/bgprunr-core/src/batch.rs` | batch_process() with rayon parallelism and ORT thread balancing | VERIFIED | ThreadPoolBuilder, ort_intra_threads formula, per-worker OrtEngine (no Arc<Mutex<Session>>), order-preserving Vec fill pattern |
-| `crates/bgprunr-core/src/lib.rs` | Public re-exports for all Phase 2 types and functions | VERIFIED | All exports present: OrtEngine, InferenceEngine, process_image, batch_process, all format functions, all types and constants |
-| `crates/bgprunr-core/tests/reference_test.rs` | Integration test suite with CORE-05 hard gate | VERIFIED | 9 test functions present, test_rembg_reference uses U2net + 95% tolerance, all 7 requirements covered |
+| `crates/prunr-core/src/types.rs` | CoreError, ModelKind, ProgressStage, ProcessResult, constants | VERIFIED | 5 CoreError variants (Io, Model, Inference, ImageFormat, LargeImage), ModelKind (Silueta/U2net), ProgressStage (6 variants), ProcessResult (rgba_bytes/active_provider), LARGE_IMAGE_LIMIT=8000, DOWNSCALE_TARGET=4096 |
+| `crates/prunr-core/src/preprocess.rs` | preprocess() → Array4<f32> [1,3,320,320] | VERIFIED | Lanczos3 resize, max(max_pixel, 1e-6) normalization, NCHW layout, 4 passing unit tests |
+| `crates/prunr-core/src/postprocess.rs` | postprocess() → RgbaImage at original dims | VERIFIED | Min-max normalization only (no sigmoid, no threshold), Lanczos3 mask resize, 4 unit tests; "NO sigmoid" documented in code comments |
+| `crates/prunr-core/src/formats.rs` | load_image_from_{path,bytes}, check_large_image, downscale_image, encode_rgba_png | VERIFIED | All 5 functions present, magic-byte format detection, aspect-ratio-preserving Lanczos3 downscale, PNG magic byte validation in test |
+| `crates/prunr-core/src/engine.rs` | OrtEngine with session management, active_provider(), InferenceEngine trait | VERIFIED | Session behind Mutex<Session> (soundness improvement over plan's session() accessor), with_session() closure API, cfg-chain EP detection, InferenceEngine trait impl |
+| `crates/prunr-core/src/pipeline.rs` | process_image() orchestration with 6 progress stages | VERIFIED | All 6 ProgressStage variants reported in order, check_large_image guard before tensor allocation, input name queried at runtime via session.inputs()[0].name() |
+| `crates/prunr-core/src/batch.rs` | batch_process() with rayon parallelism and ORT thread balancing | VERIFIED | ThreadPoolBuilder, ort_intra_threads formula, per-worker OrtEngine (no Arc<Mutex<Session>>), order-preserving Vec fill pattern |
+| `crates/prunr-core/src/lib.rs` | Public re-exports for all Phase 2 types and functions | VERIFIED | All exports present: OrtEngine, InferenceEngine, process_image, batch_process, all format functions, all types and constants |
+| `crates/prunr-core/tests/reference_test.rs` | Integration test suite with CORE-05 hard gate | VERIFIED | 9 test functions present, test_rembg_reference uses U2net + 95% tolerance, all 7 requirements covered |
 | `scripts/generate_references.py` | Reference mask generator with exact rembg settings | VERIFIED | u2net, alpha_matting=False, post_process_mask=False, VERSIONS.txt recording, clear error messages |
 | `tests/references/` | 3 reference masks committed | VERIFIED | car-1_u2net_mask.png, car-2_u2net_mask.png, car-3_u2net_mask.png, VERSIONS.txt all present |
 | `tests/test_images/` | 3 test images + README | VERIFIED | car-1.jpg, car-2.jpg, car-3.jpg, README.md all present |
-| `crates/bgprunr-core/Cargo.toml` | ort, ndarray, image, rayon, num_cpus dependencies | VERIFIED | All deps declared; dev-models feature gate correctly wired to bgprunr-models/dev-models |
+| `crates/prunr-core/Cargo.toml` | ort, ndarray, image, rayon, num_cpus dependencies | VERIFIED | All deps declared; dev-models feature gate correctly wired to prunr-models/dev-models |
 
 ### Key Link Verification
 
@@ -56,11 +56,11 @@ re_verification: false
 | `pipeline.rs` | `preprocess.rs` | `preprocess::preprocess()` | WIRED | `use crate::preprocess::preprocess` + called at line 53 |
 | `pipeline.rs` | `postprocess.rs` | `postprocess::postprocess()` | WIRED | `use crate::postprocess::postprocess` + called at line 81 |
 | `pipeline.rs` | `engine.rs` | `engine.with_session()` | WIRED | `with_session` closure wraps all ORT inference calls at line 58 |
-| `engine.rs` | `bgprunr-models` | `bgprunr_models::silueta_bytes()` / `u2net_bytes()` | WIRED | cfg-gated model byte loading for both dev-models and production paths |
+| `engine.rs` | `prunr-models` | `prunr_models::silueta_bytes()` / `u2net_bytes()` | WIRED | cfg-gated model byte loading for both dev-models and production paths |
 | `batch.rs` | `pipeline.rs` | `pipeline::process_image` per image | WIRED | `use crate::pipeline::process_image` + called in par_iter at line 84 |
 | `batch.rs` | `rayon::ThreadPoolBuilder` | `build_batch_pool(jobs)` | WIRED | `ThreadPoolBuilder::new().num_threads(jobs.max(1)).build()` |
 | `batch.rs` | `num_cpus` | `ort_intra_threads` calculation | WIRED | `num_cpus::get()` in `ort_intra_threads()` |
-| `reference_test.rs` | `bgprunr_core::process_image` | Calls process_image on test images | WIRED | `use bgprunr_core::process_image` + called in test_rembg_reference |
+| `reference_test.rs` | `prunr_core::process_image` | Calls process_image on test images | WIRED | `use prunr_core::process_image` + called in test_rembg_reference |
 | `reference_test.rs` | `tests/references/` | Loads reference masks for pixel comparison | WIRED | `references_dir()` resolves to workspace root + tests/references; 3 mask files present |
 
 ### Requirements Coverage
@@ -107,7 +107,7 @@ This is a soundness improvement: ORT's `Session::run()` requires `&mut self`, an
 
 | # | Test | Expected | Why Human |
 |---|------|----------|-----------|
-| 1 | Run `cargo test -p bgprunr-core --features dev-models` and inspect CORE-05 output | Lines like `CORE-05 [car-1]: 97.x% pixel match ... PASS` for all 3 cars | Numeric pixel match percentages are runtime outputs; the prompt states all 43 tests pass including test_rembg_reference, which is accepted as ground truth |
+| 1 | Run `cargo test -p prunr-core --features dev-models` and inspect CORE-05 output | Lines like `CORE-05 [car-1]: 97.x% pixel match ... PASS` for all 3 cars | Numeric pixel match percentages are runtime outputs; the prompt states all 43 tests pass including test_rembg_reference, which is accepted as ground truth |
 | 2 | On a machine with CUDA GPU, verify `active_provider()` returns "CUDA" | `Active execution provider: CUDA` printed by test_active_provider_queryable | Requires actual GPU hardware; not verifiable in this environment |
 
 Note: Item 1 is marked as human-needed only for completeness. The prompt explicitly states test_rembg_reference passed, which is accepted as authoritative.

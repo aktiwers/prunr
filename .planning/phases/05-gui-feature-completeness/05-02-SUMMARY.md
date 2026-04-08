@@ -30,15 +30,15 @@ tech-stack:
 
 key-files:
   created:
-    - crates/bgprunr-app/src/gui/views/settings.rs
-    - crates/bgprunr-app/src/gui/views/animation.rs
-    - crates/bgprunr-app/src/gui/tests/settings_tests.rs
-    - crates/bgprunr-app/src/gui/tests/anim_tests.rs
+    - crates/prunr-app/src/gui/views/settings.rs
+    - crates/prunr-app/src/gui/views/animation.rs
+    - crates/prunr-app/src/gui/tests/settings_tests.rs
+    - crates/prunr-app/src/gui/tests/anim_tests.rs
   modified:
-    - crates/bgprunr-app/src/gui/views/mod.rs
-    - crates/bgprunr-app/src/gui/views/canvas.rs
-    - crates/bgprunr-app/src/gui/app.rs
-    - crates/bgprunr-app/src/gui/tests/mod.rs
+    - crates/prunr-app/src/gui/views/mod.rs
+    - crates/prunr-app/src/gui/views/canvas.rs
+    - crates/prunr-app/src/gui/app.rs
+    - crates/prunr-app/src/gui/tests/mod.rs
 
 key-decisions:
   - "egui InputState has no keys_pressed field — use i.events.iter().any(|e| matches!(e, Event::Key { pressed: true, .. })) for any-key-pressed detection"
@@ -81,14 +81,14 @@ completed: 2026-04-07
 2. **Task 2: Reveal animation rendering and state transitions** - `4928d39` (feat)
 
 ## Files Created/Modified
-- `crates/bgprunr-app/src/gui/views/settings.rs` - Centered modal overlay with 5 settings fields, uses ComboBox/Slider/checkbox widgets
-- `crates/bgprunr-app/src/gui/views/animation.rs` - build_animation_frame() producing per-frame ColorImage with mask-based dissolve
-- `crates/bgprunr-app/src/gui/views/canvas.rs` - Added render_animating() function with checkerboard + animation texture upload
-- `crates/bgprunr-app/src/gui/app.rs` - Ctrl+, shortcut, settings::render call, animation advancement, WorkerResult::Done Animating transition
-- `crates/bgprunr-app/src/gui/views/mod.rs` - Added pub mod settings; pub mod animation;
-- `crates/bgprunr-app/src/gui/tests/settings_tests.rs` - 7 settings unit tests
-- `crates/bgprunr-app/src/gui/tests/anim_tests.rs` - 6 animation unit tests
-- `crates/bgprunr-app/src/gui/tests/mod.rs` - Added settings_tests and anim_tests modules
+- `crates/prunr-app/src/gui/views/settings.rs` - Centered modal overlay with 5 settings fields, uses ComboBox/Slider/checkbox widgets
+- `crates/prunr-app/src/gui/views/animation.rs` - build_animation_frame() producing per-frame ColorImage with mask-based dissolve
+- `crates/prunr-app/src/gui/views/canvas.rs` - Added render_animating() function with checkerboard + animation texture upload
+- `crates/prunr-app/src/gui/app.rs` - Ctrl+, shortcut, settings::render call, animation advancement, WorkerResult::Done Animating transition
+- `crates/prunr-app/src/gui/views/mod.rs` - Added pub mod settings; pub mod animation;
+- `crates/prunr-app/src/gui/tests/settings_tests.rs` - 7 settings unit tests
+- `crates/prunr-app/src/gui/tests/anim_tests.rs` - 6 animation unit tests
+- `crates/prunr-app/src/gui/tests/mod.rs` - Added settings_tests and anim_tests modules
 
 ## Decisions Made
 - `keys_pressed` field does not exist on egui 0.34 InputState — replaced with `i.events.iter().any(|e| matches!(e, egui::Event::Key { pressed: true, .. }))` for skip detection
@@ -103,7 +103,7 @@ completed: 2026-04-07
 - **Found during:** Task 2 (reveal animation rendering)
 - **Issue:** epaint-0.34 ColorImage struct requires source_size: Vec2 field — plan's struct literal was missing it
 - **Fix:** Added `source_size: Vec2::new(out_w as f32, out_h as f32)` to ColorImage construction
-- **Files modified:** crates/bgprunr-app/src/gui/views/animation.rs
+- **Files modified:** crates/prunr-app/src/gui/views/animation.rs
 - **Verification:** cargo test passes
 - **Committed in:** 4928d39
 
@@ -111,7 +111,7 @@ completed: 2026-04-07
 - **Found during:** Task 2 (animation skip detection)
 - **Issue:** Plan used `i.keys_pressed.is_empty()` but egui 0.34 InputState has no `keys_pressed` field
 - **Fix:** Replaced with event scan: `i.events.iter().any(|e| matches!(e, egui::Event::Key { pressed: true, .. }))`
-- **Files modified:** crates/bgprunr-app/src/gui/app.rs
+- **Files modified:** crates/prunr-app/src/gui/app.rs
 - **Verification:** cargo test passes, all 29 tests green
 - **Committed in:** 4928d39
 

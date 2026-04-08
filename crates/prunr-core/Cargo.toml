@@ -1,0 +1,26 @@
+[package]
+name = "prunr-core"
+version.workspace = true
+edition.workspace = true
+
+[features]
+# Enable runtime model loading from filesystem (for development without embedding ONNX files).
+# Activates prunr-models/dev-models which provides silueta_bytes()/u2net_bytes() functions
+# instead of SILUETA_BYTES/U2NET_BYTES statics that require models at compile time.
+# Usage: cargo test -p prunr-core --features dev-models
+dev-models = ["prunr-models/dev-models"]
+
+# CUDA execution provider (requires CUDA toolkit at link time)
+cuda = []
+
+[dependencies]
+prunr-models = { path = "../prunr-models" }
+thiserror = { workspace = true }
+ort = { workspace = true }
+ndarray = { workspace = true }
+image = { workspace = true }
+rayon = { workspace = true }
+num_cpus = "1"
+
+[dev-dependencies]
+prunr-models = { path = "../prunr-models", features = ["dev-models"] }

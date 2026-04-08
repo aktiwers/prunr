@@ -16,7 +16,7 @@
 - SHA256 checksums hardcoded in xtask — verified on download
 - At compile time, `include-bytes-zstd` embeds models into the binary (level 19 compression)
 - `dev-models` feature flag loads from filesystem instead (avoids recompilation during development)
-- `bgprunr-models` is an isolated crate so model embedding only recompiles when model files change
+- `prunr-models` is an isolated crate so model embedding only recompiles when model files change
 - GitHub Actions with native runners for all platforms
 - macOS: macos-14 (arm64) + macos-13 (x86_64) native runners — no cross-compilation
 - Linux: ubuntu-latest x86_64
@@ -26,9 +26,9 @@
 - cargo-dist for generating release workflow and per-platform binary artifacts
 - Even Phase 1 should produce a placeholder binary artifact in CI (validates the pipeline)
 - Single workspace version via `workspace.package.version` — all crates share one version
-- Single binary architecture: `bgprunr` (no args) = GUI, `bgprunr remove ...` = CLI
-- Workspace has: `bgprunr` (binary crate, name=`bgprunr-app`), `bgprunr-core` (lib), `bgprunr-models` (lib)
-- Key traits defined in bgprunr-core: `InferenceEngine`, `ImageProcessor`
+- Single binary architecture: `prunr` (no args) = GUI, `prunr remove ...` = CLI
+- Workspace has: `prunr` (binary crate, name=`prunr-app`), `prunr-core` (lib), `prunr-models` (lib)
+- Key traits defined in prunr-core: `InferenceEngine`, `ImageProcessor`
 - Error handling: `thiserror` enums per crate with `#[from]` conversions
 
 ### Claude's Discretion
@@ -48,8 +48,8 @@ None — discussion stayed within phase scope
 
 | ID | Description | Research Support |
 |----|-------------|-----------------|
-| DIST-01 | Application is distributed as a single self-contained binary per platform | Covered by single binary (bgprunr-app) + cargo-dist multi-platform artifact generation |
-| DIST-02 | Both ONNX models (silueta + u2net) are embedded in the binary | Covered by include-bytes-zstd in isolated bgprunr-models crate with dev-models feature |
+| DIST-01 | Application is distributed as a single self-contained binary per platform | Covered by single binary (prunr-app) + cargo-dist multi-platform artifact generation |
+| DIST-02 | Both ONNX models (silueta + u2net) are embedded in the binary | Covered by include-bytes-zstd in isolated prunr-models crate with dev-models feature |
 | DIST-03 | Binary runs on Linux x86_64, macOS x86_64 + aarch64, Windows x86_64 | Covered by GitHub Actions native runners on all four targets + cargo-dist target triples |
 | DIST-04 | No runtime dependencies — user downloads one file and runs it | Covered by model embedding + ort download-binaries + static/copy-dylibs strategy for ORT DLL |
 </phase_requirements>
@@ -58,13 +58,13 @@ None — discussion stayed within phase scope
 
 ## Summary
 
-Phase 1 establishes the Cargo workspace that all subsequent phases build on. The work divides into four areas: (1) workspace layout and Cargo configuration, (2) the xtask binary for one-time model fetching, (3) GitHub Actions CI producing native builds for all four platform targets, and (4) model embedding via `include-bytes-zstd` in the isolated `bgprunr-models` crate. The placeholder binary need not do anything meaningful — it just proves `cargo build` works on every target.
+Phase 1 establishes the Cargo workspace that all subsequent phases build on. The work divides into four areas: (1) workspace layout and Cargo configuration, (2) the xtask binary for one-time model fetching, (3) GitHub Actions CI producing native builds for all four platform targets, and (4) model embedding via `include-bytes-zstd` in the isolated `prunr-models` crate. The placeholder binary need not do anything meaningful — it just proves `cargo build` works on every target.
 
 The workspace pattern using `[workspace.package]` and `[workspace.dependencies]` for shared version and dependency pinning is stable since Rust 1.64 and is the right approach for a project with three crates sharing the same version number. The `cargo xtask` pattern (with a `.cargo/config.toml` alias) is the idiomatic way to write developer automation in Rust without relying on `build.rs` or Makefiles. cargo-dist 0.31.0 is the current release and handles the four target triples out of the box via `dist init`.
 
-The most critical architectural decision to get right in Phase 1 is isolating `bgprunr-models` as its own crate with no other workspace crate as a dependency. If the model embedding and any source code are in the same compilation unit, every source edit triggers a ~170MB recompile of the model blob. Getting this isolation wrong costs every subsequent phase significant development-loop time.
+The most critical architectural decision to get right in Phase 1 is isolating `prunr-models` as its own crate with no other workspace crate as a dependency. If the model embedding and any source code are in the same compilation unit, every source edit triggers a ~170MB recompile of the model blob. Getting this isolation wrong costs every subsequent phase significant development-loop time.
 
-**Primary recommendation:** Follow the exact workspace structure from ARCHITECTURE.md. Isolate model embedding in `bgprunr-models`. Use reqwest (blocking, rustls) for the xtask downloader. Configure cargo-dist via `[workspace.metadata.dist]` with the four standard target triples. Use `Swatinem/rust-cache` for Cargo artifact caching and `actions/cache` with a SHA256-keyed cache for model files.
+**Primary recommendation:** Follow the exact workspace structure from ARCHITECTURE.md. Isolate model embedding in `prunr-models`. Use reqwest (blocking, rustls) for the xtask downloader. Configure cargo-dist via `[workspace.metadata.dist]` with the four standard target triples. Use `Swatinem/rust-cache` for Cargo artifact caching and `actions/cache` with a SHA256-keyed cache for model files.
 
 ---
 
@@ -116,24 +116,24 @@ cargo install cargo-dist --version 0.31.0
 ### Recommended Project Structure
 
 ```
-bgprunr/                          # Git repo root
+prunr/                          # Git repo root
 ├── Cargo.toml                    # [workspace] — members, [workspace.package], [workspace.dependencies]
 ├── Cargo.lock                    # Committed (binary project)
 ├── .cargo/
 │   └── config.toml               # [alias] xtask = "run --package xtask --"
 ├── crates/
-│   ├── bgprunr-core/             # lib crate — inference pipeline, traits, types
+│   ├── prunr-core/             # lib crate — inference pipeline, traits, types
 │   │   ├── Cargo.toml
 │   │   └── src/
 │   │       ├── lib.rs
 │   │       ├── engine.rs         # InferenceEngine trait (stub in Phase 1)
 │   │       └── types.rs          # Error enum (thiserror)
-│   ├── bgprunr-models/           # lib crate — model embedding ONLY
+│   ├── prunr-models/           # lib crate — model embedding ONLY
 │   │   ├── Cargo.toml
 │   │   └── src/
 │   │       └── lib.rs            # include_bytes_zstd! or dev-models filesystem load
-│   └── bgprunr-app/              # binary crate — placeholder main.rs
-│       ├── Cargo.toml            # name = "bgprunr" (the binary name)
+│   └── prunr-app/              # binary crate — placeholder main.rs
+│       ├── Cargo.toml            # name = "prunr" (the binary name)
 │       └── src/
 │           └── main.rs           # Prints version string; proves build works
 ├── xtask/                        # Developer tooling — NOT a workspace member for distribution
@@ -162,9 +162,9 @@ bgprunr/                          # Git repo root
 # Cargo.toml (workspace root)
 [workspace]
 members = [
-    "crates/bgprunr-core",
-    "crates/bgprunr-models",
-    "crates/bgprunr-app",
+    "crates/prunr-core",
+    "crates/prunr-models",
+    "crates/prunr-app",
     "xtask",
 ]
 resolver = "2"
@@ -173,7 +173,7 @@ resolver = "2"
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/yourname/bgprunr"
+repository = "https://github.com/yourname/prunr"
 
 [workspace.dependencies]
 # Inference (Phase 2+)
@@ -194,30 +194,30 @@ include-bytes-zstd = { git = "https://github.com/daac-tools/include-bytes-zstd" 
 ```
 
 ```toml
-# crates/bgprunr-core/Cargo.toml
+# crates/prunr-core/Cargo.toml
 [package]
-name = "bgprunr-core"
+name = "prunr-core"
 version.workspace = true
 edition.workspace = true
 
 [dependencies]
-bgprunr-models = { path = "../bgprunr-models" }
+prunr-models = { path = "../prunr-models" }
 thiserror = { workspace = true }
 ```
 
 ```toml
-# crates/bgprunr-app/Cargo.toml
+# crates/prunr-app/Cargo.toml
 [package]
-name = "bgprunr-app"
+name = "prunr-app"
 version.workspace = true
 edition.workspace = true
 
 [[bin]]
-name = "bgprunr"     # ← The distributed binary name
+name = "prunr"     # ← The distributed binary name
 path = "src/main.rs"
 
 [dependencies]
-bgprunr-core = { path = "../bgprunr-core" }
+prunr-core = { path = "../prunr-core" }
 ```
 
 ### Pattern 2: xtask Alias
@@ -250,13 +250,13 @@ fn main() -> anyhow::Result<()> {
 
 ### Pattern 3: Model Embedding with dev-models Feature
 
-**What:** `bgprunr-models/src/lib.rs` uses `cfg` guards to switch between compile-time embedding (default/release) and runtime filesystem loading (dev-models feature). The crate has NO other workspace crate as a dependency.
+**What:** `prunr-models/src/lib.rs` uses `cfg` guards to switch between compile-time embedding (default/release) and runtime filesystem loading (dev-models feature). The crate has NO other workspace crate as a dependency.
 
 **When to use:** Always — this is the isolation pattern that prevents model recompilation on source edits.
 
 **Example:**
 ```rust
-// crates/bgprunr-models/src/lib.rs
+// crates/prunr-models/src/lib.rs
 // Source: ARCHITECTURE.md canonical pattern
 
 #[cfg(not(feature = "dev-models"))]
@@ -287,9 +287,9 @@ pub fn u2net_bytes() -> Vec<u8> {
 ```
 
 ```toml
-# crates/bgprunr-models/Cargo.toml
+# crates/prunr-models/Cargo.toml
 [package]
-name = "bgprunr-models"
+name = "prunr-models"
 version.workspace = true
 edition.workspace = true
 
@@ -344,7 +344,7 @@ targets = [
 
 ### Anti-Patterns to Avoid
 
-- **Model embedding in bgprunr-core or bgprunr-app:** Any source edit in these crates would trigger a 170MB model recompilation. The models crate MUST be isolated.
+- **Model embedding in prunr-core or prunr-app:** Any source edit in these crates would trigger a 170MB model recompilation. The models crate MUST be isolated.
 - **Using `build.rs` for model fetching:** build.rs runs on every build. xtask is explicit and one-time — the correct tool for optional, destructive developer setup.
 - **Putting `xtask` in the workspace members list for distribution:** xtask is a developer tool. It should be a workspace member (so it can be run via `cargo xtask`) but it should NOT be a dist target. Mark it with `dist = false` in `[package.metadata.dist]` or simply exclude it from cargo-dist targets.
 - **Using `include_bytes!` (without zstd) on u2net:** 170MB raw blob in a compilation unit — the compiler processes the entire blob during every build that touches the crate. The proc-macro approach compresses at build time and decompresses at runtime.
@@ -369,13 +369,13 @@ targets = [
 ## Common Pitfalls
 
 ### Pitfall 1: Model Crate Not Truly Isolated
-**What goes wrong:** `bgprunr-models` has `bgprunr-core` as a dependency, or `bgprunr-core` has inline `include_bytes_zstd!` calls. Result: every source edit in core triggers model recompilation. A developer changing a type in `types.rs` waits several minutes for Cargo to re-embed and re-link 170MB of compressed model data.
+**What goes wrong:** `prunr-models` has `prunr-core` as a dependency, or `prunr-core` has inline `include_bytes_zstd!` calls. Result: every source edit in core triggers model recompilation. A developer changing a type in `types.rs` waits several minutes for Cargo to re-embed and re-link 170MB of compressed model data.
 
 **Why it happens:** Convenience — it seems natural to put model access in the crate that uses the models. The isolation looks like extra indirection.
 
-**How to avoid:** `bgprunr-models` must have ZERO dependencies on other workspace crates. Its only job is to vend model bytes. The dependency arrow goes: `bgprunr-app` → `bgprunr-core` → `bgprunr-models`. Never in reverse.
+**How to avoid:** `prunr-models` must have ZERO dependencies on other workspace crates. Its only job is to vend model bytes. The dependency arrow goes: `prunr-app` → `prunr-core` → `prunr-models`. Never in reverse.
 
-**Warning signs:** `cargo build --timings` shows `bgprunr-models` recompiling after a change to `engine.rs`.
+**Warning signs:** `cargo build --timings` shows `prunr-models` recompiling after a change to `engine.rs`.
 
 ### Pitfall 2: xtask Not Listed as Workspace Member
 **What goes wrong:** `cargo xtask fetch-models` fails with "package `xtask` not found in workspace". The alias in `.cargo/config.toml` relies on `--package xtask`, which requires xtask to be in the workspace members list.
@@ -417,7 +417,7 @@ Hashing the xtask source file is a practical proxy — the SHA256 constants live
 
 **Why it happens:** `download-binaries` fetches binaries at build time from pykeio's CDN. Corporate or restrictive Windows runners may block outbound connections during build.
 
-**How to avoid:** In Phase 1, the placeholder binary does not use `ort` at all (no inference logic yet). Declare `ort` only in `bgprunr-core`'s `[dependencies]` and do not call any `ort` API from the placeholder binary. The linker will not try to link ORT until Phase 2 wires it up. This defers the ORT distribution problem to Phase 2 where it belongs.
+**How to avoid:** In Phase 1, the placeholder binary does not use `ort` at all (no inference logic yet). Declare `ort` only in `prunr-core`'s `[dependencies]` and do not call any `ort` API from the placeholder binary. The linker will not try to link ORT until Phase 2 wires it up. This defers the ORT distribution problem to Phase 2 where it belongs.
 
 **Warning signs:** CI hangs at `[ort] Downloading ONNX Runtime...` for more than 3 minutes.
 
@@ -457,9 +457,9 @@ Hashing the xtask source file is a practical proxy — the SHA256 constants live
 # Source: Cargo Book official docs on workspace.package + workspace.dependencies
 [workspace]
 members = [
-    "crates/bgprunr-core",
-    "crates/bgprunr-models",
-    "crates/bgprunr-app",
+    "crates/prunr-core",
+    "crates/prunr-models",
+    "crates/prunr-app",
     "xtask",
 ]
 resolver = "2"
@@ -468,7 +468,7 @@ resolver = "2"
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/yourname/bgprunr"
+repository = "https://github.com/yourname/prunr"
 
 [workspace.dependencies]
 # Phase 1 — active
@@ -574,25 +574,25 @@ fn fetch_models() -> anyhow::Result<()> {
 }
 ```
 
-### Placeholder Binary (bgprunr-app/src/main.rs)
+### Placeholder Binary (prunr-app/src/main.rs)
 
 ```rust
-// crates/bgprunr-app/src/main.rs
+// crates/prunr-app/src/main.rs
 // Minimal placeholder — proves the build works on all platforms
 
 fn main() {
     println!(
-        "bgprunr v{} — background removal tool (placeholder)",
+        "prunr v{} — background removal tool (placeholder)",
         env!("CARGO_PKG_VERSION")
     );
-    println!("Run `bgprunr --help` when the CLI is implemented.");
+    println!("Run `prunr --help` when the CLI is implemented.");
 }
 ```
 
-### Minimal Trait Stubs in bgprunr-core (Phase 1 skeleton only)
+### Minimal Trait Stubs in prunr-core (Phase 1 skeleton only)
 
 ```rust
-// crates/bgprunr-core/src/lib.rs
+// crates/prunr-core/src/lib.rs
 // Phase 1: define the trait interface; no implementation yet
 
 pub mod engine;
@@ -603,7 +603,7 @@ pub use types::CoreError;
 ```
 
 ```rust
-// crates/bgprunr-core/src/engine.rs
+// crates/prunr-core/src/engine.rs
 use crate::types::CoreError;
 
 pub trait InferenceEngine: Send + Sync {
@@ -613,7 +613,7 @@ pub trait InferenceEngine: Send + Sync {
 ```
 
 ```rust
-// crates/bgprunr-core/src/types.rs
+// crates/prunr-core/src/types.rs
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -739,7 +739,7 @@ jobs:
 | Req ID | Behavior | Test Type | Automated Command | File Exists? |
 |--------|----------|-----------|-------------------|-------------|
 | DIST-01 | Single binary artifact produced per platform | smoke (CI build check) | `cargo build --release --target <triple>` succeeds | ❌ Wave 0: CI workflow |
-| DIST-02 | Models embedded in binary (or accessible via dev-models) | unit | `cargo test -p bgprunr-models -- test_model_bytes_accessible` | ❌ Wave 0 |
+| DIST-02 | Models embedded in binary (or accessible via dev-models) | unit | `cargo test -p prunr-models -- test_model_bytes_accessible` | ❌ Wave 0 |
 | DIST-03 | Binary builds on all 4 platform targets | smoke (CI matrix) | CI matrix job for each target succeeds | ❌ Wave 0: CI workflow |
 | DIST-04 | No runtime deps: binary runs standalone | smoke (manual on clean VM) | `cargo build --release` produces binary; runs without installing anything | manual-only (Phase 6 full validation) |
 
@@ -753,7 +753,7 @@ jobs:
 
 ### Wave 0 Gaps
 
-- [ ] `crates/bgprunr-models/src/lib.rs` — needs `#[cfg(test)] mod tests` block with `test_model_bytes_accessible` that loads bytes and asserts non-empty (run with `--features dev-models` so it doesn't embed 174MB during test)
+- [ ] `crates/prunr-models/src/lib.rs` — needs `#[cfg(test)] mod tests` block with `test_model_bytes_accessible` that loads bytes and asserts non-empty (run with `--features dev-models` so it doesn't embed 174MB during test)
 - [ ] `.github/workflows/ci.yml` — matrix CI workflow (created during scaffolding tasks)
 - [ ] `.github/workflows/release.yml` — generated by `cargo dist init` (created during scaffolding tasks)
 - [ ] `xtask/src/main.rs` — `fetch-models` subcommand (created during scaffolding tasks)

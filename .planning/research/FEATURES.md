@@ -55,7 +55,7 @@ Features that seem good but create problems.
 | Cloud sync / account system | Persistent history, cross-device access | Violates core privacy principle; adds auth, backend, infra, GDPR concerns | Local-only. History is the user's file system. |
 | Auto-update with remote download | Convenient for users | Requires network permission, signing infra, update server. Contradicts zero-network-access model. | Ship new binaries; let users download manually or via package manager. |
 | Plugin/extension system | Power-user extensibility | Massively increases API surface; forces stability guarantees on internals; security considerations | Keep core small and composable via CLI. Scripting via shell is the extension system. |
-| Subscription / credit model | Revenue | Creates friction, locked UX, support burden. Primary user pain point with competitors (Snapclear, remove.bg). | One-time purchase or open-source. Users explicitly choose BgPrunR to escape subscriptions. |
+| Subscription / credit model | Revenue | Creates friction, locked UX, support burden. Primary user pain point with competitors (Snapclear, remove.bg). | One-time purchase or open-source. Users explicitly choose Prunr to escape subscriptions. |
 | AI background generation (inpainting) | "Fill with AI-generated scene" trend | Requires a generative model (Stable Diffusion class) — gigabytes of weights, totally different problem domain | Out of scope. Recommend Stable Diffusion desktop apps for that use case. |
 
 ## Feature Dependencies
@@ -179,7 +179,7 @@ Features to defer until product-market fit is established.
 
 ## Competitor Feature Analysis
 
-| Feature | rembg (Python) | Snapclear (desktop) | remove.bg (cloud) | BgPrunR approach |
+| Feature | rembg (Python) | Snapclear (desktop) | remove.bg (cloud) | Prunr approach |
 |---------|---------------|---------------------|-------------------|-----------------|
 | Local inference | Yes | Yes | No (cloud-only) | Yes — core differentiator |
 | CLI | Yes | No | API only | Yes — shared core crate |
@@ -210,5 +210,5 @@ Features to defer until product-market fit is established.
 - [rembg vs Background Remover comparison 2026](https://www.backgroundremover.com/blog/rembg-vs-background-remover) — open-source vs. cloud trade-offs
 
 ---
-*Feature research for: Desktop AI background removal tool (BgPrunR)*
+*Feature research for: Desktop AI background removal tool (Prunr)*
 *Researched: 2026-04-06*

@@ -1,4 +1,4 @@
-# BgPrunR Architecture
+# Prunr Architecture
 
 > Living document — updated as the codebase evolves. Last updated: 2026-04-08.
 
@@ -12,10 +12,10 @@
 ## Workspace Structure
 
 ```
-bgprunr/
+prunr/
 ├── Cargo.toml                    # [workspace] — members below
 ├── crates/
-│   ├── bgprunr-core/             # Library: inference pipeline, image I/O
+│   ├── prunr-core/             # Library: inference pipeline, image I/O
 │   │   └── src/
 │   │       ├── lib.rs            # Public API surface + trait definitions
 │   │       ├── engine.rs         # InferenceEngine trait + ORT implementation
@@ -24,11 +24,11 @@ bgprunr/
 │   │       ├── formats.rs        # Image decode/encode (image crate + resvg)
 │   │       └── types.rs          # Shared types: ProcessResult, Progress, Error (thiserror)
 │   │
-│   ├── bgprunr-models/           # Library: model embedding (isolated for build speed)
+│   ├── prunr-models/           # Library: model embedding (isolated for build speed)
 │   │   └── src/lib.rs            # include_bytes! + zstd::bulk::decompress for silueta + u2net
 │   │                             # Dev feature: load from filesystem
 │   │
-│   └── bgprunr-app/              # Binary: single binary for both CLI and GUI
+│   └── prunr-app/              # Binary: single binary for both CLI and GUI
 │       └── src/
 │           ├── main.rs           # Entry point: no args → GUI, subcommands → CLI
 │           ├── cli.rs            # clap subcommands: remove, batch (indicatif progress)
@@ -65,21 +65,21 @@ bgprunr/
 ## Crate Dependency Graph
 
 ```
-bgprunr-models  (no deps on other workspace crates)
+prunr-models  (no deps on other workspace crates)
       │
       ▼
-bgprunr-core    (depends on: bgprunr-models)
+prunr-core    (depends on: prunr-models)
       │
       ▼
-bgprunr-app     (single binary: CLI + GUI, depends on: bgprunr-core)
+prunr-app     (single binary: CLI + GUI, depends on: prunr-core)
 ```
 
-**Single binary architecture:** `bgprunr` (no args) opens the GUI. `bgprunr remove ...` runs CLI mode. One binary to distribute.
+**Single binary architecture:** `prunr` (no args) opens the GUI. `prunr remove ...` runs CLI mode. One binary to distribute.
 
 **Why this matters:**
-- `bgprunr-models` compiles independently. Its 170MB embed only recompiles when model files change, not on every source edit.
-- `bgprunr-core` owns all inference logic. The app binary is a thin presentation layer.
-- `bgprunr-app` contains both CLI and GUI code in one binary — `bgprunr` (no args) = GUI, `bgprunr remove ...` = CLI.
+- `prunr-models` compiles independently. Its 170MB embed only recompiles when model files change, not on every source edit.
+- `prunr-core` owns all inference logic. The app binary is a thin presentation layer.
+- `prunr-app` contains both CLI and GUI code in one binary — `prunr` (no args) = GUI, `prunr remove ...` = CLI.
 
 ## Data Flow
 
@@ -207,7 +207,7 @@ SessionBuilder::new()?
 ## Model Embedding
 
 ```rust
-// bgprunr-models/src/lib.rs
+// prunr-models/src/lib.rs
 
 // Pre-compressed .zst blobs embedded via plain include_bytes!
 #[cfg(not(feature = "dev-models"))]
@@ -338,7 +338,7 @@ if ui.input(|i| i.modifiers.ctrl && i.key_pressed(Key::O)) { /* open */ }
 | 2026-04-08 | Worker spawns threads per batch for true parallel concurrent processing | Architecture |
 | 2026-04-08 | Per-stage progress via BatchProgress (6 stages reported to UI) | UX |
 | 2026-04-08 | Sidebar hover actions: trash icon (delete), save icon (per-item save) | UX |
-| 2026-04-08 | Simplified CLI: bgprunr photo.jpg works without subcommand, short flags | CLI |
+| 2026-04-08 | Simplified CLI: prunr photo.jpg works without subcommand, short flags | CLI |
 | 2026-04-08 | Canvas fade-in (200ms) on image switch, thumbnail fade-in on load | UI polish |
 | 2026-04-08 | Non-interactive settings backdrop (fixes frozen settings modal) | Bug fix |
 | 2026-04-08 | Fixed concurrent processing: results tracked by item_id not selected index | Bug fix |

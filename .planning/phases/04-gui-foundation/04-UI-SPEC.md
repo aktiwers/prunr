@@ -197,7 +197,7 @@ Left to right: [Open Image] [Remove BG] [  spacer  ] [Model: dropdown] [  spacer
 
 - Default size: 1280×800px (source: CONTEXT.md)
 - Minimum size: 640×480px
-- Title: "BgPrunR" when empty/loaded without inference result; "BgPrunR — {filename}" when image loaded
+- Title: "Prunr" when empty/loaded without inference result; "Prunr — {filename}" when image loaded
 - Window size/position remembered in-session only (Phase 6 adds file persistence)
 
 ---

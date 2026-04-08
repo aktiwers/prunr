@@ -19,16 +19,16 @@ created: 2026-04-07
 |----------|-------|
 | **Framework** | cargo test (Rust built-in) |
 | **Config file** | Cargo.toml (workspace) |
-| **Quick run command** | `cargo test -p bgprunr-core` |
-| **Full suite command** | `cargo test -p bgprunr-core --all-features` |
+| **Quick run command** | `cargo test -p prunr-core` |
+| **Full suite command** | `cargo test -p prunr-core --all-features` |
 | **Estimated runtime** | ~15 seconds (includes inference on test images) |
 
 ---
 
 ## Sampling Rate
 
-- **After every task commit:** Run `cargo test -p bgprunr-core`
-- **After every plan wave:** Run `cargo test -p bgprunr-core --all-features`
+- **After every task commit:** Run `cargo test -p prunr-core`
+- **After every plan wave:** Run `cargo test -p prunr-core --all-features`
 - **Before `/gsd:verify-work`:** Full suite must be green
 - **Max feedback latency:** 30 seconds
 
@@ -38,13 +38,13 @@ created: 2026-04-07
 
 | Task ID | Plan | Wave | Requirement | Test Type | Automated Command | File Exists | Status |
 |---------|------|------|-------------|-----------|-------------------|-------------|--------|
-| TBD | TBD | TBD | CORE-01 | integration | `cargo test -p bgprunr-core test_process_image` | ❌ W0 | ⬜ pending |
-| TBD | TBD | TBD | CORE-02 | unit | `cargo test -p bgprunr-core test_model_selection` | ❌ W0 | ⬜ pending |
-| TBD | TBD | TBD | CORE-03 | unit | `cargo test -p bgprunr-core test_active_provider` | ❌ W0 | ⬜ pending |
-| TBD | TBD | TBD | CORE-04 | unit | `cargo test -p bgprunr-core test_progress_callback` | ❌ W0 | ⬜ pending |
-| TBD | TBD | TBD | CORE-05 | integration | `cargo test -p bgprunr-core test_rembg_reference` | ❌ W0 | ⬜ pending |
-| TBD | TBD | TBD | LOAD-03 | unit | `cargo test -p bgprunr-core test_format_support` | ❌ W0 | ⬜ pending |
-| TBD | TBD | TBD | LOAD-04 | unit | `cargo test -p bgprunr-core test_large_image_warning` | ❌ W0 | ⬜ pending |
+| TBD | TBD | TBD | CORE-01 | integration | `cargo test -p prunr-core test_process_image` | ❌ W0 | ⬜ pending |
+| TBD | TBD | TBD | CORE-02 | unit | `cargo test -p prunr-core test_model_selection` | ❌ W0 | ⬜ pending |
+| TBD | TBD | TBD | CORE-03 | unit | `cargo test -p prunr-core test_active_provider` | ❌ W0 | ⬜ pending |
+| TBD | TBD | TBD | CORE-04 | unit | `cargo test -p prunr-core test_progress_callback` | ❌ W0 | ⬜ pending |
+| TBD | TBD | TBD | CORE-05 | integration | `cargo test -p prunr-core test_rembg_reference` | ❌ W0 | ⬜ pending |
+| TBD | TBD | TBD | LOAD-03 | unit | `cargo test -p prunr-core test_format_support` | ❌ W0 | ⬜ pending |
+| TBD | TBD | TBD | LOAD-04 | unit | `cargo test -p prunr-core test_large_image_warning` | ❌ W0 | ⬜ pending |
 
 *Status: ⬜ pending · ✅ green · ❌ red · ⚠️ flaky*
 

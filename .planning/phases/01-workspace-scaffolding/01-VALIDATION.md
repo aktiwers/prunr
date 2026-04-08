@@ -39,7 +39,7 @@ created: 2026-04-06
 | Task ID | Plan | Wave | Requirement | Test Type | Automated Command | File Exists | Status |
 |---------|------|------|-------------|-----------|-------------------|-------------|--------|
 | TBD | TBD | TBD | DIST-01 | build | `cargo build --workspace` | ❌ W0 | ⬜ pending |
-| TBD | TBD | TBD | DIST-02 | unit | `cargo test -p bgprunr-models` | ❌ W0 | ⬜ pending |
+| TBD | TBD | TBD | DIST-02 | unit | `cargo test -p prunr-models` | ❌ W0 | ⬜ pending |
 | TBD | TBD | TBD | DIST-03 | ci | GitHub Actions workflow | ❌ W0 | ⬜ pending |
 | TBD | TBD | TBD | DIST-04 | build | `cargo build --release` | ❌ W0 | ⬜ pending |
 
@@ -49,8 +49,8 @@ created: 2026-04-06
 
 ## Wave 0 Requirements
 
-- [ ] `crates/bgprunr-core/src/lib.rs` — placeholder with version test
-- [ ] `crates/bgprunr-models/src/lib.rs` — model bytes accessibility test
+- [ ] `crates/prunr-core/src/lib.rs` — placeholder with version test
+- [ ] `crates/prunr-models/src/lib.rs` — model bytes accessibility test
 - [ ] Root `Cargo.toml` workspace configuration
 
 *If none: "Existing infrastructure covers all phase requirements."*

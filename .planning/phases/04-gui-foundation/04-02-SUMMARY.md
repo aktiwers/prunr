@@ -9,9 +9,9 @@ requires:
   - phase: 04-01
     provides: AppState enum, spawn_worker() with mpsc channels + AtomicBool cancel, theme constants, test scaffolding
   - phase: 03
-    provides: bgprunr-core process_image(), encode_rgba_png(), ModelKind, ProcessResult
+    provides: prunr-core process_image(), encode_rgba_png(), ModelKind, ProcessResult
 provides:
-  - Complete egui GUI application: BgPrunrApp struct with eframe::App impl
+  - Complete egui GUI application: PrunrApp struct with eframe::App impl
   - All 4 view modules: toolbar, canvas, statusbar, shortcuts overlay
   - Keyboard shortcuts via bool-flag pattern (Ctrl/Cmd+O/R/S/C, Escape, ?)
   - Drag-and-drop image loading
@@ -25,7 +25,7 @@ affects: [04-03, phase-05, phase-06]
 
 # Tech tracking
 tech-stack:
-  added: [image crate added to bgprunr-app Cargo.toml for direct texture loading]
+  added: [image crate added to prunr-app Cargo.toml for direct texture loading]
   patterns:
     - "Bool-flag keyboard shortcut pattern: detect in ctx.input() closure, act AFTER closure returns (avoids blocking rfd inside egui lock)"
     - "eframe 0.34 logic()+ui() split: channel polling in logic(), widget rendering in ui()"
@@ -34,23 +34,23 @@ tech-stack:
 
 key-files:
   created:
-    - crates/bgprunr-app/src/gui/app.rs
-    - crates/bgprunr-app/src/gui/views/mod.rs
-    - crates/bgprunr-app/src/gui/views/toolbar.rs
-    - crates/bgprunr-app/src/gui/views/canvas.rs
-    - crates/bgprunr-app/src/gui/views/statusbar.rs
-    - crates/bgprunr-app/src/gui/views/shortcuts.rs
+    - crates/prunr-app/src/gui/app.rs
+    - crates/prunr-app/src/gui/views/mod.rs
+    - crates/prunr-app/src/gui/views/toolbar.rs
+    - crates/prunr-app/src/gui/views/canvas.rs
+    - crates/prunr-app/src/gui/views/statusbar.rs
+    - crates/prunr-app/src/gui/views/shortcuts.rs
   modified:
-    - crates/bgprunr-app/src/gui/mod.rs
-    - crates/bgprunr-app/src/gui/tests/input_tests.rs
-    - crates/bgprunr-app/src/gui/tests/clipboard_tests.rs
-    - crates/bgprunr-app/src/main.rs
-    - crates/bgprunr-app/Cargo.toml
+    - crates/prunr-app/src/gui/mod.rs
+    - crates/prunr-app/src/gui/tests/input_tests.rs
+    - crates/prunr-app/src/gui/tests/clipboard_tests.rs
+    - crates/prunr-app/src/main.rs
+    - crates/prunr-app/Cargo.toml
 
 key-decisions:
   - "egui 0.34 API renames applied: Panel::top/bottom (not TopBottomPanel), exact_size (not exact_height), corner_radius (not rounding), CornerRadius (not Rounding), global_style/set_global_style (not style/set_style)"
-  - "image crate added to bgprunr-app deps for direct RgbaImage loading without going through bgprunr-core"
-  - "BgPrunrApp::new_for_test() constructor added for unit tests since eframe::CreationContext unavailable outside eframe::run_native"
+  - "image crate added to prunr-app deps for direct RgbaImage loading without going through prunr-core"
+  - "PrunrApp::new_for_test() constructor added for unit tests since eframe::CreationContext unavailable outside eframe::run_native"
   - "cancel_flag made pub(crate) to allow test assertions on AtomicBool state"
   - "Source texture loaded lazily in logic() rather than at open time since egui Context unavailable in handle_open_path()"
 
@@ -66,7 +66,7 @@ duration: 4min
 completed: 2026-04-07
 ---
 
-# Phase 4 Plan 02: GUI Foundation — BgPrunrApp Summary
+# Phase 4 Plan 02: GUI Foundation — PrunrApp Summary
 
 **Full egui application with toolbar/canvas/statusbar/shortcuts views, bool-flag keyboard shortcuts, drag-and-drop, file dialogs, clipboard copy, and cancel via AtomicBool**
 
@@ -79,7 +79,7 @@ completed: 2026-04-07
 - **Files modified:** 11
 
 ## Accomplishments
-- BgPrunrApp struct with full eframe 0.34 logic()+ui() split — no deprecated update() method
+- PrunrApp struct with full eframe 0.34 logic()+ui() split — no deprecated update() method
 - All 4 view modules render toolbar, canvas (drop zone + image + checkerboard), status bar, and shortcuts overlay
 - Keyboard shortcuts wired via bool-flag pattern; rfd file dialogs never called inside ctx.input() closure
 - 7 unit tests pass: cancel flag, open path error, clipboard no-panic scenarios
@@ -88,29 +88,29 @@ completed: 2026-04-07
 
 Each task was committed atomically:
 
-1. **Task 1: BgPrunrApp struct, eframe boilerplate, gui::run()** - `6f952fa` (feat)
+1. **Task 1: PrunrApp struct, eframe boilerplate, gui::run()** - `6f952fa` (feat)
 2. **Task 2: All view modules and test stubs** - `13116a3` (feat)
 
 **Plan metadata:** (committed with docs after this summary)
 
 ## Files Created/Modified
-- `crates/bgprunr-app/src/gui/app.rs` - BgPrunrApp struct, eframe::App impl (logic+ui split, all handlers)
-- `crates/bgprunr-app/src/gui/mod.rs` - Updated with app, views modules and run() function
-- `crates/bgprunr-app/src/main.rs` - None arm now calls gui::run()
-- `crates/bgprunr-app/src/gui/views/mod.rs` - Views module root
-- `crates/bgprunr-app/src/gui/views/toolbar.rs` - Open/Remove BG/Save/Copy buttons + model selector ComboBox
-- `crates/bgprunr-app/src/gui/views/canvas.rs` - Drop zone, image display, processing overlay, checkerboard
-- `crates/bgprunr-app/src/gui/views/statusbar.rs` - State text, progress bar, dimensions, backend badge
-- `crates/bgprunr-app/src/gui/views/shortcuts.rs` - Centered modal with 6 platform-aware shortcuts
-- `crates/bgprunr-app/src/gui/tests/input_tests.rs` - handle_cancel, open_path_error, show_shortcuts tests
-- `crates/bgprunr-app/src/gui/tests/clipboard_tests.rs` - handle_copy no-panic tests
-- `crates/bgprunr-app/Cargo.toml` - Added image crate dependency
+- `crates/prunr-app/src/gui/app.rs` - PrunrApp struct, eframe::App impl (logic+ui split, all handlers)
+- `crates/prunr-app/src/gui/mod.rs` - Updated with app, views modules and run() function
+- `crates/prunr-app/src/main.rs` - None arm now calls gui::run()
+- `crates/prunr-app/src/gui/views/mod.rs` - Views module root
+- `crates/prunr-app/src/gui/views/toolbar.rs` - Open/Remove BG/Save/Copy buttons + model selector ComboBox
+- `crates/prunr-app/src/gui/views/canvas.rs` - Drop zone, image display, processing overlay, checkerboard
+- `crates/prunr-app/src/gui/views/statusbar.rs` - State text, progress bar, dimensions, backend badge
+- `crates/prunr-app/src/gui/views/shortcuts.rs` - Centered modal with 6 platform-aware shortcuts
+- `crates/prunr-app/src/gui/tests/input_tests.rs` - handle_cancel, open_path_error, show_shortcuts tests
+- `crates/prunr-app/src/gui/tests/clipboard_tests.rs` - handle_copy no-panic tests
+- `crates/prunr-app/Cargo.toml` - Added image crate dependency
 
 ## Decisions Made
 
 - **egui 0.34 API renames:** Several methods renamed in 0.34: `TopBottomPanel` -> `Panel::top/bottom`, `exact_height` -> `exact_size`, `.rounding()` -> `.corner_radius()`, `Rounding` -> `CornerRadius`, `ctx.style()` -> `ctx.global_style()`, `ctx.set_style()` -> `ctx.set_global_style()`. All applied to eliminate deprecation warnings.
-- **image crate in bgprunr-app:** Added `image = { workspace = true }` to bgprunr-app Cargo.toml since app.rs needs `image::load_from_memory()` and `image::RgbaImage` for texture loading and clipboard tests, without routing through bgprunr-core.
-- **BgPrunrApp::new_for_test():** Added `#[cfg(test)]` constructor that creates mock mpsc channels without eframe::CreationContext, enabling unit tests for state-machine logic methods.
+- **image crate in prunr-app:** Added `image = { workspace = true }` to prunr-app Cargo.toml since app.rs needs `image::load_from_memory()` and `image::RgbaImage` for texture loading and clipboard tests, without routing through prunr-core.
+- **PrunrApp::new_for_test():** Added `#[cfg(test)]` constructor that creates mock mpsc channels without eframe::CreationContext, enabling unit tests for state-machine logic methods.
 - **cancel_flag pub(crate):** Made `cancel_flag: Arc<AtomicBool>` field pub(crate) so input_tests.rs can assert the AtomicBool value directly.
 - **Lazy source texture:** Source texture is created in `logic()` rather than in `handle_open_path()` because the egui `Context` is not available when loading from file picker or drag-and-drop path handling.
 
@@ -126,10 +126,10 @@ Each task was committed atomically:
 - **Verification:** `cargo check` exits 0 with only unused-constant warnings
 - **Committed in:** 6f952fa, 13116a3
 
-**2. [Rule 1 - Bug] Added image crate to bgprunr-app Cargo.toml**
+**2. [Rule 1 - Bug] Added image crate to prunr-app Cargo.toml**
 - **Found during:** Task 1 (compile verification)
-- **Issue:** `app.rs` uses `image::load_from_memory()` and `image::RgbaImage` directly, but `image` was not listed in `bgprunr-app/Cargo.toml` dependencies (only available transitively via bgprunr-core)
-- **Fix:** Added `image = { workspace = true }` to bgprunr-app Cargo.toml
+- **Issue:** `app.rs` uses `image::load_from_memory()` and `image::RgbaImage` directly, but `image` was not listed in `prunr-app/Cargo.toml` dependencies (only available transitively via prunr-core)
+- **Fix:** Added `image = { workspace = true }` to prunr-app Cargo.toml
 - **Files modified:** Cargo.toml, Cargo.lock
 - **Committed in:** 6f952fa
 
@@ -142,7 +142,7 @@ Each task was committed atomically:
 - egui 0.34 has several renamed APIs vs what the plan code assumed. All renames resolved by checking compiler deprecation messages.
 
 ## Next Phase Readiness
-- GUI application fully wired: run `cargo run -p bgprunr-app --features dev-models` to launch
+- GUI application fully wired: run `cargo run -p prunr-app --features dev-models` to launch
 - Phase 04-03 (integration/polish) can now add image zoom/pan, window state persistence, and error display improvements
 - All 7 unit tests passing for core state machine logic
 

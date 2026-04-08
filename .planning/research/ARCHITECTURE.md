@@ -12,7 +12,7 @@
 ┌─────────────────────────────────────────────────────────────────┐
 │                        Presentation Layer                        │
 ├────────────────────────────┬────────────────────────────────────┤
-│  bgprunr-gui (egui/eframe) │  bgprunr-cli (clap binary)        │
+│  prunr-gui (egui/eframe) │  prunr-cli (clap binary)        │
 │  ┌──────────────────────┐  │  ┌──────────────────────────────┐  │
 │  │  App struct (state)  │  │  │  Arg parsing → JobRequest    │  │
 │  │  update() per frame  │  │  │  Progress → stderr/stdout    │  │
@@ -22,7 +22,7 @@
 └─────────────┼───────────────┴─────────────────┼─────────────────┘
               │                                  │
 ┌─────────────┼──────────────────────────────────┼─────────────────┐
-│                         Core Library (bgprunr-core)               │
+│                         Core Library (prunr-core)               │
 │  ┌──────────▼──────────────────────────────────▼──────────────┐  │
 │  │                    pub API surface                          │  │
 │  │  process_image(input, model, options) → Result<RgbaImage>  │  │
@@ -49,9 +49,9 @@
 
 | Component | Responsibility | Talks To |
 |-----------|----------------|----------|
-| `bgprunr-core` (lib) | Inference pipeline, image I/O, model management | Nothing upstream — pure library |
-| `bgprunr-gui` (bin) | egui/eframe UI, state, texture rendering, user events | `bgprunr-core` via mpsc worker thread |
-| `bgprunr-cli` (bin) | Clap arg parsing, batch orchestration, stdout/stderr | `bgprunr-core` directly (blocking calls) |
+| `prunr-core` (lib) | Inference pipeline, image I/O, model management | Nothing upstream — pure library |
+| `prunr-gui` (bin) | egui/eframe UI, state, texture rendering, user events | `prunr-core` via mpsc worker thread |
+| `prunr-cli` (bin) | Clap arg parsing, batch orchestration, stdout/stderr | `prunr-core` directly (blocking calls) |
 | `InferenceEngine` (in core) | Session creation, execution provider negotiation, tensor I/O | `ort` crate, `ModelRegistry` |
 | `PreProcessor` (in core) | Resize, normalize, channel-first layout, f32 tensor | `image` crate |
 | `PostProcessor` (in core) | Sigmoid, threshold, mask resize, alpha channel merge | `image` crate |
@@ -66,7 +66,7 @@ BgPrunr/                          # Workspace root
 ├── Cargo.lock
 │
 ├── crates/
-│   ├── bgprunr-core/             # Shared inference library
+│   ├── prunr-core/             # Shared inference library
 │   │   ├── Cargo.toml
 │   │   └── src/
 │   │       ├── lib.rs            # Public API exports
@@ -78,7 +78,7 @@ BgPrunr/                          # Workspace root
 │   │       ├── batch.rs          # rayon parallel batch with progress callback
 │   │       └── error.rs          # unified BgPrunrError type
 │   │
-│   ├── bgprunr-gui/              # egui/eframe desktop application
+│   ├── prunr-gui/              # egui/eframe desktop application
 │   │   ├── Cargo.toml
 │   │   └── src/
 │   │       ├── main.rs           # eframe::run_native entry point
@@ -92,7 +92,7 @@ BgPrunr/                          # Workspace root
 │   │       │   └── progress.rs   # progress bar, spinner overlay
 │   │       └── texture.rs        # egui TextureHandle management
 │   │
-│   └── bgprunr-cli/              # clap CLI binary
+│   └── prunr-cli/              # clap CLI binary
 │       ├── Cargo.toml
 │       └── src/
 │           ├── main.rs           # clap derive parse, dispatch
@@ -108,7 +108,7 @@ BgPrunr/                          # Workspace root
 
 ### Structure Rationale
 
-- **`crates/` subdirectory:** Keeps workspace members away from root, allows clean separation. `bgprunr-core` has no binary targets so it cannot accidentally gain a `main.rs`.
+- **`crates/` subdirectory:** Keeps workspace members away from root, allows clean separation. `prunr-core` has no binary targets so it cannot accidentally gain a `main.rs`.
 - **`engine.rs` separate from `model.rs`:** Session lifecycle (GPU/CPU negotiation, session pool) is independent from which model bytes to load. Swap models without touching engine code.
 - **`preprocess.rs` / `postprocess.rs` split:** Preprocessing (image → tensor) and postprocessing (mask → RGBA) are distinct pipeline stages. Easier to unit-test independently, easier to tune normalization constants without touching inference.
 - **`worker.rs` in GUI:** Keeps thread and channel boilerplate out of `app.rs`. The App struct only holds channel ends, not OS thread handles.
@@ -118,7 +118,7 @@ BgPrunr/                          # Workspace root
 
 ### Pattern 1: Worker Thread with mpsc Channels (GUI)
 
-**What:** The GUI never calls inference directly. It sends a `WorkRequest` message on an mpsc sender and polls a `WorkResult` receiver each frame via `try_recv()` (non-blocking). The worker thread owns the `Session` and calls `bgprunr-core`.
+**What:** The GUI never calls inference directly. It sends a `WorkRequest` message on an mpsc sender and polls a `WorkResult` receiver each frame via `try_recv()` (non-blocking). The worker thread owns the `Session` and calls `prunr-core`.
 
 **When to use:** Any operation that blocks longer than ~16ms. Inference on CPU can take 200ms–2s. Blocking `update()` freezes the window.
 
@@ -207,15 +207,15 @@ Note: `static` with `include_bytes_zstd` works because the macro emits a `const 
 
 ### Pattern 4: CLI Direct-Call (No Channels)
 
-**What:** The CLI binary calls `bgprunr-core` functions directly on the main thread using rayon's parallel iterator for batch. Progress is reported via a closure passed to `batch_process`.
+**What:** The CLI binary calls `prunr-core` functions directly on the main thread using rayon's parallel iterator for batch. Progress is reported via a closure passed to `batch_process`.
 
 **When to use:** CLI does not have a render loop, so blocking is fine. Simpler than channels.
 
-**Trade-offs:** Zero overhead. The same `bgprunr-core` API works for both GUI (async dispatch) and CLI (blocking).
+**Trade-offs:** Zero overhead. The same `prunr-core` API works for both GUI (async dispatch) and CLI (blocking).
 
 **Sketch:**
 ```rust
-// In bgprunr-cli batch.rs
+// In prunr-cli batch.rs
 core::batch_process(&inputs, model, options, |done, total| {
     pb.set_position(done as u64);
     pb.set_length(total as u64);
@@ -231,15 +231,15 @@ User drops file onto window
     ↓
 app.rs: send WorkRequest::Process to worker_tx
     ↓
-worker.rs: receive request, call bgprunr_core::process_image()
+worker.rs: receive request, call prunr_core::process_image()
     ↓
-bgprunr_core::imageio: decode file → DynamicImage
+prunr_core::imageio: decode file → DynamicImage
     ↓
-bgprunr_core::preprocess: resize(320×320) → normalize([0.485,0.456,0.406]/[0.229,0.224,0.225]) → NCHW f32 tensor
+prunr_core::preprocess: resize(320×320) → normalize([0.485,0.456,0.406]/[0.229,0.224,0.225]) → NCHW f32 tensor
     ↓
-bgprunr_core::engine: Session::run(tensor) → output tensor [1,1,320,320]
+prunr_core::engine: Session::run(tensor) → output tensor [1,1,320,320]
     ↓
-bgprunr_core::postprocess: sigmoid → threshold(0.5) → resize(original dims) → merge as alpha channel
+prunr_core::postprocess: sigmoid → threshold(0.5) → resize(original dims) → merge as alpha channel
     ↓
 worker.rs: send WorkResult::Done(RgbaImage) to result_tx + ctx.request_repaint()
     ↓
@@ -253,9 +253,9 @@ ui/canvas.rs: render before/after panels using egui::Image widget
 ```
 clap args: Vec<PathBuf> input, output dir, model, parallelism
     ↓
-bgprunr_cli::batch: rayon::par_iter over inputs
+prunr_cli::batch: rayon::par_iter over inputs
     ↓ (N threads in parallel, one per CPU core by default)
-bgprunr_core::process_image() per image (each call is self-contained)
+prunr_core::process_image() per image (each call is self-contained)
     ↓
 progress closure → indicatif progress bar on stderr
     ↓
@@ -287,16 +287,16 @@ DynamicImage RGBA u8 (original size, transparent background)
 The Cargo dependency graph dictates compilation order:
 
 ```
-1. bgprunr-core  (no workspace deps — builds first)
+1. prunr-core  (no workspace deps — builds first)
         ↓ (depends on)
-2. bgprunr-gui   (depends on bgprunr-core)
-   bgprunr-cli   (depends on bgprunr-core, builds in parallel with gui)
+2. prunr-gui   (depends on prunr-core)
+   prunr-cli   (depends on prunr-core, builds in parallel with gui)
 ```
 
 **Phase implications:**
 - Phase 1 (core inference) must be fully functional before any GUI or CLI work begins.
-- `bgprunr-core` should expose a stable API boundary early so GUI and CLI can be developed concurrently.
-- Integration tests can be written against `bgprunr-core` alone before any binary targets exist.
+- `prunr-core` should expose a stable API boundary early so GUI and CLI can be developed concurrently.
+- Integration tests can be written against `prunr-core` alone before any binary targets exist.
 
 ## Anti-Patterns
 
@@ -310,7 +310,7 @@ The Cargo dependency graph dictates compilation order:
 
 ### Anti-Pattern 2: Blocking the egui Update Loop
 
-**What people do:** Call `bgprunr_core::process_image()` directly inside `App::update()`.
+**What people do:** Call `prunr_core::process_image()` directly inside `App::update()`.
 
 **Why it's wrong:** `update()` is called on the GUI thread every frame (60fps target). Any call taking >16ms causes visible stutter. Inference takes 200ms–2s even on fast hardware. The window freezes and appears crashed to the user.
 
@@ -338,16 +338,16 @@ The Cargo dependency graph dictates compilation order:
 
 | Boundary | Communication | Notes |
 |----------|---------------|-------|
-| `bgprunr-core` → `ort` | Direct function call (sync) | Session::run() blocks until inference done |
-| `bgprunr-core` → `image` | Direct function call | DynamicImage conversion, resize, encode |
-| `bgprunr-core` → `resvg` | Direct function call at decode time | SVG only; rasterize to DynamicImage immediately |
-| `bgprunr-gui` → `bgprunr-core` | mpsc channel (async dispatch) | worker.rs mediates; App holds Sender/Receiver ends |
-| `bgprunr-cli` → `bgprunr-core` | Direct blocking call + rayon | No channel needed; CLI blocks until batch done |
-| `bgprunr-gui` → egui textures | `ctx.load_texture()` once, `TextureHandle` retained | Never re-upload per frame for static results |
+| `prunr-core` → `ort` | Direct function call (sync) | Session::run() blocks until inference done |
+| `prunr-core` → `image` | Direct function call | DynamicImage conversion, resize, encode |
+| `prunr-core` → `resvg` | Direct function call at decode time | SVG only; rasterize to DynamicImage immediately |
+| `prunr-gui` → `prunr-core` | mpsc channel (async dispatch) | worker.rs mediates; App holds Sender/Receiver ends |
+| `prunr-cli` → `prunr-core` | Direct blocking call + rayon | No channel needed; CLI blocks until batch done |
+| `prunr-gui` → egui textures | `ctx.load_texture()` once, `TextureHandle` retained | Never re-upload per frame for static results |
 
 ### No External Services
 
-BgPrunR has zero network integration by design. No external service boundaries exist. The only "external" data is the ONNX model bytes, which are embedded at compile time.
+Prunr has zero network integration by design. No external service boundaries exist. The only "external" data is the ONNX model bytes, which are embedded at compile time.
 
 ## Scaling Considerations
 

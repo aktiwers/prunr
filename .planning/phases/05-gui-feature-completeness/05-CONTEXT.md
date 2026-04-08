@@ -53,7 +53,7 @@ Full interactive experience for the egui desktop GUI: zoom/pan for edge inspecti
 
 ### Batch Processing
 - "Process All" action processes all unprocessed images in the queue
-- Uses batch_process() from bgprunr-core with rayon thread pool
+- Uses batch_process() from prunr-core with rayon thread pool
 - Parallelism level comes from settings (default: half available cores)
 - Individual image progress shown via status icons in sidebar
 - Overall batch progress in status bar
@@ -91,18 +91,18 @@ Full interactive experience for the egui desktop GUI: zoom/pan for edge inspecti
 - `ARCHITECTURE.md` — GUI data flow, state machine diagram, threading model, keyboard shortcuts platform modifier section
 
 ### Existing GUI Code
-- `crates/bgprunr-app/src/gui/app.rs` — BgPrunrApp struct with source_texture, result_texture, worker channels, state machine. All Phase 5 features extend this.
-- `crates/bgprunr-app/src/gui/state.rs` — AppState enum (Empty/Loaded/Processing/Done). Needs extension for animation and batch states.
-- `crates/bgprunr-app/src/gui/views/canvas.rs` — render_image_centered(), draw_checkerboard(), per-state rendering. Zoom/pan/before-after changes happen here.
-- `crates/bgprunr-app/src/gui/worker.rs` — WorkerMessage/WorkerResult enums, spawn_worker(). Batch processing extends this.
-- `crates/bgprunr-app/src/gui/theme.rs` — Color/spacing/layout constants. New UI elements must use these.
-- `crates/bgprunr-app/src/gui/views/toolbar.rs` — Toolbar buttons. Needs batch-related buttons.
-- `crates/bgprunr-app/src/gui/views/statusbar.rs` — Status bar. Needs zoom % display.
-- `crates/bgprunr-app/src/gui/views/shortcuts.rs` — Shortcuts overlay pattern. Settings dialog follows same modal pattern.
+- `crates/prunr-app/src/gui/app.rs` — PrunrApp struct with source_texture, result_texture, worker channels, state machine. All Phase 5 features extend this.
+- `crates/prunr-app/src/gui/state.rs` — AppState enum (Empty/Loaded/Processing/Done). Needs extension for animation and batch states.
+- `crates/prunr-app/src/gui/views/canvas.rs` — render_image_centered(), draw_checkerboard(), per-state rendering. Zoom/pan/before-after changes happen here.
+- `crates/prunr-app/src/gui/worker.rs` — WorkerMessage/WorkerResult enums, spawn_worker(). Batch processing extends this.
+- `crates/prunr-app/src/gui/theme.rs` — Color/spacing/layout constants. New UI elements must use these.
+- `crates/prunr-app/src/gui/views/toolbar.rs` — Toolbar buttons. Needs batch-related buttons.
+- `crates/prunr-app/src/gui/views/statusbar.rs` — Status bar. Needs zoom % display.
+- `crates/prunr-app/src/gui/views/shortcuts.rs` — Shortcuts overlay pattern. Settings dialog follows same modal pattern.
 
 ### Core API
-- `crates/bgprunr-core/src/lib.rs` — Public API: process_image, batch_process, OrtEngine, ModelKind, ProgressStage, ProcessResult
-- `crates/bgprunr-core/src/batch.rs` — batch_process() with rayon, progress callback, indexed results
+- `crates/prunr-core/src/lib.rs` — Public API: process_image, batch_process, OrtEngine, ModelKind, ProgressStage, ProcessResult
+- `crates/prunr-core/src/batch.rs` — batch_process() with rayon, progress callback, indexed results
 
 ### Prior Phase Context
 - `.planning/phases/04-gui-foundation/04-CONTEXT.md` — Phase 4 decisions: dark theme, fit-to-window default, worker thread pattern, toolbar layout, status bar format
@@ -118,7 +118,7 @@ Full interactive experience for the egui desktop GUI: zoom/pan for edge inspecti
 - `shortcuts::render()` — Modal overlay pattern with dark background. Clone pattern for settings dialog.
 - `theme::OVERLAY_BG`, `theme::OVERLAY_BORDER` — Overlay visual constants already defined.
 - `worker::spawn_worker()` — Single-image worker. Extend for batch or spawn additional workers.
-- `app::BgPrunrApp` fields: `source_texture`, `result_texture`, `result_rgba` — Before/after toggle switches which texture renders.
+- `app::PrunrApp` fields: `source_texture`, `result_texture`, `result_rgba` — Before/after toggle switches which texture renders.
 
 ### Established Patterns
 - State machine in `state.rs` — All behavior gated on AppState. New states or sub-states needed for animation and batch.

@@ -1,0 +1,11 @@
+[package]
+name = "prunr-models"
+version.workspace = true
+edition.workspace = true
+
+[features]
+default = []
+dev-models = []
+
+[dependencies]
+zstd = { workspace = true }

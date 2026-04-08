@@ -2,14 +2,14 @@
 phase: 03-cli-binary
 plan: 02
 subsystem: cli
-tags: [rust, clap, indicatif, bgprunr-core, ort, rayon]
+tags: [rust, clap, indicatif, prunr-core, ort, rayon]
 
 # Dependency graph
 requires:
   - phase: 03-01
     provides: CLI struct definitions (Cli, Commands, RemoveArgs, CliModel, LargeImagePolicy) and clap/indicatif deps
   - phase: 02-cli-binary
-    provides: bgprunr-core public API (process_image, batch_process, OrtEngine, formats)
+    provides: prunr-core public API (process_image, batch_process, OrtEngine, formats)
 
 provides:
   - Full CLI execution engine: main.rs dispatch + run_remove() orchestration
@@ -35,8 +35,8 @@ tech-stack:
 key-files:
   created: []
   modified:
-    - crates/bgprunr-app/src/main.rs
-    - crates/bgprunr-app/src/cli.rs
+    - crates/prunr-app/src/main.rs
+    - crates/prunr-app/src/cli.rs
 
 key-decisions:
   - "load_with_policy() encodes DynamicImage to PNG bytes before passing to process_image — adds a round-trip encode but keeps process_image signature as &[u8] (no core API change)"
@@ -57,7 +57,7 @@ completed: 2026-04-06
 
 # Phase 03 Plan 02: CLI Execution Engine Summary
 
-**Full bgprunr remove CLI with stage-spinner single-image path, MultiProgress batch path, overwrite protection, --quiet/--force/--jobs flags, and 0/1/2 exit code contract**
+**Full prunr remove CLI with stage-spinner single-image path, MultiProgress batch path, overwrite protection, --quiet/--force/--jobs flags, and 0/1/2 exit code contract**
 
 ## Performance
 
@@ -86,8 +86,8 @@ _Note: Both tasks were written in a single edit session and committed together. 
 
 ## Files Created/Modified
 
-- `crates/bgprunr-app/src/main.rs` - Rewrote placeholder: dispatch Commands::Remove, GUI stub hint on no args
-- `crates/bgprunr-app/src/cli.rs` - Added run_remove(), all helpers, run_single(), and run_batch() after Plan 01 struct definitions
+- `crates/prunr-app/src/main.rs` - Rewrote placeholder: dispatch Commands::Remove, GUI stub hint on no args
+- `crates/prunr-app/src/cli.rs` - Added run_remove(), all helpers, run_single(), and run_batch() after Plan 01 struct definitions
 
 ## Decisions Made
 
@@ -108,7 +108,7 @@ None — no external service configuration required.
 
 ## Next Phase Readiness
 
-- `bgprunr remove --help` and `bgprunr --help` both work
+- `prunr remove --help` and `prunr --help` both work
 - Binary exits 0 with GUI stub message when called with no args
 - All five CLI requirements (CLI-01 through CLI-05) are met
 - Phase 4 (GUI): replace the `None =>` arm in main.rs with `eframe::run_native()` call — no other changes to the CLI path required

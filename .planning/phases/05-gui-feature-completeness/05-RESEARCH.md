@@ -48,7 +48,7 @@
 
 **Batch Processing**
 - "Process All" action processes all unprocessed images in the queue
-- Uses batch_process() from bgprunr-core with rayon thread pool
+- Uses batch_process() from prunr-core with rayon thread pool
 - Parallelism level comes from settings (default: half available cores)
 - Individual image progress via status icons in sidebar
 - Overall batch progress in status bar
@@ -92,7 +92,7 @@ None — discussion stayed within phase scope
 | BATCH-01 | Drop multiple images; appear in sidebar queue | Extend dropped_files handler to collect Vec; add `Panel::left` sidebar |
 | BATCH-02 | Click between images in sidebar to view each | `selected_index: usize` field; thumbnail click sets it; canvas renders current item |
 | BATCH-03 | Reorder images by dragging items in sidebar | `response.dnd_set_drag_payload()` / `dnd_release_payload()` — egui 0.34 built-in DnD |
-| BATCH-04 | Process all queued images at once with parallel inference | `batch_process()` from bgprunr-core; WorkerMessage::BatchProcess variant |
+| BATCH-04 | Process all queued images at once with parallel inference | `batch_process()` from prunr-core; WorkerMessage::BatchProcess variant |
 | BATCH-05 | Results cached; switching does not re-process | `Vec<BatchItem>` each holding `Option<ProcessResult>` — switch = lookup only |
 | BATCH-06 | Auto-remove on import setting processes images automatically | `Settings::auto_remove: bool`; after load, if true, enqueue and start processing |
 | UX-02 | Settings dialog (Ctrl/Cmd+,) for model, auto-remove, parallelism | Modal window following shortcuts overlay pattern; `egui::Window` with `anchor(CENTER_CENTER)` |
@@ -105,7 +105,7 @@ None — discussion stayed within phase scope
 
 Phase 5 adds five major feature clusters to the existing egui 0.34.1 GUI: zoom/pan on the canvas, before/after toggle, a reveal animation on processing completion, a batch sidebar for multi-image workflows, and a settings dialog. All five clusters are fully achievable with the current dependency set — no new crates are required except adding `serde` and `serde_json` to the workspace (for the serializable Settings struct; file I/O deferred to Phase 6).
 
-The existing codebase provides excellent foundations: `draw_checkerboard()`, the modal overlay pattern from `shortcuts.rs`, the worker channel pattern, `batch_process()` in bgprunr-core, and the AppState machine in state.rs. Phase 5 extends and connects these — it is primarily additive work with targeted refactors in canvas.rs, state.rs, app.rs, and worker.rs.
+The existing codebase provides excellent foundations: `draw_checkerboard()`, the modal overlay pattern from `shortcuts.rs`, the worker channel pattern, `batch_process()` in prunr-core, and the AppState machine in state.rs. Phase 5 extends and connects these — it is primarily additive work with targeted refactors in canvas.rs, state.rs, app.rs, and worker.rs.
 
 The most technically nuanced parts are: (1) zoom-toward-cursor math (requires the pointer position at the time of the scroll event); (2) the mask-aware reveal animation (requires storing the raw alpha mask alongside the result texture to drive per-pixel opacity during animation); and (3) the batch sidebar drag-to-reorder (egui 0.34 provides `Response::dnd_set_drag_payload` / `dnd_release_payload` natively — no external library needed).
 
@@ -121,9 +121,9 @@ The most technically nuanced parts are: (1) zoom-toward-cursor math (requires th
 |---------|---------|---------|--------------|
 | `egui` | 0.34.1 | All GUI widgets: Panel::left for sidebar, egui::Window for settings, DnD, input events | Already in use; 0.34.1 is the pinned workspace version |
 | `eframe` | 0.34.1 | App lifecycle, repaint scheduling | Already in use |
-| `image` | 0.25 | RgbaImage pixel access for animation mask | Already in bgprunr-app |
-| `rayon` | 1.11 | Batch parallelism via `batch_process()` | Already in bgprunr-core |
-| `num_cpus` | 1.17.0 | Default parallelism = half cores | Already in bgprunr-core |
+| `image` | 0.25 | RgbaImage pixel access for animation mask | Already in prunr-app |
+| `rayon` | 1.11 | Batch parallelism via `batch_process()` | Already in prunr-core |
+| `num_cpus` | 1.17.0 | Default parallelism = half cores | Already in prunr-core |
 
 ### New Dependency (must add)
 
@@ -132,13 +132,13 @@ The most technically nuanced parts are: (1) zoom-toward-cursor math (requires th
 | `serde` | 1.0.228 | Derive `Serialize`/`Deserialize` on `Settings` struct | Settings struct needs it now; file I/O in Phase 6 |
 | `serde_json` | 1.0.149 | JSON serialization for settings file (Phase 6 consumes it) | Add now; `serde_json` is already an indirect dep |
 
-**Installation (add to workspace Cargo.toml `[workspace.dependencies]` and bgprunr-app `[dependencies]`):**
+**Installation (add to workspace Cargo.toml `[workspace.dependencies]` and prunr-app `[dependencies]`):**
 ```toml
 # workspace Cargo.toml
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
-# crates/bgprunr-app/Cargo.toml [dependencies]
+# crates/prunr-app/Cargo.toml [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
 ```
@@ -153,7 +153,7 @@ Note: `serde_json` is already present as an indirect dependency (version 1.0.149
 
 The planner should create these new files:
 ```
-crates/bgprunr-app/src/gui/
+crates/prunr-app/src/gui/
 ├── views/
 │   ├── canvas.rs          # EXTEND: add zoom/pan transform, before/after rendering
 │   ├── sidebar.rs         # NEW: batch queue thumbnail strip
@@ -170,11 +170,11 @@ crates/bgprunr-app/src/gui/
 
 ### Pattern 1: Zoom/Pan State Fields
 
-**What:** Add zoom level and pan offset as fields in `BgPrunrApp`. Canvas render functions use these to compute `img_rect`.
+**What:** Add zoom level and pan offset as fields in `PrunrApp`. Canvas render functions use these to compute `img_rect`.
 **When to use:** All canvas render paths (Loaded, Processing, Done, Animating) must apply the same transform.
 
 ```rust
-// In app.rs — new fields on BgPrunrApp
+// In app.rs — new fields on PrunrApp
 pub(crate) zoom: f32,           // 1.0 = 100%
 pub(crate) pan_offset: Vec2,    // pixels from center
 pub(crate) previous_zoom: f32,  // for Ctrl+0/Ctrl+1 toggle
@@ -226,7 +226,7 @@ if (app.zoom - fit).abs() < 0.001 {
 
 ### Pattern 2: Before/After Toggle State
 
-**What:** A single bool in `BgPrunrApp` controls which texture renders in Done state.
+**What:** A single bool in `PrunrApp` controls which texture renders in Done state.
 **When to use:** Only relevant in Done (and Animating) states.
 
 ```rust
@@ -365,7 +365,7 @@ if let Some(src_idx) = item_response.dnd_release_payload::<usize>() {
 
 ### Pattern 5: Settings Dialog (Modal Window)
 
-**What:** `egui::Window` anchored to CENTER_CENTER, same frame style as shortcuts overlay. Controlled by `show_settings: bool` on `BgPrunrApp`.
+**What:** `egui::Window` anchored to CENTER_CENTER, same frame style as shortcuts overlay. Controlled by `show_settings: bool` on `PrunrApp`.
 **When to use:** Opened by Ctrl/Cmd+, or X button.
 
 ```rust
@@ -375,7 +375,7 @@ pub(crate) settings: Settings,
 ```
 
 ```rust
-// New file: crates/bgprunr-app/src/gui/settings.rs
+// New file: crates/prunr-app/src/gui/settings.rs
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Settings {
     pub model: ModelKind,
@@ -403,7 +403,7 @@ impl Default for Settings {
 **Settings dialog rendering (views/settings.rs):**
 ```rust
 // Source: mirrors shortcuts.rs pattern exactly
-pub fn render(ctx: &egui::Context, app: &mut BgPrunrApp) {
+pub fn render(ctx: &egui::Context, app: &mut PrunrApp) {
     egui::Window::new("Settings")
         .collapsible(false)
         .resizable(false)
@@ -640,9 +640,9 @@ pub enum WorkerResult {
    - Recommendation: The worker thread wraps `batch_process()` per-item, not as a single call. The worker spawns a rayon pool and sends `WorkerResult::BatchItemDone { index, result }` via the mpsc channel as each image finishes, rather than calling `batch_process()` wholesale. This matches the architecture diagram in ARCHITECTURE.md which shows "send per-image results via channel."
 
 3. **Settings serde and ModelKind derive**
-   - What we know: `ModelKind` is defined in bgprunr-core and does not currently derive `serde::Serialize/Deserialize`.
-   - What's unclear: Whether to add serde derives to `ModelKind` in bgprunr-core, or create a parallel `SettingsModelKind` type in bgprunr-app with `From` conversion.
-   - Recommendation: Add `serde` as an optional feature to bgprunr-core and derive on `ModelKind` only when the feature is active. This avoids forcing a serde dependency on the core library for CLI use. Alternatively, since bgprunr-app already has serde, define a mirrored enum in settings.rs with a `From<SettingsModelKind> for ModelKind` impl — simpler, no core changes needed.
+   - What we know: `ModelKind` is defined in prunr-core and does not currently derive `serde::Serialize/Deserialize`.
+   - What's unclear: Whether to add serde derives to `ModelKind` in prunr-core, or create a parallel `SettingsModelKind` type in prunr-app with `From` conversion.
+   - Recommendation: Add `serde` as an optional feature to prunr-core and derive on `ModelKind` only when the feature is active. This avoids forcing a serde dependency on the core library for CLI use. Alternatively, since prunr-app already has serde, define a mirrored enum in settings.rs with a `From<SettingsModelKind> for ModelKind` impl — simpler, no core changes needed.
 
 ---
 
@@ -652,33 +652,33 @@ pub enum WorkerResult {
 | Property | Value |
 |----------|-------|
 | Framework | Rust built-in test (`cargo test`) |
-| Config file | none — `[lib]` section in bgprunr-app/Cargo.toml with `src/lib.rs` |
-| Quick run command | `cargo test -p bgprunr-app --lib 2>&1 \| tail -20` |
+| Config file | none — `[lib]` section in prunr-app/Cargo.toml with `src/lib.rs` |
+| Quick run command | `cargo test -p prunr-app --lib 2>&1 \| tail -20` |
 | Full suite command | `cargo test --workspace --lib 2>&1 \| tail -30` |
 
 ### Phase Requirements → Test Map
 
 | Req ID | Behavior | Test Type | Automated Command | File Exists? |
 |--------|----------|-----------|-------------------|-------------|
-| VIEW-01 | Zoom state field initialized to fit-zoom | unit | `cargo test -p bgprunr-app --lib zoom` | ❌ Wave 0 |
-| VIEW-02 | Pan offset accumulates during space+drag | unit | `cargo test -p bgprunr-app --lib pan` | ❌ Wave 0 |
-| VIEW-03 | Checkerboard already tested implicitly | unit | `cargo test -p bgprunr-app --lib canvas` | ❌ Wave 0 |
-| VIEW-04 | before_after toggle switches show_original field | unit | `cargo test -p bgprunr-app --lib before_after` | ❌ Wave 0 |
-| VIEW-05 | Ctrl+0 sets zoom to fit, second call restores previous | unit | `cargo test -p bgprunr-app --lib fit_zoom` | ❌ Wave 0 |
-| ANIM-01 | AppState::Animating variant exists | unit | `cargo test -p bgprunr-app --lib state` | ❌ (extends state_tests.rs) |
-| ANIM-02 | anim_progress advances by dt/DURATION | unit | `cargo test -p bgprunr-app --lib anim` | ❌ Wave 0 |
-| ANIM-03 | Skip on click/key sets state to Done | unit | `cargo test -p bgprunr-app --lib anim_skip` | ❌ Wave 0 |
-| BATCH-01 | Multiple dropped files → batch_items Vec populated | unit | `cargo test -p bgprunr-app --lib batch` | ❌ Wave 0 |
-| BATCH-02 | selected_batch_index change switches active item | unit | `cargo test -p bgprunr-app --lib batch_select` | ❌ Wave 0 |
-| BATCH-03 | Drag-reorder swaps items at correct indices | unit | `cargo test -p bgprunr-app --lib batch_reorder` | ❌ Wave 0 |
-| BATCH-04 | WorkerMessage::BatchProcess variant exists and routes | unit | `cargo test -p bgprunr-app --lib worker` | ❌ Wave 0 |
-| BATCH-05 | result cached in BatchItem; second select does not re-process | unit | `cargo test -p bgprunr-app --lib batch_cache` | ❌ Wave 0 |
-| BATCH-06 | auto_remove_on_import triggers handle_remove_bg after load | unit | `cargo test -p bgprunr-app --lib auto_remove` | ❌ Wave 0 |
-| UX-02 | Settings struct default values correct | unit | `cargo test -p bgprunr-app --lib settings` | ❌ Wave 0 |
-| UX-05 | OpenBracket/CloseBracket keys advance selected_batch_index | unit | `cargo test -p bgprunr-app --lib nav_keys` | ❌ Wave 0 |
+| VIEW-01 | Zoom state field initialized to fit-zoom | unit | `cargo test -p prunr-app --lib zoom` | ❌ Wave 0 |
+| VIEW-02 | Pan offset accumulates during space+drag | unit | `cargo test -p prunr-app --lib pan` | ❌ Wave 0 |
+| VIEW-03 | Checkerboard already tested implicitly | unit | `cargo test -p prunr-app --lib canvas` | ❌ Wave 0 |
+| VIEW-04 | before_after toggle switches show_original field | unit | `cargo test -p prunr-app --lib before_after` | ❌ Wave 0 |
+| VIEW-05 | Ctrl+0 sets zoom to fit, second call restores previous | unit | `cargo test -p prunr-app --lib fit_zoom` | ❌ Wave 0 |
+| ANIM-01 | AppState::Animating variant exists | unit | `cargo test -p prunr-app --lib state` | ❌ (extends state_tests.rs) |
+| ANIM-02 | anim_progress advances by dt/DURATION | unit | `cargo test -p prunr-app --lib anim` | ❌ Wave 0 |
+| ANIM-03 | Skip on click/key sets state to Done | unit | `cargo test -p prunr-app --lib anim_skip` | ❌ Wave 0 |
+| BATCH-01 | Multiple dropped files → batch_items Vec populated | unit | `cargo test -p prunr-app --lib batch` | ❌ Wave 0 |
+| BATCH-02 | selected_batch_index change switches active item | unit | `cargo test -p prunr-app --lib batch_select` | ❌ Wave 0 |
+| BATCH-03 | Drag-reorder swaps items at correct indices | unit | `cargo test -p prunr-app --lib batch_reorder` | ❌ Wave 0 |
+| BATCH-04 | WorkerMessage::BatchProcess variant exists and routes | unit | `cargo test -p prunr-app --lib worker` | ❌ Wave 0 |
+| BATCH-05 | result cached in BatchItem; second select does not re-process | unit | `cargo test -p prunr-app --lib batch_cache` | ❌ Wave 0 |
+| BATCH-06 | auto_remove_on_import triggers handle_remove_bg after load | unit | `cargo test -p prunr-app --lib auto_remove` | ❌ Wave 0 |
+| UX-02 | Settings struct default values correct | unit | `cargo test -p prunr-app --lib settings` | ❌ Wave 0 |
+| UX-05 | OpenBracket/CloseBracket keys advance selected_batch_index | unit | `cargo test -p prunr-app --lib nav_keys` | ❌ Wave 0 |
 
 ### Sampling Rate
-- **Per task commit:** `cargo test -p bgprunr-app --lib 2>&1 | tail -20`
+- **Per task commit:** `cargo test -p prunr-app --lib 2>&1 | tail -20`
 - **Per wave merge:** `cargo test --workspace --lib 2>&1 | tail -30`
 - **Phase gate:** Full workspace test suite green before `/gsd:verify-work`
 
@@ -686,11 +686,11 @@ pub enum WorkerResult {
 All Phase 5 test files are new. Existing test infrastructure (`tests/mod.rs`, `tests/state_tests.rs`, `tests/input_tests.rs`, `tests/clipboard_tests.rs`) provides the pattern.
 
 New test files needed:
-- [ ] `crates/bgprunr-app/src/gui/tests/zoom_pan_tests.rs` — covers VIEW-01, VIEW-02, VIEW-05
-- [ ] `crates/bgprunr-app/src/gui/tests/batch_tests.rs` — covers BATCH-01 through BATCH-06, UX-05
-- [ ] `crates/bgprunr-app/src/gui/tests/anim_tests.rs` — covers ANIM-01, ANIM-02, ANIM-03
-- [ ] `crates/bgprunr-app/src/gui/tests/settings_tests.rs` — covers UX-02
-- [ ] Extend `crates/bgprunr-app/src/gui/tests/state_tests.rs` — add Animating variant test
+- [ ] `crates/prunr-app/src/gui/tests/zoom_pan_tests.rs` — covers VIEW-01, VIEW-02, VIEW-05
+- [ ] `crates/prunr-app/src/gui/tests/batch_tests.rs` — covers BATCH-01 through BATCH-06, UX-05
+- [ ] `crates/prunr-app/src/gui/tests/anim_tests.rs` — covers ANIM-01, ANIM-02, ANIM-03
+- [ ] `crates/prunr-app/src/gui/tests/settings_tests.rs` — covers UX-02
+- [ ] Extend `crates/prunr-app/src/gui/tests/state_tests.rs` — add Animating variant test
 
 These are unit tests of state-machine logic only (same pattern as existing tests). They do not require a running egui context.
 
@@ -706,7 +706,7 @@ These are unit tests of state-machine logic only (same pattern as existing tests
 - `~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui-0.34.1/src/data/key.rs` — Key::Space, Key::OpenBracket, Key::CloseBracket, Key::Comma verified
 - `~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui-0.34.1/src/context.rs` — request_repaint, request_repaint_after_secs
 - `~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui-0.34.1/src/data/input.rs` — Event::MouseWheel structure, modifiers field
-- `crates/bgprunr-app/src/gui/` — all existing Phase 4 GUI code read directly
+- `crates/prunr-app/src/gui/` — all existing Phase 4 GUI code read directly
 
 ### Secondary (MEDIUM confidence)
 - `cargo metadata` output — confirmed serde 1.0.228, serde_json 1.0.149, num_cpus 1.17.0 already present in dependency graph

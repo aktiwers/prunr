@@ -1,8 +1,8 @@
-# Roadmap: BgPrunR
+# Roadmap: Prunr
 
 ## Overview
 
-BgPrunR ships in six phases that follow the hard dependency graph imposed by the architecture: workspace scaffolding must exist before any crate compiles; the core inference engine must be correct and tested before any presentation layer exists; the CLI exercises the core API before the GUI adds threading complexity; the GUI is built in two passes (threading architecture first, then feature completeness); and distribution verification closes the loop on clean-machine reliability. Every requirement maps to the phase that first makes it possible to deliver it.
+Prunr ships in six phases that follow the hard dependency graph imposed by the architecture: workspace scaffolding must exist before any crate compiles; the core inference engine must be correct and tested before any presentation layer exists; the CLI exercises the core API before the GUI adds threading complexity; the GUI is built in two passes (threading architecture first, then feature completeness); and distribution verification closes the loop on clean-machine reliability. Every requirement maps to the phase that first makes it possible to deliver it.
 
 ## Phases
 
@@ -28,12 +28,12 @@ Decimal phases appear between their surrounding integers in numeric order.
 **Success Criteria** (what must be TRUE):
   1. `cargo build` succeeds from the workspace root on Linux, macOS (x86_64 + aarch64), and Windows x86_64 without any manual setup steps
   2. GitHub Actions CI builds and tests all three platform targets in a single workflow run
-  3. Model bytes are embedded via `include-bytes-zstd` in a dedicated `bgprunr-models` crate; a development feature flag loads models from the filesystem instead to avoid recompilation cost during development
+  3. Model bytes are embedded via `include-bytes-zstd` in a dedicated `prunr-models` crate; a development feature flag loads models from the filesystem instead to avoid recompilation cost during development
   4. `cargo-dist` release pipeline produces a per-platform binary artifact in CI (even if the binary is a placeholder)
 **Plans**: 4 plans
 
 Plans:
-- [ ] 01-01-PLAN.md — Workspace manifests and crate stubs (Cargo.toml, bgprunr-core traits, bgprunr-models feature gate, placeholder binary)
+- [ ] 01-01-PLAN.md — Workspace manifests and crate stubs (Cargo.toml, prunr-core traits, prunr-models feature gate, placeholder binary)
 - [ ] 01-02-PLAN.md — xtask fetch-models with SHA256 verification
 - [ ] 01-03-PLAN.md — GitHub Actions CI matrix workflow (4 native platform targets)
 - [ ] 01-04-PLAN.md — cargo-dist release pipeline + CI human verification gate
@@ -43,7 +43,7 @@ Plans:
 **Depends on**: Phase 1
 **Requirements**: CORE-01, CORE-02, CORE-03, CORE-04, CORE-05, LOAD-03, LOAD-04
 **Success Criteria** (what must be TRUE):
-  1. A reference test compares BgPrunR's output mask pixel-by-pixel against rembg Python output on three known test images and passes — this is a hard gate before any GUI or CLI work ships
+  1. A reference test compares Prunr's output mask pixel-by-pixel against rembg Python output on three known test images and passes — this is a hard gate before any GUI or CLI work ships
   2. `process_image()` runs to completion on silueta and u2net models on CPU with no panic or data corruption
   3. When CUDA/CoreML/DirectML hardware is present, the active execution provider name is logged at session initialization and queryable via the public API (not silently falling back without notice)
   4. Calling `process_image()` on an image exceeding 8000px in either dimension returns a warning/prompt result rather than silently processing a huge tensor
@@ -63,8 +63,8 @@ Plans:
 **Depends on**: Phase 2
 **Requirements**: CLI-01, CLI-02, CLI-03, CLI-04, CLI-05
 **Success Criteria** (what must be TRUE):
-  1. `bgprunr input.jpg -o output.png` produces a transparent PNG with the background removed and exits with code 0
-  2. `bgprunr *.jpg --output-dir ./results/` processes all matching files in parallel and exits with code 0 (all success), 1 (total failure), or 2 (partial failure)
+  1. `prunr input.jpg -o output.png` produces a transparent PNG with the background removed and exits with code 0
+  2. `prunr *.jpg --output-dir ./results/` processes all matching files in parallel and exits with code 0 (all success), 1 (total failure), or 2 (partial failure)
   3. `--model silueta` and `--model u2net` both select the correct embedded model and produce visibly different quality on a complex image
   4. `--jobs N` controls rayon parallelism and the binary does not spawn more threads than requested
   5. A progress bar (indicatif) updates per image during batch processing so the user knows the job is running
@@ -89,7 +89,7 @@ Plans:
 
 Plans:
 - [ ] 04-01-PLAN.md — GUI module foundation: state machine, worker thread, theme constants, Cargo deps
-- [ ] 04-02-PLAN.md — BgPrunrApp eframe integration, toolbar, canvas, status bar, shortcuts overlay, main.rs launch
+- [ ] 04-02-PLAN.md — PrunrApp eframe integration, toolbar, canvas, status bar, shortcuts overlay, main.rs launch
 - [ ] 04-03-PLAN.md — Human verification checkpoint: end-to-end GUI testing of all Phase 4 requirements
 
 ### Phase 5: GUI Feature Completeness

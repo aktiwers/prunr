@@ -27,11 +27,11 @@ tech-stack:
 
 key-files:
   created:
-    - crates/bgprunr-core/src/preprocess.rs
-    - crates/bgprunr-core/src/postprocess.rs
-    - crates/bgprunr-core/src/formats.rs
+    - crates/prunr-core/src/preprocess.rs
+    - crates/prunr-core/src/postprocess.rs
+    - crates/prunr-core/src/formats.rs
   modified:
-    - crates/bgprunr-core/src/types.rs
+    - crates/prunr-core/src/types.rs
 
 key-decisions:
   - "From<image::ImageError> for CoreError auto-added to types.rs — required for formats.rs image loading (Rule 3 fix)"
@@ -76,10 +76,10 @@ Each task was committed atomically:
 **Plan metadata:** (docs commit follows)
 
 ## Files Created/Modified
-- `crates/bgprunr-core/src/preprocess.rs` - Pure function preprocess(): DynamicImage -> Array4<f32> [1,3,320,320]
-- `crates/bgprunr-core/src/postprocess.rs` - Pure function postprocess(): ArrayView4<f32> + DynamicImage -> RgbaImage
-- `crates/bgprunr-core/src/formats.rs` - Image loading (path/bytes), large image check, downscale, PNG encode
-- `crates/bgprunr-core/src/types.rs` - Added From<image::ImageError> for CoreError
+- `crates/prunr-core/src/preprocess.rs` - Pure function preprocess(): DynamicImage -> Array4<f32> [1,3,320,320]
+- `crates/prunr-core/src/postprocess.rs` - Pure function postprocess(): ArrayView4<f32> + DynamicImage -> RgbaImage
+- `crates/prunr-core/src/formats.rs` - Image loading (path/bytes), large image check, downscale, PNG encode
+- `crates/prunr-core/src/types.rs` - Added From<image::ImageError> for CoreError
 
 ## Decisions Made
 - `From<image::ImageError>` added to types.rs as an inline impl (not `#[from]` on a new variant) — maps to existing `ImageFormat(String)` variant, preserves the error enum shape from Plan 01
@@ -93,8 +93,8 @@ Each task was committed atomically:
 - **Found during:** Task 2 (formats.rs implementation)
 - **Issue:** formats.rs uses `.map_err(CoreError::from)` for image decoding errors, but `types.rs` had no `From<image::ImageError>` impl — compile error blocked Task 2 completion
 - **Fix:** Added `impl From<image::ImageError> for CoreError` to types.rs, mapping to `CoreError::ImageFormat(e.to_string())`
-- **Files modified:** `crates/bgprunr-core/src/types.rs`
-- **Verification:** `cargo test -p bgprunr-core` passes all 22 tests with no errors
+- **Files modified:** `crates/prunr-core/src/types.rs`
+- **Verification:** `cargo test -p prunr-core` passes all 22 tests with no errors
 - **Committed in:** `bf2714a` (Task 2 commit)
 
 ---

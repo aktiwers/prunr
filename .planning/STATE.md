@@ -73,7 +73,7 @@ Recent decisions affecting current work:
 - Pre-roadmap: ort over tract/candle for exact rembg ONNX model compatibility
 - Pre-roadmap: Embed models in binary via include-bytes-zstd for single-file UX
 - Pre-roadmap: rayon for batch parallelism (no async runtime — inference is CPU/GPU-bound)
-- Pre-roadmap: Cargo workspace with bgprunr-core, bgprunr-gui, bgprunr-cli crates
+- Pre-roadmap: Cargo workspace with prunr-core, prunr-gui, prunr-cli crates
 - [Phase 01]: Added #[allow(unused_imports)] to engine.rs — import required by spec but unused in stub; will be used in Phase 2 inference backend
 - [Phase 01]: [Phase 01-03]: dtolnay/rust-toolchain used instead of deprecated actions-rs/toolchain in CI
 - [Phase 01]: [Phase 01-03]: fail-fast: false in CI matrix so each platform failure is independently reported
@@ -81,14 +81,14 @@ Recent decisions affecting current work:
 - [Phase 01]: rembg GitHub releases as model source (danielgatis/rembg/releases/download/v0.0.0/) — exact same models rembg uses for compatibility
 - [Phase 01]: [Phase 01-04]: Manually authored release.yml for cargo-dist 0.31.0 rather than running cargo dist init interactively (no local install)
 - [Phase 01]: [Phase 01-04]: release.yml mirrors ci.yml model cache pattern (hashFiles xtask/src/main.rs) for consistency
-- [Phase 02]: include-bytes-zstd moved from build-dependencies to dependencies in bgprunr-models (proc-macro crate, not build script dep)
+- [Phase 02]: include-bytes-zstd moved from build-dependencies to dependencies in prunr-models (proc-macro crate, not build script dep)
 - [Phase 02]: ProgressStage uses Postprocess not Sigmoid — matches rembg min-max normalization per RESEARCH.md
-- [Phase 02]: Dev workflow for bgprunr-core requires --features bgprunr-models/dev-models; production build needs xtask fetch-models to be run first
+- [Phase 02]: Dev workflow for prunr-core requires --features prunr-models/dev-models; production build needs xtask fetch-models to be run first
 - [Phase 02-02]: From<image::ImageError> for CoreError implemented as inline impl mapping to ImageFormat(String) — required by formats.rs image loading
 - [Phase 02-02]: DOWNSCALE_TARGET imported explicitly in test module rather than re-exported from formats.rs to avoid unused import lint
 - [Phase 02]: [Phase 02-03]: OrtEngine wraps Mutex<Session> because ort::Session::run() requires &mut self — Mutex enables shared &OrtEngine references while satisfying mutability
 - [Phase 02]: [Phase 02-03]: ndarray upgraded from 0.16 to 0.17 in workspace Cargo.toml to match ort 2.0-rc.12 dependency requirement
-- [Phase 02]: [Phase 02-03]: dev-models and cuda features added to bgprunr-core Cargo.toml to propagate bgprunr-models feature flags properly
+- [Phase 02]: [Phase 02-03]: dev-models and cuda features added to prunr-core Cargo.toml to propagate prunr-models feature flags properly
 - [Phase 02]: Each rayon worker creates its own OrtEngine::new() — no Arc<Mutex<Session>> sharing, avoids contention
 - [Phase 02]: ort_intra_threads = (num_cpus / jobs).max(1) — balances ORT and rayon thread counts to prevent CPU oversubscription
 - [Phase 02]: [Phase 02-04]: Results collected as indexed (usize, Result) pairs then assigned to pre-allocated Vec to preserve input order with rayon work-stealing
@@ -96,27 +96,27 @@ Recent decisions affecting current work:
 - [Phase 02]: [Phase 02-05]: generate_references.py locks alpha_matting=False, post_process_mask=False, model=u2net — exact rembg defaults required for valid CORE-05 comparison
 - [Phase 02]: [Phase 02-05]: VERSIONS.txt written alongside masks by generate_references.py to capture rembg version at generation time
 - [Phase Phase 02]: Import InferenceEngine trait explicitly in integration tests — active_provider() only accessible when trait is in scope
-- [Phase Phase 02]: Reference mask resize with FilterType::Nearest for pixel-accurate comparison when rembg output dimensions differ from bgprunr output
-- [Phase 03]: dev-models feature added to bgprunr-app (propagates bgprunr-core/dev-models) to avoid OOM from model-embedding proc macro during cargo check
+- [Phase Phase 02]: Reference mask resize with FilterType::Nearest for pixel-accurate comparison when rembg output dimensions differ from prunr output
+- [Phase 03]: dev-models feature added to prunr-app (propagates prunr-core/dev-models) to avoid OOM from model-embedding proc macro during cargo check
 - [Phase 03]: CliModel defined separately from ModelKind with From impl for decoupled CLI/core type boundary
 - [Phase 03]: process_image_from_decoded private helper shares pipeline body between checked and unchecked variants
 - [Phase 03]: load_with_policy() encode round-trip: DynamicImage -> PNG bytes before process_image to avoid changing core API signature
 - [Phase 03]: Arc<Vec<Option<ProgressBar>>> pattern makes batch progress callback Send + Sync for rayon without shared mutable state
-- [Phase 04-01]: lib.rs + [lib] section added to bgprunr-app so cargo test --lib works; crate was binary-only before this plan
+- [Phase 04-01]: lib.rs + [lib] section added to prunr-app so cargo test --lib works; crate was binary-only before this plan
 - [Phase 04-01]: OrtEngine::new(model, 1) used in GUI worker — plan showed 1-arg call but actual signature requires intra_threads param; 1 = single-image GUI context
 - [Phase 04-01]: Worker creates OrtEngine per ProcessImage invocation — consistent with Phase 2/3 each-worker-creates-own pattern, no Arc<Mutex<Session>> contention
 - [Phase 04-02]: egui 0.34 API renames applied: Panel::top/bottom, exact_size, corner_radius, CornerRadius, global_style/set_global_style
-- [Phase 04-02]: image crate added to bgprunr-app Cargo.toml for direct RgbaImage loading and test support
-- [Phase 04-02]: BgPrunrApp::new_for_test() constructor added (cfg test) since eframe::CreationContext only available inside run_native
+- [Phase 04-02]: image crate added to prunr-app Cargo.toml for direct RgbaImage loading and test support
+- [Phase 04-02]: PrunrApp::new_for_test() constructor added (cfg test) since eframe::CreationContext only available inside run_native
 - [Phase 04-02]: cancel_flag made pub(crate) to enable test assertions on AtomicBool state
 - [Phase 04-02]: Source texture loaded lazily in logic() since egui Context unavailable in handle_open_path()
-- [Phase 05]: canvas::render takes &mut BgPrunrApp so zoom/pan state is mutated during the render pass itself
+- [Phase 05]: canvas::render takes &mut PrunrApp so zoom/pan state is mutated during the render pass itself
 - [Phase 05]: pending_fit_zoom and pending_actual_size flags bridge logic()-side keyboard detection to canvas-side geometry computation
 - [Phase 05]: fit_zoom() caps at 1.0 to never upscale images smaller than canvas
 - [Phase 05]: egui InputState has no keys_pressed field — use i.events.iter().any(Event::Key pressed) for any-key detection in animation skip
 - [Phase 05]: ColorImage in epaint-0.34 requires source_size: Vec2 field alongside size and pixels
 - [Phase 05]: Animation frame downscaled to canvas size for GPU performance — avoids uploading multi-megapixel ColorImage each render tick
-- [Phase 05]: rayon ThreadPoolBuilder with num_threads(jobs) used for batch in bgprunr-app — mirrors bgprunr-core batch processing pattern
+- [Phase 05]: rayon ThreadPoolBuilder with num_threads(jobs) used for batch in prunr-app — mirrors prunr-core batch processing pattern
 - [Phase 05]: add_to_batch() migrates existing single image to batch slot 0 when first batch item added — preserves loaded state
 - [Phase 05]: sync_selected_batch_textures() centralizes lazy texture loading and app-level canvas sync for batch navigation
 - [Phase 05]: Drop handler: single file + empty batch uses single-image flow; multiple files OR existing batch uses add_to_batch() for all

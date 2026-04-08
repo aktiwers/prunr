@@ -13,8 +13,8 @@ provides:
   - ort_intra_threads() formula for CPU oversubscription prevention
   - Per-worker OrtEngine pattern for thread-safe inference
 affects:
-  - bgprunr-cli
-  - bgprunr-gui
+  - prunr-cli
+  - prunr-gui
 
 # Tech tracking
 tech-stack:
@@ -26,9 +26,9 @@ tech-stack:
 
 key-files:
   created:
-    - crates/bgprunr-core/src/batch.rs
+    - crates/prunr-core/src/batch.rs
   modified:
-    - crates/bgprunr-core/src/lib.rs
+    - crates/prunr-core/src/lib.rs
 
 key-decisions:
   - "Each rayon worker creates its own OrtEngine::new() — no Arc<Mutex<Session>> sharing, avoids contention"
@@ -77,8 +77,8 @@ Each task was committed atomically:
 **Plan metadata:** (docs commit follows)
 
 ## Files Created/Modified
-- `crates/bgprunr-core/src/batch.rs` - batch_process(), ort_intra_threads(), build_batch_pool() with embedded tests
-- `crates/bgprunr-core/src/lib.rs` - Added `pub use batch::batch_process` re-export
+- `crates/prunr-core/src/batch.rs` - batch_process(), ort_intra_threads(), build_batch_pool() with embedded tests
+- `crates/prunr-core/src/lib.rs` - Added `pub use batch::batch_process` re-export
 
 ## Decisions Made
 - Each rayon worker creates its own OrtEngine::new() inside the closure — avoids Arc<Mutex<Session>> sharing, removes lock contention during parallel inference
@@ -90,19 +90,19 @@ Each task was committed atomically:
 None - plan executed exactly as written.
 
 ## Issues Encountered
-- Running `cargo test -p bgprunr-core batch` (without any feature flag) fails because the non-dev-models path uses `include_bytes_zstd!` which requires model files at compile time — this is a pre-existing project constraint, not caused by batch.rs. Tests run correctly with `--features dev-models`.
+- Running `cargo test -p prunr-core batch` (without any feature flag) fails because the non-dev-models path uses `include_bytes_zstd!` which requires model files at compile time — this is a pre-existing project constraint, not caused by batch.rs. Tests run correctly with `--features dev-models`.
 
 ## User Setup Required
 None - no external service configuration required.
 
 ## Next Phase Readiness
-- batch_process() is exported from bgprunr_core public API and ready for CLI and GUI consumption
+- batch_process() is exported from prunr_core public API and ready for CLI and GUI consumption
 - Integration tests (test_batch_process_jobs_1_sequential, test_batch_process_preserves_order) will pass once `cargo xtask fetch-models` is run
 - Phase 02-05 can proceed: batch_process() provides the parallel batch API the CLI batch queue depends on
 
 ## Self-Check: PASSED
 
-- FOUND: crates/bgprunr-core/src/batch.rs
+- FOUND: crates/prunr-core/src/batch.rs
 - FOUND: .planning/phases/02-core-inference-engine/02-04-SUMMARY.md
 - FOUND: commit 0f07225 (feat(02-04): implement batch_process())
 
