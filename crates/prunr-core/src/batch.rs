@@ -3,8 +3,8 @@ use rayon::ThreadPoolBuilder;
 
 use crate::{
     engine::OrtEngine,
-    pipeline::process_image,
-    types::{CoreError, ModelKind, ProcessResult, ProgressStage},
+    pipeline::process_image_with_mask,
+    types::{CoreError, MaskSettings, ModelKind, ProcessResult, ProgressStage},
 };
 
 /// Calculate ORT intra-op thread count to prevent oversubscription.
@@ -53,6 +53,20 @@ pub fn batch_process<F>(
 where
     F: Fn(usize, ProgressStage, f32) + Send + Sync,
 {
+    batch_process_with_mask(images, model, jobs, &MaskSettings::default(), progress)
+}
+
+/// Like `batch_process` but with custom mask settings.
+pub fn batch_process_with_mask<F>(
+    images: &[&[u8]],
+    model: ModelKind,
+    jobs: usize,
+    mask: &MaskSettings,
+    progress: Option<F>,
+) -> Vec<Result<ProcessResult, CoreError>>
+where
+    F: Fn(usize, ProgressStage, f32) + Send + Sync,
+{
     if images.is_empty() {
         return Vec::new();
     }
@@ -60,8 +74,6 @@ where
     let intra_threads = ort_intra_threads(jobs.max(1));
     let pool = build_batch_pool(jobs);
 
-    // Use a vector pre-allocated with placeholders, then fill via parallel index iteration.
-    // This preserves input order even with rayon's work-stealing execution.
     let mut results: Vec<Result<ProcessResult, CoreError>> =
         (0..images.len()).map(|_| Err(CoreError::Model("not processed".into()))).collect();
 
@@ -71,7 +83,6 @@ where
                 .par_iter()
                 .enumerate()
                 .map(|(idx, img_bytes)| {
-                    // Each worker creates its own session — never share across threads
                     let engine = match OrtEngine::new(model, intra_threads) {
                         Ok(e) => e,
                         Err(e) => return (idx, Err(e)),
@@ -81,7 +92,7 @@ where
                         move |stage: ProgressStage, pct: f32| f(idx, stage, pct)
                     });
 
-                    let result = process_image(img_bytes, &engine, cb, None);
+                    let result = process_image_with_mask(img_bytes, &engine, mask, cb, None);
                     (idx, result)
                 })
                 .collect();

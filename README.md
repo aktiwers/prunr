@@ -98,14 +98,15 @@ Open with the gear button or `Ctrl+,` (`Cmd+,` on macOS):
 | `Ctrl+R` | Remove background |
 | `Ctrl+S` | Save result |
 | `Ctrl+C` | Copy result to clipboard |
+| `Ctrl+Z` | Undo background removal |
 | `Escape` | Cancel processing / close dialog |
 | `F1` | Show keyboard shortcuts |
 | `B` | Toggle before/after comparison |
-| `[ / ]` | Previous / next image in batch |
+| `← / → or A / D` | Previous / next image in batch |
 | `Ctrl+0` | Fit image to window |
 | `Ctrl+1` | Actual size (1:1 pixels) |
 | `Tab` | Show/hide batch queue sidebar |
-| `Ctrl+,` | Open settings |
+| `Ctrl+Space` | Open settings |
 | `Click+drag` | Pan image |
 | `Scroll wheel` | Zoom in/out (cursor-centered) |
 
@@ -121,7 +122,6 @@ prunr photo.jpg -o result.png      # custom output path
 prunr *.jpg -o clean/              # batch to folder
 prunr -m u2net portrait.jpg        # use quality model
 prunr -j 4 *.jpg -o out/           # 4 parallel jobs
-prunr remove photo.jpg             # backward compatible subcommand
 ```
 
 ### Full CLI Reference
@@ -139,6 +139,9 @@ prunr [OPTIONS] [INPUTS]...
 | `--large-image <MODE>` | `downscale` (default) or `process` (full size) |
 | `-f, --force` | Overwrite existing output files |
 | `-q, --quiet` | Suppress progress output |
+| `--gamma <N>` | Removal strength (default: 1.0). >1 = more aggressive, <1 = gentler |
+| `--threshold <N>` | Binary cutoff (0.0–1.0). Pixels below become fully transparent |
+| `--edge-shift <N>` | Edge refinement in pixels. Positive erodes, negative dilates |
 | `-h, --help` | Print help |
 | `-V, --version` | Print version |
 
@@ -153,6 +156,12 @@ prunr -j 8 -f photos/*.jpg -o clean/
 
 # Large image at full resolution
 prunr --large-image process poster.png
+
+# Aggressive removal with hard cutoff
+prunr --gamma 2.0 --threshold 0.5 photo.jpg
+
+# Gentle removal with expanded edges
+prunr --gamma 0.5 --edge-shift -2 portrait.jpg
 
 # Quiet mode for scripting
 prunr -q photo.jpg -o output.png
