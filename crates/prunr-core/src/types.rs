@@ -38,6 +38,7 @@ pub enum ProgressStage {
     Alpha,
 }
 
+#[derive(Debug)]
 pub struct ProcessResult {
     /// RGBA PNG bytes of the output image with background removed
     pub rgba_bytes: Vec<u8>,
@@ -45,6 +46,27 @@ pub struct ProcessResult {
     pub rgba_image: image::RgbaImage,
     /// Name of the execution provider used (e.g., "CUDA", "CPU")
     pub active_provider: String,
+}
+
+/// Controls for post-processing the AI-generated mask before applying it as alpha.
+#[derive(Debug, Clone, Copy)]
+pub struct MaskSettings {
+    /// Gamma curve applied to the mask. >1.0 = more aggressive removal, <1.0 = gentler.
+    pub gamma: f32,
+    /// Optional binary threshold (0.0–1.0). When set, alpha below this becomes 0, above becomes 255.
+    pub threshold: Option<f32>,
+    /// Edge hardness: >0 erodes (shrinks) the mask, <0 dilates (expands) it. In pixels.
+    pub edge_shift: f32,
+}
+
+impl Default for MaskSettings {
+    fn default() -> Self {
+        Self {
+            gamma: 1.0,
+            threshold: None,
+            edge_shift: 0.0,
+        }
+    }
 }
 
 pub const LARGE_IMAGE_LIMIT: u32 = 8000;

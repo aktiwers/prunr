@@ -78,7 +78,7 @@ impl OrtEngine {
 
     /// Infer the active provider name from compile-time feature flags.
     /// On a standard Linux build without CUDA feature, returns "CPU".
-    fn detect_active_provider() -> String {
+    pub fn detect_active_provider() -> String {
         #[cfg(target_os = "macos")]
         { return "CoreML".to_string(); }
 

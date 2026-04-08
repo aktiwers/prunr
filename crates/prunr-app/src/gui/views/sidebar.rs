@@ -28,24 +28,13 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
             return;
         }
 
-        // Select All / Clear controls
-        let any_selected = app.batch_items.iter().any(|i| i.selected);
         let all_selected = !app.batch_items.is_empty() && app.batch_items.iter().all(|i| i.selected);
-        ui.horizontal(|ui| {
-            let mut select_all = all_selected;
-            if ui.checkbox(&mut select_all, RichText::new("All").size(theme::FONT_SIZE_MONO).color(theme::TEXT_SECONDARY)).changed() {
-                for item in &mut app.batch_items {
-                    item.selected = select_all;
-                }
+        let mut select_all = all_selected;
+        if ui.checkbox(&mut select_all, RichText::new("Select All").size(theme::FONT_SIZE_BODY).color(theme::TEXT_PRIMARY)).changed() {
+            for item in &mut app.batch_items {
+                item.selected = select_all;
             }
-            if any_selected {
-                if ui.small_button("Clear").clicked() {
-                    for item in &mut app.batch_items {
-                        item.selected = false;
-                    }
-                }
-            }
-        });
+        }
         ui.add_space(theme::SPACE_XS);
 
         // Thumbnail list with drag-to-reorder
