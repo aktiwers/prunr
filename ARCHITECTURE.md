@@ -315,3 +315,10 @@ if ui.input(|i| i.modifiers.ctrl && i.key_pressed(Key::O)) { /* open */ }
 | 2026-04-08 | Save All button + folder picker for batch export | Batch workflow completion |
 | 2026-04-08 | Reveal animation for batch items, dimension safety check | Batch animation support |
 | 2026-04-08 | Fit-to-window zoom on image load/switch | Large image UX |
+| 2026-04-08 | Batch selection: per-item checkboxes, Select All/Clear, Remove Selected | Multi-image workflow |
+| 2026-04-08 | Save Selected / Remove BG Selected: actions follow checkbox state | Consistent batch UX |
+| 2026-04-08 | Click-drag pan (no Space key needed), sidebar always visible with 1+ images | Photo editor UX |
+| 2026-04-08 | Background thumbnail generation via thread+channel (non-blocking UI) | Performance |
+| 2026-04-08 | Interactive modal backdrop (click outside to close), fixed Settings button | Modal UX |
+| 2026-04-08 | Processing animations: shimmer sweep + pulsing border on thumbnails/canvas | Visual feedback |
+| 2026-04-08 | Extracted process_items(), clear_to_empty(), sync_after_batch_change() helpers | Code cleanup |

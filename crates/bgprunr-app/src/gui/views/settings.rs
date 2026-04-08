@@ -5,7 +5,7 @@ use crate::gui::settings::SettingsModel;
 use crate::gui::theme;
 
 pub fn render(ctx: &egui::Context, app: &mut BgPrunrApp) {
-    theme::draw_modal_backdrop(ctx, "settings_backdrop");
+    let backdrop_clicked = theme::draw_modal_backdrop(ctx, "settings_backdrop");
 
     let mut open = true;
     egui::Window::new("Settings")
@@ -16,6 +16,15 @@ pub fn render(ctx: &egui::Context, app: &mut BgPrunrApp) {
         .fixed_size([theme::SETTINGS_DIALOG_WIDTH, theme::SETTINGS_DIALOG_HEIGHT])
         .frame(theme::overlay_frame())
         .show(ctx, |ui| {
+            // Visible checkbox borders on dark overlay background
+            {
+                let vis = ui.visuals_mut();
+                vis.widgets.inactive.bg_stroke =
+                    egui::Stroke::new(1.0, egui::Color32::from_rgb(0x60, 0x60, 0x60));
+                vis.widgets.hovered.bg_stroke =
+                    egui::Stroke::new(1.0, egui::Color32::from_rgb(0x80, 0x80, 0x80));
+            }
+
             ui.vertical(|ui| {
                 // Row 1 — Model selection
                 ui.horizontal(|ui| {
@@ -140,7 +149,7 @@ pub fn render(ctx: &egui::Context, app: &mut BgPrunrApp) {
                 });
             });
         });
-    if !open {
+    if !open || backdrop_clicked {
         app.show_settings = false;
     }
 }

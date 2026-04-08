@@ -35,12 +35,16 @@ pub fn render(ui: &mut egui::Ui, app: &mut BgPrunrApp) {
                 }
             }
         }
-        // Space+drag pan
-        let space_held = i.keys_down.contains(&egui::Key::Space);
+        // Click+drag pan (like photo editors)
         let dragging = i.pointer.primary_down();
-        if space_held && dragging {
-            app.pan_offset += i.pointer.delta();
-            app.is_panning = true;
+        if dragging && i.pointer.delta() != egui::Vec2::ZERO {
+            // Only pan if cursor is over the canvas area
+            if let Some(pos) = i.pointer.hover_pos() {
+                if canvas_rect.contains(pos) {
+                    app.pan_offset += i.pointer.delta();
+                    app.is_panning = true;
+                }
+            }
         } else {
             app.is_panning = false;
         }
@@ -172,26 +176,57 @@ fn render_loaded(ui: &mut egui::Ui, app: &BgPrunrApp) {
 }
 
 fn render_processing(ui: &mut egui::Ui, app: &BgPrunrApp) {
+    let canvas_rect = ui.available_rect_before_wrap();
+
+    let t = ui.ctx().input(|i| i.time) as f32;
+
     if let Some(ref texture) = app.source_texture {
-        let canvas_rect = ui.available_rect_before_wrap();
         let img_rect = compute_img_rect(canvas_rect, texture.size_vec2(), app.zoom, app.pan_offset);
         ui.painter().image(
             texture.id(),
             img_rect,
             Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-            Color32::from_rgba_unmultiplied(255, 255, 255, 128),
+            Color32::from_rgba_unmultiplied(255, 255, 255, 160),
         );
+
+        // Shimmer sweep effect over image
+        let sweep_x = ((t * 0.6).fract()) * (img_rect.width() + 80.0) - 40.0 + img_rect.min.x;
+        let shimmer_rect = Rect::from_min_max(
+            Pos2::new(sweep_x - 40.0, img_rect.min.y),
+            Pos2::new(sweep_x + 40.0, img_rect.max.y),
+        ).intersect(img_rect);
+        if shimmer_rect.width() > 0.0 && shimmer_rect.height() > 0.0 {
+            ui.painter().rect_filled(shimmer_rect, 0.0,
+                Color32::from_rgba_unmultiplied(255, 255, 255, 18));
+        }
     }
 
-    // Center overlay text
-    let center = ui.available_rect_before_wrap().center();
+    let dots = ".".repeat(((t * 2.0) as usize % 4) + 1);
+    let center = canvas_rect.center();
+
+    // Pulsing glow behind text
+    let pulse = (t * 2.5).sin() * 0.5 + 0.5;
+    let glow_alpha = (pulse * 40.0) as u8;
+    let glow_rect = Rect::from_center_size(center, Vec2::new(260.0, 50.0));
+    ui.painter().rect_filled(glow_rect, 12.0,
+        Color32::from_rgba_unmultiplied(0x3b, 0x82, 0xf6, glow_alpha));
+
     ui.painter().text(
-        center + egui::Vec2::new(0.0, 30.0),
+        center,
         egui::Align2::CENTER_CENTER,
-        "Press Escape to cancel",
-        egui::FontId::proportional(theme::FONT_SIZE_BODY),
+        format!("Processing{dots}"),
+        egui::FontId::proportional(theme::FONT_SIZE_HEADING),
         theme::TEXT_PRIMARY,
     );
+    ui.painter().text(
+        center + Vec2::new(0.0, 24.0),
+        egui::Align2::CENTER_CENTER,
+        "Press Escape to cancel",
+        egui::FontId::proportional(theme::FONT_SIZE_MONO),
+        theme::TEXT_SECONDARY,
+    );
+
+    ui.ctx().request_repaint();
 }
 
 fn render_done(ui: &mut egui::Ui, app: &BgPrunrApp) {
@@ -223,15 +258,16 @@ fn render_done(ui: &mut egui::Ui, app: &BgPrunrApp) {
         }
     }
 
-    // Before/after indicator label in top-left of canvas
-    let label = if app.show_original { "Original" } else { "Result" };
-    ui.painter().text(
-        canvas_rect.min + Vec2::new(theme::SPACE_SM, theme::SPACE_SM),
-        egui::Align2::LEFT_TOP,
-        label,
-        egui::FontId::monospace(theme::FONT_SIZE_MONO),
-        theme::TEXT_SECONDARY,
-    );
+    // Show "Original" label only when viewing the before image (B key toggle)
+    if app.show_original {
+        ui.painter().text(
+            canvas_rect.min + Vec2::new(theme::SPACE_SM, theme::SPACE_SM),
+            egui::Align2::LEFT_TOP,
+            "Original",
+            egui::FontId::monospace(theme::FONT_SIZE_MONO),
+            theme::TEXT_SECONDARY,
+        );
+    }
 }
 
 fn render_animating(ui: &mut egui::Ui, app: &mut BgPrunrApp) {

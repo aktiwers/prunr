@@ -2,12 +2,15 @@ use egui::{Align2, RichText};
 
 use crate::gui::theme;
 
-pub fn render(ctx: &egui::Context) {
-    theme::draw_modal_backdrop(ctx, "shortcuts_backdrop");
+/// Returns true if the modal should close (user clicked backdrop or X).
+pub fn render(ctx: &egui::Context) -> bool {
+    let backdrop_clicked = theme::draw_modal_backdrop(ctx, "shortcuts_backdrop");
 
     let modifier = if cfg!(target_os = "macos") { "Cmd" } else { "Ctrl" };
 
+    let mut open = true;
     egui::Window::new("Keyboard Shortcuts")
+        .open(&mut open)
         .collapsible(false)
         .resizable(false)
         .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
@@ -21,7 +24,7 @@ pub fn render(ctx: &egui::Context) {
                     .num_columns(2)
                     .spacing([theme::SPACE_LG, theme::SPACE_SM])
                     .show(ui, |ui| {
-                        shortcut_row(ui, &format!("{modifier}+O"), "Open file");
+                        shortcut_row(ui, &format!("{modifier}+O"), "Open file(s)");
                         shortcut_row(ui, &format!("{modifier}+R"), "Remove background");
                         shortcut_row(ui, &format!("{modifier}+S"), "Save result");
                         shortcut_row(ui, &format!("{modifier}+C"), "Copy result");
@@ -33,11 +36,13 @@ pub fn render(ctx: &egui::Context) {
                         shortcut_row(ui, &format!("{modifier}+1"), "Actual size");
                         shortcut_row(ui, "Tab", "Show/hide queue");
                         shortcut_row(ui, &format!("{modifier}+,"), "Settings");
-                        shortcut_row(ui, "Space+drag", "Pan image");
+                        shortcut_row(ui, "Drag", "Pan image");
                         shortcut_row(ui, "Scroll", "Zoom in/out");
                     });
             });
         });
+
+    !open || backdrop_clicked
 }
 
 fn shortcut_row(ui: &mut egui::Ui, key: &str, action: &str) {

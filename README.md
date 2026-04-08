@@ -50,24 +50,27 @@ bgprunr
 | Button | Description |
 |--------|-------------|
 | **Open Image** | Open one or more images (multi-select supported) |
-| **Remove BG** | Remove background from the current image |
+| **Remove BG** | Remove background from current image; if checkboxes are selected, processes all selected |
 | **Process All** | Process all queued images in parallel (appears with 2+ images) |
-| **Save PNG** | Save the current result as PNG |
+| **Save** / **Save Selected** | Save current result; if checkboxes are selected, saves all selected to a folder |
 | **Save All** | Save all processed images to a folder (appears with 2+ done) |
+| **Remove Selected** | Remove all checked images from the sidebar (appears when any are checked) |
 | **Copy Image** | Copy result to clipboard |
 | **Model** | Switch between Silueta (fast) and U2Net (quality) |
 | **Settings** | Open settings dialog |
 
 ### Sidebar
 
-The sidebar appears on the right when multiple images are loaded. It shows thumbnails with status icons:
+The sidebar appears on the right when any images are loaded. Each thumbnail shows:
 
-- **Circle** — Pending (not yet processed)
-- **Diamond** — Processing
-- **Checkmark** — Done
-- **Cross** — Error
+- **Status badge** (bottom-right) — gray dot (pending), pulsing blue dot (processing), green checkmark (done), red X (error)
+- **Selection checkbox** (top-left) — check to include in batch operations (Remove BG Selected, Save Selected, Remove Selected)
+- **Remove button** (top-right, on hover) — click X to remove individual image
+- **Processing animation** — blue shimmer sweep + pulsing border while AI is working
 
-Click a thumbnail to view that image. Drag to reorder. Thumbnails update to show the result after processing.
+At the top: **Select All** checkbox and **Clear** button for quick batch selection.
+
+Click a thumbnail to view it on the canvas. Drag to reorder. Thumbnails update to show the result after processing.
 
 ### Settings
 
@@ -97,7 +100,7 @@ Open with the gear button or `Ctrl+,` (`Cmd+,` on macOS):
 | `Ctrl+1` | Actual size (1:1 pixels) |
 | `Tab` | Show/hide batch queue sidebar |
 | `Ctrl+,` | Open settings |
-| `Space+drag` | Pan image |
+| `Click+drag` | Pan image |
 | `Scroll wheel` | Zoom in/out (cursor-centered) |
 
 On macOS, replace `Ctrl` with `Cmd`.
