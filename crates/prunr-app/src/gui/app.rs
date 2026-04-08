@@ -4,15 +4,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
 
 use egui::{Key, ViewportCommand};
-use image::GenericImageView;
-
 
 use prunr_core::ProgressStage;
 use super::settings::Settings;
 use super::state::AppState;
 use super::theme;
 use super::worker::{WorkerMessage, WorkerResult, spawn_worker};
-use super::views::{canvas, settings, shortcuts, sidebar, statusbar, toolbar};
+use super::views::{canvas, cli_help, settings, shortcuts, sidebar, statusbar, toolbar};
 
 pub(crate) struct BatchItem {
     pub id: u64,
@@ -69,6 +67,7 @@ pub struct PrunrApp {
 
     // UI state
     pub(crate) show_shortcuts: bool,
+    pub(crate) show_cli_help: bool,
 
     // Set by raw_input_hook — egui converts Ctrl+C to Event::Copy before we see it
     pending_copy: bool,
@@ -94,11 +93,14 @@ pub struct PrunrApp {
     // Batch items
     pub(crate) batch_items: Vec<BatchItem>,
     pub(crate) selected_batch_index: usize,
-    pub(crate) show_sidebar: bool,
+    /// User explicitly hid the sidebar via Tab
+    pub(crate) sidebar_hidden: bool,
     pub(crate) next_batch_id: u64,
 
     // Settings
     pub(crate) show_settings: bool,
+    /// Timestamp when settings was last opened (for click-outside debounce)
+    pub(crate) settings_opened_at: f64,
     pub(crate) settings: Settings,
 
     // Canvas fade-in: incremented on every image switch
@@ -172,7 +174,9 @@ impl PrunrApp {
         visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(0x50, 0x50, 0x50));
         visuals.widgets.open.bg_stroke = subtle; // ComboBox "open" state
         visuals.window_stroke = subtle;
-        visuals.error_fg_color = theme::DESTRUCTIVE; // keep red for actual errors only
+        visuals.selection.bg_fill = egui::Color32::from_rgba_unmultiplied(0x7b, 0x2d, 0x8e, 60);
+        visuals.selection.stroke = egui::Stroke::new(1.0, theme::ACCENT);
+        visuals.error_fg_color = theme::DESTRUCTIVE;
         cc.egui_ctx.set_visuals(visuals);
 
         // Override font sizes and suppress debug red-border warnings
@@ -202,6 +206,8 @@ impl PrunrApp {
         let (thumb_tx, thumb_rx) = mpsc::channel();
         let (decode_tx, decode_rx) = mpsc::channel();
         let (save_done_tx, save_done_rx) = mpsc::channel();
+        let mut settings = Settings::load();
+        settings.active_backend = prunr_core::OrtEngine::detect_active_provider();
 
         Self {
             state: AppState::Empty,
@@ -221,6 +227,7 @@ impl PrunrApp {
             result_rgba: None,
             clipboard,
             show_shortcuts: false,
+            show_cli_help: false,
             pending_copy: false,
             zoom: 1.0,
             pan_offset: egui::Vec2::ZERO,
@@ -233,10 +240,11 @@ impl PrunrApp {
             prev_title: String::new(),
             batch_items: Vec::new(),
             selected_batch_index: 0,
-            show_sidebar: false,
+            sidebar_hidden: false,
             next_batch_id: 0,
             show_settings: false,
-            settings: Settings::default(),
+            settings_opened_at: 0.0,
+            settings,
             canvas_switch_id: 0,
             pending_fit_zoom: false,
             pending_actual_size: false,
@@ -250,7 +258,9 @@ impl PrunrApp {
             decode_rx,
             save_done_tx,
             save_done_rx,
-            toasts: egui_notify::Toasts::default().with_anchor(egui_notify::Anchor::BottomRight),
+            toasts: egui_notify::Toasts::default()
+                    .with_anchor(egui_notify::Anchor::TopLeft)
+                    .with_margin(egui::vec2(theme::SPACE_SM, theme::TOOLBAR_HEIGHT + theme::SPACE_SM)),
         }
     }
 
@@ -263,6 +273,7 @@ impl PrunrApp {
         let (thumb_tx, thumb_rx) = mpsc::channel();
         let (decode_tx, decode_rx) = mpsc::channel();
         let (save_done_tx, save_done_rx) = mpsc::channel();
+        let settings = Settings::default();
         Self {
             state: AppState::Empty,
             loaded_filename: None,
@@ -281,6 +292,7 @@ impl PrunrApp {
             result_rgba: None,
             clipboard: None,
             show_shortcuts: false,
+            show_cli_help: false,
             pending_copy: false,
             zoom: 1.0,
             pan_offset: egui::Vec2::ZERO,
@@ -293,10 +305,11 @@ impl PrunrApp {
             prev_title: String::new(),
             batch_items: Vec::new(),
             selected_batch_index: 0,
-            show_sidebar: false,
+            sidebar_hidden: false,
             next_batch_id: 0,
             show_settings: false,
-            settings: Settings::default(),
+            settings_opened_at: 0.0,
+            settings,
             canvas_switch_id: 0,
             pending_fit_zoom: false,
             pending_actual_size: false,
@@ -310,7 +323,9 @@ impl PrunrApp {
             decode_rx,
             save_done_tx,
             save_done_rx,
-            toasts: egui_notify::Toasts::default().with_anchor(egui_notify::Anchor::BottomRight),
+            toasts: egui_notify::Toasts::default()
+                    .with_anchor(egui_notify::Anchor::TopLeft)
+                    .with_margin(egui::vec2(theme::SPACE_SM, theme::TOOLBAR_HEIGHT + theme::SPACE_SM)),
         }
     }
 
@@ -463,6 +478,43 @@ impl PrunrApp {
         }
     }
 
+    pub(crate) fn close_settings(&mut self) {
+        self.show_settings = false;
+        self.settings.save();
+        self.toasts.info("Settings saved");
+    }
+
+    pub(crate) fn any_modal_open(&self) -> bool {
+        self.show_settings || self.show_shortcuts || self.show_cli_help
+    }
+
+    /// Undo background removal on selected items (or current item if none selected).
+    /// Reverts Done/Error items back to Pending, clearing their results.
+    fn handle_undo(&mut self, ctx: &egui::Context) {
+        let has_selected = self.batch_items.iter().any(|i| i.selected);
+        let current_id = self.batch_items.get(self.selected_batch_index).map(|b| b.id);
+        let mut undone = 0u32;
+        for item in &mut self.batch_items {
+            let target = if has_selected { item.selected } else { Some(item.id) == current_id };
+            if target && matches!(item.status, BatchStatus::Done | BatchStatus::Error(_)) {
+                item.status = BatchStatus::Pending;
+                item.result_rgba = None;
+                item.result_texture = None;
+                item.thumb_texture = None;
+                item.thumb_pending = false;
+                undone += 1;
+            }
+        }
+        if undone > 0 {
+            self.sync_selected_batch_textures(ctx);
+            if undone == 1 {
+                self.toasts.info("Reverted to original");
+            } else {
+                self.toasts.info(format!("Reverted {undone} images"));
+            }
+        }
+    }
+
     /// Collect and send batch items matching `filter` for processing.
     fn process_items(&mut self, filter: impl Fn(&BatchItem) -> bool) {
         let items: Vec<(u64, Arc<Vec<u8>>)> = self.batch_items.iter()
@@ -484,6 +536,7 @@ impl PrunrApp {
             model: self.settings.model.into(),
             jobs: self.settings.parallel_jobs,
             cancel: self.cancel_flag.clone(),
+            mask: self.settings.mask_settings(),
         });
     }
 
@@ -568,20 +621,6 @@ impl PrunrApp {
         }
     }
 
-    pub fn handle_save_all(&mut self) {
-        // Select all done items, then delegate to save_selected
-        for item in &mut self.batch_items {
-            if item.status == BatchStatus::Done && item.result_rgba.is_some() {
-                item.selected = true;
-            }
-        }
-        self.handle_save_selected();
-        // Deselect after save
-        for item in &mut self.batch_items {
-            item.selected = false;
-        }
-    }
-
     pub fn remove_selected(&mut self) {
         let count = self.batch_items.iter().filter(|i| i.selected).count();
         self.batch_items.retain(|item| !item.selected);
@@ -614,64 +653,6 @@ impl PrunrApp {
         }
     }
 
-    pub fn handle_paste(&mut self) {
-        if let Some(ref mut clipboard) = self.clipboard {
-            match clipboard.get_image() {
-                Ok(img_data) => {
-                    let w = img_data.width as u32;
-                    let h = img_data.height as u32;
-                    if let Some(rgba) = image::RgbaImage::from_raw(w, h, img_data.bytes.into_owned()) {
-                        // Encode to PNG on background thread for save capability,
-                        // but load immediately from raw RGBA (no roundtrip decode)
-                        let name = "pasted-image.png".to_string();
-                        let id = self.next_batch_id;
-                        self.next_batch_id += 1;
-
-                        // Encode PNG bytes in background for later save
-                        let mut png_bytes = Vec::new();
-                        let _ = image::DynamicImage::ImageRgba8(rgba.clone())
-                            .write_to(&mut std::io::Cursor::new(&mut png_bytes), image::ImageFormat::Png);
-                        let png_bytes = Arc::new(png_bytes);
-
-                        self.batch_items.push(BatchItem {
-                            id,
-                            filename: name.clone(),
-                            source_bytes: png_bytes.clone(),
-                            dimensions: (w, h),
-                            source_rgba: Some(rgba),
-                            source_texture: None,
-                            thumb_texture: None,
-                            thumb_pending: false,
-                            result_rgba: None,
-                            result_texture: None,
-                            status: BatchStatus::Pending,
-                            selected: false,
-                        });
-                        self.selected_batch_index = self.batch_items.len() - 1;
-                        self.image_dimensions = Some((w, h));
-                        self.source_bytes = Some(png_bytes);
-                        self.loaded_filename = Some(name);
-                        self.source_texture = None;
-                        self.result_texture = None;
-                        self.result_rgba = None;
-                        self.source_rgba_cache = None;
-                        self.state = AppState::Loaded;
-                        self.pan_offset = egui::Vec2::ZERO;
-                        self.previous_zoom = 1.0;
-                        self.pending_fit_zoom = true;
-                        self.pending_batch_sync = true;
-                        return;
-                    }
-                    self.set_temporary_status("Could not decode clipboard image");
-                }
-                Err(_) => {
-                    self.set_temporary_status("No image in clipboard");
-                }
-            }
-        } else {
-            self.set_temporary_status("Clipboard not available");
-        }
-    }
 
     pub fn handle_cancel(&mut self) {
         self.cancel_flag.store(true, Ordering::Relaxed);
@@ -921,7 +902,12 @@ impl eframe::App for PrunrApp {
                                 item.status = BatchStatus::Done;
                                 item.thumb_texture = None;
                                 item.thumb_pending = false;
+                                let backend_changed = self.settings.active_backend != pr.active_provider;
                                 self.settings.active_backend = pr.active_provider;
+                                if backend_changed {
+                                    // Adjust parallel jobs to smart default for detected backend
+                                    self.settings.parallel_jobs = self.settings.default_jobs();
+                                }
                             }
                             Err(e) => {
                                 item.status = BatchStatus::Error(e);
@@ -1003,12 +989,19 @@ impl eframe::App for PrunrApp {
                 self.handle_open_bytes(bytes, name);
             } else {
                 // Multiple images OR existing batch — add to batch queue
+                let id_floor = self.next_batch_id;
+                let count = new_items.len();
                 for (bytes, name) in new_items {
                     self.add_to_batch(bytes, name);
                 }
-                // Auto-remove on import
-                if self.settings.auto_remove_on_import && self.batch_items.iter().any(|i| i.status == BatchStatus::Pending) {
-                    self.handle_process_all();
+                // Select the new image if only one was added
+                if count == 1 {
+                    self.selected_batch_index = self.batch_items.len() - 1;
+                    self.pending_batch_sync = true;
+                }
+                // Auto-remove on import — only process newly added items
+                if self.settings.auto_remove_on_import && self.next_batch_id > id_floor {
+                    self.process_items(|item| item.id >= id_floor);
                 }
             }
         }
@@ -1042,6 +1035,7 @@ impl eframe::App for PrunrApp {
         let (mut toggle_before_after, mut fit_to_window, mut actual_size) = (false, false, false);
         let mut toggle_settings = false;
         let (mut nav_prev, mut nav_next, mut toggle_sidebar) = (false, false, false);
+        let mut undo_requested = false;
 
         ctx.input(|i| {
             if i.modifiers.command && i.key_pressed(Key::O) {
@@ -1059,6 +1053,9 @@ impl eframe::App for PrunrApp {
             if i.key_pressed(Key::F1) {
                 toggle_shortcuts = true;
             }
+            if i.key_pressed(Key::F2) {
+                self.show_cli_help = !self.show_cli_help;
+            }
             if i.key_pressed(Key::B) {
                 toggle_before_after = true;
             }
@@ -1068,17 +1065,20 @@ impl eframe::App for PrunrApp {
             if i.modifiers.command && i.key_pressed(Key::Num1) {
                 actual_size = true;
             }
-            if i.modifiers.command && i.key_pressed(Key::Comma) {
+            if i.modifiers.command && i.key_pressed(Key::Space) {
                 toggle_settings = true;
             }
-            if i.key_pressed(Key::OpenBracket) {
+            if i.key_pressed(Key::ArrowLeft) || i.key_pressed(Key::A) {
                 nav_prev = true;
             }
-            if i.key_pressed(Key::CloseBracket) {
+            if i.key_pressed(Key::ArrowRight) || i.key_pressed(Key::D) {
                 nav_next = true;
             }
             if i.key_pressed(Key::Tab) {
                 toggle_sidebar = true;
+            }
+            if i.modifiers.command && i.key_pressed(Key::Z) {
+                undo_requested = true;
             }
         });
 
@@ -1122,15 +1122,22 @@ impl eframe::App for PrunrApp {
             self.state = AppState::Loaded;
             self.status_text = "Cancelled".to_string();
         } else if cancel_requested && self.show_settings {
-            self.show_settings = false;
+            self.close_settings();
         } else if cancel_requested && self.show_shortcuts {
             self.show_shortcuts = false;
+        } else if cancel_requested && self.show_cli_help {
+            self.show_cli_help = false;
         }
         if toggle_shortcuts {
             self.show_shortcuts = !self.show_shortcuts;
         }
         if toggle_settings {
-            self.show_settings = !self.show_settings;
+            if self.show_settings {
+                self.close_settings();
+            } else {
+                self.show_settings = true;
+                self.settings_opened_at = ctx.input(|i| i.time);
+            }
         }
         if nav_prev && !self.batch_items.is_empty() {
             if self.selected_batch_index == 0 {
@@ -1147,7 +1154,10 @@ impl eframe::App for PrunrApp {
             self.show_original = false;
         }
         if toggle_sidebar {
-            self.show_sidebar = !self.show_sidebar;
+            self.sidebar_hidden = !self.sidebar_hidden;
+        }
+        if undo_requested {
+            self.handle_undo(ctx);
         }
         // Deferred batch sync from sidebar click
         if self.pending_batch_sync {
@@ -1172,22 +1182,27 @@ impl eframe::App for PrunrApp {
             }
         }
 
-        let mut loaded_any = false;
+        let id_floor = self.next_batch_id;
+        let mut loaded_count = 0u32;
+        let mut channel_drained = false;
         for _ in 0..5 {
             match self.file_load_rx.try_recv() {
                 Ok((bytes, name)) => {
                     self.add_to_batch(bytes, name);
-                    loaded_any = true;
+                    loaded_count += 1;
                 }
-                Err(_) => break,
+                Err(_) => { channel_drained = true; break; }
             }
         }
-        if loaded_any {
-            ctx.request_repaint(); // more may be pending
-            if self.settings.auto_remove_on_import
-                && self.batch_items.iter().any(|i| i.status == BatchStatus::Pending)
-            {
-                self.handle_process_all();
+        if loaded_count > 0 {
+            ctx.request_repaint();
+            // Select the new image if only one was loaded and no more are pending
+            if loaded_count == 1 && channel_drained {
+                self.selected_batch_index = self.batch_items.len() - 1;
+                self.sync_selected_batch_textures(ctx);
+            }
+            if self.settings.auto_remove_on_import && self.next_batch_id > id_floor {
+                self.process_items(|item| item.id >= id_floor);
             }
         }
 
@@ -1241,7 +1256,7 @@ impl eframe::App for PrunrApp {
             .frame(panel_frame)
             .show_inside(ui, |ui| statusbar::render(ui, self));
 
-        let sidebar_visible = self.show_sidebar || !self.batch_items.is_empty();
+        let sidebar_visible = !self.batch_items.is_empty() && !self.sidebar_hidden;
         if sidebar_visible {
             egui::Panel::right("sidebar")
                 .exact_size(theme::SIDEBAR_WIDTH)
@@ -1254,6 +1269,11 @@ impl eframe::App for PrunrApp {
         if self.show_shortcuts {
             if shortcuts::render(ui.ctx()) {
                 self.show_shortcuts = false;
+            }
+        }
+        if self.show_cli_help {
+            if cli_help::render(ui.ctx(), &mut self.toasts) {
+                self.show_cli_help = false;
             }
         }
         if self.show_settings {

@@ -33,3 +33,4 @@ rayon = { workspace = true }
 egui-notify = { workspace = true }
 egui_material_icons = { workspace = true }
 egui_animation = { workspace = true }
+dirs = "6"

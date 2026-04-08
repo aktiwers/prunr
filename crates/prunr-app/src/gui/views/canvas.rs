@@ -16,39 +16,42 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
 
     let canvas_rect = ui.available_rect_before_wrap();
 
-    // Handle scroll-wheel zoom (cursor-centered)
-    ui.ctx().input(|i| {
-        for event in &i.events {
-            if let egui::Event::MouseWheel { delta, modifiers, .. } = event {
-                if !modifiers.any() {
-                    let scroll_y = delta.y;
-                    let zoom_delta = theme::ZOOM_STEP.powf(scroll_y);
-                    let new_zoom = (app.zoom * zoom_delta).clamp(theme::ZOOM_MIN, theme::ZOOM_MAX);
-                    if let Some(cursor) = i.pointer.hover_pos() {
-                        if canvas_rect.contains(cursor) {
-                            let cursor_rel = cursor - canvas_rect.center();
-                            app.pan_offset =
-                                cursor_rel / app.zoom - cursor_rel / new_zoom + app.pan_offset;
-                            app.zoom = new_zoom;
+    let modal_open = app.any_modal_open();
+    if !modal_open {
+        // Handle scroll-wheel zoom (cursor-centered)
+        ui.ctx().input(|i| {
+            for event in &i.events {
+                if let egui::Event::MouseWheel { delta, modifiers, .. } = event {
+                    if !modifiers.any() {
+                        let scroll_y = delta.y;
+                        let zoom_delta = theme::ZOOM_STEP.powf(scroll_y);
+                        let new_zoom = (app.zoom * zoom_delta).clamp(theme::ZOOM_MIN, theme::ZOOM_MAX);
+                        if let Some(cursor) = i.pointer.hover_pos() {
+                            if canvas_rect.contains(cursor) {
+                                let cursor_rel = cursor - canvas_rect.center();
+                                app.pan_offset =
+                                    cursor_rel / app.zoom - cursor_rel / new_zoom + app.pan_offset;
+                                app.zoom = new_zoom;
+                            }
                         }
                     }
                 }
             }
-        }
-        // Click+drag pan (like photo editors)
-        let dragging = i.pointer.primary_down();
-        if dragging && i.pointer.delta() != egui::Vec2::ZERO {
-            // Only pan if cursor is over the canvas area
-            if let Some(pos) = i.pointer.hover_pos() {
-                if canvas_rect.contains(pos) {
-                    app.pan_offset += i.pointer.delta();
-                    app.is_panning = true;
+            // Click+drag pan (like photo editors)
+            let dragging = i.pointer.primary_down();
+            if dragging && i.pointer.delta() != egui::Vec2::ZERO {
+                // Only pan if cursor is over the canvas area
+                if let Some(pos) = i.pointer.hover_pos() {
+                    if canvas_rect.contains(pos) {
+                        app.pan_offset += i.pointer.delta();
+                        app.is_panning = true;
+                    }
                 }
+            } else {
+                app.is_panning = false;
             }
-        } else {
-            app.is_panning = false;
-        }
-    });
+        });
+    }
 
     // Handle pending Ctrl+0 (fit to window) / Ctrl+1 (actual size)
     if let Some(ref tex) = app.source_texture {
@@ -103,6 +106,28 @@ fn fit_zoom(canvas_size: Vec2, tex_size: Vec2) -> f32 {
         .min(1.0)
 }
 
+const TIP_CYCLE_SECS: f64 = 5.0;
+const TIP_FADE_SECS: f64 = 0.5;
+
+static TIPS: LazyLock<Vec<String>> = LazyLock::new(|| {
+    let m = if cfg!(target_os = "macos") { "Cmd" } else { "Ctrl" };
+    vec![
+        "Press F1 to view keyboard shortcuts".to_string(),
+        "Press F2 to view CLI usage examples".to_string(),
+        format!("Press {m}+R to remove the background"),
+        "Press B to toggle before/after comparison".to_string(),
+        "Use Arrow keys or A/D to navigate between images".to_string(),
+        format!("Press {m}+0 to fit image to window"),
+        "Scroll to zoom, drag to pan".to_string(),
+        "Press Tab to show/hide the image queue".to_string(),
+        format!("Press {m}+Space to open settings"),
+        format!("Press {m}+S to save the result"),
+        format!("Press {m}+C to copy result to clipboard"),
+        format!("Press {m}+Z to undo background removal"),
+        "Open multiple images for batch processing".to_string(),
+    ]
+});
+
 fn render_empty(ui: &mut egui::Ui, _app: &PrunrApp) {
     let avail = ui.available_size();
     let is_hovered = ui.ctx().input(|i| !i.raw.hovered_files.is_empty());
@@ -111,7 +136,7 @@ fn render_empty(ui: &mut egui::Ui, _app: &PrunrApp) {
 
     // Larger drop zone with logo
     let zone_w = (avail.x * 0.6).min(500.0).max(280.0);
-    let zone_h = 340.0_f32;
+    let zone_h = 380.0_f32;
     let zone_rect = Rect::from_center_size(center, Vec2::new(zone_w, zone_h));
 
     // Draw drop zone border
@@ -129,14 +154,14 @@ fn render_empty(ui: &mut egui::Ui, _app: &PrunrApp) {
 
     // Logo at center-top of drop zone (preserve aspect ratio)
     let logo_max_h = 140.0;
-    let logo_aspect = 483.0 / 594.0; // width/height from source
+    let logo_aspect = theme::LOGO_ASPECT;
     let logo_w = logo_max_h * logo_aspect;
     let logo_size = Vec2::new(logo_w, logo_max_h);
     let logo_rect = Rect::from_center_size(
         Pos2::new(center.x, zone_rect.min.y + 16.0 + logo_size.y * 0.5),
         logo_size,
     );
-    let logo_image = egui::Image::new(egui::include_image!("../../../../../img/logo.png"))
+    let logo_image = egui::Image::new(egui::include_image!("../../../../../img/logo-nobg.png"))
         .fit_to_exact_size(logo_size);
     logo_image.paint_at(ui, logo_rect);
 
@@ -165,7 +190,7 @@ fn render_empty(ui: &mut egui::Ui, _app: &PrunrApp) {
         theme::TEXT_SECONDARY,
     );
 
-    if *IS_WAYLAND {
+    let wayland_offset = if *IS_WAYLAND {
         painter.text(
             Pos2::new(center.x, text_y + 58.0),
             egui::Align2::CENTER_CENTER,
@@ -173,6 +198,47 @@ fn render_empty(ui: &mut egui::Ui, _app: &PrunrApp) {
             egui::FontId::proportional(theme::FONT_SIZE_BODY * 0.85),
             theme::TEXT_SECONDARY,
         );
+        30.0
+    } else {
+        0.0
+    };
+
+    let time = ui.ctx().input(|i| i.time);
+    let tip_index = ((time / TIP_CYCLE_SECS) as usize) % TIPS.len();
+    let phase = time % TIP_CYCLE_SECS; // 0..TIP_CYCLE_SECS
+
+    let alpha = if phase < TIP_FADE_SECS {
+        // Fading in
+        (phase / TIP_FADE_SECS) as f32
+    } else if phase > TIP_CYCLE_SECS - TIP_FADE_SECS {
+        // Fading out
+        ((TIP_CYCLE_SECS - phase) / TIP_FADE_SECS) as f32
+    } else {
+        1.0
+    };
+
+    let tip_color = egui::Color32::from_rgba_unmultiplied(
+        theme::TEXT_SECONDARY.r(),
+        theme::TEXT_SECONDARY.g(),
+        theme::TEXT_SECONDARY.b(),
+        (alpha * theme::TEXT_SECONDARY.a() as f32) as u8,
+    );
+
+    let tip_y = text_y + 68.0 + wayland_offset;
+    painter.text(
+        Pos2::new(center.x, tip_y),
+        egui::Align2::CENTER_CENTER,
+        &TIPS[tip_index],
+        egui::FontId::proportional(theme::FONT_SIZE_BODY * 0.9),
+        tip_color,
+    );
+
+    // Repaint for tip animation — during fades repaint frequently, otherwise schedule next transition
+    if alpha < 1.0 {
+        ui.ctx().request_repaint(); // smooth fade
+    } else {
+        let secs_until_fade_out = TIP_CYCLE_SECS - TIP_FADE_SECS - phase;
+        ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(secs_until_fade_out.max(0.016)));
     }
 }
 

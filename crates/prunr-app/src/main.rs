@@ -2,17 +2,11 @@ mod cli;
 mod gui;
 
 use clap::Parser;
-use cli::{Cli, Commands};
+use cli::Cli;
 
 fn main() {
-    let mut cli = Cli::parse();
+    let cli = Cli::parse();
 
-    // `prunr remove file.jpg` — merge subcommand inputs into top-level
-    if let Some(Commands::Remove(sub)) = cli.command.take() {
-        cli.inputs = sub.inputs;
-    }
-
-    // Any inputs → process images
     if !cli.inputs.is_empty() {
         let exit_code = cli::run_remove(&cli);
         std::process::exit(exit_code);

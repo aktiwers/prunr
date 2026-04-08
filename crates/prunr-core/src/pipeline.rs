@@ -9,7 +9,7 @@ use crate::{
     formats::{check_large_image, encode_rgba_png, load_image_from_bytes},
     postprocess::postprocess,
     preprocess::preprocess,
-    types::{CoreError, ProcessResult, ProgressStage},
+    types::{CoreError, MaskSettings, ProcessResult, ProgressStage},
 };
 
 /// Process a single image: remove background and return a transparent PNG.
@@ -35,6 +35,20 @@ pub fn process_image<F>(
 where
     F: Fn(ProgressStage, f32),
 {
+    process_image_with_mask(img_bytes, engine, &MaskSettings::default(), progress, cancel)
+}
+
+/// Process a single image with custom mask settings.
+pub fn process_image_with_mask<F>(
+    img_bytes: &[u8],
+    engine: &OrtEngine,
+    mask: &MaskSettings,
+    progress: Option<F>,
+    cancel: Option<Arc<AtomicBool>>,
+) -> Result<ProcessResult, CoreError>
+where
+    F: Fn(ProgressStage, f32),
+{
     let report = |stage: ProgressStage, pct: f32| {
         if let Some(ref cb) = progress {
             cb(stage, pct);
@@ -50,7 +64,7 @@ where
         return Err(err);
     }
 
-    process_image_from_decoded(img, engine, progress, cancel)
+    process_image_from_decoded(img, engine, mask, progress, cancel)
 }
 
 /// Process a single image without the large-image size guard.
@@ -77,7 +91,7 @@ where
     F: Fn(ProgressStage, f32),
 {
     let img = load_image_from_bytes(img_bytes)?;
-    process_image_from_decoded(img, engine, progress, cancel)
+    process_image_from_decoded(img, engine, &MaskSettings::default(), progress, cancel)
 }
 
 /// Internal helper: run the full pipeline on an already-decoded image.
@@ -87,6 +101,7 @@ where
 fn process_image_from_decoded<F>(
     img: DynamicImage,
     engine: &OrtEngine,
+    mask: &MaskSettings,
     progress: Option<F>,
     cancel: Option<Arc<AtomicBool>>,
 ) -> Result<ProcessResult, CoreError>
@@ -149,7 +164,7 @@ where
 
     // Stage 5: Postprocess (min-max normalize → grayscale mask → resize to original dims)
     report(ProgressStage::Postprocess, 0.8);
-    let rgba_image = postprocess(raw_output.view(), &img);
+    let rgba_image = postprocess(raw_output.view(), &img, mask);
 
     // Stage 6: Alpha merge + PNG encode
     report(ProgressStage::Alpha, 0.95);

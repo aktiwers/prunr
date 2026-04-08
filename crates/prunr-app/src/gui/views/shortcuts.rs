@@ -2,14 +2,14 @@ use egui::{Align2, RichText};
 
 use crate::gui::theme;
 
-/// Returns true if the modal should close (user clicked backdrop or X).
+/// Returns true if the modal should close.
 pub fn render(ctx: &egui::Context) -> bool {
-    let backdrop_clicked = theme::draw_modal_backdrop(ctx, "shortcuts_backdrop");
+    theme::draw_modal_backdrop(ctx, "shortcuts_backdrop");
 
     let modifier = if cfg!(target_os = "macos") { "Cmd" } else { "Ctrl" };
 
     let mut open = true;
-    egui::Window::new("Keyboard Shortcuts")
+    let window_response = egui::Window::new("Keyboard Shortcuts")
         .open(&mut open)
         .collapsible(false)
         .resizable(false)
@@ -28,21 +28,23 @@ pub fn render(ctx: &egui::Context) -> bool {
                         shortcut_row(ui, &format!("{modifier}+R"), "Remove background");
                         shortcut_row(ui, &format!("{modifier}+S"), "Save result");
                         shortcut_row(ui, &format!("{modifier}+C"), "Copy result");
+                        shortcut_row(ui, &format!("{modifier}+Z"), "Undo removal");
                         shortcut_row(ui, "Escape", "Cancel / Close");
-                        shortcut_row(ui, "F1", "Show this help");
+                        shortcut_row(ui, "F1", "Keyboard shortcuts");
+                        shortcut_row(ui, "F2", "CLI reference");
                         shortcut_row(ui, "B", "Toggle before/after");
-                        shortcut_row(ui, "[ / ]", "Previous / Next image");
+                        shortcut_row(ui, "← / → or A / D", "Previous / Next image");
                         shortcut_row(ui, &format!("{modifier}+0"), "Fit to window");
                         shortcut_row(ui, &format!("{modifier}+1"), "Actual size");
                         shortcut_row(ui, "Tab", "Show/hide queue");
-                        shortcut_row(ui, &format!("{modifier}+,"), "Settings");
+                        shortcut_row(ui, &format!("{modifier}+Space"), "Settings");
                         shortcut_row(ui, "Drag", "Pan image");
                         shortcut_row(ui, "Scroll", "Zoom in/out");
                     });
             });
         });
 
-    !open || backdrop_clicked
+    !open || theme::clicked_outside_modal(window_response)
 }
 
 fn shortcut_row(ui: &mut egui::Ui, key: &str, action: &str) {

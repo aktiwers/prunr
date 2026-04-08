@@ -13,9 +13,9 @@ fn selected_batch_index_starts_at_zero() {
 }
 
 #[test]
-fn show_sidebar_defaults_false() {
+fn sidebar_hidden_defaults_false() {
     let app = PrunrApp::new_for_test();
-    assert!(!app.show_sidebar);
+    assert!(!app.sidebar_hidden);
 }
 
 #[test]
