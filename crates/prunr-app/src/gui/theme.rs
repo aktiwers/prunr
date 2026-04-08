@@ -1,37 +1,19 @@
 use egui::{Color32, Stroke};
 
 /// Draw a semi-transparent backdrop to dim the app behind a modal overlay.
-/// If `clickable` is true, returns whether the backdrop was clicked (for close-on-click-outside).
-pub fn draw_modal_backdrop(ctx: &egui::Context, id: &str) -> bool {
-    draw_modal_backdrop_ex(ctx, id, true)
+pub fn draw_modal_backdrop(ctx: &egui::Context, id: &str) {
+    let screen_rect = ctx.content_rect();
+    let painter = ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Foreground,
+        egui::Id::new(id),
+    ));
+    painter.rect_filled(screen_rect, 0.0,
+        Color32::from_rgba_unmultiplied(0, 0, 0, 100));
 }
 
-/// Draw backdrop with explicit clickable control.
-pub fn draw_modal_backdrop_ex(ctx: &egui::Context, id: &str, clickable: bool) -> bool {
-    let screen_rect = ctx.content_rect();
-
-    if clickable {
-        let backdrop_response = egui::Area::new(egui::Id::new(id))
-            .fixed_pos(screen_rect.min)
-            .order(egui::Order::Foreground)
-            .interactable(true)
-            .show(ctx, |ui| {
-                let (_, response) = ui.allocate_exact_size(screen_rect.size(), egui::Sense::click());
-                ui.painter().rect_filled(screen_rect, 0.0,
-                    Color32::from_rgba_unmultiplied(0, 0, 0, 100));
-                response.clicked()
-            });
-        backdrop_response.inner
-    } else {
-        // Non-interactive backdrop — just dim, don't absorb clicks
-        let painter = ctx.layer_painter(egui::LayerId::new(
-            egui::Order::Foreground,
-            egui::Id::new(id),
-        ));
-        painter.rect_filled(screen_rect, 0.0,
-            Color32::from_rgba_unmultiplied(0, 0, 0, 100));
-        false
-    }
+/// Check if user clicked outside a modal window.
+pub fn clicked_outside_modal(response: Option<egui::InnerResponse<Option<()>>>) -> bool {
+    response.map_or(false, |resp| resp.response.clicked_elsewhere())
 }
 
 /// Standard frame for modal overlay windows.
@@ -56,17 +38,11 @@ pub const BG_SECONDARY: Color32 = Color32::from_rgb(0x26, 0x24, 0x28);
 /// Primary accent — plum purple (buttons, selections, progress)
 pub const ACCENT: Color32 = Color32::from_rgb(0x7b, 0x2d, 0x8e);
 
-/// Accent highlight — lighter purple for hover states
-pub const ACCENT_LIGHT: Color32 = Color32::from_rgb(0x9b, 0x4d, 0xca);
-
 /// Secondary accent — leaf green (done/success states)
 pub const ACCENT_GREEN: Color32 = Color32::from_rgb(0x5b, 0x8c, 0x3e);
 
 /// Destructive/error
 pub const DESTRUCTIVE: Color32 = Color32::from_rgb(0xef, 0x44, 0x44);
-
-/// Surface overlay
-pub const SURFACE_OVERLAY: Color32 = Color32::from_rgba_premultiplied(0xff, 0xff, 0xff, 0x14);
 
 /// Primary text
 pub const TEXT_PRIMARY: Color32 = Color32::from_rgb(0xf0, 0xf0, 0xf0);
@@ -95,7 +71,6 @@ pub const SPACE_XS: f32 = 4.0;
 pub const SPACE_SM: f32 = 8.0;
 pub const SPACE_MD: f32 = 16.0;
 pub const SPACE_LG: f32 = 24.0;
-pub const SPACE_XL: f32 = 32.0;
 
 // === Layout ===
 
@@ -136,14 +111,20 @@ pub const OVERLAY_BORDER: Color32 = Color32::from_rgba_premultiplied(0xff, 0xff,
 /// Checkerboard square size in pixels
 pub const CHECKER_SIZE: f32 = 16.0;
 
+// === Logo ===
+pub const LOGO_ASPECT: f32 = 416.0 / 512.0;
+
 // === Phase 5: Sidebar ===
-pub const SIDEBAR_WIDTH: f32 = 140.0;
+pub const SIDEBAR_WIDTH: f32 = 170.0;
 pub const THUMBNAIL_SIZE: f32 = 120.0;
 pub const THUMBNAIL_ROUNDING: f32 = 4.0;
 
 // === Phase 5: Settings Dialog ===
-pub const SETTINGS_DIALOG_WIDTH: f32 = 400.0;
-pub const SETTINGS_DIALOG_HEIGHT: f32 = 320.0;
+pub const SETTINGS_DIALOG_WIDTH: f32 = 340.0;
+pub const SETTINGS_DIALOG_HEIGHT: f32 = 800.0;
+
+/// Hint text for settings modal (readable on dark overlay)
+pub const TEXT_HINT: Color32 = Color32::from_rgb(0xb8, 0xb8, 0xb8);
 
 // === Sidebar Colors ===
 pub const SIDEBAR_ITEM_BG: Color32 = Color32::from_rgb(0x26, 0x24, 0x28);
