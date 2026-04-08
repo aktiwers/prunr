@@ -79,7 +79,7 @@ pub const SPACE_XL: f32 = 32.0;
 
 // === Layout ===
 
-pub const TOOLBAR_HEIGHT: f32 = 36.0;
+pub const TOOLBAR_HEIGHT: f32 = 40.0;
 pub const STATUS_BAR_HEIGHT: f32 = 24.0;
 pub const PROGRESS_BAR_HEIGHT: f32 = 4.0;
 pub const PROGRESS_BAR_BG: Color32 = Color32::from_rgb(0x30, 0x30, 0x30);

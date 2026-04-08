@@ -12,6 +12,9 @@ BgPrunR removes backgrounds from images using ONNX neural networks running entir
 - **Batch processing** — open multiple images, process all in parallel, save all to a folder
 - **Reveal animation** — dissolve effect when background removal completes (toggle in settings)
 - **Drag-and-drop** — drop images onto the window to queue them (X11; Wayland pending winit support)
+- **Toast notifications** — animated feedback for save, copy, process complete, errors
+- **Material Design icons** — crisp vector icons throughout the UI (via egui_material_icons)
+- **Non-blocking architecture** — all image decoding, saving, and thumbnail generation runs on background threads
 - **Keyboard-driven** — full shortcut set for power users
 - **Cross-platform** — Linux x86_64, macOS x86_64/aarch64, Windows x86_64
 - **Formats** — PNG, JPEG, WebP, BMP input; PNG output (transparent background)

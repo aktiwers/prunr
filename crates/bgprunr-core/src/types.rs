@@ -38,10 +38,11 @@ pub enum ProgressStage {
     Alpha,
 }
 
-#[derive(Debug, Clone)]
 pub struct ProcessResult {
     /// RGBA PNG bytes of the output image with background removed
     pub rgba_bytes: Vec<u8>,
+    /// Raw RGBA pixels — avoids re-decode on the UI thread
+    pub rgba_image: image::RgbaImage,
     /// Name of the execution provider used (e.g., "CUDA", "CPU")
     pub active_provider: String,
 }
@@ -118,6 +119,7 @@ mod tests {
     fn test_process_result_fields() {
         let result = ProcessResult {
             rgba_bytes: vec![1, 2, 3, 4],
+            rgba_image: image::RgbaImage::new(1, 1),
             active_provider: "CPU".to_string(),
         };
         assert_eq!(result.rgba_bytes, vec![1, 2, 3, 4]);

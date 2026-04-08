@@ -157,6 +157,7 @@ where
 
     Ok(ProcessResult {
         rgba_bytes,
+        rgba_image,
         active_provider: engine.active_provider().to_string(),
     })
 }

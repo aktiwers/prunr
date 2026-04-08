@@ -113,9 +113,8 @@ pub fn render(ui: &mut egui::Ui, app: &mut BgPrunrApp) {
                 // Draw thumbnail if available (preserve aspect ratio)
                 if let Some(ref thumb_tex) = app.batch_items[i].thumb_texture {
                     let tex_size = thumb_tex.size_vec2();
-                    let fit_size = item_width.min(item_height);
-                    let scale = (fit_size / tex_size.x)
-                        .min(fit_size / tex_size.y);
+                    let scale = (item_width / tex_size.x)
+                        .min(item_height / tex_size.y);
                     let fitted = tex_size * scale;
                     let thumb_rect = Rect::from_center_size(
                         item_rect.center(),
