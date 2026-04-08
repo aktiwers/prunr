@@ -1,7 +1,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
 
-use prunr_core::{ModelKind, OrtEngine, ProgressStage, ProcessResult, process_image};
+use prunr_core::{MaskSettings, ModelKind, OrtEngine, ProgressStage, ProcessResult, process_image_with_mask};
 
 pub enum WorkerMessage {
     BatchProcess {
@@ -9,8 +9,8 @@ pub enum WorkerMessage {
         model: ModelKind,
         jobs: usize,
         cancel: Arc<AtomicBool>,
+        mask: MaskSettings,
     },
-    Quit,
 }
 
 pub enum WorkerResult {
@@ -39,7 +39,7 @@ pub fn spawn_worker(
         .spawn(move || {
             while let Ok(msg) = msg_rx.recv() {
                 match msg {
-                    WorkerMessage::BatchProcess { items, model, jobs, cancel } => {
+                    WorkerMessage::BatchProcess { items, model, jobs, cancel, mask } => {
                         // Spawn processing on a new thread so the worker loop
                         // stays free to accept more BatchProcess messages concurrently
                         let res_tx_batch = res_tx.clone();
@@ -58,6 +58,7 @@ pub fn spawn_worker(
                                     let res_tx_item = res_tx_batch.clone();
                                     let ctx_item = ctx_batch.clone();
                                     let cancel_item = cancel_batch.clone();
+                                    let mask_item = mask;
 
                                     s.spawn(move |_| {
                                         if cancel_item.load(Ordering::Relaxed) {
@@ -86,9 +87,10 @@ pub fn spawn_worker(
                                                 progress_ctx.request_repaint();
                                             }
                                         };
-                                        let result = process_image(
+                                        let result = process_image_with_mask(
                                             &img_bytes,
                                             &engine,
+                                            &mask_item,
                                             Some(progress_cb),
                                             Some(cancel_item),
                                         );
@@ -109,7 +111,6 @@ pub fn spawn_worker(
                             ctx_batch.request_repaint();
                         });
                     }
-                    WorkerMessage::Quit => break,
                 }
             }
         })

@@ -10,9 +10,9 @@ pub fn render(ui: &mut egui::Ui, app: &PrunrApp) {
 
         // Mini logo
         let logo_h = theme::STATUS_BAR_HEIGHT - 4.0;
-        let logo_w = logo_h * (483.0 / 594.0);
+        let logo_w = logo_h * theme::LOGO_ASPECT;
         ui.add(
-            egui::Image::new(egui::include_image!("../../../../../img/logo.png"))
+            egui::Image::new(egui::include_image!("../../../../../img/logo-nobg.png"))
                 .fit_to_exact_size(egui::vec2(logo_w, logo_h))
         );
         ui.add_space(theme::SPACE_XS);

@@ -88,13 +88,8 @@ $BGPRUNR -j 2 "$TEST_DIR/Bolli_Khajeh.jpg" "$TEST_DIR/20251120_013152.jpg" -o "$
 check "parallel batch 1" "$OUT_DIR/Bolli_Khajeh_nobg.png"
 check "parallel batch 2" "$OUT_DIR/20251120_013152_nobg.png"
 
-# ── Test 8: Backward compat — `remove` subcommand ────────────────────
-bold "Test 8: prunr remove photo.jpg (backward compat)"
-$BGPRUNR remove "$TEST_DIR/Firefox.png" -o "$OUT_DIR/firefox_compat.png" -f -q
-check "remove subcommand" "$OUT_DIR/firefox_compat.png"
-
-# ── Test 9: No overwrite without --force ──────────────────────────────
-bold "Test 9: no overwrite without --force"
+# ── Test 8: No overwrite without --force ──────────────────────────────
+bold "Test 8: no overwrite without --force"
 # Create a dummy file that would be overwritten
 touch "$OUT_DIR/Firefox_nobg.png"
 $BGPRUNR "$TEST_DIR/Firefox.png" -o "$OUT_DIR/Firefox_nobg.png" -q 2>/dev/null || true

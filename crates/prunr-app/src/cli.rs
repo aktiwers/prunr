@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Parser, ValueEnum};
 use std::path::PathBuf;
 
 /// Prunr — local AI background removal.
@@ -10,48 +10,44 @@ use std::path::PathBuf;
 #[derive(Parser, Debug)]
 #[command(name = "prunr", version, about, long_about = None)]
 pub struct Cli {
-    #[command(subcommand)]
-    pub command: Option<Commands>,
-
     /// Input image file(s).
     pub inputs: Vec<PathBuf>,
 
     /// Output path. File for single image, directory for batch.
-    #[arg(short = 'o', long, global = true)]
+    #[arg(short = 'o', long)]
     pub output: Option<PathBuf>,
 
     /// Model: silueta (fast, default) or u2net (quality).
-    #[arg(short = 'm', long, default_value = "silueta", global = true)]
+    #[arg(short = 'm', long, default_value = "silueta")]
     pub model: CliModel,
 
     /// Number of parallel jobs for batch processing.
-    #[arg(short = 'j', long, default_value_t = 1, global = true)]
+    #[arg(short = 'j', long, default_value_t = 1)]
     pub jobs: usize,
 
     /// How to handle images exceeding 8000px in either dimension.
-    #[arg(long, default_value = "downscale", global = true)]
+    #[arg(long, default_value = "downscale")]
     pub large_image: LargeImagePolicy,
 
     /// Overwrite existing output files.
-    #[arg(short = 'f', long, global = true)]
+    #[arg(short = 'f', long)]
     pub force: bool,
 
     /// Suppress progress output (errors still go to stderr).
-    #[arg(short = 'q', long, global = true)]
+    #[arg(short = 'q', long)]
     pub quiet: bool,
-}
 
-#[derive(Subcommand, Debug)]
-pub enum Commands {
-    /// Remove background from one or more images (same as passing files directly).
-    Remove(RemoveSubArgs),
-}
+    /// Mask gamma (removal strength). >1 = more aggressive, <1 = gentler.
+    #[arg(long, default_value_t = 1.0)]
+    pub gamma: f32,
 
-/// Subcommand args — only inputs, inherits everything else from parent Cli.
-#[derive(clap::Args, Debug)]
-pub struct RemoveSubArgs {
-    /// Input image file(s).
-    pub inputs: Vec<PathBuf>,
+    /// Binary threshold (0.0–1.0). Pixels below become fully transparent.
+    #[arg(long)]
+    pub threshold: Option<f32>,
+
+    /// Edge refinement in pixels. Positive erodes (shrinks), negative dilates (expands).
+    #[arg(long, default_value_t = 0.0)]
+    pub edge_shift: f32,
 }
 
 /// Model selection
@@ -84,12 +80,22 @@ pub enum LargeImagePolicy {
 use std::time::Instant;
 use indicatif::{ProgressBar, ProgressStyle, MultiProgress};
 use prunr_core::{
-    OrtEngine, ModelKind, ProgressStage, CoreError,
+    MaskSettings, OrtEngine, ModelKind, ProgressStage, CoreError,
     DOWNSCALE_TARGET,
-    process_image, process_image_unchecked,
-    batch_process,
+    process_image_with_mask, process_image_unchecked,
+    batch_process_with_mask,
     load_image_from_path, check_large_image, downscale_image, encode_rgba_png,
 };
+
+impl Cli {
+    fn mask_settings(&self) -> MaskSettings {
+        MaskSettings {
+            gamma: self.gamma,
+            threshold: self.threshold,
+            edge_shift: self.edge_shift,
+        }
+    }
+}
 
 /// Entry point for processing. Returns exit code (0/1/2).
 pub fn run_remove(args: &Cli) -> i32 {
@@ -250,10 +256,11 @@ fn run_single(args: &Cli) -> i32 {
         }
     });
 
+    let mask = args.mask_settings();
     let result = if args.large_image == LargeImagePolicy::Process {
         process_image_unchecked(&img_bytes, &engine, progress, None)
     } else {
-        process_image(&img_bytes, &engine, progress, None)
+        process_image_with_mask(&img_bytes, &engine, &mask, progress, None)
     };
 
     if let Some(pb) = &spinner { pb.finish_and_clear(); }
@@ -363,10 +370,12 @@ fn run_batch(args: &Cli) -> i32 {
         }
     };
 
-    let batch_results = batch_process(
+    let mask = args.mask_settings();
+    let batch_results = batch_process_with_mask(
         &valid_refs,
         model,
         args.jobs,
+        &mask,
         Some(progress_cb),
     );
 
