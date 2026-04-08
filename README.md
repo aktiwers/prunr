@@ -1,12 +1,12 @@
-# BgPrunR
+# Prunr
 
 Local AI background removal. One binary, no cloud, no API keys.
 
-BgPrunR removes backgrounds from images using ONNX neural networks running entirely on your machine. It ships as a single binary with embedded models — download, run, done.
+Prunr removes backgrounds from images using ONNX neural networks running entirely on your machine. It ships as a single binary with embedded models — download, run, done.
 
 ## Features
 
-- **GUI and CLI** in one binary — `bgprunr` opens the GUI, `bgprunr photo.jpg` runs headless
+- **GUI and CLI** in one binary — `prunr` opens the GUI, `prunr photo.jpg` runs headless
 - **Two bundled models** — Silueta (~4 MB, fast) and U2Net (~170 MB, higher quality)
 - **GPU acceleration** — CUDA (Linux/Windows), CoreML (macOS), DirectML (Windows), with automatic CPU fallback
 - **Batch processing** — open multiple images, process in parallel, save all to a folder
@@ -34,11 +34,11 @@ BgPrunR removes backgrounds from images using ONNX neural networks running entir
 cargo xtask fetch-models
 
 # 2. Run the GUI (dev mode — loads models from filesystem)
-cargo run -p bgprunr-app --features dev-models
+cargo run -p prunr-app --features dev-models
 
 # 3. Or build a release binary (models embedded in binary)
-cargo build --release -p bgprunr-app
-./target/release/bgprunr
+cargo build --release -p prunr-app
+./target/release/prunr
 ```
 
 ## GUI
@@ -46,7 +46,7 @@ cargo build --release -p bgprunr-app
 Launch with no arguments:
 
 ```bash
-bgprunr
+prunr
 ```
 
 ### Toolbar
@@ -116,18 +116,18 @@ On macOS, replace `Ctrl` with `Cmd`.
 Pass image files directly — no subcommand needed:
 
 ```bash
-bgprunr photo.jpg                    # saves photo_nobg.png alongside input
-bgprunr photo.jpg -o result.png      # custom output path
-bgprunr *.jpg -o clean/              # batch to folder
-bgprunr -m u2net portrait.jpg        # use quality model
-bgprunr -j 4 *.jpg -o out/           # 4 parallel jobs
-bgprunr remove photo.jpg             # backward compatible subcommand
+prunr photo.jpg                    # saves photo_nobg.png alongside input
+prunr photo.jpg -o result.png      # custom output path
+prunr *.jpg -o clean/              # batch to folder
+prunr -m u2net portrait.jpg        # use quality model
+prunr -j 4 *.jpg -o out/           # 4 parallel jobs
+prunr remove photo.jpg             # backward compatible subcommand
 ```
 
 ### Full CLI Reference
 
 ```
-bgprunr [OPTIONS] [INPUTS]...
+prunr [OPTIONS] [INPUTS]...
 ```
 
 | Option | Description |
@@ -146,26 +146,26 @@ bgprunr [OPTIONS] [INPUTS]...
 
 ```bash
 # Single image with quality model
-bgprunr -m u2net portrait.jpg
+prunr -m u2net portrait.jpg
 
 # Batch with parallel jobs, force overwrite
-bgprunr -j 8 -f photos/*.jpg -o clean/
+prunr -j 8 -f photos/*.jpg -o clean/
 
 # Large image at full resolution
-bgprunr --large-image process poster.png
+prunr --large-image process poster.png
 
 # Quiet mode for scripting
-bgprunr -q photo.jpg -o output.png
+prunr -q photo.jpg -o output.png
 ```
 
 ## Project Structure
 
 ```
-bgprunr/
+prunr/
 ├── crates/
-│   ├── bgprunr-core/       # Inference pipeline, image I/O, batch processing
-│   ├── bgprunr-models/     # Model embedding (zstd-compressed ONNX, ~174 MB)
-│   └── bgprunr-app/        # Single binary: GUI (egui) + CLI (clap)
+│   ├── prunr-core/       # Inference pipeline, image I/O, batch processing
+│   ├── prunr-models/     # Model embedding (zstd-compressed ONNX, ~174 MB)
+│   └── prunr-app/        # Single binary: GUI (egui) + CLI (clap)
 ├── xtask/                   # Developer tooling (cargo xtask fetch-models)
 ├── models/                  # ONNX model files (.gitignored)
 ├── ARCHITECTURE.md          # Detailed architecture documentation
@@ -175,13 +175,13 @@ bgprunr/
 ### Crate Dependencies
 
 ```
-bgprunr-models  (standalone — no workspace deps)
+prunr-models  (standalone — no workspace deps)
       |
       v
-bgprunr-core    (inference pipeline)
+prunr-core    (inference pipeline)
       |
       v
-bgprunr-app     (GUI + CLI binary)
+prunr-app     (GUI + CLI binary)
 ```
 
 ## Models
@@ -195,7 +195,7 @@ Both models are ONNX format, compatible with the rembg Python library's preproce
 
 ## GPU Acceleration
 
-BgPrunR automatically selects the best available inference backend:
+Prunr automatically selects the best available inference backend:
 
 1. **CUDA** (Linux/Windows with NVIDIA GPU)
 2. **CoreML** (macOS — Neural Engine on Apple Silicon)
@@ -208,7 +208,7 @@ The active backend is shown in Settings. No configuration needed — it just wor
 
 ```bash
 # Run with dev-models feature (loads models from disk, faster iteration)
-cargo run -p bgprunr-app --features dev-models
+cargo run -p prunr-app --features dev-models
 
 # Run tests
 cargo test --workspace
