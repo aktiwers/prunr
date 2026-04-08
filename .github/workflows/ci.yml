@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: macos-13
+            target: x86_64-apple-darwin
+          - os: macos-14
+            target: aarch64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Restore model cache
+        id: cache-models
+        uses: actions/cache@v4
+        with:
+          path: models/
+          key: models-${{ hashFiles('xtask/src/main.rs') }}
+
+      - name: Fetch models (cache miss)
+        if: steps.cache-models.outputs.cache-hit != 'true'
+        run: cargo xtask fetch-models
+
+      - name: Build
+        run: cargo build --target ${{ matrix.target }}
+
+      - name: Test
+        run: cargo test --target ${{ matrix.target }} --features prunr-models/dev-models
