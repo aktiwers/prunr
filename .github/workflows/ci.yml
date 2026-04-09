@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [master, main]
   pull_request:
 
 jobs:
@@ -31,6 +31,10 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libxdo-dev
+
       - name: Cache Cargo artifacts
         uses: Swatinem/rust-cache@v2
         with:
@@ -41,11 +45,21 @@ jobs:
         uses: actions/cache@v4
         with:
           path: models/
-          key: models-${{ hashFiles('xtask/src/main.rs') }}
+          key: models-v2-${{ hashFiles('xtask/src/main.rs') }}
 
       - name: Fetch models (cache miss)
         if: steps.cache-models.outputs.cache-hit != 'true'
         run: cargo xtask fetch-models
+
+      - name: Compress models to .zst (if needed)
+        shell: bash
+        run: |
+          for f in models/*.onnx; do
+            if [ -f "$f" ] && [ ! -f "$f.zst" ]; then
+              echo "Compressing $f ..."
+              zstd -19 "$f" -o "$f.zst"
+            fi
+          done
 
       - name: Build
         run: cargo build --target ${{ matrix.target }}
