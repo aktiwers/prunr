@@ -128,7 +128,8 @@ where
 
     // Stage 3: Normalize (happens inside preprocess, reported before the call)
     report(ProgressStage::Normalize, 0.4);
-    let input_array = preprocess(&img);
+    let model = engine.model_kind();
+    let input_array = preprocess(&img, model);
 
     if is_cancelled() {
         return Err(CoreError::Cancelled);
@@ -164,7 +165,7 @@ where
 
     // Stage 5: Postprocess (min-max normalize → grayscale mask → resize to original dims)
     report(ProgressStage::Postprocess, 0.8);
-    let rgba_image = postprocess(raw_output.view(), &img, mask);
+    let rgba_image = postprocess(raw_output.view(), &img, mask, model);
 
     // Stage 6: Alpha merge + PNG encode
     report(ProgressStage::Alpha, 0.95);

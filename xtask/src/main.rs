@@ -19,6 +19,11 @@ const MODELS: &[ModelSpec] = &[
         url: "https://github.com/danielgatis/rembg/releases/download/v0.0.0/u2net.onnx",
         sha256: "8d10d2f3bb75ae3b6d527c77944fc5e7dcd94b29809d47a739a7a728a912b491",
     },
+    ModelSpec {
+        name: "birefnet_lite.onnx",
+        url: "https://huggingface.co/onnx-community/BiRefNet_lite-ONNX/resolve/main/onnx/model.onnx",
+        sha256: "5600024376f572a557870a5eb0afb1e5961636bef4e1e22132025467d0f03333",
+    },
 ];
 
 fn main() -> anyhow::Result<()> {

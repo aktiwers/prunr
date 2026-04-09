@@ -1,7 +1,7 @@
 use egui::{Align2, RichText};
 
 use crate::gui::app::PrunrApp;
-use crate::gui::settings::{Settings, SettingsModel};
+use crate::gui::settings::Settings;
 use crate::gui::theme;
 
 /// Slider row: label left, slider fills middle, value right.
@@ -72,36 +72,6 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) {
             ui.vertical(|ui| {
                 section_heading(ui, "General");
 
-                ui.horizontal(|ui| {
-                    ui.label(
-                        RichText::new("Model")
-                            .color(theme::TEXT_PRIMARY)
-                            .size(theme::FONT_SIZE_BODY),
-                    );
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let model_text = match app.settings.model {
-                            SettingsModel::Silueta => "silueta (fast, ~4 MB)",
-                            SettingsModel::U2net => "u2net (quality, ~170 MB)",
-                        };
-                        egui::ComboBox::from_id_salt("settings_model")
-                            .selected_text(model_text)
-                            .show_ui(ui, |ui| {
-                                ui.selectable_value(
-                                    &mut app.settings.model,
-                                    SettingsModel::Silueta,
-                                    "silueta (fast, ~4 MB)",
-                                );
-                                ui.selectable_value(
-                                    &mut app.settings.model,
-                                    SettingsModel::U2net,
-                                    "u2net (quality, ~170 MB)",
-                                );
-                            });
-                    });
-                });
-                hint(ui, "AI model used for background detection");
-                ui.add_space(theme::SPACE_MD);
-
                 let max_jobs = app.settings.max_jobs();
                 ui.horizontal(|ui| {
                     ui.label(
@@ -148,15 +118,6 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) {
                         .size(theme::FONT_SIZE_BODY),
                 );
                 hint(ui, "Start removing background as soon as images are opened");
-                ui.add_space(theme::SPACE_MD);
-
-                ui.checkbox(
-                    &mut app.settings.reveal_animation_enabled,
-                    RichText::new("Reveal animation")
-                        .color(theme::TEXT_PRIMARY)
-                        .size(theme::FONT_SIZE_BODY),
-                );
-                hint(ui, "Dissolve effect when removal completes");
 
                 ui.add_space(theme::SPACE_MD);
                 ui.separator();
@@ -215,6 +176,16 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) {
                 hint(ui, "Adjusts the outline around your subject.");
                 hint(ui, "Positive values trim away fringe pixels,");
                 hint(ui, "negative values expand to keep more edge detail.");
+                ui.add_space(theme::SPACE_MD);
+
+                ui.checkbox(
+                    &mut app.settings.refine_edges,
+                    RichText::new("Refine edges")
+                        .color(theme::TEXT_PRIMARY)
+                        .size(theme::FONT_SIZE_BODY),
+                );
+                hint(ui, "Uses the original image colors to sharpen");
+                hint(ui, "the mask around fine detail like hair and leaves.");
 
                 ui.add_space(theme::SPACE_LG);
                 ui.separator();

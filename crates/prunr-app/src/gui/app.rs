@@ -24,6 +24,8 @@ pub(crate) struct BatchItem {
     pub thumb_pending: bool,
     pub result_rgba: Option<image::RgbaImage>,
     pub result_texture: Option<egui::TextureHandle>,
+    /// Saved result for redo (populated by undo, consumed by redo)
+    pub undo_result_rgba: Option<image::RgbaImage>,
     pub status: BatchStatus,
     pub selected: bool,
 }
@@ -40,6 +42,8 @@ pub struct PrunrApp {
     // State
     pub(crate) state: AppState,
     pub(crate) loaded_filename: Option<String>,
+    /// Directory of the most recently opened file (for save dialog default)
+    pub(crate) last_open_dir: Option<std::path::PathBuf>,
     pub(crate) source_bytes: Option<Arc<Vec<u8>>>,
     pub(crate) image_dimensions: Option<(u32, u32)>,
 
@@ -81,12 +85,6 @@ pub struct PrunrApp {
     // Before/After toggle
     pub(crate) show_original: bool,
 
-    // Animation state
-    pub(crate) anim_progress: f32,
-    pub(crate) anim_mask: Option<Vec<u8>>,
-    /// Decoded source RGBA cached for animation (avoids per-frame decode)
-    pub(crate) source_rgba_cache: Option<image::RgbaImage>,
-
     // Window title change detection
     prev_title: String,
 
@@ -105,6 +103,8 @@ pub struct PrunrApp {
 
     // Canvas fade-in: incremented on every image switch
     pub(crate) canvas_switch_id: u64,
+    /// Incremented when a result completes, drives crossfade in render_done
+    pub(crate) result_switch_id: u64,
 
     // Pending zoom actions (flags consumed by canvas.rs)
     pub(crate) pending_fit_zoom: bool,
@@ -174,8 +174,6 @@ impl PrunrApp {
         visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(0x50, 0x50, 0x50));
         visuals.widgets.open.bg_stroke = subtle; // ComboBox "open" state
         visuals.window_stroke = subtle;
-        visuals.selection.bg_fill = egui::Color32::from_rgba_unmultiplied(0x7b, 0x2d, 0x8e, 60);
-        visuals.selection.stroke = egui::Stroke::new(1.0, theme::ACCENT);
         visuals.error_fg_color = theme::DESTRUCTIVE;
         cc.egui_ctx.set_visuals(visuals);
 
@@ -212,6 +210,7 @@ impl PrunrApp {
         Self {
             state: AppState::Empty,
             loaded_filename: None,
+            last_open_dir: None,
             source_bytes: None,
             image_dimensions: None,
             worker_tx,
@@ -234,9 +233,6 @@ impl PrunrApp {
             previous_zoom: 1.0,
             is_panning: false,
             show_original: false,
-            anim_progress: 0.0,
-            anim_mask: None,
-            source_rgba_cache: None,
             prev_title: String::new(),
             batch_items: Vec::new(),
             selected_batch_index: 0,
@@ -246,6 +242,7 @@ impl PrunrApp {
             settings_opened_at: 0.0,
             settings,
             canvas_switch_id: 0,
+            result_switch_id: 0,
             pending_fit_zoom: false,
             pending_actual_size: false,
             pending_batch_sync: false,
@@ -277,6 +274,7 @@ impl PrunrApp {
         Self {
             state: AppState::Empty,
             loaded_filename: None,
+            last_open_dir: None,
             source_bytes: None,
             image_dimensions: None,
             worker_tx,
@@ -299,9 +297,6 @@ impl PrunrApp {
             previous_zoom: 1.0,
             is_panning: false,
             show_original: false,
-            anim_progress: 0.0,
-            anim_mask: None,
-            source_rgba_cache: None,
             prev_title: String::new(),
             batch_items: Vec::new(),
             selected_batch_index: 0,
@@ -311,6 +306,7 @@ impl PrunrApp {
             settings_opened_at: 0.0,
             settings,
             canvas_switch_id: 0,
+            result_switch_id: 0,
             pending_fit_zoom: false,
             pending_actual_size: false,
             pending_batch_sync: false,
@@ -394,6 +390,7 @@ impl PrunrApp {
             thumb_pending: false,
             result_rgba: None,
             result_texture: None,
+            undo_result_rgba: None,
             status: BatchStatus::Pending,
             selected: false,
         });
@@ -407,7 +404,7 @@ impl PrunrApp {
         self.source_texture = None;
         self.result_texture = None;
         self.result_rgba = None;
-        self.source_rgba_cache = None;
+
         self.state = AppState::Loaded;
         self.status_text = "Ready".to_string();
         self.canvas_switch_id += 1;
@@ -442,6 +439,9 @@ impl PrunrApp {
             .set_title("Open Image(s)")
             .pick_files();
         if let Some(paths) = paths {
+            if let Some(first) = paths.first() {
+                self.last_open_dir = first.parent().map(|p| p.to_path_buf());
+            }
             if paths.len() == 1 && self.batch_items.is_empty() {
                 self.handle_open_path(paths.into_iter().next().unwrap());
             } else {
@@ -497,8 +497,8 @@ impl PrunrApp {
         for item in &mut self.batch_items {
             let target = if has_selected { item.selected } else { Some(item.id) == current_id };
             if target && matches!(item.status, BatchStatus::Done | BatchStatus::Error(_)) {
+                item.undo_result_rgba = item.result_rgba.take();
                 item.status = BatchStatus::Pending;
-                item.result_rgba = None;
                 item.result_texture = None;
                 item.thumb_texture = None;
                 item.thumb_pending = false;
@@ -511,6 +511,31 @@ impl PrunrApp {
                 self.toasts.info("Reverted to original");
             } else {
                 self.toasts.info(format!("Reverted {undone} images"));
+            }
+        }
+    }
+
+    fn handle_redo(&mut self, ctx: &egui::Context) {
+        let has_selected = self.batch_items.iter().any(|i| i.selected);
+        let current_id = self.batch_items.get(self.selected_batch_index).map(|b| b.id);
+        let mut redone = 0u32;
+        for item in &mut self.batch_items {
+            let target = if has_selected { item.selected } else { Some(item.id) == current_id };
+            if target && item.status == BatchStatus::Pending && item.undo_result_rgba.is_some() {
+                item.result_rgba = item.undo_result_rgba.take();
+                item.result_texture = None;
+                item.thumb_texture = None;
+                item.thumb_pending = false;
+                item.status = BatchStatus::Done;
+                redone += 1;
+            }
+        }
+        if redone > 0 {
+            self.sync_selected_batch_textures(ctx);
+            if redone == 1 {
+                self.toasts.info("Result restored");
+            } else {
+                self.toasts.info(format!("Restored {redone} images"));
             }
         }
     }
@@ -542,6 +567,14 @@ impl PrunrApp {
 
     /// Save selected images (or current image if none selected).
     /// Single selection → save-as dialog; multiple → folder picker.
+    pub(crate) fn save_dialog(&self) -> rfd::FileDialog {
+        let mut dlg = rfd::FileDialog::new();
+        if let Some(ref dir) = self.last_open_dir {
+            dlg = dlg.set_directory(dir);
+        }
+        dlg
+    }
+
     pub fn handle_save_selected(&mut self) {
         let selected: Vec<_> = self.batch_items.iter()
             .filter(|i| i.selected && i.status == BatchStatus::Done && i.result_rgba.is_some())
@@ -556,7 +589,7 @@ impl PrunrApp {
                     .and_then(|name| Path::new(name).file_stem()?.to_str())
                     .map(|stem| format!("{stem}-nobg.png"))
                     .unwrap_or_else(|| "result-nobg.png".to_string());
-                if let Some(path) = rfd::FileDialog::new()
+                if let Some(path) = self.save_dialog()
                     .add_filter("PNG Image", &["png"])
                     .set_file_name(&default_name)
                     .set_title("Save PNG")
@@ -581,7 +614,7 @@ impl PrunrApp {
         }
 
         // Multiple selected — folder picker, encode+write on background thread
-        if let Some(folder) = rfd::FileDialog::new()
+        if let Some(folder) = self.save_dialog()
             .set_title("Save Selected — Choose Folder")
             .pick_folder()
         {
@@ -689,6 +722,7 @@ impl PrunrApp {
                     thumb_pending: false,
                     result_rgba: self.result_rgba.take(),
                     result_texture: self.result_texture.take(),
+                    undo_result_rgba: None,
                     status: if self.state == AppState::Done { BatchStatus::Done } else { BatchStatus::Pending },
                     selected: false,
                 };
@@ -711,6 +745,7 @@ impl PrunrApp {
             thumb_pending: false,
             result_rgba: None,
             result_texture: None,
+            undo_result_rgba: None,
             status: BatchStatus::Pending,
             selected: false,
         });
@@ -767,24 +802,6 @@ impl PrunrApp {
         self.process_items(|_| true);
     }
 
-    /// Set up reveal animation state from a completed result image.
-    fn setup_reveal_animation(&mut self, rgba: &image::RgbaImage, ctx: &egui::Context) {
-        let alpha_mask: Vec<u8> = rgba.pixels().map(|p| p[3]).collect();
-        self.anim_mask = Some(alpha_mask);
-        self.result_rgba = Some(rgba.clone());
-        self.result_texture = Some(rgba_to_texture(rgba, "result", ctx));
-        if self.source_rgba_cache.is_none() {
-            // Use pre-decoded source from batch item (avoids UI-thread decode)
-            let idx = self.selected_batch_index.min(self.batch_items.len().saturating_sub(1));
-            if let Some(ref rgba) = self.batch_items.get(idx).and_then(|b| b.source_rgba.as_ref()) {
-                self.source_rgba_cache = Some((*rgba).clone());
-            }
-        }
-        self.state = AppState::Animating;
-        self.anim_progress = 0.0;
-        self.show_original = false;
-    }
-
     pub(crate) fn sync_selected_batch_textures(&mut self, ctx: &egui::Context) {
         if self.batch_items.is_empty() { return; }
         let idx = self.selected_batch_index.min(self.batch_items.len() - 1);
@@ -816,11 +833,7 @@ impl PrunrApp {
         self.source_texture = item.source_texture.clone();
         self.loaded_filename = Some(item.filename.clone());
         self.image_dimensions = Some(item.dimensions);
-        self.source_rgba_cache = None;
         self.show_original = false;
-        // Cancel any in-progress animation (data belongs to previous image)
-        self.anim_mask = None;
-        self.anim_progress = 0.0;
 
         self.pan_offset = egui::Vec2::ZERO;
         self.previous_zoom = 1.0;
@@ -889,16 +902,11 @@ impl eframe::App for PrunrApp {
                 WorkerResult::BatchItemDone { item_id, result } => {
                     let is_selected = self.batch_items.get(self.selected_batch_index)
                         .map_or(false, |b| b.id == item_id);
-                    // Update batch item first (release borrow before animation setup)
-                    let mut animate_rgba: Option<image::RgbaImage> = None;
                     if let Some(item) = self.batch_items.iter_mut().find(|b| b.id == item_id) {
                         match result {
                             Ok(pr) => {
-                                let rgba = pr.rgba_image;
-                                if is_selected && self.settings.reveal_animation_enabled {
-                                    animate_rgba = Some(rgba.clone());
-                                }
-                                item.result_rgba = Some(rgba);
+                                item.result_rgba = Some(pr.rgba_image);
+                                item.undo_result_rgba = None;
                                 item.status = BatchStatus::Done;
                                 item.thumb_texture = None;
                                 item.thumb_pending = false;
@@ -925,9 +933,8 @@ impl eframe::App for PrunrApp {
                     }
                     self.progress_pct = done as f32 / total.max(1) as f32;
 
-                    if let Some(rgba) = animate_rgba {
-                        self.setup_reveal_animation(&rgba, ctx);
-                    } else if is_selected {
+                    if is_selected {
+                        self.result_switch_id += 1;
                         self.sync_selected_batch_textures(ctx);
                     }
                 }
@@ -972,6 +979,7 @@ impl eframe::App for PrunrApp {
             for file in dropped {
                 if let Some(path) = file.path {
                     if let Ok(bytes) = std::fs::read(&path) {
+                        self.last_open_dir = path.parent().map(|p| p.to_path_buf());
                         let name = path.file_name()
                             .and_then(|n| n.to_str())
                             .unwrap_or("untitled")
@@ -1006,26 +1014,6 @@ impl eframe::App for PrunrApp {
             }
         }
 
-        // b2. Advance animation
-        if self.state == AppState::Animating {
-            let dt = ctx.input(|i| i.stable_dt);
-            self.anim_progress = (self.anim_progress + dt / theme::ANIM_DURATION_SECS).min(1.0);
-
-            // Check for skip (any key or mouse click)
-            let skip = ctx.input(|i| {
-                let any_key = i.events.iter().any(|e| matches!(e, egui::Event::Key { pressed: true, .. }));
-                i.pointer.any_pressed() || any_key
-            });
-
-            if skip || self.anim_progress >= 1.0 {
-                self.state = AppState::Done;
-                self.anim_progress = 0.0;
-                self.status_text = "Done".to_string();
-                self.toasts.success("Background removed");
-            } else {
-                ctx.request_repaint(); // keep animation loop running
-            }
-        }
 
         // c. Keyboard shortcuts
         // Ctrl+C is intercepted via raw_input_hook (egui converts it to Event::Copy).
@@ -1036,6 +1024,7 @@ impl eframe::App for PrunrApp {
         let mut toggle_settings = false;
         let (mut nav_prev, mut nav_next, mut toggle_sidebar) = (false, false, false);
         let mut undo_requested = false;
+        let mut redo_requested = false;
 
         ctx.input(|i| {
             if i.modifiers.command && i.key_pressed(Key::O) {
@@ -1080,6 +1069,9 @@ impl eframe::App for PrunrApp {
             if i.modifiers.command && i.key_pressed(Key::Z) {
                 undo_requested = true;
             }
+            if i.modifiers.command && i.key_pressed(Key::Y) {
+                redo_requested = true;
+            }
         });
 
         let copy_requested = std::mem::take(&mut self.pending_copy);
@@ -1114,9 +1106,6 @@ impl eframe::App for PrunrApp {
                     item.status = BatchStatus::Pending;
                 }
             }
-        } else if cancel_requested && self.state == AppState::Animating {
-            self.state = AppState::Done;
-            self.anim_progress = 0.0;
         } else if cancel_requested && self.state == AppState::Processing {
             self.handle_cancel();
             self.state = AppState::Loaded;
@@ -1158,6 +1147,9 @@ impl eframe::App for PrunrApp {
         }
         if undo_requested {
             self.handle_undo(ctx);
+        }
+        if redo_requested {
+            self.handle_redo(ctx);
         }
         // Deferred batch sync from sidebar click
         if self.pending_batch_sync {

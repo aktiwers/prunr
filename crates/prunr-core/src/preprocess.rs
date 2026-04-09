@@ -1,41 +1,52 @@
 use image::{DynamicImage, imageops::FilterType};
 use ndarray::Array4;
 
-pub const TARGET_SIZE: u32 = 320;
+use crate::types::ModelKind;
+
+const REMBG_SIZE: u32 = 320;
+const BIREFNET_SIZE: u32 = 1024;
 const MEAN: [f32; 3] = [0.485, 0.456, 0.406];
 const STD:  [f32; 3] = [0.229, 0.224, 0.225];
 
-/// Preprocess a dynamic image into a 4D NCHW float tensor for rembg-compatible ONNX models.
-///
-/// Matches rembg's normalize() from rembg/sessions/base.py exactly:
-/// 1. Convert to RGB8
-/// 2. Resize to 320x320 using Lanczos3 (rembg: Image.Resampling.LANCZOS)
-/// 3. Divide by max(max_pixel, 1e-6)  — NOT 255.0 unconditionally
-/// 4. Subtract ImageNet mean per channel, divide by std
-/// 5. Arrange in NCHW order: [1, 3, 320, 320]
-pub fn preprocess(img: &DynamicImage) -> Array4<f32> {
-    let rgb = img.to_rgb8();
-    let resized = image::imageops::resize(&rgb, TARGET_SIZE, TARGET_SIZE, FilterType::Lanczos3);
+/// Preprocess for the given model. Returns NCHW tensor at the model's expected resolution.
+pub fn preprocess(img: &DynamicImage, model: ModelKind) -> Array4<f32> {
+    match model {
+        ModelKind::Silueta | ModelKind::U2net => preprocess_rembg(img),
+        ModelKind::BiRefNetLite => preprocess_birefnet(img),
+    }
+}
 
-    // rembg: im_ary = im_ary / max(np.max(im_ary), 1e-6)
+/// Build NCHW tensor from a resized image with the given divisor.
+fn to_nchw(resized: &image::RgbImage, size: u32, divisor: f32) -> Array4<f32> {
+    let s = size as usize;
+    let mut out = Array4::<f32>::zeros((1, 3, s, s));
+    for y in 0..s {
+        for x in 0..s {
+            let p = resized.get_pixel(x as u32, y as u32);
+            for c in 0..3 {
+                out[[0, c, y, x]] = (p[c] as f32 / divisor - MEAN[c]) / STD[c];
+            }
+        }
+    }
+    out
+}
+
+fn preprocess_rembg(img: &DynamicImage) -> Array4<f32> {
+    let rgb = img.to_rgb8();
+    let resized = image::imageops::resize(&rgb, REMBG_SIZE, REMBG_SIZE, FilterType::Lanczos3);
     let max_val = resized
         .pixels()
         .flat_map(|p| p.0.iter().copied())
         .map(|v| v as f32)
         .fold(f32::NEG_INFINITY, f32::max)
         .max(1e-6_f32);
+    to_nchw(&resized, REMBG_SIZE, max_val)
+}
 
-    let s = TARGET_SIZE as usize;
-    let mut out = Array4::<f32>::zeros((1, 3, s, s));
-    for y in 0..s {
-        for x in 0..s {
-            let p = resized.get_pixel(x as u32, y as u32);
-            for c in 0..3 {
-                out[[0, c, y, x]] = (p[c] as f32 / max_val - MEAN[c]) / STD[c];
-            }
-        }
-    }
-    out
+fn preprocess_birefnet(img: &DynamicImage) -> Array4<f32> {
+    let rgb = img.to_rgb8();
+    let resized = image::imageops::resize(&rgb, BIREFNET_SIZE, BIREFNET_SIZE, FilterType::Lanczos3);
+    to_nchw(&resized, BIREFNET_SIZE, 255.0)
 }
 
 #[cfg(test)]
@@ -54,14 +65,24 @@ mod tests {
     #[test]
     fn test_preprocess_output_shape() {
         let img = solid_rgb_image(128, 64, 32, 640, 480);
-        let tensor = preprocess(&img);
+        let tensor = preprocess(&img, ModelKind::Silueta);
         assert_eq!(tensor.shape(), &[1, 3, 320, 320]);
+    }
+
+    #[test]
+    fn test_preprocess_birefnet_shape() {
+        let img = solid_rgb_image(128, 64, 32, 640, 480);
+        let tensor = preprocess(&img, ModelKind::BiRefNetLite);
+        assert_eq!(tensor.shape(), &[1, 3, 1024, 1024]);
+        for &val in tensor.iter() {
+            assert!(val.is_finite(), "BiRefNet tensor contains NaN/Inf: {val}");
+        }
     }
 
     #[test]
     fn test_preprocess_values_normalized() {
         let img = solid_rgb_image(100, 150, 200, 320, 320);
-        let tensor = preprocess(&img);
+        let tensor = preprocess(&img, ModelKind::Silueta);
         for &val in tensor.iter() {
             assert!(val.is_finite(), "Tensor contains NaN or Inf: {val}");
             assert!(val > -5.0 && val < 5.0, "Value out of expected range: {val}");
@@ -73,7 +94,7 @@ mod tests {
         // Solid red image: R=255, G=0, B=0
         // After normalization, channel 0 (R) should be much larger than channels 1,2
         let img = solid_rgb_image(255, 0, 0, 64, 64);
-        let tensor = preprocess(&img);
+        let tensor = preprocess(&img, ModelKind::Silueta);
         let r_center = tensor[[0, 0, 160, 160]];
         let g_center = tensor[[0, 1, 160, 160]];
         assert!(r_center > g_center, "Channel 0 (R) should be normalized higher than channel 1 (G) for red image");
@@ -84,7 +105,7 @@ mod tests {
         // All-black image: max_val = 1e-6 (clamped), pixel/max_val = 0.0
         // Result = (0.0 - MEAN[c]) / STD[c] — all finite
         let img = solid_rgb_image(0, 0, 0, 32, 32);
-        let tensor = preprocess(&img);
+        let tensor = preprocess(&img, ModelKind::Silueta);
         for &val in tensor.iter() {
             assert!(val.is_finite(), "Black image produced NaN or Inf: {val}");
         }
