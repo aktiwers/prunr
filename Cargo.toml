@@ -50,6 +50,7 @@ inherits = "release"
 [workspace.metadata.dist]
 cargo-dist-version = "0.31.0"
 ci = "github"
+allow-dirty = ["ci"]
 installers = []
 targets = [
     "x86_64-unknown-linux-gnu",
