@@ -4,6 +4,16 @@ Local AI background removal. One binary, no cloud, no API keys.
 
 Prunr removes backgrounds from images using ONNX neural networks running entirely on your machine. It ships as a single binary with embedded models — download, run, done.
 
+## Download
+
+| Platform | Download |
+|----------|----------|
+| **Linux x86_64** | [prunr-linux-x86_64.tar.gz](https://github.com/aktiwers/BgPrunR/releases/latest/download/prunr-linux-x86_64.tar.gz) |
+| **macOS Apple Silicon** | [prunr-macos-aarch64.tar.gz](https://github.com/aktiwers/BgPrunR/releases/latest/download/prunr-macos-aarch64.tar.gz) |
+| **Windows x86_64** | [prunr-windows-x86_64.zip](https://github.com/aktiwers/BgPrunR/releases/latest/download/prunr-windows-x86_64.zip) |
+
+Or browse all releases: [github.com/aktiwers/BgPrunR/releases](https://github.com/aktiwers/BgPrunR/releases)
+
 ## Features
 
 - **GUI and CLI** in one binary — `prunr` opens the GUI, `prunr photo.jpg` runs headless
