@@ -1,4 +1,4 @@
-# <img src="img/logo-nobg.png" width="32" height="32" align="top"> Prunr
+# <img src="img/logo-nobg.png" height="48"> Prunr
 
 Local AI background removal. One binary, no cloud, no API keys.
 
