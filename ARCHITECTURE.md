@@ -1,6 +1,6 @@
 # Prunr Architecture
 
-> Living document — updated as the codebase evolves. Last updated: 2026-04-08.
+> Living document — updated as the codebase evolves. Last updated: 2026-04-09.
 
 ## Design Principles
 
@@ -31,8 +31,8 @@ prunr/
 │   │
 │   └── prunr-app/              # Binary: single binary for both CLI and GUI
 │       └── src/
-│           ├── main.rs           # Entry point: no args → GUI, subcommands → CLI
-│           ├── cli.rs            # clap subcommands: remove, batch (indicatif progress)
+│           ├── main.rs           # Entry point: no args → GUI, files → CLI
+│           ├── cli.rs            # clap args: prunr photo.jpg [options] (indicatif progress)
 │           ├── gui/
 │           │   ├── mod.rs        # eframe::run_native entry point
 │           │   ├── app.rs        # App struct, eframe::App impl, message routing, batch sync
@@ -56,7 +56,8 @@ prunr/
 │
 ├── models/                       # ONNX model files (.gitignored, fetched via xtask)
 │   ├── silueta.onnx              # ~4MB — fast model, default
-│   └── u2net.onnx                # ~170MB — quality model
+│   ├── u2net.onnx                # ~170MB — quality model
+│   └── birefnet_lite.onnx        # ~214MB — best detail, 1024×1024
 │
 ├── assets/                       # App icon, fonts
 ├── ARCHITECTURE.md               # This file
@@ -75,12 +76,12 @@ prunr-core    (depends on: prunr-models)
 prunr-app     (single binary: CLI + GUI, depends on: prunr-core)
 ```
 
-**Single binary architecture:** `prunr` (no args) opens the GUI. `prunr remove ...` runs CLI mode. One binary to distribute.
+**Single binary architecture:** `prunr` (no args) opens the GUI. `prunr photo.jpg` runs CLI mode. One binary to distribute.
 
 **Why this matters:**
-- `prunr-models` compiles independently. Its 170MB embed only recompiles when model files change, not on every source edit.
+- `prunr-models` compiles independently. Its ~380MB embed only recompiles when model files change, not on every source edit.
 - `prunr-core` owns all inference logic. The app binary is a thin presentation layer.
-- `prunr-app` contains both CLI and GUI code in one binary — `prunr` (no args) = GUI, `prunr remove ...` = CLI.
+- `prunr-app` contains both CLI and GUI code in one binary — `prunr` (no args) = GUI, `prunr photo.jpg` = CLI.
 
 ## Data Flow
 
@@ -170,7 +171,7 @@ If rayon has 4 workers and the machine has 16 cores, each ORT session uses 4 int
 
 ## Inference Pipeline Detail
 
-Matching rembg's Python preprocessing exactly:
+Model-aware preprocessing and postprocessing:
 
 ```
 1. Input: DynamicImage (any format, any size)
@@ -283,6 +284,10 @@ the currently viewed image, not the overall batch progress.
 | `zstd` | 0.13 | Runtime model decompression (replaced include-bytes-zstd) |
 | `rfd` | 0.15 | Native file dialogs (open/save/folder picker) |
 | `num_cpus` | 1.x | Detect CPU count for parallel jobs setting |
+| `dirs` | 6.x | Cross-platform config directory for persistent settings |
+| `egui-notify` | 0.22 | Toast notification system |
+| `egui_material_icons` | 0.6 | Material Design icons throughout the UI |
+| `serde` + `serde_json` | 1.x | Settings serialization/persistence |
 
 ## Keyboard Shortcuts — Platform Modifier
 
@@ -342,3 +347,19 @@ if ui.input(|i| i.modifiers.ctrl && i.key_pressed(Key::O)) { /* open */ }
 | 2026-04-08 | Canvas fade-in (200ms) on image switch, thumbnail fade-in on load | UI polish |
 | 2026-04-08 | Non-interactive settings backdrop (fixes frozen settings modal) | Bug fix |
 | 2026-04-08 | Fixed concurrent processing: results tracked by item_id not selected index | Bug fix |
+| 2026-04-08 | Mask tuning: gamma, threshold, edge shift controls in Settings + CLI | Feature |
+| 2026-04-08 | Ctrl+Z undo / Ctrl+Y redo for background removal | Feature |
+| 2026-04-08 | Settings persistence via ~/.config/prunr/settings.json | Feature |
+| 2026-04-08 | Smart parallel jobs default: 2 for GPU, num_cpus/2 for CPU | Performance |
+| 2026-04-08 | Removed CLI subcommand — prunr photo.jpg works directly | CLI simplification |
+| 2026-04-08 | F2 CLI reference modal with copy-to-clipboard buttons | UX |
+| 2026-04-08 | Cycling tips on empty canvas with fade animation | UX |
+| 2026-04-09 | BiRefNet-lite model (1024×1024, ~214 MB) for fine detail | Feature |
+| 2026-04-09 | Guided filter edge refinement (pure Rust, O(1) box filter) | Feature |
+| 2026-04-09 | Removed reveal animation — replaced with simple crossfade (0.4s) | Simplification |
+| 2026-04-09 | Loading spinner on canvas while source image decodes | UX |
+| 2026-04-09 | Model dropdown in toolbar with per-model icons | UI |
+| 2026-04-09 | Progress percentage in status bar during processing | UX |
+| 2026-04-09 | Save dialogs default to source image directory | UX |
+| 2026-04-09 | Backend detected at startup via compile-time feature flags | Architecture |
+| 2026-04-09 | GitHub Actions release workflow with embedded models | CI/CD |
