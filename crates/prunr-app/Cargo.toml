@@ -2,7 +2,7 @@
 name = "prunr-app"
 version.workspace = true
 edition.workspace = true
-repository = "https://github.com/aktiwers/BgPrunR"
+repository = "https://github.com/aktiwers/prunr"
 
 [[bin]]
 name = "prunr"
