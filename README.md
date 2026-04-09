@@ -57,13 +57,12 @@ prunr
 | Button | Description |
 |--------|-------------|
 | **Open** | Open one or more images (multi-select supported) |
-| **Remove BG** / **Remove BG Selected** | Process current image, or all checked images in parallel |
+| **Settings** | Open settings dialog (center) |
+| **Model** | Switch between Silueta (fast), U2Net (quality), BiRefNet (detail) |
+| **Remove BG** / **Process Selected** | Process current image, or all checked images in parallel |
 | **Process All** | Process all queued images in parallel (appears with 2+ images) |
-| **Save** / **Save Selected** | Save current result, or all checked results to a folder |
-| **Save All** | Save all processed images to a folder (appears with 2+ done) |
+| **Save** / **Save Selected** | Save current result, or all checked results to a folder (appears when result ready) |
 | **Remove Selected** | Remove all checked images from the sidebar (appears when any are checked) |
-| **Model** | Switch between Silueta (fast) and U2Net (quality) |
-| **Settings** | Open settings dialog |
 
 ### Sidebar
 
@@ -77,13 +76,13 @@ The sidebar appears on the right when any images are loaded. Each thumbnail show
 - **Loading spinner** — shown while thumbnail is being decoded in background
 - **Fade-in** — 200ms fade when thumbnail loads or image switches
 
-At the top: **Select All** checkbox and **Clear** button for quick batch selection.
+At the top: **Select All** checkbox (toggles all on/off).
 
 Click a thumbnail to view it on the canvas with a smooth fade transition. Drag to reorder. Thumbnails update to show the result after processing.
 
 ### Settings
 
-Open with the gear button or `Ctrl+,` (`Cmd+,` on macOS):
+Open with the gear button or `Ctrl+Space` (`Cmd+Space` on macOS):
 
 | Setting | Description |
 |---------|-------------|
@@ -104,6 +103,7 @@ Open with the gear button or `Ctrl+,` (`Cmd+,` on macOS):
 | `Ctrl+Y` | Redo (restore result from memory) |
 | `Escape` | Cancel processing / close dialog |
 | `F1` | Show keyboard shortcuts |
+| `F2` | Show CLI reference |
 | `B` | Toggle before/after comparison |
 | `← / → or A / D` | Previous / next image in batch |
 | `Ctrl+0` | Fit image to window |
