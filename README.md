@@ -6,11 +6,11 @@ Prunr removes backgrounds from images using ONNX neural networks running entirel
 
 ## Download
 
-| Platform | Download |
-|----------|----------|
-| **Linux x86_64** | [prunr-linux-x86_64.tar.gz](https://github.com/aktiwers/BgPrunR/releases/latest/download/prunr-linux-x86_64.tar.gz) |
-| **macOS Apple Silicon** | [prunr-macos-aarch64.tar.gz](https://github.com/aktiwers/BgPrunR/releases/latest/download/prunr-macos-aarch64.tar.gz) |
-| **Windows x86_64** | [prunr-windows-x86_64.zip](https://github.com/aktiwers/BgPrunR/releases/latest/download/prunr-windows-x86_64.zip) |
+| Platform | Installer | Portable |
+|----------|-----------|----------|
+| **Linux** | [AppImage](https://github.com/aktiwers/BgPrunR/releases/latest/download/Prunr-x86_64.AppImage) \| [.deb](https://github.com/aktiwers/BgPrunR/releases/latest/download/prunr-linux-x86_64.deb) | [tar.gz](https://github.com/aktiwers/BgPrunR/releases/latest/download/prunr-linux-x86_64.tar.gz) |
+| **macOS** (Apple Silicon) | [DMG](https://github.com/aktiwers/BgPrunR/releases/latest/download/Prunr-macos-aarch64.dmg) | [tar.gz](https://github.com/aktiwers/BgPrunR/releases/latest/download/prunr-macos-aarch64.tar.gz) |
+| **Windows** | [Installer](https://github.com/aktiwers/BgPrunR/releases/latest/download/prunr-windows-x86_64-setup.exe) | [zip](https://github.com/aktiwers/BgPrunR/releases/latest/download/prunr-windows-x86_64.zip) |
 
 Or browse all releases: [github.com/aktiwers/BgPrunR/releases](https://github.com/aktiwers/BgPrunR/releases)
 
