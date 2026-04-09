@@ -117,14 +117,15 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                 );
                 if let Some(ref thumb_tex) = app.batch_items[i].thumb_texture {
                     let tex_size = thumb_tex.size_vec2();
-                    let scale = (item_width / tex_size.x)
-                        .min(item_height / tex_size.y)
+                    // Fit inside item_rect with 2px padding to avoid touching the border
+                    let pad = 4.0;
+                    let max_w = item_rect.width() - pad;
+                    let max_h = item_rect.height() - pad;
+                    let scale = (max_w / tex_size.x)
+                        .min(max_h / tex_size.y)
                         .min(1.0);
                     let fitted = tex_size * scale;
-                    let thumb_rect = Rect::from_center_size(
-                        item_rect.center(),
-                        fitted,
-                    );
+                    let thumb_rect = Rect::from_center_size(item_rect.center(), fitted);
                     let alpha = (fade * 255.0) as u8;
                     ui.painter().image(
                         thumb_tex.id(), thumb_rect,
