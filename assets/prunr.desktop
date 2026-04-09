@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=Prunr
+Comment=Local AI background removal
+Exec=prunr
+Icon=prunr
+Type=Application
+Categories=Graphics;ImageProcessing;
+MimeType=image/png;image/jpeg;image/webp;image/bmp;
