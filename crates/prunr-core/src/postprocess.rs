@@ -1,30 +1,38 @@
 use image::{DynamicImage, GrayImage, Luma, Rgba, RgbaImage, imageops::FilterType};
 use ndarray::ArrayView4;
 
-use crate::types::MaskSettings;
+use crate::guided_filter::guided_filter_alpha;
+use crate::types::{MaskSettings, ModelKind};
 
 /// Postprocess raw ONNX model output into a transparent RGBA image.
-///
-/// Pipeline:
-/// 1. Slice channel 0: output[0, 0, :, :] -> shape [320, 320]
-/// 2. Min-max normalize to [0, 1]
-/// 3. Apply gamma curve (mask_settings.gamma)
-/// 4. Apply optional binary threshold (mask_settings.threshold)
-/// 5. Scale to u8 grayscale mask, resize to original dimensions (Lanczos3)
-/// 6. Apply edge shift (erode/dilate via distance-based approach)
-/// 7. Apply mask as alpha channel
-pub fn postprocess(raw: ArrayView4<f32>, original: &DynamicImage, mask_settings: &MaskSettings) -> RgbaImage {
-    let pred = raw.slice(ndarray::s![0, 0, .., ..]);  // [320, 320]
+pub fn postprocess(raw: ArrayView4<f32>, original: &DynamicImage, mask_settings: &MaskSettings, model: ModelKind) -> RgbaImage {
+    let pred = raw.slice(ndarray::s![0, 0, .., ..]);
 
-    let ma = pred.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-    let mi = pred.iter().cloned().fold(f32::INFINITY, f32::min);
-    let range = (ma - mi).max(1e-6_f32);
+    let use_sigmoid = matches!(model, ModelKind::BiRefNetLite);
+
+    // rembg models need min-max stats; BiRefNet uses sigmoid instead
+    let (mi, range) = if !use_sigmoid {
+        let (mi, ma) = pred.iter().cloned().fold(
+            (f32::INFINITY, f32::NEG_INFINITY),
+            |(lo, hi), v| (lo.min(v), hi.max(v)),
+        );
+        (mi, (ma - mi).max(1e-6_f32))
+    } else {
+        (0.0, 1.0)
+    };
 
     let (sh, sw) = (pred.nrows(), pred.ncols());
     let mut mask = GrayImage::new(sw as u32, sh as u32);
     for y in 0..sh {
         for x in 0..sw {
-            let mut val = ((pred[[y, x]] - mi) / range).clamp(0.0, 1.0);
+            let raw_val = pred[[y, x]];
+            let mut val = if use_sigmoid {
+                // BiRefNet outputs logits — apply sigmoid
+                1.0 / (1.0 + (-raw_val).exp())
+            } else {
+                // rembg models — min-max normalize
+                ((raw_val - mi) / range).clamp(0.0, 1.0)
+            };
 
             // Gamma curve: >1 = more aggressive, <1 = gentler
             if mask_settings.gamma != 1.0 {
@@ -49,8 +57,13 @@ pub fn postprocess(raw: ArrayView4<f32>, original: &DynamicImage, mask_settings:
         apply_edge_shift(&mut mask, mask_settings.edge_shift);
     }
 
-    // Apply as alpha channel
+    // Guided filter: refine edges using original image colors
     let rgba = original.to_rgba8();
+    if mask_settings.refine_edges {
+        const GUIDED_RADIUS: u32 = 8;
+        const GUIDED_EPSILON: f32 = 1e-4;
+        mask = guided_filter_alpha(&rgba, &mask, GUIDED_RADIUS, GUIDED_EPSILON);
+    }
     let mut out = RgbaImage::new(ow, oh);
     for (x, y, p) in rgba.enumerate_pixels() {
         let a = mask.get_pixel(x, y)[0];
@@ -115,7 +128,7 @@ mod tests {
     fn test_postprocess_output_dimensions() {
         let raw = make_raw_tensor(0.5);
         let original = solid_rgb(640, 480);
-        let result = postprocess(raw.view(), &original, &MaskSettings::default());
+        let result = postprocess(raw.view(), &original, &MaskSettings::default(), ModelKind::Silueta);
         assert_eq!(result.width(), 640);
         assert_eq!(result.height(), 480);
     }
@@ -126,7 +139,7 @@ mod tests {
         // (0 - 0) / 1e-6 = 0 -> alpha = 0
         let raw = make_raw_tensor(0.0);
         let original = solid_rgb(32, 32);
-        let result = postprocess(raw.view(), &original, &MaskSettings::default());
+        let result = postprocess(raw.view(), &original, &MaskSettings::default(), ModelKind::Silueta);
         // All alpha values should be 0
         for (_, _, p) in result.enumerate_pixels() {
             assert_eq!(p[3], 0, "Expected alpha=0 for all-zero tensor");
@@ -141,7 +154,7 @@ mod tests {
         // This is mathematically correct for min-max on constant input
         let raw = make_raw_tensor(1.0);
         let original = solid_rgb(32, 32);
-        let result = postprocess(raw.view(), &original, &MaskSettings::default());
+        let result = postprocess(raw.view(), &original, &MaskSettings::default(), ModelKind::Silueta);
         for (_, _, p) in result.enumerate_pixels() {
             assert_eq!(p[3], 0, "Expected alpha=0 for uniform tensor (no range)");
         }
@@ -157,7 +170,7 @@ mod tests {
             }
         }
         let original = solid_rgb(320, 320);
-        let result = postprocess(raw.view(), &original, &MaskSettings::default());
+        let result = postprocess(raw.view(), &original, &MaskSettings::default(), ModelKind::Silueta);
         let unique_alphas: std::collections::HashSet<u8> =
             result.enumerate_pixels().map(|(_, _, p)| p[3]).collect();
         assert!(

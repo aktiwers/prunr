@@ -22,6 +22,7 @@ pub trait InferenceEngine: Send + Sync {
 pub struct OrtEngine {
     session: Mutex<Session>,
     provider_name: String,
+    model_kind: ModelKind,
 }
 
 impl OrtEngine {
@@ -38,11 +39,16 @@ impl OrtEngine {
         let bytes = match model {
             ModelKind::Silueta => prunr_models::silueta_bytes(),
             ModelKind::U2net => prunr_models::u2net_bytes(),
+            ModelKind::BiRefNetLite => prunr_models::birefnet_lite_bytes(),
         };
-        Self::new_from_bytes(&bytes, intra_threads)
+        Self::new_from_bytes(&bytes, intra_threads, model)
     }
 
-    fn new_from_bytes(model_bytes: &[u8], intra_threads: usize) -> Result<Self, CoreError> {
+    pub fn model_kind(&self) -> ModelKind {
+        self.model_kind
+    }
+
+    fn new_from_bytes(model_bytes: &[u8], intra_threads: usize, model: ModelKind) -> Result<Self, CoreError> {
         let mut builder = Session::builder()
             .map_err(|e| CoreError::Inference(format!("ORT builder init failed: {e}")))?
             .with_optimization_level(GraphOptimizationLevel::Level3)
@@ -73,6 +79,7 @@ impl OrtEngine {
         Ok(Self {
             session: Mutex::new(session),
             provider_name,
+            model_kind: model,
         })
     }
 

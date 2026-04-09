@@ -74,7 +74,7 @@ pub const SPACE_LG: f32 = 24.0;
 
 // === Layout ===
 
-pub const TOOLBAR_HEIGHT: f32 = 40.0;
+pub const TOOLBAR_HEIGHT: f32 = 48.0;
 pub const STATUS_BAR_HEIGHT: f32 = 24.0;
 pub const PROGRESS_BAR_HEIGHT: f32 = 4.0;
 pub const PROGRESS_BAR_BG: Color32 = Color32::from_rgb(0x30, 0x30, 0x30);
@@ -133,9 +133,6 @@ pub const SIDEBAR_SELECTED_BORDER: Color32 = ACCENT;
 pub const STATUS_ICON_PENDING: Color32 = Color32::from_rgb(0x88, 0x88, 0x88);
 pub const INSERTION_LINE: Color32 = ACCENT;
 
-// === Phase 5: Animation ===
-pub const ANIM_DURATION_SECS: f32 = 0.75;
-pub const ANIM_MASK_THRESHOLD: u8 = 128;
 
 // === Phase 5: Zoom ===
 pub const ZOOM_MIN: f32 = 0.10;

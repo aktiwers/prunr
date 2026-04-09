@@ -26,6 +26,7 @@ impl From<image::ImageError> for CoreError {
 pub enum ModelKind {
     Silueta,
     U2net,
+    BiRefNetLite,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,6 +58,8 @@ pub struct MaskSettings {
     pub threshold: Option<f32>,
     /// Edge hardness: >0 erodes (shrinks) the mask, <0 dilates (expands) it. In pixels.
     pub edge_shift: f32,
+    /// Refine mask edges using guided filter (color-aware edge refinement).
+    pub refine_edges: bool,
 }
 
 impl Default for MaskSettings {
@@ -65,6 +68,7 @@ impl Default for MaskSettings {
             gamma: 1.0,
             threshold: None,
             edge_shift: 0.0,
+            refine_edges: false,
         }
     }
 }
