@@ -2,58 +2,43 @@ name: Release
 
 on:
   push:
-    tags:
-      - "v[0-9]*"
+    tags: ["v*"]
 
 permissions:
   contents: write
 
 jobs:
-  plan:
-    name: Plan release
-    runs-on: ubuntu-latest
-    outputs:
-      val: ${{ steps.plan.outputs.manifest }}
-      tag: ${{ !startsWith(github.ref, 'refs/tags/') && 'dry-run' || '' }}
-    env:
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
-      - name: Install cargo-dist
-        run: |
-          curl --proto '=https' --tlsv1.2 -LsSf \
-            https://github.com/axodotdev/cargo-dist/releases/download/v0.31.0/cargo-dist-installer.sh \
-            | sh
-      - id: plan
-        run: cargo dist plan --output-format=json > dist-manifest.json && echo "manifest=$(cat dist-manifest.json)" >> "$GITHUB_OUTPUT"
-      - name: Store manifest
-        uses: actions/upload-artifact@v4
-        with:
-          name: dist-manifest.json
-          path: dist-manifest.json
-
   build:
-    name: Build (${{ matrix.target }})
-    needs: plan
+    name: Build (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          - name: linux-x86_64
+            os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-          - os: macos-13
+            binary: prunr
+            archive: tar.gz
+          - name: macos-x86_64
+            os: macos-13
             target: x86_64-apple-darwin
-          - os: macos-14
+            binary: prunr
+            archive: tar.gz
+          - name: macos-aarch64
+            os: macos-latest
             target: aarch64-apple-darwin
-          - os: windows-latest
+            binary: prunr
+            archive: tar.gz
+          - name: windows-x86_64
+            os: windows-latest
             target: x86_64-pc-windows-msvc
-    env:
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+            binary: prunr.exe
+            archive: zip
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -90,50 +75,44 @@ jobs:
             fi
           done
 
-      - name: Install cargo-dist
-        run: |
-          curl --proto '=https' --tlsv1.2 -LsSf \
-            https://github.com/axodotdev/cargo-dist/releases/download/v0.31.0/cargo-dist-installer.sh \
-            | sh
-
       - name: Build release binary
-        run: cargo dist build --target=${{ matrix.target }} --output-format=json
+        run: cargo build --release --target ${{ matrix.target }} -p prunr-app
 
-      - name: Upload artifacts
+      - name: Package (Unix)
+        if: matrix.archive == 'tar.gz'
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/${{ matrix.binary }} dist/
+          cd dist
+          tar czf ../prunr-${{ matrix.name }}.tar.gz ${{ matrix.binary }}
+
+      - name: Package (Windows)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist
+          Copy-Item "target/${{ matrix.target }}/release/${{ matrix.binary }}" dist/
+          Compress-Archive -Path "dist/${{ matrix.binary }}" -DestinationPath "prunr-${{ matrix.name }}.zip"
+
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: artifacts-${{ matrix.target }}
-          path: |
-            target/distrib/
+          name: prunr-${{ matrix.name }}
+          path: prunr-${{ matrix.name }}.${{ matrix.archive }}
 
-  publish:
-    name: Publish GitHub Release
-    needs: [plan, build]
+  release:
+    name: Create Release
+    needs: build
     runs-on: ubuntu-latest
-    env:
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Download dist manifest
+      - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
-          name: dist-manifest.json
-
-      - name: Download all build artifacts
-        uses: actions/download-artifact@v4
-        with:
-          pattern: artifacts-*
-          merge-multiple: true
-          path: dist-artifacts/
-
-      - name: Install cargo-dist
-        run: |
-          curl --proto '=https' --tlsv1.2 -LsSf \
-            https://github.com/axodotdev/cargo-dist/releases/download/v0.31.0/cargo-dist-installer.sh \
-            | sh
+          path: artifacts/
 
       - name: Create GitHub Release
-        run: cargo dist publish --output-format=json
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: artifacts/**/*
