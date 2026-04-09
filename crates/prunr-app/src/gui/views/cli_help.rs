@@ -13,7 +13,7 @@ pub fn render(ctx: &egui::Context, toasts: &mut egui_notify::Toasts) -> bool {
         .collapsible(false)
         .resizable(false)
         .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
-        .fixed_size([420.0, 680.0])
+        .fixed_size([420.0, 800.0])
         .frame(theme::overlay_frame())
         .show(ctx, |ui| {
             ui.vertical(|ui| {
@@ -35,23 +35,37 @@ pub fn render(ctx: &egui::Context, toasts: &mut egui_notify::Toasts) -> bool {
                     .spacing([theme::SPACE_LG, theme::SPACE_SM])
                     .show(ui, |ui| {
                         opt_row(ui, "-o <path>", "Where to save (file or folder)");
-                        opt_row(ui, "-m u2net", "Higher quality model (~170 MB)");
+                        opt_row(ui, "-m <model>", "silueta, u2net, or birefnet-lite");
                         opt_row(ui, "-j 4", "Process 4 images at once");
                         opt_row(ui, "-f", "Overwrite existing files");
                         opt_row(ui, "-q", "Silent mode (errors only)");
                     });
 
                 ui.add_space(theme::SPACE_MD);
+                section_heading(ui, "Models");
+
+                egui::Grid::new("cli_models_grid")
+                    .num_columns(2)
+                    .spacing([theme::SPACE_LG, theme::SPACE_SM])
+                    .show(ui, |ui| {
+                        opt_row(ui, "silueta", "Fast, ~4 MB (default)");
+                        opt_row(ui, "u2net", "Quality, ~170 MB");
+                        opt_row(ui, "birefnet-lite", "Best detail, ~214 MB, 1024\u{00d7}1024");
+                    });
+
+                ui.add_space(theme::SPACE_MD);
                 section_heading(ui, "Examples");
 
+                example_row(ui, toasts, "prunr -m birefnet-lite portrait.jpg",
+                    "Best detail for hair, leaves, fine edges");
                 example_row(ui, toasts, "prunr -m u2net portrait.jpg",
-                    "Use the higher quality model");
+                    "Higher quality than default");
                 example_row(ui, toasts, "prunr -j 8 -f *.jpg -o out/",
                     "Fast batch: 8 parallel, overwrite allowed");
+                example_row(ui, toasts, "prunr --refine-edges photo.jpg",
+                    "Sharpen mask edges using image colors");
                 example_row(ui, toasts, "prunr --gamma 2.0 --threshold 0.5 photo.jpg",
                     "Aggressive removal with crisp edges");
-                example_row(ui, toasts, "prunr --gamma 0.5 --edge-shift -2 portrait.jpg",
-                    "Gentle removal, keep more edge detail");
 
                 ui.add_space(theme::SPACE_MD);
                 section_heading(ui, "Mask Tuning Flags");
@@ -66,6 +80,8 @@ pub fn render(ctx: &egui::Context, toasts: &mut egui_notify::Toasts) -> bool {
                             "Hard cutoff, 0\u{2013}1 (off by default)");
                         opt_row(ui, "--edge-shift <n>",
                             "Trim (+) or expand (\u{2212}) edges, in px");
+                        opt_row(ui, "--refine-edges",
+                            "Guided filter for fine edge detail");
                     });
 
                 ui.add_space(theme::SPACE_LG);

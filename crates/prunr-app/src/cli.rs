@@ -48,6 +48,10 @@ pub struct Cli {
     /// Edge refinement in pixels. Positive erodes (shrinks), negative dilates (expands).
     #[arg(long, default_value_t = 0.0)]
     pub edge_shift: f32,
+
+    /// Refine mask edges using guided filter for better detail on hair, leaves, etc.
+    #[arg(long)]
+    pub refine_edges: bool,
 }
 
 /// Model selection
@@ -57,6 +61,8 @@ pub enum CliModel {
     Silueta,
     /// U2Net (~170MB, higher quality)
     U2net,
+    /// BiRefNet-lite (~214MB, best detail at 1024×1024)
+    BirefnetLite,
 }
 
 impl From<CliModel> for prunr_core::ModelKind {
@@ -64,6 +70,7 @@ impl From<CliModel> for prunr_core::ModelKind {
         match m {
             CliModel::Silueta => prunr_core::ModelKind::Silueta,
             CliModel::U2net => prunr_core::ModelKind::U2net,
+            CliModel::BirefnetLite => prunr_core::ModelKind::BiRefNetLite,
         }
     }
 }
@@ -93,6 +100,7 @@ impl Cli {
             gamma: self.gamma,
             threshold: self.threshold,
             edge_shift: self.edge_shift,
+            refine_edges: self.refine_edges,
         }
     }
 }

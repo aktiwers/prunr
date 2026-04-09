@@ -40,28 +40,32 @@ pub fn render(ui: &mut egui::Ui, app: &PrunrApp) {
                 AppState::Processing => {
                     format!("Processing... {}", app.progress_stage)
                 }
-                AppState::Animating | AppState::Done => app.status_text.clone(),
+                AppState::Done => app.status_text.clone(),
             }
         };
 
         ui.label(RichText::new(&status_text).color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY));
 
-        // Center: progress bar only during Processing
         if app.state == AppState::Processing {
-            let available_width = ui.available_width() - 200.0; // leave space for right side
+            let pct = (app.progress_pct * 100.0).round() as u32;
+            ui.label(
+                RichText::new(format!("{pct}%"))
+                    .monospace()
+                    .size(theme::FONT_SIZE_MONO)
+                    .color(theme::TEXT_SECONDARY),
+            );
+
+            let available_width = ui.available_width() - 320.0;
             let bar_width = available_width.max(50.0);
             let bar_height = theme::PROGRESS_BAR_HEIGHT;
 
-            // Allocate space for the progress bar
             let (rect, _) = ui.allocate_exact_size(
                 egui::Vec2::new(bar_width, bar_height),
                 egui::Sense::hover(),
             );
 
-            // Background
             ui.painter().rect_filled(rect, 2.0, theme::PROGRESS_BAR_BG);
 
-            // Fill
             let fill_w = rect.width() * app.progress_pct.clamp(0.0, 1.0);
             if fill_w > 0.0 {
                 let fill_rect = Rect::from_min_max(

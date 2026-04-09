@@ -320,7 +320,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                         .and_then(|s| s.to_str())
                         .unwrap_or("image");
                     let default_name = format!("{stem}-nobg.png");
-                    if let Some(path) = rfd::FileDialog::new()
+                    if let Some(path) = app.save_dialog()
                         .add_filter("PNG Image", &["png"])
                         .set_file_name(&default_name)
                         .set_title("Save PNG")
