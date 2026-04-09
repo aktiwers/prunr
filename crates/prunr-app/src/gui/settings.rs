@@ -6,7 +6,6 @@ pub struct Settings {
     pub model: SettingsModel,
     pub auto_remove_on_import: bool,
     pub parallel_jobs: usize,
-    pub reveal_animation_enabled: bool,
     /// Mask gamma: >1 = more aggressive removal, <1 = gentler. Default 1.0.
     pub mask_gamma: f32,
     /// Optional binary threshold (0.0–1.0). 0.0 means disabled (soft mask).
@@ -15,6 +14,8 @@ pub struct Settings {
     pub mask_threshold_enabled: bool,
     /// Edge shift in pixels: >0 erodes (shrinks), <0 dilates (expands). Default 0.
     pub edge_shift: f32,
+    /// Refine mask edges using guided filter for better detail.
+    pub refine_edges: bool,
     #[serde(skip)]
     pub active_backend: String,
 }
@@ -65,6 +66,7 @@ impl Settings {
             gamma: self.mask_gamma,
             threshold: if self.mask_threshold_enabled { Some(self.mask_threshold) } else { None },
             edge_shift: self.edge_shift,
+            refine_edges: self.refine_edges,
         }
     }
 }
@@ -73,6 +75,7 @@ impl Settings {
 pub enum SettingsModel {
     Silueta,
     U2net,
+    BiRefNetLite,
 }
 
 impl From<SettingsModel> for ModelKind {
@@ -80,6 +83,7 @@ impl From<SettingsModel> for ModelKind {
         match m {
             SettingsModel::Silueta => ModelKind::Silueta,
             SettingsModel::U2net => ModelKind::U2net,
+            SettingsModel::BiRefNetLite => ModelKind::BiRefNetLite,
         }
     }
 }
@@ -89,6 +93,7 @@ impl From<ModelKind> for SettingsModel {
         match m {
             ModelKind::Silueta => SettingsModel::Silueta,
             ModelKind::U2net => SettingsModel::U2net,
+            ModelKind::BiRefNetLite => SettingsModel::BiRefNetLite,
         }
     }
 }
@@ -99,11 +104,11 @@ impl Default for Settings {
             model: SettingsModel::Silueta,
             auto_remove_on_import: false,
             parallel_jobs: (num_cpus::get() / 2).max(1),
-            reveal_animation_enabled: true,
             mask_gamma: 1.0,
             mask_threshold: 0.5,
             mask_threshold_enabled: false,
             edge_shift: 0.0,
+            refine_edges: false,
             active_backend: "CPU".to_string(),
         }
     }

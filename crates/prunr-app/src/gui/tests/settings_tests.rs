@@ -21,12 +21,6 @@ fn settings_default_parallel_jobs_is_half_cpus() {
 }
 
 #[test]
-fn settings_default_animation_enabled() {
-    let s = Settings::default();
-    assert!(s.reveal_animation_enabled);
-}
-
-#[test]
 fn settings_serializes_to_json() {
     let s = Settings::default();
     let json = serde_json::to_string(&s).unwrap();

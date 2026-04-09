@@ -3,5 +3,4 @@ mod input_tests;
 mod clipboard_tests;
 mod zoom_pan_tests;
 mod settings_tests;
-mod anim_tests;
 mod batch_tests;

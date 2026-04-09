@@ -7,11 +7,14 @@ Prunr removes backgrounds from images using ONNX neural networks running entirel
 ## Features
 
 - **GUI and CLI** in one binary — `prunr` opens the GUI, `prunr photo.jpg` runs headless
-- **Two bundled models** — Silueta (~4 MB, fast) and U2Net (~170 MB, higher quality)
+- **Three bundled models** — Silueta (~4 MB, fast), U2Net (~170 MB, quality), BiRefNet-lite (~214 MB, best detail at 1024×1024)
 - **GPU acceleration** — CUDA (Linux/Windows), CoreML (macOS), DirectML (Windows), with automatic CPU fallback
 - **Batch processing** — open multiple images, process in parallel, save all to a folder
 - **True parallel processing** — start processing multiple images independently, switch between them while AI works
-- **Reveal animation** — dissolve effect when background removal completes (toggle in settings)
+- **Mask tuning** — removal strength, hard cutoff threshold, edge refinement, guided filter edge sharpening
+- **Undo/Redo** — Ctrl+Z reverts to original, Ctrl+Y restores the processed result from memory
+- **Crossfade transition** — smooth fade from original to result when processing completes
+- **Persistent settings** — model choice, parallel jobs, mask tuning saved between sessions
 - **Drag-and-drop** — drop images onto the window to queue them (X11; Wayland pending winit support)
 - **Toast notifications** — animated feedback for save, copy, process complete, errors
 - **Material Design icons** — crisp vector icons throughout the UI (via egui_material_icons)
@@ -84,10 +87,9 @@ Open with the gear button or `Ctrl+,` (`Cmd+,` on macOS):
 
 | Setting | Description |
 |---------|-------------|
-| **Model** | Silueta (fast, ~4 MB) or U2Net (quality, ~170 MB) |
+| **Model** | Silueta (fast), U2Net (quality), or BiRefNet-lite (best detail) |
 | **Auto-remove on import** | Automatically process images when added to the queue |
 | **Parallel jobs** | Number of images to process simultaneously (1 to CPU count) |
-| **Reveal animation** | Play dissolve effect when background removal completes |
 | **Inference backend** | Shows active GPU/CPU backend (read-only) |
 
 ### Keyboard Shortcuts
@@ -99,6 +101,7 @@ Open with the gear button or `Ctrl+,` (`Cmd+,` on macOS):
 | `Ctrl+S` | Save result |
 | `Ctrl+C` | Copy result to clipboard |
 | `Ctrl+Z` | Undo background removal |
+| `Ctrl+Y` | Redo (restore result from memory) |
 | `Escape` | Cancel processing / close dialog |
 | `F1` | Show keyboard shortcuts |
 | `B` | Toggle before/after comparison |
@@ -134,7 +137,7 @@ prunr [OPTIONS] [INPUTS]...
 |--------|-------------|
 | `[INPUTS]...` | Input image file(s) |
 | `-o, --output <PATH>` | Output file (single) or directory (batch) |
-| `-m, --model <MODEL>` | `silueta` (default, fast) or `u2net` (quality) |
+| `-m, --model <MODEL>` | `silueta` (default, fast), `u2net` (quality), or `birefnet-lite` (best detail) |
 | `-j, --jobs <N>` | Parallel inference jobs (default: 1) |
 | `--large-image <MODE>` | `downscale` (default) or `process` (full size) |
 | `-f, --force` | Overwrite existing output files |
@@ -142,6 +145,7 @@ prunr [OPTIONS] [INPUTS]...
 | `--gamma <N>` | Removal strength (default: 1.0). >1 = more aggressive, <1 = gentler |
 | `--threshold <N>` | Binary cutoff (0.0–1.0). Pixels below become fully transparent |
 | `--edge-shift <N>` | Edge refinement in pixels. Positive erodes, negative dilates |
+| `--refine-edges` | Guided filter for fine edge detail (hair, leaves) |
 | `-h, --help` | Print help |
 | `-V, --version` | Print version |
 
@@ -195,12 +199,13 @@ prunr-app     (GUI + CLI binary)
 
 ## Models
 
-| Model | Size | Speed | Quality | Default |
-|-------|------|-------|---------|---------|
-| **Silueta** | ~4 MB | Fast | Good for clean subjects | Yes |
-| **U2Net** | ~170 MB | Slower | Better edge detail | No |
+| Model | Size | Resolution | Speed | Quality | Default |
+|-------|------|-----------|-------|---------|---------|
+| **Silueta** | ~4 MB | 320×320 | Fast | Good for clean subjects | Yes |
+| **U2Net** | ~170 MB | 320×320 | Slower | Better edge detail | No |
+| **BiRefNet-lite** | ~214 MB | 1024×1024 | Slowest | Best for fine detail (hair, leaves) | No |
 
-Both models are ONNX format, compatible with the rembg Python library's preprocessing pipeline.
+All models are ONNX format. Silueta and U2Net are compatible with rembg's preprocessing. BiRefNet-lite uses standard ImageNet normalization with sigmoid output.
 
 ## GPU Acceleration
 

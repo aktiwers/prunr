@@ -4,7 +4,6 @@ use egui::{Color32, Pos2, Rect, Stroke, Vec2};
 use crate::gui::app::PrunrApp;
 use crate::gui::state::AppState;
 use crate::gui::theme;
-use super::animation;
 
 static IS_WAYLAND: LazyLock<bool> = LazyLock::new(|| std::env::var_os("WAYLAND_DISPLAY").is_some());
 
@@ -87,7 +86,6 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
         AppState::Empty => render_empty(ui, app),
         AppState::Loaded => render_loaded(ui, app),
         AppState::Processing => render_processing(ui, app),
-        AppState::Animating => render_animating(ui, app),
         AppState::Done => render_done(ui, app),
     }
 }
@@ -243,10 +241,9 @@ fn render_empty(ui: &mut egui::Ui, _app: &PrunrApp) {
 }
 
 fn render_loaded(ui: &mut egui::Ui, app: &PrunrApp) {
+    let canvas_rect = ui.available_rect_before_wrap();
     if let Some(ref texture) = app.source_texture {
-        let canvas_rect = ui.available_rect_before_wrap();
         let img_rect = compute_img_rect(canvas_rect, texture.size_vec2(), app.zoom, app.pan_offset);
-        // Fade-in on image switch (200ms), keyed on switch counter
         let fade = ui.ctx().animate_bool_with_time(
             egui::Id::new(("canvas_fade", app.canvas_switch_id)),
             true,
@@ -260,6 +257,14 @@ fn render_loaded(ui: &mut egui::Ui, app: &PrunrApp) {
             Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
             Color32::from_rgba_unmultiplied(255, 255, 255, alpha),
         );
+    } else {
+        // Source not decoded yet — show spinner
+        let center = canvas_rect.center();
+        ui.put(
+            Rect::from_center_size(center, Vec2::splat(40.0)),
+            egui::Spinner::new().size(40.0).color(theme::ACCENT),
+        );
+        ui.ctx().request_repaint();
     }
 }
 
@@ -330,8 +335,16 @@ fn render_processing(ui: &mut egui::Ui, app: &PrunrApp) {
 
 fn render_done(ui: &mut egui::Ui, app: &PrunrApp) {
     let canvas_rect = ui.available_rect_before_wrap();
+
+    // Crossfade: result fades in over 0.4s when processing completes
+    let fade = ui.ctx().animate_bool_with_time(
+        egui::Id::new(("result_fade", app.result_switch_id)),
+        true,
+        0.4,
+    );
+    if fade < 1.0 { ui.ctx().request_repaint(); }
+
     if app.show_original {
-        // Show original image without checkerboard
         if let Some(ref texture) = app.source_texture {
             let img_rect =
                 compute_img_rect(canvas_rect, texture.size_vec2(), app.zoom, app.pan_offset);
@@ -342,22 +355,35 @@ fn render_done(ui: &mut egui::Ui, app: &PrunrApp) {
                 Color32::WHITE,
             );
         }
-    } else {
-        // Show result with checkerboard
-        if let Some(ref texture) = app.result_texture {
-            let img_rect =
-                compute_img_rect(canvas_rect, texture.size_vec2(), app.zoom, app.pan_offset);
-            draw_checkerboard(ui, img_rect);
-            ui.painter().image(
-                texture.id(),
-                img_rect,
-                Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-                Color32::WHITE,
-            );
+    } else if let Some(ref result_tex) = app.result_texture {
+        let img_rect =
+            compute_img_rect(canvas_rect, result_tex.size_vec2(), app.zoom, app.pan_offset);
+
+        // During crossfade: show source fading out behind checkerboard + result fading in
+        if fade < 1.0 {
+            if let Some(ref source_tex) = app.source_texture {
+                let src_alpha = ((1.0 - fade) * 255.0) as u8;
+                ui.painter().image(
+                    source_tex.id(),
+                    img_rect,
+                    Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                    Color32::from_rgba_unmultiplied(255, 255, 255, src_alpha),
+                );
+            }
         }
+
+        if fade >= 1.0 {
+            draw_checkerboard(ui, img_rect);
+        }
+        let result_alpha = (fade * 255.0) as u8;
+        ui.painter().image(
+            result_tex.id(),
+            img_rect,
+            Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+            Color32::from_rgba_unmultiplied(255, 255, 255, result_alpha),
+        );
     }
 
-    // Show "Original" label only when viewing the before image (B key toggle)
     if app.show_original {
         ui.painter().text(
             canvas_rect.min + Vec2::new(theme::SPACE_SM, theme::SPACE_SM),
@@ -366,55 +392,6 @@ fn render_done(ui: &mut egui::Ui, app: &PrunrApp) {
             egui::FontId::monospace(theme::FONT_SIZE_MONO),
             theme::TEXT_SECONDARY,
         );
-    }
-}
-
-fn render_animating(ui: &mut egui::Ui, app: &mut PrunrApp) {
-    let canvas_rect = ui.available_rect_before_wrap();
-
-    // Populate cache if empty (decoded once, reused every frame)
-    if app.source_rgba_cache.is_none() {
-        if let Some(ref bytes) = app.source_bytes {
-            app.source_rgba_cache = image::load_from_memory(bytes)
-                .ok()
-                .map(|img| img.to_rgba8());
-        }
-    }
-
-    if let (Some(ref source), Some(ref result), Some(ref mask)) =
-        (&app.source_rgba_cache, &app.result_rgba, &app.anim_mask)
-    {
-        // Cap animation texture to canvas size for performance
-        let max_w = canvas_rect.width() as u32;
-        let max_h = canvas_rect.height() as u32;
-
-        let frame = animation::build_animation_frame(
-            &source, result, mask, app.anim_progress, max_w, max_h,
-        );
-
-        // Compute image rect with fit zoom (ignore user zoom to keep it simple during animation)
-        let tex_size = egui::Vec2::new(frame.size[0] as f32, frame.size[1] as f32);
-        let fit = fit_zoom(canvas_rect.size(), tex_size);
-        let img_rect = Rect::from_center_size(canvas_rect.center(), tex_size * fit);
-
-        // Draw checkerboard behind (visible through fading background)
-        draw_checkerboard(ui, img_rect);
-
-        // Upload animation frame as texture
-        let anim_texture = ui.ctx().load_texture(
-            "anim_frame",
-            frame,
-            egui::TextureOptions::LINEAR,
-        );
-        ui.painter().image(
-            anim_texture.id(),
-            img_rect,
-            Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-            Color32::WHITE,
-        );
-    } else {
-        // Fallback: just show result
-        render_done(ui, app);
     }
 }
 
