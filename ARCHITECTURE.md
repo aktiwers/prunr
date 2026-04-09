@@ -21,11 +21,12 @@ prunr/
 │   │       ├── engine.rs         # InferenceEngine trait + ORT implementation
 │   │       ├── pipeline.rs       # Pre-process → infer → post-process → alpha
 │   │       ├── batch.rs          # Parallel batch via rayon, progress callbacks
+│   │       ├── guided_filter.rs  # Guided filter alpha matting for edge refinement
 │   │       ├── formats.rs        # Image decode/encode (image crate + resvg)
-│   │       └── types.rs          # Shared types: ProcessResult, Progress, Error (thiserror)
+│   │       └── types.rs          # Shared types: ProcessResult, Progress, MaskSettings, Error
 │   │
 │   ├── prunr-models/           # Library: model embedding (isolated for build speed)
-│   │   └── src/lib.rs            # include_bytes! + zstd::bulk::decompress for silueta + u2net
+│   │   └── src/lib.rs            # include_bytes! + zstd decompress for silueta, u2net, birefnet-lite
 │   │                             # Dev feature: load from filesystem
 │   │
 │   └── prunr-app/              # Binary: single binary for both CLI and GUI
@@ -42,11 +43,11 @@ prunr/
 │           │   ├── views/
 │           │   │   ├── canvas.rs     # Image viewer: textures, zoom/pan, fit-to-window, checkerboard
 │           │   │   ├── sidebar.rs    # Batch queue: lazy thumbnails, drag-reorder, click-to-switch
-│           │   │   ├── toolbar.rs    # Open/Remove/Process All/Save/Copy/Save All/Settings buttons
-│           │   │   ├── statusbar.rs  # Status text + progress bar
-│           │   │   ├── settings.rs   # Settings modal dialog (model, jobs, animation, backend)
-│           │   │   ├── shortcuts.rs  # ? keyboard shortcuts overlay
-│           │   │   └── animation.rs  # Reveal animation: mask-based dissolve effect
+│           │   │   ├── toolbar.rs    # Open/Model/Settings/RemoveBG/ProcessAll/Save buttons
+│           │   │   ├── statusbar.rs  # Status text + progress bar + progress %
+│           │   │   ├── settings.rs   # Settings modal (parallel jobs, mask tuning, backend)
+│           │   │   ├── shortcuts.rs  # F1 keyboard shortcuts overlay
+│           │   │   └── cli_help.rs   # F2 CLI reference with copy-to-clipboard
 │           └── shared.rs         # Common utilities between CLI and GUI paths
 │
 ├── xtask/                        # Developer tooling
@@ -103,7 +104,7 @@ User drops image
        │  send result via mpsc channel
        │  call ctx.request_repaint()
        ▼
-  [UI Thread]  ──receive result──►  Play reveal animation → display result
+  [UI Thread]  ──receive result──►  Crossfade original → result (0.4s)
 ```
 
 ### Batch Processing (GUI)
@@ -129,7 +130,7 @@ User opens N images (file dialog or drag-and-drop)
        │  call ctx.request_repaint() on each completion
        ▼
   [UI Thread]  ──cache results on BatchItem──►  result_rgba + result_texture
-               ──if viewed item: play reveal animation──►  or sync to canvas
+               ──if viewed item: sync to canvas──►
                (switching images = batch item lookup, no re-inference)
 ```
 
@@ -173,19 +174,21 @@ Matching rembg's Python preprocessing exactly:
 
 ```
 1. Input: DynamicImage (any format, any size)
-2. Resize to 320×320 (bilinear interpolation)
-3. Convert to f32 tensor [1, 3, 320, 320] (NCHW layout)
-   - Divide by 255.0
-   - Normalize: (pixel - mean) / std
-     mean = [0.485, 0.456, 0.406]  (ImageNet)
-     std  = [0.229, 0.224, 0.225]  (ImageNet)
+2. Resize to model target (320×320 for Silueta/U2Net, 1024×1024 for BiRefNet-lite)
+3. Convert to f32 tensor [1, 3, H, H] (NCHW layout)
+   - Silueta/U2Net: divide by max(max_pixel, 1e-6), then ImageNet normalize
+   - BiRefNet-lite: divide by 255.0, then ImageNet normalize
+     mean = [0.485, 0.456, 0.406]  std = [0.229, 0.224, 0.225]
 4. Run ONNX session (GPU or CPU)
-5. Take first output tensor
-6. Apply sigmoid activation
-7. Normalize to [0, 1] range: (val - min) / (max - min)
-8. Threshold at 0.5 → binary mask
-9. Resize mask back to original image dimensions (bilinear)
-10. Apply mask as alpha channel to original image → RGBA output
+5. Take first output tensor [1, 1, H, H]
+6. Normalize to [0, 1]:
+   - Silueta/U2Net: min-max normalization (val - min) / (max - min)
+   - BiRefNet-lite: sigmoid activation 1/(1+exp(-x))
+7. Apply mask settings: gamma curve, optional binary threshold
+8. Resize mask back to original image dimensions (Lanczos3)
+9. Optional: edge shift (morphological erode/dilate)
+10. Optional: guided filter edge refinement (uses original image colors)
+11. Apply mask as alpha channel to original image → RGBA output
 ```
 
 ## GPU Execution Provider Strategy
@@ -214,6 +217,8 @@ SessionBuilder::new()?
 static SILUETA_ZST: &[u8] = include_bytes!("../../../models/silueta.onnx.zst");
 #[cfg(not(feature = "dev-models"))]
 static U2NET_ZST: &[u8] = include_bytes!("../../../models/u2net.onnx.zst");
+#[cfg(not(feature = "dev-models"))]
+static BIREFNET_LITE_ZST: &[u8] = include_bytes!("../../../models/birefnet_lite.onnx.zst");
 
 // Runtime decompression via zstd::bulk::decompress
 #[cfg(not(feature = "dev-models"))]
@@ -249,11 +254,6 @@ pub fn silueta_bytes() -> Vec<u8> {
         │ Processing │  (worker thread running, progress shown)
         └─────┬─────┘
               │ inference complete
-              ▼
-        ┌───────────┐
-        │ Animating  │  (reveal animation playing, if enabled in settings)
-        └─────┬─────┘
-              │ animation done / skipped / click
               ▼
         ┌───────────┐
         │   Done     │  (result displayed, can save/copy/compare/save all)

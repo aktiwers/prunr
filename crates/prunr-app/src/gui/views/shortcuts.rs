@@ -29,6 +29,7 @@ pub fn render(ctx: &egui::Context) -> bool {
                         shortcut_row(ui, &format!("{modifier}+S"), "Save result");
                         shortcut_row(ui, &format!("{modifier}+C"), "Copy result");
                         shortcut_row(ui, &format!("{modifier}+Z"), "Undo removal");
+                        shortcut_row(ui, &format!("{modifier}+Y"), "Redo removal");
                         shortcut_row(ui, "Escape", "Cancel / Close");
                         shortcut_row(ui, "F1", "Keyboard shortcuts");
                         shortcut_row(ui, "F2", "CLI reference");
