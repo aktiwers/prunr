@@ -4,6 +4,10 @@ Local AI background removal. One binary, no cloud, no API keys.
 
 Prunr removes backgrounds from images using ONNX neural networks running entirely on your machine. It ships as a single binary with embedded models — download, run, done.
 
+<p align="center">
+  <img src="img/demo.gif" alt="Prunr demo" width="720">
+</p>
+
 ## Download
 
 | Platform | Installer | Portable |
