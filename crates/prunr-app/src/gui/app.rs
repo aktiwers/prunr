@@ -154,7 +154,8 @@ pub(crate) fn rgba_to_texture(
 
 impl PrunrApp {
     pub fn new(cc: &eframe::CreationContext) -> Self {
-        let (worker_tx, worker_rx) = spawn_worker(cc.egui_ctx.clone());
+        // Worker is spawned below after prewarm_engine is created
+        let worker_ctx = cc.egui_ctx.clone();
 
         // Initialize material icons font
         egui_material_icons::initialize(&cc.egui_ctx);
@@ -210,15 +211,21 @@ impl PrunrApp {
         // Pre-warm the default model on a background thread.
         // On macOS, CoreML compiles the ONNX model on first use (can take minutes).
         // By starting this at launch, the model is ready by the time the user needs it.
+        // The warmed engine is stored and passed to the worker to avoid re-creation.
+        let prewarm_engine: Arc<std::sync::OnceLock<prunr_core::OrtEngine>> = Arc::new(std::sync::OnceLock::new());
         {
             let model: prunr_core::ModelKind = settings.model.into();
+            let lock = prewarm_engine.clone();
             std::thread::Builder::new()
                 .name("model-prewarm".into())
                 .spawn(move || {
-                    let _ = prunr_core::OrtEngine::new(model, 1);
+                    if let Ok(engine) = prunr_core::OrtEngine::new(model, 1) {
+                        let _ = lock.set(engine);
+                    }
                 })
                 .ok();
         }
+        let (worker_tx, worker_rx) = spawn_worker(worker_ctx, prewarm_engine);
 
         Self {
             state: AppState::Empty,
