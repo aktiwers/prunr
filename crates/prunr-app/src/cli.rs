@@ -204,6 +204,7 @@ fn load_with_policy(
 
 fn stage_label(stage: ProgressStage) -> &'static str {
     match stage {
+        ProgressStage::LoadingModel => "Loading model...",
         ProgressStage::Decode      => "Decoding...",
         ProgressStage::Resize      => "Resizing...",
         ProgressStage::Normalize   => "Normalizing...",

@@ -40,12 +40,40 @@ pub fn spawn_worker(
             while let Ok(msg) = msg_rx.recv() {
                 match msg {
                     WorkerMessage::BatchProcess { items, model, jobs, cancel, mask } => {
-                        // Spawn processing on a new thread so the worker loop
-                        // stays free to accept more BatchProcess messages concurrently
                         let res_tx_batch = res_tx.clone();
                         let ctx_batch = ctx.clone();
 
                         std::thread::spawn(move || {
+                            // Report "Loading model" for the first item so the UI
+                            // shows feedback during CoreML/CUDA model compilation
+                            if let Some((first_id, _)) = items.first() {
+                                let _ = res_tx_batch.send(WorkerResult::BatchProgress {
+                                    item_id: *first_id,
+                                    stage: ProgressStage::LoadingModel,
+                                    pct: 0.0,
+                                });
+                                ctx_batch.request_repaint();
+                            }
+
+                            // Create engine ONCE — CoreML/CUDA compilation happens here.
+                            // Sharing via Arc avoids recompiling per worker thread.
+                            let intra_threads = (num_cpus::get() / jobs).max(1);
+                            let engine = match OrtEngine::new(model, intra_threads) {
+                                Ok(e) => Arc::new(e),
+                                Err(e) => {
+                                    // Report error for all items
+                                    for (item_id, _) in &items {
+                                        let _ = res_tx_batch.send(WorkerResult::BatchItemDone {
+                                            item_id: *item_id,
+                                            result: Err(e.to_string()),
+                                        });
+                                    }
+                                    let _ = res_tx_batch.send(WorkerResult::BatchComplete);
+                                    ctx_batch.request_repaint();
+                                    return;
+                                }
+                            };
+
                             let pool = rayon::ThreadPoolBuilder::new()
                                 .num_threads(jobs)
                                 .build()
@@ -59,23 +87,12 @@ pub fn spawn_worker(
                                     let ctx_item = ctx_batch.clone();
                                     let cancel_item = cancel_batch.clone();
                                     let mask_item = mask;
+                                    let engine_ref = engine.clone();
 
                                     s.spawn(move |_| {
                                         if cancel_item.load(Ordering::Relaxed) {
                                             return;
                                         }
-                                        let intra_threads = (num_cpus::get() / jobs).max(1);
-                                        let engine = match OrtEngine::new(model, intra_threads) {
-                                            Ok(e) => e,
-                                            Err(e) => {
-                                                let _ = res_tx_item.send(WorkerResult::BatchItemDone {
-                                                    item_id,
-                                                    result: Err(e.to_string()),
-                                                });
-                                                ctx_item.request_repaint();
-                                                return;
-                                            }
-                                        };
                                         let progress_tx = res_tx_item.clone();
                                         let progress_ctx = ctx_item.clone();
                                         let progress_cancel = cancel_item.clone();
@@ -89,7 +106,7 @@ pub fn spawn_worker(
                                         };
                                         let result = process_image_with_mask(
                                             &img_bytes,
-                                            &engine,
+                                            &engine_ref,
                                             &mask_item,
                                             Some(progress_cb),
                                             Some(cancel_item),
