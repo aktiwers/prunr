@@ -31,6 +31,8 @@ pub enum ModelKind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProgressStage {
+    /// Loading and compiling the AI model (can be slow on first run with GPU backends)
+    LoadingModel,
     Decode,
     Resize,
     Normalize,

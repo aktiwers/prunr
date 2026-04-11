@@ -207,6 +207,19 @@ impl PrunrApp {
         let mut settings = Settings::load();
         settings.active_backend = prunr_core::OrtEngine::detect_active_provider();
 
+        // Pre-warm the default model on a background thread.
+        // On macOS, CoreML compiles the ONNX model on first use (can take minutes).
+        // By starting this at launch, the model is ready by the time the user needs it.
+        {
+            let model: prunr_core::ModelKind = settings.model.into();
+            std::thread::Builder::new()
+                .name("model-prewarm".into())
+                .spawn(move || {
+                    let _ = prunr_core::OrtEngine::new(model, 1);
+                })
+                .ok();
+        }
+
         Self {
             state: AppState::Empty,
             loaded_filename: None,
@@ -889,8 +902,9 @@ impl eframe::App for PrunrApp {
                         .map_or(false, |b| b.id == item_id);
                     if is_selected {
                         self.progress_stage = match stage {
+                            ProgressStage::LoadingModel => "Loading AI model (first run may be slow)".into(),
                             ProgressStage::Decode => "Decoding image".into(),
-                            ProgressStage::Resize => "Resizing to 320\u{00d7}320".into(),
+                            ProgressStage::Resize => "Resizing".into(),
                             ProgressStage::Normalize => "Normalizing pixels".into(),
                             ProgressStage::Infer => "Running AI model".into(),
                             ProgressStage::Postprocess => "Building mask".into(),
