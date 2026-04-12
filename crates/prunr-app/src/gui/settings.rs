@@ -16,7 +16,8 @@ pub struct Settings {
     pub edge_shift: f32,
     /// Refine mask edges using guided filter for better detail.
     pub refine_edges: bool,
-    /// Force CPU inference even when GPU is available.
+    /// Force CPU inference even when GPU is available (not persisted — resets each launch).
+    #[serde(skip)]
     pub force_cpu: bool,
     #[serde(skip)]
     pub active_backend: String,

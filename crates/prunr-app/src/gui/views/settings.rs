@@ -126,7 +126,7 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) {
                         .color(theme::TEXT_PRIMARY)
                         .size(theme::FONT_SIZE_BODY),
                 );
-                hint(ui, "Use CPU even when GPU is available (slower but more compatible)");
+                hint(ui, "Use CPU even when GPU is available (resets each launch)");
 
                 ui.add_space(theme::SPACE_MD);
                 ui.separator();
