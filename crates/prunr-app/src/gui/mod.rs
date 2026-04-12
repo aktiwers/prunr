@@ -31,7 +31,8 @@ pub fn run() -> eframe::Result {
             .with_inner_size(theme::DEFAULT_WINDOW_SIZE)
             .with_min_inner_size(theme::MIN_WINDOW_SIZE)
             .with_drag_and_drop(true)
-            .with_icon(icon),
+            .with_icon(icon)
+            .with_app_id("prunr"),
         ..Default::default()
     };
     eframe::run_native(
