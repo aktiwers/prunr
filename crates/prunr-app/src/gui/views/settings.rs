@@ -167,6 +167,7 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) {
                                 app.settings.parallel_jobs = app.settings.default_jobs();
                                 app.settings.auto_remove_on_import = defaults.auto_remove_on_import;
                                 app.settings.force_cpu = defaults.force_cpu;
+                                app.settings.chain_mode = defaults.chain_mode;
                                 app.settings.apply_bg_color = defaults.apply_bg_color;
                                 app.settings.bg_color = defaults.bg_color;
                             }
@@ -251,6 +252,16 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) {
                             .size(theme::FONT_SIZE_BODY),
                     );
                     hint(ui, "Use CPU even when GPU is available (resets each launch)");
+
+                    ui.add_space(theme::SPACE_MD);
+                    ui.checkbox(
+                        &mut app.settings.chain_mode,
+                        RichText::new("Chain mode")
+                            .color(theme::TEXT_PRIMARY)
+                            .size(theme::FONT_SIZE_BODY),
+                    );
+                    hint(ui, "Process the current result instead of the original.");
+                    hint(ui, "Allows stacking effects: BG removal \u{2192} lines \u{2192} etc.");
 
                     ui.add_space(theme::SPACE_MD);
                     ui.separator();
