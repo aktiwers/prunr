@@ -36,12 +36,8 @@ impl OrtEngine {
     /// ORT silently selects the first available EP. Call active_provider() after creation
     /// to confirm which EP was selected.
     pub fn new(model: ModelKind, intra_threads: usize) -> Result<Self, CoreError> {
-        let bytes = match model {
-            ModelKind::Silueta => prunr_models::silueta_bytes(),
-            ModelKind::U2net => prunr_models::u2net_bytes(),
-            ModelKind::BiRefNetLite => prunr_models::birefnet_lite_bytes(),
-        };
-        Self::new_from_bytes(&bytes, intra_threads, model)
+        let bytes = Self::model_bytes(model);
+        Self::build_session(&bytes, intra_threads, model, false)
     }
 
     pub fn model_kind(&self) -> ModelKind {
@@ -49,41 +45,33 @@ impl OrtEngine {
     }
 
     /// Create a CPU-only engine. Instant — no GPU compilation.
-    /// Used as fallback while GPU engine compiles in the background.
     pub fn new_cpu_only(model: ModelKind, intra_threads: usize) -> Result<Self, CoreError> {
-        let bytes = match model {
+        let bytes = Self::model_bytes(model);
+        Self::build_session(&bytes, intra_threads, model, true)
+    }
+
+    fn model_bytes(model: ModelKind) -> Vec<u8> {
+        match model {
             ModelKind::Silueta => prunr_models::silueta_bytes(),
             ModelKind::U2net => prunr_models::u2net_bytes(),
             ModelKind::BiRefNetLite => prunr_models::birefnet_lite_bytes(),
-        };
-        let mut builder = Session::builder()
-            .map_err(|e| CoreError::Inference(format!("ORT builder init failed: {e}")))?
-            .with_optimization_level(GraphOptimizationLevel::Level3)
-            .map_err(|e| CoreError::Inference(format!("ORT set optimization level failed: {e}")))?
-            .with_intra_threads(intra_threads.max(1))
-            .map_err(|e| CoreError::Inference(format!("ORT set intra threads failed: {e}")))?
-            .with_execution_providers([
-                CPUExecutionProvider::default().build(),
-            ])
-            .map_err(|e| CoreError::Inference(format!("ORT set execution providers failed: {e}")))?;
-        let session = builder
-            .commit_from_memory(&bytes)
-            .map_err(|e| CoreError::Inference(format!("ORT session creation failed: {e}")))?;
-        Ok(Self {
-            session: Mutex::new(session),
-            provider_name: "CPU".to_string(),
-            model_kind: model,
-        })
+        }
     }
 
-    fn new_from_bytes(model_bytes: &[u8], intra_threads: usize, model: ModelKind) -> Result<Self, CoreError> {
+    fn build_session(model_bytes: &[u8], intra_threads: usize, model: ModelKind, cpu_only: bool) -> Result<Self, CoreError> {
         let mut builder = Session::builder()
             .map_err(|e| CoreError::Inference(format!("ORT builder init failed: {e}")))?
             .with_optimization_level(GraphOptimizationLevel::Level3)
             .map_err(|e| CoreError::Inference(format!("ORT set optimization level failed: {e}")))?
             .with_intra_threads(intra_threads.max(1))
-            .map_err(|e| CoreError::Inference(format!("ORT set intra threads failed: {e}")))?
-            .with_execution_providers([
+            .map_err(|e| CoreError::Inference(format!("ORT set intra threads failed: {e}")))?;
+
+        builder = if cpu_only {
+            builder.with_execution_providers([
+                CPUExecutionProvider::default().build(),
+            ])
+        } else {
+            builder.with_execution_providers([
                 #[cfg(all(feature = "cuda", not(target_os = "macos")))]
                 ort::execution_providers::CUDAExecutionProvider::default().build(),
                 #[cfg(target_os = "macos")]
@@ -92,17 +80,13 @@ impl OrtEngine {
                 ort::execution_providers::DirectMLExecutionProvider::default().build(),
                 CPUExecutionProvider::default().build(),
             ])
-            .map_err(|e| CoreError::Inference(format!("ORT set execution providers failed: {e}")))?;
+        }.map_err(|e| CoreError::Inference(format!("ORT set execution providers failed: {e}")))?;
 
         let session = builder
             .commit_from_memory(model_bytes)
             .map_err(|e| CoreError::Inference(format!("ORT session creation failed: {e}")))?;
 
-        // Determine which EP ORT selected.
-        // ORT 2.0-rc.12 does not expose a direct "active EP" query API.
-        // We infer it from compile-time feature flags. ORT logs the selected EP to stderr
-        // at session init (visible in development). This matches rembg's approach.
-        let provider_name = Self::detect_active_provider();
+        let provider_name = if cpu_only { "CPU".to_string() } else { Self::detect_active_provider() };
 
         Ok(Self {
             session: Mutex::new(session),
