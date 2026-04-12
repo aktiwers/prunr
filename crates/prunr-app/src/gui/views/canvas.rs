@@ -330,7 +330,7 @@ fn render_processing(ui: &mut egui::Ui, app: &PrunrApp) {
         theme::TEXT_SECONDARY,
     );
 
-    ui.ctx().request_repaint();
+    ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
 }
 
 fn render_done(ui: &mut egui::Ui, app: &PrunrApp) {

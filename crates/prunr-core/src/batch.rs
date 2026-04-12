@@ -15,7 +15,7 @@ pub fn create_engine_pool(
     cpu_only: bool,
 ) -> Result<Vec<std::sync::Arc<OrtEngine>>, CoreError> {
     let is_gpu = !cpu_only && !OrtEngine::detect_active_provider().eq_ignore_ascii_case("CPU");
-    let pool_size = if is_gpu { jobs.min(2) } else { 1 };
+    let pool_size = if is_gpu { jobs.min(2) } else { jobs };
     let intra_threads = if pool_size == 1 {
         num_cpus::get()
     } else {
@@ -85,7 +85,7 @@ where
 ///
 /// Uses engine pooling: engines are created upfront (not per-image).
 /// GPU backends are capped at 2 sessions to prevent VRAM exhaustion.
-/// CPU uses 1 engine with full thread parallelism.
+/// CPU creates one engine per job, each with num_cpus/jobs intra-op threads.
 pub fn batch_process_with_mask<F>(
     images: &[&[u8]],
     model: ModelKind,

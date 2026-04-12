@@ -822,7 +822,10 @@ impl PrunrApp {
 
 impl PrunrApp {
     fn poll_worker_results(&mut self, ctx: &egui::Context) {
-        while let Ok(msg) = self.worker_rx.try_recv() {
+        // Cap messages per frame to keep the UI responsive during heavy batch processing.
+        // Remaining messages are picked up next frame (request_repaint_after ensures continuity).
+        for _ in 0..8 {
+            let Ok(msg) = self.worker_rx.try_recv() else { break };
             match msg {
                 WorkerResult::BatchProgress { item_id, stage, pct } => {
                     // Update progress if this is the currently viewed item

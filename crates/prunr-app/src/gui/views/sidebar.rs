@@ -303,9 +303,9 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
             }
         });
 
-        // Request repaint if animations are running or thumbnails still pending
+        // Request repaint for animations/pending thumbnails — throttled to ~30fps
         if needs_repaint || app.batch_items.iter().any(|i| i.thumb_pending) {
-            ui.ctx().request_repaint();
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
         }
 
         // Apply remove
