@@ -30,6 +30,8 @@ pub struct Settings {
     pub bg_color: [u8; 4],
     /// Maximum number of undo steps per image. Default 10.
     pub history_depth: usize,
+    /// When true, Process uses the current result as input instead of the original image.
+    pub chain_mode: bool,
     /// Force CPU inference even when GPU is available (not persisted — resets each launch).
     #[serde(skip)]
     pub force_cpu: bool,
@@ -143,6 +145,7 @@ impl Default for Settings {
             apply_bg_color: false,
             bg_color: [255, 255, 255, 255],
             history_depth: 10,
+            chain_mode: false,
             force_cpu: false,
             active_backend: "CPU".to_string(),
         }
