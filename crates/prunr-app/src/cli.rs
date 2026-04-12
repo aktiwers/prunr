@@ -76,6 +76,13 @@ pub struct Cli {
     /// Force CPU inference even when GPU is available.
     #[arg(long)]
     pub cpu: bool,
+
+    /// Chain mode: process the previous result instead of the original.
+    /// Only meaningful in multi-pass scripting workflows where the user
+    /// runs prunr multiple times on the same file. For a single invocation
+    /// this flag has no effect since there is no previous result.
+    #[arg(long)]
+    pub chain: bool,
 }
 
 /// Model selection
