@@ -6,7 +6,7 @@ use crate::gui::settings::LineMode;
 
 pub enum WorkerMessage {
     BatchProcess {
-        items: Vec<(u64, Arc<Vec<u8>>)>,
+        items: Vec<(u64, Arc<Vec<u8>>, Option<Arc<image::RgbaImage>>)>,
         model: ModelKind,
         jobs: usize,
         cancel: Arc<AtomicBool>,
@@ -58,7 +58,7 @@ pub fn spawn_worker(
                             let cpu_only = force_cpu || prewarm.get().is_none();
 
                             // Report loading status — let user know if falling back to CPU
-                            if let Some((first_id, _)) = items.first() {
+                            if let Some((first_id, _, _)) = items.first() {
                                 let stage = if gpu_warming {
                                     ProgressStage::LoadingModelCpuFallback
                                 } else {
@@ -80,7 +80,7 @@ pub fn spawn_worker(
                                 match EdgeEngine::new() {
                                     Ok(e) => Some(Arc::new(e)),
                                     Err(e) => {
-                                        for (item_id, _) in &items {
+                                        for (item_id, _, _) in &items {
                                             let _ = res_tx_batch.send(WorkerResult::BatchItemDone {
                                                 item_id: *item_id,
                                                 result: Err(e.to_string()),
@@ -100,7 +100,7 @@ pub fn spawn_worker(
                                 match create_engine_pool(model, jobs, cpu_only) {
                                     Ok(e) => e,
                                     Err(e) => {
-                                        for (item_id, _) in &items {
+                                        for (item_id, _, _) in &items {
                                             let _ = res_tx_batch.send(WorkerResult::BatchItemDone {
                                                 item_id: *item_id,
                                                 result: Err(e.to_string()),
@@ -125,7 +125,7 @@ pub fn spawn_worker(
                             let cancel_batch = cancel.clone();
 
                             pool.scope(|s| {
-                                for (idx, (item_id, img_bytes)) in items.into_iter().enumerate() {
+                                for (idx, (item_id, img_bytes, chain_input)) in items.into_iter().enumerate() {
                                     let res_tx_item = res_tx_batch.clone();
                                     let ctx_item = ctx_batch.clone();
                                     let cancel_item = cancel_batch.clone();
