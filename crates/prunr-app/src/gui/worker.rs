@@ -57,10 +57,12 @@ pub fn spawn_worker(
                                 ctx_batch.request_repaint();
                             }
 
-                            // Create engine pool upfront — one per parallel job.
-                            // Reuse pre-warmed engine for the first slot if model matches.
-                            let intra_threads = (num_cpus::get() / jobs).max(1);
-                            let mut engines: Vec<OrtEngine> = Vec::with_capacity(jobs);
+                            // GPU backends allocate VRAM per session — cap pool to
+                            // avoid exhausting GPU memory with too many sessions.
+                            let is_gpu = !OrtEngine::detect_active_provider().eq_ignore_ascii_case("CPU");
+                            let pool_size = if is_gpu { jobs.min(2) } else { jobs };
+                            let intra_threads = (num_cpus::get() / pool_size).max(1);
+                            let mut engines: Vec<OrtEngine> = Vec::with_capacity(pool_size);
 
                             // The pre-warm thread (started at app launch) populates
                             // the CoreML/CUDA disk cache. We don't reuse its session
@@ -68,7 +70,7 @@ pub fn spawn_worker(
                             // OrtEngine::new() calls are fast thanks to the warm cache.
                             let _ = prewarm.get(); // ensure pre-warm finished
 
-                            while engines.len() < jobs {
+                            while engines.len() < pool_size {
                                 match OrtEngine::new(model, intra_threads) {
                                     Ok(e) => engines.push(e),
                                     Err(e) => {

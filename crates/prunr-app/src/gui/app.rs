@@ -22,10 +22,10 @@ pub(crate) struct BatchItem {
     pub source_texture: Option<egui::TextureHandle>,
     pub thumb_texture: Option<egui::TextureHandle>,
     pub thumb_pending: bool,
-    pub result_rgba: Option<image::RgbaImage>,
+    pub result_rgba: Option<Arc<image::RgbaImage>>,
     pub result_texture: Option<egui::TextureHandle>,
     /// Saved result for redo (populated by undo, consumed by redo)
-    pub undo_result_rgba: Option<image::RgbaImage>,
+    pub undo_result_rgba: Option<Arc<image::RgbaImage>>,
     pub status: BatchStatus,
     pub selected: bool,
 }
@@ -64,7 +64,7 @@ pub struct PrunrApp {
     pub(crate) result_texture: Option<egui::TextureHandle>,
 
     // Result image for save/copy
-    pub(crate) result_rgba: Option<image::RgbaImage>,
+    pub(crate) result_rgba: Option<Arc<image::RgbaImage>>,
 
     // Clipboard (MUST live for app lifetime -- Wayland ownership requirement)
     clipboard: Option<arboard::Clipboard>,
@@ -638,9 +638,9 @@ impl PrunrApp {
             .set_title("Save Selected — Choose Folder")
             .pick_folder()
         {
-            let items: Vec<(String, image::RgbaImage)> = selected.iter()
+            let items: Vec<(String, Arc<image::RgbaImage>)> = selected.iter()
                 .filter_map(|item| {
-                    let rgba = item.result_rgba.as_ref()?.clone();
+                    let rgba = item.result_rgba.clone()?;
                     Some((item.filename.clone(), rgba))
                 })
                 .collect();
@@ -790,13 +790,13 @@ impl PrunrApp {
 
     /// Request thumbnail generation on a background thread for a batch item.
     /// If result_rgba is Some, thumbnails from result; otherwise decodes source bytes.
-    pub(crate) fn request_thumbnail(&self, item_id: u64, source_bytes: &[u8], result_rgba: Option<&image::RgbaImage>) {
+    pub(crate) fn request_thumbnail(&self, item_id: u64, source_bytes: &[u8], result_rgba: Option<&Arc<image::RgbaImage>>) {
         let tx = self.thumb_tx.clone();
         if let Some(rgba) = result_rgba {
-            let rgba = rgba.clone();
+            let rgba = rgba.clone(); // Arc clone = cheap pointer copy
             std::thread::spawn(move || {
                 let (w, h) = fit_dimensions(rgba.width(), rgba.height(), 160, 160);
-                let thumb = image::imageops::resize(&rgba, w, h, image::imageops::FilterType::Triangle);
+                let thumb = image::imageops::resize(rgba.as_ref(), w, h, image::imageops::FilterType::Triangle);
                 let _ = tx.send((item_id, thumb.width(), thumb.height(), thumb.into_raw()));
             });
         } else {
@@ -926,7 +926,7 @@ impl eframe::App for PrunrApp {
                     if let Some(item) = self.batch_items.iter_mut().find(|b| b.id == item_id) {
                         match result {
                             Ok(pr) => {
-                                item.result_rgba = Some(pr.rgba_image);
+                                item.result_rgba = Some(Arc::new(pr.rgba_image));
                                 item.undo_result_rgba = None;
                                 item.status = BatchStatus::Done;
                                 item.thumb_texture = None;

@@ -9,7 +9,7 @@ fn handle_copy_without_clipboard_does_not_panic() {
 
     // set a dummy result_rgba so handle_copy reaches the clipboard check
     let rgba = image::RgbaImage::new(2, 2);
-    app.result_rgba = Some(rgba);
+    app.result_rgba = Some(std::sync::Arc::new(rgba));
 
     // Should not panic, should set error status_text
     app.handle_copy();
