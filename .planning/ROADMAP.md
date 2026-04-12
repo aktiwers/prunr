@@ -18,6 +18,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [ ] **Phase 4: GUI Foundation** - egui app with worker-thread architecture, drag-and-drop, progress, save, copy, keyboard shortcuts
 - [x] **Phase 5: GUI Feature Completeness** - Before/after view, zoom/pan, batch sidebar, settings dialog, reveal animation (completed 2026-04-07)
 - [ ] **Phase 6: Distribution and Packaging** - Single-binary verification on clean VMs, SVG input, settings persistence, release artifacts
+- [ ] **Phase 7: Iterative Processing** - Chain mode: process result of previous step instead of original, full undo/redo history stack, memory management
 
 ## Phase Details
 
@@ -121,10 +122,28 @@ Plans:
   5. Settings (last-used model, parallelism) persist across application restarts on all three platforms
 **Plans**: TBD
 
+### Phase 7: Iterative Processing
+**Goal**: Users can chain processing steps — each "Process" click operates on the previous result instead of the original image, with full undo/redo history through all layers. A toggle switches between "Process original" (default) and "Process result" (chain mode).
+**Depends on**: Phase 5
+**Requirements**: ITER-01, ITER-02, ITER-03, ITER-04
+**Success Criteria** (what must be TRUE):
+  1. A "Chain mode" toggle in General settings switches between processing the original source image and processing the current result
+  2. In chain mode, clicking Process after a previous result uses the result RGBA as input to the pipeline (not the original source bytes)
+  3. Each processing step pushes the previous result onto a history stack; Ctrl+Z walks backward through the history; Ctrl+Y walks forward
+  4. The history stack has a configurable maximum depth (default 10) to prevent unbounded memory growth
+  5. Switching chain mode off reverts to processing the original image; the history stack is preserved for undo/redo
+  6. Works with all processing modes: background removal, line extraction (all 3 modes), and combinations
+**Plans**: 3 plans
+
+Plans:
+- [ ] 07-01-PLAN.md — History stack data model and undo/redo (Vec-based history, depth limit)
+- [ ] 07-02-PLAN.md — Chain mode: process result instead of original (toggle, worker pipeline, CLI)
+- [ ] 07-03-PLAN.md — UI polish: history indicator, depth slider, status bar
+
 ## Progress
 
 **Execution Order:**
-Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
+Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
@@ -134,3 +153,4 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 | 4. GUI Foundation | 2/3 | In Progress|  |
 | 5. GUI Feature Completeness | 3/3 | Complete   | 2026-04-07 |
 | 6. Distribution and Packaging | 0/TBD | Not started | - |
+| 7. Iterative Processing | 0/3 | Not started | - |
