@@ -105,12 +105,17 @@ pub fn spawn_worker(
                                         let progress_tx = res_tx_item.clone();
                                         let progress_ctx = ctx_item.clone();
                                         let progress_cancel = cancel_item.clone();
+                                        let last_repaint = std::cell::Cell::new(std::time::Instant::now());
                                         let progress_cb = move |stage: ProgressStage, pct: f32| {
                                             if !progress_cancel.load(Ordering::Relaxed) {
                                                 let _ = progress_tx.send(WorkerResult::BatchProgress {
                                                     item_id, stage, pct,
                                                 });
-                                                progress_ctx.request_repaint();
+                                                // Throttle repaints to ~30fps to keep UI smooth under load
+                                                if last_repaint.get().elapsed().as_millis() >= 33 {
+                                                    progress_ctx.request_repaint();
+                                                    last_repaint.set(std::time::Instant::now());
+                                                }
                                             }
                                         };
                                         let result = process_image_with_mask(
