@@ -35,20 +35,22 @@ prunr/
 │           ├── cli.rs            # clap args: prunr photo.jpg [options] (indicatif progress)
 │           ├── gui/
 │           │   ├── mod.rs        # eframe::run_native entry point
-│           │   ├── app.rs        # App struct, eframe::App impl, message routing, batch sync
-│           │   ├── worker.rs     # Background inference thread + mpsc channels
-│           │   ├── state.rs      # Application state machine (Empty → Loaded → Processing → Done)
-│           │   ├── settings.rs   # Settings model (persisted preferences)
-│           │   ├── theme.rs      # Design tokens: colors, spacing, fonts, sizes
+│           │   ├── app.rs            # App struct, eframe::App impl, event routing
+│           │   ├── worker.rs         # Background inference thread + dual-engine fallback
+│           │   ├── state.rs          # State machine (Empty → Loaded → Processing → Done)
+│           │   ├── settings.rs       # Settings model (persisted to ~/.config/prunr/)
+│           │   ├── zoom_state.rs     # Zoom/pan state (extracted from app.rs)
+│           │   ├── status_state.rs   # Progress/status text (extracted from app.rs)
+│           │   ├── background_io.rs  # Background channel bundle (file/thumb/decode/save)
+│           │   ├── theme.rs          # Design tokens: colors, spacing, fonts, sizes
 │           │   ├── views/
-│           │   │   ├── canvas.rs     # Image viewer: textures, zoom/pan, fit-to-window, checkerboard
-│           │   │   ├── sidebar.rs    # Batch queue: lazy thumbnails, drag-reorder, click-to-switch
-│           │   │   ├── toolbar.rs    # Open/Model/Settings/RemoveBG/ProcessAll/Save buttons
+│           │   │   ├── canvas.rs     # Image viewer: textures, zoom/pan, checkerboard
+│           │   │   ├── sidebar.rs    # Batch queue: thumbnails, drag-reorder, select
+│           │   │   ├── toolbar.rs    # Open/Model/Settings/RemoveBG/ProcessAll/Save
 │           │   │   ├── statusbar.rs  # Status text + progress bar + progress %
-│           │   │   ├── settings.rs   # Settings modal (parallel jobs, mask tuning, backend)
+│           │   │   ├── settings.rs   # Settings modal (jobs, mask tuning, backend)
 │           │   │   ├── shortcuts.rs  # F1 keyboard shortcuts overlay
 │           │   │   └── cli_help.rs   # F2 CLI reference with copy-to-clipboard
-│           └── shared.rs         # Common utilities between CLI and GUI paths
 │
 ├── xtask/                        # Developer tooling
 │   ├── Cargo.toml
@@ -160,11 +162,25 @@ Args parsed (clap)
 | **Thumbnail threads** (per image) | Decodes + resizes source images to 160px thumbnails | Sends `(id, w, h, pixels)` via channel |
 | **Decode threads** (per image) | Pre-decodes source `RgbaImage` for instant canvas switching | Sends `(id, RgbaImage)` via channel |
 | **Save thread** (per save operation) | PNG encode + `fs::write`, sends completion via `save_done` channel | UI shows "Saving..." toast, receives result |
+| **Model pre-warm** (startup, one-shot) | Creates ORT engine to populate CoreML/CUDA disk cache | Dropped after compilation; cache persists for future creates |
+
+### Engine Pooling Strategy
+
+Engines are created **once per batch**, not per-image. `create_engine_pool()` handles sizing:
+
+| Backend | Pool size | intra_threads | Rayon threads |
+|---------|-----------|---------------|---------------|
+| **CPU** (or GPU not ready) | 1 | num_cpus | 1 |
+| **GPU** (CUDA/CoreML/DirectML) | min(jobs, 2) | num_cpus / pool_size | pool_size |
+
+On macOS, the first `OrtEngine::new()` triggers CoreML model compilation (~2-5 min).
+The pre-warm thread does this at launch. If the user processes before it finishes,
+the worker falls back to `new_cpu_only()` for instant start. Future batches use GPU.
 
 ### Thread Oversubscription Prevention
 
 ```
-ORT intra_op_threads = num_cpus / rayon_pool_size
+ORT intra_op_threads = num_cpus / pool_size
 ```
 
 If rayon has 4 workers and the machine has 16 cores, each ORT session uses 4 intra-op threads. Total: 4 × 4 = 16 threads = no oversubscription.
@@ -195,18 +211,26 @@ Model-aware preprocessing and postprocessing:
 ## GPU Execution Provider Strategy
 
 ```rust
-SessionBuilder::new()?
-    .with_execution_providers([
-        CUDAExecutionProvider::default().build(),        // Linux/Windows NVIDIA
-        CoreMLExecutionProvider::default().build(),      // macOS
-        DirectMLExecutionProvider::default().build(),    // Windows (AMD/Intel)
-        CPUExecutionProvider::default().build(),         // Always available
-    ])?
+// engine.rs: build_session() — cpu_only flag selects provider set
+if cpu_only {
+    builder.with_execution_providers([CPUExecutionProvider::default().build()])
+} else {
+    builder.with_execution_providers([
+        #[cfg(all(feature = "cuda", not(target_os = "macos")))]
+        CUDAExecutionProvider::default().build(),
+        #[cfg(target_os = "macos")]
+        CoreMLExecutionProvider::default().build(),
+        #[cfg(windows)]
+        DirectMLExecutionProvider::default().build(),
+        CPUExecutionProvider::default().build(),
+    ])
+}
 ```
 
-- EPs are tried in order; first available wins
-- The active EP is logged at session creation and exposed via `Engine::active_provider() -> &str`
-- **No silent fallback** — the app always shows which backend is active
+- EPs are feature-gated per platform — only the relevant GPU EP is compiled in
+- `new_cpu_only()` skips all GPU providers for instant startup
+- The active EP is exposed via `Engine::active_provider() -> &str`
+- **Dual-engine fallback**: GPU compiles in background; CPU used until ready
 
 ## Model Embedding
 
@@ -363,3 +387,11 @@ if ui.input(|i| i.modifiers.ctrl && i.key_pressed(Key::O)) { /* open */ }
 | 2026-04-09 | Save dialogs default to source image directory | UX |
 | 2026-04-09 | Backend detected at startup via compile-time feature flags | Architecture |
 | 2026-04-09 | GitHub Actions release workflow with embedded models | CI/CD |
+| 2026-04-12 | God Object refactor: ZoomState, StatusState, BackgroundIO extracted | Architecture |
+| 2026-04-12 | logic() decomposed into 5 focused sub-methods (340→8 lines) | Architecture |
+| 2026-04-12 | Engine pooling: create_engine_pool() replaces per-image OrtEngine::new() | Performance |
+| 2026-04-12 | Dual-engine CPU fallback: instant start while GPU compiles in background | Performance |
+| 2026-04-12 | Arc<RgbaImage> throughout — zero-copy image switching/saving | Performance |
+| 2026-04-12 | VRAM-safe GPU pool: capped at 2 sessions per batch | Stability |
+| 2026-04-12 | Lazy PNG encoding: removed from pipeline, encode on save only | Performance |
+| 2026-04-12 | Parallel guided filter: rayon::join for 4-way box_filter, parallel prefix sums | Performance |
