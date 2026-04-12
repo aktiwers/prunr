@@ -12,6 +12,8 @@ static SILUETA_ZST: &[u8] = include_bytes!("../../../models/silueta.onnx.zst");
 static U2NET_ZST: &[u8] = include_bytes!("../../../models/u2net.onnx.zst");
 #[cfg(not(feature = "dev-models"))]
 static BIREFNET_LITE_ZST: &[u8] = include_bytes!("../../../models/birefnet_lite.onnx.zst");
+#[cfg(not(feature = "dev-models"))]
+static DEXINED_ZST: &[u8] = include_bytes!("../../../models/dexined.onnx.zst");
 
 /// Load Silueta model bytes. In dev-models mode reads from filesystem;
 /// in release mode decompresses the embedded zstd blob (~200ms).
@@ -33,6 +35,12 @@ pub fn u2net_bytes() -> Vec<u8> {
 pub fn birefnet_lite_bytes() -> Vec<u8> {
     zstd::bulk::decompress(BIREFNET_LITE_ZST, 250 * 1024 * 1024)
         .expect("failed to decompress embedded birefnet-lite model")
+}
+
+#[cfg(not(feature = "dev-models"))]
+pub fn dexined_bytes() -> Vec<u8> {
+    zstd::bulk::decompress(DEXINED_ZST, 150 * 1024 * 1024)
+        .expect("failed to decompress embedded dexined model")
 }
 
 #[cfg(feature = "dev-models")]
@@ -60,6 +68,15 @@ pub fn birefnet_lite_bytes() -> Vec<u8> {
             .join("../../models/birefnet_lite.onnx"),
     )
     .expect("models/birefnet_lite.onnx not found — run `cargo xtask fetch-models`")
+}
+
+#[cfg(feature = "dev-models")]
+pub fn dexined_bytes() -> Vec<u8> {
+    std::fs::read(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../models/dexined.onnx"),
+    )
+    .expect("models/dexined.onnx not found — run `cargo xtask fetch-models`")
 }
 
 // ── Optimized model variants (FP16 for GPU, INT8 for CPU) ───────────────────

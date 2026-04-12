@@ -53,6 +53,26 @@ pub struct Cli {
     #[arg(long)]
     pub refine_edges: bool,
 
+    /// Extract lines/edges instead of removing background (uses DexiNed model).
+    #[arg(long)]
+    pub lines: bool,
+
+    /// Run line extraction after background removal (combine both).
+    #[arg(long)]
+    pub lines_after_bg: bool,
+
+    /// Line detection sensitivity (0.0–1.0). Lower = bold outlines, higher = fine detail.
+    #[arg(long, default_value_t = 0.5)]
+    pub line_strength: f32,
+
+    /// Paint all lines a solid color (hex, e.g. "000000" for black, "ff0000" for red).
+    #[arg(long)]
+    pub line_color: Option<String>,
+
+    /// Fill transparent background with a color (hex, e.g. "ffffff" for white).
+    #[arg(long)]
+    pub bg_color: Option<String>,
+
     /// Force CPU inference even when GPU is available.
     #[arg(long)]
     pub cpu: bool,
@@ -98,6 +118,17 @@ use prunr_core::{
     load_image_from_path, check_large_image, downscale_image, encode_rgba_png,
 };
 
+use crate::gui::settings::LineMode;
+
+fn parse_hex_color(s: &str) -> Option<[u8; 3]> {
+    let s = s.strip_prefix('#').unwrap_or(s);
+    if s.len() != 6 { return None; }
+    let r = u8::from_str_radix(&s[0..2], 16).ok()?;
+    let g = u8::from_str_radix(&s[2..4], 16).ok()?;
+    let b = u8::from_str_radix(&s[4..6], 16).ok()?;
+    Some([r, g, b])
+}
+
 impl Cli {
     fn mask_settings(&self) -> MaskSettings {
         MaskSettings {
@@ -105,6 +136,16 @@ impl Cli {
             threshold: self.threshold,
             edge_shift: self.edge_shift,
             refine_edges: self.refine_edges,
+        }
+    }
+
+    fn line_mode(&self) -> LineMode {
+        if self.lines_after_bg {
+            LineMode::AfterBgRemoval
+        } else if self.lines {
+            LineMode::LinesOnly
+        } else {
+            LineMode::Off
         }
     }
 }
@@ -253,18 +294,26 @@ fn run_single(args: &Cli) -> i32 {
         None
     };
 
-    let model: ModelKind = args.model.into();
-    if let Some(pb) = &spinner {
-        pb.set_message("Initializing model (first run may take a minute)...");
-    }
-    let create = if args.cpu { OrtEngine::new_cpu_only } else { OrtEngine::new };
-    let engine = match create(model, 1) {
-        Ok(e) => e,
-        Err(e) => {
-            if let Some(pb) = &spinner { pb.finish_and_clear(); }
-            eprintln!("error: failed to load model: {e}");
-            return 1;
+    let lm = args.line_mode();
+    let mask = args.mask_settings();
+
+    // Only load the segmentation engine if we need it
+    let engine: Option<OrtEngine> = if lm != LineMode::LinesOnly {
+        let model: ModelKind = args.model.into();
+        if let Some(pb) = &spinner {
+            pb.set_message("Initializing model (first run may take a minute)...");
         }
+        let create = if args.cpu { OrtEngine::new_cpu_only } else { OrtEngine::new };
+        match create(model, 1) {
+            Ok(e) => Some(e),
+            Err(e) => {
+                if let Some(pb) = &spinner { pb.finish_and_clear(); }
+                eprintln!("error: failed to load model: {e}");
+                return 1;
+            }
+        }
+    } else {
+        None
     };
 
     let spinner_ref = spinner.as_ref();
@@ -274,12 +323,67 @@ fn run_single(args: &Cli) -> i32 {
         }
     });
 
-    let mask = args.mask_settings();
-    let result = if args.large_image == LargeImagePolicy::Process {
-        process_image_unchecked(&img_bytes, &engine, progress, None)
+    // Load edge engine if needed
+    let edge_engine = if lm != LineMode::Off {
+        if let Some(pb) = &spinner { pb.set_message("Loading edge model..."); }
+        match prunr_core::EdgeEngine::new() {
+            Ok(e) => Some(e),
+            Err(e) => {
+                if let Some(pb) = &spinner { pb.finish_and_clear(); }
+                eprintln!("error: {e}");
+                return 1;
+            }
+        }
     } else {
-        process_image_with_mask(&img_bytes, &engine, &mask, progress, None)
+        None
     };
+
+    let result = match lm {
+        LineMode::LinesOnly => {
+            if let Some(pb) = &spinner { pb.set_message("Extracting lines..."); }
+            prunr_core::load_image_from_bytes(&img_bytes)
+                .and_then(|img| {
+                    edge_engine.as_ref().unwrap().detect(&img, args.line_strength, args.line_color.as_deref().and_then(parse_hex_color))
+                        .map(|rgba_image| prunr_core::ProcessResult {
+                            rgba_image,
+                            active_provider: prunr_core::OrtEngine::detect_active_provider(),
+                        })
+                })
+        }
+        LineMode::AfterBgRemoval => {
+            let eng = engine.as_ref().expect("segmentation engine required");
+            let bg_result = if args.large_image == LargeImagePolicy::Process {
+                process_image_unchecked(&img_bytes, eng, progress, None)
+            } else {
+                process_image_with_mask(&img_bytes, eng, &mask, progress, None)
+            };
+            bg_result.and_then(|pr| {
+                if let Some(pb) = &spinner { pb.set_message("Extracting lines..."); }
+                let img = image::DynamicImage::ImageRgba8(pr.rgba_image);
+                edge_engine.as_ref().unwrap().detect(&img, args.line_strength, args.line_color.as_deref().and_then(parse_hex_color))
+                    .map(|rgba_image| prunr_core::ProcessResult {
+                        rgba_image,
+                        active_provider: pr.active_provider,
+                    })
+            })
+        }
+        LineMode::Off => {
+            let eng = engine.as_ref().expect("segmentation engine required");
+            if args.large_image == LargeImagePolicy::Process {
+                process_image_unchecked(&img_bytes, eng, progress, None)
+            } else {
+                process_image_with_mask(&img_bytes, eng, &mask, progress, None)
+            }
+        }
+    };
+
+    // Apply background color if specified
+    let result = result.map(|mut pr| {
+        if let Some(bg) = args.bg_color.as_deref().and_then(parse_hex_color) {
+            prunr_core::apply_background_color(&mut pr.rgba_image, bg);
+        }
+        pr
+    });
 
     if let Some(pb) = &spinner { pb.finish_and_clear(); }
 

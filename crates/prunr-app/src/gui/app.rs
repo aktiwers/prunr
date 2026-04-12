@@ -520,6 +520,16 @@ impl PrunrApp {
             cancel: self.cancel_flag.clone(),
             mask: self.settings.mask_settings(),
             force_cpu: self.settings.force_cpu,
+            line_mode: self.settings.line_mode,
+            line_strength: self.settings.line_strength,
+            solid_line_color: if self.settings.solid_line_color {
+                let c = self.settings.line_color;
+                Some([c[0], c[1], c[2]])
+            } else { None },
+            bg_color: if self.settings.apply_bg_color {
+                let c = self.settings.bg_color;
+                Some([c[0], c[1], c[2]])
+            } else { None },
         });
     }
 
@@ -984,7 +994,11 @@ impl PrunrApp {
         let mut undo_requested = false;
         let mut redo_requested = false;
 
+        // Suppress bare-key shortcuts when any widget has focus (e.g., hex color input)
+        let text_focused = ctx.memory(|m| m.focused().is_some());
+
         ctx.input(|i| {
+            // Modifier shortcuts always work
             if i.modifiers.command && i.key_pressed(Key::O) {
                 open_requested = true;
             }
@@ -1003,9 +1017,6 @@ impl PrunrApp {
             if i.key_pressed(Key::F2) {
                 self.show_cli_help = !self.show_cli_help;
             }
-            if i.key_pressed(Key::B) {
-                toggle_before_after = true;
-            }
             if i.modifiers.command && i.key_pressed(Key::Num0) {
                 fit_to_window = true;
             }
@@ -1015,14 +1026,20 @@ impl PrunrApp {
             if i.modifiers.command && i.key_pressed(Key::Space) {
                 toggle_settings = true;
             }
-            if i.key_pressed(Key::ArrowLeft) || i.key_pressed(Key::A) {
-                nav_prev = true;
-            }
-            if i.key_pressed(Key::ArrowRight) || i.key_pressed(Key::D) {
-                nav_next = true;
-            }
-            if i.key_pressed(Key::Tab) {
-                toggle_sidebar = true;
+            // Bare-key shortcuts — only when no text field is focused
+            if !text_focused {
+                if i.key_pressed(Key::B) {
+                    toggle_before_after = true;
+                }
+                if i.key_pressed(Key::ArrowLeft) || i.key_pressed(Key::A) {
+                    nav_prev = true;
+                }
+                if i.key_pressed(Key::ArrowRight) || i.key_pressed(Key::D) {
+                    nav_next = true;
+                }
+                if i.key_pressed(Key::Tab) {
+                    toggle_sidebar = true;
+                }
             }
             if i.modifiers.command && i.key_pressed(Key::Z) {
                 undo_requested = true;

@@ -22,10 +22,12 @@ Or browse all releases: [github.com/aktiwers/prunr/releases](https://github.com/
 
 - **GUI and CLI** in one binary — `prunr` opens the GUI, `prunr photo.jpg` runs headless
 - **Three bundled models** — Silueta (~4 MB, fast), U2Net (~170 MB, quality), BiRefNet-lite (~214 MB, best detail at 1024×1024)
+- **Line extraction** — extract edges/outlines using DexiNed AI, with solid color and background color options
 - **GPU acceleration** — CUDA (Linux/Windows), CoreML (macOS), DirectML (Windows), with automatic CPU fallback
 - **Batch processing** — open multiple images, process in parallel, save all to a folder
 - **True parallel processing** — start processing multiple images independently, switch between them while AI works
 - **Mask tuning** — removal strength, hard cutoff threshold, edge refinement, guided filter edge sharpening
+- **Background color** — fill transparent areas with any solid color instead of transparency
 - **Undo/Redo** — Ctrl+Z reverts to original, Ctrl+Y restores the processed result from memory
 - **Crossfade transition** — smooth fade from original to result when processing completes
 - **Persistent settings** — model choice, parallel jobs, mask tuning saved between sessions
@@ -97,18 +99,33 @@ Click a thumbnail to view it on the canvas with a smooth fade transition. Drag t
 
 ### Settings
 
-Open with the gear button or `Ctrl+Space` (`Cmd+Space` on macOS):
+Open with the gear button or `Ctrl+Space` (`Cmd+Space` on macOS). Settings are organized into three tabs:
+
+**General tab:**
 
 | Setting | Description |
 |---------|-------------|
 | **Parallel jobs** | Number of images to process simultaneously |
 | **Auto-remove on import** | Process images automatically when opened |
+| **Force CPU** | Skip GPU, use CPU only (resets each launch) |
+| **Apply background color** | Fill transparent areas with a solid color + color picker |
+
+**Lines tab:**
+
+| Setting | Description |
+|---------|-------------|
+| **Extract lines** | Off / Lines only / After BG removal — edge detection using DexiNed AI |
+| **Line strength** | How much detail to capture (0.05–1.0) |
+| **Solid color lines** | Paint all lines a single color + color picker |
+
+**Mask tab:**
+
+| Setting | Description |
+|---------|-------------|
 | **Strength** | How aggressively the background is removed (gamma) |
 | **Hard cutoff** | Binary threshold — removes all semi-transparency |
 | **Edge refine** | Shrink or expand the mask boundary |
 | **Refine edges** | Guided filter for fine detail (hair, leaves) |
-| **Force CPU** | Skip GPU, use CPU only (resets each launch) |
-| **Inference backend** | Shows active GPU/CPU backend (read-only) |
 
 ### Keyboard Shortcuts
 
@@ -165,6 +182,11 @@ prunr [OPTIONS] [INPUTS]...
 | `--threshold <N>` | Binary cutoff (0.0–1.0). Pixels below become fully transparent |
 | `--edge-shift <N>` | Edge refinement in pixels. Positive erodes, negative dilates |
 | `--refine-edges` | Guided filter for fine edge detail (hair, leaves) |
+| `--lines` | Extract lines/edges only (skip background removal) |
+| `--lines-after-bg` | Remove background first, then extract lines |
+| `--line-strength <N>` | Line detail level (0.0–1.0, default: 0.5) |
+| `--line-color <HEX>` | Solid color for lines (e.g. `000000` for black) |
+| `--bg-color <HEX>` | Fill transparent background with color (e.g. `ffffff`) |
 | `--cpu` | Force CPU inference (skip GPU) |
 | `-h, --help` | Print help |
 | `-V, --version` | Print version |
@@ -189,6 +211,18 @@ prunr --gamma 0.5 --edge-shift -2 portrait.jpg
 
 # Quiet mode for scripting
 prunr -q photo.jpg -o output.png
+
+# Extract line art from a logo
+prunr --lines logo.png
+
+# Black outlines on transparent background
+prunr --lines --line-color 000000 art.jpg
+
+# Remove background, then extract lines
+prunr --lines-after-bg graffiti.jpg
+
+# White background instead of transparent
+prunr photo.jpg --bg-color ffffff
 ```
 
 ## Project Structure
