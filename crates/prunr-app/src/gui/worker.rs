@@ -57,43 +57,61 @@ pub fn spawn_worker(
                                 ctx_batch.request_repaint();
                             }
 
+                            // Create engine pool upfront — one per parallel job.
+                            // Reuse pre-warmed engine for the first slot if model matches.
+                            let intra_threads = (num_cpus::get() / jobs).max(1);
+                            let mut engines: Vec<OrtEngine> = Vec::with_capacity(jobs);
+
+                            // Try to take the pre-warmed engine for the first slot
+                            if let Some(pw) = prewarm.get() {
+                                if pw.model_kind() == model {
+                                    // Can't move out of OnceLock, so create fresh (CoreML cache is warm)
+                                    if let Ok(e) = OrtEngine::new(model, intra_threads) {
+                                        engines.push(e);
+                                    }
+                                }
+                            }
+
+                            // Fill remaining slots
+                            while engines.len() < jobs {
+                                match OrtEngine::new(model, intra_threads) {
+                                    Ok(e) => engines.push(e),
+                                    Err(e) => {
+                                        for (item_id, _) in &items {
+                                            let _ = res_tx_batch.send(WorkerResult::BatchItemDone {
+                                                item_id: *item_id,
+                                                result: Err(e.to_string()),
+                                            });
+                                        }
+                                        let _ = res_tx_batch.send(WorkerResult::BatchComplete);
+                                        ctx_batch.request_repaint();
+                                        return;
+                                    }
+                                }
+                            }
+
+                            // Wrap in Arc for sharing with rayon — each worker picks one by index
+                            let engines: Vec<Arc<OrtEngine>> = engines.into_iter().map(Arc::new).collect();
+
                             let pool = rayon::ThreadPoolBuilder::new()
                                 .num_threads(jobs)
                                 .build()
                                 .unwrap_or_else(|_| rayon::ThreadPoolBuilder::new().build().unwrap());
 
                             let cancel_batch = cancel.clone();
-                            // Take the pre-warmed engine if model matches (consumed once)
-                            let prewarmed = prewarm.get().and_then(|e| {
-                                if e.model_kind() == model { Some(()) } else { None }
-                            });
-                            let _ = prewarmed; // just to warm the cache; each worker needs its own engine
 
                             pool.scope(|s| {
-                                for (item_id, img_bytes) in items {
+                                for (idx, (item_id, img_bytes)) in items.into_iter().enumerate() {
                                     let res_tx_item = res_tx_batch.clone();
                                     let ctx_item = ctx_batch.clone();
                                     let cancel_item = cancel_batch.clone();
                                     let mask_item = mask;
+                                    let engine = engines[idx % engines.len()].clone();
 
                                     s.spawn(move |_| {
                                         if cancel_item.load(Ordering::Relaxed) {
                                             return;
                                         }
-                                        // Each worker creates its own engine for true parallel
-                                        // inference. After pre-warm, CoreML cache makes this fast.
-                                        let intra_threads = (num_cpus::get() / jobs).max(1);
-                                        let engine = match OrtEngine::new(model, intra_threads) {
-                                            Ok(e) => e,
-                                            Err(e) => {
-                                                let _ = res_tx_item.send(WorkerResult::BatchItemDone {
-                                                    item_id,
-                                                    result: Err(e.to_string()),
-                                                });
-                                                ctx_item.request_repaint();
-                                                return;
-                                            }
-                                        };
                                         let progress_tx = res_tx_item.clone();
                                         let progress_ctx = ctx_item.clone();
                                         let progress_cancel = cancel_item.clone();

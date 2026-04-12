@@ -108,9 +108,7 @@ fn test_rembg_reference() {
         let result = process_image(&img_bytes, &engine, None::<fn(ProgressStage, f32)>, None::<Arc<AtomicBool>>)
             .unwrap_or_else(|e| panic!("process_image failed for {stem}: {e}"));
 
-        let our_rgba = image::load_from_memory(&result.rgba_bytes)
-            .expect("Failed to decode output PNG")
-            .to_rgba8();
+        let our_rgba = result.rgba_image;
 
         let Some(ref_mask) = load_reference_mask(stem) else {
             continue;
@@ -164,13 +162,8 @@ fn test_process_image_produces_valid_rgba_png() {
     let result = process_image(&img_bytes, &engine, None::<fn(ProgressStage, f32)>, None::<Arc<AtomicBool>>)
         .expect("process_image should succeed");
 
-    // Verify output is valid PNG bytes
-    assert!(!result.rgba_bytes.is_empty());
-    assert_eq!(&result.rgba_bytes[0..4], &[0x89, 0x50, 0x4E, 0x47], "Output must be PNG");
-
     // Verify output has transparency (not all-opaque)
-    let output = image::load_from_memory(&result.rgba_bytes).unwrap().to_rgba8();
-    let has_transparency = output.pixels().any(|p| p[3] < 255);
+    let has_transparency = result.rgba_image.pixels().any(|p| p[3] < 255);
     assert!(has_transparency, "Background removal must produce at least some transparent pixels");
 }
 
