@@ -12,7 +12,6 @@ use crate::{
 /// Returns (engines, pool_size) where pool_size = engines.len().
 pub fn create_engine_pool(
     model: ModelKind,
-    _jobs: usize,
     cpu_only: bool,
 ) -> Result<Vec<std::sync::Arc<OrtEngine>>, CoreError> {
     // Single engine with full thread parallelism. ORT handles GPU/CPU
@@ -82,7 +81,7 @@ where
 pub fn batch_process_with_mask<F>(
     images: &[&[u8]],
     model: ModelKind,
-    jobs: usize,
+    _jobs: usize,
     mask: &MaskSettings,
     cpu_only: bool,
     progress: Option<F>,
@@ -94,7 +93,7 @@ where
         return Vec::new();
     }
 
-    let engines = match create_engine_pool(model, jobs, cpu_only) {
+    let engines = match create_engine_pool(model, cpu_only) {
         Ok(e) => e,
         Err(e) => return images.iter().map(|_| Err(CoreError::Model(e.to_string()))).collect(),
     };

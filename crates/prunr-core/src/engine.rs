@@ -93,7 +93,7 @@ impl OrtEngine {
         let provider_name = if cpu_only {
             "CPU".to_string()
         } else {
-            Self::detect_runtime_provider()
+            Self::detect_active_provider()
         };
 
         Ok(Self {
@@ -116,35 +116,32 @@ impl OrtEngine {
         }
     }
 
-    /// Detect the actual runtime provider by checking for GPU drivers.
-    fn detect_runtime_provider() -> String {
-        #[cfg(target_os = "macos")]
-        { return "CoreML".to_string(); }
-
-        #[cfg(all(not(target_os = "macos"), not(windows)))]
-        {
-            // Check if NVIDIA GPU is available via nvidia-smi
-            if std::process::Command::new("nvidia-smi")
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
-                .map_or(false, |s| s.success())
-            {
-                return "CUDA".to_string();
-            }
-            return "CPU".to_string();
-        }
-
-        #[cfg(windows)]
-        { return "DirectML".to_string(); }
-
-        #[allow(unreachable_code)]
-        "CPU".to_string()
-    }
-
-    /// Returns "CPU" as the safe startup default.
+    /// Detect the runtime provider (cached — runs once per process).
     pub fn detect_active_provider() -> String {
-        "CPU".to_string()
+        static CACHED: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        CACHED.get_or_init(|| {
+            #[cfg(target_os = "macos")]
+            { return "CoreML".to_string(); }
+
+            #[cfg(all(not(target_os = "macos"), not(windows)))]
+            {
+                if std::process::Command::new("nvidia-smi")
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status()
+                    .map_or(false, |s| s.success())
+                {
+                    return "CUDA".to_string();
+                }
+                return "CPU".to_string();
+            }
+
+            #[cfg(windows)]
+            { return "DirectML".to_string(); }
+
+            #[allow(unreachable_code)]
+            "CPU".to_string()
+        }).clone()
     }
 
     /// Lock the underlying ORT Session for inference.
