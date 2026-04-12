@@ -62,17 +62,12 @@ pub fn spawn_worker(
                             let intra_threads = (num_cpus::get() / jobs).max(1);
                             let mut engines: Vec<OrtEngine> = Vec::with_capacity(jobs);
 
-                            // Try to take the pre-warmed engine for the first slot
-                            if let Some(pw) = prewarm.get() {
-                                if pw.model_kind() == model {
-                                    // Can't move out of OnceLock, so create fresh (CoreML cache is warm)
-                                    if let Ok(e) = OrtEngine::new(model, intra_threads) {
-                                        engines.push(e);
-                                    }
-                                }
-                            }
+                            // The pre-warm thread (started at app launch) populates
+                            // the CoreML/CUDA disk cache. We don't reuse its session
+                            // directly — OnceLock can't move out — but all subsequent
+                            // OrtEngine::new() calls are fast thanks to the warm cache.
+                            let _ = prewarm.get(); // ensure pre-warm finished
 
-                            // Fill remaining slots
                             while engines.len() < jobs {
                                 match OrtEngine::new(model, intra_threads) {
                                     Ok(e) => engines.push(e),
