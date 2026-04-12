@@ -815,22 +815,8 @@ impl PrunrApp {
     }
 }
 
-impl eframe::App for PrunrApp {
-    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
-        // egui_winit converts Ctrl+C to Event::Copy. Intercept it so we can
-        // use it for image clipboard copy (egui's Copy is for text widgets).
-        raw_input.events.retain(|event| {
-            if matches!(event, egui::Event::Copy) {
-                self.pending_copy = true;
-                false
-            } else {
-                true
-            }
-        });
-    }
-
-    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // a. Poll worker channel
+impl PrunrApp {
+    fn poll_worker_results(&mut self, ctx: &egui::Context) {
         while let Ok(msg) = self.worker_rx.try_recv() {
             match msg {
                 WorkerResult::BatchProgress { item_id, stage, pct } => {
@@ -922,8 +908,9 @@ impl eframe::App for PrunrApp {
                 }
             }
         }
+    }
 
-        // b. Handle drag-and-drop (works on X11; no-op on native Wayland — winit#1881)
+    fn handle_drag_and_drop(&mut self, ctx: &egui::Context) {
         let dropped = ctx.input(|i| i.raw.dropped_files.clone());
         if !dropped.is_empty() {
             let mut new_items: Vec<(Vec<u8>, String)> = Vec::new();
@@ -964,10 +951,9 @@ impl eframe::App for PrunrApp {
                 }
             }
         }
+    }
 
-
-        // c. Keyboard shortcuts
-        // Ctrl+C is intercepted via raw_input_hook (egui converts it to Event::Copy).
+    fn handle_keyboard_shortcuts(&mut self, ctx: &egui::Context) {
         let (mut open_requested, mut remove_requested, mut save_requested) =
             (false, false, false);
         let (mut cancel_requested, mut toggle_shortcuts) = (false, false);
@@ -1102,13 +1088,13 @@ impl eframe::App for PrunrApp {
         if redo_requested {
             self.handle_redo(ctx);
         }
-        // Deferred batch sync from sidebar click
         if self.pending_batch_sync {
             self.pending_batch_sync = false;
             self.sync_selected_batch_textures(ctx);
         }
+    }
 
-        // Drain pre-decoded source images from background threads
+    fn drain_background_channels(&mut self, ctx: &egui::Context) {
         while let Ok((item_id, rgba)) = self.bg_io.decode_rx.try_recv() {
             if let Some(item) = self.batch_items.iter_mut().find(|b| b.id == item_id) {
                 item.source_rgba = Some(rgba);
@@ -1148,8 +1134,9 @@ impl eframe::App for PrunrApp {
                 self.process_items(|item| item.id >= id_floor);
             }
         }
+    }
 
-        // d. Update window title (only when changed)
+    fn update_window_title(&mut self, ctx: &egui::Context) {
         let title = if self.batch_items.len() >= 2 {
             format!("Prunr \u{2014} {} images", self.batch_items.len())
         } else {
@@ -1162,16 +1149,35 @@ impl eframe::App for PrunrApp {
             self.prev_title = title.clone();
             ctx.send_viewport_cmd(ViewportCommand::Title(title));
         }
+    }
+}
 
+impl eframe::App for PrunrApp {
+    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        // egui_winit converts Ctrl+C to Event::Copy. Intercept it so we can
+        // use it for image clipboard copy (egui's Copy is for text widgets).
+        raw_input.events.retain(|event| {
+            if matches!(event, egui::Event::Copy) {
+                self.pending_copy = true;
+                false
+            } else {
+                true
+            }
+        });
+    }
+
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.poll_worker_results(ctx);
+        self.handle_drag_and_drop(ctx);
+        self.handle_keyboard_shortcuts(ctx);
+        self.drain_background_channels(ctx);
+        self.update_window_title(ctx);
         self.status.tick();
-
-        // If source texture still missing, try creating from decode channel results
-        // (sync_selected_batch_textures handles this from batch_items[].source_rgba)
         if self.source_texture.is_none() && !self.batch_items.is_empty() {
             self.sync_selected_batch_textures(ctx);
         }
-
     }
+
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let panel_frame = egui::Frame {
