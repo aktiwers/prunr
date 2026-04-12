@@ -38,6 +38,7 @@ zstd = "0.13"
 egui-notify = "0.22"
 egui_material_icons = "0.6"
 egui_animation = "0.11"
+dirs = "6"
 
 [profile.release]
 strip = true
