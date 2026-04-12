@@ -2,7 +2,7 @@ use rayon::prelude::*;
 use rayon::ThreadPoolBuilder;
 
 use crate::{
-    engine::{InferenceEngine, OrtEngine},
+    engine::OrtEngine,
     pipeline::process_image_with_mask,
     types::{CoreError, MaskSettings, ModelKind, ProcessResult, ProgressStage},
 };
@@ -12,37 +12,18 @@ use crate::{
 /// Returns (engines, pool_size) where pool_size = engines.len().
 pub fn create_engine_pool(
     model: ModelKind,
-    jobs: usize,
+    _jobs: usize,
     cpu_only: bool,
 ) -> Result<Vec<std::sync::Arc<OrtEngine>>, CoreError> {
-    // Create first engine to detect actual runtime provider
-    let first = if cpu_only {
-        OrtEngine::new_cpu_only(model, 1)?
+    // Single engine with full thread parallelism. ORT handles GPU/CPU
+    // selection internally — we can't reliably detect which EP was chosen.
+    let intra_threads = num_cpus::get();
+    let engine = if cpu_only {
+        OrtEngine::new_cpu_only(model, intra_threads)?
     } else {
-        OrtEngine::new(model, 1)?
+        OrtEngine::new(model, intra_threads)?
     };
-
-    // Pool sizing based on what ORT actually selected at runtime
-    let is_gpu = !first.active_provider().eq_ignore_ascii_case("CPU");
-    let pool_size = if is_gpu { jobs.min(2) } else { 1 };
-    let intra_threads = if pool_size == 1 { num_cpus::get() } else { ort_intra_threads(pool_size) };
-
-    // Rebuild first engine with correct thread count if needed
-    let create = |threads| {
-        if cpu_only { OrtEngine::new_cpu_only(model, threads) } else { OrtEngine::new(model, threads) }
-    };
-
-    let mut engines = Vec::with_capacity(pool_size);
-    if intra_threads == 1 {
-        engines.push(std::sync::Arc::new(first)); // reuse if threads match
-    } else {
-        drop(first);
-        engines.push(std::sync::Arc::new(create(intra_threads)?));
-    }
-    while engines.len() < pool_size {
-        engines.push(std::sync::Arc::new(create(intra_threads)?));
-    }
-    Ok(engines)
+    Ok(vec![std::sync::Arc::new(engine)])
 }
 
 /// Calculate ORT intra-op thread count to prevent oversubscription.

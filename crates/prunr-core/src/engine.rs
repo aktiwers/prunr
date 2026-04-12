@@ -90,18 +90,10 @@ impl OrtEngine {
             .commit_from_memory(model_bytes)
             .map_err(|e| CoreError::Inference(format!("ORT session creation failed: {e}")))?;
 
-        // We can't query ORT for which EP it actually selected at runtime.
-        // Report platform best-guess; updated after first inference from
-        // ProcessResult.active_provider if the actual backend differs.
         let provider_name = if cpu_only {
             "CPU".to_string()
         } else {
-            #[cfg(target_os = "macos")]
-            { "CoreML".to_string() }
-            #[cfg(all(not(target_os = "macos"), not(windows)))]
-            { "CUDA".to_string() }
-            #[cfg(windows)]
-            { "DirectML".to_string() }
+            Self::detect_runtime_provider()
         };
 
         Ok(Self {
@@ -124,10 +116,35 @@ impl OrtEngine {
         }
     }
 
-    /// Returns a placeholder. The actual backend is confirmed after first
-    /// inference via ProcessResult.active_provider.
+    /// Detect the actual runtime provider by checking for GPU drivers.
+    fn detect_runtime_provider() -> String {
+        #[cfg(target_os = "macos")]
+        { return "CoreML".to_string(); }
+
+        #[cfg(all(not(target_os = "macos"), not(windows)))]
+        {
+            // Check if NVIDIA GPU is available via nvidia-smi
+            if std::process::Command::new("nvidia-smi")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .map_or(false, |s| s.success())
+            {
+                return "CUDA".to_string();
+            }
+            return "CPU".to_string();
+        }
+
+        #[cfg(windows)]
+        { return "DirectML".to_string(); }
+
+        #[allow(unreachable_code)]
+        "CPU".to_string()
+    }
+
+    /// Returns "CPU" as the safe startup default.
     pub fn detect_active_provider() -> String {
-        "Detecting...".to_string()
+        "CPU".to_string()
     }
 
     /// Lock the underlying ORT Session for inference.
