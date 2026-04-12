@@ -28,6 +28,8 @@ pub struct Settings {
     pub apply_bg_color: bool,
     /// The background fill color. [R, G, B, A]
     pub bg_color: [u8; 4],
+    /// Maximum number of undo steps per image. Default 10.
+    pub history_depth: usize,
     /// Force CPU inference even when GPU is available (not persisted — resets each launch).
     #[serde(skip)]
     pub force_cpu: bool,
@@ -140,6 +142,7 @@ impl Default for Settings {
             line_color: [0, 0, 0, 255],
             apply_bg_color: false,
             bg_color: [255, 255, 255, 255],
+            history_depth: 10,
             force_cpu: false,
             active_backend: "CPU".to_string(),
         }
