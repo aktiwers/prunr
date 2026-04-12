@@ -1,7 +1,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
 
-use prunr_core::{MaskSettings, ModelKind, OrtEngine, ProgressStage, ProcessResult, process_image_with_mask};
+use prunr_core::{MaskSettings, ModelKind, OrtEngine, ProgressStage, ProcessResult, process_image_with_mask, create_engine_pool};
 
 pub enum WorkerMessage {
     BatchProcess {
@@ -57,58 +57,24 @@ pub fn spawn_worker(
                                 ctx_batch.request_repaint();
                             }
 
-                            // Dual-engine strategy: if GPU is still compiling
-                            // (pre-warm not done), use CPU engines for instant start.
-                            // Once GPU is ready, future batches use GPU engines.
-                            let gpu_ready = prewarm.get().is_some();
-                            let is_gpu = gpu_ready && !OrtEngine::detect_active_provider().eq_ignore_ascii_case("CPU");
-                            // CPU fallback: single engine with full thread parallelism
-                            // GPU: cap at 2 to avoid VRAM exhaustion
-                            // CPU (incl. fallback): 1 engine, full thread parallelism
-                            // GPU: up to 2 engines to avoid VRAM exhaustion
-                            let pool_size = if is_gpu { jobs.min(2) } else { 1 };
-                            let intra_threads = if pool_size == 1 { num_cpus::get() } else { (num_cpus::get() / pool_size).max(1) };
-                            let mut engines: Vec<OrtEngine> = Vec::with_capacity(pool_size);
+                            // CPU fallback if GPU pre-warm hasn't finished
+                            let cpu_only = prewarm.get().is_none();
 
-                            // Report whether using GPU or CPU fallback
-                            if !gpu_ready {
-                                if let Some((first_id, _)) = items.first() {
-                                    let _ = res_tx_batch.send(WorkerResult::BatchProgress {
-                                        item_id: *first_id,
-                                        stage: ProgressStage::LoadingModel,
-                                        pct: 0.0,
-                                    });
+                            let engines = match create_engine_pool(model, jobs, cpu_only) {
+                                Ok(e) => e,
+                                Err(e) => {
+                                    for (item_id, _) in &items {
+                                        let _ = res_tx_batch.send(WorkerResult::BatchItemDone {
+                                            item_id: *item_id,
+                                            result: Err(e.to_string()),
+                                        });
+                                    }
+                                    let _ = res_tx_batch.send(WorkerResult::BatchComplete);
                                     ctx_batch.request_repaint();
-                                }
-                            }
-
-                            let create_engine = |threads: usize| -> Result<OrtEngine, _> {
-                                if gpu_ready {
-                                    OrtEngine::new(model, threads)
-                                } else {
-                                    OrtEngine::new_cpu_only(model, threads)
+                                    return;
                                 }
                             };
-
-                            while engines.len() < pool_size {
-                                match create_engine(intra_threads) {
-                                    Ok(e) => engines.push(e),
-                                    Err(e) => {
-                                        for (item_id, _) in &items {
-                                            let _ = res_tx_batch.send(WorkerResult::BatchItemDone {
-                                                item_id: *item_id,
-                                                result: Err(e.to_string()),
-                                            });
-                                        }
-                                        let _ = res_tx_batch.send(WorkerResult::BatchComplete);
-                                        ctx_batch.request_repaint();
-                                        return;
-                                    }
-                                }
-                            }
-
-                            // Wrap in Arc for sharing with rayon — each worker picks one by index
-                            let engines: Vec<Arc<OrtEngine>> = engines.into_iter().map(Arc::new).collect();
+                            let pool_size = engines.len();
 
                             let pool = rayon::ThreadPoolBuilder::new()
                                 .num_threads(pool_size)
