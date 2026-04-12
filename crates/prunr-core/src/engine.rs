@@ -75,7 +75,9 @@ impl OrtEngine {
                 #[cfg(all(feature = "cuda", not(target_os = "macos")))]
                 ort::execution_providers::CUDAExecutionProvider::default().build(),
                 #[cfg(target_os = "macos")]
-                ort::execution_providers::CoreMLExecutionProvider::default().build(),
+                ort::execution_providers::CoreMLExecutionProvider::default()
+                    .with_model_cache_dir(Self::coreml_cache_dir())
+                    .build(),
                 #[cfg(windows)]
                 ort::execution_providers::DirectMLExecutionProvider::default().build(),
                 CPUExecutionProvider::default().build(),
@@ -93,6 +95,19 @@ impl OrtEngine {
             provider_name,
             model_kind: model,
         })
+    }
+
+    /// CoreML compiled model cache directory.
+    /// Ensures the ~2-5 min compilation only happens once ever per model.
+    #[cfg(target_os = "macos")]
+    fn coreml_cache_dir() -> String {
+        if let Some(cache) = dirs::cache_dir() {
+            let path = cache.join("prunr").join("coreml");
+            let _ = std::fs::create_dir_all(&path);
+            path.to_string_lossy().into_owned()
+        } else {
+            "/tmp/prunr-coreml-cache".to_string()
+        }
     }
 
     /// Infer the active provider name from compile-time feature flags.

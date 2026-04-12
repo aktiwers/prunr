@@ -21,6 +21,7 @@ ndarray = { workspace = true }
 image = { workspace = true }
 rayon = { workspace = true }
 num_cpus = "1"
+dirs = "6"
 
 [dev-dependencies]
 prunr-models = { path = "../prunr-models", features = ["dev-models"] }
