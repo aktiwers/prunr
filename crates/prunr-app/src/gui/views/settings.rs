@@ -118,6 +118,15 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) {
                         .size(theme::FONT_SIZE_BODY),
                 );
                 hint(ui, "Start removing background as soon as images are opened");
+                ui.add_space(theme::SPACE_MD);
+
+                ui.checkbox(
+                    &mut app.settings.force_cpu,
+                    RichText::new("Force CPU")
+                        .color(theme::TEXT_PRIMARY)
+                        .size(theme::FONT_SIZE_BODY),
+                );
+                hint(ui, "Use CPU even when GPU is available (slower but more compatible)");
 
                 ui.add_space(theme::SPACE_MD);
                 ui.separator();
