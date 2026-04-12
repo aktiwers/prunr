@@ -161,38 +161,72 @@ pub fn spawn_worker(
                                             }
                                         };
 
+                                        // Determine input image from chain (previous result) or decode from source
+                                        let chain_img: Option<image::DynamicImage> = chain_input.as_ref().map(|rgba| {
+                                            image::DynamicImage::ImageRgba8((**rgba).clone())
+                                        });
+
                                         let result = match line_mode {
                                             LineMode::LinesOnly => {
                                                 // Edge detection only, skip bg removal
-                                                prunr_core::load_image_from_bytes(&img_bytes)
-                                                    .and_then(|img| {
-                                                        edge_eng.as_ref().unwrap().detect(&img, line_str, line_col)
-                                                            .map(|rgba_image| ProcessResult {
-                                                                rgba_image,
-                                                                active_provider: OrtEngine::detect_active_provider(),
-                                                            })
-                                                    })
-                                            }
-                                            LineMode::AfterBgRemoval => {
-                                                // BG removal first, then edge detection on result
-                                                let eng = engine.as_ref().expect("segmentation engine required");
-                                                process_image_with_mask(
-                                                    &img_bytes, eng, &mask_item,
-                                                    Some(progress_cb), Some(cancel_item),
-                                                ).and_then(|pr| {
-                                                    let img = image::DynamicImage::ImageRgba8(pr.rgba_image);
+                                                let input = match &chain_img {
+                                                    Some(img) => Ok(img.clone()),
+                                                    None => prunr_core::load_image_from_bytes(&img_bytes),
+                                                };
+                                                input.and_then(|img| {
                                                     edge_eng.as_ref().unwrap().detect(&img, line_str, line_col)
                                                         .map(|rgba_image| ProcessResult {
                                                             rgba_image,
-                                                            active_provider: pr.active_provider,
+                                                            active_provider: OrtEngine::detect_active_provider(),
                                                         })
                                                 })
+                                            }
+                                            LineMode::AfterBgRemoval => {
+                                                if chain_img.is_some() {
+                                                    // Chain mode: skip bg removal, go straight to edge detection
+                                                    let img = chain_img.unwrap();
+                                                    edge_eng.as_ref().unwrap().detect(&img, line_str, line_col)
+                                                        .map(|rgba_image| ProcessResult {
+                                                            rgba_image,
+                                                            active_provider: OrtEngine::detect_active_provider(),
+                                                        })
+                                                } else {
+                                                    // Normal: BG removal first, then edge detection
+                                                    let eng = engine.as_ref().expect("segmentation engine required");
+                                                    process_image_with_mask(
+                                                        &img_bytes, eng, &mask_item,
+                                                        Some(progress_cb), Some(cancel_item),
+                                                    ).and_then(|pr| {
+                                                        let img = image::DynamicImage::ImageRgba8(pr.rgba_image);
+                                                        edge_eng.as_ref().unwrap().detect(&img, line_str, line_col)
+                                                            .map(|rgba_image| ProcessResult {
+                                                                rgba_image,
+                                                                active_provider: pr.active_provider,
+                                                            })
+                                                    })
+                                                }
                                             }
                                             LineMode::Off => {
                                                 // Normal background removal
                                                 let eng = engine.as_ref().expect("segmentation engine required");
+                                                let input_bytes: std::borrow::Cow<[u8]> = if let Some(ref rgba) = chain_input {
+                                                    // Encode chain input to PNG bytes for process_image_with_mask
+                                                    match prunr_core::encode_rgba_png(rgba) {
+                                                        Ok(bytes) => std::borrow::Cow::Owned(bytes),
+                                                        Err(e) => {
+                                                            let _ = res_tx_item.send(WorkerResult::BatchItemDone {
+                                                                item_id,
+                                                                result: Err(e.to_string()),
+                                                            });
+                                                            ctx_item.request_repaint();
+                                                            return;
+                                                        }
+                                                    }
+                                                } else {
+                                                    std::borrow::Cow::Borrowed(&img_bytes)
+                                                };
                                                 process_image_with_mask(
-                                                    &img_bytes, eng, &mask_item,
+                                                    &input_bytes, eng, &mask_item,
                                                     Some(progress_cb), Some(cancel_item),
                                                 )
                                             }
