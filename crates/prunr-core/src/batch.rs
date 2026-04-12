@@ -57,6 +57,10 @@ where
 }
 
 /// Like `batch_process` but with custom mask settings.
+///
+/// Uses engine pooling: engines are created upfront (not per-image).
+/// GPU backends are capped at 2 sessions to prevent VRAM exhaustion.
+/// CPU uses 1 engine with full thread parallelism.
 pub fn batch_process_with_mask<F>(
     images: &[&[u8]],
     model: ModelKind,
@@ -71,8 +75,23 @@ where
         return Vec::new();
     }
 
-    let intra_threads = ort_intra_threads(jobs.max(1));
-    let pool = build_batch_pool(jobs);
+    // GPU-aware pool sizing (same logic as GUI worker)
+    let is_gpu = !OrtEngine::detect_active_provider().eq_ignore_ascii_case("CPU");
+    let pool_size = if is_gpu { jobs.min(2) } else { 1 };
+    let intra_threads = if pool_size == 1 { num_cpus::get() } else { ort_intra_threads(pool_size) };
+
+    // Create engine pool upfront — one per worker slot
+    let mut engines: Vec<std::sync::Arc<OrtEngine>> = Vec::with_capacity(pool_size);
+    for _ in 0..pool_size {
+        match OrtEngine::new(model, intra_threads) {
+            Ok(e) => engines.push(std::sync::Arc::new(e)),
+            Err(e) => {
+                return images.iter().map(|_| Err(CoreError::Model(e.to_string()))).collect();
+            }
+        }
+    }
+
+    let pool = build_batch_pool(pool_size);
 
     let mut results: Vec<Result<ProcessResult, CoreError>> =
         (0..images.len()).map(|_| Err(CoreError::Model("not processed".into()))).collect();
@@ -83,16 +102,13 @@ where
                 .par_iter()
                 .enumerate()
                 .map(|(idx, img_bytes)| {
-                    let engine = match OrtEngine::new(model, intra_threads) {
-                        Ok(e) => e,
-                        Err(e) => return (idx, Err(e)),
-                    };
+                    let engine = &engines[idx % engines.len()];
 
                     let cb = progress.as_ref().map(|f| {
                         move |stage: ProgressStage, pct: f32| f(idx, stage, pct)
                     });
 
-                    let result = process_image_with_mask(img_bytes, &engine, mask, cb, None);
+                    let result = process_image_with_mask(img_bytes, engine, mask, cb, None);
                     (idx, result)
                 })
                 .collect();
