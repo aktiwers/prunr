@@ -7,7 +7,6 @@ pub enum WorkerMessage {
     BatchProcess {
         items: Vec<(u64, Arc<Vec<u8>>)>,
         model: ModelKind,
-        jobs: usize,
         cancel: Arc<AtomicBool>,
         mask: MaskSettings,
         force_cpu: bool,
@@ -41,7 +40,7 @@ pub fn spawn_worker(
         .spawn(move || {
             while let Ok(msg) = msg_rx.recv() {
                 match msg {
-                    WorkerMessage::BatchProcess { items, model, jobs, cancel, mask, force_cpu } => {
+                    WorkerMessage::BatchProcess { items, model, cancel, mask, force_cpu } => {
                         let res_tx_batch = res_tx.clone();
                         let ctx_batch = ctx.clone();
 
@@ -60,7 +59,7 @@ pub fn spawn_worker(
 
                             let cpu_only = force_cpu || prewarm.get().is_none();
 
-                            let engines = match create_engine_pool(model, jobs, cpu_only) {
+                            let engines = match create_engine_pool(model, cpu_only) {
                                 Ok(e) => e,
                                 Err(e) => {
                                     for (item_id, _) in &items {
