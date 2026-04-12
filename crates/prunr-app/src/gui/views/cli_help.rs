@@ -82,6 +82,8 @@ pub fn render(ctx: &egui::Context, toasts: &mut egui_notify::Toasts) -> bool {
                             "Trim (+) or expand (\u{2212}) edges, in px");
                         opt_row(ui, "--refine-edges",
                             "Guided filter for fine edge detail");
+                        opt_row(ui, "--cpu",
+                            "Force CPU inference (skip GPU)");
                     });
 
                 ui.add_space(theme::SPACE_LG);

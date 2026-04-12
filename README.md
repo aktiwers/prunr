@@ -106,6 +106,7 @@ Open with the gear button or `Ctrl+Space` (`Cmd+Space` on macOS):
 | **Hard cutoff** | Binary threshold — removes all semi-transparency |
 | **Edge refine** | Shrink or expand the mask boundary |
 | **Refine edges** | Guided filter for fine detail (hair, leaves) |
+| **Force CPU** | Skip GPU, use CPU only (resets each launch) |
 | **Inference backend** | Shows active GPU/CPU backend (read-only) |
 
 ### Keyboard Shortcuts
@@ -163,6 +164,7 @@ prunr [OPTIONS] [INPUTS]...
 | `--threshold <N>` | Binary cutoff (0.0–1.0). Pixels below become fully transparent |
 | `--edge-shift <N>` | Edge refinement in pixels. Positive erodes, negative dilates |
 | `--refine-edges` | Guided filter for fine edge detail (hair, leaves) |
+| `--cpu` | Force CPU inference (skip GPU) |
 | `-h, --help` | Print help |
 | `-V, --version` | Print version |
 

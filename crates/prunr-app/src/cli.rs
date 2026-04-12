@@ -256,7 +256,8 @@ fn run_single(args: &Cli) -> i32 {
     if let Some(pb) = &spinner {
         pb.set_message("Initializing model (first run may take a minute)...");
     }
-    let engine = match if args.cpu { OrtEngine::new_cpu_only(model, 1) } else { OrtEngine::new(model, 1) } {
+    let create = if args.cpu { OrtEngine::new_cpu_only } else { OrtEngine::new };
+    let engine = match create(model, 1) {
         Ok(e) => e,
         Err(e) => {
             if let Some(pb) = &spinner { pb.finish_and_clear(); }
