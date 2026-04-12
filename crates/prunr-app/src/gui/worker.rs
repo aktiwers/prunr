@@ -48,17 +48,23 @@ pub fn spawn_worker(
                         let prewarm = prewarm_engine.clone();
 
                         std::thread::spawn(move || {
-                            // Report "Loading model" for the first item
+                            let gpu_warming = !force_cpu && prewarm.get().is_none();
+                            let cpu_only = force_cpu || gpu_warming;
+
+                            // Report loading status — let user know if falling back to CPU
                             if let Some((first_id, _)) = items.first() {
+                                let stage = if gpu_warming {
+                                    ProgressStage::LoadingModelCpuFallback
+                                } else {
+                                    ProgressStage::LoadingModel
+                                };
                                 let _ = res_tx_batch.send(WorkerResult::BatchProgress {
                                     item_id: *first_id,
-                                    stage: ProgressStage::LoadingModel,
+                                    stage,
                                     pct: 0.0,
                                 });
                                 ctx_batch.request_repaint();
                             }
-
-                            let cpu_only = force_cpu || prewarm.get().is_none();
 
                             let engines = match create_engine_pool(model, jobs, cpu_only) {
                                 Ok(e) => e,

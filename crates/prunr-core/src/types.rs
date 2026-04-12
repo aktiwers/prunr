@@ -39,6 +39,8 @@ pub enum ProgressStage {
     Alpha,
     /// Loading and compiling the AI model (can be slow on first run with GPU backends)
     LoadingModel,
+    /// GPU is still compiling; processing on CPU in the meantime
+    LoadingModelCpuFallback,
 }
 
 #[derive(Debug)]
@@ -132,14 +134,15 @@ mod tests {
             ProgressStage::Postprocess,
             ProgressStage::Alpha,
             ProgressStage::LoadingModel,
+            ProgressStage::LoadingModelCpuFallback,
         ];
-        // All six variants compile and implement Debug + Clone + Copy
+        // All variants compile and implement Debug + Clone + Copy
         for stage in &stages {
             let _ = format!("{:?}", stage);
             let _cloned = stage.clone();
             let _copied: ProgressStage = *stage;
         }
-        assert_eq!(stages.len(), 7);
+        assert_eq!(stages.len(), 8);
     }
 
     #[test]
