@@ -14,9 +14,9 @@ fn handle_copy_without_clipboard_does_not_panic() {
     // Should not panic, should set error status_text
     app.handle_copy();
     assert!(
-        app.status_text.contains("clipboard") || app.status_text.contains("saving"),
+        app.status.text.contains("clipboard") || app.status.text.contains("saving"),
         "Expected clipboard error message, got: {}",
-        app.status_text
+        app.status.text
     );
 }
 

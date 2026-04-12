@@ -24,13 +24,13 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                     if !modifiers.any() {
                         let scroll_y = delta.y;
                         let zoom_delta = theme::ZOOM_STEP.powf(scroll_y);
-                        let new_zoom = (app.zoom * zoom_delta).clamp(theme::ZOOM_MIN, theme::ZOOM_MAX);
+                        let new_zoom = (app.zoom_state.zoom * zoom_delta).clamp(theme::ZOOM_MIN, theme::ZOOM_MAX);
                         if let Some(cursor) = i.pointer.hover_pos() {
                             if canvas_rect.contains(cursor) {
                                 let cursor_rel = cursor - canvas_rect.center();
-                                app.pan_offset =
-                                    cursor_rel / app.zoom - cursor_rel / new_zoom + app.pan_offset;
-                                app.zoom = new_zoom;
+                                app.zoom_state.pan_offset =
+                                    cursor_rel / app.zoom_state.zoom - cursor_rel / new_zoom + app.zoom_state.pan_offset;
+                                app.zoom_state.zoom = new_zoom;
                             }
                         }
                     }
@@ -42,12 +42,12 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                 // Only pan if cursor is over the canvas area
                 if let Some(pos) = i.pointer.hover_pos() {
                     if canvas_rect.contains(pos) {
-                        app.pan_offset += i.pointer.delta();
-                        app.is_panning = true;
+                        app.zoom_state.pan_offset += i.pointer.delta();
+                        app.zoom_state.is_panning = true;
                     }
                 }
             } else {
-                app.is_panning = false;
+                app.zoom_state.is_panning = false;
             }
         });
     }
@@ -57,27 +57,27 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
         let tex_size = tex.size_vec2();
         let canvas_size = canvas_rect.size();
 
-        if app.pending_fit_zoom {
-            app.pending_fit_zoom = false;
+        if app.zoom_state.pending_fit_zoom {
+            app.zoom_state.pending_fit_zoom = false;
             let fit = fit_zoom(canvas_size, tex_size);
             // Only toggle back if zoom is already at fit (keyboard shortcut).
             // previous_zoom == 1.0 means this is a fresh image switch — always fit.
-            if (app.zoom - fit).abs() < 0.001 && app.previous_zoom != 1.0 {
-                app.zoom = app.previous_zoom;
+            if (app.zoom_state.zoom - fit).abs() < 0.001 && app.zoom_state.previous_zoom != 1.0 {
+                app.zoom_state.zoom = app.zoom_state.previous_zoom;
             } else {
-                app.previous_zoom = app.zoom;
-                app.zoom = fit;
-                app.pan_offset = Vec2::ZERO;
+                app.zoom_state.previous_zoom = app.zoom_state.zoom;
+                app.zoom_state.zoom = fit;
+                app.zoom_state.pan_offset = Vec2::ZERO;
             }
         }
-        if app.pending_actual_size {
-            app.pending_actual_size = false;
-            if (app.zoom - 1.0).abs() < 0.001 {
-                app.zoom = app.previous_zoom;
+        if app.zoom_state.pending_actual_size {
+            app.zoom_state.pending_actual_size = false;
+            if (app.zoom_state.zoom - 1.0).abs() < 0.001 {
+                app.zoom_state.zoom = app.zoom_state.previous_zoom;
             } else {
-                app.previous_zoom = app.zoom;
-                app.zoom = 1.0;
-                app.pan_offset = Vec2::ZERO;
+                app.zoom_state.previous_zoom = app.zoom_state.zoom;
+                app.zoom_state.zoom = 1.0;
+                app.zoom_state.pan_offset = Vec2::ZERO;
             }
         }
     }
@@ -243,7 +243,7 @@ fn render_empty(ui: &mut egui::Ui, _app: &PrunrApp) {
 fn render_loaded(ui: &mut egui::Ui, app: &PrunrApp) {
     let canvas_rect = ui.available_rect_before_wrap();
     if let Some(ref texture) = app.source_texture {
-        let img_rect = compute_img_rect(canvas_rect, texture.size_vec2(), app.zoom, app.pan_offset);
+        let img_rect = compute_img_rect(canvas_rect, texture.size_vec2(), app.zoom_state.zoom, app.zoom_state.pan_offset);
         let fade = ui.ctx().animate_bool_with_time(
             egui::Id::new(("canvas_fade", app.canvas_switch_id)),
             true,
@@ -279,8 +279,8 @@ fn render_processing(ui: &mut egui::Ui, app: &PrunrApp) {
         let wiggle_zoom = 1.0 + (t * 1.5).sin() * 0.003;
         let wiggle_x = (t * 0.8).sin() * 2.0;
         let wiggle_y = (t * 1.1).cos() * 1.5;
-        let wiggle_offset = app.pan_offset + Vec2::new(wiggle_x, wiggle_y);
-        let img_rect = compute_img_rect(canvas_rect, tex_size, app.zoom * wiggle_zoom, wiggle_offset);
+        let wiggle_offset = app.zoom_state.pan_offset + Vec2::new(wiggle_x, wiggle_y);
+        let img_rect = compute_img_rect(canvas_rect, tex_size, app.zoom_state.zoom * wiggle_zoom, wiggle_offset);
         ui.painter().image(
             texture.id(),
             img_rect,
@@ -318,7 +318,7 @@ fn render_processing(ui: &mut egui::Ui, app: &PrunrApp) {
     ui.painter().text(
         center + Vec2::new(0.0, 14.0),
         egui::Align2::CENTER_CENTER,
-        &app.progress_stage,
+        &app.status.stage,
         egui::FontId::proportional(theme::FONT_SIZE_BODY),
         theme::TEXT_SECONDARY,
     );
@@ -347,7 +347,7 @@ fn render_done(ui: &mut egui::Ui, app: &PrunrApp) {
     if app.show_original {
         if let Some(ref texture) = app.source_texture {
             let img_rect =
-                compute_img_rect(canvas_rect, texture.size_vec2(), app.zoom, app.pan_offset);
+                compute_img_rect(canvas_rect, texture.size_vec2(), app.zoom_state.zoom, app.zoom_state.pan_offset);
             ui.painter().image(
                 texture.id(),
                 img_rect,
@@ -357,7 +357,7 @@ fn render_done(ui: &mut egui::Ui, app: &PrunrApp) {
         }
     } else if let Some(ref result_tex) = app.result_texture {
         let img_rect =
-            compute_img_rect(canvas_rect, result_tex.size_vec2(), app.zoom, app.pan_offset);
+            compute_img_rect(canvas_rect, result_tex.size_vec2(), app.zoom_state.zoom, app.zoom_state.pan_offset);
 
         // During crossfade: show source fading out behind checkerboard + result fading in
         if fade < 1.0 {
