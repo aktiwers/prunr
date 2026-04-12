@@ -8,11 +8,6 @@
 use image::{GrayImage, RgbaImage};
 
 /// Refine an alpha mask using a guided filter.
-///
-/// - `guide`: original RGBA image (used for color-based edge guidance)
-/// - `mask`: AI-generated grayscale alpha mask (same dimensions as guide)
-/// - `radius`: filter window radius in pixels (larger = smoother)
-/// - `epsilon`: regularization (smaller = sharper edges, larger = smoother)
 pub fn guided_filter_alpha(
     guide: &RgbaImage,
     mask: &GrayImage,
@@ -22,14 +17,15 @@ pub fn guided_filter_alpha(
     let (w, h) = (mask.width(), mask.height());
     let n = (w * h) as usize;
 
-    // Two reusable scratchpads — avoids allocating 6 separate Vecs
-    let mut buf_a = vec![0.0f32; n];
-    let mut buf_b = vec![0.0f32; n];
-    let mut integral = vec![0.0f64; n]; // reused by all box_filter calls
-
-    // Convert guide to grayscale float [0,1] and mask to float [0,1]
+    // All working buffers allocated once
     let mut guide_f = vec![0.0f32; n];
     let mut mask_f = vec![0.0f32; n];
+    let mut mean_i = vec![0.0f32; n];
+    let mut mean_p = vec![0.0f32; n];
+    let mut buf = vec![0.0f32; n]; // scratch for intermediate products
+    let mut integral = vec![0.0f64; n];
+
+    // Convert guide to grayscale luminance [0,1] and mask to [0,1]
     for y in 0..h {
         for x in 0..w {
             let idx = (y * w + x) as usize;
@@ -39,43 +35,46 @@ pub fn guided_filter_alpha(
         }
     }
 
-    // mean_I and mean_p
-    box_filter(&guide_f, w, h, radius, &mut integral, &mut buf_a);
-    let mean_i = buf_a.clone(); // need to keep for later
-    box_filter(&mask_f, w, h, radius, &mut integral, &mut buf_b);
-    let mean_p = buf_b.clone();
+    // mean_I → mean_i, mean_p → mean_p
+    box_filter(&guide_f, w, h, radius, &mut integral, &mut mean_i);
+    box_filter(&mask_f, w, h, radius, &mut integral, &mut mean_p);
 
-    // I*I → buf_a, I*p → buf_b, then box filter each
+    // mean(I*I): compute I*I into buf, box_filter into buf (in-place via integral)
+    for i in 0..n { buf[i] = guide_f[i] * guide_f[i]; }
+    let mean_ii = buf.clone(); // need source separate from dest
+    box_filter(&mean_ii, w, h, radius, &mut integral, &mut buf); // buf = mean_ii
+
+    // Compute variance and a = cov / (var + eps), store a in guide_f (no longer needed as guide)
+    // First need mean(I*p) — compute into mask_f (about to be overwritten with b)
+    let mut ip = vec![0.0f32; n];
+    for i in 0..n { ip[i] = guide_f[i] * mask_f[i]; }
+    // Now overwrite mask_f with mean(I*p)
+    box_filter(&ip, w, h, radius, &mut integral, &mut mask_f); // mask_f = mean_ip
+
+    // a = (mean_ip - mean_i * mean_p) / (var_i + eps)
+    // b = mean_p - a * mean_i
+    // Store a in guide_f, b in mean_p (mean_p no longer needed after this)
     for i in 0..n {
-        buf_a[i] = guide_f[i] * guide_f[i];
-        buf_b[i] = guide_f[i] * mask_f[i];
-    }
-    let ii_src = buf_a.clone();
-    let ip_src = buf_b.clone();
-    box_filter(&ii_src, w, h, radius, &mut integral, &mut buf_a); // mean_ii in buf_a
-    box_filter(&ip_src, w, h, radius, &mut integral, &mut buf_b); // mean_ip in buf_b
-
-    // Compute a and b in-place (reuse guide_f and mask_f which are no longer needed)
-    for i in 0..n {
-        let var_i = buf_a[i] - mean_i[i] * mean_i[i];
-        let cov_ip = buf_b[i] - mean_i[i] * mean_p[i];
-        guide_f[i] = cov_ip / (var_i + epsilon); // a
-        mask_f[i] = mean_p[i] - guide_f[i] * mean_i[i]; // b
+        let var_i = buf[i] - mean_i[i] * mean_i[i]; // buf=mean_ii
+        let cov_ip = mask_f[i] - mean_i[i] * mean_p[i]; // mask_f=mean_ip
+        let a = cov_ip / (var_i + epsilon);
+        let b = mean_p[i] - a * mean_i[i];
+        guide_f[i] = a;
+        mean_p[i] = b;
     }
 
-    // Average a and b
-    box_filter(&guide_f, w, h, radius, &mut integral, &mut buf_a); // mean_a
-    box_filter(&mask_f, w, h, radius, &mut integral, &mut buf_b); // mean_b
+    // mean_a → buf, mean_b → mean_i (reuse)
+    box_filter(&guide_f, w, h, radius, &mut integral, &mut buf); // buf = mean_a
+    box_filter(&mean_p, w, h, radius, &mut integral, &mut mean_i); // mean_i = mean_b
 
-    // Compute output: q = mean_a * I + mean_b
-    // Recompute guide luminance from the original (guide_f was overwritten with 'a')
+    // Output: q = mean_a * I + mean_b
     let mut out = GrayImage::new(w, h);
     for y in 0..h {
         for x in 0..w {
             let idx = (y * w + x) as usize;
             let gp = guide.get_pixel(x, y);
             let lum = (0.299 * gp[0] as f32 + 0.587 * gp[1] as f32 + 0.114 * gp[2] as f32) / 255.0;
-            let val = (buf_a[idx] * lum + buf_b[idx]).clamp(0.0, 1.0);
+            let val = (buf[idx] * lum + mean_i[idx]).clamp(0.0, 1.0);
             out.put_pixel(x, y, image::Luma([(val * 255.0) as u8]));
         }
     }
@@ -88,7 +87,6 @@ fn box_filter(src: &[f32], w: u32, h: u32, radius: u32, integral: &mut [f64], ou
     let h = h as usize;
     let r = radius as i64;
 
-    // Build integral image (reuses caller's buffer)
     for y in 0..h {
         let mut row_sum = 0.0f64;
         for x in 0..w {
