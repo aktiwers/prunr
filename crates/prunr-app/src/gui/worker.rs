@@ -10,6 +10,7 @@ pub enum WorkerMessage {
         jobs: usize,
         cancel: Arc<AtomicBool>,
         mask: MaskSettings,
+        force_cpu: bool,
     },
 }
 
@@ -40,7 +41,7 @@ pub fn spawn_worker(
         .spawn(move || {
             while let Ok(msg) = msg_rx.recv() {
                 match msg {
-                    WorkerMessage::BatchProcess { items, model, jobs, cancel, mask } => {
+                    WorkerMessage::BatchProcess { items, model, jobs, cancel, mask, force_cpu } => {
                         let res_tx_batch = res_tx.clone();
                         let ctx_batch = ctx.clone();
 
@@ -57,8 +58,7 @@ pub fn spawn_worker(
                                 ctx_batch.request_repaint();
                             }
 
-                            // CPU fallback if GPU pre-warm hasn't finished
-                            let cpu_only = prewarm.get().is_none();
+                            let cpu_only = force_cpu || prewarm.get().is_none();
 
                             let engines = match create_engine_pool(model, jobs, cpu_only) {
                                 Ok(e) => e,
