@@ -826,7 +826,7 @@ impl PrunrApp {
                         .map_or(false, |b| b.id == item_id);
                     if is_selected {
                         self.status.stage = match stage {
-                            ProgressStage::LoadingModel => "Initializing GPU... using CPU for now".into(),
+                            ProgressStage::LoadingModel => "Loading model...".into(),
                             ProgressStage::Decode => "Decoding image".into(),
                             ProgressStage::Resize => "Resizing".into(),
                             ProgressStage::Normalize => "Normalizing pixels".into(),
