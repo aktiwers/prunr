@@ -1,20 +1,36 @@
 use egui::{Color32, Stroke};
 
-/// Draw a semi-transparent backdrop to dim the app behind a modal overlay.
+/// Draw a semi-transparent backdrop behind a modal.
+/// Call `backdrop_clicked` after the modal window is rendered to check if
+/// the user clicked the backdrop (outside the window).
 pub fn draw_modal_backdrop(ctx: &egui::Context, id: &str) {
     let screen_rect = ctx.content_rect();
-    let painter = ctx.layer_painter(egui::LayerId::new(
-        egui::Order::Foreground,
-        egui::Id::new(id),
-    ));
+    let layer_id = egui::LayerId::new(egui::Order::Foreground, egui::Id::new(id));
+    let painter = ctx.layer_painter(layer_id);
     painter.rect_filled(screen_rect, 0.0,
         Color32::from_rgba_unmultiplied(0, 0, 0, 100));
 }
 
-/// Check if user clicked outside a modal window.
-pub fn clicked_outside_modal(response: Option<egui::InnerResponse<Option<()>>>) -> bool {
-    response.map_or(false, |resp| resp.response.clicked_elsewhere())
+/// Check if the user clicked the backdrop (outside the modal window).
+/// Must be called AFTER the window is rendered so we know the window rect.
+pub fn backdrop_clicked(ctx: &egui::Context, window_response: &Option<egui::InnerResponse<Option<()>>>) -> bool {
+    let clicked = ctx.input(|i| i.pointer.primary_clicked());
+    if !clicked { return false; }
+
+    // If any popup is open (color picker, combo box), don't close
+    #[allow(deprecated)]
+    let popup_open = ctx.memory(|m| m.any_popup_open());
+    if popup_open { return false; }
+
+    // Check click position is outside the window rect
+    let click_pos = ctx.input(|i| i.pointer.interact_pos());
+    if let (Some(pos), Some(resp)) = (click_pos, window_response) {
+        !resp.response.rect.contains(pos)
+    } else {
+        false
+    }
 }
+
 
 /// Standard frame for modal overlay windows.
 pub fn overlay_frame() -> egui::Frame {
@@ -120,8 +136,8 @@ pub const THUMBNAIL_SIZE: f32 = 120.0;
 pub const THUMBNAIL_ROUNDING: f32 = 4.0;
 
 // === Phase 5: Settings Dialog ===
-pub const SETTINGS_DIALOG_WIDTH: f32 = 340.0;
-pub const SETTINGS_DIALOG_HEIGHT: f32 = 800.0;
+pub const SETTINGS_DIALOG_WIDTH: f32 = 480.0;
+pub const SETTINGS_DIALOG_HEIGHT: f32 = 700.0;
 
 /// Hint text for settings modal (readable on dark overlay)
 pub const TEXT_HINT: Color32 = Color32::from_rgb(0xb8, 0xb8, 0xb8);

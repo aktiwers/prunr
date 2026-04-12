@@ -48,6 +48,22 @@ pub fn downscale_image(img: DynamicImage, max_dim: u32) -> DynamicImage {
     img.resize_exact(nw, nh, FilterType::Lanczos3)
 }
 
+/// Alpha-blend an RGBA image onto a solid background color, making all pixels fully opaque.
+pub fn apply_background_color(img: &mut RgbaImage, bg: [u8; 3]) {
+    let raw = img.as_mut();
+    let n = raw.len() / 4;
+    for i in 0..n {
+        let a = raw[i * 4 + 3] as f32 / 255.0;
+        if a < 1.0 {
+            let inv = 1.0 - a;
+            raw[i * 4]     = (raw[i * 4]     as f32 * a + bg[0] as f32 * inv) as u8;
+            raw[i * 4 + 1] = (raw[i * 4 + 1] as f32 * a + bg[1] as f32 * inv) as u8;
+            raw[i * 4 + 2] = (raw[i * 4 + 2] as f32 * a + bg[2] as f32 * inv) as u8;
+            raw[i * 4 + 3] = 255;
+        }
+    }
+}
+
 /// Encode an RgbaImage as PNG bytes with fast compression.
 pub fn encode_rgba_png(img: &RgbaImage) -> Result<Vec<u8>, CoreError> {
     let mut buf = Vec::with_capacity(img.as_raw().len() / 2);

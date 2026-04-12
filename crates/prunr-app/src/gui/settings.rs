@@ -16,6 +16,18 @@ pub struct Settings {
     pub edge_shift: f32,
     /// Refine mask edges using guided filter for better detail.
     pub refine_edges: bool,
+    /// Line extraction mode.
+    pub line_mode: LineMode,
+    /// Line detection sensitivity: 0.0 = minimal lines, 1.0 = maximum detail. Default 0.5.
+    pub line_strength: f32,
+    /// Override line color instead of keeping original colors.
+    pub solid_line_color: bool,
+    /// The solid color for lines when solid_line_color is enabled. [R, G, B, A]
+    pub line_color: [u8; 4],
+    /// Fill transparent areas with a solid background color.
+    pub apply_bg_color: bool,
+    /// The background fill color. [R, G, B, A]
+    pub bg_color: [u8; 4],
     /// Force CPU inference even when GPU is available (not persisted — resets each launch).
     #[serde(skip)]
     pub force_cpu: bool,
@@ -101,6 +113,16 @@ impl From<ModelKind> for SettingsModel {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum LineMode {
+    /// No line extraction
+    Off,
+    /// Extract lines from original image (skip bg removal)
+    LinesOnly,
+    /// Remove background first, then extract lines from the result
+    AfterBgRemoval,
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
@@ -112,6 +134,12 @@ impl Default for Settings {
             mask_threshold_enabled: false,
             edge_shift: 0.0,
             refine_edges: false,
+            line_mode: LineMode::Off,
+            line_strength: 0.5,
+            solid_line_color: false,
+            line_color: [0, 0, 0, 255],
+            apply_bg_color: false,
+            bg_color: [255, 255, 255, 255],
             force_cpu: false,
             active_backend: "CPU".to_string(),
         }
