@@ -79,7 +79,7 @@ pub fn batch_process<F>(
 where
     F: Fn(usize, ProgressStage, f32) + Send + Sync,
 {
-    batch_process_with_mask(images, model, jobs, &MaskSettings::default(), progress)
+    batch_process_with_mask(images, model, jobs, &MaskSettings::default(), false, progress)
 }
 
 /// Like `batch_process` but with custom mask settings.
@@ -92,6 +92,7 @@ pub fn batch_process_with_mask<F>(
     model: ModelKind,
     jobs: usize,
     mask: &MaskSettings,
+    cpu_only: bool,
     progress: Option<F>,
 ) -> Vec<Result<ProcessResult, CoreError>>
 where
@@ -101,7 +102,7 @@ where
         return Vec::new();
     }
 
-    let engines = match create_engine_pool(model, jobs, false) {
+    let engines = match create_engine_pool(model, jobs, cpu_only) {
         Ok(e) => e,
         Err(e) => return images.iter().map(|_| Err(CoreError::Model(e.to_string()))).collect(),
     };
