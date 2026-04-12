@@ -6,7 +6,7 @@ use ort::{inputs, value::Tensor};
 
 use crate::{
     engine::{InferenceEngine, OrtEngine},
-    formats::{check_large_image, encode_rgba_png, load_image_from_bytes},
+    formats::{check_large_image, load_image_from_bytes},
     postprocess::postprocess,
     preprocess::preprocess,
     types::{CoreError, MaskSettings, ProcessResult, ProgressStage},
@@ -167,12 +167,9 @@ where
     report(ProgressStage::Postprocess, 0.8);
     let rgba_image = postprocess(raw_output.view(), &img, mask, model);
 
-    // Stage 6: Alpha merge + PNG encode
     report(ProgressStage::Alpha, 0.95);
-    let rgba_bytes = encode_rgba_png(&rgba_image)?;
 
     Ok(ProcessResult {
-        rgba_bytes,
         rgba_image,
         active_provider: engine.active_provider().to_string(),
     })
@@ -224,7 +221,7 @@ mod tests {
     // Full integration tests require dev-models feature and downloaded model files.
     #[cfg(feature = "dev-models")]
     #[test]
-    fn test_process_image_produces_rgba_bytes() {
+    fn test_process_image_produces_rgba() {
         use crate::{engine::OrtEngine, types::ModelKind};
 
         let engine = OrtEngine::new(ModelKind::Silueta, 1)
@@ -234,9 +231,8 @@ mod tests {
         let result = process_image(&png_bytes, &engine, None::<fn(ProgressStage, f32)>, None);
         assert!(result.is_ok(), "process_image failed: {:?}", result.err());
         let pr = result.unwrap();
-        assert!(!pr.rgba_bytes.is_empty(), "rgba_bytes must not be empty");
-        // PNG magic bytes
-        assert_eq!(&pr.rgba_bytes[0..4], &[0x89, 0x50, 0x4E, 0x47]);
+        assert!(pr.rgba_image.width() > 0, "output image must have width");
+        assert!(pr.rgba_image.height() > 0, "output image must have height");
     }
 
     #[cfg(feature = "dev-models")]
