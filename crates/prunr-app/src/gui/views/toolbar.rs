@@ -123,24 +123,41 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
             }
 
             if app.batch_items.len() >= 2 {
-                let has_pending = app.batch_items.iter().any(|i| i.status == BatchStatus::Pending);
                 let is_batch_processing = app.batch_items.iter().any(|i| i.status == BatchStatus::Processing);
-                let enabled = has_pending && !is_batch_processing;
 
-                let fill = if enabled { theme::ACCENT } else { theme::ACCENT_DISABLED };
-                let text_color = if enabled {
-                    Color32::WHITE
-                } else {
-                    Color32::from_rgba_unmultiplied(255, 255, 255, 102)
-                };
-                let batch_icon = egui::Image::new(egui::include_image!("../../../../../img/batch-icon.png"))
-                    .fit_to_exact_size(egui::vec2(22.0, 22.0));
-                let btn = egui::Button::image_and_text(batch_icon, RichText::new("Process All").color(text_color))
-                    .fill(fill)
+                if is_batch_processing {
+                    // Show Cancel All while processing
+                    let cancel_btn = egui::Button::new(
+                        RichText::new(format!("{}  Cancel All", ICON_CANCEL.codepoint)).color(Color32::WHITE),
+                    )
+                    .fill(theme::DESTRUCTIVE)
                     .corner_radius(theme::BUTTON_ROUNDING)
                     .min_size(egui::vec2(0.0, BTN_HEIGHT));
-                if ui.add_enabled(enabled, btn).on_hover_text("Process all pending images").clicked() {
-                    app.handle_process_all();
+                    if ui.add(cancel_btn).on_hover_text("Cancel all processing (Escape)").clicked() {
+                        app.handle_cancel();
+                        for item in &mut app.batch_items {
+                            if item.status == BatchStatus::Processing {
+                                item.status = BatchStatus::Pending;
+                            }
+                        }
+                    }
+                } else {
+                    let has_pending = app.batch_items.iter().any(|i| i.status == BatchStatus::Pending);
+                    let fill = if has_pending { theme::ACCENT } else { theme::ACCENT_DISABLED };
+                    let text_color = if has_pending {
+                        Color32::WHITE
+                    } else {
+                        Color32::from_rgba_unmultiplied(255, 255, 255, 102)
+                    };
+                    let batch_icon = egui::Image::new(egui::include_image!("../../../../../img/batch-icon.png"))
+                        .fit_to_exact_size(egui::vec2(22.0, 22.0));
+                    let btn = egui::Button::image_and_text(batch_icon, RichText::new("Process All").color(text_color))
+                        .fill(fill)
+                        .corner_radius(theme::BUTTON_ROUNDING)
+                        .min_size(egui::vec2(0.0, BTN_HEIGHT));
+                    if ui.add_enabled(has_pending, btn).on_hover_text("Process all pending images").clicked() {
+                        app.handle_process_all();
+                    }
                 }
             }
 
