@@ -31,6 +31,7 @@ def convert_fp16(src: Path, dst: Path):
         keep_io_types=True,       # inputs/outputs stay FP32 for compatibility
         min_positive_val=1e-7,
         max_finite_val=1e4,
+        op_block_list=["DynamicQuantizeLinear"],  # ORT 2.0 rejects FP16 inputs on this op
     )
     onnx.save(model_fp16, str(dst))
     print(f"    {dst.stat().st_size / 1024 / 1024:.1f} MB")
@@ -45,6 +46,7 @@ def convert_int8(src: Path, dst: Path):
         str(src),
         str(dst),
         weight_type=QuantType.QInt8,
+        op_types_to_quantize=["MatMul", "Gemm", "Conv"],  # only quantize ops ORT 2.0 supports
     )
     print(f"    {dst.stat().st_size / 1024 / 1024:.1f} MB")
 
