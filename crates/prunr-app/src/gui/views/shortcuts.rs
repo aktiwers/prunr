@@ -45,7 +45,7 @@ pub fn render(ctx: &egui::Context) -> bool {
             });
         });
 
-    !open || theme::clicked_outside_modal(window_response)
+    !open || theme::backdrop_clicked(ctx, &window_response)
 }
 
 fn shortcut_row(ui: &mut egui::Ui, key: &str, action: &str) {
