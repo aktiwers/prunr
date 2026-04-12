@@ -46,6 +46,22 @@ pub fn render(ui: &mut egui::Ui, app: &PrunrApp) {
 
         ui.label(RichText::new(&status_text).color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY));
 
+        // History/undo depth indicator (visible when chain_mode is on and history exists)
+        if app.settings.chain_mode {
+            if let Some(item) = app.selected_item() {
+                let depth = item.history.len();
+                if depth > 0 {
+                    ui.add_space(theme::SPACE_SM);
+                    ui.label(
+                        RichText::new(format!("{depth} undo"))
+                            .monospace()
+                            .size(theme::FONT_SIZE_MONO)
+                            .color(theme::TEXT_SECONDARY),
+                    );
+                }
+            }
+        }
+
         if app.state == AppState::Processing {
             let pct = (app.status.pct * 100.0).round() as u32;
             ui.label(
