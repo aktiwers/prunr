@@ -24,8 +24,10 @@ pub(crate) struct BatchItem {
     pub thumb_pending: bool,
     pub result_rgba: Option<Arc<image::RgbaImage>>,
     pub result_texture: Option<egui::TextureHandle>,
-    /// Saved result for redo (populated by undo, consumed by redo)
-    pub undo_result_rgba: Option<Arc<image::RgbaImage>>,
+    /// History stack for undo: previous results, newest last.
+    pub history: Vec<Arc<image::RgbaImage>>,
+    /// Redo stack: results undone, newest last. Cleared on new processing.
+    pub redo_stack: Vec<Arc<image::RgbaImage>>,
     pub status: BatchStatus,
     pub selected: bool,
 }
@@ -345,7 +347,8 @@ impl PrunrApp {
             thumb_pending: false,
             result_rgba: None,
             result_texture: None,
-            undo_result_rgba: None,
+            history: Vec::new(),
+            redo_stack: Vec::new(),
             status: BatchStatus::Pending,
             selected: false,
         });
@@ -453,9 +456,16 @@ impl PrunrApp {
         let mut undone = 0u32;
         for item in &mut self.batch_items {
             let target = if has_selected { item.selected } else { Some(item.id) == current_id };
-            if target && matches!(item.status, BatchStatus::Done | BatchStatus::Error(_)) {
-                item.undo_result_rgba = item.result_rgba.take();
-                item.status = BatchStatus::Pending;
+            if target && item.status == BatchStatus::Done && !item.history.is_empty() {
+                // Push current result to redo stack
+                if let Some(current) = item.result_rgba.take() {
+                    item.redo_stack.push(current);
+                }
+                // Pop from history
+                item.result_rgba = item.history.pop();
+                if item.result_rgba.is_none() {
+                    item.status = BatchStatus::Pending;
+                }
                 item.result_texture = None;
                 item.thumb_texture = None;
                 item.thumb_pending = false;
@@ -465,9 +475,9 @@ impl PrunrApp {
         if undone > 0 {
             self.sync_selected_batch_textures(ctx);
             if undone == 1 {
-                self.toasts.info("Reverted to original");
+                self.toasts.info("Undone");
             } else {
-                self.toasts.info(format!("Reverted {undone} images"));
+                self.toasts.info(format!("Undone {undone} images"));
             }
         }
     }
@@ -478,12 +488,17 @@ impl PrunrApp {
         let mut redone = 0u32;
         for item in &mut self.batch_items {
             let target = if has_selected { item.selected } else { Some(item.id) == current_id };
-            if target && item.status == BatchStatus::Pending && item.undo_result_rgba.is_some() {
-                item.result_rgba = item.undo_result_rgba.take();
+            if target && !item.redo_stack.is_empty() {
+                // Push current result to history
+                if let Some(current) = item.result_rgba.take() {
+                    item.history.push(current);
+                }
+                // Pop from redo
+                item.result_rgba = item.redo_stack.pop();
+                item.status = BatchStatus::Done;
                 item.result_texture = None;
                 item.thumb_texture = None;
                 item.thumb_pending = false;
-                item.status = BatchStatus::Done;
                 redone += 1;
             }
         }
@@ -500,12 +515,28 @@ impl PrunrApp {
     /// Collect and send batch items matching `filter` for processing.
     fn process_items(&mut self, filter: impl Fn(&BatchItem) -> bool) {
         let items: Vec<(u64, Arc<Vec<u8>>)> = self.batch_items.iter()
-            .filter(|i| filter(i) && matches!(i.status, BatchStatus::Pending | BatchStatus::Error(_)))
+            .filter(|i| filter(i) && !matches!(i.status, BatchStatus::Processing))
             .map(|i| (i.id, i.source_bytes.clone()))
             .collect();
         if items.is_empty() { return; }
         for item in &mut self.batch_items {
-            if filter(item) && matches!(item.status, BatchStatus::Pending | BatchStatus::Error(_)) {
+            if filter(item) && !matches!(item.status, BatchStatus::Processing) {
+                // Save current result to history before reprocessing
+                if item.status == BatchStatus::Done {
+                    if let Some(current) = item.result_rgba.take() {
+                        item.history.push(current);
+                        // Enforce depth limit
+                        let max = self.settings.history_depth;
+                        while item.history.len() > max {
+                            item.history.remove(0);
+                        }
+                    }
+                    // Clear redo stack on new processing (standard behavior)
+                    item.redo_stack.clear();
+                    item.result_texture = None;
+                    item.thumb_texture = None;
+                    item.thumb_pending = false;
+                }
                 item.status = BatchStatus::Processing;
             }
         }
@@ -690,7 +721,8 @@ impl PrunrApp {
                     thumb_pending: false,
                     result_rgba: self.result_rgba.take(),
                     result_texture: self.result_texture.take(),
-                    undo_result_rgba: None,
+                    history: Vec::new(),
+                    redo_stack: Vec::new(),
                     status: if self.state == AppState::Done { BatchStatus::Done } else { BatchStatus::Pending },
                     selected: false,
                 };
@@ -713,7 +745,8 @@ impl PrunrApp {
             thumb_pending: false,
             result_rgba: None,
             result_texture: None,
-            undo_result_rgba: None,
+            history: Vec::new(),
+            redo_stack: Vec::new(),
             status: BatchStatus::Pending,
             selected: false,
         });
@@ -862,7 +895,6 @@ impl PrunrApp {
                         match result {
                             Ok(pr) => {
                                 item.result_rgba = Some(Arc::new(pr.rgba_image));
-                                item.undo_result_rgba = None;
                                 item.status = BatchStatus::Done;
                                 item.thumb_texture = None;
                                 item.thumb_pending = false;
