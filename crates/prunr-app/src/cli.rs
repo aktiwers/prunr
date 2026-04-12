@@ -249,6 +249,9 @@ fn run_single(args: &Cli) -> i32 {
     };
 
     let model: ModelKind = args.model.into();
+    if let Some(pb) = &spinner {
+        pb.set_message("Initializing model (first run may take a minute)...");
+    }
     let engine = match OrtEngine::new(model, 1) {
         Ok(e) => e,
         Err(e) => {
