@@ -2,7 +2,7 @@ use rayon::prelude::*;
 use rayon::ThreadPoolBuilder;
 
 use crate::{
-    engine::OrtEngine,
+    engine::{InferenceEngine, OrtEngine},
     pipeline::process_image_with_mask,
     types::{CoreError, MaskSettings, ModelKind, ProcessResult, ProgressStage},
 };
@@ -15,20 +15,31 @@ pub fn create_engine_pool(
     jobs: usize,
     cpu_only: bool,
 ) -> Result<Vec<std::sync::Arc<OrtEngine>>, CoreError> {
-    let is_gpu = !cpu_only && !OrtEngine::detect_active_provider().eq_ignore_ascii_case("CPU");
+    // Create first engine to detect actual runtime provider
+    let first = if cpu_only {
+        OrtEngine::new_cpu_only(model, 1)?
+    } else {
+        OrtEngine::new(model, 1)?
+    };
+
+    // Pool sizing based on what ORT actually selected at runtime
+    let is_gpu = !first.active_provider().eq_ignore_ascii_case("CPU");
     let pool_size = if is_gpu { jobs.min(2) } else { 1 };
     let intra_threads = if pool_size == 1 { num_cpus::get() } else { ort_intra_threads(pool_size) };
 
+    // Rebuild first engine with correct thread count if needed
     let create = |threads| {
-        if cpu_only {
-            OrtEngine::new_cpu_only(model, threads)
-        } else {
-            OrtEngine::new(model, threads)
-        }
+        if cpu_only { OrtEngine::new_cpu_only(model, threads) } else { OrtEngine::new(model, threads) }
     };
 
     let mut engines = Vec::with_capacity(pool_size);
-    for _ in 0..pool_size {
+    if intra_threads == 1 {
+        engines.push(std::sync::Arc::new(first)); // reuse if threads match
+    } else {
+        drop(first);
+        engines.push(std::sync::Arc::new(create(intra_threads)?));
+    }
+    while engines.len() < pool_size {
         engines.push(std::sync::Arc::new(create(intra_threads)?));
     }
     Ok(engines)
