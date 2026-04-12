@@ -168,6 +168,7 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) {
                                 app.settings.auto_remove_on_import = defaults.auto_remove_on_import;
                                 app.settings.force_cpu = defaults.force_cpu;
                                 app.settings.chain_mode = defaults.chain_mode;
+                                app.settings.history_depth = defaults.history_depth;
                                 app.settings.apply_bg_color = defaults.apply_bg_color;
                                 app.settings.bg_color = defaults.bg_color;
                             }
@@ -271,6 +272,23 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) {
                     hint(ui, "Fill transparent areas with a solid color.");
                     ui.add_space(theme::SPACE_SM);
                     color_toggle_row(ui, &mut app.settings.apply_bg_color, "Apply background color", &mut app.settings.bg_color);
+
+                    if app.settings.chain_mode {
+                        ui.add_space(theme::SPACE_MD);
+                        ui.separator();
+                        ui.add_space(theme::SPACE_SM);
+
+                        section_heading(ui, "History");
+                        ui.add_space(theme::SPACE_SM);
+                        let mut depth_f32 = app.settings.history_depth as f32;
+                        let depth_text = format!("{}", app.settings.history_depth);
+                        slider_row(
+                            ui, "History depth", &mut depth_f32,
+                            1.0..=50.0, &depth_text, false, Some(1.0),
+                        );
+                        app.settings.history_depth = depth_f32 as usize;
+                        hint(ui, "Maximum undo steps per image. Higher = more memory.");
+                    }
                 }
 
                 // ── Lines ──

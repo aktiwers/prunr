@@ -514,9 +514,13 @@ impl PrunrApp {
 
     /// Collect and send batch items matching `filter` for processing.
     fn process_items(&mut self, filter: impl Fn(&BatchItem) -> bool) {
-        let items: Vec<(u64, Arc<Vec<u8>>)> = self.batch_items.iter()
+        let chain = self.settings.chain_mode;
+        let items: Vec<(u64, Arc<Vec<u8>>, Option<Arc<image::RgbaImage>>)> = self.batch_items.iter()
             .filter(|i| filter(i) && !matches!(i.status, BatchStatus::Processing))
-            .map(|i| (i.id, i.source_bytes.clone()))
+            .map(|i| {
+                let chain_input = if chain { i.result_rgba.clone() } else { None };
+                (i.id, i.source_bytes.clone(), chain_input)
+            })
             .collect();
         if items.is_empty() { return; }
         for item in &mut self.batch_items {
