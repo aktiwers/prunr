@@ -8,21 +8,29 @@ use crate::{
 };
 
 /// Create an engine pool with GPU/CPU-aware sizing.
-/// GPU: min(jobs, 2) engines. CPU: 1 engine with full thread parallelism.
-/// Returns (engines, pool_size) where pool_size = engines.len().
+/// GPU: 2 engines for pipeline overlap. CPU: 1 engine with full thread parallelism.
 pub fn create_engine_pool(
     model: ModelKind,
+    jobs: usize,
     cpu_only: bool,
 ) -> Result<Vec<std::sync::Arc<OrtEngine>>, CoreError> {
-    // Single engine with full thread parallelism. ORT handles GPU/CPU
-    // selection internally — we can't reliably detect which EP was chosen.
-    let intra_threads = num_cpus::get();
-    let engine = if cpu_only {
-        OrtEngine::new_cpu_only(model, intra_threads)?
+    let is_gpu = !cpu_only && !OrtEngine::detect_active_provider().eq_ignore_ascii_case("CPU");
+    let pool_size = if is_gpu { jobs.min(2) } else { 1 };
+    let intra_threads = if pool_size == 1 {
+        num_cpus::get()
     } else {
-        OrtEngine::new(model, intra_threads)?
+        ort_intra_threads(pool_size)
     };
-    Ok(vec![std::sync::Arc::new(engine)])
+
+    let create = |threads| {
+        if cpu_only { OrtEngine::new_cpu_only(model, threads) } else { OrtEngine::new(model, threads) }
+    };
+
+    let mut engines = Vec::with_capacity(pool_size);
+    for _ in 0..pool_size {
+        engines.push(std::sync::Arc::new(create(intra_threads)?));
+    }
+    Ok(engines)
 }
 
 /// Calculate ORT intra-op thread count to prevent oversubscription.
@@ -81,7 +89,7 @@ where
 pub fn batch_process_with_mask<F>(
     images: &[&[u8]],
     model: ModelKind,
-    _jobs: usize,
+    jobs: usize,
     mask: &MaskSettings,
     cpu_only: bool,
     progress: Option<F>,
@@ -93,7 +101,7 @@ where
         return Vec::new();
     }
 
-    let engines = match create_engine_pool(model, cpu_only) {
+    let engines = match create_engine_pool(model, jobs, cpu_only) {
         Ok(e) => e,
         Err(e) => return images.iter().map(|_| Err(CoreError::Model(e.to_string()))).collect(),
     };
