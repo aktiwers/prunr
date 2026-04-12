@@ -43,9 +43,7 @@ pub enum ProgressStage {
 
 #[derive(Debug)]
 pub struct ProcessResult {
-    /// RGBA PNG bytes of the output image with background removed
-    pub rgba_bytes: Vec<u8>,
-    /// Raw RGBA pixels — avoids re-decode on the UI thread
+    /// Raw RGBA pixels of the output image with background removed
     pub rgba_image: image::RgbaImage,
     /// Name of the execution provider used (e.g., "CUDA", "CPU")
     pub active_provider: String,
@@ -133,6 +131,7 @@ mod tests {
             ProgressStage::Infer,
             ProgressStage::Postprocess,
             ProgressStage::Alpha,
+            ProgressStage::LoadingModel,
         ];
         // All six variants compile and implement Debug + Clone + Copy
         for stage in &stages {
@@ -140,17 +139,16 @@ mod tests {
             let _cloned = stage.clone();
             let _copied: ProgressStage = *stage;
         }
-        assert_eq!(stages.len(), 6);
+        assert_eq!(stages.len(), 7);
     }
 
     #[test]
     fn test_process_result_fields() {
         let result = ProcessResult {
-            rgba_bytes: vec![1, 2, 3, 4],
             rgba_image: image::RgbaImage::new(1, 1),
             active_provider: "CPU".to_string(),
         };
-        assert_eq!(result.rgba_bytes, vec![1, 2, 3, 4]);
+        assert_eq!(result.rgba_image.width(), 1);
         assert_eq!(result.active_provider, "CPU");
     }
 }

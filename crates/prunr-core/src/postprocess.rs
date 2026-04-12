@@ -11,14 +11,21 @@ pub fn postprocess(raw: ArrayView4<f32>, original: &DynamicImage, mask_settings:
     let use_sigmoid = matches!(model, ModelKind::BiRefNetLite);
 
     // rembg models need min-max stats; BiRefNet uses sigmoid instead
-    let (mi, range) = if !use_sigmoid {
+    let (mi, range, uniform_val) = if !use_sigmoid {
         let (mi, ma) = pred.iter().cloned().fold(
             (f32::INFINITY, f32::NEG_INFINITY),
             |(lo, hi), v| (lo.min(v), hi.max(v)),
         );
-        (mi, (ma - mi).max(1e-6_f32))
+        let r = ma - mi;
+        if r < 1e-6 {
+            // Uniform output — use the absolute value to decide:
+            // high confidence (ma > 0.5) = foreground, else background
+            (mi, 1.0, Some(if ma > 0.5 { 1.0f32 } else { 0.0 }))
+        } else {
+            (mi, r, None)
+        }
     } else {
-        (0.0, 1.0)
+        (0.0, 1.0, None)
     };
 
     let (sh, sw) = (pred.nrows(), pred.ncols());
@@ -26,11 +33,11 @@ pub fn postprocess(raw: ArrayView4<f32>, original: &DynamicImage, mask_settings:
     for y in 0..sh {
         for x in 0..sw {
             let raw_val = pred[[y, x]];
-            let mut val = if use_sigmoid {
-                // BiRefNet outputs logits — apply sigmoid
+            let mut val = if let Some(uv) = uniform_val {
+                uv
+            } else if use_sigmoid {
                 1.0 / (1.0 + (-raw_val).exp())
             } else {
-                // rembg models — min-max normalize
                 ((raw_val - mi) / range).clamp(0.0, 1.0)
             };
 
@@ -148,15 +155,12 @@ mod tests {
 
     #[test]
     fn test_postprocess_no_sigmoid_uniform_one() {
-        // All-one tensor: mi = ma = 1, range = 1e-6
-        // (1 - 1) / 1e-6 = 0 -> alpha = 0
-        // Note: uniform tensor always produces 0 alpha (no dynamic range)
-        // This is mathematically correct for min-max on constant input
+        // All-one tensor: uniform high confidence → foreground → alpha=255
         let raw = make_raw_tensor(1.0);
         let original = solid_rgb(32, 32);
         let result = postprocess(raw.view(), &original, &MaskSettings::default(), ModelKind::Silueta);
         for (_, _, p) in result.enumerate_pixels() {
-            assert_eq!(p[3], 0, "Expected alpha=0 for uniform tensor (no range)");
+            assert_eq!(p[3], 255, "Expected alpha=255 for uniform high-confidence tensor");
         }
     }
 

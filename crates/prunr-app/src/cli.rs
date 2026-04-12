@@ -276,7 +276,11 @@ fn run_single(args: &Cli) -> i32 {
 
     match result {
         Ok(pr) => {
-            if let Err(e) = std::fs::write(&out_path, &pr.rgba_bytes) {
+            let png_bytes = match prunr_core::encode_rgba_png(&pr.rgba_image) {
+                Ok(b) => b,
+                Err(e) => { eprintln!("error encoding '{}': {e}", out_path.display()); return 1; }
+            };
+            if let Err(e) = std::fs::write(&out_path, &png_bytes) {
                 eprintln!("error writing '{}': {e}", out_path.display());
                 return 1;
             }
@@ -416,7 +420,17 @@ fn run_batch(args: &Cli) -> i32 {
                     fail_count += 1;
                     continue;
                 }
-                match std::fs::write(&out_path, &pr.rgba_bytes) {
+                let png_bytes = match prunr_core::encode_rgba_png(&pr.rgba_image) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        fail_count += 1;
+                        if let Some(pb) = spinner_opt {
+                            pb.finish_with_message(format!("X {} — encode error: {e}", input.display()));
+                        }
+                        continue;
+                    }
+                };
+                match std::fs::write(&out_path, &png_bytes) {
                     Ok(_) => {
                         success_count += 1;
                         if let Some(pb) = spinner_opt {

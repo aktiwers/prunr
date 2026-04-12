@@ -13,8 +13,6 @@ use image::{GrayImage, RgbaImage};
 /// - `mask`: AI-generated grayscale alpha mask (same dimensions as guide)
 /// - `radius`: filter window radius in pixels (larger = smoother)
 /// - `epsilon`: regularization (smaller = sharper edges, larger = smoother)
-///
-/// Returns a refined GrayImage mask with the same dimensions.
 pub fn guided_filter_alpha(
     guide: &RgbaImage,
     mask: &GrayImage,
@@ -24,6 +22,11 @@ pub fn guided_filter_alpha(
     let (w, h) = (mask.width(), mask.height());
     let n = (w * h) as usize;
 
+    // Two reusable scratchpads — avoids allocating 6 separate Vecs
+    let mut buf_a = vec![0.0f32; n];
+    let mut buf_b = vec![0.0f32; n];
+    let mut integral = vec![0.0f64; n]; // reused by all box_filter calls
+
     // Convert guide to grayscale float [0,1] and mask to float [0,1]
     let mut guide_f = vec![0.0f32; n];
     let mut mask_f = vec![0.0f32; n];
@@ -31,61 +34,61 @@ pub fn guided_filter_alpha(
         for x in 0..w {
             let idx = (y * w + x) as usize;
             let gp = guide.get_pixel(x, y);
-            // Luminance from RGB
             guide_f[idx] = (0.299 * gp[0] as f32 + 0.587 * gp[1] as f32 + 0.114 * gp[2] as f32) / 255.0;
             mask_f[idx] = mask.get_pixel(x, y)[0] as f32 / 255.0;
         }
     }
 
-    // Box filter helper (integral image based)
-    let mean_i = box_filter(&guide_f, w, h, radius);
-    let mean_p = box_filter(&mask_f, w, h, radius);
+    // mean_I and mean_p
+    box_filter(&guide_f, w, h, radius, &mut integral, &mut buf_a);
+    let mean_i = buf_a.clone(); // need to keep for later
+    box_filter(&mask_f, w, h, radius, &mut integral, &mut buf_b);
+    let mean_p = buf_b.clone();
 
-    // I*I and I*p
-    let mut ii = vec![0.0f32; n];
-    let mut ip = vec![0.0f32; n];
+    // I*I → buf_a, I*p → buf_b, then box filter each
     for i in 0..n {
-        ii[i] = guide_f[i] * guide_f[i];
-        ip[i] = guide_f[i] * mask_f[i];
+        buf_a[i] = guide_f[i] * guide_f[i];
+        buf_b[i] = guide_f[i] * mask_f[i];
     }
-    let mean_ii = box_filter(&ii, w, h, radius);
-    let mean_ip = box_filter(&ip, w, h, radius);
+    let ii_src = buf_a.clone();
+    let ip_src = buf_b.clone();
+    box_filter(&ii_src, w, h, radius, &mut integral, &mut buf_a); // mean_ii in buf_a
+    box_filter(&ip_src, w, h, radius, &mut integral, &mut buf_b); // mean_ip in buf_b
 
-    // Compute a and b for each pixel
-    let mut a = vec![0.0f32; n];
-    let mut b = vec![0.0f32; n];
+    // Compute a and b in-place (reuse guide_f and mask_f which are no longer needed)
     for i in 0..n {
-        let var_i = mean_ii[i] - mean_i[i] * mean_i[i];
-        let cov_ip = mean_ip[i] - mean_i[i] * mean_p[i];
-        a[i] = cov_ip / (var_i + epsilon);
-        b[i] = mean_p[i] - a[i] * mean_i[i];
+        let var_i = buf_a[i] - mean_i[i] * mean_i[i];
+        let cov_ip = buf_b[i] - mean_i[i] * mean_p[i];
+        guide_f[i] = cov_ip / (var_i + epsilon); // a
+        mask_f[i] = mean_p[i] - guide_f[i] * mean_i[i]; // b
     }
 
-    // Average a and b over the window
-    let mean_a = box_filter(&a, w, h, radius);
-    let mean_b = box_filter(&b, w, h, radius);
+    // Average a and b
+    box_filter(&guide_f, w, h, radius, &mut integral, &mut buf_a); // mean_a
+    box_filter(&mask_f, w, h, radius, &mut integral, &mut buf_b); // mean_b
 
     // Compute output: q = mean_a * I + mean_b
+    // Recompute guide luminance from the original (guide_f was overwritten with 'a')
     let mut out = GrayImage::new(w, h);
     for y in 0..h {
         for x in 0..w {
             let idx = (y * w + x) as usize;
-            let val = (mean_a[idx] * guide_f[idx] + mean_b[idx]).clamp(0.0, 1.0);
+            let gp = guide.get_pixel(x, y);
+            let lum = (0.299 * gp[0] as f32 + 0.587 * gp[1] as f32 + 0.114 * gp[2] as f32) / 255.0;
+            let val = (buf_a[idx] * lum + buf_b[idx]).clamp(0.0, 1.0);
             out.put_pixel(x, y, image::Luma([(val * 255.0) as u8]));
         }
     }
     out
 }
 
-/// O(1) box filter using integral image (cumulative sum).
-fn box_filter(src: &[f32], w: u32, h: u32, radius: u32) -> Vec<f32> {
+/// O(1) box filter using integral image. Writes result into `out`.
+fn box_filter(src: &[f32], w: u32, h: u32, radius: u32, integral: &mut [f64], out: &mut [f32]) {
     let w = w as usize;
     let h = h as usize;
     let r = radius as i64;
-    let n = w * h;
 
-    // Build integral image
-    let mut integral = vec![0.0f64; n];
+    // Build integral image (reuses caller's buffer)
     for y in 0..h {
         let mut row_sum = 0.0f64;
         for x in 0..w {
@@ -101,7 +104,6 @@ fn box_filter(src: &[f32], w: u32, h: u32, radius: u32) -> Vec<f32> {
         integral[y * w + x]
     };
 
-    let mut out = vec![0.0f32; n];
     for y in 0..h as i64 {
         for x in 0..w as i64 {
             let x1 = (x - r - 1).max(-1);
@@ -113,7 +115,6 @@ fn box_filter(src: &[f32], w: u32, h: u32, radius: u32) -> Vec<f32> {
             out[y as usize * w + x as usize] = (sum / area.max(1.0)) as f32;
         }
     }
-    out
 }
 
 #[cfg(test)]
@@ -135,7 +136,6 @@ mod tests {
         let guide = RgbaImage::from_pixel(32, 32, Rgba([100, 150, 200, 255]));
         let mask = GrayImage::from_pixel(32, 32, Luma([255]));
         let result = guided_filter_alpha(&guide, &mask, 4, 0.01);
-        // Uniform white mask should stay ~white everywhere
         for p in result.pixels() {
             assert!(p[0] >= 250, "Expected ~255, got {}", p[0]);
         }
@@ -144,8 +144,10 @@ mod tests {
     #[test]
     fn test_box_filter_uniform_is_identity() {
         let data = vec![0.5f32; 16];
-        let result = box_filter(&data, 4, 4, 1);
-        for &v in &result {
+        let mut integral = vec![0.0f64; 16];
+        let mut out = vec![0.0f32; 16];
+        box_filter(&data, 4, 4, 1, &mut integral, &mut out);
+        for &v in &out {
             assert!((v - 0.5).abs() < 0.01, "Expected ~0.5, got {v}");
         }
     }
