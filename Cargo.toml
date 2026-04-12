@@ -28,7 +28,7 @@ rayon = "1.11"
 num_cpus = "1"
 egui = "0.34"
 eframe = { version = "0.34", default-features = true }
-egui_extras = { version = "0.34", features = ["all_loaders"] }
+egui_extras = { version = "0.34", features = ["image"] }
 clap = { version = "4.5", features = ["derive"] }
 arboard = { version = "3.6", features = ["wayland-data-control"] }
 resvg = "0.47"
@@ -42,8 +42,10 @@ dirs = "6"
 
 [profile.release]
 strip = true
-lto = "thin"
+lto = "fat"
 opt-level = 3
+panic = "abort"
+codegen-units = 1
 
 [profile.dist]
 inherits = "release"

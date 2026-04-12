@@ -209,6 +209,7 @@ fn load_with_policy(
 fn stage_label(stage: ProgressStage) -> &'static str {
     match stage {
         ProgressStage::LoadingModel => "Loading model...",
+        ProgressStage::LoadingModelCpuFallback => "GPU warming up \u{2014} using CPU...",
         ProgressStage::Decode      => "Decoding...",
         ProgressStage::Resize      => "Resizing...",
         ProgressStage::Normalize   => "Normalizing...",
