@@ -32,7 +32,8 @@ Or browse all releases: [github.com/aktiwers/prunr/releases](https://github.com/
 - **Drag-and-drop** — drop images onto the window to queue them (X11; Wayland pending winit support)
 - **Toast notifications** — animated feedback for save, copy, process complete, errors
 - **Material Design icons** — crisp vector icons throughout the UI (via egui_material_icons)
-- **Non-blocking architecture** — all image decoding, saving, and thumbnail generation runs on background threads
+- **Non-blocking architecture** — all image decoding, saving, thumbnail generation, and file loading runs on background threads
+- **Optimized inference** — FP16 models on GPU, INT8 on CPU, CUDA graph capture, parallel postprocessing with Rayon
 - **Keyboard-driven** — full shortcut set for power users
 - **Cross-platform** — Linux x86_64, macOS x86_64/aarch64, Windows x86_64
 - **Formats** — PNG, JPEG, WebP, BMP input; PNG output (transparent background)
@@ -230,10 +231,12 @@ All models are ONNX format. Silueta and U2Net are compatible with rembg's prepro
 
 Prunr automatically selects the best available inference backend:
 
-1. **CUDA** (Linux/Windows with NVIDIA GPU)
-2. **CoreML** (macOS — Neural Engine on Apple Silicon)
+1. **CUDA** (Linux/Windows with NVIDIA GPU) — with graph capture and TF32 for Ampere+
+2. **CoreML** (macOS — Neural Engine on Apple Silicon) — with persistent model cache
 3. **DirectML** (Windows — AMD/Intel GPUs)
 4. **CPU** (always available, automatic fallback)
+
+When FP16 model variants are available, GPU inference uses half-precision for ~2x speedup. On CPU, INT8 quantized models are preferred for faster inference. Falls back to FP32 automatically if the optimized variant isn't compatible.
 
 The active backend is shown in Settings. No configuration needed — it just works.
 
