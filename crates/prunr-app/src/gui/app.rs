@@ -512,6 +512,7 @@ impl PrunrApp {
         let _ = self.worker_tx.send(WorkerMessage::BatchProcess {
             items,
             model: self.settings.model.into(),
+            jobs: self.settings.parallel_jobs,
             cancel: self.cancel_flag.clone(),
             mask: self.settings.mask_settings(),
             force_cpu: self.settings.force_cpu,
