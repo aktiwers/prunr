@@ -6,3 +6,4 @@ Icon=prunr
 Type=Application
 Categories=Graphics;ImageProcessing;
 MimeType=image/png;image/jpeg;image/webp;image/bmp;
+StartupWMClass=prunr
