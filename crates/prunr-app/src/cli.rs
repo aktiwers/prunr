@@ -52,6 +52,10 @@ pub struct Cli {
     /// Refine mask edges using guided filter for better detail on hair, leaves, etc.
     #[arg(long)]
     pub refine_edges: bool,
+
+    /// Force CPU inference even when GPU is available.
+    #[arg(long)]
+    pub cpu: bool,
 }
 
 /// Model selection
@@ -252,7 +256,7 @@ fn run_single(args: &Cli) -> i32 {
     if let Some(pb) = &spinner {
         pb.set_message("Initializing model (first run may take a minute)...");
     }
-    let engine = match OrtEngine::new(model, 1) {
+    let engine = match if args.cpu { OrtEngine::new_cpu_only(model, 1) } else { OrtEngine::new(model, 1) } {
         Ok(e) => e,
         Err(e) => {
             if let Some(pb) = &spinner { pb.finish_and_clear(); }
@@ -392,6 +396,7 @@ fn run_batch(args: &Cli) -> i32 {
         model,
         args.jobs,
         &mask,
+        args.cpu,
         Some(progress_cb),
     );
 

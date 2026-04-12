@@ -515,6 +515,7 @@ impl PrunrApp {
             jobs: self.settings.parallel_jobs,
             cancel: self.cancel_flag.clone(),
             mask: self.settings.mask_settings(),
+            force_cpu: self.settings.force_cpu,
         });
     }
 
