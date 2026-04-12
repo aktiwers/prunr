@@ -1,6 +1,6 @@
 # Prunr Architecture
 
-> Living document — updated as the codebase evolves. Last updated: 2026-04-12.
+> Living document — updated as the codebase evolves. Last updated: 2026-04-13.
 
 ## Design Principles
 
@@ -22,7 +22,8 @@ prunr/
 │   │       ├── pipeline.rs       # Pre-process → infer → post-process → alpha
 │   │       ├── batch.rs          # Parallel batch via rayon, progress callbacks
 │   │       ├── guided_filter.rs  # Guided filter alpha matting for edge refinement
-│   │       ├── formats.rs        # Image decode/encode (image crate + resvg)
+│   │       ├── edge.rs           # DexiNed edge detection engine + pipeline
+│   │       ├── formats.rs        # Image decode/encode, background color
 │   │       └── types.rs          # Shared types: ProcessResult, Progress, MaskSettings, Error
 │   │
 │   ├── prunr-models/           # Library: model embedding (isolated for build speed)
@@ -59,7 +60,8 @@ prunr/
 ├── models/                       # ONNX model files (.gitignored, fetched via xtask)
 │   ├── silueta.onnx              # ~4MB — fast model, default
 │   ├── u2net.onnx                # ~170MB — quality model
-│   └── birefnet_lite.onnx        # ~214MB — best detail, 1024×1024
+│   ├── birefnet_lite.onnx        # ~214MB — best detail, 1024×1024
+│   └── dexined.onnx              # ~134MB — DexiNed edge detection (exported via scripts/export_dexined.py)
 │
 ├── assets/                       # App icon, fonts
 ├── ARCHITECTURE.md               # This file
@@ -206,7 +208,32 @@ Model-aware preprocessing and postprocessing:
 9. Optional: edge shift (morphological erode/dilate)
 10. Optional: guided filter edge refinement (uses original image colors)
 11. Apply mask as alpha channel to original image → RGBA output
+12. Optional: apply background color (alpha-blend onto solid color)
 ```
+
+## Edge Detection Pipeline (DexiNed)
+
+Line extraction uses a separate pipeline via `EdgeEngine`:
+
+```
+1. Input: DynamicImage (any format, any size)
+2. If image has alpha (AfterBgRemoval mode): flatten onto white background
+3. Resize to 480×640 (DexiNed fixed input shape)
+4. Convert to BGR float32 tensor [1, 3, 480, 640], subtract mean [103.5, 116.2, 123.6]
+5. Run DexiNed ONNX session → 7 output tensors (6 scale outputs + 1 fused)
+6. Take fused output "block_cat" [1, 1, 480, 640]
+7. Apply sigmoid → edge probability map [0, 1]
+8. Apply smoothstep threshold based on line_strength slider
+9. Resize edge mask to original dimensions (Lanczos3)
+10. Compose: edge mask as alpha channel
+    - Optional: override RGB with solid line color
+11. Optional: apply background color
+```
+
+Three line modes:
+- **Off**: normal background removal only
+- **Lines only**: skip segmentation, run DexiNed on original image
+- **After BG removal**: run segmentation first, flatten result onto white, then run DexiNed
 
 ## GPU Execution Provider Strategy
 
@@ -419,3 +446,14 @@ if ui.input(|i| i.modifiers.ctrl && i.key_pressed(Key::O)) { /* open */ }
 | 2026-04-12 | Fix: GPU warming status only shown when GPU actually present | Bug fix |
 | 2026-04-12 | selected_item() helper replaces direct batch indexing (5 call sites) | Code quality |
 | 2026-04-12 | LoadingModelCpuFallback progress stage for CPU fallback visibility | UX |
+| 2026-04-12 | UI repaint throttle: 30fps cap during batch, 8-message-per-frame cap | Performance |
+| 2026-04-12 | CPU parallel processing: pool_size = jobs (was hardcoded to 1) | Bug fix |
+| 2026-04-13 | DexiNed edge detection: EdgeEngine, 3 line modes, line strength slider | Feature |
+| 2026-04-13 | Solid line color picker + background color picker with hex input | Feature |
+| 2026-04-13 | Flatten-on-white for AfterBgRemoval mode (prevents ghost edges) | Bug fix |
+| 2026-04-13 | Tabbed Settings modal: General, Lines, Mask tabs | UI |
+| 2026-04-13 | Tabbed CLI Reference (F2): Quick Start, Lines, Mask, Advanced | UI |
+| 2026-04-13 | Backdrop click-to-close: only fires outside modal window rect | Bug fix |
+| 2026-04-13 | Bare-key shortcuts suppressed when text fields have focus | Bug fix |
+| 2026-04-13 | Per-tab + global reset buttons in Settings header | UX |
+| 2026-04-13 | apply_background_color() extracted to prunr-core::formats | Code quality |
