@@ -100,9 +100,12 @@ Open with the gear button or `Ctrl+Space` (`Cmd+Space` on macOS):
 
 | Setting | Description |
 |---------|-------------|
-| **Model** | Silueta (fast), U2Net (quality), or BiRefNet-lite (best detail) |
-| **Auto-remove on import** | Automatically process images when added to the queue |
-| **Parallel jobs** | Number of images to process simultaneously (1 to CPU count) |
+| **Parallel jobs** | Number of images to process simultaneously |
+| **Auto-remove on import** | Process images automatically when opened |
+| **Strength** | How aggressively the background is removed (gamma) |
+| **Hard cutoff** | Binary threshold — removes all semi-transparency |
+| **Edge refine** | Shrink or expand the mask boundary |
+| **Refine edges** | Guided filter for fine detail (hair, leaves) |
 | **Inference backend** | Shows active GPU/CPU backend (read-only) |
 
 ### Keyboard Shortcuts
