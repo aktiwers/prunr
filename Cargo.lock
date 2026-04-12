@@ -3770,6 +3770,7 @@ dependencies = [
 name = "prunr-core"
 version = "0.1.0"
 dependencies = [
+ "dirs",
  "image",
  "ndarray",
  "num_cpus",
