@@ -31,12 +31,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
             app.pending_open_dialog = true;
         }
 
-        // ── Center: Settings gear + Model dropdown ──
-        let center_width = BTN_HEIGHT + theme::SPACE_SM + 160.0;
-        let toolbar_center_x = ui.max_rect().center().x;
-        let current_x = ui.cursor().min.x;
-        let offset = (toolbar_center_x - current_x - center_width / 2.0).max(0.0);
-        ui.add_space(offset);
+        // ── Settings gear + Model dropdown ──
 
         let gear_btn = egui::Button::new(
             RichText::new(ICON_SETTINGS.codepoint)
@@ -164,12 +159,12 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
             }
 
             let has_processable = if has_selected {
-                app.batch_items.iter().any(|i| i.selected && matches!(i.status, BatchStatus::Pending | BatchStatus::Error(_)))
+                app.batch_items.iter().any(|i| i.selected && !matches!(i.status, BatchStatus::Processing))
             } else {
                 app.selected_item()
-                    .map_or(app.state == AppState::Loaded, |item| matches!(item.status, BatchStatus::Pending | BatchStatus::Error(_)))
+                    .map_or(app.state == AppState::Loaded, |item| !matches!(item.status, BatchStatus::Processing))
             };
-            let remove_label = if has_selected { "Process Selected" } else { "Remove BG" };
+            let remove_label = if has_selected { "Process Selected" } else { "Process" };
             let remove_text = if !has_processable || is_processing {
                 RichText::new(remove_label).color(Color32::from_rgba_unmultiplied(255, 255, 255, 102))
             } else {
@@ -186,8 +181,15 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                 .fill(remove_fill)
                 .corner_radius(theme::BUTTON_ROUNDING)
                 .min_size(egui::vec2(0.0, BTN_HEIGHT));
+            let process_tooltip = if app.settings.chain_mode
+                && app.selected_item().map_or(false, |i| i.result_rgba.is_some())
+            {
+                format!("Process current result ({m}+R)")
+            } else {
+                format!("Process original ({m}+R)")
+            };
             if ui.add_enabled(has_processable && !is_processing, remove_btn)
-                .on_hover_text(format!("Remove background ({m}+R)"))
+                .on_hover_text(process_tooltip)
                 .clicked()
             {
                 app.handle_remove_bg();
