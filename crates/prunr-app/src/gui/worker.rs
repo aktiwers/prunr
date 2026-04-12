@@ -64,7 +64,9 @@ pub fn spawn_worker(
                             let is_gpu = gpu_ready && !OrtEngine::detect_active_provider().eq_ignore_ascii_case("CPU");
                             // CPU fallback: single engine with full thread parallelism
                             // GPU: cap at 2 to avoid VRAM exhaustion
-                            let pool_size = if !gpu_ready { 1 } else if is_gpu { jobs.min(2) } else { jobs };
+                            // CPU (incl. fallback): 1 engine, full thread parallelism
+                            // GPU: up to 2 engines to avoid VRAM exhaustion
+                            let pool_size = if is_gpu { jobs.min(2) } else { 1 };
                             let intra_threads = if pool_size == 1 { num_cpus::get() } else { (num_cpus::get() / pool_size).max(1) };
                             let mut engines: Vec<OrtEngine> = Vec::with_capacity(pool_size);
 
@@ -109,7 +111,7 @@ pub fn spawn_worker(
                             let engines: Vec<Arc<OrtEngine>> = engines.into_iter().map(Arc::new).collect();
 
                             let pool = rayon::ThreadPoolBuilder::new()
-                                .num_threads(jobs)
+                                .num_threads(pool_size)
                                 .build()
                                 .unwrap_or_else(|_| rayon::ThreadPoolBuilder::new().build().unwrap());
 
