@@ -90,7 +90,19 @@ impl OrtEngine {
             .commit_from_memory(model_bytes)
             .map_err(|e| CoreError::Inference(format!("ORT session creation failed: {e}")))?;
 
-        let provider_name = if cpu_only { "CPU".to_string() } else { Self::detect_active_provider() };
+        // We can't query ORT for which EP it actually selected at runtime.
+        // Report platform best-guess; updated after first inference from
+        // ProcessResult.active_provider if the actual backend differs.
+        let provider_name = if cpu_only {
+            "CPU".to_string()
+        } else {
+            #[cfg(target_os = "macos")]
+            { "CoreML".to_string() }
+            #[cfg(all(not(target_os = "macos"), not(windows)))]
+            { "CUDA".to_string() }
+            #[cfg(windows)]
+            { "DirectML".to_string() }
+        };
 
         Ok(Self {
             session: Mutex::new(session),
@@ -112,22 +124,10 @@ impl OrtEngine {
         }
     }
 
-    /// Detect the best available provider for this platform.
-    /// On macOS returns "CoreML", on Linux/Windows returns "CUDA" or "DirectML".
-    /// The actual EP used depends on runtime driver availability — ORT silently
-    /// falls back to CPU if GPU drivers are missing.
+    /// Returns a placeholder. The actual backend is confirmed after first
+    /// inference via ProcessResult.active_provider.
     pub fn detect_active_provider() -> String {
-        #[cfg(target_os = "macos")]
-        { return "CoreML".to_string(); }
-
-        #[cfg(all(not(target_os = "macos"), not(windows)))]
-        { return "CUDA".to_string(); }
-
-        #[cfg(windows)]
-        { return "DirectML".to_string(); }
-
-        #[allow(unreachable_code)]
-        "CPU".to_string()
+        "Detecting...".to_string()
     }
 
     /// Lock the underlying ORT Session for inference.
