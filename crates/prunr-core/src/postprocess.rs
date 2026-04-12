@@ -19,7 +19,9 @@ pub fn postprocess(raw: ArrayView4<f32>, original: &DynamicImage, mask_settings:
         let r = ma - mi;
         if r < 1e-6 {
             // Uniform output — use the absolute value to decide:
-            // high confidence (ma > 0.5) = foreground, else background
+            // rembg models output ~0 for background, ~1 for foreground
+            // after min-max normalization. A uniform value > 0.5 means
+            // "everything is foreground" → full opacity.
             (mi, 1.0, Some(if ma > 0.5 { 1.0f32 } else { 0.0 }))
         } else {
             (mi, r, None)
