@@ -19,21 +19,24 @@ pub fn preprocess(img: &DynamicImage, model: ModelKind) -> Array4<f32> {
 /// Build NCHW tensor from a resized image with the given divisor.
 fn to_nchw(resized: &image::RgbImage, size: u32, divisor: f32) -> Array4<f32> {
     let s = size as usize;
+    let raw = resized.as_raw();
+    let inv_div = 1.0 / divisor;
+    let scale: [f32; 3] = std::array::from_fn(|c| inv_div / STD[c]);
+    let bias: [f32; 3] = std::array::from_fn(|c| MEAN[c] / STD[c]);
+
     let mut out = Array4::<f32>::zeros((1, 3, s, s));
-    for y in 0..s {
-        for x in 0..s {
-            let p = resized.get_pixel(x as u32, y as u32);
-            for c in 0..3 {
-                out[[0, c, y, x]] = (p[c] as f32 / divisor - MEAN[c]) / STD[c];
-            }
+    for c in 0..3 {
+        let mut plane = out.slice_mut(ndarray::s![0, c, .., ..]);
+        let plane_slice = plane.as_slice_mut().unwrap();
+        for i in 0..s * s {
+            plane_slice[i] = raw[i * 3 + c] as f32 * scale[c] - bias[c];
         }
     }
     out
 }
 
 fn preprocess_rembg(img: &DynamicImage) -> Array4<f32> {
-    let rgb = img.to_rgb8();
-    let resized = image::imageops::resize(&rgb, REMBG_SIZE, REMBG_SIZE, FilterType::Lanczos3);
+    let resized = img.resize_exact(REMBG_SIZE, REMBG_SIZE, FilterType::Lanczos3).to_rgb8();
     let max_val = resized
         .pixels()
         .flat_map(|p| p.0.iter().copied())
@@ -44,8 +47,7 @@ fn preprocess_rembg(img: &DynamicImage) -> Array4<f32> {
 }
 
 fn preprocess_birefnet(img: &DynamicImage) -> Array4<f32> {
-    let rgb = img.to_rgb8();
-    let resized = image::imageops::resize(&rgb, BIREFNET_SIZE, BIREFNET_SIZE, FilterType::Lanczos3);
+    let resized = img.resize_exact(BIREFNET_SIZE, BIREFNET_SIZE, FilterType::Lanczos3).to_rgb8();
     to_nchw(&resized, BIREFNET_SIZE, 255.0)
 }
 

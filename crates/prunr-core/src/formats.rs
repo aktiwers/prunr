@@ -1,6 +1,8 @@
 use std::io::Cursor;
 use std::path::Path;
 use image::{DynamicImage, ImageReader, RgbaImage, imageops::FilterType};
+use image::codecs::png::{PngEncoder, CompressionType, FilterType as PngFilter};
+use image::ImageEncoder;
 use crate::types::{CoreError, LARGE_IMAGE_LIMIT};
 
 /// Load an image from a file path. Format detected by file extension.
@@ -46,10 +48,11 @@ pub fn downscale_image(img: DynamicImage, max_dim: u32) -> DynamicImage {
     img.resize_exact(nw, nh, FilterType::Lanczos3)
 }
 
-/// Encode an RgbaImage as PNG bytes. Returns the raw PNG file bytes.
+/// Encode an RgbaImage as PNG bytes with fast compression.
 pub fn encode_rgba_png(img: &RgbaImage) -> Result<Vec<u8>, CoreError> {
-    let mut buf = Vec::new();
-    img.write_to(&mut Cursor::new(&mut buf), image::ImageFormat::Png)
+    let mut buf = Vec::with_capacity(img.as_raw().len() / 2);
+    let encoder = PngEncoder::new_with_quality(&mut buf, CompressionType::Fast, PngFilter::Sub);
+    encoder.write_image(img.as_raw(), img.width(), img.height(), image::ExtendedColorType::Rgba8)
         .map_err(CoreError::from)?;
     Ok(buf)
 }
