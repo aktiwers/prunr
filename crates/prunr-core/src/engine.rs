@@ -66,13 +66,15 @@ impl OrtEngine {
             .with_intra_threads(intra_threads.max(1))
             .map_err(|e| CoreError::Inference(format!("ORT set intra threads failed: {e}")))?;
 
+        // Register all available EPs — ORT tries them in order and silently
+        // skips any that aren't available at runtime (e.g. no CUDA drivers).
         builder = if cpu_only {
             builder.with_execution_providers([
                 CPUExecutionProvider::default().build(),
             ])
         } else {
             builder.with_execution_providers([
-                #[cfg(all(feature = "cuda", not(target_os = "macos")))]
+                #[cfg(not(target_os = "macos"))]
                 ort::execution_providers::CUDAExecutionProvider::default().build(),
                 #[cfg(target_os = "macos")]
                 ort::execution_providers::CoreMLExecutionProvider::default()
@@ -110,18 +112,21 @@ impl OrtEngine {
         }
     }
 
-    /// Infer the active provider name from compile-time feature flags.
-    /// On a standard Linux build without CUDA feature, returns "CPU".
+    /// Detect the best available provider for this platform.
+    /// On macOS returns "CoreML", on Linux/Windows returns "CUDA" or "DirectML".
+    /// The actual EP used depends on runtime driver availability — ORT silently
+    /// falls back to CPU if GPU drivers are missing.
     pub fn detect_active_provider() -> String {
         #[cfg(target_os = "macos")]
         { return "CoreML".to_string(); }
 
-        #[cfg(all(feature = "cuda", not(target_os = "macos")))]
+        #[cfg(all(not(target_os = "macos"), not(windows)))]
         { return "CUDA".to_string(); }
 
         #[cfg(windows)]
         { return "DirectML".to_string(); }
 
+        #[allow(unreachable_code)]
         "CPU".to_string()
     }
 
