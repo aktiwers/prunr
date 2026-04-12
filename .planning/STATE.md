@@ -3,13 +3,13 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: unknown
-stopped_at: Completed 07-01-PLAN.md
-last_updated: "2026-04-12T23:44:51.217Z"
+stopped_at: Completed 07-03-PLAN.md
+last_updated: "2026-04-12T23:52:09.622Z"
 progress:
   total_phases: 7
-  completed_phases: 4
+  completed_phases: 5
   total_plans: 22
-  completed_plans: 19
+  completed_plans: 21
 ---
 
 # Project State
@@ -24,7 +24,7 @@ See: .planning/PROJECT.md (updated 2026-04-06)
 ## Current Position
 
 Phase: 07 (iterative-processing) — EXECUTING
-Plan: 2 of 3
+Plan: 3 of 3 (COMPLETE)
 
 ## Performance Metrics
 
@@ -62,6 +62,8 @@ Plan: 2 of 3
 | Phase 05 P02 | 4 | 2 tasks | 8 files |
 | Phase 05 P03 | 35 | 3 tasks | 10 files |
 | Phase 07 P01 | 4 | 5 tasks | 2 files |
+| Phase 07 P02 | 5 | 5 tasks | 5 files |
+| Phase 07 P03 | 4 | 3 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -123,6 +125,10 @@ Recent decisions affecting current work:
 - [Phase 05]: Drop handler: single file + empty batch uses single-image flow; multiple files OR existing batch uses add_to_batch() for all
 - [Phase 07]: All 5 tasks applied in single compilation pass: removing undo_result_rgba required simultaneous struct/method updates
 - [Phase 07]: History depth enforced via while-loop removal from front of Vec (oldest entries dropped first)
+- [Phase 07]: chain_input encoded to PNG via encode_rgba_png for Off mode since process_image_with_mask takes &[u8]
+- [Phase 07]: AfterBgRemoval with chain_input skips BG removal entirely, runs edge detection directly on chain image
+- [Phase 07]: Cow<[u8]> used in Off arm to avoid cloning source_bytes when not chaining
+- [Phase 07]: History depth slider gated behind chain_mode -- only shown when chain mode is active since history is only relevant in chain mode
 
 ### Pending Todos
 
@@ -136,6 +142,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-04-12T23:44:51.214Z
-Stopped at: Completed 07-01-PLAN.md
+Last session: 2026-04-12T23:52:09.618Z
+Stopped at: Completed 07-03-PLAN.md
 Resume file: None

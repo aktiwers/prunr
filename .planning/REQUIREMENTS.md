@@ -87,6 +87,13 @@ Deferred to future release. Tracked but not in current roadmap.
 - **ADV-01**: Support BiRefNet model for higher-quality edges
 - **ADV-02**: Support ISNet for anime/illustration content
 
+### Iterative Processing
+
+- **ITER-01**: Chain mode toggle — process the current result instead of the original image
+- **ITER-02**: Full undo/redo history stack across all processing layers
+- **ITER-03**: Configurable history depth limit to prevent unbounded memory growth
+- **ITER-04**: Works with all processing modes (BG removal, line extraction, combinations)
+
 ### UX Polish
 
 - **UXP-01**: Recent files list
