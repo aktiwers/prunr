@@ -54,6 +54,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                 item.thumb_texture = Some(
                     ui.ctx().load_texture(format!("thumb_{item_id}"), ci, egui::TextureOptions::LINEAR),
                 );
+                item.thumb_pending = false;
             }
         }
 

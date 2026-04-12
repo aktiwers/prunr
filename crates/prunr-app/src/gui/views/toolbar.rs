@@ -140,6 +140,8 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                                 item.status = BatchStatus::Pending;
                             }
                         }
+                        app.state = AppState::Loaded;
+                        app.status.text = "Cancelled".to_string();
                     }
                 } else {
                     let has_pending = app.batch_items.iter().any(|i| i.status == BatchStatus::Pending);
@@ -164,7 +166,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
             let has_processable = if has_selected {
                 app.batch_items.iter().any(|i| i.selected && matches!(i.status, BatchStatus::Pending | BatchStatus::Error(_)))
             } else {
-                app.batch_items.get(app.selected_batch_index)
+                app.selected_item()
                     .map_or(app.state == AppState::Loaded, |item| matches!(item.status, BatchStatus::Pending | BatchStatus::Error(_)))
             };
             let remove_label = if has_selected { "Process Selected" } else { "Remove BG" };

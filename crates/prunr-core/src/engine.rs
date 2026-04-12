@@ -36,8 +36,7 @@ impl OrtEngine {
     /// ORT silently selects the first available EP. Call active_provider() after creation
     /// to confirm which EP was selected.
     pub fn new(model: ModelKind, intra_threads: usize) -> Result<Self, CoreError> {
-        let bytes = Self::model_bytes(model);
-        Self::build_session(&bytes, intra_threads, model, false)
+        Self::new_with_fallback(model, intra_threads, false)
     }
 
     pub fn model_kind(&self) -> ModelKind {
@@ -46,8 +45,20 @@ impl OrtEngine {
 
     /// Create a CPU-only engine. Instant — no GPU compilation.
     pub fn new_cpu_only(model: ModelKind, intra_threads: usize) -> Result<Self, CoreError> {
-        let bytes = Self::model_bytes(model);
-        Self::build_session(&bytes, intra_threads, model, true)
+        Self::new_with_fallback(model, intra_threads, true)
+    }
+
+    /// Try optimized variant (FP16/INT8) first; fall back to FP32 if session creation fails.
+    fn new_with_fallback(model: ModelKind, intra_threads: usize, cpu_only: bool) -> Result<Self, CoreError> {
+        let optimized = Self::model_bytes_for_backend(model, cpu_only);
+        let fp32 = Self::model_bytes(model);
+        // If the optimized bytes differ from FP32, try them first
+        if optimized.len() != fp32.len() {
+            if let Ok(engine) = Self::build_session(&optimized, intra_threads, model, cpu_only) {
+                return Ok(engine);
+            }
+        }
+        Self::build_session(&fp32, intra_threads, model, cpu_only)
     }
 
     fn model_bytes(model: ModelKind) -> Vec<u8> {
@@ -55,6 +66,23 @@ impl OrtEngine {
             ModelKind::Silueta => prunr_models::silueta_bytes(),
             ModelKind::U2net => prunr_models::u2net_bytes(),
             ModelKind::BiRefNetLite => prunr_models::birefnet_lite_bytes(),
+        }
+    }
+
+    /// Select the best model variant for the active backend.
+    /// Prefers FP16 on GPU, INT8 on CPU, falls back to FP32.
+    fn model_bytes_for_backend(model: ModelKind, cpu_only: bool) -> Vec<u8> {
+        let pm = match model {
+            ModelKind::Silueta => prunr_models::Model::Silueta,
+            ModelKind::U2net => prunr_models::Model::U2net,
+            ModelKind::BiRefNetLite => prunr_models::Model::BiRefNetLite,
+        };
+        if cpu_only {
+            prunr_models::model_int8_bytes(pm)
+                .unwrap_or_else(|| Self::model_bytes(model))
+        } else {
+            prunr_models::model_fp16_bytes(pm)
+                .unwrap_or_else(|| Self::model_bytes(model))
         }
     }
 
@@ -75,7 +103,13 @@ impl OrtEngine {
         } else {
             builder.with_execution_providers([
                 #[cfg(not(target_os = "macos"))]
-                ort::execution_providers::CUDAExecutionProvider::default().build(),
+                ort::execution_providers::CUDAExecutionProvider::default()
+                    .with_device_id(0)
+                    .with_arena_extend_strategy(ort::ep::ArenaExtendStrategy::SameAsRequested)
+                    .with_conv_algorithm_search(ort::ep::cuda::ConvAlgorithmSearch::Default)
+                    .with_cuda_graph(true)
+                    .with_tf32(true)
+                    .build(),
                 #[cfg(target_os = "macos")]
                 ort::execution_providers::CoreMLExecutionProvider::default()
                     .with_model_cache_dir(Self::coreml_cache_dir())

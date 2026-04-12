@@ -437,6 +437,10 @@ impl PrunrApp {
         self.toasts.info("Settings saved");
     }
 
+    pub(crate) fn selected_item(&self) -> Option<&BatchItem> {
+        self.batch_items.get(self.selected_batch_index)
+    }
+
     pub(crate) fn any_modal_open(&self) -> bool {
         self.show_settings || self.show_shortcuts || self.show_cli_help
     }
@@ -445,7 +449,7 @@ impl PrunrApp {
     /// Reverts Done/Error items back to Pending, clearing their results.
     fn handle_undo(&mut self, ctx: &egui::Context) {
         let has_selected = self.batch_items.iter().any(|i| i.selected);
-        let current_id = self.batch_items.get(self.selected_batch_index).map(|b| b.id);
+        let current_id = self.selected_item().map(|b| b.id);
         let mut undone = 0u32;
         for item in &mut self.batch_items {
             let target = if has_selected { item.selected } else { Some(item.id) == current_id };
@@ -470,7 +474,7 @@ impl PrunrApp {
 
     fn handle_redo(&mut self, ctx: &egui::Context) {
         let has_selected = self.batch_items.iter().any(|i| i.selected);
-        let current_id = self.batch_items.get(self.selected_batch_index).map(|b| b.id);
+        let current_id = self.selected_item().map(|b| b.id);
         let mut redone = 0u32;
         for item in &mut self.batch_items {
             let target = if has_selected { item.selected } else { Some(item.id) == current_id };
@@ -712,9 +716,9 @@ impl PrunrApp {
     }
 
     /// Pre-decode source image on a background thread for instant canvas switching.
-    fn request_decode(&self, item_id: u64, bytes: &[u8]) {
+    fn request_decode(&self, item_id: u64, bytes: &Arc<Vec<u8>>) {
         let tx = self.bg_io.decode_tx.clone();
-        let bytes = bytes.to_vec();
+        let bytes = bytes.clone(); // Arc clone — cheap pointer copy
         std::thread::spawn(move || {
             if let Ok(img) = image::load_from_memory(&bytes) {
                 let _ = tx.send((item_id, img.to_rgba8()));
@@ -822,11 +826,12 @@ impl PrunrApp {
             match msg {
                 WorkerResult::BatchProgress { item_id, stage, pct } => {
                     // Update progress if this is the currently viewed item
-                    let is_selected = self.batch_items.get(self.selected_batch_index)
+                    let is_selected = self.selected_item()
                         .map_or(false, |b| b.id == item_id);
                     if is_selected {
                         self.status.stage = match stage {
                             ProgressStage::LoadingModel => "Loading model...".into(),
+                            ProgressStage::LoadingModelCpuFallback => "GPU warming up \u{2014} using CPU".into(),
                             ProgressStage::Decode => "Decoding image".into(),
                             ProgressStage::Resize => "Resizing".into(),
                             ProgressStage::Normalize => "Normalizing pixels".into(),
@@ -838,7 +843,7 @@ impl PrunrApp {
                     }
                 }
                 WorkerResult::BatchItemDone { item_id, result } => {
-                    let is_selected = self.batch_items.get(self.selected_batch_index)
+                    let is_selected = self.selected_item()
                         .map_or(false, |b| b.id == item_id);
                     if let Some(item) = self.batch_items.iter_mut().find(|b| b.id == item_id) {
                         match result {
@@ -913,40 +918,52 @@ impl PrunrApp {
 
     fn handle_drag_and_drop(&mut self, ctx: &egui::Context) {
         let dropped = ctx.input(|i| i.raw.dropped_files.clone());
-        if !dropped.is_empty() {
-            let mut new_items: Vec<(Vec<u8>, String)> = Vec::new();
-            for file in dropped {
-                if let Some(path) = file.path {
+        if dropped.is_empty() { return; }
+
+        // Collect paths (need background I/O) and inline bytes (already in memory)
+        let mut paths: Vec<PathBuf> = Vec::new();
+        let mut inline_items: Vec<(Vec<u8>, String)> = Vec::new();
+
+        for file in dropped {
+            if let Some(path) = file.path {
+                self.last_open_dir = path.parent().map(|p| p.to_path_buf());
+                paths.push(path);
+            } else if let Some(bytes) = file.bytes {
+                inline_items.push((bytes.to_vec(), file.name.clone()));
+            }
+        }
+
+        // Offload path-based file reads to background thread (avoids GUI freeze)
+        if !paths.is_empty() {
+            let tx = self.bg_io.file_load_tx.clone();
+            std::thread::spawn(move || {
+                for path in paths {
                     if let Ok(bytes) = std::fs::read(&path) {
-                        self.last_open_dir = path.parent().map(|p| p.to_path_buf());
                         let name = path.file_name()
                             .and_then(|n| n.to_str())
                             .unwrap_or("untitled")
                             .to_string();
-                        new_items.push((bytes, name));
+                        let _ = tx.send((bytes, name));
                     }
-                } else if let Some(bytes) = file.bytes {
-                    new_items.push((bytes.to_vec(), file.name.clone()));
                 }
-            }
+            });
+        }
 
-            if new_items.len() == 1 && self.batch_items.is_empty() {
-                // Single image, no existing batch — use single-image flow
-                let (bytes, name) = new_items.into_iter().next().unwrap();
+        // Handle inline bytes immediately (Wayland — already in memory, no I/O)
+        if !inline_items.is_empty() {
+            if inline_items.len() == 1 && self.batch_items.is_empty() {
+                let (bytes, name) = inline_items.into_iter().next().unwrap();
                 self.handle_open_bytes(bytes, name);
             } else {
-                // Multiple images OR existing batch — add to batch queue
                 let id_floor = self.next_batch_id;
-                let count = new_items.len();
-                for (bytes, name) in new_items {
+                let count = inline_items.len();
+                for (bytes, name) in inline_items {
                     self.add_to_batch(bytes, name);
                 }
-                // Select the new image if only one was added
                 if count == 1 {
                     self.selected_batch_index = self.batch_items.len() - 1;
                     self.pending_batch_sync = true;
                 }
-                // Auto-remove on import — only process newly added items
                 if self.settings.auto_remove_on_import && self.next_batch_id > id_floor {
                     self.process_items(|item| item.id >= id_floor);
                 }
