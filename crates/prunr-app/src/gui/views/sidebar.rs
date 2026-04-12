@@ -46,7 +46,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
         let item_height = theme::THUMBNAIL_SIZE + theme::SPACE_SM;
 
         // Pick up completed thumbnails from background threads
-        while let Ok((item_id, tw, th, pixels)) = app.thumb_rx.try_recv() {
+        while let Ok((item_id, tw, th, pixels)) = app.bg_io.thumb_rx.try_recv() {
             if let Some(item) = app.batch_items.iter_mut().find(|b| b.id == item_id) {
                 let ci = egui::ColorImage::from_rgba_unmultiplied(
                     [tw as usize, th as usize], &pixels,
@@ -328,7 +328,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                         .save_file()
                     {
                         let rgba = rgba.clone();
-                        let tx = app.save_done_tx.clone();
+                        let tx = app.bg_io.save_done_tx.clone();
                         app.toasts.info("Saving...");
                         std::thread::spawn(move || {
                             let msg = match prunr_core::encode_rgba_png(&rgba) {

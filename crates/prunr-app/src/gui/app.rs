@@ -52,12 +52,7 @@ pub struct PrunrApp {
     worker_rx: mpsc::Receiver<WorkerResult>,
     pub(crate) cancel_flag: Arc<AtomicBool>,
 
-    // Progress tracking
-    pub(crate) progress_stage: String,
-    pub(crate) progress_pct: f32,
-    pub(crate) status_text: String,
-    pub(crate) status_is_temporary: bool,
-    status_set_at: Option<std::time::Instant>,
+    pub(crate) status: super::status_state::StatusState,
 
     // Textures
     pub(crate) source_texture: Option<egui::TextureHandle>,
@@ -76,11 +71,7 @@ pub struct PrunrApp {
     // Set by raw_input_hook — egui converts Ctrl+C to Event::Copy before we see it
     pending_copy: bool,
 
-    // Zoom/Pan state
-    pub(crate) zoom: f32,
-    pub(crate) pan_offset: egui::Vec2,
-    pub(crate) previous_zoom: f32,
-    pub(crate) is_panning: bool,
+    pub(crate) zoom_state: super::zoom_state::ZoomState,
 
     // Before/After toggle
     pub(crate) show_original: bool,
@@ -106,26 +97,11 @@ pub struct PrunrApp {
     /// Incremented when a result completes, drives crossfade in render_done
     pub(crate) result_switch_id: u64,
 
-    // Pending zoom actions (flags consumed by canvas.rs)
-    pub(crate) pending_fit_zoom: bool,
-    pub(crate) pending_actual_size: bool,
     /// Set by add_to_batch — triggers sync_selected_batch_textures in next logic()
     pending_batch_sync: bool,
     /// Set by toolbar Open button — processed in logic() where ctx is available
     pub(crate) pending_open_dialog: bool,
-    /// Channel for receiving files loaded by background thread
-    file_load_rx: mpsc::Receiver<(Vec<u8>, String)>,
-    file_load_tx: mpsc::Sender<(Vec<u8>, String)>,
-    /// Channel for receiving decoded thumbnails from background thread
-    /// (batch_item_id, width, height, rgba_pixels)
-    pub(crate) thumb_rx: mpsc::Receiver<(u64, u32, u32, Vec<u8>)>,
-    thumb_tx: mpsc::Sender<(u64, u32, u32, Vec<u8>)>,
-    /// Channel for pre-decoded source images (background thread → UI for instant switching)
-    decode_rx: mpsc::Receiver<(u64, image::RgbaImage)>,
-    decode_tx: mpsc::Sender<(u64, image::RgbaImage)>,
-    /// Channel for background save completion notifications
-    save_done_rx: mpsc::Receiver<String>,
-    pub(crate) save_done_tx: mpsc::Sender<String>,
+    pub(crate) bg_io: super::background_io::BackgroundIO,
     /// Toast notification system
     pub(crate) toasts: egui_notify::Toasts,
 }
@@ -201,10 +177,7 @@ impl PrunrApp {
         cc.egui_ctx.set_global_style(style);
 
         let clipboard = arboard::Clipboard::new().ok();
-        let (file_load_tx, file_load_rx) = mpsc::channel();
-        let (thumb_tx, thumb_rx) = mpsc::channel();
-        let (decode_tx, decode_rx) = mpsc::channel();
-        let (save_done_tx, save_done_rx) = mpsc::channel();
+        let bg_io = super::background_io::BackgroundIO::new();
         let mut settings = Settings::load();
         settings.active_backend = prunr_core::OrtEngine::detect_active_provider();
 
@@ -236,11 +209,7 @@ impl PrunrApp {
             worker_tx,
             worker_rx,
             cancel_flag: Arc::new(AtomicBool::new(false)),
-            progress_stage: String::new(),
-            progress_pct: 0.0,
-            status_text: "Ready".to_string(),
-            status_is_temporary: false,
-            status_set_at: None,
+            status: Default::default(),
             source_texture: None,
             result_texture: None,
             result_rgba: None,
@@ -248,10 +217,7 @@ impl PrunrApp {
             show_shortcuts: false,
             show_cli_help: false,
             pending_copy: false,
-            zoom: 1.0,
-            pan_offset: egui::Vec2::ZERO,
-            previous_zoom: 1.0,
-            is_panning: false,
+            zoom_state: Default::default(),
             show_original: false,
             prev_title: String::new(),
             batch_items: Vec::new(),
@@ -263,18 +229,9 @@ impl PrunrApp {
             settings,
             canvas_switch_id: 0,
             result_switch_id: 0,
-            pending_fit_zoom: false,
-            pending_actual_size: false,
             pending_batch_sync: false,
             pending_open_dialog: false,
-            file_load_tx,
-            file_load_rx,
-            thumb_tx,
-            thumb_rx,
-            decode_tx,
-            decode_rx,
-            save_done_tx,
-            save_done_rx,
+            bg_io,
             toasts: egui_notify::Toasts::default()
                     .with_anchor(egui_notify::Anchor::TopLeft)
                     .with_margin(egui::vec2(theme::SPACE_SM, theme::TOOLBAR_HEIGHT + theme::SPACE_SM)),
@@ -286,10 +243,7 @@ impl PrunrApp {
     pub fn new_for_test() -> Self {
         let (worker_tx, _worker_msg_rx) = mpsc::channel::<WorkerMessage>();
         let (_result_tx, worker_rx) = mpsc::channel::<WorkerResult>();
-        let (file_load_tx, file_load_rx) = mpsc::channel();
-        let (thumb_tx, thumb_rx) = mpsc::channel();
-        let (decode_tx, decode_rx) = mpsc::channel();
-        let (save_done_tx, save_done_rx) = mpsc::channel();
+        let bg_io = super::background_io::BackgroundIO::new();
         let settings = Settings::default();
         Self {
             state: AppState::Empty,
@@ -300,11 +254,7 @@ impl PrunrApp {
             worker_tx,
             worker_rx,
             cancel_flag: Arc::new(AtomicBool::new(false)),
-            progress_stage: String::new(),
-            progress_pct: 0.0,
-            status_text: "Ready".to_string(),
-            status_is_temporary: false,
-            status_set_at: None,
+            status: Default::default(),
             source_texture: None,
             result_texture: None,
             result_rgba: None,
@@ -312,10 +262,7 @@ impl PrunrApp {
             show_shortcuts: false,
             show_cli_help: false,
             pending_copy: false,
-            zoom: 1.0,
-            pan_offset: egui::Vec2::ZERO,
-            previous_zoom: 1.0,
-            is_panning: false,
+            zoom_state: Default::default(),
             show_original: false,
             prev_title: String::new(),
             batch_items: Vec::new(),
@@ -327,18 +274,9 @@ impl PrunrApp {
             settings,
             canvas_switch_id: 0,
             result_switch_id: 0,
-            pending_fit_zoom: false,
-            pending_actual_size: false,
             pending_batch_sync: false,
             pending_open_dialog: false,
-            file_load_tx,
-            file_load_rx,
-            thumb_tx,
-            thumb_rx,
-            decode_tx,
-            decode_rx,
-            save_done_tx,
-            save_done_rx,
+            bg_io,
             toasts: egui_notify::Toasts::default()
                     .with_anchor(egui_notify::Anchor::TopLeft)
                     .with_margin(egui::vec2(theme::SPACE_SM, theme::TOOLBAR_HEIGHT + theme::SPACE_SM)),
@@ -347,15 +285,12 @@ impl PrunrApp {
 
     fn set_temporary_status(&mut self, text: impl Into<String>) {
         let msg: String = text.into();
-        // Show as toast notification
         if msg.contains("fail") || msg.contains("Could not") || msg.contains("not available") {
             self.toasts.error(msg.clone());
         } else {
             self.toasts.success(msg.clone());
         }
-        self.status_text = msg;
-        self.status_is_temporary = true;
-        self.status_set_at = Some(std::time::Instant::now());
+        self.status.set_temporary(&msg);
     }
 
     /// Reset app state after all batch items are removed.
@@ -426,11 +361,9 @@ impl PrunrApp {
         self.result_rgba = None;
 
         self.state = AppState::Loaded;
-        self.status_text = "Ready".to_string();
+        self.status.text = "Ready".to_string();
         self.canvas_switch_id += 1;
-        self.pan_offset = egui::Vec2::ZERO;
-        self.previous_zoom = 1.0;
-        self.pending_fit_zoom = true;
+        self.zoom_state.reset();
         self.show_original = false;
     }
 
@@ -466,7 +399,7 @@ impl PrunrApp {
                 self.handle_open_path(paths.into_iter().next().unwrap());
             } else {
                 // Read files on a background thread to avoid blocking the UI
-                let tx = self.file_load_tx.clone();
+                let tx = self.bg_io.file_load_tx.clone();
                 std::thread::spawn(move || {
                     for path in paths {
                         if let Ok(bytes) = std::fs::read(&path) {
@@ -574,8 +507,8 @@ impl PrunrApp {
         }
         self.cancel_flag.store(false, Ordering::Relaxed);
         self.state = AppState::Processing;
-        self.progress_pct = 0.0;
-        self.progress_stage = "Starting".to_string();
+        self.status.pct = 0.0;
+        self.status.stage = "Starting".to_string();
         let _ = self.worker_tx.send(WorkerMessage::BatchProcess {
             items,
             model: self.settings.model.into(),
@@ -616,7 +549,7 @@ impl PrunrApp {
                     .save_file()
                 {
                     let rgba = rgba.clone();
-                    let tx = self.save_done_tx.clone();
+                    let tx = self.bg_io.save_done_tx.clone();
                     self.toasts.info("Saving...");
                     std::thread::spawn(move || {
                         let msg = match prunr_core::encode_rgba_png(&rgba) {
@@ -646,7 +579,7 @@ impl PrunrApp {
                 .collect();
             let count = items.len();
             self.toasts.info(format!("Saving {count} image(s)..."));
-            let tx = self.save_done_tx.clone();
+            let tx = self.bg_io.save_done_tx.clone();
             std::thread::spawn(move || {
                 let mut saved = 0usize;
                 let mut failed = 0usize;
@@ -779,7 +712,7 @@ impl PrunrApp {
 
     /// Pre-decode source image on a background thread for instant canvas switching.
     fn request_decode(&self, item_id: u64, bytes: &[u8]) {
-        let tx = self.decode_tx.clone();
+        let tx = self.bg_io.decode_tx.clone();
         let bytes = bytes.to_vec();
         std::thread::spawn(move || {
             if let Ok(img) = image::load_from_memory(&bytes) {
@@ -791,7 +724,7 @@ impl PrunrApp {
     /// Request thumbnail generation on a background thread for a batch item.
     /// If result_rgba is Some, thumbnails from result; otherwise decodes source bytes.
     pub(crate) fn request_thumbnail(&self, item_id: u64, source_bytes: &[u8], result_rgba: Option<&Arc<image::RgbaImage>>) {
-        let tx = self.thumb_tx.clone();
+        let tx = self.bg_io.thumb_tx.clone();
         if let Some(rgba) = result_rgba {
             let rgba = rgba.clone(); // Arc clone = cheap pointer copy
             std::thread::spawn(move || {
@@ -855,10 +788,7 @@ impl PrunrApp {
         self.image_dimensions = Some(item.dimensions);
         self.show_original = false;
 
-        self.pan_offset = egui::Vec2::ZERO;
-        self.previous_zoom = 1.0;
-        self.zoom = 1.0;
-        self.pending_fit_zoom = true;
+        self.zoom_state.reset();
 
         // Set state based on this item's status, not global processing state
         let item_status = item.status.clone();
@@ -908,7 +838,7 @@ impl eframe::App for PrunrApp {
                     let is_selected = self.batch_items.get(self.selected_batch_index)
                         .map_or(false, |b| b.id == item_id);
                     if is_selected {
-                        self.progress_stage = match stage {
+                        self.status.stage = match stage {
                             ProgressStage::LoadingModel => "Loading AI model (first run may be slow)".into(),
                             ProgressStage::Decode => "Decoding image".into(),
                             ProgressStage::Resize => "Resizing".into(),
@@ -917,7 +847,7 @@ impl eframe::App for PrunrApp {
                             ProgressStage::Postprocess => "Building mask".into(),
                             ProgressStage::Alpha => "Applying transparency".into(),
                         };
-                        self.progress_pct = pct;
+                        self.status.pct = pct;
                     }
                 }
                 WorkerResult::BatchItemDone { item_id, result } => {
@@ -948,11 +878,11 @@ impl eframe::App for PrunrApp {
                     let total = self.batch_items.len();
                     let processing = self.batch_items.iter().filter(|i| i.status == BatchStatus::Processing).count();
                     if processing > 0 {
-                        self.progress_stage = format!("Processing {done}/{total}");
+                        self.status.stage = format!("Processing {done}/{total}");
                     } else {
-                        self.progress_stage = "Finishing up".to_string();
+                        self.status.stage = "Finishing up".to_string();
                     }
-                    self.progress_pct = done as f32 / total.max(1) as f32;
+                    self.status.pct = done as f32 / total.max(1) as f32;
 
                     if is_selected {
                         self.result_switch_id += 1;
@@ -965,11 +895,11 @@ impl eframe::App for PrunrApp {
                     let still_processing = self.batch_items.iter().any(|i| i.status == BatchStatus::Processing);
                     if failed > 0 {
                         let msg = format!("{failed} image(s) failed to process");
-                        self.status_text = msg.clone();
+                        self.status.text = msg.clone();
                         self.toasts.warning(msg);
                     } else if !still_processing {
                         let msg = format!("All done \u{2014} {done} images processed");
-                        self.status_text = msg.clone();
+                        self.status.text = msg.clone();
                         self.toasts.success(msg);
                     }
                     // Update app state to match viewed item (textures already synced by BatchItemDone)
@@ -987,7 +917,7 @@ impl eframe::App for PrunrApp {
                 WorkerResult::Cancelled => {
                     if self.state == AppState::Processing {
                         self.state = AppState::Loaded;
-                        self.status_text = "Cancelled".to_string();
+                        self.status.text = "Cancelled".to_string();
                     }
                 }
             }
@@ -1113,10 +1043,10 @@ impl eframe::App for PrunrApp {
             self.show_original = !self.show_original;
         }
         if fit_to_window {
-            self.pending_fit_zoom = true;
+            self.zoom_state.pending_fit_zoom = true;
         }
         if actual_size {
-            self.pending_actual_size = true;
+            self.zoom_state.pending_actual_size = true;
         }
         // Cancel batch processing
         let batch_processing = self.batch_items.iter().any(|i| i.status == BatchStatus::Processing);
@@ -1130,7 +1060,7 @@ impl eframe::App for PrunrApp {
         } else if cancel_requested && self.state == AppState::Processing {
             self.handle_cancel();
             self.state = AppState::Loaded;
-            self.status_text = "Cancelled".to_string();
+            self.status.text = "Cancelled".to_string();
         } else if cancel_requested && self.show_settings {
             self.close_settings();
         } else if cancel_requested && self.show_shortcuts {
@@ -1179,7 +1109,7 @@ impl eframe::App for PrunrApp {
         }
 
         // Drain pre-decoded source images from background threads
-        while let Ok((item_id, rgba)) = self.decode_rx.try_recv() {
+        while let Ok((item_id, rgba)) = self.bg_io.decode_rx.try_recv() {
             if let Some(item) = self.batch_items.iter_mut().find(|b| b.id == item_id) {
                 item.source_rgba = Some(rgba);
             }
@@ -1187,7 +1117,7 @@ impl eframe::App for PrunrApp {
 
         // Drain files loaded by background thread (max 5 per frame to stay responsive)
         // Drain save completion notifications
-        while let Ok(msg) = self.save_done_rx.try_recv() {
+        while let Ok(msg) = self.bg_io.save_done_rx.try_recv() {
             if msg.contains("fail") {
                 self.toasts.error(msg);
             } else {
@@ -1199,7 +1129,7 @@ impl eframe::App for PrunrApp {
         let mut loaded_count = 0u32;
         let mut channel_drained = false;
         for _ in 0..5 {
-            match self.file_load_rx.try_recv() {
+            match self.bg_io.file_load_rx.try_recv() {
                 Ok((bytes, name)) => {
                     self.add_to_batch(bytes, name);
                     loaded_count += 1;
@@ -1233,16 +1163,7 @@ impl eframe::App for PrunrApp {
             ctx.send_viewport_cmd(ViewportCommand::Title(title));
         }
 
-        // e. Clear temporary status text after ~2 seconds
-        if self.status_is_temporary {
-            if let Some(set_at) = self.status_set_at {
-                if set_at.elapsed() > std::time::Duration::from_secs(2) {
-                    self.status_text = "Ready".into();
-                    self.status_is_temporary = false;
-                    self.status_set_at = None;
-                }
-            }
-        }
+        self.status.tick();
 
         // If source texture still missing, try creating from decode channel results
         // (sync_selected_batch_textures handles this from batch_items[].source_rgba)

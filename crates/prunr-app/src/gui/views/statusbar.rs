@@ -31,23 +31,23 @@ pub fn render(ui: &mut egui::Ui, app: &PrunrApp) {
         } else {
             match app.state {
                 AppState::Empty | AppState::Loaded => {
-                    if app.status_is_temporary {
-                        app.status_text.clone()
+                    if app.status.is_temporary {
+                        app.status.text.clone()
                     } else {
                         "Ready".to_string()
                     }
                 }
                 AppState::Processing => {
-                    format!("Processing... {}", app.progress_stage)
+                    format!("Processing... {}", app.status.stage)
                 }
-                AppState::Done => app.status_text.clone(),
+                AppState::Done => app.status.text.clone(),
             }
         };
 
         ui.label(RichText::new(&status_text).color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY));
 
         if app.state == AppState::Processing {
-            let pct = (app.progress_pct * 100.0).round() as u32;
+            let pct = (app.status.pct * 100.0).round() as u32;
             ui.label(
                 RichText::new(format!("{pct}%"))
                     .monospace()
@@ -66,7 +66,7 @@ pub fn render(ui: &mut egui::Ui, app: &PrunrApp) {
 
             ui.painter().rect_filled(rect, 2.0, theme::PROGRESS_BAR_BG);
 
-            let fill_w = rect.width() * app.progress_pct.clamp(0.0, 1.0);
+            let fill_w = rect.width() * app.status.pct.clamp(0.0, 1.0);
             if fill_w > 0.0 {
                 let fill_rect = Rect::from_min_max(
                     rect.min,
@@ -91,7 +91,7 @@ pub fn render(ui: &mut egui::Ui, app: &PrunrApp) {
             // Zoom percentage with magnifier icon
             if app.state != AppState::Empty {
                 ui.add_space(theme::SPACE_SM);
-                let zoom_pct = (app.zoom * 100.0).round() as u32;
+                let zoom_pct = (app.zoom_state.zoom * 100.0).round() as u32;
                 ui.label(
                     RichText::new(format!("{} {zoom_pct}%", egui_material_icons::icons::ICON_SEARCH.codepoint))
                         .size(theme::FONT_SIZE_BODY)

@@ -4,6 +4,9 @@ pub mod settings;
 pub mod worker;
 pub mod theme;
 pub mod views;
+pub mod zoom_state;
+pub mod status_state;
+pub mod background_io;
 
 #[cfg(test)]
 mod tests;
