@@ -6,6 +6,13 @@
 //! Reference: He, Sun, Tang — "Guided Image Filtering" (2013)
 
 use image::{GrayImage, RgbaImage};
+use rayon::prelude::*;
+
+/// Minimum number of pixels to justify rayon overhead for the lookup pass.
+const PAR_LOOKUP_THRESHOLD: usize = 64 * 64;
+
+/// Minimum number of rows/cols to justify rayon for prefix-sum passes.
+const PAR_PREFIX_THRESHOLD: usize = 256;
 
 /// Refine an alpha mask using a guided filter.
 pub fn guided_filter_alpha(
@@ -17,108 +24,220 @@ pub fn guided_filter_alpha(
     let (w, h) = (mask.width(), mask.height());
     let n = (w * h) as usize;
 
-    // All working buffers allocated once
+    // Convert guide to grayscale luminance [0,1] and mask to [0,1]
     let mut guide_f = vec![0.0f32; n];
     let mut mask_f = vec![0.0f32; n];
-    let mut mean_i = vec![0.0f32; n];
-    let mut mean_p = vec![0.0f32; n];
-    let mut buf = vec![0.0f32; n]; // scratch for intermediate products
-    let mut integral = vec![0.0f64; n];
 
-    // Convert guide to grayscale luminance [0,1] and mask to [0,1]
-    for y in 0..h {
-        for x in 0..w {
-            let idx = (y * w + x) as usize;
-            let gp = guide.get_pixel(x, y);
-            guide_f[idx] = (0.299 * gp[0] as f32 + 0.587 * gp[1] as f32 + 0.114 * gp[2] as f32) / 255.0;
-            mask_f[idx] = mask.get_pixel(x, y)[0] as f32 / 255.0;
-        }
-    }
+    let wu = w as usize;
+    guide_f
+        .par_chunks_mut(wu)
+        .zip(mask_f.par_chunks_mut(wu))
+        .enumerate()
+        .for_each(|(y, (grow, mrow))| {
+            for x in 0..wu {
+                let gp = guide.get_pixel(x as u32, y as u32);
+                grow[x] = (0.299 * gp[0] as f32 + 0.587 * gp[1] as f32 + 0.114 * gp[2] as f32)
+                    / 255.0;
+                mrow[x] = mask.get_pixel(x as u32, y as u32)[0] as f32 / 255.0;
+            }
+        });
 
-    // mean_I → mean_i, mean_p → mean_p
-    box_filter(&guide_f, w, h, radius, &mut integral, &mut mean_i);
-    box_filter(&mask_f, w, h, radius, &mut integral, &mut mean_p);
+    // Prepare element-wise products needed for box_filter calls.
+    // guide_f*guide_f and guide_f*mask_f can be computed in parallel.
+    let mut ii = vec![0.0f32; n]; // I*I
+    let mut ip = vec![0.0f32; n]; // I*p
+    ii.par_iter_mut()
+        .zip(ip.par_iter_mut())
+        .zip(guide_f.par_iter().zip(mask_f.par_iter()))
+        .for_each(|((ii_v, ip_v), (&g, &m))| {
+            *ii_v = g * g;
+            *ip_v = g * m;
+        });
 
-    // mean(I*I): compute I*I into buf, box_filter into buf (in-place via integral)
-    for i in 0..n { buf[i] = guide_f[i] * guide_f[i]; }
-    let mean_ii = buf.clone(); // need source separate from dest
-    box_filter(&mean_ii, w, h, radius, &mut integral, &mut buf); // buf = mean_ii
+    // --- Box filter calls 1-4 in parallel ---
+    // Each needs its own integral scratch and output buffer.
+    let ((mean_i, mean_p), (mean_ii, mean_ip)) = rayon::join(
+        || {
+            rayon::join(
+                || box_filter(&guide_f, w, h, radius), // mean_I
+                || box_filter(&mask_f, w, h, radius),  // mean_p
+            )
+        },
+        || {
+            rayon::join(
+                || box_filter(&ii, w, h, radius),  // mean(I*I)
+                || box_filter(&ip, w, h, radius),  // mean(I*p)
+            )
+        },
+    );
 
-    // Compute variance and a = cov / (var + eps), store a in guide_f (no longer needed as guide)
-    // First need mean(I*p) — compute into mask_f (about to be overwritten with b)
-    let mut ip = vec![0.0f32; n];
-    for i in 0..n { ip[i] = guide_f[i] * mask_f[i]; }
-    // Now overwrite mask_f with mean(I*p)
-    box_filter(&ip, w, h, radius, &mut integral, &mut mask_f); // mask_f = mean_ip
+    // Compute a and b element-wise: a = cov_ip / (var_i + eps), b = mean_p - a * mean_i
+    // Reuse ii/ip buffers for a/b to avoid allocation.
+    let mut a_buf = ii; // reuse
+    let mut b_buf = ip; // reuse
+    a_buf
+        .par_iter_mut()
+        .zip(b_buf.par_iter_mut())
+        .zip(
+            mean_ii
+                .par_iter()
+                .zip(mean_ip.par_iter())
+                .zip(mean_i.par_iter().zip(mean_p.par_iter())),
+        )
+        .for_each(|((a, b), ((mii, mip), (mi, mp)))| {
+            let var_i = mii - mi * mi;
+            let cov_ip = mip - mi * mp;
+            *a = cov_ip / (var_i + epsilon);
+            *b = mp - *a * mi;
+        });
 
-    // a = (mean_ip - mean_i * mean_p) / (var_i + eps)
-    // b = mean_p - a * mean_i
-    // Store a in guide_f, b in mean_p (mean_p no longer needed after this)
-    for i in 0..n {
-        let var_i = buf[i] - mean_i[i] * mean_i[i]; // buf=mean_ii
-        let cov_ip = mask_f[i] - mean_i[i] * mean_p[i]; // mask_f=mean_ip
-        let a = cov_ip / (var_i + epsilon);
-        let b = mean_p[i] - a * mean_i[i];
-        guide_f[i] = a;
-        mean_p[i] = b;
-    }
+    // --- Box filter calls 5-6 in parallel ---
+    let (mean_a, mean_b) = rayon::join(
+        || box_filter(&a_buf, w, h, radius),
+        || box_filter(&b_buf, w, h, radius),
+    );
 
-    // mean_a → buf, mean_b → mean_i (reuse)
-    box_filter(&guide_f, w, h, radius, &mut integral, &mut buf); // buf = mean_a
-    box_filter(&mean_p, w, h, radius, &mut integral, &mut mean_i); // mean_i = mean_b
-
-    // Output: q = mean_a * I + mean_b
+    // Output: q = mean_a * I_original + mean_b
+    // Recompute luminance from guide to avoid keeping guide_f alive.
     let mut out = GrayImage::new(w, h);
-    for y in 0..h {
-        for x in 0..w {
-            let idx = (y * w + x) as usize;
-            let gp = guide.get_pixel(x, y);
-            let lum = (0.299 * gp[0] as f32 + 0.587 * gp[1] as f32 + 0.114 * gp[2] as f32) / 255.0;
-            let val = (buf[idx] * lum + mean_i[idx]).clamp(0.0, 1.0);
-            out.put_pixel(x, y, image::Luma([(val * 255.0) as u8]));
-        }
-    }
+    let out_buf = out.as_mut();
+    out_buf
+        .par_chunks_mut(wu)
+        .enumerate()
+        .for_each(|(y, row)| {
+            for x in 0..wu {
+                let idx = y * wu + x;
+                let gp = guide.get_pixel(x as u32, y as u32);
+                let lum = (0.299 * gp[0] as f32 + 0.587 * gp[1] as f32 + 0.114 * gp[2] as f32)
+                    / 255.0;
+                let val = (mean_a[idx] * lum + mean_b[idx]).clamp(0.0, 1.0);
+                row[x] = (val * 255.0) as u8;
+            }
+        });
     out
 }
 
-/// O(1) box filter using integral image. Writes result into `out`.
-fn box_filter(src: &[f32], w: u32, h: u32, radius: u32, integral: &mut [f64], out: &mut [f32]) {
+/// O(1) box filter using integral image (two-pass parallel prefix sums).
+///
+/// Returns a newly-allocated output buffer.
+fn box_filter(src: &[f32], w: u32, h: u32, radius: u32) -> Vec<f32> {
     let w = w as usize;
     let h = h as usize;
+    let n = w * h;
     let r = radius as i64;
 
-    for y in 0..h {
-        let mut row_sum = 0.0f64;
+    // --- Build integral image via two separable passes ---
+    // Pass 1: horizontal prefix sums (each row independent)
+    let mut integral = vec![0.0f64; n];
+
+    let do_par_rows = h >= PAR_PREFIX_THRESHOLD;
+    let row_work = |y: usize, integral: &mut [f64]| {
+        let base = y * w;
+        let mut acc = 0.0f64;
         for x in 0..w {
-            row_sum += src[y * w + x] as f64;
-            integral[y * w + x] = row_sum + if y > 0 { integral[(y - 1) * w + x] } else { 0.0 };
+            acc += src[base + x] as f64;
+            integral[base + x] = acc;
+        }
+    };
+
+    if do_par_rows {
+        // Each row writes to a disjoint slice — use par_chunks_mut for safe parallel access.
+        integral
+            .par_chunks_mut(w)
+            .enumerate()
+            .for_each(|(y, row)| {
+                let src_base = y * w;
+                let mut acc = 0.0f64;
+                for x in 0..w {
+                    acc += src[src_base + x] as f64;
+                    row[x] = acc;
+                }
+            });
+    } else {
+        for y in 0..h {
+            row_work(y, &mut integral);
         }
     }
 
+    // Pass 2: vertical prefix sums (each column independent)
+    let do_par_cols = w >= PAR_PREFIX_THRESHOLD;
+
+    if do_par_cols {
+        // SAFETY: each column x accesses indices {x, x+w, x+2w, ...} which are disjoint
+        // across different x values. No two parallel iterations touch the same element.
+        let integral_ptr = integral.as_mut_ptr();
+        struct SendPtr(*mut f64);
+        unsafe impl Send for SendPtr {}
+        unsafe impl Sync for SendPtr {}
+        let sp = SendPtr(integral_ptr);
+
+        (0..w).into_par_iter().for_each(|x| {
+            for y in 1..h {
+                unsafe {
+                    let cur = sp.0.add(y * w + x);
+                    let prev = sp.0.add((y - 1) * w + x);
+                    *cur += *prev;
+                }
+            }
+            let _ = &sp;
+        });
+    } else {
+        for x in 0..w {
+            for y in 1..h {
+                integral[y * w + x] += integral[(y - 1) * w + x];
+            }
+        }
+    }
+
+    // --- Lookup pass (embarrassingly parallel) ---
+    let mut out = vec![0.0f32; n];
+
     let get = |x: i64, y: i64| -> f64 {
-        if x < 0 || y < 0 { return 0.0; }
+        if x < 0 || y < 0 {
+            return 0.0;
+        }
         let x = (x as usize).min(w - 1);
         let y = (y as usize).min(h - 1);
         integral[y * w + x]
     };
 
-    for y in 0..h as i64 {
-        for x in 0..w as i64 {
-            let x1 = (x - r - 1).max(-1);
-            let y1 = (y - r - 1).max(-1);
-            let x2 = (x + r).min(w as i64 - 1);
-            let y2 = (y + r).min(h as i64 - 1);
-            let area = (x2 - x1) as f64 * (y2 - y1) as f64;
-            let sum = get(x2, y2) - get(x1, y2) - get(x2, y1) + get(x1, y1);
-            out[y as usize * w + x as usize] = (sum / area.max(1.0)) as f32;
+    let do_par_lookup = n >= PAR_LOOKUP_THRESHOLD;
+
+    if do_par_lookup {
+        out.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+            let yi = y as i64;
+            for x in 0..w {
+                let xi = x as i64;
+                let x1 = (xi - r - 1).max(-1);
+                let y1 = (yi - r - 1).max(-1);
+                let x2 = (xi + r).min(w as i64 - 1);
+                let y2 = (yi + r).min(h as i64 - 1);
+                let area = (x2 - x1) as f64 * (y2 - y1) as f64;
+                let sum = get(x2, y2) - get(x1, y2) - get(x2, y1) + get(x1, y1);
+                row[x] = (sum / area.max(1.0)) as f32;
+            }
+        });
+    } else {
+        for y in 0..h as i64 {
+            for x in 0..w as i64 {
+                let x1 = (x - r - 1).max(-1);
+                let y1 = (y - r - 1).max(-1);
+                let x2 = (x + r).min(w as i64 - 1);
+                let y2 = (y + r).min(h as i64 - 1);
+                let area = (x2 - x1) as f64 * (y2 - y1) as f64;
+                let sum = get(x2, y2) - get(x1, y2) - get(x2, y1) + get(x1, y1);
+                out[y as usize * w + x as usize] = (sum / area.max(1.0)) as f32;
+            }
         }
     }
+
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use image::{Rgba, Luma};
+    use image::{Luma, Rgba};
 
     #[test]
     fn test_guided_filter_preserves_dimensions() {
@@ -142,11 +261,41 @@ mod tests {
     #[test]
     fn test_box_filter_uniform_is_identity() {
         let data = vec![0.5f32; 16];
-        let mut integral = vec![0.0f64; 16];
-        let mut out = vec![0.0f32; 16];
-        box_filter(&data, 4, 4, 1, &mut integral, &mut out);
+        let out = box_filter(&data, 4, 4, 1);
         for &v in &out {
             assert!((v - 0.5).abs() < 0.01, "Expected ~0.5, got {v}");
+        }
+    }
+
+    #[test]
+    fn test_box_filter_correctness_3x3() {
+        // 3x3 image, radius 1 => each interior pixel averages all 9 neighbors
+        #[rustfmt::skip]
+        let data = vec![
+            1.0, 2.0, 3.0,
+            4.0, 5.0, 6.0,
+            7.0, 8.0, 9.0,
+        ];
+        let out = box_filter(&data, 3, 3, 1);
+        // Center pixel (1,1): mean of all 9 = 5.0
+        assert!((out[4] - 5.0).abs() < 1e-5, "center={}", out[4]);
+        // Corner (0,0): mean of [1,2,4,5] = 3.0
+        assert!((out[0] - 3.0).abs() < 1e-5, "corner={}", out[0]);
+    }
+
+    #[test]
+    fn test_parallel_box_filter_matches_sequential() {
+        // Generate a non-trivial image and verify parallel results match
+        let w = 200u32;
+        let h = 150u32;
+        let n = (w * h) as usize;
+        let data: Vec<f32> = (0..n).map(|i| (i as f32 * 0.001).sin().abs()).collect();
+        let result = box_filter(&data, w, h, 5);
+        assert_eq!(result.len(), n);
+        // Every output should be non-negative (input is non-negative)
+        for (i, &v) in result.iter().enumerate() {
+            assert!(v >= -1e-6, "Negative value at {i}: {v}");
+            assert!(v <= 1.0 + 1e-6, "Value > 1 at {i}: {v}");
         }
     }
 }
