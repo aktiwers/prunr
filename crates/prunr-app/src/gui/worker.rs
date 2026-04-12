@@ -57,21 +57,37 @@ pub fn spawn_worker(
                                 ctx_batch.request_repaint();
                             }
 
-                            // GPU backends allocate VRAM per session — cap pool to
-                            // avoid exhausting GPU memory with too many sessions.
-                            let is_gpu = !OrtEngine::detect_active_provider().eq_ignore_ascii_case("CPU");
+                            // Dual-engine strategy: if GPU is still compiling
+                            // (pre-warm not done), use CPU engines for instant start.
+                            // Once GPU is ready, future batches use GPU engines.
+                            let gpu_ready = prewarm.get().is_some();
+                            let is_gpu = gpu_ready && !OrtEngine::detect_active_provider().eq_ignore_ascii_case("CPU");
                             let pool_size = if is_gpu { jobs.min(2) } else { jobs };
                             let intra_threads = (num_cpus::get() / pool_size).max(1);
                             let mut engines: Vec<OrtEngine> = Vec::with_capacity(pool_size);
 
-                            // The pre-warm thread (started at app launch) populates
-                            // the CoreML/CUDA disk cache. We don't reuse its session
-                            // directly — OnceLock can't move out — but all subsequent
-                            // OrtEngine::new() calls are fast thanks to the warm cache.
-                            let _ = prewarm.get(); // ensure pre-warm finished
+                            // Report whether using GPU or CPU fallback
+                            if !gpu_ready {
+                                if let Some((first_id, _)) = items.first() {
+                                    let _ = res_tx_batch.send(WorkerResult::BatchProgress {
+                                        item_id: *first_id,
+                                        stage: ProgressStage::LoadingModel,
+                                        pct: 0.0,
+                                    });
+                                    ctx_batch.request_repaint();
+                                }
+                            }
+
+                            let create_engine = |threads: usize| -> Result<OrtEngine, _> {
+                                if gpu_ready {
+                                    OrtEngine::new(model, threads)
+                                } else {
+                                    OrtEngine::new_cpu_only(model, threads)
+                                }
+                            };
 
                             while engines.len() < pool_size {
-                                match OrtEngine::new(model, intra_threads) {
+                                match create_engine(intra_threads) {
                                     Ok(e) => engines.push(e),
                                     Err(e) => {
                                         for (item_id, _) in &items {
