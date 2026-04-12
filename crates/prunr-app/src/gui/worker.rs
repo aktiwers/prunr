@@ -48,8 +48,9 @@ pub fn spawn_worker(
                         let prewarm = prewarm_engine.clone();
 
                         std::thread::spawn(move || {
-                            let gpu_warming = !force_cpu && prewarm.get().is_none();
-                            let cpu_only = force_cpu || gpu_warming;
+                            let has_gpu = !OrtEngine::detect_active_provider().eq_ignore_ascii_case("CPU");
+                            let gpu_warming = !force_cpu && has_gpu && prewarm.get().is_none();
+                            let cpu_only = force_cpu || prewarm.get().is_none();
 
                             // Report loading status — let user know if falling back to CPU
                             if let Some((first_id, _)) = items.first() {
