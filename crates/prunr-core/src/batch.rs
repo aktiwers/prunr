@@ -7,6 +7,33 @@ use crate::{
     types::{CoreError, MaskSettings, ModelKind, ProcessResult, ProgressStage},
 };
 
+/// Create an engine pool with GPU/CPU-aware sizing.
+/// GPU: min(jobs, 2) engines. CPU: 1 engine with full thread parallelism.
+/// Returns (engines, pool_size) where pool_size = engines.len().
+pub fn create_engine_pool(
+    model: ModelKind,
+    jobs: usize,
+    cpu_only: bool,
+) -> Result<Vec<std::sync::Arc<OrtEngine>>, CoreError> {
+    let is_gpu = !cpu_only && !OrtEngine::detect_active_provider().eq_ignore_ascii_case("CPU");
+    let pool_size = if is_gpu { jobs.min(2) } else { 1 };
+    let intra_threads = if pool_size == 1 { num_cpus::get() } else { ort_intra_threads(pool_size) };
+
+    let create = |threads| {
+        if cpu_only {
+            OrtEngine::new_cpu_only(model, threads)
+        } else {
+            OrtEngine::new(model, threads)
+        }
+    };
+
+    let mut engines = Vec::with_capacity(pool_size);
+    for _ in 0..pool_size {
+        engines.push(std::sync::Arc::new(create(intra_threads)?));
+    }
+    Ok(engines)
+}
+
 /// Calculate ORT intra-op thread count to prevent oversubscription.
 ///
 /// Formula: num_cpus / rayon_workers (minimum 1)
@@ -32,18 +59,17 @@ fn build_batch_pool(jobs: usize) -> rayon::ThreadPool {
 /// # Arguments
 /// - `images`: Slice of image byte slices (PNG, JPEG, WebP, BMP)
 /// - `model`: Which model to use for all images in this batch
-/// - `jobs`: Number of parallel rayon workers. Default 1 (sequential).
-///   Each worker creates its own OrtEngine session — sessions are never shared.
+/// - `jobs`: Desired parallelism. Actual pool size is capped for GPU (max 2) and CPU (1).
 /// - `progress`: Optional per-image progress callback.
 ///   Signature: `|image_idx: usize, stage: ProgressStage, pct: f32|`
 ///
 /// # Returns
 /// `Vec<Result<ProcessResult, CoreError>>` — one entry per input image, in input order.
-/// A failed image returns Err in its slot; the batch does not abort on partial failure.
 ///
-/// # Thread Safety
-/// Each rayon worker thread creates its own OrtEngine. ORT sessions are not shared.
-/// The `progress` callback must be Send + Sync (use Arc<Mutex<_>> if capturing shared state).
+/// # Engine Pool
+/// Engines are created upfront (not per-image). GPU backends cap at 2 sessions to
+/// prevent VRAM exhaustion. CPU uses 1 engine with full thread parallelism. Rayon
+/// pool is sized to match engine count, so there's no Mutex contention.
 pub fn batch_process<F>(
     images: &[&[u8]],
     model: ModelKind,
@@ -75,22 +101,11 @@ where
         return Vec::new();
     }
 
-    // GPU-aware pool sizing (same logic as GUI worker)
-    let is_gpu = !OrtEngine::detect_active_provider().eq_ignore_ascii_case("CPU");
-    let pool_size = if is_gpu { jobs.min(2) } else { 1 };
-    let intra_threads = if pool_size == 1 { num_cpus::get() } else { ort_intra_threads(pool_size) };
-
-    // Create engine pool upfront — one per worker slot
-    let mut engines: Vec<std::sync::Arc<OrtEngine>> = Vec::with_capacity(pool_size);
-    for _ in 0..pool_size {
-        match OrtEngine::new(model, intra_threads) {
-            Ok(e) => engines.push(std::sync::Arc::new(e)),
-            Err(e) => {
-                return images.iter().map(|_| Err(CoreError::Model(e.to_string()))).collect();
-            }
-        }
-    }
-
+    let engines = match create_engine_pool(model, jobs, false) {
+        Ok(e) => e,
+        Err(e) => return images.iter().map(|_| Err(CoreError::Model(e.to_string()))).collect(),
+    };
+    let pool_size = engines.len();
     let pool = build_batch_pool(pool_size);
 
     let mut results: Vec<Result<ProcessResult, CoreError>> =

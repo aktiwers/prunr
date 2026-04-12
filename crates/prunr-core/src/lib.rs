@@ -13,5 +13,5 @@ pub use types::{
     LARGE_IMAGE_LIMIT, DOWNSCALE_TARGET,
 };
 pub use pipeline::{process_image, process_image_unchecked, process_image_with_mask};
-pub use batch::{batch_process, batch_process_with_mask};
+pub use batch::{batch_process, batch_process_with_mask, create_engine_pool};
 pub use formats::{load_image_from_path, load_image_from_bytes, check_large_image, downscale_image, encode_rgba_png};
