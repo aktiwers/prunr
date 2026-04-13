@@ -7,6 +7,7 @@ pub mod views;
 pub mod zoom_state;
 pub mod status_state;
 pub mod background_io;
+pub mod drag_export;
 
 #[cfg(test)]
 mod tests;

@@ -36,5 +36,11 @@ egui_material_icons = { workspace = true }
 egui_animation = { workspace = true }
 dirs = { workspace = true }
 
+# OS drag-out: supported on Windows and macOS. On Linux the crate requires a
+# GTK window (winit/eframe cannot supply one), and pulls in gtk/gdk native
+# deps, so we exclude it entirely on Linux and show a fallback toast instead.
+[target.'cfg(any(target_os = "windows", target_os = "macos"))'.dependencies]
+drag = "2.1"
+
 [build-dependencies]
 winresource = "0.1"
