@@ -168,6 +168,7 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) {
                                 app.settings.auto_remove_on_import = defaults.auto_remove_on_import;
                                 app.settings.force_cpu = defaults.force_cpu;
                                 app.settings.chain_mode = defaults.chain_mode;
+                                app.settings.dark_checker = defaults.dark_checker;
                                 app.settings.history_depth = defaults.history_depth;
                                 app.settings.apply_bg_color = defaults.apply_bg_color;
                                 app.settings.bg_color = defaults.bg_color;
@@ -244,6 +245,15 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) {
                             .size(theme::FONT_SIZE_BODY),
                     );
                     hint(ui, "Start removing background as soon as images are opened");
+                    ui.add_space(theme::SPACE_MD);
+
+                    ui.checkbox(
+                        &mut app.settings.dark_checker,
+                        RichText::new("Dark checkerboard")
+                            .color(theme::TEXT_PRIMARY)
+                            .size(theme::FONT_SIZE_BODY),
+                    );
+                    hint(ui, "Use dark tones for the transparency pattern — helps when viewing light results.");
                     ui.add_space(theme::SPACE_MD);
 
                     // Force CPU only makes sense when a GPU is actually in play.

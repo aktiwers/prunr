@@ -66,11 +66,17 @@ pub const TEXT_PRIMARY: Color32 = Color32::from_rgb(0xf0, 0xf0, 0xf0);
 /// Secondary text
 pub const TEXT_SECONDARY: Color32 = Color32::from_rgb(0x88, 0x88, 0x88);
 
-/// Checkerboard light squares
+/// Checkerboard light squares (light mode)
 pub const CHECKER_LIGHT: Color32 = Color32::from_rgb(0xcc, 0xcc, 0xcc);
 
-/// Checkerboard dark squares
+/// Checkerboard dark squares (light mode)
 pub const CHECKER_DARK: Color32 = Color32::from_rgb(0x88, 0x88, 0x88);
+
+/// Checkerboard light squares (dark mode — for viewing results on dark background)
+pub const CHECKER_LIGHT_DARK_MODE: Color32 = Color32::from_rgb(0x2a, 0x2a, 0x2a);
+
+/// Checkerboard dark squares (dark mode)
+pub const CHECKER_DARK_DARK_MODE: Color32 = Color32::from_rgb(0x1f, 0x1f, 0x1f);
 
 /// Progress bar fill
 pub const PROGRESS_FILL: Color32 = ACCENT;
