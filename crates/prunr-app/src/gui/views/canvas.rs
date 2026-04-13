@@ -380,7 +380,7 @@ fn render_done(ui: &mut egui::Ui, app: &PrunrApp) {
         }
 
         if fade >= 1.0 {
-            draw_checkerboard(ui, img_rect);
+            draw_checkerboard(ui, img_rect, app.settings.dark_checker);
         }
         let result_alpha = (fade * 255.0) as u8;
         ui.painter().image(
@@ -402,9 +402,14 @@ fn render_done(ui: &mut egui::Ui, app: &PrunrApp) {
     }
 }
 
-fn draw_checkerboard(ui: &egui::Ui, bounds: Rect) {
+fn draw_checkerboard(ui: &egui::Ui, bounds: Rect, dark: bool) {
     let checker_size = theme::CHECKER_SIZE;
     let painter = ui.painter();
+    let (color_light, color_dark) = if dark {
+        (theme::CHECKER_LIGHT_DARK_MODE, theme::CHECKER_DARK_DARK_MODE)
+    } else {
+        (theme::CHECKER_LIGHT, theme::CHECKER_DARK)
+    };
 
     let start_x = bounds.min.x;
     let start_y = bounds.min.y;
@@ -418,9 +423,9 @@ fn draw_checkerboard(ui: &egui::Ui, bounds: Rect) {
         let mut col = 0usize;
         while x < end_x {
             let color = if (row + col) % 2 == 0 {
-                theme::CHECKER_LIGHT
+                color_light
             } else {
-                theme::CHECKER_DARK
+                color_dark
             };
             let rect = Rect::from_min_max(
                 Pos2::new(x, y),
