@@ -161,16 +161,19 @@ pub fn spawn_worker(
                                             }
                                         };
 
-                                        // Determine input image from chain (previous result) or decode from source
-                                        let chain_img: Option<image::DynamicImage> = chain_input.as_ref().map(|rgba| {
-                                            image::DynamicImage::ImageRgba8((**rgba).clone())
-                                        });
+                                        // Lazily build DynamicImage from chain input — only when actually consumed
+                                        // (edge detect takes &DynamicImage; one clone is unavoidable at this boundary).
+                                        let build_chain_img = || -> Option<image::DynamicImage> {
+                                            chain_input.as_ref().map(|rgba| {
+                                                image::DynamicImage::ImageRgba8((**rgba).clone())
+                                            })
+                                        };
 
                                         let result = match line_mode {
                                             LineMode::LinesOnly => {
                                                 // Edge detection only, skip bg removal
-                                                let input = match &chain_img {
-                                                    Some(img) => Ok(img.clone()),
+                                                let input = match build_chain_img() {
+                                                    Some(img) => Ok(img),
                                                     None => prunr_core::load_image_from_bytes(&img_bytes),
                                                 };
                                                 input.and_then(|img| {
@@ -182,9 +185,8 @@ pub fn spawn_worker(
                                                 })
                                             }
                                             LineMode::AfterBgRemoval => {
-                                                if chain_img.is_some() {
+                                                if let Some(img) = build_chain_img() {
                                                     // Chain mode: skip bg removal, go straight to edge detection
-                                                    let img = chain_img.unwrap();
                                                     edge_eng.as_ref().unwrap().detect(&img, line_str, line_col)
                                                         .map(|rgba_image| ProcessResult {
                                                             rgba_image,

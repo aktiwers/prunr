@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
@@ -18,16 +19,16 @@ pub(crate) struct BatchItem {
     pub source_bytes: Arc<Vec<u8>>,
     pub dimensions: (u32, u32),
     /// Pre-decoded source RGBA (decoded on background thread for instant switching)
-    pub source_rgba: Option<image::RgbaImage>,
+    pub source_rgba: Option<Arc<image::RgbaImage>>,
     pub source_texture: Option<egui::TextureHandle>,
     pub thumb_texture: Option<egui::TextureHandle>,
     pub thumb_pending: bool,
     pub result_rgba: Option<Arc<image::RgbaImage>>,
     pub result_texture: Option<egui::TextureHandle>,
     /// History stack for undo: previous results, newest last.
-    pub history: Vec<Arc<image::RgbaImage>>,
+    pub history: VecDeque<Arc<image::RgbaImage>>,
     /// Redo stack: results undone, newest last. Cleared on new processing.
-    pub redo_stack: Vec<Arc<image::RgbaImage>>,
+    pub redo_stack: VecDeque<Arc<image::RgbaImage>>,
     pub status: BatchStatus,
     pub selected: bool,
 }
@@ -347,8 +348,8 @@ impl PrunrApp {
             thumb_pending: false,
             result_rgba: None,
             result_texture: None,
-            history: Vec::new(),
-            redo_stack: Vec::new(),
+            history: VecDeque::new(),
+            redo_stack: VecDeque::new(),
             status: BatchStatus::Pending,
             selected: false,
         });
@@ -459,10 +460,10 @@ impl PrunrApp {
             if target && item.status == BatchStatus::Done && !item.history.is_empty() {
                 // Push current result to redo stack
                 if let Some(current) = item.result_rgba.take() {
-                    item.redo_stack.push(current);
+                    item.redo_stack.push_back(current);
                 }
-                // Pop from history
-                item.result_rgba = item.history.pop();
+                // Pop most recent from history
+                item.result_rgba = item.history.pop_back();
                 if item.result_rgba.is_none() {
                     item.status = BatchStatus::Pending;
                 }
@@ -473,6 +474,7 @@ impl PrunrApp {
             }
         }
         if undone > 0 {
+            self.result_switch_id += 1;
             self.sync_selected_batch_textures(ctx);
             if undone == 1 {
                 self.toasts.info("Undone");
@@ -491,10 +493,10 @@ impl PrunrApp {
             if target && !item.redo_stack.is_empty() {
                 // Push current result to history
                 if let Some(current) = item.result_rgba.take() {
-                    item.history.push(current);
+                    item.history.push_back(current);
                 }
-                // Pop from redo
-                item.result_rgba = item.redo_stack.pop();
+                // Pop most recent from redo stack
+                item.result_rgba = item.redo_stack.pop_back();
                 item.status = BatchStatus::Done;
                 item.result_texture = None;
                 item.thumb_texture = None;
@@ -503,6 +505,7 @@ impl PrunrApp {
             }
         }
         if redone > 0 {
+            self.result_switch_id += 1;
             self.sync_selected_batch_textures(ctx);
             if redone == 1 {
                 self.toasts.info("Result restored");
@@ -523,21 +526,34 @@ impl PrunrApp {
             })
             .collect();
         if items.is_empty() { return; }
+        let chain_mode = self.settings.chain_mode;
+        let max_depth = self.settings.history_depth;
         for item in &mut self.batch_items {
             if filter(item) && !matches!(item.status, BatchStatus::Processing) {
+                // Seed history with the original image on the very first process of this item.
+                // This lets undo walk all the way back to "no processing applied".
+                if item.history.is_empty() && item.redo_stack.is_empty() {
+                    if let Some(ref src_rgba) = item.source_rgba {
+                        // Zero-copy Arc bump — both fields share the same pixel data
+                        item.history.push_back(src_rgba.clone());
+                    }
+                }
                 // Save current result to history before reprocessing
                 if item.status == BatchStatus::Done {
                     if let Some(current) = item.result_rgba.take() {
-                        item.history.push(current);
-                        // Enforce depth limit
-                        let max = self.settings.history_depth;
-                        while item.history.len() > max {
-                            item.history.remove(0);
+                        if chain_mode {
+                            // Clone the Arc (cheap pointer copy) so history keeps one and canvas keeps one
+                            item.result_rgba = Some(current.clone());
+                        }
+                        item.history.push_back(current);
+                        while item.history.len() > max_depth {
+                            item.history.pop_front();
                         }
                     }
-                    // Clear redo stack on new processing (standard behavior)
                     item.redo_stack.clear();
-                    item.result_texture = None;
+                    if !chain_mode {
+                        item.result_texture = None;
+                    }
                     item.thumb_texture = None;
                     item.thumb_pending = false;
                 }
@@ -725,8 +741,8 @@ impl PrunrApp {
                     thumb_pending: false,
                     result_rgba: self.result_rgba.take(),
                     result_texture: self.result_texture.take(),
-                    history: Vec::new(),
-                    redo_stack: Vec::new(),
+                    history: VecDeque::new(),
+                    redo_stack: VecDeque::new(),
                     status: if self.state == AppState::Done { BatchStatus::Done } else { BatchStatus::Pending },
                     selected: false,
                 };
@@ -749,8 +765,8 @@ impl PrunrApp {
             thumb_pending: false,
             result_rgba: None,
             result_texture: None,
-            history: Vec::new(),
-            redo_stack: Vec::new(),
+            history: VecDeque::new(),
+            redo_stack: VecDeque::new(),
             status: BatchStatus::Pending,
             selected: false,
         });
@@ -768,7 +784,7 @@ impl PrunrApp {
         let bytes = bytes.clone(); // Arc clone — cheap pointer copy
         std::thread::spawn(move || {
             if let Ok(img) = image::load_from_memory(&bytes) {
-                let _ = tx.send((item_id, img.to_rgba8()));
+                let _ = tx.send((item_id, Arc::new(img.to_rgba8())));
             }
         });
     }
@@ -822,12 +838,14 @@ impl PrunrApp {
             // source_rgba not ready yet — background decode thread will deliver it
         }
 
-        // Load result texture lazily
+        // Load result texture lazily — use switch_id in name so every new result
+        // gets a fresh GPU texture (egui caches by name)
         if self.batch_items[idx].result_texture.is_none() {
             if let Some(ref rgba) = self.batch_items[idx].result_rgba {
                 let item_id = self.batch_items[idx].id;
+                let switch = self.result_switch_id;
                 self.batch_items[idx].result_texture = Some(
-                    rgba_to_texture(rgba, &format!("result_{item_id}"), ctx),
+                    rgba_to_texture(rgba, &format!("result_{item_id}_{switch}"), ctx),
                 );
             }
         }
@@ -853,8 +871,9 @@ impl PrunrApp {
                 self.state = AppState::Done;
             }
             BatchStatus::Processing => {
-                self.result_texture = None;
-                self.result_rgba = None;
+                // In chain mode, keep the previous result visible during processing
+                self.result_texture = result_texture;
+                self.result_rgba = result_rgba;
                 self.state = AppState::Processing;
             }
             _ => {
@@ -900,6 +919,9 @@ impl PrunrApp {
                             Ok(pr) => {
                                 item.result_rgba = Some(Arc::new(pr.rgba_image));
                                 item.status = BatchStatus::Done;
+                                // Clear result_texture so sync creates a fresh one from the new RGBA
+                                // (in chain mode we kept the old texture alive for the processing animation)
+                                item.result_texture = None;
                                 item.thumb_texture = None;
                                 item.thumb_pending = false;
                                 let backend_changed = self.settings.active_backend != pr.active_provider;
