@@ -1,8 +1,8 @@
 use std::borrow::Cow;
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc};
+use std::sync::{mpsc, Arc, Mutex};
 
 use egui::{Key, ViewportCommand};
 
@@ -107,6 +107,20 @@ pub struct PrunrApp {
     pub(crate) bg_io: super::background_io::BackgroundIO,
     /// Toast notification system
     pub(crate) toasts: egui_notify::Toasts,
+
+    // ── Drag-out (OS drag to external apps) ────────────────────────────────
+    /// One-shot: set by sidebar when a drag escapes the sidebar rect.
+    /// Consumed by `ui()` which then invokes the platform drag crate.
+    pub(crate) drag_out_pending: Option<Vec<u64>>,
+    /// True while an OS drag session is in progress. Flipped false by the
+    /// drag crate's completion callback. Read by sidebar to dim thumbnails.
+    pub(crate) drag_out_active: Arc<AtomicBool>,
+    /// Item IDs currently being dragged — sidebar reads this to know which
+    /// thumbnails to dim. Shared with the drag callback thread.
+    pub(crate) drag_out_items: Arc<Mutex<HashSet<u64>>>,
+    /// One-time flag: true if we've already shown the "Linux not supported"
+    /// toast this session. Prevents repeat spam on every drag attempt.
+    pub(crate) drag_out_linux_notified: bool,
 }
 
 /// Compute dimensions that fit within max_w x max_h preserving aspect ratio.
@@ -181,6 +195,10 @@ impl PrunrApp {
 
         let clipboard = arboard::Clipboard::new().ok();
         let bg_io = super::background_io::BackgroundIO::new();
+
+        // Housekeeping: clean up stale drag-out temp files from prior sessions.
+        super::drag_export::cleanup_stale();
+
         let mut settings = Settings::load();
         settings.active_backend = prunr_core::OrtEngine::detect_active_provider();
 
@@ -238,6 +256,10 @@ impl PrunrApp {
             toasts: egui_notify::Toasts::default()
                     .with_anchor(egui_notify::Anchor::TopLeft)
                     .with_margin(egui::vec2(theme::SPACE_SM, theme::TOOLBAR_HEIGHT + theme::SPACE_SM)),
+            drag_out_pending: None,
+            drag_out_active: Arc::new(AtomicBool::new(false)),
+            drag_out_items: Arc::new(Mutex::new(HashSet::new())),
+            drag_out_linux_notified: false,
         }
     }
 
@@ -283,6 +305,10 @@ impl PrunrApp {
             toasts: egui_notify::Toasts::default()
                     .with_anchor(egui_notify::Anchor::TopLeft)
                     .with_margin(egui::vec2(theme::SPACE_SM, theme::TOOLBAR_HEIGHT + theme::SPACE_SM)),
+            drag_out_pending: None,
+            drag_out_active: Arc::new(AtomicBool::new(false)),
+            drag_out_items: Arc::new(Mutex::new(HashSet::new())),
+            drag_out_linux_notified: false,
         }
     }
 
@@ -682,26 +708,134 @@ impl PrunrApp {
         }
     }
 
-    pub fn handle_copy(&mut self) {
-        if let Some(ref mut clipboard) = self.clipboard {
-            if let Some(ref rgba) = self.result_rgba {
-                let width = rgba.width() as usize;
-                let height = rgba.height() as usize;
-                let samples = rgba.as_flat_samples();
-                let image_data = arboard::ImageData {
-                    width,
-                    height,
-                    bytes: Cow::Borrowed(samples.as_slice()),
-                };
-                match clipboard.set_image(image_data) {
-                    Ok(()) => self.set_temporary_status("Copied to clipboard"),
-                    Err(_) => self.set_temporary_status(
-                        "Could not copy to clipboard. Try saving instead.",
-                    ),
+    /// Initiate an OS drag-out for the given batch item IDs.
+    /// On Windows/macOS: calls the `drag` crate with PNG temp files.
+    /// On Linux: clears drag state and shows a one-time fallback toast
+    /// (winit + drag crate incompatibility; see Cargo.toml comment).
+    #[allow(unused_variables)]
+    pub fn initiate_drag_out(&mut self, ids: Vec<u64>, frame: &eframe::Frame) {
+        let line_mode = self.settings.line_mode;
+
+        // Encode each item's current pixels to a temp PNG named after the source.
+        let mut paths: Vec<PathBuf> = Vec::with_capacity(ids.len());
+        for id in &ids {
+            if let Some(item) = self.batch_items.iter().find(|b| b.id == *id) {
+                match super::drag_export::prepare(item, line_mode) {
+                    Ok(path) => paths.push(path),
+                    Err(e) => {
+                        self.toasts.error(format!("Drag export failed: {e}"));
+                    }
                 }
             }
-        } else {
+        }
+        if paths.is_empty() {
+            return;
+        }
+
+        // Mark these items as "being dragged out" so sidebar renders them dimmed.
+        if let Ok(mut set) = self.drag_out_items.lock() {
+            set.clear();
+            set.extend(ids.iter().copied());
+        }
+        self.drag_out_active.store(true, Ordering::Relaxed);
+
+        #[cfg(any(target_os = "windows", target_os = "macos"))]
+        {
+            let active_flag = self.drag_out_active.clone();
+            let items_set = self.drag_out_items.clone();
+            let preview_path = paths[0].clone();
+
+            let result = drag::start_drag(
+                frame,
+                drag::DragItem::Files(paths),
+                drag::Image::File(preview_path),
+                move |_result, _cursor| {
+                    active_flag.store(false, Ordering::Relaxed);
+                    if let Ok(mut set) = items_set.lock() {
+                        set.clear();
+                    }
+                },
+                drag::Options::default(),
+            );
+            if let Err(e) = result {
+                self.drag_out_active.store(false, Ordering::Relaxed);
+                if let Ok(mut set) = self.drag_out_items.lock() {
+                    set.clear();
+                }
+                self.toasts.error(format!("Drag failed: {e}"));
+            }
+        }
+
+        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+        {
+            // Linux: not supported by the `drag` crate with winit windows.
+            // Clear drag state and show a one-time hint toast.
+            self.drag_out_active.store(false, Ordering::Relaxed);
+            if let Ok(mut set) = self.drag_out_items.lock() {
+                set.clear();
+            }
+            if !self.drag_out_linux_notified {
+                self.drag_out_linux_notified = true;
+                self.toasts.info(
+                    "Drag to external apps isn't supported on Linux yet.\n\
+                     Use Ctrl+C to copy to clipboard, or the Save button to export."
+                );
+            }
+        }
+    }
+
+    pub fn handle_copy(&mut self) {
+        // Selection rules:
+        // - 0 checkbox-selected → copy the currently-viewed result (original behavior).
+        // - 1 checkbox-selected → copy that one (even if not the currently-viewed item).
+        // - 2+ checkbox-selected → copy the first, show a hint toast about drag-out.
+        //   (System clipboards can't hold multiple images as bitmaps; drag-out
+        //    is the native multi-image export path.)
+        let selected_with_result: Vec<Arc<image::RgbaImage>> = self
+            .batch_items
+            .iter()
+            .filter(|b| b.selected)
+            .filter_map(|b| b.result_rgba.clone())
+            .collect();
+
+        let (rgba_to_copy, multi_hint) = match selected_with_result.len() {
+            0 => (self.result_rgba.clone(), None),
+            1 => (Some(selected_with_result[0].clone()), None),
+            n => (
+                Some(selected_with_result[0].clone()),
+                Some(format!(
+                    "Copied 1 of {n} selected. Drag thumbnails out of the window to export multiple.")
+                ),
+            ),
+        };
+
+        let Some(clipboard) = self.clipboard.as_mut() else {
             self.set_temporary_status("Could not copy to clipboard. Try saving instead.");
+            return;
+        };
+        let Some(rgba) = rgba_to_copy else {
+            return;
+        };
+
+        let width = rgba.width() as usize;
+        let height = rgba.height() as usize;
+        let samples = rgba.as_flat_samples();
+        let image_data = arboard::ImageData {
+            width,
+            height,
+            bytes: Cow::Borrowed(samples.as_slice()),
+        };
+        match clipboard.set_image(image_data) {
+            Ok(()) => {
+                if let Some(msg) = multi_hint {
+                    self.toasts.info(msg);
+                } else {
+                    self.set_temporary_status("Copied to clipboard");
+                }
+            }
+            Err(_) => self.set_temporary_status(
+                "Could not copy to clipboard. Try saving instead.",
+            ),
         }
     }
 
@@ -1275,7 +1409,7 @@ impl eframe::App for PrunrApp {
     }
 
 
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let panel_frame = egui::Frame {
             fill: theme::BG_SECONDARY,
             stroke: egui::Stroke::new(1.0, egui::Color32::from_rgb(0x2a, 0x2a, 0x2a)),
@@ -1318,5 +1452,11 @@ impl eframe::App for PrunrApp {
 
         // Toast notifications — rendered last as foreground overlay
         self.toasts.show(ui.ctx());
+
+        // Consume pending drag-out (sidebar set this when a drag escaped the sidebar).
+        // Must run after sidebar renders so the user sees the drag cursor leave the area.
+        if let Some(ids) = self.drag_out_pending.take() {
+            self.initiate_drag_out(ids, frame);
+        }
     }
 }
