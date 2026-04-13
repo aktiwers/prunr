@@ -16,7 +16,9 @@ fn hit_test(ui: &egui::Ui, rect: Rect) -> (bool, bool) {
 
 pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
     // Sidebar rect — used to detect when a drag escapes the sidebar (= drag-out to external app).
+    // The 12px expansion is a dead-zone so small drifts while reordering don't trigger drag-out.
     let sidebar_rect = ui.clip_rect();
+    let sidebar_escape_rect = sidebar_rect.expand(12.0);
 
     // Snapshot active drag-out state (set of item IDs being dragged) for visual dimming.
     let dragging_ids: HashSet<u64> = if app.drag_out_active.load(Ordering::Relaxed) {
@@ -303,9 +305,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                     && !app.drag_out_active.load(Ordering::Relaxed)
                 {
                     if let Some(pos) = ui.ctx().pointer_hover_pos() {
-                        // Small dead-zone buffer so small drifts while reordering
-                        // within the sidebar don't accidentally trigger drag-out.
-                        if !sidebar_rect.expand(12.0).contains(pos) {
+                        if !sidebar_escape_rect.contains(pos) {
                             let source_selected = app.batch_items[i].selected;
                             let ids: Vec<u64> = if source_selected {
                                 app.batch_items

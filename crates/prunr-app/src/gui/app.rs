@@ -708,6 +708,17 @@ impl PrunrApp {
         }
     }
 
+    /// Clear active drag-out state (used on drag end, error, and Linux fallback).
+    fn reset_drag_out_state(
+        active: &AtomicBool,
+        items: &Mutex<HashSet<u64>>,
+    ) {
+        active.store(false, Ordering::Relaxed);
+        if let Ok(mut set) = items.lock() {
+            set.clear();
+        }
+    }
+
     /// Initiate an OS drag-out for the given batch item IDs.
     /// On Windows/macOS: calls the `drag` crate with PNG temp files.
     /// On Linux: clears drag state and shows a one-time fallback toast
@@ -716,7 +727,6 @@ impl PrunrApp {
     pub fn initiate_drag_out(&mut self, ids: Vec<u64>, frame: &eframe::Frame) {
         let line_mode = self.settings.line_mode;
 
-        // Encode each item's current pixels to a temp PNG named after the source.
         let mut paths: Vec<PathBuf> = Vec::with_capacity(ids.len());
         for id in &ids {
             if let Some(item) = self.batch_items.iter().find(|b| b.id == *id) {
@@ -732,7 +742,7 @@ impl PrunrApp {
             return;
         }
 
-        // Mark these items as "being dragged out" so sidebar renders them dimmed.
+        // Publish dragged IDs so sidebar can dim those thumbnails.
         if let Ok(mut set) = self.drag_out_items.lock() {
             set.clear();
             set.extend(ids.iter().copied());
@@ -750,30 +760,19 @@ impl PrunrApp {
                 drag::DragItem::Files(paths),
                 drag::Image::File(preview_path),
                 move |_result, _cursor| {
-                    active_flag.store(false, Ordering::Relaxed);
-                    if let Ok(mut set) = items_set.lock() {
-                        set.clear();
-                    }
+                    Self::reset_drag_out_state(&active_flag, &items_set);
                 },
                 drag::Options::default(),
             );
             if let Err(e) = result {
-                self.drag_out_active.store(false, Ordering::Relaxed);
-                if let Ok(mut set) = self.drag_out_items.lock() {
-                    set.clear();
-                }
+                Self::reset_drag_out_state(&self.drag_out_active, &self.drag_out_items);
                 self.toasts.error(format!("Drag failed: {e}"));
             }
         }
 
         #[cfg(not(any(target_os = "windows", target_os = "macos")))]
         {
-            // Linux: not supported by the `drag` crate with winit windows.
-            // Clear drag state and show a one-time hint toast.
-            self.drag_out_active.store(false, Ordering::Relaxed);
-            if let Ok(mut set) = self.drag_out_items.lock() {
-                set.clear();
-            }
+            Self::reset_drag_out_state(&self.drag_out_active, &self.drag_out_items);
             if !self.drag_out_linux_notified {
                 self.drag_out_linux_notified = true;
                 self.toasts.info(
