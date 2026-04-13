@@ -406,9 +406,9 @@ fn draw_checkerboard(ui: &egui::Ui, bounds: Rect, dark: bool) {
     let checker_size = theme::CHECKER_SIZE;
     let painter = ui.painter();
     let (color_light, color_dark) = if dark {
-        (theme::CHECKER_LIGHT_DARK_MODE, theme::CHECKER_DARK_DARK_MODE)
+        theme::CHECKER_DARK_MODE
     } else {
-        (theme::CHECKER_LIGHT, theme::CHECKER_DARK)
+        theme::CHECKER_LIGHT_MODE
     };
 
     let start_x = bounds.min.x;
