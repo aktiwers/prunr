@@ -24,9 +24,13 @@ const MODELS: &[ModelSpec] = &[
         url: "https://huggingface.co/onnx-community/BiRefNet_lite-ONNX/resolve/main/onnx/model.onnx",
         sha256: "5600024376f572a557870a5eb0afb1e5961636bef4e1e22132025467d0f03333",
     },
-    // DexiNed is exported locally via: python3 scripts/export_dexined.py
-    // Not auto-fetchable — the model must be exported from PyTorch weights.
-    // The .onnx.zst file is committed/cached alongside other models.
+    // DexiNed is exported from PyTorch weights via scripts/export_dexined.py
+    // and hosted on prunr's own releases (separate tag from app versions).
+    ModelSpec {
+        name: "dexined.onnx",
+        url: "https://github.com/aktiwers/prunr/releases/download/models-v1/dexined.onnx",
+        sha256: "cba9193b1e3fbcb5bd196001a9aae13bafaa309442f6cb074330c426cc61ec5a",
+    },
 ];
 
 fn main() -> anyhow::Result<()> {
