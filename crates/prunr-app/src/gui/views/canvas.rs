@@ -273,7 +273,14 @@ fn render_processing(ui: &mut egui::Ui, app: &PrunrApp) {
 
     let t = ui.ctx().input(|i| i.time) as f32;
 
-    if let Some(ref texture) = app.source_texture {
+    // In chain mode with an existing result, show the result being processed (not the original)
+    let display_texture = if app.settings.chain_mode && app.result_texture.is_some() {
+        app.result_texture.as_ref()
+    } else {
+        app.source_texture.as_ref()
+    };
+
+    if let Some(texture) = display_texture {
         let tex_size = texture.size_vec2();
         // Gentle wiggle/breathing effect on background image
         let wiggle_zoom = 1.0 + (t * 1.5).sin() * 0.003;
