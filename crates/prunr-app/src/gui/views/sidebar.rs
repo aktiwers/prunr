@@ -1,3 +1,6 @@
+use std::collections::HashSet;
+use std::sync::atomic::Ordering;
+
 use egui::{Color32, Pos2, Rect, RichText, Stroke, Vec2};
 use egui_material_icons::icons::*;
 use crate::gui::app::{PrunrApp, BatchStatus};
@@ -12,6 +15,16 @@ fn hit_test(ui: &egui::Ui, rect: Rect) -> (bool, bool) {
 }
 
 pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
+    // Sidebar rect — used to detect when a drag escapes the sidebar (= drag-out to external app).
+    let sidebar_rect = ui.clip_rect();
+
+    // Snapshot active drag-out state (set of item IDs being dragged) for visual dimming.
+    let dragging_ids: HashSet<u64> = if app.drag_out_active.load(Ordering::Relaxed) {
+        app.drag_out_items.lock().ok().map(|s| s.clone()).unwrap_or_default()
+    } else {
+        HashSet::new()
+    };
+
     ui.vertical(|ui| {
         if app.batch_items.is_empty() {
             // Empty state — centered
@@ -127,7 +140,9 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                         .min(1.0);
                     let fitted = tex_size * scale;
                     let thumb_rect = Rect::from_center_size(item_rect.center(), fitted);
-                    let alpha = (fade * 255.0) as u8;
+                    // Dim thumbnail to ~40% while it's being dragged out to an external app.
+                    let dim = if dragging_ids.contains(&app.batch_items[i].id) { 0.4 } else { 1.0 };
+                    let alpha = (fade * dim * 255.0) as u8;
                     ui.painter().image(
                         thumb_tex.id(), thumb_rect,
                         Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
@@ -270,13 +285,45 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                     }
                 }
 
-                // DnD: set drag payload
+                // DnD: set drag payload (for intra-sidebar reorder)
                 item_response.dnd_set_drag_payload(i);
 
                 // DnD: check if something dropped here
                 if let Some(src_idx) = item_response.dnd_release_payload::<usize>() {
                     swap_from = Some(*src_idx);
                     swap_to = Some(i);
+                }
+
+                // Drag-out: if this item is being dragged AND pointer has left the sidebar
+                // area, queue an OS drag to external apps. File-manager convention:
+                // if the dragged item is checkbox-selected, drag ALL selected items;
+                // otherwise drag just the one. Skip items still processing.
+                if ui.ctx().is_being_dragged(item_response.id)
+                    && app.drag_out_pending.is_none()
+                    && !app.drag_out_active.load(Ordering::Relaxed)
+                {
+                    if let Some(pos) = ui.ctx().pointer_hover_pos() {
+                        // Small dead-zone buffer so small drifts while reordering
+                        // within the sidebar don't accidentally trigger drag-out.
+                        if !sidebar_rect.expand(12.0).contains(pos) {
+                            let source_selected = app.batch_items[i].selected;
+                            let ids: Vec<u64> = if source_selected {
+                                app.batch_items
+                                    .iter()
+                                    .filter(|b| b.selected
+                                        && !matches!(b.status, BatchStatus::Processing))
+                                    .map(|b| b.id)
+                                    .collect()
+                            } else if !matches!(app.batch_items[i].status, BatchStatus::Processing) {
+                                vec![app.batch_items[i].id]
+                            } else {
+                                Vec::new()
+                            };
+                            if !ids.is_empty() {
+                                app.drag_out_pending = Some(ids);
+                            }
+                        }
+                    }
                 }
 
                 // Click to select (skip if close button was clicked)
