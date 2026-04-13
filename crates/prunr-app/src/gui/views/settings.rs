@@ -280,7 +280,7 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) {
                             .size(theme::FONT_SIZE_BODY),
                     );
                     hint(ui, "Process the current result instead of the original.");
-                    hint(ui, "Allows stacking effects: BG removal \u{2192} lines \u{2192} etc.");
+                    hint(ui, "Allows stacking effects: BG removal -> lines -> etc.");
 
                     if app.settings.chain_mode {
                         ui.add_space(theme::SPACE_SM);
