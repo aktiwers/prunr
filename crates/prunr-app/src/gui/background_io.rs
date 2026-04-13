@@ -9,8 +9,8 @@ pub struct BackgroundIO {
     pub thumb_tx: mpsc::Sender<(u64, u32, u32, Vec<u8>)>,
     pub thumb_rx: mpsc::Receiver<(u64, u32, u32, Vec<u8>)>,
     /// Pre-decoded source images for instant canvas switching
-    pub decode_tx: mpsc::Sender<(u64, image::RgbaImage)>,
-    pub decode_rx: mpsc::Receiver<(u64, image::RgbaImage)>,
+    pub decode_tx: mpsc::Sender<(u64, std::sync::Arc<image::RgbaImage>)>,
+    pub decode_rx: mpsc::Receiver<(u64, std::sync::Arc<image::RgbaImage>)>,
     /// Save completion notifications
     pub save_done_tx: mpsc::Sender<String>,
     pub save_done_rx: mpsc::Receiver<String>,

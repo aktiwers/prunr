@@ -255,6 +255,20 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) {
                     hint(ui, "Use CPU even when GPU is available (resets each launch)");
 
                     ui.add_space(theme::SPACE_MD);
+                    ui.separator();
+                    ui.add_space(theme::SPACE_SM);
+
+                    section_heading(ui, "Background Color");
+                    hint(ui, "Fill transparent areas with a solid color.");
+                    ui.add_space(theme::SPACE_SM);
+                    color_toggle_row(ui, &mut app.settings.apply_bg_color, "Apply background color", &mut app.settings.bg_color);
+
+                    ui.add_space(theme::SPACE_MD);
+                    ui.separator();
+                    ui.add_space(theme::SPACE_SM);
+
+                    section_heading(ui, "History");
+                    ui.add_space(theme::SPACE_SM);
                     ui.checkbox(
                         &mut app.settings.chain_mode,
                         RichText::new("Chain mode")
@@ -264,21 +278,7 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) {
                     hint(ui, "Process the current result instead of the original.");
                     hint(ui, "Allows stacking effects: BG removal \u{2192} lines \u{2192} etc.");
 
-                    ui.add_space(theme::SPACE_MD);
-                    ui.separator();
-                    ui.add_space(theme::SPACE_SM);
-
-                    section_heading(ui, "Background Color");
-                    hint(ui, "Fill transparent areas with a solid color.");
-                    ui.add_space(theme::SPACE_SM);
-                    color_toggle_row(ui, &mut app.settings.apply_bg_color, "Apply background color", &mut app.settings.bg_color);
-
                     if app.settings.chain_mode {
-                        ui.add_space(theme::SPACE_MD);
-                        ui.separator();
-                        ui.add_space(theme::SPACE_SM);
-
-                        section_heading(ui, "History");
                         ui.add_space(theme::SPACE_SM);
                         let mut depth_f32 = app.settings.history_depth as f32;
                         let depth_text = format!("{}", app.settings.history_depth);
