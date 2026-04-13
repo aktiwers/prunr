@@ -24,7 +24,7 @@ const DRAG_SUBDIR: &str = "prunr-drag";
 const STALE_AGE: Duration = Duration::from_secs(10 * 60);
 
 /// Return (and create if needed) the drag temp directory.
-pub(crate) fn temp_dir() -> PathBuf {
+fn temp_dir() -> PathBuf {
     let dir = std::env::temp_dir().join(DRAG_SUBDIR);
     let _ = std::fs::create_dir_all(&dir);
     dir
@@ -53,7 +53,7 @@ pub(crate) fn cleanup_stale() {
 
 /// Build a human-friendly filename stem for a batch item given its processing mode.
 /// Pure function — does not touch the filesystem.
-pub(crate) fn make_filename(source_filename: &str, has_result: bool, line_mode: LineMode) -> String {
+fn make_filename(source_filename: &str, has_result: bool, line_mode: LineMode) -> String {
     let stem = Path::new(source_filename)
         .file_stem()
         .and_then(|s| s.to_str())
