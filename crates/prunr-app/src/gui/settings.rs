@@ -32,6 +32,10 @@ pub struct Settings {
     pub history_depth: usize,
     /// When true, Process uses the current result as input instead of the original image.
     pub chain_mode: bool,
+    /// When true, canvas transparency checkerboard uses dark tones instead of light.
+    /// `#[serde(default)]` so this new field doesn't reset older settings files.
+    #[serde(default)]
+    pub dark_checker: bool,
     /// Force CPU inference even when GPU is available (not persisted — resets each launch).
     #[serde(skip)]
     pub force_cpu: bool,
@@ -146,6 +150,7 @@ impl Default for Settings {
             bg_color: [255, 255, 255, 255],
             history_depth: 10,
             chain_mode: false,
+            dark_checker: false,
             force_cpu: false,
             active_backend: "CPU".to_string(),
         }
