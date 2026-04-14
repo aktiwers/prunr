@@ -52,7 +52,6 @@ impl OrtEngine {
     fn new_with_fallback(model: ModelKind, intra_threads: usize, cpu_only: bool) -> Result<Self, CoreError> {
         let optimized = Self::model_bytes_for_backend(model, cpu_only);
         let fp32 = Self::model_bytes(model);
-        // If the optimized bytes differ from FP32, try them first
         if optimized.len() != fp32.len() {
             if let Ok(engine) = Self::build_session(&optimized, intra_threads, model, cpu_only) {
                 return Ok(engine);
@@ -70,19 +69,39 @@ impl OrtEngine {
     }
 
     /// Select the best model variant for the active backend.
-    /// Prefers FP16 on GPU, INT8 on CPU, falls back to FP32.
+    /// Prefers FP16 on CUDA/DirectML GPUs, INT8 on CPU, FP32 on macOS CoreML.
+    ///
+    /// macOS uses FP32 because CoreML silently converts to FP16 internally on Apple Silicon.
+    /// Feeding it our FP16 variant stacks two conversions and the accumulated precision
+    /// loss can collapse the segmentation mask to near-zero — producing a fully
+    /// transparent output (image looks "completely removed").
     fn model_bytes_for_backend(model: ModelKind, cpu_only: bool) -> Vec<u8> {
+        #[cfg(not(target_os = "macos"))]
         let pm = match model {
             ModelKind::Silueta => prunr_models::Model::Silueta,
             ModelKind::U2net => prunr_models::Model::U2net,
             ModelKind::BiRefNetLite => prunr_models::Model::BiRefNetLite,
         };
         if cpu_only {
-            prunr_models::model_int8_bytes(pm)
-                .unwrap_or_else(|| Self::model_bytes(model))
+            #[cfg(not(target_os = "macos"))]
+            {
+                prunr_models::model_int8_bytes(pm)
+                    .unwrap_or_else(|| Self::model_bytes(model))
+            }
+            #[cfg(target_os = "macos")]
+            {
+                Self::model_bytes(model)
+            }
         } else {
-            prunr_models::model_fp16_bytes(pm)
-                .unwrap_or_else(|| Self::model_bytes(model))
+            #[cfg(not(target_os = "macos"))]
+            {
+                prunr_models::model_fp16_bytes(pm)
+                    .unwrap_or_else(|| Self::model_bytes(model))
+            }
+            #[cfg(target_os = "macos")]
+            {
+                Self::model_bytes(model)
+            }
         }
     }
 

@@ -55,7 +55,13 @@ impl Settings {
     pub fn load() -> Self {
         let Some(path) = Self::config_path() else { return Self::default() };
         let Ok(data) = std::fs::read_to_string(&path) else { return Self::default() };
-        serde_json::from_str(&data).unwrap_or_default()
+        match serde_json::from_str(&data) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("warning: settings.json is corrupt ({e}), using defaults");
+                Self::default()
+            }
+        }
     }
 
     /// Save to disk. Errors are silently ignored (best-effort).

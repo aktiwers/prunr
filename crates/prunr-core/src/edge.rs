@@ -60,13 +60,18 @@ fn flatten_on_white(img: &DynamicImage) -> DynamicImage {
         }
         out[i * 4 + 3] = 255; // fully opaque for preprocessing
     }
-    DynamicImage::ImageRgba8(RgbaImage::from_raw(w, h, out).unwrap())
+    DynamicImage::ImageRgba8(RgbaImage::from_raw(w, h, out).expect("flatten buffer size matches dimensions"))
 }
 
 fn preprocess(img: &DynamicImage) -> Array4<f32> {
-    // Flatten transparency onto white so edge detection ignores removed backgrounds
-    let flattened = if img.color().has_alpha() { flatten_on_white(img) } else { img.clone() };
-    let resized = flattened.resize_exact(DEXINED_W, DEXINED_H, FilterType::Lanczos3).to_rgb8();
+    let flattened;
+    let source = if img.color().has_alpha() {
+        flattened = flatten_on_white(img);
+        &flattened
+    } else {
+        img
+    };
+    let resized = source.resize_exact(DEXINED_W, DEXINED_H, FilterType::Lanczos3).to_rgb8();
     let raw = resized.as_raw();
     let h = DEXINED_H as usize;
     let w = DEXINED_W as usize;
@@ -126,20 +131,30 @@ fn detect_edges_inner(
     }
 
     // Resize edge mask to original dimensions
-    let mask = image::GrayImage::from_raw(w as u32, h as u32, mask_buf).unwrap();
+    let mask = image::GrayImage::from_raw(w as u32, h as u32, mask_buf)
+        .expect("edge mask buffer size matches dimensions");
     let mask = image::imageops::resize(&mask, ow, oh, FilterType::Lanczos3);
 
-    // Compose: edge mask as alpha, optionally force black RGB
-    let mut rgba = original.to_rgba8();
+    // Compose: edge mask as alpha, optionally solid RGB color
     let mask_raw = mask.as_raw();
-    let out_raw = rgba.as_mut();
-    for i in 0..(ow * oh) as usize {
-        if let Some(c) = line_color {
-            out_raw[i * 4]     = c[0];
-            out_raw[i * 4 + 1] = c[1];
-            out_raw[i * 4 + 2] = c[2];
+    let rgba = if let Some(c) = line_color {
+        // Solid color: build directly without copying original pixels
+        let mut buf = vec![0u8; (ow * oh * 4) as usize];
+        for i in 0..(ow * oh) as usize {
+            buf[i * 4]     = c[0];
+            buf[i * 4 + 1] = c[1];
+            buf[i * 4 + 2] = c[2];
+            buf[i * 4 + 3] = mask_raw[i];
         }
-        out_raw[i * 4 + 3] = mask_raw[i];
-    }
+        RgbaImage::from_raw(ow, oh, buf).expect("edge output buffer size matches dimensions")
+    } else {
+        // Preserve original RGB, replace alpha with edge mask
+        let mut rgba = original.to_rgba8();
+        let out_raw = rgba.as_mut();
+        for i in 0..(ow * oh) as usize {
+            out_raw[i * 4 + 3] = mask_raw[i];
+        }
+        rgba
+    };
     Ok(rgba)
 }

@@ -256,10 +256,11 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) {
                     hint(ui, "Use dark tones for the transparency pattern — helps when viewing light results.");
                     ui.add_space(theme::SPACE_MD);
 
-                    // Force CPU only makes sense when a GPU is actually in play.
-                    // On CPU-only systems the checkbox is a no-op; the status bar
-                    // already shows "Backend: CPU".
-                    if app.settings.is_gpu() {
+                    // Show "Force CPU" only on systems that actually have a GPU.
+                    // Uses the hardware detection cache, not the current active_backend
+                    // (which changes when Force CPU is toggled).
+                    let has_gpu = !prunr_core::OrtEngine::detect_active_provider().eq_ignore_ascii_case("CPU");
+                    if has_gpu {
                         ui.checkbox(
                             &mut app.settings.force_cpu,
                             RichText::new("Force CPU")

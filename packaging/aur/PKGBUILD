@@ -1,0 +1,35 @@
+# Maintainer: Prunr <prunr@example.com>
+# AUR package for prunr — local AI background removal
+#
+# This PKGBUILD downloads the pre-built Linux binary from GitHub Releases.
+# CI auto-updates pkgver and sha256sums on each release.
+
+pkgname=prunr-bin
+pkgver=0.4.4
+pkgrel=1
+pkgdesc="Local AI background removal — no cloud, no API keys"
+arch=('x86_64')
+url="https://github.com/aktiwers/prunr"
+license=('MIT' 'Apache-2.0')
+depends=('gtk3')
+provides=('prunr')
+conflicts=('prunr')
+source=("${url}/releases/download/v${pkgver}/prunr-linux-x86_64.tar.gz")
+sha256sums=('SKIP')
+
+package() {
+    install -Dm755 prunr "${pkgdir}/usr/bin/prunr"
+
+    # Desktop entry
+    install -Dm644 /dev/stdin "${pkgdir}/usr/share/applications/prunr.desktop" << 'EOF'
+[Desktop Entry]
+Name=Prunr
+Comment=Local AI background removal
+Exec=prunr %F
+Icon=prunr
+Terminal=false
+Type=Application
+Categories=Graphics;
+MimeType=image/png;image/jpeg;image/webp;image/bmp;
+EOF
+}

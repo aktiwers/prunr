@@ -25,12 +25,13 @@ fn to_nchw(resized: &image::RgbImage, size: u32, divisor: f32) -> Array4<f32> {
     let bias: [f32; 3] = std::array::from_fn(|c| MEAN[c] / STD[c]);
 
     let mut out = Array4::<f32>::zeros((1, 3, s, s));
-    for c in 0..3 {
-        let mut plane = out.slice_mut(ndarray::s![0, c, .., ..]);
-        let plane_slice = plane.as_slice_mut().unwrap();
-        for i in 0..s * s {
-            plane_slice[i] = raw[i * 3 + c] as f32 * scale[c] - bias[c];
-        }
+    let plane_size = s * s;
+    let out_slice = out.as_slice_mut().unwrap();
+    for i in 0..plane_size {
+        let base = i * 3;
+        out_slice[i] = raw[base] as f32 * scale[0] - bias[0];
+        out_slice[plane_size + i] = raw[base + 1] as f32 * scale[1] - bias[1];
+        out_slice[plane_size * 2 + i] = raw[base + 2] as f32 * scale[2] - bias[2];
     }
     out
 }
