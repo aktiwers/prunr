@@ -1,9 +1,12 @@
-use std::sync::LazyLock;
-use egui::{Color32, Pos2, Rect, Stroke, Vec2};
+use std::sync::{LazyLock, OnceLock};
+use egui::{Color32, Pos2, Rect, Stroke, TextureHandle, TextureOptions, Vec2};
 
 use crate::gui::app::PrunrApp;
 use crate::gui::state::AppState;
 use crate::gui::theme;
+
+/// Number of checker squares per texture edge (16×16 grid).
+const CHECKER_TEX_TILES: usize = 16;
 
 static IS_WAYLAND: LazyLock<bool> = LazyLock::new(|| std::env::var_os("WAYLAND_DISPLAY").is_some());
 
@@ -307,7 +310,8 @@ fn render_processing(ui: &mut egui::Ui, app: &PrunrApp) {
         }
     }
 
-    let dots = ".".repeat(((t * 2.0) as usize % 4) + 1);
+    const PROCESSING_DOTS: [&str; 4] = ["Processing.", "Processing..", "Processing...", "Processing...."];
+    let label = PROCESSING_DOTS[(t * 2.0) as usize % 4];
     let center = canvas_rect.center();
 
     // Dark pill behind text
@@ -318,7 +322,7 @@ fn render_processing(ui: &mut egui::Ui, app: &PrunrApp) {
     ui.painter().text(
         center - Vec2::new(0.0, 6.0),
         egui::Align2::CENTER_CENTER,
-        format!("Processing{dots}"),
+        label,
         egui::FontId::proportional(theme::FONT_SIZE_HEADING),
         theme::TEXT_PRIMARY,
     );
@@ -337,7 +341,7 @@ fn render_processing(ui: &mut egui::Ui, app: &PrunrApp) {
         theme::TEXT_SECONDARY,
     );
 
-    ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
+    ui.ctx().request_repaint_after(std::time::Duration::from_millis(66));
 }
 
 fn render_done(ui: &mut egui::Ui, app: &PrunrApp) {
@@ -402,40 +406,64 @@ fn render_done(ui: &mut egui::Ui, app: &PrunrApp) {
     }
 }
 
-fn draw_checkerboard(ui: &egui::Ui, bounds: Rect, dark: bool) {
-    let checker_size = theme::CHECKER_SIZE;
-    let painter = ui.painter();
-    let (color_light, color_dark) = if dark {
-        theme::CHECKER_DARK_MODE
-    } else {
-        theme::CHECKER_LIGHT_MODE
-    };
-
-    let start_x = bounds.min.x;
-    let start_y = bounds.min.y;
-    let end_x = bounds.max.x;
-    let end_y = bounds.max.y;
-
-    let mut y = start_y;
-    let mut row = 0usize;
-    while y < end_y {
-        let mut x = start_x;
-        let mut col = 0usize;
-        while x < end_x {
-            let color = if (row + col) % 2 == 0 {
-                color_light
-            } else {
-                color_dark
-            };
-            let rect = Rect::from_min_max(
-                Pos2::new(x, y),
-                Pos2::new((x + checker_size).min(end_x), (y + checker_size).min(end_y)),
-            );
-            painter.rect_filled(rect, 0.0, color);
-            x += checker_size;
-            col += 1;
+fn build_checker_image(light: Color32, dark: Color32) -> egui::ColorImage {
+    let cell = theme::CHECKER_SIZE as usize;
+    let px = CHECKER_TEX_TILES * cell;
+    let mut img = egui::ColorImage::filled([px, px], light);
+    for row in 0..CHECKER_TEX_TILES {
+        for col in 0..CHECKER_TEX_TILES {
+            if (row + col) % 2 != 0 {
+                for dy in 0..cell {
+                    let y = row * cell + dy;
+                    let start = y * px + col * cell;
+                    for dx in 0..cell {
+                        img.pixels[start + dx] = dark;
+                    }
+                }
+            }
         }
-        y += checker_size;
-        row += 1;
+    }
+    img
+}
+
+fn checker_texture(ctx: &egui::Context, dark: bool) -> TextureHandle {
+    static LIGHT: OnceLock<TextureHandle> = OnceLock::new();
+    static DARK: OnceLock<TextureHandle> = OnceLock::new();
+
+    if dark {
+        DARK.get_or_init(|| {
+            let (light, dark) = theme::CHECKER_DARK_MODE;
+            ctx.load_texture("checker_dark", build_checker_image(light, dark), TextureOptions::NEAREST)
+        }).clone()
+    } else {
+        LIGHT.get_or_init(|| {
+            let (light, dark) = theme::CHECKER_LIGHT_MODE;
+            ctx.load_texture("checker_light", build_checker_image(light, dark), TextureOptions::NEAREST)
+        }).clone()
+    }
+}
+
+fn draw_checkerboard(ui: &egui::Ui, bounds: Rect, dark: bool) {
+    let tex = checker_texture(ui.ctx(), dark);
+    let tile_px = CHECKER_TEX_TILES as f32 * theme::CHECKER_SIZE; // screen-space size of one tile
+    let painter = ui.painter();
+
+    let mut y = bounds.min.y;
+    while y < bounds.max.y {
+        let mut x = bounds.min.x;
+        let row_h = tile_px.min(bounds.max.y - y);
+        while x < bounds.max.x {
+            let col_w = tile_px.min(bounds.max.x - x);
+            let tile_rect = Rect::from_min_size(Pos2::new(x, y), Vec2::new(col_w, row_h));
+            // UV: fraction of tile actually visible (for edge tiles that are clipped)
+            let uv_max = Pos2::new(col_w / tile_px, row_h / tile_px);
+            painter.image(
+                tex.id(), tile_rect,
+                Rect::from_min_max(Pos2::ZERO, uv_max),
+                Color32::WHITE,
+            );
+            x += tile_px;
+        }
+        y += tile_px;
     }
 }

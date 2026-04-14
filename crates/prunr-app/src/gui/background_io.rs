@@ -14,6 +14,9 @@ pub struct BackgroundIO {
     /// Save completion notifications
     pub save_done_tx: mpsc::Sender<String>,
     pub save_done_rx: mpsc::Receiver<String>,
+    /// Pre-built ColorImages ready for GPU upload (item_id, texture_name, image, is_result)
+    pub tex_prep_tx: mpsc::Sender<(u64, String, egui::ColorImage, bool)>,
+    pub tex_prep_rx: mpsc::Receiver<(u64, String, egui::ColorImage, bool)>,
 }
 
 impl BackgroundIO {
@@ -22,11 +25,13 @@ impl BackgroundIO {
         let (thumb_tx, thumb_rx) = mpsc::channel();
         let (decode_tx, decode_rx) = mpsc::channel();
         let (save_done_tx, save_done_rx) = mpsc::channel();
+        let (tex_prep_tx, tex_prep_rx) = mpsc::channel();
         Self {
             file_load_tx, file_load_rx,
             thumb_tx, thumb_rx,
             decode_tx, decode_rx,
             save_done_tx, save_done_rx,
+            tex_prep_tx, tex_prep_rx,
         }
     }
 }

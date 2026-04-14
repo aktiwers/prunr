@@ -4164,7 +4164,7 @@ dependencies = [
 
 [[package]]
 name = "prunr-app"
-version = "0.1.0"
+version = "0.4.4"
 dependencies = [
  "arboard",
  "clap",
@@ -4189,7 +4189,7 @@ dependencies = [
 
 [[package]]
 name = "prunr-core"
-version = "0.1.0"
+version = "0.4.4"
 dependencies = [
  "dirs",
  "image",
@@ -4203,7 +4203,7 @@ dependencies = [
 
 [[package]]
 name = "prunr-models"
-version = "0.1.0"
+version = "0.4.4"
 dependencies = [
  "zstd",
 ]

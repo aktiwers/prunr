@@ -5,6 +5,8 @@
 // IMPORTANT: This crate has NO dependencies on other workspace crates.
 // The dependency arrow is prunr-app -> prunr-core -> prunr-models (never in reverse).
 
+use std::sync::OnceLock;
+
 /// Embedded pre-compressed model data (plain include_bytes — no compile-time decompression).
 #[cfg(not(feature = "dev-models"))]
 static SILUETA_ZST: &[u8] = include_bytes!("../../../models/silueta.onnx.zst");
@@ -15,32 +17,46 @@ static BIREFNET_LITE_ZST: &[u8] = include_bytes!("../../../models/birefnet_lite.
 #[cfg(not(feature = "dev-models"))]
 static DEXINED_ZST: &[u8] = include_bytes!("../../../models/dexined.onnx.zst");
 
-/// Load Silueta model bytes. In dev-models mode reads from filesystem;
-/// in release mode decompresses the embedded zstd blob (~200ms).
+/// Cached decompressed model bytes — decompressed once, reused across engine creations.
+#[cfg(not(feature = "dev-models"))]
+static SILUETA_CACHE: OnceLock<Vec<u8>> = OnceLock::new();
+#[cfg(not(feature = "dev-models"))]
+static U2NET_CACHE: OnceLock<Vec<u8>> = OnceLock::new();
+#[cfg(not(feature = "dev-models"))]
+static BIREFNET_LITE_CACHE: OnceLock<Vec<u8>> = OnceLock::new();
+#[cfg(not(feature = "dev-models"))]
+static DEXINED_CACHE: OnceLock<Vec<u8>> = OnceLock::new();
+
 #[cfg(not(feature = "dev-models"))]
 pub fn silueta_bytes() -> Vec<u8> {
-    zstd::bulk::decompress(SILUETA_ZST, 50 * 1024 * 1024)
-        .expect("failed to decompress embedded silueta model")
+    SILUETA_CACHE.get_or_init(|| {
+        zstd::bulk::decompress(SILUETA_ZST, 50 * 1024 * 1024)
+            .expect("failed to decompress embedded silueta model")
+    }).clone()
 }
 
-/// Load U2Net model bytes. In dev-models mode reads from filesystem;
-/// in release mode decompresses the embedded zstd blob (~200ms).
 #[cfg(not(feature = "dev-models"))]
 pub fn u2net_bytes() -> Vec<u8> {
-    zstd::bulk::decompress(U2NET_ZST, 200 * 1024 * 1024)
-        .expect("failed to decompress embedded u2net model")
+    U2NET_CACHE.get_or_init(|| {
+        zstd::bulk::decompress(U2NET_ZST, 200 * 1024 * 1024)
+            .expect("failed to decompress embedded u2net model")
+    }).clone()
 }
 
 #[cfg(not(feature = "dev-models"))]
 pub fn birefnet_lite_bytes() -> Vec<u8> {
-    zstd::bulk::decompress(BIREFNET_LITE_ZST, 250 * 1024 * 1024)
-        .expect("failed to decompress embedded birefnet-lite model")
+    BIREFNET_LITE_CACHE.get_or_init(|| {
+        zstd::bulk::decompress(BIREFNET_LITE_ZST, 250 * 1024 * 1024)
+            .expect("failed to decompress embedded birefnet-lite model")
+    }).clone()
 }
 
 #[cfg(not(feature = "dev-models"))]
 pub fn dexined_bytes() -> Vec<u8> {
-    zstd::bulk::decompress(DEXINED_ZST, 150 * 1024 * 1024)
-        .expect("failed to decompress embedded dexined model")
+    DEXINED_CACHE.get_or_init(|| {
+        zstd::bulk::decompress(DEXINED_ZST, 150 * 1024 * 1024)
+            .expect("failed to decompress embedded dexined model")
+    }).clone()
 }
 
 #[cfg(feature = "dev-models")]

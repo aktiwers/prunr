@@ -64,7 +64,7 @@ where
         return Err(err);
     }
 
-    process_image_from_decoded(img, engine, mask, progress, cancel)
+    process_image_from_decoded(&img, engine, mask, progress, cancel)
 }
 
 /// Process a single image without the large-image size guard.
@@ -91,15 +91,15 @@ where
     F: Fn(ProgressStage, f32),
 {
     let img = load_image_from_bytes(img_bytes)?;
-    process_image_from_decoded(img, engine, &MaskSettings::default(), progress, cancel)
+    process_image_from_decoded(&img, engine, &MaskSettings::default(), progress, cancel)
 }
 
-/// Internal helper: run the full pipeline on an already-decoded image.
+/// Run the full pipeline on an already-decoded image.
 ///
-/// Called by both `process_image` (after the large-image guard) and
-/// `process_image_unchecked` (bypassing the guard).
-fn process_image_from_decoded<F>(
-    img: DynamicImage,
+/// Use this when the image is already in memory (e.g., chain mode) to
+/// avoid an unnecessary encode→decode round-trip through bytes.
+pub fn process_image_from_decoded<F>(
+    img: &DynamicImage,
     engine: &OrtEngine,
     mask: &MaskSettings,
     progress: Option<F>,
@@ -111,7 +111,7 @@ where
     let is_cancelled = || {
         cancel
             .as_ref()
-            .is_some_and(|c| c.load(Ordering::Relaxed))
+            .is_some_and(|c| c.load(Ordering::Acquire))
     };
 
     let report = |stage: ProgressStage, pct: f32| {
@@ -139,7 +139,6 @@ where
     report(ProgressStage::Infer, 0.5);
 
     let raw_output = engine.with_session(|session| {
-        // Query input name at runtime — do NOT hardcode
         let input_name = session.inputs()[0].name().to_string();
 
         let input_tensor = Tensor::from_array(input_array)
@@ -149,23 +148,20 @@ where
             .run(inputs![input_name.as_str() => &input_tensor])
             .map_err(|e| CoreError::Inference(format!("ORT inference failed: {e}")))?;
 
-        let raw = outputs[0]
+        outputs[0]
             .try_extract_array::<f32>()
             .map_err(|e| CoreError::Inference(format!("Failed to extract output tensor: {e}")))?
             .into_dimensionality::<ndarray::Ix4>()
-            .map_err(|e| CoreError::Inference(format!("Output reshape error: {e}")))?
-            .to_owned();
-
-        Ok(raw)
+            .map_err(|e| CoreError::Inference(format!("Output reshape error: {e}")))
+            .map(|v| v.to_owned())
     })?;
 
     if is_cancelled() {
         return Err(CoreError::Cancelled);
     }
 
-    // Stage 5: Postprocess (min-max normalize → grayscale mask → resize to original dims)
     report(ProgressStage::Postprocess, 0.8);
-    let rgba_image = postprocess(raw_output.view(), &img, mask, model);
+    let rgba_image = postprocess(raw_output.view(), img, mask, model);
 
     report(ProgressStage::Alpha, 0.95);
 

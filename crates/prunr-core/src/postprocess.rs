@@ -37,30 +37,39 @@ pub fn postprocess(raw: ArrayView4<f32>, original: &DynamicImage, mask_settings:
         Some(s) => s,
         None => { contiguous = pred.as_standard_layout(); contiguous.as_slice().unwrap() }
     };
-    let mut mask_buf = vec![0u8; sw * sh];
     let gamma = mask_settings.gamma;
     let threshold = mask_settings.threshold;
 
-    for i in 0..sh * sw {
-        let raw_val = pred_slice[i];
-        let mut val = if let Some(uv) = uniform_val {
-            uv
-        } else if use_sigmoid {
-            1.0 / (1.0 + (-raw_val).exp())
-        } else {
-            ((raw_val - mi) / range).clamp(0.0, 1.0)
-        };
+    // Short-circuit: uniform output → fill with constant, skip per-pixel loop
+    let mask_buf = if let Some(uv) = uniform_val {
+        let mut val = uv;
+        if gamma != 1.0 { val = val.powf(gamma); }
+        if let Some(t) = threshold { val = if val >= t { 1.0 } else { 0.0 }; }
+        vec![(val * 255.0) as u8; sw * sh]
+    } else {
+        let inv_range = 1.0 / range;
+        let mut buf = vec![0u8; sw * sh];
+        for i in 0..sh * sw {
+            let raw_val = pred_slice[i];
+            let mut val = if use_sigmoid {
+                1.0 / (1.0 + (-raw_val).exp())
+            } else {
+                ((raw_val - mi) * inv_range).clamp(0.0, 1.0)
+            };
 
-        if gamma != 1.0 {
-            val = val.powf(gamma);
-        }
-        if let Some(t) = threshold {
-            val = if val >= t { 1.0 } else { 0.0 };
-        }
+            if gamma != 1.0 {
+                val = val.powf(gamma);
+            }
+            if let Some(t) = threshold {
+                val = if val >= t { 1.0 } else { 0.0 };
+            }
 
-        mask_buf[i] = (val * 255.0) as u8;
-    }
-    let mask = GrayImage::from_raw(sw as u32, sh as u32, mask_buf).unwrap();
+            buf[i] = (val * 255.0) as u8;
+        }
+        buf
+    };
+    let mask = GrayImage::from_raw(sw as u32, sh as u32, mask_buf)
+        .expect("mask buffer size matches dimensions");
 
     // Resize mask back to original dimensions using Lanczos3
     let (ow, oh) = (original.width(), original.height());
@@ -71,7 +80,6 @@ pub fn postprocess(raw: ArrayView4<f32>, original: &DynamicImage, mask_settings:
         apply_edge_shift(&mut mask, mask_settings.edge_shift);
     }
 
-    // Guided filter: refine edges using original image colors
     let mut rgba = original.to_rgba8();
     if mask_settings.refine_edges {
         const GUIDED_RADIUS: u32 = 8;
@@ -79,7 +87,7 @@ pub fn postprocess(raw: ArrayView4<f32>, original: &DynamicImage, mask_settings:
         mask = guided_filter_alpha(&rgba, &mask, GUIDED_RADIUS, GUIDED_EPSILON);
     }
 
-    // Compose: overwrite alpha channel in-place (avoids a second full-image allocation)
+    // Compose: write alpha from mask
     let mask_raw = mask.as_raw();
     let out_raw = rgba.as_mut();
     for i in 0..(ow * oh) as usize {
@@ -102,7 +110,7 @@ fn apply_edge_shift(mask: &mut GrayImage, shift: f32) {
 
     let mut a = mask.as_raw().clone();
     let mut b = vec![0u8; w * h];
-    let use_par = h >= 256;
+    let use_par = h >= 512;
 
     for _ in 0..iterations {
         let process_row = |(y, row): (usize, &mut [u8])| {
