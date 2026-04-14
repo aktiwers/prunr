@@ -30,6 +30,26 @@ fn temp_dir() -> PathBuf {
     dir
 }
 
+/// Check whether a path was created by our own drag-out (i.e. lives under prunr-drag/).
+/// Used to reject self-originated drops so our own thumbnails can't be re-ingested.
+pub(crate) fn is_self_drop(path: &Path) -> bool {
+    path.components().any(|c| c.as_os_str() == DRAG_SUBDIR)
+}
+
+/// Remove ALL temp drag files on a background thread. Called on graceful app exit.
+pub(crate) fn cleanup_all() {
+    std::thread::spawn(|| {
+        let dir = temp_dir();
+        let Ok(entries) = std::fs::read_dir(&dir) else { return };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() {
+                let _ = std::fs::remove_file(&path);
+            }
+        }
+    });
+}
+
 /// Remove stale temp files left behind by previous sessions or crashes.
 /// Silent on errors — this is best-effort housekeeping.
 pub(crate) fn cleanup_stale() {

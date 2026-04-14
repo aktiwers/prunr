@@ -128,34 +128,30 @@ fn box_filter(src: &[f32], w: u32, h: u32, radius: u32) -> Vec<f32> {
 
     // --- Build integral image via two separable passes ---
     // Pass 1: horizontal prefix sums (each row independent)
-    let mut integral = vec![0.0f64; n];
+    let mut integral = vec![0.0f32; n];
 
     let do_par_rows = h >= PAR_PREFIX_THRESHOLD;
-    let row_work = |y: usize, integral: &mut [f64]| {
-        let base = y * w;
-        let mut acc = 0.0f64;
-        for x in 0..w {
-            acc += src[base + x] as f64;
-            integral[base + x] = acc;
-        }
-    };
 
     if do_par_rows {
-        // Each row writes to a disjoint slice — use par_chunks_mut for safe parallel access.
         integral
             .par_chunks_mut(w)
             .enumerate()
             .for_each(|(y, row)| {
                 let src_base = y * w;
-                let mut acc = 0.0f64;
+                let mut acc = 0.0f32;
                 for x in 0..w {
-                    acc += src[src_base + x] as f64;
+                    acc += src[src_base + x];
                     row[x] = acc;
                 }
             });
     } else {
         for y in 0..h {
-            row_work(y, &mut integral);
+            let base = y * w;
+            let mut acc = 0.0f32;
+            for x in 0..w {
+                acc += src[base + x];
+                integral[base + x] = acc;
+            }
         }
     }
 
@@ -166,7 +162,7 @@ fn box_filter(src: &[f32], w: u32, h: u32, radius: u32) -> Vec<f32> {
         // SAFETY: each column x accesses indices {x, x+w, x+2w, ...} which are disjoint
         // across different x values. No two parallel iterations touch the same element.
         let integral_ptr = integral.as_mut_ptr();
-        struct SendPtr(*mut f64);
+        struct SendPtr(*mut f32);
         unsafe impl Send for SendPtr {}
         unsafe impl Sync for SendPtr {}
         let sp = SendPtr(integral_ptr);
@@ -192,7 +188,7 @@ fn box_filter(src: &[f32], w: u32, h: u32, radius: u32) -> Vec<f32> {
     // --- Lookup pass (embarrassingly parallel) ---
     let mut out = vec![0.0f32; n];
 
-    let get = |x: i64, y: i64| -> f64 {
+    let get = |x: i64, y: i64| -> f32 {
         if x < 0 || y < 0 {
             return 0.0;
         }
@@ -212,9 +208,9 @@ fn box_filter(src: &[f32], w: u32, h: u32, radius: u32) -> Vec<f32> {
                 let y1 = (yi - r - 1).max(-1);
                 let x2 = (xi + r).min(w as i64 - 1);
                 let y2 = (yi + r).min(h as i64 - 1);
-                let area = (x2 - x1) as f64 * (y2 - y1) as f64;
+                let area = (x2 - x1) as f32 * (y2 - y1) as f32;
                 let sum = get(x2, y2) - get(x1, y2) - get(x2, y1) + get(x1, y1);
-                row[x] = (sum / area.max(1.0)) as f32;
+                row[x] = sum / area.max(1.0);
             }
         });
     } else {
@@ -224,9 +220,9 @@ fn box_filter(src: &[f32], w: u32, h: u32, radius: u32) -> Vec<f32> {
                 let y1 = (y - r - 1).max(-1);
                 let x2 = (x + r).min(w as i64 - 1);
                 let y2 = (y + r).min(h as i64 - 1);
-                let area = (x2 - x1) as f64 * (y2 - y1) as f64;
+                let area = (x2 - x1) as f32 * (y2 - y1) as f32;
                 let sum = get(x2, y2) - get(x1, y2) - get(x2, y1) + get(x1, y1);
-                out[y as usize * w + x as usize] = (sum / area.max(1.0)) as f32;
+                out[y as usize * w + x as usize] = sum / area.max(1.0);
             }
         }
     }

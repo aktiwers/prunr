@@ -25,6 +25,10 @@ pub(crate) struct BatchItem {
     pub thumb_pending: bool,
     pub result_rgba: Option<Arc<image::RgbaImage>>,
     pub result_texture: Option<egui::TextureHandle>,
+    /// True while a background thread is building the source ColorImage.
+    pub source_tex_pending: bool,
+    /// True while a background thread is building the result ColorImage.
+    pub result_tex_pending: bool,
     /// History stack for undo: previous results, newest last.
     pub history: VecDeque<Arc<image::RgbaImage>>,
     /// Redo stack: results undone, newest last. Cleared on new processing.
@@ -129,21 +133,6 @@ fn fit_dimensions(src_w: u32, src_h: u32, max_w: u32, max_h: u32) -> (u32, u32) 
     ((src_w as f32 * scale).round().max(1.0) as u32,
      (src_h as f32 * scale).round().max(1.0) as u32)
 }
-
-/// Convert an RgbaImage to an egui TextureHandle.
-pub(crate) fn rgba_to_texture(
-    rgba: &image::RgbaImage,
-    name: &str,
-    ctx: &egui::Context,
-) -> egui::TextureHandle {
-    let (w, h) = (rgba.width(), rgba.height());
-    let ci = egui::ColorImage::from_rgba_unmultiplied(
-        [w as usize, h as usize],
-        rgba.as_flat_samples().as_slice(),
-    );
-    ctx.load_texture(name, ci, egui::TextureOptions::default())
-}
-
 
 impl PrunrApp {
     pub fn new(cc: &eframe::CreationContext) -> Self {
@@ -374,6 +363,8 @@ impl PrunrApp {
             thumb_pending: false,
             result_rgba: None,
             result_texture: None,
+            source_tex_pending: false,
+            result_tex_pending: false,
             history: VecDeque::new(),
             redo_stack: VecDeque::new(),
             status: BatchStatus::Pending,
@@ -490,12 +481,16 @@ impl PrunrApp {
                 }
                 // Pop most recent from history
                 item.result_rgba = item.history.pop_back();
-                if item.result_rgba.is_none() {
+                if item.result_rgba.is_none() || item.history.is_empty() {
+                    // History exhausted — back to unprocessed state
                     item.status = BatchStatus::Pending;
+                    item.result_rgba = None;
                 }
                 item.result_texture = None;
                 item.thumb_texture = None;
                 item.thumb_pending = false;
+                item.source_tex_pending = false;
+                item.result_tex_pending = false;
                 undone += 1;
             }
         }
@@ -527,6 +522,8 @@ impl PrunrApp {
                 item.result_texture = None;
                 item.thumb_texture = None;
                 item.thumb_pending = false;
+                item.source_tex_pending = false;
+                item.result_tex_pending = false;
                 redone += 1;
             }
         }
@@ -582,11 +579,13 @@ impl PrunrApp {
                     }
                     item.thumb_texture = None;
                     item.thumb_pending = false;
+                    item.source_tex_pending = false;
+                    item.result_tex_pending = false;
                 }
                 item.status = BatchStatus::Processing;
             }
         }
-        self.cancel_flag.store(false, Ordering::Relaxed);
+        self.cancel_flag.store(false, Ordering::Release);
         self.state = AppState::Processing;
         self.status.pct = 0.0;
         self.status.stage = "Starting".to_string();
@@ -713,7 +712,7 @@ impl PrunrApp {
         active: &AtomicBool,
         items: &Mutex<HashSet<u64>>,
     ) {
-        active.store(false, Ordering::Relaxed);
+        active.store(false, Ordering::Release);
         if let Ok(mut set) = items.lock() {
             set.clear();
         }
@@ -747,7 +746,7 @@ impl PrunrApp {
             set.clear();
             set.extend(ids.iter().copied());
         }
-        self.drag_out_active.store(true, Ordering::Relaxed);
+        self.drag_out_active.store(true, Ordering::Release);
 
         #[cfg(any(target_os = "windows", target_os = "macos"))]
         {
@@ -840,7 +839,7 @@ impl PrunrApp {
 
 
     pub fn handle_cancel(&mut self) {
-        self.cancel_flag.store(true, Ordering::Relaxed);
+        self.cancel_flag.store(true, Ordering::Release);
     }
 
     pub fn add_to_batch(&mut self, bytes: Vec<u8>, filename: String) {
@@ -874,6 +873,8 @@ impl PrunrApp {
                     thumb_pending: false,
                     result_rgba: self.result_rgba.take(),
                     result_texture: self.result_texture.take(),
+                    source_tex_pending: false,
+                    result_tex_pending: false,
                     history: VecDeque::new(),
                     redo_stack: VecDeque::new(),
                     status: if self.state == AppState::Done { BatchStatus::Done } else { BatchStatus::Pending },
@@ -898,6 +899,8 @@ impl PrunrApp {
             thumb_pending: false,
             result_rgba: None,
             result_texture: None,
+            source_tex_pending: false,
+            result_tex_pending: false,
             history: VecDeque::new(),
             redo_stack: VecDeque::new(),
             status: BatchStatus::Pending,
@@ -914,7 +917,7 @@ impl PrunrApp {
     /// Pre-decode source image on a background thread for instant canvas switching.
     fn request_decode(&self, item_id: u64, bytes: &Arc<Vec<u8>>) {
         let tx = self.bg_io.decode_tx.clone();
-        let bytes = bytes.clone(); // Arc clone — cheap pointer copy
+        let bytes = bytes.clone();
         std::thread::spawn(move || {
             if let Ok(img) = image::load_from_memory(&bytes) {
                 let _ = tx.send((item_id, Arc::new(img.to_rgba8())));
@@ -927,7 +930,7 @@ impl PrunrApp {
     pub(crate) fn request_thumbnail(&self, item_id: u64, source_bytes: &[u8], result_rgba: Option<&Arc<image::RgbaImage>>) {
         let tx = self.bg_io.thumb_tx.clone();
         if let Some(rgba) = result_rgba {
-            let rgba = rgba.clone(); // Arc clone = cheap pointer copy
+            let rgba = rgba.clone();
             std::thread::spawn(move || {
                 let (w, h) = fit_dimensions(rgba.width(), rgba.height(), 160, 160);
                 let thumb = image::imageops::resize(rgba.as_ref(), w, h, image::imageops::FilterType::Triangle);
@@ -960,51 +963,60 @@ impl PrunrApp {
         if self.batch_items.is_empty() { return; }
         let idx = self.selected_batch_index.min(self.batch_items.len() - 1);
 
-        // Create source texture from pre-decoded RGBA (fast GPU upload, no decode)
-        if self.batch_items[idx].source_texture.is_none() {
-            if let Some(ref rgba) = self.batch_items[idx].source_rgba {
-                let item_id = self.batch_items[idx].id;
-                self.batch_items[idx].source_texture = Some(
-                    rgba_to_texture(rgba, &format!("source_{item_id}"), ctx),
+        // Dispatch ColorImage preparation to background threads if needed.
+        // The actual ctx.load_texture() happens in drain_background_channels.
+        let item_id = self.batch_items[idx].id;
+
+        if self.batch_items[idx].source_texture.is_none()
+            && !self.batch_items[idx].source_tex_pending
+        {
+            if let Some(rgba) = self.batch_items[idx].source_rgba.clone() {
+                self.batch_items[idx].source_tex_pending = true;
+                Self::spawn_tex_prep(
+                    rgba, item_id, format!("source_{item_id}"), false,
+                    self.bg_io.tex_prep_tx.clone(), ctx.clone(),
                 );
             }
-            // source_rgba not ready yet — background decode thread will deliver it
         }
 
-        // Load result texture lazily — use switch_id in name so every new result
-        // gets a fresh GPU texture (egui caches by name)
-        if self.batch_items[idx].result_texture.is_none() {
-            if let Some(ref rgba) = self.batch_items[idx].result_rgba {
-                let item_id = self.batch_items[idx].id;
+        if self.batch_items[idx].result_texture.is_none()
+            && !self.batch_items[idx].result_tex_pending
+        {
+            if let Some(rgba) = self.batch_items[idx].result_rgba.clone() {
                 let switch = self.result_switch_id;
-                self.batch_items[idx].result_texture = Some(
-                    rgba_to_texture(rgba, &format!("result_{item_id}_{switch}"), ctx),
+                self.batch_items[idx].result_tex_pending = true;
+                Self::spawn_tex_prep(
+                    rgba, item_id, format!("result_{item_id}_{switch}"), true,
+                    self.bg_io.tex_prep_tx.clone(), ctx.clone(),
                 );
             }
         }
 
-        // Sync app-level state for canvas rendering
-        // Use references/clones only for textures (cheap Arc clones), avoid cloning raw bytes
+        // Sync app-level state for canvas rendering.
+        // Keep the previous texture visible while the new one is being prepared
+        // (avoids a spinner flash on every sidebar click).
         let item = &self.batch_items[idx];
-        self.source_texture = item.source_texture.clone();
+        if item.source_texture.is_some() || item.source_rgba.is_none() {
+            self.source_texture = item.source_texture.clone();
+        }
         self.loaded_filename = Some(item.filename.clone());
         self.image_dimensions = Some(item.dimensions);
         self.show_original = false;
 
         self.zoom_state.reset();
 
-        // Set state based on this item's status, not global processing state
         let item_status = item.status.clone();
         let result_texture = item.result_texture.clone();
         let result_rgba = item.result_rgba.clone();
         match item_status {
             BatchStatus::Done => {
-                self.result_texture = result_texture;
+                if item.result_texture.is_some() || item.result_rgba.is_none() {
+                    self.result_texture = result_texture;
+                }
                 self.result_rgba = result_rgba;
                 self.state = AppState::Done;
             }
             BatchStatus::Processing => {
-                // In chain mode, keep the previous result visible during processing
                 self.result_texture = result_texture;
                 self.result_rgba = result_rgba;
                 self.state = AppState::Processing;
@@ -1015,7 +1027,25 @@ impl PrunrApp {
                 self.state = AppState::Loaded;
             }
         }
-        self.source_bytes = Some(self.batch_items[idx].source_bytes.clone());
+    }
+
+    fn spawn_tex_prep(
+        rgba: Arc<image::RgbaImage>,
+        item_id: u64,
+        name: String,
+        is_result: bool,
+        tx: mpsc::Sender<(u64, String, egui::ColorImage, bool)>,
+        ctx: egui::Context,
+    ) {
+        std::thread::spawn(move || {
+            let (w, h) = (rgba.width(), rgba.height());
+            let ci = egui::ColorImage::from_rgba_unmultiplied(
+                [w as usize, h as usize],
+                rgba.as_flat_samples().as_slice(),
+            );
+            let _ = tx.send((item_id, name, ci, is_result));
+            ctx.request_repaint();
+        });
     }
 }
 
@@ -1057,6 +1087,8 @@ impl PrunrApp {
                                 item.result_texture = None;
                                 item.thumb_texture = None;
                                 item.thumb_pending = false;
+                                item.source_tex_pending = false;
+                                item.result_tex_pending = false;
                                 let backend_changed = self.settings.active_backend != pr.active_provider;
                                 self.settings.active_backend = pr.active_provider;
                                 if backend_changed {
@@ -1127,14 +1159,33 @@ impl PrunrApp {
         // Collect paths (need background I/O) and inline bytes (already in memory)
         let mut paths: Vec<PathBuf> = Vec::new();
         let mut inline_items: Vec<(Vec<u8>, String)> = Vec::new();
+        let mut saw_self_drop = false;
 
         for file in dropped {
             if let Some(path) = file.path {
+                // Reject self-originated drops: our own drag-out writes temp files
+                // under prunr-drag/. Dropping those back onto the canvas would
+                // reopen them as new images.
+                if super::drag_export::is_self_drop(&path) {
+                    saw_self_drop = true;
+                    continue;
+                }
                 self.last_open_dir = path.parent().map(|p| p.to_path_buf());
                 paths.push(path);
             } else if let Some(bytes) = file.bytes {
                 inline_items.push((bytes.to_vec(), file.name.clone()));
             }
+        }
+
+        // Pure self-drop (our own drag landed back on the canvas): clear any
+        // lingering drag state in case the drag crate's completion callback
+        // didn't fire (observed on Windows).
+        if saw_self_drop && paths.is_empty() && inline_items.is_empty() {
+            self.drag_out_active.store(false, Ordering::Release);
+            if let Ok(mut set) = self.drag_out_items.lock() {
+                set.clear();
+            }
+            return;
         }
 
         // Offload path-based file reads to background thread (avoids GUI freeze)
@@ -1330,6 +1381,25 @@ impl PrunrApp {
             }
         }
 
+        // Receive pre-built ColorImages and upload to GPU (lightweight — just queues the upload)
+        let mut tex_arrived = false;
+        while let Ok((item_id, name, color_image, is_result)) = self.bg_io.tex_prep_rx.try_recv() {
+            let tex = ctx.load_texture(name, color_image, egui::TextureOptions::default());
+            if let Some(item) = self.batch_items.iter_mut().find(|b| b.id == item_id) {
+                if is_result {
+                    item.result_texture = Some(tex);
+                    item.result_tex_pending = false;
+                } else {
+                    item.source_texture = Some(tex);
+                    item.source_tex_pending = false;
+                }
+                tex_arrived = true;
+            }
+        }
+        if tex_arrived {
+            self.sync_selected_batch_textures(ctx);
+        }
+
         // Drain files loaded by background thread (max 5 per frame to stay responsive)
         // Drain save completion notifications
         while let Ok(msg) = self.bg_io.save_done_rx.try_recv() {
@@ -1378,6 +1448,13 @@ impl PrunrApp {
             self.prev_title = title.clone();
             ctx.send_viewport_cmd(ViewportCommand::Title(title));
         }
+    }
+}
+
+impl Drop for PrunrApp {
+    fn drop(&mut self) {
+        self.cancel_flag.store(true, Ordering::Release);
+        super::drag_export::cleanup_all();
     }
 }
 

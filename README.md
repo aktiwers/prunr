@@ -4,17 +4,38 @@ Local AI background removal. One binary, no cloud, no API keys.
 
 Prunr removes backgrounds from images using ONNX neural networks running entirely on your machine. It ships as a single binary with embedded models — download, run, done.
 
+Website: [prunr.io](https://prunr.io/)
+
 <p align="center">
   <img src="img/demo.gif" alt="Prunr demo" width="720">
 </p>
 
 ## Download
 
-| Platform | Installer | Portable |
-|----------|-----------|----------|
-| **Linux** | [AppImage](https://github.com/aktiwers/prunr/releases/latest/download/Prunr-x86_64.AppImage) \| [.deb](https://github.com/aktiwers/prunr/releases/latest/download/prunr-linux-x86_64.deb) | [tar.gz](https://github.com/aktiwers/prunr/releases/latest/download/prunr-linux-x86_64.tar.gz) |
-| **macOS** (Apple Silicon) | [DMG](https://github.com/aktiwers/prunr/releases/latest/download/Prunr-macos-aarch64.dmg) | [tar.gz](https://github.com/aktiwers/prunr/releases/latest/download/prunr-macos-aarch64.tar.gz) |
-| **Windows** | [Installer](https://github.com/aktiwers/prunr/releases/latest/download/prunr-windows-x86_64-setup.exe) | [zip](https://github.com/aktiwers/prunr/releases/latest/download/prunr-windows-x86_64.zip) |
+### Linux (x86_64)
+
+| Format | Link | Notes |
+|--------|------|-------|
+| AppImage | [Prunr-x86_64.AppImage](https://github.com/aktiwers/prunr/releases/latest/download/Prunr-x86_64.AppImage) | Universal — any distro |
+| Debian / Ubuntu | [.deb](https://github.com/aktiwers/prunr/releases/latest/download/prunr-linux-x86_64.deb) | `sudo dpkg -i` |
+| Fedora / RHEL / openSUSE | [.rpm](https://github.com/aktiwers/prunr/releases/latest/download/prunr-linux-x86_64.rpm) | `sudo rpm -i` |
+| Arch Linux (AUR) | [PKGBUILD](packaging/aur/PKGBUILD) | `makepkg -si` — AUR package name: `prunr-bin` |
+| Portable tarball | [tar.gz](https://github.com/aktiwers/prunr/releases/latest/download/prunr-linux-x86_64.tar.gz) | Extract and run |
+
+### macOS (Apple Silicon)
+
+| Format | Link | Notes |
+|--------|------|-------|
+| Disk image | [Prunr-macos-aarch64.dmg](https://github.com/aktiwers/prunr/releases/latest/download/Prunr-macos-aarch64.dmg) | Drag to Applications |
+| Homebrew | [Formula](packaging/homebrew/prunr.rb) | `brew install aktiwers/prunr/prunr` |
+| Portable tarball | [tar.gz](https://github.com/aktiwers/prunr/releases/latest/download/prunr-macos-aarch64.tar.gz) | Extract and run |
+
+### Windows (x86_64)
+
+| Format | Link | Notes |
+|--------|------|-------|
+| Installer | [prunr-windows-x86_64-setup.exe](https://github.com/aktiwers/prunr/releases/latest/download/prunr-windows-x86_64-setup.exe) | Inno Setup — Start Menu + desktop shortcut |
+| Portable zip | [prunr-windows-x86_64.zip](https://github.com/aktiwers/prunr/releases/latest/download/prunr-windows-x86_64.zip) | Unzip and run |
 
 Or browse all releases: [github.com/aktiwers/prunr/releases](https://github.com/aktiwers/prunr/releases)
 

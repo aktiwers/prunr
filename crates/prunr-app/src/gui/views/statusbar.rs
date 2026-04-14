@@ -96,9 +96,14 @@ pub fn render(ui: &mut egui::Ui, app: &PrunrApp) {
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.add_space(theme::SPACE_SM);
 
-            // Backend badge
+            // Backend badge — show forced status immediately when toggled
+            let backend_display = if app.settings.force_cpu {
+                "CPU (forced)"
+            } else {
+                &app.settings.active_backend
+            };
             ui.label(
-                RichText::new(format!("Backend: {}", app.settings.active_backend))
+                RichText::new(format!("Backend: {backend_display}"))
                     .monospace()
                     .size(theme::FONT_SIZE_MONO)
                     .color(theme::TEXT_SECONDARY),

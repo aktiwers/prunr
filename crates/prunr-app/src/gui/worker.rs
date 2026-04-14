@@ -1,7 +1,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
 
-use prunr_core::{MaskSettings, ModelKind, OrtEngine, ProgressStage, ProcessResult, process_image_with_mask, create_engine_pool, EdgeEngine};
+use prunr_core::{MaskSettings, ModelKind, OrtEngine, ProgressStage, ProcessResult, process_image_with_mask, process_image_from_decoded, create_engine_pool, EdgeEngine};
 use crate::gui::settings::LineMode;
 
 pub enum WorkerMessage {
@@ -115,6 +115,10 @@ pub fn spawn_worker(
                                 Vec::new()
                             };
 
+                            // Prewarm engine served its purpose (GPU readiness signal).
+                            // Drop our Arc clone so its VRAM can be freed once all references are gone.
+                            drop(prewarm);
+
                             let pool_size = if engines.is_empty() { jobs.max(1) } else { engines.len() };
 
                             let pool = rayon::ThreadPoolBuilder::new()
@@ -123,6 +127,9 @@ pub fn spawn_worker(
                                 .unwrap_or_else(|_| rayon::ThreadPoolBuilder::new().build().unwrap());
 
                             let cancel_batch = cancel.clone();
+                            // Shared repaint timestamp — all workers check this so only
+                            // one request_repaint() fires per 33ms regardless of worker count.
+                            let shared_repaint = Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
 
                             pool.scope(|s| {
                                 for (idx, (item_id, img_bytes, chain_input)) in items.into_iter().enumerate() {
@@ -140,44 +147,48 @@ pub fn spawn_worker(
                                     let line_str = line_strength;
                                     let line_col = solid_line_color;
                                     let bg_col = bg_color;
+                                    let repaint_lock = shared_repaint.clone();
 
                                     s.spawn(move |_| {
-                                        if cancel_item.load(Ordering::Relaxed) {
+                                        if cancel_item.load(Ordering::Acquire) {
                                             return;
                                         }
                                         let progress_tx = res_tx_item.clone();
                                         let progress_ctx = ctx_item.clone();
                                         let progress_cancel = cancel_item.clone();
-                                        let last_repaint = std::cell::Cell::new(std::time::Instant::now());
                                         let progress_cb = move |stage: ProgressStage, pct: f32| {
-                                            if !progress_cancel.load(Ordering::Relaxed) {
+                                            if !progress_cancel.load(Ordering::Acquire) {
                                                 let _ = progress_tx.send(WorkerResult::BatchProgress {
                                                     item_id, stage, pct,
                                                 });
-                                                if last_repaint.get().elapsed().as_millis() >= 33 {
-                                                    progress_ctx.request_repaint();
-                                                    last_repaint.set(std::time::Instant::now());
+                                                if let Ok(mut last) = repaint_lock.try_lock() {
+                                                    if last.elapsed().as_millis() >= 33 {
+                                                        progress_ctx.request_repaint();
+                                                        *last = std::time::Instant::now();
+                                                    }
                                                 }
                                             }
                                         };
 
-                                        // Lazily build DynamicImage from chain input — only when actually consumed
-                                        // (edge detect takes &DynamicImage; one clone is unavoidable at this boundary).
-                                        let build_chain_img = || -> Option<image::DynamicImage> {
-                                            chain_input.as_ref().map(|rgba| {
-                                                image::DynamicImage::ImageRgba8((**rgba).clone())
-                                            })
-                                        };
+                                        // Build DynamicImage from chain input once — all consumers borrow it.
+                                        // Arc::unwrap_or_clone avoids the copy if this is the sole reference.
+                                        let chain_img: Option<image::DynamicImage> = chain_input.map(|rgba| {
+                                            image::DynamicImage::ImageRgba8(Arc::unwrap_or_clone(rgba))
+                                        });
 
                                         let result = match line_mode {
                                             LineMode::LinesOnly => {
-                                                // Edge detection only, skip bg removal
-                                                let input = match build_chain_img() {
-                                                    Some(img) => Ok(img),
-                                                    None => prunr_core::load_image_from_bytes(&img_bytes),
+                                                let decoded;
+                                                let img_ref = if let Some(ref img) = chain_img {
+                                                    Ok(img as &image::DynamicImage)
+                                                } else {
+                                                    match prunr_core::load_image_from_bytes(&img_bytes) {
+                                                        Ok(img) => { decoded = img; Ok(&decoded as &image::DynamicImage) }
+                                                        Err(e) => Err(e),
+                                                    }
                                                 };
-                                                input.and_then(|img| {
-                                                    edge_eng.as_ref().unwrap().detect(&img, line_str, line_col)
+                                                img_ref.and_then(|img| {
+                                                    edge_eng.as_ref().unwrap().detect(img, line_str, line_col)
                                                         .map(|rgba_image| ProcessResult {
                                                             rgba_image,
                                                             active_provider: OrtEngine::detect_active_provider(),
@@ -185,9 +196,8 @@ pub fn spawn_worker(
                                                 })
                                             }
                                             LineMode::AfterBgRemoval => {
-                                                if let Some(img) = build_chain_img() {
-                                                    // Chain mode: skip bg removal, go straight to edge detection
-                                                    edge_eng.as_ref().unwrap().detect(&img, line_str, line_col)
+                                                if let Some(ref img) = chain_img {
+                                                    edge_eng.as_ref().unwrap().detect(img, line_str, line_col)
                                                         .map(|rgba_image| ProcessResult {
                                                             rgba_image,
                                                             active_provider: OrtEngine::detect_active_provider(),
@@ -209,28 +219,18 @@ pub fn spawn_worker(
                                                 }
                                             }
                                             LineMode::Off => {
-                                                // Normal background removal
                                                 let eng = engine.as_ref().expect("segmentation engine required");
-                                                let input_bytes: std::borrow::Cow<[u8]> = if let Some(ref rgba) = chain_input {
-                                                    // Encode chain input to PNG bytes for process_image_with_mask
-                                                    match prunr_core::encode_rgba_png(rgba) {
-                                                        Ok(bytes) => std::borrow::Cow::Owned(bytes),
-                                                        Err(e) => {
-                                                            let _ = res_tx_item.send(WorkerResult::BatchItemDone {
-                                                                item_id,
-                                                                result: Err(e.to_string()),
-                                                            });
-                                                            ctx_item.request_repaint();
-                                                            return;
-                                                        }
-                                                    }
+                                                if let Some(ref img) = chain_img {
+                                                    process_image_from_decoded(
+                                                        img, eng, &mask_item,
+                                                        Some(progress_cb), Some(cancel_item),
+                                                    )
                                                 } else {
-                                                    std::borrow::Cow::Borrowed(&img_bytes)
-                                                };
-                                                process_image_with_mask(
-                                                    &input_bytes, eng, &mask_item,
-                                                    Some(progress_cb), Some(cancel_item),
-                                                )
+                                                    process_image_with_mask(
+                                                        &img_bytes, eng, &mask_item,
+                                                        Some(progress_cb), Some(cancel_item),
+                                                    )
+                                                }
                                             }
                                         };
 
@@ -251,10 +251,13 @@ pub fn spawn_worker(
                                 }
                             });
 
-                            if !cancel.load(Ordering::Relaxed) {
-                                let _ = res_tx_batch.send(WorkerResult::BatchComplete);
+                            let final_msg = if !cancel.load(Ordering::Acquire) {
+                                WorkerResult::BatchComplete
                             } else {
-                                let _ = res_tx_batch.send(WorkerResult::Cancelled);
+                                WorkerResult::Cancelled
+                            };
+                            if res_tx_batch.send(final_msg).is_err() {
+                                eprintln!("worker: UI channel closed, batch result lost");
                             }
                             ctx_batch.request_repaint();
                         });

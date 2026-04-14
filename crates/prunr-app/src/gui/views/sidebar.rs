@@ -20,11 +20,12 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
     let sidebar_rect = ui.clip_rect();
     let sidebar_escape_rect = sidebar_rect.expand(12.0);
 
-    // Snapshot active drag-out state (set of item IDs being dragged) for visual dimming.
-    let dragging_ids: HashSet<u64> = if app.drag_out_active.load(Ordering::Relaxed) {
-        app.drag_out_items.lock().ok().map(|s| s.clone()).unwrap_or_default()
+    // Snapshot active drag-out state once per frame (only locks/clones when actively dragging).
+    let drag_active = app.drag_out_active.load(Ordering::Acquire);
+    let dragging_ids: Option<HashSet<u64>> = if drag_active {
+        app.drag_out_items.lock().ok().map(|s| s.clone())
     } else {
-        HashSet::new()
+        None
     };
 
     ui.vertical(|ui| {
@@ -77,14 +78,21 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
         let mut needs_repaint = false;
 
         egui::ScrollArea::vertical().show(ui, |ui| {
+            let visible_rect = ui.clip_rect();
+
             for i in 0..app.batch_items.len() {
                 let is_selected = i == app.selected_batch_index;
 
-                // Allocate space for item
+                // Allocate space for item (always — keeps layout/scrollbar correct)
                 let (item_rect, item_response) = ui.allocate_exact_size(
                     Vec2::new(item_width, item_height),
                     egui::Sense::click_and_drag(),
                 );
+
+                // Skip painting for off-screen items (virtualization)
+                if item_rect.max.y < visible_rect.min.y || item_rect.min.y > visible_rect.max.y {
+                    continue;
+                }
 
                 // Background
                 let bg_color = if is_selected {
@@ -143,7 +151,8 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                     let fitted = tex_size * scale;
                     let thumb_rect = Rect::from_center_size(item_rect.center(), fitted);
                     // Dim thumbnail to ~40% while it's being dragged out to an external app.
-                    let dim = if dragging_ids.contains(&app.batch_items[i].id) { 0.4 } else { 1.0 };
+                    let is_dragging = dragging_ids.as_ref().is_some_and(|s| s.contains(&app.batch_items[i].id));
+                    let dim = if is_dragging { 0.4 } else { 1.0 };
                     let alpha = (fade * dim * 255.0) as u8;
                     ui.painter().image(
                         thumb_tex.id(), thumb_rect,
@@ -302,7 +311,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                 // otherwise drag just the one. Skip items still processing.
                 if ui.ctx().is_being_dragged(item_response.id)
                     && app.drag_out_pending.is_none()
-                    && !app.drag_out_active.load(Ordering::Relaxed)
+                    && !app.drag_out_active.load(Ordering::Acquire)
                 {
                     if let Some(pos) = ui.ctx().pointer_hover_pos() {
                         if !sidebar_escape_rect.contains(pos) {
@@ -350,9 +359,9 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
             }
         });
 
-        // Request repaint for animations/pending thumbnails — throttled to ~30fps
+        // Request repaint for animations/pending thumbnails — throttled to ~15fps
         if needs_repaint || app.batch_items.iter().any(|i| i.thumb_pending) {
-            ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(66));
         }
 
         // Apply remove
