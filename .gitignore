@@ -8,3 +8,9 @@ tests/test_images/*.png
 tests/test_images/*.webp
 tests/test_images/*.bmp
 test_cli/
+
+# Internal dev planning — not for public repo
+.planning/
+.claude/
+demo/
+memory/
