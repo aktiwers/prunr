@@ -1,459 +1,300 @@
 # Prunr Architecture
 
-> Living document — updated as the codebase evolves. Last updated: 2026-04-13.
+Living document describing how Prunr is built. For user-facing info see [README.md](README.md).
 
 ## Design Principles
 
-1. **Blazing fast, non-blocking everywhere** — The UI thread never waits on inference. All I/O and inference runs on dedicated worker threads. Batch processing parallelizes across images.
-2. **SOLID in Rust** — Single-responsibility crates. Trait-based abstractions for inference backends. Dependency inversion between core/GUI/CLI via trait objects and channels.
-3. **Cross-platform by default** — Every architectural decision must work on Linux x86_64, macOS x86_64+aarch64, and Windows x86_64. Platform-specific code is isolated behind feature flags.
-4. **Single binary, zero dependencies** — Models, assets, and runtime libraries are embedded. The user downloads one file and runs it.
+1. **The UI thread never waits** — inference, file I/O, decoding, PNG encoding, texture prep all run on background threads. All communication is via `mpsc` channels drained non-blockingly each frame.
+2. **Single binary** — one `prunr` executable hosts both GUI and CLI. No `prunr-gui` vs `prunr-cli` split. Models are embedded as zstd blobs decompressed at runtime.
+3. **Platform parity** — every feature works on Linux x86_64, macOS aarch64, and Windows x86_64. Platform-specific code is isolated behind `#[cfg(...)]`.
+4. **Progressive performance** — start fast, improve in place. Use real hardware (GPU/NE) when available, fall back gracefully to CPU, never block startup on compilation.
 
-## Workspace Structure
+## Workspace
 
 ```
 prunr/
-├── Cargo.toml                    # [workspace] — members below
 ├── crates/
-│   ├── prunr-core/             # Library: inference pipeline, image I/O
-│   │   └── src/
-│   │       ├── lib.rs            # Public API surface + trait definitions
-│   │       ├── engine.rs         # InferenceEngine trait + ORT implementation
-│   │       ├── pipeline.rs       # Pre-process → infer → post-process → alpha
-│   │       ├── batch.rs          # Parallel batch via rayon, progress callbacks
-│   │       ├── guided_filter.rs  # Guided filter alpha matting for edge refinement
-│   │       ├── edge.rs           # DexiNed edge detection engine + pipeline
-│   │       ├── formats.rs        # Image decode/encode, background color
-│   │       └── types.rs          # Shared types: ProcessResult, Progress, MaskSettings, Error
-│   │
-│   ├── prunr-models/           # Library: model embedding (isolated for build speed)
-│   │   └── src/lib.rs            # include_bytes! + zstd decompress for silueta, u2net, birefnet-lite
-│   │                             # Dev feature: load from filesystem
-│   │
-│   └── prunr-app/              # Binary: single binary for both CLI and GUI
-│       └── src/
-│           ├── main.rs           # Entry point: no args → GUI, files → CLI
-│           ├── cli.rs            # clap args: prunr photo.jpg [options] (indicatif progress)
-│           ├── gui/
-│           │   ├── mod.rs        # eframe::run_native entry point
-│           │   ├── app.rs            # App struct, eframe::App impl, event routing
-│           │   ├── worker.rs         # Background inference thread + dual-engine fallback
-│           │   ├── state.rs          # State machine (Empty → Loaded → Processing → Done)
-│           │   ├── settings.rs       # Settings model (persisted to ~/.config/prunr/)
-│           │   ├── zoom_state.rs     # Zoom/pan state (extracted from app.rs)
-│           │   ├── status_state.rs   # Progress/status text (extracted from app.rs)
-│           │   ├── background_io.rs  # Background channel bundle (file/thumb/decode/save)
-│           │   ├── theme.rs          # Design tokens: colors, spacing, fonts, sizes
-│           │   ├── views/
-│           │   │   ├── canvas.rs     # Image viewer: textures, zoom/pan, checkerboard
-│           │   │   ├── sidebar.rs    # Batch queue: thumbnails, drag-reorder, select
-│           │   │   ├── toolbar.rs    # Open/Model/Settings/RemoveBG/ProcessAll/Save
-│           │   │   ├── statusbar.rs  # Status text + progress bar + progress %
-│           │   │   ├── settings.rs   # Settings modal (jobs, mask tuning, backend)
-│           │   │   ├── shortcuts.rs  # F1 keyboard shortcuts overlay
-│           │   │   └── cli_help.rs   # F2 CLI reference with copy-to-clipboard
-│
-├── xtask/                        # Developer tooling
-│   ├── Cargo.toml
-│   └── src/main.rs               # cargo xtask fetch-models (SHA256-verified download)
-│
-├── models/                       # ONNX model files (.gitignored, fetched via xtask)
-│   ├── silueta.onnx              # ~4MB — fast model, default
-│   ├── u2net.onnx                # ~170MB — quality model
-│   ├── birefnet_lite.onnx        # ~214MB — best detail, 1024×1024
-│   └── dexined.onnx              # ~134MB — DexiNed edge detection (exported via scripts/export_dexined.py)
-│
-├── assets/                       # App icon, fonts
-├── ARCHITECTURE.md               # This file
-└── .planning/                    # GSD planning docs
+│   ├── prunr-models/       # Embedded zstd-compressed ONNX blobs + runtime decompression
+│   ├── prunr-core/         # Inference pipeline, image I/O, batch processing
+│   └── prunr-app/          # Single binary: GUI (eframe/egui) + CLI (clap)
+├── xtask/                  # Developer tooling (cargo xtask fetch-models)
+├── packaging/              # AUR PKGBUILD, Homebrew formula template
+├── scripts/                # Model conversion (FP16/INT8 variants, DexiNed export)
+├── assets/                 # Icon, Info.plist, .desktop file
+├── .github/workflows/      # CI + multi-platform release packaging
+├── ARCHITECTURE.md         # This file
+├── README.md
+└── LICENSE                 # Apache-2.0
 ```
 
-## Crate Dependency Graph
+**Dependency direction:** `prunr-models` → `prunr-core` → `prunr-app`. Reverse deps are forbidden; `prunr-models` has no workspace-internal dependencies so its ~380 MB embed blob only recompiles when models change.
 
-```
-prunr-models  (no deps on other workspace crates)
-      │
-      ▼
-prunr-core    (depends on: prunr-models)
-      │
-      ▼
-prunr-app     (single binary: CLI + GUI, depends on: prunr-core)
-```
+## Threading Model
 
-**Single binary architecture:** `prunr` (no args) opens the GUI. `prunr photo.jpg` runs CLI mode. One binary to distribute.
+| Thread | Spawned | Lives for | Purpose |
+|--------|---------|-----------|---------|
+| UI (egui render loop) | main | app lifetime | Render frames, handle input, drain channels via `try_recv()` |
+| Worker dispatch | startup | app lifetime | Receives `WorkerMessage::BatchProcess`, spawns processing threads |
+| Per-batch processing | per batch | one batch | Builds engine pool, drives rayon scope for parallel inference |
+| File loader | per drag-drop / open | until files loaded | `std::fs::read` in a loop, sends `(bytes, name)` via mpsc |
+| Image decoder | per imported image | ~20-80ms | `image::load_from_memory` → `Arc<RgbaImage>` for instant canvas switching |
+| Thumbnail builder | per imported image | ~5-50ms | Lanczos resize to 160px, sends `(id, w, h, pixels)` |
+| Texture prep | per canvas texture | ~5-50ms | Builds `egui::ColorImage` off the UI thread |
+| Save writer | per save | until PNG written | Background PNG encode + `fs::write` |
+| Model pre-warm | startup | app lifetime | Creates one GPU engine early so CoreML/CUDA compile cache populates |
+| Temp file cleanup | app exit | brief | Removes `prunr-drag/*` temp files |
 
-**Why this matters:**
-- `prunr-models` compiles independently. Its ~380MB embed only recompiles when model files change, not on every source edit.
-- `prunr-core` owns all inference logic. The app binary is a thin presentation layer.
-- `prunr-app` contains both CLI and GUI code in one binary — `prunr` (no args) = GUI, `prunr photo.jpg` = CLI.
+All background threads use `std::thread::spawn` — deliberately **not** `rayon::spawn`. Rayon's global pool is reserved for inference/guided filter parallelism; mixing them caused pool saturation during batch processing (earlier iterations of this code used rayon for everything and the global pool got blocked by decode/thumbnail tasks while `guided_filter::rayon::join` waited for workers).
+
+### Engine pooling
+
+Engines are created **once per batch**, not per-image:
+
+| Backend | Pool size | Intra-op threads |
+|---------|-----------|------------------|
+| CPU | `jobs` | `num_cpus / pool_size` |
+| GPU (CUDA/DirectML/CoreML) | `jobs.min(2)` | `num_cpus / pool_size` |
+
+GPU is capped at 2 engines — more doesn't help because the GPU driver serializes anyway, and each extra session doubles VRAM. The per-batch rayon thread pool matches the engine count so every worker has its own engine (no Mutex contention during inference).
+
+### Pre-warm + GPU fallback
+
+At startup, a background thread calls `OrtEngine::new()` to populate the CoreML/CUDA disk cache. If the user triggers processing before that finishes, the worker falls back to `new_cpu_only()` and reports `ProgressStage::LoadingModelCpuFallback` so the UI can show "GPU warming up — using CPU". After the first successful engine pool creation, the batch thread drops its Arc clone of the pre-warm engine to free its VRAM.
+
+### Repaint throttling
+
+With N rayon workers each calling `request_repaint()` on progress, we'd get N frames per 33ms window. Instead, the progress callback uses a single `Arc<Mutex<Instant>>` across all workers — only one repaint fires per 33ms regardless of how many workers are active.
 
 ## Data Flow
 
-### Single Image (GUI)
+### Single-image GUI processing
 
 ```
-User drops image
-       │
-       ▼
-  [UI Thread]  ──load + decode──►  DynamicImage in memory
-       │
-       │  send via mpsc channel
-       ▼
-  [Worker Thread]
-       │
-       ├── preprocess(img)     → resize 320×320, normalize (ImageNet mean/std)
-       ├── session.run(tensor) → raw ONNX output (ORT handles GPU/CPU)
-       ├── postprocess(output) → sigmoid, threshold, resize mask to original dims
-       └── apply_alpha(img, mask) → RGBA image with transparent background
-       │
-       │  send result via mpsc channel
-       │  call ctx.request_repaint()
-       ▼
-  [UI Thread]  ──receive result──►  Crossfade original → result (0.4s)
+User drops/opens image
+  ↓ (UI thread)
+add_to_batch(bytes) → BatchItem with Arc<Vec<u8>> source_bytes
+  ↓ (spawns decode + thumbnail threads)
+Image decoder → Arc<RgbaImage> → item.source_rgba
+Thumbnail builder → (id, w, h, pixels) → sidebar texture
+Texture prep → ColorImage → ctx.load_texture() → canvas texture
+  ↓ (user clicks "Remove BG")
+WorkerMessage::BatchProcess { items, model, jobs, ... } → worker
+  ↓ (worker spawns per-batch thread)
+create_engine_pool(model, jobs, cpu_only)
+  ↓ (pool.scope() — rayon parallel)
+per item: preprocess → session.run → postprocess → apply_alpha
+  ↓ (per image: mpsc send)
+WorkerResult::BatchItemDone { item_id, result }
+  ↓ (UI thread drains 8/frame)
+item.result_rgba = Some(Arc::new(rgba))
+  ↓ (spawns texture prep for result)
+Texture prep → ctx.load_texture() → result_texture
+  ↓
+Canvas crossfade (0.4s) original → result
 ```
 
-### Batch Processing (GUI)
+### Chain mode
 
-```
-User opens N images (file dialog or drag-and-drop)
-       │
-       ▼
-  [File Load Thread]  ──std::fs::read per file──►  send (bytes, name) via mpsc
-       │
-       │  UI drains max 5 files per frame (non-blocking)
-       ▼
-  [UI Thread]  ──add_to_batch()──►  Vec<BatchItem> (dims via ImageReader header-only)
-       │                             Thumbnails created lazily (1 per frame in sidebar)
-       │
-       │  "Process All" sends batch request via channel
-       ▼
-  [Worker Thread]  ──rayon::par_iter──►  N images processed in parallel
-       │                                   (thread pool sized to avoid
-       │                                    oversubscription with ORT)
-       │
-       │  send BatchItemDone per image via channel
-       │  call ctx.request_repaint() on each completion
-       ▼
-  [UI Thread]  ──cache results on BatchItem──►  result_rgba + result_texture
-               ──if viewed item: sync to canvas──►
-               (switching images = batch item lookup, no re-inference)
-```
+When "chain mode" is on, processing an already-processed image feeds the previous result as input. The worker receives `Option<Arc<RgbaImage>>` as a chain input; if present, it's wrapped in a `DynamicImage` (via `Arc::unwrap_or_clone` — zero-copy when sole owner) and passed to `process_image_from_decoded()` which skips the PNG encode/decode round-trip.
 
 ### CLI
 
 ```
-Args parsed (clap)
-       │
-       ├── single: core::pipeline::process_image()  →  save PNG
-       │
-       └── batch:  core::batch::batch_process()
-                     │
-                     ├── rayon thread pool (--jobs N)
-                     ├── indicatif progress bar (callback per image)
-                     └── exit code: 0 (all ok) / 1 (all fail) / 2 (partial)
+main.rs
+  ↓ Cli::parse()
+  ↓ inputs non-empty → cli::run_remove(&cli)
+  ↓
+single image: pipeline::process_image_with_mask() → PNG encode → fs::write
+batch:        batch::batch_process_with_mask() → rayon → PNG encodes in parallel
+  ↓
+exit code: 0 all ok / 1 all fail / 2 partial
 ```
 
-## Threading Model
-
-| Thread | Responsibility | Never does |
-|--------|---------------|------------|
-| **UI thread** (egui render loop) | Renders frames, handles input, polls channels via `try_recv()` | Blocks on inference, file I/O, image decode, or any operation >16ms |
-| **Worker dispatch** (single, long-lived) | Receives `BatchProcess` messages, spawns processing threads | Blocks on inference (delegates immediately) |
-| **Processing threads** (per batch, short-lived) | Each spawns a rayon pool for parallel inference, sends `BatchItemDone`/`BatchProgress` per image | Multiple batches can run concurrently |
-| **File loader thread** (per open dialog) | Reads image files from disk, sends `(bytes, name)` via mpsc | UI drains max 5 per frame |
-| **Thumbnail threads** (per image) | Decodes + resizes source images to 160px thumbnails | Sends `(id, w, h, pixels)` via channel |
-| **Decode threads** (per image) | Pre-decodes source `RgbaImage` for instant canvas switching | Sends `(id, RgbaImage)` via channel |
-| **Save thread** (per save operation) | PNG encode + `fs::write`, sends completion via `save_done` channel | UI shows "Saving..." toast, receives result |
-| **Model pre-warm** (startup, one-shot) | Creates ORT engine to populate CoreML/CUDA disk cache | Dropped after compilation; cache persists for future creates |
-
-### Engine Pooling Strategy
-
-Engines are created **once per batch**, not per-image. `create_engine_pool()` handles sizing:
-
-| Backend | Pool size | intra_threads | Rayon threads |
-|---------|-----------|---------------|---------------|
-| **CPU** (or GPU not ready) | 1 | num_cpus | 1 |
-| **GPU** (CUDA/CoreML/DirectML) | min(jobs, 2) | num_cpus / pool_size | pool_size |
-
-On macOS, the first `OrtEngine::new()` triggers CoreML model compilation (~2-5 min).
-The pre-warm thread does this at launch. If the user processes before it finishes,
-the worker falls back to `new_cpu_only()` for instant start. Future batches use GPU.
-
-### Thread Oversubscription Prevention
+## Inference Pipeline
 
 ```
-ORT intra_op_threads = num_cpus / pool_size
+1.  load_image_from_bytes()             → DynamicImage
+2.  check_large_image()                 → error if > 8000px (configurable via --large-image)
+3.  preprocess(img, model)              → Array4<f32> [1, 3, H, H] NCHW
+      - Silueta/U2Net: divide by max_pixel, ImageNet normalize
+      - BiRefNet-lite: divide by 255, ImageNet normalize
+      (single-pass: sequential reads of RGB source, scattered writes to 3 planes)
+4.  engine.with_session(|s| s.run(...)) → raw output tensor [1, 1, H, H]
+5.  postprocess(raw_output.view(), img, mask, model):
+      - Normalize to [0, 1]
+          - Silueta/U2Net: min-max via single scan
+          - BiRefNet-lite: sigmoid
+      - Short-circuit uniform output (everything foreground or everything background)
+          → fill mask with constant, skip per-pixel loop
+      - Otherwise: single pass with precomputed inv_range (division → multiplication)
+      - Apply gamma + optional hard threshold
+      - Resize mask to original dimensions (Lanczos3)
+      - Optional: apply_edge_shift (morphological erode/dilate, pre-allocated buffers)
+      - Optional: guided_filter_alpha (O(1) box filter with f32 integral images)
+      - Compose mask as alpha channel
+6.  Optional: apply_background_color() → fills transparent pixels with solid color
 ```
 
-If rayon has 4 workers and the machine has 16 cores, each ORT session uses 4 intra-op threads. Total: 4 × 4 = 16 threads = no oversubscription.
+### Postprocess fast paths
 
-## Inference Pipeline Detail
+- Division by range → precomputed `inv_range` multiplier (10x faster per pixel)
+- Uniform-output detection happens before the per-pixel loop (skipped entirely for uniform masks)
+- Guided filter uses `f32` prefix sums (was `f64` — halved memory bandwidth with no precision loss at typical image sizes)
+- Apply_edge_shift's ring buffers are allocated once and swapped via `std::mem::swap` across iterations
 
-Model-aware preprocessing and postprocessing:
+## Edge Detection (DexiNed)
 
-```
-1. Input: DynamicImage (any format, any size)
-2. Resize to model target (320×320 for Silueta/U2Net, 1024×1024 for BiRefNet-lite)
-3. Convert to f32 tensor [1, 3, H, H] (NCHW layout)
-   - Silueta/U2Net: divide by max(max_pixel, 1e-6), then ImageNet normalize
-   - BiRefNet-lite: divide by 255.0, then ImageNet normalize
-     mean = [0.485, 0.456, 0.406]  std = [0.229, 0.224, 0.225]
-4. Run ONNX session (GPU or CPU)
-5. Take first output tensor [1, 1, H, H]
-6. Normalize to [0, 1]:
-   - Silueta/U2Net: min-max normalization (val - min) / (max - min)
-   - BiRefNet-lite: sigmoid activation 1/(1+exp(-x))
-7. Apply mask settings: gamma curve, optional binary threshold
-8. Resize mask back to original image dimensions (Lanczos3)
-9. Optional: edge shift (morphological erode/dilate)
-10. Optional: guided filter edge refinement (uses original image colors)
-11. Apply mask as alpha channel to original image → RGBA output
-12. Optional: apply background color (alpha-blend onto solid color)
-```
+A separate `EdgeEngine` handles line extraction with its own ONNX session. Three line modes:
 
-## Edge Detection Pipeline (DexiNed)
+| Mode | Behaviour |
+|------|-----------|
+| `Off` | Normal background removal only |
+| `LinesOnly` | Skip segmentation, run DexiNed on original image |
+| `AfterBgRemoval` | Segmentation first, flatten result onto white (prevents ghost edges from transparent regions), then DexiNed |
 
-Line extraction uses a separate pipeline via `EdgeEngine`:
+Pipeline: resize to 480×640 → BGR float32 with mean subtraction → run DexiNed → take fused output → sigmoid + smoothstep threshold controlled by `line_strength` slider → resize mask to original → compose as alpha (optionally override RGB with solid line color).
 
-```
-1. Input: DynamicImage (any format, any size)
-2. If image has alpha (AfterBgRemoval mode): flatten onto white background
-3. Resize to 480×640 (DexiNed fixed input shape)
-4. Convert to BGR float32 tensor [1, 3, 480, 640], subtract mean [103.5, 116.2, 123.6]
-5. Run DexiNed ONNX session → 7 output tensors (6 scale outputs + 1 fused)
-6. Take fused output "block_cat" [1, 1, 480, 640]
-7. Apply sigmoid → edge probability map [0, 1]
-8. Apply smoothstep threshold based on line_strength slider
-9. Resize edge mask to original dimensions (Lanczos3)
-10. Compose: edge mask as alpha channel
-    - Optional: override RGB with solid line color
-11. Optional: apply background color
-```
-
-Three line modes:
-- **Off**: normal background removal only
-- **Lines only**: skip segmentation, run DexiNed on original image
-- **After BG removal**: run segmentation first, flatten result onto white, then run DexiNed
-
-## GPU Execution Provider Strategy
+## GPU Execution Providers
 
 ```rust
-// engine.rs: build_session() — cpu_only flag selects provider set
 if cpu_only {
-    builder.with_execution_providers([CPUExecutionProvider::default().build()])
+    // CPUExecutionProvider only
 } else {
-    builder.with_execution_providers([
-        #[cfg(not(target_os = "macos"))]
-        CUDAExecutionProvider::default()
-            .with_arena_extend_strategy(ArenaExtendStrategy::SameAsRequested)
-            .with_cuda_graph(true)   // fixed input shapes → graph replay
-            .with_tf32(true)         // TF32 on Ampere+ GPUs
-            .build(),
-        #[cfg(target_os = "macos")]
-        CoreMLExecutionProvider::default()
-            .with_model_cache_dir(coreml_cache_dir())
-            .build(),
-        #[cfg(windows)]
-        DirectMLExecutionProvider::default().build(),
-        CPUExecutionProvider::default().build(),
-    ])
+    // Try in order, fall through to CPU:
+    #[cfg(not(target_os = "macos"))]
+    CUDAExecutionProvider::default()
+        .with_arena_extend_strategy(ArenaExtendStrategy::SameAsRequested)
+        .with_cuda_graph(true)      // fixed-shape models → graph replay
+        .with_tf32(true)            // 10-30% speedup on Ampere+
+        .build(),
+    #[cfg(target_os = "macos")]
+    CoreMLExecutionProvider::default()
+        .with_model_cache_dir(coreml_cache_dir())  // persistent cache
+        .build(),
+    #[cfg(windows)]
+    DirectMLExecutionProvider::default().build(),
+    CPUExecutionProvider::default().build(),
 }
 ```
 
-- EPs are feature-gated per platform — only the relevant GPU EP is compiled in
-- CUDA EP tuned: `arena_extend_strategy(SameAsRequested)`, `cuda_graph(true)`, `tf32(true)` for 10-30% speedup
-- `new_cpu_only()` skips all GPU providers for instant startup
-- The active EP is exposed via `Engine::active_provider() -> &str`
-- **Dual-engine fallback**: GPU compiles in background; CPU used until ready
-- **FP16/INT8 model variants**: `new_with_fallback()` tries optimized model first, falls back to FP32 if ORT rejects it
+- EPs are feature-gated per platform; only the relevant GPU EP is compiled in
+- The active EP is detected once and cached via `OrtEngine::detect_active_provider()` (a `OnceLock<String>`). Settings UI uses this (not `active_backend`, which reflects what the last batch ran on) to decide whether to show "Force CPU".
 
-## Model Embedding
+### Model variants
 
-```rust
-// prunr-models/src/lib.rs
+`OrtEngine::new_with_fallback()` selects the right model for the active backend:
 
-// Pre-compressed .zst blobs embedded via plain include_bytes!
-#[cfg(not(feature = "dev-models"))]
-static SILUETA_ZST: &[u8] = include_bytes!("../../../models/silueta.onnx.zst");
-#[cfg(not(feature = "dev-models"))]
-static U2NET_ZST: &[u8] = include_bytes!("../../../models/u2net.onnx.zst");
-#[cfg(not(feature = "dev-models"))]
-static BIREFNET_LITE_ZST: &[u8] = include_bytes!("../../../models/birefnet_lite.onnx.zst");
+| Platform | Preferred | Fallback |
+|----------|-----------|----------|
+| Linux/Windows GPU | FP16 | FP32 |
+| Linux/Windows CPU | INT8 | FP32 |
+| **macOS (all backends)** | **FP32 always** | n/a |
 
-// Runtime decompression via zstd::bulk::decompress
-#[cfg(not(feature = "dev-models"))]
-pub fn silueta_bytes() -> Vec<u8> {
-    zstd::bulk::decompress(SILUETA_ZST, 50 * 1024 * 1024).expect("decompress failed")
-}
+macOS uses FP32 because CoreML silently converts to FP16 internally on Apple Silicon. Feeding it our FP16 variant stacks two conversions — precision loss can collapse the mask to near-zero, producing a fully transparent output (the "entire image removed" bug).
 
-#[cfg(feature = "dev-models")]
-pub fn silueta_bytes() -> Vec<u8> {
-    std::fs::read("models/silueta.onnx").expect("model not found")
-}
-```
+### Model bytes cache
 
-- Production: models stored as pre-compressed `.onnx.zst` files, embedded via `include_bytes!`, decompressed at runtime via `zstd::bulk::decompress`
-- Development: `--features dev-models` loads from filesystem (no recompilation on model changes)
-- Isolated crate: changing source code in core/gui/cli does not trigger model recompilation
-- Dependency changed from `include-bytes-zstd` (compile-time macro) to `zstd` (runtime decompression) for simpler builds
-- **Optimized variants**: FP16 (GPU) and INT8 (CPU) models generated by `scripts/convert_models.py`, loaded at runtime via `model_fp16_bytes()`/`model_int8_bytes()` with FP32 fallback
+Decompressed ONNX bytes are cached in `OnceLock<Vec<u8>>` per model. First call to e.g. `silueta_bytes()` takes ~200ms (zstd decompress 50 MB); subsequent calls clone the cached Vec (~1 ms). Previously every engine creation triggered a fresh decompression — visible as a 200 ms stall every time the user changed models or started a batch.
 
-## State Machine (GUI)
+## GUI State Machine
 
 ```
-        ┌───────────┐
-        │   Empty   │  (app just launched, no image loaded)
-        └─────┬─────┘
-              │ load image (open dialog, drag-drop, or batch file channel)
-              ▼
-        ┌───────────┐
-        │  Loaded    │  (image displayed, ready to process)
-        └─────┬─────┘
-              │ user clicks Remove BG / Process All / Ctrl+R
-              ▼
-        ┌───────────┐
-        │ Processing │  (worker thread running, progress shown)
-        └─────┬─────┘
-              │ inference complete
-              ▼
-        ┌───────────┐
-        │   Done     │  (result displayed, can save/copy/compare/save all)
-        └─────┴─────┘
-              │ load new image → back to Loaded
-              │ Escape during Processing → back to Loaded
-              │ Click different batch item → state follows that item's status
+      Empty  ──(add_to_batch)──►  Loaded  ──(process)──►  Processing  ──(done)──►  Done
+        ▲                            ▲                        │                      │
+        │                            │                        │ (cancel/Escape)      │
+        │                            └────────────────────────┤                      │
+        │                                                     │                      │
+        │                                                     ▼                      │
+        │                                              Back to Loaded                │
+        │                                                                            │
+        └────────────────────── (remove all batch items) ────────────────────────────┘
 ```
 
-**Batch state**: In batch mode, switching sidebar items sets `AppState` to match the *viewed item's*
-`BatchStatus` (Pending→Loaded, Processing→Processing, Done→Done). The global state reflects
-the currently viewed image, not the overall batch progress.
+In batch mode, switching sidebar items sets `AppState` to match the **viewed item's** `BatchStatus` (Pending→Loaded, Processing→Processing, Done→Done). The global state reflects the currently viewed image, not the overall batch progress.
 
-## Key Crate Dependencies
+## Canvas & Texture Lifecycle
+
+- Textures are built on background threads via `spawn_tex_prep()` — the expensive `ColorImage::from_rgba_unmultiplied()` (full RGBA copy) runs off the UI thread; `ctx.load_texture()` itself is cheap (queues a GPU upload)
+- Each `BatchItem` tracks `source_tex_pending` / `result_tex_pending` flags independently so source and result texture prep don't block each other
+- During a sidebar switch the previous texture is kept visible until the new one is ready — prevents a spinner flash for 25-130 ms while decode + texture prep complete
+- The checkerboard behind transparent results is a single 256×256 pre-generated texture (per theme: light and dark), tiled via `~40` `painter.image()` calls — down from ~8100 `rect_filled()` calls on a 1080p canvas in an earlier iteration
+- Off-screen sidebar items skip painting entirely (virtualization by viewport intersection)
+
+## Drag-Out (OS-level drag to external apps)
+
+Implemented via the `drag` crate (Windows/macOS only — Linux lacks a GTK window under winit). Files are written to `std::env::temp_dir()/prunr-drag/*.png` and handed to the OS drag session.
+
+Two defences against footguns:
+
+1. **Self-drop rejection** — if a drop event contains a path inside `prunr-drag/`, it's silently discarded. Otherwise dragging a thumbnail back onto the Prunr canvas would re-ingest it as a new image
+2. **Stuck-drag recovery** — on Windows, the `drag` crate's completion callback sometimes doesn't fire. When a self-drop is detected, we clear `drag_out_active` and `drag_out_items` so the sidebar dimming resets and a new drag can start
+
+Temp files are removed at app shutdown via a `Drop` impl on `PrunrApp` that spawns a cleanup thread (also cancels the worker via `cancel_flag`).
+
+## Windows-Specific: Console Subsystem
+
+Release builds on Windows use `#[windows_subsystem = "windows"]` — without this, launching the GUI pops an empty `cmd` window. When CLI arguments are detected at startup, we call `AttachConsole(ATTACH_PARENT_PROCESS)` so `prunr.exe photo.jpg` invoked from `cmd`/PowerShell still prints to the user's terminal.
+
+The GUI has a renderer fallback chain: glow (OpenGL) first, then wgpu (DX12/Vulkan). Mac-hosted Windows VMs often ship unreliable OpenGL drivers; wgpu works better in virtualized environments. If both fail, startup errors are written to `prunr-startup-error.log` next to the exe.
+
+## Atomic Memory Ordering
+
+`cancel_flag` and `drag_out_active` use `Release` on store, `Acquire` on load (rather than `Relaxed`). On x86 this is free; on ARM (Apple Silicon, and eventually ARM Windows) the memory barriers are necessary to guarantee cross-thread visibility of the cancel signal.
+
+## Build & Release
+
+### Build profile
+
+```toml
+[profile.release]
+strip = true
+lto = "fat"
+opt-level = 3
+panic = "abort"
+codegen-units = 1
+```
+
+LTO takes longer to link but shrinks the binary by ~15% and enables cross-crate inlining across the workspace.
+
+### GitHub Actions release pipeline
+
+Tag push (`v*`) triggers parallel builds on three runners:
+
+| Matrix target | Runner | Artifacts |
+|---------------|--------|-----------|
+| linux-x86_64 | ubuntu-latest | `.tar.gz`, `.AppImage`, `.deb`, `.rpm` |
+| macos-aarch64 | macos-latest | `.dmg`, `.tar.gz` (version patched into Info.plist from git tag) |
+| windows-x86_64 | windows-latest | `.zip`, Inno Setup `.exe` |
+
+All 8 artifacts are uploaded to a single GitHub Release. The RPM is built from an inline `.spec` file; the `.deb` is built directly via `dpkg-deb`.
+
+### Homebrew tap
+
+`brew install aktiwers/prunr/prunr` installs from [aktiwers/homebrew-prunr](https://github.com/aktiwers/homebrew-prunr) (a separate repo, since Homebrew requires taps to live in `homebrew-<name>` repos). The formula downloads the macOS tarball from the main repo's GitHub Release. Updates require bumping `version` + `sha256` in that tap repo after each release.
+
+### Version sync
+
+The workspace `Cargo.toml` `version` field is the single source of truth:
+- CLI: `clap` reads `CARGO_PKG_VERSION` automatically
+- Info.plist: patched from `${GITHUB_REF_NAME#v}` in CI before the macOS build
+- Inno Setup + deb + rpm: each reads the tag name via env in their respective package steps
+- Homebrew: manually synced in the tap after release (documented in `packaging/homebrew/prunr.rb`)
+
+## Key Dependencies
 
 | Crate | Version | Purpose |
 |-------|---------|---------|
-| `ort` | 2.0.0-rc.12 | ONNX Runtime bindings (CUDA, CoreML, DirectML, CPU) |
-| `egui` + `eframe` | 0.34.1 | GPU-accelerated immediate-mode GUI |
-| `image` | 0.25 | Image decode/encode (PNG, JPEG, WebP, BMP) |
-| `ndarray` | 0.17 | Tensor manipulation (ort 2.x compatible) |
-| `rayon` | 1.11 | Work-stealing thread pool for batch parallelism |
+| `ort` | 2.0.0-rc.12 | ONNX Runtime bindings |
+| `eframe` / `egui` | 0.34.1 | Immediate-mode GUI + windowing |
+| `wgpu` (transitive) | 29 | GPU rendering fallback on Windows VMs |
+| `image` | 0.25 | PNG/JPEG/WebP/BMP decode/encode |
+| `ndarray` | 0.17 | ORT-compatible tensor manipulation |
+| `rayon` | 1.11 | Work-stealing parallelism (scoped pools per batch) |
+| `zstd` | 0.13 | Runtime model decompression |
 | `clap` | 4.5 | CLI argument parsing |
-| `resvg` | 0.47 | SVG → raster conversion |
-| `arboard` | 3.4 | Clipboard (with `wayland-data-control` feature) |
-| `indicatif` | 0.17 | CLI progress bars |
-| `zstd` | 0.13 | Runtime model decompression (replaced include-bytes-zstd) |
-| `rfd` | 0.15 | Native file dialogs (open/save/folder picker) |
-| `num_cpus` | 1.x | Detect CPU count for parallel jobs setting |
-| `dirs` | 6.x | Cross-platform config directory for persistent settings |
-| `egui-notify` | 0.22 | Toast notification system |
-| `egui_material_icons` | 0.6 | Material Design icons throughout the UI |
-| `serde` + `serde_json` | 1.x | Settings serialization/persistence |
-
-## Keyboard Shortcuts — Platform Modifier
-
-All shortcuts use Ctrl on Linux/Windows and Cmd (⌘) on macOS. In code, use egui's `Modifiers::command` (not `ctrl`) which maps to the correct platform modifier automatically.
-
-```rust
-// Correct — platform-aware
-if ui.input(|i| i.modifiers.command && i.key_pressed(Key::O)) { /* open */ }
-
-// Wrong — Ctrl on macOS feels alien
-if ui.input(|i| i.modifiers.ctrl && i.key_pressed(Key::O)) { /* open */ }
-```
-
-## Platform-Specific Notes
-
-| Platform | GPU EP | Clipboard | File dialogs | Notes |
-|----------|--------|-----------|-------------|-------|
-| Linux x86_64 | CUDA (if NVIDIA) → CPU | arboard + wayland-data-control | rfd (GTK/portal) | Test on both X11 and Wayland |
-| macOS x86_64 | CoreML → CPU | arboard (AppKit) | rfd (NSOpenPanel) | Universal binary not required (separate x86/arm builds) |
-| macOS aarch64 | CoreML (Neural Engine/GPU) → CPU | arboard (AppKit) | rfd (NSOpenPanel) | Primary Apple Silicon target |
-| Windows x86_64 | CUDA → DirectML → CPU | arboard (Win32) | rfd (IFileDialog) | Bundle ORT DLL or static link to avoid system32 conflicts |
-
-## Change Log
-
-| Date | Change | Reason |
-|------|--------|--------|
-| 2026-04-06 | Initial architecture | Project initialization |
-| 2026-04-06 | Single binary (CLI+GUI), xtask model fetch, thiserror errors | Phase 1 discussion decisions |
-| 2026-04-08 | Multi-select open dialog, background file loading thread | Batch UX improvement |
-| 2026-04-08 | Sidebar moved to right, lazy thumbnail decode (1/frame) | UI polish |
-| 2026-04-08 | Replaced include-bytes-zstd with zstd runtime decompression | Simpler build, no proc-macro dependency |
-| 2026-04-08 | Settings modal: .open() close button, stepper for parallel jobs | Settings UI overhaul |
-| 2026-04-08 | Save All button + folder picker for batch export | Batch workflow completion |
-| 2026-04-08 | Reveal animation for batch items, dimension safety check | Batch animation support |
-| 2026-04-08 | Fit-to-window zoom on image load/switch | Large image UX |
-| 2026-04-08 | Batch selection: per-item checkboxes, Select All/Clear, Remove Selected | Multi-image workflow |
-| 2026-04-08 | Save Selected / Remove BG Selected: actions follow checkbox state | Consistent batch UX |
-| 2026-04-08 | Click-drag pan (no Space key needed), sidebar always visible with 1+ images | Photo editor UX |
-| 2026-04-08 | Background thumbnail generation via thread+channel (non-blocking UI) | Performance |
-| 2026-04-08 | Interactive modal backdrop (click outside to close), fixed Settings button | Modal UX |
-| 2026-04-08 | Processing animations: shimmer sweep + pulsing border on thumbnails/canvas | Visual feedback |
-| 2026-04-08 | Extracted process_items(), clear_to_empty(), sync_after_batch_change() helpers | Code cleanup |
-| 2026-04-08 | ProcessResult carries raw rgba_image — eliminates UI-thread PNG decode (50-200ms) | Performance |
-| 2026-04-08 | Arc<Vec<u8>> for source_bytes — eliminates multi-MB clones on click/send | Performance |
-| 2026-04-08 | Background thread save (encode+write off UI thread) with save_done channel | Performance |
-| 2026-04-08 | Removed all UI-thread image::load_from_memory fallbacks | Performance |
-| 2026-04-08 | Cow::Borrowed for clipboard copy, fixed paste encode roundtrip | Performance |
-| 2026-04-08 | Added egui_material_icons, egui-notify, egui_animation dependencies | UI polish |
-| 2026-04-08 | Material Design icons on all toolbar buttons, toast notifications | UI polish |
-| 2026-04-08 | Pre-decoded source images via background thread for instant switching | Performance |
-| 2026-04-08 | Plum purple theme from logo (#7B2D8E accent, #5B8C3E leaf green) | Branding |
-| 2026-04-08 | Eliminated ProcessImage path — all processing via BatchProcess with item_id | Architecture |
-| 2026-04-08 | Worker spawns threads per batch for true parallel concurrent processing | Architecture |
-| 2026-04-08 | Per-stage progress via BatchProgress (6 stages reported to UI) | UX |
-| 2026-04-08 | Sidebar hover actions: trash icon (delete), save icon (per-item save) | UX |
-| 2026-04-08 | Simplified CLI: prunr photo.jpg works without subcommand, short flags | CLI |
-| 2026-04-08 | Canvas fade-in (200ms) on image switch, thumbnail fade-in on load | UI polish |
-| 2026-04-08 | Non-interactive settings backdrop (fixes frozen settings modal) | Bug fix |
-| 2026-04-08 | Fixed concurrent processing: results tracked by item_id not selected index | Bug fix |
-| 2026-04-08 | Mask tuning: gamma, threshold, edge shift controls in Settings + CLI | Feature |
-| 2026-04-08 | Ctrl+Z undo / Ctrl+Y redo for background removal | Feature |
-| 2026-04-08 | Settings persistence via ~/.config/prunr/settings.json | Feature |
-| 2026-04-08 | Smart parallel jobs default: 2 for GPU, num_cpus/2 for CPU | Performance |
-| 2026-04-08 | Removed CLI subcommand — prunr photo.jpg works directly | CLI simplification |
-| 2026-04-08 | F2 CLI reference modal with copy-to-clipboard buttons | UX |
-| 2026-04-08 | Cycling tips on empty canvas with fade animation | UX |
-| 2026-04-09 | BiRefNet-lite model (1024×1024, ~214 MB) for fine detail | Feature |
-| 2026-04-09 | Guided filter edge refinement (pure Rust, O(1) box filter) | Feature |
-| 2026-04-09 | Removed reveal animation — replaced with simple crossfade (0.4s) | Simplification |
-| 2026-04-09 | Loading spinner on canvas while source image decodes | UX |
-| 2026-04-09 | Model dropdown in toolbar with per-model icons | UI |
-| 2026-04-09 | Progress percentage in status bar during processing | UX |
-| 2026-04-09 | Save dialogs default to source image directory | UX |
-| 2026-04-09 | Backend detected at startup via compile-time feature flags | Architecture |
-| 2026-04-09 | GitHub Actions release workflow with embedded models | CI/CD |
-| 2026-04-12 | God Object refactor: ZoomState, StatusState, BackgroundIO extracted | Architecture |
-| 2026-04-12 | logic() decomposed into 5 focused sub-methods (340→8 lines) | Architecture |
-| 2026-04-12 | Engine pooling: create_engine_pool() replaces per-image OrtEngine::new() | Performance |
-| 2026-04-12 | Dual-engine CPU fallback: instant start while GPU compiles in background | Performance |
-| 2026-04-12 | Arc<RgbaImage> throughout — zero-copy image switching/saving | Performance |
-| 2026-04-12 | VRAM-safe GPU pool: capped at 2 sessions per batch | Stability |
-| 2026-04-12 | Lazy PNG encoding: removed from pipeline, encode on save only | Performance |
-| 2026-04-12 | Parallel guided filter: rayon::join for 4-way box_filter, parallel prefix sums | Performance |
-| 2026-04-12 | Parallel apply_edge_shift with Rayon (par_chunks_mut rows, threshold gate) | Performance |
-| 2026-04-12 | Raw buffer ops: to_nchw precomputed scale/bias, channel-planar writes | Performance |
-| 2026-04-12 | Raw buffer postprocess: flat pred_slice, in-place alpha compositing | Performance |
-| 2026-04-12 | Fast PNG encoding: Compression::Fast + FilterType::Sub (3-5x faster) | Performance |
-| 2026-04-12 | Resize directly from DynamicImage (skip full-res RGB intermediate) | Performance |
-| 2026-04-12 | Arc in request_decode (eliminates 5-50MB clone per import) | Performance |
-| 2026-04-12 | Drag-and-drop file reads moved to background thread | Performance |
-| 2026-04-12 | CUDA EP tuned: arena strategy, cuda_graph, tf32 | Performance |
-| 2026-04-12 | FP16/INT8 model variants with fallback to FP32 | Performance |
-| 2026-04-12 | egui_extras trimmed from all_loaders to image (~15MB binary reduction) | Build |
-| 2026-04-12 | Release profile: fat LTO, panic=abort, codegen-units=1 | Build |
-| 2026-04-12 | Fix: sidebar thumb_pending never cleared (100% CPU when idle) | Bug fix |
-| 2026-04-12 | Fix: GPU warming status only shown when GPU actually present | Bug fix |
-| 2026-04-12 | selected_item() helper replaces direct batch indexing (5 call sites) | Code quality |
-| 2026-04-12 | LoadingModelCpuFallback progress stage for CPU fallback visibility | UX |
-| 2026-04-12 | UI repaint throttle: 30fps cap during batch, 8-message-per-frame cap | Performance |
-| 2026-04-12 | CPU parallel processing: pool_size = jobs (was hardcoded to 1) | Bug fix |
-| 2026-04-13 | DexiNed edge detection: EdgeEngine, 3 line modes, line strength slider | Feature |
-| 2026-04-13 | Solid line color picker + background color picker with hex input | Feature |
-| 2026-04-13 | Flatten-on-white for AfterBgRemoval mode (prevents ghost edges) | Bug fix |
-| 2026-04-13 | Tabbed Settings modal: General, Lines, Mask tabs | UI |
-| 2026-04-13 | Tabbed CLI Reference (F2): Quick Start, Lines, Mask, Advanced | UI |
-| 2026-04-13 | Backdrop click-to-close: only fires outside modal window rect | Bug fix |
-| 2026-04-13 | Bare-key shortcuts suppressed when text fields have focus | Bug fix |
-| 2026-04-13 | Per-tab + global reset buttons in Settings header | UX |
-| 2026-04-13 | apply_background_color() extracted to prunr-core::formats | Code quality |
+| `rfd` | 0.15 | Native file dialogs |
+| `arboard` | 3.x | Cross-platform clipboard |
+| `dirs` | 6.x | Platform config dirs |
+| `drag` | 2.1 | OS drag-out (Windows/macOS only) |
+| `windows-sys` | 0.59 | AttachConsole on Windows GUI builds |
+| `serde` / `serde_json` | 1.x | Settings persistence |
