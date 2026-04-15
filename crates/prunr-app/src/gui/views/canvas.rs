@@ -39,18 +39,18 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                     }
                 }
             }
-            // Click+drag pan (like photo editors)
-            let dragging = i.pointer.primary_down();
-            if dragging && i.pointer.delta() != egui::Vec2::ZERO {
-                // Only pan if cursor is over the canvas area
-                if let Some(pos) = i.pointer.hover_pos() {
-                    if canvas_rect.contains(pos) {
-                        app.zoom_state.pan_offset += i.pointer.delta();
-                        app.zoom_state.is_panning = true;
-                    }
-                }
-            } else {
+            // Click+drag pan: enter panning ONLY on a fresh press inside the canvas.
+            // This avoids false pan when egui's pointer state is desynced — e.g. after
+            // an OS drag-out session where Prunr's window never saw the mouse-up.
+            let hovered_inside = i.pointer.hover_pos().is_some_and(|p| canvas_rect.contains(p));
+            if i.pointer.primary_pressed() && hovered_inside {
+                app.zoom_state.is_panning = true;
+            }
+            if !i.pointer.primary_down() {
                 app.zoom_state.is_panning = false;
+            }
+            if app.zoom_state.is_panning && i.pointer.delta() != egui::Vec2::ZERO {
+                app.zoom_state.pan_offset += i.pointer.delta();
             }
         });
     }
