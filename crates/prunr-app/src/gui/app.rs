@@ -1185,6 +1185,7 @@ impl PrunrApp {
             if let Ok(mut set) = self.drag_out_items.lock() {
                 set.clear();
             }
+            ctx.stop_dragging();
             return;
         }
 
@@ -1533,6 +1534,10 @@ impl eframe::App for PrunrApp {
         // Must run after sidebar renders so the user sees the drag cursor leave the area.
         if let Some(ids) = self.drag_out_pending.take() {
             self.initiate_drag_out(ids, frame);
+            // Clear egui's internal drag state — the OS drag session has taken over.
+            // Without this, egui keeps showing the DnD crosshair cursor because it
+            // still thinks an internal drag is in progress.
+            ui.ctx().stop_dragging();
         }
     }
 }
