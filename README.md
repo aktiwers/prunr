@@ -19,7 +19,6 @@ Website: [prunr.io](https://prunr.io/)
 | AppImage | [Prunr-x86_64.AppImage](https://github.com/aktiwers/prunr/releases/latest/download/Prunr-x86_64.AppImage) | Universal — any distro |
 | Debian / Ubuntu | [.deb](https://github.com/aktiwers/prunr/releases/latest/download/prunr-linux-x86_64.deb) | `sudo dpkg -i` |
 | Fedora / RHEL / openSUSE | [.rpm](https://github.com/aktiwers/prunr/releases/latest/download/prunr-linux-x86_64.rpm) | `sudo rpm -i` |
-| Arch Linux (AUR) | [PKGBUILD](packaging/aur/PKGBUILD) | `makepkg -si` — AUR package name: `prunr-bin` |
 | Portable tarball | [tar.gz](https://github.com/aktiwers/prunr/releases/latest/download/prunr-linux-x86_64.tar.gz) | Extract and run |
 
 ### macOS (Apple Silicon)
@@ -27,7 +26,7 @@ Website: [prunr.io](https://prunr.io/)
 | Format | Link | Notes |
 |--------|------|-------|
 | Disk image | [Prunr-macos-aarch64.dmg](https://github.com/aktiwers/prunr/releases/latest/download/Prunr-macos-aarch64.dmg) | Drag to Applications |
-| Homebrew | [Formula](packaging/homebrew/prunr.rb) | `brew install aktiwers/prunr/prunr` |
+| Homebrew | `brew install aktiwers/prunr/prunr` | Tap: [aktiwers/homebrew-prunr](https://github.com/aktiwers/homebrew-prunr) |
 | Portable tarball | [tar.gz](https://github.com/aktiwers/prunr/releases/latest/download/prunr-macos-aarch64.tar.gz) | Extract and run |
 
 ### Windows (x86_64)
