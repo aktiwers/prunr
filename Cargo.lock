@@ -4164,7 +4164,7 @@ dependencies = [
 
 [[package]]
 name = "prunr-app"
-version = "0.4.4"
+version = "0.4.5"
 dependencies = [
  "arboard",
  "clap",
@@ -4184,12 +4184,13 @@ dependencies = [
  "rfd",
  "serde",
  "serde_json",
+ "windows-sys 0.59.0",
  "winresource",
 ]
 
 [[package]]
 name = "prunr-core"
-version = "0.4.4"
+version = "0.4.5"
 dependencies = [
  "dirs",
  "image",
@@ -4203,7 +4204,7 @@ dependencies = [
 
 [[package]]
 name = "prunr-models"
-version = "0.4.4"
+version = "0.4.5"
 dependencies = [
  "zstd",
 ]
