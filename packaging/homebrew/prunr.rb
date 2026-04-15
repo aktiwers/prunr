@@ -12,7 +12,7 @@ class Prunr < Formula
   desc "Local AI background removal — no cloud, no API keys"
   homepage "https://prunr.io"
   version "0.4.4"
-  license any_of: ["MIT", "Apache-2.0"]
+  license "Apache-2.0"
 
   on_macos do
     on_arm do
