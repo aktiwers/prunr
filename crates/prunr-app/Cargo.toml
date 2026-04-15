@@ -42,5 +42,11 @@ dirs = { workspace = true }
 [target.'cfg(any(target_os = "windows", target_os = "macos"))'.dependencies]
 drag = "2.1"
 
+# Windows: attach to parent console when run from cmd/PowerShell so CLI output
+# reaches the user. Paired with `#![windows_subsystem = "windows"]` in main.rs
+# to suppress the empty console window on GUI launch.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_System_Console"] }
+
 [build-dependencies]
 winresource = "0.1"
