@@ -22,6 +22,7 @@ image = { workspace = true }
 rayon = { workspace = true }
 num_cpus = "1"
 dirs = { workspace = true }
+serde = { workspace = true }
 
 [dev-dependencies]
 prunr-models = { path = "../prunr-models", features = ["dev-models"] }

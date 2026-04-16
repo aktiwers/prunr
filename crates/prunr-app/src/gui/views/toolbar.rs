@@ -89,6 +89,11 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
         });
 
         if app.settings.model != prev_model {
+            // Clamp parallel jobs to safe max for the new model
+            let max = app.settings.max_jobs();
+            if app.settings.parallel_jobs > max {
+                app.settings.parallel_jobs = max;
+            }
             app.toasts.info(format!("{} loaded", model_name(app.settings.model)));
             app.settings.save();
         }

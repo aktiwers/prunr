@@ -119,7 +119,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                     let item_id = app.batch_items[i].id;
                     app.request_thumbnail(
                         item_id,
-                        &app.batch_items[i].source_bytes,
+                        &app.batch_items[i].source,
                         app.batch_items[i].result_rgba.as_ref(),
                     );
                     needs_repaint = true;

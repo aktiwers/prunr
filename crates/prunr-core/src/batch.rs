@@ -15,7 +15,11 @@ pub fn create_engine_pool(
     cpu_only: bool,
 ) -> Result<Vec<std::sync::Arc<OrtEngine>>, CoreError> {
     let is_gpu = !cpu_only && !OrtEngine::detect_active_provider().eq_ignore_ascii_case("CPU");
+    // GPU: cap at 2 engines (VRAM is limited, more causes allocation failures).
+    // CPU: respect user's setting fully — the admission controller manages
+    // overall memory pressure at the batch level.
     let pool_size = if is_gpu { jobs.min(2) } else { jobs };
+    // With many engines, distribute CPU threads evenly to avoid oversubscription.
     let intra_threads = if pool_size == 1 {
         num_cpus::get()
     } else {
