@@ -77,6 +77,10 @@ pub struct Cli {
     #[arg(long)]
     pub cpu: bool,
 
+    /// Internal: run as subprocess worker for GUI batch processing.
+    #[arg(long, hide = true)]
+    pub worker: bool,
+
     /// Chain mode: process the previous result instead of the original.
     /// Only meaningful in multi-pass scripting workflows where the user
     /// runs prunr multiple times on the same file. For a single invocation
