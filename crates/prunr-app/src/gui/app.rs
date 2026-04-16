@@ -1202,6 +1202,48 @@ impl PrunrApp {
         if self.batch_items.is_empty() { return; }
         let idx = self.selected_batch_index.min(self.batch_items.len() - 1);
 
+        // Evict full-res result_rgba for non-selected Done items to save RAM.
+        // Compressed copy is saved in history; restored on demand when re-selected.
+        for (i, item) in self.batch_items.iter_mut().enumerate() {
+            if i != idx && item.result_rgba.is_some() && item.status == BatchStatus::Done {
+                if let Some(rgba) = item.result_rgba.take() {
+                    // Replace the latest history entry with the current result
+                    // (don't push — the result IS the latest state)
+                    if let Some(back) = item.history.back_mut() {
+                        back.cleanup();
+                        *back = HistorySlot::compress(rgba);
+                    } else {
+                        item.history.push_back(HistorySlot::compress(rgba));
+                    }
+                }
+                item.result_texture = None;
+                item.result_tex_pending = false;
+            }
+        }
+
+        // Restore result for the selected item if it was evicted
+        if self.batch_items[idx].status == BatchStatus::Done
+            && self.batch_items[idx].result_rgba.is_none()
+        {
+            if let Some(slot) = self.batch_items[idx].history.back_mut() {
+                // Peek at the latest history entry — decompress without removing
+                let restored = match slot {
+                    HistorySlot::InMemory(rgba) => Some(rgba.clone()),
+                    HistorySlot::Compressed(entry) => {
+                        super::history_disk::decompress_from_ram(entry)
+                            .ok()
+                            .map(|img| Arc::new(img))
+                    }
+                    HistorySlot::OnDisk(entry) => {
+                        super::history_disk::read_history(entry)
+                            .ok()
+                            .map(|img| Arc::new(img))
+                    }
+                };
+                self.batch_items[idx].result_rgba = restored;
+            }
+        }
+
         // Lazy decode: if the selected item has no decoded source RGBA, decode on demand.
         if self.batch_items[idx].source_rgba.is_none() && !self.batch_items[idx].decode_pending {
             self.batch_items[idx].decode_pending = true;
