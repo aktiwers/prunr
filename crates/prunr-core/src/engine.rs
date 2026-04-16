@@ -50,17 +50,19 @@ impl OrtEngine {
 
     /// Try optimized variant (FP16/INT8) first; fall back to FP32 if session creation fails.
     fn new_with_fallback(model: ModelKind, intra_threads: usize, cpu_only: bool) -> Result<Self, CoreError> {
-        let optimized = Self::model_bytes_for_backend(model, cpu_only);
-        let fp32 = Self::model_bytes(model);
-        if optimized.len() != fp32.len() {
+        // Check if an optimized variant exists (loaded from filesystem, so Vec<u8>).
+        if let Some(optimized) = Self::optimized_variant_bytes(model, cpu_only) {
             if let Ok(engine) = Self::build_session(&optimized, intra_threads, model, cpu_only) {
                 return Ok(engine);
             }
         }
-        Self::build_session(&fp32, intra_threads, model, cpu_only)
+        // Fall back to the embedded FP32 model (zero-copy &'static [u8]).
+        let fp32 = Self::model_bytes(model);
+        Self::build_session(fp32, intra_threads, model, cpu_only)
     }
 
-    fn model_bytes(model: ModelKind) -> Vec<u8> {
+    /// Return the embedded FP32 model bytes. Zero-copy — borrows from static cache.
+    fn model_bytes(model: ModelKind) -> &'static [u8] {
         match model {
             ModelKind::Silueta => prunr_models::silueta_bytes(),
             ModelKind::U2net => prunr_models::u2net_bytes(),
@@ -68,39 +70,23 @@ impl OrtEngine {
         }
     }
 
-    /// Select the best model variant for the active backend.
-    /// Prefers FP16 on CUDA/DirectML GPUs, INT8 on CPU, FP32 on macOS CoreML.
-    ///
-    /// macOS uses FP32 because CoreML silently converts to FP16 internally on Apple Silicon.
-    /// Feeding it our FP16 variant stacks two conversions and the accumulated precision
-    /// loss can collapse the segmentation mask to near-zero — producing a fully
-    /// transparent output (image looks "completely removed").
-    fn model_bytes_for_backend(model: ModelKind, cpu_only: bool) -> Vec<u8> {
+    /// Try to load an optimized model variant from the filesystem.
+    /// Returns None if no variant is available (falls back to embedded FP32).
+    fn optimized_variant_bytes(model: ModelKind, cpu_only: bool) -> Option<Vec<u8>> {
+        #[cfg(target_os = "macos")]
+        { return None; } // macOS uses FP32 — CoreML does its own FP16 conversion
+
         #[cfg(not(target_os = "macos"))]
-        let pm = match model {
-            ModelKind::Silueta => prunr_models::Model::Silueta,
-            ModelKind::U2net => prunr_models::Model::U2net,
-            ModelKind::BiRefNetLite => prunr_models::Model::BiRefNetLite,
-        };
-        if cpu_only {
-            #[cfg(not(target_os = "macos"))]
-            {
+        {
+            let pm = match model {
+                ModelKind::Silueta => prunr_models::Model::Silueta,
+                ModelKind::U2net => prunr_models::Model::U2net,
+                ModelKind::BiRefNetLite => prunr_models::Model::BiRefNetLite,
+            };
+            if cpu_only {
                 prunr_models::model_int8_bytes(pm)
-                    .unwrap_or_else(|| Self::model_bytes(model))
-            }
-            #[cfg(target_os = "macos")]
-            {
-                Self::model_bytes(model)
-            }
-        } else {
-            #[cfg(not(target_os = "macos"))]
-            {
+            } else {
                 prunr_models::model_fp16_bytes(pm)
-                    .unwrap_or_else(|| Self::model_bytes(model))
-            }
-            #[cfg(target_os = "macos")]
-            {
-                Self::model_bytes(model)
             }
         }
     }

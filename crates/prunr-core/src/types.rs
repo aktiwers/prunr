@@ -22,14 +22,14 @@ impl From<image::ImageError> for CoreError {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ModelKind {
     Silueta,
     U2net,
     BiRefNetLite,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ProgressStage {
     Decode,
     Resize,
@@ -52,7 +52,7 @@ pub struct ProcessResult {
 }
 
 /// Controls for post-processing the AI-generated mask before applying it as alpha.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct MaskSettings {
     /// Gamma curve applied to the mask. >1.0 = more aggressive removal, <1.0 = gentler.
     pub gamma: f32,

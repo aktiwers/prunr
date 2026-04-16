@@ -13,10 +13,109 @@ use super::theme;
 use super::worker::{WorkerMessage, WorkerResult, spawn_worker};
 use super::views::{canvas, cli_help, settings, shortcuts, sidebar, statusbar, toolbar};
 
+/// Three-tiered history entry:
+/// - Tier 1 (Hot): Raw `Arc<RgbaImage>` — instant access, full RAM cost.
+/// - Tier 2 (Warm): Zstd-compressed bytes in RAM — ~3-4x smaller, ~8ms decompress.
+/// - Tier 3 (Cold): Zstd file on disk — zero RAM cost, ~50-100ms read.
+pub(crate) enum HistorySlot {
+    /// Tier 1: uncompressed RGBA in RAM.
+    InMemory(Arc<image::RgbaImage>),
+    /// Tier 2: zstd-compressed in RAM (~3-4x smaller).
+    Compressed(super::history_disk::CompressedEntry),
+    /// Tier 3: zstd file on disk.
+    OnDisk(super::history_disk::DiskHistoryEntry),
+}
+
+impl HistorySlot {
+    /// Compress an RGBA image to RAM (Tier 2), falling back to uncompressed (Tier 1).
+    pub fn compress(rgba: Arc<image::RgbaImage>) -> Self {
+        super::history_disk::compress_to_ram(&rgba)
+            .map(Self::Compressed)
+            .unwrap_or(Self::InMemory(rgba))
+    }
+
+    /// Demote this slot to disk (Tier 3). Only affects Tier 1/2; Tier 3 is a no-op.
+    pub fn demote_to_disk(self, item_id: u64, seq: usize) -> Self {
+        match self {
+            Self::InMemory(rgba) => {
+                super::history_disk::write_history(item_id, seq, &rgba)
+                    .map(Self::OnDisk)
+                    .unwrap_or(Self::InMemory(rgba))
+            }
+            Self::Compressed(entry) => {
+                super::history_disk::demote_to_disk(&entry, item_id, seq)
+                    .map(Self::OnDisk)
+                    .unwrap_or(Self::Compressed(entry))
+            }
+            Self::OnDisk(_) => self,
+        }
+    }
+
+    /// Materialise the RGBA image from any tier.
+    /// Deletes the backing file only on successful disk read.
+    pub fn into_rgba(self) -> Option<Arc<image::RgbaImage>> {
+        match self {
+            Self::InMemory(rgba) => Some(rgba),
+            Self::Compressed(entry) => {
+                super::history_disk::decompress_from_ram(&entry)
+                    .ok()
+                    .map(|img| Arc::new(img))
+            }
+            Self::OnDisk(entry) => match super::history_disk::read_history(&entry) {
+                Ok(img) => {
+                    super::history_disk::delete_entry(&entry);
+                    Some(Arc::new(img))
+                }
+                Err(_) => None,
+            },
+        }
+    }
+
+    /// Delete the backing disk file if Tier 3 (no-op for Tier 1/2).
+    pub fn cleanup(&self) {
+        if let Self::OnDisk(entry) = self {
+            super::history_disk::delete_entry(entry);
+        }
+    }
+}
+
+impl Default for HistorySlot {
+    fn default() -> Self {
+        Self::InMemory(Arc::new(image::RgbaImage::new(1, 1)))
+    }
+}
+
+/// Where an image's raw bytes live — file path (lazy) or in-memory (clipboard/paste).
+#[derive(Clone)]
+pub(crate) enum ImageSource {
+    /// Loaded from a file. Bytes read on demand and dropped after use.
+    Path(PathBuf),
+    /// From clipboard, drag-drop, or CLI pipe. Bytes kept in memory.
+    Bytes(Arc<Vec<u8>>),
+}
+
+impl ImageSource {
+    /// Read the image bytes. For Path, reads from disk. For Bytes, clones the Arc.
+    pub fn load_bytes(&self) -> std::io::Result<Arc<Vec<u8>>> {
+        match self {
+            Self::Path(path) => Ok(Arc::new(std::fs::read(path)?)),
+            Self::Bytes(bytes) => Ok(bytes.clone()),
+        }
+    }
+
+    /// Estimated compressed file size (for admission cost estimation).
+    pub fn estimated_size(&self) -> usize {
+        match self {
+            Self::Path(path) => std::fs::metadata(path).map(|m| m.len() as usize).unwrap_or(0),
+            Self::Bytes(bytes) => bytes.len(),
+        }
+    }
+}
+
 pub(crate) struct BatchItem {
     pub id: u64,
     pub filename: String,
-    pub source_bytes: Arc<Vec<u8>>,
+    pub source: ImageSource,
     pub dimensions: (u32, u32),
     /// Pre-decoded source RGBA (decoded on background thread for instant switching)
     pub source_rgba: Option<Arc<image::RgbaImage>>,
@@ -29,10 +128,12 @@ pub(crate) struct BatchItem {
     pub source_tex_pending: bool,
     /// True while a background thread is building the result ColorImage.
     pub result_tex_pending: bool,
+    /// True while a background thread is decoding source bytes to RGBA.
+    pub decode_pending: bool,
     /// History stack for undo: previous results, newest last.
-    pub history: VecDeque<Arc<image::RgbaImage>>,
+    pub history: VecDeque<HistorySlot>,
     /// Redo stack: results undone, newest last. Cleared on new processing.
-    pub redo_stack: VecDeque<Arc<image::RgbaImage>>,
+    pub redo_stack: VecDeque<HistorySlot>,
     pub status: BatchStatus,
     pub selected: bool,
 }
@@ -51,7 +152,6 @@ pub struct PrunrApp {
     pub(crate) loaded_filename: Option<String>,
     /// Directory of the most recently opened file (for save dialog default)
     pub(crate) last_open_dir: Option<std::path::PathBuf>,
-    pub(crate) source_bytes: Option<Arc<Vec<u8>>>,
     pub(crate) image_dimensions: Option<(u32, u32)>,
 
     // Worker thread communication
@@ -125,6 +225,14 @@ pub struct PrunrApp {
     /// One-time flag: true if we've already shown the "Linux not supported"
     /// toast this session. Prevents repeat spam on every drag attempt.
     pub(crate) drag_out_linux_notified: bool,
+
+    // ── Memory-aware batch admission ──────────────────────────────────────
+    /// Active admission controller (present only during streaming batch processing).
+    admission: Option<super::memory::AdmissionController>,
+    /// Sender for streaming additional items to the worker.
+    admission_tx: Option<mpsc::Sender<super::worker::WorkItem>>,
+    /// Last time periodic history cleanup ran.
+    last_history_cleanup: std::time::Instant,
 }
 
 /// Compute dimensions that fit within max_w x max_h preserving aspect ratio.
@@ -185,8 +293,9 @@ impl PrunrApp {
         let clipboard = arboard::Clipboard::new().ok();
         let bg_io = super::background_io::BackgroundIO::new();
 
-        // Housekeeping: clean up stale drag-out temp files from prior sessions.
+        // Housekeeping: clean up stale temp files from prior sessions.
         super::drag_export::cleanup_stale();
+        super::history_disk::cleanup_stale();
 
         let mut settings = Settings::load();
         settings.active_backend = prunr_core::OrtEngine::detect_active_provider();
@@ -195,7 +304,7 @@ impl PrunrApp {
         // On macOS, CoreML compiles the ONNX model on first use (can take minutes).
         // By starting this at launch, the model is ready by the time the user needs it.
         // The warmed engine is stored and passed to the worker to avoid re-creation.
-        let prewarm_engine: Arc<std::sync::OnceLock<prunr_core::OrtEngine>> = Arc::new(std::sync::OnceLock::new());
+        let prewarm_engine: Arc<std::sync::OnceLock<Arc<prunr_core::OrtEngine>>> = Arc::new(std::sync::OnceLock::new());
         {
             let model: prunr_core::ModelKind = settings.model.into();
             let lock = prewarm_engine.clone();
@@ -203,7 +312,7 @@ impl PrunrApp {
                 .name("model-prewarm".into())
                 .spawn(move || {
                     if let Ok(engine) = prunr_core::OrtEngine::new(model, 1) {
-                        let _ = lock.set(engine);
+                        let _ = lock.set(Arc::new(engine));
                     }
                 })
                 .ok();
@@ -214,7 +323,6 @@ impl PrunrApp {
             state: AppState::Empty,
             loaded_filename: None,
             last_open_dir: None,
-            source_bytes: None,
             image_dimensions: None,
             worker_tx,
             worker_rx,
@@ -249,6 +357,9 @@ impl PrunrApp {
             drag_out_active: Arc::new(AtomicBool::new(false)),
             drag_out_items: Arc::new(Mutex::new(HashSet::new())),
             drag_out_linux_notified: false,
+            admission: None,
+            admission_tx: None,
+            last_history_cleanup: std::time::Instant::now(),
         }
     }
 
@@ -263,7 +374,6 @@ impl PrunrApp {
             state: AppState::Empty,
             loaded_filename: None,
             last_open_dir: None,
-            source_bytes: None,
             image_dimensions: None,
             worker_tx,
             worker_rx,
@@ -298,6 +408,9 @@ impl PrunrApp {
             drag_out_active: Arc::new(AtomicBool::new(false)),
             drag_out_items: Arc::new(Mutex::new(HashSet::new())),
             drag_out_linux_notified: false,
+            admission: None,
+            admission_tx: None,
+            last_history_cleanup: std::time::Instant::now(),
         }
     }
 
@@ -313,7 +426,6 @@ impl PrunrApp {
 
     /// Reset app state after all batch items are removed.
     fn clear_to_empty(&mut self) {
-        self.source_bytes = None;
         self.source_texture = None;
         self.result_texture = None;
         self.result_rgba = None;
@@ -333,29 +445,15 @@ impl PrunrApp {
         }
     }
 
-    fn load_image(&mut self, bytes: Vec<u8>, filename: Option<String>) {
-        let dims = match image::ImageReader::new(std::io::Cursor::new(&bytes))
-            .with_guessed_format()
-            .ok()
-            .and_then(|r| r.into_dimensions().ok())
-        {
-            Some(d) => d,
-            None => {
-                self.set_temporary_status("Could not load image");
-                return;
-            }
-        };
-
-        let name = filename.unwrap_or_else(|| "image".into());
-
-        // Add to batch so it appears in the sidebar
+    /// Core image loading: creates a BatchItem from a source + dimensions.
+    fn load_image_source(&mut self, source: ImageSource, dims: (u32, u32), name: String) {
         let id = self.next_batch_id;
         self.next_batch_id += 1;
-        let bytes = Arc::new(bytes);
+        let do_decode = matches!(&source, ImageSource::Bytes(_)); // decode eagerly for in-memory
         self.batch_items.push(BatchItem {
             id,
             filename: name.clone(),
-            source_bytes: bytes.clone(),
+            source: source,
             dimensions: dims,
             source_rgba: None,
             source_texture: None,
@@ -365,17 +463,21 @@ impl PrunrApp {
             result_texture: None,
             source_tex_pending: false,
             result_tex_pending: false,
+            decode_pending: false,
             history: VecDeque::new(),
             redo_stack: VecDeque::new(),
             status: BatchStatus::Pending,
             selected: false,
         });
         self.selected_batch_index = self.batch_items.len() - 1;
-        self.request_decode(id, &self.batch_items.last().unwrap().source_bytes);
+        if do_decode {
+            if let Ok(bytes) = self.batch_items.last().unwrap().source.load_bytes() {
+                self.request_decode_bytes(id, bytes);
+            }
+        }
 
         // Set app-level state for canvas
         self.image_dimensions = Some(dims);
-        self.source_bytes = Some(bytes);
         self.loaded_filename = Some(name);
         self.source_texture = None;
         self.result_texture = None;
@@ -388,19 +490,47 @@ impl PrunrApp {
         self.show_original = false;
     }
 
-    pub fn handle_open_path(&mut self, path: PathBuf) {
-        match std::fs::read(&path) {
-            Ok(bytes) => {
-                let filename = path.file_name()
-                    .and_then(|n| n.to_str())
-                    .map(|s| s.to_string());
-                self.load_image(bytes, filename);
+    /// Load an image from raw bytes (clipboard paste, CLI pipe).
+    fn load_image(&mut self, bytes: Vec<u8>, filename: Option<String>) {
+        let dims = match image::ImageReader::new(std::io::Cursor::new(&bytes))
+            .with_guessed_format()
+            .ok()
+            .and_then(|r| r.into_dimensions().ok())
+        {
+            Some(d) => d,
+            None => {
+                self.set_temporary_status("Could not load image");
+                return;
             }
-            Err(e) => {
-                self.set_temporary_status(format!("Could not read file: {e}"));
-            }
-        }
+        };
+        let name = filename.unwrap_or_else(|| "image".into());
+        self.load_image_source(ImageSource::Bytes(Arc::new(bytes)), dims, name);
     }
+
+    pub fn handle_open_path(&mut self, path: PathBuf) {
+        // Read dimensions from header only — don't load the full file into RAM.
+        let dims = match std::fs::File::open(&path)
+            .ok()
+            .and_then(|f| {
+                image::ImageReader::new(std::io::BufReader::new(f))
+                    .with_guessed_format()
+                    .ok()
+                    .and_then(|r| r.into_dimensions().ok())
+            })
+        {
+            Some(d) => d,
+            None => {
+                self.set_temporary_status("Could not load image");
+                return;
+            }
+        };
+        let filename = path.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("image")
+            .to_string();
+        self.load_image_source(ImageSource::Path(path), dims, filename);
+    }
+
 
     pub fn handle_open_bytes(&mut self, bytes: Vec<u8>, name: String) {
         let filename = if name.is_empty() { None } else { Some(name) };
@@ -419,18 +549,16 @@ impl PrunrApp {
             if paths.len() == 1 && self.batch_items.is_empty() {
                 self.handle_open_path(paths.into_iter().next().unwrap());
             } else {
-                // Read files on a background thread to avoid blocking the UI
+                // Send file paths for lazy loading — bytes read on demand.
                 let tx = self.bg_io.file_load_tx.clone();
                 std::thread::spawn(move || {
                     for path in paths {
-                        if let Ok(bytes) = std::fs::read(&path) {
-                            let name = path.file_name()
-                                .and_then(|n| n.to_str())
-                                .unwrap_or("untitled")
-                                .to_string();
-                            if tx.send((bytes, name)).is_err() {
-                                break;
-                            }
+                        let name = path.file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("untitled")
+                            .to_string();
+                        if tx.send((path, name)).is_err() {
+                            break;
                         }
                     }
                 });
@@ -475,12 +603,12 @@ impl PrunrApp {
         for item in &mut self.batch_items {
             let target = if has_selected { item.selected } else { Some(item.id) == current_id };
             if target && item.status == BatchStatus::Done && !item.history.is_empty() {
-                // Push current result to redo stack
+                // Push current result to redo stack (compress to RAM)
                 if let Some(current) = item.result_rgba.take() {
-                    item.redo_stack.push_back(current);
+                    item.redo_stack.push_back(HistorySlot::compress(current));
                 }
-                // Pop most recent from history
-                item.result_rgba = item.history.pop_back();
+                // Pop most recent from history (materialise from disk if needed)
+                item.result_rgba = item.history.pop_back().and_then(|slot| slot.into_rgba());
                 if item.result_rgba.is_none() || item.history.is_empty() {
                     // History exhausted — back to unprocessed state
                     item.status = BatchStatus::Pending;
@@ -491,11 +619,15 @@ impl PrunrApp {
                 item.thumb_pending = false;
                 item.source_tex_pending = false;
                 item.result_tex_pending = false;
+                // Reset decode state so lazy decode re-triggers for canvas display
+                item.source_texture = None;
+                item.decode_pending = false;
                 undone += 1;
             }
         }
         if undone > 0 {
             self.result_switch_id += 1;
+            self.canvas_switch_id += 1;
             self.sync_selected_batch_textures(ctx);
             if undone == 1 {
                 self.toasts.info("Undone");
@@ -512,18 +644,19 @@ impl PrunrApp {
         for item in &mut self.batch_items {
             let target = if has_selected { item.selected } else { Some(item.id) == current_id };
             if target && !item.redo_stack.is_empty() {
-                // Push current result to history
+                // Push current result to history (compress to RAM)
                 if let Some(current) = item.result_rgba.take() {
-                    item.history.push_back(current);
+                    item.history.push_back(HistorySlot::compress(current));
                 }
-                // Pop most recent from redo stack
-                item.result_rgba = item.redo_stack.pop_back();
+                // Pop most recent from redo stack (materialise from disk if needed)
+                item.result_rgba = item.redo_stack.pop_back().and_then(|slot| slot.into_rgba());
                 item.status = BatchStatus::Done;
                 item.result_texture = None;
                 item.thumb_texture = None;
                 item.thumb_pending = false;
                 item.source_tex_pending = false;
                 item.result_tex_pending = false;
+                item.decode_pending = false;
                 redone += 1;
             }
         }
@@ -540,59 +673,133 @@ impl PrunrApp {
 
     /// Collect and send batch items matching `filter` for processing.
     fn process_items(&mut self, filter: impl Fn(&BatchItem) -> bool) {
+        use super::memory::{AdmissionController, ImageMemCost};
+
         let chain = self.settings.chain_mode;
-        let items: Vec<(u64, Arc<Vec<u8>>, Option<Arc<image::RgbaImage>>)> = self.batch_items.iter()
+
+        // Identify candidate items
+        let candidate_ids: HashSet<u64> = self.batch_items.iter()
             .filter(|i| filter(i) && !matches!(i.status, BatchStatus::Processing))
-            .map(|i| {
-                let chain_input = if chain { i.result_rgba.clone() } else { None };
-                (i.id, i.source_bytes.clone(), chain_input)
-            })
+            .map(|i| i.id)
             .collect();
-        if items.is_empty() { return; }
+        if candidate_ids.is_empty() { return; }
+
+        // Save history for candidates before processing
         let chain_mode = self.settings.chain_mode;
         let max_depth = self.settings.history_depth;
         for item in &mut self.batch_items {
-            if filter(item) && !matches!(item.status, BatchStatus::Processing) {
-                // Seed history with the original image on the very first process of this item.
-                // This lets undo walk all the way back to "no processing applied".
-                if item.history.is_empty() && item.redo_stack.is_empty() {
-                    if let Some(ref src_rgba) = item.source_rgba {
-                        // Zero-copy Arc bump — both fields share the same pixel data
-                        item.history.push_back(src_rgba.clone());
+            if !candidate_ids.contains(&item.id) { continue; }
+            // Seed history with the original image on the very first process.
+            // This lets undo walk all the way back to "no processing applied".
+            if item.history.is_empty() && item.redo_stack.is_empty() {
+                if let Some(ref src_rgba) = item.source_rgba {
+                    // Source already decoded — compress it to RAM
+                    item.history.push_back(HistorySlot::compress(src_rgba.clone()));
+                } else if let Ok(bytes) = item.source.load_bytes() {
+                    // Lazy-loaded: decode source from disk for history seed
+                    if let Ok(img) = image::load_from_memory(&bytes) {
+                        item.history.push_back(HistorySlot::compress(Arc::new(img.to_rgba8())));
                     }
                 }
-                // Save current result to history before reprocessing
-                if item.status == BatchStatus::Done {
-                    if let Some(current) = item.result_rgba.take() {
-                        if chain_mode {
-                            // Clone the Arc (cheap pointer copy) so history keeps one and canvas keeps one
-                            item.result_rgba = Some(current.clone());
-                        }
-                        item.history.push_back(current);
-                        while item.history.len() > max_depth {
-                            item.history.pop_front();
+            }
+            // Save current result to history before reprocessing
+            if item.status == BatchStatus::Done {
+                if let Some(current) = item.result_rgba.take() {
+                    if chain_mode {
+                        item.result_rgba = Some(current.clone());
+                    }
+                    item.history.push_back(HistorySlot::compress(current));
+                    while item.history.len() > max_depth {
+                        if let Some(old) = item.history.pop_front() {
+                            old.cleanup();
                         }
                     }
-                    item.redo_stack.clear();
-                    if !chain_mode {
-                        item.result_texture = None;
-                    }
-                    item.thumb_texture = None;
-                    item.thumb_pending = false;
-                    item.source_tex_pending = false;
-                    item.result_tex_pending = false;
                 }
-                item.status = BatchStatus::Processing;
+                for slot in item.redo_stack.drain(..) {
+                    slot.cleanup();
+                }
+                if !chain_mode {
+                    item.result_texture = None;
+                }
+                item.thumb_texture = None;
+                item.thumb_pending = false;
+                item.source_tex_pending = false;
+                item.result_tex_pending = false;
             }
         }
+
+        // Build admission controller with per-image cost estimates.
+        // Clamp parallel_jobs to what the system can safely handle for this model.
+        let model: prunr_core::ModelKind = self.settings.model.into();
+        let safe_jobs = super::memory::safe_max_jobs(model);
+        let jobs = self.settings.parallel_jobs.min(safe_jobs);
+        let use_admission = candidate_ids.len() > 1;
+        if use_admission {
+            let mut ctrl = AdmissionController::new(model, jobs);
+            let costs: Vec<ImageMemCost> = self.batch_items.iter()
+                .filter(|i| candidate_ids.contains(&i.id))
+                .map(|i| AdmissionController::estimate_cost(i.id, i.dimensions, i.source.estimated_size()))
+                .collect();
+            ctrl.enqueue(costs);
+
+            // Admit initial window
+            let mut initial_items = Vec::new();
+            while let Some(admitted_id) = ctrl.try_admit_next() {
+                if let Some(item) = self.batch_items.iter_mut().find(|b| b.id == admitted_id) {
+                    if let Ok(bytes) = item.source.load_bytes() {
+                        let chain_input = if chain { item.result_rgba.clone() } else { None };
+                        initial_items.push((item.id, bytes, chain_input));
+                        item.status = BatchStatus::Processing;
+                    }
+                }
+            }
+
+            // Mark non-admitted items as Pending (they wait for admission)
+            for item in &mut self.batch_items {
+                if candidate_ids.contains(&item.id) && item.status != BatchStatus::Processing {
+                    item.status = BatchStatus::Pending;
+                }
+            }
+
+            // Create streaming channel for additional items
+            let (atx, arx) = mpsc::channel();
+            self.admission = Some(ctrl);
+            self.admission_tx = Some(atx);
+
+            self.dispatch_batch(initial_items, model, jobs, Some(arx));
+            return;
+        }
+
+        // Single item: no admission needed, process directly
+        let items: Vec<_> = self.batch_items.iter_mut()
+            .filter(|i| candidate_ids.contains(&i.id))
+            .filter_map(|i| {
+                let bytes = i.source.load_bytes().ok()?;
+                let chain_input = if chain { i.result_rgba.clone() } else { None };
+                i.status = BatchStatus::Processing;
+                Some((i.id, bytes, chain_input))
+            })
+            .collect();
+
+        self.dispatch_batch(items, model, jobs, None);
+    }
+
+    /// Build and send a WorkerMessage::BatchProcess with current settings.
+    fn dispatch_batch(
+        &mut self,
+        items: Vec<super::worker::WorkItem>,
+        model: prunr_core::ModelKind,
+        jobs: usize,
+        additional_items_rx: Option<mpsc::Receiver<super::worker::WorkItem>>,
+    ) {
         self.cancel_flag.store(false, Ordering::Release);
         self.state = AppState::Processing;
         self.status.pct = 0.0;
         self.status.stage = "Starting".to_string();
         let _ = self.worker_tx.send(WorkerMessage::BatchProcess {
             items,
-            model: self.settings.model.into(),
-            jobs: self.settings.parallel_jobs,
+            model,
+            jobs,
             cancel: self.cancel_flag.clone(),
             mask: self.settings.mask_settings(),
             force_cpu: self.settings.force_cpu,
@@ -606,6 +813,7 @@ impl PrunrApp {
                 let c = self.settings.bg_color;
                 Some([c[0], c[1], c[2]])
             } else { None },
+            additional_items_rx,
         });
     }
 
@@ -842,56 +1050,45 @@ impl PrunrApp {
         self.cancel_flag.store(true, Ordering::Release);
     }
 
+    /// Add an image to the batch from a file path (lazy — bytes not loaded yet).
+    pub fn add_to_batch_path(&mut self, path: PathBuf, filename: String) {
+        // Read dimensions from header only
+        let dims = match std::fs::File::open(&path)
+            .ok()
+            .and_then(|f| {
+                image::ImageReader::new(std::io::BufReader::new(f))
+                    .with_guessed_format()
+                    .ok()
+                    .and_then(|r| r.into_dimensions().ok())
+            })
+        {
+            Some(d) => d,
+            None => return, // not a valid image
+        };
+        self.add_to_batch_source(ImageSource::Path(path), dims, filename);
+    }
+
+    /// Add an image to the batch from raw bytes (clipboard/paste).
     pub fn add_to_batch(&mut self, bytes: Vec<u8>, filename: String) {
-        // Use image reader to get dimensions without full decode
         let dims = match image::ImageReader::new(std::io::Cursor::new(&bytes))
             .with_guessed_format()
             .ok()
             .and_then(|r| r.into_dimensions().ok())
         {
             Some(d) => d,
-            None => return, // not a valid image
+            None => return,
         };
+        self.add_to_batch_source(ImageSource::Bytes(Arc::new(bytes)), dims, filename);
+    }
 
-        let bytes = Arc::new(bytes);
-
-        // Migrate existing single image to batch as item 0
-        if self.batch_items.is_empty() {
-            if let Some(existing_bytes) = self.source_bytes.take() {
-                let existing_name = self.loaded_filename.clone().unwrap_or_else(|| "image".into());
-                let existing_dims = self.image_dimensions.unwrap_or((0, 0));
-                let eid = self.next_batch_id;
-                self.next_batch_id += 1;
-                let existing_item = BatchItem {
-                    id: eid,
-                    filename: existing_name,
-                    source_bytes: existing_bytes,
-                    dimensions: existing_dims,
-                    source_rgba: None,
-                    source_texture: self.source_texture.take(),
-                    thumb_texture: None,
-                    thumb_pending: false,
-                    result_rgba: self.result_rgba.take(),
-                    result_texture: self.result_texture.take(),
-                    source_tex_pending: false,
-                    result_tex_pending: false,
-                    history: VecDeque::new(),
-                    redo_stack: VecDeque::new(),
-                    status: if self.state == AppState::Done { BatchStatus::Done } else { BatchStatus::Pending },
-                    selected: false,
-                };
-                self.batch_items.insert(0, existing_item);
-                self.selected_batch_index = 0;
-            }
-        }
-
+    fn add_to_batch_source(&mut self, source: ImageSource, dims: (u32, u32), filename: String) {
         let id = self.next_batch_id;
         self.next_batch_id += 1;
 
         self.batch_items.push(BatchItem {
             id,
             filename,
-            source_bytes: bytes,
+            source: source,
             dimensions: dims,
             source_rgba: None,
             source_texture: None,
@@ -901,12 +1098,12 @@ impl PrunrApp {
             result_texture: None,
             source_tex_pending: false,
             result_tex_pending: false,
+            decode_pending: false,
             history: VecDeque::new(),
             redo_stack: VecDeque::new(),
             status: BatchStatus::Pending,
             selected: false,
         });
-        self.request_decode(id, &self.batch_items.last().unwrap().source_bytes);
 
         if self.state == AppState::Empty {
             self.state = AppState::Loaded;
@@ -914,10 +1111,9 @@ impl PrunrApp {
         self.pending_batch_sync = true;
     }
 
-    /// Pre-decode source image on a background thread for instant canvas switching.
-    fn request_decode(&self, item_id: u64, bytes: &Arc<Vec<u8>>) {
+    /// Pre-decode source image on a background thread (from Arc bytes).
+    fn request_decode_bytes(&self, item_id: u64, bytes: Arc<Vec<u8>>) {
         let tx = self.bg_io.decode_tx.clone();
-        let bytes = bytes.clone();
         std::thread::spawn(move || {
             if let Ok(img) = image::load_from_memory(&bytes) {
                 let _ = tx.send((item_id, Arc::new(img.to_rgba8())));
@@ -925,9 +1121,16 @@ impl PrunrApp {
         });
     }
 
+    /// Pre-decode from an ImageSource (reads file if needed).
+    fn request_decode_source(&self, item_id: u64, source: &ImageSource) {
+        if let Ok(bytes) = source.load_bytes() {
+            self.request_decode_bytes(item_id, bytes);
+        }
+    }
+
     /// Request thumbnail generation on a background thread for a batch item.
     /// If result_rgba is Some, thumbnails from result; otherwise decodes source bytes.
-    pub(crate) fn request_thumbnail(&self, item_id: u64, source_bytes: &[u8], result_rgba: Option<&Arc<image::RgbaImage>>) {
+    pub(crate) fn request_thumbnail(&self, item_id: u64, source: &ImageSource, result_rgba: Option<&Arc<image::RgbaImage>>) {
         let tx = self.bg_io.thumb_tx.clone();
         if let Some(rgba) = result_rgba {
             let rgba = rgba.clone();
@@ -937,13 +1140,15 @@ impl PrunrApp {
                 let _ = tx.send((item_id, thumb.width(), thumb.height(), thumb.into_raw()));
             });
         } else {
-            let bytes = source_bytes.to_vec();
+            let source = source.clone();
             std::thread::spawn(move || {
-                if let Ok(img) = image::load_from_memory(&bytes) {
-                    let rgba = img.to_rgba8();
-                    let (w, h) = fit_dimensions(rgba.width(), rgba.height(), 160, 160);
-                    let thumb = image::imageops::resize(&rgba, w, h, image::imageops::FilterType::Triangle);
-                    let _ = tx.send((item_id, thumb.width(), thumb.height(), thumb.into_raw()));
+                if let Ok(bytes) = source.load_bytes() {
+                    if let Ok(img) = image::load_from_memory(&bytes) {
+                        let rgba = img.to_rgba8();
+                        let (w, h) = fit_dimensions(rgba.width(), rgba.height(), 160, 160);
+                        let thumb = image::imageops::resize(&rgba, w, h, image::imageops::FilterType::Triangle);
+                        let _ = tx.send((item_id, thumb.width(), thumb.height(), thumb.into_raw()));
+                    }
                 }
             });
         }
@@ -951,7 +1156,14 @@ impl PrunrApp {
 
     pub fn remove_batch_item(&mut self, idx: usize) {
         if idx >= self.batch_items.len() { return; }
-        self.batch_items.remove(idx);
+        let item = self.batch_items.remove(idx);
+        // Clean up any on-disk history/redo entries for this item
+        for slot in item.history {
+            slot.cleanup();
+        }
+        for slot in item.redo_stack {
+            slot.cleanup();
+        }
         self.sync_after_batch_change();
     }
 
@@ -959,9 +1171,57 @@ impl PrunrApp {
         self.process_items(|_| true);
     }
 
+    /// Release an item's memory budget and greedily admit the next fitting items.
+    fn admission_release_and_admit(&mut self, completed_id: u64) {
+        let Some(ref mut ctrl) = self.admission else { return; };
+        ctrl.release(completed_id);
+
+        let chain = self.settings.chain_mode;
+        while let Some(next_id) = ctrl.try_admit_next() {
+            if let Some(item) = self.batch_items.iter_mut().find(|b| b.id == next_id) {
+                let Ok(bytes) = item.source.load_bytes() else { continue; };
+                let chain_input = if chain { item.result_rgba.clone() } else { None };
+                let tuple = (next_id, bytes, chain_input);
+                item.status = BatchStatus::Processing;
+
+                if let Some(ref tx) = self.admission_tx {
+                    if tx.send(tuple).is_err() {
+                        break; // worker gone
+                    }
+                }
+            }
+        }
+
+        // If all items admitted and released, drop the sender to signal worker
+        if ctrl.is_complete() {
+            self.admission_tx = None;
+            self.admission = None;
+        }
+    }
+
+    /// Demote all Tier 2 (compressed RAM) history/redo entries to Tier 3 (disk).
+    /// Called when system memory pressure is detected.
+    fn demote_history_to_disk(&mut self) {
+        for item in &mut self.batch_items {
+            let mut seq = 0usize;
+            for slot in item.history.iter_mut().chain(item.redo_stack.iter_mut()) {
+                if matches!(slot, HistorySlot::Compressed(_)) {
+                    *slot = std::mem::take(slot).demote_to_disk(item.id, seq);
+                }
+                seq += 1;
+            }
+        }
+    }
+
     pub(crate) fn sync_selected_batch_textures(&mut self, ctx: &egui::Context) {
         if self.batch_items.is_empty() { return; }
         let idx = self.selected_batch_index.min(self.batch_items.len() - 1);
+
+        // Lazy decode: if the selected item has no decoded source RGBA, decode on demand.
+        if self.batch_items[idx].source_rgba.is_none() && !self.batch_items[idx].decode_pending {
+            self.batch_items[idx].decode_pending = true;
+            self.request_decode_source(self.batch_items[idx].id, &self.batch_items[idx].source);
+        }
 
         // Dispatch ColorImage preparation to background threads if needed.
         // The actual ctx.load_texture() happens in drain_background_channels.
@@ -1078,12 +1338,20 @@ impl PrunrApp {
                     let is_selected = self.selected_item()
                         .map_or(false, |b| b.id == item_id);
                     if let Some(item) = self.batch_items.iter_mut().find(|b| b.id == item_id) {
+                        // Skip results for items that were already cancelled (reset to Pending)
+                        if item.status != BatchStatus::Processing {
+                            continue;
+                        }
                         match result {
                             Ok(pr) => {
                                 item.result_rgba = Some(Arc::new(pr.rgba_image));
                                 item.status = BatchStatus::Done;
-                                // Clear result_texture so sync creates a fresh one from the new RGBA
-                                // (in chain mode we kept the old texture alive for the processing animation)
+                                // Evict decoded source to free RAM — lazy decode
+                                // will re-decode on demand if the user navigates back.
+                                if !is_selected {
+                                    item.source_rgba = None;
+                                    item.source_texture = None;
+                                }
                                 item.result_texture = None;
                                 item.thumb_texture = None;
                                 item.thumb_pending = false;
@@ -1092,7 +1360,6 @@ impl PrunrApp {
                                 let backend_changed = self.settings.active_backend != pr.active_provider;
                                 self.settings.active_backend = pr.active_provider;
                                 if backend_changed {
-                                    // Adjust parallel jobs to smart default for detected backend
                                     self.settings.parallel_jobs = self.settings.default_jobs();
                                 }
                             }
@@ -1115,6 +1382,14 @@ impl PrunrApp {
                     if is_selected {
                         self.result_switch_id += 1;
                         self.sync_selected_batch_textures(ctx);
+                    }
+
+                    // Memory admission: release budget and admit next items
+                    self.admission_release_and_admit(item_id);
+
+                    // Under memory pressure: demote Tier 2 (compressed RAM) history to Tier 3 (disk)
+                    if super::memory::under_memory_pressure() {
+                        self.demote_history_to_disk();
                     }
                 }
                 WorkerResult::BatchComplete => {
@@ -1147,6 +1422,9 @@ impl PrunrApp {
                         self.state = AppState::Loaded;
                         self.status.text = "Cancelled".to_string();
                     }
+                    // Clean up admission state on cancel
+                    self.admission = None;
+                    self.admission_tx = None;
                 }
             }
         }
@@ -1189,18 +1467,16 @@ impl PrunrApp {
             return;
         }
 
-        // Offload path-based file reads to background thread (avoids GUI freeze)
+        // Send file paths for lazy loading (avoids reading all into RAM upfront)
         if !paths.is_empty() {
             let tx = self.bg_io.file_load_tx.clone();
             std::thread::spawn(move || {
                 for path in paths {
-                    if let Ok(bytes) = std::fs::read(&path) {
-                        let name = path.file_name()
-                            .and_then(|n| n.to_str())
-                            .unwrap_or("untitled")
-                            .to_string();
-                        let _ = tx.send((bytes, name));
-                    }
+                    let name = path.file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("untitled")
+                        .to_string();
+                    let _ = tx.send((path, name));
                 }
             });
         }
@@ -1319,6 +1595,9 @@ impl PrunrApp {
         let batch_processing = self.batch_items.iter().any(|i| i.status == BatchStatus::Processing);
         if cancel_requested && batch_processing {
             self.handle_cancel();
+            // Immediately drop admission state so no more items are admitted
+            self.admission = None;
+            self.admission_tx = None;
             for item in &mut self.batch_items {
                 if item.status == BatchStatus::Processing {
                     item.status = BatchStatus::Pending;
@@ -1326,6 +1605,8 @@ impl PrunrApp {
             }
         } else if cancel_requested && self.state == AppState::Processing {
             self.handle_cancel();
+            self.admission = None;
+            self.admission_tx = None;
             self.state = AppState::Loaded;
             self.status.text = "Cancelled".to_string();
         } else if cancel_requested && self.show_settings {
@@ -1376,10 +1657,16 @@ impl PrunrApp {
     }
 
     fn drain_background_channels(&mut self, ctx: &egui::Context) {
+        let mut decode_arrived = false;
         while let Ok((item_id, rgba)) = self.bg_io.decode_rx.try_recv() {
             if let Some(item) = self.batch_items.iter_mut().find(|b| b.id == item_id) {
                 item.source_rgba = Some(rgba);
+                item.decode_pending = false;
+                decode_arrived = true;
             }
+        }
+        if decode_arrived {
+            self.sync_selected_batch_textures(ctx);
         }
 
         // Receive pre-built ColorImages and upload to GPU (lightweight — just queues the upload)
@@ -1416,8 +1703,8 @@ impl PrunrApp {
         let mut channel_drained = false;
         for _ in 0..5 {
             match self.bg_io.file_load_rx.try_recv() {
-                Ok((bytes, name)) => {
-                    self.add_to_batch(bytes, name);
+                Ok((path, name)) => {
+                    self.add_to_batch_path(path, name);
                     loaded_count += 1;
                 }
                 Err(_) => { channel_drained = true; break; }
@@ -1456,6 +1743,7 @@ impl Drop for PrunrApp {
     fn drop(&mut self) {
         self.cancel_flag.store(true, Ordering::Release);
         super::drag_export::cleanup_all();
+        super::history_disk::cleanup_all();
     }
 }
 
@@ -1482,6 +1770,11 @@ impl eframe::App for PrunrApp {
         self.status.tick();
         if self.source_texture.is_none() && !self.batch_items.is_empty() {
             self.sync_selected_batch_textures(ctx);
+        }
+        // Periodic cleanup of stale history files (every 10 minutes)
+        if self.last_history_cleanup.elapsed().as_secs() >= 600 {
+            self.last_history_cleanup = std::time::Instant::now();
+            super::history_disk::cleanup_stale();
         }
     }
 
