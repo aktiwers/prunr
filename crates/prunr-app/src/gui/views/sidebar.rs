@@ -56,8 +56,14 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                 }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let selected = app.batch_items.iter().filter(|i| i.selected).count();
+                let label = if selected > 0 {
+                    format!("{selected}/{count}")
+                } else {
+                    format!("{count}")
+                };
                 ui.label(
-                    RichText::new(format!("{count}"))
+                    RichText::new(label)
                         .size(theme::FONT_SIZE_MONO)
                         .color(theme::TEXT_SECONDARY),
                 );
