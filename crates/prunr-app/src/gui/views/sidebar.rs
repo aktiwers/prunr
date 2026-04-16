@@ -338,7 +338,8 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                 // Click to select (skip if close button was clicked)
                 if !close_clicked && item_response.clicked() && app.selected_batch_index != i {
                     app.selected_batch_index = i;
-                    app.canvas_switch_id += 1; // trigger canvas fade-in
+                    app.canvas_switch_id += 1;
+                    app.zoom_state.reset();
                     let ctx = ui.ctx().clone();
                     app.sync_selected_batch_textures(&ctx);
                 }
