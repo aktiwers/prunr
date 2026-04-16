@@ -103,7 +103,9 @@ impl OrtEngine {
         // skips any that aren't available at runtime (e.g. no CUDA drivers).
         builder = if cpu_only {
             builder.with_execution_providers([
-                CPUExecutionProvider::default().build(),
+                CPUExecutionProvider::default()
+                    .with_arena_allocator(false) // lower memory baseline; subprocess handles OOM
+                    .build(),
             ])
         } else {
             builder.with_execution_providers([
