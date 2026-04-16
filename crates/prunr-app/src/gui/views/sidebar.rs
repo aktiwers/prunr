@@ -44,13 +44,25 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
             return;
         }
 
-        let all_selected = !app.batch_items.is_empty() && app.batch_items.iter().all(|i| i.selected);
+        let count = app.batch_items.len();
+        let all_selected = count > 0 && app.batch_items.iter().all(|i| i.selected);
         let mut select_all = all_selected;
-        if ui.checkbox(&mut select_all, RichText::new("Select All").size(theme::FONT_SIZE_BODY).color(theme::TEXT_PRIMARY)).changed() {
-            for item in &mut app.batch_items {
-                item.selected = select_all;
+        ui.horizontal(|ui| {
+            ui.spacing_mut().icon_width = 20.0;
+            ui.spacing_mut().icon_spacing = 8.0;
+            if ui.checkbox(&mut select_all, RichText::new("Select All").size(theme::FONT_SIZE_BODY).color(theme::TEXT_PRIMARY)).changed() {
+                for item in &mut app.batch_items {
+                    item.selected = select_all;
+                }
             }
-        }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(
+                    RichText::new(format!("{count}"))
+                        .size(theme::FONT_SIZE_MONO)
+                        .color(theme::TEXT_SECONDARY),
+                );
+            });
+        });
         ui.add_space(theme::SPACE_XS);
 
         // Thumbnail list with drag-to-reorder
@@ -355,6 +367,9 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                         Stroke::new(2.0, theme::INSERTION_LINE),
                     );
                 }
+
+                // Filename tooltip on hover (must be last — consumes response)
+                item_response.on_hover_text(&app.batch_items[i].filename);
 
                 ui.add_space(theme::SPACE_XS); // gap between items
             }
