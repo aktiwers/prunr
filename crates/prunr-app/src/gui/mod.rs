@@ -8,6 +8,8 @@ pub mod zoom_state;
 pub mod status_state;
 pub mod background_io;
 pub mod drag_export;
+pub mod history_disk;
+pub mod memory;
 
 #[cfg(test)]
 mod tests;

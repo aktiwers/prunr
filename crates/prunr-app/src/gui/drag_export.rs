@@ -104,7 +104,8 @@ pub(crate) fn prepare(item: &BatchItem, line_mode: LineMode) -> std::io::Result<
             std::fs::write(&path, &bytes)?;
         }
         None => {
-            std::fs::write(&path, item.source_bytes.as_slice())?;
+            let bytes = item.source.load_bytes()?;
+            std::fs::write(&path, bytes.as_slice())?;
         }
     }
     Ok(path)

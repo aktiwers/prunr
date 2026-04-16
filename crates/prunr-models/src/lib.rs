@@ -28,71 +28,73 @@ static BIREFNET_LITE_CACHE: OnceLock<Vec<u8>> = OnceLock::new();
 static DEXINED_CACHE: OnceLock<Vec<u8>> = OnceLock::new();
 
 #[cfg(not(feature = "dev-models"))]
-pub fn silueta_bytes() -> Vec<u8> {
+pub fn silueta_bytes() -> &'static [u8] {
     SILUETA_CACHE.get_or_init(|| {
         zstd::bulk::decompress(SILUETA_ZST, 50 * 1024 * 1024)
             .expect("failed to decompress embedded silueta model")
-    }).clone()
+    })
 }
 
 #[cfg(not(feature = "dev-models"))]
-pub fn u2net_bytes() -> Vec<u8> {
+pub fn u2net_bytes() -> &'static [u8] {
     U2NET_CACHE.get_or_init(|| {
         zstd::bulk::decompress(U2NET_ZST, 200 * 1024 * 1024)
             .expect("failed to decompress embedded u2net model")
-    }).clone()
+    })
 }
 
 #[cfg(not(feature = "dev-models"))]
-pub fn birefnet_lite_bytes() -> Vec<u8> {
+pub fn birefnet_lite_bytes() -> &'static [u8] {
     BIREFNET_LITE_CACHE.get_or_init(|| {
         zstd::bulk::decompress(BIREFNET_LITE_ZST, 250 * 1024 * 1024)
             .expect("failed to decompress embedded birefnet-lite model")
-    }).clone()
+    })
 }
 
 #[cfg(not(feature = "dev-models"))]
-pub fn dexined_bytes() -> Vec<u8> {
+pub fn dexined_bytes() -> &'static [u8] {
     DEXINED_CACHE.get_or_init(|| {
         zstd::bulk::decompress(DEXINED_ZST, 150 * 1024 * 1024)
             .expect("failed to decompress embedded dexined model")
-    }).clone()
+    })
 }
 
 #[cfg(feature = "dev-models")]
-pub fn silueta_bytes() -> Vec<u8> {
-    std::fs::read(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../models/silueta.onnx"),
-    )
-    .expect("models/silueta.onnx not found — run `cargo xtask fetch-models`")
+static DEV_SILUETA: OnceLock<Vec<u8>> = OnceLock::new();
+#[cfg(feature = "dev-models")]
+static DEV_U2NET: OnceLock<Vec<u8>> = OnceLock::new();
+#[cfg(feature = "dev-models")]
+static DEV_BIREFNET: OnceLock<Vec<u8>> = OnceLock::new();
+#[cfg(feature = "dev-models")]
+static DEV_DEXINED: OnceLock<Vec<u8>> = OnceLock::new();
+
+#[cfg(feature = "dev-models")]
+fn dev_model_path(name: &str) -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../models").join(name)
 }
 
 #[cfg(feature = "dev-models")]
-pub fn u2net_bytes() -> Vec<u8> {
-    std::fs::read(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../models/u2net.onnx"),
-    )
-    .expect("models/u2net.onnx not found — run `cargo xtask fetch-models`")
+pub fn silueta_bytes() -> &'static [u8] {
+    DEV_SILUETA.get_or_init(|| std::fs::read(dev_model_path("silueta.onnx"))
+        .expect("models/silueta.onnx not found — run `cargo xtask fetch-models`"))
 }
 
 #[cfg(feature = "dev-models")]
-pub fn birefnet_lite_bytes() -> Vec<u8> {
-    std::fs::read(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../models/birefnet_lite.onnx"),
-    )
-    .expect("models/birefnet_lite.onnx not found — run `cargo xtask fetch-models`")
+pub fn u2net_bytes() -> &'static [u8] {
+    DEV_U2NET.get_or_init(|| std::fs::read(dev_model_path("u2net.onnx"))
+        .expect("models/u2net.onnx not found — run `cargo xtask fetch-models`"))
 }
 
 #[cfg(feature = "dev-models")]
-pub fn dexined_bytes() -> Vec<u8> {
-    std::fs::read(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../models/dexined.onnx"),
-    )
-    .expect("models/dexined.onnx not found — run `cargo xtask fetch-models`")
+pub fn birefnet_lite_bytes() -> &'static [u8] {
+    DEV_BIREFNET.get_or_init(|| std::fs::read(dev_model_path("birefnet_lite.onnx"))
+        .expect("models/birefnet_lite.onnx not found — run `cargo xtask fetch-models`"))
+}
+
+#[cfg(feature = "dev-models")]
+pub fn dexined_bytes() -> &'static [u8] {
+    DEV_DEXINED.get_or_init(|| std::fs::read(dev_model_path("dexined.onnx"))
+        .expect("models/dexined.onnx not found — run `cargo xtask fetch-models`"))
 }
 
 // ── Optimized model variants (FP16 for GPU, INT8 for CPU) ───────────────────
@@ -157,16 +159,15 @@ mod tests {
         // This test simply verifies the module compiles and the public API is accessible.
         #[cfg(feature = "dev-models")]
         {
-            // Verify function signatures are correct (fn() -> Vec<u8>).
-            let _: fn() -> Vec<u8> = super::silueta_bytes;
-            let _: fn() -> Vec<u8> = super::u2net_bytes;
-            let _: fn() -> Vec<u8> = super::birefnet_lite_bytes;
+            let _: fn() -> &'static [u8] = super::silueta_bytes;
+            let _: fn() -> &'static [u8] = super::u2net_bytes;
+            let _: fn() -> &'static [u8] = super::birefnet_lite_bytes;
         }
         #[cfg(not(feature = "dev-models"))]
         {
-            let _: fn() -> Vec<u8> = super::silueta_bytes;
-            let _: fn() -> Vec<u8> = super::u2net_bytes;
-            let _: fn() -> Vec<u8> = super::birefnet_lite_bytes;
+            let _: fn() -> &'static [u8] = super::silueta_bytes;
+            let _: fn() -> &'static [u8] = super::u2net_bytes;
+            let _: fn() -> &'static [u8] = super::birefnet_lite_bytes;
         }
     }
 }

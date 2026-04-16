@@ -80,14 +80,22 @@ impl Settings {
         !self.active_backend.is_empty() && !self.active_backend.eq_ignore_ascii_case("CPU")
     }
 
-    /// Smart default for parallel jobs based on backend.
+    /// Smart default for parallel jobs based on backend and model.
+    /// Capped at what the system can safely handle.
     pub fn default_jobs(&self) -> usize {
-        if self.is_gpu() { 2 } else { (num_cpus::get() / 2).max(1) }
+        let model: prunr_core::ModelKind = self.model.into();
+        let safe = super::memory::safe_max_jobs(model);
+        let base = if self.is_gpu() { 2 } else { (num_cpus::get() / 2).max(1) };
+        base.min(safe)
     }
 
-    /// Max recommended parallel jobs based on backend.
+    /// Max recommended parallel jobs based on backend and model.
+    /// Limited by available system RAM to prevent OOM.
     pub fn max_jobs(&self) -> usize {
-        if self.is_gpu() { 4 } else { num_cpus::get() }
+        let model: prunr_core::ModelKind = self.model.into();
+        let safe = super::memory::safe_max_jobs(model);
+        let base = if self.is_gpu() { 4 } else { num_cpus::get() };
+        base.min(safe)
     }
 
     pub fn mask_settings(&self) -> MaskSettings {
