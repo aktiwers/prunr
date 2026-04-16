@@ -1280,27 +1280,29 @@ impl PrunrApp {
         }
 
         // Sync app-level state for canvas rendering.
-        // Keep the previous texture visible while the new one is being prepared
-        // (avoids a spinner flash on every sidebar click).
+        // Keep the previous texture visible until the new item's texture is ready
+        // (avoids a blank flash on sidebar click, especially for lazy-decoded items).
         let item = &self.batch_items[idx];
-        if item.source_texture.is_some() || item.source_rgba.is_none() {
+        if item.source_texture.is_some() {
             self.source_texture = item.source_texture.clone();
         }
+        // Only update dimensions/filename when the item actually has something to show,
+        // or when switching away from a completely different state.
         self.loaded_filename = Some(item.filename.clone());
         self.image_dimensions = Some(item.dimensions);
         self.show_original = false;
-
-        self.zoom_state.reset();
 
         let item_status = item.status.clone();
         let result_texture = item.result_texture.clone();
         let result_rgba = item.result_rgba.clone();
         match item_status {
             BatchStatus::Done => {
-                if item.result_texture.is_some() || item.result_rgba.is_none() {
+                if item.result_texture.is_some() {
                     self.result_texture = result_texture;
                 }
-                self.result_rgba = result_rgba;
+                if item.result_rgba.is_some() {
+                    self.result_rgba = result_rgba;
+                }
                 self.state = AppState::Done;
             }
             BatchStatus::Processing => {
@@ -1666,11 +1668,13 @@ impl PrunrApp {
             } else {
                 self.selected_batch_index -= 1;
             }
+            self.zoom_state.reset();
             self.sync_selected_batch_textures(ctx);
             self.show_original = false;
         }
         if nav_next && !self.batch_items.is_empty() {
             self.selected_batch_index = (self.selected_batch_index + 1) % self.batch_items.len();
+            self.zoom_state.reset();
             self.sync_selected_batch_textures(ctx);
             self.show_original = false;
         }
