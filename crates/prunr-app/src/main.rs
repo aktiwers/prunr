@@ -6,6 +6,7 @@
 
 mod cli;
 mod gui;
+mod worker_process;
 
 use clap::Parser;
 use cli::Cli;
@@ -18,6 +19,11 @@ fn attach_parent_console() {
 
 fn main() {
     let cli = Cli::parse();
+
+    // Internal subprocess worker mode (launched by GUI batch processing)
+    if cli.worker {
+        worker_process::run_worker();
+    }
 
     if !cli.inputs.is_empty() {
         #[cfg(windows)]
