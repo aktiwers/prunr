@@ -1,9 +1,11 @@
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
-use std::time::Duration;
 
-use prunr_core::{MaskSettings, ModelKind, OrtEngine, ProgressStage, ProcessResult, process_image_with_mask, process_image_from_decoded, create_engine_pool, EdgeEngine};
+use prunr_core::{MaskSettings, ModelKind, ProgressStage, ProcessResult};
 use crate::gui::settings::LineMode;
+use crate::subprocess::protocol::SubprocessEvent;
+use crate::subprocess::manager::SubprocessManager;
 
 /// A single image item to be processed.
 pub type WorkItem = (u64, Arc<Vec<u8>>, Option<Arc<image::RgbaImage>>);
@@ -21,13 +23,11 @@ pub enum WorkerMessage {
         solid_line_color: Option<[u8; 3]>,
         bg_color: Option<[u8; 3]>,
         /// Channel for additional items admitted by the memory controller.
-        /// The sender is dropped by the UI thread when all items are admitted.
         additional_items_rx: Option<mpsc::Receiver<WorkItem>>,
     },
 }
 
 pub enum WorkerResult {
-    /// Per-stage progress for a specific batch item
     BatchProgress {
         item_id: u64,
         stage: ProgressStage,
@@ -39,349 +39,335 @@ pub enum WorkerResult {
     },
     BatchComplete,
     Cancelled,
+    /// Subprocess crashed — retrying with reduced concurrency.
+    SubprocessRetry {
+        reduced_jobs: usize,
+        re_queued_count: usize,
+    },
 }
 
+/// Spawn the worker bridge thread. Receives `WorkerMessage` from the UI,
+/// translates to subprocess IPC, handles crash+retry, sends `WorkerResult` back.
 pub fn spawn_worker(
     ctx: egui::Context,
-    prewarm_engine: Arc<std::sync::OnceLock<Arc<OrtEngine>>>,
 ) -> (mpsc::Sender<WorkerMessage>, mpsc::Receiver<WorkerResult>) {
     let (msg_tx, msg_rx) = mpsc::channel::<WorkerMessage>();
     let (res_tx, res_rx) = mpsc::channel::<WorkerResult>();
 
     std::thread::Builder::new()
-        .name("prunr-worker".into())
+        .name("prunr-bridge".into())
         .spawn(move || {
             while let Ok(msg) = msg_rx.recv() {
                 match msg {
-                    WorkerMessage::BatchProcess { items, model, jobs, cancel, mask, force_cpu, line_mode, line_strength, solid_line_color, bg_color, additional_items_rx } => {
-                        let res_tx_batch = res_tx.clone();
-                        let ctx_batch = ctx.clone();
-
-                        let prewarm = prewarm_engine.clone();
-
-                        std::thread::spawn(move || {
-                            let has_gpu = !OrtEngine::detect_active_provider().eq_ignore_ascii_case("CPU");
-                            let gpu_warming = !force_cpu && has_gpu && prewarm.get().is_none();
-                            let cpu_only = force_cpu || prewarm.get().is_none();
-
-                            // Report loading status — let user know if falling back to CPU
-                            if let Some((first_id, _, _)) = items.first() {
-                                let stage = if gpu_warming {
-                                    ProgressStage::LoadingModelCpuFallback
-                                } else {
-                                    ProgressStage::LoadingModel
-                                };
-                                let _ = res_tx_batch.send(WorkerResult::BatchProgress {
-                                    item_id: *first_id,
-                                    stage,
-                                    pct: 0.0,
-                                });
-                                ctx_batch.request_repaint();
-                            }
-
-                            let needs_edge = line_mode != LineMode::Off;
-                            let needs_segmentation = line_mode != LineMode::LinesOnly;
-
-                            // Load edge engine if needed
-                            let edge_engine: Option<Arc<EdgeEngine>> = if needs_edge {
-                                match EdgeEngine::new() {
-                                    Ok(e) => Some(Arc::new(e)),
-                                    Err(e) => {
-                                        for (item_id, _, _) in &items {
-                                            let _ = res_tx_batch.send(WorkerResult::BatchItemDone {
-                                                item_id: *item_id,
-                                                result: Err(e.to_string()),
-                                            });
-                                        }
-                                        let _ = res_tx_batch.send(WorkerResult::BatchComplete);
-                                        ctx_batch.request_repaint();
-                                        return;
-                                    }
-                                }
-                            } else {
-                                None
-                            };
-
-                            // Load segmentation engines if needed.
-                            // Reuse the prewarm engine if it matches the requested model
-                            // (avoids loading a duplicate 250+ MB ORT session).
-                            let engines: Vec<Arc<prunr_core::OrtEngine>> = if needs_segmentation {
-                                let reused = prewarm.get()
-                                    .filter(|e| e.model_kind() == model)
-                                    .cloned();
-
-                                match reused {
-                                    Some(engine) => {
-                                        // Prewarm was created with intra_threads=1 (for quick
-                                        // startup check). For batch processing we need full
-                                        // thread parallelism, so always create a proper pool.
-                                        // The prewarm is only reused as fallback if pool
-                                        // creation fails.
-                                        create_engine_pool(model, jobs, cpu_only)
-                                            .unwrap_or_else(|_| vec![engine])
-                                    }
-                                    None => {
-                                        match create_engine_pool(model, jobs, cpu_only) {
-                                            Ok(e) => e,
-                                            Err(e) => {
-                                                for (item_id, _, _) in &items {
-                                                    let _ = res_tx_batch.send(WorkerResult::BatchItemDone {
-                                                        item_id: *item_id,
-                                                        result: Err(e.to_string()),
-                                                    });
-                                                }
-                                                let _ = res_tx_batch.send(WorkerResult::BatchComplete);
-                                                ctx_batch.request_repaint();
-                                                return;
-                                            }
-                                        }
-                                    }
-                                }
-                            } else {
-                                Vec::new()
-                            };
-
-                            drop(prewarm);
-
-                            let pool_size = if engines.is_empty() { jobs.max(1) } else { engines.len() };
-
-                            let pool = rayon::ThreadPoolBuilder::new()
-                                .num_threads(pool_size)
-                                .build()
-                                .unwrap_or_else(|_| rayon::ThreadPoolBuilder::new().build().unwrap());
-
-                            run_streaming(
-                                pool, pool_size, items, additional_items_rx,
-                                &engines, &edge_engine, &cancel, mask, line_mode,
-                                line_strength, solid_line_color, bg_color,
-                                &res_tx_batch, &ctx_batch,
-                            );
-
-                            let final_msg = if !cancel.load(Ordering::Acquire) {
-                                WorkerResult::BatchComplete
-                            } else {
-                                WorkerResult::Cancelled
-                            };
-                            if res_tx_batch.send(final_msg).is_err() {
-                                eprintln!("worker: UI channel closed, batch result lost");
-                            }
-                            ctx_batch.request_repaint();
-                        });
+                    WorkerMessage::BatchProcess {
+                        items, model, jobs, cancel, mask, force_cpu,
+                        line_mode, line_strength, solid_line_color, bg_color,
+                        additional_items_rx,
+                    } => {
+                        run_batch_with_retry(
+                            items, model, jobs, &cancel, mask, force_cpu,
+                            line_mode, line_strength, solid_line_color, bg_color,
+                            additional_items_rx,
+                            &res_tx, &ctx,
+                        );
                     }
                 }
             }
         })
-        .expect("failed to spawn worker thread");
+        .expect("failed to spawn bridge thread");
 
     (msg_tx, res_rx)
 }
 
-/// Process items with dynamic admission: initial items are spawned immediately,
-/// and additional items arrive via `additional_rx` as the admission controller
-/// releases budget. When `additional_rx` is None, all items are in `initial_items`.
-fn run_streaming(
-    pool: rayon::ThreadPool,
-    pool_size: usize,
+/// Run a batch with automatic retry on subprocess crash.
+/// Reduces concurrency (jobs) on each crash: jobs → jobs/2 → 1.
+/// If even 1 job crashes, marks remaining items as "insufficient memory".
+fn run_batch_with_retry(
     initial_items: Vec<WorkItem>,
-    additional_rx: Option<mpsc::Receiver<WorkItem>>,
-    engines: &[Arc<OrtEngine>],
-    edge_engine: &Option<Arc<EdgeEngine>>,
+    model: ModelKind,
+    initial_jobs: usize,
     cancel: &Arc<AtomicBool>,
     mask: MaskSettings,
+    force_cpu: bool,
     line_mode: LineMode,
     line_strength: f32,
     solid_line_color: Option<[u8; 3]>,
     bg_color: Option<[u8; 3]>,
+    additional_items_rx: Option<mpsc::Receiver<WorkItem>>,
     res_tx: &mpsc::Sender<WorkerResult>,
     ctx: &egui::Context,
 ) {
-    let in_flight = Arc::new(AtomicUsize::new(0));
-    let (done_tx, done_rx) = mpsc::channel::<u64>();
-    let shared_repaint = Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
-    let mut next_idx: usize = 0;
+    let mut pending: VecDeque<WorkItem> = initial_items.into();
+    let mut completed: std::collections::HashSet<u64> = std::collections::HashSet::new();
+    let mut max_jobs = initial_jobs;
 
-    // Closure to spawn a single item into the rayon pool.
-    let spawn_one = |item_id: u64, img_bytes: Arc<Vec<u8>>, chain_input: Option<Arc<image::RgbaImage>>,
-                          next_idx: &mut usize| {
-        let engine = if !engines.is_empty() {
-            Some(engines[*next_idx % engines.len()].clone())
-        } else {
-            None
-        };
-        *next_idx += 1;
-        in_flight.fetch_add(1, Ordering::AcqRel);
-
-        let done_tx = done_tx.clone();
-        let edge_eng = edge_engine.clone();
-        let cancel_item = cancel.clone();
-        let res_tx_item = res_tx.clone();
-        let ctx_item = ctx.clone();
-        let repaint = shared_repaint.clone();
-
-        pool.spawn(move || {
-            if cancel_item.load(Ordering::Acquire) {
-                let _ = done_tx.send(item_id);
-                return;
-            }
-            let result = process_single_item(
-                item_id, &img_bytes, chain_input, engine.as_ref(), edge_eng.as_ref(),
-                &cancel_item, mask, line_mode, line_strength, solid_line_color,
-                bg_color, &res_tx_item, &ctx_item, &repaint,
-            );
-            let _ = res_tx_item.send(WorkerResult::BatchItemDone {
-                item_id,
-                result: result.map_err(|e| e.to_string()),
-            });
-            ctx_item.request_repaint();
-            let _ = done_tx.send(item_id);
+    // Report loading status
+    if let Some((first_id, _, _)) = pending.front() {
+        let _ = res_tx.send(WorkerResult::BatchProgress {
+            item_id: *first_id,
+            stage: ProgressStage::LoadingModel,
+            pct: 0.0,
         });
-    };
-
-    // Spawn initial items
-    for (item_id, img_bytes, chain_input) in initial_items {
-        spawn_one(item_id, img_bytes, chain_input, &mut next_idx);
+        ctx.request_repaint();
     }
 
-    // Dynamic admission loop.
-    // Termination: in_flight == 0 && no more items coming.
-    let mut additional_closed = additional_rx.is_none();
     loop {
-        // Wait for a completion or timeout
-        match done_rx.recv_timeout(Duration::from_millis(100)) {
-            Ok(_completed_id) => {
-                in_flight.fetch_sub(1, Ordering::AcqRel);
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                if cancel.load(Ordering::Acquire) { break; }
-            }
-            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        if cancel.load(Ordering::Acquire) {
+            let _ = res_tx.send(WorkerResult::Cancelled);
+            ctx.request_repaint();
+            return;
         }
 
-        // Pull newly admitted items from the streaming channel
-        if let Some(ref rx) = additional_rx {
-            if !additional_closed {
-                while in_flight.load(Ordering::Acquire) < pool_size {
-                    match rx.try_recv() {
-                        Ok((id, bytes, chain)) => spawn_one(id, bytes, chain, &mut next_idx),
-                        Err(mpsc::TryRecvError::Empty) => break,
-                        Err(mpsc::TryRecvError::Disconnected) => {
-                            additional_closed = true;
-                            break;
-                        }
+        if pending.is_empty() {
+            // Check if more items coming from admission controller
+            if let Some(ref rx) = additional_items_rx {
+                match rx.try_recv() {
+                    Ok(item) => pending.push_back(item),
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        // All items admitted and processed
+                        let _ = res_tx.send(WorkerResult::BatchComplete);
+                        ctx.request_repaint();
+                        return;
+                    }
+                    Err(mpsc::TryRecvError::Empty) => {
+                        // Wait a bit for more items
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                        continue;
                     }
                 }
+            } else {
+                let _ = res_tx.send(WorkerResult::BatchComplete);
+                ctx.request_repaint();
+                return;
             }
         }
 
-        // All done?
-        if in_flight.load(Ordering::Acquire) == 0 && additional_closed {
-            break;
+        // Spawn subprocess with current concurrency
+        let (mut sub, _active_provider) = match SubprocessManager::spawn(
+            model, max_jobs, mask, force_cpu, line_mode,
+            line_strength, solid_line_color, bg_color,
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                // Can't even spawn — report error for all pending
+                for (id, _, _) in &pending {
+                    let _ = res_tx.send(WorkerResult::BatchItemDone {
+                        item_id: *id,
+                        result: Err(e.clone()),
+                    });
+                }
+                let _ = res_tx.send(WorkerResult::BatchComplete);
+                ctx.request_repaint();
+                return;
+            }
+        };
+
+        // Track items sent to this subprocess (for re-queue on crash)
+        let mut sent_items: Vec<WorkItem> = Vec::new();
+
+        // Send initial burst of items (up to max_jobs)
+        let burst = max_jobs.min(pending.len());
+        for _ in 0..burst {
+            if let Some(item) = pending.pop_front() {
+                if send_item_to_sub(&mut sub, &item).is_err() {
+                    pending.push_front(item);
+                    break;
+                }
+                sent_items.push(item);
+            }
         }
+
+        // Event loop: process results, admit more, handle crash
+        let mut subprocess_finished = false;
+        let mut subprocess_crashed = false;
+
+        while !subprocess_finished {
+            if cancel.load(Ordering::Acquire) {
+                let _ = sub.send_cancel();
+                // Wait for child to acknowledge
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                sub.poll_events(); // drain
+                let _ = res_tx.send(WorkerResult::Cancelled);
+                ctx.request_repaint();
+                return;
+            }
+
+            // Check if child is still alive
+            if !sub.is_alive() {
+                subprocess_crashed = true;
+                break;
+            }
+
+            // Poll events from subprocess
+            let events = sub.poll_events();
+            for event in events {
+                match event {
+                    SubprocessEvent::Progress { item_id, stage, pct } => {
+                        let _ = res_tx.send(WorkerResult::BatchProgress { item_id, stage, pct });
+                        // Throttled repaint
+                        ctx.request_repaint();
+                    }
+                    SubprocessEvent::ImageDone { item_id, result_path, width, height, active_provider } => {
+                        // Read result from temp file and clean up
+                        let result = std::fs::read(&result_path)
+                            .ok()
+                            .and_then(|data| image::RgbaImage::from_raw(width, height, data))
+                            .map(|rgba_image| ProcessResult {
+                                rgba_image,
+                                active_provider: active_provider.clone(),
+                            })
+                            .ok_or_else(|| "Failed to read result from subprocess".to_string());
+                        let _ = std::fs::remove_file(&result_path);
+
+                        completed.insert(item_id);
+                        sent_items.retain(|(id, _, _)| *id != item_id);
+
+                        let _ = res_tx.send(WorkerResult::BatchItemDone { item_id, result });
+                        ctx.request_repaint();
+
+                        // Admit next item if RSS allows
+                        if !sub.should_pause_admission() {
+                            // Try from pending queue first
+                            if let Some(item) = pending.pop_front() {
+                                if send_item_to_sub(&mut sub, &item).is_ok() {
+                                    sent_items.push(item);
+                                } else {
+                                    pending.push_front(item);
+                                }
+                            } else if let Some(ref rx) = additional_items_rx {
+                                // Try streaming admission channel
+                                if let Ok(item) = rx.try_recv() {
+                                    if send_item_to_sub(&mut sub, &item).is_ok() {
+                                        sent_items.push(item);
+                                    } else {
+                                        pending.push_back(item);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    SubprocessEvent::ImageError { item_id, error } => {
+                        completed.insert(item_id);
+                        sent_items.retain(|(id, _, _)| *id != item_id);
+                        let _ = res_tx.send(WorkerResult::BatchItemDone {
+                            item_id,
+                            result: Err(error),
+                        });
+                        ctx.request_repaint();
+                    }
+                    SubprocessEvent::Finished => {
+                        subprocess_finished = true;
+                    }
+                    SubprocessEvent::RssUpdate { .. } => {
+                        // Handled internally by SubprocessManager
+                    }
+                    _ => {}
+                }
+            }
+
+            // Check if all items done and no more coming
+            if sent_items.is_empty() && pending.is_empty() {
+                if let Some(ref rx) = additional_items_rx {
+                    match rx.try_recv() {
+                        Ok(item) => pending.push_back(item),
+                        Err(mpsc::TryRecvError::Disconnected) => {
+                            subprocess_finished = true;
+                        }
+                        Err(mpsc::TryRecvError::Empty) => {}
+                    }
+                } else {
+                    subprocess_finished = true;
+                }
+            }
+
+            if !subprocess_finished {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        }
+
+        if subprocess_crashed {
+            // Re-queue ALL in-flight items (not just the one that crashed)
+            let re_queued: Vec<WorkItem> = sent_items.into_iter()
+                .filter(|(id, _, _)| !completed.contains(id))
+                .collect();
+            let re_count = re_queued.len();
+
+            // Also drain any items from additional_items_rx into pending
+            if let Some(ref rx) = additional_items_rx {
+                while let Ok(item) = rx.try_recv() {
+                    pending.push_back(item);
+                }
+            }
+
+            // Put re-queued items back at the front
+            for item in re_queued.into_iter().rev() {
+                pending.push_front(item);
+            }
+
+            // Reduce concurrency
+            let old_jobs = max_jobs;
+            max_jobs = (max_jobs / 2).max(1);
+
+            if old_jobs == 1 {
+                // Already at minimum — these items genuinely can't be processed
+                for (id, _, _) in &pending {
+                    if !completed.contains(id) {
+                        let _ = res_tx.send(WorkerResult::BatchItemDone {
+                            item_id: *id,
+                            result: Err("Insufficient memory — try a smaller model".to_string()),
+                        });
+                    }
+                }
+                let _ = res_tx.send(WorkerResult::BatchComplete);
+                ctx.request_repaint();
+                return;
+            }
+
+            let _ = res_tx.send(WorkerResult::SubprocessRetry {
+                reduced_jobs: max_jobs,
+                re_queued_count: re_count,
+            });
+            ctx.request_repaint();
+
+            // Clean up dead subprocess
+            sub.kill();
+            crate::subprocess::protocol::cleanup_ipc_temp();
+
+            // Loop back to spawn a new subprocess with reduced concurrency
+            continue;
+        }
+
+        // Subprocess finished normally — check if batch is done
+        if pending.is_empty() {
+            if let Some(ref rx) = additional_items_rx {
+                match rx.try_recv() {
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        let _ = res_tx.send(WorkerResult::BatchComplete);
+                        ctx.request_repaint();
+                        return;
+                    }
+                    Ok(item) => pending.push_back(item),
+                    Err(mpsc::TryRecvError::Empty) => {
+                        // More items might be coming — loop back
+                    }
+                }
+            } else {
+                let _ = res_tx.send(WorkerResult::BatchComplete);
+                ctx.request_repaint();
+                return;
+            }
+        }
+
+        // Graceful shutdown of this subprocess before looping for more work
+        let _ = sub.send_shutdown();
     }
 }
 
-/// Process a single image item. Returns the result.
-fn process_single_item(
-    item_id: u64,
-    img_bytes: &[u8],
-    chain_input: Option<Arc<image::RgbaImage>>,
-    engine: Option<&Arc<OrtEngine>>,
-    edge_engine: Option<&Arc<EdgeEngine>>,
-    cancel: &Arc<AtomicBool>,
-    mask: MaskSettings,
-    line_mode: LineMode,
-    line_strength: f32,
-    solid_line_color: Option<[u8; 3]>,
-    bg_color: Option<[u8; 3]>,
-    res_tx: &mpsc::Sender<WorkerResult>,
-    ctx: &egui::Context,
-    shared_repaint: &Arc<std::sync::Mutex<std::time::Instant>>,
-) -> Result<ProcessResult, prunr_core::CoreError> {
-    let progress_tx = res_tx.clone();
-    let progress_ctx = ctx.clone();
-    let progress_cancel = cancel.clone();
-    let repaint_lock = shared_repaint.clone();
-    let progress_cb = move |stage: ProgressStage, pct: f32| {
-        if !progress_cancel.load(Ordering::Acquire) {
-            let _ = progress_tx.send(WorkerResult::BatchProgress {
-                item_id, stage, pct,
-            });
-            if let Ok(mut last) = repaint_lock.try_lock() {
-                if last.elapsed().as_millis() >= 33 {
-                    progress_ctx.request_repaint();
-                    *last = std::time::Instant::now();
-                }
-            }
-        }
-    };
-
-    let chain_img: Option<image::DynamicImage> = chain_input.map(|rgba| {
-        image::DynamicImage::ImageRgba8(Arc::unwrap_or_clone(rgba))
+/// Send a WorkItem to the subprocess via temp file IPC.
+fn send_item_to_sub(sub: &mut SubprocessManager, item: &WorkItem) -> Result<(), String> {
+    let (item_id, bytes, chain) = item;
+    let chain_input = chain.as_ref().map(|rgba| {
+        (rgba.as_ref(), rgba.width(), rgba.height())
     });
-
-    let result = match line_mode {
-        LineMode::LinesOnly => {
-            let decoded;
-            let img_ref = if let Some(ref img) = chain_img {
-                Ok(img as &image::DynamicImage)
-            } else {
-                match prunr_core::load_image_from_bytes(img_bytes) {
-                    Ok(img) => { decoded = img; Ok(&decoded as &image::DynamicImage) }
-                    Err(e) => Err(e),
-                }
-            };
-            img_ref.and_then(|img| {
-                edge_engine.unwrap().detect(img, line_strength, solid_line_color)
-                    .map(|rgba_image| ProcessResult {
-                        rgba_image,
-                        active_provider: OrtEngine::detect_active_provider(),
-                    })
-            })
-        }
-        LineMode::AfterBgRemoval => {
-            if let Some(ref img) = chain_img {
-                edge_engine.unwrap().detect(img, line_strength, solid_line_color)
-                    .map(|rgba_image| ProcessResult {
-                        rgba_image,
-                        active_provider: OrtEngine::detect_active_provider(),
-                    })
-            } else {
-                let eng = engine.expect("segmentation engine required");
-                process_image_with_mask(
-                    img_bytes, eng, &mask,
-                    Some(progress_cb), Some(cancel.clone()),
-                ).and_then(|pr| {
-                    let img = image::DynamicImage::ImageRgba8(pr.rgba_image);
-                    edge_engine.unwrap().detect(&img, line_strength, solid_line_color)
-                        .map(|rgba_image| ProcessResult {
-                            rgba_image,
-                            active_provider: pr.active_provider,
-                        })
-                })
-            }
-        }
-        LineMode::Off => {
-            let eng = engine.expect("segmentation engine required");
-            if let Some(ref img) = chain_img {
-                process_image_from_decoded(
-                    img, eng, &mask,
-                    Some(progress_cb), Some(cancel.clone()),
-                )
-            } else {
-                process_image_with_mask(
-                    img_bytes, eng, &mask,
-                    Some(progress_cb), Some(cancel.clone()),
-                )
-            }
-        }
-    };
-
-    // Apply background color if enabled
-    result.map(|mut pr| {
-        if let Some(bg) = bg_color {
-            prunr_core::apply_background_color(&mut pr.rgba_image, bg);
-        }
-        pr
-    })
+    sub.send_image(*item_id, bytes, chain_input)
 }
-

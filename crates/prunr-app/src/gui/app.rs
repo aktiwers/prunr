@@ -300,24 +300,9 @@ impl PrunrApp {
         let mut settings = Settings::load();
         settings.active_backend = prunr_core::OrtEngine::detect_active_provider();
 
-        // Pre-warm the default model on a background thread.
-        // On macOS, CoreML compiles the ONNX model on first use (can take minutes).
-        // By starting this at launch, the model is ready by the time the user needs it.
-        // The warmed engine is stored and passed to the worker to avoid re-creation.
-        let prewarm_engine: Arc<std::sync::OnceLock<Arc<prunr_core::OrtEngine>>> = Arc::new(std::sync::OnceLock::new());
-        {
-            let model: prunr_core::ModelKind = settings.model.into();
-            let lock = prewarm_engine.clone();
-            std::thread::Builder::new()
-                .name("model-prewarm".into())
-                .spawn(move || {
-                    if let Ok(engine) = prunr_core::OrtEngine::new(model, 1) {
-                        let _ = lock.set(Arc::new(engine));
-                    }
-                })
-                .ok();
-        }
-        let (worker_tx, worker_rx) = spawn_worker(worker_ctx, prewarm_engine);
+        // Subprocess worker: inference runs in a child process for OOM isolation.
+        // No prewarm needed — the subprocess creates its own engine pool.
+        let (worker_tx, worker_rx) = spawn_worker(worker_ctx);
 
         Self {
             state: AppState::Empty,
@@ -1422,9 +1407,15 @@ impl PrunrApp {
                         self.state = AppState::Loaded;
                         self.status.text = "Cancelled".to_string();
                     }
-                    // Clean up admission state on cancel
                     self.admission = None;
                     self.admission_tx = None;
+                }
+                WorkerResult::SubprocessRetry { reduced_jobs, re_queued_count } => {
+                    let msg = format!(
+                        "Memory pressure \u{2014} retrying {re_queued_count} images with {reduced_jobs} parallel jobs"
+                    );
+                    self.toasts.warning(msg.clone());
+                    self.status.text = msg;
                 }
             }
         }
