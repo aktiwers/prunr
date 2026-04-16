@@ -21,8 +21,6 @@ use prunr_app::gui::settings::LineMode;
 /// Global lock for postprocessing (Lanczos3 resize).
 /// AI inference can run in parallel, but high-res CPU resizing must be
 /// serialized to prevent concurrent memory spikes from crashing the process.
-/// TODO: Wire into postprocess stage in prunr-core.
-#[allow(dead_code)]
 static POSTPROCESS_LOCK: Mutex<()> = Mutex::new(());
 
 /// Entry point for `prunr --worker`.
@@ -182,7 +180,10 @@ pub fn run_worker() -> ! {
                         }
                     };
 
-                    // Process the image
+                    // Serialize processing to prevent concurrent postprocess
+                    // (Lanczos3 resize) spikes from causing OOM. AI inference
+                    // still uses all CPU threads via ORT intra-op parallelism.
+                    let _lock = POSTPROCESS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
                     let result = match line_mode {
                         LineMode::LinesOnly => {
                             let decoded;

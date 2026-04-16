@@ -52,6 +52,9 @@ impl SubprocessManager {
         solid_line_color: Option<[u8; 3]>,
         bg_color: Option<[u8; 3]>,
     ) -> Result<(Self, String), String> {
+        // Clean up stale IPC temp files from previous workers (crash recovery)
+        super::protocol::cleanup_ipc_temp();
+
         let exe = std::env::current_exe()
             .map_err(|e| format!("Failed to get current exe: {e}"))?;
 
