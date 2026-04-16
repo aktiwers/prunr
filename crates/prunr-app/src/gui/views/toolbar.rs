@@ -53,29 +53,37 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
         let prev_model = app.settings.model;
         ui.add_enabled_ui(!is_processing, |ui| {
             {
+                // Force light text on all ComboBox states — prevents dark-on-dark
+                // when the OS is in light mode (egui may inherit OS text color).
                 let vis = ui.visuals_mut();
                 vis.widgets.inactive.weak_bg_fill = theme::BG_SECONDARY;
+                vis.widgets.inactive.fg_stroke.color = theme::TEXT_PRIMARY;
                 vis.widgets.hovered.weak_bg_fill = egui::Color32::from_rgb(0x30, 0x2e, 0x32);
+                vis.widgets.hovered.fg_stroke.color = theme::TEXT_PRIMARY;
                 vis.widgets.open.weak_bg_fill = theme::BG_SECONDARY;
+                vis.widgets.open.fg_stroke.color = theme::TEXT_PRIMARY;
+                vis.widgets.active.fg_stroke.color = theme::TEXT_PRIMARY;
+                vis.widgets.noninteractive.fg_stroke.color = theme::TEXT_SECONDARY;
+                vis.window_fill = theme::BG_PRIMARY;
             }
             ui.spacing_mut().interact_size.y = BTN_HEIGHT;
             egui::ComboBox::from_id_salt("model")
-                .selected_text(model_label(app.settings.model, true))
+                .selected_text(RichText::new(model_label(app.settings.model, true)).color(theme::TEXT_PRIMARY))
                 .show_ui(ui, |ui| {
                     ui.selectable_value(
                         &mut app.settings.model,
                         SettingsModel::Silueta,
-                        model_label(SettingsModel::Silueta, false),
+                        RichText::new(model_label(SettingsModel::Silueta, false)).color(theme::TEXT_PRIMARY),
                     );
                     ui.selectable_value(
                         &mut app.settings.model,
                         SettingsModel::U2net,
-                        model_label(SettingsModel::U2net, false),
+                        RichText::new(model_label(SettingsModel::U2net, false)).color(theme::TEXT_PRIMARY),
                     );
                     ui.selectable_value(
                         &mut app.settings.model,
                         SettingsModel::BiRefNetLite,
-                        model_label(SettingsModel::BiRefNetLite, false),
+                        RichText::new(model_label(SettingsModel::BiRefNetLite, false)).color(theme::TEXT_PRIMARY),
                     );
                 });
         });
