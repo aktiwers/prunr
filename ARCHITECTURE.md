@@ -227,13 +227,13 @@ main.rs
   ↓ Cli::parse()
   ↓ inputs non-empty → cli::run_remove(&cli)
   ↓
-single image: pipeline::process_image_with_mask() → PNG encode → fs::write
-batch:        batch::batch_process_with_mask() → rayon → PNG encodes in parallel
+single image: pipeline::process_image_with_mask() → PNG encode → fs::write (in-process)
+batch (2+ images): spawn `prunr --worker` subprocess → IPC → results → PNG encode → fs::write
   ↓
 exit code: 0 all ok / 1 all fail / 2 partial
 ```
 
-CLI batch processing currently runs in-process (not subprocess). The zero-copy model bytes and CPU engine pooling improvements apply to CLI as well.
+CLI batch processing uses the same subprocess isolation as the GUI. Auto-retry with concurrency reduction (4→2→1) on OOM, RSS-based admission throttling, progress spinners updated via subprocess events.
 
 ## Inference Pipeline
 

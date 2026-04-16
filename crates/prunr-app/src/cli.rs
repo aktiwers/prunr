@@ -125,7 +125,6 @@ use prunr_core::{
     MaskSettings, OrtEngine, ModelKind, ProgressStage, CoreError,
     DOWNSCALE_TARGET,
     process_image_with_mask, process_image_unchecked,
-    batch_process_with_mask,
     load_image_from_path, check_large_image, downscale_image, encode_rgba_png,
 };
 
@@ -478,43 +477,21 @@ fn run_batch(args: &Cli) -> i32 {
             valid_bytes.push(res.as_ref().unwrap().clone());
         }
     }
-    let valid_refs: Vec<&[u8]> = valid_bytes.iter().map(|b| b.as_slice()).collect();
-
     let model: ModelKind = args.model.into();
-
-    // Progress callback: update per-image spinner with stage label
-    // Use Arc so it's Send + Sync (required by batch_process)
     let spinners_arc = std::sync::Arc::new(spinners);
     let inputs_arc = std::sync::Arc::new(args.inputs.clone());
-    let valid_indices_arc = std::sync::Arc::new(valid_indices.clone());
     let quiet = args.quiet;
-
-    let progress_cb = {
-        let spinners = spinners_arc.clone();
-        let valid_indices = valid_indices_arc.clone();
-        let inputs = inputs_arc.clone();
-        move |batch_idx: usize, stage: ProgressStage, _pct: f32| {
-            let original_idx = valid_indices[batch_idx];
-            if !quiet {
-                if let Some(Some(pb)) = spinners.get(original_idx) {
-                    pb.set_message(format!(
-                        "{} — {}",
-                        inputs[original_idx].display(),
-                        stage_label(stage)
-                    ));
-                }
-            }
-        }
-    };
-
     let mask = args.mask_settings();
-    let batch_results = batch_process_with_mask(
-        &valid_refs,
-        model,
-        args.jobs,
-        &mask,
-        args.cpu,
-        Some(progress_cb),
+
+    // Process via subprocess for OOM isolation with auto-retry.
+    let line_mode = args.line_mode();
+    let solid_line_color = args.line_color.as_deref().and_then(parse_hex_color);
+    let bg_color = args.bg_color.as_deref().and_then(parse_hex_color);
+
+    let batch_results = run_batch_subprocess(
+        &valid_bytes, &valid_indices, model, args.jobs, mask, args.cpu,
+        line_mode, args.line_strength, solid_line_color, bg_color,
+        &spinners_arc, &inputs_arc, quiet,
     );
 
     // Compute output paths and write results
@@ -606,4 +583,176 @@ fn run_batch(args: &Cli) -> i32 {
     }
 }
 
+/// Run batch processing via subprocess with auto-retry on OOM.
+fn run_batch_subprocess(
+    valid_bytes: &[Vec<u8>],
+    valid_indices: &[usize],
+    model: ModelKind,
+    initial_jobs: usize,
+    mask: MaskSettings,
+    force_cpu: bool,
+    line_mode: LineMode,
+    line_strength: f32,
+    solid_line_color: Option<[u8; 3]>,
+    bg_color: Option<[u8; 3]>,
+    spinners: &[Option<ProgressBar>],
+    inputs: &[std::path::PathBuf],
+    quiet: bool,
+) -> Vec<Result<prunr_core::ProcessResult, CoreError>> {
+    use prunr_app::subprocess::manager::SubprocessManager;
+    use prunr_app::subprocess::protocol::SubprocessEvent;
 
+    let mut results: Vec<Option<Result<prunr_core::ProcessResult, CoreError>>> =
+        (0..valid_bytes.len()).map(|_| None).collect();
+    let mut pending: std::collections::VecDeque<usize> = (0..valid_bytes.len()).collect();
+    let mut max_jobs = initial_jobs;
+
+    loop {
+        if pending.is_empty() { break; }
+
+        // Spawn subprocess
+        let (mut sub, _provider) = match SubprocessManager::spawn(
+            model, max_jobs, mask, force_cpu, line_mode,
+            line_strength, solid_line_color, bg_color,
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                // Can't spawn — fail all remaining
+                for &idx in &pending {
+                    results[idx] = Some(Err(CoreError::Model(e.clone())));
+                }
+                break;
+            }
+        };
+
+        let mut in_flight: Vec<usize> = Vec::new();
+
+        // Send initial burst
+        let burst = max_jobs.min(pending.len());
+        for _ in 0..burst {
+            if let Some(idx) = pending.pop_front() {
+                let item_id = valid_indices[idx] as u64;
+                if sub.send_image(item_id, &valid_bytes[idx], None).is_err() {
+                    pending.push_front(idx);
+                    break;
+                }
+                in_flight.push(idx);
+            }
+        }
+
+        // Event loop
+        let mut crashed = false;
+        loop {
+            if !sub.is_alive() && !in_flight.is_empty() {
+                crashed = true;
+                break;
+            }
+
+            let events = sub.poll_events();
+            if events.is_empty() && in_flight.is_empty() && pending.is_empty() {
+                break;
+            }
+
+            for event in events {
+                match event {
+                    SubprocessEvent::Progress { item_id, stage, .. } => {
+                        let orig_idx = item_id as usize;
+                        if !quiet {
+                            if let Some(Some(pb)) = spinners.get(orig_idx) {
+                                pb.set_message(format!(
+                                    "{} \u{2014} {}",
+                                    inputs[orig_idx].display(),
+                                    stage_label(stage),
+                                ));
+                            }
+                        }
+                    }
+                    SubprocessEvent::ImageDone { item_id, result_path, width, height, .. } => {
+                        let orig_idx = item_id as usize;
+                        let batch_idx = in_flight.iter().position(|&i| valid_indices[i] as u64 == item_id);
+                        if let Some(pos) = batch_idx {
+                            in_flight.remove(pos);
+                        }
+
+                        let result = std::fs::read(&result_path)
+                            .ok()
+                            .and_then(|data| image::RgbaImage::from_raw(width, height, data))
+                            .map(|rgba_image| prunr_core::ProcessResult {
+                                rgba_image,
+                                active_provider: String::new(),
+                            })
+                            .ok_or_else(|| CoreError::Model("Failed to read subprocess result".into()));
+                        let _ = std::fs::remove_file(&result_path);
+
+                        // Find the batch_results index for this item
+                        if let Some(ridx) = valid_indices.iter().position(|&vi| vi == orig_idx) {
+                            results[ridx] = Some(result);
+                        }
+
+                        // Admit next
+                        if !sub.should_pause_admission() {
+                            if let Some(next) = pending.pop_front() {
+                                let next_id = valid_indices[next] as u64;
+                                if sub.send_image(next_id, &valid_bytes[next], None).is_ok() {
+                                    in_flight.push(next);
+                                }
+                            }
+                        }
+                    }
+                    SubprocessEvent::ImageError { item_id, error } => {
+                        let orig_idx = item_id as usize;
+                        let batch_idx = in_flight.iter().position(|&i| valid_indices[i] as u64 == item_id);
+                        if let Some(pos) = batch_idx {
+                            in_flight.remove(pos);
+                        }
+                        if let Some(ridx) = valid_indices.iter().position(|&vi| vi == orig_idx) {
+                            results[ridx] = Some(Err(CoreError::Model(error)));
+                        }
+                    }
+                    SubprocessEvent::Finished => {
+                        if in_flight.is_empty() && pending.is_empty() {
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            if in_flight.is_empty() && pending.is_empty() { break; }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+
+        if crashed {
+            // Re-queue in-flight items
+            for idx in in_flight.into_iter().rev() {
+                pending.push_front(idx);
+            }
+            let old_jobs = max_jobs;
+            max_jobs = (max_jobs / 2).max(1);
+            if old_jobs == 1 {
+                // Give up on remaining
+                for &idx in &pending {
+                    results[idx] = Some(Err(CoreError::Model(
+                        "Insufficient memory \u{2014} try a smaller model".into()
+                    )));
+                }
+                break;
+            }
+            if !quiet {
+                eprintln!("Memory pressure \u{2014} retrying with {} parallel jobs", max_jobs);
+            }
+            sub.kill();
+            prunr_app::subprocess::protocol::cleanup_ipc_temp();
+            continue;
+        }
+
+        // Normal completion of this subprocess run
+        let _ = sub.send_shutdown();
+        break;
+    }
+
+    // Convert Option<Result> to Result (None should not happen, but handle gracefully)
+    results.into_iter()
+        .map(|r| r.unwrap_or_else(|| Err(CoreError::Model("Not processed".into()))))
+        .collect()
+}
