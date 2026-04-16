@@ -20,7 +20,10 @@ pub fn render(ui: &mut egui::Ui, app: &PrunrApp) {
         // Left side: status text
         let batch_processing = app.batch_items.iter().any(|i| i.status == BatchStatus::Processing);
         let batch_done_count = app.batch_items.iter().filter(|i| i.status == BatchStatus::Done).count();
-        let batch_total = app.batch_items.len();
+        let batch_errored = app.batch_items.iter().filter(|i| matches!(i.status, BatchStatus::Error(_))).count();
+        let batch_in_progress = app.batch_items.iter().filter(|i| i.status == BatchStatus::Processing).count();
+        // Only count items involved in processing (not idle Pending items)
+        let batch_total = batch_done_count + batch_errored + batch_in_progress;
 
         let status_text = if batch_processing {
             format!("Processing {batch_done_count}/{batch_total} images...")
