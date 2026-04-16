@@ -5,7 +5,7 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod cli;
-mod gui;
+use prunr_app::gui;
 mod worker_process;
 
 use clap::Parser;
