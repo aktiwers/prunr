@@ -178,11 +178,8 @@ pub fn run_remove(args: &Cli) -> i32 {
         }
     }
 
-    if args.inputs.len() == 1 {
-        run_single(args)
-    } else {
-        run_batch(args)
-    }
+    // All processing uses subprocess isolation for OOM protection
+    run_batch(args)
 }
 
 // ── Output path helpers ──────────────────────────────────────────────────────
@@ -272,6 +269,7 @@ fn stage_label(stage: ProgressStage) -> &'static str {
 
 // ── Single-image execution path ──────────────────────────────────────────────
 
+#[allow(dead_code)]
 fn run_single(args: &Cli) -> i32 {
     let input = &args.inputs[0];
     let out_path = output_path(input, &args.output, false);
@@ -450,46 +448,72 @@ fn run_batch(args: &Cli) -> i32 {
         })
     }).collect();
 
-    // Load all image bytes upfront (fail-fast per image, not globally)
+    // Validate images lazily — only check dimensions, don't load bytes into RAM.
+    // The subprocess reads file bytes on demand when processing each image.
     let start_times: Vec<Instant> = args.inputs.iter().map(|_| Instant::now()).collect();
-    let img_bytes_store: Vec<Result<Vec<u8>, CoreError>> = args.inputs.iter().map(|input| {
-        load_with_policy(input, args.large_image, args.quiet)
-    }).collect();
+    let mut valid_indices: Vec<usize> = Vec::new();
+    let mut valid_paths: Vec<std::path::PathBuf> = Vec::new();
+    let mut load_fail_count = 0usize;
 
-    // Update spinner for images that failed to load
-    for (idx, res) in img_bytes_store.iter().enumerate() {
-        if let Err(e) = res {
-            if let Some(Some(pb)) = spinners.get(idx) {
-                pb.finish_with_message(format!(
-                    "X {} — load error: {e}", args.inputs[idx].display()
-                ));
+    for (idx, input) in args.inputs.iter().enumerate() {
+        match std::fs::File::open(input)
+            .ok()
+            .and_then(|f| {
+                image::ImageReader::new(std::io::BufReader::new(f))
+                    .with_guessed_format()
+                    .ok()
+                    .and_then(|r| r.into_dimensions().ok())
+            })
+        {
+            Some((w, h)) if args.large_image == LargeImagePolicy::Downscale
+                && (w > prunr_core::LARGE_IMAGE_LIMIT || h > prunr_core::LARGE_IMAGE_LIMIT) =>
+            {
+                // Oversized — downscale to temp file, pass temp path to subprocess
+                match load_with_policy(input, args.large_image, args.quiet) {
+                    Ok(bytes) => {
+                        let temp = prunr_app::subprocess::protocol::ipc_temp_dir()
+                            .join(format!("cli_ds_{idx}.img"));
+                        if std::fs::write(&temp, &bytes).is_ok() {
+                            valid_indices.push(idx);
+                            valid_paths.push(temp);
+                        } else {
+                            load_fail_count += 1;
+                        }
+                    }
+                    Err(e) => {
+                        load_fail_count += 1;
+                        if let Some(Some(pb)) = spinners.get(idx) {
+                            pb.finish_with_message(format!("X {} — {e}", input.display()));
+                        }
+                    }
+                }
+            }
+            Some(_) => {
+                // Normal size — pass original path directly (zero RAM cost)
+                valid_indices.push(idx);
+                valid_paths.push(input.clone());
+            }
+            None => {
+                load_fail_count += 1;
+                if let Some(Some(pb)) = spinners.get(idx) {
+                    pb.finish_with_message(format!("X {} — not a valid image", input.display()));
+                }
             }
         }
     }
 
-    // Build refs for batch_process (only successfully loaded images)
-    // Track which indices actually get processed
-    let mut valid_indices: Vec<usize> = Vec::new();
-    let mut valid_bytes: Vec<Vec<u8>> = Vec::new();
-    for (idx, res) in img_bytes_store.iter().enumerate() {
-        if res.is_ok() {
-            valid_indices.push(idx);
-            valid_bytes.push(res.as_ref().unwrap().clone());
-        }
-    }
     let model: ModelKind = args.model.into();
     let spinners_arc = std::sync::Arc::new(spinners);
     let inputs_arc = std::sync::Arc::new(args.inputs.clone());
     let quiet = args.quiet;
     let mask = args.mask_settings();
 
-    // Process via subprocess for OOM isolation with auto-retry.
     let line_mode = args.line_mode();
     let solid_line_color = args.line_color.as_deref().and_then(parse_hex_color);
     let bg_color = args.bg_color.as_deref().and_then(parse_hex_color);
 
     let batch_results = run_batch_subprocess(
-        &valid_bytes, &valid_indices, model, args.jobs, mask, args.cpu,
+        &valid_paths, &valid_indices, model, args.jobs, mask, args.cpu,
         line_mode, args.line_strength, solid_line_color, bg_color,
         &spinners_arc, &inputs_arc, quiet,
     );
@@ -497,9 +521,6 @@ fn run_batch(args: &Cli) -> i32 {
     // Compute output paths and write results
     let mut success_count = 0usize;
     let mut fail_count = 0usize;
-
-    // Account for images that failed to load
-    let load_fail_count = img_bytes_store.iter().filter(|r| r.is_err()).count();
     fail_count += load_fail_count;
 
     for (batch_idx, result) in batch_results.iter().enumerate() {
@@ -584,8 +605,9 @@ fn run_batch(args: &Cli) -> i32 {
 }
 
 /// Run batch processing via subprocess with auto-retry on OOM.
+/// Accepts file paths — bytes are read lazily by the subprocess.
 fn run_batch_subprocess(
-    valid_bytes: &[Vec<u8>],
+    valid_paths: &[std::path::PathBuf],
     valid_indices: &[usize],
     model: ModelKind,
     initial_jobs: usize,
@@ -603,8 +625,8 @@ fn run_batch_subprocess(
     use prunr_app::subprocess::protocol::SubprocessEvent;
 
     let mut results: Vec<Option<Result<prunr_core::ProcessResult, CoreError>>> =
-        (0..valid_bytes.len()).map(|_| None).collect();
-    let mut pending: std::collections::VecDeque<usize> = (0..valid_bytes.len()).collect();
+        (0..valid_paths.len()).map(|_| None).collect();
+    let mut pending: std::collections::VecDeque<usize> = (0..valid_paths.len()).collect();
     let mut max_jobs = initial_jobs;
 
     loop {
@@ -632,7 +654,7 @@ fn run_batch_subprocess(
         for _ in 0..burst {
             if let Some(idx) = pending.pop_front() {
                 let item_id = valid_indices[idx] as u64;
-                if sub.send_image(item_id, &valid_bytes[idx], None).is_err() {
+                if sub.send_image_path(item_id, valid_paths[idx].clone()).is_err() {
                     pending.push_front(idx);
                     break;
                 }
@@ -693,7 +715,7 @@ fn run_batch_subprocess(
                         if !sub.should_pause_admission() {
                             if let Some(next) = pending.pop_front() {
                                 let next_id = valid_indices[next] as u64;
-                                if sub.send_image(next_id, &valid_bytes[next], None).is_ok() {
+                                if sub.send_image_path(next_id, valid_paths[next].clone()).is_ok() {
                                     in_flight.push(next);
                                 }
                             }

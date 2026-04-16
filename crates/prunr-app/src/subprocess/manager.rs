@@ -185,6 +185,22 @@ impl SubprocessManager {
         Ok(())
     }
 
+    /// Send an image for processing directly from a file path (no copy).
+    /// The subprocess reads the file; caller is responsible for cleanup.
+    pub fn send_image_path(
+        &mut self,
+        item_id: u64,
+        image_path: std::path::PathBuf,
+    ) -> Result<(), String> {
+        write_message(&mut self.stdin_writer, &SubprocessCommand::ProcessImage {
+            item_id,
+            image_path,
+            chain_input: None,
+        }).map_err(|e| format!("Failed to send ProcessImage: {e}"))?;
+        self.in_flight.insert(item_id);
+        Ok(())
+    }
+
     /// Send cancel signal to the child.
     pub fn send_cancel(&mut self) -> Result<(), String> {
         write_message(&mut self.stdin_writer, &SubprocessCommand::Cancel)

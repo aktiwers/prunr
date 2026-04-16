@@ -233,7 +233,7 @@ batch (2+ images): spawn `prunr --worker` subprocess → IPC → results → PNG
 exit code: 0 all ok / 1 all fail / 2 partial
 ```
 
-CLI batch processing uses the same subprocess isolation as the GUI. Auto-retry with concurrency reduction (4→2→1) on OOM, RSS-based admission throttling, progress spinners updated via subprocess events.
+All CLI processing (single and batch) uses subprocess isolation for OOM protection. File paths are passed directly to the subprocess — image bytes are never loaded into the parent process. Only oversized images that need downscaling are loaded temporarily. Auto-retry with concurrency reduction (4→2→1) on OOM.
 
 ## Inference Pipeline
 
