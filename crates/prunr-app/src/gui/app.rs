@@ -1397,16 +1397,17 @@ impl PrunrApp {
                             }
                         }
                     }
-                    // Update progress info
+                    // Update progress info — count only items involved in this batch
                     let done = self.batch_items.iter().filter(|i| i.status == BatchStatus::Done).count();
-                    let total = self.batch_items.len();
                     let processing = self.batch_items.iter().filter(|i| i.status == BatchStatus::Processing).count();
+                    let errored = self.batch_items.iter().filter(|i| matches!(i.status, BatchStatus::Error(_))).count();
+                    let batch_total = done + processing + errored;
                     if processing > 0 {
-                        self.status.stage = format!("Processing {done}/{total}");
+                        self.status.stage = format!("Processing {done}/{batch_total}");
                     } else {
                         self.status.stage = "Finishing up".to_string();
                     }
-                    self.status.pct = done as f32 / total.max(1) as f32;
+                    self.status.pct = done as f32 / batch_total.max(1) as f32;
 
                     if is_selected {
                         self.result_switch_id += 1;
