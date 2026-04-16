@@ -103,8 +103,9 @@ impl SubprocessManager {
             })
             .map_err(|e| format!("Failed to spawn reader thread: {e}"))?;
 
-        // Wait for Ready or InitError (with timeout)
-        let active_provider = match event_rx.recv_timeout(std::time::Duration::from_secs(120)) {
+        // Wait for Ready or InitError. 300s timeout covers macOS CoreML
+        // first-run compilation which can take 2-5 minutes on slow systems.
+        let active_provider = match event_rx.recv_timeout(std::time::Duration::from_secs(300)) {
             Ok(ReaderEvent::Event(SubprocessEvent::Ready { active_provider })) => {
                 active_provider
             }
@@ -122,7 +123,7 @@ impl SubprocessManager {
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 let _ = child.kill();
-                return Err("Worker init timed out (120s)".to_string());
+                return Err("Worker init timed out (300s)".to_string());
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 let _ = child.kill();
