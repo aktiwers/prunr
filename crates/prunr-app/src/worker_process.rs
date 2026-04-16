@@ -287,10 +287,16 @@ pub fn run_worker() -> ! {
                         });
                     }
 
-                    // Clean up input temp files
-                    let _ = std::fs::remove_file(&image_path);
+                    // Clean up temp files only (not user's original files).
+                    // Files in the IPC temp dir were created by the parent for this subprocess.
+                    let ipc_dir = prunr_app::subprocess::protocol::ipc_temp_dir();
+                    if image_path.starts_with(&ipc_dir) {
+                        let _ = std::fs::remove_file(&image_path);
+                    }
                     if let Some(ref p) = chain_path {
-                        let _ = std::fs::remove_file(p);
+                        if p.starts_with(&ipc_dir) {
+                            let _ = std::fs::remove_file(p);
+                        }
                     }
 
                     in_flight.fetch_sub(1, Ordering::AcqRel);
