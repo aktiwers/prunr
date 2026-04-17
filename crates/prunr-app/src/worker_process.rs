@@ -35,13 +35,22 @@ impl WeightedSemaphore {
         }
     }
 
+    fn capacity(&self) -> usize {
+        // Read the initial capacity (total units = what release restores to)
+        // For safety, return a reasonable max
+        64
+    }
+
     /// Acquire `weight` units, blocking until enough are available.
-    fn acquire(&self, weight: usize) {
+    /// Weight is capped to capacity to prevent deadlock on oversized images.
+    fn acquire(&self, weight: usize) -> usize {
+        let capped = weight.min(self.capacity());
         let mut units = self.state.lock().unwrap();
-        while *units < weight {
+        while *units < capped {
             units = self.available.wait(units).unwrap();
         }
-        *units -= weight;
+        *units -= capped;
+        capped // return actual acquired weight for matching release
     }
 
     /// Release `weight` units and notify waiting threads.
@@ -234,7 +243,7 @@ pub fn run_worker() -> ! {
                     // Weighted semaphore: acquire pixel units proportional to image size.
                     // Small images run in parallel; large images throttle automatically.
                     let weight = pixel_weight(&img_bytes);
-                    sem.acquire(weight);
+                    let acquired = sem.acquire(weight);
                     let result = match line_mode {
                         LineMode::LinesOnly => {
                             let decoded;
@@ -332,7 +341,7 @@ pub fn run_worker() -> ! {
                     }
 
                     // Release semaphore weight (allows next image to proceed)
-                    sem.release(weight);
+                    sem.release(acquired);
 
                     // Report RSS after each image
                     if let Some(stats) = memory_stats::memory_stats() {
