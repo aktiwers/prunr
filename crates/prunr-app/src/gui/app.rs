@@ -1362,16 +1362,32 @@ impl PrunrApp {
 
     /// Request thumbnail generation on a background thread for a batch item.
     /// If result_rgba is Some, thumbnails from result; otherwise decodes source bytes.
-    pub(crate) fn request_thumbnail(&self, item_id: u64, source: &ImageSource, result_rgba: Option<&Arc<image::RgbaImage>>) {
+    ///
+    /// `bg` applies a background color to the thumbnail (matches display).
+    /// Result images stay transparent in storage; the thumb texture needs
+    /// its own composite so the sidebar matches what's drawn on the canvas.
+    /// Solid line color is already baked into `result_rgba` by the pipeline,
+    /// so we don't need a separate parameter for it.
+    pub(crate) fn request_thumbnail(
+        &self,
+        item_id: u64,
+        source: &ImageSource,
+        result_rgba: Option<&Arc<image::RgbaImage>>,
+        bg: Option<[u8; 3]>,
+    ) {
         let tx = self.bg_io.thumb_tx.clone();
         if let Some(rgba) = result_rgba {
             let rgba = rgba.clone();
             std::thread::spawn(move || {
                 let (w, h) = fit_dimensions(rgba.width(), rgba.height(), 160, 160);
-                let thumb = image::imageops::resize(rgba.as_ref(), w, h, image::imageops::FilterType::Triangle);
+                let mut thumb = image::imageops::resize(rgba.as_ref(), w, h, image::imageops::FilterType::Triangle);
+                if let Some(bg) = bg {
+                    prunr_core::apply_background_color(&mut thumb, bg);
+                }
                 let _ = tx.send((item_id, thumb.width(), thumb.height(), thumb.into_raw()));
             });
         } else {
+            // Source-only thumbnails have no transparency, so `bg` is a no-op.
             let source = source.clone();
             std::thread::spawn(move || {
                 if let Ok(bytes) = source.load_bytes() {
@@ -1505,6 +1521,12 @@ impl PrunrApp {
                 // Mark pending so sync_selected_batch_textures doesn't also
                 // spawn its own prep on this same frame.
                 item.result_tex_pending = true;
+                // Invalidate the sidebar thumbnail — it was built from the
+                // previous result_rgba and may have different line colors.
+                // Sidebar's render loop will see `None + !pending` and queue
+                // a fresh thumb generation on the next frame.
+                item.thumb_texture = None;
+                item.thumb_pending = false;
                 let item_id = item.id;
                 let switch = self.result_switch_id;
                 let bg = item.settings.bg_rgb();
@@ -2383,6 +2405,10 @@ impl eframe::App for PrunrApp {
                 let idx = self.selected_batch_index.min(self.batch_items.len() - 1);
                 self.batch_items[idx].result_texture = None;
                 self.batch_items[idx].result_tex_pending = false;
+                // Thumbnail bakes bg in during generation; needs regeneration
+                // so the sidebar preview matches the canvas.
+                self.batch_items[idx].thumb_texture = None;
+                self.batch_items[idx].thumb_pending = false;
                 self.result_texture = None;
                 self.result_switch_id += 1;
                 self.sync_selected_batch_textures(ui.ctx());

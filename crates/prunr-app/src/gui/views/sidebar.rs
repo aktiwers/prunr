@@ -134,10 +134,12 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                 {
                     app.batch_items[i].thumb_pending = true;
                     let item_id = app.batch_items[i].id;
+                    let bg = app.batch_items[i].settings.bg_rgb();
                     app.request_thumbnail(
                         item_id,
                         &app.batch_items[i].source,
                         app.batch_items[i].result_rgba.as_ref(),
+                        bg,
                     );
                     needs_repaint = true;
                 }
