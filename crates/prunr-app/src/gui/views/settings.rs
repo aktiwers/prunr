@@ -229,8 +229,8 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) {
 
             // ── Default preset for new images ──
             section_heading(ui, "Default preset");
-            let preset_names = super::preset_dropdown::sorted_preset_names(&app.settings);
-            let current = app.settings.default_preset.clone().unwrap_or_else(|| "Prunr (factory defaults)".to_string());
+            let preset_names = super::preset_dropdown::all_preset_names(&app.settings);
+            let current = app.settings.default_preset.clone();
             ui.horizontal(|ui| {
                 egui::ComboBox::from_id_salt("default_preset")
                     .selected_text(
@@ -239,18 +239,15 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) {
                             .size(theme::FONT_SIZE_BODY),
                     )
                     .show_ui(ui, |ui| {
-                        if ui.selectable_label(app.settings.default_preset.is_none(), "Prunr (factory defaults)").clicked() {
-                            app.settings.default_preset = None;
-                        }
                         for name in &preset_names {
-                            let selected = app.settings.default_preset.as_deref() == Some(name.as_str());
+                            let selected = app.settings.default_preset == *name;
                             if ui.selectable_label(selected, name).clicked() {
-                                app.settings.default_preset = Some(name.clone());
+                                app.settings.default_preset = name.clone();
                             }
                         }
                     });
             });
-            hint(ui, "New images on import inherit this preset's values (save presets in the toolbar).");
+            hint(ui, "New images inherit this preset. Reset-all-knobs on row 2 also restores this preset's values.");
             ui.add_space(theme::SPACE_MD);
 
             // Backend info at the bottom

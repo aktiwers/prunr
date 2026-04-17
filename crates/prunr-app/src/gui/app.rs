@@ -1486,19 +1486,38 @@ impl PrunrApp {
             ctx.request_repaint_after(w);
         }
 
-        // Apply any completed previews to their items. Invalidate the result
-        // texture so the canvas rebuilds it on the next render pass.
+        // Apply any completed previews. Critical: do NOT null `result_texture`
+        // here — the old texture must stay visible until the newly-built one
+        // lands via drain_background_channels. Clearing it causes the canvas
+        // to flash black for a frame (no texture to draw → BG_PRIMARY shows).
+        //
+        // Instead we spawn a tex prep for the new RGBA directly and let
+        // drain_background_channels swap it in atomically when ready.
         let results = self.live_preview.drain_results();
         if !results.is_empty() {
+            let tex_prep_tx = self.bg_io.tex_prep_tx.clone();
             for r in results {
-                if let Some(item) = self.batch_items.iter_mut().find(|b| b.id == r.item_id) {
-                    item.result_rgba = Some(std::sync::Arc::new(r.rgba));
-                    item.result_texture = None;
-                    item.result_tex_pending = false;
-                }
+                let Some(item) = self.batch_items.iter_mut().find(|b| b.id == r.item_id) else {
+                    continue;
+                };
+                let new_rgba = std::sync::Arc::new(r.rgba);
+                item.result_rgba = Some(new_rgba.clone());
+                // Mark pending so sync_selected_batch_textures doesn't also
+                // spawn its own prep on this same frame.
+                item.result_tex_pending = true;
+                let item_id = item.id;
+                let switch = self.result_switch_id;
+                let bg = item.settings.bg_rgb();
+                Self::spawn_tex_prep(
+                    new_rgba,
+                    item_id,
+                    format!("result_{item_id}_{switch}"),
+                    true,
+                    bg,
+                    tex_prep_tx.clone(),
+                    ctx.clone(),
+                );
             }
-            self.result_texture = None;
-            self.pending_batch_sync = true;
             ctx.request_repaint();
         }
     }
@@ -2265,9 +2284,12 @@ impl eframe::App for PrunrApp {
             false
         } else if self.settings.auto_hide_adjustments {
             let screen_rect = ui.ctx().content_rect();
+            // Peek zone covers the main toolbar + ~half the adjustments toolbar
+            // height. Generous enough to catch the user heading up toward the
+            // chips, tight enough not to trigger on ordinary canvas work.
             let peek_zone = egui::Rect::from_min_size(
                 screen_rect.min,
-                egui::vec2(screen_rect.width(), theme::TOOLBAR_HEIGHT + 80.0),
+                egui::vec2(screen_rect.width(), theme::TOOLBAR_HEIGHT + 32.0),
             );
             let hover_in_peek = ui
                 .ctx()
