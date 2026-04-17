@@ -32,6 +32,20 @@ pub enum SubprocessCommand {
         /// For chain mode: path to temp file with previous result RGBA + dimensions.
         chain_input: Option<ChainInput>,
     },
+    /// Tier 2: Re-run postprocess from a cached tensor (skip inference).
+    /// The parent sends the raw tensor + original image via temp files.
+    RePostProcess {
+        item_id: u64,
+        /// Path to temp file with raw f32 tensor data.
+        tensor_path: std::path::PathBuf,
+        tensor_height: u32,
+        tensor_width: u32,
+        model: ModelKind,
+        /// Path to temp file with original image bytes.
+        original_image_path: std::path::PathBuf,
+        /// Updated mask settings for re-postprocessing.
+        mask: MaskSettings,
+    },
     /// Cancel: stop after current image, send Finished.
     Cancel,
     /// Shut down gracefully.
@@ -67,6 +81,11 @@ pub enum SubprocessEvent {
         width: u32,
         height: u32,
         active_provider: String,
+        /// Path to cached raw tensor (Tier 1 output). Parent stores for future Tier 2 runs.
+        /// Only present for full pipeline runs, not RePostProcess.
+        tensor_cache_path: Option<std::path::PathBuf>,
+        tensor_cache_height: Option<u32>,
+        tensor_cache_width: Option<u32>,
     },
     /// Image processing failed (non-fatal).
     ImageError {
