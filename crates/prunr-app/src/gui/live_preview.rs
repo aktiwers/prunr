@@ -27,9 +27,10 @@ use prunr_core::{ModelKind, postprocess_from_flat, finalize_edges};
 use crate::gui::item_settings::ItemSettings;
 use crate::gui::worker::CompressedTensor;
 
-/// Debounce before a preview actually dispatches. Gives fast slider drags
-/// a chance to settle so we don't fire 60 previews/second during a drag.
-pub const DEBOUNCE: Duration = Duration::from_millis(300);
+/// Debounce before a preview actually dispatches. Short enough to feel
+/// responsive on slider release; long enough to coalesce fast drag events
+/// into a single rerun.
+pub const DEBOUNCE: Duration = Duration::from_millis(150);
 
 /// What kind of Tier 2 rerun a tweak needs. Two kinds because they touch
 /// different cached tensors (segmentation vs DexiNed) and different pipeline
@@ -266,8 +267,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn debounce_is_300ms() {
-        assert_eq!(DEBOUNCE, Duration::from_millis(300));
+    fn debounce_is_reasonable() {
+        // Balance: short enough to feel responsive, long enough to coalesce
+        // mid-drag change events into one dispatch.
+        assert!(DEBOUNCE >= Duration::from_millis(100));
+        assert!(DEBOUNCE <= Duration::from_millis(300));
     }
 
     #[test]

@@ -13,7 +13,6 @@ use egui::{RichText, Ui};
 use egui_material_icons::icons::*;
 
 use crate::gui::item_settings::ItemSettings;
-use crate::gui::settings::Settings;
 use crate::gui::theme;
 use crate::gui::views::chip;
 use prunr_core::LineMode;
@@ -34,27 +33,28 @@ impl ToolbarChange {
     }
 }
 
-/// Default values used by the Reset button on each chip. Wraps the full
-/// `ItemSettings` template from `AppSettings.item_defaults` so per-chip reset
-/// and "Reset all" both honor the user's saved defaults identically.
+/// Factory default values for per-chip reset + "Reset all" kebab action.
+///
+/// Intentionally does NOT depend on `AppSettings.item_defaults` — that field is
+/// the template for NEW imports (possibly populated from v1 migration with a
+/// user's old preferences). Reset buttons should mean "go back to known-good
+/// factory defaults," which is a separate concern. Users who want to restore
+/// their preferred template should use the Preset dropdown.
 struct Defaults {
     template: ItemSettings,
-    /// Scalar values used for the "toggle enabled, pick this value" chips.
-    /// We pre-compute the pick-this-value for Option chips so the chip
-    /// widgets don't have to know about the template shape.
+    /// Scalar values used as "pick this when user toggles enabled" for Option chips.
     threshold_value: f32,
     bg_value: [u8; 4],
     solid_line_color_value: [u8; 3],
 }
 
 impl Defaults {
-    fn from(settings: &Settings) -> Self {
-        let t = settings.item_defaults;
+    fn new() -> Self {
         Self {
-            template: t,
-            threshold_value: t.threshold.unwrap_or(0.5),
-            bg_value: t.bg.unwrap_or([255, 255, 255, 255]),
-            solid_line_color_value: t.solid_line_color.unwrap_or([0, 0, 0]),
+            template: ItemSettings::default(),
+            threshold_value: 0.5,
+            bg_value: [255, 255, 255, 255],
+            solid_line_color_value: [0, 0, 0],
         }
     }
 
@@ -67,10 +67,9 @@ impl Defaults {
 pub fn render(
     ui: &mut Ui,
     item_settings: &mut ItemSettings,
-    app_settings: &Settings,
 ) -> ToolbarChange {
     let mut change = ToolbarChange::default();
-    let defaults = Defaults::from(app_settings);
+    let defaults = Defaults::new();
 
     ui.spacing_mut().item_spacing.x = theme::SPACE_SM;
 
