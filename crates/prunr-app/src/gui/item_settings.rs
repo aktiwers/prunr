@@ -96,6 +96,8 @@ impl ItemSettings {
                 model,
                 uses_segmentation,
                 uses_edge_detection,
+            },
+            edge: prunr_core::EdgeRecipe {
                 line_strength_bits: self.line_strength.to_bits(),
                 solid_line_color: self.solid_line_color,
             },
