@@ -59,6 +59,12 @@ impl Default for ItemSettings {
 }
 
 impl ItemSettings {
+    /// bg color as RGB triple (alpha stripped) for pipeline/compositing.
+    /// `None` when bg is disabled.
+    pub fn bg_rgb(&self) -> Option<[u8; 3]> {
+        self.bg.map(|[r, g, b, _]| [r, g, b])
+    }
+
     /// Convert mask-related fields into the core `MaskSettings`.
     pub fn mask_settings(&self) -> MaskSettings {
         MaskSettings {

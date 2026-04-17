@@ -166,10 +166,19 @@ pub(crate) struct BatchItem {
     pub redo_stack: VecDeque<HistoryEntry>,
     pub status: BatchStatus,
     pub selected: bool,
+    /// Per-image processing settings. Edited via the adjustments toolbar (Phase 2).
+    /// In Phase 1 the settings modal edits `AppSettings.item_defaults` and close_settings
+    /// propagates the template to all items to preserve v1 UX until the toolbar lands.
+    pub settings: super::item_settings::ItemSettings,
+    /// Settings snapshot taken when checkbox was checked; uncheck restores it.
+    /// `None` once committed via Process or when the item was never checked.
+    pub pre_check_settings: Option<super::item_settings::ItemSettings>,
     /// The recipe that produced the current result_rgba. None if never processed.
     pub applied_recipe: Option<prunr_core::ProcessingRecipe>,
     /// Compressed cached tensor from Tier 1 inference (for Tier 2 mask reruns).
     pub cached_tensor: Option<super::worker::CompressedTensor>,
+    /// Compressed cached DexiNed output (for Tier 2 edge reruns on line_strength tweaks).
+    pub cached_edge_tensor: Option<super::worker::CompressedTensor>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -232,7 +241,7 @@ pub struct PrunrApp {
     /// Timestamp when settings was last opened (for click-outside debounce)
     pub(crate) settings_opened_at: f64,
     /// Snapshot of bg settings when settings panel opened (for change detection on close)
-    pub(crate) bg_settings_snapshot: (bool, [u8; 4]),
+    pub(crate) bg_settings_snapshot: Option<[u8; 4]>,
     pub(crate) settings: Settings,
 
     // Canvas fade-in: incremented on every image switch
@@ -367,7 +376,7 @@ impl PrunrApp {
             next_batch_id: 0,
             show_settings: false,
             settings_opened_at: 0.0,
-            bg_settings_snapshot: (false, [0; 4]),
+            bg_settings_snapshot: None,
             settings,
             canvas_switch_id: 0,
             result_switch_id: 0,
@@ -420,7 +429,7 @@ impl PrunrApp {
             next_batch_id: 0,
             show_settings: false,
             settings_opened_at: 0.0,
-            bg_settings_snapshot: (false, [0; 4]),
+            bg_settings_snapshot: None,
             settings,
             canvas_switch_id: 0,
             result_switch_id: 0,
@@ -477,6 +486,7 @@ impl PrunrApp {
         let id = self.next_batch_id;
         self.next_batch_id += 1;
         let do_decode = matches!(&source, ImageSource::Bytes(_)); // decode eagerly for in-memory
+        let new_settings = self.settings.item_defaults_for_new_item();
         self.batch_items.push(BatchItem {
             id,
             filename: name.clone(),
@@ -495,8 +505,11 @@ impl PrunrApp {
             redo_stack: VecDeque::new(),
             status: BatchStatus::Pending,
             selected: false,
+            settings: new_settings,
+            pre_check_settings: None,
             applied_recipe: None,
             cached_tensor: None,
+            cached_edge_tensor: None,
         });
         self.selected_batch_index = self.batch_items.len() - 1;
         if do_decode {
@@ -612,9 +625,17 @@ impl PrunrApp {
     pub(crate) fn close_settings(&mut self, ctx: &egui::Context) {
         self.show_settings = false;
         self.settings.save();
-        // Only invalidate result textures if bg_color settings changed
-        let bg_changed = self.settings.apply_bg_color != self.bg_settings_snapshot.0
-            || self.settings.bg_color != self.bg_settings_snapshot.1;
+
+        // Phase 1: broadcast the edited item_defaults template to ALL existing
+        // batch items to preserve v1 UX (modal changes apply to everything).
+        // Phase 2's toolbar replaces this with per-item edits + explicit broadcast
+        // via checkbox/Process.
+        let new_template = self.settings.item_defaults;
+        let bg_changed = new_template.bg != self.bg_settings_snapshot;
+        for item in &mut self.batch_items {
+            item.settings = new_template;
+        }
+
         if bg_changed {
             self.result_switch_id += 1;
             for item in &mut self.batch_items {
@@ -736,7 +757,7 @@ impl PrunrApp {
         use prunr_core::RequiredTier;
 
         let chain = self.settings.chain_mode;
-        let current_recipe = self.settings.current_recipe();
+        let model: prunr_core::ModelKind = self.settings.model.into();
 
         // Identify candidate items (not already processing)
         let candidate_ids: HashSet<u64> = self.batch_items.iter()
@@ -766,6 +787,7 @@ impl PrunrApp {
                 continue;
             }
 
+            let current_recipe = item.settings.current_recipe(model, chain);
             match prunr_core::resolve_tier(old_recipe, &current_recipe) {
                 RequiredTier::Skip | RequiredTier::CompositeOnly => {
                     // CompositeOnly (bg_color) is handled at display/export time,
@@ -845,12 +867,12 @@ impl PrunrApp {
         }
 
         // ── Build Tier 2 work items ──────────────────────────────────
-        let mask = self.settings.mask_settings();
         let mut tier2_work: Vec<super::worker::Tier2WorkItem> = Vec::new();
         for item in &mut self.batch_items {
             if !tier2_ids.contains(&item.id) { continue; }
             if let Some(ref ct) = item.cached_tensor {
                 let tensor_data = ct.decompress();
+                let mask = item.settings.mask_settings();
                 match (tensor_data, item.source.load_bytes()) {
                     (Some(data), Ok(bytes)) => {
                         tier2_work.push(super::worker::Tier2WorkItem {
@@ -860,7 +882,7 @@ impl PrunrApp {
                             tensor_width: ct.width,
                             model: ct.model,
                             original_bytes: bytes,
-                            mask: mask.clone(),
+                            mask,
                         });
                         item.status = BatchStatus::Processing;
                     }
@@ -950,7 +972,13 @@ impl PrunrApp {
     ) {
         self.cancel_flag.store(false, Ordering::Release);
         self.state = AppState::Processing;
-        self.dispatch_recipe = Some(self.settings.current_recipe());
+
+        // Phase 1: all items share the same settings (broadcast from item_defaults
+        // on modal close), so we snapshot the template for dispatch_recipe. Phase 3
+        // will per-item this when selection-scope apply lands.
+        let template = self.settings.item_defaults;
+        self.dispatch_recipe = Some(template.current_recipe(model, self.settings.chain_mode));
+
         self.status.pct = 0.0;
         self.status.stage = "Starting".to_string();
         let _ = self.worker_tx.send(WorkerMessage::BatchProcess {
@@ -959,11 +987,11 @@ impl PrunrApp {
             config: super::worker::ProcessingConfig {
                 model,
                 jobs,
-                mask: self.settings.mask_settings(),
+                mask: template.mask_settings(),
                 force_cpu: self.settings.force_cpu,
-                line_mode: self.settings.line_mode,
-                line_strength: self.settings.line_strength,
-                solid_line_color: self.settings.solid_line_color_rgb(),
+                line_mode: template.line_mode,
+                line_strength: template.line_strength,
+                solid_line_color: template.solid_line_color,
             },
             cancel: self.cancel_flag.clone(),
             additional_items_rx,
@@ -981,25 +1009,17 @@ impl PrunrApp {
     }
 
     /// Apply background color to a result image for export/save.
-    /// Returns a new image if bg_color is enabled, otherwise clones the Arc.
-    pub(crate) fn apply_bg_for_export(&self, rgba: &Arc<image::RgbaImage>) -> Arc<image::RgbaImage> {
-        if self.settings.apply_bg_color {
+    /// Returns a new image when `bg` is `Some`; otherwise clones the Arc.
+    pub(crate) fn apply_bg_for_export(
+        rgba: &Arc<image::RgbaImage>,
+        bg: Option<[u8; 3]>,
+    ) -> Arc<image::RgbaImage> {
+        if let Some(c) = bg {
             let mut copy = (**rgba).clone();
-            let c = self.settings.bg_color;
-            prunr_core::apply_background_color(&mut copy, [c[0], c[1], c[2]]);
+            prunr_core::apply_background_color(&mut copy, c);
             Arc::new(copy)
         } else {
             rgba.clone()
-        }
-    }
-
-    /// bg_color to apply during display-texture compositing, or None if disabled.
-    /// Lets the tex-prep worker clone + blend off the UI thread.
-    fn bg_for_display(&self) -> Option<[u8; 3]> {
-        if self.settings.apply_bg_color {
-            Some([self.settings.bg_color[0], self.settings.bg_color[1], self.settings.bg_color[2]])
-        } else {
-            None
         }
     }
 
@@ -1023,7 +1043,8 @@ impl PrunrApp {
                     .set_title("Save PNG")
                     .save_file()
                 {
-                    let rgba = self.apply_bg_for_export(rgba);
+                    let bg = self.selected_item().and_then(|i| i.settings.bg_rgb());
+                    let rgba = Self::apply_bg_for_export(rgba, bg);
                     let tx = self.bg_io.save_done_tx.clone();
                     self.toasts.info("Saving...");
                     std::thread::spawn(move || {
@@ -1049,7 +1070,7 @@ impl PrunrApp {
             let items: Vec<(String, Arc<image::RgbaImage>)> = selected.iter()
                 .filter_map(|item| {
                     let rgba = item.result_rgba.as_ref()?;
-                    Some((item.filename.clone(), self.apply_bg_for_export(rgba)))
+                    Some((item.filename.clone(), Self::apply_bg_for_export(rgba, item.settings.bg_rgb())))
                 })
                 .collect();
             let count = items.len();
@@ -1108,12 +1129,10 @@ impl PrunrApp {
     /// (winit + drag crate incompatibility; see Cargo.toml comment).
     #[allow(unused_variables)]
     pub fn initiate_drag_out(&mut self, ids: Vec<u64>, frame: &eframe::Frame) {
-        let line_mode = self.settings.line_mode;
-
         let mut paths: Vec<PathBuf> = Vec::with_capacity(ids.len());
         for id in &ids {
             if let Some(item) = self.batch_items.iter().find(|b| b.id == *id) {
-                match super::drag_export::prepare(item, line_mode) {
+                match super::drag_export::prepare(item) {
                     Ok(path) => paths.push(path),
                     Err(e) => {
                         self.toasts.error(format!("Drag export failed: {e}"));
@@ -1191,6 +1210,8 @@ impl PrunrApp {
             ),
         };
 
+        // Compute bg before borrowing clipboard mutably (avoids aliasing self).
+        let bg = self.selected_item().and_then(|i| i.settings.bg_rgb());
         let Some(clipboard) = self.clipboard.as_mut() else {
             self.set_temporary_status("Could not copy to clipboard. Try saving instead.");
             return;
@@ -1198,15 +1219,8 @@ impl PrunrApp {
         let Some(rgba) = rgba_to_copy else {
             return;
         };
-        // Apply bg_color for clipboard (matches display)
-        let rgba = if self.settings.apply_bg_color {
-            let mut copy = (*rgba).clone();
-            let c = self.settings.bg_color;
-            prunr_core::apply_background_color(&mut copy, [c[0], c[1], c[2]]);
-            Arc::new(copy)
-        } else {
-            rgba
-        };
+        // Apply bg_color for clipboard (matches display).
+        let rgba = Self::apply_bg_for_export(&rgba, bg);
 
         let width = rgba.width() as usize;
         let height = rgba.height() as usize;
@@ -1270,6 +1284,7 @@ impl PrunrApp {
         let id = self.next_batch_id;
         self.next_batch_id += 1;
 
+        let new_settings = self.settings.item_defaults_for_new_item();
         self.batch_items.push(BatchItem {
             id,
             filename,
@@ -1288,8 +1303,11 @@ impl PrunrApp {
             redo_stack: VecDeque::new(),
             status: BatchStatus::Pending,
             selected: false,
+            settings: new_settings,
+            pre_check_settings: None,
             applied_recipe: None,
             cached_tensor: None,
+            cached_edge_tensor: None,
         });
 
         if self.state == AppState::Empty {
@@ -1507,10 +1525,11 @@ impl PrunrApp {
         {
             if let Some(rgba) = self.batch_items[idx].result_rgba.clone() {
                 let switch = self.result_switch_id;
+                let bg = self.batch_items[idx].settings.bg_rgb();
                 self.batch_items[idx].result_tex_pending = true;
                 Self::spawn_tex_prep(
                     rgba, item_id, format!("result_{item_id}_{switch}"), true,
-                    self.bg_for_display(), self.bg_io.tex_prep_tx.clone(), ctx.clone(),
+                    bg, self.bg_io.tex_prep_tx.clone(), ctx.clone(),
                 );
             }
         }
@@ -1621,8 +1640,16 @@ impl PrunrApp {
                 WorkerResult::BatchItemDone { item_id, result, tensor_cache } => {
                     let is_selected = self.selected_item()
                         .map_or(false, |b| b.id == item_id);
-                    let recipe_snapshot = self.dispatch_recipe.clone()
-                        .unwrap_or_else(|| self.settings.current_recipe());
+                    // Fall back to the target item's own settings if dispatch_recipe
+                    // wasn't snapshot (shouldn't happen in normal flow; defensive).
+                    let recipe_snapshot = self.dispatch_recipe.clone().unwrap_or_else(|| {
+                        let model: prunr_core::ModelKind = self.settings.model.into();
+                        let chain = self.settings.chain_mode;
+                        self.batch_items.iter()
+                            .find(|b| b.id == item_id)
+                            .map(|b| b.settings.current_recipe(model, chain))
+                            .unwrap_or_else(|| self.settings.item_defaults.current_recipe(model, chain))
+                    });
                     if let Some(item) = self.batch_items.iter_mut().find(|b| b.id == item_id) {
                         // Skip results for items that were already cancelled (reset to Pending)
                         if item.status != BatchStatus::Processing {
@@ -1936,7 +1963,7 @@ impl PrunrApp {
             } else {
                 self.show_settings = true;
                 self.settings_opened_at = ctx.input(|i| i.time);
-                self.bg_settings_snapshot = (self.settings.apply_bg_color, self.settings.bg_color);
+                self.bg_settings_snapshot = self.settings.item_defaults.bg;
             }
         }
         if nav_prev && !self.batch_items.is_empty() {

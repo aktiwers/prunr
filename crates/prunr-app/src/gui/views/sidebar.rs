@@ -400,13 +400,14 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                         .and_then(|s| s.to_str())
                         .unwrap_or("image");
                     let default_name = format!("{stem}-nobg.png");
+                    let bg = app.batch_items[idx].settings.bg_rgb();
                     if let Some(path) = app.save_dialog()
                         .add_filter("PNG Image", &["png"])
                         .set_file_name(&default_name)
                         .set_title("Save PNG")
                         .save_file()
                     {
-                        let rgba = app.apply_bg_for_export(rgba);
+                        let rgba = crate::gui::app::PrunrApp::apply_bg_for_export(rgba, bg);
                         let tx = app.bg_io.save_done_tx.clone();
                         app.toasts.info("Saving...");
                         std::thread::spawn(move || {
