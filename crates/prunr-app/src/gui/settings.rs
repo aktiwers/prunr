@@ -4,10 +4,15 @@ use prunr_core::ModelKind;
 
 use super::item_settings::ItemSettings;
 
+/// Name of the built-in, non-deletable, non-overwritable preset representing
+/// factory defaults. Always present in the preset dropdown; the synthetic
+/// values are `ItemSettings::default()` regardless of what's in the map.
+pub const PRUNR_PRESET: &str = "Prunr";
+
 /// Global app config. Per-image knobs (gamma, threshold, line mode, bg, ...)
-/// live on `BatchItem.settings: ItemSettings` instead. The settings modal
-/// edits `item_defaults` (the template for new images); the adjustments
-/// toolbar edits the current image's `ItemSettings` directly.
+/// live on `BatchItem.settings: ItemSettings` instead. New images inherit
+/// whichever preset `default_preset` points at; the adjustments toolbar
+/// edits the current image's `ItemSettings` directly.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Settings {
     pub model: SettingsModel,
@@ -29,14 +34,18 @@ pub struct Settings {
     /// User-configurable keyboard shortcuts (Phase 5 wires up the UI).
     #[serde(default)]
     pub shortcuts: HashMap<String, String>,
-    /// Named presets: `HashMap<name, snapshot>`.
+    /// Named presets. Does NOT include "Prunr" — that's synthetic (always
+    /// `ItemSettings::default()`, served via `preset_values()`).
     #[serde(default)]
     pub presets: HashMap<String, ItemSettings>,
-    /// Preset to apply to new items on import. `None` uses `item_defaults`.
-    #[serde(default)]
-    pub default_preset: Option<String>,
-    /// Template applied to new items when `default_preset` is None.
-    /// v1 settings migrate their per-image fields into this on first load.
+    /// Which preset new imports inherit, and what Reset All Knobs restores.
+    /// Always set; defaults to "Prunr". If the named preset goes missing
+    /// (user deleted it out of serde state), resolution falls back to "Prunr".
+    #[serde(default = "default_preset_name")]
+    pub default_preset: String,
+    /// Legacy field kept for serde compatibility with Phase 1 builds. No
+    /// longer influences any behavior; presets are the single source of
+    /// truth for "what new images should start with."
     #[serde(default)]
     pub item_defaults: ItemSettings,
 
@@ -48,6 +57,7 @@ pub struct Settings {
 }
 
 fn default_live_preview() -> bool { true }
+fn default_preset_name() -> String { PRUNR_PRESET.to_string() }
 
 impl Settings {
     /// Config file path: ~/.config/prunr/settings.json (Linux),
@@ -134,20 +144,21 @@ impl Settings {
         base.min(safe)
     }
 
-    /// ItemSettings template for new batch items. Resolves `default_preset`
-    /// against the preset map; if no preset is set (or the named one is
-    /// missing), returns factory defaults.
-    ///
-    /// The `item_defaults` field is kept for serde compatibility with earlier
-    /// Phase 1 builds, but no longer influences new imports — presets are the
-    /// single source of truth for "what new images should start with."
-    pub fn item_defaults_for_new_item(&self) -> ItemSettings {
-        if let Some(ref name) = self.default_preset {
-            if let Some(preset) = self.presets.get(name) {
-                return *preset;
-            }
+    /// Resolve a preset name to its values. "Prunr" is always
+    /// `ItemSettings::default()`; user presets come from the map. A missing
+    /// user preset falls back to factory defaults.
+    pub fn preset_values(&self, name: &str) -> ItemSettings {
+        if name == PRUNR_PRESET {
+            return ItemSettings::default();
         }
-        ItemSettings::default()
+        self.presets.get(name).copied().unwrap_or_default()
+    }
+
+    /// ItemSettings template for new batch items. Resolves `default_preset`
+    /// against `preset_values()`. `default_preset` is always set (defaults to
+    /// "Prunr"), so new imports never get arbitrary `item_defaults` leakage.
+    pub fn item_defaults_for_new_item(&self) -> ItemSettings {
+        self.preset_values(&self.default_preset)
     }
 }
 
@@ -245,7 +256,7 @@ impl Default for Settings {
             auto_hide_adjustments: false,
             shortcuts: HashMap::new(),
             presets: HashMap::new(),
-            default_preset: None,
+            default_preset: default_preset_name(),
             item_defaults: ItemSettings::default(),
             force_cpu: false,
             active_backend: "CPU".to_string(),
@@ -310,39 +321,45 @@ mod tests {
     }
 
     #[test]
-    fn item_defaults_for_new_item_uses_preset() {
-        let mut s = Settings::default();
-        let mut preset_values = ItemSettings::default();
-        preset_values.gamma = 2.0;
-        s.presets.insert("Portrait".to_string(), preset_values);
-        s.default_preset = Some("Portrait".to_string());
-
-        let new_item = s.item_defaults_for_new_item();
-        assert_eq!(new_item.gamma, 2.0);
-    }
-
-    #[test]
-    fn item_defaults_for_new_item_is_factory_when_no_preset() {
-        // No default_preset, no manually-edited item_defaults → factory defaults.
-        // The v1-migrated legacy values live in the "Previous defaults" preset
-        // (opt-in via the toolbar), not inherited by new imports.
+    fn default_preset_is_prunr() {
         let s = Settings::default();
-        let new_item = s.item_defaults_for_new_item();
-        assert_eq!(new_item, ItemSettings::default());
-        assert_eq!(new_item.line_mode, LineMode::Off);
-        assert_eq!(new_item.gamma, 1.0);
+        assert_eq!(s.default_preset, PRUNR_PRESET);
     }
 
     #[test]
-    fn item_defaults_for_new_item_ignores_item_defaults_field() {
-        // `item_defaults` is a legacy field kept for serde compat; it must not
-        // leak into new imports. Only `default_preset` can override factory
-        // defaults now.
+    fn preset_values_prunr_is_factory() {
+        let s = Settings::default();
+        assert_eq!(s.preset_values(PRUNR_PRESET), ItemSettings::default());
+    }
+
+    #[test]
+    fn preset_values_returns_user_preset() {
         let mut s = Settings::default();
-        s.item_defaults.gamma = 1.3;
-        s.item_defaults.line_mode = LineMode::EdgesOnly;
-        let new_item = s.item_defaults_for_new_item();
-        assert_eq!(new_item, ItemSettings::default());
-        assert_eq!(new_item.line_mode, LineMode::Off);
+        let mut portrait = ItemSettings::default();
+        portrait.gamma = 2.0;
+        s.presets.insert("Portrait".to_string(), portrait);
+        assert_eq!(s.preset_values("Portrait").gamma, 2.0);
+    }
+
+    #[test]
+    fn preset_values_missing_name_falls_back_to_factory() {
+        let s = Settings::default();
+        assert_eq!(s.preset_values("NonExistent"), ItemSettings::default());
+    }
+
+    #[test]
+    fn item_defaults_for_new_item_uses_default_preset() {
+        let mut s = Settings::default();
+        let mut portrait = ItemSettings::default();
+        portrait.gamma = 2.0;
+        s.presets.insert("Portrait".to_string(), portrait);
+        s.default_preset = "Portrait".to_string();
+        assert_eq!(s.item_defaults_for_new_item().gamma, 2.0);
+    }
+
+    #[test]
+    fn item_defaults_for_new_item_factory_when_prunr_default() {
+        let s = Settings::default();
+        assert_eq!(s.item_defaults_for_new_item(), ItemSettings::default());
     }
 }

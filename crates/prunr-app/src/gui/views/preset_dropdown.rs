@@ -16,33 +16,27 @@ use egui::{RichText, Ui};
 use egui_material_icons::icons::*;
 
 use crate::gui::item_settings::ItemSettings;
-use crate::gui::settings::Settings;
+use crate::gui::settings::{PRUNR_PRESET, Settings};
 use crate::gui::theme;
 
 const BTN_HEIGHT: f32 = 32.0;
 const POPOVER_WIDTH: f32 = 260.0;
 
-/// Display name for factory defaults (no saved preset matches current settings).
-const FACTORY_NAME: &str = "Prunr";
-
 /// Label for the dropdown button — reflects the CURRENT item's effective preset:
-///   - Matches factory defaults → "Prunr"
+///   - Matches "Prunr" (factory defaults) → "Prunr"
 ///   - Matches a saved preset exactly → that preset's name
-///   - Otherwise → "Custom"
-///
-/// Tracks the current image's state, not `default_preset` (the global template
-/// pointer for new imports). Reset-all-knobs flips settings back to factory
-/// and the label follows to "Prunr" automatically.
+///   - Otherwise → "Custom" (user has diverged from the last-applied preset)
 fn button_label(settings: &Settings, current: &ItemSettings) -> String {
     let name = active_preset_name(settings, current);
     format!("{}  Preset: {name}", ICON_BOOKMARK.codepoint)
 }
 
-/// Determine which preset (or "Prunr"/factory, or "Custom") matches the
-/// current item's settings. Prefers exact equality; O(N) scan of presets.
+/// Determine which preset matches the current item's settings. Checks Prunr
+/// first (factory defaults), then the saved preset map. Returns "Custom" on
+/// no match — the signal that the user has diverged from any saved state.
 fn active_preset_name<'a>(settings: &'a Settings, current: &ItemSettings) -> &'a str {
     if *current == ItemSettings::default() {
-        return FACTORY_NAME;
+        return PRUNR_PRESET;
     }
     for (name, values) in &settings.presets {
         if *values == *current {
@@ -52,10 +46,22 @@ fn active_preset_name<'a>(settings: &'a Settings, current: &ItemSettings) -> &'a
     "Custom"
 }
 
-/// Sort preset names case-insensitively so the list is stable.
+/// Sort USER preset names case-insensitively. The synthetic "Prunr" preset
+/// is NOT included — callers prepend it manually since it always appears
+/// first in the dropdown regardless of alphabetical order.
 pub(super) fn sorted_preset_names(settings: &Settings) -> Vec<String> {
     let mut names: Vec<String> = settings.presets.keys().cloned().collect();
     names.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
+    names
+}
+
+/// All preset names in display order: Prunr first, then user presets
+/// alphabetically. Used by the dropdown list and anywhere we need the
+/// complete set of valid `default_preset` values.
+pub(super) fn all_preset_names(settings: &Settings) -> Vec<String> {
+    let mut names = Vec::with_capacity(settings.presets.len() + 1);
+    names.push(PRUNR_PRESET.to_string());
+    names.extend(sorted_preset_names(settings));
     names
 }
 
@@ -95,81 +101,74 @@ pub fn render(
             ui.label(RichText::new("Presets").strong().color(theme::TEXT_PRIMARY));
             ui.add_space(theme::SPACE_XS);
 
-            let names = sorted_preset_names(settings);
-            if names.is_empty() {
-                ui.label(
-                    RichText::new("No presets saved yet.")
-                        .color(theme::TEXT_HINT)
-                        .size(theme::FONT_SIZE_MONO),
-                );
-            } else {
-                for name in &names {
-                    let is_default = settings.default_preset.as_deref() == Some(name.as_str());
-                    ui.horizontal(|ui| {
-                        let label_text = RichText::new(name)
-                            .color(theme::TEXT_PRIMARY)
-                            .size(theme::FONT_SIZE_BODY);
-                        if ui.selectable_label(false, label_text)
-                            .on_hover_text("Click to apply these settings to the current image")
-                            .clicked()
-                        {
-                            if let Some(values) = settings.presets.get(name) {
-                                *current_item = *values;
-                                applied = true;
-                            }
-                        }
-                        ui.with_layout(
-                            egui::Layout::right_to_left(egui::Align::Center),
-                            |ui| {
+            // List in display order: Prunr first, then user presets. Prunr is
+            // a synthetic entry — applies ItemSettings::default() and cannot be
+            // deleted or overwritten.
+            for name in all_preset_names(settings) {
+                let is_prunr = name == PRUNR_PRESET;
+                let is_default = settings.default_preset == name;
+                ui.horizontal(|ui| {
+                    let label_text = RichText::new(&name)
+                        .color(theme::TEXT_PRIMARY)
+                        .size(theme::FONT_SIZE_BODY);
+                    if ui.selectable_label(false, label_text)
+                        .on_hover_text("Click to apply these settings to the current image")
+                        .clicked()
+                    {
+                        *current_item = settings.preset_values(&name);
+                        applied = true;
+                    }
+                    ui.with_layout(
+                        egui::Layout::right_to_left(egui::Align::Center),
+                        |ui| {
+                            // Delete — hidden for Prunr (non-deletable).
+                            if !is_prunr {
                                 let delete_btn = ui.small_button(
                                     RichText::new(ICON_DELETE.codepoint)
                                         .size(theme::FONT_SIZE_MONO)
                                         .color(theme::DESTRUCTIVE),
                                 );
                                 if delete_btn.on_hover_text("Delete preset").clicked() {
-                                    settings.presets.remove(name);
+                                    settings.presets.remove(&name);
+                                    // If the deleted preset was the app's default,
+                                    // fall back to Prunr so default_preset stays valid.
                                     if is_default {
-                                        settings.default_preset = None;
+                                        settings.default_preset = PRUNR_PRESET.to_string();
                                     }
                                 }
-                                let star_icon = if is_default {
-                                    ICON_STAR.codepoint
-                                } else {
-                                    ICON_STAR_OUTLINE.codepoint
-                                };
-                                let star_color = if is_default {
-                                    theme::ACCENT
-                                } else {
-                                    theme::TEXT_SECONDARY
-                                };
-                                let star_tooltip = if is_default {
-                                    "Default for new images — click to clear"
-                                } else {
-                                    "Set as default for new images"
-                                };
-                                let star_btn = ui.small_button(
-                                    RichText::new(star_icon)
-                                        .size(theme::FONT_SIZE_MONO)
-                                        .color(star_color),
-                                );
-                                if star_btn.on_hover_text(star_tooltip).clicked() {
-                                    if is_default {
-                                        settings.default_preset = None;
-                                    } else {
-                                        settings.default_preset = Some(name.clone());
-                                    }
-                                }
-                            },
-                        );
-                    });
-                }
+                            }
+                            let star_icon = if is_default {
+                                ICON_STAR.codepoint
+                            } else {
+                                ICON_STAR_OUTLINE.codepoint
+                            };
+                            let star_color = if is_default {
+                                theme::ACCENT
+                            } else {
+                                theme::TEXT_SECONDARY
+                            };
+                            let star_tooltip = if is_default {
+                                "Default for new images (click another preset's star to switch)"
+                            } else {
+                                "Set as default for new images"
+                            };
+                            let star_btn = ui.small_button(
+                                RichText::new(star_icon)
+                                    .size(theme::FONT_SIZE_MONO)
+                                    .color(star_color),
+                            );
+                            if star_btn.on_hover_text(star_tooltip).clicked() && !is_default {
+                                settings.default_preset = name.clone();
+                            }
+                        },
+                    );
+                });
             }
 
             ui.add_space(theme::SPACE_SM);
             ui.separator();
             ui.add_space(theme::SPACE_SM);
 
-            // Save current as… → opens dialog
             let save_btn = egui::Button::new(
                 RichText::new(format!(
                     "{}  Save current as…",
@@ -186,18 +185,12 @@ pub fn render(
                 });
             }
 
-            // Set-as-default toggle for currently-applied preset (if any)
-            if let Some(ref name) = settings.default_preset.clone() {
-                ui.add_space(theme::SPACE_XS);
-                ui.label(
-                    RichText::new(format!("Default for new images: {name}"))
-                        .color(theme::TEXT_HINT)
-                        .size(theme::FONT_SIZE_MONO),
-                );
-                if ui.small_button("Clear default").clicked() {
-                    settings.default_preset = None;
-                }
-            }
+            ui.add_space(theme::SPACE_XS);
+            ui.label(
+                RichText::new(format!("Default for new images: {}", settings.default_preset))
+                    .color(theme::TEXT_HINT)
+                    .size(theme::FONT_SIZE_MONO),
+            );
         },
     );
 
@@ -227,9 +220,15 @@ pub fn render(
                 if text_resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                     commit = true;
                 }
-                // Warn if the typed name would overwrite an existing preset.
                 let trimmed = name_buf.trim();
-                if !trimmed.is_empty() && existing_names.iter().any(|n| n == trimmed) {
+                let is_prunr_name = trimmed.eq_ignore_ascii_case(PRUNR_PRESET);
+                if is_prunr_name {
+                    ui.label(
+                        RichText::new("\"Prunr\" is reserved — pick another name.")
+                            .color(theme::DESTRUCTIVE)
+                            .size(theme::FONT_SIZE_MONO),
+                    );
+                } else if !trimmed.is_empty() && existing_names.iter().any(|n| n == trimmed) {
                     ui.label(
                         RichText::new(format!("⚠ Will overwrite \"{trimmed}\""))
                             .color(theme::DESTRUCTIVE)
@@ -239,7 +238,7 @@ pub fn render(
 
                 ui.add_space(theme::SPACE_SM);
                 ui.horizontal(|ui| {
-                    if ui.button("Save").clicked() {
+                    if ui.add_enabled(!is_prunr_name, egui::Button::new("Save")).clicked() {
                         commit = true;
                     }
                     if ui.button("Cancel").clicked() {
@@ -247,8 +246,6 @@ pub fn render(
                     }
                 });
 
-                // Show existing presets as one-click overwrite targets. Clicking
-                // one saves the CURRENT item.settings under that existing name.
                 if !existing_names.is_empty() {
                     ui.add_space(theme::SPACE_SM);
                     ui.separator();
@@ -279,16 +276,19 @@ pub fn render(
             });
         };
 
+        let trimmed = name_buf.trim();
         if let Some(target) = overwrite_target {
             settings.presets.insert(target, *current_item);
             close_dialog();
-        } else if commit && !name_buf.trim().is_empty() {
-            settings.presets.insert(name_buf.trim().to_string(), *current_item);
+        } else if commit
+            && !trimmed.is_empty()
+            && !trimmed.eq_ignore_ascii_case(PRUNR_PRESET)
+        {
+            settings.presets.insert(trimmed.to_string(), *current_item);
             close_dialog();
         } else if cancel {
             close_dialog();
         } else {
-            // Persist typed text across frames while the dialog is open.
             ui.ctx()
                 .memory_mut(|m| m.data.insert_temp::<String>(save_dialog_id, name_buf));
         }
@@ -352,5 +352,15 @@ mod tests {
         map.insert("Beta".to_string(), ItemSettings::default());
         s.presets = map;
         assert_eq!(sorted_preset_names(&s), vec!["alpha", "Beta", "Zeta"]);
+    }
+
+    #[test]
+    fn all_preset_names_prunr_first() {
+        let mut s = Settings::default();
+        s.presets.insert("Zeta".to_string(), ItemSettings::default());
+        s.presets.insert("alpha".to_string(), ItemSettings::default());
+        let names = all_preset_names(&s);
+        assert_eq!(names[0], PRUNR_PRESET);
+        assert_eq!(names[1..], vec!["alpha".to_string(), "Zeta".to_string()]);
     }
 }
