@@ -43,7 +43,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
         .min_size(egui::vec2(BTN_HEIGHT, BTN_HEIGHT));
         if ui.add(gear_btn).on_hover_text(format!("Settings ({m}+Space)")).clicked() {
             if app.show_settings {
-                app.close_settings();
+                app.close_settings(ui.ctx());
             } else {
                 app.show_settings = true;
                 app.settings_opened_at = ui.ctx().input(|i| i.time);

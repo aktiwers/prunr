@@ -79,16 +79,17 @@ Communication uses **length-prefixed bincode frames** over stdin/stdout:
 
 | Direction | Message | Purpose |
 |-----------|---------|---------|
-| Parent → Child | `Init` | Load model, create engine pool |
-| Parent → Child | `ProcessImage` | Process one image (path to temp file) |
+| Parent → Child | `Init` | Load model, create engine pool (`ProcessingConfig` bundles 7 fields) |
+| Parent → Child | `ProcessImage` | Full pipeline: decode + infer + postprocess |
+| Parent → Child | `RePostProcess` | Tier 2: skip inference, re-run postprocess from cached tensor |
 | Parent → Child | `Cancel` / `Shutdown` | Graceful stop |
 | Child → Parent | `Ready` | Engines loaded |
 | Child → Parent | `Progress` | Per-stage progress (Decode, Infer, etc.) |
-| Child → Parent | `ImageDone` | Result written to temp file |
+| Child → Parent | `ImageDone` | Result + optional `tensor_cache_path/height/width` for Tier 2 reuse |
 | Child → Parent | `ImageError` | Non-fatal error |
 | Child → Parent | `RssUpdate` | Current process RSS (for admission throttling) |
 
-**Image data transfer:** Large payloads (image bytes, result RGBA) go via temp files, not through the pipe. On Linux, temp files are placed in `/dev/shm/prunr-ipc/` (RAM-backed tmpfs — zero disk I/O). On Windows/macOS, `std::env::temp_dir()` is used.
+**Image data transfer:** Large payloads (image bytes, result RGBA, raw tensors) go via temp files, not through the pipe. On Linux, temp files are placed in `/dev/shm/prunr-ipc-{pid}/` (RAM-backed tmpfs — zero disk I/O). On Windows/macOS, `std::env::temp_dir()` is used. Cancel path calls `cleanup_ipc_temp()` to prevent tmpfs leaks.
 
 ## Threading Model
 
@@ -130,6 +131,39 @@ Attempt 3: 1 engine → success → continue at 1
 
 The parent shows a toast: "Memory pressure — retrying X images with Y parallel jobs". Crash diagnostics detect the exit signal (SIGKILL = "Process killed by OS (out of memory)", SIGSEGV = "segmentation fault") for user-facing messages.
 
+## Tiered Recipe Pipeline
+
+Re-processing images uses a three-tier system to avoid redundant work:
+
+| Tier | Name | When | Cost |
+|------|------|------|------|
+| 1 | FullPipeline | Model, line mode, or chain changed | Full inference (expensive) |
+| 2 | MaskRerun | Only mask params changed (gamma, threshold, edge shift, refine) | Postprocess from cached tensor (fast) |
+| 3 | CompositeOnly | Only bg_color changed | Applied at display/export time (free) |
+| — | Skip | Recipe identical | No work needed |
+
+### Recipe types (`prunr-core/src/recipe.rs`)
+
+```rust
+ProcessingRecipe { inference: InferenceRecipe, mask: MaskRecipe, composite: CompositeRecipe, was_chain: bool }
+```
+
+`resolve_tier(old, new)` compares two recipes and returns the minimum `RequiredTier`. Each `BatchItem` carries `applied_recipe: Option<ProcessingRecipe>` (what the stored result was built from) and receives `dispatch_recipe` (snapshot at send time, not delivery time — prevents stale applied_recipe when settings change mid-batch).
+
+### Tensor cache (`CompressedTensor`)
+
+After Tier 1, the subprocess writes the raw `f32` tensor to a temp file and returns `tensor_cache_path/height/width` in `ImageDone`. The parent:
+1. Reads the bytes and compresses them with zstd level 1 → `CompressedTensor`
+2. Stores it on the `BatchItem`
+
+For a Tier 2 rerun, the parent decompresses the tensor, writes it to a temp file, and sends `RePostProcess` instead of `ProcessImage`. The subprocess calls `postprocess_from_flat()` — no inference at all.
+
+**Tensor budget:** `enforce_tensor_budget()` caps total compressed tensor RAM at 512 MB, evicting oldest items first (preserving the selected item's tensor). `evict_all_tensors()` is called on batch start to reclaim stale tensors.
+
+### LinesOnly short-circuit
+
+`InferenceRecipe.uses_segmentation` is false for `LinesOnly` mode. This means mask settings are pinned to defaults in the recipe comparison — gamma/threshold changes don't trigger Tier 1 for LinesOnly jobs.
+
 ## Memory Management
 
 ### Three-tiered history cache
@@ -145,6 +179,8 @@ Undo/redo history uses a tiered strategy to bound RAM while preserving Ctrl+Z:
 History seeding is lazy: for images that haven't been decoded yet (lazy file loading), the seed is skipped at process time and created on demand during the first undo. This eliminates UI freezes when processing large batches.
 
 History entries compress to Tier 2 (warm) by default. Demotion to Tier 3 (cold) happens automatically when the subprocess reports high RSS via `under_memory_pressure()`.
+
+`HistoryEntry` wraps a `HistorySlot` and an `Option<ProcessingRecipe>`. When undoing, the entry's recipe is restored to `BatchItem.applied_recipe` so that redo/reprocess can correctly tier-route from the restored state.
 
 ### Lazy file loading (ImageSource)
 
@@ -195,20 +231,25 @@ add_to_batch_path(PathBuf) → BatchItem with ImageSource::Path (zero RAM)
 
 User clicks "Process All"
   ↓ (UI thread: process_items)
-AdmissionController estimates costs, admits initial window
+evict_all_tensors() — clear stale tensor caches
+For each item: resolve_tier(applied_recipe, current_recipe) → Skip/Tier2/MaskRerun/FullPipeline
+dispatch_recipe = snapshot of current settings
+Tier 1 items: AdmissionController estimates costs, admits initial window
+Tier 2 items: dispatched directly as Tier2WorkItem (no admission needed)
   ↓ (bridge thread)
-Spawn `prunr --worker` subprocess
-Send Init { model, jobs, mask, ... }
+Spawn `prunr --worker` subprocess (if Tier 1 work exists)
+Send Init { model, jobs, ProcessingConfig }
   ↓ (subprocess)
 create_engine_pool → ORT sessions loaded
 Ready { active_provider }
-  ↓ (bridge thread sends ProcessImage for each admitted item)
+  ↓ Tier 1: bridge sends ProcessImage
+  ↓ Tier 2: bridge sends RePostProcess (tensor from BatchItem.cached_tensor)
   ↓ (subprocess processes one at a time, locked by POSTPROCESS_LOCK)
-ImageDone { result_path, width, height }
-  ↓ (bridge thread reads result temp file, converts to ProcessResult)
-WorkerResult::BatchItemDone → UI thread
-  ↓
+ImageDone { result_path, tensor_cache_path?, ... }
+  ↓ (bridge reads result, reads tensor if present → compresses → WorkerResult::BatchItemDone)
 item.result_rgba = Some(Arc::new(rgba))
+item.cached_tensor = Some(CompressedTensor)     ← Tier 1 only
+item.applied_recipe = dispatch_recipe           ← snapshot, not current settings
   ↓ (background texture prep → canvas crossfade)
 
 If subprocess crashes:
@@ -245,16 +286,21 @@ All CLI processing (single and batch) uses subprocess isolation for OOM protecti
 3.  preprocess(img, model)              → Array4<f32> [1, 3, H, H] NCHW
       - Silueta/U2Net: divide by max_pixel, ImageNet normalize
       - BiRefNet-lite: divide by 255, ImageNet normalize
-4.  engine.with_session(|s| s.run(...)) → raw output tensor [1, 1, H, H]
+4.  engine.with_session(|s| s.run(...)) → raw output tensor [1, 1, H, H]  ← Tier 1 only
 5.  postprocess(raw_output.view(), img, mask, model):
+      - Allocates RGBA once (shared by guided filter + mask application)
       - Normalize to [0, 1] (min-max for Silueta/U2Net, sigmoid for BiRefNet)
       - Short-circuit uniform output (skip per-pixel loop)
       - Apply gamma + optional hard threshold
       - Resize mask to original dimensions (SIMD Lanczos3 via `fast_image_resize`)
       - Optional: apply_edge_shift (morphological erode/dilate)
       - Optional: guided_filter_alpha (O(1) box filter)
-      - Compose mask as alpha channel (parallel via rayon)
+      - Write mask as alpha channel into the shared RGBA buffer
 6.  Optional: apply_background_color()
+
+Tier 2 path uses postprocess_from_flat(tensor: &[f32], h, w, original, mask, model)
+  → reshapes flat bytes from IPC into ArrayView4 → calls postprocess() directly
+  → eliminates inference entirely
 ```
 
 ### Postprocess fast paths
@@ -265,10 +311,11 @@ All CLI processing (single and batch) uses subprocess isolation for OOM protecti
 - Alpha composition parallelized via `rayon::par_chunks_mut`
 - Guided filter uses `f32` prefix sums (halved bandwidth vs f64)
 - Edge shift's ring buffers allocated once, swapped via `std::mem::swap`
+- Single RGBA allocation in `postprocess()` — shared across guided filter and mask application (saves ~48 MB per Tier 2 run on a 4000×3000 image)
 
 ## Edge Detection (DexiNed)
 
-A separate `EdgeEngine` handles line extraction with its own ONNX session. Three line modes:
+A separate `EdgeEngine` handles line extraction with its own ONNX session. Three line modes (defined in `prunr-core::types::LineMode` — re-exported by `gui::settings` to avoid a layering violation where the IPC protocol previously depended on a GUI module):
 
 | Mode | Behaviour |
 |------|-----------|
@@ -336,6 +383,8 @@ Decompressed ONNX bytes are cached in `OnceLock<Vec<u8>>` per model. Callers rec
 - Zoom resets only on explicit user navigation (sidebar click, arrow keys), not on background texture arrivals
 - Checkerboard behind transparent results: single 256×256 pre-generated texture, tiled
 - Off-screen sidebar items skip painting entirely (viewport virtualization)
+- **bg_color** is applied at texture-build time (`apply_bg_for_export`), not stored in the RGBA. When bg_color settings change, `close_settings()` increments `result_switch_id`, clears all `result_texture`, and calls `sync_selected_batch_textures(ctx)` immediately so the canvas rebuilds the texture with the new color without requiring sidebar navigation.
+- `result_switch_id` is used as the animation seed for the crossfade — incrementing it restarts the fade on bg_color change.
 
 ## Drag-Out (OS-level drag to external apps)
 
