@@ -10,7 +10,7 @@
 //! and testable, and prevents PrunrApp from growing into a God Object.
 //!
 //! All chip functions return `bool` indicating whether the value changed,
-//! so callers can invalidate textures or kick off live preview (Phase 3).
+//! so callers can invalidate textures or kick off live preview.
 
 use egui::{Color32, RichText, Response, Ui};
 use egui::widgets::color_picker::{color_picker_color32, Alpha};
@@ -339,7 +339,7 @@ pub fn chip_option_rgb(
 mod tests {
     // The chip widgets require an egui::Ui to render, so unit tests here
     // only check the non-render helpers. Visual integration tests belong
-    // in the adjustments_toolbar smoke test suite (Phase 2 verification).
+    // in the adjustments_toolbar smoke test suite.
     #[test]
     fn popover_width_is_sane() {
         assert!(super::POPOVER_WIDTH >= 200.0);

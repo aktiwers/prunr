@@ -277,17 +277,14 @@ pub fn render(
         };
 
         let trimmed = name_buf.trim();
-        if let Some(target) = overwrite_target {
-            settings.presets.insert(target.clone(), *current_item);
-            // Saving the current settings AS a preset makes that preset the
-            // now-applied one — the label should read "Target ✓" (clean).
-            applied = Some(target);
-            close_dialog();
-        } else if commit
-            && !trimmed.is_empty()
-            && !trimmed.eq_ignore_ascii_case(PRUNR_PRESET)
-        {
-            let name = trimmed.to_string();
+        // Resolve the target name: overwrite button wins, else a valid typed
+        // name on commit. Saving the current settings AS a preset makes that
+        // preset the now-applied one — label reads "Name ✓" after.
+        let target_name = overwrite_target.or_else(|| {
+            (commit && !trimmed.is_empty() && !trimmed.eq_ignore_ascii_case(PRUNR_PRESET))
+                .then(|| trimmed.to_string())
+        });
+        if let Some(name) = target_name {
             settings.presets.insert(name.clone(), *current_item);
             applied = Some(name);
             close_dialog();

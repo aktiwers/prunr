@@ -166,13 +166,11 @@ pub(crate) struct BatchItem {
     pub redo_stack: VecDeque<HistoryEntry>,
     pub status: BatchStatus,
     pub selected: bool,
-    /// Per-image processing settings. Edited via the adjustments toolbar (Phase 2).
-    /// In Phase 1 the settings modal edits `AppSettings.item_defaults` and close_settings
-    /// propagates the template to all items to preserve v1 UX until the toolbar lands.
+    /// Per-image processing settings. Edited via the adjustments toolbar.
     pub settings: super::item_settings::ItemSettings,
     /// Settings snapshot taken when checkbox was checked; uncheck restores it.
     /// `None` once committed via Process or when the item was never checked.
-    /// Phase 4 wires up the read path (selection-as-apply semantics).
+    /// Read path not yet wired — reserved for selection-as-apply semantics.
     #[allow(dead_code)]
     pub pre_check_settings: Option<super::item_settings::ItemSettings>,
     /// The recipe that produced the current result_rgba. None if never processed.
@@ -288,6 +286,9 @@ pub struct PrunrApp {
     dispatch_recipe: Option<prunr_core::ProcessingRecipe>,
     /// Last time periodic history cleanup ran.
     last_history_cleanup: std::time::Instant,
+    /// Rate-limits the "Preset applied — click Process" toast so rapid
+    /// preset cycling doesn't stack duplicates.
+    last_preset_toast_at: Option<std::time::Instant>,
     /// Tier 2 live preview dispatcher. Debounces chip tweaks and runs
     /// postprocess_from_flat / finalize_edges on rayon threads.
     pub(crate) live_preview: super::live_preview::LivePreview,
@@ -405,6 +406,7 @@ impl PrunrApp {
             admission_tx: None,
             dispatch_recipe: None,
             last_history_cleanup: std::time::Instant::now(),
+            last_preset_toast_at: None,
             live_preview: super::live_preview::LivePreview::default(),
         }
     }
@@ -459,6 +461,7 @@ impl PrunrApp {
             admission_tx: None,
             dispatch_recipe: None,
             last_history_cleanup: std::time::Instant::now(),
+            last_preset_toast_at: None,
             live_preview: super::live_preview::LivePreview::default(),
         }
     }
@@ -639,10 +642,6 @@ impl PrunrApp {
     pub(crate) fn close_settings(&mut self, _ctx: &egui::Context) {
         self.show_settings = false;
         self.settings.save();
-        // Phase 2: modal no longer edits per-image knobs, so there's nothing
-        // to propagate to batch_items and no texture invalidation needed.
-        // The toolbar edits item.settings directly and handles its own
-        // texture invalidation (P2.9).
         self.toasts.info("Settings saved");
     }
 
@@ -803,10 +802,11 @@ impl PrunrApp {
                     }
                 }
                 RequiredTier::EdgeRerun => {
-                    // Phase 1: edge rerun dispatch lands in Phase 3. For now,
-                    // if we have the edge cache we still route to Tier 1 because
-                    // the subprocess path isn't wired yet. When Phase 3 lands,
-                    // this becomes: `if cached_edge_tensor.is_some() { tier2_edge }`.
+                    // Edge rerun via the subprocess isn't wired for batch
+                    // dispatch yet — fall through to a full pipeline run.
+                    // (Live-preview edge reruns DO work in-process via
+                    // `pump_live_preview` + `finalize_edges`; this branch is
+                    // for the explicit Process click path only.)
                     item.cached_edge_tensor = None;
                     tier1_ids.insert(item.id);
                 }
@@ -981,22 +981,16 @@ impl PrunrApp {
         self.cancel_flag.store(false, Ordering::Release);
         self.state = AppState::Processing;
 
-        // Use the currently-viewed item's settings for the batch. The toolbar
-        // always binds to the current item, so this matches "what you see is
-        // what you process." Phase 5's explicit Process Selected broadcast
-        // will copy current.settings to each scoped item first, keeping their
-        // stored settings in sync with what's actually dispatched.
-        //
-        // IMPORTANT: this is NOT `self.settings.item_defaults` — that's the
-        // template for NEW imports and is stale relative to toolbar tweaks.
+        // Use the currently-viewed item's settings for the batch — matches
+        // "what you see is what you process." Fallback to factory defaults
+        // only if the batch is somehow empty at dispatch time (defensive).
         let idx = self.selected_batch_index.min(self.batch_items.len().saturating_sub(1));
         let current_settings = self.batch_items.get(idx)
             .map(|b| b.settings)
-            .unwrap_or(self.settings.item_defaults);
+            .unwrap_or_default();
 
         // Broadcast: every item about to be processed inherits current.settings
-        // so their `applied_recipe` ends up consistent with what ran. This is
-        // the Phase 3 stand-in for Phase 5's explicit selection-apply.
+        // so their `applied_recipe` ends up consistent with what ran.
         let process_ids: std::collections::HashSet<u64> = items.iter()
             .map(|wi| wi.0)
             .chain(tier2_items.iter().map(|ti| ti.item_id))
@@ -1791,7 +1785,7 @@ impl PrunrApp {
                         self.batch_items.iter()
                             .find(|b| b.id == item_id)
                             .map(|b| b.settings.current_recipe(model, chain))
-                            .unwrap_or_else(|| self.settings.item_defaults.current_recipe(model, chain))
+                            .unwrap_or_else(|| super::item_settings::ItemSettings::default().current_recipe(model, chain))
                     });
                     if let Some(item) = self.batch_items.iter_mut().find(|b| b.id == item_id) {
                         // Skip results for items that were already cancelled (reset to Pending)
@@ -2045,8 +2039,7 @@ impl PrunrApp {
                 }
                 // H = toggle sidebar, Shift+H = toggle adjustments toolbar.
                 // Tab stays reserved for egui's focus traversal (accessibility).
-                // Kept Tab as a fallback for v1 muscle memory — will be removed
-                // when Settings → Hotkeys rebinding UI lands (Phase 5).
+                // Tab kept as a fallback for v1 muscle memory.
                 if i.key_pressed(Key::H) {
                     if i.modifiers.shift {
                         toggle_adjustments = true;
@@ -2286,9 +2279,9 @@ impl eframe::App for PrunrApp {
 
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
-        // Phase 3: dispatch any debounced previews + apply completed ones
-        // before we render. Tick returns a hint of how long to wait before
-        // the next scheduled dispatch, so we schedule a repaint accordingly.
+        // Dispatch any debounced previews + apply completed ones before we
+        // render. tick() returns a hint of how long until the next scheduled
+        // dispatch so we can schedule a repaint accordingly.
         self.pump_live_preview(ui.ctx());
 
         let panel_frame = egui::Frame {
@@ -2342,33 +2335,30 @@ impl eframe::App for PrunrApp {
             };
             let mut bg_changed = false;
             let mut toolbar_change = adjustments_toolbar::ToolbarChange::default();
-            let mut new_applied_preset: Option<String> = None;
             let is_processing = self.state == AppState::Processing;
             egui::Panel::top("adjustments_toolbar")
                 .exact_size(height)
                 .frame(panel_frame)
                 .show_inside(ui, |ui| {
                     let idx = self.selected_batch_index.min(self.batch_items.len() - 1);
-                    let applied_preset = self.batch_items[idx].applied_preset.clone();
-                    let settings_ref: &mut crate::gui::settings::Settings = &mut self.settings;
-                    let item_settings_ref: &mut crate::gui::item_settings::ItemSettings =
-                        &mut self.batch_items[idx].settings;
+                    // Split borrow: app.settings and batch_items are disjoint
+                    // fields of PrunrApp, and within the batch item its
+                    // `settings` and `applied_preset` are disjoint fields too.
+                    // This lets the toolbar mutate the preset string in place
+                    // without a clone + writeback round-trip.
+                    let settings_ref = &mut self.settings;
+                    let item = &mut self.batch_items[idx];
                     toolbar_change = adjustments_toolbar::render(
                         ui,
-                        item_settings_ref,
+                        &mut item.settings,
                         settings_ref,
-                        &applied_preset,
-                        &mut new_applied_preset,
+                        &mut item.applied_preset,
                         is_processing,
                     );
-                    // bg is applied at display-time, not via Tier 2 — rebuild
-                    // texture immediately. Phase 4 moves this to GPU-side fill.
+                    // bg is applied at display-time — rebuild texture
+                    // immediately, not via Tier 2.
                     bg_changed = toolbar_change.bg;
                 });
-            if let Some(name) = new_applied_preset {
-                let idx = self.selected_batch_index.min(self.batch_items.len() - 1);
-                self.batch_items[idx].applied_preset = name;
-            }
             // Model swap: persist the new selection, show toast, invalidate caches.
             if toolbar_change.model_changed {
                 self.settings.save();
@@ -2392,12 +2382,18 @@ impl eframe::App for PrunrApp {
                 }
                 // Live preview for the newly-invalidated tier can no longer run
                 // against the cache — user needs to Process to repopulate.
-                // Only hint on preset apply (for chip-level edits the user
-                // already knows they tweaked a cross-tier setting).
+                // Rate-limit to 2 seconds so rapid preset cycling (comparing
+                // Portrait / Product / Landscape) doesn't stack toasts.
                 if toolbar_change.preset_applied
                     && self.batch_items[idx].status == BatchStatus::Done
                 {
-                    self.toasts.info("Preset applied — click Process to see the new result.");
+                    let now = std::time::Instant::now();
+                    let fresh = self.last_preset_toast_at
+                        .map_or(true, |t| now.duration_since(t).as_secs() >= 2);
+                    if fresh {
+                        self.toasts.info("Preset applied — click Process to see the new result.");
+                        self.last_preset_toast_at = Some(now);
+                    }
                 }
             }
             // Register mask / edge tweaks with the live preview dispatcher.
