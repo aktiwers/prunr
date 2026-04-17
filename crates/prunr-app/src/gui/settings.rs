@@ -35,7 +35,7 @@ pub struct Settings {
     /// Auto-hide the adjustments toolbar when the cursor leaves it.
     #[serde(default)]
     pub auto_hide_adjustments: bool,
-    /// User-configurable keyboard shortcuts (Phase 5 wires up the UI).
+    /// User-configurable keyboard shortcuts. Rebinding UI not yet wired.
     #[serde(default)]
     pub shortcuts: HashMap<String, String>,
     /// Named presets. Does NOT include "Prunr" — that's synthetic (always
@@ -47,11 +47,6 @@ pub struct Settings {
     /// (user deleted it out of serde state), resolution falls back to "Prunr".
     #[serde(default = "default_preset_name")]
     pub default_preset: String,
-    /// Legacy field kept for serde compatibility with Phase 1 builds. No
-    /// longer influences any behavior; presets are the single source of
-    /// truth for "what new images should start with."
-    #[serde(default)]
-    pub item_defaults: ItemSettings,
 
     /// Force CPU inference even when GPU is available (not persisted — resets each launch).
     #[serde(skip)]
@@ -158,9 +153,7 @@ impl Settings {
         self.presets.get(name).copied().unwrap_or_default()
     }
 
-    /// ItemSettings template for new batch items. Resolves `default_preset`
-    /// against `preset_values()`. `default_preset` is always set (defaults to
-    /// "Prunr"), so new imports never get arbitrary `item_defaults` leakage.
+    /// ItemSettings template for new batch items — the default_preset's values.
     pub fn item_defaults_for_new_item(&self) -> ItemSettings {
         self.preset_values(&self.default_preset)
     }
@@ -261,7 +254,6 @@ impl Default for Settings {
             shortcuts: HashMap::new(),
             presets: HashMap::new(),
             default_preset: default_preset_name(),
-            item_defaults: ItemSettings::default(),
             force_cpu: false,
             active_backend: "CPU".to_string(),
         }
@@ -274,7 +266,7 @@ mod tests {
     use prunr_core::LineMode;
 
     #[test]
-    fn v1_migration_populates_item_defaults() {
+    fn v1_migration_parses_all_per_image_fields() {
         let v1_json = serde_json::json!({
             "model": "Silueta",
             "auto_remove_on_import": false,
