@@ -197,6 +197,8 @@ pub struct PrunrApp {
     pub(crate) show_settings: bool,
     /// Timestamp when settings was last opened (for click-outside debounce)
     pub(crate) settings_opened_at: f64,
+    /// Snapshot of bg settings when settings panel opened (for change detection on close)
+    pub(crate) bg_settings_snapshot: (bool, [u8; 4]),
     pub(crate) settings: Settings,
 
     // Canvas fade-in: incremented on every image switch
@@ -329,6 +331,7 @@ impl PrunrApp {
             next_batch_id: 0,
             show_settings: false,
             settings_opened_at: 0.0,
+            bg_settings_snapshot: (false, [0; 4]),
             settings,
             canvas_switch_id: 0,
             result_switch_id: 0,
@@ -380,6 +383,7 @@ impl PrunrApp {
             next_batch_id: 0,
             show_settings: false,
             settings_opened_at: 0.0,
+            bg_settings_snapshot: (false, [0; 4]),
             settings,
             canvas_switch_id: 0,
             result_switch_id: 0,
@@ -568,13 +572,17 @@ impl PrunrApp {
     pub(crate) fn close_settings(&mut self) {
         self.show_settings = false;
         self.settings.save();
-        // Invalidate result textures so bg_color changes take effect immediately
-        self.result_switch_id += 1;
-        for item in &mut self.batch_items {
-            item.result_texture = None;
-            item.result_tex_pending = false;
+        // Only invalidate result textures if bg_color settings changed
+        let bg_changed = self.settings.apply_bg_color != self.bg_settings_snapshot.0
+            || self.settings.bg_color != self.bg_settings_snapshot.1;
+        if bg_changed {
+            self.result_switch_id += 1;
+            for item in &mut self.batch_items {
+                item.result_texture = None;
+                item.result_tex_pending = false;
+            }
+            self.result_texture = None;
         }
-        self.result_texture = None;
         self.toasts.info("Settings saved");
     }
 
@@ -822,7 +830,7 @@ impl PrunrApp {
 
     /// Apply background color to a result image for export/save.
     /// Returns a new image if bg_color is enabled, otherwise clones the Arc.
-    fn apply_bg_for_export(&self, rgba: &Arc<image::RgbaImage>) -> Arc<image::RgbaImage> {
+    pub(crate) fn apply_bg_for_export(&self, rgba: &Arc<image::RgbaImage>) -> Arc<image::RgbaImage> {
         if self.settings.apply_bg_color {
             let mut copy = (**rgba).clone();
             let c = self.settings.bg_color;
@@ -1302,15 +1310,7 @@ impl PrunrApp {
             if let Some(rgba) = self.batch_items[idx].result_rgba.clone() {
                 let switch = self.result_switch_id;
                 self.batch_items[idx].result_tex_pending = true;
-                // Apply bg_color non-destructively for display (result_rgba stays transparent)
-                let display_rgba = if self.settings.apply_bg_color {
-                    let mut copy = (*rgba).clone();
-                    let c = self.settings.bg_color;
-                    prunr_core::apply_background_color(&mut copy, [c[0], c[1], c[2]]);
-                    Arc::new(copy)
-                } else {
-                    rgba
-                };
+                let display_rgba = self.apply_bg_for_export(&rgba);
                 Self::spawn_tex_prep(
                     display_rgba, item_id, format!("result_{item_id}_{switch}"), true,
                     self.bg_io.tex_prep_tx.clone(), ctx.clone(),
@@ -1706,6 +1706,7 @@ impl PrunrApp {
             } else {
                 self.show_settings = true;
                 self.settings_opened_at = ctx.input(|i| i.time);
+                self.bg_settings_snapshot = (self.settings.apply_bg_color, self.settings.bg_color);
             }
         }
         if nav_prev && !self.batch_items.is_empty() {
