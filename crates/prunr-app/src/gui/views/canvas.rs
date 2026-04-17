@@ -55,7 +55,9 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
         });
     }
 
-    // Handle pending Ctrl+0 (fit to window) / Ctrl+1 (actual size)
+    // Handle pending Ctrl+0 (fit to window) / Ctrl+1 (actual size).
+    // Only consume the flag when the texture is ready — with lazy decode,
+    // the texture may not exist on the first frame after opening.
     if let Some(ref tex) = app.source_texture {
         let tex_size = tex.size_vec2();
         let canvas_size = canvas_rect.size();

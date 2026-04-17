@@ -1715,6 +1715,9 @@ impl PrunrApp {
             }
         }
         if decode_arrived {
+            // Re-trigger fit zoom when a freshly decoded image arrives
+            // (the previous pending_fit_zoom may have been consumed by the old texture)
+            self.zoom_state.pending_fit_zoom = true;
             self.sync_selected_batch_textures(ctx);
         }
 
