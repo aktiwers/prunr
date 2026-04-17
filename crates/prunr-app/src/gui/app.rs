@@ -181,6 +181,12 @@ pub(crate) struct BatchItem {
     pub cached_tensor: Option<super::worker::CompressedTensor>,
     /// Compressed cached DexiNed output (for Tier 2 edge reruns on line_strength tweaks).
     pub cached_edge_tensor: Option<super::worker::CompressedTensor>,
+    /// Which preset was last APPLIED to this image (via the dropdown's row
+    /// click or via Reset All). The preset button compares current `settings`
+    /// against this preset's values to show a modified/clean icon. Stays set
+    /// across unrelated tweaks — so "Portrait ✎" keeps saying Portrait even
+    /// after the user modifies something.
+    pub applied_preset: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -517,6 +523,7 @@ impl PrunrApp {
             applied_recipe: None,
             cached_tensor: None,
             cached_edge_tensor: None,
+            applied_preset: self.settings.default_preset.clone(),
         });
         self.selected_batch_index = self.batch_items.len() - 1;
         if do_decode {
@@ -1331,6 +1338,7 @@ impl PrunrApp {
             applied_recipe: None,
             cached_tensor: None,
             cached_edge_tensor: None,
+            applied_preset: self.settings.default_preset.clone(),
         });
 
         if self.state == AppState::Empty {
@@ -2334,12 +2342,14 @@ impl eframe::App for PrunrApp {
             };
             let mut bg_changed = false;
             let mut toolbar_change = adjustments_toolbar::ToolbarChange::default();
+            let mut new_applied_preset: Option<String> = None;
             let is_processing = self.state == AppState::Processing;
             egui::Panel::top("adjustments_toolbar")
                 .exact_size(height)
                 .frame(panel_frame)
                 .show_inside(ui, |ui| {
                     let idx = self.selected_batch_index.min(self.batch_items.len() - 1);
+                    let applied_preset = self.batch_items[idx].applied_preset.clone();
                     let settings_ref: &mut crate::gui::settings::Settings = &mut self.settings;
                     let item_settings_ref: &mut crate::gui::item_settings::ItemSettings =
                         &mut self.batch_items[idx].settings;
@@ -2347,12 +2357,18 @@ impl eframe::App for PrunrApp {
                         ui,
                         item_settings_ref,
                         settings_ref,
+                        &applied_preset,
+                        &mut new_applied_preset,
                         is_processing,
                     );
                     // bg is applied at display-time, not via Tier 2 — rebuild
                     // texture immediately. Phase 4 moves this to GPU-side fill.
                     bg_changed = toolbar_change.bg;
                 });
+            if let Some(name) = new_applied_preset {
+                let idx = self.selected_batch_index.min(self.batch_items.len() - 1);
+                self.batch_items[idx].applied_preset = name;
+            }
             // Model swap: persist the new selection, show toast, invalidate caches.
             if toolbar_change.model_changed {
                 self.settings.save();
@@ -2373,6 +2389,15 @@ impl eframe::App for PrunrApp {
                 }
                 if toolbar_change.edge_cache_invalid {
                     self.batch_items[idx].cached_edge_tensor = None;
+                }
+                // Live preview for the newly-invalidated tier can no longer run
+                // against the cache — user needs to Process to repopulate.
+                // Only hint on preset apply (for chip-level edits the user
+                // already knows they tweaked a cross-tier setting).
+                if toolbar_change.preset_applied
+                    && self.batch_items[idx].status == BatchStatus::Done
+                {
+                    self.toasts.info("Preset applied — click Process to see the new result.");
                 }
             }
             // Register mask / edge tweaks with the live preview dispatcher.
