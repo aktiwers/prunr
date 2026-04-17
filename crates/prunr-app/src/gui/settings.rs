@@ -103,9 +103,9 @@ impl Settings {
     pub fn current_recipe(&self) -> prunr_core::ProcessingRecipe {
         let model: ModelKind = self.model.into();
         let solid_line = self.solid_line_color_rgb();
-        // Mask settings are irrelevant for LinesOnly — fix to defaults
+        // Mask settings are irrelevant for EdgesOnly — fix to defaults
         // so changing gamma/threshold doesn't trigger unnecessary reprocessing.
-        let mask = if self.line_mode == LineMode::LinesOnly {
+        let mask = if self.line_mode == LineMode::EdgesOnly {
             prunr_core::MaskRecipe::new(1.0, None, 0.0, false)
         } else {
             prunr_core::MaskRecipe::new(
@@ -118,7 +118,7 @@ impl Settings {
         prunr_core::ProcessingRecipe {
             inference: prunr_core::InferenceRecipe {
                 model,
-                uses_segmentation: self.line_mode != LineMode::LinesOnly,
+                uses_segmentation: self.line_mode != LineMode::EdgesOnly,
                 uses_edge_detection: self.line_mode != LineMode::Off,
                 line_strength_bits: self.line_strength.to_bits(),
                 solid_line_color: solid_line,

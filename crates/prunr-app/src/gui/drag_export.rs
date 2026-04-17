@@ -85,8 +85,8 @@ fn make_filename(source_filename: &str, has_result: bool, line_mode: LineMode) -
     }
     let suffix = match line_mode {
         LineMode::Off => "nobg",
-        LineMode::LinesOnly => "lines",
-        LineMode::AfterBgRemoval => "nobg-lines",
+        LineMode::EdgesOnly => "lines",
+        LineMode::SubjectOutline => "nobg-lines",
     };
     format!("{stem}-{suffix}.png")
 }
@@ -122,11 +122,11 @@ mod tests {
             "sunset-nobg.png"
         );
         assert_eq!(
-            make_filename("sunset.jpg", true, LineMode::LinesOnly),
+            make_filename("sunset.jpg", true, LineMode::EdgesOnly),
             "sunset-lines.png"
         );
         assert_eq!(
-            make_filename("sunset.jpg", true, LineMode::AfterBgRemoval),
+            make_filename("sunset.jpg", true, LineMode::SubjectOutline),
             "sunset-nobg-lines.png"
         );
     }

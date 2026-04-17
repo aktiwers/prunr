@@ -120,7 +120,7 @@ pub fn run_worker() -> ! {
 
     // Load edge engine if needed
     let needs_edge = line_mode != LineMode::Off;
-    let needs_segmentation = line_mode != LineMode::LinesOnly;
+    let needs_segmentation = line_mode != LineMode::EdgesOnly;
 
     let edge_engine: Option<Arc<EdgeEngine>> = if needs_edge {
         match EdgeEngine::new() {
@@ -255,7 +255,7 @@ pub fn run_worker() -> ! {
                     let mut tensor_for_cache: Option<(Vec<f32>, u32, u32)> = None;
 
                     let result = match line_mode {
-                        LineMode::LinesOnly => {
+                        LineMode::EdgesOnly => {
                             let decoded;
                             let img_ref = if let Some(ref img) = chain_img {
                                 Ok(img as &image::DynamicImage)
@@ -273,7 +273,7 @@ pub fn run_worker() -> ! {
                                     })
                             })
                         }
-                        LineMode::AfterBgRemoval => {
+                        LineMode::SubjectOutline => {
                             if let Some(ref img) = chain_img {
                                 edge_eng.as_ref().unwrap().detect(img, line_strength, solid_line_color)
                                     .map(|rgba_image| ProcessResult {
