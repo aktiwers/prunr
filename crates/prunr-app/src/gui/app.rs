@@ -974,11 +974,33 @@ impl PrunrApp {
         self.cancel_flag.store(false, Ordering::Release);
         self.state = AppState::Processing;
 
-        // Phase 1: all items share the same settings (broadcast from item_defaults
-        // on modal close), so we snapshot the template for dispatch_recipe. Phase 3
-        // will per-item this when selection-scope apply lands.
-        let template = self.settings.item_defaults;
-        self.dispatch_recipe = Some(template.current_recipe(model, self.settings.chain_mode));
+        // Use the currently-viewed item's settings for the batch. The toolbar
+        // always binds to the current item, so this matches "what you see is
+        // what you process." Phase 5's explicit Process Selected broadcast
+        // will copy current.settings to each scoped item first, keeping their
+        // stored settings in sync with what's actually dispatched.
+        //
+        // IMPORTANT: this is NOT `self.settings.item_defaults` — that's the
+        // template for NEW imports and is stale relative to toolbar tweaks.
+        let idx = self.selected_batch_index.min(self.batch_items.len().saturating_sub(1));
+        let current_settings = self.batch_items.get(idx)
+            .map(|b| b.settings)
+            .unwrap_or(self.settings.item_defaults);
+
+        // Broadcast: every item about to be processed inherits current.settings
+        // so their `applied_recipe` ends up consistent with what ran. This is
+        // the Phase 3 stand-in for Phase 5's explicit selection-apply.
+        let process_ids: std::collections::HashSet<u64> = items.iter()
+            .map(|wi| wi.0)
+            .chain(tier2_items.iter().map(|ti| ti.item_id))
+            .collect();
+        for item in &mut self.batch_items {
+            if process_ids.contains(&item.id) {
+                item.settings = current_settings;
+            }
+        }
+
+        self.dispatch_recipe = Some(current_settings.current_recipe(model, self.settings.chain_mode));
 
         self.status.pct = 0.0;
         self.status.stage = "Starting".to_string();
@@ -988,11 +1010,11 @@ impl PrunrApp {
             config: super::worker::ProcessingConfig {
                 model,
                 jobs,
-                mask: template.mask_settings(),
+                mask: current_settings.mask_settings(),
                 force_cpu: self.settings.force_cpu,
-                line_mode: template.line_mode,
-                line_strength: template.line_strength,
-                solid_line_color: template.solid_line_color,
+                line_mode: current_settings.line_mode,
+                line_strength: current_settings.line_strength,
+                solid_line_color: current_settings.solid_line_color,
             },
             cancel: self.cancel_flag.clone(),
             additional_items_rx,
