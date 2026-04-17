@@ -200,6 +200,16 @@ pub enum SettingsModel {
     BiRefNetLite,
 }
 
+impl SettingsModel {
+    /// All variants in display order — source of truth for the model dropdown.
+    /// Adding a new model? Update this array once and every dropdown follows.
+    pub const ALL: [Self; 3] = [
+        Self::Silueta,
+        Self::U2net,
+        Self::BiRefNetLite,
+    ];
+}
+
 impl From<SettingsModel> for ModelKind {
     fn from(m: SettingsModel) -> Self {
         match m {

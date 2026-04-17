@@ -27,6 +27,16 @@ pub fn section_heading(ui: &mut egui::Ui, title: &str) {
     ui.add_space(theme::SPACE_SM);
 }
 
+/// Dimmed description text below a control. Empty strings render nothing.
+pub fn hint(ui: &mut egui::Ui, text: &str) {
+    if text.is_empty() { return; }
+    ui.label(
+        RichText::new(text)
+            .color(theme::TEXT_HINT)
+            .size(theme::FONT_SIZE_MONO),
+    );
+}
+
 /// Platform-aware modifier key name.
 pub fn modifier_key() -> &'static str {
     if cfg!(target_os = "macos") { "Cmd" } else { "Ctrl" }
