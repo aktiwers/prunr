@@ -201,6 +201,44 @@ impl SubprocessManager {
         Ok(())
     }
 
+    /// Send a Tier 2 re-postprocess command (skip inference, reuse cached tensor).
+    pub fn send_repostprocess(
+        &mut self,
+        item_id: u64,
+        tensor_data: &[f32],
+        tensor_height: u32,
+        tensor_width: u32,
+        model: prunr_core::ModelKind,
+        original_image_bytes: &[u8],
+        mask: prunr_core::MaskSettings,
+    ) -> Result<(), String> {
+        // Write tensor as raw f32 LE bytes to temp file
+        let tensor_path = ipc_temp_dir().join(format!("tensor_{item_id}.raw"));
+        let tensor_bytes: Vec<u8> = tensor_data.iter()
+            .flat_map(|f| f.to_le_bytes())
+            .collect();
+        std::fs::write(&tensor_path, &tensor_bytes)
+            .map_err(|e| format!("Failed to write tensor temp file: {e}"))?;
+
+        // Write original image bytes to temp file
+        let orig_path = ipc_temp_dir().join(format!("orig_{item_id}.img"));
+        std::fs::write(&orig_path, original_image_bytes)
+            .map_err(|e| format!("Failed to write original temp file: {e}"))?;
+
+        write_message(&mut self.stdin_writer, &SubprocessCommand::RePostProcess {
+            item_id,
+            tensor_path,
+            tensor_height,
+            tensor_width,
+            model,
+            original_image_path: orig_path,
+            mask,
+        }).map_err(|e| format!("Failed to send RePostProcess: {e}"))?;
+
+        self.in_flight.insert(item_id);
+        Ok(())
+    }
+
     /// Send cancel signal to the child.
     pub fn send_cancel(&mut self) -> Result<(), String> {
         write_message(&mut self.stdin_writer, &SubprocessCommand::Cancel)
