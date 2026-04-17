@@ -406,7 +406,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                         .set_title("Save PNG")
                         .save_file()
                     {
-                        let rgba = rgba.clone();
+                        let rgba = app.apply_bg_for_export(rgba);
                         let tx = app.bg_io.save_done_tx.clone();
                         app.toasts.info("Saving...");
                         std::thread::spawn(move || {
