@@ -94,8 +94,10 @@ fn make_filename(source_filename: &str, has_result: bool, line_mode: LineMode) -
 /// Prepare a drag temp file for a batch item. Returns the absolute path.
 /// If the item has no processed result, writes the raw source bytes as-is
 /// (preserving original extension so file managers recognize it).
-pub(crate) fn prepare(item: &BatchItem, line_mode: LineMode) -> std::io::Result<PathBuf> {
-    let name = make_filename(&item.filename, item.result_rgba.is_some(), line_mode);
+///
+/// Uses the item's own `line_mode` — each image carries its own mode in v2.
+pub(crate) fn prepare(item: &BatchItem) -> std::io::Result<PathBuf> {
+    let name = make_filename(&item.filename, item.result_rgba.is_some(), item.settings.line_mode);
     let path = temp_dir().join(&name);
     match &item.result_rgba {
         Some(rgba) => {

@@ -1,47 +1,53 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
-use prunr_core::{MaskSettings, ModelKind};
+use prunr_core::ModelKind;
 
+use super::item_settings::ItemSettings;
+
+/// Global app config. Per-image knobs (gamma, threshold, line mode, bg, ...)
+/// live on `BatchItem.settings: ItemSettings` instead. The settings modal
+/// edits `item_defaults` (the template for new images); the adjustments
+/// toolbar edits the current image's `ItemSettings` directly.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Settings {
     pub model: SettingsModel,
     pub auto_remove_on_import: bool,
     pub parallel_jobs: usize,
-    /// Mask gamma: >1 = more aggressive removal, <1 = gentler. Default 1.0.
-    pub mask_gamma: f32,
-    /// Optional binary threshold (0.0–1.0). 0.0 means disabled (soft mask).
-    pub mask_threshold: f32,
-    /// Whether binary threshold is enabled.
-    pub mask_threshold_enabled: bool,
-    /// Edge shift in pixels: >0 erodes (shrinks), <0 dilates (expands). Default 0.
-    pub edge_shift: f32,
-    /// Refine mask edges using guided filter for better detail.
-    pub refine_edges: bool,
-    /// Line extraction mode.
-    pub line_mode: LineMode,
-    /// Line detection sensitivity: 0.0 = minimal lines, 1.0 = maximum detail. Default 0.5.
-    pub line_strength: f32,
-    /// Override line color instead of keeping original colors.
-    pub solid_line_color: bool,
-    /// The solid color for lines when solid_line_color is enabled. [R, G, B, A]
-    pub line_color: [u8; 4],
-    /// Fill transparent areas with a solid background color.
-    pub apply_bg_color: bool,
-    /// The background fill color. [R, G, B, A]
-    pub bg_color: [u8; 4],
-    /// Maximum number of undo steps per image. Default 10.
+    /// Maximum number of undo steps per image.
     pub history_depth: usize,
-    /// When true, Process uses the current result as input instead of the original image.
+    /// When true, Process uses the current result as input instead of the original.
     pub chain_mode: bool,
-    /// When true, canvas transparency checkerboard uses dark tones instead of light.
-    /// `#[serde(default)]` so this new field doesn't reset older settings files.
+    /// Canvas transparency checkerboard uses dark tones instead of light.
     #[serde(default)]
     pub dark_checker: bool,
+    /// Auto-rerun Tier 2 on knob tweaks (live preview). Default ON.
+    #[serde(default = "default_live_preview")]
+    pub live_preview: bool,
+    /// Auto-hide the adjustments toolbar when the cursor leaves it.
+    #[serde(default)]
+    pub auto_hide_adjustments: bool,
+    /// User-configurable keyboard shortcuts (Phase 5 wires up the UI).
+    #[serde(default)]
+    pub shortcuts: HashMap<String, String>,
+    /// Named presets: `HashMap<name, snapshot>`.
+    #[serde(default)]
+    pub presets: HashMap<String, ItemSettings>,
+    /// Preset to apply to new items on import. `None` uses `item_defaults`.
+    #[serde(default)]
+    pub default_preset: Option<String>,
+    /// Template applied to new items when `default_preset` is None.
+    /// v1 settings migrate their per-image fields into this on first load.
+    #[serde(default)]
+    pub item_defaults: ItemSettings,
+
     /// Force CPU inference even when GPU is available (not persisted — resets each launch).
     #[serde(skip)]
     pub force_cpu: bool,
     #[serde(skip)]
     pub active_backend: String,
 }
+
+fn default_live_preview() -> bool { true }
 
 impl Settings {
     /// Config file path: ~/.config/prunr/settings.json (Linux),
@@ -52,16 +58,41 @@ impl Settings {
     }
 
     /// Load from disk, falling back to defaults if missing or corrupt.
+    /// Migrates v1 per-image fields (mask_gamma, bg_color, line_mode, ...)
+    /// into `item_defaults`.
     pub fn load() -> Self {
         let Some(path) = Self::config_path() else { return Self::default() };
         let Ok(data) = std::fs::read_to_string(&path) else { return Self::default() };
-        match serde_json::from_str(&data) {
+
+        // Parse to Value first so we can migrate v1 fields regardless of
+        // whether strict struct parsing succeeds.
+        let value: serde_json::Value = match serde_json::from_str(&data) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("warning: settings.json is corrupt ({e}), using defaults");
+                return Self::default();
+            }
+        };
+
+        let mut settings: Self = match serde_json::from_value(value.clone()) {
             Ok(s) => s,
             Err(e) => {
                 eprintln!("warning: settings.json is corrupt ({e}), using defaults");
-                Self::default()
+                return Self::default();
             }
+        };
+
+        // Detect v1 format (presence of old per-image keys) and migrate.
+        // Only migrate if item_defaults is still at ItemSettings::default(),
+        // so we don't clobber an already-migrated v2 file on subsequent loads.
+        let is_v1 = value.get("mask_gamma").is_some()
+            || value.get("apply_bg_color").is_some()
+            || value.get("line_mode").is_some();
+        if is_v1 && settings.item_defaults == ItemSettings::default() {
+            settings.item_defaults = migrate_v1_item_settings(&value);
         }
+
+        settings
     }
 
     /// Save to disk. Errors are silently ignored (best-effort).
@@ -81,7 +112,6 @@ impl Settings {
     }
 
     /// Smart default for parallel jobs based on backend and model.
-    /// Capped at what the system can safely handle.
     pub fn default_jobs(&self) -> usize {
         let model: prunr_core::ModelKind = self.model.into();
         let safe = super::memory::safe_max_jobs(model);
@@ -90,7 +120,6 @@ impl Settings {
     }
 
     /// Max recommended parallel jobs based on backend and model.
-    /// Limited by available system RAM to prevent OOM.
     pub fn max_jobs(&self) -> usize {
         let model: prunr_core::ModelKind = self.model.into();
         let safe = super::memory::safe_max_jobs(model);
@@ -98,66 +127,59 @@ impl Settings {
         base.min(safe)
     }
 
-    /// Build a ProcessingRecipe from the current settings state.
-    /// Used by tier routing to compare against each item's applied_recipe.
-    pub fn current_recipe(&self) -> prunr_core::ProcessingRecipe {
-        let model: ModelKind = self.model.into();
-        let solid_line = self.solid_line_color_rgb();
-        // Mask settings are irrelevant for EdgesOnly — fix to defaults
-        // so changing gamma/threshold doesn't trigger unnecessary reprocessing.
-        let mask = if self.line_mode == LineMode::EdgesOnly {
-            prunr_core::MaskRecipe::new(1.0, None, 0.0, false)
-        } else {
-            prunr_core::MaskRecipe::new(
-                self.mask_gamma,
-                self.threshold_value(),
-                self.edge_shift,
-                self.refine_edges,
-            )
+    /// ItemSettings template for new batch items. Resolves `default_preset`
+    /// against the preset map, falling back to `item_defaults` if the named
+    /// preset is missing.
+    pub fn item_defaults_for_new_item(&self) -> ItemSettings {
+        if let Some(ref name) = self.default_preset {
+            if let Some(preset) = self.presets.get(name) {
+                return *preset;
+            }
+        }
+        self.item_defaults
+    }
+}
+
+/// Extract v1 per-image settings from raw JSON into ItemSettings.
+/// Each field is tolerant of missing/wrong-type values (falls back to default).
+fn migrate_v1_item_settings(v: &serde_json::Value) -> ItemSettings {
+    use prunr_core::LineMode;
+
+    let mut s = ItemSettings::default();
+    if let Some(x) = v.get("mask_gamma").and_then(|x| x.as_f64()) { s.gamma = x as f32; }
+    if v.get("mask_threshold_enabled").and_then(|x| x.as_bool()) == Some(true) {
+        if let Some(x) = v.get("mask_threshold").and_then(|x| x.as_f64()) {
+            s.threshold = Some(x as f32);
+        }
+    }
+    if let Some(x) = v.get("edge_shift").and_then(|x| x.as_f64()) { s.edge_shift = x as f32; }
+    if let Some(x) = v.get("refine_edges").and_then(|x| x.as_bool()) { s.refine_edges = x; }
+    if let Some(mode) = v.get("line_mode").and_then(|x| x.as_str()) {
+        s.line_mode = match mode {
+            "Off" => LineMode::Off,
+            "LinesOnly" | "EdgesOnly" => LineMode::EdgesOnly,
+            "AfterBgRemoval" | "SubjectOutline" => LineMode::SubjectOutline,
+            _ => LineMode::Off,
         };
-        prunr_core::ProcessingRecipe {
-            inference: prunr_core::InferenceRecipe {
-                model,
-                uses_segmentation: self.line_mode != LineMode::EdgesOnly,
-                uses_edge_detection: self.line_mode != LineMode::Off,
-                line_strength_bits: self.line_strength.to_bits(),
-                solid_line_color: solid_line,
-            },
-            mask,
-            composite: prunr_core::CompositeRecipe {
-                bg_color: if self.apply_bg_color {
-                    Some([self.bg_color[0], self.bg_color[1], self.bg_color[2]])
-                } else {
-                    None
-                },
-                solid_line_color: solid_line,
-            },
-            was_chain: self.chain_mode,
+    }
+    if let Some(x) = v.get("line_strength").and_then(|x| x.as_f64()) { s.line_strength = x as f32; }
+    if v.get("solid_line_color").and_then(|x| x.as_bool()) == Some(true) {
+        if let Some(arr) = v.get("line_color").and_then(|x| x.as_array()) {
+            if let [r, g, b, ..] = arr.as_slice() {
+                let to_u8 = |x: &serde_json::Value| x.as_u64().unwrap_or(0).min(255) as u8;
+                s.solid_line_color = Some([to_u8(r), to_u8(g), to_u8(b)]);
+            }
         }
     }
-
-    /// Solid line color as RGB triple, or None if disabled.
-    pub fn solid_line_color_rgb(&self) -> Option<[u8; 3]> {
-        if self.solid_line_color {
-            Some([self.line_color[0], self.line_color[1], self.line_color[2]])
-        } else {
-            None
+    if v.get("apply_bg_color").and_then(|x| x.as_bool()) == Some(true) {
+        if let Some(arr) = v.get("bg_color").and_then(|x| x.as_array()) {
+            if let [r, g, b, a, ..] = arr.as_slice() {
+                let to_u8 = |x: &serde_json::Value| x.as_u64().unwrap_or(0).min(255) as u8;
+                s.bg = Some([to_u8(r), to_u8(g), to_u8(b), to_u8(a)]);
+            }
         }
     }
-
-    /// Binary threshold value if enabled, None if soft mask.
-    fn threshold_value(&self) -> Option<f32> {
-        if self.mask_threshold_enabled { Some(self.mask_threshold) } else { None }
-    }
-
-    pub fn mask_settings(&self) -> MaskSettings {
-        MaskSettings {
-            gamma: self.mask_gamma,
-            threshold: self.threshold_value(),
-            edge_shift: self.edge_shift,
-            refine_edges: self.refine_edges,
-        }
-    }
+    s
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -195,22 +217,96 @@ impl Default for Settings {
             model: SettingsModel::Silueta,
             auto_remove_on_import: false,
             parallel_jobs: (num_cpus::get() / 2).max(1),
-            mask_gamma: 1.0,
-            mask_threshold: 0.5,
-            mask_threshold_enabled: false,
-            edge_shift: 0.0,
-            refine_edges: false,
-            line_mode: LineMode::Off,
-            line_strength: 0.5,
-            solid_line_color: false,
-            line_color: [0, 0, 0, 255],
-            apply_bg_color: false,
-            bg_color: [255, 255, 255, 255],
             history_depth: 10,
             chain_mode: false,
             dark_checker: false,
+            live_preview: true,
+            auto_hide_adjustments: false,
+            shortcuts: HashMap::new(),
+            presets: HashMap::new(),
+            default_preset: None,
+            item_defaults: ItemSettings::default(),
             force_cpu: false,
             active_backend: "CPU".to_string(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use prunr_core::LineMode;
+
+    #[test]
+    fn v1_migration_populates_item_defaults() {
+        let v1_json = serde_json::json!({
+            "model": "Silueta",
+            "auto_remove_on_import": false,
+            "parallel_jobs": 4,
+            "mask_gamma": 1.5,
+            "mask_threshold": 0.3,
+            "mask_threshold_enabled": true,
+            "edge_shift": 2.0,
+            "refine_edges": true,
+            "line_mode": "AfterBgRemoval",
+            "line_strength": 0.8,
+            "solid_line_color": true,
+            "line_color": [10, 20, 30, 255],
+            "apply_bg_color": true,
+            "bg_color": [100, 150, 200, 255],
+            "history_depth": 10,
+            "chain_mode": false,
+        });
+        let migrated = migrate_v1_item_settings(&v1_json);
+        assert_eq!(migrated.gamma, 1.5);
+        assert_eq!(migrated.threshold, Some(0.3));
+        assert_eq!(migrated.edge_shift, 2.0);
+        assert!(migrated.refine_edges);
+        assert_eq!(migrated.line_mode, LineMode::SubjectOutline);
+        assert_eq!(migrated.line_strength, 0.8);
+        assert_eq!(migrated.solid_line_color, Some([10, 20, 30]));
+        assert_eq!(migrated.bg, Some([100, 150, 200, 255]));
+    }
+
+    #[test]
+    fn v1_migration_threshold_disabled() {
+        let v1_json = serde_json::json!({
+            "mask_threshold": 0.5,
+            "mask_threshold_enabled": false,
+        });
+        let migrated = migrate_v1_item_settings(&v1_json);
+        assert_eq!(migrated.threshold, None);
+    }
+
+    #[test]
+    fn v1_migration_bg_disabled() {
+        let v1_json = serde_json::json!({
+            "apply_bg_color": false,
+            "bg_color": [100, 150, 200, 255],
+        });
+        let migrated = migrate_v1_item_settings(&v1_json);
+        assert_eq!(migrated.bg, None);
+    }
+
+    #[test]
+    fn item_defaults_for_new_item_uses_preset() {
+        let mut s = Settings::default();
+        let mut preset_values = ItemSettings::default();
+        preset_values.gamma = 2.0;
+        s.presets.insert("Portrait".to_string(), preset_values);
+        s.default_preset = Some("Portrait".to_string());
+
+        let new_item = s.item_defaults_for_new_item();
+        assert_eq!(new_item.gamma, 2.0);
+    }
+
+    #[test]
+    fn item_defaults_for_new_item_falls_back_if_preset_missing() {
+        let mut s = Settings::default();
+        s.default_preset = Some("NonExistent".to_string());
+        s.item_defaults.gamma = 1.2;
+
+        let new_item = s.item_defaults_for_new_item();
+        assert_eq!(new_item.gamma, 1.2);
     }
 }

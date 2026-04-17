@@ -47,7 +47,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
             } else {
                 app.show_settings = true;
                 app.settings_opened_at = ui.ctx().input(|i| i.time);
-                app.bg_settings_snapshot = (app.settings.apply_bg_color, app.settings.bg_color);
+                app.bg_settings_snapshot = app.settings.item_defaults.bg;
             }
         }
 
