@@ -99,8 +99,8 @@ pub fn run_worker() -> ! {
 
     // Read Init command
     let init = match read_message::<_, SubprocessCommand>(&mut reader) {
-        Ok(Some(SubprocessCommand::Init { model, jobs, mask, force_cpu, line_mode, line_strength, solid_line_color, bg_color, ipc_dir })) => {
-            (model, jobs, mask, force_cpu, line_mode, line_strength, solid_line_color, bg_color, ipc_dir)
+        Ok(Some(SubprocessCommand::Init { model, jobs, mask, force_cpu, line_mode, line_strength, solid_line_color, ipc_dir })) => {
+            (model, jobs, mask, force_cpu, line_mode, line_strength, solid_line_color, ipc_dir)
         }
         _ => {
             let _ = evt_tx.send(SubprocessEvent::InitError {
@@ -112,7 +112,7 @@ pub fn run_worker() -> ! {
         }
     };
 
-    let (model, jobs, mask, force_cpu, line_mode, line_strength, solid_line_color, bg_color, ipc_dir) = init;
+    let (model, jobs, mask, force_cpu, line_mode, line_strength, solid_line_color, ipc_dir) = init;
 
     // Detect backend
     let has_gpu = !OrtEngine::detect_active_provider().eq_ignore_ascii_case("CPU");
@@ -304,13 +304,8 @@ pub fn run_worker() -> ! {
                         }
                     };
 
-                    // Apply background color if enabled
-                    let result = result.map(|mut pr| {
-                        if let Some(bg) = bg_color {
-                            prunr_core::apply_background_color(&mut pr.rgba_image, bg);
-                        }
-                        pr
-                    });
+                    // Background color is applied by the parent at display/export time
+                    // (non-destructive — result_rgba always stores the transparent version)
 
                     match result {
                         Ok(pr) => {

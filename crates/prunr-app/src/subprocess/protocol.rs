@@ -20,7 +20,6 @@ pub enum SubprocessCommand {
         line_mode: LineMode,
         line_strength: f32,
         solid_line_color: Option<[u8; 3]>,
-        bg_color: Option<[u8; 3]>,
         /// IPC temp directory (set by parent so child uses the same PID-namespaced dir)
         ipc_dir: std::path::PathBuf,
     },
