@@ -60,9 +60,9 @@ fn batch_reorder_preserves_items() {
 }
 
 #[test]
-fn auto_remove_setting_defaults_false() {
+fn auto_process_setting_defaults_false() {
     let app = PrunrApp::new_for_test();
-    assert!(!app.settings.auto_remove_on_import);
+    assert!(!app.settings.auto_process_on_import);
 }
 
 #[test]

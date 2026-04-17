@@ -195,12 +195,12 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) {
             // ── Processing ──
             section_heading(ui, "Processing");
             ui.checkbox(
-                &mut app.settings.auto_remove_on_import,
-                RichText::new("Auto-remove on import")
+                &mut app.settings.auto_process_on_import,
+                RichText::new("Auto-process on import")
                     .color(theme::TEXT_PRIMARY)
                     .size(theme::FONT_SIZE_BODY),
             );
-            hint(ui, "Start removing background as soon as images are opened.");
+            hint(ui, "When enabled, each image kicks off Process automatically on import. The full pipeline runs — BG removal or line extraction, whichever matches the current Line mode.");
             ui.add_space(theme::SPACE_MD);
 
             ui.checkbox(
