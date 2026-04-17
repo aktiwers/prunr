@@ -1,9 +1,30 @@
 use std::io::Cursor;
 use std::path::Path;
-use image::{DynamicImage, ImageReader, RgbaImage, imageops::FilterType};
+use image::{DynamicImage, GrayImage, ImageReader, RgbaImage};
 use image::codecs::png::{PngEncoder, CompressionType, FilterType as PngFilter};
 use image::ImageEncoder;
+use fast_image_resize::{images::Image, PixelType, Resizer};
 use crate::types::{CoreError, LARGE_IMAGE_LIMIT};
+
+/// SIMD-accelerated Lanczos3 resize for single-channel (gray) images.
+pub fn resize_gray_lanczos3(src: &GrayImage, dst_width: u32, dst_height: u32) -> GrayImage {
+    let src_image = Image::from_vec_u8(
+        src.width(), src.height(), src.as_raw().clone(), PixelType::U8,
+    ).expect("valid gray image buffer");
+    let mut dst_image = Image::new(dst_width, dst_height, PixelType::U8);
+    Resizer::new().resize(&src_image, &mut dst_image, None).expect("resize failed");
+    GrayImage::from_raw(dst_width, dst_height, dst_image.into_vec()).expect("valid dimensions")
+}
+
+/// SIMD-accelerated Lanczos3 resize for RGB images.
+pub fn resize_rgb_lanczos3(img: &DynamicImage, dst_width: u32, dst_height: u32) -> image::RgbImage {
+    let rgb = img.to_rgb8();
+    let src = Image::from_vec_u8(rgb.width(), rgb.height(), rgb.into_raw(), PixelType::U8x3)
+        .expect("valid RGB buffer");
+    let mut dst = Image::new(dst_width, dst_height, PixelType::U8x3);
+    Resizer::new().resize(&src, &mut dst, None).expect("resize failed");
+    image::RgbImage::from_raw(dst_width, dst_height, dst.into_vec()).expect("valid dimensions")
+}
 
 /// Load an image from a file path. Format detected by file extension.
 /// Supports PNG, JPEG, WebP, BMP (via image crate feature flags in Cargo.toml).
@@ -45,7 +66,13 @@ pub fn downscale_image(img: DynamicImage, max_dim: u32) -> DynamicImage {
     let scale = max_dim as f32 / largest as f32;
     let nw = ((w as f32 * scale).round() as u32).max(1);
     let nh = ((h as f32 * scale).round() as u32).max(1);
-    img.resize_exact(nw, nh, FilterType::Lanczos3)
+    let rgba = img.to_rgba8();
+    let src = Image::from_vec_u8(rgba.width(), rgba.height(), rgba.into_raw(), PixelType::U8x4)
+        .expect("valid RGBA buffer");
+    let mut dst = Image::new(nw, nh, PixelType::U8x4);
+    Resizer::new().resize(&src, &mut dst, None).expect("resize failed");
+    let out = image::RgbaImage::from_raw(nw, nh, dst.into_vec()).expect("valid dimensions");
+    DynamicImage::ImageRgba8(out)
 }
 
 /// Alpha-blend an RGBA image onto a solid background color, making all pixels fully opaque.

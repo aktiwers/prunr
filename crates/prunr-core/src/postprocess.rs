@@ -1,7 +1,8 @@
-use image::{DynamicImage, GrayImage, RgbaImage, imageops::FilterType};
+use image::{DynamicImage, GrayImage, RgbaImage};
 use ndarray::ArrayView4;
 use rayon::prelude::*;
 
+use crate::formats::resize_gray_lanczos3;
 use crate::guided_filter::guided_filter_alpha;
 use crate::types::{MaskSettings, ModelKind};
 
@@ -71,9 +72,9 @@ pub fn postprocess(raw: ArrayView4<f32>, original: &DynamicImage, mask_settings:
     let mask = GrayImage::from_raw(sw as u32, sh as u32, mask_buf)
         .expect("mask buffer size matches dimensions");
 
-    // Resize mask back to original dimensions using Lanczos3
+    // Resize mask back to original dimensions (SIMD-accelerated Lanczos3)
     let (ow, oh) = (original.width(), original.height());
-    let mut mask = image::imageops::resize(&mask, ow, oh, FilterType::Lanczos3);
+    let mut mask = resize_gray_lanczos3(&mask, ow, oh);
 
     // Edge shift: positive erodes (shrinks foreground), negative dilates (expands it)
     if mask_settings.edge_shift.abs() > 0.01 {

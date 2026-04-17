@@ -42,6 +42,7 @@ dirs = "6"
 sysinfo = "0.37"
 bincode = { version = "2", features = ["serde"] }
 memory-stats = "1"
+fast_image_resize = "6"
 
 [profile.release]
 strip = true

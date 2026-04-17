@@ -1,6 +1,6 @@
 use std::sync::Mutex;
 
-use image::{DynamicImage, RgbaImage, imageops::FilterType};
+use image::{DynamicImage, RgbaImage};
 use ndarray::Array4;
 use ort::{inputs, session::Session, value::Tensor};
 
@@ -71,7 +71,7 @@ fn preprocess(img: &DynamicImage) -> Array4<f32> {
     } else {
         img
     };
-    let resized = source.resize_exact(DEXINED_W, DEXINED_H, FilterType::Lanczos3).to_rgb8();
+    let resized = crate::formats::resize_rgb_lanczos3(source, DEXINED_W, DEXINED_H);
     let raw = resized.as_raw();
     let h = DEXINED_H as usize;
     let w = DEXINED_W as usize;
@@ -133,7 +133,7 @@ fn detect_edges_inner(
     // Resize edge mask to original dimensions
     let mask = image::GrayImage::from_raw(w as u32, h as u32, mask_buf)
         .expect("edge mask buffer size matches dimensions");
-    let mask = image::imageops::resize(&mask, ow, oh, FilterType::Lanczos3);
+    let mask = crate::formats::resize_gray_lanczos3(&mask, ow, oh);
 
     // Compose: edge mask as alpha, optionally solid RGB color
     let mask_raw = mask.as_raw();

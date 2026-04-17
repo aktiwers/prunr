@@ -1,6 +1,7 @@
-use image::{DynamicImage, imageops::FilterType};
+use image::DynamicImage;
 use ndarray::Array4;
 
+use crate::formats::resize_rgb_lanczos3;
 use crate::types::ModelKind;
 
 const REMBG_SIZE: u32 = 320;
@@ -37,7 +38,7 @@ fn to_nchw(resized: &image::RgbImage, size: u32, divisor: f32) -> Array4<f32> {
 }
 
 fn preprocess_rembg(img: &DynamicImage) -> Array4<f32> {
-    let resized = img.resize_exact(REMBG_SIZE, REMBG_SIZE, FilterType::Lanczos3).to_rgb8();
+    let resized = resize_rgb_lanczos3(img, REMBG_SIZE, REMBG_SIZE);
     let max_val = resized
         .pixels()
         .flat_map(|p| p.0.iter().copied())
@@ -48,7 +49,7 @@ fn preprocess_rembg(img: &DynamicImage) -> Array4<f32> {
 }
 
 fn preprocess_birefnet(img: &DynamicImage) -> Array4<f32> {
-    let resized = img.resize_exact(BIREFNET_SIZE, BIREFNET_SIZE, FilterType::Lanczos3).to_rgb8();
+    let resized = resize_rgb_lanczos3(img, BIREFNET_SIZE, BIREFNET_SIZE);
     to_nchw(&resized, BIREFNET_SIZE, 255.0)
 }
 
