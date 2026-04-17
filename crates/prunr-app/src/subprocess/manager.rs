@@ -77,6 +77,7 @@ impl SubprocessManager {
         write_message(&mut stdin_writer, &SubprocessCommand::Init {
             model, jobs, mask, force_cpu, line_mode,
             line_strength, solid_line_color, bg_color,
+            ipc_dir: ipc_temp_dir(),
         }).map_err(|e| format!("Failed to send Init: {e}"))?;
 
         // Spawn reader thread for non-blocking stdout consumption
