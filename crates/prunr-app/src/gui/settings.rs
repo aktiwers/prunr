@@ -59,7 +59,9 @@ impl Settings {
 
     /// Load from disk, falling back to defaults if missing or corrupt.
     /// Migrates v1 per-image fields (mask_gamma, bg_color, line_mode, ...)
-    /// into `item_defaults`.
+    /// into a "Previous defaults" preset — preserves the user's customizations
+    /// without forcing them onto every new import. User can opt-in by applying
+    /// the preset explicitly from the toolbar.
     pub fn load() -> Self {
         let Some(path) = Self::config_path() else { return Self::default() };
         let Ok(data) = std::fs::read_to_string(&path) else { return Self::default() };
@@ -82,14 +84,19 @@ impl Settings {
             }
         };
 
-        // Detect v1 format (presence of old per-image keys) and migrate.
-        // Only migrate if item_defaults is still at ItemSettings::default(),
-        // so we don't clobber an already-migrated v2 file on subsequent loads.
+        // Detect v1 format (presence of old per-image keys) and stash the
+        // migrated values as a preset. New imports still get factory defaults;
+        // user can apply "Previous defaults" from the toolbar if they want
+        // their v1 preferences back. Avoids re-migrating on every launch.
         let is_v1 = value.get("mask_gamma").is_some()
             || value.get("apply_bg_color").is_some()
             || value.get("line_mode").is_some();
-        if is_v1 && settings.item_defaults == ItemSettings::default() {
-            settings.item_defaults = migrate_v1_item_settings(&value);
+        const LEGACY_PRESET: &str = "Previous defaults";
+        if is_v1 && !settings.presets.contains_key(LEGACY_PRESET) {
+            let legacy = migrate_v1_item_settings(&value);
+            if legacy != ItemSettings::default() {
+                settings.presets.insert(LEGACY_PRESET.to_string(), legacy);
+            }
         }
 
         settings
@@ -128,15 +135,19 @@ impl Settings {
     }
 
     /// ItemSettings template for new batch items. Resolves `default_preset`
-    /// against the preset map, falling back to `item_defaults` if the named
-    /// preset is missing.
+    /// against the preset map; if no preset is set (or the named one is
+    /// missing), returns factory defaults.
+    ///
+    /// The `item_defaults` field is kept for serde compatibility with earlier
+    /// Phase 1 builds, but no longer influences new imports — presets are the
+    /// single source of truth for "what new images should start with."
     pub fn item_defaults_for_new_item(&self) -> ItemSettings {
         if let Some(ref name) = self.default_preset {
             if let Some(preset) = self.presets.get(name) {
                 return *preset;
             }
         }
-        self.item_defaults
+        ItemSettings::default()
     }
 }
 
@@ -301,12 +312,27 @@ mod tests {
     }
 
     #[test]
-    fn item_defaults_for_new_item_falls_back_if_preset_missing() {
-        let mut s = Settings::default();
-        s.default_preset = Some("NonExistent".to_string());
-        s.item_defaults.gamma = 1.2;
-
+    fn item_defaults_for_new_item_is_factory_when_no_preset() {
+        // No default_preset, no manually-edited item_defaults → factory defaults.
+        // The v1-migrated legacy values live in the "Previous defaults" preset
+        // (opt-in via the toolbar), not inherited by new imports.
+        let s = Settings::default();
         let new_item = s.item_defaults_for_new_item();
-        assert_eq!(new_item.gamma, 1.2);
+        assert_eq!(new_item, ItemSettings::default());
+        assert_eq!(new_item.line_mode, LineMode::Off);
+        assert_eq!(new_item.gamma, 1.0);
+    }
+
+    #[test]
+    fn item_defaults_for_new_item_ignores_item_defaults_field() {
+        // `item_defaults` is a legacy field kept for serde compat; it must not
+        // leak into new imports. Only `default_preset` can override factory
+        // defaults now.
+        let mut s = Settings::default();
+        s.item_defaults.gamma = 1.3;
+        s.item_defaults.line_mode = LineMode::EdgesOnly;
+        let new_item = s.item_defaults_for_new_item();
+        assert_eq!(new_item, ItemSettings::default());
+        assert_eq!(new_item.line_mode, LineMode::Off);
     }
 }
