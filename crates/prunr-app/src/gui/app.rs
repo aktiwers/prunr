@@ -282,6 +282,9 @@ pub struct PrunrApp {
     dispatch_recipe: Option<prunr_core::ProcessingRecipe>,
     /// Last time periodic history cleanup ran.
     last_history_cleanup: std::time::Instant,
+    /// Tier 2 live preview dispatcher. Debounces chip tweaks and runs
+    /// postprocess_from_flat / finalize_edges on rayon threads.
+    pub(crate) live_preview: super::live_preview::LivePreview,
 }
 
 /// Compute dimensions that fit within max_w x max_h preserving aspect ratio.
@@ -396,6 +399,7 @@ impl PrunrApp {
             admission_tx: None,
             dispatch_recipe: None,
             last_history_cleanup: std::time::Instant::now(),
+            live_preview: super::live_preview::LivePreview::default(),
         }
     }
 
@@ -449,6 +453,7 @@ impl PrunrApp {
             admission_tx: None,
             dispatch_recipe: None,
             last_history_cleanup: std::time::Instant::now(),
+            live_preview: super::live_preview::LivePreview::default(),
         }
     }
 
@@ -1414,6 +1419,64 @@ impl PrunrApp {
         }
     }
 
+    /// Live-preview pump: dispatch debounced Tier 2 reruns + apply completed ones.
+    /// Called once per frame at the start of `ui()` so the current frame renders
+    /// with the newest available results.
+    fn pump_live_preview(&mut self, ctx: &egui::Context) {
+        // Dispatch any pending previews whose debounce has expired. The closure
+        // snapshots the inputs (original image + cached tensors + settings) for
+        // each dispatch — run on the UI thread, but only for items that are
+        // actually dispatched this frame.
+        let batch_items = &self.batch_items;
+        let wait = self.live_preview.tick(|id, kind| {
+            use crate::gui::live_preview::{DispatchInputs, PreviewKind, decompress_edge, decompress_seg};
+            let item = batch_items.iter().find(|b| b.id == id)?;
+            let rgba = item.source_rgba.as_ref()?;
+            // One clone here — live preview workers need an owned DynamicImage.
+            // Clones the ~48 MB RGBA once per dispatch (not per frame); the user
+            // has paused typing for 300ms so a single clone is acceptable.
+            let original = std::sync::Arc::new(image::DynamicImage::ImageRgba8((**rgba).clone()));
+            let seg_tensor = item.cached_tensor.as_ref().and_then(decompress_seg);
+            let edge_tensor = item.cached_edge_tensor.as_ref().and_then(decompress_edge);
+            // Abort dispatch if the cache needed for this kind isn't available.
+            // (User must Process first to populate the tensor cache.)
+            match kind {
+                PreviewKind::Mask if seg_tensor.is_none() => return None,
+                PreviewKind::Edge if edge_tensor.is_none() => return None,
+                _ => {}
+            }
+            Some(DispatchInputs {
+                kind,
+                original,
+                settings: item.settings,
+                seg_tensor,
+                edge_tensor,
+            })
+        });
+
+        // If a future dispatch is waiting, schedule a repaint when the debounce
+        // elapses so tick() can fire.
+        if let Some(w) = wait {
+            ctx.request_repaint_after(w);
+        }
+
+        // Apply any completed previews to their items. Invalidate the result
+        // texture so the canvas rebuilds it on the next render pass.
+        let results = self.live_preview.drain_results();
+        if !results.is_empty() {
+            for r in results {
+                if let Some(item) = self.batch_items.iter_mut().find(|b| b.id == r.item_id) {
+                    item.result_rgba = Some(std::sync::Arc::new(r.rgba));
+                    item.result_texture = None;
+                    item.result_tex_pending = false;
+                }
+            }
+            self.result_texture = None;
+            self.pending_batch_sync = true;
+            ctx.request_repaint();
+        }
+    }
+
     /// 512 MB budget for compressed tensor caches across all items.
     /// Budget covers BOTH segmentation (`cached_tensor`) and DexiNed
     /// (`cached_edge_tensor`) caches combined.
@@ -2148,6 +2211,11 @@ impl eframe::App for PrunrApp {
 
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        // Phase 3: dispatch any debounced previews + apply completed ones
+        // before we render. Tick returns a hint of how long to wait before
+        // the next scheduled dispatch, so we schedule a repaint accordingly.
+        self.pump_live_preview(ui.ctx());
+
         let panel_frame = egui::Frame {
             fill: theme::BG_SECONDARY,
             stroke: egui::Stroke::new(1.0, egui::Color32::from_rgb(0x2a, 0x2a, 0x2a)),
@@ -2175,6 +2243,7 @@ impl eframe::App for PrunrApp {
                 chip::CHIP_HEIGHT * 2.0 + theme::SPACE_XS + theme::SPACE_SM * 2.0
             };
             let mut bg_changed = false;
+            let mut toolbar_change = adjustments_toolbar::ToolbarChange::default();
             egui::Panel::top("adjustments_toolbar")
                 .exact_size(height)
                 .frame(panel_frame)
@@ -2183,19 +2252,32 @@ impl eframe::App for PrunrApp {
                     let app_settings_ref: &crate::gui::settings::Settings = &self.settings;
                     let item_settings_ref: &mut crate::gui::item_settings::ItemSettings =
                         &mut self.batch_items[idx].settings;
-                    let change = adjustments_toolbar::render(
+                    toolbar_change = adjustments_toolbar::render(
                         ui,
                         item_settings_ref,
                         app_settings_ref,
                     );
-                    if change.any() {
-                        // Mask / edge tweaks won't visibly change the result until
-                        // the user clicks Process (live preview lands in Phase 3).
-                        // bg is the exception — it's applied at display-time, so
-                        // the result texture needs rebuilding immediately.
-                        bg_changed = change.bg;
-                    }
+                    // bg is applied at display-time, not via Tier 2 — rebuild
+                    // texture immediately. Phase 4 moves this to GPU-side fill.
+                    bg_changed = toolbar_change.bg;
                 });
+            // Register mask / edge tweaks with the live preview dispatcher.
+            // The dispatcher debounces (300ms) and runs Tier 2 on rayon threads;
+            // results flow back to us via drain_results (see end of ui()).
+            if self.settings.live_preview && (toolbar_change.mask || toolbar_change.edge) {
+                let idx = self.selected_batch_index.min(self.batch_items.len() - 1);
+                let item_id = self.batch_items[idx].id;
+                let kind = if toolbar_change.mask {
+                    crate::gui::live_preview::PreviewKind::Mask
+                } else {
+                    crate::gui::live_preview::PreviewKind::Edge
+                };
+                self.live_preview.mark_tweak(item_id, kind);
+                // Wake up after the debounce elapses so tick() can dispatch.
+                ui.ctx().request_repaint_after(
+                    crate::gui::live_preview::DEBOUNCE,
+                );
+            }
             if bg_changed {
                 let idx = self.selected_batch_index.min(self.batch_items.len() - 1);
                 self.batch_items[idx].result_texture = None;

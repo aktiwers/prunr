@@ -34,10 +34,98 @@ impl EdgeEngine {
 
     /// Run edge detection on an image. Returns RGBA where edges are opaque.
     /// If `line_color` is Some, all edge pixels are painted that color.
+    ///
+    /// Convenience wrapper around `infer_tensor` + `finalize_edges` for callers
+    /// that don't need the intermediate tensor (e.g. CLI or single-shot flows).
     pub fn detect(&self, original: &DynamicImage, line_strength: f32, line_color: Option<[u8; 3]>) -> Result<RgbaImage, CoreError> {
+        let (tensor, h, w) = self.infer_tensor(original)?;
+        Ok(finalize_edges(&tensor, h, w, original, line_strength, line_color))
+    }
+
+    /// Run only the DexiNed inference stage. Returns the raw sigmoid-logits
+    /// tensor at DexiNed's native resolution (480×640), plus (height, width).
+    ///
+    /// Phase 3 Tier 2 edge preview path: parent caches this tensor and reruns
+    /// `finalize_edges` with new line_strength / line_color without re-running
+    /// the model (~20-100ms instead of 200ms-10s).
+    pub fn infer_tensor(&self, original: &DynamicImage) -> Result<(Vec<f32>, u32, u32), CoreError> {
         let mut session = self.session.lock()
             .map_err(|e| CoreError::Inference(format!("Edge session lock failed: {e}")))?;
-        detect_edges_inner(&mut session, original, line_strength, line_color)
+
+        let input_array = preprocess(original);
+        let input_name = session.inputs()[0].name().to_string();
+        let input_tensor = Tensor::from_array(input_array)
+            .map_err(|e| CoreError::Inference(format!("Failed to create edge tensor: {e}")))?;
+        let outputs = session
+            .run(inputs![input_name.as_str() => &input_tensor])
+            .map_err(|e| CoreError::Inference(format!("Edge detection failed: {e}")))?;
+
+        // Take the fused output (last one: "block_cat")
+        let fused_idx = outputs.len() - 1;
+        let edge_map = outputs[fused_idx]
+            .try_extract_array::<f32>()
+            .map_err(|e| CoreError::Inference(format!("Failed to extract edge output: {e}")))?;
+        let edge_slice = edge_map.as_slice().unwrap();
+        Ok((edge_slice.to_vec(), DEXINED_H, DEXINED_W))
+    }
+}
+
+/// Apply threshold + resize + compose stages to a cached DexiNed tensor.
+/// Used by Tier 2 edge reruns to cheaply re-generate the final RGBA without
+/// re-running the model.
+///
+/// - `edge_tensor` = raw sigmoid-logits (pre-threshold) at (tensor_h, tensor_w)
+/// - `original` = the image DexiNed saw (used for RGB when `line_color` is None)
+/// - `line_strength` = 0.0–1.0, maps to internal threshold via an exp curve
+/// - `line_color` = Some → paint all edges that color; None → preserve original RGB
+pub fn finalize_edges(
+    edge_tensor: &[f32],
+    tensor_h: u32,
+    tensor_w: u32,
+    original: &DynamicImage,
+    line_strength: f32,
+    line_color: Option<[u8; 3]>,
+) -> RgbaImage {
+    let (ow, oh) = (original.width(), original.height());
+    let h = tensor_h as usize;
+    let w = tensor_w as usize;
+
+    // Sigmoid → edge probability, then apply strength as contrast/threshold control.
+    // Exponential curve: slider 0.0→threshold 0.95, slider 0.5→0.3, slider 1.0→0.01
+    let s = line_strength.clamp(0.0, 1.0);
+    let threshold = (1.0 - s).powi(2) * 0.95 + 0.01;
+    let mut mask_buf = vec![0u8; h * w];
+    for i in 0..h * w {
+        let prob = 1.0 / (1.0 + (-edge_tensor[i]).exp());
+        // Smooth step: remap [threshold-0.1, threshold+0.1] to [0, 1] for anti-aliased edges
+        let edge = ((prob - threshold + 0.1) / 0.2).clamp(0.0, 1.0);
+        let val = edge * edge * (3.0 - 2.0 * edge); // smoothstep
+        mask_buf[i] = (val * 255.0) as u8;
+    }
+
+    // Resize edge mask to original dimensions
+    let mask = image::GrayImage::from_raw(w as u32, h as u32, mask_buf)
+        .expect("edge mask buffer size matches dimensions");
+    let mask = crate::formats::resize_gray_lanczos3(&mask, ow, oh);
+
+    // Compose: edge mask as alpha, optionally solid RGB color
+    let mask_raw = mask.as_raw();
+    if let Some(c) = line_color {
+        let mut buf = vec![0u8; (ow * oh * 4) as usize];
+        for i in 0..(ow * oh) as usize {
+            buf[i * 4]     = c[0];
+            buf[i * 4 + 1] = c[1];
+            buf[i * 4 + 2] = c[2];
+            buf[i * 4 + 3] = mask_raw[i];
+        }
+        RgbaImage::from_raw(ow, oh, buf).expect("edge output buffer size matches dimensions")
+    } else {
+        let mut rgba = original.to_rgba8();
+        let out_raw = rgba.as_mut();
+        for i in 0..(ow * oh) as usize {
+            out_raw[i * 4 + 3] = mask_raw[i];
+        }
+        rgba
     }
 }
 
@@ -89,72 +177,43 @@ fn preprocess(img: &DynamicImage) -> Array4<f32> {
     out
 }
 
-fn detect_edges_inner(
-    session: &mut Session,
-    original: &DynamicImage,
-    line_strength: f32,
-    line_color: Option<[u8; 3]>,
-) -> Result<RgbaImage, CoreError> {
-    let (ow, oh) = (original.width(), original.height());
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use image::{DynamicImage, RgbImage, Rgb};
 
-    let input_array = preprocess(original);
-    let input_name = session.inputs()[0].name().to_string();
-    let input_tensor = Tensor::from_array(input_array)
-        .map_err(|e| CoreError::Inference(format!("Failed to create edge tensor: {e}")))?;
-
-    let outputs = session
-        .run(inputs![input_name.as_str() => &input_tensor])
-        .map_err(|e| CoreError::Inference(format!("Edge detection failed: {e}")))?;
-
-    // Take the fused output (last one: "block_cat")
-    let fused_idx = outputs.len() - 1;
-    let edge_map = outputs[fused_idx]
-        .try_extract_array::<f32>()
-        .map_err(|e| CoreError::Inference(format!("Failed to extract edge output: {e}")))?;
-
-    let edge_slice = edge_map.as_slice().unwrap();
-    let h = DEXINED_H as usize;
-    let w = DEXINED_W as usize;
-
-    // Sigmoid → edge probability, then apply strength as contrast/threshold control.
-    // Exponential curve: slider 0.0→threshold 0.95, slider 0.5→0.3, slider 1.0→0.01
-    // This spreads perceptual detail evenly across the slider range.
-    let s = line_strength.clamp(0.0, 1.0);
-    let threshold = (1.0 - s).powi(2) * 0.95 + 0.01;
-    let mut mask_buf = vec![0u8; h * w];
-    for i in 0..h * w {
-        let prob = 1.0 / (1.0 + (-edge_slice[i]).exp());
-        // Smooth step: remap [threshold-0.1, threshold+0.1] to [0, 1] for anti-aliased edges
-        let edge = ((prob - threshold + 0.1) / 0.2).clamp(0.0, 1.0);
-        let val = edge * edge * (3.0 - 2.0 * edge); // smoothstep
-        mask_buf[i] = (val * 255.0) as u8;
+    fn solid_rgb(w: u32, h: u32) -> DynamicImage {
+        DynamicImage::ImageRgb8(RgbImage::from_pixel(w, h, Rgb([120, 120, 120])))
     }
 
-    // Resize edge mask to original dimensions
-    let mask = image::GrayImage::from_raw(w as u32, h as u32, mask_buf)
-        .expect("edge mask buffer size matches dimensions");
-    let mask = crate::formats::resize_gray_lanczos3(&mask, ow, oh);
+    #[test]
+    fn finalize_edges_solid_color_paints_edges() {
+        // Synthetic edge tensor: half high logits, half zero.
+        let w = DEXINED_W as usize;
+        let h = DEXINED_H as usize;
+        let mut tensor = vec![0.0_f32; h * w];
+        for i in 0..h * w / 2 {
+            tensor[i] = 10.0; // sigmoid → ~1 → edge
+        }
+        let original = solid_rgb(64, 48);
+        let out = finalize_edges(&tensor, h as u32, w as u32, &original, 0.5, Some([255, 0, 0]));
+        assert_eq!(out.width(), 64);
+        assert_eq!(out.height(), 48);
+        // With high-logit side → opaque red, zero-logit → transparent.
+        let strong_red = out.get_pixel(0, 0);
+        assert_eq!([strong_red[0], strong_red[1], strong_red[2]], [255, 0, 0]);
+    }
 
-    // Compose: edge mask as alpha, optionally solid RGB color
-    let mask_raw = mask.as_raw();
-    let rgba = if let Some(c) = line_color {
-        // Solid color: build directly without copying original pixels
-        let mut buf = vec![0u8; (ow * oh * 4) as usize];
-        for i in 0..(ow * oh) as usize {
-            buf[i * 4]     = c[0];
-            buf[i * 4 + 1] = c[1];
-            buf[i * 4 + 2] = c[2];
-            buf[i * 4 + 3] = mask_raw[i];
-        }
-        RgbaImage::from_raw(ow, oh, buf).expect("edge output buffer size matches dimensions")
-    } else {
-        // Preserve original RGB, replace alpha with edge mask
-        let mut rgba = original.to_rgba8();
-        let out_raw = rgba.as_mut();
-        for i in 0..(ow * oh) as usize {
-            out_raw[i * 4 + 3] = mask_raw[i];
-        }
-        rgba
-    };
-    Ok(rgba)
+    #[test]
+    fn finalize_edges_preserves_original_rgb_when_no_line_color() {
+        let w = DEXINED_W as usize;
+        let h = DEXINED_H as usize;
+        let tensor = vec![10.0_f32; h * w]; // all edges
+        let original = solid_rgb(32, 32);
+        let out = finalize_edges(&tensor, h as u32, w as u32, &original, 0.5, None);
+        // Original color preserved
+        assert_eq!(out.get_pixel(0, 0)[0], 120);
+        assert_eq!(out.get_pixel(0, 0)[1], 120);
+        assert_eq!(out.get_pixel(0, 0)[2], 120);
+    }
 }

@@ -253,6 +253,9 @@ pub fn run_worker() -> ! {
                     // future Tier 2 mask reruns.  Other modes don't benefit from
                     // tensor caching so they use the monolithic pipeline.
                     let mut tensor_for_cache: Option<(Vec<f32>, u32, u32)> = None;
+                    // DexiNed pre-threshold tensor — captured for Tier 2 edge reruns
+                    // (live-preview of line_strength without re-running the model).
+                    let mut edge_tensor_for_cache: Option<(Vec<f32>, u32, u32)> = None;
 
                     let result = match line_mode {
                         LineMode::EdgesOnly => {
@@ -266,20 +269,32 @@ pub fn run_worker() -> ! {
                                 }
                             };
                             img_ref.and_then(|img| {
-                                edge_eng.as_ref().unwrap().detect(img, line_strength, solid_line_color)
-                                    .map(|rgba_image| ProcessResult {
+                                let eng_ref = edge_eng.as_ref().unwrap();
+                                eng_ref.infer_tensor(img).map(|(tensor, h, w)| {
+                                    let rgba_image = prunr_core::finalize_edges(
+                                        &tensor, h, w, img, line_strength, solid_line_color,
+                                    );
+                                    edge_tensor_for_cache = Some((tensor, h, w));
+                                    ProcessResult {
                                         rgba_image,
                                         active_provider: provider.clone(),
-                                    })
+                                    }
+                                })
                             })
                         }
                         LineMode::SubjectOutline => {
                             if let Some(ref img) = chain_img {
-                                edge_eng.as_ref().unwrap().detect(img, line_strength, solid_line_color)
-                                    .map(|rgba_image| ProcessResult {
+                                let eng_ref = edge_eng.as_ref().unwrap();
+                                eng_ref.infer_tensor(img).map(|(tensor, h, w)| {
+                                    let rgba_image = prunr_core::finalize_edges(
+                                        &tensor, h, w, img, line_strength, solid_line_color,
+                                    );
+                                    edge_tensor_for_cache = Some((tensor, h, w));
+                                    ProcessResult {
                                         rgba_image,
                                         active_provider: provider.clone(),
-                                    })
+                                    }
+                                })
                             } else {
                                 match engine.as_ref() {
                                     None => Err(prunr_core::CoreError::Inference(
@@ -291,11 +306,17 @@ pub fn run_worker() -> ! {
                                     ),
                                 }.and_then(|pr| {
                                     let img = image::DynamicImage::ImageRgba8(pr.rgba_image);
-                                    edge_eng.as_ref().unwrap().detect(&img, line_strength, solid_line_color)
-                                        .map(|rgba_image| ProcessResult {
+                                    let eng_ref = edge_eng.as_ref().unwrap();
+                                    eng_ref.infer_tensor(&img).map(|(tensor, h, w)| {
+                                        let rgba_image = prunr_core::finalize_edges(
+                                            &tensor, h, w, &img, line_strength, solid_line_color,
+                                        );
+                                        edge_tensor_for_cache = Some((tensor, h, w));
+                                        ProcessResult {
                                             rgba_image,
                                             active_provider: pr.active_provider,
-                                        })
+                                        }
+                                    })
                                 })
                             }
                         }
@@ -416,6 +437,18 @@ pub fn run_worker() -> ! {
                                 (None, None, None)
                             };
 
+                            // Write DexiNed edge tensor cache similarly (for Tier 2 edge reruns).
+                            let (ecp, ech, ecw) = if let Some((ref edata, eh, ew)) = edge_tensor_for_cache {
+                                let ep = ipc.join(format!("edge_{item_id}.raw"));
+                                let ebytes = prunr_app::subprocess::ipc::f32s_to_le_bytes(edata);
+                                match std::fs::write(&ep, &ebytes) {
+                                    Ok(()) => (Some(ep), Some(eh), Some(ew)),
+                                    Err(_) => (None, None, None),
+                                }
+                            } else {
+                                (None, None, None)
+                            };
+
                             // Write result RGBA to temp file
                             let (w, h) = (pr.rgba_image.width(), pr.rgba_image.height());
                             let result_path = ipc.join(format!("result_{item_id}.raw"));
@@ -430,11 +463,9 @@ pub fn run_worker() -> ! {
                                         tensor_cache_path: tcp,
                                         tensor_cache_height: tch,
                                         tensor_cache_width: tcw,
-                                        // Edge tensor cache populated in Phase 3 when
-                                        // EdgeEngine exposes its pre-threshold output.
-                                        edge_cache_path: None,
-                                        edge_cache_height: None,
-                                        edge_cache_width: None,
+                                        edge_cache_path: ecp,
+                                        edge_cache_height: ech,
+                                        edge_cache_width: ecw,
                                     });
                                 }
                                 Err(e) => {
