@@ -389,8 +389,8 @@ impl PrunrApp {
             pending_open_dialog: false,
             bg_io,
             toasts: egui_notify::Toasts::default()
-                    .with_anchor(egui_notify::Anchor::TopLeft)
-                    .with_margin(egui::vec2(theme::SPACE_SM, theme::TOOLBAR_HEIGHT + theme::SPACE_SM)),
+                    .with_anchor(egui_notify::Anchor::BottomLeft)
+                    .with_margin(egui::vec2(theme::SPACE_SM, theme::STATUS_BAR_HEIGHT + theme::SPACE_SM)),
             drag_out_pending: None,
             drag_out_active: Arc::new(AtomicBool::new(false)),
             drag_out_items: Arc::new(Mutex::new(HashSet::new())),
@@ -443,8 +443,8 @@ impl PrunrApp {
             pending_open_dialog: false,
             bg_io,
             toasts: egui_notify::Toasts::default()
-                    .with_anchor(egui_notify::Anchor::TopLeft)
-                    .with_margin(egui::vec2(theme::SPACE_SM, theme::TOOLBAR_HEIGHT + theme::SPACE_SM)),
+                    .with_anchor(egui_notify::Anchor::BottomLeft)
+                    .with_margin(egui::vec2(theme::SPACE_SM, theme::STATUS_BAR_HEIGHT + theme::SPACE_SM)),
             drag_out_pending: None,
             drag_out_active: Arc::new(AtomicBool::new(false)),
             drag_out_items: Arc::new(Mutex::new(HashSet::new())),
@@ -1336,6 +1336,10 @@ impl PrunrApp {
         if self.state == AppState::Empty {
             self.state = AppState::Loaded;
         }
+        // Fit-to-window on first import so images open at a sensible size
+        // (matching Ctrl+0). Any subsequent image change also fits — the reset
+        // happens via zoom_state.reset() when the user navigates away.
+        self.zoom_state.pending_fit_zoom = true;
         self.pending_batch_sync = true;
     }
 
@@ -2250,10 +2254,30 @@ impl eframe::App for PrunrApp {
             .show_inside(ui, |ui| toolbar::render(ui, self));
 
         // Row 2 + 3: persistent adjustments toolbar. Only renders when the
-        // batch has an item to bind to. Shift+H hides it (Phase 2.8 wires
-        // up the hotkey; the field is already on PrunrApp).
-        let show_adjustments = !self.adjustments_hidden
-            && !self.batch_items.is_empty();
+        // batch has an item to bind to. Shift+H hides it; `auto_hide_adjustments`
+        // hides it when the cursor is below a peek zone at the top of the window.
+        //
+        // Peek zone = first ~(TOOLBAR_HEIGHT + 60px) of the window vertically.
+        // Toolbar stays visible while any chip/combo popup is open so that
+        // the user interacting with a popover doesn't have the toolbar yanked
+        // out from under their cursor.
+        let show_adjustments = if self.adjustments_hidden || self.batch_items.is_empty() {
+            false
+        } else if self.settings.auto_hide_adjustments {
+            let screen_rect = ui.ctx().content_rect();
+            let peek_zone = egui::Rect::from_min_size(
+                screen_rect.min,
+                egui::vec2(screen_rect.width(), theme::TOOLBAR_HEIGHT + 80.0),
+            );
+            let hover_in_peek = ui
+                .ctx()
+                .input(|i| i.pointer.hover_pos().is_some_and(|p| peek_zone.contains(p)));
+            #[allow(deprecated)]
+            let popup_open = ui.ctx().memory(|m| m.any_popup_open());
+            hover_in_peek || popup_open
+        } else {
+            true
+        };
         if show_adjustments {
             let line_mode = self.batch_items
                 .get(self.selected_batch_index.min(self.batch_items.len() - 1))
@@ -2266,21 +2290,39 @@ impl eframe::App for PrunrApp {
             };
             let mut bg_changed = false;
             let mut toolbar_change = adjustments_toolbar::ToolbarChange::default();
+            let is_processing = self.state == AppState::Processing;
             egui::Panel::top("adjustments_toolbar")
                 .exact_size(height)
                 .frame(panel_frame)
                 .show_inside(ui, |ui| {
                     let idx = self.selected_batch_index.min(self.batch_items.len() - 1);
+                    let settings_ref: &mut crate::gui::settings::Settings = &mut self.settings;
                     let item_settings_ref: &mut crate::gui::item_settings::ItemSettings =
                         &mut self.batch_items[idx].settings;
                     toolbar_change = adjustments_toolbar::render(
                         ui,
                         item_settings_ref,
+                        settings_ref,
+                        is_processing,
                     );
                     // bg is applied at display-time, not via Tier 2 — rebuild
                     // texture immediately. Phase 4 moves this to GPU-side fill.
                     bg_changed = toolbar_change.bg;
                 });
+            // Model swap: clamp jobs, show toast, invalidate caches.
+            if toolbar_change.model_changed {
+                self.toasts.info(format!(
+                    "{} loaded",
+                    crate::gui::views::model_name(self.settings.model),
+                ));
+            }
+            // Model change OR preset apply invalidates both tensor caches
+            // (old caches were run with different params).
+            if toolbar_change.needs_cache_invalidation() {
+                let idx = self.selected_batch_index.min(self.batch_items.len() - 1);
+                self.batch_items[idx].cached_tensor = None;
+                self.batch_items[idx].cached_edge_tensor = None;
+            }
             // Register mask / edge tweaks with the live preview dispatcher.
             // `mark_tweak` debounces; `flush` fires immediately when a chip
             // signals the edit has settled (slider released, toggle flipped,

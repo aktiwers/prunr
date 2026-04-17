@@ -13,9 +13,12 @@ use egui::{RichText, Ui};
 use egui_material_icons::icons::*;
 
 use crate::gui::item_settings::ItemSettings;
+use crate::gui::settings::{Settings, SettingsModel};
 use crate::gui::theme;
-use crate::gui::views::chip;
+use crate::gui::views::{chip, preset_dropdown};
 use prunr_core::LineMode;
+
+use super::model_label;
 
 /// Summary of what a toolbar render cycle changed.
 ///
@@ -24,17 +27,29 @@ use prunr_core::LineMode;
 /// - `commit` — the edit has settled (slider released, checkbox toggled,
 ///   color picked). When true the caller should FLUSH any pending live
 ///   preview instead of debouncing further.
+/// - `model_changed` — the segmentation model was swapped via the row-2
+///   dropdown. Caller invalidates both tensor caches (old caches were run
+///   with a different model) and should kick off a fresh Tier 1 Process.
+/// - `preset_applied` — a preset replaced the current item's settings.
+///   Invalidates both caches since any/all fields may have changed.
 #[derive(Default, Debug, Clone, Copy)]
 pub struct ToolbarChange {
     pub mask: bool,
     pub edge: bool,
     pub bg: bool,
     pub commit: bool,
+    pub model_changed: bool,
+    pub preset_applied: bool,
 }
 
 impl ToolbarChange {
     pub fn any(&self) -> bool {
         self.mask || self.edge || self.bg
+    }
+    /// Whether the change invalidates the cached tensors (mask + edge).
+    /// Caller clears them + the user should re-Process for a correct result.
+    pub fn needs_cache_invalidation(&self) -> bool {
+        self.model_changed || self.preset_applied
     }
 }
 
@@ -69,9 +84,16 @@ impl Defaults {
 }
 
 /// Render rows 2 + 3. Returns a `ToolbarChange` summarizing what was edited.
+///
+/// `app_settings` is `&mut` because Row 2 now hosts the model dropdown
+/// (app-global) and the preset dropdown (reads/writes preset map). Phase 2's
+/// signature took only `&mut ItemSettings`; Phase 3 added Model+Preset here
+/// per user feedback.
 pub fn render(
     ui: &mut Ui,
     item_settings: &mut ItemSettings,
+    app_settings: &mut Settings,
+    processing: bool,
 ) -> ToolbarChange {
     let mut change = ToolbarChange::default();
     let defaults = Defaults::new();
@@ -91,8 +113,11 @@ pub fn render(
         if ch.commit { acc.commit = true; }
     };
 
-    // ── Row 2: mask + composite ──
+    // ── Row 2: model (leftmost) + mask + composite + preset + reset (right) ──
     ui.horizontal(|ui| {
+        // Model dropdown at the very left of row 2.
+        render_model_dropdown(ui, app_settings, processing, &mut change);
+
         // Mask knobs are irrelevant when segmentation is skipped (EdgesOnly mode).
         let mask_active = item_settings.line_mode != LineMode::EdgesOnly;
         ui.add_enabled_ui(mask_active, |ui| {
@@ -146,11 +171,43 @@ pub fn render(
             defaults.bg_value,
         ), Tier::Bg, &mut change);
 
-        // Overflow / kebab menu at the end of row 2.
+        // Right-aligned cluster: reset, preset. Right-to-left layout fills
+        // from the right edge so items stack: [..free space..] [preset] [↺].
         ui.with_layout(
             egui::Layout::right_to_left(egui::Align::Center),
             |ui| {
-                kebab_menu(ui, item_settings, &defaults);
+                // Reset-all-knobs button visible directly (per user feedback —
+                // was previously hidden in the kebab overflow menu).
+                let reset_btn = egui::Button::new(
+                    RichText::new(ICON_RESTART_ALT.codepoint)
+                        .color(theme::TEXT_SECONDARY)
+                        .size(18.0),
+                )
+                .fill(theme::BG_SECONDARY)
+                .corner_radius(theme::BUTTON_ROUNDING)
+                .min_size(egui::vec2(chip::CHIP_HEIGHT, chip::CHIP_HEIGHT));
+                if ui.add(reset_btn)
+                    .on_hover_text("Reset all knobs on this image to factory defaults")
+                    .clicked()
+                {
+                    *item_settings = defaults.template;
+                    // Act like "everything changed" — live preview dispatches
+                    // a fresh Tier 2 and the user sees the reset take effect.
+                    change.mask = true;
+                    change.edge = true;
+                    change.bg = true;
+                    change.commit = true;
+                }
+
+                // Preset dropdown — applies/saves presets for the current image.
+                let preset_applied = preset_dropdown::render(ui, app_settings, item_settings);
+                if preset_applied {
+                    change.preset_applied = true;
+                    change.commit = true;
+                    change.mask = true;
+                    change.edge = true;
+                    change.bg = true;
+                }
             },
         );
     });
@@ -185,37 +242,63 @@ pub fn render(
 #[derive(Copy, Clone)]
 enum Tier { Mask, Edge, Bg }
 
-/// Row 2 overflow kebab. Houses rarely-used actions that don't deserve a chip slot.
-#[allow(deprecated)]
-fn kebab_menu(ui: &mut Ui, item_settings: &mut ItemSettings, defaults: &Defaults) {
-    let pop_id = egui::Id::new("adjustments_kebab");
-    let btn = egui::Button::new(
-        RichText::new(ICON_MORE_VERT.codepoint)
-            .color(theme::TEXT_SECONDARY)
-            .size(18.0),
-    )
-    .fill(egui::Color32::TRANSPARENT)
-    .min_size(egui::vec2(chip::CHIP_HEIGHT, chip::CHIP_HEIGHT));
-    let resp = ui.add(btn).on_hover_text("More…");
-    if resp.clicked() {
-        ui.memory_mut(|m| m.toggle_popup(pop_id));
+/// Row 2 leftmost: model dropdown. Edits `app_settings.model` directly and
+/// sets `change.model_changed` + `commit` when the selection flips so caller
+/// can invalidate tensor caches and fire a fresh Tier 1.
+fn render_model_dropdown(
+    ui: &mut Ui,
+    app_settings: &mut Settings,
+    processing: bool,
+    change: &mut ToolbarChange,
+) {
+    let prev_model = app_settings.model;
+    ui.add_enabled_ui(!processing, |ui| {
+        // Match the combobox visuals used by row 1's other dropdowns.
+        let vis = ui.visuals_mut();
+        vis.widgets.inactive.weak_bg_fill = theme::BG_SECONDARY;
+        vis.widgets.inactive.fg_stroke.color = theme::TEXT_PRIMARY;
+        vis.widgets.hovered.weak_bg_fill = egui::Color32::from_rgb(0x30, 0x2e, 0x32);
+        vis.widgets.hovered.fg_stroke.color = theme::TEXT_PRIMARY;
+        vis.widgets.open.weak_bg_fill = theme::BG_SECONDARY;
+        vis.widgets.open.fg_stroke.color = theme::TEXT_PRIMARY;
+        vis.widgets.active.fg_stroke.color = theme::TEXT_PRIMARY;
+        vis.widgets.noninteractive.fg_stroke.color = theme::TEXT_SECONDARY;
+
+        ui.spacing_mut().interact_size.y = chip::CHIP_HEIGHT;
+        egui::ComboBox::from_id_salt("adjustments_model")
+            .selected_text(
+                RichText::new(model_label(app_settings.model, true))
+                    .color(theme::TEXT_PRIMARY),
+            )
+            .show_ui(ui, |ui| {
+                for variant in [
+                    SettingsModel::Silueta,
+                    SettingsModel::U2net,
+                    SettingsModel::BiRefNetLite,
+                ] {
+                    ui.selectable_value(
+                        &mut app_settings.model,
+                        variant,
+                        RichText::new(model_label(variant, false))
+                            .color(theme::TEXT_PRIMARY),
+                    );
+                }
+            })
+            .response
+            .on_hover_text("Segmentation model — affects quality, speed, and download size");
+    });
+
+    if app_settings.model != prev_model {
+        // Clamp parallel jobs to the new model's safe maximum.
+        let max = app_settings.max_jobs();
+        if app_settings.parallel_jobs > max {
+            app_settings.parallel_jobs = max;
+        }
+        app_settings.save();
+        change.model_changed = true;
+        change.commit = true;
+        // Toasts live on PrunrApp — caller reads change.model_changed and fires.
     }
-    egui::popup_below_widget(
-        ui,
-        pop_id,
-        &resp,
-        egui::PopupCloseBehavior::CloseOnClickOutside,
-        |ui| {
-            ui.set_min_width(200.0);
-            if ui.button("Reset all knobs on this image").clicked() {
-                // Restore to the app-wide defaults template exactly — preserves
-                // the user's default_preset / item_defaults Option<> settings
-                // instead of forcing everything to None.
-                *item_settings = defaults.template;
-                ui.memory_mut(|m| m.close_popup(pop_id));
-            }
-        },
-    );
 }
 
 #[cfg(test)]
