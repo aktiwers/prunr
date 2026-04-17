@@ -286,6 +286,8 @@ fn run_batch_with_retry(
         }
 
         if subprocess_crashed {
+            let crash_reason = sub.crash_reason();
+
             // Re-queue ALL in-flight items (not just the one that crashed)
             let re_queued: Vec<WorkItem> = sent_items.into_iter()
                 .filter(|(id, _, _)| !completed.contains(id))
@@ -310,11 +312,12 @@ fn run_batch_with_retry(
 
             if old_jobs == 1 {
                 // Already at minimum — these items genuinely can't be processed
+                let err_msg = format!("{crash_reason} \u{2014} try a smaller model");
                 for (id, _, _) in &pending {
                     if !completed.contains(id) {
                         let _ = res_tx.send(WorkerResult::BatchItemDone {
                             item_id: *id,
-                            result: Err("Insufficient memory — try a smaller model".to_string()),
+                            result: Err(err_msg.clone()),
                         });
                     }
                 }

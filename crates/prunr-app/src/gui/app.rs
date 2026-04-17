@@ -587,17 +587,25 @@ impl PrunrApp {
         let mut undone = 0u32;
         for item in &mut self.batch_items {
             let target = if has_selected { item.selected } else { Some(item.id) == current_id };
-            if target && item.status == BatchStatus::Done && !item.history.is_empty() {
-                // Push current result to redo stack (compress to RAM)
-                if let Some(current) = item.result_rgba.take() {
-                    item.redo_stack.push_back(HistorySlot::compress(current));
-                }
-                // Pop most recent from history (materialise from disk if needed)
-                item.result_rgba = item.history.pop_back().and_then(|slot| slot.into_rgba());
-                if item.result_rgba.is_none() || item.history.is_empty() {
-                    // History exhausted — back to unprocessed state
+            if target && item.status == BatchStatus::Done {
+                // Lazy history seed: if history is empty (source wasn't decoded at
+                // process time), just push current result to redo and revert to Pending.
+                if item.history.is_empty() {
+                    if let Some(current) = item.result_rgba.take() {
+                        item.redo_stack.push_back(HistorySlot::compress(current));
+                    }
                     item.status = BatchStatus::Pending;
                     item.result_rgba = None;
+                } else {
+                    // Normal undo: push current to redo, pop from history
+                    if let Some(current) = item.result_rgba.take() {
+                        item.redo_stack.push_back(HistorySlot::compress(current));
+                    }
+                    item.result_rgba = item.history.pop_back().and_then(|slot| slot.into_rgba());
+                    if item.result_rgba.is_none() || item.history.is_empty() {
+                        item.status = BatchStatus::Pending;
+                        item.result_rgba = None;
+                    }
                 }
                 item.result_texture = None;
                 item.thumb_texture = None;
@@ -675,17 +683,14 @@ impl PrunrApp {
         for item in &mut self.batch_items {
             if !candidate_ids.contains(&item.id) { continue; }
             // Seed history with the original image on the very first process.
-            // This lets undo walk all the way back to "no processing applied".
+            // Only seed if source is already decoded (instant). For lazy-loaded
+            // items, the seed is created on first undo attempt to avoid blocking
+            // the UI thread with disk I/O + decode + compress.
             if item.history.is_empty() && item.redo_stack.is_empty() {
                 if let Some(ref src_rgba) = item.source_rgba {
-                    // Source already decoded — compress it to RAM
                     item.history.push_back(HistorySlot::compress(src_rgba.clone()));
-                } else if let Ok(bytes) = item.source.load_bytes() {
-                    // Lazy-loaded: decode source from disk for history seed
-                    if let Ok(img) = image::load_from_memory(&bytes) {
-                        item.history.push_back(HistorySlot::compress(Arc::new(img.to_rgba8())));
-                    }
                 }
+                // Lazy items: history stays empty. handle_undo creates the seed on demand.
             }
             // Save current result to history before reprocessing
             if item.status == BatchStatus::Done {
@@ -1351,7 +1356,13 @@ impl PrunrApp {
                         .map_or(false, |b| b.id == item_id);
                     if is_selected {
                         self.status.stage = match stage {
-                            ProgressStage::LoadingModel => "Loading model...".into(),
+                            ProgressStage::LoadingModel => {
+                                if cfg!(target_os = "macos") {
+                                    "Loading model (first run may take a few minutes)...".into()
+                                } else {
+                                    "Loading model...".into()
+                                }
+                            }
                             ProgressStage::LoadingModelCpuFallback => "GPU warming up \u{2014} using CPU".into(),
                             ProgressStage::Decode => "Decoding image".into(),
                             ProgressStage::Resize => "Resizing".into(),
