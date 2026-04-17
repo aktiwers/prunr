@@ -487,7 +487,7 @@ fn run_batch_subprocess(
         let effective_jobs = max_jobs.min(pending.len());
         let (mut sub, _provider) = match SubprocessManager::spawn(
             model, effective_jobs, mask, force_cpu, line_mode,
-            line_strength, solid_line_color, bg_color,
+            line_strength, solid_line_color,
         ) {
             Ok(s) => s,
             Err(e) => {
@@ -551,9 +551,15 @@ fn run_batch_subprocess(
                         let result = std::fs::read(&result_path)
                             .ok()
                             .and_then(|data| image::RgbaImage::from_raw(width, height, data))
-                            .map(|rgba_image| prunr_core::ProcessResult {
-                                rgba_image,
-                                active_provider: String::new(),
+                            .map(|mut rgba_image| {
+                                // Apply bg_color on the parent side (non-destructive in subprocess)
+                                if let Some(bg) = bg_color {
+                                    prunr_core::apply_background_color(&mut rgba_image, bg);
+                                }
+                                prunr_core::ProcessResult {
+                                    rgba_image,
+                                    active_provider: String::new(),
+                                }
                             })
                             .ok_or_else(|| CoreError::Model("Failed to read subprocess result".into()));
                         let _ = std::fs::remove_file(&result_path);

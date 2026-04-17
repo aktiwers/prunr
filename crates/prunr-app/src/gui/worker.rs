@@ -21,7 +21,6 @@ pub enum WorkerMessage {
         line_mode: LineMode,
         line_strength: f32,
         solid_line_color: Option<[u8; 3]>,
-        bg_color: Option<[u8; 3]>,
         /// Channel for additional items admitted by the memory controller.
         additional_items_rx: Option<mpsc::Receiver<WorkItem>>,
     },
@@ -61,12 +60,12 @@ pub fn spawn_worker(
                 match msg {
                     WorkerMessage::BatchProcess {
                         items, model, jobs, cancel, mask, force_cpu,
-                        line_mode, line_strength, solid_line_color, bg_color,
+                        line_mode, line_strength, solid_line_color,
                         additional_items_rx,
                     } => {
                         run_batch_with_retry(
                             items, model, jobs, &cancel, mask, force_cpu,
-                            line_mode, line_strength, solid_line_color, bg_color,
+                            line_mode, line_strength, solid_line_color,
                             additional_items_rx,
                             &res_tx, &ctx,
                         );
@@ -92,7 +91,6 @@ fn run_batch_with_retry(
     line_mode: LineMode,
     line_strength: f32,
     solid_line_color: Option<[u8; 3]>,
-    bg_color: Option<[u8; 3]>,
     additional_items_rx: Option<mpsc::Receiver<WorkItem>>,
     res_tx: &mpsc::Sender<WorkerResult>,
     ctx: &egui::Context,
@@ -147,7 +145,7 @@ fn run_batch_with_retry(
         let effective_jobs = max_jobs.min(pending.len());
         let (mut sub, _active_provider) = match SubprocessManager::spawn(
             model, effective_jobs, mask, force_cpu, line_mode,
-            line_strength, solid_line_color, bg_color,
+            line_strength, solid_line_color,
         ) {
             Ok(s) => s,
             Err(e) => {

@@ -568,6 +568,13 @@ impl PrunrApp {
     pub(crate) fn close_settings(&mut self) {
         self.show_settings = false;
         self.settings.save();
+        // Invalidate result textures so bg_color changes take effect immediately
+        self.result_switch_id += 1;
+        for item in &mut self.batch_items {
+            item.result_texture = None;
+            item.result_tex_pending = false;
+        }
+        self.result_texture = None;
         self.toasts.info("Settings saved");
     }
 
@@ -799,10 +806,6 @@ impl PrunrApp {
                 let c = self.settings.line_color;
                 Some([c[0], c[1], c[2]])
             } else { None },
-            bg_color: if self.settings.apply_bg_color {
-                let c = self.settings.bg_color;
-                Some([c[0], c[1], c[2]])
-            } else { None },
             additional_items_rx,
         });
     }
@@ -815,6 +818,19 @@ impl PrunrApp {
             dlg = dlg.set_directory(dir);
         }
         dlg
+    }
+
+    /// Apply background color to a result image for export/save.
+    /// Returns a new image if bg_color is enabled, otherwise clones the Arc.
+    fn apply_bg_for_export(&self, rgba: &Arc<image::RgbaImage>) -> Arc<image::RgbaImage> {
+        if self.settings.apply_bg_color {
+            let mut copy = (**rgba).clone();
+            let c = self.settings.bg_color;
+            prunr_core::apply_background_color(&mut copy, [c[0], c[1], c[2]]);
+            Arc::new(copy)
+        } else {
+            rgba.clone()
+        }
     }
 
     pub fn handle_save_selected(&mut self) {
@@ -837,7 +853,7 @@ impl PrunrApp {
                     .set_title("Save PNG")
                     .save_file()
                 {
-                    let rgba = rgba.clone();
+                    let rgba = self.apply_bg_for_export(rgba);
                     let tx = self.bg_io.save_done_tx.clone();
                     self.toasts.info("Saving...");
                     std::thread::spawn(move || {
@@ -862,8 +878,8 @@ impl PrunrApp {
         {
             let items: Vec<(String, Arc<image::RgbaImage>)> = selected.iter()
                 .filter_map(|item| {
-                    let rgba = item.result_rgba.clone()?;
-                    Some((item.filename.clone(), rgba))
+                    let rgba = item.result_rgba.as_ref()?;
+                    Some((item.filename.clone(), self.apply_bg_for_export(rgba)))
                 })
                 .collect();
             let count = items.len();
@@ -1011,6 +1027,15 @@ impl PrunrApp {
         };
         let Some(rgba) = rgba_to_copy else {
             return;
+        };
+        // Apply bg_color for clipboard (matches display)
+        let rgba = if self.settings.apply_bg_color {
+            let mut copy = (*rgba).clone();
+            let c = self.settings.bg_color;
+            prunr_core::apply_background_color(&mut copy, [c[0], c[1], c[2]]);
+            Arc::new(copy)
+        } else {
+            rgba
         };
 
         let width = rgba.width() as usize;
@@ -1277,8 +1302,17 @@ impl PrunrApp {
             if let Some(rgba) = self.batch_items[idx].result_rgba.clone() {
                 let switch = self.result_switch_id;
                 self.batch_items[idx].result_tex_pending = true;
+                // Apply bg_color non-destructively for display (result_rgba stays transparent)
+                let display_rgba = if self.settings.apply_bg_color {
+                    let mut copy = (*rgba).clone();
+                    let c = self.settings.bg_color;
+                    prunr_core::apply_background_color(&mut copy, [c[0], c[1], c[2]]);
+                    Arc::new(copy)
+                } else {
+                    rgba
+                };
                 Self::spawn_tex_prep(
-                    rgba, item_id, format!("result_{item_id}_{switch}"), true,
+                    display_rgba, item_id, format!("result_{item_id}_{switch}"), true,
                     self.bg_io.tex_prep_tx.clone(), ctx.clone(),
                 );
             }

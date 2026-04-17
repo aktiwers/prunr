@@ -50,7 +50,6 @@ impl SubprocessManager {
         line_mode: LineMode,
         line_strength: f32,
         solid_line_color: Option<[u8; 3]>,
-        bg_color: Option<[u8; 3]>,
     ) -> Result<(Self, String), String> {
         // Clean up stale IPC temp files from previous workers (crash recovery)
         super::protocol::cleanup_ipc_temp();
@@ -76,7 +75,7 @@ impl SubprocessManager {
         // Send Init command
         write_message(&mut stdin_writer, &SubprocessCommand::Init {
             model, jobs, mask, force_cpu, line_mode,
-            line_strength, solid_line_color, bg_color,
+            line_strength, solid_line_color,
             ipc_dir: ipc_temp_dir(),
         }).map_err(|e| format!("Failed to send Init: {e}"))?;
 
