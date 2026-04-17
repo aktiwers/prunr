@@ -609,7 +609,7 @@ impl PrunrApp {
         }
     }
 
-    pub(crate) fn close_settings(&mut self) {
+    pub(crate) fn close_settings(&mut self, ctx: &egui::Context) {
         self.show_settings = false;
         self.settings.save();
         // Only invalidate result textures if bg_color settings changed
@@ -622,6 +622,7 @@ impl PrunrApp {
                 item.result_tex_pending = false;
             }
             self.result_texture = None;
+            self.sync_selected_batch_textures(ctx);
         }
         self.toasts.info("Settings saved");
     }
@@ -1898,7 +1899,7 @@ impl PrunrApp {
             self.state = AppState::Loaded;
             self.status.text = "Cancelled".to_string();
         } else if cancel_requested && self.show_settings {
-            self.close_settings();
+            self.close_settings(ctx);
         } else if cancel_requested && self.show_shortcuts {
             self.show_shortcuts = false;
         } else if cancel_requested && self.show_cli_help {
@@ -1909,7 +1910,7 @@ impl PrunrApp {
         }
         if toggle_settings {
             if self.show_settings {
-                self.close_settings();
+                self.close_settings(ctx);
             } else {
                 self.show_settings = true;
                 self.settings_opened_at = ctx.input(|i| i.time);
