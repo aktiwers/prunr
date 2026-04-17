@@ -177,13 +177,12 @@ pub fn render(
                 .fill(theme::BG_SECONDARY)
                 .corner_radius(theme::BUTTON_ROUNDING)
                 .min_size(egui::vec2(chip::CHIP_HEIGHT, chip::CHIP_HEIGHT));
-                if ui.add(reset_btn)
-                    .on_hover_text("Reset all knobs on this image to factory defaults")
-                    .clicked()
-                {
-                    *item_settings = defaults.template;
-                    // Act like "everything changed" — live preview dispatches
-                    // a fresh Tier 2 and the user sees the reset take effect.
+                let reset_target = app_settings.default_preset.clone();
+                let reset_tooltip = format!(
+                    "Reset all knobs to the \"{reset_target}\" preset (your default)"
+                );
+                if ui.add(reset_btn).on_hover_text(reset_tooltip).clicked() {
+                    *item_settings = app_settings.preset_values(&reset_target);
                     change.mask = true;
                     change.edge = true;
                     change.bg = true;
