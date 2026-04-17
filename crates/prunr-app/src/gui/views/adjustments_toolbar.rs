@@ -22,16 +22,11 @@ use super::model_label;
 
 /// Summary of what a toolbar render cycle changed.
 ///
-/// - `mask` / `edge` / `bg` — which tier was affected. Live preview dispatches
-///   to Tier 2 (mask/edge) or Tier 3 (bg) accordingly.
-/// - `commit` — the edit has settled (slider released, checkbox toggled,
-///   color picked). When true the caller should FLUSH any pending live
-///   preview instead of debouncing further.
-/// - `model_changed` — the segmentation model was swapped via the row-2
-///   dropdown. Caller invalidates both tensor caches (old caches were run
-///   with a different model) and should kick off a fresh Tier 1 Process.
-/// - `preset_applied` — a preset replaced the current item's settings.
-///   Invalidates both caches since any/all fields may have changed.
+/// Tier flags drive live-preview dispatch; cache-invalidation flags are
+/// granular so we don't clear a still-valid cache (e.g. seg tensor stays
+/// good after a line_mode toggle — only the edge tensor is stale then).
+/// Keeping unrelated caches alive means the user's next mask/edge tweak
+/// can still live-preview without a full Process.
 #[derive(Default, Debug, Clone, Copy)]
 pub struct ToolbarChange {
     pub mask: bool,
@@ -40,14 +35,11 @@ pub struct ToolbarChange {
     pub commit: bool,
     pub model_changed: bool,
     pub preset_applied: bool,
-}
-
-impl ToolbarChange {
-    /// Whether the change invalidates the cached tensors (mask + edge).
-    /// Caller clears them + the user should re-Process for a correct result.
-    pub fn needs_cache_invalidation(&self) -> bool {
-        self.model_changed || self.preset_applied
-    }
+    /// Segmentation tensor is stale (produced by a now-swapped model).
+    pub seg_cache_invalid: bool,
+    /// DexiNed edge tensor is stale (different line_mode means DexiNed
+    /// would see a different input — full scene vs subject-on-white).
+    pub edge_cache_invalid: bool,
 }
 
 /// Factory default values for per-chip reset + "Reset all" button.
@@ -91,8 +83,13 @@ pub fn render(
 
     ui.spacing_mut().item_spacing.x = theme::SPACE_SM;
 
-    // Aggregate helper: lift a chip's ChipChange into the aggregate ToolbarChange
-    // by the tier it affects. Keeps per-chip call sites a single if-block.
+    // Snapshots for smart cache invalidation. We compare before/after so we
+    // only clear caches whose INPUT actually changed, not every cache on
+    // every apply. Matters for live preview: a preset apply that keeps
+    // line_mode the same leaves the edge tensor valid, so subsequent
+    // line_strength tweaks still live-preview without needing a Process.
+    let before_line_mode = item_settings.line_mode;
+
     let aggregate = |ch: chip::ChipChange, tier: Tier, acc: &mut ToolbarChange| {
         if ch.changed {
             match tier {
@@ -106,7 +103,6 @@ pub fn render(
 
     // ── Row 2: model (leftmost) + mask + composite + preset + reset (right) ──
     ui.horizontal(|ui| {
-        // Model dropdown at the very left of row 2.
         render_model_dropdown(ui, app_settings, processing, &mut change);
 
         // Mask knobs are irrelevant when segmentation is skipped (EdgesOnly mode).
@@ -189,7 +185,6 @@ pub fn render(
                     change.commit = true;
                 }
 
-                // Preset dropdown — applies/saves presets for the current image.
                 let preset_applied = preset_dropdown::render(ui, app_settings, item_settings);
                 if preset_applied {
                     change.preset_applied = true;
@@ -223,6 +218,23 @@ pub fn render(
                 defaults.solid_line_color_value,
             ), Tier::Edge, &mut change);
         });
+    }
+
+    // Granular cache invalidation:
+    // - Segmentation tensor depends on the model. Only stale when the model
+    //   swapped. Mask-tier live preview keeps working across preset applies
+    //   and line_mode toggles.
+    // - Edge tensor depends on what DexiNed saw: full scene (EdgesOnly)
+    //   vs subject-on-white (SubjectOutline). Switching between modes with
+    //   different inputs invalidates it; switching from/to Off doesn't.
+    if change.model_changed {
+        change.seg_cache_invalid = true;
+    }
+    if item_settings.line_mode != before_line_mode {
+        // Conservative: any line_mode change clears the edge cache. A more
+        // surgical diff could keep it valid for "no change in DexiNed input"
+        // transitions, but the speed-up isn't worth the fragility.
+        change.edge_cache_invalid = true;
     }
 
     change
@@ -294,13 +306,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn needs_cache_invalidation_fires_on_model_or_preset() {
-        let mut c = ToolbarChange::default();
-        assert!(!c.needs_cache_invalidation());
-        c.model_changed = true;
-        assert!(c.needs_cache_invalidation());
-        let mut c = ToolbarChange::default();
-        c.preset_applied = true;
-        assert!(c.needs_cache_invalidation());
+    fn toolbar_change_default_invalidates_nothing() {
+        let c = ToolbarChange::default();
+        assert!(!c.seg_cache_invalid);
+        assert!(!c.edge_cache_invalid);
     }
 }

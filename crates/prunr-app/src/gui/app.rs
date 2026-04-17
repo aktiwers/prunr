@@ -1952,7 +1952,7 @@ impl PrunrApp {
                     self.selected_batch_index = self.batch_items.len() - 1;
                     self.pending_batch_sync = true;
                 }
-                if self.settings.auto_remove_on_import && self.next_batch_id > id_floor {
+                if self.settings.auto_process_on_import && self.next_batch_id > id_floor {
                     self.process_items(|item| item.id >= id_floor);
                 }
             }
@@ -2193,7 +2193,7 @@ impl PrunrApp {
                 self.selected_batch_index = self.batch_items.len() - 1;
                 self.sync_selected_batch_textures(ctx);
             }
-            if self.settings.auto_remove_on_import && self.next_batch_id > id_floor {
+            if self.settings.auto_process_on_import && self.next_batch_id > id_floor {
                 self.process_items(|item| item.id >= id_floor);
             }
         }
@@ -2339,12 +2339,19 @@ impl eframe::App for PrunrApp {
                     crate::gui::views::model_name(self.settings.model),
                 ));
             }
-            // Model change OR preset apply invalidates both tensor caches
-            // (old caches were run with different params).
-            if toolbar_change.needs_cache_invalidation() {
+            // Granular cache invalidation — only clear the tensors whose
+            // INPUT actually changed. Preset applies that keep line_mode the
+            // same leave the edge cache valid (line_strength tweaks can still
+            // live-preview). Model swaps clear only the seg cache (edge
+            // tensor is model-independent).
+            if toolbar_change.seg_cache_invalid || toolbar_change.edge_cache_invalid {
                 let idx = self.selected_batch_index.min(self.batch_items.len() - 1);
-                self.batch_items[idx].cached_tensor = None;
-                self.batch_items[idx].cached_edge_tensor = None;
+                if toolbar_change.seg_cache_invalid {
+                    self.batch_items[idx].cached_tensor = None;
+                }
+                if toolbar_change.edge_cache_invalid {
+                    self.batch_items[idx].cached_edge_tensor = None;
+                }
             }
             // Register mask / edge tweaks with the live preview dispatcher.
             // `mark_tweak` debounces; `flush` fires immediately when a chip
