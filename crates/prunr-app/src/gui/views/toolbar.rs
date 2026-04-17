@@ -47,7 +47,6 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
             } else {
                 app.show_settings = true;
                 app.settings_opened_at = ui.ctx().input(|i| i.time);
-                app.bg_settings_snapshot = app.settings.item_defaults.bg;
             }
         }
 
@@ -97,6 +96,23 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
             }
             app.toasts.info(format!("{} loaded", model_name(app.settings.model)));
             app.settings.save();
+        }
+
+        // ── Lines popover + Preset dropdown ──
+        // Both edit the currently-selected BatchItem's ItemSettings. Skip when
+        // no item is selected (e.g. empty batch).
+        if let Some(idx) = active_item_index(app) {
+            // Split borrow: grab &mut to the item's settings + &mut to app.settings
+            // separately. Rust's disjoint-field borrow rule allows this.
+            let settings_ref: &mut crate::gui::settings::Settings = &mut app.settings;
+            let item_settings_ref: &mut crate::gui::item_settings::ItemSettings =
+                &mut app.batch_items[idx].settings;
+            ui.add_enabled_ui(!is_processing, |ui| {
+                let _lines_changed = super::lines_popover::render(ui, item_settings_ref);
+                let _preset_applied = super::preset_dropdown::render(ui, settings_ref, item_settings_ref);
+                // Texture invalidation wiring lands in P2.9 — for now the changes
+                // land in item.settings and will reflect on next Process.
+            });
         }
 
         // ── Right group: action buttons ──
@@ -210,4 +226,11 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
             }
         });
     });
+}
+
+/// Index of the currently-active batch item (the one the toolbar binds to).
+/// `None` when the batch is empty.
+fn active_item_index(app: &PrunrApp) -> Option<usize> {
+    if app.batch_items.is_empty() { return None; }
+    Some(app.selected_batch_index.min(app.batch_items.len() - 1))
 }

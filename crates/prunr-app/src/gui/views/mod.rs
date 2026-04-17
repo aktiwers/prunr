@@ -5,6 +5,10 @@ pub mod shortcuts;
 pub mod cli_help;
 pub mod settings;
 pub mod sidebar;
+pub mod chip;
+pub mod lines_popover;
+pub mod preset_dropdown;
+pub mod adjustments_toolbar;
 
 use egui::RichText;
 use egui_material_icons::icons::*;
