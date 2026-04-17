@@ -2271,13 +2271,11 @@ impl eframe::App for PrunrApp {
                 .frame(panel_frame)
                 .show_inside(ui, |ui| {
                     let idx = self.selected_batch_index.min(self.batch_items.len() - 1);
-                    let app_settings_ref: &crate::gui::settings::Settings = &self.settings;
                     let item_settings_ref: &mut crate::gui::item_settings::ItemSettings =
                         &mut self.batch_items[idx].settings;
                     toolbar_change = adjustments_toolbar::render(
                         ui,
                         item_settings_ref,
-                        app_settings_ref,
                     );
                     // bg is applied at display-time, not via Tier 2 — rebuild
                     // texture immediately. Phase 4 moves this to GPU-side fill.
