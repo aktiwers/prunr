@@ -7,7 +7,7 @@
 //! reference for defaults / live-preview flag lookups. Never `&mut PrunrApp`.
 //!
 //! Returns a `ToolbarChange` summarizing WHAT changed so the caller can
-//! invalidate the right textures and schedule live-preview reruns in Phase 3.
+//! invalidate the right textures and schedule live-preview reruns.
 
 use egui::{RichText, Ui};
 use egui_material_icons::icons::*;
@@ -42,12 +42,11 @@ pub struct ToolbarChange {
     pub edge_cache_invalid: bool,
 }
 
-/// Factory default values for per-chip reset + "Reset all" button.
-///
-/// Does NOT depend on `AppSettings.item_defaults` — that field is the template
-/// for NEW imports (possibly from v1 migration). Reset means "go back to
-/// known-good factory defaults." Users who want their preferred template back
-/// should use the Preset dropdown.
+/// Factory default values for per-chip reset. Per-chip reset sends the value
+/// back to ItemSettings::default() (not the user's default preset) — single
+/// knobs should reset predictably, independent of whatever preset is loaded.
+/// The separate "Reset all knobs" button below goes back to the default
+/// preset instead; that's the per-user "what I usually want" anchor.
 struct Defaults {
     template: ItemSettings,
     /// "Pick this when user toggles enabled" fallback for Option chips that
@@ -70,18 +69,14 @@ impl Defaults {
 }
 
 /// Render rows 2 + 3. Returns a `ToolbarChange` summarizing what was edited.
-/// Takes `&mut Settings` because Row 2 hosts the model dropdown (app-global)
-/// and the preset dropdown (reads/writes the preset map).
-/// `applied_preset` is the caller's record of which preset was last applied
-/// to this image — required for the preset button's modified/clean icon.
-/// `applied_preset_out` is set to the new preset's name when the user applies
-/// one via the dropdown or saves their current settings as a preset.
+/// `app_settings` exposes model + preset map (Row 2 hosts both dropdowns).
+/// `applied_preset` is read for the button's modified/clean icon and written
+/// in place when the user applies or saves a preset.
 pub fn render(
     ui: &mut Ui,
     item_settings: &mut ItemSettings,
     app_settings: &mut Settings,
-    applied_preset: &str,
-    applied_preset_out: &mut Option<String>,
+    applied_preset: &mut String,
     processing: bool,
 ) -> ToolbarChange {
     let mut change = ToolbarChange::default();
@@ -185,7 +180,7 @@ pub fn render(
                 );
                 if ui.add(reset_btn).on_hover_text(reset_tooltip).clicked() {
                     *item_settings = app_settings.preset_values(&reset_target);
-                    *applied_preset_out = Some(reset_target);
+                    *applied_preset = reset_target;
                     change.mask = true;
                     change.edge = true;
                     change.bg = true;
@@ -193,7 +188,7 @@ pub fn render(
                 }
 
                 if let Some(name) = preset_dropdown::render(ui, app_settings, item_settings, applied_preset) {
-                    *applied_preset_out = Some(name);
+                    *applied_preset = name;
                     change.preset_applied = true;
                     change.commit = true;
                     change.mask = true;

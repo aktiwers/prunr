@@ -8,7 +8,7 @@
 //!   • Processing  — chain mode
 //!   • Default preset — applied to new images on import
 //!
-//! Phase 5 will add a Hotkeys tab for rebindable shortcuts.
+//! A Hotkeys tab for rebindable shortcuts will slot in next to General.
 
 use egui::{Align2, RichText};
 
@@ -86,16 +86,15 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) {
                             .size(theme::FONT_SIZE_MONO)
                             .color(theme::TEXT_SECONDARY),
                     ).clicked() {
+                        // Preserve presets + default pointer across a
+                        // Reset of app-wide settings — those are per-user
+                        // artifacts that don't belong to "app defaults."
                         let backend = app.settings.active_backend.clone();
-                        let item_defaults = app.settings.item_defaults;
                         let presets = std::mem::take(&mut app.settings.presets);
                         let default_preset = app.settings.default_preset.clone();
                         app.settings = Settings::default();
                         app.settings.active_backend = backend;
                         app.settings.parallel_jobs = app.settings.default_jobs();
-                        // Preserve per-image default template + presets across a reset
-                        // of app-wide settings — those are separate concerns.
-                        app.settings.item_defaults = item_defaults;
                         app.settings.presets = presets;
                         app.settings.default_preset = default_preset;
                     }
