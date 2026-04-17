@@ -22,17 +22,38 @@ use crate::gui::theme;
 const BTN_HEIGHT: f32 = 32.0;
 const POPOVER_WIDTH: f32 = 260.0;
 
-/// Label for the dropdown button.
-fn button_label(settings: &Settings) -> String {
-    let name = settings
-        .default_preset
-        .as_deref()
-        .unwrap_or("Default");
-    format!("{}  Preset: {}", ICON_BOOKMARK.codepoint, name)
+/// Display name for factory defaults (no saved preset matches current settings).
+const FACTORY_NAME: &str = "Prunr";
+
+/// Label for the dropdown button — reflects the CURRENT item's effective preset:
+///   - Matches factory defaults → "Prunr"
+///   - Matches a saved preset exactly → that preset's name
+///   - Otherwise → "Custom"
+///
+/// Tracks the current image's state, not `default_preset` (the global template
+/// pointer for new imports). Reset-all-knobs flips settings back to factory
+/// and the label follows to "Prunr" automatically.
+fn button_label(settings: &Settings, current: &ItemSettings) -> String {
+    let name = active_preset_name(settings, current);
+    format!("{}  Preset: {name}", ICON_BOOKMARK.codepoint)
+}
+
+/// Determine which preset (or "Prunr"/factory, or "Custom") matches the
+/// current item's settings. Prefers exact equality; O(N) scan of presets.
+fn active_preset_name<'a>(settings: &'a Settings, current: &ItemSettings) -> &'a str {
+    if *current == ItemSettings::default() {
+        return FACTORY_NAME;
+    }
+    for (name, values) in &settings.presets {
+        if *values == *current {
+            return name.as_str();
+        }
+    }
+    "Custom"
 }
 
 /// Sort preset names case-insensitively so the list is stable.
-fn sorted_preset_names(settings: &Settings) -> Vec<String> {
+pub(super) fn sorted_preset_names(settings: &Settings) -> Vec<String> {
     let mut names: Vec<String> = settings.presets.keys().cloned().collect();
     names.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
     names
@@ -50,7 +71,7 @@ pub fn render(
     let save_dialog_id = egui::Id::new("preset_save_dialog");
 
     let btn = egui::Button::new(
-        RichText::new(button_label(settings))
+        RichText::new(button_label(settings, current_item))
             .color(theme::TEXT_PRIMARY)
             .size(theme::FONT_SIZE_BODY),
     )
@@ -100,7 +121,6 @@ pub fn render(
                         ui.with_layout(
                             egui::Layout::right_to_left(egui::Align::Center),
                             |ui| {
-                                // Right-to-left: delete (rightmost), then default-toggle.
                                 let delete_btn = ui.small_button(
                                     RichText::new(ICON_DELETE.codepoint)
                                         .size(theme::FONT_SIZE_MONO)
@@ -112,8 +132,6 @@ pub fn render(
                                         settings.default_preset = None;
                                     }
                                 }
-                                // Star icon toggles "is default preset for new images."
-                                // Filled when default, outlined otherwise.
                                 let star_icon = if is_default {
                                     ICON_STAR.codepoint
                                 } else {
@@ -285,16 +303,44 @@ mod tests {
     use std::collections::HashMap;
 
     #[test]
-    fn button_label_shows_default_when_none() {
+    fn button_label_shows_prunr_for_factory_defaults() {
         let s = Settings::default();
-        assert_eq!(button_label(&s), format!("{}  Preset: Default", ICON_BOOKMARK.codepoint));
+        let current = ItemSettings::default();
+        assert_eq!(
+            button_label(&s, &current),
+            format!("{}  Preset: Prunr", ICON_BOOKMARK.codepoint),
+        );
     }
 
     #[test]
-    fn button_label_shows_named_preset() {
+    fn button_label_shows_matching_preset_name() {
         let mut s = Settings::default();
-        s.default_preset = Some("Portrait".to_string());
-        assert_eq!(button_label(&s), format!("{}  Preset: Portrait", ICON_BOOKMARK.codepoint));
+        let mut values = ItemSettings::default();
+        values.gamma = 2.0;
+        s.presets.insert("Portrait".to_string(), values);
+        // Current item matches "Portrait" exactly → label tracks it.
+        let current = values;
+        assert_eq!(
+            button_label(&s, &current),
+            format!("{}  Preset: Portrait", ICON_BOOKMARK.codepoint),
+        );
+    }
+
+    #[test]
+    fn button_label_shows_custom_when_no_match() {
+        let mut s = Settings::default();
+        s.presets.insert("Portrait".to_string(), {
+            let mut v = ItemSettings::default();
+            v.gamma = 2.0;
+            v
+        });
+        // Current item matches neither factory nor any saved preset.
+        let mut current = ItemSettings::default();
+        current.gamma = 1.7;
+        assert_eq!(
+            button_label(&s, &current),
+            format!("{}  Preset: Custom", ICON_BOOKMARK.codepoint),
+        );
     }
 
     #[test]

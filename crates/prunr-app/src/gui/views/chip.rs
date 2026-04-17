@@ -42,8 +42,11 @@ pub struct ChipChange {
     pub commit: bool,
 }
 
-impl ChipChange {
-    pub fn any(&self) -> bool { self.changed || self.commit }
+/// Returns true when a slider interaction has "settled" — drag released or
+/// value changed without an active drag (keyboard, click-jump). Used to
+/// flip the `commit` flag so live preview flushes instead of debouncing.
+fn slider_settled(resp: &egui::Response) -> bool {
+    resp.drag_stopped() || (resp.changed() && !resp.dragged())
 }
 
 /// Shared chip-button renderer. Returns the response for popup wiring.
@@ -81,15 +84,7 @@ fn reset_button(ui: &mut Ui, tooltip: &str) -> bool {
     .clicked()
 }
 
-/// Dimmed description text inside a chip popover.
-fn hint(ui: &mut Ui, text: &str) {
-    if text.is_empty() { return; }
-    ui.label(
-        RichText::new(text)
-            .color(theme::TEXT_HINT)
-            .size(theme::FONT_SIZE_MONO),
-    );
-}
+use super::hint;
 
 /// Wire a popup to a chip button. Handles toggle-on-click.
 /// Uses the legacy `popup_below_widget` API; egui's newer `Popup::` builder
@@ -144,14 +139,8 @@ pub fn chip_f32(
                 .show_value(true)
                 .fixed_decimals(2),
         );
-        if slider.changed() {
-            out.changed = true;
-        }
-        // Commit now when the interaction settles (drag released, keyboard
-        // change, click-jump) so live preview can flush instead of debounce.
-        if slider.drag_stopped() || (slider.changed() && !slider.dragged()) {
-            out.commit = true;
-        }
+        if slider.changed() { out.changed = true; }
+        if slider_settled(&slider) { out.commit = true; }
         hint(ui, tooltip);
         ui.add_space(theme::SPACE_XS);
         if reset_button(ui, "Reset to factory default") {
@@ -202,9 +191,7 @@ pub fn chip_option_f32(
                     .fixed_decimals(2),
             );
             if slider.changed() { out.changed = true; }
-            if slider.drag_stopped() || (slider.changed() && !slider.dragged()) {
-                out.commit = true;
-            }
+            if slider_settled(&slider) { out.commit = true; }
         }
         hint(ui, tooltip);
         ui.add_space(theme::SPACE_XS);
