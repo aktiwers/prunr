@@ -7,7 +7,15 @@ use crate::guided_filter::guided_filter_alpha;
 use crate::types::{MaskSettings, ModelKind};
 
 /// Postprocess raw ONNX model output into a transparent RGBA image.
+/// Convenience wrapper that calls `tensor_to_mask()` + `apply_mask()`.
 pub fn postprocess(raw: ArrayView4<f32>, original: &DynamicImage, mask_settings: &MaskSettings, model: ModelKind) -> RgbaImage {
+    let mask = tensor_to_mask(raw, original, mask_settings, model);
+    apply_mask(original, &mask)
+}
+
+/// Convert raw ONNX tensor to a full-resolution grayscale mask (Tier 2).
+/// Applies normalization, gamma, threshold, resize, edge shift, and guided filter.
+pub fn tensor_to_mask(raw: ArrayView4<f32>, original: &DynamicImage, mask_settings: &MaskSettings, model: ModelKind) -> GrayImage {
     let pred = raw.slice(ndarray::s![0, 0, .., ..]);
 
     let use_sigmoid = matches!(model, ModelKind::BiRefNetLite);
@@ -81,16 +89,19 @@ pub fn postprocess(raw: ArrayView4<f32>, original: &DynamicImage, mask_settings:
         apply_edge_shift(&mut mask, mask_settings.edge_shift);
     }
 
-    let mut rgba = original.to_rgba8();
+    let rgba = original.to_rgba8();
     if mask_settings.refine_edges {
         const GUIDED_RADIUS: u32 = 8;
         const GUIDED_EPSILON: f32 = 1e-4;
         mask = guided_filter_alpha(&rgba, &mask, GUIDED_RADIUS, GUIDED_EPSILON);
     }
 
-    // Compose: write alpha from mask.
-    // Sequential — runs inside a rayon worker thread in the subprocess,
-    // so nested parallelism risks deadlock. The loop is memory-bound anyway.
+    mask
+}
+
+/// Apply a grayscale mask as the alpha channel on the original image (Tier 3).
+pub fn apply_mask(original: &DynamicImage, mask: &GrayImage) -> RgbaImage {
+    let mut rgba = original.to_rgba8();
     let mask_raw = mask.as_raw();
     let out_raw = rgba.as_mut();
     for (pixel, &alpha) in out_raw.chunks_mut(4).zip(mask_raw.iter()) {

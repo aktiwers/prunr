@@ -171,6 +171,60 @@ where
     })
 }
 
+/// Run inference only (Tier 1). Returns the raw model tensor without postprocessing.
+/// Use with `postprocess::tensor_to_mask()` + `postprocess::apply_mask()` for the full pipeline.
+pub fn infer_only<F>(
+    img: &DynamicImage,
+    engine: &OrtEngine,
+    progress: Option<F>,
+    cancel: Option<Arc<AtomicBool>>,
+) -> Result<crate::types::InferenceResult, CoreError>
+where
+    F: Fn(ProgressStage, f32),
+{
+    let is_cancelled = || cancel.as_ref().is_some_and(|c| c.load(Ordering::Acquire));
+    let report = |stage: ProgressStage, pct: f32| { if let Some(ref cb) = progress { cb(stage, pct); } };
+
+    report(ProgressStage::Resize, 0.2);
+    if is_cancelled() { return Err(CoreError::Cancelled); }
+
+    report(ProgressStage::Normalize, 0.4);
+    let model = engine.model_kind();
+    let input_array = preprocess(img, model);
+
+    if is_cancelled() { return Err(CoreError::Cancelled); }
+
+    report(ProgressStage::Infer, 0.5);
+    let raw_output = engine.with_session(|session| {
+        let input_name = session.inputs()[0].name().to_string();
+        let input_tensor = Tensor::from_array(input_array)
+            .map_err(|e| CoreError::Inference(format!("Failed to create input tensor: {e}")))?;
+        let outputs = session
+            .run(inputs![input_name.as_str() => &input_tensor])
+            .map_err(|e| CoreError::Inference(format!("ORT inference failed: {e}")))?;
+        outputs[0]
+            .try_extract_array::<f32>()
+            .map_err(|e| CoreError::Inference(format!("Failed to extract output tensor: {e}")))?
+            .into_dimensionality::<ndarray::Ix4>()
+            .map_err(|e| CoreError::Inference(format!("Output reshape error: {e}")))
+            .map(|v| v.to_owned())
+    })?;
+
+    let h = raw_output.shape()[2];
+    let w = raw_output.shape()[3];
+    Ok(crate::types::InferenceResult {
+        tensor_data: {
+            let (vec, offset) = raw_output.into_raw_vec_and_offset();
+            debug_assert!(offset.unwrap_or(0) == 0, "ORT output tensor has non-zero offset");
+            vec
+        },
+        tensor_height: h,
+        tensor_width: w,
+        model,
+        active_provider: engine.active_provider().to_string(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
