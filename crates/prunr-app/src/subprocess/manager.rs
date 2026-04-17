@@ -268,6 +268,31 @@ impl SubprocessManager {
         &self.in_flight
     }
 
+    /// Describe why the subprocess died (for user-facing messages).
+    pub fn crash_reason(&mut self) -> String {
+        match self.child.try_wait() {
+            Ok(Some(status)) => {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::process::ExitStatusExt;
+                    if let Some(signal) = status.signal() {
+                        return match signal {
+                            9 => "Process killed by OS (out of memory)".to_string(),
+                            11 => "Process crashed (segmentation fault)".to_string(),
+                            _ => format!("Process killed by signal {signal}"),
+                        };
+                    }
+                }
+                if let Some(code) = status.code() {
+                    format!("Process exited with code {code}")
+                } else {
+                    "Process terminated unexpectedly".to_string()
+                }
+            }
+            _ => "Worker process stopped responding".to_string(),
+        }
+    }
+
     /// Kill the subprocess forcefully.
     pub fn kill(&mut self) {
         let _ = self.child.kill();

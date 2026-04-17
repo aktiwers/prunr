@@ -88,12 +88,14 @@ pub fn postprocess(raw: ArrayView4<f32>, original: &DynamicImage, mask_settings:
         mask = guided_filter_alpha(&rgba, &mask, GUIDED_RADIUS, GUIDED_EPSILON);
     }
 
-    // Compose: write alpha from mask
+    // Compose: write alpha from mask (parallel for large images)
     let mask_raw = mask.as_raw();
     let out_raw = rgba.as_mut();
-    for i in 0..(ow * oh) as usize {
-        out_raw[i * 4 + 3] = mask_raw[i];
-    }
+    out_raw.par_chunks_mut(4)
+        .zip(mask_raw.par_iter())
+        .for_each(|(pixel, &alpha)| {
+            pixel[3] = alpha;
+        });
     rgba
 }
 
