@@ -22,28 +22,25 @@ use crate::gui::theme;
 const BTN_HEIGHT: f32 = 32.0;
 const POPOVER_WIDTH: f32 = 260.0;
 
-/// Label for the dropdown button — reflects the CURRENT item's effective preset:
-///   - Matches "Prunr" (factory defaults) → "Prunr"
-///   - Matches a saved preset exactly → that preset's name
-///   - Otherwise → "Custom" (user has diverged from the last-applied preset)
-fn button_label(settings: &Settings, current: &ItemSettings) -> String {
-    let name = active_preset_name(settings, current);
-    format!("{}  Preset: {name}", ICON_BOOKMARK.codepoint)
-}
-
-/// Determine which preset matches the current item's settings. Checks Prunr
-/// first (factory defaults), then the saved preset map. Returns "Custom" on
-/// no match — the signal that the user has diverged from any saved state.
-fn active_preset_name<'a>(settings: &'a Settings, current: &ItemSettings) -> &'a str {
-    if *current == ItemSettings::default() {
-        return PRUNR_PRESET;
+/// Label for the dropdown button — shows the `applied_preset` name and
+/// whether current settings still match it.
+///   - Match → `Preset: Portrait ✓` (check icon, clean)
+///   - Diverged → `Preset: Portrait ✎` (edit icon, modified)
+///
+/// Tracks the preset the user LAST APPLIED (via dropdown click or Reset All),
+/// not whichever preset happens to match current settings. This way
+/// "Portrait ✎" keeps saying Portrait while you tweak — you know your base
+/// and that you've diverged from it.
+fn button_label(settings: &Settings, current: &ItemSettings, applied_preset: &str) -> String {
+    // If applied_preset was deleted out from under us, fall back gracefully.
+    let exists = applied_preset == PRUNR_PRESET
+        || settings.presets.contains_key(applied_preset);
+    if !exists {
+        return format!("{}  Preset: Custom  {}", ICON_BOOKMARK.codepoint, ICON_EDIT.codepoint);
     }
-    for (name, values) in &settings.presets {
-        if *values == *current {
-            return name.as_str();
-        }
-    }
-    "Custom"
+    let is_modified = *current != settings.preset_values(applied_preset);
+    let state_icon = if is_modified { ICON_EDIT.codepoint } else { ICON_CHECK.codepoint };
+    format!("{}  Preset: {applied_preset}  {state_icon}", ICON_BOOKMARK.codepoint)
 }
 
 /// Sort USER preset names case-insensitively. The synthetic "Prunr" preset
@@ -65,19 +62,22 @@ pub(super) fn all_preset_names(settings: &Settings) -> Vec<String> {
     names
 }
 
-/// Render the Preset dropdown. Returns `true` when the current item's
-/// settings were modified by an Apply action.
+/// Render the Preset dropdown. Returns `Some(name)` when the user applied a
+/// preset (click on a row, or Save that swaps in the new name), so the caller
+/// can update `BatchItem.applied_preset`. Returns `None` for no-op frames or
+/// non-apply interactions (saves, deletes, star toggles).
 #[allow(deprecated)]
 pub fn render(
     ui: &mut Ui,
     settings: &mut Settings,
     current_item: &mut ItemSettings,
-) -> bool {
+    applied_preset: &str,
+) -> Option<String> {
     let pop_id = egui::Id::new("preset_popover");
     let save_dialog_id = egui::Id::new("preset_save_dialog");
 
     let btn = egui::Button::new(
-        RichText::new(button_label(settings, current_item))
+        RichText::new(button_label(settings, current_item, applied_preset))
             .color(theme::TEXT_PRIMARY)
             .size(theme::FONT_SIZE_BODY),
     )
@@ -90,7 +90,7 @@ pub fn render(
         ui.memory_mut(|m| m.toggle_popup(pop_id));
     }
 
-    let mut applied = false;
+    let mut applied: Option<String> = None;
     egui::popup_below_widget(
         ui,
         pop_id,
@@ -116,7 +116,7 @@ pub fn render(
                         .clicked()
                     {
                         *current_item = settings.preset_values(&name);
-                        applied = true;
+                        applied = Some(name.clone());
                     }
                     ui.with_layout(
                         egui::Layout::right_to_left(egui::Align::Center),
@@ -278,13 +278,18 @@ pub fn render(
 
         let trimmed = name_buf.trim();
         if let Some(target) = overwrite_target {
-            settings.presets.insert(target, *current_item);
+            settings.presets.insert(target.clone(), *current_item);
+            // Saving the current settings AS a preset makes that preset the
+            // now-applied one — the label should read "Target ✓" (clean).
+            applied = Some(target);
             close_dialog();
         } else if commit
             && !trimmed.is_empty()
             && !trimmed.eq_ignore_ascii_case(PRUNR_PRESET)
         {
-            settings.presets.insert(trimmed.to_string(), *current_item);
+            let name = trimmed.to_string();
+            settings.presets.insert(name.clone(), *current_item);
+            applied = Some(name);
             close_dialog();
         } else if cancel {
             close_dialog();
@@ -303,44 +308,50 @@ mod tests {
     use std::collections::HashMap;
 
     #[test]
-    fn button_label_shows_prunr_for_factory_defaults() {
+    fn button_label_clean_icon_when_settings_match_applied() {
         let s = Settings::default();
         let current = ItemSettings::default();
-        assert_eq!(
-            button_label(&s, &current),
-            format!("{}  Preset: Prunr", ICON_BOOKMARK.codepoint),
-        );
+        let label = button_label(&s, &current, PRUNR_PRESET);
+        assert!(label.contains("Prunr"), "{label}");
+        assert!(label.ends_with(ICON_CHECK.codepoint), "{label}");
     }
 
     #[test]
-    fn button_label_shows_matching_preset_name() {
-        let mut s = Settings::default();
-        let mut values = ItemSettings::default();
-        values.gamma = 2.0;
-        s.presets.insert("Portrait".to_string(), values);
-        // Current item matches "Portrait" exactly → label tracks it.
-        let current = values;
-        assert_eq!(
-            button_label(&s, &current),
-            format!("{}  Preset: Portrait", ICON_BOOKMARK.codepoint),
-        );
-    }
-
-    #[test]
-    fn button_label_shows_custom_when_no_match() {
-        let mut s = Settings::default();
-        s.presets.insert("Portrait".to_string(), {
-            let mut v = ItemSettings::default();
-            v.gamma = 2.0;
-            v
-        });
-        // Current item matches neither factory nor any saved preset.
+    fn button_label_modified_icon_when_diverged_from_applied() {
+        let s = Settings::default();
         let mut current = ItemSettings::default();
         current.gamma = 1.7;
-        assert_eq!(
-            button_label(&s, &current),
-            format!("{}  Preset: Custom", ICON_BOOKMARK.codepoint),
-        );
+        let label = button_label(&s, &current, PRUNR_PRESET);
+        assert!(label.contains("Prunr"), "{label}");
+        assert!(label.ends_with(ICON_EDIT.codepoint), "{label}");
+    }
+
+    #[test]
+    fn button_label_falls_back_to_custom_when_applied_was_deleted() {
+        let s = Settings::default();
+        let current = ItemSettings::default();
+        // "Portrait" is NOT in presets, not Prunr — applied_preset dangles.
+        let label = button_label(&s, &current, "Portrait");
+        assert!(label.contains("Custom"), "{label}");
+        assert!(label.ends_with(ICON_EDIT.codepoint), "{label}");
+    }
+
+    #[test]
+    fn button_label_tracks_applied_even_when_current_matches_different_preset() {
+        let mut s = Settings::default();
+        let mut portrait = ItemSettings::default();
+        portrait.gamma = 2.0;
+        s.presets.insert("Portrait".to_string(), portrait);
+        // applied_preset = "Prunr" but current happens to match factory.
+        // Label should stay on "Prunr" (the applied one).
+        let current = ItemSettings::default();
+        let label = button_label(&s, &current, PRUNR_PRESET);
+        assert!(label.contains("Prunr"), "{label}");
+        // …and when current matches the OTHER preset but applied is Prunr,
+        // we still show "Prunr ✎" (modified relative to the applied base).
+        let label = button_label(&s, &portrait, PRUNR_PRESET);
+        assert!(label.contains("Prunr"), "{label}");
+        assert!(label.ends_with(ICON_EDIT.codepoint), "{label}");
     }
 
     #[test]

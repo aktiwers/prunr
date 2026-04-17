@@ -163,7 +163,7 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) {
                     .color(theme::TEXT_PRIMARY)
                     .size(theme::FONT_SIZE_BODY),
             );
-            hint(ui, "Auto-rerun mask and edge tweaks as you adjust them (Phase 3).");
+            hint(ui, "Auto-rerun mask and edge tweaks as you adjust them.");
             ui.add_space(theme::SPACE_MD);
 
             ui.separator();
