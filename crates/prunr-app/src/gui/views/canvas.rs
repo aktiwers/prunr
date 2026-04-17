@@ -19,7 +19,17 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
     let canvas_rect = ui.available_rect_before_wrap();
 
     let modal_open = app.any_modal_open();
-    if !modal_open {
+    // Block canvas pan/zoom when an egui popup (chip popover, combo box,
+    // dropdown) is open — otherwise the press that lands on a slider inside
+    // the popover would also start panning the canvas, and slider drag would
+    // drag both the slider AND the image.
+    #[allow(deprecated)]
+    let popup_open = ui.ctx().memory(|m| m.any_popup_open());
+    // Also check egui's global "wants pointer input" — this is true when any
+    // widget (slider, button, text field) is currently capturing the pointer.
+    let widget_has_pointer = ui.ctx().egui_wants_pointer_input();
+    let canvas_gets_input = !modal_open && !popup_open && !widget_has_pointer;
+    if canvas_gets_input {
         // Handle scroll-wheel zoom (cursor-centered)
         ui.ctx().input(|i| {
             for event in &i.events {
@@ -53,6 +63,10 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                 app.zoom_state.pan_offset += i.pointer.delta();
             }
         });
+    } else {
+        // Cancel any ongoing pan when a widget / popup takes over. Prevents
+        // stuck "is_panning=true" state after clicking from canvas onto a chip.
+        app.zoom_state.is_panning = false;
     }
 
     // Handle pending Ctrl+0 (fit to window) / Ctrl+1 (actual size).
