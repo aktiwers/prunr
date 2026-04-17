@@ -87,8 +87,8 @@ impl Default for LivePreview {
 
 impl LivePreview {
     /// Register a tweak. Debounce resets each call; when the user stops
-    /// tweaking for 300ms, `tick` dispatches. A new tweak for the same item
-    /// cancels any in-flight dispatch.
+    /// tweaking for DEBOUNCE ms, `tick` dispatches. A new tweak for the same
+    /// item cancels any in-flight dispatch.
     pub fn mark_tweak(&mut self, item_id: u64, kind: PreviewKind) {
         // Cancel any in-flight work for this item — the new tweak will produce
         // a fresh dispatch that supersedes it.
@@ -96,6 +96,21 @@ impl LivePreview {
             f.cancel.store(true, Ordering::Release);
         }
         self.pending.insert(item_id, Pending { last_tweak_at: Instant::now(), kind });
+    }
+
+    /// Flush: expire the pending tweak timer so the next `tick` dispatches
+    /// immediately. Used when an edit settles (slider released, checkbox
+    /// toggled, color picked) so the user doesn't wait the full debounce.
+    ///
+    /// Idempotent — no-op if there's no pending tweak for `item_id`.
+    pub fn flush(&mut self, item_id: u64) {
+        if let Some(p) = self.pending.get_mut(&item_id) {
+            // Reach backward by more than DEBOUNCE so `tick`'s elapsed check
+            // is unconditionally satisfied on the next frame.
+            p.last_tweak_at = Instant::now()
+                .checked_sub(DEBOUNCE + Duration::from_millis(10))
+                .unwrap_or_else(Instant::now);
+        }
     }
 
     /// Per-frame tick. Returns the time until the next tween we're waiting on
