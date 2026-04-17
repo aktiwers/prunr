@@ -483,9 +483,10 @@ fn run_batch_subprocess(
     loop {
         if pending.is_empty() { break; }
 
-        // Spawn subprocess
+        // Spawn subprocess — cap engines at pending item count
+        let effective_jobs = max_jobs.min(pending.len());
         let (mut sub, _provider) = match SubprocessManager::spawn(
-            model, max_jobs, mask, force_cpu, line_mode,
+            model, effective_jobs, mask, force_cpu, line_mode,
             line_strength, solid_line_color, bg_color,
         ) {
             Ok(s) => s,
