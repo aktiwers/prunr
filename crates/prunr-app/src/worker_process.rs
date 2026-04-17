@@ -281,11 +281,15 @@ pub fn run_worker() -> ! {
                                         active_provider: provider.clone(),
                                     })
                             } else {
-                                let eng = engine.as_ref().expect("segmentation engine required");
-                                process_image_with_mask(
-                                    &img_bytes, eng, &mask,
-                                    Some(progress_cb), Some(cancel.clone()),
-                                ).and_then(|pr| {
+                                match engine.as_ref() {
+                                    None => Err(prunr_core::CoreError::Inference(
+                                        "segmentation engine not initialized".into()
+                                    )),
+                                    Some(eng) => process_image_with_mask(
+                                        &img_bytes, eng, &mask,
+                                        Some(progress_cb), Some(cancel.clone()),
+                                    ),
+                                }.and_then(|pr| {
                                     let img = image::DynamicImage::ImageRgba8(pr.rgba_image);
                                     edge_eng.as_ref().unwrap().detect(&img, line_strength, solid_line_color)
                                         .map(|rgba_image| ProcessResult {
@@ -298,7 +302,22 @@ pub fn run_worker() -> ! {
                         LineMode::Off => {
                             // Split pipeline: infer_only → tensor_to_mask → apply_mask
                             // This captures the raw tensor for future Tier 2 mask reruns.
-                            let eng = engine.as_ref().expect("segmentation engine required");
+                            let Some(eng) = engine.as_ref() else {
+                                let _ = evt_tx.send(SubprocessEvent::ImageError {
+                                    item_id,
+                                    error: "segmentation engine not initialized".into(),
+                                });
+                                in_flight.fetch_sub(1, Ordering::AcqRel);
+                                if image_path.starts_with(ipc.as_ref()) {
+                                    let _ = std::fs::remove_file(&image_path);
+                                }
+                                if let Some(ref p) = chain_path {
+                                    if p.starts_with(ipc.as_ref()) {
+                                        let _ = std::fs::remove_file(p);
+                                    }
+                                }
+                                return;
+                            };
                             let decoded;
                             let original: &image::DynamicImage = if let Some(ref img) = chain_img {
                                 img
@@ -353,15 +372,9 @@ pub fn run_worker() -> ! {
 
                                     let th = ir.tensor_height;
                                     let tw = ir.tensor_width;
-                                    let tensor_view = ndarray::ArrayView4::from_shape(
-                                        (1, 1, th, tw), &ir.tensor_data
-                                    ).map_err(|e| prunr_core::CoreError::Inference(
-                                        format!("Tensor reshape: {e}")
-                                    ))?;
-                                    let mask_img = prunr_core::tensor_to_mask(
-                                        tensor_view, original, &mask, model,
-                                    );
-                                    let rgba_image = prunr_core::apply_mask(original, &mask_img);
+                                    let rgba_image = prunr_core::postprocess_from_flat(
+                                        &ir.tensor_data, th, tw, original, &mask, model,
+                                    )?;
 
                                     // Report alpha stage
                                     if !cancel.load(Ordering::Acquire) {
@@ -477,21 +490,14 @@ pub fn run_worker() -> ! {
                         let raw_bytes = std::fs::read(&tensor_path)
                             .map_err(|e| format!("Failed to read tensor: {e}"))?;
                         let floats = prunr_app::subprocess::ipc::le_bytes_to_f32s(&raw_bytes);
-                        let th = tensor_height as usize;
-                        let tw = tensor_width as usize;
-                        let tensor = ndarray::ArrayView4::from_shape(
-                            (1, 1, th, tw), &floats
-                        ).map_err(|e| format!("Tensor reshape failed: {e}"))?;
-
-                        // Read original image
                         let img_bytes = std::fs::read(&original_image_path)
                             .map_err(|e| format!("Failed to read original: {e}"))?;
                         let original = prunr_core::load_image_from_bytes(&img_bytes)
                             .map_err(|e| format!("Failed to decode original: {e}"))?;
-
-                        // Tier 2: tensor_to_mask + apply_mask
-                        let mask_img = prunr_core::tensor_to_mask(tensor, &original, &repost_mask, model);
-                        Ok(prunr_core::apply_mask(&original, &mask_img))
+                        prunr_core::postprocess_from_flat(
+                            &floats, tensor_height as usize, tensor_width as usize,
+                            &original, &repost_mask, model,
+                        ).map_err(|e| e.to_string())
                     })();
 
                     match tensor_result {

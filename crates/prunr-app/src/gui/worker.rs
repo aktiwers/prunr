@@ -257,6 +257,10 @@ fn run_batch_with_retry(
                 // Wait for child to acknowledge
                 std::thread::sleep(std::time::Duration::from_millis(200));
                 sub.poll_events(); // drain
+                // Any tempfiles written between drain and cancel honoring would leak.
+                // Kill + cleanup mirrors the crash path.
+                sub.kill();
+                crate::subprocess::protocol::cleanup_ipc_temp();
                 let _ = res_tx.send(WorkerResult::Cancelled);
                 ctx.request_repaint();
                 return;
