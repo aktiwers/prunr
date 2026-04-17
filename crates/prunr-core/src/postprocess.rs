@@ -7,15 +7,45 @@ use crate::guided_filter::guided_filter_alpha;
 use crate::types::{MaskSettings, ModelKind};
 
 /// Postprocess raw ONNX model output into a transparent RGBA image.
-/// Convenience wrapper that calls `tensor_to_mask()` + `apply_mask()`.
+/// Allocates the RGBA buffer once and reuses it for guided filter (if enabled)
+/// and final mask application — avoids two 4×width×height allocations.
 pub fn postprocess(raw: ArrayView4<f32>, original: &DynamicImage, mask_settings: &MaskSettings, model: ModelKind) -> RgbaImage {
-    let mask = tensor_to_mask(raw, original, mask_settings, model);
-    apply_mask(original, &mask)
+    let mut rgba = original.to_rgba8();
+    let mask = tensor_to_mask_with_rgba(raw, &rgba, mask_settings, model);
+    apply_mask_inplace(&mut rgba, &mask);
+    rgba
+}
+
+/// Postprocess from a flat f32 tensor slice. Used by subprocess paths where
+/// tensor data arrives via IPC as a Vec<f32> that needs reshaping to [1,1,H,W].
+pub fn postprocess_from_flat(
+    tensor: &[f32],
+    tensor_h: usize,
+    tensor_w: usize,
+    original: &DynamicImage,
+    mask_settings: &MaskSettings,
+    model: ModelKind,
+) -> Result<RgbaImage, crate::types::CoreError> {
+    let view = ArrayView4::from_shape((1, 1, tensor_h, tensor_w), tensor)
+        .map_err(|e| crate::types::CoreError::Inference(format!("Tensor reshape: {e}")))?;
+    Ok(postprocess(view, original, mask_settings, model))
 }
 
 /// Convert raw ONNX tensor to a full-resolution grayscale mask (Tier 2).
 /// Applies normalization, gamma, threshold, resize, edge shift, and guided filter.
 pub fn tensor_to_mask(raw: ArrayView4<f32>, original: &DynamicImage, mask_settings: &MaskSettings, model: ModelKind) -> GrayImage {
+    // Materializing rgba here is wasteful when refine_edges is false; callers on
+    // the hot path should use `postprocess()` which shares the RGBA buffer.
+    let rgba = if mask_settings.refine_edges { Some(original.to_rgba8()) } else { None };
+    tensor_to_mask_core(raw, original.width(), original.height(), rgba.as_ref(), mask_settings, model)
+}
+
+/// Same as `tensor_to_mask` but reuses an already-materialized RGBA buffer.
+fn tensor_to_mask_with_rgba(raw: ArrayView4<f32>, rgba: &RgbaImage, mask_settings: &MaskSettings, model: ModelKind) -> GrayImage {
+    tensor_to_mask_core(raw, rgba.width(), rgba.height(), Some(rgba), mask_settings, model)
+}
+
+fn tensor_to_mask_core(raw: ArrayView4<f32>, ow: u32, oh: u32, rgba_for_guided: Option<&RgbaImage>, mask_settings: &MaskSettings, model: ModelKind) -> GrayImage {
     let pred = raw.slice(ndarray::s![0, 0, .., ..]);
 
     let use_sigmoid = matches!(model, ModelKind::BiRefNetLite);
@@ -81,7 +111,6 @@ pub fn tensor_to_mask(raw: ArrayView4<f32>, original: &DynamicImage, mask_settin
         .expect("mask buffer size matches dimensions");
 
     // Resize mask back to original dimensions (SIMD-accelerated Lanczos3)
-    let (ow, oh) = (original.width(), original.height());
     let mut mask = resize_gray_lanczos3(&mask, ow, oh);
 
     // Edge shift: positive erodes (shrinks foreground), negative dilates (expands it)
@@ -89,11 +118,12 @@ pub fn tensor_to_mask(raw: ArrayView4<f32>, original: &DynamicImage, mask_settin
         apply_edge_shift(&mut mask, mask_settings.edge_shift);
     }
 
-    let rgba = original.to_rgba8();
     if mask_settings.refine_edges {
-        const GUIDED_RADIUS: u32 = 8;
-        const GUIDED_EPSILON: f32 = 1e-4;
-        mask = guided_filter_alpha(&rgba, &mask, GUIDED_RADIUS, GUIDED_EPSILON);
+        if let Some(rgba) = rgba_for_guided {
+            const GUIDED_RADIUS: u32 = 8;
+            const GUIDED_EPSILON: f32 = 1e-4;
+            mask = guided_filter_alpha(rgba, &mask, GUIDED_RADIUS, GUIDED_EPSILON);
+        }
     }
 
     mask
@@ -102,12 +132,18 @@ pub fn tensor_to_mask(raw: ArrayView4<f32>, original: &DynamicImage, mask_settin
 /// Apply a grayscale mask as the alpha channel on the original image (Tier 3).
 pub fn apply_mask(original: &DynamicImage, mask: &GrayImage) -> RgbaImage {
     let mut rgba = original.to_rgba8();
+    apply_mask_inplace(&mut rgba, mask);
+    rgba
+}
+
+/// Write the mask into an existing RGBA buffer's alpha channel in place.
+/// Used by `postprocess()` to avoid a second full-resolution RGBA allocation.
+fn apply_mask_inplace(rgba: &mut RgbaImage, mask: &GrayImage) {
     let mask_raw = mask.as_raw();
     let out_raw = rgba.as_mut();
     for (pixel, &alpha) in out_raw.chunks_mut(4).zip(mask_raw.iter()) {
         pixel[3] = alpha;
     }
-    rgba
 }
 
 /// Erode (positive shift) or dilate (negative shift) the mask.

@@ -187,15 +187,7 @@ impl From<ModelKind> for SettingsModel {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum LineMode {
-    /// No line extraction
-    Off,
-    /// Extract lines from original image (skip bg removal)
-    LinesOnly,
-    /// Remove background first, then extract lines from the result
-    AfterBgRemoval,
-}
+pub use prunr_core::LineMode;
 
 impl Default for Settings {
     fn default() -> Self {
