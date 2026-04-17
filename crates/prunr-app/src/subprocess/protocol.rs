@@ -3,10 +3,8 @@
 //! All types are serde-serializable and sent as length-prefixed bincode
 //! frames over stdin/stdout.
 
-use prunr_core::{ModelKind, MaskSettings, ProgressStage};
+use prunr_core::{ModelKind, MaskSettings, ProgressStage, LineMode};
 use serde::{Serialize, Deserialize};
-
-use crate::gui::settings::LineMode;
 
 /// Parent → Child commands (sent over child's stdin).
 #[derive(Serialize, Deserialize, Debug)]

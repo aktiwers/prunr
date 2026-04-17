@@ -29,6 +29,17 @@ pub enum ModelKind {
     BiRefNetLite,
 }
 
+/// Line extraction mode. Determines which engines the pipeline uses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum LineMode {
+    /// No line extraction
+    Off,
+    /// Extract lines from original image (skip bg removal)
+    LinesOnly,
+    /// Remove background first, then extract lines from the result
+    AfterBgRemoval,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ProgressStage {
     Decode,

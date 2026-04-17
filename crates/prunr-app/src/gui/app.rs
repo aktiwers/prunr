@@ -866,10 +866,12 @@ impl PrunrApp {
                     (None, _) => {
                         item.status = BatchStatus::Error("Tensor cache corrupt".into());
                         item.cached_tensor = None;
+                        item.applied_recipe = None;
                     }
                     (_, Err(e)) => {
                         item.status = BatchStatus::Error(format!("Failed to load: {e}"));
                         item.cached_tensor = None;
+                        item.applied_recipe = None;
                     }
                 }
             }
@@ -906,6 +908,9 @@ impl PrunrApp {
                 }
             }
 
+            // All Tier 1 items failed load_bytes AND no Tier 2 work — skip dispatch.
+            if initial_items.is_empty() && tier2_work.is_empty() { return; }
+
             let (atx, arx) = mpsc::channel();
             self.admission = Some(ctrl);
             self.admission_tx = Some(atx);
@@ -924,6 +929,11 @@ impl PrunrApp {
                 Some((i.id, bytes, chain_input))
             })
             .collect();
+
+        // If all prep failed (both Tier 2 decompress + Tier 1 load_bytes), don't
+        // dispatch an empty batch — the subprocess would spin up for nothing
+        // and items stay in Error status set above.
+        if items.is_empty() && tier2_work.is_empty() { return; }
 
         self.dispatch_batch(items, tier2_work, model, jobs, None);
     }
@@ -1614,15 +1624,22 @@ impl PrunrApp {
                                 item.thumb_pending = false;
                                 item.source_tex_pending = false;
                                 item.result_tex_pending = false;
-                                let backend_changed = self.settings.active_backend != pr.active_provider;
-                                self.settings.active_backend = pr.active_provider;
-                                if backend_changed {
-                                    self.settings.parallel_jobs = self.settings.default_jobs();
+                                // Tier 2 reruns report empty active_provider (no inference).
+                                // Only update backend label on Tier 1 results that actually ran inference.
+                                if !pr.active_provider.is_empty() {
+                                    let backend_changed = self.settings.active_backend != pr.active_provider;
+                                    self.settings.active_backend = pr.active_provider;
+                                    if backend_changed {
+                                        self.settings.parallel_jobs = self.settings.default_jobs();
+                                    }
                                 }
                             }
                             Err(e) => {
+                                // Clear recipe + tensor so retry runs a fresh Tier 1
+                                // (otherwise resolve_tier might return Skip for an errored item).
                                 item.status = BatchStatus::Error(e);
                                 item.cached_tensor = None;
+                                item.applied_recipe = None;
                             }
                         }
                     }
