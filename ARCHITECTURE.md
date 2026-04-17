@@ -128,7 +128,7 @@ Attempt 3: 1 engine → success → continue at 1
          or → crash → mark remaining images as "insufficient memory"
 ```
 
-The parent shows a toast: "Memory pressure — retrying X images with Y parallel jobs".
+The parent shows a toast: "Memory pressure — retrying X images with Y parallel jobs". Crash diagnostics detect the exit signal (SIGKILL = "Process killed by OS (out of memory)", SIGSEGV = "segmentation fault") for user-facing messages.
 
 ## Memory Management
 
@@ -141,6 +141,8 @@ Undo/redo history uses a tiered strategy to bound RAM while preserving Ctrl+Z:
 | Hot | `Arc<RgbaImage>` in RAM | 100% | instant | Currently viewed result |
 | Warm | Zstd-compressed `Vec<u8>` in RAM | ~25-30% | ~8ms decompress | Non-visible history entries |
 | Cold | Zstd file on disk (`~/.cache/prunr/history/`) | 0% RAM | ~50-100ms | Under memory pressure |
+
+History seeding is lazy: for images that haven't been decoded yet (lazy file loading), the seed is skipped at process time and created on demand during the first undo. This eliminates UI freezes when processing large batches.
 
 History entries compress to Tier 2 (warm) by default. Demotion to Tier 3 (cold) happens automatically when the subprocess reports high RSS via `under_memory_pressure()`.
 
@@ -248,17 +250,19 @@ All CLI processing (single and batch) uses subprocess isolation for OOM protecti
       - Normalize to [0, 1] (min-max for Silueta/U2Net, sigmoid for BiRefNet)
       - Short-circuit uniform output (skip per-pixel loop)
       - Apply gamma + optional hard threshold
-      - Resize mask to original dimensions (Lanczos3) ← memory spike point
+      - Resize mask to original dimensions (SIMD Lanczos3 via `fast_image_resize`)
       - Optional: apply_edge_shift (morphological erode/dilate)
       - Optional: guided_filter_alpha (O(1) box filter)
-      - Compose mask as alpha channel
+      - Compose mask as alpha channel (parallel via rayon)
 6.  Optional: apply_background_color()
 ```
 
 ### Postprocess fast paths
 
+- All Lanczos3 resizes use `fast_image_resize` (SSE4.1, AVX2, NEON) — 10-20x faster than `image` crate
 - Division by range → precomputed `inv_range` multiplier
 - Uniform-output detection before the per-pixel loop
+- Alpha composition parallelized via `rayon::par_chunks_mut`
 - Guided filter uses `f32` prefix sums (halved bandwidth vs f64)
 - Edge shift's ring buffers allocated once, swapped via `std::mem::swap`
 
@@ -391,6 +395,7 @@ Workspace `Cargo.toml` `version` is the single source of truth. CLI reads `CARGO
 | `bincode` | 2 | Subprocess IPC serialization |
 | `sysinfo` | 0.37 | Cross-platform available RAM query |
 | `memory-stats` | 1 | Process RSS monitoring (subprocess self-reporting) |
+| `fast_image_resize` | 6 | SIMD-accelerated Lanczos3 resize (SSE4.1/AVX2/NEON) |
 | `clap` | 4.5 | CLI argument parsing |
 | `serde` / `serde_json` | 1.x | Settings + IPC serialization |
 | `rfd` | 0.15 | Native file dialogs |
