@@ -162,6 +162,7 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) {
                             .size(theme::FONT_SIZE_MONO)
                             .color(theme::TEXT_SECONDARY),
                     ).clicked() {
+                        let default_item = defaults.item_defaults;
                         match tab {
                             0 => {
                                 app.settings.parallel_jobs = app.settings.default_jobs();
@@ -170,21 +171,18 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) {
                                 app.settings.chain_mode = defaults.chain_mode;
                                 app.settings.dark_checker = defaults.dark_checker;
                                 app.settings.history_depth = defaults.history_depth;
-                                app.settings.apply_bg_color = defaults.apply_bg_color;
-                                app.settings.bg_color = defaults.bg_color;
+                                app.settings.item_defaults.bg = default_item.bg;
                             }
                             1 => {
-                                app.settings.line_mode = defaults.line_mode;
-                                app.settings.line_strength = defaults.line_strength;
-                                app.settings.solid_line_color = defaults.solid_line_color;
-                                app.settings.line_color = defaults.line_color;
+                                app.settings.item_defaults.line_mode = default_item.line_mode;
+                                app.settings.item_defaults.line_strength = default_item.line_strength;
+                                app.settings.item_defaults.solid_line_color = default_item.solid_line_color;
                             }
                             2 => {
-                                app.settings.mask_gamma = defaults.mask_gamma;
-                                app.settings.mask_threshold = defaults.mask_threshold;
-                                app.settings.mask_threshold_enabled = defaults.mask_threshold_enabled;
-                                app.settings.edge_shift = defaults.edge_shift;
-                                app.settings.refine_edges = defaults.refine_edges;
+                                app.settings.item_defaults.gamma = default_item.gamma;
+                                app.settings.item_defaults.threshold = default_item.threshold;
+                                app.settings.item_defaults.edge_shift = default_item.edge_shift;
+                                app.settings.item_defaults.refine_edges = default_item.refine_edges;
                             }
                             _ => {}
                         }
@@ -276,7 +274,10 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) {
                     section_heading(ui, "Background Color");
                     hint(ui, "Fill transparent areas with a solid color.");
                     ui.add_space(theme::SPACE_SM);
-                    color_toggle_row(ui, &mut app.settings.apply_bg_color, "Apply background color", &mut app.settings.bg_color);
+                    let mut bg_enabled = app.settings.item_defaults.bg.is_some();
+                    let mut bg_value = app.settings.item_defaults.bg.unwrap_or([255, 255, 255, 255]);
+                    color_toggle_row(ui, &mut bg_enabled, "Apply background color", &mut bg_value);
+                    app.settings.item_defaults.bg = if bg_enabled { Some(bg_value) } else { None };
 
                     ui.add_space(theme::SPACE_MD);
                     ui.separator();
@@ -312,7 +313,7 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) {
                     hint(ui, "graffiti, and illustrations. Uses DexiNed AI model.");
                     ui.add_space(theme::SPACE_SM);
 
-                    let mode_label = match app.settings.line_mode {
+                    let mode_label = match app.settings.item_defaults.line_mode {
                         LineMode::Off => "Off",
                         LineMode::EdgesOnly => "Edges only (full image)",
                         LineMode::SubjectOutline => "Outline only (no fill)",
@@ -326,35 +327,44 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) {
                         egui::ComboBox::from_id_salt("line_mode")
                             .selected_text(mode_label)
                             .show_ui(ui, |ui| {
-                                ui.selectable_value(&mut app.settings.line_mode, LineMode::Off, "Off");
-                                ui.selectable_value(&mut app.settings.line_mode, LineMode::EdgesOnly, "Edges only (full image)");
-                                ui.selectable_value(&mut app.settings.line_mode, LineMode::SubjectOutline, "Outline only (no fill)");
+                                ui.selectable_value(&mut app.settings.item_defaults.line_mode, LineMode::Off, "Off");
+                                ui.selectable_value(&mut app.settings.item_defaults.line_mode, LineMode::EdgesOnly, "Edges only (full image)");
+                                ui.selectable_value(&mut app.settings.item_defaults.line_mode, LineMode::SubjectOutline, "Outline only (no fill)");
                             });
                     });
                     hint(ui, "Off = normal background removal.");
                     hint(ui, "Edges only = extract all edges from the full image, skip BG removal.");
                     hint(ui, "Outline only = remove BG, then extract edges within the subject.");
 
-                    if app.settings.line_mode != LineMode::Off {
+                    if app.settings.item_defaults.line_mode != LineMode::Off {
                         ui.add_space(theme::SPACE_MD);
-                        let strength_text = format!("{:.2}", app.settings.line_strength);
+                        let strength_text = format!("{:.2}", app.settings.item_defaults.line_strength);
                         slider_row(
-                            ui, "Line strength", &mut app.settings.line_strength,
+                            ui, "Line strength", &mut app.settings.item_defaults.line_strength,
                             0.05..=1.0, &strength_text, false, None,
                         );
                         hint(ui, "How much detail to capture. Lower = bold outlines");
                         hint(ui, "only, higher = fine texture and subtle edges.");
                         ui.add_space(theme::SPACE_SM);
-                        color_toggle_row(ui, &mut app.settings.solid_line_color, "Solid color lines", &mut app.settings.line_color);
+                        let mut slc_enabled = app.settings.item_defaults.solid_line_color.is_some();
+                        let mut slc_value = app.settings.item_defaults.solid_line_color
+                            .map(|[r, g, b]| [r, g, b, 255])
+                            .unwrap_or([0, 0, 0, 255]);
+                        color_toggle_row(ui, &mut slc_enabled, "Solid color lines", &mut slc_value);
+                        app.settings.item_defaults.solid_line_color = if slc_enabled {
+                            Some([slc_value[0], slc_value[1], slc_value[2]])
+                        } else {
+                            None
+                        };
                         hint(ui, "Paint all lines a single color instead of original.");
                     }
                 }
 
                 // ── Mask ──
                 2 => {
-                    let gamma_text = format!("{:.2}", app.settings.mask_gamma);
+                    let gamma_text = format!("{:.2}", app.settings.item_defaults.gamma);
                     slider_row(
-                        ui, "Strength", &mut app.settings.mask_gamma,
+                        ui, "Strength", &mut app.settings.item_defaults.gamma,
                         0.2..=3.0, &gamma_text, true, None,
                     );
                     hint(ui, "Controls how much background is removed.");
@@ -362,19 +372,21 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) {
                     hint(ui, "more forgiving with edges and fine detail.");
                     ui.add_space(theme::SPACE_MD);
 
-                    let threshold_text = format!("{:.2}", app.settings.mask_threshold);
+                    let mut thr_enabled = app.settings.item_defaults.threshold.is_some();
+                    let mut thr_value = app.settings.item_defaults.threshold.unwrap_or(0.5);
+                    let threshold_text = format!("{:.2}", thr_value);
                     ui.horizontal(|ui| {
                         ui.checkbox(
-                            &mut app.settings.mask_threshold_enabled,
+                            &mut thr_enabled,
                             RichText::new("Hard cutoff")
                                 .color(theme::TEXT_PRIMARY)
                                 .size(theme::FONT_SIZE_BODY),
                         );
-                        if app.settings.mask_threshold_enabled {
+                        if thr_enabled {
                             let avail = ui.available_width() - 52.0;
                             ui.add_sized(
                                 [avail.max(100.0), 18.0],
-                                egui::Slider::new(&mut app.settings.mask_threshold, 0.01..=0.99)
+                                egui::Slider::new(&mut thr_value, 0.01..=0.99)
                                     .show_value(false),
                             );
                             ui.label(
@@ -385,20 +397,22 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) {
                             );
                         }
                     });
+                    app.settings.item_defaults.threshold = if thr_enabled { Some(thr_value) } else { None };
                     hint(ui, "Makes the result fully opaque or fully transparent");
                     hint(ui, "\u{2014} no in-between. Lower values keep more of the");
                     hint(ui, "subject, higher values remove more aggressively.");
                     ui.add_space(theme::SPACE_MD);
 
-                    let edge_label = if app.settings.edge_shift > 0.5 {
-                        format!("erode {:.0}px", app.settings.edge_shift)
-                    } else if app.settings.edge_shift < -0.5 {
-                        format!("dilate {:.0}px", app.settings.edge_shift.abs())
+                    let edge_shift = app.settings.item_defaults.edge_shift;
+                    let edge_label = if edge_shift > 0.5 {
+                        format!("erode {:.0}px", edge_shift)
+                    } else if edge_shift < -0.5 {
+                        format!("dilate {:.0}px", edge_shift.abs())
                     } else {
                         "off".to_string()
                     };
                     slider_row(
-                        ui, "Edge refine", &mut app.settings.edge_shift,
+                        ui, "Edge refine", &mut app.settings.item_defaults.edge_shift,
                         -5.0..=5.0, &edge_label, false, Some(1.0),
                     );
                     hint(ui, "Adjusts the outline around your subject.");
@@ -407,7 +421,7 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) {
                     ui.add_space(theme::SPACE_MD);
 
                     ui.checkbox(
-                        &mut app.settings.refine_edges,
+                        &mut app.settings.item_defaults.refine_edges,
                         RichText::new("Refine edges")
                             .color(theme::TEXT_PRIMARY)
                             .size(theme::FONT_SIZE_BODY),
