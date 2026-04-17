@@ -11,9 +11,9 @@ use crate::types::ModelKind;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct InferenceRecipe {
     pub model: ModelKind,
-    /// Whether segmentation model runs (false for LinesOnly mode).
+    /// Whether segmentation model runs (false for EdgesOnly mode).
     pub uses_segmentation: bool,
-    /// Whether edge detection model runs (true for LinesOnly or AfterBgRemoval).
+    /// Whether edge detection model runs (true when line_mode is not Off).
     pub uses_edge_detection: bool,
     /// Edge detection sensitivity (affects DexiNed output).
     pub line_strength_bits: u32,

@@ -150,9 +150,9 @@ impl Cli {
 
     fn line_mode(&self) -> LineMode {
         if self.lines_after_bg {
-            LineMode::AfterBgRemoval
+            LineMode::SubjectOutline
         } else if self.lines {
-            LineMode::LinesOnly
+            LineMode::EdgesOnly
         } else {
             LineMode::Off
         }

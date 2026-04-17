@@ -314,8 +314,8 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) {
 
                     let mode_label = match app.settings.line_mode {
                         LineMode::Off => "Off",
-                        LineMode::LinesOnly => "Lines only",
-                        LineMode::AfterBgRemoval => "After BG removal",
+                        LineMode::EdgesOnly => "Edges only (full image)",
+                        LineMode::SubjectOutline => "Outline only (no fill)",
                     };
                     ui.horizontal(|ui| {
                         ui.label(
@@ -327,13 +327,13 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) {
                             .selected_text(mode_label)
                             .show_ui(ui, |ui| {
                                 ui.selectable_value(&mut app.settings.line_mode, LineMode::Off, "Off");
-                                ui.selectable_value(&mut app.settings.line_mode, LineMode::LinesOnly, "Lines only");
-                                ui.selectable_value(&mut app.settings.line_mode, LineMode::AfterBgRemoval, "After BG removal");
+                                ui.selectable_value(&mut app.settings.line_mode, LineMode::EdgesOnly, "Edges only (full image)");
+                                ui.selectable_value(&mut app.settings.line_mode, LineMode::SubjectOutline, "Outline only (no fill)");
                             });
                     });
                     hint(ui, "Off = normal background removal.");
-                    hint(ui, "Lines only = extract edges, skip BG removal.");
-                    hint(ui, "After BG removal = remove BG, then extract lines.");
+                    hint(ui, "Edges only = extract all edges from the full image, skip BG removal.");
+                    hint(ui, "Outline only = remove BG, then extract edges within the subject.");
 
                     if app.settings.line_mode != LineMode::Off {
                         ui.add_space(theme::SPACE_MD);
