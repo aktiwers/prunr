@@ -30,14 +30,19 @@ pub enum ModelKind {
 }
 
 /// Line extraction mode. Determines which engines the pipeline uses.
+///
+/// `#[serde(alias = ...)]` preserves backward compatibility with v1 settings
+/// files that used the older `LinesOnly` / `AfterBgRemoval` names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum LineMode {
     /// No line extraction
     Off,
-    /// Extract lines from original image (skip bg removal)
-    LinesOnly,
-    /// Remove background first, then extract lines from the result
-    AfterBgRemoval,
+    /// DexiNed on original image; segmentation skipped.
+    #[serde(alias = "LinesOnly")]
+    EdgesOnly,
+    /// Segmentation first, then DexiNed — edges only within subject, body transparent.
+    #[serde(alias = "AfterBgRemoval")]
+    SubjectOutline,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
