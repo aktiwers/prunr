@@ -16,7 +16,7 @@ use crate::gui::app::PrunrApp;
 use crate::gui::settings::Settings;
 use crate::gui::theme;
 
-use super::section_heading;
+use super::{hint, section_heading};
 
 /// Slider row: label left, slider fills middle, value right.
 fn slider_row(
@@ -46,15 +46,6 @@ fn slider_row(
                 .color(theme::TEXT_PRIMARY),
         );
     });
-}
-
-/// Dimmed description text below a control.
-fn hint(ui: &mut egui::Ui, text: &str) {
-    ui.label(
-        RichText::new(text)
-            .color(theme::TEXT_HINT)
-            .size(theme::FONT_SIZE_MONO),
-    );
 }
 
 pub fn render(ctx: &egui::Context, app: &mut PrunrApp) {
@@ -238,9 +229,8 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) {
 
             // ── Default preset for new images ──
             section_heading(ui, "Default preset");
-            let mut preset_names: Vec<String> = app.settings.presets.keys().cloned().collect();
-            preset_names.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
-            let current = app.settings.default_preset.clone().unwrap_or_else(|| "— none —".to_string());
+            let preset_names = super::preset_dropdown::sorted_preset_names(&app.settings);
+            let current = app.settings.default_preset.clone().unwrap_or_else(|| "Prunr (factory defaults)".to_string());
             ui.horizontal(|ui| {
                 egui::ComboBox::from_id_salt("default_preset")
                     .selected_text(
@@ -249,7 +239,7 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) {
                             .size(theme::FONT_SIZE_BODY),
                     )
                     .show_ui(ui, |ui| {
-                        if ui.selectable_label(app.settings.default_preset.is_none(), "— none —").clicked() {
+                        if ui.selectable_label(app.settings.default_preset.is_none(), "Prunr (factory defaults)").clicked() {
                             app.settings.default_preset = None;
                         }
                         for name in &preset_names {

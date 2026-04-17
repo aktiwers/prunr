@@ -2309,8 +2309,9 @@ impl eframe::App for PrunrApp {
                     // texture immediately. Phase 4 moves this to GPU-side fill.
                     bg_changed = toolbar_change.bg;
                 });
-            // Model swap: clamp jobs, show toast, invalidate caches.
+            // Model swap: persist the new selection, show toast, invalidate caches.
             if toolbar_change.model_changed {
+                self.settings.save();
                 self.toasts.info(format!(
                     "{} loaded",
                     crate::gui::views::model_name(self.settings.model),

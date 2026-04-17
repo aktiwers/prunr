@@ -43,9 +43,6 @@ pub struct ToolbarChange {
 }
 
 impl ToolbarChange {
-    pub fn any(&self) -> bool {
-        self.mask || self.edge || self.bg
-    }
     /// Whether the change invalidates the cached tensors (mask + edge).
     /// Caller clears them + the user should re-Process for a correct result.
     pub fn needs_cache_invalidation(&self) -> bool {
@@ -53,16 +50,17 @@ impl ToolbarChange {
     }
 }
 
-/// Factory default values for per-chip reset + "Reset all" kebab action.
+/// Factory default values for per-chip reset + "Reset all" button.
 ///
-/// Intentionally does NOT depend on `AppSettings.item_defaults` — that field is
-/// the template for NEW imports (possibly populated from v1 migration with a
-/// user's old preferences). Reset buttons should mean "go back to known-good
-/// factory defaults," which is a separate concern. Users who want to restore
-/// their preferred template should use the Preset dropdown.
+/// Does NOT depend on `AppSettings.item_defaults` — that field is the template
+/// for NEW imports (possibly from v1 migration). Reset means "go back to
+/// known-good factory defaults." Users who want their preferred template back
+/// should use the Preset dropdown.
 struct Defaults {
     template: ItemSettings,
-    /// Scalar values used as "pick this when user toggles enabled" for Option chips.
+    /// "Pick this when user toggles enabled" fallback for Option chips that
+    /// have no factory value (threshold/bg/line_color are None by default but
+    /// the color/slider inside the popover needs a starting value).
     threshold_value: f32,
     bg_value: [u8; 4],
     solid_line_color_value: [u8; 3],
@@ -77,18 +75,11 @@ impl Defaults {
             solid_line_color_value: [0, 0, 0],
         }
     }
-
-    fn gamma(&self) -> f32 { self.template.gamma }
-    fn edge_shift(&self) -> f32 { self.template.edge_shift }
-    fn line_strength(&self) -> f32 { self.template.line_strength }
 }
 
 /// Render rows 2 + 3. Returns a `ToolbarChange` summarizing what was edited.
-///
-/// `app_settings` is `&mut` because Row 2 now hosts the model dropdown
-/// (app-global) and the preset dropdown (reads/writes preset map). Phase 2's
-/// signature took only `&mut ItemSettings`; Phase 3 added Model+Preset here
-/// per user feedback.
+/// Takes `&mut Settings` because Row 2 hosts the model dropdown (app-global)
+/// and the preset dropdown (reads/writes the preset map).
 pub fn render(
     ui: &mut Ui,
     item_settings: &mut ItemSettings,
@@ -125,7 +116,7 @@ pub fn render(
                 ui, "gamma", "γ", "Gamma",
                 "How hard the mask cuts. >1 removes more aggressively, <1 is gentler on fine edges.",
                 &mut item_settings.gamma,
-                0.2..=3.0, defaults.gamma(),
+                0.2..=3.0, defaults.template.gamma,
                 |v| format!("{v:.2}"),
             ), Tier::Mask, &mut change);
 
@@ -143,7 +134,7 @@ pub fn render(
                 &ICON_SWAP_HORIZ.codepoint.to_string(), "Edge shift",
                 "Shrink or grow the mask outline. Positive = erode (trim fringe pixels), negative = dilate (keep more edge detail).",
                 &mut item_settings.edge_shift,
-                -5.0..=5.0, defaults.edge_shift(),
+                -5.0..=5.0, defaults.template.edge_shift,
                 |v| {
                     if v > 0.5 { format!("erode {v:.0}px") }
                     else if v < -0.5 { format!("dilate {:.0}px", v.abs()) }
@@ -221,7 +212,7 @@ pub fn render(
                 &ICON_TUNE.codepoint.to_string(), "Line strength",
                 "How much edge detail to capture. Lower = bold outlines only, higher = fine texture and subtle edges.",
                 &mut item_settings.line_strength,
-                0.05..=1.0, defaults.line_strength(),
+                0.05..=1.0, defaults.template.line_strength,
                 |v| format!("{v:.2}"),
             ), Tier::Edge, &mut change);
 
@@ -271,11 +262,7 @@ fn render_model_dropdown(
                     .color(theme::TEXT_PRIMARY),
             )
             .show_ui(ui, |ui| {
-                for variant in [
-                    SettingsModel::Silueta,
-                    SettingsModel::U2net,
-                    SettingsModel::BiRefNetLite,
-                ] {
+                for variant in SettingsModel::ALL {
                     ui.selectable_value(
                         &mut app_settings.model,
                         variant,
@@ -289,15 +276,17 @@ fn render_model_dropdown(
     });
 
     if app_settings.model != prev_model {
-        // Clamp parallel jobs to the new model's safe maximum.
+        // Clamp parallel jobs to the new model's safe maximum. Keeping this
+        // here (vs the caller) because it's a correctness invariant on
+        // app_settings — we mustn't leave an invalid parallel_jobs value.
+        // Disk persistence, toasts, and cache invalidation all live on the
+        // caller via `change.model_changed`.
         let max = app_settings.max_jobs();
         if app_settings.parallel_jobs > max {
             app_settings.parallel_jobs = max;
         }
-        app_settings.save();
         change.model_changed = true;
         change.commit = true;
-        // Toasts live on PrunrApp — caller reads change.model_changed and fires.
     }
 }
 
@@ -306,16 +295,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn toolbar_change_any_detects_any_field() {
-        assert!(!ToolbarChange::default().any());
+    fn needs_cache_invalidation_fires_on_model_or_preset() {
         let mut c = ToolbarChange::default();
-        c.mask = true;
-        assert!(c.any());
+        assert!(!c.needs_cache_invalidation());
+        c.model_changed = true;
+        assert!(c.needs_cache_invalidation());
         let mut c = ToolbarChange::default();
-        c.edge = true;
-        assert!(c.any());
-        let mut c = ToolbarChange::default();
-        c.bg = true;
-        assert!(c.any());
+        c.preset_applied = true;
+        assert!(c.needs_cache_invalidation());
     }
 }

@@ -204,13 +204,7 @@ pub fn render(ctx: &egui::Context, toasts: &mut egui_notify::Toasts) -> bool {
     !open || theme::backdrop_clicked(ctx, &window_response)
 }
 
-fn hint(ui: &mut egui::Ui, text: &str) {
-    ui.label(
-        RichText::new(text)
-            .color(theme::TEXT_HINT)
-            .size(theme::FONT_SIZE_MONO),
-    );
-}
+use super::hint;
 
 fn example_row(ui: &mut egui::Ui, toasts: &mut egui_notify::Toasts, cmd: &str, desc: &str) {
     ui.horizontal(|ui| {
