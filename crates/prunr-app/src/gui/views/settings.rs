@@ -436,6 +436,6 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) {
     let close_via_backdrop = debounce_passed && theme::backdrop_clicked(ctx, &window_response);
 
     if !open || close_via_backdrop {
-        app.close_settings();
+        app.close_settings(ctx);
     }
 }
