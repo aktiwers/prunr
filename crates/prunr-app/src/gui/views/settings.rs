@@ -1,8 +1,22 @@
+//! Settings modal. v2: app-wide config only — per-image knobs live on the
+//! persistent adjustments toolbar (rows 2 + 3).
+//!
+//! Sections in this modal:
+//!   • Performance — parallel jobs, force CPU, live preview toggle
+//!   • Appearance  — dark checker, auto-hide adjustments
+//!   • History     — history depth (shown when chain mode is on)
+//!   • Processing  — chain mode
+//!   • Default preset — applied to new images on import
+//!
+//! Phase 5 will add a Hotkeys tab for rebindable shortcuts.
+
 use egui::{Align2, RichText};
 
 use crate::gui::app::PrunrApp;
 use crate::gui::settings::Settings;
 use crate::gui::theme;
+
+use super::section_heading;
 
 /// Slider row: label left, slider fills middle, value right.
 fn slider_row(
@@ -43,61 +57,6 @@ fn hint(ui: &mut egui::Ui, text: &str) {
     );
 }
 
-use super::section_heading;
-
-/// Checkbox + color swatch + hex input on one row.
-fn color_toggle_row(ui: &mut egui::Ui, enabled: &mut bool, label: &str, color: &mut [u8; 4]) {
-    ui.horizontal(|ui| {
-        ui.checkbox(
-            enabled,
-            RichText::new(label)
-                .color(theme::TEXT_PRIMARY)
-                .size(theme::FONT_SIZE_BODY),
-        );
-        if *enabled {
-            let mut rgb = [
-                color[0] as f32 / 255.0,
-                color[1] as f32 / 255.0,
-                color[2] as f32 / 255.0,
-            ];
-            if ui.color_edit_button_rgb(&mut rgb).changed() {
-                color[0] = (rgb[0] * 255.0).round() as u8;
-                color[1] = (rgb[1] * 255.0).round() as u8;
-                color[2] = (rgb[2] * 255.0).round() as u8;
-            }
-            // Hex input (persisted while typing, applied on focus loss)
-            let hex_id = ui.id().with("hex");
-            let mut hex = ui.data_mut(|d| {
-                d.get_temp::<String>(hex_id)
-                    .unwrap_or_else(|| format!("{:02X}{:02X}{:02X}", color[0], color[1], color[2]))
-            });
-            let response = ui.add_sized(
-                [62.0, 18.0],
-                egui::TextEdit::singleline(&mut hex)
-                    .font(egui::TextStyle::Monospace)
-                    .char_limit(7),
-            );
-            if response.lost_focus() {
-                let clean = hex.trim_start_matches('#');
-                if clean.len() == 6 {
-                    if let (Ok(r), Ok(g), Ok(b)) = (
-                        u8::from_str_radix(&clean[0..2], 16),
-                        u8::from_str_radix(&clean[2..4], 16),
-                        u8::from_str_radix(&clean[4..6], 16),
-                    ) {
-                        color[0] = r; color[1] = g; color[2] = b;
-                    }
-                }
-                ui.data_mut(|d| d.remove::<String>(hex_id));
-            } else if response.has_focus() {
-                ui.data_mut(|d| d.insert_temp(hex_id, hex));
-            } else {
-                ui.data_mut(|d| d.remove::<String>(hex_id));
-            }
-        }
-    });
-}
-
 pub fn render(ctx: &egui::Context, app: &mut PrunrApp) {
     theme::draw_modal_backdrop(ctx, "settings_backdrop");
 
@@ -107,7 +66,7 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) {
         .collapsible(false)
         .resizable(false)
         .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
-        .fixed_size([theme::SETTINGS_DIALOG_WIDTH, theme::SETTINGS_DIALOG_HEIGHT])
+        .fixed_size([theme::SETTINGS_DIALOG_WIDTH, 520.0])
         .frame(theme::overlay_frame())
         .show(ctx, |ui| {
             {
@@ -122,28 +81,14 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) {
                 vis.widgets.hovered.bg_fill = egui::Color32::from_rgb(0x5a, 0x5a, 0x5a);
             }
 
-            use crate::gui::settings::LineMode;
-
-            // Tab state (persisted in egui temp data)
-            let tab_id = egui::Id::new("settings_tab");
-            let mut tab: usize = ui.data(|d| d.get_temp(tab_id).unwrap_or(0));
-
-            // Tab bar + reset buttons on the same row
+            // Header with Reset-all action on the right.
             ui.horizontal(|ui| {
-                for (i, label) in ["General", "Lines", "Mask"].iter().enumerate() {
-                    let selected = tab == i;
-                    let text = RichText::new(*label)
-                        .size(theme::FONT_SIZE_BODY)
-                        .color(if selected { theme::TEXT_PRIMARY } else { theme::TEXT_SECONDARY });
-                    let btn = egui::Button::new(text)
-                        .fill(if selected { theme::BG_SECONDARY } else { egui::Color32::TRANSPARENT })
-                        .corner_radius(4.0)
-                        .min_size(egui::vec2(0.0, 28.0));
-                    if ui.add(btn).clicked() {
-                        tab = i;
-                    }
-                }
-                // Push reset buttons to the right
+                ui.label(
+                    RichText::new("App settings")
+                        .size(theme::FONT_SIZE_HEADING)
+                        .strong()
+                        .color(theme::TEXT_PRIMARY),
+                );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.small_button(
                         RichText::new("Reset all")
@@ -151,287 +96,172 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) {
                             .color(theme::TEXT_SECONDARY),
                     ).clicked() {
                         let backend = app.settings.active_backend.clone();
+                        let item_defaults = app.settings.item_defaults;
+                        let presets = std::mem::take(&mut app.settings.presets);
+                        let default_preset = app.settings.default_preset.clone();
                         app.settings = Settings::default();
                         app.settings.active_backend = backend;
                         app.settings.parallel_jobs = app.settings.default_jobs();
-                    }
-                    let tab_name = ["General", "Lines", "Mask"][tab.min(2)];
-                    let defaults = Settings::default();
-                    if ui.small_button(
-                        RichText::new(format!("Reset {tab_name}"))
-                            .size(theme::FONT_SIZE_MONO)
-                            .color(theme::TEXT_SECONDARY),
-                    ).clicked() {
-                        let default_item = defaults.item_defaults;
-                        match tab {
-                            0 => {
-                                app.settings.parallel_jobs = app.settings.default_jobs();
-                                app.settings.auto_remove_on_import = defaults.auto_remove_on_import;
-                                app.settings.force_cpu = defaults.force_cpu;
-                                app.settings.chain_mode = defaults.chain_mode;
-                                app.settings.dark_checker = defaults.dark_checker;
-                                app.settings.history_depth = defaults.history_depth;
-                                app.settings.item_defaults.bg = default_item.bg;
-                            }
-                            1 => {
-                                app.settings.item_defaults.line_mode = default_item.line_mode;
-                                app.settings.item_defaults.line_strength = default_item.line_strength;
-                                app.settings.item_defaults.solid_line_color = default_item.solid_line_color;
-                            }
-                            2 => {
-                                app.settings.item_defaults.gamma = default_item.gamma;
-                                app.settings.item_defaults.threshold = default_item.threshold;
-                                app.settings.item_defaults.edge_shift = default_item.edge_shift;
-                                app.settings.item_defaults.refine_edges = default_item.refine_edges;
-                            }
-                            _ => {}
-                        }
+                        // Preserve per-image default template + presets across a reset
+                        // of app-wide settings — those are separate concerns.
+                        app.settings.item_defaults = item_defaults;
+                        app.settings.presets = presets;
+                        app.settings.default_preset = default_preset;
                     }
                 });
             });
             ui.separator();
             ui.add_space(theme::SPACE_SM);
 
-            ui.data_mut(|d| d.insert_temp(tab_id, tab));
+            // ── Performance ──
+            section_heading(ui, "Performance");
+            let max_jobs = app.settings.max_jobs();
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new("Parallel jobs")
+                        .color(theme::TEXT_PRIMARY)
+                        .size(theme::FONT_SIZE_BODY),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.add_enabled(
+                        app.settings.parallel_jobs < max_jobs,
+                        egui::Button::new(RichText::new("+").color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY))
+                            .fill(theme::BG_SECONDARY).min_size(egui::vec2(28.0, 28.0)),
+                    ).clicked() {
+                        app.settings.parallel_jobs += 1;
+                    }
+                    ui.label(
+                        RichText::new(format!("{}", app.settings.parallel_jobs))
+                            .color(theme::TEXT_PRIMARY)
+                            .size(theme::FONT_SIZE_BODY)
+                            .strong(),
+                    );
+                    if ui.add_enabled(
+                        app.settings.parallel_jobs > 1,
+                        egui::Button::new(RichText::new("\u{2212}").color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY))
+                            .fill(theme::BG_SECONDARY).min_size(egui::vec2(28.0, 28.0)),
+                    ).clicked() {
+                        app.settings.parallel_jobs -= 1;
+                    }
+                });
+            });
+            ui.add_space(-10.0);
+            let jobs_hint = if app.settings.is_gpu() {
+                format!("Images processed at the same time (1\u{2013}{max_jobs}, GPU: 1\u{2013}2 is optimal)")
+            } else {
+                format!("Images processed at the same time (1\u{2013}{max_jobs})")
+            };
+            hint(ui, &jobs_hint);
+            ui.add_space(theme::SPACE_MD);
 
-            match tab {
-                // ── General ──
-                0 => {
-                    let max_jobs = app.settings.max_jobs();
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            RichText::new("Parallel jobs")
-                                .color(theme::TEXT_PRIMARY)
-                                .size(theme::FONT_SIZE_BODY),
-                        );
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.add_enabled(
-                                app.settings.parallel_jobs < max_jobs,
-                                egui::Button::new(RichText::new("+").color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY))
-                                    .fill(theme::BG_SECONDARY).min_size(egui::vec2(28.0, 28.0)),
-                            ).clicked() {
-                                app.settings.parallel_jobs += 1;
+            let has_gpu = !prunr_core::OrtEngine::detect_active_provider().eq_ignore_ascii_case("CPU");
+            if has_gpu {
+                ui.checkbox(
+                    &mut app.settings.force_cpu,
+                    RichText::new("Force CPU")
+                        .color(theme::TEXT_PRIMARY)
+                        .size(theme::FONT_SIZE_BODY),
+                );
+                hint(ui, "Use CPU even when GPU is available (resets each launch).");
+                ui.add_space(theme::SPACE_MD);
+            }
+
+            ui.checkbox(
+                &mut app.settings.live_preview,
+                RichText::new("Live preview")
+                    .color(theme::TEXT_PRIMARY)
+                    .size(theme::FONT_SIZE_BODY),
+            );
+            hint(ui, "Auto-rerun mask and edge tweaks as you adjust them (Phase 3).");
+            ui.add_space(theme::SPACE_MD);
+
+            ui.separator();
+            ui.add_space(theme::SPACE_SM);
+
+            // ── Appearance ──
+            section_heading(ui, "Appearance");
+            ui.checkbox(
+                &mut app.settings.dark_checker,
+                RichText::new("Dark checkerboard")
+                    .color(theme::TEXT_PRIMARY)
+                    .size(theme::FONT_SIZE_BODY),
+            );
+            hint(ui, "Use dark tones for the transparency pattern \u{2014} helps when viewing light results.");
+            ui.add_space(theme::SPACE_MD);
+
+            ui.checkbox(
+                &mut app.settings.auto_hide_adjustments,
+                RichText::new("Auto-hide adjustments toolbar")
+                    .color(theme::TEXT_PRIMARY)
+                    .size(theme::FONT_SIZE_BODY),
+            );
+            hint(ui, "Collapse the adjustments toolbar when the cursor leaves it. Toggle manually with Shift+H.");
+            ui.add_space(theme::SPACE_MD);
+
+            ui.separator();
+            ui.add_space(theme::SPACE_SM);
+
+            // ── Processing ──
+            section_heading(ui, "Processing");
+            ui.checkbox(
+                &mut app.settings.auto_remove_on_import,
+                RichText::new("Auto-remove on import")
+                    .color(theme::TEXT_PRIMARY)
+                    .size(theme::FONT_SIZE_BODY),
+            );
+            hint(ui, "Start removing background as soon as images are opened.");
+            ui.add_space(theme::SPACE_MD);
+
+            ui.checkbox(
+                &mut app.settings.chain_mode,
+                RichText::new("Chain mode")
+                    .color(theme::TEXT_PRIMARY)
+                    .size(theme::FONT_SIZE_BODY),
+            );
+            hint(ui, "Process the current result instead of the original \u{2014} stacks effects.");
+
+            if app.settings.chain_mode {
+                ui.add_space(theme::SPACE_SM);
+                let mut depth_f32 = app.settings.history_depth as f32;
+                let depth_text = format!("{}", app.settings.history_depth);
+                slider_row(
+                    ui, "History depth", &mut depth_f32,
+                    1.0..=50.0, &depth_text, false, Some(1.0),
+                );
+                app.settings.history_depth = depth_f32 as usize;
+                hint(ui, "Maximum undo steps per image. Higher = more memory.");
+            }
+            ui.add_space(theme::SPACE_MD);
+
+            ui.separator();
+            ui.add_space(theme::SPACE_SM);
+
+            // ── Default preset for new images ──
+            section_heading(ui, "Default preset");
+            let mut preset_names: Vec<String> = app.settings.presets.keys().cloned().collect();
+            preset_names.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
+            let current = app.settings.default_preset.clone().unwrap_or_else(|| "— none —".to_string());
+            ui.horizontal(|ui| {
+                egui::ComboBox::from_id_salt("default_preset")
+                    .selected_text(
+                        RichText::new(&current)
+                            .color(theme::TEXT_PRIMARY)
+                            .size(theme::FONT_SIZE_BODY),
+                    )
+                    .show_ui(ui, |ui| {
+                        if ui.selectable_label(app.settings.default_preset.is_none(), "— none —").clicked() {
+                            app.settings.default_preset = None;
+                        }
+                        for name in &preset_names {
+                            let selected = app.settings.default_preset.as_deref() == Some(name.as_str());
+                            if ui.selectable_label(selected, name).clicked() {
+                                app.settings.default_preset = Some(name.clone());
                             }
-                            ui.label(
-                                RichText::new(format!("{}", app.settings.parallel_jobs))
-                                    .color(theme::TEXT_PRIMARY)
-                                    .size(theme::FONT_SIZE_BODY)
-                                    .strong(),
-                            );
-                            if ui.add_enabled(
-                                app.settings.parallel_jobs > 1,
-                                egui::Button::new(RichText::new("\u{2212}").color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY))
-                                    .fill(theme::BG_SECONDARY).min_size(egui::vec2(28.0, 28.0)),
-                            ).clicked() {
-                                app.settings.parallel_jobs -= 1;
-                            }
-                        });
-                    });
-                    ui.add_space(-10.0);
-                    let jobs_hint = if app.settings.is_gpu() {
-                        format!("Images processed at the same time (1\u{2013}{max_jobs}, GPU: 1\u{2013}2 is optimal)")
-                    } else {
-                        format!("Images processed at the same time (1\u{2013}{max_jobs})")
-                    };
-                    hint(ui, &jobs_hint);
-                    ui.add_space(theme::SPACE_MD);
-
-                    ui.checkbox(
-                        &mut app.settings.auto_remove_on_import,
-                        RichText::new("Auto-remove on import")
-                            .color(theme::TEXT_PRIMARY)
-                            .size(theme::FONT_SIZE_BODY),
-                    );
-                    hint(ui, "Start removing background as soon as images are opened");
-                    ui.add_space(theme::SPACE_MD);
-
-                    ui.checkbox(
-                        &mut app.settings.dark_checker,
-                        RichText::new("Dark checkerboard")
-                            .color(theme::TEXT_PRIMARY)
-                            .size(theme::FONT_SIZE_BODY),
-                    );
-                    hint(ui, "Use dark tones for the transparency pattern — helps when viewing light results.");
-                    ui.add_space(theme::SPACE_MD);
-
-                    // Show "Force CPU" only on systems that actually have a GPU.
-                    // Uses the hardware detection cache, not the current active_backend
-                    // (which changes when Force CPU is toggled).
-                    let has_gpu = !prunr_core::OrtEngine::detect_active_provider().eq_ignore_ascii_case("CPU");
-                    if has_gpu {
-                        ui.checkbox(
-                            &mut app.settings.force_cpu,
-                            RichText::new("Force CPU")
-                                .color(theme::TEXT_PRIMARY)
-                                .size(theme::FONT_SIZE_BODY),
-                        );
-                        hint(ui, "Use CPU even when GPU is available (resets each launch)");
-                        ui.add_space(theme::SPACE_MD);
-                    }
-                    ui.separator();
-                    ui.add_space(theme::SPACE_SM);
-
-                    section_heading(ui, "Background Color");
-                    hint(ui, "Fill transparent areas with a solid color.");
-                    ui.add_space(theme::SPACE_SM);
-                    let mut bg_enabled = app.settings.item_defaults.bg.is_some();
-                    let mut bg_value = app.settings.item_defaults.bg.unwrap_or([255, 255, 255, 255]);
-                    color_toggle_row(ui, &mut bg_enabled, "Apply background color", &mut bg_value);
-                    app.settings.item_defaults.bg = if bg_enabled { Some(bg_value) } else { None };
-
-                    ui.add_space(theme::SPACE_MD);
-                    ui.separator();
-                    ui.add_space(theme::SPACE_SM);
-
-                    section_heading(ui, "History");
-                    ui.add_space(theme::SPACE_SM);
-                    ui.checkbox(
-                        &mut app.settings.chain_mode,
-                        RichText::new("Chain mode")
-                            .color(theme::TEXT_PRIMARY)
-                            .size(theme::FONT_SIZE_BODY),
-                    );
-                    hint(ui, "Process the current result instead of the original.");
-                    hint(ui, "Allows stacking effects: BG removal -> lines -> etc.");
-
-                    if app.settings.chain_mode {
-                        ui.add_space(theme::SPACE_SM);
-                        let mut depth_f32 = app.settings.history_depth as f32;
-                        let depth_text = format!("{}", app.settings.history_depth);
-                        slider_row(
-                            ui, "History depth", &mut depth_f32,
-                            1.0..=50.0, &depth_text, false, Some(1.0),
-                        );
-                        app.settings.history_depth = depth_f32 as usize;
-                        hint(ui, "Maximum undo steps per image. Higher = more memory.");
-                    }
-                }
-
-                // ── Lines ──
-                1 => {
-                    hint(ui, "Keep only edges and outlines \u{2014} great for logos,");
-                    hint(ui, "graffiti, and illustrations. Uses DexiNed AI model.");
-                    ui.add_space(theme::SPACE_SM);
-
-                    let mode_label = match app.settings.item_defaults.line_mode {
-                        LineMode::Off => "Off",
-                        LineMode::EdgesOnly => "Edges only (full image)",
-                        LineMode::SubjectOutline => "Outline only (no fill)",
-                    };
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            RichText::new("Extract lines")
-                                .color(theme::TEXT_PRIMARY)
-                                .size(theme::FONT_SIZE_BODY),
-                        );
-                        egui::ComboBox::from_id_salt("line_mode")
-                            .selected_text(mode_label)
-                            .show_ui(ui, |ui| {
-                                ui.selectable_value(&mut app.settings.item_defaults.line_mode, LineMode::Off, "Off");
-                                ui.selectable_value(&mut app.settings.item_defaults.line_mode, LineMode::EdgesOnly, "Edges only (full image)");
-                                ui.selectable_value(&mut app.settings.item_defaults.line_mode, LineMode::SubjectOutline, "Outline only (no fill)");
-                            });
-                    });
-                    hint(ui, "Off = normal background removal.");
-                    hint(ui, "Edges only = extract all edges from the full image, skip BG removal.");
-                    hint(ui, "Outline only = remove BG, then extract edges within the subject.");
-
-                    if app.settings.item_defaults.line_mode != LineMode::Off {
-                        ui.add_space(theme::SPACE_MD);
-                        let strength_text = format!("{:.2}", app.settings.item_defaults.line_strength);
-                        slider_row(
-                            ui, "Line strength", &mut app.settings.item_defaults.line_strength,
-                            0.05..=1.0, &strength_text, false, None,
-                        );
-                        hint(ui, "How much detail to capture. Lower = bold outlines");
-                        hint(ui, "only, higher = fine texture and subtle edges.");
-                        ui.add_space(theme::SPACE_SM);
-                        let mut slc_enabled = app.settings.item_defaults.solid_line_color.is_some();
-                        let mut slc_value = app.settings.item_defaults.solid_line_color
-                            .map(|[r, g, b]| [r, g, b, 255])
-                            .unwrap_or([0, 0, 0, 255]);
-                        color_toggle_row(ui, &mut slc_enabled, "Solid color lines", &mut slc_value);
-                        app.settings.item_defaults.solid_line_color = if slc_enabled {
-                            Some([slc_value[0], slc_value[1], slc_value[2]])
-                        } else {
-                            None
-                        };
-                        hint(ui, "Paint all lines a single color instead of original.");
-                    }
-                }
-
-                // ── Mask ──
-                2 => {
-                    let gamma_text = format!("{:.2}", app.settings.item_defaults.gamma);
-                    slider_row(
-                        ui, "Strength", &mut app.settings.item_defaults.gamma,
-                        0.2..=3.0, &gamma_text, true, None,
-                    );
-                    hint(ui, "Controls how much background is removed.");
-                    hint(ui, "Higher values cut deeper, lower values are");
-                    hint(ui, "more forgiving with edges and fine detail.");
-                    ui.add_space(theme::SPACE_MD);
-
-                    let mut thr_enabled = app.settings.item_defaults.threshold.is_some();
-                    let mut thr_value = app.settings.item_defaults.threshold.unwrap_or(0.5);
-                    let threshold_text = format!("{:.2}", thr_value);
-                    ui.horizontal(|ui| {
-                        ui.checkbox(
-                            &mut thr_enabled,
-                            RichText::new("Hard cutoff")
-                                .color(theme::TEXT_PRIMARY)
-                                .size(theme::FONT_SIZE_BODY),
-                        );
-                        if thr_enabled {
-                            let avail = ui.available_width() - 52.0;
-                            ui.add_sized(
-                                [avail.max(100.0), 18.0],
-                                egui::Slider::new(&mut thr_value, 0.01..=0.99)
-                                    .show_value(false),
-                            );
-                            ui.label(
-                                RichText::new(&threshold_text)
-                                    .monospace()
-                                    .size(theme::FONT_SIZE_MONO)
-                                    .color(theme::TEXT_PRIMARY),
-                            );
                         }
                     });
-                    app.settings.item_defaults.threshold = if thr_enabled { Some(thr_value) } else { None };
-                    hint(ui, "Makes the result fully opaque or fully transparent");
-                    hint(ui, "\u{2014} no in-between. Lower values keep more of the");
-                    hint(ui, "subject, higher values remove more aggressively.");
-                    ui.add_space(theme::SPACE_MD);
-
-                    let edge_shift = app.settings.item_defaults.edge_shift;
-                    let edge_label = if edge_shift > 0.5 {
-                        format!("erode {:.0}px", edge_shift)
-                    } else if edge_shift < -0.5 {
-                        format!("dilate {:.0}px", edge_shift.abs())
-                    } else {
-                        "off".to_string()
-                    };
-                    slider_row(
-                        ui, "Edge refine", &mut app.settings.item_defaults.edge_shift,
-                        -5.0..=5.0, &edge_label, false, Some(1.0),
-                    );
-                    hint(ui, "Adjusts the outline around your subject.");
-                    hint(ui, "Positive values trim away fringe pixels,");
-                    hint(ui, "negative values expand to keep more edge detail.");
-                    ui.add_space(theme::SPACE_MD);
-
-                    ui.checkbox(
-                        &mut app.settings.item_defaults.refine_edges,
-                        RichText::new("Refine edges")
-                            .color(theme::TEXT_PRIMARY)
-                            .size(theme::FONT_SIZE_BODY),
-                    );
-                    hint(ui, "Uses the original image colors to sharpen");
-                    hint(ui, "the mask around fine detail like hair and leaves.");
-                }
-
-                _ => {}
-            }
+            });
+            hint(ui, "New images on import inherit this preset's values (save presets in the toolbar).");
+            ui.add_space(theme::SPACE_MD);
 
             // Backend info at the bottom
             ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
