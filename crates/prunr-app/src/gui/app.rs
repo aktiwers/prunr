@@ -172,6 +172,8 @@ pub(crate) struct BatchItem {
     pub settings: super::item_settings::ItemSettings,
     /// Settings snapshot taken when checkbox was checked; uncheck restores it.
     /// `None` once committed via Process or when the item was never checked.
+    /// Phase 4 wires up the read path (selection-as-apply semantics).
+    #[allow(dead_code)]
     pub pre_check_settings: Option<super::item_settings::ItemSettings>,
     /// The recipe that produced the current result_rgba. None if never processed.
     pub applied_recipe: Option<prunr_core::ProcessingRecipe>,
@@ -804,8 +806,18 @@ impl PrunrApp {
                         tier1_ids.insert(item.id);
                     }
                 }
+                RequiredTier::EdgeRerun => {
+                    // Phase 1: edge rerun dispatch lands in Phase 3. For now,
+                    // if we have the edge cache we still route to Tier 1 because
+                    // the subprocess path isn't wired yet. When Phase 3 lands,
+                    // this becomes: `if cached_edge_tensor.is_some() { tier2_edge }`.
+                    item.cached_edge_tensor = None;
+                    tier1_ids.insert(item.id);
+                }
                 RequiredTier::FullPipeline => {
-                    item.cached_tensor = None; // model changed, tensor invalid
+                    // Model / chain / mode changed — both caches invalid.
+                    item.cached_tensor = None;
+                    item.cached_edge_tensor = None;
                     tier1_ids.insert(item.id);
                 }
             }
@@ -1419,25 +1431,33 @@ impl PrunrApp {
     }
 
     /// 512 MB budget for compressed tensor caches across all items.
+    /// Budget covers BOTH segmentation (`cached_tensor`) and DexiNed
+    /// (`cached_edge_tensor`) caches combined.
     const TENSOR_BUDGET: usize = 512 * 1024 * 1024;
+
+    /// Total compressed bytes across both caches for a single item.
+    fn item_cache_size(item: &BatchItem) -> usize {
+        let seg = item.cached_tensor.as_ref().map(|ct| ct.compressed_size()).unwrap_or(0);
+        let edge = item.cached_edge_tensor.as_ref().map(|ct| ct.compressed_size()).unwrap_or(0);
+        seg + edge
+    }
 
     /// Evict tensor caches from oldest-loaded items until under budget.
     /// Iterates front-to-back (oldest first) to preserve recently-processed items.
+    /// Drops BOTH caches on eviction — partial eviction would leave a partially-stale
+    /// item (segmentation cached but edges gone, or vice versa) which is useless.
     fn enforce_tensor_budget(&mut self) {
-        let total: usize = self.batch_items.iter()
-            .filter_map(|i| i.cached_tensor.as_ref())
-            .map(|ct| ct.compressed_size())
-            .sum();
+        let total: usize = self.batch_items.iter().map(Self::item_cache_size).sum();
         if total <= Self::TENSOR_BUDGET { return; }
         let selected_id = self.selected_item().map(|b| b.id);
         let mut remaining = total;
         for item in &mut self.batch_items {
             if remaining <= Self::TENSOR_BUDGET { break; }
-            // Preserve the selected item's tensor (most likely to be reused)
+            // Preserve the selected item's tensors (most likely to be reused)
             if Some(item.id) == selected_id { continue; }
-            if let Some(ct) = item.cached_tensor.take() {
-                remaining -= ct.compressed_size();
-            }
+            remaining -= Self::item_cache_size(item);
+            item.cached_tensor = None;
+            item.cached_edge_tensor = None;
         }
     }
 
@@ -1447,6 +1467,7 @@ impl PrunrApp {
         for item in &mut self.batch_items {
             if Some(item.id) != selected_id {
                 item.cached_tensor = None;
+                item.cached_edge_tensor = None;
             }
         }
     }
@@ -1637,7 +1658,7 @@ impl PrunrApp {
                         self.status.pct = pct;
                     }
                 }
-                WorkerResult::BatchItemDone { item_id, result, tensor_cache } => {
+                WorkerResult::BatchItemDone { item_id, result, tensor_cache, edge_cache } => {
                     let is_selected = self.selected_item()
                         .map_or(false, |b| b.id == item_id);
                     // Fall back to the target item's own settings if dispatch_recipe
@@ -1659,9 +1680,13 @@ impl PrunrApp {
                             Ok(pr) => {
                                 item.result_rgba = Some(Arc::new(pr.rgba_image));
                                 item.status = BatchStatus::Done;
-                                // Store recipe + compressed tensor for future tier routing
+                                // Store recipe + compressed tensors for future tier routing.
+                                // Both caches are zstd-compressed on the bridge thread before
+                                // arriving here; storing is a zero-cost move.
                                 item.applied_recipe = Some(recipe_snapshot);
                                 item.cached_tensor = tensor_cache
+                                    .and_then(super::worker::CompressedTensor::from_raw);
+                                item.cached_edge_tensor = edge_cache
                                     .and_then(super::worker::CompressedTensor::from_raw);
                                 // Evict decoded source to free RAM — lazy decode
                                 // will re-decode on demand if the user navigates back.
@@ -1685,10 +1710,11 @@ impl PrunrApp {
                                 }
                             }
                             Err(e) => {
-                                // Clear recipe + tensor so retry runs a fresh Tier 1
+                                // Clear recipe + tensors so retry runs a fresh Tier 1
                                 // (otherwise resolve_tier might return Skip for an errored item).
                                 item.status = BatchStatus::Error(e);
                                 item.cached_tensor = None;
+                                item.cached_edge_tensor = None;
                                 item.applied_recipe = None;
                             }
                         }
