@@ -18,10 +18,52 @@ use prunr_app::subprocess::protocol::*;
 use prunr_app::subprocess::ipc::{read_message, write_message};
 use prunr_app::gui::settings::LineMode;
 
-/// Global lock for postprocessing (Lanczos3 resize).
-/// AI inference can run in parallel, but high-res CPU resizing must be
-/// serialized to prevent concurrent memory spikes from crashing the process.
-static POSTPROCESS_LOCK: Mutex<()> = Mutex::new(());
+/// Weighted memory semaphore for processing.
+/// Instead of a binary lock, this tracks "pixel units" (1 unit = 1M pixels).
+/// Small images run in parallel; large images throttle automatically.
+/// Total capacity is set based on available RAM at worker startup.
+struct WeightedSemaphore {
+    state: Mutex<usize>,     // available units
+    available: std::sync::Condvar,
+}
+
+impl WeightedSemaphore {
+    fn new(total_units: usize) -> Self {
+        Self {
+            state: Mutex::new(total_units),
+            available: std::sync::Condvar::new(),
+        }
+    }
+
+    /// Acquire `weight` units, blocking until enough are available.
+    fn acquire(&self, weight: usize) {
+        let mut units = self.state.lock().unwrap();
+        while *units < weight {
+            units = self.available.wait(units).unwrap();
+        }
+        *units -= weight;
+    }
+
+    /// Release `weight` units and notify waiting threads.
+    fn release(&self, weight: usize) {
+        let mut units = self.state.lock().unwrap();
+        *units += weight;
+        self.available.notify_all();
+    }
+}
+
+/// Calculate pixel weight for an image (1 unit = 1M pixels, minimum 1).
+fn pixel_weight(image_bytes: &[u8]) -> usize {
+    // Read dimensions from header without full decode
+    let dims = image::ImageReader::new(std::io::Cursor::new(image_bytes))
+        .with_guessed_format()
+        .ok()
+        .and_then(|r| r.into_dimensions().ok());
+    match dims {
+        Some((w, h)) => ((w as usize * h as usize) / 1_000_000).max(1),
+        None => 4, // conservative fallback (~4MP)
+    }
+}
 
 /// Entry point for `prunr --worker`.
 pub fn run_worker() -> ! {
@@ -46,8 +88,8 @@ pub fn run_worker() -> ! {
 
     // Read Init command
     let init = match read_message::<_, SubprocessCommand>(&mut reader) {
-        Ok(Some(SubprocessCommand::Init { model, jobs, mask, force_cpu, line_mode, line_strength, solid_line_color, bg_color })) => {
-            (model, jobs, mask, force_cpu, line_mode, line_strength, solid_line_color, bg_color)
+        Ok(Some(SubprocessCommand::Init { model, jobs, mask, force_cpu, line_mode, line_strength, solid_line_color, bg_color, ipc_dir })) => {
+            (model, jobs, mask, force_cpu, line_mode, line_strength, solid_line_color, bg_color, ipc_dir)
         }
         _ => {
             let _ = evt_tx.send(SubprocessEvent::InitError {
@@ -59,7 +101,7 @@ pub fn run_worker() -> ! {
         }
     };
 
-    let (model, jobs, mask, force_cpu, line_mode, line_strength, solid_line_color, bg_color) = init;
+    let (model, jobs, mask, force_cpu, line_mode, line_strength, solid_line_color, bg_color, ipc_dir) = init;
 
     // Detect backend
     let has_gpu = !OrtEngine::detect_active_provider().eq_ignore_ascii_case("CPU");
@@ -118,6 +160,13 @@ pub fn run_worker() -> ! {
     let in_flight = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let mut engine_idx: usize = 0;
 
+    let ipc_dir = Arc::new(ipc_dir);
+
+    // Weighted memory semaphore: capacity in megapixel units.
+    // ~64 units = allows parallel processing of many small images,
+    // but throttles large images (40MP = 40 units → only ~1 at a time).
+    let semaphore = Arc::new(WeightedSemaphore::new(64));
+
     // Main command loop
     loop {
         let cmd = match read_message::<_, SubprocessCommand>(&mut reader) {
@@ -141,6 +190,8 @@ pub fn run_worker() -> ! {
                 let in_flight = in_flight.clone();
                 let edge_eng = edge_engine.clone();
                 let provider = active_provider.clone();
+                let sem = semaphore.clone();
+                let ipc = ipc_dir.clone();
 
                 pool.spawn(move || {
                     if cancel.load(Ordering::Acquire) {
@@ -180,10 +231,10 @@ pub fn run_worker() -> ! {
                         }
                     };
 
-                    // Serialize processing to prevent concurrent postprocess
-                    // (Lanczos3 resize) spikes from causing OOM. AI inference
-                    // still uses all CPU threads via ORT intra-op parallelism.
-                    let _lock = POSTPROCESS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+                    // Weighted semaphore: acquire pixel units proportional to image size.
+                    // Small images run in parallel; large images throttle automatically.
+                    let weight = pixel_weight(&img_bytes);
+                    sem.acquire(weight);
                     let result = match line_mode {
                         LineMode::LinesOnly => {
                             let decoded;
@@ -253,7 +304,7 @@ pub fn run_worker() -> ! {
                         Ok(pr) => {
                             // Write result RGBA to temp file
                             let (w, h) = (pr.rgba_image.width(), pr.rgba_image.height());
-                            let result_path = ipc_temp_dir().join(format!("result_{item_id}.raw"));
+                            let result_path = ipc.join(format!("result_{item_id}.raw"));
                             match std::fs::write(&result_path, pr.rgba_image.as_raw()) {
                                 Ok(()) => {
                                     let _ = evt_tx.send(SubprocessEvent::ImageDone {
@@ -280,6 +331,9 @@ pub fn run_worker() -> ! {
                         }
                     }
 
+                    // Release semaphore weight (allows next image to proceed)
+                    sem.release(weight);
+
                     // Report RSS after each image
                     if let Some(stats) = memory_stats::memory_stats() {
                         let _ = evt_tx.send(SubprocessEvent::RssUpdate {
@@ -289,12 +343,11 @@ pub fn run_worker() -> ! {
 
                     // Clean up temp files only (not user's original files).
                     // Files in the IPC temp dir were created by the parent for this subprocess.
-                    let ipc_dir = prunr_app::subprocess::protocol::ipc_temp_dir();
-                    if image_path.starts_with(&ipc_dir) {
+                    if image_path.starts_with(ipc.as_ref()) {
                         let _ = std::fs::remove_file(&image_path);
                     }
                     if let Some(ref p) = chain_path {
-                        if p.starts_with(&ipc_dir) {
+                        if p.starts_with(ipc.as_ref()) {
                             let _ = std::fs::remove_file(p);
                         }
                     }

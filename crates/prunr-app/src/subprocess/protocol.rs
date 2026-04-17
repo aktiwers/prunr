@@ -21,6 +21,8 @@ pub enum SubprocessCommand {
         line_strength: f32,
         solid_line_color: Option<[u8; 3]>,
         bg_color: Option<[u8; 3]>,
+        /// IPC temp directory (set by parent so child uses the same PID-namespaced dir)
+        ipc_dir: std::path::PathBuf,
     },
     /// Process a single image. `image_path` points to a temp file with
     /// the raw image bytes (avoids piping large payloads through stdin).
@@ -85,21 +87,25 @@ pub enum SubprocessEvent {
 }
 
 /// Return the preferred directory for IPC temp files.
-/// Prefers RAM-backed tmpfs (/dev/shm on Linux) when available,
-/// falls back to system temp dir.
+/// PID-namespaced to prevent collisions between multiple app instances.
+/// Uses the **parent** PID so both parent and child agree on the same directory.
+/// Prefers RAM-backed tmpfs (/dev/shm on Linux), falls back to system temp dir.
 pub fn ipc_temp_dir() -> std::path::PathBuf {
-    // Linux: /dev/shm is RAM-backed tmpfs — no disk I/O.
-    // Try to create subdirectory directly; fall back to system temp on failure.
-    #[cfg(target_os = "linux")]
-    {
-        let dir = std::path::PathBuf::from("/dev/shm/prunr-ipc");
-        if std::fs::create_dir_all(&dir).is_ok() {
-            return dir;
+    use std::sync::OnceLock;
+    static DIR: OnceLock<std::path::PathBuf> = OnceLock::new();
+    DIR.get_or_init(|| {
+        let pid = std::process::id();
+        #[cfg(target_os = "linux")]
+        {
+            let dir = std::path::PathBuf::from(format!("/dev/shm/prunr-ipc-{pid}"));
+            if std::fs::create_dir_all(&dir).is_ok() {
+                return dir;
+            }
         }
-    }
-    let dir = std::env::temp_dir().join("prunr-ipc");
-    let _ = std::fs::create_dir_all(&dir);
-    dir
+        let dir = std::env::temp_dir().join(format!("prunr-ipc-{pid}"));
+        let _ = std::fs::create_dir_all(&dir);
+        dir
+    }).clone()
 }
 
 /// Clean up all IPC temp files.
