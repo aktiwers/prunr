@@ -2,11 +2,10 @@ use egui::{Color32, RichText};
 use egui_material_icons::icons::*;
 
 use crate::gui::app::{PrunrApp, BatchStatus};
-use crate::gui::settings::SettingsModel;
 use crate::gui::state::AppState;
 use crate::gui::theme;
 
-use super::{model_label, model_name, modifier_key};
+use super::modifier_key;
 
 const BTN_HEIGHT: f32 = 32.0;
 
@@ -50,85 +49,24 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
             }
         }
 
-        let prev_model = app.settings.model;
-        ui.add_enabled_ui(!is_processing, |ui| {
-            {
-                // Force light text on all ComboBox states — prevents dark-on-dark
-                // when the OS is in light mode (egui may inherit OS text color).
-                let vis = ui.visuals_mut();
-                vis.widgets.inactive.weak_bg_fill = theme::BG_SECONDARY;
-                vis.widgets.inactive.fg_stroke.color = theme::TEXT_PRIMARY;
-                vis.widgets.hovered.weak_bg_fill = egui::Color32::from_rgb(0x30, 0x2e, 0x32);
-                vis.widgets.hovered.fg_stroke.color = theme::TEXT_PRIMARY;
-                vis.widgets.open.weak_bg_fill = theme::BG_SECONDARY;
-                vis.widgets.open.fg_stroke.color = theme::TEXT_PRIMARY;
-                vis.widgets.active.fg_stroke.color = theme::TEXT_PRIMARY;
-                vis.widgets.noninteractive.fg_stroke.color = theme::TEXT_SECONDARY;
-                vis.window_fill = theme::BG_PRIMARY;
-            }
-            ui.spacing_mut().interact_size.y = BTN_HEIGHT;
-            egui::ComboBox::from_id_salt("model")
-                .selected_text(RichText::new(model_label(app.settings.model, true)).color(theme::TEXT_PRIMARY))
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(
-                        &mut app.settings.model,
-                        SettingsModel::Silueta,
-                        RichText::new(model_label(SettingsModel::Silueta, false)).color(theme::TEXT_PRIMARY),
-                    );
-                    ui.selectable_value(
-                        &mut app.settings.model,
-                        SettingsModel::U2net,
-                        RichText::new(model_label(SettingsModel::U2net, false)).color(theme::TEXT_PRIMARY),
-                    );
-                    ui.selectable_value(
-                        &mut app.settings.model,
-                        SettingsModel::BiRefNetLite,
-                        RichText::new(model_label(SettingsModel::BiRefNetLite, false)).color(theme::TEXT_PRIMARY),
-                    );
-                });
-        });
+        // Model dropdown moved to row 2 (adjustments_toolbar). Preset dropdown
+        // also moved to row 2 (right cluster). Row 1 now hosts: Open, Settings,
+        // Lines mode, then the action buttons (right-aligned). Lines popover
+        // stays on row 1 because it's a MODE selector orthogonal to the
+        // per-image knob tweaks.
 
-        if app.settings.model != prev_model {
-            // Clamp parallel jobs to safe max for the new model
-            let max = app.settings.max_jobs();
-            if app.settings.parallel_jobs > max {
-                app.settings.parallel_jobs = max;
-            }
-            app.toasts.info(format!("{} loaded", model_name(app.settings.model)));
-            app.settings.save();
-        }
-
-        // ── Lines popover + Preset dropdown ──
-        // Both edit the currently-selected BatchItem's ItemSettings. Skip when
-        // no item is selected (e.g. empty batch).
         if let Some(idx) = active_item_index(app) {
-            let (mut lines_changed, mut preset_applied) = (false, false);
+            let mut lines_changed = false;
             {
-                // Split borrow: &mut to the item + &mut to app.settings
-                // separately. Rust's disjoint-field borrow rule allows this.
-                let settings_ref: &mut crate::gui::settings::Settings = &mut app.settings;
                 let item_settings_ref: &mut crate::gui::item_settings::ItemSettings =
                     &mut app.batch_items[idx].settings;
                 ui.add_enabled_ui(!is_processing, |ui| {
                     lines_changed = super::lines_popover::render(ui, item_settings_ref);
-                    preset_applied = super::preset_dropdown::render(
-                        ui, settings_ref, item_settings_ref,
-                    );
                 });
             }
-            // Line-mode change invalidates the DexiNed edge cache: the tensor
-            // was computed for a DIFFERENT input (EdgesOnly sees full scene,
-            // SubjectOutline sees subject-on-white). Re-running is required.
-            // Conservative: invalidate on any change; matches Phase 5 clearing
-            // model on preset apply below.
             if lines_changed {
-                app.batch_items[idx].cached_edge_tensor = None;
-            }
-            // Preset apply changes many settings at once. Invalidate both
-            // caches since any of gamma/threshold/edge_shift/line_strength/
-            // line_mode may have flipped. User re-processes to repopulate.
-            if preset_applied {
-                app.batch_items[idx].cached_tensor = None;
+                // Line-mode change invalidates the DexiNed edge cache (tensor was
+                // computed for a different input).
                 app.batch_items[idx].cached_edge_tensor = None;
             }
         }

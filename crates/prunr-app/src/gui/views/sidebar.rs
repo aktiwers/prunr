@@ -56,12 +56,11 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                 }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                // Always show "N/M" for consistency — "0/4" reads as "0 of 4
+                // selected" rather than the ambiguous "4" when nothing's
+                // checked. Users can scan this to confirm selection state.
                 let selected = app.batch_items.iter().filter(|i| i.selected).count();
-                let label = if selected > 0 {
-                    format!("{selected}/{count}")
-                } else {
-                    format!("{count}")
-                };
+                let label = format!("{selected}/{count}");
                 ui.label(
                     RichText::new(label)
                         .size(theme::FONT_SIZE_MONO)
