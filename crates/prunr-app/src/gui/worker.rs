@@ -142,9 +142,11 @@ fn run_batch_with_retry(
             }
         }
 
-        // Spawn subprocess with current concurrency
+        // Spawn subprocess — cap engines at the number of pending items
+        // (no point creating 4 engines for 2 images)
+        let effective_jobs = max_jobs.min(pending.len());
         let (mut sub, _active_provider) = match SubprocessManager::spawn(
-            model, max_jobs, mask, force_cpu, line_mode,
+            model, effective_jobs, mask, force_cpu, line_mode,
             line_strength, solid_line_color, bg_color,
         ) {
             Ok(s) => s,
