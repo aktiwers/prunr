@@ -32,6 +32,11 @@ pub enum SubprocessCommand {
     },
     /// Tier 2: Re-run postprocess from a cached tensor (skip inference).
     /// The parent sends the raw tensor + original image via temp files.
+    ///
+    /// `edge_tensor_path` is present when this is an edge-tier rerun (line_strength
+    /// tweak) — the subprocess re-thresholds the cached DexiNed output instead of
+    /// re-running the model. `live_preview = true` skips guided filter (Phase 3
+    /// optimization: preview uses cheap approx, commit uses full quality).
     RePostProcess {
         item_id: u64,
         /// Path to temp file with raw f32 tensor data.
@@ -43,6 +48,16 @@ pub enum SubprocessCommand {
         original_image_path: std::path::PathBuf,
         /// Updated mask settings for re-postprocessing.
         mask: MaskSettings,
+        /// Path to cached DexiNed output for edge-tier reruns. None = mask-only rerun.
+        #[serde(default)]
+        edge_tensor_path: Option<std::path::PathBuf>,
+        #[serde(default)]
+        edge_tensor_height: Option<u32>,
+        #[serde(default)]
+        edge_tensor_width: Option<u32>,
+        /// Live preview mode: skip guided filter and other expensive stages.
+        #[serde(default)]
+        live_preview: bool,
     },
     /// Cancel: stop after current image, send Finished.
     Cancel,
@@ -79,11 +94,20 @@ pub enum SubprocessEvent {
         width: u32,
         height: u32,
         active_provider: String,
-        /// Path to cached raw tensor (Tier 1 output). Parent stores for future Tier 2 runs.
+        /// Path to cached raw segmentation tensor (Tier 1 output).
         /// Only present for full pipeline runs, not RePostProcess.
         tensor_cache_path: Option<std::path::PathBuf>,
         tensor_cache_height: Option<u32>,
         tensor_cache_width: Option<u32>,
+        /// Path to cached DexiNed edge tensor (full-resolution f32, pre-threshold).
+        /// Parent compresses and stores for Tier 2 edge reruns on line_strength tweaks.
+        /// Only present when the run used DexiNed (EdgesOnly or SubjectOutline modes).
+        #[serde(default)]
+        edge_cache_path: Option<std::path::PathBuf>,
+        #[serde(default)]
+        edge_cache_height: Option<u32>,
+        #[serde(default)]
+        edge_cache_width: Option<u32>,
     },
     /// Image processing failed (non-fatal).
     ImageError {

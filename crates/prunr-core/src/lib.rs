@@ -10,7 +10,7 @@ pub mod edge;
 pub mod recipe;
 
 pub use engine::{InferenceEngine, OrtEngine};
-pub use recipe::{ProcessingRecipe, InferenceRecipe, MaskRecipe, CompositeRecipe, RequiredTier, resolve_tier};
+pub use recipe::{ProcessingRecipe, InferenceRecipe, EdgeRecipe, MaskRecipe, CompositeRecipe, RequiredTier, resolve_tier};
 pub use types::{
     CoreError, ModelKind, ProgressStage, ProcessResult, MaskSettings, InferenceResult,
     LineMode, LARGE_IMAGE_LIMIT, DOWNSCALE_TARGET,

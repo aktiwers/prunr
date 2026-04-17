@@ -90,8 +90,11 @@ pub enum WorkerResult {
     BatchItemDone {
         item_id: u64,
         result: Result<ProcessResult, String>,
-        /// Cached tensor from Tier 1 inference (for future Tier 2 mask reruns).
+        /// Cached segmentation tensor from Tier 1 (for future mask-tier reruns).
         tensor_cache: Option<TensorCache>,
+        /// Cached DexiNed output (for future edge-tier reruns on line_strength tweaks).
+        /// Only populated when the run used edge detection.
+        edge_cache: Option<TensorCache>,
     },
     BatchComplete,
     Cancelled,
@@ -210,6 +213,7 @@ fn run_batch_with_retry(
                         item_id: *id,
                         result: Err(e.clone()),
                         tensor_cache: None,
+                        edge_cache: None,
                     });
                 }
                 for t2 in &pending_tier2 {
@@ -217,6 +221,7 @@ fn run_batch_with_retry(
                         item_id: t2.item_id,
                         result: Err(e.clone()),
                         tensor_cache: None,
+                        edge_cache: None,
                     });
                 }
                 let _ = res_tx.send(WorkerResult::BatchComplete);
@@ -284,6 +289,7 @@ fn run_batch_with_retry(
                     SubprocessEvent::ImageDone {
                         item_id, result_path, width, height, active_provider,
                         tensor_cache_path, tensor_cache_height, tensor_cache_width,
+                        edge_cache_path, edge_cache_height, edge_cache_width,
                     } => {
                         // Read result from temp file and clean up
                         let result = std::fs::read(&result_path)
@@ -296,21 +302,32 @@ fn run_batch_with_retry(
                             .ok_or_else(|| "Failed to read result from subprocess".to_string());
                         let _ = std::fs::remove_file(&result_path);
 
-                        // Read tensor cache file into memory before cleanup
-                        let tensor_cache = tensor_cache_path.as_ref().and_then(|tp| {
-                            let th = tensor_cache_height?;
-                            let tw = tensor_cache_width?;
+                        let read_tensor = |tp: &std::path::PathBuf, h: u32, w: u32| -> Option<TensorCache> {
                             let raw_bytes = std::fs::read(tp).ok()?;
                             let _ = std::fs::remove_file(tp);
                             let data = crate::subprocess::ipc::le_bytes_to_f32s(&raw_bytes);
-                            Some(TensorCache { data, height: th, width: tw, model })
+                            Some(TensorCache { data, height: h, width: w, model })
+                        };
+
+                        // Read segmentation tensor cache (Tier 1 → Tier 2 mask reruns).
+                        let tensor_cache = tensor_cache_path.as_ref().and_then(|tp| {
+                            let th = tensor_cache_height?;
+                            let tw = tensor_cache_width?;
+                            read_tensor(tp, th, tw)
+                        });
+
+                        // Read DexiNed edge tensor cache (Tier 1 → Tier 2 edge reruns).
+                        let edge_cache = edge_cache_path.as_ref().and_then(|tp| {
+                            let th = edge_cache_height?;
+                            let tw = edge_cache_width?;
+                            read_tensor(tp, th, tw)
                         });
 
                         completed.insert(item_id);
                         sent_items.retain(|(id, _, _)| *id != item_id);
                         sent_tier2_ids.retain(|id| *id != item_id);
 
-                        let _ = res_tx.send(WorkerResult::BatchItemDone { item_id, result, tensor_cache });
+                        let _ = res_tx.send(WorkerResult::BatchItemDone { item_id, result, tensor_cache, edge_cache });
                         ctx.request_repaint();
 
                         // Admit next item if RSS allows
@@ -342,6 +359,7 @@ fn run_batch_with_retry(
                             item_id,
                             result: Err(error),
                             tensor_cache: None,
+                            edge_cache: None,
                         });
                         ctx.request_repaint();
                     }
@@ -393,6 +411,7 @@ fn run_batch_with_retry(
                         item_id: tid,
                         result: Err(crash_reason.clone()),
                         tensor_cache: None,
+                        edge_cache: None,
                     });
                 }
             }
@@ -423,6 +442,7 @@ fn run_batch_with_retry(
                             item_id: *id,
                             result: Err(err_msg.clone()),
                             tensor_cache: None,
+                            edge_cache: None,
                         });
                     }
                 }
@@ -431,6 +451,7 @@ fn run_batch_with_retry(
                         item_id: t2.item_id,
                         result: Err(err_msg.clone()),
                         tensor_cache: None,
+                        edge_cache: None,
                     });
                 }
                 let _ = res_tx.send(WorkerResult::BatchComplete);

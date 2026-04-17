@@ -8,6 +8,12 @@ use serde::{Serialize, Deserialize};
 use crate::types::ModelKind;
 
 /// Tier 1: settings that require AI model inference.
+///
+/// `line_strength` and `solid_line_color` are NOT here — those are applied
+/// AFTER DexiNed in the edge postprocess stage and live in `EdgeRecipe`.
+/// This lets a `line_strength` tweak fire a Tier 2 (EdgeRerun) instead of
+/// a full re-inference, as long as the cached edge tensor is still valid
+/// (i.e. `uses_edge_detection` hasn't changed).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct InferenceRecipe {
     pub model: ModelKind,
@@ -15,9 +21,13 @@ pub struct InferenceRecipe {
     pub uses_segmentation: bool,
     /// Whether edge detection model runs (true when line_mode is not Off).
     pub uses_edge_detection: bool,
-    /// Edge detection sensitivity (affects DexiNed output).
+}
+
+/// Tier 2 (edge variant): settings re-applied to the cached DexiNed tensor.
+/// Changes here trigger an EdgeRerun, not a full pipeline — ~20-100ms vs 200ms-10s.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct EdgeRecipe {
     pub line_strength_bits: u32,
-    /// Solid line color override (affects edge output).
     pub solid_line_color: Option<[u8; 3]>,
 }
 
@@ -73,6 +83,7 @@ pub struct CompositeRecipe {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct ProcessingRecipe {
     pub inference: InferenceRecipe,
+    pub edge: EdgeRecipe,
     pub mask: MaskRecipe,
     pub composite: CompositeRecipe,
     /// True if this result was produced in chain mode (previous result as input).
@@ -86,23 +97,31 @@ pub enum RequiredTier {
     Skip,
     /// Only compositing changed (bg_color) — parent-local, instant.
     CompositeOnly,
-    /// Mask settings changed — re-run postprocess from cached tensor (~200ms).
+    /// Mask settings changed — re-run postprocess from cached segmentation tensor (~200ms).
     MaskRerun,
-    /// Model changed — full pipeline needed.
+    /// Edge settings changed — re-threshold cached DexiNed tensor (~20-100ms).
+    EdgeRerun,
+    /// Model / mode changed — full pipeline needed.
     FullPipeline,
 }
 
 /// Determine what processing tier is needed when changing from old to new recipe.
+///
+/// Ordered by cost (cheapest changes bubble up first):
+/// Skip < CompositeOnly < EdgeRerun < MaskRerun < FullPipeline.
 pub fn resolve_tier(old: &ProcessingRecipe, new: &ProcessingRecipe) -> RequiredTier {
     if old == new {
         return RequiredTier::Skip;
     }
-    // Chain mode changes the input image, not settings — always needs full pipeline
+    // Chain mode changes the input image, not settings — always needs full pipeline.
     if old.was_chain != new.was_chain || old.inference != new.inference {
         return RequiredTier::FullPipeline;
     }
     if old.mask != new.mask {
         return RequiredTier::MaskRerun;
+    }
+    if old.edge != new.edge {
+        return RequiredTier::EdgeRerun;
     }
     RequiredTier::CompositeOnly
 }
@@ -117,6 +136,8 @@ mod tests {
                 model,
                 uses_segmentation: true,
                 uses_edge_detection: false,
+            },
+            edge: EdgeRecipe {
                 line_strength_bits: 0.5f32.to_bits(),
                 solid_line_color: None,
             },
@@ -174,5 +195,21 @@ mod tests {
         let a = MaskRecipe::new(1.0, Some(0.5), 0.0, true);
         let b = MaskRecipe::new(1.0, Some(0.50001), 0.0, true);
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn line_strength_change_edge_rerun() {
+        let mut a = make_recipe(ModelKind::Silueta, 1.0, None);
+        let mut b = a.clone();
+        b.edge.line_strength_bits = 0.8f32.to_bits();
+        assert_eq!(resolve_tier(&a, &b), RequiredTier::EdgeRerun);
+    }
+
+    #[test]
+    fn solid_line_color_change_edge_rerun() {
+        let mut a = make_recipe(ModelKind::Silueta, 1.0, None);
+        let mut b = a.clone();
+        b.edge.solid_line_color = Some([255, 0, 0]);
+        assert_eq!(resolve_tier(&a, &b), RequiredTier::EdgeRerun);
     }
 }

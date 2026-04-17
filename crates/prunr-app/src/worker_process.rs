@@ -430,6 +430,11 @@ pub fn run_worker() -> ! {
                                         tensor_cache_path: tcp,
                                         tensor_cache_height: tch,
                                         tensor_cache_width: tcw,
+                                        // Edge tensor cache populated in Phase 3 when
+                                        // EdgeEngine exposes its pre-threshold output.
+                                        edge_cache_path: None,
+                                        edge_cache_height: None,
+                                        edge_cache_width: None,
                                     });
                                 }
                                 Err(e) => {
@@ -473,6 +478,13 @@ pub fn run_worker() -> ! {
             SubprocessCommand::RePostProcess {
                 item_id, tensor_path, tensor_height, tensor_width,
                 model, original_image_path, mask: repost_mask,
+                // Phase 3 will use these to run edge-tier reruns and skip the
+                // guided filter in live-preview mode. Phase 1 accepts the fields
+                // for forward-compat but ignores them (no edge tier 2 yet).
+                edge_tensor_path: _,
+                edge_tensor_height: _,
+                edge_tensor_width: _,
+                live_preview: _,
             } => {
                 let evt_tx = evt_tx.clone();
                 let in_flight = in_flight.clone();
@@ -514,6 +526,9 @@ pub fn run_worker() -> ! {
                                     tensor_cache_path: None,
                                     tensor_cache_height: None,
                                     tensor_cache_width: None,
+                                    edge_cache_path: None,
+                                    edge_cache_height: None,
+                                    edge_cache_width: None,
                                 });
                             }
                         }
