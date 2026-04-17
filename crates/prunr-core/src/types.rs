@@ -22,7 +22,7 @@ impl From<image::ImageError> for CoreError {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum ModelKind {
     Silueta,
     U2net,
@@ -73,6 +73,16 @@ impl Default for MaskSettings {
             refine_edges: false,
         }
     }
+}
+
+/// Raw inference result (Tier 1 output) — the model tensor before postprocessing.
+pub struct InferenceResult {
+    /// Raw f32 tensor data in row-major order [1, 1, H, W].
+    pub tensor_data: Vec<f32>,
+    pub tensor_height: usize,
+    pub tensor_width: usize,
+    pub model: ModelKind,
+    pub active_provider: String,
 }
 
 pub const LARGE_IMAGE_LIMIT: u32 = 8000;
