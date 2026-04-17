@@ -136,6 +136,10 @@ pub(crate) struct BatchItem {
     pub redo_stack: VecDeque<HistorySlot>,
     pub status: BatchStatus,
     pub selected: bool,
+    /// The recipe that produced the current result_rgba. None if never processed.
+    pub applied_recipe: Option<prunr_core::ProcessingRecipe>,
+    /// Cached raw tensor from Tier 1 inference (for Tier 2 mask reruns).
+    pub cached_tensor: Option<super::worker::TensorCache>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -233,6 +237,8 @@ pub struct PrunrApp {
     admission: Option<super::memory::AdmissionController>,
     /// Sender for streaming additional items to the worker.
     admission_tx: Option<mpsc::Sender<super::worker::WorkItem>>,
+    /// Recipe snapshot taken at dispatch time — stored on completed items.
+    dispatch_recipe: Option<prunr_core::ProcessingRecipe>,
     /// Last time periodic history cleanup ran.
     last_history_cleanup: std::time::Instant,
 }
@@ -347,6 +353,7 @@ impl PrunrApp {
             drag_out_linux_notified: false,
             admission: None,
             admission_tx: None,
+            dispatch_recipe: None,
             last_history_cleanup: std::time::Instant::now(),
         }
     }
@@ -399,6 +406,7 @@ impl PrunrApp {
             drag_out_linux_notified: false,
             admission: None,
             admission_tx: None,
+            dispatch_recipe: None,
             last_history_cleanup: std::time::Instant::now(),
         }
     }
@@ -457,6 +465,8 @@ impl PrunrApp {
             redo_stack: VecDeque::new(),
             status: BatchStatus::Pending,
             selected: false,
+            applied_recipe: None,
+            cached_tensor: None,
         });
         self.selected_batch_index = self.batch_items.len() - 1;
         if do_decode {
@@ -680,34 +690,95 @@ impl PrunrApp {
     }
 
     /// Collect and send batch items matching `filter` for processing.
+    /// Uses tier routing: compares each item's applied_recipe against current
+    /// settings to determine the minimum work needed (skip / mask rerun / full).
     fn process_items(&mut self, filter: impl Fn(&BatchItem) -> bool) {
         use super::memory::{AdmissionController, ImageMemCost};
+        use prunr_core::RequiredTier;
 
         let chain = self.settings.chain_mode;
+        let current_recipe = self.settings.current_recipe();
 
-        // Identify candidate items
+        // Identify candidate items (not already processing)
         let candidate_ids: HashSet<u64> = self.batch_items.iter()
             .filter(|i| filter(i) && !matches!(i.status, BatchStatus::Processing))
             .map(|i| i.id)
             .collect();
         if candidate_ids.is_empty() { return; }
 
-        // Save history for candidates before processing
+        // ── Tier classification ──────────────────────────────────────────
+        let mut tier1_ids: HashSet<u64> = HashSet::new(); // Full pipeline
+        let mut tier2_ids: HashSet<u64> = HashSet::new(); // Mask rerun
+        let mut skip_count = 0usize;
+
+        for item in &mut self.batch_items {
+            if !candidate_ids.contains(&item.id) { continue; }
+
+            // Never-processed items always need full pipeline
+            let Some(ref old_recipe) = item.applied_recipe else {
+                tier1_ids.insert(item.id);
+                continue;
+            };
+
+            // Chain mode with existing result: input changes each time → always full
+            if chain && item.result_rgba.is_some() {
+                item.cached_tensor = None;
+                tier1_ids.insert(item.id);
+                continue;
+            }
+
+            match prunr_core::resolve_tier(old_recipe, &current_recipe) {
+                RequiredTier::Skip | RequiredTier::CompositeOnly => {
+                    // CompositeOnly (bg_color) is handled at display/export time,
+                    // so it's effectively a skip. Update composite to stay in sync.
+                    if let Some(ref mut recipe) = item.applied_recipe {
+                        recipe.composite = current_recipe.composite.clone();
+                    }
+                    skip_count += 1;
+                }
+                RequiredTier::MaskRerun => {
+                    if item.cached_tensor.is_some() {
+                        tier2_ids.insert(item.id);
+                    } else {
+                        tier1_ids.insert(item.id);
+                    }
+                }
+                RequiredTier::FullPipeline => {
+                    item.cached_tensor = None; // model changed, tensor invalid
+                    tier1_ids.insert(item.id);
+                }
+            }
+        }
+
+        let process_count = tier1_ids.len() + tier2_ids.len();
+        if process_count == 0 {
+            if skip_count > 0 {
+                let msg = if skip_count == 1 {
+                    "Already up to date".to_string()
+                } else {
+                    format!("{skip_count} images already up to date")
+                };
+                self.toasts.info(msg);
+            }
+            return;
+        }
+
+        if skip_count > 0 {
+            let msg = format!("{skip_count} up to date, processing {process_count}");
+            self.toasts.info(msg);
+        }
+
+        // ── Save history for items being reprocessed ──────────────────
+        let process_ids: HashSet<u64> = tier1_ids.iter().chain(tier2_ids.iter()).copied().collect();
         let chain_mode = self.settings.chain_mode;
         let max_depth = self.settings.history_depth;
         for item in &mut self.batch_items {
-            if !candidate_ids.contains(&item.id) { continue; }
-            // Seed history with the original image on the very first process.
-            // Only seed if source is already decoded (instant). For lazy-loaded
-            // items, the seed is created on first undo attempt to avoid blocking
-            // the UI thread with disk I/O + decode + compress.
+            if !process_ids.contains(&item.id) { continue; }
             if item.history.is_empty() && item.redo_stack.is_empty() {
                 if let Some(ref src_rgba) = item.source_rgba {
                     item.history.push_back(HistorySlot::compress(src_rgba.clone()));
                 }
-                // Lazy items: history stays empty. handle_undo creates the seed on demand.
             }
-            // Save current result to history before reprocessing
             if item.status == BatchStatus::Done {
                 if let Some(current) = item.result_rgba.take() {
                     if chain_mode {
@@ -733,21 +804,47 @@ impl PrunrApp {
             }
         }
 
-        // Build admission controller with per-image cost estimates.
-        // Clamp parallel_jobs to what the system can safely handle for this model.
+        // ── Build Tier 2 work items ──────────────────────────────────
+        let mask = self.settings.mask_settings();
+        let mut tier2_work: Vec<super::worker::Tier2WorkItem> = Vec::new();
+        for item in &mut self.batch_items {
+            if !tier2_ids.contains(&item.id) { continue; }
+            if let Some(ref ct) = item.cached_tensor {
+                match item.source.load_bytes() {
+                    Ok(bytes) => {
+                        tier2_work.push(super::worker::Tier2WorkItem {
+                            item_id: item.id,
+                            tensor_data: ct.data.clone(),
+                            tensor_height: ct.height,
+                            tensor_width: ct.width,
+                            model: ct.model,
+                            original_bytes: bytes,
+                            mask: mask.clone(),
+                        });
+                        item.status = BatchStatus::Processing;
+                    }
+                    Err(e) => {
+                        item.status = BatchStatus::Error(format!("Failed to load: {e}"));
+                        item.cached_tensor = None;
+                    }
+                }
+            }
+        }
+
+        // ── Build Tier 1 work items + admission ──────────────────────
         let model: prunr_core::ModelKind = self.settings.model.into();
         let safe_jobs = super::memory::safe_max_jobs(model);
         let jobs = self.settings.parallel_jobs.min(safe_jobs);
-        let use_admission = candidate_ids.len() > 1;
+        let use_admission = tier1_ids.len() > 1;
+
         if use_admission {
             let mut ctrl = AdmissionController::new(model, jobs);
             let costs: Vec<ImageMemCost> = self.batch_items.iter()
-                .filter(|i| candidate_ids.contains(&i.id))
+                .filter(|i| tier1_ids.contains(&i.id))
                 .map(|i| AdmissionController::estimate_cost(i.id, i.dimensions, i.source.estimated_size()))
                 .collect();
             ctrl.enqueue(costs);
 
-            // Admit initial window
             let mut initial_items = Vec::new();
             while let Some(admitted_id) = ctrl.try_admit_next() {
                 if let Some(item) = self.batch_items.iter_mut().find(|b| b.id == admitted_id) {
@@ -759,25 +856,23 @@ impl PrunrApp {
                 }
             }
 
-            // Mark non-admitted items as Pending (they wait for admission)
             for item in &mut self.batch_items {
-                if candidate_ids.contains(&item.id) && item.status != BatchStatus::Processing {
+                if tier1_ids.contains(&item.id) && item.status != BatchStatus::Processing {
                     item.status = BatchStatus::Pending;
                 }
             }
 
-            // Create streaming channel for additional items
             let (atx, arx) = mpsc::channel();
             self.admission = Some(ctrl);
             self.admission_tx = Some(atx);
 
-            self.dispatch_batch(initial_items, model, jobs, Some(arx));
+            self.dispatch_batch(initial_items, tier2_work, model, jobs, Some(arx));
             return;
         }
 
-        // Single item: no admission needed, process directly
+        // Small batch / single item: no admission needed
         let items: Vec<_> = self.batch_items.iter_mut()
-            .filter(|i| candidate_ids.contains(&i.id))
+            .filter(|i| tier1_ids.contains(&i.id))
             .filter_map(|i| {
                 let bytes = i.source.load_bytes().ok()?;
                 let chain_input = if chain { i.result_rgba.clone() } else { None };
@@ -786,34 +881,36 @@ impl PrunrApp {
             })
             .collect();
 
-        self.dispatch_batch(items, model, jobs, None);
+        self.dispatch_batch(items, tier2_work, model, jobs, None);
     }
 
     /// Build and send a WorkerMessage::BatchProcess with current settings.
     fn dispatch_batch(
         &mut self,
         items: Vec<super::worker::WorkItem>,
+        tier2_items: Vec<super::worker::Tier2WorkItem>,
         model: prunr_core::ModelKind,
         jobs: usize,
         additional_items_rx: Option<mpsc::Receiver<super::worker::WorkItem>>,
     ) {
         self.cancel_flag.store(false, Ordering::Release);
         self.state = AppState::Processing;
+        self.dispatch_recipe = Some(self.settings.current_recipe());
         self.status.pct = 0.0;
         self.status.stage = "Starting".to_string();
         let _ = self.worker_tx.send(WorkerMessage::BatchProcess {
             items,
-            model,
-            jobs,
+            tier2_items,
+            config: super::worker::ProcessingConfig {
+                model,
+                jobs,
+                mask: self.settings.mask_settings(),
+                force_cpu: self.settings.force_cpu,
+                line_mode: self.settings.line_mode,
+                line_strength: self.settings.line_strength,
+                solid_line_color: self.settings.solid_line_color_rgb(),
+            },
             cancel: self.cancel_flag.clone(),
-            mask: self.settings.mask_settings(),
-            force_cpu: self.settings.force_cpu,
-            line_mode: self.settings.line_mode,
-            line_strength: self.settings.line_strength,
-            solid_line_color: if self.settings.solid_line_color {
-                let c = self.settings.line_color;
-                Some([c[0], c[1], c[2]])
-            } else { None },
             additional_items_rx,
         });
     }
@@ -1126,6 +1223,8 @@ impl PrunrApp {
             redo_stack: VecDeque::new(),
             status: BatchStatus::Pending,
             selected: false,
+            applied_recipe: None,
+            cached_tensor: None,
         });
 
         if self.state == AppState::Empty {
@@ -1408,9 +1507,11 @@ impl PrunrApp {
                         self.status.pct = pct;
                     }
                 }
-                WorkerResult::BatchItemDone { item_id, result } => {
+                WorkerResult::BatchItemDone { item_id, result, tensor_cache } => {
                     let is_selected = self.selected_item()
                         .map_or(false, |b| b.id == item_id);
+                    let recipe_snapshot = self.dispatch_recipe.clone()
+                        .unwrap_or_else(|| self.settings.current_recipe());
                     if let Some(item) = self.batch_items.iter_mut().find(|b| b.id == item_id) {
                         // Skip results for items that were already cancelled (reset to Pending)
                         if item.status != BatchStatus::Processing {
@@ -1420,6 +1521,9 @@ impl PrunrApp {
                             Ok(pr) => {
                                 item.result_rgba = Some(Arc::new(pr.rgba_image));
                                 item.status = BatchStatus::Done;
+                                // Store recipe + tensor cache for future tier routing
+                                item.applied_recipe = Some(recipe_snapshot);
+                                item.cached_tensor = tensor_cache;
                                 // Evict decoded source to free RAM — lazy decode
                                 // will re-decode on demand if the user navigates back.
                                 if !is_selected {
@@ -1439,6 +1543,7 @@ impl PrunrApp {
                             }
                             Err(e) => {
                                 item.status = BatchStatus::Error(e);
+                                item.cached_tensor = None;
                             }
                         }
                     }
@@ -1468,6 +1573,7 @@ impl PrunrApp {
                     }
                 }
                 WorkerResult::BatchComplete => {
+                    self.dispatch_recipe = None;
                     let done = self.batch_items.iter().filter(|i| i.status == BatchStatus::Done).count();
                     let failed = self.batch_items.iter().filter(|i| matches!(i.status, BatchStatus::Error(_))).count();
                     let still_processing = self.batch_items.iter().any(|i| i.status == BatchStatus::Processing);
@@ -1493,6 +1599,7 @@ impl PrunrApp {
                     }
                 }
                 WorkerResult::Cancelled => {
+                    self.dispatch_recipe = None;
                     if self.state == AppState::Processing {
                         self.state = AppState::Loaded;
                         self.status.text = "Cancelled".to_string();

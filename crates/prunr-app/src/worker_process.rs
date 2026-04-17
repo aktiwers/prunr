@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 
 use prunr_core::{
-    create_engine_pool, process_image_with_mask, process_image_from_decoded,
+    create_engine_pool, process_image_with_mask,
     OrtEngine, ProcessResult, ProgressStage, EdgeEngine,
 };
 
@@ -247,6 +247,13 @@ pub fn run_worker() -> ! {
                     // Guard releases on drop (panic-safe).
                     let weight = pixel_weight(&img_bytes);
                     let _sem_guard = sem.acquire(weight);
+
+                    // For LineMode::Off we use the split pipeline (infer_only +
+                    // tensor_to_mask + apply_mask) to capture the raw tensor for
+                    // future Tier 2 mask reruns.  Other modes don't benefit from
+                    // tensor caching so they use the monolithic pipeline.
+                    let mut tensor_for_cache: Option<(Vec<f32>, u32, u32)> = None;
+
                     let result = match line_mode {
                         LineMode::LinesOnly => {
                             let decoded;
@@ -289,17 +296,92 @@ pub fn run_worker() -> ! {
                             }
                         }
                         LineMode::Off => {
+                            // Split pipeline: infer_only → tensor_to_mask → apply_mask
+                            // This captures the raw tensor for future Tier 2 mask reruns.
                             let eng = engine.as_ref().expect("segmentation engine required");
-                            if let Some(ref img) = chain_img {
-                                process_image_from_decoded(
-                                    img, eng, &mask,
-                                    Some(progress_cb), Some(cancel.clone()),
-                                )
+                            let decoded;
+                            let original: &image::DynamicImage = if let Some(ref img) = chain_img {
+                                img
                             } else {
-                                process_image_with_mask(
-                                    &img_bytes, eng, &mask,
-                                    Some(progress_cb), Some(cancel.clone()),
-                                )
+                                match prunr_core::load_image_from_bytes(&img_bytes) {
+                                    Ok(img) => { decoded = img; &decoded }
+                                    Err(e) => {
+                                        // Use the error directly
+                                        let _ = evt_tx.send(SubprocessEvent::ImageError {
+                                            item_id,
+                                            error: e.to_string(),
+                                        });
+                                        in_flight.fetch_sub(1, Ordering::AcqRel);
+                                        // Clean up temp files
+                                        if image_path.starts_with(ipc.as_ref()) {
+                                            let _ = std::fs::remove_file(&image_path);
+                                        }
+                                        if let Some(ref p) = chain_path {
+                                            if p.starts_with(ipc.as_ref()) {
+                                                let _ = std::fs::remove_file(p);
+                                            }
+                                        }
+                                        return;
+                                    }
+                                }
+                            };
+
+                            // Check large image limit
+                            if let Some(err) = prunr_core::check_large_image(original) {
+                                Err(err)
+                            } else {
+                                // Progress callback for infer_only
+                                let infer_evt_tx = evt_tx.clone();
+                                let infer_cancel = cancel.clone();
+                                let infer_progress = move |stage: ProgressStage, pct: f32| {
+                                    if !infer_cancel.load(Ordering::Acquire) {
+                                        let _ = infer_evt_tx.send(SubprocessEvent::Progress {
+                                            item_id, stage, pct,
+                                        });
+                                    }
+                                };
+
+                                prunr_core::infer_only(
+                                    original, eng, Some(infer_progress), Some(cancel.clone()),
+                                ).and_then(|ir| {
+                                    // Report postprocess stage
+                                    if !cancel.load(Ordering::Acquire) {
+                                        let _ = evt_tx.send(SubprocessEvent::Progress {
+                                            item_id, stage: ProgressStage::Postprocess, pct: 0.8,
+                                        });
+                                    }
+
+                                    let th = ir.tensor_height;
+                                    let tw = ir.tensor_width;
+                                    let tensor_view = ndarray::ArrayView4::from_shape(
+                                        (1, 1, th, tw), &ir.tensor_data
+                                    ).map_err(|e| prunr_core::CoreError::Inference(
+                                        format!("Tensor reshape: {e}")
+                                    ))?;
+                                    let mask_img = prunr_core::tensor_to_mask(
+                                        tensor_view, original, &mask, model,
+                                    );
+                                    let rgba_image = prunr_core::apply_mask(original, &mask_img);
+
+                                    // Report alpha stage
+                                    if !cancel.load(Ordering::Acquire) {
+                                        let _ = evt_tx.send(SubprocessEvent::Progress {
+                                            item_id, stage: ProgressStage::Alpha, pct: 0.95,
+                                        });
+                                    }
+
+                                    // Stash tensor for cache output
+                                    tensor_for_cache = Some((
+                                        ir.tensor_data,
+                                        th as u32,
+                                        tw as u32,
+                                    ));
+
+                                    Ok(ProcessResult {
+                                        rgba_image,
+                                        active_provider: ir.active_provider,
+                                    })
+                                })
                             }
                         }
                     };
@@ -309,6 +391,18 @@ pub fn run_worker() -> ! {
 
                     match result {
                         Ok(pr) => {
+                            // Write tensor cache to temp file if available
+                            let (tcp, tch, tcw) = if let Some((ref tdata, th, tw)) = tensor_for_cache {
+                                let tp = ipc.join(format!("tensor_{item_id}.raw"));
+                                let tbytes = prunr_app::subprocess::ipc::f32s_to_le_bytes(tdata);
+                                match std::fs::write(&tp, &tbytes) {
+                                    Ok(()) => (Some(tp), Some(th), Some(tw)),
+                                    Err(_) => (None, None, None), // non-fatal
+                                }
+                            } else {
+                                (None, None, None)
+                            };
+
                             // Write result RGBA to temp file
                             let (w, h) = (pr.rgba_image.width(), pr.rgba_image.height());
                             let result_path = ipc.join(format!("result_{item_id}.raw"));
@@ -320,11 +414,9 @@ pub fn run_worker() -> ! {
                                         width: w,
                                         height: h,
                                         active_provider: pr.active_provider,
-                                        // Tensor cache not yet implemented for full pipeline
-                                        // (will be added when parent-side routing uses infer_only)
-                                        tensor_cache_path: None,
-                                        tensor_cache_height: None,
-                                        tensor_cache_width: None,
+                                        tensor_cache_path: tcp,
+                                        tensor_cache_height: tch,
+                                        tensor_cache_width: tcw,
                                     });
                                 }
                                 Err(e) => {
@@ -342,8 +434,6 @@ pub fn run_worker() -> ! {
                             });
                         }
                     }
-
-                    // Semaphore released automatically by _sem_guard drop
 
                     // Report RSS after each image
                     if let Some(stats) = memory_stats::memory_stats() {
@@ -386,9 +476,7 @@ pub fn run_worker() -> ! {
                     let tensor_result = (|| -> Result<image::RgbaImage, String> {
                         let raw_bytes = std::fs::read(&tensor_path)
                             .map_err(|e| format!("Failed to read tensor: {e}"))?;
-                        let floats: Vec<f32> = raw_bytes.chunks_exact(4)
-                            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-                            .collect();
+                        let floats = prunr_app::subprocess::ipc::le_bytes_to_f32s(&raw_bytes);
                         let th = tensor_height as usize;
                         let tw = tensor_width as usize;
                         let tensor = ndarray::ArrayView4::from_shape(

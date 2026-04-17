@@ -98,10 +98,62 @@ impl Settings {
         base.min(safe)
     }
 
+    /// Build a ProcessingRecipe from the current settings state.
+    /// Used by tier routing to compare against each item's applied_recipe.
+    pub fn current_recipe(&self) -> prunr_core::ProcessingRecipe {
+        let model: ModelKind = self.model.into();
+        let solid_line = self.solid_line_color_rgb();
+        // Mask settings are irrelevant for LinesOnly — fix to defaults
+        // so changing gamma/threshold doesn't trigger unnecessary reprocessing.
+        let mask = if self.line_mode == LineMode::LinesOnly {
+            prunr_core::MaskRecipe::new(1.0, None, 0.0, false)
+        } else {
+            prunr_core::MaskRecipe::new(
+                self.mask_gamma,
+                self.threshold_value(),
+                self.edge_shift,
+                self.refine_edges,
+            )
+        };
+        prunr_core::ProcessingRecipe {
+            inference: prunr_core::InferenceRecipe {
+                model,
+                uses_segmentation: self.line_mode != LineMode::LinesOnly,
+                uses_edge_detection: self.line_mode != LineMode::Off,
+                line_strength_bits: self.line_strength.to_bits(),
+                solid_line_color: solid_line,
+            },
+            mask,
+            composite: prunr_core::CompositeRecipe {
+                bg_color: if self.apply_bg_color {
+                    Some([self.bg_color[0], self.bg_color[1], self.bg_color[2]])
+                } else {
+                    None
+                },
+                solid_line_color: solid_line,
+            },
+            was_chain: self.chain_mode,
+        }
+    }
+
+    /// Solid line color as RGB triple, or None if disabled.
+    pub fn solid_line_color_rgb(&self) -> Option<[u8; 3]> {
+        if self.solid_line_color {
+            Some([self.line_color[0], self.line_color[1], self.line_color[2]])
+        } else {
+            None
+        }
+    }
+
+    /// Binary threshold value if enabled, None if soft mask.
+    fn threshold_value(&self) -> Option<f32> {
+        if self.mask_threshold_enabled { Some(self.mask_threshold) } else { None }
+    }
+
     pub fn mask_settings(&self) -> MaskSettings {
         MaskSettings {
             gamma: self.mask_gamma,
-            threshold: if self.mask_threshold_enabled { Some(self.mask_threshold) } else { None },
+            threshold: self.threshold_value(),
             edge_shift: self.edge_shift,
             refine_edges: self.refine_edges,
         }
