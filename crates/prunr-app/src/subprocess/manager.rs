@@ -214,9 +214,7 @@ impl SubprocessManager {
     ) -> Result<(), String> {
         // Write tensor as raw f32 LE bytes to temp file
         let tensor_path = ipc_temp_dir().join(format!("tensor_{item_id}.raw"));
-        let tensor_bytes: Vec<u8> = tensor_data.iter()
-            .flat_map(|f| f.to_le_bytes())
-            .collect();
+        let tensor_bytes = super::ipc::f32s_to_le_bytes(tensor_data);
         std::fs::write(&tensor_path, &tensor_bytes)
             .map_err(|e| format!("Failed to write tensor temp file: {e}"))?;
 
