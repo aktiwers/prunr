@@ -11,7 +11,7 @@ use super::settings::Settings;
 use super::state::AppState;
 use super::theme;
 use super::worker::{WorkerMessage, WorkerResult, spawn_worker};
-use super::views::{canvas, cli_help, settings, shortcuts, sidebar, statusbar, toolbar};
+use super::views::{adjustments_toolbar, canvas, chip, cli_help, settings, shortcuts, sidebar, statusbar, toolbar};
 
 /// Three-tiered history entry:
 /// - Tier 1 (Hot): Raw `Arc<RgbaImage>` — instant access, full RAM cost.
@@ -234,16 +234,16 @@ pub struct PrunrApp {
     // Batch items
     pub(crate) batch_items: Vec<BatchItem>,
     pub(crate) selected_batch_index: usize,
-    /// User explicitly hid the sidebar via Tab
+    /// User explicitly hid the sidebar via Tab / configured hotkey.
     pub(crate) sidebar_hidden: bool,
+    /// User explicitly hid the adjustments toolbar (rows 2 + 3) via Shift+H.
+    pub(crate) adjustments_hidden: bool,
     pub(crate) next_batch_id: u64,
 
     // Settings
     pub(crate) show_settings: bool,
     /// Timestamp when settings was last opened (for click-outside debounce)
     pub(crate) settings_opened_at: f64,
-    /// Snapshot of bg settings when settings panel opened (for change detection on close)
-    pub(crate) bg_settings_snapshot: Option<[u8; 4]>,
     pub(crate) settings: Settings,
 
     // Canvas fade-in: incremented on every image switch
@@ -375,10 +375,10 @@ impl PrunrApp {
             batch_items: Vec::new(),
             selected_batch_index: 0,
             sidebar_hidden: false,
+            adjustments_hidden: false,
             next_batch_id: 0,
             show_settings: false,
             settings_opened_at: 0.0,
-            bg_settings_snapshot: None,
             settings,
             canvas_switch_id: 0,
             result_switch_id: 0,
@@ -428,10 +428,10 @@ impl PrunrApp {
             batch_items: Vec::new(),
             selected_batch_index: 0,
             sidebar_hidden: false,
+            adjustments_hidden: false,
             next_batch_id: 0,
             show_settings: false,
             settings_opened_at: 0.0,
-            bg_settings_snapshot: None,
             settings,
             canvas_switch_id: 0,
             result_switch_id: 0,
@@ -624,29 +624,13 @@ impl PrunrApp {
         }
     }
 
-    pub(crate) fn close_settings(&mut self, ctx: &egui::Context) {
+    pub(crate) fn close_settings(&mut self, _ctx: &egui::Context) {
         self.show_settings = false;
         self.settings.save();
-
-        // Phase 1: broadcast the edited item_defaults template to ALL existing
-        // batch items to preserve v1 UX (modal changes apply to everything).
-        // Phase 2's toolbar replaces this with per-item edits + explicit broadcast
-        // via checkbox/Process.
-        let new_template = self.settings.item_defaults;
-        let bg_changed = new_template.bg != self.bg_settings_snapshot;
-        for item in &mut self.batch_items {
-            item.settings = new_template;
-        }
-
-        if bg_changed {
-            self.result_switch_id += 1;
-            for item in &mut self.batch_items {
-                item.result_texture = None;
-                item.result_tex_pending = false;
-            }
-            self.result_texture = None;
-            self.sync_selected_batch_textures(ctx);
-        }
+        // Phase 2: modal no longer edits per-image knobs, so there's nothing
+        // to propagate to batch_items and no texture invalidation needed.
+        // The toolbar edits item.settings directly and handles its own
+        // texture invalidation (P2.9).
         self.toasts.info("Settings saved");
     }
 
@@ -1874,6 +1858,7 @@ impl PrunrApp {
         let (mut toggle_before_after, mut fit_to_window, mut actual_size) = (false, false, false);
         let mut toggle_settings = false;
         let (mut nav_prev, mut nav_next, mut toggle_sidebar) = (false, false, false);
+        let mut toggle_adjustments = false;
         let mut undo_requested = false;
         let mut redo_requested = false;
 
@@ -1920,7 +1905,18 @@ impl PrunrApp {
                 if i.key_pressed(Key::ArrowRight) || i.key_pressed(Key::D) {
                     nav_next = true;
                 }
-                if i.key_pressed(Key::Tab) {
+                // H = toggle sidebar, Shift+H = toggle adjustments toolbar.
+                // Tab stays reserved for egui's focus traversal (accessibility).
+                // Kept Tab as a fallback for v1 muscle memory — will be removed
+                // when Settings → Hotkeys rebinding UI lands (Phase 5).
+                if i.key_pressed(Key::H) {
+                    if i.modifiers.shift {
+                        toggle_adjustments = true;
+                    } else {
+                        toggle_sidebar = true;
+                    }
+                }
+                if i.key_pressed(Key::Tab) && !i.modifiers.shift {
                     toggle_sidebar = true;
                 }
             }
@@ -1989,7 +1985,6 @@ impl PrunrApp {
             } else {
                 self.show_settings = true;
                 self.settings_opened_at = ctx.input(|i| i.time);
-                self.bg_settings_snapshot = self.settings.item_defaults.bg;
             }
         }
         if nav_prev && !self.batch_items.is_empty() {
@@ -2010,6 +2005,9 @@ impl PrunrApp {
         }
         if toggle_sidebar {
             self.sidebar_hidden = !self.sidebar_hidden;
+        }
+        if toggle_adjustments {
+            self.adjustments_hidden = !self.adjustments_hidden;
         }
         if undo_requested {
             self.handle_undo(ctx);
@@ -2160,6 +2158,53 @@ impl eframe::App for PrunrApp {
             .exact_size(theme::TOOLBAR_HEIGHT)
             .frame(panel_frame)
             .show_inside(ui, |ui| toolbar::render(ui, self));
+
+        // Row 2 + 3: persistent adjustments toolbar. Only renders when the
+        // batch has an item to bind to. Shift+H hides it (Phase 2.8 wires
+        // up the hotkey; the field is already on PrunrApp).
+        let show_adjustments = !self.adjustments_hidden
+            && !self.batch_items.is_empty();
+        if show_adjustments {
+            let line_mode = self.batch_items
+                .get(self.selected_batch_index.min(self.batch_items.len() - 1))
+                .map(|i| i.settings.line_mode)
+                .unwrap_or(prunr_core::LineMode::Off);
+            let height = if line_mode == prunr_core::LineMode::Off {
+                chip::CHIP_HEIGHT + theme::SPACE_SM * 2.0
+            } else {
+                chip::CHIP_HEIGHT * 2.0 + theme::SPACE_XS + theme::SPACE_SM * 2.0
+            };
+            let mut bg_changed = false;
+            egui::Panel::top("adjustments_toolbar")
+                .exact_size(height)
+                .frame(panel_frame)
+                .show_inside(ui, |ui| {
+                    let idx = self.selected_batch_index.min(self.batch_items.len() - 1);
+                    let app_settings_ref: &crate::gui::settings::Settings = &self.settings;
+                    let item_settings_ref: &mut crate::gui::item_settings::ItemSettings =
+                        &mut self.batch_items[idx].settings;
+                    let change = adjustments_toolbar::render(
+                        ui,
+                        item_settings_ref,
+                        app_settings_ref,
+                    );
+                    if change.any() {
+                        // Mask / edge tweaks won't visibly change the result until
+                        // the user clicks Process (live preview lands in Phase 3).
+                        // bg is the exception — it's applied at display-time, so
+                        // the result texture needs rebuilding immediately.
+                        bg_changed = change.bg;
+                    }
+                });
+            if bg_changed {
+                let idx = self.selected_batch_index.min(self.batch_items.len() - 1);
+                self.batch_items[idx].result_texture = None;
+                self.batch_items[idx].result_tex_pending = false;
+                self.result_texture = None;
+                self.result_switch_id += 1;
+                self.sync_selected_batch_textures(ui.ctx());
+            }
+        }
 
         egui::Panel::bottom("statusbar")
             .exact_size(theme::STATUS_BAR_HEIGHT)
