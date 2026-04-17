@@ -83,11 +83,15 @@ pub fn render(
                 );
             } else {
                 for name in &names {
+                    let is_default = settings.default_preset.as_deref() == Some(name.as_str());
                     ui.horizontal(|ui| {
                         let label_text = RichText::new(name)
                             .color(theme::TEXT_PRIMARY)
                             .size(theme::FONT_SIZE_BODY);
-                        if ui.selectable_label(false, label_text).clicked() {
+                        if ui.selectable_label(false, label_text)
+                            .on_hover_text("Click to apply these settings to the current image")
+                            .clicked()
+                        {
                             if let Some(values) = settings.presets.get(name) {
                                 *current_item = *values;
                                 applied = true;
@@ -96,6 +100,7 @@ pub fn render(
                         ui.with_layout(
                             egui::Layout::right_to_left(egui::Align::Center),
                             |ui| {
+                                // Right-to-left: delete (rightmost), then default-toggle.
                                 let delete_btn = ui.small_button(
                                     RichText::new(ICON_DELETE.codepoint)
                                         .size(theme::FONT_SIZE_MONO)
@@ -103,9 +108,37 @@ pub fn render(
                                 );
                                 if delete_btn.on_hover_text("Delete preset").clicked() {
                                     settings.presets.remove(name);
-                                    // If this was the default, clear the pointer.
-                                    if settings.default_preset.as_deref() == Some(name.as_str()) {
+                                    if is_default {
                                         settings.default_preset = None;
+                                    }
+                                }
+                                // Star icon toggles "is default preset for new images."
+                                // Filled when default, outlined otherwise.
+                                let star_icon = if is_default {
+                                    ICON_STAR.codepoint
+                                } else {
+                                    ICON_STAR_OUTLINE.codepoint
+                                };
+                                let star_color = if is_default {
+                                    theme::ACCENT
+                                } else {
+                                    theme::TEXT_SECONDARY
+                                };
+                                let star_tooltip = if is_default {
+                                    "Default for new images — click to clear"
+                                } else {
+                                    "Set as default for new images"
+                                };
+                                let star_btn = ui.small_button(
+                                    RichText::new(star_icon)
+                                        .size(theme::FONT_SIZE_MONO)
+                                        .color(star_color),
+                                );
+                                if star_btn.on_hover_text(star_tooltip).clicked() {
+                                    if is_default {
+                                        settings.default_preset = None;
+                                    } else {
+                                        settings.default_preset = Some(name.clone());
                                     }
                                 }
                             },
@@ -160,6 +193,12 @@ pub fn render(
             .memory(|m| m.data.get_temp::<String>(save_dialog_id).unwrap_or_default());
         let mut commit = false;
         let mut cancel = false;
+        let mut overwrite_target: Option<String> = None;
+
+        // Snapshot existing preset names so we can offer overwrite targets
+        // without holding a borrow on `settings.presets` across the dialog.
+        let existing_names = sorted_preset_names(settings);
+
         egui::Window::new("Save preset")
             .collapsible(false)
             .resizable(false)
@@ -170,6 +209,17 @@ pub fn render(
                 if text_resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                     commit = true;
                 }
+                // Warn if the typed name would overwrite an existing preset.
+                let trimmed = name_buf.trim();
+                if !trimmed.is_empty() && existing_names.iter().any(|n| n == trimmed) {
+                    ui.label(
+                        RichText::new(format!("⚠ Will overwrite \"{trimmed}\""))
+                            .color(theme::DESTRUCTIVE)
+                            .size(theme::FONT_SIZE_MONO),
+                    );
+                }
+
+                ui.add_space(theme::SPACE_SM);
                 ui.horizontal(|ui| {
                     if ui.button("Save").clicked() {
                         commit = true;
@@ -178,23 +228,47 @@ pub fn render(
                         cancel = true;
                     }
                 });
+
+                // Show existing presets as one-click overwrite targets. Clicking
+                // one saves the CURRENT item.settings under that existing name.
+                if !existing_names.is_empty() {
+                    ui.add_space(theme::SPACE_SM);
+                    ui.separator();
+                    ui.add_space(theme::SPACE_XS);
+                    ui.label(
+                        RichText::new("Or overwrite an existing preset:")
+                            .color(theme::TEXT_HINT)
+                            .size(theme::FONT_SIZE_MONO),
+                    );
+                    ui.add_space(theme::SPACE_XS);
+                    for name in &existing_names {
+                        let btn = ui.button(
+                            RichText::new(format!("{}  {name}", ICON_BOOKMARK.codepoint))
+                                .color(theme::TEXT_PRIMARY)
+                                .size(theme::FONT_SIZE_BODY),
+                        );
+                        if btn.on_hover_text("Overwrite with current settings").clicked() {
+                            overwrite_target = Some(name.clone());
+                        }
+                    }
+                }
             });
 
-        if commit && !name_buf.trim().is_empty() {
-            settings
-                .presets
-                .insert(name_buf.trim().to_string(), *current_item);
+        let close_dialog = || {
             ui.ctx().memory_mut(|m| {
-                m.data
-                    .insert_temp::<bool>(save_dialog_id.with("open"), false);
+                m.data.insert_temp::<bool>(save_dialog_id.with("open"), false);
                 m.data.remove::<String>(save_dialog_id);
             });
+        };
+
+        if let Some(target) = overwrite_target {
+            settings.presets.insert(target, *current_item);
+            close_dialog();
+        } else if commit && !name_buf.trim().is_empty() {
+            settings.presets.insert(name_buf.trim().to_string(), *current_item);
+            close_dialog();
         } else if cancel {
-            ui.ctx().memory_mut(|m| {
-                m.data
-                    .insert_temp::<bool>(save_dialog_id.with("open"), false);
-                m.data.remove::<String>(save_dialog_id);
-            });
+            close_dialog();
         } else {
             // Persist typed text across frames while the dialog is open.
             ui.ctx()
