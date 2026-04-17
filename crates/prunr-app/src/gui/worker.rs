@@ -207,7 +207,7 @@ fn run_batch_with_retry(
                         // Throttled repaint
                         ctx.request_repaint();
                     }
-                    SubprocessEvent::ImageDone { item_id, result_path, width, height, active_provider } => {
+                    SubprocessEvent::ImageDone { item_id, result_path, width, height, active_provider, tensor_cache_path, .. } => {
                         // Read result from temp file and clean up
                         let result = std::fs::read(&result_path)
                             .ok()
@@ -218,6 +218,10 @@ fn run_batch_with_retry(
                             })
                             .ok_or_else(|| "Failed to read result from subprocess".to_string());
                         let _ = std::fs::remove_file(&result_path);
+                        // Clean up tensor cache file if present (Phase E will store it instead)
+                        if let Some(ref p) = tensor_cache_path {
+                            let _ = std::fs::remove_file(p);
+                        }
 
                         completed.insert(item_id);
                         sent_items.retain(|(id, _, _)| *id != item_id);

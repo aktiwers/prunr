@@ -320,6 +320,11 @@ pub fn run_worker() -> ! {
                                         width: w,
                                         height: h,
                                         active_provider: pr.active_provider,
+                                        // Tensor cache not yet implemented for full pipeline
+                                        // (will be added when parent-side routing uses infer_only)
+                                        tensor_cache_path: None,
+                                        tensor_cache_height: None,
+                                        tensor_cache_width: None,
                                     });
                                 }
                                 Err(e) => {
@@ -356,6 +361,85 @@ pub fn run_worker() -> ! {
                         if p.starts_with(ipc.as_ref()) {
                             let _ = std::fs::remove_file(p);
                         }
+                    }
+
+                    in_flight.fetch_sub(1, Ordering::AcqRel);
+                });
+            }
+
+            SubprocessCommand::RePostProcess {
+                item_id, tensor_path, tensor_height, tensor_width,
+                model, original_image_path, mask: repost_mask,
+            } => {
+                let evt_tx = evt_tx.clone();
+                let in_flight = in_flight.clone();
+                let sem = semaphore.clone();
+                let ipc = ipc_dir.clone();
+
+                in_flight.fetch_add(1, Ordering::AcqRel);
+                pool.spawn(move || {
+                    // Conservative weight — postprocess upscales tensor to original resolution
+                    // which allocates significant memory for Lanczos3 + guided filter
+                    let _sem_guard = sem.acquire(10);
+
+                    // Read tensor from temp file
+                    let tensor_result = (|| -> Result<image::RgbaImage, String> {
+                        let raw_bytes = std::fs::read(&tensor_path)
+                            .map_err(|e| format!("Failed to read tensor: {e}"))?;
+                        let floats: Vec<f32> = raw_bytes.chunks_exact(4)
+                            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                            .collect();
+                        let th = tensor_height as usize;
+                        let tw = tensor_width as usize;
+                        let tensor = ndarray::ArrayView4::from_shape(
+                            (1, 1, th, tw), &floats
+                        ).map_err(|e| format!("Tensor reshape failed: {e}"))?;
+
+                        // Read original image
+                        let img_bytes = std::fs::read(&original_image_path)
+                            .map_err(|e| format!("Failed to read original: {e}"))?;
+                        let original = prunr_core::load_image_from_bytes(&img_bytes)
+                            .map_err(|e| format!("Failed to decode original: {e}"))?;
+
+                        // Tier 2: tensor_to_mask + apply_mask
+                        let mask_img = prunr_core::tensor_to_mask(tensor, &original, &repost_mask, model);
+                        Ok(prunr_core::apply_mask(&original, &mask_img))
+                    })();
+
+                    match tensor_result {
+                        Ok(rgba) => {
+                            let (w, h) = (rgba.width(), rgba.height());
+                            let result_path = ipc.join(format!("result_{item_id}.raw"));
+                            if std::fs::write(&result_path, rgba.as_raw()).is_ok() {
+                                let _ = evt_tx.send(SubprocessEvent::ImageDone {
+                                    item_id,
+                                    result_path,
+                                    width: w,
+                                    height: h,
+                                    active_provider: String::new(),
+                                    tensor_cache_path: None,
+                                    tensor_cache_height: None,
+                                    tensor_cache_width: None,
+                                });
+                            }
+                        }
+                        Err(e) => {
+                            let _ = evt_tx.send(SubprocessEvent::ImageError { item_id, error: e });
+                        }
+                    }
+
+                    // Clean up temp files
+                    if tensor_path.starts_with(ipc.as_ref()) {
+                        let _ = std::fs::remove_file(&tensor_path);
+                    }
+                    if original_image_path.starts_with(ipc.as_ref()) {
+                        let _ = std::fs::remove_file(&original_image_path);
+                    }
+
+                    if let Some(stats) = memory_stats::memory_stats() {
+                        let _ = evt_tx.send(SubprocessEvent::RssUpdate {
+                            rss_bytes: stats.physical_mem as u64,
+                        });
                     }
 
                     in_flight.fetch_sub(1, Ordering::AcqRel);
