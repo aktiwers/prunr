@@ -10,12 +10,41 @@ use crate::subprocess::manager::SubprocessManager;
 /// A single image item to be processed (Tier 1: full pipeline).
 pub type WorkItem = (u64, Arc<Vec<u8>>, Option<Arc<image::RgbaImage>>);
 
-/// Cached tensor data passed from subprocess → parent for future Tier 2 reruns.
+/// Raw tensor data from subprocess → parent (IPC transfer format).
 pub struct TensorCache {
     pub data: Vec<f32>,
     pub height: u32,
     pub width: u32,
     pub model: ModelKind,
+}
+
+/// Zstd-compressed tensor stored in BatchItem. Trades ~1ms decompress for ~3-4x RAM savings.
+pub struct CompressedTensor {
+    compressed: Vec<u8>,
+    pub height: u32,
+    pub width: u32,
+    pub model: ModelKind,
+}
+
+impl CompressedTensor {
+    /// Compress raw tensor data with zstd (level 1 for speed).
+    /// Returns None if compression fails (caller skips caching).
+    pub fn from_raw(tc: TensorCache) -> Option<Self> {
+        let raw_bytes = crate::subprocess::ipc::f32s_to_le_bytes(&tc.data);
+        let compressed = zstd::encode_all(raw_bytes.as_slice(), 1).ok()?;
+        Some(Self { compressed, height: tc.height, width: tc.width, model: tc.model })
+    }
+
+    /// Decompress to raw f32 tensor data for Tier 2 dispatch.
+    pub fn decompress(&self) -> Option<Vec<f32>> {
+        let bytes = zstd::decode_all(self.compressed.as_slice()).ok()?;
+        Some(crate::subprocess::ipc::le_bytes_to_f32s(&bytes))
+    }
+
+    /// Compressed size in bytes (for budget tracking).
+    pub fn compressed_size(&self) -> usize {
+        self.compressed.len()
+    }
 }
 
 /// A Tier 2 re-postprocess item: cached tensor + original image bytes.

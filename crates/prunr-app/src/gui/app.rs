@@ -85,6 +85,36 @@ impl Default for HistorySlot {
     }
 }
 
+/// A history entry: image data + the recipe that produced it.
+pub(crate) struct HistoryEntry {
+    pub(crate) slot: HistorySlot,
+    pub(crate) recipe: Option<prunr_core::ProcessingRecipe>,
+}
+
+impl HistoryEntry {
+    fn new(rgba: Arc<image::RgbaImage>, recipe: Option<prunr_core::ProcessingRecipe>) -> Self {
+        Self { slot: HistorySlot::compress(rgba), recipe }
+    }
+
+    fn cleanup(&self) {
+        self.slot.cleanup();
+    }
+
+    fn demote_to_disk(self, item_id: u64, seq: usize) -> Self {
+        Self { slot: self.slot.demote_to_disk(item_id, seq), recipe: self.recipe }
+    }
+
+    fn into_parts(self) -> (HistorySlot, Option<prunr_core::ProcessingRecipe>) {
+        (self.slot, self.recipe)
+    }
+}
+
+impl Default for HistoryEntry {
+    fn default() -> Self {
+        Self { slot: HistorySlot::default(), recipe: None }
+    }
+}
+
 /// Where an image's raw bytes live — file path (lazy) or in-memory (clipboard/paste).
 #[derive(Clone)]
 pub(crate) enum ImageSource {
@@ -130,16 +160,16 @@ pub(crate) struct BatchItem {
     pub result_tex_pending: bool,
     /// True while a background thread is decoding source bytes to RGBA.
     pub decode_pending: bool,
-    /// History stack for undo: previous results, newest last.
-    pub history: VecDeque<HistorySlot>,
+    /// History stack for undo: previous results + their recipes, newest last.
+    pub history: VecDeque<HistoryEntry>,
     /// Redo stack: results undone, newest last. Cleared on new processing.
-    pub redo_stack: VecDeque<HistorySlot>,
+    pub redo_stack: VecDeque<HistoryEntry>,
     pub status: BatchStatus,
     pub selected: bool,
     /// The recipe that produced the current result_rgba. None if never processed.
     pub applied_recipe: Option<prunr_core::ProcessingRecipe>,
-    /// Cached raw tensor from Tier 1 inference (for Tier 2 mask reruns).
-    pub cached_tensor: Option<super::worker::TensorCache>,
+    /// Compressed cached tensor from Tier 1 inference (for Tier 2 mask reruns).
+    pub cached_tensor: Option<super::worker::CompressedTensor>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -613,25 +643,29 @@ impl PrunrApp {
         for item in &mut self.batch_items {
             let target = if has_selected { item.selected } else { Some(item.id) == current_id };
             if target && item.status == BatchStatus::Done {
-                // Lazy history seed: if history is empty (source wasn't decoded at
-                // process time), just push current result to redo and revert to Pending.
+                let current_recipe = item.applied_recipe.take();
                 if item.history.is_empty() {
                     if let Some(current) = item.result_rgba.take() {
-                        item.redo_stack.push_back(HistorySlot::compress(current));
+                        item.redo_stack.push_back(HistoryEntry::new(current, current_recipe));
                     }
                     item.status = BatchStatus::Pending;
                     item.result_rgba = None;
                 } else {
-                    // Normal undo: push current to redo, pop from history
                     if let Some(current) = item.result_rgba.take() {
-                        item.redo_stack.push_back(HistorySlot::compress(current));
+                        item.redo_stack.push_back(HistoryEntry::new(current, current_recipe));
                     }
-                    item.result_rgba = item.history.pop_back().and_then(|slot| slot.into_rgba());
+                    if let Some(entry) = item.history.pop_back() {
+                        let (slot, recipe) = entry.into_parts();
+                        item.applied_recipe = recipe;
+                        item.result_rgba = slot.into_rgba();
+                    }
                     if item.result_rgba.is_none() || item.history.is_empty() {
                         item.status = BatchStatus::Pending;
                         item.result_rgba = None;
+                        item.applied_recipe = None;
                     }
                 }
+                item.cached_tensor = None;
                 item.result_texture = None;
                 item.thumb_texture = None;
                 item.thumb_pending = false;
@@ -662,12 +696,16 @@ impl PrunrApp {
         for item in &mut self.batch_items {
             let target = if has_selected { item.selected } else { Some(item.id) == current_id };
             if target && !item.redo_stack.is_empty() {
-                // Push current result to history (compress to RAM)
+                let current_recipe = item.applied_recipe.take();
                 if let Some(current) = item.result_rgba.take() {
-                    item.history.push_back(HistorySlot::compress(current));
+                    item.history.push_back(HistoryEntry::new(current, current_recipe));
                 }
-                // Pop most recent from redo stack (materialise from disk if needed)
-                item.result_rgba = item.redo_stack.pop_back().and_then(|slot| slot.into_rgba());
+                if let Some(entry) = item.redo_stack.pop_back() {
+                    let (slot, recipe) = entry.into_parts();
+                    item.applied_recipe = recipe;
+                    item.result_rgba = slot.into_rgba();
+                }
+                item.cached_tensor = None;
                 item.status = BatchStatus::Done;
                 item.result_texture = None;
                 item.thumb_texture = None;
@@ -776,7 +814,8 @@ impl PrunrApp {
             if !process_ids.contains(&item.id) { continue; }
             if item.history.is_empty() && item.redo_stack.is_empty() {
                 if let Some(ref src_rgba) = item.source_rgba {
-                    item.history.push_back(HistorySlot::compress(src_rgba.clone()));
+                    // Seed with original — no recipe (it's the unprocessed source)
+                    item.history.push_back(HistoryEntry::new(src_rgba.clone(), None));
                 }
             }
             if item.status == BatchStatus::Done {
@@ -784,15 +823,15 @@ impl PrunrApp {
                     if chain_mode {
                         item.result_rgba = Some(current.clone());
                     }
-                    item.history.push_back(HistorySlot::compress(current));
+                    item.history.push_back(HistoryEntry::new(current, item.applied_recipe.clone()));
                     while item.history.len() > max_depth {
                         if let Some(old) = item.history.pop_front() {
                             old.cleanup();
                         }
                     }
                 }
-                for slot in item.redo_stack.drain(..) {
-                    slot.cleanup();
+                for entry in item.redo_stack.drain(..) {
+                    entry.cleanup();
                 }
                 if !chain_mode {
                     item.result_texture = None;
@@ -810,11 +849,12 @@ impl PrunrApp {
         for item in &mut self.batch_items {
             if !tier2_ids.contains(&item.id) { continue; }
             if let Some(ref ct) = item.cached_tensor {
-                match item.source.load_bytes() {
-                    Ok(bytes) => {
+                let tensor_data = ct.decompress();
+                match (tensor_data, item.source.load_bytes()) {
+                    (Some(data), Ok(bytes)) => {
                         tier2_work.push(super::worker::Tier2WorkItem {
                             item_id: item.id,
-                            tensor_data: ct.data.clone(),
+                            tensor_data: data,
                             tensor_height: ct.height,
                             tensor_width: ct.width,
                             model: ct.model,
@@ -823,7 +863,11 @@ impl PrunrApp {
                         });
                         item.status = BatchStatus::Processing;
                     }
-                    Err(e) => {
+                    (None, _) => {
+                        item.status = BatchStatus::Error("Tensor cache corrupt".into());
+                        item.cached_tensor = None;
+                    }
+                    (_, Err(e)) => {
                         item.status = BatchStatus::Error(format!("Failed to load: {e}"));
                         item.cached_tensor = None;
                     }
@@ -1280,11 +1324,11 @@ impl PrunrApp {
         if idx >= self.batch_items.len() { return; }
         let item = self.batch_items.remove(idx);
         // Clean up any on-disk history/redo entries for this item
-        for slot in item.history {
-            slot.cleanup();
+        for entry in item.history {
+            entry.cleanup();
         }
-        for slot in item.redo_stack {
-            slot.cleanup();
+        for entry in item.redo_stack {
+            entry.cleanup();
         }
         self.sync_after_batch_change();
     }
@@ -1326,11 +1370,44 @@ impl PrunrApp {
     fn demote_history_to_disk(&mut self) {
         for item in &mut self.batch_items {
             let mut seq = 0usize;
-            for slot in item.history.iter_mut().chain(item.redo_stack.iter_mut()) {
-                if matches!(slot, HistorySlot::Compressed(_)) {
-                    *slot = std::mem::take(slot).demote_to_disk(item.id, seq);
+            for entry in item.history.iter_mut().chain(item.redo_stack.iter_mut()) {
+                if matches!(entry.slot, HistorySlot::Compressed(_)) {
+                    *entry = std::mem::take(entry).demote_to_disk(item.id, seq);
                 }
                 seq += 1;
+            }
+        }
+    }
+
+    /// 512 MB budget for compressed tensor caches across all items.
+    const TENSOR_BUDGET: usize = 512 * 1024 * 1024;
+
+    /// Evict tensor caches from oldest-loaded items until under budget.
+    /// Iterates front-to-back (oldest first) to preserve recently-processed items.
+    fn enforce_tensor_budget(&mut self) {
+        let total: usize = self.batch_items.iter()
+            .filter_map(|i| i.cached_tensor.as_ref())
+            .map(|ct| ct.compressed_size())
+            .sum();
+        if total <= Self::TENSOR_BUDGET { return; }
+        let selected_id = self.selected_item().map(|b| b.id);
+        let mut remaining = total;
+        for item in &mut self.batch_items {
+            if remaining <= Self::TENSOR_BUDGET { break; }
+            // Preserve the selected item's tensor (most likely to be reused)
+            if Some(item.id) == selected_id { continue; }
+            if let Some(ct) = item.cached_tensor.take() {
+                remaining -= ct.compressed_size();
+            }
+        }
+    }
+
+    /// Evict all tensor caches except the selected item (called under memory pressure).
+    fn evict_all_tensors(&mut self) {
+        let selected_id = self.selected_item().map(|b| b.id);
+        for item in &mut self.batch_items {
+            if Some(item.id) != selected_id {
+                item.cached_tensor = None;
             }
         }
     }
@@ -1344,13 +1421,12 @@ impl PrunrApp {
         for (i, item) in self.batch_items.iter_mut().enumerate() {
             if i != idx && item.result_rgba.is_some() && item.status == BatchStatus::Done {
                 if let Some(rgba) = item.result_rgba.take() {
-                    // Replace the latest history entry with the current result
-                    // (don't push — the result IS the latest state)
+                    let recipe = item.applied_recipe.clone();
                     if let Some(back) = item.history.back_mut() {
                         back.cleanup();
-                        *back = HistorySlot::compress(rgba);
+                        *back = HistoryEntry::new(rgba, recipe);
                     } else {
-                        item.history.push_back(HistorySlot::compress(rgba));
+                        item.history.push_back(HistoryEntry::new(rgba, recipe));
                     }
                 }
                 item.result_texture = None;
@@ -1362,22 +1438,24 @@ impl PrunrApp {
         if self.batch_items[idx].status == BatchStatus::Done
             && self.batch_items[idx].result_rgba.is_none()
         {
-            if let Some(slot) = self.batch_items[idx].history.back_mut() {
+            if let Some(entry) = self.batch_items[idx].history.back() {
                 // Peek at the latest history entry — decompress without removing
-                let restored = match slot {
+                let restored = match &entry.slot {
                     HistorySlot::InMemory(rgba) => Some(rgba.clone()),
-                    HistorySlot::Compressed(entry) => {
-                        super::history_disk::decompress_from_ram(entry)
+                    HistorySlot::Compressed(ce) => {
+                        super::history_disk::decompress_from_ram(ce)
                             .ok()
                             .map(|img| Arc::new(img))
                     }
-                    HistorySlot::OnDisk(entry) => {
-                        super::history_disk::read_history(entry)
+                    HistorySlot::OnDisk(de) => {
+                        super::history_disk::read_history(de)
                             .ok()
                             .map(|img| Arc::new(img))
                     }
                 };
+                let recipe = entry.recipe.clone();
                 self.batch_items[idx].result_rgba = restored;
+                self.batch_items[idx].applied_recipe = recipe;
             }
         }
 
@@ -1521,9 +1599,10 @@ impl PrunrApp {
                             Ok(pr) => {
                                 item.result_rgba = Some(Arc::new(pr.rgba_image));
                                 item.status = BatchStatus::Done;
-                                // Store recipe + tensor cache for future tier routing
+                                // Store recipe + compressed tensor for future tier routing
                                 item.applied_recipe = Some(recipe_snapshot);
-                                item.cached_tensor = tensor_cache;
+                                item.cached_tensor = tensor_cache
+                                    .and_then(super::worker::CompressedTensor::from_raw);
                                 // Evict decoded source to free RAM — lazy decode
                                 // will re-decode on demand if the user navigates back.
                                 if !is_selected {
@@ -1567,9 +1646,13 @@ impl PrunrApp {
                     // Memory admission: release budget and admit next items
                     self.admission_release_and_admit(item_id);
 
-                    // Under memory pressure: demote Tier 2 (compressed RAM) history to Tier 3 (disk)
+                    // Enforce tensor cache budget (evict oldest when over 512 MB)
+                    self.enforce_tensor_budget();
+
+                    // Under memory pressure: demote history to disk + evict tensors
                     if super::memory::under_memory_pressure() {
                         self.demote_history_to_disk();
+                        self.evict_all_tensors();
                     }
                 }
                 WorkerResult::BatchComplete => {
