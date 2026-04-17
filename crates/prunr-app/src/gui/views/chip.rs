@@ -13,6 +13,7 @@
 //! so callers can invalidate textures or kick off live preview (Phase 3).
 
 use egui::{Color32, RichText, Response, Ui};
+use egui::widgets::color_picker::{color_picker_color32, Alpha};
 use egui_material_icons::icons::*;
 
 use crate::gui::theme;
@@ -25,6 +26,25 @@ const CHIP_PADDING_X: f32 = 8.0;
 
 /// Popover width — wide enough for slider + value + reset.
 const POPOVER_WIDTH: f32 = 260.0;
+
+/// Return value of every chip function. Callers aggregate these into a
+/// `ToolbarChange` and use them to decide whether a live-preview dispatch
+/// should debounce or fire immediately.
+///
+/// - `changed` — the underlying value was edited this frame.
+/// - `commit` — the change is "settled" (slider released, checkbox toggled,
+///   color picked) and a pending preview should flush now instead of waiting
+///   for debounce. Sliders mid-drag set `changed=true, commit=false` so a
+///   flurry of drag events debounces into a single rerun.
+#[derive(Default, Debug, Clone, Copy)]
+pub struct ChipChange {
+    pub changed: bool,
+    pub commit: bool,
+}
+
+impl ChipChange {
+    pub fn any(&self) -> bool { self.changed || self.commit }
+}
 
 /// Shared chip-button renderer. Returns the response for popup wiring.
 /// `accent` = true draws an accent border (non-default value indicator).
@@ -61,6 +81,16 @@ fn reset_button(ui: &mut Ui, tooltip: &str) -> bool {
     .clicked()
 }
 
+/// Dimmed description text inside a chip popover.
+fn hint(ui: &mut Ui, text: &str) {
+    if text.is_empty() { return; }
+    ui.label(
+        RichText::new(text)
+            .color(theme::TEXT_HINT)
+            .size(theme::FONT_SIZE_MONO),
+    );
+}
+
 /// Wire a popup to a chip button. Handles toggle-on-click.
 /// Uses the legacy `popup_below_widget` API; egui's newer `Popup::` builder
 /// is a future cleanup. Deprecation is isolated to this helper.
@@ -88,22 +118,24 @@ fn popup_for(
 
 /// Continuous f32 chip (gamma, edge_shift, line_strength, ...).
 /// `format` converts the value to display text (e.g. "1.20", "2px erode").
+/// `tooltip` shows on hover over the chip button and inside the popover.
 pub fn chip_f32(
     ui: &mut Ui,
     id_salt: &str,
     icon: &str,
     label: &str,
+    tooltip: &str,
     value: &mut f32,
     range: std::ops::RangeInclusive<f32>,
     default_value: f32,
     format: impl Fn(f32) -> String,
-) -> bool {
+) -> ChipChange {
     let pop_id = egui::Id::new(("chip_f32", id_salt));
     let accent = (*value - default_value).abs() > f32::EPSILON;
     let display = format(*value);
-    let resp = chip_button(ui, icon, &display, accent);
+    let resp = chip_button(ui, icon, &display, accent).on_hover_text(tooltip);
 
-    let mut changed = false;
+    let mut out = ChipChange::default();
     popup_for(ui, pop_id, &resp, |ui| {
         ui.label(RichText::new(label).strong().color(theme::TEXT_PRIMARY));
         ui.add_space(theme::SPACE_XS);
@@ -113,15 +145,22 @@ pub fn chip_f32(
                 .fixed_decimals(2),
         );
         if slider.changed() {
-            changed = true;
+            out.changed = true;
         }
+        // Commit now when the interaction settles (drag released, keyboard
+        // change, click-jump) so live preview can flush instead of debounce.
+        if slider.drag_stopped() || (slider.changed() && !slider.dragged()) {
+            out.commit = true;
+        }
+        hint(ui, tooltip);
         ui.add_space(theme::SPACE_XS);
-        if reset_button(ui, "Reset to app default") {
+        if reset_button(ui, "Reset to factory default") {
             *value = default_value;
-            changed = true;
+            out.changed = true;
+            out.commit = true;
         }
     });
-    changed
+    out
 }
 
 /// Optional f32 chip (threshold). Toggle enables/disables; slider sets the value.
@@ -130,27 +169,29 @@ pub fn chip_option_f32(
     id_salt: &str,
     icon: &str,
     label: &str,
+    tooltip: &str,
     value: &mut Option<f32>,
     range: std::ops::RangeInclusive<f32>,
     default_when_enabled: f32,
     off_label: &str,
     format: impl Fn(f32) -> String,
-) -> bool {
+) -> ChipChange {
     let pop_id = egui::Id::new(("chip_option_f32", id_salt));
     let accent = value.is_some();
     let display = match value {
         Some(v) => format(*v),
         None => off_label.to_string(),
     };
-    let resp = chip_button(ui, icon, &display, accent);
+    let resp = chip_button(ui, icon, &display, accent).on_hover_text(tooltip);
 
-    let mut changed = false;
+    let mut out = ChipChange::default();
     popup_for(ui, pop_id, &resp, |ui| {
         ui.label(RichText::new(label).strong().color(theme::TEXT_PRIMARY));
         ui.add_space(theme::SPACE_XS);
         let mut enabled = value.is_some();
         if ui.checkbox(&mut enabled, "Enabled").changed() {
-            changed = true;
+            out.changed = true;
+            out.commit = true; // toggle settles immediately
             *value = if enabled { Some(default_when_enabled) } else { None };
         }
         if let Some(v) = value.as_mut() {
@@ -160,17 +201,20 @@ pub fn chip_option_f32(
                     .show_value(true)
                     .fixed_decimals(2),
             );
-            if slider.changed() {
-                changed = true;
+            if slider.changed() { out.changed = true; }
+            if slider.drag_stopped() || (slider.changed() && !slider.dragged()) {
+                out.commit = true;
             }
         }
+        hint(ui, tooltip);
         ui.add_space(theme::SPACE_XS);
-        if reset_button(ui, "Reset to app default") {
+        if reset_button(ui, "Disable") {
             *value = None;
-            changed = true;
+            out.changed = true;
+            out.commit = true;
         }
     });
-    changed
+    out
 }
 
 /// Bool chip (refine_edges). Simple on/off toggle; popover shows the toggle + label.
@@ -179,74 +223,81 @@ pub fn chip_bool(
     id_salt: &str,
     icon: &str,
     label: &str,
+    tooltip: &str,
     value: &mut bool,
-    hint: Option<&str>,
-) -> bool {
+) -> ChipChange {
     let pop_id = egui::Id::new(("chip_bool", id_salt));
     let display = if *value { "On" } else { "Off" };
-    let resp = chip_button(ui, icon, display, *value);
+    let resp = chip_button(ui, icon, display, *value).on_hover_text(tooltip);
 
-    let mut changed = false;
+    let mut out = ChipChange::default();
     popup_for(ui, pop_id, &resp, |ui| {
         ui.label(RichText::new(label).strong().color(theme::TEXT_PRIMARY));
         ui.add_space(theme::SPACE_XS);
         if ui.checkbox(value, label).changed() {
-            changed = true;
+            out.changed = true;
+            out.commit = true; // toggle always commits
         }
-        if let Some(h) = hint {
-            ui.add_space(theme::SPACE_XS);
-            ui.label(
-                RichText::new(h)
-                    .color(theme::TEXT_HINT)
-                    .size(theme::FONT_SIZE_MONO),
-            );
-        }
+        hint(ui, tooltip);
     });
-    changed
+    out
 }
 
-/// Optional RGBA chip (bg color). Toggle enables; color picker sets the value.
-/// Displays "None" when disabled, a color swatch preview when enabled.
+/// Optional RGBA chip (bg color). Toggle enables; inline color picker sets the value.
+/// Displays "None" when disabled, a swatch preview when enabled.
+///
+/// Uses `color_picker_color32` (inline picker) instead of `color_edit_button`
+/// (button that opens a nested popup). egui's nested popup close behavior
+/// mis-handles the chip's `CloseOnClickOutside` when the color picker popup
+/// opens outside the chip popover's rect — click on the color palette was
+/// seen as "outside" and closed the chip popover. Inline picker avoids the
+/// whole class of bug.
 pub fn chip_option_rgba(
     ui: &mut Ui,
     id_salt: &str,
     icon: &str,
     label: &str,
+    tooltip: &str,
     value: &mut Option<[u8; 4]>,
     default_when_enabled: [u8; 4],
-) -> bool {
+) -> ChipChange {
     let pop_id = egui::Id::new(("chip_option_rgba", id_salt));
     let accent = value.is_some();
     let display = match value {
         Some(_) => "Set".to_string(),
         None => "None".to_string(),
     };
-    let resp = chip_button(ui, icon, &display, accent);
+    let resp = chip_button(ui, icon, &display, accent).on_hover_text(tooltip);
 
-    let mut changed = false;
+    let mut out = ChipChange::default();
     popup_for(ui, pop_id, &resp, |ui| {
         ui.label(RichText::new(label).strong().color(theme::TEXT_PRIMARY));
         ui.add_space(theme::SPACE_XS);
         let mut enabled = value.is_some();
         if ui.checkbox(&mut enabled, "Enabled").changed() {
-            changed = true;
+            out.changed = true;
+            out.commit = true;
             *value = if enabled { Some(default_when_enabled) } else { None };
         }
         if let Some(rgba) = value.as_mut() {
             ui.add_space(theme::SPACE_XS);
-            let mut c = *rgba;
-            if ui.color_edit_button_srgba_unmultiplied(&mut c).changed() {
-                *rgba = c;
-                changed = true;
+            let mut c = Color32::from_rgba_unmultiplied(rgba[0], rgba[1], rgba[2], rgba[3]);
+            if color_picker_color32(ui, &mut c, Alpha::OnlyBlend) {
+                let [r, g, b, a] = c.to_srgba_unmultiplied();
+                *rgba = [r, g, b, a];
+                out.changed = true;
+                out.commit = true;
             }
         }
+        hint(ui, tooltip);
         ui.add_space(theme::SPACE_XS);
-        if reset_button(ui, "Clear color") {
+        if reset_button(ui, "Clear background color") {
             *value = None;
-            changed = true;
+            out.changed = true;
+            out.commit = true;
         }
     });
-    changed
+    out
 }
 
 /// Optional RGB chip (solid_line_color). Same pattern as chip_option_rgba but 3-channel.
@@ -255,41 +306,46 @@ pub fn chip_option_rgb(
     id_salt: &str,
     icon: &str,
     label: &str,
+    tooltip: &str,
     value: &mut Option<[u8; 3]>,
     default_when_enabled: [u8; 3],
-) -> bool {
+) -> ChipChange {
     let pop_id = egui::Id::new(("chip_option_rgb", id_salt));
     let accent = value.is_some();
     let display = match value {
         Some(_) => "Set".to_string(),
         None => "Original".to_string(),
     };
-    let resp = chip_button(ui, icon, &display, accent);
+    let resp = chip_button(ui, icon, &display, accent).on_hover_text(tooltip);
 
-    let mut changed = false;
+    let mut out = ChipChange::default();
     popup_for(ui, pop_id, &resp, |ui| {
         ui.label(RichText::new(label).strong().color(theme::TEXT_PRIMARY));
         ui.add_space(theme::SPACE_XS);
         let mut enabled = value.is_some();
         if ui.checkbox(&mut enabled, "Override").changed() {
-            changed = true;
+            out.changed = true;
+            out.commit = true;
             *value = if enabled { Some(default_when_enabled) } else { None };
         }
         if let Some(rgb) = value.as_mut() {
             ui.add_space(theme::SPACE_XS);
-            let mut c = *rgb;
-            if ui.color_edit_button_srgb(&mut c).changed() {
-                *rgb = c;
-                changed = true;
+            let mut c = Color32::from_rgb(rgb[0], rgb[1], rgb[2]);
+            if color_picker_color32(ui, &mut c, Alpha::Opaque) {
+                *rgb = [c.r(), c.g(), c.b()];
+                out.changed = true;
+                out.commit = true;
             }
         }
+        hint(ui, tooltip);
         ui.add_space(theme::SPACE_XS);
-        if reset_button(ui, "Use original colors") {
+        if reset_button(ui, "Use original line colors") {
             *value = None;
-            changed = true;
+            out.changed = true;
+            out.commit = true;
         }
     });
-    changed
+    out
 }
 
 #[cfg(test)]
