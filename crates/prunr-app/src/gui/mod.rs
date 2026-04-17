@@ -11,6 +11,7 @@ pub mod background_io;
 pub mod drag_export;
 pub mod history_disk;
 pub mod memory;
+pub mod live_preview;
 
 #[cfg(test)]
 mod tests;
