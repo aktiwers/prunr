@@ -7,20 +7,46 @@ use crate::gui::settings::LineMode;
 use crate::subprocess::protocol::SubprocessEvent;
 use crate::subprocess::manager::SubprocessManager;
 
-/// A single image item to be processed.
+/// A single image item to be processed (Tier 1: full pipeline).
 pub type WorkItem = (u64, Arc<Vec<u8>>, Option<Arc<image::RgbaImage>>);
+
+/// Cached tensor data passed from subprocess → parent for future Tier 2 reruns.
+pub struct TensorCache {
+    pub data: Vec<f32>,
+    pub height: u32,
+    pub width: u32,
+    pub model: ModelKind,
+}
+
+/// A Tier 2 re-postprocess item: cached tensor + original image bytes.
+pub struct Tier2WorkItem {
+    pub item_id: u64,
+    pub tensor_data: Vec<f32>,
+    pub tensor_height: u32,
+    pub tensor_width: u32,
+    pub model: ModelKind,
+    pub original_bytes: Arc<Vec<u8>>,
+    pub mask: MaskSettings,
+}
+
+/// Bundled processing settings — avoids passing 6+ individual fields.
+pub struct ProcessingConfig {
+    pub model: ModelKind,
+    pub jobs: usize,
+    pub mask: MaskSettings,
+    pub force_cpu: bool,
+    pub line_mode: LineMode,
+    pub line_strength: f32,
+    pub solid_line_color: Option<[u8; 3]>,
+}
 
 pub enum WorkerMessage {
     BatchProcess {
         items: Vec<WorkItem>,
-        model: ModelKind,
-        jobs: usize,
+        /// Tier 2 items: re-postprocess from cached tensor (skip inference).
+        tier2_items: Vec<Tier2WorkItem>,
+        config: ProcessingConfig,
         cancel: Arc<AtomicBool>,
-        mask: MaskSettings,
-        force_cpu: bool,
-        line_mode: LineMode,
-        line_strength: f32,
-        solid_line_color: Option<[u8; 3]>,
         /// Channel for additional items admitted by the memory controller.
         additional_items_rx: Option<mpsc::Receiver<WorkItem>>,
     },
@@ -35,6 +61,8 @@ pub enum WorkerResult {
     BatchItemDone {
         item_id: u64,
         result: Result<ProcessResult, String>,
+        /// Cached tensor from Tier 1 inference (for future Tier 2 mask reruns).
+        tensor_cache: Option<TensorCache>,
     },
     BatchComplete,
     Cancelled,
@@ -59,13 +87,11 @@ pub fn spawn_worker(
             while let Ok(msg) = msg_rx.recv() {
                 match msg {
                     WorkerMessage::BatchProcess {
-                        items, model, jobs, cancel, mask, force_cpu,
-                        line_mode, line_strength, solid_line_color,
+                        items, tier2_items, config, cancel,
                         additional_items_rx,
                     } => {
                         run_batch_with_retry(
-                            items, model, jobs, &cancel, mask, force_cpu,
-                            line_mode, line_strength, solid_line_color,
+                            items, tier2_items, config, &cancel,
                             additional_items_rx,
                             &res_tx, &ctx,
                         );
@@ -83,26 +109,25 @@ pub fn spawn_worker(
 /// If even 1 job crashes, marks remaining items as "insufficient memory".
 fn run_batch_with_retry(
     initial_items: Vec<WorkItem>,
-    model: ModelKind,
-    initial_jobs: usize,
+    initial_tier2: Vec<Tier2WorkItem>,
+    config: ProcessingConfig,
     cancel: &Arc<AtomicBool>,
-    mask: MaskSettings,
-    force_cpu: bool,
-    line_mode: LineMode,
-    line_strength: f32,
-    solid_line_color: Option<[u8; 3]>,
     additional_items_rx: Option<mpsc::Receiver<WorkItem>>,
     res_tx: &mpsc::Sender<WorkerResult>,
     ctx: &egui::Context,
 ) {
+    let ProcessingConfig { model, jobs: initial_jobs, mask, force_cpu, line_mode, line_strength, solid_line_color } = config;
     let mut pending: VecDeque<WorkItem> = initial_items.into();
+    let mut pending_tier2: VecDeque<Tier2WorkItem> = initial_tier2.into();
     let mut completed: std::collections::HashSet<u64> = std::collections::HashSet::new();
     let mut max_jobs = initial_jobs;
 
     // Report loading status
-    if let Some((first_id, _, _)) = pending.front() {
+    let first_id = pending.front().map(|(id, _, _)| *id)
+        .or_else(|| pending_tier2.front().map(|t| t.item_id));
+    if let Some(fid) = first_id {
         let _ = res_tx.send(WorkerResult::BatchProgress {
-            item_id: *first_id,
+            item_id: fid,
             stage: ProgressStage::LoadingModel,
             pct: 0.0,
         });
@@ -116,7 +141,7 @@ fn run_batch_with_retry(
             return;
         }
 
-        if pending.is_empty() {
+        if pending.is_empty() && pending_tier2.is_empty() {
             // Check if more items coming from admission controller
             if let Some(ref rx) = additional_items_rx {
                 match rx.try_recv() {
@@ -140,9 +165,10 @@ fn run_batch_with_retry(
             }
         }
 
-        // Spawn subprocess — cap engines at the number of pending items
-        // (no point creating 4 engines for 2 images)
-        let effective_jobs = max_jobs.min(pending.len());
+        // Spawn subprocess — cap engines at the number of Tier 1 items
+        // (Tier 2 doesn't use engines; no point creating 4 for 2 images)
+        let total_pending = pending.len() + pending_tier2.len();
+        let effective_jobs = max_jobs.min(pending.len().max(1));
         let (mut sub, _active_provider) = match SubprocessManager::spawn(
             model, effective_jobs, mask, force_cpu, line_mode,
             line_strength, solid_line_color,
@@ -154,6 +180,14 @@ fn run_batch_with_retry(
                     let _ = res_tx.send(WorkerResult::BatchItemDone {
                         item_id: *id,
                         result: Err(e.clone()),
+                        tensor_cache: None,
+                    });
+                }
+                for t2 in &pending_tier2 {
+                    let _ = res_tx.send(WorkerResult::BatchItemDone {
+                        item_id: t2.item_id,
+                        result: Err(e.clone()),
+                        tensor_cache: None,
                     });
                 }
                 let _ = res_tx.send(WorkerResult::BatchComplete);
@@ -164,16 +198,23 @@ fn run_batch_with_retry(
 
         // Track items sent to this subprocess (for re-queue on crash)
         let mut sent_items: Vec<WorkItem> = Vec::new();
+        let mut sent_tier2_ids: Vec<u64> = Vec::new();
 
-        // Send initial burst of items (up to max_jobs)
-        let burst = max_jobs.min(pending.len());
-        for _ in 0..burst {
-            if let Some(item) = pending.pop_front() {
+        // Send initial burst: Tier 2 items first (faster), then Tier 1
+        let burst = max_jobs.min(total_pending);
+        let mut sent_count = 0;
+        while sent_count < burst {
+            if try_send_tier2(&mut sub, &mut pending_tier2, &mut sent_tier2_ids) {
+                sent_count += 1;
+            } else if let Some(item) = pending.pop_front() {
                 if send_item_to_sub(&mut sub, &item).is_err() {
                     pending.push_front(item);
                     break;
                 }
                 sent_items.push(item);
+                sent_count += 1;
+            } else {
+                break;
             }
         }
 
@@ -207,7 +248,10 @@ fn run_batch_with_retry(
                         // Throttled repaint
                         ctx.request_repaint();
                     }
-                    SubprocessEvent::ImageDone { item_id, result_path, width, height, active_provider, tensor_cache_path, .. } => {
+                    SubprocessEvent::ImageDone {
+                        item_id, result_path, width, height, active_provider,
+                        tensor_cache_path, tensor_cache_height, tensor_cache_width,
+                    } => {
                         // Read result from temp file and clean up
                         let result = std::fs::read(&result_path)
                             .ok()
@@ -218,20 +262,28 @@ fn run_batch_with_retry(
                             })
                             .ok_or_else(|| "Failed to read result from subprocess".to_string());
                         let _ = std::fs::remove_file(&result_path);
-                        // Clean up tensor cache file if present (Phase E will store it instead)
-                        if let Some(ref p) = tensor_cache_path {
-                            let _ = std::fs::remove_file(p);
-                        }
+
+                        // Read tensor cache file into memory before cleanup
+                        let tensor_cache = tensor_cache_path.as_ref().and_then(|tp| {
+                            let th = tensor_cache_height?;
+                            let tw = tensor_cache_width?;
+                            let raw_bytes = std::fs::read(tp).ok()?;
+                            let _ = std::fs::remove_file(tp);
+                            let data = crate::subprocess::ipc::le_bytes_to_f32s(&raw_bytes);
+                            Some(TensorCache { data, height: th, width: tw, model })
+                        });
 
                         completed.insert(item_id);
                         sent_items.retain(|(id, _, _)| *id != item_id);
+                        sent_tier2_ids.retain(|id| *id != item_id);
 
-                        let _ = res_tx.send(WorkerResult::BatchItemDone { item_id, result });
+                        let _ = res_tx.send(WorkerResult::BatchItemDone { item_id, result, tensor_cache });
                         ctx.request_repaint();
 
                         // Admit next item if RSS allows
-                        if !sub.should_pause_admission() {
-                            // Try from pending queue first
+                        if !sub.should_pause_admission()
+                            && !try_send_tier2(&mut sub, &mut pending_tier2, &mut sent_tier2_ids)
+                        {
                             if let Some(item) = pending.pop_front() {
                                 if send_item_to_sub(&mut sub, &item).is_ok() {
                                     sent_items.push(item);
@@ -239,7 +291,6 @@ fn run_batch_with_retry(
                                     pending.push_front(item);
                                 }
                             } else if let Some(ref rx) = additional_items_rx {
-                                // Try streaming admission channel
                                 if let Ok(item) = rx.try_recv() {
                                     if send_item_to_sub(&mut sub, &item).is_ok() {
                                         sent_items.push(item);
@@ -253,9 +304,11 @@ fn run_batch_with_retry(
                     SubprocessEvent::ImageError { item_id, error } => {
                         completed.insert(item_id);
                         sent_items.retain(|(id, _, _)| *id != item_id);
+                        sent_tier2_ids.retain(|id| *id != item_id);
                         let _ = res_tx.send(WorkerResult::BatchItemDone {
                             item_id,
                             result: Err(error),
+                            tensor_cache: None,
                         });
                         ctx.request_repaint();
                     }
@@ -270,7 +323,8 @@ fn run_batch_with_retry(
             }
 
             // Check if all items done and no more coming
-            if sent_items.is_empty() && pending.is_empty() {
+            let all_sent_empty = sent_items.is_empty() && sent_tier2_ids.is_empty();
+            if all_sent_empty && pending.is_empty() && pending_tier2.is_empty() {
                 if let Some(ref rx) = additional_items_rx {
                     match rx.try_recv() {
                         Ok(item) => pending.push_back(item),
@@ -292,10 +346,23 @@ fn run_batch_with_retry(
         if subprocess_crashed {
             let crash_reason = sub.crash_reason();
 
-            // Re-queue ALL in-flight items (not just the one that crashed)
+            // Re-queue in-flight Tier 1 items (not just the one that crashed)
             let re_queued: Vec<WorkItem> = sent_items.into_iter()
                 .filter(|(id, _, _)| !completed.contains(id))
                 .collect();
+            // Tier 2 in-flight items can't be re-queued (tensor data was consumed
+            // by send_repostprocess). Report them as errors so they don't stay
+            // stuck in Processing. The parent clears cached_tensor for errored
+            // items, so next "Process" will use FullPipeline.
+            for &tid in &sent_tier2_ids {
+                if !completed.contains(&tid) {
+                    let _ = res_tx.send(WorkerResult::BatchItemDone {
+                        item_id: tid,
+                        result: Err(crash_reason.clone()),
+                        tensor_cache: None,
+                    });
+                }
+            }
             let re_count = re_queued.len();
 
             // Also drain any items from additional_items_rx into pending
@@ -322,8 +389,16 @@ fn run_batch_with_retry(
                         let _ = res_tx.send(WorkerResult::BatchItemDone {
                             item_id: *id,
                             result: Err(err_msg.clone()),
+                            tensor_cache: None,
                         });
                     }
+                }
+                for t2 in &pending_tier2 {
+                    let _ = res_tx.send(WorkerResult::BatchItemDone {
+                        item_id: t2.item_id,
+                        result: Err(err_msg.clone()),
+                        tensor_cache: None,
+                    });
                 }
                 let _ = res_tx.send(WorkerResult::BatchComplete);
                 ctx.request_repaint();
@@ -345,7 +420,7 @@ fn run_batch_with_retry(
         }
 
         // Subprocess finished normally — check if batch is done
-        if pending.is_empty() {
+        if pending.is_empty() && pending_tier2.is_empty() {
             if let Some(ref rx) = additional_items_rx {
                 match rx.try_recv() {
                     Err(mpsc::TryRecvError::Disconnected) => {
@@ -377,4 +452,24 @@ fn send_item_to_sub(sub: &mut SubprocessManager, item: &WorkItem) -> Result<(), 
         (rgba.as_ref(), rgba.width(), rgba.height())
     });
     sub.send_image(*item_id, bytes, chain_input)
+}
+
+/// Try to send a Tier 2 item to the subprocess. Returns true if sent.
+fn try_send_tier2(
+    sub: &mut SubprocessManager,
+    pending_tier2: &mut VecDeque<Tier2WorkItem>,
+    sent_tier2_ids: &mut Vec<u64>,
+) -> bool {
+    if let Some(t2) = pending_tier2.pop_front() {
+        let tid = t2.item_id;
+        if sub.send_repostprocess(
+            t2.item_id, &t2.tensor_data, t2.tensor_height, t2.tensor_width,
+            t2.model, &t2.original_bytes, t2.mask.clone(),
+        ).is_ok() {
+            sent_tier2_ids.push(tid);
+            return true;
+        }
+        pending_tier2.push_front(t2);
+    }
+    false
 }
