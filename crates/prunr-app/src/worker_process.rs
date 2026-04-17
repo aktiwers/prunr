@@ -23,8 +23,9 @@ use prunr_app::gui::settings::LineMode;
 /// Small images run in parallel; large images throttle automatically.
 /// Total capacity is set based on available RAM at worker startup.
 struct WeightedSemaphore {
-    state: Mutex<usize>,     // available units
+    state: Mutex<usize>,
     available: std::sync::Condvar,
+    total_units: usize,
 }
 
 impl WeightedSemaphore {
@@ -32,32 +33,33 @@ impl WeightedSemaphore {
         Self {
             state: Mutex::new(total_units),
             available: std::sync::Condvar::new(),
+            total_units,
         }
     }
 
-    fn capacity(&self) -> usize {
-        // Read the initial capacity (total units = what release restores to)
-        // For safety, return a reasonable max
-        64
-    }
-
-    /// Acquire `weight` units, blocking until enough are available.
-    /// Weight is capped to capacity to prevent deadlock on oversized images.
-    fn acquire(&self, weight: usize) -> usize {
-        let capped = weight.min(self.capacity());
+    /// Acquire units, returning a RAII guard that releases on drop (panic-safe).
+    fn acquire(self: &Arc<Self>, weight: usize) -> SemaphoreGuard {
+        let capped = weight.min(self.total_units);
         let mut units = self.state.lock().unwrap();
         while *units < capped {
             units = self.available.wait(units).unwrap();
         }
         *units -= capped;
-        capped // return actual acquired weight for matching release
+        SemaphoreGuard { sem: self.clone(), acquired: capped }
     }
+}
 
-    /// Release `weight` units and notify waiting threads.
-    fn release(&self, weight: usize) {
-        let mut units = self.state.lock().unwrap();
-        *units += weight;
-        self.available.notify_all();
+/// RAII guard: releases semaphore units on drop (including panics).
+struct SemaphoreGuard {
+    sem: Arc<WeightedSemaphore>,
+    acquired: usize,
+}
+
+impl Drop for SemaphoreGuard {
+    fn drop(&mut self) {
+        let mut units = self.sem.state.lock().unwrap();
+        *units += self.acquired;
+        self.sem.available.notify_all();
     }
 }
 
@@ -242,8 +244,9 @@ pub fn run_worker() -> ! {
 
                     // Weighted semaphore: acquire pixel units proportional to image size.
                     // Small images run in parallel; large images throttle automatically.
+                    // Guard releases on drop (panic-safe).
                     let weight = pixel_weight(&img_bytes);
-                    let acquired = sem.acquire(weight);
+                    let _sem_guard = sem.acquire(weight);
                     let result = match line_mode {
                         LineMode::LinesOnly => {
                             let decoded;
@@ -340,8 +343,7 @@ pub fn run_worker() -> ! {
                         }
                     }
 
-                    // Release semaphore weight (allows next image to proceed)
-                    sem.release(acquired);
+                    // Semaphore released automatically by _sem_guard drop
 
                     // Report RSS after each image
                     if let Some(stats) = memory_stats::memory_stats() {
