@@ -88,14 +88,14 @@ pub fn postprocess(raw: ArrayView4<f32>, original: &DynamicImage, mask_settings:
         mask = guided_filter_alpha(&rgba, &mask, GUIDED_RADIUS, GUIDED_EPSILON);
     }
 
-    // Compose: write alpha from mask (parallel for large images)
+    // Compose: write alpha from mask.
+    // Sequential — runs inside a rayon worker thread in the subprocess,
+    // so nested parallelism risks deadlock. The loop is memory-bound anyway.
     let mask_raw = mask.as_raw();
     let out_raw = rgba.as_mut();
-    out_raw.par_chunks_mut(4)
-        .zip(mask_raw.par_iter())
-        .for_each(|(pixel, &alpha)| {
-            pixel[3] = alpha;
-        });
+    for (pixel, &alpha) in out_raw.chunks_mut(4).zip(mask_raw.iter()) {
+        pixel[3] = alpha;
+    }
     rgba
 }
 
