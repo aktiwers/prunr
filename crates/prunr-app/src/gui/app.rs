@@ -993,6 +993,16 @@ impl PrunrApp {
         }
     }
 
+    /// bg_color to apply during display-texture compositing, or None if disabled.
+    /// Lets the tex-prep worker clone + blend off the UI thread.
+    fn bg_for_display(&self) -> Option<[u8; 3]> {
+        if self.settings.apply_bg_color {
+            Some([self.settings.bg_color[0], self.settings.bg_color[1], self.settings.bg_color[2]])
+        } else {
+            None
+        }
+    }
+
     pub fn handle_save_selected(&mut self) {
         let selected: Vec<_> = self.batch_items.iter()
             .filter(|i| i.selected && i.status == BatchStatus::Done && i.result_rgba.is_some())
@@ -1487,7 +1497,7 @@ impl PrunrApp {
                 self.batch_items[idx].source_tex_pending = true;
                 Self::spawn_tex_prep(
                     rgba, item_id, format!("source_{item_id}"), false,
-                    self.bg_io.tex_prep_tx.clone(), ctx.clone(),
+                    None, self.bg_io.tex_prep_tx.clone(), ctx.clone(),
                 );
             }
         }
@@ -1498,10 +1508,9 @@ impl PrunrApp {
             if let Some(rgba) = self.batch_items[idx].result_rgba.clone() {
                 let switch = self.result_switch_id;
                 self.batch_items[idx].result_tex_pending = true;
-                let display_rgba = self.apply_bg_for_export(&rgba);
                 Self::spawn_tex_prep(
-                    display_rgba, item_id, format!("result_{item_id}_{switch}"), true,
-                    self.bg_io.tex_prep_tx.clone(), ctx.clone(),
+                    rgba, item_id, format!("result_{item_id}_{switch}"), true,
+                    self.bg_for_display(), self.bg_io.tex_prep_tx.clone(), ctx.clone(),
                 );
             }
         }
@@ -1550,15 +1559,28 @@ impl PrunrApp {
         item_id: u64,
         name: String,
         is_result: bool,
+        bg_apply: Option<[u8; 3]>,
         tx: mpsc::Sender<(u64, String, egui::ColorImage, bool)>,
         ctx: egui::Context,
     ) {
         std::thread::spawn(move || {
             let (w, h) = (rgba.width(), rgba.height());
-            let ci = egui::ColorImage::from_rgba_unmultiplied(
-                [w as usize, h as usize],
-                rgba.as_flat_samples().as_slice(),
-            );
+            let ci = if let Some(bg) = bg_apply {
+                // Background compositing runs off the UI thread: clone the
+                // RGBA (~48 MB for 4000×3000) and the per-pixel blend both
+                // happen here instead of blocking the canvas.
+                let mut composed = (*rgba).clone();
+                prunr_core::apply_background_color(&mut composed, bg);
+                egui::ColorImage::from_rgba_unmultiplied(
+                    [w as usize, h as usize],
+                    composed.as_flat_samples().as_slice(),
+                )
+            } else {
+                egui::ColorImage::from_rgba_unmultiplied(
+                    [w as usize, h as usize],
+                    rgba.as_flat_samples().as_slice(),
+                )
+            };
             let _ = tx.send((item_id, name, ci, is_result));
             ctx.request_repaint();
         });
