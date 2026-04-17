@@ -102,17 +102,35 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
         // Both edit the currently-selected BatchItem's ItemSettings. Skip when
         // no item is selected (e.g. empty batch).
         if let Some(idx) = active_item_index(app) {
-            // Split borrow: grab &mut to the item's settings + &mut to app.settings
-            // separately. Rust's disjoint-field borrow rule allows this.
-            let settings_ref: &mut crate::gui::settings::Settings = &mut app.settings;
-            let item_settings_ref: &mut crate::gui::item_settings::ItemSettings =
-                &mut app.batch_items[idx].settings;
-            ui.add_enabled_ui(!is_processing, |ui| {
-                let _lines_changed = super::lines_popover::render(ui, item_settings_ref);
-                let _preset_applied = super::preset_dropdown::render(ui, settings_ref, item_settings_ref);
-                // Texture invalidation wiring lands in P2.9 — for now the changes
-                // land in item.settings and will reflect on next Process.
-            });
+            let (mut lines_changed, mut preset_applied) = (false, false);
+            {
+                // Split borrow: &mut to the item + &mut to app.settings
+                // separately. Rust's disjoint-field borrow rule allows this.
+                let settings_ref: &mut crate::gui::settings::Settings = &mut app.settings;
+                let item_settings_ref: &mut crate::gui::item_settings::ItemSettings =
+                    &mut app.batch_items[idx].settings;
+                ui.add_enabled_ui(!is_processing, |ui| {
+                    lines_changed = super::lines_popover::render(ui, item_settings_ref);
+                    preset_applied = super::preset_dropdown::render(
+                        ui, settings_ref, item_settings_ref,
+                    );
+                });
+            }
+            // Line-mode change invalidates the DexiNed edge cache: the tensor
+            // was computed for a DIFFERENT input (EdgesOnly sees full scene,
+            // SubjectOutline sees subject-on-white). Re-running is required.
+            // Conservative: invalidate on any change; matches Phase 5 clearing
+            // model on preset apply below.
+            if lines_changed {
+                app.batch_items[idx].cached_edge_tensor = None;
+            }
+            // Preset apply changes many settings at once. Invalidate both
+            // caches since any of gamma/threshold/edge_shift/line_strength/
+            // line_mode may have flipped. User re-processes to repopulate.
+            if preset_applied {
+                app.batch_items[idx].cached_tensor = None;
+                app.batch_items[idx].cached_edge_tensor = None;
+            }
         }
 
         // ── Right group: action buttons ──
