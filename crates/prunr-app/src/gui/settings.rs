@@ -16,7 +16,11 @@ pub const PRUNR_PRESET: &str = "Prunr";
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Settings {
     pub model: SettingsModel,
-    pub auto_remove_on_import: bool,
+    /// Start processing each image automatically on import. Field is
+    /// `#[serde(alias = ...)]` for compatibility with pre-v2 settings
+    /// files that used the old `auto_remove_on_import` name.
+    #[serde(alias = "auto_remove_on_import")]
+    pub auto_process_on_import: bool,
     pub parallel_jobs: usize,
     /// Maximum number of undo steps per image.
     pub history_depth: usize,
@@ -247,7 +251,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             model: SettingsModel::Silueta,
-            auto_remove_on_import: false,
+            auto_process_on_import: false,
             parallel_jobs: (num_cpus::get() / 2).max(1),
             history_depth: 10,
             chain_mode: false,

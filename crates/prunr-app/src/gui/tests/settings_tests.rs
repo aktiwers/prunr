@@ -8,9 +8,9 @@ fn settings_default_model_is_silueta() {
 }
 
 #[test]
-fn settings_default_auto_remove_is_false() {
+fn settings_default_auto_process_is_false() {
     let s = Settings::default();
-    assert!(!s.auto_remove_on_import);
+    assert!(!s.auto_process_on_import);
 }
 
 #[test]
