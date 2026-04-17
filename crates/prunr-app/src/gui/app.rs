@@ -2282,8 +2282,11 @@ impl eframe::App for PrunrApp {
                     bg_changed = toolbar_change.bg;
                 });
             // Register mask / edge tweaks with the live preview dispatcher.
-            // The dispatcher debounces (300ms) and runs Tier 2 on rayon threads;
-            // results flow back to us via drain_results (see end of ui()).
+            // `mark_tweak` debounces; `flush` fires immediately when a chip
+            // signals the edit has settled (slider released, toggle flipped,
+            // color picked). toolbar_change.commit is OR-ed across all chips
+            // touched this frame, so toggles + color picks always commit now
+            // and mid-slider-drag changes debounce.
             if self.settings.live_preview && (toolbar_change.mask || toolbar_change.edge) {
                 let idx = self.selected_batch_index.min(self.batch_items.len() - 1);
                 let item_id = self.batch_items[idx].id;
@@ -2293,10 +2296,16 @@ impl eframe::App for PrunrApp {
                     crate::gui::live_preview::PreviewKind::Edge
                 };
                 self.live_preview.mark_tweak(item_id, kind);
-                // Wake up after the debounce elapses so tick() can dispatch.
-                ui.ctx().request_repaint_after(
-                    crate::gui::live_preview::DEBOUNCE,
-                );
+                if toolbar_change.commit {
+                    self.live_preview.flush(item_id);
+                    // Immediate dispatch — no debounce wait needed.
+                    ui.ctx().request_repaint();
+                } else {
+                    // Wake up after the debounce elapses so tick() can dispatch.
+                    ui.ctx().request_repaint_after(
+                        crate::gui::live_preview::DEBOUNCE,
+                    );
+                }
             }
             if bg_changed {
                 let idx = self.selected_batch_index.min(self.batch_items.len() - 1);

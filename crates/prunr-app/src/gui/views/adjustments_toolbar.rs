@@ -17,14 +17,19 @@ use crate::gui::theme;
 use crate::gui::views::chip;
 use prunr_core::LineMode;
 
-/// Summary of what a toolbar render cycle changed. Phase 2 callers use `any`
-/// to trigger texture rebuilds; Phase 3 will branch on `mask`, `edge`, `bg`
-/// to dispatch the correct Tier 2 path.
+/// Summary of what a toolbar render cycle changed.
+///
+/// - `mask` / `edge` / `bg` — which tier was affected. Live preview dispatches
+///   to Tier 2 (mask/edge) or Tier 3 (bg) accordingly.
+/// - `commit` — the edit has settled (slider released, checkbox toggled,
+///   color picked). When true the caller should FLUSH any pending live
+///   preview instead of debouncing further.
 #[derive(Default, Debug, Clone, Copy)]
 pub struct ToolbarChange {
     pub mask: bool,
     pub edge: bool,
     pub bg: bool,
+    pub commit: bool,
 }
 
 impl ToolbarChange {
@@ -73,82 +78,73 @@ pub fn render(
 
     ui.spacing_mut().item_spacing.x = theme::SPACE_SM;
 
+    // Aggregate helper: lift a chip's ChipChange into the aggregate ToolbarChange
+    // by the tier it affects. Keeps per-chip call sites a single if-block.
+    let aggregate = |ch: chip::ChipChange, tier: Tier, acc: &mut ToolbarChange| {
+        if ch.changed {
+            match tier {
+                Tier::Mask => acc.mask = true,
+                Tier::Edge => acc.edge = true,
+                Tier::Bg   => acc.bg   = true,
+            }
+        }
+        if ch.commit { acc.commit = true; }
+    };
+
     // ── Row 2: mask + composite ──
     ui.horizontal(|ui| {
         // Mask knobs are irrelevant when segmentation is skipped (EdgesOnly mode).
         let mask_active = item_settings.line_mode != LineMode::EdgesOnly;
         ui.add_enabled_ui(mask_active, |ui| {
-            if chip::chip_f32(
-                ui,
-                "gamma",
-                "γ",
-                "Gamma",
+            aggregate(chip::chip_f32(
+                ui, "gamma", "γ", "Gamma",
+                "How hard the mask cuts. >1 removes more aggressively, <1 is gentler on fine edges.",
                 &mut item_settings.gamma,
-                0.2..=3.0,
-                defaults.gamma(),
+                0.2..=3.0, defaults.gamma(),
                 |v| format!("{v:.2}"),
-            ) {
-                change.mask = true;
-            }
-            if chip::chip_option_f32(
-                ui,
-                "threshold",
-                &ICON_BOLT.codepoint.to_string(),
-                "Hard threshold",
+            ), Tier::Mask, &mut change);
+
+            aggregate(chip::chip_option_f32(
+                ui, "threshold",
+                &ICON_BOLT.codepoint.to_string(), "Hard threshold",
+                "Snap the mask to fully opaque or fully transparent at this cutoff. Soft = smooth alpha, on = crisp silhouette.",
                 &mut item_settings.threshold,
-                0.01..=0.99,
-                defaults.threshold_value,
-                "Soft",
+                0.01..=0.99, defaults.threshold_value, "Soft",
                 |v| format!("{v:.2}"),
-            ) {
-                change.mask = true;
-            }
-            if chip::chip_f32(
-                ui,
-                "edge_shift",
-                &ICON_SWAP_HORIZ.codepoint.to_string(),
-                "Edge shift",
+            ), Tier::Mask, &mut change);
+
+            aggregate(chip::chip_f32(
+                ui, "edge_shift",
+                &ICON_SWAP_HORIZ.codepoint.to_string(), "Edge shift",
+                "Shrink or grow the mask outline. Positive = erode (trim fringe pixels), negative = dilate (keep more edge detail).",
                 &mut item_settings.edge_shift,
-                -5.0..=5.0,
-                defaults.edge_shift(),
+                -5.0..=5.0, defaults.edge_shift(),
                 |v| {
-                    if v > 0.5 {
-                        format!("erode {v:.0}px")
-                    } else if v < -0.5 {
-                        format!("dilate {:.0}px", v.abs())
-                    } else {
-                        "0px".to_string()
-                    }
+                    if v > 0.5 { format!("erode {v:.0}px") }
+                    else if v < -0.5 { format!("dilate {:.0}px", v.abs()) }
+                    else { "0px".to_string() }
                 },
-            ) {
-                change.mask = true;
-            }
-            if chip::chip_bool(
-                ui,
-                "refine_edges",
-                &ICON_AUTO_FIX_HIGH.codepoint.to_string(),
-                "Refine edges",
+            ), Tier::Mask, &mut change);
+
+            aggregate(chip::chip_bool(
+                ui, "refine_edges",
+                &ICON_AUTO_FIX_HIGH.codepoint.to_string(), "Refine edges",
+                "Use the original image's colors to sharpen the mask around fine detail like hair or leaves. Runs a guided filter — slower but higher quality.",
                 &mut item_settings.refine_edges,
-                Some("Uses the original image colors to sharpen the mask around fine detail."),
-            ) {
-                change.mask = true;
-            }
+            ), Tier::Mask, &mut change);
         });
 
         // Divider between mask and composite groups.
         ui.separator();
 
         // Background color — a composite concern, always visible (works in all modes).
-        if chip::chip_option_rgba(
-            ui,
-            "bg",
-            &ICON_PALETTE.codepoint.to_string(),
-            "Background color",
+        aggregate(chip::chip_option_rgba(
+            ui, "bg",
+            &ICON_PALETTE.codepoint.to_string(), "Background color",
+            "Fill transparent areas with a solid color. Applied at display time, does not change the saved PNG's transparency.",
             &mut item_settings.bg,
             defaults.bg_value,
-        ) {
-            change.bg = true;
-        }
+        ), Tier::Bg, &mut change);
 
         // Overflow / kebab menu at the end of row 2.
         ui.with_layout(
@@ -163,33 +159,31 @@ pub fn render(
     if item_settings.line_mode != LineMode::Off {
         ui.add_space(theme::SPACE_XS);
         ui.horizontal(|ui| {
-            if chip::chip_f32(
-                ui,
-                "line_strength",
-                &ICON_TUNE.codepoint.to_string(),
-                "Line strength",
+            aggregate(chip::chip_f32(
+                ui, "line_strength",
+                &ICON_TUNE.codepoint.to_string(), "Line strength",
+                "How much edge detail to capture. Lower = bold outlines only, higher = fine texture and subtle edges.",
                 &mut item_settings.line_strength,
-                0.05..=1.0,
-                defaults.line_strength(),
+                0.05..=1.0, defaults.line_strength(),
                 |v| format!("{v:.2}"),
-            ) {
-                change.edge = true;
-            }
-            if chip::chip_option_rgb(
-                ui,
-                "solid_line_color",
-                &ICON_BRUSH.codepoint.to_string(),
-                "Solid line color",
+            ), Tier::Edge, &mut change);
+
+            aggregate(chip::chip_option_rgb(
+                ui, "solid_line_color",
+                &ICON_BRUSH.codepoint.to_string(), "Solid line color",
+                "Paint every edge the same color instead of keeping the original RGB underneath.",
                 &mut item_settings.solid_line_color,
                 defaults.solid_line_color_value,
-            ) {
-                change.edge = true;
-            }
+            ), Tier::Edge, &mut change);
         });
     }
 
     change
 }
+
+/// Which tier a chip's change lifts into on the aggregate ToolbarChange.
+#[derive(Copy, Clone)]
+enum Tier { Mask, Edge, Bg }
 
 /// Row 2 overflow kebab. Houses rarely-used actions that don't deserve a chip slot.
 #[allow(deprecated)]
