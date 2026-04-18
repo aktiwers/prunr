@@ -1296,183 +1296,166 @@ impl PrunrApp {
             let Ok(msg) = self.processor.worker_rx.try_recv() else { break };
             match msg {
                 WorkerResult::BatchProgress { item_id, stage, pct } => {
-                    // Update progress if this is the currently viewed item
-                    let is_selected = self.batch.selected_item()
-                        .map_or(false, |b| b.id == item_id);
-                    if is_selected {
-                        self.status.stage = match stage {
-                            ProgressStage::LoadingModel => {
-                                // Name the models actually being loaded so the
-                                // user can tell "loading Silueta (BG removal)"
-                                // from "loading DexiNed (for lines)" — the
-                                // generic "Loading model..." hid which was in
-                                // flight, which matters when a preset change
-                                // triggers a DexiNed-only reload.
-                                let line_mode = self.batch.items.iter()
-                                    .find(|b| b.id == item_id)
-                                    .map(|b| b.settings.line_mode)
-                                    .unwrap_or(prunr_core::LineMode::Off);
-                                let seg_name = super::views::model_name(self.settings.model);
-                                let models = match line_mode {
-                                    prunr_core::LineMode::Off => seg_name.to_string(),
-                                    prunr_core::LineMode::EdgesOnly => "DexiNed".to_string(),
-                                    prunr_core::LineMode::SubjectOutline => {
-                                        format!("{seg_name} + DexiNed")
-                                    }
-                                };
-                                if cfg!(target_os = "macos") {
-                                    format!("Loading {models} (first run may take a few minutes)...")
-                                } else {
-                                    format!("Loading {models}...")
-                                }
-                            }
-                            ProgressStage::LoadingModelCpuFallback => "GPU warming up \u{2014} using CPU".into(),
-                            ProgressStage::Decode => "Decoding image".into(),
-                            ProgressStage::Resize => "Resizing".into(),
-                            ProgressStage::Normalize => "Normalizing pixels".into(),
-                            ProgressStage::Infer => "Running AI model".into(),
-                            ProgressStage::Postprocess => "Building mask".into(),
-                            ProgressStage::Alpha => "Applying transparency".into(),
-                        };
-                        self.status.pct = pct;
-                    }
+                    self.on_batch_progress(item_id, stage, pct);
                 }
                 WorkerResult::BatchItemDone { item_id, result, tensor_cache, edge_cache } => {
-                    let is_selected = self.batch.selected_item()
-                        .map_or(false, |b| b.id == item_id);
-                    // Fall back to the target item's own settings if dispatch_recipe
-                    // wasn't snapshot (shouldn't happen in normal flow; defensive).
-                    let recipe_snapshot = self.processor.dispatch_recipe.clone().unwrap_or_else(|| {
-                        let model: prunr_core::ModelKind = self.settings.model.into();
-                        let chain = self.settings.chain_mode;
-                        self.batch.items.iter()
-                            .find(|b| b.id == item_id)
-                            .map(|b| b.settings.current_recipe(model, chain))
-                            .unwrap_or_else(|| super::item_settings::ItemSettings::default().current_recipe(model, chain))
-                    });
-                    if let Some(item) = self.batch.items.iter_mut().find(|b| b.id == item_id) {
-                        // Skip results for items that were already cancelled (reset to Pending)
-                        if item.status != BatchStatus::Processing {
-                            continue;
-                        }
-                        match result {
-                            Ok(pr) => {
-                                item.result_rgba = Some(Arc::new(pr.rgba_image));
-                                item.status = BatchStatus::Done;
-                                // Store recipe + compressed tensors for future tier routing.
-                                // Both caches are zstd-compressed on the bridge thread before
-                                // arriving here; storing is a zero-cost move.
-                                item.applied_recipe = Some(recipe_snapshot);
-                                item.cached_tensor = tensor_cache
-                                    .and_then(super::worker::CompressedTensor::from_raw);
-                                item.cached_edge_tensor = edge_cache
-                                    .and_then(super::worker::CompressedTensor::from_raw);
-                                // New tensor → any prior mask was built from stale data.
-                                item.cached_edge_mask = None;
-                                // Evict decoded source to free RAM — lazy decode
-                                // will re-decode on demand if the user navigates back.
-                                if !is_selected {
-                                    item.source_rgba = None;
-                                    item.source_texture = None;
-                                }
-                                item.result_texture = None;
-                                item.thumb_texture = None;
-                                item.thumb_pending = false;
-                                item.source_tex_pending = false;
-                                item.result_tex_pending = false;
-                                // Tier 2 reruns report empty active_provider (no inference).
-                                // Only update backend label on Tier 1 results that actually ran inference.
-                                if !pr.active_provider.is_empty() {
-                                    let backend_changed = self.settings.active_backend != pr.active_provider;
-                                    self.settings.active_backend = pr.active_provider;
-                                    if backend_changed {
-                                        self.settings.parallel_jobs = self.settings.default_jobs();
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                // Clear recipe + tensors so retry runs a fresh Tier 1
-                                // (otherwise resolve_tier might return Skip for an errored item).
-                                item.status = BatchStatus::Error(e);
-                                item.cached_tensor = None;
-                                item.invalidate_edge_cache();
-                                item.applied_recipe = None;
-                            }
-                        }
-                    }
-                    // Update progress info — count only items involved in this batch
-                    let done = self.batch.items.iter().filter(|i| i.status == BatchStatus::Done).count();
-                    let processing = self.batch.items.iter().filter(|i| i.status == BatchStatus::Processing).count();
-                    let errored = self.batch.items.iter().filter(|i| matches!(i.status, BatchStatus::Error(_))).count();
-                    let batch_total = done + processing + errored;
-                    if processing > 0 {
-                        self.status.stage = format!("Processing {done}/{batch_total}");
-                    } else {
-                        self.status.stage = "Finishing up".to_string();
-                    }
-                    self.status.pct = done as f32 / batch_total.max(1) as f32;
-
-                    if is_selected {
-                        self.result_switch_id += 1;
-                        self.sync_selected_batch_textures(ctx);
-                    }
-
-                    // Memory admission: release budget and admit next items
-                    self.admission_release_and_admit(item_id);
-
-                    // Enforce tensor cache budget (evict oldest when over 512 MB)
-                    self.batch.enforce_tensor_budget();
-
-                    // Under memory pressure: demote history to disk + evict tensors
-                    if super::memory::under_memory_pressure() {
-                        self.demote_history_to_disk();
-                        self.batch.evict_all_tensors();
-                    }
+                    self.on_batch_item_done(ctx, item_id, result, tensor_cache, edge_cache);
                 }
-                WorkerResult::BatchComplete => {
-                    self.processor.dispatch_recipe = None;
-                    let done = self.batch.items.iter().filter(|i| i.status == BatchStatus::Done).count();
-                    let failed = self.batch.items.iter().filter(|i| matches!(i.status, BatchStatus::Error(_))).count();
-                    let still_processing = self.batch.items.iter().any(|i| i.status == BatchStatus::Processing);
-                    if failed > 0 {
-                        let msg = format!("{failed} image(s) failed to process");
-                        self.status.text = msg.clone();
-                        self.toasts.warning(msg);
-                    } else if !still_processing {
-                        let msg = format!("All done \u{2014} {done} images processed");
-                        self.status.text = msg.clone();
-                        self.toasts.success(msg);
-                    }
-                    // Update app state to match viewed item (textures already synced by BatchItemDone)
-                    if !still_processing {
-                        let idx = self.batch.selected_index.min(self.batch.items.len().saturating_sub(1));
-                        if let Some(item) = self.batch.items.get(idx) {
-                            match item.status {
-                                BatchStatus::Done => self.state = AppState::Done,
-                                BatchStatus::Processing => self.state = AppState::Processing,
-                                _ => self.state = AppState::Loaded,
-                            }
-                        }
-                    }
-                }
-                WorkerResult::Cancelled => {
-                    self.processor.dispatch_recipe = None;
-                    if self.state == AppState::Processing {
-                        self.state = AppState::Loaded;
-                        self.status.text = "Cancelled".to_string();
-                    }
-                    self.processor.admission = None;
-                    self.processor.admission_tx = None;
-                }
+                WorkerResult::BatchComplete => self.on_batch_complete(),
+                WorkerResult::Cancelled => self.on_cancelled(),
                 WorkerResult::SubprocessRetry { reduced_jobs, re_queued_count } => {
-                    let msg = format!(
-                        "Memory pressure \u{2014} retrying {re_queued_count} images with {reduced_jobs} parallel jobs"
-                    );
-                    self.toasts.warning(msg.clone());
-                    self.status.text = msg;
+                    self.on_subprocess_retry(reduced_jobs, re_queued_count);
                 }
             }
         }
+    }
+
+    fn on_batch_progress(&mut self, item_id: u64, stage: ProgressStage, pct: f32) {
+        if !self.batch.is_selected(item_id) {
+            return;
+        }
+        self.status.stage = match stage {
+            ProgressStage::LoadingModel => self.loading_model_status_text(item_id),
+            ProgressStage::LoadingModelCpuFallback => "GPU warming up \u{2014} using CPU".into(),
+            ProgressStage::Decode => "Decoding image".into(),
+            ProgressStage::Resize => "Resizing".into(),
+            ProgressStage::Normalize => "Normalizing pixels".into(),
+            ProgressStage::Infer => "Running AI model".into(),
+            ProgressStage::Postprocess => "Building mask".into(),
+            ProgressStage::Alpha => "Applying transparency".into(),
+        };
+        self.status.pct = pct;
+    }
+
+    /// Include which models are loading so a DexiNed-only reload is
+    /// distinguishable from a segmentation model load.
+    fn loading_model_status_text(&self, item_id: u64) -> String {
+        let line_mode = self.batch.items.iter()
+            .find(|b| b.id == item_id)
+            .map(|b| b.settings.line_mode)
+            .unwrap_or(prunr_core::LineMode::Off);
+        let seg_name = super::views::model_name(self.settings.model);
+        let models = match line_mode {
+            prunr_core::LineMode::Off => seg_name.to_string(),
+            prunr_core::LineMode::EdgesOnly => "DexiNed".to_string(),
+            prunr_core::LineMode::SubjectOutline => format!("{seg_name} + DexiNed"),
+        };
+        if cfg!(target_os = "macos") {
+            format!("Loading {models} (first run may take a few minutes)...")
+        } else {
+            format!("Loading {models}...")
+        }
+    }
+
+    fn on_batch_item_done(
+        &mut self,
+        ctx: &egui::Context,
+        item_id: u64,
+        result: Result<prunr_core::ProcessResult, String>,
+        tensor_cache: Option<super::worker::TensorCache>,
+        edge_cache: Option<super::worker::TensorCache>,
+    ) {
+        let is_selected = self.batch.is_selected(item_id);
+        let recipe_snapshot = self.resolved_dispatch_recipe(item_id);
+
+        let Some(item) = self.batch.items.iter_mut().find(|b| b.id == item_id) else { return };
+        // Skip results for items that were already cancelled (reset to Pending).
+        if item.status != BatchStatus::Processing {
+            return;
+        }
+        let backend_update = item.apply_tier_result(result, tensor_cache, edge_cache, recipe_snapshot, is_selected);
+
+        if let Some(provider) = backend_update {
+            let backend_changed = self.settings.active_backend != provider;
+            self.settings.active_backend = provider;
+            if backend_changed {
+                self.settings.parallel_jobs = self.settings.default_jobs();
+            }
+        }
+
+        self.refresh_batch_progress_status();
+
+        if is_selected {
+            self.result_switch_id += 1;
+            self.sync_selected_batch_textures(ctx);
+        }
+
+        self.admission_release_and_admit(item_id);
+        self.batch.enforce_tensor_budget();
+
+        if super::memory::under_memory_pressure() {
+            self.demote_history_to_disk();
+            self.batch.evict_all_tensors();
+        }
+    }
+
+    /// Resolve the recipe to stamp on a finished item. Prefers the snapshot
+    /// taken at dispatch time; falls back to the item's own settings if no
+    /// snapshot is available (defensive — shouldn't happen in normal flow).
+    fn resolved_dispatch_recipe(&self, item_id: u64) -> prunr_core::ProcessingRecipe {
+        self.processor.dispatch_recipe.clone().unwrap_or_else(|| {
+            let model: prunr_core::ModelKind = self.settings.model.into();
+            let chain = self.settings.chain_mode;
+            self.batch.items.iter()
+                .find(|b| b.id == item_id)
+                .map(|b| b.settings.current_recipe(model, chain))
+                .unwrap_or_else(|| super::item_settings::ItemSettings::default().current_recipe(model, chain))
+        })
+    }
+
+    fn refresh_batch_progress_status(&mut self) {
+        let counts = self.batch.status_counts();
+        let total = counts.batch_total();
+        self.status.stage = if counts.processing > 0 {
+            format!("Processing {}/{total}", counts.done)
+        } else {
+            "Finishing up".to_string()
+        };
+        self.status.pct = counts.done as f32 / total.max(1) as f32;
+    }
+
+    fn on_batch_complete(&mut self) {
+        self.processor.dispatch_recipe = None;
+        let counts = self.batch.status_counts();
+        let still_processing = counts.processing > 0;
+        if counts.errored > 0 {
+            let msg = format!("{} image(s) failed to process", counts.errored);
+            self.status.text = msg.clone();
+            self.toasts.warning(msg);
+        } else if !still_processing {
+            let msg = format!("All done \u{2014} {} images processed", counts.done);
+            self.status.text = msg.clone();
+            self.toasts.success(msg);
+        }
+        // Update app state to match viewed item (textures already synced by BatchItemDone).
+        if !still_processing {
+            let idx = self.batch.selected_index.min(self.batch.items.len().saturating_sub(1));
+            if let Some(item) = self.batch.items.get(idx) {
+                match item.status {
+                    BatchStatus::Done => self.state = AppState::Done,
+                    BatchStatus::Processing => self.state = AppState::Processing,
+                    _ => self.state = AppState::Loaded,
+                }
+            }
+        }
+    }
+
+    fn on_cancelled(&mut self) {
+        self.processor.dispatch_recipe = None;
+        if self.state == AppState::Processing {
+            self.state = AppState::Loaded;
+            self.status.text = "Cancelled".to_string();
+        }
+        self.processor.admission = None;
+        self.processor.admission_tx = None;
+    }
+
+    fn on_subprocess_retry(&mut self, reduced_jobs: usize, re_queued_count: usize) {
+        let msg = format!(
+            "Memory pressure \u{2014} retrying {re_queued_count} images with {reduced_jobs} parallel jobs"
+        );
+        self.toasts.warning(msg.clone());
+        self.status.text = msg;
     }
 
     fn handle_drag_and_drop(&mut self, ctx: &egui::Context) {
