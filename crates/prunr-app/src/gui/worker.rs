@@ -1,11 +1,33 @@
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
+use std::time::{Duration, Instant};
 
 use prunr_core::{MaskSettings, EdgeSettings, ModelKind, ProgressStage, ProcessResult};
 use crate::gui::settings::LineMode;
 use crate::subprocess::protocol::SubprocessEvent;
 use crate::subprocess::manager::SubprocessManager;
+
+/// Maximum time the subprocess may stay silent with in-flight work before we
+/// treat it as a hung crash. Real batches emit Progress events every few
+/// hundred ms; 60s of silence means something is wrong.
+const HANG_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Graceful-shutdown budget at the end of a batch. Long enough for the child
+/// to drop its model caches cleanly, short enough that a misbehaving worker
+/// doesn't block the UI thread indefinitely.
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// True when the subprocess is alive but hasn't produced events for too long.
+/// Pure so it's unit-testable — the event loop calls this each iteration and
+/// treats `true` as a crash, reusing the existing re-queue + retry path.
+fn is_stalled(
+    last_event_age: Duration,
+    in_flight_count: usize,
+    hang_timeout: Duration,
+) -> bool {
+    in_flight_count > 0 && last_event_age > hang_timeout
+}
 
 /// A single image item to be processed (Tier 1: full pipeline).
 pub type WorkItem = (u64, Arc<Vec<u8>>, Option<Arc<image::RgbaImage>>);
@@ -253,6 +275,8 @@ fn run_batch_with_retry(
         // Event loop: process results, admit more, handle crash
         let mut subprocess_finished = false;
         let mut subprocess_crashed = false;
+        let mut last_event_at = Instant::now();
+        let mut stall_reason_override: Option<String> = None;
 
         while !subprocess_finished {
             if cancel.load(Ordering::Acquire) {
@@ -269,8 +293,23 @@ fn run_batch_with_retry(
                 return;
             }
 
-            // Check if child is still alive
+            // Real-crash check first so a segfault is reported as such rather
+            // than masked by the watchdog firing on the same silence.
             if !sub.is_alive() {
+                subprocess_crashed = true;
+                break;
+            }
+
+            // Hang detection: child is still alive but hasn't produced events
+            // for too long with work in flight. Treat as crash and reuse the
+            // existing retry path; override the reason so the user sees why.
+            let in_flight_count = sent_items.len() + sent_tier2_ids.len();
+            if is_stalled(last_event_at.elapsed(), in_flight_count, HANG_TIMEOUT) {
+                sub.kill();
+                stall_reason_override = Some(format!(
+                    "Worker stopped responding (no events for {}s)",
+                    HANG_TIMEOUT.as_secs()
+                ));
                 subprocess_crashed = true;
                 break;
             }
@@ -278,6 +317,10 @@ fn run_batch_with_retry(
             // Poll events from subprocess
             let events = sub.poll_events();
             for event in events {
+                // Every event — Progress, ImageDone, ImageError, RssUpdate
+                // (which the worker emits per-image-completion, not on a
+                // timer) — is evidence the child is alive and doing work.
+                last_event_at = Instant::now();
                 match event {
                     SubprocessEvent::Progress { item_id, stage, pct } => {
                         let _ = res_tx.send(WorkerResult::BatchProgress { item_id, stage, pct });
@@ -393,7 +436,8 @@ fn run_batch_with_retry(
         }
 
         if subprocess_crashed {
-            let crash_reason = sub.crash_reason();
+            let crash_reason = stall_reason_override
+                .unwrap_or_else(|| sub.crash_reason());
 
             // Re-queue in-flight Tier 1 items (not just the one that crashed)
             let re_queued: Vec<WorkItem> = sent_items.into_iter()
@@ -492,8 +536,45 @@ fn run_batch_with_retry(
             }
         }
 
-        // Graceful shutdown of this subprocess before looping for more work
-        let _ = sub.send_shutdown();
+        // Graceful shutdown of this subprocess before looping for more work.
+        // 5s covers model-cache teardown; if the worker ignores us, Drop's
+        // shorter timeout + force-kill closes the gap.
+        let _ = sub.shutdown_with_timeout(SHUTDOWN_TIMEOUT);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn is_stalled_false_when_no_work_in_flight() {
+        // Idle subprocess waiting for admission is NOT a stall — we only flag
+        // the subprocess as hung if it's sitting on work it hasn't reported.
+        assert!(!is_stalled(Duration::from_secs(120), 0, Duration::from_secs(60)));
+    }
+
+    #[test]
+    fn is_stalled_true_when_silence_exceeds_timeout_with_work() {
+        assert!(is_stalled(Duration::from_secs(61), 1, Duration::from_secs(60)));
+    }
+
+    #[test]
+    fn is_stalled_false_when_under_timeout() {
+        assert!(!is_stalled(Duration::from_secs(59), 1, Duration::from_secs(60)));
+    }
+
+    #[test]
+    fn is_stalled_at_exact_boundary_is_false() {
+        // Strict `>` not `>=`: a subprocess that emits an event every
+        // `hang_timeout` seconds on the dot is not considered stalled.
+        assert!(!is_stalled(Duration::from_secs(60), 1, Duration::from_secs(60)));
+    }
+
+    #[test]
+    fn is_stalled_scales_with_in_flight_count() {
+        // Any non-zero in-flight count triggers the detector given silence.
+        assert!(is_stalled(Duration::from_secs(90), 5, Duration::from_secs(60)));
     }
 }
 

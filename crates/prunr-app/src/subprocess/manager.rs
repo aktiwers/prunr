@@ -247,6 +247,28 @@ impl SubprocessManager {
             .map_err(|e| format!("Failed to send Shutdown: {e}"))
     }
 
+    /// Send Shutdown and wait up to `timeout` for the child to exit.
+    /// Force-kills if unresponsive. Returns true iff graceful exit succeeded.
+    ///
+    /// Use a long timeout (e.g. 5s) for end-of-batch cleanup — the child may
+    /// be flushing model caches. Use a short timeout (e.g. 1s) for Drop paths
+    /// that must not stall the UI thread.
+    pub fn shutdown_with_timeout(&mut self, timeout: std::time::Duration) -> bool {
+        // Ignore send errors — child may already be dead, we just need to wait/kill.
+        let _ = write_message(&mut self.stdin_writer, &SubprocessCommand::Shutdown);
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            match self.child.try_wait() {
+                Ok(Some(_)) => return true,
+                _ if std::time::Instant::now() > deadline => {
+                    self.kill();
+                    return false;
+                }
+                _ => std::thread::sleep(std::time::Duration::from_millis(50)),
+            }
+        }
+    }
+
     /// Non-blocking poll for events from the subprocess.
     pub fn poll_events(&mut self) -> Vec<SubprocessEvent> {
         let mut events = Vec::new();
@@ -336,19 +358,8 @@ impl SubprocessManager {
 
 impl Drop for SubprocessManager {
     fn drop(&mut self) {
-        // Try graceful shutdown first, then force kill
-        let _ = write_message(&mut self.stdin_writer, &SubprocessCommand::Shutdown);
-        // Give child 1 second to exit
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
-        loop {
-            match self.child.try_wait() {
-                Ok(Some(_)) => break,
-                _ if std::time::Instant::now() > deadline => {
-                    self.kill();
-                    break;
-                }
-                _ => std::thread::sleep(std::time::Duration::from_millis(50)),
-            }
-        }
+        // 1s is aggressive but necessary — Drop runs on the UI thread during
+        // app shutdown / panic unwinding and must not stall.
+        let _ = self.shutdown_with_timeout(std::time::Duration::from_secs(1));
     }
 }
