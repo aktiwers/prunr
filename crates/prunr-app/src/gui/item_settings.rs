@@ -39,6 +39,10 @@ pub struct ItemSettings {
     pub edge_shift: f32,
     /// Guided-filter refinement of mask edges.
     pub refine_edges: bool,
+    /// Guided filter window radius (pixels). Only used when refine_edges.
+    pub guided_radius: u32,
+    /// Guided filter regularization. Only used when refine_edges.
+    pub guided_epsilon: f32,
 
     /// Line extraction mode.
     pub line_mode: LineMode,
@@ -59,6 +63,8 @@ impl Default for ItemSettings {
             threshold: None,
             edge_shift: 0.0,
             refine_edges: false,
+            guided_radius: 8,
+            guided_epsilon: 1e-4,
             line_mode: LineMode::Off,
             line_strength: 0.5,
             solid_line_color: None,
@@ -81,6 +87,8 @@ impl ItemSettings {
             threshold: self.threshold,
             edge_shift: self.edge_shift,
             refine_edges: self.refine_edges,
+            guided_radius: self.guided_radius,
+            guided_epsilon: self.guided_epsilon,
         }
     }
 
@@ -95,9 +103,17 @@ impl ItemSettings {
         let bg_rgb = self.bg.map(|[r, g, b, _]| [r, g, b]);
 
         let mask = if uses_segmentation {
-            prunr_core::MaskRecipe::new(self.gamma, self.threshold, self.edge_shift, self.refine_edges)
+            prunr_core::MaskRecipe::new(
+                self.gamma,
+                self.threshold,
+                self.edge_shift,
+                self.refine_edges,
+                self.guided_radius,
+                self.guided_epsilon,
+            )
         } else {
-            prunr_core::MaskRecipe::new(1.0, None, 0.0, false)
+            let d = MaskSettings::default();
+            prunr_core::MaskRecipe::new(1.0, None, 0.0, false, d.guided_radius, d.guided_epsilon)
         };
 
         prunr_core::ProcessingRecipe {
@@ -182,7 +198,26 @@ mod tests {
         s.gamma = 2.0; // should NOT affect recipe in EdgesOnly mode
         s.threshold = Some(0.8);
         let r = s.current_recipe(prunr_core::ModelKind::Silueta, false);
-        let defaults = prunr_core::MaskRecipe::new(1.0, None, 0.0, false);
+        let defaults = prunr_core::MaskRecipe::new(1.0, None, 0.0, false, 8, 1e-4);
         assert_eq!(r.mask, defaults);
+    }
+
+    #[test]
+    fn serde_json_roundtrip_all_fields_populated() {
+        let s = ItemSettings {
+            gamma: 2.3,
+            threshold: Some(0.75),
+            edge_shift: -1.5,
+            refine_edges: true,
+            guided_radius: 12,
+            guided_epsilon: 5e-4,
+            line_mode: LineMode::EdgesOnly,
+            line_strength: 0.3,
+            solid_line_color: Some([10, 20, 30]),
+            bg: Some([100, 150, 200, 240]),
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        let recovered: ItemSettings = serde_json::from_str(&json).unwrap();
+        assert_eq!(s, recovered);
     }
 }

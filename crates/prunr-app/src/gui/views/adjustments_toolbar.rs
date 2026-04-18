@@ -113,7 +113,8 @@ pub fn render(
             ui, "gamma", "γ", "Gamma",
             "How hard the mask cuts. >1 removes more aggressively, <1 is gentler on fine edges.",
             &mut item_settings.gamma,
-            0.2..=3.0, defaults.template.gamma,
+            0.1..=10.0, defaults.template.gamma,
+            true, // log scale — matches perceptual symmetry around 1.0
             |v| format!("{v:.2}"),
         ), Tier::Mask, &mut change);
 
@@ -122,8 +123,8 @@ pub fn render(
             &ICON_BOLT.codepoint.to_string(), "Hard threshold",
             "Snap the mask to fully opaque or fully transparent at this cutoff. Soft = smooth alpha, on = crisp silhouette.",
             &mut item_settings.threshold,
-            0.01..=0.99, defaults.threshold_value, "Soft",
-            |v| format!("{v:.2}"),
+            0.001..=0.999, defaults.threshold_value, "Soft",
+            |v| format!("{:.1}%", v * 100.0),
         ), Tier::Mask, &mut change);
 
         aggregate(chip::chip_f32(
@@ -131,10 +132,11 @@ pub fn render(
             &ICON_SWAP_HORIZ.codepoint.to_string(), "Edge shift",
             "Shrink or grow the mask outline. Positive = erode (trim fringe pixels), negative = dilate (keep more edge detail).",
             &mut item_settings.edge_shift,
-            -5.0..=5.0, defaults.template.edge_shift,
+            -20.0..=20.0, defaults.template.edge_shift,
+            false,
             |v| {
-                if v > 0.5 { format!("erode {v:.0}px") }
-                else if v < -0.5 { format!("dilate {:.0}px", v.abs()) }
+                if v > 0.05 { format!("erode {v:.1}px") }
+                else if v < -0.05 { format!("dilate {:.1}px", v.abs()) }
                 else { "0px".to_string() }
             },
         ), Tier::Mask, &mut change);
@@ -145,6 +147,26 @@ pub fn render(
             "Use the original image's colors to sharpen the mask around fine detail like hair or leaves. Runs a guided filter — slower but higher quality.",
             &mut item_settings.refine_edges,
         ), Tier::Mask, &mut change);
+
+        if item_settings.refine_edges {
+            aggregate(chip::chip_u32(
+                ui, "guided_radius",
+                &ICON_BLUR_ON.codepoint.to_string(), "Refine radius",
+                "Guided filter window size (pixels). Smaller = crisper edges, larger = softer blend.",
+                &mut item_settings.guided_radius,
+                1..=32, defaults.template.guided_radius,
+                |v| format!("{v}px"),
+            ), Tier::Mask, &mut change);
+
+            aggregate(chip::chip_f32(
+                ui, "guided_epsilon", "ε", "Refine strength",
+                "Guided filter regularization. Smaller = preserve edges from color guide, larger = smoother blend.",
+                &mut item_settings.guided_epsilon,
+                1e-6..=1e-2, defaults.template.guided_epsilon,
+                true, // log scale — epsilon is a multiplicative regularizer
+                |v| format!("{v:.1e}"),
+            ), Tier::Mask, &mut change);
+        }
 
         // Divider between mask and composite groups.
         ui.separator();
@@ -217,6 +239,7 @@ pub fn render(
                 "How much edge detail to capture. Lower = bold outlines only, higher = fine texture and subtle edges.",
                 &mut item_settings.line_strength,
                 0.05..=1.0, defaults.template.line_strength,
+                false,
                 |v| format!("{v:.2}"),
             ), Tier::Edge, &mut change);
 
