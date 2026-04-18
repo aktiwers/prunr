@@ -1076,9 +1076,11 @@ impl PrunrApp {
     /// with the newest available results.
     fn pump_live_preview(&mut self, ctx: &egui::Context) {
         // Dispatch phase: tick() invokes the closure for each item whose
-        // debounce expired this frame. The closure captures `&self.batch.items`
-        // for read-only access; it doesn't need `&mut self`.
-        let batch_items = &self.batch.items;
+        // debounce expired this frame. The closure borrows `batch.items`
+        // mutably so `build_preview_inputs` can lazily cache an
+        // `Arc<DynamicImage>` on the item (built once, reused across every
+        // subsequent dispatch of the drag session — see `source_dyn`).
+        let batch_items = &mut self.batch.items;
         let wait = self.processor.live_preview.tick(|id, kind| {
             Self::build_preview_inputs(batch_items, id, kind)
         });
@@ -1098,18 +1100,24 @@ impl PrunrApp {
     /// decompressed tensors + settings + reusable edge mask if its
     /// line_strength still matches. Returns `None` to abort the dispatch
     /// when a required tensor cache isn't available (user must Process first).
+    ///
+    /// Lazily builds (and then reuses) `item.source_dyn` — the first dispatch
+    /// of a drag session pays the ~15ms / 48 MB clone to wrap `source_rgba`
+    /// in a `DynamicImage`, every subsequent dispatch is just an `Arc::clone`.
     fn build_preview_inputs(
-        items: &[BatchItem],
+        items: &mut [BatchItem],
         id: u64,
         kind: super::live_preview::PreviewKind,
     ) -> Option<super::live_preview::DispatchInputs> {
         use super::live_preview::{DispatchInputs, PreviewKind, decompress_edge, decompress_seg};
-        let item = items.iter().find(|b| b.id == id)?;
-        let rgba = item.source_rgba.as_ref()?;
-        // One clone here — live preview workers need an owned DynamicImage.
-        // Clones the ~48 MB RGBA once per dispatch (not per frame); the user
-        // has paused typing for 300ms so a single clone is acceptable.
-        let original = Arc::new(image::DynamicImage::ImageRgba8((**rgba).clone()));
+        let item = items.iter_mut().find(|b| b.id == id)?;
+        // Lazily build the cached `Arc<DynamicImage>` once per decode.
+        if item.source_dyn.is_none() {
+            let rgba = item.source_rgba.as_ref()?;
+            item.source_dyn = Some(Arc::new(image::DynamicImage::ImageRgba8((**rgba).clone())));
+        }
+        // Unwrap: we just set it above if it was None.
+        let original = Arc::clone(item.source_dyn.as_ref().unwrap());
         let seg_tensor = item.cached_tensor.as_ref().and_then(decompress_seg);
         let edge_tensor = item.cached_edge_tensor.as_ref().and_then(decompress_edge);
         match kind {
@@ -1684,6 +1692,9 @@ impl PrunrApp {
         while let Ok((item_id, rgba)) = self.batch.bg_io.decode_rx.try_recv() {
             if let Some(item) = self.batch.find_by_id_mut(item_id) {
                 item.source_rgba = Some(rgba);
+                // Live-preview DynamicImage cache is built from source_rgba;
+                // invalidate so the next dispatch rebuilds against the new one.
+                item.source_dyn = None;
                 item.decode_pending = false;
                 decode_arrived = true;
             }
