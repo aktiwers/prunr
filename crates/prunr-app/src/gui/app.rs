@@ -142,6 +142,32 @@ impl ImageSource {
     }
 }
 
+/// Snapshot of everything a preset apply (or Reset All Knobs) replaces. Used
+/// by Ctrl+Shift+Z / Ctrl+Shift+Y to undo an accidental preset swap without
+/// touching the image-result history.
+#[derive(Clone)]
+pub(crate) struct PresetSnapshot {
+    pub settings: super::item_settings::ItemSettings,
+    pub applied_preset: String,
+}
+
+/// Bound on the per-item preset undo/redo stacks. Each entry is ~100 bytes,
+/// so 20 × ~100 = ~2 KB per image — a rounding error next to the result
+/// history's megabyte-scale entries.
+const PRESET_HISTORY_DEPTH: usize = 20;
+
+/// Push onto a bounded undo/redo stack, dropping the oldest entry if it
+/// exceeds `PRESET_HISTORY_DEPTH`.
+fn push_bounded(stack: &mut VecDeque<PresetSnapshot>, snap: PresetSnapshot) {
+    stack.push_back(snap);
+    while stack.len() > PRESET_HISTORY_DEPTH {
+        stack.pop_front();
+    }
+}
+
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum HistoryDir { Undo, Redo }
+
 pub(crate) struct BatchItem {
     pub id: u64,
     pub filename: String,
@@ -185,6 +211,13 @@ pub(crate) struct BatchItem {
     /// across unrelated tweaks — so "Portrait ✎" keeps saying Portrait even
     /// after the user modifies something.
     pub applied_preset: String,
+    /// Preset-apply undo stack — snapshots of (settings, applied_preset)
+    /// taken BEFORE each preset apply / Reset All on this image. Separate
+    /// from `history` (which is the image-result stack) so Ctrl+Shift+Z
+    /// rolls back an accidental preset swap without touching the pixels.
+    pub preset_undo_stack: VecDeque<PresetSnapshot>,
+    /// Redo counterpart — cleared on a fresh preset apply, fed by undos.
+    pub preset_redo_stack: VecDeque<PresetSnapshot>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -522,6 +555,8 @@ impl PrunrApp {
             cached_tensor: None,
             cached_edge_tensor: None,
             applied_preset: self.settings.default_preset.clone(),
+            preset_undo_stack: VecDeque::new(),
+            preset_redo_stack: VecDeque::new(),
         });
         self.selected_batch_index = self.batch_items.len() - 1;
         if do_decode {
@@ -738,6 +773,44 @@ impl PrunrApp {
             } else {
                 self.toasts.info(format!("Restored {redone} images"));
             }
+        }
+    }
+
+    /// Preset undo/redo: rolls back (or re-applies) a preset swap on the
+    /// current image. Does NOT touch the image-result history — that stays on
+    /// Ctrl+Z. Kicks an auto-reprocess on a Done item so the restored settings
+    /// produce a fresh result (same path a live preset apply would take).
+    fn swap_preset_history(&mut self, dir: HistoryDir) {
+        if self.batch_items.is_empty() { return; }
+        let idx = self.selected_batch_index.min(self.batch_items.len() - 1);
+        let (target_id, should_reprocess) = {
+            let item = &mut self.batch_items[idx];
+            let popped = match dir {
+                HistoryDir::Undo => item.preset_undo_stack.pop_back(),
+                HistoryDir::Redo => item.preset_redo_stack.pop_back(),
+            };
+            let Some(snapshot) = popped else { return };
+            let current = PresetSnapshot {
+                settings: item.settings,
+                applied_preset: item.applied_preset.clone(),
+            };
+            match dir {
+                HistoryDir::Undo => push_bounded(&mut item.preset_redo_stack, current),
+                HistoryDir::Redo => push_bounded(&mut item.preset_undo_stack, current),
+            }
+            let old_line_mode = item.settings.line_mode;
+            item.settings = snapshot.settings;
+            item.applied_preset = snapshot.applied_preset;
+            // Edge tensor depends on what DexiNed saw (full scene vs subject-
+            // on-white), so a line_mode flip invalidates it. Segmentation
+            // tensor doesn't care — model isn't part of the preset.
+            if item.settings.line_mode != old_line_mode {
+                item.cached_edge_tensor = None;
+            }
+            (item.id, item.status == BatchStatus::Done)
+        };
+        if should_reprocess {
+            self.process_items(|i| i.id == target_id);
         }
     }
 
@@ -1328,6 +1401,8 @@ impl PrunrApp {
             cached_tensor: None,
             cached_edge_tensor: None,
             applied_preset: self.settings.default_preset.clone(),
+            preset_undo_stack: VecDeque::new(),
+            preset_redo_stack: VecDeque::new(),
         });
 
         if self.state == AppState::Empty {
@@ -2006,6 +2081,8 @@ impl PrunrApp {
         let mut toggle_adjustments = false;
         let mut undo_requested = false;
         let mut redo_requested = false;
+        let mut preset_undo_requested = false;
+        let mut preset_redo_requested = false;
 
         // Suppress bare-key shortcuts when any widget has focus (e.g., hex color input)
         let text_focused = ctx.memory(|m| m.focused().is_some());
@@ -2064,11 +2141,22 @@ impl PrunrApp {
                     toggle_sidebar = true;
                 }
             }
+            // Shift variants of Z/Y are preset-only undo/redo — roll back
+            // an accidental preset apply without touching the image-result
+            // history. Without-shift stays bound to image history.
             if i.modifiers.command && i.key_pressed(Key::Z) {
-                undo_requested = true;
+                if i.modifiers.shift {
+                    preset_undo_requested = true;
+                } else {
+                    undo_requested = true;
+                }
             }
             if i.modifiers.command && i.key_pressed(Key::Y) {
-                redo_requested = true;
+                if i.modifiers.shift {
+                    preset_redo_requested = true;
+                } else {
+                    redo_requested = true;
+                }
             }
         });
 
@@ -2158,6 +2246,12 @@ impl PrunrApp {
         }
         if redo_requested {
             self.handle_redo(ctx);
+        }
+        if preset_undo_requested {
+            self.swap_preset_history(HistoryDir::Undo);
+        }
+        if preset_redo_requested {
+            self.swap_preset_history(HistoryDir::Redo);
         }
         if self.pending_batch_sync {
             self.pending_batch_sync = false;
@@ -2343,6 +2437,18 @@ impl eframe::App for PrunrApp {
             let mut bg_changed = false;
             let mut toolbar_change = adjustments_toolbar::ToolbarChange::default();
             let is_processing = self.state == AppState::Processing;
+            // Snapshot of the current (settings, applied_preset) taken BEFORE
+            // adjustments_toolbar::render runs — if the user ends up applying
+            // a preset this frame, the snapshot goes onto the preset undo
+            // stack so Ctrl+Shift+Z can roll back an accidental pick.
+            let pre_apply_snapshot = {
+                let idx = self.selected_batch_index.min(self.batch_items.len() - 1);
+                let item = &self.batch_items[idx];
+                PresetSnapshot {
+                    settings: item.settings,
+                    applied_preset: item.applied_preset.clone(),
+                }
+            };
             egui::Panel::top("adjustments_toolbar")
                 .exact_size(height)
                 .frame(panel_frame)
@@ -2366,6 +2472,13 @@ impl eframe::App for PrunrApp {
                     // immediately, not via Tier 2.
                     bg_changed = toolbar_change.bg;
                 });
+            if toolbar_change.preset_applied {
+                let idx = self.selected_batch_index.min(self.batch_items.len() - 1);
+                let item = &mut self.batch_items[idx];
+                push_bounded(&mut item.preset_undo_stack, pre_apply_snapshot);
+                // A fresh apply branches off the timeline — redo is invalidated.
+                item.preset_redo_stack.clear();
+            }
             // Model swap: persist the new selection, show toast, invalidate caches.
             if toolbar_change.model_changed {
                 self.settings.save();
