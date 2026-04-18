@@ -53,3 +53,53 @@ impl DragExportState {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reset_clears_active_and_items() {
+        let s = DragExportState::new();
+        // Simulate an in-progress drag: active=true, items populated.
+        s.active.store(true, Ordering::Release);
+        s.items.lock().unwrap().extend([1u64, 2, 3]);
+        assert!(s.active.load(Ordering::Acquire));
+        assert_eq!(s.items.lock().unwrap().len(), 3);
+
+        DragExportState::reset(&s.active, &s.items);
+        assert!(!s.active.load(Ordering::Acquire));
+        assert!(s.items.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn reset_does_not_touch_pending_or_linux_notified() {
+        // Two flags are user-thread-only and not part of the cross-thread
+        // reset — verify reset leaves them untouched.
+        let mut s = DragExportState::new();
+        s.pending = Some(vec![42]);
+        s.linux_notified = true;
+
+        DragExportState::reset(&s.active, &s.items);
+        assert_eq!(s.pending, Some(vec![42]));
+        assert!(s.linux_notified);
+    }
+
+    #[test]
+    fn items_mutex_supports_insert_read_clear_round_trip() {
+        let s = DragExportState::new();
+        {
+            let mut set = s.items.lock().unwrap();
+            set.insert(7);
+            set.insert(11);
+        }
+        {
+            let set = s.items.lock().unwrap();
+            assert!(set.contains(&7));
+            assert!(set.contains(&11));
+            assert_eq!(set.len(), 2);
+        }
+        s.items.lock().unwrap().clear();
+        assert!(s.items.lock().unwrap().is_empty());
+    }
+}

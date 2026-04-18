@@ -190,7 +190,9 @@ mod preset_stack_tests {
     use super::*;
     use crate::gui::item_settings::ItemSettings;
 
-    fn snap(gamma: f32) -> PresetSnapshot {
+    /// Build a single-attribute PresetSnapshot. `pub(super)` so the sibling
+    /// `tests` module can reuse it (deduped per /simplify finding).
+    pub(super) fn snap(gamma: f32) -> PresetSnapshot {
         let mut s = ItemSettings::default();
         s.gamma = gamma;
         PresetSnapshot { settings: s, applied_preset: String::new() }
@@ -220,5 +222,225 @@ mod preset_stack_tests {
         assert_eq!(stack.len(), 3);
         assert_eq!(stack.front().unwrap().settings.gamma, 1.0);
         assert_eq!(stack.back().unwrap().settings.gamma, 3.0);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Tests for the `HistoryManager` methods themselves — the policy layer
+    //! over per-item history stacks. Build a `BatchItem` fixture, call the
+    //! methods, assert state.
+    use super::*;
+    use super::preset_stack_tests::snap; // shared with the push_bounded tests
+    use crate::gui::item::ImageSource;
+    use crate::gui::item_settings::ItemSettings;
+    use std::sync::Arc;
+
+    fn fixture(id: u64) -> BatchItem {
+        BatchItem::new(
+            id,
+            "test.png".into(),
+            ImageSource::Bytes(Arc::new(Vec::new())),
+            (10, 10),
+            ItemSettings::default(),
+            String::new(),
+        )
+    }
+
+    fn rgba(r: u8) -> Arc<image::RgbaImage> {
+        Arc::new(image::RgbaImage::from_pixel(2, 2, image::Rgba([r, 0, 0, 255])))
+    }
+
+    // ── seed_with_source ────────────────────────────────────────────────
+
+    #[test]
+    fn seed_with_source_no_op_if_history_non_empty() {
+        let mut item = fixture(1);
+        item.history.push_back(HistoryEntry::new(rgba(99), None));
+        item.source_rgba = Some(rgba(0));
+        let before = item.history.len();
+        HistoryManager::seed_with_source(&mut item);
+        assert_eq!(item.history.len(), before, "should not push when history non-empty");
+    }
+
+    #[test]
+    fn seed_with_source_no_op_if_source_rgba_missing() {
+        let mut item = fixture(1);
+        // source_rgba defaults to None
+        HistoryManager::seed_with_source(&mut item);
+        assert!(item.history.is_empty(), "should not push without source_rgba");
+    }
+
+    #[test]
+    fn seed_with_source_pushes_when_both_stacks_empty_and_source_present() {
+        let mut item = fixture(1);
+        item.source_rgba = Some(rgba(7));
+        HistoryManager::seed_with_source(&mut item);
+        assert_eq!(item.history.len(), 1);
+        // Recipe is None for the source-seed entry — it's the unprocessed source.
+        assert!(item.history.front().unwrap().recipe.is_none());
+    }
+
+    // ── archive_current_result ──────────────────────────────────────────
+
+    #[test]
+    fn archive_current_result_no_op_if_status_not_done() {
+        let mut item = fixture(1);
+        item.status = BatchStatus::Pending;
+        item.result_rgba = Some(rgba(5));
+        HistoryManager::archive_current_result(&mut item, 10, false);
+        assert_eq!(item.history.len(), 0);
+        assert!(item.result_rgba.is_some(), "result_rgba should be untouched");
+    }
+
+    #[test]
+    fn archive_current_result_pushes_to_history_and_clears_redo() {
+        let mut item = fixture(1);
+        item.status = BatchStatus::Done;
+        item.result_rgba = Some(rgba(5));
+        item.redo_stack.push_back(HistoryEntry::new(rgba(99), None));
+
+        HistoryManager::archive_current_result(&mut item, 10, false);
+
+        assert_eq!(item.history.len(), 1, "current pushed onto history");
+        assert!(item.redo_stack.is_empty(), "redo cleared on fresh process branch");
+        assert!(item.result_rgba.is_none(), "non-chain mode releases result_rgba");
+    }
+
+    #[test]
+    fn archive_current_result_chain_mode_keeps_result_rgba_for_next_step() {
+        let mut item = fixture(1);
+        item.status = BatchStatus::Done;
+        item.result_rgba = Some(rgba(5));
+
+        HistoryManager::archive_current_result(&mut item, 10, true);
+
+        assert_eq!(item.history.len(), 1);
+        assert!(item.result_rgba.is_some(), "chain mode keeps result_rgba populated");
+    }
+
+    #[test]
+    fn archive_current_result_enforces_max_depth() {
+        let mut item = fixture(1);
+        // Pre-fill history to depth 5.
+        for _ in 0..5 {
+            item.history.push_back(HistoryEntry::new(rgba(0), None));
+        }
+        item.status = BatchStatus::Done;
+        item.result_rgba = Some(rgba(99));
+
+        HistoryManager::archive_current_result(&mut item, 3, false);
+
+        // After: oldest popped to fit max_depth=3; latest pushed.
+        assert_eq!(item.history.len(), 3);
+    }
+
+    // ── undo_result ─────────────────────────────────────────────────────
+
+    #[test]
+    fn undo_result_returns_false_if_status_not_done() {
+        let mut item = fixture(1);
+        item.status = BatchStatus::Pending;
+        assert!(!HistoryManager::undo_result(&mut item));
+    }
+
+    #[test]
+    fn undo_result_empty_history_transitions_to_pending() {
+        let mut item = fixture(1);
+        item.status = BatchStatus::Done;
+        item.result_rgba = Some(rgba(7));
+
+        assert!(HistoryManager::undo_result(&mut item));
+        assert_eq!(item.status, BatchStatus::Pending);
+        assert!(item.result_rgba.is_none());
+        assert_eq!(item.redo_stack.len(), 1, "current went to redo stack");
+    }
+
+    #[test]
+    fn undo_then_redo_round_trip_preserves_pixels() {
+        let mut item = fixture(1);
+        item.status = BatchStatus::Done;
+        let original_pixels = rgba(42);
+        item.result_rgba = Some(original_pixels.clone());
+        // History layout: [source_seed (oldest), prior_result]. Two entries so
+        // that after undo pops `prior_result`, history is non-empty and
+        // status stays Done. (Single-entry history is the source-seed case
+        // and walks back to Pending — covered by `undo_result_empty_history_*`.)
+        item.history.push_back(HistoryEntry::new(rgba(0), None));   // source seed
+        item.history.push_back(HistoryEntry::new(rgba(11), None));  // prior real result
+
+        // Undo: pops prior_result onto current, current_42 goes to redo.
+        assert!(HistoryManager::undo_result(&mut item));
+        assert_eq!(item.status, BatchStatus::Done);
+        let after_undo = item.result_rgba.as_ref().expect("undo restored a result");
+        assert_eq!(after_undo.get_pixel(0, 0).0, [11, 0, 0, 255]);
+
+        // Redo: original result restored byte-for-byte.
+        assert!(HistoryManager::redo_result(&mut item));
+        assert_eq!(item.status, BatchStatus::Done);
+        let after_redo = item.result_rgba.as_ref().expect("redo restored result");
+        assert_eq!(after_redo.as_raw(), original_pixels.as_raw());
+    }
+
+    // ── redo_result ─────────────────────────────────────────────────────
+
+    #[test]
+    fn redo_result_returns_false_if_redo_empty() {
+        let mut item = fixture(1);
+        // redo_stack empty by default
+        assert!(!HistoryManager::redo_result(&mut item));
+    }
+
+    // ── push_preset / swap_preset ───────────────────────────────────────
+
+    #[test]
+    fn push_preset_adds_to_undo_and_clears_redo() {
+        let mut item = fixture(1);
+        item.preset_redo_stack.push_back(snap(99.0));
+        HistoryManager::push_preset(&mut item, snap(1.5));
+        assert_eq!(item.preset_undo_stack.len(), 1);
+        assert_eq!(item.preset_undo_stack.front().unwrap().settings.gamma, 1.5);
+        assert!(item.preset_redo_stack.is_empty(), "fresh apply branches the timeline");
+    }
+
+    #[test]
+    fn swap_preset_returns_false_when_stack_empty() {
+        let mut item = fixture(1);
+        assert!(!HistoryManager::swap_preset(&mut item, HistoryDir::Undo));
+        assert!(!HistoryManager::swap_preset(&mut item, HistoryDir::Redo));
+    }
+
+    #[test]
+    fn swap_preset_undo_pops_one_and_pushes_current_to_redo() {
+        let mut item = fixture(1);
+        item.settings.gamma = 1.5;
+        item.preset_undo_stack.push_back(snap(0.5));
+
+        assert!(HistoryManager::swap_preset(&mut item, HistoryDir::Undo));
+
+        // Snapshot from undo stack applied.
+        assert_eq!(item.settings.gamma, 0.5);
+        // Pre-swap state pushed to redo stack.
+        assert_eq!(item.preset_redo_stack.len(), 1);
+        assert_eq!(item.preset_redo_stack.front().unwrap().settings.gamma, 1.5);
+    }
+
+    #[test]
+    fn swap_preset_invalidates_edge_cache_on_line_mode_change() {
+        use crate::gui::item_settings::ItemSettings;
+        use prunr_core::LineMode;
+        let mut item = fixture(1);
+        item.settings.line_mode = LineMode::Off;
+        item.cached_edge_mask = Some((Arc::new(image::GrayImage::new(1, 1)), 0));
+        let mut snap_with_edges = ItemSettings::default();
+        snap_with_edges.line_mode = LineMode::EdgesOnly;
+        item.preset_undo_stack.push_back(PresetSnapshot {
+            settings: snap_with_edges,
+            applied_preset: String::new(),
+        });
+
+        assert!(HistoryManager::swap_preset(&mut item, HistoryDir::Undo));
+        assert_eq!(item.settings.line_mode, LineMode::EdgesOnly);
+        assert!(item.cached_edge_mask.is_none(), "line_mode change must invalidate edge cache");
     }
 }
