@@ -294,7 +294,7 @@ pub fn render(
             // this session, but the user loses it on restart, which is
             // surprising if we stay fully silent.
             if let Err(e) = crate::gui::presets_fs::save(&name, current_item) {
-                eprintln!("prunr: failed to save preset \"{name}\" to disk: {e}");
+                tracing::error!(preset = %name, %e, "failed to save preset to disk");
             }
             applied = Some(name);
             close_dialog();

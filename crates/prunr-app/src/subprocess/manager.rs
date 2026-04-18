@@ -42,6 +42,10 @@ enum ReaderEvent {
 impl SubprocessManager {
     /// Spawn a `prunr --worker` subprocess and send the Init command.
     /// Blocks until the child sends `Ready` or `InitError`.
+    #[tracing::instrument(
+        skip_all,
+        fields(model = ?model, jobs, force_cpu, line_mode = ?line_mode),
+    )]
     pub fn spawn(
         model: ModelKind,
         jobs: usize,

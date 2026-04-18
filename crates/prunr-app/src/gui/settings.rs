@@ -95,7 +95,7 @@ impl Settings {
         let value: serde_json::Value = match serde_json::from_str(&data) {
             Ok(v) => v,
             Err(e) => {
-                eprintln!("warning: settings.json is corrupt ({e}), using defaults");
+                tracing::warn!(%e, "settings.json is corrupt; falling back to defaults");
                 return Self::default();
             }
         };
@@ -103,7 +103,7 @@ impl Settings {
         let mut settings: Self = match serde_json::from_value(value.clone()) {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("warning: settings.json is corrupt ({e}), using defaults");
+                tracing::warn!(%e, "settings.json is corrupt; falling back to defaults");
                 return Self::default();
             }
         };

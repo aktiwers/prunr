@@ -160,6 +160,17 @@ pub fn spawn_worker(
 /// Run a batch with automatic retry on subprocess crash.
 /// Reduces concurrency (jobs) on each crash: jobs → jobs/2 → 1.
 /// If even 1 job crashes, marks remaining items as "insufficient memory".
+#[tracing::instrument(
+    skip_all,
+    fields(
+        tier1_count = initial_items.len(),
+        tier2_count = initial_tier2.len(),
+        // Snapshot of the user's requested job count — tracing fields are
+        // captured at span entry. The effective count halves on each crash
+        // retry; see the per-spawn span on `SubprocessManager::spawn`.
+        initial_jobs = config.jobs,
+    ),
+)]
 fn run_batch_with_retry(
     initial_items: Vec<WorkItem>,
     initial_tier2: Vec<Tier2WorkItem>,
