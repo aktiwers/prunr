@@ -4,13 +4,13 @@ use crate::gui::item::BatchStatus;
 #[test]
 fn batch_items_starts_empty() {
     let app = PrunrApp::new_for_test();
-    assert!(app.batch_items.is_empty());
+    assert!(app.batch.items.is_empty());
 }
 
 #[test]
 fn selected_batch_index_starts_at_zero() {
     let app = PrunrApp::new_for_test();
-    assert_eq!(app.selected_batch_index, 0);
+    assert_eq!(app.batch.selected_index, 0);
 }
 
 #[test]
@@ -69,5 +69,5 @@ fn auto_process_setting_defaults_false() {
 #[test]
 fn next_batch_id_starts_at_zero() {
     let app = PrunrApp::new_for_test();
-    assert_eq!(app.next_batch_id, 0);
+    assert_eq!(app.batch.next_id, 0);
 }

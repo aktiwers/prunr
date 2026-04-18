@@ -19,10 +19,10 @@ pub fn render(ui: &mut egui::Ui, app: &PrunrApp) {
         ui.add_space(theme::SPACE_XS);
 
         // Left side: status text
-        let batch_processing = app.batch_items.iter().any(|i| i.status == BatchStatus::Processing);
-        let batch_done_count = app.batch_items.iter().filter(|i| i.status == BatchStatus::Done).count();
-        let batch_errored = app.batch_items.iter().filter(|i| matches!(i.status, BatchStatus::Error(_))).count();
-        let batch_in_progress = app.batch_items.iter().filter(|i| i.status == BatchStatus::Processing).count();
+        let batch_processing = app.batch.items.iter().any(|i| i.status == BatchStatus::Processing);
+        let batch_done_count = app.batch.items.iter().filter(|i| i.status == BatchStatus::Done).count();
+        let batch_errored = app.batch.items.iter().filter(|i| matches!(i.status, BatchStatus::Error(_))).count();
+        let batch_in_progress = app.batch.items.iter().filter(|i| i.status == BatchStatus::Processing).count();
         // Only count items involved in processing (not idle Pending items)
         let batch_total = batch_done_count + batch_errored + batch_in_progress;
 
@@ -52,7 +52,7 @@ pub fn render(ui: &mut egui::Ui, app: &PrunrApp) {
 
         // History/undo depth indicator (visible when chain_mode is on and history exists)
         if app.settings.chain_mode {
-            if let Some(item) = app.selected_item() {
+            if let Some(item) = app.batch.selected_item() {
                 let depth = item.history.len();
                 if depth > 0 {
                     ui.add_space(theme::SPACE_SM);

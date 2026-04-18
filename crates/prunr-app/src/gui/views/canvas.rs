@@ -402,7 +402,7 @@ fn render_done(ui: &mut egui::Ui, app: &PrunrApp) {
         if fade >= 1.0 {
             // Render-time bg fill: transparent result tex, solid rect or
             // checkerboard underneath. Flips instantly on bg color change.
-            let bg_rgb = app.selected_item().and_then(|it| it.settings.bg_rgb());
+            let bg_rgb = app.batch.selected_item().and_then(|it| it.settings.bg_rgb());
             if let Some(bg) = bg_rgb {
                 ui.painter().rect_filled(
                     img_rect,

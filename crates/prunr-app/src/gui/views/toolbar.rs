@@ -17,7 +17,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
 
         let is_processing = app.state == AppState::Processing;
         let can_save_copy = app.state == AppState::Done;
-        let has_selected = app.batch_items.iter().any(|i| i.selected);
+        let has_selected = app.batch.items.iter().any(|i| i.selected);
         let m = modifier_key();
 
         // ── Left: Open ──
@@ -68,7 +68,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
             }
 
             let has_saveable_selected = has_selected
-                && app.batch_items.iter().any(|i| i.selected && i.status == BatchStatus::Done);
+                && app.batch.items.iter().any(|i| i.selected && i.status == BatchStatus::Done);
             let show_save = can_save_copy || has_saveable_selected;
             if show_save {
                 let save_label = if has_selected {
@@ -86,8 +86,8 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                 }
             }
 
-            if app.batch_items.len() >= 2 {
-                let is_batch_processing = app.batch_items.iter().any(|i| i.status == BatchStatus::Processing);
+            if app.batch.items.len() >= 2 {
+                let is_batch_processing = app.batch.items.iter().any(|i| i.status == BatchStatus::Processing);
 
                 if is_batch_processing {
                     // Show Cancel All while processing
@@ -99,7 +99,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                     .min_size(egui::vec2(0.0, BTN_HEIGHT));
                     if ui.add(cancel_btn).on_hover_text("Cancel all processing (Escape)").clicked() {
                         app.handle_cancel();
-                        for item in &mut app.batch_items {
+                        for item in &mut app.batch.items {
                             if item.status == BatchStatus::Processing {
                                 item.status = BatchStatus::Pending;
                             }
@@ -108,7 +108,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                         app.status.text = "Cancelled".to_string();
                     }
                 } else {
-                    let has_pending = app.batch_items.iter().any(|i| i.status == BatchStatus::Pending);
+                    let has_pending = app.batch.items.iter().any(|i| i.status == BatchStatus::Pending);
                     let fill = if has_pending { theme::ACCENT } else { theme::ACCENT_DISABLED };
                     let text_color = if has_pending {
                         Color32::WHITE
@@ -128,9 +128,9 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
             }
 
             let has_processable = if has_selected {
-                app.batch_items.iter().any(|i| i.selected && !matches!(i.status, BatchStatus::Processing))
+                app.batch.items.iter().any(|i| i.selected && !matches!(i.status, BatchStatus::Processing))
             } else {
-                app.selected_item()
+                app.batch.selected_item()
                     .map_or(app.state == AppState::Loaded, |item| !matches!(item.status, BatchStatus::Processing))
             };
             let remove_label = if has_selected { "Process Selected" } else { "Process" };
@@ -151,7 +151,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                 .corner_radius(theme::BUTTON_ROUNDING)
                 .min_size(egui::vec2(0.0, BTN_HEIGHT));
             let process_tooltip = if app.settings.chain_mode
-                && app.selected_item().map_or(false, |i| i.result_rgba.is_some())
+                && app.batch.selected_item().map_or(false, |i| i.result_rgba.is_some())
             {
                 format!("Process current result ({m}+R)")
             } else {

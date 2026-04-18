@@ -30,7 +30,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
     };
 
     ui.vertical(|ui| {
-        if app.batch_items.is_empty() {
+        if app.batch.items.is_empty() {
             // Empty state — centered
             ui.with_layout(
                 egui::Layout::centered_and_justified(egui::Direction::TopDown),
@@ -45,14 +45,14 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
             return;
         }
 
-        let count = app.batch_items.len();
-        let all_selected = count > 0 && app.batch_items.iter().all(|i| i.selected);
+        let count = app.batch.items.len();
+        let all_selected = count > 0 && app.batch.items.iter().all(|i| i.selected);
         let mut select_all = all_selected;
         ui.horizontal(|ui| {
             ui.spacing_mut().icon_width = 20.0;
             ui.spacing_mut().icon_spacing = 8.0;
             if ui.checkbox(&mut select_all, RichText::new("Select All").size(theme::FONT_SIZE_BODY).color(theme::TEXT_PRIMARY)).changed() {
-                for item in &mut app.batch_items {
+                for item in &mut app.batch.items {
                     item.selected = select_all;
                 }
             }
@@ -60,7 +60,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                 // Always show "N/M" for consistency — "0/4" reads as "0 of 4
                 // selected" rather than the ambiguous "4" when nothing's
                 // checked. Users can scan this to confirm selection state.
-                let selected = app.batch_items.iter().filter(|i| i.selected).count();
+                let selected = app.batch.items.iter().filter(|i| i.selected).count();
                 let label = format!("{selected}/{count}");
                 ui.label(
                     RichText::new(label)
@@ -80,8 +80,8 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
         let item_height = theme::THUMBNAIL_SIZE + theme::SPACE_SM;
 
         // Pick up completed thumbnails from background threads
-        while let Ok((item_id, tw, th, pixels)) = app.bg_io.thumb_rx.try_recv() {
-            if let Some(item) = app.batch_items.iter_mut().find(|b| b.id == item_id) {
+        while let Ok((item_id, tw, th, pixels)) = app.batch.bg_io.thumb_rx.try_recv() {
+            if let Some(item) = app.batch.items.iter_mut().find(|b| b.id == item_id) {
                 let ci = egui::ColorImage::from_rgba_unmultiplied(
                     [tw as usize, th as usize], &pixels,
                 );
@@ -98,8 +98,8 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
         egui::ScrollArea::vertical().show(ui, |ui| {
             let visible_rect = ui.clip_rect();
 
-            for i in 0..app.batch_items.len() {
-                let is_selected = i == app.selected_batch_index;
+            for i in 0..app.batch.items.len() {
+                let is_selected = i == app.batch.selected_index;
 
                 // Allocate space for item (always — keeps layout/scrollbar correct)
                 let (item_rect, item_response) = ui.allocate_exact_size(
@@ -130,34 +130,34 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                 }
 
                 // Request thumbnail generation on background thread if needed
-                if app.batch_items[i].thumb_texture.is_none()
-                    && !app.batch_items[i].thumb_pending
+                if app.batch.items[i].thumb_texture.is_none()
+                    && !app.batch.items[i].thumb_pending
                 {
-                    app.batch_items[i].thumb_pending = true;
-                    let item_id = app.batch_items[i].id;
-                    app.request_thumbnail(
+                    app.batch.items[i].thumb_pending = true;
+                    let item_id = app.batch.items[i].id;
+                    app.batch.request_thumbnail(
                         item_id,
-                        &app.batch_items[i].source,
-                        app.batch_items[i].result_rgba.as_ref(),
+                        &app.batch.items[i].source,
+                        app.batch.items[i].result_rgba.as_ref(),
                     );
                     needs_repaint = true;
                 }
 
                 // Loading spinner while thumbnail is being generated
-                if app.batch_items[i].thumb_texture.is_none() && app.batch_items[i].thumb_pending {
+                if app.batch.items[i].thumb_texture.is_none() && app.batch.items[i].thumb_pending {
                     let spinner_rect = Rect::from_center_size(item_rect.center(), Vec2::splat(20.0));
                     ui.put(spinner_rect, egui::Spinner::new().size(20.0).color(theme::ACCENT));
                     needs_repaint = true;
                 }
 
                 // Draw thumbnail with fade-in
-                let has_thumb = app.batch_items[i].thumb_texture.is_some();
+                let has_thumb = app.batch.items[i].thumb_texture.is_some();
                 let fade = ui.ctx().animate_bool_with_time(
-                    egui::Id::new(("thumb_fade", app.batch_items[i].id)),
+                    egui::Id::new(("thumb_fade", app.batch.items[i].id)),
                     has_thumb,
                     0.2,
                 );
-                if let Some(ref thumb_tex) = app.batch_items[i].thumb_texture {
+                if let Some(ref thumb_tex) = app.batch.items[i].thumb_texture {
                     let tex_size = thumb_tex.size_vec2();
                     // Fit inside item_rect with 2px padding to avoid touching the border
                     let pad = 4.0;
@@ -171,8 +171,8 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                     // Render-time bg fill: result thumbs are transparent where
                     // pixels were removed; paint the bg color behind so the
                     // sidebar matches the canvas. Source-only thumbs are opaque.
-                    if app.batch_items[i].result_rgba.is_some() {
-                        if let Some(bg) = app.batch_items[i].settings.bg_rgb() {
+                    if app.batch.items[i].result_rgba.is_some() {
+                        if let Some(bg) = app.batch.items[i].settings.bg_rgb() {
                             ui.painter().rect_filled(
                                 thumb_rect,
                                 0.0,
@@ -181,7 +181,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                         }
                     }
                     // Dim thumbnail to ~40% while it's being dragged out to an external app.
-                    let is_dragging = dragging_ids.as_ref().is_some_and(|s| s.contains(&app.batch_items[i].id));
+                    let is_dragging = dragging_ids.as_ref().is_some_and(|s| s.contains(&app.batch.items[i].id));
                     let dim = if is_dragging { 0.4 } else { 1.0 };
                     let alpha = (fade * dim * 255.0) as u8;
                     ui.painter().image(
@@ -203,11 +203,11 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
 
                     let (cb_hovered, cb_clicked) = hit_test(ui, cb_rect);
                     if cb_clicked {
-                        app.batch_items[i].selected = !app.batch_items[i].selected;
+                        app.batch.items[i].selected = !app.batch.items[i].selected;
                     }
 
                     // Draw checkbox background
-                    let cb_bg = if app.batch_items[i].selected {
+                    let cb_bg = if app.batch.items[i].selected {
                         theme::ACCENT
                     } else if cb_hovered {
                         Color32::from_rgb(0x50, 0x50, 0x50)
@@ -218,14 +218,14 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                     ui.painter().rect_stroke(cb_rect, 3.0,
                         Stroke::new(1.0, theme::TEXT_SECONDARY),
                         egui::StrokeKind::Outside);
-                    if app.batch_items[i].selected {
+                    if app.batch.items[i].selected {
                         ui.painter().text(cb_center, egui::Align2::CENTER_CENTER,
                             ICON_CHECK.codepoint, egui::FontId::proportional(12.0), Color32::WHITE);
                     }
                 }
 
                 // Processing animation on thumbnail: shimmer sweep + pulsing blue border
-                if matches!(app.batch_items[i].status, BatchStatus::Processing) {
+                if matches!(app.batch.items[i].status, BatchStatus::Processing) {
                     // Shimmer sweep
                     let sweep = ((anim_time * 0.7).fract()) * (item_rect.width() + 40.0) - 20.0 + item_rect.min.x;
                     let shimmer = Rect::from_min_max(
@@ -248,7 +248,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                 }
 
                 // Status indicator — bottom-right corner, minimal design
-                match &app.batch_items[i].status {
+                match &app.batch.items[i].status {
                     BatchStatus::Pending => {
                         // Small gray dot
                         let dot = Pos2::new(item_rect.max.x - 8.0, item_rect.max.y - 8.0);
@@ -304,7 +304,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                     }
 
                     // Save button — bottom-left (only for Done items)
-                    if matches!(app.batch_items[i].status, BatchStatus::Done) {
+                    if matches!(app.batch.items[i].status, BatchStatus::Done) {
                         let save_center = Pos2::new(
                             item_rect.min.x + 4.0 + btn_size * 0.5,
                             item_rect.max.y - 4.0 - btn_size * 0.5,
@@ -345,16 +345,16 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                 {
                     if let Some(pos) = ui.ctx().pointer_hover_pos() {
                         if !sidebar_escape_rect.contains(pos) {
-                            let source_selected = app.batch_items[i].selected;
+                            let source_selected = app.batch.items[i].selected;
                             let ids: Vec<u64> = if source_selected {
-                                app.batch_items
+                                app.batch.items
                                     .iter()
                                     .filter(|b| b.selected
                                         && !matches!(b.status, BatchStatus::Processing))
                                     .map(|b| b.id)
                                     .collect()
-                            } else if !matches!(app.batch_items[i].status, BatchStatus::Processing) {
-                                vec![app.batch_items[i].id]
+                            } else if !matches!(app.batch.items[i].status, BatchStatus::Processing) {
+                                vec![app.batch.items[i].id]
                             } else {
                                 Vec::new()
                             };
@@ -366,8 +366,8 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                 }
 
                 // Click to select (skip if close button was clicked)
-                if !close_clicked && item_response.clicked() && app.selected_batch_index != i {
-                    app.selected_batch_index = i;
+                if !close_clicked && item_response.clicked() && app.batch.selected_index != i {
+                    app.batch.selected_index = i;
                     app.canvas_switch_id += 1;
                     app.zoom_state.reset();
                     let ctx = ui.ctx().clone();
@@ -387,14 +387,14 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                 }
 
                 // Filename tooltip on hover (must be last — consumes response)
-                item_response.on_hover_text(&app.batch_items[i].filename);
+                item_response.on_hover_text(&app.batch.items[i].filename);
 
                 ui.add_space(theme::SPACE_XS); // gap between items
             }
         });
 
         // Request repaint for animations/pending thumbnails — throttled to ~15fps
-        if needs_repaint || app.batch_items.iter().any(|i| i.thumb_pending) {
+        if needs_repaint || app.batch.items.iter().any(|i| i.thumb_pending) {
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(66));
         }
 
@@ -405,14 +405,14 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
 
         // Apply save single item
         if let Some(idx) = save_idx {
-            if idx < app.batch_items.len() {
-                if let Some(ref rgba) = app.batch_items[idx].result_rgba {
-                    let stem = std::path::Path::new(&app.batch_items[idx].filename)
+            if idx < app.batch.items.len() {
+                if let Some(ref rgba) = app.batch.items[idx].result_rgba {
+                    let stem = std::path::Path::new(&app.batch.items[idx].filename)
                         .file_stem()
                         .and_then(|s| s.to_str())
                         .unwrap_or("image");
                     let default_name = format!("{stem}-nobg.png");
-                    let bg = app.batch_items[idx].settings.bg_rgb();
+                    let bg = app.batch.items[idx].settings.bg_rgb();
                     if let Some(path) = app.save_dialog()
                         .add_filter("PNG Image", &["png"])
                         .set_file_name(&default_name)
@@ -420,7 +420,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                         .save_file()
                     {
                         let rgba = crate::gui::app::PrunrApp::apply_bg_for_export(rgba, bg);
-                        let tx = app.bg_io.save_done_tx.clone();
+                        let tx = app.batch.bg_io.save_done_tx.clone();
                         app.toasts.info("Saving...");
                         std::thread::spawn(move || {
                             let msg = match prunr_core::encode_rgba_png(&rgba) {
@@ -440,16 +440,16 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
         // Apply reorder after iteration
         if let (Some(from), Some(to)) = (swap_from, swap_to) {
             if from != to {
-                let item = app.batch_items.remove(from);
+                let item = app.batch.items.remove(from);
                 let dst = if from < to { to - 1 } else { to };
-                app.batch_items.insert(dst, item);
+                app.batch.items.insert(dst, item);
                 // Adjust selected index
-                if app.selected_batch_index == from {
-                    app.selected_batch_index = dst;
-                } else if from < app.selected_batch_index && app.selected_batch_index <= to {
-                    app.selected_batch_index -= 1;
-                } else if to <= app.selected_batch_index && app.selected_batch_index < from {
-                    app.selected_batch_index += 1;
+                if app.batch.selected_index == from {
+                    app.batch.selected_index = dst;
+                } else if from < app.batch.selected_index && app.batch.selected_index <= to {
+                    app.batch.selected_index -= 1;
+                } else if to <= app.batch.selected_index && app.batch.selected_index < from {
+                    app.batch.selected_index += 1;
                 }
             }
         }
