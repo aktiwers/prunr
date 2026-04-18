@@ -1273,21 +1273,25 @@ impl PrunrApp {
     /// until the new item's is ready (no blank flash on sidebar click).
     fn sync_app_state_to_selected_item(&mut self, idx: usize) {
         let item = &self.batch.items[idx];
-        if item.source_texture.is_some() {
-            self.source_texture = item.source_texture.clone();
-        }
+        // Mirror both textures exactly — including `None`. The old "keep the
+        // previous texture" guards caused two distinct bugs:
+        //   - result_texture guard: canvas stayed on the previous item's image
+        //     until the user wiggled the mouse (compositor dropped the
+        //     post-tex_prep repaint).
+        //   - source_texture guard: canvas's fit-zoom calculation ran against
+        //     the previous item's dimensions, producing a "pop" when the new
+        //     source_texture eventually landed at a different size. Because
+        //     `pending_fit_zoom` is consumed on the frame the fit runs (see
+        //     `canvas.rs:79-91`), the re-fit against the correct size never
+        //     happened.
+        // Mirroring None means the canvas either skips fit (source absent) or
+        // shows a blank result area (~30-50ms) while tex_prep runs, then
+        // snaps to the correct fit on the next frame.
+        self.source_texture = item.source_texture.clone();
         self.loaded_filename = Some(item.filename.clone());
         self.image_dimensions = Some(item.dimensions);
         self.show_original = false;
 
-        // Mirror the selected item's texture/rgba exactly — including `None`.
-        // Previously we kept the old texture visible to avoid a one-frame
-        // flash when clicking to a Done item whose texture had been evicted,
-        // but that made the canvas show the PREVIOUS item until the async
-        // `request_selected_textures` → `tex_prep` → drain cycle completed,
-        // and the completion-repaint wasn't reliable — canvas would stay
-        // stale until the user wiggled the mouse. A short blank flash on
-        // eviction-recovery is the honest trade-off.
         let result_texture = item.result_texture.clone();
         let result_rgba = item.result_rgba.clone();
         self.result_texture = result_texture;
