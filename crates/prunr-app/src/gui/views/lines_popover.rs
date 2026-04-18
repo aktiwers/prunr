@@ -120,7 +120,7 @@ pub fn render(ui: &mut Ui, settings: &mut ItemSettings, seg_model_name: &str) ->
             // Track which mode the pointer is currently over so the Model
             // section below can preview the model set that mode would use.
             let mut hovered_mode: Option<LineMode> = None;
-            for mode in [LineMode::Off, LineMode::EdgesOnly, LineMode::SubjectOutline] {
+            for mode in [LineMode::Off, LineMode::SubjectOutline, LineMode::EdgesOnly] {
                 let selected = settings.line_mode == mode;
                 let label = two_line_label(mode_label(mode), mode_description(mode));
                 let resp = ui.selectable_label(selected, label);
@@ -159,7 +159,7 @@ pub fn render(ui: &mut Ui, settings: &mut ItemSettings, seg_model_name: &str) ->
                 LineMode::Off => format!("{}  (no model used)", ICON_NEUROLOGY.codepoint),
                 LineMode::EdgesOnly => format!("{}  DexiNed", ICON_NEUROLOGY.codepoint),
                 LineMode::SubjectOutline => format!(
-                    "{}  DexiNed + {seg_model_name}",
+                    "{}  {seg_model_name} + DexiNed",
                     ICON_NEUROLOGY.codepoint,
                 ),
             };
