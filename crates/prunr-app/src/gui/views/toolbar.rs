@@ -86,7 +86,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                 }
             }
 
-            let is_batch_processing = app.batch.items.iter().any(|i| i.status == BatchStatus::Processing);
+            let is_batch_processing = app.batch.status_counts().processing > 0;
 
             // Cancel All replaces the Process button while any item is
             // mid-processing — single-action slot, no ambiguity.

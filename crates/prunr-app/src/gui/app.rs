@@ -1143,11 +1143,13 @@ impl PrunrApp {
             // Mark pending so sync_selected_batch_textures doesn't also spawn
             // its own prep on this same frame.
             item.result_tex_pending = true;
-            // Invalidate the sidebar thumbnail — it was built from the previous
-            // result_rgba and may carry different line colors. Sidebar's render
-            // loop will see `None + !pending` and queue a fresh generation.
-            item.thumb_texture = None;
-            item.thumb_pending = false;
+            // Thumbnail is deliberately NOT invalidated here: during a slider
+            // drag, live-preview results arrive every ~DEBOUNCE, and clearing
+            // thumb_texture each time makes the sidebar flicker wildly between
+            // the spinner and the freshly-built thumb. A slightly-stale thumb
+            // during drag is fine — the user is watching the canvas, not the
+            // sidebar, and a real Process (seed_history_for_reprocess) still
+            // resets the thumb for the authoritative new result.
             if let Some((mask, bits)) = r.new_edge_mask {
                 item.cached_edge_mask = Some((mask, bits));
             }
@@ -1272,29 +1274,23 @@ impl PrunrApp {
         self.image_dimensions = Some(item.dimensions);
         self.show_original = false;
 
+        // Mirror the selected item's texture/rgba exactly — including `None`.
+        // Previously we kept the old texture visible to avoid a one-frame
+        // flash when clicking to a Done item whose texture had been evicted,
+        // but that made the canvas show the PREVIOUS item until the async
+        // `request_selected_textures` → `tex_prep` → drain cycle completed,
+        // and the completion-repaint wasn't reliable — canvas would stay
+        // stale until the user wiggled the mouse. A short blank flash on
+        // eviction-recovery is the honest trade-off.
         let result_texture = item.result_texture.clone();
         let result_rgba = item.result_rgba.clone();
-        match item.status {
-            BatchStatus::Done => {
-                if item.result_texture.is_some() {
-                    self.result_texture = result_texture;
-                }
-                if item.result_rgba.is_some() {
-                    self.result_rgba = result_rgba;
-                }
-                self.state = AppState::Done;
-            }
-            BatchStatus::Processing => {
-                self.result_texture = result_texture;
-                self.result_rgba = result_rgba;
-                self.state = AppState::Processing;
-            }
-            _ => {
-                self.result_texture = None;
-                self.result_rgba = None;
-                self.state = AppState::Loaded;
-            }
-        }
+        self.result_texture = result_texture;
+        self.result_rgba = result_rgba;
+        self.state = match item.status {
+            BatchStatus::Done => AppState::Done,
+            BatchStatus::Processing => AppState::Processing,
+            _ => AppState::Loaded,
+        };
     }
 
     fn spawn_tex_prep(
