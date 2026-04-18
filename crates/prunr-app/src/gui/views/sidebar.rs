@@ -134,12 +134,10 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                 {
                     app.batch_items[i].thumb_pending = true;
                     let item_id = app.batch_items[i].id;
-                    let bg = app.batch_items[i].settings.bg_rgb();
                     app.request_thumbnail(
                         item_id,
                         &app.batch_items[i].source,
                         app.batch_items[i].result_rgba.as_ref(),
-                        bg,
                     );
                     needs_repaint = true;
                 }
@@ -169,6 +167,18 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                         .min(1.0);
                     let fitted = tex_size * scale;
                     let thumb_rect = Rect::from_center_size(item_rect.center(), fitted);
+                    // Render-time bg fill: result thumbs are transparent where
+                    // pixels were removed; paint the bg color behind so the
+                    // sidebar matches the canvas. Source-only thumbs are opaque.
+                    if app.batch_items[i].result_rgba.is_some() {
+                        if let Some(bg) = app.batch_items[i].settings.bg_rgb() {
+                            ui.painter().rect_filled(
+                                thumb_rect,
+                                0.0,
+                                Color32::from_rgb(bg[0], bg[1], bg[2]),
+                            );
+                        }
+                    }
                     // Dim thumbnail to ~40% while it's being dragged out to an external app.
                     let is_dragging = dragging_ids.as_ref().is_some_and(|s| s.contains(&app.batch_items[i].id));
                     let dim = if is_dragging { 0.4 } else { 1.0 };

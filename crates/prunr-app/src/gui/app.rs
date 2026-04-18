@@ -1405,21 +1405,16 @@ impl PrunrApp {
         item_id: u64,
         source: &ImageSource,
         result_rgba: Option<&Arc<image::RgbaImage>>,
-        bg: Option<[u8; 3]>,
     ) {
         let tx = self.bg_io.thumb_tx.clone();
         if let Some(rgba) = result_rgba {
             let rgba = rgba.clone();
             std::thread::spawn(move || {
                 let (w, h) = fit_dimensions(rgba.width(), rgba.height(), 160, 160);
-                let mut thumb = image::imageops::resize(rgba.as_ref(), w, h, image::imageops::FilterType::Triangle);
-                if let Some(bg) = bg {
-                    prunr_core::apply_background_color(&mut thumb, bg);
-                }
+                let thumb = image::imageops::resize(rgba.as_ref(), w, h, image::imageops::FilterType::Triangle);
                 let _ = tx.send((item_id, thumb.width(), thumb.height(), thumb.into_raw()));
             });
         } else {
-            // Source-only thumbnails have no transparency, so `bg` is a no-op.
             let source = source.clone();
             std::thread::spawn(move || {
                 if let Ok(bytes) = source.load_bytes() {
@@ -1553,20 +1548,18 @@ impl PrunrApp {
                 // spawn its own prep on this same frame.
                 item.result_tex_pending = true;
                 // Invalidate the sidebar thumbnail — it was built from the
-                // previous result_rgba and may have different line colors.
+                // previous result_rgba and may carry different line colors.
                 // Sidebar's render loop will see `None + !pending` and queue
                 // a fresh thumb generation on the next frame.
                 item.thumb_texture = None;
                 item.thumb_pending = false;
                 let item_id = item.id;
                 let switch = self.result_switch_id;
-                let bg = item.settings.bg_rgb();
                 Self::spawn_tex_prep(
                     new_rgba,
                     item_id,
                     format!("result_{item_id}_{switch}"),
                     true,
-                    bg,
                     tex_prep_tx.clone(),
                     ctx.clone(),
                 );
@@ -1681,7 +1674,7 @@ impl PrunrApp {
                 self.batch_items[idx].source_tex_pending = true;
                 Self::spawn_tex_prep(
                     rgba, item_id, format!("source_{item_id}"), false,
-                    None, self.bg_io.tex_prep_tx.clone(), ctx.clone(),
+                    self.bg_io.tex_prep_tx.clone(), ctx.clone(),
                 );
             }
         }
@@ -1691,11 +1684,10 @@ impl PrunrApp {
         {
             if let Some(rgba) = self.batch_items[idx].result_rgba.clone() {
                 let switch = self.result_switch_id;
-                let bg = self.batch_items[idx].settings.bg_rgb();
                 self.batch_items[idx].result_tex_pending = true;
                 Self::spawn_tex_prep(
                     rgba, item_id, format!("result_{item_id}_{switch}"), true,
-                    bg, self.bg_io.tex_prep_tx.clone(), ctx.clone(),
+                    self.bg_io.tex_prep_tx.clone(), ctx.clone(),
                 );
             }
         }
@@ -1744,28 +1736,15 @@ impl PrunrApp {
         item_id: u64,
         name: String,
         is_result: bool,
-        bg_apply: Option<[u8; 3]>,
         tx: mpsc::Sender<(u64, String, egui::ColorImage, bool)>,
         ctx: egui::Context,
     ) {
         std::thread::spawn(move || {
             let (w, h) = (rgba.width(), rgba.height());
-            let ci = if let Some(bg) = bg_apply {
-                // Background compositing runs off the UI thread: clone the
-                // RGBA (~48 MB for 4000×3000) and the per-pixel blend both
-                // happen here instead of blocking the canvas.
-                let mut composed = (*rgba).clone();
-                prunr_core::apply_background_color(&mut composed, bg);
-                egui::ColorImage::from_rgba_unmultiplied(
-                    [w as usize, h as usize],
-                    composed.as_flat_samples().as_slice(),
-                )
-            } else {
-                egui::ColorImage::from_rgba_unmultiplied(
-                    [w as usize, h as usize],
-                    rgba.as_flat_samples().as_slice(),
-                )
-            };
+            let ci = egui::ColorImage::from_rgba_unmultiplied(
+                [w as usize, h as usize],
+                rgba.as_flat_samples().as_slice(),
+            );
             let _ = tx.send((item_id, name, ci, is_result));
             ctx.request_repaint();
         });
@@ -2393,7 +2372,6 @@ impl eframe::App for PrunrApp {
             // Row 3 is always visible now (Lines mode selector lives there),
             // so the toolbar always reserves two rows of height.
             let height = chip::CHIP_HEIGHT * 2.0 + theme::SPACE_XS + theme::SPACE_SM * 2.0;
-            let mut bg_changed = false;
             let mut toolbar_change = adjustments_toolbar::ToolbarChange::default();
             let is_processing = self.state == AppState::Processing;
             // Snapshot of the current (settings, applied_preset) taken BEFORE
@@ -2427,9 +2405,6 @@ impl eframe::App for PrunrApp {
                         &mut item.applied_preset,
                         is_processing,
                     );
-                    // bg is applied at display-time — rebuild texture
-                    // immediately, not via Tier 2.
-                    bg_changed = toolbar_change.bg;
                 });
             if toolbar_change.preset_applied {
                 let idx = self.selected_batch_index.min(self.batch_items.len() - 1);
@@ -2497,17 +2472,10 @@ impl eframe::App for PrunrApp {
                     );
                 }
             }
-            if bg_changed {
-                let idx = self.selected_batch_index.min(self.batch_items.len() - 1);
-                self.batch_items[idx].result_texture = None;
-                self.batch_items[idx].result_tex_pending = false;
-                // Thumbnail bakes bg in during generation; needs regeneration
-                // so the sidebar preview matches the canvas.
-                self.batch_items[idx].thumb_texture = None;
-                self.batch_items[idx].thumb_pending = false;
-                self.result_texture = None;
-                self.result_switch_id += 1;
-                self.sync_selected_batch_textures(ui.ctx());
+            if toolbar_change.bg {
+                // bg is rendered at draw time (GPU rect behind transparent
+                // result texture) — no CPU compositing, no texture rebuild.
+                ui.ctx().request_repaint();
             }
         }
 
