@@ -154,6 +154,13 @@ pub(crate) struct BatchItem {
     pub(crate) dimensions: (u32, u32),
     /// Pre-decoded source RGBA (decoded on background thread for instant switching)
     pub(crate) source_rgba: Option<Arc<image::RgbaImage>>,
+    /// Same pixels as `source_rgba`, pre-wrapped in `DynamicImage::ImageRgba8`
+    /// and shared via `Arc`. Built lazily by `build_preview_inputs` on the
+    /// first live-preview dispatch for this item and reused for every
+    /// subsequent dispatch in the session, so each drag-tweak avoids a ~15ms,
+    /// ~48MB memcpy clone. Cleared whenever `source_rgba` is re-populated
+    /// (re-decode) so the cache can't go stale.
+    pub(crate) source_dyn: Option<Arc<image::DynamicImage>>,
     pub(crate) source_texture: Option<egui::TextureHandle>,
     pub(crate) thumb_texture: Option<egui::TextureHandle>,
     pub(crate) thumb_pending: bool,
@@ -299,6 +306,7 @@ impl BatchItem {
             source,
             dimensions,
             source_rgba: None,
+            source_dyn: None,
             source_texture: None,
             thumb_texture: None,
             thumb_pending: false,
