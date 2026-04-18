@@ -155,6 +155,13 @@ fn apply_mask_inplace(rgba: &mut RgbaImage, mask: &GrayImage) {
 /// ~1px. Fractional shifts run `floor` full iterations then linearly blend
 /// with one extra iteration for sub-pixel precision (e.g. 2.5 = 50% 2-iter +
 /// 50% 3-iter).
+/// Dilate a grayscale mask by N pixels (0 is a fast no-op).
+/// Thin wrapper around `apply_edge_shift` that hides the "negative = dilate" sign convention.
+pub(crate) fn dilate_mask(mask: &mut GrayImage, pixels: u32) {
+    if pixels == 0 { return; }
+    apply_edge_shift(mask, -(pixels as f32));
+}
+
 fn apply_edge_shift(mask: &mut GrayImage, shift: f32) {
     let abs = shift.abs();
     if abs < 0.01 { return; }

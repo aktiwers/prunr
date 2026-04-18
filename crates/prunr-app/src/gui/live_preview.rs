@@ -20,9 +20,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
-use image::{DynamicImage, RgbaImage};
+use image::{DynamicImage, GrayImage, RgbaImage};
 
-use prunr_core::{ModelKind, postprocess_from_flat, finalize_edges};
+use prunr_core::{ModelKind, postprocess_from_flat, tensor_to_edge_mask, compose_edges};
 
 use crate::gui::item_settings::ItemSettings;
 use crate::gui::worker::CompressedTensor;
@@ -50,6 +50,10 @@ pub struct PreviewResult {
     /// Generation counter — used to discard results from stale dispatches
     /// that completed after a newer tweak cancelled them.
     pub generation: u64,
+    /// Edge mask built during this dispatch, for the parent to cache so
+    /// subsequent edge_thickness / solid_line_color tweaks skip the resize.
+    /// Some only when Kind was Edge and the mask was built (not reused).
+    pub new_edge_mask: Option<(Arc<GrayImage>, u32 /* line_strength bits */)>,
 }
 
 /// State for a pending (debounced) preview dispatch.
@@ -150,12 +154,22 @@ impl LivePreview {
 
             let tx = self.result_tx.clone();
             rayon::spawn(move || {
-                let result = run_preview(inputs, &cancel);
+                let ls_bits = inputs.settings.line_strength.to_bits();
+                let is_edge = matches!(inputs.kind, PreviewKind::Edge);
+                let had_cache = inputs.cached_edge_mask.is_some();
+                let (result, built_mask) = run_preview(inputs, &cancel);
                 if cancel.load(Ordering::Acquire) {
                     return;
                 }
                 if let Some(rgba) = result {
-                    let _ = tx.send(PreviewResult { item_id: id, rgba, generation });
+                    // Publish the mask for caching only if we just built it
+                    // (cache miss path) — no point re-publishing what was cached.
+                    let new_edge_mask = if is_edge && !had_cache {
+                        built_mask.map(|m| (m, ls_bits))
+                    } else {
+                        None
+                    };
+                    let _ = tx.send(PreviewResult { item_id: id, rgba, generation, new_edge_mask });
                 }
             });
         }
@@ -205,6 +219,10 @@ pub struct DispatchInputs {
     /// that as the base image for finalize_edges).
     pub seg_tensor: Option<SegTensor>,
     pub edge_tensor: Option<EdgeTensor>,
+    /// Pre-built edge mask (post-resize, pre-dilation) from a previous dispatch
+    /// whose line_strength matches the current one. Populated when available
+    /// so tweaks to edge_thickness / solid_line_color skip the resize.
+    pub cached_edge_mask: Option<Arc<GrayImage>>,
 }
 
 pub struct SegTensor {
@@ -238,41 +256,57 @@ pub fn decompress_edge(ct: &CompressedTensor) -> Option<EdgeTensor> {
     })
 }
 
-/// Actually run the preview. Runs on a rayon worker thread. Returns None
-/// if the work couldn't be completed (cancelled or bad inputs).
+/// Actually run the preview. Runs on a rayon worker thread. Returns the RGBA
+/// plus, for Edge kind, the resized pre-dilation mask so the parent can cache
+/// it (tied to the dispatch's line_strength).
 ///
 /// Preview mode skips the guided filter stage in postprocess — the full-quality
 /// refinement runs only on Process commit. Result looks slightly softer during
 /// live-drag but full quality is restored the moment the user commits.
-fn run_preview(inputs: DispatchInputs, cancel: &AtomicBool) -> Option<RgbaImage> {
-    if cancel.load(Ordering::Acquire) { return None; }
+fn run_preview(inputs: DispatchInputs, cancel: &AtomicBool) -> (Option<RgbaImage>, Option<Arc<GrayImage>>) {
+    if cancel.load(Ordering::Acquire) { return (None, None); }
 
     match inputs.kind {
         PreviewKind::Mask => {
-            let seg = inputs.seg_tensor?;
-            // For live preview we disable guided filter in the MaskSettings
-            // copy — keeps preview fast. User re-enables automatically on Process.
+            let Some(seg) = inputs.seg_tensor else { return (None, None); };
             let mut mask_settings = inputs.settings.mask_settings();
             mask_settings.refine_edges = false;
-            postprocess_from_flat(
+            let rgba = postprocess_from_flat(
                 &seg.data,
                 seg.height as usize,
                 seg.width as usize,
                 &inputs.original,
                 &mask_settings,
                 seg.model,
-            ).ok()
+            ).ok();
+            (rgba, None)
         }
         PreviewKind::Edge => {
-            let edge = inputs.edge_tensor?;
-            Some(finalize_edges(
-                &edge.data,
-                edge.height,
-                edge.width,
+            let Some(edge) = inputs.edge_tensor else { return (None, None); };
+            let edge_settings = inputs.settings.edge_settings();
+            // Fast path: cached mask still valid for this line_strength.
+            // Skip sigmoid + Lanczos resize (~40-80ms on 4K) and go straight
+            // to dilate + composite.
+            let (mask, built) = if let Some(m) = inputs.cached_edge_mask {
+                (m, None)
+            } else {
+                let m = Arc::new(tensor_to_edge_mask(
+                    &edge.data,
+                    edge.height,
+                    edge.width,
+                    inputs.original.width(),
+                    inputs.original.height(),
+                    edge_settings.line_strength,
+                ));
+                (m.clone(), Some(m))
+            };
+            let rgba = compose_edges(
+                &mask,
                 &inputs.original,
-                inputs.settings.line_strength,
-                inputs.settings.solid_line_color,
-            ))
+                edge_settings.solid_line_color,
+                edge_settings.edge_thickness,
+            );
+            (Some(rgba), built)
         }
     }
 }
@@ -299,7 +333,6 @@ mod tests {
     #[test]
     fn mark_tweak_twice_cancels_in_flight() {
         let mut lp = LivePreview::default();
-        // Simulate an in-flight dispatch
         let cancel = Arc::new(AtomicBool::new(false));
         lp.in_flight.insert(
             7,
@@ -329,5 +362,67 @@ mod tests {
         lp.cancel_all();
         assert!(lp.pending.is_empty());
         assert!(lp.in_flight.is_empty());
+    }
+
+    #[test]
+    fn stale_generation_result_is_dropped() {
+        // In-flight carries generation 5 (latest dispatch). A stale worker
+        // finishes with generation 1 — drain_results must drop it silently.
+        let mut lp = LivePreview::default();
+        lp.in_flight.insert(
+            42,
+            InFlight { cancel: Arc::new(AtomicBool::new(false)), generation: 5 },
+        );
+        lp.result_tx.send(PreviewResult {
+            item_id: 42,
+            rgba: RgbaImage::new(1, 1),
+            generation: 1,
+            new_edge_mask: None,
+        }).unwrap();
+
+        let drained = lp.drain_results();
+        assert!(drained.is_empty(), "stale generation must not be returned");
+        assert!(
+            lp.in_flight.contains_key(&42),
+            "in-flight entry is preserved — the real dispatch hasn't completed",
+        );
+    }
+
+    #[test]
+    fn matching_generation_result_is_accepted_and_clears_in_flight() {
+        let mut lp = LivePreview::default();
+        lp.in_flight.insert(
+            99,
+            InFlight { cancel: Arc::new(AtomicBool::new(false)), generation: 7 },
+        );
+        lp.result_tx.send(PreviewResult {
+            item_id: 99,
+            rgba: RgbaImage::new(2, 2),
+            generation: 7,
+            new_edge_mask: None,
+        }).unwrap();
+
+        let drained = lp.drain_results();
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0].item_id, 99);
+        assert!(
+            !lp.in_flight.contains_key(&99),
+            "once a fresh result is accepted, the in-flight slot is cleared",
+        );
+    }
+
+    #[test]
+    fn result_for_unknown_item_is_dropped() {
+        // No in-flight entry at all (user cancel_all'd or never dispatched).
+        // A late result arriving for an unknown id must be dropped cleanly.
+        let mut lp = LivePreview::default();
+        lp.result_tx.send(PreviewResult {
+            item_id: 777,
+            rgba: RgbaImage::new(1, 1),
+            generation: 1,
+            new_edge_mask: None,
+        }).unwrap();
+        let drained = lp.drain_results();
+        assert!(drained.is_empty());
     }
 }

@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
 
-use prunr_core::{MaskSettings, ModelKind, ProgressStage, ProcessResult};
+use prunr_core::{MaskSettings, EdgeSettings, ModelKind, ProgressStage, ProcessResult};
 use crate::gui::settings::LineMode;
 use crate::subprocess::protocol::SubprocessEvent;
 use crate::subprocess::manager::SubprocessManager;
@@ -65,8 +65,7 @@ pub struct ProcessingConfig {
     pub mask: MaskSettings,
     pub force_cpu: bool,
     pub line_mode: LineMode,
-    pub line_strength: f32,
-    pub solid_line_color: Option<[u8; 3]>,
+    pub edge: EdgeSettings,
 }
 
 pub enum WorkerMessage {
@@ -148,7 +147,7 @@ fn run_batch_with_retry(
     res_tx: &mpsc::Sender<WorkerResult>,
     ctx: &egui::Context,
 ) {
-    let ProcessingConfig { model, jobs: initial_jobs, mask, force_cpu, line_mode, line_strength, solid_line_color } = config;
+    let ProcessingConfig { model, jobs: initial_jobs, mask, force_cpu, line_mode, edge } = config;
     let mut pending: VecDeque<WorkItem> = initial_items.into();
     let mut pending_tier2: VecDeque<Tier2WorkItem> = initial_tier2.into();
     let mut completed: std::collections::HashSet<u64> = std::collections::HashSet::new();
@@ -202,8 +201,7 @@ fn run_batch_with_retry(
         let total_pending = pending.len() + pending_tier2.len();
         let effective_jobs = max_jobs.min(pending.len().max(1));
         let (mut sub, _active_provider) = match SubprocessManager::spawn(
-            model, effective_jobs, mask, force_cpu, line_mode,
-            line_strength, solid_line_color,
+            model, effective_jobs, mask, force_cpu, line_mode, edge,
         ) {
             Ok(s) => s,
             Err(e) => {

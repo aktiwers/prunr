@@ -29,6 +29,17 @@ pub struct InferenceRecipe {
 pub struct EdgeRecipe {
     pub line_strength_bits: u32,
     pub solid_line_color: Option<[u8; 3]>,
+    pub edge_thickness: u32,
+}
+
+impl From<&crate::EdgeSettings> for EdgeRecipe {
+    fn from(e: &crate::EdgeSettings) -> Self {
+        Self {
+            line_strength_bits: e.line_strength.to_bits(),
+            solid_line_color: e.solid_line_color,
+            edge_thickness: e.edge_thickness,
+        }
+    }
 }
 
 /// Tier 2: mask postprocessing settings (gamma, threshold, edge refinement).
@@ -161,6 +172,7 @@ mod tests {
             edge: EdgeRecipe {
                 line_strength_bits: 0.5f32.to_bits(),
                 solid_line_color: None,
+                edge_thickness: 0,
             },
             mask: mask(gamma, None, 0.0, false),
             composite: CompositeRecipe { bg_color: bg, solid_line_color: None },
@@ -231,6 +243,14 @@ mod tests {
         let a = make_recipe(ModelKind::Silueta, 1.0, None);
         let mut b = a.clone();
         b.edge.solid_line_color = Some([255, 0, 0]);
+        assert_eq!(resolve_tier(&a, &b), RequiredTier::EdgeRerun);
+    }
+
+    #[test]
+    fn edge_thickness_change_edge_rerun() {
+        let a = make_recipe(ModelKind::Silueta, 1.0, None);
+        let mut b = a.clone();
+        b.edge.edge_thickness = 3;
         assert_eq!(resolve_tier(&a, &b), RequiredTier::EdgeRerun);
     }
 

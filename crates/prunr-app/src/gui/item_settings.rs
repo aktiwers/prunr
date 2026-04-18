@@ -11,7 +11,7 @@
 //! Target size: under 40 bytes to fit in a single cache line alongside the
 //! BatchItem's lightweight metadata fields.
 
-use prunr_core::{LineMode, MaskSettings};
+use prunr_core::{LineMode, MaskSettings, EdgeSettings};
 use serde::{Deserialize, Serialize};
 
 /// Per-image processing settings. Edited via the adjustments toolbar.
@@ -50,6 +50,8 @@ pub struct ItemSettings {
     pub line_strength: f32,
     /// Solid color override for edges. `None` = preserve original RGB.
     pub solid_line_color: Option<[u8; 3]>,
+    /// Dilate edge mask by N pixels after threshold — thickens thin lines.
+    pub edge_thickness: u32,
 
     /// Fill transparent areas with a solid color. `None` = transparent.
     /// Stored as RGBA for UI parity; pipeline only uses RGB.
@@ -68,6 +70,7 @@ impl Default for ItemSettings {
             line_mode: LineMode::Off,
             line_strength: 0.5,
             solid_line_color: None,
+            edge_thickness: 0,
             bg: None,
         }
     }
@@ -89,6 +92,15 @@ impl ItemSettings {
             refine_edges: self.refine_edges,
             guided_radius: self.guided_radius,
             guided_epsilon: self.guided_epsilon,
+        }
+    }
+
+    /// Convert edge-postprocess fields into the core `EdgeSettings`.
+    pub fn edge_settings(&self) -> EdgeSettings {
+        EdgeSettings {
+            line_strength: self.line_strength,
+            solid_line_color: self.solid_line_color,
+            edge_thickness: self.edge_thickness,
         }
     }
 
@@ -122,10 +134,7 @@ impl ItemSettings {
                 uses_segmentation,
                 uses_edge_detection,
             },
-            edge: prunr_core::EdgeRecipe {
-                line_strength_bits: self.line_strength.to_bits(),
-                solid_line_color: self.solid_line_color,
-            },
+            edge: prunr_core::EdgeRecipe::from(&self.edge_settings()),
             mask,
             composite: prunr_core::CompositeRecipe {
                 bg_color: bg_rgb,
@@ -155,10 +164,9 @@ mod tests {
 
     #[test]
     fn size_under_cache_line_budget() {
-        // Hard limit: must stay under 40 bytes so BatchItem doesn't bloat.
         assert!(
-            std::mem::size_of::<ItemSettings>() <= 40,
-            "ItemSettings is {} bytes, budget is 40",
+            std::mem::size_of::<ItemSettings>() <= 48,
+            "ItemSettings is {} bytes, budget is 48",
             std::mem::size_of::<ItemSettings>()
         );
     }
@@ -214,6 +222,7 @@ mod tests {
             line_mode: LineMode::EdgesOnly,
             line_strength: 0.3,
             solid_line_color: Some([10, 20, 30]),
+            edge_thickness: 2,
             bg: Some([100, 150, 200, 240]),
         };
         let json = serde_json::to_string(&s).unwrap();

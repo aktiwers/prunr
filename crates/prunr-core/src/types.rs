@@ -97,6 +97,28 @@ impl Default for MaskSettings {
     }
 }
 
+/// Controls for the edge-detection postprocess (`finalize_edges`).
+/// `line_mode` is kept separate — it picks whether edges run at all.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct EdgeSettings {
+    /// DexiNed sensitivity, 0.0-1.0.
+    pub line_strength: f32,
+    /// Solid color override for edges. `None` = preserve original RGB.
+    pub solid_line_color: Option<[u8; 3]>,
+    /// Dilate edge mask by N pixels after threshold — thickens thin lines.
+    pub edge_thickness: u32,
+}
+
+impl Default for EdgeSettings {
+    fn default() -> Self {
+        Self {
+            line_strength: 0.5,
+            solid_line_color: None,
+            edge_thickness: 0,
+        }
+    }
+}
+
 /// Raw inference result (Tier 1 output) — the model tensor before postprocessing.
 pub struct InferenceResult {
     /// Raw f32 tensor data in row-major order [1, 1, H, W].
