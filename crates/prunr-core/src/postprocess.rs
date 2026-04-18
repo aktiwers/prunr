@@ -149,11 +149,35 @@ pub fn apply_mask(original: &DynamicImage, mask: &GrayImage) -> RgbaImage {
 
 /// Write the mask into an existing RGBA buffer's alpha channel in place.
 /// Used by `postprocess()` to avoid a second full-resolution RGBA allocation.
+///
+/// Above `PAR_THRESHOLD` pixels the work splits across rows — each rayon
+/// task owns a disjoint horizontal strip, matching the buffer's row-major
+/// memory layout so writes stay cache-friendly. Below the threshold the
+/// serial loop wins: rayon's fan-out costs more than this loop does on a
+/// small image. The loop is memory-bandwidth-bound, so the speedup ceiling
+/// is ~1.1-1.2× on 4K regardless of core count.
 fn apply_mask_inplace(rgba: &mut RgbaImage, mask: &GrayImage) {
+    const PAR_THRESHOLD: usize = 512 * 512;
+
+    let width = rgba.width() as usize;
+    let row_bytes = width * 4;
+    let mask_stride = width;
     let mask_raw = mask.as_raw();
     let out_raw = rgba.as_mut();
-    for (pixel, &alpha) in out_raw.chunks_mut(4).zip(mask_raw.iter()) {
-        pixel[3] = alpha;
+
+    if mask_raw.len() >= PAR_THRESHOLD {
+        out_raw
+            .par_chunks_mut(row_bytes)
+            .zip(mask_raw.par_chunks(mask_stride))
+            .for_each(|(px_row, mask_row)| {
+                for (pixel, &alpha) in px_row.chunks_mut(4).zip(mask_row.iter()) {
+                    pixel[3] = alpha;
+                }
+            });
+    } else {
+        for (pixel, &alpha) in out_raw.chunks_mut(4).zip(mask_raw.iter()) {
+            pixel[3] = alpha;
+        }
     }
 }
 
@@ -317,5 +341,75 @@ mod tests {
             "Expected many distinct alpha values, got {}",
             unique_alphas.len()
         );
+    }
+
+    /// Time `f` N times (with a few warm-up runs) and `eprintln!` min /
+    /// median / mean. Shared by the two `#[ignore]` benches below.
+    fn bench_report(label: &str, warmup: usize, iterations: usize, mut f: impl FnMut()) {
+        for _ in 0..warmup {
+            f();
+        }
+        let mut samples: Vec<u128> = Vec::with_capacity(iterations);
+        for _ in 0..iterations {
+            let start = std::time::Instant::now();
+            f();
+            samples.push(start.elapsed().as_micros());
+        }
+        samples.sort_unstable();
+        let min = samples[0];
+        let median = samples[iterations / 2];
+        let mean = samples.iter().sum::<u128>() / iterations as u128;
+        eprintln!(
+            "{label} ({iterations} iters): min={:.3}ms median={:.3}ms mean={:.3}ms",
+            min as f64 / 1000.0,
+            median as f64 / 1000.0,
+            mean as f64 / 1000.0,
+        );
+    }
+
+    /// Isolated bench for `apply_mask_inplace` — the loop Phase 10-07
+    /// parallelized. Skips the RGBA alloc / Lanczos resize that dominate
+    /// `postprocess_4k_bench`.
+    ///   `cargo test -p prunr-core --release apply_mask_inplace_4k_bench -- --nocapture --ignored`
+    #[test]
+    #[ignore]
+    fn apply_mask_inplace_4k_bench() {
+        let (w, h) = (4000u32, 3000u32);
+        let mask = GrayImage::from_fn(w, h, |x, _| image::Luma([(x & 0xFF) as u8]));
+        let mut rgba = RgbaImage::new(w, h);
+        for (i, px) in rgba.as_mut().chunks_mut(4).enumerate() {
+            px[0] = (i & 0xFF) as u8;
+            px[1] = ((i >> 8) & 0xFF) as u8;
+            px[2] = ((i >> 16) & 0xFF) as u8;
+            px[3] = 0;
+        }
+
+        bench_report(
+            &format!("apply_mask_inplace_4k_bench ({w}x{h})"),
+            3,
+            20,
+            || apply_mask_inplace(&mut rgba, &mask),
+        );
+    }
+
+    /// Timed bench for the whole postprocess pipeline on a Silueta-shaped
+    /// tensor + 4000×3000 source.
+    ///   `cargo test -p prunr-core --release postprocess_4k_bench -- --nocapture --ignored`
+    #[test]
+    #[ignore]
+    fn postprocess_4k_bench() {
+        let mut tensor = vec![0.0f32; 320 * 320];
+        for y in 0..320 {
+            for x in 0..320 {
+                tensor[y * 320 + x] = (y * 320 + x) as f32 / (320.0 * 320.0);
+            }
+        }
+        let original = solid_rgb(4000, 3000);
+        let mask = MaskSettings::default();
+
+        bench_report("postprocess_4k_bench (4000x3000, 320x320 tensor)", 2, 12, || {
+            let _ = postprocess_from_flat(&tensor, 320, 320, &original, &mask, ModelKind::Silueta)
+                .expect("postprocess succeeds");
+        });
     }
 }
