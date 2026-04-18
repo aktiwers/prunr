@@ -24,8 +24,8 @@ const POPOVER_WIDTH: f32 = 260.0;
 
 /// Label for the dropdown button — shows the `applied_preset` name and
 /// whether current settings still match it.
-///   - Match → `Preset: Portrait ✓` (check icon, clean)
-///   - Diverged → `Preset: Portrait ✎` (edit icon, modified)
+///   - Match → `🔖 Portrait ✓` (check icon, clean)
+///   - Diverged → `🔖 Portrait ✎` (edit icon, modified)
 ///
 /// Tracks the preset the user LAST APPLIED (via dropdown click or Reset All),
 /// not whichever preset happens to match current settings. This way
@@ -36,11 +36,11 @@ fn button_label(settings: &Settings, current: &ItemSettings, applied_preset: &st
     let exists = applied_preset == PRUNR_PRESET
         || settings.presets.contains_key(applied_preset);
     if !exists {
-        return format!("{}  Preset: Custom  {}", ICON_BOOKMARK.codepoint, ICON_EDIT.codepoint);
+        return format!("{}  Custom  {}", ICON_BOOKMARK.codepoint, ICON_EDIT.codepoint);
     }
     let is_modified = *current != settings.preset_values(applied_preset);
     let state_icon = if is_modified { ICON_EDIT.codepoint } else { ICON_CHECK.codepoint };
-    format!("{}  Preset: {applied_preset}  {state_icon}", ICON_BOOKMARK.codepoint)
+    format!("{}  {applied_preset}  {state_icon}", ICON_BOOKMARK.codepoint)
 }
 
 /// Sort USER preset names case-insensitively. The synthetic "Prunr" preset
@@ -84,7 +84,9 @@ pub fn render(
     .fill(theme::BG_SECONDARY)
     .corner_radius(theme::BUTTON_ROUNDING)
     .min_size(egui::vec2(0.0, BTN_HEIGHT));
-    let resp = ui.add(btn).on_hover_text("Apply or save preset for the current image");
+    let resp = ui.add(btn).on_hover_text(format!(
+        "Apply or save preset — currently: {applied_preset}",
+    ));
 
     if resp.clicked() {
         ui.memory_mut(|m| m.toggle_popup(pop_id));
