@@ -63,6 +63,11 @@ pub struct PreviewResult {
     /// subsequent edge_thickness / solid_line_color tweaks skip the resize.
     /// Some only when Kind was Edge and the mask was built (not reused).
     pub new_edge_mask: Option<(Arc<GrayImage>, u32 /* line_strength bits */)>,
+    /// `true` when no further tweaks are pending for this item at drain
+    /// time — the drag has settled and this is the last result of the
+    /// session. Callers gate heavy side-effects (sidebar thumb rebuild)
+    /// on this so the mid-drag sidebar doesn't flicker.
+    pub is_final: bool,
 }
 
 /// State for a pending (debounced) preview dispatch.
@@ -191,7 +196,13 @@ impl LivePreview {
                     } else {
                         None
                     };
-                    let _ = tx.send(PreviewResult { item_id: id, rgba, generation, new_edge_mask });
+                    // `is_final` is set by `drain_results`, where the UI
+                    // thread can read `self.pending` atomically. The worker
+                    // ships a placeholder and doesn't care.
+                    let _ = tx.send(PreviewResult {
+                        item_id: id, rgba, generation, new_edge_mask,
+                        is_final: false,
+                    });
                 }
             });
         }
@@ -200,11 +211,12 @@ impl LivePreview {
     }
 
     /// Drain any completed previews. Returned results are already filtered
-    /// to the latest generation — callers can apply them directly without
-    /// further staleness checks.
+    /// to the latest generation; each result's `is_final` is set to `true`
+    /// iff no new tweak for that item is currently pending — i.e. the drag
+    /// has settled and this is the last result of the session.
     pub fn drain_results(&mut self) -> Vec<PreviewResult> {
         let mut out = Vec::new();
-        while let Ok(r) = self.result_rx.try_recv() {
+        while let Ok(mut r) = self.result_rx.try_recv() {
             // Drop stale: if generation doesn't match the last dispatch for
             // this item, a newer tweak superseded it.
             let is_latest = self.in_flight
@@ -212,6 +224,10 @@ impl LivePreview {
                 .map_or(false, |f| f.generation == r.generation);
             if is_latest {
                 self.in_flight.remove(&r.item_id);
+                // If pending has a fresh entry for this item, the user is
+                // still mid-drag (a tweak landed after the current dispatch
+                // started). Empty pending = drag settled = final result.
+                r.is_final = !self.pending.contains_key(&r.item_id);
                 out.push(r);
             }
         }
@@ -427,6 +443,7 @@ mod tests {
             rgba: RgbaImage::new(1, 1),
             generation: 1,
             new_edge_mask: None,
+            is_final: false,
         }).unwrap();
 
         let drained = lp.drain_results();
@@ -449,6 +466,7 @@ mod tests {
             rgba: RgbaImage::new(2, 2),
             generation: 7,
             new_edge_mask: None,
+            is_final: false,
         }).unwrap();
 
         let drained = lp.drain_results();
@@ -470,8 +488,56 @@ mod tests {
             rgba: RgbaImage::new(1, 1),
             generation: 1,
             new_edge_mask: None,
+            is_final: false,
         }).unwrap();
         let drained = lp.drain_results();
         assert!(drained.is_empty());
+    }
+
+    #[test]
+    fn drain_sets_is_final_true_when_no_more_pending() {
+        // User released the knob — no new pending entry for this item.
+        let mut lp = LivePreview::default();
+        lp.in_flight.insert(
+            11,
+            InFlight { cancel: Arc::new(AtomicBool::new(false)), generation: 3 },
+        );
+        lp.result_tx.send(PreviewResult {
+            item_id: 11,
+            rgba: RgbaImage::new(1, 1),
+            generation: 3,
+            new_edge_mask: None,
+            is_final: false,
+        }).unwrap();
+
+        let drained = lp.drain_results();
+        assert_eq!(drained.len(), 1);
+        assert!(drained[0].is_final, "empty pending at drain time → result is final");
+    }
+
+    #[test]
+    fn drain_sets_is_final_false_while_user_still_tweaking() {
+        // User is still dragging — a new tweak has landed in pending since
+        // the dispatch was started.
+        let mut lp = LivePreview::default();
+        lp.in_flight.insert(
+            22,
+            InFlight { cancel: Arc::new(AtomicBool::new(false)), generation: 2 },
+        );
+        lp.pending.insert(
+            22,
+            Pending { last_tweak_at: Instant::now(), kind: PreviewKind::Mask },
+        );
+        lp.result_tx.send(PreviewResult {
+            item_id: 22,
+            rgba: RgbaImage::new(1, 1),
+            generation: 2,
+            new_edge_mask: None,
+            is_final: false,
+        }).unwrap();
+
+        let drained = lp.drain_results();
+        assert_eq!(drained.len(), 1);
+        assert!(!drained[0].is_final, "pending for this item means drag is still active");
     }
 }

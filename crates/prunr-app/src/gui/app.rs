@@ -1146,13 +1146,16 @@ impl PrunrApp {
             // Mark pending so sync_selected_batch_textures doesn't also spawn
             // its own prep on this same frame.
             item.result_tex_pending = true;
-            // Thumbnail is deliberately NOT invalidated here: during a slider
-            // drag, live-preview results arrive every ~DEBOUNCE, and clearing
-            // thumb_texture each time makes the sidebar flicker wildly between
-            // the spinner and the freshly-built thumb. A slightly-stale thumb
-            // during drag is fine — the user is watching the canvas, not the
-            // sidebar, and a real Process (seed_history_for_reprocess) still
-            // resets the thumb for the authoritative new result.
+            // Thumbnail invalidation is gated on `is_final` (set by
+            // LivePreview::drain_results based on whether the user has more
+            // tweaks pending). Invalidating on every mid-drag result produces
+            // a sidebar flicker between the spinner and the rebuilt thumb.
+            // Invalidating only on the drag-settled result gets us a refreshed
+            // sidebar when the user stops tweaking, without strobing during.
+            if r.is_final {
+                item.thumb_texture = None;
+                item.thumb_pending = false;
+            }
             if let Some((mask, bits)) = r.new_edge_mask {
                 item.cached_edge_mask = Some((mask, bits));
             }
