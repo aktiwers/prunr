@@ -193,6 +193,7 @@ fn preprocess(img: &DynamicImage) -> Array4<f32> {
     for c in 0..3 {
         let bgr_c = 2 - c; // RGB→BGR: channel 0(R)→2(B), 1(G)→1(G), 2(B)→0(R)
         let mut plane = out.slice_mut(ndarray::s![0, bgr_c, .., ..]);
+        // invariant: slice of a freshly-zeroed Array4 is contiguous.
         let plane_slice = plane.as_slice_mut().unwrap();
         for i in 0..h * w {
             plane_slice[i] = raw[i * 3 + c] as f32 - MEAN_BGR[bgr_c];

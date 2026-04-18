@@ -551,6 +551,7 @@ impl PrunrApp {
         ));
         self.selected_batch_index = self.batch_items.len() - 1;
         if do_decode {
+            // invariant: push occurred above, so batch_items is non-empty.
             if let Ok(bytes) = self.batch_items.last().unwrap().source.load_bytes() {
                 self.request_decode_bytes(id, bytes);
             }
@@ -627,6 +628,7 @@ impl PrunrApp {
                 self.last_open_dir = first.parent().map(|p| p.to_path_buf());
             }
             if paths.len() == 1 && self.batch_items.is_empty() {
+                // invariant: paths.len() == 1 checked in the guard above.
                 self.handle_open_path(paths.into_iter().next().unwrap());
             } else {
                 // Send file paths for lazy loading — bytes read on demand.
@@ -2010,6 +2012,7 @@ impl PrunrApp {
         // Handle inline bytes immediately (Wayland — already in memory, no I/O)
         if !inline_items.is_empty() {
             if inline_items.len() == 1 && self.batch_items.is_empty() {
+                // invariant: inline_items.len() == 1 checked in the guard above.
                 let (bytes, name) = inline_items.into_iter().next().unwrap();
                 self.handle_open_bytes(bytes, name);
             } else {
