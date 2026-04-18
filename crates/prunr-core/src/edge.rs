@@ -45,9 +45,8 @@ impl EdgeEngine {
     /// Run only the DexiNed inference stage. Returns the raw sigmoid-logits
     /// tensor at DexiNed's native resolution (480×640), plus (height, width).
     ///
-    /// Phase 3 Tier 2 edge preview path: parent caches this tensor and reruns
-    /// `finalize_edges` with new line_strength / line_color without re-running
-    /// the model (~20-100ms instead of 200ms-10s).
+    /// Split from `detect` so callers can cache this tensor and rerun
+    /// `finalize_edges` with new line_strength / line_color without re-running the model.
     pub fn infer_tensor(&self, original: &DynamicImage) -> Result<(Vec<f32>, u32, u32), CoreError> {
         let mut session = self.session.lock()
             .map_err(|e| CoreError::Inference(format!("Edge session lock failed: {e}")))?;
@@ -65,7 +64,8 @@ impl EdgeEngine {
         let edge_map = outputs[fused_idx]
             .try_extract_array::<f32>()
             .map_err(|e| CoreError::Inference(format!("Failed to extract edge output: {e}")))?;
-        let edge_slice = edge_map.as_slice().unwrap();
+        let edge_slice = edge_map.as_slice()
+            .ok_or_else(|| CoreError::Inference("Edge output tensor is not contiguous".to_string()))?;
         Ok((edge_slice.to_vec(), DEXINED_H, DEXINED_W))
     }
 }

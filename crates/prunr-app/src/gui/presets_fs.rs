@@ -137,20 +137,6 @@ pub fn delete(name: &str) -> std::io::Result<()> {
     }
 }
 
-/// Return the absolute path to the presets directory, for "Reveal in Finder"
-/// / "Show in file manager" affordances.
-#[allow(dead_code)] // wired up when a Settings modal "Open folder" button lands
-pub fn reveal_path() -> Option<PathBuf> {
-    presets_dir()
-}
-
-/// Return whether a user-chosen name maps to a path that already exists.
-/// Used by the save dialog to surface an overwrite warning.
-#[allow(dead_code)]
-pub fn exists(name: &str) -> bool {
-    preset_path(name).is_some_and(|p| p.is_file())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

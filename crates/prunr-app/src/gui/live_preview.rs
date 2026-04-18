@@ -105,8 +105,8 @@ impl LivePreview {
     /// Idempotent — no-op if there's no pending tweak for `item_id`.
     pub fn flush(&mut self, item_id: u64) {
         if let Some(p) = self.pending.get_mut(&item_id) {
-            // Reach backward by more than DEBOUNCE so `tick`'s elapsed check
-            // is unconditionally satisfied on the next frame.
+            // Anti-date past DEBOUNCE so next tick dispatches immediately.
+            // checked_sub guards against early-boot monotonic clock underflow.
             p.last_tweak_at = Instant::now()
                 .checked_sub(DEBOUNCE + Duration::from_millis(10))
                 .unwrap_or_else(Instant::now);

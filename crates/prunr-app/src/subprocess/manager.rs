@@ -231,10 +231,6 @@ impl SubprocessManager {
             model,
             original_image_path: orig_path,
             mask,
-            edge_tensor_path: None,
-            edge_tensor_height: None,
-            edge_tensor_width: None,
-            live_preview: false,
         }).map_err(|e| format!("Failed to send RePostProcess: {e}"))?;
 
         self.in_flight.insert(item_id);

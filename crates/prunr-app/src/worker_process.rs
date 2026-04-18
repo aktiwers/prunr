@@ -98,21 +98,17 @@ pub fn run_worker() -> ! {
         .expect("failed to spawn writer thread");
 
     // Read Init command
-    let init = match read_message::<_, SubprocessCommand>(&mut reader) {
-        Ok(Some(SubprocessCommand::Init { model, jobs, mask, force_cpu, line_mode, line_strength, solid_line_color, ipc_dir })) => {
-            (model, jobs, mask, force_cpu, line_mode, line_strength, solid_line_color, ipc_dir)
-        }
-        _ => {
-            let _ = evt_tx.send(SubprocessEvent::InitError {
-                error: "Expected Init command".to_string(),
-            });
-            drop(evt_tx);
-            let _ = writer_handle.join();
-            std::process::exit(1);
-        }
+    let Ok(Some(SubprocessCommand::Init {
+        model, jobs, mask, force_cpu, line_mode, line_strength, solid_line_color, ipc_dir,
+    })) = read_message::<_, SubprocessCommand>(&mut reader)
+    else {
+        let _ = evt_tx.send(SubprocessEvent::InitError {
+            error: "Expected Init command".to_string(),
+        });
+        drop(evt_tx);
+        let _ = writer_handle.join();
+        std::process::exit(1);
     };
-
-    let (model, jobs, mask, force_cpu, line_mode, line_strength, solid_line_color, ipc_dir) = init;
 
     // Detect backend
     let has_gpu = !OrtEngine::detect_active_provider().eq_ignore_ascii_case("CPU");
@@ -509,13 +505,6 @@ pub fn run_worker() -> ! {
             SubprocessCommand::RePostProcess {
                 item_id, tensor_path, tensor_height, tensor_width,
                 model, original_image_path, mask: repost_mask,
-                // Phase 3 will use these to run edge-tier reruns and skip the
-                // guided filter in live-preview mode. Phase 1 accepts the fields
-                // for forward-compat but ignores them (no edge tier 2 yet).
-                edge_tensor_path: _,
-                edge_tensor_height: _,
-                edge_tensor_width: _,
-                live_preview: _,
             } => {
                 let evt_tx = evt_tx.clone();
                 let in_flight = in_flight.clone();
