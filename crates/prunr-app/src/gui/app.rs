@@ -1787,6 +1787,21 @@ impl eframe::App for PrunrApp {
         if self.source_texture.is_none() && !self.batch.items.is_empty() {
             self.sync_selected_batch_textures(ctx);
         }
+        // Keep the event loop awake while any async texture / decode work is
+        // pending. `ctx.request_repaint()` from the tex_prep / decode threads
+        // is supposed to wake egui, but some compositors (notably Wayland)
+        // drop thread-initiated wake-ups when the window is idle, leaving the
+        // canvas stuck on the old image until a mouse event fires. Polling
+        // from the UI thread is reliable; it costs one frame per 50ms while
+        // async work is in flight, then self-extinguishes. See item 6 in
+        // `.planning/phases/12-ux-refinement-and-bugs/12-01-FINDINGS.md` for
+        // the full incident analysis.
+        let any_tex_pending = self.batch.items.iter().any(|it| {
+            it.result_tex_pending || it.source_tex_pending || it.decode_pending
+        });
+        if any_tex_pending {
+            ctx.request_repaint_after(std::time::Duration::from_millis(50));
+        }
         // Periodic cleanup of stale on-disk history files.
         if self.processor.last_history_cleanup.elapsed().as_secs() >= HISTORY_CLEANUP_INTERVAL_SECS {
             self.processor.last_history_cleanup = std::time::Instant::now();
