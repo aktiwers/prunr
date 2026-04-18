@@ -286,9 +286,6 @@ pub struct PrunrApp {
     dispatch_recipe: Option<prunr_core::ProcessingRecipe>,
     /// Last time periodic history cleanup ran.
     last_history_cleanup: std::time::Instant,
-    /// Rate-limits the "Preset applied — click Process" toast so rapid
-    /// preset cycling doesn't stack duplicates.
-    last_preset_toast_at: Option<std::time::Instant>,
     /// Tier 2 live preview dispatcher. Debounces chip tweaks and runs
     /// postprocess_from_flat / finalize_edges on rayon threads.
     pub(crate) live_preview: super::live_preview::LivePreview,
@@ -406,7 +403,6 @@ impl PrunrApp {
             admission_tx: None,
             dispatch_recipe: None,
             last_history_cleanup: std::time::Instant::now(),
-            last_preset_toast_at: None,
             live_preview: super::live_preview::LivePreview::default(),
         }
     }
@@ -461,7 +457,6 @@ impl PrunrApp {
             admission_tx: None,
             dispatch_recipe: None,
             last_history_cleanup: std::time::Instant::now(),
-            last_preset_toast_at: None,
             live_preview: super::live_preview::LivePreview::default(),
         }
     }
@@ -2380,20 +2375,16 @@ impl eframe::App for PrunrApp {
                 if toolbar_change.edge_cache_invalid {
                     self.batch_items[idx].cached_edge_tensor = None;
                 }
-                // Live preview for the newly-invalidated tier can no longer run
-                // against the cache — user needs to Process to repopulate.
-                // Rate-limit to 2 seconds so rapid preset cycling (comparing
-                // Portrait / Product / Landscape) doesn't stack toasts.
+                // A preset apply that invalidates the cache on an already-
+                // processed item means live preview has no tensor to rerun
+                // against. Auto-trigger a reprocess so the user doesn't have
+                // to click Process; tier routing keeps this cheap when only
+                // one tensor is stale.
                 if toolbar_change.preset_applied
                     && self.batch_items[idx].status == BatchStatus::Done
                 {
-                    let now = std::time::Instant::now();
-                    let fresh = self.last_preset_toast_at
-                        .map_or(true, |t| now.duration_since(t).as_secs() >= 2);
-                    if fresh {
-                        self.toasts.info("Preset applied — click Process to see the new result.");
-                        self.last_preset_toast_at = Some(now);
-                    }
+                    let target_id = self.batch_items[idx].id;
+                    self.process_items(|item| item.id == target_id);
                 }
             }
             // Register mask / edge tweaks with the live preview dispatcher.
