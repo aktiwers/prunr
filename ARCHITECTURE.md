@@ -81,7 +81,7 @@ Parent process (GUI/CLI)                  Child process (prunr --worker)
 ONNX Runtime allocates unpredictable amounts of memory at runtime (varies by model, input size, graph optimization, arena behaviour). Static memory estimates are always wrong. The subprocess model means:
 - **OOM kills only the child** — the parent stays responsive, the desktop never freezes
 - **Auto-retry with reduced concurrency** — crash at 4 jobs → retry at 2 → retry at 1
-- **Memory is fully reclaimed** by the OS when the child exits (no leaked arenas)
+- **Memory can only be fully reclaimed by process exit** — ORT's arena allocator + CUDA/CoreML contexts keep allocations alive for the lifetime of the session, so process exit is the only guaranteed reclaim mechanism
 
 ### IPC Protocol
 

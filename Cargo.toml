@@ -14,35 +14,43 @@ license = "Apache-2.0"
 repository = "https://github.com/aktiwers/prunr"
 
 [workspace.dependencies]
-# Phase 1 — active
-thiserror = "2.0"
-include-bytes-zstd = { git = "https://github.com/daac-tools/include-bytes-zstd" }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-
-# Phase 2+ — declared for consistent pinning, not used yet
+# Inference runtime — pinned to an RC for stable feature surface (CUDA, CoreML,
+# DirectML, download-binaries). Unpin when ort 2.0 stable ships and our feature
+# set is preserved. Check https://github.com/pykeio/ort/milestones before bumping.
 ort = { version = "=2.0.0-rc.12", features = ["cuda", "coreml", "directml", "ndarray", "download-binaries"] }
+
+# Image + tensor core
 ndarray = "0.17"
 image = { version = "0.25", features = ["jpeg", "png", "webp", "bmp"] }
 rayon = "1.11"
+fast_image_resize = "6"
+zstd = "0.13"
 num_cpus = "1"
+
+# Error handling + serialization
+thiserror = "2.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+bincode = { version = "2", features = ["serde"] }
+
+# GUI
 egui = "0.34"
 eframe = { version = "0.34", default-features = true }
 egui_extras = { version = "0.34", features = ["image"] }
-clap = { version = "4.5", features = ["derive"] }
-arboard = { version = "3.6", features = ["wayland-data-control"] }
-resvg = "0.47"
-indicatif = "0.17"
-rfd = "0.15"
-zstd = "0.13"
 egui-notify = "0.22"
 egui_material_icons = "0.6"
 egui_animation = "0.11"
+
+# Platform integration
+clap = { version = "4.5", features = ["derive"] }
+arboard = { version = "3.6", features = ["wayland-data-control"] }
+indicatif = "0.17"
+rfd = "0.15"
 dirs = "6"
 sysinfo = "0.37"
-bincode = { version = "2", features = ["serde"] }
 memory-stats = "1"
-fast_image_resize = "6"
+
+# Observability
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
@@ -52,18 +60,3 @@ lto = "fat"
 opt-level = 3
 panic = "abort"
 codegen-units = 1
-
-[profile.dist]
-inherits = "release"
-
-[workspace.metadata.dist]
-cargo-dist-version = "0.31.0"
-ci = "github"
-allow-dirty = ["ci"]
-installers = []
-targets = [
-    "x86_64-unknown-linux-gnu",
-    "x86_64-apple-darwin",
-    "aarch64-apple-darwin",
-    "x86_64-pc-windows-msvc",
-]
