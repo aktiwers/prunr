@@ -148,6 +148,16 @@ pub fn render(
             &mut item_settings.refine_edges,
         ), Tier::Mask, &mut change);
 
+        aggregate(chip::chip_f32(
+            ui, "feather",
+            &ICON_BLUR_LINEAR.codepoint.to_string(), "Feather",
+            "Soften mask edges with a Gaussian blur. Color-agnostic — use for general smoothing or when refine_edges isn't picking up the right detail.",
+            &mut item_settings.feather,
+            0.0..=5.0, defaults.template.feather,
+            false,
+            |v| if v < 0.1 { "off".into() } else { format!("σ {v:.1}") },
+        ), Tier::Mask, &mut change);
+
         if item_settings.refine_edges {
             aggregate(chip::chip_u32(
                 ui, "guided_radius",

@@ -43,6 +43,8 @@ pub struct ItemSettings {
     pub guided_radius: u32,
     /// Guided filter regularization. Only used when refine_edges.
     pub guided_epsilon: f32,
+    /// Gaussian blur sigma applied to mask (softens edges, color-agnostic).
+    pub feather: f32,
 
     /// Line extraction mode.
     pub line_mode: LineMode,
@@ -67,6 +69,7 @@ impl Default for ItemSettings {
             refine_edges: false,
             guided_radius: 8,
             guided_epsilon: 1e-4,
+            feather: 0.0,
             line_mode: LineMode::Off,
             line_strength: 0.5,
             solid_line_color: None,
@@ -92,6 +95,7 @@ impl ItemSettings {
             refine_edges: self.refine_edges,
             guided_radius: self.guided_radius,
             guided_epsilon: self.guided_epsilon,
+            feather: self.feather,
         }
     }
 
@@ -115,17 +119,9 @@ impl ItemSettings {
         let bg_rgb = self.bg.map(|[r, g, b, _]| [r, g, b]);
 
         let mask = if uses_segmentation {
-            prunr_core::MaskRecipe::new(
-                self.gamma,
-                self.threshold,
-                self.edge_shift,
-                self.refine_edges,
-                self.guided_radius,
-                self.guided_epsilon,
-            )
+            prunr_core::MaskRecipe::from(&self.mask_settings())
         } else {
-            let d = MaskSettings::default();
-            prunr_core::MaskRecipe::new(1.0, None, 0.0, false, d.guided_radius, d.guided_epsilon)
+            prunr_core::MaskRecipe::from(&MaskSettings::default())
         };
 
         prunr_core::ProcessingRecipe {
@@ -206,7 +202,7 @@ mod tests {
         s.gamma = 2.0; // should NOT affect recipe in EdgesOnly mode
         s.threshold = Some(0.8);
         let r = s.current_recipe(prunr_core::ModelKind::Silueta, false);
-        let defaults = prunr_core::MaskRecipe::new(1.0, None, 0.0, false, 8, 1e-4);
+        let defaults = prunr_core::MaskRecipe::from(&prunr_core::MaskSettings::default());
         assert_eq!(r.mask, defaults);
     }
 
@@ -219,6 +215,7 @@ mod tests {
             refine_edges: true,
             guided_radius: 12,
             guided_epsilon: 5e-4,
+            feather: 1.5,
             line_mode: LineMode::EdgesOnly,
             line_strength: 0.3,
             solid_line_color: Some([10, 20, 30]),

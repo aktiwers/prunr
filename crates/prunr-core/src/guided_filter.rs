@@ -120,7 +120,7 @@ pub fn guided_filter_alpha(
 /// O(1) box filter using integral image (two-pass parallel prefix sums).
 ///
 /// Returns a newly-allocated output buffer.
-fn box_filter(src: &[f32], w: u32, h: u32, radius: u32) -> Vec<f32> {
+pub(crate) fn box_filter(src: &[f32], w: u32, h: u32, radius: u32) -> Vec<f32> {
     let w = w as usize;
     let h = h as usize;
     let n = w * h;
