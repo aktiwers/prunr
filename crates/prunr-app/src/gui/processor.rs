@@ -45,15 +45,12 @@ pub(crate) struct Processor {
     pub(crate) dispatch_recipe: Option<ProcessingRecipe>,
     /// Last time periodic history cleanup ran.
     pub(crate) last_history_cleanup: Instant,
-    #[allow(dead_code)] // held for future method moves (10-06 / 10-05.5)
-    egui_ctx: egui::Context,
 }
 
 impl Processor {
     pub(crate) fn new(
         worker_tx: mpsc::Sender<WorkerMessage>,
         worker_rx: mpsc::Receiver<WorkerResult>,
-        egui_ctx: egui::Context,
     ) -> Self {
         Self {
             worker_tx,
@@ -64,7 +61,6 @@ impl Processor {
             admission_tx: None,
             dispatch_recipe: None,
             last_history_cleanup: Instant::now(),
-            egui_ctx,
         }
     }
 }
@@ -77,7 +73,7 @@ mod tests {
     fn fixture() -> Processor {
         let (tx, _rx_unused) = mpsc::channel::<WorkerMessage>();
         let (_tx_unused, rx) = mpsc::channel::<WorkerResult>();
-        Processor::new(tx, rx, egui::Context::default())
+        Processor::new(tx, rx)
     }
 
     #[test]

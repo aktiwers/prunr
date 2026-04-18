@@ -48,7 +48,7 @@ impl HistoryManager {
     /// Seed history with the source RGBA as an initial no-recipe entry.
     /// No-op if either stack is non-empty (history already exists) or the
     /// source hasn't been decoded yet.
-    pub fn seed_with_source(item: &mut BatchItem) {
+    pub(crate) fn seed_with_source(item: &mut BatchItem) {
         if !item.history.is_empty() || !item.redo_stack.is_empty() {
             return;
         }
@@ -63,7 +63,7 @@ impl HistoryManager {
     /// entries — `HistoryEntry::cleanup` releases their backing Tier-3 disk
     /// files. In chain mode, keep `result_rgba` populated so the next chain
     /// step has its input.
-    pub fn archive_current_result(item: &mut BatchItem, max_depth: usize, chain_mode: bool) {
+    pub(crate) fn archive_current_result(item: &mut BatchItem, max_depth: usize, chain_mode: bool) {
         if item.status != BatchStatus::Done {
             return;
         }
@@ -90,7 +90,7 @@ impl HistoryManager {
     /// Precondition: caller checks `item.status == Done` if they want to
     /// gate by status (this method does the check internally and returns
     /// false if not Done — keeps callers branch-light).
-    pub fn undo_result(item: &mut BatchItem) -> bool {
+    pub(crate) fn undo_result(item: &mut BatchItem) -> bool {
         if item.status != BatchStatus::Done {
             return false;
         }
@@ -126,7 +126,7 @@ impl HistoryManager {
     /// Walk the redo stack forward. Returns true iff anything was redone.
     /// Inverse of `undo_result`: pushes current to `history`, restores from
     /// redo top, transitions status to Done.
-    pub fn redo_result(item: &mut BatchItem) -> bool {
+    pub(crate) fn redo_result(item: &mut BatchItem) -> bool {
         if item.redo_stack.is_empty() {
             return false;
         }
@@ -146,7 +146,7 @@ impl HistoryManager {
     /// Record a pre-apply snapshot before a preset is applied. The snapshot
     /// goes onto `preset_undo_stack` with depth enforcement; `preset_redo_stack`
     /// is cleared because a fresh apply branches the preset timeline.
-    pub fn push_preset(item: &mut BatchItem, snap: PresetSnapshot) {
+    pub(crate) fn push_preset(item: &mut BatchItem, snap: PresetSnapshot) {
         push_bounded(&mut item.preset_undo_stack, snap);
         item.preset_redo_stack.clear();
     }
@@ -159,7 +159,7 @@ impl HistoryManager {
     ///
     /// Side-effect: invalidates the edge cache if `line_mode` changed,
     /// because DexiNed's input depends on whether segmentation ran first.
-    pub fn swap_preset(item: &mut BatchItem, dir: HistoryDir) -> bool {
+    pub(crate) fn swap_preset(item: &mut BatchItem, dir: HistoryDir) -> bool {
         let popped = match dir {
             HistoryDir::Undo => item.preset_undo_stack.pop_back(),
             HistoryDir::Redo => item.preset_redo_stack.pop_back(),
