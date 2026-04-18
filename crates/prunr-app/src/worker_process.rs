@@ -40,9 +40,11 @@ impl WeightedSemaphore {
     /// Acquire units, returning a RAII guard that releases on drop (panic-safe).
     fn acquire(self: &Arc<Self>, weight: usize) -> SemaphoreGuard {
         let capped = weight.min(self.total_units);
-        let mut units = self.state.lock().unwrap();
+        // Poison recovery: the semaphore state is just a unit counter. A
+        // panicking user of the semaphore must not deadlock the worker pool.
+        let mut units = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         while *units < capped {
-            units = self.available.wait(units).unwrap();
+            units = self.available.wait(units).unwrap_or_else(std::sync::PoisonError::into_inner);
         }
         *units -= capped;
         SemaphoreGuard { sem: self.clone(), acquired: capped }
@@ -57,7 +59,8 @@ struct SemaphoreGuard {
 
 impl Drop for SemaphoreGuard {
     fn drop(&mut self) {
-        let mut units = self.sem.state.lock().unwrap();
+        // Poison recovery: drop must not panic (would abort under double-panic).
+        let mut units = self.sem.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         *units += self.acquired;
         self.sem.available.notify_all();
     }
@@ -161,6 +164,9 @@ pub fn run_worker() -> ! {
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(pool_size)
         .build()
+        // Fallback to a default (unsized) rayon pool if the sized builder
+        // somehow fails. Default-pool construction failing means rayon itself
+        // can't function; no useful recovery possible.
         .unwrap_or_else(|_| rayon::ThreadPoolBuilder::new().build().unwrap());
 
     let cancel = Arc::new(AtomicBool::new(false));
@@ -265,6 +271,7 @@ pub fn run_worker() -> ! {
                                 }
                             };
                             img_ref.and_then(|img| {
+                                // invariant: line_mode == EdgesOnly → needs_edge → edge_eng loaded.
                                 let eng_ref = edge_eng.as_ref().unwrap();
                                 eng_ref.infer_tensor(img).map(|(tensor, h, w)| {
                                     let rgba_image = prunr_core::finalize_edges(
@@ -280,6 +287,7 @@ pub fn run_worker() -> ! {
                         }
                         LineMode::SubjectOutline => {
                             if let Some(ref img) = chain_img {
+                                // invariant: line_mode == SubjectOutline → needs_edge → edge_eng loaded.
                                 let eng_ref = edge_eng.as_ref().unwrap();
                                 eng_ref.infer_tensor(img).map(|(tensor, h, w)| {
                                     let rgba_image = prunr_core::finalize_edges(
@@ -302,6 +310,7 @@ pub fn run_worker() -> ! {
                                     ),
                                 }.and_then(|pr| {
                                     let img = image::DynamicImage::ImageRgba8(pr.rgba_image);
+                                    // invariant: line_mode == SubjectOutline → needs_edge → edge_eng loaded.
                                     let eng_ref = edge_eng.as_ref().unwrap();
                                     eng_ref.infer_tensor(&img).map(|(tensor, h, w)| {
                                         let rgba_image = prunr_core::finalize_edges(

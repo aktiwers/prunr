@@ -79,6 +79,7 @@ impl AdmissionController {
         // Nothing fits. If nothing is in-flight, force-admit the smallest
         // to guarantee forward progress (avoids deadlock).
         if self.admitted.is_empty() && !self.pending.is_empty() {
+            // invariant: !pending.is_empty() checked in the guard above.
             let cost = self.pending.pop().unwrap(); // pop last = smallest
             self.committed_bytes += cost.total;
             self.admitted.insert(cost.item_id, cost.total);
@@ -103,10 +104,12 @@ impl AdmissionController {
 
 /// Cached sysinfo::System instance to avoid repeated allocations.
 fn with_system<T>(f: impl FnOnce(&sysinfo::System) -> T) -> T {
-    use std::sync::{Mutex, OnceLock};
+    use std::sync::{Mutex, OnceLock, PoisonError};
     static SYS: OnceLock<Mutex<sysinfo::System>> = OnceLock::new();
     let mtx = SYS.get_or_init(|| Mutex::new(sysinfo::System::new()));
-    let mut sys = mtx.lock().unwrap();
+    // Poison recovery: a panic in a prior RAM query must not disable memory
+    // queries app-wide. The inner System is just a cache; stale data is fine.
+    let mut sys = mtx.lock().unwrap_or_else(PoisonError::into_inner);
     sys.refresh_memory();
     f(&sys)
 }
