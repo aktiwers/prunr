@@ -630,8 +630,9 @@ fn run_batch_subprocess(
             continue;
         }
 
-        // Normal completion of this subprocess run
-        let _ = sub.send_shutdown();
+        // Normal completion of this subprocess run — matches the GUI's 5s
+        // grace budget for model-cache teardown; Drop's 1s covers any slippage.
+        let _ = sub.shutdown_with_timeout(std::time::Duration::from_secs(5));
         break;
     }
 
