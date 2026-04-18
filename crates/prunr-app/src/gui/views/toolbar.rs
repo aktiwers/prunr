@@ -49,27 +49,9 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
             }
         }
 
-        // Model dropdown moved to row 2 (adjustments_toolbar). Preset dropdown
-        // also moved to row 2 (right cluster). Row 1 now hosts: Open, Settings,
-        // Lines mode, then the action buttons (right-aligned). Lines popover
-        // stays on row 1 because it's a MODE selector orthogonal to the
-        // per-image knob tweaks.
-
-        if let Some(idx) = active_item_index(app) {
-            let mut lines_changed = false;
-            {
-                let item_settings_ref: &mut crate::gui::item_settings::ItemSettings =
-                    &mut app.batch_items[idx].settings;
-                ui.add_enabled_ui(!is_processing, |ui| {
-                    lines_changed = super::lines_popover::render(ui, item_settings_ref);
-                });
-            }
-            if lines_changed {
-                // Line-mode change invalidates the DexiNed edge cache (tensor was
-                // computed for a different input).
-                app.batch_items[idx].cached_edge_tensor = None;
-            }
-        }
+        // Model + Preset dropdowns live on row 2 (adjustments_toolbar); the
+        // Lines mode selector lives on row 3's left edge alongside its own
+        // chips. Row 1 stays minimal: Open, Settings, and the action cluster.
 
         // ── Right group: action buttons ──
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -182,11 +164,4 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
             }
         });
     });
-}
-
-/// Index of the currently-active batch item (the one the toolbar binds to).
-/// `None` when the batch is empty.
-fn active_item_index(app: &PrunrApp) -> Option<usize> {
-    if app.batch_items.is_empty() { return None; }
-    Some(app.selected_batch_index.min(app.batch_items.len() - 1))
 }
