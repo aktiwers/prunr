@@ -106,46 +106,46 @@ pub fn render(
     ui.horizontal(|ui| {
         render_model_dropdown(ui, app_settings, processing, &mut change);
 
-        // Mask knobs are irrelevant when segmentation is skipped (EdgesOnly mode).
-        let mask_active = item_settings.line_mode != LineMode::EdgesOnly;
-        ui.add_enabled_ui(mask_active, |ui| {
-            aggregate(chip::chip_f32(
-                ui, "gamma", "γ", "Gamma",
-                "How hard the mask cuts. >1 removes more aggressively, <1 is gentler on fine edges.",
-                &mut item_settings.gamma,
-                0.2..=3.0, defaults.template.gamma,
-                |v| format!("{v:.2}"),
-            ), Tier::Mask, &mut change);
+        // Mask knobs stay editable regardless of line_mode — in EdgesOnly
+        // mode they don't affect the current output, but letting the user
+        // pre-configure them means the preset's mask values stay visible
+        // and usable for when they switch back to Off / SubjectOutline.
+        aggregate(chip::chip_f32(
+            ui, "gamma", "γ", "Gamma",
+            "How hard the mask cuts. >1 removes more aggressively, <1 is gentler on fine edges.",
+            &mut item_settings.gamma,
+            0.2..=3.0, defaults.template.gamma,
+            |v| format!("{v:.2}"),
+        ), Tier::Mask, &mut change);
 
-            aggregate(chip::chip_option_f32(
-                ui, "threshold",
-                &ICON_BOLT.codepoint.to_string(), "Hard threshold",
-                "Snap the mask to fully opaque or fully transparent at this cutoff. Soft = smooth alpha, on = crisp silhouette.",
-                &mut item_settings.threshold,
-                0.01..=0.99, defaults.threshold_value, "Soft",
-                |v| format!("{v:.2}"),
-            ), Tier::Mask, &mut change);
+        aggregate(chip::chip_option_f32(
+            ui, "threshold",
+            &ICON_BOLT.codepoint.to_string(), "Hard threshold",
+            "Snap the mask to fully opaque or fully transparent at this cutoff. Soft = smooth alpha, on = crisp silhouette.",
+            &mut item_settings.threshold,
+            0.01..=0.99, defaults.threshold_value, "Soft",
+            |v| format!("{v:.2}"),
+        ), Tier::Mask, &mut change);
 
-            aggregate(chip::chip_f32(
-                ui, "edge_shift",
-                &ICON_SWAP_HORIZ.codepoint.to_string(), "Edge shift",
-                "Shrink or grow the mask outline. Positive = erode (trim fringe pixels), negative = dilate (keep more edge detail).",
-                &mut item_settings.edge_shift,
-                -5.0..=5.0, defaults.template.edge_shift,
-                |v| {
-                    if v > 0.5 { format!("erode {v:.0}px") }
-                    else if v < -0.5 { format!("dilate {:.0}px", v.abs()) }
-                    else { "0px".to_string() }
-                },
-            ), Tier::Mask, &mut change);
+        aggregate(chip::chip_f32(
+            ui, "edge_shift",
+            &ICON_SWAP_HORIZ.codepoint.to_string(), "Edge shift",
+            "Shrink or grow the mask outline. Positive = erode (trim fringe pixels), negative = dilate (keep more edge detail).",
+            &mut item_settings.edge_shift,
+            -5.0..=5.0, defaults.template.edge_shift,
+            |v| {
+                if v > 0.5 { format!("erode {v:.0}px") }
+                else if v < -0.5 { format!("dilate {:.0}px", v.abs()) }
+                else { "0px".to_string() }
+            },
+        ), Tier::Mask, &mut change);
 
-            aggregate(chip::chip_bool(
-                ui, "refine_edges",
-                &ICON_AUTO_FIX_HIGH.codepoint.to_string(), "Refine edges",
-                "Use the original image's colors to sharpen the mask around fine detail like hair or leaves. Runs a guided filter — slower but higher quality.",
-                &mut item_settings.refine_edges,
-            ), Tier::Mask, &mut change);
-        });
+        aggregate(chip::chip_bool(
+            ui, "refine_edges",
+            &ICON_AUTO_FIX_HIGH.codepoint.to_string(), "Refine edges",
+            "Use the original image's colors to sharpen the mask around fine detail like hair or leaves. Runs a guided filter — slower but higher quality.",
+            &mut item_settings.refine_edges,
+        ), Tier::Mask, &mut change);
 
         // Divider between mask and composite groups.
         ui.separator();
@@ -207,8 +207,9 @@ pub fn render(
     // directly — cache invalidation below picks up the change.
     ui.add_space(theme::SPACE_XS);
     ui.horizontal(|ui| {
+        let seg_model_name = super::model_name(app_settings.model);
         ui.add_enabled_ui(!processing, |ui| {
-            super::lines_popover::render(ui, item_settings);
+            super::lines_popover::render(ui, item_settings, seg_model_name);
         });
         if item_settings.line_mode != LineMode::Off {
             aggregate(chip::chip_f32(
