@@ -34,6 +34,18 @@ impl StatusCounts {
     }
 }
 
+/// Which shape the Process button should take for the current selection state.
+/// Drives both the button label and the icon the toolbar renders.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProcessButtonLabel {
+    /// No checkboxes set — click targets the currently-viewed item only.
+    ProcessViewed,
+    /// N checkboxes set, 1 ≤ N < total (or 1 ≤ N and total == 1).
+    ProcessSelected(usize),
+    /// All N ≥ 2 items checked — click targets the whole batch.
+    ProcessAll(usize),
+}
+
 /// Combined budget for compressed segmentation (`cached_tensor`) + edge
 /// (`cached_edge_tensor`) caches across all batch items, in bytes.
 const TENSOR_BUDGET: usize = 512 * 1024 * 1024;
@@ -91,6 +103,37 @@ impl BatchManager {
         } else {
             Some(self.selected_index.min(self.items.len() - 1))
         }
+    }
+
+    /// Derive the Process button's label shape from current selection state.
+    /// Single-item batches where the one item is checked render as
+    /// `ProcessSelected(1)` (not `ProcessAll(1)`) — "Process All [1]" reads
+    /// as a glitch.
+    pub(crate) fn process_button_label(&self) -> ProcessButtonLabel {
+        let total = self.items.len();
+        let selected = self.items.iter().filter(|i| i.selected).count();
+        match (selected, total) {
+            (0, _) => ProcessButtonLabel::ProcessViewed,
+            (n, t) if n == t && t >= 2 => ProcessButtonLabel::ProcessAll(t),
+            (n, _) => ProcessButtonLabel::ProcessSelected(n),
+        }
+    }
+
+    /// Item ids the Process button should dispatch: the checkbox-checked set
+    /// if any are checked, else the currently-viewed item. Empty when the
+    /// batch is empty.
+    pub(crate) fn items_to_process(&self) -> Vec<u64> {
+        let checked: Vec<u64> = self.items.iter()
+            .filter(|i| i.selected)
+            .map(|i| i.id)
+            .collect();
+        if !checked.is_empty() {
+            return checked;
+        }
+        self.selected_idx_clamped()
+            .and_then(|idx| self.items.get(idx).map(|i| i.id))
+            .into_iter()
+            .collect()
     }
 
     /// Single pass over `items` producing the three counts that callers
@@ -475,5 +518,113 @@ mod tests {
         // Pathological case: extreme aspect ratio shouldn't produce zero dims.
         let (w, h) = fit_dimensions(1000, 1, 50, 50);
         assert!(w >= 1 && h >= 1);
+    }
+
+    // ── process_button_label ─────────────────────────────────────────────
+
+    fn checked(id: u64) -> BatchItem {
+        let mut i = item_with_cache(id, 0);
+        i.selected = true;
+        i
+    }
+
+    #[test]
+    fn process_button_label_empty_batch_is_viewed() {
+        let bm = fixture();
+        assert_eq!(bm.process_button_label(), ProcessButtonLabel::ProcessViewed);
+    }
+
+    #[test]
+    fn process_button_label_no_checkboxes_is_viewed() {
+        let mut bm = fixture();
+        bm.items.push(item_with_cache(1, 0));
+        bm.items.push(item_with_cache(2, 0));
+        bm.items.push(item_with_cache(3, 0));
+        assert_eq!(bm.process_button_label(), ProcessButtonLabel::ProcessViewed);
+    }
+
+    #[test]
+    fn process_button_label_one_checkbox_of_three_is_selected_1() {
+        let mut bm = fixture();
+        bm.items.push(checked(1));
+        bm.items.push(item_with_cache(2, 0));
+        bm.items.push(item_with_cache(3, 0));
+        assert_eq!(bm.process_button_label(), ProcessButtonLabel::ProcessSelected(1));
+    }
+
+    #[test]
+    fn process_button_label_two_checkboxes_of_three_is_selected_2() {
+        let mut bm = fixture();
+        bm.items.push(checked(1));
+        bm.items.push(checked(2));
+        bm.items.push(item_with_cache(3, 0));
+        assert_eq!(bm.process_button_label(), ProcessButtonLabel::ProcessSelected(2));
+    }
+
+    #[test]
+    fn process_button_label_all_checked_multi_is_all() {
+        let mut bm = fixture();
+        bm.items.push(checked(1));
+        bm.items.push(checked(2));
+        bm.items.push(checked(3));
+        assert_eq!(bm.process_button_label(), ProcessButtonLabel::ProcessAll(3));
+    }
+
+    #[test]
+    fn process_button_label_single_item_checked_is_selected_not_all() {
+        // "Process All [1]" reads as a glitch — the t>=2 guard keeps it Selected.
+        let mut bm = fixture();
+        bm.items.push(checked(1));
+        assert_eq!(bm.process_button_label(), ProcessButtonLabel::ProcessSelected(1));
+    }
+
+    // ── items_to_process ─────────────────────────────────────────────────
+
+    #[test]
+    fn items_to_process_empty_batch_is_empty() {
+        let bm = fixture();
+        assert!(bm.items_to_process().is_empty());
+    }
+
+    #[test]
+    fn items_to_process_no_checkboxes_returns_viewed() {
+        let mut bm = fixture();
+        bm.items.push(item_with_cache(10, 0));
+        bm.items.push(item_with_cache(20, 0));
+        bm.items.push(item_with_cache(30, 0));
+        bm.selected_index = 1;
+        assert_eq!(bm.items_to_process(), vec![20]);
+    }
+
+    #[test]
+    fn items_to_process_no_checkboxes_clamps_stale_index() {
+        let mut bm = fixture();
+        bm.items.push(item_with_cache(42, 0));
+        bm.selected_index = 99; // stale; clamped to 0
+        assert_eq!(bm.items_to_process(), vec![42]);
+    }
+
+    #[test]
+    fn items_to_process_some_checkboxes_returns_only_checked() {
+        let mut bm = fixture();
+        bm.items.push(checked(1));
+        bm.items.push(item_with_cache(2, 0));
+        bm.items.push(checked(3));
+        bm.selected_index = 1; // viewed item is NOT checked — still excluded
+        let got = bm.items_to_process();
+        assert_eq!(got.len(), 2);
+        assert!(got.contains(&1));
+        assert!(got.contains(&3));
+        assert!(!got.contains(&2));
+    }
+
+    #[test]
+    fn items_to_process_all_checked_returns_all() {
+        let mut bm = fixture();
+        bm.items.push(checked(1));
+        bm.items.push(checked(2));
+        bm.items.push(checked(3));
+        let got = bm.items_to_process();
+        assert_eq!(got.len(), 3);
     }
 }

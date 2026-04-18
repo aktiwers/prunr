@@ -342,17 +342,12 @@ impl PrunrApp {
     }
 
     pub fn handle_remove_bg(&mut self) {
-        let has_selected = self.batch.items.iter().any(|i| i.selected);
-        if has_selected {
-            self.process_items(|item| item.selected);
-        } else {
-            // Process current image via batch path (item_id tracking ensures
-            // result goes to correct image even if user switches during processing)
-            let idx = self.batch.selected_index.min(self.batch.items.len().saturating_sub(1));
-            if let Some(target_id) = self.batch.items.get(idx).map(|b| b.id) {
-                self.process_items(|item| item.id == target_id);
-            }
+        let ids: std::collections::HashSet<u64> =
+            self.batch.items_to_process().into_iter().collect();
+        if ids.is_empty() {
+            return;
         }
+        self.process_items(|item| ids.contains(&item.id));
     }
 
     pub(crate) fn close_settings(&mut self, _ctx: &egui::Context) {
@@ -1031,10 +1026,6 @@ impl PrunrApp {
             entry.cleanup();
         }
         self.sync_after_batch_change();
-    }
-
-    pub fn handle_process_all(&mut self) {
-        self.process_items(|_| true);
     }
 
     /// Release an item's memory budget and greedily admit the next fitting items.
