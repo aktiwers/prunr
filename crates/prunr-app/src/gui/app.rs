@@ -1008,10 +1008,13 @@ impl PrunrApp {
         if self.state == AppState::Empty {
             self.state = AppState::Loaded;
         }
-        // Fit-to-window on first import so images open at a sensible size
-        // (matching Ctrl+0). Any subsequent image change also fits — the reset
-        // happens via zoom_state.reset() when the user navigates away.
-        self.zoom_state.pending_fit_zoom = true;
+        // NOTE: do NOT touch `zoom_state` here. The callers that actually
+        // change selection to the newly-added item (DnD inline single-file,
+        // force-select-after-drain) own the full `zoom_state.reset()`, so
+        // `previous_zoom` and `pan_offset` are cleared along with the flag.
+        // Setting only `pending_fit_zoom` here would leak stale toggle-state
+        // (previous_zoom) from the prior image into the fit logic, which can
+        // mis-fire `canvas.rs`'s "toggle-back to previous_zoom" branch.
         self.pending_batch_sync = true;
     }
 
@@ -1556,6 +1559,7 @@ impl PrunrApp {
                 }
                 if count == 1 {
                     self.batch.selected_index = self.batch.items.len() - 1;
+                    self.zoom_state.reset();
                     self.pending_batch_sync = true;
                 }
                 if self.settings.auto_process_on_import && self.batch.next_id > id_floor {
@@ -1672,9 +1676,11 @@ impl PrunrApp {
             }
         }
         if decode_arrived {
-            // Re-trigger fit zoom when a freshly decoded image arrives
-            // (the previous pending_fit_zoom may have been consumed by the old texture)
-            self.zoom_state.pending_fit_zoom = true;
+            // Freshly-decoded RGBA for the viewed item: clear zoom state
+            // entirely (not just re-arm the flag). A bare flag keeps
+            // previous_zoom / pan_offset around, which lets `canvas.rs`'s
+            // toggle-back branch fire against the old image's state.
+            self.zoom_state.reset();
             self.sync_selected_batch_textures(ctx);
         }
 
@@ -1724,6 +1730,7 @@ impl PrunrApp {
             // Select the new image if only one was loaded and no more are pending
             if loaded_count == 1 && channel_drained {
                 self.batch.selected_index = self.batch.items.len() - 1;
+                self.zoom_state.reset();
                 self.sync_selected_batch_textures(ctx);
             }
             if self.settings.auto_process_on_import && self.batch.next_id > id_floor {

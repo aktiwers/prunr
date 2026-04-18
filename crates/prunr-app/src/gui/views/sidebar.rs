@@ -191,7 +191,7 @@ fn render_item_row(
         actions.needs_repaint = true;
     }
 
-    paint_selection_checkbox(ui, &mut app.batch.items[i], item_rect);
+    let checkbox_clicked = paint_selection_checkbox(ui, &mut app.batch.items[i], item_rect);
 
     if matches!(app.batch.items[i].status, BatchStatus::Processing) {
         paint_processing_animation(ui, item_rect, ctx.anim_time);
@@ -214,8 +214,8 @@ fn render_item_row(
 
     detect_drag_escape(ui, app, i, &item_response, ctx.sidebar_escape_rect);
 
-    // Click to select (skip if a hover button handled the click).
-    if !close_clicked && item_response.clicked() && app.batch.selected_index != i {
+    // Click to select (skip if a hover button or the checkbox absorbed the click).
+    if !close_clicked && !checkbox_clicked && item_response.clicked() && app.batch.selected_index != i {
         app.batch.selected_index = i;
         app.canvas_switch_id += 1;
         app.zoom_state.reset();
@@ -351,7 +351,11 @@ fn paint_thumbnail(
     );
 }
 
-fn paint_selection_checkbox(ui: &egui::Ui, item: &mut BatchItem, item_rect: Rect) {
+/// Returns `true` when the checkbox absorbed a click this frame — the row's
+/// click-to-select handler must then skip, so toggling the check does NOT
+/// also switch the main canvas to this item. Mirrors the `close_clicked`
+/// contract used for the delete/save hover buttons.
+fn paint_selection_checkbox(ui: &egui::Ui, item: &mut BatchItem, item_rect: Rect) -> bool {
     let cb_size = 16.0;
     let cb_center = Pos2::new(
         item_rect.min.x + 4.0 + cb_size * 0.5,
@@ -387,6 +391,7 @@ fn paint_selection_checkbox(ui: &egui::Ui, item: &mut BatchItem, item_rect: Rect
             Color32::WHITE,
         );
     }
+    cb_clicked
 }
 
 fn paint_processing_animation(ui: &egui::Ui, item_rect: Rect, anim_time: f32) {
