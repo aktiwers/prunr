@@ -199,10 +199,17 @@ pub fn render(
         );
     });
 
-    // ── Row 3: line-specific knobs (conditional) ──
-    if item_settings.line_mode != LineMode::Off {
-        ui.add_space(theme::SPACE_XS);
-        ui.horizontal(|ui| {
+    // ── Row 3: Lines mode selector (always visible) + line knobs (when Lines
+    // mode is on). The Lines dropdown is the gate for enabling line
+    // extraction; keeping it visible at all times is how the user turns
+    // lines on. `lines_popover::render` mutates `item_settings.line_mode`
+    // directly — cache invalidation below picks up the change.
+    ui.add_space(theme::SPACE_XS);
+    ui.horizontal(|ui| {
+        ui.add_enabled_ui(!processing, |ui| {
+            super::lines_popover::render(ui, item_settings);
+        });
+        if item_settings.line_mode != LineMode::Off {
             aggregate(chip::chip_f32(
                 ui, "line_strength",
                 &ICON_TUNE.codepoint.to_string(), "Line strength",
@@ -219,8 +226,8 @@ pub fn render(
                 &mut item_settings.solid_line_color,
                 defaults.solid_line_color_value,
             ), Tier::Edge, &mut change);
-        });
-    }
+        }
+    });
 
     // Granular cache invalidation:
     // - Segmentation tensor depends on the model. Only stale when the model
