@@ -157,6 +157,32 @@ pub fn spawn_worker(
     (msg_tx, res_rx)
 }
 
+/// Batch-wide state carried across subprocess spawns. `max_jobs` halves on
+/// each crash retry; `completed` lets the crash handler skip already-delivered
+/// items when re-queueing in-flight work.
+struct BatchRunState {
+    pending: VecDeque<WorkItem>,
+    pending_tier2: VecDeque<Tier2WorkItem>,
+    completed: std::collections::HashSet<u64>,
+    max_jobs: usize,
+}
+
+/// Outcome of one subprocess's event loop. `Cancelled` means the user cancel
+/// was already propagated (sub killed, IPC cleaned, `WorkerResult::Cancelled`
+/// sent) — caller returns immediately.
+enum EventLoopOutcome {
+    Finished,
+    Crashed(String),
+    Cancelled,
+}
+
+/// What `poll_additional_items` found when the queues ran dry.
+enum WaitAction {
+    Continue, // more work in queues or just pushed
+    Complete, // producer disconnected → batch done
+    Sleep,    // producer still connected, nothing available yet
+}
+
 /// Run a batch with automatic retry on subprocess crash.
 /// Reduces concurrency (jobs) on each crash: jobs → jobs/2 → 1.
 /// If even 1 job crashes, marks remaining items as "insufficient memory".
@@ -181,22 +207,15 @@ fn run_batch_with_retry(
     ctx: &egui::Context,
 ) {
     let ProcessingConfig { model, jobs: initial_jobs, mask, force_cpu, line_mode, edge } = config;
-    let mut pending: VecDeque<WorkItem> = initial_items.into();
-    let mut pending_tier2: VecDeque<Tier2WorkItem> = initial_tier2.into();
-    let mut completed: std::collections::HashSet<u64> = std::collections::HashSet::new();
-    let mut max_jobs = initial_jobs;
+    let mut state = BatchRunState {
+        pending: initial_items.into(),
+        pending_tier2: initial_tier2.into(),
+        completed: std::collections::HashSet::new(),
+        max_jobs: initial_jobs,
+    };
+    let additional_items_rx = additional_items_rx.as_ref();
 
-    // Report loading status
-    let first_id = pending.front().map(|(id, _, _)| *id)
-        .or_else(|| pending_tier2.front().map(|t| t.item_id));
-    if let Some(fid) = first_id {
-        let _ = res_tx.send(WorkerResult::BatchProgress {
-            item_id: fid,
-            stage: ProgressStage::LoadingModel,
-            pct: 0.0,
-        });
-        ctx.request_repaint();
-    }
+    emit_loading_status(&state, res_tx, ctx);
 
     loop {
         if cancel.load(Ordering::Acquire) {
@@ -205,353 +224,493 @@ fn run_batch_with_retry(
             return;
         }
 
-        if pending.is_empty() && pending_tier2.is_empty() {
-            // Check if more items coming from admission controller
-            if let Some(ref rx) = additional_items_rx {
-                match rx.try_recv() {
-                    Ok(item) => pending.push_back(item),
-                    Err(mpsc::TryRecvError::Disconnected) => {
-                        // All items admitted and processed
-                        let _ = res_tx.send(WorkerResult::BatchComplete);
-                        ctx.request_repaint();
-                        return;
-                    }
-                    Err(mpsc::TryRecvError::Empty) => {
-                        // Wait a bit for more items
-                        std::thread::sleep(std::time::Duration::from_millis(50));
-                        continue;
-                    }
-                }
-            } else {
+        match poll_additional_items(&mut state, additional_items_rx) {
+            WaitAction::Complete => {
                 let _ = res_tx.send(WorkerResult::BatchComplete);
                 ctx.request_repaint();
                 return;
             }
+            WaitAction::Sleep => {
+                std::thread::sleep(Duration::from_millis(50));
+                continue;
+            }
+            WaitAction::Continue => {}
         }
 
-        // Spawn subprocess — cap engines at the number of Tier 1 items
-        // (Tier 2 doesn't use engines; no point creating 4 for 2 images)
-        let total_pending = pending.len() + pending_tier2.len();
-        let effective_jobs = max_jobs.min(pending.len().max(1));
-        let (mut sub, _active_provider) = match SubprocessManager::spawn(
-            model, effective_jobs, mask, force_cpu, line_mode, edge,
-        ) {
-            Ok(s) => s,
-            Err(e) => {
-                // Can't even spawn — report error for all pending
-                for (id, _, _) in &pending {
-                    let _ = res_tx.send(WorkerResult::BatchItemDone {
-                        item_id: *id,
-                        result: Err(e.clone()),
-                        tensor_cache: None,
-                        edge_cache: None,
-                    });
-                }
-                for t2 in &pending_tier2 {
-                    let _ = res_tx.send(WorkerResult::BatchItemDone {
-                        item_id: t2.item_id,
-                        result: Err(e.clone()),
-                        tensor_cache: None,
-                        edge_cache: None,
-                    });
-                }
-                let _ = res_tx.send(WorkerResult::BatchComplete);
-                ctx.request_repaint();
-                return;
-            }
+        let Some((mut sub, mut sent_items, mut sent_tier2_ids)) = spawn_and_initial_burst(
+            &mut state, model, mask, force_cpu, line_mode, edge, res_tx, ctx,
+        ) else {
+            return; // spawn failed — errors + BatchComplete already sent
         };
 
-        // Track items sent to this subprocess (for re-queue on crash)
-        let mut sent_items: Vec<WorkItem> = Vec::new();
-        let mut sent_tier2_ids: Vec<u64> = Vec::new();
+        let outcome = run_event_loop(
+            &mut sub, &mut state, &mut sent_items, &mut sent_tier2_ids,
+            additional_items_rx, cancel, model, res_tx, ctx,
+        );
 
-        // Send initial burst: Tier 2 items first (faster), then Tier 1
-        let burst = max_jobs.min(total_pending);
-        let mut sent_count = 0;
-        while sent_count < burst {
-            if try_send_tier2(&mut sub, &mut pending_tier2, &mut sent_tier2_ids) {
-                sent_count += 1;
-            } else if let Some(item) = pending.pop_front() {
-                if send_item_to_sub(&mut sub, &item).is_err() {
-                    pending.push_front(item);
-                    break;
+        match outcome {
+            EventLoopOutcome::Cancelled => return,
+            EventLoopOutcome::Crashed(reason) => {
+                let should_retry = handle_crash_and_retry(
+                    &mut state, sent_items, sent_tier2_ids, reason,
+                    &mut sub, additional_items_rx, res_tx, ctx,
+                );
+                if !should_retry {
+                    return;
                 }
-                sent_items.push(item);
-                sent_count += 1;
+            }
+            EventLoopOutcome::Finished => {
+                if !finalize_or_continue(&mut state, &mut sub, additional_items_rx, res_tx, ctx) {
+                    return;
+                }
+            }
+        }
+    }
+}
+
+/// Emit the first-frame "Loading model..." status so the UI shows activity
+/// before the subprocess reports its own progress.
+fn emit_loading_status(
+    state: &BatchRunState,
+    res_tx: &mpsc::Sender<WorkerResult>,
+    ctx: &egui::Context,
+) {
+    let first_id = state.pending.front().map(|(id, _, _)| *id)
+        .or_else(|| state.pending_tier2.front().map(|t| t.item_id));
+    if let Some(fid) = first_id {
+        let _ = res_tx.send(WorkerResult::BatchProgress {
+            item_id: fid,
+            stage: ProgressStage::LoadingModel,
+            pct: 0.0,
+        });
+        ctx.request_repaint();
+    }
+}
+
+/// When the batch queues are empty, check if the admission controller has
+/// more to send. Returns immediately — the caller owns the sleep/cancel cadence.
+fn poll_additional_items(
+    state: &mut BatchRunState,
+    additional_items_rx: Option<&mpsc::Receiver<WorkItem>>,
+) -> WaitAction {
+    if !state.pending.is_empty() || !state.pending_tier2.is_empty() {
+        return WaitAction::Continue;
+    }
+    let Some(rx) = additional_items_rx else {
+        return WaitAction::Complete;
+    };
+    match rx.try_recv() {
+        Ok(item) => {
+            state.pending.push_back(item);
+            WaitAction::Continue
+        }
+        Err(mpsc::TryRecvError::Disconnected) => WaitAction::Complete,
+        Err(mpsc::TryRecvError::Empty) => WaitAction::Sleep,
+    }
+}
+
+/// Spawn a subprocess and send the initial burst (Tier 2 first — no inference
+/// needed — then Tier 1 up to `max_jobs`). On spawn failure, reports errors
+/// for every pending item and sends `BatchComplete`; returns `None`.
+fn spawn_and_initial_burst(
+    state: &mut BatchRunState,
+    model: ModelKind,
+    mask: MaskSettings,
+    force_cpu: bool,
+    line_mode: LineMode,
+    edge: EdgeSettings,
+    res_tx: &mpsc::Sender<WorkerResult>,
+    ctx: &egui::Context,
+) -> Option<(SubprocessManager, Vec<WorkItem>, Vec<u64>)> {
+    let total_pending = state.pending.len() + state.pending_tier2.len();
+    // Cap engines at the number of Tier 1 items — Tier 2 doesn't use engines.
+    let effective_jobs = state.max_jobs.min(state.pending.len().max(1));
+
+    let (mut sub, _active_provider) = match SubprocessManager::spawn(
+        model, effective_jobs, mask, force_cpu, line_mode, edge,
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            emit_pending_errors(state, &e, res_tx);
+            let _ = res_tx.send(WorkerResult::BatchComplete);
+            ctx.request_repaint();
+            return None;
+        }
+    };
+
+    let mut sent_items: Vec<WorkItem> = Vec::new();
+    let mut sent_tier2_ids: Vec<u64> = Vec::new();
+    let burst = state.max_jobs.min(total_pending);
+    let mut sent_count = 0;
+    while sent_count < burst {
+        if try_send_tier2(&mut sub, &mut state.pending_tier2, &mut sent_tier2_ids) {
+            sent_count += 1;
+        } else if let Some(item) = state.pending.pop_front() {
+            if send_item_to_sub(&mut sub, &item).is_err() {
+                state.pending.push_front(item);
+                break;
+            }
+            sent_items.push(item);
+            sent_count += 1;
+        } else {
+            break;
+        }
+    }
+    Some((sub, sent_items, sent_tier2_ids))
+}
+
+/// Drive one subprocess through its lifecycle — poll events, admit more work
+/// on ImageDone, detect crash / hang, stop on Finished or cancel.
+#[allow(clippy::too_many_arguments)]
+fn run_event_loop(
+    sub: &mut SubprocessManager,
+    state: &mut BatchRunState,
+    sent_items: &mut Vec<WorkItem>,
+    sent_tier2_ids: &mut Vec<u64>,
+    additional_items_rx: Option<&mpsc::Receiver<WorkItem>>,
+    cancel: &AtomicBool,
+    model: ModelKind,
+    res_tx: &mpsc::Sender<WorkerResult>,
+    ctx: &egui::Context,
+) -> EventLoopOutcome {
+    let mut last_event_at = Instant::now();
+    let mut subprocess_finished = false;
+
+    while !subprocess_finished {
+        if cancel.load(Ordering::Acquire) {
+            cancel_subprocess(sub, res_tx, ctx);
+            return EventLoopOutcome::Cancelled;
+        }
+
+        // Real-crash check first so a segfault is reported as such rather
+        // than masked by the watchdog firing on the same silence.
+        if !sub.is_alive() {
+            return EventLoopOutcome::Crashed(sub.crash_reason());
+        }
+
+        let in_flight_count = sent_items.len() + sent_tier2_ids.len();
+        if is_stalled(last_event_at.elapsed(), in_flight_count, HANG_TIMEOUT) {
+            sub.kill();
+            return EventLoopOutcome::Crashed(format!(
+                "Worker stopped responding (no events for {}s)",
+                HANG_TIMEOUT.as_secs(),
+            ));
+        }
+
+        for event in sub.poll_events() {
+            // Every event — Progress, ImageDone, ImageError, RssUpdate
+            // (emitted per-completion, not on a timer) — proves liveness.
+            last_event_at = Instant::now();
+            if matches!(event, SubprocessEvent::Finished) {
+                subprocess_finished = true;
+                continue;
+            }
+            handle_subprocess_event(
+                event, sub, state, sent_items, sent_tier2_ids,
+                additional_items_rx, model, res_tx, ctx,
+            );
+        }
+
+        // If everything drained and no more coming, mark finished.
+        let all_sent_empty = sent_items.is_empty() && sent_tier2_ids.is_empty();
+        if all_sent_empty && state.pending.is_empty() && state.pending_tier2.is_empty() {
+            if let Some(rx) = additional_items_rx {
+                match rx.try_recv() {
+                    Ok(item) => state.pending.push_back(item),
+                    Err(mpsc::TryRecvError::Disconnected) => subprocess_finished = true,
+                    Err(mpsc::TryRecvError::Empty) => {}
+                }
             } else {
-                break;
+                subprocess_finished = true;
             }
         }
 
-        // Event loop: process results, admit more, handle crash
-        let mut subprocess_finished = false;
-        let mut subprocess_crashed = false;
-        let mut last_event_at = Instant::now();
-        let mut stall_reason_override: Option<String> = None;
-
-        while !subprocess_finished {
-            if cancel.load(Ordering::Acquire) {
-                let _ = sub.send_cancel();
-                // Wait for child to acknowledge
-                std::thread::sleep(std::time::Duration::from_millis(200));
-                sub.poll_events(); // drain
-                // Any tempfiles written between drain and cancel honoring would leak.
-                // Kill + cleanup mirrors the crash path.
-                sub.kill();
-                crate::subprocess::protocol::cleanup_ipc_temp();
-                let _ = res_tx.send(WorkerResult::Cancelled);
-                ctx.request_repaint();
-                return;
-            }
-
-            // Real-crash check first so a segfault is reported as such rather
-            // than masked by the watchdog firing on the same silence.
-            if !sub.is_alive() {
-                subprocess_crashed = true;
-                break;
-            }
-
-            // Hang detection: child is still alive but hasn't produced events
-            // for too long with work in flight. Treat as crash and reuse the
-            // existing retry path; override the reason so the user sees why.
-            let in_flight_count = sent_items.len() + sent_tier2_ids.len();
-            if is_stalled(last_event_at.elapsed(), in_flight_count, HANG_TIMEOUT) {
-                sub.kill();
-                stall_reason_override = Some(format!(
-                    "Worker stopped responding (no events for {}s)",
-                    HANG_TIMEOUT.as_secs()
-                ));
-                subprocess_crashed = true;
-                break;
-            }
-
-            // Poll events from subprocess
-            let events = sub.poll_events();
-            for event in events {
-                // Every event — Progress, ImageDone, ImageError, RssUpdate
-                // (which the worker emits per-image-completion, not on a
-                // timer) — is evidence the child is alive and doing work.
-                last_event_at = Instant::now();
-                match event {
-                    SubprocessEvent::Progress { item_id, stage, pct } => {
-                        let _ = res_tx.send(WorkerResult::BatchProgress { item_id, stage, pct });
-                        // Throttled repaint
-                        ctx.request_repaint();
-                    }
-                    SubprocessEvent::ImageDone {
-                        item_id, result_path, width, height, active_provider,
-                        tensor_cache_path, tensor_cache_height, tensor_cache_width,
-                        edge_cache_path, edge_cache_height, edge_cache_width,
-                    } => {
-                        // Read result from temp file and clean up
-                        let result = std::fs::read(&result_path)
-                            .ok()
-                            .and_then(|data| image::RgbaImage::from_raw(width, height, data))
-                            .map(|rgba_image| ProcessResult {
-                                rgba_image,
-                                active_provider: active_provider.clone(),
-                            })
-                            .ok_or_else(|| "Failed to read result from subprocess".to_string());
-                        let _ = std::fs::remove_file(&result_path);
-
-                        let read_tensor = |tp: &std::path::PathBuf, h: u32, w: u32| -> Option<TensorCache> {
-                            let raw_bytes = std::fs::read(tp).ok()?;
-                            let _ = std::fs::remove_file(tp);
-                            let data = crate::subprocess::ipc::le_bytes_to_f32s(&raw_bytes);
-                            Some(TensorCache { data, height: h, width: w, model })
-                        };
-
-                        // Read segmentation tensor cache (Tier 1 → Tier 2 mask reruns).
-                        let tensor_cache = tensor_cache_path.as_ref().and_then(|tp| {
-                            let th = tensor_cache_height?;
-                            let tw = tensor_cache_width?;
-                            read_tensor(tp, th, tw)
-                        });
-
-                        // Read DexiNed edge tensor cache (Tier 1 → Tier 2 edge reruns).
-                        let edge_cache = edge_cache_path.as_ref().and_then(|tp| {
-                            let th = edge_cache_height?;
-                            let tw = edge_cache_width?;
-                            read_tensor(tp, th, tw)
-                        });
-
-                        completed.insert(item_id);
-                        sent_items.retain(|(id, _, _)| *id != item_id);
-                        sent_tier2_ids.retain(|id| *id != item_id);
-
-                        let _ = res_tx.send(WorkerResult::BatchItemDone { item_id, result, tensor_cache, edge_cache });
-                        ctx.request_repaint();
-
-                        // Admit next item if RSS allows
-                        if !sub.should_pause_admission()
-                            && !try_send_tier2(&mut sub, &mut pending_tier2, &mut sent_tier2_ids)
-                        {
-                            if let Some(item) = pending.pop_front() {
-                                if send_item_to_sub(&mut sub, &item).is_ok() {
-                                    sent_items.push(item);
-                                } else {
-                                    pending.push_front(item);
-                                }
-                            } else if let Some(ref rx) = additional_items_rx {
-                                if let Ok(item) = rx.try_recv() {
-                                    if send_item_to_sub(&mut sub, &item).is_ok() {
-                                        sent_items.push(item);
-                                    } else {
-                                        pending.push_back(item);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    SubprocessEvent::ImageError { item_id, error } => {
-                        completed.insert(item_id);
-                        sent_items.retain(|(id, _, _)| *id != item_id);
-                        sent_tier2_ids.retain(|id| *id != item_id);
-                        let _ = res_tx.send(WorkerResult::BatchItemDone {
-                            item_id,
-                            result: Err(error),
-                            tensor_cache: None,
-                            edge_cache: None,
-                        });
-                        ctx.request_repaint();
-                    }
-                    SubprocessEvent::Finished => {
-                        subprocess_finished = true;
-                    }
-                    SubprocessEvent::RssUpdate { .. } => {
-                        // Handled internally by SubprocessManager
-                    }
-                    _ => {}
-                }
-            }
-
-            // Check if all items done and no more coming
-            let all_sent_empty = sent_items.is_empty() && sent_tier2_ids.is_empty();
-            if all_sent_empty && pending.is_empty() && pending_tier2.is_empty() {
-                if let Some(ref rx) = additional_items_rx {
-                    match rx.try_recv() {
-                        Ok(item) => pending.push_back(item),
-                        Err(mpsc::TryRecvError::Disconnected) => {
-                            subprocess_finished = true;
-                        }
-                        Err(mpsc::TryRecvError::Empty) => {}
-                    }
-                } else {
-                    subprocess_finished = true;
-                }
-            }
-
-            if !subprocess_finished {
-                std::thread::sleep(std::time::Duration::from_millis(50));
-            }
+        if !subprocess_finished {
+            std::thread::sleep(Duration::from_millis(50));
         }
+    }
+    EventLoopOutcome::Finished
+}
 
-        if subprocess_crashed {
-            let crash_reason = stall_reason_override
-                .unwrap_or_else(|| sub.crash_reason());
+/// Route one `SubprocessEvent` to its handler. `Finished` is handled by the
+/// event loop itself (sets the exit flag); `RssUpdate` is absorbed by
+/// `SubprocessManager` internally.
+#[allow(clippy::too_many_arguments)]
+fn handle_subprocess_event(
+    event: SubprocessEvent,
+    sub: &mut SubprocessManager,
+    state: &mut BatchRunState,
+    sent_items: &mut Vec<WorkItem>,
+    sent_tier2_ids: &mut Vec<u64>,
+    additional_items_rx: Option<&mpsc::Receiver<WorkItem>>,
+    model: ModelKind,
+    res_tx: &mpsc::Sender<WorkerResult>,
+    ctx: &egui::Context,
+) {
+    match event {
+        SubprocessEvent::Progress { item_id, stage, pct } => {
+            let _ = res_tx.send(WorkerResult::BatchProgress { item_id, stage, pct });
+            ctx.request_repaint();
+        }
+        SubprocessEvent::ImageDone {
+            item_id, result_path, width, height, active_provider,
+            tensor_cache_path, tensor_cache_height, tensor_cache_width,
+            edge_cache_path, edge_cache_height, edge_cache_width,
+        } => {
+            let result = read_result_image(&result_path, width, height, &active_provider);
+            let tensor_cache = read_tensor_cache(
+                tensor_cache_path.as_ref(), tensor_cache_height, tensor_cache_width, model,
+            );
+            let edge_cache = read_tensor_cache(
+                edge_cache_path.as_ref(), edge_cache_height, edge_cache_width, model,
+            );
 
-            // Re-queue in-flight Tier 1 items (not just the one that crashed)
-            let re_queued: Vec<WorkItem> = sent_items.into_iter()
-                .filter(|(id, _, _)| !completed.contains(id))
-                .collect();
-            // Tier 2 in-flight items can't be re-queued (tensor data was consumed
-            // by send_repostprocess). Report them as errors so they don't stay
-            // stuck in Processing. The parent clears cached_tensor for errored
-            // items, so next "Process" will use FullPipeline.
-            for &tid in &sent_tier2_ids {
-                if !completed.contains(&tid) {
-                    let _ = res_tx.send(WorkerResult::BatchItemDone {
-                        item_id: tid,
-                        result: Err(crash_reason.clone()),
-                        tensor_cache: None,
-                        edge_cache: None,
-                    });
-                }
-            }
-            let re_count = re_queued.len();
+            state.completed.insert(item_id);
+            sent_items.retain(|(id, _, _)| *id != item_id);
+            sent_tier2_ids.retain(|id| *id != item_id);
 
-            // Also drain any items from additional_items_rx into pending
-            if let Some(ref rx) = additional_items_rx {
-                while let Ok(item) = rx.try_recv() {
-                    pending.push_back(item);
-                }
-            }
-
-            // Put re-queued items back at the front
-            for item in re_queued.into_iter().rev() {
-                pending.push_front(item);
-            }
-
-            // Reduce concurrency
-            let old_jobs = max_jobs;
-            max_jobs = (max_jobs / 2).max(1);
-
-            if old_jobs == 1 {
-                // Already at minimum — these items genuinely can't be processed
-                let err_msg = format!("{crash_reason} \u{2014} try a smaller model");
-                for (id, _, _) in &pending {
-                    if !completed.contains(id) {
-                        let _ = res_tx.send(WorkerResult::BatchItemDone {
-                            item_id: *id,
-                            result: Err(err_msg.clone()),
-                            tensor_cache: None,
-                            edge_cache: None,
-                        });
-                    }
-                }
-                for t2 in &pending_tier2 {
-                    let _ = res_tx.send(WorkerResult::BatchItemDone {
-                        item_id: t2.item_id,
-                        result: Err(err_msg.clone()),
-                        tensor_cache: None,
-                        edge_cache: None,
-                    });
-                }
-                let _ = res_tx.send(WorkerResult::BatchComplete);
-                ctx.request_repaint();
-                return;
-            }
-
-            let _ = res_tx.send(WorkerResult::SubprocessRetry {
-                reduced_jobs: max_jobs,
-                re_queued_count: re_count,
+            let _ = res_tx.send(WorkerResult::BatchItemDone {
+                item_id, result, tensor_cache, edge_cache,
             });
             ctx.request_repaint();
 
-            // Clean up dead subprocess
-            sub.kill();
-            crate::subprocess::protocol::cleanup_ipc_temp();
-
-            // Loop back to spawn a new subprocess with reduced concurrency
-            continue;
+            admit_next_item(sub, state, sent_items, sent_tier2_ids, additional_items_rx);
         }
+        SubprocessEvent::ImageError { item_id, error } => {
+            state.completed.insert(item_id);
+            sent_items.retain(|(id, _, _)| *id != item_id);
+            sent_tier2_ids.retain(|id| *id != item_id);
+            let _ = res_tx.send(WorkerResult::BatchItemDone {
+                item_id,
+                result: Err(error),
+                tensor_cache: None,
+                edge_cache: None,
+            });
+            ctx.request_repaint();
+        }
+        SubprocessEvent::RssUpdate { .. } | SubprocessEvent::Finished => {}
+        _ => {}
+    }
+}
 
-        // Subprocess finished normally — check if batch is done
-        if pending.is_empty() && pending_tier2.is_empty() {
-            if let Some(ref rx) = additional_items_rx {
-                match rx.try_recv() {
-                    Err(mpsc::TryRecvError::Disconnected) => {
-                        let _ = res_tx.send(WorkerResult::BatchComplete);
-                        ctx.request_repaint();
-                        return;
-                    }
-                    Ok(item) => pending.push_back(item),
-                    Err(mpsc::TryRecvError::Empty) => {
-                        // More items might be coming — loop back
-                    }
-                }
+/// Read the result RGBA from the subprocess's temp file and wrap it. Always
+/// removes the temp file (success or parse failure) to keep `/dev/shm` tidy.
+fn read_result_image(
+    result_path: &std::path::Path,
+    width: u32,
+    height: u32,
+    active_provider: &str,
+) -> Result<ProcessResult, String> {
+    let result = std::fs::read(result_path)
+        .ok()
+        .and_then(|data| image::RgbaImage::from_raw(width, height, data))
+        .map(|rgba_image| ProcessResult {
+            rgba_image,
+            active_provider: active_provider.to_string(),
+        })
+        .ok_or_else(|| "Failed to read result from subprocess".to_string());
+    let _ = std::fs::remove_file(result_path);
+    result
+}
+
+/// Read one of the two optional tensor caches (seg tensor / DexiNed tensor)
+/// from disk. Returns `None` if the path is missing, dimensions are absent,
+/// or the read fails. Always deletes the temp file on success.
+fn read_tensor_cache(
+    path: Option<&std::path::PathBuf>,
+    height: Option<u32>,
+    width: Option<u32>,
+    model: ModelKind,
+) -> Option<TensorCache> {
+    let path = path?;
+    let h = height?;
+    let w = width?;
+    let raw_bytes = std::fs::read(path).ok()?;
+    let _ = std::fs::remove_file(path);
+    let data = crate::subprocess::ipc::le_bytes_to_f32s(&raw_bytes);
+    Some(TensorCache { data, height: h, width: w, model })
+}
+
+/// After an ImageDone, pull one more item into the subprocess if RSS allows.
+/// Prefers Tier 2 (no inference), then Tier 1 pending, then the admission
+/// overflow channel.
+fn admit_next_item(
+    sub: &mut SubprocessManager,
+    state: &mut BatchRunState,
+    sent_items: &mut Vec<WorkItem>,
+    sent_tier2_ids: &mut Vec<u64>,
+    additional_items_rx: Option<&mpsc::Receiver<WorkItem>>,
+) {
+    if sub.should_pause_admission() {
+        return;
+    }
+    if try_send_tier2(sub, &mut state.pending_tier2, sent_tier2_ids) {
+        return;
+    }
+    if let Some(item) = state.pending.pop_front() {
+        if send_item_to_sub(sub, &item).is_ok() {
+            sent_items.push(item);
+        } else {
+            state.pending.push_front(item);
+        }
+        return;
+    }
+    if let Some(rx) = additional_items_rx {
+        if let Ok(item) = rx.try_recv() {
+            if send_item_to_sub(sub, &item).is_ok() {
+                sent_items.push(item);
             } else {
-                let _ = res_tx.send(WorkerResult::BatchComplete);
-                ctx.request_repaint();
-                return;
+                state.pending.push_back(item);
             }
         }
-
-        // Graceful shutdown of this subprocess before looping for more work.
-        // 5s covers model-cache teardown; if the worker ignores us, Drop's
-        // shorter timeout + force-kill closes the gap.
-        let _ = sub.shutdown_with_timeout(SHUTDOWN_TIMEOUT);
     }
+}
+
+/// Cancel path: nudge the child, wait briefly, drain any in-flight results,
+/// then kill + clean up so no orphan IPC temps leak.
+fn cancel_subprocess(
+    sub: &mut SubprocessManager,
+    res_tx: &mpsc::Sender<WorkerResult>,
+    ctx: &egui::Context,
+) {
+    let _ = sub.send_cancel();
+    std::thread::sleep(Duration::from_millis(200));
+    sub.poll_events();
+    // Any tempfiles written between drain and cancel honouring would leak.
+    // Kill + cleanup mirrors the crash path.
+    sub.kill();
+    crate::subprocess::protocol::cleanup_ipc_temp();
+    let _ = res_tx.send(WorkerResult::Cancelled);
+    ctx.request_repaint();
+}
+
+/// Post-crash: re-queue in-flight Tier 1 work, error out in-flight Tier 2
+/// (tensor data already consumed by IPC), halve `max_jobs`, and either
+/// continue (return `true`) or bail if we were already at 1 job (return
+/// `false` after emitting terminal errors + `BatchComplete`).
+#[allow(clippy::too_many_arguments)]
+fn handle_crash_and_retry(
+    state: &mut BatchRunState,
+    sent_items: Vec<WorkItem>,
+    sent_tier2_ids: Vec<u64>,
+    crash_reason: String,
+    sub: &mut SubprocessManager,
+    additional_items_rx: Option<&mpsc::Receiver<WorkItem>>,
+    res_tx: &mpsc::Sender<WorkerResult>,
+    ctx: &egui::Context,
+) -> bool {
+    // Tier 2 can't be re-queued — parent clears cached_tensor on error so a
+    // subsequent "Process" runs the full pipeline.
+    for tid in sent_tier2_ids {
+        if !state.completed.contains(&tid) {
+            let _ = res_tx.send(WorkerResult::BatchItemDone {
+                item_id: tid,
+                result: Err(crash_reason.clone()),
+                tensor_cache: None,
+                edge_cache: None,
+            });
+        }
+    }
+
+    let re_queued: Vec<WorkItem> = sent_items.into_iter()
+        .filter(|(id, _, _)| !state.completed.contains(id))
+        .collect();
+    let re_count = re_queued.len();
+
+    // Drain late additions before re-queuing so the original in-flight
+    // order stays at the front.
+    if let Some(rx) = additional_items_rx {
+        while let Ok(item) = rx.try_recv() {
+            state.pending.push_back(item);
+        }
+    }
+    for item in re_queued.into_iter().rev() {
+        state.pending.push_front(item);
+    }
+
+    let old_jobs = state.max_jobs;
+    state.max_jobs = (state.max_jobs / 2).max(1);
+
+    sub.kill();
+    crate::subprocess::protocol::cleanup_ipc_temp();
+
+    if old_jobs == 1 {
+        let err_msg = format!("{crash_reason} \u{2014} try a smaller model");
+        emit_pending_errors(state, &err_msg, res_tx);
+        let _ = res_tx.send(WorkerResult::BatchComplete);
+        ctx.request_repaint();
+        return false;
+    }
+
+    let _ = res_tx.send(WorkerResult::SubprocessRetry {
+        reduced_jobs: state.max_jobs,
+        re_queued_count: re_count,
+    });
+    ctx.request_repaint();
+    true
+}
+
+/// Emit `BatchItemDone(Err)` for every pending Tier 1 + Tier 2 item that
+/// hasn't already completed. Used on spawn failure and at max-retries.
+fn emit_pending_errors(
+    state: &BatchRunState,
+    err_msg: &str,
+    res_tx: &mpsc::Sender<WorkerResult>,
+) {
+    for (id, _, _) in &state.pending {
+        if !state.completed.contains(id) {
+            let _ = res_tx.send(WorkerResult::BatchItemDone {
+                item_id: *id,
+                result: Err(err_msg.to_string()),
+                tensor_cache: None,
+                edge_cache: None,
+            });
+        }
+    }
+    for t2 in &state.pending_tier2 {
+        let _ = res_tx.send(WorkerResult::BatchItemDone {
+            item_id: t2.item_id,
+            result: Err(err_msg.to_string()),
+            tensor_cache: None,
+            edge_cache: None,
+        });
+    }
+}
+
+/// After a subprocess finishes normally, decide whether the batch is done or
+/// another subprocess needs spawning. Returns `false` when the batch is done
+/// (BatchComplete already sent); `true` to loop back and spawn again.
+fn finalize_or_continue(
+    state: &mut BatchRunState,
+    sub: &mut SubprocessManager,
+    additional_items_rx: Option<&mpsc::Receiver<WorkItem>>,
+    res_tx: &mpsc::Sender<WorkerResult>,
+    ctx: &egui::Context,
+) -> bool {
+    if state.pending.is_empty() && state.pending_tier2.is_empty() {
+        if let Some(rx) = additional_items_rx {
+            match rx.try_recv() {
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    let _ = res_tx.send(WorkerResult::BatchComplete);
+                    ctx.request_repaint();
+                    return false;
+                }
+                Ok(item) => state.pending.push_back(item),
+                Err(mpsc::TryRecvError::Empty) => {
+                    // More might be coming — loop back.
+                }
+            }
+        } else {
+            let _ = res_tx.send(WorkerResult::BatchComplete);
+            ctx.request_repaint();
+            return false;
+        }
+    }
+
+    // 5s covers model-cache teardown; if the worker ignores us, Drop's
+    // shorter timeout + force-kill closes the gap.
+    let _ = sub.shutdown_with_timeout(SHUTDOWN_TIMEOUT);
+    true
 }
 
 #[cfg(test)]
