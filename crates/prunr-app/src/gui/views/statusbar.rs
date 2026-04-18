@@ -8,7 +8,6 @@ pub fn render(ui: &mut egui::Ui, app: &PrunrApp) {
     ui.horizontal(|ui| {
         ui.add_space(theme::SPACE_XS);
 
-        // Mini logo
         let logo_h = theme::STATUS_BAR_HEIGHT - 4.0;
         let logo_w = logo_h * theme::LOGO_ASPECT;
         ui.add(
@@ -17,7 +16,6 @@ pub fn render(ui: &mut egui::Ui, app: &PrunrApp) {
         );
         ui.add_space(theme::SPACE_XS);
 
-        // Left side: status text
         let counts = app.batch.status_counts();
         let batch_processing = counts.processing > 0;
         let batch_done_count = counts.done;
@@ -94,11 +92,11 @@ pub fn render(ui: &mut egui::Ui, app: &PrunrApp) {
             }
         }
 
-        // Right side -- push to right
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.add_space(theme::SPACE_SM);
 
-            // Backend badge — show forced status immediately when toggled
+            // `force_cpu` overrides the detected backend so the toggle reflects
+            // the override instantly, not after the next batch reinit.
             let backend_display = if app.settings.force_cpu {
                 "CPU (forced)"
             } else {
@@ -111,7 +109,6 @@ pub fn render(ui: &mut egui::Ui, app: &PrunrApp) {
                     .color(theme::TEXT_SECONDARY),
             );
 
-            // Zoom percentage with magnifier icon
             if app.state != AppState::Empty {
                 ui.add_space(theme::SPACE_SM);
                 let zoom_pct = (app.zoom_state.zoom * 100.0).round() as u32;
@@ -122,7 +119,6 @@ pub fn render(ui: &mut egui::Ui, app: &PrunrApp) {
                 );
             }
 
-            // Image dimensions
             if let Some((w, h)) = app.image_dimensions {
                 ui.add_space(theme::SPACE_SM);
                 ui.label(
