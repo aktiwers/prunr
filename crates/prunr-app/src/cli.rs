@@ -364,10 +364,14 @@ fn run_batch(args: &Cli) -> i32 {
     let solid_line_color = args.line_color.as_deref().and_then(parse_hex_color);
     let bg_color = args.bg_color.as_deref().and_then(parse_hex_color);
 
+    let edge = prunr_core::EdgeSettings {
+        line_strength: args.line_strength,
+        solid_line_color,
+        edge_thickness: 0,
+    };
     let batch_results = run_batch_subprocess(
         &valid_paths, &valid_indices, model, args.jobs, mask, args.cpu,
-        line_mode, args.line_strength, solid_line_color, bg_color,
-        &spinners_arc, &inputs_arc, quiet,
+        line_mode, edge, bg_color, &spinners_arc, &inputs_arc, quiet,
     );
 
     // Compute output paths and write results
@@ -466,8 +470,7 @@ fn run_batch_subprocess(
     mask: MaskSettings,
     force_cpu: bool,
     line_mode: LineMode,
-    line_strength: f32,
-    solid_line_color: Option<[u8; 3]>,
+    edge: prunr_core::EdgeSettings,
     bg_color: Option<[u8; 3]>,
     spinners: &[Option<ProgressBar>],
     inputs: &[std::path::PathBuf],
@@ -487,8 +490,7 @@ fn run_batch_subprocess(
         // Spawn subprocess — cap engines at pending item count
         let effective_jobs = max_jobs.min(pending.len());
         let (mut sub, _provider) = match SubprocessManager::spawn(
-            model, effective_jobs, mask, force_cpu, line_mode,
-            line_strength, solid_line_color,
+            model, effective_jobs, mask, force_cpu, line_mode, edge,
         ) {
             Ok(s) => s,
             Err(e) => {

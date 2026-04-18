@@ -3,11 +3,11 @@
 //! All types are serde-serializable and sent as length-prefixed bincode
 //! frames over stdin/stdout.
 
-use prunr_core::{ModelKind, MaskSettings, ProgressStage, LineMode};
+use prunr_core::{ModelKind, MaskSettings, EdgeSettings, ProgressStage, LineMode};
 use serde::{Serialize, Deserialize};
 
 /// Parent → Child commands (sent over child's stdin).
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub enum SubprocessCommand {
     /// Initialize the worker: load model, create engine pool.
     Init {
@@ -16,8 +16,7 @@ pub enum SubprocessCommand {
         mask: MaskSettings,
         force_cpu: bool,
         line_mode: LineMode,
-        line_strength: f32,
-        solid_line_color: Option<[u8; 3]>,
+        edge: EdgeSettings,
         /// IPC temp directory (set by parent so child uses the same PID-namespaced dir)
         ipc_dir: std::path::PathBuf,
     },
@@ -51,7 +50,7 @@ pub enum SubprocessCommand {
 }
 
 /// Chain mode input: previous result as raw RGBA in a temp file.
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub struct ChainInput {
     pub path: std::path::PathBuf,
     pub width: u32,
@@ -59,7 +58,7 @@ pub struct ChainInput {
 }
 
 /// Child → Parent events (sent over child's stdout).
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub enum SubprocessEvent {
     /// Engine pool created successfully.
     Ready {
@@ -140,5 +139,147 @@ pub fn cleanup_ipc_temp() {
         for entry in entries.flatten() {
             let _ = std::fs::remove_file(entry.path());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Bincode round-trip tests for every `SubprocessCommand` and
+    //! `SubprocessEvent` variant. A single generic helper covers both enums
+    //! via `PartialEq` — any drift between encoded and decoded payload fails
+    //! the assertion with a real diff, not a stringified debug comparison.
+    use super::*;
+    use bincode::config::standard;
+    use serde::de::DeserializeOwned;
+    use std::fmt::Debug;
+    use std::path::PathBuf;
+
+    fn roundtrip<T>(value: &T)
+    where
+        T: serde::Serialize + DeserializeOwned + PartialEq + Debug,
+    {
+        let bytes = bincode::serde::encode_to_vec(value, standard()).unwrap();
+        let (decoded, _): (T, _) =
+            bincode::serde::decode_from_slice(&bytes, standard()).unwrap();
+        assert_eq!(value, &decoded);
+    }
+
+    #[test]
+    fn command_init_roundtrip() {
+        roundtrip(&SubprocessCommand::Init {
+            model: ModelKind::Silueta,
+            jobs: 2,
+            mask: MaskSettings::default(),
+            force_cpu: false,
+            line_mode: LineMode::Off,
+            edge: EdgeSettings { line_strength: 0.5, solid_line_color: Some([255, 0, 0]), edge_thickness: 0 },
+            ipc_dir: PathBuf::from("/tmp/prunr-ipc-test"),
+        });
+    }
+
+    #[test]
+    fn command_process_image_with_and_without_chain_roundtrip() {
+        roundtrip(&SubprocessCommand::ProcessImage {
+            item_id: 7,
+            image_path: PathBuf::from("/tmp/img.png"),
+            chain_input: Some(ChainInput {
+                path: PathBuf::from("/tmp/chain.bin"),
+                width: 1920,
+                height: 1080,
+            }),
+        });
+        roundtrip(&SubprocessCommand::ProcessImage {
+            item_id: 8,
+            image_path: PathBuf::from("/tmp/img2.png"),
+            chain_input: None,
+        });
+    }
+
+    #[test]
+    fn command_repostprocess_roundtrip() {
+        roundtrip(&SubprocessCommand::RePostProcess {
+            item_id: 9,
+            tensor_path: PathBuf::from("/tmp/t.bin"),
+            tensor_height: 320,
+            tensor_width: 320,
+            model: ModelKind::U2net,
+            original_image_path: PathBuf::from("/tmp/orig.png"),
+            mask: MaskSettings::default(),
+        });
+    }
+
+    #[test]
+    fn command_cancel_and_shutdown_roundtrip() {
+        roundtrip(&SubprocessCommand::Cancel);
+        roundtrip(&SubprocessCommand::Shutdown);
+    }
+
+    #[test]
+    fn event_ready_roundtrip() {
+        roundtrip(&SubprocessEvent::Ready {
+            active_provider: "CUDA".to_string(),
+        });
+    }
+
+    #[test]
+    fn event_progress_roundtrip() {
+        roundtrip(&SubprocessEvent::Progress {
+            item_id: 3,
+            stage: ProgressStage::Infer,
+            pct: 0.5,
+        });
+    }
+
+    #[test]
+    fn event_image_done_with_and_without_edge_cache_roundtrip() {
+        roundtrip(&SubprocessEvent::ImageDone {
+            item_id: 11,
+            result_path: PathBuf::from("/tmp/result.bin"),
+            width: 1000,
+            height: 1000,
+            active_provider: "CPU".to_string(),
+            tensor_cache_path: Some(PathBuf::from("/tmp/tensor.bin")),
+            tensor_cache_height: Some(320),
+            tensor_cache_width: Some(320),
+            edge_cache_path: None,
+            edge_cache_height: None,
+            edge_cache_width: None,
+        });
+        roundtrip(&SubprocessEvent::ImageDone {
+            item_id: 12,
+            result_path: PathBuf::from("/tmp/result2.bin"),
+            width: 500,
+            height: 500,
+            active_provider: "CoreML".to_string(),
+            tensor_cache_path: None,
+            tensor_cache_height: None,
+            tensor_cache_width: None,
+            edge_cache_path: Some(PathBuf::from("/tmp/edge.bin")),
+            edge_cache_height: Some(480),
+            edge_cache_width: Some(640),
+        });
+    }
+
+    #[test]
+    fn event_image_error_roundtrip() {
+        roundtrip(&SubprocessEvent::ImageError {
+            item_id: 4,
+            error: "decode failed: not a PNG".to_string(),
+        });
+    }
+
+    #[test]
+    fn event_rss_update_roundtrip() {
+        roundtrip(&SubprocessEvent::RssUpdate {
+            rss_bytes: 1_234_567_890,
+        });
+    }
+
+    #[test]
+    fn event_finished_and_init_error_roundtrip() {
+        roundtrip(&SubprocessEvent::Finished);
+        roundtrip(&SubprocessEvent::InitError {
+            error: "engine creation failed".into(),
+        });
     }
 }

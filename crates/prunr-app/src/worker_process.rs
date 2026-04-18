@@ -99,7 +99,7 @@ pub fn run_worker() -> ! {
 
     // Read Init command
     let Ok(Some(SubprocessCommand::Init {
-        model, jobs, mask, force_cpu, line_mode, line_strength, solid_line_color, ipc_dir,
+        model, jobs, mask, force_cpu, line_mode, edge, ipc_dir,
     })) = read_message::<_, SubprocessCommand>(&mut reader)
     else {
         let _ = evt_tx.send(SubprocessEvent::InitError {
@@ -268,7 +268,7 @@ pub fn run_worker() -> ! {
                                 let eng_ref = edge_eng.as_ref().unwrap();
                                 eng_ref.infer_tensor(img).map(|(tensor, h, w)| {
                                     let rgba_image = prunr_core::finalize_edges(
-                                        &tensor, h, w, img, line_strength, solid_line_color,
+                                        &tensor, h, w, img, &edge,
                                     );
                                     edge_tensor_for_cache = Some((tensor, h, w));
                                     ProcessResult {
@@ -283,7 +283,7 @@ pub fn run_worker() -> ! {
                                 let eng_ref = edge_eng.as_ref().unwrap();
                                 eng_ref.infer_tensor(img).map(|(tensor, h, w)| {
                                     let rgba_image = prunr_core::finalize_edges(
-                                        &tensor, h, w, img, line_strength, solid_line_color,
+                                        &tensor, h, w, img, &edge,
                                     );
                                     edge_tensor_for_cache = Some((tensor, h, w));
                                     ProcessResult {
@@ -305,7 +305,7 @@ pub fn run_worker() -> ! {
                                     let eng_ref = edge_eng.as_ref().unwrap();
                                     eng_ref.infer_tensor(&img).map(|(tensor, h, w)| {
                                         let rgba_image = prunr_core::finalize_edges(
-                                            &tensor, h, w, &img, line_strength, solid_line_color,
+                                            &tensor, h, w, &img, &edge,
                                         );
                                         edge_tensor_for_cache = Some((tensor, h, w));
                                         ProcessResult {

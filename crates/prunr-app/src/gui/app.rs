@@ -200,6 +200,10 @@ pub(crate) struct BatchItem {
     pub cached_tensor: Option<super::worker::CompressedTensor>,
     /// Compressed cached DexiNed output (for Tier 2 edge reruns on line_strength tweaks).
     pub cached_edge_tensor: Option<super::worker::CompressedTensor>,
+    /// Post-resize, pre-dilation edge mask for the line_strength that produced
+    /// it. Lets `edge_thickness` / `solid_line_color` tweaks skip the expensive
+    /// tensor→mask resize. Invalidated alongside `cached_edge_tensor`.
+    pub cached_edge_mask: Option<(Arc<image::GrayImage>, u32 /* line_strength bits */)>,
     /// Which preset was last APPLIED to this image (via the dropdown's row
     /// click or via Reset All). The preset button compares current `settings`
     /// against this preset's values to show a modified/clean icon. Stays set
@@ -216,6 +220,13 @@ pub(crate) struct BatchItem {
 }
 
 impl BatchItem {
+    /// Clear the edge tensor + derived mask cache together — the mask is
+    /// always built from the tensor, so any tensor change invalidates both.
+    pub fn invalidate_edge_cache(&mut self) {
+        self.cached_edge_tensor = None;
+        self.cached_edge_mask = None;
+    }
+
     fn new(
         id: u64,
         filename: String,
@@ -246,6 +257,7 @@ impl BatchItem {
             applied_recipe: None,
             cached_tensor: None,
             cached_edge_tensor: None,
+            cached_edge_mask: None,
             applied_preset,
             preset_undo_stack: VecDeque::new(),
             preset_redo_stack: VecDeque::new(),
@@ -784,7 +796,7 @@ impl PrunrApp {
             // on-white), so a line_mode flip invalidates it. Segmentation
             // tensor doesn't care — model isn't part of the preset.
             if item.settings.line_mode != old_line_mode {
-                item.cached_edge_tensor = None;
+                item.invalidate_edge_cache();
             }
             (item.id, item.status == BatchStatus::Done)
         };
@@ -854,13 +866,13 @@ impl PrunrApp {
                     // (Live-preview edge reruns DO work in-process via
                     // `pump_live_preview` + `finalize_edges`; this branch is
                     // for the explicit Process click path only.)
-                    item.cached_edge_tensor = None;
+                    item.invalidate_edge_cache();
                     tier1_ids.insert(item.id);
                 }
                 RequiredTier::FullPipeline => {
                     // Model / chain / mode changed — both caches invalid.
                     item.cached_tensor = None;
-                    item.cached_edge_tensor = None;
+                    item.invalidate_edge_cache();
                     tier1_ids.insert(item.id);
                 }
             }
@@ -1061,8 +1073,7 @@ impl PrunrApp {
                 mask: current_settings.mask_settings(),
                 force_cpu: self.settings.force_cpu,
                 line_mode: current_settings.line_mode,
-                line_strength: current_settings.line_strength,
-                solid_line_color: current_settings.solid_line_color,
+                edge: current_settings.edge_settings(),
             },
             cancel: self.cancel_flag.clone(),
             additional_items_rx,
@@ -1513,12 +1524,16 @@ impl PrunrApp {
                 PreviewKind::Edge if edge_tensor.is_none() => return None,
                 _ => {}
             }
+            let cached_edge_mask = item.cached_edge_mask.as_ref().and_then(|(m, bits)| {
+                (*bits == item.settings.line_strength.to_bits()).then(|| m.clone())
+            });
             Some(DispatchInputs {
                 kind,
                 original,
                 settings: item.settings,
                 seg_tensor,
                 edge_tensor,
+                cached_edge_mask,
             })
         });
 
@@ -1553,6 +1568,9 @@ impl PrunrApp {
                 // a fresh thumb generation on the next frame.
                 item.thumb_texture = None;
                 item.thumb_pending = false;
+                if let Some((mask, bits)) = r.new_edge_mask {
+                    item.cached_edge_mask = Some((mask, bits));
+                }
                 let item_id = item.id;
                 let switch = self.result_switch_id;
                 Self::spawn_tex_prep(
@@ -1595,7 +1613,7 @@ impl PrunrApp {
             if Some(item.id) == selected_id { continue; }
             remaining -= Self::item_cache_size(item);
             item.cached_tensor = None;
-            item.cached_edge_tensor = None;
+            item.invalidate_edge_cache();
         }
     }
 
@@ -1605,7 +1623,7 @@ impl PrunrApp {
         for item in &mut self.batch_items {
             if Some(item.id) != selected_id {
                 item.cached_tensor = None;
-                item.cached_edge_tensor = None;
+                item.invalidate_edge_cache();
             }
         }
     }
@@ -1830,6 +1848,8 @@ impl PrunrApp {
                                     .and_then(super::worker::CompressedTensor::from_raw);
                                 item.cached_edge_tensor = edge_cache
                                     .and_then(super::worker::CompressedTensor::from_raw);
+                                // New tensor → any prior mask was built from stale data.
+                                item.cached_edge_mask = None;
                                 // Evict decoded source to free RAM — lazy decode
                                 // will re-decode on demand if the user navigates back.
                                 if !is_selected {
@@ -1856,7 +1876,7 @@ impl PrunrApp {
                                 // (otherwise resolve_tier might return Skip for an errored item).
                                 item.status = BatchStatus::Error(e);
                                 item.cached_tensor = None;
-                                item.cached_edge_tensor = None;
+                                item.invalidate_edge_cache();
                                 item.applied_recipe = None;
                             }
                         }
@@ -2432,7 +2452,7 @@ impl eframe::App for PrunrApp {
                     self.batch_items[idx].cached_tensor = None;
                 }
                 if toolbar_change.edge_cache_invalid {
-                    self.batch_items[idx].cached_edge_tensor = None;
+                    self.batch_items[idx].invalidate_edge_cache();
                 }
                 // A preset apply that invalidates the cache on an already-
                 // processed item means live preview has no tensor to rerun
@@ -2520,5 +2540,46 @@ impl eframe::App for PrunrApp {
             // still thinks an internal drag is in progress.
             ui.ctx().stop_dragging();
         }
+    }
+}
+
+#[cfg(test)]
+mod preset_stack_tests {
+    //! Tests for the `push_bounded` helper that backs the preset undo/redo
+    //! stacks on each `BatchItem`. Kept inline so the helper can stay private.
+    use super::{push_bounded, PresetSnapshot, PRESET_HISTORY_DEPTH};
+    use super::super::item_settings::ItemSettings;
+    use std::collections::VecDeque;
+
+    fn snap(gamma: f32) -> PresetSnapshot {
+        let mut s = ItemSettings::default();
+        s.gamma = gamma;
+        PresetSnapshot { settings: s, applied_preset: String::new() }
+    }
+
+    #[test]
+    fn push_bounded_drops_oldest_when_exceeding_depth() {
+        let mut stack: VecDeque<PresetSnapshot> = VecDeque::new();
+        for i in 0..(PRESET_HISTORY_DEPTH + 5) {
+            push_bounded(&mut stack, snap(i as f32));
+        }
+        assert_eq!(stack.len(), PRESET_HISTORY_DEPTH);
+        // Oldest 5 entries dropped; newest entry is the last pushed.
+        assert_eq!(stack.front().unwrap().settings.gamma, 5.0);
+        assert_eq!(
+            stack.back().unwrap().settings.gamma,
+            (PRESET_HISTORY_DEPTH + 4) as f32,
+        );
+    }
+
+    #[test]
+    fn push_bounded_below_depth_keeps_every_entry() {
+        let mut stack: VecDeque<PresetSnapshot> = VecDeque::new();
+        push_bounded(&mut stack, snap(1.0));
+        push_bounded(&mut stack, snap(2.0));
+        push_bounded(&mut stack, snap(3.0));
+        assert_eq!(stack.len(), 3);
+        assert_eq!(stack.front().unwrap().settings.gamma, 1.0);
+        assert_eq!(stack.back().unwrap().settings.gamma, 3.0);
     }
 }

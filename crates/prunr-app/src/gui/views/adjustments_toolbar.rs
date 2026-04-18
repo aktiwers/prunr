@@ -250,6 +250,15 @@ pub fn render(
                 &mut item_settings.solid_line_color,
                 defaults.solid_line_color_value,
             ), Tier::Edge, &mut change);
+
+            aggregate(chip::chip_u32(
+                ui, "edge_thickness",
+                &ICON_LINE_WEIGHT.codepoint.to_string(), "Edge thickness",
+                "Thicken edges by dilating the mask. 0 = native DexiNed width, higher = bolder outlines that stay readable at display resolution.",
+                &mut item_settings.edge_thickness,
+                0..=10, defaults.template.edge_thickness,
+                |v| if v == 0 { "off".into() } else { format!("+{v}px") },
+            ), Tier::Edge, &mut change);
         }
     });
 
