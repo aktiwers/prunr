@@ -264,9 +264,10 @@ fn render_thumbnail_layer(
     needs_repaint || fade < 1.0
 }
 
-/// True when the item needs a thumbnail but hasn't asked for one yet. Phase
-/// 10-07 will gate this on viewport visibility; today the gate is just
-/// "no texture, not in flight".
+/// True when the item needs a thumbnail but hasn't asked for one yet.
+/// Viewport-visibility gating happens upstream: `render_item_row`
+/// early-returns on the virtualization check before this is called, so
+/// off-screen rows never trigger a request.
 fn should_request_thumbnail(item: &BatchItem) -> bool {
     item.thumb_texture.is_none() && !item.thumb_pending
 }
