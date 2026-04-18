@@ -400,7 +400,18 @@ fn render_done(ui: &mut egui::Ui, app: &PrunrApp) {
         }
 
         if fade >= 1.0 {
-            draw_checkerboard(ui, img_rect, app.settings.dark_checker);
+            // Render-time bg fill: transparent result tex, solid rect or
+            // checkerboard underneath. Flips instantly on bg color change.
+            let bg_rgb = app.selected_item().and_then(|it| it.settings.bg_rgb());
+            if let Some(bg) = bg_rgb {
+                ui.painter().rect_filled(
+                    img_rect,
+                    0.0,
+                    Color32::from_rgb(bg[0], bg[1], bg[2]),
+                );
+            } else {
+                draw_checkerboard(ui, img_rect, app.settings.dark_checker);
+            }
         }
         let result_alpha = (fade * 255.0) as u8;
         ui.painter().image(
