@@ -234,7 +234,7 @@ impl BatchItem {
         tensor_cache: Option<super::worker::TensorCache>,
         edge_cache: Option<super::worker::TensorCache>,
         recipe_snapshot: prunr_core::ProcessingRecipe,
-        is_selected: bool,
+        _is_selected: bool,
     ) -> Option<String> {
         match result {
             Ok(pr) => {
@@ -249,10 +249,18 @@ impl BatchItem {
                 self.cached_edge_tensor = edge_cache
                     .and_then(super::worker::CompressedTensor::from_raw);
                 self.cached_edge_mask = None;
-                if !is_selected {
-                    self.source_rgba = None;
-                    self.source_texture = None;
-                }
+                // Note: we used to null `source_rgba` / `source_texture` on
+                // non-selected items here to save ~48 MB per 4K image, but
+                // that broke live preview on any item that was NOT the
+                // viewed item when its batch result landed. `source_rgba` is
+                // required for the in-process Tier 2 rerun (see
+                // `build_preview_inputs` → `rgba = item.source_rgba.as_ref()?`)
+                // and without it, tweaking a slider on a previously-processed-
+                // but-not-yet-reviewed image would silently drop the tweak
+                // until the async re-decode from disk landed. Memory-pressure
+                // eviction is handled separately by `evict_all_tensors` /
+                // `enforce_tensor_budget`, which do preserve the selected
+                // item's cache.
                 // Tier 2 reruns report empty active_provider (no inference ran).
                 (!pr.active_provider.is_empty()).then_some(pr.active_provider)
             }
@@ -425,7 +433,13 @@ mod tests {
     }
 
     #[test]
-    fn apply_tier_result_success_evicts_source_when_not_selected() {
+    fn apply_tier_result_success_keeps_source_when_not_selected() {
+        // `source_rgba` is required for in-process live preview on any item
+        // — including ones that happened to be non-selected at the moment
+        // their batch result landed. The caller may not know in advance
+        // which items the user will tweak next. Memory-pressure eviction is
+        // handled separately via `evict_all_tensors` / `enforce_tensor_budget`
+        // on the batch manager.
         let mut item = fixture_item(1);
         item.status = BatchStatus::Processing;
         item.source_rgba = Some(Arc::new(image::RgbaImage::new(1, 1)));
@@ -435,11 +449,10 @@ mod tests {
             None,
             None,
             fixture_recipe(),
-            false, // not selected — background item
+            false, // not selected — but source_rgba should still be kept
         );
 
-        assert!(item.source_rgba.is_none(), "source_rgba must be evicted for background items to free RAM");
-        assert!(item.source_texture.is_none());
+        assert!(item.source_rgba.is_some(), "source_rgba must stay for live preview");
     }
 
     #[test]
