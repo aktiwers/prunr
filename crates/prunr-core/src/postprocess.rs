@@ -367,9 +367,9 @@ mod tests {
         );
     }
 
-    /// Isolated bench for `apply_mask_inplace` — the loop Phase 10-07
-    /// parallelized. Skips the RGBA alloc / Lanczos resize that dominate
-    /// `postprocess_4k_bench`.
+    /// Isolated bench for the row-parallel `apply_mask_inplace`. Skips the
+    /// RGBA alloc / Lanczos resize that dominate `postprocess_4k_bench`, so
+    /// the number reflects only the mask-to-alpha loop.
     ///   `cargo test -p prunr-core --release apply_mask_inplace_4k_bench -- --nocapture --ignored`
     #[test]
     #[ignore]

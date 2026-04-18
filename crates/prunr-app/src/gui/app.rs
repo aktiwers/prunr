@@ -251,7 +251,6 @@ impl PrunrApp {
             }
         }
 
-        // Set app-level state for canvas
         self.image_dimensions = Some(dims);
         self.loaded_filename = Some(name);
         self.source_texture = None;
@@ -625,7 +624,7 @@ impl PrunrApp {
 
         let mut initial_items = Vec::new();
         while let Some(admitted_id) = ctrl.try_admit_next() {
-            if let Some(item) = self.batch.items.iter_mut().find(|b| b.id == admitted_id) {
+            if let Some(item) = self.batch.find_by_id_mut(admitted_id) {
                 if let Ok(bytes) = item.source.load_bytes() {
                     let chain_input = if chain { item.result_rgba.clone() } else { None };
                     initial_items.push((item.id, bytes, chain_input));
@@ -765,21 +764,13 @@ impl PrunrApp {
     /// No checkboxes selected — save just the currently-viewed result via a
     /// save-as dialog. Suggests a `<stem>-nobg.png` name based on the source.
     fn save_current_to_file(&mut self) {
-        let Some(rgba) = self.result_rgba.as_ref() else { return };
+        let Some(rgba) = self.result_rgba.clone() else { return };
         let default_name = self.loaded_filename.as_deref()
             .and_then(|name| Path::new(name).file_stem()?.to_str())
             .map(|stem| format!("{stem}-nobg.png"))
             .unwrap_or_else(|| "result-nobg.png".to_string());
-        let Some(path) = self.save_dialog()
-            .add_filter("PNG Image", &["png"])
-            .set_file_name(&default_name)
-            .set_title("Save PNG")
-            .save_file() else { return };
         let bg = self.batch.selected_item().and_then(|i| i.settings.bg_rgb());
-        let rgba = Self::apply_bg_for_export(rgba, bg);
-        let tx = self.batch.bg_io.save_done_tx.clone();
-        self.toasts.info("Saving...");
-        spawn_save_single(path, rgba, tx);
+        self.save_rgba_with_dialog(&rgba, &default_name, bg);
     }
 
     /// Save one specific batch item (by index) via a save-as dialog. Used by
@@ -787,17 +778,30 @@ impl PrunrApp {
     /// entry point into the same encode-on-background pipeline as
     /// `save_current_to_file`.
     pub(crate) fn save_item_to_file(&mut self, idx: usize) {
-        let Some(item) = self.batch.items.get(idx) else { return };
-        let Some(rgba) = item.result_rgba.as_ref() else { return };
-        let stem = Path::new(&item.filename)
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("image");
-        let default_name = format!("{stem}-nobg.png");
-        let bg = item.settings.bg_rgb();
+        let (rgba, default_name, bg) = {
+            let Some(item) = self.batch.items.get(idx) else { return };
+            let Some(rgba) = item.result_rgba.clone() else { return };
+            let stem = Path::new(&item.filename)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("image");
+            (rgba, format!("{stem}-nobg.png"), item.settings.bg_rgb())
+        };
+        self.save_rgba_with_dialog(&rgba, &default_name, bg);
+    }
+
+    /// Shared tail for the two single-item save paths: open the PNG save-as
+    /// dialog, composite the bg if set, kick off the encode+write on a
+    /// background thread.
+    fn save_rgba_with_dialog(
+        &mut self,
+        rgba: &Arc<image::RgbaImage>,
+        default_name: &str,
+        bg: Option<[u8; 3]>,
+    ) {
         let Some(path) = self.save_dialog()
             .add_filter("PNG Image", &["png"])
-            .set_file_name(&default_name)
+            .set_file_name(default_name)
             .set_title("Save PNG")
             .save_file() else { return };
         let rgba = Self::apply_bg_for_export(rgba, bg);
@@ -842,7 +846,7 @@ impl PrunrApp {
     pub fn initiate_drag_out(&mut self, ids: Vec<u64>, frame: &eframe::Frame) {
         let mut paths: Vec<PathBuf> = Vec::with_capacity(ids.len());
         for id in &ids {
-            if let Some(item) = self.batch.items.iter().find(|b| b.id == *id) {
+            if let Some(item) = self.batch.find_by_id(*id) {
                 match super::drag_export::prepare(item) {
                     Ok(path) => paths.push(path),
                     Err(e) => {
@@ -1040,7 +1044,7 @@ impl PrunrApp {
 
         let chain = self.settings.chain_mode;
         while let Some(next_id) = ctrl.try_admit_next() {
-            if let Some(item) = self.batch.items.iter_mut().find(|b| b.id == next_id) {
+            if let Some(item) = self.batch.find_by_id_mut(next_id) {
                 let Ok(bytes) = item.source.load_bytes() else { continue; };
                 let chain_input = if chain { item.result_rgba.clone() } else { None };
                 let tuple = (next_id, bytes, chain_input);
@@ -1140,7 +1144,7 @@ impl PrunrApp {
     ) {
         let tex_prep_tx = self.batch.bg_io.tex_prep_tx.clone();
         for r in results {
-            let Some(item) = self.batch.items.iter_mut().find(|b| b.id == r.item_id) else {
+            let Some(item) = self.batch.find_by_id_mut(r.item_id) else {
                 continue;
             };
             let new_rgba = Arc::new(r.rgba);
@@ -1404,7 +1408,7 @@ impl PrunrApp {
         let is_selected = self.batch.is_selected(item_id);
         let recipe_snapshot = self.resolved_dispatch_recipe(item_id);
 
-        let Some(item) = self.batch.items.iter_mut().find(|b| b.id == item_id) else { return };
+        let Some(item) = self.batch.find_by_id_mut(item_id) else { return };
         // Skip results for items that were already cancelled (reset to Pending).
         if item.status != BatchStatus::Processing {
             return;
@@ -1674,7 +1678,7 @@ impl PrunrApp {
     fn drain_background_channels(&mut self, ctx: &egui::Context) {
         let mut decode_arrived = false;
         while let Ok((item_id, rgba)) = self.batch.bg_io.decode_rx.try_recv() {
-            if let Some(item) = self.batch.items.iter_mut().find(|b| b.id == item_id) {
+            if let Some(item) = self.batch.find_by_id_mut(item_id) {
                 item.source_rgba = Some(rgba);
                 item.decode_pending = false;
                 decode_arrived = true;
@@ -1691,7 +1695,7 @@ impl PrunrApp {
         let mut tex_arrived = false;
         while let Ok((item_id, name, color_image, is_result)) = self.batch.bg_io.tex_prep_rx.try_recv() {
             let tex = ctx.load_texture(name, color_image, egui::TextureOptions::default());
-            if let Some(item) = self.batch.items.iter_mut().find(|b| b.id == item_id) {
+            if let Some(item) = self.batch.find_by_id_mut(item_id) {
                 if is_result {
                     item.result_texture = Some(tex);
                     item.result_tex_pending = false;

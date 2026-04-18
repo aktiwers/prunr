@@ -124,7 +124,7 @@ fn render_header(ui: &mut egui::Ui, app: &mut PrunrApp) {
 /// Drain completed thumbnails from the background decoder into textures.
 fn pump_thumbnail_results(ui: &egui::Ui, app: &mut PrunrApp) {
     while let Ok((item_id, tw, th, pixels)) = app.batch.bg_io.thumb_rx.try_recv() {
-        if let Some(item) = app.batch.items.iter_mut().find(|b| b.id == item_id) {
+        if let Some(item) = app.batch.find_by_id_mut(item_id) {
             let ci = egui::ColorImage::from_rgba_unmultiplied(
                 [tw as usize, th as usize],
                 &pixels,
@@ -175,13 +175,12 @@ fn render_item_row(
 ) {
     let is_selected = i == app.batch.selected_index;
 
-    // Allocate space for item (always — keeps layout/scrollbar correct).
+    // Allocate even for off-screen rows so the scrollbar reflects the full
+    // list; virtualization below then skips painting for the invisible ones.
     let (item_rect, item_response) = ui.allocate_exact_size(
         Vec2::new(ctx.item_width, ctx.item_height),
         egui::Sense::click_and_drag(),
     );
-
-    // Skip painting for off-screen items (virtualization).
     if item_rect.max.y < ctx.visible_rect.min.y || item_rect.min.y > ctx.visible_rect.max.y {
         return;
     }
