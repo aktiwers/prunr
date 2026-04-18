@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::{mpsc, Arc};
 
 use egui::{Key, ViewportCommand};
@@ -24,10 +24,8 @@ pub struct PrunrApp {
     pub(crate) last_open_dir: Option<std::path::PathBuf>,
     pub(crate) image_dimensions: Option<(u32, u32)>,
 
-    // Worker thread communication
-    worker_tx: mpsc::Sender<WorkerMessage>,
-    worker_rx: mpsc::Receiver<WorkerResult>,
-    pub(crate) cancel_flag: Arc<AtomicBool>,
+    /// Processing pipeline — worker channels, admission, live preview, dispatch state.
+    pub(crate) processor: super::processor::Processor,
 
     pub(crate) status: super::status_state::StatusState,
 
@@ -84,16 +82,6 @@ pub struct PrunrApp {
     // ── Drag-out (OS drag to external apps) ────────────────────────────────
     pub(crate) drag_export: super::drag_export_state::DragExportState,
 
-    // ── Memory-aware batch admission ──────────────────────────────────────
-    /// Active admission controller (present only during streaming batch processing).
-    admission: Option<super::memory::AdmissionController>,
-    /// Sender for streaming additional items to the worker.
-    admission_tx: Option<mpsc::Sender<super::worker::WorkItem>>,
-    /// Recipe snapshot taken at dispatch time — stored on completed items.
-    dispatch_recipe: Option<prunr_core::ProcessingRecipe>,
-    /// Last time periodic history cleanup ran.
-    last_history_cleanup: std::time::Instant,
-    pub(crate) live_preview: super::live_preview::LivePreview,
 }
 
 impl PrunrApp {
@@ -182,9 +170,7 @@ impl PrunrApp {
             loaded_filename: None,
             last_open_dir: None,
             image_dimensions: None,
-            worker_tx,
-            worker_rx,
-            cancel_flag: Arc::new(AtomicBool::new(false)),
+            processor: super::processor::Processor::new(worker_tx, worker_rx, egui_ctx.clone()),
             status: Default::default(),
             source_texture: None,
             result_texture: None,
@@ -210,11 +196,6 @@ impl PrunrApp {
                     .with_anchor(egui_notify::Anchor::BottomLeft)
                     .with_margin(egui::vec2(theme::SPACE_SM, theme::STATUS_BAR_HEIGHT + theme::SPACE_SM)),
             drag_export: super::drag_export_state::DragExportState::new(),
-            admission: None,
-            admission_tx: None,
-            dispatch_recipe: None,
-            last_history_cleanup: std::time::Instant::now(),
-            live_preview: super::live_preview::LivePreview::default(),
         }
     }
 
@@ -635,8 +616,8 @@ impl PrunrApp {
             if initial_items.is_empty() && tier2_work.is_empty() { return; }
 
             let (atx, arx) = mpsc::channel();
-            self.admission = Some(ctrl);
-            self.admission_tx = Some(atx);
+            self.processor.admission = Some(ctrl);
+            self.processor.admission_tx = Some(atx);
 
             self.dispatch_batch(initial_items, tier2_work, model, jobs, Some(arx));
             return;
@@ -670,7 +651,7 @@ impl PrunrApp {
         jobs: usize,
         additional_items_rx: Option<mpsc::Receiver<super::worker::WorkItem>>,
     ) {
-        self.cancel_flag.store(false, Ordering::Release);
+        self.processor.cancel_flag.store(false, Ordering::Release);
         self.state = AppState::Processing;
 
         // Use the currently-viewed item's settings for the batch — matches
@@ -693,11 +674,11 @@ impl PrunrApp {
             }
         }
 
-        self.dispatch_recipe = Some(current_settings.current_recipe(model, self.settings.chain_mode));
+        self.processor.dispatch_recipe = Some(current_settings.current_recipe(model, self.settings.chain_mode));
 
         self.status.pct = 0.0;
         self.status.stage = "Starting".to_string();
-        let _ = self.worker_tx.send(WorkerMessage::BatchProcess {
+        let _ = self.processor.worker_tx.send(WorkerMessage::BatchProcess {
             items,
             tier2_items,
             config: super::worker::ProcessingConfig {
@@ -708,7 +689,7 @@ impl PrunrApp {
                 line_mode: current_settings.line_mode,
                 edge: current_settings.edge_settings(),
             },
-            cancel: self.cancel_flag.clone(),
+            cancel: self.processor.cancel_flag.clone(),
             additional_items_rx,
         });
     }
@@ -951,7 +932,7 @@ impl PrunrApp {
 
 
     pub fn handle_cancel(&mut self) {
-        self.cancel_flag.store(true, Ordering::Release);
+        self.processor.cancel_flag.store(true, Ordering::Release);
     }
 
     /// Add an image to the batch from a file path (lazy — bytes not loaded yet).
@@ -1028,7 +1009,7 @@ impl PrunrApp {
 
     /// Release an item's memory budget and greedily admit the next fitting items.
     fn admission_release_and_admit(&mut self, completed_id: u64) {
-        let Some(ref mut ctrl) = self.admission else { return; };
+        let Some(ref mut ctrl) = self.processor.admission else { return; };
         ctrl.release(completed_id);
 
         let chain = self.settings.chain_mode;
@@ -1039,7 +1020,7 @@ impl PrunrApp {
                 let tuple = (next_id, bytes, chain_input);
                 item.status = BatchStatus::Processing;
 
-                if let Some(ref tx) = self.admission_tx {
+                if let Some(ref tx) = self.processor.admission_tx {
                     if tx.send(tuple).is_err() {
                         break; // worker gone
                     }
@@ -1049,8 +1030,8 @@ impl PrunrApp {
 
         // If all items admitted and released, drop the sender to signal worker
         if ctrl.is_complete() {
-            self.admission_tx = None;
-            self.admission = None;
+            self.processor.admission_tx = None;
+            self.processor.admission = None;
         }
     }
 
@@ -1076,7 +1057,7 @@ impl PrunrApp {
         // each dispatch — run on the UI thread, but only for items that are
         // actually dispatched this frame.
         let batch_items = &self.batch.items;
-        let wait = self.live_preview.tick(|id, kind| {
+        let wait = self.processor.live_preview.tick(|id, kind| {
             use crate::gui::live_preview::{DispatchInputs, PreviewKind, decompress_edge, decompress_seg};
             let item = batch_items.iter().find(|b| b.id == id)?;
             let rgba = item.source_rgba.as_ref()?;
@@ -1119,7 +1100,7 @@ impl PrunrApp {
         //
         // Instead we spawn a tex prep for the new RGBA directly and let
         // drain_background_channels swap it in atomically when ready.
-        let results = self.live_preview.drain_results();
+        let results = self.processor.live_preview.drain_results();
         if !results.is_empty() {
             let tex_prep_tx = self.batch.bg_io.tex_prep_tx.clone();
             for r in results {
@@ -1301,7 +1282,7 @@ impl PrunrApp {
         // Cap messages per frame to keep the UI responsive during heavy batch processing.
         // Remaining messages are picked up next frame (request_repaint_after ensures continuity).
         for _ in 0..8 {
-            let Ok(msg) = self.worker_rx.try_recv() else { break };
+            let Ok(msg) = self.processor.worker_rx.try_recv() else { break };
             match msg {
                 WorkerResult::BatchProgress { item_id, stage, pct } => {
                     // Update progress if this is the currently viewed item
@@ -1350,7 +1331,7 @@ impl PrunrApp {
                         .map_or(false, |b| b.id == item_id);
                     // Fall back to the target item's own settings if dispatch_recipe
                     // wasn't snapshot (shouldn't happen in normal flow; defensive).
-                    let recipe_snapshot = self.dispatch_recipe.clone().unwrap_or_else(|| {
+                    let recipe_snapshot = self.processor.dispatch_recipe.clone().unwrap_or_else(|| {
                         let model: prunr_core::ModelKind = self.settings.model.into();
                         let chain = self.settings.chain_mode;
                         self.batch.items.iter()
@@ -1438,7 +1419,7 @@ impl PrunrApp {
                     }
                 }
                 WorkerResult::BatchComplete => {
-                    self.dispatch_recipe = None;
+                    self.processor.dispatch_recipe = None;
                     let done = self.batch.items.iter().filter(|i| i.status == BatchStatus::Done).count();
                     let failed = self.batch.items.iter().filter(|i| matches!(i.status, BatchStatus::Error(_))).count();
                     let still_processing = self.batch.items.iter().any(|i| i.status == BatchStatus::Processing);
@@ -1464,13 +1445,13 @@ impl PrunrApp {
                     }
                 }
                 WorkerResult::Cancelled => {
-                    self.dispatch_recipe = None;
+                    self.processor.dispatch_recipe = None;
                     if self.state == AppState::Processing {
                         self.state = AppState::Loaded;
                         self.status.text = "Cancelled".to_string();
                     }
-                    self.admission = None;
-                    self.admission_tx = None;
+                    self.processor.admission = None;
+                    self.processor.admission_tx = None;
                 }
                 WorkerResult::SubprocessRetry { reduced_jobs, re_queued_count } => {
                     let msg = format!(
@@ -1671,8 +1652,8 @@ impl PrunrApp {
         if cancel_requested && batch_processing {
             self.handle_cancel();
             // Immediately drop admission state so no more items are admitted
-            self.admission = None;
-            self.admission_tx = None;
+            self.processor.admission = None;
+            self.processor.admission_tx = None;
             for item in &mut self.batch.items {
                 if item.status == BatchStatus::Processing {
                     item.status = BatchStatus::Pending;
@@ -1680,8 +1661,8 @@ impl PrunrApp {
             }
         } else if cancel_requested && self.state == AppState::Processing {
             self.handle_cancel();
-            self.admission = None;
-            self.admission_tx = None;
+            self.processor.admission = None;
+            self.processor.admission_tx = None;
             self.state = AppState::Loaded;
             self.status.text = "Cancelled".to_string();
         } else if cancel_requested && self.show_settings {
@@ -1830,7 +1811,7 @@ impl PrunrApp {
 
 impl Drop for PrunrApp {
     fn drop(&mut self) {
-        self.cancel_flag.store(true, Ordering::Release);
+        self.processor.cancel_flag.store(true, Ordering::Release);
         super::drag_export::cleanup_all();
         super::history_disk::cleanup_all();
     }
@@ -1861,8 +1842,8 @@ impl eframe::App for PrunrApp {
             self.sync_selected_batch_textures(ctx);
         }
         // Periodic cleanup of stale history files (every 10 minutes)
-        if self.last_history_cleanup.elapsed().as_secs() >= 600 {
-            self.last_history_cleanup = std::time::Instant::now();
+        if self.processor.last_history_cleanup.elapsed().as_secs() >= 600 {
+            self.processor.last_history_cleanup = std::time::Instant::now();
             super::history_disk::cleanup_stale();
         }
     }
@@ -2003,9 +1984,9 @@ impl eframe::App for PrunrApp {
                 } else {
                     crate::gui::live_preview::PreviewKind::Edge
                 };
-                self.live_preview.mark_tweak(item_id, kind);
+                self.processor.live_preview.mark_tweak(item_id, kind);
                 if toolbar_change.commit {
-                    self.live_preview.flush(item_id);
+                    self.processor.live_preview.flush(item_id);
                     // Immediate dispatch — no debounce wait needed.
                     ui.ctx().request_repaint();
                 } else {

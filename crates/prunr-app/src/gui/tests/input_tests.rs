@@ -12,12 +12,12 @@ fn handle_cancel_sets_flag_during_processing() {
     app.state = AppState::Processing;
 
     // Before cancel, flag should be false
-    let flag_before = app.cancel_flag.load(Ordering::Relaxed);
+    let flag_before = app.processor.cancel_flag.load(Ordering::Relaxed);
     assert!(!flag_before, "cancel_flag should start false");
 
     app.handle_cancel();
 
-    let flag_after = app.cancel_flag.load(Ordering::Relaxed);
+    let flag_after = app.processor.cancel_flag.load(Ordering::Relaxed);
     assert!(flag_after, "handle_cancel should set cancel_flag to true");
 }
 
