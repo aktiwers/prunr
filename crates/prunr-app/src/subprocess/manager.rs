@@ -8,7 +8,7 @@ use std::io::{BufReader, BufWriter};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 
-use prunr_core::{ModelKind, MaskSettings};
+use prunr_core::{ModelKind, MaskSettings, EdgeSettings};
 use crate::gui::settings::LineMode;
 use super::protocol::*;
 use super::ipc::{write_message, read_message};
@@ -48,8 +48,7 @@ impl SubprocessManager {
         mask: MaskSettings,
         force_cpu: bool,
         line_mode: LineMode,
-        line_strength: f32,
-        solid_line_color: Option<[u8; 3]>,
+        edge: EdgeSettings,
     ) -> Result<(Self, String), String> {
         // Clean up stale IPC temp files from previous workers (crash recovery)
         super::protocol::cleanup_ipc_temp();
@@ -74,8 +73,7 @@ impl SubprocessManager {
 
         // Send Init command
         write_message(&mut stdin_writer, &SubprocessCommand::Init {
-            model, jobs, mask, force_cpu, line_mode,
-            line_strength, solid_line_color,
+            model, jobs, mask, force_cpu, line_mode, edge,
             ipc_dir: ipc_temp_dir(),
         }).map_err(|e| format!("Failed to send Init: {e}"))?;
 

@@ -37,9 +37,9 @@ impl EdgeEngine {
     ///
     /// Convenience wrapper around `infer_tensor` + `finalize_edges` for callers
     /// that don't need the intermediate tensor (e.g. CLI or single-shot flows).
-    pub fn detect(&self, original: &DynamicImage, line_strength: f32, line_color: Option<[u8; 3]>) -> Result<RgbaImage, CoreError> {
+    pub fn detect(&self, original: &DynamicImage, edge: &crate::EdgeSettings) -> Result<RgbaImage, CoreError> {
         let (tensor, h, w) = self.infer_tensor(original)?;
-        Ok(finalize_edges(&tensor, h, w, original, line_strength, line_color))
+        Ok(finalize_edges(&tensor, h, w, original, edge))
     }
 
     /// Run only the DexiNed inference stage. Returns the raw sigmoid-logits
@@ -70,23 +70,17 @@ impl EdgeEngine {
     }
 }
 
-/// Apply threshold + resize + compose stages to a cached DexiNed tensor.
-/// Used by Tier 2 edge reruns to cheaply re-generate the final RGBA without
-/// re-running the model.
-///
-/// - `edge_tensor` = raw sigmoid-logits (pre-threshold) at (tensor_h, tensor_w)
-/// - `original` = the image DexiNed saw (used for RGB when `line_color` is None)
-/// - `line_strength` = 0.0–1.0, maps to internal threshold via an exp curve
-/// - `line_color` = Some → paint all edges that color; None → preserve original RGB
-pub fn finalize_edges(
+/// Threshold + resize a DexiNed tensor into a full-resolution edge mask.
+/// Depends only on `line_strength`; callers can cache the result and reuse it
+/// across `edge_thickness` / `solid_line_color` tweaks.
+pub fn tensor_to_edge_mask(
     edge_tensor: &[f32],
     tensor_h: u32,
     tensor_w: u32,
-    original: &DynamicImage,
+    out_w: u32,
+    out_h: u32,
     line_strength: f32,
-    line_color: Option<[u8; 3]>,
-) -> RgbaImage {
-    let (ow, oh) = (original.width(), original.height());
+) -> image::GrayImage {
     let h = tensor_h as usize;
     let w = tensor_w as usize;
 
@@ -103,14 +97,24 @@ pub fn finalize_edges(
         mask_buf[i] = (val * 255.0) as u8;
     }
 
-    // Resize edge mask to original dimensions
     let mask = image::GrayImage::from_raw(w as u32, h as u32, mask_buf)
         .expect("edge mask buffer size matches dimensions");
-    let mask = crate::formats::resize_gray_lanczos3(&mask, ow, oh);
+    crate::formats::resize_gray_lanczos3(&mask, out_w, out_h)
+}
 
-    // Compose: edge mask as alpha, optionally solid RGB color
+/// Dilate + composite a pre-built edge mask into an RGBA. Cheap; safe to call
+/// every live-preview tweak.
+pub fn compose_edges(
+    mask: &image::GrayImage,
+    original: &DynamicImage,
+    solid_line_color: Option<[u8; 3]>,
+    edge_thickness: u32,
+) -> RgbaImage {
+    let (ow, oh) = (original.width(), original.height());
+    let mut mask = mask.clone();
+    crate::postprocess::dilate_mask(&mut mask, edge_thickness);
     let mask_raw = mask.as_raw();
-    if let Some(c) = line_color {
+    if let Some(c) = solid_line_color {
         let mut buf = vec![0u8; (ow * oh * 4) as usize];
         for i in 0..(ow * oh) as usize {
             buf[i * 4]     = c[0];
@@ -127,6 +131,26 @@ pub fn finalize_edges(
         }
         rgba
     }
+}
+
+/// Tier 2 edge convenience: tensor → mask → RGBA in one call. Prefer the two
+/// split functions when you want to cache the mask between dispatches.
+pub fn finalize_edges(
+    edge_tensor: &[f32],
+    tensor_h: u32,
+    tensor_w: u32,
+    original: &DynamicImage,
+    edge: &crate::EdgeSettings,
+) -> RgbaImage {
+    let mask = tensor_to_edge_mask(
+        edge_tensor,
+        tensor_h,
+        tensor_w,
+        original.width(),
+        original.height(),
+        edge.line_strength,
+    );
+    compose_edges(&mask, original, edge.solid_line_color, edge.edge_thickness)
 }
 
 /// Preprocess an image for DexiNed: resize, BGR float32, subtract mean.
@@ -196,7 +220,8 @@ mod tests {
             tensor[i] = 10.0; // sigmoid → ~1 → edge
         }
         let original = solid_rgb(64, 48);
-        let out = finalize_edges(&tensor, h as u32, w as u32, &original, 0.5, Some([255, 0, 0]));
+        let edge = crate::EdgeSettings { line_strength: 0.5, solid_line_color: Some([255, 0, 0]), edge_thickness: 0 };
+        let out = finalize_edges(&tensor, h as u32, w as u32, &original, &edge);
         assert_eq!(out.width(), 64);
         assert_eq!(out.height(), 48);
         // With high-logit side → opaque red, zero-logit → transparent.
@@ -210,7 +235,8 @@ mod tests {
         let h = DEXINED_H as usize;
         let tensor = vec![10.0_f32; h * w]; // all edges
         let original = solid_rgb(32, 32);
-        let out = finalize_edges(&tensor, h as u32, w as u32, &original, 0.5, None);
+        let edge = crate::EdgeSettings { line_strength: 0.5, solid_line_color: None, edge_thickness: 0 };
+        let out = finalize_edges(&tensor, h as u32, w as u32, &original, &edge);
         // Original color preserved
         assert_eq!(out.get_pixel(0, 0)[0], 120);
         assert_eq!(out.get_pixel(0, 0)[1], 120);
