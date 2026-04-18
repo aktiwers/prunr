@@ -90,6 +90,24 @@ pub fn render(ui: &mut egui::Ui, app: &PrunrApp) {
                 );
                 ui.painter().rect_filled(fill_rect, 2.0, theme::PROGRESS_FILL);
             }
+        } else {
+            // Teach-the-user hint when ≥ 2 checkboxes are set: the canvas
+            // live-preview only updates the viewed image, not the whole
+            // selection. Sits in the statusbar center (between the left
+            // status text and the right metadata) — only visible when the
+            // progress bar isn't occupying that slot.
+            let selected_count = app.batch.items.iter().filter(|i| i.selected).count();
+            if selected_count >= 2 {
+                ui.add_space(theme::SPACE_SM);
+                ui.label(
+                    RichText::new(
+                        "Live editing applies to the viewed image only \u{2014} \
+                         click Process to apply to all selected."
+                    )
+                    .size(theme::FONT_SIZE_MONO)
+                    .color(theme::TEXT_SECONDARY),
+                );
+            }
         }
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
