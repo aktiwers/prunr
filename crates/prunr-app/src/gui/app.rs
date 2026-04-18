@@ -2,11 +2,12 @@ use std::borrow::Cow;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{mpsc, Arc};
 
 use egui::{Key, ViewportCommand};
 
 use prunr_core::ProgressStage;
+use super::drag_export_state::DragExportState;
 use super::history_manager::{HistoryDir, HistoryManager};
 use super::item::{BatchItem, BatchStatus, HistoryEntry, HistorySlot, ImageSource, PresetSnapshot};
 use super::settings::Settings;
@@ -84,18 +85,7 @@ pub struct PrunrApp {
     pub(crate) toasts: egui_notify::Toasts,
 
     // ── Drag-out (OS drag to external apps) ────────────────────────────────
-    /// One-shot: set by sidebar when a drag escapes the sidebar rect.
-    /// Consumed by `ui()` which then invokes the platform drag crate.
-    pub(crate) drag_out_pending: Option<Vec<u64>>,
-    /// True while an OS drag session is in progress. Flipped false by the
-    /// drag crate's completion callback. Read by sidebar to dim thumbnails.
-    pub(crate) drag_out_active: Arc<AtomicBool>,
-    /// Item IDs currently being dragged — sidebar reads this to know which
-    /// thumbnails to dim. Shared with the drag callback thread.
-    pub(crate) drag_out_items: Arc<Mutex<HashSet<u64>>>,
-    /// One-time flag: true if we've already shown the "Linux not supported"
-    /// toast this session. Prevents repeat spam on every drag attempt.
-    pub(crate) drag_out_linux_notified: bool,
+    pub(crate) drag_export: super::drag_export_state::DragExportState,
 
     // ── Memory-aware batch admission ──────────────────────────────────────
     /// Active admission controller (present only during streaming batch processing).
@@ -234,10 +224,7 @@ impl PrunrApp {
             toasts: egui_notify::Toasts::default()
                     .with_anchor(egui_notify::Anchor::BottomLeft)
                     .with_margin(egui::vec2(theme::SPACE_SM, theme::STATUS_BAR_HEIGHT + theme::SPACE_SM)),
-            drag_out_pending: None,
-            drag_out_active: Arc::new(AtomicBool::new(false)),
-            drag_out_items: Arc::new(Mutex::new(HashSet::new())),
-            drag_out_linux_notified: false,
+            drag_export: super::drag_export_state::DragExportState::new(),
             admission: None,
             admission_tx: None,
             dispatch_recipe: None,
@@ -859,17 +846,6 @@ impl PrunrApp {
         }
     }
 
-    /// Clear active drag-out state (used on drag end, error, and Linux fallback).
-    fn reset_drag_out_state(
-        active: &AtomicBool,
-        items: &Mutex<HashSet<u64>>,
-    ) {
-        active.store(false, Ordering::Release);
-        if let Ok(mut set) = items.lock() {
-            set.clear();
-        }
-    }
-
     /// Initiate an OS drag-out for the given batch item IDs.
     /// On Windows/macOS: calls the `drag` crate with PNG temp files.
     /// On Linux: clears drag state and shows a one-time fallback toast
@@ -892,16 +868,16 @@ impl PrunrApp {
         }
 
         // Publish dragged IDs so sidebar can dim those thumbnails.
-        if let Ok(mut set) = self.drag_out_items.lock() {
+        if let Ok(mut set) = self.drag_export.items.lock() {
             set.clear();
             set.extend(ids.iter().copied());
         }
-        self.drag_out_active.store(true, Ordering::Release);
+        self.drag_export.active.store(true, Ordering::Release);
 
         #[cfg(any(target_os = "windows", target_os = "macos"))]
         {
-            let active_flag = self.drag_out_active.clone();
-            let items_set = self.drag_out_items.clone();
+            let active_flag = self.drag_export.active.clone();
+            let items_set = self.drag_export.items.clone();
             let preview_path = paths[0].clone();
 
             let result = drag::start_drag(
@@ -909,21 +885,21 @@ impl PrunrApp {
                 drag::DragItem::Files(paths),
                 drag::Image::File(preview_path),
                 move |_result, _cursor| {
-                    Self::reset_drag_out_state(&active_flag, &items_set);
+                    DragExportState::reset(&active_flag, &items_set);
                 },
                 drag::Options::default(),
             );
             if let Err(e) = result {
-                Self::reset_drag_out_state(&self.drag_out_active, &self.drag_out_items);
+                DragExportState::reset(&self.drag_export.active, &self.drag_export.items);
                 self.toasts.error(format!("Drag failed: {e}"));
             }
         }
 
         #[cfg(not(any(target_os = "windows", target_os = "macos")))]
         {
-            Self::reset_drag_out_state(&self.drag_out_active, &self.drag_out_items);
-            if !self.drag_out_linux_notified {
-                self.drag_out_linux_notified = true;
+            DragExportState::reset(&self.drag_export.active, &self.drag_export.items);
+            if !self.drag_export.linux_notified {
+                self.drag_export.linux_notified = true;
                 self.toasts.info(
                     "Drag to external apps isn't supported on Linux yet.\n\
                      Use Ctrl+C to copy to clipboard, or the Save button to export."
@@ -1650,10 +1626,7 @@ impl PrunrApp {
         // lingering drag state in case the drag crate's completion callback
         // didn't fire (observed on Windows).
         if saw_self_drop && paths.is_empty() && inline_items.is_empty() {
-            self.drag_out_active.store(false, Ordering::Release);
-            if let Ok(mut set) = self.drag_out_items.lock() {
-                set.clear();
-            }
+            DragExportState::reset(&self.drag_export.active, &self.drag_export.items);
             ctx.stop_dragging();
             return;
         }
@@ -2197,7 +2170,7 @@ impl eframe::App for PrunrApp {
 
         // Consume pending drag-out (sidebar set this when a drag escaped the sidebar).
         // Must run after sidebar renders so the user sees the drag cursor leave the area.
-        if let Some(ids) = self.drag_out_pending.take() {
+        if let Some(ids) = self.drag_export.pending.take() {
             self.initiate_drag_out(ids, frame);
             // Clear egui's internal drag state — the OS drag session has taken over.
             // Without this, egui keeps showing the DnD crosshair cursor because it

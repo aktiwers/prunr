@@ -22,9 +22,9 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
     let sidebar_escape_rect = sidebar_rect.expand(12.0);
 
     // Snapshot active drag-out state once per frame (only locks/clones when actively dragging).
-    let drag_active = app.drag_out_active.load(Ordering::Acquire);
+    let drag_active = app.drag_export.active.load(Ordering::Acquire);
     let dragging_ids: Option<HashSet<u64>> = if drag_active {
-        app.drag_out_items.lock().ok().map(|s| s.clone())
+        app.drag_export.items.lock().ok().map(|s| s.clone())
     } else {
         None
     };
@@ -340,8 +340,8 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                 // if the dragged item is checkbox-selected, drag ALL selected items;
                 // otherwise drag just the one. Skip items still processing.
                 if ui.ctx().is_being_dragged(item_response.id)
-                    && app.drag_out_pending.is_none()
-                    && !app.drag_out_active.load(Ordering::Acquire)
+                    && app.drag_export.pending.is_none()
+                    && !app.drag_export.active.load(Ordering::Acquire)
                 {
                     if let Some(pos) = ui.ctx().pointer_hover_pos() {
                         if !sidebar_escape_rect.contains(pos) {
@@ -359,7 +359,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                                 Vec::new()
                             };
                             if !ids.is_empty() {
-                                app.drag_out_pending = Some(ids);
+                                app.drag_export.pending = Some(ids);
                             }
                         }
                     }
