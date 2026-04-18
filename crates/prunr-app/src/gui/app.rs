@@ -1276,11 +1276,23 @@ impl PrunrApp {
     }
 }
 
+/// Cap on `WorkerResult` messages drained per frame from `processor.worker_rx`.
+/// Keeps the UI responsive during heavy batch processing — remaining messages
+/// are picked up on the next frame (request_repaint_after ensures continuity).
+const WORKER_POLL_PER_FRAME: usize = 8;
+
+/// Cap on file-load receipts drained per frame from `batch.bg_io.file_load_rx`.
+/// Same rationale as `WORKER_POLL_PER_FRAME`.
+const FILE_LOAD_DRAIN_PER_FRAME: usize = 5;
+
+/// How often `eframe::App::logic` triggers a sweep of stale on-disk history
+/// files (Tier 3). 10 minutes is conservative — short enough that a long
+/// session doesn't accumulate, long enough that the sweep cost is invisible.
+const HISTORY_CLEANUP_INTERVAL_SECS: u64 = 600;
+
 impl PrunrApp {
     fn poll_worker_results(&mut self, ctx: &egui::Context) {
-        // Cap messages per frame to keep the UI responsive during heavy batch processing.
-        // Remaining messages are picked up next frame (request_repaint_after ensures continuity).
-        for _ in 0..8 {
+        for _ in 0..WORKER_POLL_PER_FRAME {
             let Ok(msg) = self.processor.worker_rx.try_recv() else { break };
             match msg {
                 WorkerResult::BatchProgress { item_id, stage, pct } => {
@@ -1770,7 +1782,7 @@ impl PrunrApp {
         let id_floor = self.batch.next_id;
         let mut loaded_count = 0u32;
         let mut channel_drained = false;
-        for _ in 0..5 {
+        for _ in 0..FILE_LOAD_DRAIN_PER_FRAME {
             match self.batch.bg_io.file_load_rx.try_recv() {
                 Ok((path, name)) => {
                     self.add_to_batch_path(path, name);
@@ -1840,8 +1852,8 @@ impl eframe::App for PrunrApp {
         if self.source_texture.is_none() && !self.batch.items.is_empty() {
             self.sync_selected_batch_textures(ctx);
         }
-        // Periodic cleanup of stale history files (every 10 minutes)
-        if self.processor.last_history_cleanup.elapsed().as_secs() >= 600 {
+        // Periodic cleanup of stale on-disk history files.
+        if self.processor.last_history_cleanup.elapsed().as_secs() >= HISTORY_CLEANUP_INTERVAL_SECS {
             self.processor.last_history_cleanup = std::time::Instant::now();
             super::history_disk::cleanup_stale();
         }
