@@ -2,6 +2,7 @@ pub mod app;
 pub mod state;
 pub mod settings;
 pub mod item_settings;
+pub mod presets_fs;
 pub mod worker;
 pub mod theme;
 pub mod views;

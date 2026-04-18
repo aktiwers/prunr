@@ -38,9 +38,14 @@ pub struct Settings {
     /// User-configurable keyboard shortcuts. Rebinding UI not yet wired.
     #[serde(default)]
     pub shortcuts: HashMap<String, String>,
-    /// Named presets. Does NOT include "Prunr" — that's synthetic (always
-    /// `ItemSettings::default()`, served via `preset_values()`).
-    #[serde(default)]
+    /// Named presets (excluding the synthetic "Prunr"). Populated from the
+    /// filesystem store at load time; not written to settings.json on save —
+    /// each preset lives as its own file in `~/.config/prunr/presets/` so
+    /// users can share them by dropping JSON files into the folder.
+    /// The `default` + `skip_serializing` pair lets older builds that
+    /// embedded presets in settings.json still deserialize cleanly (the
+    /// load path migrates them out on first run).
+    #[serde(default, skip_serializing)]
     pub presets: HashMap<String, ItemSettings>,
     /// Which preset new imports inherit, and what Reset All Knobs restores.
     /// Always set; defaults to "Prunr". If the named preset goes missing
@@ -67,13 +72,23 @@ impl Settings {
     }
 
     /// Load from disk, falling back to defaults if missing or corrupt.
+    ///
+    /// Presets come from the filesystem store (`~/.config/prunr/presets/`),
+    /// one JSON file per preset — shareable by dropping a file into the
+    /// folder. Anything still in settings.json from older builds gets
+    /// migrated to files on this load and then cleared from the JSON.
+    ///
     /// Migrates v1 per-image fields (mask_gamma, bg_color, line_mode, ...)
-    /// into a "Previous defaults" preset — preserves the user's customizations
-    /// without forcing them onto every new import. User can opt-in by applying
-    /// the preset explicitly from the toolbar.
+    /// into a "Previous defaults" preset file on first load.
     pub fn load() -> Self {
         let Some(path) = Self::config_path() else { return Self::default() };
-        let Ok(data) = std::fs::read_to_string(&path) else { return Self::default() };
+        let Ok(data) = std::fs::read_to_string(&path) else {
+            // No settings.json, but the user may still have preset files
+            // dropped into the folder. Pick those up.
+            let mut settings = Self::default();
+            settings.presets = super::presets_fs::load_all();
+            return settings;
+        };
 
         // Parse to Value first so we can migrate v1 fields regardless of
         // whether strict struct parsing succeeds.
@@ -93,10 +108,9 @@ impl Settings {
             }
         };
 
-        // Detect v1 format (presence of old per-image keys) and stash the
-        // migrated values as a preset. New imports still get factory defaults;
-        // user can apply "Previous defaults" from the toolbar if they want
-        // their v1 preferences back. Avoids re-migrating on every launch.
+        // v1 migration: stash old per-image fields as a "Previous defaults"
+        // preset. User can apply it explicitly if they want their old values
+        // back; new imports still start with factory defaults.
         let is_v1 = value.get("mask_gamma").is_some()
             || value.get("apply_bg_color").is_some()
             || value.get("line_mode").is_some();
@@ -108,6 +122,21 @@ impl Settings {
             }
         }
 
+        // One-shot migration: if settings.json still embeds presets from an
+        // older build, write each to the filesystem store and persist the
+        // cleared settings (skip_serializing drops them from settings.json).
+        // The embedded copies stay in memory for this session — no need to
+        // re-parse what we just wrote.
+        if !settings.presets.is_empty() {
+            for (name, values) in &settings.presets {
+                let _ = super::presets_fs::save(name, values);
+            }
+            settings.save();
+            return settings;
+        }
+
+        // Steady state: no embedded presets. Load from the filesystem store.
+        settings.presets = super::presets_fs::load_all();
         settings
     }
 
