@@ -37,13 +37,18 @@ use crate::gui::item_settings::ItemSettings;
 use crate::gui::worker::CompressedTensor;
 
 /// Throttle cadence for live-preview dispatch during a continuous drag.
-/// Sized slightly above the per-dispatch postprocess cost (~90ms on 4K
-/// without refine_edges) so each dispatch completes before the next
-/// fires — dropping lower would pile up stale dispatches that the
-/// generation filter in `drain_results` discards, burning CPU for no
+/// 150ms is comfortably above the worker's best-case cost (~90ms on 4K
+/// without refine_edges, ~240ms with refine_edges) so each dispatch has
+/// room to land before the next fires — dropping lower piles up stale
+/// dispatches that the generation filter discards, burning CPU with no
 /// visible gain. Release / commit paths call `flush` instead, so the
 /// final result on knob-release still lands immediately.
-pub const DEBOUNCE: Duration = Duration::from_millis(100);
+///
+/// Independent of DEBOUNCE, `pump_live_preview` polls at 50ms while an
+/// in-flight dispatch hasn't drained — so the UI never goes idle with a
+/// worker result waiting in the channel, regardless of which knob you
+/// tweaked or how slow the pass is.
+pub const DEBOUNCE: Duration = Duration::from_millis(150);
 
 /// What kind of Tier 2 rerun a tweak needs. Two kinds because they touch
 /// different cached tensors (segmentation vs DexiNed) and different pipeline
@@ -253,6 +258,14 @@ impl LivePreview {
         out
     }
 
+    /// True while at least one dispatch is still running on the rayon pool.
+    /// `pump_live_preview` uses this to keep polling repaints so the result
+    /// channel gets drained as soon as the worker lands, instead of sitting
+    /// until a user-input event wakes egui.
+    pub fn has_in_flight(&self) -> bool {
+        !self.in_flight.is_empty()
+    }
+
     /// Cancel all in-flight + pending previews. Called on batch clear or shutdown.
     pub fn cancel_all(&mut self) {
         for f in self.in_flight.values() {
@@ -386,6 +399,19 @@ mod tests {
         let mut lp = LivePreview::default();
         lp.mark_tweak(42, PreviewKind::Mask);
         assert!(lp.pending.contains_key(&42));
+    }
+
+    #[test]
+    fn has_in_flight_tracks_dispatch_lifecycle() {
+        let mut lp = LivePreview::default();
+        assert!(!lp.has_in_flight(), "fresh LivePreview is idle");
+        lp.in_flight.insert(
+            1,
+            InFlight { cancel: Arc::new(AtomicBool::new(false)), generation: 1 },
+        );
+        assert!(lp.has_in_flight());
+        lp.cancel_all();
+        assert!(!lp.has_in_flight(), "cancel_all clears in_flight");
     }
 
     #[test]
