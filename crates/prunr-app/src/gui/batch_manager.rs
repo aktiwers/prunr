@@ -71,6 +71,17 @@ impl BatchManager {
         self.selected_item().map_or(false, |b| b.id == id)
     }
 
+    /// Selected-item index clamped to the current batch size. `None` when
+    /// the batch is empty — callers early-return on that shape instead of
+    /// dealing with saturating arithmetic.
+    pub(crate) fn selected_idx_clamped(&self) -> Option<usize> {
+        if self.items.is_empty() {
+            None
+        } else {
+            Some(self.selected_index.min(self.items.len() - 1))
+        }
+    }
+
     /// Single pass over `items` producing the three counts that callers
     /// (`poll_worker_results`, statusbar) otherwise compute with three
     /// separate filter-count passes.
@@ -258,6 +269,33 @@ mod tests {
         let bm = fixture();
         assert!(!bm.is_selected(0));
         assert!(!bm.is_selected(99));
+    }
+
+    // ── selected_idx_clamped ────────────────────────────────────────────
+
+    #[test]
+    fn selected_idx_clamped_is_none_when_empty() {
+        let bm = fixture();
+        assert_eq!(bm.selected_idx_clamped(), None);
+    }
+
+    #[test]
+    fn selected_idx_clamped_returns_index_when_in_bounds() {
+        let mut bm = fixture();
+        bm.items.push(item_with_cache(1, 0));
+        bm.items.push(item_with_cache(2, 0));
+        bm.selected_index = 1;
+        assert_eq!(bm.selected_idx_clamped(), Some(1));
+    }
+
+    #[test]
+    fn selected_idx_clamped_clamps_when_out_of_bounds() {
+        // Guards against stale selected_index after items shrink (remove
+        // operation) before selected_index has been updated.
+        let mut bm = fixture();
+        bm.items.push(item_with_cache(1, 0));
+        bm.selected_index = 99;
+        assert_eq!(bm.selected_idx_clamped(), Some(0));
     }
 
     // ── status_counts ───────────────────────────────────────────────────

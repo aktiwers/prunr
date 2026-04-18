@@ -1169,60 +1169,76 @@ impl PrunrApp {
     }
 
     pub(crate) fn sync_selected_batch_textures(&mut self, ctx: &egui::Context) {
-        if self.batch.items.is_empty() { return; }
-        let idx = self.batch.selected_index.min(self.batch.items.len() - 1);
+        let Some(idx) = self.batch.selected_idx_clamped() else { return };
 
-        // Evict full-res result_rgba for non-selected Done items to save RAM.
-        // Compressed copy is saved in history; restored on demand when re-selected.
+        self.evict_result_rgba_for_background_items(idx);
+        self.restore_selected_result_from_history(idx);
+        self.ensure_selected_source_decoded(idx);
+        self.request_selected_textures(idx, ctx);
+        self.sync_app_state_to_selected_item(idx);
+    }
+
+    /// Free full-resolution `result_rgba` for every Done item that isn't the
+    /// selected one. The compressed history copy stays, so a later selection
+    /// can restore on demand (see `restore_selected_result_from_history`).
+    fn evict_result_rgba_for_background_items(&mut self, selected_idx: usize) {
         for (i, item) in self.batch.items.iter_mut().enumerate() {
-            if i != idx && item.result_rgba.is_some() && item.status == BatchStatus::Done {
-                if let Some(rgba) = item.result_rgba.take() {
-                    let recipe = item.applied_recipe.clone();
-                    if let Some(back) = item.history.back_mut() {
-                        back.cleanup();
-                        *back = HistoryEntry::new(rgba, recipe);
-                    } else {
-                        item.history.push_back(HistoryEntry::new(rgba, recipe));
-                    }
+            if i == selected_idx || item.result_rgba.is_none() || item.status != BatchStatus::Done {
+                continue;
+            }
+            if let Some(rgba) = item.result_rgba.take() {
+                let recipe = item.applied_recipe.clone();
+                if let Some(back) = item.history.back_mut() {
+                    back.cleanup();
+                    *back = HistoryEntry::new(rgba, recipe);
+                } else {
+                    item.history.push_back(HistoryEntry::new(rgba, recipe));
                 }
-                item.result_texture = None;
-                item.result_tex_pending = false;
             }
+            item.result_texture = None;
+            item.result_tex_pending = false;
         }
+    }
 
-        // Restore result for the selected item if it was evicted
-        if self.batch.items[idx].status == BatchStatus::Done
-            && self.batch.items[idx].result_rgba.is_none()
+    /// Restore `result_rgba` for the selected item if it was previously evicted
+    /// by the background-eviction pass. Peeks the latest history slot
+    /// (non-destructive) and decompresses / reads from disk as needed.
+    fn restore_selected_result_from_history(&mut self, idx: usize) {
+        if self.batch.items[idx].status != BatchStatus::Done
+            || self.batch.items[idx].result_rgba.is_some()
         {
-            if let Some(entry) = self.batch.items[idx].history.back() {
-                // Peek at the latest history entry — decompress without removing
-                let restored = match &entry.slot {
-                    HistorySlot::InMemory(rgba) => Some(rgba.clone()),
-                    HistorySlot::Compressed(ce) => {
-                        super::history_disk::decompress_from_ram(ce)
-                            .ok()
-                            .map(|img| Arc::new(img))
-                    }
-                    HistorySlot::OnDisk(de) => {
-                        super::history_disk::read_history(de)
-                            .ok()
-                            .map(|img| Arc::new(img))
-                    }
-                };
-                let recipe = entry.recipe.clone();
-                self.batch.items[idx].result_rgba = restored;
-                self.batch.items[idx].applied_recipe = recipe;
+            return;
+        }
+        let Some(entry) = self.batch.items[idx].history.back() else { return };
+        let restored = match &entry.slot {
+            HistorySlot::InMemory(rgba) => Some(rgba.clone()),
+            HistorySlot::Compressed(ce) => {
+                super::history_disk::decompress_from_ram(ce).ok().map(Arc::new)
             }
-        }
+            HistorySlot::OnDisk(de) => {
+                super::history_disk::read_history(de).ok().map(Arc::new)
+            }
+        };
+        let recipe = entry.recipe.clone();
+        self.batch.items[idx].result_rgba = restored;
+        self.batch.items[idx].applied_recipe = recipe;
+    }
 
-        // Lazy decode: if the selected item has no decoded source RGBA, decode on demand.
-        if self.batch.items[idx].source_rgba.is_none() && !self.batch.items[idx].decode_pending {
-            self.batch.items[idx].decode_pending = true;
-            self.batch.request_decode_source(self.batch.items[idx].id, &self.batch.items[idx].source);
+    /// Kick off background decode if the selected item has no decoded source
+    /// (lazy decode path — applies after sidebar navigation to a not-yet-decoded item).
+    fn ensure_selected_source_decoded(&mut self, idx: usize) {
+        if self.batch.items[idx].source_rgba.is_some() || self.batch.items[idx].decode_pending {
+            return;
         }
+        self.batch.items[idx].decode_pending = true;
+        let id = self.batch.items[idx].id;
+        self.batch.request_decode_source(id, &self.batch.items[idx].source);
+    }
 
-        // Dispatch ColorImage preparation to background threads if needed.
-        // The actual ctx.load_texture() happens in drain_background_channels.
+    /// Spawn ColorImage preparation threads for whichever textures are missing.
+    /// The actual `ctx.load_texture()` call happens in `drain_background_channels`
+    /// after the prepared ColorImage arrives on `tex_prep_rx`.
+    fn request_selected_textures(&mut self, idx: usize, ctx: &egui::Context) {
         let item_id = self.batch.items[idx].id;
 
         if self.batch.items[idx].source_texture.is_none()
@@ -1249,24 +1265,23 @@ impl PrunrApp {
                 );
             }
         }
+    }
 
-        // Sync app-level state for canvas rendering.
-        // Keep the previous texture visible until the new item's texture is ready
-        // (avoids a blank flash on sidebar click, especially for lazy-decoded items).
+    /// Pull the selected item's textures + dimensions + filename onto the
+    /// app-level fields the canvas reads. Keeps the previous texture visible
+    /// until the new item's is ready (no blank flash on sidebar click).
+    fn sync_app_state_to_selected_item(&mut self, idx: usize) {
         let item = &self.batch.items[idx];
         if item.source_texture.is_some() {
             self.source_texture = item.source_texture.clone();
         }
-        // Only update dimensions/filename when the item actually has something to show,
-        // or when switching away from a completely different state.
         self.loaded_filename = Some(item.filename.clone());
         self.image_dimensions = Some(item.dimensions);
         self.show_original = false;
 
-        let item_status = item.status.clone();
         let result_texture = item.result_texture.clone();
         let result_rgba = item.result_rgba.clone();
-        match item_status {
+        match item.status {
             BatchStatus::Done => {
                 if item.result_texture.is_some() {
                     self.result_texture = result_texture;
@@ -1801,141 +1816,8 @@ impl eframe::App for PrunrApp {
             .frame(panel_frame)
             .show_inside(ui, |ui| toolbar::render(ui, self));
 
-        // Row 2 + 3: persistent adjustments toolbar. Only renders when the
-        // batch has an item to bind to. Shift+H hides it; `auto_hide_adjustments`
-        // hides it when the cursor is below a peek zone at the top of the window.
-        //
-        // Peek zone = first ~(TOOLBAR_HEIGHT + 60px) of the window vertically.
-        // Toolbar stays visible while any chip/combo popup is open so that
-        // the user interacting with a popover doesn't have the toolbar yanked
-        // out from under their cursor.
-        let show_adjustments = if self.adjustments_hidden || self.batch.items.is_empty() {
-            false
-        } else if self.settings.auto_hide_adjustments {
-            let screen_rect = ui.ctx().content_rect();
-            // Peek zone covers the main toolbar + ~half the adjustments toolbar
-            // height. Generous enough to catch the user heading up toward the
-            // chips, tight enough not to trigger on ordinary canvas work.
-            let peek_zone = egui::Rect::from_min_size(
-                screen_rect.min,
-                egui::vec2(screen_rect.width(), theme::TOOLBAR_HEIGHT + 32.0),
-            );
-            let hover_in_peek = ui
-                .ctx()
-                .input(|i| i.pointer.hover_pos().is_some_and(|p| peek_zone.contains(p)));
-            #[allow(deprecated)]
-            let popup_open = ui.ctx().memory(|m| m.any_popup_open());
-            hover_in_peek || popup_open
-        } else {
-            true
-        };
-        if show_adjustments {
-            // Row 3 is always visible now (Lines mode selector lives there),
-            // so the toolbar always reserves two rows of height.
-            let height = chip::CHIP_HEIGHT * 2.0 + theme::SPACE_XS + theme::SPACE_SM * 2.0;
-            let mut toolbar_change = adjustments_toolbar::ToolbarChange::default();
-            let is_processing = self.state == AppState::Processing;
-            // Snapshot of the current (settings, applied_preset) taken BEFORE
-            // adjustments_toolbar::render runs — if the user ends up applying
-            // a preset this frame, the snapshot goes onto the preset undo
-            // stack so Ctrl+Shift+Z can roll back an accidental pick.
-            let pre_apply_snapshot = {
-                let idx = self.batch.selected_index.min(self.batch.items.len() - 1);
-                let item = &self.batch.items[idx];
-                PresetSnapshot {
-                    settings: item.settings,
-                    applied_preset: item.applied_preset.clone(),
-                }
-            };
-            egui::Panel::top("adjustments_toolbar")
-                .exact_size(height)
-                .frame(panel_frame)
-                .show_inside(ui, |ui| {
-                    let idx = self.batch.selected_index.min(self.batch.items.len() - 1);
-                    // Split borrow: app.settings and app.batch are disjoint
-                    // fields of PrunrApp, and within the batch item its
-                    // `settings` and `applied_preset` are disjoint fields too.
-                    // This lets the toolbar mutate the preset string in place
-                    // without a clone + writeback round-trip.
-                    let settings_ref = &mut self.settings;
-                    let item = &mut self.batch.items[idx];
-                    toolbar_change = adjustments_toolbar::render(
-                        ui,
-                        &mut item.settings,
-                        settings_ref,
-                        &mut item.applied_preset,
-                        is_processing,
-                    );
-                });
-            if toolbar_change.preset_applied {
-                let idx = self.batch.selected_index.min(self.batch.items.len() - 1);
-                let item = &mut self.batch.items[idx];
-                HistoryManager::push_preset(item, pre_apply_snapshot);
-            }
-            // Model swap: persist the new selection, show toast, invalidate caches.
-            if toolbar_change.model_changed {
-                self.settings.save();
-                self.toasts.info(format!(
-                    "{} loaded",
-                    crate::gui::views::model_name(self.settings.model),
-                ));
-            }
-            // Granular cache invalidation — only clear the tensors whose
-            // INPUT actually changed. Preset applies that keep line_mode the
-            // same leave the edge cache valid (line_strength tweaks can still
-            // live-preview). Model swaps clear only the seg cache (edge
-            // tensor is model-independent).
-            if toolbar_change.seg_cache_invalid || toolbar_change.edge_cache_invalid {
-                let idx = self.batch.selected_index.min(self.batch.items.len() - 1);
-                if toolbar_change.seg_cache_invalid {
-                    self.batch.items[idx].cached_tensor = None;
-                }
-                if toolbar_change.edge_cache_invalid {
-                    self.batch.items[idx].invalidate_edge_cache();
-                }
-                // A preset apply that invalidates the cache on an already-
-                // processed item means live preview has no tensor to rerun
-                // against. Auto-trigger a reprocess so the user doesn't have
-                // to click Process; tier routing keeps this cheap when only
-                // one tensor is stale.
-                if toolbar_change.preset_applied
-                    && self.batch.items[idx].status == BatchStatus::Done
-                {
-                    let target_id = self.batch.items[idx].id;
-                    self.process_items(|item| item.id == target_id);
-                }
-            }
-            // Register mask / edge tweaks with the live preview dispatcher.
-            // `mark_tweak` debounces; `flush` fires immediately when a chip
-            // signals the edit has settled (slider released, toggle flipped,
-            // color picked). toolbar_change.commit is OR-ed across all chips
-            // touched this frame, so toggles + color picks always commit now
-            // and mid-slider-drag changes debounce.
-            if self.settings.live_preview && (toolbar_change.mask || toolbar_change.edge) {
-                let idx = self.batch.selected_index.min(self.batch.items.len() - 1);
-                let item_id = self.batch.items[idx].id;
-                let kind = if toolbar_change.mask {
-                    crate::gui::live_preview::PreviewKind::Mask
-                } else {
-                    crate::gui::live_preview::PreviewKind::Edge
-                };
-                self.processor.live_preview.mark_tweak(item_id, kind);
-                if toolbar_change.commit {
-                    self.processor.live_preview.flush(item_id);
-                    // Immediate dispatch — no debounce wait needed.
-                    ui.ctx().request_repaint();
-                } else {
-                    // Wake up after the debounce elapses so tick() can dispatch.
-                    ui.ctx().request_repaint_after(
-                        crate::gui::live_preview::DEBOUNCE,
-                    );
-                }
-            }
-            if toolbar_change.bg {
-                // bg is rendered at draw time (GPU rect behind transparent
-                // result texture) — no CPU compositing, no texture rebuild.
-                ui.ctx().request_repaint();
-            }
+        if self.adjustments_should_show(ui.ctx()) {
+            self.render_adjustments_toolbar(ui, panel_frame);
         }
 
         egui::Panel::bottom("statusbar")
@@ -1953,25 +1835,10 @@ impl eframe::App for PrunrApp {
 
         egui::CentralPanel::default().show_inside(ui, |ui| canvas::render(ui, self));
 
-        if self.show_shortcuts {
-            if shortcuts::render(ui.ctx()) {
-                self.show_shortcuts = false;
-            }
-        }
-        if self.show_cli_help {
-            if cli_help::render(ui.ctx(), &mut self.toasts) {
-                self.show_cli_help = false;
-            }
-        }
-        if self.show_settings {
-            settings::render(ui.ctx(), self);
-        }
-
-        // Toast notifications — rendered last as foreground overlay
-        self.toasts.show(ui.ctx());
+        self.render_modal_overlays(ui.ctx());
 
         // Consume pending drag-out (sidebar set this when a drag escaped the sidebar).
-        // Must run after sidebar renders so the user sees the drag cursor leave the area.
+        // Runs after sidebar renders so the user sees the drag cursor leave the area.
         if let Some(ids) = self.drag_export.pending.take() {
             self.initiate_drag_out(ids, frame);
             // Clear egui's internal drag state — the OS drag session has taken over.
@@ -1979,6 +1846,154 @@ impl eframe::App for PrunrApp {
             // still thinks an internal drag is in progress.
             ui.ctx().stop_dragging();
         }
+    }
+}
+
+impl PrunrApp {
+    /// Whether the row 2+3 adjustments toolbar should render this frame.
+    /// Shift+H and an empty batch always hide it. `auto_hide_adjustments`
+    /// hides it unless the cursor is in a peek zone near the top of the
+    /// window or a popup (combo / color picker) is open.
+    fn adjustments_should_show(&self, ctx: &egui::Context) -> bool {
+        if self.adjustments_hidden || self.batch.items.is_empty() {
+            return false;
+        }
+        if !self.settings.auto_hide_adjustments {
+            return true;
+        }
+        let screen_rect = ctx.content_rect();
+        // Peek zone covers the main toolbar + ~half the adjustments toolbar
+        // height. Generous enough to catch the user heading up toward the
+        // chips, tight enough not to trigger on ordinary canvas work.
+        let peek_zone = egui::Rect::from_min_size(
+            screen_rect.min,
+            egui::vec2(screen_rect.width(), theme::TOOLBAR_HEIGHT + 32.0),
+        );
+        let hover_in_peek = ctx.input(|i| i.pointer.hover_pos().is_some_and(|p| peek_zone.contains(p)));
+        hover_in_peek || egui::Popup::is_any_open(ctx)
+    }
+
+    fn render_adjustments_toolbar(&mut self, ui: &mut egui::Ui, panel_frame: egui::Frame) {
+        let Some(idx) = self.batch.selected_idx_clamped() else { return };
+        // Row 3 is always visible (Lines mode selector lives there), so the
+        // toolbar always reserves two rows of height.
+        let height = chip::CHIP_HEIGHT * 2.0 + theme::SPACE_XS + theme::SPACE_SM * 2.0;
+        let mut toolbar_change = adjustments_toolbar::ToolbarChange::default();
+        let is_processing = self.state == AppState::Processing;
+        // Snapshot taken BEFORE adjustments_toolbar::render runs — if the
+        // user ends up applying a preset this frame, the snapshot goes onto
+        // the preset undo stack so Ctrl+Shift+Z can roll back an accidental pick.
+        let item = &self.batch.items[idx];
+        let pre_apply_snapshot = PresetSnapshot {
+            settings: item.settings,
+            applied_preset: item.applied_preset.clone(),
+        };
+        egui::Panel::top("adjustments_toolbar")
+            .exact_size(height)
+            .frame(panel_frame)
+            .show_inside(ui, |ui| {
+                // Split borrow: app.settings and app.batch are disjoint
+                // fields of PrunrApp, and within the batch item its
+                // `settings` and `applied_preset` are disjoint fields too.
+                // Lets the toolbar mutate the preset string in place
+                // without a clone + writeback round-trip.
+                let settings_ref = &mut self.settings;
+                let item = &mut self.batch.items[idx];
+                toolbar_change = adjustments_toolbar::render(
+                    ui,
+                    &mut item.settings,
+                    settings_ref,
+                    &mut item.applied_preset,
+                    is_processing,
+                );
+            });
+        self.apply_toolbar_change(ui.ctx(), toolbar_change, pre_apply_snapshot);
+    }
+
+    fn apply_toolbar_change(
+        &mut self,
+        ctx: &egui::Context,
+        toolbar_change: adjustments_toolbar::ToolbarChange,
+        pre_apply_snapshot: PresetSnapshot,
+    ) {
+        let Some(idx) = self.batch.selected_idx_clamped() else { return };
+
+        if toolbar_change.preset_applied {
+            let item = &mut self.batch.items[idx];
+            HistoryManager::push_preset(item, pre_apply_snapshot);
+        }
+        // Model swap: persist the new selection, show toast, invalidate caches.
+        if toolbar_change.model_changed {
+            self.settings.save();
+            self.toasts.info(format!(
+                "{} loaded",
+                crate::gui::views::model_name(self.settings.model),
+            ));
+        }
+        // Granular cache invalidation — only clear the tensors whose INPUT
+        // actually changed. Preset applies that keep line_mode the same
+        // leave the edge cache valid (line_strength tweaks can still
+        // live-preview). Model swaps clear only the seg cache (edge tensor
+        // is model-independent).
+        if toolbar_change.seg_cache_invalid || toolbar_change.edge_cache_invalid {
+            if toolbar_change.seg_cache_invalid {
+                self.batch.items[idx].cached_tensor = None;
+            }
+            if toolbar_change.edge_cache_invalid {
+                self.batch.items[idx].invalidate_edge_cache();
+            }
+            // A preset apply that invalidates the cache on an already-
+            // processed item means live preview has no tensor to rerun
+            // against. Auto-trigger a reprocess so the user doesn't have to
+            // click Process; tier routing keeps this cheap when only one
+            // tensor is stale.
+            if toolbar_change.preset_applied
+                && self.batch.items[idx].status == BatchStatus::Done
+            {
+                let target_id = self.batch.items[idx].id;
+                self.process_items(|item| item.id == target_id);
+            }
+        }
+        // Register mask / edge tweaks with the live preview dispatcher.
+        // `mark_tweak` debounces; `flush` fires immediately when a chip
+        // signals the edit has settled (slider released, toggle flipped,
+        // color picked). toolbar_change.commit is OR-ed across all chips
+        // touched this frame, so toggles + color picks always commit now
+        // and mid-slider-drag changes debounce.
+        if self.settings.live_preview && (toolbar_change.mask || toolbar_change.edge) {
+            let item_id = self.batch.items[idx].id;
+            let kind = if toolbar_change.mask {
+                crate::gui::live_preview::PreviewKind::Mask
+            } else {
+                crate::gui::live_preview::PreviewKind::Edge
+            };
+            self.processor.live_preview.mark_tweak(item_id, kind);
+            if toolbar_change.commit {
+                self.processor.live_preview.flush(item_id);
+                ctx.request_repaint();
+            } else {
+                ctx.request_repaint_after(crate::gui::live_preview::DEBOUNCE);
+            }
+        }
+        if toolbar_change.bg {
+            // bg is rendered at draw time (GPU rect behind transparent result
+            // texture) — no CPU compositing, no texture rebuild.
+            ctx.request_repaint();
+        }
+    }
+
+    fn render_modal_overlays(&mut self, ctx: &egui::Context) {
+        if self.show_shortcuts && shortcuts::render(ctx) {
+            self.show_shortcuts = false;
+        }
+        if self.show_cli_help && cli_help::render(ctx, &mut self.toasts) {
+            self.show_cli_help = false;
+        }
+        if self.show_settings {
+            settings::render(ctx, self);
+        }
+        // Toasts — rendered last as foreground overlay.
+        self.toasts.show(ctx);
     }
 }
 
