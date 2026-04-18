@@ -123,6 +123,7 @@ pub fn chip_f32(
     value: &mut f32,
     range: std::ops::RangeInclusive<f32>,
     default_value: f32,
+    logarithmic: bool,
     format: impl Fn(f32) -> String,
 ) -> ChipChange {
     let pop_id = egui::Id::new(("chip_f32", id_salt));
@@ -137,8 +138,44 @@ pub fn chip_f32(
         let slider = ui.add(
             egui::Slider::new(value, range)
                 .show_value(true)
-                .fixed_decimals(2),
+                .fixed_decimals(2)
+                .logarithmic(logarithmic),
         );
+        if slider.changed() { out.changed = true; }
+        if slider_settled(&slider) { out.commit = true; }
+        hint(ui, tooltip);
+        ui.add_space(theme::SPACE_XS);
+        if reset_button(ui, "Reset to factory default") {
+            *value = default_value;
+            out.changed = true;
+            out.commit = true;
+        }
+    });
+    out
+}
+
+/// Integer chip. Used for pixel counts where fractional values don't make sense.
+pub fn chip_u32(
+    ui: &mut Ui,
+    id_salt: &str,
+    icon: &str,
+    label: &str,
+    tooltip: &str,
+    value: &mut u32,
+    range: std::ops::RangeInclusive<u32>,
+    default_value: u32,
+    format: impl Fn(u32) -> String,
+) -> ChipChange {
+    let pop_id = egui::Id::new(("chip_u32", id_salt));
+    let accent = *value != default_value;
+    let display = format(*value);
+    let resp = chip_button(ui, icon, &display, accent).on_hover_text(tooltip);
+
+    let mut out = ChipChange::default();
+    popup_for(ui, pop_id, &resp, |ui| {
+        ui.label(RichText::new(label).strong().color(theme::TEXT_PRIMARY));
+        ui.add_space(theme::SPACE_XS);
+        let slider = ui.add(egui::Slider::new(value, range).show_value(true));
         if slider.changed() { out.changed = true; }
         if slider_settled(&slider) { out.commit = true; }
         hint(ui, tooltip);
@@ -188,7 +225,7 @@ pub fn chip_option_f32(
             let slider = ui.add(
                 egui::Slider::new(v, range)
                     .show_value(true)
-                    .fixed_decimals(2),
+                    .fixed_decimals(3),
             );
             if slider.changed() { out.changed = true; }
             if slider_settled(&slider) { out.commit = true; }

@@ -120,9 +120,12 @@ fn tensor_to_mask_core(raw: ArrayView4<f32>, ow: u32, oh: u32, rgba_for_guided: 
 
     if mask_settings.refine_edges {
         if let Some(rgba) = rgba_for_guided {
-            const GUIDED_RADIUS: u32 = 8;
-            const GUIDED_EPSILON: f32 = 1e-4;
-            mask = guided_filter_alpha(rgba, &mask, GUIDED_RADIUS, GUIDED_EPSILON);
+            mask = guided_filter_alpha(
+                rgba,
+                &mask,
+                mask_settings.guided_radius,
+                mask_settings.guided_epsilon,
+            );
         }
     }
 
@@ -148,21 +151,25 @@ fn apply_mask_inplace(rgba: &mut RgbaImage, mask: &GrayImage) {
 
 /// Erode (positive shift) or dilate (negative shift) the mask.
 ///
-/// Uses iterative box-blur approximation: blur the mask, then re-threshold.
-/// Each iteration shifts the boundary by ~1px.
+/// Integer iterations of a 3×3 min/max filter; each shifts the boundary by
+/// ~1px. Fractional shifts run `floor` full iterations then linearly blend
+/// with one extra iteration for sub-pixel precision (e.g. 2.5 = 50% 2-iter +
+/// 50% 3-iter).
 fn apply_edge_shift(mask: &mut GrayImage, shift: f32) {
-    let iterations = shift.abs().round() as u32;
-    if iterations == 0 { return; }
+    let abs = shift.abs();
+    if abs < 0.01 { return; }
     let erode = shift > 0.0;
+    let full = abs.floor() as u32;
+    let frac = abs - full as f32;
     let (w, h) = (mask.width() as usize, mask.height() as usize);
     let wi = w as i32;
     let hi = h as i32;
+    let use_par = h >= 512;
 
     let mut a = mask.as_raw().clone();
     let mut b = vec![0u8; w * h];
-    let use_par = h >= 512;
 
-    for _ in 0..iterations {
+    let step = |src: &[u8], dst: &mut [u8]| {
         let process_row = |(y, row): (usize, &mut [u8])| {
             let yi = y as i32;
             for x in 0..w {
@@ -172,7 +179,7 @@ fn apply_edge_shift(mask: &mut GrayImage, shift: f32) {
                     let ny = (yi + dy).clamp(0, hi - 1) as usize;
                     for dx in -1i32..=1 {
                         let nx = (xi + dx).clamp(0, wi - 1) as usize;
-                        let v = a[ny * w + nx];
+                        let v = src[ny * w + nx];
                         if erode {
                             extremum = extremum.min(v);
                         } else {
@@ -183,13 +190,30 @@ fn apply_edge_shift(mask: &mut GrayImage, shift: f32) {
                 row[x] = extremum;
             }
         };
-
         if use_par {
-            b.par_chunks_mut(w).enumerate().for_each(process_row);
+            dst.par_chunks_mut(w).enumerate().for_each(process_row);
         } else {
-            b.chunks_mut(w).enumerate().for_each(process_row);
+            dst.chunks_mut(w).enumerate().for_each(process_row);
         }
+    };
+
+    for _ in 0..full {
+        step(&a, &mut b);
         std::mem::swap(&mut a, &mut b);
+    }
+
+    if frac >= 0.01 {
+        // Blend `a` (N iterations) with one more iteration for sub-pixel shift.
+        step(&a, &mut b);
+        let inv = 1.0 - frac;
+        let blend = |a_byte: &mut u8, b_byte: u8| {
+            *a_byte = (*a_byte as f32 * inv + b_byte as f32 * frac + 0.5) as u8;
+        };
+        if use_par {
+            a.par_iter_mut().zip(b.par_iter()).for_each(|(a, &b)| blend(a, b));
+        } else {
+            a.iter_mut().zip(b.iter()).for_each(|(a, &b)| blend(a, b));
+        }
     }
 
     mask.as_mut().copy_from_slice(&a);

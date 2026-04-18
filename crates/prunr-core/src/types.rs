@@ -68,7 +68,7 @@ pub struct ProcessResult {
 }
 
 /// Controls for post-processing the AI-generated mask before applying it as alpha.
-#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct MaskSettings {
     /// Gamma curve applied to the mask. >1.0 = more aggressive removal, <1.0 = gentler.
     pub gamma: f32,
@@ -78,6 +78,10 @@ pub struct MaskSettings {
     pub edge_shift: f32,
     /// Refine mask edges using guided filter (color-aware edge refinement).
     pub refine_edges: bool,
+    /// Guided filter window radius in pixels. Smaller = crisper edges, larger = softer blend. Only used when refine_edges.
+    pub guided_radius: u32,
+    /// Guided filter regularization. Smaller = preserve edges from guide, larger = smoother. Only used when refine_edges.
+    pub guided_epsilon: f32,
 }
 
 impl Default for MaskSettings {
@@ -87,6 +91,8 @@ impl Default for MaskSettings {
             threshold: None,
             edge_shift: 0.0,
             refine_edges: false,
+            guided_radius: 8,
+            guided_epsilon: 1e-4,
         }
     }
 }

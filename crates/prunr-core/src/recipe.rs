@@ -39,15 +39,26 @@ pub struct MaskRecipe {
     threshold_bits: Option<u32>,
     edge_shift_bits: u32,
     pub refine_edges: bool,
+    guided_radius: u32,
+    guided_epsilon_bits: u32,
 }
 
 impl MaskRecipe {
-    pub fn new(gamma: f32, threshold: Option<f32>, edge_shift: f32, refine_edges: bool) -> Self {
+    pub fn new(
+        gamma: f32,
+        threshold: Option<f32>,
+        edge_shift: f32,
+        refine_edges: bool,
+        guided_radius: u32,
+        guided_epsilon: f32,
+    ) -> Self {
         Self {
             gamma_bits: gamma.to_bits(),
             threshold_bits: threshold.map(|t| t.to_bits()),
             edge_shift_bits: edge_shift.to_bits(),
             refine_edges,
+            guided_radius,
+            guided_epsilon_bits: guided_epsilon.to_bits(),
         }
     }
 }
@@ -58,6 +69,8 @@ impl PartialEq for MaskRecipe {
             && self.threshold_bits == other.threshold_bits
             && self.edge_shift_bits == other.edge_shift_bits
             && self.refine_edges == other.refine_edges
+            && self.guided_radius == other.guided_radius
+            && self.guided_epsilon_bits == other.guided_epsilon_bits
     }
 }
 impl Eq for MaskRecipe {}
@@ -68,6 +81,8 @@ impl std::hash::Hash for MaskRecipe {
         self.threshold_bits.hash(state);
         self.edge_shift_bits.hash(state);
         self.refine_edges.hash(state);
+        self.guided_radius.hash(state);
+        self.guided_epsilon_bits.hash(state);
     }
 }
 
@@ -130,6 +145,12 @@ pub fn resolve_tier(old: &ProcessingRecipe, new: &ProcessingRecipe) -> RequiredT
 mod tests {
     use super::*;
 
+    /// Build a MaskRecipe with default guided-filter values. Use this in tests
+    /// so changes to the factory defaults don't require touching every call site.
+    fn mask(gamma: f32, threshold: Option<f32>, edge_shift: f32, refine: bool) -> MaskRecipe {
+        MaskRecipe::new(gamma, threshold, edge_shift, refine, 8, 1e-4)
+    }
+
     fn make_recipe(model: ModelKind, gamma: f32, bg: Option<[u8; 3]>) -> ProcessingRecipe {
         ProcessingRecipe {
             inference: InferenceRecipe {
@@ -141,7 +162,7 @@ mod tests {
                 line_strength_bits: 0.5f32.to_bits(),
                 solid_line_color: None,
             },
-            mask: MaskRecipe::new(gamma, None, 0.0, false),
+            mask: mask(gamma, None, 0.0, false),
             composite: CompositeRecipe { bg_color: bg, solid_line_color: None },
             was_chain: false,
         }
@@ -185,21 +206,21 @@ mod tests {
 
     #[test]
     fn float_bits_equality() {
-        let a = MaskRecipe::new(1.0, Some(0.5), 0.0, true);
-        let b = MaskRecipe::new(1.0, Some(0.5), 0.0, true);
+        let a = mask(1.0, Some(0.5), 0.0, true);
+        let b = mask(1.0, Some(0.5), 0.0, true);
         assert_eq!(a, b);
     }
 
     #[test]
     fn float_bits_inequality() {
-        let a = MaskRecipe::new(1.0, Some(0.5), 0.0, true);
-        let b = MaskRecipe::new(1.0, Some(0.50001), 0.0, true);
+        let a = mask(1.0, Some(0.5), 0.0, true);
+        let b = mask(1.0, Some(0.50001), 0.0, true);
         assert_ne!(a, b);
     }
 
     #[test]
     fn line_strength_change_edge_rerun() {
-        let mut a = make_recipe(ModelKind::Silueta, 1.0, None);
+        let a = make_recipe(ModelKind::Silueta, 1.0, None);
         let mut b = a.clone();
         b.edge.line_strength_bits = 0.8f32.to_bits();
         assert_eq!(resolve_tier(&a, &b), RequiredTier::EdgeRerun);
@@ -207,9 +228,114 @@ mod tests {
 
     #[test]
     fn solid_line_color_change_edge_rerun() {
-        let mut a = make_recipe(ModelKind::Silueta, 1.0, None);
+        let a = make_recipe(ModelKind::Silueta, 1.0, None);
         let mut b = a.clone();
         b.edge.solid_line_color = Some([255, 0, 0]);
         assert_eq!(resolve_tier(&a, &b), RequiredTier::EdgeRerun);
+    }
+
+    #[test]
+    fn threshold_change_mask_rerun() {
+        let a = make_recipe(ModelKind::Silueta, 1.0, None);
+        let mut b = a.clone();
+        b.mask = mask(1.0, Some(0.5), 0.0, false);
+        assert_eq!(resolve_tier(&a, &b), RequiredTier::MaskRerun);
+    }
+
+    #[test]
+    fn edge_shift_change_mask_rerun() {
+        let a = make_recipe(ModelKind::Silueta, 1.0, None);
+        let mut b = a.clone();
+        b.mask = mask(1.0, None, 2.0, false);
+        assert_eq!(resolve_tier(&a, &b), RequiredTier::MaskRerun);
+    }
+
+    #[test]
+    fn refine_edges_change_mask_rerun() {
+        let a = make_recipe(ModelKind::Silueta, 1.0, None);
+        let mut b = a.clone();
+        b.mask = mask(1.0, None, 0.0, true);
+        assert_eq!(resolve_tier(&a, &b), RequiredTier::MaskRerun);
+    }
+
+    #[test]
+    fn line_mode_toggle_full_pipeline() {
+        // Flipping uses_edge_detection (line_mode Off → something) changes the
+        // inference signature → FullPipeline.
+        let a = make_recipe(ModelKind::Silueta, 1.0, None);
+        let mut b = a.clone();
+        b.inference.uses_edge_detection = true;
+        assert_eq!(resolve_tier(&a, &b), RequiredTier::FullPipeline);
+    }
+
+    #[test]
+    fn edges_only_mode_still_honours_edge_rerun() {
+        // EdgesOnly: uses_segmentation = false. Mask fields become no-ops at
+        // the ItemSettings → ProcessingRecipe boundary, but if a recipe directly
+        // toggles line_strength, resolve_tier still returns EdgeRerun.
+        let mut a = make_recipe(ModelKind::Silueta, 1.0, None);
+        a.inference.uses_segmentation = false;
+        a.inference.uses_edge_detection = true;
+        let mut b = a.clone();
+        b.edge.line_strength_bits = 0.2f32.to_bits();
+        assert_eq!(resolve_tier(&a, &b), RequiredTier::EdgeRerun);
+    }
+
+    /// Table-driven test: single source of truth for tier priority ordering.
+    /// When multiple things change, the highest-cost tier wins.
+    #[test]
+    fn tier_resolution_priority_table() {
+        let base = make_recipe(ModelKind::Silueta, 1.0, None);
+
+        let with_gamma = |g: f32| {
+            let mut r = base.clone();
+            r.mask = mask(g, None, 0.0, false);
+            r
+        };
+        let with_line = |s: f32| {
+            let mut r = base.clone();
+            r.edge.line_strength_bits = s.to_bits();
+            r
+        };
+        let with_bg = |rgb: [u8; 3]| {
+            let mut r = base.clone();
+            r.composite.bg_color = Some(rgb);
+            r
+        };
+
+        // (name, old, new, expected)
+        let cases: Vec<(&str, ProcessingRecipe, ProcessingRecipe, RequiredTier)> = vec![
+            ("identical", base.clone(), base.clone(), RequiredTier::Skip),
+            ("bg only", base.clone(), with_bg([255, 0, 0]), RequiredTier::CompositeOnly),
+            ("gamma only", base.clone(), with_gamma(1.5), RequiredTier::MaskRerun),
+            ("line only", base.clone(), with_line(0.9), RequiredTier::EdgeRerun),
+            ("model only", base.clone(), make_recipe(ModelKind::BiRefNetLite, 1.0, None), RequiredTier::FullPipeline),
+            // Priority: mask changes dominate composite changes.
+            ("gamma+bg → mask", base.clone(), {
+                let mut r = with_gamma(1.5);
+                r.composite.bg_color = Some([9, 9, 9]);
+                r
+            }, RequiredTier::MaskRerun),
+            // Priority: edge changes dominate composite changes.
+            ("line+bg → edge", base.clone(), {
+                let mut r = with_line(0.2);
+                r.composite.bg_color = Some([9, 9, 9]);
+                r
+            }, RequiredTier::EdgeRerun),
+            // Priority: model change dominates everything.
+            ("model+gamma+line+bg → full", base.clone(), {
+                let mut r = make_recipe(ModelKind::U2net, 1.5, Some([9, 9, 9]));
+                r.edge.line_strength_bits = 0.2f32.to_bits();
+                r
+            }, RequiredTier::FullPipeline),
+        ];
+
+        for (name, old, new, expected) in &cases {
+            assert_eq!(
+                resolve_tier(old, new),
+                *expected,
+                "table row {name:?}: expected {expected:?}",
+            );
+        }
     }
 }
