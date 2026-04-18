@@ -3,6 +3,7 @@ use egui_material_icons::icons::*;
 
 use crate::gui::app::PrunrApp;
 use crate::gui::batch_manager::ProcessButtonLabel;
+use crate::gui::history_manager::HistoryManager;
 use crate::gui::item::BatchStatus;
 use crate::gui::state::AppState;
 use crate::gui::theme;
@@ -53,6 +54,53 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
         // Model + Preset dropdowns live on row 2 (adjustments_toolbar); the
         // Lines mode selector lives on row 3's left edge alongside its own
         // chips. Row 1 stays minimal: Open, Settings, and the action cluster.
+
+        // ── Undo / Redo — left-flow, immediately right of Settings ──
+        // Target scope mirrors `handle_undo` / `handle_redo`: selected
+        // items if any, else the currently-viewed item.
+        if !app.batch.items.is_empty() {
+            let has_selected_any = app.batch.items.iter().any(|i| i.selected);
+            let current_id = app.batch.selected_item().map(|b| b.id);
+            let (can_undo, can_redo) = app.batch.items.iter().fold(
+                (false, false),
+                |(u, r), item| {
+                    let is_target = if has_selected_any {
+                        item.selected
+                    } else {
+                        Some(item.id) == current_id
+                    };
+                    if !is_target { return (u, r); }
+                    (u || HistoryManager::can_undo(item),
+                     r || HistoryManager::can_redo(item))
+                },
+            );
+
+            let undo_btn = egui::Button::new(
+                RichText::new(ICON_UNDO.codepoint).size(20.0).color(theme::TEXT_PRIMARY),
+            )
+            .fill(theme::BG_SECONDARY)
+            .corner_radius(theme::BUTTON_ROUNDING)
+            .min_size(egui::vec2(BTN_HEIGHT, BTN_HEIGHT));
+            if ui.add_enabled(can_undo, undo_btn)
+                .on_hover_text(format!("Undo ({m}+Z)"))
+                .clicked()
+            {
+                app.handle_undo(ui.ctx());
+            }
+
+            let redo_btn = egui::Button::new(
+                RichText::new(ICON_REDO.codepoint).size(20.0).color(theme::TEXT_PRIMARY),
+            )
+            .fill(theme::BG_SECONDARY)
+            .corner_radius(theme::BUTTON_ROUNDING)
+            .min_size(egui::vec2(BTN_HEIGHT, BTN_HEIGHT));
+            if ui.add_enabled(can_redo, redo_btn)
+                .on_hover_text(format!("Redo ({m}+Y)"))
+                .clicked()
+            {
+                app.handle_redo(ui.ctx());
+            }
+        }
 
         // ── Right group: action buttons ──
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -165,6 +213,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                     app.handle_remove_bg();
                 }
             }
+
         });
     });
 }

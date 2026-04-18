@@ -272,6 +272,85 @@ pub fn chip_bool(
     out
 }
 
+/// Bool chip with follow-up sliders tucked into the same popover.
+/// Used for `refine_edges` where the toggle gates two guided-filter knobs —
+/// keeping the knobs inline would grow the row when Refine Edges is on.
+///
+/// `extras` runs inside the popover when `*value == true`, after the Enabled
+/// checkbox + divider. Return the aggregate of any slider changes so they
+/// propagate into the caller's `ChipChange`.
+pub fn chip_bool_with_extras(
+    ui: &mut Ui,
+    id_salt: &str,
+    icon: &str,
+    label: &str,
+    tooltip: &str,
+    value: &mut bool,
+    extras: impl FnOnce(&mut Ui) -> ChipChange,
+) -> ChipChange {
+    let pop_id = egui::Id::new(("chip_bool_with_extras", id_salt));
+    let display = if *value { "On" } else { "Off" };
+    let resp = chip_button(ui, icon, display, *value).on_hover_text(tooltip);
+
+    let mut out = ChipChange::default();
+    popup_for(ui, pop_id, &resp, |ui| {
+        ui.label(RichText::new(label).strong().color(theme::TEXT_PRIMARY));
+        ui.add_space(theme::SPACE_XS);
+        if ui.checkbox(value, label).changed() {
+            out.changed = true;
+            out.commit = true;
+        }
+        if *value {
+            ui.add_space(theme::SPACE_SM);
+            ui.separator();
+            ui.add_space(theme::SPACE_SM);
+            let inner = extras(ui);
+            if inner.changed { out.changed = true; }
+            if inner.commit  { out.commit  = true; }
+        }
+        hint(ui, tooltip);
+    });
+    out
+}
+
+/// Label + f32 slider without the surrounding chip button. For use inside
+/// a popover's `extras` closure (see `chip_bool_with_extras`).
+pub fn slider_row_f32(
+    ui: &mut Ui,
+    label: &str,
+    value: &mut f32,
+    range: std::ops::RangeInclusive<f32>,
+    logarithmic: bool,
+    format: impl Fn(f32) -> String,
+) -> ChipChange {
+    let mut out = ChipChange::default();
+    ui.label(RichText::new(label).color(theme::TEXT_SECONDARY).size(theme::FONT_SIZE_MONO));
+    let slider = ui.add(
+        egui::Slider::new(value, range)
+            .show_value(true)
+            .custom_formatter(move |v, _| format(v as f32))
+            .logarithmic(logarithmic),
+    );
+    if slider.changed() { out.changed = true; }
+    if slider_settled(&slider) { out.commit = true; }
+    out
+}
+
+/// Label + u32 slider (no custom formatter — matches `chip_u32`'s popover).
+pub fn slider_row_u32(
+    ui: &mut Ui,
+    label: &str,
+    value: &mut u32,
+    range: std::ops::RangeInclusive<u32>,
+) -> ChipChange {
+    let mut out = ChipChange::default();
+    ui.label(RichText::new(label).color(theme::TEXT_SECONDARY).size(theme::FONT_SIZE_MONO));
+    let slider = ui.add(egui::Slider::new(value, range).show_value(true));
+    if slider.changed() { out.changed = true; }
+    if slider_settled(&slider) { out.commit = true; }
+    out
+}
+
 /// Optional RGBA chip (bg color). Toggle enables; inline color picker sets the value.
 /// Displays "None" when disabled, a swatch preview when enabled.
 ///
