@@ -36,10 +36,14 @@ use prunr_core::{ModelKind, postprocess_from_flat, tensor_to_edge_mask, compose_
 use crate::gui::item_settings::ItemSettings;
 use crate::gui::worker::CompressedTensor;
 
-/// Debounce before a preview actually dispatches. Short enough to feel
-/// responsive on slider release; long enough to coalesce fast drag events
-/// into a single rerun.
-pub const DEBOUNCE: Duration = Duration::from_millis(150);
+/// Throttle cadence for live-preview dispatch during a continuous drag.
+/// Sized slightly above the per-dispatch postprocess cost (~90ms on 4K
+/// without refine_edges) so each dispatch completes before the next
+/// fires — dropping lower would pile up stale dispatches that the
+/// generation filter in `drain_results` discards, burning CPU for no
+/// visible gain. Release / commit paths call `flush` instead, so the
+/// final result on knob-release still lands immediately.
+pub const DEBOUNCE: Duration = Duration::from_millis(100);
 
 /// What kind of Tier 2 rerun a tweak needs. Two kinds because they touch
 /// different cached tensors (segmentation vs DexiNed) and different pipeline
