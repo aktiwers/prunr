@@ -102,4 +102,25 @@ mod tests {
         s.items.lock().unwrap().clear();
         assert!(s.items.lock().unwrap().is_empty());
     }
+
+    #[test]
+    fn reset_works_from_a_separate_thread_via_cloned_arcs() {
+        // The static `reset(&AtomicBool, &Mutex<...>)` signature exists
+        // precisely so the OS drag-completion callback (which runs off-thread)
+        // can call it via cloned Arcs without owning the full struct.
+        // Verify by spawning a thread that does exactly that.
+        let s = DragExportState::new();
+        s.active.store(true, Ordering::Release);
+        s.items.lock().unwrap().extend([10u64, 20, 30]);
+
+        let active_clone = s.active.clone();
+        let items_clone = s.items.clone();
+        let handle = std::thread::spawn(move || {
+            DragExportState::reset(&active_clone, &items_clone);
+        });
+        handle.join().expect("reset thread must not panic");
+
+        assert!(!s.active.load(Ordering::Acquire), "parent must observe the off-thread store");
+        assert!(s.items.lock().unwrap().is_empty(), "parent must observe the off-thread clear");
+    }
 }
