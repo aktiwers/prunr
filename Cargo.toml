@@ -43,6 +43,8 @@ sysinfo = "0.37"
 bincode = { version = "2", features = ["serde"] }
 memory-stats = "1"
 fast_image_resize = "6"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [profile.release]
 strip = true

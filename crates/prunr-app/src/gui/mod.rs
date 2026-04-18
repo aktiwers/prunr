@@ -63,7 +63,7 @@ pub fn run() -> eframe::Result {
 /// Write startup failures to a log file next to the executable so users on
 /// machines without a console (Windows GUI subsystem) can still diagnose.
 fn log_startup_error(stage: &str, err: &eframe::Error) {
-    eprintln!("prunr: {stage}: {err}");
+    tracing::error!(stage, %err, "startup failed");
     let Ok(exe) = std::env::current_exe() else { return };
     let Some(dir) = exe.parent() else { return };
     let path = dir.join("prunr-startup-error.log");
