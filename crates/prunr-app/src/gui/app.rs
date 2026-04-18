@@ -362,7 +362,7 @@ impl PrunrApp {
 
     /// Undo background removal on selected items (or current item if none selected).
     /// Reverts Done/Error items back to Pending, clearing their results.
-    fn handle_undo(&mut self, ctx: &egui::Context) {
+    pub fn handle_undo(&mut self, ctx: &egui::Context) {
         let has_selected = self.batch.items.iter().any(|i| i.selected);
         let current_id = self.batch.selected_item().map(|b| b.id);
         let mut undone = 0u32;
@@ -388,7 +388,7 @@ impl PrunrApp {
         }
     }
 
-    fn handle_redo(&mut self, ctx: &egui::Context) {
+    pub fn handle_redo(&mut self, ctx: &egui::Context) {
         let has_selected = self.batch.items.iter().any(|i| i.selected);
         let current_id = self.batch.selected_item().map(|b| b.id);
         let mut redone = 0u32;

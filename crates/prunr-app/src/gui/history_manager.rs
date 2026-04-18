@@ -45,6 +45,19 @@ fn push_bounded(stack: &mut VecDeque<PresetSnapshot>, snap: PresetSnapshot) {
 pub(crate) struct HistoryManager;
 
 impl HistoryManager {
+    /// True if Ctrl+Z on this item would change anything. Mirrors the internal
+    /// gate of `undo_result` so the toolbar can render its button state
+    /// without duplicating the policy.
+    pub(crate) fn can_undo(item: &BatchItem) -> bool {
+        item.status == BatchStatus::Done
+            && (!item.history.is_empty() || item.result_rgba.is_some())
+    }
+
+    /// True if Ctrl+Y would replay a previously-undone result.
+    pub(crate) fn can_redo(item: &BatchItem) -> bool {
+        !item.redo_stack.is_empty()
+    }
+
     /// Seed history with the source RGBA as an initial no-recipe entry.
     /// No-op if either stack is non-empty (history already exists) or the
     /// source hasn't been decoded yet.
@@ -249,6 +262,41 @@ mod tests {
 
     fn rgba(r: u8) -> Arc<image::RgbaImage> {
         Arc::new(image::RgbaImage::from_pixel(2, 2, image::Rgba([r, 0, 0, 255])))
+    }
+
+    // ── can_undo / can_redo ─────────────────────────────────────────────
+
+    #[test]
+    fn can_undo_false_when_pending() {
+        let mut item = fixture(1);
+        item.status = BatchStatus::Pending;
+        item.result_rgba = Some(rgba(7));
+        assert!(!HistoryManager::can_undo(&item));
+    }
+
+    #[test]
+    fn can_undo_true_on_done_with_result() {
+        let mut item = fixture(1);
+        item.status = BatchStatus::Done;
+        item.result_rgba = Some(rgba(7));
+        assert!(HistoryManager::can_undo(&item));
+    }
+
+    #[test]
+    fn can_undo_true_on_done_with_nonempty_history() {
+        let mut item = fixture(1);
+        item.status = BatchStatus::Done;
+        item.history.push_back(HistoryEntry::new(rgba(1), None));
+        // result_rgba is None but history is non-empty → still undoable
+        assert!(HistoryManager::can_undo(&item));
+    }
+
+    #[test]
+    fn can_redo_false_until_undo() {
+        let mut item = fixture(1);
+        assert!(!HistoryManager::can_redo(&item));
+        item.redo_stack.push_back(HistoryEntry::new(rgba(1), None));
+        assert!(HistoryManager::can_redo(&item));
     }
 
     // ── seed_with_source ────────────────────────────────────────────────
