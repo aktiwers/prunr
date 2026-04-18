@@ -220,4 +220,65 @@ mod tests {
         ctrl.release(id);
         assert!(ctrl.is_complete());
     }
+
+    #[test]
+    fn best_fit_prefers_largest_that_fits() {
+        // Budget ~35 MB; three items:
+        //   - big:  ~38 MB (oversized — won't fit)
+        //   - mid:  ~23 MB (fits — and is the best-fit largest)
+        //   - smol: ~8 MB  (also fits but smaller)
+        let mut ctrl = make_ctrl(35_000_000);
+        let big = AdmissionController::estimate_cost(1, (2200, 2200), 0);
+        let mid = AdmissionController::estimate_cost(2, (1700, 1700), 0);
+        let smol = AdmissionController::estimate_cost(3, (1000, 1000), 0);
+        ctrl.enqueue(vec![big, mid, smol]);
+        let admitted = ctrl.try_admit_next();
+        assert_eq!(admitted, Some(2), "should prefer the largest fitting item");
+    }
+
+    #[test]
+    fn release_of_unadmitted_is_noop() {
+        // Defensive: releasing an id that was never admitted must not underflow.
+        let mut ctrl = make_ctrl(100_000_000);
+        ctrl.release(42);
+        assert_eq!(ctrl.committed_bytes, 0);
+    }
+
+    #[test]
+    fn double_release_does_not_underflow() {
+        let mut ctrl = make_ctrl(100_000_000);
+        ctrl.enqueue(vec![AdmissionController::estimate_cost(1, (100, 100), 100)]);
+        let id = ctrl.try_admit_next().unwrap();
+        ctrl.release(id);
+        ctrl.release(id); // second release must be a no-op
+        assert_eq!(ctrl.committed_bytes, 0);
+    }
+
+    #[test]
+    fn drains_all_items_even_when_every_one_exceeds_budget() {
+        // Every item is bigger than the budget. Force-admit must kick in each
+        // time the window is empty, so the queue still drains completely.
+        let mut ctrl = make_ctrl(5_000_000);
+        let items: Vec<ImageMemCost> = (1..=10)
+            .map(|i| AdmissionController::estimate_cost(i, (2000, 2000), 100))
+            .collect();
+        ctrl.enqueue(items);
+
+        let mut drained = 0;
+        let mut safety = 0;
+        while !ctrl.is_complete() {
+            safety += 1;
+            if safety > 1000 {
+                panic!("admission loop did not converge");
+            }
+            if let Some(id) = ctrl.try_admit_next() {
+                drained += 1;
+                ctrl.release(id);
+            } else {
+                break;
+            }
+        }
+        assert_eq!(drained, 10);
+        assert!(ctrl.is_complete());
+    }
 }
