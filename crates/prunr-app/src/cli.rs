@@ -145,6 +145,7 @@ impl Cli {
             threshold: self.threshold,
             edge_shift: self.edge_shift,
             refine_edges: self.refine_edges,
+            ..Default::default()
         }
     }
 
