@@ -68,3 +68,35 @@ impl Processor {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+
+    fn fixture() -> Processor {
+        let (tx, _rx_unused) = mpsc::channel::<WorkerMessage>();
+        let (_tx_unused, rx) = mpsc::channel::<WorkerResult>();
+        Processor::new(tx, rx, egui::Context::default())
+    }
+
+    #[test]
+    fn new_initialises_last_history_cleanup_recent() {
+        // Verifies the periodic 600s cleanup gate isn't accidentally
+        // triggered at startup — the Instant must be effectively-now.
+        let p = fixture();
+        assert!(p.last_history_cleanup.elapsed().as_secs() < 5);
+    }
+
+    #[test]
+    fn cancel_flag_is_shared_arc_visible_across_clones() {
+        // The cancel_flag is cloned into WorkerMessage::BatchProcess and read
+        // by the bridge thread. A store on the parent must be visible via any
+        // clone of the Arc — verify by storing through one handle, reading via another.
+        let p = fixture();
+        let clone = p.cancel_flag.clone();
+        assert!(!clone.load(Ordering::Acquire));
+        p.cancel_flag.store(true, Ordering::Release);
+        assert!(clone.load(Ordering::Acquire), "Arc clone must observe the store");
+    }
+}
