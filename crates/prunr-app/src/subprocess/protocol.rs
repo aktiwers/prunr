@@ -32,11 +32,6 @@ pub enum SubprocessCommand {
     },
     /// Tier 2: Re-run postprocess from a cached tensor (skip inference).
     /// The parent sends the raw tensor + original image via temp files.
-    ///
-    /// `edge_tensor_path` is present when this is an edge-tier rerun (line_strength
-    /// tweak) — the subprocess re-thresholds the cached DexiNed output instead of
-    /// re-running the model. `live_preview = true` skips guided filter (Phase 3
-    /// optimization: preview uses cheap approx, commit uses full quality).
     RePostProcess {
         item_id: u64,
         /// Path to temp file with raw f32 tensor data.
@@ -48,16 +43,6 @@ pub enum SubprocessCommand {
         original_image_path: std::path::PathBuf,
         /// Updated mask settings for re-postprocessing.
         mask: MaskSettings,
-        /// Path to cached DexiNed output for edge-tier reruns. None = mask-only rerun.
-        #[serde(default)]
-        edge_tensor_path: Option<std::path::PathBuf>,
-        #[serde(default)]
-        edge_tensor_height: Option<u32>,
-        #[serde(default)]
-        edge_tensor_width: Option<u32>,
-        /// Live preview mode: skip guided filter and other expensive stages.
-        #[serde(default)]
-        live_preview: bool,
     },
     /// Cancel: stop after current image, send Finished.
     Cancel,

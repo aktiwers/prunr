@@ -194,11 +194,6 @@ pub(crate) struct BatchItem {
     pub selected: bool,
     /// Per-image processing settings. Edited via the adjustments toolbar.
     pub settings: super::item_settings::ItemSettings,
-    /// Settings snapshot taken when checkbox was checked; uncheck restores it.
-    /// `None` once committed via Process or when the item was never checked.
-    /// Read path not yet wired — reserved for selection-as-apply semantics.
-    #[allow(dead_code)]
-    pub pre_check_settings: Option<super::item_settings::ItemSettings>,
     /// The recipe that produced the current result_rgba. None if never processed.
     pub applied_recipe: Option<prunr_core::ProcessingRecipe>,
     /// Compressed cached tensor from Tier 1 inference (for Tier 2 mask reruns).
@@ -218,6 +213,44 @@ pub(crate) struct BatchItem {
     pub preset_undo_stack: VecDeque<PresetSnapshot>,
     /// Redo counterpart — cleared on a fresh preset apply, fed by undos.
     pub preset_redo_stack: VecDeque<PresetSnapshot>,
+}
+
+impl BatchItem {
+    fn new(
+        id: u64,
+        filename: String,
+        source: ImageSource,
+        dimensions: (u32, u32),
+        settings: super::item_settings::ItemSettings,
+        applied_preset: String,
+    ) -> Self {
+        Self {
+            id,
+            filename,
+            source,
+            dimensions,
+            source_rgba: None,
+            source_texture: None,
+            thumb_texture: None,
+            thumb_pending: false,
+            result_rgba: None,
+            result_texture: None,
+            source_tex_pending: false,
+            result_tex_pending: false,
+            decode_pending: false,
+            history: VecDeque::new(),
+            redo_stack: VecDeque::new(),
+            status: BatchStatus::Pending,
+            selected: false,
+            settings,
+            applied_recipe: None,
+            cached_tensor: None,
+            cached_edge_tensor: None,
+            applied_preset,
+            preset_undo_stack: VecDeque::new(),
+            preset_redo_stack: VecDeque::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -319,8 +352,6 @@ pub struct PrunrApp {
     dispatch_recipe: Option<prunr_core::ProcessingRecipe>,
     /// Last time periodic history cleanup ran.
     last_history_cleanup: std::time::Instant,
-    /// Tier 2 live preview dispatcher. Debounces chip tweaks and runs
-    /// postprocess_from_flat / finalize_edges on rayon threads.
     pub(crate) live_preview: super::live_preview::LivePreview,
 }
 
@@ -393,6 +424,27 @@ impl PrunrApp {
         // No prewarm needed — the subprocess creates its own engine pool.
         let (worker_tx, worker_rx) = spawn_worker(worker_ctx);
 
+        Self::init_state(settings, clipboard, worker_tx, worker_rx, bg_io)
+    }
+
+    /// Test constructor that skips eframe setup (for unit tests)
+    #[cfg(test)]
+    pub fn new_for_test() -> Self {
+        let (worker_tx, _worker_msg_rx) = mpsc::channel::<WorkerMessage>();
+        let (_result_tx, worker_rx) = mpsc::channel::<WorkerResult>();
+        let bg_io = super::background_io::BackgroundIO::new();
+        Self::init_state(Settings::default(), None, worker_tx, worker_rx, bg_io)
+    }
+
+    /// Shared field-init for both `new` and `new_for_test`. Clipboard and
+    /// worker channels are the only inputs that differ between runtime and test.
+    fn init_state(
+        settings: Settings,
+        clipboard: Option<arboard::Clipboard>,
+        worker_tx: mpsc::Sender<WorkerMessage>,
+        worker_rx: mpsc::Receiver<WorkerResult>,
+        bg_io: super::background_io::BackgroundIO,
+    ) -> Self {
         Self {
             state: AppState::Empty,
             loaded_filename: None,
@@ -406,60 +458,6 @@ impl PrunrApp {
             result_texture: None,
             result_rgba: None,
             clipboard,
-            show_shortcuts: false,
-            show_cli_help: false,
-            pending_copy: false,
-            zoom_state: Default::default(),
-            show_original: false,
-            prev_title: String::new(),
-            batch_items: Vec::new(),
-            selected_batch_index: 0,
-            sidebar_hidden: false,
-            adjustments_hidden: false,
-            next_batch_id: 0,
-            show_settings: false,
-            settings_opened_at: 0.0,
-            settings,
-            canvas_switch_id: 0,
-            result_switch_id: 0,
-            pending_batch_sync: false,
-            pending_open_dialog: false,
-            bg_io,
-            toasts: egui_notify::Toasts::default()
-                    .with_anchor(egui_notify::Anchor::BottomLeft)
-                    .with_margin(egui::vec2(theme::SPACE_SM, theme::STATUS_BAR_HEIGHT + theme::SPACE_SM)),
-            drag_out_pending: None,
-            drag_out_active: Arc::new(AtomicBool::new(false)),
-            drag_out_items: Arc::new(Mutex::new(HashSet::new())),
-            drag_out_linux_notified: false,
-            admission: None,
-            admission_tx: None,
-            dispatch_recipe: None,
-            last_history_cleanup: std::time::Instant::now(),
-            live_preview: super::live_preview::LivePreview::default(),
-        }
-    }
-
-    /// Test constructor that skips eframe setup (for unit tests)
-    #[cfg(test)]
-    pub fn new_for_test() -> Self {
-        let (worker_tx, _worker_msg_rx) = mpsc::channel::<WorkerMessage>();
-        let (_result_tx, worker_rx) = mpsc::channel::<WorkerResult>();
-        let bg_io = super::background_io::BackgroundIO::new();
-        let settings = Settings::default();
-        Self {
-            state: AppState::Empty,
-            loaded_filename: None,
-            last_open_dir: None,
-            image_dimensions: None,
-            worker_tx,
-            worker_rx,
-            cancel_flag: Arc::new(AtomicBool::new(false)),
-            status: Default::default(),
-            source_texture: None,
-            result_texture: None,
-            result_rgba: None,
-            clipboard: None,
             show_shortcuts: false,
             show_cli_help: false,
             pending_copy: false,
@@ -531,33 +529,14 @@ impl PrunrApp {
         self.next_batch_id += 1;
         let do_decode = matches!(&source, ImageSource::Bytes(_)); // decode eagerly for in-memory
         let new_settings = self.settings.item_defaults_for_new_item();
-        self.batch_items.push(BatchItem {
+        self.batch_items.push(BatchItem::new(
             id,
-            filename: name.clone(),
-            source: source,
-            dimensions: dims,
-            source_rgba: None,
-            source_texture: None,
-            thumb_texture: None,
-            thumb_pending: false,
-            result_rgba: None,
-            result_texture: None,
-            source_tex_pending: false,
-            result_tex_pending: false,
-            decode_pending: false,
-            history: VecDeque::new(),
-            redo_stack: VecDeque::new(),
-            status: BatchStatus::Pending,
-            selected: false,
-            settings: new_settings,
-            pre_check_settings: None,
-            applied_recipe: None,
-            cached_tensor: None,
-            cached_edge_tensor: None,
-            applied_preset: self.settings.default_preset.clone(),
-            preset_undo_stack: VecDeque::new(),
-            preset_redo_stack: VecDeque::new(),
-        });
+            name.clone(),
+            source,
+            dims,
+            new_settings,
+            self.settings.default_preset.clone(),
+        ));
         self.selected_batch_index = self.batch_items.len() - 1;
         if do_decode {
             if let Ok(bytes) = self.batch_items.last().unwrap().source.load_bytes() {
@@ -1377,33 +1356,14 @@ impl PrunrApp {
         self.next_batch_id += 1;
 
         let new_settings = self.settings.item_defaults_for_new_item();
-        self.batch_items.push(BatchItem {
+        self.batch_items.push(BatchItem::new(
             id,
             filename,
-            source: source,
-            dimensions: dims,
-            source_rgba: None,
-            source_texture: None,
-            thumb_texture: None,
-            thumb_pending: false,
-            result_rgba: None,
-            result_texture: None,
-            source_tex_pending: false,
-            result_tex_pending: false,
-            decode_pending: false,
-            history: VecDeque::new(),
-            redo_stack: VecDeque::new(),
-            status: BatchStatus::Pending,
-            selected: false,
-            settings: new_settings,
-            pre_check_settings: None,
-            applied_recipe: None,
-            cached_tensor: None,
-            cached_edge_tensor: None,
-            applied_preset: self.settings.default_preset.clone(),
-            preset_undo_stack: VecDeque::new(),
-            preset_redo_stack: VecDeque::new(),
-        });
+            source,
+            dims,
+            new_settings,
+            self.settings.default_preset.clone(),
+        ));
 
         if self.state == AppState::Empty {
             self.state = AppState::Loaded;
@@ -1519,8 +1479,7 @@ impl PrunrApp {
         }
     }
 
-    /// Demote all Tier 2 (compressed RAM) history/redo entries to Tier 3 (disk).
-    /// Called when system memory pressure is detected.
+    /// Demote Tier 2 (compressed RAM) history to Tier 3 (disk) under memory pressure.
     fn demote_history_to_disk(&mut self) {
         for item in &mut self.batch_items {
             let mut seq = 0usize;
