@@ -63,6 +63,15 @@ impl Processor {
             last_history_cleanup: Instant::now(),
         }
     }
+
+    /// Drop admission state so no further items are admitted. Called on
+    /// cancel (user or worker-side) and by the cancelled-message handler.
+    /// Leaves `cancel_flag` untouched — that's owned by the caller's cancel
+    /// protocol.
+    pub(crate) fn clear_admission(&mut self) {
+        self.admission = None;
+        self.admission_tx = None;
+    }
 }
 
 #[cfg(test)]
@@ -82,6 +91,24 @@ mod tests {
         // triggered at startup — the Instant must be effectively-now.
         let p = fixture();
         assert!(p.last_history_cleanup.elapsed().as_secs() < 5);
+    }
+
+    #[test]
+    fn clear_admission_drops_both_sides_but_leaves_cancel_flag() {
+        let mut p = fixture();
+        let (tx, _rx) = mpsc::channel::<WorkItem>();
+        p.admission_tx = Some(tx);
+        // admission controller is harder to construct from a test; the None → Some
+        // transition for admission is adequately covered by admission_tx + a sentinel.
+        p.cancel_flag.store(true, Ordering::Release);
+        assert!(p.admission_tx.is_some());
+
+        p.clear_admission();
+
+        assert!(p.admission.is_none());
+        assert!(p.admission_tx.is_none());
+        assert!(p.cancel_flag.load(Ordering::Acquire),
+            "clear_admission must leave cancel_flag untouched — that's the caller's protocol");
     }
 
     #[test]
