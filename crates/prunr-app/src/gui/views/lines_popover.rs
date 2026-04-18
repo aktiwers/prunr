@@ -1,6 +1,6 @@
-//! Row 3 "Lines" control: a button that reveals a popover with two sub-pickers:
-//! Output mode (Off / Edges only / Subject with outlines / Outline only) and
-//! Model (DexiNed — only option today; future HED/PIDI will slot in here).
+//! Row 3 "Sketch" control: a button that reveals a popover with two sub-pickers:
+//! Output mode (Off / Full / Subject) and Model (DexiNed — only option today;
+//! future HED/PIDI will slot in here).
 //!
 //! Returns `true` when the line_mode changed, so the caller can invalidate
 //! caches / textures / etc.
@@ -23,17 +23,17 @@ const POPOVER_WIDTH: f32 = 300.0;
 fn mode_label(mode: LineMode) -> &'static str {
     match mode {
         LineMode::Off => "Off",
-        LineMode::EdgesOnly => "Sketch",
-        LineMode::SubjectOutline => "Subject sketch",
+        LineMode::EdgesOnly => "Full",
+        LineMode::SubjectOutline => "Subject",
     }
 }
 
 /// Short description for the dropdown list (shown beneath the title).
 fn mode_description(mode: LineMode) -> &'static str {
     match mode {
-        LineMode::Off => "no line extraction",
-        LineMode::EdgesOnly => "line art of the full image",
-        LineMode::SubjectOutline => "line art of the subject only, transparent background",
+        LineMode::Off => "no sketch extraction",
+        LineMode::EdgesOnly => "sketch of the full image",
+        LineMode::SubjectOutline => "sketch of the subject only, transparent background",
     }
 }
 
@@ -65,13 +65,18 @@ fn two_line_label(title: &str, description: &str) -> egui::text::LayoutJob {
     job
 }
 
-/// Render the row 1 Lines button + popover. Returns `true` if line_mode changed
+/// Render the row 3 Lines button + popover. Returns `true` if line_mode changed
 /// (caller should invalidate edge cache and re-route pipeline).
+///
+/// `seg_model_name` is the display name of the currently-selected BG removal
+/// model (e.g. "BiRefNet"). Shown in the Model section when the user hovers
+/// over the Subject mode, since that mode runs seg → DexiNed and both models
+/// are actually in play.
 #[allow(deprecated)]
-pub fn render(ui: &mut Ui, settings: &mut ItemSettings) -> bool {
+pub fn render(ui: &mut Ui, settings: &mut ItemSettings, seg_model_name: &str) -> bool {
     let pop_id = egui::Id::new("lines_popover");
     let label = format!(
-        "{}  Lines: {}",
+        "{}  Sketch: {}",
         ICON_BRUSH.codepoint,
         mode_label(settings.line_mode)
     );
@@ -90,7 +95,7 @@ pub fn render(ui: &mut Ui, settings: &mut ItemSettings) -> bool {
     })
     .corner_radius(theme::BUTTON_ROUNDING)
     .min_size(egui::vec2(0.0, chip::CHIP_HEIGHT));
-    let resp = ui.add(btn).on_hover_text("Line extraction mode and model");
+    let resp = ui.add(btn).on_hover_text("Sketch extraction mode and model");
 
     if resp.clicked() {
         ui.memory_mut(|m| m.toggle_popup(pop_id));
@@ -112,10 +117,17 @@ pub fn render(ui: &mut Ui, settings: &mut ItemSettings) -> bool {
                     .color(theme::TEXT_PRIMARY),
             );
             ui.add_space(theme::SPACE_XS);
+            // Track which mode the pointer is currently over so the Model
+            // section below can preview the model set that mode would use.
+            let mut hovered_mode: Option<LineMode> = None;
             for mode in [LineMode::Off, LineMode::EdgesOnly, LineMode::SubjectOutline] {
                 let selected = settings.line_mode == mode;
                 let label = two_line_label(mode_label(mode), mode_description(mode));
-                if ui.selectable_label(selected, label).clicked() {
+                let resp = ui.selectable_label(selected, label);
+                if resp.hovered() {
+                    hovered_mode = Some(mode);
+                }
+                if resp.clicked() {
                     if !selected {
                         settings.line_mode = mode;
                         changed = true;
@@ -132,16 +144,27 @@ pub fn render(ui: &mut Ui, settings: &mut ItemSettings) -> bool {
             ui.add_space(theme::SPACE_SM);
 
             // ── Model picker ──
-            // For now there's only DexiNed, but the structure is in place
-            // so HED / PIDI / other edge models slot in cleanly later.
+            // Preview the model set for the hovered row; fall back to the
+            // currently-selected mode when nothing is hovered. Subject sketch
+            // runs seg → DexiNed, so both models appear; other modes show just
+            // DexiNed (or nothing for Off).
             ui.label(
                 RichText::new("Model")
                     .strong()
                     .color(theme::TEXT_PRIMARY),
             );
             ui.add_space(theme::SPACE_XS);
+            let effective_mode = hovered_mode.unwrap_or(settings.line_mode);
+            let model_text = match effective_mode {
+                LineMode::Off => format!("{}  (no model used)", ICON_NEUROLOGY.codepoint),
+                LineMode::EdgesOnly => format!("{}  DexiNed", ICON_NEUROLOGY.codepoint),
+                LineMode::SubjectOutline => format!(
+                    "{}  DexiNed + {seg_model_name}",
+                    ICON_NEUROLOGY.codepoint,
+                ),
+            };
             ui.label(
-                RichText::new(format!("{}  DexiNed", ICON_NEUROLOGY.codepoint))
+                RichText::new(model_text)
                     .color(theme::TEXT_SECONDARY)
                     .size(theme::FONT_SIZE_BODY),
             );
