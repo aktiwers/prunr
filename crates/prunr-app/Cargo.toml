@@ -40,6 +40,8 @@ sysinfo = { workspace = true }
 bincode = { workspace = true }
 memory-stats = { workspace = true }
 ndarray = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
 
 # OS drag-out: supported on Windows and macOS. On Linux the crate requires a
 # GTK window (winit/eframe cannot supply one), and pulls in gtk/gdk native

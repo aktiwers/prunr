@@ -41,9 +41,13 @@ Unless we explicitly want the panic to propagate (rare — say so in a comment).
 
 ## Logging
 
-Use `tracing::{info, warn, error, debug}!` with structured fields (`item_id`, `stage`, `rss_mb`, …). **Never `eprintln!` in library or app code.** Exceptions: `main.rs` before `tracing_subscriber` is initialized, and test/diagnostic tools where `stderr` capture matters.
+Use `tracing::{info, warn, error, debug}!` with structured fields (`item_id`, `stage`, `rss_mb`, …). **Never `eprintln!` in library or GUI-internal app code.** Allowed exceptions:
 
-When logging errors, include the failing identifier as a structured field, not interpolated into the message — `error!(item_id, %err, "decode failed")` beats `eprintln!("decode {item_id} failed: {err}")`.
+- `main.rs` before `tracing_subscriber` is initialized.
+- **CLI user-facing output** in `cli.rs` — messages intended for the user's terminal (`error: no input files`, per-file processing failures, skip notices). These are the CLI's UI; timestamps and log levels would be a UX regression, and shell scripts parse the format. **Diagnostic output (timing, internal state, debug dumps) still uses `tracing` even in `cli.rs`** — if it wouldn't show up on a polished release binary, it's not user UI.
+- Tests and diagnostic tools where `stderr` capture matters.
+
+When logging errors via `tracing`, include the failing identifier as a structured field, not interpolated into the message — `error!(item_id, %err, "decode failed")` beats `eprintln!("decode {item_id} failed: {err}")`.
 
 ## Test expectations
 
