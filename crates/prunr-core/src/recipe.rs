@@ -52,24 +52,19 @@ pub struct MaskRecipe {
     pub refine_edges: bool,
     guided_radius: u32,
     guided_epsilon_bits: u32,
+    feather_bits: u32,
 }
 
-impl MaskRecipe {
-    pub fn new(
-        gamma: f32,
-        threshold: Option<f32>,
-        edge_shift: f32,
-        refine_edges: bool,
-        guided_radius: u32,
-        guided_epsilon: f32,
-    ) -> Self {
+impl From<&crate::MaskSettings> for MaskRecipe {
+    fn from(m: &crate::MaskSettings) -> Self {
         Self {
-            gamma_bits: gamma.to_bits(),
-            threshold_bits: threshold.map(|t| t.to_bits()),
-            edge_shift_bits: edge_shift.to_bits(),
-            refine_edges,
-            guided_radius,
-            guided_epsilon_bits: guided_epsilon.to_bits(),
+            gamma_bits: m.gamma.to_bits(),
+            threshold_bits: m.threshold.map(|t| t.to_bits()),
+            edge_shift_bits: m.edge_shift.to_bits(),
+            refine_edges: m.refine_edges,
+            guided_radius: m.guided_radius,
+            guided_epsilon_bits: m.guided_epsilon.to_bits(),
+            feather_bits: m.feather.to_bits(),
         }
     }
 }
@@ -82,6 +77,7 @@ impl PartialEq for MaskRecipe {
             && self.refine_edges == other.refine_edges
             && self.guided_radius == other.guided_radius
             && self.guided_epsilon_bits == other.guided_epsilon_bits
+            && self.feather_bits == other.feather_bits
     }
 }
 impl Eq for MaskRecipe {}
@@ -94,6 +90,7 @@ impl std::hash::Hash for MaskRecipe {
         self.refine_edges.hash(state);
         self.guided_radius.hash(state);
         self.guided_epsilon_bits.hash(state);
+        self.feather_bits.hash(state);
     }
 }
 
@@ -156,10 +153,15 @@ pub fn resolve_tier(old: &ProcessingRecipe, new: &ProcessingRecipe) -> RequiredT
 mod tests {
     use super::*;
 
-    /// Build a MaskRecipe with default guided-filter values. Use this in tests
-    /// so changes to the factory defaults don't require touching every call site.
+    /// Build a MaskRecipe for tests — other MaskSettings fields default.
     fn mask(gamma: f32, threshold: Option<f32>, edge_shift: f32, refine: bool) -> MaskRecipe {
-        MaskRecipe::new(gamma, threshold, edge_shift, refine, 8, 1e-4)
+        MaskRecipe::from(&crate::MaskSettings {
+            gamma,
+            threshold,
+            edge_shift,
+            refine_edges: refine,
+            ..Default::default()
+        })
     }
 
     fn make_recipe(model: ModelKind, gamma: f32, bg: Option<[u8; 3]>) -> ProcessingRecipe {

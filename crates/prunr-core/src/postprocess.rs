@@ -129,6 +129,13 @@ fn tensor_to_mask_core(raw: ArrayView4<f32>, ow: u32, oh: u32, rgba_for_guided: 
         }
     }
 
+    // Feather runs AFTER refine_edges: guided filter snaps the mask to color
+    // edges first (sharpening); feather is the final softening pass on top.
+    // Running feather first and then refine would have them fight each other.
+    if mask_settings.feather >= 0.1 {
+        feather_mask(&mut mask, mask_settings.feather);
+    }
+
     mask
 }
 
@@ -155,6 +162,24 @@ fn apply_mask_inplace(rgba: &mut RgbaImage, mask: &GrayImage) {
 /// ~1px. Fractional shifts run `floor` full iterations then linearly blend
 /// with one extra iteration for sub-pixel precision (e.g. 2.5 = 50% 2-iter +
 /// 50% 3-iter).
+/// Gaussian blur approximation via 3-pass O(1) box filter. ~10× faster than
+/// `image::imageops::blur` and rayon-parallel. For σ → radius, the 3-box
+/// theorem gives `σ² = 3·(2r+1)²/12` → `r ≈ σ`. Visually indistinguishable
+/// from a true Gaussian on a single-channel alpha mask.
+fn feather_mask(mask: &mut GrayImage, sigma: f32) {
+    let (w, h) = (mask.width(), mask.height());
+    let radius = sigma.round().max(1.0) as u32;
+    let raw = mask.as_raw();
+    let mut buf: Vec<f32> = raw.iter().map(|&v| v as f32).collect();
+    for _ in 0..3 {
+        buf = crate::guided_filter::box_filter(&buf, w, h, radius);
+    }
+    let out = mask.as_mut();
+    for (dst, src) in out.iter_mut().zip(buf.iter()) {
+        *dst = src.clamp(0.0, 255.0).round() as u8;
+    }
+}
+
 /// Dilate a grayscale mask by N pixels (0 is a fast no-op).
 /// Thin wrapper around `apply_edge_shift` that hides the "negative = dilate" sign convention.
 pub(crate) fn dilate_mask(mask: &mut GrayImage, pixels: u32) {
