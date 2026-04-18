@@ -20,7 +20,16 @@ use serde::{Deserialize, Serialize};
 /// - All fields are `Copy`. Diff is a branchless struct compare.
 /// - `bg` uses RGBA for UI parity with egui color pickers; only RGB is sent
 ///   into the pipeline (alpha is always treated as 255 during compositing).
+///
+/// Serialization contract — IMPORTANT when adding fields:
+/// Preset files on disk carry one `ItemSettings` as JSON. Users share them,
+/// so files written by old builds MUST keep loading when we add fields.
+/// The `#[serde(default)]` attribute on this struct makes missing fields
+/// fall back to `Default::default()`, so adding a new field is safe *as
+/// long as `Default` covers it*. Do NOT add `#[serde(deny_unknown_fields)]`
+/// — the tripwire tests in `presets_fs::tests` enforce this contract.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ItemSettings {
     /// Gamma curve applied to the mask. >1.0 = more aggressive removal, <1.0 = gentler.
     pub gamma: f32,

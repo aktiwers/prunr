@@ -130,6 +130,9 @@ pub fn render(
                                 );
                                 if delete_btn.on_hover_text("Delete preset").clicked() {
                                     settings.presets.remove(&name);
+                                    // Remove the on-disk file too; presets are
+                                    // the filesystem-store's source of truth.
+                                    let _ = crate::gui::presets_fs::delete(&name);
                                     // If the deleted preset was the app's default,
                                     // fall back to Prunr so default_preset stays valid.
                                     if is_default {
@@ -286,6 +289,13 @@ pub fn render(
         });
         if let Some(name) = target_name {
             settings.presets.insert(name.clone(), *current_item);
+            // Write to the filesystem store so the preset survives restart
+            // and is shareable. Log on error — the in-memory copy works for
+            // this session, but the user loses it on restart, which is
+            // surprising if we stay fully silent.
+            if let Err(e) = crate::gui::presets_fs::save(&name, current_item) {
+                eprintln!("prunr: failed to save preset \"{name}\" to disk: {e}");
+            }
             applied = Some(name);
             close_dialog();
         } else if cancel {
