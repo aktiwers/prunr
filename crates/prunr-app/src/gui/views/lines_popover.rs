@@ -1,4 +1,4 @@
-//! Row 1 "Lines" control: a button that reveals a popover with two sub-pickers:
+//! Row 3 "Lines" control: a button that reveals a popover with two sub-pickers:
 //! Output mode (Off / Edges only / Subject with outlines / Outline only) and
 //! Model (DexiNed — only option today; future HED/PIDI will slot in here).
 //!
@@ -13,10 +13,8 @@ use egui_material_icons::icons::*;
 
 use crate::gui::item_settings::ItemSettings;
 use crate::gui::theme;
+use crate::gui::views::chip;
 use prunr_core::LineMode;
-
-/// Height of the row 1 button.
-const BTN_HEIGHT: f32 = 32.0;
 
 /// Popover width.
 const POPOVER_WIDTH: f32 = 300.0;
@@ -63,7 +61,7 @@ pub fn render(ui: &mut Ui, settings: &mut ItemSettings) -> bool {
         egui::Stroke::new(1.0, egui::Color32::TRANSPARENT)
     })
     .corner_radius(theme::BUTTON_ROUNDING)
-    .min_size(egui::vec2(0.0, BTN_HEIGHT));
+    .min_size(egui::vec2(0.0, chip::CHIP_HEIGHT));
     let resp = ui.add(btn).on_hover_text("Line extraction mode and model");
 
     if resp.clicked() {
@@ -115,11 +113,6 @@ pub fn render(ui: &mut Ui, settings: &mut ItemSettings) -> bool {
                 RichText::new(format!("{}  DexiNed", ICON_NEUROLOGY.codepoint))
                     .color(theme::TEXT_SECONDARY)
                     .size(theme::FONT_SIZE_BODY),
-            );
-            ui.label(
-                RichText::new("More models available in a future update.")
-                    .color(theme::TEXT_HINT)
-                    .size(theme::FONT_SIZE_MONO),
             );
         },
     );

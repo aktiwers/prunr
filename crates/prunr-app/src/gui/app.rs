@@ -1752,10 +1752,28 @@ impl PrunrApp {
                     if is_selected {
                         self.status.stage = match stage {
                             ProgressStage::LoadingModel => {
+                                // Name the models actually being loaded so the
+                                // user can tell "loading Silueta (BG removal)"
+                                // from "loading DexiNed (for lines)" — the
+                                // generic "Loading model..." hid which was in
+                                // flight, which matters when a preset change
+                                // triggers a DexiNed-only reload.
+                                let line_mode = self.batch_items.iter()
+                                    .find(|b| b.id == item_id)
+                                    .map(|b| b.settings.line_mode)
+                                    .unwrap_or(prunr_core::LineMode::Off);
+                                let seg_name = super::views::model_name(self.settings.model);
+                                let models = match line_mode {
+                                    prunr_core::LineMode::Off => seg_name.to_string(),
+                                    prunr_core::LineMode::EdgesOnly => "DexiNed".to_string(),
+                                    prunr_core::LineMode::SubjectOutline => {
+                                        format!("{seg_name} + DexiNed")
+                                    }
+                                };
                                 if cfg!(target_os = "macos") {
-                                    "Loading model (first run may take a few minutes)...".into()
+                                    format!("Loading {models} (first run may take a few minutes)...")
                                 } else {
-                                    "Loading model...".into()
+                                    format!("Loading {models}...")
                                 }
                             }
                             ProgressStage::LoadingModelCpuFallback => "GPU warming up \u{2014} using CPU".into(),
@@ -2319,15 +2337,9 @@ impl eframe::App for PrunrApp {
             true
         };
         if show_adjustments {
-            let line_mode = self.batch_items
-                .get(self.selected_batch_index.min(self.batch_items.len() - 1))
-                .map(|i| i.settings.line_mode)
-                .unwrap_or(prunr_core::LineMode::Off);
-            let height = if line_mode == prunr_core::LineMode::Off {
-                chip::CHIP_HEIGHT + theme::SPACE_SM * 2.0
-            } else {
-                chip::CHIP_HEIGHT * 2.0 + theme::SPACE_XS + theme::SPACE_SM * 2.0
-            };
+            // Row 3 is always visible now (Lines mode selector lives there),
+            // so the toolbar always reserves two rows of height.
+            let height = chip::CHIP_HEIGHT * 2.0 + theme::SPACE_XS + theme::SPACE_SM * 2.0;
             let mut bg_changed = false;
             let mut toolbar_change = adjustments_toolbar::ToolbarChange::default();
             let is_processing = self.state == AppState::Processing;
