@@ -360,4 +360,37 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn guided_radius_change_mask_rerun() {
+        let a = make_recipe(ModelKind::Silueta, 1.0, None);
+        let mut b = a.clone();
+        b.mask = MaskRecipe::from(&crate::MaskSettings {
+            guided_radius: 16,
+            ..Default::default()
+        });
+        assert_eq!(resolve_tier(&a, &b), RequiredTier::MaskRerun);
+    }
+
+    #[test]
+    fn guided_epsilon_change_mask_rerun() {
+        let a = make_recipe(ModelKind::Silueta, 1.0, None);
+        let mut b = a.clone();
+        b.mask = MaskRecipe::from(&crate::MaskSettings {
+            guided_epsilon: 2e-3,
+            ..Default::default()
+        });
+        assert_eq!(resolve_tier(&a, &b), RequiredTier::MaskRerun);
+    }
+
+    #[test]
+    fn feather_change_mask_rerun() {
+        let a = make_recipe(ModelKind::Silueta, 1.0, None);
+        let mut b = a.clone();
+        b.mask = MaskRecipe::from(&crate::MaskSettings {
+            feather: 1.5,
+            ..Default::default()
+        });
+        assert_eq!(resolve_tier(&a, &b), RequiredTier::MaskRerun);
+    }
 }

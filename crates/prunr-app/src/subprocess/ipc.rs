@@ -115,4 +115,27 @@ mod tests {
         let result: Option<TestMsg> = read_message(&mut reader).unwrap();
         assert!(result.is_none());
     }
+
+    #[test]
+    fn oversize_frame_returns_error_not_panic() {
+        // Craft a frame header claiming a payload > MAX_MESSAGE_SIZE. The
+        // reader must reject it with InvalidData, not panic or try to allocate
+        // a huge buffer.
+        let bad_len: u32 = MAX_MESSAGE_SIZE + 1;
+        let mut buf = bad_len.to_le_bytes().to_vec();
+        buf.extend_from_slice(&[0u8; 8]); // truncated payload — never reached
+        let mut reader = BufReader::new(Cursor::new(buf));
+        let result: io::Result<Option<TestMsg>> = read_message(&mut reader);
+        let err = result.expect_err("oversize frame must be an error");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn f32_byte_roundtrip() {
+        let data: Vec<f32> = vec![0.0, 1.0, -1.0, std::f32::consts::PI, 1e-10, 1e10];
+        let bytes = f32s_to_le_bytes(&data);
+        assert_eq!(bytes.len(), data.len() * 4);
+        let recovered = le_bytes_to_f32s(&bytes);
+        assert_eq!(recovered, data);
+    }
 }

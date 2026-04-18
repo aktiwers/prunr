@@ -183,4 +183,31 @@ mod tests {
     fn cleanup_stale_does_not_panic_on_missing_dir() {
         cleanup_stale();
     }
+
+    #[test]
+    fn ram_roundtrip_preserves_pixels() {
+        // Non-trivial pattern so any off-by-one in the header/pixel split
+        // shows up as a mismatch rather than a clean black image.
+        let rgba = image::RgbaImage::from_fn(50, 40, |x, y| {
+            image::Rgba([x as u8, y as u8, ((x + y) & 0xFF) as u8, 255])
+        });
+        let compressed = compress_to_ram(&rgba).unwrap();
+        let recovered = decompress_from_ram(&compressed).unwrap();
+        assert_eq!(rgba.dimensions(), recovered.dimensions());
+        assert_eq!(rgba.as_raw(), recovered.as_raw());
+    }
+
+    #[test]
+    fn demote_compressed_to_disk_and_read_back() {
+        let rgba = image::RgbaImage::from_pixel(30, 30, image::Rgba([100, 150, 200, 250]));
+        let compressed = compress_to_ram(&rgba).unwrap();
+        // Use distinct ids / seq so the path is unique even if tests run in
+        // parallel with other disk-history tests.
+        let entry = demote_to_disk(&compressed, 987_654_321, 42).unwrap();
+        assert!(entry.path.exists());
+        let recovered = read_history(&entry).unwrap();
+        assert_eq!(rgba.as_raw(), recovered.as_raw());
+        delete_entry(&entry);
+        assert!(!entry.path.exists());
+    }
 }
