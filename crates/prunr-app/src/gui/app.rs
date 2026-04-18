@@ -1027,10 +1027,9 @@ impl PrunrApp {
             }
         }
 
-        // If all items admitted and released, drop the sender to signal worker
+        // If all items admitted and released, drop the sender to signal worker.
         if ctrl.is_complete() {
-            self.processor.admission_tx = None;
-            self.processor.admission = None;
+            self.processor.clear_admission();
         }
     }
 
@@ -1446,8 +1445,7 @@ impl PrunrApp {
             self.state = AppState::Loaded;
             self.status.text = "Cancelled".to_string();
         }
-        self.processor.admission = None;
-        self.processor.admission_tx = None;
+        self.processor.clear_admission();
     }
 
     fn on_subprocess_retry(&mut self, reduced_jobs: usize, re_queued_count: usize) {
@@ -1530,191 +1528,100 @@ impl PrunrApp {
     }
 
     fn handle_keyboard_shortcuts(&mut self, ctx: &egui::Context) {
-        let (mut open_requested, mut remove_requested, mut save_requested) =
-            (false, false, false);
-        let (mut cancel_requested, mut toggle_shortcuts) = (false, false);
-        let (mut toggle_before_after, mut fit_to_window, mut actual_size) = (false, false, false);
-        let mut toggle_settings = false;
-        let (mut nav_prev, mut nav_next, mut toggle_sidebar) = (false, false, false);
-        let mut toggle_adjustments = false;
-        let mut undo_requested = false;
-        let mut redo_requested = false;
-        let mut preset_undo_requested = false;
-        let mut preset_redo_requested = false;
-
-        // Suppress bare-key shortcuts when any widget has focus (e.g., hex color input)
-        let text_focused = ctx.memory(|m| m.focused().is_some());
-
-        ctx.input(|i| {
-            // Modifier shortcuts always work
-            if i.modifiers.command && i.key_pressed(Key::O) {
-                open_requested = true;
-            }
-            if i.modifiers.command && i.key_pressed(Key::R) {
-                remove_requested = true;
-            }
-            if i.modifiers.command && i.key_pressed(Key::S) {
-                save_requested = true;
-            }
-            if i.key_pressed(Key::Escape) {
-                cancel_requested = true;
-            }
-            if i.key_pressed(Key::F1) {
-                toggle_shortcuts = true;
-            }
-            if i.key_pressed(Key::F2) {
-                self.show_cli_help = !self.show_cli_help;
-            }
-            if i.modifiers.command && i.key_pressed(Key::Num0) {
-                fit_to_window = true;
-            }
-            if i.modifiers.command && i.key_pressed(Key::Num1) {
-                actual_size = true;
-            }
-            if i.modifiers.command && i.key_pressed(Key::Space) {
-                toggle_settings = true;
-            }
-            // Bare-key shortcuts — only when no text field is focused
-            if !text_focused {
-                if i.key_pressed(Key::B) {
-                    toggle_before_after = true;
-                }
-                if i.key_pressed(Key::ArrowLeft) || i.key_pressed(Key::A) {
-                    nav_prev = true;
-                }
-                if i.key_pressed(Key::ArrowRight) || i.key_pressed(Key::D) {
-                    nav_next = true;
-                }
-                // H = toggle sidebar, Shift+H = toggle adjustments toolbar.
-                // Tab stays reserved for egui's focus traversal (accessibility).
-                // Tab kept as a fallback for v1 muscle memory.
-                if i.key_pressed(Key::H) {
-                    if i.modifiers.shift {
-                        toggle_adjustments = true;
-                    } else {
-                        toggle_sidebar = true;
-                    }
-                }
-                if i.key_pressed(Key::Tab) && !i.modifiers.shift {
-                    toggle_sidebar = true;
-                }
-            }
-            // Shift variants of Z/Y are preset-only undo/redo — roll back
-            // an accidental preset apply without touching the image-result
-            // history. Without-shift stays bound to image history.
-            if i.modifiers.command && i.key_pressed(Key::Z) {
-                if i.modifiers.shift {
-                    preset_undo_requested = true;
-                } else {
-                    undo_requested = true;
-                }
-            }
-            if i.modifiers.command && i.key_pressed(Key::Y) {
-                if i.modifiers.shift {
-                    preset_redo_requested = true;
-                } else {
-                    redo_requested = true;
-                }
-            }
-        });
-
+        let intents = collect_shortcut_intents(ctx);
         let copy_requested = std::mem::take(&mut self.pending_copy);
+        let pending_open = std::mem::take(&mut self.pending_open_dialog);
 
-        if open_requested || std::mem::take(&mut self.pending_open_dialog) {
+        if intents.open_requested || pending_open {
             self.handle_open_dialog();
         }
-        if remove_requested && matches!(self.state, AppState::Loaded | AppState::Done) {
+        if intents.remove_requested && matches!(self.state, AppState::Loaded | AppState::Done) {
             self.handle_remove_bg();
         }
-        if save_requested && self.state == AppState::Done {
+        if intents.save_requested && self.state == AppState::Done {
             self.handle_save_selected();
         }
         if copy_requested && self.state == AppState::Done {
             self.handle_copy();
         }
-        if toggle_before_after && self.state == AppState::Done {
+        if intents.toggle_before_after && self.state == AppState::Done {
             self.show_original = !self.show_original;
         }
-        if fit_to_window {
-            self.zoom_state.pending_fit_zoom = true;
+        if intents.fit_to_window { self.zoom_state.pending_fit_zoom = true; }
+        if intents.actual_size   { self.zoom_state.pending_actual_size = true; }
+
+        if intents.cancel_requested {
+            self.apply_cancel_shortcut(ctx);
         }
-        if actual_size {
-            self.zoom_state.pending_actual_size = true;
+
+        if intents.toggle_shortcuts { self.show_shortcuts = !self.show_shortcuts; }
+        if intents.toggle_cli_help  { self.show_cli_help  = !self.show_cli_help;  }
+        if intents.toggle_settings  { self.toggle_settings_panel(ctx); }
+
+        if intents.nav_prev { self.navigate_batch(ctx, NavDir::Prev); }
+        if intents.nav_next { self.navigate_batch(ctx, NavDir::Next); }
+
+        if intents.toggle_sidebar     { self.sidebar_hidden     = !self.sidebar_hidden; }
+        if intents.toggle_adjustments { self.adjustments_hidden = !self.adjustments_hidden; }
+
+        if intents.undo_requested        { self.handle_undo(ctx); }
+        if intents.redo_requested        { self.handle_redo(ctx); }
+        if intents.preset_undo_requested { self.swap_preset_history(HistoryDir::Undo); }
+        if intents.preset_redo_requested { self.swap_preset_history(HistoryDir::Redo); }
+
+        if self.pending_batch_sync {
+            self.pending_batch_sync = false;
+            self.sync_selected_batch_textures(ctx);
         }
-        // Cancel batch processing
-        let batch_processing = self.batch.items.iter().any(|i| i.status == BatchStatus::Processing);
-        if cancel_requested && batch_processing {
+    }
+
+    /// Escape dismisses the topmost interruptable state. Priority order:
+    /// active processing → open modal (settings / shortcuts / cli help).
+    fn apply_cancel_shortcut(&mut self, ctx: &egui::Context) {
+        if self.batch.status_counts().processing > 0 {
             self.handle_cancel();
-            // Immediately drop admission state so no more items are admitted
-            self.processor.admission = None;
-            self.processor.admission_tx = None;
+            self.processor.clear_admission();
             for item in &mut self.batch.items {
                 if item.status == BatchStatus::Processing {
                     item.status = BatchStatus::Pending;
                 }
             }
-        } else if cancel_requested && self.state == AppState::Processing {
+        } else if self.state == AppState::Processing {
             self.handle_cancel();
-            self.processor.admission = None;
-            self.processor.admission_tx = None;
+            self.processor.clear_admission();
             self.state = AppState::Loaded;
             self.status.text = "Cancelled".to_string();
-        } else if cancel_requested && self.show_settings {
+        } else if self.show_settings {
             self.close_settings(ctx);
-        } else if cancel_requested && self.show_shortcuts {
+        } else if self.show_shortcuts {
             self.show_shortcuts = false;
-        } else if cancel_requested && self.show_cli_help {
+        } else if self.show_cli_help {
             self.show_cli_help = false;
         }
-        if toggle_shortcuts {
-            self.show_shortcuts = !self.show_shortcuts;
+    }
+
+    fn toggle_settings_panel(&mut self, ctx: &egui::Context) {
+        if self.show_settings {
+            self.close_settings(ctx);
+        } else {
+            self.show_settings = true;
+            self.settings_opened_at = ctx.input(|i| i.time);
         }
-        if toggle_settings {
-            if self.show_settings {
-                self.close_settings(ctx);
-            } else {
-                self.show_settings = true;
-                self.settings_opened_at = ctx.input(|i| i.time);
-            }
+    }
+
+    fn navigate_batch(&mut self, ctx: &egui::Context, dir: NavDir) {
+        let len = self.batch.items.len();
+        if len == 0 {
+            return;
         }
-        if nav_prev && !self.batch.items.is_empty() {
-            if self.batch.selected_index == 0 {
-                self.batch.selected_index = self.batch.items.len() - 1;
-            } else {
-                self.batch.selected_index -= 1;
-            }
-            self.zoom_state.reset();
-            self.sync_selected_batch_textures(ctx);
-            self.show_original = false;
-        }
-        if nav_next && !self.batch.items.is_empty() {
-            self.batch.selected_index = (self.batch.selected_index + 1) % self.batch.items.len();
-            self.zoom_state.reset();
-            self.sync_selected_batch_textures(ctx);
-            self.show_original = false;
-        }
-        if toggle_sidebar {
-            self.sidebar_hidden = !self.sidebar_hidden;
-        }
-        if toggle_adjustments {
-            self.adjustments_hidden = !self.adjustments_hidden;
-        }
-        if undo_requested {
-            self.handle_undo(ctx);
-        }
-        if redo_requested {
-            self.handle_redo(ctx);
-        }
-        if preset_undo_requested {
-            self.swap_preset_history(HistoryDir::Undo);
-        }
-        if preset_redo_requested {
-            self.swap_preset_history(HistoryDir::Redo);
-        }
-        if self.pending_batch_sync {
-            self.pending_batch_sync = false;
-            self.sync_selected_batch_textures(ctx);
-        }
+        self.batch.selected_index = match dir {
+            NavDir::Prev if self.batch.selected_index == 0 => len - 1,
+            NavDir::Prev => self.batch.selected_index - 1,
+            NavDir::Next => (self.batch.selected_index + 1) % len,
+        };
+        self.zoom_state.reset();
+        self.sync_selected_batch_textures(ctx);
+        self.show_original = false;
     }
 
     fn drain_background_channels(&mut self, ctx: &egui::Context) {
@@ -2041,3 +1948,79 @@ impl eframe::App for PrunrApp {
     }
 }
 
+#[derive(Copy, Clone)]
+enum NavDir {
+    Prev,
+    Next,
+}
+
+/// Pure aggregate of "user pressed a shortcut this frame" flags, collected
+/// from `ctx.input` in a single pass. Separating collect from apply lets the
+/// apply phase freely borrow `&mut self` without fighting egui's input lock.
+#[derive(Default)]
+struct ShortcutIntents {
+    open_requested: bool,
+    remove_requested: bool,
+    save_requested: bool,
+    cancel_requested: bool,
+    toggle_shortcuts: bool,
+    toggle_cli_help: bool,
+    toggle_before_after: bool,
+    fit_to_window: bool,
+    actual_size: bool,
+    toggle_settings: bool,
+    nav_prev: bool,
+    nav_next: bool,
+    toggle_sidebar: bool,
+    toggle_adjustments: bool,
+    undo_requested: bool,
+    redo_requested: bool,
+    preset_undo_requested: bool,
+    preset_redo_requested: bool,
+}
+
+fn collect_shortcut_intents(ctx: &egui::Context) -> ShortcutIntents {
+    // Suppress bare-key shortcuts when any widget has focus (e.g., hex color input).
+    let text_focused = ctx.memory(|m| m.focused().is_some());
+    let mut s = ShortcutIntents::default();
+    ctx.input(|i| {
+        // Modifier shortcuts always work, even with a text field focused.
+        if i.modifiers.command && i.key_pressed(Key::O) { s.open_requested = true; }
+        if i.modifiers.command && i.key_pressed(Key::R) { s.remove_requested = true; }
+        if i.modifiers.command && i.key_pressed(Key::S) { s.save_requested = true; }
+        if i.key_pressed(Key::Escape)                   { s.cancel_requested = true; }
+        if i.key_pressed(Key::F1)                       { s.toggle_shortcuts = true; }
+        if i.key_pressed(Key::F2)                       { s.toggle_cli_help = true; }
+        if i.modifiers.command && i.key_pressed(Key::Num0)  { s.fit_to_window = true; }
+        if i.modifiers.command && i.key_pressed(Key::Num1)  { s.actual_size = true; }
+        if i.modifiers.command && i.key_pressed(Key::Space) { s.toggle_settings = true; }
+
+        // Bare-key shortcuts — only when no text field is focused.
+        if !text_focused {
+            if i.key_pressed(Key::B) { s.toggle_before_after = true; }
+            if i.key_pressed(Key::ArrowLeft)  || i.key_pressed(Key::A) { s.nav_prev = true; }
+            if i.key_pressed(Key::ArrowRight) || i.key_pressed(Key::D) { s.nav_next = true; }
+            // H = toggle sidebar, Shift+H = toggle adjustments toolbar.
+            // Tab stays reserved for egui's focus traversal (accessibility),
+            // kept here as a fallback for v1 muscle memory.
+            if i.key_pressed(Key::H) {
+                if i.modifiers.shift { s.toggle_adjustments = true; }
+                else                 { s.toggle_sidebar = true; }
+            }
+            if i.key_pressed(Key::Tab) && !i.modifiers.shift { s.toggle_sidebar = true; }
+        }
+
+        // Shift variants of Z/Y are preset-only undo/redo — roll back an
+        // accidental preset apply without touching the image-result history.
+        // Without-shift stays bound to image history.
+        if i.modifiers.command && i.key_pressed(Key::Z) {
+            if i.modifiers.shift { s.preset_undo_requested = true; }
+            else                 { s.undo_requested = true; }
+        }
+        if i.modifiers.command && i.key_pressed(Key::Y) {
+            if i.modifiers.shift { s.preset_redo_requested = true; }
+            else                 { s.redo_requested = true; }
+        }
+    });
+    s
+}
