@@ -28,7 +28,8 @@ prunr/
 │           │   ├── ipc.rs          # Length-prefixed bincode framing
 │           │   └── manager.rs      # SubprocessManager (spawn, send, poll, kill)
 │           └── gui/                # GUI application
-│               ├── app.rs             # PrunrApp state, batch orchestration
+│               ├── app.rs             # PrunrApp coordinator (UI flags + handles to coordinators)
+│               ├── item.rs            # Pure data types: BatchItem, HistorySlot, ImageSource, …
 │               ├── item_settings.rs   # Per-image processing settings
 │               ├── live_preview.rs    # In-process Tier 2 dispatcher
 │               ├── presets_fs.rs      # On-disk preset store (one JSON per preset)

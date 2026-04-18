@@ -3,7 +3,8 @@ use std::sync::atomic::Ordering;
 
 use egui::{Color32, Pos2, Rect, RichText, Stroke, Vec2};
 use egui_material_icons::icons::*;
-use crate::gui::app::{PrunrApp, BatchStatus};
+use crate::gui::app::PrunrApp;
+use crate::gui::item::BatchStatus;
 use crate::gui::theme;
 
 /// Manual pointer hit test for a rect — returns (hovered, clicked).

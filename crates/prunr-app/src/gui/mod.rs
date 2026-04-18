@@ -1,4 +1,5 @@
 pub mod app;
+pub mod item;
 pub mod state;
 pub mod settings;
 pub mod item_settings;
