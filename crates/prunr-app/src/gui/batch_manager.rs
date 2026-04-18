@@ -17,7 +17,23 @@
 use std::sync::Arc;
 
 use super::background_io::BackgroundIO;
-use super::item::{BatchItem, ImageSource};
+use super::item::{BatchItem, BatchStatus, ImageSource};
+
+/// Per-status counts across the batch. Produced by `status_counts` for
+/// callers that need to render progress strings, decide "all done" vs
+/// "still processing", etc. without triple-scanning `items` inline.
+#[derive(Default, Copy, Clone, Debug, PartialEq, Eq)]
+pub(crate) struct StatusCounts {
+    pub done: usize,
+    pub processing: usize,
+    pub errored: usize,
+}
+
+impl StatusCounts {
+    pub(crate) fn batch_total(&self) -> usize {
+        self.done + self.processing + self.errored
+    }
+}
 
 /// Combined budget for compressed segmentation (`cached_tensor`) + edge
 /// (`cached_edge_tensor`) caches across all batch items, in bytes.
@@ -46,6 +62,29 @@ impl BatchManager {
 
     pub(crate) fn selected_item(&self) -> Option<&BatchItem> {
         self.items.get(self.selected_index)
+    }
+
+    /// True when the currently-selected item has the given id. Callers use
+    /// this to decide whether a worker message / background-io event affects
+    /// what the user is looking at right now (textures, progress, status).
+    pub(crate) fn is_selected(&self, id: u64) -> bool {
+        self.selected_item().map_or(false, |b| b.id == id)
+    }
+
+    /// Single pass over `items` producing the three counts that callers
+    /// (`poll_worker_results`, statusbar) otherwise compute with three
+    /// separate filter-count passes.
+    pub(crate) fn status_counts(&self) -> StatusCounts {
+        let mut c = StatusCounts::default();
+        for item in &self.items {
+            match item.status {
+                BatchStatus::Done => c.done += 1,
+                BatchStatus::Processing => c.processing += 1,
+                BatchStatus::Error(_) => c.errored += 1,
+                _ => {}
+            }
+        }
+        c
     }
 
     /// Pre-decode source bytes to RgbaImage on a background thread; the
@@ -200,6 +239,56 @@ mod tests {
         bm.items.push(item_with_cache(1, 0));
         bm.selected_index = 99;
         assert!(bm.selected_item().is_none());
+    }
+
+    // ── is_selected ─────────────────────────────────────────────────────
+
+    #[test]
+    fn is_selected_matches_selected_item_id() {
+        let mut bm = fixture();
+        bm.items.push(item_with_cache(1, 0));
+        bm.items.push(item_with_cache(42, 0));
+        bm.selected_index = 1;
+        assert!(bm.is_selected(42));
+        assert!(!bm.is_selected(1));
+    }
+
+    #[test]
+    fn is_selected_false_when_batch_empty() {
+        let bm = fixture();
+        assert!(!bm.is_selected(0));
+        assert!(!bm.is_selected(99));
+    }
+
+    // ── status_counts ───────────────────────────────────────────────────
+
+    #[test]
+    fn status_counts_totals_by_status_excluding_pending() {
+        let mut bm = fixture();
+        let mut push = |id, status| {
+            let mut item = item_with_cache(id, 0);
+            item.status = status;
+            bm.items.push(item);
+        };
+        push(1, BatchStatus::Done);
+        push(2, BatchStatus::Done);
+        push(3, BatchStatus::Processing);
+        push(4, BatchStatus::Error("oops".into()));
+        push(5, BatchStatus::Pending);
+
+        let c = bm.status_counts();
+        assert_eq!(c.done, 2);
+        assert_eq!(c.processing, 1);
+        assert_eq!(c.errored, 1);
+        assert_eq!(c.batch_total(), 4, "Pending items are excluded from batch_total");
+    }
+
+    #[test]
+    fn status_counts_empty_batch_zero() {
+        let bm = fixture();
+        let c = bm.status_counts();
+        assert_eq!(c, StatusCounts::default());
+        assert_eq!(c.batch_total(), 0);
     }
 
     // ── enforce_tensor_budget / evict_all_tensors ───────────────────────
