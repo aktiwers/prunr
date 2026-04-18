@@ -1,4 +1,5 @@
-use crate::gui::app::{PrunrApp, BatchStatus};
+use crate::gui::app::PrunrApp;
+use crate::gui::item::BatchStatus;
 
 #[test]
 fn batch_items_starts_empty() {

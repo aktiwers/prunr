@@ -15,7 +15,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use super::app::BatchItem;
+use super::item::BatchItem;
 use super::settings::LineMode;
 
 /// Subdirectory name under temp_dir for prunr drag files.
