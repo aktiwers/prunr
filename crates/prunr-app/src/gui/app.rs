@@ -436,55 +436,77 @@ impl PrunrApp {
     /// Uses tier routing: compares each item's applied_recipe against current
     /// settings to determine the minimum work needed (skip / mask rerun / full).
     fn process_items(&mut self, filter: impl Fn(&BatchItem) -> bool) {
-        use super::memory::{AdmissionController, ImageMemCost};
-        use prunr_core::RequiredTier;
-
         let chain = self.settings.chain_mode;
         let model: prunr_core::ModelKind = self.settings.model.into();
 
-        // Identify candidate items (not already processing)
         let candidate_ids: HashSet<u64> = self.batch.items.iter()
             .filter(|i| filter(i) && !matches!(i.status, BatchStatus::Processing))
             .map(|i| i.id)
             .collect();
         if candidate_ids.is_empty() { return; }
 
-        // ── Tier classification ──────────────────────────────────────────
-        let mut tier1_ids: HashSet<u64> = HashSet::new(); // Full pipeline
-        let mut tier2_ids: HashSet<u64> = HashSet::new(); // Mask rerun
-        let mut skip_count = 0usize;
+        let tiers = self.classify_candidates(&candidate_ids, model, chain);
+        let process_count = tiers.tier1.len() + tiers.tier2.len();
+        self.notify_skip(tiers.skip_count, process_count);
+        if process_count == 0 { return; }
+
+        self.seed_history_for_reprocess(&tiers.all_process_ids(), chain);
+
+        let tier2_work = self.build_tier2_work(&tiers.tier2);
+
+        let jobs = self.settings.parallel_jobs.min(super::memory::safe_max_jobs(model));
+        if tiers.tier1.len() > 1 {
+            self.dispatch_with_admission(&tiers.tier1, tier2_work, model, jobs, chain);
+        } else {
+            self.dispatch_small_batch(&tiers.tier1, tier2_work, model, jobs, chain);
+        }
+    }
+
+    /// Classify each candidate into Tier 1 (full pipeline), Tier 2 (mask
+    /// rerun from cached tensor), or Skip (already up to date).
+    /// Mutates items in-place: invalidates stale caches, syncs composite-only
+    /// recipe changes, and never downgrades Tier 2 items without a tensor.
+    fn classify_candidates(
+        &mut self,
+        candidate_ids: &HashSet<u64>,
+        model: prunr_core::ModelKind,
+        chain: bool,
+    ) -> ClassifiedTiers {
+        use prunr_core::RequiredTier;
+        let mut tiers = ClassifiedTiers::default();
 
         for item in &mut self.batch.items {
             if !candidate_ids.contains(&item.id) { continue; }
 
-            // Never-processed items always need full pipeline
+            // Never-processed items always need the full pipeline.
             let Some(ref old_recipe) = item.applied_recipe else {
-                tier1_ids.insert(item.id);
+                tiers.tier1.insert(item.id);
                 continue;
             };
 
-            // Chain mode with existing result: input changes each time → always full
+            // Chain mode with an existing result feeds the output back in,
+            // so the input changes each time → always full.
             if chain && item.result_rgba.is_some() {
                 item.cached_tensor = None;
-                tier1_ids.insert(item.id);
+                tiers.tier1.insert(item.id);
                 continue;
             }
 
             let current_recipe = item.settings.current_recipe(model, chain);
             match prunr_core::resolve_tier(old_recipe, &current_recipe) {
                 RequiredTier::Skip | RequiredTier::CompositeOnly => {
-                    // CompositeOnly (bg_color) is handled at display/export time,
-                    // so it's effectively a skip. Update composite to stay in sync.
+                    // CompositeOnly (bg_color) is handled at display/export time;
+                    // sync the stored composite so status reads stay accurate.
                     if let Some(ref mut recipe) = item.applied_recipe {
                         recipe.composite = current_recipe.composite.clone();
                     }
-                    skip_count += 1;
+                    tiers.skip_count += 1;
                 }
                 RequiredTier::MaskRerun => {
                     if item.cached_tensor.is_some() {
-                        tier2_ids.insert(item.id);
+                        tiers.tier2.insert(item.id);
                     } else {
-                        tier1_ids.insert(item.id);
+                        tiers.tier1.insert(item.id);
                     }
                 }
                 RequiredTier::EdgeRerun => {
@@ -494,49 +516,47 @@ impl PrunrApp {
                     // `pump_live_preview` + `finalize_edges`; this branch is
                     // for the explicit Process click path only.)
                     item.invalidate_edge_cache();
-                    tier1_ids.insert(item.id);
+                    tiers.tier1.insert(item.id);
                 }
                 RequiredTier::FullPipeline => {
                     // Model / chain / mode changed — both caches invalid.
                     item.cached_tensor = None;
                     item.invalidate_edge_cache();
-                    tier1_ids.insert(item.id);
+                    tiers.tier1.insert(item.id);
                 }
             }
         }
+        tiers
+    }
 
-        let process_count = tier1_ids.len() + tier2_ids.len();
-        if process_count == 0 {
-            if skip_count > 0 {
-                let msg = if skip_count == 1 {
-                    "Already up to date".to_string()
-                } else {
-                    format!("{skip_count} images already up to date")
-                };
-                self.toasts.info(msg);
+    /// Tell the user when some items were skipped. Three shapes:
+    /// nothing-skipped (silent), all-skipped, partially-skipped.
+    fn notify_skip(&mut self, skipped: usize, processing: usize) {
+        if skipped == 0 { return; }
+        let msg = if processing == 0 {
+            if skipped == 1 {
+                "Already up to date".to_string()
+            } else {
+                format!("{skipped} images already up to date")
             }
-            return;
-        }
+        } else {
+            format!("{skipped} up to date, processing {processing}")
+        };
+        self.toasts.info(msg);
+    }
 
-        if skip_count > 0 {
-            let msg = format!("{skip_count} up to date, processing {process_count}");
-            self.toasts.info(msg);
-        }
-
-        // ── Save history for items being reprocessed ──────────────────
-        let process_ids: HashSet<u64> = tier1_ids.iter().chain(tier2_ids.iter()).copied().collect();
-        let chain_mode = self.settings.chain_mode;
+    fn seed_history_for_reprocess(&mut self, process_ids: &HashSet<u64>, chain: bool) {
         let max_depth = self.settings.history_depth;
         for item in &mut self.batch.items {
             if !process_ids.contains(&item.id) { continue; }
             HistoryManager::seed_with_source(item);
             let was_done = item.status == BatchStatus::Done;
-            HistoryManager::archive_current_result(item, max_depth, chain_mode);
+            HistoryManager::archive_current_result(item, max_depth, chain);
             if was_done {
-                // Reset texture caches so the next paint rebuilds from the
-                // (possibly new) result. In chain mode, result_rgba was kept
-                // populated by archive_current_result for the next chain step.
-                if !chain_mode {
+                // Rebuild textures from the (possibly new) result. In chain
+                // mode, result_rgba stays populated for the next chain step,
+                // so keep result_texture; otherwise drop it.
+                if !chain {
                     item.result_texture = None;
                 }
                 item.thumb_texture = None;
@@ -545,84 +565,99 @@ impl PrunrApp {
                 item.result_tex_pending = false;
             }
         }
+    }
 
-        // ── Build Tier 2 work items ──────────────────────────────────
-        let mut tier2_work: Vec<super::worker::Tier2WorkItem> = Vec::new();
+    fn build_tier2_work(&mut self, tier2_ids: &HashSet<u64>) -> Vec<super::worker::Tier2WorkItem> {
+        let mut out = Vec::new();
         for item in &mut self.batch.items {
             if !tier2_ids.contains(&item.id) { continue; }
-            if let Some(ref ct) = item.cached_tensor {
-                let tensor_data = ct.decompress();
-                let mask = item.settings.mask_settings();
-                match (tensor_data, item.source.load_bytes()) {
-                    (Some(data), Ok(bytes)) => {
-                        tier2_work.push(super::worker::Tier2WorkItem {
-                            item_id: item.id,
-                            tensor_data: data,
-                            tensor_height: ct.height,
-                            tensor_width: ct.width,
-                            model: ct.model,
-                            original_bytes: bytes,
-                            mask,
-                        });
-                        item.status = BatchStatus::Processing;
-                    }
-                    (None, _) => {
-                        item.status = BatchStatus::Error("Tensor cache corrupt".into());
-                        item.cached_tensor = None;
-                        item.applied_recipe = None;
-                    }
-                    (_, Err(e)) => {
-                        item.status = BatchStatus::Error(format!("Failed to load: {e}"));
-                        item.cached_tensor = None;
-                        item.applied_recipe = None;
-                    }
+            let Some(ref ct) = item.cached_tensor else { continue };
+            let tensor_data = ct.decompress();
+            let mask = item.settings.mask_settings();
+            match (tensor_data, item.source.load_bytes()) {
+                (Some(data), Ok(bytes)) => {
+                    out.push(super::worker::Tier2WorkItem {
+                        item_id: item.id,
+                        tensor_data: data,
+                        tensor_height: ct.height,
+                        tensor_width: ct.width,
+                        model: ct.model,
+                        original_bytes: bytes,
+                        mask,
+                    });
+                    item.status = BatchStatus::Processing;
+                }
+                (None, _) => {
+                    item.status = BatchStatus::Error("Tensor cache corrupt".into());
+                    item.cached_tensor = None;
+                    item.applied_recipe = None;
+                }
+                (_, Err(e)) => {
+                    item.status = BatchStatus::Error(format!("Failed to load: {e}"));
+                    item.cached_tensor = None;
+                    item.applied_recipe = None;
+                }
+            }
+        }
+        out
+    }
+
+    /// Dispatch with streaming admission — used when >1 Tier 1 items so the
+    /// batch doesn't blow past memory limits. Admits what fits now; the
+    /// worker bridge receives more items via `admission_tx` as earlier items
+    /// complete and free memory.
+    fn dispatch_with_admission(
+        &mut self,
+        tier1_ids: &HashSet<u64>,
+        tier2_work: Vec<super::worker::Tier2WorkItem>,
+        model: prunr_core::ModelKind,
+        jobs: usize,
+        chain: bool,
+    ) {
+        use super::memory::{AdmissionController, ImageMemCost};
+
+        let mut ctrl = AdmissionController::new(model, jobs);
+        let costs: Vec<ImageMemCost> = self.batch.items.iter()
+            .filter(|i| tier1_ids.contains(&i.id))
+            .map(|i| AdmissionController::estimate_cost(i.id, i.dimensions, i.source.estimated_size()))
+            .collect();
+        ctrl.enqueue(costs);
+
+        let mut initial_items = Vec::new();
+        while let Some(admitted_id) = ctrl.try_admit_next() {
+            if let Some(item) = self.batch.items.iter_mut().find(|b| b.id == admitted_id) {
+                if let Ok(bytes) = item.source.load_bytes() {
+                    let chain_input = if chain { item.result_rgba.clone() } else { None };
+                    initial_items.push((item.id, bytes, chain_input));
+                    item.status = BatchStatus::Processing;
                 }
             }
         }
 
-        // ── Build Tier 1 work items + admission ──────────────────────
-        let model: prunr_core::ModelKind = self.settings.model.into();
-        let safe_jobs = super::memory::safe_max_jobs(model);
-        let jobs = self.settings.parallel_jobs.min(safe_jobs);
-        let use_admission = tier1_ids.len() > 1;
-
-        if use_admission {
-            let mut ctrl = AdmissionController::new(model, jobs);
-            let costs: Vec<ImageMemCost> = self.batch.items.iter()
-                .filter(|i| tier1_ids.contains(&i.id))
-                .map(|i| AdmissionController::estimate_cost(i.id, i.dimensions, i.source.estimated_size()))
-                .collect();
-            ctrl.enqueue(costs);
-
-            let mut initial_items = Vec::new();
-            while let Some(admitted_id) = ctrl.try_admit_next() {
-                if let Some(item) = self.batch.items.iter_mut().find(|b| b.id == admitted_id) {
-                    if let Ok(bytes) = item.source.load_bytes() {
-                        let chain_input = if chain { item.result_rgba.clone() } else { None };
-                        initial_items.push((item.id, bytes, chain_input));
-                        item.status = BatchStatus::Processing;
-                    }
-                }
+        for item in &mut self.batch.items {
+            if tier1_ids.contains(&item.id) && item.status != BatchStatus::Processing {
+                item.status = BatchStatus::Pending;
             }
-
-            for item in &mut self.batch.items {
-                if tier1_ids.contains(&item.id) && item.status != BatchStatus::Processing {
-                    item.status = BatchStatus::Pending;
-                }
-            }
-
-            // All Tier 1 items failed load_bytes AND no Tier 2 work — skip dispatch.
-            if initial_items.is_empty() && tier2_work.is_empty() { return; }
-
-            let (atx, arx) = mpsc::channel();
-            self.processor.admission = Some(ctrl);
-            self.processor.admission_tx = Some(atx);
-
-            self.dispatch_batch(initial_items, tier2_work, model, jobs, Some(arx));
-            return;
         }
 
-        // Small batch / single item: no admission needed
+        // All Tier 1 items failed load_bytes AND no Tier 2 work — skip dispatch.
+        if initial_items.is_empty() && tier2_work.is_empty() { return; }
+
+        let (atx, arx) = mpsc::channel();
+        self.processor.admission = Some(ctrl);
+        self.processor.admission_tx = Some(atx);
+        self.dispatch_batch(initial_items, tier2_work, model, jobs, Some(arx));
+    }
+
+    /// Single-item or small-batch fast path — skip admission entirely.
+    fn dispatch_small_batch(
+        &mut self,
+        tier1_ids: &HashSet<u64>,
+        tier2_work: Vec<super::worker::Tier2WorkItem>,
+        model: prunr_core::ModelKind,
+        jobs: usize,
+        chain: bool,
+    ) {
         let items: Vec<_> = self.batch.items.iter_mut()
             .filter(|i| tier1_ids.contains(&i.id))
             .filter_map(|i| {
@@ -633,9 +668,8 @@ impl PrunrApp {
             })
             .collect();
 
-        // If all prep failed (both Tier 2 decompress + Tier 1 load_bytes), don't
-        // dispatch an empty batch — the subprocess would spin up for nothing
-        // and items stay in Error status set above.
+        // If all prep failed (Tier 2 decompress + Tier 1 load_bytes), don't
+        // dispatch an empty batch — the subprocess would spin up for nothing.
         if items.is_empty() && tier2_work.is_empty() { return; }
 
         self.dispatch_batch(items, tier2_work, model, jobs, None);
@@ -1952,6 +1986,25 @@ impl eframe::App for PrunrApp {
 enum NavDir {
     Prev,
     Next,
+}
+
+/// Classification output from `classify_candidates`: which items go to the
+/// full subprocess pipeline (tier1), which can do an in-subprocess mask
+/// rerun from their cached tensor (tier2), and how many were already
+/// up-to-date (skip_count, used only for the user-facing toast).
+#[derive(Default)]
+struct ClassifiedTiers {
+    tier1: HashSet<u64>,
+    tier2: HashSet<u64>,
+    skip_count: usize,
+}
+
+impl ClassifiedTiers {
+    /// Union of tier1 + tier2 — the set of items that will actually be
+    /// reprocessed this batch (history seeding, progress counting).
+    fn all_process_ids(&self) -> HashSet<u64> {
+        self.tier1.iter().chain(self.tier2.iter()).copied().collect()
+    }
 }
 
 /// Pure aggregate of "user pressed a shortcut this frame" flags, collected
