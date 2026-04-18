@@ -313,17 +313,18 @@ pub fn decompress_edge(ct: &CompressedTensor) -> Option<EdgeTensor> {
 /// plus, for Edge kind, the resized pre-dilation mask so the parent can cache
 /// it (tied to the dispatch's line_strength).
 ///
-/// Preview mode skips the guided filter stage in postprocess — the full-quality
-/// refinement runs only on Process commit. Result looks slightly softer during
-/// live-drag but full quality is restored the moment the user commits.
+/// Respects the user's full mask settings, including `refine_edges`. The
+/// guided filter stage adds ~50-150ms on 4K when enabled, so drag cadence
+/// slows accordingly — but the user opted into that cost when they toggled
+/// Refine Edges on, and without running the filter the three refine knobs
+/// (toggle, guided_radius, guided_epsilon) would be no-ops in live preview.
 fn run_preview(inputs: DispatchInputs, cancel: &AtomicBool) -> (Option<RgbaImage>, Option<Arc<GrayImage>>) {
     if cancel.load(Ordering::Acquire) { return (None, None); }
 
     match inputs.kind {
         PreviewKind::Mask => {
             let Some(seg) = inputs.seg_tensor else { return (None, None); };
-            let mut mask_settings = inputs.settings.mask_settings();
-            mask_settings.refine_edges = false;
+            let mask_settings = inputs.settings.mask_settings();
             let rgba = postprocess_from_flat(
                 &seg.data,
                 seg.height as usize,
