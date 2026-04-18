@@ -228,10 +228,15 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use image::{DynamicImage, Rgb, RgbImage};
+    use image::{DynamicImage, RgbImage};
+    #[cfg(feature = "dev-models")]
+    use image::Rgb;
+    #[cfg(feature = "dev-models")]
     use std::io::Cursor;
 
-    /// Encode a DynamicImage to PNG bytes for use as test input
+    // Only the `dev-models` tests below consume these helpers; gating keeps
+    // the default `cargo test` build free of dead-code warnings.
+    #[cfg(feature = "dev-models")]
     fn encode_as_png(img: DynamicImage) -> Vec<u8> {
         let mut buf = Vec::new();
         img.write_to(&mut Cursor::new(&mut buf), image::ImageFormat::Png)
@@ -239,6 +244,7 @@ mod tests {
         buf
     }
 
+    #[cfg(feature = "dev-models")]
     fn make_png(width: u32, height: u32) -> Vec<u8> {
         encode_as_png(DynamicImage::ImageRgb8(RgbImage::from_pixel(
             width,
