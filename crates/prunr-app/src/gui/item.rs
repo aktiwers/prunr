@@ -221,6 +221,53 @@ impl BatchItem {
         self.decode_pending = false;
     }
 
+    /// Apply a finished tier result to this item (success or error branch).
+    /// Returns the `active_provider` string when the caller should update the
+    /// app-level backend label; `None` for Tier 2 reruns (empty provider) or
+    /// error results.
+    ///
+    /// Keeps the BatchItem mutation isolated here; the backend update on
+    /// `Settings` is applied in the caller via the returned `Option<String>`.
+    pub(crate) fn apply_tier_result(
+        &mut self,
+        result: Result<prunr_core::ProcessResult, String>,
+        tensor_cache: Option<super::worker::TensorCache>,
+        edge_cache: Option<super::worker::TensorCache>,
+        recipe_snapshot: prunr_core::ProcessingRecipe,
+        is_selected: bool,
+    ) -> Option<String> {
+        match result {
+            Ok(pr) => {
+                self.reset_result_caches();
+                self.result_rgba = Some(Arc::new(pr.rgba_image));
+                self.status = BatchStatus::Done;
+                self.applied_recipe = Some(recipe_snapshot);
+                // Tensor caches are already zstd-compressed on the bridge
+                // thread; storing is a zero-cost move.
+                self.cached_tensor = tensor_cache
+                    .and_then(super::worker::CompressedTensor::from_raw);
+                self.cached_edge_tensor = edge_cache
+                    .and_then(super::worker::CompressedTensor::from_raw);
+                self.cached_edge_mask = None;
+                if !is_selected {
+                    self.source_rgba = None;
+                    self.source_texture = None;
+                }
+                // Tier 2 reruns report empty active_provider (no inference ran).
+                (!pr.active_provider.is_empty()).then_some(pr.active_provider)
+            }
+            Err(e) => {
+                // Clear recipe + tensors so retry runs a fresh Tier 1
+                // (otherwise resolve_tier might return Skip for an errored item).
+                self.status = BatchStatus::Error(e);
+                self.cached_tensor = None;
+                self.invalidate_edge_cache();
+                self.applied_recipe = None;
+                None
+            }
+        }
+    }
+
     /// Combined compressed size of segmentation + edge tensor caches.
     /// Used by memory governance (`BatchManager::enforce_tensor_budget`)
     /// and any future telemetry / HUD readout.
@@ -326,6 +373,112 @@ mod tests {
     fn cache_size_zero_when_caches_empty() {
         let item = fixture_item(1);
         assert_eq!(item.cache_size(), 0);
+    }
+
+    fn fixture_recipe() -> prunr_core::ProcessingRecipe {
+        ItemSettings::default().current_recipe(prunr_core::ModelKind::Silueta, false)
+    }
+
+    fn fixture_process_result(provider: &str) -> prunr_core::ProcessResult {
+        prunr_core::ProcessResult {
+            rgba_image: image::RgbaImage::from_pixel(2, 2, image::Rgba([0, 0, 0, 255])),
+            active_provider: provider.to_string(),
+        }
+    }
+
+    #[test]
+    fn apply_tier_result_success_sets_done_and_returns_provider() {
+        let mut item = fixture_item(1);
+        item.status = BatchStatus::Processing;
+
+        let provider = item.apply_tier_result(
+            Ok(fixture_process_result("CUDA")),
+            None,
+            None,
+            fixture_recipe(),
+            true,
+        );
+
+        assert_eq!(provider.as_deref(), Some("CUDA"));
+        assert_eq!(item.status, BatchStatus::Done);
+        assert!(item.result_rgba.is_some());
+        assert!(item.applied_recipe.is_some());
+    }
+
+    #[test]
+    fn apply_tier_result_tier2_rerun_returns_none_for_empty_provider() {
+        // Tier 2 reruns omit active_provider so the caller knows not to
+        // overwrite the backend label shown in the UI.
+        let mut item = fixture_item(1);
+        item.status = BatchStatus::Processing;
+
+        let provider = item.apply_tier_result(
+            Ok(fixture_process_result("")),
+            None,
+            None,
+            fixture_recipe(),
+            true,
+        );
+
+        assert!(provider.is_none());
+        assert_eq!(item.status, BatchStatus::Done);
+    }
+
+    #[test]
+    fn apply_tier_result_success_evicts_source_when_not_selected() {
+        let mut item = fixture_item(1);
+        item.status = BatchStatus::Processing;
+        item.source_rgba = Some(Arc::new(image::RgbaImage::new(1, 1)));
+
+        let _ = item.apply_tier_result(
+            Ok(fixture_process_result("CUDA")),
+            None,
+            None,
+            fixture_recipe(),
+            false, // not selected — background item
+        );
+
+        assert!(item.source_rgba.is_none(), "source_rgba must be evicted for background items to free RAM");
+        assert!(item.source_texture.is_none());
+    }
+
+    #[test]
+    fn apply_tier_result_success_keeps_source_when_selected() {
+        let mut item = fixture_item(1);
+        item.status = BatchStatus::Processing;
+        item.source_rgba = Some(Arc::new(image::RgbaImage::new(1, 1)));
+
+        let _ = item.apply_tier_result(
+            Ok(fixture_process_result("CUDA")),
+            None,
+            None,
+            fixture_recipe(),
+            true, // selected — user is looking at it
+        );
+
+        assert!(item.source_rgba.is_some(), "source_rgba must stay populated for the selected item");
+    }
+
+    #[test]
+    fn apply_tier_result_error_clears_recipe_and_tensors_for_fresh_retry() {
+        let mut item = fixture_item(1);
+        item.status = BatchStatus::Processing;
+        item.applied_recipe = Some(fixture_recipe());
+
+        let provider = item.apply_tier_result(
+            Err("boom".to_string()),
+            None,
+            None,
+            fixture_recipe(),
+            true,
+        );
+
+        assert!(provider.is_none());
+        assert!(matches!(item.status, BatchStatus::Error(ref e) if e == "boom"));
+        assert!(item.cached_tensor.is_none());
+        assert!(item.cached_edge_tensor.is_none());
+        assert!(item.applied_recipe.is_none(),
+            "applied_recipe must be cleared so resolve_tier picks FullPipeline on retry");
     }
 
     #[test]

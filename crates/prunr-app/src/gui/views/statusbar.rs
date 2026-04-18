@@ -1,7 +1,6 @@
 use egui::{Pos2, Rect, RichText};
 
 use crate::gui::app::PrunrApp;
-use crate::gui::item::BatchStatus;
 use crate::gui::state::AppState;
 use crate::gui::theme;
 
@@ -19,12 +18,11 @@ pub fn render(ui: &mut egui::Ui, app: &PrunrApp) {
         ui.add_space(theme::SPACE_XS);
 
         // Left side: status text
-        let batch_processing = app.batch.items.iter().any(|i| i.status == BatchStatus::Processing);
-        let batch_done_count = app.batch.items.iter().filter(|i| i.status == BatchStatus::Done).count();
-        let batch_errored = app.batch.items.iter().filter(|i| matches!(i.status, BatchStatus::Error(_))).count();
-        let batch_in_progress = app.batch.items.iter().filter(|i| i.status == BatchStatus::Processing).count();
+        let counts = app.batch.status_counts();
+        let batch_processing = counts.processing > 0;
+        let batch_done_count = counts.done;
         // Only count items involved in processing (not idle Pending items)
-        let batch_total = batch_done_count + batch_errored + batch_in_progress;
+        let batch_total = counts.batch_total();
 
         let status_text = if batch_processing {
             format!("Processing {batch_done_count}/{batch_total} images...")
