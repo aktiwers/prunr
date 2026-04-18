@@ -181,6 +181,7 @@ pub fn render(
                 if ui.add(reset_btn).on_hover_text(reset_tooltip).clicked() {
                     *item_settings = app_settings.preset_values(&reset_target);
                     *applied_preset = reset_target;
+                    change.preset_applied = true;
                     change.mask = true;
                     change.edge = true;
                     change.bg = true;

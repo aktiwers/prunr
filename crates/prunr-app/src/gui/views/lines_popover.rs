@@ -23,18 +23,46 @@ const POPOVER_WIDTH: f32 = 300.0;
 fn mode_label(mode: LineMode) -> &'static str {
     match mode {
         LineMode::Off => "Off",
-        LineMode::EdgesOnly => "Edges only",
-        LineMode::SubjectOutline => "Outline only",
+        LineMode::EdgesOnly => "Sketch",
+        LineMode::SubjectOutline => "Subject sketch",
     }
 }
 
-/// Long-form label for the dropdown list.
-fn mode_long_label(mode: LineMode) -> &'static str {
+/// Short description for the dropdown list (shown beneath the title).
+fn mode_description(mode: LineMode) -> &'static str {
     match mode {
-        LineMode::Off => "Off — no line extraction",
-        LineMode::EdgesOnly => "Edges only — full image, skip BG removal",
-        LineMode::SubjectOutline => "Outline only — BG removed, subject edges only",
+        LineMode::Off => "no line extraction",
+        LineMode::EdgesOnly => "line art of the full image",
+        LineMode::SubjectOutline => "line art of the subject only, transparent background",
     }
+}
+
+/// Build a two-line selectable label: bold title on top, secondary-coloured
+/// description underneath. Matches the visual hierarchy of other descriptive
+/// controls in the app.
+fn two_line_label(title: &str, description: &str) -> egui::text::LayoutJob {
+    use egui::text::{LayoutJob, TextFormat};
+    let mut job = LayoutJob::default();
+    job.append(
+        title,
+        0.0,
+        TextFormat {
+            color: theme::TEXT_PRIMARY,
+            font_id: egui::FontId::proportional(theme::FONT_SIZE_BODY),
+            ..Default::default()
+        },
+    );
+    job.append("\n", 0.0, TextFormat::default());
+    job.append(
+        description,
+        0.0,
+        TextFormat {
+            color: theme::TEXT_SECONDARY,
+            font_id: egui::FontId::proportional(theme::FONT_SIZE_MONO),
+            ..Default::default()
+        },
+    );
+    job
 }
 
 /// Render the row 1 Lines button + popover. Returns `true` if line_mode changed
@@ -86,13 +114,16 @@ pub fn render(ui: &mut Ui, settings: &mut ItemSettings) -> bool {
             ui.add_space(theme::SPACE_XS);
             for mode in [LineMode::Off, LineMode::EdgesOnly, LineMode::SubjectOutline] {
                 let selected = settings.line_mode == mode;
-                if ui
-                    .selectable_label(selected, mode_long_label(mode))
-                    .clicked()
-                    && !selected
-                {
-                    settings.line_mode = mode;
-                    changed = true;
+                let label = two_line_label(mode_label(mode), mode_description(mode));
+                if ui.selectable_label(selected, label).clicked() {
+                    if !selected {
+                        settings.line_mode = mode;
+                        changed = true;
+                    }
+                    // Close the popover on any selection (even re-clicking the
+                    // current one) — the user's intent was to make a choice
+                    // and move on, not to keep the menu open.
+                    ui.memory_mut(|m| m.close_popup(pop_id));
                 }
             }
 
@@ -128,7 +159,7 @@ mod tests {
     fn mode_labels_cover_all_variants() {
         for mode in [LineMode::Off, LineMode::EdgesOnly, LineMode::SubjectOutline] {
             assert!(!mode_label(mode).is_empty());
-            assert!(!mode_long_label(mode).is_empty());
+            assert!(!mode_description(mode).is_empty());
         }
     }
 }
