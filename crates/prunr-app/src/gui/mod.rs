@@ -3,6 +3,7 @@ pub mod item;
 pub mod history_manager;
 pub mod drag_export_state;
 pub mod batch_manager;
+pub mod processor;
 pub mod state;
 pub mod settings;
 pub mod item_settings;
