@@ -9,10 +9,9 @@
 //!   and save-done channels.
 //!
 //! Does NOT own:
-//! - Inference dispatch (worker channels, admission, live-preview) — those
-//!   move to `Processor` in 10-05e
+//! - Inference dispatch (worker channels, admission, live-preview) — `Processor`
 //! - History mutation logic — `HistoryManager` (no own state) handles that
-//! - Drag-out lifecycle — `DragExportState` owns that
+//! - Drag-out lifecycle — `DragExportState`
 
 use std::sync::Arc;
 
@@ -62,6 +61,18 @@ impl BatchManager {
 
     pub(crate) fn selected_item(&self) -> Option<&BatchItem> {
         self.items.get(self.selected_index)
+    }
+
+    /// Look up an item by id. Returns `None` if no batch item has that id —
+    /// common when a worker event arrives after the item was removed.
+    pub(crate) fn find_by_id(&self, id: u64) -> Option<&BatchItem> {
+        self.items.iter().find(|b| b.id == id)
+    }
+
+    /// Mutable counterpart of `find_by_id`. Used by worker-event handlers
+    /// that write results / status into the matching item.
+    pub(crate) fn find_by_id_mut(&mut self, id: u64) -> Option<&mut BatchItem> {
+        self.items.iter_mut().find(|b| b.id == id)
     }
 
     /// True when the currently-selected item has the given id. Callers use

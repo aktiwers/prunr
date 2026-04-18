@@ -327,7 +327,7 @@ Tier 2 path uses postprocess_from_flat(tensor: &[f32], h, w, original, mask, mod
 - Edge shift's ring buffers allocated once, swapped via `std::mem::swap`
 - Single RGBA allocation in `postprocess()` — shared across guided filter and mask application (saves ~48 MB per Tier 2 run on a 4000×3000 image)
 
-#### Phase 10-07 numbers (4000×3000 image, 8-core x86_64, `cargo test --release`)
+#### Benchmark numbers (4000×3000 image, 8-core x86_64, `cargo test --release`)
 
 | Stage                         | Serial (median) | Row-parallel (median) | Speedup |
 |-------------------------------|----------------:|----------------------:|--------:|

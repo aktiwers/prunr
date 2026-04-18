@@ -25,7 +25,6 @@ pub struct AdmissionController {
     admitted: HashMap<u64, usize>,
     /// Pending items sorted descending by cost (largest first for best-fit).
     pending: Vec<ImageMemCost>,
-    total_items: usize,
 }
 
 impl AdmissionController {
@@ -40,7 +39,6 @@ impl AdmissionController {
             committed_bytes: 0,
             admitted: HashMap::new(),
             pending: Vec::new(),
-            total_items: 0,
         }
     }
 
@@ -56,7 +54,6 @@ impl AdmissionController {
 
     /// Add pending items. Sorts them for best-fit (largest first).
     pub fn enqueue(&mut self, mut costs: Vec<ImageMemCost>) {
-        self.total_items += costs.len();
         costs.sort_by(|a, b| b.total.cmp(&a.total));
         self.pending.extend(costs);
         // Re-sort after extend in case there were existing pending items
@@ -169,7 +166,6 @@ mod tests {
             committed_bytes: 0,
             admitted: HashMap::new(),
             pending: Vec::new(),
-            total_items: 0,
         }
     }
 
