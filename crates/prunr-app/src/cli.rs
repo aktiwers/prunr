@@ -280,7 +280,8 @@ fn run_batch(args: &Cli) -> i32 {
         pb.set_style(
             ProgressStyle::with_template(
                 "{bar:40.cyan/blue} {pos}/{len} images  {elapsed_precise}"
-            ).unwrap(),
+            )
+            .expect("static indicatif template compiles"),
         );
         pb
     });
@@ -291,7 +292,7 @@ fn run_batch(args: &Cli) -> i32 {
             let pb = m.add(ProgressBar::new_spinner());
             pb.set_style(
                 ProgressStyle::with_template("{spinner:.cyan} {msg}")
-                    .unwrap()
+                    .expect("static indicatif template compiles")
                     .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]),
             );
             pb.set_message(format!("{} (waiting...)", input.display()));

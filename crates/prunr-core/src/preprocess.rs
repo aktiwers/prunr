@@ -27,6 +27,7 @@ fn to_nchw(resized: &image::RgbImage, size: u32, divisor: f32) -> Array4<f32> {
 
     let mut out = Array4::<f32>::zeros((1, 3, s, s));
     let plane_size = s * s;
+    // invariant: `out` is a freshly allocated `Array4` (standard layout, contiguous).
     let out_slice = out.as_slice_mut().unwrap();
     for i in 0..plane_size {
         let base = i * 3;
