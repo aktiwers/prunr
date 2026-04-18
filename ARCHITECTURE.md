@@ -56,6 +56,23 @@ prunr/
 
 **Dependency direction:** `prunr-models` → `prunr-core` → `prunr-app`. Reverse deps are forbidden; `prunr-models` has no workspace-internal dependencies so its ~380 MB embed blob only recompiles when models change.
 
+## GUI Coordinators
+
+`PrunrApp` (in `crates/prunr-app/src/gui/app.rs`) is a **coordinator, not an owner**. It holds UI visibility flags, view state with no natural home (zoom, toasts, transient status), and handles to four domain coordinators that own business logic and mutable state.
+
+| Coordinator        | File                         | Owns                                                                                                                                     |
+|--------------------|------------------------------|------------------------------------------------------------------------------------------------------------------------------------------|
+| `BatchManager`     | `gui/batch_manager.rs`       | `Vec<BatchItem>`, selection index, next-id counter, `BackgroundIO` (thumb / decode / tex-prep / save-done / file-load channels), memory-governance passes |
+| `Processor`        | `gui/processor.rs`           | Worker IPC tx/rx, `AdmissionController`, live-preview dispatch state, cancel flag                                                        |
+| `HistoryManager`   | `gui/history_manager.rs`     | Unit struct; exposes methods on `&mut BatchItem` for result-history push/undo/redo and preset snapshots                                   |
+| `DragExportState`  | `gui/drag_export_state.rs`   | `Arc<AtomicBool>` active flag, `Mutex<HashSet<u64>>` dragged-ids, `Option<Vec<u64>>` pending queue                                        |
+
+**Dependency shape:** `PrunrApp` owns all four by `&mut self`; the coordinators don't know about each other. Cross-coordinator work happens on `PrunrApp` as the orchestrator — e.g., `on_batch_item_done` writes the result via `BatchManager::find_by_id_mut`, records history via `HistoryManager::record(&mut item, ...)`, and asks the `Processor` whether more work can be admitted.
+
+**Adding state:** before adding a new field to `PrunrApp`, see `CLAUDE.md#state-ownership` — new business state belongs on a coordinator; `PrunrApp` only adds UI visibility flags and transient view state.
+
+**Not yet coordinators:** save dialogs (`save_current_to_file`, `save_item_to_file`, `save_selected_to_folder`), clipboard (`handle_copy`), and the open-file dialog still live directly on `PrunrApp`. These are Phase 11 candidates for extraction to a `SystemBridge` / `OsGateway` (see `.planning/phases/11-architectural-residue/11-CONTEXT.md`).
+
 ## Process Architecture
 
 Prunr uses a **two-process model** for batch inference, inspired by Chrome's renderer isolation:
