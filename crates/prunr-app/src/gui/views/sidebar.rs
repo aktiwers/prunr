@@ -221,6 +221,13 @@ fn render_item_row(
         app.zoom_state.reset();
         let egui_ctx = ui.ctx().clone();
         app.sync_selected_batch_textures(&egui_ctx);
+        // Force a repaint now AND shortly after — when the selected item's
+        // result_texture was previously evicted, `sync_selected_batch_textures`
+        // kicks off an async tex_prep whose completion-time repaint can race
+        // with egui's idle state. Without these, the canvas waits for the
+        // next mouse event before showing the new image.
+        egui_ctx.request_repaint();
+        egui_ctx.request_repaint_after(std::time::Duration::from_millis(66));
     }
 
     paint_insertion_line(ui, &item_response, item_rect);

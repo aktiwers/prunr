@@ -135,10 +135,15 @@ pub fn chip_f32(
     popup_for(ui, pop_id, &resp, |ui| {
         ui.label(RichText::new(label).strong().color(theme::TEXT_PRIMARY));
         ui.add_space(theme::SPACE_XS);
+        // Honour the caller-supplied formatter for the slider's embedded
+        // numeric display — the chip's button face already uses `format`,
+        // and letting the slider fall back to a fixed 2-decimal default
+        // makes tiny ranges (e.g. 1e-6..=1e-2) look stuck at 0.00.
+        let format_fn = &format;
         let slider = ui.add(
             egui::Slider::new(value, range)
                 .show_value(true)
-                .fixed_decimals(2)
+                .custom_formatter(|v, _| format_fn(v as f32))
                 .logarithmic(logarithmic),
         );
         if slider.changed() { out.changed = true; }
