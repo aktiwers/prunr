@@ -6,10 +6,19 @@
 //! item and, if so, spawns a background thread to run the Tier 2 postprocess
 //! (mask) or edge finalize (edge) on the cached tensor.
 //!
-//! Cancel + restart semantics: when a new tweak arrives for an item whose
-//! preview is still in flight, the old cancel token is flipped; the in-flight
-//! worker drops its result on the next polling point (stage boundaries in the
-//! postprocess pipeline). The new tweak starts a fresh dispatch.
+//! Staleness handling: if multiple dispatches are in flight for the same item
+//! (possible during a continuous drag — a new dispatch fires every DEBOUNCE
+//! while earlier ones are still running), `drain_results` drops any result
+//! whose generation doesn't match the most-recently-dispatched generation. The
+//! cancel token is still held per-dispatch but is only triggered on
+//! `cancel_all` (batch clear / shutdown) — letting in-flight dispatches
+//! complete during a drag is what produces live updates mid-drag.
+//!
+//! **Do not reintroduce per-tweak cancellation.** It was removed on purpose:
+//! `postprocess` doesn't check the cancel token at stage boundaries, so the
+//! token only gates the final `tx.send`. Cancelling mid-drag therefore dropped
+//! every dispatch's result before it could be drained, which is exactly the
+//! "no live preview during drag" bug this module was rewritten to fix.
 //!
 //! No subprocess involved — Tier 2 is pure CPU work, so running it in-process
 //! saves ~20-50ms of IPC overhead per tick and works even outside a batch.
@@ -90,16 +99,29 @@ impl Default for LivePreview {
 }
 
 impl LivePreview {
-    /// Register a tweak. Debounce resets each call; when the user stops
-    /// tweaking for DEBOUNCE ms, `tick` dispatches. A new tweak for the same
-    /// item cancels any in-flight dispatch.
+    /// Register a tweak. During a continuous drag (many tweaks per frame), the
+    /// debounce timer is only reset once per DEBOUNCE window — so dispatches
+    /// actually fire mid-drag rather than being postponed indefinitely. In-
+    /// flight dispatches are left alone; `drain_results` drops stale ones via
+    /// the generation filter, and the next tick starts a fresh dispatch once
+    /// the window elapses again.
     pub fn mark_tweak(&mut self, item_id: u64, kind: PreviewKind) {
-        // Cancel any in-flight work for this item — the new tweak will produce
-        // a fresh dispatch that supersedes it.
-        if let Some(f) = self.in_flight.get(&item_id) {
-            f.cancel.store(true, Ordering::Release);
+        let now = Instant::now();
+        match self.pending.get_mut(&item_id) {
+            Some(p) => {
+                // Cap dispatch cadence during a drag: only re-arm the timer if
+                // the previous arm has already expired (and thus dispatched).
+                // Continuous mid-drag tweaks then produce ~one dispatch per
+                // DEBOUNCE window instead of holding the timer open forever.
+                if now.saturating_duration_since(p.last_tweak_at) >= DEBOUNCE {
+                    p.last_tweak_at = now;
+                }
+                p.kind = kind;
+            }
+            None => {
+                self.pending.insert(item_id, Pending { last_tweak_at: now, kind });
+            }
         }
-        self.pending.insert(item_id, Pending { last_tweak_at: Instant::now(), kind });
     }
 
     /// Flush: expire the pending tweak timer so the next `tick` dispatches
@@ -331,7 +353,10 @@ mod tests {
     }
 
     #[test]
-    fn mark_tweak_twice_cancels_in_flight() {
+    fn mark_tweak_does_not_cancel_in_flight() {
+        // Mid-drag behaviour: a running dispatch must be allowed to complete
+        // so the user sees a preview update; `drain_results`' generation
+        // filter drops results that were superseded.
         let mut lp = LivePreview::default();
         let cancel = Arc::new(AtomicBool::new(false));
         lp.in_flight.insert(
@@ -339,7 +364,31 @@ mod tests {
             InFlight { cancel: cancel.clone(), generation: 1 },
         );
         lp.mark_tweak(7, PreviewKind::Edge);
-        assert!(cancel.load(Ordering::Acquire), "old in-flight should be cancelled");
+        assert!(
+            !cancel.load(Ordering::Acquire),
+            "in-flight dispatch must NOT be cancelled by a subsequent tweak",
+        );
+    }
+
+    #[test]
+    fn mark_tweak_does_not_reset_timer_mid_drag() {
+        // Continuous-drag scenario: multiple tweaks within DEBOUNCE of each
+        // other must not keep re-arming the timer, or the dispatch would
+        // never fire until the user stopped moving.
+        let mut lp = LivePreview::default();
+        lp.mark_tweak(1, PreviewKind::Mask);
+        let first_arm = lp.pending.get(&1).expect("armed").last_tweak_at;
+
+        // Simulate a second tweak "soon after" (short of DEBOUNCE). The timer
+        // should NOT move — otherwise the dispatch would be pushed out.
+        std::thread::sleep(Duration::from_millis(5));
+        lp.mark_tweak(1, PreviewKind::Mask);
+        let second_arm = lp.pending.get(&1).expect("still armed").last_tweak_at;
+
+        assert_eq!(
+            first_arm, second_arm,
+            "mid-drag tweaks must leave the original arm time in place",
+        );
     }
 
     #[test]
