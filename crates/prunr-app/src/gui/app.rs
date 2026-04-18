@@ -143,9 +143,9 @@ impl PrunrApp {
 
         // Subprocess worker: inference runs in a child process for OOM isolation.
         // No prewarm needed — the subprocess creates its own engine pool.
-        let (worker_tx, worker_rx) = spawn_worker(worker_ctx.clone());
+        let (worker_tx, worker_rx) = spawn_worker(worker_ctx);
 
-        Self::init_state(settings, clipboard, worker_tx, worker_rx, worker_ctx)
+        Self::init_state(settings, clipboard, worker_tx, worker_rx)
     }
 
     /// Test constructor that skips eframe setup (for unit tests)
@@ -153,7 +153,7 @@ impl PrunrApp {
     pub fn new_for_test() -> Self {
         let (worker_tx, _worker_msg_rx) = mpsc::channel::<WorkerMessage>();
         let (_result_tx, worker_rx) = mpsc::channel::<WorkerResult>();
-        Self::init_state(Settings::default(), None, worker_tx, worker_rx, egui::Context::default())
+        Self::init_state(Settings::default(), None, worker_tx, worker_rx)
     }
 
     /// Shared field-init for both `new` and `new_for_test`. Clipboard and
@@ -163,14 +163,13 @@ impl PrunrApp {
         clipboard: Option<arboard::Clipboard>,
         worker_tx: mpsc::Sender<WorkerMessage>,
         worker_rx: mpsc::Receiver<WorkerResult>,
-        egui_ctx: egui::Context,
     ) -> Self {
         Self {
             state: AppState::Empty,
             loaded_filename: None,
             last_open_dir: None,
             image_dimensions: None,
-            processor: super::processor::Processor::new(worker_tx, worker_rx, egui_ctx.clone()),
+            processor: super::processor::Processor::new(worker_tx, worker_rx),
             status: Default::default(),
             source_texture: None,
             result_texture: None,
@@ -182,7 +181,7 @@ impl PrunrApp {
             zoom_state: Default::default(),
             show_original: false,
             prev_title: String::new(),
-            batch: super::batch_manager::BatchManager::new(egui_ctx),
+            batch: super::batch_manager::BatchManager::new(),
             sidebar_hidden: false,
             adjustments_hidden: false,
             show_settings: false,

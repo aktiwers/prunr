@@ -29,18 +29,15 @@ pub(crate) struct BatchManager {
     pub(crate) selected_index: usize,
     pub(crate) next_id: u64,
     pub(crate) bg_io: BackgroundIO,
-    #[allow(dead_code)] // used by methods that move in 10-05d's later sub-stages / 10-05e
-    pub(crate) egui_ctx: egui::Context,
 }
 
 impl BatchManager {
-    pub(crate) fn new(egui_ctx: egui::Context) -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             items: Vec::new(),
             selected_index: 0,
             next_id: 0,
             bg_io: BackgroundIO::new(),
-            egui_ctx,
         }
     }
 
@@ -150,7 +147,7 @@ mod tests {
     use std::time::Duration;
 
     fn fixture() -> BatchManager {
-        BatchManager::new(egui::Context::default())
+        BatchManager::new()
     }
 
     /// Construct a BatchItem with optional cached tensor of `bytes_uncompressed`
