@@ -1,7 +1,8 @@
 use egui::{Color32, RichText};
 use egui_material_icons::icons::*;
 
-use crate::gui::app::{PrunrApp, BatchStatus};
+use crate::gui::app::PrunrApp;
+use crate::gui::item::BatchStatus;
 use crate::gui::state::AppState;
 use crate::gui::theme;
 
