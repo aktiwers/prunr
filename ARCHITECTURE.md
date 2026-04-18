@@ -28,12 +28,17 @@ prunr/
 │           │   ├── ipc.rs          # Length-prefixed bincode framing
 │           │   └── manager.rs      # SubprocessManager (spawn, send, poll, kill)
 │           └── gui/                # GUI application
-│               ├── app.rs          # PrunrApp state, batch orchestration
-│               ├── worker.rs       # Bridge thread (subprocess ↔ WorkerResult)
-│               ├── memory.rs       # AdmissionController, RSS monitoring
-│               ├── history_disk.rs # Three-tiered history (RAM/compressed/disk)
-│               ├── settings.rs     # User settings + model-aware job limits
-│               └── views/          # UI components (canvas, sidebar, toolbar, etc.)
+│               ├── app.rs             # PrunrApp state, batch orchestration
+│               ├── item_settings.rs   # Per-image processing settings
+│               ├── live_preview.rs    # In-process Tier 2 dispatcher
+│               ├── presets_fs.rs      # On-disk preset store (one JSON per preset)
+│               ├── worker.rs          # Bridge thread (subprocess ↔ app)
+│               ├── memory.rs          # Admission control, RSS monitoring
+│               ├── history_disk.rs    # Cold-tier history on disk
+│               ├── settings.rs        # App-wide settings
+│               └── views/             # UI components (canvas, sidebar, toolbar,
+│                                      #   adjustments_toolbar, chip, lines_popover,
+│                                      #   preset_dropdown, settings, …)
 ├── xtask/                  # Developer tooling (cargo xtask fetch-models)
 ├── packaging/              # AUR PKGBUILD, Homebrew formula template
 ├── scripts/                # Model conversion (FP16/INT8 variants, DexiNed export)
@@ -79,13 +84,13 @@ Communication uses **length-prefixed bincode frames** over stdin/stdout:
 
 | Direction | Message | Purpose |
 |-----------|---------|---------|
-| Parent → Child | `Init` | Load model, create engine pool (`ProcessingConfig` bundles 7 fields) |
+| Parent → Child | `Init` | Load model, create engine pool |
 | Parent → Child | `ProcessImage` | Full pipeline: decode + infer + postprocess |
-| Parent → Child | `RePostProcess` | Tier 2: skip inference, re-run postprocess from cached tensor |
+| Parent → Child | `RePostProcess` | Tier 2 mask rerun from cached tensor (batched reruns only — live preview runs in-process) |
 | Parent → Child | `Cancel` / `Shutdown` | Graceful stop |
 | Child → Parent | `Ready` | Engines loaded |
 | Child → Parent | `Progress` | Per-stage progress (Decode, Infer, etc.) |
-| Child → Parent | `ImageDone` | Result + optional `tensor_cache_path/height/width` for Tier 2 reuse |
+| Child → Parent | `ImageDone` | Result + optional seg-tensor path and DexiNed-tensor path for Tier 2 caches |
 | Child → Parent | `ImageError` | Non-fatal error |
 | Child → Parent | `RssUpdate` | Current process RSS (for admission throttling) |
 
@@ -101,9 +106,10 @@ Communication uses **length-prefixed bincode frames** over stdin/stdout:
 | Subprocess reader thread | per subprocess | subprocess lifetime | Reads child stdout events non-blockingly |
 | File loader | per drag-drop / open | until paths sent | Sends `(PathBuf, name)` via mpsc (lazy — no file read) |
 | Image decoder | on demand | ~20-80ms | `image::load_from_memory` → `Arc<RgbaImage>` |
-| Thumbnail builder | per imported image | ~5-50ms | Lanczos resize to 160px |
-| Texture prep | per canvas texture | ~5-50ms | Builds `egui::ColorImage` off the UI thread |
-| Save writer | per save | until PNG written | Background PNG encode + `fs::write` |
+| Thumbnail builder | per imported image | ~5-50ms | Lanczos resize to 160px (bg fill happens at render time, not here) |
+| Texture prep | per canvas texture | ~5-50ms | Builds `egui::ColorImage` off the UI thread (transparent — bg is render-time) |
+| Live-preview rayon job | per tweak dispatch | ~20-500ms | Tier 2 postprocess or edge rerun; shared rayon pool |
+| Save writer | per save | until PNG written | Background PNG encode + `fs::write` (with bg composited) |
 | Temp file cleanup | app exit + periodic | brief | Removes `prunr-drag/*`, `prunr-history/*`, `prunr-ipc/*` |
 
 ### Engine pooling (in subprocess)
@@ -133,36 +139,39 @@ The parent shows a toast: "Memory pressure — retrying X images with Y parallel
 
 ## Tiered Recipe Pipeline
 
-Re-processing images uses a three-tier system to avoid redundant work:
+Re-processing avoids redundant work by classifying each change into a tier:
 
 | Tier | Name | When | Cost |
 |------|------|------|------|
-| 1 | FullPipeline | Model, line mode, or chain changed | Full inference (expensive) |
-| 2 | MaskRerun | Only mask params changed (gamma, threshold, edge shift, refine) | Postprocess from cached tensor (fast) |
-| 3 | CompositeOnly | Only bg_color changed | Applied at display/export time (free) |
-| — | Skip | Recipe identical | No work needed |
+| 1 | FullPipeline | Model, line mode, or chain changed | Full inference |
+| 2a | MaskRerun | Mask params changed (gamma, threshold, edge_shift, refine_edges) | Postprocess cached seg tensor (~50-200ms) |
+| 2b | EdgeRerun | Line params changed (line_strength, solid_line_color) | Re-threshold cached DexiNed tensor (~20-100ms) |
+| 3 | CompositeOnly | bg_color changed | Render-time GPU rect — zero CPU |
+| — | Skip | Recipe identical | No work |
 
-### Recipe types (`prunr-core/src/recipe.rs`)
+Each `BatchItem` stores the recipe that produced its current result, snapshotted at dispatch time — so settings changes mid-batch can't corrupt the stored tag.
 
-```rust
-ProcessingRecipe { inference: InferenceRecipe, mask: MaskRecipe, composite: CompositeRecipe, was_chain: bool }
-```
+**Two independent tensor caches.** A `BatchItem` holds a segmentation tensor (for MaskRerun) and a DexiNed tensor (for EdgeRerun) as separate zstd-compressed fields — a model swap invalidates only the seg cache, a line_mode change only the edge cache. Combined budget: 512 MB, oldest-evicted first.
 
-`resolve_tier(old, new)` compares two recipes and returns the minimum `RequiredTier`. Each `BatchItem` carries `applied_recipe: Option<ProcessingRecipe>` (what the stored result was built from) and receives `dispatch_recipe` (snapshot at send time, not delivery time — prevents stale applied_recipe when settings change mid-batch).
+**Two Tier 2 paths.** Batched reruns (e.g. preset applied across many selected items) go through the subprocess. Live-preview reruns run in-process on the rayon pool to avoid IPC overhead — see [Live Preview](#live-preview).
 
-### Tensor cache (`CompressedTensor`)
+## Per-Image Settings
 
-After Tier 1, the subprocess writes the raw `f32` tensor to a temp file and returns `tensor_cache_path/height/width` in `ImageDone`. The parent:
-1. Reads the bytes and compresses them with zstd level 1 → `CompressedTensor`
-2. Stores it on the `BatchItem`
+Each `BatchItem` owns its own processing settings, so tweaking the adjustments toolbar edits one image instead of broadcasting to the whole batch. App-wide config (parallel_jobs, chain_mode, live_preview, etc.) stays separate on `AppSettings`. Per-image settings are `Copy`-sized and forward-compatible: older preset files load cleanly when new fields are added.
 
-For a Tier 2 rerun, the parent decompresses the tensor, writes it to a temp file, and sends `RePostProcess` instead of `ProcessImage`. The subprocess calls `postprocess_from_flat()` — no inference at all.
+## Live Preview
 
-**Tensor budget:** `enforce_tensor_budget()` caps total compressed tensor RAM at 512 MB, evicting oldest items first (preserving the selected item's tensor). `evict_all_tensors()` is called on batch start to reclaim stale tensors.
+Mask and edge tweaks auto-rerun Tier 2 during slider drag. A tweak is debounced ~150 ms; a new tweak on the same item cancels the in-flight one and dispatches a fresh rerun on the rayon pool.
 
-### LinesOnly short-circuit
+**Why in-process.** The subprocess path costs ~20-50 ms per rerun in IPC alone; live preview needs 60 fps feel during drag. Batched Tier 2 reruns still go through the subprocess — that overhead amortizes across many images.
 
-`InferenceRecipe.uses_segmentation` is false for `LinesOnly` mode. This means mask settings are pinned to defaults in the recipe comparison — gamma/threshold changes don't trigger Tier 1 for LinesOnly jobs.
+**Preview trades quality for speed.** Guided-filter edge refinement is skipped in preview and restored on commit. Cancel drops the result but doesn't interrupt the CPU pipeline mid-run — a dispatch started just before cancel completes and its output is discarded.
+
+## Presets
+
+A preset is a named snapshot of per-image settings, stored as one JSON file per preset in the platform config dir. Human-readable and self-contained: a user sends a `.json` to a friend, the friend drops it in the folder, the preset appears in their dropdown next launch.
+
+A reserved `"Prunr"` entry is the factory default (cannot be overwritten or deleted). Each `BatchItem` carries preset undo/redo stacks (Ctrl+Shift+Z/Y) separate from image-result history, so rolling back an accidental preset swap doesn't touch pixels.
 
 ## Memory Management
 
@@ -180,7 +189,7 @@ History seeding is lazy: for images that haven't been decoded yet (lazy file loa
 
 History entries compress to Tier 2 (warm) by default. Demotion to Tier 3 (cold) happens automatically when the subprocess reports high RSS via `under_memory_pressure()`.
 
-`HistoryEntry` wraps a `HistorySlot` and an `Option<ProcessingRecipe>`. When undoing, the entry's recipe is restored to `BatchItem.applied_recipe` so that redo/reprocess can correctly tier-route from the restored state.
+Each history entry carries its recipe alongside the pixels, so undoing restores the recipe too — a subsequent reprocess can tier-route correctly from the restored state.
 
 ### Lazy file loading (ImageSource)
 
@@ -315,13 +324,15 @@ Tier 2 path uses postprocess_from_flat(tensor: &[f32], h, w, original, mask, mod
 
 ## Edge Detection (DexiNed)
 
-A separate `EdgeEngine` handles line extraction with its own ONNX session. Three line modes (defined in `prunr-core::types::LineMode` — re-exported by `gui::settings` to avoid a layering violation where the IPC protocol previously depended on a GUI module):
+A separate `EdgeEngine` handles line extraction with its own ONNX session. Three line modes:
 
-| Mode | Behaviour |
-|------|-----------|
-| `Off` | Normal background removal only |
-| `LinesOnly` | Skip segmentation, run DexiNed on original image |
-| `AfterBgRemoval` | Segmentation first, then DexiNed on the result |
+| Mode | User-facing label | Behaviour |
+|------|-------------------|-----------|
+| `Off` | "Off" | Normal background removal only |
+| `EdgesOnly` | "Edges only (full image)" | Skip segmentation, run DexiNed on original image |
+| `SubjectOutline` | "Outline only (no fill)" | Segmentation first, then DexiNed on the result — edges only within subject, body transparent |
+
+Inference is split from the threshold-and-composite step so the raw DexiNed tensor can be cached and re-thresholded without re-running the model. This powers EdgeRerun Tier 2.
 
 ## GPU Execution Providers
 
@@ -383,14 +394,28 @@ Decompressed ONNX bytes are cached in `OnceLock<Vec<u8>>` per model. Callers rec
 - Zoom resets only on explicit user navigation (sidebar click, arrow keys), not on background texture arrivals
 - Checkerboard behind transparent results: single 256×256 pre-generated texture, tiled
 - Off-screen sidebar items skip painting entirely (viewport virtualization)
-- **bg_color** is applied at texture-build time (`apply_bg_for_export`), not stored in the RGBA. When bg_color settings change, `close_settings()` increments `result_switch_id`, clears all `result_texture`, and calls `sync_selected_batch_textures(ctx)` immediately so the canvas rebuilds the texture with the new color without requiring sidebar navigation.
-- `result_switch_id` is used as the animation seed for the crossfade — incrementing it restarts the fade on bg_color change.
+- `result_switch_id` is used as the animation seed for the result crossfade
+
+### Render-time bg_color fill
+
+**bg_color is never composited into pixels for display.** The result texture stays transparent where pixels were removed; at draw time the canvas paints a filled rect (or the checkerboard) *behind* the texture, and the GPU alpha-blends the result on top. Changing the bg color costs one rect repaint — no CPU compositing, no texture rebuild, no subprocess dispatch.
+
+The sidebar thumbnail uses the same pattern. Save/export is the exception: PNG has no separate canvas-bg concept, so the bg is composited into pixels on demand at save time. Display and export paths diverge intentionally.
 
 ## Drag-Out (OS-level drag to external apps)
 
 Implemented via the `drag` crate (Windows/macOS only). Files written to `temp_dir/prunr-drag/*.png`.
 
 Self-drop rejection prevents re-ingesting thumbnails. Stuck-drag recovery clears state when the drag callback doesn't fire.
+
+## Persistent Config
+
+User data lives in the platform config dir (`dirs::config_dir()`):
+
+| File / Folder | Linux | macOS | Windows |
+|---|---|---|---|
+| `settings.json` | `~/.config/prunr/` | `~/Library/Application Support/prunr/` | `%APPDATA%\prunr\` |
+| `presets/*.json` | `~/.config/prunr/presets/` | `~/Library/Application Support/prunr/presets/` | `%APPDATA%\prunr\presets\` |
 
 ## Temp File Lifecycle
 
