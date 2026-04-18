@@ -1094,6 +1094,16 @@ impl PrunrApp {
         if !results.is_empty() {
             self.apply_completed_previews(ctx, results);
         }
+
+        // Poll while any dispatch is still running on the rayon pool. Without
+        // this, a release-frame flush dispatches, pending empties, `tick`
+        // returns None — and nothing wakes egui until the worker's result
+        // sits in the channel for the next user-input event. Same 50ms
+        // cadence and self-extinguishing shape as the tex_pending poll in
+        // `logic()`.
+        if self.processor.live_preview.has_in_flight() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(50));
+        }
     }
 
     /// Snapshot the dispatch inputs for one preview job: original RGBA +
