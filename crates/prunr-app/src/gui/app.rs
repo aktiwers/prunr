@@ -753,83 +753,52 @@ impl PrunrApp {
     }
 
     pub fn handle_save_selected(&mut self) {
-        let selected: Vec<_> = self.batch.items.iter()
+        let has_selection = self.batch.items.iter()
+            .any(|i| i.selected && i.status == BatchStatus::Done && i.result_rgba.is_some());
+        if has_selection {
+            self.save_selected_to_folder();
+        } else {
+            self.save_current_to_file();
+        }
+    }
+
+    /// No checkboxes selected — save just the currently-viewed result via a
+    /// save-as dialog. Suggests a `<stem>-nobg.png` name based on the source.
+    fn save_current_to_file(&mut self) {
+        let Some(rgba) = self.result_rgba.as_ref() else { return };
+        let default_name = self.loaded_filename.as_deref()
+            .and_then(|name| Path::new(name).file_stem()?.to_str())
+            .map(|stem| format!("{stem}-nobg.png"))
+            .unwrap_or_else(|| "result-nobg.png".to_string());
+        let Some(path) = self.save_dialog()
+            .add_filter("PNG Image", &["png"])
+            .set_file_name(&default_name)
+            .set_title("Save PNG")
+            .save_file() else { return };
+        let bg = self.batch.selected_item().and_then(|i| i.settings.bg_rgb());
+        let rgba = Self::apply_bg_for_export(rgba, bg);
+        let tx = self.batch.bg_io.save_done_tx.clone();
+        self.toasts.info("Saving...");
+        spawn_save_single(path, rgba, tx);
+    }
+
+    /// One or more sidebar checkboxes selected — pick a folder, write each
+    /// as `<source-stem>-nobg.png`. Encode + write run on a background thread.
+    fn save_selected_to_folder(&mut self) {
+        let items: Vec<(String, Arc<image::RgbaImage>)> = self.batch.items.iter()
             .filter(|i| i.selected && i.status == BatchStatus::Done && i.result_rgba.is_some())
+            .filter_map(|item| {
+                let rgba = item.result_rgba.as_ref()?;
+                Some((item.filename.clone(), Self::apply_bg_for_export(rgba, item.settings.bg_rgb())))
+            })
             .collect();
-
-        if selected.is_empty() {
-            // No checkboxes selected — save current image via save-as dialog
-            if let Some(ref rgba) = self.result_rgba {
-                let default_name = self
-                    .loaded_filename
-                    .as_deref()
-                    .and_then(|name| Path::new(name).file_stem()?.to_str())
-                    .map(|stem| format!("{stem}-nobg.png"))
-                    .unwrap_or_else(|| "result-nobg.png".to_string());
-                if let Some(path) = self.save_dialog()
-                    .add_filter("PNG Image", &["png"])
-                    .set_file_name(&default_name)
-                    .set_title("Save PNG")
-                    .save_file()
-                {
-                    let bg = self.batch.selected_item().and_then(|i| i.settings.bg_rgb());
-                    let rgba = Self::apply_bg_for_export(rgba, bg);
-                    let tx = self.batch.bg_io.save_done_tx.clone();
-                    self.toasts.info("Saving...");
-                    std::thread::spawn(move || {
-                        let msg = match prunr_core::encode_rgba_png(&rgba) {
-                            Ok(png_bytes) => match std::fs::write(&path, &png_bytes) {
-                                Ok(()) => "Saved".into(),
-                                Err(e) => format!("Save failed: {e}"),
-                            },
-                            Err(e) => format!("Save failed: {e}"),
-                        };
-                        let _ = tx.send(msg);
-                    });
-                }
-            }
-            return;
-        }
-
-        // Multiple selected — folder picker, encode+write on background thread
-        if let Some(folder) = self.save_dialog()
-            .set_title("Save Selected — Choose Folder")
-            .pick_folder()
-        {
-            let items: Vec<(String, Arc<image::RgbaImage>)> = selected.iter()
-                .filter_map(|item| {
-                    let rgba = item.result_rgba.as_ref()?;
-                    Some((item.filename.clone(), Self::apply_bg_for_export(rgba, item.settings.bg_rgb())))
-                })
-                .collect();
-            let count = items.len();
-            self.toasts.info(format!("Saving {count} image(s)..."));
-            let tx = self.batch.bg_io.save_done_tx.clone();
-            std::thread::spawn(move || {
-                let mut saved = 0usize;
-                let mut failed = 0usize;
-                for (filename, rgba) in items {
-                    let stem = Path::new(&filename)
-                        .file_stem()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("image");
-                    let out_path = folder.join(format!("{stem}-nobg.png"));
-                    match prunr_core::encode_rgba_png(&rgba) {
-                        Ok(png_bytes) => match std::fs::write(&out_path, &png_bytes) {
-                            Ok(()) => saved += 1,
-                            Err(_) => failed += 1,
-                        },
-                        Err(_) => failed += 1,
-                    }
-                }
-                let msg = if failed > 0 {
-                    format!("Saved {saved}, failed {failed}")
-                } else {
-                    format!("Saved {saved} image(s)")
-                };
-                let _ = tx.send(msg);
-            });
-        }
+        let Some(folder) = self.save_dialog()
+            .set_title("Save Selected \u{2014} Choose Folder")
+            .pick_folder() else { return };
+        let count = items.len();
+        self.toasts.info(format!("Saving {count} image(s)..."));
+        let tx = self.batch.bg_io.save_done_tx.clone();
+        spawn_save_batch(folder, items, tx);
     }
 
     pub fn remove_selected(&mut self) {
@@ -1084,88 +1053,93 @@ impl PrunrApp {
     /// Called once per frame at the start of `ui()` so the current frame renders
     /// with the newest available results.
     fn pump_live_preview(&mut self, ctx: &egui::Context) {
-        // Dispatch any pending previews whose debounce has expired. The closure
-        // snapshots the inputs (original image + cached tensors + settings) for
-        // each dispatch — run on the UI thread, but only for items that are
-        // actually dispatched this frame.
+        // Dispatch phase: tick() invokes the closure for each item whose
+        // debounce expired this frame. The closure captures `&self.batch.items`
+        // for read-only access; it doesn't need `&mut self`.
         let batch_items = &self.batch.items;
         let wait = self.processor.live_preview.tick(|id, kind| {
-            use crate::gui::live_preview::{DispatchInputs, PreviewKind, decompress_edge, decompress_seg};
-            let item = batch_items.iter().find(|b| b.id == id)?;
-            let rgba = item.source_rgba.as_ref()?;
-            // One clone here — live preview workers need an owned DynamicImage.
-            // Clones the ~48 MB RGBA once per dispatch (not per frame); the user
-            // has paused typing for 300ms so a single clone is acceptable.
-            let original = std::sync::Arc::new(image::DynamicImage::ImageRgba8((**rgba).clone()));
-            let seg_tensor = item.cached_tensor.as_ref().and_then(decompress_seg);
-            let edge_tensor = item.cached_edge_tensor.as_ref().and_then(decompress_edge);
-            // Abort dispatch if the cache needed for this kind isn't available.
-            // (User must Process first to populate the tensor cache.)
-            match kind {
-                PreviewKind::Mask if seg_tensor.is_none() => return None,
-                PreviewKind::Edge if edge_tensor.is_none() => return None,
-                _ => {}
-            }
-            let cached_edge_mask = item.cached_edge_mask.as_ref().and_then(|(m, bits)| {
-                (*bits == item.settings.line_strength.to_bits()).then(|| m.clone())
-            });
-            Some(DispatchInputs {
-                kind,
-                original,
-                settings: item.settings,
-                seg_tensor,
-                edge_tensor,
-                cached_edge_mask,
-            })
+            Self::build_preview_inputs(batch_items, id, kind)
         });
-
-        // If a future dispatch is waiting, schedule a repaint when the debounce
-        // elapses so tick() can fire.
+        // If a future dispatch is waiting, schedule a repaint when the
+        // debounce elapses so tick() can fire on its own.
         if let Some(w) = wait {
             ctx.request_repaint_after(w);
         }
 
-        // Apply any completed previews. Critical: do NOT null `result_texture`
-        // here — the old texture must stay visible until the newly-built one
-        // lands via drain_background_channels. Clearing it causes the canvas
-        // to flash black for a frame (no texture to draw → BG_PRIMARY shows).
-        //
-        // Instead we spawn a tex prep for the new RGBA directly and let
-        // drain_background_channels swap it in atomically when ready.
         let results = self.processor.live_preview.drain_results();
         if !results.is_empty() {
-            let tex_prep_tx = self.batch.bg_io.tex_prep_tx.clone();
-            for r in results {
-                let Some(item) = self.batch.items.iter_mut().find(|b| b.id == r.item_id) else {
-                    continue;
-                };
-                let new_rgba = std::sync::Arc::new(r.rgba);
-                item.result_rgba = Some(new_rgba.clone());
-                // Mark pending so sync_selected_batch_textures doesn't also
-                // spawn its own prep on this same frame.
-                item.result_tex_pending = true;
-                // Invalidate the sidebar thumbnail — it was built from the
-                // previous result_rgba and may carry different line colors.
-                // Sidebar's render loop will see `None + !pending` and queue
-                // a fresh thumb generation on the next frame.
-                item.thumb_texture = None;
-                item.thumb_pending = false;
-                if let Some((mask, bits)) = r.new_edge_mask {
-                    item.cached_edge_mask = Some((mask, bits));
-                }
-                let item_id = item.id;
-                let switch = self.result_switch_id;
-                Self::spawn_tex_prep(
-                    new_rgba,
-                    item_id,
-                    format!("result_{item_id}_{switch}"),
-                    true,
-                    tex_prep_tx.clone(),
-                    ctx.clone(),
-                );
-            }
-            ctx.request_repaint();
+            self.apply_completed_previews(ctx, results);
         }
+    }
+
+    /// Snapshot the dispatch inputs for one preview job: original RGBA +
+    /// decompressed tensors + settings + reusable edge mask if its
+    /// line_strength still matches. Returns `None` to abort the dispatch
+    /// when a required tensor cache isn't available (user must Process first).
+    fn build_preview_inputs(
+        items: &[BatchItem],
+        id: u64,
+        kind: super::live_preview::PreviewKind,
+    ) -> Option<super::live_preview::DispatchInputs> {
+        use super::live_preview::{DispatchInputs, PreviewKind, decompress_edge, decompress_seg};
+        let item = items.iter().find(|b| b.id == id)?;
+        let rgba = item.source_rgba.as_ref()?;
+        // One clone here — live preview workers need an owned DynamicImage.
+        // Clones the ~48 MB RGBA once per dispatch (not per frame); the user
+        // has paused typing for 300ms so a single clone is acceptable.
+        let original = Arc::new(image::DynamicImage::ImageRgba8((**rgba).clone()));
+        let seg_tensor = item.cached_tensor.as_ref().and_then(decompress_seg);
+        let edge_tensor = item.cached_edge_tensor.as_ref().and_then(decompress_edge);
+        match kind {
+            PreviewKind::Mask if seg_tensor.is_none() => return None,
+            PreviewKind::Edge if edge_tensor.is_none() => return None,
+            _ => {}
+        }
+        let cached_edge_mask = item.cached_edge_mask.as_ref().and_then(|(m, bits)| {
+            (*bits == item.settings.line_strength.to_bits()).then(|| m.clone())
+        });
+        Some(DispatchInputs {
+            kind, original, settings: item.settings,
+            seg_tensor, edge_tensor, cached_edge_mask,
+        })
+    }
+
+    /// Critical: do NOT null `result_texture` here — the old texture must stay
+    /// visible until the newly-built one lands via `drain_background_channels`.
+    /// Clearing it causes the canvas to flash black for a frame (no texture
+    /// to draw → BG_PRIMARY shows). Instead we spawn a tex prep for the new
+    /// RGBA directly and let drain swap it in atomically when ready.
+    fn apply_completed_previews(
+        &mut self,
+        ctx: &egui::Context,
+        results: Vec<super::live_preview::PreviewResult>,
+    ) {
+        let tex_prep_tx = self.batch.bg_io.tex_prep_tx.clone();
+        for r in results {
+            let Some(item) = self.batch.items.iter_mut().find(|b| b.id == r.item_id) else {
+                continue;
+            };
+            let new_rgba = Arc::new(r.rgba);
+            item.result_rgba = Some(new_rgba.clone());
+            // Mark pending so sync_selected_batch_textures doesn't also spawn
+            // its own prep on this same frame.
+            item.result_tex_pending = true;
+            // Invalidate the sidebar thumbnail — it was built from the previous
+            // result_rgba and may carry different line colors. Sidebar's render
+            // loop will see `None + !pending` and queue a fresh generation.
+            item.thumb_texture = None;
+            item.thumb_pending = false;
+            if let Some((mask, bits)) = r.new_edge_mask {
+                item.cached_edge_mask = Some((mask, bits));
+            }
+            let item_id = item.id;
+            let switch = self.result_switch_id;
+            Self::spawn_tex_prep(
+                new_rgba, item_id, format!("result_{item_id}_{switch}"),
+                true, tex_prep_tx.clone(), ctx.clone(),
+            );
+        }
+        ctx.request_repaint();
     }
 
     pub(crate) fn sync_selected_batch_textures(&mut self, ctx: &egui::Context) {
@@ -1995,6 +1969,55 @@ impl PrunrApp {
         // Toasts — rendered last as foreground overlay.
         self.toasts.show(ctx);
     }
+}
+
+/// Encode + write one PNG on a background thread, then send the result toast
+/// text on `tx`. Stays at module scope so neither save method needs `&mut self`
+/// once they've kicked off the work.
+fn spawn_save_single(path: PathBuf, rgba: Arc<image::RgbaImage>, tx: mpsc::Sender<String>) {
+    std::thread::spawn(move || {
+        let msg = match prunr_core::encode_rgba_png(&rgba) {
+            Ok(png_bytes) => match std::fs::write(&path, &png_bytes) {
+                Ok(()) => "Saved".into(),
+                Err(e) => format!("Save failed: {e}"),
+            },
+            Err(e) => format!("Save failed: {e}"),
+        };
+        let _ = tx.send(msg);
+    });
+}
+
+/// Encode + write N PNGs into `folder` (named `<source-stem>-nobg.png`) on a
+/// background thread; report aggregate counts when done.
+fn spawn_save_batch(
+    folder: PathBuf,
+    items: Vec<(String, Arc<image::RgbaImage>)>,
+    tx: mpsc::Sender<String>,
+) {
+    std::thread::spawn(move || {
+        let mut saved = 0usize;
+        let mut failed = 0usize;
+        for (filename, rgba) in items {
+            let stem = Path::new(&filename)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("image");
+            let out_path = folder.join(format!("{stem}-nobg.png"));
+            match prunr_core::encode_rgba_png(&rgba) {
+                Ok(png_bytes) => match std::fs::write(&out_path, &png_bytes) {
+                    Ok(()) => saved += 1,
+                    Err(_) => failed += 1,
+                },
+                Err(_) => failed += 1,
+            }
+        }
+        let msg = if failed > 0 {
+            format!("Saved {saved}, failed {failed}")
+        } else {
+            format!("Saved {saved} image(s)")
+        };
+        let _ = tx.send(msg);
+    });
 }
 
 #[derive(Copy, Clone)]
