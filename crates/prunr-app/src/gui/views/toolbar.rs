@@ -2,6 +2,7 @@ use egui::{Color32, RichText};
 use egui_material_icons::icons::*;
 
 use crate::gui::app::PrunrApp;
+use crate::gui::batch_manager::ProcessButtonLabel;
 use crate::gui::item::BatchStatus;
 use crate::gui::state::AppState;
 use crate::gui::theme;
@@ -15,7 +16,6 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
         ui.spacing_mut().item_spacing.x = theme::SPACE_SM;
         ui.spacing_mut().button_padding = egui::vec2(8.0, 4.0);
 
-        let is_processing = app.state == AppState::Processing;
         let can_save_copy = app.state == AppState::Done;
         let has_selected = app.batch.items.iter().any(|i| i.selected);
         let m = modifier_key();
@@ -86,82 +86,84 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                 }
             }
 
-            if app.batch.items.len() >= 2 {
-                let is_batch_processing = app.batch.items.iter().any(|i| i.status == BatchStatus::Processing);
+            let is_batch_processing = app.batch.items.iter().any(|i| i.status == BatchStatus::Processing);
 
-                if is_batch_processing {
-                    // Show Cancel All while processing
-                    let cancel_btn = egui::Button::new(
-                        RichText::new(format!("{}  Cancel All", ICON_CANCEL.codepoint)).color(Color32::WHITE),
-                    )
-                    .fill(theme::DESTRUCTIVE)
-                    .corner_radius(theme::BUTTON_ROUNDING)
-                    .min_size(egui::vec2(0.0, BTN_HEIGHT));
-                    if ui.add(cancel_btn).on_hover_text("Cancel all processing (Escape)").clicked() {
-                        app.handle_cancel();
-                        for item in &mut app.batch.items {
-                            if item.status == BatchStatus::Processing {
-                                item.status = BatchStatus::Pending;
-                            }
-                        }
-                        app.state = AppState::Loaded;
-                        app.status.text = "Cancelled".to_string();
-                    }
-                } else {
-                    let has_pending = app.batch.items.iter().any(|i| i.status == BatchStatus::Pending);
-                    let fill = if has_pending { theme::ACCENT } else { theme::ACCENT_DISABLED };
-                    let text_color = if has_pending {
-                        Color32::WHITE
-                    } else {
-                        Color32::from_rgba_unmultiplied(255, 255, 255, 102)
-                    };
-                    let batch_icon = egui::Image::new(egui::include_image!("../../../../../img/batch-icon.png"))
-                        .fit_to_exact_size(egui::vec2(22.0, 22.0));
-                    let btn = egui::Button::image_and_text(batch_icon, RichText::new("Process All").color(text_color))
-                        .fill(fill)
-                        .corner_radius(theme::BUTTON_ROUNDING)
-                        .min_size(egui::vec2(0.0, BTN_HEIGHT));
-                    if ui.add_enabled(has_pending, btn).on_hover_text("Process all pending images").clicked() {
-                        app.handle_process_all();
-                    }
-                }
-            }
-
-            let has_processable = if has_selected {
-                app.batch.items.iter().any(|i| i.selected && !matches!(i.status, BatchStatus::Processing))
-            } else {
-                app.batch.selected_item()
-                    .map_or(app.state == AppState::Loaded, |item| !matches!(item.status, BatchStatus::Processing))
-            };
-            let remove_label = if has_selected { "Process Selected" } else { "Process" };
-            let remove_text = if !has_processable || is_processing {
-                RichText::new(remove_label).color(Color32::from_rgba_unmultiplied(255, 255, 255, 102))
-            } else {
-                RichText::new(remove_label).color(Color32::WHITE)
-            };
-            let remove_fill = if has_processable && !is_processing {
-                theme::ACCENT
-            } else {
-                theme::ACCENT_DISABLED
-            };
-            let logo_icon = egui::Image::new(egui::include_image!("../../../../../img/logo-nobg.png"))
-                .fit_to_exact_size(egui::vec2(22.0, 22.0));
-            let remove_btn = egui::Button::image_and_text(logo_icon, remove_text)
-                .fill(remove_fill)
+            // Cancel All replaces the Process button while any item is
+            // mid-processing — single-action slot, no ambiguity.
+            if is_batch_processing {
+                let cancel_btn = egui::Button::new(
+                    RichText::new(format!("{}  Cancel All", ICON_CANCEL.codepoint)).color(Color32::WHITE),
+                )
+                .fill(theme::DESTRUCTIVE)
                 .corner_radius(theme::BUTTON_ROUNDING)
                 .min_size(egui::vec2(0.0, BTN_HEIGHT));
-            let process_tooltip = if app.settings.chain_mode
-                && app.batch.selected_item().map_or(false, |i| i.result_rgba.is_some())
-            {
-                format!("Process current result ({m}+R)")
+                if ui.add(cancel_btn).on_hover_text("Cancel all processing (Escape)").clicked() {
+                    app.handle_cancel();
+                    for item in &mut app.batch.items {
+                        if item.status == BatchStatus::Processing {
+                            item.status = BatchStatus::Pending;
+                        }
+                    }
+                    app.state = AppState::Loaded;
+                    app.status.text = "Cancelled".to_string();
+                }
             } else {
-                format!("Process original ({m}+R)")
-            };
-            if ui.add_enabled(has_processable && !is_processing, remove_btn)
-                .on_hover_text(process_tooltip)
-                .clicked()
-            {
-                app.handle_remove_bg();
+                let label = app.batch.process_button_label();
+                let target_ids = app.batch.items_to_process();
+                // Enabled when at least one target exists and isn't already
+                // Processing. Empty `target_ids` (empty batch) naturally → false.
+                let has_processable = target_ids.iter().any(|id| {
+                    app.batch.find_by_id(*id)
+                        .map_or(false, |it| !matches!(it.status, BatchStatus::Processing))
+                });
+
+                let (label_text, is_all) = match label {
+                    ProcessButtonLabel::ProcessViewed => ("Process".to_string(), false),
+                    ProcessButtonLabel::ProcessSelected(1) => ("Process 1 selected".to_string(), false),
+                    ProcessButtonLabel::ProcessSelected(n) => (format!("Process {n} selected"), false),
+                    ProcessButtonLabel::ProcessAll(n) => (format!("Process All [{n}]"), true),
+                };
+
+                let text_color = if has_processable {
+                    Color32::WHITE
+                } else {
+                    Color32::from_rgba_unmultiplied(255, 255, 255, 102)
+                };
+                let fill = if has_processable { theme::ACCENT } else { theme::ACCENT_DISABLED };
+
+                let icon = if is_all {
+                    egui::Image::new(egui::include_image!("../../../../../img/batch-icon.png"))
+                } else {
+                    egui::Image::new(egui::include_image!("../../../../../img/logo-nobg.png"))
+                }
+                .fit_to_exact_size(egui::vec2(22.0, 22.0));
+
+                let btn = egui::Button::image_and_text(icon, RichText::new(label_text).color(text_color))
+                    .fill(fill)
+                    .corner_radius(theme::BUTTON_ROUNDING)
+                    .min_size(egui::vec2(0.0, BTN_HEIGHT));
+
+                let tooltip = match label {
+                    ProcessButtonLabel::ProcessAll(n) => format!("Process all {n} images ({m}+R)"),
+                    ProcessButtonLabel::ProcessSelected(n) if n > 1 => {
+                        format!("Process {n} selected images ({m}+R)")
+                    }
+                    _ => {
+                        // ProcessViewed or ProcessSelected(1): single-image dispatch.
+                        // Chain-mode tooltip varies on whether the target already has a result.
+                        let target_has_result = target_ids.first().and_then(|id| app.batch.find_by_id(*id))
+                            .map_or(false, |i| i.result_rgba.is_some());
+                        if app.settings.chain_mode && target_has_result {
+                            format!("Process current result ({m}+R)")
+                        } else {
+                            format!("Process original ({m}+R)")
+                        }
+                    }
+                };
+
+                if ui.add_enabled(has_processable, btn).on_hover_text(tooltip).clicked() {
+                    app.handle_remove_bg();
+                }
             }
         });
     });
