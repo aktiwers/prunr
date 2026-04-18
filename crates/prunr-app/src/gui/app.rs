@@ -782,6 +782,30 @@ impl PrunrApp {
         spawn_save_single(path, rgba, tx);
     }
 
+    /// Save one specific batch item (by index) via a save-as dialog. Used by
+    /// the sidebar's per-row save button, which needs a non-selection-based
+    /// entry point into the same encode-on-background pipeline as
+    /// `save_current_to_file`.
+    pub(crate) fn save_item_to_file(&mut self, idx: usize) {
+        let Some(item) = self.batch.items.get(idx) else { return };
+        let Some(rgba) = item.result_rgba.as_ref() else { return };
+        let stem = Path::new(&item.filename)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("image");
+        let default_name = format!("{stem}-nobg.png");
+        let bg = item.settings.bg_rgb();
+        let Some(path) = self.save_dialog()
+            .add_filter("PNG Image", &["png"])
+            .set_file_name(&default_name)
+            .set_title("Save PNG")
+            .save_file() else { return };
+        let rgba = Self::apply_bg_for_export(rgba, bg);
+        let tx = self.batch.bg_io.save_done_tx.clone();
+        self.toasts.info("Saving...");
+        spawn_save_single(path, rgba, tx);
+    }
+
     /// One or more sidebar checkboxes selected — pick a folder, write each
     /// as `<source-stem>-nobg.png`. Encode + write run on a background thread.
     fn save_selected_to_folder(&mut self) {
