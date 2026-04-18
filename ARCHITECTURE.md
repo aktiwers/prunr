@@ -322,10 +322,23 @@ Tier 2 path uses postprocess_from_flat(tensor: &[f32], h, w, original, mask, mod
 - All Lanczos3 resizes use `fast_image_resize` (SSE4.1, AVX2, NEON) — 10-20x faster than `image` crate
 - Division by range → precomputed `inv_range` multiplier
 - Uniform-output detection before the per-pixel loop
-- Alpha composition parallelized via `rayon::par_chunks_mut`
+- Alpha composition row-parallel via `par_chunks_mut` above 256k pixels (memory-bandwidth-bound, so the ceiling is ~1.1-1.2× on 4K regardless of core count)
 - Guided filter uses `f32` prefix sums (halved bandwidth vs f64)
 - Edge shift's ring buffers allocated once, swapped via `std::mem::swap`
 - Single RGBA allocation in `postprocess()` — shared across guided filter and mask application (saves ~48 MB per Tier 2 run on a 4000×3000 image)
+
+#### Phase 10-07 numbers (4000×3000 image, 8-core x86_64, `cargo test --release`)
+
+| Stage                         | Serial (median) | Row-parallel (median) | Speedup |
+|-------------------------------|----------------:|----------------------:|--------:|
+| `apply_mask_inplace` (alone)  |          5.68ms |                4.83ms |   1.18× |
+| `postprocess_from_flat` (E2E) |         94.45ms |               89.80ms |   1.05× |
+
+End-to-end delta is small because the mask-to-alpha loop is ~5-6% of
+total postprocess time (the dominant costs are the 48 MB RGBA allocation
+and the SIMD Lanczos resize). The `apply_mask_inplace_4k_bench` and
+`postprocess_4k_bench` `#[ignore]` tests in `postprocess.rs` reproduce
+these numbers.
 
 ## Edge Detection (DexiNed)
 
