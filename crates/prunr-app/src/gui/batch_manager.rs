@@ -3,7 +3,6 @@
 //! Owns:
 //! - The `Vec<BatchItem>` and selection state
 //! - The next-id counter for new items
-//! - The cloned `egui::Context` for `request_repaint` from background paths
 //! - The `BackgroundIO` channels (thumbnail, decode, save-done, tex-prep,
 //!   file-load) — historically mixed but the majority are batch-driven.
 //!   Future `Saver` / `ImageOpener` extractions may carve out the file-load
@@ -23,6 +22,10 @@ use super::item::{BatchItem, ImageSource};
 /// Combined budget for compressed segmentation (`cached_tensor`) + edge
 /// (`cached_edge_tensor`) caches across all batch items, in bytes.
 const TENSOR_BUDGET: usize = 512 * 1024 * 1024;
+
+/// Maximum thumbnail edge length in pixels. Used by `request_thumbnail`
+/// for both source-decode and result-rgba paths.
+const THUMB_MAX_PX: u32 = 160;
 
 pub(crate) struct BatchManager {
     pub(crate) items: Vec<BatchItem>,
@@ -81,7 +84,7 @@ impl BatchManager {
         if let Some(rgba) = result_rgba {
             let rgba = rgba.clone();
             std::thread::spawn(move || {
-                let (w, h) = fit_dimensions(rgba.width(), rgba.height(), 160, 160);
+                let (w, h) = fit_dimensions(rgba.width(), rgba.height(), THUMB_MAX_PX, THUMB_MAX_PX);
                 let thumb = image::imageops::resize(rgba.as_ref(), w, h, image::imageops::FilterType::Triangle);
                 let _ = tx.send((item_id, thumb.width(), thumb.height(), thumb.into_raw()));
             });
@@ -91,7 +94,7 @@ impl BatchManager {
                 if let Ok(bytes) = source.load_bytes() {
                     if let Ok(img) = image::load_from_memory(&bytes) {
                         let rgba = img.to_rgba8();
-                        let (w, h) = fit_dimensions(rgba.width(), rgba.height(), 160, 160);
+                        let (w, h) = fit_dimensions(rgba.width(), rgba.height(), THUMB_MAX_PX, THUMB_MAX_PX);
                         let thumb = image::imageops::resize(&rgba, w, h, image::imageops::FilterType::Triangle);
                         let _ = tx.send((item_id, thumb.width(), thumb.height(), thumb.into_raw()));
                     }

@@ -62,9 +62,9 @@ Changes to `resolve_tier` or `ItemSettings` fields require a test covering the n
 `PrunrApp` is a **coordinator**, not an owner. It holds UI visibility flags and handles to domain coordinators — not business logic.
 
 Business state lives in its own module with a clear owner:
-- Batch orchestration → `BatchDispatcher`
-- Result history + preset undo → `HistoryManager`
+- Batch state (items, selection, memory governance, BackgroundIO) → `BatchManager`
+- Processing pipeline (worker channels, admission, live preview, dispatch state) → `Processor`
+- Result history + preset undo → `HistoryManager` (unit struct; methods on `&mut BatchItem`)
 - Drag-export lifecycle → `DragExportState`
-- Live preview → `LivePreviewDispatcher`
 
 Before adding a new `PrunrApp` field, ask: which coordinator owns this domain? Default-to-no.

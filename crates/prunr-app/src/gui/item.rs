@@ -343,6 +343,34 @@ mod tests {
     }
 
     #[test]
+    fn image_source_path_load_and_size_round_trip() {
+        // Path is the 99%-case variant (file open / drag-drop). Write a temp
+        // file, read it back via load_bytes, and verify estimated_size matches
+        // file metadata.
+        let payload: &[u8] = b"PRUNR-TEST-FIXTURE-CONTENTS-1234567890";
+        let mut path = std::env::temp_dir();
+        path.push(format!("prunr-item-test-{}.bin", std::process::id()));
+        std::fs::write(&path, payload).expect("write tempfile");
+
+        let source = ImageSource::Path(path.clone());
+        let loaded = source.load_bytes().expect("Path variant must read the file");
+        assert_eq!(&**loaded, payload);
+        assert_eq!(source.estimated_size(), payload.len());
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn image_source_path_estimated_size_zero_on_missing_file() {
+        // Defensive: estimated_size returns 0 (not panic) when the file is
+        // missing — used by AdmissionController; must never fail.
+        let mut path = std::env::temp_dir();
+        path.push(format!("prunr-item-missing-{}-DOES-NOT-EXIST.bin", std::process::id()));
+        let source = ImageSource::Path(path);
+        assert_eq!(source.estimated_size(), 0);
+    }
+
+    #[test]
     fn history_entry_into_parts_round_trips_construction() {
         let rgba = Arc::new(image::RgbaImage::from_pixel(2, 2, image::Rgba([10, 20, 30, 255])));
         let entry = HistoryEntry::new(rgba.clone(), None);
