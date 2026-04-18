@@ -30,6 +30,7 @@ prunr/
 │           └── gui/                # GUI application
 │               ├── app.rs             # PrunrApp coordinator (UI flags + handles to coordinators)
 │               ├── item.rs            # Pure data types: BatchItem, HistorySlot, ImageSource, …
+│               ├── history_manager.rs # Per-item undo/redo + preset history (no own state)
 │               ├── item_settings.rs   # Per-image processing settings
 │               ├── live_preview.rs    # In-process Tier 2 dispatcher
 │               ├── presets_fs.rs      # On-disk preset store (one JSON per preset)

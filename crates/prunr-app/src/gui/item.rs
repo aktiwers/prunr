@@ -206,6 +206,21 @@ impl BatchItem {
         self.cached_edge_mask = None;
     }
 
+    /// Reset all caches tied to the current result. Call after the result
+    /// has changed (history walk, fresh process, etc.) so the next paint
+    /// rebuilds textures and the next reprocess re-runs from scratch.
+    /// Note: `source_texture` is NOT cleared — callers decide whether the
+    /// source view also needs rebuilding (undo: yes; redo: no).
+    pub(crate) fn reset_result_caches(&mut self) {
+        self.cached_tensor = None;
+        self.result_texture = None;
+        self.thumb_texture = None;
+        self.thumb_pending = false;
+        self.source_tex_pending = false;
+        self.result_tex_pending = false;
+        self.decode_pending = false;
+    }
+
     pub(crate) fn new(
         id: u64,
         filename: String,
