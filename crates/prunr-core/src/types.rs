@@ -82,6 +82,8 @@ pub struct MaskSettings {
     pub guided_radius: u32,
     /// Guided filter regularization. Smaller = preserve edges from guide, larger = smoother. Only used when refine_edges.
     pub guided_epsilon: f32,
+    /// Gaussian blur sigma (pixels). Color-agnostic edge softening.
+    pub feather: f32,
 }
 
 impl Default for MaskSettings {
@@ -93,6 +95,7 @@ impl Default for MaskSettings {
             refine_edges: false,
             guided_radius: 8,
             guided_epsilon: 1e-4,
+            feather: 0.0,
         }
     }
 }
