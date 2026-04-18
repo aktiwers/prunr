@@ -56,14 +56,12 @@ pub struct PrunrApp {
     // Window title change detection
     prev_title: String,
 
-    // Batch items
-    pub(crate) batch_items: Vec<BatchItem>,
-    pub(crate) selected_batch_index: usize,
+    // Batch state — items, selection, lifecycle, memory, textures, bg_io
+    pub(crate) batch: super::batch_manager::BatchManager,
     /// User explicitly hid the sidebar via Tab / configured hotkey.
     pub(crate) sidebar_hidden: bool,
     /// User explicitly hid the adjustments toolbar (rows 2 + 3) via Shift+H.
     pub(crate) adjustments_hidden: bool,
-    pub(crate) next_batch_id: u64,
 
     // Settings
     pub(crate) show_settings: bool,
@@ -80,7 +78,6 @@ pub struct PrunrApp {
     pending_batch_sync: bool,
     /// Set by toolbar Open button — processed in logic() where ctx is available
     pub(crate) pending_open_dialog: bool,
-    pub(crate) bg_io: super::background_io::BackgroundIO,
     /// Toast notification system
     pub(crate) toasts: egui_notify::Toasts,
 
@@ -97,13 +94,6 @@ pub struct PrunrApp {
     /// Last time periodic history cleanup ran.
     last_history_cleanup: std::time::Instant,
     pub(crate) live_preview: super::live_preview::LivePreview,
-}
-
-/// Compute dimensions that fit within max_w x max_h preserving aspect ratio.
-fn fit_dimensions(src_w: u32, src_h: u32, max_w: u32, max_h: u32) -> (u32, u32) {
-    let scale = (max_w as f32 / src_w as f32).min(max_h as f32 / src_h as f32).min(1.0);
-    ((src_w as f32 * scale).round().max(1.0) as u32,
-     (src_h as f32 * scale).round().max(1.0) as u32)
 }
 
 impl PrunrApp {
@@ -155,7 +145,6 @@ impl PrunrApp {
         cc.egui_ctx.set_global_style(style);
 
         let clipboard = arboard::Clipboard::new().ok();
-        let bg_io = super::background_io::BackgroundIO::new();
 
         // Housekeeping: clean up stale temp files from prior sessions.
         super::drag_export::cleanup_stale();
@@ -166,9 +155,9 @@ impl PrunrApp {
 
         // Subprocess worker: inference runs in a child process for OOM isolation.
         // No prewarm needed — the subprocess creates its own engine pool.
-        let (worker_tx, worker_rx) = spawn_worker(worker_ctx);
+        let (worker_tx, worker_rx) = spawn_worker(worker_ctx.clone());
 
-        Self::init_state(settings, clipboard, worker_tx, worker_rx, bg_io)
+        Self::init_state(settings, clipboard, worker_tx, worker_rx, worker_ctx)
     }
 
     /// Test constructor that skips eframe setup (for unit tests)
@@ -176,8 +165,7 @@ impl PrunrApp {
     pub fn new_for_test() -> Self {
         let (worker_tx, _worker_msg_rx) = mpsc::channel::<WorkerMessage>();
         let (_result_tx, worker_rx) = mpsc::channel::<WorkerResult>();
-        let bg_io = super::background_io::BackgroundIO::new();
-        Self::init_state(Settings::default(), None, worker_tx, worker_rx, bg_io)
+        Self::init_state(Settings::default(), None, worker_tx, worker_rx, egui::Context::default())
     }
 
     /// Shared field-init for both `new` and `new_for_test`. Clipboard and
@@ -187,7 +175,7 @@ impl PrunrApp {
         clipboard: Option<arboard::Clipboard>,
         worker_tx: mpsc::Sender<WorkerMessage>,
         worker_rx: mpsc::Receiver<WorkerResult>,
-        bg_io: super::background_io::BackgroundIO,
+        egui_ctx: egui::Context,
     ) -> Self {
         Self {
             state: AppState::Empty,
@@ -208,11 +196,9 @@ impl PrunrApp {
             zoom_state: Default::default(),
             show_original: false,
             prev_title: String::new(),
-            batch_items: Vec::new(),
-            selected_batch_index: 0,
+            batch: super::batch_manager::BatchManager::new(egui_ctx),
             sidebar_hidden: false,
             adjustments_hidden: false,
-            next_batch_id: 0,
             show_settings: false,
             settings_opened_at: 0.0,
             settings,
@@ -220,7 +206,6 @@ impl PrunrApp {
             result_switch_id: 0,
             pending_batch_sync: false,
             pending_open_dialog: false,
-            bg_io,
             toasts: egui_notify::Toasts::default()
                     .with_anchor(egui_notify::Anchor::BottomLeft)
                     .with_margin(egui::vec2(theme::SPACE_SM, theme::STATUS_BAR_HEIGHT + theme::SPACE_SM)),
@@ -251,26 +236,26 @@ impl PrunrApp {
         self.loaded_filename = None;
         self.image_dimensions = None;
         self.state = AppState::Empty;
-        self.selected_batch_index = 0;
+        self.batch.selected_index = 0;
     }
 
     /// Sync after batch modification — clamp index and refresh canvas.
     fn sync_after_batch_change(&mut self) {
-        if self.batch_items.is_empty() {
+        if self.batch.items.is_empty() {
             self.clear_to_empty();
         } else {
-            self.selected_batch_index = self.selected_batch_index.min(self.batch_items.len() - 1);
+            self.batch.selected_index = self.batch.selected_index.min(self.batch.items.len() - 1);
             self.pending_batch_sync = true;
         }
     }
 
     /// Core image loading: creates a BatchItem from a source + dimensions.
     fn load_image_source(&mut self, source: ImageSource, dims: (u32, u32), name: String) {
-        let id = self.next_batch_id;
-        self.next_batch_id += 1;
+        let id = self.batch.next_id;
+        self.batch.next_id += 1;
         let do_decode = matches!(&source, ImageSource::Bytes(_)); // decode eagerly for in-memory
         let new_settings = self.settings.item_defaults_for_new_item();
-        self.batch_items.push(BatchItem::new(
+        self.batch.items.push(BatchItem::new(
             id,
             name.clone(),
             source,
@@ -278,11 +263,11 @@ impl PrunrApp {
             new_settings,
             self.settings.default_preset.clone(),
         ));
-        self.selected_batch_index = self.batch_items.len() - 1;
+        self.batch.selected_index = self.batch.items.len() - 1;
         if do_decode {
-            // invariant: push occurred above, so batch_items is non-empty.
-            if let Ok(bytes) = self.batch_items.last().unwrap().source.load_bytes() {
-                self.request_decode_bytes(id, bytes);
+            // invariant: push occurred above, so batch.items is non-empty.
+            if let Ok(bytes) = self.batch.items.last().unwrap().source.load_bytes() {
+                self.batch.request_decode_bytes(id, bytes);
             }
         }
 
@@ -356,12 +341,12 @@ impl PrunrApp {
             if let Some(first) = paths.first() {
                 self.last_open_dir = first.parent().map(|p| p.to_path_buf());
             }
-            if paths.len() == 1 && self.batch_items.is_empty() {
+            if paths.len() == 1 && self.batch.items.is_empty() {
                 // invariant: paths.len() == 1 checked in the guard above.
                 self.handle_open_path(paths.into_iter().next().unwrap());
             } else {
                 // Send file paths for lazy loading — bytes read on demand.
-                let tx = self.bg_io.file_load_tx.clone();
+                let tx = self.batch.bg_io.file_load_tx.clone();
                 std::thread::spawn(move || {
                     for path in paths {
                         let name = path.file_name()
@@ -378,14 +363,14 @@ impl PrunrApp {
     }
 
     pub fn handle_remove_bg(&mut self) {
-        let has_selected = self.batch_items.iter().any(|i| i.selected);
+        let has_selected = self.batch.items.iter().any(|i| i.selected);
         if has_selected {
             self.process_items(|item| item.selected);
         } else {
             // Process current image via batch path (item_id tracking ensures
             // result goes to correct image even if user switches during processing)
-            let idx = self.selected_batch_index.min(self.batch_items.len().saturating_sub(1));
-            if let Some(target_id) = self.batch_items.get(idx).map(|b| b.id) {
+            let idx = self.batch.selected_index.min(self.batch.items.len().saturating_sub(1));
+            if let Some(target_id) = self.batch.items.get(idx).map(|b| b.id) {
                 self.process_items(|item| item.id == target_id);
             }
         }
@@ -397,10 +382,6 @@ impl PrunrApp {
         self.toasts.info("Settings saved");
     }
 
-    pub(crate) fn selected_item(&self) -> Option<&BatchItem> {
-        self.batch_items.get(self.selected_batch_index)
-    }
-
     pub(crate) fn any_modal_open(&self) -> bool {
         self.show_settings || self.show_shortcuts || self.show_cli_help
     }
@@ -408,10 +389,10 @@ impl PrunrApp {
     /// Undo background removal on selected items (or current item if none selected).
     /// Reverts Done/Error items back to Pending, clearing their results.
     fn handle_undo(&mut self, ctx: &egui::Context) {
-        let has_selected = self.batch_items.iter().any(|i| i.selected);
-        let current_id = self.selected_item().map(|b| b.id);
+        let has_selected = self.batch.items.iter().any(|i| i.selected);
+        let current_id = self.batch.selected_item().map(|b| b.id);
         let mut undone = 0u32;
-        for item in &mut self.batch_items {
+        for item in &mut self.batch.items {
             let target = if has_selected { item.selected } else { Some(item.id) == current_id };
             if target && HistoryManager::undo_result(item) {
                 item.reset_result_caches();
@@ -434,10 +415,10 @@ impl PrunrApp {
     }
 
     fn handle_redo(&mut self, ctx: &egui::Context) {
-        let has_selected = self.batch_items.iter().any(|i| i.selected);
-        let current_id = self.selected_item().map(|b| b.id);
+        let has_selected = self.batch.items.iter().any(|i| i.selected);
+        let current_id = self.batch.selected_item().map(|b| b.id);
         let mut redone = 0u32;
-        for item in &mut self.batch_items {
+        for item in &mut self.batch.items {
             let target = if has_selected { item.selected } else { Some(item.id) == current_id };
             if target && HistoryManager::redo_result(item) {
                 item.reset_result_caches();
@@ -460,9 +441,9 @@ impl PrunrApp {
     /// Ctrl+Z. Kicks an auto-reprocess on a Done item so the restored settings
     /// produce a fresh result (same path a live preset apply would take).
     fn swap_preset_history(&mut self, dir: HistoryDir) {
-        if self.batch_items.is_empty() { return; }
-        let idx = self.selected_batch_index.min(self.batch_items.len() - 1);
-        let item = &mut self.batch_items[idx];
+        if self.batch.items.is_empty() { return; }
+        let idx = self.batch.selected_index.min(self.batch.items.len() - 1);
+        let item = &mut self.batch.items[idx];
         if !HistoryManager::swap_preset(item, dir) { return; }
         let target_id = item.id;
         let should_reprocess = item.status == BatchStatus::Done;
@@ -482,7 +463,7 @@ impl PrunrApp {
         let model: prunr_core::ModelKind = self.settings.model.into();
 
         // Identify candidate items (not already processing)
-        let candidate_ids: HashSet<u64> = self.batch_items.iter()
+        let candidate_ids: HashSet<u64> = self.batch.items.iter()
             .filter(|i| filter(i) && !matches!(i.status, BatchStatus::Processing))
             .map(|i| i.id)
             .collect();
@@ -493,7 +474,7 @@ impl PrunrApp {
         let mut tier2_ids: HashSet<u64> = HashSet::new(); // Mask rerun
         let mut skip_count = 0usize;
 
-        for item in &mut self.batch_items {
+        for item in &mut self.batch.items {
             if !candidate_ids.contains(&item.id) { continue; }
 
             // Never-processed items always need full pipeline
@@ -566,7 +547,7 @@ impl PrunrApp {
         let process_ids: HashSet<u64> = tier1_ids.iter().chain(tier2_ids.iter()).copied().collect();
         let chain_mode = self.settings.chain_mode;
         let max_depth = self.settings.history_depth;
-        for item in &mut self.batch_items {
+        for item in &mut self.batch.items {
             if !process_ids.contains(&item.id) { continue; }
             HistoryManager::seed_with_source(item);
             let was_done = item.status == BatchStatus::Done;
@@ -587,7 +568,7 @@ impl PrunrApp {
 
         // ── Build Tier 2 work items ──────────────────────────────────
         let mut tier2_work: Vec<super::worker::Tier2WorkItem> = Vec::new();
-        for item in &mut self.batch_items {
+        for item in &mut self.batch.items {
             if !tier2_ids.contains(&item.id) { continue; }
             if let Some(ref ct) = item.cached_tensor {
                 let tensor_data = ct.decompress();
@@ -627,7 +608,7 @@ impl PrunrApp {
 
         if use_admission {
             let mut ctrl = AdmissionController::new(model, jobs);
-            let costs: Vec<ImageMemCost> = self.batch_items.iter()
+            let costs: Vec<ImageMemCost> = self.batch.items.iter()
                 .filter(|i| tier1_ids.contains(&i.id))
                 .map(|i| AdmissionController::estimate_cost(i.id, i.dimensions, i.source.estimated_size()))
                 .collect();
@@ -635,7 +616,7 @@ impl PrunrApp {
 
             let mut initial_items = Vec::new();
             while let Some(admitted_id) = ctrl.try_admit_next() {
-                if let Some(item) = self.batch_items.iter_mut().find(|b| b.id == admitted_id) {
+                if let Some(item) = self.batch.items.iter_mut().find(|b| b.id == admitted_id) {
                     if let Ok(bytes) = item.source.load_bytes() {
                         let chain_input = if chain { item.result_rgba.clone() } else { None };
                         initial_items.push((item.id, bytes, chain_input));
@@ -644,7 +625,7 @@ impl PrunrApp {
                 }
             }
 
-            for item in &mut self.batch_items {
+            for item in &mut self.batch.items {
                 if tier1_ids.contains(&item.id) && item.status != BatchStatus::Processing {
                     item.status = BatchStatus::Pending;
                 }
@@ -662,7 +643,7 @@ impl PrunrApp {
         }
 
         // Small batch / single item: no admission needed
-        let items: Vec<_> = self.batch_items.iter_mut()
+        let items: Vec<_> = self.batch.items.iter_mut()
             .filter(|i| tier1_ids.contains(&i.id))
             .filter_map(|i| {
                 let bytes = i.source.load_bytes().ok()?;
@@ -695,8 +676,8 @@ impl PrunrApp {
         // Use the currently-viewed item's settings for the batch — matches
         // "what you see is what you process." Fallback to factory defaults
         // only if the batch is somehow empty at dispatch time (defensive).
-        let idx = self.selected_batch_index.min(self.batch_items.len().saturating_sub(1));
-        let current_settings = self.batch_items.get(idx)
+        let idx = self.batch.selected_index.min(self.batch.items.len().saturating_sub(1));
+        let current_settings = self.batch.items.get(idx)
             .map(|b| b.settings)
             .unwrap_or_default();
 
@@ -706,7 +687,7 @@ impl PrunrApp {
             .map(|wi| wi.0)
             .chain(tier2_items.iter().map(|ti| ti.item_id))
             .collect();
-        for item in &mut self.batch_items {
+        for item in &mut self.batch.items {
             if process_ids.contains(&item.id) {
                 item.settings = current_settings;
             }
@@ -758,7 +739,7 @@ impl PrunrApp {
     }
 
     pub fn handle_save_selected(&mut self) {
-        let selected: Vec<_> = self.batch_items.iter()
+        let selected: Vec<_> = self.batch.items.iter()
             .filter(|i| i.selected && i.status == BatchStatus::Done && i.result_rgba.is_some())
             .collect();
 
@@ -777,9 +758,9 @@ impl PrunrApp {
                     .set_title("Save PNG")
                     .save_file()
                 {
-                    let bg = self.selected_item().and_then(|i| i.settings.bg_rgb());
+                    let bg = self.batch.selected_item().and_then(|i| i.settings.bg_rgb());
                     let rgba = Self::apply_bg_for_export(rgba, bg);
-                    let tx = self.bg_io.save_done_tx.clone();
+                    let tx = self.batch.bg_io.save_done_tx.clone();
                     self.toasts.info("Saving...");
                     std::thread::spawn(move || {
                         let msg = match prunr_core::encode_rgba_png(&rgba) {
@@ -809,7 +790,7 @@ impl PrunrApp {
                 .collect();
             let count = items.len();
             self.toasts.info(format!("Saving {count} image(s)..."));
-            let tx = self.bg_io.save_done_tx.clone();
+            let tx = self.batch.bg_io.save_done_tx.clone();
             std::thread::spawn(move || {
                 let mut saved = 0usize;
                 let mut failed = 0usize;
@@ -838,8 +819,8 @@ impl PrunrApp {
     }
 
     pub fn remove_selected(&mut self) {
-        let count = self.batch_items.iter().filter(|i| i.selected).count();
-        self.batch_items.retain(|item| !item.selected);
+        let count = self.batch.items.iter().filter(|i| i.selected).count();
+        self.batch.items.retain(|item| !item.selected);
         self.sync_after_batch_change();
         if count > 0 {
             self.toasts.info(format!("Removed {count} image(s)"));
@@ -854,7 +835,7 @@ impl PrunrApp {
     pub fn initiate_drag_out(&mut self, ids: Vec<u64>, frame: &eframe::Frame) {
         let mut paths: Vec<PathBuf> = Vec::with_capacity(ids.len());
         for id in &ids {
-            if let Some(item) = self.batch_items.iter().find(|b| b.id == *id) {
+            if let Some(item) = self.batch.items.iter().find(|b| b.id == *id) {
                 match super::drag_export::prepare(item) {
                     Ok(path) => paths.push(path),
                     Err(e) => {
@@ -916,7 +897,8 @@ impl PrunrApp {
         //   (System clipboards can't hold multiple images as bitmaps; drag-out
         //    is the native multi-image export path.)
         let selected_with_result: Vec<Arc<image::RgbaImage>> = self
-            .batch_items
+            .batch
+            .items
             .iter()
             .filter(|b| b.selected)
             .filter_map(|b| b.result_rgba.clone())
@@ -934,7 +916,7 @@ impl PrunrApp {
         };
 
         // Compute bg before borrowing clipboard mutably (avoids aliasing self).
-        let bg = self.selected_item().and_then(|i| i.settings.bg_rgb());
+        let bg = self.batch.selected_item().and_then(|i| i.settings.bg_rgb());
         let Some(clipboard) = self.clipboard.as_mut() else {
             self.set_temporary_status("Could not copy to clipboard. Try saving instead.");
             return;
@@ -1004,11 +986,11 @@ impl PrunrApp {
     }
 
     fn add_to_batch_source(&mut self, source: ImageSource, dims: (u32, u32), filename: String) {
-        let id = self.next_batch_id;
-        self.next_batch_id += 1;
+        let id = self.batch.next_id;
+        self.batch.next_id += 1;
 
         let new_settings = self.settings.item_defaults_for_new_item();
-        self.batch_items.push(BatchItem::new(
+        self.batch.items.push(BatchItem::new(
             id,
             filename,
             source,
@@ -1027,63 +1009,9 @@ impl PrunrApp {
         self.pending_batch_sync = true;
     }
 
-    /// Pre-decode source image on a background thread (from Arc bytes).
-    fn request_decode_bytes(&self, item_id: u64, bytes: Arc<Vec<u8>>) {
-        let tx = self.bg_io.decode_tx.clone();
-        std::thread::spawn(move || {
-            if let Ok(img) = image::load_from_memory(&bytes) {
-                let _ = tx.send((item_id, Arc::new(img.to_rgba8())));
-            }
-        });
-    }
-
-    /// Pre-decode from an ImageSource (reads file if needed).
-    fn request_decode_source(&self, item_id: u64, source: &ImageSource) {
-        if let Ok(bytes) = source.load_bytes() {
-            self.request_decode_bytes(item_id, bytes);
-        }
-    }
-
-    /// Request thumbnail generation on a background thread for a batch item.
-    /// If result_rgba is Some, thumbnails from result; otherwise decodes source bytes.
-    ///
-    /// `bg` applies a background color to the thumbnail (matches display).
-    /// Result images stay transparent in storage; the thumb texture needs
-    /// its own composite so the sidebar matches what's drawn on the canvas.
-    /// Solid line color is already baked into `result_rgba` by the pipeline,
-    /// so we don't need a separate parameter for it.
-    pub(crate) fn request_thumbnail(
-        &self,
-        item_id: u64,
-        source: &ImageSource,
-        result_rgba: Option<&Arc<image::RgbaImage>>,
-    ) {
-        let tx = self.bg_io.thumb_tx.clone();
-        if let Some(rgba) = result_rgba {
-            let rgba = rgba.clone();
-            std::thread::spawn(move || {
-                let (w, h) = fit_dimensions(rgba.width(), rgba.height(), 160, 160);
-                let thumb = image::imageops::resize(rgba.as_ref(), w, h, image::imageops::FilterType::Triangle);
-                let _ = tx.send((item_id, thumb.width(), thumb.height(), thumb.into_raw()));
-            });
-        } else {
-            let source = source.clone();
-            std::thread::spawn(move || {
-                if let Ok(bytes) = source.load_bytes() {
-                    if let Ok(img) = image::load_from_memory(&bytes) {
-                        let rgba = img.to_rgba8();
-                        let (w, h) = fit_dimensions(rgba.width(), rgba.height(), 160, 160);
-                        let thumb = image::imageops::resize(&rgba, w, h, image::imageops::FilterType::Triangle);
-                        let _ = tx.send((item_id, thumb.width(), thumb.height(), thumb.into_raw()));
-                    }
-                }
-            });
-        }
-    }
-
     pub fn remove_batch_item(&mut self, idx: usize) {
-        if idx >= self.batch_items.len() { return; }
-        let item = self.batch_items.remove(idx);
+        if idx >= self.batch.items.len() { return; }
+        let item = self.batch.items.remove(idx);
         // Clean up any on-disk history/redo entries for this item
         for entry in item.history {
             entry.cleanup();
@@ -1105,7 +1033,7 @@ impl PrunrApp {
 
         let chain = self.settings.chain_mode;
         while let Some(next_id) = ctrl.try_admit_next() {
-            if let Some(item) = self.batch_items.iter_mut().find(|b| b.id == next_id) {
+            if let Some(item) = self.batch.items.iter_mut().find(|b| b.id == next_id) {
                 let Ok(bytes) = item.source.load_bytes() else { continue; };
                 let chain_input = if chain { item.result_rgba.clone() } else { None };
                 let tuple = (next_id, bytes, chain_input);
@@ -1128,7 +1056,7 @@ impl PrunrApp {
 
     /// Demote Tier 2 (compressed RAM) history to Tier 3 (disk) under memory pressure.
     fn demote_history_to_disk(&mut self) {
-        for item in &mut self.batch_items {
+        for item in &mut self.batch.items {
             let mut seq = 0usize;
             for entry in item.history.iter_mut().chain(item.redo_stack.iter_mut()) {
                 if matches!(entry.slot, HistorySlot::Compressed(_)) {
@@ -1147,7 +1075,7 @@ impl PrunrApp {
         // snapshots the inputs (original image + cached tensors + settings) for
         // each dispatch — run on the UI thread, but only for items that are
         // actually dispatched this frame.
-        let batch_items = &self.batch_items;
+        let batch_items = &self.batch.items;
         let wait = self.live_preview.tick(|id, kind| {
             use crate::gui::live_preview::{DispatchInputs, PreviewKind, decompress_edge, decompress_seg};
             let item = batch_items.iter().find(|b| b.id == id)?;
@@ -1193,9 +1121,9 @@ impl PrunrApp {
         // drain_background_channels swap it in atomically when ready.
         let results = self.live_preview.drain_results();
         if !results.is_empty() {
-            let tex_prep_tx = self.bg_io.tex_prep_tx.clone();
+            let tex_prep_tx = self.batch.bg_io.tex_prep_tx.clone();
             for r in results {
-                let Some(item) = self.batch_items.iter_mut().find(|b| b.id == r.item_id) else {
+                let Some(item) = self.batch.items.iter_mut().find(|b| b.id == r.item_id) else {
                     continue;
                 };
                 let new_rgba = std::sync::Arc::new(r.rgba);
@@ -1227,55 +1155,13 @@ impl PrunrApp {
         }
     }
 
-    /// 512 MB budget for compressed tensor caches across all items.
-    /// Budget covers BOTH segmentation (`cached_tensor`) and DexiNed
-    /// (`cached_edge_tensor`) caches combined.
-    const TENSOR_BUDGET: usize = 512 * 1024 * 1024;
-
-    /// Total compressed bytes across both caches for a single item.
-    fn item_cache_size(item: &BatchItem) -> usize {
-        let seg = item.cached_tensor.as_ref().map(|ct| ct.compressed_size()).unwrap_or(0);
-        let edge = item.cached_edge_tensor.as_ref().map(|ct| ct.compressed_size()).unwrap_or(0);
-        seg + edge
-    }
-
-    /// Evict tensor caches from oldest-loaded items until under budget.
-    /// Iterates front-to-back (oldest first) to preserve recently-processed items.
-    /// Drops BOTH caches on eviction — partial eviction would leave a partially-stale
-    /// item (segmentation cached but edges gone, or vice versa) which is useless.
-    fn enforce_tensor_budget(&mut self) {
-        let total: usize = self.batch_items.iter().map(Self::item_cache_size).sum();
-        if total <= Self::TENSOR_BUDGET { return; }
-        let selected_id = self.selected_item().map(|b| b.id);
-        let mut remaining = total;
-        for item in &mut self.batch_items {
-            if remaining <= Self::TENSOR_BUDGET { break; }
-            // Preserve the selected item's tensors (most likely to be reused)
-            if Some(item.id) == selected_id { continue; }
-            remaining -= Self::item_cache_size(item);
-            item.cached_tensor = None;
-            item.invalidate_edge_cache();
-        }
-    }
-
-    /// Evict all tensor caches except the selected item (called under memory pressure).
-    fn evict_all_tensors(&mut self) {
-        let selected_id = self.selected_item().map(|b| b.id);
-        for item in &mut self.batch_items {
-            if Some(item.id) != selected_id {
-                item.cached_tensor = None;
-                item.invalidate_edge_cache();
-            }
-        }
-    }
-
     pub(crate) fn sync_selected_batch_textures(&mut self, ctx: &egui::Context) {
-        if self.batch_items.is_empty() { return; }
-        let idx = self.selected_batch_index.min(self.batch_items.len() - 1);
+        if self.batch.items.is_empty() { return; }
+        let idx = self.batch.selected_index.min(self.batch.items.len() - 1);
 
         // Evict full-res result_rgba for non-selected Done items to save RAM.
         // Compressed copy is saved in history; restored on demand when re-selected.
-        for (i, item) in self.batch_items.iter_mut().enumerate() {
+        for (i, item) in self.batch.items.iter_mut().enumerate() {
             if i != idx && item.result_rgba.is_some() && item.status == BatchStatus::Done {
                 if let Some(rgba) = item.result_rgba.take() {
                     let recipe = item.applied_recipe.clone();
@@ -1292,10 +1178,10 @@ impl PrunrApp {
         }
 
         // Restore result for the selected item if it was evicted
-        if self.batch_items[idx].status == BatchStatus::Done
-            && self.batch_items[idx].result_rgba.is_none()
+        if self.batch.items[idx].status == BatchStatus::Done
+            && self.batch.items[idx].result_rgba.is_none()
         {
-            if let Some(entry) = self.batch_items[idx].history.back() {
+            if let Some(entry) = self.batch.items[idx].history.back() {
                 // Peek at the latest history entry — decompress without removing
                 let restored = match &entry.slot {
                     HistorySlot::InMemory(rgba) => Some(rgba.clone()),
@@ -1311,42 +1197,42 @@ impl PrunrApp {
                     }
                 };
                 let recipe = entry.recipe.clone();
-                self.batch_items[idx].result_rgba = restored;
-                self.batch_items[idx].applied_recipe = recipe;
+                self.batch.items[idx].result_rgba = restored;
+                self.batch.items[idx].applied_recipe = recipe;
             }
         }
 
         // Lazy decode: if the selected item has no decoded source RGBA, decode on demand.
-        if self.batch_items[idx].source_rgba.is_none() && !self.batch_items[idx].decode_pending {
-            self.batch_items[idx].decode_pending = true;
-            self.request_decode_source(self.batch_items[idx].id, &self.batch_items[idx].source);
+        if self.batch.items[idx].source_rgba.is_none() && !self.batch.items[idx].decode_pending {
+            self.batch.items[idx].decode_pending = true;
+            self.batch.request_decode_source(self.batch.items[idx].id, &self.batch.items[idx].source);
         }
 
         // Dispatch ColorImage preparation to background threads if needed.
         // The actual ctx.load_texture() happens in drain_background_channels.
-        let item_id = self.batch_items[idx].id;
+        let item_id = self.batch.items[idx].id;
 
-        if self.batch_items[idx].source_texture.is_none()
-            && !self.batch_items[idx].source_tex_pending
+        if self.batch.items[idx].source_texture.is_none()
+            && !self.batch.items[idx].source_tex_pending
         {
-            if let Some(rgba) = self.batch_items[idx].source_rgba.clone() {
-                self.batch_items[idx].source_tex_pending = true;
+            if let Some(rgba) = self.batch.items[idx].source_rgba.clone() {
+                self.batch.items[idx].source_tex_pending = true;
                 Self::spawn_tex_prep(
                     rgba, item_id, format!("source_{item_id}"), false,
-                    self.bg_io.tex_prep_tx.clone(), ctx.clone(),
+                    self.batch.bg_io.tex_prep_tx.clone(), ctx.clone(),
                 );
             }
         }
 
-        if self.batch_items[idx].result_texture.is_none()
-            && !self.batch_items[idx].result_tex_pending
+        if self.batch.items[idx].result_texture.is_none()
+            && !self.batch.items[idx].result_tex_pending
         {
-            if let Some(rgba) = self.batch_items[idx].result_rgba.clone() {
+            if let Some(rgba) = self.batch.items[idx].result_rgba.clone() {
                 let switch = self.result_switch_id;
-                self.batch_items[idx].result_tex_pending = true;
+                self.batch.items[idx].result_tex_pending = true;
                 Self::spawn_tex_prep(
                     rgba, item_id, format!("result_{item_id}_{switch}"), true,
-                    self.bg_io.tex_prep_tx.clone(), ctx.clone(),
+                    self.batch.bg_io.tex_prep_tx.clone(), ctx.clone(),
                 );
             }
         }
@@ -1354,7 +1240,7 @@ impl PrunrApp {
         // Sync app-level state for canvas rendering.
         // Keep the previous texture visible until the new item's texture is ready
         // (avoids a blank flash on sidebar click, especially for lazy-decoded items).
-        let item = &self.batch_items[idx];
+        let item = &self.batch.items[idx];
         if item.source_texture.is_some() {
             self.source_texture = item.source_texture.clone();
         }
@@ -1419,7 +1305,7 @@ impl PrunrApp {
             match msg {
                 WorkerResult::BatchProgress { item_id, stage, pct } => {
                     // Update progress if this is the currently viewed item
-                    let is_selected = self.selected_item()
+                    let is_selected = self.batch.selected_item()
                         .map_or(false, |b| b.id == item_id);
                     if is_selected {
                         self.status.stage = match stage {
@@ -1430,7 +1316,7 @@ impl PrunrApp {
                                 // generic "Loading model..." hid which was in
                                 // flight, which matters when a preset change
                                 // triggers a DexiNed-only reload.
-                                let line_mode = self.batch_items.iter()
+                                let line_mode = self.batch.items.iter()
                                     .find(|b| b.id == item_id)
                                     .map(|b| b.settings.line_mode)
                                     .unwrap_or(prunr_core::LineMode::Off);
@@ -1460,19 +1346,19 @@ impl PrunrApp {
                     }
                 }
                 WorkerResult::BatchItemDone { item_id, result, tensor_cache, edge_cache } => {
-                    let is_selected = self.selected_item()
+                    let is_selected = self.batch.selected_item()
                         .map_or(false, |b| b.id == item_id);
                     // Fall back to the target item's own settings if dispatch_recipe
                     // wasn't snapshot (shouldn't happen in normal flow; defensive).
                     let recipe_snapshot = self.dispatch_recipe.clone().unwrap_or_else(|| {
                         let model: prunr_core::ModelKind = self.settings.model.into();
                         let chain = self.settings.chain_mode;
-                        self.batch_items.iter()
+                        self.batch.items.iter()
                             .find(|b| b.id == item_id)
                             .map(|b| b.settings.current_recipe(model, chain))
                             .unwrap_or_else(|| super::item_settings::ItemSettings::default().current_recipe(model, chain))
                     });
-                    if let Some(item) = self.batch_items.iter_mut().find(|b| b.id == item_id) {
+                    if let Some(item) = self.batch.items.iter_mut().find(|b| b.id == item_id) {
                         // Skip results for items that were already cancelled (reset to Pending)
                         if item.status != BatchStatus::Processing {
                             continue;
@@ -1523,9 +1409,9 @@ impl PrunrApp {
                         }
                     }
                     // Update progress info — count only items involved in this batch
-                    let done = self.batch_items.iter().filter(|i| i.status == BatchStatus::Done).count();
-                    let processing = self.batch_items.iter().filter(|i| i.status == BatchStatus::Processing).count();
-                    let errored = self.batch_items.iter().filter(|i| matches!(i.status, BatchStatus::Error(_))).count();
+                    let done = self.batch.items.iter().filter(|i| i.status == BatchStatus::Done).count();
+                    let processing = self.batch.items.iter().filter(|i| i.status == BatchStatus::Processing).count();
+                    let errored = self.batch.items.iter().filter(|i| matches!(i.status, BatchStatus::Error(_))).count();
                     let batch_total = done + processing + errored;
                     if processing > 0 {
                         self.status.stage = format!("Processing {done}/{batch_total}");
@@ -1543,19 +1429,19 @@ impl PrunrApp {
                     self.admission_release_and_admit(item_id);
 
                     // Enforce tensor cache budget (evict oldest when over 512 MB)
-                    self.enforce_tensor_budget();
+                    self.batch.enforce_tensor_budget();
 
                     // Under memory pressure: demote history to disk + evict tensors
                     if super::memory::under_memory_pressure() {
                         self.demote_history_to_disk();
-                        self.evict_all_tensors();
+                        self.batch.evict_all_tensors();
                     }
                 }
                 WorkerResult::BatchComplete => {
                     self.dispatch_recipe = None;
-                    let done = self.batch_items.iter().filter(|i| i.status == BatchStatus::Done).count();
-                    let failed = self.batch_items.iter().filter(|i| matches!(i.status, BatchStatus::Error(_))).count();
-                    let still_processing = self.batch_items.iter().any(|i| i.status == BatchStatus::Processing);
+                    let done = self.batch.items.iter().filter(|i| i.status == BatchStatus::Done).count();
+                    let failed = self.batch.items.iter().filter(|i| matches!(i.status, BatchStatus::Error(_))).count();
+                    let still_processing = self.batch.items.iter().any(|i| i.status == BatchStatus::Processing);
                     if failed > 0 {
                         let msg = format!("{failed} image(s) failed to process");
                         self.status.text = msg.clone();
@@ -1567,8 +1453,8 @@ impl PrunrApp {
                     }
                     // Update app state to match viewed item (textures already synced by BatchItemDone)
                     if !still_processing {
-                        let idx = self.selected_batch_index.min(self.batch_items.len().saturating_sub(1));
-                        if let Some(item) = self.batch_items.get(idx) {
+                        let idx = self.batch.selected_index.min(self.batch.items.len().saturating_sub(1));
+                        if let Some(item) = self.batch.items.get(idx) {
                             match item.status {
                                 BatchStatus::Done => self.state = AppState::Done,
                                 BatchStatus::Processing => self.state = AppState::Processing,
@@ -1633,7 +1519,7 @@ impl PrunrApp {
 
         // Send file paths for lazy loading (avoids reading all into RAM upfront)
         if !paths.is_empty() {
-            let tx = self.bg_io.file_load_tx.clone();
+            let tx = self.batch.bg_io.file_load_tx.clone();
             std::thread::spawn(move || {
                 for path in paths {
                     let name = path.file_name()
@@ -1647,21 +1533,21 @@ impl PrunrApp {
 
         // Handle inline bytes immediately (Wayland — already in memory, no I/O)
         if !inline_items.is_empty() {
-            if inline_items.len() == 1 && self.batch_items.is_empty() {
+            if inline_items.len() == 1 && self.batch.items.is_empty() {
                 // invariant: inline_items.len() == 1 checked in the guard above.
                 let (bytes, name) = inline_items.into_iter().next().unwrap();
                 self.handle_open_bytes(bytes, name);
             } else {
-                let id_floor = self.next_batch_id;
+                let id_floor = self.batch.next_id;
                 let count = inline_items.len();
                 for (bytes, name) in inline_items {
                     self.add_to_batch(bytes, name);
                 }
                 if count == 1 {
-                    self.selected_batch_index = self.batch_items.len() - 1;
+                    self.batch.selected_index = self.batch.items.len() - 1;
                     self.pending_batch_sync = true;
                 }
-                if self.settings.auto_process_on_import && self.next_batch_id > id_floor {
+                if self.settings.auto_process_on_import && self.batch.next_id > id_floor {
                     self.process_items(|item| item.id >= id_floor);
                 }
             }
@@ -1781,13 +1667,13 @@ impl PrunrApp {
             self.zoom_state.pending_actual_size = true;
         }
         // Cancel batch processing
-        let batch_processing = self.batch_items.iter().any(|i| i.status == BatchStatus::Processing);
+        let batch_processing = self.batch.items.iter().any(|i| i.status == BatchStatus::Processing);
         if cancel_requested && batch_processing {
             self.handle_cancel();
             // Immediately drop admission state so no more items are admitted
             self.admission = None;
             self.admission_tx = None;
-            for item in &mut self.batch_items {
+            for item in &mut self.batch.items {
                 if item.status == BatchStatus::Processing {
                     item.status = BatchStatus::Pending;
                 }
@@ -1816,18 +1702,18 @@ impl PrunrApp {
                 self.settings_opened_at = ctx.input(|i| i.time);
             }
         }
-        if nav_prev && !self.batch_items.is_empty() {
-            if self.selected_batch_index == 0 {
-                self.selected_batch_index = self.batch_items.len() - 1;
+        if nav_prev && !self.batch.items.is_empty() {
+            if self.batch.selected_index == 0 {
+                self.batch.selected_index = self.batch.items.len() - 1;
             } else {
-                self.selected_batch_index -= 1;
+                self.batch.selected_index -= 1;
             }
             self.zoom_state.reset();
             self.sync_selected_batch_textures(ctx);
             self.show_original = false;
         }
-        if nav_next && !self.batch_items.is_empty() {
-            self.selected_batch_index = (self.selected_batch_index + 1) % self.batch_items.len();
+        if nav_next && !self.batch.items.is_empty() {
+            self.batch.selected_index = (self.batch.selected_index + 1) % self.batch.items.len();
             self.zoom_state.reset();
             self.sync_selected_batch_textures(ctx);
             self.show_original = false;
@@ -1858,8 +1744,8 @@ impl PrunrApp {
 
     fn drain_background_channels(&mut self, ctx: &egui::Context) {
         let mut decode_arrived = false;
-        while let Ok((item_id, rgba)) = self.bg_io.decode_rx.try_recv() {
-            if let Some(item) = self.batch_items.iter_mut().find(|b| b.id == item_id) {
+        while let Ok((item_id, rgba)) = self.batch.bg_io.decode_rx.try_recv() {
+            if let Some(item) = self.batch.items.iter_mut().find(|b| b.id == item_id) {
                 item.source_rgba = Some(rgba);
                 item.decode_pending = false;
                 decode_arrived = true;
@@ -1874,9 +1760,9 @@ impl PrunrApp {
 
         // Receive pre-built ColorImages and upload to GPU (lightweight — just queues the upload)
         let mut tex_arrived = false;
-        while let Ok((item_id, name, color_image, is_result)) = self.bg_io.tex_prep_rx.try_recv() {
+        while let Ok((item_id, name, color_image, is_result)) = self.batch.bg_io.tex_prep_rx.try_recv() {
             let tex = ctx.load_texture(name, color_image, egui::TextureOptions::default());
-            if let Some(item) = self.batch_items.iter_mut().find(|b| b.id == item_id) {
+            if let Some(item) = self.batch.items.iter_mut().find(|b| b.id == item_id) {
                 if is_result {
                     item.result_texture = Some(tex);
                     item.result_tex_pending = false;
@@ -1893,7 +1779,7 @@ impl PrunrApp {
 
         // Drain files loaded by background thread (max 5 per frame to stay responsive)
         // Drain save completion notifications
-        while let Ok(msg) = self.bg_io.save_done_rx.try_recv() {
+        while let Ok(msg) = self.batch.bg_io.save_done_rx.try_recv() {
             if msg.contains("fail") {
                 self.toasts.error(msg);
             } else {
@@ -1901,11 +1787,11 @@ impl PrunrApp {
             }
         }
 
-        let id_floor = self.next_batch_id;
+        let id_floor = self.batch.next_id;
         let mut loaded_count = 0u32;
         let mut channel_drained = false;
         for _ in 0..5 {
-            match self.bg_io.file_load_rx.try_recv() {
+            match self.batch.bg_io.file_load_rx.try_recv() {
                 Ok((path, name)) => {
                     self.add_to_batch_path(path, name);
                     loaded_count += 1;
@@ -1917,18 +1803,18 @@ impl PrunrApp {
             ctx.request_repaint();
             // Select the new image if only one was loaded and no more are pending
             if loaded_count == 1 && channel_drained {
-                self.selected_batch_index = self.batch_items.len() - 1;
+                self.batch.selected_index = self.batch.items.len() - 1;
                 self.sync_selected_batch_textures(ctx);
             }
-            if self.settings.auto_process_on_import && self.next_batch_id > id_floor {
+            if self.settings.auto_process_on_import && self.batch.next_id > id_floor {
                 self.process_items(|item| item.id >= id_floor);
             }
         }
     }
 
     fn update_window_title(&mut self, ctx: &egui::Context) {
-        let title = if self.batch_items.len() >= 2 {
-            format!("Prunr \u{2014} {} images", self.batch_items.len())
+        let title = if self.batch.items.len() >= 2 {
+            format!("Prunr \u{2014} {} images", self.batch.items.len())
         } else {
             match &self.loaded_filename {
                 Some(name) => format!("Prunr \u{2014} {name}"),
@@ -1971,7 +1857,7 @@ impl eframe::App for PrunrApp {
         self.drain_background_channels(ctx);
         self.update_window_title(ctx);
         self.status.tick();
-        if self.source_texture.is_none() && !self.batch_items.is_empty() {
+        if self.source_texture.is_none() && !self.batch.items.is_empty() {
             self.sync_selected_batch_textures(ctx);
         }
         // Periodic cleanup of stale history files (every 10 minutes)
@@ -2007,7 +1893,7 @@ impl eframe::App for PrunrApp {
         // Toolbar stays visible while any chip/combo popup is open so that
         // the user interacting with a popover doesn't have the toolbar yanked
         // out from under their cursor.
-        let show_adjustments = if self.adjustments_hidden || self.batch_items.is_empty() {
+        let show_adjustments = if self.adjustments_hidden || self.batch.items.is_empty() {
             false
         } else if self.settings.auto_hide_adjustments {
             let screen_rect = ui.ctx().content_rect();
@@ -2038,8 +1924,8 @@ impl eframe::App for PrunrApp {
             // a preset this frame, the snapshot goes onto the preset undo
             // stack so Ctrl+Shift+Z can roll back an accidental pick.
             let pre_apply_snapshot = {
-                let idx = self.selected_batch_index.min(self.batch_items.len() - 1);
-                let item = &self.batch_items[idx];
+                let idx = self.batch.selected_index.min(self.batch.items.len() - 1);
+                let item = &self.batch.items[idx];
                 PresetSnapshot {
                     settings: item.settings,
                     applied_preset: item.applied_preset.clone(),
@@ -2049,14 +1935,14 @@ impl eframe::App for PrunrApp {
                 .exact_size(height)
                 .frame(panel_frame)
                 .show_inside(ui, |ui| {
-                    let idx = self.selected_batch_index.min(self.batch_items.len() - 1);
-                    // Split borrow: app.settings and batch_items are disjoint
+                    let idx = self.batch.selected_index.min(self.batch.items.len() - 1);
+                    // Split borrow: app.settings and app.batch are disjoint
                     // fields of PrunrApp, and within the batch item its
                     // `settings` and `applied_preset` are disjoint fields too.
                     // This lets the toolbar mutate the preset string in place
                     // without a clone + writeback round-trip.
                     let settings_ref = &mut self.settings;
-                    let item = &mut self.batch_items[idx];
+                    let item = &mut self.batch.items[idx];
                     toolbar_change = adjustments_toolbar::render(
                         ui,
                         &mut item.settings,
@@ -2066,8 +1952,8 @@ impl eframe::App for PrunrApp {
                     );
                 });
             if toolbar_change.preset_applied {
-                let idx = self.selected_batch_index.min(self.batch_items.len() - 1);
-                let item = &mut self.batch_items[idx];
+                let idx = self.batch.selected_index.min(self.batch.items.len() - 1);
+                let item = &mut self.batch.items[idx];
                 HistoryManager::push_preset(item, pre_apply_snapshot);
             }
             // Model swap: persist the new selection, show toast, invalidate caches.
@@ -2084,12 +1970,12 @@ impl eframe::App for PrunrApp {
             // live-preview). Model swaps clear only the seg cache (edge
             // tensor is model-independent).
             if toolbar_change.seg_cache_invalid || toolbar_change.edge_cache_invalid {
-                let idx = self.selected_batch_index.min(self.batch_items.len() - 1);
+                let idx = self.batch.selected_index.min(self.batch.items.len() - 1);
                 if toolbar_change.seg_cache_invalid {
-                    self.batch_items[idx].cached_tensor = None;
+                    self.batch.items[idx].cached_tensor = None;
                 }
                 if toolbar_change.edge_cache_invalid {
-                    self.batch_items[idx].invalidate_edge_cache();
+                    self.batch.items[idx].invalidate_edge_cache();
                 }
                 // A preset apply that invalidates the cache on an already-
                 // processed item means live preview has no tensor to rerun
@@ -2097,9 +1983,9 @@ impl eframe::App for PrunrApp {
                 // to click Process; tier routing keeps this cheap when only
                 // one tensor is stale.
                 if toolbar_change.preset_applied
-                    && self.batch_items[idx].status == BatchStatus::Done
+                    && self.batch.items[idx].status == BatchStatus::Done
                 {
-                    let target_id = self.batch_items[idx].id;
+                    let target_id = self.batch.items[idx].id;
                     self.process_items(|item| item.id == target_id);
                 }
             }
@@ -2110,8 +1996,8 @@ impl eframe::App for PrunrApp {
             // touched this frame, so toggles + color picks always commit now
             // and mid-slider-drag changes debounce.
             if self.settings.live_preview && (toolbar_change.mask || toolbar_change.edge) {
-                let idx = self.selected_batch_index.min(self.batch_items.len() - 1);
-                let item_id = self.batch_items[idx].id;
+                let idx = self.batch.selected_index.min(self.batch.items.len() - 1);
+                let item_id = self.batch.items[idx].id;
                 let kind = if toolbar_change.mask {
                     crate::gui::live_preview::PreviewKind::Mask
                 } else {
@@ -2141,7 +2027,7 @@ impl eframe::App for PrunrApp {
             .frame(panel_frame)
             .show_inside(ui, |ui| statusbar::render(ui, self));
 
-        let sidebar_visible = !self.batch_items.is_empty() && !self.sidebar_hidden;
+        let sidebar_visible = !self.batch.items.is_empty() && !self.sidebar_hidden;
         if sidebar_visible {
             egui::Panel::right("sidebar")
                 .exact_size(theme::SIDEBAR_WIDTH)

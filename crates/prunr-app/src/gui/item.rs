@@ -221,6 +221,15 @@ impl BatchItem {
         self.decode_pending = false;
     }
 
+    /// Combined compressed size of segmentation + edge tensor caches.
+    /// Used by memory governance (`BatchManager::enforce_tensor_budget`)
+    /// and any future telemetry / HUD readout.
+    pub(crate) fn cache_size(&self) -> usize {
+        let seg = self.cached_tensor.as_ref().map(|ct| ct.compressed_size()).unwrap_or(0);
+        let edge = self.cached_edge_tensor.as_ref().map(|ct| ct.compressed_size()).unwrap_or(0);
+        seg + edge
+    }
+
     pub(crate) fn new(
         id: u64,
         filename: String,
