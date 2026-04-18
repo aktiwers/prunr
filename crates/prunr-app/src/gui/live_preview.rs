@@ -169,11 +169,26 @@ impl LivePreview {
         }
 
         for id in ready_ids {
-            let Some(pending) = self.pending.remove(&id) else { continue };
-            let Some(inputs) = snapshot(id, pending.kind) else {
-                // No cache available — user must Process first. Silently skip.
+            // Peek the pending kind without removing — if the snapshot isn't
+            // ready yet (e.g. `source_rgba` decode in flight after a view
+            // switch), we keep the pending entry so the next tick retries.
+            // Dropping it here silently swallowed the tweak and left the
+            // user thinking live preview was dead.
+            let kind = match self.pending.get(&id) {
+                Some(p) => p.kind,
+                None => continue,
+            };
+            let Some(inputs) = snapshot(id, kind) else {
+                // Snapshot couldn't assemble inputs this frame. Possibilities:
+                // (a) `source_rgba` is None (decode pending after view
+                //     switch) — retry once the decode lands.
+                // (b) required tensor cache is permanently absent (item
+                //     never processed) — the retry is cheap and the pending
+                //     entry stays inert until the user clicks Process or
+                //     stops tweaking; no harm.
                 continue;
             };
+            self.pending.remove(&id);
             self.generation_counter = self.generation_counter.wrapping_add(1);
             let generation = self.generation_counter;
             let cancel = Arc::new(AtomicBool::new(false));

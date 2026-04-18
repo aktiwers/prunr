@@ -1138,33 +1138,39 @@ impl PrunrApp {
     ) {
         let tex_prep_tx = self.batch.bg_io.tex_prep_tx.clone();
         for r in results {
-            let Some(item) = self.batch.find_by_id_mut(r.item_id) else {
-                continue;
+            let (item_id, source, is_final) = {
+                let Some(item) = self.batch.find_by_id_mut(r.item_id) else {
+                    continue;
+                };
+                let new_rgba = Arc::new(r.rgba);
+                item.result_rgba = Some(new_rgba.clone());
+                // Mark pending so sync_selected_batch_textures doesn't also
+                // spawn its own prep on this same frame.
+                item.result_tex_pending = true;
+                if let Some((mask, bits)) = r.new_edge_mask {
+                    item.cached_edge_mask = Some((mask, bits));
+                }
+                let switch = self.result_switch_id;
+                Self::spawn_tex_prep(
+                    new_rgba, item.id, format!("result_{}_{}", item.id, switch),
+                    true, tex_prep_tx.clone(), ctx.clone(),
+                );
+                (item.id, item.source.clone(), r.is_final)
             };
-            let new_rgba = Arc::new(r.rgba);
-            item.result_rgba = Some(new_rgba.clone());
-            // Mark pending so sync_selected_batch_textures doesn't also spawn
-            // its own prep on this same frame.
-            item.result_tex_pending = true;
-            // Thumbnail invalidation is gated on `is_final` (set by
-            // LivePreview::drain_results based on whether the user has more
-            // tweaks pending). Invalidating on every mid-drag result produces
-            // a sidebar flicker between the spinner and the rebuilt thumb.
-            // Invalidating only on the drag-settled result gets us a refreshed
-            // sidebar when the user stops tweaking, without strobing during.
-            if r.is_final {
-                item.thumb_texture = None;
-                item.thumb_pending = false;
+            // On the drag-settled result only, regenerate the sidebar
+            // thumbnail. Unlike nulling `thumb_texture` + letting the
+            // sidebar re-request, we call request_thumbnail directly while
+            // the old texture remains displayed — `pump_thumbnail_results`
+            // swaps it atomically when the new thumb arrives, so the user
+            // never sees a spinner-gap. Mid-drag results skip this entirely
+            // (is_final false) to avoid regenerating thumbs every debounce.
+            if is_final {
+                let result_rgba = self.batch.find_by_id(item_id).and_then(|i| i.result_rgba.clone());
+                if let Some(item) = self.batch.find_by_id_mut(item_id) {
+                    item.thumb_pending = true;
+                }
+                self.batch.request_thumbnail(item_id, &source, result_rgba.as_ref());
             }
-            if let Some((mask, bits)) = r.new_edge_mask {
-                item.cached_edge_mask = Some((mask, bits));
-            }
-            let item_id = item.id;
-            let switch = self.result_switch_id;
-            Self::spawn_tex_prep(
-                new_rgba, item_id, format!("result_{item_id}_{switch}"),
-                true, tex_prep_tx.clone(), ctx.clone(),
-            );
         }
         ctx.request_repaint();
     }
