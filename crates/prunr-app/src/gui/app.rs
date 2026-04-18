@@ -1,5 +1,5 @@
 use std::borrow::Cow;
-use std::collections::{HashSet, VecDeque};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
@@ -7,29 +7,13 @@ use std::sync::{mpsc, Arc, Mutex};
 use egui::{Key, ViewportCommand};
 
 use prunr_core::ProgressStage;
+use super::history_manager::{HistoryDir, HistoryManager};
 use super::item::{BatchItem, BatchStatus, HistoryEntry, HistorySlot, ImageSource, PresetSnapshot};
 use super::settings::Settings;
 use super::state::AppState;
 use super::theme;
 use super::worker::{WorkerMessage, WorkerResult, spawn_worker};
 use super::views::{adjustments_toolbar, canvas, chip, cli_help, settings, shortcuts, sidebar, statusbar, toolbar};
-
-/// Bound on the per-item preset undo/redo stacks. Each entry is ~100 bytes,
-/// so 20 × ~100 = ~2 KB per image — a rounding error next to the result
-/// history's megabyte-scale entries.
-const PRESET_HISTORY_DEPTH: usize = 20;
-
-/// Push onto a bounded undo/redo stack, dropping the oldest entry if it
-/// exceeds `PRESET_HISTORY_DEPTH`.
-fn push_bounded(stack: &mut VecDeque<PresetSnapshot>, snap: PresetSnapshot) {
-    stack.push_back(snap);
-    while stack.len() > PRESET_HISTORY_DEPTH {
-        stack.pop_front();
-    }
-}
-
-#[derive(Copy, Clone, PartialEq, Eq)]
-enum HistoryDir { Undo, Redo }
 
 pub struct PrunrApp {
     // State
@@ -442,38 +426,11 @@ impl PrunrApp {
         let mut undone = 0u32;
         for item in &mut self.batch_items {
             let target = if has_selected { item.selected } else { Some(item.id) == current_id };
-            if target && item.status == BatchStatus::Done {
-                let current_recipe = item.applied_recipe.take();
-                if item.history.is_empty() {
-                    if let Some(current) = item.result_rgba.take() {
-                        item.redo_stack.push_back(HistoryEntry::new(current, current_recipe));
-                    }
-                    item.status = BatchStatus::Pending;
-                    item.result_rgba = None;
-                } else {
-                    if let Some(current) = item.result_rgba.take() {
-                        item.redo_stack.push_back(HistoryEntry::new(current, current_recipe));
-                    }
-                    if let Some(entry) = item.history.pop_back() {
-                        let (slot, recipe) = entry.into_parts();
-                        item.applied_recipe = recipe;
-                        item.result_rgba = slot.into_rgba();
-                    }
-                    if item.result_rgba.is_none() || item.history.is_empty() {
-                        item.status = BatchStatus::Pending;
-                        item.result_rgba = None;
-                        item.applied_recipe = None;
-                    }
-                }
-                item.cached_tensor = None;
-                item.result_texture = None;
-                item.thumb_texture = None;
-                item.thumb_pending = false;
-                item.source_tex_pending = false;
-                item.result_tex_pending = false;
-                // Reset decode state so lazy decode re-triggers for canvas display
+            if target && HistoryManager::undo_result(item) {
+                item.reset_result_caches();
+                // Undo also needs the SOURCE view rebuilt — the canvas may
+                // now show the unprocessed source instead of a result.
                 item.source_texture = None;
-                item.decode_pending = false;
                 undone += 1;
             }
         }
@@ -495,24 +452,8 @@ impl PrunrApp {
         let mut redone = 0u32;
         for item in &mut self.batch_items {
             let target = if has_selected { item.selected } else { Some(item.id) == current_id };
-            if target && !item.redo_stack.is_empty() {
-                let current_recipe = item.applied_recipe.take();
-                if let Some(current) = item.result_rgba.take() {
-                    item.history.push_back(HistoryEntry::new(current, current_recipe));
-                }
-                if let Some(entry) = item.redo_stack.pop_back() {
-                    let (slot, recipe) = entry.into_parts();
-                    item.applied_recipe = recipe;
-                    item.result_rgba = slot.into_rgba();
-                }
-                item.cached_tensor = None;
-                item.status = BatchStatus::Done;
-                item.result_texture = None;
-                item.thumb_texture = None;
-                item.thumb_pending = false;
-                item.source_tex_pending = false;
-                item.result_tex_pending = false;
-                item.decode_pending = false;
+            if target && HistoryManager::redo_result(item) {
+                item.reset_result_caches();
                 redone += 1;
             }
         }
@@ -534,32 +475,10 @@ impl PrunrApp {
     fn swap_preset_history(&mut self, dir: HistoryDir) {
         if self.batch_items.is_empty() { return; }
         let idx = self.selected_batch_index.min(self.batch_items.len() - 1);
-        let (target_id, should_reprocess) = {
-            let item = &mut self.batch_items[idx];
-            let popped = match dir {
-                HistoryDir::Undo => item.preset_undo_stack.pop_back(),
-                HistoryDir::Redo => item.preset_redo_stack.pop_back(),
-            };
-            let Some(snapshot) = popped else { return };
-            let current = PresetSnapshot {
-                settings: item.settings,
-                applied_preset: item.applied_preset.clone(),
-            };
-            match dir {
-                HistoryDir::Undo => push_bounded(&mut item.preset_redo_stack, current),
-                HistoryDir::Redo => push_bounded(&mut item.preset_undo_stack, current),
-            }
-            let old_line_mode = item.settings.line_mode;
-            item.settings = snapshot.settings;
-            item.applied_preset = snapshot.applied_preset;
-            // Edge tensor depends on what DexiNed saw (full scene vs subject-
-            // on-white), so a line_mode flip invalidates it. Segmentation
-            // tensor doesn't care — model isn't part of the preset.
-            if item.settings.line_mode != old_line_mode {
-                item.invalidate_edge_cache();
-            }
-            (item.id, item.status == BatchStatus::Done)
-        };
+        let item = &mut self.batch_items[idx];
+        if !HistoryManager::swap_preset(item, dir) { return; }
+        let target_id = item.id;
+        let should_reprocess = item.status == BatchStatus::Done;
         if should_reprocess {
             self.process_items(|i| i.id == target_id);
         }
@@ -662,27 +581,13 @@ impl PrunrApp {
         let max_depth = self.settings.history_depth;
         for item in &mut self.batch_items {
             if !process_ids.contains(&item.id) { continue; }
-            if item.history.is_empty() && item.redo_stack.is_empty() {
-                if let Some(ref src_rgba) = item.source_rgba {
-                    // Seed with original — no recipe (it's the unprocessed source)
-                    item.history.push_back(HistoryEntry::new(src_rgba.clone(), None));
-                }
-            }
-            if item.status == BatchStatus::Done {
-                if let Some(current) = item.result_rgba.take() {
-                    if chain_mode {
-                        item.result_rgba = Some(current.clone());
-                    }
-                    item.history.push_back(HistoryEntry::new(current, item.applied_recipe.clone()));
-                    while item.history.len() > max_depth {
-                        if let Some(old) = item.history.pop_front() {
-                            old.cleanup();
-                        }
-                    }
-                }
-                for entry in item.redo_stack.drain(..) {
-                    entry.cleanup();
-                }
+            HistoryManager::seed_with_source(item);
+            let was_done = item.status == BatchStatus::Done;
+            HistoryManager::archive_current_result(item, max_depth, chain_mode);
+            if was_done {
+                // Reset texture caches so the next paint rebuilds from the
+                // (possibly new) result. In chain mode, result_rgba was kept
+                // populated by archive_current_result for the next chain step.
                 if !chain_mode {
                     item.result_texture = None;
                 }
@@ -2190,9 +2095,7 @@ impl eframe::App for PrunrApp {
             if toolbar_change.preset_applied {
                 let idx = self.selected_batch_index.min(self.batch_items.len() - 1);
                 let item = &mut self.batch_items[idx];
-                push_bounded(&mut item.preset_undo_stack, pre_apply_snapshot);
-                // A fresh apply branches off the timeline — redo is invalidated.
-                item.preset_redo_stack.clear();
+                HistoryManager::push_preset(item, pre_apply_snapshot);
             }
             // Model swap: persist the new selection, show toast, invalidate caches.
             if toolbar_change.model_changed {
@@ -2304,43 +2207,3 @@ impl eframe::App for PrunrApp {
     }
 }
 
-#[cfg(test)]
-mod preset_stack_tests {
-    //! Tests for the `push_bounded` helper that backs the preset undo/redo
-    //! stacks on each `BatchItem`. Kept inline so the helper can stay private.
-    use super::{push_bounded, PresetSnapshot, PRESET_HISTORY_DEPTH};
-    use super::super::item_settings::ItemSettings;
-    use std::collections::VecDeque;
-
-    fn snap(gamma: f32) -> PresetSnapshot {
-        let mut s = ItemSettings::default();
-        s.gamma = gamma;
-        PresetSnapshot { settings: s, applied_preset: String::new() }
-    }
-
-    #[test]
-    fn push_bounded_drops_oldest_when_exceeding_depth() {
-        let mut stack: VecDeque<PresetSnapshot> = VecDeque::new();
-        for i in 0..(PRESET_HISTORY_DEPTH + 5) {
-            push_bounded(&mut stack, snap(i as f32));
-        }
-        assert_eq!(stack.len(), PRESET_HISTORY_DEPTH);
-        // Oldest 5 entries dropped; newest entry is the last pushed.
-        assert_eq!(stack.front().unwrap().settings.gamma, 5.0);
-        assert_eq!(
-            stack.back().unwrap().settings.gamma,
-            (PRESET_HISTORY_DEPTH + 4) as f32,
-        );
-    }
-
-    #[test]
-    fn push_bounded_below_depth_keeps_every_entry() {
-        let mut stack: VecDeque<PresetSnapshot> = VecDeque::new();
-        push_bounded(&mut stack, snap(1.0));
-        push_bounded(&mut stack, snap(2.0));
-        push_bounded(&mut stack, snap(3.0));
-        assert_eq!(stack.len(), 3);
-        assert_eq!(stack.front().unwrap().settings.gamma, 1.0);
-        assert_eq!(stack.back().unwrap().settings.gamma, 3.0);
-    }
-}
