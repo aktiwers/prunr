@@ -102,7 +102,6 @@ pub fn render(
         if ch.commit { acc.commit = true; }
     };
 
-    // ── Row 2: model (leftmost) + mask + composite + preset + reset (right) ──
     ui.horizontal(|ui| {
         render_model_dropdown(ui, app_settings, processing, &mut change);
 
