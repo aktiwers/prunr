@@ -140,3 +140,202 @@ fn fit_dimensions(src_w: u32, src_h: u32, max_w: u32, max_h: u32) -> (u32, u32) 
     ((src_w as f32 * scale).round().max(1.0) as u32,
      (src_h as f32 * scale).round().max(1.0) as u32)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::gui::item_settings::ItemSettings;
+    use crate::gui::worker::{CompressedTensor, TensorCache};
+    use prunr_core::ModelKind;
+    use std::time::Duration;
+
+    fn fixture() -> BatchManager {
+        BatchManager::new(egui::Context::default())
+    }
+
+    /// Construct a BatchItem with optional cached tensor of `bytes_uncompressed`
+    /// raw size. Used by enforce_tensor_budget / cache_size tests.
+    fn item_with_cache(id: u64, tensor_floats: usize) -> BatchItem {
+        let mut item = BatchItem::new(
+            id,
+            format!("item_{id}.png"),
+            ImageSource::Bytes(Arc::new(Vec::new())),
+            (10, 10),
+            ItemSettings::default(),
+            String::new(),
+        );
+        if tensor_floats > 0 {
+            // Real CompressedTensor: zstd-compress f32 data via from_raw.
+            let data: Vec<f32> = vec![0.5; tensor_floats];
+            let cache = TensorCache { data, height: 10, width: 10, model: ModelKind::Silueta };
+            item.cached_tensor = CompressedTensor::from_raw(cache);
+        }
+        item
+    }
+
+    // ── new + selected_item ─────────────────────────────────────────────
+
+    // (BatchManager::new defaults are covered indirectly by tests/batch_tests.rs
+    //  which assert the same fields via PrunrApp::new_for_test → BatchManager::new.)
+
+    #[test]
+    fn selected_item_returns_none_when_batch_empty() {
+        let bm = fixture();
+        assert!(bm.selected_item().is_none());
+    }
+
+    #[test]
+    fn selected_item_returns_indexed_item() {
+        let mut bm = fixture();
+        bm.items.push(item_with_cache(1, 0));
+        bm.items.push(item_with_cache(2, 0));
+        bm.selected_index = 1;
+        assert_eq!(bm.selected_item().unwrap().id, 2);
+    }
+
+    #[test]
+    fn selected_item_returns_none_when_index_out_of_bounds() {
+        // Defensive: callers should clamp, but the accessor must not panic.
+        let mut bm = fixture();
+        bm.items.push(item_with_cache(1, 0));
+        bm.selected_index = 99;
+        assert!(bm.selected_item().is_none());
+    }
+
+    // ── enforce_tensor_budget / evict_all_tensors ───────────────────────
+
+    #[test]
+    fn enforce_tensor_budget_no_op_below_budget() {
+        let mut bm = fixture();
+        // Tiny tensors well under 512 MB.
+        bm.items.push(item_with_cache(1, 100));
+        bm.items.push(item_with_cache(2, 100));
+        let before_1 = bm.items[0].cached_tensor.is_some();
+        let before_2 = bm.items[1].cached_tensor.is_some();
+        bm.enforce_tensor_budget();
+        assert_eq!(bm.items[0].cached_tensor.is_some(), before_1);
+        assert_eq!(bm.items[1].cached_tensor.is_some(), before_2);
+    }
+
+    #[test]
+    fn evict_all_tensors_clears_all_except_selected() {
+        let mut bm = fixture();
+        bm.items.push(item_with_cache(1, 100));
+        bm.items.push(item_with_cache(2, 100));
+        bm.items.push(item_with_cache(3, 100));
+        bm.selected_index = 1; // item id=2
+        // Sanity: all three start with caches.
+        assert!(bm.items.iter().all(|i| i.cached_tensor.is_some()));
+
+        bm.evict_all_tensors();
+
+        assert!(bm.items[0].cached_tensor.is_none(), "non-selected evicted");
+        assert!(bm.items[1].cached_tensor.is_some(), "selected preserved");
+        assert!(bm.items[2].cached_tensor.is_none(), "non-selected evicted");
+    }
+
+    #[test]
+    fn evict_all_tensors_clears_edge_cache_too() {
+        let mut bm = fixture();
+        let mut item = item_with_cache(1, 100);
+        item.cached_edge_mask = Some((Arc::new(image::GrayImage::new(1, 1)), 0));
+        bm.items.push(item);
+        bm.items.push(item_with_cache(2, 100));
+        bm.selected_index = 1; // selected = id=2
+
+        bm.evict_all_tensors();
+
+        // item id=1 (non-selected) gets BOTH caches cleared.
+        assert!(bm.items[0].cached_tensor.is_none());
+        assert!(bm.items[0].cached_edge_mask.is_none());
+        assert!(bm.items[0].cached_edge_tensor.is_none());
+    }
+
+    // ── request_decode_bytes / request_thumbnail (thread-spawning) ──────
+
+    /// 1x1 PNG byte sequence — minimum valid PNG.
+    fn one_pixel_png() -> Vec<u8> {
+        let img = image::RgbaImage::from_pixel(1, 1, image::Rgba([200, 100, 50, 255]));
+        let mut buf = Vec::new();
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
+            .unwrap();
+        buf
+    }
+
+    #[test]
+    fn request_decode_bytes_emits_decoded_rgba_to_decode_rx() {
+        let bm = fixture();
+        let png = Arc::new(one_pixel_png());
+        bm.request_decode_bytes(42, png);
+
+        let (id, rgba) = bm.bg_io.decode_rx.recv_timeout(Duration::from_secs(2))
+            .expect("decode_tx must produce a result within 2s");
+        assert_eq!(id, 42);
+        assert_eq!(rgba.dimensions(), (1, 1));
+        assert_eq!(rgba.get_pixel(0, 0).0, [200, 100, 50, 255]);
+    }
+
+    #[test]
+    fn request_decode_source_for_bytes_variant_routes_through() {
+        let bm = fixture();
+        let source = ImageSource::Bytes(Arc::new(one_pixel_png()));
+        bm.request_decode_source(99, &source);
+
+        let (id, _rgba) = bm.bg_io.decode_rx.recv_timeout(Duration::from_secs(2))
+            .expect("decode_tx must produce a result within 2s");
+        assert_eq!(id, 99);
+    }
+
+    #[test]
+    fn request_thumbnail_with_result_rgba_emits_to_thumb_rx() {
+        let bm = fixture();
+        let result = Arc::new(image::RgbaImage::from_pixel(200, 200, image::Rgba([10, 20, 30, 255])));
+        let source = ImageSource::Bytes(Arc::new(Vec::new())); // unused when result_rgba is Some
+        bm.request_thumbnail(7, &source, Some(&result));
+
+        let (id, w, h, pixels) = bm.bg_io.thumb_rx.recv_timeout(Duration::from_secs(2))
+            .expect("thumb_tx must produce a result within 2s");
+        assert_eq!(id, 7);
+        // 200x200 fits within 160x160 → scaled to 160x160.
+        assert_eq!((w, h), (160, 160));
+        assert_eq!(pixels.len(), (w * h * 4) as usize);
+    }
+
+    #[test]
+    fn request_thumbnail_without_result_decodes_source() {
+        let bm = fixture();
+        let source = ImageSource::Bytes(Arc::new(one_pixel_png()));
+        bm.request_thumbnail(8, &source, None);
+
+        let (id, w, h, pixels) = bm.bg_io.thumb_rx.recv_timeout(Duration::from_secs(2))
+            .expect("thumb_tx must produce a result within 2s");
+        assert_eq!(id, 8);
+        // 1x1 fits trivially → stays 1x1.
+        assert_eq!((w, h), (1, 1));
+        assert_eq!(pixels.len(), 4);
+    }
+
+    // ── fit_dimensions (private helper) ─────────────────────────────────
+
+    #[test]
+    fn fit_dimensions_scales_down_oversized() {
+        // 4000x2000 → fits inside 1000x1000 with aspect preserved.
+        let (w, h) = fit_dimensions(4000, 2000, 1000, 1000);
+        assert_eq!((w, h), (1000, 500));
+    }
+
+    #[test]
+    fn fit_dimensions_does_not_upscale() {
+        // Small image should NOT be upscaled to fill the box.
+        let (w, h) = fit_dimensions(10, 10, 1000, 1000);
+        assert_eq!((w, h), (10, 10));
+    }
+
+    #[test]
+    fn fit_dimensions_minimum_size_is_one() {
+        // Pathological case: extreme aspect ratio shouldn't produce zero dims.
+        let (w, h) = fit_dimensions(1000, 1, 50, 50);
+        assert!(w >= 1 && h >= 1);
+    }
+}

@@ -275,3 +275,92 @@ pub(crate) enum BatchStatus {
     Done,
     Error(String),
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::gui::item_settings::ItemSettings;
+
+    fn fixture_item(id: u64) -> BatchItem {
+        BatchItem::new(
+            id,
+            "test.png".to_string(),
+            ImageSource::Bytes(Arc::new(Vec::new())),
+            (100, 100),
+            ItemSettings::default(),
+            String::new(),
+        )
+    }
+
+    #[test]
+    fn invalidate_edge_cache_clears_both_atomically() {
+        let mut item = fixture_item(1);
+        // Simulate populated edge caches (minimal placeholder structs).
+        item.cached_edge_mask = Some((Arc::new(image::GrayImage::new(1, 1)), 0));
+        // (cached_edge_tensor would need a real CompressedTensor — leave None
+        // here; the method should still run cleanly and clear cached_edge_mask.)
+        assert!(item.cached_edge_mask.is_some());
+        item.invalidate_edge_cache();
+        assert!(item.cached_edge_tensor.is_none());
+        assert!(item.cached_edge_mask.is_none());
+    }
+
+    #[test]
+    fn reset_result_caches_clears_expected_fields() {
+        let mut item = fixture_item(1);
+        item.thumb_pending = true;
+        item.source_tex_pending = true;
+        item.result_tex_pending = true;
+        item.decode_pending = true;
+        item.reset_result_caches();
+        assert!(item.cached_tensor.is_none());
+        assert!(item.result_texture.is_none());
+        assert!(item.thumb_texture.is_none());
+        assert!(!item.thumb_pending);
+        assert!(!item.source_tex_pending);
+        assert!(!item.result_tex_pending);
+        assert!(!item.decode_pending);
+    }
+
+    #[test]
+    fn cache_size_zero_when_caches_empty() {
+        let item = fixture_item(1);
+        assert_eq!(item.cache_size(), 0);
+    }
+
+    #[test]
+    fn image_source_load_bytes_for_bytes_variant_returns_same_arc() {
+        let bytes = Arc::new(vec![0xDE, 0xAD, 0xBE, 0xEF]);
+        let source = ImageSource::Bytes(bytes.clone());
+        let loaded = source.load_bytes().expect("Bytes variant must succeed");
+        assert!(Arc::ptr_eq(&loaded, &bytes), "Bytes load must return the same Arc, no realloc");
+    }
+
+    #[test]
+    fn image_source_estimated_size_for_bytes_returns_len() {
+        let source = ImageSource::Bytes(Arc::new(vec![0u8; 1234]));
+        assert_eq!(source.estimated_size(), 1234);
+    }
+
+    #[test]
+    fn history_entry_into_parts_round_trips_construction() {
+        let rgba = Arc::new(image::RgbaImage::from_pixel(2, 2, image::Rgba([10, 20, 30, 255])));
+        let entry = HistoryEntry::new(rgba.clone(), None);
+        let (slot, recipe) = entry.into_parts();
+        assert!(recipe.is_none());
+        // Slot was compressed; rehydrate and check pixel equality.
+        let recovered = slot.into_rgba().expect("compressed slot must rehydrate");
+        assert_eq!(recovered.dimensions(), (2, 2));
+        assert_eq!(recovered.as_raw(), rgba.as_raw());
+    }
+
+    #[test]
+    fn history_slot_default_is_inmemory_one_by_one_placeholder() {
+        let slot = HistorySlot::default();
+        match slot {
+            HistorySlot::InMemory(ref rgba) => assert_eq!(rgba.dimensions(), (1, 1)),
+            HistorySlot::Compressed(_) => panic!("expected InMemory, got Compressed"),
+            HistorySlot::OnDisk(_) => panic!("expected InMemory, got OnDisk"),
+        }
+    }
+}
