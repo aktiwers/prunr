@@ -37,6 +37,13 @@ pub struct Cli {
     #[arg(short = 'q', long)]
     pub quiet: bool,
 
+    /// Verbose diagnostics: bumps tracing filter to `prunr=debug` and, on
+    /// Windows, attaches the parent console so GUI-mode stderr is visible
+    /// in the launching terminal. Use to capture pipeline diagnostics
+    /// when reporting a bug.
+    #[arg(long)]
+    pub debug: bool,
+
     /// Mask gamma (removal strength). >1 = more aggressive, <1 = gentler.
     #[arg(long, default_value_t = 1.0)]
     pub gamma: f32,

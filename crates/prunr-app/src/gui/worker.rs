@@ -576,8 +576,27 @@ fn read_tensor_cache(
     width: Option<u32>,
     model: ModelKind,
 ) -> Option<TensorCache> {
-    let data = crate::subprocess::ipc::le_bytes_to_f32s(&read_and_delete(path?)?);
-    Some(TensorCache { data, height: height?, width: width?, model })
+    let p = path?;
+    let bytes = read_and_delete(p)?;
+    let data = crate::subprocess::ipc::le_bytes_to_f32s(&bytes);
+    let h = height?;
+    let w = width?;
+    let expected = (h as usize) * (w as usize);
+    let head: Vec<f32> = data.iter().take(6).copied().collect();
+    tracing::debug!(
+        path = %p.display(), bytes_len = bytes.len(),
+        tensor_len = data.len(), expected_len = expected,
+        h, w, ?head,
+        "parent read seg tensor",
+    );
+    if data.len() != expected {
+        tracing::error!(
+            path = %p.display(),
+            got = data.len(), expected,
+            "seg tensor length mismatch — mask will be garbage",
+        );
+    }
+    Some(TensorCache { data, height: h, width: w, model })
 }
 
 /// Read the DexiNed multi-scale cache. Child concatenates 4 tensors into

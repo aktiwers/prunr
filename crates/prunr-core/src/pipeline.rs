@@ -191,6 +191,19 @@ where
     report(ProgressStage::Normalize, 0.4);
     let model = engine.model_kind();
     let input_array = preprocess(img, model);
+    {
+        let shape = input_array.shape();
+        let s = input_array.as_slice().unwrap_or(&[]);
+        let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
+        let mut sum = 0.0_f32;
+        for &v in s { if v < lo { lo = v; } if v > hi { hi = v; } sum += v; }
+        let mean = if s.is_empty() { 0.0 } else { sum / s.len() as f32 };
+        tracing::debug!(
+            ?model, input_shape = ?shape, input_len = s.len(),
+            input_min = lo, input_max = hi, input_mean = mean,
+            "infer_only preprocessed tensor ready",
+        );
+    }
 
     if is_cancelled() { return Err(CoreError::Cancelled); }
 
@@ -202,10 +215,15 @@ where
         let outputs = session
             .run(inputs![input_name.as_str() => &input_tensor])
             .map_err(|e| CoreError::Inference(format!("ORT inference failed: {e}")))?;
-        outputs[0]
+        let arr = outputs[0]
             .try_extract_array::<f32>()
-            .map_err(|e| CoreError::Inference(format!("Failed to extract output tensor: {e}")))?
-            .into_dimensionality::<ndarray::Ix4>()
+            .map_err(|e| CoreError::Inference(format!("Failed to extract output tensor: {e}")))?;
+        tracing::debug!(
+            shape = ?arr.shape(), strides = ?arr.strides(),
+            is_standard = arr.is_standard_layout(),
+            "infer_only ORT output extracted",
+        );
+        arr.into_dimensionality::<ndarray::Ix4>()
             .map_err(|e| CoreError::Inference(format!("Output reshape error: {e}")))
             .map(|v| v.to_owned())
     })?;
@@ -216,12 +234,25 @@ where
     // the raw backing Vec as C-order then gives garbage data downstream.
     // `as_standard_layout()` is a no-op when already standard (CPU EP), and
     // a single memcpy otherwise — trivial next to inference cost.
+    let is_std_owned = raw_output.is_standard_layout();
     let standard = raw_output.as_standard_layout();
     let h = standard.shape()[2];
     let w = standard.shape()[3];
     // invariant: as_standard_layout always produces a contiguous view,
     // so as_slice() is Some.
     let tensor_data = standard.as_slice().unwrap().to_vec();
+    let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
+    let mut sum = 0.0_f32;
+    for &v in &tensor_data { if v < lo { lo = v; } if v > hi { hi = v; } sum += v; }
+    let mean = if tensor_data.is_empty() { 0.0 } else { sum / tensor_data.len() as f32 };
+    let head: Vec<f32> = tensor_data.iter().take(6).copied().collect();
+    tracing::debug!(
+        ?model, h, w, tensor_len = tensor_data.len(),
+        owned_was_standard = is_std_owned,
+        tensor_min = lo, tensor_max = hi, tensor_mean = mean,
+        ?head,
+        "infer_only raw tensor flattened",
+    );
     Ok(crate::types::InferenceResult {
         tensor_data,
         tensor_height: h,

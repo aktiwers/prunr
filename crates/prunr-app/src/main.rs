@@ -18,11 +18,22 @@ fn attach_parent_console() {
 }
 
 fn main() {
-    init_tracing();
-
+    // Parse CLI before tracing init so --debug can raise the filter level
+    // and propagate to the subprocess worker via env.
     let cli = Cli::parse();
 
-    // Internal subprocess worker mode (launched by GUI batch processing)
+    // `--debug` propagates to the subprocess worker via RUST_LOG so its
+    // tracing output matches the parent's. Set BEFORE init_tracing reads
+    // the env (worker subprocess inherits env from parent).
+    if cli.debug && std::env::var_os("RUST_LOG").is_none() {
+        // SAFETY: single-threaded at this point in main, no other threads
+        // reading env yet. The subprocess spawn inherits this env.
+        unsafe { std::env::set_var("RUST_LOG", "prunr=debug"); }
+    }
+
+    init_tracing();
+
+    // Internal subprocess worker mode (launched by GUI batch processing).
     if cli.worker {
         worker_process::run_worker();
     }
@@ -34,7 +45,16 @@ fn main() {
         std::process::exit(exit_code);
     }
 
-    // No args → launch GUI
+    // No args → launch GUI. With --debug on Windows, attach the parent
+    // console so tracing stderr is visible in the launching terminal
+    // (GUI subsystem has no console by default).
+    #[cfg(windows)]
+    if cli.debug {
+        attach_parent_console();
+    }
+    if cli.debug {
+        tracing::info!("debug mode active — GUI + subprocess tracing at prunr=debug");
+    }
     if let Err(e) = gui::run() {
         tracing::error!(%e, "GUI launch failed");
         std::process::exit(1);
@@ -45,8 +65,7 @@ fn main() {
 ///
 /// Writes to stderr so the subprocess worker's stdout stays clean for
 /// bincode IPC framing. Default filter is `prunr=info`; override via
-/// `RUST_LOG=prunr=debug` etc. Per-crate filters (`prunr_app=debug`,
-/// `prunr_core=warn`) also work.
+/// `RUST_LOG=prunr=debug` (or `--debug` which sets that env var).
 fn init_tracing() {
     use tracing_subscriber::{fmt, EnvFilter};
     let filter = EnvFilter::try_from_default_env()
