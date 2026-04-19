@@ -369,6 +369,7 @@ fn run_batch(args: &Cli) -> i32 {
         line_strength: args.line_strength,
         solid_line_color,
         edge_thickness: 0,
+        edge_scale: prunr_core::EdgeScale::Fused,
     };
     let batch_results = run_batch_subprocess(
         &valid_paths, &valid_indices, model, args.jobs, mask, args.cpu,

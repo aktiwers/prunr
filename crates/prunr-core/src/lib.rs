@@ -12,8 +12,8 @@ pub mod recipe;
 pub use engine::{InferenceEngine, OrtEngine};
 pub use recipe::{ProcessingRecipe, InferenceRecipe, EdgeRecipe, MaskRecipe, CompositeRecipe, RequiredTier, resolve_tier};
 pub use types::{
-    CoreError, ModelKind, ProgressStage, ProcessResult, MaskSettings, EdgeSettings, InferenceResult,
-    LineMode, LARGE_IMAGE_LIMIT, DOWNSCALE_TARGET,
+    CoreError, ModelKind, ProgressStage, ProcessResult, MaskSettings, EdgeSettings, EdgeScale,
+    InferenceResult, LineMode, LARGE_IMAGE_LIMIT, DOWNSCALE_TARGET,
 };
 pub use pipeline::{process_image, process_image_from_decoded, process_image_unchecked, process_image_with_mask, infer_only};
 pub use postprocess::{tensor_to_mask, apply_mask, postprocess_from_flat};

@@ -172,7 +172,7 @@ mod tests {
             mask: MaskSettings::default(),
             force_cpu: false,
             line_mode: LineMode::Off,
-            edge: EdgeSettings { line_strength: 0.5, solid_line_color: Some([255, 0, 0]), edge_thickness: 0 },
+            edge: EdgeSettings { line_strength: 0.5, solid_line_color: Some([255, 0, 0]), edge_thickness: 0, edge_scale: prunr_core::EdgeScale::Bold },
             ipc_dir: PathBuf::from("/tmp/prunr-ipc-test"),
         });
     }

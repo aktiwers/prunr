@@ -100,6 +100,49 @@ impl Default for MaskSettings {
     }
 }
 
+/// DexiNed output-scale selector. The model produces 6 side outputs
+/// (`block0`..`block5`, fine → coarse) plus a fused `block_cat`. One inference
+/// pass computes all 7; picking a scale just indexes into the outputs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum EdgeScale {
+    /// `block0` — finest, crispest micro-edges.
+    Fine,
+    /// `block3` — mid-scale; smoother transitions than Fine.
+    Balanced,
+    /// `block5` — coarsest side output; abstract outlines.
+    Bold,
+    /// `block_cat` — learned combination of all blocks; current default.
+    Fused,
+}
+
+impl Default for EdgeScale {
+    fn default() -> Self { Self::Fused }
+}
+
+impl std::fmt::Display for EdgeScale {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Fine => "fine",
+            Self::Balanced => "balanced",
+            Self::Bold => "bold",
+            Self::Fused => "fused",
+        })
+    }
+}
+
+impl std::str::FromStr for EdgeScale {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_ascii_lowercase().as_str() {
+            "fine" => Ok(Self::Fine),
+            "balanced" => Ok(Self::Balanced),
+            "bold" => Ok(Self::Bold),
+            "fused" => Ok(Self::Fused),
+            _ => Err(format!("unknown edge scale '{s}' (expected: fine, balanced, bold, fused)")),
+        }
+    }
+}
+
 /// Controls for the edge-detection postprocess (`finalize_edges`).
 /// `line_mode` is kept separate — it picks whether edges run at all.
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -110,6 +153,8 @@ pub struct EdgeSettings {
     pub solid_line_color: Option<[u8; 3]>,
     /// Dilate edge mask by N pixels after threshold — thickens thin lines.
     pub edge_thickness: u32,
+    /// Which DexiNed output scale to read. Default `Fused` = current behaviour.
+    pub edge_scale: EdgeScale,
 }
 
 impl Default for EdgeSettings {
@@ -118,6 +163,7 @@ impl Default for EdgeSettings {
             line_strength: 0.5,
             solid_line_color: None,
             edge_thickness: 0,
+            edge_scale: EdgeScale::Fused,
         }
     }
 }
@@ -200,6 +246,29 @@ mod tests {
             let _copied: ProgressStage = *stage;
         }
         assert_eq!(stages.len(), 8);
+    }
+
+    #[test]
+    fn edge_scale_default_is_fused() {
+        // Default must keep current behaviour (block_cat / fused output).
+        assert_eq!(EdgeScale::default(), EdgeScale::Fused);
+    }
+
+    #[test]
+    fn edge_scale_from_str_accepts_all_variants_case_insensitive() {
+        use std::str::FromStr;
+        assert_eq!(EdgeScale::from_str("fine").unwrap(), EdgeScale::Fine);
+        assert_eq!(EdgeScale::from_str("Balanced").unwrap(), EdgeScale::Balanced);
+        assert_eq!(EdgeScale::from_str("BOLD").unwrap(), EdgeScale::Bold);
+        assert_eq!(EdgeScale::from_str("fused").unwrap(), EdgeScale::Fused);
+        assert!(EdgeScale::from_str("ultra").is_err());
+    }
+
+    #[test]
+    fn edge_settings_default_has_fused_scale() {
+        // Backwards-compat invariant: loading old settings/preset files that
+        // lack edge_scale must fall back to Fused, matching pre-Task-5 output.
+        assert_eq!(EdgeSettings::default().edge_scale, EdgeScale::Fused);
     }
 
     #[test]

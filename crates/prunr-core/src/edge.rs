@@ -221,7 +221,7 @@ mod tests {
             tensor[i] = 10.0; // sigmoid → ~1 → edge
         }
         let original = solid_rgb(64, 48);
-        let edge = crate::EdgeSettings { line_strength: 0.5, solid_line_color: Some([255, 0, 0]), edge_thickness: 0 };
+        let edge = crate::EdgeSettings { line_strength: 0.5, solid_line_color: Some([255, 0, 0]), edge_thickness: 0, edge_scale: crate::EdgeScale::Fused };
         let out = finalize_edges(&tensor, h as u32, w as u32, &original, &edge);
         assert_eq!(out.width(), 64);
         assert_eq!(out.height(), 48);
@@ -236,7 +236,7 @@ mod tests {
         let h = DEXINED_H as usize;
         let tensor = vec![10.0_f32; h * w]; // all edges
         let original = solid_rgb(32, 32);
-        let edge = crate::EdgeSettings { line_strength: 0.5, solid_line_color: None, edge_thickness: 0 };
+        let edge = crate::EdgeSettings { line_strength: 0.5, solid_line_color: None, edge_thickness: 0, edge_scale: crate::EdgeScale::Fused };
         let out = finalize_edges(&tensor, h as u32, w as u32, &original, &edge);
         // Original color preserved
         assert_eq!(out.get_pixel(0, 0)[0], 120);
