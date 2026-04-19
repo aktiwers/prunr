@@ -1184,6 +1184,13 @@ impl PrunrApp {
         let original = Arc::clone(item.source_dyn.as_ref().unwrap());
         let seg_tensor = item.cached_tensor.as_ref().and_then(decompress_seg);
         let edge_tensor = Self::edge_tensor_for_active_scale(item);
+        // DualScale needs TWO edge tensors — the primary (active scale, used
+        // as the Fine layer) and a secondary Bold layer. Only decompress the
+        // Bold tensor when the style actually uses it; skipping this keeps
+        // single-scale dispatches fast.
+        let secondary_edge_tensor = matches!(item.settings.line_style, prunr_core::LineStyle::DualScale { .. })
+            .then(|| Self::edge_tensor_for_scale(item, prunr_core::EdgeScale::Bold))
+            .flatten();
         match kind {
             PreviewKind::Mask if seg_tensor.is_none() => return None,
             PreviewKind::Edge if edge_tensor.is_none() => return None,
@@ -1201,7 +1208,8 @@ impl PrunrApp {
         });
         Some(DispatchInputs {
             kind, original, settings: item.settings,
-            seg_tensor, edge_tensor, cached_edge_mask, cached_masked_base,
+            seg_tensor, edge_tensor, secondary_edge_tensor,
+            cached_edge_mask, cached_masked_base,
         })
     }
 
@@ -1210,8 +1218,20 @@ impl PrunrApp {
     /// drag. The tensor rides through as `Arc<Vec<f32>>` so hot hits are a
     /// pointer bump, not a 1.2 MB memcpy per dispatch.
     fn edge_tensor_for_active_scale(item: &mut BatchItem) -> Option<super::live_preview::EdgeTensor> {
-        let scale = item.settings.edge_scale;
+        Self::edge_tensor_for_scale(item, item.settings.edge_scale)
+    }
 
+    /// Decompress the edge tensor for a specific scale. Uses the
+    /// `volatile_edge_tensor` hot cache when the requested scale matches
+    /// the cached one; otherwise pays the zstd decompress. Only updates the
+    /// hot cache when `scale` matches the item's active scale — otherwise a
+    /// DualScale dispatch that asks for Bold would evict the active-scale
+    /// entry and make the next Edge tweak miss. Returns `None` when the
+    /// multi-scale cache isn't populated (user must Process first).
+    fn edge_tensor_for_scale(
+        item: &mut BatchItem,
+        scale: prunr_core::EdgeScale,
+    ) -> Option<super::live_preview::EdgeTensor> {
         let hot_hit = item.volatile_edge_tensor.as_ref()
             .filter(|(s, _)| *s == scale)
             .map(|(_, arc)| arc.clone());
@@ -1226,7 +1246,9 @@ impl PrunrApp {
             let d = Arc::new(cache.decompress(scale)?);
             (d, cache.height, cache.width)
         };
-        item.volatile_edge_tensor = Some((scale, data.clone()));
+        if scale == item.settings.edge_scale {
+            item.volatile_edge_tensor = Some((scale, data.clone()));
+        }
         Some(super::live_preview::EdgeTensor { data, height, width })
     }
 

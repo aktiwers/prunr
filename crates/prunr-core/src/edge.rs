@@ -339,6 +339,12 @@ pub fn compose_edges_styled(
                 let (r, g, b) = crate::postprocess::hsv_to_rgb(hue, 200, 240);
                 Some([r, g, b])
             }
+            // DualScale is handled by `compose_edges_dual_styled` — the
+            // single-mask path here renders only the active scale. Callers
+            // that select DualScale must dispatch to the dual function; the
+            // fallthrough here prevents compile errors and degrades to the
+            // user's solid_line_color for correctness.
+            LineStyle::DualScale { .. } => solid_tint,
         };
         if let Some(target) = gradient_target {
             blend_rgb(&mut out_raw[i * 4..i * 4 + 3], target, edge as u16);
@@ -347,12 +353,58 @@ pub fn compose_edges_styled(
     rgba
 }
 
-/// Clone + dilate + return the raw byte buffer. Both compose paths
-/// (`compose_edges`, `compose_edges_styled`) need this prelude.
+/// Clone + dilate + return the raw byte buffer. Every compose path
+/// (`compose_edges`, `compose_edges_styled`, `compose_edges_dual_styled`)
+/// needs this prelude.
 fn dilate_to_bytes(mask: &image::GrayImage, thickness: u32) -> Vec<u8> {
     let mut out = mask.clone();
     crate::postprocess::dilate_mask(&mut out, thickness);
     out.into_raw()
+}
+
+/// Compose two edge masks from different DexiNed scales with independent
+/// colours. Used by `LineStyle::DualScale` — fine details at `fine_color`,
+/// structural edges at `bold_color`. Alpha merges via the same ComposeMode
+/// formulas, using the max of the two edges.
+pub fn compose_edges_dual_styled(
+    fine_mask: &image::GrayImage,
+    bold_mask: &image::GrayImage,
+    base: &RgbaImage,
+    compose: crate::types::ComposeMode,
+    fine_color: [u8; 3],
+    bold_color: [u8; 3],
+    edge_thickness: u32,
+) -> RgbaImage {
+    use crate::types::ComposeMode;
+    let (ow, oh) = (base.width(), base.height());
+    let fine_raw = dilate_to_bytes(fine_mask, edge_thickness);
+    let bold_raw = dilate_to_bytes(bold_mask, edge_thickness);
+    let mut rgba = base.clone();
+    let out_raw = rgba.as_mut();
+    let pixel_count = (ow * oh) as usize;
+
+    let alpha_fn: fn(i32, i32) -> u8 = match compose {
+        ComposeMode::LinesOnly => |s, e| (s * e / 255) as u8,
+        ComposeMode::SubjectFilled => |s, e| s.max(e) as u8,
+        ComposeMode::Engraving => |s, e| (s - e).max(0) as u8,
+        ComposeMode::Ghost => |s, e| ((s * 77 + e * 204) / 255).clamp(0, 255) as u8,
+        ComposeMode::InverseMask => |s, e| ((255 - s) * e / 255) as u8,
+    };
+
+    for i in 0..pixel_count {
+        let subject = out_raw[i * 4 + 3] as i32;
+        let fine = fine_raw[i] as i32;
+        let bold = bold_raw[i] as i32;
+        let edge = fine.max(bold);
+        out_raw[i * 4 + 3] = alpha_fn(subject, edge);
+        if fine > 0 {
+            blend_rgb(&mut out_raw[i * 4..i * 4 + 3], fine_color, fine as u16);
+        }
+        if bold > 0 {
+            blend_rgb(&mut out_raw[i * 4..i * 4 + 3], bold_color, bold as u16);
+        }
+    }
+    rgba
 }
 
 /// Blend `rgb` toward `target` using `weight` (0..=255 as a /255 fraction).

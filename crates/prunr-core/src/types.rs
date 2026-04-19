@@ -267,6 +267,11 @@ pub enum LineStyle {
     /// Per-edge-pixel hue noise. `amount` = jitter magnitude 0..=255 applied
     /// to a deterministic per-pixel hash — feels hand-drawn without dithering.
     Noise { amount: u8 },
+    /// Two DexiNed scales layered — Fine at `fine_color` for micro-details,
+    /// Bold at `bold_color` for structural edges. Both sets share
+    /// `line_strength` and `edge_thickness` from the chip; colours are
+    /// independent.
+    DualScale { fine_color: [u8; 3], bold_color: [u8; 3] },
 }
 
 impl LineStyle {
@@ -278,6 +283,7 @@ impl LineStyle {
         LineStyle::Rainbow { cycles: 3 },
         LineStyle::Chromatic { offset: 3 },
         LineStyle::Noise { amount: 80 },
+        LineStyle::DualScale { fine_color: [50, 180, 230], bold_color: [30, 20, 60] },
     ];
 
     pub fn name(&self) -> &'static str {
@@ -289,6 +295,7 @@ impl LineStyle {
             LineStyle::Rainbow { .. } => "Rainbow",
             LineStyle::Chromatic { .. } => "Chromatic",
             LineStyle::Noise { .. } => "Noise",
+            LineStyle::DualScale { .. } => "Dual scale",
         }
     }
 }

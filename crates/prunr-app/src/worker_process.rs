@@ -66,6 +66,45 @@ impl Drop for SemaphoreGuard {
     }
 }
 
+/// Compose a SubjectOutline-mode output: builds the primary edge mask (from
+/// the active scale) and, if `LineStyle::DualScale` is active, also builds
+/// a Bold mask and dispatches to the dual-scale compose. Shared by the
+/// full-pipeline SubjectOutline branch and the AddEdgeInference branch.
+fn compose_subject_outline(
+    edge_res: &prunr_core::EdgeInferenceResult,
+    masked_rgba: &image::RgbaImage,
+    edge: &prunr_core::EdgeSettings,
+) -> image::RgbaImage {
+    use prunr_core::{EdgeScale, LineStyle};
+    let active = &edge_res.tensors[edge.edge_scale as usize];
+    let primary_mask = prunr_core::tensor_to_edge_mask(
+        active, edge_res.height, edge_res.width,
+        masked_rgba.width(), masked_rgba.height(),
+        edge.line_strength,
+    );
+    if let LineStyle::DualScale { fine_color, bold_color } = edge.line_style {
+        let bold = &edge_res.tensors[EdgeScale::Bold as usize];
+        let bold_mask = prunr_core::tensor_to_edge_mask(
+            bold, edge_res.height, edge_res.width,
+            masked_rgba.width(), masked_rgba.height(),
+            edge.line_strength,
+        );
+        prunr_core::compose_edges_dual_styled(
+            &primary_mask, &bold_mask, masked_rgba,
+            edge.compose_mode,
+            fine_color, bold_color,
+            edge.edge_thickness,
+        )
+    } else {
+        prunr_core::compose_edges_styled(
+            &primary_mask, masked_rgba,
+            edge.compose_mode,
+            edge.line_style,
+            edge.solid_line_color, edge.edge_thickness,
+        )
+    }
+}
+
 /// Pack an `EdgeInferenceResult`'s per-scale tensors into one LE byte buffer
 /// for IPC. Matches the layout the parent expects in `read_edge_tensor_cache`.
 fn pack_edge_tensors(res: &prunr_core::EdgeInferenceResult) -> Vec<u8> {
@@ -368,19 +407,7 @@ pub fn run_worker() -> ! {
                                         if cancel.load(Ordering::Acquire) {
                                             return Err(prunr_core::CoreError::Cancelled);
                                         }
-                                        let active = &edge_res.tensors[edge.edge_scale as usize];
-                                        // SubjectOutline: dispatch on compose_mode.
-                                        let edge_mask = prunr_core::tensor_to_edge_mask(
-                                            active, edge_res.height, edge_res.width,
-                                            masked_rgba.width(), masked_rgba.height(),
-                                            edge.line_strength,
-                                        );
-                                        let rgba_image = prunr_core::compose_edges_styled(
-                                            &edge_mask, &masked_rgba,
-                                            edge.compose_mode,
-                                            edge.line_style,
-                                            edge.solid_line_color, edge.edge_thickness,
-                                        );
+                                        let rgba_image = compose_subject_outline(&edge_res, &masked_rgba, &edge);
                                         edge_tensor_for_cache = Some(edge_res);
                                         Ok(ProcessResult { rgba_image, active_provider })
                                     })
@@ -720,19 +747,7 @@ pub fn run_worker() -> ! {
                         if cancel.load(Ordering::Acquire) {
                             return Err("cancelled".to_string());
                         }
-                        let active = &edge_res.tensors[edge_settings.edge_scale as usize];
-                        // SubjectOutline compose: dispatch on compose_mode.
-                        let edge_mask = prunr_core::tensor_to_edge_mask(
-                            active, edge_res.height, edge_res.width,
-                            masked_rgba.width(), masked_rgba.height(),
-                            edge_settings.line_strength,
-                        );
-                        let rgba_image = prunr_core::compose_edges_styled(
-                            &edge_mask, &masked_rgba,
-                            edge_settings.compose_mode,
-                            edge_settings.line_style,
-                            edge_settings.solid_line_color, edge_settings.edge_thickness,
-                        );
+                        let rgba_image = compose_subject_outline(&edge_res, &masked_rgba, &edge_settings);
                         Ok((rgba_image, edge_res))
                     })();
 

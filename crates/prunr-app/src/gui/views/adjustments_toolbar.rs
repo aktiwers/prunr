@@ -448,6 +448,10 @@ fn line_style_params(ui: &mut Ui, style: &mut prunr_core::LineStyle) -> bool {
                 changed = true;
             }
         }
+        LineStyle::DualScale { fine_color, bold_color } => {
+            changed |= rgb_picker_row(ui, "Fine (detail)", fine_color);
+            changed |= rgb_picker_row(ui, "Bold (structure)", bold_color);
+        }
     }
     changed
 }
