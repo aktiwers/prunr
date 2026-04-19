@@ -255,9 +255,6 @@ pub fn run_worker() -> ! {
                     // future Tier 2 mask reruns.  Other modes don't benefit from
                     // tensor caching so they use the monolithic pipeline.
                     let mut tensor_for_cache: Option<(Vec<f32>, u32, u32)> = None;
-                    // DexiNed multi-scale cache — all 4 scales captured from one
-                    // inference pass so live preview can switch scales without
-                    // re-inferring.
                     let mut edge_tensor_for_cache: Option<prunr_core::EdgeInferenceResult> = None;
 
                     let result = match line_mode {
