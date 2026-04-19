@@ -40,12 +40,12 @@ fn to_nchw(resized: &image::RgbImage, size: u32, divisor: f32) -> Array4<f32> {
 
 fn preprocess_rembg(img: &DynamicImage) -> Array4<f32> {
     let resized = resize_rgb_lanczos3(img, REMBG_SIZE, REMBG_SIZE);
-    let max_val = resized
-        .pixels()
-        .flat_map(|p| p.0.iter().copied())
-        .map(|v| v as f32)
-        .fold(f32::NEG_INFINITY, f32::max)
-        .max(1e-6_f32);
+    // Auto-vectorizable max over the flat RGB byte buffer — faster than the
+    // previous `.pixels().flat_map(...).map(|v| v as f32).fold(f32::max)`
+    // chain because u8::max is branchless and the slice is contiguous.
+    // Clamp to 1e-6 so to_nchw doesn't divide by zero on an all-black image.
+    let max_u8 = resized.as_raw().iter().copied().max().unwrap_or(0);
+    let max_val = (max_u8 as f32).max(1e-6_f32);
     to_nchw(&resized, REMBG_SIZE, max_val)
 }
 
