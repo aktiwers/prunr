@@ -149,8 +149,8 @@ pub fn apply_mask(original: &DynamicImage, mask: &GrayImage) -> RgbaImage {
 }
 
 /// Transform the RGB channels of `rgba` according to `style`. Alpha is
-/// preserved. Per-pixel variants run cheap (~5-20 ms at 4K). Spatial
-/// variants (Pixelate) pay one extra ~64 MB clone at 4K.
+/// preserved. Spatial variants (`Pixelate`) allocate a scratch copy of the
+/// buffer so reads don't race writes; per-pixel variants mutate in place.
 pub fn apply_fill_style(rgba: &mut RgbaImage, style: crate::types::FillStyle) {
     use crate::types::FillStyle;
     match style {
@@ -247,6 +247,9 @@ pub fn apply_fill_style(rgba: &mut RgbaImage, style: crate::types::FillStyle) {
         FillStyle::Pixelate { block_size } => {
             if block_size < 2 { return; }
             let (w, h) = rgba.dimensions();
+            // Scratch copy: reads sample the block top-left, writes fill the
+            // whole block. In-place would race the read once the first block
+            // fills forward.
             let src = rgba.clone();
             for y in 0..h {
                 for x in 0..w {
@@ -271,7 +274,9 @@ fn luma_u8(r: u8, g: u8, b: u8) -> u8 {
 }
 
 /// Convert RGB (0-255) to HSV with H in 0..=359°, S and V in 0..=255.
-/// f32 internally for clarity — fast enough for per-pixel at 4K (~20 ms).
+/// Called per-pixel on the 4K live-preview hot path — `#[inline]` lets LLVM
+/// fold it through the caller's arithmetic.
+#[inline]
 pub(crate) fn rgb_to_hsv(r: u8, g: u8, b: u8) -> (u16, u8, u8) {
     let rf = r as f32 / 255.0;
     let gf = g as f32 / 255.0;
@@ -295,6 +300,7 @@ pub(crate) fn rgb_to_hsv(r: u8, g: u8, b: u8) -> (u16, u8, u8) {
 }
 
 /// Convert HSV (H 0..=359°, S / V 0..=255) to RGB (0..=255).
+#[inline]
 pub(crate) fn hsv_to_rgb(h: u16, s: u8, v: u8) -> (u8, u8, u8) {
     let sf = s as f32 / 255.0;
     let vf = v as f32 / 255.0;
