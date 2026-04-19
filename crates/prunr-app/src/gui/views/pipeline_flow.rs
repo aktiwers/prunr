@@ -76,7 +76,10 @@ pub fn render(ctx: &egui::Context) -> bool {
                 }
 
                 arrow(ui);
-                endpoint_label(ui, "Final mask → applied as alpha");
+                endpoint_label(ui, &format!(
+                    "Final mask  {}  applied as alpha",
+                    ICON_ARROW_FORWARD.codepoint,
+                ));
 
                 ui.add_space(theme::SPACE_MD);
                 ui.separator();
@@ -129,7 +132,7 @@ fn arrow(ui: &mut egui::Ui) {
     ui.horizontal(|ui| {
         ui.add_space(theme::SPACE_SM + theme::ICON_SIZE_BUTTON / 2.0 - 4.0);
         ui.label(
-            RichText::new("↓")
+            RichText::new(ICON_ARROW_DOWNWARD.codepoint)
                 .size(theme::FONT_SIZE_BODY)
                 .color(theme::TEXT_SECONDARY),
         );
