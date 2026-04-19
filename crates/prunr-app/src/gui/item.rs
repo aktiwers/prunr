@@ -196,6 +196,12 @@ pub(crate) struct BatchItem {
     /// picks a different upstream tensor — a mask built from the Fine tensor
     /// must not be reused after the user switches to Bold.
     pub(crate) cached_edge_mask: Option<(Arc<image::GrayImage>, u32 /* line_strength bits */, prunr_core::EdgeScale)>,
+    /// SubjectOutline live-preview cache: the "masked subject" base
+    /// (`postprocess_from_flat` output) that edge composition draws onto.
+    /// Keyed by `(MaskRecipe, ModelKind)` — when mask settings change, the
+    /// base is rebuilt; when only edge settings change, the base is reused
+    /// and we skip ~50-100 ms of Lanczos + guided filter per Edge tick.
+    pub(crate) cached_masked_base: Option<(Arc<image::RgbaImage>, prunr_core::MaskRecipe, prunr_core::ModelKind)>,
     /// Which preset was last APPLIED to this image (via the dropdown's row
     /// click or via Reset All). The preset button compares current `settings`
     /// against this preset's values to show a modified/clean icon. Stays set
@@ -267,6 +273,7 @@ impl BatchItem {
                     .and_then(super::worker::CompressedEdgeTensors::from_raw);
                 self.volatile_edge_tensor = None;
                 self.cached_edge_mask = None;
+                self.cached_masked_base = None;
                 // Note: we used to null `source_rgba` / `source_texture` on
                 // non-selected items here to save ~48 MB per 4K image, but
                 // that broke live preview on any item that was NOT the
@@ -336,6 +343,7 @@ impl BatchItem {
             cached_edge_tensors: None,
             volatile_edge_tensor: None,
             cached_edge_mask: None,
+            cached_masked_base: None,
             applied_preset,
             preset_undo_stack: VecDeque::new(),
             preset_redo_stack: VecDeque::new(),

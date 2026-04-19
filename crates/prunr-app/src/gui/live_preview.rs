@@ -89,6 +89,10 @@ pub struct PreviewResult {
     /// Keyed by (line_strength bits, scale) so scale switches don't reuse a
     /// stale mask built from a different tensor.
     pub new_edge_mask: Option<(Arc<GrayImage>, u32 /* line_strength bits */, prunr_core::EdgeScale)>,
+    /// Masked subject base built during this dispatch (SubjectOutline only),
+    /// for the parent to cache so subsequent Edge tweaks whose mask recipe
+    /// matches can skip `postprocess_from_flat`. Keyed by (MaskRecipe, model).
+    pub new_masked_base: Option<(Arc<image::RgbaImage>, prunr_core::MaskRecipe, prunr_core::ModelKind)>,
     /// `true` when no further tweaks are pending for this item at drain
     /// time — the drag has settled and this is the last result of the
     /// session. Callers gate heavy side-effects (sidebar thumb rebuild)
@@ -225,24 +229,26 @@ impl LivePreview {
                 let ls_bits = inputs.settings.line_strength.to_bits();
                 let scale = inputs.settings.edge_scale;
                 let is_edge = matches!(inputs.kind, PreviewKind::Edge);
-                let had_cache = inputs.cached_edge_mask.is_some();
-                let (result, built_mask) = run_preview(inputs, &cancel);
+                let mask_recipe = prunr_core::MaskRecipe::from(&inputs.settings.mask_settings());
+                let seg_model = inputs.seg_tensor.as_ref().map(|s| s.model);
+                let output = run_preview(inputs, &cancel);
                 if cancel.load(Ordering::Acquire) {
                     return;
                 }
-                if let Some(rgba) = result {
-                    // Publish the mask for caching only if we just built it
-                    // (cache miss path) — no point re-publishing what was cached.
-                    let new_edge_mask = if is_edge && !had_cache {
-                        built_mask.map(|m| (m, ls_bits, scale))
+                if let Some(rgba) = output.rgba {
+                    let new_edge_mask = if is_edge {
+                        output.built_edge_mask.map(|m| (m, ls_bits, scale))
                     } else {
                         None
                     };
+                    let new_masked_base = output.built_masked_base
+                        .zip(seg_model)
+                        .map(|(base, model)| (base, mask_recipe, model));
                     // `is_final` is set by `drain_results`, where the UI
                     // thread can read `self.pending` atomically. The worker
                     // ships a placeholder and doesn't care.
                     let _ = tx.send(PreviewResult {
-                        item_id: id, rgba, generation, new_edge_mask,
+                        item_id: id, rgba, generation, new_edge_mask, new_masked_base,
                         is_final: false,
                     });
                 }
@@ -308,6 +314,10 @@ pub struct DispatchInputs {
     /// whose line_strength matches the current one. Populated when available
     /// so tweaks to edge_thickness / solid_line_color skip the resize.
     pub cached_edge_mask: Option<Arc<GrayImage>>,
+    /// SubjectOutline masked-subject base (output of `postprocess_from_flat`)
+    /// from a previous dispatch whose mask recipe matches the current one.
+    /// Populated when available so Edge tweaks skip Lanczos + guided filter.
+    pub cached_masked_base: Option<Arc<image::RgbaImage>>,
 }
 
 pub struct SegTensor {
@@ -342,63 +352,107 @@ pub fn decompress_seg(ct: &CompressedTensor) -> Option<SegTensor> {
 /// slows accordingly — but the user opted into that cost when they toggled
 /// Refine Edges on, and without running the filter the three refine knobs
 /// (toggle, guided_radius, guided_epsilon) would be no-ops in live preview.
-fn run_preview(inputs: DispatchInputs, cancel: &AtomicBool) -> (Option<RgbaImage>, Option<Arc<GrayImage>>) {
-    if cancel.load(Ordering::Acquire) { return (None, None); }
+/// What `run_preview` produces. `built_edge_mask` / `built_masked_base` are
+/// `Some` only when newly constructed this dispatch so the parent caches
+/// them — reused inputs pass through as `None` to avoid re-publishing.
+struct RunOutput {
+    rgba: Option<RgbaImage>,
+    built_edge_mask: Option<Arc<GrayImage>>,
+    built_masked_base: Option<Arc<image::RgbaImage>>,
+}
 
-    // SubjectOutline mode (both tensors present): build the masked subject so
-    // edges composite onto it instead of the raw photo. Without this, Edge
-    // tweaks in SubjectOutline would draw lines on the unmasked source, and
-    // Mask tweaks would drop the edges entirely.
+impl RunOutput {
+    fn empty() -> Self {
+        Self { rgba: None, built_edge_mask: None, built_masked_base: None }
+    }
+}
+
+fn run_preview(inputs: DispatchInputs, cancel: &AtomicBool) -> RunOutput {
+    if cancel.load(Ordering::Acquire) { return RunOutput::empty(); }
+
+    // SubjectOutline mode: both tensors are present. Edge compositing draws
+    // onto the masked subject (not the raw photo); mask tweaks must keep the
+    // outline; edge tweaks reuse the masked base across dispatches.
     let is_subject_outline = inputs.seg_tensor.is_some() && inputs.edge_tensor.is_some();
+
+    // Resolve the masked base for SubjectOutline mode.
+    // - Mask kind: always rebuild (the mask settings may have just changed).
+    // - Edge kind: reuse cached base if Some (mask settings stable during drag).
+    // When newly built, `built_masked_base` propagates back for caching.
+    let (masked_base, built_masked_base) = if is_subject_outline {
+        match inputs.kind {
+            PreviewKind::Mask => {
+                // invariant: is_subject_outline → seg_tensor is Some.
+                let seg = inputs.seg_tensor.as_ref().unwrap();
+                match build_masked_base(seg, &inputs.original, &inputs.settings) {
+                    Some(img) => {
+                        let arc = Arc::new(img.to_rgba8());
+                        (Some(arc.clone()), Some(arc))
+                    }
+                    None => (None, None),
+                }
+            }
+            PreviewKind::Edge => {
+                if let Some(cached) = inputs.cached_masked_base.clone() {
+                    (Some(cached), None)
+                } else {
+                    let seg = inputs.seg_tensor.as_ref().unwrap();
+                    match build_masked_base(seg, &inputs.original, &inputs.settings) {
+                        Some(img) => {
+                            let arc = Arc::new(img.to_rgba8());
+                            (Some(arc.clone()), Some(arc))
+                        }
+                        None => (None, None),
+                    }
+                }
+            }
+        }
+    } else {
+        (None, None)
+    };
 
     match inputs.kind {
         PreviewKind::Mask => {
-            let Some(seg) = inputs.seg_tensor.as_ref() else { return (None, None); };
-            let Some(masked) = build_masked_base(seg, &inputs.original, &inputs.settings)
-            else { return (None, None); };
-
             if !is_subject_outline {
-                // Off mode: mask tweak output is the masked RGBA itself.
-                return (Some(masked.to_rgba8()), None);
+                // Off mode: rebuild and return masked RGBA (no edge compose).
+                let Some(seg) = inputs.seg_tensor.as_ref() else { return RunOutput::empty(); };
+                let Some(masked) = build_masked_base(seg, &inputs.original, &inputs.settings)
+                else { return RunOutput::empty(); };
+                return RunOutput {
+                    rgba: Some(masked.to_rgba8()),
+                    built_edge_mask: None,
+                    built_masked_base: None,
+                };
             }
-
-            // SubjectOutline: also composite edges on top so mask tweaks don't
-            // visually drop the subject outline from the preview.
+            // SubjectOutline: composite edges onto the (freshly built) masked base.
+            let Some(base_arc) = masked_base else { return RunOutput::empty(); };
+            let base = DynamicImage::ImageRgba8((*base_arc).clone());
             // invariant: is_subject_outline → edge_tensor is Some.
             let edge = inputs.edge_tensor.as_ref().unwrap();
             let edge_settings = inputs.settings.edge_settings();
-            let (mask, _) = resolve_edge_mask(&inputs.cached_edge_mask, edge, &masked, &edge_settings);
+            let (mask, _) = resolve_edge_mask(&inputs.cached_edge_mask, edge, &base, &edge_settings);
             let rgba = compose_edges(
-                &mask, &masked,
+                &mask, &base,
                 edge_settings.solid_line_color,
                 edge_settings.edge_thickness,
             );
-            (Some(rgba), None)
+            RunOutput { rgba: Some(rgba), built_edge_mask: None, built_masked_base }
         }
         PreviewKind::Edge => {
-            let Some(edge) = inputs.edge_tensor.as_ref() else { return (None, None); };
+            let Some(edge) = inputs.edge_tensor.as_ref() else { return RunOutput::empty(); };
             let edge_settings = inputs.settings.edge_settings();
 
-            // Base image to composite edges onto: masked subject in
-            // SubjectOutline mode, raw original in EdgesOnly mode. Building the
-            // masked base costs one Tier 2 postprocess (~50 ms on 4K); the
-            // line_strength fast path below still saves the tensor→mask resize.
-            let base_owned = if is_subject_outline {
-                inputs.seg_tensor.as_ref().and_then(|seg| {
-                    build_masked_base(seg, &inputs.original, &inputs.settings)
-                })
-            } else {
-                None
-            };
+            // Base for compose: masked subject (SubjectOutline) or raw original (EdgesOnly).
+            let base_owned = masked_base.as_ref().map(|arc| DynamicImage::ImageRgba8((**arc).clone()));
             let base: &DynamicImage = base_owned.as_ref().unwrap_or(&inputs.original);
 
-            let (mask, built) = resolve_edge_mask(&inputs.cached_edge_mask, edge, base, &edge_settings);
+            let (mask, built_edge_mask) = resolve_edge_mask(&inputs.cached_edge_mask, edge, base, &edge_settings);
             let rgba = compose_edges(
                 &mask, base,
                 edge_settings.solid_line_color,
                 edge_settings.edge_thickness,
             );
-            (Some(rgba), built)
+            RunOutput { rgba: Some(rgba), built_edge_mask, built_masked_base }
         }
     }
 }
@@ -534,6 +588,7 @@ mod tests {
             rgba: RgbaImage::new(1, 1),
             generation: 1,
             new_edge_mask: None,
+            new_masked_base: None,
             is_final: false,
         }).unwrap();
 
@@ -557,6 +612,7 @@ mod tests {
             rgba: RgbaImage::new(2, 2),
             generation: 7,
             new_edge_mask: None,
+            new_masked_base: None,
             is_final: false,
         }).unwrap();
 
@@ -579,6 +635,7 @@ mod tests {
             rgba: RgbaImage::new(1, 1),
             generation: 1,
             new_edge_mask: None,
+            new_masked_base: None,
             is_final: false,
         }).unwrap();
         let drained = lp.drain_results();
@@ -598,6 +655,7 @@ mod tests {
             rgba: RgbaImage::new(1, 1),
             generation: 3,
             new_edge_mask: None,
+            new_masked_base: None,
             is_final: false,
         }).unwrap();
 
@@ -624,6 +682,7 @@ mod tests {
             rgba: RgbaImage::new(1, 1),
             generation: 2,
             new_edge_mask: None,
+            new_masked_base: None,
             is_final: false,
         }).unwrap();
 
