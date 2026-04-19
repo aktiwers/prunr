@@ -219,6 +219,13 @@ pub fn render(
             "Transparent",
         ), Tier::Bg, &mut change);
 
+        // BG effect — orthogonal to bg colour. Effect wins when non-None;
+        // solid colour stays the fast-path render-time fallback.
+        if render_bg_effect_chip(ui, &mut item_settings.bg_effect) {
+            change.mask = true;
+            change.commit = true;
+        }
+
         // Right-aligned cluster: reset, preset. Right-to-left layout fills
         // from the right edge so items stack: [..free space..] [preset] [↺].
         ui.with_layout(
@@ -515,6 +522,56 @@ fn fill_style_params(ui: &mut Ui, style: &mut prunr_core::FillStyle) -> bool {
         FillStyle::Duotone { dark, light } => {
             changed |= rgb_picker_row(ui, "Dark", dark);
             changed |= rgb_picker_row(ui, "Light", light);
+        }
+    }
+    changed
+}
+
+/// Background-effect picker. Orthogonal to the bg colour chip — effects
+/// override colour when non-None (the output RGBA gets the effect baked
+/// in). Picker keeps the popover open so the user can tune params.
+fn render_bg_effect_chip(ui: &mut Ui, effect: &mut prunr_core::BgEffect) -> bool {
+    use prunr_core::BgEffect;
+    let accent = !matches!(effect, BgEffect::None);
+    let resp = chip::chip_tooltip(
+        chip::chip_button(ui, &ICON_TEXTURE.codepoint.to_string(), effect.name(), accent),
+        "Bg effect",
+        "Backdrop composited behind the subject. Overrides the bg colour \
+         when non-transparent; baked into the output RGBA at process time.",
+    );
+
+    let popup_id = ui.make_persistent_id("bg_effect_popup");
+    let mut changed = false;
+    chip::popup_for(ui, popup_id, &resp, |ui| {
+        ui.label(RichText::new("Bg effect").strong().color(theme::TEXT_PRIMARY));
+        ui.add_space(theme::SPACE_XS);
+        for option in BgEffect::ALL {
+            let selected = std::mem::discriminant(option) == std::mem::discriminant(effect);
+            if ui.selectable_label(selected, option.name()).clicked() && !selected {
+                *effect = *option;
+                changed = true;
+            }
+        }
+        ui.separator();
+        if bg_effect_params(ui, effect) {
+            changed = true;
+        }
+    });
+    changed
+}
+
+fn bg_effect_params(ui: &mut Ui, effect: &mut prunr_core::BgEffect) -> bool {
+    use prunr_core::BgEffect;
+    let mut changed = false;
+    match effect {
+        BgEffect::None | BgEffect::InvertedSource | BgEffect::DesaturatedSource => {
+            ui.label(RichText::new("No parameters.").color(theme::TEXT_SECONDARY)
+                .size(theme::FONT_SIZE_MONO));
+        }
+        BgEffect::BlurredSource { radius } => {
+            if ui.add(egui::Slider::new(radius, 1..=64).text("Blur radius")).changed() {
+                changed = true;
+            }
         }
     }
     changed

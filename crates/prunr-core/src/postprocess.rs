@@ -14,6 +14,7 @@ pub fn postprocess(raw: ArrayView4<f32>, original: &DynamicImage, mask_settings:
     let mask = tensor_to_mask_with_rgba(raw, &rgba, mask_settings, model);
     apply_mask_inplace(&mut rgba, &mask);
     apply_fill_style(&mut rgba, mask_settings.fill_style);
+    apply_bg_effect(&mut rgba, original, mask_settings.bg_effect);
     rgba
 }
 
@@ -271,6 +272,57 @@ pub fn apply_fill_style(rgba: &mut RgbaImage, style: crate::types::FillStyle) {
 #[inline]
 fn luma_u8(r: u8, g: u8, b: u8) -> u8 {
     ((r as u32 * 2126 + g as u32 * 7152 + b as u32 * 722) / 10000) as u8
+}
+
+/// Composite a derived backdrop into the transparent areas of `rgba` per the
+/// selected `effect`. Output becomes fully opaque where the effect applies.
+/// Always allocates a scratch backdrop the size of the source — acceptable
+/// cost because bg effects only run at postprocess tier, never on the
+/// per-tick live-preview path (live preview keeps transparency so the
+/// canvas's GPU-rect bg render stays instant).
+pub fn apply_bg_effect(rgba: &mut RgbaImage, source: &DynamicImage, effect: crate::types::BgEffect) {
+    use crate::types::BgEffect;
+    let backdrop: RgbaImage = match effect {
+        BgEffect::None => return,
+        BgEffect::BlurredSource { radius } => {
+            let r = radius.clamp(1, 64) as f32;
+            image::imageops::blur(&source.to_rgba8(), r)
+        }
+        BgEffect::InvertedSource => {
+            let mut img = source.to_rgba8();
+            for p in img.pixels_mut() {
+                p.0[0] = 255 - p.0[0];
+                p.0[1] = 255 - p.0[1];
+                p.0[2] = 255 - p.0[2];
+            }
+            img
+        }
+        BgEffect::DesaturatedSource => {
+            let mut img = source.to_rgba8();
+            for p in img.pixels_mut() {
+                let y = luma_u8(p.0[0], p.0[1], p.0[2]);
+                p.0[0] = y; p.0[1] = y; p.0[2] = y;
+            }
+            img
+        }
+    };
+
+    // Alpha-blend foreground over backdrop, force fully opaque output where
+    // the subject mask left partial alpha. Anywhere the subject was fully
+    // opaque already, the formula reduces to a no-op.
+    debug_assert_eq!(rgba.dimensions(), backdrop.dimensions());
+    let raw = rgba.as_mut();
+    let bd = backdrop.as_raw();
+    for (i, px) in raw.chunks_exact_mut(4).enumerate() {
+        let a = px[3] as u16;
+        if a == 255 { continue; }
+        let inv = 255 - a;
+        let bd_i = i * 4;
+        px[0] = ((px[0] as u16 * a + bd[bd_i]     as u16 * inv) / 255) as u8;
+        px[1] = ((px[1] as u16 * a + bd[bd_i + 1] as u16 * inv) / 255) as u8;
+        px[2] = ((px[2] as u16 * a + bd[bd_i + 2] as u16 * inv) / 255) as u8;
+        px[3] = 255;
+    }
 }
 
 /// Convert RGB (0-255) to HSV with H in 0..=359°, S and V in 0..=255.

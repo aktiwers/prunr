@@ -87,6 +87,11 @@ pub struct MaskSettings {
     /// How the subject RGB is transformed after masking and before compose.
     #[serde(default)]
     pub fill_style: FillStyle,
+    /// Backdrop effect baked into the output where the mask was transparent.
+    /// `None` preserves transparency (solid bg colour still renders via the
+    /// GPU-rect fast path at display time).
+    #[serde(default)]
+    pub bg_effect: BgEffect,
 }
 
 impl Default for MaskSettings {
@@ -100,6 +105,7 @@ impl Default for MaskSettings {
             guided_epsilon: 1e-4,
             feather: 0.0,
             fill_style: FillStyle::default(),
+            bg_effect: BgEffect::default(),
         }
     }
 }
@@ -321,6 +327,56 @@ pub enum FillStyle {
     /// Nearest-neighbour block downscale. Each `block_size × block_size`
     /// region takes the colour of its top-left pixel.
     Pixelate { block_size: u32 },
+}
+
+/// Backdrop effect composited behind the masked subject. Unlike the solid
+/// `bg` color (rendered as a GPU rect at display time — instant), effects
+/// need pixels, so they're baked into the output RGBA by `postprocess`.
+/// Changing an effect re-runs the postprocess tier.
+///
+/// `None` preserves the transparent-output + GPU-rect-bg-color render path;
+/// any other variant hands the pipeline a derived backdrop built from the
+/// source image.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash,
+    serde::Serialize, serde::Deserialize, Default,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum BgEffect {
+    /// Keep transparency. Solid `bg` colour (if set) paints at render/export time.
+    #[default]
+    None,
+    /// Fill transparent areas with the source image, blurred. `radius` is the
+    /// Gaussian sigma in pixels — higher = softer. Clamped 1..=64.
+    BlurredSource { radius: u32 },
+    /// Fill transparent areas with the negative of the source.
+    InvertedSource,
+    /// Fill transparent areas with the luma grayscale of the source.
+    DesaturatedSource,
+}
+
+impl BgEffect {
+    pub const ALL: &'static [Self] = &[
+        BgEffect::None,
+        BgEffect::BlurredSource { radius: 12 },
+        BgEffect::InvertedSource,
+        BgEffect::DesaturatedSource,
+    ];
+
+    pub fn name(&self) -> &'static str {
+        match self {
+            BgEffect::None => "Transparent",
+            BgEffect::BlurredSource { .. } => "Blurred source",
+            BgEffect::InvertedSource => "Inverted source",
+            BgEffect::DesaturatedSource => "Desaturated source",
+        }
+    }
+}
+
+impl std::fmt::Display for BgEffect {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
 }
 
 impl FillStyle {

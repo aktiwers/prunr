@@ -5,7 +5,7 @@
 //! tier needs to re-run (or if processing can be skipped entirely).
 
 use serde::{Serialize, Deserialize};
-use crate::types::{ModelKind, EdgeScale, ComposeMode, LineStyle, FillStyle};
+use crate::types::{ModelKind, EdgeScale, ComposeMode, LineStyle, FillStyle, BgEffect};
 
 /// Tier 1: settings that require AI model inference.
 ///
@@ -64,6 +64,7 @@ pub struct MaskRecipe {
     guided_epsilon_bits: u32,
     feather_bits: u32,
     pub fill_style: FillStyle,
+    pub bg_effect: BgEffect,
 }
 
 impl From<&crate::MaskSettings> for MaskRecipe {
@@ -77,6 +78,7 @@ impl From<&crate::MaskSettings> for MaskRecipe {
             guided_epsilon_bits: m.guided_epsilon.to_bits(),
             feather_bits: m.feather.to_bits(),
             fill_style: m.fill_style,
+            bg_effect: m.bg_effect,
         }
     }
 }
@@ -91,6 +93,7 @@ impl PartialEq for MaskRecipe {
             && self.guided_epsilon_bits == other.guided_epsilon_bits
             && self.feather_bits == other.feather_bits
             && self.fill_style == other.fill_style
+            && self.bg_effect == other.bg_effect
     }
 }
 impl Eq for MaskRecipe {}
@@ -105,6 +108,7 @@ impl std::hash::Hash for MaskRecipe {
         self.guided_epsilon_bits.hash(state);
         self.feather_bits.hash(state);
         self.fill_style.hash(state);
+        self.bg_effect.hash(state);
     }
 }
 
