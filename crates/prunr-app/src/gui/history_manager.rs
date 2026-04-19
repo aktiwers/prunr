@@ -45,15 +45,13 @@ fn push_bounded(stack: &mut VecDeque<PresetSnapshot>, snap: PresetSnapshot) {
 pub(crate) struct HistoryManager;
 
 impl HistoryManager {
-    /// True if Ctrl+Z on this item would change anything. Mirrors the internal
-    /// gate of `undo_result` so the toolbar can render its button state
-    /// without duplicating the policy.
+    /// True if `undo_result` on this item would change anything.
     pub(crate) fn can_undo(item: &BatchItem) -> bool {
         item.status == BatchStatus::Done
             && (!item.history.is_empty() || item.result_rgba.is_some())
     }
 
-    /// True if Ctrl+Y would replay a previously-undone result.
+    /// True if `redo_result` on this item would change anything.
     pub(crate) fn can_redo(item: &BatchItem) -> bool {
         !item.redo_stack.is_empty()
     }
