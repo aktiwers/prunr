@@ -1258,9 +1258,16 @@ impl PrunrApp {
         for r in results {
             let (item_id, source, is_final) = {
                 let Some(item) = self.batch.find_by_id_mut(r.item_id) else {
+                    tracing::warn!(item_id = r.item_id, "live_preview: apply — item not found");
                     continue;
                 };
                 let new_rgba = Arc::new(r.rgba);
+                let (w, h) = (new_rgba.width(), new_rgba.height());
+                tracing::info!(
+                    item_id = item.id, w, h,
+                    has_new_masked_base = r.new_masked_base.is_some(),
+                    "live_preview: apply — new result_rgba, spawning tex_prep",
+                );
                 item.result_rgba = Some(new_rgba.clone());
                 // Mark pending so sync_selected_batch_textures doesn't also
                 // spawn its own prep on this same frame.
@@ -2104,15 +2111,16 @@ impl PrunrApp {
             if toolbar_change.edge_cache_invalid {
                 self.batch.items[idx].invalidate_edge_cache();
             }
-            // A preset apply or line-mode toggle on a Done item leaves the
-            // result stale (cache invalidated, but applied_recipe still
-            // says the old setup). Auto-trigger a reprocess so the user
-            // doesn't have to click Process; tier routing keeps this cheap
-            // — AddEdgeInference when only edges were added, MaskRerun
-            // when only edges were dropped.
-            if (toolbar_change.preset_applied || toolbar_change.line_mode_changed)
-                && self.batch.items[idx].status == BatchStatus::Done
-            {
+            // A preset apply, or switching back to Off (the "just bg removal"
+            // case), leaves the Done item stale. Auto-reprocess so the user
+            // doesn't have to click Process. We don't auto-process on Off
+            // → Subject or Off → EdgesOnly; those are mode-enablement
+            // transitions where the user typically wants to tweak settings
+            // before firing the run.
+            let current_line_mode = self.batch.items[idx].settings.line_mode;
+            let auto_trigger = toolbar_change.preset_applied
+                || (toolbar_change.line_mode_changed && current_line_mode == prunr_core::LineMode::Off);
+            if auto_trigger && self.batch.items[idx].status == BatchStatus::Done {
                 let target_id = self.batch.items[idx].id;
                 self.process_items(|item| item.id == target_id);
             }
