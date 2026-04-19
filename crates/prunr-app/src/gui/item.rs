@@ -234,7 +234,11 @@ impl BatchItem {
     /// Note: `source_texture` is NOT cleared — callers decide whether the
     /// source view also needs rebuilding (undo: yes; redo: no).
     pub(crate) fn reset_result_caches(&mut self) {
-        self.cached_tensor = None;
+        // Do NOT clear `cached_tensor` here. The seg tensor is a function of
+        // the source image + model, so it stays valid across undo/redo and
+        // across Tier 2 / AddEdge reruns that don't return a fresh tensor.
+        // Callers that actually invalidate the tensor (model swap, crash
+        // retry) set `cached_tensor = None` explicitly.
         self.result_texture = None;
         self.thumb_texture = None;
         self.thumb_pending = false;
@@ -264,15 +268,19 @@ impl BatchItem {
                 self.result_rgba = Some(Arc::new(pr.rgba_image));
                 self.status = BatchStatus::Done;
                 self.applied_recipe = Some(recipe_snapshot);
-                // Tensor caches are compressed on the bridge thread; storing
-                // is a zero-cost move. Fresh edge tensors invalidate the hot
-                // decompressed cache on top.
-                self.cached_tensor = tensor_cache
-                    .and_then(super::worker::CompressedTensor::from_raw);
-                self.cached_edge_tensors = edge_cache
-                    .and_then(super::worker::CompressedEdgeTensors::from_raw);
-                self.volatile_edge_tensor = None;
-                self.cached_edge_mask = None;
+                // Preserve existing cache when the worker returned without a
+                // fresh tensor (Tier 2 RePostProcess / AddEdgeInference for
+                // the seg side). Clobbering it here silently killed live
+                // preview after any tier-2 result — the next gamma tweak had
+                // nothing to postprocess from.
+                if let Some(new) = tensor_cache.and_then(super::worker::CompressedTensor::from_raw) {
+                    self.cached_tensor = Some(new);
+                }
+                if let Some(new) = edge_cache.and_then(super::worker::CompressedEdgeTensors::from_raw) {
+                    self.cached_edge_tensors = Some(new);
+                    self.volatile_edge_tensor = None;
+                    self.cached_edge_mask = None;
+                }
                 self.cached_masked_base = None;
                 // Note: we used to null `source_rgba` / `source_texture` on
                 // non-selected items here to save ~48 MB per 4K image, but
@@ -389,14 +397,16 @@ mod tests {
     }
 
     #[test]
-    fn reset_result_caches_clears_expected_fields() {
+    fn reset_result_caches_clears_display_fields_only() {
+        // reset_result_caches owns display/texture cleanup. It must NOT
+        // touch cached_tensor — that would kill live preview after any
+        // Tier 2 rerun (the tier-2 worker doesn't return a fresh tensor).
         let mut item = fixture_item(1);
         item.thumb_pending = true;
         item.source_tex_pending = true;
         item.result_tex_pending = true;
         item.decode_pending = true;
         item.reset_result_caches();
-        assert!(item.cached_tensor.is_none());
         assert!(item.result_texture.is_none());
         assert!(item.thumb_texture.is_none());
         assert!(!item.thumb_pending);
