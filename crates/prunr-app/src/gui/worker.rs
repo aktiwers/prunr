@@ -1,11 +1,10 @@
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
 use prunr_core::{MaskSettings, EdgeSettings, EdgeScale, ModelKind, ProgressStage, ProcessResult, EDGE_SCALE_COUNT};
 use crate::gui::settings::LineMode;
-use crate::subprocess::protocol::SubprocessEvent;
+use crate::subprocess::protocol::{SubprocessEvent, CANCELLED_ERR_MSG};
 use crate::subprocess::manager::SubprocessManager;
 
 /// Maximum time the subprocess may stay silent with in-flight work before we
@@ -201,7 +200,7 @@ pub enum WorkerMessage {
         /// doesn't force a full seg re-inference.
         add_edge_items: Vec<AddEdgeWorkItem>,
         config: ProcessingConfig,
-        cancel: Arc<AtomicBool>,
+        cancels: super::processor::CancelRegistry,
         /// Channel for additional items admitted by the memory controller.
         additional_items_rx: Option<mpsc::Receiver<WorkItem>>,
     },
@@ -251,11 +250,11 @@ pub fn spawn_worker(
             while let Ok(msg) = msg_rx.recv() {
                 match msg {
                     WorkerMessage::BatchProcess {
-                        items, tier2_items, add_edge_items, config, cancel,
+                        items, tier2_items, add_edge_items, config, cancels,
                         additional_items_rx,
                     } => {
                         run_batch_with_retry(
-                            items, tier2_items, add_edge_items, config, &cancel,
+                            items, tier2_items, add_edge_items, config, &cancels,
                             additional_items_rx,
                             &res_tx, &ctx,
                         );
@@ -314,7 +313,7 @@ fn run_batch_with_retry(
     initial_tier2: Vec<Tier2WorkItem>,
     initial_add_edge: Vec<AddEdgeWorkItem>,
     config: ProcessingConfig,
-    cancel: &Arc<AtomicBool>,
+    cancels: &super::processor::CancelRegistry,
     additional_items_rx: Option<mpsc::Receiver<WorkItem>>,
     res_tx: &mpsc::Sender<WorkerResult>,
     ctx: &egui::Context,
@@ -332,7 +331,7 @@ fn run_batch_with_retry(
     emit_loading_status(&state, res_tx, ctx);
 
     loop {
-        if cancel.load(Ordering::Acquire) {
+        if cancels.is_global_cancelled() {
             let _ = res_tx.send(WorkerResult::Cancelled);
             ctx.request_repaint();
             return;
@@ -352,14 +351,14 @@ fn run_batch_with_retry(
         }
 
         let Some((mut sub, mut sent_items, mut sent_tier2_ids, mut sent_add_edge_ids)) = spawn_and_initial_burst(
-            &mut state, model, mask, force_cpu, line_mode, edge, res_tx, ctx,
+            &mut state, model, mask, force_cpu, line_mode, edge, cancels, res_tx, ctx,
         ) else {
             return; // spawn failed — errors + BatchComplete already sent
         };
 
         let outcome = run_event_loop(
             &mut sub, &mut state, &mut sent_items, &mut sent_tier2_ids, &mut sent_add_edge_ids,
-            additional_items_rx, cancel, model, res_tx, ctx,
+            additional_items_rx, cancels, model, res_tx, ctx,
         );
 
         match outcome {
@@ -434,10 +433,19 @@ fn spawn_and_initial_burst(
     force_cpu: bool,
     line_mode: LineMode,
     edge: EdgeSettings,
+    cancels: &super::processor::CancelRegistry,
     res_tx: &mpsc::Sender<WorkerResult>,
     ctx: &egui::Context,
 ) -> Option<(SubprocessManager, Vec<WorkItem>, Vec<u64>, Vec<u64>)> {
+    // Drop anything cancelled before spawn — they don't count toward
+    // `effective_jobs` and shouldn't occupy burst slots either.
+    drop_cancelled_pending(state, cancels, res_tx, ctx);
     let total_pending = state.pending.len() + state.pending_tier2.len() + state.pending_add_edge.len();
+    if total_pending == 0 {
+        let _ = res_tx.send(WorkerResult::BatchComplete);
+        ctx.request_repaint();
+        return None;
+    }
     // Cap engines at the number of Tier 1 items — Tier 2 + AddEdge don't
     // use the seg engine pool.
     let effective_jobs = state.max_jobs.min(state.pending.len().max(1));
@@ -490,19 +498,28 @@ fn run_event_loop(
     sent_tier2_ids: &mut Vec<u64>,
     sent_add_edge_ids: &mut Vec<u64>,
     additional_items_rx: Option<&mpsc::Receiver<WorkItem>>,
-    cancel: &AtomicBool,
+    cancels: &super::processor::CancelRegistry,
     model: ModelKind,
     res_tx: &mpsc::Sender<WorkerResult>,
     ctx: &egui::Context,
 ) -> EventLoopOutcome {
     let mut last_event_at = Instant::now();
     let mut subprocess_finished = false;
+    // Items we've already told the subprocess to cancel — avoids re-sending
+    // `CancelItem` every iteration while we wait for the ImageError echo.
+    let mut cancel_notified: std::collections::HashSet<u64> = std::collections::HashSet::new();
 
     while !subprocess_finished {
-        if cancel.load(Ordering::Acquire) {
+        if cancels.is_global_cancelled() {
             cancel_subprocess(sub, res_tx, ctx);
             return EventLoopOutcome::Cancelled;
         }
+
+        // Notify subprocess of newly cancelled in-flight items so it can drop
+        // them at the next dispatch check instead of finishing the work.
+        forward_item_cancels(
+            sub, sent_items, sent_tier2_ids, sent_add_edge_ids, cancels, &mut cancel_notified,
+        );
 
         // Real-crash check first so a segfault is reported as such rather
         // than masked by the watchdog firing on the same silence.
@@ -529,7 +546,7 @@ fn run_event_loop(
             }
             handle_subprocess_event(
                 event, sub, state, sent_items, sent_tier2_ids, sent_add_edge_ids,
-                additional_items_rx, model, res_tx, ctx,
+                additional_items_rx, cancels, model, res_tx, ctx,
             );
         }
 
@@ -566,6 +583,7 @@ fn handle_subprocess_event(
     sent_tier2_ids: &mut Vec<u64>,
     sent_add_edge_ids: &mut Vec<u64>,
     additional_items_rx: Option<&mpsc::Receiver<WorkItem>>,
+    cancels: &super::processor::CancelRegistry,
     model: ModelKind,
     res_tx: &mpsc::Sender<WorkerResult>,
     ctx: &egui::Context,
@@ -598,7 +616,7 @@ fn handle_subprocess_event(
             });
             ctx.request_repaint();
 
-            admit_next_item(sub, state, sent_items, sent_tier2_ids, sent_add_edge_ids, additional_items_rx);
+            admit_next_item(sub, state, sent_items, sent_tier2_ids, sent_add_edge_ids, additional_items_rx, cancels, res_tx, ctx);
         }
         SubprocessEvent::ImageError { item_id, error } => {
             state.completed.insert(item_id);
@@ -712,6 +730,7 @@ fn read_edge_tensor_cache(
 /// After an ImageDone, pull one more item into the subprocess if RSS allows.
 /// Prefers Tier 2 (no inference), then Tier 1 pending, then the admission
 /// overflow channel.
+#[allow(clippy::too_many_arguments)]
 fn admit_next_item(
     sub: &mut SubprocessManager,
     state: &mut BatchRunState,
@@ -719,7 +738,11 @@ fn admit_next_item(
     sent_tier2_ids: &mut Vec<u64>,
     sent_add_edge_ids: &mut Vec<u64>,
     additional_items_rx: Option<&mpsc::Receiver<WorkItem>>,
+    cancels: &super::processor::CancelRegistry,
+    res_tx: &mpsc::Sender<WorkerResult>,
+    ctx: &egui::Context,
 ) {
+    drop_cancelled_pending(state, cancels, res_tx, ctx);
     if sub.should_pause_admission() {
         return;
     }
@@ -739,13 +762,76 @@ fn admit_next_item(
     }
     if let Some(rx) = additional_items_rx {
         if let Ok(item) = rx.try_recv() {
-            if send_item_to_sub(sub, &item).is_ok() {
+            if cancels.is_cancelled(item.0) {
+                report_cancelled(item.0, state, res_tx, ctx);
+            } else if send_item_to_sub(sub, &item).is_ok() {
                 sent_items.push(item);
             } else {
                 state.pending.push_back(item);
             }
         }
     }
+}
+
+fn drop_cancelled_pending(
+    state: &mut BatchRunState,
+    cancels: &super::processor::CancelRegistry,
+    res_tx: &mpsc::Sender<WorkerResult>,
+    ctx: &egui::Context,
+) {
+    let mut cancelled: Vec<u64> = Vec::new();
+    for (id, _, _) in &state.pending {
+        if cancels.is_cancelled(*id) { cancelled.push(*id); }
+    }
+    for w in &state.pending_tier2 {
+        if cancels.is_cancelled(w.item_id) { cancelled.push(w.item_id); }
+    }
+    for w in &state.pending_add_edge {
+        if cancels.is_cancelled(w.item_id) { cancelled.push(w.item_id); }
+    }
+    if cancelled.is_empty() { return; }
+    state.pending.retain(|(id, _, _)| !cancels.is_cancelled(*id));
+    state.pending_tier2.retain(|w| !cancels.is_cancelled(w.item_id));
+    state.pending_add_edge.retain(|w| !cancels.is_cancelled(w.item_id));
+    for id in cancelled {
+        report_cancelled(id, state, res_tx, ctx);
+    }
+}
+
+/// `notified` prevents re-sending `CancelItem` every 50ms while the worker
+/// winds down the job.
+fn forward_item_cancels(
+    sub: &mut SubprocessManager,
+    sent_items: &[WorkItem],
+    sent_tier2_ids: &[u64],
+    sent_add_edge_ids: &[u64],
+    cancels: &super::processor::CancelRegistry,
+    notified: &mut std::collections::HashSet<u64>,
+) {
+    let in_flight = sent_items.iter().map(|(id, _, _)| *id)
+        .chain(sent_tier2_ids.iter().copied())
+        .chain(sent_add_edge_ids.iter().copied());
+    for id in in_flight {
+        if cancels.is_cancelled(id) && notified.insert(id) {
+            let _ = sub.send_cancel_item(id);
+        }
+    }
+}
+
+fn report_cancelled(
+    item_id: u64,
+    state: &mut BatchRunState,
+    res_tx: &mpsc::Sender<WorkerResult>,
+    ctx: &egui::Context,
+) {
+    state.completed.insert(item_id);
+    let _ = res_tx.send(WorkerResult::BatchItemDone {
+        item_id,
+        result: Err(CANCELLED_ERR_MSG.to_string()),
+        tensor_cache: None,
+        edge_cache: None,
+    });
+    ctx.request_repaint();
 }
 
 /// Cancel path: nudge the child, wait briefly, drain any in-flight results,

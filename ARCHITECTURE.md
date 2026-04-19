@@ -110,6 +110,7 @@ Communication uses **length-prefixed bincode frames** over stdin/stdout:
 | Parent → Child | `ProcessImage` | Full pipeline: decode + infer + postprocess |
 | Parent → Child | `RePostProcess` | Tier 2 mask rerun from cached tensor (batched reruns only — live preview runs in-process) |
 | Parent → Child | `Cancel` / `Shutdown` | Graceful stop |
+| Parent → Child | `CancelItem { item_id }` | Drop one item at the next dispatch check — others in flight keep running |
 | Child → Parent | `Ready` | Engines loaded |
 | Child → Parent | `Progress` | Per-stage progress (Decode, Infer, etc.) |
 | Child → Parent | `ImageDone` | Result + optional seg-tensor path and DexiNed-tensor path for Tier 2 caches |
@@ -117,6 +118,8 @@ Communication uses **length-prefixed bincode frames** over stdin/stdout:
 | Child → Parent | `RssUpdate` | Current process RSS (for admission throttling) |
 
 **Image data transfer:** Large payloads (image bytes, result RGBA, raw tensors) go via temp files, not through the pipe. On Linux, temp files are placed in `/dev/shm/prunr-ipc-{pid}/` (RAM-backed tmpfs — zero disk I/O). On Windows/macOS, `std::env::temp_dir()` is used. Cancel path calls `cleanup_ipc_temp()` to prevent tmpfs leaks.
+
+**Cancellation.** `processor::CancelRegistry` holds a global `Arc<AtomicBool>` plus a `HashMap<u64, Arc<AtomicBool>>` for per-item flags, shared by clone between the UI thread and the bridge thread. `handle_cancel` raises the global flag (stops the whole batch); `handle_cancel_selected` raises per-item flags for selected+Processing items. The bridge drops cancelled items from its pending queues (emitting `BatchItemDone(Err("Cancelled"))` directly) and forwards `SubprocessCommand::CancelItem` for any cancelled in-flight items. The worker keeps its own `HashSet<u64>` and checks membership before each pool job — matched ids skip with `ImageError { error: "Cancelled" }`. Items that come back as "Cancelled" revert to `BatchStatus::Pending` (not `Error`), so caches stay intact for a follow-up Process.
 
 ## Threading Model
 

@@ -94,6 +94,15 @@ impl BatchManager {
         self.selected_item().map_or(false, |b| b.id == id)
     }
 
+    /// IDs of checkbox-selected items currently in a given status. Used by
+    /// the partial-cancel path to decide which in-flight items to stop.
+    pub(crate) fn selected_ids_with_status(&self, status: BatchStatus) -> Vec<u64> {
+        self.items.iter()
+            .filter(|i| i.selected && i.status == status)
+            .map(|i| i.id)
+            .collect()
+    }
+
     /// Selected-item index clamped to the current batch size. `None` when
     /// the batch is empty — callers early-return on that shape instead of
     /// dealing with saturating arithmetic.
