@@ -203,6 +203,42 @@ impl SubprocessManager {
         Ok(())
     }
 
+    /// Send an AddEdgeInference command (seg cached, run DexiNed on masked).
+    /// Writes the seg tensor + original image bytes to temp files. The worker
+    /// reads the seg tensor without deleting it and hands the path back as
+    /// `tensor_cache_path` on `ImageDone`, so the parent's reader takes
+    /// ownership — no extra copy round-trip.
+    pub fn send_add_edge_inference(
+        &mut self,
+        item_id: u64,
+        tensor_data: &[f32],
+        tensor_height: u32,
+        tensor_width: u32,
+        model: prunr_core::ModelKind,
+        original_image_bytes: &[u8],
+        mask: prunr_core::MaskSettings,
+    ) -> Result<(), String> {
+        let seg_tensor_path = ipc_temp_dir().join(format!("seg_{item_id}.raw"));
+        std::fs::write(&seg_tensor_path, super::ipc::f32s_as_le_bytes(tensor_data))
+            .map_err(|e| format!("Failed to write seg tensor temp file: {e}"))?;
+        let image_path = ipc_temp_dir().join(format!("input_{item_id}.img"));
+        std::fs::write(&image_path, original_image_bytes)
+            .map_err(|e| format!("Failed to write input temp file: {e}"))?;
+
+        write_message(&mut self.stdin_writer, &SubprocessCommand::AddEdgeInference {
+            item_id,
+            image_path,
+            seg_tensor_path,
+            seg_tensor_height: tensor_height,
+            seg_tensor_width: tensor_width,
+            model,
+            mask,
+        }).map_err(|e| format!("Failed to send AddEdgeInference: {e}"))?;
+
+        self.in_flight.insert(item_id);
+        Ok(())
+    }
+
     /// Send a Tier 2 re-postprocess command (skip inference, reuse cached tensor).
     pub fn send_repostprocess(
         &mut self,

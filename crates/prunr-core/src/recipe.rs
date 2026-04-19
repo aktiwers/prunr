@@ -130,6 +130,10 @@ pub enum RequiredTier {
     MaskRerun,
     /// Edge settings changed — re-threshold cached DexiNed tensor (~20-100ms).
     EdgeRerun,
+    /// Turning edge detection on while the segmentation side is unchanged.
+    /// Reuse the cached seg tensor, run only DexiNed on the masked image,
+    /// compose (~DexiNed inference time, no seg re-inference).
+    AddEdgeInference,
     /// Model / mode changed — full pipeline needed.
     FullPipeline,
 }
@@ -137,20 +141,49 @@ pub enum RequiredTier {
 /// Determine what processing tier is needed when changing from old to new recipe.
 ///
 /// Ordered by cost (cheapest changes bubble up first):
-/// Skip < CompositeOnly < EdgeRerun < MaskRerun < FullPipeline.
+/// Skip < CompositeOnly < EdgeRerun < MaskRerun < AddEdgeInference < FullPipeline.
 pub fn resolve_tier(old: &ProcessingRecipe, new: &ProcessingRecipe) -> RequiredTier {
     if old == new {
         return RequiredTier::Skip;
     }
     // Chain mode changes the input image, not settings — always needs full pipeline.
-    if old.was_chain != new.was_chain || old.inference != new.inference {
+    if old.was_chain != new.was_chain {
         return RequiredTier::FullPipeline;
+    }
+    if old.inference != new.inference {
+        // Model change forces everything (seg tensor from old model is wrong shape / scale).
+        if old.inference.model != new.inference.model {
+            return RequiredTier::FullPipeline;
+        }
+        // Seg-flag flip swaps between modes whose cached tensors aren't
+        // interchangeable (e.g. EdgesOnly's edge tensor is on the raw input,
+        // SubjectOutline's is on the masked input — mixing them produces
+        // nonsense). Only safe for the edge-flag-only case below.
+        if old.inference.uses_segmentation != new.inference.uses_segmentation {
+            return RequiredTier::FullPipeline;
+        }
+        // Only `uses_edge_detection` flipped with seg stable.
+        if new.inference.uses_edge_detection {
+            // Enabling edges: seg tensor cached → skip seg inference, just
+            // run DexiNed on the masked image.
+            return RequiredTier::AddEdgeInference;
+        }
+        // Disabling edges: seg tensor still cached, re-apply mask to regen
+        // the result without edges. Falls through to the mask-tier check so
+        // a simultaneous mask change still wins over it.
     }
     if old.mask != new.mask {
         return RequiredTier::MaskRerun;
     }
     if old.edge != new.edge {
         return RequiredTier::EdgeRerun;
+    }
+    // Inference flipped but mask/edge/composite identical. If the flip was
+    // "disable edges", we still need to regenerate the result without edges,
+    // which is a MaskRerun. (Pure equality was caught by the old==new check
+    // at the top.)
+    if old.inference != new.inference {
+        return RequiredTier::MaskRerun;
     }
     RequiredTier::CompositeOnly
 }
@@ -298,13 +331,52 @@ mod tests {
     }
 
     #[test]
-    fn line_mode_toggle_full_pipeline() {
-        // Flipping uses_edge_detection (line_mode Off → something) changes the
-        // inference signature → FullPipeline.
+    fn enable_edge_detection_with_seg_stable_is_add_edge_inference() {
+        // Off → SubjectOutline: uses_segmentation stays true, uses_edge_detection
+        // flips false → true. Seg tensor cached → skip seg re-inference.
         let a = make_recipe(ModelKind::Silueta, 1.0, None);
         let mut b = a.clone();
         b.inference.uses_edge_detection = true;
+        assert_eq!(resolve_tier(&a, &b), RequiredTier::AddEdgeInference);
+    }
+
+    #[test]
+    fn disable_edge_detection_with_seg_stable_is_mask_rerun() {
+        // SubjectOutline → Off: uses_segmentation stays true, uses_edge_detection
+        // flips true → false. Seg tensor still cached; MaskRerun regenerates the
+        // result without edges.
+        let mut a = make_recipe(ModelKind::Silueta, 1.0, None);
+        a.inference.uses_edge_detection = true;
+        let mut b = a.clone();
+        b.inference.uses_edge_detection = false;
+        assert_eq!(resolve_tier(&a, &b), RequiredTier::MaskRerun);
+    }
+
+    #[test]
+    fn seg_flag_flip_still_full_pipeline() {
+        // EdgesOnly ↔ SubjectOutline (or Off ↔ EdgesOnly): uses_segmentation
+        // flips — cached tensors from one mode aren't valid for the other, so
+        // the tier must drop all caches and re-infer.
+        let mut a = make_recipe(ModelKind::Silueta, 1.0, None);
+        a.inference.uses_segmentation = false;
+        a.inference.uses_edge_detection = true; // EdgesOnly
+        let mut b = a.clone();
+        b.inference.uses_segmentation = true;
+        b.inference.uses_edge_detection = true; // SubjectOutline
         assert_eq!(resolve_tier(&a, &b), RequiredTier::FullPipeline);
+    }
+
+    #[test]
+    fn enable_edge_with_mask_change_still_add_edge_inference() {
+        // AddEdgeInference takes priority over MaskRerun when both apply —
+        // the worker handles this by re-masking from the cached seg as part
+        // of the AddEdgeInference flow anyway, so a separate MaskRerun would
+        // be redundant.
+        let a = make_recipe(ModelKind::Silueta, 1.0, None);
+        let mut b = a.clone();
+        b.inference.uses_edge_detection = true;
+        b.mask = mask(1.5, None, 0.0, false); // mask also changed
+        assert_eq!(resolve_tier(&a, &b), RequiredTier::AddEdgeInference);
     }
 
     #[test]

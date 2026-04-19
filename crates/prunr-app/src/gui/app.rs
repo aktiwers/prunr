@@ -442,20 +442,54 @@ impl PrunrApp {
         if candidate_ids.is_empty() { return; }
 
         let tiers = self.classify_candidates(&candidate_ids, model, chain);
-        let process_count = tiers.tier1.len() + tiers.tier2.len();
+        let process_count = tiers.tier1.len() + tiers.tier2.len() + tiers.tier_add_edge.len();
         self.notify_skip(tiers.skip_count, process_count);
         if process_count == 0 { return; }
 
         self.seed_history_for_reprocess(&tiers.all_process_ids(), chain);
 
         let tier2_work = self.build_tier2_work(&tiers.tier2);
+        let add_edge_work = self.build_add_edge_work(&tiers.tier_add_edge);
 
         let jobs = self.settings.parallel_jobs.min(super::memory::safe_max_jobs(model));
         if tiers.tier1.len() > 1 {
-            self.dispatch_with_admission(&tiers.tier1, tier2_work, model, jobs, chain);
+            self.dispatch_with_admission(&tiers.tier1, tier2_work, add_edge_work, model, jobs, chain);
         } else {
-            self.dispatch_small_batch(&tiers.tier1, tier2_work, model, jobs, chain);
+            self.dispatch_small_batch(&tiers.tier1, tier2_work, add_edge_work, model, jobs, chain);
         }
+    }
+
+    fn build_add_edge_work(&mut self, ids: &HashSet<u64>) -> Vec<super::worker::AddEdgeWorkItem> {
+        let mut out = Vec::new();
+        for item in &mut self.batch.items {
+            if !ids.contains(&item.id) { continue; }
+            let Some(ref ct) = item.cached_tensor else { continue };
+            let tensor_data = ct.decompress();
+            let mask = item.settings.mask_settings();
+            match (tensor_data, item.source.load_bytes()) {
+                (Some(data), Ok(bytes)) => {
+                    out.push(super::worker::AddEdgeWorkItem {
+                        item_id: item.id,
+                        tensor_data: data,
+                        tensor_height: ct.height,
+                        tensor_width: ct.width,
+                        model: ct.model,
+                        original_bytes: bytes,
+                        mask,
+                    });
+                    item.status = BatchStatus::Processing;
+                }
+                (None, _) => {
+                    item.status = BatchStatus::Error("Seg tensor cache corrupt".into());
+                    item.cached_tensor = None;
+                    item.applied_recipe = None;
+                }
+                (_, Err(e)) => {
+                    item.status = BatchStatus::Error(format!("Failed to load: {e}"));
+                }
+            }
+        }
+        out
     }
 
     /// Classify each candidate into Tier 1 (full pipeline), Tier 2 (mask
@@ -500,7 +534,17 @@ impl PrunrApp {
                 }
                 RequiredTier::MaskRerun => {
                     if item.cached_tensor.is_some() {
-                        tiers.tier2.insert(item.id);
+                        // In SubjectOutline the mask rerun also has to
+                        // re-composite edges on the new masked base.
+                        // Subprocess RePostProcess only runs the mask side,
+                        // so we route through AddEdgeInference which does
+                        // mask + DexiNed + compose. (Optimization idea:
+                        // reuse cached_edge_tensors to skip DexiNed here.)
+                        if current_recipe.inference.uses_edge_detection {
+                            tiers.tier_add_edge.insert(item.id);
+                        } else {
+                            tiers.tier2.insert(item.id);
+                        }
                     } else {
                         tiers.tier1.insert(item.id);
                     }
@@ -513,6 +557,16 @@ impl PrunrApp {
                     // for the explicit Process click path only.)
                     item.invalidate_edge_cache();
                     tiers.tier1.insert(item.id);
+                }
+                RequiredTier::AddEdgeInference => {
+                    // Seg tensor cached → run only DexiNed on the masked
+                    // image. Fall back to a full pipeline if we somehow lost
+                    // the seg cache (cache eviction under memory pressure).
+                    if item.cached_tensor.is_some() {
+                        tiers.tier_add_edge.insert(item.id);
+                    } else {
+                        tiers.tier1.insert(item.id);
+                    }
                 }
                 RequiredTier::FullPipeline => {
                     // Model / chain / mode changed — both caches invalid.
@@ -606,6 +660,7 @@ impl PrunrApp {
         &mut self,
         tier1_ids: &HashSet<u64>,
         tier2_work: Vec<super::worker::Tier2WorkItem>,
+        add_edge_work: Vec<super::worker::AddEdgeWorkItem>,
         model: prunr_core::ModelKind,
         jobs: usize,
         chain: bool,
@@ -636,13 +691,14 @@ impl PrunrApp {
             }
         }
 
-        // All Tier 1 items failed load_bytes AND no Tier 2 work — skip dispatch.
-        if initial_items.is_empty() && tier2_work.is_empty() { return; }
+        // All Tier 1 items failed load_bytes AND no Tier 2 / add-edge work —
+        // skip dispatch.
+        if initial_items.is_empty() && tier2_work.is_empty() && add_edge_work.is_empty() { return; }
 
         let (atx, arx) = mpsc::channel();
         self.processor.admission = Some(ctrl);
         self.processor.admission_tx = Some(atx);
-        self.dispatch_batch(initial_items, tier2_work, model, jobs, Some(arx));
+        self.dispatch_batch(initial_items, tier2_work, add_edge_work, model, jobs, Some(arx));
     }
 
     /// Single-item or small-batch fast path — skip admission entirely.
@@ -650,6 +706,7 @@ impl PrunrApp {
         &mut self,
         tier1_ids: &HashSet<u64>,
         tier2_work: Vec<super::worker::Tier2WorkItem>,
+        add_edge_work: Vec<super::worker::AddEdgeWorkItem>,
         model: prunr_core::ModelKind,
         jobs: usize,
         chain: bool,
@@ -664,11 +721,10 @@ impl PrunrApp {
             })
             .collect();
 
-        // If all prep failed (Tier 2 decompress + Tier 1 load_bytes), don't
-        // dispatch an empty batch — the subprocess would spin up for nothing.
-        if items.is_empty() && tier2_work.is_empty() { return; }
+        // If all prep failed, don't dispatch an empty batch.
+        if items.is_empty() && tier2_work.is_empty() && add_edge_work.is_empty() { return; }
 
-        self.dispatch_batch(items, tier2_work, model, jobs, None);
+        self.dispatch_batch(items, tier2_work, add_edge_work, model, jobs, None);
     }
 
     /// Build and send a WorkerMessage::BatchProcess with current settings.
@@ -676,6 +732,7 @@ impl PrunrApp {
         &mut self,
         items: Vec<super::worker::WorkItem>,
         tier2_items: Vec<super::worker::Tier2WorkItem>,
+        add_edge_items: Vec<super::worker::AddEdgeWorkItem>,
         model: prunr_core::ModelKind,
         jobs: usize,
         additional_items_rx: Option<mpsc::Receiver<super::worker::WorkItem>>,
@@ -696,6 +753,7 @@ impl PrunrApp {
         let process_ids: std::collections::HashSet<u64> = items.iter()
             .map(|wi| wi.0)
             .chain(tier2_items.iter().map(|ti| ti.item_id))
+            .chain(add_edge_items.iter().map(|ai| ai.item_id))
             .collect();
         for item in &mut self.batch.items {
             if process_ids.contains(&item.id) {
@@ -710,6 +768,7 @@ impl PrunrApp {
         let _ = self.processor.worker_tx.send(WorkerMessage::BatchProcess {
             items,
             tier2_items,
+            add_edge_items,
             config: super::worker::ProcessingConfig {
                 model,
                 jobs,
@@ -2147,14 +2206,19 @@ enum NavDir {
 struct ClassifiedTiers {
     tier1: HashSet<u64>,
     tier2: HashSet<u64>,
+    /// AddEdgeInference items: seg tensor cached, run DexiNed only.
+    tier_add_edge: HashSet<u64>,
     skip_count: usize,
 }
 
 impl ClassifiedTiers {
-    /// Union of tier1 + tier2 — the set of items that will actually be
-    /// reprocessed this batch (history seeding, progress counting).
+    /// Union of tier1 + tier2 + add-edge — the set of items that will actually
+    /// be reprocessed this batch (history seeding, progress counting).
     fn all_process_ids(&self) -> HashSet<u64> {
-        self.tier1.iter().chain(self.tier2.iter()).copied().collect()
+        self.tier1.iter()
+            .chain(self.tier2.iter())
+            .chain(self.tier_add_edge.iter())
+            .copied().collect()
     }
 }
 
