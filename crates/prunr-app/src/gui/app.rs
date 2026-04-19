@@ -534,12 +534,9 @@ impl PrunrApp {
                 }
                 RequiredTier::MaskRerun => {
                     if item.cached_tensor.is_some() {
-                        // In SubjectOutline the mask rerun also has to
-                        // re-composite edges on the new masked base.
-                        // Subprocess RePostProcess only runs the mask side,
-                        // so we route through AddEdgeInference which does
-                        // mask + DexiNed + compose. (Optimization idea:
-                        // reuse cached_edge_tensors to skip DexiNed here.)
+                        // SubjectOutline mask rerun needs DexiNed re-composite
+                        // on the new masked base; Tier 2 RePostProcess only
+                        // runs the mask side, which would drop the outline.
                         if current_recipe.inference.uses_edge_detection {
                             tiers.tier_add_edge.insert(item.id);
                         } else {
@@ -1197,9 +1194,14 @@ impl PrunrApp {
             let scale_match = *scale == item.settings.edge_scale;
             (strength_match && scale_match).then(|| m.clone())
         });
+        let cached_masked_base = item.cached_masked_base.as_ref().and_then(|(base, recipe, model)| {
+            let current_recipe = prunr_core::MaskRecipe::from(&item.settings.mask_settings());
+            let seg_model_match = seg_tensor.as_ref().map_or(false, |s| s.model == *model);
+            (*recipe == current_recipe && seg_model_match).then(|| base.clone())
+        });
         Some(DispatchInputs {
             kind, original, settings: item.settings,
-            seg_tensor, edge_tensor, cached_edge_mask,
+            seg_tensor, edge_tensor, cached_edge_mask, cached_masked_base,
         })
     }
 
@@ -1251,6 +1253,9 @@ impl PrunrApp {
                 item.result_tex_pending = true;
                 if let Some((mask, bits, scale)) = r.new_edge_mask {
                     item.cached_edge_mask = Some((mask, bits, scale));
+                }
+                if let Some((base, recipe, model)) = r.new_masked_base {
+                    item.cached_masked_base = Some((base, recipe, model));
                 }
                 let switch = self.result_switch_id;
                 Self::spawn_tex_prep(
