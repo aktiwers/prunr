@@ -9,6 +9,7 @@ pub mod chip;
 pub mod lines_popover;
 pub mod preset_dropdown;
 pub mod adjustments_toolbar;
+pub mod pipeline_flow;
 
 use egui::RichText;
 use egui_material_icons::icons::*;
