@@ -196,7 +196,7 @@ pub fn render(
         aggregate(chip::chip_option_rgba(
             ui, "bg",
             &ICON_PALETTE.codepoint.to_string(), "Background",
-            "Replace transparent areas with a solid color or image.",
+            "Replace transparent areas with a solid color.",
             &mut item_settings.bg,
             defaults.bg_value,
             "Transparent",
