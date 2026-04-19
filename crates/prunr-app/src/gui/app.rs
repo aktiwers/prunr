@@ -1402,6 +1402,12 @@ impl PrunrApp {
                 WorkerResult::SubprocessRetry { reduced_jobs, re_queued_count } => {
                     self.on_subprocess_retry(reduced_jobs, re_queued_count);
                 }
+                WorkerResult::BackendReady(provider) => {
+                    if !provider.is_empty() && self.settings.active_backend != provider {
+                        self.settings.active_backend = provider;
+                        self.settings.parallel_jobs = self.settings.default_jobs();
+                    }
+                }
             }
         }
     }
