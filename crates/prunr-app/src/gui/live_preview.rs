@@ -31,7 +31,7 @@ use std::time::{Duration, Instant};
 
 use image::{DynamicImage, GrayImage, RgbaImage};
 
-use prunr_core::{ModelKind, postprocess_from_flat, tensor_to_edge_mask, compose_edges, compose_edges_styled};
+use prunr_core::{ModelKind, postprocess_from_flat, tensor_to_edge_mask, compose_edges, compose_edges_styled, compose_edges_dual_styled};
 
 /// Build the "masked base" for SubjectOutline live preview — run Tier 2 mask
 /// from the cached seg tensor to reproduce the segmented subject, so edges
@@ -310,6 +310,10 @@ pub struct DispatchInputs {
     /// that as the base image for finalize_edges).
     pub seg_tensor: Option<SegTensor>,
     pub edge_tensor: Option<EdgeTensor>,
+    /// Secondary edge tensor for multi-scale LineStyle variants
+    /// (DualScale). Only populated when the style needs it, so single-scale
+    /// dispatches skip the extra zstd decompress.
+    pub secondary_edge_tensor: Option<EdgeTensor>,
     /// Pre-built edge mask (post-resize, pre-dilation) from a previous dispatch
     /// whose line_strength matches the current one. Populated when available
     /// so tweaks to edge_thickness / solid_line_color skip the resize.
@@ -432,12 +436,10 @@ fn run_preview(inputs: DispatchInputs, cancel: &AtomicBool) -> RunOutput {
             let edge_settings = inputs.settings.edge_settings();
             let base_dyn = DynamicImage::ImageRgba8((*base_arc).clone());
             let (mask, _) = resolve_edge_mask(&inputs.cached_edge_mask, edge, &base_dyn, &edge_settings);
-            let rgba = compose_edges_styled(
-                &mask, &base_arc,
-                edge_settings.compose_mode,
-                edge_settings.line_style,
-                edge_settings.solid_line_color,
-                edge_settings.edge_thickness,
+            let rgba = dispatch_compose(
+                &mask, &base_arc, &edge_settings,
+                inputs.secondary_edge_tensor.as_ref(),
+                (base_arc.width(), base_arc.height()),
             );
             RunOutput { rgba: Some(rgba), built_edge_mask: None, built_masked_base }
         }
@@ -450,15 +452,13 @@ fn run_preview(inputs: DispatchInputs, cancel: &AtomicBool) -> RunOutput {
             let base_for_mask: &DynamicImage = base_dyn.as_ref().unwrap_or(&inputs.original);
 
             let (mask, built_edge_mask) = resolve_edge_mask(&inputs.cached_edge_mask, edge, base_for_mask, &edge_settings);
-            // SubjectOutline: dispatch to the selected ComposeMode.
+            // SubjectOutline: dispatch to the selected ComposeMode (with dual-scale if active).
             // EdgesOnly: plain lines-on-transparent via compose_edges.
             let rgba = if let Some(ref base_arc) = masked_base {
-                compose_edges_styled(
-                    &mask, base_arc,
-                    edge_settings.compose_mode,
-                    edge_settings.line_style,
-                    edge_settings.solid_line_color,
-                    edge_settings.edge_thickness,
+                dispatch_compose(
+                    &mask, base_arc, &edge_settings,
+                    inputs.secondary_edge_tensor.as_ref(),
+                    (base_arc.width(), base_arc.height()),
                 )
             } else {
                 compose_edges(
@@ -469,6 +469,42 @@ fn run_preview(inputs: DispatchInputs, cancel: &AtomicBool) -> RunOutput {
             };
             RunOutput { rgba: Some(rgba), built_edge_mask, built_masked_base }
         }
+    }
+}
+
+/// Pick between single-scale (`compose_edges_styled`) and dual-scale
+/// (`compose_edges_dual_styled`) composition based on the selected
+/// `LineStyle`. For dual-scale, uses `primary_mask` as the Fine layer and
+/// builds a Bold layer from `secondary_tensor` on the fly.
+fn dispatch_compose(
+    primary_mask: &GrayImage,
+    base: &image::RgbaImage,
+    edge_settings: &prunr_core::EdgeSettings,
+    secondary_tensor: Option<&EdgeTensor>,
+    base_dims: (u32, u32),
+) -> image::RgbaImage {
+    use prunr_core::LineStyle;
+    match (edge_settings.line_style, secondary_tensor) {
+        (LineStyle::DualScale { fine_color, bold_color }, Some(secondary)) => {
+            let (w, h) = base_dims;
+            let bold_mask = tensor_to_edge_mask(
+                &secondary.data, secondary.height, secondary.width,
+                w, h, edge_settings.line_strength,
+            );
+            compose_edges_dual_styled(
+                primary_mask, &bold_mask, base,
+                edge_settings.compose_mode,
+                fine_color, bold_color,
+                edge_settings.edge_thickness,
+            )
+        }
+        _ => compose_edges_styled(
+            primary_mask, base,
+            edge_settings.compose_mode,
+            edge_settings.line_style,
+            edge_settings.solid_line_color,
+            edge_settings.edge_thickness,
+        ),
     }
 }
 
