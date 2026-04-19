@@ -27,12 +27,13 @@ pub fn section_heading(ui: &mut egui::Ui, title: &str) {
     ui.add_space(theme::SPACE_SM);
 }
 
-/// Dimmed description text below a control. Empty strings render nothing.
+/// Description text below a control. Mono font signals "supplemental"; color
+/// stays primary so modal body text reads comfortably. Empty strings render nothing.
 pub fn hint(ui: &mut egui::Ui, text: &str) {
     if text.is_empty() { return; }
     ui.label(
         RichText::new(text)
-            .color(theme::TEXT_HINT)
+            .color(theme::TEXT_PRIMARY)
             .size(theme::FONT_SIZE_MONO),
     );
 }

@@ -202,11 +202,11 @@ pub fn render(
                 let reset_btn = egui::Button::new(
                     RichText::new(ICON_RESTART_ALT.codepoint)
                         .color(theme::TEXT_SECONDARY)
-                        .size(18.0),
+                        .size(theme::ICON_SIZE_SMALL),
                 )
                 .fill(theme::BG_SECONDARY)
                 .corner_radius(theme::BUTTON_ROUNDING)
-                .min_size(egui::vec2(chip::CHIP_HEIGHT, chip::CHIP_HEIGHT));
+                .min_size(egui::vec2(theme::CHIP_HEIGHT, theme::CHIP_HEIGHT));
                 let reset_target = app_settings.default_preset.clone();
                 let reset_tooltip = format!(
                     "Reset all knobs to the \"{reset_target}\" preset (your default)"
@@ -320,7 +320,7 @@ fn render_model_dropdown(
         vis.widgets.active.fg_stroke.color = theme::TEXT_PRIMARY;
         vis.widgets.noninteractive.fg_stroke.color = theme::TEXT_SECONDARY;
 
-        ui.spacing_mut().interact_size.y = chip::CHIP_HEIGHT;
+        ui.spacing_mut().interact_size.y = theme::CHIP_HEIGHT;
         egui::ComboBox::from_id_salt("adjustments_model")
             .selected_text(
                 RichText::new(model_label(app_settings.model, true))

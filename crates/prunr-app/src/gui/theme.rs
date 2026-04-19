@@ -36,7 +36,7 @@ pub fn backdrop_clicked(ctx: &egui::Context, window_response: &Option<egui::Inne
 pub fn overlay_frame() -> egui::Frame {
     egui::Frame {
         fill: OVERLAY_BG,
-        stroke: Stroke::new(1.0, OVERLAY_BORDER),
+        stroke: Stroke::new(STROKE_DEFAULT, OVERLAY_BORDER),
         corner_radius: egui::CornerRadius::same(8),
         inner_margin: egui::Margin::same(SPACE_MD as i8),
         ..Default::default()
@@ -64,7 +64,7 @@ pub const DESTRUCTIVE: Color32 = Color32::from_rgb(0xef, 0x44, 0x44);
 pub const TEXT_PRIMARY: Color32 = Color32::from_rgb(0xf0, 0xf0, 0xf0);
 
 /// Secondary text
-pub const TEXT_SECONDARY: Color32 = Color32::from_rgb(0x88, 0x88, 0x88);
+pub const TEXT_SECONDARY: Color32 = Color32::from_rgb(0xa8, 0xa8, 0xa8);
 
 /// Checkerboard colors for light mode: (lighter square, darker square).
 pub const CHECKER_LIGHT_MODE: (Color32, Color32) = (
@@ -104,6 +104,26 @@ pub const PROGRESS_BAR_BG: Color32 = Color32::from_rgb(0x30, 0x30, 0x30);
 pub const BUTTON_ROUNDING: f32 = 4.0;
 pub const DROP_ZONE_ROUNDING: f32 = 8.0;
 pub const DROP_ZONE_BORDER_WIDTH: f32 = 2.0;
+
+/// Toolbar button height (Open, Settings, Process, Preset dropdown, Undo/Redo icons).
+pub const BTN_HEIGHT: f32 = 32.0;
+/// Chip / compact-button height on the adjustments rows, modal +/– steppers,
+/// and the CLI help tab strip.
+pub const CHIP_HEIGHT: f32 = 28.0;
+/// Shared popover width for chip / preset dropdowns.
+pub const POPOVER_WIDTH: f32 = 260.0;
+/// Default stroke width for widget borders and accent outlines.
+pub const STROKE_DEFAULT: f32 = 1.0;
+/// Icon glyph size on toolbar icon-buttons (settings gear, undo, redo).
+pub const ICON_SIZE_BUTTON: f32 = 20.0;
+/// Smaller icon glyph size — secondary-action buttons like reset-all.
+pub const ICON_SIZE_SMALL: f32 = 18.0;
+
+/// Modal widget inactive fill / hover-border gray (+/– steppers, cli tab
+/// inactive bg, app-wide hovered widget border).
+pub const WIDGET_INACTIVE_BG: Color32 = Color32::from_rgb(0x50, 0x50, 0x50);
+/// Modal widget hover fill — one step brighter than inactive.
+pub const WIDGET_HOVER_BG: Color32 = Color32::from_rgb(0x5a, 0x5a, 0x5a);
 
 /// Accent at ~40% opacity for disabled buttons
 /// Premultiplied: 0x7b*102/255=49, 0x2d*102/255=18, 0x8e*102/255=57

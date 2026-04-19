@@ -10,8 +10,6 @@ use crate::gui::theme;
 
 use super::modifier_key;
 
-const BTN_HEIGHT: f32 = 32.0;
-
 pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
     ui.horizontal_centered(|ui| {
         ui.spacing_mut().item_spacing.x = theme::SPACE_SM;
@@ -27,7 +25,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
         )
         .fill(theme::BG_SECONDARY)
         .corner_radius(theme::BUTTON_ROUNDING)
-        .min_size(egui::vec2(0.0, BTN_HEIGHT));
+        .min_size(egui::vec2(0.0, theme::BTN_HEIGHT));
         if ui.add(open_btn).on_hover_text(format!("Open image(s) ({m}+O)")).clicked() {
             app.pending_open_dialog = true;
         }
@@ -36,12 +34,12 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
 
         let gear_btn = egui::Button::new(
             RichText::new(ICON_SETTINGS.codepoint)
-                .size(20.0)
+                .size(theme::ICON_SIZE_BUTTON)
                 .color(theme::TEXT_PRIMARY),
         )
         .fill(theme::BG_SECONDARY)
         .corner_radius(theme::BUTTON_ROUNDING)
-        .min_size(egui::vec2(BTN_HEIGHT, BTN_HEIGHT));
+        .min_size(egui::vec2(theme::BTN_HEIGHT, theme::BTN_HEIGHT));
         if ui.add(gear_btn).on_hover_text(format!("Settings ({m}+Space)")).clicked() {
             if app.show_settings {
                 app.close_settings(ui.ctx());
@@ -59,11 +57,11 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
             let can_undo = app.batch.any_target_can(HistoryManager::can_undo);
             let can_redo = app.batch.any_target_can(HistoryManager::can_redo);
             let icon_btn = |icon: &'static str| egui::Button::new(
-                RichText::new(icon).size(20.0).color(theme::TEXT_PRIMARY),
+                RichText::new(icon).size(theme::ICON_SIZE_BUTTON).color(theme::TEXT_PRIMARY),
             )
             .fill(theme::BG_SECONDARY)
             .corner_radius(theme::BUTTON_ROUNDING)
-            .min_size(egui::vec2(BTN_HEIGHT, BTN_HEIGHT));
+            .min_size(egui::vec2(theme::BTN_HEIGHT, theme::BTN_HEIGHT));
 
             if ui.add_enabled(can_undo, icon_btn(ICON_UNDO.codepoint))
                 .on_hover_text(format!("Undo ({m}+Z)"))
@@ -121,7 +119,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                 )
                 .fill(theme::DESTRUCTIVE)
                 .corner_radius(theme::BUTTON_ROUNDING)
-                .min_size(egui::vec2(0.0, BTN_HEIGHT));
+                .min_size(egui::vec2(0.0, theme::BTN_HEIGHT));
                 if ui.add(cancel_btn).on_hover_text("Cancel all processing (Escape)").clicked() {
                     app.handle_cancel();
                     for item in &mut app.batch.items {
@@ -166,7 +164,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                 let btn = egui::Button::image_and_text(icon, RichText::new(label_text).color(text_color))
                     .fill(fill)
                     .corner_radius(theme::BUTTON_ROUNDING)
-                    .min_size(egui::vec2(0.0, BTN_HEIGHT));
+                    .min_size(egui::vec2(0.0, theme::BTN_HEIGHT));
 
                 let tooltip = match label {
                     ProcessButtonLabel::ProcessAll(n) => format!("Process all {n} images ({m}+R)"),
