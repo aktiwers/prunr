@@ -43,6 +43,26 @@ pub enum SubprocessCommand {
         /// Updated mask settings for re-postprocessing.
         mask: MaskSettings,
     },
+    /// AddEdgeInference tier: seg tensor is cached, run only DexiNed on the
+    /// masked image and compose. Used for Off → SubjectOutline transitions so
+    /// enabling the outline doesn't re-run seg inference.
+    AddEdgeInference {
+        item_id: u64,
+        /// Path to temp file with original image bytes.
+        image_path: std::path::PathBuf,
+        /// Path to temp file with the cached raw f32 seg tensor. The worker
+        /// does NOT delete this file — it hands the path back as
+        /// `tensor_cache_path` on `ImageDone`, and the parent's reader takes
+        /// ownership (read-and-delete). This preserves the cache without an
+        /// extra copy round-trip.
+        seg_tensor_path: std::path::PathBuf,
+        seg_tensor_height: u32,
+        seg_tensor_width: u32,
+        /// Model that produced the seg tensor (must match Init's model).
+        model: ModelKind,
+        /// Per-item mask settings (may differ from Init's mask).
+        mask: MaskSettings,
+    },
     /// Cancel: stop after current image, send Finished.
     Cancel,
     /// Shut down gracefully.
@@ -204,6 +224,19 @@ mod tests {
             tensor_width: 320,
             model: ModelKind::U2net,
             original_image_path: PathBuf::from("/tmp/orig.png"),
+            mask: MaskSettings::default(),
+        });
+    }
+
+    #[test]
+    fn command_add_edge_inference_roundtrip() {
+        roundtrip(&SubprocessCommand::AddEdgeInference {
+            item_id: 13,
+            image_path: PathBuf::from("/tmp/orig.png"),
+            seg_tensor_path: PathBuf::from("/tmp/seg.raw"),
+            seg_tensor_height: 1024,
+            seg_tensor_width: 1024,
+            model: ModelKind::BiRefNetLite,
             mask: MaskSettings::default(),
         });
     }

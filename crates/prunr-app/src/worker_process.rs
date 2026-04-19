@@ -654,6 +654,121 @@ pub fn run_worker() -> ! {
                 });
             }
 
+            SubprocessCommand::AddEdgeInference {
+                item_id, image_path, seg_tensor_path,
+                seg_tensor_height, seg_tensor_width, model: cmd_model,
+                mask: cmd_mask,
+            } => {
+                let evt_tx = evt_tx.clone();
+                let in_flight = in_flight.clone();
+                let sem = semaphore.clone();
+                let ipc = ipc_dir.clone();
+                let mask_settings = cmd_mask;
+                let edge_settings = edge.clone();
+                let edge_eng = edge_engine.clone();
+                let cancel = cancel.clone();
+
+                in_flight.fetch_add(1, Ordering::AcqRel);
+                pool.spawn(move || {
+                    let _sem_guard = sem.acquire(10);
+
+                    // seg_tensor_path is both our input and the output we hand
+                    // back as tensor_cache_path — the parent's read_tensor_cache
+                    // reads-and-deletes it. So here we `read`, not `read_and_delete`.
+                    let produce = (|| -> Result<(image::RgbaImage, prunr_core::EdgeInferenceResult), String> {
+                        if cancel.load(Ordering::Acquire) {
+                            return Err("cancelled".to_string());
+                        }
+                        let raw_bytes = std::fs::read(&seg_tensor_path)
+                            .map_err(|e| format!("Failed to read seg tensor: {e}"))?;
+                        let seg_data = prunr_app::subprocess::ipc::le_bytes_to_f32s(&raw_bytes);
+
+                        let img_bytes = std::fs::read(&image_path)
+                            .map_err(|e| format!("Failed to read image: {e}"))?;
+                        let original = prunr_core::load_image_from_bytes(&img_bytes)
+                            .map_err(|e| format!("Failed to decode image: {e}"))?;
+
+                        if cancel.load(Ordering::Acquire) {
+                            return Err("cancelled".to_string());
+                        }
+                        let masked_rgba = prunr_core::postprocess_from_flat(
+                            &seg_data, seg_tensor_height as usize, seg_tensor_width as usize,
+                            &original, &mask_settings, cmd_model,
+                        ).map_err(|e| e.to_string())?;
+
+                        let masked_img = image::DynamicImage::ImageRgba8(masked_rgba);
+                        let eng_ref = edge_eng.as_ref()
+                            .ok_or_else(|| "edge engine not initialized in this subprocess".to_string())?;
+                        let edge_res = eng_ref.infer_all_tensors(&masked_img)
+                            .map_err(|e| e.to_string())?;
+
+                        if cancel.load(Ordering::Acquire) {
+                            return Err("cancelled".to_string());
+                        }
+                        let active = &edge_res.tensors[edge_settings.edge_scale as usize];
+                        let rgba_image = prunr_core::finalize_edges(
+                            active, edge_res.height, edge_res.width, &masked_img, &edge_settings,
+                        );
+                        Ok((rgba_image, edge_res))
+                    })();
+
+                    match produce {
+                        Ok((rgba, edge_res)) => {
+                            let (w, h) = (rgba.width(), rgba.height());
+                            let result_path = ipc.join(format!("result_{item_id}.raw"));
+
+                            let (ecp, ech, ecw) = {
+                                let ep = ipc.join(format!("edge_{item_id}.raw"));
+                                let per_tensor_floats = (edge_res.height as usize) * (edge_res.width as usize);
+                                let mut ebytes = Vec::with_capacity(per_tensor_floats * prunr_core::EDGE_SCALE_COUNT * 4);
+                                for t in &edge_res.tensors {
+                                    ebytes.extend_from_slice(prunr_app::subprocess::ipc::f32s_as_le_bytes(t));
+                                }
+                                match std::fs::write(&ep, &ebytes) {
+                                    Ok(()) => (Some(ep), Some(edge_res.height), Some(edge_res.width)),
+                                    Err(_) => (None, None, None),
+                                }
+                            };
+
+                            if std::fs::write(&result_path, rgba.as_raw()).is_ok() {
+                                let _ = evt_tx.send(SubprocessEvent::ImageDone {
+                                    item_id,
+                                    result_path,
+                                    width: w,
+                                    height: h,
+                                    // Empty active_provider — seg didn't run this
+                                    // tier; parent treats it like a Tier 2 rerun
+                                    // and keeps the existing backend label.
+                                    active_provider: String::new(),
+                                    tensor_cache_path: Some(seg_tensor_path.clone()),
+                                    tensor_cache_height: Some(seg_tensor_height),
+                                    tensor_cache_width: Some(seg_tensor_width),
+                                    edge_cache_path: ecp,
+                                    edge_cache_height: ech,
+                                    edge_cache_width: ecw,
+                                });
+                            }
+                        }
+                        Err(e) => {
+                            let _ = evt_tx.send(SubprocessEvent::ImageError { item_id, error: e });
+                            if seg_tensor_path.starts_with(ipc.as_ref()) {
+                                let _ = std::fs::remove_file(&seg_tensor_path);
+                            }
+                        }
+                    }
+
+                    if image_path.starts_with(ipc.as_ref()) {
+                        let _ = std::fs::remove_file(&image_path);
+                    }
+                    if let Some(stats) = memory_stats::memory_stats() {
+                        let _ = evt_tx.send(SubprocessEvent::RssUpdate {
+                            rss_bytes: stats.physical_mem as u64,
+                        });
+                    }
+                    in_flight.fetch_sub(1, Ordering::AcqRel);
+                });
+            }
+
             SubprocessCommand::Cancel => {
                 cancel.store(true, Ordering::Release);
                 // Wait for in-flight to drain
