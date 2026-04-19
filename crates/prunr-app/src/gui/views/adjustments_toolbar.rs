@@ -121,6 +121,7 @@ pub fn render(
         ui.add_enabled_ui(mask_active, |ui| {
             aggregate(chip::chip_f32(
                 ui, "gamma", "γ", "Gamma",
+                "How hard the mask cuts. >1 removes more aggressively, <1 is gentler on fine edges.",
                 tip!("Stage 1 of 5. How hard the mask cuts. >1 removes more aggressively, <1 is gentler on fine edges. Feeds every stage below."),
                 &mut item_settings.gamma,
                 0.01..=10.0, defaults.template.gamma,
@@ -131,6 +132,7 @@ pub fn render(
             aggregate(chip::chip_option_f32(
                 ui, "threshold",
                 &ICON_BOLT.codepoint.to_string(), "Hard threshold",
+                "Snap the mask to fully opaque or fully transparent at this cutoff. Soft = smooth alpha, on = crisp silhouette.",
                 tip!("Stage 2 of 5. Snaps the mask to fully opaque or fully transparent at this cutoff. Soft = smooth alpha, on = crisp silhouette. When on, downstream stages lose the gradient — Refine can only clean up stairsteps."),
                 &mut item_settings.threshold,
                 0.001..=0.999, defaults.threshold_value, "Soft",
@@ -140,6 +142,7 @@ pub fn render(
             aggregate(chip::chip_f32(
                 ui, "edge_shift",
                 &ICON_SWAP_HORIZ.codepoint.to_string(), "Edge shift",
+                "Shrink or grow the mask outline. Positive = erode (trim fringe pixels), negative = dilate (keep more edge detail).",
                 tip!("Stage 3 of 5. Shrink or grow the mask outline. Positive = erode (trim fringe pixels), negative = dilate (keep more edge detail). Refine Edges then snaps the shifted boundary to image color."),
                 &mut item_settings.edge_shift,
                 -50.0..=50.0, defaults.template.edge_shift,
@@ -154,6 +157,7 @@ pub fn render(
             aggregate(chip::chip_bool_with_extras(
                 ui, "refine_edges",
                 &ICON_AUTO_FIX_HIGH.codepoint.to_string(), "Refine edges",
+                "Use the original image's colors to sharpen the mask around fine detail like hair or leaves. Runs a guided filter — slower but higher quality.",
                 tip!("Stage 4 of 5. Uses the original image's colors to sharpen the mask around fine detail like hair or leaves. Sees whatever threshold + edge shift produced, so tighter upstream input gives a tighter result. Slower but higher quality."),
                 &mut item_settings.refine_edges,
                 |ui| {
@@ -181,6 +185,7 @@ pub fn render(
             aggregate(chip::chip_f32(
                 ui, "feather",
                 &ICON_BLUR_LINEAR.codepoint.to_string(), "Feather",
+                "Soften mask edges with a Gaussian blur. Color-agnostic — use for general smoothing or when Refine Edges isn't picking up the right detail.",
                 tip!("Stage 5 of 5. Final softening pass — Gaussian blur over the finished mask. Runs last so it smooths whatever Refine Edges sharpened; reach for Feather when Refine can't pick up the right detail."),
                 &mut item_settings.feather,
                 0.0..=10.0, defaults.template.feather,
@@ -196,6 +201,7 @@ pub fn render(
         aggregate(chip::chip_option_rgba(
             ui, "bg",
             &ICON_PALETTE.codepoint.to_string(), "Background",
+            "Pick a solid color to fill transparent areas. Leave as Transparent to keep the alpha channel.",
             "Replace transparent areas with a solid color.",
             &mut item_settings.bg,
             defaults.bg_value,
@@ -258,6 +264,7 @@ pub fn render(
             aggregate(chip::chip_f32(
                 ui, "line_strength",
                 &ICON_TUNE.codepoint.to_string(), "Line strength",
+                "How much edge detail to capture. Lower = bold outlines only, higher = fine texture and subtle edges.",
                 "Stage 2 of 4 in the lines pipeline. Threshold on DexiNed's raw edge tensor. Lower = bold outlines only; higher = fine texture and subtle edges. Feeds edge thickness + solid color.",
                 &mut item_settings.line_strength,
                 0.0..=1.0, defaults.template.line_strength,
@@ -268,6 +275,7 @@ pub fn render(
             aggregate(chip::chip_u32(
                 ui, "edge_thickness",
                 &ICON_LINE_WEIGHT.codepoint.to_string(), "Edge thickness",
+                "Thicken edges by dilating the mask. 0 = native DexiNed width, higher = bolder outlines that stay readable at display resolution.",
                 "Stage 3 of 4 in the lines pipeline. Dilates the thresholded edge mask by N pixels. 0 = native DexiNed width; higher = bolder outlines that stay readable at display resolution. Runs before solid color, so bolder edges still inherit the paint choice.",
                 &mut item_settings.edge_thickness,
                 0..=20, defaults.template.edge_thickness,
@@ -280,6 +288,7 @@ pub fn render(
             aggregate(chip::chip_option_rgb(
                 ui, "solid_line_color",
                 &ICON_BRUSH.codepoint.to_string(), "Solid line color",
+                "Paint every edge the same color instead of keeping the original RGB underneath.",
                 "Stage 4 of 4 in the lines pipeline. Paint every visible edge the same color, or leave unset to keep the original RGB beneath the mask. Runs after edge thickness.",
                 &mut item_settings.solid_line_color,
                 defaults.solid_line_color_value,
