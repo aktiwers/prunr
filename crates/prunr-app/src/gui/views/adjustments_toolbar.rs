@@ -54,6 +54,11 @@ pub struct ToolbarChange {
     /// click Process — tier routing keeps this cheap (AddEdgeInference when
     /// the seg tensor is still valid).
     pub line_mode_changed: bool,
+    /// `input_transform` was toggled. Not live-previewable (requires a
+    /// DexiNed rerun on the transformed image), but the caller auto-runs
+    /// an `AddEdgeInference` when the seg tensor is cached — same fast
+    /// path as line_mode auto-trigger.
+    pub input_transform_changed: bool,
 }
 
 /// Factory default values for per-chip reset. Per-chip reset sends the value
@@ -353,11 +358,15 @@ pub fn render(
                 change.commit = true;
             }
             if render_input_transform_chip(ui, &mut item_settings.input_transform) {
-                // Changes to the input transform invalidate BOTH caches —
-                // DexiNed sees a different image → signal a full pipeline
-                // rerun via seg + edge cache invalidation.
+                // Only the EDGE tensor is stale — DexiNed sees a different
+                // image when input_transform changes, but the seg model
+                // reads the raw source, which hasn't changed. Clearing the
+                // seg cache here used to kill every subsequent mask/edge
+                // live preview (no seg tensor to rerun from). Keep seg
+                // intact; the next Process runs `AddEdgeInference` with
+                // the cached seg + new DexiNed pass.
                 change.edge_cache_invalid = true;
-                change.seg_cache_invalid = true;
+                change.input_transform_changed = true;
                 change.commit = true;
             }
 
