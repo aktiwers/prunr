@@ -238,27 +238,33 @@ impl OrtEngine {
     }
 
     /// Detect the runtime provider (cached — runs once per process).
+    ///
+    /// This is a best-effort *startup guess* for the UI label before any
+    /// subprocess is spawned. Windows/Linux probe `nvidia-smi` for CUDA;
+    /// macOS always returns CoreML. The real EP is stamped onto each
+    /// `OrtEngine` at session creation and propagated through the subprocess
+    /// `Ready` event, so the UI corrects itself if this guess was wrong.
     pub fn detect_active_provider() -> String {
         static CACHED: std::sync::OnceLock<String> = std::sync::OnceLock::new();
         CACHED.get_or_init(|| {
             #[cfg(target_os = "macos")]
             { return "CoreML".to_string(); }
 
-            #[cfg(all(not(target_os = "macos"), not(windows)))]
+            #[cfg(not(target_os = "macos"))]
             {
-                if std::process::Command::new("nvidia-smi")
+                let has_nvidia = std::process::Command::new("nvidia-smi")
                     .stdout(std::process::Stdio::null())
                     .stderr(std::process::Stdio::null())
                     .status()
-                    .map_or(false, |s| s.success())
-                {
+                    .map_or(false, |s| s.success());
+                if has_nvidia {
                     return "CUDA".to_string();
                 }
-                return "CPU".to_string();
+                #[cfg(windows)]
+                { return "DirectML".to_string(); }
+                #[cfg(not(windows))]
+                { return "CPU".to_string(); }
             }
-
-            #[cfg(windows)]
-            { return "DirectML".to_string(); }
 
             #[allow(unreachable_code)]
             "CPU".to_string()

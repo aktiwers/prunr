@@ -172,6 +172,12 @@ pub enum WorkerResult {
         reduced_jobs: usize,
         re_queued_count: usize,
     },
+    /// Subprocess reported the EP it actually built the session with. Sent
+    /// once per subprocess spawn, before the first image completes, so the
+    /// statusbar label corrects any mismatch with the startup guess from
+    /// `OrtEngine::detect_active_provider` (e.g. CUDA driver installed but
+    /// EP init fell back to DirectML at runtime).
+    BackendReady(String),
 }
 
 /// Spawn the worker bridge thread. Receives `WorkerMessage` from the UI,
@@ -374,7 +380,7 @@ fn spawn_and_initial_burst(
     // Cap engines at the number of Tier 1 items — Tier 2 doesn't use engines.
     let effective_jobs = state.max_jobs.min(state.pending.len().max(1));
 
-    let (mut sub, _active_provider) = match SubprocessManager::spawn(
+    let (mut sub, active_provider) = match SubprocessManager::spawn(
         model, effective_jobs, mask, force_cpu, line_mode, edge,
     ) {
         Ok(s) => s,
@@ -385,6 +391,8 @@ fn spawn_and_initial_burst(
             return None;
         }
     };
+    let _ = res_tx.send(WorkerResult::BackendReady(active_provider));
+    ctx.request_repaint();
 
     let mut sent_items: Vec<WorkItem> = Vec::new();
     let mut sent_tier2_ids: Vec<u64> = Vec::new();
