@@ -136,6 +136,19 @@ impl BatchManager {
             .collect()
     }
 
+    /// Any item in the action target set satisfies `f`. Target set = checked
+    /// items if any, else the currently-viewed one — same rule as
+    /// `items_to_process`, expressed as a fold so callers (toolbar
+    /// Undo/Redo enablement) don't allocate an id vec just to test.
+    pub(crate) fn any_target_can<F: FnMut(&BatchItem) -> bool>(&self, mut f: F) -> bool {
+        let has_selected = self.items.iter().any(|i| i.selected);
+        let current_id = self.selected_item().map(|b| b.id);
+        self.items.iter().any(|item| {
+            let is_target = if has_selected { item.selected } else { Some(item.id) == current_id };
+            is_target && f(item)
+        })
+    }
+
     /// Single pass over `items` producing the three counts that callers
     /// (`poll_worker_results`, statusbar) otherwise compute with three
     /// separate filter-count passes.

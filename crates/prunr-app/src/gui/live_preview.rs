@@ -37,17 +37,10 @@ use crate::gui::item_settings::ItemSettings;
 use crate::gui::worker::CompressedTensor;
 
 /// Throttle cadence for live-preview dispatch during a continuous drag.
-/// 150ms is comfortably above the worker's best-case cost (~90ms on 4K
-/// without refine_edges, ~240ms with refine_edges) so each dispatch has
-/// room to land before the next fires — dropping lower piles up stale
-/// dispatches that the generation filter discards, burning CPU with no
-/// visible gain. Release / commit paths call `flush` instead, so the
-/// final result on knob-release still lands immediately.
-///
-/// Independent of DEBOUNCE, `pump_live_preview` polls at 50ms while an
-/// in-flight dispatch hasn't drained — so the UI never goes idle with a
-/// worker result waiting in the channel, regardless of which knob you
-/// tweaked or how slow the pass is.
+/// 150ms stays above the ~90ms baseline and ~240ms refine_edges worker
+/// cost so dispatches don't pile up for the generation filter to discard.
+/// Release / commit paths call `flush` instead, so the final result on
+/// knob-release lands immediately.
 pub const DEBOUNCE: Duration = Duration::from_millis(150);
 
 /// What kind of Tier 2 rerun a tweak needs. Two kinds because they touch
@@ -258,10 +251,7 @@ impl LivePreview {
         out
     }
 
-    /// True while at least one dispatch is still running on the rayon pool.
-    /// `pump_live_preview` uses this to keep polling repaints so the result
-    /// channel gets drained as soon as the worker lands, instead of sitting
-    /// until a user-input event wakes egui.
+    /// True while a rayon dispatch hasn't drained yet.
     pub fn has_in_flight(&self) -> bool {
         !self.in_flight.is_empty()
     }
