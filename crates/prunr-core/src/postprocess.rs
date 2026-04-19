@@ -13,6 +13,7 @@ pub fn postprocess(raw: ArrayView4<f32>, original: &DynamicImage, mask_settings:
     let mut rgba = original.to_rgba8();
     let mask = tensor_to_mask_with_rgba(raw, &rgba, mask_settings, model);
     apply_mask_inplace(&mut rgba, &mask);
+    apply_fill_style(&mut rgba, mask_settings.fill_style);
     rgba
 }
 
@@ -145,6 +146,43 @@ pub fn apply_mask(original: &DynamicImage, mask: &GrayImage) -> RgbaImage {
     let mut rgba = original.to_rgba8();
     apply_mask_inplace(&mut rgba, mask);
     rgba
+}
+
+/// Transform the RGB channels of `rgba` according to `style`. Alpha is
+/// preserved. Runs in place; cheap enough for live preview (~5-10 ms at 4K).
+pub fn apply_fill_style(rgba: &mut RgbaImage, style: crate::types::FillStyle) {
+    use crate::types::FillStyle;
+    match style {
+        FillStyle::None => {}
+        FillStyle::Desaturate => {
+            for p in rgba.pixels_mut() {
+                let [r, g, b, _] = p.0;
+                // Rec. 709 luma weights.
+                let luma = ((r as u32 * 2126 + g as u32 * 7152 + b as u32 * 722) / 10000) as u8;
+                p.0[0] = luma;
+                p.0[1] = luma;
+                p.0[2] = luma;
+            }
+        }
+        FillStyle::Invert => {
+            for p in rgba.pixels_mut() {
+                p.0[0] = 255 - p.0[0];
+                p.0[1] = 255 - p.0[1];
+                p.0[2] = 255 - p.0[2];
+            }
+        }
+        FillStyle::Duotone { dark, light } => {
+            for p in rgba.pixels_mut() {
+                let [r, g, b, _] = p.0;
+                let luma = (r as u32 * 2126 + g as u32 * 7152 + b as u32 * 722) / 10000;
+                let t = luma as u16;
+                let inv = 255 - t;
+                p.0[0] = ((dark[0] as u16 * inv + light[0] as u16 * t) / 255) as u8;
+                p.0[1] = ((dark[1] as u16 * inv + light[1] as u16 * t) / 255) as u8;
+                p.0[2] = ((dark[2] as u16 * inv + light[2] as u16 * t) / 255) as u8;
+            }
+        }
+    }
 }
 
 /// Write the mask into an existing RGBA buffer's alpha channel in place.

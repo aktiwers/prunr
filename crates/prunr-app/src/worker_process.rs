@@ -378,6 +378,7 @@ pub fn run_worker() -> ! {
                                         let rgba_image = prunr_core::compose_edges_styled(
                                             &edge_mask, &masked_rgba,
                                             edge.compose_mode,
+                                            edge.line_style,
                                             edge.solid_line_color, edge.edge_thickness,
                                         );
                                         edge_tensor_for_cache = Some(edge_res);
@@ -729,6 +730,7 @@ pub fn run_worker() -> ! {
                         let rgba_image = prunr_core::compose_edges_styled(
                             &edge_mask, &masked_rgba,
                             edge_settings.compose_mode,
+                            edge_settings.line_style,
                             edge_settings.solid_line_color, edge_settings.edge_thickness,
                         );
                         Ok((rgba_image, edge_res))

@@ -435,6 +435,7 @@ fn run_preview(inputs: DispatchInputs, cancel: &AtomicBool) -> RunOutput {
             let rgba = compose_edges_styled(
                 &mask, &base_arc,
                 edge_settings.compose_mode,
+                edge_settings.line_style,
                 edge_settings.solid_line_color,
                 edge_settings.edge_thickness,
             );
@@ -455,6 +456,7 @@ fn run_preview(inputs: DispatchInputs, cancel: &AtomicBool) -> RunOutput {
                 compose_edges_styled(
                     &mask, base_arc,
                     edge_settings.compose_mode,
+                    edge_settings.line_style,
                     edge_settings.solid_line_color,
                     edge_settings.edge_thickness,
                 )
