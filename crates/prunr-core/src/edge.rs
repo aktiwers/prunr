@@ -4,17 +4,43 @@ use image::{DynamicImage, RgbaImage};
 use ndarray::Array4;
 use ort::{inputs, session::Session, value::Tensor};
 
-use crate::types::CoreError;
+use crate::types::{CoreError, EdgeScale};
 
 const DEXINED_H: u32 = 480;
 const DEXINED_W: u32 = 640;
 // BGR mean for DexiNed (OpenCV Zoo variant)
 const MEAN_BGR: [f32; 3] = [103.5, 116.2, 123.6];
 
+/// Number of DexiNed outputs we surface as `EdgeScale` variants.
+/// Indexed by `EdgeScale as usize`: Fine=0, Balanced=1, Bold=2, Fused=3.
+pub const EDGE_SCALE_COUNT: usize = 4;
+
+/// All outputs from a single DexiNed inference, keyed by [`EdgeScale`] as
+/// `usize`. Produced by [`EdgeEngine::infer_all_tensors`] so the GUI can
+/// cache every scale from one model run and switch between them without
+/// re-inferring.
+pub struct EdgeInferenceResult {
+    pub tensors: [Vec<f32>; EDGE_SCALE_COUNT],
+    pub height: u32,
+    pub width: u32,
+}
+
 /// Opaque wrapper around the DexiNed ORT session.
 /// Thread-safe via internal Mutex (same pattern as OrtEngine).
 pub struct EdgeEngine {
     session: Mutex<Session>,
+}
+
+/// Pick the session-output index for a given scale. DexiNed's OpenCV Zoo
+/// export orders outputs as `block0..block5` (fine → coarse) followed by
+/// the fused `block_cat`. Validated at `EdgeEngine::new`.
+fn scale_to_output_index(scale: EdgeScale, last: usize) -> usize {
+    match scale {
+        EdgeScale::Fine => 0,
+        EdgeScale::Balanced => 3,
+        EdgeScale::Bold => 5,
+        EdgeScale::Fused => last,
+    }
 }
 
 impl EdgeEngine {
@@ -29,45 +55,98 @@ impl EdgeEngine {
             .map_err(|e| CoreError::Inference(format!("Edge set threads failed: {e}")))?
             .commit_from_memory(&edge_bytes)
             .map_err(|e| CoreError::Inference(format!("Edge model load failed: {e}")))?;
+
+        // Validate the output layout. If a model re-export ever renames /
+        // reorders the outputs, we want a clear init error instead of a
+        // silent wrong-scale result downstream.
+        let names: Vec<String> = session.outputs().iter().map(|o| o.name().to_string()).collect();
+        tracing::info!(?names, "DexiNed output layout");
+        let last = names.last().map(String::as_str);
+        if last != Some("block_cat") {
+            return Err(CoreError::Inference(format!(
+                "DexiNed export layout changed: expected last output 'block_cat', got {:?}. \
+                 Scale selection would pick the wrong tensor.",
+                last,
+            )));
+        }
+        if names.len() < 6 {
+            return Err(CoreError::Inference(format!(
+                "DexiNed export layout changed: expected ≥6 side outputs + block_cat, got {} total.",
+                names.len(),
+            )));
+        }
+
         Ok(Self { session: Mutex::new(session) })
     }
 
     /// Run edge detection on an image. Returns RGBA where edges are opaque.
     /// If `line_color` is Some, all edge pixels are painted that color.
     ///
-    /// Convenience wrapper around `infer_tensor` + `finalize_edges` for callers
-    /// that don't need the intermediate tensor (e.g. CLI or single-shot flows).
+    /// Convenience wrapper for CLI / single-shot flows that don't cache the
+    /// intermediate tensor.
     pub fn detect(&self, original: &DynamicImage, edge: &crate::EdgeSettings) -> Result<RgbaImage, CoreError> {
-        let (tensor, h, w) = self.infer_tensor(original)?;
+        let (tensor, h, w) = self.infer_tensor(original, edge.edge_scale)?;
         Ok(finalize_edges(&tensor, h, w, original, edge))
     }
 
-    /// Run only the DexiNed inference stage. Returns the raw sigmoid-logits
-    /// tensor at DexiNed's native resolution (480×640), plus (height, width).
-    ///
-    /// Split from `detect` so callers can cache this tensor and rerun
-    /// `finalize_edges` with new line_strength / line_color without re-running the model.
-    pub fn infer_tensor(&self, original: &DynamicImage) -> Result<(Vec<f32>, u32, u32), CoreError> {
+    /// Run DexiNed and extract a single output scale. Use this when the
+    /// caller doesn't cache per-scale tensors (CLI, single-shot flows).
+    /// One `session.run` produces all outputs internally; this just picks
+    /// the one we want and discards the rest.
+    pub fn infer_tensor(&self, original: &DynamicImage, scale: EdgeScale) -> Result<(Vec<f32>, u32, u32), CoreError> {
         let mut session = self.session.lock()
-            .map_err(|e| CoreError::Inference(format!("Edge session lock failed: {e}")))?;
-
-        let input_array = preprocess(original);
-        let input_name = session.inputs()[0].name().to_string();
-        let input_tensor = Tensor::from_array(input_array)
-            .map_err(|e| CoreError::Inference(format!("Failed to create edge tensor: {e}")))?;
-        let outputs = session
-            .run(inputs![input_name.as_str() => &input_tensor])
-            .map_err(|e| CoreError::Inference(format!("Edge detection failed: {e}")))?;
-
-        // Take the fused output (last one: "block_cat")
-        let fused_idx = outputs.len() - 1;
-        let edge_map = outputs[fused_idx]
-            .try_extract_array::<f32>()
-            .map_err(|e| CoreError::Inference(format!("Failed to extract edge output: {e}")))?;
-        let edge_slice = edge_map.as_slice()
-            .ok_or_else(|| CoreError::Inference("Edge output tensor is not contiguous".to_string()))?;
-        Ok((edge_slice.to_vec(), DEXINED_H, DEXINED_W))
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let outputs = run_inference(&mut session, original)?;
+        let idx = scale_to_output_index(scale, outputs.len() - 1);
+        let tensor = extract_output(&outputs, idx)?;
+        Ok((tensor, DEXINED_H, DEXINED_W))
     }
+
+    /// Run DexiNed and extract every scale we expose (Fine, Balanced, Bold,
+    /// Fused) from a single inference pass. GUI/subprocess path uses this
+    /// so scale switching in live preview is zero inference cost — every
+    /// scale is already cached.
+    pub fn infer_all_tensors(&self, original: &DynamicImage) -> Result<EdgeInferenceResult, CoreError> {
+        let mut session = self.session.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let outputs = run_inference(&mut session, original)?;
+        let last = outputs.len() - 1;
+        // Order must match `EdgeScale as usize` so callers can index by it.
+        let fine = extract_output(&outputs, scale_to_output_index(EdgeScale::Fine, last))?;
+        let balanced = extract_output(&outputs, scale_to_output_index(EdgeScale::Balanced, last))?;
+        let bold = extract_output(&outputs, scale_to_output_index(EdgeScale::Bold, last))?;
+        let fused = extract_output(&outputs, scale_to_output_index(EdgeScale::Fused, last))?;
+        Ok(EdgeInferenceResult {
+            tensors: [fine, balanced, bold, fused],
+            height: DEXINED_H,
+            width: DEXINED_W,
+        })
+    }
+}
+
+/// Run the ONNX session once and return the raw outputs vec. Shared by the
+/// single-scale and multi-scale extraction paths.
+fn run_inference<'s>(
+    session: &'s mut Session,
+    original: &DynamicImage,
+) -> Result<ort::session::SessionOutputs<'s>, CoreError> {
+    let input_array = preprocess(original);
+    let input_name = session.inputs()[0].name().to_string();
+    let input_tensor = Tensor::from_array(input_array)
+        .map_err(|e| CoreError::Inference(format!("Failed to create edge tensor: {e}")))?;
+    session
+        .run(inputs![input_name.as_str() => &input_tensor])
+        .map_err(|e| CoreError::Inference(format!("Edge detection failed: {e}")))
+}
+
+/// Pull one output tensor from a session result by index, copying into a Vec.
+fn extract_output(outputs: &ort::session::SessionOutputs, idx: usize) -> Result<Vec<f32>, CoreError> {
+    let edge_map = outputs[idx]
+        .try_extract_array::<f32>()
+        .map_err(|e| CoreError::Inference(format!("Failed to extract edge output at index {idx}: {e}")))?;
+    let slice = edge_map.as_slice()
+        .ok_or_else(|| CoreError::Inference("Edge output tensor is not contiguous".to_string()))?;
+    Ok(slice.to_vec())
 }
 
 /// Threshold + resize a DexiNed tensor into a full-resolution edge mask.
