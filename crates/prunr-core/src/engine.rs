@@ -49,6 +49,13 @@ impl OrtEngine {
     }
 
     /// Try optimized variant (FP16/INT8) first; fall back to FP32 if session creation fails.
+    ///
+    /// When `cpu_only=false`, we also fall back to CPU-only if the GPU EP's
+    /// session creation crashes at init. Seen in the wild with DirectML on
+    /// some Windows setups (AbiCustomRegistry exception during initialization);
+    /// ORT bubbles the exception out of `commit_from_memory` rather than
+    /// silently skipping the EP, so the CPU fallback in the EP list is never
+    /// reached. Retrying with `cpu_only=true` gives us a working session.
     fn new_with_fallback(model: ModelKind, intra_threads: usize, cpu_only: bool) -> Result<Self, CoreError> {
         tracing::debug!(?model, intra_threads, cpu_only, "OrtEngine init");
         // Check if an optimized variant exists (loaded from filesystem, so Vec<u8>).
@@ -68,9 +75,19 @@ impl OrtEngine {
         }
         // Fall back to the embedded FP32 model (zero-copy &'static [u8]).
         let fp32 = Self::model_bytes(model);
-        let engine = Self::build_session(fp32, intra_threads, model, cpu_only)?;
-        tracing::info!(?model, provider = %engine.provider_name, "OrtEngine ready (FP32)");
-        Ok(engine)
+        match Self::build_session(fp32, intra_threads, model, cpu_only) {
+            Ok(engine) => {
+                tracing::info!(?model, provider = %engine.provider_name, "OrtEngine ready (FP32)");
+                Ok(engine)
+            }
+            Err(e) if !cpu_only => {
+                tracing::warn!(?model, error = %e, "GPU session creation failed — retrying CPU-only");
+                let engine = Self::build_session(fp32, intra_threads, model, true)?;
+                tracing::info!(?model, provider = %engine.provider_name, "OrtEngine ready (FP32, CPU fallback)");
+                Ok(engine)
+            }
+            Err(e) => Err(e),
+        }
     }
 
     /// Return the embedded FP32 model bytes. Zero-copy — borrows from static cache.
@@ -104,56 +121,107 @@ impl OrtEngine {
     }
 
     fn build_session(model_bytes: &[u8], intra_threads: usize, model: ModelKind, cpu_only: bool) -> Result<Self, CoreError> {
-        let mut builder = Session::builder()
+        // CPU-only path: straight shot.
+        if cpu_only {
+            let session = Self::builder_with_base(intra_threads)?
+                .with_execution_providers([
+                    CPUExecutionProvider::default()
+                        .with_arena_allocator(false) // lower memory baseline; subprocess handles OOM
+                        .build(),
+                ])
+                .map_err(|e| CoreError::Inference(format!("ORT set CPU EP failed: {e}")))?
+                .commit_from_memory(model_bytes)
+                .map_err(|e| CoreError::Inference(format!("ORT session creation failed (CPU): {e}")))?;
+            return Ok(Self {
+                session: Mutex::new(session),
+                provider_name: "CPU".to_string(),
+                model_kind: model,
+            });
+        }
+
+        // GPU path: try platform GPU EPs one by one so we know which succeeded
+        // (registering them as a list hides which EP was actually selected and
+        // lets a crashing EP abort session creation before the CPU fallback is
+        // reached — exactly the DirectML AbiCustomRegistry failure seen in the
+        // wild). Fall through on error; the caller retries with cpu_only=true
+        // if all GPU EPs fail.
+        let gpu_eps: &[&str] = {
+            #[cfg(target_os = "macos")]
+            { &["CoreML"] }
+            #[cfg(target_os = "linux")]
+            { &["CUDA"] }
+            #[cfg(windows)]
+            { &["CUDA", "DirectML"] }
+            #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+            { &[] }
+        };
+
+        let mut last_err: Option<CoreError> = None;
+        for ep_name in gpu_eps {
+            let builder = Self::builder_with_base(intra_threads)?;
+            let res = match *ep_name {
+                #[cfg(not(target_os = "macos"))]
+                "CUDA" => builder.with_execution_providers([
+                    ort::execution_providers::CUDAExecutionProvider::default()
+                        .with_device_id(0)
+                        .with_arena_extend_strategy(ort::ep::ArenaExtendStrategy::SameAsRequested)
+                        .with_conv_algorithm_search(ort::ep::cuda::ConvAlgorithmSearch::Default)
+                        .with_cuda_graph(true)
+                        .with_tf32(true)
+                        .build(),
+                ]),
+                #[cfg(target_os = "macos")]
+                "CoreML" => builder.with_execution_providers([
+                    ort::execution_providers::CoreMLExecutionProvider::default()
+                        .with_model_cache_dir(Self::coreml_cache_dir())
+                        .build(),
+                ]),
+                #[cfg(windows)]
+                "DirectML" => builder.with_execution_providers([
+                    ort::execution_providers::DirectMLExecutionProvider::default().build(),
+                ]),
+                _ => continue,
+            };
+
+            let mut built = match res {
+                Ok(b) => b,
+                Err(e) => {
+                    let err = CoreError::Inference(format!("ORT register {ep_name} EP failed: {e}"));
+                    tracing::warn!(?model, ep = %ep_name, error = %err, "GPU EP register failed");
+                    last_err = Some(err);
+                    continue;
+                }
+            };
+
+            match built.commit_from_memory(model_bytes) {
+                Ok(session) => {
+                    tracing::debug!(?model, ep = %ep_name, "GPU session committed");
+                    return Ok(Self {
+                        session: Mutex::new(session),
+                        provider_name: (*ep_name).to_string(),
+                        model_kind: model,
+                    });
+                }
+                Err(e) => {
+                    let err = CoreError::Inference(format!("ORT session creation failed ({ep_name}): {e}"));
+                    tracing::warn!(?model, ep = %ep_name, error = %err, "GPU session creation failed — trying next EP");
+                    last_err = Some(err);
+                }
+            }
+        }
+
+        Err(last_err.unwrap_or_else(|| {
+            CoreError::Inference("No GPU EPs available on this platform".to_string())
+        }))
+    }
+
+    fn builder_with_base(intra_threads: usize) -> Result<ort::session::builder::SessionBuilder, CoreError> {
+        Session::builder()
             .map_err(|e| CoreError::Inference(format!("ORT builder init failed: {e}")))?
             .with_optimization_level(GraphOptimizationLevel::Level3)
             .map_err(|e| CoreError::Inference(format!("ORT set optimization level failed: {e}")))?
             .with_intra_threads(intra_threads.max(1))
-            .map_err(|e| CoreError::Inference(format!("ORT set intra threads failed: {e}")))?;
-
-        // Register all available EPs — ORT tries them in order and silently
-        // skips any that aren't available at runtime (e.g. no CUDA drivers).
-        builder = if cpu_only {
-            builder.with_execution_providers([
-                CPUExecutionProvider::default()
-                    .with_arena_allocator(false) // lower memory baseline; subprocess handles OOM
-                    .build(),
-            ])
-        } else {
-            builder.with_execution_providers([
-                #[cfg(not(target_os = "macos"))]
-                ort::execution_providers::CUDAExecutionProvider::default()
-                    .with_device_id(0)
-                    .with_arena_extend_strategy(ort::ep::ArenaExtendStrategy::SameAsRequested)
-                    .with_conv_algorithm_search(ort::ep::cuda::ConvAlgorithmSearch::Default)
-                    .with_cuda_graph(true)
-                    .with_tf32(true)
-                    .build(),
-                #[cfg(target_os = "macos")]
-                ort::execution_providers::CoreMLExecutionProvider::default()
-                    .with_model_cache_dir(Self::coreml_cache_dir())
-                    .build(),
-                #[cfg(windows)]
-                ort::execution_providers::DirectMLExecutionProvider::default().build(),
-                CPUExecutionProvider::default().build(),
-            ])
-        }.map_err(|e| CoreError::Inference(format!("ORT set execution providers failed: {e}")))?;
-
-        let session = builder
-            .commit_from_memory(model_bytes)
-            .map_err(|e| CoreError::Inference(format!("ORT session creation failed: {e}")))?;
-
-        let provider_name = if cpu_only {
-            "CPU".to_string()
-        } else {
-            Self::detect_active_provider()
-        };
-
-        Ok(Self {
-            session: Mutex::new(session),
-            provider_name,
-            model_kind: model,
-        })
+            .map_err(|e| CoreError::Inference(format!("ORT set intra threads failed: {e}")))
     }
 
     /// CoreML compiled model cache directory.
