@@ -119,15 +119,6 @@ pub fn render(
                 |v| format!("{v:.2}"),
             ), Tier::Mask, &mut change);
 
-            aggregate(chip::chip_option_f32(
-                ui, "threshold",
-                &ICON_BOLT.codepoint.to_string(), "Hard threshold",
-                "Snap the mask to fully opaque or fully transparent at this cutoff. Soft = smooth alpha, on = crisp silhouette.",
-                &mut item_settings.threshold,
-                0.001..=0.999, defaults.threshold_value, "Soft",
-                |v| format!("{:.1}%", v * 100.0),
-            ), Tier::Mask, &mut change);
-
             aggregate(chip::chip_f32(
                 ui, "edge_shift",
                 &ICON_SWAP_HORIZ.codepoint.to_string(), "Edge shift",
@@ -140,6 +131,16 @@ pub fn render(
                     else if v < -0.05 { format!("dilate {:.1}px", v.abs()) }
                     else { "0px".to_string() }
                 },
+            ), Tier::Mask, &mut change);
+
+            aggregate(chip::chip_f32(
+                ui, "feather",
+                &ICON_BLUR_LINEAR.codepoint.to_string(), "Feather",
+                "Soften mask edges with a Gaussian blur. Color-agnostic — use for general smoothing or when refine_edges isn't picking up the right detail.",
+                &mut item_settings.feather,
+                0.0..=5.0, defaults.template.feather,
+                false,
+                |v| if v < 0.1 { "off".into() } else { format!("σ {v:.1}") },
             ), Tier::Mask, &mut change);
 
             aggregate(chip::chip_bool_with_extras(
@@ -169,14 +170,13 @@ pub fn render(
                 },
             ), Tier::Mask, &mut change);
 
-            aggregate(chip::chip_f32(
-                ui, "feather",
-                &ICON_BLUR_LINEAR.codepoint.to_string(), "Feather",
-                "Soften mask edges with a Gaussian blur. Color-agnostic — use for general smoothing or when refine_edges isn't picking up the right detail.",
-                &mut item_settings.feather,
-                0.0..=5.0, defaults.template.feather,
-                false,
-                |v| if v < 0.1 { "off".into() } else { format!("σ {v:.1}") },
+            aggregate(chip::chip_option_f32(
+                ui, "threshold",
+                &ICON_BOLT.codepoint.to_string(), "Hard threshold",
+                "Snap the mask to fully opaque or fully transparent at this cutoff. Soft = smooth alpha, on = crisp silhouette.",
+                &mut item_settings.threshold,
+                0.001..=0.999, defaults.threshold_value, "Soft",
+                |v| format!("{:.1}%", v * 100.0),
             ), Tier::Mask, &mut change);
         });
 
