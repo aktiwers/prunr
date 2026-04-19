@@ -27,6 +27,19 @@ pub struct EdgeEngine {
     session: Mutex<Session>,
 }
 
+/// Compile-time lock on `EdgeScale` discriminants. `infer_all_tensors` builds
+/// the result array as `[fine, balanced, bold, fused]` and callers index by
+/// `scale as usize`; reordering the enum without updating the array would
+/// silently point every scale at the wrong tensor. This assertion fails the
+/// build before that can ship.
+const _: () = {
+    assert!(EdgeScale::Fine as usize == 0);
+    assert!(EdgeScale::Balanced as usize == 1);
+    assert!(EdgeScale::Bold as usize == 2);
+    assert!(EdgeScale::Fused as usize == 3);
+    assert!(EDGE_SCALE_COUNT == 4);
+};
+
 /// Layout assumption: `block0..block5` (fine → coarse), then fused `block_cat`.
 /// Validated at `EdgeEngine::new`.
 fn scale_to_output_index(scale: EdgeScale, last: usize) -> usize {
