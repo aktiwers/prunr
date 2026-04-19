@@ -197,9 +197,7 @@ pub fn compose_edges(
     edge_thickness: u32,
 ) -> RgbaImage {
     let (ow, oh) = (original.width(), original.height());
-    let mut mask = mask.clone();
-    crate::postprocess::dilate_mask(&mut mask, edge_thickness);
-    let mask_raw = mask.as_raw();
+    let mask_raw = dilate_to_bytes(mask, edge_thickness);
     if let Some(c) = solid_line_color {
         let mut buf = vec![0u8; (ow * oh * 4) as usize];
         for i in 0..(ow * oh) as usize {
@@ -238,43 +236,61 @@ pub fn compose_edges_styled(
 ) -> RgbaImage {
     use crate::types::ComposeMode;
     let (ow, oh) = (base.width(), base.height());
-    let mut mask = mask.clone();
-    crate::postprocess::dilate_mask(&mut mask, edge_thickness);
-    let mask_raw = mask.as_raw();
+    let mask_raw = dilate_to_bytes(mask, edge_thickness);
     let mut rgba = base.clone();
     let out_raw = rgba.as_mut();
+    let pixel_count = (ow * oh) as usize;
 
-    for i in 0..(ow * oh) as usize {
-        let subject = out_raw[i * 4 + 3] as i32;
-        let edge = mask_raw[i] as i32;
-        let new_alpha = match compose {
-            ComposeMode::LinesOnly => (subject * edge / 255) as u8,
-            ComposeMode::SubjectFilled => subject.max(edge) as u8,
-            ComposeMode::Engraving => (subject - edge).max(0) as u8,
-            // 0.3 * subject + 0.8 * edge, clamped to 0..=255
-            ComposeMode::Ghost => {
-                let ghost = (subject * 77 + edge * 204) / 255;
-                ghost.clamp(0, 255) as u8
-            }
-            ComposeMode::InverseMask => ((255 - subject) * edge / 255) as u8,
-        };
-        out_raw[i * 4 + 3] = new_alpha;
+    // Single alpha-formula dispatch keeps the mode match out of the per-pixel
+    // loop. LLVM will typically hoist it anyway, but spelling it out makes
+    // the cost predictable regardless of optimization settings.
+    let alpha_fn: fn(i32, i32) -> u8 = match compose {
+        ComposeMode::LinesOnly => |s, e| (s * e / 255) as u8,
+        ComposeMode::SubjectFilled => |s, e| s.max(e) as u8,
+        ComposeMode::Engraving => |s, e| (s - e).max(0) as u8,
+        // 0.3 * subject + 0.8 * edge, clamped. Sums to > 1.0 on purpose —
+        // saturates to fully opaque where subject AND edge both contribute.
+        ComposeMode::Ghost => |s, e| ((s * 77 + e * 204) / 255).clamp(0, 255) as u8,
+        ComposeMode::InverseMask => |s, e| ((255 - s) * e / 255) as u8,
+    };
 
-        // Line colour tint applies per pixel where an edge exists, regardless
-        // of compose mode (edge strength picks the blend weight). In Engraving
-        // the line alpha is low, so tint rarely shows — that's the visual
-        // signature of the mode.
-        if let Some(c) = solid_line_color {
+    // Two outer branches on `solid_line_color` — keeps the color check out of
+    // the pixel loop.
+    if let Some(c) = solid_line_color {
+        for i in 0..pixel_count {
+            let subject = out_raw[i * 4 + 3] as i32;
+            let edge = mask_raw[i] as i32;
+            out_raw[i * 4 + 3] = alpha_fn(subject, edge);
             if edge > 0 {
-                let w = edge as u16;
-                let iw = 255 - w;
-                out_raw[i * 4]     = ((out_raw[i * 4]     as u16 * iw + c[0] as u16 * w) / 255) as u8;
-                out_raw[i * 4 + 1] = ((out_raw[i * 4 + 1] as u16 * iw + c[1] as u16 * w) / 255) as u8;
-                out_raw[i * 4 + 2] = ((out_raw[i * 4 + 2] as u16 * iw + c[2] as u16 * w) / 255) as u8;
+                blend_rgb(&mut out_raw[i * 4..i * 4 + 3], c, edge as u16);
             }
+        }
+    } else {
+        for i in 0..pixel_count {
+            let subject = out_raw[i * 4 + 3] as i32;
+            let edge = mask_raw[i] as i32;
+            out_raw[i * 4 + 3] = alpha_fn(subject, edge);
         }
     }
     rgba
+}
+
+/// Clone + dilate + return the raw byte buffer. Both compose paths
+/// (`compose_edges`, `compose_edges_styled`) need this prelude.
+fn dilate_to_bytes(mask: &image::GrayImage, thickness: u32) -> Vec<u8> {
+    let mut out = mask.clone();
+    crate::postprocess::dilate_mask(&mut out, thickness);
+    out.into_raw()
+}
+
+/// Blend `rgb` toward `target` using `weight` (0..=255 as a /255 fraction).
+/// Used where an edge pixel is painted with the user's `solid_line_color`.
+#[inline]
+fn blend_rgb(rgb: &mut [u8], target: [u8; 3], weight: u16) {
+    let inv = 255 - weight;
+    rgb[0] = ((rgb[0] as u16 * inv + target[0] as u16 * weight) / 255) as u8;
+    rgb[1] = ((rgb[1] as u16 * inv + target[1] as u16 * weight) / 255) as u8;
+    rgb[2] = ((rgb[2] as u16 * inv + target[2] as u16 * weight) / 255) as u8;
 }
 
 /// Tier 2 edge convenience: tensor → mask → RGBA in one call. Prefer the two
