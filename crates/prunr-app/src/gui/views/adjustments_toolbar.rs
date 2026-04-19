@@ -20,6 +20,15 @@ use prunr_core::LineMode;
 
 use super::model_label;
 
+/// Append the "Press F3 for the full pipeline." hint to a chip tooltip at
+/// compile time. Single-point of truth for the hint suffix so an F3 rebind
+/// or rewording doesn't require touching every chip.
+macro_rules! tip {
+    ($body:literal) => {
+        concat!($body, "\n\nPress F3 for the full pipeline.")
+    };
+}
+
 /// Summary of what a toolbar render cycle changed.
 ///
 /// Tier flags drive live-preview dispatch; cache-invalidation flags are
@@ -112,7 +121,7 @@ pub fn render(
         ui.add_enabled_ui(mask_active, |ui| {
             aggregate(chip::chip_f32(
                 ui, "gamma", "γ", "Gamma",
-                "Stage 1 of 5. How hard the mask cuts. >1 removes more aggressively, <1 is gentler on fine edges. Feeds every stage below.\n\nPress F3 for the full pipeline.",
+                tip!("Stage 1 of 5. How hard the mask cuts. >1 removes more aggressively, <1 is gentler on fine edges. Feeds every stage below."),
                 &mut item_settings.gamma,
                 0.1..=10.0, defaults.template.gamma,
                 true, // log scale — matches perceptual symmetry around 1.0
@@ -122,7 +131,7 @@ pub fn render(
             aggregate(chip::chip_option_f32(
                 ui, "threshold",
                 &ICON_BOLT.codepoint.to_string(), "Hard threshold",
-                "Stage 2 of 5. Snaps the mask to fully opaque or fully transparent at this cutoff. Soft = smooth alpha, on = crisp silhouette. When on, downstream stages lose the gradient — Refine can only clean up stairsteps.\n\nPress F3 for the full pipeline.",
+                tip!("Stage 2 of 5. Snaps the mask to fully opaque or fully transparent at this cutoff. Soft = smooth alpha, on = crisp silhouette. When on, downstream stages lose the gradient — Refine can only clean up stairsteps."),
                 &mut item_settings.threshold,
                 0.001..=0.999, defaults.threshold_value, "Soft",
                 |v| format!("{:.1}%", v * 100.0),
@@ -131,7 +140,7 @@ pub fn render(
             aggregate(chip::chip_f32(
                 ui, "edge_shift",
                 &ICON_SWAP_HORIZ.codepoint.to_string(), "Edge shift",
-                "Stage 3 of 5. Shrink or grow the mask outline. Positive = erode (trim fringe pixels), negative = dilate (keep more edge detail). Refine Edges then snaps the shifted boundary to image color.\n\nPress F3 for the full pipeline.",
+                tip!("Stage 3 of 5. Shrink or grow the mask outline. Positive = erode (trim fringe pixels), negative = dilate (keep more edge detail). Refine Edges then snaps the shifted boundary to image color."),
                 &mut item_settings.edge_shift,
                 -20.0..=20.0, defaults.template.edge_shift,
                 false,
@@ -145,7 +154,7 @@ pub fn render(
             aggregate(chip::chip_bool_with_extras(
                 ui, "refine_edges",
                 &ICON_AUTO_FIX_HIGH.codepoint.to_string(), "Refine edges",
-                "Stage 4 of 5. Uses the original image's colors to sharpen the mask around fine detail like hair or leaves. Sees whatever threshold + edge shift produced, so tighter upstream input gives a tighter result. Slower but higher quality.\n\nPress F3 for the full pipeline.",
+                tip!("Stage 4 of 5. Uses the original image's colors to sharpen the mask around fine detail like hair or leaves. Sees whatever threshold + edge shift produced, so tighter upstream input gives a tighter result. Slower but higher quality."),
                 &mut item_settings.refine_edges,
                 |ui| {
                     let mut inner = chip::ChipChange::default();
@@ -172,7 +181,7 @@ pub fn render(
             aggregate(chip::chip_f32(
                 ui, "feather",
                 &ICON_BLUR_LINEAR.codepoint.to_string(), "Feather",
-                "Stage 5 of 5. Final softening pass — Gaussian blur over the finished mask. Runs last so it smooths whatever Refine Edges sharpened; reach for Feather when Refine can't pick up the right detail.\n\nPress F3 for the full pipeline.",
+                tip!("Stage 5 of 5. Final softening pass — Gaussian blur over the finished mask. Runs last so it smooths whatever Refine Edges sharpened; reach for Feather when Refine can't pick up the right detail."),
                 &mut item_settings.feather,
                 0.0..=5.0, defaults.template.feather,
                 false,
