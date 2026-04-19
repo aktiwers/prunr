@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 
 use prunr_core::{
-    create_engine_pool, process_image_with_mask,
+    create_engine_pool,
     OrtEngine, ProcessResult, ProgressStage, EdgeEngine,
 };
 
@@ -233,17 +233,6 @@ pub fn run_worker() -> ! {
                         Some(image::DynamicImage::ImageRgba8(rgba))
                     });
 
-                    // Progress callback
-                    let progress_evt_tx = evt_tx.clone();
-                    let progress_cancel = cancel.clone();
-                    let progress_cb = move |stage: ProgressStage, pct: f32| {
-                        if !progress_cancel.load(Ordering::Acquire) {
-                            let _ = progress_evt_tx.send(SubprocessEvent::Progress {
-                                item_id, stage, pct,
-                            });
-                        }
-                    };
-
                     // Weighted semaphore: acquire pixel units proportional to image size.
                     // Small images run in parallel; large images throttle automatically.
                     // Guard releases on drop (panic-safe).
@@ -286,6 +275,9 @@ pub fn run_worker() -> ! {
                         }
                         LineMode::SubjectOutline => {
                             if let Some(ref img) = chain_img {
+                                // Chain: chain input is already a masked RGBA from a prior
+                                // tier, so run DexiNed on it directly. No seg cache — we
+                                // don't have the seg tensor that produced the chain input.
                                 // invariant: line_mode == SubjectOutline → needs_edge → edge_eng loaded.
                                 let eng_ref = edge_eng.as_ref().unwrap();
                                 eng_ref.infer_all_tensors(img).map(|res| {
@@ -300,30 +292,79 @@ pub fn run_worker() -> ! {
                                     }
                                 })
                             } else {
-                                match engine.as_ref() {
-                                    None => Err(prunr_core::CoreError::Inference(
-                                        "segmentation engine not initialized".into()
-                                    )),
-                                    Some(eng) => process_image_with_mask(
-                                        &img_bytes, eng, &mask,
-                                        Some(progress_cb), Some(cancel.clone()),
-                                    ),
-                                }.and_then(|pr| {
-                                    let img = image::DynamicImage::ImageRgba8(pr.rgba_image);
-                                    // invariant: line_mode == SubjectOutline → needs_edge → edge_eng loaded.
-                                    let eng_ref = edge_eng.as_ref().unwrap();
-                                    eng_ref.infer_all_tensors(&img).map(|res| {
-                                        let active = &res.tensors[edge.edge_scale as usize];
-                                        let rgba_image = prunr_core::finalize_edges(
-                                            active, res.height, res.width, &img, &edge,
-                                        );
-                                        edge_tensor_for_cache = Some(res);
-                                        ProcessResult {
-                                            rgba_image,
-                                            active_provider: pr.active_provider,
+                                // Non-chain: split pipeline so the seg tensor is captured
+                                // for Tier 2 mask reruns and cross-mode transitions (the
+                                // monolithic `process_image_with_mask` threw it away).
+                                let Some(eng) = engine.as_ref() else {
+                                    let _ = evt_tx.send(SubprocessEvent::ImageError {
+                                        item_id,
+                                        error: "segmentation engine not initialized".into(),
+                                    });
+                                    in_flight.fetch_sub(1, Ordering::AcqRel);
+                                    if image_path.starts_with(ipc.as_ref()) {
+                                        let _ = std::fs::remove_file(&image_path);
+                                    }
+                                    return;
+                                };
+                                let decoded = match prunr_core::load_image_from_bytes(&img_bytes) {
+                                    Ok(img) => img,
+                                    Err(e) => {
+                                        let _ = evt_tx.send(SubprocessEvent::ImageError {
+                                            item_id, error: e.to_string(),
+                                        });
+                                        in_flight.fetch_sub(1, Ordering::AcqRel);
+                                        if image_path.starts_with(ipc.as_ref()) {
+                                            let _ = std::fs::remove_file(&image_path);
                                         }
+                                        return;
+                                    }
+                                };
+                                let original = &decoded;
+                                if let Some(err) = prunr_core::check_large_image(original) {
+                                    Err(err)
+                                } else {
+                                    let infer_evt_tx = evt_tx.clone();
+                                    let infer_cancel = cancel.clone();
+                                    let infer_progress = move |stage: ProgressStage, pct: f32| {
+                                        if !infer_cancel.load(Ordering::Acquire) {
+                                            let _ = infer_evt_tx.send(SubprocessEvent::Progress {
+                                                item_id, stage, pct,
+                                            });
+                                        }
+                                    };
+                                    prunr_core::infer_only(
+                                        original, eng, Some(infer_progress), Some(cancel.clone()),
+                                    ).and_then(|ir| {
+                                        if cancel.load(Ordering::Acquire) {
+                                            return Err(prunr_core::CoreError::Cancelled);
+                                        }
+                                        let th = ir.tensor_height;
+                                        let tw = ir.tensor_width;
+                                        let active_provider = ir.active_provider.clone();
+                                        let masked_rgba = prunr_core::postprocess_from_flat(
+                                            &ir.tensor_data, th, tw, original, &mask, model,
+                                        )?;
+                                        // Seg tensor captured → Tier 2 mask reruns work in
+                                        // SubjectOutline; Off ↔ SubjectOutline can reuse it.
+                                        tensor_for_cache = Some((ir.tensor_data, th as u32, tw as u32));
+                                        if cancel.load(Ordering::Acquire) {
+                                            return Err(prunr_core::CoreError::Cancelled);
+                                        }
+                                        let masked_img = image::DynamicImage::ImageRgba8(masked_rgba);
+                                        // invariant: line_mode == SubjectOutline → needs_edge → edge_eng loaded.
+                                        let eng_ref = edge_eng.as_ref().unwrap();
+                                        let edge_res = eng_ref.infer_all_tensors(&masked_img)?;
+                                        if cancel.load(Ordering::Acquire) {
+                                            return Err(prunr_core::CoreError::Cancelled);
+                                        }
+                                        let active = &edge_res.tensors[edge.edge_scale as usize];
+                                        let rgba_image = prunr_core::finalize_edges(
+                                            active, edge_res.height, edge_res.width, &masked_img, &edge,
+                                        );
+                                        edge_tensor_for_cache = Some(edge_res);
+                                        Ok(ProcessResult { rgba_image, active_provider })
                                     })
-                                })
+                                }
                             }
                         }
                         LineMode::Off => {
