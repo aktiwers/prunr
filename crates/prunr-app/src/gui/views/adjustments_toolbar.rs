@@ -111,13 +111,14 @@ pub fn render(
         if ch.commit { acc.commit = true; }
     };
 
-    ui.horizontal(|ui| {
-        render_model_dropdown(ui, app_settings, processing, &mut change);
+    // EdgesOnly w/o chain bypasses the mask tier — don't let the user
+    // tweak dead knobs. Chain mode re-runs mask on a later pass.
+    let mask_active = !(item_settings.line_mode == LineMode::EdgesOnly
+        && !app_settings.chain_mode);
 
-        // EdgesOnly w/o chain bypasses the mask tier — don't let the user
-        // tweak dead knobs. Chain mode re-runs mask on a later pass.
-        let mask_active = !(item_settings.line_mode == LineMode::EdgesOnly
-            && !app_settings.chain_mode);
+    ui.horizontal(|ui| {
+        render_model_dropdown(ui, app_settings, processing, mask_active, &mut change);
+
         ui.add_enabled_ui(mask_active, |ui| {
             aggregate(chip::chip_f32(
                 ui, "gamma", "γ", "Gamma",
@@ -260,6 +261,16 @@ pub fn render(
         ui.add_enabled_ui(!processing, |ui| {
             super::lines_popover::render(ui, item_settings, seg_model_name);
         });
+        if !mask_active {
+            ui.label(
+                RichText::new(format!(
+                    "{}  DexiNed only — mask model bypassed",
+                    ICON_BLOCK.codepoint,
+                ))
+                .color(theme::TEXT_SECONDARY)
+                .size(theme::FONT_SIZE_MONO),
+            );
+        }
         if item_settings.line_mode != LineMode::Off {
             aggregate(chip::chip_f32(
                 ui, "line_strength",
@@ -327,10 +338,12 @@ fn render_model_dropdown(
     ui: &mut Ui,
     app_settings: &mut Settings,
     processing: bool,
+    mask_active: bool,
     change: &mut ToolbarChange,
 ) {
     let prev_model = app_settings.model;
-    ui.add_enabled_ui(!processing, |ui| {
+    let enabled = !processing && mask_active;
+    ui.add_enabled_ui(enabled, |ui| {
         // Match the combobox visuals used by row 1's other dropdowns.
         let vis = ui.visuals_mut();
         vis.widgets.inactive.weak_bg_fill = theme::BG_SECONDARY;
@@ -343,9 +356,14 @@ fn render_model_dropdown(
         vis.widgets.noninteractive.fg_stroke.color = theme::TEXT_SECONDARY;
 
         ui.spacing_mut().interact_size.y = theme::CHIP_HEIGHT;
+        let selected_text = if mask_active {
+            model_label(app_settings.model, true)
+        } else {
+            format!("{}  Bypassed", ICON_BLOCK.codepoint)
+        };
         egui::ComboBox::from_id_salt("adjustments_model")
             .selected_text(
-                RichText::new(model_label(app_settings.model, true))
+                RichText::new(selected_text)
                     .color(theme::TEXT_PRIMARY),
             )
             .show_ui(ui, |ui| {
@@ -364,14 +382,23 @@ fn render_model_dropdown(
             })
             .response
             .on_hover_ui(|ui| {
-                ui.label(RichText::new("Segmentation model").strong().color(theme::TEXT_PRIMARY));
-                ui.add_space(theme::SPACE_XS);
-                ui.label(
-                    RichText::new(
+                let (heading, body) = if mask_active {
+                    (
+                        "Segmentation model",
                         "Which AI model extracts the subject. Trade quality, speed, and memory footprint — per-row labels show each option's position on those three axes.",
                     )
-                    .color(theme::TEXT_PRIMARY)
-                    .size(theme::FONT_SIZE_MONO),
+                } else {
+                    (
+                        "Mask model bypassed",
+                        "Sketch is set to Full, so DexiNed runs over the whole image and the subject-extraction model isn't needed. Switch Sketch to Off or Subject to re-enable.",
+                    )
+                };
+                ui.label(RichText::new(heading).strong().color(theme::TEXT_PRIMARY));
+                ui.add_space(theme::SPACE_XS);
+                ui.label(
+                    RichText::new(body)
+                        .color(theme::TEXT_PRIMARY)
+                        .size(theme::FONT_SIZE_MONO),
                 );
             });
     });
