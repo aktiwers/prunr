@@ -470,6 +470,15 @@ Implemented via the `drag` crate (Windows/macOS only). Files written to `temp_di
 
 Self-drop rejection prevents re-ingesting thumbnails. Stuck-drag recovery clears state when the drag callback doesn't fire.
 
+**Export paths** — `drag_export::prepare_for_drag(item, split)` returns `Vec<PathBuf>`:
+
+| Mode | Output | Cached-tensor requirement |
+|------|--------|---------------------------|
+| Composite (default) | `{stem}-{nobg\|lines\|nobg-lines}.png` | None — uses `result_rgba` or raw source |
+| Split (`export_split_layers`) | `{stem}-subject.png` + `{stem}-lines.png` + `{stem}-mask.png` | Subject / Mask need `cached_tensor`; Lines needs `cached_edge_tensors` |
+
+Split mode skips layers whose tensor isn't cached (e.g. LineMode::Off items have no edge tensor → 2 files, not 3). Falls back to the composite path when nothing is cached so drags of unprocessed items still work. Subject layer re-runs `postprocess_from_flat` with `fill_style=None`, `bg_effect=None` forced so the receiving app sees clean pixels; other mask tweaks (gamma, threshold, refine, feather, edge_shift) are preserved.
+
 ## Persistent Config
 
 User data lives in the platform config dir (`dirs::config_dir()`):
