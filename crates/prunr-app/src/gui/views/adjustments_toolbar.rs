@@ -362,8 +362,9 @@ pub fn render(
 enum Tier { Mask, Edge, Bg }
 
 /// Line-style picker. Solid defers to the user's `solid_line_color` chip;
-/// every other variant carries its own colours / params (defaults from
-/// `LineStyle::ALL`). Phase-3 adds in-popover tuning for the params.
+/// every other variant carries its own colours / params. Picking a variant
+/// keeps the popover open so the user can tune the params below — click
+/// outside to dismiss.
 fn render_line_style_chip(ui: &mut Ui, style: &mut prunr_core::LineStyle) -> bool {
     use prunr_core::LineStyle;
     let accent = !matches!(style, LineStyle::Solid);
@@ -376,23 +377,66 @@ fn render_line_style_chip(ui: &mut Ui, style: &mut prunr_core::LineStyle) -> boo
     let popup_id = ui.make_persistent_id("line_style_popup");
     let mut changed = false;
     chip::popup_for(ui, popup_id, &resp, |ui| {
+        ui.label(RichText::new("Line style").strong().color(theme::TEXT_PRIMARY));
+        ui.add_space(theme::SPACE_XS);
         for option in LineStyle::ALL {
             let selected = std::mem::discriminant(option) == std::mem::discriminant(style);
-            if ui.selectable_label(selected, option.name()).clicked() {
-                if !selected {
-                    *style = *option;
-                    changed = true;
-                }
-                egui::Popup::close_id(ui.ctx(), popup_id);
+            if ui.selectable_label(selected, option.name()).clicked() && !selected {
+                *style = *option;
+                changed = true;
             }
+        }
+        ui.separator();
+        if line_style_params(ui, style) {
+            changed = true;
         }
     });
     changed
 }
 
-/// Fill-style picker. Param-carrying variants take defaults from
-/// `FillStyle::ALL`; Phase-3 adds slider / colour-picker tuning inside
-/// the popover.
+fn line_style_params(ui: &mut Ui, style: &mut prunr_core::LineStyle) -> bool {
+    use prunr_core::LineStyle;
+    let mut changed = false;
+    match style {
+        LineStyle::Solid => {
+            ui.label(RichText::new("Uses Solid line color chip.").color(theme::TEXT_SECONDARY)
+                .size(theme::FONT_SIZE_MONO));
+        }
+        LineStyle::GradientY { top, bottom } => {
+            changed |= rgb_picker_row(ui, "Top", top);
+            changed |= rgb_picker_row(ui, "Bottom", bottom);
+        }
+        LineStyle::GradientX { left, right } => {
+            changed |= rgb_picker_row(ui, "Left", left);
+            changed |= rgb_picker_row(ui, "Right", right);
+        }
+        LineStyle::RadialGradient { center, inner, outer } => {
+            changed |= rgb_picker_row(ui, "Inner", inner);
+            changed |= rgb_picker_row(ui, "Outer", outer);
+            ui.horizontal(|ui| {
+                ui.label("Centre");
+                if ui.add(egui::Slider::new(&mut center[0], 0..=255).text("X")).changed() {
+                    changed = true;
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.label("");
+                if ui.add(egui::Slider::new(&mut center[1], 0..=255).text("Y")).changed() {
+                    changed = true;
+                }
+            });
+        }
+        LineStyle::Rainbow { cycles } => {
+            if ui.add(egui::Slider::new(cycles, 1..=10).text("Cycles")).changed() {
+                changed = true;
+            }
+        }
+    }
+    changed
+}
+
+/// Fill-style picker. Variant list + inline param editor. Pick a variant to
+/// switch, tune the params below, click outside to dismiss.
 fn render_fill_style_chip(ui: &mut Ui, style: &mut prunr_core::FillStyle) -> bool {
     use prunr_core::FillStyle;
     let accent = !matches!(style, FillStyle::None);
@@ -405,15 +449,85 @@ fn render_fill_style_chip(ui: &mut Ui, style: &mut prunr_core::FillStyle) -> boo
     let popup_id = ui.make_persistent_id("fill_style_popup");
     let mut changed = false;
     chip::popup_for(ui, popup_id, &resp, |ui| {
+        ui.label(RichText::new("Fill style").strong().color(theme::TEXT_PRIMARY));
+        ui.add_space(theme::SPACE_XS);
         for option in FillStyle::ALL {
             let selected = std::mem::discriminant(option) == std::mem::discriminant(style);
-            if ui.selectable_label(selected, option.name()).clicked() {
-                if !selected {
-                    *style = *option;
-                    changed = true;
-                }
-                egui::Popup::close_id(ui.ctx(), popup_id);
+            if ui.selectable_label(selected, option.name()).clicked() && !selected {
+                *style = *option;
+                changed = true;
             }
+        }
+        ui.separator();
+        if fill_style_params(ui, style) {
+            changed = true;
+        }
+    });
+    changed
+}
+
+fn fill_style_params(ui: &mut Ui, style: &mut prunr_core::FillStyle) -> bool {
+    use prunr_core::FillStyle;
+    let mut changed = false;
+    match style {
+        FillStyle::None | FillStyle::Desaturate | FillStyle::Invert | FillStyle::Sepia => {
+            ui.label(RichText::new("No parameters.").color(theme::TEXT_SECONDARY)
+                .size(theme::FONT_SIZE_MONO));
+        }
+        FillStyle::Threshold { level } => {
+            if ui.add(egui::Slider::new(level, 0..=255).text("Level")).changed() {
+                changed = true;
+            }
+        }
+        FillStyle::Posterize { levels } => {
+            if ui.add(egui::Slider::new(levels, 2..=8).text("Levels")).changed() {
+                changed = true;
+            }
+        }
+        FillStyle::Solarize { pivot } => {
+            if ui.add(egui::Slider::new(pivot, 0..=255).text("Pivot")).changed() {
+                changed = true;
+            }
+        }
+        FillStyle::HueShift { degrees } => {
+            if ui.add(egui::Slider::new(degrees, -180..=180).text("Degrees")).changed() {
+                changed = true;
+            }
+        }
+        FillStyle::Saturate { percent } => {
+            if ui.add(egui::Slider::new(percent, 0..=300).text("Percent")).changed() {
+                changed = true;
+            }
+        }
+        FillStyle::ColorSplash { keep_hue, tolerance } => {
+            if ui.add(egui::Slider::new(keep_hue, 0..=359).text("Hue°")).changed() {
+                changed = true;
+            }
+            if ui.add(egui::Slider::new(tolerance, 0..=180).text("Tolerance°")).changed() {
+                changed = true;
+            }
+        }
+        FillStyle::Pixelate { block_size } => {
+            if ui.add(egui::Slider::new(block_size, 2..=64).text("Block size")).changed() {
+                changed = true;
+            }
+        }
+        FillStyle::Duotone { dark, light } => {
+            changed |= rgb_picker_row(ui, "Dark", dark);
+            changed |= rgb_picker_row(ui, "Light", light);
+        }
+    }
+    changed
+}
+
+/// Label + compact colour-edit button on one row. Returns true when the
+/// colour changed.
+fn rgb_picker_row(ui: &mut Ui, label: &str, rgb: &mut [u8; 3]) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.label(label);
+        if ui.color_edit_button_srgb(rgb).changed() {
+            changed = true;
         }
     });
     changed
@@ -438,6 +552,8 @@ fn render_compose_mode_chip(ui: &mut Ui, mode: &mut prunr_core::ComposeMode) -> 
     let popup_id = ui.make_persistent_id("compose_mode_popup");
     let mut changed = false;
     chip::popup_for(ui, popup_id, &resp, |ui| {
+        ui.label(RichText::new("Style").strong().color(theme::TEXT_PRIMARY));
+        ui.add_space(theme::SPACE_XS);
         for option in ComposeMode::ALL {
             let selected = *option == *mode;
             if ui.selectable_label(selected, option.to_string()).clicked() {
