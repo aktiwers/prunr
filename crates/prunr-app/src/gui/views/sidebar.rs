@@ -81,7 +81,7 @@ fn render_empty_state(ui: &mut egui::Ui) {
             ui.label(
                 RichText::new("Drop images here\nto queue them")
                     .size(theme::FONT_SIZE_MONO)
-                    .color(theme::TEXT_SECONDARY),
+                    .color(theme::TEXT_PRIMARY),
             );
         },
     );
@@ -371,7 +371,7 @@ fn paint_selection_checkbox(ui: &egui::Ui, item: &mut BatchItem, item_rect: Rect
     let cb_bg = if item.selected {
         theme::ACCENT
     } else if cb_hovered {
-        Color32::from_rgb(0x50, 0x50, 0x50)
+        theme::WIDGET_INACTIVE_BG
     } else {
         Color32::from_rgba_unmultiplied(0, 0, 0, 160)
     };
@@ -379,7 +379,7 @@ fn paint_selection_checkbox(ui: &egui::Ui, item: &mut BatchItem, item_rect: Rect
     ui.painter().rect_stroke(
         cb_rect,
         3.0,
-        Stroke::new(1.0, theme::TEXT_SECONDARY),
+        Stroke::new(theme::STROKE_DEFAULT, theme::TEXT_SECONDARY),
         egui::StrokeKind::Outside,
     );
     if item.selected {

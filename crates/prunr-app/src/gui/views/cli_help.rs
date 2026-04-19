@@ -19,10 +19,10 @@ pub fn render(ctx: &egui::Context, toasts: &mut egui_notify::Toasts) -> bool {
         .show(ctx, |ui| {
             {
                 let vis = ui.visuals_mut();
-                vis.widgets.inactive.bg_fill = egui::Color32::from_rgb(0x50, 0x50, 0x50);
+                vis.widgets.inactive.bg_fill = theme::WIDGET_INACTIVE_BG;
                 vis.widgets.inactive.fg_stroke =
-                    egui::Stroke::new(1.0, theme::TEXT_PRIMARY);
-                vis.widgets.hovered.bg_fill = egui::Color32::from_rgb(0x5a, 0x5a, 0x5a);
+                    egui::Stroke::new(theme::STROKE_DEFAULT, theme::TEXT_PRIMARY);
+                vis.widgets.hovered.bg_fill = theme::WIDGET_HOVER_BG;
             }
 
             // Tab state
@@ -37,8 +37,8 @@ pub fn render(ctx: &egui::Context, toasts: &mut egui_notify::Toasts) -> bool {
                         .color(if selected { theme::TEXT_PRIMARY } else { theme::TEXT_SECONDARY });
                     let btn = egui::Button::new(text)
                         .fill(if selected { theme::BG_SECONDARY } else { egui::Color32::TRANSPARENT })
-                        .corner_radius(4.0)
-                        .min_size(egui::vec2(0.0, 28.0));
+                        .corner_radius(theme::BUTTON_ROUNDING)
+                        .min_size(egui::vec2(0.0, theme::CHIP_HEIGHT));
                     if ui.add(btn).clicked() {
                         tab = i;
                     }
@@ -235,7 +235,7 @@ fn example_row(ui: &mut egui::Ui, toasts: &mut egui_notify::Toasts, cmd: &str, d
     ui.label(
         RichText::new(format!("  {desc}"))
             .size(theme::FONT_SIZE_BODY)
-            .color(theme::TEXT_HINT),
+            .color(theme::TEXT_PRIMARY),
     );
     ui.add_space(theme::SPACE_XS);
 }
@@ -250,7 +250,7 @@ fn opt_row(ui: &mut egui::Ui, flag: &str, desc: &str) {
     ui.label(
         RichText::new(desc)
             .size(theme::FONT_SIZE_BODY)
-            .color(theme::TEXT_HINT),
+            .color(theme::TEXT_PRIMARY),
     );
     ui.end_row();
 }

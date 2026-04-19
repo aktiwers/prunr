@@ -18,14 +18,8 @@ use egui_material_icons::icons::*;
 
 use crate::gui::theme;
 
-/// Height of a chip button on the toolbar row.
-pub const CHIP_HEIGHT: f32 = 28.0;
-
 /// Horizontal padding inside a chip.
 const CHIP_PADDING_X: f32 = 8.0;
-
-/// Popover width — wide enough for slider + value + reset.
-const POPOVER_WIDTH: f32 = 260.0;
 
 /// Return value of every chip function. Callers aggregate these into a
 /// `ToolbarChange` and use them to decide whether a live-preview dispatch
@@ -54,9 +48,9 @@ fn slider_settled(resp: &egui::Response) -> bool {
 fn chip_button(ui: &mut Ui, icon: &str, value: &str, accent: bool) -> Response {
     let fill = theme::BG_SECONDARY;
     let stroke = if accent {
-        egui::Stroke::new(1.0, theme::ACCENT)
+        egui::Stroke::new(theme::STROKE_DEFAULT, theme::ACCENT)
     } else {
-        egui::Stroke::new(1.0, Color32::TRANSPARENT)
+        egui::Stroke::new(theme::STROKE_DEFAULT, Color32::TRANSPARENT)
     };
     let text = format!("{icon}  {value}");
     let btn = egui::Button::new(
@@ -65,7 +59,7 @@ fn chip_button(ui: &mut Ui, icon: &str, value: &str, accent: bool) -> Response {
     .fill(fill)
     .stroke(stroke)
     .corner_radius(theme::BUTTON_ROUNDING)
-    .min_size(egui::vec2(0.0, CHIP_HEIGHT));
+    .min_size(egui::vec2(0.0, theme::CHIP_HEIGHT));
     let saved_padding = ui.spacing().button_padding;
     ui.spacing_mut().button_padding = egui::vec2(CHIP_PADDING_X, 4.0);
     let resp = ui.add(btn);
@@ -105,7 +99,7 @@ fn popup_for(
         resp,
         egui::PopupCloseBehavior::CloseOnClickOutside,
         |ui| {
-            ui.set_min_width(POPOVER_WIDTH);
+            ui.set_min_width(theme::POPOVER_WIDTH);
             body(ui);
         },
     );
@@ -458,7 +452,7 @@ mod tests {
     // in the adjustments_toolbar smoke test suite.
     #[test]
     fn popover_width_is_sane() {
-        assert!(super::POPOVER_WIDTH >= 200.0);
-        assert!(super::POPOVER_WIDTH <= 400.0);
+        assert!(crate::gui::theme::POPOVER_WIDTH >= 200.0);
+        assert!(crate::gui::theme::POPOVER_WIDTH <= 400.0);
     }
 }

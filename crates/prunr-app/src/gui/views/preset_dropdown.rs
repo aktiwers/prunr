@@ -19,9 +19,6 @@ use crate::gui::item_settings::ItemSettings;
 use crate::gui::settings::{PRUNR_PRESET, Settings};
 use crate::gui::theme;
 
-const BTN_HEIGHT: f32 = 32.0;
-const POPOVER_WIDTH: f32 = 260.0;
-
 /// Label for the dropdown button — shows the `applied_preset` name and
 /// whether current settings still match it.
 ///   - Match → `🔖 Portrait ✓` (check icon, clean)
@@ -83,7 +80,7 @@ pub fn render(
     )
     .fill(theme::BG_SECONDARY)
     .corner_radius(theme::BUTTON_ROUNDING)
-    .min_size(egui::vec2(0.0, BTN_HEIGHT));
+    .min_size(egui::vec2(0.0, theme::BTN_HEIGHT));
     let resp = ui.add(btn).on_hover_text(format!(
         "Apply or save preset — currently: {applied_preset}",
     ));
@@ -99,7 +96,7 @@ pub fn render(
         &resp,
         egui::PopupCloseBehavior::CloseOnClickOutside,
         |ui| {
-            ui.set_min_width(POPOVER_WIDTH);
+            ui.set_min_width(theme::POPOVER_WIDTH);
             ui.label(RichText::new("Presets").strong().color(theme::TEXT_PRIMARY));
             ui.add_space(theme::SPACE_XS);
 
@@ -257,7 +254,7 @@ pub fn render(
                     ui.add_space(theme::SPACE_XS);
                     ui.label(
                         RichText::new("Or overwrite an existing preset:")
-                            .color(theme::TEXT_HINT)
+                            .color(theme::TEXT_PRIMARY)
                             .size(theme::FONT_SIZE_MONO),
                     );
                     ui.add_space(theme::SPACE_XS);

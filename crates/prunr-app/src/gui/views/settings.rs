@@ -63,13 +63,13 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) {
             {
                 let vis = ui.visuals_mut();
                 vis.widgets.inactive.bg_stroke =
-                    egui::Stroke::new(1.0, egui::Color32::from_rgb(0x60, 0x60, 0x60));
+                    egui::Stroke::new(theme::STROKE_DEFAULT, egui::Color32::from_rgb(0x60, 0x60, 0x60));
                 vis.widgets.hovered.bg_stroke =
-                    egui::Stroke::new(1.0, egui::Color32::from_rgb(0x80, 0x80, 0x80));
-                vis.widgets.inactive.bg_fill = egui::Color32::from_rgb(0x50, 0x50, 0x50);
+                    egui::Stroke::new(theme::STROKE_DEFAULT, egui::Color32::from_rgb(0x80, 0x80, 0x80));
+                vis.widgets.inactive.bg_fill = theme::WIDGET_INACTIVE_BG;
                 vis.widgets.inactive.fg_stroke =
-                    egui::Stroke::new(1.0, theme::TEXT_PRIMARY);
-                vis.widgets.hovered.bg_fill = egui::Color32::from_rgb(0x5a, 0x5a, 0x5a);
+                    egui::Stroke::new(theme::STROKE_DEFAULT, theme::TEXT_PRIMARY);
+                vis.widgets.hovered.bg_fill = theme::WIDGET_HOVER_BG;
             }
 
             // Header with Reset-all action on the right.
@@ -116,7 +116,7 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) {
                     if ui.add_enabled(
                         app.settings.parallel_jobs < max_jobs,
                         egui::Button::new(RichText::new("+").color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY))
-                            .fill(theme::BG_SECONDARY).min_size(egui::vec2(28.0, 28.0)),
+                            .fill(theme::BG_SECONDARY).min_size(egui::vec2(theme::CHIP_HEIGHT, theme::CHIP_HEIGHT)),
                     ).clicked() {
                         app.settings.parallel_jobs += 1;
                     }
@@ -129,7 +129,7 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) {
                     if ui.add_enabled(
                         app.settings.parallel_jobs > 1,
                         egui::Button::new(RichText::new("\u{2212}").color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY))
-                            .fill(theme::BG_SECONDARY).min_size(egui::vec2(28.0, 28.0)),
+                            .fill(theme::BG_SECONDARY).min_size(egui::vec2(theme::CHIP_HEIGHT, theme::CHIP_HEIGHT)),
                     ).clicked() {
                         app.settings.parallel_jobs -= 1;
                     }
