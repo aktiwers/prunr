@@ -44,6 +44,13 @@ fn handle_cancel_selected_raises_only_selected_item_flags() {
     assert!(app.processor.cancels.is_cancelled(1), "selected processing item must be cancelled");
     assert!(!app.processor.cancels.is_cancelled(2), "selected-but-done item must not be cancelled");
     assert!(!app.processor.cancels.is_cancelled(3), "unselected item must not be cancelled");
+
+    // Cancelled item flipped immediately → thumbnail / canvas spinners stop
+    // before the subprocess acknowledges the cancel.
+    let item1 = app.batch.find_by_id(1).expect("id 1 still present");
+    assert_eq!(item1.status, BatchStatus::Pending);
+    let item3 = app.batch.find_by_id(3).expect("id 3 still present");
+    assert_eq!(item3.status, BatchStatus::Processing, "unselected item keeps running");
 }
 
 #[test]

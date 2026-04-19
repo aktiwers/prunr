@@ -117,7 +117,9 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) {
         app.start_animation_sweep();
     }
 
-    let close_via_backdrop = theme::backdrop_clicked(ctx, &window_response);
+    let now = ctx.input(|i| i.time);
+    let debounce_passed = (now - app.animation_sweep_opened_at) > 0.15;
+    let close_via_backdrop = debounce_passed && theme::backdrop_clicked(ctx, &window_response);
     if !open || close_via_backdrop {
         app.show_animation_sweep = false;
     }
