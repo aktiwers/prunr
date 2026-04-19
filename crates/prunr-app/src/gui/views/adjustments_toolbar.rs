@@ -349,10 +349,18 @@ pub fn render(
         change.seg_cache_invalid = true;
     }
     if item_settings.line_mode != before_line_mode {
-        // Conservative: any line_mode change clears the edge cache. A more
-        // surgical diff could keep it valid for "no change in DexiNed input"
-        // transitions, but the speed-up isn't worth the fragility.
-        change.edge_cache_invalid = true;
+        // Edge cache is only stale when DexiNed would see a DIFFERENT input.
+        // SubjectOutline's edges were computed on the masked-subject image;
+        // EdgesOnly's edges on the raw image. Off doesn't run DexiNed at
+        // all, so transitions to/from Off preserve whatever edge cache
+        // exists (letting a SubjectOutline → Off → SubjectOutline round
+        // trip keep live-preview working for line_strength tweaks).
+        let invalidates = matches!((before_line_mode, item_settings.line_mode),
+            (LineMode::SubjectOutline, LineMode::EdgesOnly)
+            | (LineMode::EdgesOnly, LineMode::SubjectOutline));
+        if invalidates {
+            change.edge_cache_invalid = true;
+        }
         change.line_mode_changed = true;
     }
 
