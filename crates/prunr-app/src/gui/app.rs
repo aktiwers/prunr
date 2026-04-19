@@ -1184,9 +1184,23 @@ impl PrunrApp {
         let original = Arc::clone(item.source_dyn.as_ref().unwrap());
         let seg_tensor = item.cached_tensor.as_ref().and_then(decompress_seg);
         let edge_tensor = Self::edge_tensor_for_active_scale(item);
+        tracing::info!(
+            item_id = id, ?kind,
+            has_cached_tensor = item.cached_tensor.is_some(),
+            has_cached_edge_tensors = item.cached_edge_tensors.is_some(),
+            has_seg = seg_tensor.is_some(),
+            has_edge = edge_tensor.is_some(),
+            "live_preview: build_preview_inputs",
+        );
         match kind {
-            PreviewKind::Mask if seg_tensor.is_none() => return None,
-            PreviewKind::Edge if edge_tensor.is_none() => return None,
+            PreviewKind::Mask if seg_tensor.is_none() => {
+                tracing::warn!(item_id = id, "live_preview: Mask aborted — seg_tensor None");
+                return None;
+            }
+            PreviewKind::Edge if edge_tensor.is_none() => {
+                tracing::warn!(item_id = id, "live_preview: Edge aborted — edge_tensor None");
+                return None;
+            }
             _ => {}
         }
         let cached_edge_mask = item.cached_edge_mask.as_ref().and_then(|(m, bits, scale)| {
@@ -2090,12 +2104,13 @@ impl PrunrApp {
             if toolbar_change.edge_cache_invalid {
                 self.batch.items[idx].invalidate_edge_cache();
             }
-            // A preset apply that invalidates the cache on an already-
-            // processed item means live preview has no tensor to rerun
-            // against. Auto-trigger a reprocess so the user doesn't have to
-            // click Process; tier routing keeps this cheap when only one
-            // tensor is stale.
-            if toolbar_change.preset_applied
+            // A preset apply or line-mode toggle on a Done item leaves the
+            // result stale (cache invalidated, but applied_recipe still
+            // says the old setup). Auto-trigger a reprocess so the user
+            // doesn't have to click Process; tier routing keeps this cheap
+            // — AddEdgeInference when only edges were added, MaskRerun
+            // when only edges were dropped.
+            if (toolbar_change.preset_applied || toolbar_change.line_mode_changed)
                 && self.batch.items[idx].status == BatchStatus::Done
             {
                 let target_id = self.batch.items[idx].id;
