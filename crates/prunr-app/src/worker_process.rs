@@ -361,7 +361,7 @@ pub fn run_worker() -> ! {
                                         if cancel.load(Ordering::Acquire) {
                                             return Err(prunr_core::CoreError::Cancelled);
                                         }
-                                        let masked_img = image::DynamicImage::ImageRgba8(masked_rgba);
+                                        let masked_img = image::DynamicImage::ImageRgba8(masked_rgba.clone());
                                         // invariant: line_mode == SubjectOutline → needs_edge → edge_eng loaded.
                                         let eng_ref = edge_eng.as_ref().unwrap();
                                         let edge_res = eng_ref.infer_all_tensors(&masked_img)?;
@@ -369,8 +369,18 @@ pub fn run_worker() -> ! {
                                             return Err(prunr_core::CoreError::Cancelled);
                                         }
                                         let active = &edge_res.tensors[edge.edge_scale as usize];
-                                        let rgba_image = prunr_core::finalize_edges(
-                                            active, edge_res.height, edge_res.width, &masked_img, &edge,
+                                        // SubjectOutline: preserve the subject silhouette in the
+                                        // alpha channel via compose_edges_over_rgba (max-merge).
+                                        // `finalize_edges` would overwrite the subject alpha with
+                                        // the edge mask — that's right for EdgesOnly, wrong here.
+                                        let edge_mask = prunr_core::tensor_to_edge_mask(
+                                            active, edge_res.height, edge_res.width,
+                                            masked_rgba.width(), masked_rgba.height(),
+                                            edge.line_strength,
+                                        );
+                                        let rgba_image = prunr_core::compose_edges_over_rgba(
+                                            &edge_mask, &masked_rgba,
+                                            edge.solid_line_color, edge.edge_thickness,
                                         );
                                         edge_tensor_for_cache = Some(edge_res);
                                         Ok(ProcessResult { rgba_image, active_provider })
@@ -702,7 +712,7 @@ pub fn run_worker() -> ! {
                             &original, &mask_settings, cmd_model,
                         ).map_err(|e| e.to_string())?;
 
-                        let masked_img = image::DynamicImage::ImageRgba8(masked_rgba);
+                        let masked_img = image::DynamicImage::ImageRgba8(masked_rgba.clone());
                         let eng_ref = edge_eng.as_ref()
                             .ok_or_else(|| "edge engine not initialized in this subprocess".to_string())?;
                         let edge_res = eng_ref.infer_all_tensors(&masked_img)
@@ -712,8 +722,16 @@ pub fn run_worker() -> ! {
                             return Err("cancelled".to_string());
                         }
                         let active = &edge_res.tensors[edge_settings.edge_scale as usize];
-                        let rgba_image = prunr_core::finalize_edges(
-                            active, edge_res.height, edge_res.width, &masked_img, &edge_settings,
+                        // SubjectOutline compose: preserve subject alpha (see
+                        // non-chain SubjectOutline branch for rationale).
+                        let edge_mask = prunr_core::tensor_to_edge_mask(
+                            active, edge_res.height, edge_res.width,
+                            masked_rgba.width(), masked_rgba.height(),
+                            edge_settings.line_strength,
+                        );
+                        let rgba_image = prunr_core::compose_edges_over_rgba(
+                            &edge_mask, &masked_rgba,
+                            edge_settings.solid_line_color, edge_settings.edge_thickness,
                         );
                         Ok((rgba_image, edge_res))
                     })();

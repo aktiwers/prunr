@@ -183,6 +183,13 @@ pub fn tensor_to_edge_mask(
 
 /// Dilate + composite a pre-built edge mask into an RGBA. Cheap; safe to call
 /// every live-preview tweak.
+///
+/// Semantics: the output alpha channel IS the dilated edge mask — any alpha
+/// already on `original` is overwritten. That's what `LineMode::EdgesOnly`
+/// wants (show only the lines, transparent everywhere else). For
+/// `LineMode::SubjectOutline`, use `compose_edges_over_rgba` instead — it
+/// merges the edge mask with the base's existing alpha so the masked subject
+/// stays visible under the outline.
 pub fn compose_edges(
     mask: &image::GrayImage,
     original: &DynamicImage,
@@ -210,6 +217,50 @@ pub fn compose_edges(
         }
         rgba
     }
+}
+
+/// Composite a pre-built edge mask OVER an already-masked RGBA, preserving
+/// the base's alpha. Used by `SubjectOutline` mode where the base carries the
+/// subject silhouette in its alpha channel and the edges draw on top.
+///
+/// Alpha merge is `max(base_alpha, edge_mask)`: inside the subject the base
+/// alpha dominates; outside the subject the edge mask shows through. With a
+/// `solid_line_color`, edge pixels are recolored (overwriting base RGB at
+/// edge pixels using the edge mask's strength as a blend weight).
+pub fn compose_edges_over_rgba(
+    mask: &image::GrayImage,
+    base: &RgbaImage,
+    solid_line_color: Option<[u8; 3]>,
+    edge_thickness: u32,
+) -> RgbaImage {
+    let (ow, oh) = (base.width(), base.height());
+    let mut mask = mask.clone();
+    crate::postprocess::dilate_mask(&mut mask, edge_thickness);
+    let mask_raw = mask.as_raw();
+    let mut rgba = base.clone();
+    let out_raw = rgba.as_mut();
+    if let Some(c) = solid_line_color {
+        for i in 0..(ow * oh) as usize {
+            let e = mask_raw[i];
+            if e == 0 { continue; } // no edge here — keep base pixel untouched
+            let w = e as u16;
+            let iw = 255 - w;
+            // Blend base RGB toward the line color using edge strength as weight.
+            out_raw[i * 4]     = ((out_raw[i * 4]     as u16 * iw + c[0] as u16 * w) / 255) as u8;
+            out_raw[i * 4 + 1] = ((out_raw[i * 4 + 1] as u16 * iw + c[1] as u16 * w) / 255) as u8;
+            out_raw[i * 4 + 2] = ((out_raw[i * 4 + 2] as u16 * iw + c[2] as u16 * w) / 255) as u8;
+            let a = out_raw[i * 4 + 3];
+            out_raw[i * 4 + 3] = a.max(e);
+        }
+    } else {
+        for i in 0..(ow * oh) as usize {
+            let e = mask_raw[i];
+            if e == 0 { continue; }
+            let a = out_raw[i * 4 + 3];
+            out_raw[i * 4 + 3] = a.max(e);
+        }
+    }
+    rgba
 }
 
 /// Tier 2 edge convenience: tensor → mask → RGBA in one call. Prefer the two

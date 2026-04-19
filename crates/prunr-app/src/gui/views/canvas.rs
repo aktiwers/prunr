@@ -414,14 +414,8 @@ fn render_done(ui: &mut egui::Ui, app: &PrunrApp) {
             }
         }
         let result_alpha = (fade * 255.0) as u8;
-        let tex_id = result_tex.id();
-        let last = app.last_painted_tex_id.get();
-        if last != Some(tex_id) {
-            tracing::info!(?tex_id, ?last, fade, "canvas: painting result_texture (id changed)");
-            app.last_painted_tex_id.set(Some(tex_id));
-        }
         ui.painter().image(
-            tex_id,
+            result_tex.id(),
             img_rect,
             Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
             Color32::from_rgba_unmultiplied(255, 255, 255, result_alpha),
