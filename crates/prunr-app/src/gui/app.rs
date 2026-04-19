@@ -72,6 +72,11 @@ pub struct PrunrApp {
     pub(crate) canvas_switch_id: u64,
     /// Incremented when a result completes, drives crossfade in render_done
     pub(crate) result_switch_id: u64,
+    /// Diagnostic: last `result_texture.id()` we traced from the canvas
+    /// paint path. Populated by `canvas::render_done` only when the id
+    /// changes, so the log shows exactly one line per visible texture
+    /// swap instead of a per-frame flood.
+    pub(crate) last_painted_tex_id: std::cell::Cell<Option<egui::TextureId>>,
 
     /// Set by add_to_batch — triggers sync_selected_batch_textures in next logic()
     pending_batch_sync: bool,
@@ -191,6 +196,7 @@ impl PrunrApp {
             settings,
             canvas_switch_id: 0,
             result_switch_id: 0,
+            last_painted_tex_id: std::cell::Cell::new(None),
             pending_batch_sync: false,
             pending_open_dialog: false,
             toasts: egui_notify::Toasts::default()
@@ -1304,7 +1310,20 @@ impl PrunrApp {
     }
 
     pub(crate) fn sync_selected_batch_textures(&mut self, ctx: &egui::Context) {
-        let Some(idx) = self.batch.selected_idx_clamped() else { return };
+        let Some(idx) = self.batch.selected_idx_clamped() else {
+            tracing::warn!("sync_selected_batch_textures: no selected idx");
+            return;
+        };
+        let (item_id, status, has_rgba, tex_id, rgba_ptr) = {
+            let item = &self.batch.items[idx];
+            let rgba_ptr = item.result_rgba.as_ref().map(|r| Arc::as_ptr(r) as usize);
+            (item.id, item.status.clone(), item.result_rgba.is_some(),
+             item.result_texture.as_ref().map(|t| t.id()), rgba_ptr)
+        };
+        tracing::info!(
+            idx, item_id, ?status, has_rgba, ?tex_id, ?rgba_ptr,
+            "sync_selected_batch_textures: before sync",
+        );
 
         self.evict_result_rgba_for_background_items(idx);
         self.restore_selected_result_from_history(idx);
@@ -1407,6 +1426,12 @@ impl PrunrApp {
     /// until the new item's is ready (no blank flash on sidebar click).
     fn sync_app_state_to_selected_item(&mut self, idx: usize) {
         let item = &self.batch.items[idx];
+        tracing::info!(
+            idx, item_id = item.id, ?item.status,
+            item_has_rgba = item.result_rgba.is_some(),
+            item_tex_id = ?item.result_texture.as_ref().map(|t| t.id()),
+            "sync_app_state_to_selected_item",
+        );
         // Mirror both textures exactly — including `None`. The old "keep the
         // previous texture" guards caused two distinct bugs:
         //   - result_texture guard: canvas stayed on the previous item's image
@@ -1445,13 +1470,22 @@ impl PrunrApp {
         tx: mpsc::Sender<(u64, String, egui::ColorImage, bool)>,
         ctx: egui::Context,
     ) {
+        let arc_ptr = Arc::as_ptr(&rgba) as usize;
+        tracing::info!(item_id, name = %name, is_result, arc_ptr, "tex_prep: spawn");
         std::thread::spawn(move || {
             let (w, h) = (rgba.width(), rgba.height());
+            let sample = rgba.as_raw().get(0..8).map(|s| s.to_vec()).unwrap_or_default();
             let ci = egui::ColorImage::from_rgba_unmultiplied(
                 [w as usize, h as usize],
                 rgba.as_flat_samples().as_slice(),
             );
-            let _ = tx.send((item_id, name, ci, is_result));
+            tracing::info!(
+                item_id, name = %name, is_result, w, h,
+                arc_ptr, first_bytes = ?sample,
+                "tex_prep: ColorImage built, sending",
+            );
+            let send_result = tx.send((item_id, name, ci, is_result));
+            tracing::info!(item_id, send_ok = send_result.is_ok(), "tex_prep: send complete");
             ctx.request_repaint();
         });
     }
