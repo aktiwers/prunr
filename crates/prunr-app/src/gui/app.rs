@@ -14,7 +14,7 @@ use super::settings::Settings;
 use super::state::AppState;
 use super::theme;
 use super::worker::{WorkerMessage, WorkerResult, spawn_worker};
-use super::views::{adjustments_toolbar, canvas, chip, cli_help, settings, shortcuts, sidebar, statusbar, toolbar};
+use super::views::{adjustments_toolbar, canvas, cli_help, settings, shortcuts, sidebar, statusbar, toolbar};
 
 pub struct PrunrApp {
     // State
@@ -100,11 +100,11 @@ impl PrunrApp {
         let mut visuals = cc.egui_ctx.global_style().visuals.clone();
         visuals.window_fill = theme::BG_PRIMARY;
         visuals.panel_fill = theme::BG_SECONDARY;
-        let subtle = egui::Stroke::new(1.0, egui::Color32::from_rgb(0x3a, 0x3a, 0x3a));
+        let subtle = egui::Stroke::new(theme::STROKE_DEFAULT, egui::Color32::from_rgb(0x3a, 0x3a, 0x3a));
         visuals.widgets.noninteractive.bg_stroke = subtle;
         visuals.widgets.inactive.bg_stroke = subtle;
-        visuals.widgets.active.bg_stroke = egui::Stroke::new(1.0, theme::ACCENT);
-        visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(0x50, 0x50, 0x50));
+        visuals.widgets.active.bg_stroke = egui::Stroke::new(theme::STROKE_DEFAULT, theme::ACCENT);
+        visuals.widgets.hovered.bg_stroke = egui::Stroke::new(theme::STROKE_DEFAULT, theme::WIDGET_INACTIVE_BG);
         visuals.widgets.open.bg_stroke = subtle; // ComboBox "open" state
         visuals.window_stroke = subtle;
         visuals.error_fg_color = theme::DESTRUCTIVE;
@@ -1848,7 +1848,7 @@ impl eframe::App for PrunrApp {
 
         let panel_frame = egui::Frame {
             fill: theme::BG_SECONDARY,
-            stroke: egui::Stroke::new(1.0, egui::Color32::from_rgb(0x2a, 0x2a, 0x2a)),
+            stroke: egui::Stroke::new(theme::STROKE_DEFAULT, egui::Color32::from_rgb(0x2a, 0x2a, 0x2a)),
             inner_margin: egui::Margin::symmetric(theme::SPACE_SM as i8, 0),
             ..Default::default()
         };
@@ -1918,7 +1918,7 @@ impl PrunrApp {
         let Some(idx) = self.batch.selected_idx_clamped() else { return };
         // Row 3 is always visible (Lines mode selector lives there), so the
         // toolbar always reserves two rows of height.
-        let height = chip::CHIP_HEIGHT * 2.0 + theme::SPACE_XS + theme::SPACE_SM * 2.0;
+        let height = theme::CHIP_HEIGHT * 2.0 + theme::SPACE_XS + theme::SPACE_SM * 2.0;
         let mut toolbar_change = adjustments_toolbar::ToolbarChange::default();
         let is_processing = self.state == AppState::Processing;
         // Snapshot taken BEFORE adjustments_toolbar::render runs — if the

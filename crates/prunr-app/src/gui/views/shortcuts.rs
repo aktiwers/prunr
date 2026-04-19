@@ -58,7 +58,7 @@ fn shortcut_row(ui: &mut egui::Ui, key: &str, action: &str) {
     ui.label(
         RichText::new(action)
             .size(theme::FONT_SIZE_BODY)
-            .color(theme::TEXT_SECONDARY),
+            .color(theme::TEXT_PRIMARY),
     );
     ui.end_row();
 }

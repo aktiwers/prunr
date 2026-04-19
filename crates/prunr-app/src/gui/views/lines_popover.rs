@@ -13,7 +13,6 @@ use egui_material_icons::icons::*;
 
 use crate::gui::item_settings::ItemSettings;
 use crate::gui::theme;
-use crate::gui::views::chip;
 use prunr_core::LineMode;
 
 /// Popover width.
@@ -57,7 +56,7 @@ fn two_line_label(title: &str, description: &str) -> egui::text::LayoutJob {
         description,
         0.0,
         TextFormat {
-            color: theme::TEXT_SECONDARY,
+            color: theme::TEXT_PRIMARY,
             font_id: egui::FontId::proportional(theme::FONT_SIZE_MONO),
             ..Default::default()
         },
@@ -89,12 +88,12 @@ pub fn render(ui: &mut Ui, settings: &mut ItemSettings, seg_model_name: &str) ->
     )
     .fill(theme::BG_SECONDARY)
     .stroke(if accent {
-        egui::Stroke::new(1.0, theme::ACCENT)
+        egui::Stroke::new(theme::STROKE_DEFAULT, theme::ACCENT)
     } else {
-        egui::Stroke::new(1.0, egui::Color32::TRANSPARENT)
+        egui::Stroke::new(theme::STROKE_DEFAULT, egui::Color32::TRANSPARENT)
     })
     .corner_radius(theme::BUTTON_ROUNDING)
-    .min_size(egui::vec2(0.0, chip::CHIP_HEIGHT));
+    .min_size(egui::vec2(0.0, theme::CHIP_HEIGHT));
     let resp = ui.add(btn).on_hover_text("Sketch extraction mode and model");
 
     if resp.clicked() {
@@ -165,7 +164,7 @@ pub fn render(ui: &mut Ui, settings: &mut ItemSettings, seg_model_name: &str) ->
             };
             ui.label(
                 RichText::new(model_text)
-                    .color(theme::TEXT_SECONDARY)
+                    .color(theme::TEXT_PRIMARY)
                     .size(theme::FONT_SIZE_BODY),
             );
         },
