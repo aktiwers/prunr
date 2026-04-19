@@ -72,6 +72,11 @@ pub struct ItemSettings {
     /// RGB transformation applied to the masked subject before compose.
     #[serde(default)]
     pub fill_style: prunr_core::FillStyle,
+    /// Backdrop composited behind the masked subject in the output RGBA.
+    /// Orthogonal to `bg` — effects win when non-`None`, solid colour is
+    /// the render-time fallback via the GPU rect behind the texture.
+    #[serde(default)]
+    pub bg_effect: prunr_core::BgEffect,
 }
 
 impl Default for ItemSettings {
@@ -93,6 +98,7 @@ impl Default for ItemSettings {
             compose_mode: prunr_core::ComposeMode::default(),
             line_style: prunr_core::LineStyle::default(),
             fill_style: prunr_core::FillStyle::default(),
+            bg_effect: prunr_core::BgEffect::default(),
         }
     }
 }
@@ -115,6 +121,7 @@ impl ItemSettings {
             guided_epsilon: self.guided_epsilon,
             feather: self.feather,
             fill_style: self.fill_style,
+            bg_effect: self.bg_effect,
         }
     }
 
@@ -277,6 +284,7 @@ mod tests {
             compose_mode: prunr_core::ComposeMode::Ghost,
             line_style: prunr_core::LineStyle::GradientY { top: [255, 0, 0], bottom: [0, 0, 255] },
             fill_style: prunr_core::FillStyle::Duotone { dark: [10, 10, 40], light: [240, 240, 200] },
+            bg_effect: prunr_core::BgEffect::BlurredSource { radius: 8 },
         };
         let json = serde_json::to_string(&s).unwrap();
         let recovered: ItemSettings = serde_json::from_str(&json).unwrap();
