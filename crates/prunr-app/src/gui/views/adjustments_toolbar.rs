@@ -259,7 +259,14 @@ pub fn render(
     ui.horizontal(|ui| {
         let seg_model_name = super::model_name(app_settings.model);
         ui.add_enabled_ui(!processing, |ui| {
-            super::lines_popover::render(ui, item_settings, seg_model_name);
+            let lines_change = super::lines_popover::render(ui, item_settings, seg_model_name);
+            if lines_change.scale_changed {
+                // Scale-change routes as an edge-tier tweak so live preview
+                // re-dispatches and reads the new scale from the multi-cache.
+                // No cache invalidation — all 4 scales are already cached.
+                change.edge = true;
+                change.commit = true;
+            }
         });
         if !mask_active {
             ui.label(
