@@ -31,7 +31,7 @@ use std::time::{Duration, Instant};
 
 use image::{DynamicImage, GrayImage, RgbaImage};
 
-use prunr_core::{ModelKind, postprocess_from_flat, tensor_to_edge_mask, compose_edges};
+use prunr_core::{ModelKind, postprocess_from_flat, tensor_to_edge_mask, compose_edges, compose_edges_over_rgba};
 
 /// Build the "masked base" for SubjectOutline live preview — run Tier 2 mask
 /// from the cached seg tensor to reproduce the segmented subject, so edges
@@ -236,8 +236,6 @@ impl LivePreview {
                     return;
                 }
                 if let Some(rgba) = output.rgba {
-                    let (w, h) = (rgba.width(), rgba.height());
-                    tracing::info!(item_id = id, generation, w, h, "live_preview: sending PreviewResult");
                     let new_edge_mask = if is_edge {
                         output.built_edge_mask.map(|m| (m, ls_bits, scale))
                     } else {
@@ -253,8 +251,6 @@ impl LivePreview {
                         item_id: id, rgba, generation, new_edge_mask, new_masked_base,
                         is_final: false,
                     });
-                } else {
-                    tracing::warn!(item_id = id, generation, "live_preview: run_preview produced no rgba");
                 }
             });
         }
@@ -271,15 +267,9 @@ impl LivePreview {
         while let Ok(mut r) = self.result_rx.try_recv() {
             // Drop stale: if generation doesn't match the last dispatch for
             // this item, a newer tweak superseded it.
-            let latest_gen = self.in_flight.get(&r.item_id).map(|f| f.generation);
-            let is_latest = latest_gen == Some(r.generation);
-            tracing::info!(
-                item_id = r.item_id,
-                generation = r.generation,
-                latest_gen = ?latest_gen,
-                is_latest,
-                "live_preview: drain_results",
-            );
+            let is_latest = self.in_flight
+                .get(&r.item_id)
+                .map_or(false, |f| f.generation == r.generation);
             if is_latest {
                 self.in_flight.remove(&r.item_id);
                 // If pending has a fresh entry for this item, the user is
@@ -380,15 +370,6 @@ impl RunOutput {
 fn run_preview(inputs: DispatchInputs, cancel: &AtomicBool) -> RunOutput {
     if cancel.load(Ordering::Acquire) { return RunOutput::empty(); }
 
-    tracing::info!(
-        kind = ?inputs.kind,
-        has_seg = inputs.seg_tensor.is_some(),
-        has_edge = inputs.edge_tensor.is_some(),
-        has_cached_mask = inputs.cached_edge_mask.is_some(),
-        has_cached_masked_base = inputs.cached_masked_base.is_some(),
-        "live_preview: run_preview entry",
-    );
-
     // SubjectOutline mode: both tensors are present. Edge compositing draws
     // onto the masked subject (not the raw photo); mask tweaks must keep the
     // outline; edge tweaks reuse the masked base across dispatches.
@@ -433,59 +414,57 @@ fn run_preview(inputs: DispatchInputs, cancel: &AtomicBool) -> RunOutput {
     match inputs.kind {
         PreviewKind::Mask => {
             if !is_subject_outline {
-                tracing::info!("live_preview: Mask / Off-mode path");
                 // Off mode: rebuild and return masked RGBA (no edge compose).
-                let Some(seg) = inputs.seg_tensor.as_ref() else {
-                    tracing::warn!("live_preview: Mask/Off — seg None, aborting");
-                    return RunOutput::empty();
-                };
+                let Some(seg) = inputs.seg_tensor.as_ref() else { return RunOutput::empty(); };
                 let Some(masked) = build_masked_base(seg, &inputs.original, &inputs.settings)
-                else {
-                    tracing::warn!("live_preview: Mask/Off — build_masked_base None, aborting");
-                    return RunOutput::empty();
-                };
+                else { return RunOutput::empty(); };
                 return RunOutput {
                     rgba: Some(masked.to_rgba8()),
                     built_edge_mask: None,
                     built_masked_base: None,
                 };
             }
-            tracing::info!("live_preview: Mask / SubjectOutline path");
-            // SubjectOutline: composite edges onto the (freshly built) masked base.
-            let Some(base_arc) = masked_base else {
-                tracing::warn!("live_preview: Mask/SubjectOutline — masked_base None, aborting");
-                return RunOutput::empty();
-            };
-            let base = DynamicImage::ImageRgba8((*base_arc).clone());
+            // SubjectOutline: edges drawn OVER the freshly built masked subject.
+            // compose_edges_over_rgba preserves the subject alpha (max-merge)
+            // so gamma / threshold / refine_edges tweaks visibly change the
+            // subject silhouette while the outline stays on top.
+            let Some(base_arc) = masked_base else { return RunOutput::empty(); };
             // invariant: is_subject_outline → edge_tensor is Some.
             let edge = inputs.edge_tensor.as_ref().unwrap();
             let edge_settings = inputs.settings.edge_settings();
-            let (mask, _) = resolve_edge_mask(&inputs.cached_edge_mask, edge, &base, &edge_settings);
-            let rgba = compose_edges(
-                &mask, &base,
+            let base_dyn = DynamicImage::ImageRgba8((*base_arc).clone());
+            let (mask, _) = resolve_edge_mask(&inputs.cached_edge_mask, edge, &base_dyn, &edge_settings);
+            let rgba = compose_edges_over_rgba(
+                &mask, &base_arc,
                 edge_settings.solid_line_color,
                 edge_settings.edge_thickness,
             );
             RunOutput { rgba: Some(rgba), built_edge_mask: None, built_masked_base }
         }
         PreviewKind::Edge => {
-            tracing::info!("live_preview: Edge path");
-            let Some(edge) = inputs.edge_tensor.as_ref() else {
-                tracing::warn!("live_preview: Edge — edge_tensor None, aborting");
-                return RunOutput::empty();
-            };
+            let Some(edge) = inputs.edge_tensor.as_ref() else { return RunOutput::empty(); };
             let edge_settings = inputs.settings.edge_settings();
 
             // Base for compose: masked subject (SubjectOutline) or raw original (EdgesOnly).
-            let base_owned = masked_base.as_ref().map(|arc| DynamicImage::ImageRgba8((**arc).clone()));
-            let base: &DynamicImage = base_owned.as_ref().unwrap_or(&inputs.original);
+            let base_dyn = masked_base.as_ref().map(|arc| DynamicImage::ImageRgba8((**arc).clone()));
+            let base_for_mask: &DynamicImage = base_dyn.as_ref().unwrap_or(&inputs.original);
 
-            let (mask, built_edge_mask) = resolve_edge_mask(&inputs.cached_edge_mask, edge, base, &edge_settings);
-            let rgba = compose_edges(
-                &mask, base,
-                edge_settings.solid_line_color,
-                edge_settings.edge_thickness,
-            );
+            let (mask, built_edge_mask) = resolve_edge_mask(&inputs.cached_edge_mask, edge, base_for_mask, &edge_settings);
+            // SubjectOutline: preserve the subject alpha via compose_edges_over_rgba.
+            // EdgesOnly: use compose_edges so the output is transparent-with-lines.
+            let rgba = if let Some(ref base_arc) = masked_base {
+                compose_edges_over_rgba(
+                    &mask, base_arc,
+                    edge_settings.solid_line_color,
+                    edge_settings.edge_thickness,
+                )
+            } else {
+                compose_edges(
+                    &mask, &inputs.original,
+                    edge_settings.solid_line_color,
+                    edge_settings.edge_thickness,
+                )
+            };
             RunOutput { rgba: Some(rgba), built_edge_mask, built_masked_base }
         }
     }
