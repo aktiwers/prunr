@@ -1,5 +1,3 @@
-use std::sync::atomic::Ordering;
-
 use super::super::app::PrunrApp;
 use super::super::state::AppState;
 
@@ -7,18 +5,45 @@ use super::super::state::AppState;
 // not the egui input system. Full keyboard testing requires the running app (Plan 03).
 
 #[test]
-fn handle_cancel_sets_flag_during_processing() {
+fn handle_cancel_raises_global_flag_during_processing() {
     let mut app = PrunrApp::new_for_test();
     app.state = AppState::Processing;
-
-    // Before cancel, flag should be false
-    let flag_before = app.processor.cancel_flag.load(Ordering::Relaxed);
-    assert!(!flag_before, "cancel_flag should start false");
+    assert!(!app.processor.cancels.is_cancelled(0), "cancel registry should start clean");
 
     app.handle_cancel();
 
-    let flag_after = app.processor.cancel_flag.load(Ordering::Relaxed);
-    assert!(flag_after, "handle_cancel should set cancel_flag to true");
+    assert!(app.processor.cancels.is_cancelled(0),
+        "handle_cancel must raise the global flag (every id reports cancelled)");
+}
+
+#[test]
+fn handle_cancel_selected_raises_only_selected_item_flags() {
+    use super::super::item::{BatchItem, BatchStatus, ImageSource};
+    use super::super::item_settings::ItemSettings;
+    use std::sync::Arc;
+
+    let mut app = PrunrApp::new_for_test();
+    app.state = AppState::Processing;
+    // Seed batch: id 1 selected+processing, id 2 selected+done, id 3 unselected+processing.
+    for (id, selected, status) in [(1u64, true, BatchStatus::Processing), (2, true, BatchStatus::Done), (3, false, BatchStatus::Processing)] {
+        let mut item = BatchItem::new(
+            id, format!("x{id}.png"),
+            ImageSource::Bytes(Arc::new(Vec::new())),
+            (1, 1),
+            ItemSettings::default(),
+            String::new(),
+        );
+        item.selected = selected;
+        item.status = status;
+        app.batch.items.push(item);
+    }
+
+    app.handle_cancel_selected();
+
+    // Only id 1 matches selected + Processing.
+    assert!(app.processor.cancels.is_cancelled(1), "selected processing item must be cancelled");
+    assert!(!app.processor.cancels.is_cancelled(2), "selected-but-done item must not be cancelled");
+    assert!(!app.processor.cancels.is_cancelled(3), "unselected item must not be cancelled");
 }
 
 #[test]

@@ -747,7 +747,7 @@ impl PrunrApp {
         jobs: usize,
         additional_items_rx: Option<mpsc::Receiver<super::worker::WorkItem>>,
     ) {
-        self.processor.cancel_flag.store(false, Ordering::Release);
+        self.processor.cancels.reset();
         self.state = AppState::Processing;
 
         // Use the currently-viewed item's settings for the batch — matches
@@ -787,7 +787,7 @@ impl PrunrApp {
                 line_mode: current_settings.line_mode,
                 edge: current_settings.edge_settings(),
             },
-            cancel: self.processor.cancel_flag.clone(),
+            cancels: self.processor.cancels.clone(),
             additional_items_rx,
         });
     }
@@ -1068,7 +1068,18 @@ impl PrunrApp {
 
 
     pub fn handle_cancel(&mut self) {
-        self.processor.cancel_flag.store(true, Ordering::Release);
+        self.processor.cancels.request_global_cancel();
+    }
+
+    pub fn handle_cancel_selected(&mut self) {
+        let targets = self.batch.selected_ids_with_status(BatchStatus::Processing);
+        if targets.is_empty() {
+            return;
+        }
+        for id in &targets {
+            self.processor.cancels.request_item_cancel(*id);
+        }
+        self.toasts.info(format!("Cancelling {} image(s)", targets.len()));
     }
 
     /// Add an image to the batch from a file path (lazy — bytes not loaded yet).
@@ -1599,6 +1610,19 @@ impl PrunrApp {
         let is_selected = self.batch.is_selected(item_id);
         let recipe_snapshot = self.resolved_dispatch_recipe(item_id);
 
+        // User-initiated cancel reverts to Pending (not Error) so caches and
+        // recipe stay intact for a re-Process.
+        if matches!(result.as_ref(), Err(e) if e == crate::subprocess::protocol::CANCELLED_ERR_MSG) {
+            if let Some(item) = self.batch.find_by_id_mut(item_id) {
+                if item.status == BatchStatus::Processing {
+                    item.status = BatchStatus::Pending;
+                }
+            }
+            self.admission_release_and_admit(item_id);
+            self.refresh_batch_progress_status();
+            return;
+        }
+
         let Some(item) = self.batch.find_by_id_mut(item_id) else { return };
         // Skip results for items that were already cancelled (reset to Pending).
         if item.status != BatchStatus::Processing {
@@ -1971,7 +1995,7 @@ impl PrunrApp {
 
 impl Drop for PrunrApp {
     fn drop(&mut self) {
-        self.processor.cancel_flag.store(true, Ordering::Release);
+        self.processor.cancels.request_global_cancel();
         super::drag_export::cleanup_all();
         super::history_disk::cleanup_all();
     }
