@@ -357,12 +357,13 @@ pub fn chip_option_rgba(
     tooltip: &str,
     value: &mut Option<[u8; 4]>,
     default_when_enabled: [u8; 4],
+    off_label: &str,
 ) -> ChipChange {
     let pop_id = egui::Id::new(("chip_option_rgba", id_salt));
     let accent = value.is_some();
     let display = match value {
         Some(_) => "Set".to_string(),
-        None => "None".to_string(),
+        None => off_label.to_string(),
     };
     let resp = chip_button(ui, icon, &display, accent).on_hover_text(tooltip);
 

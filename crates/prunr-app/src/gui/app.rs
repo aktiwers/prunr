@@ -14,7 +14,7 @@ use super::settings::Settings;
 use super::state::AppState;
 use super::theme;
 use super::worker::{WorkerMessage, WorkerResult, spawn_worker};
-use super::views::{adjustments_toolbar, canvas, cli_help, settings, shortcuts, sidebar, statusbar, toolbar};
+use super::views::{adjustments_toolbar, canvas, cli_help, pipeline_flow, settings, shortcuts, sidebar, statusbar, toolbar};
 
 pub struct PrunrApp {
     // State
@@ -42,6 +42,7 @@ pub struct PrunrApp {
     // UI state
     pub(crate) show_shortcuts: bool,
     pub(crate) show_cli_help: bool,
+    pub(crate) show_pipeline_flow: bool,
 
     // Set by raw_input_hook — egui converts Ctrl+C to Event::Copy before we see it
     pending_copy: bool,
@@ -177,6 +178,7 @@ impl PrunrApp {
             clipboard,
             show_shortcuts: false,
             show_cli_help: false,
+            show_pipeline_flow: false,
             pending_copy: false,
             zoom_state: Default::default(),
             show_original: false,
@@ -357,7 +359,7 @@ impl PrunrApp {
     }
 
     pub(crate) fn any_modal_open(&self) -> bool {
-        self.show_settings || self.show_shortcuts || self.show_cli_help
+        self.show_settings || self.show_shortcuts || self.show_cli_help || self.show_pipeline_flow
     }
 
     /// Undo background removal on selected items (or current item if none selected).
@@ -1625,6 +1627,7 @@ impl PrunrApp {
 
         if intents.toggle_shortcuts { self.show_shortcuts = !self.show_shortcuts; }
         if intents.toggle_cli_help  { self.show_cli_help  = !self.show_cli_help;  }
+        if intents.toggle_pipeline_flow { self.show_pipeline_flow = !self.show_pipeline_flow; }
         if intents.toggle_settings  { self.toggle_settings_panel(ctx); }
 
         if intents.nav_prev { self.navigate_batch(ctx, NavDir::Prev); }
@@ -1666,6 +1669,8 @@ impl PrunrApp {
             self.show_shortcuts = false;
         } else if self.show_cli_help {
             self.show_cli_help = false;
+        } else if self.show_pipeline_flow {
+            self.show_pipeline_flow = false;
         }
     }
 
@@ -2030,6 +2035,9 @@ impl PrunrApp {
         if self.show_cli_help && cli_help::render(ctx, &mut self.toasts) {
             self.show_cli_help = false;
         }
+        if self.show_pipeline_flow && pipeline_flow::render(ctx) {
+            self.show_pipeline_flow = false;
+        }
         if self.show_settings {
             settings::render(ctx, self);
         }
@@ -2123,6 +2131,7 @@ struct ShortcutIntents {
     cancel_requested: bool,
     toggle_shortcuts: bool,
     toggle_cli_help: bool,
+    toggle_pipeline_flow: bool,
     toggle_before_after: bool,
     fit_to_window: bool,
     actual_size: bool,
@@ -2149,6 +2158,7 @@ fn collect_shortcut_intents(ctx: &egui::Context) -> ShortcutIntents {
         if i.key_pressed(Key::Escape)                   { s.cancel_requested = true; }
         if i.key_pressed(Key::F1)                       { s.toggle_shortcuts = true; }
         if i.key_pressed(Key::F2)                       { s.toggle_cli_help = true; }
+        if i.key_pressed(Key::F3)                       { s.toggle_pipeline_flow = true; }
         if i.modifiers.command && i.key_pressed(Key::Num0)  { s.fit_to_window = true; }
         if i.modifiers.command && i.key_pressed(Key::Num1)  { s.actual_size = true; }
         if i.modifiers.command && i.key_pressed(Key::Space) { s.toggle_settings = true; }
