@@ -149,19 +149,16 @@ pub fn apply_mask(original: &DynamicImage, mask: &GrayImage) -> RgbaImage {
 }
 
 /// Transform the RGB channels of `rgba` according to `style`. Alpha is
-/// preserved. Runs in place; cheap enough for live preview (~5-10 ms at 4K).
+/// preserved. Per-pixel variants run cheap (~5-20 ms at 4K). Spatial
+/// variants (Pixelate) pay one extra ~64 MB clone at 4K.
 pub fn apply_fill_style(rgba: &mut RgbaImage, style: crate::types::FillStyle) {
     use crate::types::FillStyle;
     match style {
         FillStyle::None => {}
         FillStyle::Desaturate => {
             for p in rgba.pixels_mut() {
-                let [r, g, b, _] = p.0;
-                // Rec. 709 luma weights.
-                let luma = ((r as u32 * 2126 + g as u32 * 7152 + b as u32 * 722) / 10000) as u8;
-                p.0[0] = luma;
-                p.0[1] = luma;
-                p.0[2] = luma;
+                let y = luma_u8(p.0[0], p.0[1], p.0[2]);
+                p.0[0] = y; p.0[1] = y; p.0[2] = y;
             }
         }
         FillStyle::Invert => {
@@ -173,16 +170,158 @@ pub fn apply_fill_style(rgba: &mut RgbaImage, style: crate::types::FillStyle) {
         }
         FillStyle::Duotone { dark, light } => {
             for p in rgba.pixels_mut() {
-                let [r, g, b, _] = p.0;
-                let luma = (r as u32 * 2126 + g as u32 * 7152 + b as u32 * 722) / 10000;
-                let t = luma as u16;
+                let t = luma_u8(p.0[0], p.0[1], p.0[2]) as u16;
                 let inv = 255 - t;
                 p.0[0] = ((dark[0] as u16 * inv + light[0] as u16 * t) / 255) as u8;
                 p.0[1] = ((dark[1] as u16 * inv + light[1] as u16 * t) / 255) as u8;
                 p.0[2] = ((dark[2] as u16 * inv + light[2] as u16 * t) / 255) as u8;
             }
         }
+        FillStyle::Sepia => {
+            for p in rgba.pixels_mut() {
+                let (r, g, b) = (p.0[0] as u32, p.0[1] as u32, p.0[2] as u32);
+                // Standard sepia coefficients (scaled ×1000 for integer math).
+                p.0[0] = ((r * 393 + g * 769 + b * 189) / 1000).min(255) as u8;
+                p.0[1] = ((r * 349 + g * 686 + b * 168) / 1000).min(255) as u8;
+                p.0[2] = ((r * 272 + g * 534 + b * 131) / 1000).min(255) as u8;
+            }
+        }
+        FillStyle::Threshold { level } => {
+            for p in rgba.pixels_mut() {
+                let y = luma_u8(p.0[0], p.0[1], p.0[2]);
+                let v = if y >= level { 255 } else { 0 };
+                p.0[0] = v; p.0[1] = v; p.0[2] = v;
+            }
+        }
+        FillStyle::Posterize { levels } => {
+            let n = levels.max(2) as u16 - 1;
+            for p in rgba.pixels_mut() {
+                for i in 0..3 {
+                    let v = p.0[i] as u16;
+                    p.0[i] = ((v * n / 255) * 255 / n) as u8;
+                }
+            }
+        }
+        FillStyle::Solarize { pivot } => {
+            for p in rgba.pixels_mut() {
+                for i in 0..3 {
+                    if p.0[i] >= pivot {
+                        p.0[i] = 255 - p.0[i];
+                    }
+                }
+            }
+        }
+        FillStyle::HueShift { degrees } => {
+            for p in rgba.pixels_mut() {
+                let (h, s, v) = rgb_to_hsv(p.0[0], p.0[1], p.0[2]);
+                let new_h = (h as i32 + degrees as i32).rem_euclid(360) as u16;
+                let (r, g, b) = hsv_to_rgb(new_h, s, v);
+                p.0[0] = r; p.0[1] = g; p.0[2] = b;
+            }
+        }
+        FillStyle::Saturate { percent } => {
+            // Move each channel toward/away from luma by `percent / 100`.
+            // percent=0 → grayscale, 100 → unchanged, >100 → punchy.
+            let factor = percent.min(300) as i32;
+            for p in rgba.pixels_mut() {
+                let y = luma_u8(p.0[0], p.0[1], p.0[2]) as i32;
+                for i in 0..3 {
+                    let v = p.0[i] as i32;
+                    let shifted = y + ((v - y) * factor / 100);
+                    p.0[i] = shifted.clamp(0, 255) as u8;
+                }
+            }
+        }
+        FillStyle::ColorSplash { keep_hue, tolerance } => {
+            let keep = (keep_hue % 360) as i32;
+            let tol = tolerance.min(180) as i32;
+            for p in rgba.pixels_mut() {
+                let (h, _, _) = rgb_to_hsv(p.0[0], p.0[1], p.0[2]);
+                let dist = hue_distance(h as i32, keep);
+                if dist > tol {
+                    let y = luma_u8(p.0[0], p.0[1], p.0[2]);
+                    p.0[0] = y; p.0[1] = y; p.0[2] = y;
+                }
+            }
+        }
+        FillStyle::Pixelate { block_size } => {
+            if block_size < 2 { return; }
+            let (w, h) = rgba.dimensions();
+            let src = rgba.clone();
+            for y in 0..h {
+                for x in 0..w {
+                    let bx = (x / block_size) * block_size;
+                    let by = (y / block_size) * block_size;
+                    let sample = src.get_pixel(bx, by);
+                    let dst = rgba.get_pixel_mut(x, y);
+                    dst.0[0] = sample.0[0];
+                    dst.0[1] = sample.0[1];
+                    dst.0[2] = sample.0[2];
+                }
+            }
+        }
     }
+}
+
+/// Rec. 709 luma of an 8-bit RGB triple. Used by every grayscale / duotone /
+/// threshold / splash variant.
+#[inline]
+fn luma_u8(r: u8, g: u8, b: u8) -> u8 {
+    ((r as u32 * 2126 + g as u32 * 7152 + b as u32 * 722) / 10000) as u8
+}
+
+/// Convert RGB (0-255) to HSV with H in 0..=359°, S and V in 0..=255.
+/// f32 internally for clarity — fast enough for per-pixel at 4K (~20 ms).
+pub(crate) fn rgb_to_hsv(r: u8, g: u8, b: u8) -> (u16, u8, u8) {
+    let rf = r as f32 / 255.0;
+    let gf = g as f32 / 255.0;
+    let bf = b as f32 / 255.0;
+    let max = rf.max(gf).max(bf);
+    let min = rf.min(gf).min(bf);
+    let delta = max - min;
+    let v = max;
+    let s = if max == 0.0 { 0.0 } else { delta / max };
+    let h = if delta == 0.0 {
+        0.0
+    } else if max == rf {
+        60.0 * (((gf - bf) / delta).rem_euclid(6.0))
+    } else if max == gf {
+        60.0 * ((bf - rf) / delta + 2.0)
+    } else {
+        60.0 * ((rf - gf) / delta + 4.0)
+    };
+    let h = if h < 0.0 { h + 360.0 } else { h };
+    (h as u16 % 360, (s * 255.0) as u8, (v * 255.0) as u8)
+}
+
+/// Convert HSV (H 0..=359°, S / V 0..=255) to RGB (0..=255).
+pub(crate) fn hsv_to_rgb(h: u16, s: u8, v: u8) -> (u8, u8, u8) {
+    let sf = s as f32 / 255.0;
+    let vf = v as f32 / 255.0;
+    let c = vf * sf;
+    let hp = (h % 360) as f32 / 60.0;
+    let x = c * (1.0 - (hp.rem_euclid(2.0) - 1.0).abs());
+    let (rp, gp, bp) = match hp as u32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    let m = vf - c;
+    (
+        ((rp + m) * 255.0) as u8,
+        ((gp + m) * 255.0) as u8,
+        ((bp + m) * 255.0) as u8,
+    )
+}
+
+/// Shortest angular distance between two hues in degrees, 0..=180.
+#[inline]
+fn hue_distance(a: i32, b: i32) -> i32 {
+    let d = (a - b).rem_euclid(360);
+    if d > 180 { 360 - d } else { d }
 }
 
 /// Write the mask into an existing RGBA buffer's alpha channel in place.

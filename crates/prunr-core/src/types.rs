@@ -249,16 +249,30 @@ pub enum LineStyle {
     GradientY { top: [u8; 3], bottom: [u8; 3] },
     /// Horizontal gradient — lerp between `left` (x=0) and `right` (x=W).
     GradientX { left: [u8; 3], right: [u8; 3] },
+    /// Radial gradient — `center` (x, y) normalised 0..=255, `inner` at
+    /// centre, `outer` at image-diagonal distance.
+    RadialGradient { center: [u8; 2], inner: [u8; 3], outer: [u8; 3] },
+    /// Hue rotates through the colour wheel along pixel index —
+    /// `cycles` = how many full rotations across the image.
+    Rainbow { cycles: u16 },
 }
 
 impl LineStyle {
-    pub const ALL_NAMES: &'static [&'static str] = &["Solid", "Vertical gradient", "Horizontal gradient"];
+    pub const ALL: &'static [Self] = &[
+        LineStyle::Solid,
+        LineStyle::GradientY { top: [255, 50, 50], bottom: [50, 50, 255] },
+        LineStyle::GradientX { left: [255, 50, 50], right: [50, 50, 255] },
+        LineStyle::RadialGradient { center: [128, 128], inner: [255, 200, 50], outer: [30, 20, 60] },
+        LineStyle::Rainbow { cycles: 3 },
+    ];
 
     pub fn name(&self) -> &'static str {
         match self {
             LineStyle::Solid => "Solid",
             LineStyle::GradientY { .. } => "Vertical gradient",
             LineStyle::GradientX { .. } => "Horizontal gradient",
+            LineStyle::RadialGradient { .. } => "Radial gradient",
+            LineStyle::Rainbow { .. } => "Rainbow",
         }
     }
 }
@@ -287,10 +301,43 @@ pub enum FillStyle {
     Invert,
     /// Remap luma: lerp between `dark` (black pixels) and `light` (white).
     Duotone { dark: [u8; 3], light: [u8; 3] },
+    /// Warm brown monochrome — classic vintage photo.
+    Sepia,
+    /// Pure black/white at the luma threshold.
+    Threshold { level: u8 },
+    /// Quantise each RGB channel to N levels. N in 2..=8 gives cel-shaded flats.
+    Posterize { levels: u8 },
+    /// Invert channels above `pivot`. Partial negative / surreal look.
+    Solarize { pivot: u8 },
+    /// Rotate hue by `degrees` (-180..=180). Fast colour variation.
+    HueShift { degrees: i16 },
+    /// Saturation scale where `percent` = 100 is neutral. 0 = grayscale,
+    /// >100 punchy, <100 muted. Clamped 0..=300.
+    Saturate { percent: u16 },
+    /// Desaturate everything OUTSIDE a hue range. `keep_hue` is 0..=359°,
+    /// `tolerance` is the half-width (0..=180) — pixels within tolerance
+    /// degrees of `keep_hue` keep their colour; everything else goes gray.
+    ColorSplash { keep_hue: u16, tolerance: u16 },
+    /// Nearest-neighbour block downscale. Each `block_size × block_size`
+    /// region takes the colour of its top-left pixel.
+    Pixelate { block_size: u32 },
 }
 
 impl FillStyle {
-    pub const ALL_NAMES: &'static [&'static str] = &["None", "Desaturate", "Invert", "Duotone"];
+    pub const ALL: &'static [Self] = &[
+        FillStyle::None,
+        FillStyle::Desaturate,
+        FillStyle::Invert,
+        FillStyle::Sepia,
+        FillStyle::Threshold { level: 128 },
+        FillStyle::Posterize { levels: 4 },
+        FillStyle::Solarize { pivot: 128 },
+        FillStyle::HueShift { degrees: 90 },
+        FillStyle::Saturate { percent: 180 },
+        FillStyle::ColorSplash { keep_hue: 0, tolerance: 30 },
+        FillStyle::Pixelate { block_size: 12 },
+        FillStyle::Duotone { dark: [20, 20, 60], light: [240, 220, 180] },
+    ];
 
     pub fn name(&self) -> &'static str {
         match self {
@@ -298,6 +345,14 @@ impl FillStyle {
             FillStyle::Desaturate => "Desaturate",
             FillStyle::Invert => "Invert",
             FillStyle::Duotone { .. } => "Duotone",
+            FillStyle::Sepia => "Sepia",
+            FillStyle::Threshold { .. } => "Threshold",
+            FillStyle::Posterize { .. } => "Posterize",
+            FillStyle::Solarize { .. } => "Solarize",
+            FillStyle::HueShift { .. } => "Hue shift",
+            FillStyle::Saturate { .. } => "Saturate",
+            FillStyle::ColorSplash { .. } => "Color splash",
+            FillStyle::Pixelate { .. } => "Pixelate",
         }
     }
 }
