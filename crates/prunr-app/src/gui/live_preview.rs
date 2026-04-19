@@ -33,6 +33,28 @@ use image::{DynamicImage, GrayImage, RgbaImage};
 
 use prunr_core::{ModelKind, postprocess_from_flat, tensor_to_edge_mask, compose_edges};
 
+/// Build the "masked base" for SubjectOutline live preview — run Tier 2 mask
+/// from the cached seg tensor to reproduce the segmented subject, so edges
+/// composite onto the masked subject instead of the raw photo. Returns None
+/// on postprocess failure; caller falls back to the raw original.
+fn build_masked_base(
+    seg: &SegTensor,
+    original: &DynamicImage,
+    settings: &ItemSettings,
+) -> Option<DynamicImage> {
+    let mask_settings = settings.mask_settings();
+    postprocess_from_flat(
+        &seg.data,
+        seg.height as usize,
+        seg.width as usize,
+        original,
+        &mask_settings,
+        seg.model,
+    )
+    .ok()
+    .map(DynamicImage::ImageRgba8)
+}
+
 use crate::gui::item_settings::ItemSettings;
 use crate::gui::worker::CompressedTensor;
 
@@ -323,47 +345,85 @@ pub fn decompress_seg(ct: &CompressedTensor) -> Option<SegTensor> {
 fn run_preview(inputs: DispatchInputs, cancel: &AtomicBool) -> (Option<RgbaImage>, Option<Arc<GrayImage>>) {
     if cancel.load(Ordering::Acquire) { return (None, None); }
 
+    // SubjectOutline mode (both tensors present): build the masked subject so
+    // edges composite onto it instead of the raw photo. Without this, Edge
+    // tweaks in SubjectOutline would draw lines on the unmasked source, and
+    // Mask tweaks would drop the edges entirely.
+    let is_subject_outline = inputs.seg_tensor.is_some() && inputs.edge_tensor.is_some();
+
     match inputs.kind {
         PreviewKind::Mask => {
-            let Some(seg) = inputs.seg_tensor else { return (None, None); };
-            let mask_settings = inputs.settings.mask_settings();
-            let rgba = postprocess_from_flat(
-                &seg.data,
-                seg.height as usize,
-                seg.width as usize,
-                &inputs.original,
-                &mask_settings,
-                seg.model,
-            ).ok();
-            (rgba, None)
+            let Some(seg) = inputs.seg_tensor.as_ref() else { return (None, None); };
+            let Some(masked) = build_masked_base(seg, &inputs.original, &inputs.settings)
+            else { return (None, None); };
+
+            if !is_subject_outline {
+                // Off mode: mask tweak output is the masked RGBA itself.
+                return (Some(masked.to_rgba8()), None);
+            }
+
+            // SubjectOutline: also composite edges on top so mask tweaks don't
+            // visually drop the subject outline from the preview.
+            // invariant: is_subject_outline → edge_tensor is Some.
+            let edge = inputs.edge_tensor.as_ref().unwrap();
+            let edge_settings = inputs.settings.edge_settings();
+            let (mask, _) = resolve_edge_mask(&inputs.cached_edge_mask, edge, &masked, &edge_settings);
+            let rgba = compose_edges(
+                &mask, &masked,
+                edge_settings.solid_line_color,
+                edge_settings.edge_thickness,
+            );
+            (Some(rgba), None)
         }
         PreviewKind::Edge => {
-            let Some(edge) = inputs.edge_tensor else { return (None, None); };
+            let Some(edge) = inputs.edge_tensor.as_ref() else { return (None, None); };
             let edge_settings = inputs.settings.edge_settings();
-            // Fast path: cached mask still valid for this line_strength.
-            // Skip sigmoid + Lanczos resize (~40-80ms on 4K) and go straight
-            // to dilate + composite.
-            let (mask, built) = if let Some(m) = inputs.cached_edge_mask {
-                (m, None)
+
+            // Base image to composite edges onto: masked subject in
+            // SubjectOutline mode, raw original in EdgesOnly mode. Building the
+            // masked base costs one Tier 2 postprocess (~50 ms on 4K); the
+            // line_strength fast path below still saves the tensor→mask resize.
+            let base_owned = if is_subject_outline {
+                inputs.seg_tensor.as_ref().and_then(|seg| {
+                    build_masked_base(seg, &inputs.original, &inputs.settings)
+                })
             } else {
-                let m = Arc::new(tensor_to_edge_mask(
-                    &edge.data,
-                    edge.height,
-                    edge.width,
-                    inputs.original.width(),
-                    inputs.original.height(),
-                    edge_settings.line_strength,
-                ));
-                (m.clone(), Some(m))
+                None
             };
+            let base: &DynamicImage = base_owned.as_ref().unwrap_or(&inputs.original);
+
+            let (mask, built) = resolve_edge_mask(&inputs.cached_edge_mask, edge, base, &edge_settings);
             let rgba = compose_edges(
-                &mask,
-                &inputs.original,
+                &mask, base,
                 edge_settings.solid_line_color,
                 edge_settings.edge_thickness,
             );
             (Some(rgba), built)
         }
+    }
+}
+
+/// Resolve the edge mask for compositing: use the cached one when it exists
+/// (fast path — skips sigmoid + Lanczos resize, ~40-80 ms on 4K), else build
+/// it from the raw edge tensor at the base image's resolution.
+fn resolve_edge_mask(
+    cached: &Option<Arc<GrayImage>>,
+    edge: &EdgeTensor,
+    base: &DynamicImage,
+    edge_settings: &prunr_core::EdgeSettings,
+) -> (Arc<GrayImage>, Option<Arc<GrayImage>>) {
+    if let Some(m) = cached {
+        (m.clone(), None)
+    } else {
+        let m = Arc::new(tensor_to_edge_mask(
+            &edge.data,
+            edge.height,
+            edge.width,
+            base.width(),
+            base.height(),
+            edge_settings.line_strength,
+        ));
+        (m.clone(), Some(m))
     }
 }
 
