@@ -189,8 +189,8 @@ On top of the AI pipeline sit four orthogonal compose-time enums, all stored on 
 | Enum | What it drives | Applies when | Tier |
 |---|---|---|---|
 | `ComposeMode` | How the subject mask α and edge mask α combine (LinesOnly / SubjectFilled / Engraving / Ghost / InverseMask) | `LineMode::SubjectOutline` | EdgeRerun |
-| `LineStyle` | How edge pixels are coloured (Solid / GradientY / GradientX / RadialGradient / Rainbow) | Any mode with lines | EdgeRerun |
-| `FillStyle` | RGB transform on the masked subject before compose (Desaturate / Invert / Sepia / Duotone / Threshold / Posterize / Solarize / HueShift / Saturate / ColorSplash / Pixelate) | Any mode with a subject | MaskRerun |
+| `LineStyle` | How edge pixels are coloured (Solid / GradientY / GradientX / RadialGradient / Rainbow / Chromatic / Noise) | Any mode with lines | EdgeRerun |
+| `FillStyle` | RGB transform on the masked subject before compose (Desaturate / Invert / Sepia / Duotone / Threshold / Posterize / Solarize / HueShift / Saturate / ColorSplash / Pixelate / CrossProcess / ChannelSwap / Halftone / GradientMap) | Any mode with a subject | MaskRerun |
 | `BgEffect` | Source-derived backdrop baked into transparent areas (BlurredSource / InvertedSource / DesaturatedSource) | Any mode | MaskRerun |
 
 All four land in the same `postprocess → compose` step in `prunr-core`; live preview threads them through `DispatchInputs`. Shared helpers: `luma_u8`, `rgb_to_hsv`, `hsv_to_rgb`, `blend_rgb`, `lerp_rgb` in `prunr-core`. `#[inline]` on every per-pixel primitive; `LinesOnly` / `SubjectFilled` etc. resolve to a `fn(i32,i32)->u8` once per dispatch so the 5-way compose-mode match stays out of the per-pixel loop.
