@@ -2151,14 +2151,23 @@ fn collect_shortcut_intents(ctx: &egui::Context) -> ShortcutIntents {
     let text_focused = ctx.memory(|m| m.focused().is_some());
     let mut s = ShortcutIntents::default();
     ctx.input(|i| {
+        // Fresh-press filter: egui's `key_pressed` includes OS key-repeat
+        // events, which flip toggle-shortcuts on/off many times a second if
+        // the user holds the key for more than the repeat-delay. Bind toggle
+        // intents via this instead.
+        let fresh = |k: Key| i.events.iter().any(|e| matches!(
+            e,
+            egui::Event::Key { key, pressed: true, repeat: false, .. } if *key == k,
+        ));
+
         // Modifier shortcuts always work, even with a text field focused.
         if i.modifiers.command && i.key_pressed(Key::O) { s.open_requested = true; }
         if i.modifiers.command && i.key_pressed(Key::R) { s.remove_requested = true; }
         if i.modifiers.command && i.key_pressed(Key::S) { s.save_requested = true; }
         if i.key_pressed(Key::Escape)                   { s.cancel_requested = true; }
-        if i.key_pressed(Key::F1)                       { s.toggle_shortcuts = true; }
-        if i.key_pressed(Key::F2)                       { s.toggle_cli_help = true; }
-        if i.key_pressed(Key::F3)                       { s.toggle_pipeline_flow = true; }
+        if fresh(Key::F1)                               { s.toggle_shortcuts = true; }
+        if fresh(Key::F2)                               { s.toggle_cli_help = true; }
+        if fresh(Key::F3)                               { s.toggle_pipeline_flow = true; }
         if i.modifiers.command && i.key_pressed(Key::Num0)  { s.fit_to_window = true; }
         if i.modifiers.command && i.key_pressed(Key::Num1)  { s.actual_size = true; }
         if i.modifiers.command && i.key_pressed(Key::Space) { s.toggle_settings = true; }
