@@ -210,72 +210,37 @@ pub fn render(ui: &mut Ui, settings: &mut ItemSettings, seg_model_name: &str) ->
     change
 }
 
-/// Render the DexiNed-scale chip as a standalone Row 3 control. Popover
-/// lets the user pick one of the 4 scales. All 4 live in the multi-tensor
-/// cache so switching is a live-preview tensor lookup (no re-inference).
-/// Returns `true` when the scale was changed.
-#[allow(deprecated)]
+/// Row 3 DexiNed-scale chip. Popover picks one of 4 scales. Returns true
+/// when the user flipped the scale this frame.
 pub fn render_scale_chip(ui: &mut egui::Ui, settings: &mut ItemSettings) -> bool {
+    use crate::gui::views::chip;
+    const TOOLTIP: &str = "How zoomed-in the edge detector looks. Fine picks up tiny texture; Bold keeps only the big silhouettes. Balanced sits between the two; Fused combines every scale for the most detailed result.";
+
     let pop_id = egui::Id::new("edge_scale_popover");
     let accent = settings.edge_scale != EdgeScale::Fused;
-    let display = format!("{}  {}", ICON_TUNE.codepoint, scale_label(settings.edge_scale));
-
-    let stroke = if accent {
-        egui::Stroke::new(theme::STROKE_DEFAULT, theme::ACCENT)
-    } else {
-        egui::Stroke::new(theme::STROKE_DEFAULT, egui::Color32::TRANSPARENT)
-    };
-    let btn = egui::Button::new(
-        RichText::new(display).color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY),
-    )
-    .fill(theme::BG_SECONDARY)
-    .stroke(stroke)
-    .corner_radius(theme::BUTTON_ROUNDING)
-    .min_size(egui::vec2(0.0, theme::CHIP_HEIGHT));
-    let saved_padding = ui.spacing().button_padding;
-    ui.spacing_mut().button_padding = egui::vec2(8.0, 4.0);
-    let resp = ui.add(btn);
-    ui.spacing_mut().button_padding = saved_padding;
-
-    let resp = resp.on_hover_ui(|ui| {
-        ui.label(RichText::new("Scale").strong().color(theme::TEXT_PRIMARY));
-        ui.add_space(theme::SPACE_XS);
-        ui.label(
-            RichText::new(
-                "How zoomed-in the edge detector looks. Fine picks up tiny texture; Bold keeps only the big silhouettes. Balanced sits between the two; Fused combines every scale for the most detailed result.",
-            )
-            .color(theme::TEXT_PRIMARY)
-            .size(theme::FONT_SIZE_MONO),
-        );
-    });
-
-    if resp.clicked() {
-        ui.memory_mut(|m| m.toggle_popup(pop_id));
-    }
+    let icon_str = ICON_TUNE.codepoint;
+    let resp = chip::chip_tooltip(
+        chip::chip_button(ui, icon_str, scale_label(settings.edge_scale), accent),
+        "Scale",
+        TOOLTIP,
+    );
 
     let mut changed = false;
-    egui::popup_below_widget(
-        ui,
-        pop_id,
-        &resp,
-        egui::PopupCloseBehavior::CloseOnClickOutside,
-        |ui| {
-            ui.set_min_width(240.0);
-            ui.label(RichText::new("Scale").strong().color(theme::TEXT_PRIMARY));
-            ui.add_space(theme::SPACE_XS);
-            for scale in [EdgeScale::Fine, EdgeScale::Balanced, EdgeScale::Bold, EdgeScale::Fused] {
-                let selected = settings.edge_scale == scale;
-                let label = two_line_label(scale_label(scale), scale_description(scale));
-                if ui.selectable_label(selected, label).clicked() {
-                    if !selected {
-                        settings.edge_scale = scale;
-                        changed = true;
-                    }
-                    ui.memory_mut(|m| m.close_popup(pop_id));
+    chip::popup_for(ui, pop_id, &resp, |ui| {
+        ui.label(RichText::new("Scale").strong().color(theme::TEXT_PRIMARY));
+        ui.add_space(theme::SPACE_XS);
+        for scale in [EdgeScale::Fine, EdgeScale::Balanced, EdgeScale::Bold, EdgeScale::Fused] {
+            let selected = settings.edge_scale == scale;
+            let label = two_line_label(scale_label(scale), scale_description(scale));
+            if ui.selectable_label(selected, label).clicked() {
+                if !selected {
+                    settings.edge_scale = scale;
+                    changed = true;
                 }
+                ui.memory_mut(|m| m.close_popup(pop_id));
             }
-        },
-    );
+        }
+    });
     changed
 }
 

@@ -1146,33 +1146,26 @@ impl PrunrApp {
 
     /// Decompress the edge tensor for the item's currently-selected scale,
     /// using the `volatile_edge_tensor` hot cache to skip zstd work during a
-    /// drag. On miss (scale change or fresh item), decompresses once and
-    /// populates the hot cache with an `Arc<Vec<f32>>` so the next dispatch
-    /// in the same drag session reuses it without allocating.
+    /// drag. The tensor rides through as `Arc<Vec<f32>>` so hot hits are a
+    /// pointer bump, not a 1.2 MB memcpy per dispatch.
     fn edge_tensor_for_active_scale(item: &mut BatchItem) -> Option<super::live_preview::EdgeTensor> {
         let scale = item.settings.edge_scale;
 
-        // Hot path: decompressed tensor for this exact scale already cached.
         let hot_hit = item.volatile_edge_tensor.as_ref()
             .filter(|(s, _)| *s == scale)
             .map(|(_, arc)| arc.clone());
         if let Some(arc) = hot_hit {
             let (height, width) = item.cached_edge_tensors.as_ref()
                 .map(|c| (c.height, c.width))?;
-            return Some(super::live_preview::EdgeTensor {
-                data: (*arc).clone(),
-                height,
-                width,
-            });
+            return Some(super::live_preview::EdgeTensor { data: arc, height, width });
         }
 
-        // Miss: decompress once and populate the hot cache.
         let (data, height, width) = {
             let cache = item.cached_edge_tensors.as_ref()?;
-            let d = cache.decompress(scale)?;
+            let d = Arc::new(cache.decompress(scale)?);
             (d, cache.height, cache.width)
         };
-        item.volatile_edge_tensor = Some((scale, Arc::new(data.clone())));
+        item.volatile_edge_tensor = Some((scale, data.clone()));
         Some(super::live_preview::EdgeTensor { data, height, width })
     }
 

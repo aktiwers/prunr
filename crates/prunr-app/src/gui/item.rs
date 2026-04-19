@@ -184,15 +184,11 @@ pub(crate) struct BatchItem {
     pub(crate) applied_recipe: Option<prunr_core::ProcessingRecipe>,
     /// Compressed cached tensor from Tier 1 inference (for Tier 2 mask reruns).
     pub(crate) cached_tensor: Option<super::worker::CompressedTensor>,
-    /// Compressed cached DexiNed output — all 4 scales (Fine/Balanced/Bold/
-    /// Fused) produced by one inference pass. Scale switching is a tensor
-    /// lookup + decompress, never a re-inference.
+    /// All 4 DexiNed scales from one inference (Tier 2 edge reruns read
+    /// whichever scale the user has picked without re-inferring).
     pub(crate) cached_edge_tensors: Option<super::worker::CompressedEdgeTensors>,
-    /// Hot-cache for the currently-previewed scale. Decompressed once per
-    /// scale change, reused across every live-preview dispatch of that scale
-    /// during a drag. The `EdgeScale` discriminator invalidates the cache
-    /// when the user flips the dropdown; `invalidate_edge_cache` clears it
-    /// whenever the compressed cache is rebuilt.
+    /// Decompressed hot copy of the active scale. Lets a slider drag reuse
+    /// the same Arc instead of paying zstd per dispatch.
     pub(crate) volatile_edge_tensor: Option<(prunr_core::EdgeScale, Arc<Vec<f32>>)>,
     /// Post-resize, pre-dilation edge mask for the (line_strength, scale) that
     /// produced it. Lets `edge_thickness` / `solid_line_color` tweaks skip the

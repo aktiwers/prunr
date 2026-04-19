@@ -45,7 +45,7 @@ fn slider_settled(resp: &egui::Response) -> bool {
 
 /// Shared chip-button renderer. Returns the response for popup wiring.
 /// `accent` = true draws an accent border (non-default value indicator).
-fn chip_button(ui: &mut Ui, icon: &str, value: &str, accent: bool) -> Response {
+pub(super) fn chip_button(ui: &mut Ui, icon: &str, value: &str, accent: bool) -> Response {
     let fill = theme::BG_SECONDARY;
     let stroke = if accent {
         egui::Stroke::new(theme::STROKE_DEFAULT, theme::ACCENT)
@@ -69,7 +69,7 @@ fn chip_button(ui: &mut Ui, icon: &str, value: &str, accent: bool) -> Response {
 
 /// Attach a rich hover tooltip: strong setting-name heading + body text.
 /// Every chip uses this so the user always sees what they're hovering.
-fn chip_tooltip(resp: Response, label: &str, body: &str) -> Response {
+pub(super) fn chip_tooltip(resp: Response, label: &str, body: &str) -> Response {
     resp.on_hover_ui(|ui| {
         ui.label(RichText::new(label).strong().color(theme::TEXT_PRIMARY));
         ui.add_space(theme::SPACE_XS);
@@ -98,7 +98,7 @@ use super::hint;
 /// Uses the legacy `popup_below_widget` API; egui's newer `Popup::` builder
 /// is a future cleanup. Deprecation is isolated to this helper.
 #[allow(deprecated)]
-fn popup_for(
+pub(super) fn popup_for(
     ui: &mut Ui,
     id: egui::Id,
     resp: &Response,

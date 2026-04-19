@@ -296,7 +296,7 @@ pub struct SegTensor {
 }
 
 pub struct EdgeTensor {
-    pub data: Vec<f32>,
+    pub data: Arc<Vec<f32>>,
     pub height: u32,
     pub width: u32,
 }

@@ -559,36 +559,35 @@ fn read_result_image(
     result
 }
 
-/// Read the segmentation tensor cache from disk. Returns `None` if the
-/// path is missing, dimensions are absent, or the read fails. Always
-/// deletes the temp file on success.
+/// Read a temp file and delete it in the same breath. Invariant shared by
+/// every subprocess-IPC reader: the temp file is one-shot, always removed.
+fn read_and_delete(path: &std::path::Path) -> Option<Vec<u8>> {
+    let bytes = std::fs::read(path).ok()?;
+    let _ = std::fs::remove_file(path);
+    Some(bytes)
+}
+
+/// Read the segmentation tensor cache from disk.
 fn read_tensor_cache(
     path: Option<&std::path::PathBuf>,
     height: Option<u32>,
     width: Option<u32>,
     model: ModelKind,
 ) -> Option<TensorCache> {
-    let path = path?;
-    let h = height?;
-    let w = width?;
-    let raw_bytes = std::fs::read(path).ok()?;
-    let _ = std::fs::remove_file(path);
-    let data = crate::subprocess::ipc::le_bytes_to_f32s(&raw_bytes);
-    Some(TensorCache { data, height: h, width: w, model })
+    let data = crate::subprocess::ipc::le_bytes_to_f32s(&read_and_delete(path?)?);
+    Some(TensorCache { data, height: height?, width: width?, model })
 }
 
-/// Read the DexiNed multi-scale cache. The child concatenates 4 tensors into
-/// one file (each sized h*w*4 bytes); parent splits into equal chunks.
+/// Read the DexiNed multi-scale cache. Child concatenates 4 tensors into
+/// one file (each h*w*4 bytes); parent splits into equal chunks.
 fn read_edge_tensor_cache(
     path: Option<&std::path::PathBuf>,
     height: Option<u32>,
     width: Option<u32>,
 ) -> Option<EdgeTensorCache> {
-    let path = path?;
     let h = height?;
     let w = width?;
-    let raw_bytes = std::fs::read(path).ok()?;
-    let _ = std::fs::remove_file(path);
+    let raw_bytes = read_and_delete(path?)?;
 
     let per_tensor_bytes = (h as usize) * (w as usize) * std::mem::size_of::<f32>();
     let expected = per_tensor_bytes * EDGE_SCALE_COUNT;
