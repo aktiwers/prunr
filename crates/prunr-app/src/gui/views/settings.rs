@@ -230,20 +230,11 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) {
             section_heading(ui, "Export");
             ui.checkbox(
                 &mut app.settings.export_split_layers,
-                RichText::new("Split layers on drag-out")
+                RichText::new("Split exports into layers")
                     .color(theme::TEXT_PRIMARY)
                     .size(theme::FONT_SIZE_BODY),
             );
-            hint(ui, "Drag a processed image as 3 separate PNGs (subject, lines, mask) instead of one composite \u{2014} useful for Photoshop / Procreate workflows.");
-            ui.add_space(theme::SPACE_MD);
-
-            ui.checkbox(
-                &mut app.settings.export_animation_enabled,
-                RichText::new("Export animation button")
-                    .color(theme::TEXT_PRIMARY)
-                    .size(theme::FONT_SIZE_BODY),
-            );
-            hint(ui, "Show the toolbar button that sweeps one knob across N frames into a PNG sequence. Off hides the button entirely.");
+            hint(ui, "Drag-out and Save emit subject / lines / mask as separate PNGs instead of one composite \u{2014} useful for Photoshop / Procreate workflows. On Linux (no drag-out), Save is the way.");
             ui.add_space(theme::SPACE_MD);
 
             ui.separator();

@@ -480,9 +480,7 @@ Self-drop rejection prevents re-ingesting thumbnails. Stuck-drag recovery clears
 | Composite (default) | `{stem}-{nobg\|lines\|nobg-lines}.png` | None — uses `result_rgba` or raw source |
 | Split (`export_split_layers`) | `{stem}-subject.png` + `{stem}-lines.png` + `{stem}-mask.png` | Subject / Mask need `cached_tensor`; Lines needs `cached_edge_tensors` |
 
-Split mode skips layers whose tensor isn't cached (e.g. LineMode::Off items have no edge tensor → 2 files, not 3). Falls back to the composite path when nothing is cached so drags of unprocessed items still work. Subject layer re-runs `postprocess_from_flat` with `fill_style=None`, `bg_effect=None` forced so the receiving app sees clean pixels; other mask tweaks (gamma, threshold, refine, feather, edge_shift) are preserved.
-
-**Animation sweep** — `animation_sweep::spawn_sweep` renders N frames of a processed item while sweeping one knob (LineStrength / Gamma / ComposeMode cycle / LineStyle cycle / FillStyle cycle) and writes them as `0000.png`, `0001.png`, … to a chosen folder. Each frame is Tier 2/3 work against the cached seg + edge tensors — no re-inference. Runs on a background thread; progress events flow back through an mpsc channel and surface as toasts. `compose_subject_outline` (moved from `worker_process.rs` to `prunr_core::edge`) is shared between the subprocess full-pipeline path and the sweep thread so line-style composition stays single-source.
+Split mode skips layers whose tensor isn't cached (e.g. LineMode::Off items have no edge tensor → 2 files, not 3). Falls back to the composite path when nothing is cached so drags of unprocessed items still work. Subject layer re-runs `postprocess_from_flat` with `fill_style=None`, `bg_effect=None` forced so the receiving app sees clean pixels; other mask tweaks (gamma, threshold, refine, feather, edge_shift) are preserved. The same rendering backs the **Save** button when `export_split_layers` is on — Save asks for a folder and writes the same layer set to it, so Linux users (no drag-out) have a first-class path.
 
 ## Persistent Config
 

@@ -244,6 +244,26 @@ pub(crate) fn prepare_for_drag(item: &BatchItem, split: bool) -> std::io::Result
     Ok(paths)
 }
 
+/// Render the available split layers for `item` as `(filename, PNG bytes)`
+/// pairs, without touching the filesystem. Shared by the Save-to-folder path
+/// in `app.rs` — drag-out writes these same bytes to the temp dir, Save
+/// writes them to the user's chosen folder.
+///
+/// Empty when no cached tensors are available (item never processed, or
+/// caches evicted under memory pressure) — callers should fall back to the
+/// composite PNG in that case.
+pub(crate) fn render_layer_bytes(item: &BatchItem) -> Vec<(String, Vec<u8>)> {
+    let Some(original) = decode_source(item) else { return Vec::new() };
+    let seg = item.cached_tensor.as_ref().and_then(|ct| ct.bundle());
+    LayerKind::ALL.iter()
+        .copied()
+        .filter_map(|kind| {
+            let bytes = render_layer(item, kind, &original, seg.as_ref())?;
+            Some((make_layer_filename(&item.filename, kind), bytes))
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
