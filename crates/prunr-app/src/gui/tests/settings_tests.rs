@@ -2,9 +2,9 @@ use crate::gui::app::PrunrApp;
 use crate::gui::settings::{Settings, SettingsModel};
 
 #[test]
-fn settings_default_model_is_silueta() {
+fn settings_default_model_is_birefnet() {
     let s = Settings::default();
-    assert_eq!(s.model, SettingsModel::Silueta);
+    assert_eq!(s.model, SettingsModel::BiRefNetLite);
 }
 
 #[test]
