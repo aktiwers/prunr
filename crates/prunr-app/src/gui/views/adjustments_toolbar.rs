@@ -520,22 +520,12 @@ fn fill_style_params(ui: &mut Ui, style: &mut prunr_core::FillStyle) -> bool {
     changed
 }
 
-/// Inline colour picker for a `[u8; 3]`, preceded by a bold label. Uses
-/// `color_picker_color32` (in-place hue ring + sliders) instead of
-/// `color_edit_button_srgb` on purpose — the button variant opens its own
-/// popup, which egui's parent-popover `CloseOnClickOutside` treats as
-/// "outside", dismissing our chip dropdown on the first click.
-/// Same trick `chip_option_rgb` uses.
+/// Label + inline colour picker on two stacked rows. Thin wrapper over
+/// `chip::rgb_picker` — the label is purely visual context so the user
+/// knows which colour they're editing.
 fn rgb_picker_row(ui: &mut Ui, label: &str, rgb: &mut [u8; 3]) -> bool {
-    use egui::widgets::color_picker::{color_picker_color32, Alpha};
     ui.label(RichText::new(label).color(theme::TEXT_SECONDARY).size(theme::FONT_SIZE_MONO));
-    let mut c = egui::Color32::from_rgb(rgb[0], rgb[1], rgb[2]);
-    if color_picker_color32(ui, &mut c, Alpha::Opaque) {
-        *rgb = [c.r(), c.g(), c.b()];
-        true
-    } else {
-        false
-    }
+    chip::rgb_picker(ui, rgb)
 }
 
 /// SubjectOutline compose-mode picker — dropdown chip listing the 5 modes.
