@@ -356,16 +356,9 @@ enum Tier { Mask, Edge, Bg }
 /// Returns true when the user changed the mode.
 fn render_compose_mode_chip(ui: &mut Ui, mode: &mut prunr_core::ComposeMode) -> bool {
     use prunr_core::ComposeMode;
-    let defaults = Defaults::new();
-    let is_custom = *mode != defaults.template.compose_mode;
-    let resp = chip::chip_button(
-        ui,
-        &ICON_LAYERS.codepoint.to_string(),
-        &mode.to_string(),
-        is_custom,
-    );
+    let accent = *mode != ComposeMode::default();
     let resp = chip::chip_tooltip(
-        resp,
+        chip::chip_button(ui, &ICON_LAYERS.codepoint.to_string(), &mode.to_string(), accent),
         "Style",
         "How the subject mask and outline combine. Pure compose — switching \
          modes is instant (no re-inference).\n\
@@ -382,9 +375,11 @@ fn render_compose_mode_chip(ui: &mut Ui, mode: &mut prunr_core::ComposeMode) -> 
         for option in ComposeMode::ALL {
             let selected = *option == *mode;
             if ui.selectable_label(selected, option.to_string()).clicked() {
-                *mode = *option;
-                changed = true;
-                ui.memory_mut(|m| m.toggle_popup(popup_id));
+                if !selected {
+                    *mode = *option;
+                    changed = true;
+                }
+                ui.memory_mut(|m| m.close_popup(popup_id));
             }
         }
     });
