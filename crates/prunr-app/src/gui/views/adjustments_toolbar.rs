@@ -49,6 +49,11 @@ pub struct ToolbarChange {
     /// DexiNed edge tensor is stale (different line_mode means DexiNed
     /// would see a different input — full scene vs subject-on-white).
     pub edge_cache_invalid: bool,
+    /// Line mode (Off / EdgesOnly / SubjectOutline) was toggled. The caller
+    /// auto-triggers a reprocess on a Done item so the user doesn't have to
+    /// click Process — tier routing keeps this cheap (AddEdgeInference when
+    /// the seg tensor is still valid).
+    pub line_mode_changed: bool,
 }
 
 /// Factory default values for per-chip reset. Per-chip reset sends the value
@@ -327,6 +332,7 @@ pub fn render(
         // surgical diff could keep it valid for "no change in DexiNed input"
         // transitions, but the speed-up isn't worth the fragility.
         change.edge_cache_invalid = true;
+        change.line_mode_changed = true;
     }
 
     change
