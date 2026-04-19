@@ -84,6 +84,9 @@ pub struct MaskSettings {
     pub guided_epsilon: f32,
     /// Gaussian blur sigma (pixels). Color-agnostic edge softening.
     pub feather: f32,
+    /// How the subject RGB is transformed after masking and before compose.
+    #[serde(default)]
+    pub fill_style: FillStyle,
 }
 
 impl Default for MaskSettings {
@@ -96,6 +99,7 @@ impl Default for MaskSettings {
             guided_radius: 8,
             guided_epsilon: 1e-4,
             feather: 0.0,
+            fill_style: FillStyle::default(),
         }
     }
 }
@@ -160,6 +164,9 @@ pub struct EdgeSettings {
     /// doesn't re-run inference.
     #[serde(default)]
     pub compose_mode: ComposeMode,
+    /// How edge pixels are coloured (solid / gradient). Compose-time.
+    #[serde(default)]
+    pub line_style: LineStyle,
 }
 
 impl Default for EdgeSettings {
@@ -170,6 +177,7 @@ impl Default for EdgeSettings {
             edge_thickness: 0,
             edge_scale: EdgeScale::Fused,
             compose_mode: ComposeMode::default(),
+            line_style: LineStyle::default(),
         }
     }
 }
@@ -222,6 +230,82 @@ impl ComposeMode {
         Self::Ghost,
         Self::InverseMask,
     ];
+}
+
+/// How line pixels are coloured in `LineMode::SubjectOutline` / `EdgesOnly`.
+/// `Solid` reads the user's `solid_line_color` chip (or passes source RGB
+/// through if that's unset). Gradient variants carry their own endpoints and
+/// ignore `solid_line_color` — they paint at edge pixels only.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash,
+    serde::Serialize, serde::Deserialize, Default,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum LineStyle {
+    /// Use `solid_line_color` (or source RGB if none).
+    #[default]
+    Solid,
+    /// Vertical gradient — lerp between `top` (y=0) and `bottom` (y=H).
+    GradientY { top: [u8; 3], bottom: [u8; 3] },
+    /// Horizontal gradient — lerp between `left` (x=0) and `right` (x=W).
+    GradientX { left: [u8; 3], right: [u8; 3] },
+}
+
+impl LineStyle {
+    pub const ALL_NAMES: &'static [&'static str] = &["Solid", "Vertical gradient", "Horizontal gradient"];
+
+    pub fn name(&self) -> &'static str {
+        match self {
+            LineStyle::Solid => "Solid",
+            LineStyle::GradientY { .. } => "Vertical gradient",
+            LineStyle::GradientX { .. } => "Horizontal gradient",
+        }
+    }
+}
+
+impl std::fmt::Display for LineStyle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+/// How the subject's RGB is transformed before compose. Applies to any mode
+/// that produces a masked subject (`Off` or `SubjectOutline`). `EdgesOnly`
+/// has no subject silhouette — this is a no-op there.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash,
+    serde::Serialize, serde::Deserialize, Default,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum FillStyle {
+    /// Pass source RGB through unchanged.
+    #[default]
+    None,
+    /// Luma grayscale.
+    Desaturate,
+    /// RGB negative.
+    Invert,
+    /// Remap luma: lerp between `dark` (black pixels) and `light` (white).
+    Duotone { dark: [u8; 3], light: [u8; 3] },
+}
+
+impl FillStyle {
+    pub const ALL_NAMES: &'static [&'static str] = &["None", "Desaturate", "Invert", "Duotone"];
+
+    pub fn name(&self) -> &'static str {
+        match self {
+            FillStyle::None => "None",
+            FillStyle::Desaturate => "Desaturate",
+            FillStyle::Invert => "Invert",
+            FillStyle::Duotone { .. } => "Duotone",
+        }
+    }
+}
+
+impl std::fmt::Display for FillStyle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
 }
 
 /// Raw inference result (Tier 1 output) — the model tensor before postprocessing.

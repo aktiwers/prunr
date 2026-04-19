@@ -66,6 +66,12 @@ pub struct ItemSettings {
     /// saved before this field existed.
     #[serde(default)]
     pub compose_mode: prunr_core::ComposeMode,
+    /// Line colouring: solid (via `solid_line_color`) or a gradient.
+    #[serde(default)]
+    pub line_style: prunr_core::LineStyle,
+    /// RGB transformation applied to the masked subject before compose.
+    #[serde(default)]
+    pub fill_style: prunr_core::FillStyle,
 }
 
 impl Default for ItemSettings {
@@ -85,6 +91,8 @@ impl Default for ItemSettings {
             edge_scale: EdgeScale::Fused,
             bg: None,
             compose_mode: prunr_core::ComposeMode::default(),
+            line_style: prunr_core::LineStyle::default(),
+            fill_style: prunr_core::FillStyle::default(),
         }
     }
 }
@@ -106,6 +114,7 @@ impl ItemSettings {
             guided_radius: self.guided_radius,
             guided_epsilon: self.guided_epsilon,
             feather: self.feather,
+            fill_style: self.fill_style,
         }
     }
 
@@ -117,6 +126,7 @@ impl ItemSettings {
             edge_thickness: self.edge_thickness,
             edge_scale: self.edge_scale,
             compose_mode: self.compose_mode,
+            line_style: self.line_style,
         }
     }
 
@@ -262,6 +272,8 @@ mod tests {
             edge_scale: EdgeScale::Bold,
             bg: Some([100, 150, 200, 240]),
             compose_mode: prunr_core::ComposeMode::Ghost,
+            line_style: prunr_core::LineStyle::GradientY { top: [255, 0, 0], bottom: [0, 0, 255] },
+            fill_style: prunr_core::FillStyle::Duotone { dark: [10, 10, 40], light: [240, 240, 200] },
         };
         let json = serde_json::to_string(&s).unwrap();
         let recovered: ItemSettings = serde_json::from_str(&json).unwrap();

@@ -231,10 +231,11 @@ pub fn compose_edges_styled(
     mask: &image::GrayImage,
     base: &RgbaImage,
     compose: crate::types::ComposeMode,
+    line_style: crate::types::LineStyle,
     solid_line_color: Option<[u8; 3]>,
     edge_thickness: u32,
 ) -> RgbaImage {
-    use crate::types::ComposeMode;
+    use crate::types::{ComposeMode, LineStyle};
     let (ow, oh) = (base.width(), base.height());
     let mask_raw = dilate_to_bytes(mask, edge_thickness);
     let mut rgba = base.clone();
@@ -254,22 +255,35 @@ pub fn compose_edges_styled(
         ComposeMode::InverseMask => |s, e| ((255 - s) * e / 255) as u8,
     };
 
-    // Two outer branches on `solid_line_color` — keeps the color check out of
-    // the pixel loop.
-    if let Some(c) = solid_line_color {
-        for i in 0..pixel_count {
-            let subject = out_raw[i * 4 + 3] as i32;
-            let edge = mask_raw[i] as i32;
-            out_raw[i * 4 + 3] = alpha_fn(subject, edge);
-            if edge > 0 {
-                blend_rgb(&mut out_raw[i * 4..i * 4 + 3], c, edge as u16);
+    // LineStyle gradients supersede `solid_line_color` — they compute the
+    // target colour per pixel from position. Solid style defers to the
+    // user's colour chip (or passes source RGB through if None).
+    let tint = match line_style {
+        LineStyle::Solid => solid_line_color,
+        LineStyle::GradientY { .. } | LineStyle::GradientX { .. } => None,
+    };
+
+    for i in 0..pixel_count {
+        let subject = out_raw[i * 4 + 3] as i32;
+        let edge = mask_raw[i] as i32;
+        out_raw[i * 4 + 3] = alpha_fn(subject, edge);
+        if edge == 0 { continue; }
+
+        let gradient_target: Option<[u8; 3]> = match line_style {
+            LineStyle::Solid => tint,
+            LineStyle::GradientY { top, bottom } => {
+                let y = (i as u32 / ow) as u16;
+                let t = (y as u32 * 255 / oh.max(1) as u32) as u16;
+                Some(lerp_rgb(top, bottom, t))
             }
-        }
-    } else {
-        for i in 0..pixel_count {
-            let subject = out_raw[i * 4 + 3] as i32;
-            let edge = mask_raw[i] as i32;
-            out_raw[i * 4 + 3] = alpha_fn(subject, edge);
+            LineStyle::GradientX { left, right } => {
+                let x = (i as u32 % ow) as u16;
+                let t = (x as u32 * 255 / ow.max(1) as u32) as u16;
+                Some(lerp_rgb(left, right, t))
+            }
+        };
+        if let Some(target) = gradient_target {
+            blend_rgb(&mut out_raw[i * 4..i * 4 + 3], target, edge as u16);
         }
     }
     rgba
@@ -291,6 +305,17 @@ fn blend_rgb(rgb: &mut [u8], target: [u8; 3], weight: u16) {
     rgb[0] = ((rgb[0] as u16 * inv + target[0] as u16 * weight) / 255) as u8;
     rgb[1] = ((rgb[1] as u16 * inv + target[1] as u16 * weight) / 255) as u8;
     rgb[2] = ((rgb[2] as u16 * inv + target[2] as u16 * weight) / 255) as u8;
+}
+
+/// Lerp two RGB triples: `a` at t=0, `b` at t=255.
+#[inline]
+fn lerp_rgb(a: [u8; 3], b: [u8; 3], t: u16) -> [u8; 3] {
+    let inv = 255 - t;
+    [
+        ((a[0] as u16 * inv + b[0] as u16 * t) / 255) as u8,
+        ((a[1] as u16 * inv + b[1] as u16 * t) / 255) as u8,
+        ((a[2] as u16 * inv + b[2] as u16 * t) / 255) as u8,
+    ]
 }
 
 /// Tier 2 edge convenience: tensor → mask → RGBA in one call. Prefer the two
@@ -381,7 +406,7 @@ mod tests {
             tensor[i] = 10.0; // sigmoid → ~1 → edge
         }
         let original = solid_rgb(64, 48);
-        let edge = crate::EdgeSettings { line_strength: 0.5, solid_line_color: Some([255, 0, 0]), edge_thickness: 0, edge_scale: crate::EdgeScale::Fused, compose_mode: crate::ComposeMode::default() };
+        let edge = crate::EdgeSettings { line_strength: 0.5, solid_line_color: Some([255, 0, 0]), edge_thickness: 0, edge_scale: crate::EdgeScale::Fused, compose_mode: crate::ComposeMode::default(), line_style: crate::LineStyle::default() };
         let out = finalize_edges(&tensor, h as u32, w as u32, &original, &edge);
         assert_eq!(out.width(), 64);
         assert_eq!(out.height(), 48);
@@ -396,7 +421,7 @@ mod tests {
         let h = DEXINED_H as usize;
         let tensor = vec![10.0_f32; h * w]; // all edges
         let original = solid_rgb(32, 32);
-        let edge = crate::EdgeSettings { line_strength: 0.5, solid_line_color: None, edge_thickness: 0, edge_scale: crate::EdgeScale::Fused, compose_mode: crate::ComposeMode::default() };
+        let edge = crate::EdgeSettings { line_strength: 0.5, solid_line_color: None, edge_thickness: 0, edge_scale: crate::EdgeScale::Fused, compose_mode: crate::ComposeMode::default(), line_style: crate::LineStyle::default() };
         let out = finalize_edges(&tensor, h as u32, w as u32, &original, &edge);
         // Original color preserved
         assert_eq!(out.get_pixel(0, 0)[0], 120);

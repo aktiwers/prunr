@@ -198,6 +198,11 @@ pub fn render(
                 false,
                 |v| if v < 0.1 { "off".into() } else { format!("σ {v:.1}") },
             ), Tier::Mask, &mut change);
+
+            if render_fill_style_chip(ui, &mut item_settings.fill_style) {
+                change.mask = true;
+                change.commit = true;
+            }
         });
 
         // Divider between mask and composite groups.
@@ -324,6 +329,10 @@ pub fn render(
                     change.commit = true;
                 }
             }
+            if render_line_style_chip(ui, &mut item_settings.line_style) {
+                change.edge = true;
+                change.commit = true;
+            }
         }
     });
 
@@ -351,6 +360,88 @@ pub fn render(
 /// Which tier a chip's change lifts into on the aggregate ToolbarChange.
 #[derive(Copy, Clone)]
 enum Tier { Mask, Edge, Bg }
+
+/// Line-style picker (Solid / Vertical gradient / Horizontal gradient).
+/// Solid defers to the user's `solid_line_color` chip; gradient variants
+/// carry their own endpoints. Returns true when the user changed it.
+fn render_line_style_chip(ui: &mut Ui, style: &mut prunr_core::LineStyle) -> bool {
+    use prunr_core::LineStyle;
+    let accent = !matches!(style, LineStyle::Solid);
+    let resp = chip::chip_tooltip(
+        chip::chip_button(ui, &ICON_GRADIENT.codepoint.to_string(), style.name(), accent),
+        "Line style",
+        "How line pixels are coloured.\n\
+         • Solid — use the Solid line color chip (or source RGB if unset).\n\
+         • Vertical gradient — top colour fades to bottom colour.\n\
+         • Horizontal gradient — left colour fades to right colour.",
+    );
+
+    let popup_id = ui.make_persistent_id("line_style_popup");
+    let mut changed = false;
+    chip::popup_for(ui, popup_id, &resp, |ui| {
+        for name in LineStyle::ALL_NAMES {
+            let selected = *name == style.name();
+            if ui.selectable_label(selected, *name).clicked() {
+                if !selected {
+                    *style = match *name {
+                        "Vertical gradient" => LineStyle::GradientY {
+                            top: [255, 50, 50],
+                            bottom: [50, 50, 255],
+                        },
+                        "Horizontal gradient" => LineStyle::GradientX {
+                            left: [255, 50, 50],
+                            right: [50, 50, 255],
+                        },
+                        _ => LineStyle::Solid,
+                    };
+                    changed = true;
+                }
+                ui.memory_mut(|m| m.close_popup(popup_id));
+            }
+        }
+    });
+    changed
+}
+
+/// Fill-style picker (None / Desaturate / Invert / Duotone). Transforms the
+/// subject's RGB before compose. Returns true when the user changed it.
+fn render_fill_style_chip(ui: &mut Ui, style: &mut prunr_core::FillStyle) -> bool {
+    use prunr_core::FillStyle;
+    let accent = !matches!(style, FillStyle::None);
+    let resp = chip::chip_tooltip(
+        chip::chip_button(ui, &ICON_FORMAT_PAINT.codepoint.to_string(), style.name(), accent),
+        "Fill style",
+        "How the subject RGB is transformed before compose.\n\
+         • None — keep source colours.\n\
+         • Desaturate — luma grayscale.\n\
+         • Invert — RGB negative.\n\
+         • Duotone — remap luma between two colours.",
+    );
+
+    let popup_id = ui.make_persistent_id("fill_style_popup");
+    let mut changed = false;
+    chip::popup_for(ui, popup_id, &resp, |ui| {
+        for name in FillStyle::ALL_NAMES {
+            let selected = *name == style.name();
+            if ui.selectable_label(selected, *name).clicked() {
+                if !selected {
+                    *style = match *name {
+                        "Desaturate" => FillStyle::Desaturate,
+                        "Invert" => FillStyle::Invert,
+                        "Duotone" => FillStyle::Duotone {
+                            dark: [20, 20, 60],
+                            light: [240, 220, 180],
+                        },
+                        _ => FillStyle::None,
+                    };
+                    changed = true;
+                }
+                ui.memory_mut(|m| m.close_popup(popup_id));
+            }
+        }
+    });
+    changed
+}
 
 /// SubjectOutline compose-mode picker — dropdown chip listing the 5 modes.
 /// Returns true when the user changed the mode.
