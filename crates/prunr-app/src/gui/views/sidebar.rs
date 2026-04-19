@@ -121,9 +121,20 @@ fn render_header(ui: &mut egui::Ui, app: &mut PrunrApp) {
     });
 }
 
+/// Max thumbnail textures uploaded per frame. `ctx.load_texture` queues a
+/// GPU upload; doing 50+ in one frame overwhelms the command buffer and
+/// stutters. Capping spreads the cost across ~N/3 frames — imperceptible
+/// at 60 Hz, cheaper per-frame than the stutter it replaces.
+const THUMB_UPLOADS_PER_FRAME: usize = 3;
+
 /// Drain completed thumbnails from the background decoder into textures.
+/// Throttles GPU uploads so a 50-image import doesn't burst all uploads
+/// into one frame. Requests a repaint while the queue is still saturated
+/// so the next frame keeps draining.
 fn pump_thumbnail_results(ui: &egui::Ui, app: &mut PrunrApp) {
-    while let Ok((item_id, tw, th, pixels)) = app.batch.bg_io.thumb_rx.try_recv() {
+    let mut uploaded = 0;
+    while uploaded < THUMB_UPLOADS_PER_FRAME {
+        let Ok((item_id, tw, th, pixels)) = app.batch.bg_io.thumb_rx.try_recv() else { break };
         if let Some(item) = app.batch.find_by_id_mut(item_id) {
             let ci = egui::ColorImage::from_rgba_unmultiplied(
                 [tw as usize, th as usize],
@@ -135,7 +146,11 @@ fn pump_thumbnail_results(ui: &egui::Ui, app: &mut PrunrApp) {
                 egui::TextureOptions::LINEAR,
             ));
             item.thumb_pending = false;
+            uploaded += 1;
         }
+    }
+    if uploaded == THUMB_UPLOADS_PER_FRAME {
+        ui.ctx().request_repaint();
     }
 }
 
