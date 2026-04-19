@@ -272,7 +272,7 @@ pub use prunr_core::LineMode;
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            model: SettingsModel::Silueta,
+            model: SettingsModel::BiRefNetLite,
             auto_process_on_import: false,
             parallel_jobs: (num_cpus::get() / 2).max(1),
             history_depth: 10,
