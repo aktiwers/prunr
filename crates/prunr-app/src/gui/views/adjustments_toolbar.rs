@@ -331,6 +331,14 @@ pub fn render(
                 change.edge = true;
                 change.commit = true;
             }
+            if render_input_transform_chip(ui, &mut item_settings.input_transform) {
+                // Changes to the input transform invalidate BOTH caches —
+                // DexiNed sees a different image → signal a full pipeline
+                // rerun via seg + edge cache invalidation.
+                change.edge_cache_invalid = true;
+                change.seg_cache_invalid = true;
+                change.commit = true;
+            }
 
             aggregate(chip::chip_option_rgb(
                 ui, "solid_line_color",
@@ -367,6 +375,52 @@ pub fn render(
 /// Which tier a chip's change lifts into on the aggregate ToolbarChange.
 #[derive(Copy, Clone)]
 enum Tier { Mask, Edge, Bg }
+
+/// Input-transform picker. Changes invalidate the DexiNed edge tensor cache
+/// (and seg cache for conservatism) — not live-previewable. Label accent
+/// reminds the user their next Process will re-run inference.
+fn render_input_transform_chip(ui: &mut Ui, transform: &mut prunr_core::InputTransform) -> bool {
+    use prunr_core::InputTransform;
+    let accent = !matches!(transform, InputTransform::None);
+    let resp = chip::chip_tooltip(
+        chip::chip_button(ui, &ICON_TUNE.codepoint.to_string(), transform.name(), accent),
+        "Pre-inference transform",
+        "Transform applied to the image BEFORE edge detection. Changing this\
+         invalidates the edge cache and re-runs DexiNed on the next Process.",
+    );
+
+    let popup_id = ui.make_persistent_id("input_transform_popup");
+    let mut changed = false;
+    chip::popup_for(ui, popup_id, &resp, |ui| {
+        ui.label(RichText::new("Pre-inference transform").strong().color(theme::TEXT_PRIMARY));
+        ui.add_space(theme::SPACE_XS);
+        for option in InputTransform::ALL {
+            let selected = std::mem::discriminant(option) == std::mem::discriminant(transform);
+            if ui.selectable_label(selected, option.name()).clicked() && !selected {
+                *transform = *option;
+                changed = true;
+            }
+        }
+        ui.separator();
+        match transform {
+            InputTransform::None | InputTransform::Grayscale => {
+                ui.label(RichText::new("No parameters.").color(theme::TEXT_SECONDARY)
+                    .size(theme::FONT_SIZE_MONO));
+            }
+            InputTransform::ContrastBoost { percent } => {
+                if ui.add(egui::Slider::new(percent, 50..=300).text("Percent")).changed() {
+                    changed = true;
+                }
+            }
+            InputTransform::Posterize { levels } => {
+                if ui.add(egui::Slider::new(levels, 2..=8).text("Levels")).changed() {
+                    changed = true;
+                }
+            }
+        }
+    });
+    changed
+}
 
 /// Line-style picker. Solid defers to the user's `solid_line_color` chip;
 /// every other variant carries its own colours / params. Picking a variant
