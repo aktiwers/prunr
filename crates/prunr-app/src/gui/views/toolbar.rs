@@ -55,46 +55,23 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
         // Lines mode selector lives on row 3's left edge alongside its own
         // chips. Row 1 stays minimal: Open, Settings, and the action cluster.
 
-        // ── Undo / Redo — left-flow, immediately right of Settings ──
-        // Target scope mirrors `handle_undo` / `handle_redo`: selected
-        // items if any, else the currently-viewed item.
         if !app.batch.items.is_empty() {
-            let has_selected_any = app.batch.items.iter().any(|i| i.selected);
-            let current_id = app.batch.selected_item().map(|b| b.id);
-            let (can_undo, can_redo) = app.batch.items.iter().fold(
-                (false, false),
-                |(u, r), item| {
-                    let is_target = if has_selected_any {
-                        item.selected
-                    } else {
-                        Some(item.id) == current_id
-                    };
-                    if !is_target { return (u, r); }
-                    (u || HistoryManager::can_undo(item),
-                     r || HistoryManager::can_redo(item))
-                },
-            );
-
-            let undo_btn = egui::Button::new(
-                RichText::new(ICON_UNDO.codepoint).size(20.0).color(theme::TEXT_PRIMARY),
+            let can_undo = app.batch.any_target_can(HistoryManager::can_undo);
+            let can_redo = app.batch.any_target_can(HistoryManager::can_redo);
+            let icon_btn = |icon: &'static str| egui::Button::new(
+                RichText::new(icon).size(20.0).color(theme::TEXT_PRIMARY),
             )
             .fill(theme::BG_SECONDARY)
             .corner_radius(theme::BUTTON_ROUNDING)
             .min_size(egui::vec2(BTN_HEIGHT, BTN_HEIGHT));
-            if ui.add_enabled(can_undo, undo_btn)
+
+            if ui.add_enabled(can_undo, icon_btn(ICON_UNDO.codepoint))
                 .on_hover_text(format!("Undo ({m}+Z)"))
                 .clicked()
             {
                 app.handle_undo(ui.ctx());
             }
-
-            let redo_btn = egui::Button::new(
-                RichText::new(ICON_REDO.codepoint).size(20.0).color(theme::TEXT_PRIMARY),
-            )
-            .fill(theme::BG_SECONDARY)
-            .corner_radius(theme::BUTTON_ROUNDING)
-            .min_size(egui::vec2(BTN_HEIGHT, BTN_HEIGHT));
-            if ui.add_enabled(can_redo, redo_btn)
+            if ui.add_enabled(can_redo, icon_btn(ICON_REDO.codepoint))
                 .on_hover_text(format!("Redo ({m}+Y)"))
                 .clicked()
             {

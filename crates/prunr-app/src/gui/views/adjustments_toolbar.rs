@@ -105,11 +105,8 @@ pub fn render(
     ui.horizontal(|ui| {
         render_model_dropdown(ui, app_settings, processing, &mut change);
 
-        // Mask knobs gray out when Sketch=Full without chain mode — in that
-        // configuration the mask tier is bypassed entirely (DexiNed runs on
-        // the raw image), so letting the user tweak dead knobs is a lie. In
-        // chain mode the mask still runs on a subsequent pass, so keep them
-        // live. Off / Subject always use the mask tier → always enabled.
+        // EdgesOnly w/o chain bypasses the mask tier — don't let the user
+        // tweak dead knobs. Chain mode re-runs mask on a later pass.
         let mask_active = !(item_settings.line_mode == LineMode::EdgesOnly
             && !app_settings.chain_mode);
         ui.add_enabled_ui(mask_active, |ui| {
@@ -145,8 +142,6 @@ pub fn render(
                 },
             ), Tier::Mask, &mut change);
 
-            // Refine Edges: toggle + guided-filter knobs live in one popover
-            // so the main row footprint doesn't grow when the feature is on.
             aggregate(chip::chip_bool_with_extras(
                 ui, "refine_edges",
                 &ICON_AUTO_FIX_HIGH.codepoint.to_string(), "Refine edges",
