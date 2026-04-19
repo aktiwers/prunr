@@ -449,9 +449,7 @@ pub fn chip_option_rgb(
         }
         if let Some(rgb) = value.as_mut() {
             ui.add_space(theme::SPACE_XS);
-            let mut c = Color32::from_rgb(rgb[0], rgb[1], rgb[2]);
-            if color_picker_color32(ui, &mut c, Alpha::Opaque) {
-                *rgb = [c.r(), c.g(), c.b()];
+            if rgb_picker(ui, rgb) {
                 out.changed = true;
                 out.commit = true;
             }
@@ -465,6 +463,22 @@ pub fn chip_option_rgb(
         }
     });
     out
+}
+
+/// Inline RGB picker primitive used wherever a `[u8; 3]` needs to be
+/// edited inside a parent popover. Uses egui's `color_picker_color32`
+/// (the inline hue ring + sliders) rather than `color_edit_button_srgb`
+/// (which opens its own popup — the parent popover's `CloseOnClickOutside`
+/// treats that as "outside" and dismisses on first click).
+/// Returns `true` when the user changed the colour.
+pub(super) fn rgb_picker(ui: &mut Ui, rgb: &mut [u8; 3]) -> bool {
+    let mut c = Color32::from_rgb(rgb[0], rgb[1], rgb[2]);
+    if color_picker_color32(ui, &mut c, Alpha::Opaque) {
+        *rgb = [c.r(), c.g(), c.b()];
+        true
+    } else {
+        false
+    }
 }
 
 #[cfg(test)]

@@ -32,8 +32,7 @@ use rayon::prelude::*;
 
 use super::item_settings::ItemSettings;
 use super::settings::PRUNR_PRESET;
-use prunr_core::{ComposeMode, FillStyle, LineStyle};
-use super::settings::LineMode;
+use prunr_core::{ComposeMode, FillStyle, LineMode, LineStyle};
 
 /// Name of the presets subdirectory under the app config dir.
 const PRESETS_SUBDIR: &str = "prunr/presets";
@@ -155,6 +154,15 @@ pub fn seed_builtins_once() {
     let marker = dir.join(SEED_MARKER);
     if marker.exists() { return; }
     for (name, values) in builtin_presets() {
+        // Skip if a preset file with this name already exists. Protects
+        // user customisations against two edge cases:
+        //   1. A mid-seed crash (some presets saved, marker not yet written)
+        //      → next launch re-seeds, but won't overwrite files saved in
+        //      the previous partial run.
+        //   2. A future `_v2` seed that reuses a name the user edited under
+        //      `_v1` — keeps their version, skips the rename.
+        let Some(path) = preset_path(name) else { continue };
+        if path.exists() { continue; }
         let _ = save(name, &values);
     }
     let _ = std::fs::write(&marker, b"");
@@ -358,6 +366,11 @@ mod tests {
         let mut seen = std::collections::HashSet::new();
         for (name, settings) in &presets {
             assert!(seen.insert(*name), "duplicate builtin preset name: {name}");
+            // Reserved name would be silently rejected by `save`.
+            assert!(
+                !name.eq_ignore_ascii_case(PRUNR_PRESET),
+                "built-in preset cannot use reserved name '{PRUNR_PRESET}'",
+            );
             // Each preset must round-trip through JSON — otherwise seed_builtins_once
             // would silently skip it.
             let json = serde_json::to_string(settings).expect("preset serializes");
