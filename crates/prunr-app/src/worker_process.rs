@@ -369,17 +369,15 @@ pub fn run_worker() -> ! {
                                             return Err(prunr_core::CoreError::Cancelled);
                                         }
                                         let active = &edge_res.tensors[edge.edge_scale as usize];
-                                        // SubjectOutline: preserve the subject silhouette in the
-                                        // alpha channel via compose_edges_over_rgba (max-merge).
-                                        // `finalize_edges` would overwrite the subject alpha with
-                                        // the edge mask — that's right for EdgesOnly, wrong here.
+                                        // SubjectOutline: dispatch on compose_mode.
                                         let edge_mask = prunr_core::tensor_to_edge_mask(
                                             active, edge_res.height, edge_res.width,
                                             masked_rgba.width(), masked_rgba.height(),
                                             edge.line_strength,
                                         );
-                                        let rgba_image = prunr_core::compose_edges_over_rgba(
+                                        let rgba_image = prunr_core::compose_edges_styled(
                                             &edge_mask, &masked_rgba,
+                                            edge.compose_mode,
                                             edge.solid_line_color, edge.edge_thickness,
                                         );
                                         edge_tensor_for_cache = Some(edge_res);
@@ -722,15 +720,15 @@ pub fn run_worker() -> ! {
                             return Err("cancelled".to_string());
                         }
                         let active = &edge_res.tensors[edge_settings.edge_scale as usize];
-                        // SubjectOutline compose: preserve subject alpha (see
-                        // non-chain SubjectOutline branch for rationale).
+                        // SubjectOutline compose: dispatch on compose_mode.
                         let edge_mask = prunr_core::tensor_to_edge_mask(
                             active, edge_res.height, edge_res.width,
                             masked_rgba.width(), masked_rgba.height(),
                             edge_settings.line_strength,
                         );
-                        let rgba_image = prunr_core::compose_edges_over_rgba(
+                        let rgba_image = prunr_core::compose_edges_styled(
                             &edge_mask, &masked_rgba,
+                            edge_settings.compose_mode,
                             edge_settings.solid_line_color, edge_settings.edge_thickness,
                         );
                         Ok((rgba_image, edge_res))

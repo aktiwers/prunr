@@ -314,6 +314,16 @@ pub fn render(
                 &mut item_settings.solid_line_color,
                 defaults.solid_line_color_value,
             ), Tier::Edge, &mut change);
+
+            // ComposeMode picker — only meaningful in SubjectOutline mode.
+            // Ignored by the worker / live preview in EdgesOnly + Off, so we
+            // hide the chip there to avoid presenting a dead control.
+            if item_settings.line_mode == LineMode::SubjectOutline {
+                if render_compose_mode_chip(ui, &mut item_settings.compose_mode) {
+                    change.edge = true;
+                    change.commit = true;
+                }
+            }
         }
     });
 
@@ -341,6 +351,45 @@ pub fn render(
 /// Which tier a chip's change lifts into on the aggregate ToolbarChange.
 #[derive(Copy, Clone)]
 enum Tier { Mask, Edge, Bg }
+
+/// SubjectOutline compose-mode picker — dropdown chip listing the 5 modes.
+/// Returns true when the user changed the mode.
+fn render_compose_mode_chip(ui: &mut Ui, mode: &mut prunr_core::ComposeMode) -> bool {
+    use prunr_core::ComposeMode;
+    let defaults = Defaults::new();
+    let is_custom = *mode != defaults.template.compose_mode;
+    let resp = chip::chip_button(
+        ui,
+        &ICON_LAYERS.codepoint.to_string(),
+        &mode.to_string(),
+        is_custom,
+    );
+    let resp = chip::chip_tooltip(
+        resp,
+        "Style",
+        "How the subject mask and outline combine. Pure compose — switching \
+         modes is instant (no re-inference).\n\
+         • Lines only — outline inside the subject, transparent bg.\n\
+         • Subject filled — solid subject with outline on top.\n\
+         • Engraving — outline cut through the filled subject.\n\
+         • Ghost — faded subject with a strong outline.\n\
+         • Inverse mask — outline in the background, subject invisible.",
+    );
+
+    let popup_id = ui.make_persistent_id("compose_mode_popup");
+    let mut changed = false;
+    chip::popup_for(ui, popup_id, &resp, |ui| {
+        for option in ComposeMode::ALL {
+            let selected = *option == *mode;
+            if ui.selectable_label(selected, option.to_string()).clicked() {
+                *mode = *option;
+                changed = true;
+                ui.memory_mut(|m| m.toggle_popup(popup_id));
+            }
+        }
+    });
+    changed
+}
 
 /// Row 2 leftmost: model dropdown. Edits `app_settings.model` directly and
 /// sets `change.model_changed` + `commit` when the selection flips so caller

@@ -31,7 +31,7 @@ use std::time::{Duration, Instant};
 
 use image::{DynamicImage, GrayImage, RgbaImage};
 
-use prunr_core::{ModelKind, postprocess_from_flat, tensor_to_edge_mask, compose_edges, compose_edges_over_rgba};
+use prunr_core::{ModelKind, postprocess_from_flat, tensor_to_edge_mask, compose_edges, compose_edges_styled};
 
 /// Build the "masked base" for SubjectOutline live preview — run Tier 2 mask
 /// from the cached seg tensor to reproduce the segmented subject, so edges
@@ -424,18 +424,17 @@ fn run_preview(inputs: DispatchInputs, cancel: &AtomicBool) -> RunOutput {
                     built_masked_base: None,
                 };
             }
-            // SubjectOutline: edges drawn OVER the freshly built masked subject.
-            // compose_edges_over_rgba preserves the subject alpha (max-merge)
-            // so gamma / threshold / refine_edges tweaks visibly change the
-            // subject silhouette while the outline stays on top.
+            // SubjectOutline: compose subject + edges via the selected mode.
+            // All modes are compose-time only — no re-inference.
             let Some(base_arc) = masked_base else { return RunOutput::empty(); };
             // invariant: is_subject_outline → edge_tensor is Some.
             let edge = inputs.edge_tensor.as_ref().unwrap();
             let edge_settings = inputs.settings.edge_settings();
             let base_dyn = DynamicImage::ImageRgba8((*base_arc).clone());
             let (mask, _) = resolve_edge_mask(&inputs.cached_edge_mask, edge, &base_dyn, &edge_settings);
-            let rgba = compose_edges_over_rgba(
+            let rgba = compose_edges_styled(
                 &mask, &base_arc,
+                edge_settings.compose_mode,
                 edge_settings.solid_line_color,
                 edge_settings.edge_thickness,
             );
@@ -450,11 +449,12 @@ fn run_preview(inputs: DispatchInputs, cancel: &AtomicBool) -> RunOutput {
             let base_for_mask: &DynamicImage = base_dyn.as_ref().unwrap_or(&inputs.original);
 
             let (mask, built_edge_mask) = resolve_edge_mask(&inputs.cached_edge_mask, edge, base_for_mask, &edge_settings);
-            // SubjectOutline: preserve the subject alpha via compose_edges_over_rgba.
-            // EdgesOnly: use compose_edges so the output is transparent-with-lines.
+            // SubjectOutline: dispatch to the selected ComposeMode.
+            // EdgesOnly: plain lines-on-transparent via compose_edges.
             let rgba = if let Some(ref base_arc) = masked_base {
-                compose_edges_over_rgba(
+                compose_edges_styled(
                     &mask, base_arc,
+                    edge_settings.compose_mode,
                     edge_settings.solid_line_color,
                     edge_settings.edge_thickness,
                 )
