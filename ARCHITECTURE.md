@@ -166,8 +166,9 @@ Re-processing avoids redundant work by classifying each change into a tier:
 | Tier | Name | When | Cost |
 |------|------|------|------|
 | 1 | FullPipeline | Model, line mode, or chain changed | Full inference |
-| 2a | MaskRerun | Mask params changed (gamma, threshold, edge_shift, refine_edges) | Postprocess cached seg tensor (~50-200ms) |
-| 2b | EdgeRerun | Line params changed (line_strength, solid_line_color) | Re-threshold cached DexiNed tensor (~20-100ms) |
+| 1b | AddEdgeInference | Only `uses_edge_detection` flipped false→true and seg cache hot | Reuse cached seg, run DexiNed only |
+| 2a | MaskRerun | Mask params changed (gamma, threshold, edge_shift, refine_edges, fill_style, bg_effect) | Postprocess cached seg tensor (~50-200ms; BgEffect adds ~30-100 ms for the backdrop compose) |
+| 2b | EdgeRerun | Line params changed (line_strength, solid_line_color, compose_mode, line_style) | Re-threshold cached DexiNed tensor (~20-100ms) |
 | 3 | CompositeOnly | bg_color changed | Render-time GPU rect — zero CPU |
 | — | Skip | Recipe identical | No work |
 
@@ -180,6 +181,19 @@ Each `BatchItem` stores the recipe that produced its current result, snapshotted
 ## Per-Image Settings
 
 Each `BatchItem` owns its own processing settings, so tweaking the adjustments toolbar edits one image instead of broadcasting to the whole batch. App-wide config (parallel_jobs, chain_mode, live_preview, etc.) stays separate on `AppSettings`. Per-image settings are `Copy`-sized and forward-compatible: older preset files load cleanly when new fields are added.
+
+### Creative compose layer
+
+On top of the AI pipeline sit four orthogonal compose-time enums, all stored on `ItemSettings` and all pure per-pixel ops on the cached tensors (no re-inference):
+
+| Enum | What it drives | Applies when | Tier |
+|---|---|---|---|
+| `ComposeMode` | How the subject mask α and edge mask α combine (LinesOnly / SubjectFilled / Engraving / Ghost / InverseMask) | `LineMode::SubjectOutline` | EdgeRerun |
+| `LineStyle` | How edge pixels are coloured (Solid / GradientY / GradientX / RadialGradient / Rainbow) | Any mode with lines | EdgeRerun |
+| `FillStyle` | RGB transform on the masked subject before compose (Desaturate / Invert / Sepia / Duotone / Threshold / Posterize / Solarize / HueShift / Saturate / ColorSplash / Pixelate) | Any mode with a subject | MaskRerun |
+| `BgEffect` | Source-derived backdrop baked into transparent areas (BlurredSource / InvertedSource / DesaturatedSource) | Any mode | MaskRerun |
+
+All four land in the same `postprocess → compose` step in `prunr-core`; live preview threads them through `DispatchInputs`. Shared helpers: `luma_u8`, `rgb_to_hsv`, `hsv_to_rgb`, `blend_rgb`, `lerp_rgb` in `prunr-core`. `#[inline]` on every per-pixel primitive; `LinesOnly` / `SubjectFilled` etc. resolve to a `fn(i32,i32)->u8` once per dispatch so the 5-way compose-mode match stays out of the per-pixel loop.
 
 ## Live Preview
 
@@ -438,6 +452,14 @@ Decompressed ONNX bytes are cached in `OnceLock<Vec<u8>>` per model. Callers rec
 **bg_color is never composited into pixels for display.** The result texture stays transparent where pixels were removed; at draw time the canvas paints a filled rect (or the checkerboard) *behind* the texture, and the GPU alpha-blends the result on top. Changing the bg color costs one rect repaint — no CPU compositing, no texture rebuild, no subprocess dispatch.
 
 The sidebar thumbnail uses the same pattern. Save/export is the exception: PNG has no separate canvas-bg concept, so the bg is composited into pixels on demand at save time. Display and export paths diverge intentionally.
+
+### BgEffect (source-derived backdrops)
+
+The `bg` colour is render-time and cheap; **BgEffect variants (BlurredSource, InvertedSource, DesaturatedSource) are destructive and bake into the output RGBA** at postprocess time. Rationale: source-derived backdrops need actual pixels behind the subject, not a single GPU rect. Building a separate backdrop texture per frame would double render bandwidth and complicate the canvas compositor; baking into output pixels keeps the render path unchanged.
+
+Consequence: a BgEffect change triggers MaskRerun (Tier 2a) — the postprocess step rebuilds the output with the new backdrop blended in where alpha < 255. Live preview of mask knobs in a BgEffect-enabled recipe keeps working: `postprocess_from_flat` already calls `apply_bg_effect` after `apply_fill_style`, so every tick reflects the current backdrop.
+
+Solid `bg` colour stays orthogonal to BgEffect — effects win when non-`None`, colour is the fallback at render time when effects are `None`. Both coexist on `ItemSettings` for zero migration churn.
 
 ## Drag-Out (OS-level drag to external apps)
 
