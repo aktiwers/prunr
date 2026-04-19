@@ -11,7 +11,7 @@
 //! Target size: under 40 bytes to fit in a single cache line alongside the
 //! BatchItem's lightweight metadata fields.
 
-use prunr_core::{LineMode, MaskSettings, EdgeSettings};
+use prunr_core::{LineMode, MaskSettings, EdgeSettings, EdgeScale};
 use serde::{Deserialize, Serialize};
 
 /// Per-image processing settings. Edited via the adjustments toolbar.
@@ -54,6 +54,8 @@ pub struct ItemSettings {
     pub solid_line_color: Option<[u8; 3]>,
     /// Dilate edge mask by N pixels after threshold — thickens thin lines.
     pub edge_thickness: u32,
+    /// Which DexiNed output scale to read from the cached tensor set.
+    pub edge_scale: EdgeScale,
 
     /// Fill transparent areas with a solid color. `None` = transparent.
     /// Stored as RGBA for UI parity; pipeline only uses RGB.
@@ -74,6 +76,7 @@ impl Default for ItemSettings {
             line_strength: 0.5,
             solid_line_color: None,
             edge_thickness: 0,
+            edge_scale: EdgeScale::Fused,
             bg: None,
         }
     }
@@ -105,7 +108,7 @@ impl ItemSettings {
             line_strength: self.line_strength,
             solid_line_color: self.solid_line_color,
             edge_thickness: self.edge_thickness,
-            edge_scale: prunr_core::EdgeScale::Fused,
+            edge_scale: self.edge_scale,
         }
     }
 
@@ -208,6 +211,30 @@ mod tests {
     }
 
     #[test]
+    fn serde_loads_old_preset_missing_edge_scale_as_fused() {
+        // Backwards-compat: preset files written before Task 5 lack
+        // edge_scale. `#[serde(default)]` on ItemSettings must fall back
+        // to `EdgeScale::Fused` (the previous hardcoded block_cat output).
+        let old_json = r#"{
+            "gamma": 1.2,
+            "threshold": null,
+            "edge_shift": 0.0,
+            "refine_edges": false,
+            "guided_radius": 8,
+            "guided_epsilon": 0.0001,
+            "feather": 0.0,
+            "line_mode": "EdgesOnly",
+            "line_strength": 0.5,
+            "solid_line_color": null,
+            "edge_thickness": 0,
+            "bg": null
+        }"#;
+        let loaded: ItemSettings = serde_json::from_str(old_json).unwrap();
+        assert_eq!(loaded.edge_scale, EdgeScale::Fused);
+        assert_eq!(loaded.line_mode, LineMode::EdgesOnly); // sanity: others still parse
+    }
+
+    #[test]
     fn serde_json_roundtrip_all_fields_populated() {
         let s = ItemSettings {
             gamma: 2.3,
@@ -221,6 +248,7 @@ mod tests {
             line_strength: 0.3,
             solid_line_color: Some([10, 20, 30]),
             edge_thickness: 2,
+            edge_scale: EdgeScale::Bold,
             bg: Some([100, 150, 200, 240]),
         };
         let json = serde_json::to_string(&s).unwrap();
