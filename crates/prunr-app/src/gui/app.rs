@@ -1845,11 +1845,14 @@ impl PrunrApp {
         // Receive pre-built ColorImages and upload to GPU (lightweight — just queues the upload)
         let mut tex_arrived = false;
         while let Ok((item_id, name, color_image, is_result)) = self.batch.bg_io.tex_prep_rx.try_recv() {
+            tracing::info!(item_id, name = %name, is_result, "live_preview: tex_prep arrived");
             let tex = ctx.load_texture(name, color_image, egui::TextureOptions::default());
+            let tex_id = tex.id();
             if let Some(item) = self.batch.find_by_id_mut(item_id) {
                 if is_result {
                     item.result_texture = Some(tex);
                     item.result_tex_pending = false;
+                    tracing::info!(item_id, ?tex_id, "live_preview: item.result_texture set");
                 } else {
                     item.source_texture = Some(tex);
                     item.source_tex_pending = false;
@@ -1859,6 +1862,10 @@ impl PrunrApp {
         }
         if tex_arrived {
             self.sync_selected_batch_textures(ctx);
+            tracing::info!(
+                app_result_tex_id = ?self.result_texture.as_ref().map(|t| t.id()),
+                "live_preview: after sync, app.result_texture",
+            );
         }
 
         // Drain files loaded by background thread (max 5 per frame to stay responsive)
