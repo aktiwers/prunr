@@ -24,6 +24,7 @@ num_cpus = "1"
 dirs = { workspace = true }
 serde = { workspace = true }
 fast_image_resize = { workspace = true }
+tracing = { workspace = true }
 
 [dev-dependencies]
 prunr-models = { path = "../prunr-models", features = ["dev-models"] }
