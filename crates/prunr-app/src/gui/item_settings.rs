@@ -105,6 +105,7 @@ impl ItemSettings {
             line_strength: self.line_strength,
             solid_line_color: self.solid_line_color,
             edge_thickness: self.edge_thickness,
+            edge_scale: prunr_core::EdgeScale::Fused,
         }
     }
 
