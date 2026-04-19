@@ -1,8 +1,6 @@
-//! F3 modal: visual reference for the mask post-processing pipeline.
-//!
-//! Five fixed stages with a one-line explanation each, so the user can
-//! predict how their knob tweaks cascade. Pairs with the per-chip tooltips
-//! in `adjustments_toolbar.rs` — same copy, different surface.
+//! F3 modal: mask-pipeline reference diagram. Five fixed stages with a
+//! one-line explanation each, so the user can predict how knob tweaks
+//! cascade.
 
 use egui::{Align2, RichText};
 use egui_material_icons::icons::*;
@@ -94,10 +92,7 @@ pub fn render(ctx: &egui::Context) -> bool {
             });
         });
 
-    let close_key = ctx.input(|i| {
-        i.key_pressed(egui::Key::Escape) || i.key_pressed(egui::Key::F3)
-    });
-    !open || close_key || theme::backdrop_clicked(ctx, &window_response)
+    !open || theme::backdrop_clicked(ctx, &window_response)
 }
 
 fn stage_row(ui: &mut egui::Ui, stage: &Stage) {
