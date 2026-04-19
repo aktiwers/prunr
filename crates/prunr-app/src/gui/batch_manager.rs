@@ -47,7 +47,7 @@ pub(crate) enum ProcessButtonLabel {
 }
 
 /// Combined budget for compressed segmentation (`cached_tensor`) + edge
-/// (`cached_edge_tensor`) caches across all batch items, in bytes.
+/// (`cached_edge_tensors`) caches across all batch items, in bytes.
 const TENSOR_BUDGET: usize = 512 * 1024 * 1024;
 
 /// Maximum thumbnail edge length in pixels. Used by `request_thumbnail`
@@ -442,7 +442,7 @@ mod tests {
         // item id=1 (non-selected) gets BOTH caches cleared.
         assert!(bm.items[0].cached_tensor.is_none());
         assert!(bm.items[0].cached_edge_mask.is_none());
-        assert!(bm.items[0].cached_edge_tensor.is_none());
+        assert!(bm.items[0].cached_edge_tensors.is_none());
     }
 
     // ── request_decode_bytes / request_thumbnail (thread-spawning) ──────

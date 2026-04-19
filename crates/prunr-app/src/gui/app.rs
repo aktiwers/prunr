@@ -1117,7 +1117,7 @@ impl PrunrApp {
         id: u64,
         kind: super::live_preview::PreviewKind,
     ) -> Option<super::live_preview::DispatchInputs> {
-        use super::live_preview::{DispatchInputs, PreviewKind, decompress_edge, decompress_seg};
+        use super::live_preview::{DispatchInputs, PreviewKind, decompress_seg};
         let item = items.iter_mut().find(|b| b.id == id)?;
         // Lazily build the cached `Arc<DynamicImage>` once per decode.
         if item.source_dyn.is_none() {
@@ -1127,7 +1127,7 @@ impl PrunrApp {
         // Unwrap: we just set it above if it was None.
         let original = Arc::clone(item.source_dyn.as_ref().unwrap());
         let seg_tensor = item.cached_tensor.as_ref().and_then(decompress_seg);
-        let edge_tensor = item.cached_edge_tensor.as_ref().and_then(decompress_edge);
+        let edge_tensor = Self::edge_tensor_for_active_scale(item);
         match kind {
             PreviewKind::Mask if seg_tensor.is_none() => return None,
             PreviewKind::Edge if edge_tensor.is_none() => return None,
@@ -1140,6 +1140,38 @@ impl PrunrApp {
             kind, original, settings: item.settings,
             seg_tensor, edge_tensor, cached_edge_mask,
         })
+    }
+
+    /// Decompress the edge tensor for the item's currently-selected scale,
+    /// using the `volatile_edge_tensor` hot cache to skip zstd work during a
+    /// drag. On miss (scale change or fresh item), decompresses once and
+    /// populates the hot cache with an `Arc<Vec<f32>>` so the next dispatch
+    /// in the same drag session reuses it without allocating.
+    fn edge_tensor_for_active_scale(item: &mut BatchItem) -> Option<super::live_preview::EdgeTensor> {
+        let scale = item.settings.edge_scale;
+
+        // Hot path: decompressed tensor for this exact scale already cached.
+        let hot_hit = item.volatile_edge_tensor.as_ref()
+            .filter(|(s, _)| *s == scale)
+            .map(|(_, arc)| arc.clone());
+        if let Some(arc) = hot_hit {
+            let (height, width) = item.cached_edge_tensors.as_ref()
+                .map(|c| (c.height, c.width))?;
+            return Some(super::live_preview::EdgeTensor {
+                data: (*arc).clone(),
+                height,
+                width,
+            });
+        }
+
+        // Miss: decompress once and populate the hot cache.
+        let (data, height, width) = {
+            let cache = item.cached_edge_tensors.as_ref()?;
+            let d = cache.decompress(scale)?;
+            (d, cache.height, cache.width)
+        };
+        item.volatile_edge_tensor = Some((scale, Arc::new(data.clone())));
+        Some(super::live_preview::EdgeTensor { data, height, width })
     }
 
     /// Critical: do NOT null `result_texture` here — the old texture must stay
@@ -1422,7 +1454,7 @@ impl PrunrApp {
         item_id: u64,
         result: Result<prunr_core::ProcessResult, String>,
         tensor_cache: Option<super::worker::TensorCache>,
-        edge_cache: Option<super::worker::TensorCache>,
+        edge_cache: Option<super::worker::EdgeTensorCache>,
     ) {
         let is_selected = self.batch.is_selected(item_id);
         let recipe_snapshot = self.resolved_dispatch_recipe(item_id);

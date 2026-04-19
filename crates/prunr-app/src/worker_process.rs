@@ -255,9 +255,10 @@ pub fn run_worker() -> ! {
                     // future Tier 2 mask reruns.  Other modes don't benefit from
                     // tensor caching so they use the monolithic pipeline.
                     let mut tensor_for_cache: Option<(Vec<f32>, u32, u32)> = None;
-                    // DexiNed pre-threshold tensor — captured for Tier 2 edge reruns
-                    // (live-preview of line_strength without re-running the model).
-                    let mut edge_tensor_for_cache: Option<(Vec<f32>, u32, u32)> = None;
+                    // DexiNed multi-scale cache — all 4 scales captured from one
+                    // inference pass so live preview can switch scales without
+                    // re-inferring.
+                    let mut edge_tensor_for_cache: Option<prunr_core::EdgeInferenceResult> = None;
 
                     let result = match line_mode {
                         LineMode::EdgesOnly => {
@@ -273,11 +274,12 @@ pub fn run_worker() -> ! {
                             img_ref.and_then(|img| {
                                 // invariant: line_mode == EdgesOnly → needs_edge → edge_eng loaded.
                                 let eng_ref = edge_eng.as_ref().unwrap();
-                                eng_ref.infer_tensor(img, edge.edge_scale).map(|(tensor, h, w)| {
+                                eng_ref.infer_all_tensors(img).map(|res| {
+                                    let active = &res.tensors[edge.edge_scale as usize];
                                     let rgba_image = prunr_core::finalize_edges(
-                                        &tensor, h, w, img, &edge,
+                                        active, res.height, res.width, img, &edge,
                                     );
-                                    edge_tensor_for_cache = Some((tensor, h, w));
+                                    edge_tensor_for_cache = Some(res);
                                     ProcessResult {
                                         rgba_image,
                                         active_provider: provider.clone(),
@@ -289,11 +291,12 @@ pub fn run_worker() -> ! {
                             if let Some(ref img) = chain_img {
                                 // invariant: line_mode == SubjectOutline → needs_edge → edge_eng loaded.
                                 let eng_ref = edge_eng.as_ref().unwrap();
-                                eng_ref.infer_tensor(img, edge.edge_scale).map(|(tensor, h, w)| {
+                                eng_ref.infer_all_tensors(img).map(|res| {
+                                    let active = &res.tensors[edge.edge_scale as usize];
                                     let rgba_image = prunr_core::finalize_edges(
-                                        &tensor, h, w, img, &edge,
+                                        active, res.height, res.width, img, &edge,
                                     );
-                                    edge_tensor_for_cache = Some((tensor, h, w));
+                                    edge_tensor_for_cache = Some(res);
                                     ProcessResult {
                                         rgba_image,
                                         active_provider: provider.clone(),
@@ -312,11 +315,12 @@ pub fn run_worker() -> ! {
                                     let img = image::DynamicImage::ImageRgba8(pr.rgba_image);
                                     // invariant: line_mode == SubjectOutline → needs_edge → edge_eng loaded.
                                     let eng_ref = edge_eng.as_ref().unwrap();
-                                    eng_ref.infer_tensor(&img, edge.edge_scale).map(|(tensor, h, w)| {
+                                    eng_ref.infer_all_tensors(&img).map(|res| {
+                                        let active = &res.tensors[edge.edge_scale as usize];
                                         let rgba_image = prunr_core::finalize_edges(
-                                            &tensor, h, w, &img, &edge,
+                                            active, res.height, res.width, &img, &edge,
                                         );
-                                        edge_tensor_for_cache = Some((tensor, h, w));
+                                        edge_tensor_for_cache = Some(res);
                                         ProcessResult {
                                             rgba_image,
                                             active_provider: pr.active_provider,
@@ -442,12 +446,17 @@ pub fn run_worker() -> ! {
                                 (None, None, None)
                             };
 
-                            // Write DexiNed edge tensor cache similarly (for Tier 2 edge reruns).
-                            let (ecp, ech, ecw) = if let Some((ref edata, eh, ew)) = edge_tensor_for_cache {
+                            // Write DexiNed multi-scale cache (4 tensors concatenated
+                            // into a single temp file; parent splits by EDGE_SCALE_COUNT).
+                            let (ecp, ech, ecw) = if let Some(ref res) = edge_tensor_for_cache {
                                 let ep = ipc.join(format!("edge_{item_id}.raw"));
-                                let ebytes = prunr_app::subprocess::ipc::f32s_to_le_bytes(edata);
+                                let per_tensor_floats = (res.height as usize) * (res.width as usize);
+                                let mut ebytes = Vec::with_capacity(per_tensor_floats * prunr_core::EDGE_SCALE_COUNT * 4);
+                                for t in &res.tensors {
+                                    ebytes.extend_from_slice(&prunr_app::subprocess::ipc::f32s_to_le_bytes(t));
+                                }
                                 match std::fs::write(&ep, &ebytes) {
-                                    Ok(()) => (Some(ep), Some(eh), Some(ew)),
+                                    Ok(()) => (Some(ep), Some(res.height), Some(res.width)),
                                     Err(_) => (None, None, None),
                                 }
                             } else {

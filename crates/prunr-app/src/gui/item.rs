@@ -184,11 +184,19 @@ pub(crate) struct BatchItem {
     pub(crate) applied_recipe: Option<prunr_core::ProcessingRecipe>,
     /// Compressed cached tensor from Tier 1 inference (for Tier 2 mask reruns).
     pub(crate) cached_tensor: Option<super::worker::CompressedTensor>,
-    /// Compressed cached DexiNed output (for Tier 2 edge reruns on line_strength tweaks).
-    pub(crate) cached_edge_tensor: Option<super::worker::CompressedTensor>,
+    /// Compressed cached DexiNed output — all 4 scales (Fine/Balanced/Bold/
+    /// Fused) produced by one inference pass. Scale switching is a tensor
+    /// lookup + decompress, never a re-inference.
+    pub(crate) cached_edge_tensors: Option<super::worker::CompressedEdgeTensors>,
+    /// Hot-cache for the currently-previewed scale. Decompressed once per
+    /// scale change, reused across every live-preview dispatch of that scale
+    /// during a drag. The `EdgeScale` discriminator invalidates the cache
+    /// when the user flips the dropdown; `invalidate_edge_cache` clears it
+    /// whenever the compressed cache is rebuilt.
+    pub(crate) volatile_edge_tensor: Option<(prunr_core::EdgeScale, Arc<Vec<f32>>)>,
     /// Post-resize, pre-dilation edge mask for the line_strength that produced
     /// it. Lets `edge_thickness` / `solid_line_color` tweaks skip the expensive
-    /// tensor→mask resize. Invalidated alongside `cached_edge_tensor`.
+    /// tensor→mask resize. Invalidated alongside the compressed edge cache.
     pub(crate) cached_edge_mask: Option<(Arc<image::GrayImage>, u32 /* line_strength bits */)>,
     /// Which preset was last APPLIED to this image (via the dropdown's row
     /// click or via Reset All). The preset button compares current `settings`
@@ -206,10 +214,13 @@ pub(crate) struct BatchItem {
 }
 
 impl BatchItem {
-    /// Clear the edge tensor + derived mask cache together — the mask is
-    /// always built from the tensor, so any tensor change invalidates both.
+    /// Clear every edge cache tier together — compressed multi-scale set,
+    /// the hot decompressed tensor, and the derived pre-dilation mask. The
+    /// mask is always built from the tensor, so any tensor change invalidates
+    /// all of them.
     pub(crate) fn invalidate_edge_cache(&mut self) {
-        self.cached_edge_tensor = None;
+        self.cached_edge_tensors = None;
+        self.volatile_edge_tensor = None;
         self.cached_edge_mask = None;
     }
 
@@ -239,7 +250,7 @@ impl BatchItem {
         &mut self,
         result: Result<prunr_core::ProcessResult, String>,
         tensor_cache: Option<super::worker::TensorCache>,
-        edge_cache: Option<super::worker::TensorCache>,
+        edge_cache: Option<super::worker::EdgeTensorCache>,
         recipe_snapshot: prunr_core::ProcessingRecipe,
         _is_selected: bool,
     ) -> Option<String> {
@@ -249,12 +260,14 @@ impl BatchItem {
                 self.result_rgba = Some(Arc::new(pr.rgba_image));
                 self.status = BatchStatus::Done;
                 self.applied_recipe = Some(recipe_snapshot);
-                // Tensor caches are already zstd-compressed on the bridge
-                // thread; storing is a zero-cost move.
+                // Tensor caches are compressed on the bridge thread; storing
+                // is a zero-cost move. Fresh edge tensors invalidate the hot
+                // decompressed cache on top.
                 self.cached_tensor = tensor_cache
                     .and_then(super::worker::CompressedTensor::from_raw);
-                self.cached_edge_tensor = edge_cache
-                    .and_then(super::worker::CompressedTensor::from_raw);
+                self.cached_edge_tensors = edge_cache
+                    .and_then(super::worker::CompressedEdgeTensors::from_raw);
+                self.volatile_edge_tensor = None;
                 self.cached_edge_mask = None;
                 // Note: we used to null `source_rgba` / `source_texture` on
                 // non-selected items here to save ~48 MB per 4K image, but
@@ -288,7 +301,7 @@ impl BatchItem {
     /// and any future telemetry / HUD readout.
     pub(crate) fn cache_size(&self) -> usize {
         let seg = self.cached_tensor.as_ref().map(|ct| ct.compressed_size()).unwrap_or(0);
-        let edge = self.cached_edge_tensor.as_ref().map(|ct| ct.compressed_size()).unwrap_or(0);
+        let edge = self.cached_edge_tensors.as_ref().map(|ct| ct.compressed_size()).unwrap_or(0);
         seg + edge
     }
 
@@ -322,7 +335,8 @@ impl BatchItem {
             settings,
             applied_recipe: None,
             cached_tensor: None,
-            cached_edge_tensor: None,
+            cached_edge_tensors: None,
+            volatile_edge_tensor: None,
             cached_edge_mask: None,
             applied_preset,
             preset_undo_stack: VecDeque::new(),
@@ -360,11 +374,11 @@ mod tests {
         let mut item = fixture_item(1);
         // Simulate populated edge caches (minimal placeholder structs).
         item.cached_edge_mask = Some((Arc::new(image::GrayImage::new(1, 1)), 0));
-        // (cached_edge_tensor would need a real CompressedTensor — leave None
+        // (cached_edge_tensors would need a real CompressedEdgeTensors — leave None
         // here; the method should still run cleanly and clear cached_edge_mask.)
         assert!(item.cached_edge_mask.is_some());
         item.invalidate_edge_cache();
-        assert!(item.cached_edge_tensor.is_none());
+        assert!(item.cached_edge_tensors.is_none());
         assert!(item.cached_edge_mask.is_none());
     }
 
@@ -497,7 +511,7 @@ mod tests {
         assert!(provider.is_none());
         assert!(matches!(item.status, BatchStatus::Error(ref e) if e == "boom"));
         assert!(item.cached_tensor.is_none());
-        assert!(item.cached_edge_tensor.is_none());
+        assert!(item.cached_edge_tensors.is_none());
         assert!(item.applied_recipe.is_none(),
             "applied_recipe must be cleared so resolve_tier picks FullPipeline on retry");
     }
