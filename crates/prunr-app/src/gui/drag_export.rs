@@ -16,10 +16,11 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use image::DynamicImage;
-use prunr_core::{BgEffect, FillStyle, MaskSettings, ModelKind};
+use prunr_core::{BgEffect, FillStyle, MaskSettings};
 
 use super::item::BatchItem;
 use super::settings::LineMode;
+use super::worker::SegBundle;
 
 /// Subdirectory name under temp_dir for prunr drag files.
 const DRAG_SUBDIR: &str = "prunr-drag";
@@ -118,24 +119,6 @@ fn make_layer_filename(source_filename: &str, kind: LayerKind) -> String {
     format!("{}-{}.png", source_stem(source_filename), kind.suffix())
 }
 
-/// Decompressed seg tensor + the metadata needed to reshape / postprocess it.
-/// Built once at the top of `prepare_for_drag` and shared by the Subject and
-/// Mask layers; Lines doesn't need it.
-struct SegCache {
-    tensor: Vec<f32>,
-    height: u32,
-    width: u32,
-    model: ModelKind,
-}
-
-impl SegCache {
-    fn from_item(item: &BatchItem) -> Option<Self> {
-        let ct = item.cached_tensor.as_ref()?;
-        let tensor = ct.decompress()?;
-        Some(Self { tensor, height: ct.height, width: ct.width, model: ct.model })
-    }
-}
-
 fn decode_source(item: &BatchItem) -> Option<DynamicImage> {
     let bytes = item.source.load_bytes()
         .map_err(|err| tracing::warn!(item_id = item.id, %err, "split drag-out: source read"))
@@ -149,7 +132,7 @@ fn render_layer(
     item: &BatchItem,
     kind: LayerKind,
     original: &DynamicImage,
-    seg: Option<&SegCache>,
+    seg: Option<&SegBundle>,
 ) -> Option<Vec<u8>> {
     let item_id = item.id;
     match kind {
@@ -164,7 +147,7 @@ fn render_layer(
                 ..item.settings.mask_settings()
             };
             let rgba = prunr_core::postprocess_from_flat(
-                &seg.tensor, seg.height as usize, seg.width as usize,
+                &seg.data, seg.height as usize, seg.width as usize,
                 original, &mask, seg.model,
             )
                 .map_err(|err| tracing::warn!(item_id, %err, "subject layer postprocess"))
@@ -186,7 +169,7 @@ fn render_layer(
         LayerKind::Mask => {
             let seg = seg?;
             let gray = prunr_core::tensor_to_mask_from_flat(
-                &seg.tensor, seg.height as usize, seg.width as usize,
+                &seg.data, seg.height as usize, seg.width as usize,
                 original, &item.settings.mask_settings(), seg.model,
             )
                 .map_err(|err| tracing::warn!(item_id, %err, "mask layer reshape"))
@@ -202,7 +185,7 @@ fn write_layer(
     item: &BatchItem,
     kind: LayerKind,
     original: &DynamicImage,
-    seg: Option<&SegCache>,
+    seg: Option<&SegBundle>,
 ) -> std::io::Result<Option<PathBuf>> {
     let Some(png_bytes) = render_layer(item, kind, original, seg) else { return Ok(None) };
     let path = temp_dir().join(make_layer_filename(&item.filename, kind));
@@ -248,7 +231,7 @@ pub(crate) fn prepare_for_drag(item: &BatchItem, split: bool) -> std::io::Result
     let Some(original) = decode_source(item) else {
         return Ok(vec![prepare(item)?]);
     };
-    let seg = SegCache::from_item(item);
+    let seg = item.cached_tensor.as_ref().and_then(|ct| ct.bundle());
 
     let paths: Vec<PathBuf> = LayerKind::ALL.iter()
         .copied()
