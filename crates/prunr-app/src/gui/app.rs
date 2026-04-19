@@ -2299,7 +2299,8 @@ impl PrunrApp {
         // before firing the run.
         let current_line_mode = self.batch.items[idx].settings.line_mode;
         let auto_trigger = toolbar_change.preset_applied
-            || (toolbar_change.line_mode_changed && current_line_mode == prunr_core::LineMode::Off);
+            || (toolbar_change.line_mode_changed && current_line_mode == prunr_core::LineMode::Off)
+            || toolbar_change.input_transform_changed;
         if auto_trigger && self.batch.items[idx].status == BatchStatus::Done {
             let target_id = self.batch.items[idx].id;
             // Line-mode → Off with a cached seg tensor is Tier 2: no
