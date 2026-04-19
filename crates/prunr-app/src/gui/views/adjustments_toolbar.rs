@@ -112,17 +112,26 @@ pub fn render(
         ui.add_enabled_ui(mask_active, |ui| {
             aggregate(chip::chip_f32(
                 ui, "gamma", "γ", "Gamma",
-                "How hard the mask cuts. >1 removes more aggressively, <1 is gentler on fine edges.",
+                "Stage 1 of 5. How hard the mask cuts. >1 removes more aggressively, <1 is gentler on fine edges. Feeds every stage below.\n\nPress F3 for the full pipeline.",
                 &mut item_settings.gamma,
                 0.1..=10.0, defaults.template.gamma,
                 true, // log scale — matches perceptual symmetry around 1.0
                 |v| format!("{v:.2}"),
             ), Tier::Mask, &mut change);
 
+            aggregate(chip::chip_option_f32(
+                ui, "threshold",
+                &ICON_BOLT.codepoint.to_string(), "Hard threshold",
+                "Stage 2 of 5. Snaps the mask to fully opaque or fully transparent at this cutoff. Soft = smooth alpha, on = crisp silhouette. When on, downstream stages lose the gradient — Refine can only clean up stairsteps.\n\nPress F3 for the full pipeline.",
+                &mut item_settings.threshold,
+                0.001..=0.999, defaults.threshold_value, "Soft",
+                |v| format!("{:.1}%", v * 100.0),
+            ), Tier::Mask, &mut change);
+
             aggregate(chip::chip_f32(
                 ui, "edge_shift",
                 &ICON_SWAP_HORIZ.codepoint.to_string(), "Edge shift",
-                "Shrink or grow the mask outline. Positive = erode (trim fringe pixels), negative = dilate (keep more edge detail).",
+                "Stage 3 of 5. Shrink or grow the mask outline. Positive = erode (trim fringe pixels), negative = dilate (keep more edge detail). Refine Edges then snaps the shifted boundary to image color.\n\nPress F3 for the full pipeline.",
                 &mut item_settings.edge_shift,
                 -20.0..=20.0, defaults.template.edge_shift,
                 false,
@@ -133,20 +142,10 @@ pub fn render(
                 },
             ), Tier::Mask, &mut change);
 
-            aggregate(chip::chip_f32(
-                ui, "feather",
-                &ICON_BLUR_LINEAR.codepoint.to_string(), "Feather",
-                "Soften mask edges with a Gaussian blur. Color-agnostic — use for general smoothing or when refine_edges isn't picking up the right detail.",
-                &mut item_settings.feather,
-                0.0..=5.0, defaults.template.feather,
-                false,
-                |v| if v < 0.1 { "off".into() } else { format!("σ {v:.1}") },
-            ), Tier::Mask, &mut change);
-
             aggregate(chip::chip_bool_with_extras(
                 ui, "refine_edges",
                 &ICON_AUTO_FIX_HIGH.codepoint.to_string(), "Refine edges",
-                "Use the original image's colors to sharpen the mask around fine detail like hair or leaves. Runs a guided filter — slower but higher quality.",
+                "Stage 4 of 5. Uses the original image's colors to sharpen the mask around fine detail like hair or leaves. Sees whatever threshold + edge shift produced, so tighter upstream input gives a tighter result. Slower but higher quality.\n\nPress F3 for the full pipeline.",
                 &mut item_settings.refine_edges,
                 |ui| {
                     let mut inner = chip::ChipChange::default();
@@ -170,26 +169,28 @@ pub fn render(
                 },
             ), Tier::Mask, &mut change);
 
-            aggregate(chip::chip_option_f32(
-                ui, "threshold",
-                &ICON_BOLT.codepoint.to_string(), "Hard threshold",
-                "Snap the mask to fully opaque or fully transparent at this cutoff. Soft = smooth alpha, on = crisp silhouette.",
-                &mut item_settings.threshold,
-                0.001..=0.999, defaults.threshold_value, "Soft",
-                |v| format!("{:.1}%", v * 100.0),
+            aggregate(chip::chip_f32(
+                ui, "feather",
+                &ICON_BLUR_LINEAR.codepoint.to_string(), "Feather",
+                "Stage 5 of 5. Final softening pass — Gaussian blur over the finished mask. Runs last so it smooths whatever Refine Edges sharpened; reach for Feather when Refine can't pick up the right detail.\n\nPress F3 for the full pipeline.",
+                &mut item_settings.feather,
+                0.0..=5.0, defaults.template.feather,
+                false,
+                |v| if v < 0.1 { "off".into() } else { format!("σ {v:.1}") },
             ), Tier::Mask, &mut change);
         });
 
         // Divider between mask and composite groups.
         ui.separator();
 
-        // Background color — a composite concern, always visible (works in all modes).
+        // Background — composite concern, always visible (works in all modes).
         aggregate(chip::chip_option_rgba(
             ui, "bg",
-            &ICON_PALETTE.codepoint.to_string(), "Background color",
+            &ICON_PALETTE.codepoint.to_string(), "Background",
             "Fill transparent areas with a solid color. Applied at display time, does not change the saved PNG's transparency.",
             &mut item_settings.bg,
             defaults.bg_value,
+            "Transparent",
         ), Tier::Bg, &mut change);
 
         // Right-aligned cluster: reset, preset. Right-to-left layout fills

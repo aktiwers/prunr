@@ -33,6 +33,7 @@ pub fn render(ctx: &egui::Context) -> bool {
                         shortcut_row(ui, "Escape", "Cancel / Close");
                         shortcut_row(ui, "F1", "Keyboard shortcuts");
                         shortcut_row(ui, "F2", "CLI reference");
+                        shortcut_row(ui, "F3", "Mask pipeline diagram");
                         shortcut_row(ui, "B", "Toggle before/after");
                         shortcut_row(ui, "← / → or A / D", "Previous / Next image");
                         shortcut_row(ui, &format!("{modifier}+0"), "Fit to window");
