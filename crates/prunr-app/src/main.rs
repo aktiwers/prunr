@@ -18,42 +18,48 @@ fn attach_parent_console() {
 }
 
 fn main() {
-    // Parse CLI before tracing init so --debug can raise the filter level
-    // and propagate to the subprocess worker via env.
     let cli = Cli::parse();
 
-    // `--debug` propagates to the subprocess worker via RUST_LOG so its
-    // tracing output matches the parent's. Set BEFORE init_tracing reads
-    // the env (worker subprocess inherits env from parent).
-    if cli.debug && std::env::var_os("RUST_LOG").is_none() {
-        // SAFETY: single-threaded at this point in main, no other threads
-        // reading env yet. The subprocess spawn inherits this env.
-        unsafe { std::env::set_var("RUST_LOG", "prunr=debug"); }
+    // `--debug` propagates to subprocess workers via two env vars, set BEFORE
+    // `init_tracing` reads them. Workers inherit the parent env at spawn.
+    //   RUST_LOG=prunr=debug  → filter level
+    //   PRUNR_DEBUG_LOG=<path> → also tee tracing to a file (bulletproof on
+    //                            Windows where AttachConsole + GUI-subsystem
+    //                            subprocess stderr is unreliable).
+    if cli.debug {
+        // SAFETY: single-threaded at this point in main.
+        if std::env::var_os("RUST_LOG").is_none() {
+            unsafe { std::env::set_var("RUST_LOG", "prunr=debug"); }
+        }
+        if std::env::var_os("PRUNR_DEBUG_LOG").is_none() {
+            let log_path = std::env::temp_dir().join("prunr-debug.log");
+            unsafe { std::env::set_var("PRUNR_DEBUG_LOG", &log_path); }
+        }
+    }
+
+    // Attach the parent console BEFORE init_tracing so the stderr writer
+    // captures a valid handle. The previous order inverted these, causing
+    // parent stderr to work by luck and worker stderr (via Stdio::inherit)
+    // to silently drop on Windows windows_subsystem=windows builds.
+    #[cfg(windows)]
+    if cli.debug || !cli.inputs.is_empty() {
+        attach_parent_console();
     }
 
     init_tracing();
 
-    // Internal subprocess worker mode (launched by GUI batch processing).
     if cli.worker {
         worker_process::run_worker();
     }
 
     if !cli.inputs.is_empty() {
-        #[cfg(windows)]
-        attach_parent_console();
         let exit_code = cli::run_remove(&cli);
         std::process::exit(exit_code);
     }
 
-    // No args → launch GUI. With --debug on Windows, attach the parent
-    // console so tracing stderr is visible in the launching terminal
-    // (GUI subsystem has no console by default).
-    #[cfg(windows)]
     if cli.debug {
-        attach_parent_console();
-    }
-    if cli.debug {
-        tracing::info!("debug mode active — GUI + subprocess tracing at prunr=debug");
+        let log = std::env::var("PRUNR_DEBUG_LOG").unwrap_or_default();
+        tracing::info!(log_file = %log, "debug mode — tracing at prunr=debug, tee to file");
     }
     if let Err(e) = gui::run() {
         tracing::error!(%e, "GUI launch failed");
@@ -63,16 +69,39 @@ fn main() {
 
 /// Initialize the global tracing subscriber.
 ///
-/// Writes to stderr so the subprocess worker's stdout stays clean for
-/// bincode IPC framing. Default filter is `prunr=info`; override via
-/// `RUST_LOG=prunr=debug` (or `--debug` which sets that env var).
+/// Writes to stderr (for CLI use and Linux/macOS debug) and, when
+/// `PRUNR_DEBUG_LOG` names a file, tees to that file too. The file route is
+/// the reliable path on Windows: `windows_subsystem = "windows"` subprocess
+/// stderr doesn't cleanly reach an AttachConsole'd parent, so we sidestep it.
 fn init_tracing() {
-    use tracing_subscriber::{fmt, EnvFilter};
+    use std::sync::Mutex;
+    use tracing_subscriber::{fmt, prelude::*, EnvFilter, Registry};
+
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("prunr=info"));
-    fmt()
-        .with_env_filter(filter)
+
+    let stderr_layer = fmt::layer()
         .with_target(false)
-        .with_writer(std::io::stderr)
+        .with_writer(std::io::stderr);
+
+    let file_layer = std::env::var_os("PRUNR_DEBUG_LOG")
+        .and_then(|p| {
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&p)
+                .ok()
+        })
+        .map(|f| {
+            fmt::layer()
+                .with_target(false)
+                .with_ansi(false)
+                .with_writer(Mutex::new(f))
+        });
+
+    Registry::default()
+        .with(filter)
+        .with(stderr_layer)
+        .with(file_layer)
         .init();
 }

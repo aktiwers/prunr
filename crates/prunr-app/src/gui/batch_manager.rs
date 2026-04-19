@@ -165,6 +165,16 @@ impl BatchManager {
         c
     }
 
+    /// First error message across errored items, or `None` if none errored.
+    /// Used for batch-failure toasts so the user sees the *reason* instead of
+    /// just the count.
+    pub(crate) fn first_error_message(&self) -> Option<&str> {
+        self.items.iter().find_map(|item| match &item.status {
+            BatchStatus::Error(msg) => Some(msg.as_str()),
+            _ => None,
+        })
+    }
+
     /// Pre-decode source bytes to RgbaImage on a background thread; the
     /// result lands on `bg_io.decode_rx` for the main thread to attach.
     pub(crate) fn request_decode_bytes(&self, item_id: u64, bytes: Arc<Vec<u8>>) {
@@ -394,6 +404,28 @@ mod tests {
         let c = bm.status_counts();
         assert_eq!(c, StatusCounts::default());
         assert_eq!(c.batch_total(), 0);
+    }
+
+    #[test]
+    fn first_error_message_returns_first_errored_item() {
+        let mut bm = fixture();
+        let mut push = |id, status| {
+            let mut item = item_with_cache(id, 0);
+            item.status = status;
+            bm.items.push(item);
+        };
+        push(1, BatchStatus::Done);
+        push(2, BatchStatus::Error("first problem".into()));
+        push(3, BatchStatus::Error("second problem".into()));
+
+        assert_eq!(bm.first_error_message(), Some("first problem"));
+    }
+
+    #[test]
+    fn first_error_message_none_when_no_errors() {
+        let mut bm = fixture();
+        bm.items.push(item_with_cache(1, 0));
+        assert_eq!(bm.first_error_message(), None);
     }
 
     // ── enforce_tensor_budget / evict_all_tensors ───────────────────────
