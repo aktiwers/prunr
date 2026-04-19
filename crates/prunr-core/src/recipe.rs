@@ -5,7 +5,7 @@
 //! tier needs to re-run (or if processing can be skipped entirely).
 
 use serde::{Serialize, Deserialize};
-use crate::types::{ModelKind, EdgeScale, ComposeMode, LineStyle, FillStyle, BgEffect};
+use crate::types::{ModelKind, EdgeScale, ComposeMode, LineStyle, FillStyle, BgEffect, InputTransform};
 
 /// Tier 1: settings that require AI model inference.
 ///
@@ -21,6 +21,9 @@ pub struct InferenceRecipe {
     pub uses_segmentation: bool,
     /// Whether edge detection model runs (true when line_mode is not Off).
     pub uses_edge_detection: bool,
+    /// Pre-inference image transform. Changing this invalidates the edge
+    /// tensor cache because DexiNed sees different input.
+    pub input_transform: InputTransform,
 }
 
 /// Tier 2 (edge variant): settings re-applied to the cached DexiNed tensor.
@@ -221,6 +224,7 @@ mod tests {
                 model,
                 uses_segmentation: true,
                 uses_edge_detection: false,
+                input_transform: InputTransform::None,
             },
             edge: EdgeRecipe {
                 line_strength_bits: 0.5f32.to_bits(),
