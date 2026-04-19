@@ -155,6 +155,11 @@ pub struct EdgeSettings {
     pub edge_thickness: u32,
     /// Which DexiNed output scale to read. Default `Fused` = current behaviour.
     pub edge_scale: EdgeScale,
+    /// How the subject mask and edge mask combine in `LineMode::SubjectOutline`.
+    /// Ignored in Off / EdgesOnly. Pure compose-time setting — changing it
+    /// doesn't re-run inference.
+    #[serde(default)]
+    pub compose_mode: ComposeMode,
 }
 
 impl Default for EdgeSettings {
@@ -164,8 +169,59 @@ impl Default for EdgeSettings {
             solid_line_color: None,
             edge_thickness: 0,
             edge_scale: EdgeScale::Fused,
+            compose_mode: ComposeMode::default(),
         }
     }
+}
+
+/// How to combine the subject mask and edge mask when `LineMode::SubjectOutline`.
+/// Each variant is a compose-time formula over the already-cached tensors, so
+/// switching modes is instant in live preview — no re-inference.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash,
+    serde::Serialize, serde::Deserialize, Default,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ComposeMode {
+    /// Lines only, confined to the subject silhouette (`alpha = subject × edge`).
+    /// Mask tweaks visibly adjust where lines fade. Transparent background.
+    #[default]
+    LinesOnly,
+    /// Filled subject with lines drawn on top (`alpha = max(subject, edge)`).
+    /// Edges outside the subject boundary show through; subject stays solid.
+    SubjectFilled,
+    /// Filled subject with lines CUT through it (`alpha = subject − edge`).
+    /// Lines appear as transparent grooves — "engraved" look.
+    Engraving,
+    /// Faded subject with strong lines (`alpha ≈ 0.3 · subject + 0.8 · edge`).
+    /// Ghostly see-through body with a sharp outline.
+    Ghost,
+    /// Lines in the background, subject stays transparent
+    /// (`alpha = (255 − subject) × edge / 255`). Negative-space outlines.
+    InverseMask,
+}
+
+impl std::fmt::Display for ComposeMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            ComposeMode::LinesOnly => "Lines only",
+            ComposeMode::SubjectFilled => "Subject filled",
+            ComposeMode::Engraving => "Engraving",
+            ComposeMode::Ghost => "Ghost",
+            ComposeMode::InverseMask => "Inverse mask",
+        };
+        f.write_str(s)
+    }
+}
+
+impl ComposeMode {
+    pub const ALL: &'static [Self] = &[
+        Self::LinesOnly,
+        Self::SubjectFilled,
+        Self::Engraving,
+        Self::Ghost,
+        Self::InverseMask,
+    ];
 }
 
 /// Raw inference result (Tier 1 output) — the model tensor before postprocessing.
