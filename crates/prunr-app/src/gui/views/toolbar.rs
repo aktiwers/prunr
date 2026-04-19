@@ -110,6 +110,41 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
             }
 
             let is_batch_processing = app.batch.status_counts().processing > 0;
+            let selected_processing = app.batch.items.iter()
+                .any(|i| i.selected && i.status == BatchStatus::Processing);
+
+            // Cancel — added FIRST in right-to-left so visually it sits between
+            // Process (added last, leftmost) and Save (added before this block,
+            // rightmost). Layout left-to-right reads [Process] [Cancel] [Save].
+            // Label flips to "Cancel Selected" when the user's checked items
+            // are the ones mid-flight — makes the intent explicit even though
+            // the action (drop the cancel flag) is the same today. Partial
+            // cancel (stop only the selected, let others continue) is a
+            // backend change for later.
+            if is_batch_processing {
+                let cancel_label = if selected_processing { "Cancel Selected" } else { "Cancel All" };
+                let cancel_btn = egui::Button::new(
+                    RichText::new(format!("{}  {cancel_label}", ICON_CANCEL.codepoint)).color(Color32::WHITE),
+                )
+                .fill(theme::DESTRUCTIVE)
+                .corner_radius(theme::BUTTON_ROUNDING)
+                .min_size(egui::vec2(0.0, theme::BTN_HEIGHT));
+                let tip = if selected_processing {
+                    "Cancel the current batch (Escape)"
+                } else {
+                    "Cancel all processing (Escape)"
+                };
+                if ui.add(cancel_btn).on_hover_text(tip).clicked() {
+                    app.handle_cancel();
+                    for item in &mut app.batch.items {
+                        if item.status == BatchStatus::Processing {
+                            item.status = BatchStatus::Pending;
+                        }
+                    }
+                    app.state = AppState::Loaded;
+                    app.status.text = "Cancelled".to_string();
+                }
+            }
 
             // Process button — always visible. Clicking while a batch is
             // already running enqueues the new work on the worker bridge;
@@ -170,28 +205,6 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
 
                 if ui.add_enabled(has_processable, btn).on_hover_text(tooltip).clicked() {
                     app.handle_remove_bg();
-                }
-            }
-
-            // Cancel All — separate button that only appears while a batch
-            // is running. Right-to-left layout places it to the LEFT of the
-            // Process button, so Process keeps its muscle-memory position.
-            if is_batch_processing {
-                let cancel_btn = egui::Button::new(
-                    RichText::new(format!("{}  Cancel All", ICON_CANCEL.codepoint)).color(Color32::WHITE),
-                )
-                .fill(theme::DESTRUCTIVE)
-                .corner_radius(theme::BUTTON_ROUNDING)
-                .min_size(egui::vec2(0.0, theme::BTN_HEIGHT));
-                if ui.add(cancel_btn).on_hover_text("Cancel all processing (Escape)").clicked() {
-                    app.handle_cancel();
-                    for item in &mut app.batch.items {
-                        if item.status == BatchStatus::Processing {
-                            item.status = BatchStatus::Pending;
-                        }
-                    }
-                    app.state = AppState::Loaded;
-                    app.status.text = "Cancelled".to_string();
                 }
             }
 
