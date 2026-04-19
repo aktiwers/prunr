@@ -258,28 +258,31 @@ pub fn render(
             aggregate(chip::chip_f32(
                 ui, "line_strength",
                 &ICON_TUNE.codepoint.to_string(), "Line strength",
-                "How much edge detail to capture. Lower = bold outlines only, higher = fine texture and subtle edges.",
+                "Stage 2 of 4 in the lines pipeline. Threshold on DexiNed's raw edge tensor. Lower = bold outlines only; higher = fine texture and subtle edges. Feeds edge thickness + solid color.",
                 &mut item_settings.line_strength,
                 0.05..=1.0, defaults.template.line_strength,
                 false,
                 |v| format!("{v:.2}"),
             ), Tier::Edge, &mut change);
 
-            aggregate(chip::chip_option_rgb(
-                ui, "solid_line_color",
-                &ICON_BRUSH.codepoint.to_string(), "Solid line color",
-                "Paint every edge the same color instead of keeping the original RGB underneath.",
-                &mut item_settings.solid_line_color,
-                defaults.solid_line_color_value,
-            ), Tier::Edge, &mut change);
-
             aggregate(chip::chip_u32(
                 ui, "edge_thickness",
                 &ICON_LINE_WEIGHT.codepoint.to_string(), "Edge thickness",
-                "Thicken edges by dilating the mask. 0 = native DexiNed width, higher = bolder outlines that stay readable at display resolution.",
+                "Stage 3 of 4 in the lines pipeline. Dilates the thresholded edge mask by N pixels. 0 = native DexiNed width; higher = bolder outlines that stay readable at display resolution. Runs before solid color, so bolder edges still inherit the paint choice.",
                 &mut item_settings.edge_thickness,
                 0..=10, defaults.template.edge_thickness,
                 |v| if v == 0 { "off".into() } else { format!("+{v}px") },
+            ), Tier::Edge, &mut change);
+
+            // Divider between threshold+shape knobs and the paint-time composite choice.
+            ui.separator();
+
+            aggregate(chip::chip_option_rgb(
+                ui, "solid_line_color",
+                &ICON_BRUSH.codepoint.to_string(), "Solid line color",
+                "Stage 4 of 4 in the lines pipeline. Paint every visible edge the same color, or leave unset to keep the original RGB beneath the mask. Runs after edge thickness.",
+                &mut item_settings.solid_line_color,
+                defaults.solid_line_color_value,
             ), Tier::Edge, &mut change);
         }
     });
