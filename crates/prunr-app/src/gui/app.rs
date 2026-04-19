@@ -14,7 +14,7 @@ use super::settings::Settings;
 use super::state::AppState;
 use super::theme;
 use super::worker::{WorkerMessage, WorkerResult, spawn_worker};
-use super::views::{adjustments_toolbar, canvas, cli_help, pipeline_flow, settings, shortcuts, sidebar, statusbar, toolbar};
+use super::views::{adjustments_toolbar, animation_sweep as animation_sweep_view, canvas, cli_help, pipeline_flow, settings, shortcuts, sidebar, statusbar, toolbar};
 
 pub struct PrunrApp {
     // State
@@ -83,6 +83,11 @@ pub struct PrunrApp {
     // ── Drag-out (OS drag to external apps) ────────────────────────────────
     pub(crate) drag_export: super::drag_export_state::DragExportState,
 
+    // ── Animation sweep export ─────────────────────────────────────────────
+    pub(crate) show_animation_sweep: bool,
+    pub(crate) animation_sweep_ui: super::animation_sweep::SweepUiState,
+    pub(crate) sweep_events_rx: Option<mpsc::Receiver<super::animation_sweep::SweepEvent>>,
+    pub(crate) sweep_progress: Option<(usize, usize)>,
 }
 
 impl PrunrApp {
@@ -197,6 +202,10 @@ impl PrunrApp {
                     .with_anchor(egui_notify::Anchor::BottomLeft)
                     .with_margin(egui::vec2(theme::SPACE_SM, theme::STATUS_BAR_HEIGHT + theme::SPACE_SM)),
             drag_export: super::drag_export_state::DragExportState::new(),
+            show_animation_sweep: false,
+            animation_sweep_ui: super::animation_sweep::SweepUiState::default(),
+            sweep_events_rx: None,
+            sweep_progress: None,
         }
     }
 
@@ -359,7 +368,11 @@ impl PrunrApp {
     }
 
     pub(crate) fn any_modal_open(&self) -> bool {
-        self.show_settings || self.show_shortcuts || self.show_cli_help || self.show_pipeline_flow
+        self.show_settings
+            || self.show_shortcuts
+            || self.show_cli_help
+            || self.show_pipeline_flow
+            || self.show_animation_sweep
     }
 
     /// Undo background removal on selected items (or current item if none selected).
@@ -952,6 +965,45 @@ impl PrunrApp {
                 );
             }
         }
+    }
+
+    // Gated on cached tensors — sweep replays Tier 2/3 work, never re-infers.
+    pub fn open_animation_sweep(&mut self) {
+        let Some(item) = self.batch.selected_item() else {
+            self.toasts.error("No image selected");
+            return;
+        };
+        if item.status != BatchStatus::Done {
+            self.toasts.error("Process the image first");
+            return;
+        }
+        if item.cached_tensor.is_none() && item.cached_edge_tensors.is_none() {
+            self.toasts.error("No cached tensors — reprocess the image");
+            return;
+        }
+        self.show_animation_sweep = true;
+    }
+
+    pub fn start_animation_sweep(&mut self) {
+        use super::animation_sweep::{self, SweepRequest};
+        let Some(item) = self.batch.selected_item() else {
+            self.toasts.error("No image selected");
+            return;
+        };
+        let (tx, rx) = mpsc::channel::<animation_sweep::SweepEvent>();
+        let req = match SweepRequest::from_item(item, &self.animation_sweep_ui, tx) {
+            Ok(req) => req,
+            Err(err) => {
+                self.toasts.error(err);
+                return;
+            }
+        };
+        let total = req.frames;
+        animation_sweep::spawn_sweep(req);
+        self.sweep_events_rx = Some(rx);
+        self.sweep_progress = Some((0, total));
+        self.toasts.info("Exporting animation…");
+        self.show_animation_sweep = false;
     }
 
     pub fn handle_copy(&mut self) {
@@ -1873,6 +1925,8 @@ impl PrunrApp {
             }
         }
 
+        self.drain_sweep_events(ctx);
+
         let id_floor = self.batch.next_id;
         let mut loaded_count = 0u32;
         let mut channel_drained = false;
@@ -2168,8 +2222,46 @@ impl PrunrApp {
         if self.show_settings {
             settings::render(ctx, self);
         }
+        if self.show_animation_sweep {
+            animation_sweep_view::render(ctx, self);
+        }
         // Toasts — rendered last as foreground overlay.
         self.toasts.show(ctx);
+    }
+
+    fn drain_sweep_events(&mut self, ctx: &egui::Context) {
+        use super::animation_sweep::SweepEvent;
+        let Some(rx) = self.sweep_events_rx.as_ref() else { return };
+        let mut any = false;
+        let mut should_close = false;
+        while let Ok(evt) = rx.try_recv() {
+            any = true;
+            match evt {
+                SweepEvent::Progress { done, total } => {
+                    self.sweep_progress = Some((done, total));
+                    self.status.set_temporary(&format!("Animation: {done}/{total}"));
+                }
+                SweepEvent::Finished { frames_written, dir } => {
+                    self.toasts.success(format!(
+                        "Wrote {frames_written} frames to {}", dir.display()
+                    ));
+                    should_close = true;
+                }
+                SweepEvent::Failed(err) => {
+                    self.toasts.error(format!("Animation export failed: {err}"));
+                    should_close = true;
+                }
+            }
+        }
+        if should_close {
+            self.sweep_events_rx = None;
+            self.sweep_progress = None;
+        }
+        // Idle egui sleeps — keep the progress UI alive while the thread is
+        // streaming events.
+        if any {
+            ctx.request_repaint();
+        }
     }
 }
 

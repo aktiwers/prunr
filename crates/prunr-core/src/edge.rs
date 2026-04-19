@@ -428,6 +428,46 @@ fn lerp_rgb(a: [u8; 3], b: [u8; 3], t: u16) -> [u8; 3] {
     ]
 }
 
+/// Compose subject outline: builds the edge mask(s) from a DexiNed result
+/// and calls `compose_edges_styled` (or `compose_edges_dual_styled` for
+/// `LineStyle::DualScale`) onto the supplied masked subject RGBA. Used by
+/// the subprocess worker and the animation-sweep path so they share the
+/// same line-styling logic.
+pub fn compose_subject_outline(
+    edge_res: &EdgeInferenceResult,
+    masked_rgba: &RgbaImage,
+    edge: &crate::EdgeSettings,
+) -> RgbaImage {
+    use crate::{EdgeScale, LineStyle};
+    let active = &edge_res.tensors[edge.edge_scale as usize];
+    let primary_mask = tensor_to_edge_mask(
+        active, edge_res.height, edge_res.width,
+        masked_rgba.width(), masked_rgba.height(),
+        edge.line_strength,
+    );
+    if let LineStyle::DualScale { fine_color, bold_color } = edge.line_style {
+        let bold = &edge_res.tensors[EdgeScale::Bold as usize];
+        let bold_mask = tensor_to_edge_mask(
+            bold, edge_res.height, edge_res.width,
+            masked_rgba.width(), masked_rgba.height(),
+            edge.line_strength,
+        );
+        compose_edges_dual_styled(
+            &primary_mask, &bold_mask, masked_rgba,
+            edge.compose_mode,
+            fine_color, bold_color,
+            edge.edge_thickness,
+        )
+    } else {
+        compose_edges_styled(
+            &primary_mask, masked_rgba,
+            edge.compose_mode,
+            edge.line_style,
+            edge.solid_line_color, edge.edge_thickness,
+        )
+    }
+}
+
 /// Tier 2 edge convenience: tensor → mask → RGBA in one call. Prefer the two
 /// split functions when you want to cache the mask between dispatches.
 pub fn finalize_edges(
