@@ -196,7 +196,7 @@ pub fn render(
         aggregate(chip::chip_option_rgba(
             ui, "bg",
             &ICON_PALETTE.codepoint.to_string(), "Background",
-            "Fill transparent areas with a solid color. Applied at display time, does not change the saved PNG's transparency.",
+            "Fill transparent areas with a solid color. Shown in the canvas preview AND baked into the exported PNG — leave as Transparent to keep the alpha channel in the saved file.",
             &mut item_settings.bg,
             defaults.bg_value,
             "Transparent",
