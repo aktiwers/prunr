@@ -2201,24 +2201,41 @@ impl PrunrApp {
         // leave the edge cache valid (line_strength tweaks can still
         // live-preview). Model swaps clear only the seg cache (edge tensor
         // is model-independent).
-        if toolbar_change.seg_cache_invalid || toolbar_change.edge_cache_invalid {
-            if toolbar_change.seg_cache_invalid {
-                self.batch.items[idx].cached_tensor = None;
-            }
-            if toolbar_change.edge_cache_invalid {
-                self.batch.items[idx].invalidate_edge_cache();
-            }
-            // A preset apply, or switching back to Off (the "just bg removal"
-            // case), leaves the Done item stale. Auto-reprocess so the user
-            // doesn't have to click Process. We don't auto-process on Off
-            // → Subject or Off → EdgesOnly; those are mode-enablement
-            // transitions where the user typically wants to tweak settings
-            // before firing the run.
-            let current_line_mode = self.batch.items[idx].settings.line_mode;
-            let auto_trigger = toolbar_change.preset_applied
-                || (toolbar_change.line_mode_changed && current_line_mode == prunr_core::LineMode::Off);
-            if auto_trigger && self.batch.items[idx].status == BatchStatus::Done {
-                let target_id = self.batch.items[idx].id;
+        if toolbar_change.seg_cache_invalid {
+            self.batch.items[idx].cached_tensor = None;
+        }
+        if toolbar_change.edge_cache_invalid {
+            self.batch.items[idx].invalidate_edge_cache();
+        }
+        // A preset apply, or switching back to Off (the "just bg removal"
+        // case), leaves the Done item stale. Auto-reprocess so the user
+        // doesn't have to click Process. We don't auto-process on Off
+        // → Subject or Off → EdgesOnly; those are mode-enablement
+        // transitions where the user typically wants to tweak settings
+        // before firing the run.
+        let current_line_mode = self.batch.items[idx].settings.line_mode;
+        let auto_trigger = toolbar_change.preset_applied
+            || (toolbar_change.line_mode_changed && current_line_mode == prunr_core::LineMode::Off);
+        if auto_trigger && self.batch.items[idx].status == BatchStatus::Done {
+            let target_id = self.batch.items[idx].id;
+            // Line-mode → Off with a cached seg tensor is Tier 2: no
+            // inference needed, just `postprocess_from_flat`. Run it
+            // in-process via live preview's rayon pool instead of
+            // spawning a fresh subprocess (which would reload the seg
+            // model for no reason). ~instant vs several seconds.
+            let use_live = toolbar_change.line_mode_changed
+                && current_line_mode == prunr_core::LineMode::Off
+                && !toolbar_change.preset_applied
+                && self.settings.live_preview
+                && self.batch.items[idx].cached_tensor.is_some();
+            if use_live {
+                self.processor.live_preview.mark_tweak(
+                    target_id,
+                    crate::gui::live_preview::PreviewKind::Mask,
+                );
+                self.processor.live_preview.flush(target_id);
+                ctx.request_repaint();
+            } else {
                 self.process_items(|item| item.id == target_id);
             }
         }
