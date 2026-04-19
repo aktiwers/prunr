@@ -115,13 +115,38 @@ pub fn render(
         if ch.commit { acc.commit = true; }
     };
 
-    // EdgesOnly w/o chain bypasses the mask tier — don't let the user
-    // tweak dead knobs. Chain mode re-runs mask on a later pass.
-    let mask_active = !(item_settings.line_mode == LineMode::EdgesOnly
-        && !app_settings.chain_mode);
+    // Knob-enablement rules:
+    // - mask_active:   mask chips (gamma/threshold/edge_shift/refine/
+    //                  feather) operate on the seg mask. Dead when model
+    //                  skips seg (No model), or when line_mode is
+    //                  EdgesOnly without chain mode (edges-only doesn't
+    //                  produce a mask).
+    // - fill_style:    transforms subject RGB. Dead when there IS no
+    //                  subject — i.e. EdgesOnly (lines only, transparent
+    //                  bg).
+    // - bg_active:     fills transparent areas. Dead only when there's no
+    //                  transparency at all — filter-only mode (No model +
+    //                  Off) outputs a full-RGB image with nothing to fill.
+    let model_uses_seg = app_settings.model.uses_segmentation();
+    let mask_active = model_uses_seg
+        && !(item_settings.line_mode == LineMode::EdgesOnly && !app_settings.chain_mode);
+    let fill_style_active = item_settings.line_mode != LineMode::EdgesOnly;
+    let bg_active = !(matches!(app_settings.model, SettingsModel::None)
+        && item_settings.line_mode == LineMode::Off);
 
     ui.horizontal(|ui| {
         render_model_dropdown(ui, app_settings, processing, mask_active, &mut change);
+
+        // If the user just picked "No model" while line_mode was
+        // SubjectOutline, auto-flip to Off — the invalid combination (no
+        // seg but compose-over-subject) would just silently render as
+        // filter-only anyway.
+        if change.model_changed
+            && !app_settings.model.uses_segmentation()
+            && item_settings.line_mode == LineMode::SubjectOutline
+        {
+            item_settings.line_mode = LineMode::Off;
+        }
 
         ui.add_enabled_ui(mask_active, |ui| {
             aggregate(chip::chip_f32(
@@ -198,6 +223,12 @@ pub fn render(
                 |v| if v < 0.1 { "off".into() } else { format!("σ {v:.1}") },
             ), Tier::Mask, &mut change);
 
+        });
+
+        // FillStyle is independent of the seg mask — it also works in
+        // filter-only mode (No model + Off), where it applies to the raw
+        // source. Only EdgesOnly (no subject) kills it.
+        ui.add_enabled_ui(fill_style_active, |ui| {
             if render_fill_style_chip(ui, &mut item_settings.fill_style) {
                 change.mask = true;
                 change.commit = true;
@@ -211,7 +242,9 @@ pub fn render(
         // effects (Blurred / Inverted / Desaturated). Behind the scenes the
         // two fields (`bg`, `bg_effect`) stay orthogonal — the chip enforces
         // mutual exclusivity at the UI so users pick one kind at a time.
-        render_background_chip(ui, &mut item_settings.bg, &mut item_settings.bg_effect, defaults.bg_value, &mut change);
+        ui.add_enabled_ui(bg_active, |ui| {
+            render_background_chip(ui, &mut item_settings.bg, &mut item_settings.bg_effect, defaults.bg_value, &mut change);
+        });
 
         // Right-aligned cluster: reset, preset. Right-to-left layout fills
         // from the right edge so items stack: [..free space..] [preset] [↺].
@@ -262,8 +295,9 @@ pub fn render(
     ui.add_space(theme::SPACE_XS);
     ui.horizontal(|ui| {
         let seg_model_name = super::model_name(app_settings.model);
+        let subject_available = app_settings.model.uses_segmentation();
         ui.add_enabled_ui(!processing, |ui| {
-            let _ = super::lines_popover::render(ui, item_settings, seg_model_name);
+            let _ = super::lines_popover::render(ui, item_settings, seg_model_name, subject_available);
         });
         if !mask_active {
             ui.label(
@@ -871,7 +905,10 @@ fn render_model_dropdown(
     change: &mut ToolbarChange,
 ) {
     let prev_model = app_settings.model;
-    let enabled = !processing && mask_active;
+    // Always enabled (except mid-processing) so the user can flip to
+    // `No model` from any mode — previously gated on mask_active, which
+    // made the dropdown unreachable in EdgesOnly.
+    let enabled = !processing;
     ui.add_enabled_ui(enabled, |ui| {
         // Match the combobox visuals used by row 1's other dropdowns.
         let vis = ui.visuals_mut();
@@ -901,6 +938,12 @@ fn render_model_dropdown(
                 ui.separator();
                 ui.add_space(theme::SPACE_XS);
                 for variant in SettingsModel::ALL {
+                    // Visual break before the `No model` entry — it's a
+                    // different class of choice (filter-only, no bg
+                    // removal) and shouldn't read as just another model.
+                    if variant == SettingsModel::None {
+                        ui.separator();
+                    }
                     ui.selectable_value(
                         &mut app_settings.model,
                         variant,
