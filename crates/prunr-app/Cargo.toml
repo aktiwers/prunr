@@ -36,6 +36,7 @@ egui_material_icons = { workspace = true }
 egui_animation = { workspace = true }
 dirs = { workspace = true }
 zstd = { workspace = true }
+bytemuck = { workspace = true }
 sysinfo = { workspace = true }
 bincode = { workspace = true }
 memory-stats = { workspace = true }

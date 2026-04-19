@@ -46,17 +46,29 @@ pub fn read_message<R: Read, T: serde::de::DeserializeOwned>(
     Ok(Some(msg))
 }
 
-/// Serialize f32 slice to raw little-endian bytes.
-/// Used for tensor IPC temp files.
-pub fn f32s_to_le_bytes(data: &[f32]) -> Vec<u8> {
-    data.iter().flat_map(|f| f.to_le_bytes()).collect()
+/// View an f32 slice as raw bytes. Zero-copy on little-endian hosts (every
+/// platform we target). The returned slice borrows from `data`; the caller
+/// feeds it straight into `fs::write` / `zstd::encode_all` / similar
+/// byte-sinks without an intermediate Vec.
+pub fn f32s_as_le_bytes(data: &[f32]) -> &[u8] {
+    // Safety (documented via bytemuck::Pod): f32 is POD; on little-endian
+    // targets (x86_64, aarch64, wasm32) the in-memory layout is already LE.
+    // Prunr ships only LE platforms — the conditional makes the big-endian
+    // case a compile error rather than a silent wrong-byte bug.
+    #[cfg(target_endian = "little")]
+    { bytemuck::cast_slice(data) }
+    #[cfg(not(target_endian = "little"))]
+    { compile_error!("prunr IPC assumes little-endian f32 layout"); }
 }
 
-/// Deserialize raw little-endian bytes to f32 vec.
+/// Read raw little-endian bytes back to a Vec<f32>. `pod_collect_to_vec`
+/// does one memcpy regardless of input alignment — safer than
+/// `cast_slice::<_, f32>` which would panic on an unaligned source.
 pub fn le_bytes_to_f32s(bytes: &[u8]) -> Vec<f32> {
-    bytes.chunks_exact(4)
-        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-        .collect()
+    #[cfg(target_endian = "little")]
+    { bytemuck::pod_collect_to_vec(bytes) }
+    #[cfg(not(target_endian = "little"))]
+    { compile_error!("prunr IPC assumes little-endian f32 layout"); }
 }
 
 #[cfg(test)]
@@ -133,9 +145,9 @@ mod tests {
     #[test]
     fn f32_byte_roundtrip() {
         let data: Vec<f32> = vec![0.0, 1.0, -1.0, std::f32::consts::PI, 1e-10, 1e10];
-        let bytes = f32s_to_le_bytes(&data);
+        let bytes = f32s_as_le_bytes(&data);
         assert_eq!(bytes.len(), data.len() * 4);
-        let recovered = le_bytes_to_f32s(&bytes);
+        let recovered = le_bytes_to_f32s(bytes);
         assert_eq!(recovered, data);
     }
 }

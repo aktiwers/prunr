@@ -434,8 +434,7 @@ pub fn run_worker() -> ! {
                             // Write tensor cache to temp file if available
                             let (tcp, tch, tcw) = if let Some((ref tdata, th, tw)) = tensor_for_cache {
                                 let tp = ipc.join(format!("tensor_{item_id}.raw"));
-                                let tbytes = prunr_app::subprocess::ipc::f32s_to_le_bytes(tdata);
-                                match std::fs::write(&tp, &tbytes) {
+                                match std::fs::write(&tp, prunr_app::subprocess::ipc::f32s_as_le_bytes(tdata)) {
                                     Ok(()) => (Some(tp), Some(th), Some(tw)),
                                     Err(_) => (None, None, None), // non-fatal
                                 }
@@ -450,7 +449,7 @@ pub fn run_worker() -> ! {
                                 let per_tensor_floats = (res.height as usize) * (res.width as usize);
                                 let mut ebytes = Vec::with_capacity(per_tensor_floats * prunr_core::EDGE_SCALE_COUNT * 4);
                                 for t in &res.tensors {
-                                    ebytes.extend_from_slice(&prunr_app::subprocess::ipc::f32s_to_le_bytes(t));
+                                    ebytes.extend_from_slice(prunr_app::subprocess::ipc::f32s_as_le_bytes(t));
                                 }
                                 match std::fs::write(&ep, &ebytes) {
                                     Ok(()) => (Some(ep), Some(res.height), Some(res.width)),

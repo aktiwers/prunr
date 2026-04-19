@@ -52,8 +52,10 @@ impl CompressedTensor {
     /// Compress raw tensor data with zstd (level 1 for speed).
     /// Returns None if compression fails (caller skips caching).
     pub fn from_raw(tc: TensorCache) -> Option<Self> {
-        let raw_bytes = crate::subprocess::ipc::f32s_to_le_bytes(&tc.data);
-        let compressed = zstd::encode_all(raw_bytes.as_slice(), 1).ok()?;
+        let compressed = zstd::encode_all(
+            crate::subprocess::ipc::f32s_as_le_bytes(&tc.data),
+            1,
+        ).ok()?;
         Some(Self { compressed, height: tc.height, width: tc.width, model: tc.model })
     }
 
@@ -93,8 +95,8 @@ impl CompressedEdgeTensors {
     pub fn from_raw(raw: EdgeTensorCache) -> Option<Self> {
         use rayon::prelude::*;
         let parts: Vec<Vec<u8>> = raw.tensors.par_iter().map(|t| {
-            let raw_bytes = crate::subprocess::ipc::f32s_to_le_bytes(t);
-            zstd::encode_all(raw_bytes.as_slice(), 1).ok().unwrap_or_default()
+            zstd::encode_all(crate::subprocess::ipc::f32s_as_le_bytes(t), 1)
+                .ok().unwrap_or_default()
         }).collect();
         if parts.iter().any(|p| p.is_empty()) { return None; }
         let [a, b, c, d] = parts.try_into().ok()?;
