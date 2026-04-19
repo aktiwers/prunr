@@ -50,15 +50,27 @@ impl OrtEngine {
 
     /// Try optimized variant (FP16/INT8) first; fall back to FP32 if session creation fails.
     fn new_with_fallback(model: ModelKind, intra_threads: usize, cpu_only: bool) -> Result<Self, CoreError> {
+        tracing::debug!(?model, intra_threads, cpu_only, "OrtEngine init");
         // Check if an optimized variant exists (loaded from filesystem, so Vec<u8>).
         if let Some(optimized) = Self::optimized_variant_bytes(model, cpu_only) {
-            if let Ok(engine) = Self::build_session(&optimized, intra_threads, model, cpu_only) {
-                return Ok(engine);
+            tracing::debug!(?model, variant_bytes = optimized.len(), "OrtEngine trying optimized variant");
+            match Self::build_session(&optimized, intra_threads, model, cpu_only) {
+                Ok(engine) => {
+                    tracing::info!(?model, provider = %engine.provider_name, "OrtEngine ready (optimized variant)");
+                    return Ok(engine);
+                }
+                Err(e) => {
+                    tracing::warn!(?model, error = %e, "optimized variant failed — falling back to FP32");
+                }
             }
+        } else {
+            tracing::debug!(?model, "no optimized variant on disk — using embedded FP32");
         }
         // Fall back to the embedded FP32 model (zero-copy &'static [u8]).
         let fp32 = Self::model_bytes(model);
-        Self::build_session(fp32, intra_threads, model, cpu_only)
+        let engine = Self::build_session(fp32, intra_threads, model, cpu_only)?;
+        tracing::info!(?model, provider = %engine.provider_name, "OrtEngine ready (FP32)");
+        Ok(engine)
     }
 
     /// Return the embedded FP32 model bytes. Zero-copy — borrows from static cache.

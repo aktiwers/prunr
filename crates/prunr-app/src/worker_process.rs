@@ -399,9 +399,28 @@ pub fn run_worker() -> ! {
 
                                     let th = ir.tensor_height;
                                     let tw = ir.tensor_width;
+                                    tracing::debug!(
+                                        item_id, th, tw, tensor_len = ir.tensor_data.len(),
+                                        provider = %ir.active_provider,
+                                        "worker about to postprocess_from_flat",
+                                    );
                                     let rgba_image = prunr_core::postprocess_from_flat(
                                         &ir.tensor_data, th, tw, original, &mask, model,
                                     )?;
+                                    let (w, h) = (rgba_image.width(), rgba_image.height());
+                                    let (mut a_min, mut a_max) = (255u8, 0u8);
+                                    let mut a_sum = 0u64;
+                                    for p in rgba_image.pixels() {
+                                        let a = p.0[3];
+                                        if a < a_min { a_min = a; }
+                                        if a > a_max { a_max = a; }
+                                        a_sum += a as u64;
+                                    }
+                                    let a_mean = a_sum / (w as u64 * h as u64).max(1);
+                                    tracing::debug!(
+                                        item_id, w, h, a_min, a_max, a_mean,
+                                        "worker postprocess result alpha stats",
+                                    );
 
                                     // Report alpha stage
                                     if !cancel.load(Ordering::Acquire) {
@@ -434,9 +453,14 @@ pub fn run_worker() -> ! {
                             // Write tensor cache to temp file if available
                             let (tcp, tch, tcw) = if let Some((ref tdata, th, tw)) = tensor_for_cache {
                                 let tp = ipc.join(format!("tensor_{item_id}.raw"));
-                                match std::fs::write(&tp, prunr_app::subprocess::ipc::f32s_as_le_bytes(tdata)) {
+                                let bytes = prunr_app::subprocess::ipc::f32s_as_le_bytes(tdata);
+                                tracing::debug!(item_id, th, tw, tensor_len = tdata.len(), bytes_len = bytes.len(), path = %tp.display(), "writing seg tensor");
+                                match std::fs::write(&tp, bytes) {
                                     Ok(()) => (Some(tp), Some(th), Some(tw)),
-                                    Err(_) => (None, None, None), // non-fatal
+                                    Err(e) => {
+                                        tracing::error!(item_id, %e, path = %tp.display(), "seg tensor write failed");
+                                        (None, None, None)
+                                    }
                                 }
                             } else {
                                 (None, None, None)
