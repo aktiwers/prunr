@@ -264,7 +264,7 @@ pub fn render(
         if !mask_active {
             ui.label(
                 RichText::new(format!(
-                    "{}  DexiNed only — mask model bypassed",
+                    "{}  DexiNed only",
                     ICON_BLOCK.codepoint,
                 ))
                 .color(theme::TEXT_SECONDARY)
