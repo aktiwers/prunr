@@ -259,14 +259,7 @@ pub fn render(
     ui.horizontal(|ui| {
         let seg_model_name = super::model_name(app_settings.model);
         ui.add_enabled_ui(!processing, |ui| {
-            let lines_change = super::lines_popover::render(ui, item_settings, seg_model_name);
-            if lines_change.scale_changed {
-                // Scale-change routes as an edge-tier tweak so live preview
-                // re-dispatches and reads the new scale from the multi-cache.
-                // No cache invalidation — all 4 scales are already cached.
-                change.edge = true;
-                change.commit = true;
-            }
+            let _ = super::lines_popover::render(ui, item_settings, seg_model_name);
         });
         if !mask_active {
             ui.label(
@@ -279,6 +272,15 @@ pub fn render(
             );
         }
         if item_settings.line_mode != LineMode::Off {
+            // Scale chip: DexiNed output-scale selector. Sits here (after the
+            // "DexiNed only" note when that's visible, else right after the
+            // Sketch dropdown) so the user can A/B compare scales without
+            // diving into the Sketch popover.
+            if super::lines_popover::render_scale_chip(ui, item_settings) {
+                change.edge = true;
+                change.commit = true;
+            }
+
             aggregate(chip::chip_f32(
                 ui, "line_strength",
                 &ICON_TUNE.codepoint.to_string(), "Line strength",

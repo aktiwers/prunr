@@ -89,9 +89,6 @@ fn two_line_label(title: &str, description: &str) -> egui::text::LayoutJob {
 pub struct LinesChange {
     /// `line_mode` was flipped (caller invalidates edge cache, retiers pipeline).
     pub mode_changed: bool,
-    /// `edge_scale` was flipped (caller marks edge-tier dirty for live preview;
-    /// no cache invalidation — all scales live in the multi-tensor cache).
-    pub scale_changed: bool,
 }
 
 /// Render the row 3 Lines button + popover.
@@ -207,36 +204,79 @@ pub fn render(ui: &mut Ui, settings: &mut ItemSettings, seg_model_name: &str) ->
                     .size(theme::FONT_SIZE_BODY),
             );
 
-            ui.add_space(theme::SPACE_SM);
-            ui.separator();
-            ui.add_space(theme::SPACE_SM);
+        },
+    );
 
-            // ── Scale picker ──
-            // DexiNed produces 7 outputs per inference. All 4 user-facing
-            // scales are extracted + cached from one pass, so switching here
-            // is a tensor-lookup in live preview (no re-inference).
-            ui.label(
-                RichText::new("Scale")
-                    .strong()
-                    .color(theme::TEXT_PRIMARY),
-            );
+    change
+}
+
+/// Render the DexiNed-scale chip as a standalone Row 3 control. Popover
+/// lets the user pick one of the 4 scales. All 4 live in the multi-tensor
+/// cache so switching is a live-preview tensor lookup (no re-inference).
+/// Returns `true` when the scale was changed.
+#[allow(deprecated)]
+pub fn render_scale_chip(ui: &mut egui::Ui, settings: &mut ItemSettings) -> bool {
+    let pop_id = egui::Id::new("edge_scale_popover");
+    let accent = settings.edge_scale != EdgeScale::Fused;
+    let display = format!("{}  {}", ICON_TUNE.codepoint, scale_label(settings.edge_scale));
+
+    let stroke = if accent {
+        egui::Stroke::new(theme::STROKE_DEFAULT, theme::ACCENT)
+    } else {
+        egui::Stroke::new(theme::STROKE_DEFAULT, egui::Color32::TRANSPARENT)
+    };
+    let btn = egui::Button::new(
+        RichText::new(display).color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY),
+    )
+    .fill(theme::BG_SECONDARY)
+    .stroke(stroke)
+    .corner_radius(theme::BUTTON_ROUNDING)
+    .min_size(egui::vec2(0.0, theme::CHIP_HEIGHT));
+    let saved_padding = ui.spacing().button_padding;
+    ui.spacing_mut().button_padding = egui::vec2(8.0, 4.0);
+    let resp = ui.add(btn);
+    ui.spacing_mut().button_padding = saved_padding;
+
+    let resp = resp.on_hover_ui(|ui| {
+        ui.label(RichText::new("Scale").strong().color(theme::TEXT_PRIMARY));
+        ui.add_space(theme::SPACE_XS);
+        ui.label(
+            RichText::new(
+                "DexiNed output scale. All 4 scales are cached from one inference pass — switching is instant in live preview.",
+            )
+            .color(theme::TEXT_PRIMARY)
+            .size(theme::FONT_SIZE_MONO),
+        );
+    });
+
+    if resp.clicked() {
+        ui.memory_mut(|m| m.toggle_popup(pop_id));
+    }
+
+    let mut changed = false;
+    egui::popup_below_widget(
+        ui,
+        pop_id,
+        &resp,
+        egui::PopupCloseBehavior::CloseOnClickOutside,
+        |ui| {
+            ui.set_min_width(240.0);
+            ui.label(RichText::new("Scale").strong().color(theme::TEXT_PRIMARY));
             ui.add_space(theme::SPACE_XS);
             for scale in [EdgeScale::Fine, EdgeScale::Balanced, EdgeScale::Bold, EdgeScale::Fused] {
                 let selected = settings.edge_scale == scale;
                 let label = two_line_label(scale_label(scale), scale_description(scale));
-                let resp = ui.selectable_label(selected, label);
-                if resp.clicked() {
+                if ui.selectable_label(selected, label).clicked() {
                     if !selected {
                         settings.edge_scale = scale;
-                        change.scale_changed = true;
+                        changed = true;
                     }
                     ui.memory_mut(|m| m.close_popup(pop_id));
                 }
             }
         },
     );
-
-    change
+    changed
 }
 
 #[cfg(test)]
