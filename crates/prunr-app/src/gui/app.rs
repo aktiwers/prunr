@@ -72,11 +72,6 @@ pub struct PrunrApp {
     pub(crate) canvas_switch_id: u64,
     /// Incremented when a result completes, drives crossfade in render_done
     pub(crate) result_switch_id: u64,
-    /// Diagnostic: last `result_texture.id()` we traced from the canvas
-    /// paint path. Populated by `canvas::render_done` only when the id
-    /// changes, so the log shows exactly one line per visible texture
-    /// swap instead of a per-frame flood.
-    pub(crate) last_painted_tex_id: std::cell::Cell<Option<egui::TextureId>>,
 
     /// Set by add_to_batch — triggers sync_selected_batch_textures in next logic()
     pending_batch_sync: bool,
@@ -196,7 +191,6 @@ impl PrunrApp {
             settings,
             canvas_switch_id: 0,
             result_switch_id: 0,
-            last_painted_tex_id: std::cell::Cell::new(None),
             pending_batch_sync: false,
             pending_open_dialog: false,
             toasts: egui_notify::Toasts::default()
@@ -1190,23 +1184,9 @@ impl PrunrApp {
         let original = Arc::clone(item.source_dyn.as_ref().unwrap());
         let seg_tensor = item.cached_tensor.as_ref().and_then(decompress_seg);
         let edge_tensor = Self::edge_tensor_for_active_scale(item);
-        tracing::info!(
-            item_id = id, ?kind,
-            has_cached_tensor = item.cached_tensor.is_some(),
-            has_cached_edge_tensors = item.cached_edge_tensors.is_some(),
-            has_seg = seg_tensor.is_some(),
-            has_edge = edge_tensor.is_some(),
-            "live_preview: build_preview_inputs",
-        );
         match kind {
-            PreviewKind::Mask if seg_tensor.is_none() => {
-                tracing::warn!(item_id = id, "live_preview: Mask aborted — seg_tensor None");
-                return None;
-            }
-            PreviewKind::Edge if edge_tensor.is_none() => {
-                tracing::warn!(item_id = id, "live_preview: Edge aborted — edge_tensor None");
-                return None;
-            }
+            PreviewKind::Mask if seg_tensor.is_none() => return None,
+            PreviewKind::Edge if edge_tensor.is_none() => return None,
             _ => {}
         }
         let cached_edge_mask = item.cached_edge_mask.as_ref().and_then(|(m, bits, scale)| {
@@ -1264,16 +1244,9 @@ impl PrunrApp {
         for r in results {
             let (item_id, source, is_final) = {
                 let Some(item) = self.batch.find_by_id_mut(r.item_id) else {
-                    tracing::warn!(item_id = r.item_id, "live_preview: apply — item not found");
                     continue;
                 };
                 let new_rgba = Arc::new(r.rgba);
-                let (w, h) = (new_rgba.width(), new_rgba.height());
-                tracing::info!(
-                    item_id = item.id, w, h,
-                    has_new_masked_base = r.new_masked_base.is_some(),
-                    "live_preview: apply — new result_rgba, spawning tex_prep",
-                );
                 item.result_rgba = Some(new_rgba.clone());
                 // Mark pending so sync_selected_batch_textures doesn't also
                 // spawn its own prep on this same frame.
@@ -1310,20 +1283,7 @@ impl PrunrApp {
     }
 
     pub(crate) fn sync_selected_batch_textures(&mut self, ctx: &egui::Context) {
-        let Some(idx) = self.batch.selected_idx_clamped() else {
-            tracing::warn!("sync_selected_batch_textures: no selected idx");
-            return;
-        };
-        let (item_id, status, has_rgba, tex_id, rgba_ptr) = {
-            let item = &self.batch.items[idx];
-            let rgba_ptr = item.result_rgba.as_ref().map(|r| Arc::as_ptr(r) as usize);
-            (item.id, item.status.clone(), item.result_rgba.is_some(),
-             item.result_texture.as_ref().map(|t| t.id()), rgba_ptr)
-        };
-        tracing::info!(
-            idx, item_id, ?status, has_rgba, ?tex_id, ?rgba_ptr,
-            "sync_selected_batch_textures: before sync",
-        );
+        let Some(idx) = self.batch.selected_idx_clamped() else { return };
 
         self.evict_result_rgba_for_background_items(idx);
         self.restore_selected_result_from_history(idx);
@@ -1426,12 +1386,6 @@ impl PrunrApp {
     /// until the new item's is ready (no blank flash on sidebar click).
     fn sync_app_state_to_selected_item(&mut self, idx: usize) {
         let item = &self.batch.items[idx];
-        tracing::info!(
-            idx, item_id = item.id, ?item.status,
-            item_has_rgba = item.result_rgba.is_some(),
-            item_tex_id = ?item.result_texture.as_ref().map(|t| t.id()),
-            "sync_app_state_to_selected_item",
-        );
         // Mirror both textures exactly — including `None`. The old "keep the
         // previous texture" guards caused two distinct bugs:
         //   - result_texture guard: canvas stayed on the previous item's image
@@ -1470,22 +1424,13 @@ impl PrunrApp {
         tx: mpsc::Sender<(u64, String, egui::ColorImage, bool)>,
         ctx: egui::Context,
     ) {
-        let arc_ptr = Arc::as_ptr(&rgba) as usize;
-        tracing::info!(item_id, name = %name, is_result, arc_ptr, "tex_prep: spawn");
         std::thread::spawn(move || {
             let (w, h) = (rgba.width(), rgba.height());
-            let sample = rgba.as_raw().get(0..8).map(|s| s.to_vec()).unwrap_or_default();
             let ci = egui::ColorImage::from_rgba_unmultiplied(
                 [w as usize, h as usize],
                 rgba.as_flat_samples().as_slice(),
             );
-            tracing::info!(
-                item_id, name = %name, is_result, w, h,
-                arc_ptr, first_bytes = ?sample,
-                "tex_prep: ColorImage built, sending",
-            );
-            let send_result = tx.send((item_id, name, ci, is_result));
-            tracing::info!(item_id, send_ok = send_result.is_ok(), "tex_prep: send complete");
+            let _ = tx.send((item_id, name, ci, is_result));
             ctx.request_repaint();
         });
     }
@@ -1879,14 +1824,11 @@ impl PrunrApp {
         // Receive pre-built ColorImages and upload to GPU (lightweight — just queues the upload)
         let mut tex_arrived = false;
         while let Ok((item_id, name, color_image, is_result)) = self.batch.bg_io.tex_prep_rx.try_recv() {
-            tracing::info!(item_id, name = %name, is_result, "live_preview: tex_prep arrived");
             let tex = ctx.load_texture(name, color_image, egui::TextureOptions::default());
-            let tex_id = tex.id();
             if let Some(item) = self.batch.find_by_id_mut(item_id) {
                 if is_result {
                     item.result_texture = Some(tex);
                     item.result_tex_pending = false;
-                    tracing::info!(item_id, ?tex_id, "live_preview: item.result_texture set");
                 } else {
                     item.source_texture = Some(tex);
                     item.source_tex_pending = false;
@@ -1896,10 +1838,6 @@ impl PrunrApp {
         }
         if tex_arrived {
             self.sync_selected_batch_textures(ctx);
-            tracing::info!(
-                app_result_tex_id = ?self.result_texture.as_ref().map(|t| t.id()),
-                "live_preview: after sync, app.result_texture",
-            );
         }
 
         // Drain files loaded by background thread (max 5 per frame to stay responsive)
