@@ -26,6 +26,7 @@ rayon = "1.11"
 fast_image_resize = "6"
 zstd = "0.13"
 num_cpus = "1"
+bytemuck = "1"
 
 # Error handling + serialization
 thiserror = "2.0"
