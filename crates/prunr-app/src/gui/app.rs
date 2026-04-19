@@ -2299,26 +2299,36 @@ impl PrunrApp {
         // before firing the run.
         let current_line_mode = self.batch.items[idx].settings.line_mode;
         let auto_trigger = toolbar_change.preset_applied
-            || (toolbar_change.line_mode_changed && current_line_mode == prunr_core::LineMode::Off)
+            || toolbar_change.line_mode_changed
             || toolbar_change.input_transform_changed;
         if auto_trigger && self.batch.items[idx].status == BatchStatus::Done {
             let target_id = self.batch.items[idx].id;
-            // Line-mode → Off with a cached seg tensor is Tier 2: no
-            // inference needed, just `postprocess_from_flat`. Run it
-            // in-process via live preview's rayon pool instead of
-            // spawning a fresh subprocess (which would reload the seg
-            // model for no reason). ~instant vs several seconds. Do this
-            // regardless of the `live_preview` setting — that toggle
-            // governs mid-drag debouncing, not commit-time fast paths.
+            // Live-rebuild (in-process rayon pool, no subprocess spawn)
+            // whenever the tensors needed for the TARGET mode are still
+            // cached. Off needs seg; EdgesOnly needs edge; SubjectOutline
+            // needs both. Preset-apply / input_transform need the full
+            // subprocess path (bigger changes / DexiNed rerun).
+            let item_ref = &self.batch.items[idx];
+            let tensors_available = match current_line_mode {
+                prunr_core::LineMode::Off => item_ref.cached_tensor.is_some(),
+                prunr_core::LineMode::EdgesOnly => item_ref.cached_edge_tensors.is_some(),
+                prunr_core::LineMode::SubjectOutline => {
+                    item_ref.cached_tensor.is_some() && item_ref.cached_edge_tensors.is_some()
+                }
+            };
             let use_live = toolbar_change.line_mode_changed
-                && current_line_mode == prunr_core::LineMode::Off
                 && !toolbar_change.preset_applied
-                && self.batch.items[idx].cached_tensor.is_some();
+                && !toolbar_change.input_transform_changed
+                && tensors_available;
             if use_live {
-                self.processor.live_preview.mark_tweak(
-                    target_id,
-                    crate::gui::live_preview::PreviewKind::Mask,
-                );
+                // Mask kind covers Off + SubjectOutline (run_preview reads
+                // the actual line_mode from settings). Edge kind for
+                // EdgesOnly — compose_edges on raw source.
+                let kind = match current_line_mode {
+                    prunr_core::LineMode::EdgesOnly => crate::gui::live_preview::PreviewKind::Edge,
+                    _ => crate::gui::live_preview::PreviewKind::Mask,
+                };
+                self.processor.live_preview.mark_tweak(target_id, kind);
                 self.processor.live_preview.flush(target_id);
                 ctx.request_repaint();
             } else {
