@@ -120,13 +120,14 @@ fn popup_for(
 }
 
 /// Continuous f32 chip (gamma, edge_shift, line_strength, ...).
-/// `format` converts the value to display text (e.g. "1.20", "2px erode").
-/// `tooltip` shows on hover over the chip button and inside the popover.
+/// `description` renders inside the popover under the slider.
+/// `tooltip` renders on hover over the chip button.
 pub fn chip_f32(
     ui: &mut Ui,
     id_salt: &str,
     icon: &str,
     label: &str,
+    description: &str,
     tooltip: &str,
     value: &mut f32,
     range: std::ops::RangeInclusive<f32>,
@@ -156,7 +157,7 @@ pub fn chip_f32(
         );
         if slider.changed() { out.changed = true; }
         if slider_settled(&slider) { out.commit = true; }
-        hint(ui, tooltip);
+        hint(ui, description);
         ui.add_space(theme::SPACE_XS);
         if reset_button(ui, "Reset to factory default") {
             *value = default_value;
@@ -173,6 +174,7 @@ pub fn chip_u32(
     id_salt: &str,
     icon: &str,
     label: &str,
+    description: &str,
     tooltip: &str,
     value: &mut u32,
     range: std::ops::RangeInclusive<u32>,
@@ -191,7 +193,7 @@ pub fn chip_u32(
         let slider = ui.add(egui::Slider::new(value, range).show_value(true));
         if slider.changed() { out.changed = true; }
         if slider_settled(&slider) { out.commit = true; }
-        hint(ui, tooltip);
+        hint(ui, description);
         ui.add_space(theme::SPACE_XS);
         if reset_button(ui, "Reset to factory default") {
             *value = default_value;
@@ -208,6 +210,7 @@ pub fn chip_option_f32(
     id_salt: &str,
     icon: &str,
     label: &str,
+    description: &str,
     tooltip: &str,
     value: &mut Option<f32>,
     range: std::ops::RangeInclusive<f32>,
@@ -243,7 +246,7 @@ pub fn chip_option_f32(
             if slider.changed() { out.changed = true; }
             if slider_settled(&slider) { out.commit = true; }
         }
-        hint(ui, tooltip);
+        hint(ui, description);
         ui.add_space(theme::SPACE_XS);
         if reset_button(ui, "Disable") {
             *value = None;
@@ -260,6 +263,7 @@ pub fn chip_bool(
     id_salt: &str,
     icon: &str,
     label: &str,
+    description: &str,
     tooltip: &str,
     value: &mut bool,
 ) -> ChipChange {
@@ -275,7 +279,7 @@ pub fn chip_bool(
             out.changed = true;
             out.commit = true; // toggle always commits
         }
-        hint(ui, tooltip);
+        hint(ui, description);
     });
     out
 }
@@ -288,6 +292,7 @@ pub fn chip_bool_with_extras(
     id_salt: &str,
     icon: &str,
     label: &str,
+    description: &str,
     tooltip: &str,
     value: &mut bool,
     extras: impl FnOnce(&mut Ui) -> ChipChange,
@@ -312,7 +317,7 @@ pub fn chip_bool_with_extras(
             if inner.changed { out.changed = true; }
             if inner.commit  { out.commit  = true; }
         }
-        hint(ui, tooltip);
+        hint(ui, description);
     });
     out
 }
@@ -368,6 +373,7 @@ pub fn chip_option_rgba(
     id_salt: &str,
     icon: &str,
     label: &str,
+    description: &str,
     tooltip: &str,
     value: &mut Option<[u8; 4]>,
     default_when_enabled: [u8; 4],
@@ -401,7 +407,7 @@ pub fn chip_option_rgba(
                 out.commit = true;
             }
         }
-        hint(ui, tooltip);
+        hint(ui, description);
         ui.add_space(theme::SPACE_XS);
         if reset_button(ui, "Clear background color") {
             *value = None;
@@ -418,6 +424,7 @@ pub fn chip_option_rgb(
     id_salt: &str,
     icon: &str,
     label: &str,
+    description: &str,
     tooltip: &str,
     value: &mut Option<[u8; 3]>,
     default_when_enabled: [u8; 3],
@@ -449,7 +456,7 @@ pub fn chip_option_rgb(
                 out.commit = true;
             }
         }
-        hint(ui, tooltip);
+        hint(ui, description);
         ui.add_space(theme::SPACE_XS);
         if reset_button(ui, "Use original line colors") {
             *value = None;
