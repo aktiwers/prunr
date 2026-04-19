@@ -94,7 +94,17 @@ pub fn render(ui: &mut Ui, settings: &mut ItemSettings, seg_model_name: &str) ->
     })
     .corner_radius(theme::BUTTON_ROUNDING)
     .min_size(egui::vec2(0.0, theme::CHIP_HEIGHT));
-    let resp = ui.add(btn).on_hover_text("Sketch extraction mode and model");
+    let resp = ui.add(btn).on_hover_ui(|ui| {
+        ui.label(RichText::new("Sketch").strong().color(theme::TEXT_PRIMARY));
+        ui.add_space(theme::SPACE_XS);
+        ui.label(
+            RichText::new(
+                "Stage 1 of 4 in the lines pipeline. Picks what DexiNed sees: Off (skipped), Subject (seg model masks to subject-on-white first, then DexiNed), Full (DexiNed runs on the whole scene). The knobs to the right are no-ops when Sketch is Off.",
+            )
+            .color(theme::TEXT_PRIMARY)
+            .size(theme::FONT_SIZE_MONO),
+        );
+    });
 
     if resp.clicked() {
         ui.memory_mut(|m| m.toggle_popup(pop_id));
