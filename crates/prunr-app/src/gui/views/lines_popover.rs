@@ -242,7 +242,7 @@ pub fn render_scale_chip(ui: &mut egui::Ui, settings: &mut ItemSettings) -> bool
         ui.add_space(theme::SPACE_XS);
         ui.label(
             RichText::new(
-                "DexiNed output scale. All 4 scales are cached from one inference pass — switching is instant in live preview.",
+                "How zoomed-in the edge detector looks. Fine picks up tiny texture; Bold keeps only the big silhouettes. Balanced sits between the two; Fused combines every scale for the most detailed result.",
             )
             .color(theme::TEXT_PRIMARY)
             .size(theme::FONT_SIZE_MONO),
