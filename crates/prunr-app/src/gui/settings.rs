@@ -38,6 +38,10 @@ pub struct Settings {
     /// Drag-out yields subject/lines/mask PNGs instead of a single composite.
     #[serde(default)]
     pub export_split_layers: bool,
+    /// Show the "Export anim…" toolbar button. Off hides the button and
+    /// its modal entry point — useful when users never need frame sequences.
+    #[serde(default = "default_export_animation_enabled")]
+    pub export_animation_enabled: bool,
     /// User-configurable keyboard shortcuts. Rebinding UI not yet wired.
     #[serde(default)]
     pub shortcuts: HashMap<String, String>,
@@ -65,6 +69,7 @@ pub struct Settings {
 
 fn default_live_preview() -> bool { true }
 fn default_preset_name() -> String { PRUNR_PRESET.to_string() }
+fn default_export_animation_enabled() -> bool { true }
 
 impl Settings {
     /// Config file path: ~/.config/prunr/settings.json (Linux),
@@ -289,6 +294,7 @@ impl Default for Settings {
             live_preview: true,
             auto_hide_adjustments: false,
             export_split_layers: false,
+            export_animation_enabled: default_export_animation_enabled(),
             shortcuts: HashMap::new(),
             presets: HashMap::new(),
             default_preset: default_preset_name(),
