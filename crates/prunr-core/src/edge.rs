@@ -219,48 +219,59 @@ pub fn compose_edges(
     }
 }
 
-/// Composite a pre-built edge mask INSIDE an already-masked RGBA — the edge
-/// only shows where the base's alpha (subject mask) also contains content.
-/// Used by `SubjectOutline` mode.
+/// Composite edges and subject mask using a named `ComposeMode` formula.
+/// Used by `LineMode::SubjectOutline` — picks how the two cached masks
+/// combine into the final alpha. All modes run at compose time on already-
+/// cached tensors, so switching modes is instant in live preview.
 ///
-/// Alpha merge is multiplicative: `alpha = base_alpha * edge_mask / 255`.
-/// That keeps the lines-only silhouette the user expects (transparent
-/// background, no filled subject) while tying line visibility to the subject
-/// mask — so gamma / threshold / refine tweaks visibly change where the
-/// lines fade out along the subject silhouette. With a `solid_line_color`,
-/// edge pixels are recoloured to that color; otherwise the base RGB shows
-/// through at edges.
-pub fn compose_edges_over_rgba(
+/// `base` carries the subject silhouette in its alpha channel (output of
+/// `postprocess::postprocess_from_flat`). `mask` is the raw edge mask from
+/// `tensor_to_edge_mask`. With a `solid_line_color`, line pixels are blended
+/// toward that color weighted by edge strength; otherwise base RGB shows
+/// through at line pixels.
+pub fn compose_edges_styled(
     mask: &image::GrayImage,
     base: &RgbaImage,
+    compose: crate::types::ComposeMode,
     solid_line_color: Option<[u8; 3]>,
     edge_thickness: u32,
 ) -> RgbaImage {
+    use crate::types::ComposeMode;
     let (ow, oh) = (base.width(), base.height());
     let mut mask = mask.clone();
     crate::postprocess::dilate_mask(&mut mask, edge_thickness);
     let mask_raw = mask.as_raw();
     let mut rgba = base.clone();
     let out_raw = rgba.as_mut();
-    if let Some(c) = solid_line_color {
-        for i in 0..(ow * oh) as usize {
-            let subject = out_raw[i * 4 + 3] as u16;
-            let edge = mask_raw[i] as u16;
-            let effective = (subject * edge / 255) as u8;
-            if effective == 0 {
-                out_raw[i * 4 + 3] = 0;
-                continue;
+
+    for i in 0..(ow * oh) as usize {
+        let subject = out_raw[i * 4 + 3] as i32;
+        let edge = mask_raw[i] as i32;
+        let new_alpha = match compose {
+            ComposeMode::LinesOnly => (subject * edge / 255) as u8,
+            ComposeMode::SubjectFilled => subject.max(edge) as u8,
+            ComposeMode::Engraving => (subject - edge).max(0) as u8,
+            // 0.3 * subject + 0.8 * edge, clamped to 0..=255
+            ComposeMode::Ghost => {
+                let ghost = (subject * 77 + edge * 204) / 255;
+                ghost.clamp(0, 255) as u8
             }
-            out_raw[i * 4]     = c[0];
-            out_raw[i * 4 + 1] = c[1];
-            out_raw[i * 4 + 2] = c[2];
-            out_raw[i * 4 + 3] = effective;
-        }
-    } else {
-        for i in 0..(ow * oh) as usize {
-            let subject = out_raw[i * 4 + 3] as u16;
-            let edge = mask_raw[i] as u16;
-            out_raw[i * 4 + 3] = (subject * edge / 255) as u8;
+            ComposeMode::InverseMask => ((255 - subject) * edge / 255) as u8,
+        };
+        out_raw[i * 4 + 3] = new_alpha;
+
+        // Line colour tint applies per pixel where an edge exists, regardless
+        // of compose mode (edge strength picks the blend weight). In Engraving
+        // the line alpha is low, so tint rarely shows — that's the visual
+        // signature of the mode.
+        if let Some(c) = solid_line_color {
+            if edge > 0 {
+                let w = edge as u16;
+                let iw = 255 - w;
+                out_raw[i * 4]     = ((out_raw[i * 4]     as u16 * iw + c[0] as u16 * w) / 255) as u8;
+                out_raw[i * 4 + 1] = ((out_raw[i * 4 + 1] as u16 * iw + c[1] as u16 * w) / 255) as u8;
+                out_raw[i * 4 + 2] = ((out_raw[i * 4 + 2] as u16 * iw + c[2] as u16 * w) / 255) as u8;
+            }
         }
     }
     rgba
@@ -354,7 +365,7 @@ mod tests {
             tensor[i] = 10.0; // sigmoid → ~1 → edge
         }
         let original = solid_rgb(64, 48);
-        let edge = crate::EdgeSettings { line_strength: 0.5, solid_line_color: Some([255, 0, 0]), edge_thickness: 0, edge_scale: crate::EdgeScale::Fused };
+        let edge = crate::EdgeSettings { line_strength: 0.5, solid_line_color: Some([255, 0, 0]), edge_thickness: 0, edge_scale: crate::EdgeScale::Fused, compose_mode: crate::ComposeMode::default() };
         let out = finalize_edges(&tensor, h as u32, w as u32, &original, &edge);
         assert_eq!(out.width(), 64);
         assert_eq!(out.height(), 48);
@@ -369,7 +380,7 @@ mod tests {
         let h = DEXINED_H as usize;
         let tensor = vec![10.0_f32; h * w]; // all edges
         let original = solid_rgb(32, 32);
-        let edge = crate::EdgeSettings { line_strength: 0.5, solid_line_color: None, edge_thickness: 0, edge_scale: crate::EdgeScale::Fused };
+        let edge = crate::EdgeSettings { line_strength: 0.5, solid_line_color: None, edge_thickness: 0, edge_scale: crate::EdgeScale::Fused, compose_mode: crate::ComposeMode::default() };
         let out = finalize_edges(&tensor, h as u32, w as u32, &original, &edge);
         // Original color preserved
         assert_eq!(out.get_pixel(0, 0)[0], 120);

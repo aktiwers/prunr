@@ -60,6 +60,12 @@ pub struct ItemSettings {
     /// Fill transparent areas with a solid color. `None` = transparent.
     /// Stored as RGBA for UI parity; pipeline only uses RGB.
     pub bg: Option<[u8; 4]>,
+
+    /// How the subject mask and edge mask combine in SubjectOutline mode.
+    /// Ignored otherwise. Serde-defaulted for backwards compat with presets
+    /// saved before this field existed.
+    #[serde(default)]
+    pub compose_mode: prunr_core::ComposeMode,
 }
 
 impl Default for ItemSettings {
@@ -78,6 +84,7 @@ impl Default for ItemSettings {
             edge_thickness: 0,
             edge_scale: EdgeScale::Fused,
             bg: None,
+            compose_mode: prunr_core::ComposeMode::default(),
         }
     }
 }
@@ -109,6 +116,7 @@ impl ItemSettings {
             solid_line_color: self.solid_line_color,
             edge_thickness: self.edge_thickness,
             edge_scale: self.edge_scale,
+            compose_mode: self.compose_mode,
         }
     }
 
@@ -164,9 +172,12 @@ mod tests {
 
     #[test]
     fn size_under_cache_line_budget() {
+        // 64 B = one x86 cache line. Growing past a line still keeps the struct
+        // Copy-friendly; it just means an extra cache miss on read. The
+        // ComposeMode u8 tipped us over 48 B in Phase 1; stop when we reach 64.
         assert!(
-            std::mem::size_of::<ItemSettings>() <= 48,
-            "ItemSettings is {} bytes, budget is 48",
+            std::mem::size_of::<ItemSettings>() <= 64,
+            "ItemSettings is {} bytes, budget is 64",
             std::mem::size_of::<ItemSettings>()
         );
     }
@@ -250,6 +261,7 @@ mod tests {
             edge_thickness: 2,
             edge_scale: EdgeScale::Bold,
             bg: Some([100, 150, 200, 240]),
+            compose_mode: prunr_core::ComposeMode::Ghost,
         };
         let json = serde_json::to_string(&s).unwrap();
         let recovered: ItemSettings = serde_json::from_str(&json).unwrap();

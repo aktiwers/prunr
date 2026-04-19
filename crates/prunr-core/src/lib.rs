@@ -19,4 +19,5 @@ pub use pipeline::{process_image, process_image_from_decoded, process_image_unch
 pub use postprocess::{tensor_to_mask, apply_mask, postprocess_from_flat};
 pub use batch::{batch_process, batch_process_with_mask, create_engine_pool};
 pub use formats::{load_image_from_path, load_image_from_bytes, check_large_image, downscale_image, encode_rgba_png, apply_background_color};
-pub use edge::{EdgeEngine, EdgeInferenceResult, EDGE_SCALE_COUNT, finalize_edges, tensor_to_edge_mask, compose_edges, compose_edges_over_rgba};
+pub use edge::{EdgeEngine, EdgeInferenceResult, EDGE_SCALE_COUNT, finalize_edges, tensor_to_edge_mask, compose_edges, compose_edges_styled};
+pub use types::ComposeMode;

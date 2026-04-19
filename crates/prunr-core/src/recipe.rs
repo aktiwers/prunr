@@ -5,7 +5,7 @@
 //! tier needs to re-run (or if processing can be skipped entirely).
 
 use serde::{Serialize, Deserialize};
-use crate::types::{ModelKind, EdgeScale};
+use crate::types::{ModelKind, EdgeScale, ComposeMode};
 
 /// Tier 1: settings that require AI model inference.
 ///
@@ -35,6 +35,7 @@ pub struct EdgeRecipe {
     pub solid_line_color: Option<[u8; 3]>,
     pub edge_thickness: u32,
     pub edge_scale: EdgeScale,
+    pub compose_mode: ComposeMode,
 }
 
 impl From<&crate::EdgeSettings> for EdgeRecipe {
@@ -44,6 +45,7 @@ impl From<&crate::EdgeSettings> for EdgeRecipe {
             solid_line_color: e.solid_line_color,
             edge_thickness: e.edge_thickness,
             edge_scale: e.edge_scale,
+            compose_mode: e.compose_mode,
         }
     }
 }
@@ -215,6 +217,7 @@ mod tests {
                 solid_line_color: None,
                 edge_thickness: 0,
                 edge_scale: EdgeScale::Fused,
+                compose_mode: ComposeMode::LinesOnly,
             },
             mask: mask(gamma, None, 0.0, false),
             composite: CompositeRecipe { bg_color: bg, solid_line_color: None },
