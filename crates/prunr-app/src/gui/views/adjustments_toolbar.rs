@@ -438,6 +438,16 @@ fn line_style_params(ui: &mut Ui, style: &mut prunr_core::LineStyle) -> bool {
                 changed = true;
             }
         }
+        LineStyle::Chromatic { offset } => {
+            if ui.add(egui::Slider::new(offset, 1..=16).text("Offset px")).changed() {
+                changed = true;
+            }
+        }
+        LineStyle::Noise { amount } => {
+            if ui.add(egui::Slider::new(amount, 0..=255).text("Amount")).changed() {
+                changed = true;
+            }
+        }
     }
     changed
 }
@@ -522,6 +532,32 @@ fn fill_style_params(ui: &mut Ui, style: &mut prunr_core::FillStyle) -> bool {
         FillStyle::Duotone { dark, light } => {
             changed |= rgb_picker_row(ui, "Dark", dark);
             changed |= rgb_picker_row(ui, "Light", light);
+        }
+        FillStyle::CrossProcess { shadow, highlight } => {
+            changed |= rgb_picker_row(ui, "Shadow", shadow);
+            changed |= rgb_picker_row(ui, "Highlight", highlight);
+        }
+        FillStyle::ChannelSwap { variant } => {
+            use prunr_core::ChannelSwapVariant;
+            ui.label(RichText::new("Channel order").color(theme::TEXT_SECONDARY).size(theme::FONT_SIZE_MONO));
+            for option in ChannelSwapVariant::ALL {
+                let selected = *variant == *option;
+                if ui.selectable_label(selected, option.name()).clicked() && !selected {
+                    *variant = *option;
+                    changed = true;
+                }
+            }
+        }
+        FillStyle::Halftone { dot_spacing } => {
+            if ui.add(egui::Slider::new(dot_spacing, 2..=32).text("Dot spacing px")).changed() {
+                changed = true;
+            }
+        }
+        FillStyle::GradientMap { stops } => {
+            changed |= rgb_picker_row(ui, "Shadow", &mut stops[0]);
+            changed |= rgb_picker_row(ui, "Dark mid", &mut stops[1]);
+            changed |= rgb_picker_row(ui, "Light mid", &mut stops[2]);
+            changed |= rgb_picker_row(ui, "Highlight", &mut stops[3]);
         }
     }
     changed

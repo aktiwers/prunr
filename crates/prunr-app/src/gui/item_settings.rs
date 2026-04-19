@@ -189,15 +189,14 @@ mod tests {
 
     #[test]
     fn size_under_cache_line_budget() {
-        // Phase 2b added several FillStyle / LineStyle variants with nested
-        // colour fields (e.g. RadialGradient carries [u8;2] + 2×[u8;3]). The
-        // enum's tag+variant size grew proportionally. 80 B covers the new
-        // variants and leaves room for 1–2 more small ones without another
-        // test bump. Still Copy-friendly; cost is one extra cache miss on
-        // cold access — not on any hot path.
+        // Budget is sized to absorb incremental FillStyle / LineStyle growth.
+        // Phase 6 (GradientMap, CrossProcess, Chromatic, etc.) pushed the
+        // enum over a cache line to 96 B. Still Copy-friendly; the cost is
+        // one extra cache miss on cold access, never on the per-pixel hot
+        // path. Bump in coarse steps to avoid a churn of test-only commits.
         assert!(
-            std::mem::size_of::<ItemSettings>() <= 80,
-            "ItemSettings is {} bytes, budget is 80",
+            std::mem::size_of::<ItemSettings>() <= 96,
+            "ItemSettings is {} bytes, budget is 96",
             std::mem::size_of::<ItemSettings>()
         );
     }
