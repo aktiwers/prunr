@@ -66,6 +66,17 @@ impl Drop for SemaphoreGuard {
     }
 }
 
+/// Pack an `EdgeInferenceResult`'s per-scale tensors into one LE byte buffer
+/// for IPC. Matches the layout the parent expects in `read_edge_tensor_cache`.
+fn pack_edge_tensors(res: &prunr_core::EdgeInferenceResult) -> Vec<u8> {
+    let per_tensor_floats = (res.height as usize) * (res.width as usize);
+    let mut bytes = Vec::with_capacity(per_tensor_floats * prunr_core::EDGE_SCALE_COUNT * 4);
+    for t in &res.tensors {
+        bytes.extend_from_slice(prunr_app::subprocess::ipc::f32s_as_le_bytes(t));
+    }
+    bytes
+}
+
 /// Calculate pixel weight for an image (1 unit = 1M pixels, minimum 1).
 fn pixel_weight(image_bytes: &[u8]) -> usize {
     // Read dimensions from header without full decode
@@ -511,12 +522,7 @@ pub fn run_worker() -> ! {
                             // into a single temp file; parent splits by EDGE_SCALE_COUNT).
                             let (ecp, ech, ecw) = if let Some(ref res) = edge_tensor_for_cache {
                                 let ep = ipc.join(format!("edge_{item_id}.raw"));
-                                let per_tensor_floats = (res.height as usize) * (res.width as usize);
-                                let mut ebytes = Vec::with_capacity(per_tensor_floats * prunr_core::EDGE_SCALE_COUNT * 4);
-                                for t in &res.tensors {
-                                    ebytes.extend_from_slice(prunr_app::subprocess::ipc::f32s_as_le_bytes(t));
-                                }
-                                match std::fs::write(&ep, &ebytes) {
+                                match std::fs::write(&ep, pack_edge_tensors(res)) {
                                     Ok(()) => (Some(ep), Some(res.height), Some(res.width)),
                                     Err(_) => (None, None, None),
                                 }
@@ -719,12 +725,7 @@ pub fn run_worker() -> ! {
 
                             let (ecp, ech, ecw) = {
                                 let ep = ipc.join(format!("edge_{item_id}.raw"));
-                                let per_tensor_floats = (edge_res.height as usize) * (edge_res.width as usize);
-                                let mut ebytes = Vec::with_capacity(per_tensor_floats * prunr_core::EDGE_SCALE_COUNT * 4);
-                                for t in &edge_res.tensors {
-                                    ebytes.extend_from_slice(prunr_app::subprocess::ipc::f32s_as_le_bytes(t));
-                                }
-                                match std::fs::write(&ep, &ebytes) {
+                                match std::fs::write(&ep, pack_edge_tensors(&edge_res)) {
                                     Ok(()) => (Some(ep), Some(edge_res.height), Some(edge_res.width)),
                                     Err(_) => (None, None, None),
                                 }
