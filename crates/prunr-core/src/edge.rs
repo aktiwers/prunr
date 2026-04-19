@@ -309,6 +309,36 @@ pub fn compose_edges_styled(
                 let (r, g, b) = crate::postprocess::hsv_to_rgb(hue, 255, 255);
                 Some([r, g, b])
             }
+            LineStyle::Chromatic { offset } => {
+                // RGB-split ghosting: sample the edge mask at horizontal
+                // offsets for R and B so line colour drifts between channels.
+                // Green stays at the centre. Output clamps at image edges.
+                let x = (i as u32 % ow) as i32;
+                let y = (i as u32 / ow) as i32;
+                let o = (offset.min(64)) as i32;
+                let r_x = (x - o).clamp(0, ow as i32 - 1) as u32;
+                let b_x = (x + o).clamp(0, ow as i32 - 1) as u32;
+                let r_idx = (y as u32 * ow + r_x) as usize;
+                let b_idx = (y as u32 * ow + b_x) as usize;
+                let rv = mask_raw[r_idx];
+                let gv = edge as u8;
+                let bv = mask_raw[b_idx];
+                Some([rv, gv, bv])
+            }
+            LineStyle::Noise { amount } => {
+                // Deterministic hash → per-pixel hue jitter. Cheap integer
+                // mixer (Wang-like) avoids RNG setup cost per dispatch.
+                let mut h = (i as u32).wrapping_mul(0x9e37_79b1);
+                h ^= h >> 16;
+                h = h.wrapping_mul(0x7feb_352d);
+                h ^= h >> 15;
+                let jitter = (h & 0xFF) as i32 - 128; // -128..=127
+                let strength = amount as i32;
+                let shift = (jitter * strength) / 128; // -amount..=amount
+                let hue = ((i as i32 * 360 / pixel_count.max(1) as i32) + shift).rem_euclid(360) as u16;
+                let (r, g, b) = crate::postprocess::hsv_to_rgb(hue, 200, 240);
+                Some([r, g, b])
+            }
         };
         if let Some(target) = gradient_target {
             blend_rgb(&mut out_raw[i * 4..i * 4 + 3], target, edge as u16);
