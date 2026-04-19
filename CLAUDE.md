@@ -16,6 +16,48 @@ Not acceptable:
 
 If the honest answer is "I was lazy," say that. The user would rather hear it and redirect than unpack a fake justification.
 
+## Comments — what earns its place
+
+Default to **no comments**. A comment earns its place only when the WHY is non-obvious — a hidden constraint, a subtle invariant, a workaround, behaviour that would surprise a reader. Good names carry intent; don't restate them.
+
+Delete on sight:
+- Narration of WHAT the code does (`"Iterate over items and find the matching id"` — the code already says that).
+- References to future work (`"step 5 will wire this up"`, `"Phase 11 will move this"`).
+- "Used by X" / "See also Y" cross-refs to non-public siblings — code navigation does that job.
+- Paragraphs about feature design rationale — goes in the commit message, not inline.
+- Docstrings that echo the type signature (`"Returns Option<T>"`, `"Takes a &mut BatchItem"`).
+- "Fixed in commit abcd" / "Added for issue #123" — lives in git blame, not in code.
+
+Keep:
+- One-line invariant notes above `.unwrap()` (`// just pushed, non-empty`).
+- WHY for non-obvious policy (`// Feather runs AFTER refine — sharpen-then-soften`).
+- Cautions against regressions (`// Do NOT parallelise: nested rayon deadlocks the subprocess path`).
+
+Rule of thumb: if removing the comment wouldn't confuse a future reader who understands the surrounding code, delete it.
+
+## Hot paths
+
+A **hot path** is any code inside:
+- A per-frame `render` closure (egui runs at 60 Hz during interaction).
+- A live-preview dispatch (~10 Hz during a slider drag).
+- The subprocess worker's per-image loop.
+
+Before you write a `.clone()` on anything larger than ~1 KB in a hot path, ask: *is this cloning the shell (Arc) or the payload?* If payload, store the value as `Arc<T>` upstream and `Arc::clone` through the hot path. Tooltip / label strings: prefer `&'static str` when the content doesn't vary; reach for `format!` only when a value interpolates in.
+
+Before allocating (Vec, String, Box) inside a hot closure: can the allocation hoist out once per frame or once per session? Drag handlers, tooltip callbacks, and per-item render loops are the usual offenders.
+
+## Code-writing defaults (compounded from /simplify passes)
+
+These are the patterns `/simplify` agents repeatedly flag. Apply them on the first attempt:
+
+- **Size-aware cloning.** `.clone()` on a type >1 KB deserves a second look — `Arc::clone` is always free. If the data is shared read-only, store as `Arc<T>` at the point of creation, not at the point of use.
+- **Parameter count alarm at 6.** When a new param pushes a function past 6, either the function does two things or the params want to be a struct. `chip_option_rgba` at 9 is the ceiling this codebase has tolerated.
+- **Stringly-typed smell.** If you're `match`-ing on a set of literal strings (model names, scale names, mode names), extract an enum with `FromStr` + `Display` — matches the `EdgeScale` / `ModelKind` / `LineMode` idiom.
+- **Option / Result combinators.** Prefer `.map`, `.and_then`, `.map_or`, `.filter` over `if let Some(x) = foo { ... } else { ... }` when one arm is trivial. Stay in expression-land; reach for `match` only when both arms carry real work.
+- **Stay in iterator-land.** Avoid `.collect::<Vec<_>>().iter().map(...)` — the intermediate Vec is wasted allocation. Chain the iterators.
+- **Helper-before-hand-rolling.** Before writing inline code that looks like something else in the file (chip layout, popup wiring, file-read-and-delete, mask-cache key), grep for a helper. The `## Use-before-hand-rolling helper menu` tables below are canonical for GUI / core; when you see duplication across two call sites, extract a `pub(super) fn` rather than triple it.
+- **Tiered fields → tiered cache keys.** When a cached artifact depends on N inputs, the cache key must include all N. A mask cached on `(line_strength)` silently broke on scale change; now it's `(line_strength, edge_scale)`. If adding an input that affects a cache, audit every cache-key tuple reading from it.
+
 ## ARCHITECTURE.md standards
 
 ARCHITECTURE.md is a **technical reference** — someone reading it should quickly understand the codebase structure, the philosophy, and the non-obvious choices. It is **not** a dump of everything that changed in a phase.
@@ -122,6 +164,29 @@ Reach for these before writing the equivalent inline:
 | Pre-decode source bytes                        | `BatchManager::request_decode_source(...)` |
 
 If the helper you want doesn't exist, add it to the coordinator — not to `PrunrApp`.
+
+### View-layer helper menu
+
+Row 2 / 3 chip rendering has its own set of pub(super) helpers in `chip.rs`. Before hand-rolling a chip / popover layout:
+
+| You need…                                      | Use                                         |
+|------------------------------------------------|---------------------------------------------|
+| Chip button (icon + value + accent border)     | `chip::chip_button(ui, icon, value, accent)` |
+| Popover attached to a chip button              | `chip::popup_for(ui, id, &resp, body)`       |
+| Strong-headline tooltip on any response        | `chip::chip_tooltip(resp, label, body)`      |
+| Slider row without a chip wrapper              | `chip::slider_row_f32` / `slider_row_u32`    |
+
+Any new chip-shaped control (e.g. the Scale chip in `lines_popover.rs`) uses these three primitives — matches the visual rhythm of every other chip and keeps stroke / rounding / padding in one file.
+
+### Subprocess helper menu
+
+IPC readers / writers share patterns. Before hand-rolling:
+
+| You need…                                      | Use                                         |
+|------------------------------------------------|---------------------------------------------|
+| Read a temp file and delete it                 | `worker::read_and_delete(path) -> Option<Vec<u8>>` |
+| f32 slice → LE bytes (for temp-file write)     | `subprocess::ipc::f32s_to_le_bytes(&[f32])` |
+| LE bytes → Vec<f32> (for temp-file read)       | `subprocess::ipc::le_bytes_to_f32s(&[u8])`  |
 
 ### Anti-patterns (grep-rejectable)
 
