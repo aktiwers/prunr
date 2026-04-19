@@ -102,6 +102,7 @@ pub fn render(ctx: &egui::Context, toasts: &mut egui_notify::Toasts) -> bool {
                             opt_row(ui, "--lines-after-bg", "Remove BG first, then extract lines");
                             opt_row(ui, "--line-strength <n>", "Detail level, 0.0\u{2013}1.0 (default 0.5)");
                             opt_row(ui, "--line-color <hex>", "Solid color for lines (e.g. 000000)");
+                            opt_row(ui, "--line-scale <scale>", "Output scale: fine / balanced / bold / fused (default)");
                             opt_row(ui, "--bg-color <hex>", "Fill background with color (e.g. ffffff)");
                         });
 
@@ -117,6 +118,8 @@ pub fn render(ctx: &egui::Context, toasts: &mut egui_notify::Toasts) -> bool {
                         "Fine detail lines (more edges)");
                     example_row(ui, toasts, "prunr --lines --line-color 333333 --bg-color eeeeee sketch.jpg",
                         "Dark gray lines on light gray background");
+                    example_row(ui, toasts, "prunr --lines --line-scale bold sketch.jpg",
+                        "Bold, abstracted outlines (DexiNed block5 output)");
                 }
 
                 // ── Mask ──

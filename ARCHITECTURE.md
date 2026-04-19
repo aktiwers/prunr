@@ -369,6 +369,8 @@ A separate `EdgeEngine` handles line extraction with its own ONNX session. Three
 
 Inference is split from the threshold-and-composite step so the raw DexiNed tensor can be cached and re-thresholded without re-running the model. This powers EdgeRerun Tier 2.
 
+**Scale selection.** DexiNed produces 7 outputs per inference (6 side blocks + fused `block_cat`). The UI exposes 4 scales (`Fine`, `Balanced`, `Bold`, `Fused`); all 4 are extracted from one inference pass and cached together in `CompressedEdgeTensors`. Switching scales is a cache lookup, never a re-inference — so a scale-change recipe diff returns `EdgeRerun`, not `FullPipeline`.
+
 ## GPU Execution Providers
 
 ```rust

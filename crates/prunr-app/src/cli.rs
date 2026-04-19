@@ -69,6 +69,11 @@ pub struct Cli {
     #[arg(long)]
     pub line_color: Option<String>,
 
+    /// DexiNed output scale: `fine` (micro-edges), `balanced` (mid-scale),
+    /// `bold` (abstract outlines), `fused` (default, combined).
+    #[arg(long, default_value_t = prunr_core::EdgeScale::Fused)]
+    pub line_scale: prunr_core::EdgeScale,
+
     /// Fill transparent background with a color (hex, e.g. "ffffff" for white).
     #[arg(long)]
     pub bg_color: Option<String>,
@@ -369,7 +374,7 @@ fn run_batch(args: &Cli) -> i32 {
         line_strength: args.line_strength,
         solid_line_color,
         edge_thickness: 0,
-        edge_scale: prunr_core::EdgeScale::Fused,
+        edge_scale: args.line_scale,
     };
     let batch_results = run_batch_subprocess(
         &valid_paths, &valid_indices, model, args.jobs, mask, args.cpu,
