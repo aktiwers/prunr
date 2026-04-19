@@ -123,7 +123,7 @@ pub fn render(
                 ui, "gamma", "γ", "Gamma",
                 tip!("Stage 1 of 5. How hard the mask cuts. >1 removes more aggressively, <1 is gentler on fine edges. Feeds every stage below."),
                 &mut item_settings.gamma,
-                0.1..=10.0, defaults.template.gamma,
+                0.01..=10.0, defaults.template.gamma,
                 true, // log scale — matches perceptual symmetry around 1.0
                 |v| format!("{v:.2}"),
             ), Tier::Mask, &mut change);
