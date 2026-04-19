@@ -834,18 +834,15 @@ fn report_cancelled(
     ctx.request_repaint();
 }
 
-/// Cancel path: nudge the child, wait briefly, drain any in-flight results,
-/// then kill + clean up so no orphan IPC temps leak.
+/// Cancel path: kill the child immediately and clean up. We used to send
+/// `Cancel` + sleep 200ms to let the child emit `Finished`, but killing the
+/// process is instant and orphaned IPC temps are swept by `cleanup_ipc_temp`
+/// — the politeness delay just made "Cancel All" feel laggy.
 fn cancel_subprocess(
     sub: &mut SubprocessManager,
     res_tx: &mpsc::Sender<WorkerResult>,
     ctx: &egui::Context,
 ) {
-    let _ = sub.send_cancel();
-    std::thread::sleep(Duration::from_millis(200));
-    sub.poll_events();
-    // Any tempfiles written between drain and cancel honouring would leak.
-    // Kill + cleanup mirrors the crash path.
     sub.kill();
     crate::subprocess::protocol::cleanup_ipc_temp();
     let _ = res_tx.send(WorkerResult::Cancelled);
