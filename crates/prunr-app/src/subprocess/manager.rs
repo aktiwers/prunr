@@ -216,8 +216,7 @@ impl SubprocessManager {
     ) -> Result<(), String> {
         // Write tensor as raw f32 LE bytes to temp file
         let tensor_path = ipc_temp_dir().join(format!("tensor_{item_id}.raw"));
-        let tensor_bytes = super::ipc::f32s_to_le_bytes(tensor_data);
-        std::fs::write(&tensor_path, &tensor_bytes)
+        std::fs::write(&tensor_path, super::ipc::f32s_as_le_bytes(tensor_data))
             .map_err(|e| format!("Failed to write tensor temp file: {e}"))?;
 
         // Write original image bytes to temp file

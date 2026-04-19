@@ -4262,6 +4262,7 @@ version = "0.4.7"
 dependencies = [
  "arboard",
  "bincode",
+ "bytemuck",
  "clap",
  "dirs",
  "drag",
