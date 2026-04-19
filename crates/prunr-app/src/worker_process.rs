@@ -273,7 +273,7 @@ pub fn run_worker() -> ! {
                             img_ref.and_then(|img| {
                                 // invariant: line_mode == EdgesOnly → needs_edge → edge_eng loaded.
                                 let eng_ref = edge_eng.as_ref().unwrap();
-                                eng_ref.infer_tensor(img).map(|(tensor, h, w)| {
+                                eng_ref.infer_tensor(img, edge.edge_scale).map(|(tensor, h, w)| {
                                     let rgba_image = prunr_core::finalize_edges(
                                         &tensor, h, w, img, &edge,
                                     );
@@ -289,7 +289,7 @@ pub fn run_worker() -> ! {
                             if let Some(ref img) = chain_img {
                                 // invariant: line_mode == SubjectOutline → needs_edge → edge_eng loaded.
                                 let eng_ref = edge_eng.as_ref().unwrap();
-                                eng_ref.infer_tensor(img).map(|(tensor, h, w)| {
+                                eng_ref.infer_tensor(img, edge.edge_scale).map(|(tensor, h, w)| {
                                     let rgba_image = prunr_core::finalize_edges(
                                         &tensor, h, w, img, &edge,
                                     );
@@ -312,7 +312,7 @@ pub fn run_worker() -> ! {
                                     let img = image::DynamicImage::ImageRgba8(pr.rgba_image);
                                     // invariant: line_mode == SubjectOutline → needs_edge → edge_eng loaded.
                                     let eng_ref = edge_eng.as_ref().unwrap();
-                                    eng_ref.infer_tensor(&img).map(|(tensor, h, w)| {
+                                    eng_ref.infer_tensor(&img, edge.edge_scale).map(|(tensor, h, w)| {
                                         let rgba_image = prunr_core::finalize_edges(
                                             &tensor, h, w, &img, &edge,
                                         );
