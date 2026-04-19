@@ -66,6 +66,25 @@ impl Drop for SemaphoreGuard {
     }
 }
 
+fn is_item_cancelled(
+    set: &Arc<Mutex<std::collections::HashSet<u64>>>,
+    item_id: u64,
+) -> bool {
+    let guard = set.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    guard.contains(&item_id)
+}
+
+/// Remove each temp path that lives under the IPC directory. Silent on
+/// missing files — subprocess cancel branches call this before the normal
+/// post-spawn cleanup would have fired.
+fn cleanup_ipc_temps(ipc: &std::path::Path, paths: &[&std::path::Path]) {
+    for p in paths {
+        if p.starts_with(ipc) {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+}
+
 /// Pack an `EdgeInferenceResult`'s per-scale tensors into one LE byte buffer
 /// for IPC. Matches the layout the parent expects in `read_edge_tensor_cache`.
 fn pack_edge_tensors(res: &prunr_core::EdgeInferenceResult) -> Vec<u8> {
@@ -181,6 +200,10 @@ pub fn run_worker() -> ! {
         .unwrap_or_else(|_| rayon::ThreadPoolBuilder::new().build().unwrap());
 
     let cancel = Arc::new(AtomicBool::new(false));
+    // Worker-side mirror of the parent's per-item cancel set — IPC can't
+    // share `Arc<AtomicBool>`, so we round-trip through `CancelItem` inserts.
+    let cancelled_items: Arc<Mutex<std::collections::HashSet<u64>>> =
+        Arc::new(Mutex::new(std::collections::HashSet::new()));
     let in_flight = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let mut engine_idx: usize = 0;
 
@@ -211,6 +234,7 @@ pub fn run_worker() -> ! {
 
                 let evt_tx = evt_tx.clone();
                 let cancel = cancel.clone();
+                let cancelled_items = cancelled_items.clone();
                 let in_flight = in_flight.clone();
                 let edge_eng = edge_engine.clone();
                 let provider = active_provider.clone();
@@ -219,6 +243,14 @@ pub fn run_worker() -> ! {
 
                 pool.spawn(move || {
                     if cancel.load(Ordering::Acquire) {
+                        in_flight.fetch_sub(1, Ordering::AcqRel);
+                        return;
+                    }
+                    if is_item_cancelled(&cancelled_items, item_id) {
+                        let _ = evt_tx.send(SubprocessEvent::ImageError {
+                            item_id,
+                            error: CANCELLED_ERR_MSG.into(),
+                        });
                         in_flight.fetch_sub(1, Ordering::AcqRel);
                         return;
                     }
@@ -595,9 +627,18 @@ pub fn run_worker() -> ! {
                 let in_flight = in_flight.clone();
                 let sem = semaphore.clone();
                 let ipc = ipc_dir.clone();
+                let cancelled_items = cancelled_items.clone();
 
                 in_flight.fetch_add(1, Ordering::AcqRel);
                 pool.spawn(move || {
+                    if is_item_cancelled(&cancelled_items, item_id) {
+                        let _ = evt_tx.send(SubprocessEvent::ImageError {
+                            item_id, error: CANCELLED_ERR_MSG.into(),
+                        });
+                        cleanup_ipc_temps(&ipc, &[&tensor_path, &original_image_path]);
+                        in_flight.fetch_sub(1, Ordering::AcqRel);
+                        return;
+                    }
                     // Conservative weight — postprocess upscales tensor to original resolution
                     // which allocates significant memory for Lanczos3 + guided filter
                     let _sem_guard = sem.acquire(10);
@@ -673,9 +714,18 @@ pub fn run_worker() -> ! {
                 let edge_settings = edge.clone();
                 let edge_eng = edge_engine.clone();
                 let cancel = cancel.clone();
+                let cancelled_items = cancelled_items.clone();
 
                 in_flight.fetch_add(1, Ordering::AcqRel);
                 pool.spawn(move || {
+                    if is_item_cancelled(&cancelled_items, item_id) {
+                        let _ = evt_tx.send(SubprocessEvent::ImageError {
+                            item_id, error: CANCELLED_ERR_MSG.into(),
+                        });
+                        cleanup_ipc_temps(&ipc, &[&seg_tensor_path, &image_path]);
+                        in_flight.fetch_sub(1, Ordering::AcqRel);
+                        return;
+                    }
                     let _sem_guard = sem.acquire(10);
 
                     // seg_tensor_path is both our input and the output we hand
@@ -768,6 +818,11 @@ pub fn run_worker() -> ! {
                 });
             }
 
+            SubprocessCommand::CancelItem { item_id } => {
+                let mut guard = cancelled_items.lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                guard.insert(item_id);
+            }
             SubprocessCommand::Cancel => {
                 cancel.store(true, Ordering::Release);
                 // Wait for in-flight to drain

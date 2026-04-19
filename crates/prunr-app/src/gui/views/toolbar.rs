@@ -132,32 +132,33 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
             let selected_processing = app.batch.items.iter()
                 .any(|i| i.selected && i.status == BatchStatus::Processing);
 
-            // Cancel button. Action is always "drop the cancel flag and stop
-            // the current batch" — the label only changes to reflect user
-            // context. Partial cancel (stop selected, keep others running)
-            // needs per-item cancellation in the worker bridge, not done yet.
             if is_batch_processing {
-                let cancel_label = if selected_processing { "Cancel Selected" } else { "Cancel All" };
+                let partial = selected_processing;
+                let cancel_label = if partial { "Cancel Selected" } else { "Cancel All" };
                 let cancel_btn = egui::Button::new(
                     RichText::new(format!("{}  {cancel_label}", ICON_CANCEL.codepoint)).color(Color32::WHITE),
                 )
                 .fill(theme::DESTRUCTIVE)
                 .corner_radius(theme::BUTTON_ROUNDING)
                 .min_size(egui::vec2(0.0, theme::BTN_HEIGHT));
-                let tip = if selected_processing {
-                    "Cancel the current batch (Escape)"
+                let tip = if partial {
+                    "Stop the selected items — others keep running"
                 } else {
                     "Cancel all processing (Escape)"
                 };
                 if ui.add(cancel_btn).on_hover_text(tip).clicked() {
-                    app.handle_cancel();
-                    for item in &mut app.batch.items {
-                        if item.status == BatchStatus::Processing {
-                            item.status = BatchStatus::Pending;
+                    if partial {
+                        app.handle_cancel_selected();
+                    } else {
+                        app.handle_cancel();
+                        for item in &mut app.batch.items {
+                            if item.status == BatchStatus::Processing {
+                                item.status = BatchStatus::Pending;
+                            }
                         }
+                        app.state = AppState::Loaded;
+                        app.status.text = "Cancelled".to_string();
                     }
-                    app.state = AppState::Loaded;
-                    app.status.text = "Cancelled".to_string();
                 }
             }
 

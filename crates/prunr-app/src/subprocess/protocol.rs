@@ -6,6 +6,12 @@
 use prunr_core::{ModelKind, MaskSettings, EdgeSettings, ProgressStage, LineMode};
 use serde::{Serialize, Deserialize};
 
+/// `ImageError.error` value emitted when a per-item `CancelItem` trips at
+/// dispatch. The parent matches on this exact string to revert the item to
+/// `Pending` rather than flag it as `Error`; any drift silently breaks the
+/// round-trip.
+pub const CANCELLED_ERR_MSG: &str = "Cancelled";
+
 /// Parent → Child commands (sent over child's stdin).
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub enum SubprocessCommand {
@@ -65,6 +71,10 @@ pub enum SubprocessCommand {
     },
     /// Cancel: stop after current image, send Finished.
     Cancel,
+    /// Cancel one item by id — worker emits `ImageError { error:
+    /// CANCELLED_ERR_MSG }` at the next dispatch check. Other in-flight
+    /// jobs keep running, unlike `Cancel` which stops the whole batch.
+    CancelItem { item_id: u64 },
     /// Shut down gracefully.
     Shutdown,
 }
@@ -245,6 +255,13 @@ mod tests {
     fn command_cancel_and_shutdown_roundtrip() {
         roundtrip(&SubprocessCommand::Cancel);
         roundtrip(&SubprocessCommand::Shutdown);
+    }
+
+    #[test]
+    fn command_cancel_item_roundtrip() {
+        roundtrip(&SubprocessCommand::CancelItem { item_id: 42 });
+        roundtrip(&SubprocessCommand::CancelItem { item_id: 0 });
+        roundtrip(&SubprocessCommand::CancelItem { item_id: u64::MAX });
     }
 
     #[test]

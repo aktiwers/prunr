@@ -18,8 +18,9 @@
 //! - `BatchManager` (per the cross-coordinator borrow rule). Methods that
 //!   operate on the batch take `&mut BatchManager` per call, never as a field.
 
-use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::time::Instant;
 
@@ -29,12 +30,66 @@ use super::live_preview::LivePreview;
 use super::memory::AdmissionController;
 use super::worker::{WorkerMessage, WorkerResult, WorkItem};
 
+#[derive(Clone)]
+pub struct CancelRegistry {
+    global: Arc<AtomicBool>,
+    // Short-circuit for the common zero-cancel case: `is_cancelled` skips the
+    // mutex entirely unless some per-item entry has been requested.
+    has_per_item: Arc<AtomicBool>,
+    per_item: Arc<Mutex<HashMap<u64, Arc<AtomicBool>>>>,
+}
+
+impl CancelRegistry {
+    pub(crate) fn new() -> Self {
+        Self {
+            global: Arc::new(AtomicBool::new(false)),
+            has_per_item: Arc::new(AtomicBool::new(false)),
+            per_item: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    pub(crate) fn is_global_cancelled(&self) -> bool {
+        self.global.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn is_cancelled(&self, item_id: u64) -> bool {
+        if self.is_global_cancelled() {
+            return true;
+        }
+        if !self.has_per_item.load(Ordering::Acquire) {
+            return false;
+        }
+        let guard = self.per_item.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.get(&item_id).is_some_and(|f| f.load(Ordering::Acquire))
+    }
+
+    pub(crate) fn request_global_cancel(&self) {
+        self.global.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn request_item_cancel(&self, item_id: u64) {
+        let mut guard = self.per_item.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.entry(item_id)
+            .or_insert_with(|| Arc::new(AtomicBool::new(false)))
+            .store(true, Ordering::Release);
+        self.has_per_item.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn reset(&self) {
+        self.global.store(false, Ordering::Release);
+        let mut guard = self.per_item.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.clear();
+        self.has_per_item.store(false, Ordering::Release);
+    }
+}
+
 pub(crate) struct Processor {
     pub(crate) worker_tx: mpsc::Sender<WorkerMessage>,
     pub(crate) worker_rx: mpsc::Receiver<WorkerResult>,
-    /// Shared with the worker bridge thread — set by `cancel`, polled by the
-    /// bridge to stop a batch in flight.
-    pub(crate) cancel_flag: Arc<AtomicBool>,
+    /// Cancellation state shared with the worker bridge. `global` stops the
+    /// whole batch; per-item entries drop individual items at the next
+    /// dispatch check.
+    pub(crate) cancels: CancelRegistry,
     pub(crate) live_preview: LivePreview,
     /// Active admission controller (present only during streaming batches).
     pub(crate) admission: Option<AdmissionController>,
@@ -55,7 +110,7 @@ impl Processor {
         Self {
             worker_tx,
             worker_rx,
-            cancel_flag: Arc::new(AtomicBool::new(false)),
+            cancels: CancelRegistry::new(),
             live_preview: LivePreview::default(),
             admission: None,
             admission_tx: None,
@@ -66,8 +121,8 @@ impl Processor {
 
     /// Drop admission state so no further items are admitted. Called on
     /// cancel (user or worker-side) and by the cancelled-message handler.
-    /// Leaves `cancel_flag` untouched — that's owned by the caller's cancel
-    /// protocol.
+    /// Leaves the cancel registry untouched — that's owned by the caller's
+    /// cancel protocol.
     pub(crate) fn clear_admission(&mut self) {
         self.admission = None;
         self.admission_tx = None;
@@ -77,7 +132,6 @@ impl Processor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::Ordering;
 
     fn fixture() -> Processor {
         let (tx, _rx_unused) = mpsc::channel::<WorkerMessage>();
@@ -94,32 +148,72 @@ mod tests {
     }
 
     #[test]
-    fn clear_admission_drops_both_sides_but_leaves_cancel_flag() {
+    fn clear_admission_drops_both_sides_but_leaves_cancels() {
         let mut p = fixture();
         let (tx, _rx) = mpsc::channel::<WorkItem>();
         p.admission_tx = Some(tx);
-        // admission controller is harder to construct from a test; the None → Some
-        // transition for admission is adequately covered by admission_tx + a sentinel.
-        p.cancel_flag.store(true, Ordering::Release);
+        p.cancels.request_global_cancel();
         assert!(p.admission_tx.is_some());
 
         p.clear_admission();
 
         assert!(p.admission.is_none());
         assert!(p.admission_tx.is_none());
-        assert!(p.cancel_flag.load(Ordering::Acquire),
-            "clear_admission must leave cancel_flag untouched — that's the caller's protocol");
+        assert!(p.cancels.is_cancelled(999),
+            "clear_admission must leave cancel registry untouched — that's the caller's protocol");
     }
 
     #[test]
-    fn cancel_flag_is_shared_arc_visible_across_clones() {
-        // The cancel_flag is cloned into WorkerMessage::BatchProcess and read
-        // by the bridge thread. A store on the parent must be visible via any
-        // clone of the Arc — verify by storing through one handle, reading via another.
-        let p = fixture();
-        let clone = p.cancel_flag.clone();
-        assert!(!clone.load(Ordering::Acquire));
-        p.cancel_flag.store(true, Ordering::Release);
-        assert!(clone.load(Ordering::Acquire), "Arc clone must observe the store");
+    fn cancel_registry_clone_shares_state() {
+        // Cloned into WorkerMessage::BatchProcess and read by the bridge —
+        // a store on the parent must be visible via any clone.
+        let r = CancelRegistry::new();
+        let handle = r.clone();
+        assert!(!handle.is_cancelled(5));
+        r.request_global_cancel();
+        assert!(handle.is_cancelled(5), "Clone must observe the global store");
+    }
+
+    #[test]
+    fn cancel_registry_per_item_is_independent_of_global() {
+        let r = CancelRegistry::new();
+        r.request_item_cancel(42);
+        assert!(r.is_cancelled(42));
+        assert!(!r.is_cancelled(7), "per-item cancel must not leak to other ids");
+    }
+
+    #[test]
+    fn cancel_registry_reset_clears_all_flags() {
+        let r = CancelRegistry::new();
+        r.request_global_cancel();
+        r.request_item_cancel(42);
+        r.reset();
+        assert!(!r.is_cancelled(42));
+        assert!(!r.is_cancelled(99));
+    }
+
+    #[test]
+    fn global_cancel_short_circuits_per_item_lookup() {
+        let r = CancelRegistry::new();
+        r.request_global_cancel();
+        // Any id reports cancelled when global is set, even ones with no per-item entry.
+        assert!(r.is_cancelled(u64::MAX));
+    }
+
+    #[test]
+    fn zero_cancel_is_cancelled_does_not_touch_mutex() {
+        // `is_cancelled` is called ~160×/s from the bridge loop. Until any
+        // per-item entry is requested the mutex must stay cold — poisoning
+        // the map from another thread and then calling `is_cancelled` on a
+        // fresh registry must not panic.
+        let r = CancelRegistry::new();
+        // Poison the inner mutex from a panicking thread.
+        let p = r.per_item.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = p.lock().unwrap();
+            panic!("deliberate poison");
+        }).join();
+        // has_per_item is still false → no lock taken → no panic propagation.
+        assert!(!r.is_cancelled(42));
     }
 }

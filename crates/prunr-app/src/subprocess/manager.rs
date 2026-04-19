@@ -280,6 +280,13 @@ impl SubprocessManager {
             .map_err(|e| format!("Failed to send Cancel: {e}"))
     }
 
+    /// Cancel one item by id — worker drops it at the next dispatch check
+    /// and emits `ImageError { error: "Cancelled" }`.
+    pub fn send_cancel_item(&mut self, item_id: u64) -> Result<(), String> {
+        write_message(&mut self.stdin_writer, &SubprocessCommand::CancelItem { item_id })
+            .map_err(|e| format!("Failed to send CancelItem: {e}"))
+    }
+
     /// Send shutdown signal to the child.
     pub fn send_shutdown(&mut self) -> Result<(), String> {
         write_message(&mut self.stdin_writer, &SubprocessCommand::Shutdown)
