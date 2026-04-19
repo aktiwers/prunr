@@ -67,6 +67,20 @@ fn chip_button(ui: &mut Ui, icon: &str, value: &str, accent: bool) -> Response {
     resp
 }
 
+/// Attach a rich hover tooltip: strong setting-name heading + body text.
+/// Every chip uses this so the user always sees what they're hovering.
+fn chip_tooltip(resp: Response, label: &str, body: &str) -> Response {
+    resp.on_hover_ui(|ui| {
+        ui.label(RichText::new(label).strong().color(theme::TEXT_PRIMARY));
+        ui.add_space(theme::SPACE_XS);
+        ui.label(
+            RichText::new(body)
+                .color(theme::TEXT_PRIMARY)
+                .size(theme::FONT_SIZE_MONO),
+        );
+    })
+}
+
 /// Render the standard reset-to-default button at the bottom of a popover.
 fn reset_button(ui: &mut Ui, tooltip: &str) -> bool {
     ui.small_button(
@@ -123,7 +137,7 @@ pub fn chip_f32(
     let pop_id = egui::Id::new(("chip_f32", id_salt));
     let accent = (*value - default_value).abs() > f32::EPSILON;
     let display = format(*value);
-    let resp = chip_button(ui, icon, &display, accent).on_hover_text(tooltip);
+    let resp = chip_tooltip(chip_button(ui, icon, &display, accent), label, tooltip);
 
     let mut out = ChipChange::default();
     popup_for(ui, pop_id, &resp, |ui| {
@@ -168,7 +182,7 @@ pub fn chip_u32(
     let pop_id = egui::Id::new(("chip_u32", id_salt));
     let accent = *value != default_value;
     let display = format(*value);
-    let resp = chip_button(ui, icon, &display, accent).on_hover_text(tooltip);
+    let resp = chip_tooltip(chip_button(ui, icon, &display, accent), label, tooltip);
 
     let mut out = ChipChange::default();
     popup_for(ui, pop_id, &resp, |ui| {
@@ -207,7 +221,7 @@ pub fn chip_option_f32(
         Some(v) => format(*v),
         None => off_label.to_string(),
     };
-    let resp = chip_button(ui, icon, &display, accent).on_hover_text(tooltip);
+    let resp = chip_tooltip(chip_button(ui, icon, &display, accent), label, tooltip);
 
     let mut out = ChipChange::default();
     popup_for(ui, pop_id, &resp, |ui| {
@@ -251,7 +265,7 @@ pub fn chip_bool(
 ) -> ChipChange {
     let pop_id = egui::Id::new(("chip_bool", id_salt));
     let display = if *value { "On" } else { "Off" };
-    let resp = chip_button(ui, icon, display, *value).on_hover_text(tooltip);
+    let resp = chip_tooltip(chip_button(ui, icon, display, *value), label, tooltip);
 
     let mut out = ChipChange::default();
     popup_for(ui, pop_id, &resp, |ui| {
@@ -280,7 +294,7 @@ pub fn chip_bool_with_extras(
 ) -> ChipChange {
     let pop_id = egui::Id::new(("chip_bool_with_extras", id_salt));
     let display = if *value { "On" } else { "Off" };
-    let resp = chip_button(ui, icon, display, *value).on_hover_text(tooltip);
+    let resp = chip_tooltip(chip_button(ui, icon, display, *value), label, tooltip);
 
     let mut out = ChipChange::default();
     popup_for(ui, pop_id, &resp, |ui| {
@@ -365,7 +379,7 @@ pub fn chip_option_rgba(
         Some(_) => "Set".to_string(),
         None => off_label.to_string(),
     };
-    let resp = chip_button(ui, icon, &display, accent).on_hover_text(tooltip);
+    let resp = chip_tooltip(chip_button(ui, icon, &display, accent), label, tooltip);
 
     let mut out = ChipChange::default();
     popup_for(ui, pop_id, &resp, |ui| {
@@ -414,7 +428,7 @@ pub fn chip_option_rgb(
         Some(_) => "Set".to_string(),
         None => "Original".to_string(),
     };
-    let resp = chip_button(ui, icon, &display, accent).on_hover_text(tooltip);
+    let resp = chip_tooltip(chip_button(ui, icon, &display, accent), label, tooltip);
 
     let mut out = ChipChange::default();
     popup_for(ui, pop_id, &resp, |ui| {
