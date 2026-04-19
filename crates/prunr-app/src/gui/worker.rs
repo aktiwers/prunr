@@ -110,17 +110,6 @@ impl CompressedEdgeTensors {
         Some(crate::subprocess::ipc::le_bytes_to_f32s(&bytes))
     }
 
-    /// Decompress every scale into a single bundle — for the animation-sweep
-    /// path which may cycle `LineStyle::DualScale` and thus needs two scales
-    /// live at once.
-    pub fn bundle_all(&self) -> Option<EdgeBundle> {
-        let mut tensors: [Vec<f32>; EDGE_SCALE_COUNT] = Default::default();
-        for scale in [EdgeScale::Fine, EdgeScale::Balanced, EdgeScale::Bold, EdgeScale::Fused] {
-            tensors[scale as usize] = self.decompress(scale)?;
-        }
-        Some(EdgeBundle { tensors, height: self.height, width: self.width })
-    }
-
     /// Total compressed bytes across all 4 scales (for budget tracking).
     pub fn compressed_size(&self) -> usize {
         self.tensors.iter().map(|t| t.len()).sum()
@@ -146,14 +135,6 @@ impl CompressedTensor {
             model: self.model,
         })
     }
-}
-
-/// Decompressed DexiNed output — all 4 scales together. See
-/// `CompressedEdgeTensors::bundle_all`.
-pub struct EdgeBundle {
-    pub tensors: [Vec<f32>; EDGE_SCALE_COUNT],
-    pub height: u32,
-    pub width: u32,
 }
 
 /// A Tier 2 re-postprocess item: cached tensor + original image bytes.

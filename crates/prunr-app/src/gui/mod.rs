@@ -18,7 +18,6 @@ pub mod drag_export;
 pub mod history_disk;
 pub mod memory;
 pub mod live_preview;
-pub mod animation_sweep;
 
 #[cfg(test)]
 mod tests;

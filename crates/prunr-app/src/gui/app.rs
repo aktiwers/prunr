@@ -14,7 +14,7 @@ use super::settings::Settings;
 use super::state::AppState;
 use super::theme;
 use super::worker::{WorkerMessage, WorkerResult, spawn_worker};
-use super::views::{adjustments_toolbar, animation_sweep as animation_sweep_view, canvas, cli_help, pipeline_flow, settings, shortcuts, sidebar, statusbar, toolbar};
+use super::views::{adjustments_toolbar, canvas, cli_help, pipeline_flow, settings, shortcuts, sidebar, statusbar, toolbar};
 
 pub struct PrunrApp {
     // State
@@ -82,15 +82,6 @@ pub struct PrunrApp {
 
     // ── Drag-out (OS drag to external apps) ────────────────────────────────
     pub(crate) drag_export: super::drag_export_state::DragExportState,
-
-    // ── Animation sweep export ─────────────────────────────────────────────
-    pub(crate) show_animation_sweep: bool,
-    /// Timestamp the sweep modal was opened — gates the backdrop click-outside
-    /// detector so the same click that opens it can't close it.
-    pub(crate) animation_sweep_opened_at: f64,
-    pub(crate) animation_sweep_ui: super::animation_sweep::SweepUiState,
-    pub(crate) sweep_events_rx: Option<mpsc::Receiver<super::animation_sweep::SweepEvent>>,
-    pub(crate) sweep_progress: Option<(usize, usize)>,
 }
 
 impl PrunrApp {
@@ -205,11 +196,6 @@ impl PrunrApp {
                     .with_anchor(egui_notify::Anchor::BottomLeft)
                     .with_margin(egui::vec2(theme::SPACE_SM, theme::STATUS_BAR_HEIGHT + theme::SPACE_SM)),
             drag_export: super::drag_export_state::DragExportState::new(),
-            show_animation_sweep: false,
-            animation_sweep_opened_at: 0.0,
-            animation_sweep_ui: super::animation_sweep::SweepUiState::default(),
-            sweep_events_rx: None,
-            sweep_progress: None,
         }
     }
 
@@ -376,7 +362,6 @@ impl PrunrApp {
             || self.show_shortcuts
             || self.show_cli_help
             || self.show_pipeline_flow
-            || self.show_animation_sweep
     }
 
     /// Undo background removal on selected items (or current item if none selected).
@@ -824,11 +809,69 @@ impl PrunrApp {
     pub fn handle_save_selected(&mut self) {
         let has_selection = self.batch.items.iter()
             .any(|i| i.selected && i.status == BatchStatus::Done && i.result_rgba.is_some());
+        // Layers mode: always folder-picker, regardless of selection count.
+        // The filenames are derived from each item's source stem + layer suffix.
+        if self.settings.export_split_layers {
+            self.save_layers_to_folder(has_selection);
+            return;
+        }
         if has_selection {
             self.save_selected_to_folder();
         } else {
             self.save_current_to_file();
         }
+    }
+
+    /// Folder-picker + multi-file save for layers mode. Renders up to 3 PNGs
+    /// per target (subject / lines / mask) via `drag_export::render_layer_bytes`
+    /// and writes them on a background thread. Per-item fallback to composite
+    /// when tensors are missing (e.g. unprocessed item), so every target lands
+    /// at least one file.
+    fn save_layers_to_folder(&mut self, has_selection: bool) {
+        let Some(folder) = self.save_dialog()
+            .set_title("Save layers \u{2014} Choose folder")
+            .pick_folder() else { return };
+
+        let targets: Vec<u64> = if has_selection {
+            self.batch.items.iter()
+                .filter(|i| i.selected && i.status == BatchStatus::Done)
+                .map(|i| i.id)
+                .collect()
+        } else {
+            self.batch.selected_item().map(|i| vec![i.id]).unwrap_or_default()
+        };
+        if targets.is_empty() { return; }
+
+        let mut payload: Vec<(PathBuf, Vec<u8>)> = Vec::new();
+        for id in &targets {
+            let Some(item) = self.batch.find_by_id(*id) else { continue };
+            let layers = super::drag_export::render_layer_bytes(item);
+            if layers.is_empty() {
+                // No cached tensors — fall back to composite PNG so the user
+                // still lands a file per target.
+                if let Some(rgba) = item.result_rgba.as_ref() {
+                    let baked = Self::apply_bg_for_export(rgba, item.settings.bg_rgb());
+                    if let Ok(bytes) = prunr_core::encode_rgba_png(&baked) {
+                        let stem = Path::new(&item.filename)
+                            .file_stem().and_then(|s| s.to_str()).unwrap_or("image");
+                        payload.push((folder.join(format!("{stem}-nobg.png")), bytes));
+                    }
+                }
+                continue;
+            }
+            for (filename, bytes) in layers {
+                payload.push((folder.join(filename), bytes));
+            }
+        }
+
+        if payload.is_empty() {
+            self.toasts.error("Nothing to save — process the image first");
+            return;
+        }
+        let file_count = payload.len();
+        self.toasts.info(format!("Saving {file_count} file(s)..."));
+        let tx = self.batch.bg_io.save_done_tx.clone();
+        spawn_save_prerendered(payload, tx);
     }
 
     /// No checkboxes selected — save just the currently-viewed result via a
@@ -969,46 +1012,6 @@ impl PrunrApp {
                 );
             }
         }
-    }
-
-    // Gated on cached tensors — sweep replays Tier 2/3 work, never re-infers.
-    pub fn open_animation_sweep(&mut self, ctx: &egui::Context) {
-        let Some(item) = self.batch.selected_item() else {
-            self.toasts.error("No image selected");
-            return;
-        };
-        if item.status != BatchStatus::Done {
-            self.toasts.error("Process the image first");
-            return;
-        }
-        if item.cached_tensor.is_none() && item.cached_edge_tensors.is_none() {
-            self.toasts.error("No cached tensors — reprocess the image");
-            return;
-        }
-        self.show_animation_sweep = true;
-        self.animation_sweep_opened_at = ctx.input(|i| i.time);
-    }
-
-    pub fn start_animation_sweep(&mut self) {
-        use super::animation_sweep::{self, SweepRequest};
-        let Some(item) = self.batch.selected_item() else {
-            self.toasts.error("No image selected");
-            return;
-        };
-        let (tx, rx) = mpsc::channel::<animation_sweep::SweepEvent>();
-        let req = match SweepRequest::from_item(item, &self.animation_sweep_ui, tx) {
-            Ok(req) => req,
-            Err(err) => {
-                self.toasts.error(err);
-                return;
-            }
-        };
-        let total = req.frames;
-        animation_sweep::spawn_sweep(req);
-        self.sweep_events_rx = Some(rx);
-        self.sweep_progress = Some((0, total));
-        self.toasts.info("Exporting animation…");
-        self.show_animation_sweep = false;
     }
 
     pub fn handle_copy(&mut self) {
@@ -1964,7 +1967,6 @@ impl PrunrApp {
             }
         }
 
-        self.drain_sweep_events(ctx);
 
         let id_floor = self.batch.next_id;
         let mut loaded_count = 0u32;
@@ -2261,46 +2263,8 @@ impl PrunrApp {
         if self.show_settings {
             settings::render(ctx, self);
         }
-        if self.show_animation_sweep {
-            animation_sweep_view::render(ctx, self);
-        }
         // Toasts — rendered last as foreground overlay.
         self.toasts.show(ctx);
-    }
-
-    fn drain_sweep_events(&mut self, ctx: &egui::Context) {
-        use super::animation_sweep::SweepEvent;
-        let Some(rx) = self.sweep_events_rx.as_ref() else { return };
-        let mut any = false;
-        let mut should_close = false;
-        while let Ok(evt) = rx.try_recv() {
-            any = true;
-            match evt {
-                SweepEvent::Progress { done, total } => {
-                    self.sweep_progress = Some((done, total));
-                    self.status.set_temporary(&format!("Animation: {done}/{total}"));
-                }
-                SweepEvent::Finished { frames_written, dir } => {
-                    self.toasts.success(format!(
-                        "Wrote {frames_written} frames to {}", dir.display()
-                    ));
-                    should_close = true;
-                }
-                SweepEvent::Failed(err) => {
-                    self.toasts.error(format!("Animation export failed: {err}"));
-                    should_close = true;
-                }
-            }
-        }
-        if should_close {
-            self.sweep_events_rx = None;
-            self.sweep_progress = None;
-        }
-        // Idle egui sleeps — keep the progress UI alive while the thread is
-        // streaming events.
-        if any {
-            ctx.request_repaint();
-        }
     }
 }
 
@@ -2315,6 +2279,28 @@ fn spawn_save_single(path: PathBuf, rgba: Arc<image::RgbaImage>, tx: mpsc::Sende
                 Err(e) => format!("Save failed: {e}"),
             },
             Err(e) => format!("Save failed: {e}"),
+        };
+        let _ = tx.send(msg);
+    });
+}
+
+/// Write a vec of pre-encoded `(path, bytes)` pairs on a background thread.
+/// Used by the layers-save path — rendering happened on the UI thread (from
+/// cached tensors), this just does disk writes.
+fn spawn_save_prerendered(payload: Vec<(PathBuf, Vec<u8>)>, tx: mpsc::Sender<String>) {
+    std::thread::spawn(move || {
+        let mut saved = 0usize;
+        let mut failed = 0usize;
+        for (path, bytes) in payload {
+            match std::fs::write(&path, &bytes) {
+                Ok(()) => saved += 1,
+                Err(_) => failed += 1,
+            }
+        }
+        let msg = if failed > 0 {
+            format!("Saved {saved}, failed {failed}")
+        } else {
+            format!("Saved {saved} file(s)")
         };
         let _ = tx.send(msg);
     });
