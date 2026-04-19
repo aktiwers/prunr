@@ -308,14 +308,6 @@ pub fn decompress_seg(ct: &CompressedTensor) -> Option<SegTensor> {
     })
 }
 
-pub fn decompress_edge(ct: &CompressedTensor) -> Option<EdgeTensor> {
-    Some(EdgeTensor {
-        data: ct.decompress()?,
-        height: ct.height,
-        width: ct.width,
-    })
-}
-
 /// Actually run the preview. Runs on a rayon worker thread. Returns the RGBA
 /// plus, for Edge kind, the resized pre-dilation mask so the parent can cache
 /// it (tied to the dispatch's line_strength).
