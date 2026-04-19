@@ -81,9 +81,16 @@ pub fn render(
     .fill(theme::BG_SECONDARY)
     .corner_radius(theme::BUTTON_ROUNDING)
     .min_size(egui::vec2(0.0, theme::BTN_HEIGHT));
-    let resp = ui.add(btn).on_hover_text(format!(
-        "Apply or save preset — currently: {applied_preset}",
-    ));
+    let applied_label = applied_preset.to_string();
+    let resp = ui.add(btn).on_hover_ui(|ui| {
+        ui.label(RichText::new("Preset").strong().color(theme::TEXT_PRIMARY));
+        ui.add_space(theme::SPACE_XS);
+        ui.label(
+            RichText::new(format!("Apply or save a preset. Currently applied: {applied_label}"))
+                .color(theme::TEXT_PRIMARY)
+                .size(theme::FONT_SIZE_MONO),
+        );
+    });
 
     if resp.clicked() {
         ui.memory_mut(|m| m.toggle_popup(pop_id));
