@@ -124,7 +124,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                 .fill(theme::BG_SECONDARY)
                 .corner_radius(theme::BUTTON_ROUNDING);
                 if ui.add(anim_btn).on_hover_text("Sweep a knob across N frames").clicked() {
-                    app.open_animation_sweep();
+                    app.open_animation_sweep(ui.ctx());
                 }
             }
 

@@ -85,6 +85,9 @@ pub struct PrunrApp {
 
     // ── Animation sweep export ─────────────────────────────────────────────
     pub(crate) show_animation_sweep: bool,
+    /// Timestamp the sweep modal was opened — gates the backdrop click-outside
+    /// detector so the same click that opens it can't close it.
+    pub(crate) animation_sweep_opened_at: f64,
     pub(crate) animation_sweep_ui: super::animation_sweep::SweepUiState,
     pub(crate) sweep_events_rx: Option<mpsc::Receiver<super::animation_sweep::SweepEvent>>,
     pub(crate) sweep_progress: Option<(usize, usize)>,
@@ -203,6 +206,7 @@ impl PrunrApp {
                     .with_margin(egui::vec2(theme::SPACE_SM, theme::STATUS_BAR_HEIGHT + theme::SPACE_SM)),
             drag_export: super::drag_export_state::DragExportState::new(),
             show_animation_sweep: false,
+            animation_sweep_opened_at: 0.0,
             animation_sweep_ui: super::animation_sweep::SweepUiState::default(),
             sweep_events_rx: None,
             sweep_progress: None,
@@ -968,7 +972,7 @@ impl PrunrApp {
     }
 
     // Gated on cached tensors — sweep replays Tier 2/3 work, never re-infers.
-    pub fn open_animation_sweep(&mut self) {
+    pub fn open_animation_sweep(&mut self, ctx: &egui::Context) {
         let Some(item) = self.batch.selected_item() else {
             self.toasts.error("No image selected");
             return;
@@ -982,6 +986,7 @@ impl PrunrApp {
             return;
         }
         self.show_animation_sweep = true;
+        self.animation_sweep_opened_at = ctx.input(|i| i.time);
     }
 
     pub fn start_animation_sweep(&mut self) {
@@ -1078,6 +1083,16 @@ impl PrunrApp {
         }
         for id in &targets {
             self.processor.cancels.request_item_cancel(*id);
+        }
+        // Flip status immediately so thumbnail / canvas spinners stop. Any late
+        // ImageDone or ImageError from the subprocess gets ignored in
+        // `on_batch_item_done` (the Processing-only guard).
+        for id in &targets {
+            if let Some(item) = self.batch.find_by_id_mut(*id) {
+                if item.status == BatchStatus::Processing {
+                    item.status = BatchStatus::Pending;
+                }
+            }
         }
         self.toasts.info(format!("Cancelling {} image(s)", targets.len()));
     }

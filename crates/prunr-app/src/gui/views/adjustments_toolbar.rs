@@ -524,22 +524,37 @@ fn render_fill_style_chip(ui: &mut Ui, style: &mut prunr_core::FillStyle) -> boo
     let popup_id = ui.make_persistent_id("fill_style_popup");
     let mut changed = false;
     chip::popup_for(ui, popup_id, &resp, |ui| {
+        // Wider popover so the variant list sits next to the parameter column
+        // instead of stacking above it — otherwise 4-stop GradientMap makes
+        // the popover taller than most screens.
+        ui.set_min_width(FILL_STYLE_POPOVER_WIDTH);
         ui.label(RichText::new("Fill style").strong().color(theme::TEXT_PRIMARY));
         ui.add_space(theme::SPACE_XS);
-        for option in FillStyle::ALL {
-            let selected = std::mem::discriminant(option) == std::mem::discriminant(style);
-            if ui.selectable_label(selected, option.name()).clicked() && !selected {
-                *style = *option;
-                changed = true;
-            }
-        }
-        ui.separator();
-        if fill_style_params(ui, style) {
-            changed = true;
-        }
+        ui.horizontal_top(|ui| {
+            ui.vertical(|ui| {
+                ui.set_min_width(FILL_STYLE_LIST_WIDTH);
+                for option in FillStyle::ALL {
+                    let selected = std::mem::discriminant(option) == std::mem::discriminant(style);
+                    if ui.selectable_label(selected, option.name()).clicked() && !selected {
+                        *style = *option;
+                        changed = true;
+                    }
+                }
+            });
+            ui.separator();
+            ui.vertical(|ui| {
+                if fill_style_params(ui, style) {
+                    changed = true;
+                }
+            });
+        });
     });
     changed
 }
+
+const FILL_STYLE_POPOVER_WIDTH: f32 = 560.0;
+const FILL_STYLE_LIST_WIDTH: f32 = 140.0;
+const GRADIENT_MAP_COL_WIDTH: f32 = 190.0;
 
 fn fill_style_params(ui: &mut Ui, style: &mut prunr_core::FillStyle) -> bool {
     use prunr_core::FillStyle;
@@ -612,10 +627,30 @@ fn fill_style_params(ui: &mut Ui, style: &mut prunr_core::FillStyle) -> bool {
             }
         }
         FillStyle::GradientMap { stops } => {
-            changed |= rgb_picker_row(ui, "Shadow", &mut stops[0]);
-            changed |= rgb_picker_row(ui, "Dark mid", &mut stops[1]);
-            changed |= rgb_picker_row(ui, "Light mid", &mut stops[2]);
-            changed |= rgb_picker_row(ui, "Highlight", &mut stops[3]);
+            // 2×2 grid keeps the 4-stop popover within one screen height; a
+            // linear stack would exceed the viewport on most displays.
+            let [s0, s1, s2, s3] = stops;
+            ui.horizontal_top(|ui| {
+                ui.vertical(|ui| {
+                    ui.set_max_width(GRADIENT_MAP_COL_WIDTH);
+                    changed |= rgb_picker_row(ui, "Shadow", s0);
+                });
+                ui.vertical(|ui| {
+                    ui.set_max_width(GRADIENT_MAP_COL_WIDTH);
+                    changed |= rgb_picker_row(ui, "Dark mid", s1);
+                });
+            });
+            ui.add_space(theme::SPACE_XS);
+            ui.horizontal_top(|ui| {
+                ui.vertical(|ui| {
+                    ui.set_max_width(GRADIENT_MAP_COL_WIDTH);
+                    changed |= rgb_picker_row(ui, "Light mid", s2);
+                });
+                ui.vertical(|ui| {
+                    ui.set_max_width(GRADIENT_MAP_COL_WIDTH);
+                    changed |= rgb_picker_row(ui, "Highlight", s3);
+                });
+            });
         }
     }
     changed
