@@ -351,7 +351,17 @@ fn render_model_dropdown(
                 }
             })
             .response
-            .on_hover_text("Segmentation model — affects quality, speed, and download size");
+            .on_hover_ui(|ui| {
+                ui.label(RichText::new("Segmentation model").strong().color(theme::TEXT_PRIMARY));
+                ui.add_space(theme::SPACE_XS);
+                ui.label(
+                    RichText::new(
+                        "Which AI model extracts the subject. Trade quality, speed, and memory footprint — per-row labels show each option's position on those three axes.",
+                    )
+                    .color(theme::TEXT_PRIMARY)
+                    .size(theme::FONT_SIZE_MONO),
+                );
+            });
     });
 
     if app_settings.model != prev_model {
