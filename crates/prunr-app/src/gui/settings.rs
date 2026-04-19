@@ -81,6 +81,11 @@ impl Settings {
     /// Migrates v1 per-image fields (mask_gamma, bg_color, line_mode, ...)
     /// into a "Previous defaults" preset file on first load.
     pub fn load() -> Self {
+        // Seed curated built-in presets on first run (idempotent via marker
+        // file). Runs before any load_all() so users see "Comic", "Neon"
+        // etc. in the dropdown on first launch.
+        super::presets_fs::seed_builtins_once();
+
         let Some(path) = Self::config_path() else { return Self::default() };
         let Ok(data) = std::fs::read_to_string(&path) else {
             // No settings.json, but the user may still have preset files

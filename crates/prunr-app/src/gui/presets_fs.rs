@@ -32,12 +32,22 @@ use rayon::prelude::*;
 
 use super::item_settings::ItemSettings;
 use super::settings::PRUNR_PRESET;
+use prunr_core::{ComposeMode, FillStyle, LineStyle};
+use super::settings::LineMode;
 
 /// Name of the presets subdirectory under the app config dir.
 const PRESETS_SUBDIR: &str = "prunr/presets";
 
 /// File extension for preset files.
 const PRESET_EXT: &str = "json";
+
+/// Marker file written after the first successful seed of the curated
+/// built-in presets. Presence = "don't seed again on this install." Lets
+/// users delete any built-in they don't want without having it re-appear
+/// on next launch. Bump the suffix (`_v2`, `_v3`, ...) when shipping a
+/// fresh batch of curated presets — the old marker won't gate the new
+/// batch.
+const SEED_MARKER: &str = ".builtins_seeded_v1";
 
 /// Resolve the presets directory, creating it if needed. Returns `None` if
 /// the platform config dir can't be resolved (very rare).
@@ -137,6 +147,124 @@ pub fn delete(name: &str) -> std::io::Result<()> {
     }
 }
 
+/// Write the curated built-in presets to disk on first run. No-op when the
+/// seed marker already exists — users can delete any built-in and the
+/// deletion sticks.
+pub fn seed_builtins_once() {
+    let Some(dir) = presets_dir() else { return };
+    let marker = dir.join(SEED_MARKER);
+    if marker.exists() { return; }
+    for (name, values) in builtin_presets() {
+        let _ = save(name, &values);
+    }
+    let _ = std::fs::write(&marker, b"");
+}
+
+/// Factory list of curated named presets. Each covers a visually-distinct
+/// look and showcases a combination of the compose / line / fill enums
+/// that a user would otherwise need several chip clicks to discover.
+fn builtin_presets() -> Vec<(&'static str, ItemSettings)> {
+    let base = ItemSettings::default();
+    vec![
+        ("Comic", ItemSettings {
+            line_mode: LineMode::SubjectOutline,
+            compose_mode: ComposeMode::LinesOnly,
+            line_strength: 0.7,
+            edge_thickness: 2,
+            solid_line_color: Some([0, 0, 0]),
+            fill_style: FillStyle::Posterize { levels: 4 },
+            gamma: 1.3,
+            ..base
+        }),
+        ("Pencil Sketch", ItemSettings {
+            line_mode: LineMode::SubjectOutline,
+            compose_mode: ComposeMode::LinesOnly,
+            line_strength: 0.8,
+            edge_thickness: 0,
+            solid_line_color: None,
+            fill_style: FillStyle::Desaturate,
+            gamma: 1.1,
+            ..base
+        }),
+        ("Neon Glow", ItemSettings {
+            line_mode: LineMode::SubjectOutline,
+            compose_mode: ComposeMode::Ghost,
+            line_strength: 0.6,
+            edge_thickness: 3,
+            line_style: LineStyle::Rainbow { cycles: 2 },
+            fill_style: FillStyle::Saturate { percent: 220 },
+            ..base
+        }),
+        ("Sepia", ItemSettings {
+            line_mode: LineMode::SubjectOutline,
+            compose_mode: ComposeMode::LinesOnly,
+            line_strength: 0.6,
+            edge_thickness: 1,
+            solid_line_color: Some([70, 45, 20]),
+            fill_style: FillStyle::Sepia,
+            ..base
+        }),
+        ("Duotone Poster", ItemSettings {
+            line_mode: LineMode::SubjectOutline,
+            compose_mode: ComposeMode::SubjectFilled,
+            line_strength: 0.6,
+            edge_thickness: 2,
+            solid_line_color: Some([10, 10, 40]),
+            fill_style: FillStyle::Duotone { dark: [20, 20, 60], light: [240, 220, 180] },
+            ..base
+        }),
+        ("X-Ray", ItemSettings {
+            line_mode: LineMode::SubjectOutline,
+            compose_mode: ComposeMode::Ghost,
+            line_strength: 0.8,
+            edge_thickness: 1,
+            solid_line_color: Some([200, 230, 255]),
+            fill_style: FillStyle::Invert,
+            bg: Some([0, 0, 30, 255]),
+            ..base
+        }),
+        ("Pop Art", ItemSettings {
+            line_mode: LineMode::SubjectOutline,
+            compose_mode: ComposeMode::SubjectFilled,
+            line_strength: 0.65,
+            edge_thickness: 3,
+            solid_line_color: Some([0, 0, 0]),
+            fill_style: FillStyle::Posterize { levels: 3 },
+            gamma: 1.4,
+            ..base
+        }),
+        ("Ghost", ItemSettings {
+            line_mode: LineMode::SubjectOutline,
+            compose_mode: ComposeMode::Ghost,
+            line_strength: 0.55,
+            edge_thickness: 1,
+            solid_line_color: Some([230, 230, 235]),
+            fill_style: FillStyle::Desaturate,
+            ..base
+        }),
+        ("Sunset Lines", ItemSettings {
+            line_mode: LineMode::SubjectOutline,
+            compose_mode: ComposeMode::LinesOnly,
+            line_strength: 0.7,
+            edge_thickness: 2,
+            line_style: LineStyle::GradientY {
+                top: [255, 180, 40],
+                bottom: [120, 20, 90],
+            },
+            ..base
+        }),
+        ("Pixel Art", ItemSettings {
+            line_mode: LineMode::SubjectOutline,
+            compose_mode: ComposeMode::SubjectFilled,
+            line_strength: 0.5,
+            edge_thickness: 2,
+            solid_line_color: Some([0, 0, 0]),
+            fill_style: FillStyle::Pixelate { block_size: 10 },
+            ..base
+        }),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -221,6 +349,20 @@ mod tests {
         let parsed: ItemSettings = serde_json::from_str(json)
             .expect("ItemSettings must ignore unknown fields — do NOT add #[serde(deny_unknown_fields)]");
         assert_eq!(parsed, ItemSettings::default());
+    }
+
+    #[test]
+    fn builtins_have_unique_names_and_serialize() {
+        let presets = super::builtin_presets();
+        assert!(presets.len() >= 5, "ship at least 5 curated looks; got {}", presets.len());
+        let mut seen = std::collections::HashSet::new();
+        for (name, settings) in &presets {
+            assert!(seen.insert(*name), "duplicate builtin preset name: {name}");
+            // Each preset must round-trip through JSON — otherwise seed_builtins_once
+            // would silently skip it.
+            let json = serde_json::to_string(settings).expect("preset serializes");
+            let _: ItemSettings = serde_json::from_str(&json).expect("preset deserializes");
+        }
     }
 
     #[test]
