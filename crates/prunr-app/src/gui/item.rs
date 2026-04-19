@@ -194,10 +194,12 @@ pub(crate) struct BatchItem {
     /// when the user flips the dropdown; `invalidate_edge_cache` clears it
     /// whenever the compressed cache is rebuilt.
     pub(crate) volatile_edge_tensor: Option<(prunr_core::EdgeScale, Arc<Vec<f32>>)>,
-    /// Post-resize, pre-dilation edge mask for the line_strength that produced
-    /// it. Lets `edge_thickness` / `solid_line_color` tweaks skip the expensive
-    /// tensor→mask resize. Invalidated alongside the compressed edge cache.
-    pub(crate) cached_edge_mask: Option<(Arc<image::GrayImage>, u32 /* line_strength bits */)>,
+    /// Post-resize, pre-dilation edge mask for the (line_strength, scale) that
+    /// produced it. Lets `edge_thickness` / `solid_line_color` tweaks skip the
+    /// expensive tensor→mask resize. Keyed by BOTH dimensions because scale
+    /// picks a different upstream tensor — a mask built from the Fine tensor
+    /// must not be reused after the user switches to Bold.
+    pub(crate) cached_edge_mask: Option<(Arc<image::GrayImage>, u32 /* line_strength bits */, prunr_core::EdgeScale)>,
     /// Which preset was last APPLIED to this image (via the dropdown's row
     /// click or via Reset All). The preset button compares current `settings`
     /// against this preset's values to show a modified/clean icon. Stays set
@@ -373,7 +375,7 @@ mod tests {
     fn invalidate_edge_cache_clears_both_atomically() {
         let mut item = fixture_item(1);
         // Simulate populated edge caches (minimal placeholder structs).
-        item.cached_edge_mask = Some((Arc::new(image::GrayImage::new(1, 1)), 0));
+        item.cached_edge_mask = Some((Arc::new(image::GrayImage::new(1, 1)), 0, prunr_core::EdgeScale::Fused));
         // (cached_edge_tensors would need a real CompressedEdgeTensors — leave None
         // here; the method should still run cleanly and clear cached_edge_mask.)
         assert!(item.cached_edge_mask.is_some());

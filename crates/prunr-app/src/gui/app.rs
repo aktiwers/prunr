@@ -1133,8 +1133,10 @@ impl PrunrApp {
             PreviewKind::Edge if edge_tensor.is_none() => return None,
             _ => {}
         }
-        let cached_edge_mask = item.cached_edge_mask.as_ref().and_then(|(m, bits)| {
-            (*bits == item.settings.line_strength.to_bits()).then(|| m.clone())
+        let cached_edge_mask = item.cached_edge_mask.as_ref().and_then(|(m, bits, scale)| {
+            let strength_match = *bits == item.settings.line_strength.to_bits();
+            let scale_match = *scale == item.settings.edge_scale;
+            (strength_match && scale_match).then(|| m.clone())
         });
         Some(DispatchInputs {
             kind, original, settings: item.settings,
@@ -1195,8 +1197,8 @@ impl PrunrApp {
                 // Mark pending so sync_selected_batch_textures doesn't also
                 // spawn its own prep on this same frame.
                 item.result_tex_pending = true;
-                if let Some((mask, bits)) = r.new_edge_mask {
-                    item.cached_edge_mask = Some((mask, bits));
+                if let Some((mask, bits, scale)) = r.new_edge_mask {
+                    item.cached_edge_mask = Some((mask, bits, scale));
                 }
                 let switch = self.result_switch_id;
                 Self::spawn_tex_prep(
