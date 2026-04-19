@@ -113,6 +113,10 @@ pub(super) fn popup_for(
         resp,
         egui::PopupCloseBehavior::CloseOnClickOutside,
         |ui| {
+            // Match `selectable_label` selection highlight to the app accent
+            // — egui's default blue clashed in chip popovers (fill-style
+            // list, channel-swap variants, etc.).
+            ui.visuals_mut().selection.bg_fill = theme::ACCENT;
             ui.set_min_width(theme::POPOVER_WIDTH);
             body(ui);
         },
