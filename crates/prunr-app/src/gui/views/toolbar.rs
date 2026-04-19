@@ -111,26 +111,10 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
 
             let is_batch_processing = app.batch.status_counts().processing > 0;
 
-            // Cancel All replaces the Process button while any item is
-            // mid-processing — single-action slot, no ambiguity.
-            if is_batch_processing {
-                let cancel_btn = egui::Button::new(
-                    RichText::new(format!("{}  Cancel All", ICON_CANCEL.codepoint)).color(Color32::WHITE),
-                )
-                .fill(theme::DESTRUCTIVE)
-                .corner_radius(theme::BUTTON_ROUNDING)
-                .min_size(egui::vec2(0.0, theme::BTN_HEIGHT));
-                if ui.add(cancel_btn).on_hover_text("Cancel all processing (Escape)").clicked() {
-                    app.handle_cancel();
-                    for item in &mut app.batch.items {
-                        if item.status == BatchStatus::Processing {
-                            item.status = BatchStatus::Pending;
-                        }
-                    }
-                    app.state = AppState::Loaded;
-                    app.status.text = "Cancelled".to_string();
-                }
-            } else {
+            // Process button — always visible. Clicking while a batch is
+            // already running enqueues the new work on the worker bridge;
+            // it runs once the current batch finishes (no auto-cancel).
+            {
                 let label = app.batch.process_button_label();
                 let target_ids = app.batch.items_to_process();
                 // Enabled when at least one target exists and isn't already
@@ -186,6 +170,28 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
 
                 if ui.add_enabled(has_processable, btn).on_hover_text(tooltip).clicked() {
                     app.handle_remove_bg();
+                }
+            }
+
+            // Cancel All — separate button that only appears while a batch
+            // is running. Right-to-left layout places it to the LEFT of the
+            // Process button, so Process keeps its muscle-memory position.
+            if is_batch_processing {
+                let cancel_btn = egui::Button::new(
+                    RichText::new(format!("{}  Cancel All", ICON_CANCEL.codepoint)).color(Color32::WHITE),
+                )
+                .fill(theme::DESTRUCTIVE)
+                .corner_radius(theme::BUTTON_ROUNDING)
+                .min_size(egui::vec2(0.0, theme::BTN_HEIGHT));
+                if ui.add(cancel_btn).on_hover_text("Cancel all processing (Escape)").clicked() {
+                    app.handle_cancel();
+                    for item in &mut app.batch.items {
+                        if item.status == BatchStatus::Processing {
+                            item.status = BatchStatus::Pending;
+                        }
+                    }
+                    app.state = AppState::Loaded;
+                    app.status.text = "Cancelled".to_string();
                 }
             }
 
