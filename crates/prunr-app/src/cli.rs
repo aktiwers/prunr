@@ -384,6 +384,7 @@ fn run_batch(args: &Cli) -> i32 {
         edge_scale: args.line_scale,
         compose_mode: prunr_core::ComposeMode::default(),
         line_style: prunr_core::LineStyle::default(),
+        input_transform: prunr_core::InputTransform::default(),
     };
     let batch_results = run_batch_subprocess(
         &valid_paths, &valid_indices, model, args.jobs, mask, args.cpu,
