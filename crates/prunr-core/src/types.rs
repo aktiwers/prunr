@@ -261,6 +261,12 @@ pub enum LineStyle {
     /// Hue rotates through the colour wheel along pixel index —
     /// `cycles` = how many full rotations across the image.
     Rainbow { cycles: u16 },
+    /// Offset RGB channels of the edge — classic chromatic aberration.
+    /// `offset` is pixels of R/B shift (G stays centred). 1..=8 feels good.
+    Chromatic { offset: u32 },
+    /// Per-edge-pixel hue noise. `amount` = jitter magnitude 0..=255 applied
+    /// to a deterministic per-pixel hash — feels hand-drawn without dithering.
+    Noise { amount: u8 },
 }
 
 impl LineStyle {
@@ -270,6 +276,8 @@ impl LineStyle {
         LineStyle::GradientX { left: [255, 50, 50], right: [50, 50, 255] },
         LineStyle::RadialGradient { center: [128, 128], inner: [255, 200, 50], outer: [30, 20, 60] },
         LineStyle::Rainbow { cycles: 3 },
+        LineStyle::Chromatic { offset: 3 },
+        LineStyle::Noise { amount: 80 },
     ];
 
     pub fn name(&self) -> &'static str {
@@ -279,6 +287,8 @@ impl LineStyle {
             LineStyle::GradientX { .. } => "Horizontal gradient",
             LineStyle::RadialGradient { .. } => "Radial gradient",
             LineStyle::Rainbow { .. } => "Rainbow",
+            LineStyle::Chromatic { .. } => "Chromatic",
+            LineStyle::Noise { .. } => "Noise",
         }
     }
 }
@@ -327,6 +337,47 @@ pub enum FillStyle {
     /// Nearest-neighbour block downscale. Each `block_size × block_size`
     /// region takes the colour of its top-left pixel.
     Pixelate { block_size: u32 },
+    /// Split-tone: map shadow pixels toward `shadow`, highlight pixels toward
+    /// `highlight`. Classic filmic cross-process look.
+    CrossProcess { shadow: [u8; 3], highlight: [u8; 3] },
+    /// Permute RGB channels. Cheap surreal palette flip.
+    ChannelSwap { variant: ChannelSwapVariant },
+    /// Newspaper halftone dots. `dot_spacing` is pixel pitch; dots shrink
+    /// where luma is bright, grow where dark.
+    Halftone { dot_spacing: u32 },
+    /// Remap luma through a 4-stop gradient. More versatile than Duotone:
+    /// mid-tones follow the middle stops so an orange→pink→purple→blue
+    /// gradient reads as a continuous sky rather than a hard mix.
+    GradientMap { stops: [[u8; 3]; 4] },
+}
+
+/// Channel permutation. Values are the new position for each input channel —
+/// `Grb` means `output = (g, r, b)`.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash,
+    serde::Serialize, serde::Deserialize, Default,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ChannelSwapVariant {
+    #[default]
+    Grb,
+    Brg,
+    Rbg,
+    Bgr,
+    Gbr,
+}
+
+impl ChannelSwapVariant {
+    pub const ALL: &'static [Self] = &[Self::Grb, Self::Brg, Self::Rbg, Self::Bgr, Self::Gbr];
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Grb => "GRB",
+            Self::Brg => "BRG",
+            Self::Rbg => "RBG",
+            Self::Bgr => "BGR",
+            Self::Gbr => "GBR",
+        }
+    }
 }
 
 /// Backdrop effect composited behind the masked subject. Unlike the solid
@@ -393,6 +444,10 @@ impl FillStyle {
         FillStyle::ColorSplash { keep_hue: 0, tolerance: 30 },
         FillStyle::Pixelate { block_size: 12 },
         FillStyle::Duotone { dark: [20, 20, 60], light: [240, 220, 180] },
+        FillStyle::CrossProcess { shadow: [30, 60, 110], highlight: [245, 220, 180] },
+        FillStyle::ChannelSwap { variant: ChannelSwapVariant::Grb },
+        FillStyle::Halftone { dot_spacing: 8 },
+        FillStyle::GradientMap { stops: [[20, 20, 60], [120, 60, 140], [240, 120, 80], [255, 230, 180]] },
     ];
 
     pub fn name(&self) -> &'static str {
@@ -409,6 +464,10 @@ impl FillStyle {
             FillStyle::Saturate { .. } => "Saturate",
             FillStyle::ColorSplash { .. } => "Color splash",
             FillStyle::Pixelate { .. } => "Pixelate",
+            FillStyle::CrossProcess { .. } => "Cross-process",
+            FillStyle::ChannelSwap { .. } => "Channel swap",
+            FillStyle::Halftone { .. } => "Halftone",
+            FillStyle::GradientMap { .. } => "Gradient map",
         }
     }
 }

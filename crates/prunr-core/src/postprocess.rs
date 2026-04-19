@@ -264,6 +264,85 @@ pub fn apply_fill_style(rgba: &mut RgbaImage, style: crate::types::FillStyle) {
                 }
             }
         }
+        FillStyle::CrossProcess { shadow, highlight } => {
+            // Split-tone by luma: pixels below 128 bend toward `shadow`,
+            // above bend toward `highlight`. Preserves midtones, lifts
+            // shadows + warms highlights (or whatever the user picked).
+            for p in rgba.pixels_mut() {
+                let y = luma_u8(p.0[0], p.0[1], p.0[2]);
+                let (target, t) = if y < 128 {
+                    (shadow, (128 - y) as u16) // 0..=128
+                } else {
+                    (highlight, (y - 128) as u16) // 0..=127
+                };
+                let w = t.min(128) * 2; // scale to 0..=256 then clamp
+                let w = w.min(255);
+                let inv = 255 - w;
+                p.0[0] = ((p.0[0] as u16 * inv + target[0] as u16 * w) / 255) as u8;
+                p.0[1] = ((p.0[1] as u16 * inv + target[1] as u16 * w) / 255) as u8;
+                p.0[2] = ((p.0[2] as u16 * inv + target[2] as u16 * w) / 255) as u8;
+            }
+        }
+        FillStyle::ChannelSwap { variant } => {
+            use crate::types::ChannelSwapVariant;
+            for p in rgba.pixels_mut() {
+                let [r, g, b, _] = p.0;
+                let (nr, ng, nb) = match variant {
+                    ChannelSwapVariant::Grb => (g, r, b),
+                    ChannelSwapVariant::Brg => (b, r, g),
+                    ChannelSwapVariant::Rbg => (r, b, g),
+                    ChannelSwapVariant::Bgr => (b, g, r),
+                    ChannelSwapVariant::Gbr => (g, b, r),
+                };
+                p.0[0] = nr; p.0[1] = ng; p.0[2] = nb;
+            }
+        }
+        FillStyle::Halftone { dot_spacing } => {
+            // Classic halftone: overlay a lattice where dot radius scales
+            // inversely with luma. `dot_spacing` = centre-to-centre pitch.
+            // Uses max pitch clamp to keep the test suite well-defined at
+            // corner cases.
+            let spacing = dot_spacing.clamp(2, 32);
+            let (w, h) = rgba.dimensions();
+            let half = (spacing / 2) as i32;
+            for y in 0..h {
+                for x in 0..w {
+                    let px = rgba.get_pixel(x, y);
+                    let luma = luma_u8(px.0[0], px.0[1], px.0[2]);
+                    // Dot radius squared: dark (luma=0) → full cell, light → tiny.
+                    let max_r_sq = (half * half) as u32;
+                    let r_sq = max_r_sq * (255 - luma as u32) / 255;
+                    let cx = ((x as i32) / spacing as i32) * spacing as i32 + half;
+                    let cy = ((y as i32) / spacing as i32) * spacing as i32 + half;
+                    let dx = x as i32 - cx;
+                    let dy = y as i32 - cy;
+                    let dist_sq = (dx * dx + dy * dy) as u32;
+                    let inside = dist_sq <= r_sq;
+                    let dst = rgba.get_pixel_mut(x, y);
+                    let v = if inside { 0 } else { 255 };
+                    dst.0[0] = v; dst.0[1] = v; dst.0[2] = v;
+                }
+            }
+        }
+        FillStyle::GradientMap { stops } => {
+            // Map luma 0..=255 through 4 colour stops at 0, 85, 170, 255.
+            // Linear interp between adjacent stops.
+            for p in rgba.pixels_mut() {
+                let y = luma_u8(p.0[0], p.0[1], p.0[2]) as u16;
+                let (lo, hi, t) = if y <= 85 {
+                    (stops[0], stops[1], y * 255 / 85)
+                } else if y <= 170 {
+                    (stops[1], stops[2], (y - 85) * 255 / 85)
+                } else {
+                    (stops[2], stops[3], (y - 170) * 255 / 85)
+                };
+                let t = t.min(255);
+                let inv = 255 - t;
+                p.0[0] = ((lo[0] as u16 * inv + hi[0] as u16 * t) / 255) as u8;
+                p.0[1] = ((lo[1] as u16 * inv + hi[1] as u16 * t) / 255) as u8;
+                p.0[2] = ((lo[2] as u16 * inv + hi[2] as u16 * t) / 255) as u8;
+            }
+        }
     }
 }
 
