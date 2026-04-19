@@ -101,6 +101,15 @@ pub fn encode_rgba_png(img: &RgbaImage) -> Result<Vec<u8>, CoreError> {
     Ok(buf)
 }
 
+/// Encode a GrayImage (L8) as PNG bytes with fast compression.
+pub fn encode_gray_png(img: &GrayImage) -> Result<Vec<u8>, CoreError> {
+    let mut buf = Vec::with_capacity(img.as_raw().len() / 2);
+    let encoder = PngEncoder::new_with_quality(&mut buf, CompressionType::Fast, PngFilter::Sub);
+    encoder.write_image(img.as_raw(), img.width(), img.height(), image::ExtendedColorType::L8)
+        .map_err(CoreError::from)?;
+    Ok(buf)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -183,5 +192,22 @@ mod tests {
         assert!(!bytes.is_empty(), "Encoded PNG is empty");
         // PNG magic bytes: \x89PNG
         assert_eq!(&bytes[0..4], &[0x89, 0x50, 0x4E, 0x47]);
+    }
+
+    #[test]
+    fn test_encode_gray_png_round_trip() {
+        // Gradient 0..255 across an 8x1 strip — round-tripping through PNG
+        // must preserve every value.
+        let mut img = GrayImage::new(8, 1);
+        for x in 0..8 {
+            img.put_pixel(x, 0, image::Luma([(x * 32) as u8]));
+        }
+        let bytes = encode_gray_png(&img).expect("gray encode");
+        assert_eq!(&bytes[0..4], &[0x89, 0x50, 0x4E, 0x47]);
+        let decoded = image::load_from_memory(&bytes).expect("decode back").to_luma8();
+        assert_eq!(decoded.dimensions(), (8, 1));
+        for x in 0..8 {
+            assert_eq!(decoded.get_pixel(x, 0).0[0], (x * 32) as u8);
+        }
     }
 }

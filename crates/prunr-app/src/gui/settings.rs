@@ -35,6 +35,9 @@ pub struct Settings {
     /// Auto-hide the adjustments toolbar when the cursor leaves it.
     #[serde(default)]
     pub auto_hide_adjustments: bool,
+    /// Drag-out yields subject/lines/mask PNGs instead of a single composite.
+    #[serde(default)]
+    pub export_split_layers: bool,
     /// User-configurable keyboard shortcuts. Rebinding UI not yet wired.
     #[serde(default)]
     pub shortcuts: HashMap<String, String>,
@@ -285,6 +288,7 @@ impl Default for Settings {
             dark_checker: false,
             live_preview: true,
             auto_hide_adjustments: false,
+            export_split_layers: false,
             shortcuts: HashMap::new(),
             presets: HashMap::new(),
             default_preset: default_preset_name(),
