@@ -142,7 +142,7 @@ pub fn render(
                 &ICON_SWAP_HORIZ.codepoint.to_string(), "Edge shift",
                 tip!("Stage 3 of 5. Shrink or grow the mask outline. Positive = erode (trim fringe pixels), negative = dilate (keep more edge detail). Refine Edges then snaps the shifted boundary to image color."),
                 &mut item_settings.edge_shift,
-                -20.0..=20.0, defaults.template.edge_shift,
+                -50.0..=50.0, defaults.template.edge_shift,
                 false,
                 |v| {
                     if v > 0.05 { format!("erode {v:.1}px") }
@@ -161,7 +161,7 @@ pub fn render(
                     let r = chip::slider_row_u32(
                         ui, "Refine radius (px)",
                         &mut item_settings.guided_radius,
-                        1..=32,
+                        1..=64,
                     );
                     if r.changed { inner.changed = true; }
                     if r.commit  { inner.commit  = true; }
@@ -183,7 +183,7 @@ pub fn render(
                 &ICON_BLUR_LINEAR.codepoint.to_string(), "Feather",
                 tip!("Stage 5 of 5. Final softening pass — Gaussian blur over the finished mask. Runs last so it smooths whatever Refine Edges sharpened; reach for Feather when Refine can't pick up the right detail."),
                 &mut item_settings.feather,
-                0.0..=5.0, defaults.template.feather,
+                0.0..=10.0, defaults.template.feather,
                 false,
                 |v| if v < 0.1 { "off".into() } else { format!("σ {v:.1}") },
             ), Tier::Mask, &mut change);
@@ -260,7 +260,7 @@ pub fn render(
                 &ICON_TUNE.codepoint.to_string(), "Line strength",
                 "Stage 2 of 4 in the lines pipeline. Threshold on DexiNed's raw edge tensor. Lower = bold outlines only; higher = fine texture and subtle edges. Feeds edge thickness + solid color.",
                 &mut item_settings.line_strength,
-                0.05..=1.0, defaults.template.line_strength,
+                0.0..=1.0, defaults.template.line_strength,
                 false,
                 |v| format!("{v:.2}"),
             ), Tier::Edge, &mut change);
@@ -270,7 +270,7 @@ pub fn render(
                 &ICON_LINE_WEIGHT.codepoint.to_string(), "Edge thickness",
                 "Stage 3 of 4 in the lines pipeline. Dilates the thresholded edge mask by N pixels. 0 = native DexiNed width; higher = bolder outlines that stay readable at display resolution. Runs before solid color, so bolder edges still inherit the paint choice.",
                 &mut item_settings.edge_thickness,
-                0..=10, defaults.template.edge_thickness,
+                0..=20, defaults.template.edge_thickness,
                 |v| if v == 0 { "off".into() } else { format!("+{v}px") },
             ), Tier::Edge, &mut change);
 
