@@ -109,6 +109,25 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                 }
             }
 
+            // Export animation — only offered when the viewed/selected item
+            // has cached tensors (a previous Process completed). Sweep replays
+            // those tensors across a knob range so a re-inference is never needed.
+            let has_cached_for_sweep = app.batch.selected_item()
+                .map(|i| i.status == BatchStatus::Done
+                    && (i.cached_tensor.is_some() || i.cached_edge_tensors.is_some()))
+                .unwrap_or(false);
+            if has_cached_for_sweep {
+                let anim_btn = egui::Button::new(
+                    RichText::new(format!("{}  Export anim\u{2026}", ICON_MOVIE.codepoint))
+                        .color(theme::TEXT_PRIMARY),
+                )
+                .fill(theme::BG_SECONDARY)
+                .corner_radius(theme::BUTTON_ROUNDING);
+                if ui.add(anim_btn).on_hover_text("Sweep a knob across N frames").clicked() {
+                    app.open_animation_sweep();
+                }
+            }
+
             let is_batch_processing = app.batch.status_counts().processing > 0;
             let selected_processing = app.batch.items.iter()
                 .any(|i| i.selected && i.status == BatchStatus::Processing);
