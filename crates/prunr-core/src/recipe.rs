@@ -5,7 +5,7 @@
 //! tier needs to re-run (or if processing can be skipped entirely).
 
 use serde::{Serialize, Deserialize};
-use crate::types::{ModelKind, EdgeScale, ComposeMode};
+use crate::types::{ModelKind, EdgeScale, ComposeMode, LineStyle, FillStyle};
 
 /// Tier 1: settings that require AI model inference.
 ///
@@ -36,6 +36,7 @@ pub struct EdgeRecipe {
     pub edge_thickness: u32,
     pub edge_scale: EdgeScale,
     pub compose_mode: ComposeMode,
+    pub line_style: LineStyle,
 }
 
 impl From<&crate::EdgeSettings> for EdgeRecipe {
@@ -46,6 +47,7 @@ impl From<&crate::EdgeSettings> for EdgeRecipe {
             edge_thickness: e.edge_thickness,
             edge_scale: e.edge_scale,
             compose_mode: e.compose_mode,
+            line_style: e.line_style,
         }
     }
 }
@@ -61,6 +63,7 @@ pub struct MaskRecipe {
     guided_radius: u32,
     guided_epsilon_bits: u32,
     feather_bits: u32,
+    pub fill_style: FillStyle,
 }
 
 impl From<&crate::MaskSettings> for MaskRecipe {
@@ -73,6 +76,7 @@ impl From<&crate::MaskSettings> for MaskRecipe {
             guided_radius: m.guided_radius,
             guided_epsilon_bits: m.guided_epsilon.to_bits(),
             feather_bits: m.feather.to_bits(),
+            fill_style: m.fill_style,
         }
     }
 }
@@ -86,6 +90,7 @@ impl PartialEq for MaskRecipe {
             && self.guided_radius == other.guided_radius
             && self.guided_epsilon_bits == other.guided_epsilon_bits
             && self.feather_bits == other.feather_bits
+            && self.fill_style == other.fill_style
     }
 }
 impl Eq for MaskRecipe {}
@@ -99,6 +104,7 @@ impl std::hash::Hash for MaskRecipe {
         self.guided_radius.hash(state);
         self.guided_epsilon_bits.hash(state);
         self.feather_bits.hash(state);
+        self.fill_style.hash(state);
     }
 }
 
@@ -218,6 +224,7 @@ mod tests {
                 edge_thickness: 0,
                 edge_scale: EdgeScale::Fused,
                 compose_mode: ComposeMode::LinesOnly,
+                line_style: LineStyle::Solid,
             },
             mask: mask(gamma, None, 0.0, false),
             composite: CompositeRecipe { bg_color: bg, solid_line_color: None },
