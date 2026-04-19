@@ -77,6 +77,11 @@ pub struct ItemSettings {
     /// the render-time fallback via the GPU rect behind the texture.
     #[serde(default)]
     pub bg_effect: prunr_core::BgEffect,
+    /// Transform applied to the image before DexiNed inference. Not live-
+    /// previewable — changes invalidate the edge tensor cache and trigger
+    /// a FullPipeline rerun on the next Process.
+    #[serde(default)]
+    pub input_transform: prunr_core::InputTransform,
 }
 
 impl Default for ItemSettings {
@@ -99,6 +104,7 @@ impl Default for ItemSettings {
             line_style: prunr_core::LineStyle::default(),
             fill_style: prunr_core::FillStyle::default(),
             bg_effect: prunr_core::BgEffect::default(),
+            input_transform: prunr_core::InputTransform::default(),
         }
     }
 }
@@ -134,6 +140,7 @@ impl ItemSettings {
             edge_scale: self.edge_scale,
             compose_mode: self.compose_mode,
             line_style: self.line_style,
+            input_transform: self.input_transform,
         }
     }
 
@@ -158,6 +165,11 @@ impl ItemSettings {
                 model,
                 uses_segmentation,
                 uses_edge_detection,
+                input_transform: if uses_edge_detection {
+                    self.input_transform
+                } else {
+                    prunr_core::InputTransform::default()
+                },
             },
             edge: prunr_core::EdgeRecipe::from(&self.edge_settings()),
             mask,
@@ -284,6 +296,7 @@ mod tests {
             line_style: prunr_core::LineStyle::GradientY { top: [255, 0, 0], bottom: [0, 0, 255] },
             fill_style: prunr_core::FillStyle::Duotone { dark: [10, 10, 40], light: [240, 240, 200] },
             bg_effect: prunr_core::BgEffect::BlurredSource { radius: 8 },
+            input_transform: prunr_core::InputTransform::ContrastBoost { percent: 150 },
         };
         let json = serde_json::to_string(&s).unwrap();
         let recovered: ItemSettings = serde_json::from_str(&json).unwrap();

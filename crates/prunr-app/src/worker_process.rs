@@ -310,7 +310,8 @@ pub fn run_worker() -> ! {
                             img_ref.and_then(|img| {
                                 // invariant: line_mode == EdgesOnly → needs_edge → edge_eng loaded.
                                 let eng_ref = edge_eng.as_ref().unwrap();
-                                eng_ref.infer_all_tensors(img).map(|res| {
+                                let transformed = prunr_core::apply_input_transform(img, edge.input_transform);
+                                eng_ref.infer_all_tensors(&transformed).map(|res| {
                                     let active = &res.tensors[edge.edge_scale as usize];
                                     let rgba_image = prunr_core::finalize_edges(
                                         active, res.height, res.width, img, &edge,
@@ -330,7 +331,8 @@ pub fn run_worker() -> ! {
                                 // don't have the seg tensor that produced the chain input.
                                 // invariant: line_mode == SubjectOutline → needs_edge → edge_eng loaded.
                                 let eng_ref = edge_eng.as_ref().unwrap();
-                                eng_ref.infer_all_tensors(img).map(|res| {
+                                let transformed = prunr_core::apply_input_transform(img, edge.input_transform);
+                                eng_ref.infer_all_tensors(&transformed).map(|res| {
                                     let active = &res.tensors[edge.edge_scale as usize];
                                     let rgba_image = prunr_core::finalize_edges(
                                         active, res.height, res.width, img, &edge,
@@ -403,7 +405,8 @@ pub fn run_worker() -> ! {
                                         let masked_img = image::DynamicImage::ImageRgba8(masked_rgba.clone());
                                         // invariant: line_mode == SubjectOutline → needs_edge → edge_eng loaded.
                                         let eng_ref = edge_eng.as_ref().unwrap();
-                                        let edge_res = eng_ref.infer_all_tensors(&masked_img)?;
+                                        let transformed = prunr_core::apply_input_transform(&masked_img, edge.input_transform);
+                                        let edge_res = eng_ref.infer_all_tensors(&transformed)?;
                                         if cancel.load(Ordering::Acquire) {
                                             return Err(prunr_core::CoreError::Cancelled);
                                         }
@@ -741,7 +744,8 @@ pub fn run_worker() -> ! {
                         let masked_img = image::DynamicImage::ImageRgba8(masked_rgba.clone());
                         let eng_ref = edge_eng.as_ref()
                             .ok_or_else(|| "edge engine not initialized in this subprocess".to_string())?;
-                        let edge_res = eng_ref.infer_all_tensors(&masked_img)
+                        let transformed = prunr_core::apply_input_transform(&masked_img, edge_settings.input_transform);
+                        let edge_res = eng_ref.infer_all_tensors(&transformed)
                             .map_err(|e| e.to_string())?;
 
                         if cancel.load(Ordering::Acquire) {

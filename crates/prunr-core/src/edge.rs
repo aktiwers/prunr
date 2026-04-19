@@ -448,6 +448,50 @@ pub fn finalize_edges(
     compose_edges(&mask, original, edge.solid_line_color, edge.edge_thickness)
 }
 
+/// Pre-process an image according to the user's `InputTransform`. Returns
+/// an owned transformed image for DexiNed inference; `None`/identity returns
+/// a clone of the original (needed because callers pass `&DynamicImage` and
+/// we can't return a reference here). Cheap enough at 4K — single per-pixel
+/// pass with integer math.
+pub fn apply_input_transform(img: &DynamicImage, transform: crate::types::InputTransform) -> DynamicImage {
+    use crate::types::InputTransform;
+    match transform {
+        InputTransform::None => img.clone(),
+        InputTransform::Grayscale => {
+            let mut rgba = img.to_rgba8();
+            for p in rgba.pixels_mut() {
+                let y = ((p.0[0] as u32 * 2126 + p.0[1] as u32 * 7152 + p.0[2] as u32 * 722) / 10000) as u8;
+                p.0[0] = y; p.0[1] = y; p.0[2] = y;
+            }
+            DynamicImage::ImageRgba8(rgba)
+        }
+        InputTransform::ContrastBoost { percent } => {
+            let factor = percent.clamp(50, 300) as i32;
+            let mut rgba = img.to_rgba8();
+            for p in rgba.pixels_mut() {
+                for i in 0..3 {
+                    // Expand around 128: new = 128 + (v - 128) * factor/100
+                    let v = p.0[i] as i32;
+                    let shifted = 128 + ((v - 128) * factor / 100);
+                    p.0[i] = shifted.clamp(0, 255) as u8;
+                }
+            }
+            DynamicImage::ImageRgba8(rgba)
+        }
+        InputTransform::Posterize { levels } => {
+            let n = levels.max(2) as u16 - 1;
+            let mut rgba = img.to_rgba8();
+            for p in rgba.pixels_mut() {
+                for i in 0..3 {
+                    let v = p.0[i] as u16;
+                    p.0[i] = ((v * n / 255) * 255 / n) as u8;
+                }
+            }
+            DynamicImage::ImageRgba8(rgba)
+        }
+    }
+}
+
 /// Preprocess an image for DexiNed: resize, BGR float32, subtract mean.
 /// Flatten RGBA onto white: transparent pixels become white so edge detection
 /// doesn't see ghost content behind removed backgrounds.
@@ -516,7 +560,7 @@ mod tests {
             tensor[i] = 10.0; // sigmoid → ~1 → edge
         }
         let original = solid_rgb(64, 48);
-        let edge = crate::EdgeSettings { line_strength: 0.5, solid_line_color: Some([255, 0, 0]), edge_thickness: 0, edge_scale: crate::EdgeScale::Fused, compose_mode: crate::ComposeMode::default(), line_style: crate::LineStyle::default() };
+        let edge = crate::EdgeSettings { line_strength: 0.5, solid_line_color: Some([255, 0, 0]), edge_thickness: 0, edge_scale: crate::EdgeScale::Fused, compose_mode: crate::ComposeMode::default(), line_style: crate::LineStyle::default(), input_transform: crate::InputTransform::default() };
         let out = finalize_edges(&tensor, h as u32, w as u32, &original, &edge);
         assert_eq!(out.width(), 64);
         assert_eq!(out.height(), 48);
@@ -531,7 +575,7 @@ mod tests {
         let h = DEXINED_H as usize;
         let tensor = vec![10.0_f32; h * w]; // all edges
         let original = solid_rgb(32, 32);
-        let edge = crate::EdgeSettings { line_strength: 0.5, solid_line_color: None, edge_thickness: 0, edge_scale: crate::EdgeScale::Fused, compose_mode: crate::ComposeMode::default(), line_style: crate::LineStyle::default() };
+        let edge = crate::EdgeSettings { line_strength: 0.5, solid_line_color: None, edge_thickness: 0, edge_scale: crate::EdgeScale::Fused, compose_mode: crate::ComposeMode::default(), line_style: crate::LineStyle::default(), input_transform: crate::InputTransform::default() };
         let out = finalize_edges(&tensor, h as u32, w as u32, &original, &edge);
         // Original color preserved
         assert_eq!(out.get_pixel(0, 0)[0], 120);

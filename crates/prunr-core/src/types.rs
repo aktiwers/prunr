@@ -173,6 +173,10 @@ pub struct EdgeSettings {
     /// How edge pixels are coloured (solid / gradient). Compose-time.
     #[serde(default)]
     pub line_style: LineStyle,
+    /// Transform applied to the image before DexiNed inference. Changing
+    /// this invalidates the edge tensor cache.
+    #[serde(default)]
+    pub input_transform: InputTransform,
 }
 
 impl Default for EdgeSettings {
@@ -184,7 +188,55 @@ impl Default for EdgeSettings {
             edge_scale: EdgeScale::Fused,
             compose_mode: ComposeMode::default(),
             line_style: LineStyle::default(),
+            input_transform: InputTransform::default(),
         }
+    }
+}
+
+/// Transform applied to the image BEFORE it reaches DexiNed. Changes what
+/// DexiNed "sees", so switching `InputTransform` invalidates the edge tensor
+/// cache and triggers a FullPipeline rerun. Not live-previewable.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash,
+    serde::Serialize, serde::Deserialize, Default,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum InputTransform {
+    /// Pass the image through unchanged.
+    #[default]
+    None,
+    /// Convert to grayscale before edge detection — colour-edge artefacts
+    /// collapse into pure luminance edges, producing ink-like lines.
+    Grayscale,
+    /// Scale contrast by `percent / 100` around luma 128. 100 = neutral,
+    /// 150 = punchy, 50 = muted. Clamped 50..=300.
+    ContrastBoost { percent: u16 },
+    /// Quantise each channel to N levels before edge detection — DexiNed
+    /// sees step transitions instead of gradients, producing cleaner lines.
+    Posterize { levels: u8 },
+}
+
+impl InputTransform {
+    pub const ALL: &'static [Self] = &[
+        InputTransform::None,
+        InputTransform::Grayscale,
+        InputTransform::ContrastBoost { percent: 150 },
+        InputTransform::Posterize { levels: 4 },
+    ];
+
+    pub fn name(&self) -> &'static str {
+        match self {
+            InputTransform::None => "None",
+            InputTransform::Grayscale => "Grayscale",
+            InputTransform::ContrastBoost { .. } => "Contrast boost",
+            InputTransform::Posterize { .. } => "Posterize",
+        }
+    }
+}
+
+impl std::fmt::Display for InputTransform {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
     }
 }
 
