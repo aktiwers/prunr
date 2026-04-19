@@ -435,12 +435,19 @@ impl PrunrApp {
     /// settings to determine the minimum work needed (skip / mask rerun / full).
     fn process_items(&mut self, filter: impl Fn(&BatchItem) -> bool) {
         let chain = self.settings.chain_mode;
-        // Filter-only mode (No model) has its own dispatcher — route early
-        // so the rest of this function can assume a real `ModelKind`. Kept
-        // as `unwrap_or(BiRefNetLite)` for now until `process_filter_only`
-        // lands; the fallback placeholder never runs because
-        // `SettingsModel::None` default is only reachable via the UI wiring
-        // that hasn't shipped yet.
+        // Pure filter mode: No model AND line_mode = Off. Skip inference +
+        // subprocess entirely. (No model + EdgesOnly still needs DexiNed,
+        // so falls through to the normal path with a dummy ModelKind — the
+        // seg engine won't spawn because needs_segmentation is false.)
+        let is_pure_filter = self.settings.model.to_model_kind().is_none()
+            && self.batch.items.iter().all(|i| i.settings.line_mode == prunr_core::LineMode::Off);
+        if is_pure_filter {
+            self.process_filter_only(filter);
+            return;
+        }
+        // No-model-but-EdgesOnly falls through with a placeholder. The
+        // subprocess Init still receives this field; `needs_segmentation`
+        // is false for EdgesOnly so the seg model never loads.
         let model: prunr_core::ModelKind = self.settings.model
             .to_model_kind()
             .unwrap_or(prunr_core::ModelKind::BiRefNetLite);
@@ -467,6 +474,40 @@ impl PrunrApp {
         } else {
             self.dispatch_small_batch(&tiers.tier1, tier2_work, add_edge_work, model, jobs, chain);
         }
+    }
+
+    /// Filter-only Process path (model=`None`). No inference, no
+    /// subprocess — apply fill_style to the source of each target inline
+    /// (a few hundred ms per image on the UI thread; fine for the usual
+    /// 1–5 image case).
+    fn process_filter_only(&mut self, filter: impl Fn(&BatchItem) -> bool) {
+        let ids: Vec<u64> = self.batch.items.iter()
+            .filter(|i| filter(i) && !matches!(i.status, BatchStatus::Processing))
+            .map(|i| i.id)
+            .collect();
+        if ids.is_empty() { return; }
+        for id in &ids {
+            let Some(item) = self.batch.find_by_id_mut(*id) else { continue };
+            let fill_style = item.settings.fill_style;
+            let bytes = match item.source.load_bytes() {
+                Ok(b) => b,
+                Err(err) => {
+                    item.status = BatchStatus::Error(format!("Failed to load: {err}"));
+                    continue;
+                }
+            };
+            let Ok(original) = prunr_core::load_image_from_bytes(&bytes) else {
+                item.status = BatchStatus::Error("Decode failed".into());
+                continue;
+            };
+            let mut rgba = original.to_rgba8();
+            prunr_core::apply_fill_style(&mut rgba, fill_style);
+            item.result_rgba = Some(std::sync::Arc::new(rgba));
+            item.result_texture = None;
+            item.thumb_texture = None;
+            item.status = BatchStatus::Done;
+        }
+        self.result_switch_id += 1;
     }
 
     fn build_add_edge_work(&mut self, ids: &HashSet<u64>) -> Vec<super::worker::AddEdgeWorkItem> {
@@ -1282,7 +1323,10 @@ impl PrunrApp {
             .then(|| Self::edge_tensor_for_scale(item, prunr_core::EdgeScale::Bold))
             .flatten();
         match kind {
-            PreviewKind::Mask if seg_tensor.is_none() => return None,
+            // Mask kind without a seg tensor is the filter-only path:
+            // `run_preview` applies fill_style to the raw source. No tensor
+            // required. Edge kind still needs an edge tensor (nothing to
+            // preview without one).
             PreviewKind::Edge if edge_tensor.is_none() => return None,
             _ => {}
         }
@@ -1360,6 +1404,13 @@ impl PrunrApp {
                 };
                 let new_rgba = Arc::new(r.rgba);
                 item.result_rgba = Some(new_rgba.clone());
+                // Filter-only mode (model=None) never clicks Process — the
+                // first live preview result IS the processed result. Promote
+                // a Pending item to Done so the canvas flips from source
+                // view to result view. Processing / Done items untouched.
+                if item.status == BatchStatus::Pending {
+                    item.status = BatchStatus::Done;
+                }
                 // Mark pending so sync_selected_batch_textures doesn't also
                 // spawn its own prep on this same frame.
                 item.result_tex_pending = true;
