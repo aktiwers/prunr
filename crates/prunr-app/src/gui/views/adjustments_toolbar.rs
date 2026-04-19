@@ -272,10 +272,6 @@ pub fn render(
             );
         }
         if item_settings.line_mode != LineMode::Off {
-            // Scale chip: DexiNed output-scale selector. Sits here (after the
-            // "DexiNed only" note when that's visible, else right after the
-            // Sketch dropdown) so the user can A/B compare scales without
-            // diving into the Sketch popover.
             if super::lines_popover::render_scale_chip(ui, item_settings) {
                 change.edge = true;
                 change.commit = true;

@@ -12,13 +12,9 @@ const DEXINED_W: u32 = 640;
 const MEAN_BGR: [f32; 3] = [103.5, 116.2, 123.6];
 
 /// Number of DexiNed outputs we surface as `EdgeScale` variants.
-/// Indexed by `EdgeScale as usize`: Fine=0, Balanced=1, Bold=2, Fused=3.
 pub const EDGE_SCALE_COUNT: usize = 4;
 
-/// All outputs from a single DexiNed inference, keyed by [`EdgeScale`] as
-/// `usize`. Produced by [`EdgeEngine::infer_all_tensors`] so the GUI can
-/// cache every scale from one model run and switch between them without
-/// re-inferring.
+/// All 4 outputs from one DexiNed inference, indexed by `EdgeScale as usize`.
 pub struct EdgeInferenceResult {
     pub tensors: [Vec<f32>; EDGE_SCALE_COUNT],
     pub height: u32,
@@ -31,9 +27,8 @@ pub struct EdgeEngine {
     session: Mutex<Session>,
 }
 
-/// Pick the session-output index for a given scale. DexiNed's OpenCV Zoo
-/// export orders outputs as `block0..block5` (fine → coarse) followed by
-/// the fused `block_cat`. Validated at `EdgeEngine::new`.
+/// Layout assumption: `block0..block5` (fine → coarse), then fused `block_cat`.
+/// Validated at `EdgeEngine::new`.
 fn scale_to_output_index(scale: EdgeScale, last: usize) -> usize {
     match scale {
         EdgeScale::Fine => 0,
@@ -79,20 +74,14 @@ impl EdgeEngine {
         Ok(Self { session: Mutex::new(session) })
     }
 
-    /// Run edge detection on an image. Returns RGBA where edges are opaque.
-    /// If `line_color` is Some, all edge pixels are painted that color.
-    ///
-    /// Convenience wrapper for CLI / single-shot flows that don't cache the
-    /// intermediate tensor.
+    /// One-shot: inference + finalize_edges for CLI / single-shot flows.
     pub fn detect(&self, original: &DynamicImage, edge: &crate::EdgeSettings) -> Result<RgbaImage, CoreError> {
         let (tensor, h, w) = self.infer_tensor(original, edge.edge_scale)?;
         Ok(finalize_edges(&tensor, h, w, original, edge))
     }
 
-    /// Run DexiNed and extract a single output scale. Use this when the
-    /// caller doesn't cache per-scale tensors (CLI, single-shot flows).
-    /// One `session.run` produces all outputs internally; this just picks
-    /// the one we want and discards the rest.
+    /// Extract a single scale from one inference run. Use when the caller
+    /// doesn't cache per-scale tensors (CLI).
     pub fn infer_tensor(&self, original: &DynamicImage, scale: EdgeScale) -> Result<(Vec<f32>, u32, u32), CoreError> {
         let mut session = self.session.lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -102,10 +91,8 @@ impl EdgeEngine {
         Ok((tensor, DEXINED_H, DEXINED_W))
     }
 
-    /// Run DexiNed and extract every scale we expose (Fine, Balanced, Bold,
-    /// Fused) from a single inference pass. GUI/subprocess path uses this
-    /// so scale switching in live preview is zero inference cost — every
-    /// scale is already cached.
+    /// Extract all 4 scales from one inference run. Used by the GUI subprocess
+    /// path so scale switching in live preview is a cached tensor lookup.
     pub fn infer_all_tensors(&self, original: &DynamicImage) -> Result<EdgeInferenceResult, CoreError> {
         let mut session = self.session.lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
