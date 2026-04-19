@@ -15,7 +15,7 @@ use egui_material_icons::icons::*;
 use crate::gui::item_settings::ItemSettings;
 use crate::gui::settings::{Settings, SettingsModel};
 use crate::gui::theme;
-use crate::gui::views::{chip, preset_dropdown};
+use crate::gui::views::{chip, hint, preset_dropdown};
 use prunr_core::LineMode;
 
 use super::model_label;
@@ -110,7 +110,6 @@ pub fn render(
             match tier {
                 Tier::Mask => acc.mask = true,
                 Tier::Edge => acc.edge = true,
-                Tier::Bg   => acc.bg   = true,
             }
         }
         if ch.commit { acc.commit = true; }
@@ -208,23 +207,11 @@ pub fn render(
         // Divider between mask and composite groups.
         ui.separator();
 
-        // Background — composite concern, always visible (works in all modes).
-        aggregate(chip::chip_option_rgba(
-            ui, "bg",
-            &ICON_PALETTE.codepoint.to_string(), "Background",
-            "Pick a solid color to fill transparent areas.",
-            "Replace transparent areas with a solid color.",
-            &mut item_settings.bg,
-            defaults.bg_value,
-            "Transparent",
-        ), Tier::Bg, &mut change);
-
-        // BG effect — orthogonal to bg colour. Effect wins when non-None;
-        // solid colour stays the fast-path render-time fallback.
-        if render_bg_effect_chip(ui, &mut item_settings.bg_effect) {
-            change.mask = true;
-            change.commit = true;
-        }
+        // Unified Background chip: Transparent / Solid colour / source-derived
+        // effects (Blurred / Inverted / Desaturated). Behind the scenes the
+        // two fields (`bg`, `bg_effect`) stay orthogonal — the chip enforces
+        // mutual exclusivity at the UI so users pick one kind at a time.
+        render_background_chip(ui, &mut item_settings.bg, &mut item_settings.bg_effect, defaults.bg_value, &mut change);
 
         // Right-aligned cluster: reset, preset. Right-to-left layout fills
         // from the right edge so items stack: [..free space..] [preset] [↺].
@@ -373,8 +360,10 @@ pub fn render(
 }
 
 /// Which tier a chip's change lifts into on the aggregate ToolbarChange.
+/// `Bg` is written directly by `render_background_chip` (not via aggregate)
+/// so the enum no longer carries a Bg variant.
 #[derive(Copy, Clone)]
-enum Tier { Mask, Edge, Bg }
+enum Tier { Mask, Edge }
 
 /// Input-transform picker. Changes invalidate the DexiNed edge tensor cache
 /// (and seg cache for conservatism) — not live-previewable. Label accent
@@ -660,54 +649,164 @@ fn fill_style_params(ui: &mut Ui, style: &mut prunr_core::FillStyle) -> bool {
     changed
 }
 
-/// Background-effect picker. Orthogonal to the bg colour chip — effects
-/// override colour when non-None (the output RGBA gets the effect baked
-/// in). Picker keeps the popover open so the user can tune params.
-fn render_bg_effect_chip(ui: &mut Ui, effect: &mut prunr_core::BgEffect) -> bool {
-    use prunr_core::BgEffect;
-    let accent = !matches!(effect, BgEffect::None);
-    let resp = chip::chip_tooltip(
-        chip::chip_button(ui, &ICON_TEXTURE.codepoint.to_string(), effect.name(), accent),
-        "Bg effect",
-        "Backdrop composited behind the subject. Overrides the bg colour \
-         when non-transparent; baked into the output RGBA at process time.",
-    );
+/// The five backgrounds a user can choose. Derived from the two
+/// orthogonal data fields (`bg`, `bg_effect`) — effects take precedence
+/// over solid colour at render time, and the chip mirrors that precedence.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BgKind { Transparent, Solid, BlurredSource, InvertedSource, DesaturatedSource }
 
-    let popup_id = ui.make_persistent_id("bg_effect_popup");
-    let mut changed = false;
-    chip::popup_for(ui, popup_id, &resp, |ui| {
-        ui.label(RichText::new("Bg effect").strong().color(theme::TEXT_PRIMARY));
-        ui.add_space(theme::SPACE_XS);
-        for option in BgEffect::ALL {
-            let selected = std::mem::discriminant(option) == std::mem::discriminant(effect);
-            if ui.selectable_label(selected, option.name()).clicked() && !selected {
-                *effect = *option;
-                changed = true;
-            }
-        }
-        ui.separator();
-        if bg_effect_params(ui, effect) {
-            changed = true;
-        }
-    });
-    changed
-}
+impl BgKind {
+    const ALL: [Self; 5] = [
+        Self::Transparent, Self::Solid,
+        Self::BlurredSource, Self::InvertedSource, Self::DesaturatedSource,
+    ];
 
-fn bg_effect_params(ui: &mut Ui, effect: &mut prunr_core::BgEffect) -> bool {
-    use prunr_core::BgEffect;
-    let mut changed = false;
-    match effect {
-        BgEffect::None | BgEffect::InvertedSource | BgEffect::DesaturatedSource => {
-            ui.label(RichText::new("No parameters.").color(theme::TEXT_SECONDARY)
-                .size(theme::FONT_SIZE_MONO));
-        }
-        BgEffect::BlurredSource { radius } => {
-            if ui.add(egui::Slider::new(radius, 1..=64).text("Blur radius")).changed() {
-                changed = true;
-            }
+    fn name(self) -> &'static str {
+        match self {
+            Self::Transparent => "Transparent",
+            Self::Solid => "Solid colour",
+            Self::BlurredSource => "Blurred source",
+            Self::InvertedSource => "Inverted source",
+            Self::DesaturatedSource => "Desaturated source",
         }
     }
-    changed
+
+    /// Derive the current kind from the two underlying fields. Effects win
+    /// over solid colour — matches the render-time precedence.
+    fn current(bg: &Option<[u8; 4]>, effect: &prunr_core::BgEffect) -> Self {
+        use prunr_core::BgEffect;
+        match effect {
+            BgEffect::BlurredSource { .. } => Self::BlurredSource,
+            BgEffect::InvertedSource => Self::InvertedSource,
+            BgEffect::DesaturatedSource => Self::DesaturatedSource,
+            BgEffect::None => if bg.is_some() { Self::Solid } else { Self::Transparent },
+        }
+    }
+
+    /// Effects require a postprocess rerun (baked into the output RGBA);
+    /// Transparent / Solid only change the render-time bg fill.
+    fn needs_postprocess(self) -> bool {
+        matches!(self, Self::BlurredSource | Self::InvertedSource | Self::DesaturatedSource)
+    }
+}
+
+/// Unified Background chip: one control for "what fills the transparent
+/// area behind the subject" — solid colour or a source-derived effect.
+fn render_background_chip(
+    ui: &mut Ui,
+    bg: &mut Option<[u8; 4]>,
+    bg_effect: &mut prunr_core::BgEffect,
+    default_color: [u8; 4],
+    change: &mut ToolbarChange,
+) {
+    use egui::widgets::color_picker::{color_picker_color32, Alpha};
+    use prunr_core::BgEffect;
+
+    let current = BgKind::current(bg, bg_effect);
+    let accent = current != BgKind::Transparent;
+    let resp = chip::chip_tooltip(
+        chip::chip_button(ui, &ICON_PALETTE.codepoint.to_string(), current.name(), accent),
+        "Background",
+        "What fills transparent areas behind the subject: a solid colour, \
+         or a source-derived effect (blurred / inverted / desaturated).",
+    );
+
+    let popup_id = ui.make_persistent_id("background_popup");
+    chip::popup_for(ui, popup_id, &resp, |ui| {
+        ui.set_min_width(BACKGROUND_POPOVER_WIDTH);
+        ui.label(RichText::new("Background").strong().color(theme::TEXT_PRIMARY));
+        ui.add_space(theme::SPACE_XS);
+        ui.horizontal_top(|ui| {
+            ui.vertical(|ui| {
+                ui.set_min_width(BACKGROUND_LIST_WIDTH);
+                for kind in BgKind::ALL {
+                    let selected = kind == current;
+                    if ui.selectable_label(selected, kind.name()).clicked() && !selected {
+                        apply_bg_kind(bg, bg_effect, kind, default_color);
+                        // Effect transitions need a postprocess rerun (bake
+                        // the effect into the output RGBA); Transparent/Solid
+                        // toggles are render-time only.
+                        if kind.needs_postprocess() || current.needs_postprocess() {
+                            change.mask = true;
+                        } else {
+                            change.bg = true;
+                        }
+                        change.commit = true;
+                    }
+                }
+            });
+            ui.separator();
+            ui.vertical(|ui| {
+                match current {
+                    BgKind::Transparent => {
+                        hint(ui, "No background — alpha is preserved on export.");
+                    }
+                    BgKind::Solid => {
+                        if let Some(rgba) = bg.as_mut() {
+                            let mut c = egui::Color32::from_rgba_unmultiplied(rgba[0], rgba[1], rgba[2], rgba[3]);
+                            if color_picker_color32(ui, &mut c, Alpha::OnlyBlend) {
+                                let [r, g, b, a] = c.to_srgba_unmultiplied();
+                                *rgba = [r, g, b, a];
+                                change.bg = true;
+                                change.commit = true;
+                            }
+                            hint(ui, "Solid colour fills transparent areas at render / export.");
+                        }
+                    }
+                    BgKind::BlurredSource => {
+                        if let BgEffect::BlurredSource { radius } = bg_effect {
+                            if ui.add(egui::Slider::new(radius, 1..=64).text("Blur radius")).changed() {
+                                change.mask = true;
+                                change.commit = true;
+                            }
+                        }
+                        hint(ui, "Transparent areas filled with a Gaussian-blurred copy of the source image.");
+                    }
+                    BgKind::InvertedSource => {
+                        hint(ui, "Transparent areas filled with the RGB-inverted source image.");
+                    }
+                    BgKind::DesaturatedSource => {
+                        hint(ui, "Transparent areas filled with the luma-grayscale source.");
+                    }
+                }
+            });
+        });
+    });
+}
+
+const BACKGROUND_POPOVER_WIDTH: f32 = 480.0;
+const BACKGROUND_LIST_WIDTH: f32 = 150.0;
+
+/// Mutate the two bg fields to match `kind`. Transparent clears both; Solid
+/// sets `bg` (picking up an existing colour if present, falling back to the
+/// default) and clears the effect; effects set `bg_effect` without touching
+/// `bg` so the user's colour survives a round-trip through an effect.
+fn apply_bg_kind(
+    bg: &mut Option<[u8; 4]>,
+    bg_effect: &mut prunr_core::BgEffect,
+    kind: BgKind,
+    default_color: [u8; 4],
+) {
+    use prunr_core::BgEffect;
+    match kind {
+        BgKind::Transparent => {
+            *bg = None;
+            *bg_effect = BgEffect::None;
+        }
+        BgKind::Solid => {
+            if bg.is_none() { *bg = Some(default_color); }
+            *bg_effect = BgEffect::None;
+        }
+        BgKind::BlurredSource => {
+            *bg_effect = BgEffect::BlurredSource { radius: 12 };
+        }
+        BgKind::InvertedSource => {
+            *bg_effect = BgEffect::InvertedSource;
+        }
+        BgKind::DesaturatedSource => {
+            *bg_effect = BgEffect::DesaturatedSource;
+        }
+    }
 }
 
 /// Label + inline colour picker on two stacked rows. Thin wrapper over
