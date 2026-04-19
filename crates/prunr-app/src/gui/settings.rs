@@ -165,20 +165,24 @@ impl Settings {
         !self.active_backend.is_empty() && !self.active_backend.eq_ignore_ascii_case("CPU")
     }
 
-    /// Smart default for parallel jobs based on backend and model.
+    /// Smart default for parallel jobs based on backend and model. In
+    /// filter-only mode (`SettingsModel::None`) the pipeline runs pure CPU
+    /// on already-decoded pixels, so the ORT-memory cap doesn't apply.
     pub fn default_jobs(&self) -> usize {
-        let model: prunr_core::ModelKind = self.model.into();
-        let safe = super::memory::safe_max_jobs(model);
         let base = if self.is_gpu() { 2 } else { (num_cpus::get() / 2).max(1) };
-        base.min(safe)
+        match self.model.to_model_kind() {
+            Some(model) => base.min(super::memory::safe_max_jobs(model)),
+            None => base,
+        }
     }
 
     /// Max recommended parallel jobs based on backend and model.
     pub fn max_jobs(&self) -> usize {
-        let model: prunr_core::ModelKind = self.model.into();
-        let safe = super::memory::safe_max_jobs(model);
         let base = if self.is_gpu() { 4 } else { num_cpus::get() };
-        base.min(safe)
+        match self.model.to_model_kind() {
+            Some(model) => base.min(super::memory::safe_max_jobs(model)),
+            None => base,
+        }
     }
 
     /// Resolve a preset name to its values. "Prunr" is always
@@ -244,24 +248,39 @@ pub enum SettingsModel {
     Silueta,
     U2net,
     BiRefNetLite,
+    /// "Filter-only" mode — no segmentation inference. The pipeline bypasses
+    /// the seg stage entirely and just applies fill_style / bg_effect to the
+    /// source. DexiNed still runs if `line_mode == EdgesOnly` (edges don't
+    /// need the seg model); SubjectOutline is invalid without a seg model
+    /// and gets greyed out in the UI.
+    None,
 }
 
 impl SettingsModel {
     /// All variants in display order — source of truth for the model dropdown.
-    /// Adding a new model? Update this array once and every dropdown follows.
-    pub const ALL: [Self; 3] = [
+    /// `None` is listed last so the dropdown visually separates it from the
+    /// real models (UI draws a separator before the last entry).
+    pub const ALL: [Self; 4] = [
         Self::Silueta,
         Self::U2net,
         Self::BiRefNetLite,
+        Self::None,
     ];
-}
 
-impl From<SettingsModel> for ModelKind {
-    fn from(m: SettingsModel) -> Self {
-        match m {
-            SettingsModel::Silueta => ModelKind::Silueta,
-            SettingsModel::U2net => ModelKind::U2net,
-            SettingsModel::BiRefNetLite => ModelKind::BiRefNetLite,
+    /// Whether this variant resolves to an ORT seg model. `None` skips
+    /// segmentation inference entirely — callers branch on this rather
+    /// than trying to convert `None` to a `ModelKind`.
+    pub fn uses_segmentation(self) -> bool {
+        !matches!(self, Self::None)
+    }
+
+    /// Convert to `ModelKind`, or `None` for the filter-only variant.
+    pub fn to_model_kind(self) -> Option<ModelKind> {
+        match self {
+            Self::Silueta => Some(ModelKind::Silueta),
+            Self::U2net => Some(ModelKind::U2net),
+            Self::BiRefNetLite => Some(ModelKind::BiRefNetLite),
+            Self::None => None,
         }
     }
 }

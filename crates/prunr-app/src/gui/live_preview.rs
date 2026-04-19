@@ -421,8 +421,20 @@ fn run_preview(inputs: DispatchInputs, cancel: &AtomicBool) -> RunOutput {
     match inputs.kind {
         PreviewKind::Mask => {
             if !is_subject_outline {
-                // Off mode: rebuild and return masked RGBA (no edge compose).
-                let Some(seg) = inputs.seg_tensor.as_ref() else { return RunOutput::empty(); };
+                // Filter-only path: no seg tensor available (model=None, or
+                // item not yet processed). Apply fill_style directly to the
+                // raw source so the user sees the filter effect without
+                // running inference.
+                let Some(seg) = inputs.seg_tensor.as_ref() else {
+                    let mut rgba = inputs.original.to_rgba8();
+                    prunr_core::apply_fill_style(&mut rgba, inputs.settings.fill_style);
+                    return RunOutput {
+                        rgba: Some(rgba),
+                        built_edge_mask: None,
+                        built_masked_base: None,
+                    };
+                };
+                // Off mode with seg tensor: rebuild masked RGBA (no edge compose).
                 let Some(masked) = build_masked_base(seg, &inputs.original, &inputs.settings)
                 else { return RunOutput::empty(); };
                 return RunOutput {

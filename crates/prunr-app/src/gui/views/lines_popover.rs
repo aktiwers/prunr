@@ -98,7 +98,12 @@ pub struct LinesChange {
 /// over the Subject mode, since that mode runs seg → DexiNed and both models
 /// are actually in play.
 #[allow(deprecated)]
-pub fn render(ui: &mut Ui, settings: &mut ItemSettings, seg_model_name: &str) -> LinesChange {
+pub fn render(
+    ui: &mut Ui,
+    settings: &mut ItemSettings,
+    seg_model_name: &str,
+    subject_available: bool,
+) -> LinesChange {
     let pop_id = egui::Id::new("lines_popover");
     let label = format!(
         "{}  Sketch: {}",
@@ -158,7 +163,11 @@ pub fn render(ui: &mut Ui, settings: &mut ItemSettings, seg_model_name: &str) ->
             for mode in [LineMode::Off, LineMode::SubjectOutline, LineMode::EdgesOnly] {
                 let selected = settings.line_mode == mode;
                 let label = two_line_label(mode_label(mode), mode_description(mode));
-                let resp = ui.selectable_label(selected, label);
+                // Subject requires a seg model — grey it out when the user
+                // picked "No model" so the invalid combination isn't
+                // reachable through clicking.
+                let mode_available = mode != LineMode::SubjectOutline || subject_available;
+                let resp = ui.add_enabled(mode_available, egui::SelectableLabel::new(selected, label));
                 if resp.hovered() {
                     hovered_mode = Some(mode);
                 }

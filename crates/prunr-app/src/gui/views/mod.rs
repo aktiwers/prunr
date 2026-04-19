@@ -50,6 +50,7 @@ pub fn model_name(model: SettingsModel) -> &'static str {
         SettingsModel::Silueta => "Silueta",
         SettingsModel::U2net => "U2Net",
         SettingsModel::BiRefNetLite => "BiRefNet",
+        SettingsModel::None => "No model",
     }
 }
 
@@ -59,6 +60,7 @@ pub fn model_label(model: SettingsModel, short: bool) -> String {
         SettingsModel::Silueta => (ICON_SPRINT.codepoint, "Silueta", "fast", "~4 MB"),
         SettingsModel::U2net => (ICON_SMART_TOY.codepoint, "U2Net", "quality", "~170 MB"),
         SettingsModel::BiRefNetLite => (ICON_NEUROLOGY.codepoint, "BiRefNet", "detail", "~214 MB"),
+        SettingsModel::None => (ICON_BLOCK.codepoint, "No model", "No background removal", "0 MB"),
     };
     if short {
         format!("{icon}  {name}")
