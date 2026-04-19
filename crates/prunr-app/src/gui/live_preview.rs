@@ -64,7 +64,9 @@ pub struct PreviewResult {
     /// Edge mask built during this dispatch, for the parent to cache so
     /// subsequent edge_thickness / solid_line_color tweaks skip the resize.
     /// Some only when Kind was Edge and the mask was built (not reused).
-    pub new_edge_mask: Option<(Arc<GrayImage>, u32 /* line_strength bits */)>,
+    /// Keyed by (line_strength bits, scale) so scale switches don't reuse a
+    /// stale mask built from a different tensor.
+    pub new_edge_mask: Option<(Arc<GrayImage>, u32 /* line_strength bits */, prunr_core::EdgeScale)>,
     /// `true` when no further tweaks are pending for this item at drain
     /// time — the drag has settled and this is the last result of the
     /// session. Callers gate heavy side-effects (sidebar thumb rebuild)
@@ -199,6 +201,7 @@ impl LivePreview {
             let tx = self.result_tx.clone();
             rayon::spawn(move || {
                 let ls_bits = inputs.settings.line_strength.to_bits();
+                let scale = inputs.settings.edge_scale;
                 let is_edge = matches!(inputs.kind, PreviewKind::Edge);
                 let had_cache = inputs.cached_edge_mask.is_some();
                 let (result, built_mask) = run_preview(inputs, &cancel);
@@ -209,7 +212,7 @@ impl LivePreview {
                     // Publish the mask for caching only if we just built it
                     // (cache miss path) — no point re-publishing what was cached.
                     let new_edge_mask = if is_edge && !had_cache {
-                        built_mask.map(|m| (m, ls_bits))
+                        built_mask.map(|m| (m, ls_bits, scale))
                     } else {
                         None
                     };

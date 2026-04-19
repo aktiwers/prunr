@@ -477,7 +477,7 @@ mod tests {
         use prunr_core::LineMode;
         let mut item = fixture(1);
         item.settings.line_mode = LineMode::Off;
-        item.cached_edge_mask = Some((Arc::new(image::GrayImage::new(1, 1)), 0));
+        item.cached_edge_mask = Some((Arc::new(image::GrayImage::new(1, 1)), 0, prunr_core::EdgeScale::Fused));
         let mut snap_with_edges = ItemSettings::default();
         snap_with_edges.line_mode = LineMode::EdgesOnly;
         item.preset_undo_stack.push_back(PresetSnapshot {
