@@ -1515,7 +1515,12 @@ impl PrunrApp {
         let counts = self.batch.status_counts();
         let still_processing = counts.processing > 0;
         if counts.errored > 0 {
-            let msg = format!("{} image(s) failed to process", counts.errored);
+            let first_err = self.batch.first_error_message().unwrap_or("unknown error");
+            let msg = if counts.errored == 1 {
+                format!("Image failed: {first_err}")
+            } else {
+                format!("{} image(s) failed — first: {first_err}", counts.errored)
+            };
             self.status.text = msg.clone();
             self.toasts.warning(msg);
         } else if !still_processing {
