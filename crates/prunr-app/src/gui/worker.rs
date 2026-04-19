@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
-use prunr_core::{MaskSettings, EdgeSettings, ModelKind, ProgressStage, ProcessResult};
+use prunr_core::{MaskSettings, EdgeSettings, EdgeScale, ModelKind, ProgressStage, ProcessResult, EDGE_SCALE_COUNT};
 use crate::gui::settings::LineMode;
 use crate::subprocess::protocol::SubprocessEvent;
 use crate::subprocess::manager::SubprocessManager;
@@ -69,6 +69,52 @@ impl CompressedTensor {
     }
 }
 
+/// Raw multi-scale DexiNed output for IPC transfer. `tensors` is indexed by
+/// [`EdgeScale`] as `usize` — Fine=0, Balanced=1, Bold=2, Fused=3.
+pub struct EdgeTensorCache {
+    pub tensors: [Vec<f32>; EDGE_SCALE_COUNT],
+    pub height: u32,
+    pub width: u32,
+}
+
+/// Zstd-compressed multi-scale DexiNed cache. All 4 scales are extracted from
+/// one inference pass and compressed in parallel here, so scale switching in
+/// live preview is a tensor lookup (one decompress, no re-inference).
+pub struct CompressedEdgeTensors {
+    tensors: [Vec<u8>; EDGE_SCALE_COUNT],
+    pub height: u32,
+    pub width: u32,
+}
+
+impl CompressedEdgeTensors {
+    /// Compress all 4 tensors with zstd level 1, in parallel via rayon.
+    /// Runs off the UI thread (called from the BG-IO / subprocess-event path).
+    /// Returns None if any compression fails.
+    pub fn from_raw(raw: EdgeTensorCache) -> Option<Self> {
+        use rayon::prelude::*;
+        let parts: Vec<Vec<u8>> = raw.tensors.par_iter().map(|t| {
+            let raw_bytes = crate::subprocess::ipc::f32s_to_le_bytes(t);
+            zstd::encode_all(raw_bytes.as_slice(), 1).ok().unwrap_or_default()
+        }).collect();
+        if parts.iter().any(|p| p.is_empty()) { return None; }
+        let [a, b, c, d] = parts.try_into().ok()?;
+        Some(Self { tensors: [a, b, c, d], height: raw.height, width: raw.width })
+    }
+
+    /// Decompress one scale's tensor. Called per-dispatch in the hot path,
+    /// so wrap the result in `Arc<Vec<f32>>` + a scale discriminator at the
+    /// call site (BatchItem::volatile_edge_tensor) to amortise across a drag.
+    pub fn decompress(&self, scale: EdgeScale) -> Option<Vec<f32>> {
+        let bytes = zstd::decode_all(self.tensors[scale as usize].as_slice()).ok()?;
+        Some(crate::subprocess::ipc::le_bytes_to_f32s(&bytes))
+    }
+
+    /// Total compressed bytes across all 4 scales (for budget tracking).
+    pub fn compressed_size(&self) -> usize {
+        self.tensors.iter().map(|t| t.len()).sum()
+    }
+}
+
 /// A Tier 2 re-postprocess item: cached tensor + original image bytes.
 pub struct Tier2WorkItem {
     pub item_id: u64,
@@ -113,9 +159,9 @@ pub enum WorkerResult {
         result: Result<ProcessResult, String>,
         /// Cached segmentation tensor from Tier 1 (for future mask-tier reruns).
         tensor_cache: Option<TensorCache>,
-        /// Cached DexiNed output (for future edge-tier reruns on line_strength tweaks).
+        /// Multi-scale DexiNed cache — all 4 scales produced in one inference.
         /// Only populated when the run used edge detection.
-        edge_cache: Option<TensorCache>,
+        edge_cache: Option<EdgeTensorCache>,
     },
     BatchComplete,
     Cancelled,
@@ -461,8 +507,8 @@ fn handle_subprocess_event(
             let tensor_cache = read_tensor_cache(
                 tensor_cache_path.as_ref(), tensor_cache_height, tensor_cache_width, model,
             );
-            let edge_cache = read_tensor_cache(
-                edge_cache_path.as_ref(), edge_cache_height, edge_cache_width, model,
+            let edge_cache = read_edge_tensor_cache(
+                edge_cache_path.as_ref(), edge_cache_height, edge_cache_width,
             );
 
             state.completed.insert(item_id);
@@ -513,9 +559,9 @@ fn read_result_image(
     result
 }
 
-/// Read one of the two optional tensor caches (seg tensor / DexiNed tensor)
-/// from disk. Returns `None` if the path is missing, dimensions are absent,
-/// or the read fails. Always deletes the temp file on success.
+/// Read the segmentation tensor cache from disk. Returns `None` if the
+/// path is missing, dimensions are absent, or the read fails. Always
+/// deletes the temp file on success.
 fn read_tensor_cache(
     path: Option<&std::path::PathBuf>,
     height: Option<u32>,
@@ -529,6 +575,41 @@ fn read_tensor_cache(
     let _ = std::fs::remove_file(path);
     let data = crate::subprocess::ipc::le_bytes_to_f32s(&raw_bytes);
     Some(TensorCache { data, height: h, width: w, model })
+}
+
+/// Read the DexiNed multi-scale cache. The child concatenates 4 tensors into
+/// one file (each sized h*w*4 bytes); parent splits into equal chunks.
+fn read_edge_tensor_cache(
+    path: Option<&std::path::PathBuf>,
+    height: Option<u32>,
+    width: Option<u32>,
+) -> Option<EdgeTensorCache> {
+    let path = path?;
+    let h = height?;
+    let w = width?;
+    let raw_bytes = std::fs::read(path).ok()?;
+    let _ = std::fs::remove_file(path);
+
+    let per_tensor_bytes = (h as usize) * (w as usize) * std::mem::size_of::<f32>();
+    let expected = per_tensor_bytes * EDGE_SCALE_COUNT;
+    if raw_bytes.len() != expected {
+        tracing::error!(
+            got = raw_bytes.len(),
+            expected,
+            "edge cache file size mismatch — discarding",
+        );
+        return None;
+    }
+
+    let mut chunks = raw_bytes.chunks_exact(per_tensor_bytes);
+    let mut next = || -> Option<Vec<f32>> {
+        Some(crate::subprocess::ipc::le_bytes_to_f32s(chunks.next()?))
+    };
+    let a = next()?;
+    let b = next()?;
+    let c = next()?;
+    let d = next()?;
+    Some(EdgeTensorCache { tensors: [a, b, c, d], height: h, width: w })
 }
 
 /// After an ImageDone, pull one more item into the subprocess if RSS allows.
