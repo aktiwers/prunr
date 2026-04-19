@@ -5,7 +5,7 @@
 //! tier needs to re-run (or if processing can be skipped entirely).
 
 use serde::{Serialize, Deserialize};
-use crate::types::ModelKind;
+use crate::types::{ModelKind, EdgeScale};
 
 /// Tier 1: settings that require AI model inference.
 ///
@@ -25,11 +25,16 @@ pub struct InferenceRecipe {
 
 /// Tier 2 (edge variant): settings re-applied to the cached DexiNed tensor.
 /// Changes here trigger an EdgeRerun, not a full pipeline — ~20-100ms vs 200ms-10s.
+///
+/// `edge_scale` lives here (not in `InferenceRecipe`) because all 4 scales are
+/// extracted from a single DexiNed run; switching between them is a tensor
+/// lookup, not a new inference.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct EdgeRecipe {
     pub line_strength_bits: u32,
     pub solid_line_color: Option<[u8; 3]>,
     pub edge_thickness: u32,
+    pub edge_scale: EdgeScale,
 }
 
 impl From<&crate::EdgeSettings> for EdgeRecipe {
@@ -38,6 +43,7 @@ impl From<&crate::EdgeSettings> for EdgeRecipe {
             line_strength_bits: e.line_strength.to_bits(),
             solid_line_color: e.solid_line_color,
             edge_thickness: e.edge_thickness,
+            edge_scale: e.edge_scale,
         }
     }
 }
@@ -175,6 +181,7 @@ mod tests {
                 line_strength_bits: 0.5f32.to_bits(),
                 solid_line_color: None,
                 edge_thickness: 0,
+                edge_scale: EdgeScale::Fused,
             },
             mask: mask(gamma, None, 0.0, false),
             composite: CompositeRecipe { bg_color: bg, solid_line_color: None },
@@ -245,6 +252,16 @@ mod tests {
         let a = make_recipe(ModelKind::Silueta, 1.0, None);
         let mut b = a.clone();
         b.edge.solid_line_color = Some([255, 0, 0]);
+        assert_eq!(resolve_tier(&a, &b), RequiredTier::EdgeRerun);
+    }
+
+    #[test]
+    fn edge_scale_change_edge_rerun() {
+        // Scale change picks a different cached output from the same DexiNed
+        // run — an EdgeRerun (pick a different tensor), never FullPipeline.
+        let a = make_recipe(ModelKind::Silueta, 1.0, None);
+        let mut b = a.clone();
+        b.edge.edge_scale = EdgeScale::Bold;
         assert_eq!(resolve_tier(&a, &b), RequiredTier::EdgeRerun);
     }
 
