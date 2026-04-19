@@ -432,7 +432,7 @@ mod tests {
     fn evict_all_tensors_clears_edge_cache_too() {
         let mut bm = fixture();
         let mut item = item_with_cache(1, 100);
-        item.cached_edge_mask = Some((Arc::new(image::GrayImage::new(1, 1)), 0));
+        item.cached_edge_mask = Some((Arc::new(image::GrayImage::new(1, 1)), 0, prunr_core::EdgeScale::Fused));
         bm.items.push(item);
         bm.items.push(item_with_cache(2, 100));
         bm.selected_index = 1; // selected = id=2
