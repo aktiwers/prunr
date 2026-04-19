@@ -210,14 +210,20 @@ where
             .map(|v| v.to_owned())
     })?;
 
-    let h = raw_output.shape()[2];
-    let w = raw_output.shape()[3];
+    // Force standard (row-major C-order, offset 0) layout before flattening.
+    // Some ORT execution providers (DirectML on Windows, plausibly CoreML on
+    // macOS) return tensors with GPU-mapped non-standard layouts; treating
+    // the raw backing Vec as C-order then gives garbage data downstream.
+    // `as_standard_layout()` is a no-op when already standard (CPU EP), and
+    // a single memcpy otherwise — trivial next to inference cost.
+    let standard = raw_output.as_standard_layout();
+    let h = standard.shape()[2];
+    let w = standard.shape()[3];
+    // invariant: as_standard_layout always produces a contiguous view,
+    // so as_slice() is Some.
+    let tensor_data = standard.as_slice().unwrap().to_vec();
     Ok(crate::types::InferenceResult {
-        tensor_data: {
-            let (vec, offset) = raw_output.into_raw_vec_and_offset();
-            debug_assert!(offset.unwrap_or(0) == 0, "ORT output tensor has non-zero offset");
-            vec
-        },
+        tensor_data,
         tensor_height: h,
         tensor_width: w,
         model,
