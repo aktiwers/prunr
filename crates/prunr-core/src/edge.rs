@@ -258,9 +258,21 @@ pub fn compose_edges_styled(
     // LineStyle gradients supersede `solid_line_color` — they compute the
     // target colour per pixel from position. Solid style defers to the
     // user's colour chip (or passes source RGB through if None).
-    let tint = match line_style {
+    let solid_tint = match line_style {
         LineStyle::Solid => solid_line_color,
-        LineStyle::GradientY { .. } | LineStyle::GradientX { .. } => None,
+        _ => None,
+    };
+
+    // Precompute geometry for radial gradient so the hot loop doesn't
+    // redo the centre conversion per pixel.
+    let (rg_cx, rg_cy, rg_max_dist_sq) = if let LineStyle::RadialGradient { center, .. } = line_style {
+        let cx = (center[0] as u32 * ow / 255) as i32;
+        let cy = (center[1] as u32 * oh / 255) as i32;
+        let far_x = cx.max(ow as i32 - cx);
+        let far_y = cy.max(oh as i32 - cy);
+        (cx, cy, (far_x * far_x + far_y * far_y).max(1))
+    } else {
+        (0, 0, 1)
     };
 
     for i in 0..pixel_count {
@@ -270,7 +282,7 @@ pub fn compose_edges_styled(
         if edge == 0 { continue; }
 
         let gradient_target: Option<[u8; 3]> = match line_style {
-            LineStyle::Solid => tint,
+            LineStyle::Solid => solid_tint,
             LineStyle::GradientY { top, bottom } => {
                 let y = (i as u32 / ow) as u16;
                 let t = (y as u32 * 255 / oh.max(1) as u32) as u16;
@@ -280,6 +292,22 @@ pub fn compose_edges_styled(
                 let x = (i as u32 % ow) as u16;
                 let t = (x as u32 * 255 / ow.max(1) as u32) as u16;
                 Some(lerp_rgb(left, right, t))
+            }
+            LineStyle::RadialGradient { inner, outer, .. } => {
+                let x = (i as u32 % ow) as i32;
+                let y = (i as u32 / ow) as i32;
+                let dx = x - rg_cx;
+                let dy = y - rg_cy;
+                let dist_sq = dx * dx + dy * dy;
+                let t = ((dist_sq * 255) / rg_max_dist_sq).min(255) as u16;
+                Some(lerp_rgb(inner, outer, t))
+            }
+            LineStyle::Rainbow { cycles } => {
+                // Hue cycles along pixel index so the colour changes smoothly
+                // across the whole image.
+                let hue = ((i as u64 * 360 * cycles.max(1) as u64 / pixel_count.max(1) as u64) % 360) as u16;
+                let (r, g, b) = crate::postprocess::hsv_to_rgb(hue, 255, 255);
+                Some([r, g, b])
             }
         };
         if let Some(target) = gradient_target {

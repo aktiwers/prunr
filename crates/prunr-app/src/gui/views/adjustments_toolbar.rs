@@ -361,39 +361,26 @@ pub fn render(
 #[derive(Copy, Clone)]
 enum Tier { Mask, Edge, Bg }
 
-/// Line-style picker (Solid / Vertical gradient / Horizontal gradient).
-/// Solid defers to the user's `solid_line_color` chip; gradient variants
-/// carry their own endpoints. Returns true when the user changed it.
+/// Line-style picker. Solid defers to the user's `solid_line_color` chip;
+/// every other variant carries its own colours / params (defaults from
+/// `LineStyle::ALL`). Phase-3 adds in-popover tuning for the params.
 fn render_line_style_chip(ui: &mut Ui, style: &mut prunr_core::LineStyle) -> bool {
     use prunr_core::LineStyle;
     let accent = !matches!(style, LineStyle::Solid);
     let resp = chip::chip_tooltip(
         chip::chip_button(ui, &ICON_GRADIENT.codepoint.to_string(), style.name(), accent),
         "Line style",
-        "How line pixels are coloured.\n\
-         • Solid — use the Solid line color chip (or source RGB if unset).\n\
-         • Vertical gradient — top colour fades to bottom colour.\n\
-         • Horizontal gradient — left colour fades to right colour.",
+        "How line pixels are coloured.",
     );
 
     let popup_id = ui.make_persistent_id("line_style_popup");
     let mut changed = false;
     chip::popup_for(ui, popup_id, &resp, |ui| {
-        for name in LineStyle::ALL_NAMES {
-            let selected = *name == style.name();
-            if ui.selectable_label(selected, *name).clicked() {
+        for option in LineStyle::ALL {
+            let selected = std::mem::discriminant(option) == std::mem::discriminant(style);
+            if ui.selectable_label(selected, option.name()).clicked() {
                 if !selected {
-                    *style = match *name {
-                        "Vertical gradient" => LineStyle::GradientY {
-                            top: [255, 50, 50],
-                            bottom: [50, 50, 255],
-                        },
-                        "Horizontal gradient" => LineStyle::GradientX {
-                            left: [255, 50, 50],
-                            right: [50, 50, 255],
-                        },
-                        _ => LineStyle::Solid,
-                    };
+                    *style = *option;
                     changed = true;
                 }
                 egui::Popup::close_id(ui.ctx(), popup_id);
@@ -403,37 +390,26 @@ fn render_line_style_chip(ui: &mut Ui, style: &mut prunr_core::LineStyle) -> boo
     changed
 }
 
-/// Fill-style picker (None / Desaturate / Invert / Duotone). Transforms the
-/// subject's RGB before compose. Returns true when the user changed it.
+/// Fill-style picker. Param-carrying variants take defaults from
+/// `FillStyle::ALL`; Phase-3 adds slider / colour-picker tuning inside
+/// the popover.
 fn render_fill_style_chip(ui: &mut Ui, style: &mut prunr_core::FillStyle) -> bool {
     use prunr_core::FillStyle;
     let accent = !matches!(style, FillStyle::None);
     let resp = chip::chip_tooltip(
         chip::chip_button(ui, &ICON_FORMAT_PAINT.codepoint.to_string(), style.name(), accent),
         "Fill style",
-        "How the subject RGB is transformed before compose.\n\
-         • None — keep source colours.\n\
-         • Desaturate — luma grayscale.\n\
-         • Invert — RGB negative.\n\
-         • Duotone — remap luma between two colours.",
+        "How the subject RGB is transformed before compose.",
     );
 
     let popup_id = ui.make_persistent_id("fill_style_popup");
     let mut changed = false;
     chip::popup_for(ui, popup_id, &resp, |ui| {
-        for name in FillStyle::ALL_NAMES {
-            let selected = *name == style.name();
-            if ui.selectable_label(selected, *name).clicked() {
+        for option in FillStyle::ALL {
+            let selected = std::mem::discriminant(option) == std::mem::discriminant(style);
+            if ui.selectable_label(selected, option.name()).clicked() {
                 if !selected {
-                    *style = match *name {
-                        "Desaturate" => FillStyle::Desaturate,
-                        "Invert" => FillStyle::Invert,
-                        "Duotone" => FillStyle::Duotone {
-                            dark: [20, 20, 60],
-                            light: [240, 220, 180],
-                        },
-                        _ => FillStyle::None,
-                    };
+                    *style = *option;
                     changed = true;
                 }
                 egui::Popup::close_id(ui.ctx(), popup_id);
