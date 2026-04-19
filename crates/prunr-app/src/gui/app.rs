@@ -897,11 +897,12 @@ impl PrunrApp {
     /// (winit + drag crate incompatibility; see Cargo.toml comment).
     #[allow(unused_variables)]
     pub fn initiate_drag_out(&mut self, ids: Vec<u64>, frame: &eframe::Frame) {
+        let split = self.settings.export_split_layers;
         let mut paths: Vec<PathBuf> = Vec::with_capacity(ids.len());
         for id in &ids {
             if let Some(item) = self.batch.find_by_id(*id) {
-                match super::drag_export::prepare(item) {
-                    Ok(path) => paths.push(path),
+                match super::drag_export::prepare_for_drag(item, split) {
+                    Ok(mut ps) => paths.append(&mut ps),
                     Err(e) => {
                         self.toasts.error(format!("Drag export failed: {e}"));
                     }

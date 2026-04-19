@@ -33,6 +33,20 @@ pub fn postprocess_from_flat(
     Ok(postprocess(view, original, mask_settings, model))
 }
 
+/// Flat-slice variant of `tensor_to_mask`. Reshapes `[1,1,H,W]` and forwards.
+pub fn tensor_to_mask_from_flat(
+    tensor: &[f32],
+    tensor_h: usize,
+    tensor_w: usize,
+    original: &DynamicImage,
+    mask_settings: &MaskSettings,
+    model: ModelKind,
+) -> Result<GrayImage, crate::types::CoreError> {
+    let view = ArrayView4::from_shape((1, 1, tensor_h, tensor_w), tensor)
+        .map_err(|e| crate::types::CoreError::Inference(format!("Tensor reshape: {e}")))?;
+    Ok(tensor_to_mask(view, original, mask_settings, model))
+}
+
 /// Convert raw ONNX tensor to a full-resolution grayscale mask (Tier 2).
 /// Applies normalization, gamma, threshold, resize, edge shift, and guided filter.
 pub fn tensor_to_mask(raw: ArrayView4<f32>, original: &DynamicImage, mask_settings: &MaskSettings, model: ModelKind) -> GrayImage {
@@ -635,6 +649,36 @@ mod tests {
         for (_, _, p) in result.enumerate_pixels() {
             assert_eq!(p[3], 255, "Expected alpha=255 for uniform high-confidence tensor");
         }
+    }
+
+    #[test]
+    fn test_tensor_to_mask_from_flat_matches_view_path() {
+        // Flat-slice path must produce byte-identical output to the ArrayView4 path.
+        let mut flat = vec![0.0f32; 320 * 320];
+        for y in 0..320_usize {
+            for x in 0..320_usize {
+                flat[y * 320 + x] = (y * 320 + x) as f32 / (320.0 * 320.0);
+            }
+        }
+        let original = solid_rgb(128, 96);
+        let mask = MaskSettings::default();
+
+        let view_mask = {
+            let arr = ndarray::Array4::from_shape_vec((1, 1, 320, 320), flat.clone()).unwrap();
+            tensor_to_mask(arr.view(), &original, &mask, ModelKind::Silueta)
+        };
+        let flat_mask = tensor_to_mask_from_flat(&flat, 320, 320, &original, &mask, ModelKind::Silueta)
+            .expect("flat path succeeds");
+        assert_eq!(view_mask.as_raw(), flat_mask.as_raw());
+    }
+
+    #[test]
+    fn test_tensor_to_mask_from_flat_rejects_size_mismatch() {
+        let flat = vec![0.0f32; 10];
+        let original = solid_rgb(16, 16);
+        let mask = MaskSettings::default();
+        let r = tensor_to_mask_from_flat(&flat, 320, 320, &original, &mask, ModelKind::Silueta);
+        assert!(r.is_err(), "size mismatch must return Err");
     }
 
     #[test]

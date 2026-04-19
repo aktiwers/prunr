@@ -15,6 +15,9 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
+use image::DynamicImage;
+use prunr_core::{BgEffect, FillStyle, MaskSettings, ModelKind};
+
 use super::item::BatchItem;
 use super::settings::LineMode;
 
@@ -71,14 +74,15 @@ pub(crate) fn cleanup_stale() {
     }
 }
 
-/// Build a human-friendly filename stem for a batch item given its processing mode.
-/// Pure function — does not touch the filesystem.
-fn make_filename(source_filename: &str, has_result: bool, line_mode: LineMode) -> String {
-    let stem = Path::new(source_filename)
+fn source_stem(source_filename: &str) -> &str {
+    Path::new(source_filename)
         .file_stem()
         .and_then(|s| s.to_str())
-        .unwrap_or("image");
+        .unwrap_or("image")
+}
 
+/// Build a human-friendly filename stem for a batch item given its processing mode.
+fn make_filename(source_filename: &str, has_result: bool, line_mode: LineMode) -> String {
     if !has_result {
         // No processing yet — drag source as-is with original extension.
         return source_filename.to_string();
@@ -88,7 +92,122 @@ fn make_filename(source_filename: &str, has_result: bool, line_mode: LineMode) -
         LineMode::EdgesOnly => "lines",
         LineMode::SubjectOutline => "nobg-lines",
     };
-    format!("{stem}-{suffix}.png")
+    format!("{}-{suffix}.png", source_stem(source_filename))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LayerKind {
+    Subject,
+    Lines,
+    Mask,
+}
+
+impl LayerKind {
+    pub const ALL: [Self; 3] = [Self::Subject, Self::Lines, Self::Mask];
+
+    fn suffix(self) -> &'static str {
+        match self {
+            Self::Subject => "subject",
+            Self::Lines => "lines",
+            Self::Mask => "mask",
+        }
+    }
+}
+
+fn make_layer_filename(source_filename: &str, kind: LayerKind) -> String {
+    format!("{}-{}.png", source_stem(source_filename), kind.suffix())
+}
+
+/// Decompressed seg tensor + the metadata needed to reshape / postprocess it.
+/// Built once at the top of `prepare_for_drag` and shared by the Subject and
+/// Mask layers; Lines doesn't need it.
+struct SegCache {
+    tensor: Vec<f32>,
+    height: u32,
+    width: u32,
+    model: ModelKind,
+}
+
+impl SegCache {
+    fn from_item(item: &BatchItem) -> Option<Self> {
+        let ct = item.cached_tensor.as_ref()?;
+        let tensor = ct.decompress()?;
+        Some(Self { tensor, height: ct.height, width: ct.width, model: ct.model })
+    }
+}
+
+fn decode_source(item: &BatchItem) -> Option<DynamicImage> {
+    let bytes = item.source.load_bytes()
+        .map_err(|err| tracing::warn!(item_id = item.id, %err, "split drag-out: source read"))
+        .ok()?;
+    prunr_core::load_image_from_bytes(&bytes)
+        .map_err(|err| tracing::warn!(item_id = item.id, %err, "split drag-out: decode"))
+        .ok()
+}
+
+fn render_layer(
+    item: &BatchItem,
+    kind: LayerKind,
+    original: &DynamicImage,
+    seg: Option<&SegCache>,
+) -> Option<Vec<u8>> {
+    let item_id = item.id;
+    match kind {
+        LayerKind::Subject => {
+            let seg = seg?;
+            // Strip user's fill_style + bg_effect so the receiving app gets
+            // a clean transparent subject. Keep every other mask knob so
+            // their guided-filter / feather / edge_shift refinements survive.
+            let mask = MaskSettings {
+                fill_style: FillStyle::None,
+                bg_effect: BgEffect::None,
+                ..item.settings.mask_settings()
+            };
+            let rgba = prunr_core::postprocess_from_flat(
+                &seg.tensor, seg.height as usize, seg.width as usize,
+                original, &mask, seg.model,
+            )
+                .map_err(|err| tracing::warn!(item_id, %err, "subject layer postprocess"))
+                .ok()?;
+            prunr_core::encode_rgba_png(&rgba)
+                .map_err(|err| tracing::warn!(item_id, %err, "subject layer encode"))
+                .ok()
+        }
+        LayerKind::Lines => {
+            let et = item.cached_edge_tensors.as_ref()?;
+            let tensor = et.decompress(item.settings.edge_scale)?;
+            let rgba = prunr_core::finalize_edges(
+                &tensor, et.height, et.width, original, &item.settings.edge_settings(),
+            );
+            prunr_core::encode_rgba_png(&rgba)
+                .map_err(|err| tracing::warn!(item_id, %err, "lines layer encode"))
+                .ok()
+        }
+        LayerKind::Mask => {
+            let seg = seg?;
+            let gray = prunr_core::tensor_to_mask_from_flat(
+                &seg.tensor, seg.height as usize, seg.width as usize,
+                original, &item.settings.mask_settings(), seg.model,
+            )
+                .map_err(|err| tracing::warn!(item_id, %err, "mask layer reshape"))
+                .ok()?;
+            prunr_core::encode_gray_png(&gray)
+                .map_err(|err| tracing::warn!(item_id, %err, "mask layer encode"))
+                .ok()
+        }
+    }
+}
+
+fn write_layer(
+    item: &BatchItem,
+    kind: LayerKind,
+    original: &DynamicImage,
+    seg: Option<&SegCache>,
+) -> std::io::Result<Option<PathBuf>> {
+    let Some(png_bytes) = render_layer(item, kind, original, seg) else { return Ok(None) };
+    let path = temp_dir().join(make_layer_filename(&item.filename, kind));
+    std::fs::write(&path, &png_bytes)?;
+    Ok(Some(path))
 }
 
 /// Prepare a drag temp file for a batch item. Returns the absolute path.
@@ -111,6 +230,35 @@ pub(crate) fn prepare(item: &BatchItem) -> std::io::Result<PathBuf> {
         }
     }
     Ok(path)
+}
+
+/// Prepare drag temp files for a batch item. `split=false` yields the single
+/// composite PNG (`prepare`); `split=true` yields up to three layer PNGs
+/// (subject / lines / mask). Layers whose underlying tensor isn't cached are
+/// skipped; if all are missing the path falls back to composite so an
+/// unprocessed drag still lands a file.
+pub(crate) fn prepare_for_drag(item: &BatchItem, split: bool) -> std::io::Result<Vec<PathBuf>> {
+    if !split {
+        return Ok(vec![prepare(item)?]);
+    }
+
+    // Decode source + decompress seg tensor once — Subject+Mask share seg,
+    // Lines uses the edge tensor independently. Avoids a 4K decode 3× on
+    // drag completion.
+    let Some(original) = decode_source(item) else {
+        return Ok(vec![prepare(item)?]);
+    };
+    let seg = SegCache::from_item(item);
+
+    let paths: Vec<PathBuf> = LayerKind::ALL.iter()
+        .copied()
+        .filter_map(|k| write_layer(item, k, &original, seg.as_ref()).transpose())
+        .collect::<std::io::Result<Vec<_>>>()?;
+
+    if paths.is_empty() {
+        return Ok(vec![prepare(item)?]);
+    }
+    Ok(paths)
 }
 
 #[cfg(test)]
@@ -157,5 +305,49 @@ mod tests {
     fn cleanup_stale_does_not_panic_on_missing_dir() {
         // Should silently succeed even if temp dir doesn't exist.
         cleanup_stale();
+    }
+
+    #[test]
+    fn layer_filename_uses_kind_suffix() {
+        assert_eq!(
+            make_layer_filename("sunset.jpg", LayerKind::Subject),
+            "sunset-subject.png"
+        );
+        assert_eq!(
+            make_layer_filename("sunset.jpg", LayerKind::Lines),
+            "sunset-lines.png"
+        );
+        assert_eq!(
+            make_layer_filename("sunset.jpg", LayerKind::Mask),
+            "sunset-mask.png"
+        );
+    }
+
+    #[test]
+    fn layer_filename_falls_back_on_empty_source() {
+        assert_eq!(
+            make_layer_filename("", LayerKind::Subject),
+            "image-subject.png"
+        );
+    }
+
+    #[test]
+    fn render_layer_returns_none_when_tensors_missing() {
+        use crate::gui::item::{BatchItem, ImageSource};
+        use crate::gui::item_settings::ItemSettings;
+        use std::sync::Arc;
+
+        let item = BatchItem::new(
+            1,
+            "x.png".to_string(),
+            ImageSource::Bytes(Arc::new(Vec::new())),
+            (10, 10),
+            ItemSettings::default(),
+            String::new(),
+        );
+        let blank = DynamicImage::ImageRgba8(image::RgbaImage::new(10, 10));
+        for kind in LayerKind::ALL {
+            assert!(render_layer(&item, kind, &blank, None).is_none());
+        }
     }
 }

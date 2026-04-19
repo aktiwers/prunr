@@ -226,6 +226,20 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) {
             ui.separator();
             ui.add_space(theme::SPACE_SM);
 
+            // ── Export ──
+            section_heading(ui, "Export");
+            ui.checkbox(
+                &mut app.settings.export_split_layers,
+                RichText::new("Split layers on drag-out")
+                    .color(theme::TEXT_PRIMARY)
+                    .size(theme::FONT_SIZE_BODY),
+            );
+            hint(ui, "Drag a processed image as 3 separate PNGs (subject, lines, mask) instead of one composite \u{2014} useful for Photoshop / Procreate workflows.");
+            ui.add_space(theme::SPACE_MD);
+
+            ui.separator();
+            ui.add_space(theme::SPACE_SM);
+
             // ── Default preset for new images ──
             section_heading(ui, "Default preset");
             let preset_names = super::preset_dropdown::all_preset_names(&app.settings);
