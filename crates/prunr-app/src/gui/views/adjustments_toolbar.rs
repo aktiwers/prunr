@@ -396,7 +396,7 @@ fn render_line_style_chip(ui: &mut Ui, style: &mut prunr_core::LineStyle) -> boo
                     };
                     changed = true;
                 }
-                ui.memory_mut(|m| m.close_popup(popup_id));
+                egui::Popup::close_id(ui.ctx(), popup_id);
             }
         }
     });
@@ -436,7 +436,7 @@ fn render_fill_style_chip(ui: &mut Ui, style: &mut prunr_core::FillStyle) -> boo
                     };
                     changed = true;
                 }
-                ui.memory_mut(|m| m.close_popup(popup_id));
+                egui::Popup::close_id(ui.ctx(), popup_id);
             }
         }
     });
@@ -470,7 +470,7 @@ fn render_compose_mode_chip(ui: &mut Ui, mode: &mut prunr_core::ComposeMode) -> 
                     *mode = *option;
                     changed = true;
                 }
-                ui.memory_mut(|m| m.close_popup(popup_id));
+                egui::Popup::close_id(ui.ctx(), popup_id);
             }
         }
     });

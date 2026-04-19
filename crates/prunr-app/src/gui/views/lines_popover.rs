@@ -170,7 +170,7 @@ pub fn render(ui: &mut Ui, settings: &mut ItemSettings, seg_model_name: &str) ->
                     // Close the popover on any selection (even re-clicking the
                     // current one) — the user's intent was to make a choice
                     // and move on, not to keep the menu open.
-                    ui.memory_mut(|m| m.close_popup(pop_id));
+                    egui::Popup::close_id(ui.ctx(), pop_id);
                 }
             }
 
@@ -237,7 +237,7 @@ pub fn render_scale_chip(ui: &mut egui::Ui, settings: &mut ItemSettings) -> bool
                     settings.edge_scale = scale;
                     changed = true;
                 }
-                ui.memory_mut(|m| m.close_popup(pop_id));
+                egui::Popup::close_id(ui.ctx(), pop_id);
             }
         }
     });
