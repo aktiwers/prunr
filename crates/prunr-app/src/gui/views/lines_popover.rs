@@ -13,7 +13,7 @@ use egui_material_icons::icons::*;
 
 use crate::gui::item_settings::ItemSettings;
 use crate::gui::theme;
-use prunr_core::LineMode;
+use prunr_core::{EdgeScale, LineMode};
 
 /// Popover width.
 const POPOVER_WIDTH: f32 = 300.0;
@@ -33,6 +33,26 @@ fn mode_description(mode: LineMode) -> &'static str {
         LineMode::Off => "no sketch extraction",
         LineMode::EdgesOnly => "sketch of the full image",
         LineMode::SubjectOutline => "sketch of the subject only, transparent background",
+    }
+}
+
+/// Scale label for the Scale picker.
+fn scale_label(scale: EdgeScale) -> &'static str {
+    match scale {
+        EdgeScale::Fine => "Fine",
+        EdgeScale::Balanced => "Balanced",
+        EdgeScale::Bold => "Bold",
+        EdgeScale::Fused => "Fused",
+    }
+}
+
+/// One-line description for the Scale picker rows.
+fn scale_description(scale: EdgeScale) -> &'static str {
+    match scale {
+        EdgeScale::Fine => "micro-edges, crispest detail",
+        EdgeScale::Balanced => "mid-scale, smooth transitions",
+        EdgeScale::Bold => "abstract outlines, coarsest",
+        EdgeScale::Fused => "combined scales (default, highest quality)",
     }
 }
 
@@ -64,15 +84,24 @@ fn two_line_label(title: &str, description: &str) -> egui::text::LayoutJob {
     job
 }
 
-/// Render the row 3 Lines button + popover. Returns `true` if line_mode changed
-/// (caller should invalidate edge cache and re-route pipeline).
+/// Summary of what the Lines popover changed this frame.
+#[derive(Default, Debug, Clone, Copy)]
+pub struct LinesChange {
+    /// `line_mode` was flipped (caller invalidates edge cache, retiers pipeline).
+    pub mode_changed: bool,
+    /// `edge_scale` was flipped (caller marks edge-tier dirty for live preview;
+    /// no cache invalidation — all scales live in the multi-tensor cache).
+    pub scale_changed: bool,
+}
+
+/// Render the row 3 Lines button + popover.
 ///
 /// `seg_model_name` is the display name of the currently-selected BG removal
 /// model (e.g. "BiRefNet"). Shown in the Model section when the user hovers
 /// over the Subject mode, since that mode runs seg → DexiNed and both models
 /// are actually in play.
 #[allow(deprecated)]
-pub fn render(ui: &mut Ui, settings: &mut ItemSettings, seg_model_name: &str) -> bool {
+pub fn render(ui: &mut Ui, settings: &mut ItemSettings, seg_model_name: &str) -> LinesChange {
     let pop_id = egui::Id::new("lines_popover");
     let label = format!(
         "{}  Sketch: {}",
@@ -110,7 +139,7 @@ pub fn render(ui: &mut Ui, settings: &mut ItemSettings, seg_model_name: &str) ->
         ui.memory_mut(|m| m.toggle_popup(pop_id));
     }
 
-    let mut changed = false;
+    let mut change = LinesChange::default();
     egui::popup_below_widget(
         ui,
         pop_id,
@@ -139,7 +168,7 @@ pub fn render(ui: &mut Ui, settings: &mut ItemSettings, seg_model_name: &str) ->
                 if resp.clicked() {
                     if !selected {
                         settings.line_mode = mode;
-                        changed = true;
+                        change.mode_changed = true;
                     }
                     // Close the popover on any selection (even re-clicking the
                     // current one) — the user's intent was to make a choice
@@ -177,10 +206,37 @@ pub fn render(ui: &mut Ui, settings: &mut ItemSettings, seg_model_name: &str) ->
                     .color(theme::TEXT_PRIMARY)
                     .size(theme::FONT_SIZE_BODY),
             );
+
+            ui.add_space(theme::SPACE_SM);
+            ui.separator();
+            ui.add_space(theme::SPACE_SM);
+
+            // ── Scale picker ──
+            // DexiNed produces 7 outputs per inference. All 4 user-facing
+            // scales are extracted + cached from one pass, so switching here
+            // is a tensor-lookup in live preview (no re-inference).
+            ui.label(
+                RichText::new("Scale")
+                    .strong()
+                    .color(theme::TEXT_PRIMARY),
+            );
+            ui.add_space(theme::SPACE_XS);
+            for scale in [EdgeScale::Fine, EdgeScale::Balanced, EdgeScale::Bold, EdgeScale::Fused] {
+                let selected = settings.edge_scale == scale;
+                let label = two_line_label(scale_label(scale), scale_description(scale));
+                let resp = ui.selectable_label(selected, label);
+                if resp.clicked() {
+                    if !selected {
+                        settings.edge_scale = scale;
+                        change.scale_changed = true;
+                    }
+                    ui.memory_mut(|m| m.close_popup(pop_id));
+                }
+            }
         },
     );
 
-    changed
+    change
 }
 
 #[cfg(test)]
