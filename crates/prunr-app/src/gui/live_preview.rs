@@ -31,7 +31,7 @@ use std::time::{Duration, Instant};
 
 use image::{DynamicImage, GrayImage, RgbaImage};
 
-use prunr_core::{ModelKind, postprocess_from_flat, tensor_to_edge_mask, compose_edges, compose_edges_styled, compose_edges_dual_styled};
+use prunr_core::{LineMode, ModelKind, postprocess_from_flat, tensor_to_edge_mask, compose_edges, compose_edges_styled, compose_edges_dual_styled};
 
 /// Build the "masked base" for SubjectOutline live preview — run Tier 2 mask
 /// from the cached seg tensor to reproduce the segmented subject, so edges
@@ -374,10 +374,13 @@ impl RunOutput {
 fn run_preview(inputs: DispatchInputs, cancel: &AtomicBool) -> RunOutput {
     if cancel.load(Ordering::Acquire) { return RunOutput::empty(); }
 
-    // SubjectOutline mode: both tensors are present. Edge compositing draws
-    // onto the masked subject (not the raw photo); mask tweaks must keep the
-    // outline; edge tweaks reuse the masked base across dispatches.
-    let is_subject_outline = inputs.seg_tensor.is_some() && inputs.edge_tensor.is_some();
+    // Pipeline shape follows the user's CURRENT `line_mode`, not tensor
+    // presence. After a SubjectOutline → Off round-trip we (intentionally)
+    // keep both tensors cached, so using tensor-presence as the selector
+    // silently kept composing edges onto Off-mode previews.
+    let is_subject_outline = inputs.settings.line_mode == LineMode::SubjectOutline
+        && inputs.seg_tensor.is_some()
+        && inputs.edge_tensor.is_some();
 
     // Resolve the masked base for SubjectOutline mode.
     // - Mask kind: always rebuild (the mask settings may have just changed).

@@ -435,7 +435,15 @@ impl PrunrApp {
     /// settings to determine the minimum work needed (skip / mask rerun / full).
     fn process_items(&mut self, filter: impl Fn(&BatchItem) -> bool) {
         let chain = self.settings.chain_mode;
-        let model: prunr_core::ModelKind = self.settings.model.into();
+        // Filter-only mode (No model) has its own dispatcher — route early
+        // so the rest of this function can assume a real `ModelKind`. Kept
+        // as `unwrap_or(BiRefNetLite)` for now until `process_filter_only`
+        // lands; the fallback placeholder never runs because
+        // `SettingsModel::None` default is only reachable via the UI wiring
+        // that hasn't shipped yet.
+        let model: prunr_core::ModelKind = self.settings.model
+            .to_model_kind()
+            .unwrap_or(prunr_core::ModelKind::BiRefNetLite);
 
         let candidate_ids: HashSet<u64> = self.batch.items.iter()
             .filter(|i| filter(i) && !matches!(i.status, BatchStatus::Processing))
@@ -1677,7 +1685,9 @@ impl PrunrApp {
     /// snapshot is available (defensive — shouldn't happen in normal flow).
     fn resolved_dispatch_recipe(&self, item_id: u64) -> prunr_core::ProcessingRecipe {
         self.processor.dispatch_recipe.clone().unwrap_or_else(|| {
-            let model: prunr_core::ModelKind = self.settings.model.into();
+            let model: prunr_core::ModelKind = self.settings.model
+                .to_model_kind()
+                .unwrap_or(prunr_core::ModelKind::BiRefNetLite);
             let chain = self.settings.chain_mode;
             self.batch.items.iter()
                 .find(|b| b.id == item_id)
@@ -2222,11 +2232,12 @@ impl PrunrApp {
             // inference needed, just `postprocess_from_flat`. Run it
             // in-process via live preview's rayon pool instead of
             // spawning a fresh subprocess (which would reload the seg
-            // model for no reason). ~instant vs several seconds.
+            // model for no reason). ~instant vs several seconds. Do this
+            // regardless of the `live_preview` setting — that toggle
+            // governs mid-drag debouncing, not commit-time fast paths.
             let use_live = toolbar_change.line_mode_changed
                 && current_line_mode == prunr_core::LineMode::Off
                 && !toolbar_change.preset_applied
-                && self.settings.live_preview
                 && self.batch.items[idx].cached_tensor.is_some();
             if use_live {
                 self.processor.live_preview.mark_tweak(
