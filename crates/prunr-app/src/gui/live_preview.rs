@@ -236,6 +236,8 @@ impl LivePreview {
                     return;
                 }
                 if let Some(rgba) = output.rgba {
+                    let (w, h) = (rgba.width(), rgba.height());
+                    tracing::info!(item_id = id, generation, w, h, "live_preview: sending PreviewResult");
                     let new_edge_mask = if is_edge {
                         output.built_edge_mask.map(|m| (m, ls_bits, scale))
                     } else {
@@ -251,6 +253,8 @@ impl LivePreview {
                         item_id: id, rgba, generation, new_edge_mask, new_masked_base,
                         is_final: false,
                     });
+                } else {
+                    tracing::warn!(item_id = id, generation, "live_preview: run_preview produced no rgba");
                 }
             });
         }
@@ -267,9 +271,15 @@ impl LivePreview {
         while let Ok(mut r) = self.result_rx.try_recv() {
             // Drop stale: if generation doesn't match the last dispatch for
             // this item, a newer tweak superseded it.
-            let is_latest = self.in_flight
-                .get(&r.item_id)
-                .map_or(false, |f| f.generation == r.generation);
+            let latest_gen = self.in_flight.get(&r.item_id).map(|f| f.generation);
+            let is_latest = latest_gen == Some(r.generation);
+            tracing::info!(
+                item_id = r.item_id,
+                generation = r.generation,
+                latest_gen = ?latest_gen,
+                is_latest,
+                "live_preview: drain_results",
+            );
             if is_latest {
                 self.in_flight.remove(&r.item_id);
                 // If pending has a fresh entry for this item, the user is
