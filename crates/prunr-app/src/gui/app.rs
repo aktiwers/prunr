@@ -141,11 +141,34 @@ impl PrunrApp {
         let mut settings = Settings::load();
         settings.active_backend = prunr_core::OrtEngine::detect_active_provider();
 
-        // Subprocess worker: inference runs in a child process for OOM isolation.
-        // No prewarm needed — the subprocess creates its own engine pool.
-        let (worker_tx, worker_rx) = spawn_worker(worker_ctx);
+        // Subprocess worker: inference runs in a child process for OOM
+        // isolation. Pre-warm a subprocess with the startup config so the
+        // first Process click skips the 1–5s model-load cost. Filter-only
+        // mode (SettingsModel::None) skips pre-warm — no ORT session
+        // needed for pure CPU filters.
+        let prewarm = Self::initial_processing_config(&settings);
+        let (worker_tx, worker_rx) = spawn_worker(worker_ctx, prewarm);
 
         Self::init_state(settings, clipboard, worker_tx, worker_rx)
+    }
+
+    /// Build the pre-warm subprocess config for startup, or `None` when
+    /// pre-warming doesn't make sense (e.g. user has "No model" selected —
+    /// filter-only runs without ORT, so the subprocess would never be used).
+    /// Uses `ItemSettings::default()` for mask/edge because startup has no
+    /// selected item yet; Process clicks that use different settings will
+    /// drop the warm sub and spawn fresh.
+    fn initial_processing_config(settings: &Settings) -> Option<super::worker::ProcessingConfig> {
+        let model = settings.model.to_model_kind()?;
+        let item_defaults = super::item_settings::ItemSettings::default();
+        Some(super::worker::ProcessingConfig {
+            model,
+            jobs: settings.parallel_jobs,
+            mask: item_defaults.mask_settings(),
+            force_cpu: settings.force_cpu,
+            line_mode: item_defaults.line_mode,
+            edge: item_defaults.edge_settings(),
+        })
     }
 
     /// Test constructor that skips eframe setup (for unit tests)

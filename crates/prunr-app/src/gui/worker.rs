@@ -162,6 +162,10 @@ pub struct AddEdgeWorkItem {
 }
 
 /// Bundled processing settings — avoids passing 6+ individual fields.
+/// Clone/PartialEq enable the pre-warm path to check whether the warm
+/// subprocess was booted with the same Init-affecting config as the
+/// incoming batch (and therefore safely reusable).
+#[derive(Clone, PartialEq)]
 pub struct ProcessingConfig {
     pub model: ModelKind,
     pub jobs: usize,
@@ -219,8 +223,16 @@ pub enum WorkerResult {
 
 /// Spawn the worker bridge thread. Receives `WorkerMessage` from the UI,
 /// translates to subprocess IPC, handles crash+retry, sends `WorkerResult` back.
+///
+/// When `prewarm` is `Some`, the bridge boots a subprocess with that config
+/// at startup and keeps it alive until the first `BatchProcess`. If the
+/// batch's config matches, the warm sub is reused and the user skips the
+/// 1–5 second model-load cost. Mismatched config (user tweaked model /
+/// jobs / line_mode before clicking Process) falls back to a fresh spawn,
+/// dropping the warm sub.
 pub fn spawn_worker(
     ctx: egui::Context,
+    prewarm: Option<ProcessingConfig>,
 ) -> (mpsc::Sender<WorkerMessage>, mpsc::Receiver<WorkerResult>) {
     let (msg_tx, msg_rx) = mpsc::channel::<WorkerMessage>();
     let (res_tx, res_rx) = mpsc::channel::<WorkerResult>();
@@ -228,13 +240,40 @@ pub fn spawn_worker(
     std::thread::Builder::new()
         .name("prunr-bridge".into())
         .spawn(move || {
+            // Pre-warm: try to spawn a subprocess with the startup config
+            // before any message arrives. Blocks this thread for the model-
+            // load duration (UI stays responsive — bridge has its own
+            // thread). If a Process click arrives during warm-up, it
+            // queues on msg_rx and gets picked up once the sub is live.
+            let mut warm: Option<(SubprocessManager, ProcessingConfig)> = None;
+            if let Some(cfg) = prewarm {
+                let ProcessingConfig { model, jobs, mask, force_cpu, line_mode, edge } = cfg.clone();
+                match SubprocessManager::spawn(model, jobs, mask, force_cpu, line_mode, edge) {
+                    Ok((sub, provider)) => {
+                        let _ = res_tx.send(WorkerResult::BackendReady(provider));
+                        ctx.request_repaint();
+                        warm = Some((sub, cfg));
+                    }
+                    Err(err) => {
+                        tracing::warn!(%err, "pre-warm subprocess failed, falling back to per-batch spawn");
+                    }
+                }
+            }
+
             while let Ok(msg) = msg_rx.recv() {
                 match msg {
                     WorkerMessage::BatchProcess {
                         items, tier2_items, add_edge_items, config, cancels,
                         additional_items_rx,
                     } => {
+                        // Reuse the warm sub only when its Init config
+                        // matches AND it's still alive. Any mismatch or
+                        // dead process drops it and re-spawns.
+                        let reuse = warm.take().and_then(|(mut sub, cfg)| {
+                            if cfg == config && sub.is_alive() { Some(sub) } else { None }
+                        });
                         run_batch_with_retry(
+                            reuse,
                             items, tier2_items, add_edge_items, config, &cancels,
                             additional_items_rx,
                             &res_tx, &ctx,
@@ -289,7 +328,9 @@ enum WaitAction {
         initial_jobs = config.jobs,
     ),
 )]
+#[allow(clippy::too_many_arguments)]
 fn run_batch_with_retry(
+    prewarm: Option<SubprocessManager>,
     initial_items: Vec<WorkItem>,
     initial_tier2: Vec<Tier2WorkItem>,
     initial_add_edge: Vec<AddEdgeWorkItem>,
@@ -308,6 +349,9 @@ fn run_batch_with_retry(
         max_jobs: initial_jobs,
     };
     let additional_items_rx = additional_items_rx.as_ref();
+    // Pre-warm sub is consumed on the first iteration; crash retries
+    // always spawn fresh.
+    let mut prewarm = prewarm;
 
     emit_loading_status(&state, res_tx, ctx);
 
@@ -332,7 +376,7 @@ fn run_batch_with_retry(
         }
 
         let Some((mut sub, mut sent_items, mut sent_tier2_ids, mut sent_add_edge_ids)) = spawn_and_initial_burst(
-            &mut state, model, mask, force_cpu, line_mode, edge, cancels, res_tx, ctx,
+            prewarm.take(), &mut state, model, mask, force_cpu, line_mode, edge, cancels, res_tx, ctx,
         ) else {
             return; // spawn failed — errors + BatchComplete already sent
         };
@@ -404,10 +448,13 @@ fn poll_additional_items(
     }
 }
 
-/// Spawn a subprocess and send the initial burst (Tier 2 first — no inference
-/// needed — then Tier 1 up to `max_jobs`). On spawn failure, reports errors
-/// for every pending item and sends `BatchComplete`; returns `None`.
+/// Spawn a subprocess (or accept a pre-warmed one) and send the initial
+/// burst (Tier 2 first — no inference needed — then Tier 1 up to
+/// `max_jobs`). On spawn failure, reports errors for every pending item
+/// and sends `BatchComplete`; returns `None`.
+#[allow(clippy::too_many_arguments)]
 fn spawn_and_initial_burst(
+    prewarm: Option<SubprocessManager>,
     state: &mut BatchRunState,
     model: ModelKind,
     mask: MaskSettings,
@@ -431,19 +478,24 @@ fn spawn_and_initial_burst(
     // use the seg engine pool.
     let effective_jobs = state.max_jobs.min(state.pending.len().max(1));
 
-    let (mut sub, active_provider) = match SubprocessManager::spawn(
-        model, effective_jobs, mask, force_cpu, line_mode, edge,
-    ) {
-        Ok(s) => s,
-        Err(e) => {
-            emit_pending_errors(state, &e, res_tx);
-            let _ = res_tx.send(WorkerResult::BatchComplete);
-            ctx.request_repaint();
-            return None;
-        }
+    let mut sub = match prewarm {
+        Some(sub) => sub,
+        None => match SubprocessManager::spawn(
+            model, effective_jobs, mask, force_cpu, line_mode, edge,
+        ) {
+            Ok((s, active_provider)) => {
+                let _ = res_tx.send(WorkerResult::BackendReady(active_provider));
+                ctx.request_repaint();
+                s
+            }
+            Err(e) => {
+                emit_pending_errors(state, &e, res_tx);
+                let _ = res_tx.send(WorkerResult::BatchComplete);
+                ctx.request_repaint();
+                return None;
+            }
+        },
     };
-    let _ = res_tx.send(WorkerResult::BackendReady(active_provider));
-    ctx.request_repaint();
 
     let mut sent_items: Vec<WorkItem> = Vec::new();
     let mut sent_tier2_ids: Vec<u64> = Vec::new();
