@@ -311,15 +311,6 @@ pub fn render(
             // Divider between threshold+shape knobs and the paint-time composite choice.
             ui.separator();
 
-            aggregate(chip::chip_option_rgb(
-                ui, "solid_line_color",
-                &ICON_BRUSH.codepoint.to_string(), "Solid line color",
-                "Paint every edge the same color.",
-                "Stage 4 of 4 in the lines pipeline. Paint every visible edge the same color, or leave unset to keep the original RGB beneath the mask. Runs after edge thickness.",
-                &mut item_settings.solid_line_color,
-                defaults.solid_line_color_value,
-            ), Tier::Edge, &mut change);
-
             // ComposeMode picker — only meaningful in SubjectOutline mode.
             // Ignored by the worker / live preview in EdgesOnly + Off, so we
             // hide the chip there to avoid presenting a dead control.
@@ -333,6 +324,15 @@ pub fn render(
                 change.edge = true;
                 change.commit = true;
             }
+
+            aggregate(chip::chip_option_rgb(
+                ui, "solid_line_color",
+                &ICON_BRUSH.codepoint.to_string(), "Solid line color",
+                "Paint every edge the same color.",
+                "Stage 4 of 4 in the lines pipeline. Paint every visible edge the same color, or leave unset to keep the original RGB beneath the mask. Runs after edge thickness.",
+                &mut item_settings.solid_line_color,
+                defaults.solid_line_color_value,
+            ), Tier::Edge, &mut change);
         }
     });
 
@@ -451,8 +451,7 @@ fn render_compose_mode_chip(ui: &mut Ui, mode: &mut prunr_core::ComposeMode) -> 
     let resp = chip::chip_tooltip(
         chip::chip_button(ui, &ICON_LAYERS.codepoint.to_string(), &mode.to_string(), accent),
         "Style",
-        "How the subject mask and outline combine. Pure compose — switching \
-         modes is instant (no re-inference).\n\
+        "How the subject mask and outline combine.\n\
          • Lines only — outline inside the subject, transparent bg.\n\
          • Subject filled — solid subject with outline on top.\n\
          • Engraving — outline cut through the filled subject.\n\
