@@ -219,14 +219,17 @@ pub fn compose_edges(
     }
 }
 
-/// Composite a pre-built edge mask OVER an already-masked RGBA, preserving
-/// the base's alpha. Used by `SubjectOutline` mode where the base carries the
-/// subject silhouette in its alpha channel and the edges draw on top.
+/// Composite a pre-built edge mask INSIDE an already-masked RGBA — the edge
+/// only shows where the base's alpha (subject mask) also contains content.
+/// Used by `SubjectOutline` mode.
 ///
-/// Alpha merge is `max(base_alpha, edge_mask)`: inside the subject the base
-/// alpha dominates; outside the subject the edge mask shows through. With a
-/// `solid_line_color`, edge pixels are recolored (overwriting base RGB at
-/// edge pixels using the edge mask's strength as a blend weight).
+/// Alpha merge is multiplicative: `alpha = base_alpha * edge_mask / 255`.
+/// That keeps the lines-only silhouette the user expects (transparent
+/// background, no filled subject) while tying line visibility to the subject
+/// mask — so gamma / threshold / refine tweaks visibly change where the
+/// lines fade out along the subject silhouette. With a `solid_line_color`,
+/// edge pixels are recoloured to that color; otherwise the base RGB shows
+/// through at edges.
 pub fn compose_edges_over_rgba(
     mask: &image::GrayImage,
     base: &RgbaImage,
@@ -241,23 +244,23 @@ pub fn compose_edges_over_rgba(
     let out_raw = rgba.as_mut();
     if let Some(c) = solid_line_color {
         for i in 0..(ow * oh) as usize {
-            let e = mask_raw[i];
-            if e == 0 { continue; } // no edge here — keep base pixel untouched
-            let w = e as u16;
-            let iw = 255 - w;
-            // Blend base RGB toward the line color using edge strength as weight.
-            out_raw[i * 4]     = ((out_raw[i * 4]     as u16 * iw + c[0] as u16 * w) / 255) as u8;
-            out_raw[i * 4 + 1] = ((out_raw[i * 4 + 1] as u16 * iw + c[1] as u16 * w) / 255) as u8;
-            out_raw[i * 4 + 2] = ((out_raw[i * 4 + 2] as u16 * iw + c[2] as u16 * w) / 255) as u8;
-            let a = out_raw[i * 4 + 3];
-            out_raw[i * 4 + 3] = a.max(e);
+            let subject = out_raw[i * 4 + 3] as u16;
+            let edge = mask_raw[i] as u16;
+            let effective = (subject * edge / 255) as u8;
+            if effective == 0 {
+                out_raw[i * 4 + 3] = 0;
+                continue;
+            }
+            out_raw[i * 4]     = c[0];
+            out_raw[i * 4 + 1] = c[1];
+            out_raw[i * 4 + 2] = c[2];
+            out_raw[i * 4 + 3] = effective;
         }
     } else {
         for i in 0..(ow * oh) as usize {
-            let e = mask_raw[i];
-            if e == 0 { continue; }
-            let a = out_raw[i * 4 + 3];
-            out_raw[i * 4 + 3] = a.max(e);
+            let subject = out_raw[i * 4 + 3] as u16;
+            let edge = mask_raw[i] as u16;
+            out_raw[i * 4 + 3] = (subject * edge / 255) as u8;
         }
     }
     rgba
