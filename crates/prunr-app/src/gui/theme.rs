@@ -112,7 +112,7 @@ pub const ACCENT_DISABLED: Color32 = Color32::from_rgba_premultiplied(49, 18, 57
 // === Window ===
 
 pub const DEFAULT_WINDOW_SIZE: [f32; 2] = [1280.0, 800.0];
-pub const MIN_WINDOW_SIZE: [f32; 2] = [640.0, 480.0];
+pub const MIN_WINDOW_SIZE: [f32; 2] = [800.0, 480.0];
 
 // === Typography (sizes for egui TextStyle overrides) ===
 
