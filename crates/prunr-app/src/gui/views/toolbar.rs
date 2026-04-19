@@ -113,14 +113,10 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
             let selected_processing = app.batch.items.iter()
                 .any(|i| i.selected && i.status == BatchStatus::Processing);
 
-            // Cancel — added FIRST in right-to-left so visually it sits between
-            // Process (added last, leftmost) and Save (added before this block,
-            // rightmost). Layout left-to-right reads [Process] [Cancel] [Save].
-            // Label flips to "Cancel Selected" when the user's checked items
-            // are the ones mid-flight — makes the intent explicit even though
-            // the action (drop the cancel flag) is the same today. Partial
-            // cancel (stop only the selected, let others continue) is a
-            // backend change for later.
+            // Cancel button. Action is always "drop the cancel flag and stop
+            // the current batch" — the label only changes to reflect user
+            // context. Partial cancel (stop selected, keep others running)
+            // needs per-item cancellation in the worker bridge, not done yet.
             if is_batch_processing {
                 let cancel_label = if selected_processing { "Cancel Selected" } else { "Cancel All" };
                 let cancel_btn = egui::Button::new(
