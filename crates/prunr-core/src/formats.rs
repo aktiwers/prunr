@@ -27,19 +27,101 @@ pub fn resize_rgb_lanczos3(img: &DynamicImage, dst_width: u32, dst_height: u32) 
 }
 
 /// Load an image from a file path. Format detected by file extension.
-/// Supports PNG, JPEG, WebP, BMP (via image crate feature flags in Cargo.toml).
+/// Supports PNG, JPEG, WebP, BMP, and SVG (rasterized via resvg).
 pub fn load_image_from_path(path: &Path) -> Result<DynamicImage, CoreError> {
+    if has_svg_extension(path) {
+        let bytes = std::fs::read(path).map_err(CoreError::Io)?;
+        return rasterize_svg(&bytes);
+    }
     image::open(path).map_err(CoreError::from)
 }
 
-/// Load an image from raw bytes. Format detected by magic bytes (not extension).
-/// Use this for drag-and-drop or embedded data where no path is available.
+/// Load an image from raw bytes. Format detected by content sniff. SVG is
+/// detected first (XML prologue / `<svg`); otherwise the `image` crate's
+/// magic-byte detection takes over for PNG/JPEG/WebP/BMP.
 pub fn load_image_from_bytes(bytes: &[u8]) -> Result<DynamicImage, CoreError> {
+    if looks_like_svg(bytes) {
+        return rasterize_svg(bytes);
+    }
     ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()
         .map_err(|e| CoreError::Io(e))?
         .decode()
         .map_err(CoreError::from)
+}
+
+fn has_svg_extension(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("svg"))
+}
+
+/// Sniff the leading bytes for an SVG marker. Allows leading whitespace +
+/// optional UTF-8 BOM. Probes only the first 512 bytes. We deliberately
+/// match `<?xml` and `<svg` only — `<!--` and `<!DOCTYPE` would false-
+/// positive on non-SVG XML or HTML; SVG that starts with a leading
+/// comment can still be loaded by extension via `load_image_from_path`.
+fn looks_like_svg(bytes: &[u8]) -> bool {
+    let probe = &bytes[..bytes.len().min(512)];
+    let probe = probe.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(probe);
+    let head = std::str::from_utf8(probe).unwrap_or("");
+    let trimmed = head.trim_start();
+    trimmed.starts_with("<?xml") || trimmed.starts_with("<svg")
+}
+
+/// Rasterize an SVG byte buffer to a `DynamicImage::ImageRgba8`. Uses the
+/// SVG's intrinsic size, capped at `LARGE_IMAGE_LIMIT` so a pathological
+/// `<svg width="100000">` can't blow memory.
+fn rasterize_svg(bytes: &[u8]) -> Result<DynamicImage, CoreError> {
+    use resvg::tiny_skia::{Pixmap, Transform};
+    use resvg::usvg::{Options, Tree};
+
+    let opts = Options::default();
+    let tree = Tree::from_data(bytes, &opts)
+        .map_err(|e| CoreError::ImageFormat(format!("SVG parse error: {e}")))?;
+    let size = tree.size();
+    let intrinsic_w = size.width().ceil().max(1.0) as u32;
+    let intrinsic_h = size.height().ceil().max(1.0) as u32;
+    let max_dim = intrinsic_w.max(intrinsic_h);
+    let scale = if max_dim > LARGE_IMAGE_LIMIT {
+        LARGE_IMAGE_LIMIT as f32 / max_dim as f32
+    } else {
+        1.0
+    };
+    let render_w = ((intrinsic_w as f32) * scale).round().max(1.0) as u32;
+    let render_h = ((intrinsic_h as f32) * scale).round().max(1.0) as u32;
+
+    let mut pixmap = Pixmap::new(render_w, render_h)
+        .ok_or_else(|| CoreError::ImageFormat("SVG render: invalid dimensions".into()))?;
+    resvg::render(&tree, Transform::from_scale(scale, scale), &mut pixmap.as_mut());
+
+    // tiny_skia stores premultiplied RGBA; demultiply so the result matches
+    // the alpha convention used by the rest of the pipeline (the seg models
+    // expect straight RGB, and our compositor unmultiplies anyway).
+    let mut rgba = pixmap.take();
+    unmultiply_alpha(&mut rgba);
+    let img = RgbaImage::from_raw(render_w, render_h, rgba)
+        .ok_or_else(|| CoreError::ImageFormat("SVG render: buffer size mismatch".into()))?;
+    Ok(DynamicImage::ImageRgba8(img))
+}
+
+/// Convert premultiplied RGBA bytes (resvg/tiny_skia output) to straight RGBA.
+/// Pixels with alpha=0 stay zeroed (already correct).
+fn unmultiply_alpha(buf: &mut [u8]) {
+    for px in buf.chunks_exact_mut(4) {
+        let a = px[3];
+        if a == 0 || a == 255 {
+            continue;
+        }
+        // ((c * 255) + a/2) / a — round-half-up integer divide.
+        let inv = |c: u8| -> u8 {
+            let n = (c as u32 * 255 + (a as u32 / 2)) / a as u32;
+            n.min(255) as u8
+        };
+        px[0] = inv(px[0]);
+        px[1] = inv(px[1]);
+        px[2] = inv(px[2]);
+    }
 }
 
 /// Check whether the image exceeds the large image limit (8000px in either dimension).
@@ -137,6 +219,84 @@ mod tests {
         let img = result.unwrap();
         assert_eq!(img.width(), 1);
         assert_eq!(img.height(), 1);
+    }
+
+    /// Minimal valid SVG: a 32x16 viewBox with one solid red rect.
+    const SAMPLE_SVG: &[u8] = br#"<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="16" viewBox="0 0 32 16">
+  <rect width="32" height="16" fill="rgb(255,0,0)"/>
+</svg>"#;
+
+    #[test]
+    fn looks_like_svg_detects_xml_prologue() {
+        assert!(looks_like_svg(SAMPLE_SVG));
+        assert!(looks_like_svg(b"<svg xmlns='...'><circle/></svg>"));
+        assert!(looks_like_svg(b"\xEF\xBB\xBF<svg/>"), "BOM-prefixed SVG");
+        assert!(looks_like_svg(b"  \n\t<svg/>"), "leading whitespace");
+    }
+
+    #[test]
+    fn looks_like_svg_rejects_raster_formats() {
+        let png = minimal_png_bytes();
+        assert!(!looks_like_svg(&png));
+        assert!(!looks_like_svg(b"\xff\xd8\xff\xe0JFIF"), "JPEG header");
+        assert!(!looks_like_svg(b"GIF89a"), "GIF header");
+        assert!(!looks_like_svg(b""), "empty buffer");
+    }
+
+    #[test]
+    fn has_svg_extension_case_insensitive() {
+        use std::path::Path;
+        assert!(has_svg_extension(Path::new("foo.svg")));
+        assert!(has_svg_extension(Path::new("foo.SVG")));
+        assert!(has_svg_extension(Path::new("foo.SvG")));
+        assert!(!has_svg_extension(Path::new("foo.png")));
+        assert!(!has_svg_extension(Path::new("foo")));
+    }
+
+    #[test]
+    fn load_image_from_bytes_rasterizes_svg() {
+        let img = load_image_from_bytes(SAMPLE_SVG)
+            .expect("SVG bytes should rasterize");
+        assert_eq!(img.width(), 32);
+        assert_eq!(img.height(), 16);
+        // The center pixel should be roughly pure red after demultiplying.
+        let rgba = img.to_rgba8();
+        let px = rgba.get_pixel(16, 8);
+        assert!(px[0] > 240, "red channel should be ~255, got {}", px[0]);
+        assert!(px[1] < 16, "green channel should be ~0, got {}", px[1]);
+        assert!(px[2] < 16, "blue channel should be ~0, got {}", px[2]);
+        assert_eq!(px[3], 255, "fully opaque rect");
+    }
+
+    #[test]
+    fn rasterize_svg_caps_oversize_input() {
+        // 20000x20000 would normally exceed LARGE_IMAGE_LIMIT (8000); rasterize
+        // must scale the render down so we don't allocate a 1.6 GB pixmap.
+        let svg = format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="20000" height="20000"><rect width="20000" height="20000" fill="black"/></svg>"#,
+        );
+        let img = load_image_from_bytes(svg.as_bytes())
+            .expect("oversize SVG should still rasterize after capping");
+        assert!(img.width() <= LARGE_IMAGE_LIMIT);
+        assert!(img.height() <= LARGE_IMAGE_LIMIT);
+    }
+
+    #[test]
+    fn unmultiply_alpha_recovers_straight_rgba() {
+        // Premultiplied (128, 0, 0, 128) → straight (~255, 0, 0, 128).
+        let mut buf = vec![128, 0, 0, 128];
+        unmultiply_alpha(&mut buf);
+        assert!(buf[0] >= 254, "unmultiplied red should be ~255, got {}", buf[0]);
+        assert_eq!(buf[3], 128, "alpha must not change");
+        // Fully transparent stays untouched.
+        let mut zero = vec![0, 0, 0, 0];
+        unmultiply_alpha(&mut zero);
+        assert_eq!(zero, vec![0, 0, 0, 0]);
+        // Fully opaque stays untouched.
+        let mut opaque = vec![100, 200, 50, 255];
+        unmultiply_alpha(&mut opaque);
+        assert_eq!(opaque, vec![100, 200, 50, 255]);
     }
 
     #[test]
