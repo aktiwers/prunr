@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use prunr_core::ModelKind;
 
 use super::item_settings::ItemSettings;
@@ -152,11 +152,17 @@ impl Settings {
     /// Save to disk. Errors are silently ignored (best-effort).
     pub fn save(&self) {
         let Some(path) = Self::config_path() else { return };
+        self.save_to_path(&path);
+    }
+
+    /// Path-injectable save (used by tests; production calls `save()`).
+    /// Best-effort: any I/O error is swallowed so the GUI keeps running.
+    fn save_to_path(&self, path: &Path) {
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
         if let Ok(json) = serde_json::to_string_pretty(self) {
-            let _ = std::fs::write(&path, json);
+            let _ = std::fs::write(path, json);
         }
     }
 
@@ -415,5 +421,66 @@ mod tests {
     fn item_defaults_for_new_item_factory_when_prunr_default() {
         let s = Settings::default();
         assert_eq!(s.item_defaults_for_new_item(), ItemSettings::default());
+    }
+
+    #[test]
+    fn save_load_round_trip_via_tempdir() {
+        // Verifies the JSON schema is stable across save → read-back, the
+        // primary cross-platform contract for settings persistence.
+        // Platform path resolution (config_dir) is delegated to the `dirs`
+        // crate and tested separately.
+        let dir = std::env::temp_dir().join(format!(
+            "prunr-test-{}",
+            std::process::id(),
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("settings.json");
+
+        let mut original = Settings::default();
+        original.parallel_jobs = 7;
+        original.auto_process_on_import = true;
+        original.history_depth = 25;
+        original.chain_mode = true;
+        original.save_to_path(&path);
+
+        let json = std::fs::read_to_string(&path).expect("settings.json should exist");
+        let restored: Settings = serde_json::from_str(&json).expect("schema round-trip");
+        assert_eq!(restored.parallel_jobs, 7);
+        assert!(restored.auto_process_on_import);
+        assert_eq!(restored.history_depth, 25);
+        assert!(restored.chain_mode);
+        // `force_cpu` and `active_backend` are #[serde(skip)] by design
+        // (machine-specific runtime state, reset on every launch). The
+        // round-trip must not preserve them.
+        assert!(!restored.force_cpu);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn config_path_is_under_prunr_subfolder() {
+        // Cross-platform contract: settings always live at
+        // <config_dir>/prunr/settings.json on Linux/macOS/Windows.
+        // `dirs::config_dir` returns None only in genuinely broken envs.
+        let path = Settings::config_path().expect("config_dir resolves on test host");
+        assert!(
+            path.ends_with("prunr/settings.json") || path.ends_with("prunr\\settings.json"),
+            "expected .../prunr/settings.json, got {path:?}",
+        );
+    }
+
+    #[test]
+    fn save_creates_parent_dir() {
+        // Regression: on a fresh install the parent dir doesn't exist yet;
+        // save() must create it rather than silently failing.
+        let dir = std::env::temp_dir().join(format!(
+            "prunr-mkdir-test-{}",
+            std::process::id(),
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let nested = dir.join("nested").join("settings.json");
+        Settings::default().save_to_path(&nested);
+        assert!(nested.exists(), "save_to_path must mkdir -p the parent");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
