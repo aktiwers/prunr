@@ -1,4 +1,3 @@
-use std::borrow::Cow;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
@@ -36,8 +35,9 @@ pub struct PrunrApp {
     // Result image for save/copy
     pub(crate) result_rgba: Option<Arc<image::RgbaImage>>,
 
-    // Clipboard (MUST live for app lifetime -- Wayland ownership requirement)
-    clipboard: Option<arboard::Clipboard>,
+    /// Platform I/O: file dialogs + clipboard. Shim around `rfd` + `arboard`
+    /// so the rest of `PrunrApp` doesn't carry their import surface.
+    pub(crate) system: super::system_bridge::SystemBridge,
 
     // UI state
     pub(crate) show_shortcuts: bool,
@@ -132,8 +132,6 @@ impl PrunrApp {
         }
         cc.egui_ctx.set_global_style(style);
 
-        let clipboard = arboard::Clipboard::new().ok();
-
         // Housekeeping: clean up stale temp files from prior sessions.
         super::drag_export::cleanup_stale();
         super::history_disk::cleanup_stale();
@@ -149,7 +147,7 @@ impl PrunrApp {
         let prewarm = Self::initial_processing_config(&settings);
         let (worker_tx, worker_rx) = spawn_worker(worker_ctx, prewarm);
 
-        Self::init_state(settings, clipboard, worker_tx, worker_rx)
+        Self::init_state(settings, super::system_bridge::SystemBridge::new(), worker_tx, worker_rx)
     }
 
     /// Build the pre-warm subprocess config for startup, or `None` when
@@ -176,14 +174,22 @@ impl PrunrApp {
     pub fn new_for_test() -> Self {
         let (worker_tx, _worker_msg_rx) = mpsc::channel::<WorkerMessage>();
         let (_result_tx, worker_rx) = mpsc::channel::<WorkerResult>();
-        Self::init_state(Settings::default(), None, worker_tx, worker_rx)
+        // Test stub: no real platform clipboard available; SystemBridge::new
+        // gracefully no-ops copy_image when the clipboard handle failed to
+        // initialize, so this is safe in headless test envs.
+        Self::init_state(
+            Settings::default(),
+            super::system_bridge::SystemBridge::new(),
+            worker_tx,
+            worker_rx,
+        )
     }
 
-    /// Shared field-init for both `new` and `new_for_test`. Clipboard and
+    /// Shared field-init for both `new` and `new_for_test`. SystemBridge and
     /// worker channels are the only inputs that differ between runtime and test.
     fn init_state(
         settings: Settings,
-        clipboard: Option<arboard::Clipboard>,
+        system: super::system_bridge::SystemBridge,
         worker_tx: mpsc::Sender<WorkerMessage>,
         worker_rx: mpsc::Receiver<WorkerResult>,
     ) -> Self {
@@ -197,7 +203,7 @@ impl PrunrApp {
             source_texture: None,
             result_texture: None,
             result_rgba: None,
-            clipboard,
+            system,
             show_shortcuts: false,
             show_cli_help: false,
             show_pipeline_flow: false,
@@ -336,10 +342,7 @@ impl PrunrApp {
     }
 
     pub fn handle_open_dialog(&mut self) {
-        let paths = rfd::FileDialog::new()
-            .add_filter("Images", &["png", "jpg", "jpeg", "webp", "bmp"])
-            .set_title("Open Image(s)")
-            .pick_files();
+        let paths = self.system.open_files_dialog(self.last_open_dir.as_deref());
         if let Some(paths) = paths {
             if let Some(first) = paths.first() {
                 self.last_open_dir = first.parent().map(|p| p.to_path_buf());
@@ -850,16 +853,6 @@ impl PrunrApp {
         });
     }
 
-    /// Save selected images (or current image if none selected).
-    /// Single selection → save-as dialog; multiple → folder picker.
-    pub(crate) fn save_dialog(&self) -> rfd::FileDialog {
-        let mut dlg = rfd::FileDialog::new();
-        if let Some(ref dir) = self.last_open_dir {
-            dlg = dlg.set_directory(dir);
-        }
-        dlg
-    }
-
     /// Apply background color to a result image for export/save.
     /// Returns a new image when `bg` is `Some`; otherwise clones the Arc.
     pub(crate) fn apply_bg_for_export(
@@ -897,9 +890,10 @@ impl PrunrApp {
     /// when tensors are missing (e.g. unprocessed item), so every target lands
     /// at least one file.
     fn save_layers_to_folder(&mut self, has_selection: bool) {
-        let Some(folder) = self.save_dialog()
-            .set_title("Save layers \u{2014} Choose folder")
-            .pick_folder() else { return };
+        let Some(folder) = self.system.pick_folder_dialog(
+            self.last_open_dir.as_deref(),
+            "Save layers \u{2014} Choose folder",
+        ) else { return };
 
         let targets: Vec<u64> = if has_selection {
             self.batch.items.iter()
@@ -981,11 +975,10 @@ impl PrunrApp {
         default_name: &str,
         bg: Option<[u8; 3]>,
     ) {
-        let Some(path) = self.save_dialog()
-            .add_filter("PNG Image", &["png"])
-            .set_file_name(default_name)
-            .set_title("Save PNG")
-            .save_file() else { return };
+        let Some(path) = self.system.save_png_dialog(
+            self.last_open_dir.as_deref(),
+            default_name,
+        ) else { return };
         let rgba = Self::apply_bg_for_export(rgba, bg);
         let tx = self.batch.bg_io.save_done_tx.clone();
         self.toasts.info("Saving...");
@@ -1002,9 +995,10 @@ impl PrunrApp {
                 Some((item.filename.clone(), Self::apply_bg_for_export(rgba, item.settings.bg_rgb())))
             })
             .collect();
-        let Some(folder) = self.save_dialog()
-            .set_title("Save Selected \u{2014} Choose Folder")
-            .pick_folder() else { return };
+        let Some(folder) = self.system.pick_folder_dialog(
+            self.last_open_dir.as_deref(),
+            "Save Selected \u{2014} Choose Folder",
+        ) else { return };
         let count = items.len();
         self.toasts.info(format!("Saving {count} image(s)..."));
         let tx = self.batch.bg_io.save_done_tx.clone();
@@ -1109,37 +1103,19 @@ impl PrunrApp {
             ),
         };
 
-        // Compute bg before borrowing clipboard mutably (avoids aliasing self).
+        let Some(rgba) = rgba_to_copy else { return };
         let bg = self.batch.selected_item().and_then(|i| i.settings.bg_rgb());
-        let Some(clipboard) = self.clipboard.as_mut() else {
-            self.set_temporary_status("Could not copy to clipboard. Try saving instead.");
-            return;
-        };
-        let Some(rgba) = rgba_to_copy else {
-            return;
-        };
         // Apply bg_color for clipboard (matches display).
         let rgba = Self::apply_bg_for_export(&rgba, bg);
 
-        let width = rgba.width() as usize;
-        let height = rgba.height() as usize;
-        let samples = rgba.as_flat_samples();
-        let image_data = arboard::ImageData {
-            width,
-            height,
-            bytes: Cow::Borrowed(samples.as_slice()),
-        };
-        match clipboard.set_image(image_data) {
-            Ok(()) => {
-                if let Some(msg) = multi_hint {
-                    self.toasts.info(msg);
-                } else {
-                    self.set_temporary_status("Copied to clipboard");
-                }
+        if self.system.copy_image(&rgba) {
+            if let Some(msg) = multi_hint {
+                self.toasts.info(msg);
+            } else {
+                self.set_temporary_status("Copied to clipboard");
             }
-            Err(_) => self.set_temporary_status(
-                "Could not copy to clipboard. Try saving instead.",
-            ),
+        } else {
+            self.set_temporary_status("Could not copy to clipboard. Try saving instead.");
         }
     }
 
