@@ -80,18 +80,24 @@ jobs:
         run: cargo build --release --target ${{ matrix.target }} -p prunr-app
 
       # ── Linux: .tar.gz + .AppImage + .deb + .rpm ──
+      # ORT's `download-binaries` feature drops `libonnxruntime.so*` next
+      # to the binary in `target/<target>/release/`. Bundle it so a clean
+      # Linux machine without system-wide ORT can run the app.
       - name: Package Linux tar.gz
         if: matrix.name == 'linux-x86_64'
         run: |
           mkdir -p dist
           cp target/${{ matrix.target }}/release/${{ matrix.binary }} dist/
-          cd dist && tar czf ../prunr-linux-x86_64.tar.gz ${{ matrix.binary }}
+          cp target/${{ matrix.target }}/release/libonnxruntime.so* dist/ || \
+            { echo "::error::libonnxruntime.so not found — release would fail on clean machines"; exit 1; }
+          cd dist && tar czf ../prunr-linux-x86_64.tar.gz *
 
       - name: Package Linux AppImage
         if: matrix.name == 'linux-x86_64'
         run: |
-          mkdir -p AppDir/usr/bin AppDir/usr/share/icons/hicolor/256x256/apps
+          mkdir -p AppDir/usr/bin AppDir/usr/lib AppDir/usr/share/icons/hicolor/256x256/apps
           cp target/${{ matrix.target }}/release/${{ matrix.binary }} AppDir/usr/bin/
+          cp target/${{ matrix.target }}/release/libonnxruntime.so* AppDir/usr/lib/
           cp assets/prunr-256.png AppDir/usr/share/icons/hicolor/256x256/apps/prunr.png
           cp assets/prunr-256.png AppDir/prunr.png
           cp assets/prunr.desktop AppDir/
@@ -102,8 +108,9 @@ jobs:
       - name: Package Linux .deb
         if: matrix.name == 'linux-x86_64'
         run: |
-          mkdir -p deb/usr/bin deb/usr/share/applications deb/usr/share/icons/hicolor/256x256/apps deb/DEBIAN
+          mkdir -p deb/usr/bin deb/usr/lib/x86_64-linux-gnu deb/usr/share/applications deb/usr/share/icons/hicolor/256x256/apps deb/DEBIAN
           cp target/${{ matrix.target }}/release/${{ matrix.binary }} deb/usr/bin/
+          cp target/${{ matrix.target }}/release/libonnxruntime.so* deb/usr/lib/x86_64-linux-gnu/
           cp assets/prunr.desktop deb/usr/share/applications/
           cp assets/prunr-256.png deb/usr/share/icons/hicolor/256x256/apps/prunr.png
           VERSION=${GITHUB_REF_NAME#v}
@@ -131,6 +138,7 @@ jobs:
           VERSION=${GITHUB_REF_NAME#v}
           mkdir -p rpmbuild/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
           cp target/${{ matrix.target }}/release/${{ matrix.binary }} rpmbuild/SOURCES/
+          cp target/${{ matrix.target }}/release/libonnxruntime.so* rpmbuild/SOURCES/
           cp assets/prunr.desktop rpmbuild/SOURCES/
           cp assets/prunr-256.png rpmbuild/SOURCES/
           cat > rpmbuild/SPECS/prunr.spec << 'SPEC'
@@ -147,11 +155,15 @@ jobs:
 
           %install
           install -Dm755 %{_sourcedir}/prunr %{buildroot}%{_bindir}/prunr
+          for so in %{_sourcedir}/libonnxruntime.so*; do
+            install -Dm755 "$so" "%{buildroot}%{_libdir}/$(basename "$so")"
+          done
           install -Dm644 %{_sourcedir}/prunr.desktop %{buildroot}%{_datadir}/applications/prunr.desktop
           install -Dm644 %{_sourcedir}/prunr-256.png %{buildroot}%{_datadir}/icons/hicolor/256x256/apps/prunr.png
 
           %files
           %{_bindir}/prunr
+          %{_libdir}/libonnxruntime.so*
           %{_datadir}/applications/prunr.desktop
           %{_datadir}/icons/hicolor/256x256/apps/prunr.png
           SPEC
@@ -186,11 +198,21 @@ jobs:
       - name: Package macOS .app + .dmg
         if: matrix.name == 'macos-aarch64'
         run: |
-          mkdir -p Prunr.app/Contents/{MacOS,Resources}
+          mkdir -p Prunr.app/Contents/{MacOS,Frameworks,Resources}
           cp target/${{ matrix.target }}/release/${{ matrix.binary }} Prunr.app/Contents/MacOS/
+          # Bundle ORT dylib in Frameworks/ so the .app runs on a clean Mac
+          # without system-wide ORT. ORT's `download-binaries` feature drops
+          # libonnxruntime.dylib next to the binary in target/release/.
+          if ls target/${{ matrix.target }}/release/libonnxruntime.*dylib 1> /dev/null 2>&1; then
+            cp target/${{ matrix.target }}/release/libonnxruntime.*dylib Prunr.app/Contents/Frameworks/
+          else
+            echo "::error::libonnxruntime.dylib not found — release would fail on clean Macs"
+            exit 1
+          fi
           cp assets/Info.plist Prunr.app/Contents/
           cp assets/prunr.icns Prunr.app/Contents/Resources/
-          # Ad-hoc sign so Gatekeeper doesn't immediately block
+          # Ad-hoc sign so Gatekeeper doesn't immediately block (signs the
+          # bundled dylib as well via --deep)
           codesign --force --deep --sign - Prunr.app
           # Create DMG
           brew install create-dmg
@@ -208,7 +230,8 @@ jobs:
         run: |
           mkdir -p dist
           cp target/${{ matrix.target }}/release/${{ matrix.binary }} dist/
-          cd dist && tar czf ../prunr-macos-aarch64.tar.gz ${{ matrix.binary }}
+          cp target/${{ matrix.target }}/release/libonnxruntime.*dylib dist/
+          cd dist && tar czf ../prunr-macos-aarch64.tar.gz *
 
       - name: Upload macOS artifacts
         if: matrix.name == 'macos-aarch64'
@@ -220,13 +243,24 @@ jobs:
             prunr-macos-aarch64.tar.gz
 
       # ── Windows: .zip + .exe installer ──
+      # ORT's `download-binaries` feature drops `onnxruntime.dll` next to
+      # the binary in `target/<target>/release/`. Bundle it in both the
+      # portable zip and the installer so a clean Windows machine without
+      # a system-wide ORT install can run the app.
       - name: Package Windows zip
         if: matrix.name == 'windows-x86_64'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist
           Copy-Item "target/${{ matrix.target }}/release/${{ matrix.binary }}" dist/
-          Compress-Archive -Path "dist/${{ matrix.binary }}" -DestinationPath "prunr-windows-x86_64.zip"
+          $dll = "target/${{ matrix.target }}/release/onnxruntime.dll"
+          if (Test-Path $dll) {
+            Copy-Item $dll dist/
+          } else {
+            Write-Output "::error::onnxruntime.dll not found at $dll — release would fail on clean machines without system ORT"
+            exit 1
+          }
+          Compress-Archive -Path "dist/*" -DestinationPath "prunr-windows-x86_64.zip"
 
       - name: Package Windows installer (Inno Setup)
         if: matrix.name == 'windows-x86_64'
@@ -248,6 +282,7 @@ jobs:
 
           [Files]
           Source: "target\${{ matrix.target }}\release\${{ matrix.binary }}"; DestDir: "{app}"; Flags: ignoreversion
+          Source: "target\${{ matrix.target }}\release\onnxruntime.dll"; DestDir: "{app}"; Flags: ignoreversion
 
           [Icons]
           Name: "{group}\Prunr"; Filename: "{app}\prunr.exe"; IconFilename: "{app}\prunr.exe"
