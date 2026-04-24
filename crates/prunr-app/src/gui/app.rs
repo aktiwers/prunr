@@ -568,14 +568,16 @@ impl PrunrApp {
 
     /// Classify each candidate into Tier 1 (full pipeline), Tier 2 (mask
     /// rerun from cached tensor), or Skip (already up to date).
-    /// Mutates items in-place: invalidates stale caches, syncs composite-only
-    /// recipe changes, and never downgrades Tier 2 items without a tensor.
+    /// Mutates items in-place: invalidates stale caches via the catalog,
+    /// syncs composite-only recipe changes, and never downgrades Tier 2
+    /// items without a tensor.
     fn classify_candidates(
         &mut self,
         candidate_ids: &HashSet<u64>,
         model: prunr_core::ModelKind,
         chain: bool,
     ) -> ClassifiedTiers {
+        use crate::gui::knob_catalog;
         use prunr_core::RequiredTier;
         let mut tiers = ClassifiedTiers::default();
 
@@ -597,7 +599,11 @@ impl PrunrApp {
             }
 
             let current_recipe = item.settings.current_recipe(model, chain);
-            match prunr_core::resolve_tier(old_recipe, &current_recipe) {
+            let tier = prunr_core::resolve_tier(old_recipe, &current_recipe);
+            let impact = knob_catalog::cache_impact_for_recipe_diff(old_recipe, &current_recipe);
+            item.apply_cache_impact(impact);
+
+            match tier {
                 RequiredTier::Skip | RequiredTier::CompositeOnly => {
                     // CompositeOnly (bg_color) is handled at display/export time;
                     // sync the stored composite so status reads stay accurate.
@@ -622,17 +628,11 @@ impl PrunrApp {
                 }
                 RequiredTier::EdgeRerun => {
                     // Edge rerun via the subprocess isn't wired for batch
-                    // dispatch yet — fall through to a full pipeline run.
-                    // (Live-preview edge reruns DO work in-process via
-                    // `pump_live_preview` + `finalize_edges`; this branch is
-                    // for the explicit Process click path only.)
-                    item.invalidate_edge_cache();
+                    // dispatch — fall through to a full pipeline run (live-
+                    // preview handles the in-process path via finalize_edges).
                     tiers.tier1.insert(item.id);
                 }
                 RequiredTier::AddEdgeInference => {
-                    // Seg tensor cached → run only DexiNed on the masked
-                    // image. Fall back to a full pipeline if we somehow lost
-                    // the seg cache (cache eviction under memory pressure).
                     if item.cached_tensor.is_some() {
                         tiers.tier_add_edge.insert(item.id);
                     } else {
@@ -640,9 +640,6 @@ impl PrunrApp {
                     }
                 }
                 RequiredTier::FullPipeline => {
-                    // Model / chain / mode changed — both caches invalid.
-                    item.cached_tensor = None;
-                    item.invalidate_edge_cache();
                     tiers.tier1.insert(item.id);
                 }
             }
@@ -2266,13 +2263,14 @@ impl PrunrApp {
         toolbar_change: adjustments_toolbar::ToolbarChange,
         pre_apply_snapshot: PresetSnapshot,
     ) {
+        use crate::gui::knob_catalog::DispatchKind;
+        use crate::gui::live_preview::PreviewKind;
+
         let Some(idx) = self.batch.selected_idx_clamped() else { return };
 
         if toolbar_change.preset_applied {
-            let item = &mut self.batch.items[idx];
-            HistoryManager::push_preset(item, pre_apply_snapshot);
+            HistoryManager::push_preset(&mut self.batch.items[idx], pre_apply_snapshot);
         }
-        // Model swap: persist the new selection, show toast, invalidate caches.
         if toolbar_change.model_changed {
             self.settings.save();
             self.toasts.info(format!(
@@ -2280,87 +2278,111 @@ impl PrunrApp {
                 crate::gui::views::model_name(self.settings.model),
             ));
         }
-        // Granular cache invalidation — only clear the tensors whose INPUT
-        // actually changed. Preset applies that keep line_mode the same
-        // leave the edge cache valid (line_strength tweaks can still
-        // live-preview). Model swaps clear only the seg cache (edge tensor
-        // is model-independent).
-        if toolbar_change.seg_cache_invalid {
-            self.batch.items[idx].cached_tensor = None;
-        }
-        if toolbar_change.edge_cache_invalid {
-            self.batch.items[idx].invalidate_edge_cache();
-        }
-        // A preset apply, or switching back to Off (the "just bg removal"
-        // case), leaves the Done item stale. Auto-reprocess so the user
-        // doesn't have to click Process. We don't auto-process on Off
-        // → Subject or Off → EdgesOnly; those are mode-enablement
-        // transitions where the user typically wants to tweak settings
-        // before firing the run.
-        let current_line_mode = self.batch.items[idx].settings.line_mode;
-        let auto_trigger = toolbar_change.preset_applied
-            || toolbar_change.line_mode_changed
-            || toolbar_change.input_transform_changed;
-        if auto_trigger && self.batch.items[idx].status == BatchStatus::Done {
-            let target_id = self.batch.items[idx].id;
-            // Live-rebuild (in-process rayon pool, no subprocess spawn)
-            // whenever the tensors needed for the TARGET mode are still
-            // cached. Off needs seg; EdgesOnly needs edge; SubjectOutline
-            // needs both. Preset-apply / input_transform need the full
-            // subprocess path (bigger changes / DexiNed rerun).
-            let item_ref = &self.batch.items[idx];
-            let tensors_available = match current_line_mode {
-                prunr_core::LineMode::Off => item_ref.cached_tensor.is_some(),
-                prunr_core::LineMode::EdgesOnly => item_ref.cached_edge_tensors.is_some(),
-                prunr_core::LineMode::SubjectOutline => {
-                    item_ref.cached_tensor.is_some() && item_ref.cached_edge_tensors.is_some()
+
+        self.batch.items[idx].apply_cache_impact(toolbar_change.cache_impact);
+
+        let dispatch = self.resolve_auto_dispatch(idx, &toolbar_change);
+        let item_id = self.batch.items[idx].id;
+        let is_done = self.batch.items[idx].status == BatchStatus::Done;
+
+        match dispatch {
+            DispatchKind::None => {}
+            DispatchKind::Render => {}
+            DispatchKind::LivePreviewMask => {
+                if self.settings.live_preview {
+                    self.processor.live_preview.mark_tweak(item_id, PreviewKind::Mask);
+                    if toolbar_change.commit {
+                        self.processor.live_preview.flush(item_id);
+                        ctx.request_repaint();
+                    } else {
+                        ctx.request_repaint_after(crate::gui::live_preview::DEBOUNCE);
+                    }
                 }
-            };
-            let use_live = toolbar_change.line_mode_changed
-                && !toolbar_change.preset_applied
-                && !toolbar_change.input_transform_changed
-                && tensors_available;
-            if use_live {
-                // Mask kind covers Off + SubjectOutline (run_preview reads
-                // the actual line_mode from settings). Edge kind for
-                // EdgesOnly — compose_edges on raw source.
-                let kind = match current_line_mode {
-                    prunr_core::LineMode::EdgesOnly => crate::gui::live_preview::PreviewKind::Edge,
-                    _ => crate::gui::live_preview::PreviewKind::Mask,
-                };
-                self.processor.live_preview.mark_tweak(target_id, kind);
-                self.processor.live_preview.flush(target_id);
-                ctx.request_repaint();
-            } else {
-                self.process_items(|item| item.id == target_id);
+            }
+            DispatchKind::LivePreviewEdge => {
+                if self.settings.live_preview {
+                    self.processor.live_preview.mark_tweak(item_id, PreviewKind::Edge);
+                    if toolbar_change.commit {
+                        self.processor.live_preview.flush(item_id);
+                        ctx.request_repaint();
+                    } else {
+                        ctx.request_repaint_after(crate::gui::live_preview::DEBOUNCE);
+                    }
+                }
+            }
+            DispatchKind::SubprocessAddEdge | DispatchKind::SubprocessFullPipeline => {
+                if is_done {
+                    self.process_items(|item| item.id == item_id);
+                }
             }
         }
-        // Register mask / edge tweaks with the live preview dispatcher.
-        // `mark_tweak` debounces; `flush` fires immediately when a chip
-        // signals the edit has settled (slider released, toggle flipped,
-        // color picked). toolbar_change.commit is OR-ed across all chips
-        // touched this frame, so toggles + color picks always commit now
-        // and mid-slider-drag changes debounce.
-        if self.settings.live_preview && (toolbar_change.mask || toolbar_change.edge) {
-            let item_id = self.batch.items[idx].id;
-            let kind = if toolbar_change.mask {
-                crate::gui::live_preview::PreviewKind::Mask
-            } else {
-                crate::gui::live_preview::PreviewKind::Edge
-            };
-            self.processor.live_preview.mark_tweak(item_id, kind);
-            if toolbar_change.commit {
-                self.processor.live_preview.flush(item_id);
-                ctx.request_repaint();
-            } else {
-                ctx.request_repaint_after(crate::gui::live_preview::DEBOUNCE);
-            }
-        }
-        if toolbar_change.bg {
-            // bg is rendered at draw time (GPU rect behind transparent result
-            // texture) — no CPU compositing, no texture rebuild.
+
+        if toolbar_change.render_repaint {
+            // bg paints as a GPU rect behind the transparent result texture —
+            // no CPU composite, no texture rebuild. Also fires on preset
+            // applies so a no-op preset still repaints for the commit toast.
             ctx.request_repaint();
         }
+    }
+
+    /// Resolve the auto-fire dispatch. Starts from the aggregated catalog
+    /// dispatch (populated only by `auto_trigger_on_commit` knobs), then
+    /// refines context-sensitive knobs with item state (cached tensors).
+    /// Preset applies reduce to the actual recipe diff — a no-op preset
+    /// pick returns `None`, so a trivial re-apply doesn't spawn a subprocess.
+    fn resolve_auto_dispatch(
+        &self,
+        idx: usize,
+        tc: &adjustments_toolbar::ToolbarChange,
+    ) -> crate::gui::knob_catalog::DispatchKind {
+        use crate::gui::knob_catalog::{self, LineModeChange};
+        use prunr_core::RequiredTier;
+        let item = &self.batch.items[idx];
+        let cached_seg = item.cached_tensor.is_some();
+        let cached_edge = item.cached_edge_tensors.is_some();
+
+        let mut dispatch = tc.auto_dispatch;
+
+        if let Some(from) = tc.line_mode_from {
+            let change = LineModeChange { from, to: item.settings.line_mode };
+            dispatch = dispatch.max(knob_catalog::line_mode_spec(change, cached_edge).dispatch);
+        }
+        if tc.input_transform_changed {
+            dispatch = dispatch.max(
+                knob_catalog::input_transform_spec(cached_seg).dispatch,
+            );
+        }
+
+        if tc.preset_applied {
+            // `None` model = filter-only mode; pick an arbitrary ModelKind for
+            // the diff since the seg stage is skipped regardless.
+            let model = self
+                .settings
+                .model
+                .to_model_kind()
+                .unwrap_or(prunr_core::ModelKind::BiRefNetLite);
+            let preset_dispatch = match &item.applied_recipe {
+                None => knob_catalog::DispatchKind::SubprocessFullPipeline,
+                Some(old) => {
+                    let new = item.settings.current_recipe(model, self.settings.chain_mode);
+                    match prunr_core::resolve_tier(old, &new) {
+                        RequiredTier::Skip | RequiredTier::CompositeOnly => {
+                            knob_catalog::DispatchKind::None
+                        }
+                        RequiredTier::EdgeRerun => knob_catalog::DispatchKind::LivePreviewEdge,
+                        RequiredTier::MaskRerun => knob_catalog::DispatchKind::LivePreviewMask,
+                        RequiredTier::AddEdgeInference => {
+                            knob_catalog::DispatchKind::SubprocessAddEdge
+                        }
+                        RequiredTier::FullPipeline => {
+                            knob_catalog::DispatchKind::SubprocessFullPipeline
+                        }
+                    }
+                }
+            };
+            dispatch = dispatch.max(preset_dispatch);
+        }
+        dispatch
     }
 
     fn render_modal_overlays(&mut self, ctx: &egui::Context) {

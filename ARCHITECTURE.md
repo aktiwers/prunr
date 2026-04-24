@@ -181,9 +181,13 @@ Each `BatchItem` stores the recipe that produced its current result, snapshotted
 
 **Two Tier 2 paths.** Batched reruns (e.g. preset applied across many selected items) go through the subprocess. Live-preview reruns run in-process on the rayon pool to avoid IPC overhead — see [Live Preview](#live-preview).
 
+**Two sources of tier truth.** `resolve_tier` compares two `ProcessingRecipe`s for batch classification (`classify_candidates`). The `gui/knob_catalog.rs` catalog exposes the same knowledge per knob (`Gamma`, `LineMode`, `InputTransform`, …) for toolbar dispatch — every chip reads the catalog to decide its cache impact and runtime path instead of hand-setting flags. A cross-check test asserts the two agree on single-knob mutations; any drift fails the build.
+
 ## Per-Image Settings
 
 Each `BatchItem` owns its own processing settings, so tweaking the adjustments toolbar edits one image instead of broadcasting to the whole batch. App-wide config (parallel_jobs, chain_mode, live_preview, etc.) stays separate on `AppSettings`. Per-image settings are `Copy`-sized and forward-compatible: older preset files load cleanly when new fields are added.
+
+**Knob catalog.** `gui/knob_catalog.rs` is the single table mapping each knob to `(tier, cache_impact, dispatch)`. Chips fold their `ChipChange` events via `aggregate_knob(knob, change)`; the resulting `ToolbarChange` carries the aggregate cache invalidation, subprocess dispatch, live-preview signal, and render-repaint hint. `apply_toolbar_change` is table-driven over those fields. Context-sensitive knobs (`LineMode`, `InputTransform`) have dedicated helpers (`line_mode_spec`, `input_transform_spec`) that consume item state for precise dispatch — e.g. Off → SubjectOutline takes the LivePreviewMask fast path when the edge tensor is cached, otherwise a subprocess DexiNed rerun.
 
 ### Creative compose layer
 

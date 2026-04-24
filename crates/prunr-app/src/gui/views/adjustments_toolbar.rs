@@ -13,6 +13,9 @@ use egui::{RichText, Ui};
 use egui_material_icons::icons::*;
 
 use crate::gui::item_settings::ItemSettings;
+use crate::gui::knob_catalog::{
+    self, CacheImpact, DispatchKind, KnobSet, LineModeChange, StaticKnob,
+};
 use crate::gui::settings::{Settings, SettingsModel};
 use crate::gui::theme;
 use crate::gui::views::{chip, hint, preset_dropdown};
@@ -36,29 +39,56 @@ macro_rules! tip {
 /// good after a line_mode toggle — only the edge tensor is stale then).
 /// Keeping unrelated caches alive means the user's next mask/edge tweak
 /// can still live-preview without a full Process.
-#[derive(Default, Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 pub struct ToolbarChange {
-    pub mask: bool,
-    pub edge: bool,
-    pub bg: bool,
+    /// Any chip signalled a committed value (slider released, toggle
+    /// flipped, color picked). Flushes pending debounced previews.
     pub commit: bool,
+    /// The model dropdown flipped — triggers settings save + toast. Does
+    /// not auto-reprocess; user must click Process.
     pub model_changed: bool,
+    /// A preset was applied — archive the pre-apply snapshot for undo.
+    /// The dispatcher resolves subprocess vs skip from the recipe diff.
     pub preset_applied: bool,
-    /// Segmentation tensor is stale (produced by a now-swapped model).
-    pub seg_cache_invalid: bool,
-    /// DexiNed edge tensor is stale (different line_mode means DexiNed
-    /// would see a different input — full scene vs subject-on-white).
-    pub edge_cache_invalid: bool,
-    /// Line mode (Off / EdgesOnly / SubjectOutline) was toggled. The caller
-    /// auto-triggers a reprocess on a Done item so the user doesn't have to
-    /// click Process — tier routing keeps this cheap (AddEdgeInference when
-    /// the seg tensor is still valid).
-    pub line_mode_changed: bool,
-    /// `input_transform` was toggled. Not live-previewable (requires a
-    /// DexiNed rerun on the transformed image), but the caller auto-runs
-    /// an `AddEdgeInference` when the seg tensor is cached — same fast
-    /// path as line_mode auto-trigger.
+    /// Which static knobs were touched (`Copy` bitset). Provides a
+    /// single-allocation record for downstream passes that want to
+    /// audit "was X touched this frame?" without a salad of booleans.
+    pub touched: KnobSet,
+    /// Previous `line_mode` when it changed this frame. Drives the
+    /// context-sensitive `line_mode_spec(from, current, cached_edge)` path.
+    /// `None` means no transition this frame.
+    pub line_mode_from: Option<LineMode>,
+    /// `input_transform` flipped this frame. Drives `input_transform_spec`
+    /// for precise dispatch. The bool is here because `StaticKnob` (and
+    /// thus `KnobSet`) intentionally excludes context-sensitive knobs.
     pub input_transform_changed: bool,
+
+    /// Catalog-derived aggregate cache invalidation — union over all knobs.
+    pub cache_impact: CacheImpact,
+    /// Strongest auto-fire dispatch (live-preview or subprocess) from knobs
+    /// with `auto_trigger_on_commit = true`. `DispatchKind::None` if no
+    /// auto-dispatchable knob was touched. Routed unconditionally when
+    /// the item is Done (live-preview fires regardless of Done status).
+    pub auto_dispatch: DispatchKind,
+    /// A render-only knob (bg color) fired — request a repaint even when
+    /// no other dispatch kicks in.
+    pub render_repaint: bool,
+}
+
+impl Default for ToolbarChange {
+    fn default() -> Self {
+        Self {
+            commit: false,
+            model_changed: false,
+            preset_applied: false,
+            touched: KnobSet::default(),
+            line_mode_from: None,
+            input_transform_changed: false,
+            cache_impact: CacheImpact::Nothing,
+            auto_dispatch: DispatchKind::None,
+            render_repaint: false,
+        }
+    }
 }
 
 /// Factory default values for per-chip reset. Per-chip reset sends the value
@@ -110,16 +140,6 @@ pub fn render(
     // line_strength tweaks still live-preview without needing a Process.
     let before_line_mode = item_settings.line_mode;
 
-    let aggregate = |ch: chip::ChipChange, tier: Tier, acc: &mut ToolbarChange| {
-        if ch.changed {
-            match tier {
-                Tier::Mask => acc.mask = true,
-                Tier::Edge => acc.edge = true,
-            }
-        }
-        if ch.commit { acc.commit = true; }
-    };
-
     // Knob-enablement rules:
     // - mask_active:   mask chips (gamma/threshold/edge_shift/refine/
     //                  feather) operate on the seg mask. Dead when model
@@ -154,7 +174,7 @@ pub fn render(
         }
 
         ui.add_enabled_ui(mask_active, |ui| {
-            aggregate(chip::chip_f32(
+            aggregate_knob(chip::chip_f32(
                 ui, "gamma", "γ", "Gamma",
                 "How hard the mask cuts. >1 is more aggressive; <1 is gentler.",
                 tip!("Stage 1 of 5. How hard the mask cuts. >1 removes more aggressively, <1 is gentler on fine edges. Feeds every stage below."),
@@ -162,9 +182,9 @@ pub fn render(
                 0.01..=10.0, defaults.template.gamma,
                 true, // log scale — matches perceptual symmetry around 1.0
                 |v| format!("{v:.2}"),
-            ), Tier::Mask, &mut change);
+            ), StaticKnob::Gamma, &mut change);
 
-            aggregate(chip::chip_option_f32(
+            aggregate_knob(chip::chip_option_f32(
                 ui, "threshold",
                 &ICON_BOLT.codepoint.to_string(), "Hard threshold",
                 "Snap the mask to fully opaque or fully transparent at this cutoff.",
@@ -172,9 +192,9 @@ pub fn render(
                 &mut item_settings.threshold,
                 0.001..=0.999, defaults.threshold_value, "Soft",
                 |v| format!("{:.1}%", v * 100.0),
-            ), Tier::Mask, &mut change);
+            ), StaticKnob::Threshold, &mut change);
 
-            aggregate(chip::chip_f32(
+            aggregate_knob(chip::chip_f32(
                 ui, "edge_shift",
                 &ICON_SWAP_HORIZ.codepoint.to_string(), "Edge shift",
                 "Shrink or grow the mask outline. Positive erodes; negative dilates.",
@@ -187,9 +207,9 @@ pub fn render(
                     else if v < -0.05 { format!("dilate {:.1}px", v.abs()) }
                     else { "0px".to_string() }
                 },
-            ), Tier::Mask, &mut change);
+            ), StaticKnob::EdgeShift, &mut change);
 
-            aggregate(chip::chip_bool_with_extras(
+            aggregate_knob(chip::chip_bool_with_extras(
                 ui, "refine_edges",
                 &ICON_AUTO_FIX_HIGH.codepoint.to_string(), "Refine edges",
                 "Use the original image's colors to sharpen the mask around fine detail like hair or leaves.",
@@ -215,9 +235,9 @@ pub fn render(
                     if e.commit  { inner.commit  = true; }
                     inner
                 },
-            ), Tier::Mask, &mut change);
+            ), StaticKnob::RefineEdges, &mut change);
 
-            aggregate(chip::chip_f32(
+            aggregate_knob(chip::chip_f32(
                 ui, "feather",
                 &ICON_BLUR_LINEAR.codepoint.to_string(), "Feather",
                 "Soften mask edges with a Gaussian blur.",
@@ -226,7 +246,7 @@ pub fn render(
                 0.0..=10.0, defaults.template.feather,
                 false,
                 |v| if v < 0.1 { "off".into() } else { format!("σ {v:.1}") },
-            ), Tier::Mask, &mut change);
+            ), StaticKnob::Feather, &mut change);
 
         });
 
@@ -234,10 +254,8 @@ pub fn render(
         // filter-only mode (No model + Off), where it applies to the raw
         // source. Only EdgesOnly (no subject) kills it.
         ui.add_enabled_ui(fill_style_active, |ui| {
-            if render_fill_style_chip(ui, &mut item_settings.fill_style) {
-                change.mask = true;
-                change.commit = true;
-            }
+            let changed = render_fill_style_chip(ui, &mut item_settings.fill_style);
+            aggregate_bool(changed, StaticKnob::FillStyle, &mut change);
         });
 
         // Divider between mask and composite groups.
@@ -273,20 +291,12 @@ pub fn render(
                 if ui.add(reset_btn).on_hover_text(reset_tooltip).clicked() {
                     *item_settings = app_settings.preset_values(&reset_target);
                     *applied_preset = reset_target;
-                    change.preset_applied = true;
-                    change.mask = true;
-                    change.edge = true;
-                    change.bg = true;
-                    change.commit = true;
+                    mark_preset_apply(&mut change);
                 }
 
                 if let Some(name) = preset_dropdown::render(ui, app_settings, item_settings, applied_preset) {
                     *applied_preset = name;
-                    change.preset_applied = true;
-                    change.commit = true;
-                    change.mask = true;
-                    change.edge = true;
-                    change.bg = true;
+                    mark_preset_apply(&mut change);
                 }
             },
         );
@@ -315,12 +325,10 @@ pub fn render(
             );
         }
         if item_settings.line_mode != LineMode::Off {
-            if super::lines_popover::render_scale_chip(ui, item_settings) {
-                change.edge = true;
-                change.commit = true;
-            }
+            let scale_changed = super::lines_popover::render_scale_chip(ui, item_settings);
+            aggregate_bool(scale_changed, StaticKnob::EdgeScale, &mut change);
 
-            aggregate(chip::chip_f32(
+            aggregate_knob(chip::chip_f32(
                 ui, "line_strength",
                 &ICON_TUNE.codepoint.to_string(), "Line strength",
                 "How much edge detail to capture. Lower = bold outlines only; higher = fine texture.",
@@ -329,9 +337,9 @@ pub fn render(
                 0.0..=1.0, defaults.template.line_strength,
                 false,
                 |v| format!("{v:.2}"),
-            ), Tier::Edge, &mut change);
+            ), StaticKnob::LineStrength, &mut change);
 
-            aggregate(chip::chip_u32(
+            aggregate_knob(chip::chip_u32(
                 ui, "edge_thickness",
                 &ICON_LINE_WEIGHT.codepoint.to_string(), "Edge thickness",
                 "Thicken edges by dilating the mask. 0 = native DexiNed width; higher = bolder outlines.",
@@ -339,7 +347,7 @@ pub fn render(
                 &mut item_settings.edge_thickness,
                 0..=20, defaults.template.edge_thickness,
                 |v| if v == 0 { "off".into() } else { format!("+{v}px") },
-            ), Tier::Edge, &mut change);
+            ), StaticKnob::EdgeThickness, &mut change);
 
             // Divider between threshold+shape knobs and the paint-time composite choice.
             ui.separator();
@@ -348,73 +356,89 @@ pub fn render(
             // Ignored by the worker / live preview in EdgesOnly + Off, so we
             // hide the chip there to avoid presenting a dead control.
             if item_settings.line_mode == LineMode::SubjectOutline {
-                if render_compose_mode_chip(ui, &mut item_settings.compose_mode) {
-                    change.edge = true;
-                    change.commit = true;
-                }
+                let compose_changed = render_compose_mode_chip(ui, &mut item_settings.compose_mode);
+                aggregate_bool(compose_changed, StaticKnob::ComposeMode, &mut change);
             }
-            if render_line_style_chip(ui, &mut item_settings.line_style) {
-                change.edge = true;
-                change.commit = true;
-            }
+            let style_changed = render_line_style_chip(ui, &mut item_settings.line_style);
+            aggregate_bool(style_changed, StaticKnob::LineStyle, &mut change);
             if render_input_transform_chip(ui, &mut item_settings.input_transform) {
-                // Only the EDGE tensor is stale — DexiNed sees a different
-                // image when input_transform changes, but the seg model
-                // reads the raw source, which hasn't changed. Clearing the
-                // seg cache here used to kill every subsequent mask/edge
-                // live preview (no seg tensor to rerun from). Keep seg
-                // intact; the next Process runs `AddEdgeInference` with
-                // the cached seg + new DexiNed pass.
-                change.edge_cache_invalid = true;
-                change.input_transform_changed = true;
-                change.commit = true;
+                mark_input_transform_change(&mut change);
             }
 
-            aggregate(chip::chip_option_rgb(
+            aggregate_knob(chip::chip_option_rgb(
                 ui, "solid_line_color",
                 &ICON_BRUSH.codepoint.to_string(), "Solid line color",
                 "Paint every edge the same color.",
                 "Stage 4 of 4 in the lines pipeline. Paint every visible edge the same color, or leave unset to keep the original RGB beneath the mask. Runs after edge thickness.",
                 &mut item_settings.solid_line_color,
                 defaults.solid_line_color_value,
-            ), Tier::Edge, &mut change);
+            ), StaticKnob::SolidLineColor, &mut change);
         }
     });
 
-    // Granular cache invalidation:
-    // - Segmentation tensor depends on the model. Only stale when the model
-    //   swapped. Mask-tier live preview keeps working across preset applies
-    //   and line_mode toggles.
-    // - Edge tensor depends on what DexiNed saw: full scene (EdgesOnly)
-    //   vs subject-on-white (SubjectOutline). Switching between modes with
-    //   different inputs invalidates it; switching from/to Off doesn't.
-    if change.model_changed {
-        change.seg_cache_invalid = true;
-    }
+    // Line-mode transition: record the signal + cache impact (deterministic
+    // in `(from, to)`). The dispatcher owns dispatch resolution — folding a
+    // worst-case here would dominate the refined fast path via `.max()`
+    // (e.g. Off→Subject with a warm edge cache would be routed to
+    // SubprocessAddEdge instead of LivePreviewMask).
     if item_settings.line_mode != before_line_mode {
-        // Edge cache is only stale when DexiNed would see a DIFFERENT input.
-        // SubjectOutline's edges were computed on the masked-subject image;
-        // EdgesOnly's edges on the raw image. Off doesn't run DexiNed at
-        // all, so transitions to/from Off preserve whatever edge cache
-        // exists (letting a SubjectOutline → Off → SubjectOutline round
-        // trip keep live-preview working for line_strength tweaks).
-        let invalidates = matches!((before_line_mode, item_settings.line_mode),
-            (LineMode::SubjectOutline, LineMode::EdgesOnly)
-            | (LineMode::EdgesOnly, LineMode::SubjectOutline));
-        if invalidates {
-            change.edge_cache_invalid = true;
-        }
-        change.line_mode_changed = true;
+        let spec = knob_catalog::line_mode_spec(
+            LineModeChange { from: before_line_mode, to: item_settings.line_mode },
+            false,
+        );
+        change.cache_impact = change.cache_impact.union(spec.cache_impact);
+        change.line_mode_from = Some(before_line_mode);
+        change.commit = true;
     }
 
     change
 }
 
-/// Which tier a chip's change lifts into on the aggregate ToolbarChange.
-/// `Bg` is written directly by `render_background_chip` (not via aggregate)
-/// so the enum no longer carries a Bg variant.
-#[derive(Copy, Clone)]
-enum Tier { Mask, Edge }
+/// Fold a static chip's `ChipChange` into the aggregate, routing via the
+/// catalog. Populates `auto_dispatch` only for knobs whose spec marks them
+/// `auto_trigger_on_commit` — Model / ChainMode fall through so the user
+/// has to click Process.
+fn aggregate_knob(ch: chip::ChipChange, knob: StaticKnob, acc: &mut ToolbarChange) {
+    if ch.commit {
+        acc.commit = true;
+    }
+    if !ch.changed {
+        return;
+    }
+    let spec = knob_catalog::spec(knob);
+    acc.touched.insert(knob);
+    acc.cache_impact = acc.cache_impact.union(spec.cache_impact);
+    if matches!(spec.dispatch, DispatchKind::Render) {
+        acc.render_repaint = true;
+    }
+    if spec.auto_trigger_on_commit {
+        acc.auto_dispatch = acc.auto_dispatch.max(spec.dispatch);
+    }
+}
+
+/// Shorthand for chips that return a bool (commit-on-change). Builds a
+/// `ChipChange` where `changed == commit == b` and folds via the catalog.
+fn aggregate_bool(b: bool, knob: StaticKnob, acc: &mut ToolbarChange) {
+    aggregate_knob(chip::ChipChange { changed: b, commit: b }, knob, acc);
+}
+
+/// Flag a preset application. Dispatch is deferred — the caller checks the
+/// actual recipe diff so a no-op preset pick doesn't spawn a subprocess.
+fn mark_preset_apply(acc: &mut ToolbarChange) {
+    acc.preset_applied = true;
+    acc.commit = true;
+    acc.render_repaint = true;
+}
+
+/// Flag an `InputTransform` change. Dispatch is deferred to the caller's
+/// `resolve_auto_dispatch`, which has item state (cached_seg) for the
+/// precise AddEdgeInference vs FullPipeline choice. Cache impact is the
+/// same in both warm and cold paths (EdgeCache), so we fold it here.
+fn mark_input_transform_change(acc: &mut ToolbarChange) {
+    acc.input_transform_changed = true;
+    acc.commit = true;
+    acc.cache_impact = acc.cache_impact.union(CacheImpact::EdgeCache);
+}
 
 /// Input-transform picker. Changes invalidate the DexiNed edge tensor cache
 /// (and seg cache for conservatism) — not live-previewable. Label accent
@@ -774,15 +798,14 @@ fn render_background_chip(
                     let selected = kind == current;
                     if ui.selectable_label(selected, kind.name()).clicked() && !selected {
                         apply_bg_kind(bg, bg_effect, kind, default_color);
-                        // Effect transitions need a postprocess rerun (bake
-                        // the effect into the output RGBA); Transparent/Solid
-                        // toggles are render-time only.
-                        if kind.needs_postprocess() || current.needs_postprocess() {
-                            change.mask = true;
+                        // Effects bake a new RGBA (postprocess); Transparent /
+                        // Solid are render-time only.
+                        let knob = if kind.needs_postprocess() || current.needs_postprocess() {
+                            StaticKnob::BgEffect
                         } else {
-                            change.bg = true;
-                        }
-                        change.commit = true;
+                            StaticKnob::BgColor
+                        };
+                        aggregate_bool(true, knob, change);
                     }
                 }
             });
@@ -798,18 +821,15 @@ fn render_background_chip(
                             if color_picker_color32(ui, &mut c, Alpha::OnlyBlend) {
                                 let [r, g, b, a] = c.to_srgba_unmultiplied();
                                 *rgba = [r, g, b, a];
-                                change.bg = true;
-                                change.commit = true;
+                                aggregate_bool(true, StaticKnob::BgColor, change);
                             }
                             hint(ui, "Solid colour fills transparent areas at render / export.");
                         }
                     }
                     BgKind::BlurredSource => {
                         if let BgEffect::BlurredSource { radius } = bg_effect {
-                            if ui.add(egui::Slider::new(radius, 1..=64).text("Blur radius")).changed() {
-                                change.mask = true;
-                                change.commit = true;
-                            }
+                            let r = ui.add(egui::Slider::new(radius, 1..=64).text("Blur radius"));
+                            aggregate_bool(r.changed(), StaticKnob::BgEffect, change);
                         }
                         hint(ui, "Transparent areas filled with a Gaussian-blurred copy of the source image.");
                     }
@@ -985,17 +1005,15 @@ fn render_model_dropdown(
     });
 
     if app_settings.model != prev_model {
-        // Clamp parallel jobs to the new model's safe maximum. Keeping this
-        // here (vs the caller) because it's a correctness invariant on
-        // app_settings — we mustn't leave an invalid parallel_jobs value.
-        // Disk persistence, toasts, and cache invalidation all live on the
-        // caller via `change.model_changed`.
+        // Clamp parallel jobs to the new model's safe maximum — a correctness
+        // invariant on app_settings that mustn't leave an invalid value even
+        // if downstream skips persistence.
         let max = app_settings.max_jobs();
         if app_settings.parallel_jobs > max {
             app_settings.parallel_jobs = max;
         }
         change.model_changed = true;
-        change.commit = true;
+        aggregate_bool(true, StaticKnob::Model, change);
     }
 }
 
@@ -1004,9 +1022,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn toolbar_change_default_invalidates_nothing() {
+    fn toolbar_change_default_is_empty() {
         let c = ToolbarChange::default();
-        assert!(!c.seg_cache_invalid);
-        assert!(!c.edge_cache_invalid);
+        assert_eq!(c.cache_impact, CacheImpact::Nothing);
+        assert_eq!(c.auto_dispatch, DispatchKind::None);
+        assert!(c.touched.is_empty());
+        assert!(!c.render_repaint);
+        assert!(c.line_mode_from.is_none());
     }
 }

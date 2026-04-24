@@ -55,6 +55,9 @@ memory-stats = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+# Test-only
+proptest = "1.5"
+
 [profile.release]
 strip = true
 lto = "fat"
