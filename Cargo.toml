@@ -22,6 +22,7 @@ ort = { version = "=2.0.0-rc.12", features = ["cuda", "coreml", "directml", "nda
 # Image + tensor core
 ndarray = "0.17"
 image = { version = "0.25", features = ["jpeg", "png", "webp", "bmp"] }
+resvg = "0.45"
 rayon = "1.11"
 fast_image_resize = "6"
 zstd = "0.13"

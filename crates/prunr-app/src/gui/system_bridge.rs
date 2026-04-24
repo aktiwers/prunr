@@ -18,7 +18,7 @@ impl SystemBridge {
     /// Multi-file image picker. Returns `None` on cancel.
     pub fn open_files_dialog(&self, start_dir: Option<&Path>) -> Option<Vec<PathBuf>> {
         let mut dlg = rfd::FileDialog::new()
-            .add_filter("Images", &["png", "jpg", "jpeg", "webp", "bmp"])
+            .add_filter("Images", &["png", "jpg", "jpeg", "webp", "bmp", "svg"])
             .set_title("Open Image(s)");
         if let Some(dir) = start_dir {
             dlg = dlg.set_directory(dir);
