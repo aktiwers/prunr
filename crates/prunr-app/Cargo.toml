@@ -44,6 +44,9 @@ ndarray = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
+[dev-dependencies]
+proptest = { workspace = true }
+
 # OS drag-out: supported on Windows and macOS. On Linux the crate requires a
 # GTK window (winit/eframe cannot supply one), and pulls in gtk/gdk native
 # deps, so we exclude it entirely on Linux and show a fallback toast instead.
