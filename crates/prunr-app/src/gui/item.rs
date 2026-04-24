@@ -228,6 +228,24 @@ impl BatchItem {
         self.cached_edge_mask = None;
     }
 
+    /// Drop whatever caches a `CacheImpact` says are stale. Single entry
+    /// point used by both the toolbar dispatcher and batch classification.
+    pub(crate) fn apply_cache_impact(
+        &mut self,
+        impact: crate::gui::knob_catalog::CacheImpact,
+    ) {
+        use crate::gui::knob_catalog::CacheImpact;
+        match impact {
+            CacheImpact::Nothing => {}
+            CacheImpact::EdgeCache => self.invalidate_edge_cache(),
+            CacheImpact::SegCache => self.cached_tensor = None,
+            CacheImpact::Both => {
+                self.cached_tensor = None;
+                self.invalidate_edge_cache();
+            }
+        }
+    }
+
     /// Reset all caches tied to the current result. Call after the result
     /// has changed (history walk, fresh process, etc.) so the next paint
     /// rebuilds textures and the next reprocess re-runs from scratch.
