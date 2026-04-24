@@ -832,7 +832,8 @@ impl PrunrApp {
             }
         }
 
-        self.processor.dispatch_recipe = Some(current_settings.current_recipe(model, self.settings.chain_mode));
+        let recipe = current_settings.current_recipe(model, self.settings.chain_mode);
+        self.processor.track_dispatch(recipe, process_ids.iter().copied());
 
         self.status.pct = 0.0;
         self.status.stage = "Starting".to_string();
@@ -1222,6 +1223,7 @@ impl PrunrApp {
         ctrl.release(completed_id);
 
         let chain = self.settings.chain_mode;
+        let mut streamed_ids = Vec::new();
         while let Some(next_id) = ctrl.try_admit_next() {
             if let Some(item) = self.batch.find_by_id_mut(next_id) {
                 let Ok(bytes) = item.source.load_bytes() else { continue; };
@@ -1233,12 +1235,17 @@ impl PrunrApp {
                     if tx.send(tuple).is_err() {
                         break; // worker gone
                     }
+                    streamed_ids.push(next_id);
                 }
             }
         }
 
-        // If all items admitted and released, drop the sender to signal worker.
-        if ctrl.is_complete() {
+        let admission_complete = ctrl.is_complete();
+        // ctrl borrow ends here so we can re-borrow processor.
+        for id in streamed_ids {
+            self.processor.track_streamed(id);
+        }
+        if admission_complete {
             self.processor.clear_admission();
         }
     }
@@ -1681,7 +1688,7 @@ impl PrunrApp {
         edge_cache: Option<super::worker::EdgeTensorCache>,
     ) {
         let is_selected = self.batch.is_selected(item_id);
-        let recipe_snapshot = self.resolved_dispatch_recipe(item_id);
+        let recipe_snapshot = self.take_dispatch_recipe(item_id);
 
         // User-initiated cancel reverts to Pending (not Error) so caches and
         // recipe stay intact for a re-Process.
@@ -1727,20 +1734,22 @@ impl PrunrApp {
         }
     }
 
-    /// Resolve the recipe to stamp on a finished item. Prefers the snapshot
-    /// taken at dispatch time; falls back to the item's own settings if no
-    /// snapshot is available (defensive — shouldn't happen in normal flow).
-    fn resolved_dispatch_recipe(&self, item_id: u64) -> prunr_core::ProcessingRecipe {
-        self.processor.dispatch_recipe.clone().unwrap_or_else(|| {
-            let model: prunr_core::ModelKind = self.settings.model
-                .to_model_kind()
-                .unwrap_or(prunr_core::ModelKind::BiRefNetLite);
-            let chain = self.settings.chain_mode;
-            self.batch.items.iter()
-                .find(|b| b.id == item_id)
-                .map(|b| b.settings.current_recipe(model, chain))
-                .unwrap_or_else(|| super::item_settings::ItemSettings::default().current_recipe(model, chain))
-        })
+    /// Recipe to stamp on a finished item. Pulled from the in-flight slot
+    /// owned by `Processor` — name is `take_*` because each call removes
+    /// the entry. Late deliveries after `drain_recipes` (cancel/complete)
+    /// fall back to reconstructing from current item state.
+    fn take_dispatch_recipe(&mut self, item_id: u64) -> prunr_core::ProcessingRecipe {
+        if let Some(recipe) = self.processor.take_recipe(item_id) {
+            return recipe;
+        }
+        let model: prunr_core::ModelKind = self.settings.model
+            .to_model_kind()
+            .unwrap_or(prunr_core::ModelKind::BiRefNetLite);
+        let chain = self.settings.chain_mode;
+        self.batch.items.iter()
+            .find(|b| b.id == item_id)
+            .map(|b| b.settings.current_recipe(model, chain))
+            .unwrap_or_else(|| super::item_settings::ItemSettings::default().current_recipe(model, chain))
     }
 
     fn refresh_batch_progress_status(&mut self) {
@@ -1750,7 +1759,7 @@ impl PrunrApp {
     }
 
     fn on_batch_complete(&mut self) {
-        self.processor.dispatch_recipe = None;
+        self.processor.drain_recipes();
         let counts = self.batch.status_counts();
         let still_processing = counts.processing > 0;
         if counts.errored > 0 {
@@ -1781,7 +1790,7 @@ impl PrunrApp {
     }
 
     fn on_cancelled(&mut self) {
-        self.processor.dispatch_recipe = None;
+        self.processor.drain_recipes();
         if self.state == AppState::Processing {
             self.state = AppState::Loaded;
             self.status.text = "Cancelled".to_string();
