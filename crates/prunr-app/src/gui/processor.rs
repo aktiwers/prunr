@@ -18,7 +18,7 @@
 //! - `BatchManager` (per the cross-coordinator borrow rule). Methods that
 //!   operate on the batch take `&mut BatchManager` per call, never as a field.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
@@ -83,6 +83,16 @@ impl CancelRegistry {
     }
 }
 
+/// Active dispatch's recipe + the set of items still expected to deliver.
+/// All items in a batch share one recipe (the toolbar broadcasts current
+/// settings at dispatch). `take_recipe` removes an item; the slot self-
+/// cleans when the last pending item completes — so a late ImageDone after
+/// a settings edit can't pick up the wrong recipe.
+struct InFlightBatch {
+    recipe: ProcessingRecipe,
+    pending: HashSet<u64>,
+}
+
 pub(crate) struct Processor {
     pub(crate) worker_tx: mpsc::Sender<WorkerMessage>,
     pub(crate) worker_rx: mpsc::Receiver<WorkerResult>,
@@ -95,9 +105,8 @@ pub(crate) struct Processor {
     pub(crate) admission: Option<AdmissionController>,
     /// Sender for streaming additional items to the worker.
     pub(crate) admission_tx: Option<mpsc::Sender<WorkItem>>,
-    /// Recipe snapshot taken at dispatch time — stored on completed items so
-    /// settings edits during a long batch don't re-attribute results.
-    pub(crate) dispatch_recipe: Option<ProcessingRecipe>,
+    /// In-flight batch: recipe + pending IDs. `None` between batches.
+    in_flight: Option<InFlightBatch>,
     /// Last time periodic history cleanup ran.
     pub(crate) last_history_cleanup: Instant,
 }
@@ -114,9 +123,55 @@ impl Processor {
             live_preview: LivePreview::default(),
             admission: None,
             admission_tx: None,
-            dispatch_recipe: None,
+            in_flight: None,
             last_history_cleanup: Instant::now(),
         }
+    }
+
+    /// Register a batch's recipe + the IDs that should deliver against it.
+    /// Replaces any prior in-flight state — callers ensure prior batches
+    /// have completed before firing a new dispatch.
+    pub(crate) fn track_dispatch(
+        &mut self,
+        recipe: ProcessingRecipe,
+        ids: impl IntoIterator<Item = u64>,
+    ) {
+        self.in_flight = Some(InFlightBatch {
+            recipe,
+            pending: ids.into_iter().collect(),
+        });
+    }
+
+    /// Add a streamed (admission-pool) item to the current batch. The
+    /// `debug_assert` catches the "admission ran without a tracked batch"
+    /// invariant breach in tests; release builds silently no-op so a
+    /// single late delivery can't take down a real batch.
+    pub(crate) fn track_streamed(&mut self, id: u64) {
+        match self.in_flight.as_mut() {
+            Some(b) => { b.pending.insert(id); }
+            None => debug_assert!(false, "track_streamed called without active batch"),
+        }
+    }
+
+    /// Take the recipe for a finished item. Returns `None` when the item
+    /// wasn't in flight (late delivery after cancel/drain) — caller falls
+    /// back. Self-cleans the in-flight slot when the last item completes.
+    pub(crate) fn take_recipe(&mut self, id: u64) -> Option<ProcessingRecipe> {
+        let batch = self.in_flight.as_mut()?;
+        if !batch.pending.remove(&id) {
+            return None;
+        }
+        let recipe = batch.recipe.clone();
+        if batch.pending.is_empty() {
+            self.in_flight = None;
+        }
+        Some(recipe)
+    }
+
+    /// Drop the in-flight slot regardless of pending. Called on user cancel
+    /// or batch-complete signals so a late delivery can't reattribute.
+    pub(crate) fn drain_recipes(&mut self) {
+        self.in_flight = None;
     }
 
     /// Drop admission state so no further items are admitted. Called on
@@ -198,6 +253,82 @@ mod tests {
         r.request_global_cancel();
         // Any id reports cancelled when global is set, even ones with no per-item entry.
         assert!(r.is_cancelled(u64::MAX));
+    }
+
+    fn fixture_recipe() -> ProcessingRecipe {
+        use prunr_core::{
+            CompositeRecipe, EdgeRecipe, EdgeScale, ComposeMode, FillStyle, InferenceRecipe,
+            InputTransform, LineStyle, MaskSettings, ModelKind,
+        };
+        ProcessingRecipe {
+            inference: InferenceRecipe {
+                model: ModelKind::Silueta,
+                uses_segmentation: true,
+                uses_edge_detection: false,
+                input_transform: InputTransform::None,
+            },
+            edge: EdgeRecipe {
+                line_strength_bits: 0.5f32.to_bits(),
+                solid_line_color: None,
+                edge_thickness: 0,
+                edge_scale: EdgeScale::Fused,
+                compose_mode: ComposeMode::LinesOnly,
+                line_style: LineStyle::Solid,
+            },
+            mask: (&MaskSettings { fill_style: FillStyle::None, ..Default::default() }).into(),
+            composite: CompositeRecipe { bg_color: None, solid_line_color: None },
+            was_chain: false,
+        }
+    }
+
+    #[test]
+    fn track_dispatch_then_take_returns_recipe_per_item() {
+        let mut p = fixture();
+        p.track_dispatch(fixture_recipe(), [10, 20, 30].iter().copied());
+        assert!(p.take_recipe(10).is_some());
+        assert!(p.take_recipe(20).is_some());
+        // Slot still alive while items remain.
+        assert!(p.in_flight.is_some());
+        assert!(p.take_recipe(30).is_some());
+        // Last item drains the slot.
+        assert!(p.in_flight.is_none());
+    }
+
+    #[test]
+    fn take_recipe_unknown_id_is_none() {
+        let mut p = fixture();
+        p.track_dispatch(fixture_recipe(), [1].iter().copied());
+        assert!(p.take_recipe(999).is_none(), "unknown id must not return a recipe");
+        // Tracked id still works.
+        assert!(p.take_recipe(1).is_some());
+    }
+
+    #[test]
+    fn track_streamed_inherits_batch_recipe() {
+        // Admission-pool items are added after dispatch; they inherit the
+        // current batch's recipe so a late ImageDone for a streamed id
+        // still attributes correctly.
+        let mut p = fixture();
+        p.track_dispatch(fixture_recipe(), [1].iter().copied());
+        p.track_streamed(2);
+        assert!(p.take_recipe(1).is_some());
+        assert!(p.take_recipe(2).is_some(), "streamed item must have a recipe");
+    }
+
+    #[test]
+    #[should_panic(expected = "track_streamed called without active batch")]
+    fn track_streamed_without_dispatch_panics_in_debug() {
+        let mut p = fixture();
+        p.track_streamed(99);
+    }
+
+    #[test]
+    fn drain_recipes_clears_pending() {
+        let mut p = fixture();
+        p.track_dispatch(fixture_recipe(), [1, 2, 3].iter().copied());
+        p.drain_recipes();
+        assert!(p.take_recipe(1).is_none(),
+            "drain must drop the slot so late deliveries fall back");
     }
 
     #[test]
