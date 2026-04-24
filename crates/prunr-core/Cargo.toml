@@ -19,6 +19,7 @@ thiserror = { workspace = true }
 ort = { workspace = true }
 ndarray = { workspace = true }
 image = { workspace = true }
+resvg = { workspace = true }
 rayon = { workspace = true }
 num_cpus = "1"
 dirs = { workspace = true }
