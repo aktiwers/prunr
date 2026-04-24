@@ -34,6 +34,14 @@ impl StatusCounts {
     }
 }
 
+/// Derived progress summary for the status bar. Owns its `stage` string so
+/// callers don't divide done/total or format text inline.
+#[derive(Default, Clone, Debug)]
+pub(crate) struct StatusReport {
+    pub stage: String,
+    pub pct: f32,
+}
+
 /// Which shape the Process button should take for the current selection state.
 /// Drives both the button label and the icon the toolbar renders.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -172,6 +180,22 @@ impl BatchManager {
             }
         }
         c
+    }
+
+    /// Status-bar progress derived from `status_counts`. Single source of
+    /// truth so callers don't divide done/total or format text inline.
+    pub(crate) fn progress(&self) -> StatusReport {
+        let counts = self.status_counts();
+        let total = counts.batch_total();
+        let stage = if counts.processing > 0 {
+            format!("Processing {}/{total}", counts.done)
+        } else {
+            "Finishing up".to_string()
+        };
+        StatusReport {
+            stage,
+            pct: counts.done as f32 / total.max(1) as f32,
+        }
     }
 
     /// First error message across errored items, or `None` if none errored.
@@ -413,6 +437,44 @@ mod tests {
         let c = bm.status_counts();
         assert_eq!(c, StatusCounts::default());
         assert_eq!(c.batch_total(), 0);
+    }
+
+    #[test]
+    fn progress_stage_says_processing_while_in_flight() {
+        let mut bm = fixture();
+        let mut push = |id, status| {
+            let mut item = item_with_cache(id, 0);
+            item.status = status;
+            bm.items.push(item);
+        };
+        push(1, BatchStatus::Done);
+        push(2, BatchStatus::Processing);
+        push(3, BatchStatus::Pending);
+
+        let report = bm.progress();
+        assert_eq!(report.stage, "Processing 1/2");
+        // pct = done(1) / batch_total(2) = 0.5; pending excluded from total.
+        assert!((report.pct - 0.5).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn progress_stage_says_finishing_when_no_in_flight() {
+        let mut bm = fixture();
+        let mut item = item_with_cache(1, 0);
+        item.status = BatchStatus::Done;
+        bm.items.push(item);
+
+        let report = bm.progress();
+        assert_eq!(report.stage, "Finishing up");
+        assert!((report.pct - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn progress_empty_batch_no_division_by_zero() {
+        let bm = fixture();
+        let report = bm.progress();
+        assert_eq!(report.stage, "Finishing up");
+        assert_eq!(report.pct, 0.0);
     }
 
     #[test]

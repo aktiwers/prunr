@@ -1744,14 +1744,9 @@ impl PrunrApp {
     }
 
     fn refresh_batch_progress_status(&mut self) {
-        let counts = self.batch.status_counts();
-        let total = counts.batch_total();
-        self.status.stage = if counts.processing > 0 {
-            format!("Processing {}/{total}", counts.done)
-        } else {
-            "Finishing up".to_string()
-        };
-        self.status.pct = counts.done as f32 / total.max(1) as f32;
+        let report = self.batch.progress();
+        self.status.stage = report.stage;
+        self.status.pct = report.pct;
     }
 
     fn on_batch_complete(&mut self) {
