@@ -248,8 +248,17 @@ pub fn spawn_worker(
             let mut warm: Option<(SubprocessManager, ProcessingConfig)> = None;
             if let Some(cfg) = prewarm {
                 let ProcessingConfig { model, jobs, mask, force_cpu, line_mode, edge } = cfg.clone();
+                let started = std::time::Instant::now();
                 match SubprocessManager::spawn(model, jobs, mask, force_cpu, line_mode, edge) {
                     Ok((sub, provider)) => {
+                        let elapsed_ms = started.elapsed().as_millis();
+                        tracing::info!(
+                            stage = "prewarm",
+                            elapsed_ms,
+                            model = ?model,
+                            line_mode = ?line_mode,
+                            "subprocess cold-start",
+                        );
                         let _ = res_tx.send(WorkerResult::BackendReady(provider));
                         ctx.request_repaint();
                         warm = Some((sub, cfg));
@@ -269,9 +278,32 @@ pub fn spawn_worker(
                         // Reuse the warm sub only when its Init config
                         // matches AND it's still alive. Any mismatch or
                         // dead process drops it and re-spawns.
-                        let reuse = warm.take().and_then(|(mut sub, cfg)| {
-                            if cfg == config && sub.is_alive() { Some(sub) } else { None }
-                        });
+                        let mut reuse: Option<SubprocessManager> = None;
+                        let respawn_reason = match warm.take() {
+                            None => Some("no_prewarm"),
+                            Some((mut sub, cfg)) => {
+                                if cfg == config && sub.is_alive() {
+                                    reuse = Some(sub);
+                                    None
+                                } else if cfg != config {
+                                    Some("config_mismatch")
+                                } else {
+                                    Some("prewarm_dead")
+                                }
+                            }
+                        };
+                        let (decision, reason) = match respawn_reason {
+                            None => ("reuse", "match"),
+                            Some(r) => ("respawn", r),
+                        };
+                        tracing::info!(
+                            stage = "batch_dispatch",
+                            decision,
+                            reason,
+                            model = ?config.model,
+                            line_mode = ?config.line_mode,
+                            "subprocess cold-start",
+                        );
                         run_batch_with_retry(
                             reuse,
                             items, tier2_items, add_edge_items, config, &cancels,
