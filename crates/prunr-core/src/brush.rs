@@ -57,7 +57,7 @@ impl MaskCorrection {
         self.grid.iter().all(|&v| v == 0)
     }
 
-    pub fn dims_match(&self, mask_len: usize) -> bool {
+    fn dims_match(&self, mask_len: usize) -> bool {
         (self.width as usize) * (self.height as usize) == mask_len
     }
 }
@@ -136,6 +136,45 @@ pub fn paint_circle(
             grid[idx] = combined.clamp(-127, 127) as i8;
         }
     }
+}
+
+/// Merge `addition` into `target` using max-magnitude in the additive
+/// direction — positive stamps from either source keep the strongest
+/// foreground push; negative stamps keep the strongest background push.
+/// Untouched cells in `addition` (== 0) leave `target` unchanged.
+///
+/// Skips silently on dimension mismatch.
+pub fn merge(target: &mut MaskCorrection, addition: &MaskCorrection) {
+    if target.width != addition.width || target.height != addition.height {
+        tracing::warn!(
+            target_dims = format!("{}x{}", target.width, target.height),
+            addition_dims = format!("{}x{}", addition.width, addition.height),
+            "merge: dimension mismatch, skipping"
+        );
+        return;
+    }
+    for (t, &a) in target.grid.iter_mut().zip(addition.grid.iter()) {
+        if a == 0 {
+            continue;
+        }
+        if a > 0 {
+            *t = (*t).max(a);
+        } else {
+            *t = (*t).min(a);
+        }
+    }
+}
+
+/// Stable hash of the correction's content (width, height, grid bytes).
+/// Uses `DefaultHasher` (`SipHasher13`) which is deterministic across
+/// runs, so persisted hashes survive load.
+pub fn content_hash(c: &MaskCorrection) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    c.width.hash(&mut h);
+    c.height.hash(&mut h);
+    c.grid.hash(&mut h);
+    h.finish()
 }
 
 #[cfg(test)]
@@ -292,5 +331,58 @@ mod tests {
         let mut c2 = c.clone();
         c2.grid[3] = 1;
         assert!(!c2.is_empty());
+    }
+
+    #[test]
+    fn merge_takes_max_magnitude_per_direction() {
+        let mut a = MaskCorrection::empty(2, 1);
+        a.grid = vec![10, -50];
+        let mut b = MaskCorrection::empty(2, 1);
+        b.grid = vec![80, -20];
+        merge(&mut a, &b);
+        assert_eq!(a.grid, vec![80, -50]);
+    }
+
+    #[test]
+    fn merge_skips_zero_cells() {
+        let mut a = MaskCorrection::empty(3, 1);
+        a.grid = vec![5, -5, 0];
+        let b_zero = MaskCorrection::empty(3, 1);
+        let snapshot = a.grid.clone();
+        merge(&mut a, &b_zero);
+        assert_eq!(a.grid, snapshot, "zero addition leaves target intact");
+    }
+
+    #[test]
+    fn merge_dim_mismatch_is_no_op() {
+        let mut a = MaskCorrection::empty(4, 4);
+        a.grid[0] = 33;
+        let b = MaskCorrection::empty(2, 2);
+        merge(&mut a, &b);
+        assert_eq!(a.grid[0], 33);
+    }
+
+    #[test]
+    fn content_hash_changes_on_grid_edit() {
+        let mut a = MaskCorrection::empty(8, 8);
+        let h1 = content_hash(&a);
+        a.grid[5] = 1;
+        let h2 = content_hash(&a);
+        assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn content_hash_changes_on_dim_change() {
+        let a = MaskCorrection::empty(8, 8);
+        let b = MaskCorrection::empty(16, 4);
+        assert_ne!(content_hash(&a), content_hash(&b));
+    }
+
+    #[test]
+    fn content_hash_deterministic_across_calls() {
+        let mut a = MaskCorrection::empty(4, 4);
+        a.grid[3] = 7;
+        a.grid[10] = -7;
+        assert_eq!(content_hash(&a), content_hash(&a));
     }
 }
