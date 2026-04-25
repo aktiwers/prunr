@@ -31,6 +31,16 @@ const MODELS: &[ModelSpec] = &[
         url: "https://github.com/aktiwers/prunr/releases/download/models-v1/dexined.onnx",
         sha256: "cba9193b1e3fbcb5bd196001a9aae13bafaa309442f6cb074330c426cc61ec5a",
     },
+    // LaMa for Phase 16 inpainting. FP32 from Carve/LaMa-ONNX
+    // (~208 MB). Swap to an INT8 quantized variant when one is
+    // verified — the filename in lib.rs::lama_bytes follows.
+    // Bootstrap entry: first `cargo xtask fetch-models` run prints
+    // the computed SHA256; replace with that value once verified.
+    ModelSpec {
+        name: "lama_fp32.onnx",
+        url: "https://huggingface.co/Carve/LaMa-ONNX/resolve/main/lama_fp32.onnx",
+        sha256: "",
+    },
 ];
 
 fn main() -> anyhow::Result<()> {

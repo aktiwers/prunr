@@ -89,8 +89,9 @@ Common flags:
 | Silueta | ~4 MB | 320×320 | Fast, clean subjects (default) |
 | U2Net | ~170 MB | 320×320 | Better edges |
 | BiRefNet-lite | ~214 MB | 1024×1024 | Fine detail (hair, leaves) |
+| LaMa (Eraser) | ~208 MB | 512×512 (tiled) | Object removal — paint over a region, fill it in |
 
-All models are embedded in the binary — no downloads after install.
+All bg-removal models are embedded in the binary — no downloads after install. The Eraser model loads on first use from `models/lama_fp32.onnx` (`cargo xtask fetch-models` populates it).
 
 ## GPU Acceleration
 
