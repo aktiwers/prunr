@@ -122,18 +122,23 @@ fn screen_to_model(p: Pos2, img_rect: Rect, model_w: u16, model_h: u16) -> Pos2 
 }
 
 /// Translucent ACCENT-purple stamps along the in-progress stroke's
-/// trail. Lets the user see where they've painted before the Tier-2
-/// rerun lands and replaces it with the real mask update.
+/// trail. Drawn on a foreground layer so the image rendered earlier
+/// in the same frame can't accidentally cover them, and tinted
+/// brighter than the theme ACCENT so the trail is legible on dark
+/// images too.
 fn draw_trail(ui: &Ui, brush_state: &BrushState) {
-    let accent = theme::ACCENT;
-    let fill = Color32::from_rgba_premultiplied(
-        ((accent.r() as u32) * 90 / 255) as u8,
-        ((accent.g() as u32) * 90 / 255) as u8,
-        ((accent.b() as u32) * 90 / 255) as u8,
-        90,
-    );
+    let mut count = 0u32;
+    let fill = Color32::from_rgba_unmultiplied(190, 120, 230, 160);
+    let painter = ui.ctx().layer_painter(egui::LayerId::new(
+        egui::Order::Foreground,
+        egui::Id::new("brush_trail"),
+    ));
     for (sx, sy, sr) in brush_state.trail_stamps() {
-        ui.painter().circle_filled(egui::Pos2::new(sx, sy), sr, fill);
+        painter.circle_filled(Pos2::new(sx, sy), sr, fill);
+        count += 1;
+    }
+    if count > 0 {
+        tracing::debug!(count, "drew brush trail stamps");
     }
 }
 

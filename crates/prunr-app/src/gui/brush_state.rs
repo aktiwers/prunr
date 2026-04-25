@@ -83,6 +83,9 @@ impl BrushState {
     pub fn record_trail_stamp(&mut self, sx: f32, sy: f32, screen_radius: f32) {
         if let Some(active) = self.active.as_mut() {
             active.trail.push((sx, sy, screen_radius));
+            tracing::trace!(sx, sy, screen_radius, total = active.trail.len(), "trail stamp recorded");
+        } else {
+            tracing::debug!("trail stamp dropped — no active stroke");
         }
     }
 
