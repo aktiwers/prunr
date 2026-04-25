@@ -170,10 +170,9 @@ pub fn tensor_to_edge_mask(
     let mut mask_buf = vec![0u8; h * w];
     for i in 0..h * w {
         let prob = 1.0 / (1.0 + (-edge_tensor[i]).exp());
-        // Smooth step: remap [threshold-0.1, threshold+0.1] to [0, 1] for anti-aliased edges
+        // Remap [threshold-0.1, threshold+0.1] to [0, 1] for anti-aliased edges.
         let edge = ((prob - threshold + 0.1) / 0.2).clamp(0.0, 1.0);
-        let val = edge * edge * (3.0 - 2.0 * edge); // smoothstep
-        mask_buf[i] = (val * 255.0) as u8;
+        mask_buf[i] = (crate::math::smoothstep(edge) * 255.0) as u8;
     }
 
     let mask = image::GrayImage::from_raw(w as u32, h as u32, mask_buf)
