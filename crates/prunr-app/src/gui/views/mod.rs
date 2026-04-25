@@ -53,6 +53,7 @@ pub fn model_name(model: SettingsModel) -> &'static str {
         SettingsModel::U2net => "U2Net",
         SettingsModel::BiRefNetLite => "BiRefNet",
         SettingsModel::None => "No model",
+        SettingsModel::Inpaint => "Eraser",
     }
 }
 
@@ -63,6 +64,7 @@ pub fn model_label(model: SettingsModel, short: bool) -> String {
         SettingsModel::U2net => (ICON_SMART_TOY.codepoint, "U2Net", "quality", "~170 MB"),
         SettingsModel::BiRefNetLite => (ICON_NEUROLOGY.codepoint, "BiRefNet", "detail", "~214 MB"),
         SettingsModel::None => (ICON_BLOCK.codepoint, "No model", "No background removal", "0 MB"),
+        SettingsModel::Inpaint => (ICON_BRUSH.codepoint, "Eraser", "object removal", "~208 MB"),
     };
     if short {
         format!("{icon}  {name}")
