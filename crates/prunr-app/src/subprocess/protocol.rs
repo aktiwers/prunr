@@ -69,18 +69,15 @@ pub enum SubprocessCommand {
         /// Per-item mask settings (may differ from Init's mask).
         mask: MaskSettings,
     },
-    /// Inpaint a region of an image (Phase 16 Eraser). Worker runs LaMa
-    /// over `mask_path`'s painted area and returns the filled RGBA.
-    /// Independent of the seg/edge engine pool — uses its own LaMa session.
+    /// Inpaint a region of an image. Worker runs LaMa over `mask_path`'s
+    /// painted area and returns the filled RGBA. Independent of the seg/
+    /// edge engine pool — uses its own LaMa session.
     Inpaint {
         item_id: u64,
-        /// Path to temp file with the source image bytes.
+        /// Source image bytes (PNG/JPG/etc — worker decodes).
         image_path: std::path::PathBuf,
-        /// Path to temp file with a single-channel mask (255 = inpaint here, 0 = keep).
+        /// Single-channel mask: 255 = inpaint here, 0 = keep.
         mask_path: std::path::PathBuf,
-        /// Image dimensions, sent inline so the worker doesn't decode twice.
-        width: u32,
-        height: u32,
     },
     /// Cancel: stop after current image, send Finished.
     Cancel,
@@ -365,8 +362,6 @@ mod tests {
             item_id: 11,
             image_path: std::path::PathBuf::from("/tmp/prunr-inpaint-img-11"),
             mask_path: std::path::PathBuf::from("/tmp/prunr-inpaint-mask-11"),
-            width: 1920,
-            height: 1080,
         });
     }
 

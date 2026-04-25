@@ -826,10 +826,10 @@ pub fn run_worker() -> ! {
                 guard.insert(item_id);
             }
 
-            SubprocessCommand::Inpaint { item_id, image_path, mask_path, width, height } => {
-                // Inpaint is independent of the engine pool — runs LaMa
-                // synchronously on the calling thread. The pool is for
-                // seg/edge models and shouldn't pre-load LaMa.
+            SubprocessCommand::Inpaint { item_id, image_path, mask_path } => {
+                // Inpaint runs independent of the seg/edge engine pool —
+                // a fresh thread per dispatch keeps LaMa from blocking
+                // batched seg work.
                 let evt_tx = evt_tx.clone();
                 std::thread::spawn(move || {
                     let result = (|| -> Result<image::RgbaImage, String> {
@@ -845,12 +845,6 @@ pub fn run_worker() -> ! {
                         let mask = image::load_from_memory(&mask_bytes)
                             .map_err(|e| format!("decode mask: {e}"))?
                             .to_luma8();
-                        if image.dimensions() != (width, height) {
-                            return Err(format!(
-                                "image dim {:?} != expected ({}, {})",
-                                image.dimensions(), width, height,
-                            ));
-                        }
                         prunr_core::inpaint::process_inpaint(&image, &mask)
                             .map_err(|e| format!("inpaint: {e:?}"))
                     })();

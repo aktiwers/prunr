@@ -158,11 +158,8 @@ fn handle_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: Rect) 
         let item_id = app.batch.items[idx].id;
         app.batch.items[idx].commit_correction(strokes);
         if is_inpaint {
-            // 16-06 wires this to LaMa via the subprocess command added
-            // in 16-04. For now record the stroke; result texture stays
-            // unchanged so the user sees the trail commit but not yet
-            // the inpainted result.
-            tracing::info!(item_id, "inpaint stroke committed (dispatch pending 16-06)");
+            // Stub: stroke recorded; LaMa dispatch wires up later.
+            tracing::info!(item_id, "inpaint stroke committed");
         } else {
             tracing::info!(item_id, "brush stroke committed; dispatching Tier-2 rerun");
             app.processor.live_preview.mark_tweak(item_id, PreviewKind::Mask);
