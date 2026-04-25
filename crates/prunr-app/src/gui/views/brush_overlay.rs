@@ -51,45 +51,57 @@ pub(crate) fn handle_input(
         // No cached tensor → brush has nothing to write into. Render a
         // muted cursor so the user gets feedback that brush is ON, but
         // skip pointer wiring.
+        tracing::debug!(item_id = item.id, "brush active but no cached_tensor — cursor only");
         draw_cursor(ui, img_rect, brush_state, /*armed=*/ false);
         return BrushAction::None;
     };
 
-    // `Sense::click_and_drag` claims pointer events on this rect so the
-    // panel below (zoom/pan) doesn't also see them.
-    let response = ui.interact(img_rect, ui.id().with("brush_overlay"), Sense::click_and_drag());
+    // Claim the area so canvas pan/zoom doesn't double-handle pointer.
+    let _claim = ui.interact(img_rect, ui.id().with("brush_overlay"), Sense::click_and_drag());
 
-    let pointer = response.hover_pos().or_else(|| response.interact_pointer_pos());
-    let pointer_on_img = pointer.filter(|p| img_rect.contains(*p));
+    let (hover, primary_pressed, primary_down, primary_released) = ui.input(|i| {
+        (
+            i.pointer.hover_pos(),
+            i.pointer.primary_pressed(),
+            i.pointer.primary_down(),
+            i.pointer.primary_released(),
+        )
+    });
+    let pointer_on_img = hover.filter(|p| img_rect.contains(*p));
 
     // Cursor circle — armed only when the pointer is over the image.
     draw_cursor(ui, img_rect, brush_state, pointer_on_img.is_some());
 
-    let Some(p) = pointer_on_img else {
-        if !response.dragged() && brush_state.has_active_stroke() {
-            // Pointer left the image mid-drag — keep the stroke alive;
-            // user might come back. The stroke commits on full release.
-        }
-        return BrushAction::None;
+    // Brush radius in model-pixel space — derived from the on-screen
+    // img_rect width vs model width. One isotropic factor is enough:
+    // letterboxed images keep proportional w/h.
+    let model_radius_for = |screen_radius: f32| -> f32 {
+        screen_radius * (model_w as f32 / img_rect.width().max(1.0))
     };
 
-    let model_pos = screen_to_model(p, img_rect, model_w, model_h);
-
-    if response.drag_started() {
-        brush_state.begin_stroke(model_w, model_h);
+    if primary_pressed {
+        if let Some(p) = pointer_on_img {
+            tracing::debug!(model_w, model_h, "brush press — begin stroke");
+            brush_state.begin_stroke(model_w, model_h);
+            let m = screen_to_model(p, img_rect, model_w, model_h);
+            brush_state.extend_stroke_with_radius(
+                m.x, m.y, model_radius_for(brush_state.settings().radius),
+            );
+        }
     }
 
-    if response.dragged() || response.drag_started() {
-        // Convert the screen-space brush radius to model space using
-        // the same scale (img_rect→tex→model). One scale factor is
-        // enough — strokes paint isotropically at the final resolution.
-        let model_radius = brush_state.settings().radius
-            * (model_w as f32 / img_rect.width().max(1.0));
-        brush_state.extend_stroke_with_radius(model_pos.x, model_pos.y, model_radius);
+    if primary_down && brush_state.has_active_stroke() {
+        if let Some(p) = pointer_on_img {
+            let m = screen_to_model(p, img_rect, model_w, model_h);
+            brush_state.extend_stroke_with_radius(
+                m.x, m.y, model_radius_for(brush_state.settings().radius),
+            );
+        }
     }
 
-    if response.drag_stopped() {
+    if primary_released && brush_state.has_active_stroke() {
         if let Some(strokes) = brush_state.commit_stroke() {
+            tracing::debug!("brush release — commit");
             return BrushAction::Committed(strokes);
         }
     }
