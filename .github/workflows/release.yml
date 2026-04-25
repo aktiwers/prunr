@@ -102,6 +102,10 @@ jobs:
           git clone --depth 1 --branch v1.20.0 \
             https://github.com/microsoft/onnxruntime.git ort-src
           cd ort-src
+          # CMAKE_POLICY_VERSION_MINIMUM=3.5: macOS runners ship CMake 4.x,
+          # which drops support for cmake_minimum_required < 3.5. ORT 1.20.0's
+          # transitive dep google_nsync still declares 2.x. The minimum-policy
+          # override lets the legacy CMakeLists configure under modern CMake.
           ./build.sh \
             --config Release \
             --use_coreml \
@@ -111,7 +115,8 @@ jobs:
             --skip_submodule_sync \
             --skip_tests \
             --osx_arch arm64 \
-            --build_dir ../ort-build
+            --build_dir ../ort-build \
+            --cmake_extra_defines CMAKE_POLICY_VERSION_MINIMUM=3.5
 
       - name: Point cargo at custom ORT (macOS)
         if: matrix.name == 'macos-aarch64'
