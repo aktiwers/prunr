@@ -9,11 +9,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::math::smoothstep;
 
-/// Scale factor when applying the i8 grid into the u8 mask. Lifts the
-/// max signed magnitude (127) into a useful u8 effect (~254), so a
-/// full-strength stamp can flip a midtone pixel either direction.
-const APPLY_SCALE: i16 = 2;
-
 /// Range of a single brush stamp's contribution into the i8 grid.
 const STAMP_SCALE: f32 = 127.0;
 
@@ -62,9 +57,19 @@ impl MaskCorrection {
     }
 }
 
-/// In-place saturating signed add of `correction` into `mask`. Skips
-/// silently on dimension mismatch (caller must resize on model swap).
-pub fn apply_correction(mask: &mut [u8], correction: &MaskCorrection) {
+/// In-place multiplicative correction in normalized [0, 1] mask space.
+/// Applied BEFORE gamma/threshold so subsequent gamma slider tweaks
+/// modulate the painted regions naturally — a 50% subtract stroke
+/// halves the local mask, then a higher gamma further attenuates.
+///
+/// Semantics per cell:
+/// - `g > 0` (add direction):    `m → lerp(m, 1.0, g/127)`
+/// - `g < 0` (subtract direction): `m → m * (1 + g/127)` (toward 0)
+/// - `g == 0`:                   no-op
+///
+/// Caller passes the post-normalize, pre-gamma mask in [0, 1].
+/// Skips silently on dimension mismatch.
+pub fn apply_correction(mask: &mut [f32], correction: &MaskCorrection) {
     if !correction.dims_match(mask.len()) {
         tracing::warn!(
             mask_len = mask.len(),
@@ -74,8 +79,15 @@ pub fn apply_correction(mask: &mut [u8], correction: &MaskCorrection) {
         return;
     }
     for (m, &g) in mask.iter_mut().zip(correction.grid.iter()) {
-        let next = (*m as i16) + (g as i16) * APPLY_SCALE;
-        *m = next.clamp(0, 255) as u8;
+        if g == 0 {
+            continue;
+        }
+        let s = (g as f32) / 127.0;
+        if s > 0.0 {
+            *m += (1.0 - *m) * s;
+        } else {
+            *m *= 1.0 + s;
+        }
     }
 }
 
@@ -181,56 +193,75 @@ pub fn content_hash(c: &MaskCorrection) -> u64 {
 mod tests {
     use super::*;
 
+    fn approx(mask: &[f32], expected: &[f32], tol: f32) -> bool {
+        mask.len() == expected.len()
+            && mask.iter().zip(expected).all(|(a, b)| (a - b).abs() < tol)
+    }
+
     #[test]
     fn empty_correction_is_no_op() {
         let c = MaskCorrection::empty(10, 10);
-        let mut mask = vec![128u8; 100];
+        let mut mask = vec![0.5f32; 100];
         apply_correction(&mut mask, &c);
-        assert!(mask.iter().all(|&v| v == 128));
+        assert!(mask.iter().all(|&v| v == 0.5));
     }
 
     #[test]
     fn dimension_mismatch_skipped() {
         let c = MaskCorrection::empty(5, 5);
-        let mut mask = vec![100u8; 100];
+        let mut mask = vec![0.4f32; 100];
         apply_correction(&mut mask, &c);
-        assert!(mask.iter().all(|&v| v == 100));
+        assert!(mask.iter().all(|&v| v == 0.4));
     }
 
     #[test]
-    fn add_saturates_at_255() {
+    fn full_add_drives_to_one() {
         let mut c = MaskCorrection::empty(2, 2);
         c.grid = vec![127, 127, 127, 127];
-        let mut mask = vec![250u8; 4];
+        let mut mask = vec![0.3f32; 4];
         apply_correction(&mut mask, &c);
-        assert!(mask.iter().all(|&v| v == 255));
+        assert!(approx(&mask, &[1.0, 1.0, 1.0, 1.0], 1e-6));
     }
 
     #[test]
-    fn subtract_saturates_at_0() {
+    fn full_subtract_drives_to_zero() {
         let mut c = MaskCorrection::empty(2, 2);
         c.grid = vec![-127, -127, -127, -127];
-        let mut mask = vec![5u8; 4];
+        let mut mask = vec![0.95f32; 4];
         apply_correction(&mut mask, &c);
-        assert!(mask.iter().all(|&v| v == 0));
+        assert!(approx(&mask, &[0.0, 0.0, 0.0, 0.0], 1e-6));
     }
 
     #[test]
-    fn add_then_subtract_returns_to_baseline_on_aligned_strokes() {
-        let mut c = MaskCorrection::empty(2, 2);
-        c.grid = vec![50, 50, 50, 50];
-        let mut mask = vec![128u8; 4];
+    fn half_subtract_halves_the_value() {
+        // s = -64/127 ≈ -0.504, so m → m * (1 - 0.504) = m * 0.496.
+        let mut c = MaskCorrection::empty(2, 1);
+        c.grid = vec![-64, -64];
+        let mut mask = vec![1.0f32, 0.6];
         apply_correction(&mut mask, &c);
-        assert_eq!(mask, vec![228, 228, 228, 228]);
+        let expected_factor = 1.0 - 64.0 / 127.0;
+        assert!(approx(&mask, &[expected_factor, 0.6 * expected_factor], 1e-5));
+    }
+
+    #[test]
+    fn half_add_lerps_toward_one() {
+        // s = +64/127 ≈ 0.504, so m → m + (1 - m) * 0.504.
+        let mut c = MaskCorrection::empty(2, 1);
+        c.grid = vec![64, 64];
+        let mut mask = vec![0.0f32, 0.5];
+        apply_correction(&mut mask, &c);
+        let s = 64.0 / 127.0;
+        assert!(approx(&mask, &[s, 0.5 + 0.5 * s], 1e-5));
     }
 
     #[test]
     fn apply_correction_non_uniform_grid() {
         let mut c = MaskCorrection::empty(3, 1);
-        c.grid = vec![10, 0, -10];
-        let mut mask = vec![128u8; 3];
+        c.grid = vec![64, 0, -64];
+        let mut mask = vec![0.5f32, 0.5, 0.5];
         apply_correction(&mut mask, &c);
-        assert_eq!(mask, vec![148, 128, 108]);
+        let s = 64.0 / 127.0;
+        assert!(approx(&mask, &[0.5 + 0.5 * s, 0.5, 0.5 * (1.0 - s)], 1e-5));
     }
 
     #[test]
