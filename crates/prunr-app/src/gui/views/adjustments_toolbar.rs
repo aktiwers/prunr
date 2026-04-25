@@ -278,19 +278,12 @@ pub fn render(
             |ui| {
                 // Reset-all-knobs button visible directly (per user feedback —
                 // was previously hidden in the kebab overflow menu).
-                let reset_btn = egui::Button::new(
-                    RichText::new(ICON_RESTART_ALT.codepoint)
-                        .color(theme::TEXT_SECONDARY)
-                        .size(theme::ICON_SIZE_SMALL),
-                )
-                .fill(theme::BG_SECONDARY)
-                .corner_radius(theme::BUTTON_ROUNDING)
-                .min_size(egui::vec2(theme::CHIP_HEIGHT, theme::CHIP_HEIGHT));
                 let reset_target = app_settings.default_preset.clone();
                 let reset_tooltip = format!(
                     "Reset all knobs to the \"{reset_target}\" preset (your default)"
                 );
-                if ui.add(reset_btn).on_hover_text(reset_tooltip).clicked() {
+                let reset_resp = chip::icon_toggle_button(ui, &ICON_RESTART_ALT.codepoint.to_string(), false);
+                if reset_resp.on_hover_text(reset_tooltip).clicked() {
                     *item_settings = app_settings.preset_values(&reset_target);
                     *applied_preset = reset_target;
                     mark_preset_apply(&mut change);
@@ -301,23 +294,14 @@ pub fn render(
                     mark_preset_apply(&mut change);
                 }
 
-                // Brush mode toggle (Phase 15). Sits left of the preset
-                // button in the right-to-left layout.
                 let brush_active = brush_state.is_enabled();
-                let brush_btn = egui::Button::new(
-                    RichText::new(ICON_BRUSH.codepoint)
-                        .color(if brush_active { theme::TEXT_PRIMARY } else { theme::TEXT_SECONDARY })
-                        .size(theme::ICON_SIZE_SMALL),
-                )
-                .fill(if brush_active { theme::ACCENT } else { theme::BG_SECONDARY })
-                .corner_radius(theme::BUTTON_ROUNDING)
-                .min_size(egui::vec2(theme::CHIP_HEIGHT, theme::CHIP_HEIGHT));
-                let tooltip = if brush_active {
+                let brush_tooltip = if brush_active {
                     "Brush mode ON — click on canvas to add (positive) / subtract (negative) mask. Click here to disable."
                 } else {
                     "Toggle brush mode: paint corrections onto the mask"
                 };
-                if ui.add(brush_btn).on_hover_text(tooltip).clicked() {
+                let brush_resp = chip::icon_toggle_button(ui, &ICON_BRUSH.codepoint.to_string(), brush_active);
+                if brush_resp.on_hover_text(brush_tooltip).clicked() {
                     brush_state.toggle();
                 }
             },
