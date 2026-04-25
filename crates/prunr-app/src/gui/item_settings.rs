@@ -128,7 +128,7 @@ impl ItemSettings {
             feather: self.feather,
             fill_style: self.fill_style,
             bg_effect: self.bg_effect,
-            mask_correction_hash: None,
+            correction_hash: None,
         }
     }
 
