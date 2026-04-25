@@ -93,8 +93,11 @@ jobs:
         id: ort-cache
         uses: actions/cache@v4
         with:
-          path: ort-build/MacOS/Release
-          key: ort-coreml-1.20.0-macos-aarch64-v1
+          # ORT 1.20's build.sh writes dylib to <build_dir>/<config>/, no OS
+          # subdir on macOS — verified empirically (run #5 failed because we
+          # cached the wrong path).
+          path: ort-build/Release
+          key: ort-coreml-1.20.0-macos-aarch64-v2
 
       - name: Install ORT build prereqs (macOS, cache miss)
         if: matrix.name == 'macos-aarch64' && steps.ort-cache.outputs.cache-hit != 'true'
@@ -133,12 +136,16 @@ jobs:
       - name: Point cargo at custom ORT (macOS)
         if: matrix.name == 'macos-aarch64'
         run: |
-          ORT_DIR="$PWD/ort-build/MacOS/Release"
-          if [ ! -f "$ORT_DIR/libonnxruntime.dylib" ]; then
-            echo "::error::ORT build did not produce libonnxruntime.dylib at $ORT_DIR"
-            ls -la "$ORT_DIR" 2>&1 || true
+          # Discover the dylib instead of assuming a fixed subdir — keeps us
+          # robust if ORT changes its build_dir layout in a future bump.
+          DYLIB=$(find ort-build -name 'libonnxruntime.dylib' -type f | head -1)
+          if [ -z "$DYLIB" ]; then
+            echo "::error::No libonnxruntime.dylib under ort-build/"
+            find ort-build -maxdepth 3 -type d 2>&1 | head -40
             exit 1
           fi
+          ORT_DIR="$(cd "$(dirname "$DYLIB")" && pwd)"
+          echo "Resolved ORT_LIB_LOCATION=$ORT_DIR"
           echo "ORT_LIB_LOCATION=$ORT_DIR" >> "$GITHUB_ENV"
           echo "ORT_PREFER_DYNAMIC_LINK=1" >> "$GITHUB_ENV"
 
