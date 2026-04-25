@@ -136,16 +136,20 @@ jobs:
       - name: Point cargo at custom ORT (macOS)
         if: matrix.name == 'macos-aarch64'
         run: |
-          # Discover the dylib instead of assuming a fixed subdir — keeps us
-          # robust if ORT changes its build_dir layout in a future bump.
-          DYLIB=$(find ort-build -name 'libonnxruntime.dylib' -type f | head -1)
+          # Discover the dylib robustly:
+          # - `-L` follows symlinks (ORT ships libonnxruntime.dylib as a
+          #   symlink to libonnxruntime.<version>.dylib).
+          # - glob `libonnxruntime*.dylib` matches the versioned file too.
+          DYLIB=$(find -L ort-build \( -name 'libonnxruntime.dylib' -o -name 'libonnxruntime.*.dylib' \) | head -1)
           if [ -z "$DYLIB" ]; then
-            echo "::error::No libonnxruntime.dylib under ort-build/"
-            find ort-build -maxdepth 3 -type d 2>&1 | head -40
+            echo "::error::No libonnxruntime*.dylib under ort-build/"
+            echo "Contents of ort-build/Release/:"
+            ls -la ort-build/Release/ 2>&1 | head -60 || true
             exit 1
           fi
           ORT_DIR="$(cd "$(dirname "$DYLIB")" && pwd)"
-          echo "Resolved ORT_LIB_LOCATION=$ORT_DIR"
+          echo "Resolved dylib: $DYLIB"
+          echo "ORT_LIB_LOCATION=$ORT_DIR"
           echo "ORT_LIB_LOCATION=$ORT_DIR" >> "$GITHUB_ENV"
           echo "ORT_PREFER_DYNAMIC_LINK=1" >> "$GITHUB_ENV"
 
