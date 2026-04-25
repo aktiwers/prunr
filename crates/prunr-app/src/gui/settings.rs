@@ -63,8 +63,6 @@ pub struct Settings {
     pub force_cpu: bool,
     #[serde(skip)]
     pub active_backend: String,
-    /// App-level brush tool defaults (radius, hardness, strength, mode,
-    /// shape). Restored at launch so a user's preferred brush stays put.
     #[serde(default)]
     pub brush: BrushSettings,
 }
@@ -494,9 +492,6 @@ mod tests {
 
     #[test]
     fn missing_brush_field_falls_back_to_default() {
-        // Older settings files written before 15-08 don't carry a brush
-        // block. The #[serde(default)] attribute must populate defaults
-        // so users upgrading don't see a load failure.
         let json = serde_json::json!({
             "model": "Silueta",
             "auto_process_on_import": false,

@@ -74,12 +74,9 @@ pub struct ToolbarChange {
     /// A render-only knob (bg color) fired — request a repaint even when
     /// no other dispatch kicks in.
     pub render_repaint: bool,
-    /// User clicked "Clear strokes" in the brush popover. Caller routes
-    /// to `BatchItem::clear_correction` post-render.
+    /// User clicked "Clear strokes" in the brush popover.
     pub clear_correction_requested: bool,
-    /// A brush popover slider settled or a button was clicked AND
-    /// `app_settings.brush` was just synced. Caller persists settings
-    /// to disk on this signal — saving every frame would burn disk.
+    /// Brush popover settled a change AND `app_settings.brush` was synced.
     pub brush_settings_committed: bool,
 }
 
