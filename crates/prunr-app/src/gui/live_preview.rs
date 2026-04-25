@@ -50,6 +50,7 @@ fn build_masked_base(
         original,
         &mask_settings,
         seg.model,
+        None,
     )
     .ok()
     .map(DynamicImage::ImageRgba8)
