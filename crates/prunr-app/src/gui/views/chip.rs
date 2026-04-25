@@ -67,6 +67,84 @@ pub(super) fn chip_button(ui: &mut Ui, icon: &str, value: &str, accent: bool) ->
     resp
 }
 
+/// Solid inner + concentric soft-falloff strokes following the same
+/// smoothstep curve as `paint_circle`. Shared by the canvas trail and
+/// the popover preview so the on-screen brush always matches what
+/// `paint_circle` will write into the mask.
+pub(super) fn paint_falloff_circle(
+    painter: &egui::Painter,
+    center: egui::Pos2,
+    outer: f32,
+    hardness: f32,
+    color: egui::Color32,
+    base_alpha: u8,
+    steps: u32,
+) {
+    paint_falloff_shape(painter, center, outer, hardness, color, base_alpha, steps, true);
+}
+
+/// Square variant of `paint_falloff_circle` — axis-aligned rect with
+/// the same smoothstep falloff toward the corners (chebyshev).
+pub(super) fn paint_falloff_square(
+    painter: &egui::Painter,
+    center: egui::Pos2,
+    outer: f32,
+    hardness: f32,
+    color: egui::Color32,
+    base_alpha: u8,
+    steps: u32,
+) {
+    paint_falloff_shape(painter, center, outer, hardness, color, base_alpha, steps, false);
+}
+
+fn paint_falloff_shape(
+    painter: &egui::Painter,
+    center: egui::Pos2,
+    outer: f32,
+    hardness: f32,
+    color: egui::Color32,
+    base_alpha: u8,
+    steps: u32,
+    round: bool,
+) {
+    use prunr_core::math::smoothstep;
+    let inner = outer * hardness.clamp(0.0, 1.0);
+    if inner >= 0.5 {
+        let solid = egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), base_alpha);
+        if round {
+            painter.circle_filled(center, inner, solid);
+        } else {
+            painter.rect_filled(
+                egui::Rect::from_center_size(center, egui::vec2(inner * 2.0, inner * 2.0)),
+                0.0,
+                solid,
+            );
+        }
+    }
+    let span = (outer - inner).max(0.001);
+    for i in 0..steps {
+        let t = (i as f32 + 0.5) / steps as f32;
+        let dist = inner + span * t;
+        let intensity = if span < 0.5 { 0.0 } else { smoothstep(1.0 - t) };
+        let a = (base_alpha as f32 * intensity) as u8;
+        if a == 0 {
+            continue;
+        }
+        let stroke_color = egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), a);
+        let stroke = egui::Stroke::new(span / steps as f32 * 1.4, stroke_color);
+        if round {
+            painter.circle_stroke(center, dist, stroke);
+        } else {
+            painter.rect_stroke(
+                egui::Rect::from_center_size(center, egui::vec2(dist * 2.0, dist * 2.0)),
+                0.0,
+                stroke,
+                egui::StrokeKind::Outside,
+            );
+        }
+    }
+}
+
 /// Square icon-only button with an active/inactive visual state. Used by
 /// the toolbar's Reset / Brush toggles and any future single-icon pill.
 pub(super) fn icon_toggle_button(ui: &mut Ui, icon: &str, active: bool) -> Response {

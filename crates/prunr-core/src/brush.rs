@@ -49,7 +49,10 @@ pub struct Stamp {
 pub struct MaskCorrection {
     pub width: u16,
     pub height: u16,
-    pub grid: Vec<i8>,
+    /// Direct mutation can violate the `width × height == grid.len()`
+    /// invariant. External writers go through `paint_circle` /
+    /// `paint_square` / `paint_line` / `merge`.
+    pub(crate) grid: Vec<i8>,
 }
 
 impl MaskCorrection {

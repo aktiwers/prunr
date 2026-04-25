@@ -7,7 +7,6 @@ use egui::{Color32, Sense, Stroke, Ui};
 
 use crate::gui::brush_state::{BrushSettings, BrushState};
 use prunr_core::brush::{BrushMode, BrushShape};
-use prunr_core::math::smoothstep;
 
 use super::chip;
 
@@ -154,61 +153,19 @@ fn draw_preview(ui: &mut Ui, settings: BrushSettings) {
     let max_r = (PREVIEW_SIZE / 2.0) - 4.0;
     // Map slider radius (1..=200) onto preview pixels with a soft cap.
     let r = (settings.radius / 200.0 * max_r).clamp(2.0, max_r);
-    let inner = r * settings.hardness.clamp(0.0, 1.0);
 
     let (cr, cg, cb) = match settings.mode {
         BrushMode::Add => (140, 230, 170),
         BrushMode::Subtract => (230, 150, 150),
     };
 
-    let solid = Color32::from_rgb(cr, cg, cb);
-    let span = (r - inner).max(0.001);
-
+    let color = Color32::from_rgb(cr, cg, cb);
     match settings.shape {
         BrushShape::Circle => {
-            if inner >= 1.0 {
-                ui.painter().circle_filled(center, inner, solid);
-            }
-            let steps = 14;
-            for i in 0..steps {
-                let t = (i as f32 + 0.5) / steps as f32;
-                let dist = inner + span * t;
-                let intensity = if span < 0.5 { 0.0 } else { smoothstep(1.0 - t) };
-                let alpha = (intensity * 220.0) as u8;
-                if alpha == 0 {
-                    continue;
-                }
-                ui.painter().circle_stroke(
-                    center,
-                    dist,
-                    Stroke::new(span / steps as f32 * 1.4, Color32::from_rgba_premultiplied(cr, cg, cb, alpha)),
-                );
-            }
+            chip::paint_falloff_circle(&ui.painter(), center, r, settings.hardness, color, 220, 14);
         }
         BrushShape::Square => {
-            if inner >= 1.0 {
-                ui.painter().rect_filled(
-                    egui::Rect::from_center_size(center, egui::vec2(inner * 2.0, inner * 2.0)),
-                    0.0,
-                    solid,
-                );
-            }
-            let steps = 10;
-            for i in 0..steps {
-                let t = (i as f32 + 0.5) / steps as f32;
-                let dist = inner + span * t;
-                let intensity = if span < 0.5 { 0.0 } else { smoothstep(1.0 - t) };
-                let alpha = (intensity * 220.0) as u8;
-                if alpha == 0 {
-                    continue;
-                }
-                ui.painter().rect_stroke(
-                    egui::Rect::from_center_size(center, egui::vec2(dist * 2.0, dist * 2.0)),
-                    0.0,
-                    Stroke::new(span / steps as f32 * 1.4, Color32::from_rgba_premultiplied(cr, cg, cb, alpha)),
-                    egui::StrokeKind::Outside,
-                );
-            }
+            chip::paint_falloff_square(&ui.painter(), center, r, settings.hardness, color, 220, 10);
         }
         BrushShape::Line => {
             let half = max_r - 4.0;
@@ -217,7 +174,7 @@ fn draw_preview(ui: &mut Ui, settings: BrushSettings) {
                     egui::Pos2::new(center.x - half, center.y + half),
                     egui::Pos2::new(center.x + half, center.y - half),
                 ],
-                Stroke::new(r * 2.0, Color32::from_rgba_premultiplied(cr, cg, cb, 200)),
+                Stroke::new(r * 2.0, color),
             );
         }
     }
