@@ -126,9 +126,6 @@ fn screen_to_model(p: Pos2, img_rect: Rect, model_w: u16, model_h: u16) -> Pos2 
 /// in the same frame can't accidentally cover them, and tinted
 /// brighter than the theme ACCENT so the trail is legible on dark
 /// images too.
-/// In-progress stroke trail. Shape-aware:
-/// - Circle / Square: per-stamp soft falloff matching `paint_*`.
-/// - Line: a single thick segment from the first stamp to the last.
 fn draw_trail(ui: &Ui, brush_state: &BrushState) {
     let s = brush_state.settings();
     if s.strength <= 0.0 {
@@ -146,27 +143,22 @@ fn draw_trail(ui: &Ui, brush_state: &BrushState) {
     let hardness = s.hardness.clamp(0.0, 1.0);
     let solid = Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), center_alpha);
 
-    let shape = brush_state.active_shape();
-    let stamps: Vec<_> = brush_state.trail_stamps().collect();
-    if stamps.is_empty() {
-        return;
-    }
-
+    let Some(shape) = brush_state.active_shape() else { return };
     match shape {
         prunr_core::brush::BrushShape::Line => {
-            // Single thick line preview from first → last stamp.
-            let (x1, y1, r) = stamps[0];
-            let (x2, y2, _) = *stamps.last().unwrap();
-            let stroke = egui::Stroke::new(r * 2.0, solid);
-            painter.line_segment([Pos2::new(x1, y1), Pos2::new(x2, y2)], stroke);
+            // Collect only when needed — the Line branch wants first + last.
+            let stamps: Vec<_> = brush_state.trail_stamps().collect();
+            let (Some(&first), Some(&last)) = (stamps.first(), stamps.last()) else { return };
+            let stroke = egui::Stroke::new(first.2 * 2.0, solid);
+            painter.line_segment([Pos2::new(first.0, first.1), Pos2::new(last.0, last.1)], stroke);
         }
         prunr_core::brush::BrushShape::Circle => {
-            for (sx, sy, outer_r) in stamps {
+            for (sx, sy, outer_r) in brush_state.trail_stamps() {
                 draw_round_stamp(&painter, sx, sy, outer_r, hardness, accent, center_alpha, solid);
             }
         }
         prunr_core::brush::BrushShape::Square => {
-            for (sx, sy, outer_r) in stamps {
+            for (sx, sy, outer_r) in brush_state.trail_stamps() {
                 draw_square_stamp(&painter, sx, sy, outer_r, hardness, accent, center_alpha);
             }
         }
@@ -260,7 +252,6 @@ fn draw_cursor(ui: &Ui, img_rect: Rect, brush_state: &BrushState, armed: bool) {
             );
         }
         prunr_core::brush::BrushShape::Line => {
-            // Crosshair — the "anchor" while user picks the line endpoint.
             ui.painter().line_segment([Pos2::new(p.x - r, p.y), Pos2::new(p.x + r, p.y)], stroke);
             ui.painter().line_segment([Pos2::new(p.x, p.y - r), Pos2::new(p.x, p.y + r)], stroke);
         }
