@@ -15,8 +15,11 @@ repository = "https://github.com/aktiwers/prunr"
 
 [workspace.dependencies]
 # Inference runtime — pinned to an RC for stable feature surface (CUDA, CoreML,
-# DirectML, download-binaries). Unpin when ort 2.0 stable ships and our feature
-# set is preserved. Check https://github.com/pykeio/ort/milestones before bumping.
+# DirectML, download-binaries). On macOS, release CI overrides the downloaded
+# prebuilt with a custom CoreML-enabled build via ORT_LIB_LOCATION + the
+# `@executable_path/../Frameworks` rpath set in `.cargo/config.toml`.
+# Unpin when ort 2.0 stable ships and our feature set is preserved.
+# Check https://github.com/pykeio/ort/milestones before bumping.
 ort = { version = "=2.0.0-rc.12", features = ["cuda", "coreml", "directml", "ndarray", "download-binaries"] }
 
 # Image + tensor core
