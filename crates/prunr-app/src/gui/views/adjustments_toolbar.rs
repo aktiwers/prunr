@@ -77,6 +77,10 @@ pub struct ToolbarChange {
     /// User clicked "Clear strokes" in the brush popover. Caller routes
     /// to `BatchItem::clear_correction` post-render.
     pub clear_correction_requested: bool,
+    /// A brush popover slider settled or a button was clicked AND
+    /// `app_settings.brush` was just synced. Caller persists settings
+    /// to disk on this signal — saving every frame would burn disk.
+    pub brush_settings_committed: bool,
 }
 
 impl Default for ToolbarChange {
@@ -92,6 +96,7 @@ impl Default for ToolbarChange {
             auto_dispatch: DispatchKind::None,
             render_repaint: false,
             clear_correction_requested: false,
+            brush_settings_committed: false,
         }
     }
 }
@@ -317,11 +322,15 @@ pub(crate) fn render(
                 // Settings chip — only visible when brush is on AND has
                 // somewhere to paint. In the right-to-left layout this
                 // appears LEFT of the toggle.
-                if brush_available
-                    && brush_state.is_enabled()
-                    && super::brush_chip::render(ui, brush_state)
-                {
-                    change.clear_correction_requested = true;
+                if brush_available && brush_state.is_enabled() {
+                    let outcome = super::brush_chip::render(ui, brush_state);
+                    if outcome.clear_requested {
+                        change.clear_correction_requested = true;
+                    }
+                    if outcome.committed && app_settings.brush != *brush_state.settings() {
+                        app_settings.brush = *brush_state.settings();
+                        change.brush_settings_committed = true;
+                    }
                 }
             },
         );

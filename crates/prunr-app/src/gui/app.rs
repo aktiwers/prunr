@@ -210,7 +210,7 @@ impl PrunrApp {
             show_pipeline_flow: false,
             pending_copy: false,
             zoom_state: Default::default(),
-            brush_state: Default::default(),
+            brush_state: super::brush_state::BrushState::with_settings(settings.brush),
             show_original: false,
             prev_title: String::new(),
             batch: super::batch_manager::BatchManager::new(),
@@ -2358,6 +2358,9 @@ impl PrunrApp {
                 "{} loaded",
                 crate::gui::views::model_name(self.settings.model),
             ));
+        }
+        if toolbar_change.brush_settings_committed {
+            self.settings.save();
         }
 
         self.batch.items[idx].apply_cache_impact(toolbar_change.cache_impact);

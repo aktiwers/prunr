@@ -4,9 +4,11 @@
 //! and writes the committed strokes back via `BatchItem`'s mutator.
 
 use prunr_core::brush::{paint_circle, paint_line, paint_square, BrushMode, BrushShape, MaskCorrection, Stamp};
+use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct BrushSettings {
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BrushSettings {
     pub radius: f32,
     /// Edge falloff: 0.0 = full smoothstep falloff, 1.0 = hard disc.
     pub hardness: f32,
@@ -63,6 +65,11 @@ pub(crate) struct BrushState {
 }
 
 impl BrushState {
+    /// Boot-time constructor populating settings from persisted app config.
+    pub fn with_settings(settings: BrushSettings) -> Self {
+        Self { enabled: false, settings, active: None }
+    }
+
     pub fn is_enabled(&self) -> bool {
         self.enabled
     }
