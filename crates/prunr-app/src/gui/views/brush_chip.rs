@@ -6,7 +6,7 @@
 use egui::{Color32, Sense, Stroke, Ui};
 
 use crate::gui::brush_state::{BrushSettings, BrushState};
-use prunr_core::brush::BrushMode;
+use prunr_core::brush::{BrushMode, BrushShape};
 use prunr_core::math::smoothstep;
 
 use super::chip;
@@ -87,6 +87,20 @@ pub(super) fn render(ui: &mut Ui, brush_state: &mut BrushState) -> bool {
             draw_preview(ui, *s);
         });
 
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.label("Shape:");
+            for (shape, label) in [
+                (BrushShape::Circle, "Circle"),
+                (BrushShape::Square, "Square"),
+                (BrushShape::Line, "Line"),
+            ] {
+                if ui.selectable_label(s.shape == shape, label).clicked() {
+                    s.shape = shape;
+                }
+            }
+        });
+
         ui.add_space(4.0);
         ui.separator();
         ui.add_space(4.0);
@@ -149,28 +163,65 @@ fn draw_preview(ui: &mut Ui, settings: BrushSettings) {
         BrushMode::Subtract => (230, 150, 150),
     };
 
-    if inner >= 1.0 {
-        ui.painter()
-            .circle_filled(center, inner, Color32::from_rgb(cr, cg, cb));
-    }
-
-    // Falloff approximated with concentric strokes — paint matches
-    // the smoothstep used by paint_circle so the preview is faithful.
+    let solid = Color32::from_rgb(cr, cg, cb);
     let span = (r - inner).max(0.001);
-    let steps = 14;
-    for i in 0..steps {
-        let t = (i as f32 + 0.5) / steps as f32;
-        let dist = inner + span * t;
-        // intensity at this radial distance: 1 at inner, 0 at outer.
-        let intensity = if span < 0.5 { 0.0 } else { smoothstep(1.0 - t) };
-        let alpha = (intensity * 220.0) as u8;
-        if alpha == 0 {
-            continue;
+
+    match settings.shape {
+        BrushShape::Circle => {
+            if inner >= 1.0 {
+                ui.painter().circle_filled(center, inner, solid);
+            }
+            let steps = 14;
+            for i in 0..steps {
+                let t = (i as f32 + 0.5) / steps as f32;
+                let dist = inner + span * t;
+                let intensity = if span < 0.5 { 0.0 } else { smoothstep(1.0 - t) };
+                let alpha = (intensity * 220.0) as u8;
+                if alpha == 0 {
+                    continue;
+                }
+                ui.painter().circle_stroke(
+                    center,
+                    dist,
+                    Stroke::new(span / steps as f32 * 1.4, Color32::from_rgba_premultiplied(cr, cg, cb, alpha)),
+                );
+            }
         }
-        ui.painter().circle_stroke(
-            center,
-            dist,
-            Stroke::new(span / steps as f32 * 1.4, Color32::from_rgba_premultiplied(cr, cg, cb, alpha)),
-        );
+        BrushShape::Square => {
+            if inner >= 1.0 {
+                ui.painter().rect_filled(
+                    egui::Rect::from_center_size(center, egui::vec2(inner * 2.0, inner * 2.0)),
+                    0.0,
+                    solid,
+                );
+            }
+            let steps = 10;
+            for i in 0..steps {
+                let t = (i as f32 + 0.5) / steps as f32;
+                let dist = inner + span * t;
+                let intensity = if span < 0.5 { 0.0 } else { smoothstep(1.0 - t) };
+                let alpha = (intensity * 220.0) as u8;
+                if alpha == 0 {
+                    continue;
+                }
+                ui.painter().rect_stroke(
+                    egui::Rect::from_center_size(center, egui::vec2(dist * 2.0, dist * 2.0)),
+                    0.0,
+                    Stroke::new(span / steps as f32 * 1.4, Color32::from_rgba_premultiplied(cr, cg, cb, alpha)),
+                    egui::StrokeKind::Outside,
+                );
+            }
+        }
+        BrushShape::Line => {
+            // Diagonal segment with the brush radius as half-thickness.
+            let half = max_r - 4.0;
+            ui.painter().line_segment(
+                [
+                    egui::Pos2::new(center.x - half, center.y + half),
+                    egui::Pos2::new(center.x + half, center.y - half),
+                ],
+                Stroke::new(r * 2.0, Color32::from_rgba_premultiplied(cr, cg, cb, 200)),
+            );
+        }
     }
 }

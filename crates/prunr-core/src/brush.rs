@@ -28,6 +28,15 @@ impl BrushMode {
     }
 }
 
+/// Brush stamp geometry. `Line` is a "tool mode" — strokes paint a single
+/// straight segment from press to release, not per-frame stamps.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BrushShape {
+    Circle,
+    Square,
+    Line,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MaskCorrection {
     pub width: u16,
@@ -150,6 +159,100 @@ pub fn paint_circle(
             };
             grid[idx] = combined.clamp(-127, 127) as i8;
         }
+    }
+}
+
+/// Square stamp variant of `paint_circle`. Same hardness/strength
+/// semantics — `hardness` controls Chebyshev-distance falloff toward
+/// the corners (1 = sharp square, 0 = diamond-soft falloff).
+pub fn paint_square(
+    target: &mut MaskCorrection,
+    cx: f32,
+    cy: f32,
+    half_size: f32,
+    hardness: f32,
+    strength: f32,
+    mode: BrushMode,
+) {
+    if half_size <= 0.0 || strength <= 0.0 {
+        return;
+    }
+    let w_i = target.width as i32;
+    let h_i = target.height as i32;
+    let outer = half_size;
+    let inner = outer * hardness.clamp(0.0, 1.0);
+    let span = (outer - inner).max(1e-6);
+    let sign = mode.sign();
+    let strength = strength.clamp(0.0, 1.0);
+
+    let xmin = ((cx - outer).floor() as i32).max(0);
+    let xmax = ((cx + outer).ceil() as i32 + 1).min(w_i);
+    let ymin = ((cy - outer).floor() as i32).max(0);
+    let ymax = ((cy + outer).ceil() as i32 + 1).min(h_i);
+    if xmin >= xmax || ymin >= ymax {
+        return;
+    }
+
+    let grid = &mut target.grid;
+    for y in ymin..ymax {
+        for x in xmin..xmax {
+            let dx = ((x as f32 + 0.5) - cx).abs();
+            let dy = ((y as f32 + 0.5) - cy).abs();
+            let dist = dx.max(dy);
+            if dist > outer {
+                continue;
+            }
+            let intensity = if dist <= inner {
+                1.0
+            } else {
+                smoothstep((outer - dist) / span)
+            };
+            let stamp = (intensity * strength * STAMP_SCALE * sign).round() as i32;
+            let idx = (y * w_i + x) as usize;
+            let prev = grid[idx] as i32;
+            let combined = match mode {
+                BrushMode::Add => prev.max(stamp),
+                BrushMode::Subtract => prev.min(stamp),
+            };
+            grid[idx] = combined.clamp(-127, 127) as i8;
+        }
+    }
+}
+
+/// Paint a thick line from `(x1, y1)` to `(x2, y2)` by stamping
+/// `paint_circle` at sub-radius steps along the segment. Caller is
+/// responsible for spacing — the line tool calls this once per
+/// stroke (press → release), not per pointer event.
+pub fn paint_line(
+    target: &mut MaskCorrection,
+    x1: f32, y1: f32,
+    x2: f32, y2: f32,
+    radius: f32,
+    hardness: f32,
+    strength: f32,
+    mode: BrushMode,
+) {
+    if radius <= 0.0 || strength <= 0.0 {
+        return;
+    }
+    let dx = x2 - x1;
+    let dy = y2 - y1;
+    let len = (dx * dx + dy * dy).sqrt();
+    // Step half a radius for smooth coverage; minimum of 1 step at
+    // zero-length lines (degenerates to a single circle).
+    let step = (radius * 0.5).max(0.5);
+    let n = ((len / step).ceil() as i32).max(1);
+    for i in 0..=n {
+        let t = i as f32 / n as f32;
+        paint_circle(
+            target,
+            x1 + dx * t,
+            y1 + dy * t,
+            radius,
+            hardness,
+            strength,
+            mode,
+        );
     }
 }
 
@@ -442,5 +545,36 @@ mod tests {
         a.grid[3] = 7;
         a.grid[10] = -7;
         assert_eq!(content_hash(&a), content_hash(&a));
+    }
+
+    #[test]
+    fn paint_square_fills_chebyshev_disc() {
+        let mut c = MaskCorrection::empty(16, 16);
+        paint_square(&mut c, 8.0, 8.0, 3.0, 1.0, 1.0, BrushMode::Add);
+        // Inside the 6×6 chebyshev ball: full strength.
+        assert_eq!(c.grid[8 * 16 + 8], 127);
+        assert_eq!(c.grid[6 * 16 + 6], 127);
+        assert_eq!(c.grid[10 * 16 + 10], 127);
+        // Outside: untouched.
+        assert_eq!(c.grid[2 * 16 + 2], 0);
+        assert_eq!(c.grid[14 * 16 + 14], 0);
+    }
+
+    #[test]
+    fn paint_line_zero_length_stamps_one_circle() {
+        let mut c = MaskCorrection::empty(8, 8);
+        paint_line(&mut c, 4.0, 4.0, 4.0, 4.0, 1.5, 1.0, 1.0, BrushMode::Add);
+        // Same as a single paint_circle stamp at (4, 4).
+        assert!(c.grid[4 * 8 + 4] > 0, "zero-length line still stamps a circle");
+    }
+
+    #[test]
+    fn paint_line_covers_intermediate_pixels() {
+        let mut c = MaskCorrection::empty(32, 32);
+        paint_line(&mut c, 4.0, 16.0, 28.0, 16.0, 1.0, 1.0, 1.0, BrushMode::Add);
+        // Pixel halfway along the line should be hit.
+        assert!(c.grid[16 * 32 + 16] > 0, "midpoint of a horizontal line must be painted");
+        // Pixel above the line, far enough out, should not.
+        assert_eq!(c.grid[5 * 32 + 16], 0, "well above the line stays untouched");
     }
 }
