@@ -347,8 +347,11 @@ fn paint_thumbnail(
 
     // Render-time bg fill: result thumbs are transparent where pixels were
     // removed; paint the bg color behind so the sidebar matches the canvas.
-    // Source-only thumbs are opaque and don't need this fill.
-    if item.result_rgba.is_some() {
+    // Gate on `Done` (not `result_rgba.is_some()`) so the bg still shows
+    // for background items whose `result_rgba` was evicted to disk by
+    // `evict_result_rgba_for_background_items` — the thumbnail texture
+    // is still cached and was built from the result.
+    if matches!(item.status, BatchStatus::Done) {
         if let Some(bg) = item.settings.bg_rgb() {
             ui.painter()
                 .rect_filled(thumb_rect, 0.0, Color32::from_rgb(bg[0], bg[1], bg[2]));
