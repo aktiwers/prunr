@@ -65,7 +65,6 @@ pub(crate) struct BrushState {
 }
 
 impl BrushState {
-    /// Boot-time constructor populating settings from persisted app config.
     pub fn with_settings(settings: BrushSettings) -> Self {
         Self { enabled: false, settings, active: None }
     }

@@ -19,14 +19,11 @@ const LABEL_PAD_WIDTH: f32 = 88.0;
 /// large brush still renders cleanly inside this box.
 const PREVIEW_SIZE: f32 = 80.0;
 
-/// Outcome flags from the popover.
 #[derive(Default, Clone, Copy)]
 pub(super) struct BrushChipOutcome {
-    /// User clicked "Clear strokes".
     pub clear_requested: bool,
-    /// At least one setting was committed (slider released, mode /
-    /// shape clicked). Caller persists app-level brush settings on
-    /// this signal — saving every frame during a drag would burn disk.
+    /// True on slider release / mode / shape click. Caller persists
+    /// app-level brush settings on this signal.
     pub committed: bool,
 }
 
