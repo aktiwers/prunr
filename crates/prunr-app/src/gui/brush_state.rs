@@ -8,7 +8,13 @@ use prunr_core::brush::{paint_circle, BrushMode, MaskCorrection};
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct BrushSettings {
     pub radius: f32,
+    /// Edge falloff: 0.0 = full smoothstep falloff, 1.0 = hard disc.
     pub hardness: f32,
+    /// Stroke magnitude. 1.0 = "neutral / equivalent to a gamma push";
+    /// lower values give a gentler local effect (`m → m * (1 - s)` for
+    /// subtract). Decoupled from hardness so users can fine-tune
+    /// intensity without changing edge softness.
+    pub strength: f32,
     pub mode: BrushMode,
 }
 
@@ -17,6 +23,7 @@ impl Default for BrushSettings {
         Self {
             radius: 24.0,
             hardness: 0.7,
+            strength: 1.0,
             mode: BrushMode::Subtract,
         }
     }
@@ -111,6 +118,7 @@ impl BrushState {
             y,
             radius,
             self.settings.hardness,
+            self.settings.strength,
             self.settings.mode,
         );
         active.dirty = true;

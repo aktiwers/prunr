@@ -126,19 +126,54 @@ fn screen_to_model(p: Pos2, img_rect: Rect, model_w: u16, model_h: u16) -> Pos2 
 /// in the same frame can't accidentally cover them, and tinted
 /// brighter than the theme ACCENT so the trail is legible on dark
 /// images too.
+/// Translucent ACCENT-purple stamps along the in-progress stroke,
+/// rendered with the same hardness falloff and strength modulation
+/// the actual brush will apply to the mask. Each stamp = solid
+/// inner disc + concentric soft-falloff strokes between inner and
+/// outer radii. Strength scales the per-stamp alpha so a half-
+/// strength brush draws a half-opacity trail.
 fn draw_trail(ui: &Ui, brush_state: &BrushState) {
-    let mut count = 0u32;
-    let fill = Color32::from_rgba_unmultiplied(190, 120, 230, 160);
+    let s = brush_state.settings();
+    if s.strength <= 0.0 {
+        return;
+    }
+    let accent = theme::ACCENT;
+    // Base alpha at strength = 1.0; scaled down for partial strengths.
+    let center_alpha = (110.0 * s.strength.clamp(0.0, 1.0)) as u8;
+    if center_alpha == 0 {
+        return;
+    }
     let painter = ui.ctx().layer_painter(egui::LayerId::new(
         egui::Order::Foreground,
         egui::Id::new("brush_trail"),
     ));
-    for (sx, sy, sr) in brush_state.trail_stamps() {
-        painter.circle_filled(Pos2::new(sx, sy), sr, fill);
-        count += 1;
-    }
-    if count > 0 {
-        tracing::debug!(count, "drew brush trail stamps");
+    let hardness = s.hardness.clamp(0.0, 1.0);
+    let solid = Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), center_alpha);
+
+    for (sx, sy, outer_r) in brush_state.trail_stamps() {
+        let center = Pos2::new(sx, sy);
+        let inner_r = outer_r * hardness;
+
+        // Solid inner disc.
+        if inner_r >= 0.5 {
+            painter.circle_filled(center, inner_r, solid);
+        }
+
+        // Soft falloff: concentric strokes from inner_r → outer_r,
+        // alpha tapering with the same smoothstep as paint_circle.
+        let span = (outer_r - inner_r).max(0.001);
+        let steps = 8;
+        for i in 0..steps {
+            let t = (i as f32 + 0.5) / steps as f32;
+            let dist = inner_r + span * t;
+            let intensity = prunr_core::math::smoothstep(1.0 - t);
+            let a = (center_alpha as f32 * intensity) as u8;
+            if a == 0 {
+                continue;
+            }
+            let stroke_color = Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), a);
+            painter.circle_stroke(center, dist, egui::Stroke::new(span / steps as f32 * 1.4, stroke_color));
+        }
     }
 }
 

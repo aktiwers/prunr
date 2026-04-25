@@ -91,8 +91,9 @@ pub fn apply_correction(mask: &mut [f32], correction: &MaskCorrection) {
     }
 }
 
-/// Stamp a soft brush at (`cx`, `cy`) into `target`. `hardness ∈ [0, 1]`:
-/// 0 = full smoothstep falloff, 1 = hard disc.
+/// Stamp a soft brush at (`cx`, `cy`) into `target`.
+/// - `hardness ∈ [0, 1]`: 0 = full smoothstep falloff, 1 = hard disc.
+/// - `strength ∈ [0, 1]`: 0 = no effect, 1 = full-magnitude stamp.
 ///
 /// Overlapping stamps keep the strongest magnitude in the active mode's
 /// direction — painting twice over the same pixel doesn't double up.
@@ -102,9 +103,10 @@ pub fn paint_circle(
     cy: f32,
     radius: f32,
     hardness: f32,
+    strength: f32,
     mode: BrushMode,
 ) {
-    if radius <= 0.0 {
+    if radius <= 0.0 || strength <= 0.0 {
         return;
     }
     let w_i = target.width as i32;
@@ -115,6 +117,7 @@ pub fn paint_circle(
     let inner_sq = inner * inner;
     let span = (outer - inner).max(1e-6);
     let sign = mode.sign();
+    let strength = strength.clamp(0.0, 1.0);
 
     let xmin = ((cx - radius).floor() as i32).max(0);
     let xmax = ((cx + radius).ceil() as i32 + 1).min(w_i);
@@ -138,7 +141,7 @@ pub fn paint_circle(
             } else {
                 smoothstep((outer - dist_sq.sqrt()) / span)
             };
-            let stamp = (intensity * STAMP_SCALE * sign).round() as i32;
+            let stamp = (intensity * strength * STAMP_SCALE * sign).round() as i32;
             let idx = (y * w_i + x) as usize;
             let prev = grid[idx] as i32;
             let combined = match mode {
@@ -267,7 +270,7 @@ mod tests {
     #[test]
     fn paint_circle_centered_pixel_only() {
         let mut c = MaskCorrection::empty(5, 5);
-        paint_circle(&mut c, 2.5, 2.5, 0.5, 1.0, BrushMode::Add);
+        paint_circle(&mut c, 2.5, 2.5, 0.5, 1.0, 1.0, BrushMode::Add);
         assert_eq!(c.grid[12], 127);
         let neighbours = [c.grid[11], c.grid[13], c.grid[7], c.grid[17]];
         assert!(neighbours.iter().all(|&v| v == 0), "only center should be hit, got {:?}", neighbours);
@@ -276,7 +279,7 @@ mod tests {
     #[test]
     fn paint_circle_radius_10_covers_disc() {
         let mut c = MaskCorrection::empty(32, 32);
-        paint_circle(&mut c, 16.0, 16.0, 10.0, 1.0, BrushMode::Add);
+        paint_circle(&mut c, 16.0, 16.0, 10.0, 1.0, 1.0, BrushMode::Add);
         assert_eq!(c.grid[16 * 32 + 16], 127);
         assert_eq!(c.grid[0], 0);
         let nonzero = c.grid.iter().filter(|&&v| v != 0).count();
@@ -292,16 +295,16 @@ mod tests {
     #[test]
     fn paint_circle_subtract_writes_negative() {
         let mut c = MaskCorrection::empty(8, 8);
-        paint_circle(&mut c, 4.0, 4.0, 2.0, 1.0, BrushMode::Subtract);
+        paint_circle(&mut c, 4.0, 4.0, 2.0, 1.0, 1.0, BrushMode::Subtract);
         assert_eq!(c.grid[4 * 8 + 4], -127);
     }
 
     #[test]
     fn paint_circle_overlapping_keeps_strongest() {
         let mut c = MaskCorrection::empty(8, 8);
-        paint_circle(&mut c, 4.0, 4.0, 2.0, 1.0, BrushMode::Add);
+        paint_circle(&mut c, 4.0, 4.0, 2.0, 1.0, 1.0, BrushMode::Add);
         let after_first = c.grid[4 * 8 + 4];
-        paint_circle(&mut c, 4.0, 4.0, 2.0, 0.5, BrushMode::Add);
+        paint_circle(&mut c, 4.0, 4.0, 2.0, 0.5, 1.0, BrushMode::Add);
         let after_second = c.grid[4 * 8 + 4];
         assert_eq!(after_first, 127);
         assert_eq!(after_second, 127, "second weaker stroke must not lower the strong stamp");
@@ -310,15 +313,39 @@ mod tests {
     #[test]
     fn paint_circle_zero_radius_no_op() {
         let mut c = MaskCorrection::empty(4, 4);
-        paint_circle(&mut c, 2.0, 2.0, 0.0, 1.0, BrushMode::Add);
+        paint_circle(&mut c, 2.0, 2.0, 0.0, 1.0, 1.0, BrushMode::Add);
         assert!(c.grid.iter().all(|&v| v == 0));
+    }
+
+    #[test]
+    fn paint_circle_zero_strength_no_op() {
+        let mut c = MaskCorrection::empty(8, 8);
+        paint_circle(&mut c, 4.0, 4.0, 3.0, 1.0, 0.0, BrushMode::Add);
+        assert!(c.grid.iter().all(|&v| v == 0), "strength = 0 produces no stamp");
+    }
+
+    #[test]
+    fn paint_circle_half_strength_halves_stamp() {
+        let mut full = MaskCorrection::empty(8, 8);
+        paint_circle(&mut full, 4.0, 4.0, 3.0, 1.0, 1.0, BrushMode::Add);
+        let mut half = MaskCorrection::empty(8, 8);
+        paint_circle(&mut half, 4.0, 4.0, 3.0, 1.0, 0.5, BrushMode::Add);
+        let center_full = full.grid[4 * 8 + 4];
+        let center_half = half.grid[4 * 8 + 4];
+        assert_eq!(center_full, 127, "full strength stamps the maximum");
+        // Half-strength halves the magnitude (within rounding).
+        assert!(
+            (center_half as i32 - 64).abs() <= 1,
+            "half strength should land near 64, got {}",
+            center_half
+        );
     }
 
     #[test]
     fn paint_circle_outside_bounds_no_panic() {
         let mut c = MaskCorrection::empty(4, 4);
-        paint_circle(&mut c, -10.0, -10.0, 5.0, 1.0, BrushMode::Add);
-        paint_circle(&mut c, 100.0, 100.0, 5.0, 1.0, BrushMode::Add);
+        paint_circle(&mut c, -10.0, -10.0, 5.0, 1.0, 1.0, BrushMode::Add);
+        paint_circle(&mut c, 100.0, 100.0, 5.0, 1.0, 1.0, BrushMode::Add);
         assert!(c.grid.iter().all(|&v| v == 0));
     }
 
@@ -327,7 +354,7 @@ mod tests {
         let mut c = MaskCorrection::empty(16, 16);
         // Half-pixel offset places the center exactly on pixel (8, 8), so
         // we can compare the perfectly-radial profile.
-        paint_circle(&mut c, 8.5, 8.5, 6.0, 0.0, BrushMode::Add);
+        paint_circle(&mut c, 8.5, 8.5, 6.0, 0.0, 1.0, BrushMode::Add);
         let center = c.grid[8 * 16 + 8];
         let mid = c.grid[8 * 16 + 11];
         let edge = c.grid[8 * 16 + 13];
@@ -347,7 +374,7 @@ mod tests {
     #[test]
     fn paint_circle_corner_clamps_safely() {
         let mut c = MaskCorrection::empty(8, 8);
-        paint_circle(&mut c, 0.5, 0.5, 4.0, 1.0, BrushMode::Add);
+        paint_circle(&mut c, 0.5, 0.5, 4.0, 1.0, 1.0, BrushMode::Add);
         assert_eq!(c.grid[0], 127, "in-frame center pixel is hit");
         let in_disc_corner = c.grid[2 * 8 + 2];
         let outside = c.grid[7 * 8 + 7];
