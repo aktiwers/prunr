@@ -3,7 +3,7 @@
 //! `BatchManager.items` — the caller hands it the active grid size
 //! and writes the committed strokes back via `BatchItem`'s mutator.
 
-use prunr_core::brush::{paint_circle, BrushMode, MaskCorrection};
+use prunr_core::brush::{paint_circle, paint_line, paint_square, BrushMode, BrushShape, MaskCorrection};
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct BrushSettings {
@@ -16,6 +16,7 @@ pub(crate) struct BrushSettings {
     /// intensity without changing edge softness.
     pub strength: f32,
     pub mode: BrushMode,
+    pub shape: BrushShape,
 }
 
 impl Default for BrushSettings {
@@ -25,6 +26,7 @@ impl Default for BrushSettings {
             hardness: 0.7,
             strength: 1.0,
             mode: BrushMode::Subtract,
+            shape: BrushShape::Circle,
         }
     }
 }
@@ -32,12 +34,20 @@ impl Default for BrushSettings {
 /// Mid-drag stroke buffer at the active item's model resolution.
 struct ActiveStroke {
     grid: MaskCorrection,
-    /// Set the first time `paint_circle` runs against `grid`. Lets
+    /// Set the first time the stamp runs against `grid`. Lets
     /// `commit_stroke` skip an O(W·H) is_empty scan on click-without-drag.
     dirty: bool,
     /// Screen-space stamps painted so far. Drawn each frame as the
     /// in-progress trail until the stroke commits.
     trail: Vec<(f32, f32, f32)>,
+    /// Stroke-time snapshot of the brush shape — pinned at begin_stroke
+    /// so a mid-stroke shape switch doesn't desync the grid.
+    shape: BrushShape,
+    /// Model-space press / current positions (Line tool only — paints
+    /// once on commit using these endpoints).
+    first_model_pos: Option<(f32, f32)>,
+    last_model_pos: Option<(f32, f32)>,
+    last_model_radius: f32,
 }
 
 #[derive(Default)]
@@ -77,7 +87,17 @@ impl BrushState {
             grid: MaskCorrection::empty(width, height),
             dirty: false,
             trail: Vec::new(),
+            shape: self.settings.shape,
+            first_model_pos: None,
+            last_model_pos: None,
+            last_model_radius: self.settings.radius,
         });
+    }
+
+    /// Active stroke's pinned shape (or `Circle` if no active stroke —
+    /// used by the trail renderer to pick a draw style).
+    pub fn active_shape(&self) -> BrushShape {
+        self.active.as_ref().map_or(BrushShape::Circle, |a| a.shape)
     }
 
     /// Record a screen-space stamp for the in-progress stroke trail.
@@ -112,29 +132,59 @@ impl BrushState {
     }
 
     /// Extend the active stroke at model-space coordinates with an
-    /// explicit model-space radius. Caller is responsible for converting
-    /// the user-visible (screen-pixel) radius to model space — keeping
-    /// the conversion outside this type prevents painting screen pixels
-    /// into a model grid by accident.
+    /// explicit model-space radius. Caller converts screen→model
+    /// outside this type so screen-radius confusion can't reach the
+    /// grid. Dispatch on the stroke's pinned shape:
+    /// - Circle / Square: paint per-frame stamps (incremental drag).
+    /// - Line: just record press / current; the actual line is painted
+    ///   once at `commit_stroke` from press → release.
     pub fn extend_stroke_with_radius(&mut self, x: f32, y: f32, radius: f32) {
         let Some(active) = self.active.as_mut() else { return };
-        paint_circle(
-            &mut active.grid,
-            x,
-            y,
-            radius,
-            self.settings.hardness,
-            self.settings.strength,
-            self.settings.mode,
-        );
-        active.dirty = true;
+        if active.first_model_pos.is_none() {
+            active.first_model_pos = Some((x, y));
+        }
+        active.last_model_pos = Some((x, y));
+        active.last_model_radius = radius;
+
+        match active.shape {
+            BrushShape::Circle => {
+                paint_circle(
+                    &mut active.grid, x, y, radius,
+                    self.settings.hardness, self.settings.strength, self.settings.mode,
+                );
+                active.dirty = true;
+            }
+            BrushShape::Square => {
+                paint_square(
+                    &mut active.grid, x, y, radius,
+                    self.settings.hardness, self.settings.strength, self.settings.mode,
+                );
+                active.dirty = true;
+            }
+            BrushShape::Line => {
+                // Wait for commit — `commit_stroke` paints press → release.
+            }
+        }
     }
 
-    /// End the active stroke and return it. Returns `None` if no stroke
-    /// was started or the stroke ended up empty (user clicked but didn't
-    /// drag onto valid pixels).
+    /// End the active stroke and return it. For Line shape, paints the
+    /// final press → release segment now. Returns `None` if no stroke
+    /// was started or it ended up empty.
     pub fn commit_stroke(&mut self) -> Option<MaskCorrection> {
-        let active = self.active.take()?;
+        let mut active = self.active.take()?;
+        if let (BrushShape::Line, Some((x1, y1)), Some((x2, y2))) =
+            (active.shape, active.first_model_pos, active.last_model_pos)
+        {
+            paint_line(
+                &mut active.grid,
+                x1, y1, x2, y2,
+                active.last_model_radius,
+                self.settings.hardness,
+                self.settings.strength,
+                self.settings.mode,
+            );
+            active.dirty = true;
+        }
         if !active.dirty {
             return None;
         }
