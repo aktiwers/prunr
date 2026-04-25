@@ -2319,7 +2319,10 @@ impl PrunrApp {
                 let settings_ref = &mut self.settings;
                 let brush_state_ref = &mut self.brush_state;
                 let item = &mut self.batch.items[idx];
-                let brush_available = item.cached_tensor.is_some();
+                // Inpaint mode operates on the source image directly — no
+                // cached seg tensor required. For seg-removal models the
+                // brush corrects the AI mask so it needs the tensor.
+                let brush_available = settings_ref.model.is_inpaint() || item.cached_tensor.is_some();
                 toolbar_change = adjustments_toolbar::render(
                     ui,
                     &mut item.settings,

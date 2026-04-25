@@ -29,9 +29,16 @@ pub(crate) enum BrushAction {
     None,
 }
 
-fn model_dims(item: &BatchItem) -> Option<(u16, u16)> {
-    let t = item.cached_tensor.as_ref()?;
-    Some((t.width as u16, t.height as u16))
+fn brush_grid_dims(item: &BatchItem, is_inpaint: bool) -> Option<(u16, u16)> {
+    if is_inpaint {
+        // Inpaint mode: brush mask is the same resolution as the image.
+        // u16 max is 65535 — fine for any reasonable image.
+        let (w, h) = item.dimensions;
+        Some((w as u16, h as u16))
+    } else {
+        let t = item.cached_tensor.as_ref()?;
+        Some((t.width as u16, t.height as u16))
+    }
 }
 
 /// Handle pointer input + paint cursor for one frame. The canvas calls
@@ -44,8 +51,9 @@ pub(crate) fn handle_input(
     brush_state: &mut BrushState,
     item: &BatchItem,
     img_rect: Rect,
+    is_inpaint: bool,
 ) -> BrushAction {
-    let Some((model_w, model_h)) = model_dims(item) else {
+    let Some((model_w, model_h)) = brush_grid_dims(item, is_inpaint) else {
         // No cached tensor → brush has nothing to write into. Render a
         // muted cursor so the user gets feedback that brush is ON, but
         // skip pointer wiring.
