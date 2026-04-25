@@ -122,7 +122,7 @@ impl Defaults {
 /// `app_settings` exposes model + preset map (Row 2 hosts both dropdowns).
 /// `applied_preset` is read for the button's modified/clean icon and written
 /// in place when the user applies or saves a preset.
-pub fn render(
+pub(crate) fn render(
     ui: &mut Ui,
     item_settings: &mut ItemSettings,
     app_settings: &mut Settings,

@@ -253,7 +253,9 @@ impl BatchItem {
         self.settings.correction_hash = Some(hash);
     }
 
-    /// Drop the brush correction. Pairs with `commit_correction`.
+    /// Drop the brush correction. Pairs with `commit_correction`. Wired
+    /// into a "Clear strokes" toolbar button in 15-06.
+    #[allow(dead_code)]
     pub(crate) fn clear_correction(&mut self) {
         self.mask_correction = None;
         self.correction_hash = None;
