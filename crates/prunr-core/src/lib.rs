@@ -8,6 +8,8 @@ pub mod batch;
 pub mod formats;
 pub mod edge;
 pub mod recipe;
+pub mod brush;
+pub mod math;
 
 pub use engine::{InferenceEngine, OrtEngine};
 pub use recipe::{ProcessingRecipe, InferenceRecipe, EdgeRecipe, MaskRecipe, CompositeRecipe, RequiredTier, resolve_tier};
