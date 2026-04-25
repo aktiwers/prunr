@@ -53,6 +53,8 @@ impl BrushState {
         &self.settings
     }
 
+    /// Wired into the brush settings chip in 15-06.
+    #[allow(dead_code)]
     pub fn settings_mut(&mut self) -> &mut BrushSettings {
         &mut self.settings
     }
@@ -98,7 +100,8 @@ impl BrushState {
         Some(active.grid)
     }
 
-    /// Cancel the active stroke without committing.
+    /// Cancel the active stroke without committing. Wired to ESC in 15-06.
+    #[allow(dead_code)]
     pub fn cancel_stroke(&mut self) {
         self.active = None;
     }
