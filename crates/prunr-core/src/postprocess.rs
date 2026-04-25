@@ -2,6 +2,7 @@ use image::{DynamicImage, GrayImage, RgbaImage};
 use ndarray::ArrayView4;
 use rayon::prelude::*;
 
+use crate::brush::MaskCorrection;
 use crate::formats::resize_gray_lanczos3;
 use crate::guided_filter::guided_filter_alpha;
 use crate::types::{MaskSettings, ModelKind};
@@ -9,9 +10,9 @@ use crate::types::{MaskSettings, ModelKind};
 /// Postprocess raw ONNX model output into a transparent RGBA image.
 /// Allocates the RGBA buffer once and reuses it for guided filter (if enabled)
 /// and final mask application — avoids two 4×width×height allocations.
-pub fn postprocess(raw: ArrayView4<f32>, original: &DynamicImage, mask_settings: &MaskSettings, model: ModelKind) -> RgbaImage {
+pub fn postprocess(raw: ArrayView4<f32>, original: &DynamicImage, mask_settings: &MaskSettings, model: ModelKind, correction: Option<&MaskCorrection>) -> RgbaImage {
     let mut rgba = original.to_rgba8();
-    let mask = tensor_to_mask_with_rgba(raw, &rgba, mask_settings, model);
+    let mask = tensor_to_mask_with_rgba(raw, &rgba, mask_settings, model, correction);
     apply_mask_inplace(&mut rgba, &mask);
     apply_fill_style(&mut rgba, mask_settings.fill_style);
     apply_bg_effect(&mut rgba, original, mask_settings.bg_effect);
@@ -27,10 +28,11 @@ pub fn postprocess_from_flat(
     original: &DynamicImage,
     mask_settings: &MaskSettings,
     model: ModelKind,
+    correction: Option<&MaskCorrection>,
 ) -> Result<RgbaImage, crate::types::CoreError> {
     let view = ArrayView4::from_shape((1, 1, tensor_h, tensor_w), tensor)
         .map_err(|e| crate::types::CoreError::Inference(format!("Tensor reshape: {e}")))?;
-    Ok(postprocess(view, original, mask_settings, model))
+    Ok(postprocess(view, original, mask_settings, model, correction))
 }
 
 /// Flat-slice variant of `tensor_to_mask`. Reshapes `[1,1,H,W]` and forwards.
@@ -41,27 +43,28 @@ pub fn tensor_to_mask_from_flat(
     original: &DynamicImage,
     mask_settings: &MaskSettings,
     model: ModelKind,
+    correction: Option<&MaskCorrection>,
 ) -> Result<GrayImage, crate::types::CoreError> {
     let view = ArrayView4::from_shape((1, 1, tensor_h, tensor_w), tensor)
         .map_err(|e| crate::types::CoreError::Inference(format!("Tensor reshape: {e}")))?;
-    Ok(tensor_to_mask(view, original, mask_settings, model))
+    Ok(tensor_to_mask(view, original, mask_settings, model, correction))
 }
 
 /// Convert raw ONNX tensor to a full-resolution grayscale mask (Tier 2).
 /// Applies normalization, gamma, threshold, resize, edge shift, and guided filter.
-pub fn tensor_to_mask(raw: ArrayView4<f32>, original: &DynamicImage, mask_settings: &MaskSettings, model: ModelKind) -> GrayImage {
+pub fn tensor_to_mask(raw: ArrayView4<f32>, original: &DynamicImage, mask_settings: &MaskSettings, model: ModelKind, correction: Option<&MaskCorrection>) -> GrayImage {
     // Materializing rgba here is wasteful when refine_edges is false; callers on
     // the hot path should use `postprocess()` which shares the RGBA buffer.
     let rgba = if mask_settings.refine_edges { Some(original.to_rgba8()) } else { None };
-    tensor_to_mask_core(raw, original.width(), original.height(), rgba.as_ref(), mask_settings, model)
+    tensor_to_mask_core(raw, original.width(), original.height(), rgba.as_ref(), mask_settings, model, correction)
 }
 
 /// Same as `tensor_to_mask` but reuses an already-materialized RGBA buffer.
-fn tensor_to_mask_with_rgba(raw: ArrayView4<f32>, rgba: &RgbaImage, mask_settings: &MaskSettings, model: ModelKind) -> GrayImage {
-    tensor_to_mask_core(raw, rgba.width(), rgba.height(), Some(rgba), mask_settings, model)
+fn tensor_to_mask_with_rgba(raw: ArrayView4<f32>, rgba: &RgbaImage, mask_settings: &MaskSettings, model: ModelKind, correction: Option<&MaskCorrection>) -> GrayImage {
+    tensor_to_mask_core(raw, rgba.width(), rgba.height(), Some(rgba), mask_settings, model, correction)
 }
 
-fn tensor_to_mask_core(raw: ArrayView4<f32>, ow: u32, oh: u32, rgba_for_guided: Option<&RgbaImage>, mask_settings: &MaskSettings, model: ModelKind) -> GrayImage {
+fn tensor_to_mask_core(raw: ArrayView4<f32>, ow: u32, oh: u32, rgba_for_guided: Option<&RgbaImage>, mask_settings: &MaskSettings, model: ModelKind, correction: Option<&MaskCorrection>) -> GrayImage {
     let pred = raw.slice(ndarray::s![0, 0, .., ..]);
 
     let use_sigmoid = matches!(model, ModelKind::BiRefNetLite);
@@ -97,7 +100,7 @@ fn tensor_to_mask_core(raw: ArrayView4<f32>, ow: u32, oh: u32, rgba_for_guided: 
     let threshold = mask_settings.threshold;
 
     // Short-circuit: uniform output → fill with constant, skip per-pixel loop
-    let mask_buf = if let Some(uv) = uniform_val {
+    let mut mask_buf = if let Some(uv) = uniform_val {
         let mut val = uv;
         if gamma != 1.0 { val = val.powf(gamma); }
         if let Some(t) = threshold { val = if val >= t { 1.0 } else { 0.0 }; }
@@ -124,6 +127,14 @@ fn tensor_to_mask_core(raw: ArrayView4<f32>, ow: u32, oh: u32, rgba_for_guided: 
         }
         buf
     };
+
+    // Brush correction runs at model resolution, BEFORE resize/guided
+    // filter, so the guided filter snaps stroke edges to the image's
+    // color edges.
+    if let Some(corr) = correction {
+        crate::brush::apply_correction(&mut mask_buf, corr);
+    }
+
     let mask = GrayImage::from_raw(sw as u32, sh as u32, mask_buf)
         .expect("mask buffer size matches dimensions");
 
@@ -622,7 +633,7 @@ mod tests {
     fn test_postprocess_output_dimensions() {
         let raw = make_raw_tensor(0.5);
         let original = solid_rgb(640, 480);
-        let result = postprocess(raw.view(), &original, &MaskSettings::default(), ModelKind::Silueta);
+        let result = postprocess(raw.view(), &original, &MaskSettings::default(), ModelKind::Silueta, None);
         assert_eq!(result.width(), 640);
         assert_eq!(result.height(), 480);
     }
@@ -633,7 +644,7 @@ mod tests {
         // (0 - 0) / 1e-6 = 0 -> alpha = 0
         let raw = make_raw_tensor(0.0);
         let original = solid_rgb(32, 32);
-        let result = postprocess(raw.view(), &original, &MaskSettings::default(), ModelKind::Silueta);
+        let result = postprocess(raw.view(), &original, &MaskSettings::default(), ModelKind::Silueta, None);
         // All alpha values should be 0
         for (_, _, p) in result.enumerate_pixels() {
             assert_eq!(p[3], 0, "Expected alpha=0 for all-zero tensor");
@@ -645,7 +656,7 @@ mod tests {
         // All-one tensor: uniform high confidence → foreground → alpha=255
         let raw = make_raw_tensor(1.0);
         let original = solid_rgb(32, 32);
-        let result = postprocess(raw.view(), &original, &MaskSettings::default(), ModelKind::Silueta);
+        let result = postprocess(raw.view(), &original, &MaskSettings::default(), ModelKind::Silueta, None);
         for (_, _, p) in result.enumerate_pixels() {
             assert_eq!(p[3], 255, "Expected alpha=255 for uniform high-confidence tensor");
         }
@@ -665,9 +676,9 @@ mod tests {
 
         let view_mask = {
             let arr = ndarray::Array4::from_shape_vec((1, 1, 320, 320), flat.clone()).unwrap();
-            tensor_to_mask(arr.view(), &original, &mask, ModelKind::Silueta)
+            tensor_to_mask(arr.view(), &original, &mask, ModelKind::Silueta, None)
         };
-        let flat_mask = tensor_to_mask_from_flat(&flat, 320, 320, &original, &mask, ModelKind::Silueta)
+        let flat_mask = tensor_to_mask_from_flat(&flat, 320, 320, &original, &mask, ModelKind::Silueta, None)
             .expect("flat path succeeds");
         assert_eq!(view_mask.as_raw(), flat_mask.as_raw());
     }
@@ -677,7 +688,7 @@ mod tests {
         let flat = vec![0.0f32; 10];
         let original = solid_rgb(16, 16);
         let mask = MaskSettings::default();
-        let r = tensor_to_mask_from_flat(&flat, 320, 320, &original, &mask, ModelKind::Silueta);
+        let r = tensor_to_mask_from_flat(&flat, 320, 320, &original, &mask, ModelKind::Silueta, None);
         assert!(r.is_err(), "size mismatch must return Err");
     }
 
@@ -691,7 +702,7 @@ mod tests {
             }
         }
         let original = solid_rgb(320, 320);
-        let result = postprocess(raw.view(), &original, &MaskSettings::default(), ModelKind::Silueta);
+        let result = postprocess(raw.view(), &original, &MaskSettings::default(), ModelKind::Silueta, None);
         let unique_alphas: std::collections::HashSet<u8> =
             result.enumerate_pixels().map(|(_, _, p)| p[3]).collect();
         assert!(
@@ -699,6 +710,43 @@ mod tests {
             "Expected many distinct alpha values, got {}",
             unique_alphas.len()
         );
+    }
+
+    #[test]
+    fn brush_correction_subtract_drives_mask_to_zero_at_painted_pixels() {
+        use crate::brush::{paint_circle, BrushMode, MaskCorrection};
+        let raw = make_raw_tensor(1.0);
+        let original = solid_rgb(320, 320);
+        let mask_settings = MaskSettings::default();
+
+        let baseline = tensor_to_mask(raw.view(), &original, &mask_settings, ModelKind::Silueta, None);
+        let baseline_at_center = baseline.get_pixel(160, 160)[0];
+        assert!(baseline_at_center > 200, "baseline center should be foreground (got {})", baseline_at_center);
+
+        let mut correction = MaskCorrection::empty(320, 320);
+        paint_circle(&mut correction, 160.0, 160.0, 20.0, 1.0, BrushMode::Subtract);
+        let corrected = tensor_to_mask(raw.view(), &original, &mask_settings, ModelKind::Silueta, Some(&correction));
+
+        let center_after = corrected.get_pixel(160, 160)[0];
+        let edge_after = corrected.get_pixel(10, 10)[0];
+        // Full-strength subtract drives 255→1 (i8 grid range × 2 = ±254
+        // effect). The 1/255 residue is imperceptible.
+        assert!(center_after <= 1, "subtract stroke should drive painted pixel to ~0, got {}", center_after);
+        assert_eq!(edge_after, baseline.get_pixel(10, 10)[0], "untouched pixels should match baseline");
+    }
+
+    #[test]
+    fn brush_correction_dim_mismatch_skipped() {
+        use crate::brush::MaskCorrection;
+        let raw = make_raw_tensor(1.0);
+        let original = solid_rgb(320, 320);
+        let mask_settings = MaskSettings::default();
+
+        let baseline = tensor_to_mask(raw.view(), &original, &mask_settings, ModelKind::Silueta, None);
+        let wrong_size = MaskCorrection::empty(64, 64);
+        let with_bad = tensor_to_mask(raw.view(), &original, &mask_settings, ModelKind::Silueta, Some(&wrong_size));
+
+        assert_eq!(baseline.as_raw(), with_bad.as_raw(), "dim mismatch must skip silently, not corrupt the mask");
     }
 
     /// Time `f` N times (with a few warm-up runs) and `eprintln!` min /
@@ -766,7 +814,7 @@ mod tests {
         let mask = MaskSettings::default();
 
         bench_report("postprocess_4k_bench (4000x3000, 320x320 tensor)", 2, 12, || {
-            let _ = postprocess_from_flat(&tensor, 320, 320, &original, &mask, ModelKind::Silueta)
+            let _ = postprocess_from_flat(&tensor, 320, 320, &original, &mask, ModelKind::Silueta, None)
                 .expect("postprocess succeeds");
         });
     }

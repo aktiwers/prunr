@@ -161,7 +161,7 @@ where
     }
 
     report(ProgressStage::Postprocess, 0.8);
-    let rgba_image = postprocess(raw_output.view(), img, mask, model);
+    let rgba_image = postprocess(raw_output.view(), img, mask, model, None);
 
     report(ProgressStage::Alpha, 0.95);
 
