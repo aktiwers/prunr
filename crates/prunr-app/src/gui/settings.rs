@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use prunr_core::ModelKind;
 
+use super::brush_state::BrushSettings;
 use super::item_settings::ItemSettings;
 
 /// Name of the built-in, non-deletable, non-overwritable preset representing
@@ -62,6 +63,10 @@ pub struct Settings {
     pub force_cpu: bool,
     #[serde(skip)]
     pub active_backend: String,
+    /// App-level brush tool defaults (radius, hardness, strength, mode,
+    /// shape). Restored at launch so a user's preferred brush stays put.
+    #[serde(default)]
+    pub brush: BrushSettings,
 }
 
 fn default_live_preview() -> bool { true }
@@ -320,6 +325,7 @@ impl Default for Settings {
             default_preset: default_preset_name(),
             force_cpu: false,
             active_backend: "CPU".to_string(),
+            brush: BrushSettings::default(),
         }
     }
 }
@@ -455,6 +461,51 @@ mod tests {
         assert!(!restored.force_cpu);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn brush_settings_round_trip() {
+        use prunr_core::brush::{BrushMode, BrushShape};
+        let dir = std::env::temp_dir().join(format!(
+            "prunr-brush-test-{}",
+            std::process::id(),
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("settings.json");
+
+        let mut original = Settings::default();
+        original.brush.radius = 87.5;
+        original.brush.hardness = 0.42;
+        original.brush.strength = 0.75;
+        original.brush.mode = BrushMode::Add;
+        original.brush.shape = BrushShape::Square;
+        original.save_to_path(&path);
+
+        let json = std::fs::read_to_string(&path).expect("settings.json exists");
+        let restored: Settings = serde_json::from_str(&json).expect("schema round-trip");
+        assert_eq!(restored.brush.radius, 87.5);
+        assert_eq!(restored.brush.hardness, 0.42);
+        assert_eq!(restored.brush.strength, 0.75);
+        assert_eq!(restored.brush.mode, BrushMode::Add);
+        assert_eq!(restored.brush.shape, BrushShape::Square);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn missing_brush_field_falls_back_to_default() {
+        // Older settings files written before 15-08 don't carry a brush
+        // block. The #[serde(default)] attribute must populate defaults
+        // so users upgrading don't see a load failure.
+        let json = serde_json::json!({
+            "model": "Silueta",
+            "auto_process_on_import": false,
+            "parallel_jobs": 4,
+            "history_depth": 10,
+            "chain_mode": false,
+        });
+        let restored: Settings = serde_json::from_value(json).expect("legacy json loads");
+        assert_eq!(restored.brush, super::BrushSettings::default());
     }
 
     #[test]

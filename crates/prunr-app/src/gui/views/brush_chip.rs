@@ -19,8 +19,18 @@ const LABEL_PAD_WIDTH: f32 = 88.0;
 /// large brush still renders cleanly inside this box.
 const PREVIEW_SIZE: f32 = 80.0;
 
-/// Returns `true` if the user clicked "Clear strokes" in the popover.
-pub(super) fn render(ui: &mut Ui, brush_state: &mut BrushState) -> bool {
+/// Outcome flags from the popover.
+#[derive(Default, Clone, Copy)]
+pub(super) struct BrushChipOutcome {
+    /// User clicked "Clear strokes".
+    pub clear_requested: bool,
+    /// At least one setting was committed (slider released, mode /
+    /// shape clicked). Caller persists app-level brush settings on
+    /// this signal — saving every frame during a drag would burn disk.
+    pub committed: bool,
+}
+
+pub(super) fn render(ui: &mut Ui, brush_state: &mut BrushState) -> BrushChipOutcome {
     let label = chip_label(brush_state.settings());
     let resp = ui
         .scope(|ui| {
@@ -34,51 +44,41 @@ pub(super) fn render(ui: &mut Ui, brush_state: &mut BrushState) -> bool {
         "Configure brush radius, edge hardness, and add/subtract mode. Click strokes to remove or restore subject regions on the result.",
     );
 
-    let mut clear_requested = false;
+    let mut outcome = BrushChipOutcome::default();
     chip::popup_for(ui, ui.id().with("brush_chip_popover"), &resp, |ui| {
         let s = brush_state.settings_mut();
 
-        // Two columns: controls on the left, preview on the right.
         ui.horizontal(|ui| {
             ui.vertical(|ui| {
                 ui.set_min_width(180.0);
-                chip::slider_row_f32(
-                    ui,
-                    "Radius",
-                    &mut s.radius,
-                    1.0..=200.0,
-                    /*logarithmic=*/ true,
+                let r = chip::slider_row_f32(
+                    ui, "Radius", &mut s.radius, 1.0..=200.0, true,
                     |v| format!("{v:.0} px"),
                 );
+                outcome.committed |= r.commit;
                 ui.add_space(4.0);
-                chip::slider_row_f32(
-                    ui,
-                    "Hardness",
-                    &mut s.hardness,
-                    0.0..=1.0,
-                    false,
+                let h = chip::slider_row_f32(
+                    ui, "Hardness", &mut s.hardness, 0.0..=1.0, false,
                     // 1-decimal % gives ~0.5% drag granularity for fine
                     // edge-softness tuning.
                     |v| format!("{:.1}%", v * 100.0),
                 );
+                outcome.committed |= h.commit;
                 ui.add_space(4.0);
-                chip::slider_row_f32(
-                    ui,
-                    "Strength",
-                    &mut s.strength,
-                    0.0..=1.0,
-                    false,
+                let st = chip::slider_row_f32(
+                    ui, "Strength", &mut s.strength, 0.0..=1.0, false,
                     |v| format!("{:.0}%", v * 100.0),
                 );
+                outcome.committed |= st.commit;
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
-                    let add = ui.selectable_label(matches!(s.mode, BrushMode::Add), "Add");
-                    if add.clicked() {
+                    if ui.selectable_label(matches!(s.mode, BrushMode::Add), "Add").clicked() {
                         s.mode = BrushMode::Add;
+                        outcome.committed = true;
                     }
-                    let sub = ui.selectable_label(matches!(s.mode, BrushMode::Subtract), "Subtract");
-                    if sub.clicked() {
+                    if ui.selectable_label(matches!(s.mode, BrushMode::Subtract), "Subtract").clicked() {
                         s.mode = BrushMode::Subtract;
+                        outcome.committed = true;
                     }
                 });
             });
@@ -95,6 +95,7 @@ pub(super) fn render(ui: &mut Ui, brush_state: &mut BrushState) -> bool {
                     ] {
                         if ui.selectable_label(s.shape == shape, label).clicked() {
                             s.shape = shape;
+                            outcome.committed = true;
                         }
                     }
                 });
@@ -110,11 +111,11 @@ pub(super) fn render(ui: &mut Ui, brush_state: &mut BrushState) -> bool {
             .on_hover_text("Discard all brush corrections on this image")
             .clicked()
         {
-            clear_requested = true;
+            outcome.clear_requested = true;
         }
     });
 
-    clear_requested
+    outcome
 }
 
 /// Right-padded label so 1-, 2-, 3-digit radius values render at the
