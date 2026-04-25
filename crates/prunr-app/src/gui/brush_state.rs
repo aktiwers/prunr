@@ -3,7 +3,7 @@
 //! `BatchManager.items` — the caller hands it the active grid size
 //! and writes the committed strokes back via `BatchItem`'s mutator.
 
-use prunr_core::brush::{paint_circle, paint_line, paint_square, BrushMode, BrushShape, MaskCorrection};
+use prunr_core::brush::{paint_circle, paint_line, paint_square, BrushMode, BrushShape, MaskCorrection, Stamp};
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct BrushSettings {
@@ -43,11 +43,16 @@ struct ActiveStroke {
     /// Stroke-time snapshot of the brush shape — pinned at begin_stroke
     /// so a mid-stroke shape switch doesn't desync the grid.
     shape: BrushShape,
-    /// Model-space press / current positions (Line tool only — paints
-    /// once on commit using these endpoints).
-    first_model_pos: Option<(f32, f32)>,
-    last_model_pos: Option<(f32, f32)>,
-    last_model_radius: f32,
+    /// Line-tool state: present iff `shape == Line`. Tracks the press +
+    /// most recent positions so `commit_stroke` can paint one segment.
+    line: Option<LineState>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct LineState {
+    first: (f32, f32),
+    last: (f32, f32),
+    radius: f32,
 }
 
 #[derive(Default)]
@@ -88,16 +93,20 @@ impl BrushState {
             dirty: false,
             trail: Vec::new(),
             shape: self.settings.shape,
-            first_model_pos: None,
-            last_model_pos: None,
-            last_model_radius: self.settings.radius,
+            line: None,
         });
     }
 
-    /// Active stroke's pinned shape (or `Circle` if no active stroke —
-    /// used by the trail renderer to pick a draw style).
-    pub fn active_shape(&self) -> BrushShape {
-        self.active.as_ref().map_or(BrushShape::Circle, |a| a.shape)
+    pub fn active_shape(&self) -> Option<BrushShape> {
+        self.active.as_ref().map(|a| a.shape)
+    }
+
+    fn current_stamp(&self) -> Stamp {
+        Stamp {
+            hardness: self.settings.hardness,
+            strength: self.settings.strength,
+            mode: self.settings.mode,
+        }
     }
 
     /// Record a screen-space stamp for the in-progress stroke trail.
@@ -131,57 +140,43 @@ impl BrushState {
             .flat_map(|a| a.trail.iter().copied())
     }
 
-    /// Extend the active stroke at model-space coordinates with an
-    /// explicit model-space radius. Caller converts screen→model
-    /// outside this type so screen-radius confusion can't reach the
-    /// grid. Dispatch on the stroke's pinned shape:
-    /// - Circle / Square: paint per-frame stamps (incremental drag).
-    /// - Line: just record press / current; the actual line is painted
-    ///   once at `commit_stroke` from press → release.
+    /// Extend the active stroke at model-space coordinates. Caller
+    /// converts screen→model so screen-radius confusion can't reach
+    /// the grid. Line strokes wait for `commit_stroke` to paint.
     pub fn extend_stroke_with_radius(&mut self, x: f32, y: f32, radius: f32) {
+        let stamp = self.current_stamp();
         let Some(active) = self.active.as_mut() else { return };
-        if active.first_model_pos.is_none() {
-            active.first_model_pos = Some((x, y));
-        }
-        active.last_model_pos = Some((x, y));
-        active.last_model_radius = radius;
-
         match active.shape {
             BrushShape::Circle => {
-                paint_circle(
-                    &mut active.grid, x, y, radius,
-                    self.settings.hardness, self.settings.strength, self.settings.mode,
-                );
+                paint_circle(&mut active.grid, x, y, radius, stamp);
                 active.dirty = true;
             }
             BrushShape::Square => {
-                paint_square(
-                    &mut active.grid, x, y, radius,
-                    self.settings.hardness, self.settings.strength, self.settings.mode,
-                );
+                paint_square(&mut active.grid, x, y, radius, stamp);
                 active.dirty = true;
             }
             BrushShape::Line => {
-                // Wait for commit — `commit_stroke` paints press → release.
+                let entry = active.line.get_or_insert(LineState {
+                    first: (x, y),
+                    last: (x, y),
+                    radius,
+                });
+                entry.last = (x, y);
+                entry.radius = radius;
             }
         }
     }
 
-    /// End the active stroke and return it. For Line shape, paints the
-    /// final press → release segment now. Returns `None` if no stroke
-    /// was started or it ended up empty.
     pub fn commit_stroke(&mut self) -> Option<MaskCorrection> {
+        let stamp = self.current_stamp();
         let mut active = self.active.take()?;
-        if let (BrushShape::Line, Some((x1, y1)), Some((x2, y2))) =
-            (active.shape, active.first_model_pos, active.last_model_pos)
-        {
+        if let Some(line) = active.line {
             paint_line(
                 &mut active.grid,
-                x1, y1, x2, y2,
-                active.last_model_radius,
-                self.settings.hardness,
-                self.settings.strength,
-                self.settings.mode,
+                line.first.0, line.first.1,
+                line.last.0, line.last.1,
+                line.radius,
+                stamp,
             );
             active.dirty = true;
         }

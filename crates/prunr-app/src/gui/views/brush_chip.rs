@@ -84,21 +84,21 @@ pub(super) fn render(ui: &mut Ui, brush_state: &mut BrushState) -> bool {
             });
 
             ui.add_space(8.0);
-            draw_preview(ui, *s);
-        });
-
-        ui.add_space(6.0);
-        ui.horizontal(|ui| {
-            ui.label("Shape:");
-            for (shape, label) in [
-                (BrushShape::Circle, "Circle"),
-                (BrushShape::Square, "Square"),
-                (BrushShape::Line, "Line"),
-            ] {
-                if ui.selectable_label(s.shape == shape, label).clicked() {
-                    s.shape = shape;
-                }
-            }
+            ui.vertical(|ui| {
+                draw_preview(ui, *s);
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    for (shape, label) in [
+                        (BrushShape::Circle, "Circle"),
+                        (BrushShape::Square, "Square"),
+                        (BrushShape::Line, "Line"),
+                    ] {
+                        if ui.selectable_label(s.shape == shape, label).clicked() {
+                            s.shape = shape;
+                        }
+                    }
+                });
+            });
         });
 
         ui.add_space(4.0);
@@ -213,7 +213,6 @@ fn draw_preview(ui: &mut Ui, settings: BrushSettings) {
             }
         }
         BrushShape::Line => {
-            // Diagonal segment with the brush radius as half-thickness.
             let half = max_r - 4.0;
             ui.painter().line_segment(
                 [
