@@ -336,6 +336,11 @@ All CLI processing (single and batch) uses subprocess isolation for OOM protecti
 
 ```
 1.  load_image_from_bytes()             → DynamicImage
+       - Sniffs leading bytes for SVG (XML prologue / `<svg`); SVGs
+         rasterize via resvg + tiny_skia at the SVG's intrinsic size,
+         capped at LARGE_IMAGE_LIMIT. Premultiplied output is
+         demultiplied to match the rest of the pipeline's straight-RGBA
+         convention.
 2.  check_large_image()                 → error if > 8000px (configurable via --large-image)
 3.  preprocess(img, model)              → Array4<f32> [1, 3, H, H] NCHW
       - Silueta/U2Net: divide by max_pixel, ImageNet normalize
@@ -429,6 +434,19 @@ if cpu_only {
 
 macOS uses FP32 because CoreML silently converts to FP16 internally — feeding our FP16 stacks two conversions, causing precision loss.
 
+### CoreML on macOS — custom ORT build
+
+The pykeio/ort `download-binaries` prebuilt doesn't ship with the CoreML EP enabled, so a vanilla download yields a CoreML-less binary on macOS. Release CI builds ORT from source on the M-series GitHub Actions runner:
+
+- Cloned at the version pinned by the `ort` crate (currently `v1.20.0` for `ort = 2.0.0-rc.12`).
+- Build flags: `--config Release --use_coreml --build_shared_lib --osx_arch arm64`.
+- Cargo override: `ORT_LIB_LOCATION=$PWD/ort-build/MacOS/Release` + `ORT_PREFER_DYNAMIC_LINK=1` so pykeio/ort links against the custom dylib instead of the (CoreML-less) prebuilt.
+- Cached by ORT version. First build ~30 min on cache miss; subsequent restores ~30 sec.
+- The custom dylib is staged into `target/release/` so the existing release-bundling step picks it up unchanged and drops it in `Prunr.app/Contents/Frameworks/`.
+- `.cargo/config.toml` rustflags add `@executable_path/../Frameworks` to the binary's rpath so the bundled `.app` finds the dylib at runtime.
+
+Linux/Windows release builds keep using `download-binaries` — the prebuilt is fine for them.
+
 ### Model bytes cache
 
 Decompressed ONNX bytes are cached in `OnceLock<Vec<u8>>` per model. Callers receive `&'static [u8]` (zero-copy borrow). Previously every engine creation cloned ~250 MB — now it borrows.
@@ -493,6 +511,8 @@ User data lives in the platform config dir (`dirs::config_dir()`):
 |---|---|---|---|
 | `settings.json` | `~/.config/prunr/` | `~/Library/Application Support/prunr/` | `%APPDATA%\prunr\` |
 | `presets/*.json` | `~/.config/prunr/presets/` | `~/Library/Application Support/prunr/presets/` | `%APPDATA%\prunr\presets\` |
+
+`Settings::save()` resolves the path then delegates to a path-injectable `save_to_path` helper, which makes the round-trip tests platform-agnostic. The schema-stability contract is enforced by three unit tests: write+read round-trip preserves persisted fields, the resolved path always lands under `<config_dir>/prunr/`, and `save` mkdir's the parent on first run. `force_cpu` and `active_backend` are `#[serde(skip)]` — machine-state, reset every launch.
 
 ## Temp File Lifecycle
 
