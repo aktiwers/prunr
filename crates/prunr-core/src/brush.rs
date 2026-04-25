@@ -28,13 +28,21 @@ impl BrushMode {
     }
 }
 
-/// Brush stamp geometry. `Line` is a "tool mode" — strokes paint a single
-/// straight segment from press to release, not per-frame stamps.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BrushShape {
     Circle,
     Square,
     Line,
+}
+
+/// Stamp parameters shared by every paint primitive.
+#[derive(Clone, Copy, Debug)]
+pub struct Stamp {
+    /// 0.0 = full smoothstep falloff, 1.0 = hard edges.
+    pub hardness: f32,
+    /// 0.0 = no effect, 1.0 = full magnitude.
+    pub strength: f32,
+    pub mode: BrushMode,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -100,90 +108,30 @@ pub fn apply_correction(mask: &mut [f32], correction: &MaskCorrection) {
     }
 }
 
-/// Stamp a soft brush at (`cx`, `cy`) into `target`.
-/// - `hardness ∈ [0, 1]`: 0 = full smoothstep falloff, 1 = hard disc.
-/// - `strength ∈ [0, 1]`: 0 = no effect, 1 = full-magnitude stamp.
+/// Generic stamp painter. The distance function decides shape:
+/// euclidean for `paint_circle`, chebyshev (`max`) for `paint_square`.
 ///
 /// Overlapping stamps keep the strongest magnitude in the active mode's
 /// direction — painting twice over the same pixel doesn't double up.
-pub fn paint_circle(
+fn stamp_with<D>(
     target: &mut MaskCorrection,
-    cx: f32,
-    cy: f32,
-    radius: f32,
-    hardness: f32,
-    strength: f32,
-    mode: BrushMode,
-) {
-    if radius <= 0.0 || strength <= 0.0 {
+    cx: f32, cy: f32,
+    outer: f32,
+    stamp: Stamp,
+    distance: D,
+)
+where
+    D: Fn(f32, f32) -> f32,
+{
+    if outer <= 0.0 || stamp.strength <= 0.0 {
         return;
     }
     let w_i = target.width as i32;
     let h_i = target.height as i32;
-    let inner = radius * hardness.clamp(0.0, 1.0);
-    let outer = radius;
-    let outer_sq = outer * outer;
-    let inner_sq = inner * inner;
+    let inner = outer * stamp.hardness.clamp(0.0, 1.0);
     let span = (outer - inner).max(1e-6);
-    let sign = mode.sign();
-    let strength = strength.clamp(0.0, 1.0);
-
-    let xmin = ((cx - radius).floor() as i32).max(0);
-    let xmax = ((cx + radius).ceil() as i32 + 1).min(w_i);
-    let ymin = ((cy - radius).floor() as i32).max(0);
-    let ymax = ((cy + radius).ceil() as i32 + 1).min(h_i);
-    if xmin >= xmax || ymin >= ymax {
-        return;
-    }
-
-    let grid = &mut target.grid;
-    for y in ymin..ymax {
-        for x in xmin..xmax {
-            let dx = x as f32 + 0.5 - cx;
-            let dy = y as f32 + 0.5 - cy;
-            let dist_sq = dx * dx + dy * dy;
-            if dist_sq > outer_sq {
-                continue;
-            }
-            let intensity = if dist_sq <= inner_sq {
-                1.0
-            } else {
-                smoothstep((outer - dist_sq.sqrt()) / span)
-            };
-            let stamp = (intensity * strength * STAMP_SCALE * sign).round() as i32;
-            let idx = (y * w_i + x) as usize;
-            let prev = grid[idx] as i32;
-            let combined = match mode {
-                BrushMode::Add => prev.max(stamp),
-                BrushMode::Subtract => prev.min(stamp),
-            };
-            grid[idx] = combined.clamp(-127, 127) as i8;
-        }
-    }
-}
-
-/// Square stamp variant of `paint_circle`. Same hardness/strength
-/// semantics — `hardness` controls Chebyshev-distance falloff toward
-/// the corners (1 = sharp square, 0 = diamond-soft falloff).
-pub fn paint_square(
-    target: &mut MaskCorrection,
-    cx: f32,
-    cy: f32,
-    half_size: f32,
-    hardness: f32,
-    strength: f32,
-    mode: BrushMode,
-) {
-    if half_size <= 0.0 || strength <= 0.0 {
-        return;
-    }
-    let w_i = target.width as i32;
-    let h_i = target.height as i32;
-    let outer = half_size;
-    let inner = outer * hardness.clamp(0.0, 1.0);
-    let span = (outer - inner).max(1e-6);
-    let sign = mode.sign();
-    let strength = strength.clamp(0.0, 1.0);
+    let sign = stamp.mode.sign();
+    let strength = stamp.strength.clamp(0.0, 1.0);
 
     let xmin = ((cx - outer).floor() as i32).max(0);
     let xmax = ((cx + outer).ceil() as i32 + 1).min(w_i);
@@ -196,9 +144,9 @@ pub fn paint_square(
     let grid = &mut target.grid;
     for y in ymin..ymax {
         for x in xmin..xmax {
-            let dx = ((x as f32 + 0.5) - cx).abs();
-            let dy = ((y as f32 + 0.5) - cy).abs();
-            let dist = dx.max(dy);
+            let dx = (x as f32 + 0.5) - cx;
+            let dy = (y as f32 + 0.5) - cy;
+            let dist = distance(dx, dy);
             if dist > outer {
                 continue;
             }
@@ -207,52 +155,49 @@ pub fn paint_square(
             } else {
                 smoothstep((outer - dist) / span)
             };
-            let stamp = (intensity * strength * STAMP_SCALE * sign).round() as i32;
+            let value = (intensity * strength * STAMP_SCALE * sign).round() as i32;
             let idx = (y * w_i + x) as usize;
             let prev = grid[idx] as i32;
-            let combined = match mode {
-                BrushMode::Add => prev.max(stamp),
-                BrushMode::Subtract => prev.min(stamp),
+            let combined = match stamp.mode {
+                BrushMode::Add => prev.max(value),
+                BrushMode::Subtract => prev.min(value),
             };
             grid[idx] = combined.clamp(-127, 127) as i8;
         }
     }
 }
 
-/// Paint a thick line from `(x1, y1)` to `(x2, y2)` by stamping
-/// `paint_circle` at sub-radius steps along the segment. Caller is
-/// responsible for spacing — the line tool calls this once per
-/// stroke (press → release), not per pointer event.
+pub fn paint_circle(target: &mut MaskCorrection, cx: f32, cy: f32, radius: f32, stamp: Stamp) {
+    stamp_with(target, cx, cy, radius, stamp, |dx, dy| (dx * dx + dy * dy).sqrt());
+}
+
+/// Chebyshev-distance variant: `hardness=1` is a sharp square,
+/// `hardness=0` softens toward a diamond.
+pub fn paint_square(target: &mut MaskCorrection, cx: f32, cy: f32, half_size: f32, stamp: Stamp) {
+    stamp_with(target, cx, cy, half_size, stamp, |dx, dy| dx.abs().max(dy.abs()));
+}
+
+/// Thick line from `(x1, y1)` to `(x2, y2)`. Caller is responsible
+/// for invocation cadence — the Line tool calls this once at
+/// `commit_stroke`, not per pointer event.
 pub fn paint_line(
     target: &mut MaskCorrection,
     x1: f32, y1: f32,
     x2: f32, y2: f32,
     radius: f32,
-    hardness: f32,
-    strength: f32,
-    mode: BrushMode,
+    stamp: Stamp,
 ) {
-    if radius <= 0.0 || strength <= 0.0 {
+    if radius <= 0.0 || stamp.strength <= 0.0 {
         return;
     }
     let dx = x2 - x1;
     let dy = y2 - y1;
     let len = (dx * dx + dy * dy).sqrt();
-    // Step half a radius for smooth coverage; minimum of 1 step at
-    // zero-length lines (degenerates to a single circle).
     let step = (radius * 0.5).max(0.5);
     let n = ((len / step).ceil() as i32).max(1);
     for i in 0..=n {
         let t = i as f32 / n as f32;
-        paint_circle(
-            target,
-            x1 + dx * t,
-            y1 + dy * t,
-            radius,
-            hardness,
-            strength,
-            mode,
-        );
+        paint_circle(target, x1 + dx * t, y1 + dy * t, radius, stamp);
     }
 }
 
@@ -373,7 +318,7 @@ mod tests {
     #[test]
     fn paint_circle_centered_pixel_only() {
         let mut c = MaskCorrection::empty(5, 5);
-        paint_circle(&mut c, 2.5, 2.5, 0.5, 1.0, 1.0, BrushMode::Add);
+        paint_circle(&mut c, 2.5, 2.5, 0.5, Stamp { hardness: 1.0, strength: 1.0, mode: BrushMode::Add });
         assert_eq!(c.grid[12], 127);
         let neighbours = [c.grid[11], c.grid[13], c.grid[7], c.grid[17]];
         assert!(neighbours.iter().all(|&v| v == 0), "only center should be hit, got {:?}", neighbours);
@@ -382,7 +327,7 @@ mod tests {
     #[test]
     fn paint_circle_radius_10_covers_disc() {
         let mut c = MaskCorrection::empty(32, 32);
-        paint_circle(&mut c, 16.0, 16.0, 10.0, 1.0, 1.0, BrushMode::Add);
+        paint_circle(&mut c, 16.0, 16.0, 10.0, Stamp { hardness: 1.0, strength: 1.0, mode: BrushMode::Add });
         assert_eq!(c.grid[16 * 32 + 16], 127);
         assert_eq!(c.grid[0], 0);
         let nonzero = c.grid.iter().filter(|&&v| v != 0).count();
@@ -398,16 +343,16 @@ mod tests {
     #[test]
     fn paint_circle_subtract_writes_negative() {
         let mut c = MaskCorrection::empty(8, 8);
-        paint_circle(&mut c, 4.0, 4.0, 2.0, 1.0, 1.0, BrushMode::Subtract);
+        paint_circle(&mut c, 4.0, 4.0, 2.0, Stamp { hardness: 1.0, strength: 1.0, mode: BrushMode::Subtract });
         assert_eq!(c.grid[4 * 8 + 4], -127);
     }
 
     #[test]
     fn paint_circle_overlapping_keeps_strongest() {
         let mut c = MaskCorrection::empty(8, 8);
-        paint_circle(&mut c, 4.0, 4.0, 2.0, 1.0, 1.0, BrushMode::Add);
+        paint_circle(&mut c, 4.0, 4.0, 2.0, Stamp { hardness: 1.0, strength: 1.0, mode: BrushMode::Add });
         let after_first = c.grid[4 * 8 + 4];
-        paint_circle(&mut c, 4.0, 4.0, 2.0, 0.5, 1.0, BrushMode::Add);
+        paint_circle(&mut c, 4.0, 4.0, 2.0, Stamp { hardness: 0.5, strength: 1.0, mode: BrushMode::Add });
         let after_second = c.grid[4 * 8 + 4];
         assert_eq!(after_first, 127);
         assert_eq!(after_second, 127, "second weaker stroke must not lower the strong stamp");
@@ -416,23 +361,23 @@ mod tests {
     #[test]
     fn paint_circle_zero_radius_no_op() {
         let mut c = MaskCorrection::empty(4, 4);
-        paint_circle(&mut c, 2.0, 2.0, 0.0, 1.0, 1.0, BrushMode::Add);
+        paint_circle(&mut c, 2.0, 2.0, 0.0, Stamp { hardness: 1.0, strength: 1.0, mode: BrushMode::Add });
         assert!(c.grid.iter().all(|&v| v == 0));
     }
 
     #[test]
     fn paint_circle_zero_strength_no_op() {
         let mut c = MaskCorrection::empty(8, 8);
-        paint_circle(&mut c, 4.0, 4.0, 3.0, 1.0, 0.0, BrushMode::Add);
+        paint_circle(&mut c, 4.0, 4.0, 3.0, Stamp { hardness: 1.0, strength: 0.0, mode: BrushMode::Add });
         assert!(c.grid.iter().all(|&v| v == 0), "strength = 0 produces no stamp");
     }
 
     #[test]
     fn paint_circle_half_strength_halves_stamp() {
         let mut full = MaskCorrection::empty(8, 8);
-        paint_circle(&mut full, 4.0, 4.0, 3.0, 1.0, 1.0, BrushMode::Add);
+        paint_circle(&mut full, 4.0, 4.0, 3.0, Stamp { hardness: 1.0, strength: 1.0, mode: BrushMode::Add });
         let mut half = MaskCorrection::empty(8, 8);
-        paint_circle(&mut half, 4.0, 4.0, 3.0, 1.0, 0.5, BrushMode::Add);
+        paint_circle(&mut half, 4.0, 4.0, 3.0, Stamp { hardness: 1.0, strength: 0.5, mode: BrushMode::Add });
         let center_full = full.grid[4 * 8 + 4];
         let center_half = half.grid[4 * 8 + 4];
         assert_eq!(center_full, 127, "full strength stamps the maximum");
@@ -447,8 +392,8 @@ mod tests {
     #[test]
     fn paint_circle_outside_bounds_no_panic() {
         let mut c = MaskCorrection::empty(4, 4);
-        paint_circle(&mut c, -10.0, -10.0, 5.0, 1.0, 1.0, BrushMode::Add);
-        paint_circle(&mut c, 100.0, 100.0, 5.0, 1.0, 1.0, BrushMode::Add);
+        paint_circle(&mut c, -10.0, -10.0, 5.0, Stamp { hardness: 1.0, strength: 1.0, mode: BrushMode::Add });
+        paint_circle(&mut c, 100.0, 100.0, 5.0, Stamp { hardness: 1.0, strength: 1.0, mode: BrushMode::Add });
         assert!(c.grid.iter().all(|&v| v == 0));
     }
 
@@ -457,7 +402,7 @@ mod tests {
         let mut c = MaskCorrection::empty(16, 16);
         // Half-pixel offset places the center exactly on pixel (8, 8), so
         // we can compare the perfectly-radial profile.
-        paint_circle(&mut c, 8.5, 8.5, 6.0, 0.0, 1.0, BrushMode::Add);
+        paint_circle(&mut c, 8.5, 8.5, 6.0, Stamp { hardness: 0.0, strength: 1.0, mode: BrushMode::Add });
         let center = c.grid[8 * 16 + 8];
         let mid = c.grid[8 * 16 + 11];
         let edge = c.grid[8 * 16 + 13];
@@ -477,7 +422,7 @@ mod tests {
     #[test]
     fn paint_circle_corner_clamps_safely() {
         let mut c = MaskCorrection::empty(8, 8);
-        paint_circle(&mut c, 0.5, 0.5, 4.0, 1.0, 1.0, BrushMode::Add);
+        paint_circle(&mut c, 0.5, 0.5, 4.0, Stamp { hardness: 1.0, strength: 1.0, mode: BrushMode::Add });
         assert_eq!(c.grid[0], 127, "in-frame center pixel is hit");
         let in_disc_corner = c.grid[2 * 8 + 2];
         let outside = c.grid[7 * 8 + 7];
@@ -550,7 +495,7 @@ mod tests {
     #[test]
     fn paint_square_fills_chebyshev_disc() {
         let mut c = MaskCorrection::empty(16, 16);
-        paint_square(&mut c, 8.0, 8.0, 3.0, 1.0, 1.0, BrushMode::Add);
+        paint_square(&mut c, 8.0, 8.0, 3.0, Stamp { hardness: 1.0, strength: 1.0, mode: BrushMode::Add });
         // Inside the 6×6 chebyshev ball: full strength.
         assert_eq!(c.grid[8 * 16 + 8], 127);
         assert_eq!(c.grid[6 * 16 + 6], 127);
@@ -563,7 +508,7 @@ mod tests {
     #[test]
     fn paint_line_zero_length_stamps_one_circle() {
         let mut c = MaskCorrection::empty(8, 8);
-        paint_line(&mut c, 4.0, 4.0, 4.0, 4.0, 1.5, 1.0, 1.0, BrushMode::Add);
+        paint_line(&mut c, 4.0, 4.0, 4.0, 4.0, 1.5, Stamp { hardness: 1.0, strength: 1.0, mode: BrushMode::Add });
         // Same as a single paint_circle stamp at (4, 4).
         assert!(c.grid[4 * 8 + 4] > 0, "zero-length line still stamps a circle");
     }
@@ -571,10 +516,29 @@ mod tests {
     #[test]
     fn paint_line_covers_intermediate_pixels() {
         let mut c = MaskCorrection::empty(32, 32);
-        paint_line(&mut c, 4.0, 16.0, 28.0, 16.0, 1.0, 1.0, 1.0, BrushMode::Add);
-        // Pixel halfway along the line should be hit.
+        paint_line(&mut c, 4.0, 16.0, 28.0, 16.0, 1.0, Stamp { hardness: 1.0, strength: 1.0, mode: BrushMode::Add });
         assert!(c.grid[16 * 32 + 16] > 0, "midpoint of a horizontal line must be painted");
-        // Pixel above the line, far enough out, should not.
         assert_eq!(c.grid[5 * 32 + 16], 0, "well above the line stays untouched");
+    }
+
+    #[test]
+    fn paint_line_diagonal_has_no_gaps() {
+        let mut c = MaskCorrection::empty(32, 32);
+        paint_line(&mut c, 0.5, 0.5, 24.5, 24.5, 1.0, Stamp { hardness: 1.0, strength: 1.0, mode: BrushMode::Add });
+        for d in 1..=23 {
+            assert!(c.grid[(d * 32 + d) as usize] > 0, "diagonal pixel ({d}, {d}) must be painted");
+        }
+    }
+
+    #[test]
+    fn paint_square_hardness_zero_falls_off_smoothly() {
+        let mut c = MaskCorrection::empty(16, 16);
+        paint_square(&mut c, 8.5, 8.5, 6.0, Stamp { hardness: 0.0, strength: 1.0, mode: BrushMode::Add });
+        let center = c.grid[8 * 16 + 8];
+        let mid = c.grid[8 * 16 + 11];
+        let edge = c.grid[8 * 16 + 13];
+        assert_eq!(center, 127, "chebyshev = 0 at center is full strength");
+        assert!(mid > 0 && mid < 127, "mid radius is partial under smoothstep, got {mid}");
+        assert!(edge < mid, "outer pixel weaker than mid (edge={edge}, mid={mid})");
     }
 }
