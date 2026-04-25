@@ -215,6 +215,11 @@ pub(crate) struct BatchItem {
     pub(crate) preset_undo_stack: VecDeque<PresetSnapshot>,
     /// Redo counterpart — cleared on a fresh preset apply, fed by undos.
     pub(crate) preset_redo_stack: VecDeque<PresetSnapshot>,
+    /// Invariant: `mask_correction` and `correction_hash` mutate together
+    /// via `commit_correction` / `clear_correction`. Direct field writes
+    /// break recipe-diff dispatch.
+    pub(crate) mask_correction: Option<Arc<prunr_core::brush::MaskCorrection>>,
+    pub(crate) correction_hash: Option<u64>,
 }
 
 impl BatchItem {
@@ -226,6 +231,28 @@ impl BatchItem {
         self.cached_edge_tensors = None;
         self.volatile_edge_tensor = None;
         self.cached_edge_mask = None;
+    }
+
+    /// Merge brush strokes into the existing correction and refresh the
+    /// hash. Skips the full-grid clone via `Arc::make_mut` when no live-
+    /// preview snapshot is currently holding the Arc — the common case
+    /// at stroke-commit time.
+    pub(crate) fn commit_correction(
+        &mut self,
+        strokes: prunr_core::brush::MaskCorrection,
+    ) {
+        let arc = self.mask_correction.get_or_insert_with(|| {
+            Arc::new(prunr_core::brush::MaskCorrection::empty(strokes.width, strokes.height))
+        });
+        let current = Arc::make_mut(arc);
+        prunr_core::brush::merge(current, &strokes);
+        self.correction_hash = Some(prunr_core::brush::content_hash(current));
+    }
+
+    /// Drop the brush correction. Pairs with `commit_correction`.
+    pub(crate) fn clear_correction(&mut self) {
+        self.mask_correction = None;
+        self.correction_hash = None;
     }
 
     /// Drop whatever caches a `CacheImpact` says are stale. Single entry
@@ -373,6 +400,8 @@ impl BatchItem {
             applied_preset,
             preset_undo_stack: VecDeque::new(),
             preset_redo_stack: VecDeque::new(),
+            mask_correction: None,
+            correction_hash: None,
         }
     }
 }
