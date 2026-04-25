@@ -69,15 +69,11 @@ impl BrushState {
         });
     }
 
-    /// Extend the active stroke with a sample at item-pixel coordinates.
-    /// No-op if no stroke is active or if dimensions don't match.
-    pub fn extend_stroke(&mut self, x: f32, y: f32) {
-        self.extend_stroke_with_radius(x, y, self.settings.radius);
-    }
-
-    /// Extend the active stroke with an explicit model-space radius.
-    /// Use when the caller has converted a screen-space brush radius
-    /// down to the model output's pixel scale.
+    /// Extend the active stroke at model-space coordinates with an
+    /// explicit model-space radius. Caller is responsible for converting
+    /// the user-visible (screen-pixel) radius to model space — keeping
+    /// the conversion outside this type prevents painting screen pixels
+    /// into a model grid by accident.
     pub fn extend_stroke_with_radius(&mut self, x: f32, y: f32, radius: f32) {
         let Some(active) = self.active.as_mut() else { return };
         paint_circle(
@@ -133,7 +129,7 @@ mod tests {
         let mut s = BrushState::default();
         s.toggle();
         s.begin_stroke(64, 64);
-        s.extend_stroke(32.0, 32.0);
+        s.extend_stroke_with_radius(32.0, 32.0, 8.0);
         assert!(s.has_active_stroke());
         s.toggle();
         assert!(!s.has_active_stroke());
@@ -142,7 +138,7 @@ mod tests {
     #[test]
     fn extend_without_begin_is_no_op() {
         let mut s = BrushState::default();
-        s.extend_stroke(10.0, 10.0);
+        s.extend_stroke_with_radius(10.0, 10.0, 8.0);
         assert!(!s.has_active_stroke());
         assert!(s.commit_stroke().is_none());
     }
@@ -160,7 +156,7 @@ mod tests {
     fn populated_stroke_commit_returns_correction() {
         let mut s = BrushState::default();
         s.begin_stroke(64, 64);
-        s.extend_stroke(32.0, 32.0);
+        s.extend_stroke_with_radius(32.0, 32.0, 8.0);
         let c = s.commit_stroke().expect("populated stroke");
         assert_eq!(c.width, 64);
         assert_eq!(c.height, 64);
@@ -172,7 +168,7 @@ mod tests {
     fn cancel_drops_active_without_returning() {
         let mut s = BrushState::default();
         s.begin_stroke(32, 32);
-        s.extend_stroke(16.0, 16.0);
+        s.extend_stroke_with_radius(16.0, 16.0, 8.0);
         s.cancel_stroke();
         assert!(!s.has_active_stroke());
         assert!(s.commit_stroke().is_none());

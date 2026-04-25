@@ -9,7 +9,7 @@
 //! Does NOT own coordinate math beyond the screen→model transform
 //! (canvas owns `compute_img_rect` and zoom/pan).
 
-use egui::{Color32, Pos2, Rect, Sense, Stroke, Ui, Vec2};
+use egui::{Color32, Pos2, Rect, Sense, Stroke, Ui};
 
 use crate::gui::brush_state::BrushState;
 use crate::gui::item::BatchItem;
@@ -38,14 +38,14 @@ pub(crate) fn model_dims(item: &BatchItem) -> Option<(u16, u16)> {
 
 /// Handle pointer input + paint cursor for one frame. The canvas calls
 /// this after rendering the image. `img_rect` is the on-screen rect of
-/// the displayed texture (post-zoom, post-pan). `tex_size` is the
-/// underlying texture pixel dimensions.
+/// the displayed texture (post-zoom, post-pan); the brush works in that
+/// rect's normalized coordinate space, so the underlying texture size
+/// is irrelevant here.
 pub(crate) fn handle_input(
     ui: &mut Ui,
     brush_state: &mut BrushState,
     item: &BatchItem,
     img_rect: Rect,
-    tex_size: Vec2,
 ) -> BrushAction {
     let Some((model_w, model_h)) = model_dims(item) else {
         // No cached tensor → brush has nothing to write into. Render a
@@ -73,7 +73,7 @@ pub(crate) fn handle_input(
         return BrushAction::None;
     };
 
-    let model_pos = screen_to_model(p, img_rect, tex_size, model_w, model_h);
+    let model_pos = screen_to_model(p, img_rect, model_w, model_h);
 
     if response.drag_started() {
         brush_state.begin_stroke(model_w, model_h);
@@ -98,10 +98,9 @@ pub(crate) fn handle_input(
 }
 
 /// Convert a screen-space pointer to model-grid coordinates.
-fn screen_to_model(p: Pos2, img_rect: Rect, tex_size: Vec2, model_w: u16, model_h: u16) -> Pos2 {
+fn screen_to_model(p: Pos2, img_rect: Rect, model_w: u16, model_h: u16) -> Pos2 {
     let in_img_x = (p.x - img_rect.min.x) / img_rect.width().max(1.0);
     let in_img_y = (p.y - img_rect.min.y) / img_rect.height().max(1.0);
-    let _ = tex_size;
     Pos2::new(in_img_x * model_w as f32, in_img_y * model_h as f32)
 }
 
@@ -121,4 +120,36 @@ fn draw_cursor(ui: &Ui, img_rect: Rect, brush_state: &BrushState, armed: bool) {
         .circle_stroke(p, r, Stroke::new(1.5, color));
     // Inner dot for precision targeting.
     ui.painter().circle_filled(p, 1.5, color);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pin the screen→model coordinate transform. A bug here flips an
+    /// axis silently — strokes paint mirrored or off-by-half-image.
+    #[test]
+    fn screen_to_model_corners_and_center() {
+        let img_rect = Rect::from_min_size(Pos2::new(100.0, 200.0), egui::vec2(400.0, 300.0));
+        let (mw, mh) = (320u16, 240u16);
+
+        let top_left = screen_to_model(img_rect.min, img_rect, mw, mh);
+        assert!((top_left.x - 0.0).abs() < 1e-3);
+        assert!((top_left.y - 0.0).abs() < 1e-3);
+
+        let bottom_right = screen_to_model(img_rect.max, img_rect, mw, mh);
+        assert!((bottom_right.x - 320.0).abs() < 1e-3);
+        assert!((bottom_right.y - 240.0).abs() < 1e-3);
+
+        let center = screen_to_model(img_rect.center(), img_rect, mw, mh);
+        assert!((center.x - 160.0).abs() < 1e-3);
+        assert!((center.y - 120.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn screen_to_model_handles_zero_width_safely() {
+        let img_rect = Rect::from_min_size(Pos2::new(0.0, 0.0), egui::vec2(0.0, 0.0));
+        let p = screen_to_model(Pos2::new(50.0, 50.0), img_rect, 320, 240);
+        assert!(p.x.is_finite() && p.y.is_finite(), "must not return NaN/inf on degenerate rect");
+    }
 }

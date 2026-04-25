@@ -67,6 +67,20 @@ pub(super) fn chip_button(ui: &mut Ui, icon: &str, value: &str, accent: bool) ->
     resp
 }
 
+/// Square icon-only button with an active/inactive visual state. Used by
+/// the toolbar's Reset / Brush toggles and any future single-icon pill.
+pub(super) fn icon_toggle_button(ui: &mut Ui, icon: &str, active: bool) -> Response {
+    let btn = egui::Button::new(
+        RichText::new(icon)
+            .color(if active { theme::TEXT_PRIMARY } else { theme::TEXT_SECONDARY })
+            .size(theme::ICON_SIZE_SMALL),
+    )
+    .fill(if active { theme::ACCENT } else { theme::BG_SECONDARY })
+    .corner_radius(theme::BUTTON_ROUNDING)
+    .min_size(egui::vec2(theme::CHIP_HEIGHT, theme::CHIP_HEIGHT));
+    ui.add(btn)
+}
+
 /// Attach a rich hover tooltip: strong setting-name heading + body text.
 /// Every chip uses this so the user always sees what they're hovering.
 pub(super) fn chip_tooltip(resp: Response, label: &str, body: &str) -> Response {
