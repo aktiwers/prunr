@@ -82,6 +82,11 @@ pub struct ItemSettings {
     /// a FullPipeline rerun on the next Process.
     #[serde(default)]
     pub input_transform: prunr_core::InputTransform,
+    /// Fingerprint of the active brush correction. The bytes themselves
+    /// live on the parent `BatchItem`; this hash is what the recipe diff
+    /// reads to fire MaskRerun on stroke commit.
+    #[serde(default)]
+    pub correction_hash: Option<u64>,
 }
 
 impl Default for ItemSettings {
@@ -105,6 +110,7 @@ impl Default for ItemSettings {
             fill_style: prunr_core::FillStyle::default(),
             bg_effect: prunr_core::BgEffect::default(),
             input_transform: prunr_core::InputTransform::default(),
+            correction_hash: None,
         }
     }
 }
@@ -128,7 +134,7 @@ impl ItemSettings {
             feather: self.feather,
             fill_style: self.fill_style,
             bg_effect: self.bg_effect,
-            correction_hash: None,
+            correction_hash: self.correction_hash,
         }
     }
 
@@ -203,13 +209,14 @@ mod tests {
     #[test]
     fn size_under_cache_line_budget() {
         // Budget is sized to absorb incremental FillStyle / LineStyle growth.
-        // Phase 6 (GradientMap, CrossProcess, Chromatic, etc.) pushed the
-        // enum over a cache line to 96 B. Still Copy-friendly; the cost is
-        // one extra cache miss on cold access, never on the per-pixel hot
-        // path. Bump in coarse steps to avoid a churn of test-only commits.
+        // Phase 6 took it to 96 B. Phase 15 added `correction_hash:
+        // Option<u64>` for the brush feature, lifting it to 112 B (two
+        // cache lines). Still Copy-friendly; the cost is one extra cache
+        // miss on cold access, never on the per-pixel hot path. Bump in
+        // coarse steps to avoid a churn of test-only commits.
         assert!(
-            std::mem::size_of::<ItemSettings>() <= 96,
-            "ItemSettings is {} bytes, budget is 96",
+            std::mem::size_of::<ItemSettings>() <= 128,
+            "ItemSettings is {} bytes, budget is 128",
             std::mem::size_of::<ItemSettings>()
         );
     }
@@ -298,6 +305,7 @@ mod tests {
             fill_style: prunr_core::FillStyle::Duotone { dark: [10, 10, 40], light: [240, 240, 200] },
             bg_effect: prunr_core::BgEffect::BlurredSource { radius: 8 },
             input_transform: prunr_core::InputTransform::ContrastBoost { percent: 150 },
+            correction_hash: Some(0xdeadbeef),
         };
         let json = serde_json::to_string(&s).unwrap();
         let recovered: ItemSettings = serde_json::from_str(&json).unwrap();

@@ -12,6 +12,7 @@
 use egui::{RichText, Ui};
 use egui_material_icons::icons::*;
 
+use crate::gui::brush_state::BrushState;
 use crate::gui::item_settings::ItemSettings;
 use crate::gui::knob_catalog::{
     self, CacheImpact, DispatchKind, KnobSet, LineModeChange, StaticKnob,
@@ -126,6 +127,7 @@ pub fn render(
     item_settings: &mut ItemSettings,
     app_settings: &mut Settings,
     applied_preset: &mut String,
+    brush_state: &mut BrushState,
     processing: bool,
 ) -> ToolbarChange {
     let mut change = ToolbarChange::default();
@@ -297,6 +299,26 @@ pub fn render(
                 if let Some(name) = preset_dropdown::render(ui, app_settings, item_settings, applied_preset) {
                     *applied_preset = name;
                     mark_preset_apply(&mut change);
+                }
+
+                // Brush mode toggle (Phase 15). Sits left of the preset
+                // button in the right-to-left layout.
+                let brush_active = brush_state.is_enabled();
+                let brush_btn = egui::Button::new(
+                    RichText::new(ICON_BRUSH.codepoint)
+                        .color(if brush_active { theme::TEXT_PRIMARY } else { theme::TEXT_SECONDARY })
+                        .size(theme::ICON_SIZE_SMALL),
+                )
+                .fill(if brush_active { theme::ACCENT } else { theme::BG_SECONDARY })
+                .corner_radius(theme::BUTTON_ROUNDING)
+                .min_size(egui::vec2(theme::CHIP_HEIGHT, theme::CHIP_HEIGHT));
+                let tooltip = if brush_active {
+                    "Brush mode ON — click on canvas to add (positive) / subtract (negative) mask. Click here to disable."
+                } else {
+                    "Toggle brush mode: paint corrections onto the mask"
+                };
+                if ui.add(brush_btn).on_hover_text(tooltip).clicked() {
+                    brush_state.toggle();
                 }
             },
         );

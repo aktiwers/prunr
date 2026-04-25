@@ -236,7 +236,9 @@ impl BatchItem {
     /// Merge brush strokes into the existing correction and refresh the
     /// hash. Skips the full-grid clone via `Arc::make_mut` when no live-
     /// preview snapshot is currently holding the Arc — the common case
-    /// at stroke-commit time.
+    /// at stroke-commit time. The hash is mirrored onto
+    /// `settings.correction_hash` so `mask_settings()` (and the recipe
+    /// diff that reads it) sees the change.
     pub(crate) fn commit_correction(
         &mut self,
         strokes: prunr_core::brush::MaskCorrection,
@@ -246,13 +248,16 @@ impl BatchItem {
         });
         let current = Arc::make_mut(arc);
         prunr_core::brush::merge(current, &strokes);
-        self.correction_hash = Some(prunr_core::brush::content_hash(current));
+        let hash = prunr_core::brush::content_hash(current);
+        self.correction_hash = Some(hash);
+        self.settings.correction_hash = Some(hash);
     }
 
     /// Drop the brush correction. Pairs with `commit_correction`.
     pub(crate) fn clear_correction(&mut self) {
         self.mask_correction = None;
         self.correction_hash = None;
+        self.settings.correction_hash = None;
     }
 
     /// Drop whatever caches a `CacheImpact` says are stale. Single entry

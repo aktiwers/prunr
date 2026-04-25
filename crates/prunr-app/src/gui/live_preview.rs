@@ -41,14 +41,17 @@ fn build_masked_base(
     seg: &SegTensor,
     original: &DynamicImage,
     settings: &ItemSettings,
+    correction: Option<&prunr_core::brush::MaskCorrection>,
 ) -> Option<DynamicImage> {
     let mask_settings = settings.mask_settings();
+    let opts = prunr_core::PostprocessOpts::new(&mask_settings, seg.model)
+        .with_correction(correction);
     postprocess_from_flat(
         &seg.data,
         seg.height as usize,
         seg.width as usize,
         original,
-        &prunr_core::PostprocessOpts::new(&mask_settings, seg.model),
+        &opts,
     )
     .ok()
     .map(DynamicImage::ImageRgba8)
@@ -321,6 +324,10 @@ pub struct DispatchInputs {
     /// from a previous dispatch whose mask recipe matches the current one.
     /// Populated when available so Edge tweaks skip Lanczos + guided filter.
     pub cached_masked_base: Option<Arc<image::RgbaImage>>,
+    /// Brush mask correction snapshot (Phase 15). Tier 2 reruns apply this
+    /// at model resolution before the resize/refine/feather chain. `None`
+    /// when no strokes have been committed.
+    pub correction: Option<Arc<prunr_core::brush::MaskCorrection>>,
 }
 
 pub struct SegTensor {
@@ -390,7 +397,7 @@ fn run_preview(inputs: DispatchInputs, cancel: &AtomicBool) -> RunOutput {
             PreviewKind::Mask => {
                 // invariant: is_subject_outline → seg_tensor is Some.
                 let seg = inputs.seg_tensor.as_ref().unwrap();
-                match build_masked_base(seg, &inputs.original, &inputs.settings) {
+                match build_masked_base(seg, &inputs.original, &inputs.settings, inputs.correction.as_deref()) {
                     Some(img) => {
                         let arc = Arc::new(img.to_rgba8());
                         (Some(arc.clone()), Some(arc))
@@ -403,7 +410,7 @@ fn run_preview(inputs: DispatchInputs, cancel: &AtomicBool) -> RunOutput {
                     (Some(cached), None)
                 } else {
                     let seg = inputs.seg_tensor.as_ref().unwrap();
-                    match build_masked_base(seg, &inputs.original, &inputs.settings) {
+                    match build_masked_base(seg, &inputs.original, &inputs.settings, inputs.correction.as_deref()) {
                         Some(img) => {
                             let arc = Arc::new(img.to_rgba8());
                             (Some(arc.clone()), Some(arc))
@@ -434,7 +441,7 @@ fn run_preview(inputs: DispatchInputs, cancel: &AtomicBool) -> RunOutput {
                     };
                 };
                 // Off mode with seg tensor: rebuild masked RGBA (no edge compose).
-                let Some(masked) = build_masked_base(seg, &inputs.original, &inputs.settings)
+                let Some(masked) = build_masked_base(seg, &inputs.original, &inputs.settings, inputs.correction.as_deref())
                 else { return RunOutput::empty(); };
                 return RunOutput {
                     rgba: Some(masked.to_rgba8()),

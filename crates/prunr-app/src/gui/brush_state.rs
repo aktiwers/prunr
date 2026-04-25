@@ -72,12 +72,19 @@ impl BrushState {
     /// Extend the active stroke with a sample at item-pixel coordinates.
     /// No-op if no stroke is active or if dimensions don't match.
     pub fn extend_stroke(&mut self, x: f32, y: f32) {
+        self.extend_stroke_with_radius(x, y, self.settings.radius);
+    }
+
+    /// Extend the active stroke with an explicit model-space radius.
+    /// Use when the caller has converted a screen-space brush radius
+    /// down to the model output's pixel scale.
+    pub fn extend_stroke_with_radius(&mut self, x: f32, y: f32, radius: f32) {
         let Some(active) = self.active.as_mut() else { return };
         paint_circle(
             &mut active.grid,
             x,
             y,
-            self.settings.radius,
+            radius,
             self.settings.hardness,
             self.settings.mode,
         );
