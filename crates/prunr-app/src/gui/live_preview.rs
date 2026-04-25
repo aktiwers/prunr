@@ -95,6 +95,11 @@ pub struct PreviewResult {
     /// for the parent to cache so subsequent Edge tweaks whose mask recipe
     /// matches can skip `postprocess_from_flat`. Keyed by (MaskRecipe, model).
     pub new_masked_base: Option<(Arc<image::RgbaImage>, prunr_core::MaskRecipe, prunr_core::ModelKind)>,
+    /// MaskRecipe snapshot taken when this dispatch was kicked off. The
+    /// parent updates `applied_recipe.mask` to match so the recipe-drift
+    /// tripwire doesn't immediately re-fire on a result it already
+    /// applied.
+    pub applied_mask: prunr_core::MaskRecipe,
     /// `true` when no further tweaks are pending for this item at drain
     /// time — the drag has settled and this is the last result of the
     /// session. Callers gate heavy side-effects (sidebar thumb rebuild)
@@ -245,12 +250,13 @@ impl LivePreview {
                     };
                     let new_masked_base = output.built_masked_base
                         .zip(seg_model)
-                        .map(|(base, model)| (base, mask_recipe, model));
+                        .map(|(base, model)| (base, mask_recipe.clone(), model));
                     // `is_final` is set by `drain_results`, where the UI
                     // thread can read `self.pending` atomically. The worker
                     // ships a placeholder and doesn't care.
                     let _ = tx.send(PreviewResult {
                         item_id: id, rgba, generation, new_edge_mask, new_masked_base,
+                        applied_mask: mask_recipe,
                         is_final: false,
                     });
                 }
@@ -661,6 +667,7 @@ mod tests {
             generation: 1,
             new_edge_mask: None,
             new_masked_base: None,
+            applied_mask: prunr_core::MaskRecipe::from(&prunr_core::MaskSettings::default()),
             is_final: false,
         }).unwrap();
 
@@ -685,6 +692,7 @@ mod tests {
             generation: 7,
             new_edge_mask: None,
             new_masked_base: None,
+            applied_mask: prunr_core::MaskRecipe::from(&prunr_core::MaskSettings::default()),
             is_final: false,
         }).unwrap();
 
@@ -708,6 +716,7 @@ mod tests {
             generation: 1,
             new_edge_mask: None,
             new_masked_base: None,
+            applied_mask: prunr_core::MaskRecipe::from(&prunr_core::MaskSettings::default()),
             is_final: false,
         }).unwrap();
         let drained = lp.drain_results();
@@ -728,6 +737,7 @@ mod tests {
             generation: 3,
             new_edge_mask: None,
             new_masked_base: None,
+            applied_mask: prunr_core::MaskRecipe::from(&prunr_core::MaskSettings::default()),
             is_final: false,
         }).unwrap();
 
@@ -755,6 +765,7 @@ mod tests {
             generation: 2,
             new_edge_mask: None,
             new_masked_base: None,
+            applied_mask: prunr_core::MaskRecipe::from(&prunr_core::MaskSettings::default()),
             is_final: false,
         }).unwrap();
 

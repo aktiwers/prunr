@@ -9,7 +9,7 @@
 //! Does NOT own coordinate math beyond the screen→model transform
 //! (canvas owns `compute_img_rect` and zoom/pan).
 
-use egui::{Color32, Pos2, Rect, Sense, Stroke, Ui};
+use egui::{Color32, Pos2, Rect, Stroke, Ui};
 
 use crate::gui::brush_state::BrushState;
 use crate::gui::item::BatchItem;
@@ -56,9 +56,11 @@ pub(crate) fn handle_input(
         return BrushAction::None;
     };
 
-    // Claim the area so canvas pan/zoom doesn't double-handle pointer.
-    let _claim = ui.interact(img_rect, ui.id().with("brush_overlay"), Sense::click_and_drag());
-
+    // No `ui.interact` here: it would set `egui_wants_pointer_input`,
+    // which the canvas pan handler reads to decide whether to ignore
+    // events. With pan on secondary in brush mode, primary belongs to
+    // the brush and secondary to pan — they don't conflict, so neither
+    // needs widget-level claim. Reading raw input below is enough.
     let (hover, primary_pressed, primary_down, primary_released) = ui.input(|i| {
         (
             i.pointer.hover_pos(),
@@ -68,6 +70,9 @@ pub(crate) fn handle_input(
         )
     });
     let pointer_on_img = hover.filter(|p| img_rect.contains(*p));
+
+    // In-progress stroke trail (drawn first so the cursor renders on top).
+    draw_trail(ui, brush_state);
 
     // Cursor circle — armed only when the pointer is over the image.
     draw_cursor(ui, img_rect, brush_state, pointer_on_img.is_some());
@@ -79,23 +84,23 @@ pub(crate) fn handle_input(
         screen_radius * (model_w as f32 / img_rect.width().max(1.0))
     };
 
+    let screen_radius = brush_state.settings().radius;
+
     if primary_pressed {
         if let Some(p) = pointer_on_img {
             tracing::debug!(model_w, model_h, "brush press — begin stroke");
             brush_state.begin_stroke(model_w, model_h);
             let m = screen_to_model(p, img_rect, model_w, model_h);
-            brush_state.extend_stroke_with_radius(
-                m.x, m.y, model_radius_for(brush_state.settings().radius),
-            );
+            brush_state.extend_stroke_with_radius(m.x, m.y, model_radius_for(screen_radius));
+            brush_state.record_trail_stamp(p.x, p.y, screen_radius);
         }
     }
 
     if primary_down && brush_state.has_active_stroke() {
         if let Some(p) = pointer_on_img {
             let m = screen_to_model(p, img_rect, model_w, model_h);
-            brush_state.extend_stroke_with_radius(
-                m.x, m.y, model_radius_for(brush_state.settings().radius),
-            );
+            brush_state.extend_stroke_with_radius(m.x, m.y, model_radius_for(screen_radius));
+            brush_state.record_trail_stamp(p.x, p.y, screen_radius);
         }
     }
 
@@ -114,6 +119,22 @@ fn screen_to_model(p: Pos2, img_rect: Rect, model_w: u16, model_h: u16) -> Pos2 
     let in_img_x = (p.x - img_rect.min.x) / img_rect.width().max(1.0);
     let in_img_y = (p.y - img_rect.min.y) / img_rect.height().max(1.0);
     Pos2::new(in_img_x * model_w as f32, in_img_y * model_h as f32)
+}
+
+/// Translucent ACCENT-purple stamps along the in-progress stroke's
+/// trail. Lets the user see where they've painted before the Tier-2
+/// rerun lands and replaces it with the real mask update.
+fn draw_trail(ui: &Ui, brush_state: &BrushState) {
+    let accent = theme::ACCENT;
+    let fill = Color32::from_rgba_premultiplied(
+        ((accent.r() as u32) * 90 / 255) as u8,
+        ((accent.g() as u32) * 90 / 255) as u8,
+        ((accent.b() as u32) * 90 / 255) as u8,
+        90,
+    );
+    for (sx, sy, sr) in brush_state.trail_stamps() {
+        ui.painter().circle_filled(egui::Pos2::new(sx, sy), sr, fill);
+    }
 }
 
 fn draw_cursor(ui: &Ui, img_rect: Rect, brush_state: &BrushState, armed: bool) {
