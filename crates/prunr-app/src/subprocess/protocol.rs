@@ -69,6 +69,19 @@ pub enum SubprocessCommand {
         /// Per-item mask settings (may differ from Init's mask).
         mask: MaskSettings,
     },
+    /// Inpaint a region of an image (Phase 16 Eraser). Worker runs LaMa
+    /// over `mask_path`'s painted area and returns the filled RGBA.
+    /// Independent of the seg/edge engine pool — uses its own LaMa session.
+    Inpaint {
+        item_id: u64,
+        /// Path to temp file with the source image bytes.
+        image_path: std::path::PathBuf,
+        /// Path to temp file with a single-channel mask (255 = inpaint here, 0 = keep).
+        mask_path: std::path::PathBuf,
+        /// Image dimensions, sent inline so the worker doesn't decode twice.
+        width: u32,
+        height: u32,
+    },
     /// Cancel: stop after current image, send Finished.
     Cancel,
     /// Cancel one item by id — worker emits `ImageError { error:
@@ -125,6 +138,19 @@ pub enum SubprocessEvent {
     },
     /// Image processing failed (non-fatal).
     ImageError {
+        item_id: u64,
+        error: String,
+    },
+    /// Inpaint completed — RGBA result lives at `rgba_path`. Same
+    /// read-and-delete contract as `ImageDone.result_path`.
+    InpaintDone {
+        item_id: u64,
+        rgba_path: std::path::PathBuf,
+        width: u32,
+        height: u32,
+    },
+    /// Inpaint dispatch failed (model missing, ORT error, IO error).
+    InpaintError {
         item_id: u64,
         error: String,
     },
@@ -330,6 +356,31 @@ mod tests {
         roundtrip(&SubprocessEvent::Finished);
         roundtrip(&SubprocessEvent::InitError {
             error: "engine creation failed".into(),
+        });
+    }
+
+    #[test]
+    fn command_inpaint_roundtrip() {
+        roundtrip(&SubprocessCommand::Inpaint {
+            item_id: 11,
+            image_path: std::path::PathBuf::from("/tmp/prunr-inpaint-img-11"),
+            mask_path: std::path::PathBuf::from("/tmp/prunr-inpaint-mask-11"),
+            width: 1920,
+            height: 1080,
+        });
+    }
+
+    #[test]
+    fn event_inpaint_done_and_error_roundtrip() {
+        roundtrip(&SubprocessEvent::InpaintDone {
+            item_id: 11,
+            rgba_path: std::path::PathBuf::from("/tmp/prunr-inpaint-out-11"),
+            width: 1920,
+            height: 1080,
+        });
+        roundtrip(&SubprocessEvent::InpaintError {
+            item_id: 11,
+            error: "lama session failed: tensor shape mismatch".into(),
         });
     }
 }
