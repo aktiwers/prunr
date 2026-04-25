@@ -132,6 +132,7 @@ pub(crate) fn render(
     app_settings: &mut Settings,
     applied_preset: &mut String,
     brush_state: &mut BrushState,
+    brush_available: bool,
     processing: bool,
 ) -> ToolbarChange {
     let mut change = ToolbarChange::default();
@@ -299,20 +300,25 @@ pub(crate) fn render(
                 }
 
                 let brush_active = brush_state.is_enabled();
-                let brush_tooltip = if brush_active {
+                let brush_tooltip = if !brush_available {
+                    "Brush is available after processing — run the image through a model first."
+                } else if brush_active {
                     "Brush mode ON — click on canvas to add (positive) / subtract (negative) mask. Click here to disable."
                 } else {
                     "Toggle brush mode: paint corrections onto the mask"
                 };
-                let brush_resp = chip::icon_toggle_button(ui, &ICON_BRUSH.codepoint.to_string(), brush_active);
-                if brush_resp.on_hover_text(brush_tooltip).clicked() {
-                    brush_state.toggle();
-                }
+                ui.add_enabled_ui(brush_available, |ui| {
+                    let brush_resp = chip::icon_toggle_button(ui, &ICON_BRUSH.codepoint.to_string(), brush_active);
+                    if brush_resp.on_hover_text(brush_tooltip).clicked() {
+                        brush_state.toggle();
+                    }
+                });
 
-                // Settings chip — only visible when brush is on. In the
-                // right-to-left layout this appears LEFT of the toggle,
-                // so the modifier sits next to its mode switch.
-                if brush_state.is_enabled()
+                // Settings chip — only visible when brush is on AND has
+                // somewhere to paint. In the right-to-left layout this
+                // appears LEFT of the toggle.
+                if brush_available
+                    && brush_state.is_enabled()
                     && super::brush_chip::render(ui, brush_state)
                 {
                     change.clear_correction_requested = true;
