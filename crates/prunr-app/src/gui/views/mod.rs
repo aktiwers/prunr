@@ -9,6 +9,7 @@ pub mod chip;
 pub mod lines_popover;
 pub mod preset_dropdown;
 pub mod adjustments_toolbar;
+pub mod brush_chip;
 pub mod brush_overlay;
 pub mod pipeline_flow;
 

@@ -74,6 +74,9 @@ pub struct ToolbarChange {
     /// A render-only knob (bg color) fired — request a repaint even when
     /// no other dispatch kicks in.
     pub render_repaint: bool,
+    /// User clicked "Clear strokes" in the brush popover. Caller routes
+    /// to `BatchItem::clear_correction` post-render.
+    pub clear_correction_requested: bool,
 }
 
 impl Default for ToolbarChange {
@@ -88,6 +91,7 @@ impl Default for ToolbarChange {
             cache_impact: CacheImpact::Nothing,
             auto_dispatch: DispatchKind::None,
             render_repaint: false,
+            clear_correction_requested: false,
         }
     }
 }
@@ -303,6 +307,15 @@ pub(crate) fn render(
                 let brush_resp = chip::icon_toggle_button(ui, &ICON_BRUSH.codepoint.to_string(), brush_active);
                 if brush_resp.on_hover_text(brush_tooltip).clicked() {
                     brush_state.toggle();
+                }
+
+                // Settings chip — only visible when brush is on. In the
+                // right-to-left layout this appears LEFT of the toggle,
+                // so the modifier sits next to its mode switch.
+                if brush_state.is_enabled()
+                    && super::brush_chip::render(ui, brush_state)
+                {
+                    change.clear_correction_requested = true;
                 }
             },
         );

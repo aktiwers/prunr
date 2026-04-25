@@ -9,6 +9,22 @@ use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+/// Cap on `stroke_undo_stack` / `stroke_redo_stack` length. Each entry
+/// is `Option<Arc<MaskCorrection>>` (one refcount bump), so the cost is
+/// negligible — the cap exists to bound worst-case memory if a session
+/// runs into the thousands of strokes.
+const STROKE_HISTORY_DEPTH: usize = 50;
+
+fn push_stroke_bounded(
+    stack: &mut VecDeque<Option<Arc<prunr_core::brush::MaskCorrection>>>,
+    snap: Option<Arc<prunr_core::brush::MaskCorrection>>,
+) {
+    stack.push_back(snap);
+    while stack.len() > STROKE_HISTORY_DEPTH {
+        stack.pop_front();
+    }
+}
+
 /// Three-tiered history entry:
 /// - Tier 1 (Hot): Raw `Arc<RgbaImage>` — instant access, full RAM cost.
 /// - Tier 2 (Warm): Zstd-compressed bytes in RAM — ~3-4x smaller, ~8ms decompress.
@@ -220,6 +236,12 @@ pub(crate) struct BatchItem {
     /// break recipe-diff dispatch.
     pub(crate) mask_correction: Option<Arc<prunr_core::brush::MaskCorrection>>,
     pub(crate) correction_hash: Option<u64>,
+    /// Snapshots of `mask_correction` taken BEFORE each stroke commit.
+    /// `Ctrl+Z` while brush mode is active pops the top entry and
+    /// restores the snapshot — the user undoes one stroke per press.
+    /// Bounded; oldest dropped at depth limit.
+    pub(crate) stroke_undo_stack: VecDeque<Option<Arc<prunr_core::brush::MaskCorrection>>>,
+    pub(crate) stroke_redo_stack: VecDeque<Option<Arc<prunr_core::brush::MaskCorrection>>>,
 }
 
 impl BatchItem {
@@ -239,10 +261,17 @@ impl BatchItem {
     /// at stroke-commit time. The hash is mirrored onto
     /// `settings.correction_hash` so `mask_settings()` (and the recipe
     /// diff that reads it) sees the change.
+    ///
+    /// Pushes the pre-merge correction onto `stroke_undo_stack` and
+    /// clears `stroke_redo_stack`, mirroring the result-history shape.
     pub(crate) fn commit_correction(
         &mut self,
         strokes: prunr_core::brush::MaskCorrection,
     ) {
+        let pre = self.mask_correction.clone();
+        push_stroke_bounded(&mut self.stroke_undo_stack, pre);
+        self.stroke_redo_stack.clear();
+
         let arc = self.mask_correction.get_or_insert_with(|| {
             Arc::new(prunr_core::brush::MaskCorrection::empty(strokes.width, strokes.height))
         });
@@ -253,13 +282,53 @@ impl BatchItem {
         self.settings.correction_hash = Some(hash);
     }
 
-    /// Drop the brush correction. Pairs with `commit_correction`. Wired
-    /// into a "Clear strokes" toolbar button in 15-06.
-    #[allow(dead_code)]
+    /// Drop the brush correction. Pairs with `commit_correction`. The
+    /// pre-clear state is pushed onto the undo stack so the user can
+    /// reverse a "Clear strokes" click.
     pub(crate) fn clear_correction(&mut self) {
+        if self.mask_correction.is_some() {
+            let pre = self.mask_correction.clone();
+            push_stroke_bounded(&mut self.stroke_undo_stack, pre);
+            self.stroke_redo_stack.clear();
+        }
         self.mask_correction = None;
         self.correction_hash = None;
         self.settings.correction_hash = None;
+    }
+
+    /// Pop the last stroke snapshot, push the current state onto the
+    /// redo stack, and apply the snapshot. Returns `true` if anything
+    /// changed (caller invalidates result caches and re-dispatches).
+    pub(crate) fn undo_stroke(&mut self) -> bool {
+        let Some(prev) = self.stroke_undo_stack.pop_back() else { return false };
+        let current = self.mask_correction.clone();
+        push_stroke_bounded(&mut self.stroke_redo_stack, current);
+        self.set_correction(prev);
+        true
+    }
+
+    /// Inverse of `undo_stroke`.
+    pub(crate) fn redo_stroke(&mut self) -> bool {
+        let Some(next) = self.stroke_redo_stack.pop_back() else { return false };
+        let current = self.mask_correction.clone();
+        push_stroke_bounded(&mut self.stroke_undo_stack, current);
+        self.set_correction(next);
+        true
+    }
+
+    pub(crate) fn has_stroke_undo(&self) -> bool {
+        !self.stroke_undo_stack.is_empty()
+    }
+
+    pub(crate) fn has_stroke_redo(&self) -> bool {
+        !self.stroke_redo_stack.is_empty()
+    }
+
+    fn set_correction(&mut self, c: Option<Arc<prunr_core::brush::MaskCorrection>>) {
+        let hash = c.as_deref().map(prunr_core::brush::content_hash);
+        self.mask_correction = c;
+        self.correction_hash = hash;
+        self.settings.correction_hash = hash;
     }
 
     /// Drop whatever caches a `CacheImpact` says are stale. Single entry
@@ -409,6 +478,8 @@ impl BatchItem {
             preset_redo_stack: VecDeque::new(),
             mask_correction: None,
             correction_hash: None,
+            stroke_undo_stack: VecDeque::new(),
+            stroke_redo_stack: VecDeque::new(),
         }
     }
 }
@@ -648,5 +719,93 @@ mod tests {
             HistorySlot::Compressed(_) => panic!("expected InMemory, got Compressed"),
             HistorySlot::OnDisk(_) => panic!("expected InMemory, got OnDisk"),
         }
+    }
+
+    fn stamp(width: u16, height: u16, idx: usize, value: i8) -> prunr_core::brush::MaskCorrection {
+        let mut c = prunr_core::brush::MaskCorrection::empty(width, height);
+        c.grid[idx] = value;
+        c
+    }
+
+    #[test]
+    fn commit_correction_pushes_pre_state_onto_undo_stack() {
+        let mut item = fixture_item(1);
+        assert!(!item.has_stroke_undo());
+        item.commit_correction(stamp(8, 8, 5, 50));
+        assert!(item.has_stroke_undo(), "first stroke must register an undo entry (pre = None)");
+        assert!(!item.has_stroke_redo());
+    }
+
+    #[test]
+    fn undo_stroke_restores_pre_state() {
+        let mut item = fixture_item(1);
+        item.commit_correction(stamp(8, 8, 5, 50));
+        let after_first = item.mask_correction.clone();
+        item.commit_correction(stamp(8, 8, 10, 70));
+        assert_ne!(item.mask_correction, after_first, "second stroke changed the grid");
+
+        assert!(item.undo_stroke(), "stroke 2 must be undoable");
+        assert_eq!(item.mask_correction, after_first, "undo restored the post-stroke-1 state");
+        assert!(item.has_stroke_redo(), "undone stroke goes onto the redo stack");
+    }
+
+    #[test]
+    fn redo_stroke_inverts_undo() {
+        let mut item = fixture_item(1);
+        item.commit_correction(stamp(8, 8, 5, 50));
+        item.commit_correction(stamp(8, 8, 10, 70));
+        let after_two = item.mask_correction.clone();
+
+        item.undo_stroke();
+        assert!(item.redo_stroke(), "redo available after undo");
+        assert_eq!(item.mask_correction, after_two);
+    }
+
+    #[test]
+    fn fresh_commit_after_undo_clears_redo() {
+        let mut item = fixture_item(1);
+        item.commit_correction(stamp(8, 8, 5, 50));
+        item.commit_correction(stamp(8, 8, 10, 70));
+        item.undo_stroke();
+        assert!(item.has_stroke_redo());
+
+        item.commit_correction(stamp(8, 8, 12, 30));
+        assert!(!item.has_stroke_redo(), "fresh stroke after undo must wipe the redo stack");
+    }
+
+    #[test]
+    fn stroke_history_caps_at_depth() {
+        let mut item = fixture_item(1);
+        for i in 0..(STROKE_HISTORY_DEPTH + 5) {
+            item.commit_correction(stamp(8, 8, i % 64, 1 + (i % 100) as i8));
+        }
+        assert_eq!(
+            item.stroke_undo_stack.len(),
+            STROKE_HISTORY_DEPTH,
+            "undo stack must cap at STROKE_HISTORY_DEPTH"
+        );
+    }
+
+    #[test]
+    fn clear_correction_pushes_undo_when_correction_existed() {
+        let mut item = fixture_item(1);
+        item.commit_correction(stamp(8, 8, 5, 50));
+        let undo_before_clear = item.stroke_undo_stack.len();
+        item.clear_correction();
+        assert!(item.mask_correction.is_none());
+        assert_eq!(
+            item.stroke_undo_stack.len(),
+            undo_before_clear + 1,
+            "clear must record an undoable snapshot of the correction it dropped"
+        );
+        assert!(item.undo_stroke(), "the user can undo a clear");
+        assert!(item.mask_correction.is_some());
+    }
+
+    #[test]
+    fn clear_correction_no_op_when_already_empty() {
+        let mut item = fixture_item(1);
+        item.clear_correction();
+        assert!(!item.has_stroke_undo(), "clearing an already-empty correction must not push undo");
     }
 }
