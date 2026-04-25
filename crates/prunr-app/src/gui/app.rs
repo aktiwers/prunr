@@ -394,7 +394,14 @@ impl PrunrApp {
 
     /// Undo background removal on selected items (or current item if none selected).
     /// Reverts Done/Error items back to Pending, clearing their results.
+    ///
+    /// Brush mode override: while the brush is active, prefer popping a
+    /// stroke off the active item's stroke history. Falls through to the
+    /// result-undo when there are no strokes left to undo.
     pub fn handle_undo(&mut self, ctx: &egui::Context) {
+        if self.try_brush_undo(ctx) {
+            return;
+        }
         let has_selected = self.batch.items.iter().any(|i| i.selected);
         let current_id = self.batch.selected_item().map(|b| b.id);
         let mut undone = 0u32;
@@ -421,6 +428,9 @@ impl PrunrApp {
     }
 
     pub fn handle_redo(&mut self, ctx: &egui::Context) {
+        if self.try_brush_redo(ctx) {
+            return;
+        }
         let has_selected = self.batch.items.iter().any(|i| i.selected);
         let current_id = self.batch.selected_item().map(|b| b.id);
         let mut redone = 0u32;
@@ -439,6 +449,79 @@ impl PrunrApp {
             } else {
                 self.toasts.info(format!("Restored {redone} images"));
             }
+        }
+    }
+
+    /// If brush is active and the selected item has a stroke to undo,
+    /// pop it and dispatch a Tier 2 rerun. Returns `true` when handled.
+    fn try_brush_undo(&mut self, _ctx: &egui::Context) -> bool {
+        if !self.brush_state.is_enabled() {
+            return false;
+        }
+        let Some(idx) = self.batch.selected_idx_clamped() else { return false };
+        if !self.batch.items[idx].has_stroke_undo() {
+            return false;
+        }
+        if self.batch.items[idx].undo_stroke() {
+            self.dispatch_brush_rerun(idx);
+            self.toasts.info("Stroke undone");
+            true
+        } else {
+            false
+        }
+    }
+
+    fn try_brush_redo(&mut self, _ctx: &egui::Context) -> bool {
+        if !self.brush_state.is_enabled() {
+            return false;
+        }
+        let Some(idx) = self.batch.selected_idx_clamped() else { return false };
+        if !self.batch.items[idx].has_stroke_redo() {
+            return false;
+        }
+        if self.batch.items[idx].redo_stroke() {
+            self.dispatch_brush_rerun(idx);
+            self.toasts.info("Stroke restored");
+            true
+        } else {
+            false
+        }
+    }
+
+    fn dispatch_brush_rerun(&mut self, idx: usize) {
+        use crate::gui::live_preview::PreviewKind;
+        let item_id = self.batch.items[idx].id;
+        // Unconditional — see canvas::handle_brush_input.
+        self.processor.live_preview.mark_tweak(item_id, PreviewKind::Mask);
+        self.processor.live_preview.flush(item_id);
+    }
+
+    /// Catch any drift between an item's `applied_recipe.mask` and the
+    /// recipe derived from the current `settings.mask_settings()`. The
+    /// toolbar's `apply_toolbar_change` path is the precise dispatcher
+    /// for known knob changes; this is the safety net for non-toolbar
+    /// state mutations (brush, hotkeys, future features) so they never
+    /// silently fail to update the result.
+    ///
+    /// Logs a debug! when it fires — a `tracing` line on every drift
+    /// is the audit trail when a new feature forgets to wire dispatch.
+    fn recipe_drift_tripwire(&mut self) {
+        use crate::gui::live_preview::PreviewKind;
+        if self.processor.live_preview.has_in_flight() {
+            return;
+        }
+        let mut to_dispatch: Vec<u64> = Vec::new();
+        for item in &self.batch.items {
+            let Some(applied) = item.applied_recipe.as_ref() else { continue };
+            let current = prunr_core::MaskRecipe::from(&item.settings.mask_settings());
+            if applied.mask != current {
+                to_dispatch.push(item.id);
+            }
+        }
+        for id in to_dispatch {
+            tracing::debug!(item_id = id, "recipe-drift tripwire fired — dispatching Tier-2");
+            self.processor.live_preview.mark_tweak(id, PreviewKind::Mask);
+            self.processor.live_preview.flush(id);
         }
     }
 
@@ -1269,6 +1352,8 @@ impl PrunrApp {
     /// Called once per frame at the start of `ui()` so the current frame renders
     /// with the newest available results.
     fn pump_live_preview(&mut self, ctx: &egui::Context) {
+        self.recipe_drift_tripwire();
+
         // Dispatch phase: tick() invokes the closure for each item whose
         // debounce expired this frame. The closure borrows `batch.items`
         // mutably so `build_preview_inputs` can lazily cache an
@@ -2239,6 +2324,11 @@ impl PrunrApp {
                     is_processing,
                 );
             });
+        if toolbar_change.clear_correction_requested {
+            if let Some(idx) = self.batch.selected_idx_clamped() {
+                self.batch.items[idx].clear_correction();
+            }
+        }
         self.apply_toolbar_change(ui.ctx(), toolbar_change, pre_apply_snapshot);
     }
 

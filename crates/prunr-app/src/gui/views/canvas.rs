@@ -123,6 +123,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
 /// gate.
 fn handle_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: Rect) {
     use super::brush_overlay::{self, BrushAction};
+    use crate::gui::live_preview::PreviewKind;
     let Some(tex) = app.result_texture.as_ref().or(app.source_texture.as_ref()) else { return };
     let img_rect = compute_img_rect(canvas_rect, tex.size_vec2(), app.zoom_state.zoom, app.zoom_state.pan_offset);
 
@@ -132,8 +133,15 @@ fn handle_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: Rect) 
         brush_overlay::handle_input(ui, &mut app.brush_state, item, img_rect)
     };
     if let BrushAction::Committed(strokes) = action {
-        let item = &mut app.batch.items[idx];
-        item.commit_correction(strokes);
+        let item_id = app.batch.items[idx].id;
+        let stroke_pixels = strokes.grid.iter().filter(|&&v| v != 0).count();
+        app.batch.items[idx].commit_correction(strokes);
+        tracing::info!(item_id, stroke_pixels, "brush stroke committed; dispatching Tier-2 rerun");
+        // Brush is conceptually a live-preview action — one dispatch
+        // per stroke, not the 10 Hz slider cadence — so we fire it
+        // unconditionally even when the global live_preview toggle is off.
+        app.processor.live_preview.mark_tweak(item_id, PreviewKind::Mask);
+        app.processor.live_preview.flush(item_id);
     }
 }
 
