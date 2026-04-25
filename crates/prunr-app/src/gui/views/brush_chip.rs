@@ -26,7 +26,11 @@ pub(super) struct BrushChipOutcome {
     pub committed: bool,
 }
 
-pub(super) fn render(ui: &mut Ui, brush_state: &mut BrushState) -> BrushChipOutcome {
+pub(super) fn render(
+    ui: &mut Ui,
+    brush_state: &mut BrushState,
+    is_inpaint_mode: bool,
+) -> BrushChipOutcome {
     let label = chip_label(brush_state.settings());
     let resp = ui
         .scope(|ui| {
@@ -66,17 +70,22 @@ pub(super) fn render(ui: &mut Ui, brush_state: &mut BrushState) -> BrushChipOutc
                     |v| format!("{:.0}%", v * 100.0),
                 );
                 outcome.committed |= st.commit;
-                ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    if ui.selectable_label(matches!(s.mode, BrushMode::Add), "Add").clicked() {
-                        s.mode = BrushMode::Add;
-                        outcome.committed = true;
-                    }
-                    if ui.selectable_label(matches!(s.mode, BrushMode::Subtract), "Subtract").clicked() {
-                        s.mode = BrushMode::Subtract;
-                        outcome.committed = true;
-                    }
-                });
+                if !is_inpaint_mode {
+                    // Inpaint has only one direction (paint = erase). Hide
+                    // the toggle so the user doesn't see a knob with no
+                    // effect; mode stays pinned to whatever it was.
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        if ui.selectable_label(matches!(s.mode, BrushMode::Add), "Add").clicked() {
+                            s.mode = BrushMode::Add;
+                            outcome.committed = true;
+                        }
+                        if ui.selectable_label(matches!(s.mode, BrushMode::Subtract), "Subtract").clicked() {
+                            s.mode = BrushMode::Subtract;
+                            outcome.committed = true;
+                        }
+                    });
+                }
             });
 
             ui.add_space(8.0);

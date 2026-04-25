@@ -149,19 +149,25 @@ fn handle_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: Rect) 
     let img_rect = compute_img_rect(canvas_rect, tex.size_vec2(), app.zoom_state.zoom, app.zoom_state.pan_offset);
 
     let Some(idx) = app.batch.selected_idx_clamped() else { return };
+    let is_inpaint = app.settings.model.is_inpaint();
     let action = {
         let item = &app.batch.items[idx];
-        brush_overlay::handle_input(ui, &mut app.brush_state, item, img_rect)
+        brush_overlay::handle_input(ui, &mut app.brush_state, item, img_rect, is_inpaint)
     };
     if let BrushAction::Committed(strokes) = action {
         let item_id = app.batch.items[idx].id;
         app.batch.items[idx].commit_correction(strokes);
-        tracing::info!(item_id, "brush stroke committed; dispatching Tier-2 rerun");
-        // Brush is conceptually a live-preview action — one dispatch
-        // per stroke, not the 10 Hz slider cadence — so we fire it
-        // unconditionally even when the global live_preview toggle is off.
-        app.processor.live_preview.mark_tweak(item_id, PreviewKind::Mask);
-        app.processor.live_preview.flush(item_id);
+        if is_inpaint {
+            // 16-06 wires this to LaMa via the subprocess command added
+            // in 16-04. For now record the stroke; result texture stays
+            // unchanged so the user sees the trail commit but not yet
+            // the inpainted result.
+            tracing::info!(item_id, "inpaint stroke committed (dispatch pending 16-06)");
+        } else {
+            tracing::info!(item_id, "brush stroke committed; dispatching Tier-2 rerun");
+            app.processor.live_preview.mark_tweak(item_id, PreviewKind::Mask);
+            app.processor.live_preview.flush(item_id);
+        }
     }
 }
 
