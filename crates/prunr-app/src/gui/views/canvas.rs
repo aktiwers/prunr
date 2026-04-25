@@ -123,7 +123,16 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
         AppState::Done => render_done(ui, app),
     }
 
-    if app.brush_state.is_enabled() && matches!(app.state, AppState::Done) {
+    // Suppress brush input + cursor + trail when a popup or widget has
+    // claimed the pointer — the brush popover floats over the canvas, so
+    // its sliders sit inside `img_rect` geographically and would otherwise
+    // get painted over and double-handle clicks.
+    if app.brush_state.is_enabled()
+        && matches!(app.state, AppState::Done)
+        && !modal_open
+        && !popup_open
+        && !widget_has_pointer
+    {
         handle_brush_input(ui, app, canvas_rect);
     }
 }
