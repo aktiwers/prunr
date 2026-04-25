@@ -58,6 +58,18 @@ These are the patterns `/simplify` agents repeatedly flag. Apply them on the fir
 - **Helper-before-hand-rolling.** Before writing inline code that looks like something else in the file (chip layout, popup wiring, file-read-and-delete, mask-cache key), grep for a helper. The `## Use-before-hand-rolling helper menu` tables below are canonical for GUI / core; when you see duplication across two call sites, extract a `pub(super) fn` rather than triple it.
 - **Tiered fields → tiered cache keys.** When a cached artifact depends on N inputs, the cache key must include all N. A mask cached on `(line_strength)` silently broke on scale change; now it's `(line_strength, edge_scale)`. If adding an input that affects a cache, audit every cache-key tuple reading from it.
 
+## Verify before bundling / wiring
+
+Before adding a CI step (or `xtask`, or shell snippet) that copies, references, or globs a build-output file, run the equivalent local check first: `ls target/<target>/release/<file>`, or `ldd <binary>`, or whatever proves the assumption. Don't trust documentation that says "this feature drops the file there" — verify. The 60-second local check beats a 30-minute CI feedback loop. This applies double to any step you write `cp ... || exit 1` around: that error annotation is only useful if the cp ever has a chance of working.
+
+Specific case that prompted this rule: Phase 6-01 assumed `pykeio/ort` `download-binaries` placed `libonnxruntime.so` next to the binary on Linux/Windows. It doesn't — that runtime is statically linked into the binary on those platforms; only GPU-provider plugins ship as separate `.so` files. A single `ldd target/release/prunr` would have shown the assumption was wrong before any YAML got written.
+
+## Goal-driven for bug fixes
+
+When fixing a perf or correctness bug, write the test that **reproduces** it first. Pin the invariant in code, then make the fix turn the test green. Without the failing-then-passing transition, you've shipped a fix-shaped change, not a verified one — and the regression has nothing guarding against its return.
+
+This isn't TDD evangelism. It's specifically about bug fixes: the test you write is the contract that the bug is gone. The Phase 14 `cold_line_mode_dispatch_outranks_warm_under_max` test is the right pattern — it pins the exact `.max()` ordering that caused the Off↔Subject toggle slowdown, so any future refactor that re-poisons the warm path fails loudly.
+
 ## ARCHITECTURE.md standards
 
 ARCHITECTURE.md is a **technical reference** — someone reading it should quickly understand the codebase structure, the philosophy, and the non-obvious choices. It is **not** a dump of everything that changed in a phase.

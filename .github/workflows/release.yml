@@ -188,7 +188,15 @@ jobs:
           cp target/${{ matrix.target }}/release/${{ matrix.binary }} deb/usr/bin/
           cp assets/prunr.desktop deb/usr/share/applications/
           cp assets/prunr-256.png deb/usr/share/icons/hicolor/256x256/apps/prunr.png
-          VERSION=${GITHUB_REF_NAME#v}
+          # Tag pushes carry the version in the ref (v0.4.8 → 0.4.8).
+          # workflow_dispatch runs from a branch — fall back to Cargo.toml
+          # so the .deb / .rpm version always satisfies dpkg/rpm's
+          # "must start with a digit" rule.
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION=$(awk -F'"' '/^version/ {print $2; exit}' Cargo.toml)
+          fi
           SIZE=$(du -s deb/usr | cut -f1)
           cat > deb/DEBIAN/control << CTRL
           Package: prunr
@@ -210,7 +218,12 @@ jobs:
       - name: Package Linux .rpm
         if: matrix.name == 'linux-x86_64'
         run: |
-          VERSION=${GITHUB_REF_NAME#v}
+          # Same version-from-tag-or-Cargo.toml pattern as .deb above.
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION=$(awk -F'"' '/^version/ {print $2; exit}' Cargo.toml)
+          fi
           mkdir -p rpmbuild/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
           cp target/${{ matrix.target }}/release/${{ matrix.binary }} rpmbuild/SOURCES/
           cp assets/prunr.desktop rpmbuild/SOURCES/
