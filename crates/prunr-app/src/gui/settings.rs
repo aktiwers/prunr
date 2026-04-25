@@ -263,33 +263,41 @@ pub enum SettingsModel {
     /// need the seg model); SubjectOutline is invalid without a seg model
     /// and gets greyed out in the UI.
     None,
+    /// Object-removal / inpaint mode — Phase 16. The brush is the only
+    /// input; stroke release runs LaMa over the painted region. Bg-removal
+    /// knobs (gamma, threshold, refine, fill_style) are inert in this mode.
+    Inpaint,
 }
 
 impl SettingsModel {
     /// All variants in display order — source of truth for the model dropdown.
-    /// `None` is listed last so the dropdown visually separates it from the
-    /// real models (UI draws a separator before the last entry).
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 5] = [
         Self::Silueta,
         Self::U2net,
         Self::BiRefNetLite,
         Self::None,
+        Self::Inpaint,
     ];
 
-    /// Whether this variant resolves to an ORT seg model. `None` skips
-    /// segmentation inference entirely — callers branch on this rather
-    /// than trying to convert `None` to a `ModelKind`.
+    /// Whether this variant resolves to an ORT seg model. Filter-only and
+    /// Inpaint skip segmentation entirely.
     pub fn uses_segmentation(self) -> bool {
-        !matches!(self, Self::None)
+        matches!(self, Self::Silueta | Self::U2net | Self::BiRefNetLite)
     }
 
-    /// Convert to `ModelKind`, or `None` for the filter-only variant.
+    /// True for object-removal mode. Branches that drive the inpaint
+    /// pipeline (brush auto-enable, popover simplification) check this.
+    pub fn is_inpaint(self) -> bool {
+        matches!(self, Self::Inpaint)
+    }
+
+    /// Convert to `ModelKind`, or `None` for non-seg variants.
     pub fn to_model_kind(self) -> Option<ModelKind> {
         match self {
             Self::Silueta => Some(ModelKind::Silueta),
             Self::U2net => Some(ModelKind::U2net),
             Self::BiRefNetLite => Some(ModelKind::BiRefNetLite),
-            Self::None => None,
+            Self::None | Self::Inpaint => None,
         }
     }
 }
