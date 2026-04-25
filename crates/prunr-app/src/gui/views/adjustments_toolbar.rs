@@ -182,6 +182,14 @@ pub(crate) fn render(
             item_settings.line_mode = LineMode::Off;
         }
 
+        // Inpaint mode: paint is the only input — auto-enable brush so
+        // the user doesn't have to click two buttons. Settings stays
+        // pinned subtract-equivalent (mode picker is hidden in the
+        // popover anyway when Inpaint is active).
+        if change.model_changed && app_settings.model.is_inpaint() && !brush_state.is_enabled() {
+            brush_state.toggle();
+        }
+
         ui.add_enabled_ui(mask_active, |ui| {
             aggregate_knob(chip::chip_f32(
                 ui, "gamma", "γ", "Gamma",
@@ -320,7 +328,7 @@ pub(crate) fn render(
                 // somewhere to paint. In the right-to-left layout this
                 // appears LEFT of the toggle.
                 if brush_available && brush_state.is_enabled() {
-                    let outcome = super::brush_chip::render(ui, brush_state);
+                    let outcome = super::brush_chip::render(ui, brush_state, app_settings.model.is_inpaint());
                     if outcome.clear_requested {
                         change.clear_correction_requested = true;
                     }
