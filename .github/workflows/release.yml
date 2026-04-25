@@ -3,6 +3,10 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  # Manual trigger so we can iterate on CI changes (CoreML build,
+  # dylib bundling, etc.) without tagging an actual release. The job
+  # still produces artifacts but skips the GitHub-release step.
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -69,15 +73,70 @@ jobs:
             fi
           done
 
-      # Patch version from git tag into Info.plist before building
+      # Patch version from git tag into Info.plist before building.
+      # Skipped on workflow_dispatch (no tag → keep the in-repo placeholder).
       - name: Patch macOS Info.plist version
-        if: matrix.name == 'macos-aarch64'
+        if: matrix.name == 'macos-aarch64' && github.event_name == 'push'
         run: |
           VERSION=${GITHUB_REF_NAME#v}
           sed -i '' "s|<string>[0-9]*\.[0-9]*\.[0-9]*</string>|<string>${VERSION}</string>|g" assets/Info.plist
 
+      # ── Custom ORT with CoreML (macOS only) ──
+      # Linux/Windows use the `download-binaries` prebuilt automatically.
+      # macOS needs CoreML, which the prebuilt doesn't include — build from
+      # source and override via ORT_LIB_LOCATION + ORT_PREFER_DYNAMIC_LINK.
+      # The binary's rpath is set via `.cargo/config.toml` rustflags so the
+      # bundled .app finds the dylib in Contents/Frameworks/ at runtime.
+      # First build ~30 min; cache by ORT version restores in ~30 sec.
+      - name: Cache ORT (macOS, with CoreML)
+        if: matrix.name == 'macos-aarch64'
+        id: ort-cache
+        uses: actions/cache@v4
+        with:
+          path: ort-build/MacOS/Release
+          key: ort-coreml-1.20.0-macos-aarch64-v1
+
+      - name: Build ORT with CoreML (macOS, cache miss)
+        if: matrix.name == 'macos-aarch64' && steps.ort-cache.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 --branch v1.20.0 \
+            https://github.com/microsoft/onnxruntime.git ort-src
+          cd ort-src
+          ./build.sh \
+            --config Release \
+            --use_coreml \
+            --build_shared_lib \
+            --parallel \
+            --compile_no_warning_as_error \
+            --skip_submodule_sync \
+            --skip_tests \
+            --osx_arch arm64 \
+            --build_dir ../ort-build
+
+      - name: Point cargo at custom ORT (macOS)
+        if: matrix.name == 'macos-aarch64'
+        run: |
+          ORT_DIR="$PWD/ort-build/MacOS/Release"
+          if [ ! -f "$ORT_DIR/libonnxruntime.dylib" ]; then
+            echo "::error::ORT build did not produce libonnxruntime.dylib at $ORT_DIR"
+            ls -la "$ORT_DIR" 2>&1 || true
+            exit 1
+          fi
+          echo "ORT_LIB_LOCATION=$ORT_DIR" >> "$GITHUB_ENV"
+          echo "ORT_PREFER_DYNAMIC_LINK=1" >> "$GITHUB_ENV"
+
       - name: Build release binary
         run: cargo build --release --target ${{ matrix.target }} -p prunr-app
+
+      # On macOS the custom ORT build sits in ort-build/, not next to the
+      # binary. Stage it into target/release/ so the existing Phase 6-01
+      # bundling steps pick it up.
+      - name: Stage custom ORT dylib for bundling (macOS)
+        if: matrix.name == 'macos-aarch64'
+        run: |
+          mkdir -p "target/${{ matrix.target }}/release"
+          cp -P "$ORT_LIB_LOCATION"/libonnxruntime.*dylib \
+                "target/${{ matrix.target }}/release/"
 
       # ── Linux: .tar.gz + .AppImage + .deb + .rpm ──
       # ORT's `download-binaries` feature drops `libonnxruntime.so*` next
