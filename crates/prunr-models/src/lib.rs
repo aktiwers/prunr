@@ -116,6 +116,37 @@ pub fn model_int8_bytes(model: Model) -> Option<Vec<u8>> {
     load_variant(model, "int8")
 }
 
+/// LaMa inpainter for Phase 16 object removal. Returns None when the
+/// model isn't on disk — caller treats Inpaint mode as unavailable.
+/// Filesystem load (not embedded) until the FP32→INT8 conversion is
+/// stable; flip to `include_bytes_zstd!` once a quantized variant
+/// lands.
+pub fn lama_bytes() -> Option<Vec<u8>> {
+    load_optional_model("lama_fp32.onnx")
+}
+
+fn load_optional_model(filename: &str) -> Option<Vec<u8>> {
+    #[cfg(debug_assertions)]
+    {
+        let dev_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../models")
+            .join(filename);
+        if let Ok(bytes) = std::fs::read(&dev_path) {
+            return Some(bytes);
+        }
+    }
+
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            if let Ok(bytes) = std::fs::read(dir.join("models").join(filename)) {
+                return Some(bytes);
+            }
+        }
+    }
+
+    None
+}
+
 fn load_variant(model: Model, suffix: &str) -> Option<Vec<u8>> {
     let name = match model {
         Model::Silueta => "silueta",
@@ -169,5 +200,13 @@ mod tests {
             let _: fn() -> &'static [u8] = super::u2net_bytes;
             let _: fn() -> &'static [u8] = super::birefnet_lite_bytes;
         }
+    }
+
+    #[test]
+    fn lama_bytes_signature_is_optional() {
+        // Returns None gracefully when the file isn't present rather than
+        // panicking — the GUI uses that to disable Inpaint mode.
+        let _: fn() -> Option<Vec<u8>> = super::lama_bytes;
+        let _ = super::lama_bytes();
     }
 }
