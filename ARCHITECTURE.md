@@ -60,7 +60,7 @@ prunr/
 
 ## GUI Coordinators
 
-`PrunrApp` (in `crates/prunr-app/src/gui/app.rs`) is a **coordinator, not an owner**. It holds UI visibility flags, view state with no natural home (zoom, toasts, transient status), and handles to five domain coordinators that own business logic and mutable state.
+`PrunrApp` (in `crates/prunr-app/src/gui/app.rs`) is a **coordinator, not an owner**. It holds UI visibility flags, view state with no natural home (zoom, toasts, transient status), and handles to six domain coordinators that own business logic and mutable state.
 
 | Coordinator        | File                         | Owns                                                                                                                                     |
 |--------------------|------------------------------|------------------------------------------------------------------------------------------------------------------------------------------|
@@ -69,6 +69,7 @@ prunr/
 | `HistoryManager`   | `gui/history_manager.rs`     | Unit struct; exposes methods on `&mut BatchItem` for result-history push/undo/redo and preset snapshots                                   |
 | `DragExportState`  | `gui/drag_export_state.rs`   | `Arc<AtomicBool>` active flag, `Mutex<HashSet<u64>>` dragged-ids, `Option<Vec<u64>>` pending queue                                        |
 | `SystemBridge`     | `gui/system_bridge.rs`       | `arboard::Clipboard` handle + thin shim around `rfd::FileDialog` — the only module that imports the foreign platform deps                 |
+| `BrushState`       | `gui/brush_state.rs`         | Tool-mode toggle, `BrushSettings` (radius / hardness / strength / mode / shape), in-progress `ActiveStroke` buffer + screen-space trail   |
 
 **Dependency shape:** `PrunrApp` owns all five by `&mut self`; the coordinators don't know about each other. Cross-coordinator work happens on `PrunrApp` as the orchestrator — e.g., `on_batch_item_done` writes the result via `BatchManager::find_by_id_mut`, records history via `HistoryManager::record(&mut item, ...)`, and asks the `Processor` whether more work can be admitted.
 
@@ -205,6 +206,14 @@ On top of the AI pipeline sit four orthogonal compose-time enums, all stored on 
 All four land in the same `postprocess → compose` step in `prunr-core`; live preview threads them through `DispatchInputs`. Shared helpers: `luma_u8`, `rgb_to_hsv`, `hsv_to_rgb`, `blend_rgb`, `lerp_rgb` in `prunr-core`. `#[inline]` on every per-pixel primitive; `LinesOnly` / `SubjectFilled` etc. resolve to a `fn(i32,i32)->u8` once per dispatch so the 5-way compose-mode match stays out of the per-pixel loop.
 
 **Dual-scale edge overlay.** `LineStyle::DualScale` uses TWO DexiNed scales at once — Fine for micro-details in one colour, Bold for structure in another. The worker builds both masks from the cached `EdgeInferenceResult` and calls `compose_edges_dual_styled`. Live preview decompresses the Bold tensor on demand (only when DualScale is active), and `edge_tensor_for_scale` keeps the `volatile_edge_tensor` hot cache pinned to the active scale so the Bold decompress doesn't evict it — otherwise the next Edge tweak would miss the cache.
+
+### Brush mask correction
+
+Per-image `BatchItem.mask_correction: Option<Arc<MaskCorrection>>` — a signed magnitude grid at model-output resolution (320² for Silueta, 1024² for BiRefNet). Brush strokes paint into a mid-drag buffer on `BrushState.active`; on release the buffer commits via `BatchItem::commit_correction`, which `merge`s it into the existing correction using `Arc::make_mut` (skips the full clone in the common single-owner case) and refreshes a `content_hash` mirrored onto `ItemSettings.correction_hash`. The recipe diff sees the hash change → fires MaskRerun → live preview renders with the correction applied.
+
+`apply_correction` runs **pre-gamma in normalized [0, 1] space**: subtract at strength `s` does `m → m * (1 - s)`, add does `m → lerp(m, 1.0, s)`. Gamma + threshold then compose naturally over painted regions, so dragging gamma after painting modulates the painted area too. Three primitives in `prunr-core::brush` (Circle / Square / Line) share a generic `stamp_with` helper that takes a distance closure (euclidean for Circle, Chebyshev for Square); Line stamps `paint_circle` along a swept segment at `commit_stroke`, not per-frame.
+
+A safety net (`recipe_drift_tripwire` in `pump_live_preview`) catches drift between `applied_recipe.mask` and the current recipe for the selected item — covers state mutators that don't go through the toolbar dispatch path (brush commits, hotkeys). Tagged `tracing::debug!` when it fires so a future feature that forgets to wire dispatch is auditable.
 
 ## Live Preview
 
