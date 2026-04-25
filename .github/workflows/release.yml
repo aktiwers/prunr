@@ -179,7 +179,7 @@ jobs:
           Version: ${VERSION}
           Architecture: amd64
           Maintainer: Prunr <prunr@example.com>
-          Depends: libgtk-3-0
+          Depends: libgtk-3-0, libxkbcommon0, libfontconfig1
           Section: graphics
           Priority: optional
           Installed-Size: ${SIZE}

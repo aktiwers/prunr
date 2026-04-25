@@ -21,6 +21,11 @@ Website: [prunr.io](https://prunr.io/)
 | Fedora / RHEL / openSUSE | [.rpm](https://github.com/aktiwers/prunr/releases/latest/download/prunr-linux-x86_64.rpm) |
 | Portable | [tar.gz](https://github.com/aktiwers/prunr/releases/latest/download/prunr-linux-x86_64.tar.gz) |
 
+The .deb / .rpm packages declare their runtime deps. If you use the
+AppImage or tar.gz on a minimal install and hit a missing-library error,
+install: `libgtk-3-0`, `libxkbcommon0`, `libfontconfig1`. Already present
+on Ubuntu 22.04+ / Fedora 40+ / openSUSE Tumbleweed.
+
 ### macOS (Apple Silicon)
 
 | Format | Link |
