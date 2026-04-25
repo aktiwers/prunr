@@ -48,6 +48,7 @@ pub struct PrunrApp {
     pending_copy: bool,
 
     pub(crate) zoom_state: super::zoom_state::ZoomState,
+    pub(crate) brush_state: super::brush_state::BrushState,
 
     // Before/After toggle
     pub(crate) show_original: bool,
@@ -209,6 +210,7 @@ impl PrunrApp {
             show_pipeline_flow: false,
             pending_copy: false,
             zoom_state: Default::default(),
+            brush_state: Default::default(),
             show_original: false,
             prev_title: String::new(),
             batch: super::batch_manager::BatchManager::new(),
@@ -1347,6 +1349,7 @@ impl PrunrApp {
             kind, original, settings: item.settings,
             seg_tensor, edge_tensor, secondary_edge_tensor,
             cached_edge_mask, cached_masked_base,
+            correction: item.mask_correction.clone(),
         })
     }
 
@@ -2225,12 +2228,14 @@ impl PrunrApp {
                 // Lets the toolbar mutate the preset string in place
                 // without a clone + writeback round-trip.
                 let settings_ref = &mut self.settings;
+                let brush_state_ref = &mut self.brush_state;
                 let item = &mut self.batch.items[idx];
                 toolbar_change = adjustments_toolbar::render(
                     ui,
                     &mut item.settings,
                     settings_ref,
                     &mut item.applied_preset,
+                    brush_state_ref,
                     is_processing,
                 );
             });
