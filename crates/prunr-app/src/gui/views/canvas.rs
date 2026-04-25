@@ -28,11 +28,14 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
     // Also check egui's global "wants pointer input" — this is true when any
     // widget (slider, button, text field) is currently capturing the pointer.
     let widget_has_pointer = ui.ctx().egui_wants_pointer_input();
-    // Brush mode owns left-click+drag on the result image; suppress the
-    // canvas pan handler so a brush stroke doesn't also pan.
-    let brush_owns_input = app.brush_state.is_enabled() && matches!(app.state, AppState::Done);
-    let canvas_gets_input = !modal_open && !popup_open && !widget_has_pointer && !brush_owns_input;
-    if canvas_gets_input {
+    let brush_active = app.brush_state.is_enabled() && matches!(app.state, AppState::Done);
+    // Scroll-zoom always works: it doesn't conflict with brush strokes
+    // and the zoom feedback is reassuring even mid-painting.
+    let canvas_gets_zoom = !modal_open && !popup_open && !widget_has_pointer;
+    // Pan binding: primary (left) drag normally; secondary (right) drag
+    // in brush mode so left-click is free for the brush stroke.
+    let canvas_gets_pan = canvas_gets_zoom;
+    if canvas_gets_zoom {
         // Handle scroll-wheel zoom (cursor-centered)
         ui.ctx().input(|i| {
             for event in &i.events {
@@ -52,14 +55,23 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                     }
                 }
             }
+        });
+    }
+    if canvas_gets_pan {
+        ui.ctx().input(|i| {
             // Click+drag pan: enter panning ONLY on a fresh press inside the canvas.
             // This avoids false pan when egui's pointer state is desynced — e.g. after
             // an OS drag-out session where Prunr's window never saw the mouse-up.
             let hovered_inside = i.pointer.hover_pos().is_some_and(|p| canvas_rect.contains(p));
-            if i.pointer.primary_pressed() && hovered_inside {
+            let (pressed, down) = if brush_active {
+                (i.pointer.secondary_pressed(), i.pointer.button_down(egui::PointerButton::Secondary))
+            } else {
+                (i.pointer.primary_pressed(), i.pointer.primary_down())
+            };
+            if pressed && hovered_inside {
                 app.zoom_state.is_panning = true;
             }
-            if !i.pointer.primary_down() {
+            if !down {
                 app.zoom_state.is_panning = false;
             }
             if app.zoom_state.is_panning && i.pointer.delta() != egui::Vec2::ZERO {
