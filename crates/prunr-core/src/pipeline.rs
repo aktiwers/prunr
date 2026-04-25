@@ -7,7 +7,7 @@ use ort::{inputs, value::Tensor};
 use crate::{
     engine::{InferenceEngine, OrtEngine},
     formats::{check_large_image, load_image_from_bytes},
-    postprocess::postprocess,
+    postprocess::{postprocess, PostprocessOpts},
     preprocess::preprocess,
     types::{CoreError, MaskSettings, ProcessResult, ProgressStage},
 };
@@ -161,7 +161,7 @@ where
     }
 
     report(ProgressStage::Postprocess, 0.8);
-    let rgba_image = postprocess(raw_output.view(), img, mask, model, None);
+    let rgba_image = postprocess(raw_output.view(), img, &PostprocessOpts::new(mask, model));
 
     report(ProgressStage::Alpha, 0.95);
 

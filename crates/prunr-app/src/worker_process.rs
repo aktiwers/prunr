@@ -387,7 +387,8 @@ pub fn run_worker() -> ! {
                                         let tw = ir.tensor_width;
                                         let active_provider = ir.active_provider.clone();
                                         let masked_rgba = prunr_core::postprocess_from_flat(
-                                            &ir.tensor_data, th, tw, original, &mask, model, None,
+                                            &ir.tensor_data, th, tw, original,
+                                            &prunr_core::PostprocessOpts::new(&mask, model),
                                         )?;
                                         // Seg tensor captured → Tier 2 mask reruns work in
                                         // SubjectOutline; Off ↔ SubjectOutline can reuse it.
@@ -489,7 +490,8 @@ pub fn run_worker() -> ! {
                                         "worker about to postprocess_from_flat",
                                     );
                                     let rgba_image = prunr_core::postprocess_from_flat(
-                                        &ir.tensor_data, th, tw, original, &mask, model, None,
+                                        &ir.tensor_data, th, tw, original,
+                                        &prunr_core::PostprocessOpts::new(&mask, model),
                                     )?;
                                     let (w, h) = (rgba_image.width(), rgba_image.height());
                                     let (mut a_min, mut a_max) = (255u8, 0u8);
@@ -654,7 +656,7 @@ pub fn run_worker() -> ! {
                             .map_err(|e| format!("Failed to decode original: {e}"))?;
                         prunr_core::postprocess_from_flat(
                             &floats, tensor_height as usize, tensor_width as usize,
-                            &original, &repost_mask, model, None,
+                            &original, &prunr_core::PostprocessOpts::new(&repost_mask, model),
                         ).map_err(|e| e.to_string())
                     })();
 
@@ -749,7 +751,7 @@ pub fn run_worker() -> ! {
                         }
                         let masked_rgba = prunr_core::postprocess_from_flat(
                             &seg_data, seg_tensor_height as usize, seg_tensor_width as usize,
-                            &original, &mask_settings, cmd_model, None,
+                            &original, &prunr_core::PostprocessOpts::new(&mask_settings, cmd_model),
                         ).map_err(|e| e.to_string())?;
 
                         let masked_img = image::DynamicImage::ImageRgba8(masked_rgba.clone());

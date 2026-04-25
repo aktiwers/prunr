@@ -48,9 +48,7 @@ fn build_masked_base(
         seg.height as usize,
         seg.width as usize,
         original,
-        &mask_settings,
-        seg.model,
-        None,
+        &prunr_core::PostprocessOpts::new(&mask_settings, seg.model),
     )
     .ok()
     .map(DynamicImage::ImageRgba8)
