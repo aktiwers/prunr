@@ -28,7 +28,10 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
     // Also check egui's global "wants pointer input" — this is true when any
     // widget (slider, button, text field) is currently capturing the pointer.
     let widget_has_pointer = ui.ctx().egui_wants_pointer_input();
-    let canvas_gets_input = !modal_open && !popup_open && !widget_has_pointer;
+    // Brush mode owns left-click+drag on the result image; suppress the
+    // canvas pan handler so a brush stroke doesn't also pan.
+    let brush_owns_input = app.brush_state.is_enabled() && matches!(app.state, AppState::Done);
+    let canvas_gets_input = !modal_open && !popup_open && !widget_has_pointer && !brush_owns_input;
     if canvas_gets_input {
         // Handle scroll-wheel zoom (cursor-centered)
         ui.ctx().input(|i| {
@@ -106,6 +109,32 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
         AppState::Loaded => render_loaded(ui, app),
         AppState::Processing => render_processing(ui, app),
         AppState::Done => render_done(ui, app),
+    }
+
+    if app.brush_state.is_enabled() && matches!(app.state, AppState::Done) {
+        handle_brush_input(ui, app, canvas_rect);
+    }
+}
+
+/// Run the brush overlay (cursor + pointer events) and commit any
+/// finished stroke onto the active item. Pan is suppressed in this mode
+/// — `render_done`'s pan logic already runs with `is_panning = false`
+/// because brush mode disables the press tracking via the `canvas_gets_input`
+/// gate.
+fn handle_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: Rect) {
+    use super::brush_overlay::{self, BrushAction};
+    let Some(tex) = app.result_texture.as_ref().or(app.source_texture.as_ref()) else { return };
+    let tex_size = tex.size_vec2();
+    let img_rect = compute_img_rect(canvas_rect, tex_size, app.zoom_state.zoom, app.zoom_state.pan_offset);
+
+    let Some(idx) = app.batch.selected_idx_clamped() else { return };
+    let action = {
+        let item = &app.batch.items[idx];
+        brush_overlay::handle_input(ui, &mut app.brush_state, item, img_rect, tex_size)
+    };
+    if let BrushAction::Committed(strokes) = action {
+        let item = &mut app.batch.items[idx];
+        item.commit_correction(strokes);
     }
 }
 
