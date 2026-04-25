@@ -825,6 +825,72 @@ pub fn run_worker() -> ! {
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 guard.insert(item_id);
             }
+
+            SubprocessCommand::Inpaint { item_id, image_path, mask_path, width, height } => {
+                // Inpaint is independent of the engine pool — runs LaMa
+                // synchronously on the calling thread. The pool is for
+                // seg/edge models and shouldn't pre-load LaMa.
+                let evt_tx = evt_tx.clone();
+                std::thread::spawn(move || {
+                    let result = (|| -> Result<image::RgbaImage, String> {
+                        let image_bytes = std::fs::read(&image_path)
+                            .map_err(|e| format!("read source: {e}"))?;
+                        let _ = std::fs::remove_file(&image_path);
+                        let image = image::load_from_memory(&image_bytes)
+                            .map_err(|e| format!("decode source: {e}"))?
+                            .to_rgba8();
+                        let mask_bytes = std::fs::read(&mask_path)
+                            .map_err(|e| format!("read mask: {e}"))?;
+                        let _ = std::fs::remove_file(&mask_path);
+                        let mask = image::load_from_memory(&mask_bytes)
+                            .map_err(|e| format!("decode mask: {e}"))?
+                            .to_luma8();
+                        if image.dimensions() != (width, height) {
+                            return Err(format!(
+                                "image dim {:?} != expected ({}, {})",
+                                image.dimensions(), width, height,
+                            ));
+                        }
+                        prunr_core::inpaint::process_inpaint(&image, &mask)
+                            .map_err(|e| format!("inpaint: {e:?}"))
+                    })();
+                    match result {
+                        Ok(rgba) => {
+                            let dir = prunr_app::subprocess::protocol::ipc_temp_dir();
+                            let path = dir.join(format!("inpaint-out-{item_id}.png"));
+                            match prunr_core::encode_rgba_png(&rgba) {
+                                Ok(bytes) => {
+                                    if let Err(e) = std::fs::write(&path, &bytes) {
+                                        let _ = evt_tx.send(SubprocessEvent::InpaintError {
+                                            item_id,
+                                            error: format!("write result: {e}"),
+                                        });
+                                        return;
+                                    }
+                                    let _ = evt_tx.send(SubprocessEvent::InpaintDone {
+                                        item_id,
+                                        rgba_path: path,
+                                        width: rgba.width(),
+                                        height: rgba.height(),
+                                    });
+                                }
+                                Err(e) => {
+                                    let _ = evt_tx.send(SubprocessEvent::InpaintError {
+                                        item_id,
+                                        error: format!("encode result: {e:?}"),
+                                    });
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            let _ = evt_tx.send(SubprocessEvent::InpaintError {
+                                item_id,
+                                error: e,
+                            });
+                        }
+                    }
+                });
+            }
             SubprocessCommand::Cancel => {
                 cancel.store(true, Ordering::Release);
                 // Wait for in-flight to drain
