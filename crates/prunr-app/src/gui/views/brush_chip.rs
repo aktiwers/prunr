@@ -57,6 +57,17 @@ pub(super) fn render(ui: &mut Ui, brush_state: &mut BrushState) -> bool {
                     &mut s.hardness,
                     0.0..=1.0,
                     false,
+                    // 1-decimal % gives ~0.5% drag granularity for fine
+                    // edge-softness tuning.
+                    |v| format!("{:.1}%", v * 100.0),
+                );
+                ui.add_space(4.0);
+                chip::slider_row_f32(
+                    ui,
+                    "Strength",
+                    &mut s.strength,
+                    0.0..=1.0,
+                    false,
                     |v| format!("{:.0}%", v * 100.0),
                 );
                 ui.add_space(6.0);

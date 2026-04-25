@@ -748,7 +748,7 @@ mod tests {
         assert!(baseline_at_center > 200, "baseline center should be foreground (got {})", baseline_at_center);
 
         let mut correction = MaskCorrection::empty(320, 320);
-        paint_circle(&mut correction, 160.0, 160.0, 20.0, 1.0, BrushMode::Subtract);
+        paint_circle(&mut correction, 160.0, 160.0, 20.0, 1.0, 1.0, BrushMode::Subtract);
         let corrected = tensor_to_mask(raw.view(), &original, &opts.with_correction(Some(&correction)));
 
         let center_after = corrected.get_pixel(160, 160)[0];
