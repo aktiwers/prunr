@@ -154,6 +154,8 @@ Before adding a new field, method, or channel in the GUI layer, find the matchin
 | Drag-out state (active, items set, pending)         | `DragExportState`                                  |
 | Save-as dialog, clipboard, file picker              | `PrunrApp` (Phase 11 → `SystemBridge`)             |
 | Canvas zoom/pan state                               | `PrunrApp.zoom_state`                              |
+| Brush tool toggle / settings / active stroke / trail | `PrunrApp.brush_state` (see `BrushState`)         |
+| Per-item brush correction bytes + hash               | `BatchItem.mask_correction` + `correction_hash`    |
 | Toasts, transient status text                       | `PrunrApp`                                         |
 
 **Hard rule:** if a row matches, do NOT add the field/method/channel to `PrunrApp`. Default-to-the-coordinator.
@@ -174,6 +176,10 @@ Reach for these before writing the equivalent inline:
 | Item's cache footprint (bytes)                 | `BatchItem::cache_size()`                  |
 | Request a thumbnail build                      | `BatchManager::request_thumbnail(...)`     |
 | Pre-decode source bytes                        | `BatchManager::request_decode_source(...)` |
+| Merge brush strokes into the per-item correction | `BatchItem::commit_correction(strokes)`  |
+| Wipe per-item brush correction (undoable)      | `BatchItem::clear_correction()`            |
+| Pop / push brush stroke history                | `BatchItem::undo_stroke()` / `redo_stroke()` |
+| Read/write brush settings                      | `BrushState::settings()` / `settings_mut()` |
 
 If the helper you want doesn't exist, add it to the coordinator — not to `PrunrApp`.
 
