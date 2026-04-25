@@ -92,6 +92,12 @@ pub struct MaskSettings {
     /// GPU-rect fast path at display time).
     #[serde(default)]
     pub bg_effect: BgEffect,
+    /// Fingerprint of the active brush correction; the actual `MaskCorrection`
+    /// data is owned outside prunr-core and threaded into postprocess
+    /// separately. The recipe only needs to know "did the correction
+    /// change" to trigger MaskRerun.
+    #[serde(default)]
+    pub mask_correction_hash: Option<u64>,
 }
 
 impl Default for MaskSettings {
@@ -106,6 +112,7 @@ impl Default for MaskSettings {
             feather: 0.0,
             fill_style: FillStyle::default(),
             bg_effect: BgEffect::default(),
+            mask_correction_hash: None,
         }
     }
 }

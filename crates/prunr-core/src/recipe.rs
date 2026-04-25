@@ -68,6 +68,11 @@ pub struct MaskRecipe {
     feather_bits: u32,
     pub fill_style: FillStyle,
     pub bg_effect: BgEffect,
+    /// Fingerprint of the brush correction; bytes live on the GUI's
+    /// `BatchItem`. Including the hash here lets `resolve_tier`'s
+    /// MaskRecipe diff fire MaskRerun on stroke commit.
+    #[serde(default)]
+    mask_correction_hash: Option<u64>,
 }
 
 impl From<&crate::MaskSettings> for MaskRecipe {
@@ -82,6 +87,7 @@ impl From<&crate::MaskSettings> for MaskRecipe {
             feather_bits: m.feather.to_bits(),
             fill_style: m.fill_style,
             bg_effect: m.bg_effect,
+            mask_correction_hash: m.mask_correction_hash,
         }
     }
 }
@@ -97,6 +103,7 @@ impl PartialEq for MaskRecipe {
             && self.feather_bits == other.feather_bits
             && self.fill_style == other.fill_style
             && self.bg_effect == other.bg_effect
+            && self.mask_correction_hash == other.mask_correction_hash
     }
 }
 impl Eq for MaskRecipe {}
@@ -112,6 +119,7 @@ impl std::hash::Hash for MaskRecipe {
         self.feather_bits.hash(state);
         self.fill_style.hash(state);
         self.bg_effect.hash(state);
+        self.mask_correction_hash.hash(state);
     }
 }
 
@@ -296,6 +304,50 @@ mod tests {
         let mut b = a.clone();
         b.edge.line_strength_bits = 0.8f32.to_bits();
         assert_eq!(resolve_tier(&a, &b), RequiredTier::EdgeRerun);
+    }
+
+    #[test]
+    fn brush_correction_hash_change_triggers_mask_rerun() {
+        let a = make_recipe(ModelKind::Silueta, 1.0, None);
+        let mut b = a.clone();
+        b.mask = MaskRecipe::from(&crate::MaskSettings {
+            mask_correction_hash: Some(42),
+            ..Default::default()
+        });
+        assert_eq!(resolve_tier(&a, &b), RequiredTier::MaskRerun);
+    }
+
+    #[test]
+    fn equal_brush_correction_hashes_no_rerun() {
+        let mut a = make_recipe(ModelKind::Silueta, 1.0, None);
+        a.mask = MaskRecipe::from(&crate::MaskSettings {
+            mask_correction_hash: Some(7),
+            ..Default::default()
+        });
+        let b = a.clone();
+        assert_eq!(resolve_tier(&a, &b), RequiredTier::Skip);
+    }
+
+    #[test]
+    fn brush_correction_hash_added_from_none_triggers_mask_rerun() {
+        let a = make_recipe(ModelKind::Silueta, 1.0, None);
+        let mut b = a.clone();
+        b.mask = MaskRecipe::from(&crate::MaskSettings {
+            mask_correction_hash: Some(1),
+            ..Default::default()
+        });
+        assert_eq!(resolve_tier(&a, &b), RequiredTier::MaskRerun);
+    }
+
+    #[test]
+    fn brush_correction_hash_cleared_to_none_triggers_mask_rerun() {
+        let mut a = make_recipe(ModelKind::Silueta, 1.0, None);
+        a.mask = MaskRecipe::from(&crate::MaskSettings {
+            mask_correction_hash: Some(99),
+            ..Default::default()
+        });
+        let b = make_recipe(ModelKind::Silueta, 1.0, None);
+        assert_eq!(resolve_tier(&a, &b), RequiredTier::MaskRerun);
     }
 
     #[test]
