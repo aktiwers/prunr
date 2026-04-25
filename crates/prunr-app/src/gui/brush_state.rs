@@ -28,6 +28,11 @@ struct ActiveStroke {
     /// Set the first time `paint_circle` runs against `grid`. Lets
     /// `commit_stroke` skip an O(W·H) is_empty scan on click-without-drag.
     dirty: bool,
+    /// Screen-space stamp positions painted so far in this stroke.
+    /// Drawn each frame as a translucent purple trail until the stroke
+    /// commits and the real mask update arrives. (sx, sy, screen_radius).
+    /// Cleared on commit / cancel along with the rest of the stroke.
+    trail: Vec<(f32, f32, f32)>,
 }
 
 #[derive(Default)]
@@ -68,7 +73,26 @@ impl BrushState {
         self.active = Some(ActiveStroke {
             grid: MaskCorrection::empty(width, height),
             dirty: false,
+            trail: Vec::new(),
         });
+    }
+
+    /// Record a screen-space stamp for the in-progress stroke trail.
+    /// Caller is the canvas-side overlay; `BrushState` doesn't compute
+    /// screen coords itself.
+    pub fn record_trail_stamp(&mut self, sx: f32, sy: f32, screen_radius: f32) {
+        if let Some(active) = self.active.as_mut() {
+            active.trail.push((sx, sy, screen_radius));
+        }
+    }
+
+    /// Iterator over `(sx, sy, screen_radius)` stamps in the active
+    /// stroke's trail. Empty when no stroke is active.
+    pub fn trail_stamps(&self) -> impl Iterator<Item = (f32, f32, f32)> + '_ {
+        self.active
+            .as_ref()
+            .into_iter()
+            .flat_map(|a| a.trail.iter().copied())
     }
 
     /// Extend the active stroke at model-space coordinates with an

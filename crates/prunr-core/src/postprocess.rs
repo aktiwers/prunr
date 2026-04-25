@@ -118,40 +118,43 @@ fn tensor_to_mask_core(raw: ArrayView4<f32>, ow: u32, oh: u32, rgba_for_guided: 
     let gamma = mask_settings.gamma;
     let threshold = mask_settings.threshold;
 
-    // Short-circuit: uniform output → fill with constant, skip per-pixel loop
-    let mut mask_buf = if let Some(uv) = uniform_val {
-        let mut val = uv;
-        if gamma != 1.0 { val = val.powf(gamma); }
-        if let Some(t) = threshold { val = if val >= t { 1.0 } else { 0.0 }; }
-        vec![(val * 255.0) as u8; sw * sh]
+    // Build the normalized [0, 1] mask FIRST (no gamma/threshold yet).
+    // Brush correction (multiplicative) runs in this space so subsequent
+    // gamma slider tweaks modulate the painted regions naturally.
+    let mut normalized: Vec<f32> = if let Some(uv) = uniform_val {
+        vec![uv; sw * sh]
     } else {
         let inv_range = 1.0 / range;
-        let mut buf = vec![0u8; sw * sh];
+        let mut buf = vec![0.0f32; sw * sh];
         for i in 0..sh * sw {
             let raw_val = pred_slice[i];
-            let mut val = if use_sigmoid {
+            buf[i] = if use_sigmoid {
                 1.0 / (1.0 + (-raw_val).exp())
             } else {
                 ((raw_val - mi) * inv_range).clamp(0.0, 1.0)
             };
-
-            if gamma != 1.0 {
-                val = val.powf(gamma);
-            }
-            if let Some(t) = threshold {
-                val = if val >= t { 1.0 } else { 0.0 };
-            }
-
-            buf[i] = (val * 255.0) as u8;
         }
         buf
     };
 
-    // Brush correction runs at model resolution, BEFORE resize/guided
-    // filter, so the guided filter snaps stroke edges to the image's
-    // color edges.
+    // Brush correction in normalized space, BEFORE gamma/threshold and
+    // BEFORE resize/refine — so the gamma slider modulates the painted
+    // regions and the guided filter snaps stroke edges to color edges.
     if let Some(corr) = correction {
-        crate::brush::apply_correction(&mut mask_buf, corr);
+        crate::brush::apply_correction(&mut normalized, corr);
+    }
+
+    // Apply gamma + threshold and quantize to u8.
+    let mut mask_buf = vec![0u8; sw * sh];
+    for i in 0..sh * sw {
+        let mut val = normalized[i];
+        if gamma != 1.0 {
+            val = val.powf(gamma);
+        }
+        if let Some(t) = threshold {
+            val = if val >= t { 1.0 } else { 0.0 };
+        }
+        mask_buf[i] = (val * 255.0) as u8;
     }
 
     let mask = GrayImage::from_raw(sw as u32, sh as u32, mask_buf)

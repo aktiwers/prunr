@@ -1511,6 +1511,12 @@ impl PrunrApp {
                 if let Some((base, recipe, model)) = r.new_masked_base {
                     item.cached_masked_base = Some((base, recipe, model));
                 }
+                // Mark the dispatched MaskRecipe as applied so the
+                // recipe-drift tripwire doesn't immediately re-fire on
+                // a result it has already consumed.
+                if let Some(applied) = item.applied_recipe.as_mut() {
+                    applied.mask = r.applied_mask;
+                }
                 let switch = self.result_switch_id;
                 Self::spawn_tex_prep(
                     new_rgba, item.id, format!("result_{}_{}", item.id, switch),
