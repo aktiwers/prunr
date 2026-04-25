@@ -148,7 +148,7 @@ fn render_layer(
             };
             let rgba = prunr_core::postprocess_from_flat(
                 &seg.data, seg.height as usize, seg.width as usize,
-                original, &mask, seg.model,
+                original, &mask, seg.model, None,
             )
                 .map_err(|err| tracing::warn!(item_id, %err, "subject layer postprocess"))
                 .ok()?;
@@ -170,7 +170,7 @@ fn render_layer(
             let seg = seg?;
             let gray = prunr_core::tensor_to_mask_from_flat(
                 &seg.data, seg.height as usize, seg.width as usize,
-                original, &item.settings.mask_settings(), seg.model,
+                original, &item.settings.mask_settings(), seg.model, None,
             )
                 .map_err(|err| tracing::warn!(item_id, %err, "mask layer reshape"))
                 .ok()?;
