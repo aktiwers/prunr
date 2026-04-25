@@ -96,6 +96,16 @@ jobs:
           path: ort-build/MacOS/Release
           key: ort-coreml-1.20.0-macos-aarch64-v1
 
+      - name: Install ORT build prereqs (macOS, cache miss)
+        if: matrix.name == 'macos-aarch64' && steps.ort-cache.outputs.cache-hit != 'true'
+        run: |
+          # ORT 1.20.0 pulls eigen via FetchContent from a pinned commit on
+          # gitlab.com, which the runner network blocks/rate-limits in 2026.
+          # `brew install eigen` provides a stable Eigen3 install with cmake
+          # config files; build.sh's --use_preinstalled_eigen makes ORT
+          # find_package(Eigen3) instead of downloading.
+          brew install eigen
+
       - name: Build ORT with CoreML (macOS, cache miss)
         if: matrix.name == 'macos-aarch64' && steps.ort-cache.outputs.cache-hit != 'true'
         run: |
@@ -115,6 +125,8 @@ jobs:
             --skip_submodule_sync \
             --skip_tests \
             --osx_arch arm64 \
+            --use_preinstalled_eigen \
+            --eigen_path "$(brew --prefix eigen)/include/eigen3" \
             --build_dir ../ort-build \
             --cmake_extra_defines CMAKE_POLICY_VERSION_MINIMUM=3.5
 
