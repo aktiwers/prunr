@@ -155,9 +155,8 @@ fn handle_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: Rect) 
     };
     if let BrushAction::Committed(strokes) = action {
         let item_id = app.batch.items[idx].id;
-        let stroke_pixels = strokes.grid.iter().filter(|&&v| v != 0).count();
         app.batch.items[idx].commit_correction(strokes);
-        tracing::info!(item_id, stroke_pixels, "brush stroke committed; dispatching Tier-2 rerun");
+        tracing::info!(item_id, "brush stroke committed; dispatching Tier-2 rerun");
         // Brush is conceptually a live-preview action — one dispatch
         // per stroke, not the 10 Hz slider cadence — so we fire it
         // unconditionally even when the global live_preview toggle is off.

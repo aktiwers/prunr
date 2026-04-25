@@ -192,11 +192,6 @@ impl BrushState {
         Some(active.grid)
     }
 
-    /// Cancel the active stroke without committing.
-    #[allow(dead_code)]
-    pub fn cancel_stroke(&mut self) {
-        self.active = None;
-    }
 }
 
 #[cfg(test)]
@@ -259,15 +254,6 @@ mod tests {
         assert!(!s.has_active_stroke());
     }
 
-    #[test]
-    fn cancel_drops_active_without_returning() {
-        let mut s = BrushState::default();
-        s.begin_stroke(32, 32);
-        s.extend_stroke_with_radius(16.0, 16.0, 8.0);
-        s.cancel_stroke();
-        assert!(!s.has_active_stroke());
-        assert!(s.commit_stroke().is_none());
-    }
 
     #[test]
     fn settings_round_trip() {

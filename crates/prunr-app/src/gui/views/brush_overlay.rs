@@ -29,9 +29,7 @@ pub(crate) enum BrushAction {
     None,
 }
 
-/// Returns the model-space resolution of the active item's mask, or
-/// `None` if no inference has run yet (brush has nothing to correct).
-pub(crate) fn model_dims(item: &BatchItem) -> Option<(u16, u16)> {
+fn model_dims(item: &BatchItem) -> Option<(u16, u16)> {
     let t = item.cached_tensor.as_ref()?;
     Some((t.width as u16, t.height as u16))
 }
@@ -154,76 +152,20 @@ fn draw_trail(ui: &Ui, brush_state: &BrushState) {
         }
         prunr_core::brush::BrushShape::Circle => {
             for (sx, sy, outer_r) in brush_state.trail_stamps() {
-                draw_round_stamp(&painter, sx, sy, outer_r, hardness, accent, center_alpha, solid);
+                super::chip::paint_falloff_circle(
+                    &painter, Pos2::new(sx, sy), outer_r, hardness, accent, center_alpha, 8,
+                );
             }
         }
         prunr_core::brush::BrushShape::Square => {
             for (sx, sy, outer_r) in brush_state.trail_stamps() {
-                draw_square_stamp(&painter, sx, sy, outer_r, hardness, accent, center_alpha);
+                super::chip::paint_falloff_square(
+                    &painter, Pos2::new(sx, sy), outer_r, hardness, accent, center_alpha, 6,
+                );
             }
         }
     }
-}
-
-fn draw_round_stamp(
-    painter: &egui::Painter,
-    sx: f32, sy: f32, outer_r: f32,
-    hardness: f32,
-    accent: Color32, center_alpha: u8, solid: Color32,
-) {
-    let center = Pos2::new(sx, sy);
-    let inner_r = outer_r * hardness;
-    if inner_r >= 0.5 {
-        painter.circle_filled(center, inner_r, solid);
-    }
-    let span = (outer_r - inner_r).max(0.001);
-    let steps = 8;
-    for i in 0..steps {
-        let t = (i as f32 + 0.5) / steps as f32;
-        let dist = inner_r + span * t;
-        let intensity = prunr_core::math::smoothstep(1.0 - t);
-        let a = (center_alpha as f32 * intensity) as u8;
-        if a == 0 {
-            continue;
-        }
-        let stroke_color = Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), a);
-        painter.circle_stroke(center, dist, egui::Stroke::new(span / steps as f32 * 1.4, stroke_color));
-    }
-}
-
-fn draw_square_stamp(
-    painter: &egui::Painter,
-    sx: f32, sy: f32, half_size: f32,
-    hardness: f32,
-    accent: Color32, center_alpha: u8,
-) {
-    let inner = half_size * hardness;
-    if inner >= 0.5 {
-        let solid = Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), center_alpha);
-        painter.rect_filled(
-            Rect::from_center_size(Pos2::new(sx, sy), egui::vec2(inner * 2.0, inner * 2.0)),
-            0.0,
-            solid,
-        );
-    }
-    let span = (half_size - inner).max(0.001);
-    let steps = 6;
-    for i in 0..steps {
-        let t = (i as f32 + 0.5) / steps as f32;
-        let dist = inner + span * t;
-        let intensity = prunr_core::math::smoothstep(1.0 - t);
-        let a = (center_alpha as f32 * intensity) as u8;
-        if a == 0 {
-            continue;
-        }
-        let stroke_color = Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), a);
-        painter.rect_stroke(
-            Rect::from_center_size(Pos2::new(sx, sy), egui::vec2(dist * 2.0, dist * 2.0)),
-            0.0,
-            egui::Stroke::new(span / steps as f32 * 1.4, stroke_color),
-            egui::StrokeKind::Outside,
-        );
-    }
+    let _ = solid;
 }
 
 fn draw_cursor(ui: &Ui, img_rect: Rect, brush_state: &BrushState, armed: bool) {

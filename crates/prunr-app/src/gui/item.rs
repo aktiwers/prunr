@@ -231,11 +231,11 @@ pub(crate) struct BatchItem {
     pub(crate) preset_undo_stack: VecDeque<PresetSnapshot>,
     /// Redo counterpart — cleared on a fresh preset apply, fed by undos.
     pub(crate) preset_redo_stack: VecDeque<PresetSnapshot>,
-    /// Invariant: `mask_correction` and `correction_hash` mutate together
-    /// via `commit_correction` / `clear_correction`. Direct field writes
-    /// break recipe-diff dispatch.
+    /// Per-item brush correction. The hash for the recipe diff lives on
+    /// `settings.correction_hash` (set in lockstep by `commit_correction`
+    /// / `clear_correction`); never mutate the `Arc<MaskCorrection>` from
+    /// outside those mutators or the recipe-diff dispatch breaks.
     pub(crate) mask_correction: Option<Arc<prunr_core::brush::MaskCorrection>>,
-    pub(crate) correction_hash: Option<u64>,
     /// Snapshots of `mask_correction` taken BEFORE each stroke commit.
     /// `Ctrl+Z` while brush mode is active pops the top entry and
     /// restores the snapshot — the user undoes one stroke per press.
@@ -255,15 +255,10 @@ impl BatchItem {
         self.cached_edge_mask = None;
     }
 
-    /// Merge brush strokes into the existing correction and refresh the
-    /// hash. Skips the full-grid clone via `Arc::make_mut` when no live-
-    /// preview snapshot is currently holding the Arc — the common case
-    /// at stroke-commit time. The hash is mirrored onto
-    /// `settings.correction_hash` so `mask_settings()` (and the recipe
-    /// diff that reads it) sees the change.
-    ///
-    /// Pushes the pre-merge correction onto `stroke_undo_stack` and
-    /// clears `stroke_redo_stack`, mirroring the result-history shape.
+    /// Merge brush strokes into the existing correction. Uses
+    /// `Arc::make_mut` so the common single-owner case skips the full
+    /// clone. The new hash lands on `settings.correction_hash` —
+    /// `mask_settings()` reads it for the recipe diff.
     pub(crate) fn commit_correction(
         &mut self,
         strokes: prunr_core::brush::MaskCorrection,
@@ -277,14 +272,10 @@ impl BatchItem {
         });
         let current = Arc::make_mut(arc);
         prunr_core::brush::merge(current, &strokes);
-        let hash = prunr_core::brush::content_hash(current);
-        self.correction_hash = Some(hash);
-        self.settings.correction_hash = Some(hash);
+        self.settings.correction_hash = Some(prunr_core::brush::content_hash(current));
     }
 
-    /// Drop the brush correction. Pairs with `commit_correction`. The
-    /// pre-clear state is pushed onto the undo stack so the user can
-    /// reverse a "Clear strokes" click.
+    /// Drop the brush correction. Reversible via `undo_stroke`.
     pub(crate) fn clear_correction(&mut self) {
         if self.mask_correction.is_some() {
             let pre = self.mask_correction.clone();
@@ -292,7 +283,6 @@ impl BatchItem {
             self.stroke_redo_stack.clear();
         }
         self.mask_correction = None;
-        self.correction_hash = None;
         self.settings.correction_hash = None;
     }
 
@@ -325,10 +315,8 @@ impl BatchItem {
     }
 
     fn set_correction(&mut self, c: Option<Arc<prunr_core::brush::MaskCorrection>>) {
-        let hash = c.as_deref().map(prunr_core::brush::content_hash);
+        self.settings.correction_hash = c.as_deref().map(prunr_core::brush::content_hash);
         self.mask_correction = c;
-        self.correction_hash = hash;
-        self.settings.correction_hash = hash;
     }
 
     /// Drop whatever caches a `CacheImpact` says are stale. Single entry
@@ -477,7 +465,6 @@ impl BatchItem {
             preset_undo_stack: VecDeque::new(),
             preset_redo_stack: VecDeque::new(),
             mask_correction: None,
-            correction_hash: None,
             stroke_undo_stack: VecDeque::new(),
             stroke_redo_stack: VecDeque::new(),
         }
@@ -721,9 +708,17 @@ mod tests {
         }
     }
 
-    fn stamp(width: u16, height: u16, idx: usize, value: i8) -> prunr_core::brush::MaskCorrection {
+    fn stamp(width: u16, height: u16, idx: usize, _value: i8) -> prunr_core::brush::MaskCorrection {
+        // Stamp a real circle near the requested cell so the correction
+        // is non-empty without poking private fields. The exact magnitude
+        // doesn't matter — these tests only check undo/redo bookkeeping.
         let mut c = prunr_core::brush::MaskCorrection::empty(width, height);
-        c.grid[idx] = value;
+        let cx = (idx as u16 % width) as f32 + 0.5;
+        let cy = (idx as u16 / width) as f32 + 0.5;
+        prunr_core::brush::paint_circle(
+            &mut c, cx, cy, 1.0,
+            prunr_core::brush::Stamp { hardness: 1.0, strength: 1.0, mode: prunr_core::brush::BrushMode::Add },
+        );
         c
     }
 
@@ -807,5 +802,39 @@ mod tests {
         let mut item = fixture_item(1);
         item.clear_correction();
         assert!(!item.has_stroke_undo(), "clearing an already-empty correction must not push undo");
+    }
+
+    #[test]
+    fn commit_correction_writes_hash_to_settings() {
+        let mut item = fixture_item(1);
+        assert!(item.settings.correction_hash.is_none());
+        item.commit_correction(stamp(8, 8, 5, 50));
+        assert!(
+            item.settings.correction_hash.is_some(),
+            "settings.correction_hash must mirror the new correction's hash"
+        );
+    }
+
+    #[test]
+    fn clear_correction_clears_settings_hash() {
+        let mut item = fixture_item(1);
+        item.commit_correction(stamp(8, 8, 5, 50));
+        assert!(item.settings.correction_hash.is_some());
+        item.clear_correction();
+        assert!(item.settings.correction_hash.is_none(), "clear must wipe the hash too");
+    }
+
+    #[test]
+    fn undo_redo_keeps_settings_hash_in_sync() {
+        let mut item = fixture_item(1);
+        item.commit_correction(stamp(8, 8, 5, 50));
+        let after_commit = item.settings.correction_hash;
+        item.commit_correction(stamp(8, 8, 12, 30));
+        let after_two = item.settings.correction_hash;
+        assert_ne!(after_commit, after_two);
+        item.undo_stroke();
+        assert_eq!(item.settings.correction_hash, after_commit, "undo restores the prior hash");
+        item.redo_stroke();
+        assert_eq!(item.settings.correction_hash, after_two, "redo restores the next hash");
     }
 }
