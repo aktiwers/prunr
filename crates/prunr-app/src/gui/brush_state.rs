@@ -35,10 +35,8 @@ struct ActiveStroke {
     /// Set the first time `paint_circle` runs against `grid`. Lets
     /// `commit_stroke` skip an O(W·H) is_empty scan on click-without-drag.
     dirty: bool,
-    /// Screen-space stamp positions painted so far in this stroke.
-    /// Drawn each frame as a translucent purple trail until the stroke
-    /// commits and the real mask update arrives. (sx, sy, screen_radius).
-    /// Cleared on commit / cancel along with the rest of the stroke.
+    /// Screen-space stamps painted so far. Drawn each frame as the
+    /// in-progress trail until the stroke commits.
     trail: Vec<(f32, f32, f32)>,
 }
 
@@ -65,8 +63,6 @@ impl BrushState {
         &self.settings
     }
 
-    /// Wired into the brush settings chip in 15-06.
-    #[allow(dead_code)]
     pub fn settings_mut(&mut self) -> &mut BrushSettings {
         &mut self.settings
     }
@@ -87,13 +83,23 @@ impl BrushState {
     /// Record a screen-space stamp for the in-progress stroke trail.
     /// Caller is the canvas-side overlay; `BrushState` doesn't compute
     /// screen coords itself.
+    ///
+    /// Spatial dedup: skip the push if the new stamp is within half-radius
+    /// of the previous one. Pointer events at 60+ Hz over a slow drag
+    /// stack near-identical stamps that paint to the same pixels — keeping
+    /// only every-half-radius cuts the per-frame paint count without
+    /// changing what the user sees.
     pub fn record_trail_stamp(&mut self, sx: f32, sy: f32, screen_radius: f32) {
-        if let Some(active) = self.active.as_mut() {
-            active.trail.push((sx, sy, screen_radius));
-            tracing::trace!(sx, sy, screen_radius, total = active.trail.len(), "trail stamp recorded");
-        } else {
-            tracing::debug!("trail stamp dropped — no active stroke");
+        let Some(active) = self.active.as_mut() else { return };
+        if let Some(&(px, py, _)) = active.trail.last() {
+            let dx = sx - px;
+            let dy = sy - py;
+            let min_step_sq = (screen_radius * 0.5).max(1.0).powi(2);
+            if dx * dx + dy * dy < min_step_sq {
+                return;
+            }
         }
+        active.trail.push((sx, sy, screen_radius));
     }
 
     /// Iterator over `(sx, sy, screen_radius)` stamps in the active
@@ -135,7 +141,7 @@ impl BrushState {
         Some(active.grid)
     }
 
-    /// Cancel the active stroke without committing. Wired to ESC in 15-06.
+    /// Cancel the active stroke without committing.
     #[allow(dead_code)]
     pub fn cancel_stroke(&mut self) {
         self.active = None;

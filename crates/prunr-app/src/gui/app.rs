@@ -496,33 +496,31 @@ impl PrunrApp {
         self.processor.live_preview.flush(item_id);
     }
 
-    /// Catch any drift between an item's `applied_recipe.mask` and the
-    /// recipe derived from the current `settings.mask_settings()`. The
-    /// toolbar's `apply_toolbar_change` path is the precise dispatcher
-    /// for known knob changes; this is the safety net for non-toolbar
-    /// state mutations (brush, hotkeys, future features) so they never
-    /// silently fail to update the result.
+    /// Catch any drift between the active item's `applied_recipe.mask`
+    /// and the recipe derived from current settings. Safety net for
+    /// non-toolbar state mutations (brush commits, hotkeys) so they
+    /// never silently fail to update the result.
     ///
-    /// Logs a debug! when it fires — a `tracing` line on every drift
-    /// is the audit trail when a new feature forgets to wire dispatch.
+    /// Active-item only by design — the only drift surfaces today
+    /// (brush, undo/redo) act on the selected item; widening to the
+    /// full batch would burn ~6000 MaskRecipe::from calls/sec on a
+    /// 100-item batch for no current benefit.
     fn recipe_drift_tripwire(&mut self) {
         use crate::gui::live_preview::PreviewKind;
         if self.processor.live_preview.has_in_flight() {
             return;
         }
-        let mut to_dispatch: Vec<u64> = Vec::new();
-        for item in &self.batch.items {
-            let Some(applied) = item.applied_recipe.as_ref() else { continue };
-            let current = prunr_core::MaskRecipe::from(&item.settings.mask_settings());
-            if applied.mask != current {
-                to_dispatch.push(item.id);
-            }
+        let Some(idx) = self.batch.selected_idx_clamped() else { return };
+        let item = &self.batch.items[idx];
+        let Some(applied) = item.applied_recipe.as_ref() else { return };
+        let current = prunr_core::MaskRecipe::from(&item.settings.mask_settings());
+        if applied.mask == current {
+            return;
         }
-        for id in to_dispatch {
-            tracing::debug!(item_id = id, "recipe-drift tripwire fired — dispatching Tier-2");
-            self.processor.live_preview.mark_tweak(id, PreviewKind::Mask);
-            self.processor.live_preview.flush(id);
-        }
+        let id = item.id;
+        tracing::debug!(item_id = id, "recipe-drift tripwire fired — dispatching Tier-2");
+        self.processor.live_preview.mark_tweak(id, PreviewKind::Mask);
+        self.processor.live_preview.flush(id);
     }
 
     /// Preset undo/redo: rolls back (or re-applies) a preset swap on the
