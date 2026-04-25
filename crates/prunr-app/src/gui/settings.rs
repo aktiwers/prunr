@@ -263,9 +263,9 @@ pub enum SettingsModel {
     /// need the seg model); SubjectOutline is invalid without a seg model
     /// and gets greyed out in the UI.
     None,
-    /// Object-removal / inpaint mode — Phase 16. The brush is the only
-    /// input; stroke release runs LaMa over the painted region. Bg-removal
-    /// knobs (gamma, threshold, refine, fill_style) are inert in this mode.
+    /// Object-removal / inpaint mode. Brush is the only input; stroke
+    /// release runs LaMa over the painted region. Bg-removal knobs
+    /// (gamma, threshold, refine, fill_style) are inert in this mode.
     Inpaint,
 }
 

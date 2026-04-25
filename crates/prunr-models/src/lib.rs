@@ -116,35 +116,43 @@ pub fn model_int8_bytes(model: Model) -> Option<Vec<u8>> {
     load_variant(model, "int8")
 }
 
-/// LaMa inpainter for Phase 16 object removal. Returns None when the
-/// model isn't on disk — caller treats Inpaint mode as unavailable.
-/// Filesystem load (not embedded) until the FP32→INT8 conversion is
-/// stable; flip to `include_bytes_zstd!` once a quantized variant
-/// lands.
+/// LaMa inpainter bytes. Filesystem load (not embedded) until an
+/// INT8 quantized variant ships; flip to `include_bytes_zstd!` then.
 pub fn lama_bytes() -> Option<Vec<u8>> {
-    load_optional_model("lama_fp32.onnx")
+    let path = lama_path()?;
+    std::fs::read(path).ok()
 }
 
-fn load_optional_model(filename: &str) -> Option<Vec<u8>> {
+/// True when the LaMa file is on disk — avoids the 200+ MB read that
+/// `lama_bytes` does. Use for "is this feature available?" gates;
+/// reach for `lama_bytes` only when actually loading the session.
+pub fn lama_available() -> bool {
+    lama_path().is_some()
+}
+
+/// Resolve the LaMa filesystem path without reading the file. Mirrors
+/// `load_optional_model`'s search order.
+fn lama_path() -> Option<std::path::PathBuf> {
+    let filename = "lama_fp32.onnx";
+
     #[cfg(debug_assertions)]
     {
         let dev_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../models")
             .join(filename);
-        if let Ok(bytes) = std::fs::read(&dev_path) {
-            return Some(bytes);
+        if dev_path.is_file() {
+            return Some(dev_path);
         }
     }
 
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            if let Ok(bytes) = std::fs::read(dir.join("models").join(filename)) {
-                return Some(bytes);
-            }
-        }
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?;
+    let path = dir.join("models").join(filename);
+    if path.is_file() {
+        Some(path)
+    } else {
+        None
     }
-
-    None
 }
 
 fn load_variant(model: Model, suffix: &str) -> Option<Vec<u8>> {
@@ -203,10 +211,9 @@ mod tests {
     }
 
     #[test]
-    fn lama_bytes_signature_is_optional() {
-        // Returns None gracefully when the file isn't present rather than
-        // panicking — the GUI uses that to disable Inpaint mode.
+    fn lama_helpers_dont_panic_when_file_missing() {
         let _: fn() -> Option<Vec<u8>> = super::lama_bytes;
-        let _ = super::lama_bytes();
+        let _: fn() -> bool = super::lama_available;
+        let _ = super::lama_available();
     }
 }
