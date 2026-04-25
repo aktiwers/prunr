@@ -33,8 +33,10 @@ prunr/
 │               ├── history_manager.rs # Per-item undo/redo + preset history (no own state)
 │               ├── drag_export_state.rs # OS drag-out lifecycle state (4 fields + reset)
 │               ├── batch_manager.rs   # batch items, selection, bg_io, memory governance, decode/thumb requests
-│               ├── processor.rs       # worker channels, cancel flag, admission, live preview, dispatch state
+│               ├── processor.rs       # worker channels, cancel flag, admission, live preview, in-flight recipe slot
+│               ├── system_bridge.rs   # Thin shim over rfd (file dialogs) + arboard (clipboard)
 │               ├── item_settings.rs   # Per-image processing settings
+│               ├── knob_catalog.rs    # Declarative per-knob (tier, cache_impact, dispatch) routing table
 │               ├── live_preview.rs    # In-process Tier 2 dispatcher
 │               ├── presets_fs.rs      # On-disk preset store (one JSON per preset)
 │               ├── worker.rs          # Bridge thread (subprocess ↔ app)
@@ -174,7 +176,7 @@ Re-processing avoids redundant work by classifying each change into a tier:
 | 3 | CompositeOnly | bg_color changed | Render-time GPU rect — zero CPU |
 | — | Skip | Recipe identical | No work |
 
-Each `BatchItem` stores the recipe that produced its current result, snapshotted at dispatch time — so settings changes mid-batch can't corrupt the stored tag.
+Each `BatchItem` stores its `applied_recipe` (the recipe that produced its current result). The dispatch-time snapshot — used to attribute completed results back to the settings that ran — lives on `Processor::in_flight` as a single-owner per-batch record, so a late `ImageDone` after a settings edit can't reattribute. See `## GUI Coordinators` for the ownership rule.
 
 **Two independent tensor caches.** A `BatchItem` holds a segmentation tensor (for MaskRerun) and a DexiNed tensor (for EdgeRerun) as separate zstd-compressed fields — a model swap invalidates only the seg cache, a line_mode change only the edge cache. Combined budget: 512 MB, oldest-evicted first.
 
@@ -541,7 +543,7 @@ codegen-units = 1
 
 ### GitHub Actions release pipeline
 
-Tag push (`v*`) triggers parallel builds on three runners:
+Tag push (`v*`) and manual `workflow_dispatch` both trigger parallel builds on three runners. Manual dispatch is for testing CI changes (CoreML build, dylib bundling, etc.) without polluting the release history.
 
 | Matrix target | Runner | Artifacts |
 |---------------|--------|-----------|
@@ -549,9 +551,13 @@ Tag push (`v*`) triggers parallel builds on three runners:
 | macos-aarch64 | macos-latest | `.dmg`, `.tar.gz` |
 | windows-x86_64 | windows-latest | `.zip`, Inno Setup `.exe` |
 
+**ORT runtime bundling.** Each artifact ships the platform-specific `libonnxruntime` next to the binary so a clean machine without system ORT can run the app. Linux/Windows pull from pykeio/ort's `download-binaries`; macOS replaces it with a custom CoreML-enabled build (see `## GPU Execution Providers`). Each package step fails-loud with a `::error::` annotation if the lib didn't get produced, so a missing dylib surfaces in the PR check rather than silently shipping broken binaries.
+
+**Linux runtime deps** declared in the .deb / .rpm Depends list: `libgtk-3-0` (rfd file dialogs), `libxkbcommon0` (winit keyboard input), `libfontconfig1` (text rendering). Already present on Ubuntu 22.04+, Fedora 40+, openSUSE Tumbleweed; AppImage / tar.gz users on minimal installs may need to install them manually.
+
 ### Version sync
 
-Workspace `Cargo.toml` `version` is the single source of truth. CLI reads `CARGO_PKG_VERSION`; platform packages read the git tag.
+Workspace `Cargo.toml` `version` is the single source of truth. CLI reads `CARGO_PKG_VERSION`; platform packages read the git tag. Manual `workflow_dispatch` runs skip the macOS Info.plist version patch and keep the in-repo placeholder.
 
 ## Key Dependencies
 
@@ -560,6 +566,7 @@ Workspace `Cargo.toml` `version` is the single source of truth. CLI reads `CARGO
 | `ort` | 2.0.0-rc.12 | ONNX Runtime bindings |
 | `eframe` / `egui` | 0.34 | Immediate-mode GUI + windowing |
 | `image` | 0.25 | PNG/JPEG/WebP/BMP decode/encode |
+| `resvg` | 0.45 | SVG → RGBA rasterization on load |
 | `ndarray` | 0.17 | ORT-compatible tensor manipulation |
 | `rayon` | 1.11 | Work-stealing parallelism |
 | `zstd` | 0.13 | Model decompression + history compression |
