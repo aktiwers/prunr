@@ -126,19 +126,15 @@ fn screen_to_model(p: Pos2, img_rect: Rect, model_w: u16, model_h: u16) -> Pos2 
 /// in the same frame can't accidentally cover them, and tinted
 /// brighter than the theme ACCENT so the trail is legible on dark
 /// images too.
-/// Translucent ACCENT-purple stamps along the in-progress stroke,
-/// rendered with the same hardness falloff and strength modulation
-/// the actual brush will apply to the mask. Each stamp = solid
-/// inner disc + concentric soft-falloff strokes between inner and
-/// outer radii. Strength scales the per-stamp alpha so a half-
-/// strength brush draws a half-opacity trail.
+/// In-progress stroke trail. Shape-aware:
+/// - Circle / Square: per-stamp soft falloff matching `paint_*`.
+/// - Line: a single thick segment from the first stamp to the last.
 fn draw_trail(ui: &Ui, brush_state: &BrushState) {
     let s = brush_state.settings();
     if s.strength <= 0.0 {
         return;
     }
     let accent = theme::ACCENT;
-    // Base alpha at strength = 1.0; scaled down for partial strengths.
     let center_alpha = (110.0 * s.strength.clamp(0.0, 1.0)) as u8;
     if center_alpha == 0 {
         return;
@@ -150,30 +146,91 @@ fn draw_trail(ui: &Ui, brush_state: &BrushState) {
     let hardness = s.hardness.clamp(0.0, 1.0);
     let solid = Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), center_alpha);
 
-    for (sx, sy, outer_r) in brush_state.trail_stamps() {
-        let center = Pos2::new(sx, sy);
-        let inner_r = outer_r * hardness;
+    let shape = brush_state.active_shape();
+    let stamps: Vec<_> = brush_state.trail_stamps().collect();
+    if stamps.is_empty() {
+        return;
+    }
 
-        // Solid inner disc.
-        if inner_r >= 0.5 {
-            painter.circle_filled(center, inner_r, solid);
+    match shape {
+        prunr_core::brush::BrushShape::Line => {
+            // Single thick line preview from first → last stamp.
+            let (x1, y1, r) = stamps[0];
+            let (x2, y2, _) = *stamps.last().unwrap();
+            let stroke = egui::Stroke::new(r * 2.0, solid);
+            painter.line_segment([Pos2::new(x1, y1), Pos2::new(x2, y2)], stroke);
         }
-
-        // Soft falloff: concentric strokes from inner_r → outer_r,
-        // alpha tapering with the same smoothstep as paint_circle.
-        let span = (outer_r - inner_r).max(0.001);
-        let steps = 8;
-        for i in 0..steps {
-            let t = (i as f32 + 0.5) / steps as f32;
-            let dist = inner_r + span * t;
-            let intensity = prunr_core::math::smoothstep(1.0 - t);
-            let a = (center_alpha as f32 * intensity) as u8;
-            if a == 0 {
-                continue;
+        prunr_core::brush::BrushShape::Circle => {
+            for (sx, sy, outer_r) in stamps {
+                draw_round_stamp(&painter, sx, sy, outer_r, hardness, accent, center_alpha, solid);
             }
-            let stroke_color = Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), a);
-            painter.circle_stroke(center, dist, egui::Stroke::new(span / steps as f32 * 1.4, stroke_color));
         }
+        prunr_core::brush::BrushShape::Square => {
+            for (sx, sy, outer_r) in stamps {
+                draw_square_stamp(&painter, sx, sy, outer_r, hardness, accent, center_alpha);
+            }
+        }
+    }
+}
+
+fn draw_round_stamp(
+    painter: &egui::Painter,
+    sx: f32, sy: f32, outer_r: f32,
+    hardness: f32,
+    accent: Color32, center_alpha: u8, solid: Color32,
+) {
+    let center = Pos2::new(sx, sy);
+    let inner_r = outer_r * hardness;
+    if inner_r >= 0.5 {
+        painter.circle_filled(center, inner_r, solid);
+    }
+    let span = (outer_r - inner_r).max(0.001);
+    let steps = 8;
+    for i in 0..steps {
+        let t = (i as f32 + 0.5) / steps as f32;
+        let dist = inner_r + span * t;
+        let intensity = prunr_core::math::smoothstep(1.0 - t);
+        let a = (center_alpha as f32 * intensity) as u8;
+        if a == 0 {
+            continue;
+        }
+        let stroke_color = Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), a);
+        painter.circle_stroke(center, dist, egui::Stroke::new(span / steps as f32 * 1.4, stroke_color));
+    }
+}
+
+fn draw_square_stamp(
+    painter: &egui::Painter,
+    sx: f32, sy: f32, half_size: f32,
+    hardness: f32,
+    accent: Color32, center_alpha: u8,
+) {
+    let inner = half_size * hardness;
+    if inner >= 0.5 {
+        let solid = Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), center_alpha);
+        painter.rect_filled(
+            Rect::from_center_size(Pos2::new(sx, sy), egui::vec2(inner * 2.0, inner * 2.0)),
+            0.0,
+            solid,
+        );
+    }
+    let span = (half_size - inner).max(0.001);
+    let steps = 6;
+    for i in 0..steps {
+        let t = (i as f32 + 0.5) / steps as f32;
+        let dist = inner + span * t;
+        let intensity = prunr_core::math::smoothstep(1.0 - t);
+        let a = (center_alpha as f32 * intensity) as u8;
+        if a == 0 {
+            continue;
+        }
+        let stroke_color = Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), a);
+        painter.rect_stroke(
+            Rect::from_center_size(Pos2::new(sx, sy), egui::vec2(dist * 2.0, dist * 2.0)),
+            0.0,
+            egui::Stroke::new(span / steps as f32 * 1.4, stroke_color),
+            egui::StrokeKind::Outside,
+        );
     }
 }
 
@@ -189,8 +246,25 @@ fn draw_cursor(ui: &Ui, img_rect: Rect, brush_state: &BrushState, armed: bool) {
     } else {
         Color32::from_rgba_premultiplied(160, 160, 160, 180)
     };
-    ui.painter()
-        .circle_stroke(p, r, Stroke::new(1.5, color));
+    let stroke = Stroke::new(1.5, color);
+    match brush_state.settings().shape {
+        prunr_core::brush::BrushShape::Circle => {
+            ui.painter().circle_stroke(p, r, stroke);
+        }
+        prunr_core::brush::BrushShape::Square => {
+            ui.painter().rect_stroke(
+                Rect::from_center_size(p, egui::vec2(r * 2.0, r * 2.0)),
+                0.0,
+                stroke,
+                egui::StrokeKind::Outside,
+            );
+        }
+        prunr_core::brush::BrushShape::Line => {
+            // Crosshair — the "anchor" while user picks the line endpoint.
+            ui.painter().line_segment([Pos2::new(p.x - r, p.y), Pos2::new(p.x + r, p.y)], stroke);
+            ui.painter().line_segment([Pos2::new(p.x, p.y - r), Pos2::new(p.x, p.y + r)], stroke);
+        }
+    }
     // Inner dot for precision targeting.
     ui.painter().circle_filled(p, 1.5, color);
 }
