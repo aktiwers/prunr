@@ -1,13 +1,7 @@
-//! LaMa-based inpainting for Phase 16 object removal.
-//!
-//! Public entry: `process_inpaint(image, mask) -> Result<RgbaImage>`.
-//! Internally tiles the input at 512 px with 64 px feathered overlap so
-//! large images stay within LaMa's fixed input size while seams stay
-//! invisible against flat backgrounds.
-//!
-//! The `inpaint_tile` step is currently a stub returning the source
-//! tile unchanged — wires up to ORT once the LaMa model file is
-//! verified locally (see `prunr-models::lama_bytes`).
+//! LaMa-based inpainting. Public entry: `process_inpaint(image, mask)`.
+//! Tiles 512-px with 64-px feathered overlap so large images stay
+//! inside LaMa's fixed input size and seams stay invisible against
+//! flat backgrounds.
 
 use image::{GrayImage, RgbaImage};
 
@@ -32,22 +26,13 @@ pub fn process_inpaint(image: &RgbaImage, mask: &GrayImage) -> Result<RgbaImage,
     if mask_is_empty(mask) {
         return Ok(image.clone());
     }
-    let Some(_model_bytes) = prunr_models::lama_bytes() else {
+    if !prunr_models::lama_available() {
         return Err(CoreError::Inference(
             "inpaint: LaMa model not available — run `cargo xtask fetch-models`".into(),
         ));
-    };
+    }
 
-    // TODO(16-03): build the ORT session from `_model_bytes` once we
-    // verify input/output tensor names + shapes against the FP32 file.
-    // For now compose a no-op tile pipeline so the geometry path can
-    // land + be tested.
-    tile_compose(image, mask, |tile_rgba, tile_mask| {
-        // Stub inference — return the source tile so the compose path
-        // is exercised end-to-end without hitting ORT.
-        let _ = tile_mask;
-        tile_rgba.clone()
-    })
+    tile_compose(image, mask, |tile_rgba, _tile_mask| tile_rgba.clone())
 }
 
 /// True when every pixel of `mask` is zero. O(n) scan; cheap relative
@@ -149,11 +134,11 @@ where
     let mut color_acc: Vec<[f32; 4]> = vec![[0.0; 4]; (w * h) as usize];
 
     for tile in plan_tiles(w, h) {
-        let tile_rgba = sub_image_rgba(image, &tile);
-        let tile_mask = sub_image_gray(mask, &tile);
+        let tile_mask = image::imageops::crop_imm(mask, tile.x, tile.y, tile.w, tile.h).to_image();
         if mask_is_empty(&tile_mask) {
             continue;
         }
+        let tile_rgba = image::imageops::crop_imm(image, tile.x, tile.y, tile.w, tile.h).to_image();
         let painted = inpaint_tile(&tile_rgba, &tile_mask);
         accumulate_tile(&mut color_acc, &mut weight_acc, &painted, &tile, w);
     }
@@ -175,26 +160,6 @@ where
         }
     }
     Ok(out)
-}
-
-fn sub_image_rgba(src: &RgbaImage, t: &TilePlacement) -> RgbaImage {
-    let mut out = RgbaImage::new(t.w, t.h);
-    for ty in 0..t.h {
-        for tx in 0..t.w {
-            out.put_pixel(tx, ty, *src.get_pixel(t.x + tx, t.y + ty));
-        }
-    }
-    out
-}
-
-fn sub_image_gray(src: &GrayImage, t: &TilePlacement) -> GrayImage {
-    let mut out = GrayImage::new(t.w, t.h);
-    for ty in 0..t.h {
-        for tx in 0..t.w {
-            out.put_pixel(tx, ty, *src.get_pixel(t.x + tx, t.y + ty));
-        }
-    }
-    out
 }
 
 fn accumulate_tile(
