@@ -2321,12 +2321,14 @@ impl PrunrApp {
                 let settings_ref = &mut self.settings;
                 let brush_state_ref = &mut self.brush_state;
                 let item = &mut self.batch.items[idx];
+                let brush_available = item.cached_tensor.is_some();
                 toolbar_change = adjustments_toolbar::render(
                     ui,
                     &mut item.settings,
                     settings_ref,
                     &mut item.applied_preset,
                     brush_state_ref,
+                    brush_available,
                     is_processing,
                 );
             });
