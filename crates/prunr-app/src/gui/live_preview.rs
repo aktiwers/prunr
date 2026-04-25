@@ -324,9 +324,9 @@ pub struct DispatchInputs {
     /// from a previous dispatch whose mask recipe matches the current one.
     /// Populated when available so Edge tweaks skip Lanczos + guided filter.
     pub cached_masked_base: Option<Arc<image::RgbaImage>>,
-    /// Brush mask correction snapshot (Phase 15). Tier 2 reruns apply this
-    /// at model resolution before the resize/refine/feather chain. `None`
-    /// when no strokes have been committed.
+    /// Brush mask correction snapshot. Tier 2 reruns apply this at model
+    /// resolution before the resize / refine / feather chain. `None` when
+    /// no strokes have been committed.
     pub correction: Option<Arc<prunr_core::brush::MaskCorrection>>,
 }
 

@@ -124,13 +124,12 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
 fn handle_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: Rect) {
     use super::brush_overlay::{self, BrushAction};
     let Some(tex) = app.result_texture.as_ref().or(app.source_texture.as_ref()) else { return };
-    let tex_size = tex.size_vec2();
-    let img_rect = compute_img_rect(canvas_rect, tex_size, app.zoom_state.zoom, app.zoom_state.pan_offset);
+    let img_rect = compute_img_rect(canvas_rect, tex.size_vec2(), app.zoom_state.zoom, app.zoom_state.pan_offset);
 
     let Some(idx) = app.batch.selected_idx_clamped() else { return };
     let action = {
         let item = &app.batch.items[idx];
-        brush_overlay::handle_input(ui, &mut app.brush_state, item, img_rect, tex_size)
+        brush_overlay::handle_input(ui, &mut app.brush_state, item, img_rect)
     };
     if let BrushAction::Committed(strokes) = action {
         let item = &mut app.batch.items[idx];
