@@ -126,6 +126,11 @@ pub struct ModelDescriptor {
     /// load tax. Verified causes; speculative listings are cargo-cult.
     /// Empty `&[]` means "no static incompatibilities — try every
     /// available EP." See `is_ep_compatible` for the helper.
+    ///
+    /// Stays `&str`-typed even after `prunr-core::EpKind` exists: this
+    /// crate is a leaf with no workspace deps, and pulling `prunr-core`
+    /// in just to spell the EP names would be a layering inversion.
+    /// Callers convert via `EpKind::Display` at the boundary.
     pub incompatible_eps: &'static [&'static str],
 }
 

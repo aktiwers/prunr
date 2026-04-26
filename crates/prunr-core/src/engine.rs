@@ -13,6 +13,49 @@ pub trait InferenceEngine: Send + Sync {
     fn active_provider(&self) -> &str;
 }
 
+/// GPU execution-provider variants. Variants are platform-gated so the
+/// EP-ladder match sites stay exhaustive without dead arms — CoreML
+/// only exists on macOS, DirectML on Windows, CUDA + OpenVINO on
+/// non-macOS targets. `Display` mirrors the historic string names so
+/// log output and the persistent `ep_compat.json` cache keys stay
+/// stable across this refactor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum EpKind {
+    #[cfg(not(target_os = "macos"))]
+    OpenVino,
+    #[cfg(not(target_os = "macos"))]
+    Cuda,
+    #[cfg(target_os = "macos")]
+    CoreMl,
+    #[cfg(windows)]
+    DirectMl,
+}
+
+impl EpKind {
+    /// Stable display string used by logs, the active-provider label,
+    /// and the `ep_compat.json` cache keys. Returned as `&'static str`
+    /// so callers (e.g. `is_ep_compatible`) don't trigger an allocation
+    /// just to read the EP name.
+    pub(crate) fn as_str(&self) -> &'static str {
+        match self {
+            #[cfg(not(target_os = "macos"))]
+            EpKind::OpenVino => "OpenVINO",
+            #[cfg(not(target_os = "macos"))]
+            EpKind::Cuda => "CUDA",
+            #[cfg(target_os = "macos")]
+            EpKind::CoreMl => "CoreML",
+            #[cfg(windows)]
+            EpKind::DirectMl => "DirectML",
+        }
+    }
+}
+
+impl std::fmt::Display for EpKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Filter the GPU EP ladder by `is_available()` — on `load-dynamic`
 /// builds the loaded `libonnxruntime` may not have all EPs compiled in
 /// (e.g. the OpenVINO PyPI wheel has CPU + OpenVINO only). Cached for
@@ -22,28 +65,29 @@ pub trait InferenceEngine: Send + Sync {
 /// non-NVIDIA Linux desktop population) hit OpenVINO first when their
 /// Runtime Store install wins. NVIDIA users still get CUDA because
 /// OpenVINO Runtime won't be installed and `is_available()` returns false.
-pub(crate) fn available_gpu_eps() -> &'static [&'static str] {
+pub(crate) fn available_gpu_eps() -> &'static [EpKind] {
     use std::sync::OnceLock;
-    static CACHED: OnceLock<Vec<&'static str>> = OnceLock::new();
+    static CACHED: OnceLock<Vec<EpKind>> = OnceLock::new();
     CACHED.get_or_init(|| {
         use ort::ep::ExecutionProvider;
-        let mut eps: Vec<&'static str> = Vec::new();
+        let mut eps: Vec<EpKind> = Vec::new();
         #[cfg(target_os = "macos")]
         {
             if ort::execution_providers::CoreMLExecutionProvider::default()
-                .is_available().unwrap_or(false) { eps.push("CoreML"); }
+                .is_available().unwrap_or(false) { eps.push(EpKind::CoreMl); }
         }
         #[cfg(not(target_os = "macos"))]
         {
             if ort::execution_providers::OpenVINOExecutionProvider::default()
-                .is_available().unwrap_or(false) { eps.push("OpenVINO"); }
+                .is_available().unwrap_or(false) { eps.push(EpKind::OpenVino); }
             if ort::execution_providers::CUDAExecutionProvider::default()
-                .is_available().unwrap_or(false) { eps.push("CUDA"); }
+                .is_available().unwrap_or(false) { eps.push(EpKind::Cuda); }
             #[cfg(windows)]
             if ort::execution_providers::DirectMLExecutionProvider::default()
-                .is_available().unwrap_or(false) { eps.push("DirectML"); }
+                .is_available().unwrap_or(false) { eps.push(EpKind::DirectMl); }
         }
-        tracing::info!(?eps, "Available GPU execution providers");
+        let eps_str: Vec<&'static str> = eps.iter().map(EpKind::as_str).collect();
+        tracing::info!(eps = ?eps_str, "Available GPU execution providers");
         eps
     }).as_slice()
 }
@@ -183,23 +227,23 @@ impl OrtEngine {
 
         let model_id: prunr_models::ModelId = model.into();
         let mut last_err: Option<CoreError> = None;
-        for ep_name in gpu_eps {
+        for &ep in gpu_eps {
             // Static catalog: declared-incompatible per the model's
             // ModelDescriptor. Dynamic cache: discovered failures
             // persisted from prior runs. Either skips the load attempt
             // entirely — no failed-load tax.
-            if !prunr_models::is_ep_compatible(model_id, ep_name) {
-                tracing::debug!(?model, ep = %ep_name, "EP statically incompatible; skipping");
+            if !prunr_models::is_ep_compatible(model_id, ep.as_str()) {
+                tracing::debug!(?model, ep = %ep, "EP statically incompatible; skipping");
                 continue;
             }
-            if crate::ep_compat::is_known_failure(ep_name, model_id) {
-                tracing::debug!(?model, ep = %ep_name, "EP cached as incompatible; skipping");
+            if crate::ep_compat::is_known_failure(ep, model_id) {
+                tracing::debug!(?model, ep = %ep, "EP cached as incompatible; skipping");
                 continue;
             }
             let builder = Self::builder_with_base(intra_threads)?;
-            let res = match *ep_name {
+            let res = match ep {
                 #[cfg(not(target_os = "macos"))]
-                "CUDA" => builder.with_execution_providers([
+                EpKind::Cuda => builder.with_execution_providers([
                     ort::execution_providers::CUDAExecutionProvider::default()
                         .with_device_id(0)
                         .with_arena_extend_strategy(ort::ep::ArenaExtendStrategy::SameAsRequested)
@@ -209,27 +253,26 @@ impl OrtEngine {
                         .build(),
                 ]),
                 #[cfg(target_os = "macos")]
-                "CoreML" => builder.with_execution_providers([
+                EpKind::CoreMl => builder.with_execution_providers([
                     ort::execution_providers::CoreMLExecutionProvider::default()
                         .with_model_cache_dir(Self::coreml_cache_dir())
                         .build(),
                 ]),
                 #[cfg(windows)]
-                "DirectML" => builder.with_execution_providers([
+                EpKind::DirectMl => builder.with_execution_providers([
                     ort::execution_providers::DirectMLExecutionProvider::default().build(),
                 ]),
                 #[cfg(not(target_os = "macos"))]
-                "OpenVINO" => builder.with_execution_providers([
+                EpKind::OpenVino => builder.with_execution_providers([
                     ort::execution_providers::OpenVINOExecutionProvider::default().build(),
                 ]),
-                _ => continue,
             };
 
             let mut built = match res {
                 Ok(b) => b,
                 Err(e) => {
-                    let err = CoreError::Inference(format!("ORT register {ep_name} EP failed: {e}"));
-                    tracing::warn!(?model, ep = %ep_name, error = %err, "GPU EP register failed");
+                    let err = CoreError::Inference(format!("ORT register {ep} EP failed: {e}"));
+                    tracing::warn!(?model, ep = %ep, error = %err, "GPU EP register failed");
                     last_err = Some(err);
                     continue;
                 }
@@ -237,17 +280,17 @@ impl OrtEngine {
 
             match built.commit_from_memory(model_bytes) {
                 Ok(session) => {
-                    tracing::debug!(?model, ep = %ep_name, "GPU session committed");
+                    tracing::debug!(?model, ep = %ep, "GPU session committed");
                     return Ok(Self {
                         session: Mutex::new(session),
-                        provider_name: (*ep_name).to_string(),
+                        provider_name: ep.as_str().to_string(),
                         model_kind: model,
                     });
                 }
                 Err(e) => {
-                    let err = CoreError::Inference(format!("ORT session creation failed ({ep_name}): {e}"));
-                    tracing::warn!(?model, ep = %ep_name, error = %err, "GPU session creation failed — trying next EP");
-                    crate::ep_compat::record_failure(ep_name, model_id, &format!("{e}"));
+                    let err = CoreError::Inference(format!("ORT session creation failed ({ep}): {e}"));
+                    tracing::warn!(?model, ep = %ep, error = %err, "GPU session creation failed — trying next EP");
+                    crate::ep_compat::record_failure(ep, model_id, &format!("{e}"));
                     last_err = Some(err);
                 }
             }
@@ -296,7 +339,7 @@ impl OrtEngine {
             // has no GPU EPs compiled in.
             available_gpu_eps()
                 .first()
-                .map(|s| s.to_string())
+                .map(|ep| ep.as_str().to_string())
                 .unwrap_or_else(|| "CPU".to_string())
         }).clone()
     }

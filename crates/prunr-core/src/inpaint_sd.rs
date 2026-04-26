@@ -61,6 +61,7 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use rand_distr::{Distribution, StandardNormal};
 
+use crate::engine::EpKind;
 use crate::types::CoreError;
 
 /// SD 1.5 native input side length. Latent space is 1/8 on each axis.
@@ -472,66 +473,65 @@ fn build_part_with_ep_ladder(
 
     let gpu_eps = crate::engine::available_gpu_eps();
 
-    for ep_name in gpu_eps {
-        if !prunr_models::is_ep_compatible(id, ep_name) {
-            tracing::debug!(?id, part = %key, ep = %ep_name, "SD: EP statically incompatible; skipping");
+    for &ep in gpu_eps {
+        if !prunr_models::is_ep_compatible(id, ep.as_str()) {
+            tracing::debug!(?id, part = %key, ep = %ep, "SD: EP statically incompatible; skipping");
             continue;
         }
-        if crate::ep_compat::is_known_failure(ep_name, id) {
-            tracing::debug!(?id, part = %key, ep = %ep_name, "SD: EP cached as incompatible; skipping");
+        if crate::ep_compat::is_known_failure(ep, id) {
+            tracing::debug!(?id, part = %key, ep = %ep, "SD: EP cached as incompatible; skipping");
             continue;
         }
         let builder = match sd_base_builder() {
             Ok(b) => b,
             Err(e) => {
-                tracing::warn!(part = %key, ep = %ep_name, %e, "SD: builder init failed");
+                tracing::warn!(part = %key, ep = %ep, %e, "SD: builder init failed");
                 continue;
             }
         };
-        let registered = match *ep_name {
+        let registered = match ep {
             #[cfg(not(target_os = "macos"))]
-            "CUDA" => builder.with_execution_providers([
+            EpKind::Cuda => builder.with_execution_providers([
                 ort::execution_providers::CUDAExecutionProvider::default()
                     .with_device_id(0)
                     .build(),
             ]),
             #[cfg(target_os = "macos")]
-            "CoreML" => builder.with_execution_providers([
+            EpKind::CoreMl => builder.with_execution_providers([
                 ort::execution_providers::CoreMLExecutionProvider::default().build(),
             ]),
             #[cfg(windows)]
-            "DirectML" => builder.with_execution_providers([
+            EpKind::DirectMl => builder.with_execution_providers([
                 ort::execution_providers::DirectMLExecutionProvider::default().build(),
             ]),
             #[cfg(not(target_os = "macos"))]
-            "OpenVINO" => builder.with_execution_providers([
+            EpKind::OpenVino => builder.with_execution_providers([
                 ort::execution_providers::OpenVINOExecutionProvider::default().build(),
             ]),
-            _ => continue,
         };
         let mut built = match registered {
             Ok(b) => b,
             Err(e) => {
-                tracing::warn!(part = %key, ep = %ep_name, %e, "SD: register EP failed");
+                tracing::warn!(part = %key, ep = %ep, %e, "SD: register EP failed");
                 continue;
             }
         };
         let mut session = match built.commit_from_file(path) {
             Ok(s) => s,
             Err(e) => {
-                tracing::warn!(part = %key, ep = %ep_name, %e, "SD: GPU session commit failed — trying next");
-                crate::ep_compat::record_failure(ep_name, id, &format!("{e}"));
+                tracing::warn!(part = %key, ep = %ep, %e, "SD: GPU session commit failed — trying next");
+                crate::ep_compat::record_failure(ep, id, &format!("{e}"));
                 continue;
             }
         };
         match smoke_test(&mut session, key) {
             Ok(()) => {
-                tracing::info!(part = %key, ep = %ep_name, "SD: GPU session validated");
-                return Ok((session, (*ep_name).to_string()));
+                tracing::info!(part = %key, ep = %ep, "SD: GPU session validated");
+                return Ok((session, ep.as_str().to_string()));
             }
             Err(e) => {
-                tracing::warn!(part = %key, ep = %ep_name, %e, "SD: smoke test failed — falling back");
-                crate::ep_compat::record_failure(ep_name, id, &e);
+                tracing::warn!(part = %key, ep = %ep, %e, "SD: smoke test failed — falling back");
+                crate::ep_compat::record_failure(ep, id, &e);
             }
         }
     }
