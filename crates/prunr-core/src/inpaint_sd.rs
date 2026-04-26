@@ -245,21 +245,27 @@ fn run_one_tile(
     let padded_image = pad_to_tile(image);
     let padded_mask = pad_mask_to_tile(mask);
 
-    // 1. Text embedding (empty prompt → uncond tokens). Constant
-    //    across the denoising loop — convert to f16 once here.
-    let text_emb = encode_text(bundle, /*empty=*/ true)?;
-    let text_emb_f16 = f32_to_f16_3d(&text_emb);
-
-    // 2. VAE encode masked source (image with painted region zeroed).
-    //    SD inpaint protocol uses only the masked-image latent — the
-    //    full-image latent is unused under our current sampler, so we
-    //    skip that VAE pass (~1-3s saved per stroke on CPU).
     let masked_image = mask_image_for_vae(&padded_image, &padded_mask);
-    let masked_latent = vae_encode(bundle, &masked_image)?;
-    let masked_latent_f16 = f32_to_f16_4d(&masked_latent);
 
-    // 3. Mask in latent space (1 channel, 64×64). Also constant.
-    let mask_latent = mask_to_latent(&padded_mask);
+    // Three independent pre-loop ops, each holding a different session
+    // mutex (text_encoder, vae_encoder) or none (mask_to_latent). VAE
+    // encode is the long pole at ~1-3s on CPU; text encode is ~200ms.
+    // Running them concurrently saves ≈text-encode-time per stroke.
+    // mask_to_latent is sub-ms so the calling thread does it inline
+    // while the other two threads churn.
+    let (text_emb, masked_latent, mask_latent) = std::thread::scope(|s| -> Result<_, CoreError> {
+        let text_handle = s.spawn(|| encode_text(bundle, /*empty=*/ true));
+        let vae_handle = s.spawn(|| vae_encode(bundle, &masked_image));
+        let mask_lat = mask_to_latent(&padded_mask);
+        let text = text_handle.join()
+            .map_err(|_| CoreError::Inference("text encoder thread panicked".into()))??;
+        let vae = vae_handle.join()
+            .map_err(|_| CoreError::Inference("vae encoder thread panicked".into()))??;
+        Ok((text, vae, mask_lat))
+    })?;
+
+    let text_emb_f16 = f32_to_f16_3d(&text_emb);
+    let masked_latent_f16 = f32_to_f16_4d(&masked_latent);
     let mask_latent_f16 = f32_to_f16_4d(&mask_latent);
 
     // 4. Build scheduler + initial noise.
