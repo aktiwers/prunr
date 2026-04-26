@@ -69,12 +69,13 @@ pub const SD_LATENT_SIDE: u32 = SD_TILE / 8;
 /// SD 1.5 latent scaling factor. Diffusers calls this `vae.config.scaling_factor`.
 const VAE_SCALING_FACTOR: f32 = 0.18215;
 
-/// Minimum free RAM (bytes) required before we'll load the SD bundle on
-/// CPU. The 4 ONNX files total ~2 GB on disk; ORT graph optimization
-/// roughly doubles that during load (~4 GB resident), and UNet
-/// activations on a 512×512 tile add another 2-4 GB transient. Below
-/// 6 GB free we refuse to load — repeated swap thrash on a system at
-/// the edge has frozen at least one tester's machine.
+/// Minimum free RAM (bytes) required before we'll load the SD bundle.
+/// The 4 ONNX files total ~2 GB on disk; ORT graph optimization roughly
+/// doubles that during load (~4 GB resident), UNet activations on a
+/// 512×512 tile add 2-4 GB transient, and OpenVINO graph compilation
+/// pre-allocates its own iGPU-shared buffer (which on integrated GPUs
+/// IS RAM). Real-world working set on a CPU/iGPU machine: 6-10 GB.
+/// Below 6 GB free we've seen swap thrash freeze testers' machines.
 const SD_CPU_MIN_FREE_RAM_BYTES: u64 = 6 * 1024 * 1024 * 1024;
 /// CLIP-ViT-L/14 token sequence length used by SD 1.5.
 const CLIP_SEQ_LEN: usize = 77;

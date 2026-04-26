@@ -267,6 +267,22 @@ impl BatchItem {
         push_stroke_bounded(&mut self.stroke_undo_stack, pre);
         self.stroke_redo_stack.clear();
 
+        // Discard a stale correction whose dimensions no longer match the
+        // active model (or a previous code-path bug). Without this, `merge`
+        // silently drops the new strokes and the user sees the brush "do
+        // nothing" — the undo stack still captures the pre-state, so the
+        // reset is reversible.
+        if self.mask_correction.as_ref().is_some_and(|c|
+            c.width != strokes.width || c.height != strokes.height
+        ) {
+            tracing::info!(
+                old = ?self.mask_correction.as_ref().map(|c| (c.width, c.height)),
+                new = ?(strokes.width, strokes.height),
+                "discarding stale correction with mismatched dims",
+            );
+            self.mask_correction = None;
+        }
+
         let arc = self.mask_correction.get_or_insert_with(|| {
             Arc::new(prunr_core::brush::MaskCorrection::empty(strokes.width, strokes.height))
         });
