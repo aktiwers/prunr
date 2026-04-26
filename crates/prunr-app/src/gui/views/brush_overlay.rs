@@ -30,15 +30,18 @@ pub(crate) enum BrushAction {
 }
 
 fn brush_grid_dims(item: &BatchItem, is_inpaint: bool) -> Option<(u16, u16)> {
-    if is_inpaint {
-        // Inpaint mode: brush mask is the same resolution as the image.
-        // u16 max is 65535 — fine for any reasonable image.
-        let (w, h) = item.dimensions;
-        Some((w as u16, h as u16))
-    } else {
-        let t = item.cached_tensor.as_ref()?;
-        Some((t.width as u16, t.height as u16))
+    // Source-image resolution for both modes. `postprocess::apply_correction`
+    // runs on the source-resolution normalized mask (after model output is
+    // upsampled), so the brush grid must match — captured at model res
+    // (e.g. 1024×1024 for BiRefNet) the correction silently fails the
+    // dim-match check and is skipped. Inpaint mode also uses source dims.
+    // For mask mode we still gate on cached_tensor presence so brushing
+    // before first inference is rejected with a cursor-only feedback.
+    if !is_inpaint && item.cached_tensor.is_none() {
+        return None;
     }
+    let (w, h) = item.dimensions;
+    Some((w as u16, h as u16))
 }
 
 /// Handle pointer input + paint cursor for one frame. The canvas calls
