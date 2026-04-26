@@ -21,6 +21,8 @@ use std::sync::{Mutex, OnceLock};
 
 use serde::{Deserialize, Serialize};
 
+use crate::engine::EpKind;
+
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Serialize, Deserialize, Default)]
@@ -33,7 +35,10 @@ fn cache_path() -> Option<PathBuf> {
     prunr_models::data_dir().map(|d| d.join("ep_compat.json"))
 }
 
-fn key(ep: &str, model: prunr_models::ModelId) -> String {
+/// JSON-key shape pinned to the historic `Display` strings ("OpenVINO",
+/// "CUDA", "CoreML", "DirectML") so existing user caches survive the
+/// `EpKind` typing refactor.
+fn key(ep: EpKind, model: prunr_models::ModelId) -> String {
     format!("{ep}::{model:?}")
 }
 
@@ -66,7 +71,7 @@ fn save_to_disk(map: &HashMap<String, String>) {
 
 /// True when this (EP, model) combo is on the persistent skip list.
 /// Cheap: in-memory hashmap lookup behind a Mutex.
-pub fn is_known_failure(ep: &str, model: prunr_models::ModelId) -> bool {
+pub(crate) fn is_known_failure(ep: EpKind, model: prunr_models::ModelId) -> bool {
     let map = cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     map.contains_key(&key(ep, model))
 }
@@ -74,7 +79,7 @@ pub fn is_known_failure(ep: &str, model: prunr_models::ModelId) -> bool {
 /// Idempotent — re-recording the same combo is a no-op (no extra disk
 /// writes). Best-effort persistence; a failed write is logged but not
 /// fatal — next session will re-discover the failure.
-pub fn record_failure(ep: &str, model: prunr_models::ModelId, error: &str) {
+pub(crate) fn record_failure(ep: EpKind, model: prunr_models::ModelId, error: &str) {
     let k = key(ep, model);
     let mut map = cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     if map.contains_key(&k) { return; }
@@ -98,20 +103,44 @@ pub fn clear() -> usize {
 mod tests {
     use super::*;
 
+    // JSON-key shape is the on-disk contract — existing user
+    // `ep_compat.json` files keyed by these strings must still match
+    // post-refactor. Pin both EP-as-string and model-as-Debug fragments.
+    #[cfg(not(target_os = "macos"))]
     #[test]
-    fn key_format_is_stable() {
+    fn key_format_is_stable_openvino() {
         assert_eq!(
-            key("OpenVINO", prunr_models::ModelId::Silueta),
+            key(EpKind::OpenVino, prunr_models::ModelId::Silueta),
             "OpenVINO::Silueta",
         );
         assert_eq!(
-            key("CUDA", prunr_models::ModelId::SdV15InpaintFp16),
+            key(EpKind::Cuda, prunr_models::ModelId::SdV15InpaintFp16),
             "CUDA::SdV15InpaintFp16",
         );
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
-    fn cache_file_invalidates_on_version_mismatch() {
+    fn key_format_is_stable_coreml() {
+        assert_eq!(
+            key(EpKind::CoreMl, prunr_models::ModelId::Silueta),
+            "CoreML::Silueta",
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn key_format_is_stable_directml() {
+        assert_eq!(
+            key(EpKind::DirectMl, prunr_models::ModelId::SdV15InpaintFp16),
+            "DirectML::SdV15InpaintFp16",
+        );
+    }
+
+    #[test]
+    fn cache_file_json_shape_is_stable() {
+        // Pre-existing user cache JSON — must still parse and round-trip
+        // unchanged so an upgrade doesn't wipe `ep_compat.json` entries.
         let stale = CacheFile {
             version: "0.0.0-stale".to_string(),
             failures: HashMap::from([(
@@ -120,11 +149,14 @@ mod tests {
             )]),
         };
         let json = serde_json::to_string(&stale).unwrap();
+        assert!(json.contains("\"OpenVINO::Silueta\""));
+        assert!(json.contains("\"version\":\"0.0.0-stale\""));
         let parsed: CacheFile = serde_json::from_str(&json).unwrap();
-        // The actual `load_from_disk` checks `file.version != APP_VERSION`
-        // and discards. We verify the parse round-trip + version field
-        // is the gate.
         assert_eq!(parsed.version, "0.0.0-stale");
         assert_ne!(parsed.version, APP_VERSION);
+        assert_eq!(
+            parsed.failures.get("OpenVINO::Silueta").map(String::as_str),
+            Some("graph cycles"),
+        );
     }
 }

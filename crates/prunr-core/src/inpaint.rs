@@ -9,6 +9,7 @@ use image::{GrayImage, RgbaImage};
 use ndarray::Array4;
 use ort::{inputs, session::{Session, builder::GraphOptimizationLevel}, value::Tensor};
 
+use crate::engine::EpKind;
 use crate::types::CoreError;
 
 /// LaMa input/output side length in pixels.
@@ -401,73 +402,72 @@ fn build_lama_session(
 ) -> Result<(Session, String), String> {
     let gpu_eps = crate::engine::available_gpu_eps();
 
-    for ep_name in gpu_eps {
+    for &ep in gpu_eps {
         // Static catalog + dynamic cache, same as engine.rs.
-        if !prunr_models::is_ep_compatible(id, ep_name) {
-            tracing::debug!(?id, ep = %ep_name, "LaMa: EP statically incompatible; skipping");
+        if !prunr_models::is_ep_compatible(id, ep.as_str()) {
+            tracing::debug!(?id, ep = %ep, "LaMa: EP statically incompatible; skipping");
             continue;
         }
-        if crate::ep_compat::is_known_failure(ep_name, id) {
-            tracing::debug!(?id, ep = %ep_name, "LaMa: EP cached as incompatible; skipping");
+        if crate::ep_compat::is_known_failure(ep, id) {
+            tracing::debug!(?id, ep = %ep, "LaMa: EP cached as incompatible; skipping");
             continue;
         }
         let builder = match base_builder(threads) {
             Ok(b) => b,
             Err(e) => {
-                tracing::warn!(ep = %ep_name, %e, "LaMa: builder init failed");
+                tracing::warn!(ep = %ep, %e, "LaMa: builder init failed");
                 continue;
             }
         };
-        let registered = match *ep_name {
+        let registered = match ep {
             #[cfg(not(target_os = "macos"))]
-            "CUDA" => builder.with_execution_providers([
+            EpKind::Cuda => builder.with_execution_providers([
                 ort::execution_providers::CUDAExecutionProvider::default()
                     .with_device_id(0)
                     .build(),
             ]),
             #[cfg(target_os = "macos")]
-            "CoreML" => builder.with_execution_providers([
+            EpKind::CoreMl => builder.with_execution_providers([
                 ort::execution_providers::CoreMLExecutionProvider::default().build(),
             ]),
             #[cfg(windows)]
-            "DirectML" => builder.with_execution_providers([
+            EpKind::DirectMl => builder.with_execution_providers([
                 ort::execution_providers::DirectMLExecutionProvider::default().build(),
             ]),
             // Default device "AUTO" lets OpenVINO pick the best target
             // (iGPU when present + driver works, NPU on newer Intel,
             // else CPU). Smoke test below catches op-incompat failures.
             #[cfg(not(target_os = "macos"))]
-            "OpenVINO" => builder.with_execution_providers([
+            EpKind::OpenVino => builder.with_execution_providers([
                 ort::execution_providers::OpenVINOExecutionProvider::default().build(),
             ]),
-            _ => continue,
         };
         let mut built = match registered {
             Ok(b) => b,
             Err(e) => {
-                tracing::warn!(ep = %ep_name, %e, "LaMa: register EP failed");
+                tracing::warn!(ep = %ep, %e, "LaMa: register EP failed");
                 continue;
             }
         };
         let mut session = match built.commit_from_memory(bytes) {
             Ok(s) => s,
             Err(e) => {
-                tracing::warn!(ep = %ep_name, %e, "LaMa: GPU session commit failed — trying next");
-                crate::ep_compat::record_failure(ep_name, id, &format!("{e}"));
+                tracing::warn!(ep = %ep, %e, "LaMa: GPU session commit failed — trying next");
+                crate::ep_compat::record_failure(ep, id, &format!("{e}"));
                 continue;
             }
         };
         match smoke_test_session(&mut session) {
             Ok(()) => {
-                tracing::info!(ep = %ep_name, "LaMa: GPU session validated");
-                return Ok((session, (*ep_name).to_string()));
+                tracing::info!(ep = %ep, "LaMa: GPU session validated");
+                return Ok((session, ep.as_str().to_string()));
             }
             Err(e) => {
                 tracing::warn!(
-                    ep = %ep_name, %e,
+                    ep = %ep, %e,
                     "LaMa: GPU session smoke test failed — falling back to next EP/CPU",
                 );
-                crate::ep_compat::record_failure(ep_name, id, &e);
+                crate::ep_compat::record_failure(ep, id, &e);
             }
         }
     }
