@@ -154,7 +154,7 @@ Before adding a new field, method, or channel in the GUI layer, find the matchin
 | Result history, preset undo/redo                    | `HistoryManager` (methods on `&mut BatchItem`)     |
 | Drag-out state (active, items set, pending)         | `DragExportState`                                  |
 | Model download lifecycle (state, queue, progress)   | `DownloadManager`                                  |
-| Save-as dialog, clipboard, file picker              | `PrunrApp` (Phase 11 → `SystemBridge`)             |
+| Save-as dialog, clipboard, file picker              | `SystemBridge`                                     |
 | Canvas zoom/pan state                               | `PrunrApp.zoom_state`                              |
 | Brush tool toggle / settings / active stroke / trail | `PrunrApp.brush_state` (see `BrushState`)         |
 | Per-item brush correction bytes + hash               | `BatchItem.mask_correction` + `correction_hash`    |
