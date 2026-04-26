@@ -3,6 +3,7 @@ members = [
     "crates/prunr-core",
     "crates/prunr-models",
     "crates/prunr-app",
+    "crates/prunr-runtime-install",
     "xtask",
 ]
 resolver = "2"

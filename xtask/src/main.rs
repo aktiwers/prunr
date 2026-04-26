@@ -315,14 +315,16 @@ fn compress_to_zst(onnx_path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
 /// `libonnxruntime.so.<ver>` to `libonnxruntime.so` so
 /// `prunr_app::ort_runtime::resolve_dylib_path()` picks it up.
 fn install_runtime() -> anyhow::Result<()> {
+    use prunr_runtime_install as ri;
     let package = std::env::args().nth(2)
         .ok_or_else(|| anyhow::anyhow!("missing <package> arg, e.g. onnxruntime-openvino"))?;
     let version = std::env::args().nth(3)
         .ok_or_else(|| anyhow::anyhow!("missing <version> arg, e.g. 1.24.1"))?;
+    let short = package.strip_prefix("onnxruntime-").unwrap_or(&package);
     let target_name = std::env::args().nth(4)
-        .unwrap_or_else(|| install_target_name(&package, &version));
+        .unwrap_or_else(|| ri::install_subdir(short, &version));
 
-    println!("=== Phase 19-09: install-runtime ===");
+    println!("=== install-runtime ===");
     println!("Package:  {package} {version}");
     println!("Target:   <data>/prunr/runtimes/{target_name}/");
 
@@ -335,133 +337,38 @@ fn install_runtime() -> anyhow::Result<()> {
     let urls = metadata["urls"].as_array()
         .ok_or_else(|| anyhow::anyhow!("PyPI metadata missing `urls`"))?;
 
-    let (wheel_url, expected_sha) = pick_wheel_for_host(urls)?;
-    println!("Selected: {wheel_url}");
-    println!("SHA256:   {expected_sha}");
+    let wheel = ri::pick_wheel_for_host(urls).map_err(|e| anyhow::anyhow!(e))?;
+    println!("Selected: {}", wheel.url);
+    println!("SHA256:   {}", wheel.sha256);
 
     println!("Downloading…");
-    let bytes = client.get(wheel_url).send()?.bytes()?;
-    verify_sha256(&bytes, expected_sha)?;
-    println!("Verified ({:.1} MB)", bytes.len() as f64 / 1024.0 / 1024.0);
+    let mut on_progress = |so_far: u64, total: u64| {
+        if total > 0 && so_far == total {
+            println!("Verified ({:.1} MB)", so_far as f64 / 1024.0 / 1024.0);
+        }
+    };
+    let mut hooks = ri::DownloadHooks::progress_only(&mut on_progress);
+    let bytes = ri::download_wheel(&wheel, &mut hooks).map_err(|e| anyhow::anyhow!(e))?;
+    ri::verify_sha256(&bytes, &wheel.sha256).map_err(|e| anyhow::anyhow!(e))?;
 
     let target_dir = prunr_models::data_dir()
         .ok_or_else(|| anyhow::anyhow!("could not resolve user data dir"))?
         .join("runtimes")
         .join(&target_name);
-    // Sanity-guard the wipe: if a future refactor makes `data_dir()`
-    // return something unexpected, this keeps `remove_dir_all` from
-    // nuking the wrong tree.
     if !target_dir.parent().is_some_and(|p| p.ends_with("runtimes")) {
-        anyhow::bail!(
-            "refusing to wipe non-runtimes path: {}", target_dir.display(),
-        );
+        anyhow::bail!("refusing to wipe non-runtimes path: {}", target_dir.display());
     }
     if target_dir.exists() {
         std::fs::remove_dir_all(&target_dir)?;
     }
     std::fs::create_dir_all(&target_dir)?;
     println!("Extracting to {}", target_dir.display());
+    ri::extract_wheel(&bytes, &target_dir).map_err(|e| anyhow::anyhow!(e))?;
 
-    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(&bytes))?;
-    let mut extracted = 0u32;
-    let mut bytes_written = 0u64;
-    for i in 0..archive.len() {
-        let mut entry = archive.by_index(i)?;
-        let raw_name = entry.name().to_string();
-        let Some(target_filename) = repackage_target_filename(&raw_name) else {
-            continue;
-        };
-        let dest = target_dir.join(target_filename);
-        let mut out = std::fs::File::create(&dest)?;
-        let n = std::io::copy(&mut entry, &mut out)?;
-        bytes_written += n;
-        extracted += 1;
-    }
-    println!(
-        "Extracted {extracted} files ({:.1} MB)",
-        bytes_written as f64 / 1024.0 / 1024.0,
-    );
-
-    let dylib = target_dir.join("libonnxruntime.so");
-    if !dylib.is_file() {
-        anyhow::bail!(
-            "libonnxruntime.so missing after extract — wheel layout may have changed"
-        );
-    }
     println!();
     println!("=== install-runtime DONE ===");
     println!("Try the doctor command to confirm pickup:");
     println!("  target/debug/prunr --doctor");
-    println!("Then run any prunr command — `ort_runtime::resolve` will pick");
-    println!("up the runtime store entry without needing ORT_DYLIB_PATH.");
     Ok(())
 }
 
-/// Default install dir name when none is supplied. Strips the
-/// `onnxruntime-` prefix and tags with the host RID so multiple
-/// installs (Linux x64 + Windows x64) coexist.
-fn install_target_name(package: &str, version: &str) -> String {
-    let short = package.strip_prefix("onnxruntime-").unwrap_or(package);
-    let rid = host_rid();
-    format!("{short}-{version}-{rid}")
-}
-
-fn host_rid() -> &'static str {
-    if cfg!(all(target_os = "linux", target_arch = "x86_64")) { "linux-x64" }
-    else if cfg!(all(target_os = "linux", target_arch = "aarch64")) { "linux-arm64" }
-    else if cfg!(all(target_os = "windows", target_arch = "x86_64")) { "windows-x64" }
-    else if cfg!(all(target_os = "windows", target_arch = "aarch64")) { "windows-arm64" }
-    else if cfg!(target_os = "macos") {
-        if cfg!(target_arch = "aarch64") { "macos-arm64" } else { "macos-x64" }
-    }
-    else { "unknown" }
-}
-
-/// Pick the wheel matching the host platform. PyPI's `urls` array has
-/// per-platform entries; we match on filename suffix. Prefer cp313
-/// (newest published wheel) but accept any Python ABI tag — the
-/// `libonnxruntime.so` we extract is interpreter-agnostic.
-fn pick_wheel_for_host<'a>(urls: &'a [serde_json::Value]) -> anyhow::Result<(&'a str, &'a str)> {
-    let host_token = match host_rid() {
-        "linux-x64" => "manylinux_2_28_x86_64",
-        "linux-arm64" => "manylinux_2_28_aarch64",
-        "windows-x64" => "win_amd64",
-        "windows-arm64" => "win_arm64",
-        "macos-arm64" => "macosx_11_0_arm64",
-        _ => anyhow::bail!("unsupported host platform: {}", host_rid()),
-    };
-    let pick = |require_cp313: bool| urls.iter().find_map(|u| {
-        let name = u["filename"].as_str()?;
-        if !name.contains(host_token) { return None; }
-        if require_cp313 && !name.contains("cp313") { return None; }
-        Some((u["url"].as_str()?, u["digests"]["sha256"].as_str()?))
-    });
-    pick(true).or_else(|| pick(false)).ok_or_else(|| anyhow::anyhow!(
-        "no wheel found for host platform `{}`", host_rid(),
-    ))
-}
-
-/// Filter + rename for files extracted from an `onnxruntime-*` wheel.
-/// Returns `Some(<filename in our runtime dir>)` for files we want to
-/// keep, `None` for everything we skip. Renames `libonnxruntime.so.<ver>`
-/// to canonical `libonnxruntime.so` so our resolver picks it up;
-/// versioned symlink siblings (`libopenvino.so.2025.4.1`) keep their
-/// names since ELF dynamic linking resolves either form.
-fn repackage_target_filename(zip_name: &str) -> Option<String> {
-    let stripped = zip_name.strip_prefix("onnxruntime/capi/")?;
-    if stripped.contains('/') { return None; }
-    if stripped.starts_with("onnxruntime_pybind11_state") { return None; }
-    if stripped.ends_with(".py") { return None; }
-    if stripped.starts_with("libonnxruntime.so.") {
-        return Some("libonnxruntime.so".to_string());
-    }
-    Some(stripped.to_string())
-}
-
-fn verify_sha256(bytes: &[u8], expected: &str) -> anyhow::Result<()> {
-    let actual = hex::encode(Sha256::digest(bytes));
-    if !actual.eq_ignore_ascii_case(expected) {
-        anyhow::bail!("SHA256 mismatch:\n  expected: {expected}\n  got:      {actual}");
-    }
-    Ok(())
-}
