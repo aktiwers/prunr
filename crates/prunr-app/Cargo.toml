@@ -20,6 +20,7 @@ dev-models = ["prunr-core/dev-models"]
 [dependencies]
 prunr-core = { path = "../prunr-core" }
 prunr-models = { path = "../prunr-models" }
+prunr-runtime-install = { path = "../prunr-runtime-install" }
 ort = { workspace = true }
 clap = { workspace = true }
 indicatif = { workspace = true }
