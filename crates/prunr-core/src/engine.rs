@@ -13,6 +13,41 @@ pub trait InferenceEngine: Send + Sync {
     fn active_provider(&self) -> &str;
 }
 
+/// Filter the GPU EP ladder by `is_available()` — on `load-dynamic`
+/// builds the loaded `libonnxruntime` may not have all EPs compiled in
+/// (e.g. the OpenVINO PyPI wheel has CPU + OpenVINO only). Cached for
+/// the process lifetime; first call probes ort's EP table.
+///
+/// Order on Linux: OpenVINO before CUDA so Intel users (the most common
+/// non-NVIDIA Linux desktop population) hit OpenVINO first when their
+/// Runtime Store install wins. NVIDIA users still get CUDA because
+/// OpenVINO Runtime won't be installed and `is_available()` returns false.
+pub(crate) fn available_gpu_eps() -> &'static [&'static str] {
+    use std::sync::OnceLock;
+    static CACHED: OnceLock<Vec<&'static str>> = OnceLock::new();
+    CACHED.get_or_init(|| {
+        use ort::ep::ExecutionProvider;
+        let mut eps: Vec<&'static str> = Vec::new();
+        #[cfg(target_os = "macos")]
+        {
+            if ort::execution_providers::CoreMLExecutionProvider::default()
+                .is_available().unwrap_or(false) { eps.push("CoreML"); }
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            if ort::execution_providers::OpenVINOExecutionProvider::default()
+                .is_available().unwrap_or(false) { eps.push("OpenVINO"); }
+            if ort::execution_providers::CUDAExecutionProvider::default()
+                .is_available().unwrap_or(false) { eps.push("CUDA"); }
+            #[cfg(windows)]
+            if ort::execution_providers::DirectMLExecutionProvider::default()
+                .is_available().unwrap_or(false) { eps.push("DirectML"); }
+        }
+        tracing::info!(?eps, "Available GPU execution providers");
+        eps
+    }).as_slice()
+}
+
 /// ORT-backed inference engine. Holds one Session per model selection.
 /// Create once per model; reuse across all images — never instantiate per-image.
 ///
@@ -73,29 +108,32 @@ impl OrtEngine {
         } else {
             tracing::debug!(?model, "no optimized variant on disk — using embedded FP32");
         }
-        // Fall back to the embedded FP32 model (zero-copy &'static [u8]).
-        let fp32 = Self::model_bytes(model);
-        match Self::build_session(fp32, intra_threads, model, cpu_only) {
+        // Fall back to the FP32 model bytes. Bundled models are zero-copy
+        // (`Cow::Borrowed`); on-demand models load from the user data dir
+        // (`Cow::Owned`) and surface a clear "not installed" error here
+        // when the file is missing.
+        let id: prunr_models::ModelId = model.into();
+        let fp32 = prunr_models::resolve_bytes(id)
+            .ok_or_else(|| CoreError::Inference(prunr_models::not_installed_error(id)))?;
+        match Self::build_session(&fp32, intra_threads, model, cpu_only) {
             Ok(engine) => {
                 tracing::info!(?model, provider = %engine.provider_name, "OrtEngine ready (FP32)");
                 Ok(engine)
             }
             Err(e) if !cpu_only => {
                 tracing::warn!(?model, error = %e, "GPU session creation failed — retrying CPU-only");
-                let engine = Self::build_session(fp32, intra_threads, model, true)?;
-                tracing::info!(?model, provider = %engine.provider_name, "OrtEngine ready (FP32, CPU fallback)");
+                // Recurse so the cpu_only=true path also tries its
+                // CPU-targeted optimized variant (INT8) before falling
+                // back to FP32. Otherwise the GPU-fail-then-CPU path
+                // ends up on FP32 even when an INT8 variant is on disk.
+                let engine = Self::new_with_fallback(model, intra_threads, true)?;
+                tracing::info!(
+                    ?model, provider = %engine.provider_name,
+                    "OrtEngine ready (CPU fallback after GPU failure)",
+                );
                 Ok(engine)
             }
             Err(e) => Err(e),
-        }
-    }
-
-    /// Return the embedded FP32 model bytes. Zero-copy — borrows from static cache.
-    fn model_bytes(model: ModelKind) -> &'static [u8] {
-        match model {
-            ModelKind::Silueta => prunr_models::silueta_bytes(),
-            ModelKind::U2net => prunr_models::u2net_bytes(),
-            ModelKind::BiRefNetLite => prunr_models::birefnet_lite_bytes(),
         }
     }
 
@@ -107,15 +145,11 @@ impl OrtEngine {
 
         #[cfg(not(target_os = "macos"))]
         {
-            let pm = match model {
-                ModelKind::Silueta => prunr_models::Model::Silueta,
-                ModelKind::U2net => prunr_models::Model::U2net,
-                ModelKind::BiRefNetLite => prunr_models::Model::BiRefNetLite,
-            };
+            let id: prunr_models::ModelId = model.into();
             if cpu_only {
-                prunr_models::model_int8_bytes(pm)
+                prunr_models::model_int8_bytes(id)
             } else {
-                prunr_models::model_fp16_bytes(pm)
+                prunr_models::model_fp16_bytes(id)
             }
         }
     }
@@ -145,19 +179,23 @@ impl OrtEngine {
         // reached — exactly the DirectML AbiCustomRegistry failure seen in the
         // wild). Fall through on error; the caller retries with cpu_only=true
         // if all GPU EPs fail.
-        let gpu_eps: &[&str] = {
-            #[cfg(target_os = "macos")]
-            { &["CoreML"] }
-            #[cfg(target_os = "linux")]
-            { &["CUDA"] }
-            #[cfg(windows)]
-            { &["CUDA", "DirectML"] }
-            #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
-            { &[] }
-        };
+        let gpu_eps = available_gpu_eps();
 
+        let model_id: prunr_models::ModelId = model.into();
         let mut last_err: Option<CoreError> = None;
         for ep_name in gpu_eps {
+            // Static catalog: declared-incompatible per the model's
+            // ModelDescriptor. Dynamic cache: discovered failures
+            // persisted from prior runs. Either skips the load attempt
+            // entirely — no failed-load tax.
+            if !prunr_models::is_ep_compatible(model_id, ep_name) {
+                tracing::debug!(?model, ep = %ep_name, "EP statically incompatible; skipping");
+                continue;
+            }
+            if crate::ep_compat::is_known_failure(ep_name, model_id) {
+                tracing::debug!(?model, ep = %ep_name, "EP cached as incompatible; skipping");
+                continue;
+            }
             let builder = Self::builder_with_base(intra_threads)?;
             let res = match *ep_name {
                 #[cfg(not(target_os = "macos"))]
@@ -179,6 +217,10 @@ impl OrtEngine {
                 #[cfg(windows)]
                 "DirectML" => builder.with_execution_providers([
                     ort::execution_providers::DirectMLExecutionProvider::default().build(),
+                ]),
+                #[cfg(not(target_os = "macos"))]
+                "OpenVINO" => builder.with_execution_providers([
+                    ort::execution_providers::OpenVINOExecutionProvider::default().build(),
                 ]),
                 _ => continue,
             };
@@ -205,6 +247,7 @@ impl OrtEngine {
                 Err(e) => {
                     let err = CoreError::Inference(format!("ORT session creation failed ({ep_name}): {e}"));
                     tracing::warn!(?model, ep = %ep_name, error = %err, "GPU session creation failed — trying next EP");
+                    crate::ep_compat::record_failure(ep_name, model_id, &format!("{e}"));
                     last_err = Some(err);
                 }
             }
@@ -247,27 +290,14 @@ impl OrtEngine {
     pub fn detect_active_provider() -> String {
         static CACHED: std::sync::OnceLock<String> = std::sync::OnceLock::new();
         CACHED.get_or_init(|| {
-            #[cfg(target_os = "macos")]
-            { return "CoreML".to_string(); }
-
-            #[cfg(not(target_os = "macos"))]
-            {
-                let has_nvidia = std::process::Command::new("nvidia-smi")
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .status()
-                    .map_or(false, |s| s.success());
-                if has_nvidia {
-                    return "CUDA".to_string();
-                }
-                #[cfg(windows)]
-                { return "DirectML".to_string(); }
-                #[cfg(not(windows))]
-                { return "CPU".to_string(); }
-            }
-
-            #[allow(unreachable_code)]
-            "CPU".to_string()
+            // First entry from `available_gpu_eps` is the most likely
+            // winner — same probe drives the actual EP ladder. CPU is
+            // the universal fallback when the loaded libonnxruntime
+            // has no GPU EPs compiled in.
+            available_gpu_eps()
+                .first()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "CPU".to_string())
         }).clone()
     }
 
@@ -321,8 +351,14 @@ mod tests {
     #[cfg(feature = "dev-models")]
     #[test]
     fn test_ort_engine_u2net_creates_session() {
+        // U2Net is OnDemand — only run when the user has downloaded it.
+        // Mirrors the skip-if-missing pattern in tests/reference_test.rs.
+        if !prunr_models::is_available(prunr_models::ModelId::U2net) {
+            eprintln!("Skipping: U2Net not in user data dir (download via Model Store)");
+            return;
+        }
         let engine = OrtEngine::new(ModelKind::U2net, 1)
-            .expect("OrtEngine::new(U2net) should succeed with dev-models");
+            .expect("OrtEngine::new(U2net) should succeed when U2Net is installed");
         let provider = engine.active_provider();
         assert!(!provider.is_empty());
     }

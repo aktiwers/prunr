@@ -845,7 +845,11 @@ pub fn run_worker() -> ! {
                         let mask = image::load_from_memory(&mask_bytes)
                             .map_err(|e| format!("decode mask: {e}"))?
                             .to_luma8();
-                        prunr_core::inpaint::process_inpaint(&image, &mask)
+                        // Subprocess inpaint defaults to LaMaFp32 — the
+                        // user-facing dropdown is GUI-side. If subprocess
+                        // batch inpaint ever surfaces (CLI or otherwise)
+                        // this needs an IPC variant carrying the ModelId.
+                        prunr_core::inpaint::process_inpaint(&image, &mask, prunr_models::ModelId::LaMaFp32)
                             .map_err(|e| format!("inpaint: {e:?}"))
                     })();
                     match result {

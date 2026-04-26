@@ -88,8 +88,13 @@ fn pixel_match_percent(our_rgba: &RgbaImage, reference_mask: &image::GrayImage, 
 /// See tests/test_images/README.md for image download instructions.
 #[test]
 fn test_rembg_reference() {
+    // U2Net is OnDemand — skip unless installed.
+    if !prunr_models::is_available(prunr_models::ModelId::U2net) {
+        eprintln!("Skipping rembg reference: U2Net not installed in user data dir");
+        return;
+    }
     let engine = OrtEngine::new(ModelKind::U2net, 1)
-        .expect("Failed to create OrtEngine — run `cargo xtask fetch-models`");
+        .expect("Failed to create OrtEngine — U2Net reported available but session creation failed");
 
     let test_cases = ["car-1", "car-2", "car-3"];
     let tolerance: u8 = 5;   // |our_alpha - ref_alpha| <= 5 counts as match
@@ -173,11 +178,14 @@ fn test_process_image_produces_valid_rgba_png() {
 
 #[test]
 fn test_model_selection_silueta_and_u2net() {
-    // Both models must load without error
+    // Silueta is bundled — must always load.
     let _silueta = OrtEngine::new(ModelKind::Silueta, 1)
         .expect("Silueta model should load");
-    let _u2net = OrtEngine::new(ModelKind::U2net, 1)
-        .expect("U2net model should load");
+    // U2Net is OnDemand — only load when present.
+    if prunr_models::is_available(prunr_models::ModelId::U2net) {
+        let _u2net = OrtEngine::new(ModelKind::U2net, 1)
+            .expect("U2net reported available but session creation failed");
+    }
 }
 
 // ============================================================
@@ -336,4 +344,79 @@ fn test_batch_process_multiple_images() {
     for (i, r) in results.iter().enumerate() {
         assert!(r.is_ok(), "Batch result {} failed: {:?}", i, r);
     }
+}
+
+/// End-to-end smoke test for the LaMa inpaint pipeline.
+///
+/// Runs `process_inpaint` over a real image with a small synthetic mask
+/// patch in the centre. We don't have a deterministic golden output (LaMa
+/// is data-hungry to pin pixel-exact), so the assertions validate the
+/// I/O contract rather than the pixel values:
+///
+/// - Output dimensions match the input
+/// - Pixels OUTSIDE the mask are byte-identical to the source (the
+///   `decode_tile` source-passthrough invariant)
+/// - At least one pixel INSIDE the mask differs from the source (the
+///   model actually painted something — catches a wiring regression
+///   that returned the source unchanged)
+///
+/// Skipped when the LaMa model isn't on disk.
+#[test]
+#[cfg(feature = "dev-models")]
+fn test_inpaint_smoke() {
+    let image_path = test_images_dir().join("car-1.jpg");
+    if !image_path.exists() {
+        eprintln!("Skipping inpaint smoke test: car-1.jpg not found");
+        return;
+    }
+    // LaMa is OnDemand — skip unless the user has it in their data dir.
+    if !prunr_models::is_available(prunr_models::ModelId::LaMaFp32) {
+        eprintln!("Skipping inpaint smoke test: LaMa not installed in user data dir");
+        return;
+    }
+
+    let dyn_img = image::open(&image_path).expect("Failed to open car-1.jpg");
+    let img = dyn_img.into_rgba8();
+    let (w, h) = img.dimensions();
+
+    // Synthesise a 32×32 mask patch in the centre of the image.
+    let mut mask = image::GrayImage::new(w, h);
+    let cx = w / 2;
+    let cy = h / 2;
+    let r = 16u32;
+    for y in cy.saturating_sub(r)..(cy + r).min(h) {
+        for x in cx.saturating_sub(r)..(cx + r).min(w) {
+            mask.put_pixel(x, y, image::Luma([255]));
+        }
+    }
+
+    let result = prunr_core::inpaint::process_inpaint(&img, &mask, prunr_models::ModelId::LaMaFp32)
+        .expect("process_inpaint failed");
+    assert_eq!(result.dimensions(), img.dimensions());
+
+    // Outside the mask: byte-identical to source.
+    for y in 0..h {
+        for x in 0..w {
+            if mask.get_pixel(x, y).0[0] == 0 {
+                assert_eq!(
+                    result.get_pixel(x, y), img.get_pixel(x, y),
+                    "unmasked pixel ({x}, {y}) was modified — decode_tile passthrough broken",
+                );
+            }
+        }
+    }
+
+    // Inside the mask: at least one pixel must differ from the source.
+    let mut any_changed = false;
+    for y in cy.saturating_sub(r)..(cy + r).min(h) {
+        for x in cx.saturating_sub(r)..(cx + r).min(w) {
+            if mask.get_pixel(x, y).0[0] != 0
+                && result.get_pixel(x, y) != img.get_pixel(x, y) {
+                any_changed = true;
+                break;
+            }
+        }
+        if any_changed { break; }
+    }
+    assert!(any_changed, "no masked pixel was changed — LaMa returned source unchanged");
 }

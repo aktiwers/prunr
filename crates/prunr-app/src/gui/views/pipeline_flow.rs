@@ -2,7 +2,7 @@
 //! one-line explanation each, so the user can predict how knob tweaks
 //! cascade.
 
-use egui::{Align2, RichText};
+use egui::RichText;
 use egui_material_icons::icons::*;
 
 use crate::gui::theme;
@@ -52,17 +52,10 @@ const STAGES: &[Stage] = &[
 
 /// Returns true if the modal should close.
 pub fn render(ctx: &egui::Context) -> bool {
-    theme::draw_modal_backdrop(ctx, "pipeline_flow_backdrop");
-
-    let mut open = true;
-    let window_response = egui::Window::new("Mask Pipeline")
-        .open(&mut open)
-        .collapsible(false)
-        .resizable(false)
-        .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
-        .fixed_size([MODAL_WIDTH, MODAL_HEIGHT])
-        .frame(theme::overlay_frame())
-        .show(ctx, |ui| {
+    theme::standard_modal_window(
+        ctx, "pipeline_flow", "Mask Pipeline",
+        [MODAL_WIDTH, MODAL_HEIGHT],
+        |ui| {
             ui.vertical(|ui| {
                 ui.add_space(theme::SPACE_SM);
                 endpoint_label(ui, "Raw ONNX tensor");
@@ -93,9 +86,8 @@ pub fn render(ctx: &egui::Context) -> bool {
                     .color(theme::TEXT_PRIMARY),
                 );
             });
-        });
-
-    !open || theme::backdrop_clicked(ctx, &window_response)
+        },
+    )
 }
 
 fn stage_row(ui: &mut egui::Ui, stage: &Stage) {

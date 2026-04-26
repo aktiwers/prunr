@@ -103,6 +103,9 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) {
             ui.separator();
             ui.add_space(theme::SPACE_SM);
 
+            // ── Hardware ──
+            render_hardware_section(ui, app);
+
             // ── Performance ──
             section_heading(ui, "Performance");
             let max_jobs = app.settings.max_jobs();
@@ -276,10 +279,82 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) {
         });
 
     let now = ctx.input(|i| i.time);
-    let debounce_passed = (now - app.settings_opened_at) > 0.15;
+    let debounce_passed = (now - app.settings_opened_at) > theme::MODAL_BACKDROP_DEBOUNCE_SECS;
     let close_via_backdrop = debounce_passed && theme::backdrop_clicked(ctx, &window_response);
 
     if !open || close_via_backdrop {
         app.close_settings(ctx);
     }
+}
+
+fn render_hardware_section(ui: &mut egui::Ui, app: &mut PrunrApp) {
+    use crate::hardware;
+    use crate::runtime_install::{InstallEvent, RuntimeId, start_install};
+    section_heading(ui, "Hardware");
+
+    let p = hardware::profile();
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(format!("CPU: {} ({})", p.cpu_vendor, p.cpu_brand))
+            .color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY));
+    });
+    let gpu_label = match (p.dgpu, p.igpu) {
+        (Some(d), Some(i)) => format!("dGPU: {d}, iGPU: {i}"),
+        (Some(d), None) => format!("dGPU: {d}"),
+        (None, Some(i)) => format!("iGPU: {i}"),
+        (None, None) => "GPU: none detected".to_string(),
+    };
+    ui.label(RichText::new(gpu_label)
+        .color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY));
+
+    let active_provider = prunr_core::OrtEngine::detect_active_provider();
+    ui.label(RichText::new(format!("Active EP: {active_provider}"))
+        .color(theme::TEXT_SECONDARY).size(theme::FONT_SIZE_MONO));
+    ui.add_space(theme::SPACE_SM);
+
+    // OpenVINO Runtime row. Compute the status string up front so the
+    // borrow on `app.runtime_install` doesn't extend into the closure
+    // (which needs mutable access for the Install button).
+    let rt = RuntimeId::OpenVino;
+    let installed = rt.is_installed();
+    let status = match app.runtime_install.as_ref().filter(|p| p.runtime == rt) {
+        Some(p) => p.last_event.status_text(),
+        None if installed => "Installed".to_string(),
+        None => format!("Not installed ({} MB)", rt.approx_download_mb()),
+    };
+
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(rt.display_name())
+            .color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY));
+        ui.label(RichText::new(status)
+            .color(theme::TEXT_SECONDARY).size(theme::FONT_SIZE_MONO));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let busy = app.runtime_install.is_some();
+            if installed {
+                if !busy && ui.button(RichText::new("Uninstall")
+                    .color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY)).clicked() {
+                    match crate::runtime_install::uninstall(rt) {
+                        Ok(()) => { app.toasts.success(format!("{} removed", rt.display_name())); }
+                        Err(e) => { app.toasts.error(format!("Uninstall failed: {e}")); }
+                    }
+                }
+            } else if !busy && ui.button(RichText::new("Install")
+                .color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY)).clicked() {
+                let rx = start_install(rt);
+                app.runtime_install = Some(crate::gui::app::RuntimeInstallProgress {
+                    runtime: rt,
+                    rx,
+                    last_event: InstallEvent::Preparing,
+                });
+            }
+        });
+    });
+    // Hint hidden once installing or installed — it's a recommendation,
+    // not a permanent label.
+    if p.recommends_openvino() && !installed && app.runtime_install.is_none() {
+        hint(ui, "Recommended for your Intel hardware — 2-3× faster inference on most models, plus iGPU acceleration for SD inpaint.");
+    }
+
+    ui.add_space(theme::SPACE_MD);
+    ui.separator();
+    ui.add_space(theme::SPACE_SM);
 }

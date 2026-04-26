@@ -43,6 +43,55 @@ pub fn overlay_frame() -> egui::Frame {
     }
 }
 
+/// Suppression window for the backdrop-click that opens a modal —
+/// without it, the same primary_clicked event that triggered the open
+/// also fires backdrop_clicked outside the new window's rect, closing
+/// it on the first frame.
+pub const MODAL_BACKDROP_DEBOUNCE_SECS: f64 = 0.2;
+
+/// Render a centred non-resizable modal: backdrop + window + frame +
+/// close-on-backdrop-click. Returns `true` when the user closed the
+/// modal this frame (X button or backdrop click). The `opened_at`
+/// timestamp lives in egui memory keyed by `id`.
+///
+/// `id` must be unique across modals — used as the backdrop layer id,
+/// the egui Window id, and the debounce-memory key.
+pub fn standard_modal_window(
+    ctx: &egui::Context,
+    id: &str,
+    title: &str,
+    size: [f32; 2],
+    body: impl FnOnce(&mut egui::Ui),
+) -> bool {
+    let opened_at_key = egui::Id::new(id).with("opened_at");
+    let now = ctx.input(|i| i.time);
+    let opened_at = ctx.memory_mut(|m| {
+        *m.data.get_temp_mut_or_insert_with(opened_at_key, || now)
+    });
+    let debounce_passed = (now - opened_at) >= MODAL_BACKDROP_DEBOUNCE_SECS;
+
+    let backdrop_id = format!("{id}_backdrop");
+    draw_modal_backdrop(ctx, &backdrop_id);
+
+    let mut open = true;
+    let resp = egui::Window::new(title)
+        .id(egui::Id::new(id))
+        .open(&mut open)
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .fixed_size(size)
+        .frame(overlay_frame())
+        .show(ctx, body);
+
+    let close = !open || (debounce_passed && backdrop_clicked(ctx, &resp));
+    if close {
+        // Reset so the next reopen starts a fresh debounce window.
+        ctx.memory_mut(|m| m.data.remove_temp::<f64>(opened_at_key));
+    }
+    close
+}
+
 // === Colors (plum logo palette) ===
 
 /// Main window/canvas background — dark charcoal from logo bg

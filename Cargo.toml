@@ -20,7 +20,11 @@ repository = "https://github.com/aktiwers/prunr"
 # `@executable_path/../Frameworks` rpath set in `.cargo/config.toml`.
 # Unpin when ort 2.0 stable ships and our feature set is preserved.
 # Check https://github.com/pykeio/ort/milestones before bumping.
-ort = { version = "=2.0.0-rc.12", features = ["cuda", "coreml", "directml", "ndarray", "download-binaries"] }
+# Phase 19: load-dynamic replaces download-binaries — ORT is now
+# resolved at runtime via `ort::init_from(path)` so we can swap in
+# EP-specific bundles via the Runtime Store. api-23 pin avoids the
+# rc.12 vitis.rs build bug under load-dynamic at api-24.
+ort = { version = "=2.0.0-rc.12", default-features = false, features = ["cuda", "coreml", "directml", "openvino", "ndarray", "load-dynamic", "api-23", "half"] }
 
 # Image + tensor core
 ndarray = "0.17"
@@ -31,6 +35,16 @@ fast_image_resize = "6"
 zstd = "0.13"
 num_cpus = "1"
 bytemuck = "1"
+
+# Used by SD inpaint for seeded gaussian noise.
+# Only the `rand` core API + `rand_chacha` are needed — no `getrandom`
+# pull-in (we always seed deterministically).
+rand = { version = "0.9", default-features = false, features = ["std", "std_rng"] }
+rand_chacha = "0.9"
+rand_distr = { version = "0.5", default-features = false, features = ["std_math"] }
+# FP16 support for SD pipeline tensors. ort already pulls this in; we
+# add the workspace dep so prunr-core can use `half::f16` directly.
+half = { version = "2", features = ["num-traits"] }
 
 # Error handling + serialization
 thiserror = "2.0"
