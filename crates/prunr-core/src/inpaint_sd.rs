@@ -792,9 +792,13 @@ fn mask_to_latent(mask: &GrayImage) -> Array4<f32> {
     a
 }
 
-/// Source image with the painted region zeroed — the SD inpaint
-/// convention: the masked-image latent gives the UNet a "what was here
-/// before, with the hole" signal.
+/// Source image with the painted region replaced by mid-gray — the
+/// SD inpaint training convention. Diffusers' `prepare_mask_and_masked_image`
+/// multiplies the [-1, 1]-normalized image by `(mask < 0.5)` which puts
+/// 0 (mid-gray) into the masked region; the VAE / UNet were trained
+/// against this. Filling with black (0 in [0, 255] = -1 in [-1, 1])
+/// instead drives the masked-image latent out of distribution, and with
+/// empty-prompt CFG=1.0 the denoised output collapses to dark fills.
 fn mask_image_for_vae(image: &RgbaImage, mask: &GrayImage) -> RgbaImage {
     debug_assert_eq!(image.dimensions(), mask.dimensions());
     let mut out = image.clone();
@@ -802,9 +806,9 @@ fn mask_image_for_vae(image: &RgbaImage, mask: &GrayImage) -> RgbaImage {
     let m = mask.as_raw();
     for i in 0..m.len() {
         if m[i] > 127 {
-            raw[i * 4]     = 0;
-            raw[i * 4 + 1] = 0;
-            raw[i * 4 + 2] = 0;
+            raw[i * 4]     = 128;
+            raw[i * 4 + 1] = 128;
+            raw[i * 4 + 2] = 128;
         }
     }
     out
@@ -1116,15 +1120,15 @@ mod tests {
     }
 
     #[test]
-    fn mask_image_for_vae_zeros_painted_region_only() {
+    fn mask_image_for_vae_replaces_painted_region_with_mid_gray() {
         let mut img = RgbaImage::new(8, 8);
         for p in img.pixels_mut() { *p = Rgba([100, 200, 50, 255]); }
         let mut mask = GrayImage::new(8, 8);
         mask.put_pixel(2, 3, Luma([255]));
         let out = mask_image_for_vae(&img, &mask);
-        // Painted pixel zeroed
-        assert_eq!(out.get_pixel(2, 3).0, [0, 0, 0, 255]);
-        // Untouched pixel intact
+        // Mid-gray (128) = 0 in [-1, 1] — diffusers training convention.
+        assert_eq!(out.get_pixel(2, 3).0, [128, 128, 128, 255]);
+        // Untouched pixel intact.
         assert_eq!(out.get_pixel(0, 0).0, [100, 200, 50, 255]);
     }
 
