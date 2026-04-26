@@ -21,8 +21,13 @@ pub fn render(ui: &mut egui::Ui, app: &PrunrApp) {
         let batch_done_count = counts.done;
         // Only count items involved in processing (not idle Pending items)
         let batch_total = counts.batch_total();
+        let inpaint_busy = app.processor.any_inpaint_in_flight();
 
-        let status_text = if batch_processing {
+        let status_text = if inpaint_busy {
+            // Eraser dispatch lives outside the seg-pipeline status track,
+            // so check it first — otherwise the "All done" branch wins.
+            "Erasing\u{2026}".to_string()
+        } else if batch_processing {
             format!("Processing {batch_done_count}/{batch_total} images...")
         } else if batch_total >= 2 && batch_done_count == batch_total {
             format!("All done \u{2014} {batch_total} images processed")

@@ -58,6 +58,21 @@ pub struct Settings {
     #[serde(default = "default_preset_name")]
     pub default_preset: String,
 
+    /// Persisted set of model ids whose restrictive licenses (CreativeML
+    /// Open RAIL-M, NVIDIA SCL, …) the user has explicitly accepted.
+    /// Stored as `ModelId` Debug names so prunr-models stays serde-free.
+    /// Once accepted, the Model Store skips the license dialog on
+    /// subsequent re-downloads of the same model.
+    #[serde(default)]
+    pub accepted_licenses: Vec<String>,
+
+    /// Per-runtime snooze: unix-second timestamp before which we won't
+    /// re-prompt the user to install. Set when the user clicks "Not now"
+    /// on the first-launch runtime prompt. Cleared on a successful
+    /// install or via "Reset all". Keyed by `RuntimeId` Debug name.
+    #[serde(default)]
+    pub runtime_prompt_snoozed_until: std::collections::HashMap<String, i64>,
+
     /// Force CPU inference even when GPU is available (not persisted — resets each launch).
     #[serde(skip)]
     pub force_cpu: bool,
@@ -208,6 +223,40 @@ impl Settings {
     pub fn item_defaults_for_new_item(&self) -> ItemSettings {
         self.preset_values(&self.default_preset)
     }
+
+    pub fn has_accepted_license(&self, id: prunr_models::ModelId) -> bool {
+        let key = format!("{id:?}");
+        self.accepted_licenses.iter().any(|s| s == &key)
+    }
+
+    /// Records license acceptance and persists settings. Idempotent — a
+    /// repeated call is a no-op (no duplicate entries, no extra disk write
+    /// when the entry already exists).
+    pub fn accept_license(&mut self, id: prunr_models::ModelId) {
+        let key = format!("{id:?}");
+        if !self.accepted_licenses.iter().any(|s| s == &key) {
+            self.accepted_licenses.push(key);
+            self.save();
+        }
+    }
+
+    pub fn is_runtime_prompt_snoozed(&self, runtime: crate::runtime_install::RuntimeId) -> bool {
+        self.runtime_prompt_snoozed_until
+            .get(runtime.settings_key())
+            .copied().unwrap_or(0) > now_unix_secs()
+    }
+
+    pub fn snooze_runtime_prompt(&mut self, runtime: crate::runtime_install::RuntimeId, days: i64) {
+        let until = now_unix_secs() + days * 24 * 3600;
+        self.runtime_prompt_snoozed_until.insert(runtime.settings_key().to_string(), until);
+        self.save();
+    }
+}
+
+fn now_unix_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64).unwrap_or(0)
 }
 
 /// Extract v1 per-image settings from raw JSON into ItemSettings.
@@ -263,32 +312,47 @@ pub enum SettingsModel {
     /// need the seg model); SubjectOutline is invalid without a seg model
     /// and gets greyed out in the UI.
     None,
-    /// Object-removal / inpaint mode. Brush is the only input; stroke
-    /// release runs LaMa over the painted region. Bg-removal knobs
-    /// (gamma, threshold, refine, fill_style) are inert in this mode.
+    /// Object-removal / inpaint mode (LaMa-fp32 backend). Brush is the
+    /// only input; stroke release runs the inpainter over the painted
+    /// region. Bg-removal knobs are inert in this mode.
     Inpaint,
+    /// Same mode as `Inpaint` but routed to the higher-quality Big-LaMa
+    /// weights. Same architecture, same per-tile cost — different
+    /// training data.
+    BigInpaint,
+    /// Lightweight GAN inpainter (~25 MB). Different architecture from
+    /// LaMa: GAN-based, sharper on detail, less smooth on flat
+    /// backgrounds.
+    MiganInpaint,
+    /// Stable Diffusion 1.5 Inpainting (FP16). GPU-required, ~2 GB
+    /// multi-part bundle. Generative — produces plausible content
+    /// rather than smooth fills.
+    SdInpaint,
 }
 
 impl SettingsModel {
     /// All variants in display order — source of truth for the model dropdown.
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 8] = [
         Self::Silueta,
         Self::U2net,
         Self::BiRefNetLite,
         Self::None,
         Self::Inpaint,
+        Self::BigInpaint,
+        Self::MiganInpaint,
+        Self::SdInpaint,
     ];
 
     /// Whether this variant resolves to an ORT seg model. Filter-only and
-    /// Inpaint skip segmentation entirely.
+    /// Inpaint variants skip segmentation entirely.
     pub fn uses_segmentation(self) -> bool {
         matches!(self, Self::Silueta | Self::U2net | Self::BiRefNetLite)
     }
 
-    /// True for object-removal mode. Branches that drive the inpaint
+    /// True for any object-removal mode. Branches that drive the inpaint
     /// pipeline (brush auto-enable, popover simplification) check this.
     pub fn is_inpaint(self) -> bool {
-        matches!(self, Self::Inpaint)
+        matches!(self, Self::Inpaint | Self::BigInpaint | Self::MiganInpaint | Self::SdInpaint)
     }
 
     /// Convert to `ModelKind`, or `None` for non-seg variants.
@@ -297,7 +361,21 @@ impl SettingsModel {
             Self::Silueta => Some(ModelKind::Silueta),
             Self::U2net => Some(ModelKind::U2net),
             Self::BiRefNetLite => Some(ModelKind::BiRefNetLite),
-            Self::None | Self::Inpaint => None,
+            Self::None | Self::Inpaint | Self::BigInpaint | Self::MiganInpaint | Self::SdInpaint => None,
+        }
+    }
+
+    /// Registry id, or `None` for the no-model variant.
+    pub fn to_model_id(self) -> Option<prunr_models::ModelId> {
+        match self {
+            Self::Silueta => Some(prunr_models::ModelId::Silueta),
+            Self::U2net => Some(prunr_models::ModelId::U2net),
+            Self::BiRefNetLite => Some(prunr_models::ModelId::BiRefNetLite),
+            Self::Inpaint => Some(prunr_models::ModelId::LaMaFp32),
+            Self::BigInpaint => Some(prunr_models::ModelId::BigLaMa),
+            Self::MiganInpaint => Some(prunr_models::ModelId::Migan),
+            Self::SdInpaint => Some(prunr_models::ModelId::SdV15InpaintFp16),
+            Self::None => None,
         }
     }
 }
@@ -329,6 +407,8 @@ impl Default for Settings {
             shortcuts: HashMap::new(),
             presets: HashMap::new(),
             default_preset: default_preset_name(),
+            accepted_licenses: Vec::new(),
+            runtime_prompt_snoozed_until: std::collections::HashMap::new(),
             force_cpu: false,
             active_backend: "CPU".to_string(),
             brush: BrushSettings::default(),

@@ -19,6 +19,8 @@ dev-models = ["prunr-core/dev-models"]
 
 [dependencies]
 prunr-core = { path = "../prunr-core" }
+prunr-models = { path = "../prunr-models" }
+ort = { workspace = true }
 clap = { workspace = true }
 indicatif = { workspace = true }
 egui = { workspace = true }
@@ -43,6 +45,14 @@ memory-stats = { workspace = true }
 ndarray = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+# Model Store on-demand downloads (Phase 17). Blocking client + rustls so we
+# don't pull in OpenSSL on Linux.
+reqwest = { version = "0.12", features = ["blocking", "rustls-tls", "json"], default-features = false }
+sha2 = "0.10"
+hex = "0.4"
+# 19-04 Runtime Store: extract OpenVINO wheels (.zip)
+zip = { version = "2", default-features = false, features = ["deflate"] }
+bytes = "1"
 
 [dev-dependencies]
 proptest = { workspace = true }

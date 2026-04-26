@@ -93,6 +93,34 @@ struct InFlightBatch {
     pending: HashSet<u64>,
 }
 
+pub(crate) struct InpaintResult {
+    pub item_id: u64,
+    pub rgba: image::RgbaImage,
+    pub generation: u64,
+}
+
+/// Eraser-specific tuning passed from `BrushSettings` into the dispatch.
+/// Bundled into a struct to keep `dispatch_inpaint` from sprawling.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct InpaintTuning {
+    pub sharpen: f32,
+    pub feather_px: f32,
+    pub grow_px: f32,
+    /// Which inpaint backend to use (LaMaFp32, BigLaMa, …).
+    pub backend: prunr_models::ModelId,
+}
+
+impl Default for InpaintTuning {
+    fn default() -> Self {
+        Self {
+            sharpen: 0.0,
+            feather_px: 0.0,
+            grow_px: 0.0,
+            backend: prunr_models::ModelId::LaMaFp32,
+        }
+    }
+}
+
 pub(crate) struct Processor {
     pub(crate) worker_tx: mpsc::Sender<WorkerMessage>,
     pub(crate) worker_rx: mpsc::Receiver<WorkerResult>,
@@ -109,6 +137,15 @@ pub(crate) struct Processor {
     in_flight: Option<InFlightBatch>,
     /// Last time periodic history cleanup ran.
     pub(crate) last_history_cleanup: Instant,
+    /// Inpaint dispatch state. Per-item generation counter discards
+    /// stale results when the user paints a fresh stroke before the
+    /// previous one finishes. `inpaint_pending` is the count of
+    /// dispatches not yet drained — the canvas reads it via
+    /// `is_inpaint_in_flight` to show a progress overlay.
+    inpaint_tx: mpsc::Sender<InpaintResult>,
+    inpaint_rx: mpsc::Receiver<InpaintResult>,
+    inpaint_latest_gen: HashMap<u64, u64>,
+    inpaint_pending: HashMap<u64, u32>,
 }
 
 impl Processor {
@@ -116,6 +153,7 @@ impl Processor {
         worker_tx: mpsc::Sender<WorkerMessage>,
         worker_rx: mpsc::Receiver<WorkerResult>,
     ) -> Self {
+        let (inpaint_tx, inpaint_rx) = mpsc::channel();
         Self {
             worker_tx,
             worker_rx,
@@ -125,7 +163,91 @@ impl Processor {
             admission_tx: None,
             in_flight: None,
             last_history_cleanup: Instant::now(),
+            inpaint_tx,
+            inpaint_rx,
+            inpaint_latest_gen: HashMap::new(),
+            inpaint_pending: HashMap::new(),
         }
+    }
+
+    /// Per-item generation counter ensures a fresh stroke supersedes the
+    /// previous in-flight job at drain time — see `drain_inpaint_results`.
+    pub(crate) fn dispatch_inpaint(
+        &mut self,
+        item_id: u64,
+        image: std::sync::Arc<image::RgbaImage>,
+        correction: std::sync::Arc<prunr_core::brush::MaskCorrection>,
+        tuning: InpaintTuning,
+    ) {
+        let generation = self.inpaint_latest_gen.entry(item_id).or_insert(0);
+        *generation += 1;
+        let gen = *generation;
+        *self.inpaint_pending.entry(item_id).or_insert(0) += 1;
+        let tx = self.inpaint_tx.clone();
+        rayon::spawn(move || {
+            let raw_mask = correction.to_binary_mask(image.width(), image.height());
+            // Pre-process: grow/erode the painted area before LaMa runs.
+            let mask = if tuning.grow_px != 0.0 {
+                prunr_core::inpaint::grow_mask(&raw_mask, tuning.grow_px.round() as i32)
+            } else {
+                raw_mask
+            };
+            match prunr_core::inpaint::process_inpaint(&image, &mask, tuning.backend) {
+                Ok(rgba) => {
+                    // Post-process: sharpen first (LaMa's blur is the
+                    // pixel content), then feather the boundary so the
+                    // sharpen doesn't crisp up an already-soft seam.
+                    let mut out = rgba;
+                    if tuning.sharpen > 0.0 {
+                        out = prunr_core::inpaint::sharpen_inpainted(&out, &mask, tuning.sharpen);
+                    }
+                    if tuning.feather_px > 0.0 {
+                        out = prunr_core::inpaint::feather_inpainted(&out, &image, &mask, tuning.feather_px);
+                    }
+                    let _ = tx.send(InpaintResult { item_id, rgba: out, generation: gen });
+                }
+                Err(e) => {
+                    tracing::error!(item_id, %e, "inpaint dispatch failed");
+                    // Best-effort: send an empty marker so pending count
+                    // decrements. Use generation 0 so it's always treated
+                    // as stale and the result itself is dropped.
+                    let _ = tx.send(InpaintResult {
+                        item_id,
+                        rgba: image::RgbaImage::new(0, 0),
+                        generation: 0,
+                    });
+                }
+            }
+        });
+    }
+
+    pub(crate) fn drain_inpaint_results(&mut self) -> Vec<InpaintResult> {
+        let mut out = Vec::new();
+        while let Ok(result) = self.inpaint_rx.try_recv() {
+            // Every drained result decrements pending — stale ones
+            // count too, since the rayon job that produced them has
+            // run to completion.
+            if let Some(c) = self.inpaint_pending.get_mut(&result.item_id) {
+                *c = c.saturating_sub(1);
+            }
+            let latest = self.inpaint_latest_gen.get(&result.item_id).copied().unwrap_or(0);
+            if result.generation == latest && result.generation > 0 {
+                out.push(result);
+            }
+        }
+        out
+    }
+
+    /// True while a dispatched inpaint job hasn't drained yet for `item_id`.
+    /// Canvas reads this to render a "Erasing..." overlay during LaMa work.
+    pub(crate) fn is_inpaint_in_flight(&self, item_id: u64) -> bool {
+        self.inpaint_pending.get(&item_id).copied().unwrap_or(0) > 0
+    }
+
+    /// True while ANY item has an in-flight inpaint job. Status bar
+    /// reads this to override the "All done" text during LaMa work.
+    pub(crate) fn any_inpaint_in_flight(&self) -> bool {
+        self.inpaint_pending.values().any(|&c| c > 0)
     }
 
     /// Register a batch's recipe + the IDs that should deliver against it.
@@ -200,6 +322,21 @@ mod tests {
         // triggered at startup — the Instant must be effectively-now.
         let p = fixture();
         assert!(p.last_history_cleanup.elapsed().as_secs() < 5);
+    }
+
+    #[test]
+    fn drain_filters_stale_generations() {
+        let mut p = fixture();
+        p.inpaint_latest_gen.insert(7, 2);
+        p.inpaint_tx.send(InpaintResult {
+            item_id: 7, rgba: image::RgbaImage::new(1, 1), generation: 1,
+        }).unwrap();
+        p.inpaint_tx.send(InpaintResult {
+            item_id: 7, rgba: image::RgbaImage::new(1, 1), generation: 2,
+        }).unwrap();
+        let drained = p.drain_inpaint_results();
+        assert_eq!(drained.len(), 1, "stale gen=1 must be dropped");
+        assert_eq!(drained[0].generation, 2);
     }
 
     #[test]

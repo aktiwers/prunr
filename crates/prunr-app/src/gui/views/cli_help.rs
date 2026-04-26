@@ -1,4 +1,4 @@
-use egui::{Align2, RichText};
+use egui::RichText;
 use egui_material_icons::icons::*;
 
 use crate::gui::theme;
@@ -6,17 +6,10 @@ use super::section_heading;
 
 /// Returns true if the modal should close.
 pub fn render(ctx: &egui::Context, toasts: &mut egui_notify::Toasts) -> bool {
-    theme::draw_modal_backdrop(ctx, "cli_help_backdrop");
-
-    let mut open = true;
-    let window_response = egui::Window::new("CLI Reference")
-        .open(&mut open)
-        .collapsible(false)
-        .resizable(false)
-        .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
-        .fixed_size([theme::SETTINGS_DIALOG_WIDTH, theme::SETTINGS_DIALOG_HEIGHT])
-        .frame(theme::overlay_frame())
-        .show(ctx, |ui| {
+    theme::standard_modal_window(
+        ctx, "cli_help", "CLI Reference",
+        [theme::SETTINGS_DIALOG_WIDTH, theme::SETTINGS_DIALOG_HEIGHT],
+        |ui| {
             {
                 let vis = ui.visuals_mut();
                 vis.widgets.inactive.bg_fill = theme::WIDGET_INACTIVE_BG;
@@ -30,7 +23,7 @@ pub fn render(ctx: &egui::Context, toasts: &mut egui_notify::Toasts) -> bool {
             let mut tab: usize = ui.data(|d| d.get_temp(tab_id).unwrap_or(0));
 
             ui.horizontal(|ui| {
-                for (i, label) in ["Quick Start", "Lines", "Mask", "Advanced"].iter().enumerate() {
+                for (i, label) in ["Quick Start", "Lines", "Mask", "Eraser", "Advanced"].iter().enumerate() {
                     let selected = tab == i;
                     let text = RichText::new(*label)
                         .size(theme::FONT_SIZE_BODY)
@@ -157,8 +150,33 @@ pub fn render(ctx: &egui::Context, toasts: &mut egui_notify::Toasts) -> bool {
                         "Trim 3px fringe around subject");
                 }
 
-                // ── Advanced ──
+                // ── Eraser ──
                 3 => {
+                    section_heading(ui, "Object Removal (Eraser)");
+                    hint(ui, "Paint over an unwanted object and let LaMa fill it in.");
+                    hint(ui, "Pass a binary mask (white = remove here, black = keep).");
+
+                    ui.add_space(theme::SPACE_MD);
+                    section_heading(ui, "Flags");
+
+                    egui::Grid::new("cli_eraser_grid")
+                        .num_columns(2)
+                        .spacing([theme::SPACE_LG, theme::SPACE_SM])
+                        .show(ui, |ui| {
+                            opt_row(ui, "--inpaint", "Switch to Eraser mode (LaMa inpaint)");
+                            opt_row(ui, "--mask <path>", "Binary mask, must match input dimensions");
+                        });
+
+                    ui.add_space(theme::SPACE_MD);
+                    section_heading(ui, "Examples");
+                    example_row(ui, toasts, "prunr --inpaint photo.jpg --mask mask.png",
+                        "Erase region defined by mask.png, save photo_erased.png");
+                    example_row(ui, toasts, "prunr --inpaint photo.jpg --mask mask.png -o clean.png",
+                        "Custom output path");
+                }
+
+                // ── Advanced ──
+                4 => {
                     section_heading(ui, "Models");
 
                     egui::Grid::new("cli_models_grid")
@@ -182,6 +200,17 @@ pub fn render(ctx: &egui::Context, toasts: &mut egui_notify::Toasts) -> bool {
                         });
 
                     ui.add_space(theme::SPACE_MD);
+                    section_heading(ui, "Diagnostics & Workflow");
+
+                    egui::Grid::new("cli_diag_grid")
+                        .num_columns(2)
+                        .spacing([theme::SPACE_LG, theme::SPACE_SM])
+                        .show(ui, |ui| {
+                            opt_row(ui, "--debug", "Verbose tracing (use when reporting bugs)");
+                            opt_row(ui, "--chain", "Process previous result instead of original");
+                        });
+
+                    ui.add_space(theme::SPACE_MD);
                     section_heading(ui, "Examples");
                     example_row(ui, toasts, "prunr -m birefnet-lite portrait.jpg",
                         "Best detail for hair, leaves, fine edges");
@@ -189,6 +218,8 @@ pub fn render(ctx: &egui::Context, toasts: &mut egui_notify::Toasts) -> bool {
                         "Full-resolution processing for large images");
                     example_row(ui, toasts, "prunr -q photo.jpg -o output.png",
                         "Quiet mode for scripting");
+                    example_row(ui, toasts, "prunr --debug photo.jpg 2> prunr.log",
+                        "Capture diagnostic log for bug reports");
                 }
 
                 _ => {}
@@ -202,9 +233,8 @@ pub fn render(ctx: &egui::Context, toasts: &mut egui_notify::Toasts) -> bool {
                         .color(theme::TEXT_HINT),
                 );
             });
-        });
-
-    !open || theme::backdrop_clicked(ctx, &window_response)
+        },
+    )
 }
 
 use super::hint;

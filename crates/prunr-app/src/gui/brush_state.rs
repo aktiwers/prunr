@@ -19,7 +19,28 @@ pub struct BrushSettings {
     pub strength: f32,
     pub mode: BrushMode,
     pub shape: BrushShape,
+    /// Eraser-only: post-process unsharp-mask amount applied inside the
+    /// inpainted region. 0.0 = LaMa output as-is (slightly soft, the
+    /// model's bias). Higher values sharpen against the model's blur.
+    /// Practical sweet spot: 0.3-0.7. Pinned to BrushSettings (global)
+    /// rather than ItemSettings since it's a render preference, not
+    /// per-image content.
+    #[serde(default)]
+    pub inpaint_sharpen: f32,
+    /// Eraser-only: pixels of soft blend at the painted-region boundary.
+    /// Hides the LaMa↔source seam by gradually mixing the model's output
+    /// toward source within `feather_px` of the mask edge.
+    #[serde(default = "default_feather")]
+    pub inpaint_feather: f32,
+    /// Eraser-only: dilate (>0) or erode (<0) the painted mask before
+    /// inference. Small dilation gives LaMa more context for cleaner
+    /// fills; erosion preserves more original detail at the boundary.
+    #[serde(default = "default_grow")]
+    pub inpaint_grow: f32,
 }
+
+fn default_feather() -> f32 { 4.0 }
+fn default_grow() -> f32 { 2.0 }
 
 impl Default for BrushSettings {
     fn default() -> Self {
@@ -29,6 +50,9 @@ impl Default for BrushSettings {
             strength: 1.0,
             mode: BrushMode::Subtract,
             shape: BrushShape::Circle,
+            inpaint_sharpen: 0.6,
+            inpaint_feather: default_feather(),
+            inpaint_grow: default_grow(),
         }
     }
 }

@@ -29,6 +29,16 @@ pub enum ModelKind {
     BiRefNetLite,
 }
 
+impl From<ModelKind> for prunr_models::ModelId {
+    fn from(kind: ModelKind) -> Self {
+        match kind {
+            ModelKind::Silueta => prunr_models::ModelId::Silueta,
+            ModelKind::U2net => prunr_models::ModelId::U2net,
+            ModelKind::BiRefNetLite => prunr_models::ModelId::BiRefNetLite,
+        }
+    }
+}
+
 /// Line extraction mode. Determines which engines the pipeline uses.
 ///
 /// `#[serde(alias = ...)]` preserves backward compatibility with v1 settings
