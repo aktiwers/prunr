@@ -13,7 +13,20 @@ use super::settings::Settings;
 use super::state::AppState;
 use super::theme;
 use super::worker::{WorkerMessage, WorkerResult, spawn_worker};
-use super::views::{adjustments_toolbar, canvas, cli_help, pipeline_flow, settings, shortcuts, sidebar, statusbar, toolbar};
+use super::views::{adjustments_toolbar, canvas, cli_help, model_store, pipeline_flow, settings, shortcuts, sidebar, statusbar, toolbar};
+
+/// Days the user is left alone after dismissing the first-launch
+/// runtime prompt. 14 picked to balance "don't nag" with "remind on a
+/// reasonable cadence as the SD experience improves."
+const RUNTIME_PROMPT_SNOOZE_DAYS: i64 = 14;
+
+/// Replaced wholesale (never mutated in place) so the borrow checker
+/// stays happy with the receiver living in the struct.
+pub(crate) struct RuntimeInstallProgress {
+    pub(crate) runtime: crate::runtime_install::RuntimeId,
+    pub(crate) rx: mpsc::Receiver<crate::runtime_install::InstallEvent>,
+    pub(crate) last_event: crate::runtime_install::InstallEvent,
+}
 
 pub struct PrunrApp {
     // State
@@ -49,6 +62,7 @@ pub struct PrunrApp {
 
     pub(crate) zoom_state: super::zoom_state::ZoomState,
     pub(crate) brush_state: super::brush_state::BrushState,
+    pub(crate) download_manager: super::download_manager::DownloadManager,
 
     // Before/After toggle
     pub(crate) show_original: bool,
@@ -68,6 +82,23 @@ pub struct PrunrApp {
     /// Timestamp when settings was last opened (for click-outside debounce)
     pub(crate) settings_opened_at: f64,
     pub(crate) settings: Settings,
+
+    pub(crate) model_store: Option<super::views::adjustments_toolbar::ModelStoreRequest>,
+    /// When `Some(id)`, the license-acceptance dialog is open for that
+    /// model. Set by Model Store's Download click for any descriptor
+    /// where `requires_license_acceptance() && !has_accepted_license`;
+    /// cleared on Accept (then `start_download`) or Cancel.
+    pub(crate) pending_license_request: Option<prunr_models::ModelId>,
+    /// Upgrade path: saved settings may reference a model that's now
+    /// OnDemand and not installed. Shown once, then `take()`d.
+    pub(crate) pending_onboarding_toast: Option<String>,
+
+    pub(crate) runtime_install: Option<RuntimeInstallProgress>,
+
+    pub(crate) runtime_prompt: Option<crate::runtime_install::RuntimeId>,
+    /// Once-per-session guard so we don't re-evaluate hardware + snooze
+    /// state every frame after the prompt is dismissed.
+    runtime_prompt_evaluated: bool,
 
     // Canvas fade-in: incremented on every image switch
     pub(crate) canvas_switch_id: u64,
@@ -140,6 +171,17 @@ impl PrunrApp {
         let mut settings = Settings::load();
         settings.active_backend = prunr_core::OrtEngine::detect_active_provider();
 
+        // Phase 17 upgrade path: if the user's saved model is now OnDemand
+        // and the file isn't on disk, queue a one-time toast pointing
+        // them to the Model Store. Bundled-only users see nothing.
+        let onboarding_toast = settings.model.to_model_id()
+            .filter(|id| !prunr_models::is_available(*id))
+            .and_then(prunr_models::descriptor)
+            .map(|d| format!(
+                "{} is now an on-demand download — open the Model Store from the model dropdown.",
+                d.display_name,
+            ));
+
         // Subprocess worker: inference runs in a child process for OOM
         // isolation. Pre-warm a subprocess with the startup config so the
         // first Process click skips the 1–5s model-load cost. Filter-only
@@ -148,7 +190,9 @@ impl PrunrApp {
         let prewarm = Self::initial_processing_config(&settings);
         let (worker_tx, worker_rx) = spawn_worker(worker_ctx, prewarm);
 
-        Self::init_state(settings, super::system_bridge::SystemBridge::new(), worker_tx, worker_rx)
+        let mut app = Self::init_state(settings, super::system_bridge::SystemBridge::new(), worker_tx, worker_rx);
+        app.pending_onboarding_toast = onboarding_toast;
+        app
     }
 
     /// Build the pre-warm subprocess config for startup, or `None` when
@@ -211,12 +255,19 @@ impl PrunrApp {
             pending_copy: false,
             zoom_state: Default::default(),
             brush_state: super::brush_state::BrushState::with_settings(settings.brush),
+            download_manager: super::download_manager::DownloadManager::new(),
             show_original: false,
             prev_title: String::new(),
             batch: super::batch_manager::BatchManager::new(),
             sidebar_hidden: false,
             adjustments_hidden: false,
             show_settings: false,
+            model_store: None,
+            pending_license_request: None,
+            pending_onboarding_toast: None,
+            runtime_install: None,
+            runtime_prompt: None,
+            runtime_prompt_evaluated: false,
             settings_opened_at: 0.0,
             settings,
             canvas_switch_id: 0,
@@ -494,6 +545,126 @@ impl PrunrApp {
         // Unconditional — see canvas::handle_brush_input.
         self.processor.live_preview.mark_tweak(item_id, PreviewKind::Mask);
         self.processor.live_preview.flush(item_id);
+    }
+
+    pub(crate) fn dispatch_inpaint_for_item(&mut self, idx: usize) {
+        let item = &self.batch.items[idx];
+        let item_id = item.id;
+        let Some(correction) = item.mask_correction.as_ref().cloned() else {
+            tracing::debug!(item_id, "inpaint dispatch skipped: no correction");
+            return;
+        };
+        // source_rgba may have been evicted under memory pressure;
+        // rehydrate from the cached DynamicImage.
+        let source = item.source_rgba.as_ref().cloned().or_else(|| {
+            item.source_dyn.as_ref().map(|d| Arc::new(d.to_rgba8()))
+        });
+        let Some(source) = source else {
+            tracing::warn!(item_id, "inpaint dispatch skipped: source RGBA unavailable");
+            return;
+        };
+        let bs = self.brush_state.settings();
+        let backend = self.settings.model.to_model_id()
+            .unwrap_or(prunr_models::ModelId::LaMaFp32);
+        tracing::info!(item_id, ?backend, "inpaint stroke committed; dispatching");
+        let tuning = super::processor::InpaintTuning {
+            sharpen: bs.inpaint_sharpen,
+            feather_px: bs.inpaint_feather,
+            grow_px: bs.inpaint_grow,
+            backend,
+        };
+        self.processor.dispatch_inpaint(item_id, source, correction, tuning);
+    }
+
+    fn pump_inpaint_results(&mut self, ctx: &egui::Context) {
+        let results = self.processor.drain_inpaint_results();
+        if results.is_empty() {
+            return;
+        }
+        let tex_prep_tx = self.batch.bg_io.tex_prep_tx.clone();
+        let switch = self.result_switch_id;
+        for r in results {
+            // Keep old texture visible until tex_prep lands so the canvas
+            // doesn't flash empty for one frame between RGBA arriving and
+            // GPU upload finishing.
+            let (item_id, source, result_rgba) = {
+                let Some(item) = self.batch.find_by_id_mut(r.item_id) else { continue };
+                let new_rgba = Arc::new(r.rgba);
+                item.result_rgba = Some(new_rgba.clone());
+                if item.status == BatchStatus::Pending {
+                    item.status = BatchStatus::Done;
+                }
+                item.result_tex_pending = true;
+                item.thumb_pending = true;
+                Self::spawn_tex_prep(
+                    new_rgba.clone(), item.id, format!("inpaint_{}_{}", item.id, switch),
+                    true, tex_prep_tx.clone(), ctx.clone(),
+                );
+                (item.id, item.source.clone(), Some(new_rgba))
+            };
+            self.batch.request_thumbnail(item_id, &source, result_rgba.as_ref());
+        }
+        ctx.request_repaint();
+    }
+
+    pub(crate) fn maybe_evaluate_runtime_prompt(&mut self) {
+        if self.runtime_prompt_evaluated { return; }
+        self.runtime_prompt_evaluated = true;
+        use crate::runtime_install::RuntimeId;
+        let rt = RuntimeId::OpenVino;
+        let profile = crate::hardware::profile();
+        if !profile.recommends_openvino() { return; }
+        if rt.is_installed() { return; }
+        if self.settings.is_runtime_prompt_snoozed(rt) { return; }
+        self.runtime_prompt = Some(rt);
+    }
+
+    pub(crate) fn pump_runtime_install(&mut self, ctx: &egui::Context) {
+        use crate::runtime_install::InstallEvent;
+        let Some(progress) = self.runtime_install.as_mut() else { return };
+        while let Ok(event) = progress.rx.try_recv() {
+            progress.last_event = event.clone();
+            match event {
+                InstallEvent::Done { .. } => {
+                    let name = progress.runtime.display_name();
+                    self.toasts.success(format!("{name} installed"));
+                    self.runtime_install = None;
+                    return;
+                }
+                InstallEvent::Failed { error } => {
+                    let name = progress.runtime.display_name();
+                    self.toasts.error(format!("{name} install failed: {error}"));
+                    self.runtime_install = None;
+                    return;
+                }
+                _ => {}
+            }
+        }
+        ctx.request_repaint();
+    }
+
+    fn pump_download_manager(&mut self, ctx: &egui::Context) {
+        let events = self.download_manager.pump();
+        if events.is_empty() {
+            return;
+        }
+        for event in events {
+            use super::download_manager::DownloadEvent;
+            match event {
+                DownloadEvent::Complete { id } => {
+                    let name = prunr_models::descriptor(id)
+                        .map_or("Model", |d| d.display_name);
+                    self.toasts.success(format!("{name} ready"));
+                }
+                DownloadEvent::Failed { id, error, .. } => {
+                    let name = prunr_models::descriptor(id)
+                        .map_or("Model", |d| d.display_name);
+                    self.toasts.error(format!("{name} download failed: {error}"));
+                }
+                DownloadEvent::Progress { .. } | DownloadEvent::Verifying { .. } => {}
+            }
+        }
+        ctx.request_repaint();
     }
 
     /// Catch any drift between the active item's `applied_recipe.mask`
@@ -1350,6 +1521,12 @@ impl PrunrApp {
     /// Called once per frame at the start of `ui()` so the current frame renders
     /// with the newest available results.
     fn pump_live_preview(&mut self, ctx: &egui::Context) {
+        if let Some(msg) = self.pending_onboarding_toast.take() {
+            self.toasts.info(msg);
+        }
+        self.pump_inpaint_results(ctx);
+        self.pump_download_manager(ctx);
+        self.pump_runtime_install(ctx);
         self.recipe_drift_tripwire();
 
         // Dispatch phase: tick() invokes the closure for each item whose
@@ -2365,6 +2542,9 @@ impl PrunrApp {
         if toolbar_change.brush_settings_committed {
             self.settings.save();
         }
+        if let Some(req) = toolbar_change.open_model_store {
+            self.model_store = Some(req);
+        }
 
         self.batch.items[idx].apply_cache_impact(toolbar_change.cache_impact);
 
@@ -2484,6 +2664,43 @@ impl PrunrApp {
         }
         if self.show_settings {
             settings::render(ctx, self);
+        }
+        if self.model_store.is_some() && model_store::render(ctx, self) {
+            self.model_store = None;
+        }
+        if let Some(id) = self.pending_license_request {
+            let (close, accepted) = model_store::render_license_dialog(ctx, id);
+            if accepted {
+                self.settings.accept_license(id);
+                self.download_manager.start_download(id);
+                self.pending_license_request = None;
+            } else if close {
+                self.pending_license_request = None;
+            }
+        }
+        self.maybe_evaluate_runtime_prompt();
+        if let Some(rt) = self.runtime_prompt {
+            use super::views::runtime_prompt::{RuntimePromptAction, render_runtime_prompt};
+            if let Some(action) = render_runtime_prompt(ctx, rt) {
+                self.runtime_prompt = None;
+                match action {
+                    RuntimePromptAction::Install => {
+                        let rx = crate::runtime_install::start_install(rt);
+                        self.runtime_install = Some(RuntimeInstallProgress {
+                            runtime: rt,
+                            rx,
+                            last_event: crate::runtime_install::InstallEvent::Preparing,
+                        });
+                    }
+                    RuntimePromptAction::NotNow => {
+                        self.settings.snooze_runtime_prompt(rt, RUNTIME_PROMPT_SNOOZE_DAYS);
+                    }
+                    RuntimePromptAction::OpenSettings => {
+                        self.show_settings = true;
+                        self.settings_opened_at = ctx.input(|i| i.time);
+                    }
+                }
+            }
         }
         // Toasts — rendered last as foreground overlay.
         self.toasts.show(ctx);

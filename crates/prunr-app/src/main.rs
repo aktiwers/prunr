@@ -48,6 +48,22 @@ fn main() {
 
     init_tracing();
 
+    if cli.doctor {
+        cli::run_doctor();
+        std::process::exit(0);
+    }
+
+    if cli.clear_ep_cache {
+        let n = prunr_core::ep_compat::clear();
+        println!("Cleared {n} cached EP failure entr{}", if n == 1 { "y" } else { "ies" });
+        std::process::exit(0);
+    }
+
+    if let Err(e) = prunr_app::ort_runtime::init() {
+        tracing::error!(%e, "ORT runtime init failed");
+        std::process::exit(2);
+    }
+
     if cli.worker {
         worker_process::run_worker();
     }

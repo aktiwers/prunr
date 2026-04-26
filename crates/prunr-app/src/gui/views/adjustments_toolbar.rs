@@ -78,6 +78,15 @@ pub struct ToolbarChange {
     pub clear_correction_requested: bool,
     /// Brush popover settled a change AND `app_settings.brush` was synced.
     pub brush_settings_committed: bool,
+    /// Set when the user clicked "More models…" or a not-yet-installed
+    /// dropdown entry. `filter = None` means "show everything"; the
+    /// dropdown's not-installed click pre-filters to the entry's category.
+    pub open_model_store: Option<ModelStoreRequest>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ModelStoreRequest {
+    pub filter: Option<prunr_models::ModelCategory>,
 }
 
 impl Default for ToolbarChange {
@@ -94,6 +103,7 @@ impl Default for ToolbarChange {
             render_repaint: false,
             clear_correction_requested: false,
             brush_settings_committed: false,
+            open_model_store: None,
         }
     }
 }
@@ -185,9 +195,22 @@ pub(crate) fn render(
         // Inpaint mode: paint is the only input — auto-enable brush so
         // the user doesn't have to click two buttons. Settings stays
         // pinned subtract-equivalent (mode picker is hidden in the
-        // popover anyway when Inpaint is active).
-        if change.model_changed && app_settings.model.is_inpaint() && !brush_state.is_enabled() {
-            brush_state.toggle();
+        // popover anyway when Inpaint is active). Also pre-warm the
+        // LaMa session in the background so the first stroke doesn't
+        // pay the 5-10s zstd-decompress + ORT-session-build cost.
+        if change.model_changed && app_settings.model.is_inpaint() {
+            if !brush_state.is_enabled() {
+                brush_state.toggle();
+            }
+            // Pre-warm the specific backend the user selected (LaMa vs
+            // Big-LaMa have separate sessions in the per-id cache).
+            if let Some(id) = app_settings.model.to_model_id() {
+                rayon::spawn(move || {
+                    if let Err(e) = prunr_core::inpaint::prewarm(id) {
+                        tracing::warn!(?id, %e, "Inpaint prewarm failed");
+                    }
+                });
+            }
         }
 
         ui.add_enabled_ui(mask_active, |ui| {
@@ -990,7 +1013,9 @@ fn render_model_dropdown(
         vis.widgets.noninteractive.fg_stroke.color = theme::TEXT_SECONDARY;
 
         ui.spacing_mut().interact_size.y = theme::CHIP_HEIGHT;
-        let selected_text = if mask_active {
+        // Inpaint doesn't use seg ⇒ mask_active is false, but it's not
+        // "bypassed" — it's the Eraser model. Show the model name.
+        let selected_text = if mask_active || app_settings.model.is_inpaint() {
             model_label(app_settings.model, true)
         } else {
             format!("{}  Bypassed", ICON_BLOCK.codepoint)
@@ -1000,29 +1025,57 @@ fn render_model_dropdown(
                 RichText::new(selected_text)
                     .color(theme::TEXT_PRIMARY),
             )
+            .height(420.0)
             .show_ui(ui, |ui| {
                 ui.label(RichText::new("Models").strong().color(theme::TEXT_PRIMARY));
                 ui.add_space(theme::SPACE_XS);
                 ui.separator();
                 ui.add_space(theme::SPACE_XS);
-                for variant in SettingsModel::ALL {
-                    // Visual break before the `No model` entry — it's a
-                    // different class of choice (filter-only, no bg
-                    // removal) and shouldn't read as just another model.
-                    if variant == SettingsModel::None {
-                        ui.separator();
-                    }
-                    ui.selectable_value(
+                // Filter to installed models only — `None` (filter-only)
+                // and Bundled descriptors are always available; OnDemand
+                // entries appear only after the user has downloaded them.
+                // `None` is pinned last regardless of position in `ALL`.
+                let installed: Vec<SettingsModel> = SettingsModel::ALL.iter()
+                    .copied()
+                    .filter(|v| *v != SettingsModel::None)
+                    .filter(|v| v.to_model_id().is_none_or(prunr_models::is_available))
+                    .collect();
+                for variant in &installed {
+                    let model_id = variant.to_model_id();
+                    let desc = model_id.and_then(prunr_models::descriptor);
+                    let advisory = desc.and_then(|d| d.hardware_advisory(&app_settings.active_backend));
+                    let resp = ui.selectable_value(
                         &mut app_settings.model,
-                        variant,
-                        RichText::new(model_label(variant, false))
+                        *variant,
+                        RichText::new(model_label(*variant, false))
                             .color(theme::TEXT_PRIMARY),
                     );
+                    if let Some(tip) = advisory {
+                        resp.on_hover_text(tip);
+                    }
+                }
+                ui.separator();
+                ui.selectable_value(
+                    &mut app_settings.model,
+                    SettingsModel::None,
+                    RichText::new(model_label(SettingsModel::None, false))
+                        .color(theme::TEXT_PRIMARY),
+                );
+                ui.separator();
+                if ui.button(
+                    RichText::new("More models…").color(theme::TEXT_PRIMARY),
+                ).clicked() {
+                    change.open_model_store = Some(ModelStoreRequest::default());
                 }
             })
             .response
             .on_hover_ui(|ui| {
-                let (heading, body) = if mask_active {
+                let (heading, body) = if app_settings.model.is_inpaint() {
+                    (
+                        "Eraser (LaMa inpaint)",
+                        "Object-removal mode. Paint over an unwanted area with the brush; LaMa fills it in. Brush is auto-enabled in this mode.",
+                    )
+                } else if mask_active {
                     (
                         "Segmentation model",
                         "Which AI model extracts the subject. Trade quality, speed, and memory footprint — per-row labels show each option's position on those three axes.",

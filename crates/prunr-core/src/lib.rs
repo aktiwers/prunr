@@ -11,6 +11,8 @@ pub mod recipe;
 pub mod brush;
 pub mod math;
 pub mod inpaint;
+pub mod inpaint_sd;
+pub mod ep_compat;
 
 pub use engine::{InferenceEngine, OrtEngine};
 pub use recipe::{ProcessingRecipe, InferenceRecipe, EdgeRecipe, MaskRecipe, CompositeRecipe, RequiredTier, resolve_tier};

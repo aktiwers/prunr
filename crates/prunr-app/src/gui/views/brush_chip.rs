@@ -65,11 +65,38 @@ pub(super) fn render(
                 );
                 outcome.committed |= h.commit;
                 ui.add_space(4.0);
-                let st = chip::slider_row_f32(
-                    ui, "Strength", &mut s.strength, 0.0..=1.0, false,
-                    |v| format!("{:.0}%", v * 100.0),
-                );
-                outcome.committed |= st.commit;
+                if !is_inpaint_mode {
+                    // Strength is meaningful for the seg pipeline (multiplicative
+                    // mask correction). For Eraser the mask is binarized at the
+                    // LaMa boundary, so Strength has no effect — hide it.
+                    let st = chip::slider_row_f32(
+                        ui, "Strength", &mut s.strength, 0.0..=1.0, false,
+                        |v| format!("{:.0}%", v * 100.0),
+                    );
+                    outcome.committed |= st.commit;
+                } else {
+                    // Eraser-specific knobs. Live-update on release like
+                    // every other slider so the user sees the diff.
+                    ui.add_space(4.0);
+                    let g = chip::slider_row_f32(
+                        ui, "Mask grow", &mut s.inpaint_grow, -16.0..=16.0, false,
+                        |v| format!("{v:+.0} px"),
+                    );
+                    outcome.committed |= g.commit;
+                    ui.add_space(4.0);
+                    let f = chip::slider_row_f32(
+                        ui, "Feather", &mut s.inpaint_feather, 0.0..=32.0, false,
+                        |v| format!("{v:.0} px"),
+                    );
+                    outcome.committed |= f.commit;
+                    ui.add_space(4.0);
+                    // Sharpen displays as 0-100% on a 0-2 internal range.
+                    let sh = chip::slider_row_f32(
+                        ui, "Sharpen", &mut s.inpaint_sharpen, 0.0..=2.0, false,
+                        |v| format!("{:.0}%", v * 50.0),
+                    );
+                    outcome.committed |= sh.commit;
+                }
                 if !is_inpaint_mode {
                     // Inpaint has only one direction (paint = erase). Hide
                     // the toggle so the user doesn't see a knob with no

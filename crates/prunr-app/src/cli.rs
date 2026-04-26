@@ -93,12 +93,36 @@ pub struct Cli {
     #[arg(long, hide = true)]
     pub worker: bool,
 
+    /// Print a diagnostic dump (hardware profile, ORT runtime status,
+    /// installed models, paths) and exit. Paste the output into bug
+    /// reports when hardware acceleration misbehaves.
+    #[arg(long)]
+    pub doctor: bool,
+
+    /// Clear the persistent EP × model compatibility cache. Use after
+    /// updating drivers / OpenVINO Runtime to re-discover which EPs
+    /// can actually run each model on this machine.
+    #[arg(long)]
+    pub clear_ep_cache: bool,
+
     /// Chain mode: process the previous result instead of the original.
     /// Only meaningful in multi-pass scripting workflows where the user
     /// runs prunr multiple times on the same file. For a single invocation
     /// this flag has no effect since there is no previous result.
     #[arg(long)]
     pub chain: bool,
+
+    /// Object removal (Eraser) mode. Reads a binary mask from --mask
+    /// (white = inpaint, black = keep) and runs LaMa to fill in the
+    /// masked region. Output saved as {stem}_erased.png by default.
+    #[arg(long)]
+    pub inpaint: bool,
+
+    /// Path to the inpaint mask image. Required with --inpaint.
+    /// Any image format; pixels >128 in the first channel are treated
+    /// as "inpaint here". Mask must match the input image's dimensions.
+    #[arg(long)]
+    pub mask: Option<PathBuf>,
 }
 
 /// Model selection
@@ -190,8 +214,94 @@ pub fn run_remove(args: &Cli) -> i32 {
         }
     }
 
+    if args.inpaint {
+        return run_inpaint(args);
+    }
+
     // All processing uses subprocess isolation for OOM protection
     run_batch(args)
+}
+
+/// Eraser mode: load image + mask, run LaMa, save inpainted result.
+/// Single-file only for now — batch eraser via per-image mask paths
+/// would need a `--mask-dir` flag (not yet wired).
+fn run_inpaint(args: &Cli) -> i32 {
+    if args.inputs.len() != 1 {
+        eprintln!("error: --inpaint accepts exactly one input image (got {})", args.inputs.len());
+        return 1;
+    }
+    let input = &args.inputs[0];
+    let Some(mask_path) = args.mask.as_ref() else {
+        eprintln!("error: --inpaint requires --mask <path>");
+        return 1;
+    };
+
+    let out_path = output_path_with_suffix(input, &args.output, false, "_erased.png");
+    if let Err(e) = check_overwrite(&out_path, args.force) {
+        eprintln!("error: {e}");
+        return 1;
+    }
+
+    let img = match image::open(input) {
+        Ok(i) => i.into_rgba8(),
+        Err(e) => {
+            eprintln!("error: failed to read {}: {e}", input.display());
+            return 1;
+        }
+    };
+    let mask = match image::open(mask_path) {
+        Ok(i) => i.into_luma8(),
+        Err(e) => {
+            eprintln!("error: failed to read mask {}: {e}", mask_path.display());
+            return 1;
+        }
+    };
+    if img.dimensions() != mask.dimensions() {
+        eprintln!(
+            "error: mask {:?} dimensions don't match image {:?}",
+            mask.dimensions(), img.dimensions()
+        );
+        return 1;
+    }
+
+    if !args.quiet {
+        eprintln!("Inpainting {} (mask: {})...", input.display(), mask_path.display());
+    }
+    // CLI defaults to LaMaFp32 — Big-LaMa selection from the CLI is
+    // tracked in PLAN 17-10 (would add `--inpaint-backend big-lama`).
+    let result = match prunr_core::inpaint::process_inpaint(&img, &mask, prunr_models::ModelId::LaMaFp32) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("error: inpaint failed: {e}");
+            return 1;
+        }
+    };
+    if let Err(e) = result.save(&out_path) {
+        eprintln!("error: failed to save {}: {e}", out_path.display());
+        return 1;
+    }
+    if !args.quiet {
+        eprintln!("Saved {}", out_path.display());
+    }
+    0
+}
+
+/// Variant of `output_path` that lets callers override the `_nobg.png`
+/// suffix. Eraser writes `_erased.png`; the BG-removal path keeps its
+/// existing default.
+fn output_path_with_suffix(
+    input: &std::path::Path,
+    output: &Option<PathBuf>,
+    is_batch: bool,
+    suffix: &str,
+) -> std::path::PathBuf {
+    let stem = input.file_stem().unwrap_or_default().to_string_lossy();
+    let name = format!("{stem}{suffix}");
+    match output {
+        Some(out) if is_batch || out.is_dir() => out.join(name),
+        Some(out) => out.clone(),
+        None => input.with_file_name(name),
+    }
 }
 
 // ── Output path helpers ──────────────────────────────────────────────────────
@@ -201,13 +311,7 @@ pub fn run_remove(args: &Cli) -> i32 {
 /// Single mode with -o file.png: use that path directly.
 /// No -o: write alongside input as {input_dir}/{stem}_nobg.png.
 fn output_path(input: &std::path::Path, output: &Option<PathBuf>, is_batch: bool) -> std::path::PathBuf {
-    let stem = input.file_stem().unwrap_or_default().to_string_lossy();
-    let nobg_name = format!("{stem}_nobg.png");
-    match output {
-        Some(out) if is_batch || out.is_dir() => out.join(nobg_name),
-        Some(out) => out.clone(),
-        None => input.with_file_name(nobg_name),
-    }
+    output_path_with_suffix(input, output, is_batch, "_nobg.png")
 }
 
 /// Check if output exists and --force is not set. Returns Err with message if blocked.
@@ -656,4 +760,84 @@ fn run_batch_subprocess(
     results.into_iter()
         .map(|r| r.unwrap_or_else(|| Err(CoreError::Model("Not processed".into()))))
         .collect()
+}
+
+/// `prunr --doctor`: dump everything a support ticket would ask for.
+/// Runs before `ort::init_from`, so a missing/broken runtime shows up
+/// here instead of aborting the whole process.
+pub fn run_doctor() {
+    let p = prunr_app::hardware::profile();
+    let diag = prunr_app::ort_runtime::diagnose();
+
+    println!("Prunr Diagnostic Report");
+    println!("{}", "=".repeat(23));
+    println!();
+    println!("Version: {}", env!("CARGO_PKG_VERSION"));
+    println!("Build:   {}", if cfg!(debug_assertions) { "debug" } else { "release" });
+    println!("OS:      {} {}", p.os, p.arch);
+    println!();
+
+    section("Hardware");
+    println!("CPU vendor:  {}", p.cpu_vendor);
+    println!("CPU brand:   {}", p.cpu_brand);
+    println!("dGPU:        {}", p.dgpu.map_or("None".to_string(), |g| g.to_string()));
+    println!("iGPU:        {}", p.igpu.map_or("None".to_string(), |g| g.to_string()));
+    println!("Recommends OpenVINO: {}", p.recommends_openvino());
+    println!("Recommends ROCm:     {}", p.recommends_rocm());
+    println!();
+
+    section("ONNX Runtime");
+    println!("ORT_DYLIB_PATH: {}", diag.env_path.as_ref()
+        .map_or("(unset)".to_string(), |p| p.display().to_string()));
+    match (&diag.store_root, diag.store_entries.is_empty()) {
+        (None, _) => println!("Runtime store:  (not present)"),
+        (Some(root), true) => println!("Runtime store:  {} (empty)", root.display()),
+        (Some(root), false) => {
+            println!("Runtime store:  {}", root.display());
+            for (name, has_dylib) in &diag.store_entries {
+                let mark = if *has_dylib { "OK" } else { "MISSING" };
+                println!("  - {name} [{mark}]");
+            }
+        }
+    }
+    if let Some((path, exists)) = &diag.bundled {
+        let mark = if *exists { "OK" } else { "(absent)" };
+        println!("Bundled:        {} {mark}", path.display());
+    }
+    match &diag.resolved {
+        Some((p, src)) => println!("Active source:  {src} → {}", p.display()),
+        None => println!("Active source:  NONE — `prunr` will refuse to start without --doctor"),
+    }
+    println!();
+
+    section("Models");
+    for desc in prunr_models::REGISTRY {
+        let avail = if prunr_models::is_available(desc.id) { "installed" } else { "not installed" };
+        println!("  {:<32} {:<10} {avail}",
+            desc.display_name, desc.source.kind_label());
+    }
+    println!();
+
+    section("Paths");
+    println!("Data dir:     {}", path_or_unknown(prunr_models::data_dir()));
+    println!("Models dir:   {}", path_or_unknown(prunr_models::on_demand_dir()));
+    println!("Settings:     {}", path_or_unknown(
+        dirs::config_dir().map(|d| d.join("prunr").join("settings.json"))));
+    println!();
+
+    section("Environment");
+    for var in ["RUST_LOG", "ORT_DYLIB_PATH", "PRUNR_DEBUG_LOG"] {
+        println!("  {var}: {}",
+            std::env::var(var).unwrap_or_else(|_| "(unset)".to_string()));
+    }
+}
+
+fn section(title: &str) {
+    println!("{title}");
+    println!("{}", "-".repeat(title.len()));
+}
+
+fn path_or_unknown(p: Option<std::path::PathBuf>) -> String {
+    p.map_or("(unresolvable on this platform)".to_string(),
+        |p| p.display().to_string())
 }

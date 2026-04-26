@@ -118,7 +118,7 @@ Each layer has its own state-ownership rules. The **coordinator pattern** in the
 | Layer                       | Location                                 | Convention                                             |
 |-----------------------------|------------------------------------------|--------------------------------------------------------|
 | Core inference pipeline     | `crates/prunr-core/src/`                 | Pure functions; caller-owned state. See `## prunr-core conventions`. |
-| Model blobs                 | `crates/prunr-models/src/`               | Static `&[u8]` + `OnceLock<Vec<u8>>`; no mutable state |
+| Model blobs + registry      | `crates/prunr-models/src/`               | `REGISTRY` of `ModelDescriptor`; `Bundled` via `include_bytes!` + `OnceLock<Vec<u8>>`, `OnDemand` via user data dir. Entry: `resolve_bytes(id)`. No deps on other workspace crates. |
 | Subprocess child            | `crates/prunr-app/src/worker_process.rs` | One loop + IPC-event match; stateless by design        |
 | Subprocess IPC (parent)     | `crates/prunr-app/src/subprocess/`       | `SubprocessManager` owns child handle + event queue; new wire variants earn bincode round-trip tests (see `## Test expectations`) |
 | CLI frontend                | `crates/prunr-app/src/cli.rs`            | Thin wrapper over core + subprocess (`eprintln!` allowed for user-facing output — see `## Logging`) |
@@ -135,6 +135,7 @@ Business state lives in its own module with a clear owner:
 - Processing pipeline (worker channels, admission, live preview, dispatch state) → `Processor`
 - Result history + preset undo → `HistoryManager` (unit struct; methods on `&mut BatchItem`)
 - Drag-export lifecycle → `DragExportState`
+- On-demand model downloads → `DownloadManager` (Phase 17)
 
 Before adding a new `PrunrApp` field, ask: which coordinator owns this domain? Default-to-no.
 
@@ -152,6 +153,7 @@ Before adding a new field, method, or channel in the GUI layer, find the matchin
 | Live-preview tick / debounce / cancellation         | `Processor`                                        |
 | Result history, preset undo/redo                    | `HistoryManager` (methods on `&mut BatchItem`)     |
 | Drag-out state (active, items set, pending)         | `DragExportState`                                  |
+| Model download lifecycle (state, queue, progress)   | `DownloadManager`                                  |
 | Save-as dialog, clipboard, file picker              | `PrunrApp` (Phase 11 → `SystemBridge`)             |
 | Canvas zoom/pan state                               | `PrunrApp.zoom_state`                              |
 | Brush tool toggle / settings / active stroke / trail | `PrunrApp.brush_state` (see `BrushState`)         |
@@ -193,8 +195,18 @@ Row 2 / 3 chip rendering has its own set of pub(super) helpers in `chip.rs`. Bef
 | Popover attached to a chip button              | `chip::popup_for(ui, id, &resp, body)`       |
 | Strong-headline tooltip on any response        | `chip::chip_tooltip(resp, label, body)`      |
 | Slider row without a chip wrapper              | `chip::slider_row_f32` / `slider_row_u32`    |
+| Centred non-resizable modal (backdrop + close) | `theme::standard_modal_window(ctx, id, title, [w, h], body)` — returns `bool` |
+| Format byte counts for display                  | `views::format_byte_size(bytes)` |
 
 Any new chip-shaped control (e.g. the Scale chip in `lines_popover.rs`) uses these three primitives — matches the visual rhythm of every other chip and keeps stroke / rounding / padding in one file.
+
+### View → app intent pattern (Phase 17)
+
+Views shouldn't poke `PrunrApp` fields directly. Return an intent on the corresponding `*Change` struct (e.g. `ToolbarChange.open_model_store: Option<ModelStoreRequest>`) and let `apply_*_change` decide what to do. Same shape for any future "view requests app open a modal / fire a coordinator action" — `Option<Request>` where `Request` carries the args.
+
+### First-frame one-shot toasts (Phase 17)
+
+If you need to show a toast message produced during construction (e.g. `Self::new`), don't try to push to `toasts` directly — frame 0 of egui isn't ready. Use a `pending_*: Option<String>` field, take it in the first `pump_*` call: `if let Some(msg) = self.pending_x.take() { self.toasts.info(msg); }`.
 
 ### Subprocess helper menu
 

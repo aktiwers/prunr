@@ -12,6 +12,8 @@ pub mod adjustments_toolbar;
 pub mod brush_chip;
 pub mod brush_overlay;
 pub mod pipeline_flow;
+pub mod model_store;
+pub mod runtime_prompt;
 
 use egui::RichText;
 use egui_material_icons::icons::*;
@@ -46,6 +48,32 @@ pub fn modifier_key() -> &'static str {
     if cfg!(target_os = "macos") { "Cmd" } else { "Ctrl" }
 }
 
+/// Format a byte count for human display. Used by the Model Store
+/// (download progress, disk-usage footer) and stays here so future
+/// callers don't reinvent it.
+pub fn format_byte_size(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = 1024 * 1024;
+    const GB: u64 = 1024 * MB;
+    if bytes >= GB { format!("{:.2} GB", bytes as f64 / GB as f64) }
+    else if bytes >= MB { format!("{:.0} MB", bytes as f64 / MB as f64) }
+    else if bytes >= KB { format!("{} KB", bytes / KB) }
+    else { format!("{bytes} B") }
+}
+
+#[cfg(test)]
+mod format_byte_size_tests {
+    use super::format_byte_size;
+    #[test]
+    fn formats_units_correctly() {
+        assert_eq!(format_byte_size(0), "0 B");
+        assert_eq!(format_byte_size(512), "512 B");
+        assert_eq!(format_byte_size(2048), "2 KB");
+        assert_eq!(format_byte_size(50 * 1024 * 1024), "50 MB");
+        assert_eq!(format_byte_size(2 * 1024 * 1024 * 1024), "2.00 GB");
+    }
+}
+
 /// Model display name (no icon).
 pub fn model_name(model: SettingsModel) -> &'static str {
     match model {
@@ -53,7 +81,10 @@ pub fn model_name(model: SettingsModel) -> &'static str {
         SettingsModel::U2net => "U2Net",
         SettingsModel::BiRefNetLite => "BiRefNet",
         SettingsModel::None => "No model",
-        SettingsModel::Inpaint => "Eraser",
+        SettingsModel::Inpaint => "Eraser (LaMa)",
+        SettingsModel::BigInpaint => "Eraser (Big-LaMa)",
+        SettingsModel::MiganInpaint => "Eraser (MI-GAN)",
+        SettingsModel::SdInpaint => "Eraser (SD 1.5)",
     }
 }
 
@@ -64,7 +95,10 @@ pub fn model_label(model: SettingsModel, short: bool) -> String {
         SettingsModel::U2net => (ICON_SMART_TOY.codepoint, "U2Net", "quality", "~170 MB"),
         SettingsModel::BiRefNetLite => (ICON_NEUROLOGY.codepoint, "BiRefNet", "detail", "~214 MB"),
         SettingsModel::None => (ICON_BLOCK.codepoint, "No model", "No background removal", "0 MB"),
-        SettingsModel::Inpaint => (ICON_BRUSH.codepoint, "Eraser", "object removal", "~208 MB"),
+        SettingsModel::Inpaint => (ICON_BRUSH.codepoint, "Eraser (LaMa)", "object removal", "~199 MB"),
+        SettingsModel::BigInpaint => (ICON_BRUSH.codepoint, "Eraser (Big-LaMa)", "sharper fills", "~199 MB"),
+        SettingsModel::MiganInpaint => (ICON_BRUSH.codepoint, "Eraser (MI-GAN)", "compact GAN", "~26 MB"),
+        SettingsModel::SdInpaint => (ICON_BRUSH.codepoint, "Eraser (SD 1.5)", "generative", "~2 GB"),
     };
     if short {
         format!("{icon}  {name}")

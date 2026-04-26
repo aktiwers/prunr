@@ -217,6 +217,18 @@ A safety net (`recipe_drift_tripwire` in `pump_live_preview`) catches drift betw
 
 Per-stroke history lives on `BatchItem.stroke_undo_stack` / `stroke_redo_stack` — bounded at 50 snapshots of `Option<Arc<MaskCorrection>>` (each snapshot is one Arc bump, not a full clone). Ctrl+Z while brush mode is active pops a stroke before falling through to the result-undo handler, so users build up a stroke session non-destructively. The on-screen trail visualization (canvas overlay during drag, popover preview area in the chip) shares one falloff renderer in `gui/views/chip.rs::paint_falloff_{circle,square}` so any tweak to the smoothstep curve shows up in both places at once.
 
+### Eraser (LaMa inpaint)
+
+A separate model entry — `SettingsModel::Inpaint` ("Eraser") — turns the same brush into an object-removal tool. Selecting it auto-enables the brush; the popover hides Add/Subtract because there is no mask to add to or subtract from. The brush grid is allocated at full image resolution (not at model-output resolution like seg-mode), so the painted region maps 1:1 to LaMa's binary mask via `MaskCorrection::to_binary_mask`.
+
+Stroke commit dispatches via `Processor::dispatch_inpaint` onto rayon (in-process, not subprocess) and delivers an `InpaintResult` through an mpsc channel. A per-item generation counter (`inpaint_latest_gen`) discards stale results when a fresh stroke supersedes one mid-flight. `pump_inpaint_results` drains each frame and swaps `result_rgba` + `result_texture` atomically, mirroring `apply_completed_previews`.
+
+The pipeline lives in `prunr-core::inpaint`. The LaMa weights are zstd-embedded (~181 MB compressed) and decompressed on first use, mirroring the seg/edge models. `process_inpaint(image, mask)` empty-mask short-circuits *before* the session-builder step, then walks `plan_tiles` over the image with TILE = 512, OVERLAP = 64. Tile masks that are all-zero skip inference. Surviving tiles run through `LamaSession::run_tile` (one ORT session per process, behind a Mutex — do NOT parallelise tiles, ORT is multi-threaded internally), and contributions feather-blend into a per-pixel f32 accumulator via `tile_compose`'s smoothstep weight. The blend skips unmasked pixels (they keep source byte-identical via the `image.clone()` initial buffer) — float division would otherwise drift unmasked u8 values by 1.
+
+`encode_tile` packs RGBA → NCHW [1, 3, 512, 512] f32 in [0, 1] with zero-padding; `decode_tile` heuristically detects [0, 1] vs [0, 255] output range by sampling the max across all three planes, then writes only inside the mask (unmasked pixels copy from source byte-identical so the feather blend isn't fighting model perturbation). Input names are matched case-insensitively (`image` / `mask` keywords) with positional fallback. The LaMa session is cached in a `OnceLock<Result<_, String>>` so a missing-model failure stays sticky — no repeat 208 MB load attempts.
+
+CPU-only for now; GPU EP support deferred until a measured win justifies the EP-fallback ladder that `OrtEngine` already carries for seg/edge models.
+
 ## Live Preview
 
 Mask and edge tweaks auto-rerun Tier 2 during slider drag. A tweak is debounced ~150 ms; a new tweak on the same item cancels the in-flight one and dispatches a fresh rerun on the rayon pool.
@@ -414,26 +426,36 @@ Inference is split from the threshold-and-composite step so the raw DexiNed tens
 
 ## GPU Execution Providers
 
-```rust
-if cpu_only {
-    CPUExecutionProvider::default()
-        .with_arena_allocator(false)  // lower memory; subprocess handles OOM
-        .build()
-} else {
-    CUDAExecutionProvider::default()
-        .with_arena_extend_strategy(SameAsRequested)
-        .with_cuda_graph(true)
-        .with_tf32(true)
-        .build(),
-    CoreMLExecutionProvider::default()
-        .with_model_cache_dir(coreml_cache_dir())
-        .build(),
-    DirectMLExecutionProvider::default().build(),
-    CPUExecutionProvider::default()
-        .with_arena_allocator(false)
-        .build(),
-}
-```
+EP ladder (per session): `available_gpu_eps()` returns only EPs the loaded `libonnxruntime` actually has compiled in (filtered via `ort::ep::ExecutionProvider::is_available`). The session-build loop iterates this ladder and short-circuits on first success.
+
+| Platform | EPs in ladder (when their libs are present) |
+|---|---|
+| Linux | OpenVINO → CUDA → CPU |
+| Windows | OpenVINO → CUDA → DirectML → CPU |
+| macOS | CoreML → CPU |
+
+OpenVINO ships ahead of CUDA on Linux/Windows because **most non-NVIDIA Linux desktop machines are Intel**; CUDA users have OpenVINO Runtime not installed (`is_available()` returns false), so the ladder falls cleanly to CUDA.
+
+### Per-(model, EP) compatibility filter
+
+Two layers, applied before any session-load attempt:
+
+1. **Static catalog** — `ModelDescriptor.incompatible_eps: &'static [&str]` declared next to each REGISTRY entry. Verified known-bad combos only (e.g. Silueta + OpenVINO fails on graph cycles). Matches the lifecycle of the model — adding a new model already touches REGISTRY, declaring incompatible EPs at the same site has zero extra friction.
+2. **Dynamic cache** — `<data>/prunr/ep_compat.json`, populated when a non-cataloged EP fails on a user's machine. Versioned by `CARGO_PKG_VERSION` so app upgrades invalidate stale entries (loaded ORT may have new capabilities).
+
+Both layers skip the EP entirely instead of paying the failed-load tax. CLI: `prunr --clear-ep-cache` wipes the dynamic cache after upstream changes.
+
+### `load-dynamic` ORT + Runtime Store
+
+The app uses `ort` with the `load-dynamic` feature — no ORT is statically linked at compile time. At startup, `prunr_app::ort_runtime::init()` resolves a `libonnxruntime` from this chain:
+
+1. `ORT_DYLIB_PATH` env var (developer override)
+2. **User Runtime Store**: `<data>/prunr/runtimes/<id>/libonnxruntime.so` — populated on demand via Settings → Hardware install or `cargo xtask install-runtime`
+3. **Bundled fallback**: `<exe>/runtime/libonnxruntime.so` — cargo-dist installer ships a CPU-only ORT here
+
+Each EP-specific Runtime Store entry contains `libonnxruntime.so` (built with that EP) + the EP runtime libs (e.g. OpenVINO bundles `libopenvino.so` + GPU/NPU plugins). Sourced from official PyPI wheels (`onnxruntime-openvino` etc.) — `xtask install-runtime` extracts the relevant `.so`/`.dll` files and renames the versioned `libonnxruntime.so.X.Y.Z` → canonical `libonnxruntime.so` so the resolver picks it up.
+
+Hardware detection (`prunr_app::hardware`) classifies the machine on first launch: CPU vendor + brand via `sysinfo`, GPU vendors via `/sys/class/drm` (Linux), DXGI (Windows, stubbed), IORegistry (macOS, stubbed). The first-launch prompt fires on Intel iGPU machines without OpenVINO installed, with a 14-day snooze on dismiss.
 
 ### Model variants
 
@@ -447,22 +469,15 @@ if cpu_only {
 
 macOS uses FP32 because CoreML silently converts to FP16 internally — feeding our FP16 stacks two conversions, causing precision loss.
 
-### CoreML on macOS — custom ORT build
-
-The pykeio/ort `download-binaries` prebuilt doesn't ship with the CoreML EP enabled, so a vanilla download yields a CoreML-less binary on macOS. Release CI builds ORT from source on the M-series GitHub Actions runner:
-
-- Cloned at the version pinned by the `ort` crate (currently `v1.20.0` for `ort = 2.0.0-rc.12`).
-- Build flags: `--config Release --use_coreml --build_shared_lib --osx_arch arm64`.
-- Cargo override: `ORT_LIB_LOCATION=$PWD/ort-build/MacOS/Release` + `ORT_PREFER_DYNAMIC_LINK=1` so pykeio/ort links against the custom dylib instead of the (CoreML-less) prebuilt.
-- Cached by ORT version. First build ~30 min on cache miss; subsequent restores ~30 sec.
-- The custom dylib is staged into `target/release/` so the existing release-bundling step picks it up unchanged and drops it in `Prunr.app/Contents/Frameworks/`.
-- `.cargo/config.toml` rustflags add `@executable_path/../Frameworks` to the binary's rpath so the bundled `.app` finds the dylib at runtime.
-
-Linux/Windows release builds keep using `download-binaries` — the prebuilt is fine for them.
+When all GPU EPs fail, `new_with_fallback` recurses with `cpu_only=true` so the CPU-targeted INT8 variant gets its turn before falling back to FP32.
 
 ### Model bytes cache
 
 Decompressed ONNX bytes are cached in `OnceLock<Vec<u8>>` per model. Callers receive `&'static [u8]` (zero-copy borrow). Previously every engine creation cloned ~250 MB — now it borrows.
+
+### Diagnostics
+
+`prunr --doctor` dumps the full hardware profile, runtime resolution chain, installed models, and environment. Designed as the first thing to paste into a bug report when hardware acceleration misbehaves.
 
 ## GUI State Machine
 
@@ -526,6 +541,20 @@ User data lives in the platform config dir (`dirs::config_dir()`):
 | `presets/*.json` | `~/.config/prunr/presets/` | `~/Library/Application Support/prunr/presets/` | `%APPDATA%\prunr\presets\` |
 
 `Settings::save()` resolves the path then delegates to a path-injectable `save_to_path` helper, which makes the round-trip tests platform-agnostic. The schema-stability contract is enforced by three unit tests: write+read round-trip preserves persisted fields, the resolved path always lands under `<config_dir>/prunr/`, and `save` mkdir's the parent on first run. `force_cpu` and `active_backend` are `#[serde(skip)]` — machine-state, reset every launch.
+
+## Model Registry & Distribution
+
+Models are declared in a single `prunr_models::REGISTRY` table — `ModelDescriptor { id, display_name, description, category, source, version }`. `source` is either `Bundled` (compiled in via `include_bytes!` + zstd) or `OnDemand { filename, url, sha256, size_mb, license, license_url, source_url }` (downloaded to user data dir on first use).
+
+`resolve_bytes(id) -> Option<Cow<'static, [u8]>>` is the single byte-access entry point. Bundled returns `Cow::Borrowed(&'static [u8])` (zero-copy from the embedded zstd cache); OnDemand reads from disk, returns `Cow::Owned(Vec<u8>)`, or `None` if the file isn't there. `is_available(id)` reports installation state. `OrtEngine::new` and `LamaSession::get` both go through `resolve_bytes` and surface `prunr_models::not_installed_error(id)` ("Open the Model Store…") when the file is missing.
+
+**Default bundle (~370 MB):** Silueta + BiRefNet-lite + DexiNed. **On-demand:** U2Net (~170 MB), LaMa-fp32 (~199 MB). Hosted at `https://github.com/aktiwers/prunr/releases/tag/models-v1` with versioned filenames (`u2net-1.0.0.onnx`, `.sha256` sidecar) and a `manifest.json` listing every model's metadata. Asset URLs are stable forever — old apps keep resolving old URLs.
+
+**Storage** (gitignored, never bundled in installer): `dirs::data_dir() / "prunr" / "models"`. Linux: `~/.local/share/prunr/models/`; macOS: `~/Library/Application Support/prunr/models/`; Windows: `%APPDATA%\prunr\models\`. Dev mode (`--features dev-models`) accepts the unversioned `models/u2net.onnx` produced by `cargo xtask fetch-models` as a fallback so the dev workflow doesn't need the user data dir mirrored.
+
+**`DownloadManager`** coordinator (`gui/download_manager.rs`) — owns per-id `DownloadState`, a 1-active-at-a-time queue, and per-id cancel flags. Atomic write via `<dest>.partial` → SHA verify → `rename`. Transient errors retry with exponential backoff; fatal errors (404, SHA mismatch, user cancel) fail fast.
+
+**Model Store** modal (`gui/views/model_store.rs`) is the single user-facing surface. Pure card-state derivation `card_action(source, is_installed, &DownloadState) -> CardAction` keeps the Store and dropdown agreement testable. Entry point: "More models…" at the bottom of the model dropdown.
 
 ## Temp File Lifecycle
 

@@ -75,6 +75,37 @@ impl MaskCorrection {
     fn dims_match(&self, mask_len: usize) -> bool {
         (self.width as usize) * (self.height as usize) == mask_len
     }
+
+    /// Project the signed-magnitude grid onto a binary `GrayImage` at the
+    /// target image dimensions. Any non-zero cell paints 255; zero cells
+    /// stay 0. Resamples via nearest-neighbour when grid resolution
+    /// differs from the image; the equal-size path runs as a tight
+    /// `cells()`-vs-pixel-buffer pair iteration.
+    pub fn to_binary_mask(&self, target_w: u32, target_h: u32) -> image::GrayImage {
+        let cw = self.width as u32;
+        let ch = self.height as u32;
+        let mut out = image::GrayImage::new(target_w, target_h);
+        if cw == target_w && ch == target_h {
+            for (px, &v) in out.as_mut().iter_mut().zip(self.grid.iter()) {
+                *px = if v != 0 { 255 } else { 0 };
+            }
+            return out;
+        }
+        let cw_us = cw as usize;
+        let buf = out.as_mut();
+        for y in 0..target_h {
+            let gy = ((y as u64 * ch as u64) / target_h as u64) as usize;
+            let row_base = gy * cw_us;
+            let out_row = (y as usize) * (target_w as usize);
+            for x in 0..target_w {
+                let gx = ((x as u64 * cw as u64) / target_w as u64) as usize;
+                if self.grid[row_base + gx] != 0 {
+                    buf[out_row + x as usize] = 255;
+                }
+            }
+        }
+        out
+    }
 }
 
 /// In-place multiplicative correction in normalized [0, 1] mask space.
@@ -258,6 +289,30 @@ mod tests {
         let mut mask = vec![0.5f32; 100];
         apply_correction(&mut mask, &c);
         assert!(mask.iter().all(|&v| v == 0.5));
+    }
+
+    #[test]
+    fn to_binary_mask_marks_painted_cells() {
+        let mut c = MaskCorrection::empty(64, 64);
+        paint_circle(
+            &mut c, 32.0, 32.0, 4.0,
+            Stamp { hardness: 1.0, strength: 1.0, mode: BrushMode::Subtract },
+        );
+        let mask = c.to_binary_mask(64, 64);
+        assert_eq!(mask.get_pixel(32, 32).0[0], 255, "centre of stroke must be 255");
+        assert_eq!(mask.get_pixel(0, 0).0[0], 0, "untouched corner stays 0");
+    }
+
+    #[test]
+    fn to_binary_mask_resizes_to_target() {
+        let mut c = MaskCorrection::empty(32, 32);
+        paint_circle(
+            &mut c, 16.0, 16.0, 4.0,
+            Stamp { hardness: 1.0, strength: 1.0, mode: BrushMode::Subtract },
+        );
+        let mask = c.to_binary_mask(64, 64);
+        assert_eq!(mask.dimensions(), (64, 64));
+        assert_eq!(mask.get_pixel(32, 32).0[0], 255);
     }
 
     #[test]
