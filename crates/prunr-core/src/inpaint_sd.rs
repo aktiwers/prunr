@@ -46,7 +46,8 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use half::f16;
 use image::{GrayImage, RgbaImage};
@@ -77,6 +78,12 @@ const VAE_SCALING_FACTOR: f32 = 0.18215;
 /// IS RAM). Real-world working set on a CPU/iGPU machine: 6-10 GB.
 /// Below 6 GB free we've seen swap thrash freeze testers' machines.
 const SD_CPU_MIN_FREE_RAM_BYTES: u64 = 6 * 1024 * 1024 * 1024;
+/// Idle window after which a cached SD session bundle is dropped to
+/// release its ~4-6 GB resident set back to the OS. Trade-off: rebuilding
+/// pays the 10-30s session-build cost on the next stroke; in exchange a
+/// user who finished erasing 5 minutes ago doesn't carry the weights for
+/// the rest of the session.
+const SD_IDLE_RELEASE_SECS: u64 = 300;
 /// CLIP-ViT-L/14 token sequence length used by SD 1.5.
 const CLIP_SEQ_LEN: usize = 77;
 /// CLIP-ViT-L/14 BOS / EOS / pad ids — same value for EOS and pad in
@@ -171,13 +178,15 @@ pub fn process_inpaint_with(
         )));
     }
 
+    // Local Arc keeps the bundle alive for `run_one_tile` even if the
+    // idle sweep drops the cache's clone mid-call.
     let bundle = SdSession::get(id)?;
     let (img_w, img_h) = image.dimensions();
     let (cx, cy, cw, ch) = compute_sd_crop(&bbox, img_w, img_h);
     let cropped_img = image::imageops::crop_imm(image, cx, cy, cw, ch).to_image();
     let cropped_mask = image::imageops::crop_imm(mask, cx, cy, cw, ch).to_image();
 
-    let painted = match run_one_tile(bundle, &cropped_img, &cropped_mask, &req) {
+    let painted = match run_one_tile(&bundle, &cropped_img, &cropped_mask, &req) {
         Ok(p) => p,
         Err(e) => {
             tracing::error!(%e, "SD inference failed; leaving image unchanged");
@@ -319,24 +328,63 @@ pub(crate) struct SdSession {
     text_encoder_input: String,
 }
 
+/// `Arc<T>` so idle eviction can drop the cache's ref while in-flight
+/// callers keep their own clone — no use-after-free.
+/// Errors cache the load-failure string so a missing bundle doesn't
+/// retry-and-error every stroke; eviction lets the next try refresh.
+struct CacheEntry<T> {
+    value: Result<T, String>,
+    last_used: Instant,
+}
+
+type SdCache = HashMap<prunr_models::ModelId, CacheEntry<Arc<SdSession>>>;
+
+fn sd_cache() -> &'static Mutex<SdCache> {
+    static CACHE: OnceLock<Mutex<SdCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Drop entries whose `last_used` is older than `idle` relative to `now`,
+/// returning the count dropped. Generic over `T` so tests can drive the
+/// sweep without spinning up a real ORT session.
+fn sweep_idle<T>(
+    cache: &mut HashMap<prunr_models::ModelId, CacheEntry<T>>,
+    now: Instant,
+    idle: Duration,
+) -> usize {
+    let before = cache.len();
+    cache.retain(|_, e| now.duration_since(e.last_used) < idle);
+    before - cache.len()
+}
+
 impl SdSession {
-    fn get(id: prunr_models::ModelId) -> Result<&'static SdSession, CoreError> {
-        type Cache = HashMap<prunr_models::ModelId, Result<&'static SdSession, String>>;
-        static CACHE: OnceLock<Mutex<Cache>> = OnceLock::new();
-        let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    fn get(id: prunr_models::ModelId) -> Result<Arc<SdSession>, CoreError> {
+        let cache = sd_cache();
+        let now = Instant::now();
+        let idle = Duration::from_secs(SD_IDLE_RELEASE_SECS);
+
         {
-            let guard = cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            if let Some(entry) = guard.get(&id) {
-                return entry.clone().map_err(CoreError::Inference);
+            let mut guard = cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let dropped = sweep_idle(&mut guard, now, idle);
+            if dropped > 0 {
+                tracing::info!(
+                    dropped,
+                    idle_secs = SD_IDLE_RELEASE_SECS,
+                    rss_mb = process_rss_mb(),
+                    "SD: released idle session bundle(s)",
+                );
+            }
+            if let Some(entry) = guard.get_mut(&id) {
+                entry.last_used = now;
+                return entry.value.clone().map_err(CoreError::Inference);
             }
         }
-        let entry: Result<&'static SdSession, String> = match Self::new_inner(id) {
-            Ok(s) => Ok(Box::leak(Box::new(s))),
-            Err(e) => Err(e),
-        };
+
+        let value: Result<Arc<SdSession>, String> = Self::new_inner(id).map(Arc::new);
         let mut guard = cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        let stored = guard.entry(id).or_insert(entry);
-        stored.clone().map_err(CoreError::Inference)
+        let stored = guard.entry(id).or_insert(CacheEntry { value, last_used: now });
+        stored.last_used = now;
+        stored.value.clone().map_err(CoreError::Inference)
     }
 
     fn new_inner(id: prunr_models::ModelId) -> Result<SdSession, String> {
@@ -355,6 +403,7 @@ impl SdSession {
                 ));
             }
         }
+        let rss_before_mb = process_rss_mb();
         let parts = prunr_models::multi_part_paths(id)
             .ok_or_else(|| prunr_models::not_installed_error(id))?;
         let by_key: HashMap<&str, PathBuf> = parts.into_iter().collect();
@@ -382,6 +431,7 @@ impl SdSession {
         let vae_decoder_input = take_first_input(&vae_decoder, "vae_decoder")?;
         let text_encoder_input = take_first_input(&text_encoder, "text_encoder")?;
 
+        let rss_after_mb = process_rss_mb();
         tracing::info!(
             ?id,
             text_encoder_ep = %text_ep,
@@ -389,6 +439,9 @@ impl SdSession {
             vae_decoder_ep = %vae_dec_ep,
             unet_ep = %unet_ep,
             unet_inputs = ?unet_inputs,
+            rss_before_mb,
+            rss_after_mb,
+            rss_delta_mb = rss_after_mb.zip(rss_before_mb).map(|(a, b)| a.saturating_sub(b)),
             "SD session bundle loaded",
         );
         Ok(SdSession {
@@ -926,13 +979,36 @@ fn pad_mask_to_tile(mask: &GrayImage) -> GrayImage {
 /// callers in that case skip the guard rather than fail-closed since
 /// "we couldn't query" doesn't imply "memory is low".
 fn available_ram_bytes() -> Option<u64> {
-    use std::sync::{Mutex, OnceLock, PoisonError};
+    use std::sync::PoisonError;
     static SYS: OnceLock<Mutex<sysinfo::System>> = OnceLock::new();
     let mtx = SYS.get_or_init(|| Mutex::new(sysinfo::System::new()));
     let mut sys = mtx.lock().unwrap_or_else(PoisonError::into_inner);
     sys.refresh_memory();
     let avail = sys.available_memory();
     if avail == 0 { None } else { Some(avail) }
+}
+
+/// Current process RSS in MB. `None` when sysinfo can't read the process
+/// (sandboxed CI, exotic platforms). Used to instrument SD session
+/// load/drop where 4-6 GB swings are easy to hide in aggregate logs.
+fn process_rss_mb() -> Option<u64> {
+    use std::sync::PoisonError;
+    static SYS: OnceLock<Mutex<sysinfo::System>> = OnceLock::new();
+    let mtx = SYS.get_or_init(|| Mutex::new(sysinfo::System::new()));
+    let mut sys = mtx.lock().unwrap_or_else(PoisonError::into_inner);
+    let pid = sysinfo::get_current_pid().ok()?;
+    sys.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);
+    let proc = sys.process(pid)?;
+    Some(proc.memory() / (1024 * 1024))
+}
+
+impl Drop for SdSession {
+    fn drop(&mut self) {
+        tracing::info!(
+            rss_mb = process_rss_mb(),
+            "SD session bundle dropped (idle release or process exit)",
+        );
+    }
 }
 
 // ── DDIM scheduler ──────────────────────────────────────────────────────
@@ -1229,5 +1305,85 @@ mod tests {
         let s = DdimScheduler::new_sd15(20);
         let n = sample_initial_noise(0, &s);
         assert_eq!(n.shape(), &[1, 4, SD_LATENT_SIDE as usize, SD_LATENT_SIDE as usize]);
+    }
+
+    #[test]
+    fn sweep_idle_drops_only_stale_entries() {
+        use prunr_models::ModelId;
+        let now = Instant::now();
+        let idle = Duration::from_secs(300);
+        let fresh = now - Duration::from_secs(60);
+        let stale = now - Duration::from_secs(600);
+
+        let mut cache: HashMap<ModelId, CacheEntry<Arc<()>>> = HashMap::new();
+        cache.insert(ModelId::SdV15InpaintFp16, CacheEntry {
+            value: Ok(Arc::new(())),
+            last_used: stale,
+        });
+        cache.insert(ModelId::LaMaFp32, CacheEntry {
+            value: Ok(Arc::new(())),
+            last_used: fresh,
+        });
+
+        let dropped = sweep_idle(&mut cache, now, idle);
+        assert_eq!(dropped, 1, "exactly one stale entry should evict");
+        assert!(!cache.contains_key(&ModelId::SdV15InpaintFp16),
+            "stale entry must be removed");
+        assert!(cache.contains_key(&ModelId::LaMaFp32),
+            "fresh entry must remain");
+    }
+
+    #[test]
+    fn sweep_idle_drops_stale_error_entries_too() {
+        use prunr_models::ModelId;
+        let now = Instant::now();
+        let idle = Duration::from_secs(300);
+        let mut cache: HashMap<ModelId, CacheEntry<Arc<()>>> = HashMap::new();
+        cache.insert(ModelId::SdV15InpaintFp16, CacheEntry {
+            value: Err("load failed".to_string()),
+            last_used: now - Duration::from_secs(600),
+        });
+
+        let dropped = sweep_idle(&mut cache, now, idle);
+        assert_eq!(dropped, 1, "stale error entries should also evict");
+        assert!(cache.is_empty());
+    }
+
+    #[test]
+    fn sweep_idle_releases_arc_so_payload_drops() {
+        use prunr_models::ModelId;
+        let now = Instant::now();
+        let idle = Duration::from_secs(300);
+        let payload = Arc::new(());
+        let weak = Arc::downgrade(&payload);
+
+        let mut cache: HashMap<ModelId, CacheEntry<Arc<()>>> = HashMap::new();
+        cache.insert(ModelId::SdV15InpaintFp16, CacheEntry {
+            value: Ok(payload),
+            last_used: now - Duration::from_secs(600),
+        });
+
+        sweep_idle(&mut cache, now, idle);
+        // The cache held the only strong ref; eviction must drop the
+        // payload and release upgrades. This pins the use-after-free
+        // contract — an in-flight caller would still own a clone.
+        assert!(weak.upgrade().is_none(),
+            "evicted payload must be the last strong ref so memory releases");
+    }
+
+    #[test]
+    fn sweep_idle_keeps_entry_at_exactly_the_idle_boundary_safe() {
+        use prunr_models::ModelId;
+        let now = Instant::now();
+        let idle = Duration::from_secs(300);
+        let mut cache: HashMap<ModelId, CacheEntry<Arc<()>>> = HashMap::new();
+        // Just-under-the-boundary entry must NOT evict.
+        cache.insert(ModelId::SdV15InpaintFp16, CacheEntry {
+            value: Ok(Arc::new(())),
+            last_used: now - Duration::from_secs(299),
+        });
+        let dropped = sweep_idle(&mut cache, now, idle);
+        assert_eq!(dropped, 0);
+        assert!(cache.contains_key(&ModelId::SdV15InpaintFp16));
     }
 }
