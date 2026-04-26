@@ -4314,6 +4314,7 @@ dependencies = [
  "proptest",
  "prunr-core",
  "prunr-models",
+ "prunr-runtime-install",
  "rayon",
  "reqwest",
  "rfd",
@@ -4361,6 +4362,18 @@ dependencies = [
  "dirs",
  "tempfile",
  "zstd",
+]
+
+[[package]]
+name = "prunr-runtime-install"
+version = "0.4.8"
+dependencies = [
+ "bytes",
+ "hex",
+ "reqwest",
+ "serde_json",
+ "sha2",
+ "zip",
 ]
 
 [[package]]
@@ -7194,6 +7207,7 @@ dependencies = [
  "ndarray",
  "ort",
  "prunr-models",
+ "prunr-runtime-install",
  "reqwest",
  "serde_json",
  "sha2",

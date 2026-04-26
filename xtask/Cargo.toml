@@ -15,6 +15,7 @@ dirs = { workspace = true }
 # `dev-models` keeps `include_bytes!` out so xtask can compile before the
 # .zst files exist (xtask is the tool that produces them).
 prunr-models = { path = "../crates/prunr-models", features = ["dev-models"] }
+prunr-runtime-install = { path = "../crates/prunr-runtime-install" }
 
 # Phase 19-02b probe — see `probe_load_dynamic` in src/main.rs.
 # api-23: rc.12 vitis.rs build bug under load-dynamic at api-24.
