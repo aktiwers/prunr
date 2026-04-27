@@ -351,12 +351,13 @@ pub(crate) fn render(
                 // somewhere to paint. In the right-to-left layout this
                 // appears LEFT of the toggle.
                 if brush_available && brush_state.is_enabled() {
-                    let outcome = super::brush_chip::render(ui, brush_state, app_settings.model.is_inpaint());
+                    let is_sd = matches!(app_settings.model, crate::gui::settings::SettingsModel::SdInpaint);
+                    let outcome = super::brush_chip::render(ui, brush_state, app_settings.model.is_inpaint(), is_sd);
                     if outcome.clear_requested {
                         change.clear_correction_requested = true;
                     }
                     if outcome.committed && app_settings.brush != *brush_state.settings() {
-                        app_settings.brush = *brush_state.settings();
+                        app_settings.brush = brush_state.settings().clone();
                         change.brush_settings_committed = true;
                     }
                 }

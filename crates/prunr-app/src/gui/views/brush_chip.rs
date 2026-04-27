@@ -6,6 +6,7 @@
 use egui::{Color32, Sense, Stroke, Ui};
 
 use crate::gui::brush_state::{BrushSettings, BrushState};
+use crate::gui::theme;
 use prunr_core::brush::{BrushMode, BrushShape};
 
 use super::chip;
@@ -30,6 +31,7 @@ pub(super) fn render(
     ui: &mut Ui,
     brush_state: &mut BrushState,
     is_inpaint_mode: bool,
+    is_sd_mode: bool,
 ) -> BrushChipOutcome {
     let label = chip_label(brush_state.settings());
     let resp = ui
@@ -96,6 +98,29 @@ pub(super) fn render(
                         |v| format!("{:.0}%", v * 50.0),
                     );
                     outcome.committed |= sh.commit;
+
+                    // SD-only: text prompt + negative + CFG. Empty prompt
+                    // produces noisy fills on uniform-context regions; a
+                    // descriptive prompt is what makes SD inpaint usable.
+                    if is_sd_mode {
+                        ui.add_space(8.0);
+                        ui.separator();
+                        ui.add_space(4.0);
+                        ui.label(egui::RichText::new("Prompt").size(theme::FONT_SIZE_BODY));
+                        let p = ui.text_edit_singleline(&mut s.sd_prompt);
+                        if p.lost_focus() { outcome.committed = true; }
+                        ui.add_space(4.0);
+                        ui.label(egui::RichText::new("Negative prompt")
+                            .color(theme::TEXT_SECONDARY).size(theme::FONT_SIZE_BODY));
+                        let np = ui.text_edit_singleline(&mut s.sd_negative_prompt);
+                        if np.lost_focus() { outcome.committed = true; }
+                        ui.add_space(4.0);
+                        let cfg = chip::slider_row_f32(
+                            ui, "Guidance", &mut s.sd_guidance_scale, 1.0..=15.0, false,
+                            |v| if v <= 1.0 + 1e-3 { "off".to_string() } else { format!("{v:.1}") },
+                        );
+                        outcome.committed |= cfg.commit;
+                    }
                 }
                 if !is_inpaint_mode {
                     // Inpaint has only one direction (paint = erase). Hide
@@ -117,7 +142,7 @@ pub(super) fn render(
 
             ui.add_space(8.0);
             ui.vertical(|ui| {
-                draw_preview(ui, *s);
+                draw_preview(ui, s);
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
                     for (shape, label) in [
@@ -166,7 +191,7 @@ fn chip_label(s: &BrushSettings) -> String {
 /// The brush radius is scaled to fit `PREVIEW_SIZE` regardless of the
 /// user-chosen pixel value, so a 200 px brush and a 4 px brush both
 /// render readably inside the popover.
-fn draw_preview(ui: &mut Ui, settings: BrushSettings) {
+fn draw_preview(ui: &mut Ui, settings: &BrushSettings) {
     let (rect, _) = ui.allocate_exact_size(
         egui::vec2(PREVIEW_SIZE, PREVIEW_SIZE),
         Sense::hover(),

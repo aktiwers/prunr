@@ -72,10 +72,6 @@ impl MaskCorrection {
         self.grid.iter().all(|&v| v == 0)
     }
 
-    fn dims_match(&self, mask_len: usize) -> bool {
-        (self.width as usize) * (self.height as usize) == mask_len
-    }
-
     /// Project the signed-magnitude grid onto a binary `GrayImage` at the
     /// target image dimensions. Any non-zero cell paints 255; zero cells
     /// stay 0. Resamples via nearest-neighbour when grid resolution
@@ -118,27 +114,48 @@ impl MaskCorrection {
 /// - `g < 0` (subtract direction): `m → m * (1 + g/127)` (toward 0)
 /// - `g == 0`:                   no-op
 ///
-/// Caller passes the post-normalize, pre-gamma mask in [0, 1].
-/// Skips silently on dimension mismatch.
-pub fn apply_correction(mask: &mut [f32], correction: &MaskCorrection) {
-    if !correction.dims_match(mask.len()) {
-        tracing::warn!(
-            mask_len = mask.len(),
-            expected = (correction.width as usize) * (correction.height as usize),
-            "apply_correction: dimension mismatch, skipping"
-        );
+/// Caller passes the post-normalize, pre-gamma mask in [0, 1] along with
+/// its 2D dims. When the correction grid is at a different resolution
+/// (model switch, mode change) we nearest-neighbour resample inline —
+/// no skipping, no warning spam during live preview.
+pub fn apply_correction(mask: &mut [f32], mask_w: usize, mask_h: usize, correction: &MaskCorrection) {
+    debug_assert_eq!(mask.len(), mask_w * mask_h, "apply_correction: mask len != w*h");
+    let cw = correction.width as usize;
+    let ch = correction.height as usize;
+
+    // Fast path: dims match, single linear pass.
+    if cw == mask_w && ch == mask_h {
+        for (m, &g) in mask.iter_mut().zip(correction.grid.iter()) {
+            apply_one(m, g);
+        }
         return;
     }
-    for (m, &g) in mask.iter_mut().zip(correction.grid.iter()) {
-        if g == 0 {
-            continue;
+
+    // Resample path: nearest-neighbour sample the correction grid into
+    // mask space. Same arithmetic as MaskCorrection::to_binary_mask.
+    if cw == 0 || ch == 0 { return; }
+    for y in 0..mask_h {
+        let cy = (y as u64 * ch as u64 / mask_h as u64) as usize;
+        let row_base = cy * cw;
+        let m_row = y * mask_w;
+        for x in 0..mask_w {
+            let cx = (x as u64 * cw as u64 / mask_w as u64) as usize;
+            let g = correction.grid[row_base + cx];
+            if g != 0 {
+                apply_one(&mut mask[m_row + x], g);
+            }
         }
-        let s = (g as f32) / 127.0;
-        if s > 0.0 {
-            *m += (1.0 - *m) * s;
-        } else {
-            *m *= 1.0 + s;
-        }
+    }
+}
+
+#[inline]
+fn apply_one(m: &mut f32, g: i8) {
+    if g == 0 { return; }
+    let s = (g as f32) / 127.0;
+    if s > 0.0 {
+        *m += (1.0 - *m) * s;
+    } else {
+        *m *= 1.0 + s;
     }
 }
 
@@ -287,7 +304,7 @@ mod tests {
     fn empty_correction_is_no_op() {
         let c = MaskCorrection::empty(10, 10);
         let mut mask = vec![0.5f32; 100];
-        apply_correction(&mut mask, &c);
+        apply_correction(&mut mask, 10, 10, &c);
         assert!(mask.iter().all(|&v| v == 0.5));
     }
 
@@ -316,11 +333,20 @@ mod tests {
     }
 
     #[test]
-    fn dimension_mismatch_skipped() {
-        let c = MaskCorrection::empty(5, 5);
-        let mut mask = vec![0.4f32; 100];
-        apply_correction(&mut mask, &c);
-        assert!(mask.iter().all(|&v| v == 0.4));
+    fn dimension_mismatch_resamples_inline() {
+        // 5×5 correction with one painted cell at (2, 2): nearest-neighbour
+        // resample into a 10×10 mask should land paint in a 2×2 block at
+        // (4..6, 4..6). Replaces the old "skip on mismatch" semantics so
+        // a stale correction (e.g. from a previous model resolution) gets
+        // applied instead of silently dropped + log-spammed.
+        let mut c = MaskCorrection::empty(5, 5);
+        c.grid[2 * 5 + 2] = 127; // full add at centre cell
+        let mut mask = vec![0.0f32; 100];
+        apply_correction(&mut mask, 10, 10, &c);
+        // The 2×2 block centred on (4, 4)..(5, 5) should be 1.0; rest 0.
+        let painted = mask.iter().filter(|&&v| v > 0.0).count();
+        assert!(painted >= 1, "expected at least one mask pixel painted, got 0");
+        assert!(mask.iter().all(|&v| v == 0.0 || (v - 1.0).abs() < 1e-6));
     }
 
     #[test]
@@ -328,7 +354,7 @@ mod tests {
         let mut c = MaskCorrection::empty(2, 2);
         c.grid = vec![127, 127, 127, 127];
         let mut mask = vec![0.3f32; 4];
-        apply_correction(&mut mask, &c);
+        apply_correction(&mut mask, 2, 2, &c);
         assert!(approx(&mask, &[1.0, 1.0, 1.0, 1.0], 1e-6));
     }
 
@@ -337,7 +363,7 @@ mod tests {
         let mut c = MaskCorrection::empty(2, 2);
         c.grid = vec![-127, -127, -127, -127];
         let mut mask = vec![0.95f32; 4];
-        apply_correction(&mut mask, &c);
+        apply_correction(&mut mask, 2, 2, &c);
         assert!(approx(&mask, &[0.0, 0.0, 0.0, 0.0], 1e-6));
     }
 
@@ -347,7 +373,7 @@ mod tests {
         let mut c = MaskCorrection::empty(2, 1);
         c.grid = vec![-64, -64];
         let mut mask = vec![1.0f32, 0.6];
-        apply_correction(&mut mask, &c);
+        apply_correction(&mut mask, 2, 1, &c);
         let expected_factor = 1.0 - 64.0 / 127.0;
         assert!(approx(&mask, &[expected_factor, 0.6 * expected_factor], 1e-5));
     }
@@ -358,7 +384,7 @@ mod tests {
         let mut c = MaskCorrection::empty(2, 1);
         c.grid = vec![64, 64];
         let mut mask = vec![0.0f32, 0.5];
-        apply_correction(&mut mask, &c);
+        apply_correction(&mut mask, 2, 1, &c);
         let s = 64.0 / 127.0;
         assert!(approx(&mask, &[s, 0.5 + 0.5 * s], 1e-5));
     }
@@ -368,7 +394,7 @@ mod tests {
         let mut c = MaskCorrection::empty(3, 1);
         c.grid = vec![64, 0, -64];
         let mut mask = vec![0.5f32, 0.5, 0.5];
-        apply_correction(&mut mask, &c);
+        apply_correction(&mut mask, 3, 1, &c);
         let s = 64.0 / 127.0;
         assert!(approx(&mask, &[0.5 + 0.5 * s, 0.5, 0.5 * (1.0 - s)], 1e-5));
     }

@@ -255,6 +255,19 @@ pub fn sharpen_inpainted(image: &RgbaImage, mask: &GrayImage, amount: f32) -> Rg
 /// the mask is all-zero (no work). SD-family ids dispatch to the
 /// `inpaint_sd` module which has its own multi-model pipeline.
 pub fn process_inpaint(image: &RgbaImage, mask: &GrayImage, id: prunr_models::ModelId) -> Result<RgbaImage, CoreError> {
+    process_inpaint_with(image, mask, id, None)
+}
+
+/// Same as `process_inpaint` but takes optional SD-specific tuning
+/// (prompt / negative prompt / guidance_scale / steps). Ignored for
+/// LaMa-family backends. Pass `None` for the seg pipeline default
+/// (empty prompt, no CFG, 20 steps — equivalent to `process_inpaint`).
+pub fn process_inpaint_with(
+    image: &RgbaImage,
+    mask: &GrayImage,
+    id: prunr_models::ModelId,
+    sd_req: Option<crate::inpaint_sd::SdInpaintRequest>,
+) -> Result<RgbaImage, CoreError> {
     if image.dimensions() != mask.dimensions() {
         return Err(CoreError::Inference(format!(
             "inpaint: dim mismatch — image {:?} vs mask {:?}",
@@ -268,8 +281,11 @@ pub fn process_inpaint(image: &RgbaImage, mask: &GrayImage, id: prunr_models::Mo
         return Ok(image.clone());
     }
     if is_sd_inpaint(id) {
-        // 20 inference steps — SD-1.5 sweet spot at default scheduler.
-        return crate::inpaint_sd::process_inpaint(image, mask, id, 20);
+        let req = sd_req.unwrap_or_else(|| crate::inpaint_sd::SdInpaintRequest {
+            num_inference_steps: 20,
+            ..Default::default()
+        });
+        return crate::inpaint_sd::process_inpaint_with(image, mask, id, req);
     }
     let session = LamaSession::get(id)?;
     tile_compose(image, mask, |tile_rgba, tile_mask| {
