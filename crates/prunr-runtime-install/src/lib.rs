@@ -121,6 +121,17 @@ pub fn download_wheel(info: &WheelInfo, hooks: &mut DownloadHooks<'_>) -> Result
     }).map_err(|e| e.message)
 }
 
+/// Implemented by error types whose values distinguish transient
+/// (network blip, 5xx) from fatal (4xx, sha mismatch, user cancel).
+/// `retry_with_backoff` consults `is_retryable` to decide between retry
+/// and fail-fast; on cancel during the backoff sleep it constructs a
+/// fresh value via `cancelled()` so each error type picks its own
+/// user-facing wording.
+pub trait Retryable {
+    fn is_retryable(&self) -> bool;
+    fn cancelled() -> Self;
+}
+
 #[derive(Debug)]
 struct DlError {
     message: String,
@@ -130,6 +141,11 @@ struct DlError {
 impl DlError {
     fn fatal(msg: impl Into<String>) -> Self { Self { message: msg.into(), retryable: false } }
     fn transient(msg: impl Into<String>) -> Self { Self { message: msg.into(), retryable: true } }
+}
+
+impl Retryable for DlError {
+    fn is_retryable(&self) -> bool { self.retryable }
+    fn cancelled() -> Self { DlError::fatal("cancelled") }
 }
 
 /// Single download attempt — used by the retry wrapper. Streams chunks,
@@ -182,32 +198,36 @@ fn download_wheel_attempt(
 }
 
 /// Run `attempt` up to `max_attempts` times. Returns immediately on
-/// non-retryable errors. Between attempts, sleeps an exponentially-
-/// growing duration starting at `base_ms` (500 → 1000 → 2000…), polling
-/// `cancel` every 50 ms so a user-cancel during backoff fires promptly.
-fn retry_with_backoff<F, T>(
+/// non-retryable errors (per `Retryable::is_retryable`). Between
+/// attempts, sleeps an exponentially-growing duration starting at
+/// `base_ms` (500 → 1000 → 2000…), polling `cancel` every 50 ms so a
+/// user-cancel during backoff fires promptly. The closure receives the
+/// current attempt index (0-based) for callers that want to log which
+/// retry round triggered.
+pub fn retry_with_backoff<F, T, E>(
     cancel: &Arc<AtomicBool>,
     max_attempts: u32,
     base_ms: u64,
     mut attempt: F,
-) -> Result<T, DlError>
+) -> Result<T, E>
 where
-    F: FnMut(u32) -> Result<T, DlError>,
+    F: FnMut(u32) -> Result<T, E>,
+    E: Retryable,
 {
     let mut tries: u32 = 0;
     loop {
         match attempt(tries) {
             Ok(v) => return Ok(v),
-            Err(e) if !e.retryable => return Err(e),
+            Err(e) if !e.is_retryable() => return Err(e),
             Err(e) if tries + 1 >= max_attempts => return Err(e),
-            Err(e) => {
+            Err(_e) => {
                 tries += 1;
                 let delay = std::time::Duration::from_millis(base_ms.saturating_mul(1 << tries.min(6)));
-                tracing::warn!(tries, error = %e.message, ?delay, "transient runtime install error");
+                tracing::warn!(tries, ?delay, "transient error — retrying");
                 let deadline = std::time::Instant::now() + delay;
                 while std::time::Instant::now() < deadline {
                     if cancel.load(Ordering::Acquire) {
-                        return Err(DlError::fatal("cancelled"));
+                        return Err(E::cancelled());
                     }
                     std::thread::sleep(std::time::Duration::from_millis(50));
                 }
