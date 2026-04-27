@@ -61,6 +61,11 @@ impl DownloadManager {
         self.states.get(&id).cloned().unwrap_or(DownloadState::Idle)
     }
 
+    #[cfg(test)]
+    pub(crate) fn active(&self) -> Option<ModelId> {
+        self.active
+    }
+
     /// No-op when the model is already installed / in progress / queued.
     pub(crate) fn start_download(&mut self, id: ModelId) {
         if prunr_models::is_available(id) {
