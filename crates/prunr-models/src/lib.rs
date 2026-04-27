@@ -32,6 +32,12 @@ pub enum ModelId {
     /// automatically when `Settings.sd_fast_mode` resolves true.
     /// Bundle is the output of `scripts/export_lcm_inpaint.py`.
     SdV15LcmInpaintFp16,
+    /// TAESD (Tiny AutoEncoder for SD) FP16. Two-part bundle: encoder
+    /// + decoder, ~5 MB each. Drop-in replacement for SD 1.5's standard
+    /// VAE — ~3× faster decode at slight quality cost. Used as the VAE
+    /// backend when fast mode is on AND the bundle is installed.
+    /// Bundle is the output of `scripts/export_taesd.py`.
+    TaesdFp16,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -497,7 +503,8 @@ fn bundled_bytes(id: ModelId) -> &'static [u8] {
         | ModelId::BigLaMa
         | ModelId::Migan
         | ModelId::SdV15InpaintFp16
-        | ModelId::SdV15LcmInpaintFp16 => {
+        | ModelId::SdV15LcmInpaintFp16
+        | ModelId::TaesdFp16 => {
             // OnDemand / MultiPart in REGISTRY — resolve_bytes routes
             // via disk (or via `multi_part_paths`), not here.
             panic!("bundled_bytes called for non-Bundled model {id:?} — REGISTRY/source mismatch");
@@ -599,7 +606,8 @@ fn load_variant(id: ModelId, suffix: &str) -> Option<Vec<u8>> {
         | ModelId::BigLaMa
         | ModelId::Migan
         | ModelId::SdV15InpaintFp16
-        | ModelId::SdV15LcmInpaintFp16 => return None,
+        | ModelId::SdV15LcmInpaintFp16
+        | ModelId::TaesdFp16 => return None,
     };
     let filename = format!("{name}_{suffix}.onnx");
 
