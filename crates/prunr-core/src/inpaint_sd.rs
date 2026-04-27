@@ -358,8 +358,46 @@ fn sweep_idle<T>(
     before - cache.len()
 }
 
+/// Background sweeper interval. 60 s gives reclaim within ~1 minute of
+/// the idle threshold without burning CPU; the sweep itself is a single
+/// HashMap::retain over <10 entries so it's free.
+const SD_SWEEP_INTERVAL_SECS: u64 = 60;
+
+/// Spawn a daemon thread that periodically evicts idle SD entries even
+/// when no caller invokes `get()`. Without this, RAM doesn't reclaim
+/// until the user touches SD again — which defeats the point of the
+/// idle release. Init-once via OnceLock so we don't accumulate threads.
+fn ensure_sweeper_running() {
+    static STARTED: OnceLock<()> = OnceLock::new();
+    STARTED.get_or_init(|| {
+        std::thread::Builder::new()
+            .name("sd-idle-sweeper".to_string())
+            .spawn(|| {
+                let interval = Duration::from_secs(SD_SWEEP_INTERVAL_SECS);
+                let idle = Duration::from_secs(SD_IDLE_RELEASE_SECS);
+                loop {
+                    std::thread::sleep(interval);
+                    let cache = sd_cache();
+                    let mut guard = cache.lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let dropped = sweep_idle(&mut guard, Instant::now(), idle);
+                    if dropped > 0 {
+                        tracing::info!(
+                            dropped,
+                            idle_secs = SD_IDLE_RELEASE_SECS,
+                            rss_mb = process_rss_mb(),
+                            "SD: background sweeper released idle session(s)",
+                        );
+                    }
+                }
+            })
+            .expect("spawn sd-idle-sweeper thread");
+    });
+}
+
 impl SdSession {
     fn get(id: prunr_models::ModelId) -> Result<Arc<SdSession>, CoreError> {
+        ensure_sweeper_running();
         let cache = sd_cache();
         let now = Instant::now();
         let idle = Duration::from_secs(SD_IDLE_RELEASE_SECS);
