@@ -473,9 +473,35 @@ fn run_one_tile(
             &latent_f16, &mask_latent_f16, &masked_latent_f16,
         );
         let noise_pred = if let Some(uncond_f16) = text_emb_uncond_f16.as_ref() {
-            let pred_cond = unet_step(bundle, latent_in_f16.clone(), t, &text_emb_cond_f16)?;
-            let pred_uncond = unet_step(bundle, latent_in_f16, t, uncond_f16)?;
-            cfg_blend(&pred_uncond, &pred_cond, scale)
+            // CFG path: prefer batched UNet (one ORT call instead of two)
+            // when the export supports a dynamic batch dim. On
+            // first-time failure we flip a per-session flag and fall
+            // back to sequential for the rest of this stroke + future
+            // strokes on this bundle.
+            use std::sync::atomic::Ordering;
+            let try_batched = !bundle.cfg_fallback_to_sequential.load(Ordering::Relaxed);
+            if try_batched {
+                match unet_step_batched(bundle, &latent_in_f16, t, &text_emb_cond_f16, uncond_f16) {
+                    Ok(pred_pair) => {
+                        let pred_cond = pred_pair.slice(ndarray::s![0..1, .., .., ..]).to_owned();
+                        let pred_uncond = pred_pair.slice(ndarray::s![1..2, .., .., ..]).to_owned();
+                        cfg_blend(&pred_uncond, &pred_cond, scale)
+                    }
+                    Err(e) => {
+                        tracing::warn!(%e,
+                            "SD: batched CFG UNet rejected (likely static batch=1 ONNX); \
+                             falling back to sequential cond+uncond for this session");
+                        bundle.cfg_fallback_to_sequential.store(true, Ordering::Relaxed);
+                        let pred_cond = unet_step(bundle, latent_in_f16.clone(), t, &text_emb_cond_f16)?;
+                        let pred_uncond = unet_step(bundle, latent_in_f16, t, uncond_f16)?;
+                        cfg_blend(&pred_uncond, &pred_cond, scale)
+                    }
+                }
+            } else {
+                let pred_cond = unet_step(bundle, latent_in_f16.clone(), t, &text_emb_cond_f16)?;
+                let pred_uncond = unet_step(bundle, latent_in_f16, t, uncond_f16)?;
+                cfg_blend(&pred_uncond, &pred_cond, scale)
+            }
         } else {
             unet_step(bundle, latent_in_f16, t, &text_emb_cond_f16)?
         };
@@ -574,6 +600,13 @@ pub(crate) struct SdSession {
     vae_encoder_input: String,
     vae_decoder_input: String,
     text_encoder_input: String,
+    /// Set to `true` after the first batched UNet call fails on this
+    /// session — typically because the underlying ONNX export declared
+    /// a static batch=1. Subsequent CFG steps skip the batched attempt
+    /// and call `unet_step` twice instead. Once flipped per process,
+    /// stays flipped for the session's lifetime; cleared on session
+    /// rebuild (idle release).
+    cfg_fallback_to_sequential: std::sync::atomic::AtomicBool,
 }
 
 /// `Arc<T>` so idle eviction can drop the cache's ref while in-flight
@@ -739,6 +772,7 @@ impl SdSession {
             vae_encoder_input,
             vae_decoder_input,
             text_encoder_input,
+            cfg_fallback_to_sequential: std::sync::atomic::AtomicBool::new(false),
         })
     }
 }
@@ -1056,6 +1090,46 @@ fn unet_step(
     ])
         .map_err(|e| CoreError::Inference(format!("SD unet: run: {e}")))?;
     extract_4d(&outputs[0], "unet")
+}
+
+/// CFG batched: stack cond + uncond on batch dim 0 and run UNet ONCE
+/// per timestep instead of twice. Most SD-1.5 inpaint ONNX exports
+/// declare a dynamic batch dimension so this just works; if the loaded
+/// model has a static batch=1 the call returns Err and the caller
+/// falls back to sequential `unet_step` × 2 (and remembers to skip
+/// future batched attempts on this session).
+///
+/// Output shape: (2, 4, 64, 64). Row 0 = cond noise pred, row 1 = uncond.
+fn unet_step_batched(
+    bundle: &SdSession,
+    latent_9ch_f16: &Array4<f16>,
+    t: i64,
+    text_emb_cond_f16: &Array3<f16>,
+    text_emb_uncond_f16: &Array3<f16>,
+) -> Result<Array4<f32>, CoreError> {
+    let latent_pair = ndarray::concatenate(
+        Axis(0), &[latent_9ch_f16.view(), latent_9ch_f16.view()],
+    ).map_err(|e| CoreError::Inference(format!("SD unet batched: latent concat: {e}")))?;
+    let text_pair = ndarray::concatenate(
+        Axis(0), &[text_emb_cond_f16.view(), text_emb_uncond_f16.view()],
+    ).map_err(|e| CoreError::Inference(format!("SD unet batched: text concat: {e}")))?;
+    let timestep = ndarray::Array1::<f16>::from_elem(2, f16::from_f32(t as f32));
+
+    let lat_t = Tensor::from_array(latent_pair)
+        .map_err(|e| CoreError::Inference(format!("SD unet batched: latent tensor: {e}")))?;
+    let ts_t = Tensor::from_array(timestep)
+        .map_err(|e| CoreError::Inference(format!("SD unet batched: timestep tensor: {e}")))?;
+    let emb_t = Tensor::from_array(text_pair)
+        .map_err(|e| CoreError::Inference(format!("SD unet batched: text tensor: {e}")))?;
+    let mut session = bundle.unet.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let outputs = session.run(inputs![
+        bundle.unet_inputs[0].as_str() => &lat_t,
+        bundle.unet_inputs[1].as_str() => &ts_t,
+        bundle.unet_inputs[2].as_str() => &emb_t,
+    ])
+        .map_err(|e| CoreError::Inference(format!("SD unet batched: run: {e}")))?;
+    extract_4d(&outputs[0], "unet (batched)")
 }
 
 // ── f16 / f32 conversion at the ONNX boundary ──────────────────────────
