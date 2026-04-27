@@ -325,6 +325,36 @@ fn render_tab_general(ui: &mut egui::Ui, app: &mut PrunrApp) {
     ui.checkbox(&mut app.settings.live_preview,
         RichText::new("Live preview").color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY));
     hint(ui, "Auto-rerun mask and edge tweaks as you adjust them.");
+    ui.add_space(theme::SPACE_MD);
+
+    render_sd_fast_mode_row(ui, &mut app.settings.sd_fast_mode);
+}
+
+fn render_sd_fast_mode_row(ui: &mut egui::Ui, user_override: &mut Option<bool>) {
+    use crate::hardware;
+    let profile = hardware::profile();
+    let auto = hardware::sd_fast_mode_auto_default(profile);
+    let mut effective = user_override.unwrap_or(auto);
+
+    let prev = effective;
+    ui.checkbox(&mut effective,
+        RichText::new("Fast SD inpaint (CPU optimization)")
+            .color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY));
+    if effective != prev {
+        // Record explicit user choice. Setting it back to the auto value
+        // collapses to None so the toggle keeps tracking hardware
+        // changes (e.g. user installs OpenVINO + iGPU later).
+        *user_override = if effective == auto { None } else { Some(effective) };
+    }
+
+    let mode_label = match user_override {
+        None => format!("auto: {}", if auto { "on" } else { "off" }),
+        Some(true) => "user: on".to_string(),
+        Some(false) => "user: off".to_string(),
+    };
+    hint(ui, &format!(
+        "Trade quality for speed when SD inpaint runs on CPU / Intel iGPU. Uses LCM-distilled weights (~5\u{00d7} faster, lower fidelity) when available; the Guidance slider greys out — LCM bakes guidance into training. Default tracks your hardware ({mode_label})."
+    ));
 }
 
 fn render_tab_appearance(ui: &mut egui::Ui, settings: &mut Settings) {
