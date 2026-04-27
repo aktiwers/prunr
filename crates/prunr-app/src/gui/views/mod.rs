@@ -32,14 +32,20 @@ pub fn section_heading(ui: &mut egui::Ui, title: &str) {
     ui.add_space(theme::SPACE_SM);
 }
 
-/// Description text below a control. Mono font signals "supplemental"; color
-/// stays primary so modal body text reads comfortably. Empty strings render nothing.
+/// Description text below a control. Mono font signals "supplemental".
+/// Wraps to the available width so a long hint doesn't push its parent
+/// container wider than the screen — egui's default Label is single-line
+/// which forces parents to grow to the longest hint, which is what we
+/// don't want inside narrow popovers (brush_chip) and fixed-width modals.
 pub fn hint(ui: &mut egui::Ui, text: &str) {
     if text.is_empty() { return; }
-    ui.label(
-        RichText::new(text)
-            .color(theme::TEXT_PRIMARY)
-            .size(theme::FONT_SIZE_MONO),
+    ui.add(
+        egui::Label::new(
+            RichText::new(text)
+                .color(theme::TEXT_PRIMARY)
+                .size(theme::FONT_SIZE_MONO),
+        )
+        .wrap(),
     );
 }
 
