@@ -98,6 +98,10 @@ pub struct PrunrApp {
     pub(crate) pending_onboarding_toast: Option<String>,
 
     pub(crate) runtime_install: Option<RuntimeInstallProgress>,
+    /// Snapshot of `RuntimeId::is_installed()` to avoid syscalling per-frame
+    /// while the Settings → Hardware tab is open. Refreshed on settings open,
+    /// install completion, and uninstall.
+    pub(crate) hardware_install_cache: super::hardware_cache::HardwareInstallCache,
 
     pub(crate) runtime_prompt: Option<crate::runtime_install::RuntimeId>,
     /// Once-per-session guard so we don't re-evaluate hardware + snooze
@@ -271,6 +275,7 @@ impl PrunrApp {
             pending_license_request: None,
             pending_onboarding_toast: None,
             runtime_install: None,
+            hardware_install_cache: super::hardware_cache::HardwareInstallCache::default(),
             runtime_prompt: None,
             runtime_prompt_evaluated: false,
             settings_opened_at: 0.0,
@@ -654,12 +659,16 @@ impl PrunrApp {
                     let name = progress.runtime.display_name();
                     self.toasts.success(format!("{name} installed"));
                     self.runtime_install = None;
+                    self.hardware_install_cache =
+                        super::hardware_cache::HardwareInstallCache::refresh();
                     return;
                 }
                 InstallEvent::Failed { error } => {
                     let name = progress.runtime.display_name();
                     self.toasts.error(format!("{name} install failed: {error}"));
                     self.runtime_install = None;
+                    self.hardware_install_cache =
+                        super::hardware_cache::HardwareInstallCache::refresh();
                     return;
                 }
                 _ => {}
@@ -2252,9 +2261,14 @@ impl PrunrApp {
         if self.show_settings {
             self.close_settings(ctx);
         } else {
-            self.show_settings = true;
-            self.settings_opened_at = ctx.input(|i| i.time);
+            self.open_settings(ctx);
         }
+    }
+
+    pub(crate) fn open_settings(&mut self, ctx: &egui::Context) {
+        self.show_settings = true;
+        self.settings_opened_at = ctx.input(|i| i.time);
+        self.hardware_install_cache = super::hardware_cache::HardwareInstallCache::refresh();
     }
 
     fn navigate_batch(&mut self, ctx: &egui::Context, dir: NavDir) {
@@ -2722,8 +2736,7 @@ impl PrunrApp {
                         self.settings.snooze_runtime_prompt(rt, RUNTIME_PROMPT_SNOOZE_DAYS);
                     }
                     RuntimePromptAction::OpenSettings => {
-                        self.show_settings = true;
-                        self.settings_opened_at = ctx.input(|i| i.time);
+                        self.open_settings(ctx);
                     }
                 }
             }

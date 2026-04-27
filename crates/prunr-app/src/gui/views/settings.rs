@@ -40,6 +40,7 @@ impl SettingsTab {
 /// just `&mut Settings`). Constructed by the modal entry point from
 /// `app.runtime_install`.
 pub(crate) struct HardwareSectionContext {
+    pub openvino_installed: bool,
     pub install_in_progress: bool,
     pub install_status_text: Option<String>,
 }
@@ -153,6 +154,7 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) {
             let hardware_intent = match app.settings_tab {
                 SettingsTab::General => {
                     let ctx = HardwareSectionContext {
+                        openvino_installed: app.hardware_install_cache.openvino,
                         install_in_progress: app.runtime_install.is_some(),
                         install_status_text: app.runtime_install.as_ref()
                             .map(|p| p.last_event.status_text()),
@@ -211,6 +213,8 @@ fn dispatch_hardware_intent(app: &mut PrunrApp, intent: HardwareSectionIntent) {
                 Ok(()) => app.toasts.success(format!("{} removed", rt.display_name())),
                 Err(e) => app.toasts.error(format!("Uninstall failed: {e}")),
             };
+            app.hardware_install_cache =
+                crate::gui::hardware_cache::HardwareInstallCache::refresh();
         }
     }
 }
@@ -274,7 +278,7 @@ fn render_hardware_section(
     ui.add_space(theme::SPACE_SM);
 
     let rt = RuntimeId::OpenVino;
-    let installed = rt.is_installed();
+    let installed = ctx.openvino_installed;
     let status = match (ctx.install_in_progress, ctx.install_status_text.as_deref()) {
         (true, Some(s)) => s.to_string(),
         _ if installed => "Installed".to_string(),

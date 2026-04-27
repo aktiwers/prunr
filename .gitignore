@@ -1,5 +1,6 @@
 /target
 /models/
+/out/
 
 # Test images — not committed (copyrighted assets from rembg repo, fetched on demand)
 tests/test_images/*.jpg
