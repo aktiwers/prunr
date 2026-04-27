@@ -345,13 +345,59 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         gpu: GpuRequirement::Required,
         incompatible_eps: &[],
     },
-    // SdV15LcmInpaintFp16 descriptor lands once the LCM-Inpaint ONNX
-    // bundle is produced by `scripts/export_lcm_inpaint.py` and uploaded
-    // to a Prunr GitHub release. Until then the variant exists in
-    // ModelId so the dispatcher compiles, but `descriptor()` returns
-    // None for it — `dispatch_inpaint_for_item` checks `is_available`
-    // and falls back to standard SD when LCM isn't installed.
-    //
+    // LCM-distilled SD 1.5 Inpaint FP16. ~2 GB total. Same UNet
+    // architecture as SdV15InpaintFp16 but trained to converge in ~4
+    // steps instead of 20 — ~5× faster on CPU/iGPU at slight quality
+    // cost. Selected automatically when Settings.sd_fast_mode resolves
+    // true. Released at https://github.com/aktiwers/prunr/releases/tag/lcm-inpaint-v1.0.0.
+    ModelDescriptor {
+        id: ModelId::SdV15LcmInpaintFp16,
+        display_name: "Eraser (SD 1.5 LCM, fast)",
+        description: "Latent Consistency Model variant of SD 1.5 inpaint. ~5\u{00d7} faster on CPU/iGPU; lower fidelity. Auto-selected when Fast SD inpaint is on.",
+        category: ModelCategory::Inpaint,
+        source: ModelSource::MultiPartOnDemand {
+            subdir: "sd15-lcm-inpaint-fp16-1.0.0",
+            parts: &[
+                ModelPart {
+                    key: "unet",
+                    filename: "unet.onnx",
+                    url: "https://github.com/aktiwers/prunr/releases/download/lcm-inpaint-v1.0.0/unet.onnx",
+                    sha256: "bd62a44265e8610921d98fa851fb9507cc5ec16eebf359b8e10b0a043f17d4d7",
+                    size_bytes: 1723163151,
+                },
+                ModelPart {
+                    key: "vae_encoder",
+                    filename: "vae_encoder.onnx",
+                    url: "https://github.com/aktiwers/prunr/releases/download/lcm-inpaint-v1.0.0/vae_encoder.onnx",
+                    sha256: "9a5f1ade2a09a69496e1c48532fc54f11c8d118686115226c0de2698523b7826",
+                    size_bytes: 68826952,
+                },
+                ModelPart {
+                    key: "vae_decoder",
+                    filename: "vae_decoder.onnx",
+                    url: "https://github.com/aktiwers/prunr/releases/download/lcm-inpaint-v1.0.0/vae_decoder.onnx",
+                    sha256: "fbe8a7ab071fe0d63484ac9764423505585c4db650cbe7734fb456cf415f7896",
+                    size_bytes: 99634701,
+                },
+                ModelPart {
+                    key: "text_encoder",
+                    filename: "text_encoder.onnx",
+                    url: "https://github.com/aktiwers/prunr/releases/download/lcm-inpaint-v1.0.0/text_encoder.onnx",
+                    sha256: "76c497febe21922a096f368558a18b3549f1fe1b08f7a49267a14d0184c8155f",
+                    size_bytes: 246346236,
+                },
+            ],
+            license: LicenseInfo {
+                license: "CreativeML Open RAIL-M",
+                license_url: "https://huggingface.co/spaces/CompVis/stable-diffusion-license",
+                source_url: "https://huggingface.co/latent-consistency/lcm-lora-sdv1-5",
+            },
+            license_acceptance_required: true,
+        },
+        version: "1.0.0",
+        gpu: GpuRequirement::None,
+        incompatible_eps: &[],
+    },
     // TAESD FP16: Tiny distilled VAE for SD 1.5. ~2.4 MB encoder + ~2.5
     // MB decoder. Released at https://github.com/aktiwers/prunr/releases/tag/taesd-v1.0.0.
     // Used as the VAE backend when fast mode + LCM are both active.
