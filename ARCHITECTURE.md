@@ -508,6 +508,12 @@ Decompressed ONNX bytes are cached in `OnceLock<Vec<u8>>` per model. Callers rec
 
 The sidebar thumbnail uses the same pattern. Save/export is the exception: PNG has no separate canvas-bg concept, so the bg is composited into pixels on demand at save time. Display and export paths diverge intentionally.
 
+### Per-image background image
+
+A user-picked image can replace bg_color as the canvas backdrop. Bytes live on `BatchItem.bg_image` (`Arc<DynamicImage>` + source path + content hash); a `u64` hash on `ItemSettings.bg_image_hash` drives the recipe diff (CompositeOnly tier — same class as bg_color since neither re-runs inference). Mirrors the brush-correction shape (Arc bytes on item, hash on settings).
+
+Canvas paints the bg image lazily (egui texture built on first frame after `set_bg_image`, dropped together when cleared) at cover-fit via UV cropping — no texture re-upload on zoom or canvas resize. Save/export bakes via the new `apply_background_image` core helper (Lanczos3 cover-fit + alpha-blend, same sequential shape as `apply_background_color`). The toolbar bg chip enforces mutual exclusion: picking the Image kind clears bg_color and bg_effect; picking any non-image kind clears the image.
+
 ### BgEffect (source-derived backdrops)
 
 The `bg` colour is render-time and cheap; **BgEffect variants (BlurredSource, InvertedSource, DesaturatedSource) are destructive and bake into the output RGBA** at postprocess time. Rationale: source-derived backdrops need actual pixels behind the subject, not a single GPU rect. Building a separate backdrop texture per frame would double render bandwidth and complicate the canvas compositor; baking into output pixels keeps the render path unchanged.
