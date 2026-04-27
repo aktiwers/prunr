@@ -2165,6 +2165,11 @@ impl PrunrApp {
     fn handle_drag_and_drop(&mut self, ctx: &egui::Context) {
         let dropped = ctx.input(|i| i.raw.dropped_files.clone());
         if dropped.is_empty() { return; }
+        tracing::debug!(
+            count = dropped.len(),
+            existing_items = self.batch.items.len(),
+            "drag-and-drop received",
+        );
 
         // Collect paths (need background I/O) and inline bytes (already in memory)
         let mut paths: Vec<PathBuf> = Vec::new();
@@ -2196,11 +2201,23 @@ impl PrunrApp {
             return;
         }
 
-        // Send file paths for lazy loading (avoids reading all into RAM upfront)
-        if !paths.is_empty() {
+        // Expand directories to their immediate image children (one-level —
+        // deeper recursion would surprise users). Cheap I/O; doing it on the
+        // UI thread keeps the toast channel available without a cross-thread
+        // bridge.
+        let (resolved, dropped_empty_dir) = expand_dropped_paths(paths);
+        if dropped_empty_dir && resolved.is_empty() {
+            self.toasts.warning(
+                "Dropped folder had no supported images (PNG / JPG / WebP / BMP / SVG)."
+                    .to_string(),
+            );
+        }
+
+        // Send file paths for lazy loading (avoids reading all into RAM upfront).
+        if !resolved.is_empty() {
             let tx = self.batch.bg_io.file_load_tx.clone();
             std::thread::spawn(move || {
-                for path in paths {
+                for path in resolved {
                     let name = path.file_name()
                         .and_then(|n| n.to_str())
                         .unwrap_or("untitled")
@@ -2815,6 +2832,42 @@ impl PrunrApp {
         // Toasts — rendered last as foreground overlay.
         self.toasts.show(ctx);
     }
+}
+
+/// Resolve a list of dropped paths: directories expand to their immediate
+/// supported-image children (no recursion). Returns `(resolved_paths,
+/// any_dir_was_empty)` — the second flag drives a "no images in folder"
+/// toast at the call site.
+fn expand_dropped_paths(input: Vec<PathBuf>) -> (Vec<PathBuf>, bool) {
+    let mut out = Vec::with_capacity(input.len());
+    let mut any_empty_dir = false;
+    for path in input {
+        if path.is_dir() {
+            let before = out.len();
+            for entry in std::fs::read_dir(&path).into_iter().flatten().flatten() {
+                let p = entry.path();
+                if p.is_file() && is_supported_image_ext(&p) {
+                    out.push(p);
+                }
+            }
+            if out.len() == before { any_empty_dir = true; }
+        } else {
+            out.push(path);
+        }
+    }
+    (out, any_empty_dir)
+}
+
+/// Lower-case extension match for the file types `prunr_core::load_image_*`
+/// can decode (raster) plus SVG (rasterized via resvg).
+fn is_supported_image_ext(path: &Path) -> bool {
+    matches!(
+        path.extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_ascii_lowercase())
+            .as_deref(),
+        Some("png" | "jpg" | "jpeg" | "webp" | "bmp" | "svg")
+    )
 }
 
 /// Encode + write one PNG on a background thread, then send the result toast
