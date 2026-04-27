@@ -73,6 +73,51 @@ pub fn profile() -> &'static HardwareProfile {
     CACHE.get_or_init(detect_now)
 }
 
+/// Total system RAM (bytes). Cached — total memory doesn't change at
+/// runtime so we read it once.
+pub fn total_ram_bytes() -> u64 {
+    static CACHE: OnceLock<u64> = OnceLock::new();
+    *CACHE.get_or_init(|| {
+        let mut sys = sysinfo::System::new();
+        sys.refresh_memory();
+        sys.total_memory()
+    })
+}
+
+/// Currently-available RAM (bytes). Re-reads on every call — fresh value
+/// for UIs that show live headroom. ~1 ms on Linux. Don't call inside a
+/// per-frame loop; use a cache + manual invalidate (modal-open / event)
+/// if needed.
+pub fn available_ram_bytes_now() -> u64 {
+    let mut sys = sysinfo::System::new();
+    sys.refresh_memory();
+    sys.available_memory()
+}
+
+/// Coarse "can the user actually run this model?" verdict per model
+/// working set. Compared against currently-available RAM.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RamVerdict {
+    /// `available_ram > 1.5 × working_set`. Comfortable headroom.
+    Comfortable,
+    /// `working_set ≤ available_ram ≤ 1.5 × working_set`. Likely OK
+    /// but other apps competing for RAM may push it over the edge.
+    Tight,
+    /// `available_ram < working_set`. Refusing to load is the right
+    /// move; the model would swap-thrash or OOM.
+    Insufficient,
+}
+
+pub fn ram_verdict(working_set_bytes: u64, available_bytes: u64) -> RamVerdict {
+    if available_bytes < working_set_bytes {
+        RamVerdict::Insufficient
+    } else if available_bytes < working_set_bytes * 3 / 2 {
+        RamVerdict::Tight
+    } else {
+        RamVerdict::Comfortable
+    }
+}
+
 fn detect_now() -> HardwareProfile {
     let (cpu_vendor, cpu_brand) = detect_cpu();
     let (dgpu, igpu) = detect_gpus(cpu_vendor);
@@ -287,6 +332,21 @@ mod tests {
         p.dgpu = None;
         p.igpu = Some(GpuVendor::Amd);
         assert!(!p.recommends_rocm());
+    }
+
+    #[test]
+    fn ram_verdict_thresholds() {
+        const WS: u64 = 6 * 1024 * 1024 * 1024; // 6 GB working set
+        // Below working set → insufficient
+        assert_eq!(ram_verdict(WS, WS - 1), RamVerdict::Insufficient);
+        // Exactly working set → tight (we want >1.5× for comfortable)
+        assert_eq!(ram_verdict(WS, WS), RamVerdict::Tight);
+        // Just below 1.5× → tight
+        assert_eq!(ram_verdict(WS, WS * 3 / 2 - 1), RamVerdict::Tight);
+        // At 1.5× exactly → comfortable
+        assert_eq!(ram_verdict(WS, WS * 3 / 2), RamVerdict::Comfortable);
+        // Way above → comfortable
+        assert_eq!(ram_verdict(WS, WS * 4), RamVerdict::Comfortable);
     }
 
     #[test]
