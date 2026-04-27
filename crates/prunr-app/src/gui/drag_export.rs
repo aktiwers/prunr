@@ -197,13 +197,17 @@ fn write_layer(
 /// If the item has no processed result, writes the raw source bytes as-is
 /// (preserving original extension so file managers recognize it).
 ///
-/// Uses the item's own `line_mode` — each image carries its own mode in v2.
+/// Bakes the per-item bg (color or image) into the PNG so the dropped
+/// file matches the canvas — same parity rule as Save and clipboard
+/// copy. Split-layer drags don't go through here (`render_layer` keeps
+/// each layer clean for downstream compositing).
 pub(crate) fn prepare(item: &BatchItem) -> std::io::Result<PathBuf> {
     let name = make_filename(&item.filename, item.result_rgba.is_some(), item.settings.line_mode);
     let path = temp_dir().join(&name);
     match &item.result_rgba {
         Some(rgba) => {
-            let bytes = prunr_core::encode_rgba_png(rgba)
+            let baked = item.bake_export_bg(rgba);
+            let bytes = prunr_core::encode_rgba_png(&baked)
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
             std::fs::write(&path, &bytes)?;
         }
