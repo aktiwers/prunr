@@ -114,7 +114,7 @@ pub struct PrunrApp {
     /// Set by toolbar Open button — processed in logic() where ctx is available
     pub(crate) pending_open_dialog: bool,
     /// Toast notification system
-    pub(crate) toasts: egui_notify::Toasts,
+    pub(crate) toasts: super::toasts::Toasts,
 
     // ── Drag-out (OS drag to external apps) ────────────────────────────────
     pub(crate) drag_export: super::drag_export_state::DragExportState,
@@ -279,9 +279,10 @@ impl PrunrApp {
             result_switch_id: 0,
             pending_batch_sync: false,
             pending_open_dialog: false,
-            toasts: egui_notify::Toasts::default()
-                    .with_anchor(egui_notify::Anchor::BottomLeft)
-                    .with_margin(egui::vec2(theme::SPACE_SM, theme::STATUS_BAR_HEIGHT + theme::SPACE_SM)),
+            toasts: super::toasts::Toasts::new(
+                egui_notify::Anchor::BottomLeft,
+                egui::vec2(theme::SPACE_SM, theme::STATUS_BAR_HEIGHT + theme::SPACE_SM),
+            ),
             drag_export: super::drag_export_state::DragExportState::new(),
         }
     }

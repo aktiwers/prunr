@@ -5,7 +5,7 @@ use crate::gui::theme;
 use super::section_heading;
 
 /// Returns true if the modal should close.
-pub fn render(ctx: &egui::Context, toasts: &mut egui_notify::Toasts) -> bool {
+pub fn render(ctx: &egui::Context, toasts: &mut crate::gui::toasts::Toasts) -> bool {
     theme::standard_modal_window(
         ctx, "cli_help", "CLI Reference",
         [theme::SETTINGS_DIALOG_WIDTH, theme::SETTINGS_DIALOG_HEIGHT],
@@ -239,7 +239,7 @@ pub fn render(ctx: &egui::Context, toasts: &mut egui_notify::Toasts) -> bool {
 
 use super::hint;
 
-fn example_row(ui: &mut egui::Ui, toasts: &mut egui_notify::Toasts, cmd: &str, desc: &str) {
+fn example_row(ui: &mut egui::Ui, toasts: &mut crate::gui::toasts::Toasts, cmd: &str, desc: &str) {
     ui.horizontal(|ui| {
         ui.label(
             RichText::new(cmd)

@@ -1,4 +1,5 @@
 pub mod app;
+pub mod toasts;
 pub mod item;
 pub mod history_manager;
 pub mod drag_export_state;
