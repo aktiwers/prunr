@@ -120,11 +120,16 @@ impl std::hash::Hash for MaskRecipe {
     }
 }
 
-/// Tier 3: compositing settings (bg color, line settings).
+/// Tier 3: compositing settings (bg color, bg image, line settings).
 /// These can be applied without re-running inference or masking.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
 pub struct CompositeRecipe {
     pub bg_color: Option<[u8; 3]>,
+    /// `Some` means a bg image is active; `None` means no image bg. The
+    /// caller hashes the image once on pick so the recipe diff can detect
+    /// change with a u64 compare instead of re-hashing every dispatch.
+    #[serde(default)]
+    pub bg_image_hash: Option<u64>,
     pub solid_line_color: Option<[u8; 3]>,
 }
 
@@ -240,7 +245,7 @@ mod tests {
                 line_style: LineStyle::Solid,
             },
             mask: mask(gamma, None, 0.0, false),
-            composite: CompositeRecipe { bg_color: bg, solid_line_color: None },
+            composite: CompositeRecipe { bg_color: bg, bg_image_hash: None, solid_line_color: None },
             was_chain: false,
         }
     }
@@ -256,6 +261,16 @@ mod tests {
     fn bg_color_change_composite_only() {
         let a = make_recipe(ModelKind::Silueta, 1.0, None);
         let b = make_recipe(ModelKind::Silueta, 1.0, Some([255, 0, 0]));
+        assert_eq!(resolve_tier(&a, &b), RequiredTier::CompositeOnly);
+    }
+
+    #[test]
+    fn bg_image_hash_change_composite_only() {
+        // bg_image is a render-time / save-time texture — same tier
+        // class as bg_color (no inference, no postprocess).
+        let a = make_recipe(ModelKind::Silueta, 1.0, None);
+        let mut b = make_recipe(ModelKind::Silueta, 1.0, None);
+        b.composite.bg_image_hash = Some(0xdeadbeef);
         assert_eq!(resolve_tier(&a, &b), RequiredTier::CompositeOnly);
     }
 

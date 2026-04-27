@@ -25,6 +25,26 @@ fn push_stroke_bounded(
     }
 }
 
+/// `image` is `Arc`-wrapped so cloning across threads (canvas paint and
+/// save worker each take a handle) is a refcount bump, not a memcpy of
+/// up to ~48 MB.
+pub(crate) struct BgImage {
+    pub(crate) source_path: Option<PathBuf>,
+    pub(crate) image: Arc<image::DynamicImage>,
+    pub(crate) hash: u64,
+}
+
+/// `DefaultHasher` (SipHasher13) is deterministic across runs within a
+/// stdlib version, so a hash persisted in a preset survives reload.
+pub(crate) fn bg_image_content_hash(img: &image::DynamicImage) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    img.width().hash(&mut h);
+    img.height().hash(&mut h);
+    img.as_bytes().hash(&mut h);
+    h.finish()
+}
+
 /// Three-tiered history entry:
 /// - Tier 1 (Hot): Raw `Arc<RgbaImage>` — instant access, full RAM cost.
 /// - Tier 2 (Warm): Zstd-compressed bytes in RAM — ~3-4x smaller, ~8ms decompress.
@@ -242,6 +262,11 @@ pub(crate) struct BatchItem {
     /// Bounded; oldest dropped at depth limit.
     pub(crate) stroke_undo_stack: VecDeque<Option<Arc<prunr_core::brush::MaskCorrection>>>,
     pub(crate) stroke_redo_stack: VecDeque<Option<Arc<prunr_core::brush::MaskCorrection>>>,
+    /// Never mutate outside `set_bg_image` / `clear_bg_image` — those are
+    /// the only writers that keep `settings.bg_image_hash` in lockstep,
+    /// which the recipe-diff dispatch reads to fire CompositeOnly.
+    pub(crate) bg_image: Option<Arc<BgImage>>,
+    pub(crate) bg_image_texture: Option<egui::TextureHandle>,
 }
 
 impl BatchItem {
@@ -483,7 +508,28 @@ impl BatchItem {
             mask_correction: None,
             stroke_undo_stack: VecDeque::new(),
             stroke_redo_stack: VecDeque::new(),
+            bg_image: None,
+            bg_image_texture: None,
         }
+    }
+
+    /// Lockstep writer for `bg_image` + `settings.bg_image_hash`. Going
+    /// through this path is the invariant the recipe diff relies on.
+    pub(crate) fn set_bg_image(&mut self, img: image::DynamicImage, source_path: Option<PathBuf>) {
+        let hash = bg_image_content_hash(&img);
+        self.bg_image = Some(Arc::new(BgImage {
+            source_path,
+            image: Arc::new(img),
+            hash,
+        }));
+        self.bg_image_texture = None;
+        self.settings.bg_image_hash = Some(hash);
+    }
+
+    pub(crate) fn clear_bg_image(&mut self) {
+        self.bg_image = None;
+        self.bg_image_texture = None;
+        self.settings.bg_image_hash = None;
     }
 }
 
