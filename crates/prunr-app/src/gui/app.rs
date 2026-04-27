@@ -1173,7 +1173,7 @@ impl PrunrApp {
     ) -> Arc<image::RgbaImage> {
         if let Some(bg) = item.bg_image.as_ref() {
             let mut copy = (**rgba).clone();
-            prunr_core::apply_background_image(&mut copy, &bg.image);
+            prunr_core::apply_background_image(&mut copy, &bg.image, item.settings.bg_image_fit);
             Arc::new(copy)
         } else if let Some(c) = item.settings.bg_rgb() {
             let mut copy = (**rgba).clone();
