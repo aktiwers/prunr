@@ -387,6 +387,14 @@ impl SettingsModel {
         Self::SdInpaint,
     ];
 
+    /// Parse a Debug-style name ("Silueta", "U2net", "BiRefNetLite", …) into
+    /// a variant. Used by the harness escape hatch (PRUNR_OPEN_MODEL env
+    /// var) to force the initial model without a full settings.json.
+    /// `None` on unknown / typo input — caller leaves settings.model alone.
+    pub fn from_debug_name(s: &str) -> Option<Self> {
+        Self::ALL.iter().copied().find(|m| format!("{m:?}") == s)
+    }
+
     /// Whether this variant resolves to an ORT seg model. Filter-only and
     /// Inpaint variants skip segmentation entirely.
     pub fn uses_segmentation(self) -> bool {
