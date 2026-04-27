@@ -83,6 +83,9 @@ pub struct PrunrApp {
     /// Timestamp when settings was last opened (for click-outside debounce)
     pub(crate) settings_opened_at: f64,
     pub(crate) settings: Settings,
+    /// Which Settings tab the modal is showing. Transient UI state — not
+    /// persisted; opening Settings always starts on General.
+    pub(crate) settings_tab: super::views::settings::SettingsTab,
 
     pub(crate) model_store: Option<super::views::adjustments_toolbar::ModelStoreRequest>,
     /// When `Some(id)`, the license-acceptance dialog is open for that
@@ -263,6 +266,7 @@ impl PrunrApp {
             sidebar_hidden: false,
             adjustments_hidden: false,
             show_settings: false,
+            settings_tab: super::views::settings::SettingsTab::General,
             model_store: None,
             pending_license_request: None,
             pending_onboarding_toast: None,
