@@ -373,6 +373,9 @@ fn render_tab_general(
     hint(ui, &jobs_hint);
     ui.add_space(theme::SPACE_MD);
 
+    render_sd_fast_mode_row(ui, &mut settings.sd_fast_mode);
+    ui.add_space(theme::SPACE_MD);
+
     let has_gpu = !prunr_core::OrtEngine::detect_active_provider().eq_ignore_ascii_case("CPU");
     if has_gpu {
         ui.checkbox(&mut settings.force_cpu,
@@ -384,9 +387,6 @@ fn render_tab_general(
     ui.checkbox(&mut settings.live_preview,
         RichText::new("Live preview").color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY));
     hint(ui, "Auto-rerun mask and edge tweaks as you adjust them.");
-    ui.add_space(theme::SPACE_MD);
-
-    render_sd_fast_mode_row(ui, &mut settings.sd_fast_mode);
     intent
 }
 

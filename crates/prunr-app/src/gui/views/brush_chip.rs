@@ -112,7 +112,7 @@ pub(super) fn render(
                         ui.separator();
                         ui.add_space(4.0);
                         if sd_fast_mode {
-                            super::hint(ui, "Fast SD mode: LCM-distilled backend, ~5\u{00d7} faster on CPU. Negative prompt and Guidance are disabled — LCM bakes guidance into training. Switch off in Settings \u{2192} General to use them.");
+                            super::hint(ui, "Fast SD mode: LCM-distilled backend, ~5\u{00d7} faster on CPU. Negative prompt and Guidance are disabled — LCM bakes guidance into training. Switch off in Settings \u{2192} General \u{2192} Performance to use them.");
                             ui.add_space(4.0);
                         }
                         ui.label(egui::RichText::new("Prompt").size(theme::FONT_SIZE_BODY));
