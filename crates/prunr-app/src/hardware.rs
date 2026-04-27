@@ -118,6 +118,25 @@ pub fn ram_verdict(working_set_bytes: u64, available_bytes: u64) -> RamVerdict {
     }
 }
 
+/// Auto-detect default for SD inpaint's "Fast mode" — ON when no real
+/// GPU is detected (CPU or Intel-iGPU-only), OFF otherwise. Real GPUs
+/// run standard SD fast enough that the LCM/TAESD quality trade-off
+/// isn't worth it. Pure function of the profile so callers can mock.
+pub fn sd_fast_mode_auto_default(profile: &HardwareProfile) -> bool {
+    let has_real_gpu = match profile.dgpu {
+        Some(GpuVendor::Nvidia | GpuVendor::Amd | GpuVendor::Apple) => true,
+        _ => false,
+    } || profile.igpu == Some(GpuVendor::Apple); // Apple Silicon SoC
+    !has_real_gpu
+}
+
+/// Effective SD fast-mode flag: `user_override` wins when set, otherwise
+/// `sd_fast_mode_auto_default(profile)`. Single source of truth — the
+/// dispatch path and UI both call this so they can't disagree.
+pub fn sd_fast_mode_active(user_override: Option<bool>, profile: &HardwareProfile) -> bool {
+    user_override.unwrap_or_else(|| sd_fast_mode_auto_default(profile))
+}
+
 fn detect_now() -> HardwareProfile {
     let (cpu_vendor, cpu_brand) = detect_cpu();
     let (dgpu, igpu) = detect_gpus(cpu_vendor);
@@ -347,6 +366,60 @@ mod tests {
         assert_eq!(ram_verdict(WS, WS * 3 / 2), RamVerdict::Comfortable);
         // Way above → comfortable
         assert_eq!(ram_verdict(WS, WS * 4), RamVerdict::Comfortable);
+    }
+
+    #[test]
+    fn sd_fast_mode_default_on_for_cpu_or_intel_igpu() {
+        let cpu_only = HardwareProfile {
+            cpu_vendor: CpuVendor::Intel, cpu_brand: "i7".into(),
+            dgpu: None, igpu: None, os: "linux", arch: "x86_64",
+        };
+        assert!(sd_fast_mode_auto_default(&cpu_only));
+
+        let intel_igpu = HardwareProfile {
+            cpu_vendor: CpuVendor::Intel, cpu_brand: "i7".into(),
+            dgpu: None, igpu: Some(GpuVendor::Intel),
+            os: "linux", arch: "x86_64",
+        };
+        assert!(sd_fast_mode_auto_default(&intel_igpu));
+    }
+
+    #[test]
+    fn sd_fast_mode_default_off_for_real_gpus() {
+        let nvidia = HardwareProfile {
+            cpu_vendor: CpuVendor::Intel, cpu_brand: "i7".into(),
+            dgpu: Some(GpuVendor::Nvidia), igpu: None,
+            os: "linux", arch: "x86_64",
+        };
+        assert!(!sd_fast_mode_auto_default(&nvidia));
+
+        let amd_dgpu = HardwareProfile {
+            cpu_vendor: CpuVendor::Amd, cpu_brand: "Ryzen".into(),
+            dgpu: Some(GpuVendor::Amd), igpu: None,
+            os: "linux", arch: "x86_64",
+        };
+        assert!(!sd_fast_mode_auto_default(&amd_dgpu));
+
+        let apple = HardwareProfile {
+            cpu_vendor: CpuVendor::Apple, cpu_brand: "M2".into(),
+            dgpu: None, igpu: Some(GpuVendor::Apple),
+            os: "macos", arch: "aarch64",
+        };
+        assert!(!sd_fast_mode_auto_default(&apple));
+    }
+
+    #[test]
+    fn user_override_beats_auto_detect() {
+        let cpu_only = HardwareProfile {
+            cpu_vendor: CpuVendor::Intel, cpu_brand: "i7".into(),
+            dgpu: None, igpu: None, os: "linux", arch: "x86_64",
+        };
+        // Auto would say ON; explicit OFF wins.
+        assert!(!sd_fast_mode_active(Some(false), &cpu_only));
+        // Auto would say ON; explicit ON also ON.
+        assert!(sd_fast_mode_active(Some(true), &cpu_only));
+        // Auto-default fallback.
+        assert!(sd_fast_mode_active(None, &cpu_only));
     }
 
     #[test]
