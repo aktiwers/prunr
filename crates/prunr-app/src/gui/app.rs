@@ -26,6 +26,7 @@ pub(crate) struct RuntimeInstallProgress {
     pub(crate) runtime: crate::runtime_install::RuntimeId,
     pub(crate) rx: mpsc::Receiver<crate::runtime_install::InstallEvent>,
     pub(crate) last_event: crate::runtime_install::InstallEvent,
+    pub(crate) cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 pub struct PrunrApp {
@@ -2685,10 +2686,11 @@ impl PrunrApp {
                 self.runtime_prompt = None;
                 match action {
                     RuntimePromptAction::Install => {
-                        let rx = crate::runtime_install::start_install(rt);
+                        let h = crate::runtime_install::start_install(rt);
                         self.runtime_install = Some(RuntimeInstallProgress {
                             runtime: rt,
-                            rx,
+                            rx: h.events,
+                            cancel: h.cancel,
                             last_event: crate::runtime_install::InstallEvent::Preparing,
                         });
                     }

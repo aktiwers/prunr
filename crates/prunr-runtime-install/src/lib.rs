@@ -106,27 +106,70 @@ impl<'a> DownloadHooks<'a> {
     }
 }
 
-/// Stream-download a wheel into memory with progress + cancel.
-/// Doesn't pre-allocate from `Content-Length` (untrusted; bogus values
-/// would OOM). `Vec` grows; resize cost on 80 MB is microseconds.
+/// Wraps `download_wheel_attempt` in up to 3 tries with exponential
+/// backoff. Transient errors (network timeout, 5xx, broken connection)
+/// retry; fatal errors (404, user cancel) fail fast. Mirrors the same
+/// policy as the model `download_manager` so users see consistent retry
+/// behaviour across runtime + model installs.
 pub fn download_wheel(info: &WheelInfo, hooks: &mut DownloadHooks<'_>) -> Result<bytes::Bytes, String> {
+    let cancel = Arc::clone(&hooks.cancel);
+    retry_with_backoff(&cancel, 3, 500, |attempt| {
+        if attempt > 0 {
+            tracing::info!(attempt, url = %info.url, "retrying wheel download");
+        }
+        download_wheel_attempt(info, hooks)
+    }).map_err(|e| e.message)
+}
+
+#[derive(Debug)]
+struct DlError {
+    message: String,
+    retryable: bool,
+}
+
+impl DlError {
+    fn fatal(msg: impl Into<String>) -> Self { Self { message: msg.into(), retryable: false } }
+    fn transient(msg: impl Into<String>) -> Self { Self { message: msg.into(), retryable: true } }
+}
+
+/// Single download attempt — used by the retry wrapper. Streams chunks,
+/// fires progress per percentage point, polls cancel per chunk.
+/// `Content-Length` not pre-allocated (untrusted; bogus 9999999999 would
+/// OOM). `Vec` grows; resize cost on 80 MB is microseconds.
+fn download_wheel_attempt(
+    info: &WheelInfo,
+    hooks: &mut DownloadHooks<'_>,
+) -> Result<bytes::Bytes, DlError> {
     let client = reqwest::blocking::Client::builder()
         .user_agent(concat!("prunr-runtime-install/", env!("CARGO_PKG_VERSION")))
         .build()
-        .map_err(|e| format!("HTTP client: {e}"))?;
-    let mut response = client.get(&info.url).send()
-        .map_err(|e| format!("download: {e}"))?;
+        .map_err(|e| DlError::fatal(format!("HTTP client: {e}")))?;
+    let response = client.get(&info.url).send()
+        .map_err(|e| DlError::transient(format!("connect: {e}")))?;
+
+    // 4xx is the user/server contract being wrong (bad URL, gone wheel) —
+    // retrying won't help. 5xx is server transient. Anything not 2xx is
+    // an error at this stage.
+    let status = response.status();
+    if !status.is_success() {
+        let msg = format!("HTTP {status}");
+        return Err(if status.is_server_error() { DlError::transient(msg) } else { DlError::fatal(msg) });
+    }
     let total = response.content_length().unwrap_or(info.size_bytes);
 
+    let mut response = response;
     let mut buf: Vec<u8> = Vec::new();
     let mut chunk = [0u8; 64 * 1024];
     let mut last_pct: u64 = u64::MAX;
     loop {
         if hooks.cancel.load(Ordering::Relaxed) {
-            return Err("cancelled".to_string());
+            return Err(DlError::fatal("cancelled"));
         }
-        let n = response.read(&mut chunk)
-            .map_err(|e| format!("download read: {e}"))?;
+        let n = match response.read(&mut chunk) {
+            Ok(n) => n,
+            // Partial-stream errors (broken pipe, timeout) are transient.
+            Err(e) => return Err(DlError::transient(format!("read: {e}"))),
+        };
         if n == 0 { break; }
         buf.extend_from_slice(&chunk[..n]);
         let pct = if total > 0 { buf.len() as u64 * 100 / total } else { 0 };
@@ -136,6 +179,41 @@ pub fn download_wheel(info: &WheelInfo, hooks: &mut DownloadHooks<'_>) -> Result
         }
     }
     Ok(bytes::Bytes::from(buf))
+}
+
+/// Run `attempt` up to `max_attempts` times. Returns immediately on
+/// non-retryable errors. Between attempts, sleeps an exponentially-
+/// growing duration starting at `base_ms` (500 → 1000 → 2000…), polling
+/// `cancel` every 50 ms so a user-cancel during backoff fires promptly.
+fn retry_with_backoff<F, T>(
+    cancel: &Arc<AtomicBool>,
+    max_attempts: u32,
+    base_ms: u64,
+    mut attempt: F,
+) -> Result<T, DlError>
+where
+    F: FnMut(u32) -> Result<T, DlError>,
+{
+    let mut tries: u32 = 0;
+    loop {
+        match attempt(tries) {
+            Ok(v) => return Ok(v),
+            Err(e) if !e.retryable => return Err(e),
+            Err(e) if tries + 1 >= max_attempts => return Err(e),
+            Err(e) => {
+                tries += 1;
+                let delay = std::time::Duration::from_millis(base_ms.saturating_mul(1 << tries.min(6)));
+                tracing::warn!(tries, error = %e.message, ?delay, "transient runtime install error");
+                let deadline = std::time::Instant::now() + delay;
+                while std::time::Instant::now() < deadline {
+                    if cancel.load(Ordering::Acquire) {
+                        return Err(DlError::fatal("cancelled"));
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+            }
+        }
+    }
 }
 
 /// Extract a wheel into `target_dir`, applying `repackage_target_filename`.
@@ -257,5 +335,58 @@ mod tests {
     #[test]
     fn verify_sha256_rejects_wrong_digest() {
         assert!(verify_sha256(b"hello world", &"00".repeat(32)).is_err());
+    }
+
+    #[test]
+    fn retry_succeeds_on_second_attempt() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let mut calls = 0;
+        let r: Result<u32, DlError> = retry_with_backoff(&cancel, 3, 1, |_attempt| {
+            calls += 1;
+            if calls == 1 { Err(DlError::transient("flaky")) } else { Ok(42) }
+        });
+        assert_eq!(r.expect("eventual success"), 42);
+        assert_eq!(calls, 2);
+    }
+
+    #[test]
+    fn retry_gives_up_after_max_attempts() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let mut calls = 0;
+        let r: Result<(), DlError> = retry_with_backoff(&cancel, 3, 1, |_attempt| {
+            calls += 1;
+            Err(DlError::transient("flaky"))
+        });
+        assert!(r.is_err());
+        assert_eq!(calls, 3);
+    }
+
+    #[test]
+    fn retry_skips_remaining_attempts_on_fatal() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let mut calls = 0;
+        let r: Result<(), DlError> = retry_with_backoff(&cancel, 5, 1, |_attempt| {
+            calls += 1;
+            Err(DlError::fatal("404"))
+        });
+        assert!(r.is_err());
+        assert_eq!(calls, 1, "fatal errors must not retry");
+    }
+
+    #[test]
+    fn retry_honours_cancel_during_backoff() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel_inner = cancel.clone();
+        let mut calls = 0;
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(80));
+            cancel_inner.store(true, Ordering::Release);
+        });
+        let r: Result<(), DlError> = retry_with_backoff(&cancel, 5, 500, |_attempt| {
+            calls += 1;
+            Err(DlError::transient("flaky"))
+        });
+        assert!(r.is_err());
+        assert!(calls < 5, "cancel during backoff must short-circuit");
     }
 }
