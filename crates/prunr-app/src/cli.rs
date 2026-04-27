@@ -17,6 +17,12 @@ pub struct Cli {
     #[arg(short = 'o', long)]
     pub output: Option<PathBuf>,
 
+    /// Launch GUI mode with this image pre-loaded (skips the file picker).
+    /// Useful for shortcuts ("Open with Prunr…") and for the test harness,
+    /// which needs to land an image without driving a modal file dialog.
+    #[arg(long, value_name = "PATH")]
+    pub open: Option<PathBuf>,
+
     /// Model: silueta (fast, default) or u2net (quality).
     #[arg(short = 'm', long, default_value = "silueta")]
     pub model: CliModel,

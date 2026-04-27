@@ -246,7 +246,7 @@ impl PrunrApp {
         worker_tx: mpsc::Sender<WorkerMessage>,
         worker_rx: mpsc::Receiver<WorkerResult>,
     ) -> Self {
-        Self {
+        let app = Self {
             state: AppState::Empty,
             loaded_filename: None,
             last_open_dir: None,
@@ -289,7 +289,23 @@ impl PrunrApp {
                 egui::vec2(theme::SPACE_SM, theme::STATUS_BAR_HEIGHT + theme::SPACE_SM),
             ),
             drag_export: super::drag_export_state::DragExportState::new(),
+        };
+        // `--open <path>` (or PRUNR_OPEN_FILE env var) — pre-load on launch.
+        // Reads the env once; clears it so a child subprocess doesn't inherit
+        // and re-load again on a worker spawn.
+        let preload = std::env::var_os("PRUNR_OPEN_FILE")
+            .filter(|s| !s.is_empty())
+            .map(PathBuf::from);
+        // Safety: we're still in `new`, before any worker thread spawns.
+        unsafe { std::env::remove_var("PRUNR_OPEN_FILE"); }
+        if let Some(path) = preload {
+            let name = path.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("untitled")
+                .to_string();
+            let _ = app.batch.bg_io.file_load_tx.send((path, name));
         }
+        app
     }
 
     fn set_temporary_status(&mut self, text: impl Into<String>) {
