@@ -193,17 +193,18 @@ pub fn apply_background_image(
 ) {
     let (fw, fh) = (img.width(), img.height());
     let bg_full = build_bg_layer(bg, fw, fh, fit);
+    let raw_bg = bg_full.as_raw();
     let raw = img.as_mut();
     for (i, pixel) in raw.chunks_mut(4).enumerate() {
         let a = pixel[3] as f32 / 255.0;
         if a >= 1.0 { continue; }
         let bi = i * 4;
-        let bg_a = bg_full[bi + 3] as f32 / 255.0;
+        let bg_a = raw_bg[bi + 3] as f32 / 255.0;
         if bg_a <= 0.0 { continue; }
         let inv = (1.0 - a) * bg_a;
-        pixel[0] = (pixel[0] as f32 * a + bg_full[bi] as f32 * inv) as u8;
-        pixel[1] = (pixel[1] as f32 * a + bg_full[bi + 1] as f32 * inv) as u8;
-        pixel[2] = (pixel[2] as f32 * a + bg_full[bi + 2] as f32 * inv) as u8;
+        pixel[0] = (pixel[0] as f32 * a + raw_bg[bi] as f32 * inv) as u8;
+        pixel[1] = (pixel[1] as f32 * a + raw_bg[bi + 1] as f32 * inv) as u8;
+        pixel[2] = (pixel[2] as f32 * a + raw_bg[bi + 2] as f32 * inv) as u8;
         pixel[3] = ((a + inv) * 255.0).min(255.0) as u8;
     }
 }
@@ -215,9 +216,9 @@ fn build_bg_layer(
     dst_w: u32,
     dst_h: u32,
     fit: crate::types::BgImageFit,
-) -> Vec<u8> {
+) -> RgbaImage {
     use crate::types::BgImageFit;
-    let mut out = vec![0u8; (dst_w * dst_h * 4) as usize];
+    let mut out = RgbaImage::new(dst_w, dst_h);
     let (sw, sh) = (bg.width(), bg.height());
     if sw == 0 || sh == 0 || dst_w == 0 || dst_h == 0 {
         return out;
@@ -230,92 +231,47 @@ fn build_bg_layer(
             let scaled = resize_rgb_lanczos3(bg, scaled_w, scaled_h);
             let (ox, oy) = ((scaled_w - dst_w) / 2, (scaled_h - dst_h) / 2);
             let cropped = image::imageops::crop_imm(&scaled, ox, oy, dst_w, dst_h).to_image();
-            blit_rgb_full(&mut out, dst_w, &cropped);
+            image::imageops::replace(&mut out, &rgb_to_rgba(&cropped), 0, 0);
         }
         BgImageFit::Stretch => {
             let scaled = resize_rgb_lanczos3(bg, dst_w, dst_h);
-            blit_rgb_full(&mut out, dst_w, &scaled);
+            image::imageops::replace(&mut out, &rgb_to_rgba(&scaled), 0, 0);
         }
         BgImageFit::Contain => {
             let scale = (dst_w as f32 / sw as f32).min(dst_h as f32 / sh as f32);
             let inner_w = ((sw as f32 * scale).round() as u32).max(1).min(dst_w);
             let inner_h = ((sh as f32 * scale).round() as u32).max(1).min(dst_h);
             let scaled = resize_rgb_lanczos3(bg, inner_w, inner_h);
-            let ox = (dst_w - inner_w) / 2;
-            let oy = (dst_h - inner_h) / 2;
-            blit_rgb_at(&mut out, dst_w, dst_h, &scaled, ox, oy);
+            let ox = ((dst_w - inner_w) / 2) as i64;
+            let oy = ((dst_h - inner_h) / 2) as i64;
+            image::imageops::replace(&mut out, &rgb_to_rgba(&scaled), ox, oy);
         }
         BgImageFit::Center => {
             let inner_w = sw.min(dst_w);
             let inner_h = sh.min(dst_h);
-            let src_x = (sw.saturating_sub(dst_w)) / 2;
-            let src_y = (sh.saturating_sub(dst_h)) / 2;
+            let src_x = sw.saturating_sub(dst_w) / 2;
+            let src_y = sh.saturating_sub(dst_h) / 2;
             let cropped = image::imageops::crop_imm(&bg.to_rgb8(), src_x, src_y, inner_w, inner_h).to_image();
-            let ox = (dst_w - inner_w) / 2;
-            let oy = (dst_h - inner_h) / 2;
-            blit_rgb_at(&mut out, dst_w, dst_h, &cropped, ox, oy);
+            let ox = ((dst_w - inner_w) / 2) as i64;
+            let oy = ((dst_h - inner_h) / 2) as i64;
+            image::imageops::replace(&mut out, &rgb_to_rgba(&cropped), ox, oy);
         }
         BgImageFit::Tile => {
-            let bg_rgb = bg.to_rgb8();
-            for y in 0..dst_h {
-                let sy = (y % sh) as usize * sw as usize * 3;
-                let row_dst = (y * dst_w * 4) as usize;
-                for x in 0..dst_w {
-                    let sx = (x % sw) as usize * 3;
-                    let s = sy + sx;
-                    let d = row_dst + (x * 4) as usize;
-                    out[d] = bg_rgb.as_raw()[s];
-                    out[d + 1] = bg_rgb.as_raw()[s + 1];
-                    out[d + 2] = bg_rgb.as_raw()[s + 2];
-                    out[d + 3] = 255;
-                }
-            }
+            image::imageops::tile(&mut out, &bg.to_rgba8());
         }
     }
     out
 }
 
-/// Stamp an RGB image into a full-frame RGBA buffer (alpha=255 everywhere).
-fn blit_rgb_full(out: &mut [u8], dst_w: u32, rgb: &image::RgbImage) {
-    let raw = rgb.as_raw();
-    for (i, chunk) in out.chunks_mut(4).enumerate() {
-        let s = i * 3;
-        chunk[0] = raw[s];
-        chunk[1] = raw[s + 1];
-        chunk[2] = raw[s + 2];
-        chunk[3] = 255;
+/// Lift an opaque RGB image into an RGBA buffer (alpha=255). Required for
+/// `imageops::replace` whose top + bottom buffers must share a pixel type.
+fn rgb_to_rgba(rgb: &image::RgbImage) -> RgbaImage {
+    let (w, h) = (rgb.width(), rgb.height());
+    let mut out = Vec::with_capacity((w * h * 4) as usize);
+    for px in rgb.pixels() {
+        out.extend_from_slice(&[px[0], px[1], px[2], 255]);
     }
-    let _ = dst_w; // signature consistent with blit_rgb_at
-}
-
-/// Stamp `rgb` (sized inner_w×inner_h) into the RGBA buffer at offset (ox, oy).
-/// Pixels outside the stamp keep their existing values (typically alpha=0).
-fn blit_rgb_at(
-    out: &mut [u8],
-    dst_w: u32,
-    dst_h: u32,
-    rgb: &image::RgbImage,
-    ox: u32,
-    oy: u32,
-) {
-    let (iw, ih) = (rgb.width(), rgb.height());
-    let raw = rgb.as_raw();
-    for y in 0..ih {
-        let dst_y = oy + y;
-        if dst_y >= dst_h { break; }
-        let src_row = (y * iw * 3) as usize;
-        let dst_row = (dst_y * dst_w * 4) as usize;
-        for x in 0..iw {
-            let dst_x = ox + x;
-            if dst_x >= dst_w { break; }
-            let s = src_row + (x * 3) as usize;
-            let d = dst_row + (dst_x * 4) as usize;
-            out[d] = raw[s];
-            out[d + 1] = raw[s + 1];
-            out[d + 2] = raw[s + 2];
-            out[d + 3] = 255;
-        }
-    }
+    RgbaImage::from_raw(w, h, out).expect("dims preserved from src")
 }
 
 /// Encode an RgbaImage as PNG bytes with fast compression.
