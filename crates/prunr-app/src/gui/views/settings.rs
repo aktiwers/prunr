@@ -329,20 +329,28 @@ fn render_hardware_section(ui: &mut egui::Ui, app: &mut PrunrApp) {
             .color(theme::TEXT_SECONDARY).size(theme::FONT_SIZE_MONO));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let busy = app.runtime_install.is_some();
-            if installed {
-                if !busy && ui.button(RichText::new("Uninstall")
+            if busy {
+                if ui.button(RichText::new("Cancel")
+                    .color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY)).clicked() {
+                    if let Some(p) = app.runtime_install.as_ref() {
+                        p.cancel.store(true, std::sync::atomic::Ordering::Release);
+                    }
+                }
+            } else if installed {
+                if ui.button(RichText::new("Uninstall")
                     .color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY)).clicked() {
                     match crate::runtime_install::uninstall(rt) {
                         Ok(()) => { app.toasts.success(format!("{} removed", rt.display_name())); }
                         Err(e) => { app.toasts.error(format!("Uninstall failed: {e}")); }
                     }
                 }
-            } else if !busy && ui.button(RichText::new("Install")
+            } else if ui.button(RichText::new("Install")
                 .color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY)).clicked() {
-                let rx = start_install(rt);
+                let h = start_install(rt);
                 app.runtime_install = Some(crate::gui::app::RuntimeInstallProgress {
                     runtime: rt,
-                    rx,
+                    rx: h.events,
+                    cancel: h.cancel,
                     last_event: InstallEvent::Preparing,
                 });
             }
