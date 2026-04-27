@@ -1,53 +1,38 @@
 #!/usr/bin/env python3
 """
-Export an LCM-distilled SD 1.5 Inpaint pipeline to 4 ONNX files.
+Export LCM-distilled SD 1.5 Inpaint to 4 ONNX files via direct torch.onnx.
 
-Output layout matches the existing SD 1.5 Inpaint bundle so prunr's
-dispatcher can swap backends with no per-file routing changes:
+The earlier optimum-based exporter has API drift with diffusers >= 0.30
+(NormalizedConfig.__init__ kwargs clash). We drive each part by hand
+through torch.onnx.export — same idiom as scripts/export_taesd.py —
+which sidesteps optimum entirely.
 
+Output:
     text_encoder.onnx
     vae_encoder.onnx
     vae_decoder.onnx
     unet.onnx
 
-The LCM-LoRA (https://huggingface.co/latent-consistency/lcm-lora-sdv1-5)
-is a small adapter that modifies SD 1.5 to converge in ~4 timesteps
-instead of 20-30. We merge the LoRA weights into the base SD 1.5
-Inpaint UNet at fp16 precision (~860M params) and export the result.
+Run on a host with:
+- diffusers, transformers, peft, torch, onnx
+- ~8 GB free disk during export
+- ~6 GB free RAM (UNet is ~860M params at FP16)
 
-Run on a machine with:
-- Python 3.10+
-- diffusers, transformers, torch, peft
-- ~8 GB free RAM during export
-- ~5 GB free disk for the FP16 ONNX bundle
-
-Output goes into  ./out/sd-15-lcm-inpaint-fp16/ . Upload that
-directory's contents to your prunr GitHub release as the SdV15LcmInpaintFp16
-multi-part bundle.
+The LCM-LoRA (latent-consistency/lcm-lora-sdv1-5) is FUSED into the
+base inpaint UNet before export so the runtime side has nothing
+LoRA-aware to deal with.
 
 Usage:
-    pip install diffusers transformers torch peft accelerate optimum onnx onnxruntime
+    pip install diffusers transformers peft torch onnx accelerate
     python scripts/export_lcm_inpaint.py
-
-Notes:
-- The base inpaint checkpoint is `runwayml/stable-diffusion-inpainting`.
-  If that's gated, swap in `botp/stable-diffusion-v1-5-inpainting` (mirror).
-- The LCM-LoRA is `latent-consistency/lcm-lora-sdv1-5`.
-- Both are FP16. Mixed-precision is intentional: text_encoder and VAE
-  stay FP32 to avoid color-shift artifacts at the [-1, 1] boundary;
-  UNet (the bottleneck) is FP16.
-- `optimum-cli export onnx` would handle this in one shot if HuggingFace
-  ever ships an LCM-aware exporter; until then we drive it manually so
-  the LoRA-merge step happens before the conversion.
 """
 
-import os
+import hashlib
 import sys
-import shutil
 from pathlib import Path
 
 OUT_DIR = Path("out/sd-15-lcm-inpaint-fp16")
-BASE_INPAINT = "runwayml/stable-diffusion-inpainting"
+BASE_INPAINT = "botp/stable-diffusion-v1-5-inpainting"
 LCM_LORA = "latent-consistency/lcm-lora-sdv1-5"
 
 
@@ -56,18 +41,14 @@ def main() -> int:
     require("diffusers")
     require("transformers")
     require("peft")
-    require("optimum")
     require("onnx")
 
     import torch
-    from diffusers import StableDiffusionInpaintPipeline, LCMScheduler
-    from optimum.exporters.onnx import main_export
+    from diffusers import StableDiffusionInpaintPipeline
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    print(f"[1/4] Loading base inpaint pipeline: {BASE_INPAINT}")
-    # FP16 throughout the pipeline. CPU-only export is fine and avoids
-    # CUDA driver ambiguity; ONNX export does its own tracing pass.
+    print(f"[1/6] Loading base inpaint pipeline: {BASE_INPAINT}")
     pipe = StableDiffusionInpaintPipeline.from_pretrained(
         BASE_INPAINT,
         torch_dtype=torch.float16,
@@ -76,89 +57,107 @@ def main() -> int:
         requires_safety_checker=False,
     )
 
-    print(f"[2/4] Loading LCM-LoRA: {LCM_LORA}")
+    print(f"[2/6] Loading LCM-LoRA: {LCM_LORA}")
     pipe.load_lora_weights(LCM_LORA)
 
-    print("[3/4] Fusing LoRA weights into UNet (in-place)…")
-    # `fuse_lora` bakes the LoRA delta into the base UNet weights so we
-    # can ONNX-export without needing the LoRA adapter at runtime.
-    # Without this, the exporter trips over the PEFT modules.
+    print("[3/6] Fusing LoRA into UNet…")
     pipe.fuse_lora()
     pipe.unload_lora_weights()
+    pipe = pipe.to("cpu")
 
-    pipe.scheduler = LCMScheduler.from_config(pipe.scheduler.config)
+    text_encoder = pipe.text_encoder
+    vae = pipe.vae
+    unet = pipe.unet
+    text_encoder.eval(); vae.eval(); unet.eval()
 
-    # Save the merged pipeline to disk so optimum can find a checkpoint
-    # to export. main_export expects a HF model id or local path; the
-    # local-path route avoids a network round-trip on the export pass.
-    merged_dir = OUT_DIR.parent / "_merged_pipeline"
-    if merged_dir.exists():
-        shutil.rmtree(merged_dir)
-    pipe.save_pretrained(merged_dir, safe_serialization=True)
-
-    # Free the python pipeline before invoking the exporter — optimum
-    # loads its own copy and we don't want to hold ~4 GB twice.
-    del pipe
-    import gc
-    gc.collect()
-
-    print(f"[4/4] Exporting to ONNX → {OUT_DIR}")
-    main_export(
-        model_name_or_path=str(merged_dir),
-        output=OUT_DIR,
-        task="stable-diffusion",
-        # SD 1.5 inpaint sample shape — 9-channel UNet input (4 latent +
-        # 1 mask + 4 masked-image latent) at 64x64 latent resolution =
-        # 512x512 image.
-        device="cpu",
-        framework="pt",
-        # FP16 ops for UNet; rest stays FP32 by default, matching our
-        # standard SD bundle's mixed-precision layout.
-        dtype="fp16",
+    print("[4/6] Exporting text_encoder…")
+    sample_ids = torch.zeros(1, 77, dtype=torch.int32)
+    class TextEncWrap(torch.nn.Module):
+        def __init__(self, te): super().__init__(); self.te = te
+        def forward(self, input_ids):
+            return self.te(input_ids=input_ids.to(torch.long)).last_hidden_state
+    torch.onnx.export(
+        TextEncWrap(text_encoder), sample_ids, str(OUT_DIR / "text_encoder.onnx"),
+        input_names=["input_ids"], output_names=["last_hidden_state"], opset_version=17,
+        do_constant_folding=True,
     )
 
-    # Sanity-check the four expected ONNX files actually landed.
-    expected = ["text_encoder", "vae_encoder", "vae_decoder", "unet"]
-    for part in expected:
-        candidates = list(OUT_DIR.rglob(f"*{part}*.onnx"))
-        if not candidates:
-            print(f"  MISSING: {part}.onnx not found in {OUT_DIR}", file=sys.stderr)
-            return 2
-        # Flatten into the bundle root so prunr's loader (which reads
-        # by literal filename) finds them without sub-directory hops.
-        root_target = OUT_DIR / f"{part}.onnx"
-        if candidates[0] != root_target:
-            shutil.move(candidates[0], root_target)
-            print(f"  ✓ {part}.onnx (moved to bundle root)")
-        else:
-            print(f"  ✓ {part}.onnx")
+    print("[5/6] Exporting VAE encoder + decoder…")
+    sample_image = torch.randn(1, 3, 512, 512, dtype=torch.float16)
+    sample_latent = torch.randn(1, 4, 64, 64, dtype=torch.float16)
 
-    # Compute SHA256 of each part for the prunr-models registry entry.
+    class VaeEncWrap(torch.nn.Module):
+        def __init__(self, vae): super().__init__(); self.vae = vae
+        def forward(self, sample):
+            # Diffusers' AutoencoderKL.encode returns AutoencoderKLOutput
+            # whose .latent_dist.sample() is the conventional path. The
+            # caller scales by VAE_SCALING_FACTOR (0.18215) — we mirror
+            # that runtime-side, so the ONNX output here stays unscaled.
+            posterior = self.vae.encode(sample).latent_dist
+            return posterior.mode()
+    torch.onnx.export(
+        VaeEncWrap(vae), sample_image, str(OUT_DIR / "vae_encoder.onnx"),
+        input_names=["sample"], output_names=["latent_sample"], opset_version=17,
+        do_constant_folding=True,
+    )
+
+    class VaeDecWrap(torch.nn.Module):
+        def __init__(self, vae): super().__init__(); self.vae = vae
+        def forward(self, latent_sample):
+            return self.vae.decode(latent_sample).sample
+    torch.onnx.export(
+        VaeDecWrap(vae), sample_latent, str(OUT_DIR / "vae_decoder.onnx"),
+        input_names=["latent_sample"], output_names=["sample"], opset_version=17,
+        do_constant_folding=True,
+    )
+
+    print("[6/6] Exporting UNet (~860M params; ~5 min on CPU)…")
+    # SD 1.5 INPAINT UNet takes 9-channel input: 4 latent + 1 mask + 4 masked-image-latent.
+    sample_unet = torch.randn(1, 9, 64, 64, dtype=torch.float16)
+    timestep = torch.tensor([1], dtype=torch.float16)  # f16 for SD-15-fp16 export
+    encoder_hidden_states = torch.randn(1, 77, 768, dtype=torch.float16)
+
+    class UnetWrap(torch.nn.Module):
+        def __init__(self, unet): super().__init__(); self.unet = unet
+        def forward(self, sample, timestep, encoder_hidden_states):
+            return self.unet(sample, timestep, encoder_hidden_states).sample
+    torch.onnx.export(
+        UnetWrap(unet), (sample_unet, timestep, encoder_hidden_states),
+        str(OUT_DIR / "unet.onnx"),
+        input_names=["sample", "timestep", "encoder_hidden_states"],
+        output_names=["out_sample"], opset_version=17,
+        do_constant_folding=True,
+    )
+
+    # Inline external-data weights so each .onnx is single-file (matches
+    # our loader). torch's exporter writes weights as sidecar .onnx.data
+    # files when models are large; we round-trip through onnx.save with
+    # save_as_external_data=False to fold them in.
+    print("\nInlining external data into single-file ONNX…")
+    import onnx
+    for part in ["text_encoder", "vae_encoder", "vae_decoder", "unet"]:
+        p = OUT_DIR / f"{part}.onnx"
+        m = onnx.load(str(p), load_external_data=True)
+        onnx.save_model(m, str(p), save_as_external_data=False)
+        data = p.with_suffix(".onnx.data")
+        if data.exists(): data.unlink()
+
     print("\n=== SHA256 (paste into prunr-models registry) ===")
-    import hashlib
-    for part in expected:
-        path = OUT_DIR / f"{part}.onnx"
-        h = hashlib.sha256(path.read_bytes()).hexdigest()
-        size_mb = path.stat().st_size / (1024 * 1024)
-        print(f"  {part}.onnx  {size_mb:.1f} MB  {h}")
+    for part in ["text_encoder", "vae_encoder", "vae_decoder", "unet"]:
+        p = OUT_DIR / f"{part}.onnx"
+        h = hashlib.sha256(p.read_bytes()).hexdigest()
+        size = p.stat().st_size
+        print(f"  {part}.onnx  size={size}  sha256={h}")
 
-    # Clean up the intermediate merged pipeline.
-    shutil.rmtree(merged_dir, ignore_errors=True)
     print(f"\nDone. Bundle at {OUT_DIR.resolve()}")
-    print("Upload these 4 .onnx files to your prunr GitHub release.")
     return 0
 
 
 def require(module: str) -> None:
-    """Friendlier failure than ImportError when the user is missing a dep."""
     try:
         __import__(module)
     except ImportError:
-        print(
-            f"error: missing Python package '{module}'.\n"
-            f"  pip install diffusers transformers torch peft accelerate optimum onnx",
-            file=sys.stderr,
-        )
+        print(f"error: missing Python package '{module}'.", file=sys.stderr)
         sys.exit(1)
 
 
