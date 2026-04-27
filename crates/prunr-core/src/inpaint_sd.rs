@@ -158,38 +158,165 @@ pub fn process_inpaint_with(
         )));
     }
 
-    let Some(bbox) = mask_bbox(mask) else {
+    let components = mask_components(mask);
+    if components.is_empty() {
         return Ok(image.clone());
-    };
-    let painted_w = bbox.x_max - bbox.x_min + 1;
-    let painted_h = bbox.y_max - bbox.y_min + 1;
-    if painted_w > SD_TILE || painted_h > SD_TILE {
-        return Err(CoreError::Inference(format!(
-            "SD inpaint: painted region is {painted_w}×{painted_h} pixels, \
-             larger than SD's {SD_TILE}×{SD_TILE} tile. Paint a smaller \
-             area or downscale the image first.",
-        )));
     }
 
     // Local Arc keeps the bundle alive for `run_one_tile` even if the
     // idle sweep drops the cache's clone mid-call.
     let bundle = SdSession::get(id)?;
     let (img_w, img_h) = image.dimensions();
-    let (cx, cy, cw, ch) = compute_sd_crop(&bbox, img_w, img_h);
-    let cropped_img = image::imageops::crop_imm(image, cx, cy, cw, ch).to_image();
-    let cropped_mask = image::imageops::crop_imm(mask, cx, cy, cw, ch).to_image();
-
-    let painted = match run_one_tile(&bundle, &cropped_img, &cropped_mask, &req) {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::error!(%e, "SD inference failed; leaving image unchanged");
-            return Ok(image.clone());
-        }
-    };
-
     let mut out = image.clone();
-    image::imageops::replace(&mut out, &painted, cx as i64, cy as i64);
+
+    for component in &components {
+        let painted_w = component.x_max - component.x_min + 1;
+        let painted_h = component.y_max - component.y_min + 1;
+        if painted_w <= SD_TILE && painted_h <= SD_TILE {
+            // Fast path: single 512×512 crop centred on the component.
+            let (cx, cy, cw, ch) = compute_sd_crop(component, img_w, img_h);
+            let cropped_img = image::imageops::crop_imm(&out, cx, cy, cw, ch).to_image();
+            let cropped_mask = image::imageops::crop_imm(mask, cx, cy, cw, ch).to_image();
+            match run_one_tile(&bundle, &cropped_img, &cropped_mask, &req) {
+                Ok(painted) => image::imageops::replace(&mut out, &painted, cx as i64, cy as i64),
+                Err(e) => tracing::error!(%e, "SD inference failed for component; skipping"),
+            }
+            continue;
+        }
+
+        // Tile path: component exceeds 512×512 in some axis. Split into
+        // overlapping 512×512 tiles and alpha-blend the seams.
+        let tiles = tile_bbox(component, img_w, img_h);
+        tracing::info!(
+            comp = ?component, n_tiles = tiles.len(),
+            "SD: tiling oversized component",
+        );
+        for tile in tiles {
+            let cropped_img = image::imageops::crop_imm(&out, tile.x, tile.y, tile.w, tile.h).to_image();
+            let cropped_mask = image::imageops::crop_imm(mask, tile.x, tile.y, tile.w, tile.h).to_image();
+            match run_one_tile(&bundle, &cropped_img, &cropped_mask, &req) {
+                Ok(painted) => blend_tile(&mut out, &painted, &tile),
+                Err(e) => tracing::error!(%e, ?tile, "SD inference failed for tile; skipping"),
+            }
+        }
+    }
     Ok(out)
+}
+
+/// Width of the seam-blend ramp between adjacent tiles. 25% of SD_TILE
+/// gives a smooth fade; lower values risk a visible grid edge, higher
+/// values waste compute (more overlap = more tiles per bbox).
+const TILE_OVERLAP_PX: u32 = SD_TILE / 4;
+/// Distance the tile anchor advances per step. SD_TILE - overlap so
+/// adjacent tiles share a TILE_OVERLAP_PX column/row.
+const TILE_STEP_PX: u32 = SD_TILE - TILE_OVERLAP_PX;
+
+#[derive(Debug, Clone, Copy)]
+struct TileWindow {
+    x: u32, y: u32, w: u32, h: u32,
+    /// True iff this edge abuts another tile (i.e. needs feathering).
+    /// Edges at the bbox/image boundary stay full-strength.
+    feather_left: bool,
+    feather_right: bool,
+    feather_top: bool,
+    feather_bottom: bool,
+}
+
+/// Split an oversized bbox into 512×512 tiles with TILE_OVERLAP_PX
+/// overlap between neighbours. Tiles always anchor inside the image
+/// (no out-of-bounds access at composite time) — for image axes
+/// shorter than SD_TILE, the tile width/height collapses to the image
+/// extent and pad_to_tile handles the rest at the ORT boundary.
+fn tile_bbox(bbox: &MaskBbox, img_w: u32, img_h: u32) -> Vec<TileWindow> {
+    let span_x = bbox.x_max - bbox.x_min + 1;
+    let span_y = bbox.y_max - bbox.y_min + 1;
+
+    let n_x = tile_count(span_x);
+    let n_y = tile_count(span_y);
+
+    let tile_w = SD_TILE.min(img_w);
+    let tile_h = SD_TILE.min(img_h);
+
+    let max_anchor_x = img_w.saturating_sub(tile_w);
+    let max_anchor_y = img_h.saturating_sub(tile_h);
+
+    let mut tiles = Vec::with_capacity((n_x as usize) * (n_y as usize));
+    for j in 0..n_y {
+        for i in 0..n_x {
+            let x_raw = bbox.x_min + i * TILE_STEP_PX;
+            let y_raw = bbox.y_min + j * TILE_STEP_PX;
+            let x = x_raw.min(max_anchor_x);
+            let y = y_raw.min(max_anchor_y);
+            tiles.push(TileWindow {
+                x, y, w: tile_w, h: tile_h,
+                feather_left: i > 0,
+                feather_right: i + 1 < n_x,
+                feather_top: j > 0,
+                feather_bottom: j + 1 < n_y,
+            });
+        }
+    }
+    tiles
+}
+
+fn tile_count(span: u32) -> u32 {
+    if span <= SD_TILE { 1 }
+    else {
+        // Number of step-advances needed beyond the first tile, ceiling.
+        let extra = span - SD_TILE;
+        extra.div_ceil(TILE_STEP_PX) + 1
+    }
+}
+
+/// Composite a painted tile into `canvas` with linear-alpha feathering
+/// at edges that abut neighbour tiles. Outside the feather zones the
+/// painted tile fully replaces the canvas; inside, it ramps from 0 at
+/// the tile edge to 1 at TILE_OVERLAP_PX into the tile.
+///
+/// For non-masked pixels the feather is a no-op anyway (both source
+/// and painted carry identical pixels via run_one_tile's composite),
+/// so we don't need to know the mask here — we just blend everything.
+fn blend_tile(canvas: &mut image::RgbaImage, painted: &image::RgbaImage, tile: &TileWindow) {
+    let cw = canvas.width();
+    let pw = painted.width();
+    let raw_canvas = canvas.as_mut();
+    let raw_painted = painted.as_raw();
+
+    for y in 0..tile.h {
+        let alpha_y = edge_alpha(y, tile.h, tile.feather_top, tile.feather_bottom);
+        for x in 0..tile.w {
+            let alpha_x = edge_alpha(x, tile.w, tile.feather_left, tile.feather_right);
+            let a = alpha_x.min(alpha_y);
+            if a >= 1.0 {
+                // Full replace — copy source bytes, skip the lerp.
+                let src = ((y * pw + x) * 4) as usize;
+                let dst = (((tile.y + y) * cw + (tile.x + x)) * 4) as usize;
+                raw_canvas[dst..dst + 4].copy_from_slice(&raw_painted[src..src + 4]);
+            } else {
+                let src = ((y * pw + x) * 4) as usize;
+                let dst = (((tile.y + y) * cw + (tile.x + x)) * 4) as usize;
+                let inv = 1.0 - a;
+                for k in 0..3 {
+                    let canv = raw_canvas[dst + k] as f32;
+                    let pnt = raw_painted[src + k] as f32;
+                    raw_canvas[dst + k] = (canv * inv + pnt * a).round().clamp(0.0, 255.0) as u8;
+                }
+                // Alpha stays at painted (run_one_tile already set 255).
+                raw_canvas[dst + 3] = raw_painted[src + 3];
+            }
+        }
+    }
+}
+
+/// Linear ramp from 0 at the feathered edge(s) to 1 once we're more
+/// than TILE_OVERLAP_PX in. When neither edge is feathered, returns 1.
+fn edge_alpha(pos: u32, length: u32, feather_lo: bool, feather_hi: bool) -> f32 {
+    let f = TILE_OVERLAP_PX as f32;
+    let a_lo = if feather_lo { (pos as f32 / f).min(1.0) } else { 1.0 };
+    let a_hi = if feather_hi {
+        ((length.saturating_sub(pos + 1)) as f32 / f).min(1.0)
+    } else { 1.0 };
+    a_lo.min(a_hi)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -197,23 +324,67 @@ struct MaskBbox {
     x_min: u32, y_min: u32, x_max: u32, y_max: u32,
 }
 
-fn mask_bbox(mask: &GrayImage) -> Option<MaskBbox> {
+/// Find the bounding box of every disjoint painted region in `mask`
+/// (4-connectivity, threshold > 127). Each returned bbox is the tight
+/// rectangle around one connected component — disjoint strokes get
+/// individual bboxes so the SD dispatcher can run smart-crop on each
+/// instead of one giant bbox spanning unpainted gap.
+///
+/// Iterative BFS (no recursion) so a 4096×4096 component doesn't blow
+/// the stack. `visited` is a packed Vec<bool> sized to the mask: 4MP
+/// allocates ~4MB transiently, freed when this returns.
+fn mask_components(mask: &GrayImage) -> Vec<MaskBbox> {
     let (w, h) = mask.dimensions();
     let raw = mask.as_raw();
-    let (mut x_min, mut y_min) = (u32::MAX, u32::MAX);
-    let (mut x_max, mut y_max) = (0u32, 0u32);
-    for y in 0..h {
-        let row = (y * w) as usize;
-        for x in 0..w {
-            if raw[row + x as usize] > 127 {
-                if x < x_min { x_min = x; }
-                if x > x_max { x_max = x; }
-                if y < y_min { y_min = y; }
-                if y > y_max { y_max = y; }
+    let mut visited = vec![false; (w as usize) * (h as usize)];
+    let mut components = Vec::new();
+    let mut queue: std::collections::VecDeque<(u32, u32)> = std::collections::VecDeque::new();
+
+    for sy in 0..h {
+        for sx in 0..w {
+            let s_idx = (sy as usize) * (w as usize) + (sx as usize);
+            if visited[s_idx] || raw[s_idx] <= 127 {
+                continue;
             }
+            visited[s_idx] = true;
+            queue.push_back((sx, sy));
+            let mut bbox = MaskBbox { x_min: sx, y_min: sy, x_max: sx, y_max: sy };
+            while let Some((x, y)) = queue.pop_front() {
+                if x < bbox.x_min { bbox.x_min = x; }
+                if x > bbox.x_max { bbox.x_max = x; }
+                if y < bbox.y_min { bbox.y_min = y; }
+                if y > bbox.y_max { bbox.y_max = y; }
+                // 4-connectivity: up / down / left / right.
+                if x > 0 {
+                    push_if_unvisited(x - 1, y, w, raw, &mut visited, &mut queue);
+                }
+                if x + 1 < w {
+                    push_if_unvisited(x + 1, y, w, raw, &mut visited, &mut queue);
+                }
+                if y > 0 {
+                    push_if_unvisited(x, y - 1, w, raw, &mut visited, &mut queue);
+                }
+                if y + 1 < h {
+                    push_if_unvisited(x, y + 1, w, raw, &mut visited, &mut queue);
+                }
+            }
+            components.push(bbox);
         }
     }
-    if x_min == u32::MAX { None } else { Some(MaskBbox { x_min, y_min, x_max, y_max }) }
+    components
+}
+
+#[inline]
+fn push_if_unvisited(
+    x: u32, y: u32, w: u32,
+    raw: &[u8], visited: &mut [bool],
+    queue: &mut std::collections::VecDeque<(u32, u32)>,
+) {
+    let idx = (y as usize) * (w as usize) + (x as usize);
+    if !visited[idx] && raw[idx] > 127 {
+        visited[idx] = true;
+        queue.push_back((x, y));
+    }
 }
 
 /// Centre an SD_TILE-sized crop on the bbox centre, clamped to image
@@ -1351,28 +1522,116 @@ mod tests {
     }
 
     #[test]
-    fn mask_bbox_returns_none_on_empty_mask() {
+    fn mask_components_returns_empty_for_empty_mask() {
         let m = GrayImage::new(64, 64);
-        assert!(mask_bbox(&m).is_none());
+        assert!(mask_components(&m).is_empty());
     }
 
     #[test]
-    fn mask_bbox_returns_painted_extents() {
+    fn mask_components_separates_disjoint_regions() {
+        // Two clearly-disjoint blobs in opposite corners.
         let mut m = GrayImage::new(64, 64);
-        m.put_pixel(10, 20, Luma([255]));
-        m.put_pixel(30, 25, Luma([200]));
-        m.put_pixel(15, 50, Luma([255]));
-        let b = mask_bbox(&m).expect("bbox");
-        assert_eq!(b, MaskBbox { x_min: 10, y_min: 20, x_max: 30, y_max: 50 });
+        m.put_pixel(5, 5, Luma([255]));
+        m.put_pixel(6, 5, Luma([255]));
+        m.put_pixel(5, 6, Luma([255]));
+        m.put_pixel(50, 55, Luma([255]));
+        m.put_pixel(51, 55, Luma([255]));
+        let comps = mask_components(&m);
+        assert_eq!(comps.len(), 2, "expected two components, got {comps:?}");
+        // Components are returned in scan order; first component is upper-left.
+        assert!(comps[0].x_max <= 10);
+        assert!(comps[1].x_min >= 40);
     }
 
     #[test]
-    fn mask_bbox_ignores_below_threshold_pixels() {
+    fn mask_components_treats_4_connected_pixels_as_one() {
+        let mut m = GrayImage::new(16, 16);
+        // L-shape: connected via shared edges (4-connectivity).
+        m.put_pixel(2, 2, Luma([255]));
+        m.put_pixel(3, 2, Luma([255]));
+        m.put_pixel(3, 3, Luma([255]));
+        m.put_pixel(3, 4, Luma([255]));
+        let comps = mask_components(&m);
+        assert_eq!(comps.len(), 1);
+        assert_eq!(comps[0], MaskBbox { x_min: 2, y_min: 2, x_max: 3, y_max: 4 });
+    }
+
+    #[test]
+    fn mask_components_diagonal_pixels_are_separate_under_4_connectivity() {
+        let mut m = GrayImage::new(16, 16);
+        m.put_pixel(2, 2, Luma([255]));
+        m.put_pixel(3, 3, Luma([255])); // diagonal-only neighbour
+        let comps = mask_components(&m);
+        assert_eq!(comps.len(), 2, "diagonal-only adjacency should split");
+    }
+
+    #[test]
+    fn tile_count_single_when_under_sd_tile() {
+        assert_eq!(tile_count(SD_TILE), 1);
+        assert_eq!(tile_count(SD_TILE - 1), 1);
+        assert_eq!(tile_count(100), 1);
+    }
+
+    #[test]
+    fn tile_count_grows_with_span_at_step_granularity() {
+        // span = SD_TILE + 1 → needs 2 tiles (overlap)
+        assert_eq!(tile_count(SD_TILE + 1), 2);
+        // span = SD_TILE + TILE_STEP_PX → 2 tiles (last tile's right edge
+        // aligns with span end)
+        assert_eq!(tile_count(SD_TILE + TILE_STEP_PX), 2);
+        // span = SD_TILE + TILE_STEP_PX + 1 → 3 tiles
+        assert_eq!(tile_count(SD_TILE + TILE_STEP_PX + 1), 3);
+    }
+
+    #[test]
+    fn tile_bbox_single_for_small_component() {
+        let bbox = MaskBbox { x_min: 100, y_min: 100, x_max: 300, y_max: 300 };
+        let tiles = tile_bbox(&bbox, 4096, 4096);
+        assert_eq!(tiles.len(), 1);
+        let t = &tiles[0];
+        assert!(!t.feather_left && !t.feather_right);
+        assert!(!t.feather_top && !t.feather_bottom);
+    }
+
+    #[test]
+    fn tile_bbox_grids_a_large_component() {
+        // 1500×400 bbox → 4 tiles wide × 1 tile tall (400 ≤ SD_TILE).
+        // span 1500, step 384, tile 512: tiles at 0, 384, 768, 1152;
+        // last tile reaches 1664 ≥ span, so 4 tiles cover it.
+        let bbox = MaskBbox { x_min: 100, y_min: 100, x_max: 1599, y_max: 499 };
+        let tiles = tile_bbox(&bbox, 4096, 4096);
+        assert_eq!(tiles.len(), 4, "expected 4 tiles, got {}", tiles.len());
+        // Middle tiles feather on both horizontal edges.
+        assert!(!tiles[0].feather_left && tiles[0].feather_right);
+        assert!(tiles[1].feather_left && tiles[1].feather_right);
+        assert!(tiles[2].feather_left && tiles[2].feather_right);
+        assert!(tiles[3].feather_left && !tiles[3].feather_right);
+        // None feather vertically since only 1 row.
+        for t in &tiles {
+            assert!(!t.feather_top && !t.feather_bottom);
+        }
+    }
+
+    #[test]
+    fn edge_alpha_is_one_in_centre_and_zero_at_feathered_edge() {
+        // No feathering → always 1.
+        assert_eq!(edge_alpha(0, 512, false, false), 1.0);
+        assert_eq!(edge_alpha(256, 512, false, false), 1.0);
+        // Left feather only: 0 at x=0, ramps to 1 at x=TILE_OVERLAP_PX.
+        assert!(edge_alpha(0, 512, true, false) < 0.01);
+        assert_eq!(edge_alpha(TILE_OVERLAP_PX, 512, true, false), 1.0);
+        // Both feathers: still 1 in the centre.
+        assert_eq!(edge_alpha(SD_TILE / 2, SD_TILE, true, true), 1.0);
+    }
+
+    #[test]
+    fn mask_components_ignores_below_threshold_pixels() {
         let mut m = GrayImage::new(16, 16);
         m.put_pixel(5, 5, Luma([100])); // below 127 threshold
         m.put_pixel(8, 8, Luma([200]));
-        let b = mask_bbox(&m).expect("bbox");
-        assert_eq!(b, MaskBbox { x_min: 8, y_min: 8, x_max: 8, y_max: 8 });
+        let comps = mask_components(&m);
+        assert_eq!(comps.len(), 1);
+        assert_eq!(comps[0], MaskBbox { x_min: 8, y_min: 8, x_max: 8, y_max: 8 });
     }
 
     #[test]
