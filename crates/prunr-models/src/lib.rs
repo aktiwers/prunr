@@ -351,6 +351,44 @@ pub const REGISTRY: &[ModelDescriptor] = &[
     // ModelId so the dispatcher compiles, but `descriptor()` returns
     // None for it — `dispatch_inpaint_for_item` checks `is_available`
     // and falls back to standard SD when LCM isn't installed.
+    //
+    // TAESD FP16: Tiny distilled VAE for SD 1.5. ~2.4 MB encoder + ~2.5
+    // MB decoder. Released at https://github.com/aktiwers/prunr/releases/tag/taesd-v1.0.0.
+    // Used as the VAE backend when fast mode + LCM are both active.
+    ModelDescriptor {
+        id: ModelId::TaesdFp16,
+        display_name: "TAESD VAE (fast SD)",
+        description: "Tiny distilled VAE for SD 1.5 fast mode. ~3\u{00d7} faster decode at slight quality cost.",
+        category: ModelCategory::Inpaint,
+        source: ModelSource::MultiPartOnDemand {
+            subdir: "taesd-fp16-1.0.0",
+            parts: &[
+                ModelPart {
+                    key: "encoder",
+                    filename: "encoder.onnx",
+                    url: "https://github.com/aktiwers/prunr/releases/download/taesd-v1.0.0/encoder.onnx",
+                    sha256: "e60041ed5718ff2dd5d3bff24be82e07c9e26b10850b5837468f7bd352625f98",
+                    size_bytes: 2463603,
+                },
+                ModelPart {
+                    key: "decoder",
+                    filename: "decoder.onnx",
+                    url: "https://github.com/aktiwers/prunr/releases/download/taesd-v1.0.0/decoder.onnx",
+                    sha256: "4219d97c8bac63a18467ea47768545edcb15f554bfecadc1bed1fb70b8882304",
+                    size_bytes: 2632309,
+                },
+            ],
+            license: LicenseInfo {
+                license: "MIT",
+                license_url: "https://github.com/madebyollin/taesd/blob/main/LICENSE",
+                source_url: "https://github.com/madebyollin/taesd",
+            },
+            license_acceptance_required: false,
+        },
+        version: "1.0.0",
+        gpu: GpuRequirement::None,
+        incompatible_eps: &[],
+    },
 ];
 
 pub fn descriptor(id: ModelId) -> Option<&'static ModelDescriptor> {
