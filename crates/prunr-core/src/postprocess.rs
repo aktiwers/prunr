@@ -141,7 +141,7 @@ fn tensor_to_mask_core(raw: ArrayView4<f32>, ow: u32, oh: u32, rgba_for_guided: 
     // BEFORE resize/refine — so the gamma slider modulates the painted
     // regions and the guided filter snaps stroke edges to color edges.
     if let Some(corr) = correction {
-        crate::brush::apply_correction(&mut normalized, corr);
+        crate::brush::apply_correction(&mut normalized, sw, sh, corr);
     }
 
     // Apply gamma + threshold and quantize to u8.

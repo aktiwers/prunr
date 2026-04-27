@@ -6,7 +6,7 @@
 use prunr_core::brush::{paint_circle, paint_line, paint_square, BrushMode, BrushShape, MaskCorrection, Stamp};
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BrushSettings {
     pub radius: f32,
@@ -37,10 +37,24 @@ pub struct BrushSettings {
     /// fills; erosion preserves more original detail at the boundary.
     #[serde(default = "default_grow")]
     pub inpaint_grow: f32,
+    /// SD-only: text prompt for the inpainted region. Empty = unconditional
+    /// (poor quality on flat surrounds — see `inpaint_sd` module docs).
+    #[serde(default)]
+    pub sd_prompt: String,
+    /// SD-only: negative prompt — content to push *away* from. Useful
+    /// for suppressing the patterned-noise failure mode on uniform regions.
+    #[serde(default)]
+    pub sd_negative_prompt: String,
+    /// SD-only: classifier-free guidance scale. 1.0 = no CFG (cond pass
+    /// only). 7.5 is the typical SD-1.5 prompt strength. >1 doubles UNet
+    /// cost per step (cond + uncond passes blended).
+    #[serde(default = "default_cfg")]
+    pub sd_guidance_scale: f32,
 }
 
 fn default_feather() -> f32 { 4.0 }
 fn default_grow() -> f32 { 2.0 }
+fn default_cfg() -> f32 { 1.0 }
 
 impl Default for BrushSettings {
     fn default() -> Self {
@@ -53,6 +67,9 @@ impl Default for BrushSettings {
             inpaint_sharpen: 0.6,
             inpaint_feather: default_feather(),
             inpaint_grow: default_grow(),
+            sd_prompt: String::new(),
+            sd_negative_prompt: String::new(),
+            sd_guidance_scale: default_cfg(),
         }
     }
 }

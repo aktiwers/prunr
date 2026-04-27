@@ -151,19 +151,11 @@ pub fn process_inpaint_with(
             mask.dimensions(),
         )));
     }
-    if !req.prompt.is_empty() || !req.negative_prompt.is_empty() {
-        return Err(CoreError::Inference(
-            "sd inpaint: text prompts not yet wired (CLIP BPE tokenizer pending). \
-             Leave prompt + negative_prompt empty for unconditional inpaint."
-                .to_string(),
-        ));
-    }
-    if (req.guidance_scale - 1.0).abs() > 1e-3 {
-        return Err(CoreError::Inference(
-            "sd inpaint: classifier-free guidance not yet wired. \
-             Use guidance_scale = 1.0 for v1."
-                .to_string(),
-        ));
+    if !(0.0..=20.0).contains(&req.guidance_scale) {
+        return Err(CoreError::Inference(format!(
+            "sd inpaint: guidance_scale {} out of supported range [0, 20]",
+            req.guidance_scale,
+        )));
     }
 
     let Some(bbox) = mask_bbox(mask) else {
@@ -257,33 +249,44 @@ fn run_one_tile(
 
     let masked_image = mask_image_for_vae(&padded_image, &padded_mask);
 
-    // Three independent pre-loop ops, each holding a different session
-    // mutex (text_encoder, vae_encoder) or none (mask_to_latent). VAE
-    // encode is the long pole at ~1-3s on CPU; text encode is ~200ms.
-    // Running them concurrently saves ≈text-encode-time per stroke.
-    // mask_to_latent is sub-ms so the calling thread does it inline
-    // while the other two threads churn.
-    let (text_emb, masked_latent, mask_latent) = std::thread::scope(|s| -> Result<_, CoreError> {
-        let text_handle = s.spawn(|| encode_text(bundle, /*empty=*/ true));
-        let vae_handle = s.spawn(|| vae_encode(bundle, &masked_image));
-        let mask_lat = mask_to_latent(&padded_mask);
-        let text = text_handle.join()
-            .map_err(|_| CoreError::Inference("text encoder thread panicked".into()))??;
-        let vae = vae_handle.join()
-            .map_err(|_| CoreError::Inference("vae encoder thread panicked".into()))??;
-        Ok((text, vae, mask_lat))
-    })?;
+    // CFG threshold: above 1.0 we run the UNet TWICE per step (cond +
+    // uncond) and blend by `guidance_scale`. At ≤1.0 the cond pass is
+    // all the user wants, so we skip the second to halve UNet cost.
+    let use_cfg = req.guidance_scale > 1.0 + 1e-3;
 
-    let text_emb_f16 = f32_to_f16_3d(&text_emb);
+    // Pre-loop independent ops in parallel: text encode (cond + uncond
+    // when CFG), VAE encode, mask-to-latent. Each ORT call holds a
+    // distinct session mutex (or none) so they run concurrently.
+    let prompt = req.prompt.clone();
+    let neg_prompt = if use_cfg { Some(req.negative_prompt.clone()) } else { None };
+    let (text_emb_cond, text_emb_uncond, masked_latent, mask_latent) =
+        std::thread::scope(|s| -> Result<_, CoreError> {
+            let cond_h = s.spawn(|| encode_text(bundle, &prompt));
+            let uncond_h = neg_prompt.as_ref().map(|np| {
+                let np = np.clone();
+                s.spawn(move || encode_text(bundle, &np))
+            });
+            let vae_h = s.spawn(|| vae_encode(bundle, &masked_image));
+            let mask_lat = mask_to_latent(&padded_mask);
+            let cond = cond_h.join()
+                .map_err(|_| CoreError::Inference("text encoder (cond) thread panicked".into()))??;
+            let uncond = match uncond_h {
+                Some(h) => Some(h.join()
+                    .map_err(|_| CoreError::Inference("text encoder (uncond) thread panicked".into()))??),
+                None => None,
+            };
+            let vae = vae_h.join()
+                .map_err(|_| CoreError::Inference("vae encoder thread panicked".into()))??;
+            Ok((cond, uncond, vae, mask_lat))
+        })?;
+
+    let text_emb_cond_f16 = f32_to_f16_3d(&text_emb_cond);
+    let text_emb_uncond_f16 = text_emb_uncond.as_ref().map(f32_to_f16_3d);
     let masked_latent_f16 = f32_to_f16_4d(&masked_latent);
     let mask_latent_f16 = f32_to_f16_4d(&mask_latent);
 
-    // 4. Build scheduler + initial noise.
     let scheduler = DdimScheduler::new_sd15(req.num_inference_steps as usize);
     let seed = req.seed.unwrap_or_else(|| {
-        // Non-deterministic but stable within one call. ChaCha8Rng's
-        // `from_os_rng` would pull `getrandom`; wall-clock seed is fine
-        // for "random per stroke" UX.
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos() as u64)
@@ -291,15 +294,22 @@ fn run_one_tile(
     });
     let mut latent = sample_initial_noise(seed, &scheduler);
 
-    // 5. Denoising loop. Loop-invariant f16 conversions hoisted above;
-    //    only the 4-channel `latent` changes per step.
+    // Denoising loop. With CFG: noise_pred = uncond + scale * (cond - uncond).
+    // Without CFG: just one UNet pass with cond.
     let timesteps = scheduler.timesteps().to_vec();
+    let scale = req.guidance_scale;
     for (i, &t) in timesteps.iter().enumerate() {
         let latent_f16 = f32_to_f16_4d(&latent);
         let latent_in_f16 = concat_inpaint_input_f16(
             &latent_f16, &mask_latent_f16, &masked_latent_f16,
         );
-        let noise_pred = unet_step(bundle, latent_in_f16, t, &text_emb_f16)?;
+        let noise_pred = if let Some(uncond_f16) = text_emb_uncond_f16.as_ref() {
+            let pred_cond = unet_step(bundle, latent_in_f16.clone(), t, &text_emb_cond_f16)?;
+            let pred_uncond = unet_step(bundle, latent_in_f16, t, uncond_f16)?;
+            cfg_blend(&pred_uncond, &pred_cond, scale)
+        } else {
+            unet_step(bundle, latent_in_f16, t, &text_emb_cond_f16)?
+        };
         let t_prev = timesteps.get(i + 1).copied().unwrap_or(-1);
         latent = step_array(&scheduler, &latent, &noise_pred, t, t_prev);
     }
@@ -596,7 +606,7 @@ fn sd_base_builder() -> Result<ort::session::builder::SessionBuilder, String> {
 // incompatibilities at session-build time rather than at first stroke.
 
 fn smoke_test_text_encoder(s: &mut Session, label: &str) -> Result<(), String> {
-    let tokens = empty_prompt_tokens();
+    let tokens = clip_tokenize("");
     let t = Tensor::from_array(tokens)
         .map_err(|e| format!("{label}: smoke input: {e}"))?;
     let inputs = s.inputs();
@@ -675,24 +685,39 @@ fn take_three_inputs(s: &Session, label: &str) -> Result<[String; 3], String> {
 
 // ── Text encoder ────────────────────────────────────────────────────────
 
-/// Empty-prompt CLIP token sequence: `[BOS, EOS, EOS, …]` of length 77.
-/// Diffusers' `tokenizer("")` produces this exact pattern — `pad_token_id`
-/// equals `eos_token_id` for SD 1.5. The export under test uses `int32`
-/// for `input_ids`; some exports use `int64`. Match the dominant export
-/// (int32) and let the runtime error point us at any divergent build.
-fn empty_prompt_tokens() -> Array2<i32> {
-    let mut a = Array2::<i32>::from_elem((1, CLIP_SEQ_LEN), CLIP_EOS as i32);
-    a[(0, 0)] = CLIP_BOS as i32;
-    a
+/// Tokenize for CLIP-ViT-L/14 (SD 1.5's text encoder). Diffusers'
+/// `tokenizer(text, padding="max_length", truncation=True)` shape:
+/// `[BOS, t_0, t_1, …, EOS, EOS pad, …]` of length 77. Empty string
+/// degenerates to `[BOS, EOS, EOS, …]` — the unconditional encoding.
+/// SD 1.5 ONNX exports use `int32` for `input_ids`; tokenizer returns
+/// `u16` so we cast on copy.
+fn clip_tokenize(text: &str) -> Array2<i32> {
+    use std::sync::OnceLock;
+    static T: OnceLock<instant_clip_tokenizer::Tokenizer> = OnceLock::new();
+    let tokenizer = T.get_or_init(instant_clip_tokenizer::Tokenizer::new);
+
+    // Tokenizer's `encode` produces the inner tokens (no BOS/EOS) into a
+    // user-supplied Vec; we wrap with the special tokens + truncate +
+    // pad to 77 ourselves so the framing matches diffusers exactly.
+    let mut inner: Vec<instant_clip_tokenizer::Token> = Vec::new();
+    tokenizer.encode(text, &mut inner);
+    let max_inner = CLIP_SEQ_LEN - 2; // leave room for BOS + at least one EOS
+    let inner_len = inner.len().min(max_inner);
+
+    let mut out = Array2::<i32>::from_elem((1, CLIP_SEQ_LEN), CLIP_EOS as i32);
+    out[(0, 0)] = CLIP_BOS as i32;
+    for (i, tok) in inner.iter().take(inner_len).enumerate() {
+        out[(0, 1 + i)] = tok.to_u16() as i32;
+    }
+    // EOS terminator at content end + 1 (already filled by from_elem,
+    // making this a no-op in the "everything from inner_len+1 is EOS"
+    // case — kept explicit for readability).
+    out[(0, 1 + inner_len)] = CLIP_EOS as i32;
+    out
 }
 
-fn encode_text(bundle: &SdSession, empty: bool) -> Result<Array3<f32>, CoreError> {
-    if !empty {
-        return Err(CoreError::Inference(
-            "sd: non-empty prompts require BPE tokenizer (not yet wired)".to_string(),
-        ));
-    }
-    let tokens = empty_prompt_tokens();
+fn encode_text(bundle: &SdSession, prompt: &str) -> Result<Array3<f32>, CoreError> {
+    let tokens = clip_tokenize(prompt);
     let t = Tensor::from_array(tokens)
         .map_err(|e| CoreError::Inference(format!("SD text encoder: input tensor: {e}")))?;
     let mut session = bundle.text_encoder.lock()
@@ -971,6 +996,21 @@ fn composite(source: &RgbaImage, painted: &RgbaImage, mask: &GrayImage, w: u32, 
     out
 }
 
+/// Classifier-free guidance: `uncond + scale * (cond - uncond)`.
+/// Standard SD CFG; collapses to `uncond` at scale=0 and to `cond` at
+/// scale=1. Typical strength is 7–8 for prompt-driven generation.
+fn cfg_blend(uncond: &Array4<f32>, cond: &Array4<f32>, scale: f32) -> Array4<f32> {
+    debug_assert_eq!(uncond.dim(), cond.dim(), "CFG blend: shape mismatch");
+    let mut out = uncond.clone();
+    let u = uncond.as_slice().expect("uncond: standard layout");
+    let c = cond.as_slice().expect("cond: standard layout");
+    let o = out.as_slice_mut().expect("out: standard layout");
+    for i in 0..o.len() {
+        o[i] = u[i] + scale * (c[i] - u[i]);
+    }
+    out
+}
+
 /// Apply DDIM step element-wise to flat-Vec representations of the
 /// 4D arrays. Avoids one round-trip through Vec<f32> + reshape.
 fn step_array(
@@ -1199,12 +1239,49 @@ mod tests {
     }
 
     #[test]
-    fn empty_prompt_tokens_layout_matches_clip_convention() {
-        let toks = empty_prompt_tokens();
+    fn clip_tokenize_empty_prompt_matches_clip_convention() {
+        // Diffusers' tokenizer("") produces [BOS, EOS, EOS, …] of length 77.
+        let toks = clip_tokenize("");
         assert_eq!(toks.shape(), [1, CLIP_SEQ_LEN]);
         assert_eq!(toks[(0, 0)], CLIP_BOS as i32);
         for i in 1..CLIP_SEQ_LEN {
             assert_eq!(toks[(0, i)], CLIP_EOS as i32, "expected EOS pad at index {i}");
+        }
+    }
+
+    #[test]
+    fn clip_tokenize_real_prompt_starts_with_bos_and_ends_with_eos_padding() {
+        let toks = clip_tokenize("a photo of a cat");
+        assert_eq!(toks.shape(), [1, CLIP_SEQ_LEN]);
+        assert_eq!(toks[(0, 0)], CLIP_BOS as i32);
+        // Last position should be padding EOS — typical short prompts have
+        // their content in the first ~10 positions, EOS at content-end + 1,
+        // and padding EOS through the rest of the 77-slot sequence.
+        assert_eq!(toks[(0, CLIP_SEQ_LEN - 1)], CLIP_EOS as i32);
+        // Prompt actually produced different tokens than empty (otherwise
+        // the tokenizer is broken).
+        let empty = clip_tokenize("");
+        assert_ne!(toks, empty, "real prompt must tokenize differently than empty");
+    }
+
+    #[test]
+    fn cfg_blend_at_scale_one_returns_cond() {
+        let uncond = Array4::<f32>::from_elem((1, 4, 2, 2), 1.0);
+        let cond = Array4::<f32>::from_elem((1, 4, 2, 2), 5.0);
+        let out = cfg_blend(&uncond, &cond, 1.0);
+        for &v in out.iter() {
+            assert!((v - 5.0).abs() < 1e-6, "scale=1 should equal cond, got {v}");
+        }
+    }
+
+    #[test]
+    fn cfg_blend_extrapolates_above_scale_one() {
+        let uncond = Array4::<f32>::from_elem((1, 4, 2, 2), 1.0);
+        let cond = Array4::<f32>::from_elem((1, 4, 2, 2), 5.0);
+        // scale=7.5 → 1 + 7.5*(5-1) = 31
+        let out = cfg_blend(&uncond, &cond, 7.5);
+        for &v in out.iter() {
+            assert!((v - 31.0).abs() < 1e-4, "scale=7.5 expected 31, got {v}");
         }
     }
 
