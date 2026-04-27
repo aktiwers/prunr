@@ -23,6 +23,7 @@ pub mod live_preview;
 pub mod knob_catalog;
 pub mod system_bridge;
 pub mod download_manager;
+pub mod hardware_cache;
 
 #[cfg(test)]
 mod tests;
