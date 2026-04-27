@@ -42,6 +42,21 @@ impl SystemBridge {
         dlg.save_file()
     }
 
+    /// Single-file image picker with a custom title. Returns `None` on cancel.
+    pub fn pick_image_dialog(
+        &self,
+        start_dir: Option<&Path>,
+        title: &str,
+    ) -> Option<PathBuf> {
+        let mut dlg = rfd::FileDialog::new()
+            .add_filter("Images", &["png", "jpg", "jpeg", "webp", "bmp"])
+            .set_title(title);
+        if let Some(dir) = start_dir {
+            dlg = dlg.set_directory(dir);
+        }
+        dlg.pick_file()
+    }
+
     /// Folder picker with custom title. Returns `None` on cancel.
     pub fn pick_folder_dialog(
         &self,

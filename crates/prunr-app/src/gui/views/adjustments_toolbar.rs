@@ -82,6 +82,12 @@ pub struct ToolbarChange {
     /// dropdown entry. `filter = None` means "show everything"; the
     /// dropdown's not-installed click pre-filters to the entry's category.
     pub open_model_store: Option<ModelStoreRequest>,
+    /// User chose Image in the bg chip — `apply_toolbar_change` opens the
+    /// file picker, decodes, and calls `BatchItem::set_bg_image`.
+    pub pick_bg_image: bool,
+    /// User picked a non-image bg kind (color or effect) while a bg image
+    /// was active — drop the image so the chosen kind takes over.
+    pub clear_bg_image: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -104,6 +110,8 @@ impl Default for ToolbarChange {
             clear_correction_requested: false,
             brush_settings_committed: false,
             open_model_store: None,
+            pick_bg_image: false,
+            clear_bg_image: false,
         }
     }
 }
@@ -146,6 +154,8 @@ pub(crate) fn render(
     brush_state: &mut BrushState,
     brush_available: bool,
     processing: bool,
+    has_bg_image: bool,
+    bg_image_label: Option<&str>,
 ) -> ToolbarChange {
     let mut change = ToolbarChange::default();
     let defaults = Defaults::new();
@@ -306,7 +316,15 @@ pub(crate) fn render(
         // two fields (`bg`, `bg_effect`) stay orthogonal — the chip enforces
         // mutual exclusivity at the UI so users pick one kind at a time.
         ui.add_enabled_ui(bg_active, |ui| {
-            render_background_chip(ui, &mut item_settings.bg, &mut item_settings.bg_effect, defaults.bg_value, &mut change);
+            render_background_chip(
+                ui,
+                &mut item_settings.bg,
+                &mut item_settings.bg_effect,
+                defaults.bg_value,
+                has_bg_image,
+                bg_image_label,
+                &mut change,
+            );
         });
 
         // Right-aligned cluster: reset, preset. Right-to-left layout fills
@@ -797,11 +815,11 @@ fn fill_style_params(ui: &mut Ui, style: &mut prunr_core::FillStyle) -> bool {
 /// orthogonal data fields (`bg`, `bg_effect`) — effects take precedence
 /// over solid colour at render time, and the chip mirrors that precedence.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum BgKind { Transparent, Solid, BlurredSource, InvertedSource, DesaturatedSource }
+enum BgKind { Transparent, Solid, Image, BlurredSource, InvertedSource, DesaturatedSource }
 
 impl BgKind {
-    const ALL: [Self; 5] = [
-        Self::Transparent, Self::Solid,
+    const ALL: [Self; 6] = [
+        Self::Transparent, Self::Solid, Self::Image,
         Self::BlurredSource, Self::InvertedSource, Self::DesaturatedSource,
     ];
 
@@ -809,26 +827,33 @@ impl BgKind {
         match self {
             Self::Transparent => "Transparent",
             Self::Solid => "Solid colour",
+            Self::Image => "Image",
             Self::BlurredSource => "Blurred source",
             Self::InvertedSource => "Inverted source",
             Self::DesaturatedSource => "Desaturated source",
         }
     }
 
-    /// Derive the current kind from the two underlying fields. Effects win
-    /// over solid colour — matches the render-time precedence.
-    fn current(bg: &Option<[u8; 4]>, effect: &prunr_core::BgEffect) -> Self {
+    /// Derive the current kind from the underlying fields. Effects win over
+    /// solid colour (render-time precedence); image bg sits between effects
+    /// and solid — picking image clears bg_color and effect, picking effect
+    /// or color clears the image (mutual exclusion enforced by the chip).
+    fn current(bg: &Option<[u8; 4]>, effect: &prunr_core::BgEffect, has_image: bool) -> Self {
         use prunr_core::BgEffect;
         match effect {
             BgEffect::BlurredSource { .. } => Self::BlurredSource,
             BgEffect::InvertedSource => Self::InvertedSource,
             BgEffect::DesaturatedSource => Self::DesaturatedSource,
-            BgEffect::None => if bg.is_some() { Self::Solid } else { Self::Transparent },
+            BgEffect::None => {
+                if has_image { Self::Image }
+                else if bg.is_some() { Self::Solid }
+                else { Self::Transparent }
+            }
         }
     }
 
     /// Effects require a postprocess rerun (baked into the output RGBA);
-    /// Transparent / Solid only change the render-time bg fill.
+    /// Transparent / Solid / Image only change the render-time bg fill.
     fn needs_postprocess(self) -> bool {
         matches!(self, Self::BlurredSource | Self::InvertedSource | Self::DesaturatedSource)
     }
@@ -841,18 +866,20 @@ fn render_background_chip(
     bg: &mut Option<[u8; 4]>,
     bg_effect: &mut prunr_core::BgEffect,
     default_color: [u8; 4],
+    has_bg_image: bool,
+    bg_image_label: Option<&str>,
     change: &mut ToolbarChange,
 ) {
     use egui::widgets::color_picker::{color_picker_color32, Alpha};
     use prunr_core::BgEffect;
 
-    let current = BgKind::current(bg, bg_effect);
+    let current = BgKind::current(bg, bg_effect, has_bg_image);
     let accent = current != BgKind::Transparent;
     let resp = chip::chip_tooltip(
         chip::chip_button(ui, &ICON_PALETTE.codepoint.to_string(), current.name(), accent),
         "Background",
         "What fills transparent areas behind the subject: a solid colour, \
-         or a source-derived effect (blurred / inverted / desaturated).",
+         a chosen image, or a source-derived effect (blurred / inverted / desaturated).",
     );
 
     let popup_id = ui.make_persistent_id("background_popup");
@@ -866,9 +893,19 @@ fn render_background_chip(
                 for kind in BgKind::ALL {
                     let selected = kind == current;
                     if ui.selectable_label(selected, kind.name()).clicked() && !selected {
+                        // Image is owned by BatchItem (Arc bytes don't fit in
+                        // the Copy ItemSettings) — emit an intent and let the
+                        // app handle the file dialog + decode side effects.
+                        if matches!(kind, BgKind::Image) {
+                            change.pick_bg_image = true;
+                            continue;
+                        }
                         apply_bg_kind(bg, bg_effect, kind, default_color);
-                        // Effects bake a new RGBA (postprocess); Transparent /
-                        // Solid are render-time only.
+                        if has_bg_image {
+                            // Picking any non-image kind drops the image so
+                            // the new choice owns the bg surface alone.
+                            change.clear_bg_image = true;
+                        }
                         let knob = if kind.needs_postprocess() || current.needs_postprocess() {
                             StaticKnob::BgEffect
                         } else {
@@ -894,6 +931,19 @@ fn render_background_chip(
                             }
                             hint(ui, "Solid colour fills transparent areas at render / export.");
                         }
+                    }
+                    BgKind::Image => {
+                        if let Some(label) = bg_image_label {
+                            ui.label(RichText::new(label).color(theme::TEXT_SECONDARY).size(theme::FONT_SIZE_MONO));
+                            ui.add_space(theme::SPACE_XS);
+                        }
+                        if ui.button("Choose image\u{2026}").clicked() {
+                            change.pick_bg_image = true;
+                        }
+                        if has_bg_image && ui.button("Remove image").clicked() {
+                            change.clear_bg_image = true;
+                        }
+                        hint(ui, "Picked image fills transparent areas at render / export. Cover-fit to result dimensions.");
                     }
                     BgKind::BlurredSource => {
                         if let BgEffect::BlurredSource { radius } = bg_effect {
@@ -946,6 +996,9 @@ fn apply_bg_kind(
         BgKind::DesaturatedSource => {
             *bg_effect = BgEffect::DesaturatedSource;
         }
+        // Image bg lives on BatchItem, not on these two ItemSettings fields —
+        // the chip emits `change.pick_bg_image` and skips this fn for Image.
+        BgKind::Image => unreachable!("Image kind is handled via change.pick_bg_image, not apply_bg_kind"),
     }
 }
 

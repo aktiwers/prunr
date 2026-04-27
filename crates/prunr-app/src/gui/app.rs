@@ -432,6 +432,28 @@ impl PrunrApp {
         }
     }
 
+    /// Open a file picker for a per-item background image. Decode + hash
+    /// run synchronously on the UI thread — once per pick, after a modal
+    /// file dialog already blocked. An async pipeline would need a
+    /// pending-state machine for marginal benefit on a user-initiated event.
+    pub(crate) fn handle_pick_bg_image(&mut self, idx: usize, ctx: &egui::Context) {
+        let Some(path) = self.system.pick_image_dialog(
+            self.last_open_dir.as_deref(),
+            "Choose background image",
+        ) else { return };
+        match prunr_core::load_image_from_path(&path) {
+            Ok(img) => {
+                if let Some(item) = self.batch.items.get_mut(idx) {
+                    item.set_bg_image(img, Some(path));
+                    ctx.request_repaint();
+                }
+            }
+            Err(err) => {
+                self.toasts.error(format!("Couldn't load background image: {err}"));
+            }
+        }
+    }
+
     pub fn handle_remove_bg(&mut self) {
         let ids: std::collections::HashSet<u64> =
             self.batch.items_to_process().into_iter().collect();
@@ -2545,6 +2567,11 @@ impl PrunrApp {
                 // cached seg tensor required. For seg-removal models the
                 // brush corrects the AI mask so it needs the tensor.
                 let brush_available = settings_ref.model.is_inpaint() || item.cached_tensor.is_some();
+                let has_bg_image = item.bg_image.is_some();
+                let bg_image_label = item.bg_image.as_deref()
+                    .and_then(|bg| bg.source_path.as_deref())
+                    .and_then(|p| p.file_name())
+                    .and_then(|n| n.to_str());
                 toolbar_change = adjustments_toolbar::render(
                     ui,
                     &mut item.settings,
@@ -2553,6 +2580,8 @@ impl PrunrApp {
                     brush_state_ref,
                     brush_available,
                     is_processing,
+                    has_bg_image,
+                    bg_image_label,
                 );
             });
         if toolbar_change.clear_correction_requested {
@@ -2589,6 +2618,12 @@ impl PrunrApp {
         }
         if let Some(req) = toolbar_change.open_model_store {
             self.model_store = Some(req);
+        }
+        if toolbar_change.pick_bg_image {
+            self.handle_pick_bg_image(idx, ctx);
+        } else if toolbar_change.clear_bg_image {
+            self.batch.items[idx].clear_bg_image();
+            ctx.request_repaint();
         }
 
         self.batch.items[idx].apply_cache_impact(toolbar_change.cache_impact);
