@@ -1142,13 +1142,18 @@ impl PrunrApp {
         });
     }
 
-    /// Apply background color to a result image for export/save.
-    /// Returns a new image when `bg` is `Some`; otherwise clones the Arc.
-    pub(crate) fn apply_bg_for_export(
+    /// Bake the per-item background into a result image for save/clipboard.
+    /// Image bg wins over color bg (matches the canvas-paint rule). Returns
+    /// the cloned Arc unchanged when neither is set.
+    pub(crate) fn bake_export_bg(
         rgba: &Arc<image::RgbaImage>,
-        bg: Option<[u8; 3]>,
+        item: &super::item::BatchItem,
     ) -> Arc<image::RgbaImage> {
-        if let Some(c) = bg {
+        if let Some(bg) = item.bg_image.as_ref() {
+            let mut copy = (**rgba).clone();
+            prunr_core::apply_background_image(&mut copy, &bg.image);
+            Arc::new(copy)
+        } else if let Some(c) = item.settings.bg_rgb() {
             let mut copy = (**rgba).clone();
             prunr_core::apply_background_color(&mut copy, c);
             Arc::new(copy)
@@ -1202,7 +1207,7 @@ impl PrunrApp {
                 // No cached tensors — fall back to composite PNG so the user
                 // still lands a file per target.
                 if let Some(rgba) = item.result_rgba.as_ref() {
-                    let baked = Self::apply_bg_for_export(rgba, item.settings.bg_rgb());
+                    let baked = Self::bake_export_bg(rgba, item);
                     if let Ok(bytes) = prunr_core::encode_rgba_png(&baked) {
                         let stem = Path::new(&item.filename)
                             .file_stem().and_then(|s| s.to_str()).unwrap_or("image");
@@ -1234,8 +1239,10 @@ impl PrunrApp {
             .and_then(|name| Path::new(name).file_stem()?.to_str())
             .map(|stem| format!("{stem}-nobg.png"))
             .unwrap_or_else(|| "result-nobg.png".to_string());
-        let bg = self.batch.selected_item().and_then(|i| i.settings.bg_rgb());
-        self.save_rgba_with_dialog(&rgba, &default_name, bg);
+        let baked = self.batch.selected_item()
+            .map(|item| Self::bake_export_bg(&rgba, item))
+            .unwrap_or(rgba);
+        self.save_rgba_with_dialog(baked, &default_name);
     }
 
     /// Save one specific batch item (by index) via a save-as dialog. Used by
@@ -1243,32 +1250,30 @@ impl PrunrApp {
     /// entry point into the same encode-on-background pipeline as
     /// `save_current_to_file`.
     pub(crate) fn save_item_to_file(&mut self, idx: usize) {
-        let (rgba, default_name, bg) = {
+        let (baked, default_name) = {
             let Some(item) = self.batch.items.get(idx) else { return };
-            let Some(rgba) = item.result_rgba.clone() else { return };
+            let Some(rgba) = item.result_rgba.as_ref() else { return };
             let stem = Path::new(&item.filename)
                 .file_stem()
                 .and_then(|s| s.to_str())
                 .unwrap_or("image");
-            (rgba, format!("{stem}-nobg.png"), item.settings.bg_rgb())
+            (Self::bake_export_bg(rgba, item), format!("{stem}-nobg.png"))
         };
-        self.save_rgba_with_dialog(&rgba, &default_name, bg);
+        self.save_rgba_with_dialog(baked, &default_name);
     }
 
     /// Shared tail for the two single-item save paths: open the PNG save-as
-    /// dialog, composite the bg if set, kick off the encode+write on a
-    /// background thread.
+    /// dialog, kick off the encode+write on a background thread. The caller
+    /// has already baked any per-item bg into the rgba.
     fn save_rgba_with_dialog(
         &mut self,
-        rgba: &Arc<image::RgbaImage>,
+        rgba: Arc<image::RgbaImage>,
         default_name: &str,
-        bg: Option<[u8; 3]>,
     ) {
         let Some(path) = self.system.save_png_dialog(
             self.last_open_dir.as_deref(),
             default_name,
         ) else { return };
-        let rgba = Self::apply_bg_for_export(rgba, bg);
         let tx = self.batch.bg_io.save_done_tx.clone();
         self.toasts.info("Saving...");
         spawn_save_single(path, rgba, tx);
@@ -1281,7 +1286,7 @@ impl PrunrApp {
             .filter(|i| i.selected && i.status == BatchStatus::Done && i.result_rgba.is_some())
             .filter_map(|item| {
                 let rgba = item.result_rgba.as_ref()?;
-                Some((item.filename.clone(), Self::apply_bg_for_export(rgba, item.settings.bg_rgb())))
+                Some((item.filename.clone(), Self::bake_export_bg(rgba, item)))
             })
             .collect();
         let Some(folder) = self.system.pick_folder_dialog(
@@ -1393,9 +1398,10 @@ impl PrunrApp {
         };
 
         let Some(rgba) = rgba_to_copy else { return };
-        let bg = self.batch.selected_item().and_then(|i| i.settings.bg_rgb());
-        // Apply bg_color for clipboard (matches display).
-        let rgba = Self::apply_bg_for_export(&rgba, bg);
+        // Bake bg into the clipboard image so it matches the canvas.
+        let rgba = self.batch.selected_item()
+            .map(|item| Self::bake_export_bg(&rgba, item))
+            .unwrap_or(rgba);
 
         if self.system.copy_image(&rgba) {
             if let Some(msg) = multi_hint {
