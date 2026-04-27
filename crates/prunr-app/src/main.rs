@@ -68,7 +68,18 @@ fn main() {
         worker_process::run_worker();
     }
 
-    if !cli.inputs.is_empty() {
+    // `--open <path>` forces GUI mode regardless of input args. Plumbed
+    // via env var so gui::run() and PrunrApp::new don't need a parameter
+    // shuffle just for this opt-in flag.
+    if let Some(path) = cli.open.as_ref() {
+        if let Some(s) = path.to_str() {
+            // Safety: the binary is single-threaded at this point — the
+            // worker subprocess is a separate process, ORT init does not
+            // spawn user-visible threads, and `gui::run` is reached
+            // immediately after this block.
+            unsafe { std::env::set_var("PRUNR_OPEN_FILE", s); }
+        }
+    } else if !cli.inputs.is_empty() {
         let exit_code = cli::run_remove(&cli);
         std::process::exit(exit_code);
     }
