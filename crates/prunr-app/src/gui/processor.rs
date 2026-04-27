@@ -101,13 +101,17 @@ pub(crate) struct InpaintResult {
 
 /// Eraser-specific tuning passed from `BrushSettings` into the dispatch.
 /// Bundled into a struct to keep `dispatch_inpaint` from sprawling.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct InpaintTuning {
     pub sharpen: f32,
     pub feather_px: f32,
     pub grow_px: f32,
     /// Which inpaint backend to use (LaMaFp32, BigLaMa, …).
     pub backend: prunr_models::ModelId,
+    /// SD-only: text prompt; ignored for LaMa-family backends.
+    pub sd_prompt: String,
+    pub sd_negative_prompt: String,
+    pub sd_guidance_scale: f32,
 }
 
 impl Default for InpaintTuning {
@@ -117,6 +121,9 @@ impl Default for InpaintTuning {
             feather_px: 0.0,
             grow_px: 0.0,
             backend: prunr_models::ModelId::LaMaFp32,
+            sd_prompt: String::new(),
+            sd_negative_prompt: String::new(),
+            sd_guidance_scale: 1.0,
         }
     }
 }
@@ -192,7 +199,16 @@ impl Processor {
             } else {
                 raw_mask
             };
-            match prunr_core::inpaint::process_inpaint(&image, &mask, tuning.backend) {
+            let sd_req = if matches!(tuning.backend, prunr_models::ModelId::SdV15InpaintFp16) {
+                Some(prunr_core::inpaint_sd::SdInpaintRequest {
+                    prompt: tuning.sd_prompt.clone(),
+                    negative_prompt: tuning.sd_negative_prompt.clone(),
+                    num_inference_steps: 20,
+                    guidance_scale: tuning.sd_guidance_scale,
+                    seed: None,
+                })
+            } else { None };
+            match prunr_core::inpaint::process_inpaint_with(&image, &mask, tuning.backend, sd_req) {
                 Ok(rgba) => {
                     // Post-process: sharpen first (LaMa's blur is the
                     // pixel content), then feather the boundary so the

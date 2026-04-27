@@ -255,7 +255,7 @@ impl PrunrApp {
             show_pipeline_flow: false,
             pending_copy: false,
             zoom_state: Default::default(),
-            brush_state: super::brush_state::BrushState::with_settings(settings.brush),
+            brush_state: super::brush_state::BrushState::with_settings(settings.brush.clone()),
             download_manager: super::download_manager::DownloadManager::new(),
             show_original: false,
             prev_title: String::new(),
@@ -555,11 +555,15 @@ impl PrunrApp {
             tracing::debug!(item_id, "inpaint dispatch skipped: no correction");
             return;
         };
-        // source_rgba may have been evicted under memory pressure;
-        // rehydrate from the cached DynamicImage.
-        let source = item.source_rgba.as_ref().cloned().or_else(|| {
-            item.source_dyn.as_ref().map(|d| Arc::new(d.to_rgba8()))
-        });
+        // Stack-based inpaint: each new stroke runs against the
+        // previous result (if any), not the original. This keeps
+        // earlier strokes intact and — critically for SD — keeps the
+        // mask bbox bounded to the current stroke instead of the
+        // cumulative paint history. source_rgba may have been evicted
+        // under memory pressure; rehydrate from cached DynamicImage.
+        let source = item.result_rgba.as_ref().cloned()
+            .or_else(|| item.source_rgba.as_ref().cloned())
+            .or_else(|| item.source_dyn.as_ref().map(|d| Arc::new(d.to_rgba8())));
         let Some(source) = source else {
             tracing::warn!(item_id, "inpaint dispatch skipped: source RGBA unavailable");
             return;
@@ -573,6 +577,9 @@ impl PrunrApp {
             feather_px: bs.inpaint_feather,
             grow_px: bs.inpaint_grow,
             backend,
+            sd_prompt: bs.sd_prompt.clone(),
+            sd_negative_prompt: bs.sd_negative_prompt.clone(),
+            sd_guidance_scale: bs.sd_guidance_scale,
         };
         self.processor.dispatch_inpaint(item_id, source, correction, tuning);
     }
@@ -597,6 +604,13 @@ impl PrunrApp {
                 }
                 item.result_tex_pending = true;
                 item.thumb_pending = true;
+                // Stack-based inpaint: this stroke is now baked into
+                // result_rgba; clear the correction so the NEXT stroke's
+                // bbox is just that stroke. Push the pre-clear state to
+                // the undo stack so Ctrl+Z restores it (UX seam: undo
+                // restores the brush-correction overlay, not the result
+                // pixels — full result-pixel undo is separate work).
+                item.clear_correction();
                 Self::spawn_tex_prep(
                     new_rgba.clone(), item.id, format!("inpaint_{}_{}", item.id, switch),
                     true, tex_prep_tx.clone(), ctx.clone(),
