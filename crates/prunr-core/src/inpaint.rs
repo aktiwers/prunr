@@ -29,7 +29,8 @@ pub fn prewarm(id: prunr_models::ModelId) -> Result<(), CoreError> {
 }
 
 fn is_sd_inpaint(id: prunr_models::ModelId) -> bool {
-    matches!(id, prunr_models::ModelId::SdV15InpaintFp16)
+    use prunr_models::ModelId::*;
+    matches!(id, SdV15InpaintFp16 | SdV15LcmInpaintFp16)
 }
 
 /// Dilate (px > 0) or erode (px < 0) a binary mask. `|px|` iterations
