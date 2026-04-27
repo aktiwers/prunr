@@ -585,7 +585,7 @@ fn checker_texture(ctx: &egui::Context, dark: bool) -> TextureHandle {
 
 /// Paint `tex` into `bounds` with cover-fit — the image fills both target
 /// dimensions, overhang is sampled-out via the UV rect.
-fn paint_bg_image_cover(ui: &egui::Ui, bounds: Rect, tex: &TextureHandle) {
+pub(super) fn paint_bg_image_cover(ui: &egui::Ui, bounds: Rect, tex: &TextureHandle) {
     let tex_size = tex.size_vec2();
     let (tw, th) = (tex_size.x, tex_size.y);
     let (bw, bh) = (bounds.width(), bounds.height());
