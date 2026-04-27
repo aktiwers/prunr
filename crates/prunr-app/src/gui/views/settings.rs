@@ -35,6 +35,28 @@ impl SettingsTab {
     ];
 }
 
+/// Read-only snapshot of runtime-install state passed into the General
+/// tab so its renderer doesn't need a `&mut PrunrApp` (other tabs take
+/// just `&mut Settings`). Constructed by the modal entry point from
+/// `app.runtime_install`.
+pub(crate) struct HardwareSectionContext {
+    pub install_in_progress: bool,
+    pub install_status_text: Option<String>,
+}
+
+/// View-layer intent returned by the General tab so the modal can route
+/// the click into the right `PrunrApp` method without the tab function
+/// having to hold a `&mut PrunrApp`. Same pattern as
+/// `ToolbarChange.open_model_store`. RuntimeId carried so the dispatcher
+/// stays neutral about which runtime — future MIGraphX/etc. ride this
+/// same enum.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum HardwareSectionIntent {
+    StartInstall(crate::runtime_install::RuntimeId),
+    CancelInstall,
+    Uninstall(crate::runtime_install::RuntimeId),
+}
+
 /// Slider row: label left, slider fills middle, value right.
 fn slider_row(
     ui: &mut egui::Ui,
@@ -123,12 +145,27 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) {
             render_tab_strip(ui, &mut app.settings_tab);
             ui.add_space(theme::SPACE_SM);
 
-            match app.settings_tab {
-                SettingsTab::General => render_tab_general(ui, app),
-                SettingsTab::Appearance => render_tab_appearance(ui, &mut app.settings),
-                SettingsTab::Processing => render_tab_processing(ui, &mut app.settings),
-                SettingsTab::Defaults => render_tab_defaults(ui, &mut app.settings),
-                SettingsTab::Hotkeys => render_tab_hotkeys(ui),
+            // General tab is the only one that returns an intent — it's
+            // the one with platform side-effects (runtime install).
+            // Snapshot install state for the read-only context, then
+            // dispatch any returned intent against `app` after the tab's
+            // borrow drops.
+            let hardware_intent = match app.settings_tab {
+                SettingsTab::General => {
+                    let ctx = HardwareSectionContext {
+                        install_in_progress: app.runtime_install.is_some(),
+                        install_status_text: app.runtime_install.as_ref()
+                            .map(|p| p.last_event.status_text()),
+                    };
+                    render_tab_general(ui, &mut app.settings, &ctx)
+                }
+                SettingsTab::Appearance => { render_tab_appearance(ui, &mut app.settings); None }
+                SettingsTab::Processing => { render_tab_processing(ui, &mut app.settings); None }
+                SettingsTab::Defaults => { render_tab_defaults(ui, &mut app.settings); None }
+                SettingsTab::Hotkeys => { render_tab_hotkeys(ui); None }
+            };
+            if let Some(intent) = hardware_intent {
+                dispatch_hardware_intent(app, intent);
             }
 
             // Backend info at the bottom
@@ -152,9 +189,39 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) {
     }
 }
 
-fn render_hardware_section(ui: &mut egui::Ui, app: &mut PrunrApp) {
+fn dispatch_hardware_intent(app: &mut PrunrApp, intent: HardwareSectionIntent) {
+    use crate::runtime_install::{InstallEvent, start_install};
+    match intent {
+        HardwareSectionIntent::StartInstall(rt) => {
+            let h = start_install(rt);
+            app.runtime_install = Some(crate::gui::app::RuntimeInstallProgress {
+                runtime: rt,
+                rx: h.events,
+                cancel: h.cancel,
+                last_event: InstallEvent::Preparing,
+            });
+        }
+        HardwareSectionIntent::CancelInstall => {
+            if let Some(p) = app.runtime_install.as_ref() {
+                p.cancel.store(true, std::sync::atomic::Ordering::Release);
+            }
+        }
+        HardwareSectionIntent::Uninstall(rt) => {
+            match crate::runtime_install::uninstall(rt) {
+                Ok(()) => app.toasts.success(format!("{} removed", rt.display_name())),
+                Err(e) => app.toasts.error(format!("Uninstall failed: {e}")),
+            };
+        }
+    }
+}
+
+fn render_hardware_section(
+    ui: &mut egui::Ui,
+    ctx: &HardwareSectionContext,
+) -> Option<HardwareSectionIntent> {
     use crate::hardware;
-    use crate::runtime_install::{InstallEvent, RuntimeId, start_install};
+    use crate::runtime_install::RuntimeId;
+    let mut intent = None;
     section_heading(ui, "Hardware");
 
     let p = hardware::profile();
@@ -206,15 +273,12 @@ fn render_hardware_section(ui: &mut egui::Ui, app: &mut PrunrApp) {
     ui.label(RichText::new(text).color(color).size(theme::FONT_SIZE_MONO));
     ui.add_space(theme::SPACE_SM);
 
-    // OpenVINO Runtime row. Compute the status string up front so the
-    // borrow on `app.runtime_install` doesn't extend into the closure
-    // (which needs mutable access for the Install button).
     let rt = RuntimeId::OpenVino;
     let installed = rt.is_installed();
-    let status = match app.runtime_install.as_ref().filter(|p| p.runtime == rt) {
-        Some(p) => p.last_event.status_text(),
-        None if installed => "Installed".to_string(),
-        None => format!("Not installed ({} MB)", rt.approx_download_mb()),
+    let status = match (ctx.install_in_progress, ctx.install_status_text.as_deref()) {
+        (true, Some(s)) => s.to_string(),
+        _ if installed => "Installed".to_string(),
+        _ => format!("Not installed ({} MB)", rt.approx_download_mb()),
     };
 
     ui.horizontal(|ui| {
@@ -223,43 +287,30 @@ fn render_hardware_section(ui: &mut egui::Ui, app: &mut PrunrApp) {
         ui.label(RichText::new(status)
             .color(theme::TEXT_SECONDARY).size(theme::FONT_SIZE_MONO));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let busy = app.runtime_install.is_some();
-            if busy {
+            if ctx.install_in_progress {
                 if ui.button(RichText::new("Cancel")
                     .color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY)).clicked() {
-                    if let Some(p) = app.runtime_install.as_ref() {
-                        p.cancel.store(true, std::sync::atomic::Ordering::Release);
-                    }
+                    intent = Some(HardwareSectionIntent::CancelInstall);
                 }
             } else if installed {
                 if ui.button(RichText::new("Uninstall")
                     .color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY)).clicked() {
-                    match crate::runtime_install::uninstall(rt) {
-                        Ok(()) => { app.toasts.success(format!("{} removed", rt.display_name())); }
-                        Err(e) => { app.toasts.error(format!("Uninstall failed: {e}")); }
-                    }
+                    intent = Some(HardwareSectionIntent::Uninstall(rt));
                 }
             } else if ui.button(RichText::new("Install")
                 .color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY)).clicked() {
-                let h = start_install(rt);
-                app.runtime_install = Some(crate::gui::app::RuntimeInstallProgress {
-                    runtime: rt,
-                    rx: h.events,
-                    cancel: h.cancel,
-                    last_event: InstallEvent::Preparing,
-                });
+                intent = Some(HardwareSectionIntent::StartInstall(rt));
             }
         });
     });
-    // Hint hidden once installing or installed — it's a recommendation,
-    // not a permanent label.
-    if p.recommends_openvino() && !installed && app.runtime_install.is_none() {
+    if p.recommends_openvino() && !installed && !ctx.install_in_progress {
         hint(ui, "Recommended for your Intel hardware — 2-3× faster inference on most models, plus iGPU acceleration for SD inpaint.");
     }
 
     ui.add_space(theme::SPACE_MD);
     ui.separator();
     ui.add_space(theme::SPACE_SM);
+    intent
 }
 
 
@@ -278,35 +329,39 @@ fn render_tab_strip(ui: &mut egui::Ui, current: &mut SettingsTab) {
     ui.separator();
 }
 
-fn render_tab_general(ui: &mut egui::Ui, app: &mut PrunrApp) {
-    render_hardware_section(ui, app);
+fn render_tab_general(
+    ui: &mut egui::Ui,
+    settings: &mut Settings,
+    ctx: &HardwareSectionContext,
+) -> Option<HardwareSectionIntent> {
+    let intent = render_hardware_section(ui, ctx);
 
     section_heading(ui, "Performance");
-    let max_jobs = app.settings.max_jobs();
+    let max_jobs = settings.max_jobs();
     ui.horizontal(|ui| {
         ui.label(RichText::new("Parallel jobs")
             .color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui.add_enabled(
-                app.settings.parallel_jobs < max_jobs,
+                settings.parallel_jobs < max_jobs,
                 egui::Button::new(RichText::new("+").color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY))
                     .fill(theme::BG_SECONDARY).min_size(egui::vec2(theme::CHIP_HEIGHT, theme::CHIP_HEIGHT)),
             ).clicked() {
-                app.settings.parallel_jobs += 1;
+                settings.parallel_jobs += 1;
             }
-            ui.label(RichText::new(format!("{}", app.settings.parallel_jobs))
+            ui.label(RichText::new(format!("{}", settings.parallel_jobs))
                 .color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY).strong());
             if ui.add_enabled(
-                app.settings.parallel_jobs > 1,
+                settings.parallel_jobs > 1,
                 egui::Button::new(RichText::new("\u{2212}").color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY))
                     .fill(theme::BG_SECONDARY).min_size(egui::vec2(theme::CHIP_HEIGHT, theme::CHIP_HEIGHT)),
             ).clicked() {
-                app.settings.parallel_jobs -= 1;
+                settings.parallel_jobs -= 1;
             }
         });
     });
     ui.add_space(-10.0);
-    let jobs_hint = if app.settings.is_gpu() {
+    let jobs_hint = if settings.is_gpu() {
         format!("Images processed at the same time (1\u{2013}{max_jobs}, GPU: 1\u{2013}2 is optimal)")
     } else {
         format!("Images processed at the same time (1\u{2013}{max_jobs})")
@@ -316,18 +371,19 @@ fn render_tab_general(ui: &mut egui::Ui, app: &mut PrunrApp) {
 
     let has_gpu = !prunr_core::OrtEngine::detect_active_provider().eq_ignore_ascii_case("CPU");
     if has_gpu {
-        ui.checkbox(&mut app.settings.force_cpu,
+        ui.checkbox(&mut settings.force_cpu,
             RichText::new("Force CPU").color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY));
         hint(ui, "Use CPU even when GPU is available (resets each launch).");
         ui.add_space(theme::SPACE_MD);
     }
 
-    ui.checkbox(&mut app.settings.live_preview,
+    ui.checkbox(&mut settings.live_preview,
         RichText::new("Live preview").color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY));
     hint(ui, "Auto-rerun mask and edge tweaks as you adjust them.");
     ui.add_space(theme::SPACE_MD);
 
-    render_sd_fast_mode_row(ui, &mut app.settings.sd_fast_mode);
+    render_sd_fast_mode_row(ui, &mut settings.sd_fast_mode);
+    intent
 }
 
 fn render_sd_fast_mode_row(ui: &mut egui::Ui, user_override: &mut Option<bool>) {
