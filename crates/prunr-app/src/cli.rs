@@ -85,6 +85,17 @@ pub struct Cli {
     #[arg(long)]
     pub bg_color: Option<String>,
 
+    /// Fill transparent background with an image (PNG/JPEG/WebP/BMP). Wins
+    /// over `--bg-color` when both are set (matches GUI mutual exclusion).
+    #[arg(long, value_name = "PATH")]
+    pub bg_image: Option<std::path::PathBuf>,
+
+    /// How the background image is positioned: cover (default — fills both
+    /// dims, may crop), contain (fits inside, may letterbox), stretch
+    /// (distort to fill), tile (repeat at native size), center (1:1 native).
+    #[arg(long, default_value_t = prunr_core::BgImageFit::Cover)]
+    pub bg_image_fit: prunr_core::BgImageFit,
+
     /// Force CPU inference even when GPU is available.
     #[arg(long)]
     pub cpu: bool,
@@ -480,6 +491,17 @@ fn run_batch(args: &Cli) -> i32 {
     let line_mode = args.line_mode();
     let solid_line_color = args.line_color.as_deref().and_then(parse_hex_color);
     let bg_color = args.bg_color.as_deref().and_then(parse_hex_color);
+    let bg_image = match args.bg_image.as_deref() {
+        Some(p) => match prunr_core::load_image_from_path(p) {
+            Ok(img) => Some(std::sync::Arc::new(img)),
+            Err(e) => {
+                eprintln!("error: --bg-image: {e}");
+                return 1;
+            }
+        },
+        None => None,
+    };
+    let bg_image_fit = args.bg_image_fit;
 
     let edge = prunr_core::EdgeSettings {
         line_strength: args.line_strength,
@@ -492,7 +514,8 @@ fn run_batch(args: &Cli) -> i32 {
     };
     let batch_results = run_batch_subprocess(
         &valid_paths, &valid_indices, model, args.jobs, mask, args.cpu,
-        line_mode, edge, bg_color, &spinners_arc, &inputs_arc, quiet,
+        line_mode, edge, bg_color, bg_image.clone(), bg_image_fit,
+        &spinners_arc, &inputs_arc, quiet,
     );
 
     // Compute output paths and write results
@@ -593,6 +616,8 @@ fn run_batch_subprocess(
     line_mode: LineMode,
     edge: prunr_core::EdgeSettings,
     bg_color: Option<[u8; 3]>,
+    bg_image: Option<std::sync::Arc<image::DynamicImage>>,
+    bg_image_fit: prunr_core::BgImageFit,
     spinners: &[Option<ProgressBar>],
     inputs: &[std::path::PathBuf],
     quiet: bool,
@@ -676,8 +701,10 @@ fn run_batch_subprocess(
                             .ok()
                             .and_then(|data| image::RgbaImage::from_raw(width, height, data))
                             .map(|mut rgba_image| {
-                                // Apply bg_color on the parent side (non-destructive in subprocess)
-                                if let Some(bg) = bg_color {
+                                // Image bg wins over color bg — matches GUI mutual exclusion.
+                                if let Some(bg) = bg_image.as_deref() {
+                                    prunr_core::apply_background_image(&mut rgba_image, bg, bg_image_fit);
+                                } else if let Some(bg) = bg_color {
                                     prunr_core::apply_background_color(&mut rgba_image, bg);
                                 }
                                 prunr_core::ProcessResult {
