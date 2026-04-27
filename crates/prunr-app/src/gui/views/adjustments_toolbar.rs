@@ -316,16 +316,14 @@ pub(crate) fn render(
         // two fields (`bg`, `bg_effect`) stay orthogonal — the chip enforces
         // mutual exclusivity at the UI so users pick one kind at a time.
         ui.add_enabled_ui(bg_active, |ui| {
-            render_background_chip(
-                ui,
-                &mut item_settings.bg,
-                &mut item_settings.bg_effect,
-                &mut item_settings.bg_image_fit,
-                defaults.bg_value,
+            render_background_chip(ui, BgChipState {
+                bg: &mut item_settings.bg,
+                bg_effect: &mut item_settings.bg_effect,
+                bg_image_fit: &mut item_settings.bg_image_fit,
+                default_color: defaults.bg_value,
                 has_bg_image,
                 bg_image_label,
-                &mut change,
-            );
+            }, &mut change);
         });
 
         // Right-aligned cluster: reset, preset. Right-to-left layout fills
@@ -862,16 +860,31 @@ impl BgKind {
 
 /// Unified Background chip: one control for "what fills the transparent
 /// area behind the subject" — solid colour or a source-derived effect.
-fn render_background_chip(
-    ui: &mut Ui,
-    bg: &mut Option<[u8; 4]>,
-    bg_effect: &mut prunr_core::BgEffect,
-    bg_image_fit: &mut prunr_core::BgImageFit,
+/// Editable + display state for the background chip. Grouped because the
+/// chip needs three live-edit fields plus image-availability metadata —
+/// past the param-count alarm without this grouping.
+struct BgChipState<'a> {
+    bg: &'a mut Option<[u8; 4]>,
+    bg_effect: &'a mut prunr_core::BgEffect,
+    bg_image_fit: &'a mut prunr_core::BgImageFit,
     default_color: [u8; 4],
     has_bg_image: bool,
-    bg_image_label: Option<&str>,
+    bg_image_label: Option<&'a str>,
+}
+
+fn render_background_chip(
+    ui: &mut Ui,
+    state: BgChipState<'_>,
     change: &mut ToolbarChange,
 ) {
+    let BgChipState {
+        bg,
+        bg_effect,
+        bg_image_fit,
+        default_color,
+        has_bg_image,
+        bg_image_label,
+    } = state;
     use egui::widgets::color_picker::{color_picker_color32, Alpha};
     use prunr_core::BgEffect;
 
