@@ -281,6 +281,10 @@ fn render_thumbnail_layer(
         0.2,
     );
     let is_dragging_out = dragging_ids.is_some_and(|s| s.contains(&app.batch.items[i].id));
+    // Build the bg image texture lazily (no-op if already cached or no
+    // bg image set) — keeps the sidebar rendering current even when the
+    // canvas hasn't painted yet (e.g. before the user clicks the row).
+    app.batch.items[i].ensure_bg_image_texture(ui.ctx());
     paint_thumbnail(ui, &app.batch.items[i], item_rect, is_dragging_out, fade);
     needs_repaint || fade < 1.0
 }
@@ -346,13 +350,16 @@ fn paint_thumbnail(
     let thumb_rect = Rect::from_center_size(item_rect.center(), fitted);
 
     // Render-time bg fill: result thumbs are transparent where pixels were
-    // removed; paint the bg color behind so the sidebar matches the canvas.
+    // removed; paint the bg behind so the sidebar matches the canvas.
     // Gate on `Done` (not `result_rgba.is_some()`) so the bg still shows
     // for background items whose `result_rgba` was evicted to disk by
     // `evict_result_rgba_for_background_items` — the thumbnail texture
-    // is still cached and was built from the result.
+    // is still cached and was built from the result. Image bg wins over
+    // color bg, mirroring the canvas mutual-exclusion rule.
     if matches!(item.status, BatchStatus::Done) {
-        if let Some(bg) = item.settings.bg_rgb() {
+        if let Some(tex) = item.bg_image_texture.as_ref() {
+            super::canvas::paint_bg_image_cover(ui, thumb_rect, tex);
+        } else if let Some(bg) = item.settings.bg_rgb() {
             ui.painter()
                 .rect_filled(thumb_rect, 0.0, Color32::from_rgb(bg[0], bg[1], bg[2]));
         }
