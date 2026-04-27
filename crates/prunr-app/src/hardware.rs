@@ -123,11 +123,9 @@ pub fn ram_verdict(working_set_bytes: u64, available_bytes: u64) -> RamVerdict {
 /// run standard SD fast enough that the LCM/TAESD quality trade-off
 /// isn't worth it. Pure function of the profile so callers can mock.
 pub fn sd_fast_mode_auto_default(profile: &HardwareProfile) -> bool {
-    let has_real_gpu = match profile.dgpu {
-        Some(GpuVendor::Nvidia | GpuVendor::Amd | GpuVendor::Apple) => true,
-        _ => false,
-    } || profile.igpu == Some(GpuVendor::Apple); // Apple Silicon SoC
-    !has_real_gpu
+    let real_dgpu = matches!(profile.dgpu, Some(GpuVendor::Nvidia | GpuVendor::Amd | GpuVendor::Apple));
+    let apple_soc = profile.igpu == Some(GpuVendor::Apple);
+    !(real_dgpu || apple_soc)
 }
 
 /// Effective SD fast-mode flag: `user_override` wins when set, otherwise

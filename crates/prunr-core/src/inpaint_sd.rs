@@ -1,48 +1,30 @@
-//! Stable Diffusion 1.5 Inpainting — multi-model pipeline.
+//! Stable Diffusion 1.5 Inpainting pipeline.
 //!
-//! Pipeline (per call):
-//!   1. Tokenize prompt → text encoder → text embeddings (1, 77, 768)
-//!      (v1: empty / unconditional only — BPE tokenizer lands when we
-//!      add a prompt UI; SD ships fine with empty conditioning)
-//!   2. VAE encode source → image latent (1, 4, 64, 64)
-//!      Same for the masked source → masked-image latent
-//!   3. Mask resampled to latent space (1, 1, 64, 64)
-//!   4. Initial latent: pure gaussian noise scaled by init_noise_sigma
-//!   5. For t in DDIM timesteps:
-//!        latent_in = cat([latent, mask_lat, masked_lat], dim=1)   9 channels
-//!        noise_pred = unet(latent_in, t, text_emb)
-//!        latent = scheduler.step(noise_pred, t, latent)
-//!   6. VAE decode final latent → image (in [-1, 1])
-//!   7. Composite painted region back via mask
+//! Per-stroke flow: CLIP-tokenize prompt → text encoder; VAE-encode the
+//! masked source; downsample mask to latent space; sample gaussian noise;
+//! denoise via DDIM (with optional classifier-free guidance); VAE-decode
+//! final latent; composite back through mask.
 //!
-//! Safety guards (CPU-class hardware reality):
-//! - Bundle load checks free RAM via sysinfo and refuses below 6 GB free
-//!   (see `SD_CPU_MIN_FREE_RAM_BYTES`). The 4 ONNX files total ~2 GB on
-//!   disk, ORT graph optimization roughly doubles that during load, and
-//!   UNet activations add another 2-4 GB transient. Below the floor a
-//!   user's machine swap-thrashes and freezes.
-//! - Smart cropping: dispatch runs ONE 512×512 inference centered on the
-//!   mask bbox, not the global tile grid. Most paint strokes touch a
-//!   small region of the canvas; tiling the whole image wastes minutes
-//!   of CPU on tiles the user didn't paint. If the painted region is
-//!   larger than 512×512 we refuse — multi-tile SD on CPU is
-//!   uncancellable in practice.
+//! Dispatch wraps the per-tile pipeline:
+//! - Mask connected components are isolated so disjoint strokes don't
+//!   widen the bbox.
+//! - Each component ≤ 512×512 hits the smart-crop fast path
+//!   (`compute_sd_crop`).
+//! - Components > 512×512 split into overlapping 512×512 tiles with
+//!   linear-alpha seam blending (`tile_bbox` + `blend_tile`).
 //!
-//! v1 limits — easy upgrade paths once UI lands:
-//! - Empty prompt only (no `prompt`, no `negative_prompt`). Quality on
-//!   uniform inputs is poor with empty conditioning — SD 1.5 was trained
-//!   with text guidance and has no good "default" unconditionally. Real
-//!   photos with surrounding texture do better because the masked-image
-//!   latent provides the constraint.
-//! - Classifier-free guidance disabled (`guidance_scale = 1.0`). Adding
-//!   CFG roughly doubles per-step UNet cost but unlocks prompts.
-//! - CPU-only inference. Adding a GPU EP ladder (mirroring LaMa's
-//!   `build_lama_session`) is the next big perf win on supported HW.
-//! - 512×512 fixed tile size.
+//! Safety guards on CPU-class hardware:
+//! - Bundle load refuses below 6 GB free RAM (see `SD_CPU_MIN_FREE_RAM_BYTES`).
+//!   ORT graph optimization + UNet activations together push 6-10 GB
+//!   transient on this codepath; the floor protects against swap thrash.
+//! - Idle bundle release (`SD_IDLE_RELEASE_SECS`) drops the cached 4
+//!   ORT sessions after no use — reclaims ~4-6 GB so users who erased
+//!   ten minutes ago aren't carrying SD weights for the rest of the
+//!   session.
 //!
-//! All of these flow into `SdInpaintRequest` already; the public API is
-//! shaped for future text-prompted inpaint, outpainting, image-to-image,
-//! ControlNet, and "imagine more" variations.
+//! When `Settings.sd_fast_mode` resolves true the dispatcher routes to
+//! the LCM-distilled checkpoint (4 steps, guidance baked into training).
+//! That gating happens upstream; this module sees the chosen `ModelId`.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -163,8 +145,8 @@ pub fn process_inpaint_with(
         return Ok(image.clone());
     }
 
-    // Local Arc keeps the bundle alive for `run_one_tile` even if the
-    // idle sweep drops the cache's clone mid-call.
+    // Hold an Arc through the run so the idle sweep can't drop sessions
+    // mid-inference.
     let bundle = SdSession::get(id)?;
     let (img_w, img_h) = image.dimensions();
     let mut out = image.clone();
@@ -301,7 +283,6 @@ fn blend_tile(canvas: &mut image::RgbaImage, painted: &image::RgbaImage, tile: &
                     let pnt = raw_painted[src + k] as f32;
                     raw_canvas[dst + k] = (canv * inv + pnt * a).round().clamp(0.0, 255.0) as u8;
                 }
-                // Alpha stays at painted (run_one_tile already set 255).
                 raw_canvas[dst + 3] = raw_painted[src + 3];
             }
         }
@@ -485,10 +466,7 @@ fn run_one_tile(
         latent = step_array(&scheduler, &latent, &noise_pred, t, t_prev);
     }
 
-    // 7. VAE decode → painted RGB tile.
     let painted = vae_decode(bundle, &latent)?;
-
-    // 8. Composite onto source: outside mask = source, inside = painted.
     Ok(composite(image, &painted, mask, w, h))
 }
 
@@ -880,10 +858,6 @@ fn clip_tokenize(text: &str) -> Array2<i32> {
     for (i, tok) in inner.iter().take(inner_len).enumerate() {
         out[(0, 1 + i)] = tok.to_u16() as i32;
     }
-    // EOS terminator at content end + 1 (already filled by from_elem,
-    // making this a no-op in the "everything from inner_len+1 is EOS"
-    // case — kept explicit for readability).
-    out[(0, 1 + inner_len)] = CLIP_EOS as i32;
     out
 }
 
@@ -1134,7 +1108,7 @@ fn sample_initial_noise(seed: u64, _scheduler: &DdimScheduler) -> Array4<f32> {
     let l = SD_LATENT_SIDE as usize;
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
     let dist = StandardNormal;
-    let n = 1 * 4 * l * l;
+    let n = 4 * l * l;
     let mut buf = Vec::with_capacity(n);
     for _ in 0..n {
         let v: f32 = dist.sample(&mut rng);
@@ -1308,7 +1282,7 @@ impl DdimScheduler {
         // num_train-1 down to 0, length = num_inference.
         let step = NUM_TRAIN as f32 / num_inference as f32;
         let mut timesteps: Vec<i64> = (0..num_inference)
-            .map(|i| (((num_inference - 1 - i) as f32 + 0.0) * step).round() as i64)
+            .map(|i| ((num_inference - 1 - i) as f32 * step).round() as i64)
             .collect();
         for t in &mut timesteps {
             *t = (*t).clamp(0, NUM_TRAIN as i64 - 1);
