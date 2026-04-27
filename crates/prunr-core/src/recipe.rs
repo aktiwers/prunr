@@ -130,6 +130,11 @@ pub struct CompositeRecipe {
     /// change with a u64 compare instead of re-hashing every dispatch.
     #[serde(default)]
     pub bg_image_hash: Option<u64>,
+    /// How the bg image is positioned in the frame (Cover / Contain /
+    /// Stretch / Tile / Center). Independent of `bg_image_hash` so a fit
+    /// change with the same image still flips the recipe.
+    #[serde(default)]
+    pub bg_image_fit: crate::types::BgImageFit,
     pub solid_line_color: Option<[u8; 3]>,
 }
 
@@ -245,7 +250,12 @@ mod tests {
                 line_style: LineStyle::Solid,
             },
             mask: mask(gamma, None, 0.0, false),
-            composite: CompositeRecipe { bg_color: bg, bg_image_hash: None, solid_line_color: None },
+            composite: CompositeRecipe {
+                bg_color: bg,
+                bg_image_hash: None,
+                bg_image_fit: crate::types::BgImageFit::default(),
+                solid_line_color: None,
+            },
             was_chain: false,
         }
     }
@@ -271,6 +281,15 @@ mod tests {
         let a = make_recipe(ModelKind::Silueta, 1.0, None);
         let mut b = make_recipe(ModelKind::Silueta, 1.0, None);
         b.composite.bg_image_hash = Some(0xdeadbeef);
+        assert_eq!(resolve_tier(&a, &b), RequiredTier::CompositeOnly);
+    }
+
+    #[test]
+    fn bg_image_fit_change_composite_only() {
+        // Same image, different fit (Cover → Tile) — pure render math change.
+        let a = make_recipe(ModelKind::Silueta, 1.0, None);
+        let mut b = make_recipe(ModelKind::Silueta, 1.0, None);
+        b.composite.bg_image_fit = crate::types::BgImageFit::Tile;
         assert_eq!(resolve_tier(&a, &b), RequiredTier::CompositeOnly);
     }
 

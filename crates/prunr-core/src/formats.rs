@@ -174,40 +174,148 @@ pub fn apply_background_color(img: &mut RgbaImage, bg: [u8; 3]) {
     }
 }
 
-/// Alpha-blend an RGBA image onto a background image, making all pixels fully
-/// opaque. The bg image is scaled to cover the foreground (preserves aspect
-/// ratio, may crop). Sequential for the same reason as `apply_background_color`.
-pub fn apply_background_image(img: &mut RgbaImage, bg: &DynamicImage) {
+/// Alpha-blend an RGBA image onto a background image, making opaque any
+/// pixel where the bg layout reaches. `fit` controls how `bg` is positioned
+/// inside the foreground frame:
+///
+/// - `Cover`: scaled to fill, may crop (every alpha-zero pixel covered)
+/// - `Contain` / `Center`: bg may not cover the whole frame; uncovered
+///   transparent pixels stay transparent
+/// - `Stretch`: distorted to fill exactly
+/// - `Tile`: repeated at native size, fully covers
+///
+/// Sequential for the same reason as `apply_background_color` (subprocess
+/// rayon worker — nested parallelism deadlocks).
+pub fn apply_background_image(
+    img: &mut RgbaImage,
+    bg: &DynamicImage,
+    fit: crate::types::BgImageFit,
+) {
     let (fw, fh) = (img.width(), img.height());
-    let bg_resized = resize_cover_rgb(bg, fw, fh);
-    let bg_raw = bg_resized.as_raw();
+    let bg_full = build_bg_layer(bg, fw, fh, fit);
     let raw = img.as_mut();
     for (i, pixel) in raw.chunks_mut(4).enumerate() {
         let a = pixel[3] as f32 / 255.0;
-        if a < 1.0 {
-            let bi = i * 3;
-            let inv = 1.0 - a;
-            pixel[0] = (pixel[0] as f32 * a + bg_raw[bi] as f32 * inv) as u8;
-            pixel[1] = (pixel[1] as f32 * a + bg_raw[bi + 1] as f32 * inv) as u8;
-            pixel[2] = (pixel[2] as f32 * a + bg_raw[bi + 2] as f32 * inv) as u8;
-            pixel[3] = 255;
-        }
+        if a >= 1.0 { continue; }
+        let bi = i * 4;
+        let bg_a = bg_full[bi + 3] as f32 / 255.0;
+        if bg_a <= 0.0 { continue; }
+        let inv = (1.0 - a) * bg_a;
+        pixel[0] = (pixel[0] as f32 * a + bg_full[bi] as f32 * inv) as u8;
+        pixel[1] = (pixel[1] as f32 * a + bg_full[bi + 1] as f32 * inv) as u8;
+        pixel[2] = (pixel[2] as f32 * a + bg_full[bi + 2] as f32 * inv) as u8;
+        pixel[3] = ((a + inv) * 255.0).min(255.0) as u8;
     }
 }
 
-/// Resize `src` to cover (`dst_w`, `dst_h`): scale uniformly so that both target
-/// dimensions are filled, then center-crop the overhang.
-fn resize_cover_rgb(src: &DynamicImage, dst_w: u32, dst_h: u32) -> image::RgbImage {
-    let (sw, sh) = (src.width(), src.height());
-    if sw == 0 || sh == 0 {
-        return image::RgbImage::new(dst_w, dst_h);
+/// Build a `dst_w × dst_h` RGBA buffer with `bg` positioned per `fit`.
+/// Pixels outside the bg region have alpha=0 (preserved transparency).
+fn build_bg_layer(
+    bg: &DynamicImage,
+    dst_w: u32,
+    dst_h: u32,
+    fit: crate::types::BgImageFit,
+) -> Vec<u8> {
+    use crate::types::BgImageFit;
+    let mut out = vec![0u8; (dst_w * dst_h * 4) as usize];
+    let (sw, sh) = (bg.width(), bg.height());
+    if sw == 0 || sh == 0 || dst_w == 0 || dst_h == 0 {
+        return out;
     }
-    let scale = (dst_w as f32 / sw as f32).max(dst_h as f32 / sh as f32);
-    let scaled_w = ((sw as f32 * scale).ceil() as u32).max(dst_w);
-    let scaled_h = ((sh as f32 * scale).ceil() as u32).max(dst_h);
-    let scaled = resize_rgb_lanczos3(src, scaled_w, scaled_h);
-    let (ox, oy) = ((scaled_w - dst_w) / 2, (scaled_h - dst_h) / 2);
-    image::imageops::crop_imm(&scaled, ox, oy, dst_w, dst_h).to_image()
+    match fit {
+        BgImageFit::Cover => {
+            let scale = (dst_w as f32 / sw as f32).max(dst_h as f32 / sh as f32);
+            let scaled_w = ((sw as f32 * scale).ceil() as u32).max(dst_w);
+            let scaled_h = ((sh as f32 * scale).ceil() as u32).max(dst_h);
+            let scaled = resize_rgb_lanczos3(bg, scaled_w, scaled_h);
+            let (ox, oy) = ((scaled_w - dst_w) / 2, (scaled_h - dst_h) / 2);
+            let cropped = image::imageops::crop_imm(&scaled, ox, oy, dst_w, dst_h).to_image();
+            blit_rgb_full(&mut out, dst_w, &cropped);
+        }
+        BgImageFit::Stretch => {
+            let scaled = resize_rgb_lanczos3(bg, dst_w, dst_h);
+            blit_rgb_full(&mut out, dst_w, &scaled);
+        }
+        BgImageFit::Contain => {
+            let scale = (dst_w as f32 / sw as f32).min(dst_h as f32 / sh as f32);
+            let inner_w = ((sw as f32 * scale).round() as u32).max(1).min(dst_w);
+            let inner_h = ((sh as f32 * scale).round() as u32).max(1).min(dst_h);
+            let scaled = resize_rgb_lanczos3(bg, inner_w, inner_h);
+            let ox = (dst_w - inner_w) / 2;
+            let oy = (dst_h - inner_h) / 2;
+            blit_rgb_at(&mut out, dst_w, dst_h, &scaled, ox, oy);
+        }
+        BgImageFit::Center => {
+            let inner_w = sw.min(dst_w);
+            let inner_h = sh.min(dst_h);
+            let src_x = (sw.saturating_sub(dst_w)) / 2;
+            let src_y = (sh.saturating_sub(dst_h)) / 2;
+            let cropped = image::imageops::crop_imm(&bg.to_rgb8(), src_x, src_y, inner_w, inner_h).to_image();
+            let ox = (dst_w - inner_w) / 2;
+            let oy = (dst_h - inner_h) / 2;
+            blit_rgb_at(&mut out, dst_w, dst_h, &cropped, ox, oy);
+        }
+        BgImageFit::Tile => {
+            let bg_rgb = bg.to_rgb8();
+            for y in 0..dst_h {
+                let sy = (y % sh) as usize * sw as usize * 3;
+                let row_dst = (y * dst_w * 4) as usize;
+                for x in 0..dst_w {
+                    let sx = (x % sw) as usize * 3;
+                    let s = sy + sx;
+                    let d = row_dst + (x * 4) as usize;
+                    out[d] = bg_rgb.as_raw()[s];
+                    out[d + 1] = bg_rgb.as_raw()[s + 1];
+                    out[d + 2] = bg_rgb.as_raw()[s + 2];
+                    out[d + 3] = 255;
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Stamp an RGB image into a full-frame RGBA buffer (alpha=255 everywhere).
+fn blit_rgb_full(out: &mut [u8], dst_w: u32, rgb: &image::RgbImage) {
+    let raw = rgb.as_raw();
+    for (i, chunk) in out.chunks_mut(4).enumerate() {
+        let s = i * 3;
+        chunk[0] = raw[s];
+        chunk[1] = raw[s + 1];
+        chunk[2] = raw[s + 2];
+        chunk[3] = 255;
+    }
+    let _ = dst_w; // signature consistent with blit_rgb_at
+}
+
+/// Stamp `rgb` (sized inner_w×inner_h) into the RGBA buffer at offset (ox, oy).
+/// Pixels outside the stamp keep their existing values (typically alpha=0).
+fn blit_rgb_at(
+    out: &mut [u8],
+    dst_w: u32,
+    dst_h: u32,
+    rgb: &image::RgbImage,
+    ox: u32,
+    oy: u32,
+) {
+    let (iw, ih) = (rgb.width(), rgb.height());
+    let raw = rgb.as_raw();
+    for y in 0..ih {
+        let dst_y = oy + y;
+        if dst_y >= dst_h { break; }
+        let src_row = (y * iw * 3) as usize;
+        let dst_row = (dst_y * dst_w * 4) as usize;
+        for x in 0..iw {
+            let dst_x = ox + x;
+            if dst_x >= dst_w { break; }
+            let s = src_row + (x * 3) as usize;
+            let d = dst_row + (dst_x * 4) as usize;
+            out[d] = raw[s];
+            out[d + 1] = raw[s + 1];
+            out[d + 2] = raw[s + 2];
+            out[d + 3] = 255;
+        }
+    }
 }
 
 /// Encode an RgbaImage as PNG bytes with fast compression.
@@ -368,7 +476,7 @@ mod tests {
             *px = image::Rgb([0, 255, 0]);
         }
         let bg_dyn = DynamicImage::ImageRgb8(bg);
-        apply_background_image(&mut fg, &bg_dyn);
+        apply_background_image(&mut fg, &bg_dyn, crate::types::BgImageFit::Cover);
         assert_eq!(fg.get_pixel(0, 0), &Rgba([255, 0, 0, 255]),
             "opaque pixel must stay unchanged");
         assert_eq!(fg.get_pixel(1, 0), &Rgba([0, 255, 0, 255]),
@@ -381,7 +489,7 @@ mod tests {
         fg.put_pixel(0, 0, Rgba([200, 0, 0, 128])); // half-transparent red
         let bg_dyn = DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
             1, 1, image::Rgb([0, 0, 200])));
-        apply_background_image(&mut fg, &bg_dyn);
+        apply_background_image(&mut fg, &bg_dyn, crate::types::BgImageFit::Cover);
         let p = fg.get_pixel(0, 0);
         // a = 128/255 ≈ 0.502; blended R ≈ 200*0.502 = 100, B ≈ 200*0.498 = 99
         assert!((90..=110).contains(&p[0]), "R was {}", p[0]);
@@ -392,11 +500,43 @@ mod tests {
     #[test]
     fn apply_background_image_handles_zero_size_bg_gracefully() {
         let mut fg = RgbaImage::from_pixel(2, 2, Rgba([100, 100, 100, 0]));
-        // 0×0 bg — resize_cover returns black.
+        // 0×0 bg — every fit produces an all-transparent layer; the
+        // foreground keeps its alpha=0 pixels untouched (no division by zero).
         let bg_dyn = DynamicImage::ImageRgb8(image::RgbImage::new(0, 0));
-        apply_background_image(&mut fg, &bg_dyn);
+        apply_background_image(&mut fg, &bg_dyn, crate::types::BgImageFit::Cover);
         for p in fg.pixels() {
-            assert_eq!(p, &Rgba([0, 0, 0, 255]));
+            assert_eq!(p, &Rgba([100, 100, 100, 0]));
+        }
+    }
+
+    #[test]
+    fn apply_background_image_contain_leaves_letterbox_transparent() {
+        // Wide foreground (4×1) with a square 1×1 green bg. Contain centres
+        // the bg into a 1×1 block — the surrounding alpha-0 pixels in the
+        // foreground stay alpha-0 (transparent letterbox).
+        let mut fg = RgbaImage::from_pixel(4, 1, Rgba([0, 0, 0, 0]));
+        let bg = DynamicImage::ImageRgb8(image::RgbImage::from_pixel(1, 1, image::Rgb([0, 255, 0])));
+        apply_background_image(&mut fg, &bg, crate::types::BgImageFit::Contain);
+        // Centre column (or close to it) gets the bg green; edges stay transparent.
+        let opaque_count = fg.pixels().filter(|p| p[3] > 0).count();
+        let transparent_count = fg.pixels().filter(|p| p[3] == 0).count();
+        assert!(opaque_count >= 1, "Contain must paint at least one pixel of bg");
+        assert!(transparent_count >= 2, "Contain must letterbox the rest as transparent");
+    }
+
+    #[test]
+    fn apply_background_image_tile_covers_every_pixel() {
+        let mut fg = RgbaImage::from_pixel(4, 2, Rgba([0, 0, 0, 0]));
+        // 2×1 red+blue striped bg → tiled, every fg pixel gets red or blue.
+        let mut bg = image::RgbImage::new(2, 1);
+        bg.put_pixel(0, 0, image::Rgb([255, 0, 0]));
+        bg.put_pixel(1, 0, image::Rgb([0, 0, 255]));
+        let bg_dyn = DynamicImage::ImageRgb8(bg);
+        apply_background_image(&mut fg, &bg_dyn, crate::types::BgImageFit::Tile);
+        for p in fg.pixels() {
+            assert_eq!(p[3], 255, "Tile must cover every pixel");
+            // Each pixel is either red or blue (not black).
+            assert!(p[0] == 255 || p[2] == 255, "Tile sample must come from bg");
         }
     }
 

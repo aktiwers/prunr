@@ -11,7 +11,7 @@
 //! Target size: under 40 bytes to fit in a single cache line alongside the
 //! BatchItem's lightweight metadata fields.
 
-use prunr_core::{LineMode, MaskSettings, EdgeSettings, EdgeScale};
+use prunr_core::{LineMode, MaskSettings, EdgeSettings, EdgeScale, BgImageFit};
 use serde::{Deserialize, Serialize};
 
 /// Per-image processing settings. Edited via the adjustments toolbar.
@@ -91,6 +91,10 @@ pub struct ItemSettings {
     /// background image. `None` when no image bg is set.
     #[serde(default)]
     pub bg_image_hash: Option<u64>,
+    /// How the background image is positioned/scaled inside the result frame.
+    /// Default `Cover` matches CSS `background-size: cover`.
+    #[serde(default)]
+    pub bg_image_fit: BgImageFit,
 }
 
 impl Default for ItemSettings {
@@ -116,6 +120,7 @@ impl Default for ItemSettings {
             input_transform: prunr_core::InputTransform::default(),
             correction_hash: None,
             bg_image_hash: None,
+            bg_image_fit: BgImageFit::default(),
         }
     }
 }
@@ -188,6 +193,7 @@ impl ItemSettings {
             composite: prunr_core::CompositeRecipe {
                 bg_color: bg_rgb,
                 bg_image_hash: self.bg_image_hash,
+                bg_image_fit: self.bg_image_fit,
                 solid_line_color: self.solid_line_color,
             },
             was_chain: chain_mode,
@@ -313,6 +319,7 @@ mod tests {
             input_transform: prunr_core::InputTransform::ContrastBoost { percent: 150 },
             correction_hash: Some(0xdeadbeef),
             bg_image_hash: Some(0xfeedface),
+            bg_image_fit: prunr_core::BgImageFit::Tile,
         };
         let json = serde_json::to_string(&s).unwrap();
         let recovered: ItemSettings = serde_json::from_str(&json).unwrap();

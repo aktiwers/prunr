@@ -504,6 +504,53 @@ impl std::fmt::Display for BgEffect {
     }
 }
 
+/// How a per-image background image is positioned and scaled inside the
+/// result frame. CSS-style.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash,
+    serde::Serialize, serde::Deserialize, Default,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum BgImageFit {
+    /// Fills both target dimensions (uniform scale, may crop overhang).
+    #[default]
+    Cover,
+    /// Fits inside both target dimensions (uniform scale, may letterbox).
+    Contain,
+    /// Distorts to fill exactly (non-uniform scale).
+    Stretch,
+    /// Repeated at native size.
+    Tile,
+    /// Native size, centred. May overflow bounds (clipped) or leave gaps.
+    Center,
+}
+
+impl BgImageFit {
+    pub const ALL: &'static [Self] = &[
+        BgImageFit::Cover,
+        BgImageFit::Contain,
+        BgImageFit::Stretch,
+        BgImageFit::Tile,
+        BgImageFit::Center,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            BgImageFit::Cover => "Cover",
+            BgImageFit::Contain => "Contain",
+            BgImageFit::Stretch => "Stretch",
+            BgImageFit::Tile => "Tile",
+            BgImageFit::Center => "Center",
+        }
+    }
+}
+
+impl std::fmt::Display for BgImageFit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
 impl FillStyle {
     pub const ALL: &'static [Self] = &[
         FillStyle::None,
