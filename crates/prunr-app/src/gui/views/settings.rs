@@ -151,35 +151,44 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) {
             // Snapshot install state for the read-only context, then
             // dispatch any returned intent against `app` after the tab's
             // borrow drops.
-            let hardware_intent = match app.settings_tab {
-                SettingsTab::General => {
-                    let ctx = HardwareSectionContext {
-                        openvino_installed: app.hardware_install_cache.openvino,
-                        install_in_progress: app.runtime_install.is_some(),
-                        install_status_text: app.runtime_install.as_ref()
-                            .map(|p| p.last_event.status_text()),
-                    };
-                    render_tab_general(ui, &mut app.settings, &ctx)
-                }
-                SettingsTab::Appearance => { render_tab_appearance(ui, &mut app.settings); None }
-                SettingsTab::Processing => { render_tab_processing(ui, &mut app.settings); None }
-                SettingsTab::Defaults => { render_tab_defaults(ui, &mut app.settings); None }
-                SettingsTab::Hotkeys => { render_tab_hotkeys(ui); None }
-            };
+            //
+            // Tab content scrolls inside its own region so a long tab
+            // (e.g. General with the runtime hint) doesn't run into the
+            // footer; ~36 px reserved for `Backend: <name>` + separator.
+            const FOOTER_RESERVED: f32 = 36.0;
+            let scroll_height = (ui.available_height() - FOOTER_RESERVED).max(0.0);
+            let hardware_intent = egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .max_height(scroll_height)
+                .show(ui, |ui| {
+                    match app.settings_tab {
+                        SettingsTab::General => {
+                            let ctx = HardwareSectionContext {
+                                openvino_installed: app.hardware_install_cache.openvino,
+                                install_in_progress: app.runtime_install.is_some(),
+                                install_status_text: app.runtime_install.as_ref()
+                                    .map(|p| p.last_event.status_text()),
+                            };
+                            render_tab_general(ui, &mut app.settings, &ctx)
+                        }
+                        SettingsTab::Appearance => { render_tab_appearance(ui, &mut app.settings); None }
+                        SettingsTab::Processing => { render_tab_processing(ui, &mut app.settings); None }
+                        SettingsTab::Defaults => { render_tab_defaults(ui, &mut app.settings); None }
+                        SettingsTab::Hotkeys => { render_tab_hotkeys(ui); None }
+                    }
+                })
+                .inner;
             if let Some(intent) = hardware_intent {
                 dispatch_hardware_intent(app, intent);
             }
 
-            // Backend info at the bottom
-            ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
-                ui.label(
-                    RichText::new(format!("Backend: {}", app.settings.active_backend))
-                        .monospace()
-                        .size(theme::FONT_SIZE_MONO)
-                        .color(theme::TEXT_HINT),
-                );
-                ui.separator();
-            });
+            ui.separator();
+            ui.label(
+                RichText::new(format!("Backend: {}", app.settings.active_backend))
+                    .monospace()
+                    .size(theme::FONT_SIZE_MONO)
+                    .color(theme::TEXT_HINT),
+            );
         });
 
     let now = ctx.input(|i| i.time);
