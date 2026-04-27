@@ -352,16 +352,10 @@ pub(crate) fn render(
                 // appears LEFT of the toggle.
                 if brush_available && brush_state.is_enabled() {
                     let is_sd = matches!(app_settings.model, crate::gui::settings::SettingsModel::SdInpaint);
-                    // Mark fast_mode TRUE for the UI only when LCM
-                    // routing will actually happen — i.e. setting is on
-                    // AND the LCM bundle is installed. Otherwise the
-                    // dispatcher silently runs standard SD and the
-                    // user's Guidance/Negative inputs DO matter.
+                    // Same predicate as the dispatch path so UI greying
+                    // and routing can't disagree.
                     let sd_fast_mode = is_sd
-                        && crate::hardware::sd_fast_mode_active(
-                            app_settings.sd_fast_mode, crate::hardware::profile())
-                        && prunr_models::descriptor(prunr_models::ModelId::SdV15LcmInpaintFp16).is_some()
-                        && prunr_models::is_available(prunr_models::ModelId::SdV15LcmInpaintFp16);
+                        && app_settings.lcm_routing_active(prunr_models::ModelId::SdV15InpaintFp16);
                     let outcome = super::brush_chip::render(
                         ui, brush_state, app_settings.model.is_inpaint(), is_sd, sd_fast_mode,
                     );
