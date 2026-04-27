@@ -89,15 +89,25 @@ impl RuntimeId {
     }
 }
 
+/// Started install handle: progress receiver + cancel flag. Caller
+/// flips `cancel` to abort an in-flight install — the worker thread
+/// notices on the next chunk read or backoff tick (≤50 ms latency).
+pub struct InstallHandle {
+    pub events: mpsc::Receiver<InstallEvent>,
+    pub cancel: Arc<AtomicBool>,
+}
+
 /// Final event is either `Done` or `Failed`; channel closes after.
-pub fn start_install(runtime: RuntimeId) -> mpsc::Receiver<InstallEvent> {
+pub fn start_install(runtime: RuntimeId) -> InstallHandle {
     let (tx, rx) = mpsc::channel();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let cancel_for_thread = Arc::clone(&cancel);
     std::thread::spawn(move || {
-        if let Err(e) = run_install(runtime, &tx, Arc::new(AtomicBool::new(false))) {
+        if let Err(e) = run_install(runtime, &tx, cancel_for_thread) {
             let _ = tx.send(InstallEvent::Failed { error: e });
         }
     });
-    rx
+    InstallHandle { events: rx, cancel }
 }
 
 /// Remove an installed runtime. Refuses when this is the only ORT source
