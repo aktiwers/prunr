@@ -547,7 +547,30 @@ impl BgImageFit {
 
 impl std::fmt::Display for BgImageFit {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.name())
+        // Lower-case wire form for CLI (`--bg-image-fit cover`) — the
+        // human-readable label uses `name()`.
+        let s = match self {
+            BgImageFit::Cover => "cover",
+            BgImageFit::Contain => "contain",
+            BgImageFit::Stretch => "stretch",
+            BgImageFit::Tile => "tile",
+            BgImageFit::Center => "center",
+        };
+        f.write_str(s)
+    }
+}
+
+impl std::str::FromStr for BgImageFit {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "cover" => Ok(BgImageFit::Cover),
+            "contain" => Ok(BgImageFit::Contain),
+            "stretch" => Ok(BgImageFit::Stretch),
+            "tile" => Ok(BgImageFit::Tile),
+            "center" => Ok(BgImageFit::Center),
+            _ => Err(format!("unknown bg-image fit: {s}")),
+        }
     }
 }
 
