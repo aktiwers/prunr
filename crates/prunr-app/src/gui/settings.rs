@@ -80,6 +80,17 @@ pub struct Settings {
     pub active_backend: String,
     #[serde(default)]
     pub brush: BrushSettings,
+
+    /// SD inpaint speed/quality trade-off. `None` = auto (ON for CPU /
+    /// Intel iGPU only, OFF when a real GPU is detected). `Some(true)`
+    /// or `Some(false)` is an explicit user override that survives
+    /// hardware re-detection.
+    ///
+    /// When effective-ON, SD routes through LCM-distilled weights
+    /// (4-step inference) and TAESD when those land. When effective-OFF,
+    /// the standard SD pipeline runs (20 steps, full VAE, full CFG).
+    #[serde(default)]
+    pub sd_fast_mode: Option<bool>,
 }
 
 fn default_live_preview() -> bool { true }
@@ -412,6 +423,7 @@ impl Default for Settings {
             force_cpu: false,
             active_backend: "CPU".to_string(),
             brush: BrushSettings::default(),
+            sd_fast_mode: None,
         }
     }
 }
