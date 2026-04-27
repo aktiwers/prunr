@@ -411,8 +411,12 @@ pub fn apply_bg_effect(rgba: &mut RgbaImage, source: &DynamicImage, effect: crat
     let backdrop: RgbaImage = match effect {
         BgEffect::None => return,
         BgEffect::BlurredSource { radius } => {
-            let r = radius.clamp(1, 64) as f32;
-            image::imageops::blur(&source.to_rgba8(), r)
+            // image::imageops::blur is a single-threaded Gaussian — slow
+            // on multi-MP sources. fast_blur is a 3-pass box-filter
+            // approximation: ~3-4× faster, visually near-identical at
+            // typical UI radii. Sigma ≈ radius for the API's expectation.
+            let sigma = radius.clamp(1, 64) as f32;
+            image::imageops::fast_blur(&source.to_rgba8(), sigma)
         }
         BgEffect::InvertedSource => {
             let mut img = source.to_rgba8();

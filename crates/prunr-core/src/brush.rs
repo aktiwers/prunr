@@ -123,6 +123,15 @@ pub fn apply_correction(mask: &mut [f32], mask_w: usize, mask_h: usize, correcti
     let cw = correction.width as usize;
     let ch = correction.height as usize;
 
+    // Empty correction (no stamps): skip both the fast path and the
+    // resample loop. Common when the user has cleared their strokes or
+    // the BatchItem holds an empty correction that hasn't been dropped
+    // yet. The is_empty scan is O(grid) but cheap relative to either
+    // loop and avoids the resample's u64 division per target pixel.
+    if correction.is_empty() {
+        return;
+    }
+
     // Fast path: dims match, single linear pass.
     if cw == mask_w && ch == mask_h {
         for (m, &g) in mask.iter_mut().zip(correction.grid.iter()) {
