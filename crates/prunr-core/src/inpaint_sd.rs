@@ -90,6 +90,12 @@ pub struct SdInpaintRequest {
     pub guidance_scale: f32,
     /// `None` ⇒ random seed each call.
     pub seed: Option<u64>,
+    /// When true, swap the SD bundle's standard VAE legs for TAESD — a
+    /// distilled ~1M-param VAE pair (~3× faster decode, slight quality
+    /// cost). Caller sets this when fast mode is on AND the TAESD
+    /// bundle is installed; if the bundle isn't installed yet, the
+    /// dispatcher silently falls back to standard VAE.
+    pub use_taesd: bool,
 }
 
 impl Default for SdInpaintRequest {
@@ -100,6 +106,7 @@ impl Default for SdInpaintRequest {
             num_inference_steps: 20,
             guidance_scale: 1.0,
             seed: None,
+            use_taesd: false,
         }
     }
 }
@@ -148,6 +155,15 @@ pub fn process_inpaint_with(
     // Hold an Arc through the run so the idle sweep can't drop sessions
     // mid-inference.
     let bundle = SdSession::get(id)?;
+    // VAE backend selection: TAESD when fast mode is on AND the bundle
+    // is installed (the request flag carries that decision from
+    // dispatch). Until the TAESD artifact ships, get() errors and we
+    // silently fall back to standard VAE — same graceful pattern as LCM.
+    let taesd = if req.use_taesd { TaesdSession::get().ok() } else { None };
+    let vae: VaeBackend = match taesd.as_ref() {
+        Some(t) => VaeBackend::Taesd(t),
+        None => VaeBackend::Standard(&bundle),
+    };
     let (img_w, img_h) = image.dimensions();
     let mut out = image.clone();
 
@@ -159,7 +175,7 @@ pub fn process_inpaint_with(
             let (cx, cy, cw, ch) = compute_sd_crop(component, img_w, img_h);
             let cropped_img = image::imageops::crop_imm(&out, cx, cy, cw, ch).to_image();
             let cropped_mask = image::imageops::crop_imm(mask, cx, cy, cw, ch).to_image();
-            match run_one_tile(&bundle, &cropped_img, &cropped_mask, &req) {
+            match run_one_tile(&bundle, &vae, &cropped_img, &cropped_mask, &req) {
                 Ok(painted) => image::imageops::replace(&mut out, &painted, cx as i64, cy as i64),
                 Err(e) => tracing::error!(%e, "SD inference failed for component; skipping"),
             }
@@ -176,7 +192,7 @@ pub fn process_inpaint_with(
         for tile in tiles {
             let cropped_img = image::imageops::crop_imm(&out, tile.x, tile.y, tile.w, tile.h).to_image();
             let cropped_mask = image::imageops::crop_imm(mask, tile.x, tile.y, tile.w, tile.h).to_image();
-            match run_one_tile(&bundle, &cropped_img, &cropped_mask, &req) {
+            match run_one_tile(&bundle, &vae, &cropped_img, &cropped_mask, &req) {
                 Ok(painted) => blend_tile(&mut out, &painted, &tile),
                 Err(e) => tracing::error!(%e, ?tile, "SD inference failed for tile; skipping"),
             }
@@ -391,6 +407,7 @@ pub fn prewarm(id: prunr_models::ModelId) -> Result<(), CoreError> {
 
 fn run_one_tile(
     bundle: &SdSession,
+    vae: &VaeBackend,
     image: &RgbaImage,
     mask: &GrayImage,
     req: &SdInpaintRequest,
@@ -418,7 +435,7 @@ fn run_one_tile(
                 let np = np.clone();
                 s.spawn(move || encode_text(bundle, &np))
             });
-            let vae_h = s.spawn(|| vae_encode(bundle, &masked_image));
+            let vae_h = s.spawn(|| vae_encode(vae, &masked_image));
             let mask_lat = mask_to_latent(&padded_mask);
             let cond = cond_h.join()
                 .map_err(|_| CoreError::Inference("text encoder (cond) thread panicked".into()))??;
@@ -466,11 +483,82 @@ fn run_one_tile(
         latent = step_array(&scheduler, &latent, &noise_pred, t, t_prev);
     }
 
-    let painted = vae_decode(bundle, &latent)?;
+    let painted = vae_decode(vae, &latent)?;
     Ok(composite(image, &painted, mask, w, h))
 }
 
 // ── Session bundle ──────────────────────────────────────────────────────
+
+/// Tiny distilled VAE pair (~1M params each). Drop-in for SD's standard
+/// VAE legs when fast mode is on. No idle release — total memory cost
+/// is ~10 MB so keeping it cached forever is fine.
+pub(crate) struct TaesdSession {
+    encoder: Mutex<Session>,
+    decoder: Mutex<Session>,
+    encoder_input: String,
+    decoder_input: String,
+}
+
+impl TaesdSession {
+    fn get() -> Result<Arc<TaesdSession>, CoreError> {
+        static CACHE: OnceLock<Mutex<Option<Arc<TaesdSession>>>> = OnceLock::new();
+        let cache = CACHE.get_or_init(|| Mutex::new(None));
+        {
+            let guard = cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(s) = guard.as_ref() {
+                return Ok(Arc::clone(s));
+            }
+        }
+        let session = Self::new_inner()?;
+        let arc = Arc::new(session);
+        let mut guard = cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        *guard = Some(Arc::clone(&arc));
+        Ok(arc)
+    }
+
+    fn new_inner() -> Result<TaesdSession, CoreError> {
+        let parts = prunr_models::multi_part_paths(prunr_models::ModelId::TaesdFp16)
+            .ok_or_else(|| CoreError::Inference(
+                prunr_models::not_installed_error(prunr_models::ModelId::TaesdFp16)
+            ))?;
+        let by_key: HashMap<&str, PathBuf> = parts.into_iter().collect();
+        let encoder_path = by_key.get("encoder")
+            .ok_or_else(|| CoreError::Inference("TAESD bundle missing encoder part".into()))?;
+        let decoder_path = by_key.get("decoder")
+            .ok_or_else(|| CoreError::Inference("TAESD bundle missing decoder part".into()))?;
+
+        let encoder = Session::builder()
+            .map_err(|e| CoreError::Inference(format!("TAESD: builder init: {e}")))?
+            .with_optimization_level(GraphOptimizationLevel::Level3)
+            .map_err(|e| CoreError::Inference(format!("TAESD: opt level: {e}")))?
+            .commit_from_file(encoder_path)
+            .map_err(|e| CoreError::Inference(format!("TAESD encoder: load: {e}")))?;
+        let decoder = Session::builder()
+            .map_err(|e| CoreError::Inference(format!("TAESD: builder init: {e}")))?
+            .with_optimization_level(GraphOptimizationLevel::Level3)
+            .map_err(|e| CoreError::Inference(format!("TAESD: opt level: {e}")))?
+            .commit_from_file(decoder_path)
+            .map_err(|e| CoreError::Inference(format!("TAESD decoder: load: {e}")))?;
+
+        let encoder_input = encoder.inputs().first()
+            .ok_or_else(|| CoreError::Inference("TAESD encoder: no inputs".into()))?
+            .name().to_string();
+        let decoder_input = decoder.inputs().first()
+            .ok_or_else(|| CoreError::Inference("TAESD decoder: no inputs".into()))?
+            .name().to_string();
+
+        tracing::info!(
+            encoder_input = %encoder_input, decoder_input = %decoder_input,
+            "TAESD session loaded",
+        );
+        Ok(TaesdSession {
+            encoder: Mutex::new(encoder),
+            decoder: Mutex::new(decoder),
+            encoder_input,
+            decoder_input,
+        })
+    }
+}
 
 #[allow(dead_code)]
 pub(crate) struct SdSession {
@@ -874,39 +962,67 @@ fn encode_text(bundle: &SdSession, prompt: &str) -> Result<Array3<f32>, CoreErro
 
 // ── VAE encode / decode ────────────────────────────────────────────────
 
-/// VAE encode: image in [-1, 1] NCHW f32 → latent (1, 4, 64, 64).
-/// Diffusers' VAE encoder ONNX outputs `latent_sample` already multiplied
-/// by the 0.18215 scaling factor; some exports output unscaled `mean` and
-/// expect the caller to scale. We detect by comparing the pre/post-scale
-/// magnitude — if max(|x|) ≪ 1 we assume unscaled and apply the factor.
-fn vae_encode(bundle: &SdSession, image: &RgbaImage) -> Result<Array4<f32>, CoreError> {
+/// Pluggable VAE backend. `Standard` uses the SdSession's VAE legs
+/// (~80M params each, baked into SD 1.5). `Taesd` uses a tiny distilled
+/// pair (~1M params each, ~3× faster decode). The latter doesn't apply
+/// the 0.18215 scaling factor — TAESD bakes it into the model — so the
+/// scale step is conditional.
+pub(crate) enum VaeBackend<'a> {
+    Standard(&'a SdSession),
+    Taesd(&'a TaesdSession),
+}
+
+fn vae_encode(backend: &VaeBackend, image: &RgbaImage) -> Result<Array4<f32>, CoreError> {
     let input = image_to_minus1_plus1(image);
     let input_f16 = f32_to_f16_4d(&input);
     let t = Tensor::from_array(input_f16)
-        .map_err(|e| CoreError::Inference(format!("SD vae encoder: input tensor: {e}")))?;
-    let mut session = bundle.vae_encoder.lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let outputs = session.run(inputs![bundle.vae_encoder_input.as_str() => &t])
-        .map_err(|e| CoreError::Inference(format!("SD vae encoder: run: {e}")))?;
-    let mut latent = extract_4d(&outputs[0], "vae encoder")?;
-    // diffusers' OnnxStableDiffusionInpaintPipeline applies the scaling
-    // factor AFTER `vae_encoder(sample=image)` returns, so the ONNX
-    // output is unscaled. Mirror that: always multiply by 0.18215 here.
-    latent *= VAE_SCALING_FACTOR;
-    Ok(latent)
+        .map_err(|e| CoreError::Inference(format!("vae encoder: input tensor: {e}")))?;
+    match backend {
+        VaeBackend::Standard(bundle) => {
+            let mut session = bundle.vae_encoder.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let outputs = session.run(inputs![bundle.vae_encoder_input.as_str() => &t])
+                .map_err(|e| CoreError::Inference(format!("SD vae encoder: run: {e}")))?;
+            let mut latent = extract_4d(&outputs[0], "vae encoder")?;
+            latent *= VAE_SCALING_FACTOR;
+            Ok(latent)
+        }
+        VaeBackend::Taesd(taesd) => {
+            let mut session = taesd.encoder.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let outputs = session.run(inputs![taesd.encoder_input.as_str() => &t])
+                .map_err(|e| CoreError::Inference(format!("TAESD encoder: run: {e}")))?;
+            extract_4d(&outputs[0], "TAESD encoder")
+        }
+    }
 }
 
-fn vae_decode(bundle: &SdSession, latent: &Array4<f32>) -> Result<RgbaImage, CoreError> {
-    let unscaled = latent / VAE_SCALING_FACTOR;
-    let unscaled_f16 = f32_to_f16_4d(&unscaled);
-    let t = Tensor::from_array(unscaled_f16)
-        .map_err(|e| CoreError::Inference(format!("SD vae decoder: input tensor: {e}")))?;
-    let mut session = bundle.vae_decoder.lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let outputs = session.run(inputs![bundle.vae_decoder_input.as_str() => &t])
-        .map_err(|e| CoreError::Inference(format!("SD vae decoder: run: {e}")))?;
-    let arr = extract_4d(&outputs[0], "vae decoder")?;
-    Ok(minus1_plus1_to_image(&arr))
+fn vae_decode(backend: &VaeBackend, latent: &Array4<f32>) -> Result<RgbaImage, CoreError> {
+    match backend {
+        VaeBackend::Standard(bundle) => {
+            let unscaled = latent / VAE_SCALING_FACTOR;
+            let unscaled_f16 = f32_to_f16_4d(&unscaled);
+            let t = Tensor::from_array(unscaled_f16)
+                .map_err(|e| CoreError::Inference(format!("SD vae decoder: input tensor: {e}")))?;
+            let mut session = bundle.vae_decoder.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let outputs = session.run(inputs![bundle.vae_decoder_input.as_str() => &t])
+                .map_err(|e| CoreError::Inference(format!("SD vae decoder: run: {e}")))?;
+            let arr = extract_4d(&outputs[0], "vae decoder")?;
+            Ok(minus1_plus1_to_image(&arr))
+        }
+        VaeBackend::Taesd(taesd) => {
+            let latent_f16 = f32_to_f16_4d(latent);
+            let t = Tensor::from_array(latent_f16)
+                .map_err(|e| CoreError::Inference(format!("TAESD decoder: input tensor: {e}")))?;
+            let mut session = taesd.decoder.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let outputs = session.run(inputs![taesd.decoder_input.as_str() => &t])
+                .map_err(|e| CoreError::Inference(format!("TAESD decoder: run: {e}")))?;
+            let arr = extract_4d(&outputs[0], "TAESD decoder")?;
+            Ok(minus1_plus1_to_image(&arr))
+        }
+    }
 }
 
 // ── UNet step ───────────────────────────────────────────────────────────

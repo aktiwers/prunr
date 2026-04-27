@@ -202,8 +202,10 @@ impl Processor {
             // SD vs LCM: 20 steps + user-CFG for the standard checkpoint;
             // 4 steps + guidance forced to 1.0 for the LCM-distilled
             // backend (LCM bakes guidance into training, runtime CFG
-            // would double-count it). Selection happens upstream via
-            // `Settings.sd_fast_mode` → `dispatch_inpaint_for_item`.
+            // would double-count it). use_taesd is set for LCM only —
+            // the same fast-mode gate that picked LCM also opts into
+            // TAESD VAE; if the TAESD bundle isn't installed yet, the
+            // dispatcher silently falls back to standard VAE.
             let sd_req = match tuning.backend {
                 prunr_models::ModelId::SdV15InpaintFp16 => Some(prunr_core::inpaint_sd::SdInpaintRequest {
                     prompt: tuning.sd_prompt.clone(),
@@ -211,6 +213,7 @@ impl Processor {
                     num_inference_steps: 20,
                     guidance_scale: tuning.sd_guidance_scale,
                     seed: None,
+                    use_taesd: false,
                 }),
                 prunr_models::ModelId::SdV15LcmInpaintFp16 => Some(prunr_core::inpaint_sd::SdInpaintRequest {
                     prompt: tuning.sd_prompt.clone(),
@@ -218,6 +221,7 @@ impl Processor {
                     num_inference_steps: 4,
                     guidance_scale: 1.0,
                     seed: None,
+                    use_taesd: prunr_models::is_available(prunr_models::ModelId::TaesdFp16),
                 }),
                 _ => None,
             };
