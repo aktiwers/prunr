@@ -27,11 +27,15 @@ pub(super) struct BrushChipOutcome {
     pub committed: bool,
 }
 
+/// `sd_fast_mode = true` when the LCM-distilled backend is in effect —
+/// the Guidance slider + Negative prompt grey out because LCM bakes
+/// guidance into training and ignores the runtime knob.
 pub(super) fn render(
     ui: &mut Ui,
     brush_state: &mut BrushState,
     is_inpaint_mode: bool,
     is_sd_mode: bool,
+    sd_fast_mode: bool,
 ) -> BrushChipOutcome {
     let label = chip_label(brush_state.settings());
     let resp = ui
@@ -107,23 +111,29 @@ pub(super) fn render(
                         ui.add_space(8.0);
                         ui.separator();
                         ui.add_space(4.0);
+                        if sd_fast_mode {
+                            super::hint(ui, "Fast SD mode: LCM-distilled backend, ~5\u{00d7} faster on CPU. Negative prompt and Guidance are disabled — LCM bakes guidance into training. Switch off in Settings \u{2192} General to use them.");
+                            ui.add_space(4.0);
+                        }
                         ui.label(egui::RichText::new("Prompt").size(theme::FONT_SIZE_BODY));
                         let p = ui.text_edit_singleline(&mut s.sd_prompt);
                         if p.lost_focus() { outcome.committed = true; }
                         super::hint(ui, "What should fill the painted area. Be specific: \u{201c}wooden park bench in autumn forest\u{201d} works better than \u{201c}bench\u{201d}. Empty = unconditional (often noisy on flat surrounds).");
                         ui.add_space(4.0);
-                        ui.label(egui::RichText::new("Negative prompt")
-                            .color(theme::TEXT_SECONDARY).size(theme::FONT_SIZE_BODY));
-                        let np = ui.text_edit_singleline(&mut s.sd_negative_prompt);
-                        if np.lost_focus() { outcome.committed = true; }
-                        super::hint(ui, "What to push away from. \u{201c}blurry, watermark, signature, low quality\u{201d} suppresses common SD failure modes. Only used when Guidance > 1.");
-                        ui.add_space(4.0);
-                        let cfg = chip::slider_row_f32(
-                            ui, "Guidance", &mut s.sd_guidance_scale, 1.0..=15.0, false,
-                            |v| if v <= 1.0 + 1e-3 { "off".to_string() } else { format!("{v:.1}") },
-                        );
-                        outcome.committed |= cfg.commit;
-                        super::hint(ui, "Prompt strength. 1 = ignore prompt (faster, single UNet pass). 7\u{2013}8 = typical SD strength (slower; runs UNet twice per step). Higher = closer match but oversaturated/burnt artifacts.");
+                        ui.add_enabled_ui(!sd_fast_mode, |ui| {
+                            ui.label(egui::RichText::new("Negative prompt")
+                                .color(theme::TEXT_SECONDARY).size(theme::FONT_SIZE_BODY));
+                            let np = ui.text_edit_singleline(&mut s.sd_negative_prompt);
+                            if np.lost_focus() { outcome.committed = true; }
+                            super::hint(ui, "What to push away from. \u{201c}blurry, watermark, signature, low quality\u{201d} suppresses common SD failure modes. Only used when Guidance > 1.");
+                            ui.add_space(4.0);
+                            let cfg = chip::slider_row_f32(
+                                ui, "Guidance", &mut s.sd_guidance_scale, 1.0..=15.0, false,
+                                |v| if v <= 1.0 + 1e-3 { "off".to_string() } else { format!("{v:.1}") },
+                            );
+                            outcome.committed |= cfg.commit;
+                            super::hint(ui, "Prompt strength. 1 = ignore prompt (faster, single UNet pass). 7\u{2013}8 = typical SD strength (slower; runs UNet twice per step). Higher = closer match but oversaturated/burnt artifacts.");
+                        });
                     }
                 }
                 if !is_inpaint_mode {

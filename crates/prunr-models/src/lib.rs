@@ -26,6 +26,12 @@ pub enum ModelId {
     /// UNet + VAE encode + VAE decode + text encoder. ~2 GB total.
     /// GPU-required (`GpuRequirement::Required`).
     SdV15InpaintFp16,
+    /// LCM-distilled SD 1.5 Inpainting (FP16). Same UNet architecture as
+    /// `SdV15InpaintFp16` but trained to converge in ~4 steps instead of
+    /// 20 — ~5× faster on CPU/iGPU at slight quality cost. Selected
+    /// automatically when `Settings.sd_fast_mode` resolves true.
+    /// Bundle is the output of `scripts/export_lcm_inpaint.py`.
+    SdV15LcmInpaintFp16,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -333,6 +339,12 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         gpu: GpuRequirement::Required,
         incompatible_eps: &[],
     },
+    // SdV15LcmInpaintFp16 descriptor lands once the LCM-Inpaint ONNX
+    // bundle is produced by `scripts/export_lcm_inpaint.py` and uploaded
+    // to a Prunr GitHub release. Until then the variant exists in
+    // ModelId so the dispatcher compiles, but `descriptor()` returns
+    // None for it — `dispatch_inpaint_for_item` checks `is_available`
+    // and falls back to standard SD when LCM isn't installed.
 ];
 
 pub fn descriptor(id: ModelId) -> Option<&'static ModelDescriptor> {
@@ -484,7 +496,8 @@ fn bundled_bytes(id: ModelId) -> &'static [u8] {
         | ModelId::LaMaFp32
         | ModelId::BigLaMa
         | ModelId::Migan
-        | ModelId::SdV15InpaintFp16 => {
+        | ModelId::SdV15InpaintFp16
+        | ModelId::SdV15LcmInpaintFp16 => {
             // OnDemand / MultiPart in REGISTRY — resolve_bytes routes
             // via disk (or via `multi_part_paths`), not here.
             panic!("bundled_bytes called for non-Bundled model {id:?} — REGISTRY/source mismatch");
@@ -585,7 +598,8 @@ fn load_variant(id: ModelId, suffix: &str) -> Option<Vec<u8>> {
         | ModelId::LaMaFp32
         | ModelId::BigLaMa
         | ModelId::Migan
-        | ModelId::SdV15InpaintFp16 => return None,
+        | ModelId::SdV15InpaintFp16
+        | ModelId::SdV15LcmInpaintFp16 => return None,
     };
     let filename = format!("{name}_{suffix}.onnx");
 
