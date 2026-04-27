@@ -190,7 +190,6 @@ impl PrunrApp {
                 }
             }
         }
-
         // Phase 17 upgrade path: if the user's saved model is now OnDemand
         // and the file isn't on disk, queue a one-time toast pointing
         // them to the Model Store. Bundled-only users see nothing.
@@ -258,7 +257,7 @@ impl PrunrApp {
         worker_tx: mpsc::Sender<WorkerMessage>,
         worker_rx: mpsc::Receiver<WorkerResult>,
     ) -> Self {
-        let app = Self {
+        let mut app = Self {
             state: AppState::Empty,
             loaded_filename: None,
             last_open_dir: None,
@@ -316,6 +315,24 @@ impl PrunrApp {
                 .unwrap_or("untitled")
                 .to_string();
             let _ = app.batch.bg_io.file_load_tx.send((path, name));
+        }
+        // Test-harness escape hatch: PRUNR_OPEN_TAB pre-selects a Settings
+        // tab and auto-opens the modal at startup. Lets the harness capture
+        // each tab without driving mouse clicks (unreliable under Xephyr's
+        // coord-space mismatch). Values match SettingsTab labels: General /
+        // Appearance / Processing / Defaults / Hotkeys (case-sensitive).
+        // Not exposed on --help.
+        if let Some(name) = std::env::var_os("PRUNR_OPEN_TAB") {
+            unsafe { std::env::remove_var("PRUNR_OPEN_TAB"); }
+            if let Some(s) = name.to_str() {
+                if let Some(t) = super::views::settings::SettingsTab::from_debug_name(s) {
+                    app.settings_tab = t;
+                    app.show_settings = true;
+                    // settings_opened_at stays at the default 0.0 — first
+                    // frame's backdrop-debounce check uses egui input time
+                    // which won't be < 0.0, so no premature dismissal.
+                }
+            }
         }
         app
     }
