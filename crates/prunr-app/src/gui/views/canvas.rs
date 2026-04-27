@@ -18,6 +18,10 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
 
     let canvas_rect = ui.available_rect_before_wrap();
 
+    if let Some(item) = app.batch.selected_item_mut() {
+        item.ensure_bg_image_texture(ui.ctx());
+    }
+
     let modal_open = app.any_modal_open();
     // Block canvas pan/zoom when an egui popup (chip popover, combo box,
     // dropdown) is open — otherwise the press that lands on a slider inside
@@ -508,7 +512,13 @@ fn render_done(ui: &mut egui::Ui, app: &PrunrApp) {
             // checkerboard show through, mirroring how PNG transparency
             // would read the canvas.
             draw_checkerboard(ui, img_rect, app.settings.dark_checker);
-            if let Some(bg) = app.batch.selected_item().and_then(|it| it.settings.bg) {
+            let item = app.batch.selected_item();
+            // Image bg wins over color bg when both are set — they're
+            // mutually exclusive in the UI but a stale bg color could
+            // remain on the recipe.
+            if let Some(tex) = item.and_then(|it| it.bg_image_texture.as_ref()) {
+                paint_bg_image_cover(ui, img_rect, tex);
+            } else if let Some(bg) = item.and_then(|it| it.settings.bg) {
                 ui.painter().rect_filled(
                     img_rect,
                     0.0,
@@ -571,6 +581,38 @@ fn checker_texture(ctx: &egui::Context, dark: bool) -> TextureHandle {
             ctx.load_texture("checker_light", build_checker_image(light, dark), TextureOptions::NEAREST)
         }).clone()
     }
+}
+
+/// Paint `tex` into `bounds` with cover-fit — the image fills both target
+/// dimensions, overhang is sampled-out via the UV rect.
+fn paint_bg_image_cover(ui: &egui::Ui, bounds: Rect, tex: &TextureHandle) {
+    let tex_size = tex.size_vec2();
+    let (tw, th) = (tex_size.x, tex_size.y);
+    let (bw, bh) = (bounds.width(), bounds.height());
+    if tw <= 0.0 || th <= 0.0 || bw <= 0.0 || bh <= 0.0 {
+        return;
+    }
+    // Cover fit: scale uniformly so both dst dimensions are filled, then
+    // crop in UV space (avoids re-uploading or re-sizing the texture).
+    let tex_aspect = tw / th;
+    let bounds_aspect = bw / bh;
+    let (uv_min, uv_max) = if tex_aspect > bounds_aspect {
+        // Texture is wider — crop horizontally.
+        let visible_w = bounds_aspect / tex_aspect;
+        let pad = (1.0 - visible_w) * 0.5;
+        (Pos2::new(pad, 0.0), Pos2::new(1.0 - pad, 1.0))
+    } else {
+        // Texture is taller (or equal) — crop vertically.
+        let visible_h = tex_aspect / bounds_aspect;
+        let pad = (1.0 - visible_h) * 0.5;
+        (Pos2::new(0.0, pad), Pos2::new(1.0, 1.0 - pad))
+    };
+    ui.painter().image(
+        tex.id(),
+        bounds,
+        Rect::from_min_max(uv_min, uv_max),
+        Color32::WHITE,
+    );
 }
 
 fn draw_checkerboard(ui: &egui::Ui, bounds: Rect, dark: bool) {

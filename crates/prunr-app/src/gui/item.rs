@@ -531,6 +531,27 @@ impl BatchItem {
         self.bg_image_texture = None;
         self.settings.bg_image_hash = None;
     }
+
+    /// Build the egui texture for `bg_image` on demand. Cheap on the
+    /// frames after the first — `Option::is_some` short-circuit only.
+    pub(crate) fn ensure_bg_image_texture(&mut self, ctx: &egui::Context) {
+        if self.bg_image_texture.is_some() {
+            return;
+        }
+        let Some(bg) = self.bg_image.as_ref() else { return };
+        let rgba = bg.image.to_rgba8();
+        let (w, h) = (rgba.width(), rgba.height());
+        let color_image = egui::ColorImage::from_rgba_unmultiplied(
+            [w as usize, h as usize],
+            rgba.as_raw(),
+        );
+        let tex = ctx.load_texture(
+            format!("bg_image_{:x}", bg.hash),
+            color_image,
+            egui::TextureOptions::LINEAR,
+        );
+        self.bg_image_texture = Some(tex);
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
