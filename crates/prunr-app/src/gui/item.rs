@@ -532,6 +532,26 @@ impl BatchItem {
         self.settings.bg_image_hash = None;
     }
 
+    /// Bake the per-item background into a result image for save / clipboard /
+    /// drag-out. Image bg wins over color bg (matches the canvas-paint rule).
+    /// Returns the cloned Arc unchanged when neither is set.
+    pub(crate) fn bake_export_bg(
+        &self,
+        rgba: &Arc<image::RgbaImage>,
+    ) -> Arc<image::RgbaImage> {
+        if let Some(bg) = self.bg_image.as_ref() {
+            let mut copy = (**rgba).clone();
+            prunr_core::apply_background_image(&mut copy, &bg.image, self.settings.bg_image_fit);
+            Arc::new(copy)
+        } else if let Some(c) = self.settings.bg_rgb() {
+            let mut copy = (**rgba).clone();
+            prunr_core::apply_background_color(&mut copy, c);
+            Arc::new(copy)
+        } else {
+            rgba.clone()
+        }
+    }
+
     /// Build the egui texture for `bg_image` on demand. Cheap on the
     /// frames after the first — `Option::is_some` short-circuit only.
     pub(crate) fn ensure_bg_image_texture(&mut self, ctx: &egui::Context) {
