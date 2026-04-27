@@ -174,6 +174,42 @@ pub fn apply_background_color(img: &mut RgbaImage, bg: [u8; 3]) {
     }
 }
 
+/// Alpha-blend an RGBA image onto a background image, making all pixels fully
+/// opaque. The bg image is scaled to cover the foreground (preserves aspect
+/// ratio, may crop). Sequential for the same reason as `apply_background_color`.
+pub fn apply_background_image(img: &mut RgbaImage, bg: &DynamicImage) {
+    let (fw, fh) = (img.width(), img.height());
+    let bg_resized = resize_cover_rgb(bg, fw, fh);
+    let bg_raw = bg_resized.as_raw();
+    let raw = img.as_mut();
+    for (i, pixel) in raw.chunks_mut(4).enumerate() {
+        let a = pixel[3] as f32 / 255.0;
+        if a < 1.0 {
+            let bi = i * 3;
+            let inv = 1.0 - a;
+            pixel[0] = (pixel[0] as f32 * a + bg_raw[bi] as f32 * inv) as u8;
+            pixel[1] = (pixel[1] as f32 * a + bg_raw[bi + 1] as f32 * inv) as u8;
+            pixel[2] = (pixel[2] as f32 * a + bg_raw[bi + 2] as f32 * inv) as u8;
+            pixel[3] = 255;
+        }
+    }
+}
+
+/// Resize `src` to cover (`dst_w`, `dst_h`): scale uniformly so that both target
+/// dimensions are filled, then center-crop the overhang.
+fn resize_cover_rgb(src: &DynamicImage, dst_w: u32, dst_h: u32) -> image::RgbImage {
+    let (sw, sh) = (src.width(), src.height());
+    if sw == 0 || sh == 0 {
+        return image::RgbImage::new(dst_w, dst_h);
+    }
+    let scale = (dst_w as f32 / sw as f32).max(dst_h as f32 / sh as f32);
+    let scaled_w = ((sw as f32 * scale).ceil() as u32).max(dst_w);
+    let scaled_h = ((sh as f32 * scale).ceil() as u32).max(dst_h);
+    let scaled = resize_rgb_lanczos3(src, scaled_w, scaled_h);
+    let (ox, oy) = ((scaled_w - dst_w) / 2, (scaled_h - dst_h) / 2);
+    image::imageops::crop_imm(&scaled, ox, oy, dst_w, dst_h).to_image()
+}
+
 /// Encode an RgbaImage as PNG bytes with fast compression.
 pub fn encode_rgba_png(img: &RgbaImage) -> Result<Vec<u8>, CoreError> {
     let mut buf = Vec::with_capacity(img.as_raw().len() / 2);
@@ -318,6 +354,50 @@ mod tests {
     fn test_check_large_image_under_limit() {
         let img = DynamicImage::ImageRgb8(image::RgbImage::new(800, 600));
         assert!(check_large_image(&img).is_none());
+    }
+
+    #[test]
+    fn apply_background_image_blends_under_transparent_pixels() {
+        // 2×1 RGBA: opaque red, fully transparent (so bg should show through).
+        let mut fg = RgbaImage::new(2, 1);
+        fg.put_pixel(0, 0, Rgba([255, 0, 0, 255]));
+        fg.put_pixel(1, 0, Rgba([0, 0, 0, 0]));
+        // Solid green 4×2 bg — gets resize-cover'd to 2×1.
+        let mut bg = image::RgbImage::new(4, 2);
+        for px in bg.pixels_mut() {
+            *px = image::Rgb([0, 255, 0]);
+        }
+        let bg_dyn = DynamicImage::ImageRgb8(bg);
+        apply_background_image(&mut fg, &bg_dyn);
+        assert_eq!(fg.get_pixel(0, 0), &Rgba([255, 0, 0, 255]),
+            "opaque pixel must stay unchanged");
+        assert_eq!(fg.get_pixel(1, 0), &Rgba([0, 255, 0, 255]),
+            "transparent pixel must reveal bg, alpha forced to 255");
+    }
+
+    #[test]
+    fn apply_background_image_preserves_partial_alpha_blend() {
+        let mut fg = RgbaImage::new(1, 1);
+        fg.put_pixel(0, 0, Rgba([200, 0, 0, 128])); // half-transparent red
+        let bg_dyn = DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            1, 1, image::Rgb([0, 0, 200])));
+        apply_background_image(&mut fg, &bg_dyn);
+        let p = fg.get_pixel(0, 0);
+        // a = 128/255 ≈ 0.502; blended R ≈ 200*0.502 = 100, B ≈ 200*0.498 = 99
+        assert!((90..=110).contains(&p[0]), "R was {}", p[0]);
+        assert!((90..=110).contains(&p[2]), "B was {}", p[2]);
+        assert_eq!(p[3], 255);
+    }
+
+    #[test]
+    fn apply_background_image_handles_zero_size_bg_gracefully() {
+        let mut fg = RgbaImage::from_pixel(2, 2, Rgba([100, 100, 100, 0]));
+        // 0×0 bg — resize_cover returns black.
+        let bg_dyn = DynamicImage::ImageRgb8(image::RgbImage::new(0, 0));
+        apply_background_image(&mut fg, &bg_dyn);
+        for p in fg.pixels() {
+            assert_eq!(p, &Rgba([0, 0, 0, 255]));
+        }
     }
 
     #[test]
