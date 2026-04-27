@@ -296,12 +296,18 @@ impl DownloadError {
     }
 }
 
+impl prunr_runtime_install::Retryable for DownloadError {
+    fn is_retryable(&self) -> bool { self.retryable }
+    fn cancelled() -> Self { DownloadError::fatal("Cancelled by user") }
+}
+
 /// Download `url` to `dest`, verifying SHA256 against `expected_sha`.
 /// Writes to a `<dest>.partial` sidecar; renames to `dest` only after
-/// verification passes. Wraps `download_attempt` in a retry loop so
-/// transient network errors (timeout, 5xx) get up to 3 tries with
-/// exponential backoff. Fatal errors (404, SHA mismatch, disk full,
-/// user cancel) fail fast without retry.
+/// verification passes. Wraps `download_attempt` in the shared retry
+/// loop (`prunr_runtime_install::retry_with_backoff`) so transient
+/// network errors (timeout, 5xx) get up to 3 tries with exponential
+/// backoff. Fatal errors (404, SHA mismatch, disk full, user cancel)
+/// fail fast without retry.
 fn download_to_file(
     url: &str,
     dest: &Path,
@@ -310,45 +316,9 @@ fn download_to_file(
     on_progress: &dyn Fn(u64, u64),
     on_verifying: &dyn Fn(),
 ) -> Result<(), DownloadError> {
-    retry_with_backoff(&cancel, 3, 500, || {
+    prunr_runtime_install::retry_with_backoff(&cancel, 3, 500, |_attempt| {
         download_attempt(url, dest, expected_sha, &cancel, on_progress, on_verifying)
     })
-}
-
-/// Run `attempt` up to `max_attempts` times. Returns immediately on
-/// non-retryable errors. Between attempts, sleeps for an exponentially
-/// growing duration starting at `base_ms` (250 → 500 → 1000 → 2000…),
-/// polling `cancel` every 50 ms so a user-cancel during backoff is
-/// honoured promptly.
-fn retry_with_backoff<F>(
-    cancel: &Arc<AtomicBool>,
-    max_attempts: u32,
-    base_ms: u64,
-    mut attempt: F,
-) -> Result<(), DownloadError>
-where
-    F: FnMut() -> Result<(), DownloadError>,
-{
-    let mut tries: u32 = 0;
-    loop {
-        match attempt() {
-            Ok(()) => return Ok(()),
-            Err(e) if !e.retryable => return Err(e),
-            Err(e) if tries + 1 >= max_attempts => return Err(e),
-            Err(e) => {
-                tries += 1;
-                let delay = std::time::Duration::from_millis(base_ms.saturating_mul(1 << tries.min(6)));
-                tracing::warn!(tries, error = %e.message, ?delay, "transient download error — retrying");
-                let deadline = std::time::Instant::now() + delay;
-                while std::time::Instant::now() < deadline {
-                    if cancel.load(Ordering::Acquire) {
-                        return Err(DownloadError::fatal("Cancelled by user"));
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(50));
-                }
-            }
-        }
-    }
 }
 
 fn download_attempt(
@@ -513,7 +483,7 @@ mod tests {
     fn retry_succeeds_after_two_transient_failures() {
         let attempts = std::sync::atomic::AtomicU32::new(0);
         let cancel = never_cancel();
-        let result = retry_with_backoff(&cancel, 3, 1, || {
+        let result: Result<(), DownloadError> = prunr_runtime_install::retry_with_backoff(&cancel, 3, 1, |_attempt| {
             let n = attempts.fetch_add(1, Ordering::SeqCst);
             if n < 2 {
                 Err(DownloadError::transient("simulated timeout"))
@@ -529,7 +499,7 @@ mod tests {
     fn retry_fails_fast_on_fatal_error() {
         let attempts = std::sync::atomic::AtomicU32::new(0);
         let cancel = never_cancel();
-        let result = retry_with_backoff(&cancel, 3, 1, || {
+        let result: Result<(), DownloadError> = prunr_runtime_install::retry_with_backoff(&cancel, 3, 1, |_attempt| {
             attempts.fetch_add(1, Ordering::SeqCst);
             Err(DownloadError::fatal("404"))
         });
@@ -541,7 +511,7 @@ mod tests {
     fn retry_exhausts_max_attempts() {
         let attempts = std::sync::atomic::AtomicU32::new(0);
         let cancel = never_cancel();
-        let result = retry_with_backoff(&cancel, 3, 1, || {
+        let result: Result<(), DownloadError> = prunr_runtime_install::retry_with_backoff(&cancel, 3, 1, |_attempt| {
             attempts.fetch_add(1, Ordering::SeqCst);
             Err(DownloadError::transient("network"))
         });
@@ -559,7 +529,7 @@ mod tests {
         });
         let attempts = std::sync::atomic::AtomicU32::new(0);
         let started = std::time::Instant::now();
-        let result = retry_with_backoff(&cancel, 3, 200, || {
+        let result: Result<(), DownloadError> = prunr_runtime_install::retry_with_backoff(&cancel, 3, 200, |_attempt| {
             attempts.fetch_add(1, Ordering::SeqCst);
             Err(DownloadError::transient("network"))
         });
