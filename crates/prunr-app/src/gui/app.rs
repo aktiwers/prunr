@@ -444,12 +444,52 @@ impl PrunrApp {
         match prunr_core::load_image_from_path(&path) {
             Ok(img) => {
                 if let Some(item) = self.batch.items.get_mut(idx) {
-                    item.set_bg_image(img, Some(path));
+                    item.set_bg_image(img, Some(path.clone()));
+                    // Remember the path keyed by the bg's content hash so a
+                    // preset that captured this hash can reload the image
+                    // when applied later (or after a restart).
+                    if let Some(bg) = item.bg_image.as_ref() {
+                        self.settings.bg_image_paths.insert(bg.hash, path);
+                        self.settings.save();
+                    }
                     ctx.request_repaint();
                 }
             }
             Err(err) => {
                 self.toasts.error(format!("Couldn't load background image: {err}"));
+            }
+        }
+    }
+
+    /// Reconcile `BatchItem.bg_image` with `settings.bg_image_hash` after a
+    /// preset apply. Preset apply copies `ItemSettings` (which includes the
+    /// hash) but doesn't touch the bytes on the BatchItem; this restores
+    /// the lockstep `set_bg_image` / `clear_bg_image` invariant.
+    fn reconcile_bg_image_after_preset(&mut self, idx: usize) {
+        let Some(item) = self.batch.items.get_mut(idx) else { return };
+        let want = item.settings.bg_image_hash;
+        let have = item.bg_image.as_ref().map(|b| b.hash);
+        if want == have { return; }
+        let Some(want_hash) = want else {
+            // Preset has no bg image — drop the stale bytes.
+            item.clear_bg_image();
+            return;
+        };
+        // New hash from preset — try to reload via the persisted path map.
+        let path = self.settings.bg_image_paths.get(&want_hash).cloned();
+        let Some(path) = path else {
+            // Hash isn't in our path map (preset shared from another user,
+            // or the path entry was wiped). Drop both bytes and hash so the
+            // recipe diff stays consistent.
+            item.clear_bg_image();
+            self.toasts.info("Preset references a background image we don't have on disk.");
+            return;
+        };
+        match prunr_core::load_image_from_path(&path) {
+            Ok(img) => item.set_bg_image(img, Some(path)),
+            Err(err) => {
+                item.clear_bg_image();
+                self.toasts.error(format!("Couldn't load preset background: {err}"));
             }
         }
     }
@@ -761,6 +801,10 @@ impl PrunrApp {
         if !HistoryManager::swap_preset(item, dir) { return; }
         let target_id = item.id;
         let should_reprocess = item.status == BatchStatus::Done;
+        // Restoring a preset snapshot rewrites settings.bg_image_hash —
+        // pull the matching bytes back into bg_image so the canvas paint
+        // and recipe diff stay consistent.
+        self.reconcile_bg_image_after_preset(idx);
         if should_reprocess {
             self.process_items(|i| i.id == target_id);
         }
@@ -2586,6 +2630,11 @@ impl PrunrApp {
 
         if toolbar_change.preset_applied {
             HistoryManager::push_preset(&mut self.batch.items[idx], pre_apply_snapshot);
+            // Preset apply copied an ItemSettings into the item — including
+            // any captured bg_image_hash. Reload the matching bytes from
+            // the persisted path map (or clear if missing) so the recipe
+            // diff invariant holds and the canvas paints the right image.
+            self.reconcile_bg_image_after_preset(idx);
         }
         if toolbar_change.model_changed {
             self.settings.save();

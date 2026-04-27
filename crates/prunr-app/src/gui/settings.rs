@@ -58,6 +58,14 @@ pub struct Settings {
     #[serde(default = "default_preset_name")]
     pub default_preset: String,
 
+    /// `bg_image_hash` → on-disk path map. Lets a preset that captured a
+    /// bg image reload the image when re-applied (or applied to another
+    /// item). Sharing a preset to another user with no matching path is a
+    /// graceful miss — the bg image clears and the user is toasted.
+    /// Bytes themselves are never persisted; the path is the identity.
+    #[serde(default)]
+    pub bg_image_paths: HashMap<u64, PathBuf>,
+
     /// Persisted set of model ids whose restrictive licenses (CreativeML
     /// Open RAIL-M, NVIDIA SCL, …) the user has explicitly accepted.
     /// Stored as `ModelId` Debug names so prunr-models stays serde-free.
@@ -443,6 +451,7 @@ impl Default for Settings {
             shortcuts: HashMap::new(),
             presets: HashMap::new(),
             default_preset: default_preset_name(),
+            bg_image_paths: HashMap::new(),
             accepted_licenses: Vec::new(),
             runtime_prompt_snoozed_until: std::collections::HashMap::new(),
             force_cpu: false,
