@@ -48,6 +48,7 @@ All releases: [github.com/aktiwers/prunr/releases](https://github.com/aktiwers/p
 - **Three bundled models** — Silueta (fast), U2Net (quality), BiRefNet-lite (best detail at 1024×1024)
 - **Line extraction** — edges/outlines via DexiNed, standalone or combined with background removal
 - **Object removal (Eraser)** — paint over an unwanted area and let LaMa fill it in
+- **Custom backgrounds** — fill the cutout with a solid colour or a picked image (cover / contain / stretch / tile / center)
 - **Hardware acceleration** — CUDA (NVIDIA), CoreML (Apple), DirectML (Windows), OpenVINO (Intel iGPU/NPU), automatic CPU fallback
 - **Batch processing** — parallel inference across multiple images, switch between them while they work
 - **Mask tuning** — removal strength, hard cutoff, edge shift, guided filter for fine detail
@@ -65,6 +66,7 @@ prunr -m u2net portrait.jpg                  # quality model
 prunr -j 4 *.jpg -o out/                     # 4 parallel jobs
 prunr --lines logo.png                       # line extraction only
 prunr --inpaint photo.jpg --mask m.png       # erase area defined by mask
+prunr photo.jpg --bg-image studio.jpg        # bake a chosen image as the new background
 ```
 
 Common flags:
@@ -80,7 +82,9 @@ Common flags:
 | `--threshold <N>` | Hard cutoff (0.0–1.0) |
 | `--refine-edges` | Guided filter for fine detail (hair, leaves) |
 | `--lines` | Extract lines/edges only |
-| `--bg-color <HEX>` | Fill transparent background (e.g. `ffffff`) |
+| `--bg-color <HEX>` | Fill transparent background with a colour (e.g. `ffffff`) |
+| `--bg-image <PATH>` | Fill transparent background with a chosen image (wins over `--bg-color`) |
+| `--bg-image-fit <MODE>` | `cover` (default), `contain`, `stretch`, `tile`, `center` |
 | `--inpaint --mask <PATH>` | Eraser mode — fill a masked region using LaMa |
 | `--doctor` | Diagnostic dump for support tickets (hardware, ORT, models, paths) |
 | `--clear-ep-cache` | Wipe persistent EP failure cache (after driver/runtime updates) |
