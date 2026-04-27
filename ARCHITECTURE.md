@@ -510,9 +510,11 @@ The sidebar thumbnail uses the same pattern. Save/export is the exception: PNG h
 
 ### Per-image background image
 
-A user-picked image can replace bg_color as the canvas backdrop. Bytes live on `BatchItem.bg_image` (`Arc<DynamicImage>` + source path + content hash); a `u64` hash on `ItemSettings.bg_image_hash` drives the recipe diff (CompositeOnly tier — same class as bg_color since neither re-runs inference). Mirrors the brush-correction shape (Arc bytes on item, hash on settings).
+A user-picked image can replace bg_color as the canvas backdrop. Bytes live on `BatchItem.bg_image` (`Arc<DynamicImage>` + source path + content hash); a `u64` hash on `ItemSettings.bg_image_hash` drives the recipe diff. Both `bg_image_hash` and `bg_image_fit` ride on `CompositeRecipe` (CompositeOnly tier — same class as bg_color since neither re-runs inference). The same shape as the brush-correction pattern (Arc bytes on item, hash on settings).
 
-Canvas paints the bg image lazily (egui texture built on first frame after `set_bg_image`, dropped together when cleared) at cover-fit via UV cropping — no texture re-upload on zoom or canvas resize. Save/export bakes via the new `apply_background_image` core helper (Lanczos3 cover-fit + alpha-blend, same sequential shape as `apply_background_color`). The toolbar bg chip enforces mutual exclusion: picking the Image kind clears bg_color and bg_effect; picking any non-image kind clears the image.
+`BgImageFit` (Cover / Contain / Stretch / Tile / Center; default Cover) is a `StaticKnob` in the catalog so chip changes route via the standard `aggregate_bool` path. Canvas + sidebar share `paint_bg_image` — UV-only math (no texture re-upload on fit change): Cover crops in UV, Contain/Center letterbox via inner-rect, Stretch is unit UV on full bounds, Tile uses UV > 1.0 (texture uploaded with `WrapMode::Repeat` so the wrap actually triggers). Save/export bakes via the `apply_background_image` core helper, which dispatches per-fit through a `build_bg_layer` builder (Lanczos3 for the scaled variants; per-row indexing for Tile).
+
+The toolbar bg chip enforces mutual exclusion: picking the Image kind clears bg_color and bg_effect; picking any non-image kind clears the image. The CLI mirrors this at `--bg-image`/`--bg-image-fit`/`--bg-color` (image wins when both are set).
 
 ### BgEffect (source-derived backdrops)
 
