@@ -33,6 +33,11 @@ impl SettingsTab {
         Self::General, Self::Appearance, Self::Processing,
         Self::Defaults, Self::Hotkeys,
     ];
+
+    /// Parse a Debug-style name into a tab. Used by PRUNR_OPEN_TAB.
+    pub fn from_debug_name(s: &str) -> Option<Self> {
+        Self::ALL.iter().copied().find(|t| t.label() == s)
+    }
 }
 
 /// Read-only snapshot of runtime-install state passed into the General
