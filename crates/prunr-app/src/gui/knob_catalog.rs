@@ -738,7 +738,7 @@ mod tests {
                 fill_style: FillStyle::None,
                 ..Default::default()
             }).into(),
-            composite: CompositeRecipe { bg_color: None, solid_line_color: None },
+            composite: CompositeRecipe::default(),
             was_chain: false,
         };
 

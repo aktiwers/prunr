@@ -87,6 +87,10 @@ pub struct ItemSettings {
     /// reads to fire MaskRerun on stroke commit.
     #[serde(default)]
     pub correction_hash: Option<u64>,
+    /// Drives the CompositeOnly recipe diff when the user picks a different
+    /// background image. `None` when no image bg is set.
+    #[serde(default)]
+    pub bg_image_hash: Option<u64>,
 }
 
 impl Default for ItemSettings {
@@ -111,6 +115,7 @@ impl Default for ItemSettings {
             bg_effect: prunr_core::BgEffect::default(),
             input_transform: prunr_core::InputTransform::default(),
             correction_hash: None,
+            bg_image_hash: None,
         }
     }
 }
@@ -182,6 +187,7 @@ impl ItemSettings {
             mask,
             composite: prunr_core::CompositeRecipe {
                 bg_color: bg_rgb,
+                bg_image_hash: self.bg_image_hash,
                 solid_line_color: self.solid_line_color,
             },
             was_chain: chain_mode,
@@ -306,6 +312,7 @@ mod tests {
             bg_effect: prunr_core::BgEffect::BlurredSource { radius: 8 },
             input_transform: prunr_core::InputTransform::ContrastBoost { percent: 150 },
             correction_hash: Some(0xdeadbeef),
+            bg_image_hash: Some(0xfeedface),
         };
         let json = serde_json::to_string(&s).unwrap();
         let recovered: ItemSettings = serde_json::from_str(&json).unwrap();
