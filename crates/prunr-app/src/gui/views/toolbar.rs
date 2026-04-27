@@ -44,8 +44,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
             if app.show_settings {
                 app.close_settings(ui.ctx());
             } else {
-                app.show_settings = true;
-                app.settings_opened_at = ui.ctx().input(|i| i.time);
+                app.open_settings(ui.ctx());
             }
         }
 
