@@ -574,9 +574,24 @@ impl PrunrApp {
             return;
         };
         let bs = self.brush_state.settings();
-        let backend = self.settings.model.to_model_id()
+        let raw_backend = self.settings.model.to_model_id()
             .unwrap_or(prunr_models::ModelId::LaMaFp32);
-        tracing::info!(item_id, ?backend, "inpaint stroke committed; dispatching");
+        // Fast Mode: when active, the user picked SD, AND the LCM
+        // bundle is published + installed, route to LCM. The dropdown
+        // selection still says "SD"; the routing is invisible beyond a
+        // ~5× wall-clock speedup. Until the LCM artifact ships,
+        // descriptor() returns None and we silently keep raw_backend —
+        // user gets standard SD even with fast mode toggled on.
+        let backend = if raw_backend == prunr_models::ModelId::SdV15InpaintFp16
+            && crate::hardware::sd_fast_mode_active(self.settings.sd_fast_mode, crate::hardware::profile())
+            && prunr_models::descriptor(prunr_models::ModelId::SdV15LcmInpaintFp16).is_some()
+            && prunr_models::is_available(prunr_models::ModelId::SdV15LcmInpaintFp16)
+        {
+            prunr_models::ModelId::SdV15LcmInpaintFp16
+        } else {
+            raw_backend
+        };
+        tracing::info!(item_id, ?backend, ?raw_backend, "inpaint stroke committed; dispatching");
         let tuning = super::processor::InpaintTuning {
             sharpen: bs.inpaint_sharpen,
             feather_px: bs.inpaint_feather,

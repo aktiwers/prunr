@@ -199,15 +199,28 @@ impl Processor {
             } else {
                 raw_mask
             };
-            let sd_req = if matches!(tuning.backend, prunr_models::ModelId::SdV15InpaintFp16) {
-                Some(prunr_core::inpaint_sd::SdInpaintRequest {
+            // SD vs LCM: 20 steps + user-CFG for the standard checkpoint;
+            // 4 steps + guidance forced to 1.0 for the LCM-distilled
+            // backend (LCM bakes guidance into training, runtime CFG
+            // would double-count it). Selection happens upstream via
+            // `Settings.sd_fast_mode` → `dispatch_inpaint_for_item`.
+            let sd_req = match tuning.backend {
+                prunr_models::ModelId::SdV15InpaintFp16 => Some(prunr_core::inpaint_sd::SdInpaintRequest {
                     prompt: tuning.sd_prompt.clone(),
                     negative_prompt: tuning.sd_negative_prompt.clone(),
                     num_inference_steps: 20,
                     guidance_scale: tuning.sd_guidance_scale,
                     seed: None,
-                })
-            } else { None };
+                }),
+                prunr_models::ModelId::SdV15LcmInpaintFp16 => Some(prunr_core::inpaint_sd::SdInpaintRequest {
+                    prompt: tuning.sd_prompt.clone(),
+                    negative_prompt: String::new(), // LCM ignores negative prompt
+                    num_inference_steps: 4,
+                    guidance_scale: 1.0,
+                    seed: None,
+                }),
+                _ => None,
+            };
             match prunr_core::inpaint::process_inpaint_with(&image, &mask, tuning.backend, sd_req) {
                 Ok(rgba) => {
                     // Post-process: sharpen first (LaMa's blur is the
