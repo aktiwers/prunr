@@ -37,7 +37,6 @@ TAESD_REPO = "madebyollin/taesd"
 def main() -> int:
     require("torch")
     require("diffusers")
-    require("optimum")
     require("onnx")
 
     import torch
