@@ -309,6 +309,36 @@ fn render_hardware_section(ui: &mut egui::Ui, app: &mut PrunrApp) {
     let active_provider = prunr_core::OrtEngine::detect_active_provider();
     ui.label(RichText::new(format!("Active EP: {active_provider}"))
         .color(theme::TEXT_SECONDARY).size(theme::FONT_SIZE_MONO));
+
+    let total_ram = hardware::total_ram_bytes();
+    let avail_ram = hardware::available_ram_bytes_now();
+    ui.label(RichText::new(format!(
+        "RAM: {:.1} / {:.1} GB free",
+        avail_ram as f64 / 1e9, total_ram as f64 / 1e9,
+    ))
+        .color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY));
+
+    // Per-heavy-model RAM headroom verdict. SD 1.5 is the only model
+    // whose working set rivals the user's RAM (~6-10 GB on CPU); for
+    // the lighter eraser models the verdict is always comfortable on
+    // any system that has SD installed at all, so we skip them here.
+    let sd_working_set: u64 = 7 * 1024 * 1024 * 1024;
+    let verdict = hardware::ram_verdict(sd_working_set, avail_ram);
+    let (color, text) = match verdict {
+        hardware::RamVerdict::Comfortable => (
+            egui::Color32::from_rgb(0x6c, 0xd1, 0x6c),
+            "SD 1.5: comfortable headroom",
+        ),
+        hardware::RamVerdict::Tight => (
+            egui::Color32::from_rgb(0xe1, 0xb3, 0x4e),
+            "SD 1.5: tight — close other apps before running",
+        ),
+        hardware::RamVerdict::Insufficient => (
+            egui::Color32::from_rgb(0xd8, 0x6e, 0x6e),
+            "SD 1.5: insufficient — try Big-LaMa instead",
+        ),
+    };
+    ui.label(RichText::new(text).color(color).size(theme::FONT_SIZE_MONO));
     ui.add_space(theme::SPACE_SM);
 
     // OpenVINO Runtime row. Compute the status string up front so the
