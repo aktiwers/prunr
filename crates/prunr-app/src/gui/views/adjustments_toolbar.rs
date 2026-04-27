@@ -320,6 +320,7 @@ pub(crate) fn render(
                 ui,
                 &mut item_settings.bg,
                 &mut item_settings.bg_effect,
+                &mut item_settings.bg_image_fit,
                 defaults.bg_value,
                 has_bg_image,
                 bg_image_label,
@@ -865,6 +866,7 @@ fn render_background_chip(
     ui: &mut Ui,
     bg: &mut Option<[u8; 4]>,
     bg_effect: &mut prunr_core::BgEffect,
+    bg_image_fit: &mut prunr_core::BgImageFit,
     default_color: [u8; 4],
     has_bg_image: bool,
     bg_image_label: Option<&str>,
@@ -943,7 +945,18 @@ fn render_background_chip(
                         if has_bg_image && ui.button("Remove image").clicked() {
                             change.clear_bg_image = true;
                         }
-                        hint(ui, "Picked image fills transparent areas at render / export. Cover-fit to result dimensions.");
+                        if has_bg_image {
+                            ui.add_space(theme::SPACE_XS);
+                            ui.label(RichText::new("Fit").color(theme::TEXT_SECONDARY).size(theme::FONT_SIZE_MONO));
+                            for fit in prunr_core::BgImageFit::ALL {
+                                let selected = *fit == *bg_image_fit;
+                                if ui.selectable_label(selected, fit.name()).clicked() && !selected {
+                                    *bg_image_fit = *fit;
+                                    aggregate_bool(true, StaticKnob::BgImageFit, change);
+                                }
+                            }
+                        }
+                        hint(ui, "Picked image fills transparent areas at render / export. Fit follows CSS conventions (Cover / Contain / Stretch / Tile / Center).");
                     }
                     BgKind::BlurredSource => {
                         if let BgEffect::BlurredSource { radius } = bg_effect {

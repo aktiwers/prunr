@@ -512,18 +512,19 @@ fn render_done(ui: &mut egui::Ui, app: &PrunrApp) {
             // checkerboard show through, mirroring how PNG transparency
             // would read the canvas.
             draw_checkerboard(ui, img_rect, app.settings.dark_checker);
-            let item = app.batch.selected_item();
             // Image bg wins over color bg when both are set — they're
             // mutually exclusive in the UI but a stale bg color could
             // remain on the recipe.
-            if let Some(tex) = item.and_then(|it| it.bg_image_texture.as_ref()) {
-                paint_bg_image_cover(ui, img_rect, tex);
-            } else if let Some(bg) = item.and_then(|it| it.settings.bg) {
-                ui.painter().rect_filled(
-                    img_rect,
-                    0.0,
-                    Color32::from_rgba_unmultiplied(bg[0], bg[1], bg[2], bg[3]),
-                );
+            if let Some(it) = app.batch.selected_item() {
+                if let Some(tex) = it.bg_image_texture.as_ref() {
+                    paint_bg_image(ui, img_rect, tex, it.settings.bg_image_fit);
+                } else if let Some(bg) = it.settings.bg {
+                    ui.painter().rect_filled(
+                        img_rect,
+                        0.0,
+                        Color32::from_rgba_unmultiplied(bg[0], bg[1], bg[2], bg[3]),
+                    );
+                }
             }
         }
         let result_alpha = (fade * 255.0) as u8;
@@ -583,36 +584,61 @@ fn checker_texture(ctx: &egui::Context, dark: bool) -> TextureHandle {
     }
 }
 
-/// Paint `tex` into `bounds` with cover-fit — the image fills both target
-/// dimensions, overhang is sampled-out via the UV rect.
-pub(super) fn paint_bg_image_cover(ui: &egui::Ui, bounds: Rect, tex: &TextureHandle) {
+/// Paint `tex` into `bounds` per `fit` — UV-only math (no texture
+/// re-upload; the texture must be uploaded with `WrapMode::Repeat` for
+/// `Tile` to wrap rather than clamp).
+pub(super) fn paint_bg_image(
+    ui: &egui::Ui,
+    bounds: Rect,
+    tex: &TextureHandle,
+    fit: prunr_core::BgImageFit,
+) {
+    use prunr_core::BgImageFit;
     let tex_size = tex.size_vec2();
     let (tw, th) = (tex_size.x, tex_size.y);
     let (bw, bh) = (bounds.width(), bounds.height());
     if tw <= 0.0 || th <= 0.0 || bw <= 0.0 || bh <= 0.0 {
         return;
     }
-    // Cover fit: scale uniformly so both dst dimensions are filled, then
-    // crop in UV space (avoids re-uploading or re-sizing the texture).
-    let tex_aspect = tw / th;
-    let bounds_aspect = bw / bh;
-    let (uv_min, uv_max) = if tex_aspect > bounds_aspect {
-        // Texture is wider — crop horizontally.
-        let visible_w = bounds_aspect / tex_aspect;
-        let pad = (1.0 - visible_w) * 0.5;
-        (Pos2::new(pad, 0.0), Pos2::new(1.0 - pad, 1.0))
-    } else {
-        // Texture is taller (or equal) — crop vertically.
-        let visible_h = tex_aspect / bounds_aspect;
-        let pad = (1.0 - visible_h) * 0.5;
-        (Pos2::new(0.0, pad), Pos2::new(1.0, 1.0 - pad))
-    };
-    ui.painter().image(
-        tex.id(),
-        bounds,
-        Rect::from_min_max(uv_min, uv_max),
-        Color32::WHITE,
-    );
+    let unit_uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
+    match fit {
+        BgImageFit::Cover => {
+            let tex_aspect = tw / th;
+            let bounds_aspect = bw / bh;
+            let (uv_min, uv_max) = if tex_aspect > bounds_aspect {
+                let visible = bounds_aspect / tex_aspect;
+                let pad = (1.0 - visible) * 0.5;
+                (Pos2::new(pad, 0.0), Pos2::new(1.0 - pad, 1.0))
+            } else {
+                let visible = tex_aspect / bounds_aspect;
+                let pad = (1.0 - visible) * 0.5;
+                (Pos2::new(0.0, pad), Pos2::new(1.0, 1.0 - pad))
+            };
+            ui.painter().image(tex.id(), bounds, Rect::from_min_max(uv_min, uv_max), Color32::WHITE);
+        }
+        BgImageFit::Stretch => {
+            ui.painter().image(tex.id(), bounds, unit_uv, Color32::WHITE);
+        }
+        BgImageFit::Contain => {
+            let scale = (bw / tw).min(bh / th);
+            let inner = egui::vec2(tw * scale, th * scale);
+            let inner_rect = Rect::from_center_size(bounds.center(), inner);
+            ui.painter().image(tex.id(), inner_rect, unit_uv, Color32::WHITE);
+        }
+        BgImageFit::Center => {
+            // 1:1 native size centred. May overflow `bounds` but the
+            // canvas painter clips to the painter's clip rect (egui's
+            // panel clipping handles overflow).
+            let inner_rect = Rect::from_center_size(bounds.center(), egui::vec2(tw, th));
+            ui.painter().image(tex.id(), inner_rect, unit_uv, Color32::WHITE);
+        }
+        BgImageFit::Tile => {
+            // UV scaled by bounds/tex_size triggers WrapMode::Repeat in
+            // egui — the bg texture is uploaded with that wrap mode set.
+            let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(bw / tw, bh / th));
+            ui.painter().image(tex.id(), bounds, uv, Color32::WHITE);
+        }
+    }
 }
 
 fn draw_checkerboard(ui: &egui::Ui, bounds: Rect, dark: bool) {

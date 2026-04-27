@@ -545,10 +545,20 @@ impl BatchItem {
             [w as usize, h as usize],
             rgba.as_raw(),
         );
+        // WrapMode::Repeat enables BgImageFit::Tile (UV > 1.0 wraps around).
+        // For other fits the UVs stay within [0, 1], so the wrap mode is a
+        // no-op. LINEAR filtering for the smooth scale modes (Cover/Contain
+        // /Stretch); Tile + Center read 1:1 so filtering doesn't matter.
+        let opts = egui::TextureOptions {
+            magnification: egui::TextureFilter::Linear,
+            minification: egui::TextureFilter::Linear,
+            wrap_mode: egui::TextureWrapMode::Repeat,
+            mipmap_mode: None,
+        };
         let tex = ctx.load_texture(
             format!("bg_image_{:x}", bg.hash),
             color_image,
-            egui::TextureOptions::LINEAR,
+            opts,
         );
         self.bg_image_texture = Some(tex);
     }

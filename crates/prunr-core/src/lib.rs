@@ -25,6 +25,6 @@ pub use postprocess::{tensor_to_mask, tensor_to_mask_from_flat, apply_mask, post
 pub use batch::{batch_process, batch_process_with_mask, create_engine_pool};
 pub use formats::{load_image_from_path, load_image_from_bytes, check_large_image, downscale_image, encode_rgba_png, encode_gray_png, apply_background_color, apply_background_image};
 pub use edge::{EdgeEngine, EdgeInferenceResult, EDGE_SCALE_COUNT, finalize_edges, tensor_to_edge_mask, compose_edges, compose_edges_styled, compose_edges_dual_styled, compose_subject_outline};
-pub use types::{ComposeMode, LineStyle, FillStyle, BgEffect, ChannelSwapVariant, InputTransform};
+pub use types::{ComposeMode, LineStyle, FillStyle, BgEffect, BgImageFit, ChannelSwapVariant, InputTransform};
 pub use edge::apply_input_transform;
 pub use postprocess::{apply_fill_style, apply_bg_effect};

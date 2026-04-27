@@ -42,6 +42,7 @@ pub enum StaticKnob {
 
     // Composite — render-time only.
     BgColor,
+    BgImageFit,
 
     // Inference-level — needs worker subprocess.
     Model,
@@ -68,8 +69,9 @@ impl StaticKnob {
             StaticKnob::ComposeMode => 13,
             StaticKnob::LineStyle => 14,
             StaticKnob::BgColor => 15,
-            StaticKnob::Model => 16,
-            StaticKnob::ChainMode => 17,
+            StaticKnob::BgImageFit => 16,
+            StaticKnob::Model => 17,
+            StaticKnob::ChainMode => 18,
         }
     }
 
@@ -91,6 +93,7 @@ impl StaticKnob {
         StaticKnob::ComposeMode,
         StaticKnob::LineStyle,
         StaticKnob::BgColor,
+        StaticKnob::BgImageFit,
         StaticKnob::Model,
         StaticKnob::ChainMode,
     ];
@@ -229,7 +232,8 @@ pub fn spec(knob: StaticKnob) -> KnobSpec {
         | StaticKnob::ComposeMode
         | StaticKnob::LineStyle => s(EdgeRerun, Nothing, LivePreviewEdge, true),
 
-        StaticKnob::BgColor => s(CompositeOnly, Nothing, Render, true),
+        StaticKnob::BgColor
+        | StaticKnob::BgImageFit => s(CompositeOnly, Nothing, Render, true),
 
         // Model / ChainMode: user must click Process.
         StaticKnob::Model => s(FullPipeline, SegCache, SubprocessFullPipeline, false),
@@ -539,6 +543,12 @@ mod tests {
                 new.bg = match base.bg {
                     None => Some([128, 128, 128, 255]),
                     Some(_) => None,
+                };
+            }
+            StaticKnob::BgImageFit => {
+                new.bg_image_fit = match base.bg_image_fit {
+                    prunr_core::BgImageFit::Cover => prunr_core::BgImageFit::Tile,
+                    _ => prunr_core::BgImageFit::Cover,
                 };
             }
             StaticKnob::Model | StaticKnob::ChainMode => {

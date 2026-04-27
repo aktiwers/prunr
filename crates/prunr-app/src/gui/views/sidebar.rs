@@ -358,7 +358,7 @@ fn paint_thumbnail(
     // color bg, mirroring the canvas mutual-exclusion rule.
     if matches!(item.status, BatchStatus::Done) {
         if let Some(tex) = item.bg_image_texture.as_ref() {
-            super::canvas::paint_bg_image_cover(ui, thumb_rect, tex);
+            super::canvas::paint_bg_image(ui, thumb_rect, tex, item.settings.bg_image_fit);
         } else if let Some(bg) = item.settings.bg_rgb() {
             ui.painter()
                 .rect_filled(thumb_rect, 0.0, Color32::from_rgb(bg[0], bg[1], bg[2]));
