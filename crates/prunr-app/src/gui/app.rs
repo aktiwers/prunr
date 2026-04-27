@@ -178,6 +178,18 @@ impl PrunrApp {
 
         let mut settings = Settings::load();
         settings.active_backend = prunr_core::OrtEngine::detect_active_provider();
+        // PRUNR_OPEN_MODEL must apply BEFORE the worker prewarm config below
+        // — otherwise the wrong model loads at startup and the first Process
+        // click pays a full subprocess respawn (~15 s on this CPU). The env
+        // var is consumed here; PrunrApp::new no longer needs to re-read it.
+        if let Some(name) = std::env::var_os("PRUNR_OPEN_MODEL") {
+            unsafe { std::env::remove_var("PRUNR_OPEN_MODEL"); }
+            if let Some(s) = name.to_str() {
+                if let Some(m) = super::settings::SettingsModel::from_debug_name(s) {
+                    settings.model = m;
+                }
+            }
+        }
 
         // Phase 17 upgrade path: if the user's saved model is now OnDemand
         // and the file isn't on disk, queue a one-time toast pointing
@@ -2081,6 +2093,11 @@ impl PrunrApp {
             return;
         }
         let backend_update = item.apply_tier_result(result, tensor_cache, edge_cache, recipe_snapshot, is_selected);
+        // Single completion event — useful for `RUST_LOG=prunr=debug` bug
+        // reports (when did inference actually finish?) and as a stable
+        // signal for any external observer (e.g. a smoke driver) that a
+        // dispatch round-trip closed for this item.
+        tracing::info!(item_id, status = ?item.status, "item processing complete");
 
         if let Some(provider) = backend_update {
             let backend_changed = self.settings.active_backend != provider;
