@@ -2293,6 +2293,9 @@ impl PrunrApp {
         if intents.redo_requested        { self.handle_redo(ctx); }
         if intents.preset_undo_requested { self.swap_preset_history(HistoryDir::Undo); }
         if intents.preset_redo_requested { self.swap_preset_history(HistoryDir::Redo); }
+        if intents.screenshot_requested {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
+        }
 
         if self.pending_batch_sync {
             self.pending_batch_sync = false;
@@ -2475,6 +2478,7 @@ impl eframe::App for PrunrApp {
         self.poll_worker_results(ctx);
         self.handle_drag_and_drop(ctx);
         self.handle_keyboard_shortcuts(ctx);
+        drain_screenshot_replies(ctx);
         self.drain_background_channels(ctx);
         self.update_window_title(ctx);
         self.status.tick();
@@ -2834,6 +2838,44 @@ impl PrunrApp {
     }
 }
 
+/// Drain any `Event::Screenshot` replies and persist them as PNGs. The
+/// directory is `$PRUNR_SCREENSHOT_DIR` (test-harness sets this) or
+/// `<temp>/prunr-screenshots/`. Filename is the unix-millis timestamp
+/// so a scenario that fires Shift+F12 multiple times never collides.
+fn drain_screenshot_replies(ctx: &egui::Context) {
+    let images: Vec<std::sync::Arc<egui::ColorImage>> = ctx.input(|i| {
+        i.events.iter().filter_map(|e| match e {
+            egui::Event::Screenshot { image, .. } => Some(std::sync::Arc::clone(image)),
+            _ => None,
+        }).collect()
+    });
+    if images.is_empty() { return; }
+    let dir = std::env::var_os("PRUNR_SCREENSHOT_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::temp_dir().join("prunr-screenshots"));
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        tracing::warn!(%e, ?dir, "screenshot dir create failed");
+        return;
+    }
+    for image in images {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let path = dir.join(format!("{stamp}.png"));
+        let [w, h] = image.size;
+        let bytes: Vec<u8> = image.pixels.iter().flat_map(|c| c.to_array()).collect();
+        let Some(rgba) = image::RgbaImage::from_raw(w as u32, h as u32, bytes) else {
+            tracing::warn!("screenshot dims mismatch — skipping");
+            continue;
+        };
+        match rgba.save(&path) {
+            Ok(()) => tracing::info!(?path, "screenshot saved"),
+            Err(e) => tracing::warn!(%e, ?path, "screenshot save failed"),
+        }
+    }
+}
+
 /// Resolve a list of dropped paths: directories expand to their immediate
 /// supported-image children (no recursion). Returns `(resolved_paths,
 /// any_dir_was_empty)` — the second flag drives a "no images in folder"
@@ -2995,6 +3037,7 @@ struct ShortcutIntents {
     redo_requested: bool,
     preset_undo_requested: bool,
     preset_redo_requested: bool,
+    screenshot_requested: bool,
 }
 
 fn collect_shortcut_intents(ctx: &egui::Context) -> ShortcutIntents {
@@ -3019,6 +3062,9 @@ fn collect_shortcut_intents(ctx: &egui::Context) -> ShortcutIntents {
         if fresh(Key::F1)                               { s.toggle_shortcuts = true; }
         if fresh(Key::F2)                               { s.toggle_cli_help = true; }
         if fresh(Key::F3)                               { s.toggle_pipeline_flow = true; }
+        // Test-harness hook (also doubles as a bug-report capture).
+        // Writes to `$PRUNR_SCREENSHOT_DIR` (default `<temp>/prunr-screenshots/`).
+        if i.modifiers.shift && fresh(Key::F12)         { s.screenshot_requested = true; }
         if i.modifiers.command && i.key_pressed(Key::Num0)  { s.fit_to_window = true; }
         if i.modifiers.command && i.key_pressed(Key::Num1)  { s.actual_size = true; }
         if i.modifiers.command && i.key_pressed(Key::Space) { s.toggle_settings = true; }
