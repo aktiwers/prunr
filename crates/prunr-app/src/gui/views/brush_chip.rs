@@ -52,7 +52,8 @@ pub(super) fn render(
 
         ui.horizontal(|ui| {
             ui.vertical(|ui| {
-                ui.set_min_width(180.0);
+                ui.set_min_width(220.0);
+                ui.set_max_width(280.0);
                 let r = chip::slider_row_f32(
                     ui, "Radius", &mut s.radius, 1.0..=200.0, true,
                     |v| format!("{v:.0} px"),
