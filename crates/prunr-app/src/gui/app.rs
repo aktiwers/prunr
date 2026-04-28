@@ -86,6 +86,9 @@ pub struct PrunrApp {
     /// Which Settings tab the modal is showing. Transient UI state — not
     /// persisted; opening Settings always starts on General.
     pub(crate) settings_tab: super::views::settings::SettingsTab,
+    /// Inline "Reset to defaults" confirmation. Set when the user clicks
+    /// the reset button; the next render shows a confirm/cancel pair.
+    pub(crate) pending_reset_confirm: bool,
 
     pub(crate) model_store: Option<super::views::adjustments_toolbar::ModelStoreRequest>,
     /// When `Some(id)`, the license-acceptance dialog is open for that
@@ -282,6 +285,7 @@ impl PrunrApp {
             adjustments_hidden: false,
             show_settings: false,
             settings_tab: super::views::settings::SettingsTab::General,
+            pending_reset_confirm: false,
             model_store: None,
             pending_license_request: None,
             pending_onboarding_toast: None,
@@ -550,6 +554,8 @@ impl PrunrApp {
 
     pub(crate) fn close_settings(&mut self, _ctx: &egui::Context) {
         self.show_settings = false;
+        // Don't carry the half-clicked reset confirm across modal opens.
+        self.pending_reset_confirm = false;
         self.settings.save();
         self.toasts.info("Settings saved");
     }
