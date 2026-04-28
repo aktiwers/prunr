@@ -216,7 +216,7 @@ pub const THUMBNAIL_SIZE: f32 = 120.0;
 pub const THUMBNAIL_ROUNDING: f32 = 4.0;
 
 // === Phase 5: Settings Dialog ===
-pub const SETTINGS_DIALOG_WIDTH: f32 = 480.0;
+pub const SETTINGS_DIALOG_WIDTH: f32 = 600.0;
 pub const SETTINGS_DIALOG_HEIGHT: f32 = 700.0;
 
 /// Hint text for settings modal (readable on dark overlay)
