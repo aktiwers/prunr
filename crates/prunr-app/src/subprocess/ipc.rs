@@ -23,6 +23,8 @@ pub fn write_message<W: Write, T: serde::Serialize>(
 
 /// Read a single message: [4-byte LE length][bincode payload].
 /// Returns `None` on clean EOF (subprocess exited).
+///
+/// Stream-decodes via `Read::take(len)` — no payload Vec, no memcpy.
 pub fn read_message<R: Read, T: serde::de::DeserializeOwned>(
     reader: &mut BufReader<R>,
 ) -> io::Result<Option<T>> {
@@ -39,10 +41,11 @@ pub fn read_message<R: Read, T: serde::de::DeserializeOwned>(
             format!("IPC message too large: {len} bytes (max {MAX_MESSAGE_SIZE})"),
         ));
     }
-    let mut payload = vec![0u8; len as usize];
-    reader.read_exact(&mut payload)?;
-    let (msg, _) = bincode::serde::decode_from_slice(&payload, bincode::config::standard())
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    let mut limited = reader.take(len as u64);
+    let msg: T = bincode::serde::decode_from_std_read(
+        &mut limited,
+        bincode::config::standard(),
+    ).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     Ok(Some(msg))
 }
 

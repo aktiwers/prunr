@@ -2,21 +2,15 @@ use egui::RichText;
 use egui_material_icons::icons::*;
 
 use crate::gui::theme;
-use super::section_heading;
+use super::{kv_row, section_heading};
 
 /// Returns true if the modal should close.
 pub(crate) fn render(ctx: &egui::Context, toasts: &mut crate::gui::toasts::Toasts) -> bool {
     theme::standard_modal_window(
         ctx, "cli_help", "CLI Reference",
-        [theme::SETTINGS_DIALOG_WIDTH, theme::SETTINGS_DIALOG_HEIGHT],
+        [theme::SETTINGS_DIALOG_WIDTH, theme::CLI_HELP_DIALOG_HEIGHT],
         |ui| {
-            {
-                let vis = ui.visuals_mut();
-                vis.widgets.inactive.bg_fill = theme::WIDGET_INACTIVE_BG;
-                vis.widgets.inactive.fg_stroke =
-                    egui::Stroke::new(theme::STROKE_DEFAULT, theme::TEXT_PRIMARY);
-                vis.widgets.hovered.bg_fill = theme::WIDGET_HOVER_BG;
-            }
+            theme::apply_modal_visuals(ui);
 
             // Tab state
             let tab_id = egui::Id::new("cli_help_tab");
@@ -183,9 +177,9 @@ pub(crate) fn render(ctx: &egui::Context, toasts: &mut crate::gui::toasts::Toast
                         .num_columns(2)
                         .spacing([theme::SPACE_LG, theme::SPACE_SM])
                         .show(ui, |ui| {
-                            opt_row(ui, "silueta", "Fast, ~4 MB (default)");
+                            opt_row(ui, "birefnet-lite", "Best detail, ~214 MB, 1024\u{00d7}1024 (default)");
+                            opt_row(ui, "silueta", "Fast, ~4 MB");
                             opt_row(ui, "u2net", "Quality, ~170 MB");
-                            opt_row(ui, "birefnet-lite", "Best detail, ~214 MB, 1024\u{00d7}1024");
                         });
 
                     ui.add_space(theme::SPACE_MD);
@@ -274,16 +268,5 @@ fn example_row(ui: &mut egui::Ui, toasts: &mut crate::gui::toasts::Toasts, cmd: 
 }
 
 fn opt_row(ui: &mut egui::Ui, flag: &str, desc: &str) {
-    ui.label(
-        RichText::new(flag)
-            .monospace()
-            .size(theme::FONT_SIZE_MONO)
-            .color(theme::TEXT_PRIMARY),
-    );
-    ui.label(
-        RichText::new(desc)
-            .size(theme::FONT_SIZE_BODY)
-            .color(theme::TEXT_PRIMARY),
-    );
-    ui.end_row();
+    kv_row(ui, flag, desc, theme::TEXT_PRIMARY);
 }

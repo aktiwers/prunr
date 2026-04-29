@@ -42,13 +42,29 @@ impl AdmissionController {
         }
     }
 
-    /// Estimate memory cost for a single image from dimensions and file size.
-    /// Cost = source_rgba + result_rgba + compressed bytes.
-    pub fn estimate_cost(item_id: u64, dimensions: (u32, u32), file_bytes_len: usize) -> ImageMemCost {
+    /// Estimate memory cost for a single image from dimensions, file size,
+    /// and the (max) number of compressed history slots that will accumulate
+    /// in RAM as Tier-2/3 reruns archive prior results.
+    ///
+    /// Cost = `2 × rgba_size + file_bytes + history_residue`, where the
+    /// history residue uses a conservative ~2 : 1 zstd ratio on RGBA per
+    /// archived slot — zstd-level-1 (the level `history_disk` uses) sees
+    /// roughly 2:1 on natural-image RGBA, so dividing by 2 keeps admission
+    /// honest under sustained pressure rather than under-counting and
+    /// over-admitting. Without this term, long batches with deep history
+    /// systematically OOM. The estimate is intentionally pessimistic —
+    /// slots demoted to disk free their RAM before the next admission
+    /// window, but counting them upfront caps the worst-case RSS.
+    pub fn estimate_cost(
+        item_id: u64,
+        dimensions: (u32, u32),
+        file_bytes_len: usize,
+        history_depth: usize,
+    ) -> ImageMemCost {
         let pixels = dimensions.0 as usize * dimensions.1 as usize;
         let rgba_size = pixels * 4;
-        // source_rgba (decoded) + result_rgba (output) + compressed bytes already in RAM
-        let total = rgba_size * 2 + file_bytes_len;
+        let history_residue = (rgba_size / 2) * history_depth;
+        let total = rgba_size * 2 + file_bytes_len + history_residue;
         ImageMemCost { item_id, total }
     }
 
@@ -173,9 +189,9 @@ mod tests {
     fn admits_items_within_budget() {
         let mut ctrl = make_ctrl(100_000_000);
         ctrl.enqueue(vec![
-            AdmissionController::estimate_cost(1, (3000, 2000), 1_000_000),
-            AdmissionController::estimate_cost(2, (3000, 2000), 1_000_000),
-            AdmissionController::estimate_cost(3, (3000, 2000), 1_000_000),
+            AdmissionController::estimate_cost(1, (3000, 2000), 1_000_000, 0),
+            AdmissionController::estimate_cost(2, (3000, 2000), 1_000_000, 0),
+            AdmissionController::estimate_cost(3, (3000, 2000), 1_000_000, 0),
         ]);
         // Each image ~49 MB, budget 100 MB → 2 fit
         assert!(ctrl.try_admit_next().is_some());
@@ -187,7 +203,7 @@ mod tests {
     fn force_admits_when_deadlocked() {
         let mut ctrl = make_ctrl(10_000); // tiny budget
         ctrl.enqueue(vec![
-            AdmissionController::estimate_cost(1, (1000, 1000), 100), // ~8 MB
+            AdmissionController::estimate_cost(1, (1000, 1000), 100, 0), // ~8 MB
         ]);
         // Way over budget but nothing in-flight → force admit
         assert_eq!(ctrl.try_admit_next(), Some(1));
@@ -197,9 +213,9 @@ mod tests {
     fn release_frees_budget() {
         let mut ctrl = make_ctrl(100_000_000);
         ctrl.enqueue(vec![
-            AdmissionController::estimate_cost(1, (3000, 2000), 1_000_000),
-            AdmissionController::estimate_cost(2, (3000, 2000), 1_000_000),
-            AdmissionController::estimate_cost(3, (3000, 2000), 1_000_000),
+            AdmissionController::estimate_cost(1, (3000, 2000), 1_000_000, 0),
+            AdmissionController::estimate_cost(2, (3000, 2000), 1_000_000, 0),
+            AdmissionController::estimate_cost(3, (3000, 2000), 1_000_000, 0),
         ]);
         let id1 = ctrl.try_admit_next().unwrap();
         let _id2 = ctrl.try_admit_next().unwrap();
@@ -212,7 +228,7 @@ mod tests {
     fn is_complete_after_all_released() {
         let mut ctrl = make_ctrl(100_000_000);
         ctrl.enqueue(vec![
-            AdmissionController::estimate_cost(1, (100, 100), 100),
+            AdmissionController::estimate_cost(1, (100, 100), 100, 0),
         ]);
         let id = ctrl.try_admit_next().unwrap();
         assert!(!ctrl.is_complete());
@@ -227,9 +243,9 @@ mod tests {
         //   - mid:  ~23 MB (fits — and is the best-fit largest)
         //   - smol: ~8 MB  (also fits but smaller)
         let mut ctrl = make_ctrl(35_000_000);
-        let big = AdmissionController::estimate_cost(1, (2200, 2200), 0);
-        let mid = AdmissionController::estimate_cost(2, (1700, 1700), 0);
-        let smol = AdmissionController::estimate_cost(3, (1000, 1000), 0);
+        let big = AdmissionController::estimate_cost(1, (2200, 2200), 0, 0);
+        let mid = AdmissionController::estimate_cost(2, (1700, 1700), 0, 0);
+        let smol = AdmissionController::estimate_cost(3, (1000, 1000), 0, 0);
         ctrl.enqueue(vec![big, mid, smol]);
         let admitted = ctrl.try_admit_next();
         assert_eq!(admitted, Some(2), "should prefer the largest fitting item");
@@ -246,7 +262,7 @@ mod tests {
     #[test]
     fn double_release_does_not_underflow() {
         let mut ctrl = make_ctrl(100_000_000);
-        ctrl.enqueue(vec![AdmissionController::estimate_cost(1, (100, 100), 100)]);
+        ctrl.enqueue(vec![AdmissionController::estimate_cost(1, (100, 100), 100, 0)]);
         let id = ctrl.try_admit_next().unwrap();
         ctrl.release(id);
         ctrl.release(id); // second release must be a no-op
@@ -259,7 +275,7 @@ mod tests {
         // time the window is empty, so the queue still drains completely.
         let mut ctrl = make_ctrl(5_000_000);
         let items: Vec<ImageMemCost> = (1..=10)
-            .map(|i| AdmissionController::estimate_cost(i, (2000, 2000), 100))
+            .map(|i| AdmissionController::estimate_cost(i, (2000, 2000), 100, 0))
             .collect();
         ctrl.enqueue(items);
 
@@ -279,5 +295,27 @@ mod tests {
         }
         assert_eq!(drained, 10);
         assert!(ctrl.is_complete());
+    }
+
+    /// History residue is included in the cost estimate. Without this
+    /// term, long batches with deep history under-count committed RAM
+    /// and over-admit, leading to OOM. Test pins the (rgba_size / 2)
+    /// × depth contract so a future tweak to the divisor is visible.
+    #[test]
+    fn estimate_cost_includes_history_residue() {
+        let dims = (1000, 1000);
+        let pixels = (dims.0 * dims.1) as usize;
+        let rgba_size = pixels * 4; // 4 MB
+        let cost_zero = AdmissionController::estimate_cost(1, dims, 0, 0);
+        let cost_depth_5 = AdmissionController::estimate_cost(2, dims, 0, 5);
+        // depth 0 → only 2× rgba.
+        assert_eq!(cost_zero.total, 2 * rgba_size);
+        // depth 5 → adds (rgba_size / 2) × 5.
+        let expected_residue = (rgba_size / 2) * 5;
+        assert_eq!(cost_depth_5.total, 2 * rgba_size + expected_residue);
+        // Non-trivial OOM-prevention property: depth 50 should add at
+        // least 25× the rgba_size in committed bytes.
+        let cost_deep = AdmissionController::estimate_cost(3, dims, 0, 50);
+        assert!(cost_deep.total >= 2 * rgba_size + 25 * rgba_size);
     }
 }

@@ -193,6 +193,11 @@ impl PrunrApp {
                 }
             }
         }
+        // Test-harness escape hatch: flip auto-process so an imported image
+        // runs the pipeline without xdotool driving Ctrl+R.
+        if let Some(v) = super::env_overrides::auto_process_override() {
+            settings.auto_process_on_import = v;
+        }
         // Phase 17 upgrade path: if the user's saved model is now OnDemand
         // and the file isn't on disk, queue a one-time toast pointing
         // them to the Model Store. Bundled-only users see nothing.
@@ -324,12 +329,11 @@ impl PrunrApp {
         // tab and auto-opens the modal at startup. Lets the harness capture
         // each tab without driving mouse clicks (unreliable under Xephyr's
         // coord-space mismatch). Values match SettingsTab labels: General /
-        // Appearance / Processing / Defaults / Hotkeys (case-sensitive).
-        // Not exposed on --help.
+        // Behavior / Hotkeys (case-sensitive). Not exposed on --help.
         if let Some(name) = std::env::var_os("PRUNR_OPEN_TAB") {
             unsafe { std::env::remove_var("PRUNR_OPEN_TAB"); }
             if let Some(s) = name.to_str() {
-                if let Some(t) = super::views::settings::SettingsTab::from_debug_name(s) {
+                if let Some(t) = super::views::settings::SettingsTab::from_label(s) {
                     app.settings_tab = t;
                     app.show_settings = true;
                     // settings_opened_at stays at the default 0.0 — first
@@ -1144,9 +1148,12 @@ impl PrunrApp {
         use super::memory::{AdmissionController, ImageMemCost};
 
         let mut ctrl = AdmissionController::new(model, jobs);
+        let history_depth = self.settings.history_depth;
         let costs: Vec<ImageMemCost> = self.batch.items.iter()
             .filter(|i| tier1_ids.contains(&i.id))
-            .map(|i| AdmissionController::estimate_cost(i.id, i.dimensions, i.source.estimated_size()))
+            .map(|i| AdmissionController::estimate_cost(
+                i.id, i.dimensions, i.source.estimated_size(), history_depth,
+            ))
             .collect();
         ctrl.enqueue(costs);
 
@@ -2436,7 +2443,11 @@ impl PrunrApp {
             self.sync_selected_batch_textures(ctx);
         }
 
-        // Receive pre-built ColorImages and upload to GPU (lightweight — just queues the upload)
+        // Receive pre-built ColorImages and upload to GPU (lightweight — just queues the upload).
+        // Emit a tracing event after each upload so the test harness can wait
+        // for actually-renderable state instead of fixed-sleeping after the
+        // earlier "item processing complete" event (which only confirms the
+        // RGBA pixels exist, not that they've made it to the GPU).
         let mut tex_arrived = false;
         while let Ok((item_id, name, color_image, is_result)) = self.batch.bg_io.tex_prep_rx.try_recv() {
             let tex = ctx.load_texture(name, color_image, egui::TextureOptions::default());
@@ -2444,9 +2455,11 @@ impl PrunrApp {
                 if is_result {
                     item.result_texture = Some(tex);
                     item.result_tex_pending = false;
+                    tracing::info!(item_id, kind = "result", "texture uploaded");
                 } else {
                     item.source_texture = Some(tex);
                     item.source_tex_pending = false;
+                    tracing::info!(item_id, kind = "source", "texture uploaded");
                 }
                 tex_arrived = true;
             }
@@ -2493,18 +2506,38 @@ impl PrunrApp {
     }
 
     fn update_window_title(&mut self, ctx: &egui::Context) {
-        let title = if self.batch.items.len() >= 2 {
-            format!("Prunr \u{2014} {} images", self.batch.items.len())
+        // Cheap discriminator first: count + filename ref. Skip the
+        // `format!` (and its String allocation) on the common no-change
+        // path — runs every frame at 60 Hz, so 120 allocs/s of pure
+        // noise was the prior cost.
+        let count = self.batch.items.len();
+        let unchanged = if count >= 2 {
+            self.prev_title.starts_with("Prunr \u{2014} ")
+                && self.prev_title.ends_with(" images")
+                && self.prev_title
+                    .strip_prefix("Prunr \u{2014} ")
+                    .and_then(|s| s.strip_suffix(" images"))
+                    .and_then(|s| s.parse::<usize>().ok())
+                    == Some(count)
+        } else {
+            match &self.loaded_filename {
+                Some(name) => self.prev_title
+                    .strip_prefix("Prunr \u{2014} ") == Some(name.as_str()),
+                None => self.prev_title == "Prunr",
+            }
+        };
+        if unchanged { return; }
+
+        let title = if count >= 2 {
+            format!("Prunr \u{2014} {count} images")
         } else {
             match &self.loaded_filename {
                 Some(name) => format!("Prunr \u{2014} {name}"),
                 None => "Prunr".to_string(),
             }
         };
-        if title != self.prev_title {
-            self.prev_title = title.clone();
-            ctx.send_viewport_cmd(ViewportCommand::Title(title));
-        }
+        self.prev_title = title.clone();
+        ctx.send_viewport_cmd(ViewportCommand::Title(title));
     }
 }
 

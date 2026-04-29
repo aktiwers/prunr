@@ -46,6 +46,40 @@ Before you write a `.clone()` on anything larger than ~1 KB in a hot path, ask: 
 
 Before allocating (Vec, String, Box) inside a hot closure: can the allocation hoist out once per frame or once per session? Drag handlers, tooltip callbacks, and per-item render loops are the usual offenders.
 
+## RAM discipline (without sacrificing quality)
+
+Prunr already runs SD models hitting 2 GB+ resident; layering naïve full-image f32 buffers on top has caused near-OOMs. Bake RAM into the design **before** writing code — but **quality and user experience always win the tie-break**. The rule isn't "silently refuse trades", it's "surface them and let the user decide."
+
+For any new function that operates on full-resolution `RgbaImage` (or comparable) buffers:
+
+1. **Estimate peak working set in the doc-comment** — a small table (bbox vs RAM in MB). Be honest. If peak is 9×n, write 9×n; don't undercount to look better.
+2. **Bbox-crop the work region** to the mask / ROI. Pixels outside are bit-identical, so the user can't tell the bbox version from a full-image one.
+3. **Sequential per-channel** for multi-channel work, not parallel-channel. R/G/B in parallel triples peak RAM for invisible wall-clock gain when each channel needs scratch.
+4. **Buffer reuse.** The `guided_filter_alpha` pattern is canonical: `gi`/`gg` are repurposed in-place as `a`/`b`. Annotate reuse: `// reused as ...`. Pre-allocated `_into` variants (see `box_filter_into`) drop alloc churn across loops.
+5. **Explicit `drop()` of intermediates** before the next allocation. Rust NLL doesn't always free at last-use when control flow is complex.
+
+### The two classes of optimization
+
+**Always allowed — apply silently** (same math, smaller footprint, invisible to the user looking at the result):
+- Bbox crop, sequential channels, buffer reuse, pre-allocated `_into` outputs.
+- Numerical guards (e.g., `var.max(0.0)` before division) — these protect quality for free.
+- Lifting allocations out of hot loops, parallel reduction of sequential scans, RAII tightening.
+
+**Surface as a trade — present, don't silently apply** (anything with a non-zero cost on the user side):
+- Lower-precision working buffers (f32 → f16/int8). Quality cost.
+- Reducing kernel/filter radius below the algorithmic minimum. Quality cost.
+- Skipping refinement passes when bbox is large. Quality cost.
+- Output downscaling. Quality cost.
+- Lossy approximations of the same operation. Quality cost.
+- More-RAM-for-more-speed (parallel-channel, batched loads that hold all channels alive). Speed-vs-RAM trade.
+- Less-RAM-for-less-speed (serializing what was parallel). Speed-vs-RAM trade in the other direction.
+
+When `/simplify` or research turns up a `[TRADE]` finding, list it with location + gain + cost + recommendation. Don't apply it. Wait for the call.
+
+Examples in tree:
+- `crates/prunr-core/src/guided_filter.rs` — buffer reuse + `box_filter_into` for alloc reuse.
+- `crates/prunr-core/src/inpaint_blend.rs` — bbox crop + sequential channels + reused mean buffers + numerical guard. All quality-neutral.
+
 ## Code-writing defaults (compounded from /simplify passes)
 
 These are the patterns `/simplify` agents repeatedly flag. Apply them on the first attempt:

@@ -18,6 +18,24 @@ pub const TILE: u32 = 512;
 /// on the corners; the feather blend tapers within this region.
 pub const OVERLAP: u32 = 64;
 
+/// 5-tap separable Gaussian for `sharpen_inpainted`'s unsharp-mask blur
+/// (sigma ≈ 1.0). Constant + derived margin lock the kernel↔bbox
+/// invariant: `mask_bbox` must expand by `kernel.len() / 2` so the
+/// clamped reads at bbox edges land on the same source pixels the
+/// full-image variant would have hit.
+const SHARPEN_KERNEL: [f32; 5] = [1.0/16.0, 4.0/16.0, 6.0/16.0, 4.0/16.0, 1.0/16.0];
+const SHARPEN_MARGIN: u32 = (SHARPEN_KERNEL.len() / 2) as u32;
+
+/// Region of interest in pixel coordinates. Distinct from `TilePlacement`
+/// (which is a planned-tile-of-work); a `Bbox` is just a rectangle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Bbox {
+    pub x: u32,
+    pub y: u32,
+    pub w: u32,
+    pub h: u32,
+}
+
 /// Eagerly initialise the inpaint session for `id` in the background so
 /// the first stroke doesn't pay the ~5-10s session-build latency.
 /// Idempotent — repeated calls for the same id are no-ops.
@@ -86,7 +104,16 @@ fn morphology_step(mask: &GrayImage, dilate: bool) -> GrayImage {
 /// the LaMa↔source seam.
 ///
 /// Uses a 2-pass chamfer distance transform — accurate enough for the
-/// small radii exposed (≤32 px) and O(n) on the image.
+/// small radii exposed (≤32 px) and O(n) on the bbox.
+///
+/// RAM: chamfer + per-pixel walk are bbox-restricted with a
+/// `ceil(feather_px) + 1` margin. The `+1` guarantees a complete ring
+/// of mask=0 chamfer seeds *inside* the cropped image even when
+/// `ceil(feather_px) == 0` rounds to zero margin elsewhere. Without
+/// it a mask=255 pixel at the cropped-image edge would have no seed
+/// to chamfer from. The `tile_compose` / SD pipelines preserve source
+/// byte-for-byte at mask=0, so the original "always copy src" branch
+/// outside the bbox is redundant.
 pub fn feather_inpainted(
     inpainted: &RgbaImage,
     source: &RgbaImage,
@@ -102,34 +129,87 @@ pub fn feather_inpainted(
         tracing::warn!("feather_inpainted: dim mismatch, skipping");
         return inpainted.clone();
     }
-    let dist = chamfer_distance_inside(mask);
-    let (w, h) = inpainted.dimensions();
+    let margin = feather_px.ceil() as u32 + 1;
+    let Some(bbox) = mask_bbox(mask, 1, margin) else {
+        return inpainted.clone();
+    };
+    let crop_mask =
+        image::imageops::crop_imm(mask, bbox.x, bbox.y, bbox.w, bbox.h).to_image();
+    let dist = chamfer_distance_inside(&crop_mask);
+
+    let (img_w, _) = inpainted.dimensions();
+    let img_w_us = img_w as usize;
+    let bbox_w_us = bbox.w as usize;
     let mut out = inpainted.clone();
     let out_raw = out.as_mut();
     let src_raw = source.as_raw();
     let inp_raw = inpainted.as_raw();
-    let n = (w * h) as usize;
-    for i in 0..n {
-        let pix = i * 4;
-        let d = dist[i];
-        if d <= 0.0 {
-            // Outside the mask: source. (decode_tile already passes
-            // these through, but be defensive in case feather is
-            // chained after a different pipeline.)
-            out_raw[pix] = src_raw[pix];
-            out_raw[pix + 1] = src_raw[pix + 1];
-            out_raw[pix + 2] = src_raw[pix + 2];
-            continue;
+
+    // Per-row prefix hoisted out of the inner `bx` loop. Rows are
+    // write-disjoint across `by`, so we either parallelise via
+    // `SendMutPtr` (mirrors `sharpen_inpainted` and
+    // `inpaint_blend::composite_channel`) or fall back to sequential
+    // for tiny bboxes where rayon overhead would dominate.
+    use rayon::prelude::*;
+    #[derive(Clone, Copy)]
+    struct SendMutPtr(*mut u8);
+    unsafe impl Send for SendMutPtr {}
+    unsafe impl Sync for SendMutPtr {}
+
+    let row_step = |by: u32, out_writer: &mut dyn FnMut(usize, [u8; 3])| {
+        let global_y = bbox.y + by;
+        let row_off_global = global_y as usize * img_w_us;
+        let row_off_dist = (by as usize) * bbox_w_us;
+        for bx in 0..bbox.w {
+            let global_idx = row_off_global + (bbox.x + bx) as usize;
+            let pix = global_idx * 4;
+            let d = dist[row_off_dist + bx as usize];
+            if d <= 0.0 {
+                out_writer(pix, [src_raw[pix], src_raw[pix + 1], src_raw[pix + 2]]);
+                continue;
+            }
+            if d >= feather_px {
+                continue; // deep inside: keep inpainted
+            }
+            let t = d / feather_px;
+            let s0 = src_raw[pix] as f32;
+            let s1 = src_raw[pix + 1] as f32;
+            let s2 = src_raw[pix + 2] as f32;
+            let p0 = inp_raw[pix] as f32;
+            let p1 = inp_raw[pix + 1] as f32;
+            let p2 = inp_raw[pix + 2] as f32;
+            out_writer(pix, [
+                (s0 + t * (p0 - s0)).clamp(0.0, 255.0) as u8,
+                (s1 + t * (p1 - s1)).clamp(0.0, 255.0) as u8,
+                (s2 + t * (p2 - s2)).clamp(0.0, 255.0) as u8,
+            ]);
         }
-        if d >= feather_px {
-            // Deep inside: full inpainted (already in `out` from clone).
-            continue;
-        }
-        let t = d / feather_px;
-        for c in 0..3 {
-            let s = src_raw[pix + c] as f32;
-            let p = inp_raw[pix + c] as f32;
-            out_raw[pix + c] = (s + t * (p - s)).clamp(0.0, 255.0) as u8;
+    };
+
+    if bbox.h >= 64 {
+        // Parallel rows. SAFETY: `by` partitions writes by row;
+        // `[pix, pix+3)` for any (by, bx) lies in row `global_y`,
+        // which is unique to this iteration.
+        let dp = SendMutPtr(out_raw.as_mut_ptr());
+        (0..bbox.h).into_par_iter().for_each(|by| {
+            let mut writer = |pix: usize, rgb: [u8; 3]| unsafe {
+                *dp.0.add(pix) = rgb[0];
+                *dp.0.add(pix + 1) = rgb[1];
+                *dp.0.add(pix + 2) = rgb[2];
+            };
+            row_step(by, &mut writer);
+            // Force whole-struct capture (Rust 2021 disjoint-capture
+            // would otherwise grab `dp.0: *mut u8` alone, not Sync).
+            let _ = &dp;
+        });
+    } else {
+        for by in 0..bbox.h {
+            let mut writer = |pix: usize, rgb: [u8; 3]| {
+                out_raw[pix] = rgb[0];
+                out_raw[pix + 1] = rgb[1];
+                out_raw[pix + 2] = rgb[2];
+            };
+            row_step(by, &mut writer);
         }
     }
     out
@@ -138,7 +218,7 @@ pub fn feather_inpainted(
 /// Forward + backward chamfer pass returning, for each pixel, the
 /// distance to the nearest mask==0 pixel (0.0 if outside). Diagonal
 /// step uses √2 to keep the metric near-Euclidean.
-fn chamfer_distance_inside(mask: &GrayImage) -> Vec<f32> {
+pub(crate) fn chamfer_distance_inside(mask: &GrayImage) -> Vec<f32> {
     let (w, h) = mask.dimensions();
     let w_us = w as usize;
     let h_us = h as usize;
@@ -187,12 +267,17 @@ fn chamfer_distance_inside(mask: &GrayImage) -> Vec<f32> {
 /// Algorithm: `out = src + amount * (src - blur(src))`, applied only
 /// to pixels where `mask > 127`. Blur is a separable 5-tap Gaussian
 /// (sigma ≈ 1.0).
+///
+/// RAM: working buffers are sized to the **mask bounding box** plus
+/// the kernel half-width (2 px) so blur reads from cropped pixels
+/// stay bit-identical to a full-image variant. A 200 × 200 stroke on
+/// a 4096 × 3072 image holds ~480 KB of f32 instead of ~150 MB.
 pub fn sharpen_inpainted(image: &RgbaImage, mask: &GrayImage, amount: f32) -> RgbaImage {
     if amount <= 0.0 {
         return image.clone();
     }
     let amount = amount.min(2.0);
-    let (w, h) = image.dimensions();
+    let (w, _h) = image.dimensions();
     if image.dimensions() != mask.dimensions() {
         tracing::warn!(
             image_dims = ?image.dimensions(),
@@ -201,53 +286,85 @@ pub fn sharpen_inpainted(image: &RgbaImage, mask: &GrayImage, amount: f32) -> Rg
         );
         return image.clone();
     }
-    // 5-tap separable Gaussian, sigma ≈ 1.0 (kernel: 1, 4, 6, 4, 1 / 16).
-    let kernel: [f32; 5] = [1.0 / 16.0, 4.0 / 16.0, 6.0 / 16.0, 4.0 / 16.0, 1.0 / 16.0];
+    // No mask>127 pixels → nothing to sharpen. Bypasses the temp f32
+    // allocation entirely (was a ~150 MB no-op on full-image masks at 4K).
+    let Some(bbox) = mask_bbox(mask, 128, SHARPEN_MARGIN) else {
+        return image.clone();
+    };
     let src = image.as_raw();
-    let w_us = w as usize;
-    let h_us = h as usize;
+    let img_w = w as usize;
+    let bbox_w = bbox.w as usize;
+    let bbox_h = bbox.h as usize;
+    let bbox_x = bbox.x as usize;
+    let bbox_y = bbox.y as usize;
 
-    // Horizontal pass into a temp f32 buffer.
-    let mut tmp: Vec<f32> = vec![0.0; w_us * h_us * 3];
-    for y in 0..h_us {
-        for x in 0..w_us {
+    // Horizontal pass into a bbox-sized temp f32 buffer (RGB only —
+    // alpha never changes). Rows are independent → parallelise.
+    let mut tmp: Vec<f32> = vec![0.0; bbox_w * bbox_h * 3];
+    use rayon::prelude::*;
+    tmp.par_chunks_mut(bbox_w * 3).enumerate().for_each(|(by, row)| {
+        let global_y = bbox_y + by;
+        for bx in 0..bbox_w {
+            let global_x = bbox_x + bx;
             for c in 0..3 {
                 let mut sum = 0.0;
                 for k in 0..5 {
-                    let xi = (x as isize + k as isize - 2).clamp(0, w_us as isize - 1) as usize;
-                    sum += kernel[k] * src[(y * w_us + xi) * 4 + c] as f32;
+                    let xi = (global_x as isize + k as isize - 2)
+                        .clamp(0, img_w as isize - 1) as usize;
+                    sum += SHARPEN_KERNEL[k] * src[(global_y * img_w + xi) * 4 + c] as f32;
                 }
-                tmp[(y * w_us + x) * 3 + c] = sum;
+                row[bx * 3 + c] = sum;
             }
         }
-    }
+    });
 
-    let mut out = RgbaImage::new(w, h);
+    // Output starts as image clone. Pixels outside the bbox are
+    // mask <= 127 by definition (bbox covers all mask >= 128) — they
+    // stay as source. Vertical blur + sharpen overrides bbox-masked
+    // pixels. Rows are write-disjoint → parallelise via SendMutPtr,
+    // same pattern as `inpaint_blend::composite_channel`.
+    let mut out = image.clone();
     let out_raw = out.as_mut();
     let msk_raw = mask.as_raw();
-    for y in 0..h_us {
-        for x in 0..w_us {
-            let pix = (y * w_us + x) * 4;
-            // Always copy alpha; RGB depends on mask.
-            out_raw[pix + 3] = src[pix + 3];
-            if msk_raw[y * w_us + x] <= 127 {
-                out_raw[pix] = src[pix];
-                out_raw[pix + 1] = src[pix + 1];
-                out_raw[pix + 2] = src[pix + 2];
+    #[derive(Clone, Copy)]
+    struct SendMutPtr(*mut u8);
+    unsafe impl Send for SendMutPtr {}
+    unsafe impl Sync for SendMutPtr {}
+    let dp = SendMutPtr(out_raw.as_mut_ptr());
+    (0..bbox_h).into_par_iter().for_each(|by| {
+        let global_y = bbox_y + by;
+        for bx in 0..bbox_w {
+            let global_x = bbox_x + bx;
+            let global_idx = global_y * img_w + global_x;
+            if msk_raw[global_idx] <= 127 {
                 continue;
             }
+            let pix = global_idx * 4;
             for c in 0..3 {
                 let mut blur = 0.0;
                 for k in 0..5 {
-                    let yi = (y as isize + k as isize - 2).clamp(0, h_us as isize - 1) as usize;
-                    blur += kernel[k] * tmp[(yi * w_us + x) * 3 + c];
+                    // Clamp at bbox bounds — they extend the mask
+                    // region by `SHARPEN_MARGIN`, so the clamped index
+                    // points at the same source pixel a full-image
+                    // variant's clamp would have hit.
+                    let by_kernel = (by as isize + k as isize - 2)
+                        .clamp(0, bbox_h as isize - 1) as usize;
+                    blur += SHARPEN_KERNEL[k] * tmp[(by_kernel * bbox_w + bx) * 3 + c];
                 }
                 let s = src[pix + c] as f32;
                 let sharp = s + amount * (s - blur);
-                out_raw[pix + c] = sharp.clamp(0.0, 255.0) as u8;
+                // SAFETY: each parallel iteration `by` writes to bytes
+                // at global rows {global_y} only — different `by`s are
+                // row-disjoint. Channels (c=0,1,2) within one pixel
+                // are also distinct bytes. No race.
+                unsafe { *dp.0.add(pix + c) = sharp.clamp(0.0, 255.0) as u8; }
             }
         }
-    }
+        // Force whole-struct capture of `dp` (Rust 2021 disjoint
+        // capture would otherwise grab `dp.0: *mut u8` alone, which
+        // isn't Sync — same pattern as `guided_filter::box_filter`).
+        let _ = &dp;
+    });
     out
 }
 
@@ -710,6 +827,12 @@ pub(crate) fn feather_weight(distance_from_edge: u32) -> f32 {
 /// inference closure, and feather-blending into the output buffer.
 /// Skips tiles whose mask is all-zero (no work). The closure runs
 /// once per non-empty tile.
+///
+/// RAM: accumulators are sized to the **mask bounding box**, not the
+/// image. A 200 × 200 stroke on a 4096 × 3072 image holds ~640 KB of
+/// f32 accumulators instead of ~250 MB. Pixels outside the bbox are
+/// guaranteed mask==0 and so would be skipped by the composite loop
+/// anyway — the bbox crop is bit-exact with the full-image variant.
 pub(crate) fn tile_compose<F>(
     image: &RgbaImage,
     mask: &GrayImage,
@@ -721,13 +844,22 @@ where
     let (w, h) = image.dimensions();
     let mut out = image.clone();
 
+    // No mask → no work. Avoids allocating accumulators for the all-zero
+    // case (was a 250 MB allocation on a 4K image even when nothing
+    // needed to be inpainted).
+    let Some(bbox) = mask_bbox(mask, 1, 0) else {
+        return Ok(out);
+    };
+
+    let bbox_w = bbox.w as usize;
+    let bbox_n = (bbox.w as usize) * (bbox.h as usize);
     // Per-pixel weight accumulator for the feather blend. Tiles overlap
     // in the OVERLAP band; each contributes a smoothstep-weighted
-    // sample, normalized at the end.
-    let mut weight_acc: Vec<f32> = vec![0.0; (w * h) as usize];
-    // Accumulator for the weighted RGBA in f32. We blend in linear
-    // f32 space and quantize back to u8 at the end.
-    let mut color_acc: Vec<[f32; 4]> = vec![[0.0; 4]; (w * h) as usize];
+    // sample, normalized at the end. Bbox-sized — see fn docs.
+    let mut weight_acc: Vec<f32> = vec![0.0; bbox_n];
+    // Accumulator for the weighted RGBA in f32 — blended in linear
+    // space, quantised back to u8 at the end.
+    let mut color_acc: Vec<[f32; 4]> = vec![[0.0; 4]; bbox_n];
 
     for tile in plan_tiles(w, h) {
         let tile_mask = image::imageops::crop_imm(mask, tile.x, tile.y, tile.w, tile.h).to_image();
@@ -736,31 +868,100 @@ where
         }
         let tile_rgba = image::imageops::crop_imm(image, tile.x, tile.y, tile.w, tile.h).to_image();
         let painted = inpaint_tile(&tile_rgba, &tile_mask);
-        accumulate_tile(&mut color_acc, &mut weight_acc, &painted, &tile, w);
+        accumulate_tile(&mut color_acc, &mut weight_acc, &painted, &tile, bbox);
     }
 
-    // Resolve accumulated tiles. Unmasked pixels are skipped — `out`
-    // already started as `image.clone()`, so leaving them untouched
-    // gives byte-identical source preservation. Going through the
-    // float blend would introduce 1-unit drift in u8 quantization
-    // even when every contributing tile sampled identical source
-    // pixels (255 * w / w ≠ 255 in float arithmetic).
+    // Resolve accumulated tiles into the bbox region of `out`. Pixels
+    // outside the bbox stay byte-identical to source (already cloned
+    // into `out`); pixels inside-bbox-but-mask=0 also stay byte-
+    // identical (skipped here). Float-blend even on a uniform region
+    // would introduce 1-unit u8 quantisation drift (255*w/w ≠ 255 in
+    // float math), so the skip on mask==0 is load-bearing.
     let mask_raw = mask.as_raw();
-    for (i, pixel) in out.pixels_mut().enumerate() {
-        if mask_raw[i] == 0 {
-            continue;
-        }
-        let wsum = weight_acc[i];
-        if wsum > 0.0 {
-            let inv = 1.0 / wsum;
-            let c = color_acc[i];
-            // Alpha stays from the source clone — LaMa is RGB-only.
-            pixel.0[0] = (c[0] * inv).clamp(0.0, 255.0) as u8;
-            pixel.0[1] = (c[1] * inv).clamp(0.0, 255.0) as u8;
-            pixel.0[2] = (c[2] * inv).clamp(0.0, 255.0) as u8;
+    let img_w = w as usize;
+    let out_raw = out.as_mut();
+    for by in 0..bbox.h {
+        let global_y = bbox.y + by;
+        let row_off = global_y as usize * img_w;
+        for bx in 0..bbox.w {
+            let global_x = bbox.x + bx;
+            let global_idx = row_off + global_x as usize;
+            if mask_raw[global_idx] == 0 {
+                continue;
+            }
+            let bbox_idx = (by as usize) * bbox_w + (bx as usize);
+            let wsum = weight_acc[bbox_idx];
+            if wsum > 0.0 {
+                let inv = 1.0 / wsum;
+                let c = color_acc[bbox_idx];
+                // Direct raw-buffer write — saves the bounds-check +
+                // Rgba<u8> reconstruction per pixel that
+                // `get_pixel_mut` would do. Alpha (offset +3) is left
+                // untouched: source clone already filled it, and LaMa
+                // is RGB-only.
+                let pix = global_idx * 4;
+                out_raw[pix]     = (c[0] * inv).clamp(0.0, 255.0) as u8;
+                out_raw[pix + 1] = (c[1] * inv).clamp(0.0, 255.0) as u8;
+                out_raw[pix + 2] = (c[2] * inv).clamp(0.0, 255.0) as u8;
+            }
         }
     }
     Ok(out)
+}
+
+/// Bounding box of pixels where `mask >= min_value`, expanded by
+/// `margin` pixels on each side and clamped to image bounds. `None`
+/// for an empty result. Parallel row-reduction so a 4 K mask scans
+/// in ~1 ms on multi-core.
+///
+/// Margin asymmetry at image edges is intentional: when the bbox
+/// touches an image edge, that side's margin is clipped to 0. Callers
+/// that subsequently `clamp(0, bbox_edge - 1)` their kernel reads
+/// produce bit-identical output to a full-image variant — both clamp
+/// at the same image edge, just framed differently.
+///
+/// Two callers in this module today:
+/// - `tile_compose`: `min_value=1, margin=0` (any nonzero pixel
+///   triggers inference; matches `mask_is_empty`'s convention).
+/// - `sharpen_inpainted`: `min_value=128, margin=SHARPEN_MARGIN`
+///   (binary mask threshold; margin = kernel half-width so clamped
+///   blur reads stay bit-identical to the full-image variant).
+pub(crate) fn mask_bbox(mask: &GrayImage, min_value: u8, margin: u32) -> Option<Bbox> {
+    use rayon::prelude::*;
+    let raw = mask.as_raw();
+    let w = mask.width() as usize;
+    let h = mask.height() as usize;
+    let merged = (0..h)
+        .into_par_iter()
+        .filter_map(|y| {
+            let row = &raw[y * w..(y + 1) * w];
+            let mut min_x = usize::MAX;
+            let mut max_x = 0usize;
+            let mut any = false;
+            for (x, &v) in row.iter().enumerate() {
+                if v >= min_value {
+                    if !any { min_x = x; }
+                    max_x = x;
+                    any = true;
+                }
+            }
+            if any { Some((min_x, y, max_x, y)) } else { None }
+        })
+        .reduce_with(|a, b| {
+            (a.0.min(b.0), a.1.min(b.1), a.2.max(b.2), a.3.max(b.3))
+        })?;
+    let (min_x, min_y, max_x, max_y) = merged;
+    let m = margin as usize;
+    let bx = min_x.saturating_sub(m);
+    let by = min_y.saturating_sub(m);
+    let bx_end = (max_x + m + 1).min(w);
+    let by_end = (max_y + m + 1).min(h);
+    Some(Bbox {
+        x: bx as u32,
+        y: by as u32,
+        w: (bx_end - bx) as u32,
+        h: (by_end - by) as u32,
+    })
 }
 
 fn accumulate_tile(
@@ -768,24 +969,49 @@ fn accumulate_tile(
     weight_acc: &mut [f32],
     tile: &RgbaImage,
     placement: &TilePlacement,
-    image_w: u32,
+    bbox: Bbox,
 ) {
-    for ty in 0..placement.h {
+    // Hoist tile↔bbox intersection out of the per-pixel loop. For a
+    // small stroke far from this tile's edge, this skips ~62 K
+    // per-iteration `if outside bbox: continue` branches.
+    let bbox_x_end = bbox.x + bbox.w;
+    let bbox_y_end = bbox.y + bbox.h;
+    let tile_x_end = placement.x + placement.w;
+    let tile_y_end = placement.y + placement.h;
+    if placement.x >= bbox_x_end || placement.y >= bbox_y_end
+        || tile_x_end <= bbox.x || tile_y_end <= bbox.y
+    {
+        return; // tile and bbox don't overlap — nothing to accumulate
+    }
+    let tx_start = bbox.x.saturating_sub(placement.x);
+    let ty_start = bbox.y.saturating_sub(placement.y);
+    let tx_end = (bbox_x_end - placement.x).min(placement.w);
+    let ty_end = (bbox_y_end - placement.y).min(placement.h);
+
+    let bbox_w = bbox.w as usize;
+    let tile_raw = tile.as_raw();
+    let tile_w = tile.width() as usize;
+    for ty in ty_start..ty_end {
+        let by = ((placement.y + ty) - bbox.y) as usize;
         let dist_top = ty;
         let dist_bottom = placement.h - 1 - ty;
         let edge_y = dist_top.min(dist_bottom);
-        for tx in 0..placement.w {
+        let tile_row = ty as usize * tile_w;
+        for tx in tx_start..tx_end {
+            let bx = ((placement.x + tx) - bbox.x) as usize;
             let dist_left = tx;
             let dist_right = placement.w - 1 - tx;
             let edge_x = dist_left.min(dist_right);
             let w = feather_weight(edge_x.min(edge_y));
-            let dst_idx = ((placement.y + ty) * image_w + (placement.x + tx)) as usize;
-            let p = tile.get_pixel(tx, ty).0;
+            let dst_idx = by * bbox_w + bx;
+            // Direct raw indexing — saves the bounds-check + Rgba<u8>
+            // reconstruction `tile.get_pixel(tx, ty).0` would do.
+            let p_off = (tile_row + tx as usize) * 4;
             let acc = &mut color_acc[dst_idx];
-            acc[0] += p[0] as f32 * w;
-            acc[1] += p[1] as f32 * w;
-            acc[2] += p[2] as f32 * w;
-            acc[3] += p[3] as f32 * w;
+            acc[0] += tile_raw[p_off]     as f32 * w;
+            acc[1] += tile_raw[p_off + 1] as f32 * w;
+            acc[2] += tile_raw[p_off + 2] as f32 * w;
+            acc[3] += tile_raw[p_off + 3] as f32 * w;
             weight_acc[dst_idx] += w;
         }
     }
@@ -998,14 +1224,37 @@ mod tests {
     }
 
     #[test]
-    fn feather_inpainted_outside_mask_is_source() {
+    fn feather_inpainted_outside_bbox_keeps_inpainted() {
+        // Bbox-feather only operates on the mask bbox + margin. For
+        // mask=0 pixels OUTSIDE that region, output stays as inpainted
+        // (the upstream pipelines — `tile_compose` / SD — preserve
+        // source byte-for-byte at mask=0, so the original "always
+        // copy src" branch was redundant for outside-bbox pixels).
         let inp = RgbaImage::from_pixel(4, 4, Rgba([200, 200, 200, 255]));
         let src = RgbaImage::from_pixel(4, 4, Rgba([10, 20, 30, 255]));
-        let mask = GrayImage::new(4, 4); // all zero
+        let mask = GrayImage::new(4, 4); // all zero ⇒ no bbox at all
         let out = feather_inpainted(&inp, &src, &mask, 4.0);
-        for p in out.pixels() {
-            assert_eq!(p.0, [10, 20, 30, 255]);
-        }
+        // Empty mask short-circuits to `inpainted.clone()`.
+        assert_eq!(out, inp);
+    }
+
+    /// Inside the bbox, mask=0 pixels still get the defensive copy
+    /// (that branch is load-bearing for any pipeline that drifts
+    /// inside the bbox region — e.g. a low-alpha brush stroke pixel
+    /// whose neighbour is mask>=128).
+    #[test]
+    fn feather_inpainted_inside_bbox_mask_zero_pixels_get_source() {
+        // Mask geometry: single mask=255 pixel at (8, 8). With
+        // feather_px=4.0 → margin=ceil(4)+1=5 → bbox = (3, 3, 11, 11).
+        // The probe pixel (7, 8) sits inside the bbox at offset (4, 5),
+        // mask=0 → defensive copy fires.
+        let mut inp = RgbaImage::from_pixel(16, 16, Rgba([200, 200, 200, 255]));
+        let src = RgbaImage::from_pixel(16, 16, Rgba([10, 20, 30, 255]));
+        let mut mask = GrayImage::new(16, 16);
+        mask.put_pixel(8, 8, Luma([255]));
+        inp.put_pixel(7, 8, Rgba([200, 200, 200, 255]));
+        let out = feather_inpainted(&inp, &src, &mask, 4.0);
+        assert_eq!(out.get_pixel(7, 8).0, [10, 20, 30, 255]);
     }
 
     #[test]
@@ -1075,4 +1324,408 @@ mod tests {
         assert_eq!(msk_t[[0, 0, 200, 200]], 0.0);
     }
 
+    #[test]
+    fn mask_bbox_empty_returns_none() {
+        let mask = GrayImage::new(64, 64);
+        assert!(mask_bbox(&mask, 1, 0).is_none());
+        assert!(mask_bbox(&mask, 128, 2).is_none());
+    }
+
+    #[test]
+    fn mask_bbox_single_pixel_tight_box_no_margin() {
+        let mut mask = GrayImage::new(64, 64);
+        mask.put_pixel(10, 20, Luma([1]));
+        let bbox = mask_bbox(&mask, 1, 0).expect("non-empty");
+        assert_eq!(bbox, Bbox { x: 10, y: 20, w: 1, h: 1 });
+    }
+
+    #[test]
+    fn mask_bbox_single_pixel_with_margin_clamps_to_image() {
+        let mut mask = GrayImage::new(32, 32);
+        // Hit the corner — margin 4 on a corner pixel must clamp.
+        mask.put_pixel(0, 0, Luma([255]));
+        let bbox = mask_bbox(&mask, 128, 4).expect("non-empty");
+        assert_eq!(bbox, Bbox { x: 0, y: 0, w: 5, h: 5 });
+    }
+
+    #[test]
+    fn mask_bbox_full_image_no_margin() {
+        let mask = GrayImage::from_pixel(32, 32, Luma([255]));
+        let bbox = mask_bbox(&mask, 1, 0).expect("non-empty");
+        assert_eq!(bbox, Bbox { x: 0, y: 0, w: 32, h: 32 });
+    }
+
+    #[test]
+    fn mask_bbox_threshold_separates_low_from_high() {
+        // A pixel with value 100 counts at threshold=1 but NOT at 128.
+        let mut mask = GrayImage::new(32, 32);
+        mask.put_pixel(10, 10, Luma([100]));
+        assert!(mask_bbox(&mask, 1, 0).is_some(), "low value present at threshold 1");
+        assert!(mask_bbox(&mask, 128, 0).is_none(), "low value absent at threshold 128");
+    }
+
+    #[test]
+    fn tile_compose_empty_mask_is_byte_identical_to_source() {
+        // The bbox optimisation early-returns on empty masks. Output
+        // must be byte-identical to source — no allocation, no float
+        // round-trip.
+        let mut img = RgbaImage::new(128, 128);
+        for y in 0..128 {
+            for x in 0..128 {
+                img.put_pixel(x, y, Rgba([x as u8, y as u8, 100, 255]));
+            }
+        }
+        let mask = GrayImage::new(128, 128); // all-zero
+        let out = tile_compose(&img, &mask, |t, _| t.clone()).unwrap();
+        assert_eq!(out, img);
+    }
+
+    #[test]
+    fn sharpen_inpainted_zero_amount_is_clone() {
+        let img = RgbaImage::from_pixel(16, 16, Rgba([100, 150, 200, 255]));
+        let mut mask = GrayImage::new(16, 16);
+        mask.put_pixel(8, 8, Luma([255]));
+        let out = sharpen_inpainted(&img, &mask, 0.0);
+        assert_eq!(out, img);
+    }
+
+    #[test]
+    fn sharpen_inpainted_empty_mask_is_clone() {
+        let img = RgbaImage::from_pixel(16, 16, Rgba([100, 150, 200, 255]));
+        let mask = GrayImage::new(16, 16);
+        let out = sharpen_inpainted(&img, &mask, 0.5);
+        assert_eq!(out, img);
+    }
+
+    #[test]
+    fn sharpen_inpainted_dim_mismatch_is_clone() {
+        let img = RgbaImage::from_pixel(16, 16, Rgba([100, 150, 200, 255]));
+        let mask = GrayImage::new(8, 8);
+        let out = sharpen_inpainted(&img, &mask, 0.5);
+        assert_eq!(out, img);
+    }
+
+    #[test]
+    fn sharpen_inpainted_unmasked_pixels_byte_identical_to_source() {
+        // Bbox-restricted sharpen must leave every mask <= 127 pixel
+        // byte-identical to source — Gemini's "silent seam" risk lives
+        // here. We use a high-frequency checkerboard so any leakage of
+        // the blur outside the mask would be obvious.
+        let mut img = RgbaImage::new(64, 64);
+        for y in 0..64 {
+            for x in 0..64 {
+                let v = if (x + y) % 2 == 0 { 0 } else { 255 };
+                img.put_pixel(x, y, Rgba([v, v, v, 255]));
+            }
+        }
+        let mut mask = GrayImage::new(64, 64);
+        for y in 24..40 {
+            for x in 24..40 {
+                mask.put_pixel(x, y, Luma([255]));
+            }
+        }
+        let out = sharpen_inpainted(&img, &mask, 0.7);
+        for y in 0..64 {
+            for x in 0..64 {
+                if mask.get_pixel(x, y).0[0] > 127 {
+                    continue;
+                }
+                assert_eq!(
+                    out.get_pixel(x, y), img.get_pixel(x, y),
+                    "unmasked pixel ({x}, {y}) must be byte-identical to source",
+                );
+            }
+        }
+    }
+
+    /// Reference: re-implement the original full-image algorithm
+    /// inline so we can compare bbox output to it pixel-for-pixel.
+    /// Intentional duplication — this is the contract that bbox
+    /// preserves; copy-paste is the right pattern for a regression
+    /// test that locks the math.
+    #[cfg(test)]
+    fn reference_sharpen(image: &RgbaImage, mask: &GrayImage, amount: f32) -> RgbaImage {
+        let kernel: [f32; 5] = [1.0/16.0, 4.0/16.0, 6.0/16.0, 4.0/16.0, 1.0/16.0];
+        let (w, h) = image.dimensions();
+        let src = image.as_raw();
+        let w_us = w as usize;
+        let h_us = h as usize;
+        let mut tmp: Vec<f32> = vec![0.0; w_us * h_us * 3];
+        for y in 0..h_us {
+            for x in 0..w_us {
+                for c in 0..3 {
+                    let mut sum = 0.0;
+                    for k in 0..5 {
+                        let xi = (x as isize + k as isize - 2)
+                            .clamp(0, w_us as isize - 1) as usize;
+                        sum += kernel[k] * src[(y * w_us + xi) * 4 + c] as f32;
+                    }
+                    tmp[(y * w_us + x) * 3 + c] = sum;
+                }
+            }
+        }
+        let mut out = RgbaImage::new(w, h);
+        let out_raw = out.as_mut();
+        let msk = mask.as_raw();
+        for y in 0..h_us {
+            for x in 0..w_us {
+                let pix = (y * w_us + x) * 4;
+                out_raw[pix + 3] = src[pix + 3];
+                if msk[y * w_us + x] <= 127 {
+                    out_raw[pix] = src[pix];
+                    out_raw[pix + 1] = src[pix + 1];
+                    out_raw[pix + 2] = src[pix + 2];
+                    continue;
+                }
+                for c in 0..3 {
+                    let mut blur = 0.0;
+                    for k in 0..5 {
+                        let yi = (y as isize + k as isize - 2)
+                            .clamp(0, h_us as isize - 1) as usize;
+                        blur += kernel[k] * tmp[(yi * w_us + x) * 3 + c];
+                    }
+                    let s = src[pix + c] as f32;
+                    let sharp = s + amount * (s - blur);
+                    out_raw[pix + c] = sharp.clamp(0.0, 255.0) as u8;
+                }
+            }
+        }
+        out
+    }
+
+    #[cfg(test)]
+    fn assert_bbox_sharpen_matches_reference(img: &RgbaImage, mask: &GrayImage, amount: f32) {
+        let bbox_out = sharpen_inpainted(img, mask, amount);
+        let ref_out = reference_sharpen(img, mask, amount);
+        for y in 0..img.height() {
+            for x in 0..img.width() {
+                let a = bbox_out.get_pixel(x, y);
+                let b = ref_out.get_pixel(x, y);
+                assert_eq!(a, b, "({x}, {y}) diverged: bbox={a:?} ref={b:?}");
+            }
+        }
+    }
+
+    /// Reference: the original full-image feather algorithm, inlined
+    /// for regression testing. Same intentional-duplication pattern
+    /// as `reference_sharpen`.
+    #[cfg(test)]
+    fn reference_feather(
+        inpainted: &RgbaImage,
+        source: &RgbaImage,
+        mask: &GrayImage,
+        feather_px: f32,
+    ) -> RgbaImage {
+        if feather_px <= 0.0 { return inpainted.clone(); }
+        let dist = chamfer_distance_inside(mask);
+        let (w, h) = inpainted.dimensions();
+        let mut out = inpainted.clone();
+        let out_raw = out.as_mut();
+        let src = source.as_raw();
+        let inp = inpainted.as_raw();
+        let n = (w * h) as usize;
+        for i in 0..n {
+            let pix = i * 4;
+            let d = dist[i];
+            if d <= 0.0 {
+                out_raw[pix] = src[pix];
+                out_raw[pix + 1] = src[pix + 1];
+                out_raw[pix + 2] = src[pix + 2];
+                continue;
+            }
+            if d >= feather_px { continue; }
+            let t = d / feather_px;
+            for c in 0..3 {
+                let s = src[pix + c] as f32;
+                let p = inp[pix + c] as f32;
+                out_raw[pix + c] = (s + t * (p - s)).clamp(0.0, 255.0) as u8;
+            }
+        }
+        out
+    }
+
+    /// Build a (source, inpainted) pair where `inpainted == source`
+    /// at every mask=0 pixel — matches what the real pipelines
+    /// produce (`tile_compose`'s composite loop guarantees this for
+    /// LaMa). With this invariant, bbox-feather and full-image
+    /// reference produce bit-identical output.
+    #[cfg(test)]
+    fn make_realistic_inpaint_pair(w: u32, h: u32, mask: &GrayImage) -> (RgbaImage, RgbaImage) {
+        let source = gradient_image(w, h);
+        let mut inpainted = source.clone();
+        // Only alter pixels inside the mask region — mimics LaMa output.
+        for y in 0..h {
+            for x in 0..w {
+                if mask.get_pixel(x, y).0[0] > 0 {
+                    let p = source.get_pixel(x, y).0;
+                    let inv = Rgba([255 - p[0], 255 - p[1], 255 - p[2], p[3]]);
+                    inpainted.put_pixel(x, y, inv);
+                }
+            }
+        }
+        (source, inpainted)
+    }
+
+    #[cfg(test)]
+    fn assert_bbox_feather_matches_reference(
+        source: &RgbaImage, inpainted: &RgbaImage,
+        mask: &GrayImage, feather_px: f32,
+    ) {
+        let bbox_out = feather_inpainted(inpainted, source, mask, feather_px);
+        let ref_out = reference_feather(inpainted, source, mask, feather_px);
+        for y in 0..source.height() {
+            for x in 0..source.width() {
+                let a = bbox_out.get_pixel(x, y);
+                let b = ref_out.get_pixel(x, y);
+                assert_eq!(a, b, "({x}, {y}) diverged: bbox={a:?} ref={b:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn feather_inpainted_zero_px_is_clone() {
+        let img = RgbaImage::from_pixel(16, 16, Rgba([10, 20, 30, 200]));
+        let mut mask = GrayImage::new(16, 16);
+        mask.put_pixel(8, 8, Luma([255]));
+        let out = feather_inpainted(&img, &img, &mask, 0.0);
+        assert_eq!(out, img);
+    }
+
+    #[test]
+    fn feather_inpainted_empty_mask_is_clone() {
+        let img = RgbaImage::from_pixel(16, 16, Rgba([10, 20, 30, 200]));
+        let mask = GrayImage::new(16, 16);
+        let out = feather_inpainted(&img, &img, &mask, 4.0);
+        assert_eq!(out, img);
+    }
+
+    #[test]
+    fn feather_inpainted_dim_mismatch_is_clone() {
+        let img = RgbaImage::from_pixel(16, 16, Rgba([10, 20, 30, 200]));
+        let mask = GrayImage::new(8, 8);
+        let out = feather_inpainted(&img, &img, &mask, 4.0);
+        assert_eq!(out, img);
+    }
+
+    /// Bit-exactness — corner mask exercises the boundary clamp.
+    #[test]
+    fn feather_inpainted_matches_reference_corner_mask() {
+        let mut mask = GrayImage::new(48, 48);
+        for y in 0..16 { for x in 0..16 { mask.put_pixel(x, y, Luma([255])); } }
+        let (src, inp) = make_realistic_inpaint_pair(48, 48, &mask);
+        assert_bbox_feather_matches_reference(&src, &inp, &mask, 6.0);
+    }
+
+    /// Bit-exactness — interior mask exercises the pure-bbox path.
+    #[test]
+    fn feather_inpainted_matches_reference_interior_mask() {
+        let mut mask = GrayImage::new(64, 64);
+        for y in 24..40 { for x in 24..40 { mask.put_pixel(x, y, Luma([255])); } }
+        let (src, inp) = make_realistic_inpaint_pair(64, 64, &mask);
+        assert_bbox_feather_matches_reference(&src, &inp, &mask, 8.0);
+    }
+
+    fn gradient_image(w: u32, h: u32) -> RgbaImage {
+        let mut img = RgbaImage::new(w, h);
+        for y in 0..h {
+            for x in 0..w {
+                let r = (x * 5 + y * 3) as u8;
+                let g = (x * 7) as u8;
+                let b = (y * 11) as u8;
+                img.put_pixel(x, y, Rgba([r, g, b, 200]));
+            }
+        }
+        img
+    }
+
+    /// Bit-exactness — corner-touching mask (exercises asymmetric
+    /// boundary clamp where margin runs into the image edge).
+    #[test]
+    fn sharpen_inpainted_matches_reference_full_image_computation() {
+        let img = gradient_image(48, 48);
+        let mut mask = GrayImage::new(48, 48);
+        for y in 0..16 {
+            for x in 0..16 {
+                mask.put_pixel(x, y, Luma([255]));
+            }
+        }
+        assert_bbox_sharpen_matches_reference(&img, &mask, 0.5);
+    }
+
+    /// Bit-exactness — interior mask with margin on every side
+    /// (exercises the pure-bbox path with no edge clamping).
+    #[test]
+    fn sharpen_inpainted_matches_reference_interior_mask() {
+        let img = gradient_image(64, 64);
+        let mut mask = GrayImage::new(64, 64);
+        // 16×16 mask centred at (32, 32), 16 px from any image edge —
+        // bbox + margin (2) is still well inside, no boundary clamp.
+        for y in 24..40 {
+            for x in 24..40 {
+                mask.put_pixel(x, y, Luma([255]));
+            }
+        }
+        assert_bbox_sharpen_matches_reference(&img, &mask, 0.7);
+    }
+
+    /// Bit-exactness — mask spanning the right + bottom edges
+    /// simultaneously (exercises clamps on two adjacent edges).
+    #[test]
+    fn sharpen_inpainted_matches_reference_two_edge_mask() {
+        let img = gradient_image(48, 48);
+        let mut mask = GrayImage::new(48, 48);
+        for y in 36..48 {
+            for x in 36..48 {
+                mask.put_pixel(x, y, Luma([255]));
+            }
+        }
+        assert_bbox_sharpen_matches_reference(&img, &mask, 0.5);
+    }
+
+    #[test]
+    fn tile_compose_small_mask_preserves_unmasked_pixels_exactly() {
+        // Stroke is a 16×16 region in the centre. Every pixel outside
+        // the stroke must equal the source byte-for-byte (unchanged
+        // by the bbox crop or by tile feathering).
+        let mut img = RgbaImage::new(128, 128);
+        for y in 0..128 {
+            for x in 0..128 {
+                img.put_pixel(x, y, Rgba([x as u8, y as u8, 100, 255]));
+            }
+        }
+        let mut mask = GrayImage::new(128, 128);
+        for y in 56..72 {
+            for x in 56..72 {
+                mask.put_pixel(x, y, Luma([255]));
+            }
+        }
+        // Inpaint closure paints the masked region pure red.
+        let out = tile_compose(&img, &mask, |tile, tile_mask| {
+            let mut t = tile.clone();
+            for y in 0..tile.height() {
+                for x in 0..tile.width() {
+                    if tile_mask.get_pixel(x, y).0[0] > 0 {
+                        t.put_pixel(x, y, Rgba([255, 0, 0, 255]));
+                    }
+                }
+            }
+            t
+        }).unwrap();
+        // Spot-check: every pixel outside the masked region is identical.
+        for y in 0..128 {
+            for x in 0..128 {
+                if mask.get_pixel(x, y).0[0] != 0 {
+                    continue;
+                }
+                assert_eq!(
+                    out.get_pixel(x, y), img.get_pixel(x, y),
+                    "unmasked pixel ({x}, {y}) must be unchanged",
+                );
+            }
+        }
+        // Masked centre pixel is roughly red (feathered tiles average).
+        let centre = out.get_pixel(64, 64).0;
+        assert!(centre[0] > 200, "centre red channel high, got {centre:?}");
+        assert!(centre[1] < 50, "centre green channel low, got {centre:?}");
+    }
 }

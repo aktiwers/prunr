@@ -3,23 +3,27 @@ use std::path::Path;
 use image::{DynamicImage, GrayImage, ImageReader, RgbaImage};
 use image::codecs::png::{PngEncoder, CompressionType, FilterType as PngFilter};
 use image::ImageEncoder;
-use fast_image_resize::{images::Image, PixelType, Resizer};
+use fast_image_resize::{images::{Image, ImageRef}, PixelType, Resizer};
 use crate::types::{CoreError, LARGE_IMAGE_LIMIT};
 
 /// SIMD-accelerated Lanczos3 resize for single-channel (gray) images.
+/// Source buffer is borrowed via `ImageRef` — no clone needed.
 pub fn resize_gray_lanczos3(src: &GrayImage, dst_width: u32, dst_height: u32) -> GrayImage {
-    let src_image = Image::from_vec_u8(
-        src.width(), src.height(), src.as_raw().to_vec(), PixelType::U8,
+    let src_image = ImageRef::new(
+        src.width(), src.height(), src.as_raw(), PixelType::U8,
     ).expect("valid gray image buffer");
     let mut dst_image = Image::new(dst_width, dst_height, PixelType::U8);
     Resizer::new().resize(&src_image, &mut dst_image, None).expect("resize failed");
     GrayImage::from_raw(dst_width, dst_height, dst_image.into_vec()).expect("valid dimensions")
 }
 
-/// SIMD-accelerated Lanczos3 resize for RGB images.
+/// SIMD-accelerated Lanczos3 resize for RGB images. The `to_rgb8` call
+/// is unavoidable when `img` is a `DynamicImage` of a different layout
+/// (e.g. RGBA), but the resulting `RgbImage` is then borrowed into the
+/// resizer rather than copied again.
 pub fn resize_rgb_lanczos3(img: &DynamicImage, dst_width: u32, dst_height: u32) -> image::RgbImage {
     let rgb = img.to_rgb8();
-    let src = Image::from_vec_u8(rgb.width(), rgb.height(), rgb.into_raw(), PixelType::U8x3)
+    let src = ImageRef::new(rgb.width(), rgb.height(), rgb.as_raw(), PixelType::U8x3)
         .expect("valid RGB buffer");
     let mut dst = Image::new(dst_width, dst_height, PixelType::U8x3);
     Resizer::new().resize(&src, &mut dst, None).expect("resize failed");
@@ -274,12 +278,24 @@ fn rgb_to_rgba(rgb: &image::RgbImage) -> RgbaImage {
     RgbaImage::from_raw(w, h, out).expect("dims preserved from src")
 }
 
-/// Encode an RgbaImage as PNG bytes with fast compression.
+/// Stream-encode an RgbaImage into a `Write` sink (typically
+/// `BufWriter<File>`). Skips the intermediate `Vec<u8>` that
+/// `encode_rgba_png` allocates — relevant when the caller would
+/// immediately `fs::write` the bytes anyway. Saves 5–30 MB transient
+/// per encode at 4 K. Sink is flushed by the caller.
+pub fn encode_rgba_png_into<W: std::io::Write>(img: &RgbaImage, w: W) -> Result<(), CoreError> {
+    let encoder = PngEncoder::new_with_quality(w, CompressionType::Fast, PngFilter::Sub);
+    encoder.write_image(img.as_raw(), img.width(), img.height(), image::ExtendedColorType::Rgba8)
+        .map_err(CoreError::from)
+}
+
+/// Encode an RgbaImage as PNG bytes with fast compression. Convenience
+/// wrapper over `encode_rgba_png_into` for callers that need owned bytes
+/// (e.g. shipping over a channel). Streaming callers writing to a file
+/// should use `encode_rgba_png_into` directly.
 pub fn encode_rgba_png(img: &RgbaImage) -> Result<Vec<u8>, CoreError> {
     let mut buf = Vec::with_capacity(img.as_raw().len() / 2);
-    let encoder = PngEncoder::new_with_quality(&mut buf, CompressionType::Fast, PngFilter::Sub);
-    encoder.write_image(img.as_raw(), img.width(), img.height(), image::ExtendedColorType::Rgba8)
-        .map_err(CoreError::from)?;
+    encode_rgba_png_into(img, &mut buf)?;
     Ok(buf)
 }
 

@@ -461,12 +461,12 @@ fn run_preview(inputs: DispatchInputs, cancel: &AtomicBool) -> RunOutput {
             // invariant: is_subject_outline → edge_tensor is Some.
             let edge = inputs.edge_tensor.as_ref().unwrap();
             let edge_settings = inputs.settings.edge_settings();
-            let base_dyn = DynamicImage::ImageRgba8((*base_arc).clone());
-            let (mask, _) = resolve_edge_mask(&inputs.cached_edge_mask, edge, &base_dyn, &edge_settings);
+            let out_dims = (base_arc.width(), base_arc.height());
+            let (mask, _) = resolve_edge_mask(&inputs.cached_edge_mask, edge, out_dims, &edge_settings);
             let rgba = dispatch_compose(
                 &mask, &base_arc, &edge_settings,
                 inputs.secondary_edge_tensor.as_ref(),
-                (base_arc.width(), base_arc.height()),
+                out_dims,
             );
             RunOutput { rgba: Some(rgba), built_edge_mask: None, built_masked_base }
         }
@@ -475,10 +475,13 @@ fn run_preview(inputs: DispatchInputs, cancel: &AtomicBool) -> RunOutput {
             let edge_settings = inputs.settings.edge_settings();
 
             // Base for compose: masked subject (SubjectOutline) or raw original (EdgesOnly).
-            let base_dyn = masked_base.as_ref().map(|arc| DynamicImage::ImageRgba8((**arc).clone()));
-            let base_for_mask: &DynamicImage = base_dyn.as_ref().unwrap_or(&inputs.original);
-
-            let (mask, built_edge_mask) = resolve_edge_mask(&inputs.cached_edge_mask, edge, base_for_mask, &edge_settings);
+            // We only need its dimensions for `resolve_edge_mask` — used to be
+            // a full RGBA→DynamicImage clone (~64 MB at 4K, 10 Hz during drag).
+            let out_dims = match masked_base.as_ref() {
+                Some(arc) => (arc.width(), arc.height()),
+                None => (inputs.original.width(), inputs.original.height()),
+            };
+            let (mask, built_edge_mask) = resolve_edge_mask(&inputs.cached_edge_mask, edge, out_dims, &edge_settings);
             // SubjectOutline: dispatch to the selected ComposeMode (with dual-scale if active).
             // EdgesOnly: plain lines-on-transparent via compose_edges.
             let rgba = if let Some(ref base_arc) = masked_base {
@@ -537,22 +540,23 @@ fn dispatch_compose(
 
 /// Resolve the edge mask for compositing: use the cached one when it exists
 /// (fast path — skips sigmoid + Lanczos resize, ~40-80 ms on 4K), else build
-/// it from the raw edge tensor at the base image's resolution.
+/// it from the raw edge tensor at the requested output dimensions.
 fn resolve_edge_mask(
     cached: &Option<Arc<GrayImage>>,
     edge: &EdgeTensor,
-    base: &DynamicImage,
+    out_dims: (u32, u32),
     edge_settings: &prunr_core::EdgeSettings,
 ) -> (Arc<GrayImage>, Option<Arc<GrayImage>>) {
     if let Some(m) = cached {
         (m.clone(), None)
     } else {
+        let (out_w, out_h) = out_dims;
         let m = Arc::new(tensor_to_edge_mask(
             &edge.data,
             edge.height,
             edge.width,
-            base.width(),
-            base.height(),
+            out_w,
+            out_h,
             edge_settings.line_strength,
         ));
         (m.clone(), Some(m))

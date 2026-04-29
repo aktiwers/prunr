@@ -115,26 +115,24 @@ where
     let mut results: Vec<Result<ProcessResult, CoreError>> =
         (0..images.len()).map(|_| Err(CoreError::Model("not processed".into()))).collect();
 
+    // Write each result directly into its pre-sized slot via
+    // `par_iter_mut().zip(...)`. The previous version `.collect`-ed
+    // a parallel intermediate Vec then sequentially copied into
+    // `results` — held N × `ProcessResult` (each carrying a full RGBA)
+    // alive in a duplicate buffer for the whole batch. On a 100-image
+    // batch of 4 K images that was multi-GB redundant retention.
     pool.install(|| {
-        let processed: Vec<(usize, Result<ProcessResult, CoreError>)> =
-            images
-                .par_iter()
-                .enumerate()
-                .map(|(idx, img_bytes)| {
-                    let engine = &engines[idx % engines.len()];
-
-                    let cb = progress.as_ref().map(|f| {
-                        move |stage: ProgressStage, pct: f32| f(idx, stage, pct)
-                    });
-
-                    let result = process_image_with_mask(img_bytes, engine, mask, cb, None);
-                    (idx, result)
-                })
-                .collect();
-
-        for (idx, result) in processed {
-            results[idx] = result;
-        }
+        results
+            .par_iter_mut()
+            .zip(images.par_iter())
+            .enumerate()
+            .for_each(|(idx, (slot, img_bytes))| {
+                let engine = &engines[idx % engines.len()];
+                let cb = progress.as_ref().map(|f| {
+                    move |stage: ProgressStage, pct: f32| f(idx, stage, pct)
+                });
+                *slot = process_image_with_mask(img_bytes, engine, mask, cb, None);
+            });
     });
 
     results
@@ -157,6 +155,36 @@ mod tests {
         let result = ort_intra_threads(4);
         let expected = (cpus / 4).max(1);
         assert_eq!(result, expected);
+    }
+
+    /// Synthetic test for the `par_iter_mut().zip(par_iter()).enumerate()`
+    /// pattern that `batch_process` uses to write results in-place.
+    /// Pins that rayon's IndexedParallelIterator chain preserves
+    /// positional indices regardless of work-stealing order — without
+    /// this property, results would land in wrong slots and
+    /// `engines[idx % engines.len()]` round-robin would jumble too.
+    #[test]
+    fn par_iter_mut_zip_enumerate_preserves_positional_indices() {
+        use rayon::prelude::*;
+        let inputs: Vec<u32> = (0..1000).collect();
+        let mut outputs: Vec<u32> = vec![0; inputs.len()];
+        outputs
+            .par_iter_mut()
+            .zip(inputs.par_iter())
+            .enumerate()
+            .for_each(|(idx, (slot, &val))| {
+                // The contract: `idx` is always the source position,
+                // and `slot` is always `outputs[idx]`. If rayon broke
+                // the ordering, slot wouldn't match val * 2 at idx.
+                *slot = (val * 2).wrapping_add(idx as u32);
+            });
+        for i in 0..1000 {
+            assert_eq!(
+                outputs[i],
+                (i as u32 * 2).wrapping_add(i as u32),
+                "outputs[{i}] mis-ordered",
+            );
+        }
     }
 
     #[test]

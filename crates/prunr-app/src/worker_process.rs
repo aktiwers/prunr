@@ -85,15 +85,20 @@ fn cleanup_ipc_temps(ipc: &std::path::Path, paths: &[&std::path::Path]) {
     }
 }
 
-/// Pack an `EdgeInferenceResult`'s per-scale tensors into one LE byte buffer
-/// for IPC. Matches the layout the parent expects in `read_edge_tensor_cache`.
-fn pack_edge_tensors(res: &prunr_core::EdgeInferenceResult) -> Vec<u8> {
-    let per_tensor_floats = (res.height as usize) * (res.width as usize);
-    let mut bytes = Vec::with_capacity(per_tensor_floats * prunr_core::EDGE_SCALE_COUNT * 4);
+/// Stream an `EdgeInferenceResult`'s per-scale tensors to a path as one LE
+/// byte sequence — same layout the parent expects in `read_edge_tensor_cache`,
+/// but without the ~16 MB intermediate `Vec<u8>` that `std::fs::write(path,
+/// pack_edge_tensors(res))` would have built.
+fn write_edge_tensors(
+    path: &std::path::Path,
+    res: &prunr_core::EdgeInferenceResult,
+) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut f = std::fs::File::create(path)?;
     for t in &res.tensors {
-        bytes.extend_from_slice(prunr_app::subprocess::ipc::f32s_as_le_bytes(t));
+        f.write_all(prunr_app::subprocess::ipc::f32s_as_le_bytes(t))?;
     }
-    bytes
+    Ok(())
 }
 
 /// Calculate pixel weight for an image (1 unit = 1M pixels, minimum 1).
@@ -556,7 +561,7 @@ pub fn run_worker() -> ! {
                             // into a single temp file; parent splits by EDGE_SCALE_COUNT).
                             let (ecp, ech, ecw) = if let Some(ref res) = edge_tensor_for_cache {
                                 let ep = ipc.join(format!("edge_{item_id}.raw"));
-                                match std::fs::write(&ep, pack_edge_tensors(res)) {
+                                match write_edge_tensors(&ep, res) {
                                     Ok(()) => (Some(ep), Some(res.height), Some(res.width)),
                                     Err(_) => (None, None, None),
                                 }
@@ -566,15 +571,23 @@ pub fn run_worker() -> ! {
 
                             // Write result RGBA to temp file
                             let (w, h) = (pr.rgba_image.width(), pr.rgba_image.height());
+                            let active_provider = pr.active_provider.clone();
                             let result_path = ipc.join(format!("result_{item_id}.raw"));
-                            match std::fs::write(&result_path, pr.rgba_image.as_raw()) {
+                            let write_result = std::fs::write(&result_path, pr.rgba_image.as_raw());
+                            // Free the result RGBA (~50 MB at 4 K) before
+                            // posting the event — under N-job parallelism
+                            // this drops N×50 MB of redundant retention
+                            // during the brief window before the next
+                            // dispatch overwrites `pr`.
+                            drop(pr);
+                            match write_result {
                                 Ok(()) => {
                                     let _ = evt_tx.send(SubprocessEvent::ImageDone {
                                         item_id,
                                         result_path,
                                         width: w,
                                         height: h,
-                                        active_provider: pr.active_provider,
+                                        active_provider,
                                         tensor_cache_path: tcp,
                                         tensor_cache_height: tch,
                                         tensor_cache_width: tcw,
@@ -664,7 +677,9 @@ pub fn run_worker() -> ! {
                         Ok(rgba) => {
                             let (w, h) = (rgba.width(), rgba.height());
                             let result_path = ipc.join(format!("result_{item_id}.raw"));
-                            if std::fs::write(&result_path, rgba.as_raw()).is_ok() {
+                            let write_ok = std::fs::write(&result_path, rgba.as_raw()).is_ok();
+                            drop(rgba);
+                            if write_ok {
                                 let _ = evt_tx.send(SubprocessEvent::ImageDone {
                                     item_id,
                                     result_path,
@@ -775,13 +790,15 @@ pub fn run_worker() -> ! {
 
                             let (ecp, ech, ecw) = {
                                 let ep = ipc.join(format!("edge_{item_id}.raw"));
-                                match std::fs::write(&ep, pack_edge_tensors(&edge_res)) {
+                                match write_edge_tensors(&ep, &edge_res) {
                                     Ok(()) => (Some(ep), Some(edge_res.height), Some(edge_res.width)),
                                     Err(_) => (None, None, None),
                                 }
                             };
 
-                            if std::fs::write(&result_path, rgba.as_raw()).is_ok() {
+                            let write_ok = std::fs::write(&result_path, rgba.as_raw()).is_ok();
+                            drop(rgba);
+                            if write_ok {
                                 let _ = evt_tx.send(SubprocessEvent::ImageDone {
                                     item_id,
                                     result_path,
@@ -833,24 +850,48 @@ pub fn run_worker() -> ! {
                 let evt_tx = evt_tx.clone();
                 std::thread::spawn(move || {
                     let result = (|| -> Result<image::RgbaImage, String> {
-                        let image_bytes = std::fs::read(&image_path)
-                            .map_err(|e| format!("read source: {e}"))?;
-                        let _ = std::fs::remove_file(&image_path);
-                        let image = image::load_from_memory(&image_bytes)
-                            .map_err(|e| format!("decode source: {e}"))?
-                            .to_rgba8();
-                        let mask_bytes = std::fs::read(&mask_path)
-                            .map_err(|e| format!("read mask: {e}"))?;
-                        let _ = std::fs::remove_file(&mask_path);
-                        let mask = image::load_from_memory(&mask_bytes)
-                            .map_err(|e| format!("decode mask: {e}"))?
-                            .to_luma8();
+                        // Inner scope drops encoded bytes + DynamicImage as
+                        // soon as `to_rgba8`/`to_luma8` produces the final
+                        // buffer — the encoded source (~5–20 MB at 4 K) and
+                        // the intermediate DynamicImage (~50 MB RGBA at 4 K)
+                        // would otherwise live across the whole inference,
+                        // overlapping with LaMa weights resident.
+                        let image: image::RgbaImage = {
+                            let bytes = std::fs::read(&image_path)
+                                .map_err(|e| format!("read source: {e}"))?;
+                            let _ = std::fs::remove_file(&image_path);
+                            image::load_from_memory(&bytes)
+                                .map_err(|e| format!("decode source: {e}"))?
+                                .to_rgba8()
+                        };
+                        let mask: image::GrayImage = {
+                            let bytes = std::fs::read(&mask_path)
+                                .map_err(|e| format!("read mask: {e}"))?;
+                            let _ = std::fs::remove_file(&mask_path);
+                            image::load_from_memory(&bytes)
+                                .map_err(|e| format!("decode mask: {e}"))?
+                                .to_luma8()
+                        };
                         // Subprocess inpaint defaults to LaMaFp32 — the
                         // user-facing dropdown is GUI-side. If subprocess
                         // batch inpaint ever surfaces (CLI or otherwise)
                         // this needs an IPC variant carrying the ModelId.
-                        prunr_core::inpaint::process_inpaint(&image, &mask, prunr_models::ModelId::LaMaFp32)
-                            .map_err(|e| format!("inpaint: {e:?}"))
+                        let raw = prunr_core::inpaint::process_inpaint(&image, &mask, prunr_models::ModelId::LaMaFp32)
+                            .map_err(|e| format!("inpaint: {e:?}"))?;
+                        // Post-process: color-match + seam guided blend.
+                        // Identical to the in-process GUI path so users
+                        // can't see a quality difference based on whether
+                        // the subprocess fast path or slow path served.
+                        let color_matched = prunr_core::inpaint_blend::color_match_inpainted(
+                            &raw, &image, &mask,
+                            prunr_core::inpaint_blend::COLOR_MATCH_RING_PX,
+                        );
+                        Ok(prunr_core::inpaint_blend::seam_guided_blend(
+                            &color_matched, &image, &mask,
+                            prunr_core::inpaint_blend::SEAM_BLEND_RADIUS,
+                            prunr_core::inpaint_blend::SEAM_BLEND_EPSILON,
+                            prunr_core::inpaint_blend::SEAM_BLEND_BAND_PX,
+                        ))
                     })();
                     match result {
                         Ok(rgba) => {

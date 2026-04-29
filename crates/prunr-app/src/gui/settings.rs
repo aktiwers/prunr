@@ -263,9 +263,13 @@ impl Settings {
         self.presets.get(name).copied().unwrap_or_default()
     }
 
-    /// ItemSettings template for new batch items — the default_preset's values.
+    /// ItemSettings template for new batch items — the default_preset's
+    /// values, with any `PRUNR_*` knob env-var overrides applied on top
+    /// (test-harness only; production env is empty).
     pub fn item_defaults_for_new_item(&self) -> ItemSettings {
-        self.preset_values(&self.default_preset)
+        let mut item = self.preset_values(&self.default_preset);
+        super::env_overrides::apply_to_item_settings(&mut item);
+        item
     }
 
     pub fn has_accepted_license(&self, id: prunr_models::ModelId) -> bool {
@@ -294,6 +298,21 @@ impl Settings {
         let until = now_unix_secs() + days * 24 * 3600;
         self.runtime_prompt_snoozed_until.insert(runtime.settings_key().to_string(), until);
         self.save();
+    }
+
+    /// Reset to `Default` while preserving identity-bearing fields the user
+    /// expects to survive — the active backend probe and the user-authored
+    /// preset library + chosen default. `parallel_jobs` re-derives so it
+    /// snaps to a sane value for whatever GPU/CPU is detected.
+    pub fn reset_preserving_identity(&mut self) {
+        let backend = self.active_backend.clone();
+        let presets = std::mem::take(&mut self.presets);
+        let default_preset = self.default_preset.clone();
+        *self = Self::default();
+        self.active_backend = backend;
+        self.parallel_jobs = self.default_jobs();
+        self.presets = presets;
+        self.default_preset = default_preset;
     }
 }
 
