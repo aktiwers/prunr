@@ -35,7 +35,18 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
     // Brush is live in Done (correcting an existing seg result) and in
     // Loaded when Eraser is selected (paint directly on source — there's
     // no prior result to correct, the stroke IS the input).
+    //
+    // While an inpaint stroke is in flight on the selected item, the
+    // brush is locked: another stroke would silently supersede the
+    // first via dispatch_inpaint's generation counter, wasting the
+    // 5+ minutes of CPU work just performed. Visible signal is the
+    // banner with "Cancel (Esc)" button rendered below.
+    let inpaint_in_flight_for_selected = app.batch
+        .selected_idx_clamped()
+        .map(|idx| app.batch.items[idx].id)
+        .is_some_and(|id| app.processor.is_inpaint_in_flight(id));
     let brush_active = app.brush_state.is_enabled()
+        && !inpaint_in_flight_for_selected
         && (matches!(app.state, AppState::Done)
             || (matches!(app.state, AppState::Loaded) && app.settings.model.is_inpaint()));
     // Scroll-zoom always works: it doesn't conflict with brush strokes
@@ -133,12 +144,15 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
     }
 
     // Inpaint progress overlay — LaMa runs on rayon, takes seconds at
-    // CPU speed. Show a "Erasing..." spinner so the user knows it's
-    // working rather than guessing the click was lost.
+    // CPU speed; SD on CPU is multi-minute. Show an "Erasing..." banner
+    // with a Cancel button so the user can escape a slow stroke instead
+    // of guessing whether the click was lost.
     if let Some(idx) = app.batch.selected_idx_clamped() {
         let item_id = app.batch.items[idx].id;
         if app.processor.is_inpaint_in_flight(item_id) {
-            render_inpaint_progress(ui, canvas_rect);
+            if render_inpaint_progress(ui, canvas_rect) {
+                app.cancel_inpaint_for(item_id);
+            }
             ui.ctx().request_repaint();
         }
     }
@@ -152,38 +166,61 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
     }
 }
 
-/// Translucent banner + animated dot + text shown while a LaMa stroke
-/// is in flight. Painter-only so it doesn't conflict with the brush
-/// input handler's mutable Ui borrow. Mirrors the seg pipeline's
+/// Translucent banner + animated dots + Cancel button shown while an
+/// eraser stroke is in flight. Returns `true` when the Cancel button
+/// was clicked this frame. Mirrors the seg pipeline's
 /// `render_processing` rhythm — the same wiggle frequency family.
-fn render_inpaint_progress(ui: &mut egui::Ui, canvas_rect: Rect) {
+fn render_inpaint_progress(ui: &mut egui::Ui, canvas_rect: Rect) -> bool {
     let t = ui.ctx().input(|i| i.time) as f32;
-    let painter = ui.painter();
     let banner_h = 44.0;
     let banner = Rect::from_min_size(
         canvas_rect.min,
         Vec2::new(canvas_rect.width(), banner_h),
     );
-    painter.rect_filled(banner, 0.0, Color32::from_rgba_unmultiplied(0, 0, 0, 160));
+    ui.painter().rect_filled(banner, 0.0, Color32::from_rgba_unmultiplied(0, 0, 0, 160));
     let center = banner.center();
     // Three pulsing dots for the activity indicator.
     for i in 0..3 {
         let phase = t * 3.0 - i as f32 * 0.6;
         let a = (phase.sin() * 0.5 + 0.5).clamp(0.3, 1.0);
         let dot_x = center.x - 56.0 + i as f32 * 10.0;
-        painter.circle_filled(
+        ui.painter().circle_filled(
             Pos2::new(dot_x, center.y),
             3.5,
             theme::ACCENT.gamma_multiply(a),
         );
     }
-    painter.text(
+    ui.painter().text(
         Pos2::new(center.x - 22.0, center.y),
         egui::Align2::LEFT_CENTER,
         "Erasing…",
         egui::FontId::proportional(14.0),
         theme::TEXT_PRIMARY,
     );
+
+    // Cancel button on the right side of the banner. Interactive widget
+    // so we can't paint-only here; allocate a child Ui at the banner's
+    // right region and return whether it was clicked.
+    let btn_w = 90.0; // banner-button width — no precedent in theme.rs.
+    let btn_size = Vec2::new(btn_w, theme::CHIP_HEIGHT);
+    let btn_rect = Rect::from_center_size(
+        Pos2::new(canvas_rect.right() - 16.0 - btn_w / 2.0, center.y),
+        btn_size,
+    );
+    let mut child = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(btn_rect)
+            .layout(egui::Layout::centered_and_justified(egui::Direction::LeftToRight)),
+    );
+    let resp = child.add(
+        egui::Button::new(
+            egui::RichText::new("Cancel (Esc)")
+                .size(theme::FONT_SIZE_BODY - 1.0)
+                .color(theme::TEXT_PRIMARY),
+        )
+        .min_size(btn_size),
+    );
+    resp.clicked()
 }
 
 /// Run the brush overlay (cursor + pointer events) and commit any

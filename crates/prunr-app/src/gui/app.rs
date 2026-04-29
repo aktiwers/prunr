@@ -717,7 +717,10 @@ impl PrunrApp {
     }
 
     fn pump_inpaint_results(&mut self, ctx: &egui::Context) {
-        let results = self.processor.drain_inpaint_results();
+        let (results, cancelled) = self.processor.drain_inpaint_results();
+        for _ in &cancelled {
+            self.toasts.info("Erase cancelled");
+        }
         if results.is_empty() {
             return;
         }
@@ -1522,6 +1525,18 @@ impl PrunrApp {
 
     pub fn handle_cancel(&mut self) {
         self.processor.cancels.request_global_cancel();
+        // Esc cancels both the batch path and any in-flight eraser
+        // stroke (SD on CPU takes minutes — needs the same escape valve).
+        self.processor.cancel_all_inpaints();
+    }
+
+    /// Cancel only the in-flight inpaint stroke for `item_id`. Used by
+    /// the canvas banner's Cancel button — `handle_cancel` cancels
+    /// everything (batch + all inpaint), this scopes to one stroke.
+    pub fn cancel_inpaint_for(&mut self, item_id: u64) {
+        if self.processor.is_inpaint_in_flight(item_id) {
+            self.processor.cancel_inpaint(item_id);
+        }
     }
 
     pub fn handle_cancel_selected(&mut self) {

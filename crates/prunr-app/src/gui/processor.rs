@@ -97,6 +97,11 @@ pub(crate) struct InpaintResult {
     pub item_id: u64,
     pub rgba: image::RgbaImage,
     pub generation: u64,
+    /// True when the worker exited via `CoreError::Cancelled`. Drives
+    /// the "Erase cancelled" toast in `drain_inpaint_results` so the
+    /// user gets explicit feedback that Esc / the Cancel button took
+    /// effect (vs. a silent failure or a stale-result drop).
+    pub cancelled: bool,
 }
 
 /// Eraser-specific tuning passed from `BrushSettings` into the dispatch.
@@ -153,6 +158,12 @@ pub(crate) struct Processor {
     inpaint_rx: mpsc::Receiver<InpaintResult>,
     inpaint_latest_gen: HashMap<u64, u64>,
     inpaint_pending: HashMap<u64, u32>,
+    /// Per-item cancel flag for the in-flight inpaint stroke. The flag
+    /// is checked between LaMa tiles and between SD UNet steps; when
+    /// set, the rayon job returns `CoreError::Cancelled` early and the
+    /// drain path ignores the result. Cancel button + Esc key both
+    /// flip the flag for the currently-selected item.
+    inpaint_cancels: HashMap<u64, std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl Processor {
@@ -174,6 +185,7 @@ impl Processor {
             inpaint_rx,
             inpaint_latest_gen: HashMap::new(),
             inpaint_pending: HashMap::new(),
+            inpaint_cancels: HashMap::new(),
         }
     }
 
@@ -191,6 +203,11 @@ impl Processor {
         let gen = *generation;
         *self.inpaint_pending.entry(item_id).or_insert(0) += 1;
         let tx = self.inpaint_tx.clone();
+        // Replace any prior cancel flag — the new dispatch supersedes
+        // its predecessor anyway, so wiring a fresh flag avoids a stale
+        // earlier-stroke cancel firing the moment a new stroke starts.
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.inpaint_cancels.insert(item_id, cancel.clone());
         rayon::spawn(move || {
             let raw_mask = correction.to_binary_mask(image.width(), image.height());
             // Pre-process: grow/erode the painted area before LaMa runs.
@@ -225,7 +242,7 @@ impl Processor {
                 }),
                 _ => None,
             };
-            match prunr_core::inpaint::process_inpaint_with(&image, &mask, tuning.backend, sd_req) {
+            match prunr_core::inpaint::process_inpaint_with(&image, &mask, tuning.backend, sd_req, Some(cancel.clone())) {
                 Ok(rgba) => {
                     // Post-process pipeline:
                     //  1. color match — shifts mean RGB so the patch
@@ -255,25 +272,66 @@ impl Processor {
                     if tuning.sharpen > 0.0 {
                         out = prunr_core::inpaint::sharpen_inpainted(&out, &mask, tuning.sharpen);
                     }
-                    let _ = tx.send(InpaintResult { item_id, rgba: out, generation: gen });
+                    let _ = tx.send(InpaintResult { item_id, rgba: out, generation: gen, cancelled: false });
                 }
-                Err(e) => {
-                    tracing::error!(item_id, %e, "inpaint dispatch failed");
-                    // Best-effort: send an empty marker so pending count
-                    // decrements. Use generation 0 so it's always treated
-                    // as stale and the result itself is dropped.
+                Err(prunr_core::CoreError::Cancelled) => {
+                    tracing::info!(item_id, "inpaint cancelled by user");
+                    // Marker with cancelled=true so the drain path can
+                    // surface a toast. Gen 0 keeps it treated as stale.
                     let _ = tx.send(InpaintResult {
                         item_id,
                         rgba: image::RgbaImage::new(0, 0),
                         generation: 0,
+                        cancelled: true,
+                    });
+                }
+                Err(e) => {
+                    tracing::error!(item_id, %e, "inpaint dispatch failed");
+                    // Best-effort: send an empty marker so pending count
+                    // decrements. Generation 0 + cancelled=false routes
+                    // it through the silent-drop branch.
+                    let _ = tx.send(InpaintResult {
+                        item_id,
+                        rgba: image::RgbaImage::new(0, 0),
+                        generation: 0,
+                        cancelled: false,
                     });
                 }
             }
         });
     }
 
-    pub(crate) fn drain_inpaint_results(&mut self) -> Vec<InpaintResult> {
+    /// Cancel every in-flight inpaint stroke. Used by `handle_cancel`
+    /// (Esc) so it doesn't have to iterate `batch.items` on the GUI
+    /// side — coordinator pattern: PrunrApp delegates, Processor owns
+    /// the in-flight set. Idempotent and cheap (HashMap walk).
+    pub(crate) fn cancel_all_inpaints(&self) {
+        for flag in self.inpaint_cancels.values() {
+            flag.store(true, std::sync::atomic::Ordering::Release);
+        }
+    }
+
+    /// Cancel any in-flight inpaint stroke for `item_id`. The flag is
+    /// checked between LaMa tiles and between SD UNet steps; latency
+    /// to actually-stopping is one tile (LaMa) or one step (SD), since
+    /// ORT has no per-op cancel hook. Idempotent — safe to call when
+    /// nothing is in flight.
+    pub(crate) fn cancel_inpaint(&self, item_id: u64) {
+        if let Some(flag) = self.inpaint_cancels.get(&item_id) {
+            flag.store(true, std::sync::atomic::Ordering::Release);
+        }
+    }
+
+    /// Drain in-flight inpaint results.
+    ///
+    /// Returns `(committed_results, cancelled_item_ids)`. `committed_results`
+    /// only carries the latest-gen finished strokes (stale ones are
+    /// silently dropped). `cancelled_item_ids` lists items whose stroke
+    /// was cancelled by the user — the GUI surfaces a toast for each
+    /// so the user gets explicit feedback that Esc/Cancel took effect.
+    pub(crate) fn drain_inpaint_results(&mut self) -> (Vec<InpaintResult>, Vec<u64>) {
         let mut out = Vec::new();
+        let mut cancelled = Vec::new();
         while let Ok(result) = self.inpaint_rx.try_recv() {
             // Every drained result decrements pending — stale ones
             // count too, since the rayon job that produced them has
@@ -281,12 +339,16 @@ impl Processor {
             if let Some(c) = self.inpaint_pending.get_mut(&result.item_id) {
                 *c = c.saturating_sub(1);
             }
+            if result.cancelled {
+                cancelled.push(result.item_id);
+                continue;
+            }
             let latest = self.inpaint_latest_gen.get(&result.item_id).copied().unwrap_or(0);
             if result.generation == latest && result.generation > 0 {
                 out.push(result);
             }
         }
-        out
+        (out, cancelled)
     }
 
     /// True while a dispatched inpaint job hasn't drained yet for `item_id`.
@@ -380,14 +442,31 @@ mod tests {
         let mut p = fixture();
         p.inpaint_latest_gen.insert(7, 2);
         p.inpaint_tx.send(InpaintResult {
-            item_id: 7, rgba: image::RgbaImage::new(1, 1), generation: 1,
+            item_id: 7, rgba: image::RgbaImage::new(1, 1), generation: 1, cancelled: false,
         }).unwrap();
         p.inpaint_tx.send(InpaintResult {
-            item_id: 7, rgba: image::RgbaImage::new(1, 1), generation: 2,
+            item_id: 7, rgba: image::RgbaImage::new(1, 1), generation: 2, cancelled: false,
         }).unwrap();
-        let drained = p.drain_inpaint_results();
+        let (drained, cancelled) = p.drain_inpaint_results();
         assert_eq!(drained.len(), 1, "stale gen=1 must be dropped");
         assert_eq!(drained[0].generation, 2);
+        assert!(cancelled.is_empty(), "no cancellation events expected");
+    }
+
+    #[test]
+    fn drain_routes_cancelled_results_to_cancellation_list() {
+        let mut p = fixture();
+        p.inpaint_latest_gen.insert(7, 5);
+        p.inpaint_pending.insert(7, 1);
+        p.inpaint_tx.send(InpaintResult {
+            item_id: 7, rgba: image::RgbaImage::new(0, 0),
+            generation: 0, cancelled: true,
+        }).unwrap();
+        let (drained, cancelled) = p.drain_inpaint_results();
+        assert!(drained.is_empty(),
+            "cancelled stroke must not commit a result");
+        assert_eq!(cancelled, vec![7],
+            "cancellation event must surface for the toast");
     }
 
     #[test]
