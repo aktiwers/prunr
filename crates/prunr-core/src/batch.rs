@@ -47,11 +47,7 @@ pub fn create_engine_pool(
     // is NOT — `commit_from_memory` on parallel threads has triggered
     // AbiCustomRegistry races in the wild — so fall back to sequential
     // when DirectML is the active provider.
-    #[cfg(windows)]
-    let directml_active = active.eq_ignore_ascii_case(crate::engine::EpKind::DirectMl.as_str());
-    #[cfg(not(windows))]
-    let directml_active = false;
-    let serial = pool_size <= 1 || directml_active;
+    let serial = pool_size <= 1 || crate::engine::directml_active();
 
     let build = |_idx| create(intra_threads).map(std::sync::Arc::new);
     if serial {

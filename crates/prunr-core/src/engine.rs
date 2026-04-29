@@ -271,6 +271,14 @@ impl OrtEngine {
                     // to all logical cores, which oversubscribes against the
                     // rayon worker pool — `sched_yield` accounted for ~2% of
                     // CLI batch wall time in the perf trace.
+                    //
+                    // NOT using `with_cache_dir`: tested on ort=2.0.0-rc.12 +
+                    // openvino-1.24.1, the cache blob is written every launch
+                    // (mtime advances) and engine-ready time stays at ~6.85 s
+                    // both cold and warm. Either ORT's OpenVINO EP isn't
+                    // wiring cache_dir into compile_model correctly, or the
+                    // cache key is unstable across launches even with
+                    // disable_dynamic_shapes. Re-evaluate when ort bumps.
                     ort::execution_providers::OpenVINOExecutionProvider::default()
                         .with_num_threads(intra_threads.max(1))
                         .build(),
@@ -352,7 +360,28 @@ impl OrtEngine {
                 .unwrap_or_else(|| "CPU".to_string())
         }).clone()
     }
+}
 
+/// Whether DirectML is the active GPU provider on this platform.
+///
+/// Used to gate parallel session-build paths: DirectML's
+/// `commit_from_memory` has historic AbiCustomRegistry races on
+/// concurrent calls, so callers fall back to sequential build when
+/// DirectML is active. Always `false` outside Windows since the
+/// `EpKind::DirectMl` variant is `cfg(windows)`-gated.
+pub(crate) fn directml_active() -> bool {
+    #[cfg(windows)]
+    {
+        OrtEngine::detect_active_provider()
+            .eq_ignore_ascii_case(EpKind::DirectMl.as_str())
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
+impl OrtEngine {
     /// Lock the underlying ORT Session for inference.
     /// Used by pipeline.rs — not part of the public trait API.
     /// ORT requires &mut Session for run(); Mutex provides interior mutability.
