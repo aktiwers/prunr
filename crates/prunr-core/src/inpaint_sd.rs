@@ -125,17 +125,21 @@ pub fn process_inpaint(
     process_inpaint_with(
         image, mask, id,
         SdInpaintRequest { num_inference_steps: num_steps, ..Default::default() },
+        None,
     )
 }
 
 /// Full-knob entry. The `inpaint::process_inpaint` shim calls this with
 /// defaults; future text-prompt + CFG surfaces wire through here.
+/// See `inpaint::process_inpaint_with` for the cancel-flag contract.
 pub fn process_inpaint_with(
     image: &RgbaImage,
     mask: &GrayImage,
     id: prunr_models::ModelId,
     req: SdInpaintRequest,
+    cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 ) -> Result<RgbaImage, CoreError> {
+    use std::sync::atomic::Ordering;
     if image.dimensions() != mask.dimensions() {
         return Err(CoreError::Inference(format!(
             "sd inpaint: dim mismatch — image {:?} vs mask {:?}",
@@ -169,8 +173,10 @@ pub fn process_inpaint_with(
     };
     let (img_w, img_h) = image.dimensions();
     let mut out = image.clone();
+    let is_cancelled = || cancel.as_ref().is_some_and(|c| c.load(Ordering::Acquire));
 
     for component in &components {
+        if is_cancelled() { return Err(CoreError::Cancelled); }
         let painted_w = component.x_max - component.x_min + 1;
         let painted_h = component.y_max - component.y_min + 1;
         if painted_w <= SD_TILE && painted_h <= SD_TILE {
@@ -178,8 +184,9 @@ pub fn process_inpaint_with(
             let (cx, cy, cw, ch) = compute_sd_crop(component, img_w, img_h);
             let cropped_img = image::imageops::crop_imm(&out, cx, cy, cw, ch).to_image();
             let cropped_mask = image::imageops::crop_imm(mask, cx, cy, cw, ch).to_image();
-            match run_one_tile(&bundle, &vae, &cropped_img, &cropped_mask, &req) {
+            match run_one_tile(&bundle, &vae, &cropped_img, &cropped_mask, &req, cancel.as_ref()) {
                 Ok(painted) => image::imageops::replace(&mut out, &painted, cx as i64, cy as i64),
+                Err(CoreError::Cancelled) => return Err(CoreError::Cancelled),
                 Err(e) => tracing::error!(%e, "SD inference failed for component; skipping"),
             }
             continue;
@@ -193,14 +200,17 @@ pub fn process_inpaint_with(
             "SD: tiling oversized component",
         );
         for tile in tiles {
+            if is_cancelled() { return Err(CoreError::Cancelled); }
             let cropped_img = image::imageops::crop_imm(&out, tile.x, tile.y, tile.w, tile.h).to_image();
             let cropped_mask = image::imageops::crop_imm(mask, tile.x, tile.y, tile.w, tile.h).to_image();
-            match run_one_tile(&bundle, &vae, &cropped_img, &cropped_mask, &req) {
+            match run_one_tile(&bundle, &vae, &cropped_img, &cropped_mask, &req, cancel.as_ref()) {
                 Ok(painted) => blend_tile(&mut out, &painted, &tile),
+                Err(CoreError::Cancelled) => return Err(CoreError::Cancelled),
                 Err(e) => tracing::error!(%e, ?tile, "SD inference failed for tile; skipping"),
             }
         }
     }
+    if is_cancelled() { return Err(CoreError::Cancelled); }
     Ok(out)
 }
 
@@ -414,6 +424,7 @@ fn run_one_tile(
     image: &RgbaImage,
     mask: &GrayImage,
     req: &SdInpaintRequest,
+    cancel: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
 ) -> Result<RgbaImage, CoreError> {
     let (w, h) = image.dimensions();
     let padded_image = pad_to_tile(image);
@@ -476,7 +487,15 @@ fn run_one_tile(
     // Without CFG: just one UNet pass with cond.
     let timesteps = scheduler.timesteps().to_vec();
     let scale = req.guidance_scale;
+    let is_cancelled = || cancel.is_some_and(|c| {
+        c.load(std::sync::atomic::Ordering::Acquire)
+    });
     for (i, &t) in timesteps.iter().enumerate() {
+        // Check cancel between UNet steps. ORT has no per-op cancel, so
+        // worst-case latency on cancel is one UNet step (multi-second).
+        if is_cancelled() {
+            return Err(CoreError::Cancelled);
+        }
         let latent_f16 = f32_to_f16_4d(&latent);
         let latent_in_f16 = concat_inpaint_input_f16(
             &latent_f16, &mask_latent_f16, &masked_latent_f16,
