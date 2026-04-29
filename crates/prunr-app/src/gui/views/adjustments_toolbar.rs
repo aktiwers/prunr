@@ -182,6 +182,11 @@ pub(crate) fn render(
     //                  transparency at all — filter-only mode (No model +
     //                  Off) outputs a full-RGB image with nothing to fill.
     let model_uses_seg = app_settings.model.uses_segmentation();
+    // Snapshot pre-dropdown — the model dropdown below can mutate
+    // `app_settings.model`. Branches that need post-dropdown state
+    // (e.g. the auto-flip-to-Off + brush prewarm at line 218) re-read
+    // `app_settings.model.is_inpaint()` directly.
+    let inpaint_mode = app_settings.model.is_inpaint();
     let mask_active = model_uses_seg
         && !(item_settings.line_mode == LineMode::EdgesOnly && !app_settings.chain_mode);
     let fill_style_active = item_settings.line_mode != LineMode::EdgesOnly;
@@ -223,6 +228,7 @@ pub(crate) fn render(
             }
         }
 
+        if !inpaint_mode {
         ui.add_enabled_ui(mask_active, |ui| {
             aggregate_knob(chip::chip_f32(
                 ui, "gamma", "γ", "Gamma",
@@ -325,6 +331,7 @@ pub(crate) fn render(
                 bg_image_label,
             }, &mut change);
         });
+        } // end if !inpaint_mode
 
         // Right-aligned cluster: reset, preset. Right-to-left layout fills
         // from the right edge so items stack: [..free space..] [preset] [↺].
@@ -393,6 +400,10 @@ pub(crate) fn render(
     // extraction; keeping it visible at all times is how the user turns
     // lines on. `lines_popover::render` mutates `item_settings.line_mode`
     // directly — cache invalidation below picks up the change.
+    //
+    // Eraser models hide Row 3 entirely — DexiNed isn't part of the
+    // inpaint pipeline.
+    if !inpaint_mode {
     ui.add_space(theme::SPACE_XS);
     ui.horizontal(|ui| {
         let seg_model_name = super::model_name(app_settings.model);
@@ -461,6 +472,7 @@ pub(crate) fn render(
             ), StaticKnob::SolidLineColor, &mut change);
         }
     });
+    } // end if !inpaint_mode
 
     // Line-mode transition: record the signal + cache impact (deterministic
     // in `(from, to)`). The dispatcher owns dispatch resolution — folding a
