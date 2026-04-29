@@ -7,6 +7,10 @@ use crate::formats::resize_gray_lanczos3;
 use crate::guided_filter::guided_filter_alpha;
 use crate::types::{MaskSettings, ModelKind};
 
+/// Pixel-count cutover for serial → row-parallel kernels in this module.
+/// Below ~512² rayon's fan-out costs more than the loop saves.
+const ROW_PAR_THRESHOLD: usize = 512 * 512;
+
 /// Bundle of stable inputs shared by every postprocess entry point.
 /// Adding a new optional field here is preferable to adding another
 /// positional parameter to six functions.
@@ -456,17 +460,35 @@ pub fn apply_bg_effect(rgba: &mut RgbaImage, source: &DynamicImage, effect: crat
     // the subject mask left partial alpha. Anywhere the subject was fully
     // opaque already, the formula reduces to a no-op.
     debug_assert_eq!(rgba.dimensions(), backdrop.dimensions());
+    let width = rgba.width() as usize;
+    let height = rgba.height() as usize;
+    let row_bytes = width * 4;
     let raw = rgba.as_mut();
     let bd = backdrop.as_raw();
-    for (i, px) in raw.chunks_exact_mut(4).enumerate() {
+
+    let blend_pixel = |px: &mut [u8], bd_chunk: &[u8]| {
         let a = px[3] as u16;
-        if a == 255 { continue; }
+        if a == 255 { return; }
         let inv = 255 - a;
-        let bd_i = i * 4;
-        px[0] = ((px[0] as u16 * a + bd[bd_i]     as u16 * inv) / 255) as u8;
-        px[1] = ((px[1] as u16 * a + bd[bd_i + 1] as u16 * inv) / 255) as u8;
-        px[2] = ((px[2] as u16 * a + bd[bd_i + 2] as u16 * inv) / 255) as u8;
+        px[0] = ((px[0] as u16 * a + bd_chunk[0] as u16 * inv) / 255) as u8;
+        px[1] = ((px[1] as u16 * a + bd_chunk[1] as u16 * inv) / 255) as u8;
+        px[2] = ((px[2] as u16 * a + bd_chunk[2] as u16 * inv) / 255) as u8;
         px[3] = 255;
+    };
+
+    // Rows are write-disjoint; par_chunks_mut is safe.
+    if width * height >= ROW_PAR_THRESHOLD {
+        raw.par_chunks_mut(row_bytes)
+            .zip(bd.par_chunks(row_bytes))
+            .for_each(|(px_row, bd_row)| {
+                for (px, bd_px) in px_row.chunks_exact_mut(4).zip(bd_row.chunks_exact(4)) {
+                    blend_pixel(px, bd_px);
+                }
+            });
+    } else {
+        for (px, bd_px) in raw.chunks_exact_mut(4).zip(bd.chunks_exact(4)) {
+            blend_pixel(px, bd_px);
+        }
     }
 }
 
@@ -530,22 +552,20 @@ fn hue_distance(a: i32, b: i32) -> i32 {
 /// Write the mask into an existing RGBA buffer's alpha channel in place.
 /// Used by `postprocess()` to avoid a second full-resolution RGBA allocation.
 ///
-/// Above `PAR_THRESHOLD` pixels the work splits across rows — each rayon
-/// task owns a disjoint horizontal strip, matching the buffer's row-major
-/// memory layout so writes stay cache-friendly. Below the threshold the
-/// serial loop wins: rayon's fan-out costs more than this loop does on a
-/// small image. The loop is memory-bandwidth-bound, so the speedup ceiling
-/// is ~1.1-1.2× on 4K regardless of core count.
+/// Above `ROW_PAR_THRESHOLD` pixels the work splits across rows — each
+/// rayon task owns a disjoint horizontal strip, matching the buffer's
+/// row-major memory layout so writes stay cache-friendly. Below the
+/// threshold the serial loop wins: rayon's fan-out costs more than this
+/// loop does on a small image. The loop is memory-bandwidth-bound, so
+/// the speedup ceiling is ~1.1-1.2× on 4K regardless of core count.
 fn apply_mask_inplace(rgba: &mut RgbaImage, mask: &GrayImage) {
-    const PAR_THRESHOLD: usize = 512 * 512;
-
     let width = rgba.width() as usize;
     let row_bytes = width * 4;
     let mask_stride = width;
     let mask_raw = mask.as_raw();
     let out_raw = rgba.as_mut();
 
-    if mask_raw.len() >= PAR_THRESHOLD {
+    if mask_raw.len() >= ROW_PAR_THRESHOLD {
         out_raw
             .par_chunks_mut(row_bytes)
             .zip(mask_raw.par_chunks(mask_stride))

@@ -318,37 +318,54 @@ impl SubprocessManager {
     /// Non-blocking poll for events from the subprocess.
     pub fn poll_events(&mut self) -> Vec<SubprocessEvent> {
         let mut events = Vec::new();
-        loop {
-            match self.event_rx.try_recv() {
-                Ok(ReaderEvent::Event(evt)) => {
-                    // Update internal state based on event type
-                    match &evt {
-                        SubprocessEvent::ImageDone { item_id, .. }
-                        | SubprocessEvent::ImageError { item_id, .. } => {
-                            self.in_flight.remove(item_id);
-                        }
-                        SubprocessEvent::RssUpdate { rss_bytes } => {
-                            self.last_rss = *rss_bytes;
-                            if *rss_bytes > self.rss_limit {
-                                self.rss_paused = true;
-                            } else if *rss_bytes < self.rss_resume {
-                                self.rss_paused = false;
-                            }
-                        }
-                        _ => {}
-                    }
-                    events.push(evt);
-                }
-                Ok(ReaderEvent::Disconnected) => {
-                    // Child exited — mark all in-flight as failed
-                    // (caller handles retry logic)
-                    break;
-                }
-                Err(mpsc::TryRecvError::Empty) => break,
-                Err(mpsc::TryRecvError::Disconnected) => break,
+        while let Some(evt) = self.next_event_with_state(None) {
+            events.push(evt);
+        }
+        events
+    }
+
+    /// Block up to `timeout` for the first event, then drain anything
+    /// else already enqueued. Wakes immediately on event arrival.
+    pub fn poll_events_blocking(&mut self, timeout: std::time::Duration) -> Vec<SubprocessEvent> {
+        let mut events = Vec::new();
+        if let Some(evt) = self.next_event_with_state(Some(timeout)) {
+            events.push(evt);
+            while let Some(evt) = self.next_event_with_state(None) {
+                events.push(evt);
             }
         }
         events
+    }
+
+    /// Pull at most one event from the channel, applying state updates
+    /// (in-flight removal, RSS pause/resume). `None` timeout = `try_recv`,
+    /// `Some(t)` = `recv_timeout`. Disconnected and recv-error both
+    /// collapse to `None`; caller checks `is_alive`.
+    fn next_event_with_state(&mut self, timeout: Option<std::time::Duration>) -> Option<SubprocessEvent> {
+        let raw = match timeout {
+            None => self.event_rx.try_recv().ok(),
+            Some(t) => self.event_rx.recv_timeout(t).ok(),
+        };
+        let evt = match raw? {
+            ReaderEvent::Event(e) => e,
+            ReaderEvent::Disconnected => return None,
+        };
+        match &evt {
+            SubprocessEvent::ImageDone { item_id, .. }
+            | SubprocessEvent::ImageError { item_id, .. } => {
+                self.in_flight.remove(item_id);
+            }
+            SubprocessEvent::RssUpdate { rss_bytes } => {
+                self.last_rss = *rss_bytes;
+                if *rss_bytes > self.rss_limit {
+                    self.rss_paused = true;
+                } else if *rss_bytes < self.rss_resume {
+                    self.rss_paused = false;
+                }
+            }
+            _ => {}
+        }
+        Some(evt)
     }
 
     /// Check if the subprocess is still alive.
