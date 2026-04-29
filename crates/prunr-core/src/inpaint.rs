@@ -425,28 +425,41 @@ struct LamaSession {
 
 impl LamaSession {
     /// Per-id cache. Each LamaSession is built once on first use and
-    /// reused across strokes. Failures are also cached as strings (the
-    /// inner Mutex protects the map; CoreError isn't Clone so we store
-    /// the message and rebuild the wrapper at each call).
+    /// reused across strokes. Failures are cached as strings (CoreError
+    /// isn't Clone so the cache stores `Result<_, String>`).
+    ///
+    /// Per-id `Arc<OnceLock>` slot closes the same build race that the
+    /// SD bundle had — without it two concurrent `get()` callers (e.g.
+    /// prewarm + first stroke) would each build a full LaMa session
+    /// (hundreds of MB of VRAM on GPU EPs, plus a redundant EP-ladder
+    /// probe). The previous "concurrent caller may have inserted
+    /// between our check and build; keep their entry (drops our
+    /// duplicate session, harmless)" comment was honest about the
+    /// race; this just closes it.
     fn get(id: prunr_models::ModelId) -> Result<&'static LamaSession, CoreError> {
-        static CACHE: OnceLock<Mutex<std::collections::HashMap<prunr_models::ModelId, Result<&'static LamaSession, String>>>> = OnceLock::new();
+        type Slot = std::sync::Arc<OnceLock<Result<&'static LamaSession, String>>>;
+        static CACHE: OnceLock<Mutex<std::collections::HashMap<prunr_models::ModelId, Slot>>>
+            = OnceLock::new();
         let cache = CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
-        {
-            let guard = cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            if let Some(entry) = guard.get(&id) {
-                return entry.clone().map_err(CoreError::Inference);
-            }
-        }
-        // Build outside the lock — session creation is seconds-long.
-        let entry: Result<&'static LamaSession, String> = match Self::new_inner(id) {
-            Ok(s) => Ok(Box::leak(Box::new(s))),
-            Err(e) => Err(e),
+
+        // Hold the cache lock only for the HashMap lookup + at-most-one
+        // Arc<OnceLock> allocation, never for the seconds-long build.
+        let slot: Slot = {
+            let mut guard = cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            guard
+                .entry(id)
+                .or_insert_with(|| std::sync::Arc::new(OnceLock::new()))
+                .clone()
         };
-        let mut guard = cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        // Concurrent caller may have inserted between our check and
-        // build; keep their entry (drops our duplicate session, harmless).
-        let stored = guard.entry(id).or_insert(entry);
-        stored.clone().map_err(CoreError::Inference)
+
+        // First caller's closure runs; concurrent callers block on the
+        // OnceLock and receive the same Result. No duplicate session
+        // gets built.
+        slot.get_or_init(|| {
+            Self::new_inner(id).map(|s| &*Box::leak(Box::new(s)))
+        })
+            .clone()
+            .map_err(CoreError::Inference)
     }
 
     fn new_inner(id: prunr_models::ModelId) -> Result<LamaSession, String> {
