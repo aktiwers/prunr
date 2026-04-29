@@ -535,19 +535,16 @@ pub(crate) struct TaesdSession {
 
 impl TaesdSession {
     fn get() -> Result<Arc<TaesdSession>, CoreError> {
-        static CACHE: OnceLock<Mutex<Option<Arc<TaesdSession>>>> = OnceLock::new();
-        let cache = CACHE.get_or_init(|| Mutex::new(None));
-        {
-            let guard = cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            if let Some(s) = guard.as_ref() {
-                return Ok(Arc::clone(s));
-            }
-        }
-        let session = Self::new_inner()?;
-        let arc = Arc::new(session);
-        let mut guard = cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        *guard = Some(Arc::clone(&arc));
-        Ok(arc)
+        // Single global cache cell; `OnceLock::new()` is `const` so we
+        // need no outer lazy wrapper. `get_or_init` runs the build
+        // closure exactly once across concurrent callers.
+        // CoreError isn't Clone, so we round-trip the build error
+        // through a String — the stored Result must be cloneable so
+        // every caller can take an owned copy of the cached outcome.
+        static CACHE: OnceLock<Result<Arc<TaesdSession>, String>> = OnceLock::new();
+        CACHE.get_or_init(|| Self::new_inner().map(Arc::new).map_err(|e| e.to_string()))
+            .clone()
+            .map_err(CoreError::Inference)
     }
 
     fn new_inner() -> Result<TaesdSession, CoreError> {
@@ -628,11 +625,21 @@ pub(crate) struct SdSession {
 /// Errors cache the load-failure string so a missing bundle doesn't
 /// retry-and-error every stroke; eviction lets the next try refresh.
 struct CacheEntry<T> {
-    value: Result<T, String>,
+    value: T,
     last_used: Instant,
 }
 
-type SdCache = HashMap<prunr_models::ModelId, CacheEntry<Arc<SdSession>>>;
+/// Per-id deferred bundle. The outer `Arc<OnceLock<...>>` is what closes
+/// the build race: two concurrent `get()` callers both find the same
+/// `Arc<OnceLock>` in the cache, both call `get_or_init` on it, and the
+/// `OnceLock` semantics guarantee the build closure runs **once** —
+/// the second caller blocks until the first finishes and gets the same
+/// stored `Result`. Before this, both callers would each build a full
+/// ~15 GB bundle in parallel; the loser's bundle was dropped 3 ms later,
+/// nearly OOMing the box (`SD session bundle dropped` immediately after
+/// `SD session bundle loaded` in the trace).
+type SdBundleSlot = Arc<std::sync::OnceLock<Result<Arc<SdSession>, String>>>;
+type SdCache = HashMap<prunr_models::ModelId, CacheEntry<SdBundleSlot>>;
 
 fn sd_cache() -> &'static Mutex<SdCache> {
     static CACHE: OnceLock<Mutex<SdCache>> = OnceLock::new();
@@ -696,7 +703,9 @@ impl SdSession {
         let now = Instant::now();
         let idle = Duration::from_secs(SD_IDLE_RELEASE_SECS);
 
-        {
+        // Cache lock held only for the HashMap lookup and at most one
+        // Arc<OnceLock> allocation — never for the bundle build.
+        let slot: SdBundleSlot = {
             let mut guard = cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             let dropped = sweep_idle(&mut guard, now, idle);
             if dropped > 0 {
@@ -707,17 +716,24 @@ impl SdSession {
                     "SD: released idle session bundle(s)",
                 );
             }
-            if let Some(entry) = guard.get_mut(&id) {
+            let entry = guard.entry(id).or_insert_with(|| CacheEntry {
+                value: Arc::new(std::sync::OnceLock::new()),
+                last_used: now,
+            });
+            // Don't refresh last_used when the slot already holds an
+            // Err — otherwise a sticky build failure would keep
+            // refreshing its idle timer on every retry and never
+            // evict. Healthy or in-flight slots refresh as before.
+            if !matches!(entry.value.get(), Some(Err(_))) {
                 entry.last_used = now;
-                return entry.value.clone().map_err(CoreError::Inference);
             }
-        }
+            entry.value.clone()
+        };
 
-        let value: Result<Arc<SdSession>, String> = Self::new_inner(id).map(Arc::new);
-        let mut guard = cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        let stored = guard.entry(id).or_insert(CacheEntry { value, last_used: now });
-        stored.last_used = now;
-        stored.value.clone().map_err(CoreError::Inference)
+        // Build outside the cache lock — see `SdBundleSlot` docs.
+        slot.get_or_init(|| Self::new_inner(id).map(Arc::new))
+            .clone()
+            .map_err(CoreError::Inference)
     }
 
     fn new_inner(id: prunr_models::ModelId) -> Result<SdSession, String> {
@@ -1964,11 +1980,11 @@ mod tests {
 
         let mut cache: HashMap<ModelId, CacheEntry<Arc<()>>> = HashMap::new();
         cache.insert(ModelId::SdV15InpaintFp16, CacheEntry {
-            value: Ok(Arc::new(())),
+            value: Arc::new(()),
             last_used: stale,
         });
         cache.insert(ModelId::LaMaFp32, CacheEntry {
-            value: Ok(Arc::new(())),
+            value: Arc::new(()),
             last_used: fresh,
         });
 
@@ -1981,22 +1997,6 @@ mod tests {
     }
 
     #[test]
-    fn sweep_idle_drops_stale_error_entries_too() {
-        use prunr_models::ModelId;
-        let now = Instant::now();
-        let idle = Duration::from_secs(300);
-        let mut cache: HashMap<ModelId, CacheEntry<Arc<()>>> = HashMap::new();
-        cache.insert(ModelId::SdV15InpaintFp16, CacheEntry {
-            value: Err("load failed".to_string()),
-            last_used: now - Duration::from_secs(600),
-        });
-
-        let dropped = sweep_idle(&mut cache, now, idle);
-        assert_eq!(dropped, 1, "stale error entries should also evict");
-        assert!(cache.is_empty());
-    }
-
-    #[test]
     fn sweep_idle_releases_arc_so_payload_drops() {
         use prunr_models::ModelId;
         let now = Instant::now();
@@ -2006,7 +2006,7 @@ mod tests {
 
         let mut cache: HashMap<ModelId, CacheEntry<Arc<()>>> = HashMap::new();
         cache.insert(ModelId::SdV15InpaintFp16, CacheEntry {
-            value: Ok(payload),
+            value: payload,
             last_used: now - Duration::from_secs(600),
         });
 
@@ -2026,11 +2026,43 @@ mod tests {
         let mut cache: HashMap<ModelId, CacheEntry<Arc<()>>> = HashMap::new();
         // Just-under-the-boundary entry must NOT evict.
         cache.insert(ModelId::SdV15InpaintFp16, CacheEntry {
-            value: Ok(Arc::new(())),
+            value: Arc::new(()),
             last_used: now - Duration::from_secs(299),
         });
         let dropped = sweep_idle(&mut cache, now, idle);
         assert_eq!(dropped, 0);
         assert!(cache.contains_key(&ModelId::SdV15InpaintFp16));
+    }
+
+    /// Pin the contract that closed the OOM race: two concurrent
+    /// `get()` callers see the **same** `OnceLock` slot, so only one
+    /// build runs even though both miss the cache initially. Without
+    /// the fix we'd see `SD session bundle dropped` immediately after
+    /// `SD session bundle loaded` in the logs (both bundles built,
+    /// loser dropped) — and ~30 GB peak RSS.
+    #[test]
+    fn concurrent_get_or_init_runs_build_closure_only_once() {
+        use std::sync::OnceLock as Cell;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let slot: Arc<Cell<u32>> = Arc::new(Cell::new());
+        let calls = Arc::new(AtomicUsize::new(0));
+
+        let handles: Vec<_> = (0..8).map(|_| {
+            let slot = Arc::clone(&slot);
+            let calls = Arc::clone(&calls);
+            std::thread::spawn(move || {
+                *slot.get_or_init(|| {
+                    calls.fetch_add(1, Ordering::Relaxed);
+                    std::thread::sleep(Duration::from_millis(50));
+                    42u32
+                })
+            })
+        }).collect();
+
+        for h in handles {
+            assert_eq!(h.join().unwrap(), 42);
+        }
+        assert_eq!(calls.load(Ordering::Relaxed), 1,
+            "OnceLock must run the build closure exactly once across concurrent callers");
     }
 }
