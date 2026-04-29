@@ -1,3 +1,5 @@
+use std::mem::MaybeUninit;
+
 use image::DynamicImage;
 use ndarray::Array4;
 
@@ -25,17 +27,29 @@ fn to_nchw(resized: &image::RgbImage, size: u32, divisor: f32) -> Array4<f32> {
     let scale: [f32; 3] = std::array::from_fn(|c| inv_div / STD[c]);
     let bias: [f32; 3] = std::array::from_fn(|c| MEAN[c] / STD[c]);
 
-    let mut out = Array4::<f32>::zeros((1, 3, s, s));
+    // `Array4::zeros` writes 12 MB at BiRefNet 1024² before the loop
+    // overwrites every element. `uninit` skips the zero-fill — saves
+    // ~3 ms of memory bandwidth per dispatch (~3% of the 100 ms live
+    // preview budget at 1024²). Loop body is interleaved (one source
+    // pixel → three plane writes per iter) so `raw[base..base+3]` is
+    // read once while it's still hot in L1; the previously-attempted
+    // split-pass form did 3× source traversal for no vectorization
+    // gain (stride-3 u8→f32 gather defeats LLVM's loop vectorizer
+    // either way — verified with `--emit=asm`).
+    let mut out: Array4<MaybeUninit<f32>> = Array4::uninit((1, 3, s, s));
     let plane_size = s * s;
     // invariant: `out` is a freshly allocated `Array4` (standard layout, contiguous).
     let out_slice = out.as_slice_mut().unwrap();
     for i in 0..plane_size {
         let base = i * 3;
-        out_slice[i] = raw[base] as f32 * scale[0] - bias[0];
-        out_slice[plane_size + i] = raw[base + 1] as f32 * scale[1] - bias[1];
-        out_slice[plane_size * 2 + i] = raw[base + 2] as f32 * scale[2] - bias[2];
+        out_slice[i].write(raw[base] as f32 * scale[0] - bias[0]);
+        out_slice[plane_size + i].write(raw[base + 1] as f32 * scale[1] - bias[1]);
+        out_slice[plane_size * 2 + i].write(raw[base + 2] as f32 * scale[2] - bias[2]);
     }
-    out
+    // Safety: the loop above writes every element of all three planes
+    // (`plane_size * 3 == out.len()`). No element is skipped or read
+    // before this point.
+    unsafe { out.assume_init() }
 }
 
 fn preprocess_rembg(img: &DynamicImage) -> Array4<f32> {

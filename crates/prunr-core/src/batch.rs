@@ -9,12 +9,24 @@ use crate::{
 
 /// Create an engine pool with GPU/CPU-aware sizing.
 /// GPU: 2 engines for pipeline overlap. CPU: 1 engine with full thread parallelism.
+///
+/// Caller invariant: must not be called from inside a rayon scope — the
+/// parallel-build path uses the global pool and could deadlock under
+/// nested rayon (same hazard as `apply_background_color`).
+///
+/// During parallel build (`pool_size > 1`, non-DirectML) the peak RSS
+/// briefly doubles relative to sequential build because both ORT
+/// sessions hold their working set live at the same time
+/// (~400 MB-1 GB peak for 5-13 s instead of staggered ~200-500 MB).
+/// The window is short and the wall-clock win is large; surface only
+/// if a low-RAM user reports OOMing during pool init.
 pub fn create_engine_pool(
     model: ModelKind,
     jobs: usize,
     cpu_only: bool,
 ) -> Result<Vec<std::sync::Arc<OrtEngine>>, CoreError> {
-    let is_gpu = !cpu_only && !OrtEngine::detect_active_provider().eq_ignore_ascii_case("CPU");
+    let active = OrtEngine::detect_active_provider();
+    let is_gpu = !cpu_only && !active.eq_ignore_ascii_case("CPU");
     // GPU: cap at 2 engines (VRAM is limited, more causes allocation failures).
     // CPU: respect user's setting fully — the admission controller manages
     // overall memory pressure at the batch level.
@@ -30,11 +42,23 @@ pub fn create_engine_pool(
         if cpu_only { OrtEngine::new_cpu_only(model, threads) } else { OrtEngine::new(model, threads) }
     };
 
-    let mut engines = Vec::with_capacity(pool_size);
-    for _ in 0..pool_size {
-        engines.push(std::sync::Arc::new(create(intra_threads)?));
+    // Build engines in parallel where the EP allows it. CPU, OpenVINO,
+    // CUDA, CoreML are thread-safe during session creation. DirectML
+    // is NOT — `commit_from_memory` on parallel threads has triggered
+    // AbiCustomRegistry races in the wild — so fall back to sequential
+    // when DirectML is the active provider.
+    #[cfg(windows)]
+    let directml_active = active.eq_ignore_ascii_case(crate::engine::EpKind::DirectMl.as_str());
+    #[cfg(not(windows))]
+    let directml_active = false;
+    let serial = pool_size <= 1 || directml_active;
+
+    let build = |_idx| create(intra_threads).map(std::sync::Arc::new);
+    if serial {
+        (0..pool_size).map(build).collect()
+    } else {
+        (0..pool_size).into_par_iter().map(build).collect()
     }
-    Ok(engines)
 }
 
 /// Calculate ORT intra-op thread count to prevent oversubscription.

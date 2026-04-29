@@ -571,9 +571,14 @@ fn build_lama_session(
             // Default device "AUTO" lets OpenVINO pick the best target
             // (iGPU when present + driver works, NPU on newer Intel,
             // else CPU). Smoke test below catches op-incompat failures.
+            // `with_num_threads` caps the EP-internal TBB pool to match
+            // our outer rayon budget (same TBB-oversubscription fix as
+            // engine.rs).
             #[cfg(not(target_os = "macos"))]
             EpKind::OpenVino => builder.with_execution_providers([
-                ort::execution_providers::OpenVINOExecutionProvider::default().build(),
+                ort::execution_providers::OpenVINOExecutionProvider::default()
+                    .with_num_threads(threads.max(1))
+                    .build(),
             ]),
         };
         let mut built = match registered {

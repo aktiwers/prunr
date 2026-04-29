@@ -1,3 +1,4 @@
+use std::mem::MaybeUninit;
 use std::sync::Mutex;
 
 use image::{DynamicImage, RgbaImage};
@@ -577,18 +578,20 @@ fn preprocess(img: &DynamicImage) -> Array4<f32> {
     let h = DEXINED_H as usize;
     let w = DEXINED_W as usize;
 
-    let mut out = Array4::<f32>::zeros((1, 3, h, w));
+    // Skip the zero-fill; the loop writes every element of all three planes.
+    let mut out: Array4<MaybeUninit<f32>> = Array4::uninit((1, 3, h, w));
     // DexiNed expects BGR with mean subtraction (no /255)
     for c in 0..3 {
         let bgr_c = 2 - c; // RGB→BGR: channel 0(R)→2(B), 1(G)→1(G), 2(B)→0(R)
         let mut plane = out.slice_mut(ndarray::s![0, bgr_c, .., ..]);
-        // invariant: slice of a freshly-zeroed Array4 is contiguous.
+        // invariant: slice of a freshly-allocated Array4 is contiguous.
         let plane_slice = plane.as_slice_mut().unwrap();
         for i in 0..h * w {
-            plane_slice[i] = raw[i * 3 + c] as f32 - MEAN_BGR[bgr_c];
+            plane_slice[i].write(raw[i * 3 + c] as f32 - MEAN_BGR[bgr_c]);
         }
     }
-    out
+    // Safety: every element of all three planes was written above.
+    unsafe { out.assume_init() }
 }
 
 #[cfg(test)]
