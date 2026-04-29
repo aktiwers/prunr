@@ -572,8 +572,8 @@ fn build_lama_session(
             // (iGPU when present + driver works, NPU on newer Intel,
             // else CPU). Smoke test below catches op-incompat failures.
             // `with_num_threads` caps the EP-internal TBB pool to match
-            // our outer rayon budget (same TBB-oversubscription fix as
-            // engine.rs).
+            // our outer rayon budget. (No `with_cache_dir`: see engine.rs
+            // for the verified-but-not-effective rationale.)
             #[cfg(not(target_os = "macos"))]
             EpKind::OpenVino => builder.with_execution_providers([
                 ort::execution_providers::OpenVINOExecutionProvider::default()
