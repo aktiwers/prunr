@@ -58,9 +58,12 @@ const VAE_SCALING_FACTOR: f32 = 0.18215;
 /// doubles that during load (~4 GB resident), UNet activations on a
 /// 512×512 tile add 2-4 GB transient, and OpenVINO graph compilation
 /// pre-allocates its own iGPU-shared buffer (which on integrated GPUs
-/// IS RAM). Real-world working set on a CPU/iGPU machine: 6-10 GB.
-/// Below 6 GB free we've seen swap thrash freeze testers' machines.
-const SD_CPU_MIN_FREE_RAM_BYTES: u64 = 6 * 1024 * 1024 * 1024;
+/// IS RAM). A user trace observed `rss_delta_mb=14915` (~15 GB) for a
+/// single bundle on Linux + OpenVINO CPU plugin — the prior 6 GB
+/// threshold let bundle build proceed on a system that then spent the
+/// session at 98% RAM and nearly OOM-rebooted. Bumped to 16 GB so the
+/// guard refuses on any system that can't fit the observed peak.
+const SD_CPU_MIN_FREE_RAM_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 /// Idle window after which a cached SD session bundle is dropped to
 /// release its ~4-6 GB resident set back to the OS. Trade-off: rebuilding
 /// pays the 10-30s session-build cost on the next stroke; in exchange a
@@ -880,7 +883,21 @@ fn build_part_with_ep_ladder(
             ]),
             #[cfg(not(target_os = "macos"))]
             EpKind::OpenVino => builder.with_execution_providers([
-                ort::execution_providers::OpenVINOExecutionProvider::default().build(),
+                // SD bundle peaked at ~15 GB RSS delta on a user system
+                // (rss_before=4994 → rss_after=19909 in the reported
+                // trace) — well above the ~3-4 GB the fp16 weights
+                // would predict. Two OpenVINO knobs cap the worst-case
+                // arena: `num_streams=1` disables per-stream buffer
+                // duplication, and `dynamic_shapes=false` lets
+                // OpenVINO size the working memory to the actual
+                // 512² SD tile rather than reserving for arbitrary
+                // input shapes. Both are safe — SD's UNet is run
+                // sequentially under a Mutex, and our tile pipeline
+                // is fixed-shape.
+                ort::execution_providers::OpenVINOExecutionProvider::default()
+                    .with_num_streams(1)
+                    .with_dynamic_shapes(false)
+                    .build(),
             ]),
         };
         let mut built = match registered {
