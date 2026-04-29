@@ -118,43 +118,47 @@ fn tensor_to_mask_core(raw: ArrayView4<f32>, ow: u32, oh: u32, rgba_for_guided: 
     let gamma = mask_settings.gamma;
     let threshold = mask_settings.threshold;
 
-    // Build the normalized [0, 1] mask FIRST (no gamma/threshold yet).
-    // Brush correction (multiplicative) runs in this space so subsequent
-    // gamma slider tweaks modulate the painted regions naturally.
-    let mut normalized: Vec<f32> = if let Some(uv) = uniform_val {
-        vec![uv; sw * sh]
-    } else {
-        let inv_range = 1.0 / range;
-        let mut buf = vec![0.0f32; sw * sh];
-        for i in 0..sh * sw {
-            let raw_val = pred_slice[i];
-            buf[i] = if use_sigmoid {
-                1.0 / (1.0 + (-raw_val).exp())
-            } else {
-                ((raw_val - mi) * inv_range).clamp(0.0, 1.0)
-            };
+    let mut mask_buf = vec![0u8; sw * sh];
+    let inv_range = 1.0 / range;
+    let normalize = |raw_val: f32| -> f32 {
+        if use_sigmoid {
+            1.0 / (1.0 + (-raw_val).exp())
+        } else {
+            ((raw_val - mi) * inv_range).clamp(0.0, 1.0)
         }
-        buf
+    };
+    let finalise = |val: f32| -> u8 {
+        let mut v = val;
+        if gamma != 1.0 { v = v.powf(gamma); }
+        if let Some(t) = threshold {
+            v = if v >= t { 1.0 } else { 0.0 };
+        }
+        (v * 255.0) as u8
     };
 
-    // Brush correction in normalized space, BEFORE gamma/threshold and
-    // BEFORE resize/refine — so the gamma slider modulates the painted
-    // regions and the guided filter snaps stroke edges to color edges.
     if let Some(corr) = correction {
+        // Brush correction needs the [0, 1] f32 buffer alive for the
+        // multiplicative apply step.
+        let mut normalized: Vec<f32> = if let Some(uv) = uniform_val {
+            vec![uv; sw * sh]
+        } else {
+            let mut buf = vec![0.0f32; sw * sh];
+            for i in 0..sh * sw { buf[i] = normalize(pred_slice[i]); }
+            buf
+        };
         crate::brush::apply_correction(&mut normalized, sw, sh, corr);
-    }
-
-    // Apply gamma + threshold and quantize to u8.
-    let mut mask_buf = vec![0u8; sw * sh];
-    for i in 0..sh * sw {
-        let mut val = normalized[i];
-        if gamma != 1.0 {
-            val = val.powf(gamma);
+        for i in 0..sh * sw {
+            mask_buf[i] = finalise(normalized[i]);
         }
-        if let Some(t) = threshold {
-            val = if val >= t { 1.0 } else { 0.0 };
+        drop(normalized);
+    } else if let Some(uv) = uniform_val {
+        mask_buf.fill(finalise(uv));
+    } else {
+        // Fused walk skips a ~410 KB f32 scratch (4 MB at BiRefNet 1024²)
+        // that an intermediate normalize-then-finalise would allocate.
+        for i in 0..sh * sw {
+            mask_buf[i] = finalise(normalize(pred_slice[i]));
         }
-        mask_buf[i] = (val * 255.0) as u8;
     }
 
     let mask = GrayImage::from_raw(sw as u32, sh as u32, mask_buf)
@@ -295,21 +299,34 @@ pub fn apply_fill_style(rgba: &mut RgbaImage, style: crate::types::FillStyle) {
         FillStyle::Pixelate { block_size } => {
             if block_size < 2 { return; }
             let (w, h) = rgba.dimensions();
-            // Scratch copy: reads sample the block top-left, writes fill the
-            // whole block. In-place would race the read once the first block
-            // fills forward.
-            let src = rgba.clone();
-            for y in 0..h {
-                for x in 0..w {
-                    let bx = (x / block_size) * block_size;
-                    let by = (y / block_size) * block_size;
-                    let sample = src.get_pixel(bx, by);
-                    let dst = rgba.get_pixel_mut(x, y);
-                    dst.0[0] = sample.0[0];
-                    dst.0[1] = sample.0[1];
-                    dst.0[2] = sample.0[2];
+            // Sample one pixel per block (top-left corner) into a small
+            // LUT before any mutation. Replaces the previous full-image
+            // `rgba.clone()` (~48 MB at 4K) with a block-grid scratch
+            // (~144 KB at block_size=16, ~9 MB at block_size=2).
+            let bs = block_size;
+            let blocks_x = w.div_ceil(bs);
+            let blocks_y = h.div_ceil(bs);
+            let mut lut: Vec<[u8; 3]> =
+                Vec::with_capacity((blocks_x * blocks_y) as usize);
+            for by in 0..blocks_y {
+                for bx in 0..blocks_x {
+                    let p = rgba.get_pixel(bx * bs, by * bs);
+                    lut.push([p.0[0], p.0[1], p.0[2]]);
                 }
             }
+            // Rows are write-disjoint → parallelise.
+            use rayon::prelude::*;
+            let row_stride = (w * 4) as usize;
+            rgba.as_mut().par_chunks_mut(row_stride).enumerate().for_each(|(y, row)| {
+                let row_block = ((y as u32) / bs) * blocks_x;
+                for x in 0..w as usize {
+                    let s = lut[(row_block + (x as u32) / bs) as usize];
+                    let p = x * 4;
+                    row[p] = s[0];
+                    row[p + 1] = s[1];
+                    row[p + 2] = s[2];
+                }
+            });
         }
         FillStyle::CrossProcess { shadow, highlight } => {
             // Split-tone by luma: pixels below 128 bend toward `shadow`,
@@ -345,28 +362,26 @@ pub fn apply_fill_style(rgba: &mut RgbaImage, style: crate::types::FillStyle) {
             }
         }
         FillStyle::Halftone { dot_spacing } => {
-            // Classic halftone: overlay a lattice where dot radius scales
-            // inversely with luma. `dot_spacing` = centre-to-centre pitch.
-            // Uses max pitch clamp to keep the test suite well-defined at
-            // corner cases.
+            // Read each pixel's luma BEFORE writing the same pixel. The
+            // earlier bug read cell-top-left luma, which had already been
+            // mutated by the time later rows ran; reading `(x, y)` itself
+            // is safe because the write at `(x, y)` happens after.
             let spacing = dot_spacing.clamp(2, 32);
             let (w, h) = rgba.dimensions();
             let half = (spacing / 2) as i32;
+            let max_r_sq = (half * half) as u32;
             for y in 0..h {
                 for x in 0..w {
-                    let px = rgba.get_pixel(x, y);
-                    let luma = luma_u8(px.0[0], px.0[1], px.0[2]);
-                    // Dot radius squared: dark (luma=0) → full cell, light → tiny.
-                    let max_r_sq = (half * half) as u32;
+                    let src = rgba.get_pixel(x, y);
+                    let luma = luma_u8(src.0[0], src.0[1], src.0[2]);
                     let r_sq = max_r_sq * (255 - luma as u32) / 255;
                     let cx = ((x as i32) / spacing as i32) * spacing as i32 + half;
                     let cy = ((y as i32) / spacing as i32) * spacing as i32 + half;
                     let dx = x as i32 - cx;
                     let dy = y as i32 - cy;
                     let dist_sq = (dx * dx + dy * dy) as u32;
-                    let inside = dist_sq <= r_sq;
+                    let v = if dist_sq <= r_sq { 0u8 } else { 255 };
                     let dst = rgba.get_pixel_mut(x, y);
-                    let v = if inside { 0 } else { 255 };
                     dst.0[0] = v; dst.0[1] = v; dst.0[2] = v;
                 }
             }
@@ -588,7 +603,9 @@ fn apply_edge_shift(mask: &mut GrayImage, shift: f32) {
     let hi = h as i32;
     let use_par = h >= 512;
 
-    let mut a = mask.as_raw().clone();
+    // Skip the unconditional `mask.as_raw().clone()` (~12 MB at 4 K) by
+    // letting the first `step` read `mask.as_raw()` directly into `a`.
+    let mut a = vec![0u8; w * h];
     let mut b = vec![0u8; w * h];
 
     let step = |src: &[u8], dst: &mut [u8]| {
@@ -619,13 +636,16 @@ fn apply_edge_shift(mask: &mut GrayImage, shift: f32) {
         }
     };
 
-    for _ in 0..full {
-        step(&a, &mut b);
-        std::mem::swap(&mut a, &mut b);
+    if full > 0 {
+        step(mask.as_raw(), &mut a);
+        for _ in 1..full {
+            std::mem::swap(&mut a, &mut b);
+            step(&b, &mut a);
+        }
     }
 
     if frac >= 0.01 {
-        // Blend `a` (N iterations) with one more iteration for sub-pixel shift.
+        if full == 0 { a.copy_from_slice(mask.as_raw()); }
         step(&a, &mut b);
         let inv = 1.0 - frac;
         let blend = |a_byte: &mut u8, b_byte: u8| {
@@ -846,5 +866,60 @@ mod tests {
             let _ = postprocess_from_flat(&tensor, 320, 320, &original, &PostprocessOpts::new(&mask, ModelKind::Silueta))
                 .expect("postprocess succeeds");
         });
+    }
+
+    /// Halftone regression: on a uniform-luma input, pixels at the
+    /// same offset within their respective cells must produce
+    /// identical output. The pre-fix version read from the already-
+    /// mutated buffer, so cells past row 0 saw corrupted "luma" (the
+    /// halftone's own 0/255 output) and produced different radii.
+    /// Comparing rows at multiples of `spacing` exercises this: the
+    /// cell-relative offset is identical, so the math should be too.
+    #[test]
+    fn halftone_uniform_input_is_cell_invariant() {
+        let spacing = 8u32;
+        let mut img = image::RgbaImage::from_pixel(32, 32, image::Rgba([100, 100, 100, 255]));
+        apply_fill_style(
+            &mut img,
+            crate::types::FillStyle::Halftone { dot_spacing: spacing },
+        );
+        // Rows 0, 8, 16, 24 all have dy = -half from their cell centre.
+        for &probe_y in &[spacing, spacing * 2, spacing * 3] {
+            for x in 0..32 {
+                let a = img.get_pixel(x, 0).0;
+                let b = img.get_pixel(x, probe_y).0;
+                assert_eq!(
+                    a, b,
+                    "uniform halftone diverges at ({x}, 0) vs ({x}, {probe_y})",
+                );
+            }
+        }
+    }
+
+    /// Pixelate overhang: image dimensions not a multiple of `block_size`.
+    /// `blocks_x = w.div_ceil(bs)`; the rightmost block should sample at
+    /// `(blocks_x-1) * bs` which must be inside the image.
+    #[test]
+    fn pixelate_handles_overhang_dimensions() {
+        // 17×17 image, block_size=8 → blocks = 3×3, last block sample at (16, 16).
+        let mut img = image::RgbaImage::new(17, 17);
+        for y in 0..17 {
+            for x in 0..17 {
+                img.put_pixel(x, y, image::Rgba([(x * 13) as u8, (y * 17) as u8, 0, 255]));
+            }
+        }
+        let pre = img.clone();
+        apply_fill_style(&mut img, crate::types::FillStyle::Pixelate { block_size: 8 });
+        // Sanity: corner blocks sampled at (0,0), (8,0), (16,0), etc.
+        // Top-left block (0..8, 0..8) all same colour as pre[(0,0)].
+        let expected_tl = pre.get_pixel(0, 0).0;
+        assert_eq!(img.get_pixel(0, 0).0[..3], expected_tl[..3]);
+        assert_eq!(img.get_pixel(7, 7).0[..3], expected_tl[..3]);
+        // Rightmost block (16..17, 0..8) samples at (16, 0).
+        let expected_r = pre.get_pixel(16, 0).0;
+        assert_eq!(img.get_pixel(16, 0).0[..3], expected_r[..3]);
+        // Bottom-right block (16..17, 16..17) samples at (16, 16).
+        let expected_br = pre.get_pixel(16, 16).0;
+        assert_eq!(img.get_pixel(16, 16).0[..3], expected_br[..3]);
     }
 }

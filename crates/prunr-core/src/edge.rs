@@ -488,21 +488,25 @@ pub fn finalize_edges(
 }
 
 /// Pre-process an image according to the user's `InputTransform`. Returns
-/// an owned transformed image for DexiNed inference; `None`/identity returns
-/// a clone of the original (needed because callers pass `&DynamicImage` and
-/// we can't return a reference here). Cheap enough at 4K — single per-pixel
-/// pass with integer math.
-pub fn apply_input_transform(img: &DynamicImage, transform: crate::types::InputTransform) -> DynamicImage {
+/// `Cow::Borrowed(img)` for the identity (`None`) case so the most-common
+/// path skips a full RGBA clone (~32 MB at 4K). The transformed arms still
+/// produce owned `DynamicImage` via `Cow::Owned`. Cheap enough at 4K —
+/// single per-pixel pass with integer math.
+pub fn apply_input_transform<'a>(
+    img: &'a DynamicImage,
+    transform: crate::types::InputTransform,
+) -> std::borrow::Cow<'a, DynamicImage> {
     use crate::types::InputTransform;
+    use std::borrow::Cow;
     match transform {
-        InputTransform::None => img.clone(),
+        InputTransform::None => Cow::Borrowed(img),
         InputTransform::Grayscale => {
             let mut rgba = img.to_rgba8();
             for p in rgba.pixels_mut() {
                 let y = ((p.0[0] as u32 * 2126 + p.0[1] as u32 * 7152 + p.0[2] as u32 * 722) / 10000) as u8;
                 p.0[0] = y; p.0[1] = y; p.0[2] = y;
             }
-            DynamicImage::ImageRgba8(rgba)
+            Cow::Owned(DynamicImage::ImageRgba8(rgba))
         }
         InputTransform::ContrastBoost { percent } => {
             let factor = percent.clamp(50, 300) as i32;
@@ -515,7 +519,7 @@ pub fn apply_input_transform(img: &DynamicImage, transform: crate::types::InputT
                     p.0[i] = shifted.clamp(0, 255) as u8;
                 }
             }
-            DynamicImage::ImageRgba8(rgba)
+            Cow::Owned(DynamicImage::ImageRgba8(rgba))
         }
         InputTransform::Posterize { levels } => {
             let n = levels.max(2) as u16 - 1;
@@ -526,7 +530,7 @@ pub fn apply_input_transform(img: &DynamicImage, transform: crate::types::InputT
                     p.0[i] = ((v * n / 255) * 255 / n) as u8;
                 }
             }
-            DynamicImage::ImageRgba8(rgba)
+            Cow::Owned(DynamicImage::ImageRgba8(rgba))
         }
     }
 }
@@ -534,23 +538,30 @@ pub fn apply_input_transform(img: &DynamicImage, transform: crate::types::InputT
 /// Preprocess an image for DexiNed: resize, BGR float32, subtract mean.
 /// Flatten RGBA onto white: transparent pixels become white so edge detection
 /// doesn't see ghost content behind removed backgrounds.
+///
+/// Operates in-place on the `to_rgba8` clone — saves one full-image
+/// allocation vs. allocating a separate output buffer (~50 MB at 4 K).
+/// Rows are independent → parallel via `par_chunks_mut`. Equivalent
+/// to the previous `result = src * alpha + 255 * (1-alpha)` formula.
 fn flatten_on_white(img: &DynamicImage) -> DynamicImage {
-    let rgba = img.to_rgba8();
-    let (w, h) = (rgba.width(), rgba.height());
-    let src = rgba.as_raw();
-    let mut out = vec![255u8; (w * h * 4) as usize];
-    for i in 0..(w * h) as usize {
-        let a = src[i * 4 + 3] as f32 / 255.0;
-        if a > 0.0 {
-            // Alpha-blend onto white: result = fg * alpha + 255 * (1 - alpha)
-            let inv_a = 1.0 - a;
-            out[i * 4]     = (src[i * 4]     as f32 * a + 255.0 * inv_a) as u8;
-            out[i * 4 + 1] = (src[i * 4 + 1] as f32 * a + 255.0 * inv_a) as u8;
-            out[i * 4 + 2] = (src[i * 4 + 2] as f32 * a + 255.0 * inv_a) as u8;
+    use rayon::prelude::*;
+    let mut rgba = img.to_rgba8();
+    let row_stride = (rgba.width() * 4) as usize;
+    rgba.as_mut().par_chunks_mut(row_stride).for_each(|row| {
+        let n = row.len() / 4;
+        for i in 0..n {
+            let p = i * 4;
+            let a = row[p + 3] as f32 / 255.0;
+            if a < 1.0 {
+                let inv_a = 1.0 - a;
+                row[p]     = (row[p]     as f32 * a + 255.0 * inv_a) as u8;
+                row[p + 1] = (row[p + 1] as f32 * a + 255.0 * inv_a) as u8;
+                row[p + 2] = (row[p + 2] as f32 * a + 255.0 * inv_a) as u8;
+            }
+            row[p + 3] = 255;
         }
-        out[i * 4 + 3] = 255; // fully opaque for preprocessing
-    }
-    DynamicImage::ImageRgba8(RgbaImage::from_raw(w, h, out).expect("flatten buffer size matches dimensions"))
+    });
+    DynamicImage::ImageRgba8(rgba)
 }
 
 fn preprocess(img: &DynamicImage) -> Array4<f32> {

@@ -43,6 +43,20 @@ pub fn overlay_frame() -> egui::Frame {
     }
 }
 
+/// Tighten egui's default visuals for a modal: subdued borders + the
+/// button-fill colors used elsewhere in the app. Call once per frame
+/// inside the modal's body.
+pub fn apply_modal_visuals(ui: &mut egui::Ui) {
+    let vis = ui.visuals_mut();
+    vis.widgets.inactive.bg_stroke =
+        Stroke::new(STROKE_DEFAULT, Color32::from_rgb(0x60, 0x60, 0x60));
+    vis.widgets.hovered.bg_stroke =
+        Stroke::new(STROKE_DEFAULT, Color32::from_rgb(0x80, 0x80, 0x80));
+    vis.widgets.inactive.bg_fill = WIDGET_INACTIVE_BG;
+    vis.widgets.inactive.fg_stroke = Stroke::new(STROKE_DEFAULT, TEXT_PRIMARY);
+    vis.widgets.hovered.bg_fill = WIDGET_HOVER_BG;
+}
+
 /// Suppression window for the backdrop-click that opens a modal —
 /// without it, the same primary_clicked event that triggered the open
 /// also fires backdrop_clicked outside the new window's rect, closing
@@ -217,7 +231,11 @@ pub const THUMBNAIL_ROUNDING: f32 = 4.0;
 
 // === Phase 5: Settings Dialog ===
 pub const SETTINGS_DIALOG_WIDTH: f32 = 600.0;
-pub const SETTINGS_DIALOG_HEIGHT: f32 = 700.0;
+pub const SETTINGS_DIALOG_HEIGHT: f32 = 620.0;
+pub const CLI_HELP_DIALOG_HEIGHT: f32 = 700.0;
+/// Vertical space the settings modal reserves at the bottom for its
+/// footer (Reset / Auto-saved row + separator).
+pub const MODAL_FOOTER_RESERVED: f32 = 56.0;
 
 /// Hint text for settings modal (readable on dark overlay)
 pub const TEXT_HINT: Color32 = Color32::from_rgb(0xb8, 0xb8, 0xb8);

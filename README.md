@@ -74,7 +74,7 @@ Common flags:
 | Flag | Description |
 |------|-------------|
 | `-o, --output <PATH>` | Output file or directory |
-| `-m, --model <MODEL>` | `silueta` (default), `u2net`, `birefnet-lite` |
+| `-m, --model <MODEL>` | `birefnet-lite` (default), `silueta`, `u2net` |
 | `-j, --jobs <N>` | Parallel jobs (default: 1) |
 | `-f, --force` | Overwrite existing output |
 | `--cpu` | Force CPU inference |
@@ -95,8 +95,8 @@ Common flags:
 
 | Model | Size | Bundled? | Resolution | Best for |
 |-------|------|---------|-----------|----------|
-| Silueta | ~4 MB | yes | 320×320 | Fast, clean subjects (default) |
-| BiRefNet-lite | ~214 MB | yes | 1024×1024 | Fine detail (hair, leaves) |
+| BiRefNet-lite | ~214 MB | yes | 1024×1024 | Fine detail (hair, leaves) — **default** |
+| Silueta | ~4 MB | yes | 320×320 | Fast, clean subjects |
 | DexiNed | ~140 MB | yes | full-res | Line / edge extraction |
 | U2Net | ~170 MB | **on-demand** | 320×320 | Better edges than Silueta |
 | LaMa (Eraser) | ~199 MB | **on-demand** | 512×512 (tiled) | Object removal — paint over a region, fill it in |

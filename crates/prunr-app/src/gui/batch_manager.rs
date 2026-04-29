@@ -217,9 +217,16 @@ impl BatchManager {
     pub(crate) fn request_decode_bytes(&self, item_id: u64, bytes: Arc<Vec<u8>>) {
         let tx = self.bg_io.decode_tx.clone();
         std::thread::spawn(move || {
-            if let Ok(img) = image::load_from_memory(&bytes) {
-                let _ = tx.send((item_id, Arc::new(img.to_rgba8())));
-            }
+            // Inner block scope: the `DynamicImage` (~50 MB at 4 K RGBA)
+            // and the encoded `bytes` Arc both drop before the channel
+            // send, so concurrent decodes don't pile up DynamicImage +
+            // RGBA simultaneously per thread.
+            let rgba = match image::load_from_memory(&bytes) {
+                Ok(img) => img.to_rgba8(),
+                Err(_) => return,
+            };
+            drop(bytes);
+            let _ = tx.send((item_id, Arc::new(rgba)));
         });
     }
 
@@ -255,13 +262,22 @@ impl BatchManager {
         } else {
             let source = source.clone();
             std::thread::spawn(move || {
-                if let Ok(bytes) = source.load_bytes() {
-                    if let Ok(img) = image::load_from_memory(&bytes) {
-                        let rgba = img.to_rgba8();
-                        let (w, h) = fit_dimensions(rgba.width(), rgba.height(), THUMB_MAX_PX, THUMB_MAX_PX);
-                        let thumb = image::imageops::resize(&rgba, w, h, image::imageops::FilterType::Triangle);
-                        let _ = tx.send((item_id, thumb.width(), thumb.height(), thumb.into_raw()));
-                    }
+                // Build the thumb in an inner scope so the source bytes,
+                // DynamicImage, and full-resolution RGBA all drop before
+                // we send. On a 50-image batch this is the dominant
+                // transient peak during sidebar ingestion (was N ×
+                // ~50 MB co-resident).
+                let thumb = (|| -> Option<image::RgbaImage> {
+                    let bytes = source.load_bytes().ok()?;
+                    let img = image::load_from_memory(&bytes).ok()?;
+                    drop(bytes);
+                    let rgba = img.to_rgba8();
+                    drop(img);
+                    let (w, h) = fit_dimensions(rgba.width(), rgba.height(), THUMB_MAX_PX, THUMB_MAX_PX);
+                    Some(image::imageops::resize(&rgba, w, h, image::imageops::FilterType::Triangle))
+                })();
+                if let Some(thumb) = thumb {
+                    let _ = tx.send((item_id, thumb.width(), thumb.height(), thumb.into_raw()));
                 }
             });
         }

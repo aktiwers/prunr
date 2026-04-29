@@ -33,7 +33,10 @@ pub struct CompressedEntry {
 /// Compress an RgbaImage to a zstd buffer in RAM.
 pub fn compress_to_ram(rgba: &image::RgbaImage) -> std::io::Result<CompressedEntry> {
     let (w, h) = (rgba.width(), rgba.height());
-    let mut raw = Vec::with_capacity(8 + rgba.as_raw().len() / 3);
+    // zstd-level-1 on natural-image RGBA hits ~2:1 in practice (the
+    // earlier `/3` was optimistic). Right-sizing avoids 1–2 reallocs
+    // mid-encode on 4 K images.
+    let mut raw = Vec::with_capacity(8 + rgba.as_raw().len() / 2 + 64);
     let mut encoder = zstd::Encoder::new(&mut raw, ZSTD_LEVEL)?;
     encoder.write_all(&w.to_le_bytes())?;
     encoder.write_all(&h.to_le_bytes())?;
@@ -49,7 +52,11 @@ pub fn decompress_from_ram(entry: &CompressedEntry) -> std::io::Result<image::Rg
     decoder.read_exact(&mut header)?;
     let w = u32::from_le_bytes([header[0], header[1], header[2], header[3]]);
     let h = u32::from_le_bytes([header[4], header[5], header[6], header[7]]);
-    let mut pixels = Vec::new();
+    // Pre-size: header carries `w, h` so we know the exact decompressed
+    // size. Avoids ~25 doublings + a peak ~100 MB transient mid-grow at
+    // 4 K (read_to_end starts at 0 and doubles).
+    let expected = (w as usize) * (h as usize) * 4;
+    let mut pixels = Vec::with_capacity(expected);
     decoder.read_to_end(&mut pixels)?;
     image::RgbaImage::from_raw(w, h, pixels).ok_or_else(|| {
         std::io::Error::new(
@@ -113,7 +120,10 @@ pub fn read_history(entry: &DiskHistoryEntry) -> std::io::Result<image::RgbaImag
     let w = u32::from_le_bytes([header[0], header[1], header[2], header[3]]);
     let h = u32::from_le_bytes([header[4], header[5], header[6], header[7]]);
 
-    let mut pixels = Vec::new();
+    // Pre-size: same rationale as `decompress_from_ram` — skips the
+    // ~25 doublings + peak ~100 MB transient mid-grow at 4 K.
+    let expected = (w as usize) * (h as usize) * 4;
+    let mut pixels = Vec::with_capacity(expected);
     decoder.read_to_end(&mut pixels)?;
 
     image::RgbaImage::from_raw(w, h, pixels).ok_or_else(|| {
@@ -209,5 +219,18 @@ mod tests {
         assert_eq!(rgba.as_raw(), recovered.as_raw());
         delete_entry(&entry);
         assert!(!entry.path.exists());
+    }
+
+    /// Smallest realistic case: 1×1 image. Pre-sized capacity heuristic
+    /// (`len/2 + 64`) and the read-side `Vec::with_capacity(w*h*4)` must
+    /// both produce a usable buffer. Catches any off-by-one when the
+    /// expected pixel count is tiny.
+    #[test]
+    fn compress_decompress_roundtrip_1x1() {
+        let rgba = image::RgbaImage::from_pixel(1, 1, image::Rgba([42, 17, 200, 99]));
+        let compressed = compress_to_ram(&rgba).unwrap();
+        let recovered = decompress_from_ram(&compressed).unwrap();
+        assert_eq!(rgba.dimensions(), recovered.dimensions());
+        assert_eq!(rgba.as_raw(), recovered.as_raw());
     }
 }

@@ -227,15 +227,33 @@ impl Processor {
             };
             match prunr_core::inpaint::process_inpaint_with(&image, &mask, tuning.backend, sd_req) {
                 Ok(rgba) => {
-                    // Post-process: sharpen first (LaMa's blur is the
-                    // pixel content), then feather the boundary so the
-                    // sharpen doesn't crisp up an already-soft seam.
-                    let mut out = rgba;
+                    // Post-process pipeline:
+                    //  1. color match — shifts mean RGB so the patch
+                    //     doesn't sit as a tinted block on a flat bg.
+                    //  2. seam guided blend — uses the source as a guide
+                    //     so the inpaint edge structure follows the
+                    //     surrounding image. Subsumes the older linear
+                    //     `feather_inpainted` blend.
+                    //  3. sharpen — counters LaMa's interior blur (deep
+                    //     inside the mask, where seam blend already
+                    //     reverted toward raw inpaint).
+                    let mut out = prunr_core::inpaint_blend::color_match_inpainted(
+                        &rgba, &image, &mask,
+                        prunr_core::inpaint_blend::COLOR_MATCH_RING_PX,
+                    );
+                    let band_px = if tuning.feather_px > 0.0 {
+                        tuning.feather_px
+                    } else {
+                        prunr_core::inpaint_blend::SEAM_BLEND_BAND_PX
+                    };
+                    out = prunr_core::inpaint_blend::seam_guided_blend(
+                        &out, &image, &mask,
+                        prunr_core::inpaint_blend::SEAM_BLEND_RADIUS,
+                        prunr_core::inpaint_blend::SEAM_BLEND_EPSILON,
+                        band_px,
+                    );
                     if tuning.sharpen > 0.0 {
                         out = prunr_core::inpaint::sharpen_inpainted(&out, &mask, tuning.sharpen);
-                    }
-                    if tuning.feather_px > 0.0 {
-                        out = prunr_core::inpaint::feather_inpainted(&out, &image, &mask, tuning.feather_px);
                     }
                     let _ = tx.send(InpaintResult { item_id, rgba: out, generation: gen });
                 }
