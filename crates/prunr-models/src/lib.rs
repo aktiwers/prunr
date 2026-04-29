@@ -185,7 +185,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
     ModelDescriptor {
         id: ModelId::Silueta,
         display_name: "Silueta",
-        description: "Fast, clean subjects. The default.",
+        description: "Fast and tiny — pick when speed matters more than edge fidelity.",
         category: ModelCategory::Segmentation,
         source: ModelSource::Bundled,
         version: "1.0.0",
@@ -219,7 +219,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
     ModelDescriptor {
         id: ModelId::BiRefNetLite,
         display_name: "BiRefNet-lite",
-        description: "Best detail on hair and leaves at 1024×1024.",
+        description: "Default model. Best detail on hair and leaves at 1024×1024.",
         category: ModelCategory::Segmentation,
         source: ModelSource::Bundled,
         version: "1.0.0",

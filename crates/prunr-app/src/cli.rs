@@ -23,8 +23,8 @@ pub struct Cli {
     #[arg(long, value_name = "PATH")]
     pub open: Option<PathBuf>,
 
-    /// Model: silueta (fast, default) or u2net (quality).
-    #[arg(short = 'm', long, default_value = "silueta")]
+    /// Model: birefnet-lite (default), silueta (fast), or u2net (quality).
+    #[arg(short = 'm', long, default_value = "birefnet-lite")]
     pub model: CliModel,
 
     /// Number of parallel jobs for batch processing.
@@ -145,11 +145,11 @@ pub struct Cli {
 /// Model selection
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CliModel {
-    /// Silueta (~4MB, fast) — default
+    /// Silueta (~4MB, fast)
     Silueta,
     /// U2Net (~170MB, higher quality)
     U2net,
-    /// BiRefNet-lite (~214MB, best detail at 1024×1024)
+    /// BiRefNet-lite (~214MB, best detail at 1024×1024) — default
     BirefnetLite,
 }
 
@@ -286,13 +286,25 @@ fn run_inpaint(args: &Cli) -> i32 {
     }
     // CLI defaults to LaMaFp32 — Big-LaMa selection from the CLI is
     // tracked in PLAN 17-10 (would add `--inpaint-backend big-lama`).
-    let result = match prunr_core::inpaint::process_inpaint(&img, &mask, prunr_models::ModelId::LaMaFp32) {
+    let raw = match prunr_core::inpaint::process_inpaint(&img, &mask, prunr_models::ModelId::LaMaFp32) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("error: inpaint failed: {e}");
             return 1;
         }
     };
+    // Post-process: color-match + seam guided blend. Same defaults as
+    // the GUI path so CLI output matches what the user sees on-screen.
+    let color_matched = prunr_core::inpaint_blend::color_match_inpainted(
+        &raw, &img, &mask,
+        prunr_core::inpaint_blend::COLOR_MATCH_RING_PX,
+    );
+    let result = prunr_core::inpaint_blend::seam_guided_blend(
+        &color_matched, &img, &mask,
+        prunr_core::inpaint_blend::SEAM_BLEND_RADIUS,
+        prunr_core::inpaint_blend::SEAM_BLEND_EPSILON,
+        prunr_core::inpaint_blend::SEAM_BLEND_BAND_PX,
+    );
     if let Err(e) = result.save(&out_path) {
         eprintln!("error: failed to save {}: {e}", out_path.display());
         return 1;

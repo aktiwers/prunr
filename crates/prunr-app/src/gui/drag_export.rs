@@ -133,7 +133,7 @@ fn render_layer(
     kind: LayerKind,
     original: &DynamicImage,
     seg: Option<&SegBundle>,
-) -> Option<Vec<u8>> {
+) -> Option<LayerOutput> {
     let item_id = item.id;
     match kind {
         LayerKind::Subject => {
@@ -152,9 +152,7 @@ fn render_layer(
             )
                 .map_err(|err| tracing::warn!(item_id, %err, "subject layer postprocess"))
                 .ok()?;
-            prunr_core::encode_rgba_png(&rgba)
-                .map_err(|err| tracing::warn!(item_id, %err, "subject layer encode"))
-                .ok()
+            Some(LayerOutput::Rgba(rgba))
         }
         LayerKind::Lines => {
             let et = item.cached_edge_tensors.as_ref()?;
@@ -162,9 +160,7 @@ fn render_layer(
             let rgba = prunr_core::finalize_edges(
                 &tensor, et.height, et.width, original, &item.settings.edge_settings(),
             );
-            prunr_core::encode_rgba_png(&rgba)
-                .map_err(|err| tracing::warn!(item_id, %err, "lines layer encode"))
-                .ok()
+            Some(LayerOutput::Rgba(rgba))
         }
         LayerKind::Mask => {
             let seg = seg?;
@@ -174,11 +170,16 @@ fn render_layer(
             )
                 .map_err(|err| tracing::warn!(item_id, %err, "mask layer reshape"))
                 .ok()?;
-            prunr_core::encode_gray_png(&gray)
-                .map_err(|err| tracing::warn!(item_id, %err, "mask layer encode"))
-                .ok()
+            Some(LayerOutput::Gray(gray))
         }
     }
+}
+
+/// Owned per-layer pixel buffer, format-tagged so `write_layer` can
+/// stream-encode the right PNG variant without a `Vec<u8>` intermediate.
+enum LayerOutput {
+    Rgba(image::RgbaImage),
+    Gray(image::GrayImage),
 }
 
 fn write_layer(
@@ -187,9 +188,23 @@ fn write_layer(
     original: &DynamicImage,
     seg: Option<&SegBundle>,
 ) -> std::io::Result<Option<PathBuf>> {
-    let Some(png_bytes) = render_layer(item, kind, original, seg) else { return Ok(None) };
+    let Some(layer) = render_layer(item, kind, original, seg) else { return Ok(None) };
     let path = temp_dir().join(make_layer_filename(&item.filename, kind));
-    std::fs::write(&path, &png_bytes)?;
+    let file = std::fs::File::create(&path)?;
+    let mut w = std::io::BufWriter::new(file);
+    let res: Result<(), prunr_core::CoreError> = match layer {
+        LayerOutput::Rgba(rgba) => prunr_core::encode_rgba_png_into(&rgba, &mut w),
+        // No streaming variant for Gray yet — encode_gray_png allocates
+        // a small Vec (mask is single-channel, ~12 MB at 4 K vs ~50 MB
+        // RGBA). Acceptable for this layer's traffic.
+        LayerOutput::Gray(gray) => prunr_core::encode_gray_png(&gray)
+            .and_then(|bytes| {
+                std::io::Write::write_all(&mut w, &bytes)
+                    .map_err(prunr_core::CoreError::Io)
+            }),
+    };
+    res.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+    std::io::Write::flush(&mut w)?;
     Ok(Some(path))
 }
 
@@ -207,9 +222,13 @@ pub(crate) fn prepare(item: &BatchItem) -> std::io::Result<PathBuf> {
     match &item.result_rgba {
         Some(rgba) => {
             let baked = item.bake_export_bg(rgba);
-            let bytes = prunr_core::encode_rgba_png(&baked)
+            // Stream-encode directly into BufWriter — saves the
+            // ~5–30 MB intermediate Vec<u8> at 4 K.
+            let file = std::fs::File::create(&path)?;
+            let mut w = std::io::BufWriter::new(file);
+            prunr_core::encode_rgba_png_into(&baked, &mut w)
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
-            std::fs::write(&path, &bytes)?;
+            std::io::Write::flush(&mut w)?;
         }
         None => {
             let bytes = item.source.load_bytes()?;
@@ -262,7 +281,16 @@ pub(crate) fn render_layer_bytes(item: &BatchItem) -> Vec<(String, Vec<u8>)> {
     LayerKind::ALL.iter()
         .copied()
         .filter_map(|kind| {
-            let bytes = render_layer(item, kind, &original, seg.as_ref())?;
+            let layer = render_layer(item, kind, &original, seg.as_ref())?;
+            // Save-to-folder caller (`app.rs`) collects these bytes and
+            // writes them via `fs::write`; encoding to `Vec<u8>` here is
+            // unavoidable on this branch because the caller wants owned
+            // bytes (it ships them through a channel). Drag-out's hot
+            // path goes through `write_layer` and skips the Vec.
+            let bytes = match layer {
+                LayerOutput::Rgba(rgba) => prunr_core::encode_rgba_png(&rgba).ok()?,
+                LayerOutput::Gray(gray) => prunr_core::encode_gray_png(&gray).ok()?,
+            };
             Some((make_layer_filename(&item.filename, kind), bytes))
         })
         .collect()

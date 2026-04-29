@@ -12,7 +12,7 @@ use crate::gui::app::PrunrApp;
 use crate::gui::settings::Settings;
 use crate::gui::theme;
 
-use super::{hint, section_heading};
+use super::{hint, kv_row, section_heading};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsTab {
@@ -31,8 +31,8 @@ impl SettingsTab {
     }
     const ALL: [SettingsTab; 3] = [Self::General, Self::Behavior, Self::Hotkeys];
 
-    /// Parse a label-style name into a tab. Used by PRUNR_OPEN_TAB.
-    pub fn from_debug_name(s: &str) -> Option<Self> {
+    /// Parse a label string into a tab. Used by PRUNR_OPEN_TAB.
+    pub fn from_label(s: &str) -> Option<Self> {
         Self::ALL.iter().copied().find(|t| t.label() == s)
     }
 }
@@ -82,18 +82,17 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) {
         .collapsible(false)
         .resizable(false)
         .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
-        .fixed_size([theme::SETTINGS_DIALOG_WIDTH, 620.0])
+        .fixed_size([theme::SETTINGS_DIALOG_WIDTH, theme::SETTINGS_DIALOG_HEIGHT])
         .frame(theme::overlay_frame())
         .show(ctx, |ui| {
-            apply_modal_visuals(ui);
+            theme::apply_modal_visuals(ui);
 
             render_tab_strip(ui, &mut app.settings_tab);
             ui.add_space(theme::SPACE_SM);
 
             // Tab content scrolls inside its own region so the footer
             // (Reset row) doesn't overlap long content.
-            const FOOTER_RESERVED: f32 = 56.0;
-            let scroll_height = (ui.available_height() - FOOTER_RESERVED).max(0.0);
+            let scroll_height = (ui.available_height() - theme::MODAL_FOOTER_RESERVED).max(0.0);
             let hardware_intent = egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .max_height(scroll_height)
@@ -130,24 +129,8 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) {
     }
 }
 
-/// Tighten egui's default visuals for the modal: subdued borders + the
-/// button-fill colors used elsewhere in the app.
-fn apply_modal_visuals(ui: &mut egui::Ui) {
-    let vis = ui.visuals_mut();
-    vis.widgets.inactive.bg_stroke =
-        egui::Stroke::new(theme::STROKE_DEFAULT, egui::Color32::from_rgb(0x60, 0x60, 0x60));
-    vis.widgets.hovered.bg_stroke =
-        egui::Stroke::new(theme::STROKE_DEFAULT, egui::Color32::from_rgb(0x80, 0x80, 0x80));
-    vis.widgets.inactive.bg_fill = theme::WIDGET_INACTIVE_BG;
-    vis.widgets.inactive.fg_stroke =
-        egui::Stroke::new(theme::STROKE_DEFAULT, theme::TEXT_PRIMARY);
-    vis.widgets.hovered.bg_fill = theme::WIDGET_HOVER_BG;
-}
-
-/// Footer = Reset-to-defaults row. When `pending_reset_confirm` is set,
-/// shows an inline "Reset everything? [Reset] [Cancel]" instead of the
-/// initial trigger button. No separate modal; the destructive scope is
-/// spelled out so users can't accidentally nuke their config.
+/// Inline confirm-then-reset (no separate modal) so the destructive
+/// scope is spelled out before the user can act on it.
 fn render_modal_footer(ui: &mut egui::Ui, app: &mut PrunrApp) {
     ui.horizontal(|ui| {
         if app.pending_reset_confirm {
@@ -162,7 +145,7 @@ fn render_modal_footer(ui: &mut egui::Ui, app: &mut PrunrApp) {
                 if ui.small_button(RichText::new("Reset")
                     .color(theme::DESTRUCTIVE).size(theme::FONT_SIZE_BODY).strong()).clicked()
                 {
-                    reset_settings_to_defaults(&mut app.settings);
+                    app.settings.reset_preserving_identity();
                     app.pending_reset_confirm = false;
                 }
             });
@@ -178,21 +161,6 @@ fn render_modal_footer(ui: &mut egui::Ui, app: &mut PrunrApp) {
             });
         }
     });
-}
-
-/// Reset Settings to its `Default` while preserving identity-bearing fields
-/// (active backend probe, presets the user authored, the chosen default
-/// preset). `parallel_jobs` re-derives from the current backend so it
-/// snaps to a sane value for whatever GPU/CPU is detected.
-fn reset_settings_to_defaults(settings: &mut Settings) {
-    let backend = settings.active_backend.clone();
-    let presets = std::mem::take(&mut settings.presets);
-    let default_preset = settings.default_preset.clone();
-    *settings = Settings::default();
-    settings.active_backend = backend;
-    settings.parallel_jobs = settings.default_jobs();
-    settings.presets = presets;
-    settings.default_preset = default_preset;
 }
 
 fn dispatch_hardware_intent(app: &mut PrunrApp, intent: HardwareSectionIntent) {
@@ -233,31 +201,30 @@ fn render_hardware_section(
     section_heading(ui, "Hardware");
 
     let p = hardware::profile();
-    // Two-column key/value grid for scannable hardware facts.
+    let avail_ram = hardware::available_ram_bytes_throttled();
     egui::Grid::new("hardware_grid")
         .num_columns(2)
         .spacing([theme::SPACE_LG, theme::SPACE_XS])
         .show(ui, |ui| {
-            hw_row(ui, "CPU", &format!("{} ({})", p.cpu_vendor, p.cpu_brand));
+            kv_row(ui, "CPU", &format!("{} ({})", p.cpu_vendor, p.cpu_brand), theme::TEXT_SECONDARY);
             let gpu_label = match (p.dgpu, p.igpu) {
                 (Some(d), Some(i)) => format!("{d}, {i} (iGPU)"),
                 (Some(d), None) => format!("{d}"),
                 (None, Some(i)) => format!("{i} (iGPU)"),
                 (None, None) => "none detected".to_string(),
             };
-            hw_row(ui, "GPU", &gpu_label);
+            kv_row(ui, "GPU", &gpu_label, theme::TEXT_SECONDARY);
             let active_provider = prunr_core::OrtEngine::detect_active_provider();
-            hw_row(ui, "Active EP", &active_provider);
+            kv_row(ui, "Active EP", &active_provider, theme::TEXT_SECONDARY);
             let total_ram = hardware::total_ram_bytes();
-            let avail_ram = hardware::available_ram_bytes_now();
-            hw_row(ui, "RAM",
+            kv_row(ui, "RAM",
                 &format!("{:.1} / {:.1} GB free",
-                    avail_ram as f64 / 1e9, total_ram as f64 / 1e9));
+                    avail_ram as f64 / 1e9, total_ram as f64 / 1e9),
+                theme::TEXT_SECONDARY);
         });
 
     // SD-specific verdict on its own line, color-coded so it pops.
     let sd_working_set: u64 = 7 * 1024 * 1024 * 1024;
-    let avail_ram = hardware::available_ram_bytes_now();
     let verdict = hardware::ram_verdict(sd_working_set, avail_ram);
     let (color, text) = match verdict {
         hardware::RamVerdict::Comfortable => (
@@ -313,15 +280,6 @@ fn render_hardware_section(
 
     ui.add_space(theme::SPACE_MD);
     intent
-}
-
-/// One key/value row inside the hardware grid.
-fn hw_row(ui: &mut egui::Ui, key: &str, value: &str) {
-    ui.label(RichText::new(key)
-        .color(theme::TEXT_SECONDARY).size(theme::FONT_SIZE_MONO));
-    ui.label(RichText::new(value)
-        .color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY));
-    ui.end_row();
 }
 
 fn render_tab_strip(ui: &mut egui::Ui, current: &mut SettingsTab) {

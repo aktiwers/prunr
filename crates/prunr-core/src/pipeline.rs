@@ -235,24 +235,51 @@ where
     // `as_standard_layout()` is a no-op when already standard (CPU EP), and
     // a single memcpy otherwise — trivial next to inference cost.
     let is_std_owned = raw_output.is_standard_layout();
-    let standard = raw_output.as_standard_layout();
-    let h = standard.shape()[2];
-    let w = standard.shape()[3];
-    // invariant: as_standard_layout always produces a contiguous view,
-    // so as_slice() is Some.
-    let tensor_data = standard.as_slice().unwrap().to_vec();
-    let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
-    let mut sum = 0.0_f32;
-    for &v in &tensor_data { if v < lo { lo = v; } if v > hi { hi = v; } sum += v; }
-    let mean = if tensor_data.is_empty() { 0.0 } else { sum / tensor_data.len() as f32 };
-    let head: Vec<f32> = tensor_data.iter().take(6).copied().collect();
-    tracing::debug!(
-        ?model, h, w, tensor_len = tensor_data.len(),
-        owned_was_standard = is_std_owned,
-        tensor_min = lo, tensor_max = hi, tensor_mean = mean,
-        ?head,
-        "infer_only raw tensor flattened",
-    );
+    let h = raw_output.shape()[2];
+    let w = raw_output.shape()[3];
+    // Fast path when already standard layout: take ownership of the
+    // underlying Vec (no copy). Otherwise fall back to the contiguous
+    // view + clone. Saves 4–12 MB × 10 Hz alloc churn during a slider
+    // drag for BiRefNet-class models.
+    let tensor_data: Vec<f32> = if is_std_owned {
+        // ndarray 0.17+: an owned array can be standard-layout AND
+        // hold a nonzero data offset (e.g. after `slice_axis_inplace`
+        // moves the view but keeps the backing Vec). We currently only
+        // call this on a fresh ORT output that has offset 0, but a
+        // future caller might not — fall through to the slow path on
+        // nonzero offset rather than silently corrupt the tensor.
+        let (buf, offset) = raw_output.into_raw_vec_and_offset();
+        if offset.unwrap_or(0) == 0 {
+            buf
+        } else {
+            // Reconstruct array, then take a contiguous slice copy.
+            let arr = ndarray::Array4::from_shape_vec(
+                (buf.len() / (h * w), 1, h, w), buf,
+            ).expect("reshape from owned");
+            arr.as_standard_layout().as_slice().unwrap().to_vec()
+        }
+    } else {
+        let standard = raw_output.as_standard_layout();
+        // invariant: as_standard_layout always produces a contiguous view.
+        standard.as_slice().unwrap().to_vec()
+    };
+    // Diagnostic scans gated on tracing::debug!: each pass walks the
+    // full tensor (~16 MB for BiRefNet 1024²); skipping when the level
+    // isn't enabled saves a per-dispatch read pass.
+    if tracing::enabled!(tracing::Level::DEBUG) {
+        let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
+        let mut sum = 0.0_f32;
+        for &v in &tensor_data { if v < lo { lo = v; } if v > hi { hi = v; } sum += v; }
+        let mean = if tensor_data.is_empty() { 0.0 } else { sum / tensor_data.len() as f32 };
+        let head: Vec<f32> = tensor_data.iter().take(6).copied().collect();
+        tracing::debug!(
+            ?model, h, w, tensor_len = tensor_data.len(),
+            owned_was_standard = is_std_owned,
+            tensor_min = lo, tensor_max = hi, tensor_mean = mean,
+            ?head,
+            "infer_only raw tensor flattened",
+        );
+    }
     Ok(crate::types::InferenceResult {
         tensor_data,
         tensor_height: h,

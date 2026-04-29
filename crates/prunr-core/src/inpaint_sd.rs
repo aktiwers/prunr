@@ -416,8 +416,6 @@ fn run_one_tile(
     let padded_image = pad_to_tile(image);
     let padded_mask = pad_mask_to_tile(mask);
 
-    let masked_image = mask_image_for_vae(&padded_image, &padded_mask);
-
     // CFG threshold: above 1.0 we run the UNet TWICE per step (cond +
     // uncond) and blend by `guidance_scale`. At ≤1.0 the cond pass is
     // all the user wants, so we skip the second to halve UNet cost.
@@ -435,7 +433,7 @@ fn run_one_tile(
                 let np = np.clone();
                 s.spawn(move || encode_text(bundle, &np))
             });
-            let vae_h = s.spawn(|| vae_encode(vae, &masked_image));
+            let vae_h = s.spawn(|| vae_encode_masked(vae, &padded_image, &padded_mask));
             let mask_lat = mask_to_latent(&padded_mask);
             let cond = cond_h.join()
                 .map_err(|_| CoreError::Inference("text encoder (cond) thread panicked".into()))??;
@@ -453,6 +451,14 @@ fn run_one_tile(
     let text_emb_uncond_f16 = text_emb_uncond.as_ref().map(f32_to_f16_3d);
     let masked_latent_f16 = f32_to_f16_4d(&masked_latent);
     let mask_latent_f16 = f32_to_f16_4d(&mask_latent);
+    // Free the f32 originals — the loop only needs the f16 mirrors,
+    // and these buffers (~600 KB combined: 2 × 237 KB text emb + 2 ×
+    // 64 KB latent) would otherwise sit alive across the entire
+    // 20-step UNet loop, the longest-lived stage of the pipeline.
+    drop(text_emb_cond);
+    drop(text_emb_uncond);
+    drop(masked_latent);
+    drop(mask_latent);
 
     let scheduler = DdimScheduler::new_sd15(req.num_inference_steps as usize);
     let seed = req.seed.unwrap_or_else(|| {
@@ -483,9 +489,11 @@ fn run_one_tile(
             if try_batched {
                 match unet_step_batched(bundle, &latent_in_f16, t, &text_emb_cond_f16, uncond_f16) {
                     Ok(pred_pair) => {
-                        let pred_cond = pred_pair.slice(ndarray::s![0..1, .., .., ..]).to_owned();
-                        let pred_uncond = pred_pair.slice(ndarray::s![1..2, .., .., ..]).to_owned();
-                        cfg_blend(&pred_uncond, &pred_cond, scale)
+                        // Pass slice views directly — cfg_blend now
+                        // accepts ArrayView4, no `.to_owned()` needed.
+                        let pred_cond = pred_pair.slice(ndarray::s![0..1, .., .., ..]);
+                        let pred_uncond = pred_pair.slice(ndarray::s![1..2, .., .., ..]);
+                        cfg_blend(pred_uncond, pred_cond, scale)
                     }
                     Err(e) => {
                         tracing::warn!(%e,
@@ -494,13 +502,13 @@ fn run_one_tile(
                         bundle.cfg_fallback_to_sequential.store(true, Ordering::Relaxed);
                         let pred_cond = unet_step(bundle, latent_in_f16.clone(), t, &text_emb_cond_f16)?;
                         let pred_uncond = unet_step(bundle, latent_in_f16, t, uncond_f16)?;
-                        cfg_blend(&pred_uncond, &pred_cond, scale)
+                        cfg_blend(pred_uncond.view(), pred_cond.view(), scale)
                     }
                 }
             } else {
                 let pred_cond = unet_step(bundle, latent_in_f16.clone(), t, &text_emb_cond_f16)?;
                 let pred_uncond = unet_step(bundle, latent_in_f16, t, uncond_f16)?;
-                cfg_blend(&pred_uncond, &pred_cond, scale)
+                cfg_blend(pred_uncond.view(), pred_cond.view(), scale)
             }
         } else {
             unet_step(bundle, latent_in_f16, t, &text_emb_cond_f16)?
@@ -1006,9 +1014,28 @@ pub(crate) enum VaeBackend<'a> {
     Taesd(&'a TaesdSession),
 }
 
-fn vae_encode(backend: &VaeBackend, image: &RgbaImage) -> Result<Array4<f32>, CoreError> {
-    let input = image_to_minus1_plus1(image);
+/// VAE-encode the masked-image variant directly from source + mask,
+/// skipping the intermediate RGBA clone the old
+/// `mask_image_for_vae` → `image_to_minus1_plus1` chain built (~1 MB
+/// at 512×512).
+fn vae_encode_masked(
+    backend: &VaeBackend,
+    image: &RgbaImage,
+    mask: &GrayImage,
+) -> Result<Array4<f32>, CoreError> {
+    let input = image_to_minus1_plus1_masked(image, mask);
+    vae_encode_from_input(backend, input)
+}
+
+fn vae_encode_from_input(backend: &VaeBackend, input: Array4<f32>) -> Result<Array4<f32>, CoreError> {
     let input_f16 = f32_to_f16_4d(&input);
+    // Belt-and-suspenders: NLL would drop `input` at end of statement
+    // anyway since it's unused below. The explicit drop documents
+    // intent — the f32 buffer (~3 MB at 512×512) is dead the moment
+    // the f16 mirror exists, and the next op acquires the VAE session
+    // mutex (potentially a held-lock window if another thread is
+    // running). Free first.
+    drop(input);
     let t = Tensor::from_array(input_f16)
         .map_err(|e| CoreError::Inference(format!("vae encoder: input tensor: {e}")))?;
     match backend {
@@ -1034,8 +1061,10 @@ fn vae_encode(backend: &VaeBackend, image: &RgbaImage) -> Result<Array4<f32>, Co
 fn vae_decode(backend: &VaeBackend, latent: &Array4<f32>) -> Result<RgbaImage, CoreError> {
     match backend {
         VaeBackend::Standard(bundle) => {
-            let unscaled = latent / VAE_SCALING_FACTOR;
-            let unscaled_f16 = f32_to_f16_4d(&unscaled);
+            // Fuse the unscale divide with the f16 narrow — saves the
+            // intermediate `latent / VAE_SCALING_FACTOR` Array4 (~64 KB
+            // at 64×64 latent) that was immediately consumed and dropped.
+            let unscaled_f16 = latent.mapv(|v| f16::from_f32(v / VAE_SCALING_FACTOR));
             let t = Tensor::from_array(unscaled_f16)
                 .map_err(|e| CoreError::Inference(format!("SD vae decoder: input tensor: {e}")))?;
             let mut session = bundle.vae_decoder.lock()
@@ -1182,7 +1211,24 @@ fn extract_4d(value: &ort::value::DynValue, label: &str) -> Result<Array4<f32>, 
 
 /// RGBA → NCHW f32 in [-1, 1]. Pads/crops to SD_TILE×SD_TILE; alpha is
 /// dropped because SD operates on RGB. Out-of-bounds pixels are zero.
-fn image_to_minus1_plus1(image: &RgbaImage) -> Array4<f32> {
+/// Convert a 512×512 RGBA into the SD VAE's [-1, 1] f32 input layout,
+/// with mid-gray (0.0) written directly for masked pixels.
+///
+/// Mid-gray for the masked region is the SD inpaint training
+/// convention: diffusers' `prepare_mask_and_masked_image` multiplies
+/// the [-1, 1]-normalized image by `(mask < 0.5)` which puts 0 (mid-
+/// gray) into the masked region. Filling with black (-1 in [-1, 1])
+/// instead drives the masked-image latent out of distribution, and
+/// with empty-prompt CFG=1.0 the denoised output collapses to dark
+/// fills.
+///
+/// An empty mask degenerates to a plain image-to-tensor — the unit
+/// test exercises the byte-endpoint math through that path.
+///
+/// Skips the intermediate RGBA clone the previous `mask_image_for_vae`
+/// → `image_to_minus1_plus1` sequence built (~1 MB at 512×512).
+fn image_to_minus1_plus1_masked(image: &RgbaImage, mask: &GrayImage) -> Array4<f32> {
+    debug_assert_eq!(image.dimensions(), mask.dimensions());
     let s = SD_TILE as usize;
     let (w, h) = image.dimensions();
     let (w_us, h_us) = (w as usize, h as usize);
@@ -1190,15 +1236,27 @@ fn image_to_minus1_plus1(image: &RgbaImage) -> Array4<f32> {
     let buf = a.as_slice_mut().unwrap();
     let plane = s * s;
     let raw = image.as_raw();
+    let m = mask.as_raw();
     for y in 0..h_us.min(s) {
         let src_row = y * w_us * 4;
         let dst_row = y * s;
+        let mask_row = y * w_us;
         for x in 0..w_us.min(s) {
-            let src = src_row + x * 4;
             let dst = dst_row + x;
-            buf[dst]              = (raw[src]     as f32 / 127.5) - 1.0;
-            buf[plane + dst]      = (raw[src + 1] as f32 / 127.5) - 1.0;
-            buf[plane * 2 + dst]  = (raw[src + 2] as f32 / 127.5) - 1.0;
+            if m[mask_row + x] > 127 {
+                // Match the byte-128 path's bit pattern: same f32
+                // division as the unmasked branch, just on a constant
+                // input. Hardcoding `0.0` would diverge by ~0.00392.
+                let v = (128.0_f32 / 127.5) - 1.0;
+                buf[dst]             = v;
+                buf[plane + dst]     = v;
+                buf[plane * 2 + dst] = v;
+            } else {
+                let src = src_row + x * 4;
+                buf[dst]              = (raw[src]     as f32 / 127.5) - 1.0;
+                buf[plane + dst]      = (raw[src + 1] as f32 / 127.5) - 1.0;
+                buf[plane * 2 + dst]  = (raw[src + 2] as f32 / 127.5) - 1.0;
+            }
         }
     }
     a
@@ -1248,28 +1306,6 @@ fn mask_to_latent(mask: &GrayImage) -> Array4<f32> {
         }
     }
     a
-}
-
-/// Source image with the painted region replaced by mid-gray — the
-/// SD inpaint training convention. Diffusers' `prepare_mask_and_masked_image`
-/// multiplies the [-1, 1]-normalized image by `(mask < 0.5)` which puts
-/// 0 (mid-gray) into the masked region; the VAE / UNet were trained
-/// against this. Filling with black (0 in [0, 255] = -1 in [-1, 1])
-/// instead drives the masked-image latent out of distribution, and with
-/// empty-prompt CFG=1.0 the denoised output collapses to dark fills.
-fn mask_image_for_vae(image: &RgbaImage, mask: &GrayImage) -> RgbaImage {
-    debug_assert_eq!(image.dimensions(), mask.dimensions());
-    let mut out = image.clone();
-    let raw = out.as_mut();
-    let m = mask.as_raw();
-    for i in 0..m.len() {
-        if m[i] > 127 {
-            raw[i * 4]     = 128;
-            raw[i * 4 + 1] = 128;
-            raw[i * 4 + 2] = 128;
-        }
-    }
-    out
 }
 
 /// Concatenate the three UNet inputs along the channel axis:
@@ -1332,18 +1368,21 @@ fn composite(source: &RgbaImage, painted: &RgbaImage, mask: &GrayImage, w: u32, 
 }
 
 /// Classifier-free guidance: `uncond + scale * (cond - uncond)`.
-/// Standard SD CFG; collapses to `uncond` at scale=0 and to `cond` at
-/// scale=1. Typical strength is 7–8 for prompt-driven generation.
-fn cfg_blend(uncond: &Array4<f32>, cond: &Array4<f32>, scale: f32) -> Array4<f32> {
+/// Takes `ArrayView4` so callers can pass batched-UNet slices directly
+/// without two `.to_owned()` allocations per CFG step (~128 KB × 20
+/// timesteps of churn previously). Output is built in logical row-
+/// major order via `iter()`, which is correct for non-contiguous
+/// input views (e.g. axis-0 slices of a batched output).
+fn cfg_blend(
+    uncond: ndarray::ArrayView4<'_, f32>,
+    cond: ndarray::ArrayView4<'_, f32>,
+    scale: f32,
+) -> Array4<f32> {
     debug_assert_eq!(uncond.dim(), cond.dim(), "CFG blend: shape mismatch");
-    let mut out = uncond.clone();
-    let u = uncond.as_slice().expect("uncond: standard layout");
-    let c = cond.as_slice().expect("cond: standard layout");
-    let o = out.as_slice_mut().expect("out: standard layout");
-    for i in 0..o.len() {
-        o[i] = u[i] + scale * (c[i] - u[i]);
-    }
-    out
+    let buf: Vec<f32> = uncond.iter().zip(cond.iter())
+        .map(|(&u, &c)| u + scale * (c - u))
+        .collect();
+    Array4::from_shape_vec(uncond.dim(), buf).expect("dim matches by construction")
 }
 
 /// Apply DDIM step element-wise to flat-Vec representations of the
@@ -1365,24 +1404,28 @@ fn step_array(
 /// If the cropped input is smaller than SD_TILE on either axis (image
 /// edge case), pad to 512×512 with zero-fill (top-left aligned). The
 /// smart-crop dispatcher guarantees max dim is SD_TILE.
-fn pad_to_tile(image: &RgbaImage) -> RgbaImage {
+///
+/// Returns `Cow::Borrowed` on the fast path (already-tile-sized input,
+/// the common case for small strokes) — saves the ~1 MB image clone +
+/// ~256 KB mask clone the previous version always did.
+fn pad_to_tile(image: &RgbaImage) -> std::borrow::Cow<'_, RgbaImage> {
     let (w, h) = image.dimensions();
     if w == SD_TILE && h == SD_TILE {
-        return image.clone();
+        return std::borrow::Cow::Borrowed(image);
     }
     let mut out = RgbaImage::new(SD_TILE, SD_TILE);
     image::imageops::overlay(&mut out, image, 0, 0);
-    out
+    std::borrow::Cow::Owned(out)
 }
 
-fn pad_mask_to_tile(mask: &GrayImage) -> GrayImage {
+fn pad_mask_to_tile(mask: &GrayImage) -> std::borrow::Cow<'_, GrayImage> {
     let (w, h) = mask.dimensions();
     if w == SD_TILE && h == SD_TILE {
-        return mask.clone();
+        return std::borrow::Cow::Borrowed(mask);
     }
     let mut out = GrayImage::new(SD_TILE, SD_TILE);
     image::imageops::overlay(&mut out, mask, 0, 0);
-    out
+    std::borrow::Cow::Owned(out)
 }
 
 // ── Safety guards ───────────────────────────────────────────────────────
@@ -1603,7 +1646,7 @@ mod tests {
     fn cfg_blend_at_scale_one_returns_cond() {
         let uncond = Array4::<f32>::from_elem((1, 4, 2, 2), 1.0);
         let cond = Array4::<f32>::from_elem((1, 4, 2, 2), 5.0);
-        let out = cfg_blend(&uncond, &cond, 1.0);
+        let out = cfg_blend(uncond.view(), cond.view(), 1.0);
         for &v in out.iter() {
             assert!((v - 5.0).abs() < 1e-6, "scale=1 should equal cond, got {v}");
         }
@@ -1614,19 +1657,40 @@ mod tests {
         let uncond = Array4::<f32>::from_elem((1, 4, 2, 2), 1.0);
         let cond = Array4::<f32>::from_elem((1, 4, 2, 2), 5.0);
         // scale=7.5 → 1 + 7.5*(5-1) = 31
-        let out = cfg_blend(&uncond, &cond, 7.5);
+        let out = cfg_blend(uncond.view(), cond.view(), 7.5);
         for &v in out.iter() {
             assert!((v - 31.0).abs() < 1e-4, "scale=7.5 expected 31, got {v}");
         }
     }
 
+    /// Pin the new headline win: cfg_blend accepts non-contiguous slice
+    /// views (axis-0 slices of a batched UNet output) without needing
+    /// `.to_owned()` per CFG step.
+    #[test]
+    fn cfg_blend_accepts_axis0_slices_directly() {
+        let pair = Array4::<f32>::from_shape_fn((2, 4, 2, 2), |(b, _, _, _)| {
+            if b == 0 { 1.0 } else { 5.0 }
+        });
+        let uncond = pair.slice(ndarray::s![0..1, .., .., ..]);
+        let cond = pair.slice(ndarray::s![1..2, .., .., ..]);
+        let out = cfg_blend(uncond, cond, 7.5);
+        for &v in out.iter() {
+            assert!((v - 31.0).abs() < 1e-4, "expected 31, got {v}");
+        }
+    }
+
     #[test]
     fn image_to_minus1_plus1_maps_byte_endpoints_correctly() {
+        // Empty mask → masked variant degenerates to plain
+        // image-to-tensor; same bit-pattern as the previous standalone
+        // `image_to_minus1_plus1` helper. Exercising via the masked
+        // path keeps a single code path under test.
         let mut img = RgbaImage::new(SD_TILE, SD_TILE);
         for p in img.pixels_mut() {
             *p = Rgba([0, 128, 255, 255]);
         }
-        let arr = image_to_minus1_plus1(&img);
+        let mask = GrayImage::new(SD_TILE, SD_TILE);
+        let arr = image_to_minus1_plus1_masked(&img, &mask);
         let buf = arr.as_slice().unwrap();
         // R = 0   →  -1.0
         // G = 128 →   0.0039 (slightly above 0)
@@ -1653,16 +1717,30 @@ mod tests {
     }
 
     #[test]
-    fn mask_image_for_vae_replaces_painted_region_with_mid_gray() {
-        let mut img = RgbaImage::new(8, 8);
+    fn image_to_minus1_plus1_masked_writes_mid_gray_for_masked_pixels() {
+        // Diffusers training convention: masked region maps to 0.0 in
+        // [-1, 1] (= 128 in [0, 255]). Verifies the fused-path
+        // equivalent of the old `mask_image_for_vae` RGBA-fill helper:
+        // bit-pattern matches `(128/127.5) - 1 ≈ 0.00392` exactly.
+        let mut img = RgbaImage::new(SD_TILE, SD_TILE);
         for p in img.pixels_mut() { *p = Rgba([100, 200, 50, 255]); }
-        let mut mask = GrayImage::new(8, 8);
+        let mut mask = GrayImage::new(SD_TILE, SD_TILE);
         mask.put_pixel(2, 3, Luma([255]));
-        let out = mask_image_for_vae(&img, &mask);
-        // Mid-gray (128) = 0 in [-1, 1] — diffusers training convention.
-        assert_eq!(out.get_pixel(2, 3).0, [128, 128, 128, 255]);
-        // Untouched pixel intact.
-        assert_eq!(out.get_pixel(0, 0).0, [100, 200, 50, 255]);
+        let arr = image_to_minus1_plus1_masked(&img, &mask);
+        let buf = arr.as_slice().unwrap();
+        let plane = (SD_TILE * SD_TILE) as usize;
+        let s = SD_TILE as usize;
+        let masked_idx = 3 * s + 2;
+        let mid_gray = (128.0_f32 / 127.5) - 1.0;
+        // Masked pixel: all 3 channels at mid-gray.
+        assert!((buf[masked_idx] - mid_gray).abs() < 1e-6);
+        assert!((buf[plane + masked_idx] - mid_gray).abs() < 1e-6);
+        assert!((buf[plane * 2 + masked_idx] - mid_gray).abs() < 1e-6);
+        // Untouched pixel: original 100/200/50 byte values, [-1, 1].
+        let unmasked_idx = 0;
+        assert!((buf[unmasked_idx] - (100.0/127.5 - 1.0)).abs() < 1e-6);
+        assert!((buf[plane + unmasked_idx] - (200.0/127.5 - 1.0)).abs() < 1e-6);
+        assert!((buf[plane*2 + unmasked_idx] - (50.0/127.5 - 1.0)).abs() < 1e-6);
     }
 
     #[test]

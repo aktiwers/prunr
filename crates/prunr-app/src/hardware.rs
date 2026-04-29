@@ -86,12 +86,33 @@ pub fn total_ram_bytes() -> u64 {
 
 /// Currently-available RAM (bytes). Re-reads on every call — fresh value
 /// for UIs that show live headroom. ~1 ms on Linux. Don't call inside a
-/// per-frame loop; use a cache + manual invalidate (modal-open / event)
-/// if needed.
+/// per-frame loop; prefer `available_ram_bytes_throttled` for any caller
+/// that fires more than once per second.
 pub fn available_ram_bytes_now() -> u64 {
     let mut sys = sysinfo::System::new();
     sys.refresh_memory();
     sys.available_memory()
+}
+
+/// Cached available-RAM read with a 1-second TTL. Cheap to call from
+/// per-frame UI code (~10 ns on cache hit). The 1 s freshness is fine
+/// for a settings panel — RAM displays are read at human speed, not
+/// frame speed. First call on cold start does the full ~1 ms read.
+pub fn available_ram_bytes_throttled() -> u64 {
+    use std::sync::Mutex;
+    use std::time::Instant;
+    static CACHE: OnceLock<Mutex<Option<(Instant, u64)>>> = OnceLock::new();
+    let cell = CACHE.get_or_init(|| Mutex::new(None));
+    let mut guard = cell.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let now = Instant::now();
+    if let Some((at, bytes)) = *guard {
+        if now.duration_since(at).as_secs_f32() < 1.0 {
+            return bytes;
+        }
+    }
+    let bytes = available_ram_bytes_now();
+    *guard = Some((now, bytes));
+    bytes
 }
 
 /// Coarse "can the user actually run this model?" verdict per model

@@ -119,8 +119,20 @@ pub fn guided_filter_alpha(
 
 /// O(1) box filter using integral image (two-pass parallel prefix sums).
 ///
-/// Returns a newly-allocated output buffer.
+/// Returns a newly-allocated output buffer. For inner-loop callers that
+/// run many filters in sequence, use [`box_filter_into`] to reuse a
+/// caller-owned output buffer and skip the per-call allocation.
 pub(crate) fn box_filter(src: &[f32], w: u32, h: u32, radius: u32) -> Vec<f32> {
+    let mut out = vec![0.0f32; src.len()];
+    box_filter_into(src, w, h, radius, &mut out);
+    out
+}
+
+/// Buffer-reusing variant: writes the filtered result into `dst` (which
+/// must equal `src.len()`). The integral-image scratch is still
+/// allocated internally; lifting that requires a `box_filter_with_scratch`
+/// — not yet justified.
+pub(crate) fn box_filter_into(src: &[f32], w: u32, h: u32, radius: u32, dst: &mut [f32]) {
     let w = w as usize;
     let h = h as usize;
     let n = w * h;
@@ -186,7 +198,7 @@ pub(crate) fn box_filter(src: &[f32], w: u32, h: u32, radius: u32) -> Vec<f32> {
     }
 
     // --- Lookup pass (embarrassingly parallel) ---
-    let mut out = vec![0.0f32; n];
+    debug_assert_eq!(dst.len(), n, "box_filter_into: dst.len() must equal src.len()");
 
     let get = |x: i64, y: i64| -> f32 {
         if x < 0 || y < 0 {
@@ -200,7 +212,7 @@ pub(crate) fn box_filter(src: &[f32], w: u32, h: u32, radius: u32) -> Vec<f32> {
     let do_par_lookup = n >= PAR_LOOKUP_THRESHOLD;
 
     if do_par_lookup {
-        out.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+        dst.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
             let yi = y as i64;
             for x in 0..w {
                 let xi = x as i64;
@@ -222,12 +234,10 @@ pub(crate) fn box_filter(src: &[f32], w: u32, h: u32, radius: u32) -> Vec<f32> {
                 let y2 = (y + r).min(h as i64 - 1);
                 let area = (x2 - x1) as f32 * (y2 - y1) as f32;
                 let sum = get(x2, y2) - get(x1, y2) - get(x2, y1) + get(x1, y1);
-                out[y as usize * w + x as usize] = sum / area.max(1.0);
+                dst[y as usize * w + x as usize] = sum / area.max(1.0);
             }
         }
     }
-
-    out
 }
 
 #[cfg(test)]
