@@ -373,19 +373,24 @@ pub fn sharpen_inpainted(image: &RgbaImage, mask: &GrayImage, amount: f32) -> Rg
 /// the mask is all-zero (no work). SD-family ids dispatch to the
 /// `inpaint_sd` module which has its own multi-model pipeline.
 pub fn process_inpaint(image: &RgbaImage, mask: &GrayImage, id: prunr_models::ModelId) -> Result<RgbaImage, CoreError> {
-    process_inpaint_with(image, mask, id, None)
+    process_inpaint_with(image, mask, id, None, None)
 }
 
 /// Same as `process_inpaint` but takes optional SD-specific tuning
-/// (prompt / negative prompt / guidance_scale / steps). Ignored for
-/// LaMa-family backends. Pass `None` for the seg pipeline default
-/// (empty prompt, no CFG, 20 steps — equivalent to `process_inpaint`).
+/// (prompt / negative prompt / guidance_scale / steps) and an optional
+/// cancel flag. The flag is checked between LaMa tiles and between SD
+/// UNet steps; ORT itself has no per-op cancel hook so worst-case
+/// latency on cancel is one tile (LaMa) or one UNet step (SD).
+/// Pass `None`/`None` for the seg pipeline default (empty prompt,
+/// no CFG, 20 steps, no cancel — equivalent to `process_inpaint`).
 pub fn process_inpaint_with(
     image: &RgbaImage,
     mask: &GrayImage,
     id: prunr_models::ModelId,
     sd_req: Option<crate::inpaint_sd::SdInpaintRequest>,
+    cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 ) -> Result<RgbaImage, CoreError> {
+    use std::sync::atomic::Ordering;
     if image.dimensions() != mask.dimensions() {
         return Err(CoreError::Inference(format!(
             "inpaint: dim mismatch — image {:?} vs mask {:?}",
@@ -403,15 +408,25 @@ pub fn process_inpaint_with(
             num_inference_steps: 20,
             ..Default::default()
         });
-        return crate::inpaint_sd::process_inpaint_with(image, mask, id, req);
+        return crate::inpaint_sd::process_inpaint_with(image, mask, id, req, cancel);
     }
     let session = LamaSession::get(id)?;
-    tile_compose(image, mask, |tile_rgba, tile_mask| {
+    let is_cancelled = || cancel.as_ref().is_some_and(|c| c.load(Ordering::Acquire));
+    let composed = tile_compose(image, mask, |tile_rgba, tile_mask| {
+        // When cancelled, short-circuit each remaining tile to a no-op.
+        // The outer Cancelled error below discards the partial result.
+        if is_cancelled() {
+            return tile_rgba.clone();
+        }
         session.run_tile(tile_rgba, tile_mask).unwrap_or_else(|e| {
             tracing::error!(%e, "LaMa tile inference failed; leaving tile unchanged");
             tile_rgba.clone()
         })
-    })
+    })?;
+    if is_cancelled() {
+        return Err(CoreError::Cancelled);
+    }
+    Ok(composed)
 }
 
 /// One LaMa session per process — see `LamaSession::get`. Tiles run
