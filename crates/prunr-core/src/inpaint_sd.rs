@@ -561,18 +561,24 @@ impl TaesdSession {
         let decoder_path = by_key.get("decoder")
             .ok_or_else(|| CoreError::Inference("TAESD bundle missing decoder part".into()))?;
 
-        let encoder = Session::builder()
-            .map_err(|e| CoreError::Inference(format!("TAESD: builder init: {e}")))?
-            .with_optimization_level(GraphOptimizationLevel::Level3)
-            .map_err(|e| CoreError::Inference(format!("TAESD: opt level: {e}")))?
-            .commit_from_file(encoder_path)
-            .map_err(|e| CoreError::Inference(format!("TAESD encoder: load: {e}")))?;
-        let decoder = Session::builder()
-            .map_err(|e| CoreError::Inference(format!("TAESD: builder init: {e}")))?
-            .with_optimization_level(GraphOptimizationLevel::Level3)
-            .map_err(|e| CoreError::Inference(format!("TAESD: opt level: {e}")))?
-            .commit_from_file(decoder_path)
-            .map_err(|e| CoreError::Inference(format!("TAESD decoder: load: {e}")))?;
+        // Build encoder + decoder in parallel — saves ~1-2 s of cold
+        // start. Each session is ~5 MB; aggregate peak RSS during
+        // parallel build is well under 50 MB. No DirectML carve-out
+        // needed since TAESD has no GPU EP ladder.
+        let build = |path: &PathBuf, label: &'static str| -> Result<Session, CoreError> {
+            Session::builder()
+                .map_err(|e| CoreError::Inference(format!("TAESD: builder init: {e}")))?
+                .with_optimization_level(GraphOptimizationLevel::Level3)
+                .map_err(|e| CoreError::Inference(format!("TAESD: opt level: {e}")))?
+                .commit_from_file(path)
+                .map_err(|e| CoreError::Inference(format!("TAESD {label}: load: {e}")))
+        };
+        let (enc_res, dec_res) = rayon::join(
+            || build(encoder_path, "encoder"),
+            || build(decoder_path, "decoder"),
+        );
+        let encoder = enc_res?;
+        let decoder = dec_res?;
 
         let encoder_input = encoder.inputs().first()
             .ok_or_else(|| CoreError::Inference("TAESD encoder: no inputs".into()))?
@@ -735,23 +741,48 @@ impl SdSession {
             .ok_or_else(|| prunr_models::not_installed_error(id))?;
         let by_key: HashMap<&str, PathBuf> = parts.into_iter().collect();
 
-        // Each part is built with the GPU EP ladder + per-shape smoke
-        // test. We log the winning provider per part so a partial GPU
-        // fall-through (e.g. UNet on CUDA, VAEs on CPU) is debuggable.
-        // Text encoder smoke-tested first since it's the smallest — if
-        // GPU is broken on this machine, we discover it cheaply.
-        let (text_encoder, text_ep) = build_part_with_ep_ladder(
-            id, "text_encoder", &by_key, smoke_test_text_encoder,
-        )?;
-        let (vae_encoder, vae_enc_ep) = build_part_with_ep_ladder(
-            id, "vae_encoder", &by_key, smoke_test_vae_encoder,
-        )?;
-        let (vae_decoder, vae_dec_ep) = build_part_with_ep_ladder(
-            id, "vae_decoder", &by_key, smoke_test_vae_decoder,
-        )?;
-        let (unet, unet_ep) = build_part_with_ep_ladder(
-            id, "unet", &by_key, smoke_test_unet,
-        )?;
+        // The four parts touch disjoint sessions; build them in parallel.
+        // DirectML stays sequential — same AbiCustomRegistry race as
+        // `batch::create_engine_pool`. Parallel build holds all four
+        // optimization scratch arenas live concurrently; the
+        // SD_CPU_MIN_FREE_RAM_BYTES guard above bounds the peak.
+        // We still log the winning EP per part so partial GPU
+        // fall-through (e.g. UNet CUDA, VAEs CPU) is debuggable.
+        type SmokeFn = fn(&mut Session, &str) -> Result<(), String>;
+        const PARTS: [(&str, SmokeFn); 4] = [
+            ("text_encoder", smoke_test_text_encoder),
+            ("vae_encoder",  smoke_test_vae_encoder),
+            ("vae_decoder",  smoke_test_vae_decoder),
+            ("unet",         smoke_test_unet),
+        ];
+
+        let build = |&(key, smoke): &(&'static str, SmokeFn)|
+            -> Result<(&'static str, Session, String), String> {
+                let (s, ep) = build_part_with_ep_ladder(id, key, &by_key, smoke)?;
+                Ok((key, s, ep))
+            };
+
+        let mut parts: Vec<(&'static str, Session, String)> =
+            if crate::engine::directml_active() {
+                PARTS.iter().map(build).collect::<Result<_, _>>()?
+            } else {
+                use rayon::prelude::*;
+                PARTS.par_iter().map(build).collect::<Result<_, _>>()?
+            };
+
+        // Match by key so the destructure below survives reordering of
+        // PARTS. `IndexedParallelIterator::collect` preserves order, so
+        // this is defensive — cheap at N=4.
+        let mut take = |want: &str| -> Result<(Session, String), String> {
+            let pos = parts.iter().position(|(k, _, _)| *k == want)
+                .ok_or_else(|| format!("SD bundle missing built part: {want}"))?;
+            let (_, s, ep) = parts.swap_remove(pos);
+            Ok((s, ep))
+        };
+        let (text_encoder, text_ep) = take("text_encoder")?;
+        let (vae_encoder,  vae_enc_ep) = take("vae_encoder")?;
+        let (vae_decoder,  vae_dec_ep) = take("vae_decoder")?;
+        let (unet,         unet_ep)    = take("unet")?;
 
         let unet_inputs = take_three_inputs(&unet, "unet")?;
         let vae_encoder_input = take_first_input(&vae_encoder, "vae_encoder")?;
