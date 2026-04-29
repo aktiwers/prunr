@@ -83,3 +83,15 @@ lto = "fat"
 opt-level = 3
 panic = "abort"
 codegen-units = 1
+
+# Profiling profile: release-grade codegen with debug symbols kept so
+# `samply` / `perf` see real function names, not stripped addresses.
+# LTO disabled to keep build time tolerable (full LTO is ~5-10 min on
+# this tree). Inlining still happens within each crate, so the profile
+# reflects production-shape hot paths well enough for static review.
+[profile.profiling]
+inherits = "release"
+strip = false
+debug = "line-tables-only"
+lto = false
+codegen-units = 16

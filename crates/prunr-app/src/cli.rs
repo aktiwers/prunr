@@ -417,7 +417,18 @@ fn stage_label(stage: ProgressStage) -> &'static str {
 // ── Batch execution path ─────────────────────────────────────────────────────
 
 fn run_batch(args: &Cli) -> i32 {
-    let mp = if !args.quiet { Some(MultiProgress::new()) } else { None };
+    // 4 Hz redraw cap (default is 20 Hz). With 1 overall + N spinners
+    // every redraw recomputes every bar's template; on a 6-image batch
+    // the per-tick fan-out cost the perf trace caught was ~13% of
+    // prunr-binary self-time. 4 Hz feels indistinguishable for image
+    // processing cadence and is the standard non-game-CLI rate.
+    let mp = if !args.quiet {
+        Some(MultiProgress::with_draw_target(
+            indicatif::ProgressDrawTarget::stderr_with_hz(4),
+        ))
+    } else {
+        None
+    };
 
     // Overall progress bar: "3/10 images"
     let overall = mp.as_ref().map(|m| {
@@ -441,7 +452,13 @@ fn run_batch(args: &Cli) -> i32 {
                     .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]),
             );
             pb.set_message(format!("{} (waiting...)", input.display()));
-            pb.enable_steady_tick(std::time::Duration::from_millis(80));
+            // 250 ms (was 80 ms): the worker emits Progress at fixed
+            // pipeline checkpoints, with multi-second silence across
+            // `session.run()`. Without a tick the spinner glyph would
+            // freeze during the most-uncertain wait. The outer
+            // `MultiProgress` 4 Hz cap throttles total redraws, so
+            // per-spinner cost is bounded regardless of N.
+            pb.enable_steady_tick(std::time::Duration::from_millis(250));
             pb
         })
     }).collect();
@@ -689,7 +706,11 @@ fn run_batch_subprocess(
                 break;
             }
 
-            let events = sub.poll_events();
+            // Block up to 50 ms for the next event. Wakes immediately on
+            // arrival — admission follows ImageDone without a sleep-tail
+            // delay — and parks the thread instead of fabricating a poll
+            // every 50 ms.
+            let events = sub.poll_events_blocking(std::time::Duration::from_millis(50));
             if events.is_empty() && in_flight.is_empty() && pending.is_empty() {
                 break;
             }
@@ -768,7 +789,9 @@ fn run_batch_subprocess(
             }
 
             if in_flight.is_empty() && pending.is_empty() { break; }
-            std::thread::sleep(std::time::Duration::from_millis(50));
+            // No sleep here — `poll_events_blocking` above already
+            // waited up to 50 ms (or returned immediately when an event
+            // arrived). Re-sleeping would just stack idle delay.
         }
 
         if crashed {

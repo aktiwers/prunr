@@ -135,33 +135,22 @@ where
         return Err(CoreError::Cancelled);
     }
 
-    // Stage 4: Inference
+    // Stage 4: Inference + Postprocess in one IoBinding scope.
+    //
+    // The output tensor view is borrowed from ORT's bound CPU buffer;
+    // postprocess consumes it in-place inside the closure so we never
+    // pay the `try_extract_array().to_owned()` clone (4 MB at BiRefNet
+    // 1024² — was ~11.9% of CLI batch wall time in the perf trace).
     report(ProgressStage::Infer, 0.5);
 
-    let raw_output = engine.with_session(|session| {
-        let input_name = session.inputs()[0].name().to_string();
-
-        let input_tensor = Tensor::from_array(input_array)
-            .map_err(|e| CoreError::Inference(format!("Failed to create input tensor: {e}")))?;
-
-        let outputs = session
-            .run(inputs![input_name.as_str() => &input_tensor])
-            .map_err(|e| CoreError::Inference(format!("ORT inference failed: {e}")))?;
-
-        outputs[0]
-            .try_extract_array::<f32>()
-            .map_err(|e| CoreError::Inference(format!("Failed to extract output tensor: {e}")))?
-            .into_dimensionality::<ndarray::Ix4>()
-            .map_err(|e| CoreError::Inference(format!("Output reshape error: {e}")))
-            .map(|v| v.to_owned())
+    let postprocess_opts = PostprocessOpts::new(mask, model);
+    let rgba_image = engine.infer_into(input_array, |view| {
+        if is_cancelled() {
+            return Err(CoreError::Cancelled);
+        }
+        report(ProgressStage::Postprocess, 0.8);
+        Ok(postprocess(view, img, &postprocess_opts))
     })?;
-
-    if is_cancelled() {
-        return Err(CoreError::Cancelled);
-    }
-
-    report(ProgressStage::Postprocess, 0.8);
-    let rgba_image = postprocess(raw_output.view(), img, &PostprocessOpts::new(mask, model));
 
     report(ProgressStage::Alpha, 0.95);
 

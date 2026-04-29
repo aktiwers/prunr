@@ -601,7 +601,11 @@ fn run_event_loop(
             ));
         }
 
-        for event in sub.poll_events() {
+        // Block up to 50 ms for the next event. Wakes immediately when
+        // an event arrives so admission/pump latency tracks worker
+        // throughput, not the old fixed 50 ms sleep tail. The watchdog
+        // above runs once per iteration — well within HANG_TIMEOUT.
+        for event in sub.poll_events_blocking(Duration::from_millis(50)) {
             // Every event — Progress, ImageDone, ImageError, RssUpdate
             // (emitted per-completion, not on a timer) — proves liveness.
             last_event_at = Instant::now();
@@ -627,10 +631,6 @@ fn run_event_loop(
             } else {
                 subprocess_finished = true;
             }
-        }
-
-        if !subprocess_finished {
-            std::thread::sleep(Duration::from_millis(50));
         }
     }
     EventLoopOutcome::Finished

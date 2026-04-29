@@ -97,8 +97,11 @@ pub fn guided_filter_alpha(
         || box_filter(&b_buf, w, h, radius),
     );
 
-    // Output: q = mean_a * I_original + mean_b
-    // Recompute luminance from guide to avoid keeping guide_f alive.
+    // Output: q = mean_a * I_original + mean_b. Reuse the `guide_f`
+    // luminance buffer instead of recomputing 0.299·R + 0.587·G +
+    // 0.114·B per output pixel — saves ~3 mul + 2 add per pixel
+    // (~36 M FMAs at 4K). Buffer is alive through this point and
+    // dropped at function end.
     let mut out = GrayImage::new(w, h);
     let out_buf = out.as_mut();
     out_buf
@@ -107,10 +110,7 @@ pub fn guided_filter_alpha(
         .for_each(|(y, row)| {
             for x in 0..wu {
                 let idx = y * wu + x;
-                let gp = guide.get_pixel(x as u32, y as u32);
-                let lum = (0.299 * gp[0] as f32 + 0.587 * gp[1] as f32 + 0.114 * gp[2] as f32)
-                    / 255.0;
-                let val = (mean_a[idx] * lum + mean_b[idx]).clamp(0.0, 1.0);
+                let val = (mean_a[idx] * guide_f[idx] + mean_b[idx]).clamp(0.0, 1.0);
                 row[x] = (val * 255.0) as u8;
             }
         });

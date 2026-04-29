@@ -3,7 +3,9 @@ use std::sync::Mutex;
 use crate::types::{CoreError, ModelKind};
 use ort::{
     execution_providers::CPUExecutionProvider,
+    memory::{AllocationDevice, AllocatorType, MemoryInfo, MemoryType},
     session::{Session, builder::GraphOptimizationLevel},
+    value::Tensor,
 };
 
 /// Trait for inference backends. Implemented by OrtEngine.
@@ -264,7 +266,14 @@ impl OrtEngine {
                 ]),
                 #[cfg(not(target_os = "macos"))]
                 EpKind::OpenVino => builder.with_execution_providers([
-                    ort::execution_providers::OpenVINOExecutionProvider::default().build(),
+                    // Cap the EP-internal TBB pool to match our outer rayon
+                    // budget. Without this OpenVINO spawns its own pool sized
+                    // to all logical cores, which oversubscribes against the
+                    // rayon worker pool — `sched_yield` accounted for ~2% of
+                    // CLI batch wall time in the perf trace.
+                    ort::execution_providers::OpenVINOExecutionProvider::default()
+                        .with_num_threads(intra_threads.max(1))
+                        .build(),
                 ]),
             };
 
@@ -356,6 +365,65 @@ impl OrtEngine {
             .lock()
             .map_err(|e| CoreError::Inference(format!("Session mutex poisoned: {e}")))?;
         f(&mut session)
+    }
+
+    /// Run inference via `IoBinding` and pass the output **as a borrow**
+    /// to `f`. The borrow is alive only for the duration of `f`'s call.
+    ///
+    /// Compared to the `with_session` + `try_extract_array().to_owned()`
+    /// path, this skips one full output-tensor clone (4 MB at BiRefNet
+    /// 1024² → ~11.9% of `_memcpy_avx_unaligned_erms` in the perf trace).
+    /// `bind_output_to_device(CPU)` lets ORT allocate the output in CPU
+    /// memory directly; the post-run `try_extract_array` returns a view
+    /// into that buffer without copying.
+    ///
+    /// Use this when the caller can consume the view in-place
+    /// (e.g. postprocess running inside the closure). For paths that
+    /// need an owned `Vec<f32>` regardless (Tier-2 cache write,
+    /// IPC tensor packing), the `with_session` path is fine — the
+    /// owning copy is unavoidable there.
+    pub(crate) fn infer_into<R, F>(
+        &self,
+        input_array: ndarray::Array4<f32>,
+        f: F,
+    ) -> Result<R, CoreError>
+    where
+        F: FnOnce(ndarray::ArrayView4<'_, f32>) -> Result<R, CoreError>,
+    {
+        let mut session = self
+            .session
+            .lock()
+            .map_err(|e| CoreError::Inference(format!("Session mutex poisoned: {e}")))?;
+        let input_name = session.inputs()[0].name().to_string();
+        let output_name = session.outputs()[0].name().to_string();
+
+        let input_tensor = Tensor::from_array(input_array)
+            .map_err(|e| CoreError::Inference(format!("Failed to create input tensor: {e}")))?;
+
+        let mut binding = session.create_binding()
+            .map_err(|e| CoreError::Inference(format!("Failed to create IoBinding: {e}")))?;
+        binding.bind_input(&input_name, &input_tensor)
+            .map_err(|e| CoreError::Inference(format!("Failed to bind input: {e}")))?;
+
+        // CPU output memory works for every EP we register today: CPU,
+        // CUDA, CoreML, DirectML, OpenVINO. ORT inserts the device→host
+        // copy before writing here. If a future GPU-resident postprocess
+        // path lands, switch to the EP's native device.
+        let mem_info = MemoryInfo::new(
+            AllocationDevice::CPU, 0, AllocatorType::Device, MemoryType::CPUOutput,
+        ).map_err(|e| CoreError::Inference(format!("MemoryInfo: {e}")))?;
+        binding.bind_output_to_device(&output_name, &mem_info)
+            .map_err(|e| CoreError::Inference(format!("Failed to bind output: {e}")))?;
+
+        let outputs = session.run_binding(&binding)
+            .map_err(|e| CoreError::Inference(format!("ORT run_binding failed: {e}")))?;
+        let view = outputs[0]
+            .try_extract_array::<f32>()
+            .map_err(|e| CoreError::Inference(format!("Failed to extract output: {e}")))?
+            .into_dimensionality::<ndarray::Ix4>()
+            .map_err(|e| CoreError::Inference(format!("Output reshape error: {e}")))?;
+
+        f(view)
     }
 }
 
