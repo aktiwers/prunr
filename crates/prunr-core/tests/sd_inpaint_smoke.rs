@@ -40,7 +40,8 @@ fn sd_inpaint_modifies_painted_region() {
         seed: Some(42),
         ..Default::default()
     };
-    let result = inpaint_sd::process_inpaint_with(&image, &mask, id, req)
+    let hooks = prunr_core::inpaint::InpaintHooks::default();
+    let result = inpaint_sd::process_inpaint_with(&image, &mask, id, req, &hooks)
         .expect("SD inpaint should succeed");
 
     assert_eq!(result.dimensions(), image.dimensions());

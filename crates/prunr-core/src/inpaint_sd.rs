@@ -125,21 +125,33 @@ pub fn process_inpaint(
     process_inpaint_with(
         image, mask, id,
         SdInpaintRequest { num_inference_steps: num_steps, ..Default::default() },
-        None,
+        &crate::inpaint::InpaintHooks::default(),
     )
 }
 
 /// Full-knob entry. The `inpaint::process_inpaint` shim calls this with
 /// defaults; future text-prompt + CFG surfaces wire through here.
-/// See `inpaint::process_inpaint_with` for the cancel-flag contract.
+/// See `inpaint::process_inpaint_with` for the hooks contract.
 pub fn process_inpaint_with(
     image: &RgbaImage,
     mask: &GrayImage,
     id: prunr_models::ModelId,
     req: SdInpaintRequest,
-    cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    hooks: &crate::inpaint::InpaintHooks,
 ) -> Result<RgbaImage, CoreError> {
     use std::sync::atomic::Ordering;
+    let cancel = hooks.cancel.as_ref();
+    let progress = hooks.progress.as_ref();
+    if let Some(p) = progress {
+        // Total = steps × tiles is approximate; tiles aren't known
+        // until mask_components runs below. We seed total = steps and
+        // surface tile-count via the rolling `current` step counter
+        // wrapping past `total` per tile. Banner reads (current,
+        // total) raw; total stays the per-tile UNet step budget so
+        // "step 5 of 20" reads cleanly even on multi-tile strokes.
+        p.set_total(req.num_inference_steps);
+        p.set_step(0);
+    }
     if image.dimensions() != mask.dimensions() {
         return Err(CoreError::Inference(format!(
             "sd inpaint: dim mismatch — image {:?} vs mask {:?}",
@@ -184,7 +196,7 @@ pub fn process_inpaint_with(
             let (cx, cy, cw, ch) = compute_sd_crop(component, img_w, img_h);
             let cropped_img = image::imageops::crop_imm(&out, cx, cy, cw, ch).to_image();
             let cropped_mask = image::imageops::crop_imm(mask, cx, cy, cw, ch).to_image();
-            match run_one_tile(&bundle, &vae, &cropped_img, &cropped_mask, &req, cancel.as_ref()) {
+            match run_one_tile(&bundle, &vae, &cropped_img, &cropped_mask, &req, hooks) {
                 Ok(painted) => image::imageops::replace(&mut out, &painted, cx as i64, cy as i64),
                 Err(CoreError::Cancelled) => return Err(CoreError::Cancelled),
                 Err(e) => tracing::error!(%e, "SD inference failed for component; skipping"),
@@ -203,7 +215,7 @@ pub fn process_inpaint_with(
             if is_cancelled() { return Err(CoreError::Cancelled); }
             let cropped_img = image::imageops::crop_imm(&out, tile.x, tile.y, tile.w, tile.h).to_image();
             let cropped_mask = image::imageops::crop_imm(mask, tile.x, tile.y, tile.w, tile.h).to_image();
-            match run_one_tile(&bundle, &vae, &cropped_img, &cropped_mask, &req, cancel.as_ref()) {
+            match run_one_tile(&bundle, &vae, &cropped_img, &cropped_mask, &req, hooks) {
                 Ok(painted) => blend_tile(&mut out, &painted, &tile),
                 Err(CoreError::Cancelled) => return Err(CoreError::Cancelled),
                 Err(e) => tracing::error!(%e, ?tile, "SD inference failed for tile; skipping"),
@@ -424,8 +436,10 @@ fn run_one_tile(
     image: &RgbaImage,
     mask: &GrayImage,
     req: &SdInpaintRequest,
-    cancel: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    hooks: &crate::inpaint::InpaintHooks,
 ) -> Result<RgbaImage, CoreError> {
+    let cancel = hooks.cancel.as_ref();
+    let progress = hooks.progress.as_ref();
     let (w, h) = image.dimensions();
     let padded_image = pad_to_tile(image);
     let padded_mask = pad_mask_to_tile(mask);
@@ -495,6 +509,13 @@ fn run_one_tile(
         // worst-case latency on cancel is one UNet step (multi-second).
         if is_cancelled() {
             return Err(CoreError::Cancelled);
+        }
+        // Publish progress AFTER the cancel check so a cancelled stroke
+        // doesn't briefly tick "step N+1 of M" before exiting.
+        // `i + 1` so the banner reads "step 1 of 20" on the first
+        // iteration rather than "step 0".
+        if let Some(p) = progress {
+            p.set_step((i as u32) + 1);
         }
         let latent_f16 = f32_to_f16_4d(&latent);
         let latent_in_f16 = concat_inpaint_input_f16(

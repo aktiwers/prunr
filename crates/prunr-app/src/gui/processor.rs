@@ -169,6 +169,12 @@ pub(crate) struct Processor {
     /// drain path ignores the result. Cancel button + Esc key both
     /// flip the flag for the currently-selected item.
     inpaint_cancels: HashMap<u64, std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// Per-item progress sink for the in-flight stroke. Worker writes
+    /// `current` step between SD UNet iterations; the canvas banner
+    /// reads `(current, total)` to show "Erasing — step N of M". Same
+    /// lifetime as `inpaint_cancels` — both are replaced on every
+    /// dispatch.
+    inpaint_progress: HashMap<u64, std::sync::Arc<prunr_core::inpaint::InpaintProgress>>,
 }
 
 impl Processor {
@@ -191,6 +197,7 @@ impl Processor {
             inpaint_latest_gen: HashMap::new(),
             inpaint_pending: HashMap::new(),
             inpaint_cancels: HashMap::new(),
+            inpaint_progress: HashMap::new(),
         }
     }
 
@@ -208,11 +215,15 @@ impl Processor {
         let gen = *generation;
         *self.inpaint_pending.entry(item_id).or_insert(0) += 1;
         let tx = self.inpaint_tx.clone();
-        // Replace any prior cancel flag — the new dispatch supersedes
-        // its predecessor anyway, so wiring a fresh flag avoids a stale
-        // earlier-stroke cancel firing the moment a new stroke starts.
+        // Replace any prior cancel flag + progress sink — the new
+        // dispatch supersedes its predecessor anyway, so wiring fresh
+        // ones avoids a stale earlier-stroke cancel firing the moment
+        // a new stroke starts (and avoids the banner showing the prior
+        // stroke's last step count for one frame).
         let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let progress = std::sync::Arc::new(prunr_core::inpaint::InpaintProgress::new());
         self.inpaint_cancels.insert(item_id, cancel.clone());
+        self.inpaint_progress.insert(item_id, progress.clone());
         rayon::spawn(move || {
             let raw_mask = correction.to_binary_mask(image.width(), image.height());
             // Pre-process: grow/erode the painted area before LaMa runs.
@@ -247,7 +258,11 @@ impl Processor {
                 }),
                 _ => None,
             };
-            match prunr_core::inpaint::process_inpaint_with(&image, &mask, tuning.backend, sd_req, Some(cancel.clone())) {
+            let hooks = prunr_core::inpaint::InpaintHooks {
+                cancel: Some(cancel.clone()),
+                progress: Some(progress.clone()),
+            };
+            match prunr_core::inpaint::process_inpaint_with(&image, &mask, tuning.backend, sd_req, &hooks) {
                 Ok(rgba) => {
                     // Post-process pipeline:
                     //  1. color match — shifts mean RGB so the patch
@@ -330,6 +345,17 @@ impl Processor {
         if let Some(flag) = self.inpaint_cancels.get(&item_id) {
             flag.store(true, std::sync::atomic::Ordering::Release);
         }
+    }
+
+    /// Read the in-flight inpaint stroke's progress for `item_id` as
+    /// `(current_step, total_steps)`. Returns `(0, 0)` when no stroke
+    /// is in flight or the worker hasn't started stepping yet (LaMa
+    /// stays here for the whole stroke; only SD's UNet loop publishes
+    /// step counts).
+    pub(crate) fn inpaint_progress(&self, item_id: u64) -> (u32, u32) {
+        self.inpaint_progress.get(&item_id)
+            .map(|p| p.read())
+            .unwrap_or((0, 0))
     }
 
     /// Drain in-flight inpaint results.
