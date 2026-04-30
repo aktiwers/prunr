@@ -150,7 +150,8 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
     if let Some(idx) = app.batch.selected_idx_clamped() {
         let item_id = app.batch.items[idx].id;
         if app.processor.is_inpaint_in_flight(item_id) {
-            if render_inpaint_progress(ui, canvas_rect) {
+            let progress = app.processor.inpaint_progress(item_id);
+            if render_inpaint_progress(ui, canvas_rect, progress) {
                 app.cancel_inpaint_for(item_id);
             }
             ui.ctx().request_repaint();
@@ -168,9 +169,15 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
 
 /// Translucent banner + animated dots + Cancel button shown while an
 /// eraser stroke is in flight. Returns `true` when the Cancel button
-/// was clicked this frame. Mirrors the seg pipeline's
-/// `render_processing` rhythm — the same wiggle frequency family.
-fn render_inpaint_progress(ui: &mut egui::Ui, canvas_rect: Rect) -> bool {
+/// was clicked this frame. `progress` is `(current_step, total_steps)`
+/// from `Processor::inpaint_progress` — when `total > 0` the banner
+/// shows "Erasing — step N of M"; otherwise it stays at the "Erasing…"
+/// spinner-only form (LaMa, or SD's pre-loop bundle/VAE phase).
+fn render_inpaint_progress(
+    ui: &mut egui::Ui,
+    canvas_rect: Rect,
+    progress: (u32, u32),
+) -> bool {
     let t = ui.ctx().input(|i| i.time) as f32;
     let banner_h = 44.0;
     let banner = Rect::from_min_size(
@@ -190,10 +197,14 @@ fn render_inpaint_progress(ui: &mut egui::Ui, canvas_rect: Rect) -> bool {
             theme::ACCENT.gamma_multiply(a),
         );
     }
+    let label = match progress {
+        (cur, total) if total > 0 && cur > 0 => format!("Erasing — step {cur} of {total}"),
+        _ => "Erasing…".to_string(),
+    };
     ui.painter().text(
         Pos2::new(center.x - 22.0, center.y),
         egui::Align2::LEFT_CENTER,
-        "Erasing…",
+        label,
         egui::FontId::proportional(14.0),
         theme::TEXT_PRIMARY,
     );
