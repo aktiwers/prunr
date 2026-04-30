@@ -4,6 +4,7 @@
 //! flat backgrounds.
 
 use std::sync::{Mutex, OnceLock};
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use image::{GrayImage, RgbaImage};
 use ndarray::Array4;
@@ -11,6 +12,45 @@ use ort::{inputs, session::{Session, builder::GraphOptimizationLevel}, value::Te
 
 use crate::engine::EpKind;
 use crate::types::CoreError;
+
+/// Cross-thread progress channel for an in-flight inpaint stroke.
+///
+/// The worker writes `current` between scheduler steps (SD UNet) or
+/// at tile boundaries (LaMa); the GUI reads on its render thread to
+/// show "Erasing — step N of M". Writes are `Release` and reads are
+/// `Acquire` so a banner in the middle of a frame never sees a
+/// partial update. `total == 0` means "indeterminate" — the banner
+/// falls back to the spinner-only form.
+#[derive(Debug, Default)]
+pub struct InpaintProgress {
+    pub current: AtomicU32,
+    pub total: AtomicU32,
+}
+
+impl InpaintProgress {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub fn set_total(&self, total: u32) {
+        self.total.store(total, Ordering::Release);
+    }
+    pub fn set_step(&self, step: u32) {
+        self.current.store(step, Ordering::Release);
+    }
+    /// Returns `(current, total)`. `(0, 0)` means no progress yet.
+    pub fn read(&self) -> (u32, u32) {
+        (self.current.load(Ordering::Acquire), self.total.load(Ordering::Acquire))
+    }
+}
+
+/// Cross-cutting hooks for an in-flight inpaint stroke.
+/// Bundles `cancel` + `progress` so callers don't grow `process_inpaint_with`
+/// past the 6-param alarm as more hooks land.
+#[derive(Default)]
+pub struct InpaintHooks {
+    pub cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    pub progress: Option<std::sync::Arc<InpaintProgress>>,
+}
 
 /// LaMa input/output side length in pixels.
 pub const TILE: u32 = 512;
@@ -373,24 +413,26 @@ pub fn sharpen_inpainted(image: &RgbaImage, mask: &GrayImage, amount: f32) -> Rg
 /// the mask is all-zero (no work). SD-family ids dispatch to the
 /// `inpaint_sd` module which has its own multi-model pipeline.
 pub fn process_inpaint(image: &RgbaImage, mask: &GrayImage, id: prunr_models::ModelId) -> Result<RgbaImage, CoreError> {
-    process_inpaint_with(image, mask, id, None, None)
+    process_inpaint_with(image, mask, id, None, &InpaintHooks::default())
 }
 
 /// Same as `process_inpaint` but takes optional SD-specific tuning
-/// (prompt / negative prompt / guidance_scale / steps) and an optional
-/// cancel flag. The flag is checked between LaMa tiles and between SD
-/// UNet steps; ORT itself has no per-op cancel hook so worst-case
-/// latency on cancel is one tile (LaMa) or one UNet step (SD).
-/// Pass `None`/`None` for the seg pipeline default (empty prompt,
-/// no CFG, 20 steps, no cancel — equivalent to `process_inpaint`).
+/// (prompt / negative prompt / guidance_scale / steps) and a `hooks`
+/// bundle (cancel flag + progress sink). Cancel is checked between
+/// LaMa tiles and between SD UNet steps — ORT has no per-op cancel
+/// hook so worst-case latency on cancel is one tile (LaMa) or one
+/// UNet step (SD). Progress (when supplied) is updated between SD
+/// UNet steps; LaMa keeps the spinner-only form because per-tile
+/// updates are noisy and most strokes are a single tile.
 pub fn process_inpaint_with(
     image: &RgbaImage,
     mask: &GrayImage,
     id: prunr_models::ModelId,
     sd_req: Option<crate::inpaint_sd::SdInpaintRequest>,
-    cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    hooks: &InpaintHooks,
 ) -> Result<RgbaImage, CoreError> {
     use std::sync::atomic::Ordering;
+    let cancel = hooks.cancel.as_ref();
     if image.dimensions() != mask.dimensions() {
         return Err(CoreError::Inference(format!(
             "inpaint: dim mismatch — image {:?} vs mask {:?}",
@@ -408,10 +450,10 @@ pub fn process_inpaint_with(
             num_inference_steps: 20,
             ..Default::default()
         });
-        return crate::inpaint_sd::process_inpaint_with(image, mask, id, req, cancel);
+        return crate::inpaint_sd::process_inpaint_with(image, mask, id, req, hooks);
     }
     let session = LamaSession::get(id)?;
-    let is_cancelled = || cancel.as_ref().is_some_and(|c| c.load(Ordering::Acquire));
+    let is_cancelled = || cancel.is_some_and(|c| c.load(Ordering::Acquire));
     let composed = tile_compose(image, mask, |tile_rgba, tile_mask| {
         // When cancelled, short-circuit each remaining tile to a no-op.
         // The outer Cancelled error below discards the partial result.
