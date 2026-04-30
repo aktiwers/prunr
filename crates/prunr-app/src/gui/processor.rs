@@ -102,6 +102,11 @@ pub(crate) struct InpaintResult {
     /// user gets explicit feedback that Esc / the Cancel button took
     /// effect (vs. a silent failure or a stale-result drop).
     pub cancelled: bool,
+    /// Set when the worker returned a non-Cancelled error (e.g. the
+    /// SD-bundle RAM guard refused to load). Surfaced as a toast in
+    /// `drain_inpaint_results` so the user sees WHY the stroke did
+    /// nothing instead of guessing it was lost.
+    pub error: Option<String>,
 }
 
 /// Eraser-specific tuning passed from `BrushSettings` into the dispatch.
@@ -272,7 +277,7 @@ impl Processor {
                     if tuning.sharpen > 0.0 {
                         out = prunr_core::inpaint::sharpen_inpainted(&out, &mask, tuning.sharpen);
                     }
-                    let _ = tx.send(InpaintResult { item_id, rgba: out, generation: gen, cancelled: false });
+                    let _ = tx.send(InpaintResult { item_id, rgba: out, generation: gen, cancelled: false, error: None });
                 }
                 Err(prunr_core::CoreError::Cancelled) => {
                     tracing::info!(item_id, "inpaint cancelled by user");
@@ -283,18 +288,23 @@ impl Processor {
                         rgba: image::RgbaImage::new(0, 0),
                         generation: 0,
                         cancelled: true,
+                        error: None,
                     });
                 }
                 Err(e) => {
-                    tracing::error!(item_id, %e, "inpaint dispatch failed");
-                    // Best-effort: send an empty marker so pending count
-                    // decrements. Generation 0 + cancelled=false routes
-                    // it through the silent-drop branch.
+                    let msg = e.to_string();
+                    tracing::error!(item_id, e = %msg, "inpaint dispatch failed");
+                    // Surface the error to the GUI as a toast — without
+                    // it the user just sees the brush stroke "do nothing"
+                    // (e.g. when the SD-bundle RAM guard refuses to
+                    // load). Gen 0 still routes the result through the
+                    // stale-drop branch in drain_inpaint_results.
                     let _ = tx.send(InpaintResult {
                         item_id,
                         rgba: image::RgbaImage::new(0, 0),
                         generation: 0,
                         cancelled: false,
+                        error: Some(msg),
                     });
                 }
             }
@@ -324,14 +334,20 @@ impl Processor {
 
     /// Drain in-flight inpaint results.
     ///
-    /// Returns `(committed_results, cancelled_item_ids)`. `committed_results`
-    /// only carries the latest-gen finished strokes (stale ones are
-    /// silently dropped). `cancelled_item_ids` lists items whose stroke
-    /// was cancelled by the user — the GUI surfaces a toast for each
-    /// so the user gets explicit feedback that Esc/Cancel took effect.
-    pub(crate) fn drain_inpaint_results(&mut self) -> (Vec<InpaintResult>, Vec<u64>) {
+    /// Returns `(committed_results, cancelled_item_ids, errors)`.
+    /// - `committed_results` only carries the latest-gen finished
+    ///   strokes (stale ones are silently dropped).
+    /// - `cancelled_item_ids` lists items whose stroke was cancelled
+    ///   by the user — the GUI surfaces a toast for each so the user
+    ///   gets explicit feedback that Esc/Cancel took effect.
+    /// - `errors` carries the user-visible message for any non-Cancelled
+    ///   dispatch failure (e.g. SD RAM-guard refusal). The GUI shows
+    ///   each as an error toast — without this surface the user sees
+    ///   the stroke "do nothing" with no idea why.
+    pub(crate) fn drain_inpaint_results(&mut self) -> (Vec<InpaintResult>, Vec<u64>, Vec<String>) {
         let mut out = Vec::new();
         let mut cancelled = Vec::new();
+        let mut errors = Vec::new();
         while let Ok(result) = self.inpaint_rx.try_recv() {
             // Every drained result decrements pending — stale ones
             // count too, since the rayon job that produced them has
@@ -343,12 +359,16 @@ impl Processor {
                 cancelled.push(result.item_id);
                 continue;
             }
+            if let Some(msg) = result.error {
+                errors.push(msg);
+                continue;
+            }
             let latest = self.inpaint_latest_gen.get(&result.item_id).copied().unwrap_or(0);
             if result.generation == latest && result.generation > 0 {
                 out.push(result);
             }
         }
-        (out, cancelled)
+        (out, cancelled, errors)
     }
 
     /// True while a dispatched inpaint job hasn't drained yet for `item_id`.
@@ -442,15 +462,16 @@ mod tests {
         let mut p = fixture();
         p.inpaint_latest_gen.insert(7, 2);
         p.inpaint_tx.send(InpaintResult {
-            item_id: 7, rgba: image::RgbaImage::new(1, 1), generation: 1, cancelled: false,
+            item_id: 7, rgba: image::RgbaImage::new(1, 1), generation: 1, cancelled: false, error: None,
         }).unwrap();
         p.inpaint_tx.send(InpaintResult {
-            item_id: 7, rgba: image::RgbaImage::new(1, 1), generation: 2, cancelled: false,
+            item_id: 7, rgba: image::RgbaImage::new(1, 1), generation: 2, cancelled: false, error: None,
         }).unwrap();
-        let (drained, cancelled) = p.drain_inpaint_results();
+        let (drained, cancelled, errors) = p.drain_inpaint_results();
         assert_eq!(drained.len(), 1, "stale gen=1 must be dropped");
         assert_eq!(drained[0].generation, 2);
         assert!(cancelled.is_empty(), "no cancellation events expected");
+        assert!(errors.is_empty(), "no dispatch errors expected");
     }
 
     #[test]
@@ -460,13 +481,34 @@ mod tests {
         p.inpaint_pending.insert(7, 1);
         p.inpaint_tx.send(InpaintResult {
             item_id: 7, rgba: image::RgbaImage::new(0, 0),
-            generation: 0, cancelled: true,
+            generation: 0, cancelled: true, error: None,
         }).unwrap();
-        let (drained, cancelled) = p.drain_inpaint_results();
+        let (drained, cancelled, errors) = p.drain_inpaint_results();
         assert!(drained.is_empty(),
             "cancelled stroke must not commit a result");
         assert_eq!(cancelled, vec![7],
             "cancellation event must surface for the toast");
+        assert!(errors.is_empty(),
+            "cancel must not be reported as a dispatch error");
+    }
+
+    #[test]
+    fn drain_routes_dispatch_errors_to_error_list() {
+        let mut p = fixture();
+        p.inpaint_pending.insert(7, 1);
+        p.inpaint_tx.send(InpaintResult {
+            item_id: 7, rgba: image::RgbaImage::new(0, 0),
+            generation: 0, cancelled: false,
+            error: Some("SD inpaint refused to load: only 13.4 GB free".to_string()),
+        }).unwrap();
+        let (drained, cancelled, errors) = p.drain_inpaint_results();
+        assert!(drained.is_empty(),
+            "errored stroke must not commit a result");
+        assert!(cancelled.is_empty(),
+            "errored stroke is not a cancel");
+        assert_eq!(errors.len(), 1,
+            "dispatch error must surface for the user toast");
+        assert!(errors[0].contains("13.4 GB"));
     }
 
     #[test]
