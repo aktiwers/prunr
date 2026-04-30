@@ -1,5 +1,42 @@
 # BgPrunR — Claude Guidelines
 
+## Committing — durable authorization
+
+Commit autonomously when work reaches a logical stopping point. Don't
+ask for a one-off green light each time. Defaults that make this
+safe:
+
+- **Tests must be green.** Run `cargo test --workspace --lib` (and
+  any test that's a real correctness contract for the change) before
+  committing. Never commit through a failing run.
+- **One concept per commit.** A bug fix is one commit; a refactor is
+  one commit; a feature is one commit. Don't bundle unrelated
+  changes — that's bisect-hostile.
+- **New commits only.** Never `--amend` published work. If a hook
+  fails, fix and create a NEW commit.
+- **Never skip hooks.** No `--no-verify`, no `--no-gpg-sign`. If a
+  hook breaks, debug the underlying issue.
+- **Stage by file name.** Avoid `git add -A` / `git add .` — they
+  catch sensitive files (`.env`, credentials) or large blobs by
+  accident.
+- **Refuse to commit secrets / large binaries.** Anything that
+  smells like a credential, a `.env`, a `target/` build artifact, or
+  a multi-MB asset is a stop-and-ask.
+
+Hard line — these still require an explicit ask each time:
+- `git push` (visible to others, harder to reverse).
+- Force-push, `git reset --hard`, branch deletion, `git checkout --`,
+  any history-rewriting operation.
+- Creating, closing, or commenting on PRs / issues.
+- Anything that touches a remote, sends a notification, or is
+  user-visible beyond the local working tree.
+
+Commit message shape: short imperative title (≤ 70 chars) summarising
+the *why*, body bullets for non-obvious detail when the diff alone
+doesn't carry the reasoning, plus the standard
+`Co-Authored-By: Claude Opus 4.7 (1M context)` trailer. If in doubt,
+mirror the project's recent commit voice.
+
 ## Honesty over cop-outs
 
 When declining a task, skipping a refactor, or marking something "not worth it," **state the real reason**. Never invent risk or complexity narratives to cover "I didn't do the homework" or "I was pacing myself."

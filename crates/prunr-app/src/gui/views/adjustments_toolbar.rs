@@ -493,7 +493,6 @@ fn render_lines_row(
     flags: &LinesRowFlags<'_>,
     change: &mut ToolbarChange,
 ) {
-    let defaults = flags.defaults;
     ui.add_space(theme::SPACE_XS);
     ui.horizontal(|ui| {
         let seg_model_name = super::model_name(flags.app_settings.model);
@@ -512,55 +511,63 @@ fn render_lines_row(
             );
         }
         if item_settings.line_mode != LineMode::Off {
-            let scale_changed = super::lines_popover::render_scale_chip(ui, item_settings);
-            aggregate_bool(scale_changed, StaticKnob::EdgeScale, change);
-
-            aggregate_knob(chip::chip_f32(
-                ui, "line_strength",
-                &ICON_TUNE.codepoint.to_string(), "Line strength",
-                "How much edge detail to capture. Lower = bold outlines only; higher = fine texture.",
-                "Stage 2 of 4 in the lines pipeline. Threshold on DexiNed's raw edge tensor. Lower = bold outlines only; higher = fine texture and subtle edges. Feeds edge thickness + solid color.",
-                &mut item_settings.line_strength,
-                0.0..=1.0, defaults.template.line_strength,
-                false,
-                |v| format!("{v:.2}"),
-            ), StaticKnob::LineStrength, change);
-
-            aggregate_knob(chip::chip_u32(
-                ui, "edge_thickness",
-                &ICON_LINE_WEIGHT.codepoint.to_string(), "Edge thickness",
-                "Thicken edges by dilating the mask. 0 = native DexiNed width; higher = bolder outlines.",
-                "Stage 3 of 4 in the lines pipeline. Dilates the thresholded edge mask by N pixels. 0 = native DexiNed width; higher = bolder outlines that stay readable at display resolution. Runs before solid color, so bolder edges still inherit the paint choice.",
-                &mut item_settings.edge_thickness,
-                0..=20, defaults.template.edge_thickness,
-                |v| if v == 0 { "off".into() } else { format!("+{v}px") },
-            ), StaticKnob::EdgeThickness, change);
-
-            ui.separator();
-
-            // ComposeMode picker — only meaningful in SubjectOutline.
-            // Worker / live preview ignore it in EdgesOnly + Off, so we
-            // hide the chip there to avoid presenting a dead control.
-            if item_settings.line_mode == LineMode::SubjectOutline {
-                let compose_changed = render_compose_mode_chip(ui, &mut item_settings.compose_mode);
-                aggregate_bool(compose_changed, StaticKnob::ComposeMode, change);
-            }
-            let style_changed = render_line_style_chip(ui, &mut item_settings.line_style);
-            aggregate_bool(style_changed, StaticKnob::LineStyle, change);
-            if render_input_transform_chip(ui, &mut item_settings.input_transform) {
-                mark_input_transform_change(change);
-            }
-
-            aggregate_knob(chip::chip_option_rgb(
-                ui, "solid_line_color",
-                &ICON_BRUSH.codepoint.to_string(), "Solid line color",
-                "Paint every edge the same color.",
-                "Stage 4 of 4 in the lines pipeline. Paint every visible edge the same color, or leave unset to keep the original RGB beneath the mask. Runs after edge thickness.",
-                &mut item_settings.solid_line_color,
-                defaults.solid_line_color_value,
-            ), StaticKnob::SolidLineColor, change);
+            render_row2_right_cluster(ui, item_settings, flags.defaults, change);
         }
     });
+}
+
+/// Compose-mode is hidden outside SubjectOutline because the worker
+/// ignores it there — no point showing a dead control.
+fn render_row2_right_cluster(
+    ui: &mut Ui,
+    item_settings: &mut ItemSettings,
+    defaults: &Defaults,
+    change: &mut ToolbarChange,
+) {
+    let scale_changed = super::lines_popover::render_scale_chip(ui, item_settings);
+    aggregate_bool(scale_changed, StaticKnob::EdgeScale, change);
+
+    aggregate_knob(chip::chip_f32(
+        ui, "line_strength",
+        &ICON_TUNE.codepoint.to_string(), "Line strength",
+        "How much edge detail to capture. Lower = bold outlines only; higher = fine texture.",
+        "Stage 2 of 4 in the lines pipeline. Threshold on DexiNed's raw edge tensor. Lower = bold outlines only; higher = fine texture and subtle edges. Feeds edge thickness + solid color.",
+        &mut item_settings.line_strength,
+        0.0..=1.0, defaults.template.line_strength,
+        false,
+        |v| format!("{v:.2}"),
+    ), StaticKnob::LineStrength, change);
+
+    aggregate_knob(chip::chip_u32(
+        ui, "edge_thickness",
+        &ICON_LINE_WEIGHT.codepoint.to_string(), "Edge thickness",
+        "Thicken edges by dilating the mask. 0 = native DexiNed width; higher = bolder outlines.",
+        "Stage 3 of 4 in the lines pipeline. Dilates the thresholded edge mask by N pixels. 0 = native DexiNed width; higher = bolder outlines that stay readable at display resolution. Runs before solid color, so bolder edges still inherit the paint choice.",
+        &mut item_settings.edge_thickness,
+        0..=20, defaults.template.edge_thickness,
+        |v| if v == 0 { "off".into() } else { format!("+{v}px") },
+    ), StaticKnob::EdgeThickness, change);
+
+    ui.separator();
+
+    if item_settings.line_mode == LineMode::SubjectOutline {
+        let compose_changed = render_compose_mode_chip(ui, &mut item_settings.compose_mode);
+        aggregate_bool(compose_changed, StaticKnob::ComposeMode, change);
+    }
+    let style_changed = render_line_style_chip(ui, &mut item_settings.line_style);
+    aggregate_bool(style_changed, StaticKnob::LineStyle, change);
+    if render_input_transform_chip(ui, &mut item_settings.input_transform) {
+        mark_input_transform_change(change);
+    }
+
+    aggregate_knob(chip::chip_option_rgb(
+        ui, "solid_line_color",
+        &ICON_BRUSH.codepoint.to_string(), "Solid line color",
+        "Paint every edge the same color.",
+        "Stage 4 of 4 in the lines pipeline. Paint every visible edge the same color, or leave unset to keep the original RGB beneath the mask. Runs after edge thickness.",
+        &mut item_settings.solid_line_color,
+        defaults.solid_line_color_value,
+    ), StaticKnob::SolidLineColor, change);
 }
 
 /// Fold a static chip's `ChipChange` into the aggregate, routing via the
@@ -994,7 +1001,20 @@ fn render_background_chip(
                         // Image is owned by BatchItem (Arc bytes don't fit in
                         // the Copy ItemSettings) — emit an intent and let the
                         // app handle the file dialog + decode side effects.
+                        // We ALSO clear bg + bg_effect here, mirroring the
+                        // clear_bg_image branch below: BgKind::current
+                        // resolves bg_effect first, so leaving the previous
+                        // effect set would keep the result texture's baked-in
+                        // effect masking the freshly-loaded image.
                         if matches!(kind, BgKind::Image) {
+                            *bg = None;
+                            *bg_effect = prunr_core::BgEffect::None;
+                            let knob = if current.needs_postprocess() {
+                                StaticKnob::BgEffect
+                            } else {
+                                StaticKnob::BgColor
+                            };
+                            aggregate_bool(true, knob, change);
                             change.pick_bg_image = true;
                             continue;
                         }

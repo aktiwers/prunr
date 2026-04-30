@@ -226,26 +226,21 @@ where
     let is_std_owned = raw_output.is_standard_layout();
     let h = raw_output.shape()[2];
     let w = raw_output.shape()[3];
-    // Fast path when already standard layout: take ownership of the
-    // underlying Vec (no copy). Otherwise fall back to the contiguous
-    // view + clone. Saves 4–12 MB × 10 Hz alloc churn during a slider
-    // drag for BiRefNet-class models.
+    // `from_shape_vec` on a nonzero-offset Vec includes the stale prefix
+    // as fake tensor data — silent corruption. Slice past the offset
+    // explicitly instead.
     let tensor_data: Vec<f32> = if is_std_owned {
-        // ndarray 0.17+: an owned array can be standard-layout AND
-        // hold a nonzero data offset (e.g. after `slice_axis_inplace`
-        // moves the view but keeps the backing Vec). We currently only
-        // call this on a fresh ORT output that has offset 0, but a
-        // future caller might not — fall through to the slow path on
-        // nonzero offset rather than silently corrupt the tensor.
         let (buf, offset) = raw_output.into_raw_vec_and_offset();
-        if offset.unwrap_or(0) == 0 {
-            buf
-        } else {
-            // Reconstruct array, then take a contiguous slice copy.
-            let arr = ndarray::Array4::from_shape_vec(
-                (buf.len() / (h * w), 1, h, w), buf,
-            ).expect("reshape from owned");
-            arr.as_standard_layout().as_slice().unwrap().to_vec()
+        match offset {
+            Some(0) | None => buf,
+            Some(off) => {
+                debug_assert!(
+                    off + h * w <= buf.len(),
+                    "ndarray returned offset {off} + h*w {} > buf.len {}",
+                    h * w, buf.len(),
+                );
+                buf[off..off + h * w].to_vec()
+            }
         }
     } else {
         let standard = raw_output.as_standard_layout();

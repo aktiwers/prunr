@@ -416,6 +416,7 @@ mod tests {
             version: "1.0.0",
             gpu,
             incompatible_eps: &[],
+            working_set_mb: 100,
         }
     }
 
@@ -429,6 +430,7 @@ mod tests {
             version: "1.0.0",
             gpu: prunr_models::GpuRequirement::None,
             incompatible_eps: &[],
+            working_set_mb: 100,
         }
     }
 

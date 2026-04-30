@@ -144,14 +144,15 @@ pub fn under_memory_pressure() -> bool {
 }
 
 /// Total cost per concurrent inference slot: session weights + ORT workspace +
-/// inference tensors + decoded image buffers. Measured empirically from OOM
-/// at 4 jobs / 20 GB RSS with BiRefNet on a 32 GB system.
+/// inference tensors + decoded image buffers. Reads `working_set_mb` from
+/// the model registry — adding a new segmentation model is a registry edit,
+/// no `memory.rs` change required.
 fn per_engine_cost(model: ModelKind) -> usize {
-    match model {
-        ModelKind::Silueta => 200 * 1024 * 1024,        //  200 MB (320x320 tensors)
-        ModelKind::U2net => 800 * 1024 * 1024,           //  800 MB (320x320 + large model)
-        ModelKind::BiRefNetLite => 2500 * 1024 * 1024,   // 2.5 GB (1024x1024 tensors + ORT workspace)
-    }
+    let id: prunr_models::ModelId = model.into();
+    let mb = prunr_models::descriptor(id)
+        .map(|d| d.working_set_mb as usize)
+        .unwrap_or(800); // unreachable: every ModelKind has a descriptor.
+    mb * 1024 * 1024
 }
 
 /// Fixed overhead for the engine pool at the requested job count.
@@ -317,5 +318,20 @@ mod tests {
         // least 25× the rgba_size in committed bytes.
         let cost_deep = AdmissionController::estimate_cost(3, dims, 0, 50);
         assert!(cost_deep.total >= 2 * rgba_size + 25 * rgba_size);
+    }
+
+    /// Pins descriptor-driven dispatch — a future "regress to const"
+    /// refactor would silently mis-charge admission for new models.
+    #[test]
+    fn per_engine_cost_is_descriptor_driven() {
+        let silueta = per_engine_cost(ModelKind::Silueta);
+        let u2net   = per_engine_cost(ModelKind::U2net);
+        let birefnet = per_engine_cost(ModelKind::BiRefNetLite);
+        // BiRefNet's bigger activation footprint must charge strictly
+        // more than Silueta — the whole point of model-aware admission.
+        assert!(birefnet > u2net,   "BiRefNet ({birefnet}) ≤ U2Net ({u2net})");
+        assert!(u2net    > silueta, "U2Net ({u2net}) ≤ Silueta ({silueta})");
+        // Tie back to MB → bytes derivation: 200 MB Silueta ≈ 209 MB.
+        assert_eq!(silueta, 200 * 1024 * 1024);
     }
 }

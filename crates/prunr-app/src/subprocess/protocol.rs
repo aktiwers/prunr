@@ -4,6 +4,8 @@
 //! frames over stdin/stdout.
 
 use prunr_core::{ModelKind, MaskSettings, EdgeSettings, ProgressStage, LineMode};
+use prunr_core::inpaint_sd::SdInpaintRequest;
+use prunr_models::ModelId;
 use serde::{Serialize, Deserialize};
 
 /// `ImageError.error` value emitted when a per-item `CancelItem` trips at
@@ -16,6 +18,11 @@ pub const CANCELLED_ERR_MSG: &str = "Cancelled";
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub enum SubprocessCommand {
     /// Initialize the worker: load model, create engine pool.
+    /// When `inpaint_only` is true the worker SKIPS engine pool creation
+    /// and only handles `Inpaint` commands — the seg/edge fields
+    /// (`model`, `mask`, `line_mode`, `edge`) are ignored. Used by the
+    /// dedicated SD-inpaint subprocess so it doesn't waste GB on a seg
+    /// engine that never runs.
     Init {
         model: ModelKind,
         jobs: usize,
@@ -25,6 +32,8 @@ pub enum SubprocessCommand {
         edge: EdgeSettings,
         /// IPC temp directory (set by parent so child uses the same PID-namespaced dir)
         ipc_dir: std::path::PathBuf,
+        #[serde(default)]
+        inpaint_only: bool,
     },
     /// Process a single image. `image_path` points to a temp file with
     /// the raw image bytes (avoids piping large payloads through stdin).
@@ -69,15 +78,30 @@ pub enum SubprocessCommand {
         /// Per-item mask settings (may differ from Init's mask).
         mask: MaskSettings,
     },
-    /// Inpaint a region of an image. Worker runs LaMa over `mask_path`'s
-    /// painted area and returns the filled RGBA. Independent of the seg/
-    /// edge engine pool — uses its own LaMa session.
+    /// Inpaint a region of an image. Worker dispatches to the inpaint
+    /// model named by `model_id` (LaMa / Big-LaMa / MI-GAN / SD 1.5 /
+    /// SD 1.5 LCM), runs the full post-process pipeline (color match +
+    /// seam-guided blend + sharpen) and returns the finished RGBA.
+    /// For SD models, `sd_req` carries prompt + steps + guidance;
+    /// `None` for non-SD models. Independent of the seg/edge engine
+    /// pool — each inpaint model runs its own session inside the worker.
     Inpaint {
         item_id: u64,
+        /// Which inpaint model to run.
+        model_id: ModelId,
         /// Source image bytes (PNG/JPG/etc — worker decodes).
         image_path: std::path::PathBuf,
         /// Single-channel mask: 255 = inpaint here, 0 = keep.
         mask_path: std::path::PathBuf,
+        /// SD-specific knobs. `None` for LaMa / Big-LaMa / MI-GAN.
+        sd_req: Option<SdInpaintRequest>,
+        /// Seam-blend feather override (px). 0 ⇒ pipeline default.
+        #[serde(default)]
+        feather_px: f32,
+        /// Unsharp-mask strength applied inside the painted region.
+        /// 0 ⇒ skip sharpen.
+        #[serde(default)]
+        sharpen: f32,
     },
     /// Cancel: stop after current image, send Finished.
     Cancel,
@@ -150,6 +174,14 @@ pub enum SubprocessEvent {
     InpaintError {
         item_id: u64,
         error: String,
+    },
+    /// Per-step progress during a long inpaint stroke. Fired between
+    /// SD UNet steps; `total = num_inference_steps`. LaMa / MI-GAN
+    /// don't fire this (single-pass, sub-second on GPU).
+    InpaintProgress {
+        item_id: u64,
+        current: u32,
+        total: u32,
     },
     /// Current RSS of the subprocess (sent after each image).
     RssUpdate {
@@ -227,6 +259,17 @@ mod tests {
             line_mode: LineMode::Off,
             edge: EdgeSettings { line_strength: 0.5, solid_line_color: Some([255, 0, 0]), edge_thickness: 0, edge_scale: prunr_core::EdgeScale::Bold, compose_mode: prunr_core::ComposeMode::default(), line_style: prunr_core::LineStyle::default(), input_transform: prunr_core::InputTransform::default() },
             ipc_dir: PathBuf::from("/tmp/prunr-ipc-test"),
+            inpaint_only: false,
+        });
+        roundtrip(&SubprocessCommand::Init {
+            model: ModelKind::Silueta,
+            jobs: 1,
+            mask: MaskSettings::default(),
+            force_cpu: false,
+            line_mode: LineMode::Off,
+            edge: EdgeSettings::default(),
+            ipc_dir: PathBuf::from("/tmp/prunr-ipc-test"),
+            inpaint_only: true,
         });
     }
 
@@ -357,11 +400,35 @@ mod tests {
     }
 
     #[test]
-    fn command_inpaint_roundtrip() {
+    fn command_inpaint_lama_roundtrip() {
         roundtrip(&SubprocessCommand::Inpaint {
             item_id: 11,
+            model_id: prunr_models::ModelId::LaMaFp32,
             image_path: std::path::PathBuf::from("/tmp/prunr-inpaint-img-11"),
             mask_path: std::path::PathBuf::from("/tmp/prunr-inpaint-mask-11"),
+            sd_req: None,
+            feather_px: 0.0,
+            sharpen: 0.0,
+        });
+    }
+
+    #[test]
+    fn command_inpaint_sd_roundtrip() {
+        roundtrip(&SubprocessCommand::Inpaint {
+            item_id: 12,
+            model_id: prunr_models::ModelId::SdV15InpaintFp16,
+            image_path: std::path::PathBuf::from("/tmp/prunr-inpaint-img-12"),
+            mask_path: std::path::PathBuf::from("/tmp/prunr-inpaint-mask-12"),
+            sd_req: Some(prunr_core::inpaint_sd::SdInpaintRequest {
+                prompt: "remove subject".into(),
+                negative_prompt: "blurry".into(),
+                num_inference_steps: 20,
+                guidance_scale: 7.5,
+                seed: Some(42),
+                use_taesd: false,
+            }),
+            feather_px: 4.5,
+            sharpen: 0.6,
         });
     }
 
@@ -377,5 +444,12 @@ mod tests {
             item_id: 11,
             error: "lama session failed: tensor shape mismatch".into(),
         });
+    }
+
+    #[test]
+    fn event_inpaint_progress_roundtrip() {
+        roundtrip(&SubprocessEvent::InpaintProgress { item_id: 12, current: 0, total: 20 });
+        roundtrip(&SubprocessEvent::InpaintProgress { item_id: 12, current: 7, total: 20 });
+        roundtrip(&SubprocessEvent::InpaintProgress { item_id: 12, current: 20, total: 20 });
     }
 }

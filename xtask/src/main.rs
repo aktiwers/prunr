@@ -1,6 +1,6 @@
 use sha2::{Digest, Sha256};
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 struct ModelSpec {
     /// Registry id; OnDemand mirroring uses the filename from
@@ -300,15 +300,25 @@ fn compress_to_zst(onnx_path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Phase 19-09: download + extract a `onnxruntime-*` PyPI wheel into
-/// `<user data>/prunr/runtimes/<package>-<version>-<rid>/`.
+/// Phase 19-09 / J-7: download + extract a `onnxruntime-*` PyPI wheel.
+///
+/// Default target: `<user data>/prunr/runtimes/<package>-<version>-<rid>/`
+/// (the runtime store, hot-loaded by `ort_runtime::resolve_dylib_path`).
+///
+/// `--stage-to <DIR>`: extract directly into `<DIR>/` instead of the
+/// runtime store. CI release packaging uses this to bundle the CPU
+/// runtime next to the binary, satisfying `bundled_dylib`'s
+/// `<exe>/runtime/libonnxruntime.{so,dylib,dll}` lookup. Path-safety
+/// guard (refuse to wipe a path whose parent isn't `runtimes`) does
+/// NOT apply when staging — caller picks the path.
 ///
 /// Usage:
 ///   cargo xtask install-runtime <package> <version> [target-name]
+///   cargo xtask install-runtime <package> <version> --stage-to <DIR>
 ///
-/// Example:
+/// Examples:
 ///   cargo xtask install-runtime onnxruntime-openvino 1.24.1
-///   → installs to `<data>/prunr/runtimes/openvino-1.24.1-linux-x64/`
+///   cargo xtask install-runtime onnxruntime 1.24.1 --stage-to dist/runtime
 ///
 /// Skips Python bindings (`onnxruntime_pybind11_state.cpython-*.so`,
 /// `*.py` sources) since prunr links via Rust ort. Renames
@@ -320,13 +330,49 @@ fn install_runtime() -> anyhow::Result<()> {
         .ok_or_else(|| anyhow::anyhow!("missing <package> arg, e.g. onnxruntime-openvino"))?;
     let version = std::env::args().nth(3)
         .ok_or_else(|| anyhow::anyhow!("missing <version> arg, e.g. 1.24.1"))?;
+
+    // Either `--stage-to <DIR>` (CI bundle path) or a positional
+    // target-name (runtime store path under data_dir).
+    let mut stage_to: Option<PathBuf> = None;
+    let mut target_name: Option<String> = None;
+    let extra: Vec<String> = std::env::args().skip(4).collect();
+    let mut i = 0;
+    while i < extra.len() {
+        let arg = &extra[i];
+        if arg == "--stage-to" {
+            stage_to = Some(PathBuf::from(extra.get(i + 1)
+                .ok_or_else(|| anyhow::anyhow!("--stage-to requires a directory argument"))?));
+            i += 2;
+        } else {
+            target_name = Some(arg.clone());
+            i += 1;
+        }
+    }
+    if stage_to.is_some() && target_name.is_some() {
+        anyhow::bail!("--stage-to and a positional target-name are mutually exclusive");
+    }
+
     let short = package.strip_prefix("onnxruntime-").unwrap_or(&package);
-    let target_name = std::env::args().nth(4)
-        .unwrap_or_else(|| ri::install_subdir(short, &version));
 
     println!("=== install-runtime ===");
     println!("Package:  {package} {version}");
-    println!("Target:   <data>/prunr/runtimes/{target_name}/");
+
+    let target_dir = if let Some(stage) = &stage_to {
+        println!("Stage-to: {}", stage.display());
+        stage.clone()
+    } else {
+        let target_name = target_name
+            .unwrap_or_else(|| ri::install_subdir(short, &version));
+        let dir = prunr_models::data_dir()
+            .ok_or_else(|| anyhow::anyhow!("could not resolve user data dir"))?
+            .join("runtimes")
+            .join(&target_name);
+        if !dir.parent().is_some_and(|p| p.ends_with("runtimes")) {
+            anyhow::bail!("refusing to wipe non-runtimes path: {}", dir.display());
+        }
+        println!("Target:   {}", dir.display());
+        dir
+    };
 
     let json_url = format!("https://pypi.org/pypi/{package}/{version}/json");
     println!("Querying {json_url}");
@@ -351,13 +397,6 @@ fn install_runtime() -> anyhow::Result<()> {
     let bytes = ri::download_wheel(&wheel, &mut hooks).map_err(|e| anyhow::anyhow!(e))?;
     ri::verify_sha256(&bytes, &wheel.sha256).map_err(|e| anyhow::anyhow!(e))?;
 
-    let target_dir = prunr_models::data_dir()
-        .ok_or_else(|| anyhow::anyhow!("could not resolve user data dir"))?
-        .join("runtimes")
-        .join(&target_name);
-    if !target_dir.parent().is_some_and(|p| p.ends_with("runtimes")) {
-        anyhow::bail!("refusing to wipe non-runtimes path: {}", target_dir.display());
-    }
     if target_dir.exists() {
         std::fs::remove_dir_all(&target_dir)?;
     }
@@ -367,8 +406,10 @@ fn install_runtime() -> anyhow::Result<()> {
 
     println!();
     println!("=== install-runtime DONE ===");
-    println!("Try the doctor command to confirm pickup:");
-    println!("  target/debug/prunr --doctor");
+    if stage_to.is_none() {
+        println!("Try the doctor command to confirm pickup:");
+        println!("  target/debug/prunr --doctor");
+    }
     Ok(())
 }
 

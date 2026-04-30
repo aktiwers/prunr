@@ -137,7 +137,7 @@ pub fn run_worker() -> ! {
 
     // Read Init command
     let Ok(Some(SubprocessCommand::Init {
-        model, jobs, mask, force_cpu, line_mode, edge, ipc_dir,
+        model, jobs, mask, force_cpu, line_mode, edge, ipc_dir, inpaint_only,
     })) = read_message::<_, SubprocessCommand>(&mut reader)
     else {
         let _ = evt_tx.send(SubprocessEvent::InitError {
@@ -152,9 +152,11 @@ pub fn run_worker() -> ! {
     let has_gpu = !OrtEngine::detect_active_provider().eq_ignore_ascii_case("CPU");
     let cpu_only = force_cpu || !has_gpu;
 
-    // Load edge engine if needed
-    let needs_edge = line_mode != LineMode::Off;
-    let needs_segmentation = line_mode != LineMode::EdgesOnly;
+    // Inpaint-only subprocess: skip seg/edge engine creation entirely.
+    // Inpaint sessions are built lazily by `process_inpaint_with` on
+    // first dispatch, so the worker can enter the command loop now.
+    let needs_edge = !inpaint_only && line_mode != LineMode::Off;
+    let needs_segmentation = !inpaint_only && line_mode != LineMode::EdgesOnly;
 
     let edge_engine: Option<Arc<EdgeEngine>> = if needs_edge {
         match EdgeEngine::new() {
@@ -209,6 +211,14 @@ pub fn run_worker() -> ! {
     // share `Arc<AtomicBool>`, so we round-trip through `CancelItem` inserts.
     let cancelled_items: Arc<Mutex<std::collections::HashSet<u64>>> =
         Arc::new(Mutex::new(std::collections::HashSet::new()));
+    // Per-item inpaint cancel flags. Lives alongside `cancelled_items`
+    // because the two consumers diverge: seg dispatch checks the HashSet
+    // at dispatch time, inpaint inference takes a long-running
+    // `Arc<AtomicBool>` it polls between LaMa tiles / SD UNet steps. A
+    // `CancelItem` flips both so a single cancel from the parent reaches
+    // either dispatch path.
+    let inpaint_cancels: Arc<Mutex<std::collections::HashMap<u64, Arc<AtomicBool>>>> =
+        Arc::new(Mutex::new(std::collections::HashMap::new()));
     let in_flight = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let mut engine_idx: usize = 0;
 
@@ -838,24 +848,111 @@ pub fn run_worker() -> ! {
             }
 
             SubprocessCommand::CancelItem { item_id } => {
-                let mut guard = cancelled_items.lock()
+                {
+                    let mut guard = cancelled_items.lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    guard.insert(item_id);
+                }
+                // Also flip the inpaint flag for this item — for SD's
+                // multi-second UNet steps and LaMa's tile loop, the
+                // hook is the only mid-inference cancel signal.
+                let guard = inpaint_cancels.lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                guard.insert(item_id);
+                if let Some(flag) = guard.get(&item_id) {
+                    flag.store(true, Ordering::Release);
+                }
             }
 
-            SubprocessCommand::Inpaint { item_id, image_path, mask_path } => {
+            SubprocessCommand::Inpaint { item_id, model_id, image_path, mask_path, sd_req, feather_px, sharpen } => {
                 // Inpaint runs independent of the seg/edge engine pool —
-                // a fresh thread per dispatch keeps LaMa from blocking
-                // batched seg work.
+                // a fresh thread per dispatch keeps inference from
+                // blocking batched seg work. Bump `in_flight` so a
+                // concurrent `Cancel` / `Shutdown` waits for the SD
+                // UNet loop to actually finish rather than declaring
+                // drain done while the spawned thread is still alive
+                // and queueing events. Decrement is in `Cleanup::drop`
+                // so panics still pair correctly.
+                in_flight.fetch_add(1, Ordering::AcqRel);
                 let evt_tx = evt_tx.clone();
-                std::thread::spawn(move || {
+                let inpaint_cancels = inpaint_cancels.clone();
+                let inpaint_cancel = Arc::new(AtomicBool::new(false));
+                let inpaint_progress = Arc::new(prunr_core::inpaint::InpaintProgress::new());
+                {
+                    let mut guard = inpaint_cancels.lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    guard.insert(item_id, inpaint_cancel.clone());
+                }
+                let progress_for_pump = inpaint_progress.clone();
+                let evt_tx_for_pump = evt_tx.clone();
+                let pump_done = Arc::new(AtomicBool::new(false));
+                let pump_done_for_thread = pump_done.clone();
+                let in_flight_for_thread = in_flight.clone();
+                // Clones reserved for the spawn-failure unwind path
+                // — the closure below moves the originals.
+                let evt_tx_on_spawn_err = evt_tx.clone();
+                let inpaint_cancels_on_err = inpaint_cancels.clone();
+                let pump_done_on_err = pump_done.clone();
+                // Progress pump: 4 Hz poll matches SD's per-step cadence on
+                // CPU (1-3 s/step). Acquire reads pair with the worker's
+                // Release writes in `process_inpaint_with`.
+                let pump_handle = std::thread::spawn(move || {
+                    let mut last_current = u32::MAX;
+                    while !pump_done_for_thread.load(Ordering::Acquire) {
+                        let (current, total) = progress_for_pump.read();
+                        if current != last_current {
+                            let _ = evt_tx_for_pump.send(SubprocessEvent::InpaintProgress {
+                                item_id, current, total,
+                            });
+                            last_current = current;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(250));
+                    }
+                });
+                let spawn_result = std::thread::Builder::new()
+                    .name("prunr-inpaint".into())
+                    .spawn(move || {
+                    // RAII guard: stops pump + clears registry on Drop.
+                    // Runs even if the inference closure panics — without
+                    // this the pump thread loops forever holding evt_tx
+                    // and the parent's cancel flag is never reclaimed.
+                    // Joining the pump before any final send also closes
+                    // the "stale Progress after Done" race: pump can't be
+                    // mid-iteration when InpaintDone goes on the wire.
+                    struct Cleanup {
+                        item_id: u64,
+                        pump_done: Arc<AtomicBool>,
+                        pump_handle: Option<std::thread::JoinHandle<()>>,
+                        cancels: Arc<Mutex<std::collections::HashMap<u64, Arc<AtomicBool>>>>,
+                        in_flight: Arc<std::sync::atomic::AtomicUsize>,
+                    }
+                    impl Drop for Cleanup {
+                        fn drop(&mut self) {
+                            self.pump_done.store(true, Ordering::Release);
+                            if let Some(h) = self.pump_handle.take() {
+                                let _ = h.join();
+                            }
+                            let mut g = self.cancels.lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            g.remove(&self.item_id);
+                            // Pairs with `in_flight.fetch_add` at dispatch
+                            // (above the thread::spawn). Drop runs even on
+                            // panic, so the counter stays balanced.
+                            self.in_flight.fetch_sub(1, Ordering::AcqRel);
+                        }
+                    }
+                    let _cleanup = Cleanup {
+                        item_id,
+                        pump_done: pump_done.clone(),
+                        pump_handle: Some(pump_handle),
+                        cancels: inpaint_cancels.clone(),
+                        in_flight: in_flight_for_thread,
+                    };
                     let result = (|| -> Result<image::RgbaImage, String> {
                         // Inner scope drops encoded bytes + DynamicImage as
                         // soon as `to_rgba8`/`to_luma8` produces the final
-                        // buffer — the encoded source (~5–20 MB at 4 K) and
-                        // the intermediate DynamicImage (~50 MB RGBA at 4 K)
-                        // would otherwise live across the whole inference,
-                        // overlapping with LaMa weights resident.
+                        // buffer — encoded source (~5–20 MB at 4 K) and
+                        // intermediate DynamicImage (~50 MB RGBA at 4 K)
+                        // would otherwise overlap with model weights.
                         let image: image::RgbaImage = {
                             let bytes = std::fs::read(&image_path)
                                 .map_err(|e| format!("read source: {e}"))?;
@@ -872,27 +969,19 @@ pub fn run_worker() -> ! {
                                 .map_err(|e| format!("decode mask: {e}"))?
                                 .to_luma8()
                         };
-                        // Subprocess inpaint defaults to LaMaFp32 — the
-                        // user-facing dropdown is GUI-side. If subprocess
-                        // batch inpaint ever surfaces (CLI or otherwise)
-                        // this needs an IPC variant carrying the ModelId.
-                        let raw = prunr_core::inpaint::process_inpaint(&image, &mask, prunr_models::ModelId::LaMaFp32)
-                            .map_err(|e| format!("inpaint: {e:?}"))?;
-                        // Post-process: color-match + seam guided blend.
-                        // Identical to the in-process GUI path so users
-                        // can't see a quality difference based on whether
-                        // the subprocess fast path or slow path served.
-                        let color_matched = prunr_core::inpaint_blend::color_match_inpainted(
-                            &raw, &image, &mask,
-                            prunr_core::inpaint_blend::COLOR_MATCH_RING_PX,
-                        );
-                        Ok(prunr_core::inpaint_blend::seam_guided_blend(
-                            &color_matched, &image, &mask,
-                            prunr_core::inpaint_blend::SEAM_BLEND_RADIUS,
-                            prunr_core::inpaint_blend::SEAM_BLEND_EPSILON,
-                            prunr_core::inpaint_blend::SEAM_BLEND_BAND_PX,
+                        let hooks = prunr_core::inpaint::InpaintHooks {
+                            cancel: Some(inpaint_cancel.clone()),
+                            progress: Some(inpaint_progress.clone()),
+                        };
+                        let raw = prunr_core::inpaint::process_inpaint_with(
+                            &image, &mask, model_id, sd_req.clone(), &hooks,
+                        ).map_err(|e| format!("inpaint: {e:?}"))?;
+                        Ok(prunr_core::inpaint_blend::finalize_inpaint(
+                            &raw, &image, &mask, feather_px, sharpen,
                         ))
                     })();
+                    // Drop _cleanup HERE so InpaintDone goes after pump join.
+                    drop(_cleanup);
                     match result {
                         Ok(rgba) => {
                             let dir = prunr_app::subprocess::protocol::ipc_temp_dir();
@@ -929,6 +1018,23 @@ pub fn run_worker() -> ! {
                         }
                     }
                 });
+                // Builder::spawn returns Result; std::thread::spawn would
+                // panic on resource exhaustion. On failure we've already
+                // bumped `in_flight` and inserted the cancel flag, so
+                // unwind both before erroring out — otherwise the worker
+                // never completes its drain.
+                if let Err(e) = spawn_result {
+                    in_flight.fetch_sub(1, Ordering::AcqRel);
+                    let mut g = inpaint_cancels_on_err.lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    g.remove(&item_id);
+                    drop(g);
+                    pump_done_on_err.store(true, Ordering::Release);
+                    let _ = evt_tx_on_spawn_err.send(SubprocessEvent::InpaintError {
+                        item_id,
+                        error: format!("inpaint thread spawn failed: {e}"),
+                    });
+                }
             }
             SubprocessCommand::Cancel => {
                 cancel.store(true, Ordering::Release);
