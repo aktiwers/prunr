@@ -147,7 +147,7 @@ The app uses `ort` with `load-dynamic` — the ONNX Runtime shared library is re
 2. User Runtime Store: `~/.local/share/prunr/runtimes/<id>/libonnxruntime.so`
 3. Bundled fallback: `<exe>/runtime/libonnxruntime.so`
 
-Cargo-dist installers ship a CPU-only ORT in (3) so the app works out of the box; opt-in EP-specific runtimes (OpenVINO today, more on the roadmap) install via Settings → Hardware or `cargo xtask install-runtime`.
+Linux + Windows artifacts (tar.gz / AppImage / .deb / .rpm / .zip / installer) ship a CPU-only ORT in (3) so the app works on a clean machine. CI stages it via `cargo xtask install-runtime onnxruntime <ver> --stage-to <pkg>/runtime/` — the same code path the GUI uses for the runtime store, so installer layout and "Settings → Hardware → Install runtime" can't drift. macOS artifacts (.app / .dmg / .tar.gz) ship a custom **CoreML-enabled** ORT build instead, bundled into `Prunr.app/Contents/Frameworks/` and resolved via rpath. Opt-in EP-specific runtimes (OpenVINO today, more on the roadmap) install via Settings → Hardware or `cargo xtask install-runtime`.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for internals.
 

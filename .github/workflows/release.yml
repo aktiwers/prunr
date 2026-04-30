@@ -82,9 +82,10 @@ jobs:
           sed -i '' "s|<string>[0-9]*\.[0-9]*\.[0-9]*</string>|<string>${VERSION}</string>|g" assets/Info.plist
 
       # ── Custom ORT with CoreML (macOS only) ──
-      # Linux/Windows use the `download-binaries` prebuilt automatically.
-      # macOS needs CoreML, which the prebuilt doesn't include — build from
-      # source and override via ORT_LIB_LOCATION + ORT_PREFER_DYNAMIC_LINK.
+      # Linux/Windows stage a CPU-only runtime via xtask (see "Stage CPU
+      # runtime" steps below). macOS needs CoreML, which no PyPI wheel
+      # provides — built from source and override via ORT_LIB_LOCATION +
+      # ORT_PREFER_DYNAMIC_LINK.
       # The binary's rpath is set via `.cargo/config.toml` rustflags so the
       # bundled .app finds the dylib in Contents/Frameworks/ at runtime.
       # First build ~30 min; cache by ORT version restores in ~30 sec.
@@ -162,29 +163,40 @@ jobs:
       - name: Stage custom ORT dylib for bundling (macOS)
         if: matrix.name == 'macos-aarch64'
         run: |
-          mkdir -p "target/${{ matrix.target }}/release"
           cp -P "$ORT_LIB_LOCATION"/libonnxruntime.*dylib \
                 "target/${{ matrix.target }}/release/"
 
       # ── Linux: .tar.gz + .AppImage + .deb + .rpm ──
-      # The pykeio/ort `download-binaries` feature STATIC-links libonnxruntime
-      # into the binary on Linux/Windows; only the GPU provider plugins ship
-      # as separate .so files in target/release/. Pure-CPU users get a
-      # self-contained binary; GPU users need the system's CUDA/etc anyway.
-      # We don't bundle the providers — falling back to CPU on a clean machine
-      # is acceptable for v1.
+      # `ort` is built with `load-dynamic`: the binary resolves
+      # libonnxruntime.so at runtime via `<exe>/runtime/` (per
+      # `prunr_app::ort_runtime::bundled_dylib`). CI stages a CPU-only
+      # ORT via the same xtask the GUI uses for the runtime store —
+      # one source of truth for the install layout. GPU EP users
+      # upgrade through Settings → Hardware (runtime store).
+      - name: Stage CPU runtime (Linux)
+        if: matrix.name == 'linux-x86_64'
+        run: |
+          cargo xtask install-runtime onnxruntime 1.24.1 --stage-to runtime-stage
+          if [ ! -f runtime-stage/libonnxruntime.so ]; then
+            echo "::error::libonnxruntime.so not found in runtime-stage/ — xtask layout drift"
+            ls -la runtime-stage/ || true
+            exit 1
+          fi
+
       - name: Package Linux tar.gz
         if: matrix.name == 'linux-x86_64'
         run: |
-          mkdir -p dist
+          mkdir -p dist/runtime
           cp target/${{ matrix.target }}/release/${{ matrix.binary }} dist/
-          cd dist && tar czf ../prunr-linux-x86_64.tar.gz ${{ matrix.binary }}
+          cp runtime-stage/libonnxruntime.so dist/runtime/
+          cd dist && tar czf ../prunr-linux-x86_64.tar.gz ${{ matrix.binary }} runtime/
 
       - name: Package Linux AppImage
         if: matrix.name == 'linux-x86_64'
         run: |
-          mkdir -p AppDir/usr/bin AppDir/usr/share/icons/hicolor/256x256/apps
+          mkdir -p AppDir/usr/bin/runtime AppDir/usr/share/icons/hicolor/256x256/apps
           cp target/${{ matrix.target }}/release/${{ matrix.binary }} AppDir/usr/bin/
+          cp runtime-stage/libonnxruntime.so AppDir/usr/bin/runtime/
           cp assets/prunr-256.png AppDir/usr/share/icons/hicolor/256x256/apps/prunr.png
           cp assets/prunr-256.png AppDir/prunr.png
           cp assets/prunr.desktop AppDir/
@@ -195,8 +207,9 @@ jobs:
       - name: Package Linux .deb
         if: matrix.name == 'linux-x86_64'
         run: |
-          mkdir -p deb/usr/bin deb/usr/share/applications deb/usr/share/icons/hicolor/256x256/apps deb/DEBIAN
+          mkdir -p deb/usr/bin/runtime deb/usr/share/applications deb/usr/share/icons/hicolor/256x256/apps deb/DEBIAN
           cp target/${{ matrix.target }}/release/${{ matrix.binary }} deb/usr/bin/
+          cp runtime-stage/libonnxruntime.so deb/usr/bin/runtime/
           cp assets/prunr.desktop deb/usr/share/applications/
           cp assets/prunr-256.png deb/usr/share/icons/hicolor/256x256/apps/prunr.png
           # Tag pushes carry the version in the ref (v0.4.8 → 0.4.8).
@@ -237,6 +250,7 @@ jobs:
           fi
           mkdir -p rpmbuild/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
           cp target/${{ matrix.target }}/release/${{ matrix.binary }} rpmbuild/SOURCES/
+          cp runtime-stage/libonnxruntime.so rpmbuild/SOURCES/
           cp assets/prunr.desktop rpmbuild/SOURCES/
           cp assets/prunr-256.png rpmbuild/SOURCES/
           cat > rpmbuild/SPECS/prunr.spec << 'SPEC'
@@ -253,11 +267,13 @@ jobs:
 
           %install
           install -Dm755 %{_sourcedir}/prunr %{buildroot}%{_bindir}/prunr
+          install -Dm755 %{_sourcedir}/libonnxruntime.so %{buildroot}%{_bindir}/runtime/libonnxruntime.so
           install -Dm644 %{_sourcedir}/prunr.desktop %{buildroot}%{_datadir}/applications/prunr.desktop
           install -Dm644 %{_sourcedir}/prunr-256.png %{buildroot}%{_datadir}/icons/hicolor/256x256/apps/prunr.png
 
           %files
           %{_bindir}/prunr
+          %{_bindir}/runtime/libonnxruntime.so
           %{_datadir}/applications/prunr.desktop
           %{_datadir}/icons/hicolor/256x256/apps/prunr.png
           SPEC
@@ -294,9 +310,10 @@ jobs:
         run: |
           mkdir -p Prunr.app/Contents/{MacOS,Frameworks,Resources}
           cp target/${{ matrix.target }}/release/${{ matrix.binary }} Prunr.app/Contents/MacOS/
-          # Bundle ORT dylib in Frameworks/ so the .app runs on a clean Mac
-          # without system-wide ORT. ORT's `download-binaries` feature drops
-          # libonnxruntime.dylib next to the binary in target/release/.
+          # The custom-CoreML ORT build was staged into target/release/
+          # above so this glob picks it up. .app bundles to Frameworks/
+          # — the binary's rpath (set in .cargo/config.toml) finds it
+          # via @executable_path/../Frameworks at runtime.
           if ls target/${{ matrix.target }}/release/libonnxruntime.*dylib 1> /dev/null 2>&1; then
             cp target/${{ matrix.target }}/release/libonnxruntime.*dylib Prunr.app/Contents/Frameworks/
           else
@@ -337,14 +354,27 @@ jobs:
             prunr-macos-aarch64.tar.gz
 
       # ── Windows: .zip + .exe installer ──
-      # Same as Linux: ORT is static-linked into prunr.exe by download-binaries.
-      # No onnxruntime.dll needs to ship; CPU EP is built in.
+      # Same load-dynamic story as Linux: stage the CPU runtime via
+      # xtask, place it at <exe>/runtime/onnxruntime.dll so the
+      # `bundled_dylib` lookup picks it up.
+      - name: Stage CPU runtime (Windows)
+        if: matrix.name == 'windows-x86_64'
+        shell: pwsh
+        run: |
+          cargo xtask install-runtime onnxruntime 1.24.1 --stage-to runtime-stage
+          if (-not (Test-Path "runtime-stage/onnxruntime.dll")) {
+            Write-Error "::error::onnxruntime.dll not found in runtime-stage/ — xtask layout drift"
+            Get-ChildItem runtime-stage/
+            exit 1
+          }
+
       - name: Package Windows zip
         if: matrix.name == 'windows-x86_64'
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path dist
+          New-Item -ItemType Directory -Force -Path dist/runtime
           Copy-Item "target/${{ matrix.target }}/release/${{ matrix.binary }}" dist/
+          Copy-Item "runtime-stage/onnxruntime.dll" dist/runtime/
           Compress-Archive -Path "dist/*" -DestinationPath "prunr-windows-x86_64.zip"
 
       - name: Package Windows installer (Inno Setup)
@@ -367,6 +397,7 @@ jobs:
 
           [Files]
           Source: "target\${{ matrix.target }}\release\${{ matrix.binary }}"; DestDir: "{app}"; Flags: ignoreversion
+          Source: "runtime-stage\onnxruntime.dll"; DestDir: "{app}\runtime"; Flags: ignoreversion
 
           [Icons]
           Name: "{group}\Prunr"; Filename: "{app}\prunr.exe"; IconFilename: "{app}\prunr.exe"

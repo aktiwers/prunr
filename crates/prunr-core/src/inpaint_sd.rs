@@ -14,7 +14,7 @@
 //!   linear-alpha seam blending (`tile_bbox` + `blend_tile`).
 //!
 //! Safety guards on CPU-class hardware:
-//! - Bundle load refuses below 6 GB free RAM (see `SD_CPU_MIN_FREE_RAM_BYTES`).
+//! - Bundle load refuses below the model's `working_set_mb` free RAM.
 //!   ORT graph optimization + UNet activations together push 6-10 GB
 //!   transient on this codepath; the floor protects against swap thrash.
 //! - Idle bundle release (`SD_IDLE_RELEASE_SECS`) drops the cached 4
@@ -58,12 +58,8 @@ const VAE_SCALING_FACTOR: f32 = 0.18215;
 /// doubles that during load (~4 GB resident), UNet activations on a
 /// 512×512 tile add 2-4 GB transient, and OpenVINO graph compilation
 /// pre-allocates its own iGPU-shared buffer (which on integrated GPUs
-/// IS RAM). A user trace observed `rss_delta_mb=14915` (~15 GB) for a
-/// single bundle on Linux + OpenVINO CPU plugin — the prior 6 GB
-/// threshold let bundle build proceed on a system that then spent the
-/// session at 98% RAM and nearly OOM-rebooted. Bumped to 16 GB so the
-/// guard refuses on any system that can't fit the observed peak.
-const SD_CPU_MIN_FREE_RAM_BYTES: u64 = 16 * 1024 * 1024 * 1024;
+/// IS RAM). Threshold lives in `ModelDescriptor.working_set_mb` so the
+/// gate scales when a new SD variant ships with a different footprint.
 /// Idle window after which a cached SD session bundle is dropped to
 /// release its ~4-6 GB resident set back to the OS. Trade-off: rebuilding
 /// pays the 10-30s session-build cost on the next stroke; in exchange a
@@ -80,7 +76,9 @@ const CLIP_EOS: i64 = 49407;
 /// Inputs to one SD inpaint call. Constructable today with default
 /// fields for empty-prompt unconditional inpaint; future surfaces (text
 /// prompts, CFG, seeded variations) just set the relevant fields.
-#[derive(Debug, Clone)]
+/// Serde-derived so this struct can also ride `SubprocessCommand::Inpaint`
+/// without a wire mirror.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SdInpaintRequest {
     /// Empty string ⇒ unconditional generation (v1 only path).
     pub prompt: String,
@@ -780,21 +778,10 @@ impl SdSession {
     }
 
     fn new_inner(id: prunr_models::ModelId) -> Result<SdSession, String> {
-        // Memory guard: refuse to load the 2-GB bundle on a system that
-        // will swap-thrash during ORT graph optimization. The check is
-        // tightened in advance of the GPU EP attempts because EP setup
-        // also pulls the weights through driver memory.
-        if let Some(free) = available_ram_bytes() {
-            if free < SD_CPU_MIN_FREE_RAM_BYTES {
-                return Err(format!(
-                    "SD inpaint refused to load: only {:.1} GB RAM free, \
-                     {:.1} GB minimum recommended. Close other apps or use \
-                     a smaller eraser model (LaMa / Big-LaMa / MI-GAN).",
-                    free as f64 / 1e9,
-                    SD_CPU_MIN_FREE_RAM_BYTES as f64 / 1e9,
-                ));
-            }
-        }
+        // Defense-in-depth: prewarm builds bypass `process_inpaint_with`,
+        // so the gate has to fire here too. Same helper as the dispatch
+        // entry — single source of truth for threshold + wording.
+        check_ram_for(id)?;
         let rss_before_mb = process_rss_mb();
         let parts = prunr_models::multi_part_paths(id)
             .ok_or_else(|| prunr_models::not_installed_error(id))?;
@@ -804,7 +791,7 @@ impl SdSession {
         // DirectML stays sequential — same AbiCustomRegistry race as
         // `batch::create_engine_pool`. Parallel build holds all four
         // optimization scratch arenas live concurrently; the
-        // SD_CPU_MIN_FREE_RAM_BYTES guard above bounds the peak.
+        // `working_set_mb` guard above bounds the peak.
         // We still log the winning EP per part so partial GPU
         // fall-through (e.g. UNet CUDA, VAEs CPU) is debuggable.
         type SmokeFn = fn(&mut Session, &str) -> Result<(), String>;
@@ -1538,13 +1525,22 @@ fn pad_mask_to_tile(mask: &GrayImage) -> std::borrow::Cow<'_, GrayImage> {
 /// can't read the system (CI containers without /proc, exotic platforms);
 /// callers in that case skip the guard rather than fail-closed since
 /// "we couldn't query" doesn't imply "memory is low".
-fn available_ram_bytes() -> Option<u64> {
+/// Shared `sysinfo::System` cache for `available_ram_bytes` and
+/// `process_rss_mb`. Two callers, one cell — `refresh_*` calls on
+/// disjoint fields don't conflict.
+fn with_system<T>(f: impl FnOnce(&mut sysinfo::System) -> T) -> T {
     use std::sync::PoisonError;
     static SYS: OnceLock<Mutex<sysinfo::System>> = OnceLock::new();
     let mtx = SYS.get_or_init(|| Mutex::new(sysinfo::System::new()));
     let mut sys = mtx.lock().unwrap_or_else(PoisonError::into_inner);
-    sys.refresh_memory();
-    let avail = sys.available_memory();
+    f(&mut sys)
+}
+
+pub(crate) fn available_ram_bytes() -> Option<u64> {
+    let avail = with_system(|sys| {
+        sys.refresh_memory();
+        sys.available_memory()
+    });
     if avail == 0 { None } else { Some(avail) }
 }
 
@@ -1552,14 +1548,35 @@ fn available_ram_bytes() -> Option<u64> {
 /// (sandboxed CI, exotic platforms). Used to instrument SD session
 /// load/drop where 4-6 GB swings are easy to hide in aggregate logs.
 fn process_rss_mb() -> Option<u64> {
-    use std::sync::PoisonError;
-    static SYS: OnceLock<Mutex<sysinfo::System>> = OnceLock::new();
-    let mtx = SYS.get_or_init(|| Mutex::new(sysinfo::System::new()));
-    let mut sys = mtx.lock().unwrap_or_else(PoisonError::into_inner);
     let pid = sysinfo::get_current_pid().ok()?;
-    sys.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);
-    let proc = sys.process(pid)?;
-    Some(proc.memory() / (1024 * 1024))
+    with_system(|sys| {
+        sys.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);
+        sys.process(pid).map(|p| p.memory() / (1024 * 1024))
+    })
+}
+
+/// Shared RAM pre-flight gate. Resolves the model's `working_set_mb` and
+/// errors with a user-facing message when free RAM is below threshold.
+/// Returns `Ok(())` when sysinfo can't read the system (the gate
+/// fail-open in that case mirrors `available_ram_bytes`'s `None`-as-skip
+/// contract). Single source of truth for the wording — `process_inpaint_with`
+/// calls it on every dispatch; `SdSession::new_inner` calls it on bundle
+/// build for the prewarm path that bypasses the inpaint entry.
+pub(crate) fn check_ram_for(id: prunr_models::ModelId) -> Result<(), String> {
+    let Some(desc) = prunr_models::descriptor(id) else { return Ok(()) };
+    let need = (desc.working_set_mb as u64) * 1024 * 1024;
+    let Some(free) = available_ram_bytes() else { return Ok(()) };
+    if free >= need {
+        return Ok(());
+    }
+    Err(format!(
+        "{} refused to load: only {:.1} GB RAM free, \
+         {:.1} GB minimum recommended. Close other apps or pick a \
+         smaller eraser model.",
+        desc.display_name,
+        free as f64 / 1e9,
+        need as f64 / 1e9,
+    ))
 }
 
 impl Drop for SdSession {

@@ -80,15 +80,10 @@ pub(crate) struct Bbox {
 /// the first stroke doesn't pay the ~5-10s session-build latency.
 /// Idempotent — repeated calls for the same id are no-ops.
 pub fn prewarm(id: prunr_models::ModelId) -> Result<(), CoreError> {
-    if is_sd_inpaint(id) {
+    if id.is_sd_family() {
         return crate::inpaint_sd::prewarm(id);
     }
     LamaSession::get(id).map(|_| ())
-}
-
-fn is_sd_inpaint(id: prunr_models::ModelId) -> bool {
-    use prunr_models::ModelId::*;
-    matches!(id, SdV15InpaintFp16 | SdV15LcmInpaintFp16)
 }
 
 /// Dilate (px > 0) or erode (px < 0) a binary mask. `|px|` iterations
@@ -445,7 +440,9 @@ pub fn process_inpaint_with(
     if mask_is_empty(mask) {
         return Ok(image.clone());
     }
-    if is_sd_inpaint(id) {
+    // Unified RAM pre-flight — see `inpaint_sd::check_ram_for`.
+    crate::inpaint_sd::check_ram_for(id).map_err(CoreError::Inference)?;
+    if id.is_sd_family() {
         let req = sd_req.unwrap_or_else(|| crate::inpaint_sd::SdInpaintRequest {
             num_inference_steps: 20,
             ..Default::default()
@@ -562,27 +559,27 @@ impl LamaSession {
         let (w, h) = image.dimensions();
         let (img_in, mask_in) = encode_tile(image, mask);
 
-        let painted = {
-            let mut session = self.session.lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let img_t = Tensor::from_array(img_in)
-                .map_err(|e| CoreError::Inference(format!("LaMa: image tensor: {e}")))?;
-            let mask_t = Tensor::from_array(mask_in)
-                .map_err(|e| CoreError::Inference(format!("LaMa: mask tensor: {e}")))?;
-            let outputs = session.run(inputs![
-                self.image_input_name.as_str() => &img_t,
-                self.mask_input_name.as_str() => &mask_t,
-            ])
-                .map_err(|e| CoreError::Inference(format!("LaMa: inference failed: {e}")))?;
-            outputs[0]
-                .try_extract_array::<f32>()
-                .map_err(|e| CoreError::Inference(format!("LaMa: output extract: {e}")))?
-                .into_dimensionality::<ndarray::Ix4>()
-                .map_err(|e| CoreError::Inference(format!("LaMa: output reshape: {e}")))?
-                .to_owned()
-        };
-
-        Ok(decode_tile(&painted, image, mask, w, h))
+        // Borrow the output view straight into `decode_tile` — no
+        // `.to_owned()` between extract and decode. The session lock
+        // is held across the closure so the ORT-allocated buffer the
+        // view points into stays alive. Saves one 3 MB clone per tile.
+        let mut session = self.session.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let img_t = Tensor::from_array(img_in)
+            .map_err(|e| CoreError::Inference(format!("LaMa: image tensor: {e}")))?;
+        let mask_t = Tensor::from_array(mask_in)
+            .map_err(|e| CoreError::Inference(format!("LaMa: mask tensor: {e}")))?;
+        let outputs = session.run(inputs![
+            self.image_input_name.as_str() => &img_t,
+            self.mask_input_name.as_str() => &mask_t,
+        ])
+            .map_err(|e| CoreError::Inference(format!("LaMa: inference failed: {e}")))?;
+        let view = outputs[0]
+            .try_extract_array::<f32>()
+            .map_err(|e| CoreError::Inference(format!("LaMa: output extract: {e}")))?
+            .into_dimensionality::<ndarray::Ix4>()
+            .map_err(|e| CoreError::Inference(format!("LaMa: output reshape: {e}")))?;
+        Ok(decode_tile(view, image, mask, w, h))
     }
 }
 
@@ -778,7 +775,7 @@ fn encode_tile(image: &RgbaImage, mask: &GrayImage) -> (Array4<f32>, Array4<f32>
 /// region matches exactly — LaMa often perturbs unmasked pixels by
 /// fractions of a unit, which would defeat the feather blend.
 fn decode_tile(
-    output: &Array4<f32>,
+    output: ndarray::ArrayView4<'_, f32>,
     source: &RgbaImage,
     mask: &GrayImage,
     w: u32,
@@ -908,7 +905,11 @@ pub(crate) fn feather_weight(distance_from_edge: u32) -> f32 {
 /// f32 accumulators instead of ~250 MB. Pixels outside the bbox are
 /// guaranteed mask==0 and so would be skipped by the composite loop
 /// anyway — the bbox crop is bit-exact with the full-image variant.
-pub(crate) fn tile_compose<F>(
+// `pub` to be reachable from `benches/tile_compose.rs`; `#[doc(hidden)]`
+// because it's still an internal kernel — callers should use
+// `process_inpaint`.
+#[doc(hidden)]
+pub fn tile_compose<F>(
     image: &RgbaImage,
     mask: &GrayImage,
     mut inpaint_tile: F,
@@ -1345,7 +1346,7 @@ mod tests {
         // Fill output with junk to prove we don't read it.
         let mut output = Array4::<f32>::zeros((1, 3, s, s));
         for v in output.iter_mut() { *v = 0.5; }
-        let out = decode_tile(&output, &src, &mask, 64, 64);
+        let out = decode_tile(output.view(), &src, &mask, 64, 64);
         assert_eq!(out.as_raw(), src.as_raw(), "unmasked pixels must equal source");
     }
 
@@ -1361,7 +1362,7 @@ mod tests {
         output[[0, 0, 4, 4]] = 1.0;
         output[[0, 1, 4, 4]] = 0.0;
         output[[0, 2, 4, 4]] = 128.0 / 255.0;
-        let out = decode_tile(&output, &src, &mask, 8, 8);
+        let out = decode_tile(output.view(), &src, &mask, 8, 8);
         let p = out.get_pixel(4, 4);
         assert_eq!(p[0], 255);
         assert_eq!(p[1], 0);
@@ -1381,7 +1382,7 @@ mod tests {
         let mut output = Array4::<f32>::zeros((1, 3, s, s));
         // Big values across the whole tile so the heuristic picks 1.0 scale.
         for v in output.iter_mut() { *v = 200.0; }
-        let out = decode_tile(&output, &src, &mask, 8, 8);
+        let out = decode_tile(output.view(), &src, &mask, 8, 8);
         assert_eq!(out.get_pixel(4, 4).0[0], 200, "200.0 in [0,255] range stays 200");
     }
 

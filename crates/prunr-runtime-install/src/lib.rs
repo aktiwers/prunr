@@ -13,6 +13,14 @@ use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
 
+/// Single source of truth for the ONNX Runtime version we ship + offer
+/// for runtime-store install. The pykeio/ort `api-23` feature is
+/// forward-compatible across ORT 1.17+ so this isn't load-bearing for
+/// linkage; it IS load-bearing for "the bundled CPU runtime and the
+/// runtime-store OpenVINO upgrade are at matching versions" — drift
+/// would surprise a user upgrading via Settings → Hardware.
+pub const PINNED_ORT_VERSION: &str = "1.24.1";
+
 /// Host runtime identifier — `linux-x64`, `macos-arm64`, etc. `unknown`
 /// for unsupported platforms; `host_pypi_token` rejects those explicitly.
 pub fn host_rid() -> &'static str {
@@ -275,6 +283,27 @@ pub fn dylib_name() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `release.yml` (Linux + Windows staging steps) hard-codes the
+    /// same version this const carries. Cargo doesn't link CI YAML, so
+    /// drift would silently ship mismatched bundled-CPU vs runtime-store
+    /// runtimes. This test reads the YAML file and fails if the two
+    /// don't match.
+    #[test]
+    fn release_yml_pins_match_const() {
+        let yml = std::fs::read_to_string(
+            concat!(env!("CARGO_MANIFEST_DIR"), "/../../.github/workflows/release.yml")
+        ).expect("release.yml should exist next to the workspace root");
+        // Both staging steps invoke: cargo xtask install-runtime onnxruntime <ver>
+        // — count occurrences of the pinned version after that prefix.
+        let needle = format!("install-runtime onnxruntime {}", PINNED_ORT_VERSION);
+        assert!(
+            yml.contains(&needle),
+            "release.yml must invoke `install-runtime onnxruntime {}` (PINNED_ORT_VERSION); \
+             update both sites if the version bumps",
+            PINNED_ORT_VERSION,
+        );
+    }
     use serde_json::json;
 
     #[test]

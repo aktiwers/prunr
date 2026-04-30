@@ -53,7 +53,7 @@ impl RuntimeId {
     }
 
     fn pypi_version(self) -> &'static str {
-        match self { Self::OpenVino => "1.24.1" }
+        match self { Self::OpenVino => prunr_runtime_install::PINNED_ORT_VERSION }
     }
 
     pub fn install_subdir(self) -> String {

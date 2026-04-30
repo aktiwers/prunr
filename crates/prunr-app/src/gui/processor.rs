@@ -26,6 +26,7 @@ use std::time::Instant;
 
 use prunr_core::ProcessingRecipe;
 
+use super::inpaint_bridge::{InpaintBridgeMsg, InpaintBridgeResult, spawn_inpaint_bridge};
 use super::live_preview::LivePreview;
 use super::memory::AdmissionController;
 use super::worker::{WorkerMessage, WorkerResult, WorkItem};
@@ -175,6 +176,12 @@ pub(crate) struct Processor {
     /// lifetime as `inpaint_cancels` — both are replaced on every
     /// dispatch.
     inpaint_progress: HashMap<u64, std::sync::Arc<prunr_core::inpaint::InpaintProgress>>,
+    /// Channels to the dedicated SD-inpaint subprocess bridge thread.
+    /// LaMa / Big-LaMa / MI-GAN stay on the in-process rayon path; only
+    /// SD-family dispatches go through these. Bridge spawns the
+    /// subprocess lazily and drops it on a 5-min idle timer.
+    inpaint_bridge_tx: mpsc::Sender<InpaintBridgeMsg>,
+    inpaint_bridge_rx: mpsc::Receiver<InpaintBridgeResult>,
 }
 
 impl Processor {
@@ -183,6 +190,7 @@ impl Processor {
         worker_rx: mpsc::Receiver<WorkerResult>,
     ) -> Self {
         let (inpaint_tx, inpaint_rx) = mpsc::channel();
+        let (inpaint_bridge_tx, inpaint_bridge_rx) = spawn_inpaint_bridge();
         Self {
             worker_tx,
             worker_rx,
@@ -198,11 +206,16 @@ impl Processor {
             inpaint_pending: HashMap::new(),
             inpaint_cancels: HashMap::new(),
             inpaint_progress: HashMap::new(),
+            inpaint_bridge_tx,
+            inpaint_bridge_rx,
         }
     }
 
     /// Per-item generation counter ensures a fresh stroke supersedes the
     /// previous in-flight job at drain time — see `drain_inpaint_results`.
+    /// SD-family models route through the inpaint subprocess bridge for
+    /// process isolation; LaMa / Big-LaMa / MI-GAN stay on the in-process
+    /// rayon path (low RAM footprint, no isolation pressure).
     pub(crate) fn dispatch_inpaint(
         &mut self,
         item_id: u64,
@@ -214,7 +227,6 @@ impl Processor {
         *generation += 1;
         let gen = *generation;
         *self.inpaint_pending.entry(item_id).or_insert(0) += 1;
-        let tx = self.inpaint_tx.clone();
         // Replace any prior cancel flag + progress sink — the new
         // dispatch supersedes its predecessor anyway, so wiring fresh
         // ones avoids a stale earlier-stroke cancel firing the moment
@@ -224,6 +236,11 @@ impl Processor {
         let progress = std::sync::Arc::new(prunr_core::inpaint::InpaintProgress::new());
         self.inpaint_cancels.insert(item_id, cancel.clone());
         self.inpaint_progress.insert(item_id, progress.clone());
+        if tuning.backend.is_sd_family() {
+            self.dispatch_inpaint_sd(item_id, gen, &image, &correction, &tuning);
+            return;
+        }
+        let tx = self.inpaint_tx.clone();
         rayon::spawn(move || {
             let raw_mask = correction.to_binary_mask(image.width(), image.height());
             // Pre-process: grow/erode the painted area before LaMa runs.
@@ -232,66 +249,17 @@ impl Processor {
             } else {
                 raw_mask
             };
-            // SD vs LCM: 20 steps + user-CFG for the standard checkpoint;
-            // 4 steps + guidance forced to 1.0 for the LCM-distilled
-            // backend (LCM bakes guidance into training, runtime CFG
-            // would double-count it). use_taesd is set for LCM only —
-            // the same fast-mode gate that picked LCM also opts into
-            // TAESD VAE; if the TAESD bundle isn't installed yet, the
-            // dispatcher silently falls back to standard VAE.
-            let sd_req = match tuning.backend {
-                prunr_models::ModelId::SdV15InpaintFp16 => Some(prunr_core::inpaint_sd::SdInpaintRequest {
-                    prompt: tuning.sd_prompt.clone(),
-                    negative_prompt: tuning.sd_negative_prompt.clone(),
-                    num_inference_steps: 20,
-                    guidance_scale: tuning.sd_guidance_scale,
-                    seed: None,
-                    use_taesd: false,
-                }),
-                prunr_models::ModelId::SdV15LcmInpaintFp16 => Some(prunr_core::inpaint_sd::SdInpaintRequest {
-                    prompt: tuning.sd_prompt.clone(),
-                    negative_prompt: String::new(), // LCM ignores negative prompt
-                    num_inference_steps: 4,
-                    guidance_scale: 1.0,
-                    seed: None,
-                    use_taesd: prunr_models::is_available(prunr_models::ModelId::TaesdFp16),
-                }),
-                _ => None,
-            };
+            // This path only sees LaMa / Big-LaMa / MI-GAN — sd_req is unread.
+            let sd_req = None;
             let hooks = prunr_core::inpaint::InpaintHooks {
                 cancel: Some(cancel.clone()),
                 progress: Some(progress.clone()),
             };
             match prunr_core::inpaint::process_inpaint_with(&image, &mask, tuning.backend, sd_req, &hooks) {
                 Ok(rgba) => {
-                    // Post-process pipeline:
-                    //  1. color match — shifts mean RGB so the patch
-                    //     doesn't sit as a tinted block on a flat bg.
-                    //  2. seam guided blend — uses the source as a guide
-                    //     so the inpaint edge structure follows the
-                    //     surrounding image. Subsumes the older linear
-                    //     `feather_inpainted` blend.
-                    //  3. sharpen — counters LaMa's interior blur (deep
-                    //     inside the mask, where seam blend already
-                    //     reverted toward raw inpaint).
-                    let mut out = prunr_core::inpaint_blend::color_match_inpainted(
-                        &rgba, &image, &mask,
-                        prunr_core::inpaint_blend::COLOR_MATCH_RING_PX,
+                    let out = prunr_core::inpaint_blend::finalize_inpaint(
+                        &rgba, &image, &mask, tuning.feather_px, tuning.sharpen,
                     );
-                    let band_px = if tuning.feather_px > 0.0 {
-                        tuning.feather_px
-                    } else {
-                        prunr_core::inpaint_blend::SEAM_BLEND_BAND_PX
-                    };
-                    out = prunr_core::inpaint_blend::seam_guided_blend(
-                        &out, &image, &mask,
-                        prunr_core::inpaint_blend::SEAM_BLEND_RADIUS,
-                        prunr_core::inpaint_blend::SEAM_BLEND_EPSILON,
-                        band_px,
-                    );
-                    if tuning.sharpen > 0.0 {
-                        out = prunr_core::inpaint::sharpen_inpainted(&out, &mask, tuning.sharpen);
-                    }
                     let _ = tx.send(InpaintResult { item_id, rgba: out, generation: gen, cancelled: false, error: None });
                 }
                 Err(prunr_core::CoreError::Cancelled) => {
@@ -331,19 +299,184 @@ impl Processor {
     /// side — coordinator pattern: PrunrApp delegates, Processor owns
     /// the in-flight set. Idempotent and cheap (HashMap walk).
     pub(crate) fn cancel_all_inpaints(&self) {
-        for flag in self.inpaint_cancels.values() {
-            flag.store(true, std::sync::atomic::Ordering::Release);
+        let item_ids: Vec<u64> = self.inpaint_cancels.keys().copied().collect();
+        for item_id in item_ids {
+            self.cancel_inpaint(item_id);
         }
     }
 
-    /// Cancel any in-flight inpaint stroke for `item_id`. The flag is
-    /// checked between LaMa tiles and between SD UNet steps; latency
-    /// to actually-stopping is one tile (LaMa) or one step (SD), since
-    /// ORT has no per-op cancel hook. Idempotent — safe to call when
-    /// nothing is in flight.
+    /// Cancel any in-flight inpaint stroke for `item_id`. The local
+    /// flag drives the "Cancelling…" banner state immediately; for SD
+    /// strokes the bridge also forwards `CancelItem` to the subprocess
+    /// so its inference loop sees the flag too. Latency to actually-
+    /// stopping is one tile (LaMa) or one UNet step (SD); ORT has no
+    /// per-op cancel hook. Idempotent.
     pub(crate) fn cancel_inpaint(&self, item_id: u64) {
         if let Some(flag) = self.inpaint_cancels.get(&item_id) {
             flag.store(true, std::sync::atomic::Ordering::Release);
+        }
+        let _ = self.inpaint_bridge_tx.send(InpaintBridgeMsg::Cancel { item_id });
+    }
+
+    /// SD inpaint dispatch via the dedicated subprocess bridge. Encodes
+    /// the (already-Arc'd) image + binary mask to PNG temp files,
+    /// writes them, and sends an `InpaintBridgeMsg::Dispatch`. The
+    /// bridge handles subprocess lifecycle. Bridge results stream back
+    /// via `pump_inpaint_subprocess` (called once per frame).
+    fn dispatch_inpaint_sd(
+        &mut self,
+        item_id: u64,
+        gen: u64,
+        image: &std::sync::Arc<image::RgbaImage>,
+        correction: &std::sync::Arc<prunr_core::brush::MaskCorrection>,
+        tuning: &InpaintTuning,
+    ) {
+        // PNG-encode + temp-file write is 150-300 ms per stroke at 4K
+        // — moving it onto rayon keeps the egui frame loop responsive
+        // mid-paint. Mask construction (`to_binary_mask`, `grow_mask`)
+        // is also CPU work and rides along.
+        let image = image.clone();
+        let correction = correction.clone();
+        let tuning = tuning.clone();
+        let bridge_tx = self.inpaint_bridge_tx.clone();
+        let inpaint_tx = self.inpaint_tx.clone();
+        // Cancel flag the parent already inserted into `inpaint_cancels`
+        // — the rayon job checks it before any work and before the
+        // bridge dispatch so a mid-encode Esc doesn't end up running
+        // the SD bundle on a stroke the user already discarded.
+        let cancel = self.inpaint_cancels.get(&item_id).cloned();
+        rayon::spawn(move || {
+            let cancelled = || cancel.as_ref().is_some_and(|c| c.load(std::sync::atomic::Ordering::Acquire));
+            let send_cancelled = || {
+                let _ = inpaint_tx.send(InpaintResult {
+                    item_id,
+                    rgba: image::RgbaImage::new(0, 0),
+                    generation: 0,
+                    cancelled: true,
+                    error: None,
+                });
+            };
+            if cancelled() { send_cancelled(); return; }
+            let raw_mask = correction.to_binary_mask(image.width(), image.height());
+            let mask = if tuning.grow_px != 0.0 {
+                prunr_core::inpaint::grow_mask(&raw_mask, tuning.grow_px.round() as i32)
+            } else {
+                raw_mask
+            };
+            let sd_req = match tuning.backend {
+                prunr_models::ModelId::SdV15InpaintFp16 => Some(prunr_core::inpaint_sd::SdInpaintRequest {
+                    prompt: tuning.sd_prompt.clone(),
+                    negative_prompt: tuning.sd_negative_prompt.clone(),
+                    num_inference_steps: 20,
+                    guidance_scale: tuning.sd_guidance_scale,
+                    seed: None,
+                    use_taesd: false,
+                }),
+                prunr_models::ModelId::SdV15LcmInpaintFp16 => Some(prunr_core::inpaint_sd::SdInpaintRequest {
+                    prompt: tuning.sd_prompt.clone(),
+                    negative_prompt: String::new(),
+                    num_inference_steps: 4,
+                    guidance_scale: 1.0,
+                    seed: None,
+                    use_taesd: prunr_models::is_available(prunr_models::ModelId::TaesdFp16),
+                }),
+                _ => None,
+            };
+            let dir = crate::subprocess::protocol::ipc_temp_dir();
+            let image_path = dir.join(format!("inpaint-img-{item_id}-{gen}.png"));
+            let mask_path  = dir.join(format!("inpaint-mask-{item_id}-{gen}.png"));
+            let res: Result<(), String> = (|| {
+                let img_bytes = prunr_core::encode_rgba_png(&image)
+                    .map_err(|e| format!("encode source: {e:?}"))?;
+                std::fs::write(&image_path, img_bytes)
+                    .map_err(|e| format!("write source: {e}"))?;
+                let mask_bytes = prunr_core::encode_gray_png(&mask)
+                    .map_err(|e| format!("encode mask: {e:?}"))?;
+                std::fs::write(&mask_path, mask_bytes)
+                    .map_err(|e| format!("write mask: {e}"))
+            })();
+            if let Err(e) = res {
+                let _ = inpaint_tx.send(InpaintResult {
+                    item_id,
+                    rgba: image::RgbaImage::new(0, 0),
+                    generation: 0,
+                    cancelled: false,
+                    error: Some(e),
+                });
+                return;
+            }
+            // Esc landed during the encode — drop the work before the
+            // bridge sees it. Temp files we just wrote are abandoned;
+            // the next dispatch's gen-bump renames over them.
+            if cancelled() {
+                let _ = std::fs::remove_file(&image_path);
+                let _ = std::fs::remove_file(&mask_path);
+                send_cancelled();
+                return;
+            }
+            let _ = bridge_tx.send(InpaintBridgeMsg::Dispatch {
+                item_id, gen, model_id: tuning.backend, image_path, mask_path, sd_req,
+                feather_px: tuning.feather_px,
+                sharpen: tuning.sharpen,
+            });
+        });
+    }
+
+    /// Drain bridge events, forward into the existing inpaint result
+    /// channel + progress sinks. Called once per frame from app pump.
+    pub(crate) fn pump_inpaint_subprocess(&mut self) {
+        while let Ok(evt) = self.inpaint_bridge_rx.try_recv() {
+            match evt {
+                InpaintBridgeResult::Progress { item_id, current, total } => {
+                    if let Some(p) = self.inpaint_progress.get(&item_id) {
+                        p.set_total(total);
+                        p.set_step(current);
+                    }
+                }
+                InpaintBridgeResult::Done { item_id, gen, rgba_path, width, height } => {
+                    let result = match super::worker::read_and_delete(&rgba_path) {
+                        Some(b) => match image::load_from_memory(&b) {
+                            Ok(img) => {
+                                let rgba = img.to_rgba8();
+                                debug_assert_eq!((rgba.width(), rgba.height()), (width, height));
+                                // Stamp with the dispatch's own gen — drain
+                                // drops it as stale if a fresher stroke
+                                // bumped `inpaint_latest_gen` while this
+                                // one was in the subprocess.
+                                InpaintResult {
+                                    item_id, rgba, generation: gen,
+                                    cancelled: false, error: None,
+                                }
+                            }
+                            Err(e) => InpaintResult {
+                                item_id,
+                                rgba: image::RgbaImage::new(0, 0),
+                                generation: 0, cancelled: false,
+                                error: Some(format!("decode SD result: {e}")),
+                            },
+                        },
+                        None => InpaintResult {
+                            item_id,
+                            rgba: image::RgbaImage::new(0, 0),
+                            generation: 0, cancelled: false,
+                            error: Some(format!("read SD result missing: {}", rgba_path.display())),
+                        },
+                    };
+                    let _ = self.inpaint_tx.send(result);
+                }
+                InpaintBridgeResult::Error { item_id, error } => {
+                    // Treat the special "Cancelled" sentinel as cancel,
+                    // not error — same contract the seg path uses.
+                    let cancelled = error == crate::subprocess::protocol::CANCELLED_ERR_MSG;
+                    let _ = self.inpaint_tx.send(InpaintResult {
+                        item_id,
+                        rgba: image::RgbaImage::new(0, 0),
+                        generation: 0,
+                        cancelled,
+                        error: if cancelled { None } else { Some(error) },
+                    });
+                }
+            }
         }
     }
 
@@ -375,21 +508,31 @@ impl Processor {
         let mut cancelled = Vec::new();
         let mut errors = Vec::new();
         while let Ok(result) = self.inpaint_rx.try_recv() {
+            let item_id = result.item_id;
             // Every drained result decrements pending — stale ones
             // count too, since the rayon job that produced them has
             // run to completion.
-            if let Some(c) = self.inpaint_pending.get_mut(&result.item_id) {
+            if let Some(c) = self.inpaint_pending.get_mut(&item_id) {
                 *c = c.saturating_sub(1);
             }
+            // Reclaim the per-item cancel/progress entries once nothing
+            // else is in flight for this id. Without this they accumulate
+            // for the life of the session — `cancel_all_inpaints` walks
+            // them all, and Esc-after-50-strokes ends up firing 50
+            // no-op IPC cancels.
+            if self.inpaint_pending.get(&item_id).copied().unwrap_or(0) == 0 {
+                self.inpaint_cancels.remove(&item_id);
+                self.inpaint_progress.remove(&item_id);
+            }
             if result.cancelled {
-                cancelled.push(result.item_id);
+                cancelled.push(item_id);
                 continue;
             }
             if let Some(msg) = result.error {
                 errors.push(msg);
                 continue;
             }
-            let latest = self.inpaint_latest_gen.get(&result.item_id).copied().unwrap_or(0);
+            let latest = self.inpaint_latest_gen.get(&item_id).copied().unwrap_or(0);
             if result.generation == latest && result.generation > 0 {
                 out.push(result);
             }
@@ -407,6 +550,15 @@ impl Processor {
     /// reads this to override the "All done" text during LaMa work.
     pub(crate) fn any_inpaint_in_flight(&self) -> bool {
         self.inpaint_pending.values().any(|&c| c > 0)
+    }
+
+    /// True after Cancel/Esc clicked but before the worker's atomic
+    /// Acquire load observes the flag. Drives the "Cancelling…" banner
+    /// state — without this signal the click looks unacknowledged
+    /// during the multi-second latency to the next worker checkpoint.
+    pub(crate) fn is_inpaint_cancelling(&self, item_id: u64) -> bool {
+        self.inpaint_cancels.get(&item_id)
+            .is_some_and(|f| f.load(std::sync::atomic::Ordering::Acquire))
     }
 
     /// Register a batch's recipe + the IDs that should deliver against it.
@@ -683,3 +835,4 @@ mod tests {
         assert!(!r.is_cancelled(42));
     }
 }
+

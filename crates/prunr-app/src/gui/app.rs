@@ -717,6 +717,8 @@ impl PrunrApp {
     }
 
     fn pump_inpaint_results(&mut self, ctx: &egui::Context) {
+        // Bridge → inpaint_rx fan-in must run before the drain.
+        self.processor.pump_inpaint_subprocess();
         let (results, cancelled, errors) = self.processor.drain_inpaint_results();
         for _ in &cancelled {
             self.toasts.info("Erase cancelled");
@@ -2390,9 +2392,14 @@ impl PrunrApp {
     }
 
     /// Escape dismisses the topmost interruptable state. Priority order:
-    /// active processing → open modal (settings / shortcuts / cli help).
+    /// in-flight eraser stroke → active batch processing → open modal
+    /// (settings / shortcuts / cli help). Eraser strokes win over batch
+    /// because the canvas banner is the most prominent active operation
+    /// when both are running, and SD strokes on CPU eat minutes of work.
     fn apply_cancel_shortcut(&mut self, ctx: &egui::Context) {
-        if self.batch.status_counts().processing > 0 {
+        if self.processor.any_inpaint_in_flight() {
+            self.processor.cancel_all_inpaints();
+        } else if self.batch.status_counts().processing > 0 {
             self.handle_cancel();
             self.processor.clear_admission();
             for item in &mut self.batch.items {

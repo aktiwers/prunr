@@ -587,21 +587,43 @@ fn apply_mask_inplace(rgba: &mut RgbaImage, mask: &GrayImage) {
 /// ~1px. Fractional shifts run `floor` full iterations then linearly blend
 /// with one extra iteration for sub-pixel precision (e.g. 2.5 = 50% 2-iter +
 /// 50% 3-iter).
-/// Gaussian blur approximation via 3-pass O(1) box filter. ~10× faster than
-/// `image::imageops::blur` and rayon-parallel. For σ → radius, the 3-box
-/// theorem gives `σ² = 3·(2r+1)²/12` → `r ≈ σ`. Visually indistinguishable
-/// from a true Gaussian on a single-channel alpha mask.
+/// Gaussian blur approximation via 3-pass O(1) box filter. For σ → radius
+/// the 3-box theorem gives `r ≈ σ`. Bbox-cropped: pixels outside the
+/// `mask + 3·radius` margin can't receive any non-zero blur weight from
+/// inside, so the full-image variant just walks zeros there. Bit-exact
+/// output, ~96 MB → bbox-sized peak working set on 4K masks with small
+/// painted regions.
 fn feather_mask(mask: &mut GrayImage, sigma: f32) {
-    let (w, h) = (mask.width(), mask.height());
     let radius = sigma.round().max(1.0) as u32;
+    // 3-box kernel total reach is 3·radius from each source pixel.
+    let margin = 3 * radius;
+    let Some(bbox) = crate::inpaint::mask_bbox(mask, 1, margin) else {
+        return;
+    };
+    let raw_w = mask.width() as usize;
+    let bw = bbox.w as usize;
+    let bh = bbox.h as usize;
+    let bn = bw * bh;
+    let mut buf = vec![0.0f32; bn];
+    let mut tmp = vec![0.0f32; bn];
     let raw = mask.as_raw();
-    let mut buf: Vec<f32> = raw.iter().map(|&v| v as f32).collect();
-    for _ in 0..3 {
-        buf = crate::guided_filter::box_filter(&buf, w, h, radius);
+    for by in 0..bh {
+        let src_off = (bbox.y as usize + by) * raw_w + bbox.x as usize;
+        let dst_off = by * bw;
+        for bx in 0..bw {
+            buf[dst_off + bx] = raw[src_off + bx] as f32;
+        }
     }
+    crate::guided_filter::box_filter_into(&buf, bbox.w, bbox.h, radius, &mut tmp);
+    crate::guided_filter::box_filter_into(&tmp, bbox.w, bbox.h, radius, &mut buf);
+    crate::guided_filter::box_filter_into(&buf, bbox.w, bbox.h, radius, &mut tmp);
     let out = mask.as_mut();
-    for (dst, src) in out.iter_mut().zip(buf.iter()) {
-        *dst = src.clamp(0.0, 255.0).round() as u8;
+    for by in 0..bh {
+        let dst_off = (bbox.y as usize + by) * raw_w + bbox.x as usize;
+        let src_off = by * bw;
+        for bx in 0..bw {
+            out[dst_off + bx] = tmp[src_off + bx].clamp(0.0, 255.0).round() as u8;
+        }
     }
 }
 

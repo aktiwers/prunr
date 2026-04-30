@@ -151,9 +151,15 @@ pub fn has_fallback_excluding(excluding: &Path) -> bool {
 fn bundled_dylib() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let parent = exe.parent()?;
-    // cargo-dist's bundle layout puts shared libs in a `runtime/`
-    // sibling of the binary. Some packagers flatten this, hence the
-    // exe-dir fallback.
+    // Release CI's `cargo xtask install-runtime --stage-to <pkg>/runtime/`
+    // puts shared libs in a `runtime/` sibling of the binary. Some
+    // packagers flatten this, hence the exe-dir fallback.
+    //
+    // macOS .app skips both: the binary's rpath
+    // (`@executable_path/../Frameworks`, set in `.cargo/config.toml`)
+    // resolves the dylib at link time, so `bundled_dylib` returns
+    // `None` and the dlopen falls through to rpath. Documented for
+    // future readers — there's no Frameworks/ check here on purpose.
     let nested = parent.join("runtime").join(DYLIB_NAME);
     if nested.is_file() {
         return Some(nested);

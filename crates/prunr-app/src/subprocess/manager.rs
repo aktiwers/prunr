@@ -54,6 +54,32 @@ impl SubprocessManager {
         line_mode: LineMode,
         edge: EdgeSettings,
     ) -> Result<(Self, String), String> {
+        Self::spawn_inner(model, jobs, mask, force_cpu, line_mode, edge, false)
+    }
+
+    /// Spawn a SD-inpaint-only subprocess. The worker skips engine
+    /// creation when `inpaint_only` is set, so the seg fields on
+    /// `Init` are dead weight at this stage — we pass placeholders.
+    /// Used by `Processor::dispatch_inpaint` for SD models so an OOM
+    /// during the bundle build kills the subprocess, not the GUI.
+    pub fn spawn_inpaint_only() -> Result<(Self, String), String> {
+        Self::spawn_inner(
+            ModelKind::Silueta, 1,
+            MaskSettings::default(), false,
+            LineMode::Off, EdgeSettings::default(),
+            true,
+        )
+    }
+
+    fn spawn_inner(
+        model: ModelKind,
+        jobs: usize,
+        mask: MaskSettings,
+        force_cpu: bool,
+        line_mode: LineMode,
+        edge: EdgeSettings,
+        inpaint_only: bool,
+    ) -> Result<(Self, String), String> {
         // Clean up stale IPC temp files from previous workers (crash recovery)
         super::protocol::cleanup_ipc_temp();
 
@@ -79,6 +105,7 @@ impl SubprocessManager {
         write_message(&mut stdin_writer, &SubprocessCommand::Init {
             model, jobs, mask, force_cpu, line_mode, edge,
             ipc_dir: ipc_temp_dir(),
+            inpaint_only,
         }).map_err(|e| format!("Failed to send Init: {e}"))?;
 
         // Spawn reader thread for non-blocking stdout consumption
@@ -270,6 +297,28 @@ impl SubprocessManager {
             mask,
         }).map_err(|e| format!("Failed to send RePostProcess: {e}"))?;
 
+        self.in_flight.insert(item_id);
+        Ok(())
+    }
+
+    /// Send an `Inpaint` command. Caller writes image + mask to PNG
+    /// files (worker decodes); this method just forwards the paths +
+    /// model_id + sd_req + post-process tuning. Returns immediately —
+    /// completion comes back via `InpaintDone` / `InpaintError` events
+    /// through `poll_events`.
+    pub fn send_inpaint(
+        &mut self,
+        item_id: u64,
+        model_id: prunr_models::ModelId,
+        image_path: std::path::PathBuf,
+        mask_path: std::path::PathBuf,
+        sd_req: Option<prunr_core::inpaint_sd::SdInpaintRequest>,
+        feather_px: f32,
+        sharpen: f32,
+    ) -> Result<(), String> {
+        write_message(&mut self.stdin_writer, &SubprocessCommand::Inpaint {
+            item_id, model_id, image_path, mask_path, sd_req, feather_px, sharpen,
+        }).map_err(|e| format!("Failed to send Inpaint: {e}"))?;
         self.in_flight.insert(item_id);
         Ok(())
     }
