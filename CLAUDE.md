@@ -195,6 +195,17 @@ New subprocess IPC variants (`SubprocessCommand` / `SubprocessEvent`) earn a bin
 
 Changes to `resolve_tier` or `ItemSettings` fields require a test covering the new field's behaviour in the tier comparison table.
 
+**Cross-subsystem behaviour contracts** earn a behaviour test enumerating every variant of the trigger event. Wire-format tests are not enough — the IPC bincode roundtrip confirms bytes encode/decode correctly, but a manager's *handling* of each variant is a separate contract. The pattern: when subsystem A's state must respond to subsystem B's events (or to a lifecycle phase, slow frame, file-system race, etc.), pin the contract with a test that fails when the response drifts.
+
+Concrete shapes that count as boundary tests:
+
+- An event-handler that branches on an enum: one test row per variant. "Tested it once with `ImageDone`" is not enough when `InpaintDone` exists too.
+- A lifecycle ordering invariant (file written before spawn must survive spawn; cleanup-on-crash must not touch a sibling subprocess's in-flight files): test writes the marker, drives the lifecycle, asserts the invariant.
+- A timing/debounce contract: drive a fake clock through the worst case (slow frames, rapid bursts), assert the dispatch arrives within bounded time.
+- A scope/prefix contract on a destructive operation (cleanup, eviction, kill-all): seed inputs both inside and outside the scope, run the operation, assert only the in-scope items are affected.
+
+If a regression you ship has the shape "subsystem A changed and subsystem B broke quietly," the boundary test that would have caught it is the one to write — alongside the fix, not after. CLAUDE.md `## Goal-driven for bug fixes` already requires this for one-off bugs; the boundary-test rule is the same idea applied across every subsystem seam.
+
 ## Layers
 
 Each layer has its own state-ownership rules. The **coordinator pattern** in the next section applies **only** to the GUI layer. Other layers have their own conventions:
