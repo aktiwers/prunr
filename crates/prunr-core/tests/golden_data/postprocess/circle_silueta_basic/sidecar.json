@@ -1,0 +1,21 @@
+{
+  "shape": [
+    1,
+    1,
+    256,
+    256
+  ],
+  "model": "Silueta",
+  "mask_settings": {
+    "gamma": 1.0,
+    "threshold": null,
+    "edge_shift": 0.0,
+    "refine_edges": false,
+    "guided_radius": 8,
+    "guided_epsilon": 0.0001,
+    "feather": 0.0,
+    "fill_style": "none",
+    "bg_effect": "none",
+    "correction_hash": null
+  }
+}
