@@ -217,9 +217,23 @@ pub(crate) fn render(
             if !brush_state.is_enabled() {
                 brush_state.toggle();
             }
-            // Pre-warm the specific backend the user selected (LaMa vs
-            // Big-LaMa have separate sessions in the per-id cache).
-            if let Some(id) = app_settings.model.to_model_id() {
+            // Pre-warm the specific backend the dispatch will actually
+            // use. For SD with FAST mode active, dispatch routes through
+            // `lcm_routing_active()` to the LCM bundle — prewarming the
+            // standard SD bundle here would build TWO bundles (one
+            // standard via prewarm, one LCM via dispatch), each ~15 GB,
+            // tipping a low-RAM machine into the SD-bundle guard's
+            // refusal path.
+            let raw_id = app_settings.model.to_model_id();
+            let id = match raw_id {
+                Some(prunr_models::ModelId::SdV15InpaintFp16)
+                    if app_settings.lcm_routing_active(prunr_models::ModelId::SdV15InpaintFp16) =>
+                {
+                    Some(prunr_models::ModelId::SdV15LcmInpaintFp16)
+                }
+                other => other,
+            };
+            if let Some(id) = id {
                 rayon::spawn(move || {
                     if let Err(e) = prunr_core::inpaint::prewarm(id) {
                         tracing::warn!(?id, %e, "Inpaint prewarm failed");

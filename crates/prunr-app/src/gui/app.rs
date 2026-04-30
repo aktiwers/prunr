@@ -717,9 +717,17 @@ impl PrunrApp {
     }
 
     fn pump_inpaint_results(&mut self, ctx: &egui::Context) {
-        let (results, cancelled) = self.processor.drain_inpaint_results();
+        let (results, cancelled, errors) = self.processor.drain_inpaint_results();
         for _ in &cancelled {
             self.toasts.info("Erase cancelled");
+        }
+        for msg in &errors {
+            // Show the worker's message verbatim — the SD RAM-guard
+            // text is already user-friendly ("only X GB free, Y minimum
+            // recommended. Close other apps or use LaMa..."). Future
+            // CoreError variants that surface here can be reformatted
+            // at this seam if their default Display is too technical.
+            self.toasts.error(msg.clone());
         }
         if results.is_empty() {
             return;
