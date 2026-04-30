@@ -15,3 +15,9 @@ test_cli/
 .claude/
 demo/
 memory/
+
+# Local-only golden fixtures — dev-machine images for richer regression
+# coverage that don't belong in the public repo (personal photos, licensed
+# stock, etc.). Both golden harnesses walk this dir as a second fixture root
+# alongside `golden_data/` and apply the same bootstrap/verify rules.
+crates/prunr-core/tests/golden_data_local/
