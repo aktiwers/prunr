@@ -83,6 +83,19 @@ Before you write a `.clone()` on anything larger than ~1 KB in a hot path, ask: 
 
 Before allocating (Vec, String, Box) inside a hot closure: can the allocation hoist out once per frame or once per session? Drag handlers, tooltip callbacks, and per-item render loops are the usual offenders.
 
+### The render closure is sacred (no I/O, no decode, no GPU upload)
+
+The egui render closure runs at 60 Hz during interaction. It must do **rendering only** — no synchronous file I/O, no image decode, no GPU upload, no heavy allocation. Data that isn't already on the item flows through `BatchManager.bg_io` / `Processor` channels and is consumed via `.try_recv()` in `logic()` (or a dedicated `drain_*` helper called from there). A single 30-ms decode stalls the frame and the user feels it.
+
+Grep-rejectable patterns inside any `fn render`, closure passed to `Window::show` / `ui.allocate_*` / `egui::CentralPanel::default().show`, or any `pump_*` called from `ui()`:
+
+- `fs::File::open` / `fs::read` / `image::ImageReader::*` / `to_rgba8()` — synchronous I/O or decode. Route through `BatchManager.request_decode_source(...)` or a fresh bg_io channel.
+- `ctx.load_texture` / `TextureHandle::set` — GPU upload. Belongs in `drain_background_channels`, not row-render or popover-render. (This is what `pump_thumbnail_results` got wrong.)
+- `.recv()` (blocking) on any `Receiver` — must be `.try_recv()`.
+- `.to_string()` on a `&'static str` (icon codepoints, label literals) — pass the `&'static str` through directly.
+- `format!("...{m}...")` where `m = cfg!(target_os = "macos")` resolves at compile time — `cfg!`-gated `&'static str` constants instead.
+- Recipe / hash construction every frame for drift detection — cache the last-checked tuple on the coordinator and only recompute when the source changed.
+
 ## RAM discipline (without sacrificing quality)
 
 Prunr already runs SD models hitting 2 GB+ resident; layering naïve full-image f32 buffers on top has caused near-OOMs. Bake RAM into the design **before** writing code — but **quality and user experience always win the tie-break**. The rule isn't "silently refuse trades", it's "surface them and let the user decide."
@@ -310,6 +323,18 @@ Patterns that look fine but have a better home. Refuse PRs from your own past se
 - Pure functions by default. The single allowed mutable global pattern is `OnceLock<T>` for caches. No `static mut`, no `lazy_static!`-ish stateful singletons. `Mutex<T>` is allowed only when it wraps something ort-owned that externally mandates `&mut` (`OrtEngine::session`).
 - `tracing::{info,warn,error,debug}!` for diagnostics. No `eprintln!` (same rule as the rest of the workspace).
 - New pure functions (no I/O, no globals) in `recipe.rs` / `postprocess.rs` / `preprocess.rs` / `edge.rs` / `formats.rs` earn a unit test in the same file. Already enforced by `## Test expectations`; restated here because it's easy to miss when adding a helper.
+
+### Numerical & color invariants
+
+Image-math regressions are silent — a wrong gamma, alpha-blend, or denominator change ships without any unit test failing because the result is "still an image, just slightly different." These rules pin the invariants explicitly so refactors don't drift them.
+
+- **Straight (un-premultiplied) sRGB throughout.** Every `RgbaImage` in core holds straight alpha in sRGB-encoded u8. Do **not** introduce premultiplied intermediates or linear-light conversion inside core math without an explicit `// rationale: ...` comment naming why and where the value is converted back. An agent's instinct to "premultiply for correct blending" or "work in linear-light because that's physically correct" is almost always wrong here — the existing math is calibrated to straight sRGB, and changing the working space silently shifts pixel output. If a real need surfaces (e.g. a future linear-light bloom effect), it ships as its own commit with golden-suite updates.
+
+- **f32 working buffers for math-heavy paths.** Mask refinement, guided filtering, alpha blending, color matching, edge feathering all operate on `Vec<f32>` (or per-pixel f32). Clamp + cast to u8 only at the final write back to `RgbaImage` (`(x * 255.0).clamp(0.0, 255.0) as u8`, or via `image::Rgba` constructors that clamp internally). Do not roll u8 arithmetic in working buffers — halos and color banding are cheap to introduce, expensive to spot.
+
+- **Guard the denominator.** Where division by a variance / sum / count is involved, guard with `.max(0.0)` (or an epsilon-floor when zero is also pathological). Canonical: `inpaint_blend::seam_guided_blend:262` — `let var = (mgg_v - mg_v * mg_v).max(0.0);`. f32 rounding on flat regions of the guide image can produce sub-zero variance values that, fed through `1.0 / (var + eps)`, amplify f32 noise into the output. Apply the same guard in any new `guided_filter`-shaped math.
+
+- **Saturating cast at the boundary, not in the middle.** Converting f32 → u8 with `as u8` silently wraps negatives and truncates above 255. Always go through `.clamp(0.0, 255.0) as u8` (or the `image` crate's clamping constructors). The same goes for sums of u8 channels: prefer f32 working math over `saturating_add` chains that mask off valid out-of-range intermediate states.
 
 ### Hot-path helper menu
 
