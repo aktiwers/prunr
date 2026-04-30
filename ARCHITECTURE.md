@@ -229,6 +229,10 @@ The pipeline lives in `prunr-core::inpaint`. The LaMa weights are zstd-embedded 
 
 CPU-only for now; GPU EP support deferred until a measured win justifies the EP-fallback ladder that `OrtEngine` already carries for seg/edge models.
 
+**Cancel + progress.** `process_inpaint_with` accepts an `InpaintHooks` bundle: optional `Arc<AtomicBool>` cancel flag (checked between LaMa tiles / SD UNet steps — ORT has no per-op cancel hook) and optional `Arc<InpaintProgress>` (atomic step/total). The GUI's Esc-to-cancel and canvas Cancel button both flip the flag; the banner reads the progress atomic each frame to render "Erasing — step N of M" or "Cancelling…" once the flag is set. Latency to actually-stopping is one tile (LaMa) or one UNet step (SD) — multi-second on CPU.
+
+**SD subprocess isolation.** Stable-Diffusion-family inpaint runs in a **dedicated subprocess** spawned via `SubprocessManager::spawn_inpaint_only` (the seg engine pool is skipped in the worker — `inpaint_only: bool` on the `Init` command). `gui/inpaint_bridge.rs` owns the long-lived bridge thread: lazy-spawn on first SD dispatch, drop after 5 min idle to release the ~5 GB resident set, route `InpaintProgress` / `InpaintDone` / `InpaintError` events back into the same `inpaint_rx` channel the in-process path uses so the rest of the GUI can't tell which dispatch served. LaMa / Big-LaMa / MI-GAN stay in-process via rayon — small footprint, no isolation pressure. An OOM during SD inference now kills the subprocess (auto-restarted on the next stroke) instead of taking the GUI down. Worker-side post-processing (color match + seam blend + sharpen) takes `feather_px` + `sharpen` over IPC so SD strokes honor the same toolbar knobs the in-process path applies.
+
 ## Live Preview
 
 Mask and edge tweaks auto-rerun Tier 2 during slider drag. A tweak is debounced ~150 ms; a new tweak on the same item cancels the in-flight one and dispatches a fresh rerun on the rayon pool.
@@ -283,12 +287,21 @@ Non-visible processed results are compressed to Tier 2 (warm) on sidebar navigat
 The `AdmissionController` uses a **sliding window with greedy best-fit** to pace how many images are sent to the subprocess:
 
 1. Estimate per-image cost from dimensions: `W × H × 4 × 2 + file_size`
-2. Query available RAM, subtract model overhead
+2. Query available RAM, subtract model overhead — **per-engine** overhead is `ModelDescriptor.working_set_mb` from the registry, not a hardcoded match
 3. Admit largest pending image that fits remaining budget
 4. On each `ImageDone`: release budget, admit next
 5. Force-admit if nothing is in-flight (prevents deadlock on oversized images)
 
 Additionally, the subprocess reports its own RSS after each image. The parent pauses admission when child RSS exceeds 80% of available RAM, resumes at 70% (hysteresis).
+
+### Per-model memory metadata
+
+`ModelDescriptor.working_set_mb` is the steady-state resident RSS contribution per model. Two consumers, one source of truth:
+
+- **Segmentation/edge** (`memory.rs::per_engine_cost`): multiplied by engine pool size during batch admission
+- **Inpaint** (`inpaint_sd.rs::check_ram_for`): direct min-free-RAM gate; refuses dispatch when free RAM falls below `working_set_mb`
+
+A new model needs one registry entry — admission, the inpaint pre-flight, and `safe_max_jobs` all read it without touching `memory.rs` or `inpaint_sd.rs`. Values are derived from model architecture (weights + ORT workspace + worst-case EP overhead) so they hold cross-hardware: SD 1.5 = 10 GB (5 GB resident + 3 GB load transient + 2 GB EP worst-case), BiRefNet-lite = 2.5 GB, LaMa = 700 MB, Silueta = 200 MB.
 
 ### Model-aware parallel jobs
 
@@ -409,6 +422,24 @@ total postprocess time (the dominant costs are the 48 MB RGBA allocation
 and the SIMD Lanczos resize). The `apply_mask_inplace_4k_bench` and
 `postprocess_4k_bench` `#[ignore]` tests in `postprocess.rs` reproduce
 these numbers.
+
+#### Criterion microbenches
+
+`crates/prunr-core/benches/` ships criterion benches for the four
+kernels regression most likely to hide under E2E noise. Run with
+`cargo bench -p prunr-core --bench <name>`. CI does NOT run them —
+runner wall-clock variance produces false regressions cheaper to
+ignore than to investigate. Reference numbers (8-core x86_64,
+`bench` profile = release):
+
+| Kernel                              | Configuration            | Time (median) |
+|-------------------------------------|--------------------------|--------------:|
+| `guided_filter_alpha`               | 512² guide + mask        |        9.9 ms |
+| `guided_filter_alpha`               | 2048² guide + mask       |        243 ms |
+
+The other three benches (`tile_compose`, `resize_lanczos3`,
+`tensor_to_mask`) are committed and runnable; their reference numbers
+land here on the next perf sweep when they're actually measured.
 
 ## Edge Detection (DexiNed)
 
@@ -599,7 +630,9 @@ Tag push (`v*`) and manual `workflow_dispatch` both trigger parallel builds on t
 | macos-aarch64 | macos-latest | `.dmg`, `.tar.gz` |
 | windows-x86_64 | windows-latest | `.zip`, Inno Setup `.exe` |
 
-**ORT runtime bundling.** Each artifact ships the platform-specific `libonnxruntime` next to the binary so a clean machine without system ORT can run the app. Linux/Windows pull from pykeio/ort's `download-binaries`; macOS replaces it with a custom CoreML-enabled build (see `## GPU Execution Providers`). Each package step fails-loud with a `::error::` annotation if the lib didn't get produced, so a missing dylib surfaces in the PR check rather than silently shipping broken binaries.
+**ORT runtime bundling.** Each artifact ships the platform-specific `libonnxruntime` next to the binary so a clean machine without system ORT can run the app. Linux/Windows: CI runs `cargo xtask install-runtime onnxruntime <ver> --stage-to runtime-stage/` to download + extract the CPU-only PyPI wheel, then each package step copies `runtime-stage/<DYLIB>` into `<package>/runtime/<DYLIB>` (matching `bundled_dylib`'s nested-layout lookup). macOS replaces this with a custom CoreML-enabled build (see `## GPU Execution Providers`) bundled into `Prunr.app/Contents/Frameworks/` via rpath. The xtask staging path is the same code the GUI's "Settings → Hardware → Install runtime" uses, so the bundled fallback and the runtime store can't drift in their install layout. Each package step fails-loud with `::error::` if the staged dylib is missing.
+
+**`.deb` / `.rpm` runtime placement caveat.** The `bundled_dylib` lookup is `<exe parent>/runtime/<DYLIB>`. Standard FHS dictates `/usr/lib` for shared libs; the .deb/.rpm currently install at `/usr/bin/runtime/libonnxruntime.so` — non-idiomatic but functional, since the binary at `/usr/bin/prunr` finds it there via the bundled lookup. A proper FHS layout (binary wrapper at `/usr/bin/prunr` invoking the real binary at `/usr/lib/prunr/prunr` with `LD_LIBRARY_PATH` set) is tracked in `.planning/DEFERRED.md` § J-7.
 
 **Linux runtime deps** declared in the .deb / .rpm Depends list: `libgtk-3-0` (rfd file dialogs), `libxkbcommon0` (winit keyboard input), `libfontconfig1` (text rendering). Already present on Ubuntu 22.04+, Fedora 40+, openSUSE Tumbleweed; AppImage / tar.gz users on minimal installs may need to install them manually.
 

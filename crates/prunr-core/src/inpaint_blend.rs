@@ -413,6 +413,30 @@ fn composite_channel(
     });
 }
 
+/// Single source of truth for the inpaint post-process pipeline:
+/// color match → seam-guided blend → optional sharpen. Used by the
+/// LaMa rayon path and the subprocess worker arm so constants and
+/// order can't drift across call sites. `feather_px == 0.0` falls back
+/// to `SEAM_BLEND_BAND_PX`; `sharpen <= 0.0` skips the sharpen pass.
+pub fn finalize_inpaint(
+    raw: &RgbaImage,
+    source: &RgbaImage,
+    mask: &GrayImage,
+    feather_px: f32,
+    sharpen: f32,
+) -> RgbaImage {
+    let color_matched = color_match_inpainted(raw, source, mask, COLOR_MATCH_RING_PX);
+    let band_px = if feather_px > 0.0 { feather_px } else { SEAM_BLEND_BAND_PX };
+    let mut out = seam_guided_blend(
+        &color_matched, source, mask,
+        SEAM_BLEND_RADIUS, SEAM_BLEND_EPSILON, band_px,
+    );
+    if sharpen > 0.0 {
+        out = crate::inpaint::sharpen_inpainted(&out, mask, sharpen);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

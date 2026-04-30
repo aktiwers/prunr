@@ -151,7 +151,8 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
         let item_id = app.batch.items[idx].id;
         if app.processor.is_inpaint_in_flight(item_id) {
             let progress = app.processor.inpaint_progress(item_id);
-            if render_inpaint_progress(ui, canvas_rect, progress) {
+            let cancelling = app.processor.is_inpaint_cancelling(item_id);
+            if render_inpaint_progress(ui, canvas_rect, progress, cancelling) {
                 app.cancel_inpaint_for(item_id);
             }
             ui.ctx().request_repaint();
@@ -168,15 +169,14 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
 }
 
 /// Translucent banner + animated dots + Cancel button shown while an
-/// eraser stroke is in flight. Returns `true` when the Cancel button
-/// was clicked this frame. `progress` is `(current_step, total_steps)`
-/// from `Processor::inpaint_progress` — when `total > 0` the banner
-/// shows "Erasing — step N of M"; otherwise it stays at the "Erasing…"
-/// spinner-only form (LaMa, or SD's pre-loop bundle/VAE phase).
+/// eraser stroke is in flight. Returns `true` when Cancel was clicked
+/// this frame. Banner copy: "Cancelling…" when `cancelling`, else
+/// "Erasing — step N of M" when `progress.total > 0`, else "Erasing…".
 fn render_inpaint_progress(
     ui: &mut egui::Ui,
     canvas_rect: Rect,
     progress: (u32, u32),
+    cancelling: bool,
 ) -> bool {
     let t = ui.ctx().input(|i| i.time) as f32;
     let banner_h = 44.0;
@@ -197,9 +197,13 @@ fn render_inpaint_progress(
             theme::ACCENT.gamma_multiply(a),
         );
     }
-    let label = match progress {
-        (cur, total) if total > 0 && cur > 0 => format!("Erasing — step {cur} of {total}"),
-        _ => "Erasing…".to_string(),
+    let label = if cancelling {
+        "Cancelling…".to_string()
+    } else {
+        match progress {
+            (cur, total) if total > 0 && cur > 0 => format!("Erasing — step {cur} of {total}"),
+            _ => "Erasing…".to_string(),
+        }
     };
     ui.painter().text(
         Pos2::new(center.x - 22.0, center.y),
@@ -208,6 +212,12 @@ fn render_inpaint_progress(
         egui::FontId::proportional(14.0),
         theme::TEXT_PRIMARY,
     );
+
+    // Hide once cancelling — a still-clickable button reads as "the
+    // first click didn't take" while the worker finishes its tile/step.
+    if cancelling {
+        return false;
+    }
 
     // Cancel button on the right side of the banner. Interactive widget
     // so we can't paint-only here; allocate a child Ui at the banner's

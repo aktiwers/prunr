@@ -10,6 +10,7 @@ pub mod settings;
 pub mod item_settings;
 pub mod presets_fs;
 pub mod worker;
+pub mod inpaint_bridge;
 pub mod theme;
 pub mod views;
 pub mod zoom_state;

@@ -2,8 +2,10 @@
 // Development: --features dev-models loads from the filesystem so model changes
 // do not trigger recompilation of the prunr-models crate.
 //
-// IMPORTANT: This crate has NO dependencies on other workspace crates.
-// The dependency arrow is prunr-app -> prunr-core -> prunr-models (never in reverse).
+// IMPORTANT: This crate has NO dependencies on other WORKSPACE CRATES.
+// Third-party libraries (serde, zstd, dirs) are fine; the rule is about
+// crate-graph layering. The arrow is prunr-app -> prunr-core ->
+// prunr-models (never in reverse).
 //
 // Models are declared in `REGISTRY`; bytes are resolved via `resolve_bytes`.
 
@@ -13,7 +15,7 @@ use std::sync::{Mutex, OnceLock};
 
 // ── Registry types ──────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum ModelId {
     Silueta,
     U2net,
@@ -38,6 +40,17 @@ pub enum ModelId {
     /// backend when fast mode is on AND the bundle is installed.
     /// Bundle is the output of `scripts/export_taesd.py`.
     TaesdFp16,
+}
+
+impl ModelId {
+    /// True for inpaint models that route through the dedicated SD
+    /// subprocess. LaMa / Big-LaMa / MI-GAN have small footprints and
+    /// stay in-process. Single source of truth for the predicate;
+    /// previously duplicated in `prunr-core::inpaint` and
+    /// `prunr-app::gui::processor`.
+    pub fn is_sd_family(&self) -> bool {
+        matches!(self, ModelId::SdV15InpaintFp16 | ModelId::SdV15LcmInpaintFp16)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -144,6 +157,19 @@ pub struct ModelDescriptor {
     /// in just to spell the EP names would be a layering inversion.
     /// Callers convert via `EpKind::Display` at the boundary.
     pub incompatible_eps: &'static [&'static str],
+    /// Expected steady-state resident RSS contribution in MB when this
+    /// model is loaded and running on a typical input. Used as:
+    ///  - For Segmentation / EdgeDetection: per-engine cost in
+    ///    `AdmissionController` — multiplied by the engine pool size
+    ///    to reserve weights + ORT workspace for the batch window.
+    ///  - For Inpaint: single-shot pre-flight gate. `dispatch_inpaint`
+    ///    refuses to dispatch when `available_ram_mb < working_set_mb`.
+    ///
+    /// Empirically calibrated. Conservative > optimistic — under-counting
+    /// causes OOMs that crash the GUI; over-counting just throttles
+    /// admission. The number includes load-transient peaks (OpenVINO
+    /// graph creation, sequential VAE+UNet+text-encoder loads for SD).
+    pub working_set_mb: u32,
 }
 
 impl ModelDescriptor {
@@ -195,6 +221,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         // than ORT's CPU EP). FP16 variant additionally fails on a
         // quantized_cast type mismatch. Both verified 2026-04-26.
         incompatible_eps: &["OpenVINO"],
+        working_set_mb: 200,
     },
     ModelDescriptor {
         id: ModelId::U2net,
@@ -215,6 +242,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         version: "1.0.0",
         gpu: GpuRequirement::None,
         incompatible_eps: &[],
+        working_set_mb: 800,
     },
     ModelDescriptor {
         id: ModelId::BiRefNetLite,
@@ -225,6 +253,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         version: "1.0.0",
         gpu: GpuRequirement::None,
         incompatible_eps: &[],
+        working_set_mb: 2500,
     },
     ModelDescriptor {
         id: ModelId::DexiNed,
@@ -235,6 +264,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         version: "1.0.0",
         gpu: GpuRequirement::None,
         incompatible_eps: &[],
+        working_set_mb: 300,
     },
     ModelDescriptor {
         id: ModelId::LaMaFp32,
@@ -255,6 +285,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         version: "1.0.0",
         gpu: GpuRequirement::None,
         incompatible_eps: &[],
+        working_set_mb: 700,
     },
     ModelDescriptor {
         id: ModelId::BigLaMa,
@@ -275,6 +306,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         version: "1.0.0",
         gpu: GpuRequirement::None,
         incompatible_eps: &[],
+        working_set_mb: 700,
     },
     ModelDescriptor {
         id: ModelId::Migan,
@@ -295,6 +327,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         version: "1.0.0",
         gpu: GpuRequirement::None,
         incompatible_eps: &[],
+        working_set_mb: 150,
     },
     // SD 1.5 Inpainting FP16: GPU-required CreativeML-licensed bundle.
     ModelDescriptor {
@@ -344,6 +377,15 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         version: "1.0.0",
         gpu: GpuRequirement::Required,
         incompatible_eps: &[],
+        // Architecture-derived ceiling — cross-hardware, not tuned to
+        // any one observed system:
+        //   ~5 GB resident (UNet 1.7 + VAE 0.16 + text-encoder 0.25
+        //                   + ORT session overhead ~3)
+        //   ~3 GB load transient (graph optimization + initial scratch)
+        //   ~2 GB EP overhead worst-case (OpenVINO heaviest)
+        // Older 16 GB number encoded a then-unfixed bundle-build race;
+        // race is closed by the per-id OnceLock pattern in inpaint_sd.
+        working_set_mb: 10000,
     },
     // LCM-distilled SD 1.5 Inpaint FP16. ~2 GB total. Same UNet
     // architecture as SdV15InpaintFp16 but trained to converge in ~4
@@ -397,6 +439,9 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         version: "1.0.0",
         gpu: GpuRequirement::None,
         incompatible_eps: &[],
+        // LCM is a training-schedule variant; bundle footprint matches
+        // standard SD 1.5 inpaint.
+        working_set_mb: 10000,
     },
     // TAESD FP16: Tiny distilled VAE for SD 1.5. ~2.4 MB encoder + ~2.5
     // MB decoder. Released at https://github.com/aktiwers/prunr/releases/tag/taesd-v1.0.0.
@@ -434,6 +479,8 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         version: "1.0.0",
         gpu: GpuRequirement::None,
         incompatible_eps: &[],
+        // Auxiliary VAE — loaded with a SD bundle, never standalone.
+        working_set_mb: 100,
     },
 ];
 
@@ -805,6 +852,44 @@ mod tests {
                 assert!(license.license_url.starts_with("https://"), "{:?} bad license_url", desc.id);
                 assert!(license.source_url.starts_with("https://"),  "{:?} bad source_url",  desc.id);
             }
+        }
+    }
+
+    #[test]
+    fn is_sd_family_routes_only_sd_models_to_subprocess() {
+        // SD-family routes to the dedicated subprocess (5-10 GB bundle
+        // — process isolation prevents an OOM from killing the GUI).
+        assert!(ModelId::SdV15InpaintFp16.is_sd_family());
+        assert!(ModelId::SdV15LcmInpaintFp16.is_sd_family());
+        // Smaller inpaint models stay in-process (no isolation pressure,
+        // lower latency, no subprocess spin-up cost).
+        assert!(!ModelId::LaMaFp32.is_sd_family());
+        assert!(!ModelId::BigLaMa.is_sd_family());
+        assert!(!ModelId::Migan.is_sd_family());
+        // Non-inpaint models — predicate must be False so a future
+        // misdispatch doesn't accidentally route through the bridge.
+        assert!(!ModelId::Silueta.is_sd_family());
+        assert!(!ModelId::U2net.is_sd_family());
+        assert!(!ModelId::BiRefNetLite.is_sd_family());
+        assert!(!ModelId::DexiNed.is_sd_family());
+        assert!(!ModelId::TaesdFp16.is_sd_family());
+    }
+
+    #[test]
+    fn every_descriptor_has_a_calibrated_working_set() {
+        // Floor catches accidental zero-init when adding a new model;
+        // ceiling catches obvious typos (no real model needs > 64 GB).
+        for desc in REGISTRY {
+            assert!(
+                desc.working_set_mb >= 50,
+                "{:?} working_set_mb={} too small — every real model uses ≥ 50 MB resident",
+                desc.id, desc.working_set_mb,
+            );
+            assert!(
+                desc.working_set_mb < 65_536,
+                "{:?} working_set_mb={} suspiciously large (> 64 GB)",
+                desc.id, desc.working_set_mb,
+            );
         }
     }
 

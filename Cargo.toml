@@ -15,16 +15,18 @@ license = "Apache-2.0"
 repository = "https://github.com/aktiwers/prunr"
 
 [workspace.dependencies]
-# Inference runtime — pinned to an RC for stable feature surface (CUDA, CoreML,
-# DirectML, download-binaries). On macOS, release CI overrides the downloaded
-# prebuilt with a custom CoreML-enabled build via ORT_LIB_LOCATION + the
-# `@executable_path/../Frameworks` rpath set in `.cargo/config.toml`.
-# Unpin when ort 2.0 stable ships and our feature set is preserved.
-# Check https://github.com/pykeio/ort/milestones before bumping.
-# Phase 19: load-dynamic replaces download-binaries — ORT is now
-# resolved at runtime via `ort::init_from(path)` so we can swap in
-# EP-specific bundles via the Runtime Store. api-23 pin avoids the
-# rc.12 vitis.rs build bug under load-dynamic at api-24.
+# Inference runtime — pinned to an RC for stable feature surface
+# (CUDA, CoreML, DirectML, OpenVINO, load-dynamic). The dylib is
+# resolved at runtime via `ort::init_from(path)` from the Runtime
+# Store or the bundled fallback at `<exe>/runtime/<DYLIB>` (release
+# CI stages it via `cargo xtask install-runtime onnxruntime <ver>`).
+# macOS overrides this with a custom CoreML-enabled build via
+# ORT_LIB_LOCATION + the `@executable_path/../Frameworks` rpath set
+# in `.cargo/config.toml`. Unpin when ort 2.0 stable ships and our
+# feature set is preserved. Check
+# https://github.com/pykeio/ort/milestones before bumping. api-23
+# pin avoids the rc.12 vitis.rs build bug under load-dynamic at
+# api-24.
 ort = { version = "=2.0.0-rc.12", default-features = false, features = ["cuda", "coreml", "directml", "openvino", "ndarray", "load-dynamic", "api-23", "half"] }
 
 # Image + tensor core

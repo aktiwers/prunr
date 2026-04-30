@@ -723,7 +723,7 @@ fn read_result_image(
 
 /// Read a temp file and delete it in the same breath. Invariant shared by
 /// every subprocess-IPC reader: the temp file is one-shot, always removed.
-fn read_and_delete(path: &std::path::Path) -> Option<Vec<u8>> {
+pub(super) fn read_and_delete(path: &std::path::Path) -> Option<Vec<u8>> {
     let bytes = std::fs::read(path).ok()?;
     let _ = std::fs::remove_file(path);
     Some(bytes)
