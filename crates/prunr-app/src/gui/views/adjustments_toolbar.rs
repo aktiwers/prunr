@@ -547,18 +547,15 @@ fn render_row2_right_cluster(
     change: &mut ToolbarChange,
 ) {
     // DualScale generates Fine + Bold internally and ignores `edge_scale`
-    // (see `prunr-core/src/edge.rs::finalize_dual_scale`). Grey the chip
-    // out so the user doesn't pick a value that silently doesn't apply.
+    // (see `prunr-core/src/edge.rs::finalize_dual_scale`).
     let scale_active = !matches!(item_settings.line_style, prunr_core::LineStyle::DualScale { .. });
-    let scale_response = ui.add_enabled_ui(scale_active, |ui| {
-        super::lines_popover::render_scale_chip(ui, item_settings)
-    });
-    if !scale_active {
-        scale_response.response.on_hover_text(
-            "DualScale uses Fine + Bold internally; the scale chip has no effect under this line style.",
-        );
-    }
-    aggregate_bool(scale_response.inner, StaticKnob::EdgeScale, change);
+    let scale_changed = chip::guarded(
+        ui,
+        scale_active,
+        "DualScale uses Fine + Bold internally; the scale chip has no effect under this line style.",
+        |ui| super::lines_popover::render_scale_chip(ui, item_settings),
+    );
+    aggregate_bool(scale_changed, StaticKnob::EdgeScale, change);
 
     aggregate_knob(chip::chip_f32(
         ui,
@@ -602,28 +599,26 @@ fn render_row2_right_cluster(
     }
 
     // Edge.rs forces `solid_tint = None` for any non-`Solid` LineStyle, so
-    // the chip's value is silently ignored otherwise. Grey out + tooltip
-    // makes the dependency visible.
+    // the chip's value is silently ignored otherwise.
     let solid_tint_active = matches!(item_settings.line_style, prunr_core::LineStyle::Solid);
-    let solid_tint_tooltip = if solid_tint_active {
-        "Stage 4 of 4 in the lines pipeline. Paint every visible edge the same color, or leave unset to keep the original RGB beneath the mask. Runs after edge thickness."
-    } else {
-        "Only takes effect when line style is Solid. Other styles use the source RGB beneath each edge pixel."
-    };
-    ui.add_enabled_ui(solid_tint_active, |ui| {
-        aggregate_knob(chip::chip_option_rgb(
+    let solid_change = chip::guarded(
+        ui,
+        solid_tint_active,
+        "Only takes effect when line style is Solid. Other styles use the source RGB beneath each edge pixel.",
+        |ui| chip::chip_option_rgb(
             ui,
             chip::ChipMeta {
                 id_salt: "solid_line_color",
                 icon: ICON_BRUSH.codepoint,
                 label: "Solid line color",
                 description: "Paint every edge the same color.",
-                tooltip: solid_tint_tooltip,
+                tooltip: "Stage 4 of 4 in the lines pipeline. Paint every visible edge the same color, or leave unset to keep the original RGB beneath the mask. Runs after edge thickness.",
             },
             &mut item_settings.solid_line_color,
             defaults.solid_line_color_value,
-        ), StaticKnob::SolidLineColor, change);
-    });
+        ),
+    );
+    aggregate_knob(solid_change, StaticKnob::SolidLineColor, change);
 }
 
 /// Fold a static chip's `ChipChange` into the aggregate, routing via the

@@ -460,8 +460,9 @@ fn render_processing(ui: &mut egui::Ui, app: &PrunrApp) {
 
     // In chain mode with an existing result, show the result being processed (not the original)
     let item = app.batch.selected_item();
-    let display_texture = if app.settings.chain_mode && item.and_then(|i| i.result_texture.as_ref()).is_some() {
-        item.and_then(|i| i.result_texture.as_ref())
+    let result_tex = item.and_then(|i| i.result_texture.as_ref());
+    let display_texture = if app.settings.chain_mode && result_tex.is_some() {
+        result_tex
     } else {
         item.and_then(|i| i.source_texture.as_ref())
     };
