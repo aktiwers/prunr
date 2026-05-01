@@ -51,6 +51,22 @@ impl ModelId {
     pub fn is_sd_family(&self) -> bool {
         matches!(self, ModelId::SdV15InpaintFp16 | ModelId::SdV15LcmInpaintFp16)
     }
+
+    /// Canonical iteration of every variant. Drift catcher: a test below
+    /// uses an exhaustive `match` so a new variant fails the test build
+    /// until it's added here too.
+    pub const ALL: &'static [ModelId] = &[
+        ModelId::Silueta,
+        ModelId::U2net,
+        ModelId::BiRefNetLite,
+        ModelId::DexiNed,
+        ModelId::LaMaFp32,
+        ModelId::BigLaMa,
+        ModelId::Migan,
+        ModelId::SdV15InpaintFp16,
+        ModelId::SdV15LcmInpaintFp16,
+        ModelId::TaesdFp16,
+    ];
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -779,17 +795,29 @@ mod tests {
     fn every_model_id_has_a_registry_entry() {
         // Add a ModelId variant ⇒ add a REGISTRY row. Guards against a
         // half-finished addition that compiles but has no metadata.
-        for id in [
-            ModelId::Silueta,
-            ModelId::U2net,
-            ModelId::BiRefNetLite,
-            ModelId::DexiNed,
-            ModelId::LaMaFp32,
-            ModelId::BigLaMa,
-            ModelId::Migan,
-            ModelId::SdV15InpaintFp16,
-        ] {
+        for &id in ModelId::ALL {
             assert!(descriptor(id).is_some(), "ModelId::{id:?} missing from REGISTRY");
+        }
+
+        // Exhaustiveness fence: adding a variant to `ModelId` without
+        // adding an arm here is a compile error. The arm body is empty;
+        // its job is to force the developer to look at this test, where
+        // the comment above tells them to also extend `ModelId::ALL`.
+        // (Rust enums can't be reflected in stable; removal-from-ALL
+        // alone is silent — a deliberate code change a reviewer catches.)
+        fn _force_developer_to_update_ALL_too(id: ModelId) {
+            match id {
+                ModelId::Silueta
+                | ModelId::U2net
+                | ModelId::BiRefNetLite
+                | ModelId::DexiNed
+                | ModelId::LaMaFp32
+                | ModelId::BigLaMa
+                | ModelId::Migan
+                | ModelId::SdV15InpaintFp16
+                | ModelId::SdV15LcmInpaintFp16
+                | ModelId::TaesdFp16 => {}
+            }
         }
     }
 
@@ -922,13 +950,16 @@ mod tests {
 
     #[test]
     fn load_variant_returns_none_for_models_without_variants() {
-        for id in [
-            ModelId::DexiNed,
-            ModelId::LaMaFp32,
-            ModelId::BigLaMa,
-            ModelId::Migan,
-            ModelId::SdV15InpaintFp16,
-        ] {
+        // Variant-bearing models (segmentation only today). Update this
+        // set when a new model gains an .fp16 / .int8 export.
+        let with_variants = |id| matches!(
+            id,
+            ModelId::Silueta | ModelId::U2net | ModelId::BiRefNetLite,
+        );
+        for &id in ModelId::ALL {
+            if with_variants(id) {
+                continue;
+            }
             assert!(model_fp16_bytes(id).is_none(), "{id:?} fp16");
             assert!(model_int8_bytes(id).is_none(), "{id:?} int8");
         }
