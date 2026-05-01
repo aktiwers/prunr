@@ -909,12 +909,7 @@ fn cancel_subprocess(
     ctx: &egui::Context,
 ) {
     sub.kill();
-    // Prefix-scoped: only wipe seg-pipeline files. A concurrent inpaint
-    // subprocess shares the same dir; its `inpaint-*` files must survive
-    // a Cancel-All on the seg pipeline (B3).
-    crate::subprocess::protocol::cleanup_ipc_temp_for_prefix(
-        crate::subprocess::protocol::SEG_PIPELINE_PREFIXES,
-    );
+    crate::subprocess::protocol::cleanup_seg_pipeline_temps();
     let _ = res_tx.send(WorkerResult::Cancelled);
     ctx.request_repaint();
 }
@@ -969,10 +964,7 @@ fn handle_crash_and_retry(
     state.max_jobs = (state.max_jobs / 2).max(1);
 
     sub.kill();
-    // Prefix-scoped (B3): leave a sibling inpaint subprocess's files alone.
-    crate::subprocess::protocol::cleanup_ipc_temp_for_prefix(
-        crate::subprocess::protocol::SEG_PIPELINE_PREFIXES,
-    );
+    crate::subprocess::protocol::cleanup_seg_pipeline_temps();
 
     if old_jobs == 1 {
         let err_msg = format!("{crash_reason} \u{2014} try a smaller model");
