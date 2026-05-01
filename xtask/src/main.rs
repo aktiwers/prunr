@@ -371,17 +371,7 @@ fn install_runtime() -> anyhow::Result<()> {
     } else {
         let target_name = target_name
             .unwrap_or_else(|| ri::install_subdir(short, &version));
-        // Reject path-traversal / absolute paths so a future caller can't
-        // escape `<data_dir>/runtimes/`. Plain string check — `target_name`
-        // is one segment, never a path expression.
-        if target_name.is_empty()
-            || target_name.contains('/')
-            || target_name.contains('\\')
-            || target_name == ".."
-            || target_name == "."
-        {
-            anyhow::bail!("invalid target name: {target_name:?}");
-        }
+        ri::validate_subdir(&target_name).map_err(|e| anyhow::anyhow!(e))?;
         let dir = prunr_models::data_dir()
             .ok_or_else(|| anyhow::anyhow!("could not resolve user data dir"))?
             .join("runtimes")
