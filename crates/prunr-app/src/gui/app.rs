@@ -349,16 +349,11 @@ impl PrunrApp {
         self.status.set_temporary(&msg);
     }
 
-    /// Reset app state after all batch items are removed.
-    fn clear_to_empty(&mut self) {
-        self.state = AppState::Empty;
-        self.batch.selected_index = 0;
-    }
-
     /// Sync after batch modification — clamp index and refresh canvas.
     fn sync_after_batch_change(&mut self) {
         if self.batch.items.is_empty() {
-            self.clear_to_empty();
+            self.state = AppState::Empty;
+            self.batch.selected_index = 0;
         } else {
             self.batch.selected_index = self.batch.selected_index.min(self.batch.items.len() - 1);
             self.pending_batch_sync = true;
@@ -1866,7 +1861,14 @@ impl PrunrApp {
         self.restore_selected_result_from_history(idx);
         self.ensure_selected_source_decoded(idx);
         self.request_selected_textures(idx, ctx);
-        self.sync_app_state_to_selected_item(idx);
+
+        let item = &self.batch.items[idx];
+        self.show_original = false;
+        self.state = match item.status {
+            BatchStatus::Done => AppState::Done,
+            BatchStatus::Processing => AppState::Processing,
+            _ => AppState::Loaded,
+        };
     }
 
     /// Free full-resolution `result_rgba` for every Done item that isn't the
@@ -1958,19 +1960,6 @@ impl PrunrApp {
         }
     }
 
-    /// Sync app-level state that depends on the selected item's status.
-    /// Per-item textures + filename + dimensions are read directly from the
-    /// `BatchItem` at view time (no mirror), so this only owns the bits
-    /// that don't have a per-item home.
-    fn sync_app_state_to_selected_item(&mut self, idx: usize) {
-        let item = &self.batch.items[idx];
-        self.show_original = false;
-        self.state = match item.status {
-            BatchStatus::Done => AppState::Done,
-            BatchStatus::Processing => AppState::Processing,
-            _ => AppState::Loaded,
-        };
-    }
 
     fn spawn_tex_prep(
         rgba: Arc<image::RgbaImage>,
