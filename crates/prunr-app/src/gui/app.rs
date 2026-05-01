@@ -71,6 +71,13 @@ pub struct PrunrApp {
     // Window title change detection
     prev_title: String,
 
+    /// Last `(item_id, MaskSettings)` `recipe_drift_tripwire` proved
+    /// drift-free. Skipping `MaskRecipe::from` on a per-frame match
+    /// avoids ~60 recipe constructions/sec while the user sits idle on
+    /// a Done item with no settings tweaks. Cleared on drift or item
+    /// switch — the worst case re-pays a single frame.
+    last_drift_check: Option<(u64, prunr_core::MaskSettings)>,
+
     // Batch state — items, selection, lifecycle, memory, textures, bg_io
     pub(crate) batch: super::batch_manager::BatchManager,
     /// User explicitly hid the sidebar via Tab / configured hotkey.
@@ -285,6 +292,7 @@ impl PrunrApp {
             download_manager: super::download_manager::DownloadManager::new(),
             show_original: false,
             prev_title: String::new(),
+            last_drift_check: None,
             batch: super::batch_manager::BatchManager::new(),
             sidebar_hidden: false,
             adjustments_hidden: false,
@@ -848,11 +856,20 @@ impl PrunrApp {
         let Some(idx) = self.batch.selected_idx_clamped() else { return };
         let item = &self.batch.items[idx];
         let Some(applied) = item.applied_recipe.as_ref() else { return };
-        let current = prunr_core::MaskRecipe::from(&item.settings.mask_settings());
-        if applied.mask == current {
+        let id = item.id;
+        let current_settings = item.settings.mask_settings();
+        // Already proved (id, current_settings) drift-free — same settings
+        // ⇒ same `MaskRecipe::from(...)` ⇒ still equals applied.mask. Skip
+        // the per-frame recipe construction.
+        if self.last_drift_check == Some((id, current_settings)) {
             return;
         }
-        let id = item.id;
+        let current = prunr_core::MaskRecipe::from(&current_settings);
+        if applied.mask == current {
+            self.last_drift_check = Some((id, current_settings));
+            return;
+        }
+        self.last_drift_check = None;
         tracing::debug!(item_id = id, "recipe-drift tripwire fired — dispatching Tier-2");
         self.processor.live_preview.mark_tweak(id, PreviewKind::Mask);
         self.processor.live_preview.flush(id);
