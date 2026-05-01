@@ -74,6 +74,12 @@ impl Bbox {
 /// disagree, or fewer than 16 valid sample pixels exist on either side
 /// of the boundary (insufficient sample → noisy correction; common at
 /// image edges where the source ring is clipped).
+///
+/// **Working set scales with the mask bbox, not the image.** A 200×200
+/// stroke on an 8 MP source allocates ~400 KB of f32 scratch instead of
+/// ~64 MB. Bit-exact vs. the full-image variant — pixels outside the
+/// bbox have mask = 0 by construction (the bbox encloses every mask >=
+/// 128 pixel), and the offset-apply pass only writes where mask >= 128.
 pub fn color_match_inpainted(
     inpainted: &RgbaImage,
     source: &RgbaImage,
@@ -86,42 +92,63 @@ pub fn color_match_inpainted(
     {
         return inpainted.clone();
     }
-    let (w, h) = inpainted.dimensions();
-    let n = (w * h) as usize;
+    let (img_w, img_h) = inpainted.dimensions();
+    let Some(bbox) = mask_bbox_expanded(mask, ring_px, img_w, img_h) else {
+        return inpainted.clone();
+    };
+    let bwu = bbox.w as usize;
+    let bhu = bbox.h as usize;
+    let bxu = bbox.x as usize;
+    let byu = bbox.y as usize;
+    let img_wu = img_w as usize;
 
-    // Boundary detection via box-filtered binary mask: pixels with mean
-    // strictly between 0 and 1 are within `ring_px` of the seam.
-    let mask_bin: Vec<f32> = mask
-        .as_raw()
-        .par_iter()
-        .map(|&v| if v >= 128 { 1.0 } else { 0.0 })
-        .collect();
-    let mean = box_filter(&mask_bin, w, h, ring_px);
+    // Boundary detection via box-filtered binary mask, evaluated on the
+    // cropped mask only — pixels with mean strictly between 0 and 1 are
+    // within `ring_px` of the seam.
+    let msk_raw = mask.as_raw();
+    let mut mask_bin = vec![0.0f32; bbox.area()];
+    mask_bin
+        .par_chunks_mut(bwu)
+        .enumerate()
+        .for_each(|(j, row)| {
+            let img_y = byu + j;
+            let row_off = img_y * img_wu + bxu;
+            for (i, slot) in row.iter_mut().enumerate() {
+                *slot = if msk_raw[row_off + i] >= 128 { 1.0 } else { 0.0 };
+            }
+        });
+    let mean = box_filter(&mask_bin, bbox.w, bbox.h, ring_px);
 
     // Sum source RGB on the outer ring and inpaint RGB on the inner ring.
+    // Walk bbox-local indices; map to image-global byte offset for sampling.
     let src_raw = source.as_raw();
     let inp_raw = inpainted.as_raw();
-    let msk_raw = mask.as_raw();
     let mut src_sum = [0u64; 3];
     let mut src_count = 0u64;
     let mut inp_sum = [0u64; 3];
     let mut inp_count = 0u64;
-    for i in 0..n {
-        let m = mean[i];
-        if !(m > 0.001 && m < 0.999) {
-            continue;
-        }
-        let p = i * 4;
-        if msk_raw[i] >= 128 {
-            inp_count += 1;
-            inp_sum[0] += inp_raw[p] as u64;
-            inp_sum[1] += inp_raw[p + 1] as u64;
-            inp_sum[2] += inp_raw[p + 2] as u64;
-        } else {
-            src_count += 1;
-            src_sum[0] += src_raw[p] as u64;
-            src_sum[1] += src_raw[p + 1] as u64;
-            src_sum[2] += src_raw[p + 2] as u64;
+    for j in 0..bhu {
+        let img_y = byu + j;
+        let mean_row_off = j * bwu;
+        let img_row_off = img_y * img_wu;
+        for i in 0..bwu {
+            let m = mean[mean_row_off + i];
+            if !(m > 0.001 && m < 0.999) {
+                continue;
+            }
+            let img_idx = img_row_off + bxu + i;
+            let p = img_idx * 4;
+            if msk_raw[img_idx] >= 128 {
+                inp_count += 1;
+                inp_sum[0] += inp_raw[p] as u64;
+                inp_sum[1] += inp_raw[p + 1] as u64;
+                inp_sum[2] += inp_raw[p + 2] as u64;
+            } else {
+                src_count += 1;
+                src_sum[0] += src_raw[p] as u64;
+                src_sum[1] += src_raw[p + 1] as u64;
+                src_sum[2] += src_raw[p + 2] as u64;
+            }
         }
     }
     if src_count < 16 || inp_count < 16 {
@@ -131,18 +158,22 @@ pub fn color_match_inpainted(
         src_sum[c] as f32 / src_count as f32 - inp_sum[c] as f32 / inp_count as f32
     });
 
+    // Apply offset only on bbox rows; mask >= 128 pixels live entirely
+    // inside the bbox by construction.
     let mut out = inpainted.clone();
     let out_raw = out.as_mut();
-    let wu = w as usize;
-    out_raw
-        .par_chunks_mut(wu * 4)
+    out_raw[byu * img_wu * 4..(byu + bhu) * img_wu * 4]
+        .par_chunks_mut(img_wu * 4)
         .enumerate()
-        .for_each(|(y, row)| {
-            for x in 0..wu {
-                if msk_raw[y * wu + x] < 128 {
+        .for_each(|(j, row)| {
+            let img_y = byu + j;
+            let img_row_off = img_y * img_wu;
+            for i in 0..bwu {
+                let img_x = bxu + i;
+                if msk_raw[img_row_off + img_x] < 128 {
                     continue;
                 }
-                let p = x * 4;
+                let p = img_x * 4;
                 row[p] = (row[p] as f32 + offset[0]).clamp(0.0, 255.0) as u8;
                 row[p + 1] = (row[p + 1] as f32 + offset[1]).clamp(0.0, 255.0) as u8;
                 row[p + 2] = (row[p + 2] as f32 + offset[2]).clamp(0.0, 255.0) as u8;
@@ -503,6 +534,32 @@ mod tests {
         let mask = GrayImage::from_pixel(64, 64, Luma([255]));
         let out = color_match_inpainted(&inp, &src, &mask, 8);
         assert_eq!(out, inp);
+    }
+
+    /// Bbox-crop contract: pixels outside the mask's expanded bbox must
+    /// stay bit-exact identical to the inpaint input. A 32×32 stroke at
+    /// (200, 200) on a 512×512 image leaves the four corners untouched.
+    #[test]
+    fn color_match_outside_bbox_is_bit_exact() {
+        let src = solid(512, 512, [200, 150, 100, 255]);
+        let mut inp = solid(512, 512, [60, 90, 120, 255]);
+        let mut mask = empty_mask(512, 512);
+        for y in 200..232 {
+            for x in 200..232 {
+                inp.put_pixel(x, y, Rgba([60, 90, 120, 255]));
+                mask.put_pixel(x, y, Luma([255]));
+            }
+        }
+        let out = color_match_inpainted(&inp, &src, &mask, 8);
+        // Every pixel >24 px from the stroke edge sits outside the bbox
+        // (ring_px = 8 + 16 px slack to clear the box-filter footprint).
+        for &(x, y) in &[(0, 0), (511, 0), (0, 511), (511, 511), (100, 100), (400, 400)] {
+            assert_eq!(
+                out.get_pixel(x, y),
+                inp.get_pixel(x, y),
+                "outside-bbox pixel ({x}, {y}) should be bit-exact"
+            );
+        }
     }
 
     #[test]
