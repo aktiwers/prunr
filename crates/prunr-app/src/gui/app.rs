@@ -2461,7 +2461,15 @@ impl PrunrApp {
         // for actually-renderable state instead of fixed-sleeping after the
         // earlier "item processing complete" event (which only confirms the
         // RGBA pixels exist, not that they've made it to the GPU).
-        let mut tex_arrived = false;
+        //
+        // Only call `sync_selected_batch_textures` when the SELECTED item
+        // received an arrival. Triggering sync on every arrival made
+        // `evict_result_rgba_for_background_items` (which sync calls)
+        // wipe `result_texture`/`result_tex_pending` on non-selected Done
+        // items mid-flight — racing any tex_prep already running for them
+        // and forcing a duplicate re-spawn the next frame (B9).
+        let selected_id: Option<u64> = self.batch.selected_item().map(|i| i.id);
+        let mut tex_arrived_for_selected = false;
         while let Ok((item_id, name, color_image, is_result)) = self.batch.bg_io.tex_prep_rx.try_recv() {
             let tex = ctx.load_texture(name, color_image, egui::TextureOptions::default());
             if let Some(item) = self.batch.find_by_id_mut(item_id) {
@@ -2474,10 +2482,12 @@ impl PrunrApp {
                     item.source_tex_pending = false;
                     tracing::info!(item_id, kind = "source", "texture uploaded");
                 }
-                tex_arrived = true;
+                if Some(item_id) == selected_id {
+                    tex_arrived_for_selected = true;
+                }
             }
         }
-        if tex_arrived {
+        if tex_arrived_for_selected {
             self.sync_selected_batch_textures(ctx);
         }
 
