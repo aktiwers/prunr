@@ -263,6 +263,14 @@ pub fn run_worker() -> ! {
     // either dispatch path.
     let inpaint_cancels: Arc<Mutex<std::collections::HashMap<u64, Arc<AtomicBool>>>> =
         Arc::new(Mutex::new(std::collections::HashMap::new()));
+    // Mid-inference cancel flags for seg dispatches. Without this, a
+    // long BiRefNet (~4-8s) or SubjectOutline run keeps the engine pegged
+    // for seconds after the user clicked Cancel — `cancelled_items` was
+    // only checked at dispatch start. CancelItem flips this just like
+    // `inpaint_cancels` so one cancel reaches every flavour of in-flight
+    // work.
+    let seg_cancels: Arc<Mutex<std::collections::HashMap<u64, Arc<AtomicBool>>>> =
+        Arc::new(Mutex::new(std::collections::HashMap::new()));
     let in_flight = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let mut engine_idx: usize = 0;
 
@@ -298,8 +306,37 @@ pub fn run_worker() -> ! {
                 let provider = active_provider.clone();
                 let sem = semaphore.clone();
                 let ipc = ipc_dir.clone();
+                let seg_cancels_for_dispatch = seg_cancels.clone();
+                // Per-item mid-inference cancel flag. Registered before
+                // the closure starts heavy work so a `CancelItem` can
+                // flip it; cleaned up by `seg_cancel_guard` on every
+                // exit path.
+                let seg_cancel = Arc::new(AtomicBool::new(false));
+                {
+                    let mut g = seg_cancels_for_dispatch.lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    g.insert(item_id, seg_cancel.clone());
+                }
 
                 pool.spawn(move || {
+                    // RAII guard: removes the cancel-flag entry from
+                    // `seg_cancels` on drop so the map stays bounded.
+                    struct SegCancelGuard {
+                        item_id: u64,
+                        cancels: Arc<Mutex<std::collections::HashMap<u64, Arc<AtomicBool>>>>,
+                    }
+                    impl Drop for SegCancelGuard {
+                        fn drop(&mut self) {
+                            let mut g = self.cancels.lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            g.remove(&self.item_id);
+                        }
+                    }
+                    let _seg_cancel_guard = SegCancelGuard {
+                        item_id,
+                        cancels: seg_cancels_for_dispatch,
+                    };
+
                     // Hoist chain_path so every early-return path can clean up
                     // the parent-written temp files (img + optional chain) via
                     // `cleanup_ipc_temps`. Forgetting the chain leaks one
@@ -435,7 +472,7 @@ pub fn run_worker() -> ! {
                                         });
                                     };
                                     prunr_core::infer_only(
-                                        original, eng, Some(infer_progress), None,
+                                        original, eng, Some(infer_progress), Some(seg_cancel.clone()),
                                     ).and_then(|ir| {
                                         let th = ir.tensor_height;
                                         let tw = ir.tensor_width;
@@ -518,7 +555,7 @@ pub fn run_worker() -> ! {
                                 };
 
                                 prunr_core::infer_only(
-                                    original, eng, Some(infer_progress), None,
+                                    original, eng, Some(infer_progress), Some(seg_cancel.clone()),
                                 ).and_then(|ir| {
                                     let _ = evt_tx.send(SubprocessEvent::Progress {
                                         item_id, stage: ProgressStage::Postprocess, pct: 0.8,
@@ -857,12 +894,19 @@ pub fn run_worker() -> ! {
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
                     guard.insert(item_id);
                 }
-                // Also flip the inpaint flag for this item — for SD's
-                // multi-second UNet steps and LaMa's tile loop, the
-                // hook is the only mid-inference cancel signal.
-                let guard = inpaint_cancels.lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                if let Some(flag) = guard.get(&item_id) {
+                // Flip mid-inference flags so an in-flight infer_only /
+                // SD UNet / LaMa tile loop sees the cancel between stages
+                // instead of running to completion.
+                if let Some(flag) = inpaint_cancels.lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .get(&item_id)
+                {
+                    flag.store(true, Ordering::Release);
+                }
+                if let Some(flag) = seg_cancels.lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .get(&item_id)
+                {
                     flag.store(true, Ordering::Release);
                 }
             }
