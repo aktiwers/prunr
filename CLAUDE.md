@@ -59,8 +59,9 @@ Default to **no comments**. A comment earns its place only when the WHY is non-o
 
 Delete on sight:
 - Narration of WHAT the code does (`"Iterate over items and find the matching id"` — the code already says that).
-- References to future work (`"step 5 will wire this up"`, `"Phase 11 will move this"`).
-- "Used by X" / "See also Y" cross-refs to non-public siblings — code navigation does that job.
+- **Restating the immediate neighbour.** A comment that paraphrases the case label, function name, attribute, or struct field directly below it. If the next line is `("input_transform+edges → add_edge", …)`, don't write `// input_transform with edges on invalidates edge tensor only.` above it. If the function is `_force_developer_to_update_ALL_too`, don't add `// SCREAMING_ALL is the signal — the name is the message` — the name *is* the message.
+- **References to future work — including task-tracker IDs.** `"step 5 will wire this up"`, `"Phase 11 will move this"`, `"// REVIEW-FINDINGS H6: queued ChipMeta extraction"`, `"// see H6"`, `"M11 will refactor"`, `"fix lands once #123 merges"`. These rot when the queued work shifts, ships, or never happens. Planning IDs (REVIEW-FINDINGS, DEFERRED, phase numbers, issue/PR numbers) belong in the task list and the planning docs, not in source.
+- **Cross-file "see also" / "mirror of X" pointers.** `"(mirror of inpaint_blend::seam_guided_blend's guard)"`, `"see also format_byte_size in views/mod.rs"`, `"as in fn foo above"`. File paths and symbol names rot when files move or symbols rename. The WHY should stand on its own; if the same logic lives in two places and that *is* the non-obvious bit, name the invariant ("flat-region variance can go sub-zero by f32 rounding"), not the sibling.
 - Paragraphs about feature design rationale — goes in the commit message, not inline.
 - Docstrings that echo the type signature (`"Returns Option<T>"`, `"Takes a &mut BatchItem"`).
 - "Fixed in commit abcd" / "Added for issue #123" — lives in git blame, not in code.
@@ -71,6 +72,22 @@ Keep:
 - Cautions against regressions (`// Do NOT parallelise: nested rayon deadlocks the subprocess path`).
 
 Rule of thumb: if removing the comment wouldn't confuse a future reader who understands the surrounding code, delete it.
+
+### `#[allow(...)]` rationale comments
+
+When you `#[allow]` a lint, the rationale must name a *local, durable* reason — a constraint that's true at this site today and will still be true if the queued cleanup never lands. Generic "fits any site" excuses don't count.
+
+Bad (rot-prone or boilerplate):
+- `// see H6` / `// REVIEW-FINDINGS M11 will refactor` — points at unshipped work in a planning doc.
+- `// args are the per-frame state surface; struct adds indirection` — fits any `too_many_arguments` site, not a real local rationale.
+- `// will fix later` — every allow can claim that.
+
+Good (local + stable):
+- `// args mirror the IPC variant fields one-for-one — packing them adds indirection without consolidating call sites.`
+- `// `Process*` prefix matches the user-visible button labels and the dispatcher arms — renaming would split that pairing.`
+- `// SCREAMING_ALL deliberately matches `ModelId::ALL`; renaming erases that link.`
+
+If the only honest rationale is "queued for refactor in task X," **don't add the allow** — fix the lint inline (split the function, rename, etc.) or accept the warning until X lands. An allow with a forward-reference rationale is worse than a TODO because it has no removal trigger.
 
 ## Hot paths
 
