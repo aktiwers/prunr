@@ -846,8 +846,8 @@ impl PrunrApp {
     ///
     /// Active-item only by design — the only drift surfaces today
     /// (brush, undo/redo) act on the selected item; widening to the
-    /// full batch would burn ~6000 MaskRecipe::from calls/sec on a
-    /// 100-item batch for no current benefit.
+    /// full batch would do per-frame work for items the user isn't
+    /// editing for no current benefit.
     fn recipe_drift_tripwire(&mut self) {
         use crate::gui::live_preview::PreviewKind;
         if self.processor.live_preview.has_in_flight() {
@@ -858,9 +858,6 @@ impl PrunrApp {
         let Some(applied) = item.applied_recipe.as_ref() else { return };
         let id = item.id;
         let current_settings = item.settings.mask_settings();
-        // Already proved (id, current_settings) drift-free — same settings
-        // ⇒ same `MaskRecipe::from(...)` ⇒ still equals applied.mask. Skip
-        // the per-frame recipe construction.
         if self.last_drift_check == Some((id, current_settings)) {
             return;
         }
