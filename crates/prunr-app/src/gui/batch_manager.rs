@@ -181,7 +181,7 @@ impl BatchManager {
     /// as a glitch.
     pub(crate) fn process_button_label(&self) -> ProcessButtonLabel {
         let total = self.items.len();
-        let selected = self.items.iter().filter(|i| i.selected).count();
+        let selected = self.selected_count();
         match (selected, total) {
             (0, _) => ProcessButtonLabel::ProcessViewed,
             (n, t) if n == t && t >= 2 => ProcessButtonLabel::ProcessAll(t),
@@ -211,7 +211,7 @@ impl BatchManager {
     /// `items_to_process`, expressed as a fold so callers (toolbar
     /// Undo/Redo enablement) don't allocate an id vec just to test.
     pub(crate) fn any_target_can<F: FnMut(&BatchItem) -> bool>(&self, mut f: F) -> bool {
-        let has_selected = self.items.iter().any(|i| i.selected);
+        let has_selected = self.has_any_selected();
         let current_id = self.selected_item().map(|b| b.id);
         self.items.iter().any(|item| {
             let is_target = if has_selected { item.selected } else { Some(item.id) == current_id };
@@ -243,6 +243,23 @@ impl BatchManager {
                 item.status = BatchStatus::Pending;
             }
         }
+    }
+
+    /// Number of items with the checkbox set. Single source of truth so
+    /// statusbar / sidebar don't re-roll `iter().filter(...).count()`.
+    pub(crate) fn selected_count(&self) -> usize {
+        self.items.iter().filter(|i| i.selected).count()
+    }
+
+    /// True when at least one item has the checkbox set.
+    pub(crate) fn has_any_selected(&self) -> bool {
+        self.items.iter().any(|i| i.selected)
+    }
+
+    /// True when every item has the checkbox set (and the batch is
+    /// non-empty — an empty batch is not "all selected").
+    pub(crate) fn all_selected(&self) -> bool {
+        !self.items.is_empty() && self.items.iter().all(|i| i.selected)
     }
 
     /// Single pass over `items` producing the three counts that callers

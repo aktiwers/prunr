@@ -88,7 +88,7 @@ fn render_empty_state(ui: &mut egui::Ui) {
 /// Select-all checkbox + "N/M" selected counter.
 fn render_header(ui: &mut egui::Ui, app: &mut PrunrApp) {
     let count = app.batch.items.len();
-    let all_selected = count > 0 && app.batch.items.iter().all(|i| i.selected);
+    let all_selected = app.batch.all_selected();
     let mut select_all = all_selected;
     ui.horizontal(|ui| {
         ui.spacing_mut().icon_width = 20.0;
@@ -109,7 +109,7 @@ fn render_header(ui: &mut egui::Ui, app: &mut PrunrApp) {
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             // Always show "N/M" for consistency — "0/4" reads as "0 of 4
             // selected" rather than the ambiguous "4" when nothing's checked.
-            let selected = app.batch.items.iter().filter(|i| i.selected).count();
+            let selected = app.batch.selected_count();
             ui.label(
                 RichText::new(format!("{selected}/{count}"))
                     .size(theme::FONT_SIZE_MONO)
