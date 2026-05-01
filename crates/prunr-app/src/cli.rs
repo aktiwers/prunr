@@ -479,8 +479,8 @@ fn run_batch(args: &Cli) -> i32 {
                 // Oversized — downscale to temp file, pass temp path to subprocess
                 match load_with_policy(input, args.large_image, args.quiet) {
                     Ok(bytes) => {
-                        let temp = prunr_app::subprocess::protocol::ipc_temp_dir()
-                            .join(format!("cli_ds_{idx}.img"));
+                        let temp = prunr_app::subprocess::protocol::IpcKind::CliDs
+                            .path_for(prunr_app::subprocess::protocol::ipc_temp_dir(), idx as u64);
                         if std::fs::write(&temp, &bytes).is_ok() {
                             valid_indices.push(idx);
                             valid_paths.push(temp);
