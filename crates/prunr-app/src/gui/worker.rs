@@ -901,15 +901,20 @@ fn report_cancelled(
 
 /// Cancel path: kill the child immediately and clean up. We used to send
 /// `Cancel` + sleep 200ms to let the child emit `Finished`, but killing the
-/// process is instant and orphaned IPC temps are swept by `cleanup_ipc_temp`
-/// — the politeness delay just made "Cancel All" feel laggy.
+/// process is instant and orphaned IPC temps are swept by the prefix-scoped
+/// cleanup — the politeness delay just made "Cancel All" feel laggy.
 fn cancel_subprocess(
     sub: &mut SubprocessManager,
     res_tx: &mpsc::Sender<WorkerResult>,
     ctx: &egui::Context,
 ) {
     sub.kill();
-    crate::subprocess::protocol::cleanup_ipc_temp();
+    // Prefix-scoped: only wipe seg-pipeline files. A concurrent inpaint
+    // subprocess shares the same dir; its `inpaint-*` files must survive
+    // a Cancel-All on the seg pipeline (B3).
+    crate::subprocess::protocol::cleanup_ipc_temp_for_prefix(
+        crate::subprocess::protocol::SEG_PIPELINE_PREFIXES,
+    );
     let _ = res_tx.send(WorkerResult::Cancelled);
     ctx.request_repaint();
 }
@@ -964,7 +969,10 @@ fn handle_crash_and_retry(
     state.max_jobs = (state.max_jobs / 2).max(1);
 
     sub.kill();
-    crate::subprocess::protocol::cleanup_ipc_temp();
+    // Prefix-scoped (B3): leave a sibling inpaint subprocess's files alone.
+    crate::subprocess::protocol::cleanup_ipc_temp_for_prefix(
+        crate::subprocess::protocol::SEG_PIPELINE_PREFIXES,
+    );
 
     if old_jobs == 1 {
         let err_msg = format!("{crash_reason} \u{2014} try a smaller model");
