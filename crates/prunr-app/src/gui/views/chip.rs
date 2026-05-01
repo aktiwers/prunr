@@ -36,6 +36,22 @@ pub struct ChipChange {
     pub commit: bool,
 }
 
+/// Identity + visible labels every chip helper needs. Bundled so the
+/// chip helpers stay under the documented 9-param ceiling — without
+/// it, every chip carried 5 parallel `&str` slots in addition to its
+/// type-specific value/range/format params.
+///
+/// `id_salt` is the egui popover key — must be unique within a frame.
+/// `tooltip` shows on hover over the chip button; `description` shows
+/// inside the popover under the slider.
+pub struct ChipMeta<'a> {
+    pub id_salt: &'a str,
+    pub icon: &'a str,
+    pub label: &'a str,
+    pub description: &'a str,
+    pub tooltip: &'a str,
+}
+
 /// Returns true when a slider interaction has "settled" — drag released or
 /// value changed without an active drag (keyboard, click-jump). Used to
 /// flip the `commit` flag so live preview flushes instead of debouncing.
@@ -209,30 +225,23 @@ pub(super) fn popup_for(
 }
 
 /// Continuous f32 chip (gamma, edge_shift, line_strength, ...).
-/// `description` renders inside the popover under the slider.
-/// `tooltip` renders on hover over the chip button.
-#[allow(clippy::too_many_arguments)]
 pub fn chip_f32(
     ui: &mut Ui,
-    id_salt: &str,
-    icon: &str,
-    label: &str,
-    description: &str,
-    tooltip: &str,
+    meta: ChipMeta<'_>,
     value: &mut f32,
     range: std::ops::RangeInclusive<f32>,
     default_value: f32,
     logarithmic: bool,
     format: impl Fn(f32) -> String,
 ) -> ChipChange {
-    let pop_id = egui::Id::new(("chip_f32", id_salt));
+    let pop_id = egui::Id::new(("chip_f32", meta.id_salt));
     let accent = (*value - default_value).abs() > f32::EPSILON;
     let display = format(*value);
-    let resp = chip_tooltip(chip_button(ui, icon, &display, accent), label, tooltip);
+    let resp = chip_tooltip(chip_button(ui, meta.icon, &display, accent), meta.label, meta.tooltip);
 
     let mut out = ChipChange::default();
     popup_for(ui, pop_id, &resp, |ui| {
-        ui.label(RichText::new(label).strong().color(theme::TEXT_PRIMARY));
+        ui.label(RichText::new(meta.label).strong().color(theme::TEXT_PRIMARY));
         ui.add_space(theme::SPACE_XS);
         // Honour the caller-supplied formatter for the slider's embedded
         // numeric display — the chip's button face already uses `format`,
@@ -247,7 +256,7 @@ pub fn chip_f32(
         );
         if slider.changed() { out.changed = true; }
         if slider_settled(&slider) { out.commit = true; }
-        hint(ui, description);
+        hint(ui, meta.description);
         ui.add_space(theme::SPACE_XS);
         if reset_button(ui, "Reset to factory default") {
             *value = default_value;
@@ -259,32 +268,27 @@ pub fn chip_f32(
 }
 
 /// Integer chip. Used for pixel counts where fractional values don't make sense.
-#[allow(clippy::too_many_arguments)]
 pub fn chip_u32(
     ui: &mut Ui,
-    id_salt: &str,
-    icon: &str,
-    label: &str,
-    description: &str,
-    tooltip: &str,
+    meta: ChipMeta<'_>,
     value: &mut u32,
     range: std::ops::RangeInclusive<u32>,
     default_value: u32,
     format: impl Fn(u32) -> String,
 ) -> ChipChange {
-    let pop_id = egui::Id::new(("chip_u32", id_salt));
+    let pop_id = egui::Id::new(("chip_u32", meta.id_salt));
     let accent = *value != default_value;
     let display = format(*value);
-    let resp = chip_tooltip(chip_button(ui, icon, &display, accent), label, tooltip);
+    let resp = chip_tooltip(chip_button(ui, meta.icon, &display, accent), meta.label, meta.tooltip);
 
     let mut out = ChipChange::default();
     popup_for(ui, pop_id, &resp, |ui| {
-        ui.label(RichText::new(label).strong().color(theme::TEXT_PRIMARY));
+        ui.label(RichText::new(meta.label).strong().color(theme::TEXT_PRIMARY));
         ui.add_space(theme::SPACE_XS);
         let slider = ui.add(egui::Slider::new(value, range).show_value(true));
         if slider.changed() { out.changed = true; }
         if slider_settled(&slider) { out.commit = true; }
-        hint(ui, description);
+        hint(ui, meta.description);
         ui.add_space(theme::SPACE_XS);
         if reset_button(ui, "Reset to factory default") {
             *value = default_value;
@@ -296,31 +300,26 @@ pub fn chip_u32(
 }
 
 /// Optional f32 chip (threshold). Toggle enables/disables; slider sets the value.
-#[allow(clippy::too_many_arguments)]
 pub fn chip_option_f32(
     ui: &mut Ui,
-    id_salt: &str,
-    icon: &str,
-    label: &str,
-    description: &str,
-    tooltip: &str,
+    meta: ChipMeta<'_>,
     value: &mut Option<f32>,
     range: std::ops::RangeInclusive<f32>,
     default_when_enabled: f32,
     off_label: &str,
     format: impl Fn(f32) -> String,
 ) -> ChipChange {
-    let pop_id = egui::Id::new(("chip_option_f32", id_salt));
+    let pop_id = egui::Id::new(("chip_option_f32", meta.id_salt));
     let accent = value.is_some();
     let display = match value {
         Some(v) => format(*v),
         None => off_label.to_string(),
     };
-    let resp = chip_tooltip(chip_button(ui, icon, &display, accent), label, tooltip);
+    let resp = chip_tooltip(chip_button(ui, meta.icon, &display, accent), meta.label, meta.tooltip);
 
     let mut out = ChipChange::default();
     popup_for(ui, pop_id, &resp, |ui| {
-        ui.label(RichText::new(label).strong().color(theme::TEXT_PRIMARY));
+        ui.label(RichText::new(meta.label).strong().color(theme::TEXT_PRIMARY));
         ui.add_space(theme::SPACE_XS);
         let mut enabled = value.is_some();
         if ui.checkbox(&mut enabled, "Enabled").changed() {
@@ -338,7 +337,7 @@ pub fn chip_option_f32(
             if slider.changed() { out.changed = true; }
             if slider_settled(&slider) { out.commit = true; }
         }
-        hint(ui, description);
+        hint(ui, meta.description);
         ui.add_space(theme::SPACE_XS);
         if reset_button(ui, "Disable") {
             *value = None;
@@ -350,28 +349,20 @@ pub fn chip_option_f32(
 }
 
 /// Bool chip (refine_edges). Simple on/off toggle; popover shows the toggle + label.
-pub fn chip_bool(
-    ui: &mut Ui,
-    id_salt: &str,
-    icon: &str,
-    label: &str,
-    description: &str,
-    tooltip: &str,
-    value: &mut bool,
-) -> ChipChange {
-    let pop_id = egui::Id::new(("chip_bool", id_salt));
+pub fn chip_bool(ui: &mut Ui, meta: ChipMeta<'_>, value: &mut bool) -> ChipChange {
+    let pop_id = egui::Id::new(("chip_bool", meta.id_salt));
     let display = if *value { "On" } else { "Off" };
-    let resp = chip_tooltip(chip_button(ui, icon, display, *value), label, tooltip);
+    let resp = chip_tooltip(chip_button(ui, meta.icon, display, *value), meta.label, meta.tooltip);
 
     let mut out = ChipChange::default();
     popup_for(ui, pop_id, &resp, |ui| {
-        ui.label(RichText::new(label).strong().color(theme::TEXT_PRIMARY));
+        ui.label(RichText::new(meta.label).strong().color(theme::TEXT_PRIMARY));
         ui.add_space(theme::SPACE_XS);
-        if ui.checkbox(value, label).changed() {
+        if ui.checkbox(value, meta.label).changed() {
             out.changed = true;
             out.commit = true; // toggle always commits
         }
-        hint(ui, description);
+        hint(ui, meta.description);
     });
     out
 }
@@ -379,26 +370,21 @@ pub fn chip_bool(
 /// Bool chip with follow-up sliders tucked into the same popover.
 /// `extras` runs inside the popover when `*value == true`, after the
 /// Enabled checkbox + divider.
-#[allow(clippy::too_many_arguments)]
 pub fn chip_bool_with_extras(
     ui: &mut Ui,
-    id_salt: &str,
-    icon: &str,
-    label: &str,
-    description: &str,
-    tooltip: &str,
+    meta: ChipMeta<'_>,
     value: &mut bool,
     extras: impl FnOnce(&mut Ui) -> ChipChange,
 ) -> ChipChange {
-    let pop_id = egui::Id::new(("chip_bool_with_extras", id_salt));
+    let pop_id = egui::Id::new(("chip_bool_with_extras", meta.id_salt));
     let display = if *value { "On" } else { "Off" };
-    let resp = chip_tooltip(chip_button(ui, icon, display, *value), label, tooltip);
+    let resp = chip_tooltip(chip_button(ui, meta.icon, display, *value), meta.label, meta.tooltip);
 
     let mut out = ChipChange::default();
     popup_for(ui, pop_id, &resp, |ui| {
-        ui.label(RichText::new(label).strong().color(theme::TEXT_PRIMARY));
+        ui.label(RichText::new(meta.label).strong().color(theme::TEXT_PRIMARY));
         ui.add_space(theme::SPACE_XS);
-        if ui.checkbox(value, label).changed() {
+        if ui.checkbox(value, meta.label).changed() {
             out.changed = true;
             out.commit = true;
         }
@@ -410,7 +396,7 @@ pub fn chip_bool_with_extras(
             if inner.changed { out.changed = true; }
             if inner.commit  { out.commit  = true; }
         }
-        hint(ui, description);
+        hint(ui, meta.description);
     });
     out
 }
@@ -461,29 +447,24 @@ pub fn slider_row_u32(
 /// opens outside the chip popover's rect — click on the color palette was
 /// seen as "outside" and closed the chip popover. Inline picker avoids the
 /// whole class of bug.
-#[allow(clippy::too_many_arguments)]
 pub fn chip_option_rgba(
     ui: &mut Ui,
-    id_salt: &str,
-    icon: &str,
-    label: &str,
-    description: &str,
-    tooltip: &str,
+    meta: ChipMeta<'_>,
     value: &mut Option<[u8; 4]>,
     default_when_enabled: [u8; 4],
     off_label: &str,
 ) -> ChipChange {
-    let pop_id = egui::Id::new(("chip_option_rgba", id_salt));
+    let pop_id = egui::Id::new(("chip_option_rgba", meta.id_salt));
     let accent = value.is_some();
     let display = match value {
         Some(_) => "Set".to_string(),
         None => off_label.to_string(),
     };
-    let resp = chip_tooltip(chip_button(ui, icon, &display, accent), label, tooltip);
+    let resp = chip_tooltip(chip_button(ui, meta.icon, &display, accent), meta.label, meta.tooltip);
 
     let mut out = ChipChange::default();
     popup_for(ui, pop_id, &resp, |ui| {
-        ui.label(RichText::new(label).strong().color(theme::TEXT_PRIMARY));
+        ui.label(RichText::new(meta.label).strong().color(theme::TEXT_PRIMARY));
         ui.add_space(theme::SPACE_XS);
         let mut enabled = value.is_some();
         if ui.checkbox(&mut enabled, "Enabled").changed() {
@@ -501,7 +482,7 @@ pub fn chip_option_rgba(
                 out.commit = true;
             }
         }
-        hint(ui, description);
+        hint(ui, meta.description);
         ui.add_space(theme::SPACE_XS);
         if reset_button(ui, "Clear background color") {
             *value = None;
@@ -513,28 +494,23 @@ pub fn chip_option_rgba(
 }
 
 /// Optional RGB chip (solid_line_color). Same pattern as chip_option_rgba but 3-channel.
-#[allow(clippy::too_many_arguments)]
 pub fn chip_option_rgb(
     ui: &mut Ui,
-    id_salt: &str,
-    icon: &str,
-    label: &str,
-    description: &str,
-    tooltip: &str,
+    meta: ChipMeta<'_>,
     value: &mut Option<[u8; 3]>,
     default_when_enabled: [u8; 3],
 ) -> ChipChange {
-    let pop_id = egui::Id::new(("chip_option_rgb", id_salt));
+    let pop_id = egui::Id::new(("chip_option_rgb", meta.id_salt));
     let accent = value.is_some();
     let display = match value {
         Some(_) => "Set".to_string(),
         None => "Original".to_string(),
     };
-    let resp = chip_tooltip(chip_button(ui, icon, &display, accent), label, tooltip);
+    let resp = chip_tooltip(chip_button(ui, meta.icon, &display, accent), meta.label, meta.tooltip);
 
     let mut out = ChipChange::default();
     popup_for(ui, pop_id, &resp, |ui| {
-        ui.label(RichText::new(label).strong().color(theme::TEXT_PRIMARY));
+        ui.label(RichText::new(meta.label).strong().color(theme::TEXT_PRIMARY));
         ui.add_space(theme::SPACE_XS);
         let mut enabled = value.is_some();
         if ui.checkbox(&mut enabled, "Override").changed() {
@@ -549,7 +525,7 @@ pub fn chip_option_rgb(
                 out.commit = true;
             }
         }
-        hint(ui, description);
+        hint(ui, meta.description);
         ui.add_space(theme::SPACE_XS);
         if reset_button(ui, "Use original line colors") {
             *value = None;
