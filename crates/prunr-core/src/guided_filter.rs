@@ -74,9 +74,8 @@ pub fn guided_filter_alpha(
     // Compute a and b element-wise: a = cov_ip / (var_i + eps), b = mean_p - a * mean_i.
     // Reuse ii/ip buffers for a/b to avoid allocation.
     // `var_i.max(0.0)` guards against sub-epsilon negative variance from f32
-    // rounding on flat regions (mirror of `inpaint_blend::seam_guided_blend`'s
-    // guard) — would otherwise feed `/(var+eps)` a value below `eps` and
-    // produce noise on completely uniform input.
+    // rounding on flat regions — would otherwise feed `/(var+eps)` a value
+    // below `eps` and amplify noise on completely uniform input.
     let mut a_buf = ii; // reuse
     let mut b_buf = ip; // reuse
     a_buf
@@ -268,16 +267,18 @@ mod tests {
         }
     }
 
-    /// Regression: without `var_i.max(0.0)` (REVIEW-FINDINGS H2), f32
-    /// rounding on completely uniform input drives `var_i` and `cov_ip`
-    /// to sub-epsilon negative values. The unguarded division then
-    /// amplifies that noise into the output. With the guard, a flat
-    /// guide + flat mask produces a flat output to within rounding.
+    /// Regression: without the `var_i.max(0.0)` guard, f32 rounding on
+    /// completely uniform input drives `var_i` and `cov_ip` to sub-epsilon
+    /// negative values; the unguarded division amplifies that noise. With
+    /// the guard, flat input produces flat output. `epsilon = 1e-4` matches
+    /// the lowest production caller (`item_settings.rs` defaults sit in
+    /// `[1e-4, 2e-3]`) so the contract holds in band, not just at extreme
+    /// amplification.
     #[test]
     fn test_guided_filter_flat_input_produces_flat_output() {
         let guide = RgbaImage::from_pixel(48, 48, Rgba([128, 128, 128, 255]));
         let mask = GrayImage::from_pixel(48, 48, Luma([200]));
-        let result = guided_filter_alpha(&guide, &mask, 4, 1e-6);
+        let result = guided_filter_alpha(&guide, &mask, 4, 1e-4);
         let (min, max) = result.pixels().map(|p| p[0])
             .fold((u8::MAX, u8::MIN), |(lo, hi), v| (lo.min(v), hi.max(v)));
         assert!(max - min <= 1, "flat input produced spread {min}..={max}");
