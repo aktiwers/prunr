@@ -1074,7 +1074,12 @@ fn try_send_tier2(
     if let Some(t2) = pending_tier2.pop_front() {
         let tid = t2.item_id;
         if sub.send_repostprocess(
-            t2.item_id, &t2.tensor_data, t2.tensor_height, t2.tensor_width,
+            t2.item_id,
+            crate::subprocess::manager::TensorView {
+                data: &t2.tensor_data,
+                height: t2.tensor_height,
+                width: t2.tensor_width,
+            },
             t2.model, &t2.original_bytes, t2.mask,
         ).is_ok() {
             sent_tier2_ids.push(tid);
@@ -1094,7 +1099,12 @@ fn try_send_add_edge(
     if let Some(ae) = pending_add_edge.pop_front() {
         let tid = ae.item_id;
         if sub.send_add_edge_inference(
-            ae.item_id, &ae.tensor_data, ae.tensor_height, ae.tensor_width,
+            ae.item_id,
+            crate::subprocess::manager::TensorView {
+                data: &ae.tensor_data,
+                height: ae.tensor_height,
+                width: ae.tensor_width,
+            },
             ae.model, &ae.original_bytes, ae.mask,
         ).is_ok() {
             sent_add_edge_ids.push(tid);

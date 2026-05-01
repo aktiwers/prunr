@@ -13,6 +13,15 @@ use crate::gui::settings::LineMode;
 use super::protocol::*;
 use super::ipc::{write_message, read_message};
 
+/// Borrowed view of a 2D f32 tensor sent to the subprocess. Bundles the
+/// flat data + dimensions so `send_*` helpers don't carry three parallel
+/// args for what is conceptually one value.
+pub struct TensorView<'a> {
+    pub data: &'a [f32],
+    pub height: u32,
+    pub width: u32,
+}
+
 /// Manages a subprocess worker: spawning, IPC, in-flight tracking, RSS throttling.
 pub struct SubprocessManager {
     child: Child,
@@ -232,79 +241,91 @@ impl SubprocessManager {
         Ok(())
     }
 
-    /// Send an AddEdgeInference command (seg cached, run DexiNed on masked).
-    /// Writes the seg tensor + original image bytes to temp files. The worker
-    /// reads the seg tensor without deleting it and hands the path back as
-    /// `tensor_cache_path` on `ImageDone`, so the parent's reader takes
-    /// ownership — no extra copy round-trip.
-    // Args mirror the IPC variant fields one-for-one — packing them into a
-    // struct adds an indirection without consolidating call sites.
-    #[allow(clippy::too_many_arguments)]
-    pub fn send_add_edge_inference(
+    /// Shared "write tensor + write image + send command" path used by
+    /// `send_add_edge_inference` and `send_repostprocess`. Caller picks the
+    /// IPC filenames and the variant; this writes the temp files and
+    /// dispatches.
+    fn send_with_tensor_and_image(
         &mut self,
         item_id: u64,
-        tensor_data: &[f32],
-        tensor_height: u32,
-        tensor_width: u32,
-        model: prunr_core::ModelKind,
-        original_image_bytes: &[u8],
-        mask: prunr_core::MaskSettings,
+        tensor: TensorView<'_>,
+        tensor_filename: String,
+        image_bytes: &[u8],
+        image_filename: String,
+        build_cmd: impl FnOnce(std::path::PathBuf, std::path::PathBuf) -> SubprocessCommand,
     ) -> Result<(), String> {
-        let seg_tensor_path = ipc_temp_dir().join(format!("seg_{item_id}.raw"));
-        std::fs::write(&seg_tensor_path, super::ipc::f32s_as_le_bytes(tensor_data))
-            .map_err(|e| format!("Failed to write seg tensor temp file: {e}"))?;
-        let image_path = ipc_temp_dir().join(format!("input_{item_id}.img"));
-        std::fs::write(&image_path, original_image_bytes)
-            .map_err(|e| format!("Failed to write input temp file: {e}"))?;
+        let tensor_path = ipc_temp_dir().join(tensor_filename);
+        std::fs::write(&tensor_path, super::ipc::f32s_as_le_bytes(tensor.data))
+            .map_err(|e| format!("Failed to write tensor temp file: {e}"))?;
+        let image_path = ipc_temp_dir().join(image_filename);
+        std::fs::write(&image_path, image_bytes)
+            .map_err(|e| format!("Failed to write image temp file: {e}"))?;
 
-        write_message(&mut self.stdin_writer, &SubprocessCommand::AddEdgeInference {
-            item_id,
-            image_path,
-            seg_tensor_path,
-            seg_tensor_height: tensor_height,
-            seg_tensor_width: tensor_width,
-            model,
-            mask,
-        }).map_err(|e| format!("Failed to send AddEdgeInference: {e}"))?;
+        write_message(&mut self.stdin_writer, &build_cmd(tensor_path, image_path))
+            .map_err(|e| format!("Failed to send command: {e}"))?;
 
         self.in_flight.insert(item_id);
         Ok(())
     }
 
-    /// Send a Tier 2 re-postprocess command (skip inference, reuse cached tensor).
-    #[allow(clippy::too_many_arguments)] // args mirror the IPC variant fields
-    pub fn send_repostprocess(
+    /// Send an AddEdgeInference command (seg cached, run DexiNed on masked).
+    /// Writes the seg tensor + original image bytes to temp files. The worker
+    /// reads the seg tensor without deleting it and hands the path back as
+    /// `tensor_cache_path` on `ImageDone`, so the parent's reader takes
+    /// ownership — no extra copy round-trip.
+    pub fn send_add_edge_inference(
         &mut self,
         item_id: u64,
-        tensor_data: &[f32],
-        tensor_height: u32,
-        tensor_width: u32,
+        tensor: TensorView<'_>,
         model: prunr_core::ModelKind,
         original_image_bytes: &[u8],
         mask: prunr_core::MaskSettings,
     ) -> Result<(), String> {
-        // Write tensor as raw f32 LE bytes to temp file
-        let tensor_path = ipc_temp_dir().join(format!("tensor_{item_id}.raw"));
-        std::fs::write(&tensor_path, super::ipc::f32s_as_le_bytes(tensor_data))
-            .map_err(|e| format!("Failed to write tensor temp file: {e}"))?;
-
-        // Write original image bytes to temp file
-        let orig_path = ipc_temp_dir().join(format!("orig_{item_id}.img"));
-        std::fs::write(&orig_path, original_image_bytes)
-            .map_err(|e| format!("Failed to write original temp file: {e}"))?;
-
-        write_message(&mut self.stdin_writer, &SubprocessCommand::RePostProcess {
+        let (h, w) = (tensor.height, tensor.width);
+        self.send_with_tensor_and_image(
             item_id,
-            tensor_path,
-            tensor_height,
-            tensor_width,
-            model,
-            original_image_path: orig_path,
-            mask,
-        }).map_err(|e| format!("Failed to send RePostProcess: {e}"))?;
+            tensor,
+            format!("seg_{item_id}.raw"),
+            original_image_bytes,
+            format!("input_{item_id}.img"),
+            |seg_tensor_path, image_path| SubprocessCommand::AddEdgeInference {
+                item_id,
+                image_path,
+                seg_tensor_path,
+                seg_tensor_height: h,
+                seg_tensor_width: w,
+                model,
+                mask,
+            },
+        )
+    }
 
-        self.in_flight.insert(item_id);
-        Ok(())
+    /// Send a Tier 2 re-postprocess command (skip inference, reuse cached tensor).
+    pub fn send_repostprocess(
+        &mut self,
+        item_id: u64,
+        tensor: TensorView<'_>,
+        model: prunr_core::ModelKind,
+        original_image_bytes: &[u8],
+        mask: prunr_core::MaskSettings,
+    ) -> Result<(), String> {
+        let (h, w) = (tensor.height, tensor.width);
+        self.send_with_tensor_and_image(
+            item_id,
+            tensor,
+            format!("tensor_{item_id}.raw"),
+            original_image_bytes,
+            format!("orig_{item_id}.img"),
+            |tensor_path, original_image_path| SubprocessCommand::RePostProcess {
+                item_id,
+                tensor_path,
+                tensor_height: h,
+                tensor_width: w,
+                model,
+                original_image_path,
+                mask,
+            },
+        )
     }
 
     /// Send an `Inpaint` command. Caller writes image + mask to PNG
