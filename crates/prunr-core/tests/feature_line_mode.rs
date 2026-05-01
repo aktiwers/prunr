@@ -12,10 +12,10 @@ mod test_common;
 use image::DynamicImage;
 use prunr_core::{
     compose_subject_outline, process_image_from_decoded, ComposeMode, EdgeEngine,
-    EdgeScale, EdgeSettings, InputTransform, LineMode, LineStyle, MaskSettings, ModelKind,
+    EdgeScale, EdgeSettings, InputTransform, LineStyle, MaskSettings, ModelKind,
     OrtEngine, ProgressStage,
 };
-use test_common::{ensure_ort_initialized, render_synthetic_source, SyntheticSpec};
+use test_common::{render_synthetic_source, skip_if_no_ort, SyntheticSpec};
 
 fn fixture_source() -> DynamicImage {
     let spec = SyntheticSpec {
@@ -44,10 +44,7 @@ fn default_edge_settings(scale: EdgeScale, compose: ComposeMode, style: LineStyl
 /// "no error, dimensions match" for the LineMode::Off branch directly.
 #[test]
 fn line_mode_off_runs_seg_only() {
-    if let Err(msg) = ensure_ort_initialized() {
-        eprintln!("[line_mode_off] SKIP: {msg}");
-        return;
-    }
+    if skip_if_no_ort("line_mode_off") { return; }
     let engine = OrtEngine::new_cpu_only(ModelKind::Silueta, 1)
         .expect("OrtEngine::new_cpu_only(Silueta)");
     let img = fixture_source();
@@ -56,20 +53,13 @@ fn line_mode_off_runs_seg_only() {
         None::<fn(ProgressStage, f32)>, None,
     ).expect("Off pipeline should succeed");
     assert_eq!(result.rgba_image.dimensions(), (256, 256));
-    // Pin LineMode::Off semantics: no edge tensor was computed (we only
-    // called process_image_from_decoded). The variant_count test below
-    // catches drift.
-    assert_eq!(LineMode::Off as i32, 0, "LineMode::Off discriminant pinned for line-mode dispatcher");
 }
 
 /// `LineMode::EdgesOnly` runs DexiNed on the source and finalizes lines
 /// without segmentation. Tests the standalone edge path.
 #[test]
 fn line_mode_edges_only_produces_lines_from_source() {
-    if let Err(msg) = ensure_ort_initialized() {
-        eprintln!("[line_mode_edges_only] SKIP: {msg}");
-        return;
-    }
+    if skip_if_no_ort("line_mode_edges_only") { return; }
     let edge_engine = EdgeEngine::new().expect("EdgeEngine::new");
     let img = fixture_source();
     let edge = default_edge_settings(EdgeScale::Fused, ComposeMode::LinesOnly, LineStyle::Solid);
@@ -81,10 +71,7 @@ fn line_mode_edges_only_produces_lines_from_source() {
 /// edges within the subject only. Exercises the full two-engine pipeline.
 #[test]
 fn line_mode_subject_outline_combines_seg_and_edge() {
-    if let Err(msg) = ensure_ort_initialized() {
-        eprintln!("[line_mode_subject_outline] SKIP: {msg}");
-        return;
-    }
+    if skip_if_no_ort("line_mode_subject_outline") { return; }
     let seg_engine = OrtEngine::new_cpu_only(ModelKind::Silueta, 1)
         .expect("OrtEngine::new_cpu_only(Silueta)");
     let edge_engine = EdgeEngine::new().expect("EdgeEngine::new");
@@ -112,10 +99,7 @@ fn line_mode_subject_outline_combines_seg_and_edge() {
 /// to catch a refactor that mis-indexes the per-scale tensor lookup.
 #[test]
 fn edge_scale_fine_bold_fused_all_run() {
-    if let Err(msg) = ensure_ort_initialized() {
-        eprintln!("[edge_scale_*] SKIP: {msg}");
-        return;
-    }
+    if skip_if_no_ort("edge_scale_*") { return; }
     let edge_engine = EdgeEngine::new().expect("EdgeEngine::new");
     let img = fixture_source();
     for scale in [EdgeScale::Fine, EdgeScale::Bold, EdgeScale::Fused] {
@@ -129,10 +113,7 @@ fn edge_scale_fine_bold_fused_all_run() {
 /// the divergent compose paths in `compose_subject_outline`.
 #[test]
 fn line_style_solid_and_dual_scale_compose() {
-    if let Err(msg) = ensure_ort_initialized() {
-        eprintln!("[line_style_*] SKIP: {msg}");
-        return;
-    }
+    if skip_if_no_ort("line_style_*") { return; }
     let seg_engine = OrtEngine::new_cpu_only(ModelKind::Silueta, 1)
         .expect("OrtEngine::new_cpu_only(Silueta)");
     let edge_engine = EdgeEngine::new().expect("EdgeEngine::new");

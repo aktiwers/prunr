@@ -13,7 +13,7 @@ use prunr_core::{
     infer_only, postprocess_from_flat, MaskSettings, ModelKind, OrtEngine,
     PostprocessOpts, ProgressStage,
 };
-use test_common::{ensure_ort_initialized, render_synthetic_source, SyntheticSpec};
+use test_common::{render_synthetic_source, skip_if_no_ort, SyntheticSpec};
 
 const SIZE: u32 = 256;
 
@@ -29,10 +29,7 @@ fn fixture_source() -> DynamicImage {
 
 #[test]
 fn brush_correction_stroke_alters_the_painted_region_only() {
-    if let Err(msg) = ensure_ort_initialized() {
-        eprintln!("[brush_correction] SKIP: {msg}");
-        return;
-    }
+    if skip_if_no_ort("brush_correction") { return; }
 
     let engine = OrtEngine::new_cpu_only(ModelKind::Silueta, 1)
         .expect("OrtEngine::new_cpu_only(Silueta)");
@@ -104,10 +101,7 @@ fn brush_correction_stroke_alters_the_painted_region_only() {
 /// the cache misses or stales — both bugs caught by this test.)
 #[test]
 fn brush_correction_is_deterministic_across_runs() {
-    if let Err(msg) = ensure_ort_initialized() {
-        eprintln!("[brush_correction_deterministic] SKIP: {msg}");
-        return;
-    }
+    if skip_if_no_ort("brush_correction_deterministic") { return; }
     let engine = OrtEngine::new_cpu_only(ModelKind::Silueta, 1)
         .expect("OrtEngine::new_cpu_only(Silueta)");
     let img = fixture_source();

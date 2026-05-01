@@ -71,10 +71,14 @@ fn run_cli(input: &std::path::Path, out_dir: &std::path::Path, extra: &[&str]) -
     let out = cmd.output().expect("spawn prunr binary");
     let stderr = String::from_utf8_lossy(&out.stderr);
     if !out.status.success() {
-        // SKIP signal: ORT runtime missing. The CLI prints this exact
-        // prefix from `ort_runtime::init()`.
-        if stderr.contains("ONNX Runtime not found") {
-            return Err(format!("SKIP: ORT runtime not installed"));
+        // SKIP signals: missing ORT runtime ("ONNX Runtime not found")
+        // or a model that's marked OnDemand and not installed locally
+        // ("is not installed"). Anything else is a real test failure —
+        // Silueta is bundled, so there's no excuse for a model error
+        // beyond a registry regression.
+        let skip_signals = ["ONNX Runtime not found", "is not installed"];
+        if skip_signals.iter().any(|s| stderr.contains(s)) {
+            return Err("SKIP: prerequisite not available".to_string());
         }
         panic!(
             "prunr exited {} with stderr:\n{stderr}\n--- args: {:?}",

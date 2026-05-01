@@ -20,7 +20,7 @@ mod test_common;
 use image::{GrayImage, Luma, RgbaImage};
 use prunr_core::inpaint::process_inpaint;
 use prunr_models::{is_available, ModelId};
-use test_common::ensure_ort_initialized;
+use test_common::skip_if_no_ort;
 
 /// 256² source: solid teal background, used so masked-region inpaint
 /// output is easily distinguishable from the unmasked area's identity.
@@ -44,10 +44,7 @@ fn fixture_mask() -> GrayImage {
 }
 
 fn run_inpaint_test(model_id: ModelId, label: &str) {
-    if let Err(msg) = ensure_ort_initialized() {
-        eprintln!("[{label}] SKIP: {msg}");
-        return;
-    }
+    if skip_if_no_ort(label) { return; }
     if !is_available(model_id) {
         eprintln!(
             "[{label}] SKIP: {model_id:?} is not installed. Run `cargo xtask fetch-models` \
