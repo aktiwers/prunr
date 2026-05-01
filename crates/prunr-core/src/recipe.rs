@@ -120,8 +120,12 @@ impl std::hash::Hash for MaskRecipe {
     }
 }
 
-/// Tier 3: compositing settings (bg color, bg image, line settings).
+/// Tier 3: compositing settings (bg color, bg image).
 /// These can be applied without re-running inference or masking.
+///
+/// `solid_line_color` deliberately lives in `EdgeRecipe`, not here — a
+/// line-colour change is an EdgeRerun (re-threshold the cached DexiNed
+/// tensor), never a composite-only repaint.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
 pub struct CompositeRecipe {
     pub bg_color: Option<[u8; 3]>,
@@ -135,7 +139,6 @@ pub struct CompositeRecipe {
     /// change with the same image still flips the recipe.
     #[serde(default)]
     pub bg_image_fit: crate::types::BgImageFit,
-    pub solid_line_color: Option<[u8; 3]>,
 }
 
 /// Complete recipe — the full fingerprint of settings that produced a result.
@@ -254,7 +257,6 @@ mod tests {
                 bg_color: bg,
                 bg_image_hash: None,
                 bg_image_fit: crate::types::BgImageFit::default(),
-                solid_line_color: None,
             },
             was_chain: false,
         }
