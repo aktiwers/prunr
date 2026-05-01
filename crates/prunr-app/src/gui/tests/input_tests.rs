@@ -7,7 +7,6 @@ use super::super::state::AppState;
 #[test]
 fn handle_cancel_raises_global_flag_during_processing() {
     let mut app = PrunrApp::new_for_test();
-    app.state = AppState::Processing;
     assert!(!app.processor.cancels.is_cancelled(0), "cancel registry should start clean");
 
     app.handle_cancel();
@@ -22,7 +21,6 @@ fn handle_cancel_selected_raises_only_selected_item_flags() {
     use super::fixtures::push_test_item;
 
     let mut app = PrunrApp::new_for_test();
-    app.state = AppState::Processing;
     // Seed batch: id 1 selected+processing, id 2 selected+done, id 3 unselected+processing.
     for (id, selected, status) in [(1u64, true, BatchStatus::Processing), (2, true, BatchStatus::Done), (3, false, BatchStatus::Processing)] {
         let item = push_test_item(&mut app, id);
@@ -51,7 +49,7 @@ fn handle_open_path_nonexistent_does_not_panic() {
     // Opening a non-existent path should set error status, not panic
     app.handle_open_path(std::path::PathBuf::from("/nonexistent/path/image.png"));
     // State should remain Empty (no transition on error)
-    assert_eq!(app.state, AppState::Empty);
+    assert_eq!(app.batch.app_state(), AppState::Empty);
 }
 
 #[test]

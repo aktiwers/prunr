@@ -1,5 +1,4 @@
 use crate::gui::app::PrunrApp;
-use crate::gui::state::AppState;
 
 #[test]
 fn zoom_initialized_to_one() {
@@ -23,7 +22,6 @@ fn previous_zoom_initialized_to_one() {
 #[test]
 fn before_after_toggle_switches_show_original() {
     let mut app = PrunrApp::new_for_test();
-    app.state = AppState::Done;
     assert!(!app.show_original);
     app.show_original = !app.show_original;
     assert!(app.show_original);
@@ -38,7 +36,6 @@ fn show_original_resets_on_new_image_load() {
     // Simulate loading a new image via load_image internals
     // load_image resets show_original to false
     app.show_original = false; // simulates what load_image does
-    app.state = AppState::Loaded;
     assert!(!app.show_original);
 }
 

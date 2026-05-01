@@ -30,8 +30,6 @@ pub(crate) struct RuntimeInstallProgress {
 }
 
 pub struct PrunrApp {
-    // State
-    pub(crate) state: AppState,
     /// Directory of the most recently opened file (for save dialog default)
     pub(crate) last_open_dir: Option<std::path::PathBuf>,
 
@@ -264,7 +262,6 @@ impl PrunrApp {
         worker_rx: mpsc::Receiver<WorkerResult>,
     ) -> Self {
         let mut app = Self {
-            state: AppState::Empty,
             last_open_dir: None,
             processor: super::processor::Processor::new(worker_tx, worker_rx),
             status: Default::default(),
@@ -352,7 +349,6 @@ impl PrunrApp {
     /// Sync after batch modification — clamp index and refresh canvas.
     fn sync_after_batch_change(&mut self) {
         if self.batch.items.is_empty() {
-            self.state = AppState::Empty;
             self.batch.selected_index = 0;
         } else {
             self.batch.selected_index = self.batch.selected_index.min(self.batch.items.len() - 1);
@@ -382,7 +378,6 @@ impl PrunrApp {
             }
         }
 
-        self.state = AppState::Loaded;
         self.status.text = "Ready".to_string();
         self.canvas_switch_id += 1;
         self.zoom_state.reset();
@@ -1201,7 +1196,6 @@ impl PrunrApp {
         additional_items_rx: Option<mpsc::Receiver<super::worker::WorkItem>>,
     ) {
         self.processor.cancels.reset();
-        self.state = AppState::Processing;
 
         // Use the currently-viewed item's settings for the batch — matches
         // "what you see is what you process." Fallback to factory defaults
@@ -1584,9 +1578,6 @@ impl PrunrApp {
             self.settings.default_preset.clone(),
         ));
 
-        if self.state == AppState::Empty {
-            self.state = AppState::Loaded;
-        }
         // NOTE: do NOT touch `zoom_state` here. The callers that actually
         // change selection to the newly-added item (DnD inline single-file,
         // force-select-after-drain) own the full `zoom_state.reset()`, so
@@ -1861,14 +1852,7 @@ impl PrunrApp {
         self.restore_selected_result_from_history(idx);
         self.ensure_selected_source_decoded(idx);
         self.request_selected_textures(idx, ctx);
-
-        let item = &self.batch.items[idx];
         self.show_original = false;
-        self.state = match item.status {
-            BatchStatus::Done => AppState::Done,
-            BatchStatus::Processing => AppState::Processing,
-            _ => AppState::Loaded,
-        };
     }
 
     /// Free full-resolution `result_rgba` for every Done item that isn't the
@@ -2158,25 +2142,11 @@ impl PrunrApp {
             self.status.text = msg.clone();
             self.toasts.success(msg);
         }
-        // Update app state to match viewed item (textures already synced by BatchItemDone).
-        if !still_processing {
-            let idx = self.batch.selected_index.min(self.batch.items.len().saturating_sub(1));
-            if let Some(item) = self.batch.items.get(idx) {
-                match item.status {
-                    BatchStatus::Done => self.state = AppState::Done,
-                    BatchStatus::Processing => self.state = AppState::Processing,
-                    _ => self.state = AppState::Loaded,
-                }
-            }
-        }
     }
 
     fn on_cancelled(&mut self) {
         self.processor.drain_recipes();
-        if self.state == AppState::Processing {
-            self.state = AppState::Loaded;
-            self.status.text = "Cancelled".to_string();
-        }
+        self.status.text = "Cancelled".to_string();
         self.processor.clear_admission();
     }
 
@@ -2285,16 +2255,17 @@ impl PrunrApp {
         if intents.open_requested || pending_open {
             self.handle_open_dialog();
         }
-        if intents.remove_requested && matches!(self.state, AppState::Loaded | AppState::Done) {
+        let app_state = self.batch.app_state();
+        if intents.remove_requested && matches!(app_state, AppState::Loaded | AppState::Done) {
             self.handle_remove_bg();
         }
-        if intents.save_requested && self.state == AppState::Done {
+        if intents.save_requested && app_state == AppState::Done {
             self.handle_save_selected();
         }
-        if copy_requested && self.state == AppState::Done {
+        if copy_requested && app_state == AppState::Done {
             self.handle_copy();
         }
-        if intents.toggle_before_after && self.state == AppState::Done {
+        if intents.toggle_before_after && app_state == AppState::Done {
             self.show_original = !self.show_original;
         }
         if intents.fit_to_window { self.zoom_state.pending_fit_zoom = true; }
@@ -2345,10 +2316,6 @@ impl PrunrApp {
                     item.status = BatchStatus::Pending;
                 }
             }
-        } else if self.state == AppState::Processing {
-            self.handle_cancel();
-            self.processor.clear_admission();
-            self.state = AppState::Loaded;
             self.status.text = "Cancelled".to_string();
         } else if self.show_settings {
             self.close_settings(ctx);
@@ -2668,7 +2635,7 @@ impl PrunrApp {
         // toolbar always reserves two rows of height.
         let height = theme::CHIP_HEIGHT * 2.0 + theme::SPACE_XS + theme::SPACE_SM * 2.0;
         let mut toolbar_change = adjustments_toolbar::ToolbarChange::default();
-        let is_processing = self.state == AppState::Processing;
+        let is_processing = self.batch.app_state() == AppState::Processing;
         // Snapshot taken BEFORE adjustments_toolbar::render runs — if the
         // user ends up applying a preset this frame, the snapshot goes onto
         // the preset undo stack so Ctrl+Shift+Z can roll back an accidental pick.
