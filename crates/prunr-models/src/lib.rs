@@ -993,4 +993,36 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         assert!(read_on_demand(dir.path(), "nope.onnx").is_none());
     }
+
+    /// Pins the case-insensitive `eq_ignore_ascii_case` contract on
+    /// `incompatible_eps`. Silueta is the only model with a non-empty
+    /// list today (`["OpenVINO"]`) — exercising both casings ensures
+    /// callers passing "openvino" / "OPENVINO" / "OpenVINO" all match.
+    #[test]
+    fn is_ep_compatible_silueta_openvino_blocked_case_insensitive() {
+        assert!(!is_ep_compatible(ModelId::Silueta, "OpenVINO"));
+        assert!(!is_ep_compatible(ModelId::Silueta, "openvino"));
+        assert!(!is_ep_compatible(ModelId::Silueta, "OPENVINO"));
+    }
+
+    #[test]
+    fn is_ep_compatible_silueta_other_eps_allowed() {
+        assert!(is_ep_compatible(ModelId::Silueta, "CPU"));
+        assert!(is_ep_compatible(ModelId::Silueta, "CUDA"));
+        assert!(is_ep_compatible(ModelId::Silueta, "CoreML"));
+        assert!(is_ep_compatible(ModelId::Silueta, "DirectML"));
+    }
+
+    /// Models with an empty `incompatible_eps` list must accept every EP
+    /// — the `unwrap_or(true)` default for unknown models, plus the
+    /// `iter().any` over `[]` short-circuits to `false`, so the helper
+    /// returns `true`.
+    #[test]
+    fn is_ep_compatible_empty_list_accepts_every_ep() {
+        for ep in ["CPU", "CUDA", "CoreML", "DirectML", "OpenVINO"] {
+            assert!(is_ep_compatible(ModelId::U2net, ep), "U2Net + {ep}");
+            assert!(is_ep_compatible(ModelId::BiRefNetLite, ep), "BiRefNet + {ep}");
+            assert!(is_ep_compatible(ModelId::SdV15InpaintFp16, ep), "SD15 + {ep}");
+        }
+    }
 }
