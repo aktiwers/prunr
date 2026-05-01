@@ -32,9 +32,11 @@ fn settings_serializes_to_json() {
 
 #[test]
 fn settings_roundtrip_json() {
-    let mut s = Settings::default();
-    s.model = SettingsModel::U2net;
-    s.parallel_jobs = 4;
+    let s = Settings {
+        model: SettingsModel::U2net,
+        parallel_jobs: 4,
+        ..Settings::default()
+    };
     let json = serde_json::to_string(&s).unwrap();
     let restored: Settings = serde_json::from_str(&json).unwrap();
     assert_eq!(restored.model, SettingsModel::U2net);

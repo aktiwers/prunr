@@ -241,11 +241,13 @@ mod tests {
 
     #[test]
     fn mask_settings_roundtrip() {
-        let mut s = ItemSettings::default();
-        s.gamma = 1.5;
-        s.threshold = Some(0.3);
-        s.edge_shift = 2.0;
-        s.refine_edges = true;
+        let s = ItemSettings {
+            gamma: 1.5,
+            threshold: Some(0.3),
+            edge_shift: 2.0,
+            refine_edges: true,
+            ..ItemSettings::default()
+        };
         let m = s.mask_settings();
         assert_eq!(m.gamma, 1.5);
         assert_eq!(m.threshold, Some(0.3));
@@ -255,18 +257,19 @@ mod tests {
 
     #[test]
     fn bg_rgb_stripped_in_recipe() {
-        let mut s = ItemSettings::default();
-        s.bg = Some([10, 20, 30, 200]);
+        let s = ItemSettings { bg: Some([10, 20, 30, 200]), ..ItemSettings::default() };
         let r = s.current_recipe(prunr_core::ModelKind::Silueta, false);
         assert_eq!(r.composite.bg_color, Some([10, 20, 30]));
     }
 
     #[test]
     fn edges_only_pins_mask_defaults() {
-        let mut s = ItemSettings::default();
-        s.line_mode = LineMode::EdgesOnly;
-        s.gamma = 2.0; // should NOT affect recipe in EdgesOnly mode
-        s.threshold = Some(0.8);
+        let s = ItemSettings {
+            line_mode: LineMode::EdgesOnly,
+            gamma: 2.0, // should NOT affect recipe in EdgesOnly mode
+            threshold: Some(0.8),
+            ..ItemSettings::default()
+        };
         let r = s.current_recipe(prunr_core::ModelKind::Silueta, false);
         let defaults = prunr_core::MaskRecipe::from(&prunr_core::MaskSettings::default());
         assert_eq!(r.mask, defaults);

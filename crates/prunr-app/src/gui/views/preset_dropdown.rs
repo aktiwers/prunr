@@ -332,8 +332,7 @@ mod tests {
     #[test]
     fn button_label_modified_icon_when_diverged_from_applied() {
         let s = Settings::default();
-        let mut current = ItemSettings::default();
-        current.gamma = 1.7;
+        let current = ItemSettings { gamma: 1.7, ..ItemSettings::default() };
         let label = button_label(&s, &current, PRUNR_PRESET);
         assert!(label.contains("Prunr"), "{label}");
         assert!(label.ends_with(ICON_EDIT.codepoint), "{label}");
@@ -352,8 +351,7 @@ mod tests {
     #[test]
     fn button_label_tracks_applied_even_when_current_matches_different_preset() {
         let mut s = Settings::default();
-        let mut portrait = ItemSettings::default();
-        portrait.gamma = 2.0;
+        let portrait = ItemSettings { gamma: 2.0, ..ItemSettings::default() };
         s.presets.insert("Portrait".to_string(), portrait);
         // applied_preset = "Prunr" but current happens to match factory.
         // Label should stay on "Prunr" (the applied one).
