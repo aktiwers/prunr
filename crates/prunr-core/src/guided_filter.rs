@@ -278,13 +278,8 @@ mod tests {
         let guide = RgbaImage::from_pixel(48, 48, Rgba([128, 128, 128, 255]));
         let mask = GrayImage::from_pixel(48, 48, Luma([200]));
         let result = guided_filter_alpha(&guide, &mask, 4, 1e-6);
-        let first = result.get_pixel(0, 0)[0];
-        let mut min = first;
-        let mut max = first;
-        for p in result.pixels() {
-            min = min.min(p[0]);
-            max = max.max(p[0]);
-        }
+        let (min, max) = result.pixels().map(|p| p[0])
+            .fold((u8::MAX, u8::MIN), |(lo, hi), v| (lo.min(v), hi.max(v)));
         assert!(max - min <= 1, "flat input produced spread {min}..={max}");
     }
 
