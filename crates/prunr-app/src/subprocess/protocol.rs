@@ -103,11 +103,8 @@ pub enum SubprocessCommand {
         #[serde(default)]
         sharpen: f32,
     },
-    /// Cancel: stop after current image, send Finished.
-    Cancel,
     /// Cancel one item by id — worker emits `ImageError { error:
-    /// CANCELLED_ERR_MSG }` at the next dispatch check. Other in-flight
-    /// jobs keep running, unlike `Cancel` which stops the whole batch.
+    /// CANCELLED_ERR_MSG }` at the next dispatch check.
     CancelItem { item_id: u64 },
     /// Shut down gracefully.
     Shutdown,
@@ -374,8 +371,7 @@ mod tests {
     }
 
     #[test]
-    fn command_cancel_and_shutdown_roundtrip() {
-        roundtrip(&SubprocessCommand::Cancel);
+    fn command_shutdown_roundtrip() {
         roundtrip(&SubprocessCommand::Shutdown);
     }
 

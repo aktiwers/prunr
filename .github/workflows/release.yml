@@ -134,13 +134,16 @@ jobs:
             --build_dir ../ort-build \
             --cmake_extra_defines CMAKE_POLICY_VERSION_MINIMUM=3.5
 
-      - name: Point cargo at custom ORT (macOS)
+      - name: Locate custom ORT dylib (macOS)
         if: matrix.name == 'macos-aarch64'
         run: |
           # Discover the dylib robustly:
           # - `-L` follows symlinks (ORT ships libonnxruntime.dylib as a
           #   symlink to libonnxruntime.<version>.dylib).
           # - glob `libonnxruntime*.dylib` matches the versioned file too.
+          # Exports ORT_LIB_LOCATION for the staging step below; cargo
+          # itself does NOT need it (workspace is `load-dynamic` — runtime
+          # lookup, not link-time).
           DYLIB=$(find -L ort-build \( -name 'libonnxruntime.dylib' -o -name 'libonnxruntime.*.dylib' \) | head -1)
           if [ -z "$DYLIB" ]; then
             echo "::error::No libonnxruntime*.dylib under ort-build/"
@@ -152,7 +155,6 @@ jobs:
           echo "Resolved dylib: $DYLIB"
           echo "ORT_LIB_LOCATION=$ORT_DIR"
           echo "ORT_LIB_LOCATION=$ORT_DIR" >> "$GITHUB_ENV"
-          echo "ORT_PREFER_DYNAMIC_LINK=1" >> "$GITHUB_ENV"
 
       - name: Build release binary
         run: cargo build --release --target ${{ matrix.target }} -p prunr-app

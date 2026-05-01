@@ -122,13 +122,6 @@ pub struct Cli {
     #[arg(long)]
     pub clear_ep_cache: bool,
 
-    /// Chain mode: process the previous result instead of the original.
-    /// Only meaningful in multi-pass scripting workflows where the user
-    /// runs prunr multiple times on the same file. For a single invocation
-    /// this flag has no effect since there is no previous result.
-    #[arg(long)]
-    pub chain: bool,
-
     /// Object removal (Eraser) mode. Reads a binary mask from --mask
     /// (white = inpaint, black = keep) and runs LaMa to fill in the
     /// masked region. Output saved as {stem}_erased.png by default.
