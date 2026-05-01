@@ -351,22 +351,30 @@ struct MaskBbox {
 /// instead of one giant bbox spanning unpainted gap.
 ///
 /// Iterative BFS (no recursion) so a 4096×4096 component doesn't blow
-/// the stack. `visited` is a packed Vec<bool> sized to the mask: 4MP
-/// allocates ~4MB transiently, freed when this returns.
+/// the stack. `visited` is sized to the outer bbox of all painted
+/// pixels (via `inpaint::mask_bbox`), not the full image — a 100-px
+/// stroke in a 4K image needs ~10 KB of scratch instead of 16 MB.
 fn mask_components(mask: &GrayImage) -> Vec<MaskBbox> {
-    let (w, h) = mask.dimensions();
+    let (w, _h) = mask.dimensions();
     let raw = mask.as_raw();
-    let mut visited = vec![false; (w as usize) * (h as usize)];
+    let Some(outer) = crate::inpaint::mask_bbox(mask, 128, 0) else {
+        return Vec::new();
+    };
+    let map = BboxMap { ox: outer.x, oy: outer.y, image_w: w, bbox_w: outer.w };
+    let xmax = outer.x + outer.w;
+    let ymax = outer.y + outer.h;
+    let mut visited = vec![false; (outer.w as usize) * (outer.h as usize)];
     let mut components = Vec::new();
     let mut queue: std::collections::VecDeque<(u32, u32)> = std::collections::VecDeque::new();
 
-    for sy in 0..h {
-        for sx in 0..w {
-            let s_idx = (sy as usize) * (w as usize) + (sx as usize);
-            if visited[s_idx] || raw[s_idx] <= 127 {
+    for sy in outer.y..ymax {
+        for sx in outer.x..xmax {
+            let lidx = map.local_idx(sx, sy);
+            let gidx = (sy as usize) * (w as usize) + (sx as usize);
+            if visited[lidx] || raw[gidx] <= 127 {
                 continue;
             }
-            visited[s_idx] = true;
+            visited[lidx] = true;
             queue.push_back((sx, sy));
             let mut bbox = MaskBbox { x_min: sx, y_min: sy, x_max: sx, y_max: sy };
             while let Some((x, y)) = queue.pop_front() {
@@ -375,17 +383,17 @@ fn mask_components(mask: &GrayImage) -> Vec<MaskBbox> {
                 if y < bbox.y_min { bbox.y_min = y; }
                 if y > bbox.y_max { bbox.y_max = y; }
                 // 4-connectivity: up / down / left / right.
-                if x > 0 {
-                    push_if_unvisited(x - 1, y, w, raw, &mut visited, &mut queue);
+                if x > outer.x {
+                    push_if_unvisited(x - 1, y, map, raw, &mut visited, &mut queue);
                 }
-                if x + 1 < w {
-                    push_if_unvisited(x + 1, y, w, raw, &mut visited, &mut queue);
+                if x + 1 < xmax {
+                    push_if_unvisited(x + 1, y, map, raw, &mut visited, &mut queue);
                 }
-                if y > 0 {
-                    push_if_unvisited(x, y - 1, w, raw, &mut visited, &mut queue);
+                if y > outer.y {
+                    push_if_unvisited(x, y - 1, map, raw, &mut visited, &mut queue);
                 }
-                if y + 1 < h {
-                    push_if_unvisited(x, y + 1, w, raw, &mut visited, &mut queue);
+                if y + 1 < ymax {
+                    push_if_unvisited(x, y + 1, map, raw, &mut visited, &mut queue);
                 }
             }
             components.push(bbox);
@@ -394,15 +402,26 @@ fn mask_components(mask: &GrayImage) -> Vec<MaskBbox> {
     components
 }
 
+#[derive(Clone, Copy)]
+struct BboxMap { ox: u32, oy: u32, image_w: u32, bbox_w: u32 }
+
+impl BboxMap {
+    #[inline]
+    fn local_idx(self, x: u32, y: u32) -> usize {
+        ((y - self.oy) as usize) * (self.bbox_w as usize) + ((x - self.ox) as usize)
+    }
+}
+
 #[inline]
 fn push_if_unvisited(
-    x: u32, y: u32, w: u32,
+    x: u32, y: u32, map: BboxMap,
     raw: &[u8], visited: &mut [bool],
     queue: &mut std::collections::VecDeque<(u32, u32)>,
 ) {
-    let idx = (y as usize) * (w as usize) + (x as usize);
-    if !visited[idx] && raw[idx] > 127 {
-        visited[idx] = true;
+    let lidx = map.local_idx(x, y);
+    let gidx = (y as usize) * (map.image_w as usize) + (x as usize);
+    if !visited[lidx] && raw[gidx] > 127 {
+        visited[lidx] = true;
         queue.push_back((x, y));
     }
 }
@@ -1997,6 +2016,19 @@ mod tests {
         let comps = mask_components(&m);
         assert_eq!(comps.len(), 1);
         assert_eq!(comps[0], MaskBbox { x_min: 8, y_min: 8, x_max: 8, y_max: 8 });
+    }
+
+    #[test]
+    fn mask_components_finds_tiny_stroke_in_large_image() {
+        // A single pixel far from origin must still be found and produce
+        // the correct absolute bbox after the inner BFS walks bbox-local
+        // coordinates. Pins the bbox-bounded BFS optimisation.
+        let mut m = GrayImage::new(2048, 2048);
+        m.put_pixel(1900, 1850, Luma([200]));
+        m.put_pixel(1901, 1850, Luma([200]));
+        let comps = mask_components(&m);
+        assert_eq!(comps.len(), 1);
+        assert_eq!(comps[0], MaskBbox { x_min: 1900, y_min: 1850, x_max: 1901, y_max: 1850 });
     }
 
     #[test]
