@@ -814,7 +814,11 @@ fn run_batch_subprocess(
                 eprintln!("Memory pressure \u{2014} retrying with {} parallel jobs", max_jobs);
             }
             sub.kill();
-            prunr_app::subprocess::protocol::cleanup_ipc_temp();
+            // Prefix-scoped (B3): if CLI ever runs an inpaint subprocess
+            // concurrently, this wipe must not delete its in-flight files.
+            prunr_app::subprocess::protocol::cleanup_ipc_temp_for_prefix(
+                prunr_app::subprocess::protocol::SEG_PIPELINE_PREFIXES,
+            );
             continue;
         }
 
