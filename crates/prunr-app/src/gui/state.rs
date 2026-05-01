@@ -1,6 +1,6 @@
-/// Application state machine: Empty -> Loaded -> Processing -> Done
-/// Can also transition Done -> Loaded (load new image) or Processing -> Loaded (cancel)
-#[derive(Debug, Clone, PartialEq, Default)]
+/// App-level state derived from the selected item's `BatchStatus`.
+/// Computed on demand via `BatchManager::app_state()` — not stored.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum AppState {
     /// No image loaded. Show drop zone.
     #[default]

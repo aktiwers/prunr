@@ -137,7 +137,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
         }
     }
 
-    match app.batch.app_state() {
+    match app_state {
         AppState::Empty => render_empty(ui, app),
         AppState::Loaded => render_loaded(ui, app),
         AppState::Processing => render_processing(ui, app),

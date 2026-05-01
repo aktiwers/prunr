@@ -16,6 +16,7 @@ pub fn render(ui: &mut egui::Ui, app: &PrunrApp) {
         );
         ui.add_space(theme::SPACE_XS);
 
+        let app_state = app.batch.app_state();
         let counts = app.batch.status_counts();
         let batch_processing = counts.processing > 0;
         let batch_done_count = counts.done;
@@ -34,7 +35,7 @@ pub fn render(ui: &mut egui::Ui, app: &PrunrApp) {
         } else if batch_total >= 2 && batch_done_count > 0 {
             format!("{batch_done_count} of {batch_total} images processed")
         } else {
-            match app.batch.app_state() {
+            match app_state {
                 AppState::Empty | AppState::Loaded => {
                     if app.status.is_temporary {
                         app.status.text.clone()
@@ -67,7 +68,7 @@ pub fn render(ui: &mut egui::Ui, app: &PrunrApp) {
             }
         }
 
-        if app.batch.app_state() == AppState::Processing {
+        if app_state == AppState::Processing {
             let pct = (app.status.pct * 100.0).round() as u32;
             ui.label(
                 RichText::new(format!("{pct}%"))
@@ -132,7 +133,7 @@ pub fn render(ui: &mut egui::Ui, app: &PrunrApp) {
                     .color(theme::TEXT_SECONDARY),
             );
 
-            if app.batch.app_state() != AppState::Empty {
+            if app_state != AppState::Empty {
                 ui.add_space(theme::SPACE_SM);
                 let zoom_pct = (app.zoom_state.zoom * 100.0).round() as u32;
                 ui.label(
