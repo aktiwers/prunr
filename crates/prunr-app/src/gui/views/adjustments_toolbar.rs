@@ -146,6 +146,10 @@ impl Defaults {
 /// `app_settings` exposes model + preset map (Row 2 hosts both dropdowns).
 /// `applied_preset` is read for the button's modified/clean icon and written
 /// in place when the user applies or saves a preset.
+// Top-level view dispatcher — args are the per-frame state surface the
+// adjustments rows read or mutate. Grouping into a struct would just
+// shuffle the same fields behind one indirection.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn render(
     ui: &mut Ui,
     item_settings: &mut ItemSettings,
@@ -188,7 +192,7 @@ pub(crate) fn render(
     // `app_settings.model.is_inpaint()` directly.
     let inpaint_mode = app_settings.model.is_inpaint();
     let mask_active = model_uses_seg
-        && !(item_settings.line_mode == LineMode::EdgesOnly && !app_settings.chain_mode);
+        && (item_settings.line_mode != LineMode::EdgesOnly || app_settings.chain_mode);
     let fill_style_active = item_settings.line_mode != LineMode::EdgesOnly;
     let bg_active = !(matches!(app_settings.model, SettingsModel::None)
         && item_settings.line_mode == LineMode::Off);

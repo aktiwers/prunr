@@ -317,7 +317,7 @@ fn render_empty(ui: &mut egui::Ui, _app: &PrunrApp) {
     let center = canvas_rect.center();
 
     // Larger drop zone with logo
-    let zone_w = (avail.x * 0.6).min(500.0).max(280.0);
+    let zone_w = (avail.x * 0.6).clamp(280.0, 500.0);
     let zone_h = 380.0_f32;
     let zone_rect = Rect::from_center_size(center, Vec2::new(zone_w, zone_h));
 

@@ -21,9 +21,9 @@
 //! - `tests/golden_data/e2e/<id>/` — committed synthetic fixtures, small,
 //!   procedurally generated for past-bug categories. Public-repo safe.
 //! - `tests/golden_data_local/e2e/<id>/` — gitignored, dev-machine-only.
-//!   Drop a `source.png` here and BOOTSTRAP_GOLDEN populates `recipe.json`
-//!   + UPDATE_GOLDEN populates `expected.png`. Personal photos / licensed
-//!   stock / anything that can't ship to the public repo lives here.
+//!   Drop a `source.png` here and `BOOTSTRAP_GOLDEN` populates `recipe.json`
+//!   while `UPDATE_GOLDEN` populates `expected.png`. Personal photos and
+//!   licensed stock — anything that can't ship to the public repo — lives here.
 //!
 //! ## Per-fixture layout
 //!
