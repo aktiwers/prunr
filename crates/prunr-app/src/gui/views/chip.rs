@@ -156,6 +156,11 @@ pub(super) fn paint_falloff_square(
 
 /// Square icon-only button with an active/inactive visual state. Used by
 /// the toolbar's Reset / Brush toggles and any future single-icon pill.
+///
+/// `icon` is `&str` rather than `char` even though every caller passes a
+/// single Unicode code point — `egui::RichText::new` doesn't accept
+/// `char` directly, so a `char` parameter would force a single-char
+/// allocation per call. See DEFERRED.md P22-4 for the trade evaluation.
 pub(super) fn icon_toggle_button(ui: &mut Ui, icon: &str, active: bool) -> Response {
     let btn = egui::Button::new(
         RichText::new(icon)
