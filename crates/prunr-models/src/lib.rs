@@ -552,13 +552,18 @@ fn on_demand_bytes(id: ModelId, filename: &str) -> Option<&'static [u8]> {
         }
     }
     let bytes = read_on_demand_from_any_path(filename)?;
-    let leaked: &'static [u8] = Box::leak(bytes.into_boxed_slice());
     let mut cache = on_demand_cache().lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    // A concurrent caller may have inserted between our check and
-    // load — keep the first-inserted slice and drop ours. Cheap;
-    // beats holding the lock during the 200 MB read.
-    Some(*cache.entry(id).or_insert(leaked))
+    // Re-check under lock: a concurrent caller may have already loaded +
+    // inserted while we were reading. If so, return their slice and let
+    // our `bytes` Vec drop normally — Box::leak only runs for the winner,
+    // so the loser's ~200 MB allocation never escapes to `'static`.
+    if let Some(slice) = cache.get(&id) {
+        return Some(slice);
+    }
+    let leaked: &'static [u8] = Box::leak(bytes.into_boxed_slice());
+    cache.insert(id, leaked);
+    Some(leaked)
 }
 
 fn read_on_demand_from_any_path(filename: &str) -> Option<Vec<u8>> {
