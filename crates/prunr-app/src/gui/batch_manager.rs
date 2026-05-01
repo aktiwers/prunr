@@ -148,6 +148,7 @@ impl BatchManager {
     /// changed; `false` when it was already selected. Callers use the return value
     /// to decide whether to reset the canvas (zoom/pan/texture sync).
     pub(crate) fn select_item(&mut self, idx: usize) -> bool {
+        debug_assert!(idx < self.items.len(), "select_item: idx {idx} out of bounds (len={})", self.items.len());
         if self.selected_index == idx {
             return false;
         }
@@ -157,6 +158,7 @@ impl BatchManager {
 
     /// Move the item at `from` to position `to`, adjusting `selected_index`
     /// so the same logical item remains selected after the move.
+    /// `to == items.len()` is valid and appends the item to the end.
     pub(crate) fn reorder(&mut self, from: usize, to: usize) {
         if from == to || from >= self.items.len() {
             return;
