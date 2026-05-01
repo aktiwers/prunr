@@ -926,20 +926,17 @@ impl PrunrApp {
 
     /// Filter-only Process path (model=`None`). Dispatches each target item
     /// to a background thread via `BatchManager::request_filter_only` so the
-    /// UI stays responsive on large batches (B5). Results land on
+    /// UI stays responsive on large batches. Results land on
     /// `bg_io.filter_only_rx`, drained in `drain_background_channels`.
     fn process_filter_only(&mut self, filter: impl Fn(&BatchItem) -> bool) {
         let dispatches: Vec<(u64, ImageSource, prunr_core::FillStyle)> = self.batch.items.iter()
             .filter(|i| filter(i) && !matches!(i.status, BatchStatus::Processing))
             .map(|i| (i.id, i.source.clone(), i.settings.fill_style))
             .collect();
-        if dispatches.is_empty() { return; }
-        for (id, _, _) in &dispatches {
-            if let Some(item) = self.batch.find_by_id_mut(*id) {
+        for (id, source, fill_style) in dispatches {
+            if let Some(item) = self.batch.find_by_id_mut(id) {
                 item.status = BatchStatus::Processing;
             }
-        }
-        for (id, source, fill_style) in dispatches {
             self.batch.request_filter_only(id, &source, fill_style);
         }
     }
@@ -2484,7 +2481,7 @@ impl PrunrApp {
             self.sync_selected_batch_textures(ctx);
         }
 
-        // Filter-only Process results (model=None path; B5).
+        // Drain filter-only Process results (model=None path).
         let mut filter_only_arrived = false;
         while let Ok((item_id, result)) = self.batch.bg_io.filter_only_rx.try_recv() {
             let Some(item) = self.batch.find_by_id_mut(item_id) else { continue };
