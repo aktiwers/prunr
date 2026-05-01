@@ -2082,8 +2082,7 @@ impl PrunrApp {
     /// Include which models are loading so a DexiNed-only reload is
     /// distinguishable from a segmentation model load.
     fn loading_model_status_text(&self, item_id: u64) -> String {
-        let line_mode = self.batch.items.iter()
-            .find(|b| b.id == item_id)
+        let line_mode = self.batch.find_by_id(item_id)
             .map(|b| b.settings.line_mode)
             .unwrap_or(prunr_core::LineMode::Off);
         let seg_name = super::views::model_name(self.settings.model);
@@ -2171,8 +2170,7 @@ impl PrunrApp {
             .to_model_kind()
             .unwrap_or(prunr_core::ModelKind::BiRefNetLite);
         let chain = self.settings.chain_mode;
-        self.batch.items.iter()
-            .find(|b| b.id == item_id)
+        self.batch.find_by_id(item_id)
             .map(|b| b.settings.current_recipe(model, chain))
             .unwrap_or_else(|| super::item_settings::ItemSettings::default().current_recipe(model, chain))
     }
