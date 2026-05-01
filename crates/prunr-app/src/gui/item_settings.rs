@@ -201,6 +201,15 @@ impl ItemSettings {
     }
 }
 
+/// Test-only fixture: an `ItemSettings` whose `gamma` is overridden and
+/// every other field is the factory default. Reuse target for any sibling
+/// test that wants a non-default settings value without re-spelling
+/// `..ItemSettings::default()` in 5 places.
+#[cfg(test)]
+pub(crate) fn item_with_gamma(gamma: f32) -> ItemSettings {
+    ItemSettings { gamma, ..ItemSettings::default() }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -561,7 +561,7 @@ mod tests {
     #[test]
     fn preset_values_returns_user_preset() {
         let mut s = Settings::default();
-        let portrait = ItemSettings { gamma: 2.0, ..ItemSettings::default() };
+        let portrait = super::super::item_settings::item_with_gamma(2.0);
         s.presets.insert("Portrait".to_string(), portrait);
         assert_eq!(s.preset_values("Portrait").gamma, 2.0);
     }
@@ -575,7 +575,7 @@ mod tests {
     #[test]
     fn item_defaults_for_new_item_uses_default_preset() {
         let mut s = Settings::default();
-        let portrait = ItemSettings { gamma: 2.0, ..ItemSettings::default() };
+        let portrait = super::super::item_settings::item_with_gamma(2.0);
         s.presets.insert("Portrait".to_string(), portrait);
         s.default_preset = "Portrait".to_string();
         assert_eq!(s.item_defaults_for_new_item().gamma, 2.0);
