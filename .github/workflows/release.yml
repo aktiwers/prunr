@@ -182,8 +182,20 @@ jobs:
       # ORT via the same xtask the GUI uses for the runtime store —
       # one source of truth for the install layout. GPU EP users
       # upgrade through Settings → Hardware (runtime store).
-      - name: Stage CPU runtime (Linux)
+      # Cache the staged runtime so each release run doesn't re-fetch
+      # the ~80 MB onnxruntime wheel from PyPI. Keyed on the install
+      # logic (which encodes the PINNED_ORT_VERSION constant + wheel
+      # picker), so a version bump or repackager change busts it.
+      - name: Cache runtime-stage (Linux)
+        id: cache-runtime-linux
         if: matrix.name == 'linux-x86_64'
+        uses: actions/cache@v4
+        with:
+          path: runtime-stage
+          key: runtime-stage-linux-${{ hashFiles('crates/prunr-runtime-install/src/lib.rs') }}
+
+      - name: Stage CPU runtime (Linux)
+        if: matrix.name == 'linux-x86_64' && steps.cache-runtime-linux.outputs.cache-hit != 'true'
         run: |
           cargo xtask install-runtime onnxruntime 1.24.1 --stage-to runtime-stage
           if [ ! -f runtime-stage/libonnxruntime.so ]; then
@@ -366,8 +378,16 @@ jobs:
       # Same load-dynamic story as Linux: stage the CPU runtime via
       # xtask, place it at <exe>/runtime/onnxruntime.dll so the
       # `bundled_dylib` lookup picks it up.
-      - name: Stage CPU runtime (Windows)
+      - name: Cache runtime-stage (Windows)
+        id: cache-runtime-windows
         if: matrix.name == 'windows-x86_64'
+        uses: actions/cache@v4
+        with:
+          path: runtime-stage
+          key: runtime-stage-windows-${{ hashFiles('crates/prunr-runtime-install/src/lib.rs') }}
+
+      - name: Stage CPU runtime (Windows)
+        if: matrix.name == 'windows-x86_64' && steps.cache-runtime-windows.outputs.cache-hit != 'true'
         shell: pwsh
         run: |
           cargo xtask install-runtime onnxruntime 1.24.1 --stage-to runtime-stage
