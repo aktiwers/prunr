@@ -87,8 +87,18 @@ pub fn repackage_target_filename(zip_name: &str) -> Option<String> {
     if stripped.contains('/') { return None; }
     if stripped.starts_with("onnxruntime_pybind11_state") { return None; }
     if stripped.ends_with(".py") { return None; }
+    // Linux: `libonnxruntime.so.1.24.1` → `libonnxruntime.so`.
     if stripped.starts_with("libonnxruntime.so.") {
         return Some("libonnxruntime.so".to_string());
+    }
+    // macOS: `libonnxruntime.1.24.1.dylib` → `libonnxruntime.dylib`.
+    // The canonical un-versioned form falls through to the pass-through
+    // below; only the versioned form needs the rewrite.
+    if stripped.starts_with("libonnxruntime.")
+        && stripped.ends_with(".dylib")
+        && stripped != "libonnxruntime.dylib"
+    {
+        return Some("libonnxruntime.dylib".to_string());
     }
     Some(stripped.to_string())
 }
@@ -361,9 +371,27 @@ mod tests {
 
     #[test]
     fn repackage_keeps_capi_dylib() {
+        // Linux: versioned `.so.<ver>` strips to canonical name.
         assert_eq!(
             repackage_target_filename("onnxruntime/capi/libonnxruntime.so.1.24.1").as_deref(),
             Some("libonnxruntime.so"),
+        );
+        // macOS: versioned `<ver>.dylib` strips to canonical name (B8 —
+        // upstream PyPI wheels can ship either form; the version-strip
+        // arm was previously Linux-only and `extract_wheel`'s post-extract
+        // verify rejected the install on the versioned macOS shape).
+        assert_eq!(
+            repackage_target_filename("onnxruntime/capi/libonnxruntime.1.24.1.dylib").as_deref(),
+            Some("libonnxruntime.dylib"),
+        );
+        // Canonical un-versioned forms pass through unchanged.
+        assert_eq!(
+            repackage_target_filename("onnxruntime/capi/libonnxruntime.so").as_deref(),
+            Some("libonnxruntime.so"),
+        );
+        assert_eq!(
+            repackage_target_filename("onnxruntime/capi/libonnxruntime.dylib").as_deref(),
+            Some("libonnxruntime.dylib"),
         );
     }
 
