@@ -2050,7 +2050,7 @@ impl PrunrApp {
         edge_cache: Option<super::worker::EdgeTensorCache>,
     ) {
         let is_selected = self.batch.is_selected(item_id);
-        let recipe_snapshot = self.take_dispatch_recipe(item_id);
+        let Some(recipe_snapshot) = self.take_dispatch_recipe(item_id) else { return };
 
         // User-initiated cancel reverts to Pending (not Error) so caches and
         // recipe stay intact for a re-Process.
@@ -2103,11 +2103,12 @@ impl PrunrApp {
 
     /// Recipe to stamp on a finished item. Pulled from the in-flight slot
     /// owned by `Processor` — name is `take_*` because each call removes
-    /// the entry. Late deliveries after `drain_recipes` (cancel/complete)
-    /// fall back to reconstructing from current item state.
-    fn take_dispatch_recipe(&mut self, item_id: u64) -> prunr_core::ProcessingRecipe {
+    /// the entry. Late deliveries after `drain_recipes` fall back to
+    /// reconstructing from current item state; returns `None` when the item
+    /// is no longer in the batch (already removed by the user).
+    fn take_dispatch_recipe(&mut self, item_id: u64) -> Option<prunr_core::ProcessingRecipe> {
         if let Some(recipe) = self.processor.take_recipe(item_id) {
-            return recipe;
+            return Some(recipe);
         }
         let model: prunr_core::ModelKind = self.settings.model
             .to_model_kind()
@@ -2115,7 +2116,6 @@ impl PrunrApp {
         let chain = self.settings.chain_mode;
         self.batch.find_by_id(item_id)
             .map(|b| b.settings.current_recipe(model, chain))
-            .unwrap_or_else(|| super::item_settings::ItemSettings::default().current_recipe(model, chain))
     }
 
     fn refresh_batch_progress_status(&mut self) {
