@@ -407,14 +407,15 @@ fn run_batch_with_retry(
             WaitAction::Continue => {}
         }
 
-        let Some((mut sub, mut sent_items, mut sent_tier2_ids, mut sent_add_edge_ids)) = spawn_and_initial_burst(
+        let Some(burst) = spawn_and_initial_burst(
             prewarm.take(), &mut state, model, mask, force_cpu, line_mode, edge, cancels, res_tx, ctx,
         ) else {
             return; // spawn failed — errors + BatchComplete already sent
         };
+        let InitialBurst { mut sub, mut sent_tier1, mut sent_tier2_ids, mut sent_add_edge_ids } = burst;
 
         let outcome = run_event_loop(
-            &mut sub, &mut state, &mut sent_items, &mut sent_tier2_ids, &mut sent_add_edge_ids,
+            &mut sub, &mut state, &mut sent_tier1, &mut sent_tier2_ids, &mut sent_add_edge_ids,
             additional_items_rx, cancels, model, res_tx, ctx,
         );
 
@@ -422,7 +423,7 @@ fn run_batch_with_retry(
             EventLoopOutcome::Cancelled => return,
             EventLoopOutcome::Crashed(reason) => {
                 let should_retry = handle_crash_and_retry(
-                    &mut state, sent_items, sent_tier2_ids, sent_add_edge_ids, reason,
+                    &mut state, sent_tier1, sent_tier2_ids, sent_add_edge_ids, reason,
                     &mut sub, additional_items_rx, res_tx, ctx,
                 );
                 if !should_retry {
@@ -480,8 +481,15 @@ fn poll_additional_items(
     }
 }
 
-/// `(subprocess, sent_tier1_items, sent_tier2_ids, sent_add_edge_ids)`.
-type InitialBurst = (SubprocessManager, Vec<WorkItem>, Vec<u64>, Vec<u64>);
+/// What the initial dispatch burst sent to the freshly-spawned (or
+/// pre-warmed) subprocess. Replaces a 4-tuple alias whose meaning was
+/// pinned only by a comment.
+struct InitialBurst {
+    sub: SubprocessManager,
+    sent_tier1: Vec<WorkItem>,
+    sent_tier2_ids: Vec<u64>,
+    sent_add_edge_ids: Vec<u64>,
+}
 
 /// Spawn a subprocess (or accept a pre-warmed one) and send the initial
 /// burst (Tier 2 first — no inference needed — then Tier 1 up to
@@ -553,7 +561,12 @@ fn spawn_and_initial_burst(
             break;
         }
     }
-    Some((sub, sent_items, sent_tier2_ids, sent_add_edge_ids))
+    Some(InitialBurst {
+        sub,
+        sent_tier1: sent_items,
+        sent_tier2_ids,
+        sent_add_edge_ids,
+    })
 }
 
 /// Drive one subprocess through its lifecycle — poll events, admit more work
