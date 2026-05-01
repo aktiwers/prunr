@@ -18,24 +18,16 @@ fn handle_cancel_raises_global_flag_during_processing() {
 
 #[test]
 fn handle_cancel_selected_raises_only_selected_item_flags() {
-    use super::super::item::{BatchItem, BatchStatus, ImageSource};
-    use super::super::item_settings::ItemSettings;
-    use std::sync::Arc;
+    use super::super::item::BatchStatus;
+    use super::fixtures::push_test_item;
 
     let mut app = PrunrApp::new_for_test();
     app.state = AppState::Processing;
     // Seed batch: id 1 selected+processing, id 2 selected+done, id 3 unselected+processing.
     for (id, selected, status) in [(1u64, true, BatchStatus::Processing), (2, true, BatchStatus::Done), (3, false, BatchStatus::Processing)] {
-        let mut item = BatchItem::new(
-            id, format!("x{id}.png"),
-            ImageSource::Bytes(Arc::new(Vec::new())),
-            (1, 1),
-            ItemSettings::default(),
-            String::new(),
-        );
+        let item = push_test_item(&mut app, id);
         item.selected = selected;
         item.status = status;
-        app.batch.items.push(item);
     }
 
     app.handle_cancel_selected();

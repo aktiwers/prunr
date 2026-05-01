@@ -1,30 +1,15 @@
 use super::super::app::PrunrApp;
 use super::super::state::AppState;
-use crate::gui::item::{BatchItem, ImageSource};
-use crate::gui::item_settings::ItemSettings;
-
-fn push_test_item(app: &mut PrunrApp, with_result: bool) {
-    let mut item = BatchItem::new(
-        1,
-        "test.png".to_string(),
-        ImageSource::Bytes(std::sync::Arc::new(Vec::new())),
-        (2, 2),
-        ItemSettings::default(),
-        String::new(),
-    );
-    if with_result {
-        item.result_rgba = Some(std::sync::Arc::new(image::RgbaImage::new(2, 2)));
-    }
-    app.batch.items.push(item);
-    app.batch.selected_index = 0;
-}
+use super::fixtures::push_test_item;
 
 #[test]
 fn handle_copy_without_clipboard_does_not_panic() {
     // PrunrApp::new_for_test() sets clipboard = None
     let mut app = PrunrApp::new_for_test();
     app.state = AppState::Done;
-    push_test_item(&mut app, true);
+    push_test_item(&mut app, 1).result_rgba =
+        Some(std::sync::Arc::new(image::RgbaImage::new(2, 2)));
+    app.batch.selected_index = 0;
 
     // Should not panic, should set error status_text
     app.handle_copy();
@@ -40,7 +25,8 @@ fn handle_copy_without_result_does_not_panic() {
     // No result on the selected item — handle_copy should be a no-op.
     let mut app = PrunrApp::new_for_test();
     app.state = AppState::Done;
-    push_test_item(&mut app, false);
+    push_test_item(&mut app, 1);
+    app.batch.selected_index = 0;
 
     // Should not panic
     app.handle_copy();

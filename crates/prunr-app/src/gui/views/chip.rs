@@ -168,6 +168,24 @@ pub(super) fn icon_toggle_button(ui: &mut Ui, icon: &str, active: bool) -> Respo
     ui.add(btn)
 }
 
+/// Wrap a chip render in `add_enabled_ui(active, ...)` and, when disabled,
+/// attach `disabled_hint` as a hover tooltip on the wrapper. Use for
+/// dependency-greyed chips where the user needs to know *why* they can't
+/// edit the value (e.g. `solid_line_color` only applies under
+/// `LineStyle::Solid`; `edge_scale` is ignored under `DualScale`).
+pub(super) fn guarded<R>(
+    ui: &mut Ui,
+    active: bool,
+    disabled_hint: &str,
+    body: impl FnOnce(&mut Ui) -> R,
+) -> R {
+    let resp = ui.add_enabled_ui(active, body);
+    if !active {
+        resp.response.on_hover_text(disabled_hint);
+    }
+    resp.inner
+}
+
 /// Attach a rich hover tooltip: strong setting-name heading + body text.
 /// Every chip uses this so the user always sees what they're hovering.
 pub(super) fn chip_tooltip(resp: Response, label: &str, body: &str) -> Response {
