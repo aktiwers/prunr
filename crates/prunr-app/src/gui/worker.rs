@@ -1075,7 +1075,7 @@ fn try_send_tier2(
         let tid = t2.item_id;
         if sub.send_repostprocess(
             t2.item_id,
-            crate::subprocess::manager::TensorView {
+            &crate::subprocess::manager::TensorView {
                 data: &t2.tensor_data,
                 height: t2.tensor_height,
                 width: t2.tensor_width,
@@ -1100,7 +1100,7 @@ fn try_send_add_edge(
         let tid = ae.item_id;
         if sub.send_add_edge_inference(
             ae.item_id,
-            crate::subprocess::manager::TensorView {
+            &crate::subprocess::manager::TensorView {
                 data: &ae.tensor_data,
                 height: ae.tensor_height,
                 width: ae.tensor_width,
