@@ -11,7 +11,7 @@
 
 use egui::{Color32, Pos2, Rect, Stroke, Ui};
 
-use crate::gui::brush_state::BrushState;
+use crate::gui::brush_state::{BrushSettings, BrushState};
 use crate::gui::item::BatchItem;
 use crate::gui::theme;
 
@@ -51,6 +51,7 @@ fn brush_grid_dims(item: &BatchItem, is_inpaint: bool) -> Option<(u16, u16)> {
 pub(crate) fn handle_input(
     ui: &mut Ui,
     brush_state: &mut BrushState,
+    settings: &BrushSettings,
     item: &BatchItem,
     img_rect: Rect,
     is_inpaint: bool,
@@ -60,7 +61,7 @@ pub(crate) fn handle_input(
         // muted cursor so the user gets feedback that brush is ON, but
         // skip pointer wiring.
         tracing::debug!(item_id = item.id, "brush active but no cached_tensor — cursor only");
-        draw_cursor(ui, img_rect, brush_state, /*armed=*/ false);
+        draw_cursor(ui, img_rect, settings, /*armed=*/ false);
         return BrushAction::None;
     };
 
@@ -80,26 +81,26 @@ pub(crate) fn handle_input(
     let pointer_on_img = hover.filter(|p| img_rect.contains(*p));
 
     // In-progress stroke trail (drawn first so the cursor renders on top).
-    draw_trail(ui, brush_state);
+    draw_trail(ui, brush_state, settings);
 
     // Cursor circle — armed only when the pointer is over the image.
-    draw_cursor(ui, img_rect, brush_state, pointer_on_img.is_some());
+    draw_cursor(ui, img_rect, settings, pointer_on_img.is_some());
 
     // Brush radius in model-pixel space — derived from the on-screen
     // img_rect width vs model width. One isotropic factor is enough:
     // letterboxed images keep proportional w/h.
+    let screen_radius = settings.radius;
+    let stamp = settings.stamp();
     let model_radius_for = |screen_radius: f32| -> f32 {
         screen_radius * (model_w as f32 / img_rect.width().max(1.0))
     };
 
-    let screen_radius = brush_state.settings().radius;
-
     if primary_pressed {
         if let Some(p) = pointer_on_img {
             tracing::debug!(model_w, model_h, "brush press — begin stroke");
-            brush_state.begin_stroke(model_w, model_h);
+            brush_state.begin_stroke(model_w, model_h, settings.shape);
             let m = screen_to_model(p, img_rect, model_w, model_h);
-            brush_state.extend_stroke_with_radius(m.x, m.y, model_radius_for(screen_radius));
+            brush_state.extend_stroke_with_radius(m.x, m.y, model_radius_for(screen_radius), stamp);
             brush_state.record_trail_stamp(p.x, p.y, screen_radius);
         }
     }
@@ -107,13 +108,13 @@ pub(crate) fn handle_input(
     if primary_down && brush_state.has_active_stroke() {
         if let Some(p) = pointer_on_img {
             let m = screen_to_model(p, img_rect, model_w, model_h);
-            brush_state.extend_stroke_with_radius(m.x, m.y, model_radius_for(screen_radius));
+            brush_state.extend_stroke_with_radius(m.x, m.y, model_radius_for(screen_radius), stamp);
             brush_state.record_trail_stamp(p.x, p.y, screen_radius);
         }
     }
 
     if primary_released && brush_state.has_active_stroke() {
-        if let Some(strokes) = brush_state.commit_stroke() {
+        if let Some(strokes) = brush_state.commit_stroke(stamp) {
             tracing::debug!("brush release — commit");
             return BrushAction::Committed(strokes);
         }
@@ -134,8 +135,7 @@ fn screen_to_model(p: Pos2, img_rect: Rect, model_w: u16, model_h: u16) -> Pos2 
 /// in the same frame can't accidentally cover them, and tinted
 /// brighter than the theme ACCENT so the trail is legible on dark
 /// images too.
-fn draw_trail(ui: &Ui, brush_state: &BrushState) {
-    let s = brush_state.settings();
+fn draw_trail(ui: &Ui, brush_state: &BrushState, s: &BrushSettings) {
     if s.strength <= 0.0 {
         return;
     }
@@ -178,20 +178,20 @@ fn draw_trail(ui: &Ui, brush_state: &BrushState) {
     let _ = solid;
 }
 
-fn draw_cursor(ui: &Ui, img_rect: Rect, brush_state: &BrushState, armed: bool) {
+fn draw_cursor(ui: &Ui, img_rect: Rect, s: &BrushSettings, armed: bool) {
     let pointer = ui.input(|i| i.pointer.hover_pos());
     let Some(p) = pointer else { return };
     if !img_rect.contains(p) {
         return;
     }
-    let r = brush_state.settings().radius.max(MIN_SCREEN_RADIUS_PX);
+    let r = s.radius.max(MIN_SCREEN_RADIUS_PX);
     let color = if armed {
         theme::ACCENT
     } else {
         Color32::from_rgba_premultiplied(160, 160, 160, 180)
     };
     let stroke = Stroke::new(1.5, color);
-    match brush_state.settings().shape {
+    match s.shape {
         prunr_core::brush::BrushShape::Circle => {
             ui.painter().circle_stroke(p, r, stroke);
         }

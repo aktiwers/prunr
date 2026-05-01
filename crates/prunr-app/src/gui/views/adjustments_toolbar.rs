@@ -307,13 +307,12 @@ pub(crate) fn render(
                     let sd_fast_mode = is_sd
                         && app_settings.lcm_routing_active(prunr_models::ModelId::SdV15InpaintFp16);
                     let outcome = super::brush_chip::render(
-                        ui, brush_state, app_settings.model.is_inpaint(), is_sd, sd_fast_mode,
+                        ui, &mut app_settings.brush, app_settings.model.is_inpaint(), is_sd, sd_fast_mode,
                     );
                     if outcome.clear_requested {
                         change.clear_correction_requested = true;
                     }
-                    if outcome.committed && app_settings.brush != *brush_state.settings() {
-                        app_settings.brush = brush_state.settings().clone();
+                    if outcome.committed {
                         change.brush_settings_committed = true;
                     }
                 }

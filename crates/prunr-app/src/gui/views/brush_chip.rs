@@ -5,7 +5,7 @@
 
 use egui::{Color32, Sense, Stroke, Ui};
 
-use crate::gui::brush_state::{BrushSettings, BrushState};
+use crate::gui::brush_state::BrushSettings;
 use crate::gui::theme;
 use prunr_core::brush::{BrushMode, BrushShape};
 
@@ -32,12 +32,12 @@ pub(super) struct BrushChipOutcome {
 /// guidance into training and ignores the runtime knob.
 pub(super) fn render(
     ui: &mut Ui,
-    brush_state: &mut BrushState,
+    s: &mut BrushSettings,
     is_inpaint_mode: bool,
     is_sd_mode: bool,
     sd_fast_mode: bool,
 ) -> BrushChipOutcome {
-    let label = chip_label(brush_state.settings());
+    let label = chip_label(s);
     let resp = ui
         .scope(|ui| {
             ui.set_min_width(LABEL_PAD_WIDTH);
@@ -52,7 +52,6 @@ pub(super) fn render(
 
     let mut outcome = BrushChipOutcome::default();
     chip::popup_for(ui, ui.id().with("brush_chip_popover"), &resp, |ui| {
-        let s = brush_state.settings_mut();
 
         ui.horizontal(|ui| {
             ui.vertical(|ui| {

@@ -271,7 +271,7 @@ impl PrunrApp {
             show_pipeline_flow: false,
             pending_copy: false,
             zoom_state: Default::default(),
-            brush_state: super::brush_state::BrushState::with_settings(settings.brush.clone()),
+            brush_state: super::brush_state::BrushState::default(),
             download_manager: super::download_manager::DownloadManager::new(),
             show_original: false,
             prev_title: String::new(),
@@ -668,7 +668,7 @@ impl PrunrApp {
             tracing::warn!(item_id, "inpaint dispatch skipped: source RGBA unavailable");
             return;
         };
-        let bs = self.brush_state.settings();
+        let bs = &self.settings.brush;
         let raw_backend = self.settings.model.to_model_id()
             .unwrap_or(prunr_models::ModelId::LaMaFp32);
         let backend = if self.settings.lcm_routing_active(raw_backend) {
