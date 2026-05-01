@@ -78,8 +78,6 @@ pub struct PrunrApp {
 
     // Settings
     pub(crate) show_settings: bool,
-    /// Timestamp when settings was last opened (for click-outside debounce)
-    pub(crate) settings_opened_at: f64,
     pub(crate) settings: Settings,
     /// Which Settings tab the modal is showing. Transient UI state — not
     /// persisted; opening Settings always starts on General.
@@ -291,7 +289,6 @@ impl PrunrApp {
             hardware_install_cache: super::hardware_cache::HardwareInstallCache::default(),
             runtime_prompt: None,
             runtime_prompt_evaluated: false,
-            settings_opened_at: 0.0,
             settings,
             canvas_switch_id: 0,
             result_switch_id: 0,
@@ -329,9 +326,6 @@ impl PrunrApp {
                 if let Some(t) = super::views::settings::SettingsTab::from_label(s) {
                     app.settings_tab = t;
                     app.show_settings = true;
-                    // settings_opened_at stays at the default 0.0 — first
-                    // frame's backdrop-debounce check uses egui input time
-                    // which won't be < 0.0, so no premature dismissal.
                 }
             }
         }
@@ -2338,9 +2332,8 @@ impl PrunrApp {
         }
     }
 
-    pub(crate) fn open_settings(&mut self, ctx: &egui::Context) {
+    pub(crate) fn open_settings(&mut self, _ctx: &egui::Context) {
         self.show_settings = true;
-        self.settings_opened_at = ctx.input(|i| i.time);
         self.hardware_install_cache = super::hardware_cache::HardwareInstallCache::refresh();
     }
 

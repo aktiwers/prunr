@@ -6,7 +6,7 @@
 //! Per-image knobs (gamma, threshold, line mode, …) live on the persistent
 //! adjustments toolbar (rows 2 + 3), not here.
 
-use egui::{Align2, RichText};
+use egui::RichText;
 
 use crate::gui::app::PrunrApp;
 use crate::gui::settings::Settings;
@@ -74,57 +74,49 @@ fn slider_row(
 }
 
 pub fn render(ctx: &egui::Context, app: &mut PrunrApp) {
-    theme::draw_modal_backdrop(ctx, "settings_backdrop");
-
-    let mut open = true;
-    let window_response = egui::Window::new("Settings")
-        .open(&mut open)
-        .collapsible(false)
-        .resizable(false)
-        .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
-        .fixed_size([theme::SETTINGS_DIALOG_WIDTH, theme::SETTINGS_DIALOG_HEIGHT])
-        .frame(theme::overlay_frame())
-        .show(ctx, |ui| {
+    let mut hardware_intent: Option<HardwareSectionIntent> = None;
+    let closed = theme::standard_modal_window(
+        ctx,
+        "settings",
+        "Settings",
+        [theme::SETTINGS_DIALOG_WIDTH, theme::SETTINGS_DIALOG_HEIGHT],
+        |ui| {
             theme::apply_modal_visuals(ui);
-
             render_tab_strip(ui, &mut app.settings_tab);
             ui.add_space(theme::SPACE_SM);
 
             // Tab content scrolls inside its own region so the footer
             // (Reset row) doesn't overlap long content.
             let scroll_height = (ui.available_height() - theme::MODAL_FOOTER_RESERVED).max(0.0);
-            let hardware_intent = egui::ScrollArea::vertical()
+            hardware_intent = egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .max_height(scroll_height)
                 .show(ui, |ui| {
                     match app.settings_tab {
                         SettingsTab::General => {
-                            let ctx = HardwareSectionContext {
+                            let hw_ctx = HardwareSectionContext {
                                 openvino_installed: app.hardware_install_cache.openvino,
                                 install_in_progress: app.runtime_install.is_some(),
                                 install_status_text: app.runtime_install.as_ref()
                                     .map(|p| p.last_event.status_text()),
                             };
-                            render_tab_general(ui, &mut app.settings, &ctx)
+                            render_tab_general(ui, &mut app.settings, &hw_ctx)
                         }
                         SettingsTab::Behavior => { render_tab_behavior(ui, &mut app.settings); None }
                         SettingsTab::Hotkeys => { render_tab_hotkeys(ui); None }
                     }
                 })
                 .inner;
-            if let Some(intent) = hardware_intent {
-                dispatch_hardware_intent(app, intent);
-            }
 
             ui.separator();
             render_modal_footer(ui, app);
-        });
+        },
+    );
 
-    let now = ctx.input(|i| i.time);
-    let debounce_passed = (now - app.settings_opened_at) > theme::MODAL_BACKDROP_DEBOUNCE_SECS;
-    let close_via_backdrop = debounce_passed && theme::backdrop_clicked(ctx, &window_response);
-
-    if !open || close_via_backdrop {
+    if let Some(intent) = hardware_intent {
+        dispatch_hardware_intent(app, intent);
+    }
+    if closed {
         app.close_settings(ctx);
     }
 }
