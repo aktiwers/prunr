@@ -40,7 +40,7 @@ pub(crate) fn is_self_drop(path: &Path) -> bool {
     path.components().any(|c| c.as_os_str() == DRAG_SUBDIR)
 }
 
-/// Remove ALL temp drag files on a background thread. Called on graceful app exit.
+/// Remove ALL temp drag files. Called on graceful app exit.
 pub(crate) fn cleanup_all() {
     crate::fs_util::sweep_dir_files_async(temp_dir());
 }
