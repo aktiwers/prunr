@@ -72,6 +72,13 @@ dirs = "6"
 sysinfo = "0.37"
 memory-stats = "1"
 
+# Runtime install + xtask shared deps. Hoisted so version bumps live in
+# one place and the lockfile can't drift between the two callers.
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls", "json"] }
+sha2 = "0.10"
+hex = "0.4"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
 # Observability
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

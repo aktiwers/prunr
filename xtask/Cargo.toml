@@ -6,10 +6,10 @@ publish = false
 
 [dependencies]
 anyhow = "1"
-reqwest = { version = "0.12", features = ["blocking", "rustls-tls", "json"], default-features = false }
+reqwest = { workspace = true }
 serde_json = { workspace = true }
-sha2 = "0.10"
-hex = "0.4"
+sha2 = { workspace = true }
+hex = { workspace = true }
 zstd = { workspace = true }
 dirs = { workspace = true }
 # `dev-models` keeps `include_bytes!` out so xtask can compile before the
@@ -18,11 +18,10 @@ prunr-models = { path = "../crates/prunr-models", features = ["dev-models"] }
 prunr-runtime-install = { path = "../crates/prunr-runtime-install" }
 
 # Phase 19-02b probe — see `probe_load_dynamic` in src/main.rs.
-# api-23: rc.12 vitis.rs build bug under load-dynamic at api-24.
-ort = { version = "=2.0.0-rc.12", default-features = false, features = ["load-dynamic", "ndarray", "api-23"] }
+ort = { workspace = true }
 ndarray = { workspace = true }
 # 19-09: extract OpenVINO ORT bundles from PyPI .whl files (zip archives).
-zip = { version = "2", default-features = false, features = ["deflate"] }
+zip = { workspace = true }
 
 # 20-04: read/write PNGs for the `render-golden-diff` subcommand.
 image = { workspace = true }
