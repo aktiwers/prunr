@@ -108,10 +108,10 @@ pub fn guided_filter_alpha(
         .par_chunks_mut(wu)
         .enumerate()
         .for_each(|(y, row)| {
-            for x in 0..wu {
+            for (x, slot) in row.iter_mut().enumerate() {
                 let idx = y * wu + x;
                 let val = (mean_a[idx] * guide_f[idx] + mean_b[idx]).clamp(0.0, 1.0);
-                row[x] = (val * 255.0) as u8;
+                *slot = (val * 255.0) as u8;
             }
         });
     out
@@ -214,7 +214,7 @@ pub(crate) fn box_filter_into(src: &[f32], w: u32, h: u32, radius: u32, dst: &mu
     if do_par_lookup {
         dst.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
             let yi = y as i64;
-            for x in 0..w {
+            for (x, slot) in row.iter_mut().enumerate() {
                 let xi = x as i64;
                 let x1 = (xi - r - 1).max(-1);
                 let y1 = (yi - r - 1).max(-1);
@@ -222,7 +222,7 @@ pub(crate) fn box_filter_into(src: &[f32], w: u32, h: u32, radius: u32, dst: &mu
                 let y2 = (yi + r).min(h as i64 - 1);
                 let area = (x2 - x1) as f32 * (y2 - y1) as f32;
                 let sum = get(x2, y2) - get(x1, y2) - get(x2, y1) + get(x1, y1);
-                row[x] = sum / area.max(1.0);
+                *slot = sum / area.max(1.0);
             }
         });
     } else {

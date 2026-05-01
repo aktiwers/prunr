@@ -198,9 +198,9 @@ mod tests {
                 // the ordering, slot wouldn't match val * 2 at idx.
                 *slot = (val * 2).wrapping_add(idx as u32);
             });
-        for i in 0..1000 {
+        for (i, &out) in outputs.iter().enumerate().take(1000) {
             assert_eq!(
-                outputs[i],
+                out,
                 (i as u32 * 2).wrapping_add(i as u32),
                 "outputs[{i}] mis-ordered",
             );

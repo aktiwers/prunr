@@ -609,8 +609,8 @@ mod tests {
         let w = DEXINED_W as usize;
         let h = DEXINED_H as usize;
         let mut tensor = vec![0.0_f32; h * w];
-        for i in 0..h * w / 2 {
-            tensor[i] = 10.0; // sigmoid → ~1 → edge
+        for slot in tensor.iter_mut().take(h * w / 2) {
+            *slot = 10.0; // sigmoid → ~1 → edge
         }
         let original = solid_rgb(64, 48);
         let edge = crate::EdgeSettings { line_strength: 0.5, solid_line_color: Some([255, 0, 0]), edge_thickness: 0, edge_scale: crate::EdgeScale::Fused, compose_mode: crate::ComposeMode::default(), line_style: crate::LineStyle::default(), input_transform: crate::InputTransform::default() };

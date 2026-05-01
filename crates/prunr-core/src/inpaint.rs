@@ -343,10 +343,10 @@ pub fn sharpen_inpainted(image: &RgbaImage, mask: &GrayImage, amount: f32) -> Rg
             let global_x = bbox_x + bx;
             for c in 0..3 {
                 let mut sum = 0.0;
-                for k in 0..5 {
+                for (k, &kv) in SHARPEN_KERNEL.iter().enumerate() {
                     let xi = (global_x as isize + k as isize - 2)
                         .clamp(0, img_w as isize - 1) as usize;
-                    sum += SHARPEN_KERNEL[k] * src[(global_y * img_w + xi) * 4 + c] as f32;
+                    sum += kv * src[(global_y * img_w + xi) * 4 + c] as f32;
                 }
                 row[bx * 3 + c] = sum;
             }
@@ -377,14 +377,14 @@ pub fn sharpen_inpainted(image: &RgbaImage, mask: &GrayImage, amount: f32) -> Rg
             let pix = global_idx * 4;
             for c in 0..3 {
                 let mut blur = 0.0;
-                for k in 0..5 {
+                for (k, &kv) in SHARPEN_KERNEL.iter().enumerate() {
                     // Clamp at bbox bounds — they extend the mask
                     // region by `SHARPEN_MARGIN`, so the clamped index
                     // points at the same source pixel a full-image
                     // variant's clamp would have hit.
                     let by_kernel = (by as isize + k as isize - 2)
                         .clamp(0, bbox_h as isize - 1) as usize;
-                    blur += SHARPEN_KERNEL[k] * tmp[(by_kernel * bbox_w + bx) * 3 + c];
+                    blur += kv * tmp[(by_kernel * bbox_w + bx) * 3 + c];
                 }
                 let s = src[pix + c] as f32;
                 let sharp = s + amount * (s - blur);
@@ -1531,10 +1531,10 @@ mod tests {
             for x in 0..w_us {
                 for c in 0..3 {
                     let mut sum = 0.0;
-                    for k in 0..5 {
+                    for (k, &kv) in kernel.iter().enumerate() {
                         let xi = (x as isize + k as isize - 2)
                             .clamp(0, w_us as isize - 1) as usize;
-                        sum += kernel[k] * src[(y * w_us + xi) * 4 + c] as f32;
+                        sum += kv * src[(y * w_us + xi) * 4 + c] as f32;
                     }
                     tmp[(y * w_us + x) * 3 + c] = sum;
                 }
@@ -1555,10 +1555,10 @@ mod tests {
                 }
                 for c in 0..3 {
                     let mut blur = 0.0;
-                    for k in 0..5 {
+                    for (k, &kv) in kernel.iter().enumerate() {
                         let yi = (y as isize + k as isize - 2)
                             .clamp(0, h_us as isize - 1) as usize;
-                        blur += kernel[k] * tmp[(yi * w_us + x) * 3 + c];
+                        blur += kv * tmp[(yi * w_us + x) * 3 + c];
                     }
                     let s = src[pix + c] as f32;
                     let sharp = s + amount * (s - blur);
@@ -1600,9 +1600,9 @@ mod tests {
         let src = source.as_raw();
         let inp = inpainted.as_raw();
         let n = (w * h) as usize;
-        for i in 0..n {
+        debug_assert_eq!(dist.len(), n);
+        for (i, &d) in dist.iter().enumerate() {
             let pix = i * 4;
-            let d = dist[i];
             if d <= 0.0 {
                 out_raw[pix] = src[pix];
                 out_raw[pix + 1] = src[pix + 1];
