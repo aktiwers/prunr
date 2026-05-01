@@ -641,6 +641,11 @@ fn run_batch(args: &Cli) -> i32 {
 
 /// Run batch processing via subprocess with auto-retry on OOM.
 /// Accepts file paths — bytes are read lazily by the subprocess.
+// Single-call CLI dispatch — recipe (model + mask + line_mode + edge + bg*)
+// + runtime knobs (jobs, force_cpu) + UI surface (spinners, paths, quiet)
+// arrive together. A struct split here trades 14 args for 14 fields
+// behind a builder no other site reuses.
+#[allow(clippy::too_many_arguments)]
 fn run_batch_subprocess(
     valid_paths: &[std::path::PathBuf],
     valid_indices: &[usize],

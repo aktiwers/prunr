@@ -1660,12 +1660,10 @@ impl PrunrApp {
     /// Demote Tier 2 (compressed RAM) history to Tier 3 (disk) under memory pressure.
     fn demote_history_to_disk(&mut self) {
         for item in &mut self.batch.items {
-            let mut seq = 0usize;
-            for entry in item.history.iter_mut().chain(item.redo_stack.iter_mut()) {
+            for (seq, entry) in item.history.iter_mut().chain(item.redo_stack.iter_mut()).enumerate() {
                 if matches!(entry.slot, HistorySlot::Compressed(_)) {
                     *entry = std::mem::take(entry).demote_to_disk(item.id, seq);
                 }
-                seq += 1;
             }
         }
     }

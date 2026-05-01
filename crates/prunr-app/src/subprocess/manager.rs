@@ -237,6 +237,9 @@ impl SubprocessManager {
     /// reads the seg tensor without deleting it and hands the path back as
     /// `tensor_cache_path` on `ImageDone`, so the parent's reader takes
     /// ownership — no extra copy round-trip.
+    // Args mirror the IPC variant fields one-for-one — packing them into a
+    // struct adds an indirection without consolidating call sites.
+    #[allow(clippy::too_many_arguments)]
     pub fn send_add_edge_inference(
         &mut self,
         item_id: u64,
@@ -269,6 +272,7 @@ impl SubprocessManager {
     }
 
     /// Send a Tier 2 re-postprocess command (skip inference, reuse cached tensor).
+    #[allow(clippy::too_many_arguments)] // args mirror the IPC variant fields
     pub fn send_repostprocess(
         &mut self,
         item_id: u64,
@@ -308,6 +312,7 @@ impl SubprocessManager {
     /// model_id + sd_req + post-process tuning. Returns immediately —
     /// completion comes back via `InpaintDone` / `InpaintError` events
     /// through `poll_events`.
+    #[allow(clippy::too_many_arguments)] // args mirror the IPC variant fields
     pub fn send_inpaint(
         &mut self,
         item_id: u64,

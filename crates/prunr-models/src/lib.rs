@@ -36,9 +36,9 @@ pub enum ModelId {
     SdV15LcmInpaintFp16,
     /// TAESD (Tiny AutoEncoder for SD) FP16. Two-part bundle: encoder
     /// + decoder, ~5 MB each. Drop-in replacement for SD 1.5's standard
-    /// VAE — ~3× faster decode at slight quality cost. Used as the VAE
-    /// backend when fast mode is on AND the bundle is installed.
-    /// Bundle is the output of `scripts/export_taesd.py`.
+    ///   VAE — ~3× faster decode at slight quality cost. Used as the VAE
+    ///   backend when fast mode is on AND the bundle is installed.
+    ///   Bundle is the output of `scripts/export_taesd.py`.
     TaesdFp16,
 }
 
@@ -805,6 +805,7 @@ mod tests {
         // the comment above tells them to also extend `ModelId::ALL`.
         // (Rust enums can't be reflected in stable; removal-from-ALL
         // alone is silent — a deliberate code change a reviewer catches.)
+        #[allow(non_snake_case)] // SCREAMING_ALL is the signal — the name is the message
         fn _force_developer_to_update_ALL_too(id: ModelId) {
             match id {
                 ModelId::Silueta

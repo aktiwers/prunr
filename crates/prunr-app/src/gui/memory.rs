@@ -170,7 +170,7 @@ pub fn safe_max_jobs(model: ModelKind) -> usize {
     let budget = available / 2; // 50% of available RAM for engines
     let cost = per_engine_cost(model);
     if cost == 0 { return 4; }
-    (budget / cost).max(1).min(8)
+    (budget / cost).clamp(1, 8)
 }
 
 #[cfg(test)]

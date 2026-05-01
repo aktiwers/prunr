@@ -480,6 +480,9 @@ fn poll_additional_items(
     }
 }
 
+/// `(subprocess, sent_tier1_items, sent_tier2_ids, sent_add_edge_ids)`.
+type InitialBurst = (SubprocessManager, Vec<WorkItem>, Vec<u64>, Vec<u64>);
+
 /// Spawn a subprocess (or accept a pre-warmed one) and send the initial
 /// burst (Tier 2 first — no inference needed — then Tier 1 up to
 /// `max_jobs`). On spawn failure, reports errors for every pending item
@@ -496,7 +499,7 @@ fn spawn_and_initial_burst(
     cancels: &super::processor::CancelRegistry,
     res_tx: &mpsc::Sender<WorkerResult>,
     ctx: &egui::Context,
-) -> Option<(SubprocessManager, Vec<WorkItem>, Vec<u64>, Vec<u64>)> {
+) -> Option<InitialBurst> {
     // Drop anything cancelled before spawn — they don't count toward
     // `effective_jobs` and shouldn't occupy burst slots either.
     drop_cancelled_pending(state, cancels, res_tx, ctx);
@@ -535,9 +538,12 @@ fn spawn_and_initial_burst(
     let burst = state.max_jobs.min(total_pending);
     let mut sent_count = 0;
     while sent_count < burst {
-        if try_send_tier2(&mut sub, &mut state.pending_tier2, &mut sent_tier2_ids) {
-            sent_count += 1;
-        } else if try_send_add_edge(&mut sub, &mut state.pending_add_edge, &mut sent_add_edge_ids) {
+        // Priority order: Tier 2 (cheap re-postprocess) → AddEdge → Tier 1.
+        // `||` short-circuits — try_send_add_edge only runs if Tier 2 had
+        // nothing pending. Each try_send_* is side-effecting on success.
+        if try_send_tier2(&mut sub, &mut state.pending_tier2, &mut sent_tier2_ids)
+            || try_send_add_edge(&mut sub, &mut state.pending_add_edge, &mut sent_add_edge_ids)
+        {
             sent_count += 1;
         } else if let Some(item) = state.pending.pop_front() {
             if send_item_to_sub(&mut sub, &item).is_err() {

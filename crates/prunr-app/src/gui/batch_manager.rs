@@ -44,6 +44,9 @@ pub(crate) struct StatusReport {
 
 /// Which shape the Process button should take for the current selection state.
 /// Drives both the button label and the icon the toolbar renders.
+// `Process*` prefix matches the user-visible button labels and the
+// dispatcher arms in `process_items` — renaming would split that pairing.
+#[allow(clippy::enum_variant_names)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ProcessButtonLabel {
     /// No checkboxes set — click targets the currently-viewed item only.
