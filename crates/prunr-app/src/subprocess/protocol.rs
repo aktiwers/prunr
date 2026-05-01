@@ -195,35 +195,18 @@ pub enum SubprocessEvent {
     },
 }
 
-/// Return the preferred directory for IPC temp files.
-///
-/// PID-namespaced to prevent collisions between multiple app instances.
-/// Uses the **parent** PID so both parent and child agree on the same directory.
-/// Prefers RAM-backed tmpfs (/dev/shm on Linux), falls back to system temp dir.
-///
-/// **Init-time sweep:** the OnceLock initializer creates the directory AND
-/// sweeps any stale files left by a previous prunr process with the same PID
-/// (rare but possible after a crash + OS pid reuse). This means any caller —
-/// CLI downscale path writing `cli_ds_*.img`, inpaint bridge writing
-/// `inpaint-img-*.png`, etc. — can write to a path derived from
-/// `ipc_temp_dir()` without racing a later cleanup. The sweep happens on
-/// first access; subsequent calls return the cached path with no sweep.
-///
-/// Earlier design had the sweep inside `SubprocessManager::spawn_inner`, which
-/// raced any caller that wrote temp files BEFORE spawning the subprocess
-/// (CLI's `--large-image=downscale` path; the inpaint bridge's lazy
-/// first-dispatch — see `5454d46`'s once-gate fix and B2 in the review).
+/// PID-namespaced IPC temp dir, RAM-backed (/dev/shm) on Linux when available.
+/// The OnceLock initializer creates the dir AND sweeps any stale files left
+/// by a previous prunr process with the same PID, so writers (CLI downscale,
+/// inpaint bridge, manager) never race a later cleanup.
 pub fn ipc_temp_dir() -> std::path::PathBuf {
     use std::sync::OnceLock;
     static DIR: OnceLock<std::path::PathBuf> = OnceLock::new();
     DIR.get_or_init(|| init_temp_dir_for_pid(std::process::id())).clone()
 }
 
-/// Resolve the IPC temp dir path for `pid`, create it, and sweep any stale
-/// files. Extracted from `ipc_temp_dir()`'s OnceLock initializer so the
-/// init-time-sweep contract can be tested in isolation (without depending on
-/// the global OnceLock state, which is process-wide and order-dependent
-/// across tests in the same binary).
+/// Body of `ipc_temp_dir()`'s OnceLock init, exposed for unit tests
+/// (the global is process-wide and order-dependent across tests).
 fn init_temp_dir_for_pid(pid: u32) -> std::path::PathBuf {
     let dir = resolve_temp_dir_path(pid);
     let _ = std::fs::create_dir_all(&dir);
@@ -233,20 +216,15 @@ fn init_temp_dir_for_pid(pid: u32) -> std::path::PathBuf {
 
 fn resolve_temp_dir_path(pid: u32) -> std::path::PathBuf {
     #[cfg(target_os = "linux")]
-    {
-        let dir = std::path::PathBuf::from(format!("/dev/shm/prunr-ipc-{pid}"));
-        // Use /dev/shm if it exists (it does on every Linux distro we
-        // support); the initializer below will create the per-pid subdir.
-        if std::path::Path::new("/dev/shm").is_dir() {
-            return dir;
-        }
+    if std::path::Path::new("/dev/shm").is_dir() {
+        return std::path::PathBuf::from(format!("/dev/shm/prunr-ipc-{pid}"));
     }
     std::env::temp_dir().join(format!("prunr-ipc-{pid}"))
 }
 
-/// Remove every file directly inside `dir` (non-recursive). Misses on
-/// IO errors (best-effort); a stale orphan won't break the next run because
-/// the IPC filenames are item-id-keyed and writers re-create them.
+/// Remove every file directly inside `dir`. Non-recursive on purpose — IPC
+/// doesn't create subdirs, and recursing would risk wiping anything a future
+/// caller mistakenly drops there.
 fn sweep_dir(dir: &std::path::Path) {
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
@@ -255,10 +233,9 @@ fn sweep_dir(dir: &std::path::Path) {
     }
 }
 
-/// Explicit re-entrant cleanup of the current process's IPC temp dir. Used
-/// for crash recovery after a subprocess hard-kill (see
-/// `worker::cancel_subprocess` and `cli.rs` post-crash retry path) — these
-/// callers know they want a sweep regardless of the once-only init.
+/// Explicit cleanup for crash-recovery callers (subprocess hard-kill via
+/// `worker::cancel_subprocess`, CLI post-crash retry). Re-entrant; safe to
+/// call after the OnceLock-gated init has already run.
 pub fn cleanup_ipc_temp() {
     sweep_dir(&ipc_temp_dir());
 }
@@ -269,11 +246,6 @@ mod tests {
     //! `SubprocessEvent` variant. A single generic helper covers both enums
     //! via `PartialEq` — any drift between encoded and decoded payload fails
     //! the assertion with a real diff, not a stringified debug comparison.
-    //!
-    //! Plus boundary tests for `ipc_temp_dir`'s init-time sweep contract
-    //! (Phase 21-02 / B2): the sweep must run on first access, must NOT run
-    //! again on subsequent accesses, and the public `cleanup_ipc_temp` must
-    //! be safely re-entrant for crash-recovery callers.
     use super::*;
     use bincode::config::standard;
     use serde::de::DeserializeOwned;
@@ -496,151 +468,80 @@ mod tests {
 
     // ---------- ipc_temp_dir lifecycle (B2 / Phase 21-02) ----------
 
-    /// Build a unique sandbox dir for a test (avoids touching the real
-    /// `/dev/shm/prunr-ipc-<pid>` path which is OnceLock-cached and would
-    /// be polluted by prior tests in the same binary).
-    fn unique_sandbox(label: &str) -> PathBuf {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        // pid + nanos gives uniqueness across parallel test threads in the
-        // same process (cargo runs lib tests on a thread pool); the Debug
-        // formatting of ThreadId is stable enough for a sandbox label.
-        let tid = format!("{:?}", std::thread::current().id());
-        std::env::temp_dir().join(format!(
-            "prunr-test-{}-{}-{}-{}",
-            label,
-            std::process::id(),
-            nanos,
-            tid.replace(['(', ')', ' '], ""),
-        ))
+    /// "test"-prefixed pseudo-PID base; `wrapping_add(real pid)` ensures the
+    /// path never collides with a real `ipc_temp_dir()` in this same binary.
+    const TEST_PID_BASE: u32 = 0x_7E57_0000;
+
+    fn poison(dir: &std::path::Path, files: &[&str]) {
+        std::fs::create_dir_all(dir).unwrap();
+        for f in files {
+            std::fs::write(dir.join(f), b"x").unwrap();
+        }
+    }
+
+    fn assert_gone(dir: &std::path::Path, files: &[&str]) {
+        for f in files {
+            assert!(!dir.join(f).exists(), "expected {f} swept");
+        }
     }
 
     #[test]
     fn sweep_dir_removes_files_non_recursive() {
-        let dir = unique_sandbox("sweep-dir");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("a.bin"), b"a").unwrap();
-        std::fs::write(dir.join("b.png"), b"b").unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let dir = scratch.path();
+        poison(dir, &["a.bin", "b.png"]);
         std::fs::create_dir_all(dir.join("subdir")).unwrap();
         std::fs::write(dir.join("subdir").join("nested.bin"), b"c").unwrap();
 
-        super::sweep_dir(&dir);
+        super::sweep_dir(dir);
 
-        // Files at the top level: gone.
-        assert!(!dir.join("a.bin").exists(), "sweep_dir must remove top-level files");
-        assert!(!dir.join("b.png").exists(), "sweep_dir must remove top-level files");
-        // Nested subdir: untouched (sweep is non-recursive by design — IPC
-        // doesn't create subdirs in the temp area, and recursing would risk
-        // wiping anything a future caller mistakenly drops there).
-        assert!(dir.join("subdir").is_dir(), "sweep_dir must NOT recurse");
-        assert!(
-            dir.join("subdir").join("nested.bin").exists(),
-            "sweep_dir must NOT recurse"
-        );
-
-        let _ = std::fs::remove_dir_all(&dir);
+        assert_gone(dir, &["a.bin", "b.png"]);
+        // Non-recursive: subdir + its contents survive.
+        assert!(dir.join("subdir").is_dir());
+        assert!(dir.join("subdir").join("nested.bin").exists());
     }
 
-    /// Phase 21-02 / B2 contract: the init function (the body of
-    /// `ipc_temp_dir()`'s OnceLock initializer) must sweep stale files when
-    /// it runs. Pre-poisons the dir for a test-only PID, calls the init
-    /// helper, asserts stale files are gone — proving that any caller who
-    /// then writes via the path (CLI downscale, inpaint bridge,
-    /// SubprocessManager) lands in a clean dir.
     #[test]
     fn init_temp_dir_for_pid_sweeps_stale_leftovers() {
-        // Use a unique PID-like number so we never collide with a real
-        // ipc_temp_dir() in this same test binary's process.
-        let test_pid: u32 = 0xDEAD_BEAFu32.wrapping_add(std::process::id());
-        let dir = super::resolve_temp_dir_path(test_pid);
+        let pid = TEST_PID_BASE.wrapping_add(std::process::id());
+        let dir = super::resolve_temp_dir_path(pid);
+        let stale = ["stale-cli_ds_0.img", "stale-inpaint-out.png"];
+        poison(&dir, &stale);
 
-        // Pre-poison: simulate "previous prunr instance with same PID
-        // crashed and left these files behind".
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("stale-cli_ds_0.img"), b"orphan").unwrap();
-        std::fs::write(dir.join("stale-inpaint-out.png"), b"orphan").unwrap();
-        assert!(dir.join("stale-cli_ds_0.img").exists());
-        assert!(dir.join("stale-inpaint-out.png").exists());
+        let returned = super::init_temp_dir_for_pid(pid);
 
-        // Init: should sweep.
-        let returned = super::init_temp_dir_for_pid(test_pid);
         assert_eq!(returned, dir);
-
-        // Stale files gone.
-        assert!(
-            !dir.join("stale-cli_ds_0.img").exists(),
-            "init_temp_dir_for_pid must sweep stale files"
-        );
-        assert!(
-            !dir.join("stale-inpaint-out.png").exists(),
-            "init_temp_dir_for_pid must sweep stale files"
-        );
-        // Dir itself still exists (init created it before sweeping).
+        assert_gone(&dir, &stale);
         assert!(dir.is_dir());
 
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Files written AFTER init must survive any subsequent `init` re-call
-    /// for the same PID. This is the exact race shape B2 fixed: a caller
-    /// writes a file, then something later (formerly: spawn) wipes the
-    /// dir. Init is now idempotent-by-construction (sweep only happens on
-    /// the first call inside the OnceLock); this test verifies the
-    /// underlying `init_temp_dir_for_pid` is safe to call again — though
-    /// in practice the OnceLock guarantees it never is.
+    /// Pins "init unconditionally sweeps; OnceLock above it gates once-only."
+    /// If init ever becomes idempotent on its own, this assertion updates
+    /// consciously — callers must not rely on that.
     #[test]
-    fn writes_after_init_survive_a_second_init_with_no_pre_existing_files() {
-        let test_pid: u32 = 0xCAFE_BABEu32.wrapping_add(std::process::id());
-        let dir = super::resolve_temp_dir_path(test_pid);
+    fn second_init_call_sweeps_post_init_writes() {
+        let pid = TEST_PID_BASE.wrapping_add(std::process::id().wrapping_add(1));
+        let dir = super::resolve_temp_dir_path(pid);
         let _ = std::fs::remove_dir_all(&dir);
 
-        // First init on a fresh path: dir created, no files to sweep.
-        super::init_temp_dir_for_pid(test_pid);
-        // Caller writes a file (the CLI / inpaint bridge pattern).
-        let marker = dir.join("cli_ds_0.img");
-        std::fs::write(&marker, b"important payload").unwrap();
-        assert!(marker.exists());
-
-        // Second init: the underlying helper DOES sweep (it doesn't know
-        // any better — the OnceLock above it is what enforces "once").
-        // This test pins that contract: writers must rely on the OnceLock
-        // gate, not on init being idempotent. If we ever change init to
-        // be idempotent (skip sweep on subsequent calls), this assertion
-        // updates and the contract changes consciously.
-        super::init_temp_dir_for_pid(test_pid);
-        assert!(
-            !marker.exists(),
-            "init_temp_dir_for_pid sweeps unconditionally — \
-             OnceLock above it gates the once-only contract; \
-             callers must never invoke init_temp_dir_for_pid twice for the same pid"
-        );
+        super::init_temp_dir_for_pid(pid);
+        std::fs::write(dir.join("cli_ds_0.img"), b"payload").unwrap();
+        super::init_temp_dir_for_pid(pid);
+        assert_gone(&dir, &["cli_ds_0.img"]);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Public `cleanup_ipc_temp` must be safely re-entrant for crash-recovery
-    /// callers (`worker::cancel_subprocess`, `cli.rs` post-crash retry path).
-    /// Re-entrancy here means: calling it multiple times must not panic and
-    /// must always leave the dir empty (sweeping each time is fine; the
-    /// OnceLock-gated init only runs once but cleanup_ipc_temp uses sweep_dir
-    /// directly, not init).
     #[test]
     fn cleanup_ipc_temp_is_reentrant() {
-        // Trigger the global ipc_temp_dir() init (idempotent in this test
-        // binary's process — only happens once across all tests).
         let dir = ipc_temp_dir();
-
-        // Drop a marker so we have something to sweep.
         std::fs::write(dir.join("test-reentrant.bin"), b"x").unwrap();
-        assert!(dir.join("test-reentrant.bin").exists());
 
         cleanup_ipc_temp();
-        assert!(!dir.join("test-reentrant.bin").exists());
-
-        // Second call: must not panic, dir stays empty.
+        assert_gone(&dir, &["test-reentrant.bin"]);
         cleanup_ipc_temp();
-        assert!(!dir.join("test-reentrant.bin").exists());
+        assert_gone(&dir, &["test-reentrant.bin"]);
     }
 }
