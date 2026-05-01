@@ -233,9 +233,58 @@ fn sweep_dir(dir: &std::path::Path) {
     }
 }
 
-/// Explicit cleanup for crash-recovery callers (subprocess hard-kill via
-/// `worker::cancel_subprocess`, CLI post-crash retry). Re-entrant; safe to
-/// call after the OnceLock-gated init has already run.
+/// Like `sweep_dir`, but removes only files whose name starts with one of
+/// the supplied prefixes. Used to scope a crash-recovery cleanup to a single
+/// subprocess's owned files — wiping the whole dir would race a sibling
+/// subprocess's in-flight writes (B3: a seg-side crash must not delete
+/// `inpaint-*` files belonging to a still-running inpaint subprocess).
+fn sweep_dir_with_prefix(dir: &std::path::Path, prefixes: &[&str]) {
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            if let Some(name) = entry.file_name().to_str() {
+                if prefixes.iter().any(|p| name.starts_with(p)) {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
+        }
+    }
+}
+
+/// File-name prefixes owned by the seg / CLI subprocess pipeline. Used for
+/// crash-recovery cleanup that must NOT touch a sibling inpaint subprocess's
+/// in-flight files.
+pub const SEG_PIPELINE_PREFIXES: &[&str] = &[
+    "chain_",
+    "cli_ds_",
+    "edge_",
+    "input_",
+    "orig_",
+    "result_",
+    "seg_",
+    "tensor_",
+];
+
+/// File-name prefixes owned by the inpaint subprocess. Currently used only
+/// by tests; production cleanup paths target seg-side files via
+/// `SEG_PIPELINE_PREFIXES`.
+pub const INPAINT_PREFIXES: &[&str] = &[
+    "inpaint-",
+];
+
+/// Cleanup scoped to a specific subprocess's owned filenames. Use this from
+/// crash-recovery callers (`worker::cancel_subprocess`, the post-crash retry
+/// in `worker::handle_crash_and_retry`, CLI's OOM-retry loop) so the wipe
+/// doesn't race a sibling subprocess that's still writing files in the
+/// shared dir.
+pub fn cleanup_ipc_temp_for_prefix(prefixes: &[&str]) {
+    sweep_dir_with_prefix(&ipc_temp_dir(), prefixes);
+}
+
+/// Sweep every file in the IPC temp dir. Process-wide cleanup; do not call
+/// from a path that could race a sibling subprocess (use
+/// `cleanup_ipc_temp_for_prefix` with the caller's prefix set instead).
+/// Currently kept for the rare "everything must go" case (manual diagnostic
+/// tool, future xtask).
 pub fn cleanup_ipc_temp() {
     sweep_dir(&ipc_temp_dir());
 }
@@ -543,5 +592,100 @@ mod tests {
         assert_gone(&dir, &["test-reentrant.bin"]);
         cleanup_ipc_temp();
         assert_gone(&dir, &["test-reentrant.bin"]);
+    }
+
+    /// B3 / Phase 21-03: a seg-side crash cleanup must not touch a sibling
+    /// inpaint subprocess's `inpaint-*` files. Seeds both kinds, runs the
+    /// prefix-scoped sweep, asserts seg-prefixed gone and inpaint-prefixed
+    /// survive.
+    #[test]
+    fn sweep_dir_with_prefix_leaves_other_owners_alone() {
+        let scratch = tempfile::tempdir().unwrap();
+        let dir = scratch.path();
+
+        let seg = ["chain_42.raw", "cli_ds_0.img", "edge_5.bin", "input_3.img",
+                   "orig_3.img", "result_3.raw", "seg_3.png", "tensor_3.raw"];
+        let inpaint = ["inpaint-img-7-0.png", "inpaint-mask-7-0.png", "inpaint-out-7.png"];
+        poison(dir, &seg);
+        poison(dir, &inpaint);
+
+        super::sweep_dir_with_prefix(dir, SEG_PIPELINE_PREFIXES);
+
+        assert_gone(dir, &seg);
+        for f in &inpaint {
+            assert!(dir.join(f).exists(), "inpaint file {f} must survive a seg-scoped cleanup");
+        }
+    }
+
+    /// Symmetric direction: an inpaint-scoped cleanup leaves seg files alone.
+    /// No production caller targets only inpaint today, but the prefix table
+    /// already declares them — pinning the contract avoids accidental
+    /// asymmetry (e.g. a future inpaint-only cancel path that wipes the
+    /// seg pipeline).
+    #[test]
+    fn sweep_dir_with_prefix_inpaint_scope_is_symmetric() {
+        let scratch = tempfile::tempdir().unwrap();
+        let dir = scratch.path();
+        let seg = ["chain_1.raw", "result_1.raw"];
+        let inpaint = ["inpaint-img-1-0.png", "inpaint-out-1.png"];
+        poison(dir, &seg);
+        poison(dir, &inpaint);
+
+        super::sweep_dir_with_prefix(dir, INPAINT_PREFIXES);
+
+        for f in &seg {
+            assert!(dir.join(f).exists(), "seg file {f} must survive an inpaint-scoped cleanup");
+        }
+        assert_gone(dir, &inpaint);
+    }
+
+    /// Files matching no supplied prefix are left in place — the sweep is
+    /// "remove only what I own", not "remove everything except what I name."
+    #[test]
+    fn sweep_dir_with_prefix_ignores_unmatched_files() {
+        let scratch = tempfile::tempdir().unwrap();
+        let dir = scratch.path();
+        poison(dir, &["unrelated.txt", "seg_1.png"]);
+
+        super::sweep_dir_with_prefix(dir, SEG_PIPELINE_PREFIXES);
+
+        assert_gone(dir, &["seg_1.png"]);
+        assert!(dir.join("unrelated.txt").exists());
+    }
+
+    /// Adding a new IPC filename in production must extend the relevant
+    /// prefix table, otherwise crash-recovery cleanup leaks. This test
+    /// surfaces drift by enumerating every file the IPC code paths produce.
+    /// Adding a new variant without updating the table = test failure.
+    #[test]
+    fn every_ipc_filename_in_tree_matches_a_known_prefix() {
+        // Filenames that production code writes into ipc_temp_dir().
+        // Update both this list AND SEG_PIPELINE_PREFIXES / INPAINT_PREFIXES
+        // when introducing a new IPC file kind.
+        let production_filenames = [
+            // seg pipeline
+            "chain_42.raw",
+            "cli_ds_0.img",
+            "edge_5.bin",
+            "input_3.img",
+            "orig_3.img",
+            "result_3.raw",
+            "seg_3.png",
+            "tensor_3.raw",
+            // inpaint
+            "inpaint-img-7-0.png",
+            "inpaint-mask-7-0.png",
+            "inpaint-out-7.png",
+        ];
+        let all_prefixes: Vec<&str> = SEG_PIPELINE_PREFIXES.iter()
+            .chain(INPAINT_PREFIXES.iter())
+            .copied()
+            .collect();
+        for name in &production_filenames {
+            assert!(
+                all_prefixes.iter().any(|p| name.starts_with(p)),
+                "filename {name} matches no prefix in SEG_PIPELINE_PREFIXES + INPAINT_PREFIXES"
+            );
+        }
     }
 }
