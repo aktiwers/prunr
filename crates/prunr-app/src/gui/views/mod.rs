@@ -86,19 +86,6 @@ pub fn format_byte_size(bytes: u64) -> String {
     else { format!("{bytes} B") }
 }
 
-#[cfg(test)]
-mod format_byte_size_tests {
-    use super::format_byte_size;
-    #[test]
-    fn formats_units_correctly() {
-        assert_eq!(format_byte_size(0), "0 B");
-        assert_eq!(format_byte_size(512), "512 B");
-        assert_eq!(format_byte_size(2048), "2 KB");
-        assert_eq!(format_byte_size(50 * 1024 * 1024), "50 MB");
-        assert_eq!(format_byte_size(2 * 1024 * 1024 * 1024), "2.00 GB");
-    }
-}
-
 /// Model display name (no icon).
 pub fn model_name(model: SettingsModel) -> &'static str {
     match model {
@@ -129,5 +116,18 @@ pub fn model_label(model: SettingsModel, short: bool) -> String {
         format!("{icon}  {name}")
     } else {
         format!("{icon}  {name}  \u{2022} {speed}  \u{2022} {size}")
+    }
+}
+
+#[cfg(test)]
+mod format_byte_size_tests {
+    use super::format_byte_size;
+    #[test]
+    fn formats_units_correctly() {
+        assert_eq!(format_byte_size(0), "0 B");
+        assert_eq!(format_byte_size(512), "512 B");
+        assert_eq!(format_byte_size(2048), "2 KB");
+        assert_eq!(format_byte_size(50 * 1024 * 1024), "50 MB");
+        assert_eq!(format_byte_size(2 * 1024 * 1024 * 1024), "2.00 GB");
     }
 }

@@ -28,6 +28,12 @@ pub struct BackgroundIO {
     pub filter_only_rx: mpsc::Receiver<FilterOnlyResult>,
 }
 
+impl Default for BackgroundIO {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BackgroundIO {
     pub fn new() -> Self {
         let (file_load_tx, file_load_rx) = mpsc::channel();

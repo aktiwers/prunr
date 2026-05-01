@@ -237,10 +237,10 @@ fn draw_preview(ui: &mut Ui, settings: &BrushSettings) {
     let color = Color32::from_rgb(cr, cg, cb);
     match settings.shape {
         BrushShape::Circle => {
-            chip::paint_falloff_circle(&ui.painter(), center, r, settings.hardness, color, 220, 14);
+            chip::paint_falloff_circle(ui.painter(), center, r, settings.hardness, color, 220, 14);
         }
         BrushShape::Square => {
-            chip::paint_falloff_square(&ui.painter(), center, r, settings.hardness, color, 220, 10);
+            chip::paint_falloff_square(ui.painter(), center, r, settings.hardness, color, 220, 10);
         }
         BrushShape::Line => {
             let half = max_r - 4.0;

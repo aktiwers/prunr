@@ -1755,7 +1755,7 @@ impl PrunrApp {
         });
         let cached_masked_base = item.cached_masked_base.as_ref().and_then(|(base, recipe, model)| {
             let current_recipe = prunr_core::MaskRecipe::from(&item.settings.mask_settings());
-            let seg_model_match = seg_tensor.as_ref().map_or(false, |s| s.model == *model);
+            let seg_model_match = seg_tensor.as_ref().is_some_and(|s| s.model == *model);
             (*recipe == current_recipe && seg_model_match).then(|| base.clone())
         });
         Some(DispatchInputs {

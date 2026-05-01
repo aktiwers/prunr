@@ -129,6 +129,7 @@ impl Default for MaskSettings {
 /// (`block0`..`block5`, fine → coarse) plus a fused `block_cat`. One inference
 /// pass computes all 7; picking a scale just indexes into the outputs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Default)]
 pub enum EdgeScale {
     /// `block0` — finest, crispest micro-edges.
     Fine,
@@ -137,12 +138,10 @@ pub enum EdgeScale {
     /// `block5` — coarsest side output; abstract outlines.
     Bold,
     /// `block_cat` — learned combination of all blocks; current default.
+    #[default]
     Fused,
 }
 
-impl Default for EdgeScale {
-    fn default() -> Self { Self::Fused }
-}
 
 impl std::fmt::Display for EdgeScale {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -676,8 +675,8 @@ mod tests {
         // Both exist and implement Debug + Clone
         let _ = format!("{:?}", silueta);
         let _ = format!("{:?}", u2net);
-        let _cloned = silueta.clone();
-        let _cloned2 = u2net.clone();
+        let _cloned = silueta;
+        let _cloned2 = u2net;
         assert_ne!(silueta, u2net);
     }
 
@@ -696,7 +695,7 @@ mod tests {
         // All variants compile and implement Debug + Clone + Copy
         for stage in &stages {
             let _ = format!("{:?}", stage);
-            let _cloned = stage.clone();
+            let _cloned = *stage;
             let _copied: ProgressStage = *stage;
         }
         assert_eq!(stages.len(), 8);

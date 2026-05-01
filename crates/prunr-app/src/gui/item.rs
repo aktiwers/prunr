@@ -91,7 +91,7 @@ impl HistorySlot {
             Self::Compressed(entry) => {
                 super::history_disk::decompress_from_ram(&entry)
                     .ok()
-                    .map(|img| Arc::new(img))
+                    .map(Arc::new)
             }
             Self::OnDisk(entry) => match super::history_disk::read_history(&entry) {
                 Ok(img) => {
@@ -118,6 +118,7 @@ impl Default for HistorySlot {
 }
 
 /// A history entry: image data + the recipe that produced it.
+#[derive(Default)]
 pub(crate) struct HistoryEntry {
     pub(crate) slot: HistorySlot,
     pub(crate) recipe: Option<prunr_core::ProcessingRecipe>,
@@ -141,11 +142,6 @@ impl HistoryEntry {
     }
 }
 
-impl Default for HistoryEntry {
-    fn default() -> Self {
-        Self { slot: HistorySlot::default(), recipe: None }
-    }
-}
 
 /// Where an image's raw bytes live — file path (lazy) or in-memory (clipboard/paste).
 #[derive(Clone)]

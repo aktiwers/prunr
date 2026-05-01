@@ -1053,6 +1053,55 @@ fn finalize_or_continue(
     true
 }
 
+/// Send a WorkItem to the subprocess via temp file IPC.
+fn send_item_to_sub(sub: &mut SubprocessManager, item: &WorkItem) -> Result<(), String> {
+    let (item_id, bytes, chain) = item;
+    let chain_input = chain.as_ref().map(|rgba| {
+        (rgba.as_ref(), rgba.width(), rgba.height())
+    });
+    sub.send_image(*item_id, bytes, chain_input)
+}
+
+/// Try to send a Tier 2 item to the subprocess. Returns true if sent.
+fn try_send_tier2(
+    sub: &mut SubprocessManager,
+    pending_tier2: &mut VecDeque<Tier2WorkItem>,
+    sent_tier2_ids: &mut Vec<u64>,
+) -> bool {
+    if let Some(t2) = pending_tier2.pop_front() {
+        let tid = t2.item_id;
+        if sub.send_repostprocess(
+            t2.item_id, &t2.tensor_data, t2.tensor_height, t2.tensor_width,
+            t2.model, &t2.original_bytes, t2.mask,
+        ).is_ok() {
+            sent_tier2_ids.push(tid);
+            return true;
+        }
+        pending_tier2.push_front(t2);
+    }
+    false
+}
+
+/// Try to send an AddEdgeInference item to the subprocess. Returns true if sent.
+fn try_send_add_edge(
+    sub: &mut SubprocessManager,
+    pending_add_edge: &mut VecDeque<AddEdgeWorkItem>,
+    sent_add_edge_ids: &mut Vec<u64>,
+) -> bool {
+    if let Some(ae) = pending_add_edge.pop_front() {
+        let tid = ae.item_id;
+        if sub.send_add_edge_inference(
+            ae.item_id, &ae.tensor_data, ae.tensor_height, ae.tensor_width,
+            ae.model, &ae.original_bytes, ae.mask,
+        ).is_ok() {
+            sent_add_edge_ids.push(tid);
+            return true;
+        }
+        pending_add_edge.push_front(ae);
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1086,53 +1135,4 @@ mod tests {
         // Any non-zero in-flight count triggers the detector given silence.
         assert!(is_stalled(Duration::from_secs(90), 5, Duration::from_secs(60)));
     }
-}
-
-/// Send a WorkItem to the subprocess via temp file IPC.
-fn send_item_to_sub(sub: &mut SubprocessManager, item: &WorkItem) -> Result<(), String> {
-    let (item_id, bytes, chain) = item;
-    let chain_input = chain.as_ref().map(|rgba| {
-        (rgba.as_ref(), rgba.width(), rgba.height())
-    });
-    sub.send_image(*item_id, bytes, chain_input)
-}
-
-/// Try to send a Tier 2 item to the subprocess. Returns true if sent.
-fn try_send_tier2(
-    sub: &mut SubprocessManager,
-    pending_tier2: &mut VecDeque<Tier2WorkItem>,
-    sent_tier2_ids: &mut Vec<u64>,
-) -> bool {
-    if let Some(t2) = pending_tier2.pop_front() {
-        let tid = t2.item_id;
-        if sub.send_repostprocess(
-            t2.item_id, &t2.tensor_data, t2.tensor_height, t2.tensor_width,
-            t2.model, &t2.original_bytes, t2.mask.clone(),
-        ).is_ok() {
-            sent_tier2_ids.push(tid);
-            return true;
-        }
-        pending_tier2.push_front(t2);
-    }
-    false
-}
-
-/// Try to send an AddEdgeInference item to the subprocess. Returns true if sent.
-fn try_send_add_edge(
-    sub: &mut SubprocessManager,
-    pending_add_edge: &mut VecDeque<AddEdgeWorkItem>,
-    sent_add_edge_ids: &mut Vec<u64>,
-) -> bool {
-    if let Some(ae) = pending_add_edge.pop_front() {
-        let tid = ae.item_id;
-        if sub.send_add_edge_inference(
-            ae.item_id, &ae.tensor_data, ae.tensor_height, ae.tensor_width,
-            ae.model, &ae.original_bytes, ae.mask.clone(),
-        ).is_ok() {
-            sent_add_edge_ids.push(tid);
-            return true;
-        }
-        pending_add_edge.push_front(ae);
-    }
-    false
 }
