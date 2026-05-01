@@ -107,6 +107,19 @@ pub struct PreviewResult {
     pub is_final: bool,
 }
 
+/// Source of timestamps for `mark_tweak` / `flush` / `tick`. Production
+/// uses the system monotonic clock; tests inject a `MockClock` to drive
+/// synthetic time without sleeping or poking private fields.
+pub trait Clock: Send + Sync {
+    fn now(&self) -> Instant;
+}
+
+/// Production clock: just delegates to `Instant::now`.
+pub struct SystemClock;
+impl Clock for SystemClock {
+    fn now(&self) -> Instant { Instant::now() }
+}
+
 /// State for a pending (debounced) preview dispatch.
 struct Pending {
     last_tweak_at: Instant,
@@ -125,10 +138,20 @@ pub struct LivePreview {
     generation_counter: u64,
     result_tx: mpsc::Sender<PreviewResult>,
     result_rx: mpsc::Receiver<PreviewResult>,
+    clock: Arc<dyn Clock>,
 }
 
 impl Default for LivePreview {
     fn default() -> Self {
+        Self::with_clock(Arc::new(SystemClock))
+    }
+}
+
+impl LivePreview {
+    /// Construct with an injected clock. Production callers go through
+    /// `default()` (which uses `SystemClock`); tests pass a fake to drive
+    /// synthetic timestamps.
+    pub fn with_clock(clock: Arc<dyn Clock>) -> Self {
         let (tx, rx) = mpsc::channel();
         Self {
             pending: HashMap::new(),
@@ -136,18 +159,18 @@ impl Default for LivePreview {
             generation_counter: 0,
             result_tx: tx,
             result_rx: rx,
+            clock,
         }
     }
-}
 
-impl LivePreview {
     /// Pin `last_tweak_at` on the first tweak in a window and never re-arm —
     /// `tick`'s removal-on-dispatch starts the next window.
     pub fn mark_tweak(&mut self, item_id: u64, kind: PreviewKind) {
+        let now = self.clock.now();
         self.pending
             .entry(item_id)
             .and_modify(|p| p.kind = kind)
-            .or_insert_with(|| Pending { last_tweak_at: Instant::now(), kind });
+            .or_insert_with(|| Pending { last_tweak_at: now, kind });
     }
 
     /// Flush: expire the pending tweak timer so the next `tick` dispatches
@@ -159,9 +182,10 @@ impl LivePreview {
         if let Some(p) = self.pending.get_mut(&item_id) {
             // Anti-date past DEBOUNCE so next tick dispatches immediately.
             // checked_sub guards against early-boot monotonic clock underflow.
-            p.last_tweak_at = Instant::now()
+            let now = self.clock.now();
+            p.last_tweak_at = now
                 .checked_sub(DEBOUNCE + Duration::from_millis(10))
-                .unwrap_or_else(Instant::now);
+                .unwrap_or(now);
         }
     }
 
@@ -175,7 +199,7 @@ impl LivePreview {
     where
         F: FnMut(u64, PreviewKind) -> Option<DispatchInputs>,
     {
-        let now = Instant::now();
+        let now = self.clock.now();
         let mut ready_ids: Vec<u64> = Vec::new();
         let mut wait_for: Option<Duration> = None;
 
@@ -550,6 +574,28 @@ fn resolve_edge_mask(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    /// Test clock backed by a `Mutex<Instant>` so the test can advance
+    /// time deterministically without sleeping. The trait already
+    /// requires `Send + Sync`, so the Mutex is the natural fit.
+    struct MockClock(Mutex<Instant>);
+
+    impl MockClock {
+        fn new(start: Instant) -> Arc<Self> {
+            Arc::new(Self(Mutex::new(start)))
+        }
+        fn advance(&self, by: Duration) {
+            let mut g = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            *g += by;
+        }
+    }
+
+    impl Clock for MockClock {
+        fn now(&self) -> Instant {
+            *self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        }
+    }
 
     #[test]
     fn debounce_is_reasonable() {
@@ -618,24 +664,62 @@ mod tests {
         );
     }
 
-    /// Slow frames put `elapsed >= DEBOUNCE` on every tweak; the broken
-    /// code re-armed in that branch and starved `tick`.
+    /// B4 / Phase 21-04: slow frames put `elapsed >= DEBOUNCE` on every
+    /// tweak. Pre-fix the broken code re-armed `last_tweak_at` in that
+    /// branch and `tick` could never see a ready dispatch — mid-drag
+    /// preview silently disabled. Post-fix the timer is pinned on first
+    /// tweak and only cleared by `tick`'s removal-on-dispatch.
+    ///
+    /// Drives synthetic time through `MockClock` so the contract is
+    /// pinned regardless of CI runner speed (vs the prior `sleep(5ms)`
+    /// gap that let B4 ship).
     #[test]
-    fn mark_tweak_does_not_reset_timer_on_slow_frames() {
-        let mut lp = LivePreview::default();
+    fn slow_frame_drag_dispatches_within_two_frames() {
+        let clock = MockClock::new(Instant::now());
+        let mut lp = LivePreview::with_clock(clock.clone());
+
+        // Frame 0: first tweak arrives, timer pinned at clock = T0.
+        lp.mark_tweak(1, PreviewKind::Mask);
+        assert!(lp.pending.contains_key(&1));
+
+        // Frame 1: 200ms later (over the 150ms DEBOUNCE) — every
+        // subsequent tweak in the drag arrives after `elapsed >= DEBOUNCE`.
+        // Pre-fix this re-armed the timer; post-fix it leaves it alone.
+        clock.advance(Duration::from_millis(200));
         lp.mark_tweak(1, PreviewKind::Mask);
 
-        let aged = Instant::now()
-            .checked_sub(DEBOUNCE + Duration::from_millis(50))
-            .expect("DEBOUNCE+50ms fits in Instant's past");
-        lp.pending.get_mut(&1).unwrap().last_tweak_at = aged;
-
-        lp.mark_tweak(1, PreviewKind::Mask);
-        let second_arm = lp.pending.get(&1).expect("still armed").last_tweak_at;
-        assert_eq!(aged, second_arm, "slow-frame tweak must leave arm time pinned");
-
+        // tick at the same simulated `now` — DEBOUNCE elapsed since T0,
+        // so the dispatch must be ready. `wait` is None because nothing's
+        // pending after dispatch.
         let wait = lp.tick(|_, _| None);
-        assert!(wait.is_none(), "tick must reach dispatch-readiness on a slow-frame mark_tweak");
+        assert!(
+            wait.is_none(),
+            "tick at frame 1 (200ms after T0) must clear the pending entry"
+        );
+    }
+
+    /// `tick` returning `None` (no remaining wait) is the readiness
+    /// signal even when snapshot can't assemble inputs — the contract
+    /// that matters for B4 is that the entry is RECOGNISED as ready,
+    /// not that the rayon dispatch actually fires (which depends on
+    /// whether the snapshot has the source RGBA decoded etc).
+    #[test]
+    fn tick_recognises_ready_entry_after_synthetic_debounce() {
+        let clock = MockClock::new(Instant::now());
+        let mut lp = LivePreview::with_clock(clock.clone());
+        lp.mark_tweak(1, PreviewKind::Mask);
+
+        // Before DEBOUNCE — wait is Some(>0).
+        let wait = lp.tick(|_, _| None);
+        assert!(wait.is_some(), "before DEBOUNCE tick should report a wait");
+
+        // After DEBOUNCE — wait is None (entry is ready).
+        clock.advance(DEBOUNCE + Duration::from_millis(1));
+        let wait = lp.tick(|_, _| None);
+        assert!(
+            wait.is_none(),
+            "after DEBOUNCE tick should report no remaining wait (entry is ready)"
+        );
     }
 
     #[test]
