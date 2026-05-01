@@ -294,7 +294,11 @@ impl BatchManager {
     /// item stuck in a "still loading" state forever.
     pub(crate) fn request_decode_bytes(&self, item_id: u64, bytes: Arc<Vec<u8>>) {
         let tx = self.bg_io.decode_tx.clone();
+        let slots = self.bg_io.decode_slots.clone();
         std::thread::spawn(move || {
+            // Park here past `available_parallelism()` so a 50-image
+            // Process All doesn't hold 50 × ~80 MB transient peaks.
+            let _slot = slots.acquire();
             // Inner block scope: the `DynamicImage` (~50 MB at 4 K RGBA)
             // and the encoded `bytes` Arc both drop before the channel
             // send, so concurrent decodes don't pile up DynamicImage +
@@ -326,7 +330,9 @@ impl BatchManager {
     ) {
         let tx = self.bg_io.filter_only_tx.clone();
         let source = source.clone();
+        let slots = self.bg_io.decode_slots.clone();
         std::thread::spawn(move || {
+            let _slot = slots.acquire();
             // Drop bytes / DynamicImage / RGBA before send so concurrent
             // threads don't pile per-image peaks.
             let result: Result<Arc<image::RgbaImage>, String> = (|| {
@@ -359,9 +365,11 @@ impl BatchManager {
         result_rgba: Option<&Arc<image::RgbaImage>>,
     ) {
         let tx = self.bg_io.thumb_tx.clone();
+        let slots = self.bg_io.decode_slots.clone();
         if let Some(rgba) = result_rgba {
             let rgba = rgba.clone();
             std::thread::spawn(move || {
+                let _slot = slots.acquire();
                 let (w, h) = fit_dimensions(rgba.width(), rgba.height(), THUMB_MAX_PX, THUMB_MAX_PX);
                 let thumb = image::imageops::resize(rgba.as_ref(), w, h, image::imageops::FilterType::Triangle);
                 let _ = tx.send((item_id, thumb.width(), thumb.height(), thumb.into_raw()));
@@ -369,6 +377,7 @@ impl BatchManager {
         } else {
             let source = source.clone();
             std::thread::spawn(move || {
+                let _slot = slots.acquire();
                 // Build the thumb in an inner scope so the source bytes,
                 // DynamicImage, and full-resolution RGBA all drop before
                 // we send. On a 50-image batch this is the dominant
