@@ -987,17 +987,24 @@ pub fn run_worker() -> ! {
                     // Cancel-map cleanup happens BEFORE `in_flight.fetch_sub`
                     // so a `Shutdown` waiting on `in_flight == 0` never
                     // observes the count drop while the cancel-flag entry
-                    // for this item is still present. `_cancel_guard` is a
-                    // panic-safety net — its remove is idempotent, so the
-                    // happy-path explicit remove + the guard's drop don't
-                    // double-fault.
+                    // for this item is still present.
+                    //
+                    // `cancel_guard` is the only owner of (item_id, map);
+                    // the body removes through it explicitly and the
+                    // guard's own drop is then a no-op. The guard stays
+                    // for panic-safety — if the body panics between the
+                    // explicit remove and `fetch_sub`, drop still runs
+                    // and (idempotent) re-removes. The H14 contract
+                    // ("parent only ever queues one in-flight dispatch
+                    // per id") means a `CancelItem` can't insert a fresh
+                    // flag for this id between the body's remove and the
+                    // guard's drop, so the guard never accidentally
+                    // removes a re-registration.
                     struct Cleanup {
-                        item_id: u64,
                         pump_done: Arc<AtomicBool>,
                         pump_handle: Option<std::thread::JoinHandle<()>>,
                         in_flight: Arc<std::sync::atomic::AtomicUsize>,
-                        cancels: CancelMap,
-                        _cancel_guard: CancelMapGuard,
+                        cancel_guard: CancelMapGuard,
                     }
                     impl Drop for Cleanup {
                         fn drop(&mut self) {
@@ -1007,27 +1014,22 @@ pub fn run_worker() -> ! {
                             }
                             // Explicit cancel-map cleanup BEFORE the
                             // in_flight decrement (see struct doc above).
-                            self.cancels.lock()
+                            self.cancel_guard.map.lock()
                                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                .remove(&self.item_id);
+                                .remove(&self.cancel_guard.item_id);
                             // Pairs with `in_flight.fetch_add` at dispatch
                             // (above the thread::spawn). Drop runs even on
                             // panic, so the counter stays balanced.
                             self.in_flight.fetch_sub(1, Ordering::AcqRel);
-                            // `_cancel_guard` drops after — its remove is a
-                            // no-op since we already cleaned up, but it
-                            // covers the case where this body panics
-                            // between the explicit remove and the
-                            // fetch_sub.
+                            // `cancel_guard` drops after — its remove is a
+                            // no-op since we already cleaned up.
                         }
                     }
                     let _cleanup = Cleanup {
-                        item_id,
                         pump_done: pump_done.clone(),
                         pump_handle: Some(pump_handle),
                         in_flight: in_flight_for_thread,
-                        cancels: inpaint_cancels.clone(),
-                        _cancel_guard: CancelMapGuard {
+                        cancel_guard: CancelMapGuard {
                             item_id,
                             map: inpaint_cancels.clone(),
                         },
