@@ -171,11 +171,25 @@ impl ItemSettings {
         let uses_edge_detection = self.line_mode != LineMode::Off;
         let bg_rgb = self.bg.map(|[r, g, b, _]| [r, g, b]);
 
-        let mask = if uses_segmentation {
+        let mut mask = if uses_segmentation {
             prunr_core::MaskRecipe::from(&self.mask_settings())
         } else {
             prunr_core::MaskRecipe::from(&MaskSettings::default())
         };
+        // bg_color and bg_effect are mutually exclusive in the chip UI but
+        // the underlying fields are independent — a preset round-trip could
+        // restore both. Pin bg_effect to default when bg_color wins so the
+        // recipe-layer contract matches what the chip enforces.
+        if bg_rgb.is_some() {
+            mask.bg_effect = prunr_core::BgEffect::default();
+        }
+
+        let mut edge = prunr_core::EdgeRecipe::from(&self.edge_settings());
+        // compose_mode only affects SubjectOutline (combine subject + line
+        // outline). Pin elsewhere so a preset value can't dirty the recipe.
+        if self.line_mode != LineMode::SubjectOutline {
+            edge.compose_mode = prunr_core::ComposeMode::default();
+        }
 
         prunr_core::ProcessingRecipe {
             inference: prunr_core::InferenceRecipe {
@@ -188,7 +202,7 @@ impl ItemSettings {
                     prunr_core::InputTransform::default()
                 },
             },
-            edge: prunr_core::EdgeRecipe::from(&self.edge_settings()),
+            edge,
             mask,
             composite: prunr_core::CompositeRecipe {
                 bg_color: bg_rgb,
