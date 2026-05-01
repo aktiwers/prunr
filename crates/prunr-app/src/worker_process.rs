@@ -66,12 +66,21 @@ impl Drop for SemaphoreGuard {
     }
 }
 
+/// Check + consume the cancel flag for `item_id`. Removing on hit keeps
+/// the set bounded — without this, every `CancelItem` insert was
+/// permanent for the worker's lifetime and the per-dispatch lock
+/// contention scaled with the cumulative cancel count.
+///
+/// Each dispatch checks once at start; consuming the entry there is
+/// safe because the parent only ever queues one in-flight dispatch per
+/// id, and any later re-process would emit a fresh `CancelItem` if the
+/// user wanted it cancelled too.
 fn is_item_cancelled(
     set: &Arc<Mutex<std::collections::HashSet<u64>>>,
     item_id: u64,
 ) -> bool {
-    let guard = set.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    guard.contains(&item_id)
+    let mut guard = set.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    guard.remove(&item_id)
 }
 
 /// Remove each temp path that lives under the IPC directory. Silent on
