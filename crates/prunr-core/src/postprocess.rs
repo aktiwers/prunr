@@ -938,6 +938,64 @@ mod tests {
         }
     }
 
+    /// Filter-only mode (`SettingsModel::None` + `LineMode::Off`) routes
+    /// through `apply_fill_style` directly on the source RGB. The toolbar
+    /// chip claims every `FillStyle::ALL` variant produces a different
+    /// output; without a test that's an unverified assertion. Run each
+    /// variant on a colourful 4×4 patch and assert:
+    ///
+    /// - `FillStyle::None` is bit-exact identity (no-op contract).
+    /// - Every other variant differs from the input (variant did something).
+    /// - All non-None variants produce pairwise-distinct outputs (no two
+    ///   variants accidentally collapse to the same bytes).
+    #[test]
+    fn fill_style_all_variants_produce_distinct_output() {
+        use crate::types::FillStyle;
+
+        // 4×4 patch covering primaries + grays so every channel-touching
+        // variant has substrate to differ on.
+        let mut src = image::RgbaImage::new(4, 4);
+        let palette: [[u8; 4]; 16] = [
+            [255, 0, 0, 255], [0, 255, 0, 255], [0, 0, 255, 255], [255, 255, 0, 255],
+            [0, 255, 255, 255], [255, 0, 255, 255], [128, 128, 128, 255], [200, 100, 50, 255],
+            [50, 100, 200, 255], [180, 220, 100, 255], [100, 50, 180, 255], [240, 240, 240, 255],
+            [20, 20, 20, 255], [128, 64, 192, 255], [192, 128, 64, 255], [64, 192, 128, 255],
+        ];
+        for (i, px) in palette.iter().enumerate() {
+            src.put_pixel((i % 4) as u32, (i / 4) as u32, image::Rgba(*px));
+        }
+
+        let mut outputs: Vec<(String, image::RgbaImage)> = FillStyle::ALL.iter()
+            .map(|style| {
+                let mut img = src.clone();
+                apply_fill_style(&mut img, *style);
+                (style.name().to_string(), img)
+            })
+            .collect();
+
+        // None is identity.
+        let none_idx = outputs.iter().position(|(n, _)| n == "None")
+            .expect("FillStyle::None must be in ALL");
+        assert_eq!(outputs[none_idx].1, src, "FillStyle::None must be bit-exact identity");
+
+        // Every other variant differs from input.
+        for (name, img) in outputs.iter().filter(|(n, _)| n != "None") {
+            assert_ne!(img, &src, "FillStyle::{name} produced bit-exact-identity output (variant is dead)");
+        }
+
+        // No two variants produce the same output.
+        outputs.sort_by(|a, b| a.0.cmp(&b.0));
+        for i in 0..outputs.len() {
+            for j in (i + 1)..outputs.len() {
+                assert_ne!(
+                    outputs[i].1, outputs[j].1,
+                    "FillStyle::{} and FillStyle::{} collapse to identical bytes",
+                    outputs[i].0, outputs[j].0,
+                );
+            }
+        }
+    }
+
     /// Pixelate overhang: image dimensions not a multiple of `block_size`.
     /// `blocks_x = w.div_ceil(bs)`; the rightmost block should sample at
     /// `(blocks_x-1) * bs` which must be inside the image.
