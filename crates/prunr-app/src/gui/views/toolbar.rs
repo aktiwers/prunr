@@ -8,7 +8,8 @@ use crate::gui::item::BatchStatus;
 use crate::gui::state::AppState;
 use crate::gui::theme;
 
-use super::modifier_key;
+use crate::kb;
+use super::KB_MOD;
 
 pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
     ui.horizontal_centered(|ui| {
@@ -17,7 +18,6 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
 
         let can_save_copy = app.batch.app_state() == AppState::Done;
         let has_selected = app.batch.items.iter().any(|i| i.selected);
-        let m = modifier_key();
 
         // ── Left: Open ──
         let open_btn = egui::Button::new(
@@ -26,7 +26,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
         .fill(theme::BG_SECONDARY)
         .corner_radius(theme::BUTTON_ROUNDING)
         .min_size(egui::vec2(0.0, theme::BTN_HEIGHT));
-        if ui.add(open_btn).on_hover_text(format!("Open image(s) ({m}+O)")).clicked() {
+        if ui.add(open_btn).on_hover_text(kb!("Open image(s)", "O")).clicked() {
             app.pending_open_dialog = true;
         }
 
@@ -40,7 +40,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
         .fill(theme::BG_SECONDARY)
         .corner_radius(theme::BUTTON_ROUNDING)
         .min_size(egui::vec2(theme::BTN_HEIGHT, theme::BTN_HEIGHT));
-        if ui.add(gear_btn).on_hover_text(format!("Settings ({m}+Space)")).clicked() {
+        if ui.add(gear_btn).on_hover_text(kb!("Settings", "Space")).clicked() {
             if app.show_settings {
                 app.close_settings(ui.ctx());
             } else {
@@ -63,13 +63,13 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
             .min_size(egui::vec2(theme::BTN_HEIGHT, theme::BTN_HEIGHT));
 
             if ui.add_enabled(can_undo, icon_btn(ICON_UNDO.codepoint))
-                .on_hover_text(format!("Undo ({m}+Z)"))
+                .on_hover_text(kb!("Undo", "Z"))
                 .clicked()
             {
                 app.handle_undo(ui.ctx());
             }
             if ui.add_enabled(can_redo, icon_btn(ICON_REDO.codepoint))
-                .on_hover_text(format!("Redo ({m}+Y)"))
+                .on_hover_text(kb!("Redo", "Y"))
                 .clicked()
             {
                 app.handle_redo(ui.ctx());
@@ -103,7 +103,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                 )
                 .fill(theme::BG_SECONDARY)
                 .corner_radius(theme::BUTTON_ROUNDING);
-                if ui.add(save_btn).on_hover_text(format!("Save result ({m}+S)")).clicked() {
+                if ui.add(save_btn).on_hover_text(kb!("Save result", "S")).clicked() {
                     app.handle_save_selected();
                 }
             }
@@ -181,20 +181,18 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                     .corner_radius(theme::BUTTON_ROUNDING)
                     .min_size(egui::vec2(0.0, theme::BTN_HEIGHT));
 
-                let tooltip = match label {
-                    ProcessButtonLabel::ProcessAll(n) => format!("Process all {n} images ({m}+R)"),
+                let tooltip: std::borrow::Cow<'static, str> = match label {
+                    ProcessButtonLabel::ProcessAll(n) => format!("Process all {n} images ({}+R)", KB_MOD).into(),
                     ProcessButtonLabel::ProcessSelected(n) if n > 1 => {
-                        format!("Process {n} selected images ({m}+R)")
+                        format!("Process {n} selected images ({}+R)", KB_MOD).into()
                     }
                     _ => {
-                        // ProcessViewed or ProcessSelected(1): single-image dispatch.
-                        // Chain-mode tooltip varies on whether the target already has a result.
                         let target_has_result = target_ids.first().and_then(|id| app.batch.find_by_id(*id))
                             .is_some_and(|i| i.result_rgba.is_some());
                         if app.settings.chain_mode && target_has_result {
-                            format!("Process current result ({m}+R)")
+                            kb!("Process current result", "R").into()
                         } else {
-                            format!("Process original ({m}+R)")
+                            kb!("Process original", "R").into()
                         }
                     }
                 };
