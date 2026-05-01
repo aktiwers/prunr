@@ -221,9 +221,9 @@ impl BatchManager {
 
     /// Remove the item at `idx`, cleaning up any on-disk history /
     /// redo entries it owned. Returns `false` (without doing anything)
-    /// when `idx` is out of bounds. Caller is expected to follow up with
-    /// a selection-clamp / sync — `BatchManager` doesn't know about
-    /// `pending_batch_sync` or texture eviction.
+    /// when `idx` is out of bounds. Caller is responsible for clamping
+    /// `selected_index` and triggering any downstream sync — this helper
+    /// only mutates `items` and the removed entries' on-disk state.
     pub(crate) fn remove(&mut self, idx: usize) -> bool {
         if idx >= self.items.len() { return false; }
         let item = self.items.remove(idx);
