@@ -690,6 +690,8 @@ mod tests {
     fn sweep_stale_pid_dirs_removes_dead_pids_keeps_self_and_unrelated() {
         // Stage three siblings under a fresh parent dir: own pid (keep),
         // a guaranteed-dead pid (remove), and a non-prunr name (keep).
+        // On non-Linux the dead-pid removal is gated out — only the
+        // self/foreign preservation arms run there.
         let parent = tempfile::tempdir().unwrap();
         let self_pid = std::process::id();
         let self_dir = parent.path().join(format!("prunr-ipc-{self_pid}"));
@@ -710,9 +712,12 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     fn pick_definitely_dead_pid() -> u32 {
-        // Iterate down from u32::MAX. /proc/{pid} either doesn't exist or
-        // the entry is for a kernel thread we cannot have spawned. The
-        // first miss is our pick.
+        // Iterate down from a high pid. The first `/proc/{pid}` miss
+        // wins. Theoretical race: kernel could re-allocate the picked
+        // pid before `sweep_stale_pid_dirs` runs, leaving the dir
+        // intact. In practice the window is microseconds and Linux
+        // doesn't reuse pids that fast under normal load. Worst case
+        // is a flaky test, not a correctness bug.
         for pid in (1_000_000..2_000_000).rev() {
             if !std::path::Path::new(&format!("/proc/{pid}")).exists() {
                 return pid;
