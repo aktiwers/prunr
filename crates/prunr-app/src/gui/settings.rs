@@ -156,9 +156,10 @@ impl Settings {
         let Ok(data) = std::fs::read_to_string(&path) else {
             // No settings.json, but the user may still have preset files
             // dropped into the folder. Pick those up.
-            let mut settings = Self::default();
-            settings.presets = super::presets_fs::load_all();
-            return settings;
+            return Self {
+                presets: super::presets_fs::load_all(),
+                ..Self::default()
+            };
         };
 
         // Parse to Value first so we can migrate v1 fields regardless of
@@ -560,8 +561,7 @@ mod tests {
     #[test]
     fn preset_values_returns_user_preset() {
         let mut s = Settings::default();
-        let mut portrait = ItemSettings::default();
-        portrait.gamma = 2.0;
+        let portrait = ItemSettings { gamma: 2.0, ..ItemSettings::default() };
         s.presets.insert("Portrait".to_string(), portrait);
         assert_eq!(s.preset_values("Portrait").gamma, 2.0);
     }
@@ -575,8 +575,7 @@ mod tests {
     #[test]
     fn item_defaults_for_new_item_uses_default_preset() {
         let mut s = Settings::default();
-        let mut portrait = ItemSettings::default();
-        portrait.gamma = 2.0;
+        let portrait = ItemSettings { gamma: 2.0, ..ItemSettings::default() };
         s.presets.insert("Portrait".to_string(), portrait);
         s.default_preset = "Portrait".to_string();
         assert_eq!(s.item_defaults_for_new_item().gamma, 2.0);
@@ -601,11 +600,13 @@ mod tests {
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("settings.json");
 
-        let mut original = Settings::default();
-        original.parallel_jobs = 7;
-        original.auto_process_on_import = true;
-        original.history_depth = 25;
-        original.chain_mode = true;
+        let original = Settings {
+            parallel_jobs: 7,
+            auto_process_on_import: true,
+            history_depth: 25,
+            chain_mode: true,
+            ..Settings::default()
+        };
         original.save_to_path(&path);
 
         let json = std::fs::read_to_string(&path).expect("settings.json should exist");

@@ -204,8 +204,7 @@ mod preset_stack_tests {
     /// Build a single-attribute PresetSnapshot. `pub(super)` so the sibling
     /// `tests` module can reuse it (deduped per /simplify finding).
     pub(super) fn snap(gamma: f32) -> PresetSnapshot {
-        let mut s = ItemSettings::default();
-        s.gamma = gamma;
+        let s = ItemSettings { gamma, ..ItemSettings::default() };
         PresetSnapshot { settings: s, applied_preset: String::new() }
     }
 
@@ -478,8 +477,10 @@ mod tests {
         let mut item = fixture(1);
         item.settings.line_mode = LineMode::Off;
         item.cached_edge_mask = Some((Arc::new(image::GrayImage::new(1, 1)), 0, prunr_core::EdgeScale::Fused));
-        let mut snap_with_edges = ItemSettings::default();
-        snap_with_edges.line_mode = LineMode::EdgesOnly;
+        let snap_with_edges = ItemSettings {
+            line_mode: LineMode::EdgesOnly,
+            ..ItemSettings::default()
+        };
         item.preset_undo_stack.push_back(PresetSnapshot {
             settings: snap_with_edges,
             applied_preset: String::new(),
