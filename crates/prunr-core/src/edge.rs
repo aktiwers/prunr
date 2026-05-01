@@ -488,30 +488,32 @@ pub fn finalize_edges(
     compose_edges(&mask, original, edge.solid_line_color, edge.edge_thickness)
 }
 
-/// Pre-process an image according to the user's `InputTransform`. Returns
-/// `Cow::Borrowed(img)` for the identity (`None`) case so the most-common
-/// path skips a full RGBA clone (~32 MB at 4K). The transformed arms still
-/// produce owned `DynamicImage` via `Cow::Owned`. Cheap enough at 4K —
-/// single per-pixel pass with integer math.
+/// Pre-process an image according to the user's `InputTransform`. The
+/// identity (`None`) case returns `Cow::Borrowed(img)` and skips the
+/// `to_rgba8()` clone (~32 MB at 4K). Transformed arms must allocate
+/// — `to_rgba8()` already takes a clone-only fast path when the input
+/// is `ImageRgba8`, so there's no further alloc to skip without taking
+/// ownership of the input.
 pub fn apply_input_transform<'a>(
     img: &'a DynamicImage,
     transform: crate::types::InputTransform,
 ) -> std::borrow::Cow<'a, DynamicImage> {
     use crate::types::InputTransform;
     use std::borrow::Cow;
+    if matches!(transform, InputTransform::None) {
+        return Cow::Borrowed(img);
+    }
+    let mut rgba = img.to_rgba8();
     match transform {
-        InputTransform::None => Cow::Borrowed(img),
+        InputTransform::None => unreachable!(),
         InputTransform::Grayscale => {
-            let mut rgba = img.to_rgba8();
             for p in rgba.pixels_mut() {
                 let y = ((p.0[0] as u32 * 2126 + p.0[1] as u32 * 7152 + p.0[2] as u32 * 722) / 10000) as u8;
                 p.0[0] = y; p.0[1] = y; p.0[2] = y;
             }
-            Cow::Owned(DynamicImage::ImageRgba8(rgba))
         }
         InputTransform::ContrastBoost { percent } => {
             let factor = percent.clamp(50, 300) as i32;
-            let mut rgba = img.to_rgba8();
             for p in rgba.pixels_mut() {
                 for i in 0..3 {
                     // Expand around 128: new = 128 + (v - 128) * factor/100
@@ -520,20 +522,18 @@ pub fn apply_input_transform<'a>(
                     p.0[i] = shifted.clamp(0, 255) as u8;
                 }
             }
-            Cow::Owned(DynamicImage::ImageRgba8(rgba))
         }
         InputTransform::Posterize { levels } => {
             let n = levels.max(2) as u16 - 1;
-            let mut rgba = img.to_rgba8();
             for p in rgba.pixels_mut() {
                 for i in 0..3 {
                     let v = p.0[i] as u16;
                     p.0[i] = ((v * n / 255) * 255 / n) as u8;
                 }
             }
-            Cow::Owned(DynamicImage::ImageRgba8(rgba))
         }
     }
+    Cow::Owned(DynamicImage::ImageRgba8(rgba))
 }
 
 /// Preprocess an image for DexiNed: resize, BGR float32, subtract mean.
