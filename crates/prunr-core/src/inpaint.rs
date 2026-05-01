@@ -1594,13 +1594,10 @@ mod tests {
     ) -> RgbaImage {
         if feather_px <= 0.0 { return inpainted.clone(); }
         let dist = chamfer_distance_inside(mask);
-        let (w, h) = inpainted.dimensions();
         let mut out = inpainted.clone();
         let out_raw = out.as_mut();
         let src = source.as_raw();
         let inp = inpainted.as_raw();
-        let n = (w * h) as usize;
-        debug_assert_eq!(dist.len(), n);
         for (i, &d) in dist.iter().enumerate() {
             let pix = i * 4;
             if d <= 0.0 {

@@ -146,9 +146,6 @@ impl Defaults {
 /// `app_settings` exposes model + preset map (Row 2 hosts both dropdowns).
 /// `applied_preset` is read for the button's modified/clean icon and written
 /// in place when the user applies or saves a preset.
-// Top-level view dispatcher — args are the per-frame state surface the
-// adjustments rows read or mutate. Grouping into a struct would just
-// shuffle the same fields behind one indirection.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render(
     ui: &mut Ui,
