@@ -142,7 +142,7 @@ pub fn render(ui: &mut egui::Ui, app: &PrunrApp) {
                 );
             }
 
-            if let Some((w, h)) = app.image_dimensions {
+            if let Some((w, h)) = app.batch.selected_item().map(|i| i.dimensions) {
                 ui.add_space(theme::SPACE_SM);
                 ui.label(
                     RichText::new(format!("{w}×{h}"))
