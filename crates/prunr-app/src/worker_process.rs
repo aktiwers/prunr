@@ -206,7 +206,6 @@ pub fn run_worker() -> ! {
         // can't function; no useful recovery possible.
         .unwrap_or_else(|_| rayon::ThreadPoolBuilder::new().build().unwrap());
 
-    let cancel = Arc::new(AtomicBool::new(false));
     // Worker-side mirror of the parent's per-item cancel set — IPC can't
     // share `Arc<AtomicBool>`, so we round-trip through `CancelItem` inserts.
     let cancelled_items: Arc<Mutex<std::collections::HashSet<u64>>> =
@@ -248,7 +247,6 @@ pub fn run_worker() -> ! {
                 in_flight.fetch_add(1, Ordering::AcqRel);
 
                 let evt_tx = evt_tx.clone();
-                let cancel = cancel.clone();
                 let cancelled_items = cancelled_items.clone();
                 let in_flight = in_flight.clone();
                 let edge_eng = edge_engine.clone();
@@ -257,10 +255,6 @@ pub fn run_worker() -> ! {
                 let ipc = ipc_dir.clone();
 
                 pool.spawn(move || {
-                    if cancel.load(Ordering::Acquire) {
-                        in_flight.fetch_sub(1, Ordering::AcqRel);
-                        return;
-                    }
                     if is_item_cancelled(&cancelled_items, item_id) {
                         let _ = evt_tx.send(SubprocessEvent::ImageError {
                             item_id,
@@ -384,20 +378,14 @@ pub fn run_worker() -> ! {
                                     Err(err)
                                 } else {
                                     let infer_evt_tx = evt_tx.clone();
-                                    let infer_cancel = cancel.clone();
                                     let infer_progress = move |stage: ProgressStage, pct: f32| {
-                                        if !infer_cancel.load(Ordering::Acquire) {
-                                            let _ = infer_evt_tx.send(SubprocessEvent::Progress {
-                                                item_id, stage, pct,
-                                            });
-                                        }
+                                        let _ = infer_evt_tx.send(SubprocessEvent::Progress {
+                                            item_id, stage, pct,
+                                        });
                                     };
                                     prunr_core::infer_only(
-                                        original, eng, Some(infer_progress), Some(cancel.clone()),
+                                        original, eng, Some(infer_progress), None,
                                     ).and_then(|ir| {
-                                        if cancel.load(Ordering::Acquire) {
-                                            return Err(prunr_core::CoreError::Cancelled);
-                                        }
                                         let th = ir.tensor_height;
                                         let tw = ir.tensor_width;
                                         let active_provider = ir.active_provider.clone();
@@ -408,17 +396,11 @@ pub fn run_worker() -> ! {
                                         // Seg tensor captured → Tier 2 mask reruns work in
                                         // SubjectOutline; Off ↔ SubjectOutline can reuse it.
                                         tensor_for_cache = Some((ir.tensor_data, th as u32, tw as u32));
-                                        if cancel.load(Ordering::Acquire) {
-                                            return Err(prunr_core::CoreError::Cancelled);
-                                        }
                                         let masked_img = image::DynamicImage::ImageRgba8(masked_rgba.clone());
                                         // invariant: line_mode == SubjectOutline → needs_edge → edge_eng loaded.
                                         let eng_ref = edge_eng.as_ref().unwrap();
                                         let transformed = prunr_core::apply_input_transform(&masked_img, edge.input_transform);
                                         let edge_res = eng_ref.infer_all_tensors(&transformed)?;
-                                        if cancel.load(Ordering::Acquire) {
-                                            return Err(prunr_core::CoreError::Cancelled);
-                                        }
                                         let rgba_image = prunr_core::compose_subject_outline(&edge_res, &masked_rgba, &edge);
                                         edge_tensor_for_cache = Some(edge_res);
                                         Ok(ProcessResult { rgba_image, active_provider })
@@ -478,24 +460,18 @@ pub fn run_worker() -> ! {
                             } else {
                                 // Progress callback for infer_only
                                 let infer_evt_tx = evt_tx.clone();
-                                let infer_cancel = cancel.clone();
                                 let infer_progress = move |stage: ProgressStage, pct: f32| {
-                                    if !infer_cancel.load(Ordering::Acquire) {
-                                        let _ = infer_evt_tx.send(SubprocessEvent::Progress {
-                                            item_id, stage, pct,
-                                        });
-                                    }
+                                    let _ = infer_evt_tx.send(SubprocessEvent::Progress {
+                                        item_id, stage, pct,
+                                    });
                                 };
 
                                 prunr_core::infer_only(
-                                    original, eng, Some(infer_progress), Some(cancel.clone()),
+                                    original, eng, Some(infer_progress), None,
                                 ).and_then(|ir| {
-                                    // Report postprocess stage
-                                    if !cancel.load(Ordering::Acquire) {
-                                        let _ = evt_tx.send(SubprocessEvent::Progress {
-                                            item_id, stage: ProgressStage::Postprocess, pct: 0.8,
-                                        });
-                                    }
+                                    let _ = evt_tx.send(SubprocessEvent::Progress {
+                                        item_id, stage: ProgressStage::Postprocess, pct: 0.8,
+                                    });
 
                                     let th = ir.tensor_height;
                                     let tw = ir.tensor_width;
@@ -523,12 +499,9 @@ pub fn run_worker() -> ! {
                                         "worker postprocess result alpha stats",
                                     );
 
-                                    // Report alpha stage
-                                    if !cancel.load(Ordering::Acquire) {
-                                        let _ = evt_tx.send(SubprocessEvent::Progress {
-                                            item_id, stage: ProgressStage::Alpha, pct: 0.95,
-                                        });
-                                    }
+                                    let _ = evt_tx.send(SubprocessEvent::Progress {
+                                        item_id, stage: ProgressStage::Alpha, pct: 0.95,
+                                    });
 
                                     // Stash tensor for cache output
                                     tensor_for_cache = Some((
@@ -740,7 +713,6 @@ pub fn run_worker() -> ! {
                 let mask_settings = cmd_mask;
                 let edge_settings = edge;
                 let edge_eng = edge_engine.clone();
-                let cancel = cancel.clone();
                 let cancelled_items = cancelled_items.clone();
 
                 in_flight.fetch_add(1, Ordering::AcqRel);
@@ -759,9 +731,6 @@ pub fn run_worker() -> ! {
                     // back as tensor_cache_path — the parent's read_tensor_cache
                     // reads-and-deletes it. So here we `read`, not `read_and_delete`.
                     let produce = (|| -> Result<(image::RgbaImage, prunr_core::EdgeInferenceResult), String> {
-                        if cancel.load(Ordering::Acquire) {
-                            return Err("cancelled".to_string());
-                        }
                         let raw_bytes = std::fs::read(&seg_tensor_path)
                             .map_err(|e| format!("Failed to read seg tensor: {e}"))?;
                         let seg_data = prunr_app::subprocess::ipc::le_bytes_to_f32s(&raw_bytes);
@@ -771,9 +740,6 @@ pub fn run_worker() -> ! {
                         let original = prunr_core::load_image_from_bytes(&img_bytes)
                             .map_err(|e| format!("Failed to decode image: {e}"))?;
 
-                        if cancel.load(Ordering::Acquire) {
-                            return Err("cancelled".to_string());
-                        }
                         let masked_rgba = prunr_core::postprocess_from_flat(
                             &seg_data, seg_tensor_height as usize, seg_tensor_width as usize,
                             &original, &prunr_core::PostprocessOpts::new(&mask_settings, cmd_model),
@@ -786,9 +752,6 @@ pub fn run_worker() -> ! {
                         let edge_res = eng_ref.infer_all_tensors(&transformed)
                             .map_err(|e| e.to_string())?;
 
-                        if cancel.load(Ordering::Acquire) {
-                            return Err("cancelled".to_string());
-                        }
                         let rgba_image = prunr_core::compose_subject_outline(&edge_res, &masked_rgba, &edge_settings);
                         Ok((rgba_image, edge_res))
                     })();
@@ -867,11 +830,11 @@ pub fn run_worker() -> ! {
                 // Inpaint runs independent of the seg/edge engine pool —
                 // a fresh thread per dispatch keeps inference from
                 // blocking batched seg work. Bump `in_flight` so a
-                // concurrent `Cancel` / `Shutdown` waits for the SD
-                // UNet loop to actually finish rather than declaring
-                // drain done while the spawned thread is still alive
-                // and queueing events. Decrement is in `Cleanup::drop`
-                // so panics still pair correctly.
+                // concurrent `Shutdown` waits for the SD UNet loop to
+                // actually finish rather than declaring drain done while
+                // the spawned thread is still alive and queueing events.
+                // Decrement is in `Cleanup::drop` so panics still pair
+                // correctly.
                 in_flight.fetch_add(1, Ordering::AcqRel);
                 let evt_tx = evt_tx.clone();
                 let inpaint_cancels = inpaint_cancels.clone();
