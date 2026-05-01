@@ -103,11 +103,9 @@ impl BatchManager {
         self.items.iter_mut().find(|b| b.id == id)
     }
 
-    /// Derive the app-level state from the selected item's status. Empty
-    /// when no item is selected; otherwise mirrors `BatchStatus → AppState`
-    /// (Done/Processing pass through, everything else collapses to Loaded).
-    /// Callers should *not* cache the result — it's free to recompute and
-    /// caching just risks drift.
+    /// Derives app-level state from the selected item's status.
+    /// Empty when no item is selected; Done/Processing pass through;
+    /// all other statuses collapse to Loaded.
     pub(crate) fn app_state(&self) -> AppState {
         match self.selected_item() {
             None => AppState::Empty,
