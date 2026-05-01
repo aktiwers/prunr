@@ -14,7 +14,7 @@ use image::DynamicImage;
 use prunr_core::{
     process_image_from_decoded, BgEffect, MaskSettings, ModelKind, OrtEngine, ProgressStage,
 };
-use test_common::{ensure_ort_initialized, render_synthetic_source, SyntheticSpec};
+use test_common::{render_synthetic_source, skip_if_no_ort, SyntheticSpec};
 
 fn fixture_source() -> DynamicImage {
     // Reuse the multi_subject canary: two distinct circles on a flat bg.
@@ -42,10 +42,7 @@ fn run_with_bg_effect(engine: &OrtEngine, bg_effect: BgEffect) -> image::RgbaIma
 /// vary across the image.
 #[test]
 fn bg_effect_none_preserves_transparency() {
-    if let Err(msg) = ensure_ort_initialized() {
-        eprintln!("[bg_effect_none] SKIP: {msg}");
-        return;
-    }
+    if skip_if_no_ort("bg_effect_none") { return; }
     let engine = OrtEngine::new_cpu_only(ModelKind::Silueta, 1)
         .expect("OrtEngine::new_cpu_only(Silueta)");
     let out = run_with_bg_effect(&engine, BgEffect::None);
@@ -68,10 +65,7 @@ fn bg_effect_none_preserves_transparency() {
 /// of the source — the result must be fully opaque everywhere.
 #[test]
 fn bg_effect_blurred_source_produces_opaque_result() {
-    if let Err(msg) = ensure_ort_initialized() {
-        eprintln!("[bg_effect_blurred_source] SKIP: {msg}");
-        return;
-    }
+    if skip_if_no_ort("bg_effect_blurred_source") { return; }
     let engine = OrtEngine::new_cpu_only(ModelKind::Silueta, 1)
         .expect("OrtEngine::new_cpu_only(Silueta)");
     let out = run_with_bg_effect(&engine, BgEffect::BlurredSource { radius: 8 });
@@ -83,10 +77,7 @@ fn bg_effect_blurred_source_produces_opaque_result() {
 /// of the source — fully opaque everywhere.
 #[test]
 fn bg_effect_inverted_source_produces_opaque_result() {
-    if let Err(msg) = ensure_ort_initialized() {
-        eprintln!("[bg_effect_inverted_source] SKIP: {msg}");
-        return;
-    }
+    if skip_if_no_ort("bg_effect_inverted_source") { return; }
     let engine = OrtEngine::new_cpu_only(ModelKind::Silueta, 1)
         .expect("OrtEngine::new_cpu_only(Silueta)");
     let out = run_with_bg_effect(&engine, BgEffect::InvertedSource);
@@ -98,10 +89,7 @@ fn bg_effect_inverted_source_produces_opaque_result() {
 /// fully opaque everywhere; bg pixels should be near-grey.
 #[test]
 fn bg_effect_desaturated_source_produces_opaque_result() {
-    if let Err(msg) = ensure_ort_initialized() {
-        eprintln!("[bg_effect_desaturated_source] SKIP: {msg}");
-        return;
-    }
+    if skip_if_no_ort("bg_effect_desaturated_source") { return; }
     let engine = OrtEngine::new_cpu_only(ModelKind::Silueta, 1)
         .expect("OrtEngine::new_cpu_only(Silueta)");
     let out = run_with_bg_effect(&engine, BgEffect::DesaturatedSource);

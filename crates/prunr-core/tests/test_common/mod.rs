@@ -26,6 +26,18 @@ pub fn ensure_ort_initialized() -> Result<(), String> {
     RESULT.get_or_init(try_init_ort).clone()
 }
 
+/// Returns `true` when ORT couldn't be initialised, after printing a
+/// `[label] SKIP:` line. Caller pattern: `if skip_if_no_ort("foo") { return; }`.
+/// Centralises the boilerplate that otherwise repeats at the top of every
+/// feature-test fn.
+pub fn skip_if_no_ort(label: &str) -> bool {
+    if let Err(msg) = ensure_ort_initialized() {
+        eprintln!("[{label}] SKIP: {msg}");
+        return true;
+    }
+    false
+}
+
 fn try_init_ort() -> Result<(), String> {
     if let Some(env_path) = env::var_os("ORT_DYLIB_PATH") {
         let path = PathBuf::from(env_path);
