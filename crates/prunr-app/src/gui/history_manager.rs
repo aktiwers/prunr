@@ -199,13 +199,14 @@ mod preset_stack_tests {
     //! Tests for the `push_bounded` helper. Kept inline so the helper can
     //! stay private to this module.
     use super::*;
-    use crate::gui::item_settings::ItemSettings;
 
     /// Build a single-attribute PresetSnapshot. `pub(super)` so the sibling
     /// `tests` module can reuse it (deduped per /simplify finding).
     pub(super) fn snap(gamma: f32) -> PresetSnapshot {
-        let s = ItemSettings { gamma, ..ItemSettings::default() };
-        PresetSnapshot { settings: s, applied_preset: String::new() }
+        PresetSnapshot {
+            settings: crate::gui::item_settings::item_with_gamma(gamma),
+            applied_preset: String::new(),
+        }
     }
 
     #[test]
