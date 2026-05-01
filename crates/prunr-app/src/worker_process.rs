@@ -892,6 +892,12 @@ pub fn run_worker() -> ! {
                 let evt_tx_on_spawn_err = evt_tx.clone();
                 let inpaint_cancels_on_err = inpaint_cancels.clone();
                 let pump_done_on_err = pump_done.clone();
+                // Use the parent-supplied ipc_dir so the result PNG lands in
+                // the same /dev/shm/prunr-ipc-<parent_pid>/ that the parent
+                // reads from. Calling ipc_temp_dir() here would resolve via
+                // the CHILD's pid, leaking an orphan dir per spawn (no
+                // cleanup ever sweeps it because the child exits).
+                let ipc_dir_for_spawn = ipc_dir.clone();
                 // Progress pump: 4 Hz poll matches SD's per-step cadence on
                 // CPU (1-3 s/step). Acquire reads pair with the worker's
                 // Release writes in `process_inpaint_with`.
@@ -984,8 +990,7 @@ pub fn run_worker() -> ! {
                     drop(_cleanup);
                     match result {
                         Ok(rgba) => {
-                            let dir = prunr_app::subprocess::protocol::ipc_temp_dir();
-                            let path = dir.join(format!("inpaint-out-{item_id}.png"));
+                            let path = ipc_dir_for_spawn.join(format!("inpaint-out-{item_id}.png"));
                             match prunr_core::encode_rgba_png(&rgba) {
                                 Ok(bytes) => {
                                     if let Err(e) = std::fs::write(&path, &bytes) {
