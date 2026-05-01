@@ -544,7 +544,6 @@ mod tests {
             ("gamma only", base.clone(), with_gamma(1.5), RequiredTier::MaskRerun),
             ("line only", base.clone(), with_line(0.9), RequiredTier::EdgeRerun),
             ("model only", base.clone(), make_recipe(ModelKind::BiRefNetLite, 1.0, None), RequiredTier::FullPipeline),
-            // input_transform with edges on invalidates edge tensor only.
             ("input_transform+edges → add_edge", edges_on(), with_input_transform(InputTransform::Grayscale), RequiredTier::AddEdgeInference),
             // Priority: mask changes dominate composite changes.
             ("gamma+bg → mask", base.clone(), {
