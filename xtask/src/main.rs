@@ -328,9 +328,10 @@ fn compress_to_zst(onnx_path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
 ///   cargo xtask install-runtime onnxruntime 1.24.1 --stage-to dist/runtime
 ///
 /// Skips Python bindings (`onnxruntime_pybind11_state.cpython-*.so`,
-/// `*.py` sources) since prunr links via Rust ort. Renames
-/// `libonnxruntime.so.<ver>` to `libonnxruntime.so` so
-/// `prunr_app::ort_runtime::resolve_dylib_path()` picks it up.
+/// `*.py` sources) since prunr links via Rust ort. Strips the version
+/// suffix off `libonnxruntime.so.<ver>` (Linux) and
+/// `libonnxruntime.<ver>.dylib` (macOS) so the canonical name is what
+/// `prunr_app::ort_runtime::resolve_dylib_path()` picks up.
 fn install_runtime() -> anyhow::Result<()> {
     use prunr_runtime_install as ri;
     let package = std::env::args().nth(2)
