@@ -106,7 +106,7 @@ impl SubprocessManager {
         // Send Init command
         write_message(&mut stdin_writer, &SubprocessCommand::Init {
             model, jobs, mask, force_cpu, line_mode, edge,
-            ipc_dir: ipc_temp_dir(),
+            ipc_dir: ipc_temp_dir().to_path_buf(),
             inpaint_only,
         }).map_err(|e| format!("Failed to send Init: {e}"))?;
 
