@@ -318,8 +318,8 @@ pub fn apply_fill_style(rgba: &mut RgbaImage, style: crate::types::FillStyle) {
                     lut.push([p.0[0], p.0[1], p.0[2]]);
                 }
             }
-            // Row-parallel; validated alongside apply_mask_inplace (10-07 benchmarks).
-            // postprocess runs in the subprocess worker, never nested inside rayon.
+            // Row-parallel: postprocess runs in the subprocess worker,
+            // never nested inside rayon (so par_chunks_mut won't deadlock).
             use rayon::prelude::*;
             let row_stride = (w * 4) as usize;
             rgba.as_mut().par_chunks_mut(row_stride).enumerate().for_each(|(y, row)| {

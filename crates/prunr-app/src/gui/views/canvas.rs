@@ -294,7 +294,7 @@ const TIP_CYCLE_SECS: f64 = 5.0;
 const TIP_FADE_SECS: f64 = 0.5;
 
 static TIPS: LazyLock<Vec<String>> = LazyLock::new(|| {
-    let m = if cfg!(target_os = "macos") { "Cmd" } else { "Ctrl" };
+    let m = super::KB_MOD;
     vec![
         "Press F1 to view keyboard shortcuts".to_string(),
         "Press F2 to view CLI usage examples".to_string(),
