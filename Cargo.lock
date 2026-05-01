@@ -4431,6 +4431,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "sysinfo",
+ "tempfile",
  "tracing",
  "tracing-subscriber",
  "windows-sys 0.59.0",
