@@ -219,21 +219,30 @@ impl BatchManager {
         })
     }
 
-    /// Flip every `Processing` item back to `Pending`. Returns the number
-    /// of items that changed status. Used after a Cancel-All so spinners
-    /// stop and the items can be re-Processed without going through the
-    /// error path. Late `ImageDone` arrivals from the worker / subprocess
-    /// are silently dropped by the Processing-only guard in
-    /// `on_batch_item_done`.
-    pub(crate) fn reset_processing_to_pending(&mut self) -> usize {
-        let mut flipped = 0;
+    /// Remove the item at `idx`, cleaning up any on-disk history /
+    /// redo entries it owned. Returns `false` (without doing anything)
+    /// when `idx` is out of bounds. Caller is expected to follow up with
+    /// a selection-clamp / sync — `BatchManager` doesn't know about
+    /// `pending_batch_sync` or texture eviction.
+    pub(crate) fn remove(&mut self, idx: usize) -> bool {
+        if idx >= self.items.len() { return false; }
+        let item = self.items.remove(idx);
+        for entry in item.history { entry.cleanup(); }
+        for entry in item.redo_stack { entry.cleanup(); }
+        true
+    }
+
+    /// Flip every `Processing` item back to `Pending`. Used after a
+    /// Cancel-All so spinners stop and items can be re-Processed without
+    /// going through the error path. Late `ImageDone` arrivals from the
+    /// worker / subprocess are silently dropped by the Processing-only
+    /// guard in `on_batch_item_done`.
+    pub(crate) fn reset_processing_to_pending(&mut self) {
         for item in &mut self.items {
             if item.status == BatchStatus::Processing {
                 item.status = BatchStatus::Pending;
-                flipped += 1;
             }
         }
-        flipped
     }
 
     /// Single pass over `items` producing the three counts that callers

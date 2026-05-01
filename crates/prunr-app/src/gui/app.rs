@@ -1596,16 +1596,9 @@ impl PrunrApp {
     }
 
     pub fn remove_batch_item(&mut self, idx: usize) {
-        if idx >= self.batch.items.len() { return; }
-        let item = self.batch.items.remove(idx);
-        // Clean up any on-disk history/redo entries for this item
-        for entry in item.history {
-            entry.cleanup();
+        if self.batch.remove(idx) {
+            self.sync_after_batch_change();
         }
-        for entry in item.redo_stack {
-            entry.cleanup();
-        }
-        self.sync_after_batch_change();
     }
 
     /// Release an item's memory budget and greedily admit the next fitting items.
