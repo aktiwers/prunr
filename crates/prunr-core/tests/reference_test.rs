@@ -225,7 +225,7 @@ fn test_progress_callback_all_stages() {
 
     let _ = process_image(&img_bytes, &engine, Some(move |stage, pct| {
         stages_clone.lock().unwrap().push(stage);
-        assert!(pct >= 0.0 && pct <= 1.0, "Progress pct must be in [0.0, 1.0], got {pct}");
+        assert!((0.0..=1.0).contains(&pct), "Progress pct must be in [0.0, 1.0], got {pct}");
     }), None::<Arc<AtomicBool>>);
 
     let recorded = stages.lock().unwrap();

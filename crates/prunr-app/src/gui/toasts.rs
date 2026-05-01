@@ -16,6 +16,7 @@ use egui_notify::{Anchor, Toast};
 /// Words longer than this get hard-broken inside the wrapper.
 const TOAST_LINE_CHARS: usize = 60;
 
+#[derive(Default)]
 pub(crate) struct Toasts(egui_notify::Toasts);
 
 impl Toasts {
@@ -50,11 +51,6 @@ impl Toasts {
     }
 }
 
-impl Default for Toasts {
-    fn default() -> Self {
-        Self(egui_notify::Toasts::default())
-    }
-}
 
 /// Greedy word-wrap: break on whitespace into lines of at most
 /// `TOAST_LINE_CHARS` chars (counted in unicode scalar values, which is

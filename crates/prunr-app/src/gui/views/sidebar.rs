@@ -10,7 +10,7 @@ use crate::gui::theme;
 /// Manual pointer hit test for a rect — returns (hovered, clicked).
 fn hit_test(ui: &egui::Ui, rect: Rect) -> (bool, bool) {
     ui.ctx().input(|i| {
-        let hover = i.pointer.hover_pos().map_or(false, |p| rect.contains(p));
+        let hover = i.pointer.hover_pos().is_some_and(|p| rect.contains(p));
         (hover, hover && i.pointer.primary_clicked())
     })
 }

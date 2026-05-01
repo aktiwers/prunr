@@ -261,7 +261,7 @@ impl LivePreview {
             // this item, a newer tweak superseded it.
             let is_latest = self.in_flight
                 .get(&r.item_id)
-                .map_or(false, |f| f.generation == r.generation);
+                .is_some_and(|f| f.generation == r.generation);
             if is_latest {
                 self.in_flight.remove(&r.item_id);
                 // If pending has a fresh entry for this item, the user is

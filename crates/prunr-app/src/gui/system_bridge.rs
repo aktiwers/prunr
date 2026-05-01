@@ -10,6 +10,12 @@ pub struct SystemBridge {
     clipboard: Option<arboard::Clipboard>,
 }
 
+impl Default for SystemBridge {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SystemBridge {
     pub fn new() -> Self {
         Self { clipboard: arboard::Clipboard::new().ok() }

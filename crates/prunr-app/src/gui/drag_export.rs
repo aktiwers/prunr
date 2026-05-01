@@ -203,7 +203,7 @@ fn write_layer(
                     .map_err(prunr_core::CoreError::Io)
             }),
     };
-    res.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+    res.map_err(|e| std::io::Error::other(e.to_string()))?;
     std::io::Write::flush(&mut w)?;
     Ok(Some(path))
 }
@@ -227,7 +227,7 @@ pub(crate) fn prepare(item: &BatchItem) -> std::io::Result<PathBuf> {
             let file = std::fs::File::create(&path)?;
             let mut w = std::io::BufWriter::new(file);
             prunr_core::encode_rgba_png_into(&baked, &mut w)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
             std::io::Write::flush(&mut w)?;
         }
         None => {
