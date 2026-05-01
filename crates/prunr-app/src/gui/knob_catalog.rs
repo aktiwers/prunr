@@ -418,13 +418,6 @@ mod tests {
     }
 
     #[test]
-    fn every_static_knob_has_a_requirement() {
-        for k in StaticKnob::ALL {
-            let _ = k.requirement();
-        }
-    }
-
-    #[test]
     fn requirement_assignments_match_catalog_intent() {
         use KnobRequirement::*;
         let expected: &[(StaticKnob, KnobRequirement)] = &[
