@@ -7,25 +7,14 @@
 
 mod test_common;
 
-use image::DynamicImage;
 use prunr_core::{
     brush::{paint_circle, BrushMode, MaskCorrection, Stamp},
     infer_only, postprocess_from_flat, MaskSettings, ModelKind, OrtEngine,
     PostprocessOpts, ProgressStage,
 };
-use test_common::{render_synthetic_source, skip_if_no_ort, SyntheticSpec};
+use test_common::{multi_subject_canary, skip_if_no_ort};
 
 const SIZE: u32 = 256;
-
-fn fixture_source() -> DynamicImage {
-    let spec = SyntheticSpec {
-        id: "feature_brush_src",
-        width: SIZE,
-        height: SIZE,
-        draw_source: test_common::draw_multi_subject,
-    };
-    DynamicImage::ImageRgba8(render_synthetic_source(&spec))
-}
 
 #[test]
 fn brush_correction_stroke_alters_the_painted_region_only() {
@@ -33,7 +22,7 @@ fn brush_correction_stroke_alters_the_painted_region_only() {
 
     let engine = OrtEngine::new_cpu_only(ModelKind::Silueta, 1)
         .expect("OrtEngine::new_cpu_only(Silueta)");
-    let img = fixture_source();
+    let img = multi_subject_canary();
     let mask_settings = MaskSettings::default();
 
     // Step 1: run inference once; reuse the tensor for both postprocess
@@ -97,14 +86,14 @@ fn brush_correction_stroke_alters_the_painted_region_only() {
 }
 
 /// Pins the cache-key contract: identical correction → identical result.
-/// (`correction_hash` on `MaskSettings` keys this; if hashing drifts,
-/// the cache misses or stales — both bugs caught by this test.)
+/// `correction_hash` on `MaskSettings` keys the cache; if hashing drifts,
+/// the cache misses or stales — both failure modes caught by byte equality.
 #[test]
 fn brush_correction_is_deterministic_across_runs() {
     if skip_if_no_ort("brush_correction_deterministic") { return; }
     let engine = OrtEngine::new_cpu_only(ModelKind::Silueta, 1)
         .expect("OrtEngine::new_cpu_only(Silueta)");
-    let img = fixture_source();
+    let img = multi_subject_canary();
     let mask_settings = MaskSettings::default();
     let ir = infer_only(&img, &engine, None::<fn(ProgressStage, f32)>, None)
         .expect("infer_only");

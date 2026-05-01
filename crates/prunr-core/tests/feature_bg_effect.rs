@@ -10,27 +10,13 @@
 
 mod test_common;
 
-use image::DynamicImage;
 use prunr_core::{
     process_image_from_decoded, BgEffect, MaskSettings, ModelKind, OrtEngine, ProgressStage,
 };
-use test_common::{render_synthetic_source, skip_if_no_ort, SyntheticSpec};
-
-fn fixture_source() -> DynamicImage {
-    // Reuse the multi_subject canary: two distinct circles on a flat bg.
-    // Silueta has a stable mask response on this and the bg fill exercises
-    // each BgEffect variant on a non-trivial transparent region.
-    let spec = SyntheticSpec {
-        id: "feature_bg_effect_src",
-        width: 256,
-        height: 256,
-        draw_source: test_common::draw_multi_subject,
-    };
-    DynamicImage::ImageRgba8(render_synthetic_source(&spec))
-}
+use test_common::{multi_subject_canary, skip_if_no_ort};
 
 fn run_with_bg_effect(engine: &OrtEngine, bg_effect: BgEffect) -> image::RgbaImage {
-    let img = fixture_source();
+    let img = multi_subject_canary();
     let mask = MaskSettings { bg_effect, ..MaskSettings::default() };
     let result = process_image_from_decoded(
         &img, engine, &mask, None::<fn(ProgressStage, f32)>, None,

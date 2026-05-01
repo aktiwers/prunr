@@ -739,9 +739,9 @@ mod tests {
         assert!(result.is_ok());
     }
 
-    /// K-5: a malformed image must surface a recognisable error via
-    /// `Err` so the UI clears `decode_pending` and flags the item
-    /// instead of leaving it stuck "still loading."
+    /// A malformed image must surface a recognisable error via `Err` so
+    /// the UI clears `decode_pending` and flags the item instead of
+    /// leaving it stuck "still loading."
     #[test]
     fn request_decode_bytes_emits_err_on_malformed_input() {
         let bm = fixture();

@@ -119,18 +119,46 @@ fn is_item_cancelled(
     guard.remove(&item_id)
 }
 
+type CancelMap = Arc<Mutex<std::collections::HashMap<u64, Arc<AtomicBool>>>>;
+
 /// Flip the mid-inference cancel flag for `item_id` if a dispatch has
 /// registered one. Used twice from `CancelItem` (seg + inpaint maps);
 /// shared so both sites keep the same lock-then-store sequence.
-fn flip_cancel_flag(
-    map: &Arc<Mutex<std::collections::HashMap<u64, Arc<AtomicBool>>>>,
-    item_id: u64,
-) {
+fn flip_cancel_flag(map: &CancelMap, item_id: u64) {
     if let Some(flag) = map.lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .get(&item_id)
     {
         flag.store(true, Ordering::Release);
+    }
+}
+
+/// Insert a fresh `Arc<AtomicBool>` for `item_id` into `map` and return
+/// a clone. Both seg + inpaint dispatches register the same shape so a
+/// `CancelItem` IPC can flip the flag mid-inference.
+fn register_cancel_flag(map: &CancelMap, item_id: u64) -> Arc<AtomicBool> {
+    let flag = Arc::new(AtomicBool::new(false));
+    map.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(item_id, flag.clone());
+    flag
+}
+
+/// RAII guard that removes the cancel-flag entry from `map` on drop so
+/// the map stays bounded when a dispatch finishes (success / error /
+/// panic — Drop runs in every case). Used directly by the seg dispatch
+/// closure and embedded inside the inpaint thread's `Cleanup` struct
+/// (which carries extra fields for pump-join + in_flight decrement).
+struct CancelMapGuard {
+    item_id: u64,
+    map: CancelMap,
+}
+
+impl Drop for CancelMapGuard {
+    fn drop(&mut self) {
+        self.map.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.item_id);
     }
 }
 
@@ -324,32 +352,14 @@ pub fn run_worker() -> ! {
                 let seg_cancels_for_dispatch = seg_cancels.clone();
                 // Per-item mid-inference cancel flag. Registered before
                 // the closure starts heavy work so a `CancelItem` can
-                // flip it; cleaned up by `seg_cancel_guard` on every
-                // exit path.
-                let seg_cancel = Arc::new(AtomicBool::new(false));
-                {
-                    let mut g = seg_cancels_for_dispatch.lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    g.insert(item_id, seg_cancel.clone());
-                }
+                // flip it; the guard inside the closure removes the
+                // entry on every exit path so the map stays bounded.
+                let seg_cancel = register_cancel_flag(&seg_cancels_for_dispatch, item_id);
 
                 pool.spawn(move || {
-                    // RAII guard: removes the cancel-flag entry from
-                    // `seg_cancels` on drop so the map stays bounded.
-                    struct SegCancelGuard {
-                        item_id: u64,
-                        cancels: Arc<Mutex<std::collections::HashMap<u64, Arc<AtomicBool>>>>,
-                    }
-                    impl Drop for SegCancelGuard {
-                        fn drop(&mut self) {
-                            let mut g = self.cancels.lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner);
-                            g.remove(&self.item_id);
-                        }
-                    }
-                    let _seg_cancel_guard = SegCancelGuard {
+                    let _seg_cancel_guard = CancelMapGuard {
                         item_id,
-                        cancels: seg_cancels_for_dispatch,
+                        map: seg_cancels_for_dispatch,
                     };
 
                     // Hoist chain_path so every early-return path can clean up
@@ -928,13 +938,8 @@ pub fn run_worker() -> ! {
                 in_flight.fetch_add(1, Ordering::AcqRel);
                 let evt_tx = evt_tx.clone();
                 let inpaint_cancels = inpaint_cancels.clone();
-                let inpaint_cancel = Arc::new(AtomicBool::new(false));
+                let inpaint_cancel = register_cancel_flag(&inpaint_cancels, item_id);
                 let inpaint_progress = Arc::new(prunr_core::inpaint::InpaintProgress::new());
-                {
-                    let mut guard = inpaint_cancels.lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    guard.insert(item_id, inpaint_cancel.clone());
-                }
                 let progress_for_pump = inpaint_progress.clone();
                 let evt_tx_for_pump = evt_tx.clone();
                 let pump_done = Arc::new(AtomicBool::new(false));
@@ -970,19 +975,24 @@ pub fn run_worker() -> ! {
                 let spawn_result = std::thread::Builder::new()
                     .name("prunr-inpaint".into())
                     .spawn(move || {
-                    // RAII guard: stops pump + clears registry on Drop.
-                    // Runs even if the inference closure panics — without
-                    // this the pump thread loops forever holding evt_tx
-                    // and the parent's cancel flag is never reclaimed.
-                    // Joining the pump before any final send also closes
-                    // the "stale Progress after Done" race: pump can't be
-                    // mid-iteration when InpaintDone goes on the wire.
+                    // RAII guard: stops pump + clears registry + decrements
+                    // in_flight on Drop. Runs even if the inference closure
+                    // panics — without this the pump thread loops forever
+                    // holding evt_tx and the parent's cancel flag is never
+                    // reclaimed. Joining the pump before any final send
+                    // also closes the "stale Progress after Done" race:
+                    // pump can't be mid-iteration when InpaintDone goes on
+                    // the wire.
+                    //
+                    // The cancel-map removal is delegated to
+                    // `CancelMapGuard` (shared with the seg dispatch);
+                    // this struct just composes it with the pump-join +
+                    // in_flight decrement that are inpaint-specific.
                     struct Cleanup {
-                        item_id: u64,
                         pump_done: Arc<AtomicBool>,
                         pump_handle: Option<std::thread::JoinHandle<()>>,
-                        cancels: Arc<Mutex<std::collections::HashMap<u64, Arc<AtomicBool>>>>,
                         in_flight: Arc<std::sync::atomic::AtomicUsize>,
+                        _cancel_guard: CancelMapGuard,
                     }
                     impl Drop for Cleanup {
                         fn drop(&mut self) {
@@ -990,21 +1000,22 @@ pub fn run_worker() -> ! {
                             if let Some(h) = self.pump_handle.take() {
                                 let _ = h.join();
                             }
-                            let mut g = self.cancels.lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner);
-                            g.remove(&self.item_id);
                             // Pairs with `in_flight.fetch_add` at dispatch
                             // (above the thread::spawn). Drop runs even on
                             // panic, so the counter stays balanced.
                             self.in_flight.fetch_sub(1, Ordering::AcqRel);
+                            // `_cancel_guard` drops here, removing the
+                            // entry from `inpaint_cancels`.
                         }
                     }
                     let _cleanup = Cleanup {
-                        item_id,
                         pump_done: pump_done.clone(),
                         pump_handle: Some(pump_handle),
-                        cancels: inpaint_cancels.clone(),
                         in_flight: in_flight_for_thread,
+                        _cancel_guard: CancelMapGuard {
+                            item_id,
+                            map: inpaint_cancels.clone(),
+                        },
                     };
                     let result = (|| -> Result<image::RgbaImage, String> {
                         // Inner scope drops encoded bytes + DynamicImage as
@@ -1083,10 +1094,8 @@ pub fn run_worker() -> ! {
                 // never completes its drain.
                 if let Err(e) = spawn_result {
                     in_flight.fetch_sub(1, Ordering::AcqRel);
-                    let mut g = inpaint_cancels_on_err.lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    g.remove(&item_id);
-                    drop(g);
+                    // Drops on scope exit, removing the cancel-map entry.
+                    let _ = CancelMapGuard { item_id, map: inpaint_cancels_on_err };
                     pump_done_on_err.store(true, Ordering::Release);
                     let _ = evt_tx_on_spawn_err.send(SubprocessEvent::InpaintError {
                         item_id,
@@ -1138,10 +1147,10 @@ mod tests {
         panic!("expected ≥{n} waiters in 2s — test setup wedged");
     }
 
-    /// Pins the H15 no-starvation invariant: a giant acquirer at the head
-    /// of the queue must not be repeatedly skipped past by smaller arrivals.
-    /// Smaller waiters behind the giant only proceed if their weight still
-    /// leaves room for the giant's weight.
+    /// Pins the no-starvation invariant: a giant acquirer at the head
+    /// of the queue must not be repeatedly skipped past by smaller
+    /// arrivals. Smaller waiters behind the giant only proceed if their
+    /// weight still leaves room for the giant's weight.
     #[test]
     fn weighted_semaphore_giant_at_head_blocks_smaller_arrivals() {
         let sem = Arc::new(WeightedSemaphore::new(64));

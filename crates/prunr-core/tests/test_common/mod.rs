@@ -231,3 +231,17 @@ pub fn render_synthetic_source(spec: &SyntheticSpec) -> RgbaImage {
     (spec.draw_source)(&mut img);
     img
 }
+
+/// 256² multi_subject canary wrapped as `DynamicImage`. Shared by the
+/// feature-test files (`feature_bg_effect`, `feature_line_mode`,
+/// `feature_brush_correction`) so a future tweak to the canary scene
+/// updates one place.
+pub fn multi_subject_canary() -> image::DynamicImage {
+    let spec = SyntheticSpec {
+        id: "feature_canary",
+        width: 256,
+        height: 256,
+        draw_source: draw_multi_subject,
+    };
+    image::DynamicImage::ImageRgba8(render_synthetic_source(&spec))
+}

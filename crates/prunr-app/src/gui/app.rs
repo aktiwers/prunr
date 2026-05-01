@@ -704,6 +704,7 @@ impl PrunrApp {
             return;
         }
         let tex_prep_tx = self.batch.bg_io.tex_prep_tx.clone();
+        let slots = self.batch.bg_io.decode_slots.clone();
         let switch = self.result_switch_id;
         for r in results {
             // Keep old texture visible until tex_prep lands so the canvas
@@ -727,7 +728,7 @@ impl PrunrApp {
                 item.clear_correction();
                 Self::spawn_tex_prep(
                     new_rgba.clone(), item.id, format!("inpaint_{}_{}", item.id, switch),
-                    true, tex_prep_tx.clone(), ctx.clone(),
+                    true, tex_prep_tx.clone(), slots.clone(), ctx.clone(),
                 );
                 (item.id, item.source.clone(), Some(new_rgba))
             };
@@ -1791,6 +1792,7 @@ impl PrunrApp {
         results: Vec<super::live_preview::PreviewResult>,
     ) {
         let tex_prep_tx = self.batch.bg_io.tex_prep_tx.clone();
+        let slots = self.batch.bg_io.decode_slots.clone();
         for r in results {
             let (item_id, source, is_final) = {
                 let Some(item) = self.batch.find_by_id_mut(r.item_id) else {
@@ -1823,7 +1825,7 @@ impl PrunrApp {
                 let switch = self.result_switch_id;
                 Self::spawn_tex_prep(
                     new_rgba, item.id, format!("result_{}_{}", item.id, switch),
-                    true, tex_prep_tx.clone(), ctx.clone(),
+                    true, tex_prep_tx.clone(), slots.clone(), ctx.clone(),
                 );
                 (item.id, item.source.clone(), r.is_final)
             };
@@ -1925,7 +1927,9 @@ impl PrunrApp {
                 self.batch.items[idx].source_tex_pending = true;
                 Self::spawn_tex_prep(
                     rgba, item_id, format!("source_{item_id}"), false,
-                    self.batch.bg_io.tex_prep_tx.clone(), ctx.clone(),
+                    self.batch.bg_io.tex_prep_tx.clone(),
+                    self.batch.bg_io.decode_slots.clone(),
+                    ctx.clone(),
                 );
             }
         }
@@ -1938,7 +1942,9 @@ impl PrunrApp {
                 self.batch.items[idx].result_tex_pending = true;
                 Self::spawn_tex_prep(
                     rgba, item_id, format!("result_{item_id}_{switch}"), true,
-                    self.batch.bg_io.tex_prep_tx.clone(), ctx.clone(),
+                    self.batch.bg_io.tex_prep_tx.clone(),
+                    self.batch.bg_io.decode_slots.clone(),
+                    ctx.clone(),
                 );
             }
         }
@@ -1951,9 +1957,15 @@ impl PrunrApp {
         name: String,
         is_result: bool,
         tx: mpsc::Sender<(u64, String, egui::ColorImage, bool)>,
+        slots: Arc<super::background_io::DecodeSlots>,
         ctx: egui::Context,
     ) {
         std::thread::spawn(move || {
+            // Park here past `available_parallelism()` so a Process All
+            // batch-completion burst doesn't hold N × ~50 MB ColorImage
+            // peaks simultaneously. Same slot pool as the bg-io decode /
+            // thumbnail / filter spawns.
+            let _slot = slots.acquire();
             let (w, h) = (rgba.width(), rgba.height());
             let ci = egui::ColorImage::from_rgba_unmultiplied(
                 [w as usize, h as usize],

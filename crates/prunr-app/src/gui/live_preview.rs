@@ -664,15 +664,14 @@ mod tests {
         );
     }
 
-    /// B4 / Phase 21-04: slow frames put `elapsed >= DEBOUNCE` on every
-    /// tweak. Pre-fix the broken code re-armed `last_tweak_at` in that
-    /// branch and `tick` could never see a ready dispatch — mid-drag
-    /// preview silently disabled. Post-fix the timer is pinned on first
-    /// tweak and only cleared by `tick`'s removal-on-dispatch.
+    /// Slow frames put `elapsed >= DEBOUNCE` on every tweak. The broken
+    /// shape re-armed `last_tweak_at` in that branch and `tick` could
+    /// never see a ready dispatch — mid-drag preview silently disabled.
+    /// The current shape pins the timer on first tweak and only clears
+    /// it via `tick`'s removal-on-dispatch.
     ///
-    /// Drives synthetic time through `MockClock` so the contract is
-    /// pinned regardless of CI runner speed (vs the prior `sleep(5ms)`
-    /// gap that let B4 ship).
+    /// Drives synthetic time through `MockClock` so the contract holds
+    /// regardless of CI runner speed.
     #[test]
     fn slow_frame_drag_dispatches_within_two_frames() {
         let clock = MockClock::new(Instant::now());
@@ -700,8 +699,8 @@ mod tests {
 
     /// `tick` returning `None` (no remaining wait) is the readiness
     /// signal even when snapshot can't assemble inputs — the contract
-    /// that matters for B4 is that the entry is RECOGNISED as ready,
-    /// not that the rayon dispatch actually fires (which depends on
+    /// that matters here is that the entry is RECOGNISED as ready, not
+    /// that the rayon dispatch actually fires (which depends on
     /// whether the snapshot has the source RGBA decoded etc).
     #[test]
     fn tick_recognises_ready_entry_after_synthetic_debounce() {

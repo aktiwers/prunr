@@ -46,20 +46,15 @@ memory-stats = { workspace = true }
 ndarray = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
-# Model Store on-demand downloads (Phase 17). Blocking client + rustls so we
-# don't pull in OpenSSL on Linux.
-reqwest = { version = "0.12", features = ["blocking", "rustls-tls", "json"], default-features = false }
-sha2 = "0.10"
-hex = "0.4"
-# 19-04 Runtime Store: extract OpenVINO wheels (.zip)
-zip = { version = "2", default-features = false, features = ["deflate"] }
+reqwest = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+zip = { workspace = true }
 bytes = "1"
 
 [dev-dependencies]
 proptest = { workspace = true }
-# Auto-cleaning scratch dirs for boundary tests in subprocess::protocol.
-# Matches the existing `tempfile = "3"` pin in prunr-models.
-tempfile = "3"
+tempfile = { workspace = true }
 
 # OS drag-out: supported on Windows and macOS. On Linux the crate requires a
 # GTK window (winit/eframe cannot supply one), and pulls in gtk/gdk native
