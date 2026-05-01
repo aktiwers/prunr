@@ -237,6 +237,38 @@ impl BatchManager {
         }
     }
 
+    /// Filter-only Process: load + decode + `apply_fill_style` on a background
+    /// thread, deliver the result via `bg_io.filter_only_rx`. Replaces the
+    /// inline UI-thread decode-and-mutate path that froze egui on large
+    /// batches (B5 — `process_filter_only` used to run hundreds of ms × N
+    /// items synchronously).
+    pub(crate) fn request_filter_only(
+        &self,
+        item_id: u64,
+        source: &ImageSource,
+        fill_style: prunr_core::FillStyle,
+    ) {
+        let tx = self.bg_io.filter_only_tx.clone();
+        let source = source.clone();
+        std::thread::spawn(move || {
+            // Inner scope: drop the source bytes + DynamicImage + intermediate
+            // RGBA before sending. On a 50-image batch, all threads peak
+            // together — keeping per-thread footprint tight matters.
+            let result: Result<Arc<image::RgbaImage>, String> = (|| {
+                let bytes = source.load_bytes()
+                    .map_err(|e| format!("Failed to load: {e}"))?;
+                let original = prunr_core::load_image_from_bytes(&bytes)
+                    .map_err(|_| "Decode failed".to_string())?;
+                drop(bytes);
+                let mut rgba = original.to_rgba8();
+                drop(original);
+                prunr_core::apply_fill_style(&mut rgba, fill_style);
+                Ok(Arc::new(rgba))
+            })();
+            let _ = tx.send((item_id, result));
+        });
+    }
+
     /// Request thumbnail generation on a background thread for a batch item.
     /// If `result_rgba` is `Some`, thumbnails from the result; otherwise decodes
     /// source bytes.
@@ -762,5 +794,38 @@ mod tests {
         bm.items.push(checked(3));
         let got = bm.items_to_process();
         assert_eq!(got.len(), 3);
+    }
+
+    /// B5 / Phase 21-05: filter-only Process must be off the UI thread.
+    /// `request_filter_only` decodes + applies the fill style on a background
+    /// thread; UI thread learns about the result via `filter_only_rx`.
+    #[test]
+    fn request_filter_only_emits_processed_rgba_to_filter_only_rx() {
+        let bm = fixture();
+        let source = ImageSource::Bytes(Arc::new(one_pixel_png()));
+        bm.request_filter_only(7, &source, prunr_core::FillStyle::default());
+
+        let (id, result) = bm.bg_io.filter_only_rx.recv_timeout(Duration::from_secs(2))
+            .expect("filter_only_tx must produce a result within 2s");
+        assert_eq!(id, 7);
+        let rgba = result.expect("default FillStyle on a 1x1 source must succeed");
+        assert_eq!(rgba.dimensions(), (1, 1));
+    }
+
+    /// Load failures must travel the same channel — the UI's drain maps
+    /// `Err` to `BatchStatus::Error`. Without this the drain branch would
+    /// be unreachable and bad sources would silently stall in `Processing`.
+    #[test]
+    fn request_filter_only_emits_load_failure_via_err_variant() {
+        let bm = fixture();
+        let source = ImageSource::Path(std::path::PathBuf::from(
+            "/nonexistent/prunr-test-missing.png"
+        ));
+        bm.request_filter_only(11, &source, prunr_core::FillStyle::default());
+
+        let (id, result) = bm.bg_io.filter_only_rx.recv_timeout(Duration::from_secs(2))
+            .expect("filter_only_tx must produce a result within 2s");
+        assert_eq!(id, 11);
+        assert!(result.is_err(), "missing file must surface as Err, not stall");
     }
 }

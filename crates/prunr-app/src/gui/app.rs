@@ -924,38 +924,24 @@ impl PrunrApp {
         }
     }
 
-    /// Filter-only Process path (model=`None`). No inference, no
-    /// subprocess — apply fill_style to the source of each target inline
-    /// (a few hundred ms per image on the UI thread; fine for the usual
-    /// 1–5 image case).
+    /// Filter-only Process path (model=`None`). Dispatches each target item
+    /// to a background thread via `BatchManager::request_filter_only` so the
+    /// UI stays responsive on large batches (B5). Results land on
+    /// `bg_io.filter_only_rx`, drained in `drain_background_channels`.
     fn process_filter_only(&mut self, filter: impl Fn(&BatchItem) -> bool) {
-        let ids: Vec<u64> = self.batch.items.iter()
+        let dispatches: Vec<(u64, ImageSource, prunr_core::FillStyle)> = self.batch.items.iter()
             .filter(|i| filter(i) && !matches!(i.status, BatchStatus::Processing))
-            .map(|i| i.id)
+            .map(|i| (i.id, i.source.clone(), i.settings.fill_style))
             .collect();
-        if ids.is_empty() { return; }
-        for id in &ids {
-            let Some(item) = self.batch.find_by_id_mut(*id) else { continue };
-            let fill_style = item.settings.fill_style;
-            let bytes = match item.source.load_bytes() {
-                Ok(b) => b,
-                Err(err) => {
-                    item.status = BatchStatus::Error(format!("Failed to load: {err}"));
-                    continue;
-                }
-            };
-            let Ok(original) = prunr_core::load_image_from_bytes(&bytes) else {
-                item.status = BatchStatus::Error("Decode failed".into());
-                continue;
-            };
-            let mut rgba = original.to_rgba8();
-            prunr_core::apply_fill_style(&mut rgba, fill_style);
-            item.result_rgba = Some(std::sync::Arc::new(rgba));
-            item.result_texture = None;
-            item.thumb_texture = None;
-            item.status = BatchStatus::Done;
+        if dispatches.is_empty() { return; }
+        for (id, _, _) in &dispatches {
+            if let Some(item) = self.batch.find_by_id_mut(*id) {
+                item.status = BatchStatus::Processing;
+            }
         }
-        self.result_switch_id += 1;
+        for (id, source, fill_style) in dispatches {
+            self.batch.request_filter_only(id, &source, fill_style);
+        }
     }
 
     fn build_add_edge_work(&mut self, ids: &HashSet<u64>) -> Vec<super::worker::AddEdgeWorkItem> {
@@ -2496,6 +2482,27 @@ impl PrunrApp {
         }
         if tex_arrived {
             self.sync_selected_batch_textures(ctx);
+        }
+
+        // Filter-only Process results (model=None path; B5).
+        let mut filter_only_arrived = false;
+        while let Ok((item_id, result)) = self.batch.bg_io.filter_only_rx.try_recv() {
+            let Some(item) = self.batch.find_by_id_mut(item_id) else { continue };
+            match result {
+                Ok(rgba) => {
+                    item.result_rgba = Some(rgba);
+                    item.result_texture = None;
+                    item.thumb_texture = None;
+                    item.status = BatchStatus::Done;
+                }
+                Err(msg) => {
+                    item.status = BatchStatus::Error(msg);
+                }
+            }
+            filter_only_arrived = true;
+        }
+        if filter_only_arrived {
+            self.result_switch_id += 1;
         }
 
         // Drain files loaded by background thread (max 5 per frame to stay responsive)
