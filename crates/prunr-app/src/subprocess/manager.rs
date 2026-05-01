@@ -37,7 +37,17 @@ pub struct SubprocessManager {
     rss_paused: bool,
     /// Last known RSS from child.
     last_rss: u64,
+    /// Counter into `RSS_LIMIT_REFRESH_EVERY`: re-query system memory
+    /// every Nth `RssUpdate` so a sibling subprocess loading a 5 GB
+    /// SD bundle after us doesn't leave our pause threshold stale.
+    rss_update_count: u32,
 }
+
+/// Refresh `rss_limit` every Nth `RssUpdate` from the child. Children
+/// emit RssUpdate at ~1 Hz, so 16 ≈ once every ~15 s — cheap enough
+/// (one `sysinfo::refresh_memory` ≈ a few ms) and responsive enough
+/// for cross-subprocess pressure shifts.
+const RSS_LIMIT_REFRESH_EVERY: u32 = 16;
 
 /// Events from the reader thread.
 enum ReaderEvent {
@@ -174,14 +184,7 @@ impl SubprocessManager {
         };
 
         // Calculate RSS limits from available system RAM
-        let available = {
-            use sysinfo::System;
-            let mut sys = System::new();
-            sys.refresh_memory();
-            sys.available_memory()
-        };
-        let rss_limit = (available as f64 * 0.80) as u64;
-        let rss_resume = (rss_limit as f64 * 0.70) as u64;
+        let (rss_limit, rss_resume) = current_rss_thresholds();
 
         Ok((Self {
             child,
@@ -192,6 +195,7 @@ impl SubprocessManager {
             rss_resume,
             rss_paused: false,
             last_rss: 0,
+            rss_update_count: 0,
         }, active_provider))
     }
 
@@ -415,6 +419,17 @@ impl SubprocessManager {
             ReaderEvent::Event(e) => e,
             ReaderEvent::Disconnected => return None,
         };
+        // Re-derive RSS thresholds periodically so a sibling subprocess
+        // (e.g. inpaint loading a 5 GB SD bundle after seg started)
+        // shifts our pause/resume bands accordingly.
+        if matches!(evt, SubprocessEvent::RssUpdate { .. }) {
+            self.rss_update_count = self.rss_update_count.wrapping_add(1);
+            if self.rss_update_count.is_multiple_of(RSS_LIMIT_REFRESH_EVERY) {
+                let (limit, resume) = current_rss_thresholds();
+                self.rss_limit = limit;
+                self.rss_resume = resume;
+            }
+        }
         apply_event_state(
             &mut self.in_flight,
             &mut self.last_rss,
@@ -495,6 +510,20 @@ impl Drop for SubprocessManager {
 /// tested without spawning a real child process. The B1 regression
 /// (InpaintDone/InpaintError leaking from the `_ => {}` arm) shipped because
 /// the bookkeeping was inlined and untested per-variant.
+/// (rss_limit, rss_resume) derived from the current system available
+/// memory. Called at spawn and re-called every `RSS_LIMIT_REFRESH_EVERY`
+/// `RssUpdate` events so the pause/resume bands track sibling
+/// subprocesses' allocations.
+fn current_rss_thresholds() -> (u64, u64) {
+    use sysinfo::System;
+    let mut sys = System::new();
+    sys.refresh_memory();
+    let available = sys.available_memory();
+    let limit = (available as f64 * 0.80) as u64;
+    let resume = (limit as f64 * 0.70) as u64;
+    (limit, resume)
+}
+
 fn apply_event_state(
     in_flight: &mut HashSet<u64>,
     last_rss: &mut u64,
