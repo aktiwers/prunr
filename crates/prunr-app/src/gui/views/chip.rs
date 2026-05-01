@@ -160,7 +160,7 @@ pub(super) fn paint_falloff_square(
 /// `icon` is `&str` rather than `char` even though every caller passes a
 /// single Unicode code point — `egui::RichText::new` doesn't accept
 /// `char` directly, so a `char` parameter would force a single-char
-/// allocation per call. See DEFERRED.md P22-4 for the trade evaluation.
+/// `String` allocation per call.
 pub(super) fn icon_toggle_button(ui: &mut Ui, icon: &str, active: bool) -> Response {
     let btn = egui::Button::new(
         RichText::new(icon)

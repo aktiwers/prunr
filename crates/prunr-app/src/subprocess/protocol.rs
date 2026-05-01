@@ -282,8 +282,8 @@ fn sweep_dir_with_prefix(dir: &std::path::Path, prefixes: &[&str]) {
 }
 
 /// Which subprocess owns an IPC temp file. Drives crash-recovery
-/// cleanup scope so a seg crash doesn't wipe an inpaint sibling's
-/// in-flight files (the B3 invariant).
+/// cleanup scope so a seg-side wipe (e.g. on cancel-all) leaves a
+/// sibling inpaint subprocess's in-flight files alone.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IpcOwner {
     /// Seg / CLI pipeline (input, chain, edge, result, tensor, …).
@@ -657,7 +657,7 @@ mod tests {
         roundtrip(&SubprocessEvent::InpaintProgress { item_id: 12, current: 20, total: 20 });
     }
 
-    // ---------- ipc_temp_dir lifecycle (B2 / Phase 21-02) ----------
+    // ---------- ipc_temp_dir lifecycle ----------
 
     /// "test"-prefixed pseudo-PID base; `wrapping_add(real pid)` ensures the
     /// path never collides with a real `ipc_temp_dir()` in this same binary.
@@ -720,10 +720,10 @@ mod tests {
         assert_gone(dir, &["test-reentrant.bin"]);
     }
 
-    /// B3 / Phase 21-03: a seg-side crash cleanup must not touch a sibling
-    /// inpaint subprocess's `inpaint-*` files. Seeds both kinds, runs the
-    /// prefix-scoped sweep, asserts seg-prefixed gone and inpaint-prefixed
-    /// survive.
+    /// A seg-side crash cleanup must not touch a sibling inpaint
+    /// subprocess's `inpaint-*` files. Seeds both kinds, runs the
+    /// prefix-scoped sweep, asserts seg-prefixed gone and
+    /// inpaint-prefixed survive.
     #[test]
     fn sweep_dir_with_prefix_leaves_other_owners_alone() {
         let scratch = tempfile::tempdir().unwrap();
