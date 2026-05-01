@@ -195,11 +195,13 @@ pub enum SubprocessEvent {
 /// PID-namespaced IPC temp dir, RAM-backed (/dev/shm) on Linux when available.
 /// The OnceLock initializer creates the dir AND sweeps any stale files left
 /// by a previous prunr process with the same PID, so writers (CLI downscale,
-/// inpaint bridge, manager) never race a later cleanup.
-pub fn ipc_temp_dir() -> std::path::PathBuf {
+/// inpaint bridge, manager) never race a later cleanup. Returns
+/// `&'static Path` — `.join(...)`/`PathBuf::from(...)` at the call site,
+/// no per-call PathBuf clone.
+pub fn ipc_temp_dir() -> &'static std::path::Path {
     use std::sync::OnceLock;
     static DIR: OnceLock<std::path::PathBuf> = OnceLock::new();
-    DIR.get_or_init(|| init_temp_dir_for_pid(std::process::id())).clone()
+    DIR.get_or_init(|| init_temp_dir_for_pid(std::process::id())).as_path()
 }
 
 /// Body of `ipc_temp_dir()`'s OnceLock init, exposed for unit tests
@@ -261,7 +263,7 @@ pub const INPAINT_PREFIXES: &[&str] = &[
 /// crash-recovery paths so the wipe doesn't race a sibling subprocess
 /// writing the shared dir.
 pub fn cleanup_ipc_temp_for_prefix(prefixes: &[&str]) {
-    sweep_dir_with_prefix(&ipc_temp_dir(), prefixes);
+    sweep_dir_with_prefix(ipc_temp_dir(), prefixes);
 }
 
 /// Crash-recovery cleanup for the seg / CLI subprocess. Leaves a sibling
@@ -273,7 +275,7 @@ pub fn cleanup_seg_pipeline_temps() {
 /// Sweep every file in the IPC temp dir. Process-wide; never call from a
 /// path that could race a sibling subprocess — use a prefix-scoped helper.
 pub fn cleanup_ipc_temp() {
-    sweep_dir(&ipc_temp_dir());
+    sweep_dir(ipc_temp_dir());
 }
 
 #[cfg(test)]
@@ -575,9 +577,9 @@ mod tests {
         std::fs::write(dir.join("test-reentrant.bin"), b"x").unwrap();
 
         cleanup_ipc_temp();
-        assert_gone(&dir, &["test-reentrant.bin"]);
+        assert_gone(dir, &["test-reentrant.bin"]);
         cleanup_ipc_temp();
-        assert_gone(&dir, &["test-reentrant.bin"]);
+        assert_gone(dir, &["test-reentrant.bin"]);
     }
 
     /// B3 / Phase 21-03: a seg-side crash cleanup must not touch a sibling
