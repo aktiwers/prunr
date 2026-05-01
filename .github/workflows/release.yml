@@ -56,8 +56,15 @@ jobs:
         id: cache-models
         uses: actions/cache@v4
         with:
-          path: models/
-          key: models-v2-${{ hashFiles('xtask/src/main.rs') }}
+          # Cache only the bundled .zst files — the raw .onnx are
+          # ~2× larger and never read at build time. Halves cache
+          # upload/restore time and keeps us further from the 10 GB
+          # eviction threshold.
+          path: models/*.zst
+          # Include the registry so an `OnDemand`-only SHA256 bump
+          # (no xtask change) busts the cache instead of restoring
+          # stale bytes.
+          key: models-v3-${{ hashFiles('xtask/src/main.rs', 'crates/prunr-models/src/lib.rs') }}
 
       - name: Fetch models (cache miss)
         if: steps.cache-models.outputs.cache-hit != 'true'
