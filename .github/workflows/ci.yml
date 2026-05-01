@@ -100,8 +100,16 @@ jobs:
       # Other platforms: tests soft-skip when no runtime is found —
       # the postprocess golden tier runs everywhere regardless (no
       # ORT needed) and is the bit-exact safety net.
-      - name: Install ORT runtime (Linux x86_64)
+      - name: Cache ORT runtime data dir (Linux x86_64)
+        id: cache-ci-runtime
         if: matrix.target == 'x86_64-unknown-linux-gnu'
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/share/prunr/runtimes
+          key: ci-runtime-linux-${{ hashFiles('crates/prunr-runtime-install/src/lib.rs') }}
+
+      - name: Install ORT runtime (Linux x86_64)
+        if: matrix.target == 'x86_64-unknown-linux-gnu' && steps.cache-ci-runtime.outputs.cache-hit != 'true'
         run: cargo xtask install-runtime onnxruntime 1.24.1
 
       - name: Test
