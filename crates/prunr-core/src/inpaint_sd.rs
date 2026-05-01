@@ -1485,6 +1485,8 @@ fn step_array(
     t: i64,
     t_prev: i64,
 ) -> Array4<f32> {
+    // extract_4d returns Array4 via mapv/to_owned, which always produces
+    // standard C layout; as_slice() is infallible on those.
     let lat = latent_t.as_slice().expect("latent: standard layout");
     let eps = noise_pred.as_slice().expect("noise pred: standard layout");
     let next = scheduler.step(lat, eps, t, t_prev);
