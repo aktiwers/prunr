@@ -488,6 +488,21 @@ mod tests {
         assert_eq!(resolve_tier(&a, &b), RequiredTier::EdgeRerun);
     }
 
+    #[test]
+    fn input_transform_change_with_edges_on_is_add_edge_inference() {
+        // Per InferenceRecipe.input_transform doc-comment: changing the
+        // pre-inference image transform invalidates the edge tensor cache
+        // because DexiNed sees different input. With seg + edges both on
+        // and the model unchanged, the tier must re-run DexiNed only —
+        // seg tensor stays valid because seg is run on the original image
+        // before the transform reaches the edge leg.
+        let mut a = make_recipe(ModelKind::Silueta, 1.0, None);
+        a.inference.uses_edge_detection = true;
+        let mut b = a.clone();
+        b.inference.input_transform = InputTransform::Grayscale;
+        assert_eq!(resolve_tier(&a, &b), RequiredTier::AddEdgeInference);
+    }
+
     /// Table-driven test: single source of truth for tier priority ordering.
     /// When multiple things change, the highest-cost tier wins.
     #[test]
@@ -509,6 +524,18 @@ mod tests {
             r.composite.bg_color = Some(rgb);
             r
         };
+        // Edges-on baseline for input_transform cases (the transform only
+        // affects the edge leg; with edges off the transform is dead state).
+        let edges_on = || {
+            let mut r = base.clone();
+            r.inference.uses_edge_detection = true;
+            r
+        };
+        let with_input_transform = |it: InputTransform| {
+            let mut r = edges_on();
+            r.inference.input_transform = it;
+            r
+        };
 
         // (name, old, new, expected)
         let cases: Vec<(&str, ProcessingRecipe, ProcessingRecipe, RequiredTier)> = vec![
@@ -517,6 +544,8 @@ mod tests {
             ("gamma only", base.clone(), with_gamma(1.5), RequiredTier::MaskRerun),
             ("line only", base.clone(), with_line(0.9), RequiredTier::EdgeRerun),
             ("model only", base.clone(), make_recipe(ModelKind::BiRefNetLite, 1.0, None), RequiredTier::FullPipeline),
+            // input_transform with edges on invalidates edge tensor only.
+            ("input_transform+edges → add_edge", edges_on(), with_input_transform(InputTransform::Grayscale), RequiredTier::AddEdgeInference),
             // Priority: mask changes dominate composite changes.
             ("gamma+bg → mask", base.clone(), {
                 let mut r = with_gamma(1.5);
@@ -529,6 +558,14 @@ mod tests {
                 r.composite.bg_color = Some([9, 9, 9]);
                 r
             }, RequiredTier::EdgeRerun),
+            // Priority: AddEdgeInference dominates mask + edge + composite.
+            ("input_transform+gamma+line+bg → add_edge", edges_on(), {
+                let mut r = with_input_transform(InputTransform::Grayscale);
+                r.mask = mask(1.5, None, 0.0, false);
+                r.edge.line_strength_bits = 0.2f32.to_bits();
+                r.composite.bg_color = Some([9, 9, 9]);
+                r
+            }, RequiredTier::AddEdgeInference),
             // Priority: model change dominates everything.
             ("model+gamma+line+bg → full", base.clone(), {
                 let mut r = make_recipe(ModelKind::U2net, 1.5, Some([9, 9, 9]));
