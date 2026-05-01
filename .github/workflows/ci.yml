@@ -64,5 +64,15 @@ jobs:
       - name: Build
         run: cargo build --target ${{ matrix.target }}
 
+      # Phase 20-05: install the ORT runtime on Linux x86_64 so the
+      # `golden_e2e` integration test (and `reference_test` family)
+      # exercises real Silueta inference instead of soft-skipping.
+      # Other platforms: tests soft-skip when no runtime is found —
+      # the postprocess golden tier runs everywhere regardless (no
+      # ORT needed) and is the bit-exact safety net.
+      - name: Install ORT runtime (Linux x86_64)
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: cargo xtask install-runtime onnxruntime 1.24.1
+
       - name: Test
         run: cargo test --target ${{ matrix.target }} --features prunr-models/dev-models
