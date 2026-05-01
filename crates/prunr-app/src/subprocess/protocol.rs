@@ -233,26 +233,21 @@ fn sweep_dir(dir: &std::path::Path) {
     }
 }
 
-/// Like `sweep_dir`, but removes only files whose name starts with one of
-/// the supplied prefixes. Used to scope a crash-recovery cleanup to a single
-/// subprocess's owned files — wiping the whole dir would race a sibling
-/// subprocess's in-flight writes (B3: a seg-side crash must not delete
-/// `inpaint-*` files belonging to a still-running inpaint subprocess).
+/// Like `sweep_dir`, restricted to files whose name starts with one of the
+/// supplied prefixes.
 fn sweep_dir_with_prefix(dir: &std::path::Path, prefixes: &[&str]) {
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            if let Some(name) = entry.file_name().to_str() {
-                if prefixes.iter().any(|p| name.starts_with(p)) {
-                    let _ = std::fs::remove_file(entry.path());
-                }
-            }
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        // `file_name` must be bound so `to_str()`'s &str doesn't dangle.
+        let file_name = entry.file_name();
+        let Some(name) = file_name.to_str() else { continue };
+        if prefixes.iter().any(|p| name.starts_with(p)) {
+            let _ = std::fs::remove_file(entry.path());
         }
     }
 }
 
-/// File-name prefixes owned by the seg / CLI subprocess pipeline. Used for
-/// crash-recovery cleanup that must NOT touch a sibling inpaint subprocess's
-/// in-flight files.
+/// File-name prefixes owned by the seg / CLI subprocess pipeline.
 pub const SEG_PIPELINE_PREFIXES: &[&str] = &[
     "chain_",
     "cli_ds_",
@@ -264,27 +259,26 @@ pub const SEG_PIPELINE_PREFIXES: &[&str] = &[
     "tensor_",
 ];
 
-/// File-name prefixes owned by the inpaint subprocess. Currently used only
-/// by tests; production cleanup paths target seg-side files via
-/// `SEG_PIPELINE_PREFIXES`.
+/// File-name prefixes owned by the inpaint subprocess.
 pub const INPAINT_PREFIXES: &[&str] = &[
     "inpaint-",
 ];
 
-/// Cleanup scoped to a specific subprocess's owned filenames. Use this from
-/// crash-recovery callers (`worker::cancel_subprocess`, the post-crash retry
-/// in `worker::handle_crash_and_retry`, CLI's OOM-retry loop) so the wipe
-/// doesn't race a sibling subprocess that's still writing files in the
-/// shared dir.
+/// Cleanup scoped to a single subprocess's owned filenames. Use from
+/// crash-recovery paths so the wipe doesn't race a sibling subprocess
+/// writing the shared dir.
 pub fn cleanup_ipc_temp_for_prefix(prefixes: &[&str]) {
     sweep_dir_with_prefix(&ipc_temp_dir(), prefixes);
 }
 
-/// Sweep every file in the IPC temp dir. Process-wide cleanup; do not call
-/// from a path that could race a sibling subprocess (use
-/// `cleanup_ipc_temp_for_prefix` with the caller's prefix set instead).
-/// Currently kept for the rare "everything must go" case (manual diagnostic
-/// tool, future xtask).
+/// Crash-recovery cleanup for the seg / CLI subprocess. Leaves a sibling
+/// inpaint subprocess's `inpaint-*` files alone.
+pub fn cleanup_seg_pipeline_temps() {
+    cleanup_ipc_temp_for_prefix(SEG_PIPELINE_PREFIXES);
+}
+
+/// Sweep every file in the IPC temp dir. Process-wide; never call from a
+/// path that could race a sibling subprocess — use a prefix-scoped helper.
 pub fn cleanup_ipc_temp() {
     sweep_dir(&ipc_temp_dir());
 }
@@ -653,37 +647,23 @@ mod tests {
         assert!(dir.join("unrelated.txt").exists());
     }
 
-    /// Adding a new IPC filename in production must extend the relevant
-    /// prefix table, otherwise crash-recovery cleanup leaks. This test
-    /// surfaces drift by enumerating every file the IPC code paths produce.
-    /// Adding a new variant without updating the table = test failure.
+    /// Inventory of IPC filename kinds; keep in sync with new IPC writers
+    /// (and with `SEG_PIPELINE_PREFIXES` / `INPAINT_PREFIXES`). Pinning the
+    /// inventory in one place documents the naming contract; it does not
+    /// catch drift on its own — a new writer that lands without updating
+    /// this list AND the prefix tables would still slip through.
     #[test]
     fn every_ipc_filename_in_tree_matches_a_known_prefix() {
-        // Filenames that production code writes into ipc_temp_dir().
-        // Update both this list AND SEG_PIPELINE_PREFIXES / INPAINT_PREFIXES
-        // when introducing a new IPC file kind.
         let production_filenames = [
-            // seg pipeline
-            "chain_42.raw",
-            "cli_ds_0.img",
-            "edge_5.bin",
-            "input_3.img",
-            "orig_3.img",
-            "result_3.raw",
-            "seg_3.png",
-            "tensor_3.raw",
-            // inpaint
-            "inpaint-img-7-0.png",
-            "inpaint-mask-7-0.png",
-            "inpaint-out-7.png",
+            "chain_42.raw", "cli_ds_0.img", "edge_5.bin", "input_3.img",
+            "orig_3.img", "result_3.raw", "seg_3.png", "tensor_3.raw",
+            "inpaint-img-7-0.png", "inpaint-mask-7-0.png", "inpaint-out-7.png",
         ];
-        let all_prefixes: Vec<&str> = SEG_PIPELINE_PREFIXES.iter()
-            .chain(INPAINT_PREFIXES.iter())
-            .copied()
-            .collect();
         for name in &production_filenames {
             assert!(
-                all_prefixes.iter().any(|p| name.starts_with(p)),
+                SEG_PIPELINE_PREFIXES.iter()
+                    .chain(INPAINT_PREFIXES.iter())
+                    .any(|p| name.starts_with(p)),
                 "filename {name} matches no prefix in SEG_PIPELINE_PREFIXES + INPAINT_PREFIXES"
             );
         }
