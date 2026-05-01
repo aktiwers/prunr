@@ -261,7 +261,7 @@ pub(crate) fn chamfer_distance_inside(mask: &GrayImage) -> Vec<f32> {
     let mut d: Vec<f32> = mask.as_raw().iter()
         .map(|&v| if v > 127 { large } else { 0.0 })
         .collect();
-    const DIAG: f32 = 1.4142135;
+    const DIAG: f32 = std::f32::consts::SQRT_2;
     // Forward pass: top-left → bottom-right.
     for y in 0..h_us {
         for x in 0..w_us {
