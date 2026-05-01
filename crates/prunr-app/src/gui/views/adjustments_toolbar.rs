@@ -382,9 +382,14 @@ fn render_seg_mask_chips(
     let defaults = flags.defaults;
     ui.add_enabled_ui(flags.mask_active, |ui| {
         aggregate_knob(chip::chip_f32(
-            ui, "gamma", "γ", "Gamma",
-            "How hard the mask cuts. >1 is more aggressive; <1 is gentler.",
-            tip!("Stage 1 of 5. How hard the mask cuts. >1 removes more aggressively, <1 is gentler on fine edges. Feeds every stage below."),
+            ui,
+            chip::ChipMeta {
+                id_salt: "gamma",
+                icon: "γ",
+                label: "Gamma",
+                description: "How hard the mask cuts. >1 is more aggressive; <1 is gentler.",
+                tooltip: tip!("Stage 1 of 5. How hard the mask cuts. >1 removes more aggressively, <1 is gentler on fine edges. Feeds every stage below."),
+            },
             &mut item_settings.gamma,
             0.01..=10.0, defaults.template.gamma,
             true, // log scale — matches perceptual symmetry around 1.0
@@ -392,20 +397,28 @@ fn render_seg_mask_chips(
         ), StaticKnob::Gamma, change);
 
         aggregate_knob(chip::chip_option_f32(
-            ui, "threshold",
-            ICON_BOLT.codepoint, "Hard threshold",
-            "Snap the mask to fully opaque or fully transparent at this cutoff.",
-            tip!("Stage 2 of 5. Snaps the mask to fully opaque or fully transparent at this cutoff. Soft = smooth alpha, on = crisp silhouette. When on, downstream stages lose the gradient — Refine can only clean up stairsteps."),
+            ui,
+            chip::ChipMeta {
+                id_salt: "threshold",
+                icon: ICON_BOLT.codepoint,
+                label: "Hard threshold",
+                description: "Snap the mask to fully opaque or fully transparent at this cutoff.",
+                tooltip: tip!("Stage 2 of 5. Snaps the mask to fully opaque or fully transparent at this cutoff. Soft = smooth alpha, on = crisp silhouette. When on, downstream stages lose the gradient — Refine can only clean up stairsteps."),
+            },
             &mut item_settings.threshold,
             0.001..=0.999, defaults.threshold_value, "Soft",
             |v| format!("{:.1}%", v * 100.0),
         ), StaticKnob::Threshold, change);
 
         aggregate_knob(chip::chip_f32(
-            ui, "edge_shift",
-            ICON_SWAP_HORIZ.codepoint, "Edge shift",
-            "Shrink or grow the mask outline. Positive erodes; negative dilates.",
-            tip!("Stage 3 of 5. Shrink or grow the mask outline. Positive = erode (trim fringe pixels), negative = dilate (keep more edge detail). Refine Edges then snaps the shifted boundary to image color."),
+            ui,
+            chip::ChipMeta {
+                id_salt: "edge_shift",
+                icon: ICON_SWAP_HORIZ.codepoint,
+                label: "Edge shift",
+                description: "Shrink or grow the mask outline. Positive erodes; negative dilates.",
+                tooltip: tip!("Stage 3 of 5. Shrink or grow the mask outline. Positive = erode (trim fringe pixels), negative = dilate (keep more edge detail). Refine Edges then snaps the shifted boundary to image color."),
+            },
             &mut item_settings.edge_shift,
             -50.0..=50.0, defaults.template.edge_shift,
             false,
@@ -417,10 +430,14 @@ fn render_seg_mask_chips(
         ), StaticKnob::EdgeShift, change);
 
         aggregate_knob(chip::chip_bool_with_extras(
-            ui, "refine_edges",
-            ICON_AUTO_FIX_HIGH.codepoint, "Refine edges",
-            "Use the original image's colors to sharpen the mask around fine detail like hair or leaves.",
-            tip!("Stage 4 of 5. Uses the original image's colors to sharpen the mask around fine detail like hair or leaves. Sees whatever threshold + edge shift produced, so tighter upstream input gives a tighter result. Slower but higher quality."),
+            ui,
+            chip::ChipMeta {
+                id_salt: "refine_edges",
+                icon: ICON_AUTO_FIX_HIGH.codepoint,
+                label: "Refine edges",
+                description: "Use the original image's colors to sharpen the mask around fine detail like hair or leaves.",
+                tooltip: tip!("Stage 4 of 5. Uses the original image's colors to sharpen the mask around fine detail like hair or leaves. Sees whatever threshold + edge shift produced, so tighter upstream input gives a tighter result. Slower but higher quality."),
+            },
             &mut item_settings.refine_edges,
             |ui| {
                 let mut inner = chip::ChipChange::default();
@@ -445,10 +462,14 @@ fn render_seg_mask_chips(
         ), StaticKnob::RefineEdges, change);
 
         aggregate_knob(chip::chip_f32(
-            ui, "feather",
-            ICON_BLUR_LINEAR.codepoint, "Feather",
-            "Soften mask edges with a Gaussian blur.",
-            tip!("Stage 5 of 5. Final softening pass — Gaussian blur over the finished mask. Runs last so it smooths whatever Refine Edges sharpened; reach for Feather when Refine can't pick up the right detail."),
+            ui,
+            chip::ChipMeta {
+                id_salt: "feather",
+                icon: ICON_BLUR_LINEAR.codepoint,
+                label: "Feather",
+                description: "Soften mask edges with a Gaussian blur.",
+                tooltip: tip!("Stage 5 of 5. Final softening pass — Gaussian blur over the finished mask. Runs last so it smooths whatever Refine Edges sharpened; reach for Feather when Refine can't pick up the right detail."),
+            },
             &mut item_settings.feather,
             0.0..=10.0, defaults.template.feather,
             false,
@@ -529,10 +550,14 @@ fn render_row2_right_cluster(
     aggregate_bool(scale_changed, StaticKnob::EdgeScale, change);
 
     aggregate_knob(chip::chip_f32(
-        ui, "line_strength",
-        ICON_TUNE.codepoint, "Line strength",
-        "How much edge detail to capture. Lower = bold outlines only; higher = fine texture.",
-        "Stage 2 of 4 in the lines pipeline. Threshold on DexiNed's raw edge tensor. Lower = bold outlines only; higher = fine texture and subtle edges. Feeds edge thickness + solid color.",
+        ui,
+        chip::ChipMeta {
+            id_salt: "line_strength",
+            icon: ICON_TUNE.codepoint,
+            label: "Line strength",
+            description: "How much edge detail to capture. Lower = bold outlines only; higher = fine texture.",
+            tooltip: "Stage 2 of 4 in the lines pipeline. Threshold on DexiNed's raw edge tensor. Lower = bold outlines only; higher = fine texture and subtle edges. Feeds edge thickness + solid color.",
+        },
         &mut item_settings.line_strength,
         0.0..=1.0, defaults.template.line_strength,
         false,
@@ -540,10 +565,14 @@ fn render_row2_right_cluster(
     ), StaticKnob::LineStrength, change);
 
     aggregate_knob(chip::chip_u32(
-        ui, "edge_thickness",
-        ICON_LINE_WEIGHT.codepoint, "Edge thickness",
-        "Thicken edges by dilating the mask. 0 = native DexiNed width; higher = bolder outlines.",
-        "Stage 3 of 4 in the lines pipeline. Dilates the thresholded edge mask by N pixels. 0 = native DexiNed width; higher = bolder outlines that stay readable at display resolution. Runs before solid color, so bolder edges still inherit the paint choice.",
+        ui,
+        chip::ChipMeta {
+            id_salt: "edge_thickness",
+            icon: ICON_LINE_WEIGHT.codepoint,
+            label: "Edge thickness",
+            description: "Thicken edges by dilating the mask. 0 = native DexiNed width; higher = bolder outlines.",
+            tooltip: "Stage 3 of 4 in the lines pipeline. Dilates the thresholded edge mask by N pixels. 0 = native DexiNed width; higher = bolder outlines that stay readable at display resolution. Runs before solid color, so bolder edges still inherit the paint choice.",
+        },
         &mut item_settings.edge_thickness,
         0..=20, defaults.template.edge_thickness,
         |v| if v == 0 { "off".into() } else { format!("+{v}px") },
@@ -562,10 +591,14 @@ fn render_row2_right_cluster(
     }
 
     aggregate_knob(chip::chip_option_rgb(
-        ui, "solid_line_color",
-        ICON_BRUSH.codepoint, "Solid line color",
-        "Paint every edge the same color.",
-        "Stage 4 of 4 in the lines pipeline. Paint every visible edge the same color, or leave unset to keep the original RGB beneath the mask. Runs after edge thickness.",
+        ui,
+        chip::ChipMeta {
+            id_salt: "solid_line_color",
+            icon: ICON_BRUSH.codepoint,
+            label: "Solid line color",
+            description: "Paint every edge the same color.",
+            tooltip: "Stage 4 of 4 in the lines pipeline. Paint every visible edge the same color, or leave unset to keep the original RGB beneath the mask. Runs after edge thickness.",
+        },
         &mut item_settings.solid_line_color,
         defaults.solid_line_color_value,
     ), StaticKnob::SolidLineColor, change);
