@@ -546,8 +546,19 @@ fn render_row2_right_cluster(
     defaults: &Defaults,
     change: &mut ToolbarChange,
 ) {
-    let scale_changed = super::lines_popover::render_scale_chip(ui, item_settings);
-    aggregate_bool(scale_changed, StaticKnob::EdgeScale, change);
+    // DualScale generates Fine + Bold internally and ignores `edge_scale`
+    // (see `prunr-core/src/edge.rs::finalize_dual_scale`). Grey the chip
+    // out so the user doesn't pick a value that silently doesn't apply.
+    let scale_active = !matches!(item_settings.line_style, prunr_core::LineStyle::DualScale { .. });
+    let scale_response = ui.add_enabled_ui(scale_active, |ui| {
+        super::lines_popover::render_scale_chip(ui, item_settings)
+    });
+    if !scale_active {
+        scale_response.response.on_hover_text(
+            "DualScale uses Fine + Bold internally; the scale chip has no effect under this line style.",
+        );
+    }
+    aggregate_bool(scale_response.inner, StaticKnob::EdgeScale, change);
 
     aggregate_knob(chip::chip_f32(
         ui,
