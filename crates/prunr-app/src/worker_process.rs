@@ -1118,6 +1118,21 @@ mod tests {
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
+    /// Block until the semaphore has at least `n` waiters parked. Polls
+    /// the internal waiter queue rather than sleeping a fixed window, so
+    /// the test stays deterministic on slow CI runners.
+    fn wait_for_waiters(sem: &WeightedSemaphore, n: usize) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            let len = sem.state.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .waiters.len();
+            if len >= n { return; }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        panic!("expected ≥{n} waiters in 2s — test setup wedged");
+    }
+
     /// Pins the H15 no-starvation invariant: a giant acquirer at the head
     /// of the queue must not be repeatedly skipped past by smaller arrivals.
     /// Smaller waiters behind the giant only proceed if their weight still
@@ -1138,9 +1153,7 @@ mod tests {
             let _g = sem_giant.acquire(40);
             giant_done_for_thread.store(true, std::sync::atomic::Ordering::Release);
         });
-
-        // Give the giant time to enqueue.
-        std::thread::sleep(Duration::from_millis(50));
+        wait_for_waiters(&sem, 1);
 
         // Now spawn a 5-unit acquirer. Pre-fix it would have grabbed the
         // 14 free units past the giant. Post-fix it must wait — its
@@ -1152,9 +1165,12 @@ mod tests {
             let _g = sem_small.acquire(5);
             small_done_for_thread.store(true, std::sync::atomic::Ordering::Release);
         });
+        wait_for_waiters(&sem, 2);
 
-        // Wait briefly: the small must NOT have completed.
-        std::thread::sleep(Duration::from_millis(50));
+        // Both waiters are now parked. Give the runtime a chance to wake
+        // a buggy small-acquirer past the giant — if the fairness rule
+        // were broken, the small would have completed by now.
+        std::thread::sleep(Duration::from_millis(20));
         assert!(!small_done.load(std::sync::atomic::Ordering::Acquire),
             "small acquirer skipped past starving giant");
         assert!(!giant_done.load(std::sync::atomic::Ordering::Acquire),
