@@ -405,21 +405,14 @@ impl SubprocessManager {
             ReaderEvent::Event(e) => e,
             ReaderEvent::Disconnected => return None,
         };
-        match &evt {
-            SubprocessEvent::ImageDone { item_id, .. }
-            | SubprocessEvent::ImageError { item_id, .. } => {
-                self.in_flight.remove(item_id);
-            }
-            SubprocessEvent::RssUpdate { rss_bytes } => {
-                self.last_rss = *rss_bytes;
-                if *rss_bytes > self.rss_limit {
-                    self.rss_paused = true;
-                } else if *rss_bytes < self.rss_resume {
-                    self.rss_paused = false;
-                }
-            }
-            _ => {}
-        }
+        apply_event_state(
+            &mut self.in_flight,
+            &mut self.last_rss,
+            &mut self.rss_paused,
+            self.rss_limit,
+            self.rss_resume,
+            &evt,
+        );
         Some(evt)
     }
 
@@ -479,5 +472,208 @@ impl Drop for SubprocessManager {
         // 1s is aggressive but necessary — Drop runs on the UI thread during
         // app shutdown / panic unwinding and must not stall.
         let _ = self.shutdown_with_timeout(std::time::Duration::from_secs(1));
+    }
+}
+
+/// Apply a single subprocess event to the manager's bookkeeping state.
+///
+/// **Variant-exhaustive contract** (Phase 21-01 boundary test pins this):
+/// every Done/Error variant must decrement `in_flight`; mid-flight Progress
+/// variants and one-off Ready/Finished/InitError/RssUpdate must NOT.
+///
+/// This is split out of `next_event_with_state` so the contract can be
+/// tested without spawning a real child process. The B1 regression
+/// (InpaintDone/InpaintError leaking from the `_ => {}` arm) shipped because
+/// the bookkeeping was inlined and untested per-variant.
+fn apply_event_state(
+    in_flight: &mut HashSet<u64>,
+    last_rss: &mut u64,
+    rss_paused: &mut bool,
+    rss_limit: u64,
+    rss_resume: u64,
+    evt: &SubprocessEvent,
+) {
+    match evt {
+        // Terminal events: the item is no longer being worked on. Every
+        // Done/Error variant must land here. `InpaintProgress` is NOT
+        // terminal — it's a mid-stroke tick during a long SD inpaint.
+        SubprocessEvent::ImageDone { item_id, .. }
+        | SubprocessEvent::ImageError { item_id, .. }
+        | SubprocessEvent::InpaintDone { item_id, .. }
+        | SubprocessEvent::InpaintError { item_id, .. } => {
+            in_flight.remove(item_id);
+        }
+        // RSS hysteresis: pause when above limit, resume only when below
+        // the (lower) resume threshold. Sticky in the band between.
+        SubprocessEvent::RssUpdate { rss_bytes } => {
+            *last_rss = *rss_bytes;
+            if *rss_bytes > rss_limit {
+                *rss_paused = true;
+            } else if *rss_bytes < rss_resume {
+                *rss_paused = false;
+            }
+        }
+        // Non-terminal / one-off variants — no state change here.
+        SubprocessEvent::Ready { .. }
+        | SubprocessEvent::Progress { .. }
+        | SubprocessEvent::InpaintProgress { .. }
+        | SubprocessEvent::Finished
+        | SubprocessEvent::InitError { .. } => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use prunr_core::ProgressStage;
+    use std::path::PathBuf;
+
+    fn fresh_state() -> (HashSet<u64>, u64, bool) {
+        let in_flight: HashSet<u64> = (0..10).collect();
+        (in_flight, 0u64, false)
+    }
+
+    fn step(state: (&mut HashSet<u64>, &mut u64, &mut bool), evt: &SubprocessEvent) {
+        apply_event_state(state.0, state.1, state.2, 1_000_000_000, 800_000_000, evt);
+    }
+
+    /// Phase 21-01 / B1 fix: every terminal Done/Error variant must
+    /// decrement `in_flight`. Caught the regression where adding
+    /// `InpaintDone`/`InpaintError` IPC variants in the SD subprocess
+    /// refactor left them falling through `_ => {}` — the SD bundle
+    /// stayed resident forever after the first stroke because the idle
+    /// eviction gate keyed off `in_flight_items().is_empty()`.
+    #[test]
+    fn apply_event_state_decrements_on_every_terminal_variant() {
+        let (mut in_flight, mut last_rss, mut rss_paused) = fresh_state();
+
+        let terminal = [
+            SubprocessEvent::ImageDone {
+                item_id: 1,
+                result_path: PathBuf::from("/tmp/x"),
+                width: 100,
+                height: 100,
+                active_provider: "CPU".into(),
+                tensor_cache_path: None,
+                tensor_cache_height: None,
+                tensor_cache_width: None,
+                edge_cache_path: None,
+                edge_cache_height: None,
+                edge_cache_width: None,
+            },
+            SubprocessEvent::ImageError {
+                item_id: 2,
+                error: "decode failed".into(),
+            },
+            SubprocessEvent::InpaintDone {
+                item_id: 3,
+                rgba_path: PathBuf::from("/tmp/y"),
+                width: 100,
+                height: 100,
+            },
+            SubprocessEvent::InpaintError {
+                item_id: 4,
+                error: "lama session failed".into(),
+            },
+        ];
+
+        for e in &terminal {
+            step((&mut in_flight, &mut last_rss, &mut rss_paused), e);
+        }
+
+        assert!(!in_flight.contains(&1), "ImageDone must decrement in_flight");
+        assert!(!in_flight.contains(&2), "ImageError must decrement in_flight");
+        assert!(!in_flight.contains(&3), "InpaintDone must decrement in_flight (B1 regression)");
+        assert!(!in_flight.contains(&4), "InpaintError must decrement in_flight (B1 regression)");
+        // Items not referenced by any event are still in flight
+        for id in 5..10 {
+            assert!(in_flight.contains(&id));
+        }
+    }
+
+    /// Mid-flight Progress variants signal "still working" — they MUST NOT
+    /// decrement `in_flight`, otherwise the idle-eviction gate would fire
+    /// while a long SD stroke is still computing.
+    #[test]
+    fn apply_event_state_does_not_decrement_on_progress_variants() {
+        let (mut in_flight, mut last_rss, mut rss_paused) = fresh_state();
+
+        step(
+            (&mut in_flight, &mut last_rss, &mut rss_paused),
+            &SubprocessEvent::Progress {
+                item_id: 1,
+                stage: ProgressStage::Infer,
+                pct: 0.5,
+            },
+        );
+        step(
+            (&mut in_flight, &mut last_rss, &mut rss_paused),
+            &SubprocessEvent::InpaintProgress {
+                item_id: 2,
+                current: 5,
+                total: 20,
+            },
+        );
+
+        assert!(in_flight.contains(&1), "Progress is mid-flight — in_flight must NOT change");
+        assert!(in_flight.contains(&2), "InpaintProgress is mid-flight — in_flight must NOT change");
+    }
+
+    /// One-off lifecycle variants don't carry an `item_id` (or shouldn't
+    /// affect bookkeeping when they do). They MUST NOT touch `in_flight`.
+    #[test]
+    fn apply_event_state_ignores_lifecycle_variants() {
+        let (mut in_flight, mut last_rss, mut rss_paused) = fresh_state();
+        let original = in_flight.clone();
+
+        for evt in [
+            SubprocessEvent::Ready {
+                active_provider: "CPU".into(),
+            },
+            SubprocessEvent::Finished,
+            SubprocessEvent::InitError {
+                error: "no session".into(),
+            },
+        ] {
+            step((&mut in_flight, &mut last_rss, &mut rss_paused), &evt);
+        }
+        assert_eq!(in_flight, original);
+    }
+
+    /// RSS hysteresis: pause when ABOVE limit, resume only when BELOW resume.
+    /// Sticky in the band between resume and limit (the contract that
+    /// prevented oscillation under steady ~limit pressure).
+    #[test]
+    fn apply_event_state_rss_hysteresis() {
+        let (mut in_flight, mut last_rss, mut rss_paused) = fresh_state();
+
+        // Above limit → pause
+        step(
+            (&mut in_flight, &mut last_rss, &mut rss_paused),
+            &SubprocessEvent::RssUpdate {
+                rss_bytes: 1_500_000_000,
+            },
+        );
+        assert!(rss_paused);
+        assert_eq!(last_rss, 1_500_000_000);
+
+        // In hysteresis band (between resume and limit) → still paused
+        step(
+            (&mut in_flight, &mut last_rss, &mut rss_paused),
+            &SubprocessEvent::RssUpdate {
+                rss_bytes: 900_000_000,
+            },
+        );
+        assert!(rss_paused, "RSS in hysteresis band must remain paused");
+
+        // Below resume → unpause
+        step(
+            (&mut in_flight, &mut last_rss, &mut rss_paused),
+            &SubprocessEvent::RssUpdate {
+                rss_bytes: 700_000_000,
+            },
+        );
+        assert!(!rss_paused);
+        assert_eq!(last_rss, 700_000_000);
     }
 }
