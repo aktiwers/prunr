@@ -591,6 +591,9 @@ fn run_batch(args: &Cli) -> i32 {
                                 elapsed.as_secs_f32()
                             ));
                         } else if !args.quiet {
+                            // stdout: per-image success lines and the final summary
+                            // are the program's machine-parseable output. Errors and
+                            // skips go to stderr. Spinner path uses indicatif (stderr).
                             println!("✓ {} ({:.1}s)", input.display(), elapsed.as_secs_f32());
                         }
                         if let Some(ref opb) = overall { opb.inc(1); }

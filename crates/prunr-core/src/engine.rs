@@ -392,7 +392,7 @@ impl OrtEngine {
         let mut session = self
             .session
             .lock()
-            .map_err(|e| CoreError::Inference(format!("Session mutex poisoned: {e}")))?;
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         f(&mut session)
     }
 
@@ -422,7 +422,7 @@ impl OrtEngine {
         let mut session = self
             .session
             .lock()
-            .map_err(|e| CoreError::Inference(format!("Session mutex poisoned: {e}")))?;
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let input_name = session.inputs()[0].name().to_string();
         let output_name = session.outputs()[0].name().to_string();
 
