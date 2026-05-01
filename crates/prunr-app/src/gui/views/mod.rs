@@ -49,12 +49,6 @@ pub fn hint(ui: &mut egui::Ui, text: &str) {
     );
 }
 
-/// Platform-aware modifier key name.
-pub fn modifier_key() -> &'static str {
-    if cfg!(target_os = "macos") { "Cmd" } else { "Ctrl" }
-}
-
-/// Platform modifier key as a compile-time constant.
 pub const KB_MOD: &str = if cfg!(target_os = "macos") { "Cmd" } else { "Ctrl" };
 
 /// Build a keyboard-shortcut tooltip as a `&'static str`.
