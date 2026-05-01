@@ -738,7 +738,7 @@ pub fn run_worker() -> ! {
                 let sem = semaphore.clone();
                 let ipc = ipc_dir.clone();
                 let mask_settings = cmd_mask;
-                let edge_settings = edge.clone();
+                let edge_settings = edge;
                 let edge_eng = edge_engine.clone();
                 let cancel = cancel.clone();
                 let cancelled_items = cancelled_items.clone();

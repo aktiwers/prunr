@@ -245,9 +245,9 @@ fn example_row(ui: &mut egui::Ui, toasts: &mut crate::gui::toasts::Toasts, cmd: 
         let flash = ui.ctx().animate_bool_with_time(flash_id, false, 0.4);
         let icon_color = if flash > 0.01 { egui::Color32::WHITE } else { theme::TEXT_HINT };
         let icon_text = if flash > 0.01 {
-            ICON_CHECK.codepoint.to_string()
+            ICON_CHECK.codepoint
         } else {
-            ICON_CONTENT_COPY.codepoint.to_string()
+            ICON_CONTENT_COPY.codepoint
         };
         if ui.add(
             egui::Button::new(RichText::new(icon_text).size(12.0).color(icon_color))

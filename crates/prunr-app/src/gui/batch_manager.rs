@@ -103,7 +103,7 @@ impl BatchManager {
     /// this to decide whether a worker message / background-io event affects
     /// what the user is looking at right now (textures, progress, status).
     pub(crate) fn is_selected(&self, id: u64) -> bool {
-        self.selected_item().map_or(false, |b| b.id == id)
+        self.selected_item().is_some_and(|b| b.id == id)
     }
 
     /// IDs of checkbox-selected items currently in a given status. Used by

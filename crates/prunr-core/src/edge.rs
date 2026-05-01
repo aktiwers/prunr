@@ -62,7 +62,7 @@ impl EdgeEngine {
             .map_err(|e| CoreError::Inference(format!("Edge set opt level failed: {e}")))?
             .with_intra_threads(num_cpus::get().max(1))
             .map_err(|e| CoreError::Inference(format!("Edge set threads failed: {e}")))?
-            .commit_from_memory(&edge_bytes)
+            .commit_from_memory(edge_bytes)
             .map_err(|e| CoreError::Inference(format!("Edge model load failed: {e}")))?;
 
         // Validate the output layout. If a model re-export ever renames /
@@ -285,12 +285,12 @@ pub fn compose_edges_styled(
             LineStyle::Solid => solid_tint,
             LineStyle::GradientY { top, bottom } => {
                 let y = (i as u32 / ow) as u16;
-                let t = (y as u32 * 255 / oh.max(1) as u32) as u16;
+                let t = (y as u32 * 255 / oh.max(1)) as u16;
                 Some(lerp_rgb(top, bottom, t))
             }
             LineStyle::GradientX { left, right } => {
                 let x = (i as u32 % ow) as u16;
-                let t = (x as u32 * 255 / ow.max(1) as u32) as u16;
+                let t = (x as u32 * 255 / ow.max(1)) as u16;
                 Some(lerp_rgb(left, right, t))
             }
             LineStyle::RadialGradient { inner, outer, .. } => {

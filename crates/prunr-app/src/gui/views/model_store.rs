@@ -353,11 +353,9 @@ pub fn render_license_dialog(
             );
             ui.add_space(theme::SPACE_XS);
             ui.label(
-                RichText::new(format!(
-                    "This model is distributed under terms that you must \
+                RichText::new("This model is distributed under terms that you must \
                      review and accept before downloading. The full text \
-                     is published at the URL below."
-                ))
+                     is published at the URL below.".to_string())
                 .size(theme::FONT_SIZE_BODY)
                 .color(theme::TEXT_SECONDARY),
             );

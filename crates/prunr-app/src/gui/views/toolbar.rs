@@ -153,7 +153,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                 // Processing. Empty `target_ids` (empty batch) naturally → false.
                 let has_processable = target_ids.iter().any(|id| {
                     app.batch.find_by_id(*id)
-                        .map_or(false, |it| !matches!(it.status, BatchStatus::Processing))
+                        .is_some_and(|it| !matches!(it.status, BatchStatus::Processing))
                 });
 
                 let (label_text, is_all) = match label {
@@ -191,7 +191,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                         // ProcessViewed or ProcessSelected(1): single-image dispatch.
                         // Chain-mode tooltip varies on whether the target already has a result.
                         let target_has_result = target_ids.first().and_then(|id| app.batch.find_by_id(*id))
-                            .map_or(false, |i| i.result_rgba.is_some());
+                            .is_some_and(|i| i.result_rgba.is_some());
                         if app.settings.chain_mode && target_has_result {
                             format!("Process current result ({m}+R)")
                         } else {

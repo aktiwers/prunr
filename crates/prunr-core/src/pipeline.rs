@@ -129,7 +129,7 @@ where
     // Stage 3: Normalize (happens inside preprocess, reported before the call)
     report(ProgressStage::Normalize, 0.4);
     let model = engine.model_kind();
-    let input_array = preprocess(&img, model);
+    let input_array = preprocess(img, model);
 
     if is_cancelled() {
         return Err(CoreError::Cancelled);

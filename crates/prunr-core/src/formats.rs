@@ -49,7 +49,7 @@ pub fn load_image_from_bytes(bytes: &[u8]) -> Result<DynamicImage, CoreError> {
     }
     ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()
-        .map_err(|e| CoreError::Io(e))?
+        .map_err(CoreError::Io)?
         .decode()
         .map_err(CoreError::from)
 }
@@ -389,9 +389,7 @@ mod tests {
     fn rasterize_svg_caps_oversize_input() {
         // 20000x20000 would normally exceed LARGE_IMAGE_LIMIT (8000); rasterize
         // must scale the render down so we don't allocate a 1.6 GB pixmap.
-        let svg = format!(
-            r#"<svg xmlns="http://www.w3.org/2000/svg" width="20000" height="20000"><rect width="20000" height="20000" fill="black"/></svg>"#,
-        );
+        let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="20000" height="20000"><rect width="20000" height="20000" fill="black"/></svg>"#.to_string();
         let img = load_image_from_bytes(svg.as_bytes())
             .expect("oversize SVG should still rasterize after capping");
         assert!(img.width() <= LARGE_IMAGE_LIMIT);
