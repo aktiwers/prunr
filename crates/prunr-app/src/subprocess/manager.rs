@@ -80,15 +80,11 @@ impl SubprocessManager {
         edge: EdgeSettings,
         inpaint_only: bool,
     ) -> Result<(Self, String), String> {
-        // Clean up stale IPC temp files from previous *prunr instances*
-        // that may have crashed without cleaning up. Only on the first
-        // spawn of THIS process — `ipc_temp_dir()` is PID-namespaced
-        // and the inpaint bridge writes temp files BEFORE spawning the
-        // subprocess (lazy first-dispatch), so wiping the dir on every
-        // spawn would race the freshly-written input PNGs.
-        static CLEANUP_DONE: std::sync::Once = std::sync::Once::new();
-        CLEANUP_DONE.call_once(super::protocol::cleanup_ipc_temp);
-
+        // Stale-file cleanup is now owned by `ipc_temp_dir()`'s init-time
+        // sweep (see `protocol::ipc_temp_dir` doc). Spawning a subprocess
+        // must NOT touch the temp dir — callers like the CLI downscale path
+        // and the inpaint bridge's lazy first-dispatch write input files
+        // BEFORE spawn, and a spawn-time wipe would race those writes (B2).
         let exe = std::env::current_exe()
             .map_err(|e| format!("Failed to get current exe: {e}"))?;
 
