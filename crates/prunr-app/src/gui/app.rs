@@ -29,8 +29,6 @@ pub(crate) struct RuntimeInstallProgress {
     pub(crate) cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
-/// Change-detection state for the window title. Integer compare on the
-/// hot path; String compare only when the single-item filename changes.
 #[derive(Default, PartialEq)]
 enum TitleState { #[default] Empty, Single(String), Batch(usize) }
 
@@ -2468,20 +2466,25 @@ impl PrunrApp {
 
     fn update_window_title(&mut self, ctx: &egui::Context) {
         let count = self.batch.items.len();
-        let new_state = if count >= 2 {
-            TitleState::Batch(count)
+        let selected_name = if count < 2 {
+            self.batch.selected_item().map(|i| i.filename.as_str())
         } else {
-            match self.batch.selected_item() {
-                Some(i) => TitleState::Single(i.filename.clone()),
-                None => TitleState::Empty,
-            }
+            None
         };
-        if new_state == self.title_state { return; }
+        let unchanged = match (&self.title_state, count, selected_name) {
+            (TitleState::Batch(n), c, _) if c >= 2 => *n == c,
+            (TitleState::Single(s), c, Some(name)) if c < 2 => s == name,
+            (TitleState::Empty, c, None) if c < 2 => true,
+            _ => false,
+        };
+        if unchanged { return; }
 
-        let title = match &new_state {
-            TitleState::Batch(n) => format!("Prunr \u{2014} {n} images"),
-            TitleState::Single(name) => format!("Prunr \u{2014} {name}"),
-            TitleState::Empty => "Prunr".to_string(),
+        let (new_state, title) = if count >= 2 {
+            (TitleState::Batch(count), format!("Prunr \u{2014} {count} images"))
+        } else if let Some(name) = selected_name {
+            (TitleState::Single(name.to_string()), format!("Prunr \u{2014} {name}"))
+        } else {
+            (TitleState::Empty, "Prunr".to_string())
         };
         self.title_state = new_state;
         ctx.send_viewport_cmd(ViewportCommand::Title(title));
