@@ -42,16 +42,7 @@ pub(crate) fn is_self_drop(path: &Path) -> bool {
 
 /// Remove ALL temp drag files on a background thread. Called on graceful app exit.
 pub(crate) fn cleanup_all() {
-    std::thread::spawn(|| {
-        let dir = temp_dir();
-        let Ok(entries) = std::fs::read_dir(&dir) else { return };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_file() {
-                let _ = std::fs::remove_file(&path);
-            }
-        }
-    });
+    crate::fs_util::sweep_dir_files_async(temp_dir());
 }
 
 /// Remove stale temp files left behind by previous sessions or crashes.

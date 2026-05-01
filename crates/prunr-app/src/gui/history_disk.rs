@@ -161,16 +161,7 @@ pub fn cleanup_stale() {
 
 /// Remove ALL history files. Called on graceful app exit.
 pub fn cleanup_all() {
-    std::thread::spawn(|| {
-        let dir = cache_dir();
-        let Ok(entries) = std::fs::read_dir(dir) else { return };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_file() {
-                let _ = std::fs::remove_file(&path);
-            }
-        }
-    });
+    crate::fs_util::sweep_dir_files_async(cache_dir().clone());
 }
 
 #[cfg(test)]
