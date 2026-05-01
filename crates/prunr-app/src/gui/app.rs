@@ -29,6 +29,11 @@ pub(crate) struct RuntimeInstallProgress {
     pub(crate) cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
+/// Change-detection state for the window title. Integer compare on the
+/// hot path; String compare only when the single-item filename changes.
+#[derive(Default, PartialEq)]
+enum TitleState { #[default] Empty, Single(String), Batch(usize) }
+
 pub struct PrunrApp {
     /// Directory of the most recently opened file (for save dialog default)
     pub(crate) last_open_dir: Option<std::path::PathBuf>,
@@ -57,8 +62,7 @@ pub struct PrunrApp {
     // Before/After toggle
     pub(crate) show_original: bool,
 
-    // Window title change detection
-    prev_title: String,
+    title_state: TitleState,
 
     /// Last `(item_id, MaskSettings)` `recipe_drift_tripwire` proved
     /// drift-free. Skipping `MaskRecipe::from` on a per-frame match
@@ -274,7 +278,7 @@ impl PrunrApp {
             brush_state: super::brush_state::BrushState::default(),
             download_manager: super::download_manager::DownloadManager::new(),
             show_original: false,
-            prev_title: String::new(),
+            title_state: TitleState::default(),
             last_drift_check: None,
             batch: super::batch_manager::BatchManager::new(),
             sidebar_hidden: false,
@@ -2463,38 +2467,23 @@ impl PrunrApp {
     }
 
     fn update_window_title(&mut self, ctx: &egui::Context) {
-        // Cheap discriminator first: count + filename ref. Skip the
-        // `format!` (and its String allocation) on the common no-change
-        // path — runs every frame at 60 Hz, so 120 allocs/s of pure
-        // noise was the prior cost.
         let count = self.batch.items.len();
-        let selected_filename = self.batch.selected_item().map(|i| i.filename.as_str());
-        let unchanged = if count >= 2 {
-            self.prev_title.starts_with("Prunr \u{2014} ")
-                && self.prev_title.ends_with(" images")
-                && self.prev_title
-                    .strip_prefix("Prunr \u{2014} ")
-                    .and_then(|s| s.strip_suffix(" images"))
-                    .and_then(|s| s.parse::<usize>().ok())
-                    == Some(count)
+        let new_state = if count >= 2 {
+            TitleState::Batch(count)
         } else {
-            match selected_filename {
-                Some(name) => self.prev_title
-                    .strip_prefix("Prunr \u{2014} ") == Some(name),
-                None => self.prev_title == "Prunr",
+            match self.batch.selected_item() {
+                Some(i) => TitleState::Single(i.filename.clone()),
+                None => TitleState::Empty,
             }
         };
-        if unchanged { return; }
+        if new_state == self.title_state { return; }
 
-        let title = if count >= 2 {
-            format!("Prunr \u{2014} {count} images")
-        } else {
-            match selected_filename {
-                Some(name) => format!("Prunr \u{2014} {name}"),
-                None => "Prunr".to_string(),
-            }
+        let title = match &new_state {
+            TitleState::Batch(n) => format!("Prunr \u{2014} {n} images"),
+            TitleState::Single(name) => format!("Prunr \u{2014} {name}"),
+            TitleState::Empty => "Prunr".to_string(),
         };
-        self.prev_title = title.clone();
+        self.title_state = new_state;
         ctx.send_viewport_cmd(ViewportCommand::Title(title));
     }
 }
