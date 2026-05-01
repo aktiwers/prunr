@@ -550,7 +550,7 @@ impl PrunrApp {
         if self.try_brush_undo(ctx) {
             return;
         }
-        let has_selected = self.batch.items.iter().any(|i| i.selected);
+        let has_selected = self.batch.has_any_selected();
         let current_id = self.batch.selected_item().map(|b| b.id);
         let mut undone = 0u32;
         for item in &mut self.batch.items {
@@ -579,7 +579,7 @@ impl PrunrApp {
         if self.try_brush_redo(ctx) {
             return;
         }
-        let has_selected = self.batch.items.iter().any(|i| i.selected);
+        let has_selected = self.batch.has_any_selected();
         let current_id = self.batch.selected_item().map(|b| b.id);
         let mut redone = 0u32;
         for item in &mut self.batch.items {
@@ -1374,7 +1374,7 @@ impl PrunrApp {
     }
 
     pub fn remove_selected(&mut self) {
-        let count = self.batch.items.iter().filter(|i| i.selected).count();
+        let count = self.batch.selected_count();
         self.batch.items.retain(|item| !item.selected);
         self.sync_after_batch_change();
         if count > 0 {

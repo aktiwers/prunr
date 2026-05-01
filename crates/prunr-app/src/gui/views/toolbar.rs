@@ -17,7 +17,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
         ui.spacing_mut().button_padding = egui::vec2(8.0, 4.0);
 
         let can_save_copy = app.batch.app_state() == AppState::Done;
-        let has_selected = app.batch.items.iter().any(|i| i.selected);
+        let has_selected = app.batch.has_any_selected();
 
         // ── Left: Open ──
         let open_btn = egui::Button::new(
