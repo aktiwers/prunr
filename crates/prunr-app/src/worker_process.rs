@@ -119,6 +119,21 @@ fn is_item_cancelled(
     guard.remove(&item_id)
 }
 
+/// Flip the mid-inference cancel flag for `item_id` if a dispatch has
+/// registered one. Used twice from `CancelItem` (seg + inpaint maps);
+/// shared so both sites keep the same lock-then-store sequence.
+fn flip_cancel_flag(
+    map: &Arc<Mutex<std::collections::HashMap<u64, Arc<AtomicBool>>>>,
+    item_id: u64,
+) {
+    if let Some(flag) = map.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(&item_id)
+    {
+        flag.store(true, Ordering::Release);
+    }
+}
+
 /// Remove each temp path that lives under the IPC directory. Silent on
 /// missing files — subprocess cancel branches call this before the normal
 /// post-spawn cleanup would have fired.
@@ -897,18 +912,8 @@ pub fn run_worker() -> ! {
                 // Flip mid-inference flags so an in-flight infer_only /
                 // SD UNet / LaMa tile loop sees the cancel between stages
                 // instead of running to completion.
-                if let Some(flag) = inpaint_cancels.lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .get(&item_id)
-                {
-                    flag.store(true, Ordering::Release);
-                }
-                if let Some(flag) = seg_cancels.lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .get(&item_id)
-                {
-                    flag.store(true, Ordering::Release);
-                }
+                flip_cancel_flag(&inpaint_cancels, item_id);
+                flip_cancel_flag(&seg_cancels, item_id);
             }
 
             SubprocessCommand::Inpaint { item_id, model_id, image_path, mask_path, sd_req, feather_px, sharpen } => {
