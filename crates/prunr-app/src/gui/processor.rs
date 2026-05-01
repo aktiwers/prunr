@@ -383,8 +383,8 @@ impl Processor {
                 _ => None,
             };
             let dir = crate::subprocess::protocol::ipc_temp_dir();
-            let image_path = dir.join(format!("inpaint-img-{item_id}-{gen}.png"));
-            let mask_path  = dir.join(format!("inpaint-mask-{item_id}-{gen}.png"));
+            let image_path = crate::subprocess::protocol::IpcKind::InpaintImg.path_for_gen(dir, item_id, gen);
+            let mask_path  = crate::subprocess::protocol::IpcKind::InpaintMask.path_for_gen(dir, item_id, gen);
             let res: Result<(), String> = (|| {
                 let img_bytes = prunr_core::encode_rgba_png(&image)
                     .map_err(|e| format!("encode source: {e:?}"))?;
