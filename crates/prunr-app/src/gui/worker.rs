@@ -538,9 +538,6 @@ fn spawn_and_initial_burst(
     let burst = state.max_jobs.min(total_pending);
     let mut sent_count = 0;
     while sent_count < burst {
-        // Priority order: Tier 2 (cheap re-postprocess) → AddEdge → Tier 1.
-        // `||` short-circuits — try_send_add_edge only runs if Tier 2 had
-        // nothing pending. Each try_send_* is side-effecting on success.
         if try_send_tier2(&mut sub, &mut state.pending_tier2, &mut sent_tier2_ids)
             || try_send_add_edge(&mut sub, &mut state.pending_add_edge, &mut sent_add_edge_ids)
         {

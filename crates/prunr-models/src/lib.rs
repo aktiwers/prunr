@@ -805,7 +805,7 @@ mod tests {
         // the comment above tells them to also extend `ModelId::ALL`.
         // (Rust enums can't be reflected in stable; removal-from-ALL
         // alone is silent — a deliberate code change a reviewer catches.)
-        #[allow(non_snake_case)] // SCREAMING_ALL is the signal — the name is the message
+        #[allow(non_snake_case)]
         fn _force_developer_to_update_ALL_too(id: ModelId) {
             match id {
                 ModelId::Silueta
