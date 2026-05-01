@@ -180,7 +180,9 @@ where
     report(ProgressStage::Normalize, 0.4);
     let model = engine.model_kind();
     let input_array = preprocess(img, model);
-    {
+    // Diagnostic stats walk the full preprocessed tensor (~16 MB at
+    // BiRefNet 1024²); skip when DEBUG isn't enabled.
+    if tracing::enabled!(tracing::Level::DEBUG) {
         let shape = input_array.shape();
         let s = input_array.as_slice().unwrap_or(&[]);
         let (lo, hi, mean) = crate::math::slice_stats(s);

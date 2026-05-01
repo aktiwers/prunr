@@ -199,12 +199,13 @@ mod preset_stack_tests {
     //! Tests for the `push_bounded` helper. Kept inline so the helper can
     //! stay private to this module.
     use super::*;
+    use crate::gui::item_settings::item_with_gamma;
 
     /// Build a single-attribute PresetSnapshot. `pub(super)` so the sibling
     /// `tests` module can reuse it (deduped per /simplify finding).
     pub(super) fn snap(gamma: f32) -> PresetSnapshot {
         PresetSnapshot {
-            settings: crate::gui::item_settings::item_with_gamma(gamma),
+            settings: item_with_gamma(gamma),
             applied_preset: String::new(),
         }
     }
@@ -473,15 +474,12 @@ mod tests {
 
     #[test]
     fn swap_preset_invalidates_edge_cache_on_line_mode_change() {
-        use crate::gui::item_settings::ItemSettings;
+        use crate::gui::item_settings::item_with_line_mode;
         use prunr_core::LineMode;
         let mut item = fixture(1);
         item.settings.line_mode = LineMode::Off;
         item.cached_edge_mask = Some((Arc::new(image::GrayImage::new(1, 1)), 0, prunr_core::EdgeScale::Fused));
-        let snap_with_edges = ItemSettings {
-            line_mode: LineMode::EdgesOnly,
-            ..ItemSettings::default()
-        };
+        let snap_with_edges = item_with_line_mode(LineMode::EdgesOnly);
         item.preset_undo_stack.push_back(PresetSnapshot {
             settings: snap_with_edges,
             applied_preset: String::new(),

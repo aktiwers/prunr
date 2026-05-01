@@ -637,10 +637,7 @@ mod tests {
     #[test]
     fn input_transform_cache_impact_matches_recipe_diff() {
         use prunr_core::{InputTransform as It, ModelKind};
-        let old = crate::gui::item_settings::ItemSettings {
-            line_mode: LineMode::SubjectOutline,
-            ..Default::default()
-        };
+        let old = crate::gui::item_settings::item_with_line_mode(LineMode::SubjectOutline);
         let new = crate::gui::item_settings::ItemSettings {
             line_mode: LineMode::SubjectOutline,
             input_transform: It::Grayscale,
@@ -693,10 +690,7 @@ mod tests {
             model_flip in proptest::prelude::any::<bool>(),
         ) {
             use prunr_core::{InputTransform, ModelKind};
-            let base = crate::gui::item_settings::ItemSettings {
-                line_mode: LineMode::SubjectOutline,
-                ..Default::default()
-            };
+            let base = crate::gui::item_settings::item_with_line_mode(LineMode::SubjectOutline);
             let old_recipe = base.current_recipe(ModelKind::Silueta, false);
 
             let mut new_settings = base;
