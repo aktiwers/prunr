@@ -22,16 +22,34 @@ use prunr_app::gui::settings::LineMode;
 /// Instead of a binary lock, this tracks "pixel units" (1 unit = 1M pixels).
 /// Small images run in parallel; large images throttle automatically.
 /// Total capacity is set based on available RAM at worker startup.
+///
+/// Fairness: the wait queue is FIFO. New acquirers may proceed concurrently
+/// with existing holders only if their request still leaves enough units
+/// for the head-of-queue waiter — so a giant image isn't repeatedly skipped
+/// past by a stream of arriving small ones (`notify_all` previously woke
+/// every waiter and the smallest grabbed the lock first).
 struct WeightedSemaphore {
-    state: Mutex<usize>,
+    state: Mutex<SemState>,
     available: std::sync::Condvar,
     total_units: usize,
+}
+
+struct SemState {
+    units_remaining: usize,
+    next_ticket: u64,
+    /// FIFO queue of (ticket, weight) for waiters that haven't yet acquired.
+    /// `front()` is the head; new admissions must leave room for its weight.
+    waiters: std::collections::VecDeque<(u64, usize)>,
 }
 
 impl WeightedSemaphore {
     fn new(total_units: usize) -> Self {
         Self {
-            state: Mutex::new(total_units),
+            state: Mutex::new(SemState {
+                units_remaining: total_units,
+                next_ticket: 0,
+                waiters: std::collections::VecDeque::new(),
+            }),
             available: std::sync::Condvar::new(),
             total_units,
         }
@@ -40,13 +58,31 @@ impl WeightedSemaphore {
     /// Acquire units, returning a RAII guard that releases on drop (panic-safe).
     fn acquire(self: &Arc<Self>, weight: usize) -> SemaphoreGuard {
         let capped = weight.min(self.total_units);
-        // Poison recovery: the semaphore state is just a unit counter. A
+        // Poison recovery: the semaphore state is just bookkeeping. A
         // panicking user of the semaphore must not deadlock the worker pool.
-        let mut units = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        while *units < capped {
-            units = self.available.wait(units).unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut state = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let my_ticket = state.next_ticket;
+        state.next_ticket += 1;
+        state.waiters.push_back((my_ticket, capped));
+        loop {
+            let am_head = state.waiters.front().map(|(t, _)| *t) == Some(my_ticket);
+            let head_weight = state.waiters.front().map(|(_, w)| *w).unwrap_or(0);
+            let can_go = if am_head {
+                state.units_remaining >= capped
+            } else {
+                // Leave room for the head waiter so it isn't starved.
+                state.units_remaining >= capped + head_weight
+            };
+            if can_go { break; }
+            state = self.available.wait(state)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
         }
-        *units -= capped;
+        // Remove our entry (could be head or interior — interior happens when
+        // a smaller-than-head waiter behind the head got admitted concurrently).
+        state.waiters.retain(|(t, _)| *t != my_ticket);
+        state.units_remaining -= capped;
+        // Wake other waiters in case one of them now fits behind us.
+        self.available.notify_all();
         SemaphoreGuard { sem: self.clone(), acquired: capped }
     }
 }
@@ -60,8 +96,8 @@ struct SemaphoreGuard {
 impl Drop for SemaphoreGuard {
     fn drop(&mut self) {
         // Poison recovery: drop must not panic (would abort under double-panic).
-        let mut units = self.sem.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        *units += self.acquired;
+        let mut state = self.sem.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.units_remaining += self.acquired;
         self.sem.available.notify_all();
     }
 }
@@ -1030,4 +1066,101 @@ pub fn run_worker() -> ! {
     drop(evt_tx);
     let _ = writer_handle.join();
     std::process::exit(0);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    /// Pins the H15 no-starvation invariant: a giant acquirer at the head
+    /// of the queue must not be repeatedly skipped past by smaller arrivals.
+    /// Smaller waiters behind the giant only proceed if their weight still
+    /// leaves room for the giant's weight.
+    #[test]
+    fn weighted_semaphore_giant_at_head_blocks_smaller_arrivals() {
+        let sem = Arc::new(WeightedSemaphore::new(64));
+
+        // Hold 50 units so a 40-unit acquirer cannot proceed yet.
+        let _hold = sem.acquire(50);
+
+        // Spawn a 40-unit acquirer — it queues at head, blocked on the
+        // 14 free units.
+        let sem_giant = sem.clone();
+        let giant_done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let giant_done_for_thread = giant_done.clone();
+        let giant_thread = std::thread::spawn(move || {
+            let _g = sem_giant.acquire(40);
+            giant_done_for_thread.store(true, std::sync::atomic::Ordering::Release);
+        });
+
+        // Give the giant time to enqueue.
+        std::thread::sleep(Duration::from_millis(50));
+
+        // Now spawn a 5-unit acquirer. Pre-fix it would have grabbed the
+        // 14 free units past the giant. Post-fix it must wait — its
+        // 5 + giant's 40 = 45 > 14.
+        let sem_small = sem.clone();
+        let small_done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let small_done_for_thread = small_done.clone();
+        let small_thread = std::thread::spawn(move || {
+            let _g = sem_small.acquire(5);
+            small_done_for_thread.store(true, std::sync::atomic::Ordering::Release);
+        });
+
+        // Wait briefly: the small must NOT have completed.
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(!small_done.load(std::sync::atomic::Ordering::Acquire),
+            "small acquirer skipped past starving giant");
+        assert!(!giant_done.load(std::sync::atomic::Ordering::Acquire),
+            "giant should still be waiting (50 + 40 > 64)");
+
+        // Releasing the 50-unit hold lets the giant proceed.
+        drop(_hold);
+
+        // Both should complete shortly after the release.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            if giant_done.load(std::sync::atomic::Ordering::Acquire)
+                && small_done.load(std::sync::atomic::Ordering::Acquire)
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let _ = giant_thread.join();
+        let _ = small_thread.join();
+        assert!(giant_done.load(std::sync::atomic::Ordering::Acquire),
+            "giant should have completed once head's hold released");
+        assert!(small_done.load(std::sync::atomic::Ordering::Acquire),
+            "small should have completed after giant cleared the head");
+    }
+
+    /// Concurrent small acquirers must run in parallel (the fairness rule
+    /// only kicks in when a larger waiter is at the head).
+    #[test]
+    fn weighted_semaphore_small_acquirers_run_concurrently() {
+        let sem = Arc::new(WeightedSemaphore::new(64));
+        let live = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let max_live = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let sem = sem.clone();
+            let live = live.clone();
+            let max_live = max_live.clone();
+            handles.push(std::thread::spawn(move || {
+                let _g = sem.acquire(2);
+                let now = live.fetch_add(1, std::sync::atomic::Ordering::AcqRel) + 1;
+                let _ = max_live.fetch_max(now, std::sync::atomic::Ordering::AcqRel);
+                std::thread::sleep(Duration::from_millis(40));
+                live.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+            }));
+        }
+        for h in handles { h.join().unwrap(); }
+        assert!(max_live.load(std::sync::atomic::Ordering::Acquire) >= 4,
+            "expected at least 4 concurrent small acquirers, got {}",
+            max_live.load(std::sync::atomic::Ordering::Acquire));
+    }
 }
