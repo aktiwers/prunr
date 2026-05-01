@@ -2349,6 +2349,34 @@ impl PrunrApp {
         self.show_original = false;
     }
 
+    /// Drain completed thumbnails from the background decoder into GPU
+    /// textures. Throttles uploads so a 50-image import doesn't burst all
+    /// `ctx.load_texture` calls into one frame and overwhelm the egui
+    /// command buffer. Requests a repaint while the queue is still saturated.
+    fn pump_thumbnail_results(&mut self, ctx: &egui::Context) {
+        const THUMB_UPLOADS_PER_FRAME: usize = 3;
+        let mut uploaded = 0;
+        while uploaded < THUMB_UPLOADS_PER_FRAME {
+            let Ok((item_id, tw, th, pixels)) = self.batch.bg_io.thumb_rx.try_recv() else { break };
+            if let Some(item) = self.batch.find_by_id_mut(item_id) {
+                let ci = egui::ColorImage::from_rgba_unmultiplied(
+                    [tw as usize, th as usize],
+                    &pixels,
+                );
+                item.thumb_texture = Some(ctx.load_texture(
+                    format!("thumb_{item_id}"),
+                    ci,
+                    egui::TextureOptions::LINEAR,
+                ));
+                item.thumb_pending = false;
+                uploaded += 1;
+            }
+        }
+        if uploaded == THUMB_UPLOADS_PER_FRAME {
+            ctx.request_repaint();
+        }
+    }
+
     fn drain_background_channels(&mut self, ctx: &egui::Context) {
         let mut decode_arrived = false;
         while let Ok((item_id, rgba)) = self.batch.bg_io.decode_rx.try_recv() {
@@ -2426,6 +2454,8 @@ impl PrunrApp {
                 self.toasts.success(msg);
             }
         }
+
+        self.pump_thumbnail_results(ctx);
 
 
         let id_floor = self.batch.next_id;
