@@ -183,14 +183,7 @@ where
     {
         let shape = input_array.shape();
         let s = input_array.as_slice().unwrap_or(&[]);
-        let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
-        let mut sum = 0.0_f32;
-        for &v in s {
-            if v < lo { lo = v; }
-            if v > hi { hi = v; }
-            sum += v;
-        }
-        let mean = if s.is_empty() { 0.0 } else { sum / s.len() as f32 };
+        let (lo, hi, mean) = crate::math::slice_stats(s);
         tracing::debug!(
             ?model, input_shape = ?shape, input_len = s.len(),
             input_min = lo, input_max = hi, input_mean = mean,
@@ -255,14 +248,7 @@ where
     // full tensor (~16 MB for BiRefNet 1024²); skipping when the level
     // isn't enabled saves a per-dispatch read pass.
     if tracing::enabled!(tracing::Level::DEBUG) {
-        let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
-        let mut sum = 0.0_f32;
-        for &v in &tensor_data {
-            if v < lo { lo = v; }
-            if v > hi { hi = v; }
-            sum += v;
-        }
-        let mean = if tensor_data.is_empty() { 0.0 } else { sum / tensor_data.len() as f32 };
+        let (lo, hi, mean) = crate::math::slice_stats(&tensor_data);
         let head: Vec<f32> = tensor_data.iter().take(6).copied().collect();
         tracing::debug!(
             ?model, h, w, tensor_len = tensor_data.len(),
