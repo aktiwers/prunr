@@ -984,14 +984,19 @@ pub fn run_worker() -> ! {
                     // pump can't be mid-iteration when InpaintDone goes on
                     // the wire.
                     //
-                    // The cancel-map removal is delegated to
-                    // `CancelMapGuard` (shared with the seg dispatch);
-                    // this struct just composes it with the pump-join +
-                    // in_flight decrement that are inpaint-specific.
+                    // Cancel-map cleanup happens BEFORE `in_flight.fetch_sub`
+                    // so a `Shutdown` waiting on `in_flight == 0` never
+                    // observes the count drop while the cancel-flag entry
+                    // for this item is still present. `_cancel_guard` is a
+                    // panic-safety net — its remove is idempotent, so the
+                    // happy-path explicit remove + the guard's drop don't
+                    // double-fault.
                     struct Cleanup {
+                        item_id: u64,
                         pump_done: Arc<AtomicBool>,
                         pump_handle: Option<std::thread::JoinHandle<()>>,
                         in_flight: Arc<std::sync::atomic::AtomicUsize>,
+                        cancels: CancelMap,
                         _cancel_guard: CancelMapGuard,
                     }
                     impl Drop for Cleanup {
@@ -1000,18 +1005,28 @@ pub fn run_worker() -> ! {
                             if let Some(h) = self.pump_handle.take() {
                                 let _ = h.join();
                             }
+                            // Explicit cancel-map cleanup BEFORE the
+                            // in_flight decrement (see struct doc above).
+                            self.cancels.lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .remove(&self.item_id);
                             // Pairs with `in_flight.fetch_add` at dispatch
                             // (above the thread::spawn). Drop runs even on
                             // panic, so the counter stays balanced.
                             self.in_flight.fetch_sub(1, Ordering::AcqRel);
-                            // `_cancel_guard` drops here, removing the
-                            // entry from `inpaint_cancels`.
+                            // `_cancel_guard` drops after — its remove is a
+                            // no-op since we already cleaned up, but it
+                            // covers the case where this body panics
+                            // between the explicit remove and the
+                            // fetch_sub.
                         }
                     }
                     let _cleanup = Cleanup {
+                        item_id,
                         pump_done: pump_done.clone(),
                         pump_handle: Some(pump_handle),
                         in_flight: in_flight_for_thread,
+                        cancels: inpaint_cancels.clone(),
                         _cancel_guard: CancelMapGuard {
                             item_id,
                             map: inpaint_cancels.clone(),
