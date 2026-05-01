@@ -1,4 +1,4 @@
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc, Condvar, Mutex};
 
 /// Filter-only Process result: `Ok(rgba)` on success, `Err(msg)` so load /
 /// decode failures take the same channel path as successful results
@@ -8,6 +8,44 @@ pub type FilterOnlyResult = (u64, Result<std::sync::Arc<image::RgbaImage>, Strin
 /// Pre-decode result: `Ok(rgba)` on success, `Err(msg)` so a malformed
 /// image clears `decode_pending` instead of leaving the item stuck.
 pub type DecodeResult = (u64, Result<std::sync::Arc<image::RgbaImage>, String>);
+
+/// Counting semaphore used to bound the number of simultaneously-decoding
+/// background threads. Without this, a 50-image Process All fans out 50
+/// threads each holding `compressed bytes + DynamicImage + RgbaImage`
+/// (~50–80 MB at 4 K) → multi-GB transient before any thread releases.
+/// Threads still spawn immediately; they park on `acquire` until a slot
+/// opens. Cap is `available_parallelism()` so cold-cache disk paths
+/// still saturate cores.
+pub struct DecodeSlots {
+    state: Mutex<usize>,
+    cv: Condvar,
+}
+
+impl DecodeSlots {
+    pub fn new(slots: usize) -> Self {
+        Self { state: Mutex::new(slots.max(1)), cv: Condvar::new() }
+    }
+    pub fn acquire(self: &Arc<Self>) -> DecodeSlotGuard {
+        let mut s = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        while *s == 0 {
+            s = self.cv.wait(s).unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+        *s -= 1;
+        DecodeSlotGuard { sem: self.clone() }
+    }
+}
+
+pub struct DecodeSlotGuard {
+    sem: Arc<DecodeSlots>,
+}
+
+impl Drop for DecodeSlotGuard {
+    fn drop(&mut self) {
+        let mut s = self.sem.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        *s += 1;
+        self.sem.cv.notify_one();
+    }
+}
 
 /// Bundles all background thread communication channels.
 pub struct BackgroundIO {
@@ -30,6 +68,10 @@ pub struct BackgroundIO {
     /// while load + decode + `apply_fill_style` runs per item.
     pub filter_only_tx: mpsc::Sender<FilterOnlyResult>,
     pub filter_only_rx: mpsc::Receiver<FilterOnlyResult>,
+    /// Bounds simultaneous decode/thumbnail/filter threads to
+    /// `available_parallelism()`. Threads spawn immediately but park here
+    /// until a slot opens, capping transient RAM at N × per-thread peak.
+    pub decode_slots: Arc<DecodeSlots>,
 }
 
 impl Default for BackgroundIO {
@@ -46,6 +88,9 @@ impl BackgroundIO {
         let (save_done_tx, save_done_rx) = mpsc::channel();
         let (tex_prep_tx, tex_prep_rx) = mpsc::channel();
         let (filter_only_tx, filter_only_rx) = mpsc::channel();
+        let cap = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
         Self {
             file_load_tx, file_load_rx,
             thumb_tx, thumb_rx,
@@ -53,6 +98,7 @@ impl BackgroundIO {
             save_done_tx, save_done_rx,
             tex_prep_tx, tex_prep_rx,
             filter_only_tx, filter_only_rx,
+            decode_slots: Arc::new(DecodeSlots::new(cap)),
         }
     }
 }
