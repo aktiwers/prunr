@@ -219,6 +219,23 @@ impl BatchManager {
         })
     }
 
+    /// Flip every `Processing` item back to `Pending`. Returns the number
+    /// of items that changed status. Used after a Cancel-All so spinners
+    /// stop and the items can be re-Processed without going through the
+    /// error path. Late `ImageDone` arrivals from the worker / subprocess
+    /// are silently dropped by the Processing-only guard in
+    /// `on_batch_item_done`.
+    pub(crate) fn reset_processing_to_pending(&mut self) -> usize {
+        let mut flipped = 0;
+        for item in &mut self.items {
+            if item.status == BatchStatus::Processing {
+                item.status = BatchStatus::Pending;
+                flipped += 1;
+            }
+        }
+        flipped
+    }
+
     /// Single pass over `items` producing the three counts that callers
     /// (`poll_worker_results`, statusbar) otherwise compute with three
     /// separate filter-count passes.

@@ -1499,6 +1499,17 @@ impl PrunrApp {
         self.processor.cancel_all_inpaints();
     }
 
+    /// Cancel-All from the toolbar / Escape: request the global cancel,
+    /// clear admission, flip every Processing item back to Pending, and
+    /// surface "Cancelled" in the status bar. Single source of truth so
+    /// the toolbar button and the keyboard shortcut don't drift.
+    pub fn handle_cancel_all_and_reset(&mut self) {
+        self.handle_cancel();
+        self.processor.clear_admission();
+        self.batch.reset_processing_to_pending();
+        self.status.text = "Cancelled".to_string();
+    }
+
     /// Cancel only the in-flight inpaint stroke for `item_id`. Used by
     /// the canvas banner's Cancel button — `handle_cancel` cancels
     /// everything (batch + all inpaint), this scopes to one stroke.
@@ -2305,14 +2316,7 @@ impl PrunrApp {
         if self.processor.any_inpaint_in_flight() {
             self.processor.cancel_all_inpaints();
         } else if self.batch.status_counts().processing > 0 {
-            self.handle_cancel();
-            self.processor.clear_admission();
-            for item in &mut self.batch.items {
-                if item.status == BatchStatus::Processing {
-                    item.status = BatchStatus::Pending;
-                }
-            }
-            self.status.text = "Cancelled".to_string();
+            self.handle_cancel_all_and_reset();
         } else if self.show_settings {
             self.close_settings(ctx);
         } else if self.show_shortcuts {
@@ -2328,11 +2332,11 @@ impl PrunrApp {
         if self.show_settings {
             self.close_settings(ctx);
         } else {
-            self.open_settings(ctx);
+            self.open_settings();
         }
     }
 
-    pub(crate) fn open_settings(&mut self, _ctx: &egui::Context) {
+    pub(crate) fn open_settings(&mut self) {
         self.show_settings = true;
         self.hardware_install_cache = super::hardware_cache::HardwareInstallCache::refresh();
     }
@@ -2860,7 +2864,7 @@ impl PrunrApp {
                         self.settings.snooze_runtime_prompt(rt, RUNTIME_PROMPT_SNOOZE_DAYS);
                     }
                     RuntimePromptAction::OpenSettings => {
-                        self.open_settings(ctx);
+                        self.open_settings();
                     }
                 }
             }

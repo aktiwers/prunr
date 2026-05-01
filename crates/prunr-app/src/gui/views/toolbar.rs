@@ -44,7 +44,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
             if app.show_settings {
                 app.close_settings(ui.ctx());
             } else {
-                app.open_settings(ui.ctx());
+                app.open_settings();
             }
         }
 
@@ -131,13 +131,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                     if partial {
                         app.handle_cancel_selected();
                     } else {
-                        app.handle_cancel();
-                        for item in &mut app.batch.items {
-                            if item.status == BatchStatus::Processing {
-                                item.status = BatchStatus::Pending;
-                            }
-                        }
-                        app.status.text = "Cancelled".to_string();
+                        app.handle_cancel_all_and_reset();
                     }
                 }
             }
