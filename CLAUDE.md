@@ -284,6 +284,8 @@ Reach for these before writing the equivalent inline:
 | Selected item (or `None` when empty)           | `BatchManager::selected_item()`            |
 | Selected index, clamped to batch size          | `BatchManager::selected_idx_clamped()`     |
 | "Is `id` the selected one?"                    | `BatchManager::is_selected(id)`            |
+| Select item by index (returns true if changed) | `BatchManager::select_item(idx)`           |
+| Move item and fix selected index               | `BatchManager::reorder(from, to)`          |
 | Per-status counts (done/processing/errored)    | `BatchManager::status_counts()`            |
 | Clear all result-derived caches on an item     | `BatchItem::reset_result_caches()`         |
 | Invalidate edge cache (tensor + mask together) | `BatchItem::invalidate_edge_cache()`       |
@@ -293,7 +295,7 @@ Reach for these before writing the equivalent inline:
 | Merge brush strokes into the per-item correction | `BatchItem::commit_correction(strokes)`  |
 | Wipe per-item brush correction (undoable)      | `BatchItem::clear_correction()`            |
 | Pop / push brush stroke history                | `BatchItem::undo_stroke()` / `redo_stroke()` |
-| Read/write brush settings                      | `BrushState::settings()` / `settings_mut()` |
+| Read/write brush settings                      | `app.settings.brush: BrushSettings` (single source of truth) |
 
 If the helper you want doesn't exist, add it to the coordinator — not to `PrunrApp`.
 

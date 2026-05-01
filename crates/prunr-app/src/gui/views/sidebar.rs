@@ -230,8 +230,7 @@ fn render_item_row(
     detect_drag_escape(ui, app, i, &item_response, ctx.sidebar_escape_rect);
 
     // Click to select (skip if a hover button or the checkbox absorbed the click).
-    if !close_clicked && !checkbox_clicked && item_response.clicked() && app.batch.selected_index != i {
-        app.batch.selected_index = i;
+    if !close_clicked && !checkbox_clicked && item_response.clicked() && app.batch.select_item(i) {
         app.canvas_switch_id += 1;
         app.zoom_state.reset();
         let egui_ctx = ui.ctx().clone();
@@ -628,23 +627,7 @@ fn apply_actions(app: &mut PrunrApp, actions: &SidebarActions) {
         app.save_item_to_file(idx);
     }
     if let (Some(from), Some(to)) = (actions.swap_from, actions.swap_to) {
-        if from != to {
-            apply_reorder(app, from, to);
-        }
-    }
-}
-
-fn apply_reorder(app: &mut PrunrApp, from: usize, to: usize) {
-    let item = app.batch.items.remove(from);
-    let dst = if from < to { to - 1 } else { to };
-    app.batch.items.insert(dst, item);
-    // Adjust selected index to follow the moved item or stay in place.
-    if app.batch.selected_index == from {
-        app.batch.selected_index = dst;
-    } else if from < app.batch.selected_index && app.batch.selected_index <= to {
-        app.batch.selected_index -= 1;
-    } else if to <= app.batch.selected_index && app.batch.selected_index < from {
-        app.batch.selected_index += 1;
+        app.batch.reorder(from, to);
     }
 }
 

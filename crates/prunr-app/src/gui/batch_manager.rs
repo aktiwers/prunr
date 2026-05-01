@@ -144,6 +144,35 @@ impl BatchManager {
         }
     }
 
+    /// Switch the selected item to `idx`. Returns `true` when the index actually
+    /// changed; `false` when it was already selected. Callers use the return value
+    /// to decide whether to reset the canvas (zoom/pan/texture sync).
+    pub(crate) fn select_item(&mut self, idx: usize) -> bool {
+        if self.selected_index == idx {
+            return false;
+        }
+        self.selected_index = idx;
+        true
+    }
+
+    /// Move the item at `from` to position `to`, adjusting `selected_index`
+    /// so the same logical item remains selected after the move.
+    pub(crate) fn reorder(&mut self, from: usize, to: usize) {
+        if from == to || from >= self.items.len() {
+            return;
+        }
+        let item = self.items.remove(from);
+        let dst = if from < to { to - 1 } else { to };
+        self.items.insert(dst, item);
+        if self.selected_index == from {
+            self.selected_index = dst;
+        } else if from < self.selected_index && self.selected_index <= to {
+            self.selected_index -= 1;
+        } else if to <= self.selected_index && self.selected_index < from {
+            self.selected_index += 1;
+        }
+    }
+
     /// Derive the Process button's label shape from current selection state.
     /// Single-item batches where the one item is checked render as
     /// `ProcessSelected(1)` (not `ProcessAll(1)`) — "Process All [1]" reads
@@ -841,5 +870,68 @@ mod tests {
             .expect("filter_only_tx must produce a result within 2s");
         assert_eq!(id, 11);
         assert!(result.is_err(), "missing file must surface as Err, not stall");
+    }
+
+    // ── select_item ─────────────────────────────────────────────────────
+
+    #[test]
+    fn select_item_returns_true_when_index_changes() {
+        let mut bm = fixture();
+        bm.items.push(item_with_cache(1, 0));
+        bm.items.push(item_with_cache(2, 0));
+        bm.selected_index = 0;
+        assert!(bm.select_item(1));
+        assert_eq!(bm.selected_index, 1);
+    }
+
+    #[test]
+    fn select_item_returns_false_when_already_selected() {
+        let mut bm = fixture();
+        bm.items.push(item_with_cache(1, 0));
+        bm.selected_index = 0;
+        assert!(!bm.select_item(0));
+        assert_eq!(bm.selected_index, 0);
+    }
+
+    // ── reorder ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn reorder_moves_item_forward_and_adjusts_selected() {
+        // [A B C D] selected=1(B), move from=0(A) to=3 → [B C A D] selected=0(B)
+        let mut bm = fixture();
+        for id in [10, 20, 30, 40] { bm.items.push(item_with_cache(id, 0)); }
+        bm.selected_index = 1;
+        bm.reorder(0, 3);
+        assert_eq!(bm.items.iter().map(|i| i.id).collect::<Vec<_>>(), [20, 30, 10, 40]);
+        assert_eq!(bm.selected_index, 0, "selected item B must follow its new position");
+    }
+
+    #[test]
+    fn reorder_moves_item_backward_and_adjusts_selected() {
+        // [A B C D] selected=2(C), move from=3(D) to=1 → [A D B C] selected=3(C)
+        let mut bm = fixture();
+        for id in [10, 20, 30, 40] { bm.items.push(item_with_cache(id, 0)); }
+        bm.selected_index = 2;
+        bm.reorder(3, 1);
+        assert_eq!(bm.items.iter().map(|i| i.id).collect::<Vec<_>>(), [10, 40, 20, 30]);
+        assert_eq!(bm.selected_index, 3, "selected item C must follow its new position");
+    }
+
+    #[test]
+    fn reorder_noop_when_from_equals_to() {
+        let mut bm = fixture();
+        for id in [10, 20, 30] { bm.items.push(item_with_cache(id, 0)); }
+        bm.selected_index = 1;
+        bm.reorder(1, 1);
+        assert_eq!(bm.items.iter().map(|i| i.id).collect::<Vec<_>>(), [10, 20, 30]);
+        assert_eq!(bm.selected_index, 1);
+    }
+
+    #[test]
+    fn reorder_noop_when_from_out_of_bounds() {
+        let mut bm = fixture();
+        for id in [10, 20] { bm.items.push(item_with_cache(id, 0)); }
+        bm.reorder(5, 0);
+        assert_eq!(bm.items.iter().map(|i| i.id).collect::<Vec<_>>(), [10, 20]);
     }
 }
