@@ -13,9 +13,8 @@ use crate::gui::settings::LineMode;
 use super::protocol::*;
 use super::ipc::{write_message, read_message};
 
-/// Borrowed view of a 2D f32 tensor sent to the subprocess. Bundles the
-/// flat data + dimensions so `send_*` helpers don't carry three parallel
-/// args for what is conceptually one value.
+/// Borrowed `(data, height, width)` triple so subprocess `send_*` helpers
+/// don't carry three parallel args.
 pub struct TensorView<'a> {
     pub data: &'a [f32],
     pub height: u32,
@@ -241,14 +240,11 @@ impl SubprocessManager {
         Ok(())
     }
 
-    /// Shared "write tensor + write image + send command" path used by
-    /// `send_add_edge_inference` and `send_repostprocess`. Caller picks the
-    /// IPC filenames and the variant; this writes the temp files and
-    /// dispatches.
+    /// Write tensor + image to temp files, then dispatch the caller-built command.
     fn send_with_tensor_and_image(
         &mut self,
         item_id: u64,
-        tensor: TensorView<'_>,
+        tensor: &TensorView<'_>,
         tensor_filename: String,
         image_bytes: &[u8],
         image_filename: String,
@@ -276,12 +272,11 @@ impl SubprocessManager {
     pub fn send_add_edge_inference(
         &mut self,
         item_id: u64,
-        tensor: TensorView<'_>,
+        tensor: &TensorView<'_>,
         model: prunr_core::ModelKind,
         original_image_bytes: &[u8],
         mask: prunr_core::MaskSettings,
     ) -> Result<(), String> {
-        let (h, w) = (tensor.height, tensor.width);
         self.send_with_tensor_and_image(
             item_id,
             tensor,
@@ -292,8 +287,8 @@ impl SubprocessManager {
                 item_id,
                 image_path,
                 seg_tensor_path,
-                seg_tensor_height: h,
-                seg_tensor_width: w,
+                seg_tensor_height: tensor.height,
+                seg_tensor_width: tensor.width,
                 model,
                 mask,
             },
@@ -304,12 +299,11 @@ impl SubprocessManager {
     pub fn send_repostprocess(
         &mut self,
         item_id: u64,
-        tensor: TensorView<'_>,
+        tensor: &TensorView<'_>,
         model: prunr_core::ModelKind,
         original_image_bytes: &[u8],
         mask: prunr_core::MaskSettings,
     ) -> Result<(), String> {
-        let (h, w) = (tensor.height, tensor.width);
         self.send_with_tensor_and_image(
             item_id,
             tensor,
@@ -319,8 +313,8 @@ impl SubprocessManager {
             |tensor_path, original_image_path| SubprocessCommand::RePostProcess {
                 item_id,
                 tensor_path,
-                tensor_height: h,
-                tensor_width: w,
+                tensor_height: tensor.height,
+                tensor_width: tensor.width,
                 model,
                 original_image_path,
                 mask,
