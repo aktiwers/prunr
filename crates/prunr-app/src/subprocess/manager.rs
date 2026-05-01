@@ -207,13 +207,13 @@ impl SubprocessManager {
         chain_input: Option<(&image::RgbaImage, u32, u32)>,
     ) -> Result<(), String> {
         // Write image bytes to temp file
-        let image_path = ipc_temp_dir().join(format!("input_{item_id}.img"));
+        let image_path = super::protocol::IpcKind::Input.path_for(ipc_temp_dir(), item_id);
         std::fs::write(&image_path, image_bytes)
             .map_err(|e| format!("Failed to write input temp file: {e}"))?;
 
         // Write chain input to temp file if present
         let chain = chain_input.map(|(rgba, w, h)| {
-            let path = ipc_temp_dir().join(format!("chain_{item_id}.raw"));
+            let path = super::protocol::IpcKind::Chain.path_for(ipc_temp_dir(), item_id);
             let _ = std::fs::write(&path, rgba.as_raw());
             ChainInput { path, width: w, height: h }
         });
@@ -249,15 +249,15 @@ impl SubprocessManager {
         &mut self,
         item_id: u64,
         tensor: &TensorView<'_>,
-        tensor_filename: String,
+        tensor_kind: super::protocol::IpcKind,
         image_bytes: &[u8],
-        image_filename: String,
+        image_kind: super::protocol::IpcKind,
         build_cmd: impl FnOnce(std::path::PathBuf, std::path::PathBuf) -> SubprocessCommand,
     ) -> Result<(), String> {
-        let tensor_path = ipc_temp_dir().join(tensor_filename);
+        let tensor_path = tensor_kind.path_for(ipc_temp_dir(), item_id);
         std::fs::write(&tensor_path, super::ipc::f32s_as_le_bytes(tensor.data))
             .map_err(|e| format!("Failed to write tensor temp file: {e}"))?;
-        let image_path = ipc_temp_dir().join(image_filename);
+        let image_path = image_kind.path_for(ipc_temp_dir(), item_id);
         std::fs::write(&image_path, image_bytes)
             .map_err(|e| format!("Failed to write image temp file: {e}"))?;
 
@@ -284,9 +284,9 @@ impl SubprocessManager {
         self.send_with_tensor_and_image(
             item_id,
             tensor,
-            format!("seg_{item_id}.raw"),
+            super::protocol::IpcKind::Seg,
             original_image_bytes,
-            format!("input_{item_id}.img"),
+            super::protocol::IpcKind::Input,
             |seg_tensor_path, image_path| SubprocessCommand::AddEdgeInference {
                 item_id,
                 image_path,
@@ -311,9 +311,9 @@ impl SubprocessManager {
         self.send_with_tensor_and_image(
             item_id,
             tensor,
-            format!("tensor_{item_id}.raw"),
+            super::protocol::IpcKind::Tensor,
             original_image_bytes,
-            format!("orig_{item_id}.img"),
+            super::protocol::IpcKind::Orig,
             |tensor_path, original_image_path| SubprocessCommand::RePostProcess {
                 item_id,
                 tensor_path,

@@ -281,16 +281,127 @@ fn sweep_dir_with_prefix(dir: &std::path::Path, prefixes: &[&str]) {
     }
 }
 
+/// Which subprocess owns an IPC temp file. Drives crash-recovery
+/// cleanup scope so a seg crash doesn't wipe an inpaint sibling's
+/// in-flight files (the B3 invariant).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IpcOwner {
+    /// Seg / CLI pipeline (input, chain, edge, result, tensor, …).
+    SegCli,
+    /// Inpaint subprocess (`inpaint-img-…`, `inpaint-mask-…`, `inpaint-out-…`).
+    Inpaint,
+}
+
+/// Every IPC temp-file kind. One source of truth for the prefix +
+/// extension contract previously triplicated across 13 `format!` sites
+/// + the prefix tables + the drift-catcher test.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IpcKind {
+    /// Parent → seg worker: encoded source bytes.
+    Input,
+    /// Parent → seg worker: chained RGBA from a prior tier.
+    Chain,
+    /// Seg worker → parent: segmentation tensor cache (per-item).
+    Seg,
+    /// Seg worker → parent: alias of Seg from the older tensor-cache name.
+    Tensor,
+    /// Parent → seg worker: original encoded image for a re-postprocess.
+    Orig,
+    /// Seg worker → parent: composited RGBA result.
+    Result,
+    /// Seg worker → parent: DexiNed multi-scale edge tensor cache.
+    Edge,
+    /// CLI parent: downscaled image temp before subprocess dispatch.
+    CliDs,
+    /// Parent → inpaint worker: source PNG for a stroke (gen-suffixed).
+    InpaintImg,
+    /// Parent → inpaint worker: mask PNG for a stroke (gen-suffixed).
+    InpaintMask,
+    /// Inpaint worker → parent: composited RGBA PNG result.
+    InpaintOut,
+}
+
+impl IpcKind {
+    /// Filename prefix (everything before the id). Used by sweep / cleanup.
+    pub const fn prefix(self) -> &'static str {
+        match self {
+            IpcKind::Input => "input_",
+            IpcKind::Chain => "chain_",
+            IpcKind::Seg => "seg_",
+            IpcKind::Tensor => "tensor_",
+            IpcKind::Orig => "orig_",
+            IpcKind::Result => "result_",
+            IpcKind::Edge => "edge_",
+            IpcKind::CliDs => "cli_ds_",
+            IpcKind::InpaintImg => "inpaint-img-",
+            IpcKind::InpaintMask => "inpaint-mask-",
+            IpcKind::InpaintOut => "inpaint-out-",
+        }
+    }
+
+    /// Filename extension (without leading dot).
+    pub const fn ext(self) -> &'static str {
+        match self {
+            IpcKind::Input | IpcKind::Orig | IpcKind::CliDs => "img",
+            IpcKind::Chain | IpcKind::Seg | IpcKind::Tensor | IpcKind::Result | IpcKind::Edge => "raw",
+            IpcKind::InpaintImg | IpcKind::InpaintMask | IpcKind::InpaintOut => "png",
+        }
+    }
+
+    /// Crash-recovery owner: who's allowed to wipe this file's prefix.
+    pub const fn owner(self) -> IpcOwner {
+        match self {
+            IpcKind::InpaintImg | IpcKind::InpaintMask | IpcKind::InpaintOut => IpcOwner::Inpaint,
+            _ => IpcOwner::SegCli,
+        }
+    }
+
+    /// Build a path for an item-keyed file: `<ipc>/<prefix><id>.<ext>`.
+    pub fn path_for(self, ipc_dir: &std::path::Path, id: u64) -> std::path::PathBuf {
+        ipc_dir.join(format!("{}{id}.{}", self.prefix(), self.ext()))
+    }
+
+    /// Build a path for a gen-suffixed inpaint file:
+    /// `<ipc>/<prefix><id>-<gen>.<ext>`. Only valid for `InpaintImg` /
+    /// `InpaintMask` (the inpaint worker rewrites these per stroke and
+    /// the gen suffix prevents stale-file races).
+    pub fn path_for_gen(self, ipc_dir: &std::path::Path, id: u64, gen: u64) -> std::path::PathBuf {
+        debug_assert!(
+            matches!(self, IpcKind::InpaintImg | IpcKind::InpaintMask),
+            "path_for_gen only meaningful for stroke-versioned inpaint inputs"
+        );
+        ipc_dir.join(format!("{}{id}-{gen}.{}", self.prefix(), self.ext()))
+    }
+
+    /// All variants. Ordered so prefix-tables (derived below) are stable
+    /// across builds and test diffs are deterministic.
+    pub const ALL: &'static [IpcKind] = &[
+        IpcKind::Input,
+        IpcKind::Chain,
+        IpcKind::Seg,
+        IpcKind::Tensor,
+        IpcKind::Orig,
+        IpcKind::Result,
+        IpcKind::Edge,
+        IpcKind::CliDs,
+        IpcKind::InpaintImg,
+        IpcKind::InpaintMask,
+        IpcKind::InpaintOut,
+    ];
+}
+
 /// File-name prefixes owned by the seg / CLI subprocess pipeline.
+/// Derived from `IpcKind::ALL` so a new variant flows through with no
+/// hand maintenance.
 pub const SEG_PIPELINE_PREFIXES: &[&str] = &[
-    "chain_",
-    "cli_ds_",
-    "edge_",
-    "input_",
-    "orig_",
-    "result_",
-    "seg_",
-    "tensor_",
+    IpcKind::Chain.prefix(),
+    IpcKind::CliDs.prefix(),
+    IpcKind::Edge.prefix(),
+    IpcKind::Input.prefix(),
+    IpcKind::Orig.prefix(),
+    IpcKind::Result.prefix(),
+    IpcKind::Seg.prefix(),
+    IpcKind::Tensor.prefix(),
 ];
 
 /// File-name prefixes owned by the inpaint subprocess.

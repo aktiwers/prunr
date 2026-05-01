@@ -577,7 +577,7 @@ pub fn run_worker() -> ! {
                         Ok(pr) => {
                             // Write tensor cache to temp file if available
                             let (tcp, tch, tcw) = if let Some((ref tdata, th, tw)) = tensor_for_cache {
-                                let tp = ipc.join(format!("tensor_{item_id}.raw"));
+                                let tp = IpcKind::Tensor.path_for(&ipc, item_id);
                                 let bytes = prunr_app::subprocess::ipc::f32s_as_le_bytes(tdata);
                                 tracing::debug!(item_id, th, tw, tensor_len = tdata.len(), bytes_len = bytes.len(), path = %tp.display(), "writing seg tensor");
                                 match std::fs::write(&tp, bytes) {
@@ -594,7 +594,7 @@ pub fn run_worker() -> ! {
                             // Write DexiNed multi-scale cache (4 tensors concatenated
                             // into a single temp file; parent splits by EDGE_SCALE_COUNT).
                             let (ecp, ech, ecw) = if let Some(ref res) = edge_tensor_for_cache {
-                                let ep = ipc.join(format!("edge_{item_id}.raw"));
+                                let ep = IpcKind::Edge.path_for(&ipc, item_id);
                                 match write_edge_tensors(&ep, res) {
                                     Ok(()) => (Some(ep), Some(res.height), Some(res.width)),
                                     Err(_) => (None, None, None),
@@ -606,7 +606,7 @@ pub fn run_worker() -> ! {
                             // Write result RGBA to temp file
                             let (w, h) = (pr.rgba_image.width(), pr.rgba_image.height());
                             let active_provider = pr.active_provider.clone();
-                            let result_path = ipc.join(format!("result_{item_id}.raw"));
+                            let result_path = IpcKind::Result.path_for(&ipc, item_id);
                             let write_result = std::fs::write(&result_path, pr.rgba_image.as_raw());
                             // Free the result RGBA (~50 MB at 4 K) before
                             // posting the event — under N-job parallelism
@@ -700,7 +700,7 @@ pub fn run_worker() -> ! {
                     match tensor_result {
                         Ok(rgba) => {
                             let (w, h) = (rgba.width(), rgba.height());
-                            let result_path = ipc.join(format!("result_{item_id}.raw"));
+                            let result_path = IpcKind::Result.path_for(&ipc, item_id);
                             let write_ok = std::fs::write(&result_path, rgba.as_raw()).is_ok();
                             drop(rgba);
                             if write_ok {
@@ -800,10 +800,10 @@ pub fn run_worker() -> ! {
                     match produce {
                         Ok((rgba, edge_res)) => {
                             let (w, h) = (rgba.width(), rgba.height());
-                            let result_path = ipc.join(format!("result_{item_id}.raw"));
+                            let result_path = IpcKind::Result.path_for(&ipc, item_id);
 
                             let (ecp, ech, ecw) = {
-                                let ep = ipc.join(format!("edge_{item_id}.raw"));
+                                let ep = IpcKind::Edge.path_for(&ipc, item_id);
                                 match write_edge_tensors(&ep, &edge_res) {
                                     Ok(()) => (Some(ep), Some(edge_res.height), Some(edge_res.width)),
                                     Err(_) => (None, None, None),
@@ -994,7 +994,7 @@ pub fn run_worker() -> ! {
                     drop(_cleanup);
                     match result {
                         Ok(rgba) => {
-                            let path = ipc_dir_for_spawn.join(format!("inpaint-out-{item_id}.png"));
+                            let path = IpcKind::InpaintOut.path_for(&ipc_dir_for_spawn, item_id);
                             match prunr_core::encode_rgba_png(&rgba) {
                                 Ok(bytes) => {
                                     if let Err(e) = std::fs::write(&path, &bytes) {
