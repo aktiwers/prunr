@@ -2379,14 +2379,20 @@ impl PrunrApp {
 
     fn drain_background_channels(&mut self, ctx: &egui::Context) {
         let mut decode_arrived = false;
-        while let Ok((item_id, rgba)) = self.batch.bg_io.decode_rx.try_recv() {
-            if let Some(item) = self.batch.find_by_id_mut(item_id) {
-                item.source_rgba = Some(rgba);
-                // Live-preview DynamicImage cache is built from source_rgba;
-                // invalidate so the next dispatch rebuilds against the new one.
-                item.source_dyn = None;
-                item.decode_pending = false;
-                decode_arrived = true;
+        while let Ok((item_id, result)) = self.batch.bg_io.decode_rx.try_recv() {
+            let Some(item) = self.batch.find_by_id_mut(item_id) else { continue };
+            item.decode_pending = false;
+            match result {
+                Ok(rgba) => {
+                    item.source_rgba = Some(rgba);
+                    // Live-preview DynamicImage cache is built from source_rgba;
+                    // invalidate so the next dispatch rebuilds against the new one.
+                    item.source_dyn = None;
+                    decode_arrived = true;
+                }
+                Err(msg) => {
+                    item.status = BatchStatus::Error(msg);
+                }
             }
         }
         if decode_arrived {
