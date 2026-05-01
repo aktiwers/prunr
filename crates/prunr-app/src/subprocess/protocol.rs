@@ -301,9 +301,13 @@ pub enum IpcKind {
     Input,
     /// Parent → seg worker: chained RGBA from a prior tier.
     Chain,
-    /// Seg worker → parent: segmentation tensor cache (per-item).
+    /// Parent → seg worker: cached segmentation tensor for the
+    /// AddEdgeInference path (skip re-running the seg model).
     Seg,
-    /// Seg worker → parent: alias of Seg from the older tensor-cache name.
+    /// Parent → seg worker: cached segmentation tensor for the
+    /// RePostProcess (Tier 2) path. Distinct from `Seg` despite a
+    /// similar payload — different filename keeps the two cache
+    /// flavours separable in temp dir scans + cleanup.
     Tensor,
     /// Parent → seg worker: original encoded image for a re-postprocess.
     Orig,
