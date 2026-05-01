@@ -15,7 +15,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
         ui.spacing_mut().item_spacing.x = theme::SPACE_SM;
         ui.spacing_mut().button_padding = egui::vec2(8.0, 4.0);
 
-        let can_save_copy = app.state == AppState::Done;
+        let can_save_copy = app.batch.app_state() == AppState::Done;
         let has_selected = app.batch.items.iter().any(|i| i.selected);
         let m = modifier_key();
 
@@ -137,7 +137,6 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                                 item.status = BatchStatus::Pending;
                             }
                         }
-                        app.state = AppState::Loaded;
                         app.status.text = "Cancelled".to_string();
                     }
                 }

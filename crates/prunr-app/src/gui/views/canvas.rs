@@ -45,10 +45,11 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
         .selected_idx_clamped()
         .map(|idx| app.batch.items[idx].id)
         .is_some_and(|id| app.processor.is_inpaint_in_flight(id));
+    let app_state = app.batch.app_state();
     let brush_active = app.brush_state.is_enabled()
         && !inpaint_in_flight_for_selected
-        && (matches!(app.state, AppState::Done)
-            || (matches!(app.state, AppState::Loaded) && app.settings.model.is_inpaint()));
+        && (matches!(app_state, AppState::Done)
+            || (matches!(app_state, AppState::Loaded) && app.settings.model.is_inpaint()));
     // Scroll-zoom always works: it doesn't conflict with brush strokes
     // and the zoom feedback is reassuring even mid-painting.
     let canvas_gets_zoom = !modal_open && !popup_open && !widget_has_pointer;
@@ -136,7 +137,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
         }
     }
 
-    match app.state {
+    match app.batch.app_state() {
         AppState::Empty => render_empty(ui, app),
         AppState::Loaded => render_loaded(ui, app),
         AppState::Processing => render_processing(ui, app),
