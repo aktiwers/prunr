@@ -198,18 +198,18 @@ fn render_inpaint_progress(
             theme::ACCENT.gamma_multiply(a),
         );
     }
-    let label = if cancelling {
-        "Cancelling…".to_string()
+    let label: std::borrow::Cow<'static, str> = if cancelling {
+        std::borrow::Cow::Borrowed("Cancelling…")
     } else {
         match progress {
-            (cur, total) if total > 0 && cur > 0 => format!("Erasing — step {cur} of {total}"),
-            _ => "Erasing…".to_string(),
+            (cur, total) if total > 0 && cur > 0 => format!("Erasing — step {cur} of {total}").into(),
+            _ => std::borrow::Cow::Borrowed("Erasing…"),
         }
     };
     ui.painter().text(
         Pos2::new(center.x - 22.0, center.y),
         egui::Align2::LEFT_CENTER,
-        label,
+        &*label,
         egui::FontId::proportional(14.0),
         theme::TEXT_PRIMARY,
     );
