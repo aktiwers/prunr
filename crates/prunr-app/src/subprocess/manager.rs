@@ -98,11 +98,11 @@ impl SubprocessManager {
         edge: EdgeSettings,
         inpaint_only: bool,
     ) -> Result<(Self, String), String> {
-        // Stale-file cleanup is now owned by `ipc_temp_dir()`'s init-time
-        // sweep (see `protocol::ipc_temp_dir` doc). Spawning a subprocess
-        // must NOT touch the temp dir — callers like the CLI downscale path
-        // and the inpaint bridge's lazy first-dispatch write input files
-        // BEFORE spawn, and a spawn-time wipe would race those writes (B2).
+        // Stale-file cleanup is owned by `ipc_temp_dir()`'s init-time
+        // sweep. Spawning a subprocess must NOT touch the temp dir —
+        // callers like the CLI downscale path and the inpaint bridge's
+        // lazy first-dispatch write input files BEFORE spawn, so a
+        // spawn-time wipe would race those writes.
         let exe = std::env::current_exe()
             .map_err(|e| format!("Failed to get current exe: {e}"))?;
 
@@ -500,16 +500,6 @@ impl Drop for SubprocessManager {
     }
 }
 
-/// Apply a single subprocess event to the manager's bookkeeping state.
-///
-/// **Variant-exhaustive contract** (Phase 21-01 boundary test pins this):
-/// every Done/Error variant must decrement `in_flight`; mid-flight Progress
-/// variants and one-off Ready/Finished/InitError/RssUpdate must NOT.
-///
-/// This is split out of `next_event_with_state` so the contract can be
-/// tested without spawning a real child process. The B1 regression
-/// (InpaintDone/InpaintError leaking from the `_ => {}` arm) shipped because
-/// the bookkeeping was inlined and untested per-variant.
 /// (rss_limit, rss_resume) derived from the current system available
 /// memory. Called at spawn and re-called every `RSS_LIMIT_REFRESH_EVERY`
 /// `RssUpdate` events so the pause/resume bands track sibling

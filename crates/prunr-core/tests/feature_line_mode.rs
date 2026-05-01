@@ -9,23 +9,12 @@
 
 mod test_common;
 
-use image::DynamicImage;
 use prunr_core::{
     compose_subject_outline, process_image_from_decoded, ComposeMode, EdgeEngine,
     EdgeScale, EdgeSettings, InputTransform, LineStyle, MaskSettings, ModelKind,
     OrtEngine, ProgressStage,
 };
-use test_common::{render_synthetic_source, skip_if_no_ort, SyntheticSpec};
-
-fn fixture_source() -> DynamicImage {
-    let spec = SyntheticSpec {
-        id: "feature_line_mode_src",
-        width: 256,
-        height: 256,
-        draw_source: test_common::draw_multi_subject,
-    };
-    DynamicImage::ImageRgba8(render_synthetic_source(&spec))
-}
+use test_common::{multi_subject_canary, skip_if_no_ort};
 
 fn default_edge_settings(scale: EdgeScale, compose: ComposeMode, style: LineStyle) -> EdgeSettings {
     EdgeSettings {
@@ -47,7 +36,7 @@ fn line_mode_off_runs_seg_only() {
     if skip_if_no_ort("line_mode_off") { return; }
     let engine = OrtEngine::new_cpu_only(ModelKind::Silueta, 1)
         .expect("OrtEngine::new_cpu_only(Silueta)");
-    let img = fixture_source();
+    let img = multi_subject_canary();
     let result = process_image_from_decoded(
         &img, &engine, &MaskSettings::default(),
         None::<fn(ProgressStage, f32)>, None,
@@ -61,7 +50,7 @@ fn line_mode_off_runs_seg_only() {
 fn line_mode_edges_only_produces_lines_from_source() {
     if skip_if_no_ort("line_mode_edges_only") { return; }
     let edge_engine = EdgeEngine::new().expect("EdgeEngine::new");
-    let img = fixture_source();
+    let img = multi_subject_canary();
     let edge = default_edge_settings(EdgeScale::Fused, ComposeMode::LinesOnly, LineStyle::Solid);
     let out = edge_engine.detect(&img, &edge).expect("EdgeEngine::detect");
     assert_eq!(out.dimensions(), (256, 256));
@@ -75,7 +64,7 @@ fn line_mode_subject_outline_combines_seg_and_edge() {
     let seg_engine = OrtEngine::new_cpu_only(ModelKind::Silueta, 1)
         .expect("OrtEngine::new_cpu_only(Silueta)");
     let edge_engine = EdgeEngine::new().expect("EdgeEngine::new");
-    let img = fixture_source();
+    let img = multi_subject_canary();
 
     // Step 1: segmentation produces masked RGBA.
     let masked = process_image_from_decoded(
@@ -101,7 +90,7 @@ fn line_mode_subject_outline_combines_seg_and_edge() {
 fn edge_scale_fine_bold_fused_all_run() {
     if skip_if_no_ort("edge_scale_*") { return; }
     let edge_engine = EdgeEngine::new().expect("EdgeEngine::new");
-    let img = fixture_source();
+    let img = multi_subject_canary();
     for scale in [EdgeScale::Fine, EdgeScale::Bold, EdgeScale::Fused] {
         let edge = default_edge_settings(scale, ComposeMode::LinesOnly, LineStyle::Solid);
         let out = edge_engine.detect(&img, &edge).expect("detect should succeed");
@@ -117,7 +106,7 @@ fn line_style_solid_and_dual_scale_compose() {
     let seg_engine = OrtEngine::new_cpu_only(ModelKind::Silueta, 1)
         .expect("OrtEngine::new_cpu_only(Silueta)");
     let edge_engine = EdgeEngine::new().expect("EdgeEngine::new");
-    let img = fixture_source();
+    let img = multi_subject_canary();
     let masked = process_image_from_decoded(
         &img, &seg_engine, &MaskSettings::default(),
         None::<fn(ProgressStage, f32)>, None,
