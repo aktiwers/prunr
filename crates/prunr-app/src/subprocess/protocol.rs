@@ -219,15 +219,11 @@ fn resolve_temp_dir_path(pid: u32) -> std::path::PathBuf {
     std::env::temp_dir().join(format!("prunr-ipc-{pid}"))
 }
 
-/// Remove every file directly inside `dir`. Non-recursive on purpose — IPC
-/// doesn't create subdirs, and recursing would risk wiping anything a future
-/// caller mistakenly drops there.
+/// Remove every file directly inside `dir`. Delegates to the workspace
+/// helper so the IPC, drag-export, and history-disk cleanup paths share
+/// one implementation.
 fn sweep_dir(dir: &std::path::Path) {
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let _ = std::fs::remove_file(entry.path());
-        }
-    }
+    crate::fs_util::sweep_dir_files(dir);
 }
 
 /// Like `sweep_dir`, restricted to files whose name starts with one of the
