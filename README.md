@@ -45,7 +45,7 @@ All releases: [github.com/aktiwers/prunr/releases](https://github.com/aktiwers/p
 
 ## Features
 
-- **Three bundled models** — Silueta (fast), U2Net (quality), BiRefNet-lite (best detail at 1024×1024)
+- **Three bundled models** — Silueta (fast), BiRefNet-lite (best detail at 1024×1024), DexiNed (edges)
 - **Line extraction** — edges/outlines via DexiNed, standalone or combined with background removal
 - **Object removal (Eraser)** — paint over an unwanted area and let LaMa fill it in
 - **Custom backgrounds** — fill the cutout with a solid colour or a picked image (cover / contain / stretch / tile / center)
