@@ -52,6 +52,22 @@ pub fn install_subdir(short_name: &str, version: &str) -> String {
     format!("{short_name}-{version}-{}", host_rid())
 }
 
+/// Reject names that would escape `<data_dir>/runtimes/` when joined
+/// as a single path segment. Defense-in-depth: callers should already
+/// be passing a value produced by `install_subdir`, but a future API
+/// taking a user-supplied `--target` flag could otherwise traverse out.
+pub fn validate_subdir(name: &str) -> Result<(), String> {
+    if name.is_empty()
+        || name == "."
+        || name == ".."
+        || name.contains('/')
+        || name.contains('\\')
+    {
+        return Err(format!("invalid runtime subdirectory name: {name:?}"));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone)]
 pub struct WheelInfo {
     pub url: String,
@@ -328,6 +344,23 @@ mod tests {
         let s = install_subdir("openvino", "1.24.1");
         assert!(s.starts_with("openvino-1.24.1-"));
         assert!(s.ends_with(host_rid()));
+    }
+
+    #[test]
+    fn validate_subdir_accepts_real_install_subdir_outputs() {
+        assert!(validate_subdir("onnxruntime-1.24.1-linux-x64-gnu").is_ok());
+        assert!(validate_subdir("openvino-2024.6-osx-arm64").is_ok());
+    }
+
+    #[test]
+    fn validate_subdir_rejects_traversal_and_separators() {
+        assert!(validate_subdir("").is_err(), "empty");
+        assert!(validate_subdir(".").is_err(), "dot");
+        assert!(validate_subdir("..").is_err(), "double dot");
+        assert!(validate_subdir("../etc").is_err(), "leading traversal");
+        assert!(validate_subdir("foo/bar").is_err(), "forward slash");
+        assert!(validate_subdir("foo\\bar").is_err(), "backslash");
+        assert!(validate_subdir("/abs/path").is_err(), "absolute");
     }
 
     #[test]
