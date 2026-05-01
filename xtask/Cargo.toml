@@ -23,3 +23,6 @@ ort = { version = "=2.0.0-rc.12", default-features = false, features = ["load-dy
 ndarray = { workspace = true }
 # 19-09: extract OpenVINO ORT bundles from PyPI .whl files (zip archives).
 zip = { version = "2", default-features = false, features = ["deflate"] }
+
+# 20-04: read/write PNGs for the `render-golden-diff` subcommand.
+image = { workspace = true }
