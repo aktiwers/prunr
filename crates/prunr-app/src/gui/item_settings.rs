@@ -208,7 +208,6 @@ impl ItemSettings {
                 bg_color: bg_rgb,
                 bg_image_hash: self.bg_image_hash,
                 bg_image_fit: self.bg_image_fit,
-                solid_line_color: self.solid_line_color,
             },
             was_chain: chain_mode,
         }
