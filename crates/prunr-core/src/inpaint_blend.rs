@@ -120,7 +120,6 @@ pub fn color_match_inpainted(
     let mean = box_filter(&mask_bin, bbox.w, bbox.h, ring_px);
 
     // Sum source RGB on the outer ring and inpaint RGB on the inner ring.
-    // Walk bbox-local indices; map to image-global byte offset for sampling.
     let src_raw = source.as_raw();
     let inp_raw = inpainted.as_raw();
     let mut src_sum = [0u64; 3];
@@ -537,28 +536,32 @@ mod tests {
     }
 
     /// Bbox-crop contract: pixels outside the mask's expanded bbox must
-    /// stay bit-exact identical to the inpaint input. A 32×32 stroke at
-    /// (200, 200) on a 512×512 image leaves the four corners untouched.
+    /// stay bit-exact identical to the inpaint input.
     #[test]
     fn color_match_outside_bbox_is_bit_exact() {
         let src = solid(512, 512, [200, 150, 100, 255]);
-        let mut inp = solid(512, 512, [60, 90, 120, 255]);
+        let inp = solid(512, 512, [60, 90, 120, 255]);
         let mut mask = empty_mask(512, 512);
         for y in 200..232 {
             for x in 200..232 {
-                inp.put_pixel(x, y, Rgba([60, 90, 120, 255]));
                 mask.put_pixel(x, y, Luma([255]));
             }
         }
-        let out = color_match_inpainted(&inp, &src, &mask, 8);
-        // Every pixel >24 px from the stroke edge sits outside the bbox
-        // (ring_px = 8 + 16 px slack to clear the box-filter footprint).
-        for &(x, y) in &[(0, 0), (511, 0), (0, 511), (511, 511), (100, 100), (400, 400)] {
-            assert_eq!(
-                out.get_pixel(x, y),
-                inp.get_pixel(x, y),
-                "outside-bbox pixel ({x}, {y}) should be bit-exact"
-            );
+        let ring_px = 8;
+        let bbox = mask_bbox_expanded(&mask, ring_px, 512, 512).unwrap();
+        let out = color_match_inpainted(&inp, &src, &mask, ring_px);
+        for y in 0..512 {
+            for x in 0..512 {
+                let inside = x >= bbox.x && x < bbox.x + bbox.w
+                    && y >= bbox.y && y < bbox.y + bbox.h;
+                if !inside {
+                    assert_eq!(
+                        out.get_pixel(x, y),
+                        inp.get_pixel(x, y),
+                        "outside-bbox pixel ({x}, {y}) drifted",
+                    );
+                }
+            }
         }
     }
 
