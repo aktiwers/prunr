@@ -583,11 +583,11 @@ User data lives in the platform config dir (`dirs::config_dir()`):
 
 ## Model Registry & Distribution
 
-Models are declared in a single `prunr_models::REGISTRY` table — `ModelDescriptor { id, display_name, description, category, source, version }`. `source` is either `Bundled` (compiled in via `include_bytes!` + zstd) or `OnDemand { filename, url, sha256, size_mb, license, license_url, source_url }` (downloaded to user data dir on first use).
+Models are declared in a single `prunr_models::REGISTRY` table. `ModelDescriptor` carries identity, display metadata, source, GPU requirement, EP compatibility, and a working-set RAM estimate. `source` is either `Bundled` (compiled in via `include_bytes!` + zstd) or `OnDemand` (downloaded to user data dir on first use).
 
 `resolve_bytes(id) -> Option<Cow<'static, [u8]>>` is the single byte-access entry point. Bundled returns `Cow::Borrowed(&'static [u8])` (zero-copy from the embedded zstd cache); OnDemand reads from disk, returns `Cow::Owned(Vec<u8>)`, or `None` if the file isn't there. `is_available(id)` reports installation state. `OrtEngine::new` and `LamaSession::get` both go through `resolve_bytes` and surface `prunr_models::not_installed_error(id)` ("Open the Model Store…") when the file is missing.
 
-**Default bundle (~370 MB):** Silueta + BiRefNet-lite + DexiNed. **On-demand:** U2Net (~170 MB), LaMa-fp32 (~199 MB). Hosted at `https://github.com/aktiwers/prunr/releases/tag/models-v1` with versioned filenames (`u2net-1.0.0.onnx`, `.sha256` sidecar) and a `manifest.json` listing every model's metadata. Asset URLs are stable forever — old apps keep resolving old URLs.
+**Default bundle (~370 MB):** Silueta + BiRefNet-lite + DexiNed. **On-demand:** see `crates/prunr-models/src/lib.rs::REGISTRY` for the full list (currently U2Net, Big-LaMa, MI-GAN, LaMa-fp32, SD 1.5 inpaint variants, TAESD VAE). Hosted at `https://github.com/aktiwers/prunr/releases/tag/models-v1` with versioned filenames (`u2net-1.0.0.onnx`, `.sha256` sidecar) and a `manifest.json` listing every model's metadata. Asset URLs are stable forever — old apps keep resolving old URLs.
 
 **Storage** (gitignored, never bundled in installer): `dirs::data_dir() / "prunr" / "models"`. Linux: `~/.local/share/prunr/models/`; macOS: `~/Library/Application Support/prunr/models/`; Windows: `%APPDATA%\prunr\models\`. Dev mode (`--features dev-models`) accepts the unversioned `models/u2net.onnx` produced by `cargo xtask fetch-models` as a fallback so the dev workflow doesn't need the user data dir mirrored.
 

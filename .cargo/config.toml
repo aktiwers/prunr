@@ -4,8 +4,9 @@ xtask = "run --package xtask --"
 # macOS .app bundle: dylib lives in Contents/Frameworks/, binary in
 # Contents/MacOS/. Embed an rpath that resolves at runtime relative to
 # the executable so the bundled libonnxruntime.dylib is findable.
-# Linux/Windows don't need this — pykeio/ort sets up their rpath from
-# the download-binaries path already. Only aarch64 is shipped today;
-# add an x86_64 block here if/when an Intel Mac target gets added.
+# Linux/Windows resolve `libonnxruntime` via the bundled_dylib chain
+# (`<exe parent>/runtime/<DYLIB>` next to the binary) — no rpath needed.
+# Only aarch64 is shipped today; add an x86_64 block here if/when an
+# Intel Mac target gets added.
 [target.aarch64-apple-darwin]
 rustflags = ["-C", "link-arg=-Wl,-rpath,@executable_path/../Frameworks"]
