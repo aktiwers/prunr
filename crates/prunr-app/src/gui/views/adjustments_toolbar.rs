@@ -15,7 +15,8 @@ use egui_material_icons::icons::*;
 use crate::gui::brush_state::BrushState;
 use crate::gui::item_settings::ItemSettings;
 use crate::gui::knob_catalog::{
-    self, CacheImpact, DispatchKind, KnobSet, LineModeChange, StaticKnob,
+    self, CacheImpact, DispatchKind, KnobContext, KnobRequirement, KnobSet, LineModeChange,
+    StaticKnob,
 };
 use crate::gui::settings::{Settings, SettingsModel};
 use crate::gui::theme;
@@ -188,11 +189,15 @@ pub(crate) fn render(
     // (e.g. the auto-flip-to-Off + brush prewarm at line 218) re-read
     // `app_settings.model.is_inpaint()` directly.
     let inpaint_mode = app_settings.model.is_inpaint();
-    let mask_active = model_uses_seg
-        && (item_settings.line_mode != LineMode::EdgesOnly || app_settings.chain_mode);
-    let fill_style_active = item_settings.line_mode != LineMode::EdgesOnly;
-    let bg_active = !(matches!(app_settings.model, SettingsModel::None)
-        && item_settings.line_mode == LineMode::Off);
+    let knob_ctx = KnobContext {
+        model_uses_seg,
+        model_is_none: matches!(app_settings.model, SettingsModel::None),
+        line_mode: item_settings.line_mode,
+        chain_mode: app_settings.chain_mode,
+    };
+    let mask_active = knob_catalog::knob_enabled(KnobRequirement::MaskProduced, knob_ctx);
+    let fill_style_active = knob_catalog::knob_enabled(KnobRequirement::SubjectPresent, knob_ctx);
+    let bg_active = knob_catalog::knob_enabled(KnobRequirement::TransparencyProduced, knob_ctx);
 
     ui.horizontal(|ui| {
         render_model_dropdown(ui, app_settings, processing, mask_active, &mut change);

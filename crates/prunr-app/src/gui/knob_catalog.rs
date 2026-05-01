@@ -108,6 +108,77 @@ pub struct LineModeChange {
 }
 
 
+/// Runtime condition under which a knob's chip is enabled.
+/// Declared on each `StaticKnob` via `requirement()` so new knobs
+/// must think about model affinity at definition time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KnobRequirement {
+    /// Always enabled (when not mid-processing).
+    Always,
+    /// Enabled when the model produces a segmentation mask:
+    /// `model_uses_seg && (line_mode != EdgesOnly || chain_mode)`.
+    MaskProduced,
+    /// Enabled when a subject channel is present: `line_mode != EdgesOnly`.
+    SubjectPresent,
+    /// Enabled when the output can contain transparency, i.e. not
+    /// (no-model AND line_mode Off) — that combination outputs opaque RGB.
+    TransparencyProduced,
+}
+
+/// Inputs needed to evaluate `KnobRequirement`. Computed once per frame
+/// in the toolbar and passed to `knob_enabled` for each gate.
+#[derive(Clone, Copy, Debug)]
+pub struct KnobContext {
+    pub model_uses_seg: bool,
+    /// True when `SettingsModel::None` is active (filter-only, no AI).
+    pub model_is_none: bool,
+    pub line_mode: LineMode,
+    pub chain_mode: bool,
+}
+
+/// Returns `true` when `req` is satisfied under `ctx`.
+pub fn knob_enabled(req: KnobRequirement, ctx: KnobContext) -> bool {
+    match req {
+        KnobRequirement::Always => true,
+        KnobRequirement::MaskProduced =>
+            ctx.model_uses_seg && (ctx.line_mode != LineMode::EdgesOnly || ctx.chain_mode),
+        KnobRequirement::SubjectPresent =>
+            ctx.line_mode != LineMode::EdgesOnly,
+        KnobRequirement::TransparencyProduced =>
+            !(ctx.model_is_none && ctx.line_mode == LineMode::Off),
+    }
+}
+
+impl StaticKnob {
+    /// Which runtime condition gates this knob's chip.
+    pub fn requirement(self) -> KnobRequirement {
+        match self {
+            StaticKnob::Gamma
+            | StaticKnob::Threshold
+            | StaticKnob::EdgeShift
+            | StaticKnob::RefineEdges
+            | StaticKnob::GuidedRadius
+            | StaticKnob::GuidedEpsilon
+            | StaticKnob::Feather => KnobRequirement::MaskProduced,
+
+            StaticKnob::FillStyle => KnobRequirement::SubjectPresent,
+
+            StaticKnob::BgEffect
+            | StaticKnob::BgColor
+            | StaticKnob::BgImageFit => KnobRequirement::TransparencyProduced,
+
+            StaticKnob::LineStrength
+            | StaticKnob::EdgeThickness
+            | StaticKnob::EdgeScale
+            | StaticKnob::SolidLineColor
+            | StaticKnob::ComposeMode
+            | StaticKnob::LineStyle
+            | StaticKnob::Model
+            | StaticKnob::ChainMode => KnobRequirement::Always,
+        }
+    }
+}
+
 /// Bitset over `StaticKnob` variants. `Copy`, zero-alloc; a single u32
 /// covers all 18 static knobs with room to spare.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -343,6 +414,77 @@ mod tests {
     fn every_static_knob_has_a_spec() {
         for k in StaticKnob::ALL {
             let _ = spec(*k);
+        }
+    }
+
+    #[test]
+    fn every_static_knob_has_a_requirement() {
+        for k in StaticKnob::ALL {
+            let _ = k.requirement();
+        }
+    }
+
+    #[test]
+    fn requirement_assignments_match_catalog_intent() {
+        use KnobRequirement::*;
+        let expected: &[(StaticKnob, KnobRequirement)] = &[
+            (StaticKnob::Gamma, MaskProduced),
+            (StaticKnob::Threshold, MaskProduced),
+            (StaticKnob::EdgeShift, MaskProduced),
+            (StaticKnob::RefineEdges, MaskProduced),
+            (StaticKnob::GuidedRadius, MaskProduced),
+            (StaticKnob::GuidedEpsilon, MaskProduced),
+            (StaticKnob::Feather, MaskProduced),
+            (StaticKnob::FillStyle, SubjectPresent),
+            (StaticKnob::BgEffect, TransparencyProduced),
+            (StaticKnob::LineStrength, Always),
+            (StaticKnob::EdgeThickness, Always),
+            (StaticKnob::EdgeScale, Always),
+            (StaticKnob::SolidLineColor, Always),
+            (StaticKnob::ComposeMode, Always),
+            (StaticKnob::LineStyle, Always),
+            (StaticKnob::BgColor, TransparencyProduced),
+            (StaticKnob::BgImageFit, TransparencyProduced),
+            (StaticKnob::Model, Always),
+            (StaticKnob::ChainMode, Always),
+        ];
+        assert_eq!(expected.len(), StaticKnob::ALL.len(), "table covers all variants");
+        for &(knob, req) in expected {
+            assert_eq!(knob.requirement(), req, "{knob:?}");
+        }
+    }
+
+    #[test]
+    fn knob_enabled_matches_toolbar_boolean_formulas() {
+        use LineMode::*;
+        let cases: &[(bool, bool, LineMode, bool)] = &[
+            // (uses_seg, model_is_none, line_mode, chain_mode)
+            (true,  false, Off,            false),
+            (true,  false, SubjectOutline, false),
+            (true,  false, EdgesOnly,      false),
+            (true,  false, EdgesOnly,      true),  // chain rescues mask
+            (false, false, Off,            false),  // inpaint model
+            (false, true,  Off,            false),  // No-model + Off
+            (false, true,  SubjectOutline, false),
+            (false, true,  EdgesOnly,      false),
+        ];
+        for &(uses_seg, is_none, line_mode, chain_mode) in cases {
+            let ctx = KnobContext { model_uses_seg: uses_seg, model_is_none: is_none, line_mode, chain_mode };
+            let expected_mask = uses_seg && (line_mode != EdgesOnly || chain_mode);
+            let expected_subject = line_mode != EdgesOnly;
+            let expected_bg = !(is_none && line_mode == Off);
+            assert_eq!(
+                knob_enabled(KnobRequirement::MaskProduced, ctx), expected_mask,
+                "MaskProduced uses_seg={uses_seg} is_none={is_none} {line_mode:?} chain={chain_mode}",
+            );
+            assert_eq!(
+                knob_enabled(KnobRequirement::SubjectPresent, ctx), expected_subject,
+                "SubjectPresent {line_mode:?}",
+            );
+            assert_eq!(
+                knob_enabled(KnobRequirement::TransparencyProduced, ctx), expected_bg,
+                "TransparencyProduced is_none={is_none} {line_mode:?}",
+            );
         }
     }
 
