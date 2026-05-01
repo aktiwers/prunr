@@ -261,7 +261,7 @@ fn handle_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: Rect) 
     let is_inpaint = app.settings.model.is_inpaint();
     let action = {
         let item = &app.batch.items[idx];
-        brush_overlay::handle_input(ui, &mut app.brush_state, item, img_rect, is_inpaint)
+        brush_overlay::handle_input(ui, &mut app.brush_state, &app.settings.brush, item, img_rect, is_inpaint)
     };
     if let BrushAction::Committed(strokes) = action {
         let item_id = app.batch.items[idx].id;

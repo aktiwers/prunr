@@ -56,6 +56,12 @@ fn default_feather() -> f32 { 4.0 }
 fn default_grow() -> f32 { 2.0 }
 fn default_cfg() -> f32 { 1.0 }
 
+impl BrushSettings {
+    pub fn stamp(&self) -> Stamp {
+        Stamp { hardness: self.hardness, strength: self.strength, mode: self.mode }
+    }
+}
+
 impl Default for BrushSettings {
     fn default() -> Self {
         Self {
@@ -101,15 +107,10 @@ struct LineState {
 #[derive(Default)]
 pub(crate) struct BrushState {
     enabled: bool,
-    settings: BrushSettings,
     active: Option<ActiveStroke>,
 }
 
 impl BrushState {
-    pub fn with_settings(settings: BrushSettings) -> Self {
-        Self { enabled: false, settings, active: None }
-    }
-
     pub fn is_enabled(&self) -> bool {
         self.enabled
     }
@@ -121,39 +122,23 @@ impl BrushState {
         }
     }
 
-    pub fn settings(&self) -> &BrushSettings {
-        &self.settings
-    }
-
-    pub fn settings_mut(&mut self) -> &mut BrushSettings {
-        &mut self.settings
-    }
-
     /// True while the user is mid-drag.
     pub fn has_active_stroke(&self) -> bool {
         self.active.is_some()
     }
 
-    pub fn begin_stroke(&mut self, width: u16, height: u16) {
+    pub fn begin_stroke(&mut self, width: u16, height: u16, shape: BrushShape) {
         self.active = Some(ActiveStroke {
             grid: MaskCorrection::empty(width, height),
             dirty: false,
             trail: Vec::new(),
-            shape: self.settings.shape,
+            shape,
             line: None,
         });
     }
 
     pub fn active_shape(&self) -> Option<BrushShape> {
         self.active.as_ref().map(|a| a.shape)
-    }
-
-    fn current_stamp(&self) -> Stamp {
-        Stamp {
-            hardness: self.settings.hardness,
-            strength: self.settings.strength,
-            mode: self.settings.mode,
-        }
     }
 
     /// Record a screen-space stamp for the in-progress stroke trail.
@@ -190,8 +175,7 @@ impl BrushState {
     /// Extend the active stroke at model-space coordinates. Caller
     /// converts screen→model so screen-radius confusion can't reach
     /// the grid. Line strokes wait for `commit_stroke` to paint.
-    pub fn extend_stroke_with_radius(&mut self, x: f32, y: f32, radius: f32) {
-        let stamp = self.current_stamp();
+    pub fn extend_stroke_with_radius(&mut self, x: f32, y: f32, radius: f32, stamp: Stamp) {
         let Some(active) = self.active.as_mut() else { return };
         match active.shape {
             BrushShape::Circle => {
@@ -214,8 +198,7 @@ impl BrushState {
         }
     }
 
-    pub fn commit_stroke(&mut self) -> Option<MaskCorrection> {
-        let stamp = self.current_stamp();
+    pub fn commit_stroke(&mut self, stamp: Stamp) -> Option<MaskCorrection> {
         let mut active = self.active.take()?;
         if let Some(line) = active.line {
             paint_line(
@@ -255,12 +238,16 @@ mod tests {
         assert!(!s.is_enabled());
     }
 
+    fn default_stamp() -> Stamp {
+        BrushSettings::default().stamp()
+    }
+
     #[test]
     fn toggle_off_drops_active_stroke() {
         let mut s = BrushState::default();
         s.toggle();
-        s.begin_stroke(64, 64);
-        s.extend_stroke_with_radius(32.0, 32.0, 8.0);
+        s.begin_stroke(64, 64, BrushShape::Circle);
+        s.extend_stroke_with_radius(32.0, 32.0, 8.0, default_stamp());
         assert!(s.has_active_stroke());
         s.toggle();
         assert!(!s.has_active_stroke());
@@ -269,26 +256,26 @@ mod tests {
     #[test]
     fn extend_without_begin_is_no_op() {
         let mut s = BrushState::default();
-        s.extend_stroke_with_radius(10.0, 10.0, 8.0);
+        s.extend_stroke_with_radius(10.0, 10.0, 8.0, default_stamp());
         assert!(!s.has_active_stroke());
-        assert!(s.commit_stroke().is_none());
+        assert!(s.commit_stroke(default_stamp()).is_none());
     }
 
     #[test]
     fn empty_stroke_commit_returns_none() {
         let mut s = BrushState::default();
-        s.begin_stroke(64, 64);
+        s.begin_stroke(64, 64, BrushShape::Circle);
         // No extend_stroke calls — buffer stays empty.
-        assert!(s.commit_stroke().is_none());
+        assert!(s.commit_stroke(default_stamp()).is_none());
         assert!(!s.has_active_stroke(), "commit should clear active stroke");
     }
 
     #[test]
     fn populated_stroke_commit_returns_correction() {
         let mut s = BrushState::default();
-        s.begin_stroke(64, 64);
-        s.extend_stroke_with_radius(32.0, 32.0, 8.0);
-        let c = s.commit_stroke().expect("populated stroke");
+        s.begin_stroke(64, 64, BrushShape::Circle);
+        s.extend_stroke_with_radius(32.0, 32.0, 8.0, default_stamp());
+        let c = s.commit_stroke(default_stamp()).expect("populated stroke");
         assert_eq!(c.width, 64);
         assert_eq!(c.height, 64);
         assert!(!c.is_empty());
@@ -297,13 +284,11 @@ mod tests {
 
 
     #[test]
-    fn settings_round_trip() {
-        let mut s = BrushState::default();
-        s.settings_mut().radius = 100.0;
-        s.settings_mut().hardness = 0.3;
-        s.settings_mut().mode = BrushMode::Add;
-        assert_eq!(s.settings().radius, 100.0);
-        assert_eq!(s.settings().hardness, 0.3);
-        assert_eq!(s.settings().mode, BrushMode::Add);
+    fn brush_settings_stamp_reflects_fields() {
+        let s = BrushSettings { hardness: 0.3, strength: 0.8, mode: BrushMode::Add, ..BrushSettings::default() };
+        let stamp = s.stamp();
+        assert!((stamp.hardness - 0.3).abs() < f32::EPSILON);
+        assert!((stamp.strength - 0.8).abs() < f32::EPSILON);
+        assert_eq!(stamp.mode, BrushMode::Add);
     }
 }
