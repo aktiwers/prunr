@@ -32,22 +32,13 @@ pub(crate) struct RuntimeInstallProgress {
 pub struct PrunrApp {
     // State
     pub(crate) state: AppState,
-    pub(crate) loaded_filename: Option<String>,
     /// Directory of the most recently opened file (for save dialog default)
     pub(crate) last_open_dir: Option<std::path::PathBuf>,
-    pub(crate) image_dimensions: Option<(u32, u32)>,
 
     /// Processing pipeline — worker channels, admission, live preview, dispatch state.
     pub(crate) processor: super::processor::Processor,
 
     pub(crate) status: super::status_state::StatusState,
-
-    // Textures
-    pub(crate) source_texture: Option<egui::TextureHandle>,
-    pub(crate) result_texture: Option<egui::TextureHandle>,
-
-    // Result image for save/copy
-    pub(crate) result_rgba: Option<Arc<image::RgbaImage>>,
 
     /// Platform I/O: file dialogs + clipboard. Shim around `rfd` + `arboard`
     /// so the rest of `PrunrApp` doesn't carry their import surface.
@@ -274,14 +265,9 @@ impl PrunrApp {
     ) -> Self {
         let mut app = Self {
             state: AppState::Empty,
-            loaded_filename: None,
             last_open_dir: None,
-            image_dimensions: None,
             processor: super::processor::Processor::new(worker_tx, worker_rx),
             status: Default::default(),
-            source_texture: None,
-            result_texture: None,
-            result_rgba: None,
             system,
             show_shortcuts: false,
             show_cli_help: false,
@@ -365,11 +351,6 @@ impl PrunrApp {
 
     /// Reset app state after all batch items are removed.
     fn clear_to_empty(&mut self) {
-        self.source_texture = None;
-        self.result_texture = None;
-        self.result_rgba = None;
-        self.loaded_filename = None;
-        self.image_dimensions = None;
         self.state = AppState::Empty;
         self.batch.selected_index = 0;
     }
@@ -392,7 +373,7 @@ impl PrunrApp {
         let new_settings = self.settings.item_defaults_for_new_item();
         self.batch.items.push(BatchItem::new(
             id,
-            name.clone(),
+            name,
             source,
             dims,
             new_settings,
@@ -405,12 +386,6 @@ impl PrunrApp {
                 self.batch.request_decode_bytes(id, bytes);
             }
         }
-
-        self.image_dimensions = Some(dims);
-        self.loaded_filename = Some(name);
-        self.source_texture = None;
-        self.result_texture = None;
-        self.result_rgba = None;
 
         self.state = AppState::Loaded;
         self.status.text = "Ready".to_string();
@@ -1349,14 +1324,13 @@ impl PrunrApp {
     /// No checkboxes selected — save just the currently-viewed result via a
     /// save-as dialog. Suggests a `<stem>-nobg.png` name based on the source.
     fn save_current_to_file(&mut self) {
-        let Some(rgba) = self.result_rgba.clone() else { return };
-        let default_name = self.loaded_filename.as_deref()
-            .and_then(|name| Path::new(name).file_stem()?.to_str())
+        let Some(item) = self.batch.selected_item() else { return };
+        let Some(rgba) = item.result_rgba.clone() else { return };
+        let default_name = Path::new(&item.filename).file_stem()
+            .and_then(|s| s.to_str())
             .map(|stem| format!("{stem}-nobg.png"))
             .unwrap_or_else(|| "result-nobg.png".to_string());
-        let baked = self.batch.selected_item()
-            .map(|item| item.bake_export_bg(&rgba))
-            .unwrap_or(rgba);
+        let baked = item.bake_export_bg(&rgba);
         self.save_rgba_with_dialog(baked, &default_name);
     }
 
@@ -1502,7 +1476,10 @@ impl PrunrApp {
             .collect();
 
         let (rgba_to_copy, multi_hint) = match selected_with_result.len() {
-            0 => (self.result_rgba.clone(), None),
+            0 => (
+                self.batch.selected_item().and_then(|i| i.result_rgba.clone()),
+                None,
+            ),
             1 => (Some(selected_with_result[0].clone()), None),
             n => (
                 Some(selected_with_result[0].clone()),
@@ -1981,34 +1958,13 @@ impl PrunrApp {
         }
     }
 
-    /// Pull the selected item's textures + dimensions + filename onto the
-    /// app-level fields the canvas reads. Keeps the previous texture visible
-    /// until the new item's is ready (no blank flash on sidebar click).
+    /// Sync app-level state that depends on the selected item's status.
+    /// Per-item textures + filename + dimensions are read directly from the
+    /// `BatchItem` at view time (no mirror), so this only owns the bits
+    /// that don't have a per-item home.
     fn sync_app_state_to_selected_item(&mut self, idx: usize) {
         let item = &self.batch.items[idx];
-        // Mirror both textures exactly — including `None`. The old "keep the
-        // previous texture" guards caused two distinct bugs:
-        //   - result_texture guard: canvas stayed on the previous item's image
-        //     until the user wiggled the mouse (compositor dropped the
-        //     post-tex_prep repaint).
-        //   - source_texture guard: canvas's fit-zoom calculation ran against
-        //     the previous item's dimensions, producing a "pop" when the new
-        //     source_texture eventually landed at a different size. Because
-        //     `pending_fit_zoom` is consumed on the frame the fit runs (see
-        //     `canvas.rs:79-91`), the re-fit against the correct size never
-        //     happened.
-        // Mirroring None means the canvas either skips fit (source absent) or
-        // shows a blank result area (~30-50ms) while tex_prep runs, then
-        // snaps to the correct fit on the next frame.
-        self.source_texture = item.source_texture.clone();
-        self.loaded_filename = Some(item.filename.clone());
-        self.image_dimensions = Some(item.dimensions);
         self.show_original = false;
-
-        let result_texture = item.result_texture.clone();
-        let result_rgba = item.result_rgba.clone();
-        self.result_texture = result_texture;
-        self.result_rgba = result_rgba;
         self.state = match item.status {
             BatchStatus::Done => AppState::Done,
             BatchStatus::Processing => AppState::Processing,
@@ -2556,6 +2512,7 @@ impl PrunrApp {
         // path — runs every frame at 60 Hz, so 120 allocs/s of pure
         // noise was the prior cost.
         let count = self.batch.items.len();
+        let selected_filename = self.batch.selected_item().map(|i| i.filename.as_str());
         let unchanged = if count >= 2 {
             self.prev_title.starts_with("Prunr \u{2014} ")
                 && self.prev_title.ends_with(" images")
@@ -2565,9 +2522,9 @@ impl PrunrApp {
                     .and_then(|s| s.parse::<usize>().ok())
                     == Some(count)
         } else {
-            match &self.loaded_filename {
+            match selected_filename {
                 Some(name) => self.prev_title
-                    .strip_prefix("Prunr \u{2014} ") == Some(name.as_str()),
+                    .strip_prefix("Prunr \u{2014} ") == Some(name),
                 None => self.prev_title == "Prunr",
             }
         };
@@ -2576,7 +2533,7 @@ impl PrunrApp {
         let title = if count >= 2 {
             format!("Prunr \u{2014} {count} images")
         } else {
-            match &self.loaded_filename {
+            match selected_filename {
                 Some(name) => format!("Prunr \u{2014} {name}"),
                 None => "Prunr".to_string(),
             }
@@ -2616,7 +2573,7 @@ impl eframe::App for PrunrApp {
         self.drain_background_channels(ctx);
         self.update_window_title(ctx);
         self.status.tick();
-        if self.source_texture.is_none() && !self.batch.items.is_empty() {
+        if self.batch.selected_item().is_some_and(|i| i.source_texture.is_none()) {
             self.sync_selected_batch_textures(ctx);
         }
         // Keep the event loop awake while any async texture / decode work is
