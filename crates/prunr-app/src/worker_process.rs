@@ -1041,16 +1041,6 @@ pub fn run_worker() -> ! {
                     });
                 }
             }
-            SubprocessCommand::Cancel => {
-                cancel.store(true, Ordering::Release);
-                // Wait for in-flight to drain
-                while in_flight.load(Ordering::Acquire) > 0 {
-                    std::thread::sleep(std::time::Duration::from_millis(50));
-                }
-                let _ = evt_tx.send(SubprocessEvent::Finished);
-                cancel.store(false, Ordering::Release);
-            }
-
             SubprocessCommand::Shutdown => {
                 // Wait for in-flight to drain
                 while in_flight.load(Ordering::Acquire) > 0 {
