@@ -289,6 +289,9 @@ impl BatchManager {
 
     /// Pre-decode source bytes to RgbaImage on a background thread; the
     /// result lands on `bg_io.decode_rx` for the main thread to attach.
+    /// Decode failures travel as `Err(msg)` so the UI clears
+    /// `decode_pending` and surfaces the error instead of leaving the
+    /// item stuck in a "still loading" state forever.
     pub(crate) fn request_decode_bytes(&self, item_id: u64, bytes: Arc<Vec<u8>>) {
         let tx = self.bg_io.decode_tx.clone();
         std::thread::spawn(move || {
@@ -296,12 +299,12 @@ impl BatchManager {
             // and the encoded `bytes` Arc both drop before the channel
             // send, so concurrent decodes don't pile up DynamicImage +
             // RGBA simultaneously per thread.
-            let rgba = match image::load_from_memory(&bytes) {
-                Ok(img) => img.to_rgba8(),
-                Err(_) => return,
+            let result = match image::load_from_memory(&bytes) {
+                Ok(img) => Ok(Arc::new(img.to_rgba8())),
+                Err(e) => Err(format!("decode failed: {e}")),
             };
             drop(bytes);
-            let _ = tx.send((item_id, Arc::new(rgba)));
+            let _ = tx.send((item_id, result));
         });
     }
 
@@ -690,9 +693,10 @@ mod tests {
         let png = Arc::new(one_pixel_png());
         bm.request_decode_bytes(42, png);
 
-        let (id, rgba) = bm.bg_io.decode_rx.recv_timeout(Duration::from_secs(2))
+        let (id, result) = bm.bg_io.decode_rx.recv_timeout(Duration::from_secs(2))
             .expect("decode_tx must produce a result within 2s");
         assert_eq!(id, 42);
+        let rgba = result.expect("valid PNG must decode");
         assert_eq!(rgba.dimensions(), (1, 1));
         assert_eq!(rgba.get_pixel(0, 0).0, [200, 100, 50, 255]);
     }
@@ -703,9 +707,26 @@ mod tests {
         let source = ImageSource::Bytes(Arc::new(one_pixel_png()));
         bm.request_decode_source(99, &source);
 
-        let (id, _rgba) = bm.bg_io.decode_rx.recv_timeout(Duration::from_secs(2))
+        let (id, result) = bm.bg_io.decode_rx.recv_timeout(Duration::from_secs(2))
             .expect("decode_tx must produce a result within 2s");
         assert_eq!(id, 99);
+        assert!(result.is_ok());
+    }
+
+    /// K-5: a malformed image must surface a recognisable error via
+    /// `Err` so the UI clears `decode_pending` and flags the item
+    /// instead of leaving it stuck "still loading."
+    #[test]
+    fn request_decode_bytes_emits_err_on_malformed_input() {
+        let bm = fixture();
+        let garbage = Arc::new(b"not an image".to_vec());
+        bm.request_decode_bytes(7, garbage);
+
+        let (id, result) = bm.bg_io.decode_rx.recv_timeout(Duration::from_secs(2))
+            .expect("decode_tx must produce a result within 2s");
+        assert_eq!(id, 7);
+        let err = result.expect_err("garbage bytes must produce Err");
+        assert!(err.contains("decode failed"), "expected 'decode failed' prefix, got: {err}");
     }
 
     #[test]

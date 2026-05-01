@@ -5,6 +5,10 @@ use std::sync::mpsc;
 /// (drained in `drain_background_channels`, mapped to `BatchStatus::Error`).
 pub type FilterOnlyResult = (u64, Result<std::sync::Arc<image::RgbaImage>, String>);
 
+/// Pre-decode result: `Ok(rgba)` on success, `Err(msg)` so a malformed
+/// image clears `decode_pending` instead of leaving the item stuck.
+pub type DecodeResult = (u64, Result<std::sync::Arc<image::RgbaImage>, String>);
+
 /// Bundles all background thread communication channels.
 pub struct BackgroundIO {
     /// File paths from file dialog / drag-and-drop (loaded lazily on demand)
@@ -14,8 +18,8 @@ pub struct BackgroundIO {
     pub thumb_tx: mpsc::Sender<(u64, u32, u32, Vec<u8>)>,
     pub thumb_rx: mpsc::Receiver<(u64, u32, u32, Vec<u8>)>,
     /// Pre-decoded source images for instant canvas switching
-    pub decode_tx: mpsc::Sender<(u64, std::sync::Arc<image::RgbaImage>)>,
-    pub decode_rx: mpsc::Receiver<(u64, std::sync::Arc<image::RgbaImage>)>,
+    pub decode_tx: mpsc::Sender<DecodeResult>,
+    pub decode_rx: mpsc::Receiver<DecodeResult>,
     /// Save completion notifications
     pub save_done_tx: mpsc::Sender<String>,
     pub save_done_rx: mpsc::Receiver<String>,
