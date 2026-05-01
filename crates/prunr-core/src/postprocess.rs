@@ -653,7 +653,7 @@ fn apply_edge_shift(mask: &mut GrayImage, shift: f32) {
     let step = |src: &[u8], dst: &mut [u8]| {
         let process_row = |(y, row): (usize, &mut [u8])| {
             let yi = y as i32;
-            for x in 0..w {
+            for (x, slot) in row.iter_mut().enumerate() {
                 let xi = x as i32;
                 let mut extremum: u8 = if erode { 255 } else { 0 };
                 for dy in -1i32..=1 {
@@ -668,7 +668,7 @@ fn apply_edge_shift(mask: &mut GrayImage, shift: f32) {
                         }
                     }
                 }
-                row[x] = extremum;
+                *slot = extremum;
             }
         };
         if use_par {
