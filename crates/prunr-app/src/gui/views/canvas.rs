@@ -107,7 +107,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
     // Handle pending Ctrl+0 (fit to window) / Ctrl+1 (actual size).
     // Only consume the flag when the texture is ready — with lazy decode,
     // the texture may not exist on the first frame after opening.
-    if let Some(ref tex) = app.source_texture {
+    if let Some(tex) = app.batch.selected_item().and_then(|i| i.source_texture.as_ref()) {
         let tex_size = tex.size_vec2();
         let canvas_size = canvas_rect.size();
 
@@ -252,7 +252,8 @@ fn render_inpaint_progress(
 fn handle_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: Rect) {
     use super::brush_overlay::{self, BrushAction};
     use crate::gui::live_preview::PreviewKind;
-    let Some(tex) = app.result_texture.as_ref().or(app.source_texture.as_ref()) else { return };
+    let Some(item) = app.batch.selected_item() else { return };
+    let Some(tex) = item.result_texture.as_ref().or(item.source_texture.as_ref()) else { return };
     let img_rect = compute_img_rect(canvas_rect, tex.size_vec2(), app.zoom_state.zoom, app.zoom_state.pan_offset);
 
     let Some(idx) = app.batch.selected_idx_clamped() else { return };
@@ -426,7 +427,7 @@ fn render_empty(ui: &mut egui::Ui, _app: &PrunrApp) {
 
 fn render_loaded(ui: &mut egui::Ui, app: &PrunrApp) {
     let canvas_rect = ui.available_rect_before_wrap();
-    if let Some(ref texture) = app.source_texture {
+    if let Some(texture) = app.batch.selected_item().and_then(|i| i.source_texture.as_ref()) {
         let img_rect = compute_img_rect(canvas_rect, texture.size_vec2(), app.zoom_state.zoom, app.zoom_state.pan_offset);
         let fade = ui.ctx().animate_bool_with_time(
             egui::Id::new(("canvas_fade", app.canvas_switch_id)),
@@ -458,10 +459,11 @@ fn render_processing(ui: &mut egui::Ui, app: &PrunrApp) {
     let t = ui.ctx().input(|i| i.time) as f32;
 
     // In chain mode with an existing result, show the result being processed (not the original)
-    let display_texture = if app.settings.chain_mode && app.result_texture.is_some() {
-        app.result_texture.as_ref()
+    let item = app.batch.selected_item();
+    let display_texture = if app.settings.chain_mode && item.and_then(|i| i.result_texture.as_ref()).is_some() {
+        item.and_then(|i| i.result_texture.as_ref())
     } else {
-        app.source_texture.as_ref()
+        item.and_then(|i| i.source_texture.as_ref())
     };
 
     if let Some(texture) = display_texture {
@@ -536,8 +538,9 @@ fn render_done(ui: &mut egui::Ui, app: &PrunrApp) {
     );
     if fade < 1.0 { ui.ctx().request_repaint(); }
 
+    let item = app.batch.selected_item();
     if app.show_original {
-        if let Some(ref texture) = app.source_texture {
+        if let Some(texture) = item.and_then(|i| i.source_texture.as_ref()) {
             let img_rect =
                 compute_img_rect(canvas_rect, texture.size_vec2(), app.zoom_state.zoom, app.zoom_state.pan_offset);
             ui.painter().image(
@@ -547,13 +550,13 @@ fn render_done(ui: &mut egui::Ui, app: &PrunrApp) {
                 Color32::WHITE,
             );
         }
-    } else if let Some(ref result_tex) = app.result_texture {
+    } else if let Some(result_tex) = item.and_then(|i| i.result_texture.as_ref()) {
         let img_rect =
             compute_img_rect(canvas_rect, result_tex.size_vec2(), app.zoom_state.zoom, app.zoom_state.pan_offset);
 
         // During crossfade: show source fading out behind checkerboard + result fading in
         if fade < 1.0 {
-            if let Some(ref source_tex) = app.source_texture {
+            if let Some(source_tex) = item.and_then(|i| i.source_texture.as_ref()) {
                 let src_alpha = ((1.0 - fade) * 255.0) as u8;
                 ui.painter().image(
                     source_tex.id(),
