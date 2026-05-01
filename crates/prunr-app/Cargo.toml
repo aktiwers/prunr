@@ -57,6 +57,9 @@ bytes = "1"
 
 [dev-dependencies]
 proptest = { workspace = true }
+# Auto-cleaning scratch dirs for boundary tests in subprocess::protocol.
+# Matches the existing `tempfile = "3"` pin in prunr-models.
+tempfile = "3"
 
 # OS drag-out: supported on Windows and macOS. On Linux the crate requires a
 # GTK window (winit/eframe cannot supply one), and pulls in gtk/gdk native
