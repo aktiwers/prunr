@@ -361,6 +361,10 @@ struct SendMutPtr(*mut u8);
 unsafe impl Send for SendMutPtr {}
 unsafe impl Sync for SendMutPtr {}
 
+// Per-channel inner kernel — args are the math context the row-parallel
+// loop closes over. Splitting into a struct adds a borrow-lifetime story
+// for what is fundamentally a leaf math helper.
+#[allow(clippy::too_many_arguments)]
 fn composite_channel(
     out: &mut RgbaImage,
     source: &RgbaImage,

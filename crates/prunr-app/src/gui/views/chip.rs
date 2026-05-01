@@ -97,6 +97,10 @@ pub(super) fn paint_falloff_square(
     paint_falloff_shape(painter, center, outer, hardness, color, base_alpha, steps, false);
 }
 
+// `round` will be hoisted out of the inner loop and the function split when
+// REVIEW-FINDINGS M11 lands; until then, all 8 args are part of the brush
+// stamp's render contract.
+#[allow(clippy::too_many_arguments)]
 fn paint_falloff_shape(
     painter: &egui::Painter,
     center: egui::Pos2,
@@ -218,6 +222,9 @@ pub(super) fn popup_for(
 /// Continuous f32 chip (gamma, edge_shift, line_strength, ...).
 /// `description` renders inside the popover under the slider.
 /// `tooltip` renders on hover over the chip button.
+// REVIEW-FINDINGS H6: queued ChipMeta extraction will drop every chip
+// helper to ≤7 args (factoring id_salt/icon/label/description/tooltip).
+#[allow(clippy::too_many_arguments)]
 pub fn chip_f32(
     ui: &mut Ui,
     id_salt: &str,
@@ -265,6 +272,7 @@ pub fn chip_f32(
 }
 
 /// Integer chip. Used for pixel counts where fractional values don't make sense.
+#[allow(clippy::too_many_arguments)] // see H6
 pub fn chip_u32(
     ui: &mut Ui,
     id_salt: &str,
@@ -301,6 +309,7 @@ pub fn chip_u32(
 }
 
 /// Optional f32 chip (threshold). Toggle enables/disables; slider sets the value.
+#[allow(clippy::too_many_arguments)] // see H6
 pub fn chip_option_f32(
     ui: &mut Ui,
     id_salt: &str,
@@ -383,6 +392,7 @@ pub fn chip_bool(
 /// Bool chip with follow-up sliders tucked into the same popover.
 /// `extras` runs inside the popover when `*value == true`, after the
 /// Enabled checkbox + divider.
+#[allow(clippy::too_many_arguments)] // see H6
 pub fn chip_bool_with_extras(
     ui: &mut Ui,
     id_salt: &str,
@@ -464,6 +474,7 @@ pub fn slider_row_u32(
 /// opens outside the chip popover's rect — click on the color palette was
 /// seen as "outside" and closed the chip popover. Inline picker avoids the
 /// whole class of bug.
+#[allow(clippy::too_many_arguments)] // see H6
 pub fn chip_option_rgba(
     ui: &mut Ui,
     id_salt: &str,
@@ -515,6 +526,7 @@ pub fn chip_option_rgba(
 }
 
 /// Optional RGB chip (solid_line_color). Same pattern as chip_option_rgba but 3-channel.
+#[allow(clippy::too_many_arguments)] // see H6
 pub fn chip_option_rgb(
     ui: &mut Ui,
     id_salt: &str,
@@ -584,7 +596,9 @@ mod tests {
     // in the adjustments_toolbar smoke test suite.
     #[test]
     fn popover_width_is_sane() {
-        assert!(crate::gui::theme::POPOVER_WIDTH >= 200.0);
-        assert!(crate::gui::theme::POPOVER_WIDTH <= 400.0);
+        const _: () = {
+            assert!(crate::gui::theme::POPOVER_WIDTH >= 200.0);
+            assert!(crate::gui::theme::POPOVER_WIDTH <= 400.0);
+        };
     }
 }
