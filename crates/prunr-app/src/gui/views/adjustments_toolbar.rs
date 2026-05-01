@@ -590,18 +590,29 @@ fn render_row2_right_cluster(
         mark_input_transform_change(change);
     }
 
-    aggregate_knob(chip::chip_option_rgb(
-        ui,
-        chip::ChipMeta {
-            id_salt: "solid_line_color",
-            icon: ICON_BRUSH.codepoint,
-            label: "Solid line color",
-            description: "Paint every edge the same color.",
-            tooltip: "Stage 4 of 4 in the lines pipeline. Paint every visible edge the same color, or leave unset to keep the original RGB beneath the mask. Runs after edge thickness.",
-        },
-        &mut item_settings.solid_line_color,
-        defaults.solid_line_color_value,
-    ), StaticKnob::SolidLineColor, change);
+    // Edge.rs forces `solid_tint = None` for any non-`Solid` LineStyle, so
+    // the chip's value is silently ignored otherwise. Grey out + tooltip
+    // makes the dependency visible.
+    let solid_tint_active = matches!(item_settings.line_style, prunr_core::LineStyle::Solid);
+    let solid_tint_tooltip = if solid_tint_active {
+        "Stage 4 of 4 in the lines pipeline. Paint every visible edge the same color, or leave unset to keep the original RGB beneath the mask. Runs after edge thickness."
+    } else {
+        "Only takes effect when line style is Solid. Other styles use the source RGB beneath each edge pixel."
+    };
+    ui.add_enabled_ui(solid_tint_active, |ui| {
+        aggregate_knob(chip::chip_option_rgb(
+            ui,
+            chip::ChipMeta {
+                id_salt: "solid_line_color",
+                icon: ICON_BRUSH.codepoint,
+                label: "Solid line color",
+                description: "Paint every edge the same color.",
+                tooltip: solid_tint_tooltip,
+            },
+            &mut item_settings.solid_line_color,
+            defaults.solid_line_color_value,
+        ), StaticKnob::SolidLineColor, change);
+    });
 }
 
 /// Fold a static chip's `ChipChange` into the aggregate, routing via the
