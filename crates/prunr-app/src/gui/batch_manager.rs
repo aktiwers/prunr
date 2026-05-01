@@ -17,6 +17,7 @@ use std::sync::Arc;
 
 use super::background_io::BackgroundIO;
 use super::item::{BatchItem, BatchStatus, ImageSource};
+use super::state::AppState;
 
 /// Per-status counts across the batch. Produced by `status_counts` for
 /// callers that need to render progress strings, decide "all done" vs
@@ -100,6 +101,22 @@ impl BatchManager {
     /// that write results / status into the matching item.
     pub(crate) fn find_by_id_mut(&mut self, id: u64) -> Option<&mut BatchItem> {
         self.items.iter_mut().find(|b| b.id == id)
+    }
+
+    /// Derive the app-level state from the selected item's status. Empty
+    /// when no item is selected; otherwise mirrors `BatchStatus → AppState`
+    /// (Done/Processing pass through, everything else collapses to Loaded).
+    /// Callers should *not* cache the result — it's free to recompute and
+    /// caching just risks drift.
+    pub(crate) fn app_state(&self) -> AppState {
+        match self.selected_item() {
+            None => AppState::Empty,
+            Some(item) => match item.status {
+                BatchStatus::Done => AppState::Done,
+                BatchStatus::Processing => AppState::Processing,
+                _ => AppState::Loaded,
+            },
+        }
     }
 
     /// True when the currently-selected item has the given id. Callers use

@@ -1,12 +1,10 @@
 use super::super::app::PrunrApp;
-use super::super::state::AppState;
 use super::fixtures::push_test_item;
 
 #[test]
 fn handle_copy_without_clipboard_does_not_panic() {
     // PrunrApp::new_for_test() sets clipboard = None
     let mut app = PrunrApp::new_for_test();
-    app.state = AppState::Done;
     push_test_item(&mut app, 1).result_rgba =
         Some(std::sync::Arc::new(image::RgbaImage::new(2, 2)));
     app.batch.selected_index = 0;
@@ -24,7 +22,6 @@ fn handle_copy_without_clipboard_does_not_panic() {
 fn handle_copy_without_result_does_not_panic() {
     // No result on the selected item — handle_copy should be a no-op.
     let mut app = PrunrApp::new_for_test();
-    app.state = AppState::Done;
     push_test_item(&mut app, 1);
     app.batch.selected_index = 0;
 
