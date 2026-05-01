@@ -47,6 +47,15 @@ impl Drop for DecodeSlotGuard {
     }
 }
 
+/// Owned handles to the texture-prep channel + decode slots, bundled so
+/// `PrunrApp::spawn_tex_prep` takes one parameter instead of two. The
+/// `Clone` derive is shallow (Sender is Clone, Arc is Clone) and cheap.
+#[derive(Clone)]
+pub struct TexPrepHandles {
+    pub tx: mpsc::Sender<(u64, String, egui::ColorImage, bool)>,
+    pub slots: Arc<DecodeSlots>,
+}
+
 /// Bundles all background thread communication channels.
 pub struct BackgroundIO {
     /// File paths from file dialog / drag-and-drop (loaded lazily on demand)
@@ -72,6 +81,16 @@ pub struct BackgroundIO {
     /// `available_parallelism()`. Threads spawn immediately but park here
     /// until a slot opens, capping transient RAM at N × per-thread peak.
     pub decode_slots: Arc<DecodeSlots>,
+}
+
+impl BackgroundIO {
+    /// Clone the (tx, slots) pair as one handle bundle for spawn paths.
+    pub fn tex_prep_handles(&self) -> TexPrepHandles {
+        TexPrepHandles {
+            tx: self.tex_prep_tx.clone(),
+            slots: self.decode_slots.clone(),
+        }
+    }
 }
 
 impl Default for BackgroundIO {

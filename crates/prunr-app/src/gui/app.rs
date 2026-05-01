@@ -703,8 +703,7 @@ impl PrunrApp {
         if results.is_empty() {
             return;
         }
-        let tex_prep_tx = self.batch.bg_io.tex_prep_tx.clone();
-        let slots = self.batch.bg_io.decode_slots.clone();
+        let handles = self.batch.bg_io.tex_prep_handles();
         let switch = self.result_switch_id;
         for r in results {
             // Keep old texture visible until tex_prep lands so the canvas
@@ -728,7 +727,7 @@ impl PrunrApp {
                 item.clear_correction();
                 Self::spawn_tex_prep(
                     new_rgba.clone(), item.id, format!("inpaint_{}_{}", item.id, switch),
-                    true, tex_prep_tx.clone(), slots.clone(), ctx.clone(),
+                    true, handles.clone(), ctx.clone(),
                 );
                 (item.id, item.source.clone(), Some(new_rgba))
             };
@@ -1791,8 +1790,7 @@ impl PrunrApp {
         ctx: &egui::Context,
         results: Vec<super::live_preview::PreviewResult>,
     ) {
-        let tex_prep_tx = self.batch.bg_io.tex_prep_tx.clone();
-        let slots = self.batch.bg_io.decode_slots.clone();
+        let handles = self.batch.bg_io.tex_prep_handles();
         for r in results {
             let (item_id, source, is_final) = {
                 let Some(item) = self.batch.find_by_id_mut(r.item_id) else {
@@ -1825,7 +1823,7 @@ impl PrunrApp {
                 let switch = self.result_switch_id;
                 Self::spawn_tex_prep(
                     new_rgba, item.id, format!("result_{}_{}", item.id, switch),
-                    true, tex_prep_tx.clone(), slots.clone(), ctx.clone(),
+                    true, handles.clone(), ctx.clone(),
                 );
                 (item.id, item.source.clone(), r.is_final)
             };
@@ -1920,6 +1918,8 @@ impl PrunrApp {
     fn request_selected_textures(&mut self, idx: usize, ctx: &egui::Context) {
         let item_id = self.batch.items[idx].id;
 
+        let handles = self.batch.bg_io.tex_prep_handles();
+
         if self.batch.items[idx].source_texture.is_none()
             && !self.batch.items[idx].source_tex_pending
         {
@@ -1927,9 +1927,7 @@ impl PrunrApp {
                 self.batch.items[idx].source_tex_pending = true;
                 Self::spawn_tex_prep(
                     rgba, item_id, format!("source_{item_id}"), false,
-                    self.batch.bg_io.tex_prep_tx.clone(),
-                    self.batch.bg_io.decode_slots.clone(),
-                    ctx.clone(),
+                    handles.clone(), ctx.clone(),
                 );
             }
         }
@@ -1942,9 +1940,7 @@ impl PrunrApp {
                 self.batch.items[idx].result_tex_pending = true;
                 Self::spawn_tex_prep(
                     rgba, item_id, format!("result_{item_id}_{switch}"), true,
-                    self.batch.bg_io.tex_prep_tx.clone(),
-                    self.batch.bg_io.decode_slots.clone(),
-                    ctx.clone(),
+                    handles.clone(), ctx.clone(),
                 );
             }
         }
@@ -1956,8 +1952,7 @@ impl PrunrApp {
         item_id: u64,
         name: String,
         is_result: bool,
-        tx: mpsc::Sender<(u64, String, egui::ColorImage, bool)>,
-        slots: Arc<super::background_io::DecodeSlots>,
+        handles: super::background_io::TexPrepHandles,
         ctx: egui::Context,
     ) {
         std::thread::spawn(move || {
@@ -1965,13 +1960,13 @@ impl PrunrApp {
             // batch-completion burst doesn't hold N × ~50 MB ColorImage
             // peaks simultaneously. Same slot pool as the bg-io decode /
             // thumbnail / filter spawns.
-            let _slot = slots.acquire();
+            let _slot = handles.slots.acquire();
             let (w, h) = (rgba.width(), rgba.height());
             let ci = egui::ColorImage::from_rgba_unmultiplied(
                 [w as usize, h as usize],
                 rgba.as_flat_samples().as_slice(),
             );
-            let _ = tx.send((item_id, name, ci, is_result));
+            let _ = handles.tx.send((item_id, name, ci, is_result));
             ctx.request_repaint();
         });
     }
