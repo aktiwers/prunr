@@ -360,7 +360,7 @@ fn mask_components(mask: &GrayImage) -> Vec<MaskBbox> {
     let Some(outer) = crate::inpaint::mask_bbox(mask, 128, 0) else {
         return Vec::new();
     };
-    let map = BboxMap { ox: outer.x, oy: outer.y, image_w: w, bbox_w: outer.w };
+    let map = BboxMap { bbox_x: outer.x, bbox_y: outer.y, image_w: w, bbox_w: outer.w };
     let xmax = outer.x + outer.w;
     let ymax = outer.y + outer.h;
     let mut visited = vec![false; (outer.w as usize) * (outer.h as usize)];
@@ -370,8 +370,7 @@ fn mask_components(mask: &GrayImage) -> Vec<MaskBbox> {
     for sy in outer.y..ymax {
         for sx in outer.x..xmax {
             let lidx = map.local_idx(sx, sy);
-            let gidx = (sy as usize) * (w as usize) + (sx as usize);
-            if visited[lidx] || raw[gidx] <= 127 {
+            if visited[lidx] || raw[map.global_idx(sx, sy)] <= 127 {
                 continue;
             }
             visited[lidx] = true;
@@ -403,12 +402,16 @@ fn mask_components(mask: &GrayImage) -> Vec<MaskBbox> {
 }
 
 #[derive(Clone, Copy)]
-struct BboxMap { ox: u32, oy: u32, image_w: u32, bbox_w: u32 }
+struct BboxMap { bbox_x: u32, bbox_y: u32, image_w: u32, bbox_w: u32 }
 
 impl BboxMap {
     #[inline]
     fn local_idx(self, x: u32, y: u32) -> usize {
-        ((y - self.oy) as usize) * (self.bbox_w as usize) + ((x - self.ox) as usize)
+        ((y - self.bbox_y) as usize) * (self.bbox_w as usize) + ((x - self.bbox_x) as usize)
+    }
+    #[inline]
+    fn global_idx(self, x: u32, y: u32) -> usize {
+        (y as usize) * (self.image_w as usize) + (x as usize)
     }
 }
 
@@ -419,7 +422,7 @@ fn push_if_unvisited(
     queue: &mut std::collections::VecDeque<(u32, u32)>,
 ) {
     let lidx = map.local_idx(x, y);
-    let gidx = (y as usize) * (map.image_w as usize) + (x as usize);
+    let gidx = map.global_idx(x, y);
     if !visited[lidx] && raw[gidx] > 127 {
         visited[lidx] = true;
         queue.push_back((x, y));
