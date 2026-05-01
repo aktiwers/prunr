@@ -141,28 +141,13 @@ impl Default for LivePreview {
 }
 
 impl LivePreview {
-    /// Register a tweak. The debounce timer is set once on the first tweak in
-    /// a window and NEVER re-armed: subsequent tweaks update only `kind`. A
-    /// fresh window starts naturally after `tick` dispatches and removes the
-    /// pending entry. In-flight dispatches are left alone; `drain_results`
-    /// drops stale ones via the generation filter.
+    /// Pin `last_tweak_at` on the first tweak in a window and never re-arm —
+    /// `tick`'s removal-on-dispatch starts the next window.
     pub fn mark_tweak(&mut self, item_id: u64, kind: PreviewKind) {
-        match self.pending.get_mut(&item_id) {
-            // Tweak landed while a window is already open: only the latest
-            // kind matters for the upcoming dispatch. Re-arming would push
-            // the dispatch past every subsequent tweak, which on slow frames
-            // (frame interval > DEBOUNCE) silently disables mid-drag preview
-            // entirely (B4).
-            Some(p) => {
-                p.kind = kind;
-            }
-            None => {
-                self.pending.insert(
-                    item_id,
-                    Pending { last_tweak_at: Instant::now(), kind },
-                );
-            }
-        }
+        self.pending
+            .entry(item_id)
+            .and_modify(|p| p.kind = kind)
+            .or_insert_with(|| Pending { last_tweak_at: Instant::now(), kind });
     }
 
     /// Flush: expire the pending tweak timer so the next `tick` dispatches
@@ -633,43 +618,24 @@ mod tests {
         );
     }
 
-    /// Phase 21-04 / B4: when the gap between tweaks exceeds DEBOUNCE
-    /// (slow-frame scenario — render frame > 150 ms), `mark_tweak` must
-    /// still leave `last_tweak_at` pinned. The previous code re-armed in
-    /// this branch, which made the immediately-following `tick` see
-    /// `elapsed = 0` and decline to dispatch — silently disabling mid-drag
-    /// preview on any machine slow enough to exceed DEBOUNCE per frame.
+    /// Slow frames put `elapsed >= DEBOUNCE` on every tweak; the broken
+    /// code re-armed in that branch and starved `tick`.
     #[test]
     fn mark_tweak_does_not_reset_timer_on_slow_frames() {
         let mut lp = LivePreview::default();
         lp.mark_tweak(1, PreviewKind::Mask);
 
-        // Simulate a slow frame: pretend the original arm happened
-        // DEBOUNCE+50ms ago. (Direct poke of internal state — tests are in
-        // the same module, and this avoids a 200ms thread::sleep.)
         let aged = Instant::now()
             .checked_sub(DEBOUNCE + Duration::from_millis(50))
-            .expect("monotonic clock supports backwards arithmetic in tests");
-        let first_arm = aged;
+            .expect("DEBOUNCE+50ms fits in Instant's past");
         lp.pending.get_mut(&1).unwrap().last_tweak_at = aged;
 
-        // Next tweak arrives. Old code: re-armed because elapsed >= DEBOUNCE.
-        // New code: leaves the timestamp pinned so tick will dispatch.
         lp.mark_tweak(1, PreviewKind::Mask);
         let second_arm = lp.pending.get(&1).expect("still armed").last_tweak_at;
-        assert_eq!(
-            first_arm, second_arm,
-            "slow-frame tweak must leave the original arm time in place",
-        );
+        assert_eq!(aged, second_arm, "slow-frame tweak must leave arm time pinned");
 
-        // tick should consider the entry ready (elapsed >= DEBOUNCE) and
-        // attempt to dispatch — return value None means "all pending
-        // entries are dispatch-ready or gone."
         let wait = lp.tick(|_, _| None);
-        assert!(
-            wait.is_none(),
-            "tick must reach dispatch-readiness on a slow-frame mark_tweak",
-        );
+        assert!(wait.is_none(), "tick must reach dispatch-readiness on a slow-frame mark_tweak");
     }
 
     #[test]
