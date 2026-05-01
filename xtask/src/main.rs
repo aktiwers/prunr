@@ -108,6 +108,7 @@ fn main() -> anyhow::Result<()> {
         "fetch-models" => fetch_models(),
         "probe-load-dynamic" => probe_load_dynamic(),
         "install-runtime" => install_runtime(),
+        "render-golden-diff" => render_golden_diff(),
         _ => {
             eprintln!("Usage: cargo xtask <task>");
             eprintln!("Tasks:");
@@ -119,6 +120,12 @@ fn main() -> anyhow::Result<()> {
             eprintln!("                         PyPI wheel into the user runtime store. Args:");
             eprintln!("                         <package> <version> [target-name]");
             eprintln!("                         e.g. install-runtime onnxruntime-openvino 1.24.1");
+            eprintln!("  render-golden-diff     [Phase 20-04] After UPDATE_GOLDEN regenerates");
+            eprintln!("                         expected.png files, produce side-by-side");
+            eprintln!("                         <before | after | diff> triptych PNGs for every");
+            eprintln!("                         changed golden. Lets a reviewer visually inspect");
+            eprintln!("                         math-changing refactors before commit.");
+            eprintln!("                         Output: golden-diffs/<tier>/<id>.png");
             std::process::exit(1);
         }
     }
@@ -411,5 +418,280 @@ fn install_runtime() -> anyhow::Result<()> {
         println!("  target/debug/prunr --doctor");
     }
     Ok(())
+}
+
+/// 20-04: render side-by-side `<before | after | diff>` triptych PNGs for any
+/// `expected.png` under `crates/prunr-core/tests/golden_data/{postprocess,e2e}/`
+/// that differs from its `git HEAD` version. Run after `UPDATE_GOLDEN=1 cargo
+/// test ...` regenerates expected PNGs — the triptychs let a reviewer visually
+/// inspect a math-changing refactor before committing the golden update.
+///
+/// "before" = bytes from `git show HEAD:<path>`
+/// "after"  = bytes on disk (the regenerated expected.png)
+/// "diff"   = per-pixel max channel diff, scaled ×4 + clamped to 255 for
+///            visibility (small differences would otherwise be invisible).
+///
+/// Output: `golden-diffs/<tier>/<id>.png` (the directory is gitignored —
+/// triptychs are reviewer artifacts, not committed).
+///
+/// Args (positional, all optional):
+///   render-golden-diff [--phase postprocess|e2e|both] [--id <pattern>]
+///
+/// `--id` filters fixture ids by substring match.
+fn render_golden_diff() -> anyhow::Result<()> {
+    let args: Vec<String> = std::env::args().skip(2).collect();
+    let mut phase_filter: Option<String> = None;
+    let mut id_filter: Option<String> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--phase" => {
+                phase_filter = args.get(i + 1).cloned();
+                i += 2;
+            }
+            "--id" => {
+                id_filter = args.get(i + 1).cloned();
+                i += 2;
+            }
+            other => {
+                anyhow::bail!("unknown arg `{other}` (expected `--phase` or `--id`)");
+            }
+        }
+    }
+
+    let phases: &[&str] = match phase_filter.as_deref() {
+        None | Some("both") => &["postprocess", "e2e"],
+        Some("postprocess") => &["postprocess"],
+        Some("e2e") => &["e2e"],
+        Some(other) => anyhow::bail!("unknown phase `{other}` (expected postprocess|e2e|both)"),
+    };
+
+    let workspace_root = std::env::current_dir()?;
+    let output_root = workspace_root.join("golden-diffs");
+    std::fs::create_dir_all(&output_root)?;
+
+    let mut total_changed = 0usize;
+    let mut total_unchanged = 0usize;
+    let mut total_new = 0usize;
+
+    for phase in phases {
+        let fixture_root =
+            workspace_root.join("crates/prunr-core/tests/golden_data").join(phase);
+        if !fixture_root.is_dir() {
+            continue;
+        }
+        let phase_out = output_root.join(phase);
+        std::fs::create_dir_all(&phase_out)?;
+
+        let entries = std::fs::read_dir(&fixture_root)?
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .filter(|p| p.is_dir());
+
+        for fixture_dir in entries {
+            let id = fixture_dir
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_string();
+            if let Some(ref pat) = id_filter {
+                if !id.contains(pat.as_str()) {
+                    continue;
+                }
+            }
+
+            let expected_path = fixture_dir.join("expected.png");
+            if !expected_path.is_file() {
+                continue;
+            }
+
+            let rel_path = expected_path
+                .strip_prefix(&workspace_root)
+                .unwrap_or(&expected_path);
+
+            let head_bytes = match git_show_head(rel_path) {
+                Ok(b) => Some(b),
+                Err(GitShowErr::NotInIndex) => None,
+                Err(GitShowErr::Other(msg)) => {
+                    anyhow::bail!("git show failed for {}: {msg}", rel_path.display());
+                }
+            };
+
+            let disk_bytes = std::fs::read(&expected_path)?;
+
+            let head_bytes = match head_bytes {
+                Some(b) => b,
+                None => {
+                    total_new += 1;
+                    println!("[{phase}] {id}: NEW (no HEAD version) — skipping triptych");
+                    continue;
+                }
+            };
+
+            if head_bytes == disk_bytes {
+                total_unchanged += 1;
+                continue;
+            }
+
+            let before = image::load_from_memory(&head_bytes)
+                .map_err(|e| anyhow::anyhow!("decode HEAD expected.png ({}): {e}", rel_path.display()))?
+                .to_rgba8();
+            let after = image::load_from_memory(&disk_bytes)
+                .map_err(|e| anyhow::anyhow!("decode disk expected.png ({}): {e}", expected_path.display()))?
+                .to_rgba8();
+
+            if before.dimensions() != after.dimensions() {
+                println!(
+                    "[{phase}] {id}: DIM MISMATCH {:?} vs {:?} — writing side-by-side without diff panel",
+                    before.dimensions(),
+                    after.dimensions()
+                );
+                let triptych = compose_dim_mismatch(&before, &after);
+                let out_path = phase_out.join(format!("{id}.png"));
+                triptych.save(&out_path)?;
+                total_changed += 1;
+                continue;
+            }
+
+            let (w, h) = (before.width(), before.height());
+            let diff = scaled_abs_diff(&before, &after);
+            let triptych = compose_triptych(&before, &after, &diff);
+            let out_path = phase_out.join(format!("{id}.png"));
+            triptych.save(&out_path)?;
+            let max_diff = max_channel_diff(&before, &after);
+            println!(
+                "[{phase}] {id}: CHANGED ({w}x{h}, max channel diff {max_diff}) → {}",
+                out_path.display()
+            );
+            total_changed += 1;
+        }
+    }
+
+    println!();
+    println!(
+        "=== render-golden-diff DONE: {total_changed} changed, {total_unchanged} unchanged, {total_new} new ===",
+    );
+    if total_changed > 0 {
+        println!("Inspect triptychs under {}", output_root.display());
+        println!("If the changes are intentional, commit the goldens as a separate commit:");
+        println!("  git commit -m 'goldens: update for <reason>'");
+    }
+    Ok(())
+}
+
+enum GitShowErr {
+    /// File doesn't exist in HEAD (a brand-new fixture). Caller should skip.
+    NotInIndex,
+    /// Anything else (binary not present, repo not initialized, etc).
+    Other(String),
+}
+
+fn git_show_head(path: &Path) -> Result<Vec<u8>, GitShowErr> {
+    let arg = format!("HEAD:{}", path.display());
+    let output = std::process::Command::new("git")
+        .arg("show")
+        .arg(&arg)
+        .output()
+        .map_err(|e| GitShowErr::Other(format!("spawn git: {e}")))?;
+    if output.status.success() {
+        return Ok(output.stdout);
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // git show emits this message both for missing path and missing ref —
+    // checking for the path-specific phrase is the cleanest signal.
+    if stderr.contains("does not exist") || stderr.contains("exists on disk, but not in") {
+        return Err(GitShowErr::NotInIndex);
+    }
+    Err(GitShowErr::Other(stderr.into_owned()))
+}
+
+/// Per-pixel max channel absolute diff, scaled ×4 + clamped to 255 so that
+/// small differences (the common case after a math-neutral-ish refactor)
+/// remain visible. Output is RGBA with alpha=255 throughout.
+fn scaled_abs_diff(a: &image::RgbaImage, b: &image::RgbaImage) -> image::RgbaImage {
+    let (w, h) = a.dimensions();
+    let mut out = image::ImageBuffer::new(w, h);
+    for y in 0..h {
+        for x in 0..w {
+            let pa = a.get_pixel(x, y).0;
+            let pb = b.get_pixel(x, y).0;
+            let mut d = 0u32;
+            for c in 0..4 {
+                let cd = pa[c].abs_diff(pb[c]) as u32;
+                if cd > d {
+                    d = cd;
+                }
+            }
+            let scaled = (d * 4).min(255) as u8;
+            out.put_pixel(x, y, image::Rgba([scaled, scaled, scaled, 255]));
+        }
+    }
+    out
+}
+
+fn max_channel_diff(a: &image::RgbaImage, b: &image::RgbaImage) -> u8 {
+    let mut max = 0u8;
+    for (pa, pb) in a.pixels().zip(b.pixels()) {
+        for c in 0..4 {
+            let d = pa.0[c].abs_diff(pb.0[c]);
+            if d > max {
+                max = d;
+            }
+        }
+    }
+    max
+}
+
+/// Lay out three same-size images horizontally with thin separators.
+fn compose_triptych(
+    before: &image::RgbaImage,
+    after: &image::RgbaImage,
+    diff: &image::RgbaImage,
+) -> image::RgbaImage {
+    let (w, h) = before.dimensions();
+    let sep = 2u32;
+    let total_w = w * 3 + sep * 2;
+    let mut out = image::ImageBuffer::new(total_w, h);
+
+    // Fill with neutral gray so separators are visible.
+    for p in out.pixels_mut() {
+        *p = image::Rgba([200, 200, 200, 255]);
+    }
+
+    blit(&mut out, before, 0, 0);
+    blit(&mut out, after, w + sep, 0);
+    blit(&mut out, diff, (w + sep) * 2, 0);
+    out
+}
+
+fn compose_dim_mismatch(
+    before: &image::RgbaImage,
+    after: &image::RgbaImage,
+) -> image::RgbaImage {
+    let (bw, bh) = before.dimensions();
+    let (aw, ah) = after.dimensions();
+    let sep = 2u32;
+    let total_w = bw + aw + sep;
+    let total_h = bh.max(ah);
+    let mut out = image::ImageBuffer::new(total_w, total_h);
+    for p in out.pixels_mut() {
+        *p = image::Rgba([200, 200, 200, 255]);
+    }
+    blit(&mut out, before, 0, 0);
+    blit(&mut out, after, bw + sep, 0);
+    out
+}
+
+fn blit(dst: &mut image::RgbaImage, src: &image::RgbaImage, dx: u32, dy: u32) {
+    let (sw, sh) = src.dimensions();
+    let (dw, dh) = dst.dimensions();
+    let xe = (dx + sw).min(dw);
+    let ye = (dy + sh).min(dh);
+    for y in dy..ye {
+        for x in dx..xe {
+            let p = *src.get_pixel(x - dx, y - dy);
+            dst.put_pixel(x, y, p);
+        }
+    }
 }
 

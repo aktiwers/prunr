@@ -21,3 +21,9 @@ memory/
 # stock, etc.). Both golden harnesses walk this dir as a second fixture root
 # alongside `golden_data/` and apply the same bootstrap/verify rules.
 crates/prunr-core/tests/golden_data_local/
+
+# Triptych output from `cargo xtask render-golden-diff` — reviewer artifacts,
+# not committed. The actual goldens live under `tests/golden_data/`; this
+# directory just holds the visual `<before|after|diff>` PNGs used to inspect
+# math-changing refactors before commit.
+/golden-diffs/
