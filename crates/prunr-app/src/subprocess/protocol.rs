@@ -195,9 +195,7 @@ pub enum SubprocessEvent {
 /// PID-namespaced IPC temp dir, RAM-backed (/dev/shm) on Linux when available.
 /// The OnceLock initializer creates the dir AND sweeps any stale files left
 /// by a previous prunr process with the same PID, so writers (CLI downscale,
-/// inpaint bridge, manager) never race a later cleanup. Returns
-/// `&'static Path` — `.join(...)`/`PathBuf::from(...)` at the call site,
-/// no per-call PathBuf clone.
+/// inpaint bridge, manager) never race a later cleanup.
 pub fn ipc_temp_dir() -> &'static std::path::Path {
     use std::sync::OnceLock;
     static DIR: OnceLock<std::path::PathBuf> = OnceLock::new();
@@ -209,7 +207,7 @@ pub fn ipc_temp_dir() -> &'static std::path::Path {
 fn init_temp_dir_for_pid(pid: u32) -> std::path::PathBuf {
     let dir = resolve_temp_dir_path(pid);
     let _ = std::fs::create_dir_all(&dir);
-    sweep_dir(&dir);
+    crate::fs_util::sweep_dir_files(&dir);
     dir
 }
 
@@ -221,15 +219,8 @@ fn resolve_temp_dir_path(pid: u32) -> std::path::PathBuf {
     std::env::temp_dir().join(format!("prunr-ipc-{pid}"))
 }
 
-/// Remove every file directly inside `dir`. Delegates to the workspace
-/// helper so the IPC, drag-export, and history-disk cleanup paths share
-/// one implementation.
-fn sweep_dir(dir: &std::path::Path) {
-    crate::fs_util::sweep_dir_files(dir);
-}
-
-/// Like `sweep_dir`, restricted to files whose name starts with one of the
-/// supplied prefixes.
+/// Remove every file directly inside `dir`, restricted to files whose name
+/// starts with one of the supplied prefixes.
 fn sweep_dir_with_prefix(dir: &std::path::Path, prefixes: &[&str]) {
     let Ok(entries) = std::fs::read_dir(dir) else { return };
     for entry in entries.flatten() {
@@ -275,7 +266,7 @@ pub fn cleanup_seg_pipeline_temps() {
 /// Sweep every file in the IPC temp dir. Process-wide; never call from a
 /// path that could race a sibling subprocess — use a prefix-scoped helper.
 pub fn cleanup_ipc_temp() {
-    sweep_dir(ipc_temp_dir());
+    crate::fs_util::sweep_dir_files(ipc_temp_dir());
 }
 
 #[cfg(test)]
@@ -520,22 +511,6 @@ mod tests {
         for f in files {
             assert!(!dir.join(f).exists(), "expected {f} swept");
         }
-    }
-
-    #[test]
-    fn sweep_dir_removes_files_non_recursive() {
-        let scratch = tempfile::tempdir().unwrap();
-        let dir = scratch.path();
-        poison(dir, &["a.bin", "b.png"]);
-        std::fs::create_dir_all(dir.join("subdir")).unwrap();
-        std::fs::write(dir.join("subdir").join("nested.bin"), b"c").unwrap();
-
-        super::sweep_dir(dir);
-
-        assert_gone(dir, &["a.bin", "b.png"]);
-        // Non-recursive: subdir + its contents survive.
-        assert!(dir.join("subdir").is_dir());
-        assert!(dir.join("subdir").join("nested.bin").exists());
     }
 
     #[test]
