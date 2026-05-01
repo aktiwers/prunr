@@ -255,11 +255,28 @@ pub fn run_worker() -> ! {
                 let ipc = ipc_dir.clone();
 
                 pool.spawn(move || {
+                    // Hoist chain_path so every early-return path can clean up
+                    // the parent-written temp files (img + optional chain) via
+                    // `cleanup_ipc_temps`. Forgetting the chain leaks one
+                    // ~50 MB file in `/dev/shm` per cancelled / failed dispatch.
+                    let chain_path = chain_input.as_ref().map(|ci| ci.path.clone());
+                    let chain_img: Option<image::DynamicImage> = chain_input.and_then(|ci| {
+                        let data = std::fs::read(&ci.path).ok()?;
+                        let rgba = image::RgbaImage::from_raw(ci.width, ci.height, data)?;
+                        Some(image::DynamicImage::ImageRgba8(rgba))
+                    });
+                    let cleanup_inputs = || {
+                        let mut paths: Vec<&std::path::Path> = vec![image_path.as_path()];
+                        if let Some(p) = chain_path.as_deref() { paths.push(p); }
+                        cleanup_ipc_temps(&ipc, &paths);
+                    };
+
                     if is_item_cancelled(&cancelled_items, item_id) {
                         let _ = evt_tx.send(SubprocessEvent::ImageError {
                             item_id,
                             error: CANCELLED_ERR_MSG.into(),
                         });
+                        cleanup_inputs();
                         in_flight.fetch_sub(1, Ordering::AcqRel);
                         return;
                     }
@@ -272,18 +289,11 @@ pub fn run_worker() -> ! {
                                 item_id,
                                 error: format!("Failed to read image: {e}"),
                             });
+                            cleanup_inputs();
                             in_flight.fetch_sub(1, Ordering::AcqRel);
                             return;
                         }
                     };
-
-                    // Read chain input if present
-                    let chain_path = chain_input.as_ref().map(|ci| ci.path.clone());
-                    let chain_img: Option<image::DynamicImage> = chain_input.and_then(|ci| {
-                        let data = std::fs::read(&ci.path).ok()?;
-                        let rgba = image::RgbaImage::from_raw(ci.width, ci.height, data)?;
-                        Some(image::DynamicImage::ImageRgba8(rgba))
-                    });
 
                     // Weighted semaphore: acquire pixel units proportional to image size.
                     // Small images run in parallel; large images throttle automatically.
@@ -354,10 +364,8 @@ pub fn run_worker() -> ! {
                                         item_id,
                                         error: "segmentation engine not initialized".into(),
                                     });
+                                    cleanup_inputs();
                                     in_flight.fetch_sub(1, Ordering::AcqRel);
-                                    if image_path.starts_with(ipc.as_ref()) {
-                                        let _ = std::fs::remove_file(&image_path);
-                                    }
                                     return;
                                 };
                                 let decoded = match prunr_core::load_image_from_bytes(&img_bytes) {
@@ -366,10 +374,8 @@ pub fn run_worker() -> ! {
                                         let _ = evt_tx.send(SubprocessEvent::ImageError {
                                             item_id, error: e.to_string(),
                                         });
+                                        cleanup_inputs();
                                         in_flight.fetch_sub(1, Ordering::AcqRel);
-                                        if image_path.starts_with(ipc.as_ref()) {
-                                            let _ = std::fs::remove_file(&image_path);
-                                        }
                                         return;
                                     }
                                 };
@@ -602,17 +608,7 @@ pub fn run_worker() -> ! {
                         });
                     }
 
-                    // Clean up temp files only (not user's original files).
-                    // Files in the IPC temp dir were created by the parent for this subprocess.
-                    if image_path.starts_with(ipc.as_ref()) {
-                        let _ = std::fs::remove_file(&image_path);
-                    }
-                    if let Some(ref p) = chain_path {
-                        if p.starts_with(ipc.as_ref()) {
-                            let _ = std::fs::remove_file(p);
-                        }
-                    }
-
+                    cleanup_inputs();
                     in_flight.fetch_sub(1, Ordering::AcqRel);
                 });
             }
