@@ -48,7 +48,7 @@ pub(crate) fn card_action(
     }
 }
 
-fn disk_usage_bytes() -> u64 {
+fn disk_usage_bytes_uncached() -> u64 {
     let Some(dir) = on_demand_dir() else { return 0 };
     REGISTRY.iter().filter_map(|d| match d.source {
         ModelSource::OnDemand { filename, .. } => {
@@ -56,6 +56,28 @@ fn disk_usage_bytes() -> u64 {
         }
         _ => None,
     }).sum()
+}
+
+/// 1 s TTL cache around the per-OnDemand-model `fs::metadata` walk —
+/// the modal repaints every frame while the user drags a scrollbar
+/// or hovers a row, which fired ~7 stat syscalls per frame (~420
+/// stat/sec on cold-cache disk). Same TTL pattern as
+/// `hardware::available_ram_bytes_throttled`.
+fn disk_usage_bytes() -> u64 {
+    use std::sync::{Mutex, OnceLock};
+    use std::time::Instant;
+    static CACHE: OnceLock<Mutex<Option<(Instant, u64)>>> = OnceLock::new();
+    let cell = CACHE.get_or_init(|| Mutex::new(None));
+    let mut guard = cell.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let now = Instant::now();
+    if let Some((at, bytes)) = *guard {
+        if now.duration_since(at).as_secs_f32() < 1.0 {
+            return bytes;
+        }
+    }
+    let bytes = disk_usage_bytes_uncached();
+    *guard = Some((now, bytes));
+    bytes
 }
 
 /// Returns true when the user closed the modal this frame.
