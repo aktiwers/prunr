@@ -351,6 +351,11 @@ fn install_runtime() -> anyhow::Result<()> {
             stage_to = Some(PathBuf::from(extra.get(i + 1)
                 .ok_or_else(|| anyhow::anyhow!("--stage-to requires a directory argument"))?));
             i += 2;
+        } else if arg.starts_with("--") {
+            // Fail loud on unknown flags so a typo like `--stagee-to`
+            // doesn't silently get swallowed as a positional target-name
+            // and create `<data_dir>/runtimes/--stagee-to/`.
+            anyhow::bail!("unknown flag: {arg}");
         } else {
             target_name = Some(arg.clone());
             i += 1;
@@ -366,6 +371,16 @@ fn install_runtime() -> anyhow::Result<()> {
     println!("Package:  {package} {version}");
 
     let target_dir = if let Some(stage) = &stage_to {
+        // Defense-in-depth: reject absolute paths and any `..`
+        // component so a typo like `--stage-to ..` (which would
+        // delete the parent of cwd a few lines below via
+        // `remove_dir_all`) fails loud instead of damaging.
+        if stage.is_absolute() {
+            anyhow::bail!("--stage-to must be a relative path: {}", stage.display());
+        }
+        if stage.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+            anyhow::bail!("--stage-to must not contain `..`: {}", stage.display());
+        }
         println!("Stage-to: {}", stage.display());
         stage.clone()
     } else {
@@ -400,8 +415,9 @@ fn install_runtime() -> anyhow::Result<()> {
         }
     };
     let mut hooks = ri::DownloadHooks::progress_only(&mut on_progress);
+    // SHA verification is folded into download_wheel's retry loop —
+    // bytes returning here are already verified.
     let bytes = ri::download_wheel(&wheel, &mut hooks).map_err(|e| anyhow::anyhow!(e))?;
-    ri::verify_sha256(&bytes, &wheel.sha256).map_err(|e| anyhow::anyhow!(e))?;
 
     if target_dir.exists() {
         std::fs::remove_dir_all(&target_dir)?;

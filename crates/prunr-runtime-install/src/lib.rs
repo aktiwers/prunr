@@ -91,6 +91,11 @@ pub fn pick_wheel_for_host(urls: &[serde_json::Value]) -> Result<WheelInfo, Stri
     )?;
     let pick = |require_cp313: bool| urls.iter().find_map(|u| {
         let name = u["filename"].as_str()?;
+        // Reject sdists / non-wheel artifacts up front so a future PyPI
+        // release that includes a wheel-flavour token in a `.tar.gz`
+        // filename can't slip through to `extract_wheel` (which would
+        // fail at `ZipArchive::new` with a confusing error).
+        if !name.ends_with(".whl") { return None; }
         if !name.contains(host_token) { return None; }
         if require_cp313 && !name.contains("cp313") { return None; }
         Some(WheelInfo {
@@ -152,17 +157,27 @@ impl<'a> DownloadHooks<'a> {
 }
 
 /// Wraps `download_wheel_attempt` in up to 3 tries with exponential
-/// backoff. Transient errors (network timeout, 5xx, broken connection)
-/// retry; fatal errors (404, user cancel) fail fast. Mirrors the same
-/// policy as the model `download_manager` so users see consistent retry
-/// behaviour across runtime + model installs.
+/// backoff. Transient errors (network timeout, 5xx, broken connection,
+/// SHA256 mismatch) retry; fatal errors (404, user cancel) fail fast.
+/// Mirrors the same policy as the model `download_manager` so users see
+/// consistent retry behaviour across runtime + model installs.
+///
+/// The SHA verification happens INSIDE the attempt (not after `download_wheel`
+/// returns). A transient corruption — CDN edge cache delivering a partial
+/// payload, mid-flight bit flip, MITM-injected garbage — would otherwise
+/// fail fast with one shot at the network; folding it inside lets the
+/// retry loop give it ~3 chances before escalating.
 pub fn download_wheel(info: &WheelInfo, hooks: &mut DownloadHooks<'_>) -> Result<bytes::Bytes, String> {
     let cancel = Arc::clone(&hooks.cancel);
     retry_with_backoff(&cancel, 3, 500, |attempt| {
         if attempt > 0 {
             tracing::info!(attempt, url = %info.url, "retrying wheel download");
         }
-        download_wheel_attempt(info, hooks)
+        let bytes = download_wheel_attempt(info, hooks)?;
+        if let Err(msg) = verify_sha256(&bytes, &info.sha256) {
+            return Err(DlError::transient(msg));
+        }
+        Ok(bytes)
     }).map_err(|e| e.message)
 }
 
@@ -284,9 +299,18 @@ where
 /// Extract a wheel into `target_dir`, applying `repackage_target_filename`.
 /// Caller owns dir creation + safety guards (e.g. refusing
 /// non-`runtimes/` paths) — that's install-time policy.
+///
+/// Skip-on-collision: when two archive entries map to the same
+/// canonical target (e.g. an `onnxruntime-openvino` wheel that ships
+/// both `libonnxruntime.so` and `libonnxruntime.so.1.24.1` — the
+/// latter via the version-strip arm in `repackage_target_filename`),
+/// keep the first write and skip subsequent ones. Without this guard,
+/// a 0-byte symlink-flattened entry could shadow the real dylib if it
+/// happened to come second in archive order.
 pub fn extract_wheel(bytes: &[u8], target_dir: &std::path::Path) -> Result<PathBuf, String> {
     let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes))
         .map_err(|e| format!("zip parse: {e}"))?;
+    let mut written: std::collections::HashSet<String> = std::collections::HashSet::new();
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i)
             .map_err(|e| format!("zip entry: {e}"))?;
@@ -294,7 +318,12 @@ pub fn extract_wheel(bytes: &[u8], target_dir: &std::path::Path) -> Result<PathB
         let Some(target_filename) = repackage_target_filename(&name) else {
             continue;
         };
-        let dest = target_dir.join(target_filename);
+        if !written.insert(target_filename.clone()) {
+            // Already wrote this canonical target — keep the first one,
+            // skip the duplicate.
+            continue;
+        }
+        let dest = target_dir.join(&target_filename);
         let mut out = std::fs::File::create(&dest)
             .map_err(|e| format!("create {}: {e}", dest.display()))?;
         std::io::copy(&mut entry, &mut out)
@@ -321,25 +350,35 @@ pub fn dylib_name() -> &'static str {
 mod tests {
     use super::*;
 
-    /// `release.yml` (Linux + Windows staging steps) hard-codes the
-    /// same version this const carries. Cargo doesn't link CI YAML, so
-    /// drift would silently ship mismatched bundled-CPU vs runtime-store
-    /// runtimes. This test reads the YAML file and fails if the two
-    /// don't match.
+    /// Both `release.yml` (Linux + Windows staging steps) and `ci.yml`
+    /// (Linux ORT runtime install for the e2e test) hard-code the same
+    /// version this const carries. Cargo doesn't link CI YAML, so drift
+    /// would silently ship mismatched bundled-CPU vs runtime-store
+    /// runtimes (release) or run e2e tests against a stale runtime
+    /// (ci). This test reads both YAMLs and asserts every
+    /// `install-runtime onnxruntime <ver>` invocation matches the const.
+    /// Counts each file's occurrences too — drift in just one of two
+    /// release.yml call sites would be silently accepted by a plain
+    /// `contains` check.
     #[test]
-    fn release_yml_pins_match_const() {
-        let yml = std::fs::read_to_string(
-            concat!(env!("CARGO_MANIFEST_DIR"), "/../../.github/workflows/release.yml")
-        ).expect("release.yml should exist next to the workspace root");
-        // Both staging steps invoke: cargo xtask install-runtime onnxruntime <ver>
-        // — count occurrences of the pinned version after that prefix.
+    fn yaml_pins_match_const() {
+        // (path, expected occurrence count)
+        let cases: &[(&str, usize)] = &[
+            ("/../../.github/workflows/release.yml", 2), // Linux + Windows staging
+            ("/../../.github/workflows/ci.yml",      1), // Linux ORT install before tests
+        ];
         let needle = format!("install-runtime onnxruntime {}", PINNED_ORT_VERSION);
-        assert!(
-            yml.contains(&needle),
-            "release.yml must invoke `install-runtime onnxruntime {}` (PINNED_ORT_VERSION); \
-             update both sites if the version bumps",
-            PINNED_ORT_VERSION,
-        );
+        for (rel, expected) in cases {
+            let abs = format!("{}{rel}", env!("CARGO_MANIFEST_DIR"));
+            let yml = std::fs::read_to_string(&abs)
+                .unwrap_or_else(|e| panic!("read {abs}: {e}"));
+            let count = yml.matches(&needle).count();
+            assert_eq!(
+                count, *expected,
+                "{rel}: expected {expected} occurrence(s) of `{needle}`, found {count}. \
+                 Did a version bump miss a call site?",
+            );
+        }
     }
     use serde_json::json;
 
@@ -446,6 +485,27 @@ mod tests {
             "digests": {"sha256": "dd".repeat(32)}, "size": 0,
         })];
         assert!(pick_wheel_for_host(&urls).is_err());
+    }
+
+    /// PyPI's URL list also includes the source distribution
+    /// (`onnxruntime-X.Y.Z.tar.gz`). The picker must skip non-`.whl`
+    /// entries even if the host_token happens to appear in the
+    /// filename — without this guard, `extract_wheel` would later try
+    /// to parse a tarball as a zip and fail with a confusing error.
+    #[test]
+    fn pick_wheel_skips_sdist_even_with_matching_token() {
+        let Some(token) = host_pypi_token() else { return; };
+        let urls = vec![
+            json!({"filename": format!("ort-{token}.tar.gz"),
+                   "url": "https://example.com/sdist.tar.gz",
+                   "digests": {"sha256": "ee".repeat(32)}, "size": 0}),
+            json!({"filename": format!("ort-cp313-cp313-{token}.whl"),
+                   "url": "https://example.com/cp313.whl",
+                   "digests": {"sha256": "ff".repeat(32)}, "size": 0}),
+        ];
+        let pick = pick_wheel_for_host(&urls).expect("wheel pick should succeed");
+        assert_eq!(pick.url, "https://example.com/cp313.whl",
+            "must skip sdist and pick the .whl");
     }
 
     #[test]
@@ -556,7 +616,12 @@ mod tests {
             calls += 1;
             Err(DlError::transient("flaky"))
         });
-        assert!(r.is_err());
+        let err = r.expect_err("cancelled retry should error");
+        assert_eq!(
+            err.message, "cancelled",
+            "cancelled retry must surface the canonical \"cancelled\" message — got {:?}",
+            err.message,
+        );
         assert!(calls < 5, "cancel during backoff must short-circuit");
     }
 }
