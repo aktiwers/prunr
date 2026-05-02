@@ -195,15 +195,22 @@ pub fn resolve_tier(old: &ProcessingRecipe, new: &ProcessingRecipe) -> RequiredT
         if old.inference.uses_segmentation != new.inference.uses_segmentation {
             return RequiredTier::FullPipeline;
         }
-        // Only `uses_edge_detection` flipped with seg stable.
-        if new.inference.uses_edge_detection {
-            // Enabling edges: seg tensor cached → skip seg inference, just
-            // run DexiNed on the masked image.
-            return RequiredTier::AddEdgeInference;
+        match (old.inference.uses_edge_detection, new.inference.uses_edge_detection) {
+            // Enabling edges (or already on with `input_transform` flipped):
+            // seg tensor cached → skip seg inference, run DexiNed on the
+            // masked image.
+            (false, true) | (true, true) => return RequiredTier::AddEdgeInference,
+            // Disabling edges: seg tensor still cached. Concurrent edge-recipe
+            // or input_transform drift is dead state — regenerate the mask
+            // without lines instead of dispatching wasted EdgeRerun work.
+            (true, false) => return RequiredTier::MaskRerun,
+            // Both edges off: only `input_transform` could differ here, and
+            // it's dead state with edges off (the field's only effect is on
+            // the DexiNed input). Fall through to mask/edge/composite checks
+            // so a simultaneous mask/edge/composite change still wins; if
+            // nothing else changed the bottom of the function returns Skip.
+            (false, false) => {}
         }
-        // Disabling edges: seg tensor still cached, re-apply mask to regen
-        // the result without edges. Falls through to the mask-tier check so
-        // a simultaneous mask change still wins over it.
     }
     if old.mask != new.mask {
         return RequiredTier::MaskRerun;
@@ -211,14 +218,13 @@ pub fn resolve_tier(old: &ProcessingRecipe, new: &ProcessingRecipe) -> RequiredT
     if old.edge != new.edge {
         return RequiredTier::EdgeRerun;
     }
-    // Inference flipped but mask/edge/composite identical. If the flip was
-    // "disable edges", we still need to regenerate the result without edges,
-    // which is a MaskRerun. (Pure equality was caught by the old==new check
-    // at the top.)
-    if old.inference != new.inference {
-        return RequiredTier::MaskRerun;
+    if old.composite != new.composite {
+        return RequiredTier::CompositeOnly;
     }
-    RequiredTier::CompositeOnly
+    // Reachable only via the (false, false) input_transform fall-through:
+    // recipes differ but only in dead-state input_transform. Output is
+    // bit-identical so the cheapest tier — Skip — is correct.
+    RequiredTier::Skip
 }
 
 #[cfg(test)]
@@ -547,6 +553,23 @@ mod tests {
             ("line only", base.clone(), with_line(0.9), RequiredTier::EdgeRerun),
             ("model only", base.clone(), make_recipe(ModelKind::BiRefNetLite, 1.0, None), RequiredTier::FullPipeline),
             ("input_transform+edges → add_edge", edges_on(), with_input_transform(InputTransform::Grayscale), RequiredTier::AddEdgeInference),
+            // input_transform with edges off both sides: dead state (the
+            // field only affects the DexiNed input), so output is bit-
+            // identical → Skip rather than MaskRerun.
+            ("input_transform alone, edges off → skip", base.clone(), {
+                let mut r = base.clone();
+                r.inference.input_transform = InputTransform::Grayscale;
+                r
+            }, RequiredTier::Skip),
+            // Edges on→off with concurrent edge-recipe drift: the edge
+            // recipe is dead state once edges are off, so MaskRerun beats
+            // EdgeRerun (no point re-composing edges that won't render).
+            ("edges on→off + line_strength → mask", edges_on(), {
+                let mut r = edges_on();
+                r.inference.uses_edge_detection = false;
+                r.edge.line_strength_bits = 0.9f32.to_bits();
+                r
+            }, RequiredTier::MaskRerun),
             // Priority: mask changes dominate composite changes.
             ("gamma+bg → mask", base.clone(), {
                 let mut r = with_gamma(1.5);
