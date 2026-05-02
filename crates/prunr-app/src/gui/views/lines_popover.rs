@@ -27,6 +27,18 @@ fn mode_label(mode: LineMode) -> &'static str {
     }
 }
 
+/// Static-str sketch-button label per mode. The codepoint is hand-baked
+/// (matching `ICON_BRUSH = "\u{e3ae}"`) so the label survives a render
+/// closure without per-frame `format!` allocation. Three constants beat
+/// 60 String allocations/sec for a piece of visual chrome.
+fn sketch_button_label(mode: LineMode) -> &'static str {
+    match mode {
+        LineMode::Off => "\u{e3ae}  Sketch: Off",
+        LineMode::EdgesOnly => "\u{e3ae}  Sketch: Full",
+        LineMode::SubjectOutline => "\u{e3ae}  Sketch: Subject",
+    }
+}
+
 /// Short description for the dropdown list (shown beneath the title).
 fn mode_description(mode: LineMode) -> &'static str {
     match mode {
@@ -105,11 +117,7 @@ pub fn render(
     subject_available: bool,
 ) -> LinesChange {
     let pop_id = egui::Id::new("lines_popover");
-    let label = format!(
-        "{}  Sketch: {}",
-        ICON_BRUSH.codepoint,
-        mode_label(settings.line_mode)
-    );
+    let label = sketch_button_label(settings.line_mode);
     let accent = settings.line_mode != LineMode::Off;
 
     let btn = egui::Button::new(

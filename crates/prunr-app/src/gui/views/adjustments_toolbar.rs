@@ -9,8 +9,17 @@
 //! Returns a `ToolbarChange` summarizing WHAT changed so the caller can
 //! invalidate the right textures and schedule live-preview reruns.
 
+use std::sync::LazyLock;
+
 use egui::{RichText, Ui};
 use egui_material_icons::icons::*;
+
+/// Pre-baked "Bypassed" combobox label. Built once on first access so
+/// the model dropdown's selected-text branch doesn't allocate a fresh
+/// String per frame the modal is open. The leading codepoint mirrors
+/// `ICON_BLOCK.codepoint` — pinned by `bypassed_label_codepoint_matches`.
+static BYPASSED_LABEL: LazyLock<String> =
+    LazyLock::new(|| format!("{}  Bypassed", ICON_BLOCK.codepoint));
 
 use crate::gui::brush_state::BrushState;
 use crate::gui::item_settings::ItemSettings;
@@ -1259,10 +1268,10 @@ fn render_model_dropdown(
         ui.spacing_mut().interact_size.y = theme::CHIP_HEIGHT;
         // Inpaint doesn't use seg ⇒ mask_active is false, but it's not
         // "bypassed" — it's the Eraser model. Show the model name.
-        let selected_text = if mask_active || app_settings.model.is_inpaint() {
+        let selected_text: String = if mask_active || app_settings.model.is_inpaint() {
             model_label(app_settings.model, true)
         } else {
-            format!("{}  Bypassed", ICON_BLOCK.codepoint)
+            BYPASSED_LABEL.clone()
         };
         egui::ComboBox::from_id_salt("adjustments_model")
             .selected_text(
