@@ -953,8 +953,19 @@ pub fn run_worker() -> ! {
                 // Release writes in `process_inpaint_with`.
                 let pump_handle = std::thread::spawn(move || {
                     let mut last_current = u32::MAX;
-                    while !pump_done_for_thread.load(Ordering::Acquire) {
+                    loop {
+                        if pump_done_for_thread.load(Ordering::Acquire) { break; }
                         let (current, total) = progress_for_pump.read();
+                        // Re-check after the read but before the send. Without
+                        // this, the worker could flip pump_done between the
+                        // top-of-loop check and the send, putting an
+                        // `InpaintProgress` on the wire AHEAD of the
+                        // `InpaintDone` the worker is about to send. The
+                        // Cleanup::drop's `join()` blocks until this iteration
+                        // finishes, so the pre-send re-check is the only way
+                        // to honour the "no Progress after Done" invariant
+                        // documented above.
+                        if pump_done_for_thread.load(Ordering::Acquire) { break; }
                         if current != last_current {
                             let _ = evt_tx_for_pump.send(SubprocessEvent::InpaintProgress {
                                 item_id, current, total,
