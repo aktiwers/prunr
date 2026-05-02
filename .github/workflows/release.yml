@@ -11,6 +11,13 @@ on:
 permissions:
   contents: write
 
+# Single source of truth for the custom-CoreML ORT version. Paired with
+# `prunr_runtime_install::MACOS_CORE_ML_ORT_VERSION`; a drift test in
+# that crate reads this YAML and asserts the values match. Bumping the
+# version here without bumping the const (or vice versa) fails the test.
+env:
+  MACOS_ORT_VERSION: '1.20.0'
+
 jobs:
   build:
     name: Build (${{ matrix.name }})
@@ -105,28 +112,30 @@ jobs:
           # subdir on macOS — verified empirically (run #5 failed because we
           # cached the wrong path).
           path: ort-build/Release
-          key: ort-coreml-1.20.0-macos-aarch64-v2
+          key: ort-coreml-${{ env.MACOS_ORT_VERSION }}-macos-aarch64-v2
 
       - name: Install ORT build prereqs (macOS, cache miss)
         if: matrix.name == 'macos-aarch64' && steps.ort-cache.outputs.cache-hit != 'true'
         run: |
-          # ORT 1.20.0 pulls eigen via FetchContent from a pinned commit on
-          # gitlab.com, which the runner network blocks/rate-limits in 2026.
-          # `brew install eigen` provides a stable Eigen3 install with cmake
-          # config files; build.sh's --use_preinstalled_eigen makes ORT
-          # find_package(Eigen3) instead of downloading.
+          # The pinned ORT release pulls eigen via FetchContent from a
+          # pinned commit on gitlab.com, which the runner network
+          # blocks/rate-limits in 2026. `brew install eigen` provides a
+          # stable Eigen3 install with cmake config files; build.sh's
+          # --use_preinstalled_eigen makes ORT find_package(Eigen3)
+          # instead of downloading.
           brew install eigen
 
       - name: Build ORT with CoreML (macOS, cache miss)
         if: matrix.name == 'macos-aarch64' && steps.ort-cache.outputs.cache-hit != 'true'
         run: |
-          git clone --depth 1 --branch v1.20.0 \
+          git clone --depth 1 --branch "v${MACOS_ORT_VERSION}" \
             https://github.com/microsoft/onnxruntime.git ort-src
           cd ort-src
           # CMAKE_POLICY_VERSION_MINIMUM=3.5: macOS runners ship CMake 4.x,
-          # which drops support for cmake_minimum_required < 3.5. ORT 1.20.0's
-          # transitive dep google_nsync still declares 2.x. The minimum-policy
-          # override lets the legacy CMakeLists configure under modern CMake.
+          # which drops support for cmake_minimum_required < 3.5. The
+          # pinned ORT's transitive dep google_nsync still declares 2.x.
+          # The minimum-policy override lets the legacy CMakeLists
+          # configure under modern CMake.
           ./build.sh \
             --config Release \
             --use_coreml \
