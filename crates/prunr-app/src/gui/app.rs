@@ -1855,9 +1855,14 @@ impl PrunrApp {
         self.show_original = false;
     }
 
-    /// Free full-resolution `result_rgba` for every Done item that isn't the
-    /// selected one. The compressed history copy stays, so a later selection
-    /// can restore on demand (see `restore_selected_result_from_history`).
+    /// Free full-resolution `result_rgba` for every Done item that isn't
+    /// the selected one. Places an in-memory placeholder at
+    /// `history.back()` so `restore_selected_result_from_history` can
+    /// read pixels back instantly, then kicks an off-thread zstd
+    /// compression that swaps the placeholder for `HistorySlot::Compressed`
+    /// once it returns (drained by `pump_history_demote_results`).
+    /// Pre-fix this ran zstd inline — a 50-image 4K batch froze the UI
+    /// for ~2.5 s on every selection change.
     fn evict_result_rgba_for_background_items(&mut self, selected_idx: usize) {
         for (i, item) in self.batch.items.iter_mut().enumerate() {
             if i == selected_idx || item.result_rgba.is_none() || item.status != BatchStatus::Done {
@@ -1865,15 +1870,49 @@ impl PrunrApp {
             }
             if let Some(rgba) = item.result_rgba.take() {
                 let recipe = item.applied_recipe.clone();
+                let placeholder = HistoryEntry {
+                    slot: HistorySlot::InMemory(rgba.clone()),
+                    recipe: recipe.clone(),
+                };
                 if let Some(back) = item.history.back_mut() {
                     back.cleanup();
-                    *back = HistoryEntry::new(rgba, recipe);
+                    *back = placeholder;
                 } else {
-                    item.history.push_back(HistoryEntry::new(rgba, recipe));
+                    item.history.push_back(placeholder);
                 }
+                let id = item.id;
+                let tx = self.batch.bg_io.history_demote_tx.clone();
+                let slots = self.batch.bg_io.decode_slots.clone();
+                std::thread::spawn(move || {
+                    // Park if every decode slot is busy — same backpressure as
+                    // the texture-prep / decode workers, so a Process All
+                    // burst can't fan out N zstd encoders simultaneously.
+                    let _slot = slots.acquire();
+                    if let Ok(entry) = super::history_disk::compress_to_ram(&rgba) {
+                        let _ = tx.send((id, entry, recipe));
+                    }
+                    // On compression failure (rare — disk-full / OOM), the
+                    // InMemory placeholder stays. Memory is still freed on
+                    // the result side because `result_rgba` was dropped.
+                });
             }
             item.result_texture = None;
             item.result_tex_pending = false;
+        }
+    }
+
+    /// Replace each in-memory placeholder at `history.back()` with the
+    /// compressed slot just produced off-thread. Recipe match guards
+    /// against a fresh re-Process having pushed a new entry while the
+    /// compression was in flight — in that case we drop the result
+    /// rather than clobber the user's current state.
+    fn pump_history_demote_results(&mut self) {
+        while let Ok((id, entry, recipe)) = self.batch.bg_io.history_demote_rx.try_recv() {
+            let Some(item) = self.batch.find_by_id_mut(id) else { continue };
+            let Some(back) = item.history.back_mut() else { continue };
+            if back.recipe != recipe { continue; }
+            if !matches!(&back.slot, HistorySlot::InMemory(_)) { continue; }
+            back.slot = HistorySlot::Compressed(entry);
         }
     }
 
@@ -2469,6 +2508,7 @@ impl PrunrApp {
         }
 
         self.pump_thumbnail_results(ctx);
+        self.pump_history_demote_results();
 
 
         let id_floor = self.batch.next_id;
