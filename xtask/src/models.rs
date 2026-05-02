@@ -75,3 +75,32 @@ pub(crate) const MODELS: &[ModelSpec] = &[
         sha256: "523e84eb2ec2df933714cbab6983627a9909f9f23cd848fbbe977356c54bdaa0",
     },
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use prunr_models::ModelSource;
+
+    /// xtask `MODELS` and `prunr_models::REGISTRY` both carry SHA256s
+    /// for OnDemand artefacts — divergent values silently produce
+    /// dev-mode files that the in-app DownloadManager rejects (or vice
+    /// versa). The xtask download uses its own `sha256` field; the
+    /// in-app `OnDemand` path verifies against the registry. Pin the
+    /// two together so a one-sided edit fails the build.
+    #[test]
+    fn xtask_models_match_registry_ondemand_sha256() {
+        for spec in MODELS {
+            let Some(desc) = prunr_models::descriptor(spec.id) else { continue };
+            let ModelSource::OnDemand { sha256: registry_sha, filename, .. } = desc.source
+            else {
+                continue;
+            };
+            assert_eq!(
+                registry_sha, spec.sha256,
+                "SHA256 drift for {:?} ({}): xtask has {:?}, registry has {:?}. \
+                 The same artefact must hash the same in both places.",
+                spec.id, filename, spec.sha256, registry_sha,
+            );
+        }
+    }
+}
