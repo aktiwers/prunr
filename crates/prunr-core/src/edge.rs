@@ -439,7 +439,19 @@ pub fn compose_subject_outline(
     edge: &crate::EdgeSettings,
 ) -> RgbaImage {
     use crate::{EdgeScale, LineStyle};
-    let active = &edge_res.tensors[edge.edge_scale as usize];
+    // DualScale layers Fine + Bold by definition (matches the chip
+    // tooltip + types.rs:336 doc-comment). The UI greys out the scale
+    // chip in this mode but presets / CLI flags can still arrive with
+    // `edge_scale = Bold`; without this guard, primary and secondary
+    // would both come from the Bold tensor and the second blend would
+    // overwrite the first — the user sees single-tone Bold output
+    // labelled "Dual scale".
+    let primary_scale = if matches!(edge.line_style, LineStyle::DualScale { .. }) {
+        EdgeScale::Fine
+    } else {
+        edge.edge_scale
+    };
+    let active = &edge_res.tensors[primary_scale as usize];
     let primary_mask = tensor_to_edge_mask(
         active, edge_res.height, edge_res.width,
         masked_rgba.width(), masked_rgba.height(),
@@ -620,6 +632,58 @@ mod tests {
         // With high-logit side → opaque red, zero-logit → transparent.
         let strong_red = out.get_pixel(0, 0);
         assert_eq!([strong_red[0], strong_red[1], strong_red[2]], [255, 0, 0]);
+    }
+
+    /// `LineStyle::DualScale` must always layer Fine + Bold tensors —
+    /// the chip docstring + tooltip say so. The UI greys out the scale
+    /// chip in DualScale mode, but presets / CLI flags can still
+    /// arrive with `edge_scale = Bold`. Without the guard in
+    /// `compose_subject_outline`, primary and secondary masks would
+    /// both come from the Bold tensor and the second blend would
+    /// overwrite the first — silently degenerating to single-tone
+    /// Bold. Build distinguishable per-scale tensors and assert Fine
+    /// drives the primary mask regardless of `edge.edge_scale`.
+    #[test]
+    fn dual_scale_uses_fine_for_primary_even_when_edge_scale_is_bold() {
+        let h = DEXINED_H as usize;
+        let w = DEXINED_W as usize;
+        let fine_tensor: Vec<f32> = vec![10.0; h * w];   // sigmoid → ~1
+        let bold_tensor: Vec<f32> = vec![-10.0; h * w];  // sigmoid → ~0
+        let edge_res = EdgeInferenceResult {
+            tensors: [
+                fine_tensor,
+                vec![0.0; h * w],
+                bold_tensor,
+                vec![0.0; h * w],
+            ],
+            height: DEXINED_H,
+            width: DEXINED_W,
+        };
+        let masked = RgbaImage::from_pixel(64, 48, image::Rgba([10, 10, 10, 255]));
+        let edge = crate::EdgeSettings {
+            line_strength: 0.5,
+            solid_line_color: None,
+            edge_thickness: 0,
+            // The bypass: user-supplied edge_scale = Bold while the
+            // pipeline is in DualScale mode. Pre-fix, primary would
+            // also be Bold (≈0) and the test pixel would stay [10,10,10].
+            edge_scale: crate::EdgeScale::Bold,
+            compose_mode: crate::ComposeMode::SubjectFilled,
+            line_style: crate::LineStyle::DualScale {
+                fine_color: [200, 80, 40],
+                bold_color: [0, 0, 200],
+            },
+            input_transform: crate::InputTransform::default(),
+        };
+        let out = compose_subject_outline(&edge_res, &masked, &edge);
+        let p = out.get_pixel(32, 24);
+        // Fine tensor saturates → primary mask ≈ 255 → blend pulls all
+        // the way to fine_color. Pre-fix this pixel would be ≈[10,10,10]
+        // (no Bold edges, so neither blend fires).
+        assert_eq!(
+            [p[0], p[1], p[2]], [200, 80, 40],
+            "DualScale primary must come from Fine tensor; got {:?}", p,
+        );
     }
 
     #[test]
