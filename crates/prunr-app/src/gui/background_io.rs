@@ -9,6 +9,18 @@ pub type FilterOnlyResult = (u64, Result<std::sync::Arc<image::RgbaImage>, Strin
 /// image clears `decode_pending` instead of leaving the item stuck.
 pub type DecodeResult = (u64, Result<std::sync::Arc<image::RgbaImage>, String>);
 
+/// History-eviction → off-thread compress → drain payload. The bg
+/// thread sends `(item_id, compressed_entry, recipe)` once
+/// `compress_to_ram` returns; the drain swaps the in-memory placeholder
+/// at `history.back()` for the compressed slot. Recipe is matched at
+/// drain time so a freshly-processed result can't be clobbered by a
+/// stale eviction.
+pub type HistoryDemoteResult = (
+    u64,
+    super::history_disk::CompressedEntry,
+    Option<prunr_core::ProcessingRecipe>,
+);
+
 /// Counting semaphore used to bound the number of simultaneously-decoding
 /// background threads. Without this, a 50-image Process All fans out 50
 /// threads each holding `compressed bytes + DynamicImage + RgbaImage`
@@ -77,6 +89,14 @@ pub struct BackgroundIO {
     /// while load + decode + `apply_fill_style` runs per item.
     pub filter_only_tx: mpsc::Sender<FilterOnlyResult>,
     pub filter_only_rx: mpsc::Receiver<FilterOnlyResult>,
+    /// Off-thread zstd compression of evicted background-item RGBAs.
+    /// Eviction places an in-memory placeholder at `history.back()` and
+    /// kicks a worker that compresses + posts here; drain swaps the
+    /// placeholder for `HistorySlot::Compressed`. Without this the
+    /// zstd encode (~10–50 ms per 4K image × N items) ran inline on
+    /// every selection change.
+    pub history_demote_tx: mpsc::Sender<HistoryDemoteResult>,
+    pub history_demote_rx: mpsc::Receiver<HistoryDemoteResult>,
     /// Bounds simultaneous decode/thumbnail/filter threads to
     /// `available_parallelism()`. Threads spawn immediately but park here
     /// until a slot opens, capping transient RAM at N × per-thread peak.
@@ -107,6 +127,7 @@ impl BackgroundIO {
         let (save_done_tx, save_done_rx) = mpsc::channel();
         let (tex_prep_tx, tex_prep_rx) = mpsc::channel();
         let (filter_only_tx, filter_only_rx) = mpsc::channel();
+        let (history_demote_tx, history_demote_rx) = mpsc::channel();
         let cap = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(4);
@@ -117,6 +138,7 @@ impl BackgroundIO {
             save_done_tx, save_done_rx,
             tex_prep_tx, tex_prep_rx,
             filter_only_tx, filter_only_rx,
+            history_demote_tx, history_demote_rx,
             decode_slots: Arc::new(DecodeSlots::new(cap)),
         }
     }
