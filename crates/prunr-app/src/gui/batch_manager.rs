@@ -87,10 +87,6 @@ impl BatchManager {
         self.items.get(self.selected_index)
     }
 
-    pub(crate) fn selected_item_mut(&mut self) -> Option<&mut BatchItem> {
-        self.items.get_mut(self.selected_index)
-    }
-
     /// Look up an item by id. Returns `None` if no batch item has that id —
     /// common when a worker event arrives after the item was removed.
     pub(crate) fn find_by_id(&self, id: u64) -> Option<&BatchItem> {
