@@ -21,6 +21,16 @@ use sha2::{Digest, Sha256};
 /// would surprise a user upgrading via Settings → Hardware.
 pub const PINNED_ORT_VERSION: &str = "1.24.1";
 
+/// Version of ONNX Runtime we build from source on macOS to enable the
+/// CoreML EP (no PyPI wheel ships this). Diverges from
+/// `PINNED_ORT_VERSION` on purpose: the CPU-only runtime ships at a
+/// newer release while the CoreML build is held back to the last
+/// version we have a known-good CMake recipe for. Mirrored in
+/// `.github/workflows/release.yml` as the `MACOS_ORT_VERSION` workflow
+/// env var; the `release_yml_macos_ort_matches_const` test asserts they
+/// stay in sync.
+pub const MACOS_CORE_ML_ORT_VERSION: &str = "1.20.0";
+
 /// Host runtime identifier — `linux-x64`, `macos-arm64`, etc. `unknown`
 /// for unsupported platforms; `host_pypi_token` rejects those explicitly.
 pub fn host_rid() -> &'static str {
@@ -380,6 +390,45 @@ mod tests {
             );
         }
     }
+    /// `release.yml` builds a custom ORT with CoreML on macOS — the
+    /// version is the workflow env var `MACOS_ORT_VERSION`, used to
+    /// drive the cache key + the `git clone --branch v<ver>` step.
+    /// Bumping `MACOS_CORE_ML_ORT_VERSION` here without bumping the
+    /// YAML (or vice versa) silently produces release artifacts at the
+    /// wrong version. This test also asserts the cache key + git clone
+    /// references go through `${{ env.MACOS_ORT_VERSION }}` rather than
+    /// hard-coded literals — without that interpolation a future
+    /// version bump would only update one of the two call sites and
+    /// the test would still pass.
+    #[test]
+    fn release_yml_macos_ort_matches_const() {
+        let abs = format!(
+            "{}/../../.github/workflows/release.yml",
+            env!("CARGO_MANIFEST_DIR"),
+        );
+        let yml = std::fs::read_to_string(&abs)
+            .unwrap_or_else(|e| panic!("read {abs}: {e}"));
+        let expected_decl = format!(
+            "MACOS_ORT_VERSION: '{}'",
+            MACOS_CORE_ML_ORT_VERSION,
+        );
+        assert!(
+            yml.contains(&expected_decl),
+            "release.yml is missing the workflow env declaration `{expected_decl}` — \
+             update the workflow to match the const, or vice versa.",
+        );
+        assert!(
+            yml.contains("ort-coreml-${{ env.MACOS_ORT_VERSION }}-macos-aarch64"),
+            "release.yml ORT cache key must use ${{{{ env.MACOS_ORT_VERSION }}}} \
+             so a version bump only needs to touch the env block + the const.",
+        );
+        assert!(
+            yml.contains("git clone --depth 1 --branch \"v${MACOS_ORT_VERSION}\""),
+            "release.yml ORT git clone must reference ${{MACOS_ORT_VERSION}} \
+             so the cloned tag matches the cache key automatically.",
+        );
+    }
+
     use serde_json::json;
 
     #[test]
