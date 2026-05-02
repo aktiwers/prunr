@@ -296,10 +296,12 @@ pub fn compose_edges_styled(
             LineStyle::RadialGradient { inner, outer, .. } => {
                 let x = (i as u32 % ow) as i32;
                 let y = (i as u32 / ow) as i32;
-                let dx = x - rg_cx;
-                let dy = y - rg_cy;
+                let dx = (x - rg_cx) as i64;
+                let dy = (y - rg_cy) as i64;
+                // i64 to survive `dist_sq * 255` past ~1830² (i32 caps
+                // at 2.147 G, dist_sq * 255 hits that threshold there).
                 let dist_sq = dx * dx + dy * dy;
-                let t = ((dist_sq * 255) / rg_max_dist_sq).min(255) as u16;
+                let t = ((dist_sq * 255) / (rg_max_dist_sq as i64)).min(255) as u16;
                 Some(lerp_rgb(inner, outer, t))
             }
             LineStyle::Rainbow { cycles } => {
@@ -335,7 +337,10 @@ pub fn compose_edges_styled(
                 let jitter = (h & 0xFF) as i32 - 128; // -128..=127
                 let strength = amount as i32;
                 let shift = (jitter * strength) / 128; // -amount..=amount
-                let hue = ((i as i32 * 360 / pixel_count.max(1) as i32) + shift).rem_euclid(360) as u16;
+                // i64 to survive the multiply past ~5.96 M pixels
+                // (2700×2200) — Rainbow above already does the same.
+                let hue = (((i as i64 * 360) / pixel_count.max(1) as i64) + shift as i64)
+                    .rem_euclid(360) as u16;
                 let (r, g, b) = crate::postprocess::hsv_to_rgb(hue, 200, 240);
                 Some([r, g, b])
             }
@@ -684,6 +689,74 @@ mod tests {
             [p[0], p[1], p[2]], [200, 80, 40],
             "DualScale primary must come from Fine tensor; got {:?}", p,
         );
+    }
+
+    /// `RadialGradient`'s `dist_sq * 255` blew past `i32::MAX` for any
+    /// image past ~1830² with the centre near a corner — the wrapping
+    /// multiply produced a wildly wrong `t` and the colour ramp
+    /// inverted in the second half of the image. Drive a 4096×1 strip
+    /// with the centre at [0, 0] and assert the gradient is monotonic
+    /// across pixels well past the overflow threshold. Pre-fix the i32
+    /// multiply wraps to a negative value at pixel ~2900 and produces
+    /// out-of-order RGB values; in debug builds the `255 - t` step in
+    /// `lerp_rgb` panics outright when `t` wraps to a giant u16.
+    #[test]
+    fn radial_gradient_monotonic_past_overflow_threshold() {
+        let w = 4096_u32;
+        let h = 1_u32;
+        let mask = image::GrayImage::from_pixel(w, h, image::Luma([255]));
+        let base = RgbaImage::from_pixel(w, h, image::Rgba([10, 10, 10, 200]));
+        let out = compose_edges_styled(
+            &mask, &base,
+            crate::ComposeMode::SubjectFilled,
+            crate::LineStyle::RadialGradient {
+                center: [0, 0],
+                inner: [0, 0, 0],
+                outer: [255, 255, 255],
+            },
+            None, 0,
+        );
+        // `dist_sq * 255` first overflows i32 at x ≈ 2900 (255·x² > 2^31).
+        // Sample on either side: monotonic ramp toward outer means
+        // mid > early and far ≥ mid - small slack for u8 quantisation.
+        let early = out.get_pixel(2000, 0)[0];
+        let mid = out.get_pixel(3500, 0)[0];   // past overflow threshold
+        let far = out.get_pixel(w - 1, 0)[0];  // near image edge
+        assert!(
+            early < mid && mid <= far,
+            "radial gradient must stay monotonic across the i32 overflow \
+             threshold — got early={early}, mid={mid}, far={far}",
+        );
+        assert!(
+            far >= 250,
+            "far-corner pixel should be near `outer` ([255,255,255]); got {far}",
+        );
+    }
+
+    /// `LineStyle::Noise`'s `i as i32 * 360` overflowed i32 above
+    /// ~5.96 M pixels — past that threshold the second half of the
+    /// image got wrapped numerators and the noise hue became
+    /// uncorrelated with pixel position. In debug builds the overflow
+    /// check panics; in release the output is garbled. Drive a strip
+    /// big enough to cross the overflow threshold and assert the call
+    /// completes (post-fix uses i64).
+    #[test]
+    fn noise_line_style_does_not_overflow_above_6m_pixels() {
+        let w = 4096_u32;
+        let h = 1500_u32; // 6.144 M pixels — past the i32 threshold
+        let mask = image::GrayImage::from_pixel(w, h, image::Luma([255]));
+        let base = RgbaImage::from_pixel(w, h, image::Rgba([10, 10, 10, 200]));
+        // Pre-fix this would panic in debug from the i32 overflow at
+        // i = ~5.96 M; post-fix it produces a valid output across the
+        // whole image. The contract worth pinning is "function doesn't
+        // overflow at the project's image-size cap".
+        let out = compose_edges_styled(
+            &mask, &base,
+            crate::ComposeMode::SubjectFilled,
+            crate::LineStyle::Noise { amount: 80 },
+            None, 0,
+        );
+        assert_eq!(out.dimensions(), (w, h));
     }
 
     #[test]
