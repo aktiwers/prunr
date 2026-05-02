@@ -211,12 +211,19 @@ impl SubprocessManager {
         std::fs::write(&image_path, image_bytes)
             .map_err(|e| format!("Failed to write input temp file: {e}"))?;
 
-        // Write chain input to temp file if present
-        let chain = chain_input.map(|(rgba, w, h)| {
-            let path = super::protocol::IpcKind::Chain.path_for(ipc_temp_dir(), item_id);
-            let _ = std::fs::write(&path, rgba.as_raw());
-            ChainInput { path, width: w, height: h }
-        });
+        // Write chain input to temp file if present. Propagate write
+        // errors — discarding them produced a `ChainInput` pointing at
+        // a missing or partially-written file, which the worker silently
+        // dropped via `RgbaImage::from_raw -> None`, processing the
+        // *original* image instead of the chained input.
+        let chain = chain_input
+            .map(|(rgba, w, h)| -> Result<ChainInput, String> {
+                let path = super::protocol::IpcKind::Chain.path_for(ipc_temp_dir(), item_id);
+                std::fs::write(&path, rgba.as_raw())
+                    .map_err(|e| format!("Failed to write chain temp file: {e}"))?;
+                Ok(ChainInput { path, width: w, height: h })
+            })
+            .transpose()?;
 
         write_message(&mut self.stdin_writer, &SubprocessCommand::ProcessImage {
             item_id,

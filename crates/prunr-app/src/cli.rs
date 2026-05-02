@@ -131,7 +131,9 @@ pub struct Cli {
     /// Path to the inpaint mask image. Required with --inpaint.
     /// Any image format; pixels >128 in the first channel are treated
     /// as "inpaint here". Mask must match the input image's dimensions.
-    #[arg(long)]
+    /// `requires` enforces this at parse time so `--mask m.png foo.jpg`
+    /// (no `--inpaint`) errors out instead of silently dropping the flag.
+    #[arg(long, requires = "inpaint")]
     pub mask: Option<PathBuf>,
 }
 
@@ -517,8 +519,30 @@ fn run_batch(args: &Cli) -> i32 {
     let mask = args.mask_settings();
 
     let line_mode = args.line_mode();
-    let solid_line_color = args.line_color.as_deref().and_then(parse_hex_color);
-    let bg_color = args.bg_color.as_deref().and_then(parse_hex_color);
+    // `Some("zzzzzz")` and `None` collapsed to the same `None` before,
+    // which silently dropped a typo'd `--line-color "ff00aa "` (note
+    // trailing space). Distinguish "flag absent" from "flag set to
+    // garbage" so automation scripts can detect the failure.
+    let solid_line_color = match args.line_color.as_deref() {
+        Some(s) => match parse_hex_color(s) {
+            Some(c) => Some(c),
+            None => {
+                eprintln!("error: --line-color: '{s}' is not a 6-digit hex color (e.g. ff00aa)");
+                return 1;
+            }
+        },
+        None => None,
+    };
+    let bg_color = match args.bg_color.as_deref() {
+        Some(s) => match parse_hex_color(s) {
+            Some(c) => Some(c),
+            None => {
+                eprintln!("error: --bg-color: '{s}' is not a 6-digit hex color (e.g. ffffff)");
+                return 1;
+            }
+        },
+        None => None,
+    };
     let bg_image = match args.bg_image.as_deref() {
         Some(p) => match prunr_core::load_image_from_path(p) {
             Ok(img) => Some(std::sync::Arc::new(img)),
