@@ -530,14 +530,7 @@ pub fn run_worker() -> ! {
                                     error: "segmentation engine not initialized".into(),
                                 });
                                 in_flight.fetch_sub(1, Ordering::AcqRel);
-                                if image_path.starts_with(ipc.as_ref()) {
-                                    let _ = std::fs::remove_file(&image_path);
-                                }
-                                if let Some(ref p) = chain_path {
-                                    if p.starts_with(ipc.as_ref()) {
-                                        let _ = std::fs::remove_file(p);
-                                    }
-                                }
+                                cleanup_inputs();
                                 return;
                             };
                             let decoded;
@@ -547,21 +540,12 @@ pub fn run_worker() -> ! {
                                 match prunr_core::load_image_from_bytes(&img_bytes) {
                                     Ok(img) => { decoded = img; &decoded }
                                     Err(e) => {
-                                        // Use the error directly
                                         let _ = evt_tx.send(SubprocessEvent::ImageError {
                                             item_id,
                                             error: e.to_string(),
                                         });
                                         in_flight.fetch_sub(1, Ordering::AcqRel);
-                                        // Clean up temp files
-                                        if image_path.starts_with(ipc.as_ref()) {
-                                            let _ = std::fs::remove_file(&image_path);
-                                        }
-                                        if let Some(ref p) = chain_path {
-                                            if p.starts_with(ipc.as_ref()) {
-                                                let _ = std::fs::remove_file(p);
-                                            }
-                                        }
+                                        cleanup_inputs();
                                         return;
                                     }
                                 }
@@ -950,6 +934,14 @@ pub fn run_worker() -> ! {
                 let evt_tx_on_spawn_err = evt_tx.clone();
                 let inpaint_cancels_on_err = inpaint_cancels.clone();
                 let pump_done_on_err = pump_done.clone();
+                // Pre-clone the parent-written PNG paths so the spawn-
+                // failure path can delete them. Without this, a thread-
+                // exhaustion error left ~20 MB of `inpaint-img-*` /
+                // `inpaint-mask-*` per failed dispatch in /dev/shm
+                // until the parent restarted (the dead-PID sweep on
+                // next launch was the only collector).
+                let image_path_on_spawn_err = image_path.clone();
+                let mask_path_on_spawn_err = mask_path.clone();
                 // Use the parent-supplied ipc_dir so the result PNG lands in
                 // the same /dev/shm/prunr-ipc-<parent_pid>/ that the parent
                 // reads from. Calling ipc_temp_dir() here would resolve via
@@ -1114,6 +1106,12 @@ pub fn run_worker() -> ! {
                     // Drops on scope exit, removing the cancel-map entry.
                     let _ = CancelMapGuard { item_id, map: inpaint_cancels_on_err };
                     pump_done_on_err.store(true, Ordering::Release);
+                    // The healthy path's `read_and_delete` inside the
+                    // spawned closure never ran — clean the parent-
+                    // written temps here before the InpaintError lands
+                    // so /dev/shm doesn't accumulate.
+                    let _ = std::fs::remove_file(&image_path_on_spawn_err);
+                    let _ = std::fs::remove_file(&mask_path_on_spawn_err);
                     let _ = evt_tx_on_spawn_err.send(SubprocessEvent::InpaintError {
                         item_id,
                         error: format!("inpaint thread spawn failed: {e}"),
