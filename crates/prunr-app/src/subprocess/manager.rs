@@ -35,8 +35,6 @@ pub struct SubprocessManager {
     rss_resume: u64,
     /// Whether admission is paused due to high RSS.
     rss_paused: bool,
-    /// Last known RSS from child.
-    last_rss: u64,
     /// Counter into `RSS_LIMIT_REFRESH_EVERY`: re-query system memory
     /// every Nth `RssUpdate` so a sibling subprocess loading a 5 GB
     /// SD bundle after us doesn't leave our pause threshold stale.
@@ -194,7 +192,6 @@ impl SubprocessManager {
             rss_limit,
             rss_resume,
             rss_paused: false,
-            last_rss: 0,
             rss_update_count: 0,
         }, active_provider))
     }
@@ -439,7 +436,6 @@ impl SubprocessManager {
         }
         apply_event_state(
             &mut self.in_flight,
-            &mut self.last_rss,
             &mut self.rss_paused,
             self.rss_limit,
             self.rss_resume,
@@ -523,7 +519,6 @@ fn current_rss_thresholds() -> (u64, u64) {
 
 fn apply_event_state(
     in_flight: &mut HashSet<u64>,
-    last_rss: &mut u64,
     rss_paused: &mut bool,
     rss_limit: u64,
     rss_resume: u64,
@@ -542,7 +537,6 @@ fn apply_event_state(
         // RSS hysteresis: pause when above limit, resume only when below
         // the (lower) resume threshold. Sticky in the band between.
         SubprocessEvent::RssUpdate { rss_bytes } => {
-            *last_rss = *rss_bytes;
             if *rss_bytes > rss_limit {
                 *rss_paused = true;
             } else if *rss_bytes < rss_resume {
@@ -564,13 +558,13 @@ mod tests {
     use prunr_core::ProgressStage;
     use std::path::PathBuf;
 
-    fn fresh_state() -> (HashSet<u64>, u64, bool) {
+    fn fresh_state() -> (HashSet<u64>, bool) {
         let in_flight: HashSet<u64> = (0..10).collect();
-        (in_flight, 0u64, false)
+        (in_flight, false)
     }
 
-    fn step(state: (&mut HashSet<u64>, &mut u64, &mut bool), evt: &SubprocessEvent) {
-        apply_event_state(state.0, state.1, state.2, 1_000_000_000, 800_000_000, evt);
+    fn step(state: (&mut HashSet<u64>, &mut bool), evt: &SubprocessEvent) {
+        apply_event_state(state.0, state.1, 1_000_000_000, 800_000_000, evt);
     }
 
     /// Phase 21-01 / B1 fix: every terminal Done/Error variant must
@@ -581,7 +575,7 @@ mod tests {
     /// eviction gate keyed off `in_flight_items().is_empty()`.
     #[test]
     fn apply_event_state_decrements_on_every_terminal_variant() {
-        let (mut in_flight, mut last_rss, mut rss_paused) = fresh_state();
+        let (mut in_flight, mut rss_paused) = fresh_state();
 
         let terminal = [
             SubprocessEvent::ImageDone {
@@ -614,7 +608,7 @@ mod tests {
         ];
 
         for e in &terminal {
-            step((&mut in_flight, &mut last_rss, &mut rss_paused), e);
+            step((&mut in_flight, &mut rss_paused), e);
         }
 
         assert!(!in_flight.contains(&1), "ImageDone must decrement in_flight");
@@ -632,10 +626,10 @@ mod tests {
     /// while a long SD stroke is still computing.
     #[test]
     fn apply_event_state_does_not_decrement_on_progress_variants() {
-        let (mut in_flight, mut last_rss, mut rss_paused) = fresh_state();
+        let (mut in_flight, mut rss_paused) = fresh_state();
 
         step(
-            (&mut in_flight, &mut last_rss, &mut rss_paused),
+            (&mut in_flight, &mut rss_paused),
             &SubprocessEvent::Progress {
                 item_id: 1,
                 stage: ProgressStage::Infer,
@@ -643,7 +637,7 @@ mod tests {
             },
         );
         step(
-            (&mut in_flight, &mut last_rss, &mut rss_paused),
+            (&mut in_flight, &mut rss_paused),
             &SubprocessEvent::InpaintProgress {
                 item_id: 2,
                 current: 5,
@@ -659,7 +653,7 @@ mod tests {
     /// affect bookkeeping when they do). They MUST NOT touch `in_flight`.
     #[test]
     fn apply_event_state_ignores_lifecycle_variants() {
-        let (mut in_flight, mut last_rss, mut rss_paused) = fresh_state();
+        let (mut in_flight, mut rss_paused) = fresh_state();
         let original = in_flight.clone();
 
         for evt in [
@@ -671,7 +665,7 @@ mod tests {
                 error: "no session".into(),
             },
         ] {
-            step((&mut in_flight, &mut last_rss, &mut rss_paused), &evt);
+            step((&mut in_flight, &mut rss_paused), &evt);
         }
         assert_eq!(in_flight, original);
     }
@@ -681,21 +675,20 @@ mod tests {
     /// prevented oscillation under steady ~limit pressure).
     #[test]
     fn apply_event_state_rss_hysteresis() {
-        let (mut in_flight, mut last_rss, mut rss_paused) = fresh_state();
+        let (mut in_flight, mut rss_paused) = fresh_state();
 
         // Above limit → pause
         step(
-            (&mut in_flight, &mut last_rss, &mut rss_paused),
+            (&mut in_flight, &mut rss_paused),
             &SubprocessEvent::RssUpdate {
                 rss_bytes: 1_500_000_000,
             },
         );
         assert!(rss_paused);
-        assert_eq!(last_rss, 1_500_000_000);
 
         // In hysteresis band (between resume and limit) → still paused
         step(
-            (&mut in_flight, &mut last_rss, &mut rss_paused),
+            (&mut in_flight, &mut rss_paused),
             &SubprocessEvent::RssUpdate {
                 rss_bytes: 900_000_000,
             },
@@ -704,12 +697,11 @@ mod tests {
 
         // Below resume → unpause
         step(
-            (&mut in_flight, &mut last_rss, &mut rss_paused),
+            (&mut in_flight, &mut rss_paused),
             &SubprocessEvent::RssUpdate {
                 rss_bytes: 700_000_000,
             },
         );
         assert!(!rss_paused);
-        assert_eq!(last_rss, 700_000_000);
     }
 }
