@@ -410,7 +410,17 @@ jobs:
         if: matrix.name == 'windows-x86_64'
         shell: pwsh
         run: |
-          $version = "${{ github.ref_name }}".TrimStart("v")
+          # On tag pushes (`refs/tags/vX.Y.Z`) the version comes from the
+          # tag name; on `workflow_dispatch` from a branch the ref isn't
+          # version-shaped, so fall back to Cargo.toml — same pattern as
+          # the Linux .deb / .rpm steps. Without this fallback the
+          # installer ships with `AppVersion=master`, which Inno Setup
+          # accepts but produces unusable Windows installer metadata.
+          $version = if ("${{ github.ref_type }}" -eq "tag") {
+            "${{ github.ref_name }}".TrimStart("v")
+          } else {
+            (Select-String -Path Cargo.toml -Pattern '^version' | Select-Object -First 1).Line -replace '.*"(.+)".*', '$1'
+          }
           @"
           [Setup]
           AppName=Prunr

@@ -42,6 +42,13 @@ pub fn host_pypi_token() -> Option<&'static str> {
         "windows-x64" => "win_amd64",
         "windows-arm64" => "win_arm64",
         "macos-arm64" => "macosx_11_0_arm64",
+        // Intel Mac. PyPI's onnxruntime wheels use the 10.15 deployment
+        // target on x86_64 (the `macosx_10_15_x86_64` filename token);
+        // `host_rid` already returns `"macos-x64"` for this case, so the
+        // arm has to be present here for the GUI install button + xtask
+        // CLI to actually find a wheel instead of bailing with
+        // "unsupported host platform".
+        "macos-x64" => "macosx_10_15_x86_64",
         _ => return None,
     })
 }
@@ -98,9 +105,15 @@ pub fn pick_wheel_for_host(urls: &[serde_json::Value]) -> Result<WheelInfo, Stri
 }
 
 /// Filter + rename for files extracted from an `onnxruntime-*` wheel.
+///
+/// Path-traversal guard: the result is used as a single filename joined
+/// onto `target_dir`. Reject anything containing `/` or `\\` so a
+/// maliciously-crafted wheel can't escape `target_dir` via
+/// `..\Windows\System32\evil.dll` on Windows or its forward-slash
+/// equivalent on Unix.
 pub fn repackage_target_filename(zip_name: &str) -> Option<String> {
     let stripped = zip_name.strip_prefix("onnxruntime/capi/")?;
-    if stripped.contains('/') { return None; }
+    if stripped.contains('/') || stripped.contains('\\') { return None; }
     if stripped.starts_with("onnxruntime_pybind11_state") { return None; }
     if stripped.ends_with(".py") { return None; }
     if stripped.starts_with("libonnxruntime.so.") {
@@ -339,6 +352,41 @@ mod tests {
         ), "unexpected rid: {r}");
     }
 
+    /// Contract: every rid that `host_rid` produces (other than the
+    /// catch-all `"unknown"`) must have a matching arm in
+    /// `host_pypi_token`. Otherwise users on that platform get a
+    /// confusing "unsupported host platform" from `pick_wheel_for_host`
+    /// despite `host_rid` agreeing the platform is supported.
+    #[test]
+    fn every_supported_rid_has_a_pypi_token() {
+        for rid in [
+            "linux-x64", "linux-arm64",
+            "windows-x64", "windows-arm64",
+            "macos-arm64", "macos-x64",
+        ] {
+            let token = match rid {
+                "linux-x64" => "manylinux_2_28_x86_64",
+                "linux-arm64" => "manylinux_2_28_aarch64",
+                "windows-x64" => "win_amd64",
+                "windows-arm64" => "win_arm64",
+                "macos-arm64" => "macosx_11_0_arm64",
+                "macos-x64" => "macosx_10_15_x86_64",
+                _ => unreachable!(),
+            };
+            // Compile-time check the arm exists for current host.
+            if host_rid() == rid {
+                assert_eq!(host_pypi_token(), Some(token), "rid {rid}");
+            }
+        }
+        // Final guard: host's own rid produces Some(token), which is
+        // the actual contract `pick_wheel_for_host` depends on.
+        if host_rid() != "unknown" {
+            assert!(host_pypi_token().is_some(),
+                "host_rid()={} but host_pypi_token() is None — pick_wheel_for_host will reject this host",
+                host_rid());
+        }
+    }
+
     #[test]
     fn install_subdir_format_is_stable() {
         let s = install_subdir("openvino", "1.24.1");
@@ -427,6 +475,24 @@ mod tests {
         assert!(repackage_target_filename("onnxruntime/capi/onnxruntime_pybind11_state.so").is_none());
         assert!(repackage_target_filename("onnxruntime/capi/__init__.py").is_none());
         assert!(repackage_target_filename("onnxruntime/__init__.py").is_none());
+    }
+
+    /// Path-traversal guard: any embedded `/` or `\\` after the
+    /// `onnxruntime/capi/` prefix must be rejected so a maliciously
+    /// crafted wheel can't escape `target_dir`. The forward-slash check
+    /// covers Unix; the backslash check covers Windows.
+    #[test]
+    fn repackage_rejects_path_traversal_in_entry_name() {
+        // forward slash (Unix-style traversal)
+        assert!(repackage_target_filename("onnxruntime/capi/../etc/passwd").is_none());
+        // backslash (Windows-style traversal)
+        assert!(repackage_target_filename("onnxruntime/capi/..\\Windows\\evil.dll").is_none());
+        assert!(repackage_target_filename("onnxruntime/capi/sub\\file.so").is_none());
+        // sanity: the canonical no-separator forms still pass
+        assert_eq!(
+            repackage_target_filename("onnxruntime/capi/libonnxruntime.so"),
+            Some("libonnxruntime.so".to_string()),
+        );
     }
 
     #[test]
