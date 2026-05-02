@@ -154,10 +154,11 @@ fn run_install(
         });
     };
     let mut hooks = ri::DownloadHooks { progress: &mut on_progress, cancel };
+    // SHA verification is folded into `download_wheel`'s retry loop —
+    // bytes are already verified when this returns Ok. The Preparing
+    // event is the lifecycle marker; no separate verify call needed.
     let bytes = ri::download_wheel(&wheel, &mut hooks)?;
-
     let _ = tx.send(InstallEvent::Preparing);
-    ri::verify_sha256(&bytes, &wheel.sha256)?;
 
     let _ = tx.send(InstallEvent::Extracting);
     let install_dir = prepare_and_extract(&bytes, rt)?;
