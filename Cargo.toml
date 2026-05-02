@@ -78,6 +78,7 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 sha2 = "0.10"
 hex = "0.4"
 zip = { version = "2", default-features = false, features = ["deflate"] }
+bytes = "1"
 
 # Observability
 tracing = "0.1"
