@@ -68,10 +68,13 @@ jobs:
           # upload/restore time and keeps us further from the 10 GB
           # eviction threshold.
           path: models/*.zst
-          # Include the registry so an `OnDemand`-only SHA256 bump
-          # (no xtask change) busts the cache instead of restoring
-          # stale bytes.
-          key: models-v3-${{ hashFiles('xtask/src/main.rs', 'crates/prunr-models/src/lib.rs') }}
+          # Hash the model manifest (xtask/src/models.rs) and the
+          # registry — these are the only inputs whose change should
+          # bust the cache. Hashing the whole `xtask/src/main.rs` like
+          # we used to threw away the cache on every unrelated edit
+          # (CLI parsing, install-runtime fixes), forcing a 700 MB
+          # re-fetch each CI run.
+          key: models-v3-${{ hashFiles('xtask/src/models.rs', 'crates/prunr-models/src/lib.rs') }}
 
       - name: Fetch models (cache miss)
         if: steps.cache-models.outputs.cache-hit != 'true'
