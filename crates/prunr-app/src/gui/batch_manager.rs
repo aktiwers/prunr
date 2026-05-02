@@ -215,6 +215,19 @@ impl BatchManager {
         })
     }
 
+    /// First (in batch order) item in the action target set, by reference —
+    /// no Vec<u64> allocation. Per-frame toolbar tooltip code uses this
+    /// instead of `items_to_process().first()` so the Process button label
+    /// path doesn't churn ~400 B per frame. Same target-set rule as
+    /// `items_to_process` and `any_target_can`.
+    pub(crate) fn first_target_item(&self) -> Option<&BatchItem> {
+        let has_selected = self.has_any_selected();
+        let current_id = self.selected_item().map(|b| b.id);
+        self.items.iter().find(|item| {
+            if has_selected { item.selected } else { Some(item.id) == current_id }
+        })
+    }
+
     /// Remove the item at `idx`, cleaning up any on-disk history /
     /// redo entries it owned. Returns `false` (without doing anything)
     /// when `idx` is out of bounds. Caller is responsible for clamping
