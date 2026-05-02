@@ -97,6 +97,14 @@ pub struct BackgroundIO {
     /// every selection change.
     pub history_demote_tx: mpsc::Sender<HistoryDemoteResult>,
     pub history_demote_rx: mpsc::Receiver<HistoryDemoteResult>,
+    /// Off-thread RGBA decode + ColorImage build for a per-item bg
+    /// image. Drain calls `ctx.load_texture` with the bg-specific
+    /// options (Linear filter + Repeat wrap for `BgImageFit::Tile`).
+    /// Without this the `to_rgba8()` clone (~32 MB on a 4K bg) +
+    /// `ctx.load_texture` ran inline in `views/canvas.rs::render` on
+    /// the first frame after every bg-image pick.
+    pub bg_tex_prep_tx: mpsc::Sender<(u64, u64, egui::ColorImage)>,
+    pub bg_tex_prep_rx: mpsc::Receiver<(u64, u64, egui::ColorImage)>,
     /// Bounds simultaneous decode/thumbnail/filter threads to
     /// `available_parallelism()`. Threads spawn immediately but park here
     /// until a slot opens, capping transient RAM at N × per-thread peak.
@@ -128,6 +136,7 @@ impl BackgroundIO {
         let (tex_prep_tx, tex_prep_rx) = mpsc::channel();
         let (filter_only_tx, filter_only_rx) = mpsc::channel();
         let (history_demote_tx, history_demote_rx) = mpsc::channel();
+        let (bg_tex_prep_tx, bg_tex_prep_rx) = mpsc::channel();
         let cap = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(4);
@@ -139,6 +148,7 @@ impl BackgroundIO {
             tex_prep_tx, tex_prep_rx,
             filter_only_tx, filter_only_rx,
             history_demote_tx, history_demote_rx,
+            bg_tex_prep_tx, bg_tex_prep_rx,
             decode_slots: Arc::new(DecodeSlots::new(cap)),
         }
     }

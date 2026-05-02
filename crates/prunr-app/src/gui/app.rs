@@ -465,7 +465,7 @@ impl PrunrApp {
         ) else { return };
         match prunr_core::load_image_from_path(&path) {
             Ok(img) => {
-                if let Some(item) = self.batch.items.get_mut(idx) {
+                let kick_id = if let Some(item) = self.batch.items.get_mut(idx) {
                     item.set_bg_image(img, Some(path.clone()));
                     // Remember the path keyed by the bg's content hash so a
                     // preset that captured this hash can reload the image
@@ -474,6 +474,10 @@ impl PrunrApp {
                         self.settings.bg_image_paths.insert(bg.hash, path);
                         self.settings.save();
                     }
+                    Some(item.id)
+                } else { None };
+                if let Some(id) = kick_id {
+                    self.kick_bg_image_tex_prep(id, ctx);
                     ctx.request_repaint();
                 }
             }
@@ -487,7 +491,7 @@ impl PrunrApp {
     /// preset apply. Preset apply copies `ItemSettings` (which includes the
     /// hash) but doesn't touch the bytes on the BatchItem; this restores
     /// the lockstep `set_bg_image` / `clear_bg_image` invariant.
-    fn reconcile_bg_image_after_preset(&mut self, idx: usize) {
+    fn reconcile_bg_image_after_preset(&mut self, idx: usize, ctx: &egui::Context) {
         let Some(item) = self.batch.items.get_mut(idx) else { return };
         let want = item.settings.bg_image_hash;
         let have = item.bg_image.as_ref().map(|b| b.hash);
@@ -508,7 +512,11 @@ impl PrunrApp {
             return;
         };
         match prunr_core::load_image_from_path(&path) {
-            Ok(img) => item.set_bg_image(img, Some(path)),
+            Ok(img) => {
+                item.set_bg_image(img, Some(path));
+                let id = item.id;
+                self.kick_bg_image_tex_prep(id, ctx);
+            }
             Err(err) => {
                 item.clear_bg_image();
                 self.toasts.error(format!("Couldn't load preset background: {err}"));
@@ -837,7 +845,7 @@ impl PrunrApp {
     /// current image. Does NOT touch the image-result history — that stays on
     /// Ctrl+Z. Kicks an auto-reprocess on a Done item so the restored settings
     /// produce a fresh result (same path a live preset apply would take).
-    fn swap_preset_history(&mut self, dir: HistoryDir) {
+    fn swap_preset_history(&mut self, dir: HistoryDir, ctx: &egui::Context) {
         if self.batch.items.is_empty() { return; }
         let idx = self.batch.selected_index.min(self.batch.items.len() - 1);
         let item = &mut self.batch.items[idx];
@@ -847,7 +855,7 @@ impl PrunrApp {
         // Restoring a preset snapshot rewrites settings.bg_image_hash —
         // pull the matching bytes back into bg_image so the canvas paint
         // and recipe diff stay consistent.
-        self.reconcile_bg_image_after_preset(idx);
+        self.reconcile_bg_image_after_preset(idx, ctx);
         if should_reprocess {
             self.process_items(|i| i.id == target_id);
         }
@@ -1901,6 +1909,34 @@ impl PrunrApp {
         }
     }
 
+    /// Kick off-thread bg-image texture prep: `to_rgba8()` + the
+    /// `ColorImage::from_rgba_unmultiplied` clone happen on a worker;
+    /// `drain_background_channels` does the `ctx.load_texture` upload
+    /// when the result lands. Idempotent — re-entry while a prep is
+    /// already in flight is a no-op via the `bg_image_tex_pending`
+    /// flag (cleared by the drain).
+    pub(crate) fn kick_bg_image_tex_prep(&mut self, item_id: u64, ctx: &egui::Context) {
+        let Some(item) = self.batch.find_by_id_mut(item_id) else { return };
+        if item.bg_image_tex_pending || item.bg_image_texture.is_some() { return; }
+        let Some(bg) = item.bg_image.as_ref().cloned() else { return };
+        item.bg_image_tex_pending = true;
+        let id = item.id;
+        let tx = self.batch.bg_io.bg_tex_prep_tx.clone();
+        let slots = self.batch.bg_io.decode_slots.clone();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let _slot = slots.acquire();
+            let rgba = bg.image.to_rgba8();
+            let (w, h) = (rgba.width(), rgba.height());
+            let ci = egui::ColorImage::from_rgba_unmultiplied(
+                [w as usize, h as usize],
+                rgba.as_raw(),
+            );
+            let _ = tx.send((id, bg.hash, ci));
+            ctx.request_repaint();
+        });
+    }
+
     /// Replace each in-memory placeholder at `history.back()` with the
     /// compressed slot just produced off-thread. Recipe match guards
     /// against a fresh re-Process having pushed a new entry while the
@@ -2334,8 +2370,8 @@ impl PrunrApp {
 
         if intents.undo_requested        { self.handle_undo(ctx); }
         if intents.redo_requested        { self.handle_redo(ctx); }
-        if intents.preset_undo_requested { self.swap_preset_history(HistoryDir::Undo); }
-        if intents.preset_redo_requested { self.swap_preset_history(HistoryDir::Redo); }
+        if intents.preset_undo_requested { self.swap_preset_history(HistoryDir::Undo, ctx); }
+        if intents.preset_redo_requested { self.swap_preset_history(HistoryDir::Redo, ctx); }
         if intents.screenshot_requested {
             ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
         }
@@ -2509,6 +2545,29 @@ impl PrunrApp {
 
         self.pump_thumbnail_results(ctx);
         self.pump_history_demote_results();
+
+        // Drain bg-image texture preps. Hash match guards against a
+        // user pick that swapped to a different bg image while the
+        // worker was running — in that case the stale ColorImage is
+        // dropped and a fresh kick is already in flight.
+        while let Ok((item_id, hash, ci)) = self.batch.bg_io.bg_tex_prep_rx.try_recv() {
+            let Some(item) = self.batch.find_by_id_mut(item_id) else { continue };
+            item.bg_image_tex_pending = false;
+            if item.bg_image.as_ref().map(|b| b.hash) != Some(hash) { continue; }
+            // WrapMode::Repeat enables BgImageFit::Tile (UV > 1.0
+            // wraps); other fits keep UVs in [0, 1] so the wrap is a
+            // no-op. LINEAR for smooth scale modes (Cover/Contain
+            // /Stretch); Tile + Center read 1:1 so the filter doesn't
+            // matter there.
+            let opts = egui::TextureOptions {
+                magnification: egui::TextureFilter::Linear,
+                minification: egui::TextureFilter::Linear,
+                wrap_mode: egui::TextureWrapMode::Repeat,
+                mipmap_mode: None,
+            };
+            let tex = ctx.load_texture(format!("bg_image_{:x}", hash), ci, opts);
+            item.bg_image_texture = Some(tex);
+        }
 
 
         let id_floor = self.batch.next_id;
@@ -2767,7 +2826,7 @@ impl PrunrApp {
             // any captured bg_image_hash. Reload the matching bytes from
             // the persisted path map (or clear if missing) so the recipe
             // diff invariant holds and the canvas paints the right image.
-            self.reconcile_bg_image_after_preset(idx);
+            self.reconcile_bg_image_after_preset(idx, ctx);
         }
         if toolbar_change.model_changed {
             self.settings.save();
