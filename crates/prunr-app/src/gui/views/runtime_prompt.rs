@@ -28,13 +28,7 @@ pub fn render_runtime_prompt(ctx: &egui::Context, rt: RuntimeId) -> Option<Runti
             );
             ui.add_space(theme::SPACE_SM);
             ui.label(
-                RichText::new(format!(
-                    "We detected hardware that can use {}. Installing it (~{} MB) \
-                     unlocks 2-3× faster background removal and makes Stable \
-                     Diffusion inpaint usable on your machine.",
-                    rt.display_name(),
-                    rt.approx_download_mb(),
-                ))
+                RichText::new(rt.first_launch_prompt_body())
                 .size(theme::FONT_SIZE_BODY)
                 .color(theme::TEXT_PRIMARY),
             );
@@ -58,7 +52,7 @@ pub fn render_runtime_prompt(ctx: &egui::Context, rt: RuntimeId) -> Option<Runti
                     result = Some(RuntimePromptAction::OpenSettings);
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button(RichText::new(format!("Install {}", rt.display_name()))
+                    if ui.button(RichText::new(rt.install_button_label())
                         .color(theme::TEXT_PRIMARY)
                         .size(theme::FONT_SIZE_BODY)
                         .strong()).clicked() {

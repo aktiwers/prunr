@@ -82,6 +82,25 @@ impl RuntimeId {
         match self { Self::OpenVino => 80 }
     }
 
+    /// Pre-baked first-launch prompt body. Static-str instead of a
+    /// per-frame `format!` so the modal doesn't churn ~300 B per
+    /// repaint while the user reads the prompt.
+    pub fn first_launch_prompt_body(self) -> &'static str {
+        match self {
+            Self::OpenVino => "We detected hardware that can use OpenVINO Runtime. \
+                Installing it (~80 MB) unlocks 2-3× faster background removal and \
+                makes Stable Diffusion inpaint usable on your machine.",
+        }
+    }
+
+    /// Pre-baked install-button label for the prompt. Mirrors
+    /// `first_launch_prompt_body` — the variant count is small enough
+    /// to enumerate, and the `display_name` interpolation is the only
+    /// reason this needed a per-frame `format!` before.
+    pub fn install_button_label(self) -> &'static str {
+        match self { Self::OpenVino => "Install OpenVINO Runtime" }
+    }
+
     /// Stable key for persisted settings — decoupled from `Debug` output
     /// so we can rename the variant without breaking user state.
     pub fn settings_key(self) -> &'static str {
