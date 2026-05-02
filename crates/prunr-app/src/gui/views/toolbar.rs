@@ -141,13 +141,13 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
             // it runs once the current batch finishes (no auto-cancel).
             {
                 let label = app.batch.process_button_label();
-                let target_ids = app.batch.items_to_process();
                 // Enabled when at least one target exists and isn't already
-                // Processing. Empty `target_ids` (empty batch) naturally → false.
-                let has_processable = target_ids.iter().any(|id| {
-                    app.batch.find_by_id(*id)
-                        .is_some_and(|it| !matches!(it.status, BatchStatus::Processing))
-                });
+                // Processing. `any_target_can` is the no-alloc primitive —
+                // building `items_to_process()` here ran a `Vec<u64>::collect`
+                // every frame just to throw it away.
+                let has_processable = app.batch.any_target_can(|it|
+                    !matches!(it.status, BatchStatus::Processing)
+                );
 
                 let (label_text, is_all) = match label {
                     ProcessButtonLabel::ProcessViewed => ("Process".to_string(), false),
@@ -181,7 +181,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                         format!("Process {n} selected images ({}+R)", KB_MOD).into()
                     }
                     _ => {
-                        let target_has_result = target_ids.first().and_then(|id| app.batch.find_by_id(*id))
+                        let target_has_result = app.batch.first_target_item()
                             .is_some_and(|i| i.result_rgba.is_some());
                         if app.settings.chain_mode && target_has_result {
                             kb!("Process current result", "R").into()
