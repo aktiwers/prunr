@@ -111,17 +111,15 @@ pub fn start_install(runtime: RuntimeId) -> InstallHandle {
 }
 
 /// Remove an installed runtime. Refuses when this is the only ORT source
-/// (uninstalling would brick startup) and includes a parent-dir safety
-/// guard so a future refactor of `install_dir()` can't nuke the wrong
-/// tree.
+/// (uninstalling would brick startup) and validates the subdir name so
+/// a future refactor of `install_subdir()` (or a future variant whose
+/// short-name becomes user-supplied) can't escape `<data>/runtimes/` via
+/// embedded path separators.
 pub fn uninstall(runtime: RuntimeId) -> Result<(), String> {
+    ri::validate_subdir(&runtime.install_subdir())
+        .map_err(|e| format!("install_subdir invariant broken: {e}"))?;
     let dir = runtime.install_dir()
         .ok_or_else(|| "could not resolve user data dir".to_string())?;
-    if !dir.parent().is_some_and(|p| p.ends_with("runtimes")) {
-        return Err(format!(
-            "refusing to wipe non-runtimes path: {}", dir.display(),
-        ));
-    }
     if !dir.exists() {
         return Ok(()); // already absent — nothing to do
     }
@@ -186,15 +184,12 @@ fn query_pypi(rt: RuntimeId) -> Result<ri::WheelInfo, String> {
 }
 
 fn prepare_and_extract(bytes: &[u8], rt: RuntimeId) -> Result<PathBuf, String> {
+    ri::validate_subdir(&rt.install_subdir())
+        .map_err(|e| format!("install_subdir invariant broken: {e}"))?;
     let target_dir = prunr_models::data_dir()
         .ok_or_else(|| "could not resolve user data dir".to_string())?
         .join("runtimes")
         .join(rt.install_subdir());
-    if !target_dir.parent().is_some_and(|p| p.ends_with("runtimes")) {
-        return Err(format!(
-            "refusing to wipe non-runtimes path: {}", target_dir.display(),
-        ));
-    }
     if target_dir.exists() {
         std::fs::remove_dir_all(&target_dir)
             .map_err(|e| format!("clean install dir: {e}"))?;
