@@ -759,6 +759,76 @@ mod tests {
         assert_eq!(out.dimensions(), (w, h));
     }
 
+    /// `apply_input_transform`'s `None` arm must return a borrowed
+    /// `Cow` so the ~32 MB `to_rgba8()` clone is skipped on the
+    /// identity case. CLAUDE.md `## Test expectations` requires unit
+    /// tests for new pure functions in `edge.rs` — this contract was
+    /// implicit via the `if matches!(...) { return Cow::Borrowed(...) }`
+    /// fast path with no test pinning it.
+    #[test]
+    fn apply_input_transform_none_returns_borrowed() {
+        let img = DynamicImage::ImageRgb8(RgbImage::from_pixel(4, 4, Rgb([10, 20, 30])));
+        let out = apply_input_transform(&img, crate::types::InputTransform::None);
+        assert!(
+            matches!(out, std::borrow::Cow::Borrowed(_)),
+            "InputTransform::None must skip the to_rgba8 alloc",
+        );
+    }
+
+    /// Grayscale uses the BT.709 luma weights `(2126, 7152, 722) / 10000`.
+    /// Pure red → 54, pure green → 71, pure blue → 7. Pin those exact
+    /// outputs so a refactor of the weights gets caught.
+    #[test]
+    fn apply_input_transform_grayscale_collapses_channels() {
+        let img = DynamicImage::ImageRgb8(RgbImage::from_pixel(2, 2, Rgb([255, 0, 0])));
+        let out = apply_input_transform(&img, crate::types::InputTransform::Grayscale);
+        let rgba = out.to_rgba8();
+        let p = rgba.get_pixel(0, 0);
+        // (255 * 2126 + 0 + 0) / 10000 = 54
+        assert_eq!([p[0], p[1], p[2]], [54, 54, 54], "pure-red luma");
+    }
+
+    /// `ContrastBoost` expands around 128: pivot stays put, extremes
+    /// saturate. percent=200 doubles the deviation from 128.
+    #[test]
+    fn apply_input_transform_contrast_boost_around_pivot() {
+        let boost = crate::types::InputTransform::ContrastBoost { percent: 200 };
+        for (input, expected) in [(128_u8, 128_u8), (0, 0), (255, 255)] {
+            let img = DynamicImage::ImageRgb8(RgbImage::from_pixel(1, 1, Rgb([input, input, input])));
+            let out = apply_input_transform(&img, boost);
+            let p = out.to_rgba8().get_pixel(0, 0).0;
+            assert_eq!(
+                p[0], expected,
+                "ContrastBoost(200%) at v={input}: expected {expected}, got {}",
+                p[0],
+            );
+        }
+    }
+
+    /// `Posterize { levels: 4 }` quantises each channel to one of
+    /// `{0, 85, 170, 255}`. Pin the bucket boundaries so the
+    /// `(v * n / 255) * 255 / n` formula doesn't drift on a refactor.
+    #[test]
+    fn apply_input_transform_posterize_steps() {
+        let post = crate::types::InputTransform::Posterize { levels: 4 };
+        for (input, expected) in [
+            (0_u8, 0_u8),
+            (84, 0),
+            (85, 85),
+            (170, 170),
+            (255, 255),
+        ] {
+            let img = DynamicImage::ImageRgb8(RgbImage::from_pixel(1, 1, Rgb([input, input, input])));
+            let out = apply_input_transform(&img, post);
+            let p = out.to_rgba8().get_pixel(0, 0).0;
+            assert_eq!(
+                p[0], expected,
+                "Posterize(4) at v={input}: expected {expected}, got {}",
+                p[0],
+            );
+        }
+    }
+
     #[test]
     fn finalize_edges_preserves_original_rgb_when_no_line_color() {
         let w = DEXINED_W as usize;
