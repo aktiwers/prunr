@@ -245,10 +245,9 @@ fn render_thumbnail_layer(
         0.2,
     );
     let is_dragging_out = dragging_ids.is_some_and(|s| s.contains(&app.batch.items[i].id));
-    // Build the bg image texture lazily (no-op if already cached or no
-    // bg image set) — keeps the sidebar rendering current even when the
-    // canvas hasn't painted yet (e.g. before the user clicks the row).
-    app.batch.items[i].ensure_bg_image_texture(ui.ctx());
+    // Bg-image texture is built off-thread (kicked from the file-pick
+    // and preset-apply paths). The thumbnail paint reads the handle
+    // directly; if still pending the bg-color path renders below.
     paint_thumbnail(ui, &app.batch.items[i], item_rect, is_dragging_out, fade);
     needs_repaint || fade < 1.0
 }

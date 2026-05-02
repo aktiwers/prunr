@@ -263,6 +263,11 @@ pub(crate) struct BatchItem {
     /// which the recipe-diff dispatch reads to fire CompositeOnly.
     pub(crate) bg_image: Option<Arc<BgImage>>,
     pub(crate) bg_image_texture: Option<egui::TextureHandle>,
+    /// True while a background thread is building the bg-image
+    /// `ColorImage` so the UI thread doesn't kick a duplicate spawn
+    /// the next frame. Cleared by the drain in
+    /// `drain_background_channels`.
+    pub(crate) bg_image_tex_pending: bool,
 }
 
 impl BatchItem {
@@ -506,11 +511,17 @@ impl BatchItem {
             stroke_redo_stack: VecDeque::new(),
             bg_image: None,
             bg_image_texture: None,
+            bg_image_tex_pending: false,
         }
     }
 
     /// Lockstep writer for `bg_image` + `settings.bg_image_hash`. Going
     /// through this path is the invariant the recipe diff relies on.
+    /// Callers must follow up with
+    /// `PrunrApp::kick_bg_image_tex_prep(item_id, ctx)` so the bg-image
+    /// texture is built off-thread; the on-thread render path reads
+    /// `bg_image_texture` directly and renders the placeholder bg color
+    /// until the texture lands.
     pub(crate) fn set_bg_image(&mut self, img: image::DynamicImage, source_path: Option<PathBuf>) {
         let hash = bg_image_content_hash(&img);
         self.bg_image = Some(Arc::new(BgImage {
@@ -519,12 +530,14 @@ impl BatchItem {
             hash,
         }));
         self.bg_image_texture = None;
+        self.bg_image_tex_pending = false;
         self.settings.bg_image_hash = Some(hash);
     }
 
     pub(crate) fn clear_bg_image(&mut self) {
         self.bg_image = None;
         self.bg_image_texture = None;
+        self.bg_image_tex_pending = false;
         self.settings.bg_image_hash = None;
     }
 
@@ -548,36 +561,6 @@ impl BatchItem {
         }
     }
 
-    /// Build the egui texture for `bg_image` on demand. Cheap on the
-    /// frames after the first — `Option::is_some` short-circuit only.
-    pub(crate) fn ensure_bg_image_texture(&mut self, ctx: &egui::Context) {
-        if self.bg_image_texture.is_some() {
-            return;
-        }
-        let Some(bg) = self.bg_image.as_ref() else { return };
-        let rgba = bg.image.to_rgba8();
-        let (w, h) = (rgba.width(), rgba.height());
-        let color_image = egui::ColorImage::from_rgba_unmultiplied(
-            [w as usize, h as usize],
-            rgba.as_raw(),
-        );
-        // WrapMode::Repeat enables BgImageFit::Tile (UV > 1.0 wraps around).
-        // For other fits the UVs stay within [0, 1], so the wrap mode is a
-        // no-op. LINEAR filtering for the smooth scale modes (Cover/Contain
-        // /Stretch); Tile + Center read 1:1 so filtering doesn't matter.
-        let opts = egui::TextureOptions {
-            magnification: egui::TextureFilter::Linear,
-            minification: egui::TextureFilter::Linear,
-            wrap_mode: egui::TextureWrapMode::Repeat,
-            mipmap_mode: None,
-        };
-        let tex = ctx.load_texture(
-            format!("bg_image_{:x}", bg.hash),
-            color_image,
-            opts,
-        );
-        self.bg_image_texture = Some(tex);
-    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

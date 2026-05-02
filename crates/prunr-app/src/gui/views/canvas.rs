@@ -18,9 +18,10 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
 
     let canvas_rect = ui.available_rect_before_wrap();
 
-    if let Some(item) = app.batch.selected_item_mut() {
-        item.ensure_bg_image_texture(ui.ctx());
-    }
+    // Bg-image texture is built off-thread by `kick_bg_image_tex_prep`
+    // (called from the file-pick + preset paths). The render path
+    // reads `bg_image_texture` directly; if it's still pending the
+    // existing bg-color fallback paints below.
 
     let modal_open = app.any_modal_open();
     // Block canvas pan/zoom when an egui popup (chip popover, combo box,
