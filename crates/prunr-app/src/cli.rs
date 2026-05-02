@@ -227,6 +227,25 @@ pub fn run_remove(args: &Cli) -> i32 {
     }
 
     if args.inpaint {
+        // Eraser mode reads `inputs[0]`, `mask`, `output`, `force`,
+        // `quiet` and ignores everything else. Surface the conflicts
+        // up front so a user typing `--inpaint --lines --bg-color
+        // ff0000 --mask m.png photo.jpg` doesn't get a quiet erase
+        // with no hint that those flags were thrown away.
+        let mut conflicts: Vec<&'static str> = Vec::new();
+        if args.lines { conflicts.push("--lines"); }
+        if args.lines_after_bg { conflicts.push("--lines-after-bg"); }
+        if args.line_color.is_some() { conflicts.push("--line-color"); }
+        if args.bg_color.is_some() { conflicts.push("--bg-color"); }
+        if args.bg_image.is_some() { conflicts.push("--bg-image"); }
+        if args.threshold.is_some() { conflicts.push("--threshold"); }
+        if !conflicts.is_empty() {
+            eprintln!(
+                "error: --inpaint cannot be combined with {} \u{2014} those flags belong to background-removal mode.",
+                conflicts.join(", "),
+            );
+            return 1;
+        }
         return run_inpaint(args);
     }
 
