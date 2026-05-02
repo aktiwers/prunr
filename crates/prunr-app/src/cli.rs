@@ -825,6 +825,13 @@ fn run_batch_subprocess(
         break;
     }
 
+    // Sweep CLI-owned downscaled temps now the run_batch loop has fully
+    // exited. The crash-recovery path deliberately leaves `cli_ds_*`
+    // alone so retries can re-feed them; this final pass mops up any
+    // that the worker didn't read-and-delete (e.g. on the give-up
+    // branch above).
+    prunr_app::subprocess::protocol::cleanup_cli_persistent_temps();
+
     // Convert Option<Result> to Result (None should not happen, but handle gracefully)
     results.into_iter()
         .map(|r| r.unwrap_or_else(|| Err(CoreError::Model("Not processed".into()))))

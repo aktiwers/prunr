@@ -394,12 +394,18 @@ impl IpcKind {
     ];
 }
 
-/// File-name prefixes owned by the seg / CLI subprocess pipeline.
-/// Derived from `IpcKind::ALL` so a new variant flows through with no
-/// hand maintenance.
+/// File-name prefixes the seg worker writes or consumes-and-deletes
+/// during a dispatch. Crash-recovery cleanup wipes these because the
+/// worker may have died mid-write or with partial input.
+///
+/// `CliDs` is intentionally excluded: those `cli_ds_*` files are
+/// pre-staged by the CLI parent before the run_batch loop starts and
+/// re-sent on every retry from `valid_paths[idx]`. Including the
+/// prefix here once silently wiped the retry inputs the CLI was about
+/// to feed the re-spawned worker, surfacing as "Insufficient memory"
+/// errors whose real cause was self-inflicted.
 pub const SEG_PIPELINE_PREFIXES: &[&str] = &[
     IpcKind::Chain.prefix(),
-    IpcKind::CliDs.prefix(),
     IpcKind::Edge.prefix(),
     IpcKind::Input.prefix(),
     IpcKind::Orig.prefix(),
@@ -413,6 +419,16 @@ pub const INPAINT_PREFIXES: &[&str] = &[
     "inpaint-",
 ];
 
+/// File-name prefixes the CLI parent owns *across* worker crashes.
+/// `cli_ds_*` are the downscaled temps the CLI writes once before the
+/// run_batch loop and re-sends on every retry from `valid_paths[idx]`.
+/// Crash-recovery cleanup (`cleanup_seg_pipeline_temps`) deliberately
+/// skips these; the CLI sweeps them itself once the batch loop has
+/// fully exited.
+pub const CLI_PERSISTENT_PREFIXES: &[&str] = &[
+    IpcKind::CliDs.prefix(),
+];
+
 /// Cleanup scoped to a single subprocess's owned filenames. Use from
 /// crash-recovery paths so the wipe doesn't race a sibling subprocess
 /// writing the shared dir.
@@ -421,9 +437,18 @@ pub fn cleanup_ipc_temp_for_prefix(prefixes: &[&str]) {
 }
 
 /// Crash-recovery cleanup for the seg / CLI subprocess. Leaves a sibling
-/// inpaint subprocess's `inpaint-*` files alone.
+/// inpaint subprocess's `inpaint-*` files alone, and intentionally
+/// preserves `cli_ds_*` (the CLI's pre-staged retry inputs — see
+/// `CLI_PERSISTENT_PREFIXES`).
 pub fn cleanup_seg_pipeline_temps() {
     cleanup_ipc_temp_for_prefix(SEG_PIPELINE_PREFIXES);
+}
+
+/// End-of-batch cleanup for CLI-owned downscaled temps. Call once the
+/// run_batch loop has fully exited so the worker has stopped reading
+/// from `cli_ds_*` paths. Idempotent.
+pub fn cleanup_cli_persistent_temps() {
+    cleanup_ipc_temp_for_prefix(CLI_PERSISTENT_PREFIXES);
 }
 
 /// Sweep every file in the IPC temp dir. Process-wide; never call from a
@@ -729,10 +754,12 @@ mod tests {
         let scratch = tempfile::tempdir().unwrap();
         let dir = scratch.path();
 
-        let seg = ["chain_42.raw", "cli_ds_0.img", "edge_5.bin", "input_3.img",
+        let seg = ["chain_42.raw", "edge_5.bin", "input_3.img",
                    "orig_3.img", "result_3.raw", "seg_3.png", "tensor_3.raw"];
+        let cli = ["cli_ds_0.img"];
         let inpaint = ["inpaint-img-7-0.png", "inpaint-mask-7-0.png", "inpaint-out-7.png"];
         poison(dir, &seg);
+        poison(dir, &cli);
         poison(dir, &inpaint);
 
         super::sweep_dir_with_prefix(dir, SEG_PIPELINE_PREFIXES);
@@ -740,6 +767,10 @@ mod tests {
         assert_gone(dir, &seg);
         for f in &inpaint {
             assert!(dir.join(f).exists(), "inpaint file {f} must survive a seg-scoped cleanup");
+        }
+        for f in &cli {
+            assert!(dir.join(f).exists(),
+                "CLI-persistent file {f} must survive a seg-scoped cleanup (B-CLI-1)");
         }
     }
 
@@ -795,10 +826,41 @@ mod tests {
             assert!(
                 SEG_PIPELINE_PREFIXES.iter()
                     .chain(INPAINT_PREFIXES.iter())
+                    .chain(CLI_PERSISTENT_PREFIXES.iter())
                     .any(|p| name.starts_with(p)),
-                "filename {name} matches no prefix in SEG_PIPELINE_PREFIXES + INPAINT_PREFIXES"
+                "filename {name} matches no prefix in SEG_PIPELINE_PREFIXES + INPAINT_PREFIXES + CLI_PERSISTENT_PREFIXES"
             );
         }
+    }
+
+    /// `cleanup_seg_pipeline_temps` must NOT delete `cli_ds_*` — those
+    /// are the CLI parent's pre-staged retry inputs. Wiping them mid-
+    /// batch on a worker crash made the CLI re-send paths to files it
+    /// had just deleted, which surfaced as "Insufficient memory"
+    /// errors whose actual cause was self-inflicted (B-CLI-1).
+    #[test]
+    fn seg_pipeline_cleanup_preserves_cli_persistent_temps() {
+        let dir = std::env::temp_dir().join(format!(
+            "prunr-test-cli-ds-survive-{}", std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Seed one cli_ds file (CLI-owned) and one seg file (worker-owned).
+        std::fs::write(dir.join("cli_ds_42.img"), b"retry-input").unwrap();
+        std::fs::write(dir.join("seg_42.raw"), b"worker-output").unwrap();
+
+        super::sweep_dir_with_prefix(&dir, SEG_PIPELINE_PREFIXES);
+
+        assert!(dir.join("cli_ds_42.img").exists(),
+            "cli_ds_*.img must survive crash-recovery cleanup");
+        assert!(!dir.join("seg_42.raw").exists(),
+            "seg_*.raw must be wiped by crash-recovery cleanup");
+
+        // CLI-driven end-of-batch cleanup wipes the cli_ds_ file.
+        super::sweep_dir_with_prefix(&dir, CLI_PERSISTENT_PREFIXES);
+        assert!(!dir.join("cli_ds_42.img").exists(),
+            "cli_ds_*.img must be wiped by CLI end-of-batch cleanup");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
