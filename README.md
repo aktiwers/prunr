@@ -133,8 +133,12 @@ cargo xtask fetch-models                          # one-time model download, ~17
 cargo build --release -p prunr-app                # release binary
 cargo run --release -p prunr-app                  # build + run GUI
 
-# Optional — install OpenVINO Runtime (Intel iGPU/NPU acceleration)
-cargo xtask install-runtime onnxruntime-openvino 1.24.1
+# Optional — install OpenVINO Runtime (Intel iGPU/NPU acceleration).
+# The pinned version lives in `prunr_runtime_install::PINNED_ORT_VERSION`
+# so a single bump there propagates to GUI Settings → Hardware → Install
+# and the matching CI staging steps. Run with the literal version on the
+# command line, e.g.:
+cargo xtask install-runtime onnxruntime-openvino <version>
 
 # Diagnostic
 target/release/prunr --doctor                     # hardware + runtime status dump
