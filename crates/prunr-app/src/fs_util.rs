@@ -2,18 +2,17 @@
 
 use std::path::Path;
 
-/// Remove every regular file directly inside `dir`. Non-recursive — the
-/// `is_file()` guard skips subdirectories (and broken symlinks) so a
-/// future caller dropping a subdir into the cleanup path can't trigger
-/// a recursive wipe.
+/// Remove every regular file directly inside `dir`. Non-recursive — uses
+/// `DirEntry::file_type()` (does NOT follow symlinks) so only true regular
+/// files at depth 0 are removed; subdirectories, symlinks, and device nodes
+/// are all skipped.
 ///
 /// Silent on errors — best-effort housekeeping.
 pub(crate) fn sweep_dir_files(dir: &Path) {
     let Ok(entries) = std::fs::read_dir(dir) else { return };
     for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_file() {
-            let _ = std::fs::remove_file(&path);
+        if entry.file_type().ok().is_some_and(|t| t.is_file()) {
+            let _ = std::fs::remove_file(entry.path());
         }
     }
 }
