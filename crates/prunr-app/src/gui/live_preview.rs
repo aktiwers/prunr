@@ -258,7 +258,7 @@ impl LivePreview {
                     };
                     let new_masked_base = output.built_masked_base
                         .zip(seg_model)
-                        .map(|(base, model)| (base, mask_recipe.clone(), model));
+                        .map(|(base, model)| (base, mask_recipe, model));
                     // `is_final` is set by `drain_results`, where the UI
                     // thread can read `self.pending` atomically. The worker
                     // ships a placeholder and doesn't care.
