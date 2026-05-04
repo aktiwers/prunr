@@ -210,7 +210,9 @@ pub fn run_worker() -> ! {
     let mut reader = BufReader::new(stdin.lock());
     let (evt_tx, evt_rx) = mpsc::channel::<SubprocessEvent>();
 
-    // Writer thread: evt_rx → stdout (bincode frames)
+    // Writer thread: evt_rx → stdout (bincode frames).
+    // Frames are coalesced by BufWriter; an explicit flush at loop exit
+    // ensures the last events reach the parent before the pipe closes.
     let writer_handle = std::thread::Builder::new()
         .name("worker-writer".into())
         .spawn(move || {
@@ -220,6 +222,7 @@ pub fn run_worker() -> ! {
                     break;
                 }
             }
+            let _ = prunr_app::subprocess::ipc::flush_writer(&mut writer);
         })
         .expect("failed to spawn writer thread");
 
@@ -298,21 +301,12 @@ pub fn run_worker() -> ! {
     // share `Arc<AtomicBool>`, so we round-trip through `CancelItem` inserts.
     let cancelled_items: Arc<Mutex<std::collections::HashSet<u64>>> =
         Arc::new(Mutex::new(std::collections::HashSet::new()));
-    // Per-item inpaint cancel flags. Lives alongside `cancelled_items`
-    // because the two consumers diverge: seg dispatch checks the HashSet
-    // at dispatch time, inpaint inference takes a long-running
-    // `Arc<AtomicBool>` it polls between LaMa tiles / SD UNet steps. A
-    // `CancelItem` flips both so a single cancel from the parent reaches
-    // either dispatch path.
-    let inpaint_cancels: Arc<Mutex<std::collections::HashMap<u64, Arc<AtomicBool>>>> =
-        Arc::new(Mutex::new(std::collections::HashMap::new()));
-    // Mid-inference cancel flags for seg dispatches. Without this, a
-    // long BiRefNet (~4-8s) or SubjectOutline run keeps the engine pegged
-    // for seconds after the user clicked Cancel — `cancelled_items` was
-    // only checked at dispatch start. CancelItem flips this just like
-    // `inpaint_cancels` so one cancel reaches every flavour of in-flight
-    // work.
-    let seg_cancels: Arc<Mutex<std::collections::HashMap<u64, Arc<AtomicBool>>>> =
+    // Mid-inference cancel flags shared across all dispatch lanes (seg and
+    // inpaint). One map covers both: seg checks `cancelled_items` at dispatch
+    // start AND polls this flag during inference; inpaint polls between LaMa
+    // tiles / SD UNet steps. A single `CancelItem` flips the flag here so
+    // one cancel reaches every flavour of in-flight work.
+    let cancel_flags: Arc<Mutex<std::collections::HashMap<u64, Arc<AtomicBool>>>> =
         Arc::new(Mutex::new(std::collections::HashMap::new()));
     let in_flight = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let mut engine_idx: usize = 0;
@@ -349,17 +343,17 @@ pub fn run_worker() -> ! {
                 let provider = active_provider.clone();
                 let sem = semaphore.clone();
                 let ipc = ipc_dir.clone();
-                let seg_cancels_for_dispatch = seg_cancels.clone();
+                let cancel_flags_for_dispatch = cancel_flags.clone();
                 // Per-item mid-inference cancel flag. Registered before
                 // the closure starts heavy work so a `CancelItem` can
                 // flip it; the guard inside the closure removes the
                 // entry on every exit path so the map stays bounded.
-                let seg_cancel = register_cancel_flag(&seg_cancels_for_dispatch, item_id);
+                let seg_cancel = register_cancel_flag(&cancel_flags_for_dispatch, item_id);
 
                 pool.spawn(move || {
                     let _seg_cancel_guard = CancelMapGuard {
                         item_id,
-                        map: seg_cancels_for_dispatch,
+                        map: cancel_flags_for_dispatch,
                     };
 
                     // Hoist chain_path so every early-return path can clean up
@@ -373,9 +367,10 @@ pub fn run_worker() -> ! {
                         Some(image::DynamicImage::ImageRgba8(rgba))
                     });
                     let cleanup_inputs = || {
-                        let mut paths: Vec<&std::path::Path> = vec![image_path.as_path()];
-                        if let Some(p) = chain_path.as_deref() { paths.push(p); }
-                        cleanup_ipc_temps(&ipc, &paths);
+                        match chain_path.as_deref() {
+                            Some(p) => cleanup_ipc_temps(&ipc, &[image_path.as_path(), p]),
+                            None    => cleanup_ipc_temps(&ipc, &[image_path.as_path()]),
+                        }
                     };
 
                     if is_item_cancelled(&cancelled_items, item_id) {
@@ -903,11 +898,10 @@ pub fn run_worker() -> ! {
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
                     guard.insert(item_id);
                 }
-                // Flip mid-inference flags so an in-flight infer_only /
-                // SD UNet / LaMa tile loop sees the cancel between stages
-                // instead of running to completion.
-                flip_cancel_flag(&inpaint_cancels, item_id);
-                flip_cancel_flag(&seg_cancels, item_id);
+                // Flip the shared mid-inference flag so any in-flight
+                // infer_only / SD UNet / LaMa tile loop sees the cancel
+                // between stages instead of running to completion.
+                flip_cancel_flag(&cancel_flags, item_id);
             }
 
             SubprocessCommand::Inpaint { item_id, model_id, image_path, mask_path, sd_req, feather_px, sharpen } => {
@@ -921,7 +915,7 @@ pub fn run_worker() -> ! {
                 // correctly.
                 in_flight.fetch_add(1, Ordering::AcqRel);
                 let evt_tx = evt_tx.clone();
-                let inpaint_cancels = inpaint_cancels.clone();
+                let inpaint_cancels = cancel_flags.clone();
                 let inpaint_cancel = register_cancel_flag(&inpaint_cancels, item_id);
                 let inpaint_progress = Arc::new(prunr_core::inpaint::InpaintProgress::new());
                 let progress_for_pump = inpaint_progress.clone();
@@ -983,9 +977,8 @@ pub fn run_worker() -> ! {
                     // panics — without this the pump thread loops forever
                     // holding evt_tx and the parent's cancel flag is never
                     // reclaimed. Joining the pump before any final send
-                    // also closes the "stale Progress after Done" race:
-                    // pump can't be mid-iteration when InpaintDone goes on
-                    // the wire.
+                    // closes the "stale Progress after Done" race: pump
+                    // can't be mid-iteration when InpaintDone goes on the wire.
                     //
                     // Cancel-map cleanup happens BEFORE `in_flight.fetch_sub`
                     // so a `Shutdown` waiting on `in_flight == 0` never
@@ -997,12 +990,10 @@ pub fn run_worker() -> ! {
                     // guard's own drop is then a no-op. The guard stays
                     // for panic-safety — if the body panics between the
                     // explicit remove and `fetch_sub`, drop still runs
-                    // and (idempotent) re-removes. The H14 contract
-                    // ("parent only ever queues one in-flight dispatch
-                    // per id") means a `CancelItem` can't insert a fresh
-                    // flag for this id between the body's remove and the
-                    // guard's drop, so the guard never accidentally
-                    // removes a re-registration.
+                    // and (idempotent) re-removes. The parent only ever
+                    // queues one in-flight dispatch per id, so a `CancelItem`
+                    // can't insert a fresh flag between the body's remove and
+                    // the guard's drop — no accidental re-registration.
                     struct Cleanup {
                         pump_done: Arc<AtomicBool>,
                         pump_handle: Option<std::thread::JoinHandle<()>>,
@@ -1015,17 +1006,10 @@ pub fn run_worker() -> ! {
                             if let Some(h) = self.pump_handle.take() {
                                 let _ = h.join();
                             }
-                            // Explicit cancel-map cleanup BEFORE the
-                            // in_flight decrement (see struct doc above).
                             self.cancel_guard.map.lock()
                                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                                 .remove(&self.cancel_guard.item_id);
-                            // Pairs with `in_flight.fetch_add` at dispatch
-                            // (above the thread::spawn). Drop runs even on
-                            // panic, so the counter stays balanced.
                             self.in_flight.fetch_sub(1, Ordering::AcqRel);
-                            // `cancel_guard` drops after — its remove is a
-                            // no-op since we already cleaned up.
                         }
                     }
                     let _cleanup = Cleanup {

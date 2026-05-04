@@ -11,7 +11,7 @@ use std::sync::mpsc;
 use prunr_core::{ModelKind, MaskSettings, EdgeSettings};
 use crate::gui::settings::LineMode;
 use super::protocol::*;
-use super::ipc::{write_message, read_message};
+use super::ipc::{write_message, flush_writer, read_message};
 
 /// Borrowed `(data, height, width)` triple so subprocess `send_*` helpers
 /// don't carry three parallel args.
@@ -119,12 +119,14 @@ impl SubprocessManager {
 
         let mut stdin_writer = BufWriter::new(child_stdin);
 
-        // Send Init command
+        // Send Init command — flush immediately so the child's blocking
+        // `read_message` sees it without waiting for the buffer to fill.
         write_message(&mut stdin_writer, &SubprocessCommand::Init {
             model, jobs, mask, force_cpu, line_mode, edge,
             ipc_dir: ipc_temp_dir().to_path_buf(),
             inpaint_only,
         }).map_err(|e| format!("Failed to send Init: {e}"))?;
+        flush_writer(&mut stdin_writer).map_err(|e| format!("Failed to flush Init: {e}"))?;
 
         // Spawn reader thread for non-blocking stdout consumption
         let (event_tx, event_rx) = mpsc::channel();
@@ -222,7 +224,7 @@ impl SubprocessManager {
             })
             .transpose()?;
 
-        write_message(&mut self.stdin_writer, &SubprocessCommand::ProcessImage {
+        self.send_cmd(&SubprocessCommand::ProcessImage {
             item_id,
             image_path,
             chain_input: chain,
@@ -239,13 +241,21 @@ impl SubprocessManager {
         item_id: u64,
         image_path: std::path::PathBuf,
     ) -> Result<(), String> {
-        write_message(&mut self.stdin_writer, &SubprocessCommand::ProcessImage {
+        self.send_cmd(&SubprocessCommand::ProcessImage {
             item_id,
             image_path,
             chain_input: None,
         }).map_err(|e| format!("Failed to send ProcessImage: {e}"))?;
         self.in_flight.insert(item_id);
         Ok(())
+    }
+
+    /// Write a command and flush. Parent commands must be visible to the child
+    /// immediately — a non-flushed BufWriter would stall blocking `read_message`
+    /// on the child side until the buffer fills.
+    fn send_cmd(&mut self, cmd: &SubprocessCommand) -> std::io::Result<()> {
+        write_message(&mut self.stdin_writer, cmd)?;
+        flush_writer(&mut self.stdin_writer)
     }
 
     /// Write tensor + image to temp files, then dispatch the caller-built command.
@@ -265,7 +275,7 @@ impl SubprocessManager {
         std::fs::write(&image_path, image_bytes)
             .map_err(|e| format!("Failed to write image temp file: {e}"))?;
 
-        write_message(&mut self.stdin_writer, &build_cmd(tensor_path, image_path))
+        self.send_cmd(&build_cmd(tensor_path, image_path))
             .map_err(|e| format!("Failed to send command: {e}"))?;
 
         self.in_flight.insert(item_id);
@@ -346,7 +356,7 @@ impl SubprocessManager {
         feather_px: f32,
         sharpen: f32,
     ) -> Result<(), String> {
-        write_message(&mut self.stdin_writer, &SubprocessCommand::Inpaint {
+        self.send_cmd(&SubprocessCommand::Inpaint {
             item_id, model_id, image_path, mask_path, sd_req, feather_px, sharpen,
         }).map_err(|e| format!("Failed to send Inpaint: {e}"))?;
         self.in_flight.insert(item_id);
@@ -356,13 +366,13 @@ impl SubprocessManager {
     /// Cancel one item by id — worker drops it at the next dispatch check
     /// and emits `ImageError { error: "Cancelled" }`.
     pub fn send_cancel_item(&mut self, item_id: u64) -> Result<(), String> {
-        write_message(&mut self.stdin_writer, &SubprocessCommand::CancelItem { item_id })
+        self.send_cmd(&SubprocessCommand::CancelItem { item_id })
             .map_err(|e| format!("Failed to send CancelItem: {e}"))
     }
 
     /// Send shutdown signal to the child.
     pub fn send_shutdown(&mut self) -> Result<(), String> {
-        write_message(&mut self.stdin_writer, &SubprocessCommand::Shutdown)
+        self.send_cmd(&SubprocessCommand::Shutdown)
             .map_err(|e| format!("Failed to send Shutdown: {e}"))
     }
 
@@ -374,7 +384,7 @@ impl SubprocessManager {
     /// that must not stall the UI thread.
     pub fn shutdown_with_timeout(&mut self, timeout: std::time::Duration) -> bool {
         // Ignore send errors — child may already be dead, we just need to wait/kill.
-        let _ = write_message(&mut self.stdin_writer, &SubprocessCommand::Shutdown);
+        let _ = self.send_cmd(&SubprocessCommand::Shutdown);
         let deadline = std::time::Instant::now() + timeout;
         loop {
             match self.child.try_wait() {
