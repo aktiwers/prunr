@@ -469,6 +469,12 @@ pub fn compose_subject_outline(
             masked_rgba.width(), masked_rgba.height(),
             edge.line_strength,
         );
+        // Fine and Bold must come from distinct tensor slots — equal raw
+        // pointers mean the caller collapsed to single-scale output.
+        debug_assert_ne!(
+            active.as_ptr(), bold.as_ptr(),
+            "DualScale collapsed to single-scale: primary and bold tensors are the same slice",
+        );
         compose_edges_dual_styled(
             &primary_mask, &bold_mask, masked_rgba,
             edge.compose_mode,
