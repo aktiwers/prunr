@@ -141,20 +141,29 @@ fn tensor_to_mask_core(raw: ArrayView4<f32>, ow: u32, oh: u32, rgba_for_guided: 
     };
 
     if let Some(corr) = correction {
-        // Brush correction needs the [0, 1] f32 buffer alive for the
-        // multiplicative apply step.
-        let mut normalized: Vec<f32> = if let Some(uv) = uniform_val {
-            vec![uv; sw * sh]
+        if corr.is_empty() {
+            // Empty correction — take the same fast path as the
+            // no-correction branch (avoids a ~4 MB f32 alloc at 1024²).
+            if let Some(uv) = uniform_val {
+                mask_buf.fill(finalise(uv));
+            } else {
+                for i in 0..sh * sw { mask_buf[i] = finalise(normalize(pred_slice[i])); }
+            }
         } else {
-            let mut buf = vec![0.0f32; sw * sh];
-            for i in 0..sh * sw { buf[i] = normalize(pred_slice[i]); }
-            buf
-        };
-        crate::brush::apply_correction(&mut normalized, sw, sh, corr);
-        for i in 0..sh * sw {
-            mask_buf[i] = finalise(normalized[i]);
+            // Brush correction needs the [0, 1] f32 buffer alive for the
+            // multiplicative apply step.
+            let mut normalized: Vec<f32> = if let Some(uv) = uniform_val {
+                vec![uv; sw * sh]
+            } else {
+                let mut buf = vec![0.0f32; sw * sh];
+                for i in 0..sh * sw { buf[i] = normalize(pred_slice[i]); }
+                buf
+            };
+            crate::brush::apply_correction(&mut normalized, sw, sh, corr);
+            for i in 0..sh * sw {
+                mask_buf[i] = finalise(normalized[i]);
+            }
         }
-        drop(normalized);
     } else if let Some(uv) = uniform_val {
         mask_buf.fill(finalise(uv));
     } else {
@@ -595,7 +604,8 @@ fn apply_mask_inplace(rgba: &mut RgbaImage, mask: &GrayImage) {
 /// output, ~96 MB → bbox-sized peak working set on 4K masks with small
 /// painted regions.
 fn feather_mask(mask: &mut GrayImage, sigma: f32) {
-    let radius = sigma.round().max(1.0) as u32;
+    let radius = sigma.round() as u32;
+    if radius == 0 { return; }
     // 3-box kernel total reach is 3·radius from each source pixel.
     let margin = 3 * radius;
     let Some(bbox) = crate::inpaint::mask_bbox(mask, 1, margin) else {
