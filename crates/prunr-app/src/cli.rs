@@ -216,11 +216,19 @@ pub fn run_remove(args: &Cli) -> i32 {
         return 1;
     }
 
-    // Ensure output directory exists if -o points to a dir (create eagerly, handle error)
+    // Ensure output directory exists for batch input. `create_dir_all`
+    // on an existing *file* path returns Ok on some Unix conditions but
+    // `is_dir()` catches it — `output_path_with_suffix` would then do
+    // `.join(name)` on a file path, producing an invalid path and a
+    // confusing per-image write error.
     if let Some(ref out) = args.output {
         if args.inputs.len() > 1 {
             if let Err(e) = std::fs::create_dir_all(out) {
                 eprintln!("error: cannot create output directory {}: {e}", out.display());
+                return 1;
+            }
+            if !out.is_dir() {
+                eprintln!("error: --output must be a directory for batch input (got a file path: {})", out.display());
                 return 1;
             }
         }
@@ -431,6 +439,20 @@ fn stage_label(stage: ProgressStage) -> &'static str {
 // ── Batch execution path ─────────────────────────────────────────────────────
 
 fn run_batch(args: &Cli) -> i32 {
+    // Validate and decode --bg-image before setting up progress bars.
+    // Placing the decode inside the MultiProgress draw region causes
+    // eprintln! on decode failure to get overwritten by the next redraw.
+    let bg_image: Option<std::sync::Arc<image::DynamicImage>> = match args.bg_image.as_deref() {
+        Some(p) => match prunr_core::load_image_from_path(p) {
+            Ok(img) => Some(std::sync::Arc::new(img)),
+            Err(e) => {
+                eprintln!("error: --bg-image: {e}");
+                return 1;
+            }
+        },
+        None => None,
+    };
+
     // 4 Hz redraw cap (default is 20 Hz). With 1 overall + N spinners
     // every redraw recomputes every bar's template; on a 6-image batch
     // the per-tick fan-out cost the perf trace caught was ~13% of
@@ -557,16 +579,6 @@ fn run_batch(args: &Cli) -> i32 {
             Some(c) => Some(c),
             None => {
                 eprintln!("error: --bg-color: '{s}' is not a 6-digit hex color (e.g. ffffff)");
-                return 1;
-            }
-        },
-        None => None,
-    };
-    let bg_image = match args.bg_image.as_deref() {
-        Some(p) => match prunr_core::load_image_from_path(p) {
-            Ok(img) => Some(std::sync::Arc::new(img)),
-            Err(e) => {
-                eprintln!("error: --bg-image: {e}");
                 return 1;
             }
         },
@@ -709,6 +721,15 @@ fn run_batch_subprocess(
     let mut pending: std::collections::VecDeque<usize> = (0..valid_paths.len()).collect();
     let mut max_jobs = initial_jobs;
 
+    // Inverse index: orig_idx (item_id cast to usize) → batch_results slot.
+    // The event loop previously linear-scanned valid_indices per event;
+    // on a 1000-image batch that was O(n²) over the run. This map is O(1).
+    let orig_to_batch: std::collections::HashMap<usize, usize> = valid_indices
+        .iter()
+        .enumerate()
+        .map(|(batch, &orig)| (orig, batch))
+        .collect();
+
     loop {
         if pending.is_empty() { break; }
 
@@ -798,8 +819,7 @@ fn run_batch_subprocess(
                             .ok_or_else(|| CoreError::Model("Failed to read subprocess result".into()));
                         let _ = std::fs::remove_file(&result_path);
 
-                        // Find the batch_results index for this item
-                        if let Some(ridx) = valid_indices.iter().position(|&vi| vi == orig_idx) {
+                        if let Some(&ridx) = orig_to_batch.get(&orig_idx) {
                             results[ridx] = Some(result);
                         }
 
@@ -819,7 +839,7 @@ fn run_batch_subprocess(
                         if let Some(pos) = batch_idx {
                             in_flight.remove(pos);
                         }
-                        if let Some(ridx) = valid_indices.iter().position(|&vi| vi == orig_idx) {
+                        if let Some(&ridx) = orig_to_batch.get(&orig_idx) {
                             results[ridx] = Some(Err(CoreError::Model(error)));
                         }
                     }

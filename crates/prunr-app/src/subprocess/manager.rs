@@ -385,11 +385,18 @@ impl SubprocessManager {
     pub fn shutdown_with_timeout(&mut self, timeout: std::time::Duration) -> bool {
         // Ignore send errors — child may already be dead, we just need to wait/kill.
         let _ = self.send_cmd(&SubprocessCommand::Shutdown);
-        let deadline = std::time::Instant::now() + timeout;
+        let start = std::time::Instant::now();
+        let deadline = start + timeout;
         loop {
             match self.child.try_wait() {
                 Ok(Some(_)) => return true,
                 _ if std::time::Instant::now() > deadline => {
+                    let elapsed_ms = start.elapsed().as_millis();
+                    tracing::warn!(
+                        elapsed_ms,
+                        "subprocess shutdown timed out — force-killing child \
+                         (CoreML first-run compile or model flush still in progress)"
+                    );
                     self.kill();
                     return false;
                 }

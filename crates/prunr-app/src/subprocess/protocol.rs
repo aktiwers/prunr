@@ -370,9 +370,12 @@ impl IpcKind {
     /// `InpaintMask` (the inpaint worker rewrites these per stroke and
     /// the gen suffix prevents stale-file races).
     pub fn path_for_gen(self, ipc_dir: &std::path::Path, id: u64, gen: u64) -> std::path::PathBuf {
-        debug_assert!(
+        // `debug_assert!` was insufficient — release builds would silently
+        // produce e.g. `result_5-0.raw` for the wrong variant, breaking
+        // path disambiguation in the IPC temp dir.
+        assert!(
             matches!(self, IpcKind::InpaintImg | IpcKind::InpaintMask),
-            "path_for_gen only meaningful for stroke-versioned inpaint inputs"
+            "path_for_gen only valid for InpaintImg / InpaintMask; got {self:?}"
         );
         ipc_dir.join(format!("{}{id}-{gen}.{}", self.prefix(), self.ext()))
     }
