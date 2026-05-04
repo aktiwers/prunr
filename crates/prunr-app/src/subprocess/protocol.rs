@@ -910,4 +910,103 @@ mod tests {
         // happy path of self/foreign preservation; pid value is unused.
         u32::MAX
     }
+
+    // ── serde(default) field roundtrip tests ────────────────────────────────
+    //
+    // `#[serde(default)]` fields — `inpaint_only`, `feather_px`, `sharpen`,
+    // `edge_cache_*` — are pinned here to document their expected defaults
+    // and catch accidental value drift. Bincode is a positional format; it
+    // does NOT support "missing trailing field → default" across a wire
+    // boundary (it returns `UnexpectedEnd` on a short payload). These tests
+    // therefore verify that the defaults serialise and deserialise correctly
+    // in a full roundtrip, not that a legacy binary can omit the field.
+    //
+    // The real forward-compat contract is: parent and child are always
+    // launched from the same binary, so no cross-version decode is
+    // expected in practice.
+
+    /// `Init.inpaint_only` defaults to `false`. A worker that sees `false`
+    /// creates the full engine pool; `true` skips it. Roundtrip both values
+    /// so a stray `serde(default = "true_fn")` regression fails loudly.
+    #[test]
+    fn command_init_inpaint_only_field_roundtrips_both_values() {
+        roundtrip(&SubprocessCommand::Init {
+            model: ModelKind::Silueta,
+            jobs: 1,
+            mask: MaskSettings::default(),
+            force_cpu: false,
+            line_mode: LineMode::Off,
+            edge: EdgeSettings::default(),
+            ipc_dir: PathBuf::from("/tmp/test"),
+            inpaint_only: false,
+        });
+        roundtrip(&SubprocessCommand::Init {
+            model: ModelKind::Silueta,
+            jobs: 1,
+            mask: MaskSettings::default(),
+            force_cpu: false,
+            line_mode: LineMode::Off,
+            edge: EdgeSettings::default(),
+            ipc_dir: PathBuf::from("/tmp/test"),
+            inpaint_only: true,
+        });
+    }
+
+    /// `Inpaint.feather_px` and `Inpaint.sharpen` default to 0.0 (no
+    /// post-process tuning). Roundtrip zero and non-zero values to catch
+    /// default drift.
+    #[test]
+    fn command_inpaint_feather_and_sharpen_roundtrip_zero_and_nonzero() {
+        roundtrip(&SubprocessCommand::Inpaint {
+            item_id: 5,
+            model_id: prunr_models::ModelId::LaMaFp32,
+            image_path: PathBuf::from("/tmp/img.png"),
+            mask_path: PathBuf::from("/tmp/mask.png"),
+            sd_req: None,
+            feather_px: 0.0,
+            sharpen: 0.0,
+        });
+        roundtrip(&SubprocessCommand::Inpaint {
+            item_id: 6,
+            model_id: prunr_models::ModelId::LaMaFp32,
+            image_path: PathBuf::from("/tmp/img2.png"),
+            mask_path: PathBuf::from("/tmp/mask2.png"),
+            sd_req: None,
+            feather_px: 8.5,
+            sharpen: 0.4,
+        });
+    }
+
+    /// `ImageDone.edge_cache_*` fields default to `None`. Roundtrip the
+    /// all-None case (no DexiNed run) and the all-Some case so a default
+    /// drift from `None` to some garbage path is caught immediately.
+    #[test]
+    fn event_image_done_edge_cache_fields_roundtrip_none_and_some() {
+        roundtrip(&SubprocessEvent::ImageDone {
+            item_id: 3,
+            result_path: PathBuf::from("/tmp/result.raw"),
+            width: 800,
+            height: 600,
+            active_provider: "CPU".into(),
+            tensor_cache_path: None,
+            tensor_cache_height: None,
+            tensor_cache_width: None,
+            edge_cache_path: None,
+            edge_cache_height: None,
+            edge_cache_width: None,
+        });
+        roundtrip(&SubprocessEvent::ImageDone {
+            item_id: 4,
+            result_path: PathBuf::from("/tmp/result2.raw"),
+            width: 1920,
+            height: 1080,
+            active_provider: "CPU".into(),
+            tensor_cache_path: None,
+            tensor_cache_height: None,
+            tensor_cache_width: None,
+            edge_cache_path: Some(PathBuf::from("/tmp/edge.raw")),
+            edge_cache_height: Some(1080),
+            edge_cache_width: Some(1920),
+        });
+    }
 }
