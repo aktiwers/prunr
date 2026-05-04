@@ -1568,6 +1568,15 @@ pub(crate) fn available_ram_bytes() -> Option<u64> {
     if avail == 0 { None } else { Some(avail) }
 }
 
+/// Public bridge to `available_ram_bytes` so the GUI inpaint bridge
+/// can sample free RAM during in-flight strokes (P1-B1 watchdog).
+/// Same fail-open contract as the internal helper: `None` → skip the
+/// check rather than fail-closed, since "we couldn't query" doesn't
+/// imply "memory is low".
+pub fn available_ram_bytes_pub() -> Option<u64> {
+    available_ram_bytes()
+}
+
 /// Current process RSS in MB. `None` when sysinfo can't read the process
 /// (sandboxed CI, exotic platforms). Used to instrument SD session
 /// load/drop where 4-6 GB swings are easy to hide in aggregate logs.

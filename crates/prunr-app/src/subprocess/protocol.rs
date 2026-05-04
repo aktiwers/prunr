@@ -14,6 +14,13 @@ use serde::{Serialize, Deserialize};
 /// round-trip.
 pub const CANCELLED_ERR_MSG: &str = "Cancelled";
 
+/// `InpaintBridgeResult::Error.error` value the inpaint bridge emits
+/// when its watchdog kills the subprocess to prevent a system-wide
+/// memory-pressure stall. Routed to a distinct user-facing toast
+/// ("Erase aborted — system memory low") so the user knows the abort
+/// was self-defence, not a stroke-quality failure.
+pub const MEMORY_PRESSURE_ABORT_MSG: &str = "memory-pressure-abort";
+
 /// Parent → Child commands (sent over child's stdin).
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub enum SubprocessCommand {
