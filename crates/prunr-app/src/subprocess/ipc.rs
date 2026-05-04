@@ -1,13 +1,20 @@
 //! Length-prefixed binary framing for subprocess IPC.
 //!
 //! Format: [4 bytes LE length][bincode payload]
-//! Max message size: 64 MB (commands/events are small; image data goes via temp files).
+//! Max message size: 1 MB. Commands and events are tiny (≤ a few KB); image
+//! data travels via temp files. If a frame exceeds this limit it is a bug
+//! (e.g. an accidental inline payload), not a legitimate large message.
 
 use std::io::{self, Read, Write, BufReader, BufWriter};
 
-const MAX_MESSAGE_SIZE: u32 = 64 * 1024 * 1024; // 64 MB
+const MAX_MESSAGE_SIZE: u32 = 1024 * 1024; // 1 MB
 
 /// Write a single message: [4-byte LE length][bincode payload].
+///
+/// Does NOT flush — callers in a write loop let the BufWriter coalesce
+/// frames. Call `flush_writer` explicitly before the stream closes or
+/// before a blocking read-response cycle where the peer must see the
+/// frame before sending a reply.
 pub fn write_message<W: Write, T: serde::Serialize>(
     writer: &mut BufWriter<W>,
     msg: &T,
@@ -17,8 +24,13 @@ pub fn write_message<W: Write, T: serde::Serialize>(
     let len = payload.len() as u32;
     writer.write_all(&len.to_le_bytes())?;
     writer.write_all(&payload)?;
-    writer.flush()?;
     Ok(())
+}
+
+/// Flush the writer. Call after the last `write_message` in a session so
+/// any coalesced frames reach the peer before the pipe closes.
+pub fn flush_writer<W: Write>(writer: &mut BufWriter<W>) -> io::Result<()> {
+    writer.flush()
 }
 
 /// Read a single message: [4-byte LE length][bincode payload].
