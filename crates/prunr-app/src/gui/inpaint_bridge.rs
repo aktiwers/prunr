@@ -91,17 +91,44 @@ fn run(msg_rx: mpsc::Receiver<InpaintBridgeMsg>, res_tx: mpsc::Sender<InpaintBri
     // stroke superseded it while this one was in flight. The IPC
     // doesn't carry gen — only the GUI cares about it.
     let mut inflight_gens: HashMap<u64, u64> = HashMap::new();
-    // Poll cadence: 100 ms is fast enough that progress events feel
-    // live (UNet steps are 1-3s on CPU) and slow enough that the idle
-    // case doesn't burn CPU.
-    let poll = Duration::from_millis(100);
 
     loop {
-        // Drain pending parent messages without blocking — keeps the
-        // event-pump responsive during a steady stream of dispatches.
+        // Block up to 100 ms waiting for the next parent message. This
+        // eliminates the fixed 100 ms sleep: a new Dispatch or Cancel
+        // wakes the thread immediately instead of waiting for the next
+        // poll tick. The subprocess event drain below still runs on the
+        // same 100 ms cadence when idle (recv_timeout returns Empty).
+        //
+        // If recv_timeout returns a message we handle it inside the same
+        // try_recv drain loop (first arm `msg`; rest via try_recv).
+        let first = msg_rx.recv_timeout(Duration::from_millis(100));
+        let mut pending = match first {
+            Ok(msg) => Some(msg),
+            Err(mpsc::RecvTimeoutError::Timeout) => None,
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                if let Some(mut s) = sub.take() {
+                    let _ = s.shutdown_with_timeout(Duration::from_secs(2));
+                }
+                return;
+            }
+        };
+        // Drain parent messages (first is already resolved; rest via try_recv).
         loop {
-            match msg_rx.try_recv() {
-                Ok(InpaintBridgeMsg::Dispatch { item_id, gen, model_id, image_path, mask_path, sd_req, feather_px, sharpen }) => {
+            let msg = match pending.take() {
+                Some(m) => m,
+                None => match msg_rx.try_recv() {
+                    Ok(m) => m,
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        if let Some(mut s) = sub.take() {
+                            let _ = s.shutdown_with_timeout(Duration::from_secs(2));
+                        }
+                        return;
+                    }
+                },
+            };
+            match msg {
+                InpaintBridgeMsg::Dispatch { item_id, gen, model_id, image_path, mask_path, sd_req, feather_px, sharpen } => {
                     last_used = Instant::now();
                     inflight_gens.insert(item_id, gen);
                     let s = match ensure_sub(&mut sub) {
@@ -117,19 +144,10 @@ fn run(msg_rx: mpsc::Receiver<InpaintBridgeMsg>, res_tx: mpsc::Sender<InpaintBri
                         inflight_gens.remove(&item_id);
                     }
                 }
-                Ok(InpaintBridgeMsg::Cancel { item_id }) => {
+                InpaintBridgeMsg::Cancel { item_id } => {
                     if let Some(s) = sub.as_mut() {
                         let _ = s.send_cancel_item(item_id);
                     }
-                }
-                Err(mpsc::TryRecvError::Empty) => break,
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    // Parent dropped the sender (app exit). Tear down
-                    // the subprocess and exit the bridge thread.
-                    if let Some(mut s) = sub.take() {
-                        let _ = s.shutdown_with_timeout(Duration::from_secs(2));
-                    }
-                    return;
                 }
             }
         }
@@ -173,8 +191,6 @@ fn run(msg_rx: mpsc::Receiver<InpaintBridgeMsg>, res_tx: mpsc::Sender<InpaintBri
                 tracing::info!("inpaint subprocess released after idle window");
             }
         }
-
-        std::thread::sleep(poll);
     }
 }
 
