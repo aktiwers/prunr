@@ -299,9 +299,11 @@ impl Processor {
     /// side — coordinator pattern: PrunrApp delegates, Processor owns
     /// the in-flight set. Idempotent and cheap (HashMap walk).
     pub(crate) fn cancel_all_inpaints(&self) {
-        let item_ids: Vec<u64> = self.inpaint_cancels.keys().copied().collect();
-        for item_id in item_ids {
-            self.cancel_inpaint(item_id);
+        for flag in self.inpaint_cancels.values() {
+            flag.store(true, std::sync::atomic::Ordering::Release);
+        }
+        for &item_id in self.inpaint_cancels.keys() {
+            let _ = self.inpaint_bridge_tx.send(InpaintBridgeMsg::Cancel { item_id });
         }
     }
 
@@ -816,6 +818,41 @@ mod tests {
         p.drain_recipes();
         assert!(p.take_recipe(1).is_none(),
             "drain must drop the slot so late deliveries fall back");
+    }
+
+    // ── Brush gate boundary contract (M-GUI-9) ───────────────────────────────
+    //
+    // `canvas::render` computes:
+    //   brush_active = is_enabled && !inpaint_in_flight_for_selected && …
+    //
+    // If is_inpaint_in_flight returns true for the selected item, brush_active
+    // must be false — so handle_brush_input is never entered. This test pins
+    // the Processor half of that contract so a future decoupling of
+    // is_inpaint_in_flight / is_inpaint_cancelling doesn't silently break the gate.
+
+    #[test]
+    fn inpaint_in_flight_blocks_brush_gate_for_selected_item() {
+        let mut p = fixture();
+        // Simulate an in-flight inpaint for item 42 by bumping the pending counter.
+        *p.inpaint_pending.entry(42).or_insert(0) += 1;
+        // The gate must block: is_inpaint_in_flight returns true.
+        assert!(p.is_inpaint_in_flight(42),
+            "pending count > 0 must report in-flight for the canvas brush gate");
+        // A different item must not be affected.
+        assert!(!p.is_inpaint_in_flight(99),
+            "in-flight state must be item-scoped, not global");
+    }
+
+    #[test]
+    fn inpaint_cancelling_is_independent_of_in_flight_count() {
+        // Cancelling starts before the worker has seen the flag; is_inpaint_in_flight
+        // is still true during this window. A future refactor that decouples them
+        // must not remove the separate is_inpaint_cancelling check.
+        let mut p = fixture();
+        *p.inpaint_pending.entry(7).or_insert(0) += 1;
+        p.inpaint_cancels.insert(7, Arc::new(AtomicBool::new(true)));
+        assert!(p.is_inpaint_in_flight(7), "in-flight must still be true during cancel");
+        assert!(p.is_inpaint_cancelling(7), "cancelling must reflect the atomic flag");
     }
 
     #[test]
