@@ -718,20 +718,23 @@ fn dev_model_path(name: &str) -> std::path::PathBuf {
 
 #[cfg(feature = "dev-models")]
 pub fn silueta_bytes() -> &'static [u8] {
-    DEV_SILUETA.get_or_init(|| std::fs::read(dev_model_path("silueta.onnx"))
-        .expect("models/silueta.onnx not found — run `cargo xtask fetch-models`"))
+    let path = dev_model_path("silueta.onnx");
+    DEV_SILUETA.get_or_init(|| std::fs::read(&path)
+        .unwrap_or_else(|_| panic!("dev-models requires {} — run `cargo xtask fetch-models` from the workspace root", path.display())))
 }
 
 #[cfg(feature = "dev-models")]
 pub fn birefnet_lite_bytes() -> &'static [u8] {
-    DEV_BIREFNET.get_or_init(|| std::fs::read(dev_model_path("birefnet_lite.onnx"))
-        .expect("models/birefnet_lite.onnx not found — run `cargo xtask fetch-models`"))
+    let path = dev_model_path("birefnet_lite.onnx");
+    DEV_BIREFNET.get_or_init(|| std::fs::read(&path)
+        .unwrap_or_else(|_| panic!("dev-models requires {} — run `cargo xtask fetch-models` from the workspace root", path.display())))
 }
 
 #[cfg(feature = "dev-models")]
 pub fn dexined_bytes() -> &'static [u8] {
-    DEV_DEXINED.get_or_init(|| std::fs::read(dev_model_path("dexined.onnx"))
-        .expect("models/dexined.onnx not found — run `cargo xtask fetch-models`"))
+    let path = dev_model_path("dexined.onnx");
+    DEV_DEXINED.get_or_init(|| std::fs::read(&path)
+        .unwrap_or_else(|_| panic!("dev-models requires {} — run `cargo xtask fetch-models` from the workspace root", path.display())))
 }
 
 // ── Optimized model variants (FP16 for GPU, INT8 for CPU) ───────────────────
@@ -1024,5 +1027,18 @@ mod tests {
             assert!(is_ep_compatible(ModelId::BiRefNetLite, ep), "BiRefNet + {ep}");
             assert!(is_ep_compatible(ModelId::SdV15InpaintFp16, ep), "SD15 + {ep}");
         }
+    }
+
+    #[test]
+    fn prunr_models_has_no_workspace_deps() {
+        // prunr-models must remain a leaf — no path deps on sibling workspace crates.
+        // Adding one would risk creating circular deps through prunr-core → prunr-models.
+        let toml = std::fs::read_to_string(
+            concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml")
+        ).expect("Cargo.toml must be readable");
+        assert!(
+            !toml.contains(r#"path = ".."#),
+            "prunr-models must remain a leaf crate with no workspace-internal path deps — see CLAUDE.md Layers table"
+        );
     }
 }
