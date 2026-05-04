@@ -29,6 +29,14 @@ use prunr_models::ModelId;
 /// should get it back if they switched away."
 const IDLE_RELEASE: Duration = Duration::from_secs(5 * 60);
 
+/// Memory-pressure watchdog threshold. When `available_ram_bytes`
+/// drops below this AND a stroke is in flight, the bridge force-kills
+/// the inpaint subprocess to prevent the kernel from swap-thrashing
+/// the user's system. 1 GB is below the point where Linux starts
+/// reclaiming aggressively; on macOS it's well above the
+/// "compressed memory pressure" warning threshold.
+const MEMORY_PRESSURE_THRESHOLD_BYTES: u64 = 1024 * 1024 * 1024;
+
 /// Parent → bridge messages.
 pub enum InpaintBridgeMsg {
     /// Dispatch one SD inpaint stroke. Image + mask are temp-file
@@ -171,6 +179,36 @@ fn run(msg_rx: mpsc::Receiver<InpaintBridgeMsg>, res_tx: mpsc::Sender<InpaintBri
                                 error: crate::subprocess::protocol::CANCELLED_ERR_MSG.into(),
                             });
                         }
+                    }
+                }
+            }
+        }
+
+        // Memory-pressure watchdog: while a stroke is in flight,
+        // sample free RAM each loop iteration (every ≤100 ms via
+        // recv_timeout). If we cross the floor, force-kill the
+        // subprocess on the same path P1-CANCEL uses — kernel
+        // reclaims pages instantly, far faster than waiting for the
+        // mid-step ORT `run()` to finish. This is the only protection
+        // that survives a `working_set_mb` underestimate or a
+        // mid-load free-RAM shift.
+        if !inflight_gens.is_empty() {
+            if let Some(free) = prunr_core::inpaint_sd::available_ram_bytes_pub() {
+                if free < MEMORY_PRESSURE_THRESHOLD_BYTES {
+                    tracing::warn!(
+                        free_mb = free / (1024 * 1024),
+                        threshold_mb = MEMORY_PRESSURE_THRESHOLD_BYTES / (1024 * 1024),
+                        in_flight = inflight_gens.len(),
+                        "memory-pressure abort: killing inpaint subprocess",
+                    );
+                    if let Some(mut s) = sub.take() {
+                        s.kill();
+                    }
+                    for (id, _gen) in inflight_gens.drain() {
+                        let _ = res_tx.send(InpaintBridgeResult::Error {
+                            item_id: id,
+                            error: crate::subprocess::protocol::MEMORY_PRESSURE_ABORT_MSG.into(),
+                        });
                     }
                 }
             }
