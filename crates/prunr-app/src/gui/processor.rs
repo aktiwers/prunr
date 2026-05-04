@@ -467,18 +467,9 @@ impl Processor {
                     let _ = self.inpaint_tx.send(result);
                 }
                 InpaintBridgeResult::Error { item_id, error } => {
-                    // Two distinct sentinels carried over the bridge
-                    // result channel:
-                    //   - `CANCELLED_ERR_MSG`: user clicked Cancel.
-                    //     Routes to the "Erase cancelled" info toast
-                    //     via the cancelled-bucket in
-                    //     `drain_inpaint_results`.
-                    //   - `MEMORY_PRESSURE_ABORT_MSG`: the bridge's
-                    //     watchdog killed the subprocess to keep the
-                    //     system out of swap-thrash. Translate to a
-                    //     user-friendly message at this seam so the
-                    //     toast reads "Erase aborted — system memory
-                    //     low" with the LaMa-fallback hint.
+                    // Translate bridge sentinels to user-facing text at
+                    // this seam so `drain_inpaint_results` doesn't have
+                    // to know about IPC strings.
                     use crate::subprocess::protocol::{CANCELLED_ERR_MSG, MEMORY_PRESSURE_ABORT_MSG};
                     let cancelled = error == CANCELLED_ERR_MSG;
                     let user_error = if cancelled {
