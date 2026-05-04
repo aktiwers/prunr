@@ -144,9 +144,33 @@ fn run(msg_rx: mpsc::Receiver<InpaintBridgeMsg>, res_tx: mpsc::Sender<InpaintBri
                         inflight_gens.remove(&item_id);
                     }
                 }
-                InpaintBridgeMsg::Cancel { item_id } => {
-                    if let Some(s) = sub.as_mut() {
-                        let _ = s.send_cancel_item(item_id);
+                InpaintBridgeMsg::Cancel { item_id: _ } => {
+                    // SD's UNet `run()` is uninterruptible mid-step
+                    // (5–60 s on CPU EP), so a flag-flip cancel cannot
+                    // free RAM in time — the user sees "Cancelling…"
+                    // sit there as RSS keeps climbing. Force-kill the
+                    // subprocess so the kernel reclaims pages instantly;
+                    // bridge respawns on the next dispatch.
+                    //
+                    // Cancel applies to ALL in-flight strokes — one
+                    // user, one Cancel button, no benefit from per-
+                    // stroke targeting. The Cancel.item_id is unused
+                    // here (kept for IPC symmetry / future extensions).
+                    if !inflight_gens.is_empty() {
+                        if let Some(mut s) = sub.take() {
+                            s.kill();
+                            tracing::info!("inpaint subprocess killed by Cancel");
+                        }
+                        // CANCELLED_ERR_MSG sentinel routes through
+                        // processor::pump_inpaint_subprocess to the
+                        // "Erase cancelled" info toast — same path
+                        // the in-process LaMa cancel already uses.
+                        for (id, _gen) in inflight_gens.drain() {
+                            let _ = res_tx.send(InpaintBridgeResult::Error {
+                                item_id: id,
+                                error: crate::subprocess::protocol::CANCELLED_ERR_MSG.into(),
+                            });
+                        }
                     }
                 }
             }
