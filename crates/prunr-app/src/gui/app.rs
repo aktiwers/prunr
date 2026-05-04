@@ -344,10 +344,8 @@ impl PrunrApp {
 
     /// Sync after batch modification — clamp index and refresh canvas.
     fn sync_after_batch_change(&mut self) {
-        if self.batch.items.is_empty() {
-            self.batch.selected_index = 0;
-        } else {
-            self.batch.selected_index = self.batch.selected_index.min(self.batch.items.len() - 1);
+        self.batch.clamp_selected_index();
+        if !self.batch.items.is_empty() {
             self.pending_batch_sync = true;
         }
     }
@@ -659,16 +657,11 @@ impl PrunrApp {
             tracing::debug!(item_id, "inpaint dispatch skipped: no correction");
             return;
         };
-        // Stack-based inpaint: each new stroke runs against the
-        // previous result (if any), not the original. This keeps
-        // earlier strokes intact and — critically for SD — keeps the
-        // mask bbox bounded to the current stroke instead of the
-        // cumulative paint history. source_rgba may have been evicted
-        // under memory pressure; rehydrate from cached DynamicImage.
-        let source = item.result_rgba.as_ref().cloned()
-            .or_else(|| item.source_rgba.as_ref().cloned())
-            .or_else(|| item.source_dyn.as_ref().map(|d| Arc::new(d.to_rgba8())));
-        let Some(source) = source else {
+        // Stack-based inpaint: each stroke runs against the previous
+        // result so earlier strokes stay intact. source_for_inpaint
+        // walks result_rgba → source_rgba → source_dyn, the last arm
+        // handling memory-pressure eviction.
+        let Some(source) = item.source_for_inpaint() else {
             tracing::warn!(item_id, "inpaint dispatch skipped: source RGBA unavailable");
             return;
         };
@@ -734,7 +727,7 @@ impl PrunrApp {
                 // pixels — full result-pixel undo is separate work).
                 item.clear_correction();
                 Self::spawn_tex_prep(
-                    new_rgba.clone(), item.id, format!("inpaint_{}_{}", item.id, switch),
+                    new_rgba.clone(), item.id, Self::tex_name("inpaint", item.id, Some(switch)),
                     true, handles.clone(), ctx.clone(),
                 );
                 (item.id, item.source.clone(), Some(new_rgba))
@@ -1830,7 +1823,7 @@ impl PrunrApp {
                 }
                 let switch = self.result_switch_id;
                 Self::spawn_tex_prep(
-                    new_rgba, item.id, format!("result_{}_{}", item.id, switch),
+                    new_rgba, item.id, Self::tex_name("result", item.id, Some(switch)),
                     true, handles.clone(), ctx.clone(),
                 );
                 (item.id, item.source.clone(), r.is_final)
@@ -2001,7 +1994,7 @@ impl PrunrApp {
             if let Some(rgba) = self.batch.items[idx].source_rgba.clone() {
                 self.batch.items[idx].source_tex_pending = true;
                 Self::spawn_tex_prep(
-                    rgba, item_id, format!("source_{item_id}"), false,
+                    rgba, item_id, Self::tex_name("source", item_id, None), false,
                     handles.clone(), ctx.clone(),
                 );
             }
@@ -2014,13 +2007,22 @@ impl PrunrApp {
                 let switch = self.result_switch_id;
                 self.batch.items[idx].result_tex_pending = true;
                 Self::spawn_tex_prep(
-                    rgba, item_id, format!("result_{item_id}_{switch}"), true,
+                    rgba, item_id, Self::tex_name("result", item_id, Some(switch)), true,
                     handles.clone(), ctx.clone(),
                 );
             }
         }
     }
 
+
+    /// Build a unique texture name for `spawn_tex_prep`. Single source-of-truth
+    /// for the four call sites so the naming scheme is easy to audit.
+    pub(crate) fn tex_name(kind: &str, item_id: u64, switch: Option<u64>) -> String {
+        match switch {
+            Some(sw) => format!("{kind}_{item_id}_{sw}"),
+            None => format!("{kind}_{item_id}"),
+        }
+    }
 
     fn spawn_tex_prep(
         rgba: Arc<image::RgbaImage>,
