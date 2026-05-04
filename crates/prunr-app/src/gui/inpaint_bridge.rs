@@ -29,12 +29,10 @@ use prunr_models::ModelId;
 /// should get it back if they switched away."
 const IDLE_RELEASE: Duration = Duration::from_secs(5 * 60);
 
-/// Memory-pressure watchdog threshold. When `available_ram_bytes`
-/// drops below this AND a stroke is in flight, the bridge force-kills
-/// the inpaint subprocess to prevent the kernel from swap-thrashing
-/// the user's system. 1 GB is below the point where Linux starts
-/// reclaiming aggressively; on macOS it's well above the
-/// "compressed memory pressure" warning threshold.
+/// Below this much free RAM the watchdog force-kills the worker.
+/// 1 GB sits below Linux's aggressive-reclaim band and above macOS's
+/// "compressed memory pressure" warning, so kicks before the kernel
+/// starts swap-thrashing on either platform.
 const MEMORY_PRESSURE_THRESHOLD_BYTES: u64 = 1024 * 1024 * 1024;
 
 /// Parent → bridge messages.
@@ -153,64 +151,40 @@ fn run(msg_rx: mpsc::Receiver<InpaintBridgeMsg>, res_tx: mpsc::Sender<InpaintBri
                     }
                 }
                 InpaintBridgeMsg::Cancel { item_id: _ } => {
-                    // SD's UNet `run()` is uninterruptible mid-step
-                    // (5–60 s on CPU EP), so a flag-flip cancel cannot
-                    // free RAM in time — the user sees "Cancelling…"
-                    // sit there as RSS keeps climbing. Force-kill the
-                    // subprocess so the kernel reclaims pages instantly;
-                    // bridge respawns on the next dispatch.
-                    //
-                    // Cancel applies to ALL in-flight strokes — one
-                    // user, one Cancel button, no benefit from per-
-                    // stroke targeting. The Cancel.item_id is unused
-                    // here (kept for IPC symmetry / future extensions).
-                    if !inflight_gens.is_empty() {
-                        if let Some(mut s) = sub.take() {
-                            s.kill();
-                            tracing::info!("inpaint subprocess killed by Cancel");
-                        }
-                        // CANCELLED_ERR_MSG sentinel routes through
-                        // processor::pump_inpaint_subprocess to the
-                        // "Erase cancelled" info toast — same path
-                        // the in-process LaMa cancel already uses.
-                        for (id, _gen) in inflight_gens.drain() {
-                            let _ = res_tx.send(InpaintBridgeResult::Error {
-                                item_id: id,
-                                error: crate::subprocess::protocol::CANCELLED_ERR_MSG.into(),
-                            });
-                        }
-                    }
+                    // SD's UNet `run()` is uninterruptible mid-step;
+                    // flag-flip cancel can't free RAM in time. The
+                    // kill applies to ALL in-flight strokes — one
+                    // user, one Cancel button.
+                    kill_and_drain(
+                        &mut sub, &mut inflight_gens, &res_tx,
+                        crate::subprocess::protocol::CANCELLED_ERR_MSG,
+                        "inpaint subprocess killed by Cancel",
+                    );
                 }
             }
         }
 
-        // Memory-pressure watchdog: while a stroke is in flight,
-        // sample free RAM each loop iteration (every ≤100 ms via
-        // recv_timeout). If we cross the floor, force-kill the
-        // subprocess on the same path P1-CANCEL uses — kernel
-        // reclaims pages instantly, far faster than waiting for the
-        // mid-step ORT `run()` to finish. This is the only protection
-        // that survives a `working_set_mb` underestimate or a
-        // mid-load free-RAM shift.
+        // Watchdog: catches `working_set_mb` underestimates and
+        // mid-load free-RAM shifts that the pre-flight gate can't see.
+        // `available_ram_bytes_throttled` has a 1 s TTL cache shared
+        // with the GUI's settings-panel readout — sub-second
+        // resolution would not detect swap-thrash any faster, so the
+        // throttle is a free win over a fresh `refresh_memory()` per
+        // 100 ms loop.
         if !inflight_gens.is_empty() {
-            if let Some(free) = prunr_core::inpaint_sd::available_ram_bytes_pub() {
-                if free < MEMORY_PRESSURE_THRESHOLD_BYTES {
-                    tracing::warn!(
-                        free_mb = free / (1024 * 1024),
-                        threshold_mb = MEMORY_PRESSURE_THRESHOLD_BYTES / (1024 * 1024),
-                        in_flight = inflight_gens.len(),
-                        "memory-pressure abort: killing inpaint subprocess",
-                    );
-                    if let Some(mut s) = sub.take() {
-                        s.kill();
-                    }
-                    for (id, _gen) in inflight_gens.drain() {
-                        let _ = res_tx.send(InpaintBridgeResult::Error {
-                            item_id: id,
-                            error: crate::subprocess::protocol::MEMORY_PRESSURE_ABORT_MSG.into(),
-                        });
-                    }
-                }
+            let free = crate::hardware::available_ram_bytes_throttled();
+            if free > 0 && free < MEMORY_PRESSURE_THRESHOLD_BYTES {
+                tracing::warn!(
+                    free_mb = free / (1024 * 1024),
+                    threshold_mb = MEMORY_PRESSURE_THRESHOLD_BYTES / (1024 * 1024),
+                    in_flight = inflight_gens.len(),
+                    "memory-pressure abort: killing inpaint subprocess",
+                );
+                kill_and_drain(
+                    &mut sub, &mut inflight_gens, &res_tx,
+                    crate::subprocess::protocol::MEMORY_PRESSURE_ABORT_MSG,
+                    "inpaint subprocess killed by memory-pressure watchdog",
+                );
             }
         }
 
@@ -253,6 +227,33 @@ fn run(msg_rx: mpsc::Receiver<InpaintBridgeMsg>, res_tx: mpsc::Sender<InpaintBri
                 tracing::info!("inpaint subprocess released after idle window");
             }
         }
+    }
+}
+
+/// SIGKILL the subprocess and surface `error_msg` on every in-flight
+/// stroke. Shared by both abort paths (user Cancel and watchdog
+/// memory-pressure kill). No-op when no stroke is in flight — the
+/// next dispatch handles spawn lazily, so killing an idle subprocess
+/// would just waste the warm bundle for nothing.
+fn kill_and_drain(
+    sub: &mut Option<SubprocessManager>,
+    inflight_gens: &mut HashMap<u64, u64>,
+    res_tx: &mpsc::Sender<InpaintBridgeResult>,
+    error_msg: &'static str,
+    log_msg: &'static str,
+) {
+    if inflight_gens.is_empty() {
+        return;
+    }
+    if let Some(mut s) = sub.take() {
+        s.kill();
+        tracing::info!("{log_msg}");
+    }
+    for (id, _gen) in inflight_gens.drain() {
+        let _ = res_tx.send(InpaintBridgeResult::Error {
+            item_id: id,
+            error: error_msg.into(),
+        });
     }
 }
 
