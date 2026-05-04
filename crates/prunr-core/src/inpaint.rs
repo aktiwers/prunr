@@ -440,9 +440,11 @@ pub fn process_inpaint_with(
     if mask_is_empty(mask) {
         return Ok(image.clone());
     }
-    // Unified RAM pre-flight — see `inpaint_sd::check_ram_for`.
-    crate::inpaint_sd::check_ram_for(id).map_err(CoreError::Inference)?;
     if id.is_sd_family() {
+        // RAM pre-flight is SD-only: the check probes for the 4+ GB working
+        // set the SD pipeline needs. LaMa / MI-GAN require < 1 GB and the
+        // sysinfo refresh (~5 ms) costs more than it saves on those paths.
+        crate::inpaint_sd::check_ram_for(id).map_err(CoreError::Inference)?;
         let req = sd_req.unwrap_or_else(|| crate::inpaint_sd::SdInpaintRequest {
             num_inference_steps: 20,
             ..Default::default()
