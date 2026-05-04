@@ -103,4 +103,25 @@ mod tests {
             );
         }
     }
+
+    /// Every single-file OnDemand registry entry must have a matching
+    /// xtask `MODELS` row, otherwise `cargo xtask fetch-models` skips
+    /// it silently and the dev workflow can't exercise that model.
+    /// `MultiPartOnDemand` bundles (SD15 etc.) are out of scope —
+    /// xtask doesn't mirror multi-part bundles by design.
+    #[test]
+    fn every_ondemand_registry_entry_has_xtask_row() {
+        let xtask_ids: std::collections::HashSet<prunr_models::ModelId> =
+            MODELS.iter().map(|s| s.id).collect();
+        for id in prunr_models::ModelId::ALL {
+            let Some(desc) = prunr_models::descriptor(*id) else { continue };
+            if matches!(desc.source, ModelSource::OnDemand { .. }) && !xtask_ids.contains(id) {
+                panic!(
+                    "registry has OnDemand entry for {id:?} but xtask MODELS has no matching row \
+                     — `cargo xtask fetch-models` would silently skip it. Add the row in \
+                     xtask/src/models.rs or document why this id is dev-mode-only.",
+                );
+            }
+        }
+    }
 }
