@@ -467,15 +467,38 @@ impl Processor {
                     let _ = self.inpaint_tx.send(result);
                 }
                 InpaintBridgeResult::Error { item_id, error } => {
-                    // Treat the special "Cancelled" sentinel as cancel,
-                    // not error — same contract the seg path uses.
-                    let cancelled = error == crate::subprocess::protocol::CANCELLED_ERR_MSG;
+                    // Two distinct sentinels carried over the bridge
+                    // result channel:
+                    //   - `CANCELLED_ERR_MSG`: user clicked Cancel.
+                    //     Routes to the "Erase cancelled" info toast
+                    //     via the cancelled-bucket in
+                    //     `drain_inpaint_results`.
+                    //   - `MEMORY_PRESSURE_ABORT_MSG`: the bridge's
+                    //     watchdog killed the subprocess to keep the
+                    //     system out of swap-thrash. Translate to a
+                    //     user-friendly message at this seam so the
+                    //     toast reads "Erase aborted — system memory
+                    //     low" with the LaMa-fallback hint.
+                    use crate::subprocess::protocol::{CANCELLED_ERR_MSG, MEMORY_PRESSURE_ABORT_MSG};
+                    let cancelled = error == CANCELLED_ERR_MSG;
+                    let user_error = if cancelled {
+                        None
+                    } else if error == MEMORY_PRESSURE_ABORT_MSG {
+                        Some(
+                            "Erase aborted — system memory low. \
+                             Close other apps or use LaMa instead \
+                             (Settings → Eraser)."
+                                .to_string(),
+                        )
+                    } else {
+                        Some(error)
+                    };
                     let _ = self.inpaint_tx.send(InpaintResult {
                         item_id,
                         rgba: image::RgbaImage::new(0, 0),
                         generation: 0,
                         cancelled,
-                        error: if cancelled { None } else { Some(error) },
+                        error: user_error,
                     });
                 }
             }
