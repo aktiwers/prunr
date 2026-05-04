@@ -92,11 +92,14 @@ jobs:
 
       # Patch version from git tag into Info.plist before building.
       # Skipped on workflow_dispatch (no tag → keep the in-repo placeholder).
+      # Two targeted seds (one per key) so unrelated version-shaped strings
+      # elsewhere in the file are never touched.
       - name: Patch macOS Info.plist version
         if: matrix.name == 'macos-aarch64' && github.event_name == 'push'
         run: |
           VERSION=${GITHUB_REF_NAME#v}
-          sed -i '' "s|<string>[0-9]*\.[0-9]*\.[0-9]*</string>|<string>${VERSION}</string>|g" assets/Info.plist
+          sed -i '' "/<key>CFBundleVersion<\/key>/,/<\/string>/ s|<string>[0-9.]*</string>|<string>${VERSION}</string>|" assets/Info.plist
+          sed -i '' "/<key>CFBundleShortVersionString<\/key>/,/<\/string>/ s|<string>[0-9.]*</string>|<string>${VERSION}</string>|" assets/Info.plist
 
       # ── Custom ORT with CoreML (macOS only) ──
       # Linux/Windows stage a CPU-only runtime via xtask (see "Stage CPU
