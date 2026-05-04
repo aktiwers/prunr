@@ -1579,27 +1579,41 @@ fn process_rss_mb() -> Option<u64> {
     })
 }
 
-/// Shared RAM pre-flight gate. Resolves the model's `working_set_mb` and
-/// errors with a user-facing message when free RAM is below threshold.
-/// Returns `Ok(())` when sysinfo can't read the system (the gate
-/// fail-open in that case mirrors `available_ram_bytes`'s `None`-as-skip
-/// contract). Single source of truth for the wording — `process_inpaint_with`
-/// calls it on every dispatch; `SdSession::new_inner` calls it on bundle
-/// build for the prewarm path that bypasses the inpaint entry.
+/// Headroom on top of `working_set_mb` so the gate survives a
+/// snapshot-shifting-mid-load: between `check_ram_for` and the actual
+/// allocations deep in ORT (5–30 s later for SD), another app may
+/// spike, kernel may start swapping, our own bundle build may hit
+/// compile transients we under-modelled. 2 GB is enough to cover the
+/// "free RAM at gate time minus free RAM during build" delta we see
+/// in practice without being so large the gate becomes unfriendly to
+/// 16-GB machines. Phase 4 / E1 will surface this as a Settings slider.
+const SAFETY_MARGIN_MB: u64 = 2_000;
+
+/// Shared RAM pre-flight gate. Resolves the model's `working_set_mb`,
+/// adds a `SAFETY_MARGIN_MB` headroom, and errors with a user-facing
+/// message when free RAM is below the combined threshold. Returns
+/// `Ok(())` when sysinfo can't read the system (the gate fail-open in
+/// that case mirrors `available_ram_bytes`'s `None`-as-skip contract).
+/// Single source of truth for the wording — `process_inpaint_with`
+/// calls it on every dispatch; `SdSession::new_inner` calls it on
+/// bundle build for the prewarm path that bypasses the inpaint entry.
 pub(crate) fn check_ram_for(id: prunr_models::ModelId) -> Result<(), String> {
     let Some(desc) = prunr_models::descriptor(id) else { return Ok(()) };
-    let need = (desc.working_set_mb as u64) * 1024 * 1024;
+    let need_mb = desc.working_set_mb as u64 + SAFETY_MARGIN_MB;
+    let need = need_mb * 1024 * 1024;
     let Some(free) = available_ram_bytes() else { return Ok(()) };
     if free >= need {
         return Ok(());
     }
     Err(format!(
         "{} refused to load: only {:.1} GB RAM free, \
-         {:.1} GB minimum recommended. Close other apps or pick a \
-         smaller eraser model.",
+         {:.1} GB minimum recommended (includes {:.1} GB safety \
+         headroom). Close other apps or use LaMa instead — \
+         Settings → Eraser.",
         desc.display_name,
         free as f64 / 1e9,
         need as f64 / 1e9,
+        SAFETY_MARGIN_MB as f64 / 1024.0,
     ))
 }
 
