@@ -152,7 +152,7 @@ fn fetch_models() -> anyhow::Result<()> {
 
             if spec.sha256.is_empty() {
                 println!("  Computed SHA256: {hash}");
-                println!("  IMPORTANT: Hardcode this in xtask/src/models.rs");
+                println!("  IMPORTANT: paste this SHA256 into the matching ModelSpec.sha256 field in xtask/src/models.rs");
                 continue;
             }
 
@@ -182,7 +182,7 @@ fn fetch_models() -> anyhow::Result<()> {
         if spec.sha256.is_empty() {
             println!("  Computed SHA256: {hash}");
             println!(
-                "  IMPORTANT: Hardcode this in xtask/src/models.rs as {} constant",
+                "  IMPORTANT: paste this SHA256 into the matching ModelSpec.sha256 field in xtask/src/models.rs for {}",
                 spec.name
             );
         } else if hash != spec.sha256 {
@@ -222,7 +222,7 @@ fn fetch_models() -> anyhow::Result<()> {
         }
     }
 
-    println!("\nDone. If any SHA256 values above say IMPORTANT, update xtask/src/models.rs.");
+    println!("\nDone. If any SHA256 values above say IMPORTANT, paste each hash into the matching ModelSpec.sha256 field in xtask/src/models.rs.");
     Ok(())
 }
 
