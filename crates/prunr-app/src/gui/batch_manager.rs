@@ -140,6 +140,24 @@ impl BatchManager {
         }
     }
 
+    /// Clamp `selected_index` to the current batch size. Returns `true` when
+    /// the index moved (i.e. the batch shrank below the old selection). Callers
+    /// use the return value to trigger a pending batch sync.
+    /// No-op on an empty batch — resets to 0 instead, which is the canonical
+    /// "nothing selected" sentinel.
+    pub(crate) fn clamp_selected_index(&mut self) -> bool {
+        if self.items.is_empty() {
+            let moved = self.selected_index != 0;
+            self.selected_index = 0;
+            moved
+        } else {
+            let clamped = self.selected_index.min(self.items.len() - 1);
+            let moved = clamped != self.selected_index;
+            self.selected_index = clamped;
+            moved
+        }
+    }
+
     /// Switch the selected item to `idx`. Returns `true` when the index actually
     /// changed; `false` when it was already selected. Callers use the return value
     /// to decide whether to reset the canvas (zoom/pan/texture sync).
