@@ -57,7 +57,8 @@ impl From<&crate::EdgeSettings> for EdgeRecipe {
 
 /// Tier 2: mask postprocessing settings (gamma, threshold, edge refinement).
 /// Uses `f32::to_bits()` for exact float comparison.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// All fields are `Copy` types (u32, bool, enums), so `MaskRecipe: Copy`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct MaskRecipe {
     gamma_bits: u32,
     threshold_bits: Option<u32>,
