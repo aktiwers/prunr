@@ -91,6 +91,9 @@ pub fn sanitize_filename(name: &str) -> String {
 /// Load every preset file in the directory into a map. Invalid files are
 /// silently skipped — we'd rather load 9 of 10 valid presets than reject
 /// the whole batch because one file is malformed.
+///
+/// Called once at startup from `Settings::load` (before the first frame) and
+/// once per preset delete to refresh the in-memory map. Not on the render path.
 pub fn load_all() -> HashMap<String, ItemSettings> {
     let Some(dir) = presets_dir() else { return HashMap::new() };
     let Ok(entries) = std::fs::read_dir(&dir) else { return HashMap::new() };
