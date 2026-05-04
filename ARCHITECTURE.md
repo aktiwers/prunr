@@ -15,9 +15,10 @@ Living document describing how Prunr is built. For user-facing info see [README.
 ```
 prunr/
 ├── crates/
-│   ├── prunr-models/       # Embedded zstd-compressed ONNX blobs + runtime decompression
-│   ├── prunr-core/         # Inference pipeline, image I/O, batch processing
-│   └── prunr-app/          # Single binary: GUI (eframe/egui) + CLI (clap) + subprocess worker
+│   ├── prunr-models/         # Embedded zstd-compressed ONNX blobs + runtime decompression
+│   ├── prunr-core/           # Inference pipeline, image I/O, batch processing
+│   ├── prunr-runtime-install/# PyPI wheel fetch + repackage (shared between xtask and GUI)
+│   └── prunr-app/            # Single binary: GUI (eframe/egui) + CLI (clap) + subprocess worker
 │       └── src/
 │           ├── main.rs             # Entry point: --worker / CLI / GUI dispatch
 │           ├── cli.rs              # CLI batch processing
@@ -56,7 +57,7 @@ prunr/
 └── LICENSE                 # Apache-2.0
 ```
 
-**Dependency direction:** `prunr-models` → `prunr-core` → `prunr-app`. Reverse deps are forbidden; `prunr-models` has no workspace-internal dependencies so its ~380 MB embed blob only recompiles when models change.
+**Dependency direction:** `prunr-models` → `prunr-core` → `prunr-app`. Reverse deps are forbidden; `prunr-models` has no workspace-internal dependencies so its ~380 MB embed blob only recompiles when models change. `prunr-runtime-install` is a leaf crate consumed by both `prunr-app` (GUI install button) and `xtask` (CI runtime staging) — keeps the wheel-fetch + repackage logic single-sourced.
 
 ## GUI Coordinators
 
@@ -482,7 +483,7 @@ The app uses `ort` with the `load-dynamic` feature — no ORT is statically link
 
 1. `ORT_DYLIB_PATH` env var (developer override)
 2. **User Runtime Store**: `<data>/prunr/runtimes/<id>/libonnxruntime.so` — populated on demand via Settings → Hardware install or `cargo xtask install-runtime`
-3. **Bundled fallback**: `<exe>/runtime/libonnxruntime.so` — cargo-dist installer ships a CPU-only ORT here
+3. **Bundled fallback**: `<exe>/runtime/libonnxruntime.{so,dylib,dll}` — `release.yml` stages this via `cargo xtask install-runtime --stage-to runtime-stage` and the per-platform packaging steps copy the dylib into `<package>/runtime/`
 
 Each EP-specific Runtime Store entry contains `libonnxruntime.so` (built with that EP) + the EP runtime libs (e.g. OpenVINO bundles `libopenvino.so` + GPU/NPU plugins). Sourced from official PyPI wheels (`onnxruntime-openvino` etc.) — `xtask install-runtime` extracts the relevant `.so`/`.dll` files and renames the versioned `libonnxruntime.so.X.Y.Z` → canonical `libonnxruntime.so` so the resolver picks it up.
 
@@ -587,7 +588,7 @@ Models are declared in a single `prunr_models::REGISTRY` table. `ModelDescriptor
 
 `resolve_bytes(id) -> Option<Cow<'static, [u8]>>` is the single byte-access entry point. Bundled returns `Cow::Borrowed(&'static [u8])` (zero-copy from the embedded zstd cache); OnDemand reads from disk, returns `Cow::Owned(Vec<u8>)`, or `None` if the file isn't there. `is_available(id)` reports installation state. `OrtEngine::new` and `LamaSession::get` both go through `resolve_bytes` and surface `prunr_models::not_installed_error(id)` ("Open the Model Store…") when the file is missing.
 
-**Default bundle (~370 MB):** Silueta + BiRefNet-lite + DexiNed. **On-demand:** see `crates/prunr-models/src/lib.rs::REGISTRY` for the full list (currently U2Net, Big-LaMa, MI-GAN, LaMa-fp32, SD 1.5 inpaint variants, TAESD VAE). Hosted at `https://github.com/aktiwers/prunr/releases/tag/models-v1` with versioned filenames (`u2net-1.0.0.onnx`, `.sha256` sidecar) and a `manifest.json` listing every model's metadata. Asset URLs are stable forever — old apps keep resolving old URLs.
+**Default bundle:** Silueta + BiRefNet-lite + DexiNed (the three `.zst` blobs in `models/`; bundle size tracks model release artefacts and isn't pinned in this doc). **On-demand:** see `crates/prunr-models/src/lib.rs::REGISTRY` for the full list (currently U2Net, Big-LaMa, MI-GAN, LaMa-fp32, SD 1.5 inpaint variants, TAESD VAE). Hosted at `https://github.com/aktiwers/prunr/releases/tag/models-v1` with versioned filenames (`u2net-1.0.0.onnx`, `.sha256` sidecar) and a `manifest.json` listing every model's metadata. Asset URLs are stable forever — old apps keep resolving old URLs.
 
 **Storage** (gitignored, never bundled in installer): `dirs::data_dir() / "prunr" / "models"`. Linux: `~/.local/share/prunr/models/`; macOS: `~/Library/Application Support/prunr/models/`; Windows: `%APPDATA%\prunr\models\`. Dev mode (`--features dev-models`) accepts the unversioned `models/u2net.onnx` produced by `cargo xtask fetch-models` as a fallback so the dev workflow doesn't need the user data dir mirrored.
 

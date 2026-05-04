@@ -19,6 +19,13 @@ use sha2::{Digest, Sha256};
 /// linkage; it IS load-bearing for "the bundled CPU runtime and the
 /// runtime-store OpenVINO upgrade are at matching versions" — drift
 /// would surprise a user upgrading via Settings → Hardware.
+///
+/// **Upper bound:** pykeio/ort tracks ABI v23 across ORT 1.x. ORT 2.0+
+/// is expected to bump the ABI; bumping this past the 1.x line without
+/// switching the `ort` feature to `api-24` (or whatever the new ABI
+/// becomes) would compile but crash at session creation. Run
+/// `cargo xtask probe-load-dynamic <new-dylib>` before the bump to
+/// confirm — see CLAUDE.md `## Verify before bundling / wiring`.
 pub const PINNED_ORT_VERSION: &str = "1.24.1";
 
 /// Version of ONNX Runtime we build from source on macOS to enable the
