@@ -99,7 +99,17 @@ pub struct Settings {
     /// the standard SD pipeline runs (20 steps, full VAE, full CFG).
     #[serde(default)]
     pub sd_fast_mode: Option<bool>,
+
+    /// Free RAM the SD pre-flight gate requires *on top of* the model's
+    /// declared `working_set_mb`. Default 2 GB matches the historical
+    /// hardcoded `SAFETY_MARGIN_MB`. Lower → SD runs in tighter
+    /// memory situations (riskier, may swap-thrash). Higher → more
+    /// conservative on systems where other apps spike during inference.
+    #[serde(default = "default_ram_safety_margin_gb")]
+    pub ram_safety_margin_gb: f32,
 }
+
+fn default_ram_safety_margin_gb() -> f32 { 2.0 }
 
 impl Settings {
     /// Resolve `sd_fast_mode` against current hardware. Single source of
@@ -486,6 +496,7 @@ impl Default for Settings {
             active_backend: "CPU".to_string(),
             brush: BrushSettings::default(),
             sd_fast_mode: None,
+            ram_safety_margin_gb: default_ram_safety_margin_gb(),
         }
     }
 }
