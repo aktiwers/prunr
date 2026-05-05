@@ -139,6 +139,44 @@ pub fn ram_verdict(working_set_bytes: u64, available_bytes: u64) -> RamVerdict {
     }
 }
 
+/// GUI-side pre-flight gate for SD inpaint dispatch. Runs BEFORE
+/// spawning the subprocess so a doomed run doesn't pay the spawn
+/// cost. Returns `Err(user_message)` when free RAM is below the
+/// model's `working_set_mb` plus the user's `ram_safety_margin_gb`
+/// headroom.
+///
+/// The subprocess has its own `check_ram_for` with a hardcoded 2 GB
+/// floor — this gate ADDS the user-tunable margin on top. Lowering
+/// the slider below 2 GB doesn't loosen subprocess behavior; the
+/// slider primarily lets users tighten the threshold for tight-RAM
+/// systems where other apps spike during inference.
+pub fn pre_flight_sd_ram(
+    working_set_mb: u32,
+    available_bytes: u64,
+    safety_margin_gb: f32,
+) -> Result<(), String> {
+    // sysinfo returns 0 when it can't read /proc/meminfo etc. Treat as
+    // "unknown, pass" — matches the subprocess `check_ram_for` contract.
+    if available_bytes == 0 {
+        return Ok(());
+    }
+    let working_set = working_set_mb as u64 * 1024 * 1024;
+    let margin = (safety_margin_gb.max(0.0) * 1024.0 * 1024.0 * 1024.0) as u64;
+    let need = working_set + margin;
+    if available_bytes >= need {
+        return Ok(());
+    }
+    Err(format!(
+        "Not enough free RAM: {:.1} GB available, {:.1} GB recommended \
+         (model needs {:.1} GB + {:.1} GB safety margin). \
+         Close other apps or lower the safety margin in Settings.",
+        available_bytes as f64 / 1e9,
+        need as f64 / 1e9,
+        working_set as f64 / 1e9,
+        margin as f64 / 1e9,
+    ))
+}
+
 /// Auto-detect default for SD inpaint's "Fast mode" — ON when no real
 /// GPU is detected (CPU or Intel-iGPU-only), OFF otherwise. Real GPUs
 /// run standard SD fast enough that the LCM/TAESD quality trade-off
@@ -385,6 +423,35 @@ mod tests {
         assert_eq!(ram_verdict(WS, WS * 3 / 2), RamVerdict::Comfortable);
         // Way above → comfortable
         assert_eq!(ram_verdict(WS, WS * 4), RamVerdict::Comfortable);
+    }
+
+    #[test]
+    fn pre_flight_sd_ram_passes_when_within_budget() {
+        // 7 GB working set + 2 GB margin = 9 GB needed, 10 GB available.
+        let avail = 10 * 1024 * 1024 * 1024;
+        assert!(pre_flight_sd_ram(7000, avail, 2.0).is_ok());
+    }
+
+    #[test]
+    fn pre_flight_sd_ram_rejects_when_under_budget() {
+        // 7 GB + 4 GB = 11 GB needed, 10 GB available.
+        let avail = 10 * 1024 * 1024 * 1024;
+        let err = pre_flight_sd_ram(7000, avail, 4.0).unwrap_err();
+        assert!(err.contains("Not enough free RAM"), "got: {err}");
+    }
+
+    #[test]
+    fn pre_flight_sd_ram_treats_negative_margin_as_zero() {
+        // 7 GB working set + clamped-0 margin = 7 GB needed, 8 GB free.
+        let avail = 8 * 1024 * 1024 * 1024;
+        assert!(pre_flight_sd_ram(7000, avail, -1.0).is_ok());
+    }
+
+    #[test]
+    fn pre_flight_sd_ram_passes_when_sysinfo_unreadable() {
+        // sysinfo returning 0 must not falsely reject — fail-open matches
+        // the subprocess `check_ram_for` contract on `None` available_ram.
+        assert!(pre_flight_sd_ram(7000, 0, 2.0).is_ok());
     }
 
     #[test]

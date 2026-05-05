@@ -673,6 +673,23 @@ impl PrunrApp {
         } else {
             raw_backend
         };
+        // GUI pre-flight: refuse SD-family dispatch when free RAM is
+        // below working_set + user's safety margin. LaMa/MI-GAN are
+        // small enough that the subprocess gate alone is enough.
+        if backend.is_sd_family() {
+            if let Some(desc) = prunr_models::descriptor(backend) {
+                let avail = crate::hardware::available_ram_bytes_throttled();
+                if let Err(msg) = crate::hardware::pre_flight_sd_ram(
+                    desc.working_set_mb,
+                    avail,
+                    self.settings.ram_safety_margin_gb,
+                ) {
+                    tracing::warn!(item_id, ?backend, %msg, "SD pre-flight gate refused dispatch");
+                    self.toasts.error(msg);
+                    return;
+                }
+            }
+        }
         tracing::info!(item_id, ?backend, ?raw_backend, "inpaint stroke committed; dispatching");
         let tuning = super::processor::InpaintTuning {
             sharpen: bs.inpaint_sharpen,

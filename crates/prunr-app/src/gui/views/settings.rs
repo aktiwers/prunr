@@ -298,6 +298,20 @@ fn render_hardware_section(
     intent
 }
 
+/// SD inpaint RAM safety-margin slider. Sets how much free RAM the
+/// pre-flight gate requires *on top of* the model's working set.
+fn render_ram_safety_margin_row(ui: &mut egui::Ui, value: &mut f32) {
+    slider_row(
+        ui,
+        "SD safety margin",
+        value,
+        0.0..=8.0,
+        &format!("{value:.1} GB"),
+        Some(0.5),
+    );
+    hint(ui, "Free RAM the SD eraser keeps clear on top of the model's working set. Higher = more conservative on systems where other apps spike during inference. Default 2 GB.");
+}
+
 fn render_tab_strip(ui: &mut egui::Ui, current: &mut SettingsTab) {
     ui.horizontal(|ui| {
         for tab in SettingsTab::ALL.iter().copied() {
@@ -358,6 +372,9 @@ fn render_tab_general(
     ui.add_space(theme::SPACE_MD);
 
     render_sd_fast_mode_row(ui, &mut settings.sd_fast_mode);
+    ui.add_space(theme::SPACE_MD);
+
+    render_ram_safety_margin_row(ui, &mut settings.ram_safety_margin_gb);
     ui.add_space(theme::SPACE_MD);
 
     let has_gpu = !prunr_core::OrtEngine::detect_active_provider().eq_ignore_ascii_case("CPU");
