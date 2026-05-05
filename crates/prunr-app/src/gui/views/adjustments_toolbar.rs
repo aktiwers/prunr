@@ -222,6 +222,18 @@ pub(crate) fn render(
             item_settings.line_mode = LineMode::Off;
         }
 
+        // Drop any cached LaMa sessions on model change — fires for
+        // every direction (LaMa→LaMa-FP32, LaMa→SD, Silueta→LaMa, …)
+        // so the previous backend's ~700 MB–2 GB resident set isn't
+        // pinned across the user's "I'm done with that tool" signal.
+        // Safe because in-flight strokes hold their own Arc — we only
+        // drop the cache's ref. Rebuild on next paint is 5–15 s
+        // (well below user perception threshold for an explicit
+        // model switch).
+        if change.model_changed {
+            prunr_core::inpaint::release_all_lama_sessions();
+        }
+
         // Inpaint mode: paint is the only input — auto-enable brush so
         // the user doesn't have to click two buttons. Settings stays
         // pinned subtract-equivalent (mode picker is hidden in the

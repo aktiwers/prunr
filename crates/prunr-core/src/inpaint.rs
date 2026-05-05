@@ -503,6 +503,27 @@ fn lama_cache() -> &'static Mutex<LamaCache> {
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// Drop every cached LaMa session immediately. In-flight callers keep
+/// their own `Arc<LamaSession>` so the cache clear is safe; once the
+/// dispatch finishes, the last Arc goes away and the ORT session
+/// frees. Called by the GUI when the user switches inpaint models —
+/// keeping the previous backend cached for 5 min after they've
+/// committed to a different tool wastes ~700 MB–2 GB on the model
+/// they're no longer using.
+pub fn release_all_lama_sessions() {
+    let cache = lama_cache();
+    let mut guard = cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let dropped = guard.len();
+    guard.clear();
+    if dropped > 0 {
+        tracing::info!(
+            dropped,
+            rss_mb = crate::inpaint_sd::process_rss_mb_pub(),
+            "LaMa: cache cleared on model switch",
+        );
+    }
+}
+
 fn ensure_lama_sweeper_running() {
     static STARTED: OnceLock<()> = OnceLock::new();
     STARTED.get_or_init(|| {
