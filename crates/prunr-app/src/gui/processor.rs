@@ -332,6 +332,16 @@ impl Processor {
         let _ = self.inpaint_bridge_tx.send(InpaintBridgeMsg::Release);
     }
 
+    /// Tell the seg/edge worker bridge to drop its warm subprocess.
+    /// Idempotent; no-op when nothing is warm. Symmetric with
+    /// `release_inpaint_subprocess` — both fire on model switch so a
+    /// previous backend's engine pool (BiRefNetLite ~2 GB, U2Net
+    /// ~800 MB, …) isn't held across the user's "I'm done with that
+    /// model" signal.
+    pub(crate) fn release_seg_warm(&self) {
+        let _ = self.worker_tx.send(WorkerMessage::ReleaseWarm);
+    }
+
     /// SD inpaint dispatch via the dedicated subprocess bridge. Encodes
     /// the (already-Arc'd) image + binary mask to PNG temp files,
     /// writes them, and sends an `InpaintBridgeMsg::Dispatch`. The

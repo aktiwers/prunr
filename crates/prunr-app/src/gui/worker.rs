@@ -189,6 +189,12 @@ pub enum WorkerMessage {
         /// Channel for additional items admitted by the memory controller.
         additional_items_rx: Option<mpsc::Receiver<WorkItem>>,
     },
+    /// Drop any warm seg subprocess so its engine pool's resident RAM
+    /// is reclaimed. Sent by the GUI on every `model_changed` so a
+    /// previous backend (e.g. BiRefNetLite at ~2 GB) doesn't pin
+    /// memory across the user's "I'm done with that model" signal.
+    /// Idempotent; no-op when nothing is warm.
+    ReleaseWarm,
 }
 
 pub enum WorkerResult {
@@ -271,6 +277,16 @@ pub fn spawn_worker(
 
             while let Ok(msg) = msg_rx.recv() {
                 match msg {
+                    WorkerMessage::ReleaseWarm => {
+                        if let Some((mut sub, cfg)) = warm.take() {
+                            tracing::info!(
+                                model = ?cfg.model,
+                                line_mode = ?cfg.line_mode,
+                                "seg subprocess released on model switch",
+                            );
+                            let _ = sub.shutdown_with_timeout(std::time::Duration::from_secs(2));
+                        }
+                    }
                     WorkerMessage::BatchProcess {
                         items, tier2_items, add_edge_items, config, cancels,
                         additional_items_rx,
