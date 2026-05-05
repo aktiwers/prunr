@@ -14,10 +14,13 @@
 use std::path::{Path, PathBuf};
 use prunr_models::ModelId;
 
-/// Cache format version. Bump when the cache directory layout
-/// changes in a way that breaks back-compat. Old directories under a
-/// previous version stay on disk but are never read; the
-/// "Clear model cache" Settings button wipes them.
+/// Cache format version. Bump when the cache layout changes OR when
+/// the `ort` crate version bumps — cached optimized graphs and EP
+/// blobs are not portable across ORT versions, and we don't put the
+/// ORT version in the key directly because `ort` doesn't expose it
+/// at compile time. Old directories under a previous version stay on
+/// disk but are never read; the auto-GC at session-build time and
+/// the "Clear compiled-model cache" Settings button both reclaim them.
 const CACHE_FORMAT_VERSION: u32 = 1;
 
 /// Maximum recursion depth for `walk_dir_size`. Bounds the worst case
