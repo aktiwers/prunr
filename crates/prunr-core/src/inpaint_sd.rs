@@ -1043,21 +1043,19 @@ fn build_part_with_ep_ladder(
         }
     }
 
-    // CPU fallback refused for SD: the bundle weights are FP16 and the
-    // ORT CPU EP runs them without producing coherent output (text-like
-    // artifacts in the brushed area). Diagnosed during the EPContext
-    // spike fallout — when OpenVINO failed for any reason and SD
-    // routed to CPU, users got broken inpaint output silently. Better
-    // to refuse with a useful error so they pick LaMa (which works
-    // fine on CPU) rather than ship garbage. SD requires a working
-    // GPU EP (OpenVINO / CUDA / CoreML / DirectML).
+    // SD bundle weights are FP16; the ORT CPU EP runs them but produces
+    // text-like artifacts instead of a coherent fill. GPU EP required.
+    debug_assert!(id.is_sd_family(),
+        "build_part_with_ep_ladder is SD-only; non-SD id reached CPU fallback");
     if id.is_sd_family() {
-        return Err(format!(
+        tracing::warn!(?id, part = %key,
+            "SD bundle build refused: no compatible GPU EP, CPU produces wrong output");
+        return Err(
             "SD inpaint requires GPU acceleration. No compatible GPU \
-             execution provider is available for {key}; SD on CPU produces \
+             execution provider is available; SD on CPU produces \
              incorrect output. Install OpenVINO Runtime (Settings → \
-             Hardware) or use LaMa instead (Settings → Eraser).",
-        ));
+             Hardware) or pick LaMa as the eraser instead.".to_string(),
+        );
     }
     crate::cache::gc_stale_for_model(id, "CPU");
     let builder = sd_base_builder()
