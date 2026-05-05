@@ -951,18 +951,17 @@ fn build_part_with_ep_ladder(
                 continue;
             }
         };
-        // CUDA: write/read the ORT-optimized graph to a part-scoped cache
-        // file; on hit we load that file directly instead of the source.
-        // OpenVINO/CoreML manage their own caches via provider options.
-        let mut load_path: Cow<'_, std::path::Path> = Cow::Borrowed(path.as_path());
-        #[allow(unused_assignments)] // overwritten on non-macOS CUDA path
-        let mut builder = builder;
-        #[cfg(not(target_os = "macos"))]
-        if matches!(ep, EpKind::Cuda) {
-            let (b, p) = sd_apply_path_cache(builder, path.as_path(), id, ep.as_str(), key);
-            builder = b;
-            load_path = p;
-        }
+        #[allow(unused_mut)] // mut only used on non-macOS via the CUDA arm
+        let mut load_path: Cow<'_, Path> = Cow::Borrowed(path.as_path());
+        let builder = match ep {
+            #[cfg(not(target_os = "macos"))]
+            EpKind::Cuda => {
+                let (b, p) = sd_apply_path_cache(builder, path.as_path(), id, ep.as_str(), key);
+                load_path = p;
+                b
+            }
+            _ => builder,
+        };
         let registered = match ep {
             #[cfg(not(target_os = "macos"))]
             EpKind::Cuda => builder.with_execution_providers([

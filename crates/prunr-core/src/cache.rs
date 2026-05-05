@@ -69,10 +69,9 @@ pub fn optimized_model_path(id: ModelId, ep_name: &str) -> Option<PathBuf> {
     cache_path_for(id, ep_name).map(|d| d.join("optimized.onnx"))
 }
 
-/// Per-part variant of `cache_path_for` for multi-part models like the
-/// SD bundle (`text_encoder` / `vae_encoder` / `vae_decoder` / `unet`
-/// share one `ModelId` but each needs an isolated subdir to avoid blob
-/// collision in shared caches).
+/// Per-part variant of `cache_path_for` — isolates each bundle part so
+/// optimized blobs from one part can't collide with another's in shared
+/// EP cache directories.
 pub fn cache_path_for_part(id: ModelId, ep_name: &str, part: &str) -> Option<PathBuf> {
     cache_path_for(id, ep_name).map(|p| p.join(part))
 }
@@ -87,7 +86,8 @@ pub fn cache_dir_for_part(id: ModelId, ep_name: &str, part: &str) -> Option<Path
     Some(dir)
 }
 
-/// Per-part `optimized_model_path` for SD components.
+/// Per-part path to the ORT-graph-optimized file. No filesystem side
+/// effects — same pure/creating split as `cache_path_for`.
 pub fn optimized_model_path_for_part(id: ModelId, ep_name: &str, part: &str) -> Option<PathBuf> {
     cache_path_for_part(id, ep_name, part).map(|d| d.join("optimized.onnx"))
 }
