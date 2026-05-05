@@ -210,15 +210,23 @@ pub fn run_worker() -> ! {
     let mut reader = BufReader::new(stdin.lock());
     let (evt_tx, evt_rx) = mpsc::channel::<SubprocessEvent>();
 
-    // Writer thread: evt_rx → stdout (bincode frames).
-    // Frames are coalesced by BufWriter; an explicit flush at loop exit
-    // ensures the last events reach the parent before the pipe closes.
+    // Writer thread: evt_rx → stdout (bincode frames). Flush after
+    // every event — the parent blocks on `recv` waiting for the next
+    // frame, and a coalesced BufWriter would deadlock low-rate event
+    // flows (most importantly the post-Init `Ready` which is the
+    // only frame between the worker reaching the command loop and the
+    // first user dispatch). Per-event flush is one extra `write`
+    // syscall per frame; events are sparse (a few per image plus
+    // occasional Progress), so the cost is unmeasurable.
     let writer_handle = std::thread::Builder::new()
         .name("worker-writer".into())
         .spawn(move || {
             let mut writer = BufWriter::new(stdout.lock());
             while let Ok(evt) = evt_rx.recv() {
                 if write_message(&mut writer, &evt).is_err() {
+                    break;
+                }
+                if prunr_app::subprocess::ipc::flush_writer(&mut writer).is_err() {
                     break;
                 }
             }
