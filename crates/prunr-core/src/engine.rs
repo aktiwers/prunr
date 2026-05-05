@@ -1,4 +1,6 @@
+use std::borrow::Cow;
 use std::sync::Mutex;
+use std::time::Instant;
 
 use crate::types::{CoreError, ModelKind};
 use ort::{
@@ -201,17 +203,22 @@ impl OrtEngine {
     }
 
     fn build_session(model_bytes: &[u8], intra_threads: usize, model: ModelKind, cpu_only: bool) -> Result<Self, CoreError> {
+        let model_id: prunr_models::ModelId = model.into();
         // CPU-only path: straight shot.
         if cpu_only {
-            let session = Self::builder_with_base(intra_threads)?
+            let builder = Self::builder_with_base(intra_threads)?;
+            let (builder, bytes) = Self::apply_ort_graph_cache(builder, model_bytes, model_id, "CPU")?;
+            let started = Instant::now();
+            let session = builder
                 .with_execution_providers([
                     CPUExecutionProvider::default()
                         .with_arena_allocator(false) // lower memory baseline; subprocess handles OOM
                         .build(),
                 ])
                 .map_err(|e| CoreError::Inference(format!("ORT set CPU EP failed: {e}")))?
-                .commit_from_memory(model_bytes)
+                .commit_from_memory(&bytes)
                 .map_err(|e| CoreError::Inference(format!("ORT session creation failed (CPU): {e}")))?;
+            tracing::info!(?model, ep = "CPU", elapsed_ms = started.elapsed().as_millis() as u64, "session committed");
             return Ok(Self {
                 session: Mutex::new(session),
                 provider_name: "CPU".to_string(),
@@ -227,7 +234,6 @@ impl OrtEngine {
         // if all GPU EPs fail.
         let gpu_eps = available_gpu_eps();
 
-        let model_id: prunr_models::ModelId = model.into();
         let mut last_err: Option<CoreError> = None;
         for &ep in gpu_eps {
             // Static catalog: declared-incompatible per the model's
@@ -243,6 +249,19 @@ impl OrtEngine {
                 continue;
             }
             let builder = Self::builder_with_base(intra_threads)?;
+            // OpenVINO/CoreML manage their own compiled-IR caches via
+            // provider options; only CUDA needs the ORT-level graph cache.
+            #[allow(unused_mut)] // mut only used on non-macOS via the CUDA arm
+            let mut bytes_owner: Cow<'_, [u8]> = Cow::Borrowed(model_bytes);
+            let builder = match ep {
+                #[cfg(not(target_os = "macos"))]
+                EpKind::Cuda => {
+                    let (b, bytes) = Self::apply_ort_graph_cache(builder, model_bytes, model_id, ep.as_str())?;
+                    bytes_owner = bytes;
+                    b
+                }
+                _ => builder,
+            };
             let res = match ep {
                 #[cfg(not(target_os = "macos"))]
                 EpKind::Cuda => builder.with_execution_providers([
@@ -255,34 +274,32 @@ impl OrtEngine {
                         .build(),
                 ]),
                 #[cfg(target_os = "macos")]
-                EpKind::CoreMl => builder.with_execution_providers([
-                    ort::execution_providers::CoreMLExecutionProvider::default()
-                        .with_model_cache_dir(Self::coreml_cache_dir())
-                        .build(),
-                ]),
+                EpKind::CoreMl => {
+                    let mut p = ort::execution_providers::CoreMLExecutionProvider::default();
+                    if let Some(dir) = crate::cache::cache_dir_for(model_id, ep.as_str()) {
+                        p = p.with_model_cache_dir(dir.to_string_lossy().into_owned());
+                    }
+                    builder.with_execution_providers([p.build()])
+                }
                 #[cfg(windows)]
                 EpKind::DirectMl => builder.with_execution_providers([
+                    // No application-level cache; rely on OS DXIL cache.
                     ort::execution_providers::DirectMLExecutionProvider::default().build(),
                 ]),
                 #[cfg(not(target_os = "macos"))]
-                EpKind::OpenVino => builder.with_execution_providers([
+                EpKind::OpenVino => {
                     // Cap the EP-internal TBB pool to match our outer rayon
                     // budget. Without this OpenVINO spawns its own pool sized
                     // to all logical cores, which oversubscribes against the
                     // rayon worker pool — `sched_yield` accounted for ~2% of
                     // CLI batch wall time in the perf trace.
-                    //
-                    // NOT using `with_cache_dir`: tested on ort=2.0.0-rc.12 +
-                    // openvino-1.24.1, the cache blob is written every launch
-                    // (mtime advances) and engine-ready time stays at ~6.85 s
-                    // both cold and warm. Either ORT's OpenVINO EP isn't
-                    // wiring cache_dir into compile_model correctly, or the
-                    // cache key is unstable across launches even with
-                    // disable_dynamic_shapes. Re-evaluate when ort bumps.
-                    ort::execution_providers::OpenVINOExecutionProvider::default()
-                        .with_num_threads(intra_threads.max(1))
-                        .build(),
-                ]),
+                    let mut p = ort::execution_providers::OpenVINOExecutionProvider::default()
+                        .with_num_threads(intra_threads.max(1));
+                    if let Some(dir) = crate::cache::cache_dir_for(model_id, ep.as_str()) {
+                        p = p.with_cache_dir(dir.to_string_lossy());
+                    }
+                    builder.with_execution_providers([p.build()])
+                }
             };
 
             let mut built = match res {
@@ -295,9 +312,10 @@ impl OrtEngine {
                 }
             };
 
-            match built.commit_from_memory(model_bytes) {
+            let started = Instant::now();
+            match built.commit_from_memory(&bytes_owner) {
                 Ok(session) => {
-                    tracing::debug!(?model, ep = %ep, "GPU session committed");
+                    tracing::info!(?model, ep = %ep, elapsed_ms = started.elapsed().as_millis() as u64, "session committed");
                     return Ok(Self {
                         session: Mutex::new(session),
                         provider_name: ep.as_str().to_string(),
@@ -327,17 +345,39 @@ impl OrtEngine {
             .map_err(|e| CoreError::Inference(format!("ORT set intra threads failed: {e}")))
     }
 
-    /// CoreML compiled model cache directory.
-    /// Ensures the ~2-5 min compilation only happens once ever per model.
-    #[cfg(target_os = "macos")]
-    fn coreml_cache_dir() -> String {
-        if let Some(cache) = dirs::cache_dir() {
-            let path = cache.join("prunr").join("coreml");
-            let _ = std::fs::create_dir_all(&path);
-            path.to_string_lossy().into_owned()
-        } else {
-            "/tmp/prunr-coreml-cache".to_string()
+    /// Per-(model, EP) ORT-graph-optimization cache. On cache hit returns
+    /// the optimized bytes so commit skips optimization; on miss sets
+    /// `with_optimized_model_path` so ORT writes the optimized graph for
+    /// the next launch.
+    fn apply_ort_graph_cache<'a>(
+        builder: ort::session::builder::SessionBuilder,
+        model_bytes: &'a [u8],
+        model_id: prunr_models::ModelId,
+        ep_name: &str,
+    ) -> Result<(ort::session::builder::SessionBuilder, Cow<'a, [u8]>), CoreError> {
+        let Some(path) = crate::cache::optimized_model_path(model_id, ep_name) else {
+            return Ok((builder, Cow::Borrowed(model_bytes)));
+        };
+        match std::fs::read(&path) {
+            Ok(cached) => {
+                tracing::debug!(?model_id, ep = %ep_name, bytes = cached.len(), "cache hit (optimized graph)");
+                return Ok((builder, Cow::Owned(cached)));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                tracing::warn!(?model_id, ep = %ep_name, %e, path = %path.display(),
+                    "cached optimized graph unreadable; rebuilding");
+            }
         }
+        // Miss path: ensure the parent dir exists for ORT's write.
+        if crate::cache::cache_dir_for(model_id, ep_name).is_none() {
+            return Ok((builder, Cow::Borrowed(model_bytes)));
+        }
+        let builder = builder
+            .with_optimized_model_path(&path)
+            .map_err(|e| CoreError::Inference(format!("with_optimized_model_path failed: {e}")))?;
+        tracing::debug!(?model_id, ep = %ep_name, path = %path.display(), "cache miss (writing optimized graph)");
+        Ok((builder, Cow::Borrowed(model_bytes)))
     }
 
     /// Detect the runtime provider (cached — runs once per process).
