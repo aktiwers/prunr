@@ -298,8 +298,6 @@ fn render_hardware_section(
     intent
 }
 
-/// SD inpaint RAM safety-margin slider. Sets how much free RAM the
-/// pre-flight gate requires *on top of* the model's working set.
 fn render_ram_safety_margin_row(ui: &mut egui::Ui, value: &mut f32) {
     slider_row(
         ui,
@@ -334,6 +332,8 @@ fn render_tab_general(
     ctx: &HardwareSectionContext,
 ) -> Option<HardwareSectionIntent> {
     let intent = render_hardware_section(ui, ctx);
+    render_ram_safety_margin_row(ui, &mut settings.ram_safety_margin_gb);
+    ui.add_space(theme::SPACE_MD);
 
     section_heading(ui, "Performance");
     let max_jobs = settings.max_jobs();
@@ -372,9 +372,6 @@ fn render_tab_general(
     ui.add_space(theme::SPACE_MD);
 
     render_sd_fast_mode_row(ui, &mut settings.sd_fast_mode);
-    ui.add_space(theme::SPACE_MD);
-
-    render_ram_safety_margin_row(ui, &mut settings.ram_safety_margin_gb);
     ui.add_space(theme::SPACE_MD);
 
     let has_gpu = !prunr_core::OrtEngine::detect_active_provider().eq_ignore_ascii_case("CPU");

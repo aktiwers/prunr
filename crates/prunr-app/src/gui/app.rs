@@ -673,9 +673,6 @@ impl PrunrApp {
         } else {
             raw_backend
         };
-        // GUI pre-flight: refuse SD-family dispatch when free RAM is
-        // below working_set + user's safety margin. LaMa/MI-GAN are
-        // small enough that the subprocess gate alone is enough.
         if backend.is_sd_family() {
             if let Some(desc) = prunr_models::descriptor(backend) {
                 let avail = crate::hardware::available_ram_bytes_throttled();

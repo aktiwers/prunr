@@ -139,41 +139,32 @@ pub fn ram_verdict(working_set_bytes: u64, available_bytes: u64) -> RamVerdict {
     }
 }
 
-/// GUI-side pre-flight gate for SD inpaint dispatch. Runs BEFORE
-/// spawning the subprocess so a doomed run doesn't pay the spawn
-/// cost. Returns `Err(user_message)` when free RAM is below the
-/// model's `working_set_mb` plus the user's `ram_safety_margin_gb`
-/// headroom.
-///
-/// The subprocess has its own `check_ram_for` with a hardcoded 2 GB
-/// floor — this gate ADDS the user-tunable margin on top. Lowering
-/// the slider below 2 GB doesn't loosen subprocess behavior; the
-/// slider primarily lets users tighten the threshold for tight-RAM
-/// systems where other apps spike during inference.
 pub fn pre_flight_sd_ram(
     working_set_mb: u32,
     available_bytes: u64,
     safety_margin_gb: f32,
 ) -> Result<(), String> {
-    // sysinfo returns 0 when it can't read /proc/meminfo etc. Treat as
-    // "unknown, pass" — matches the subprocess `check_ram_for` contract.
+    // sysinfo returns 0 when /proc/meminfo etc. is unreadable. Treat as
+    // unknown and pass — refusing on missing data would be unhelpful.
     if available_bytes == 0 {
         return Ok(());
     }
+    const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
     let working_set = working_set_mb as u64 * 1024 * 1024;
-    let margin = (safety_margin_gb.max(0.0) * 1024.0 * 1024.0 * 1024.0) as u64;
+    let margin = (safety_margin_gb.max(0.0) * GIB as f32) as u64;
     let need = working_set + margin;
     if available_bytes >= need {
         return Ok(());
     }
+    // Display in GiB for consistency with the comparison units above.
     Err(format!(
         "Not enough free RAM: {:.1} GB available, {:.1} GB recommended \
          (model needs {:.1} GB + {:.1} GB safety margin). \
          Close other apps or lower the safety margin in Settings.",
-        available_bytes as f64 / 1e9,
-        need as f64 / 1e9,
-        working_set as f64 / 1e9,
-        margin as f64 / 1e9,
+        available_bytes as f64 / GIB,
+        need as f64 / GIB,
+        working_set as f64 / GIB,
+        margin as f64 / GIB,
     ))
 }
 
@@ -449,9 +440,15 @@ mod tests {
 
     #[test]
     fn pre_flight_sd_ram_passes_when_sysinfo_unreadable() {
-        // sysinfo returning 0 must not falsely reject — fail-open matches
-        // the subprocess `check_ram_for` contract on `None` available_ram.
+        // sysinfo returning 0 must not falsely reject.
         assert!(pre_flight_sd_ram(7000, 0, 2.0).is_ok());
+    }
+
+    #[test]
+    fn pre_flight_sd_ram_passes_at_exact_threshold() {
+        // The gate uses `>=`; available == need must pass.
+        let need: u64 = 7000u64 * 1024 * 1024 + 2 * 1024 * 1024 * 1024;
+        assert!(pre_flight_sd_ram(7000, need, 2.0).is_ok());
     }
 
     #[test]
