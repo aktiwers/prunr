@@ -317,6 +317,15 @@ fn delete_installed_model(app: &mut PrunrApp, id: ModelId) {
     match result {
         Ok(()) => {
             prunr_models::evict_on_demand_cache(id);
+            // Compiled-model cache (CUDA optimized.onnx, CoreML mlmodelc) is
+            // useless without the source weights. Off-thread because a
+            // multi-GB rmtree on a slow disk would stall the GUI frame.
+            std::thread::spawn(move || {
+                let bytes = prunr_core::cache::clear_for_model(id);
+                if bytes > 0 {
+                    tracing::info!(?id, bytes, "cleared compiled-model cache after uninstall");
+                }
+            });
             app.toasts.success(format!("{} removed", desc.display_name));
             tracing::info!(?id, "deleted on-demand model");
         }
