@@ -777,7 +777,11 @@ fn build_lama_session(
             }
             Err(e) => {
                 tracing::warn!(ep = %ep, %e, "LaMa: GPU session commit failed — trying next");
-                crate::ep_compat::record_failure(ep, id, &format!("{e}"));
+                if matches!(bytes_owner, Cow::Owned(_)) {
+                    crate::engine::clear_suspect_cache(crate::cache::optimized_model_path(id, ep.as_str()).as_deref());
+                } else {
+                    crate::ep_compat::record_failure(ep, id, &format!("{e}"));
+                }
                 continue;
             }
         };
@@ -791,7 +795,11 @@ fn build_lama_session(
                     ep = %ep, %e,
                     "LaMa: GPU session smoke test failed — falling back to next EP/CPU",
                 );
-                crate::ep_compat::record_failure(ep, id, &e);
+                if matches!(bytes_owner, Cow::Owned(_)) {
+                    crate::engine::clear_suspect_cache(crate::cache::optimized_model_path(id, ep.as_str()).as_deref());
+                } else {
+                    crate::ep_compat::record_failure(ep, id, &e);
+                }
             }
         }
     }

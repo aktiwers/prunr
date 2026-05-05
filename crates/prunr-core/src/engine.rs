@@ -332,7 +332,12 @@ impl OrtEngine {
                 Err(e) => {
                     let err = CoreError::Inference(format!("ORT session creation failed ({ep}): {e}"));
                     tracing::warn!(?model, ep = %ep, error = %err, "GPU session creation failed — trying next EP");
-                    crate::ep_compat::record_failure(ep, model_id, &format!("{e}"));
+                    if matches!(bytes_owner, Cow::Owned(_)) {
+                        // Suspect: stale or malformed optimized.onnx, not the EP itself.
+                        clear_suspect_cache(crate::cache::optimized_model_path(model_id, ep.as_str()).as_deref());
+                    } else {
+                        crate::ep_compat::record_failure(ep, model_id, &format!("{e}"));
+                    }
                     last_err = Some(err);
                 }
             }
@@ -474,6 +479,30 @@ impl InferenceEngine for OrtEngine {
     }
 }
 
+/// Delete a cache file that's been implicated in a session-commit
+/// failure. The next session build for the same `(model, ep)` pair
+/// will hit a cache miss and rebuild from source. Best-effort —
+/// `NotFound` is silently ignored (concurrent process already cleaned
+/// up); other errors log and continue.
+///
+/// Pair with the EP loop's `was_cached` check: when commit failed
+/// while loading from a cached file, the file is the most likely
+/// culprit (stale across an ORT version bump, malformed by a prior
+/// spike, etc.), not the EP itself. Removing the file is preferable
+/// to recording the EP as incompatible — `ep_compat::record_failure`
+/// is persistent and would silently route every subsequent run to
+/// CPU until manually cleared.
+pub(crate) fn clear_suspect_cache(cache_path: Option<&std::path::Path>) {
+    let Some(p) = cache_path else { return };
+    match std::fs::remove_file(p) {
+        Ok(()) => tracing::warn!(cache = %p.display(),
+            "deleted suspect cache file after commit failure"),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => tracing::warn!(cache = %p.display(), %e,
+            "failed to delete suspect cache file"),
+    }
+}
+
 /// Per-(model, EP) ORT-graph-optimization cache. On hit returns the
 /// optimized bytes so commit skips optimization; on miss sets
 /// `with_optimized_model_path` so ORT writes the optimized graph for
@@ -527,6 +556,31 @@ mod tests {
     fn test_inference_engine_trait_is_object_safe() {
         let engine: Box<dyn InferenceEngine> = Box::new(MockEngine);
         assert_eq!(engine.active_provider(), "CPU");
+    }
+
+    /// `clear_suspect_cache` must remove a real file, no-op on
+    /// `NotFound` (concurrent process already cleaned up), no-op on
+    /// `None` input. Pinned because the EP loops rely on this never
+    /// panicking — a panic here on a missing cache file would abort
+    /// the whole session build instead of rebuilding from source.
+    #[test]
+    fn clear_suspect_cache_removes_existing_file_and_handles_missing() {
+        // Existing file: removed.
+        let dir = std::env::temp_dir().join("prunr-clear-suspect-cache-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("optimized.onnx");
+        std::fs::write(&path, b"stale").unwrap();
+        assert!(path.exists());
+        clear_suspect_cache(Some(&path));
+        assert!(!path.exists(), "existing file must be removed");
+
+        // Already-missing: silent no-op (no panic).
+        clear_suspect_cache(Some(&path));
+
+        // None input: silent no-op.
+        clear_suspect_cache(None);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // Integration tests require dev-models feature and downloaded models.
