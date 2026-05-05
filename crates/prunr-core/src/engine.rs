@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::Instant;
 
@@ -332,12 +333,12 @@ impl OrtEngine {
                 Err(e) => {
                     let err = CoreError::Inference(format!("ORT session creation failed ({ep}): {e}"));
                     tracing::warn!(?model, ep = %ep, error = %err, "GPU session creation failed — trying next EP");
-                    if matches!(bytes_owner, Cow::Owned(_)) {
-                        // Suspect: stale or malformed optimized.onnx, not the EP itself.
-                        clear_suspect_cache(crate::cache::optimized_model_path(model_id, ep.as_str()).as_deref());
-                    } else {
-                        crate::ep_compat::record_failure(ep, model_id, &format!("{e}"));
-                    }
+                    handle_commit_failure(
+                        matches!(bytes_owner, Cow::Owned(_)),
+                        ep, model_id,
+                        || crate::cache::optimized_model_path(model_id, ep.as_str()),
+                        &format!("{e}"),
+                    );
                     last_err = Some(err);
                 }
             }
@@ -479,19 +480,8 @@ impl InferenceEngine for OrtEngine {
     }
 }
 
-/// Delete a cache file that's been implicated in a session-commit
-/// failure. The next session build for the same `(model, ep)` pair
-/// will hit a cache miss and rebuild from source. Best-effort —
-/// `NotFound` is silently ignored (concurrent process already cleaned
-/// up); other errors log and continue.
-///
-/// Pair with the EP loop's `was_cached` check: when commit failed
-/// while loading from a cached file, the file is the most likely
-/// culprit (stale across an ORT version bump, malformed by a prior
-/// spike, etc.), not the EP itself. Removing the file is preferable
-/// to recording the EP as incompatible — `ep_compat::record_failure`
-/// is persistent and would silently route every subsequent run to
-/// CPU until manually cleared.
+/// Delete a suspect cache file. `NotFound` is silent — concurrent
+/// processes legitimately race on the same path.
 pub(crate) fn clear_suspect_cache(cache_path: Option<&std::path::Path>) {
     let Some(p) = cache_path else { return };
     match std::fs::remove_file(p) {
@@ -500,6 +490,29 @@ pub(crate) fn clear_suspect_cache(cache_path: Option<&std::path::Path>) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => tracing::warn!(cache = %p.display(), %e,
             "failed to delete suspect cache file"),
+    }
+}
+
+/// Route a session-commit failure based on whether the load came from
+/// cache. Cached load → cache file is the suspect (stale optimized
+/// graph, malformed spike artifact); delete the file so the next
+/// session build hits a cache miss and rebuilds from source.
+/// Non-cached load → the EP itself failed for this model; record it
+/// in `ep_compat` so future runs skip the doomed attempt.
+///
+/// `cache_path_fn` is a closure so the path-resolution allocation
+/// only fires on the cached branch.
+pub(crate) fn handle_commit_failure(
+    was_cached: bool,
+    ep: EpKind,
+    id: prunr_models::ModelId,
+    cache_path_fn: impl FnOnce() -> Option<PathBuf>,
+    error: &str,
+) {
+    if was_cached {
+        clear_suspect_cache(cache_path_fn().as_deref());
+    } else {
+        crate::ep_compat::record_failure(ep, id, error);
     }
 }
 
@@ -558,28 +571,53 @@ mod tests {
         assert_eq!(engine.active_provider(), "CPU");
     }
 
-    /// `clear_suspect_cache` must remove a real file, no-op on
-    /// `NotFound` (concurrent process already cleaned up), no-op on
-    /// `None` input. Pinned because the EP loops rely on this never
-    /// panicking — a panic here on a missing cache file would abort
-    /// the whole session build instead of rebuilding from source.
     #[test]
     fn clear_suspect_cache_removes_existing_file_and_handles_missing() {
-        // Existing file: removed.
         let dir = std::env::temp_dir().join("prunr-clear-suspect-cache-test");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("optimized.onnx");
         std::fs::write(&path, b"stale").unwrap();
-        assert!(path.exists());
         clear_suspect_cache(Some(&path));
         assert!(!path.exists(), "existing file must be removed");
-
-        // Already-missing: silent no-op (no panic).
+        // NotFound + None must be silent no-ops — concurrent deletions
+        // are expected, and a panic here would abort the whole session
+        // build instead of letting it rebuild from source.
         clear_suspect_cache(Some(&path));
-
-        // None input: silent no-op.
         clear_suspect_cache(None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
+    /// Boundary contract: when `was_cached=true`, the cache file is
+    /// deleted AND `ep_compat::record_failure` is NOT called. This is
+    /// the bug P25-IssueA fixed — the EPContext spike's malformed
+    /// compiled.onnx triggered `record_failure` and persistently
+    /// disabled OpenVINO for SD, requiring manual `rm ep_compat.json`
+    /// to recover.
+    ///
+    /// Uses `(EpKind::Cuda, ModelId::TaesdFp16)` to dodge other tests
+    /// that touch `ep_compat` under the parallel runner.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn handle_commit_failure_skips_record_failure_when_cached() {
+        use prunr_models::ModelId;
+        let id = ModelId::TaesdFp16;
+        let ep = EpKind::Cuda;
+        let Some(dir) = crate::cache::cache_dir_for(id, ep.as_str()) else { return };
+        let cache_file = dir.join("optimized.onnx");
+        std::fs::write(&cache_file, b"stale").unwrap();
+        let initial = crate::ep_compat::is_known_failure(ep, id);
+
+        handle_commit_failure(
+            true, ep, id,
+            || crate::cache::optimized_model_path(id, ep.as_str()),
+            "test cache failure",
+        );
+
+        assert!(!cache_file.exists(), "cache file must be deleted");
+        assert_eq!(
+            crate::ep_compat::is_known_failure(ep, id), initial,
+            "record_failure must NOT fire on was_cached=true",
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
