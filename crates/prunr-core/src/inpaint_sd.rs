@@ -172,6 +172,20 @@ pub fn process_inpaint_with(
     // Hold an Arc through the run so the idle sweep can't drop sessions
     // mid-inference.
     let bundle = SdSession::get(id)?;
+    // RAII drop-on-completion: when this guard goes out of scope (any
+    // return path) the cache's Arc is removed; once `bundle` (declared
+    // ABOVE so it drops AFTER the guard) drops too, the SdSession's
+    // last reference goes away and the ORT bundle releases. Trades
+    // first-stroke responsiveness on a repeat for instant RAM reclaim
+    // — appropriate when single SD strokes are heavy enough that
+    // users typically wait between strokes anyway.
+    struct DropOnComplete(prunr_models::ModelId);
+    impl Drop for DropOnComplete {
+        fn drop(&mut self) {
+            release(self.0);
+        }
+    }
+    let _release_guard = DropOnComplete(id);
     // VAE backend selection: TAESD when fast mode is on AND the bundle
     // is installed (the request flag carries that decision from
     // dispatch). Until the TAESD artifact ships, get() errors and we
@@ -710,6 +724,22 @@ type SdCache = HashMap<prunr_models::ModelId, CacheEntry<SdBundleSlot>>;
 fn sd_cache() -> &'static Mutex<SdCache> {
     static CACHE: OnceLock<Mutex<SdCache>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Drop the cached entry for `id`, releasing the cache's `Arc` ref.
+/// In-flight callers keep their own `Arc<SdSession>` so the bundle
+/// stays valid until the dispatch finishes; once the last `Arc` drops,
+/// the `Drop` impl runs and the ORT session is released. Used by
+/// `process_inpaint_with` to drop the SD bundle the moment a stroke
+/// completes — on memory-constrained machines holding 9 GB through
+/// the 5-min idle window is worse than paying the rebuild on the
+/// next stroke.
+pub(crate) fn release(id: prunr_models::ModelId) {
+    let cache = sd_cache();
+    let mut guard = cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if guard.remove(&id).is_some() {
+        tracing::info!(?id, "SD: cache entry released after dispatch");
+    }
 }
 
 /// Drop entries whose `last_used` is older than `idle` relative to `now`,
