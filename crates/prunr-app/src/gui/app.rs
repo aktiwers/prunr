@@ -2836,6 +2836,12 @@ impl PrunrApp {
                 "{} loaded",
                 crate::gui::views::model_name(self.settings.model),
             ));
+            // Drop any cached inpaint subprocess on model switch.
+            // Pairs with the in-process LaMa cache clear (already
+            // fired in adjustments_toolbar) so the previous backend's
+            // residual RAM isn't held across a deterministic "I'm
+            // done with that tool" signal.
+            self.processor.release_inpaint_subprocess();
         }
         if toolbar_change.brush_settings_committed {
             self.settings.save();
