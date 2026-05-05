@@ -206,6 +206,7 @@ impl OrtEngine {
         let model_id: prunr_models::ModelId = model.into();
         // CPU-only path: straight shot.
         if cpu_only {
+            crate::cache::gc_stale_for_model(model_id, "CPU");
             let builder = Self::builder_with_base(intra_threads)?;
             let (builder, bytes) = apply_ort_graph_cache(builder, model_bytes, model_id, "CPU");
             let started = Instant::now();
@@ -248,6 +249,7 @@ impl OrtEngine {
                 tracing::debug!(?model, ep = %ep, "EP cached as incompatible; skipping");
                 continue;
             }
+            crate::cache::gc_stale_for_model(model_id, ep.as_str());
             let builder = Self::builder_with_base(intra_threads)?;
             #[allow(unused_mut)] // mut only used on non-macOS via the CUDA arm
             let mut bytes_owner: Cow<'_, [u8]> = Cow::Borrowed(model_bytes);
