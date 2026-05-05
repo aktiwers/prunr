@@ -104,6 +104,63 @@ pub fn cache_populated_for(id: ModelId, ep_name: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// On session-build entry, sweep stale cache entries for the same
+/// `(model, ep)` pair. A stale entry shares this model's `stable_name`
+/// but has a different `version` or `CACHE_FORMAT_VERSION` — i.e. an
+/// older prunr install or model bump left it behind. Best-effort —
+/// any I/O error logs and falls back to leaving entries alone.
+///
+/// Disambiguation: the registry's other model `stable_name`s are
+/// excluded by prefix-match before deletion, so two models whose names
+/// share a textual prefix (`lama` vs hypothetical `lama_xl`) never
+/// nuke each other's caches.
+///
+/// Concurrent processes are safe: each computes the same current key
+/// and leaves it alone; deletion of stale siblings is idempotent (the
+/// loser of a `remove_dir_all` race sees `NotFound`, logged + ignored).
+pub fn gc_stale_for_model(id: ModelId, ep_name: &str) {
+    let Some(root) = cache_root() else { return };
+    let ep_dir = root.join(ep_name.to_ascii_lowercase());
+    if !ep_dir.is_dir() { return; }
+    let Some(current_name) = cache_path_for(id, ep_name)
+        .and_then(|p| p.file_name().map(|n| n.to_owned()))
+    else { return };
+
+    let stable = id.stable_name();
+    let other_prefixes: Vec<String> = ModelId::ALL.iter()
+        .filter(|&&m| m.stable_name() != stable)
+        .map(|m| format!("{}-", m.stable_name()))
+        .collect();
+    let our_prefix = format!("{}-", stable);
+
+    let entries = match std::fs::read_dir(&ep_dir) {
+        Ok(e) => e,
+        Err(e) => {
+            tracing::warn!(?id, ep = %ep_name, %e, "gc: read_dir failed");
+            return;
+        }
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name() else { continue };
+        if name == current_name { continue; }
+        let Some(name_str) = name.to_str() else { continue };
+        if other_prefixes.iter().any(|p| name_str.starts_with(p)) { continue; }
+        if !name_str.starts_with(&our_prefix) { continue; }
+        match std::fs::remove_dir_all(&path) {
+            Ok(()) => tracing::info!(
+                ?id, ep = %ep_name, dir = %path.display(),
+                "gc: removed stale cache entry",
+            ),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => tracing::warn!(
+                ?id, ep = %ep_name, dir = %path.display(), %e,
+                "gc: failed to remove stale cache entry",
+            ),
+        }
+    }
+}
+
 /// Wipe the entire EP cache root. Returns the number of bytes
 /// reclaimed (best-effort; based on a pre-removal directory walk).
 /// Run on a background thread when called from GUI handlers — the
@@ -203,6 +260,32 @@ mod tests {
         assert!(!populated);
         assert_eq!(exists_before, exists_after,
             "cache_populated_for must be read-only");
+    }
+
+    /// Stale-entry GC must remove sibling dirs from older versions /
+    /// older `CACHE_FORMAT_VERSION`s, leave the current entry alone,
+    /// and never touch other models' caches even when their stable
+    /// names share a prefix.
+    #[test]
+    fn gc_stale_for_model_removes_siblings_only() {
+        let Some(current) = cache_dir_for(ModelId::Migan, "CPU") else { return };
+        let Some(ep_root) = cache_root().map(|r| r.join("cpu")) else { return };
+        // Sibling: same stable_name, older version.
+        let stale = ep_root.join(format!("{}-0.0.1-v0", ModelId::Migan.stable_name()));
+        std::fs::create_dir_all(&stale).unwrap();
+        std::fs::write(stale.join("dummy"), b"x").unwrap();
+        // Other model's cache must survive.
+        let other_dir = ep_root.join(format!("{}-1.0.0-v1", ModelId::Silueta.stable_name()));
+        std::fs::create_dir_all(&other_dir).unwrap();
+        std::fs::write(other_dir.join("dummy"), b"x").unwrap();
+
+        gc_stale_for_model(ModelId::Migan, "CPU");
+
+        assert!(current.is_dir(), "current cache must be preserved");
+        assert!(!stale.exists(), "stale sibling must be removed");
+        assert!(other_dir.is_dir(), "other model's cache must be untouched");
+        let _ = std::fs::remove_dir_all(&current);
+        let _ = std::fs::remove_dir_all(&other_dir);
     }
 
     /// True only when the directory exists AND has at least one entry.
