@@ -320,6 +320,18 @@ impl Processor {
         let _ = self.inpaint_bridge_tx.send(InpaintBridgeMsg::Cancel { item_id });
     }
 
+    /// Tell the inpaint bridge to drop its cached subprocess. Idempotent;
+    /// no-op when the bridge is already idle. Called by
+    /// `apply_toolbar_change` on every model switch so a previous
+    /// SD-family backend's ~200 MB residual subprocess (bundle was
+    /// already released by `inpaint_sd::release` on dispatch
+    /// completion, but the worker process itself stays alive for the
+    /// 5-min idle window) doesn't pin RAM the user no longer wants
+    /// allocated.
+    pub(crate) fn release_inpaint_subprocess(&self) {
+        let _ = self.inpaint_bridge_tx.send(InpaintBridgeMsg::Release);
+    }
+
     /// SD inpaint dispatch via the dedicated subprocess bridge. Encodes
     /// the (already-Arc'd) image + binary mask to PNG temp files,
     /// writes them, and sends an `InpaintBridgeMsg::Dispatch`. The

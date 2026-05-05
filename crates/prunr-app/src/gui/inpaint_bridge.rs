@@ -58,6 +58,17 @@ pub enum InpaintBridgeMsg {
     /// handler flips both seg and inpaint cancel flags so this is the
     /// single cancel verb.
     Cancel { item_id: u64 },
+    /// Release any cached subprocess regardless of in-flight state.
+    /// Differs from Cancel in two ways:
+    ///   1. Idle subprocess (no in-flight) is also killed — Cancel
+    ///      keeps an idle warm subprocess alive for fast next-stroke,
+    ///      Release frees the ~200 MB residual immediately.
+    ///   2. Doesn't surface a "Cancelled" toast — Release is
+    ///      driven by deterministic GUI signals (e.g. model
+    ///      switch) rather than a user-facing Cancel button.
+    /// Sent by `apply_toolbar_change` when the user picks a
+    /// non-SD-family inpaint backend or a non-inpaint model.
+    Release,
 }
 
 /// Bridge → parent results. One-to-one with the SD-specific subset of
@@ -183,6 +194,9 @@ fn run(msg_rx: mpsc::Receiver<InpaintBridgeMsg>, res_tx: mpsc::Sender<InpaintBri
                     // surfaces "Erase cancelled" immediately and marks
                     // the spawn for kill-on-arrival.
                     handle_cancel(&mut sub_state, &mut inflight_gens, &res_tx);
+                }
+                InpaintBridgeMsg::Release => {
+                    handle_release(&mut sub_state, &mut inflight_gens, &res_tx);
                 }
             }
         }
@@ -315,6 +329,48 @@ fn handle_cancel(
                 crate::subprocess::protocol::CANCELLED_ERR_MSG,
                 "inpaint subprocess killed by Cancel",
             );
+        }
+    }
+}
+
+/// Release any cached subprocess regardless of in-flight state. Differs
+/// from `handle_cancel` in two ways: (1) an idle Ready subprocess is
+/// also killed (no inflight check; the residual ~200 MB is the whole
+/// reason the GUI sent Release), and (2) any in-flight strokes get the
+/// `CANCELLED_ERR_MSG` sentinel so the user still sees a toast — the
+/// GUI typically only sends Release on model-switch, where dropping
+/// the in-flight stroke is the intent anyway.
+fn handle_release(
+    sub_state: &mut SubState,
+    inflight_gens: &mut HashMap<u64, u64>,
+    res_tx: &mpsc::Sender<InpaintBridgeResult>,
+) {
+    match std::mem::replace(sub_state, SubState::Idle) {
+        SubState::Idle => {}
+        SubState::Spawning { pending: _, cancelled: _, rx } => {
+            // Spawn is still in flight. We can't kill the helper
+            // thread; let it complete and the result will be ignored
+            // (state is now Idle, the spawn-completion poller will
+            // see it and discard). Drain inflight + restore the
+            // Spawning state so the rx is still polled.
+            *sub_state = SubState::Spawning { rx, pending: Vec::new(), cancelled: true };
+            for (id, _gen) in inflight_gens.drain() {
+                let _ = res_tx.send(InpaintBridgeResult::Error {
+                    item_id: id,
+                    error: crate::subprocess::protocol::CANCELLED_ERR_MSG.into(),
+                });
+            }
+            tracing::info!("inpaint Release during spawn — pending result will be killed");
+        }
+        SubState::Ready(mut s) => {
+            s.kill();
+            tracing::info!("inpaint subprocess released on model switch");
+            for (id, _gen) in inflight_gens.drain() {
+                let _ = res_tx.send(InpaintBridgeResult::Error {
+                    item_id: id,
+                    error: crate::subprocess::protocol::CANCELLED_ERR_MSG.into(),
+                });
+            }
         }
     }
 }
