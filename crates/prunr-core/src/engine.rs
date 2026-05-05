@@ -249,8 +249,6 @@ impl OrtEngine {
                 continue;
             }
             let builder = Self::builder_with_base(intra_threads)?;
-            // OpenVINO/CoreML manage their own compiled-IR caches via
-            // provider options; only CUDA needs the ORT-level graph cache.
             #[allow(unused_mut)] // mut only used on non-macOS via the CUDA arm
             let mut bytes_owner: Cow<'_, [u8]> = Cow::Borrowed(model_bytes);
             let builder = match ep {
