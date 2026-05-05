@@ -718,8 +718,6 @@ fn build_lama_session(
                 continue;
             }
         };
-        // OpenVINO/CoreML manage their own compiled-IR caches via
-        // provider options; only CUDA needs the ORT-level graph cache.
         #[allow(unused_mut)] // mut only used on non-macOS via the CUDA arm
         let mut bytes_owner: Cow<'_, [u8]> = Cow::Borrowed(bytes);
         let builder = match ep {
