@@ -3,8 +3,10 @@
 //! inside LaMa's fixed input size and seams stay invisible against
 //! flat backgrounds.
 
-use std::sync::{Mutex, OnceLock};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::{Duration, Instant};
 
 use image::{GrayImage, RgbaImage};
 use ndarray::Array4;
@@ -479,41 +481,104 @@ struct LamaSession {
     mask_input_name: String,
 }
 
-impl LamaSession {
-    /// Per-id cache. Each LamaSession is built once on first use and
-    /// reused across strokes. Failures are cached as strings (CoreError
-    /// isn't Clone so the cache stores `Result<_, String>`).
-    ///
-    /// Per-id `Arc<OnceLock>` slot closes the same build race that the
-    /// SD bundle had — without it two concurrent `get()` callers (e.g.
-    /// prewarm + first stroke) would each build a full LaMa session
-    /// (hundreds of MB of VRAM on GPU EPs, plus a redundant EP-ladder
-    /// probe). The previous "concurrent caller may have inserted
-    /// between our check and build; keep their entry (drops our
-    /// duplicate session, harmless)" comment was honest about the
-    /// race; this just closes it.
-    fn get(id: prunr_models::ModelId) -> Result<&'static LamaSession, CoreError> {
-        type Slot = std::sync::Arc<OnceLock<Result<&'static LamaSession, String>>>;
-        static CACHE: OnceLock<Mutex<std::collections::HashMap<prunr_models::ModelId, Slot>>>
-            = OnceLock::new();
-        let cache = CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+/// Idle-release window for LaMa sessions. Mirrors `SD_IDLE_RELEASE_SECS`
+/// in `inpaint_sd.rs`. A 5-minute window balances "user might paint
+/// again any second" against "session is hundreds of MB to a few GB
+/// after EP compile and the OS should get it back if they switched
+/// away or moved on to bg removal."
+const LAMA_IDLE_RELEASE_SECS: u64 = 300;
 
-        // Hold the cache lock only for the HashMap lookup + at-most-one
-        // Arc<OnceLock> allocation, never for the seconds-long build.
-        let slot: Slot = {
+/// Background sweeper interval. 60 s gives reclaim within ~1 minute of
+/// the idle threshold.
+const LAMA_SWEEP_INTERVAL_SECS: u64 = 60;
+
+/// Per-id deferred session — same shape as `SdBundleSlot`. Outer
+/// `Arc<OnceLock>` closes the build race between two concurrent
+/// `get()` callers (e.g. a prewarm racing the first stroke).
+type LamaSlot = Arc<OnceLock<Result<Arc<LamaSession>, String>>>;
+type LamaCache = HashMap<prunr_models::ModelId, crate::inpaint_sd::CacheEntry<LamaSlot>>;
+
+fn lama_cache() -> &'static Mutex<LamaCache> {
+    static CACHE: OnceLock<Mutex<LamaCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn ensure_lama_sweeper_running() {
+    static STARTED: OnceLock<()> = OnceLock::new();
+    STARTED.get_or_init(|| {
+        std::thread::Builder::new()
+            .name("lama-idle-sweeper".to_string())
+            .spawn(|| {
+                let interval = Duration::from_secs(LAMA_SWEEP_INTERVAL_SECS);
+                let idle = Duration::from_secs(LAMA_IDLE_RELEASE_SECS);
+                loop {
+                    std::thread::sleep(interval);
+                    let cache = lama_cache();
+                    let mut guard = cache.lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let dropped = crate::inpaint_sd::sweep_idle(
+                        &mut guard, Instant::now(), idle,
+                    );
+                    if dropped > 0 {
+                        tracing::info!(
+                            dropped,
+                            idle_secs = LAMA_IDLE_RELEASE_SECS,
+                            rss_mb = crate::inpaint_sd::process_rss_mb_pub(),
+                            "LaMa: background sweeper released idle session(s)",
+                        );
+                    }
+                }
+            })
+            .expect("spawn lama-idle-sweeper thread");
+    });
+}
+
+impl LamaSession {
+    /// Per-id cache. Each LamaSession is built once on first use, kept
+    /// in an `Arc`, and released after `LAMA_IDLE_RELEASE_SECS` of no
+    /// `get()` calls. Mirrors `SdSession::get` so both inpaint backends
+    /// have the same lifecycle: in-flight callers hold their own Arc
+    /// (no use-after-free), the cache drops its ref on idle, the OS
+    /// reclaims the underlying ORT session.
+    ///
+    /// Pre-fix this was `Box::leak`'d to a `&'static`, which meant the
+    /// session lived for the whole process lifetime — a single LaMa
+    /// stroke pinned ~700 MB–2 GB of resident RAM until shutdown.
+    fn get(id: prunr_models::ModelId) -> Result<Arc<LamaSession>, CoreError> {
+        ensure_lama_sweeper_running();
+        let cache = lama_cache();
+        let now = Instant::now();
+        let idle = Duration::from_secs(LAMA_IDLE_RELEASE_SECS);
+
+        // Cache lock held only for the HashMap lookup and at most one
+        // Arc<OnceLock> allocation — never for the seconds-long build.
+        let slot: LamaSlot = {
             let mut guard = cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            guard
-                .entry(id)
-                .or_insert_with(|| std::sync::Arc::new(OnceLock::new()))
-                .clone()
+            let dropped = crate::inpaint_sd::sweep_idle(&mut guard, now, idle);
+            if dropped > 0 {
+                tracing::info!(
+                    dropped,
+                    idle_secs = LAMA_IDLE_RELEASE_SECS,
+                    rss_mb = crate::inpaint_sd::process_rss_mb_pub(),
+                    "LaMa: released idle session(s)",
+                );
+            }
+            let entry = guard.entry(id).or_insert_with(|| crate::inpaint_sd::CacheEntry {
+                value: Arc::new(OnceLock::new()),
+                last_used: now,
+            });
+            // Don't refresh last_used on Err entries — sticky failures
+            // shouldn't keep refreshing their idle timer (mirrors SD).
+            if !matches!(entry.value.get(), Some(Err(_))) {
+                entry.last_used = now;
+            }
+            entry.value.clone()
         };
 
-        // First caller's closure runs; concurrent callers block on the
-        // OnceLock and receive the same Result. No duplicate session
-        // gets built.
-        slot.get_or_init(|| {
-            Self::new_inner(id).map(|s| &*Box::leak(Box::new(s)))
-        })
+        // Build outside the cache lock. Concurrent callers block on
+        // the OnceLock and receive the same Result — no duplicate
+        // session gets built.
+        slot.get_or_init(|| Self::new_inner(id).map(Arc::new))
             .clone()
             .map_err(CoreError::Inference)
     }
@@ -582,6 +647,15 @@ impl LamaSession {
             .into_dimensionality::<ndarray::Ix4>()
             .map_err(|e| CoreError::Inference(format!("LaMa: output reshape: {e}")))?;
         Ok(decode_tile(view, image, mask, w, h))
+    }
+}
+
+impl Drop for LamaSession {
+    fn drop(&mut self) {
+        tracing::info!(
+            rss_mb = crate::inpaint_sd::process_rss_mb_pub(),
+            "LaMa session dropped (idle release or process exit)",
+        );
     }
 }
 

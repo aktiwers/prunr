@@ -687,9 +687,12 @@ pub(crate) struct SdSession {
 /// callers keep their own clone — no use-after-free.
 /// Errors cache the load-failure string so a missing bundle doesn't
 /// retry-and-error every stroke; eviction lets the next try refresh.
-struct CacheEntry<T> {
-    value: T,
-    last_used: Instant,
+///
+/// `pub(crate)` so `inpaint::LamaSession` can reuse the same cache shape
+/// without duplicating struct + sweep helper.
+pub(crate) struct CacheEntry<T> {
+    pub(crate) value: T,
+    pub(crate) last_used: Instant,
 }
 
 /// Per-id deferred bundle. The outer `Arc<OnceLock<...>>` is what closes
@@ -712,7 +715,9 @@ fn sd_cache() -> &'static Mutex<SdCache> {
 /// Drop entries whose `last_used` is older than `idle` relative to `now`,
 /// returning the count dropped. Generic over `T` so tests can drive the
 /// sweep without spinning up a real ORT session.
-fn sweep_idle<T>(
+///
+/// `pub(crate)` so `inpaint::LamaSession`'s sweeper reuses this directly.
+pub(crate) fn sweep_idle<T>(
     cache: &mut HashMap<prunr_models::ModelId, CacheEntry<T>>,
     now: Instant,
     idle: Duration,
@@ -1571,6 +1576,13 @@ pub(crate) fn available_ram_bytes() -> Option<u64> {
 /// Current process RSS in MB. `None` when sysinfo can't read the process
 /// (sandboxed CI, exotic platforms). Used to instrument SD session
 /// load/drop where 4-6 GB swings are easy to hide in aggregate logs.
+///
+/// `pub(crate)` so the LaMa sweeper can emit RSS deltas in the same
+/// trace shape as SD's sweeper.
+pub(crate) fn process_rss_mb_pub() -> Option<u64> {
+    process_rss_mb()
+}
+
 fn process_rss_mb() -> Option<u64> {
     let pid = sysinfo::get_current_pid().ok()?;
     with_system(|sys| {
