@@ -60,6 +60,15 @@ pub fn cache_dir_for(id: ModelId, ep_name: &str) -> Option<PathBuf> {
     Some(dir)
 }
 
+/// Pure path to the ORT-graph-optimized model file for `(id, ep_name)`.
+/// **No filesystem side effects** — mirrors the `cache_path_for` /
+/// `cache_dir_for` split. Read sites poll this and `fs::read` the path
+/// directly; write sites must call `cache_dir_for` first to ensure the
+/// parent directory exists.
+pub fn optimized_model_path(id: ModelId, ep_name: &str) -> Option<PathBuf> {
+    cache_path_for(id, ep_name).map(|d| d.join("optimized.onnx"))
+}
+
 /// True when the cache for `(id, ep_name)` exists on disk and is
 /// non-empty. Read-only — never creates a directory as a side
 /// effect. The EP itself validates contents on load; this check is
