@@ -52,6 +52,7 @@ pub(crate) enum HardwareSectionIntent {
     StartInstall(crate::runtime_install::RuntimeId),
     CancelInstall,
     Uninstall(crate::runtime_install::RuntimeId),
+    ClearCompiledCache,
 }
 
 /// Slider row: label left, slider fills middle, value right.
@@ -180,6 +181,16 @@ fn dispatch_hardware_intent(app: &mut PrunrApp, intent: HardwareSectionIntent) {
             app.hardware_install_cache =
                 crate::gui::hardware_cache::HardwareInstallCache::refresh();
         }
+        HardwareSectionIntent::ClearCompiledCache => {
+            // Off-thread: a multi-GB rmtree on a slow disk would stall
+            // the GUI frame. Toast fires immediately as confirmation
+            // the action started; bytes-reclaimed lands in the log.
+            std::thread::spawn(|| {
+                let bytes = prunr_core::cache::clear_all();
+                tracing::info!(bytes, "cleared compiled-model cache");
+            });
+            app.toasts.success("Clearing compiled-model cache");
+        }
     }
 }
 
@@ -269,6 +280,20 @@ fn render_hardware_section(
     if p.recommends_openvino() && !installed && !ctx.install_in_progress {
         hint(ui, "Recommended for Intel hardware — 2-3× faster inference, plus iGPU acceleration for SD inpaint.");
     }
+
+    ui.add_space(theme::SPACE_MD);
+
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("Compiled-model cache")
+            .color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui.button(RichText::new("Clear")
+                .color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY)).clicked() {
+                intent = Some(HardwareSectionIntent::ClearCompiledCache);
+            }
+        });
+    });
+    hint(ui, "Wipes per-EP compiled artifacts (CUDA optimized graphs, CoreML mlmodelc). Models recompile on next use. Use if a cached file is corrupt or you want the disk space back.");
 
     ui.add_space(theme::SPACE_MD);
     intent
