@@ -711,6 +711,7 @@ fn build_lama_session(
             tracing::debug!(?id, ep = %ep, "LaMa: EP cached as incompatible; skipping");
             continue;
         }
+        crate::cache::gc_stale_for_model(id, ep.as_str());
         let builder = match base_builder(threads) {
             Ok(b) => b,
             Err(e) => {
@@ -796,6 +797,7 @@ fn build_lama_session(
     }
 
     // CPU fallback: no EP registration, ORT uses its default CPU provider.
+    crate::cache::gc_stale_for_model(id, "CPU");
     let builder = base_builder(threads)?;
     let (mut builder, cpu_bytes) = apply_ort_graph_cache(builder, bytes, id, "CPU");
     let started = Instant::now();

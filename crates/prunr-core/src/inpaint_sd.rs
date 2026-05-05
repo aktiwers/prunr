@@ -944,6 +944,7 @@ fn build_part_with_ep_ladder(
             tracing::debug!(?id, part = %key, ep = %ep, "SD: EP cached as incompatible; skipping");
             continue;
         }
+        crate::cache::gc_stale_for_model(id, ep.as_str());
         let builder = match sd_base_builder() {
             Ok(b) => b,
             Err(e) => {
@@ -1035,6 +1036,7 @@ fn build_part_with_ep_ladder(
     // CPU fallback: no EP registration; smoke test skipped — if the CPU
     // EP can't run a typed-zero forward, every real inference will fail
     // at the same point and surface a useful error there.
+    crate::cache::gc_stale_for_model(id, "CPU");
     let builder = sd_base_builder()
         .map_err(|e| format!("SD {key}: builder init: {e}"))?;
     let (mut builder, load_path) = sd_apply_path_cache(builder, path.as_path(), id, "CPU", key);
