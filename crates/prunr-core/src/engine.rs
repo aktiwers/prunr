@@ -207,7 +207,7 @@ impl OrtEngine {
         // CPU-only path: straight shot.
         if cpu_only {
             let builder = Self::builder_with_base(intra_threads)?;
-            let (builder, bytes) = Self::apply_ort_graph_cache(builder, model_bytes, model_id, "CPU")?;
+            let (builder, bytes) = apply_ort_graph_cache(builder, model_bytes, model_id, "CPU");
             let started = Instant::now();
             let session = builder
                 .with_execution_providers([
@@ -256,7 +256,7 @@ impl OrtEngine {
             let builder = match ep {
                 #[cfg(not(target_os = "macos"))]
                 EpKind::Cuda => {
-                    let (b, bytes) = Self::apply_ort_graph_cache(builder, model_bytes, model_id, ep.as_str())?;
+                    let (b, bytes) = apply_ort_graph_cache(builder, model_bytes, model_id, ep.as_str());
                     bytes_owner = bytes;
                     b
                 }
@@ -343,41 +343,6 @@ impl OrtEngine {
             .map_err(|e| CoreError::Inference(format!("ORT set optimization level failed: {e}")))?
             .with_intra_threads(intra_threads.max(1))
             .map_err(|e| CoreError::Inference(format!("ORT set intra threads failed: {e}")))
-    }
-
-    /// Per-(model, EP) ORT-graph-optimization cache. On cache hit returns
-    /// the optimized bytes so commit skips optimization; on miss sets
-    /// `with_optimized_model_path` so ORT writes the optimized graph for
-    /// the next launch.
-    fn apply_ort_graph_cache<'a>(
-        builder: ort::session::builder::SessionBuilder,
-        model_bytes: &'a [u8],
-        model_id: prunr_models::ModelId,
-        ep_name: &str,
-    ) -> Result<(ort::session::builder::SessionBuilder, Cow<'a, [u8]>), CoreError> {
-        let Some(path) = crate::cache::optimized_model_path(model_id, ep_name) else {
-            return Ok((builder, Cow::Borrowed(model_bytes)));
-        };
-        match std::fs::read(&path) {
-            Ok(cached) => {
-                tracing::debug!(?model_id, ep = %ep_name, bytes = cached.len(), "cache hit (optimized graph)");
-                return Ok((builder, Cow::Owned(cached)));
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => {
-                tracing::warn!(?model_id, ep = %ep_name, %e, path = %path.display(),
-                    "cached optimized graph unreadable; rebuilding");
-            }
-        }
-        // Miss path: ensure the parent dir exists for ORT's write.
-        if crate::cache::cache_dir_for(model_id, ep_name).is_none() {
-            return Ok((builder, Cow::Borrowed(model_bytes)));
-        }
-        let builder = builder
-            .with_optimized_model_path(&path)
-            .map_err(|e| CoreError::Inference(format!("with_optimized_model_path failed: {e}")))?;
-        tracing::debug!(?model_id, ep = %ep_name, path = %path.display(), "cache miss (writing optimized graph)");
-        Ok((builder, Cow::Borrowed(model_bytes)))
     }
 
     /// Detect the runtime provider (cached — runs once per process).
@@ -499,6 +464,46 @@ impl OrtEngine {
 impl InferenceEngine for OrtEngine {
     fn active_provider(&self) -> &str {
         &self.provider_name
+    }
+}
+
+/// Per-(model, EP) ORT-graph-optimization cache. On hit returns the
+/// optimized bytes so commit skips optimization; on miss sets
+/// `with_optimized_model_path` so ORT writes the optimized graph for
+/// the next launch. Cache failures are best-effort — any I/O or ORT
+/// error logs and falls back to the uncached path.
+pub(crate) fn apply_ort_graph_cache<'a>(
+    builder: ort::session::builder::SessionBuilder,
+    model_bytes: &'a [u8],
+    model_id: prunr_models::ModelId,
+    ep_name: &str,
+) -> (ort::session::builder::SessionBuilder, Cow<'a, [u8]>) {
+    let Some(path) = crate::cache::optimized_model_path(model_id, ep_name) else {
+        return (builder, Cow::Borrowed(model_bytes));
+    };
+    match std::fs::read(&path) {
+        Ok(cached) => {
+            tracing::debug!(?model_id, ep = %ep_name, bytes = cached.len(), "cache hit (optimized graph)");
+            return (builder, Cow::Owned(cached));
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            tracing::warn!(?model_id, ep = %ep_name, %e, path = %path.display(),
+                "cached optimized graph unreadable; rebuilding");
+        }
+    }
+    if crate::cache::cache_dir_for(model_id, ep_name).is_none() {
+        return (builder, Cow::Borrowed(model_bytes));
+    }
+    match builder.with_optimized_model_path(&path) {
+        Ok(builder) => {
+            tracing::debug!(?model_id, ep = %ep_name, path = %path.display(), "cache miss (writing optimized graph)");
+            (builder, Cow::Borrowed(model_bytes))
+        }
+        Err(e) => {
+            tracing::warn!(?model_id, ep = %ep_name, %e, "with_optimized_model_path failed; cache disabled for this build");
+            (e.recover(), Cow::Borrowed(model_bytes))
+        }
     }
 }
 

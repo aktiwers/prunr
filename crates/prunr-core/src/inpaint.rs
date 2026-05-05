@@ -3,6 +3,7 @@
 //! inside LaMa's fixed input size and seams stay invisible against
 //! flat backgrounds.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -12,7 +13,7 @@ use image::{GrayImage, RgbaImage};
 use ndarray::Array4;
 use ort::{inputs, session::{Session, builder::GraphOptimizationLevel}, value::Tensor};
 
-use crate::engine::EpKind;
+use crate::engine::{apply_ort_graph_cache, EpKind};
 use crate::types::CoreError;
 
 /// Cross-thread progress channel for an in-flight inpaint stroke.
@@ -717,6 +718,19 @@ fn build_lama_session(
                 continue;
             }
         };
+        // OpenVINO/CoreML manage their own compiled-IR caches via
+        // provider options; only CUDA needs the ORT-level graph cache.
+        #[allow(unused_mut)] // mut only used on non-macOS via the CUDA arm
+        let mut bytes_owner: Cow<'_, [u8]> = Cow::Borrowed(bytes);
+        let builder = match ep {
+            #[cfg(not(target_os = "macos"))]
+            EpKind::Cuda => {
+                let (b, owned) = apply_ort_graph_cache(builder, bytes, id, ep.as_str());
+                bytes_owner = owned;
+                b
+            }
+            _ => builder,
+        };
         let registered = match ep {
             #[cfg(not(target_os = "macos"))]
             EpKind::Cuda => builder.with_execution_providers([
@@ -725,9 +739,13 @@ fn build_lama_session(
                     .build(),
             ]),
             #[cfg(target_os = "macos")]
-            EpKind::CoreMl => builder.with_execution_providers([
-                ort::execution_providers::CoreMLExecutionProvider::default().build(),
-            ]),
+            EpKind::CoreMl => {
+                let mut p = ort::execution_providers::CoreMLExecutionProvider::default();
+                if let Some(dir) = crate::cache::cache_dir_for(id, ep.as_str()) {
+                    p = p.with_model_cache_dir(dir.to_string_lossy().into_owned());
+                }
+                builder.with_execution_providers([p.build()])
+            }
             #[cfg(windows)]
             EpKind::DirectMl => builder.with_execution_providers([
                 ort::execution_providers::DirectMLExecutionProvider::default().build(),
@@ -736,14 +754,16 @@ fn build_lama_session(
             // (iGPU when present + driver works, NPU on newer Intel,
             // else CPU). Smoke test below catches op-incompat failures.
             // `with_num_threads` caps the EP-internal TBB pool to match
-            // our outer rayon budget. (No `with_cache_dir`: see engine.rs
-            // for the verified-but-not-effective rationale.)
+            // our outer rayon budget.
             #[cfg(not(target_os = "macos"))]
-            EpKind::OpenVino => builder.with_execution_providers([
-                ort::execution_providers::OpenVINOExecutionProvider::default()
-                    .with_num_threads(threads.max(1))
-                    .build(),
-            ]),
+            EpKind::OpenVino => {
+                let mut p = ort::execution_providers::OpenVINOExecutionProvider::default()
+                    .with_num_threads(threads.max(1));
+                if let Some(dir) = crate::cache::cache_dir_for(id, ep.as_str()) {
+                    p = p.with_cache_dir(dir.to_string_lossy());
+                }
+                builder.with_execution_providers([p.build()])
+            }
         };
         let mut built = match registered {
             Ok(b) => b,
@@ -752,8 +772,12 @@ fn build_lama_session(
                 continue;
             }
         };
-        let mut session = match built.commit_from_memory(bytes) {
-            Ok(s) => s,
+        let started = Instant::now();
+        let mut session = match built.commit_from_memory(&bytes_owner) {
+            Ok(s) => {
+                tracing::info!(?id, ep = %ep, elapsed_ms = started.elapsed().as_millis() as u64, "LaMa: session committed");
+                s
+            }
             Err(e) => {
                 tracing::warn!(ep = %ep, %e, "LaMa: GPU session commit failed — trying next");
                 crate::ep_compat::record_failure(ep, id, &format!("{e}"));
@@ -776,9 +800,13 @@ fn build_lama_session(
     }
 
     // CPU fallback: no EP registration, ORT uses its default CPU provider.
-    let session = base_builder(threads)?
-        .commit_from_memory(bytes)
+    let builder = base_builder(threads)?;
+    let (mut builder, cpu_bytes) = apply_ort_graph_cache(builder, bytes, id, "CPU");
+    let started = Instant::now();
+    let session = builder
+        .commit_from_memory(&cpu_bytes)
         .map_err(|e| format!("LaMa: CPU session commit failed: {e}"))?;
+    tracing::info!(?id, ep = "CPU", elapsed_ms = started.elapsed().as_millis() as u64, "LaMa: session committed");
     Ok((session, "CPU".to_string()))
 }
 
