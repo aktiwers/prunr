@@ -3,113 +3,84 @@
 //! Every EP that supports caching its compiled IR (OpenVINO model
 //! cache, CoreML mlmodelc cache, ORT graph optimization for CPU /
 //! CUDA) gets a directory under `<data>/prunr/ep_cache/<ep>/<key>/`,
-//! where `<key>` is derived from `(model_id, model_version,
-//! cache_format_version)`. Bumping any component invalidates the
-//! cache automatically.
+//! where `<key>` is `<model_stable_name>-<model_version>-v<format>`.
+//! Bumping any component invalidates the cache automatically.
 //!
-//! Phase 2.5 (SD memory robustness). See
-//! `.planning/phases/26-sd-memory-robustness/PHASE-2.5-SCOPE.md`.
-//!
-//! Layout:
-//!
-//! ```text
-//! <data>/prunr/ep_cache/
-//! ├── openvino/<key>/        ← OpenVINO compiled blob + index
-//! ├── coreml/<key>/          ← CoreML mlmodelc bundle
-//! ├── ort_optimized/<key>/   ← ORT graph-optimized .onnx (CPU + CUDA)
-//! └── tensorrt/<key>/        ← reserved for future TRT EP
-//! ```
-//!
-//! `<key>` shape: `<model_id>-<model_version>-<cache_format_version>`.
-//! E.g. `SdV15InpaintFp16-1.0.0-v1`.
+//! EP names match `OrtEngine::active_provider()`'s output (`"OpenVINO"`,
+//! `"CUDA"`, `"CoreML"`, `"DirectML"`, `"CPU"`) and the existing
+//! `ep_compat.json` cache keys — strings rather than an enum because
+//! the rest of the codebase already treats EP identity as a string.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use prunr_models::ModelId;
 
 /// Cache format version. Bump when the cache directory layout
-/// changes in a way that breaks back-compat (e.g. moving from a
-/// flat blob to a multi-file index). Old cache directories under a
+/// changes in a way that breaks back-compat. Old directories under a
 /// previous version stay on disk but are never read; the
-/// "Clear model cache" Settings button (P25-G) wipes them.
+/// "Clear model cache" Settings button wipes them.
 const CACHE_FORMAT_VERSION: u32 = 1;
 
-/// Which EP a cached artefact was built for. Each EP's cache lives in
-/// its own subdirectory so cross-EP collision can't corrupt a load
-/// (e.g. OpenVINO-compiled IR loaded by CPU EP).
-///
-/// Mirror of `crate::engine::EpKind`, kept as a separate type to
-/// keep `prunr-core::cache` independent of the `engine` module's
-/// other concerns. Conversion is one match arm in `engine.rs`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CacheEp {
-    Cpu,
-    OpenVino,
-    Cuda,
-    CoreMl,
-    DirectMl,
-    TensorRt,
-}
-
-impl CacheEp {
-    /// Subdirectory name. Lowercase + underscores so a future
-    /// `<data>/prunr/ep_cache/` listing is grep-friendly.
-    pub const fn subdir(self) -> &'static str {
-        match self {
-            Self::Cpu => "ort_optimized",
-            Self::OpenVino => "openvino",
-            Self::Cuda => "ort_optimized",
-            Self::CoreMl => "coreml",
-            Self::DirectMl => "directml",
-            Self::TensorRt => "tensorrt",
-        }
-    }
-}
+/// Maximum recursion depth for `walk_dir_size`. Bounds the worst case
+/// for an adversarial / corrupted cache directory with deeply nested
+/// symlinks; cache layout is two levels deep in normal operation, so
+/// 16 has plenty of headroom while still terminating.
+const MAX_WALK_DEPTH: u32 = 16;
 
 /// Root cache directory: `<data>/prunr/ep_cache/`. Returns `None` on
-/// platforms where `data_dir()` itself is unavailable (sandbox /
-/// exotic platforms) — caller falls back to no-cache rather than
-/// erroring out.
+/// platforms where `data_dir()` itself is unavailable; callers fall
+/// back to no-cache rather than erroring out.
 pub fn cache_root() -> Option<PathBuf> {
     prunr_models::data_dir().map(|d| d.join("ep_cache"))
 }
 
-/// Per-`(model, ep)` cache directory. Creates parent directories on
-/// demand. Returns `None` when `data_dir()` is unavailable OR the
-/// model id is unknown to the registry.
-pub fn cache_dir_for(id: ModelId, ep: CacheEp) -> Option<PathBuf> {
-    let descriptor = prunr_models::descriptor(id)?;
+/// Pure path builder — no filesystem side effects. Use this from any
+/// read-only check (`cache_populated_for`, prewarm decisions). Callers
+/// that actually need the directory to exist should use
+/// `cache_dir_for` instead, which creates it.
+pub fn cache_path_for(id: ModelId, ep_name: &str) -> Option<PathBuf> {
     let root = cache_root()?;
-    let key = format!("{:?}-{}-v{}", id, descriptor.version, CACHE_FORMAT_VERSION);
-    let dir = root.join(ep.subdir()).join(key);
+    let descriptor = prunr_models::descriptor(id)?;
+    let key = format!(
+        "{}-{}-v{}",
+        id.stable_name(), descriptor.version, CACHE_FORMAT_VERSION,
+    );
+    Some(root.join(ep_name.to_ascii_lowercase()).join(key))
+}
+
+/// Per-`(model, ep)` cache directory, **created** if missing. Use
+/// from session-build sites that are about to write into the cache.
+/// Returns `None` when `data_dir()` is unavailable, the model id is
+/// unknown, or `create_dir_all` fails.
+pub fn cache_dir_for(id: ModelId, ep_name: &str) -> Option<PathBuf> {
+    let dir = cache_path_for(id, ep_name)?;
     if let Err(e) = std::fs::create_dir_all(&dir) {
-        tracing::warn!(?id, ?ep, %e, "failed to create EP cache dir");
+        tracing::warn!(?id, ep = %ep_name, %e, "failed to create EP cache dir");
         return None;
     }
     Some(dir)
 }
 
-/// Whether the cache for `(id, ep)` is non-empty. Used by background-
-/// prewarm to skip already-cached models. Considers any non-empty
-/// directory hit; the EP itself validates the contents on load.
-pub fn cache_populated_for(id: ModelId, ep: CacheEp) -> bool {
-    let Some(dir) = cache_dir_for(id, ep) else { return false };
+/// True when the cache for `(id, ep_name)` exists on disk and is
+/// non-empty. Read-only — never creates a directory as a side
+/// effect. The EP itself validates contents on load; this check is
+/// just "should we skip the prewarm work?".
+pub fn cache_populated_for(id: ModelId, ep_name: &str) -> bool {
+    let Some(dir) = cache_path_for(id, ep_name) else { return false };
+    if !dir.is_dir() { return false; }
     std::fs::read_dir(&dir)
         .map(|mut entries| entries.next().is_some())
         .unwrap_or(false)
 }
 
-/// Wipe the entire EP cache root. Called from Settings → Hardware →
-/// "Clear model cache" so users can recover from a broken cache
-/// without manual `rm -rf`. Idempotent.
-///
-/// Returns the number of bytes reclaimed (best-effort; based on
-/// pre-removal directory walk). `0` on any failure — failures are
-/// logged at WARN but never propagated, since cache wipe is a
-/// best-effort hygiene operation.
+/// Wipe the entire EP cache root. Returns the number of bytes
+/// reclaimed (best-effort; based on a pre-removal directory walk).
+/// Run on a background thread when called from GUI handlers — the
+/// walk + remove can take hundreds of ms on multi-GB caches over
+/// slow disks.
 pub fn clear_all() -> u64 {
     let Some(root) = cache_root() else { return 0 };
     if !root.exists() { return 0 }
-    let bytes = walk_dir_size(&root).unwrap_or(0);
+    let bytes = walk_dir_size(&root, 0).unwrap_or(0);
     if let Err(e) = std::fs::remove_dir_all(&root) {
         tracing::warn!(%e, dir = %root.display(), "failed to clear EP cache");
         return 0;
@@ -117,15 +88,18 @@ pub fn clear_all() -> u64 {
     bytes
 }
 
-/// Recursive directory size. Used only to report bytes-freed in the
-/// Settings UI; not on any hot path.
-fn walk_dir_size(dir: &std::path::Path) -> std::io::Result<u64> {
+/// Recursive directory size with depth bound. Used only by `clear_all`
+/// for the bytes-reclaimed report. Skips entries beyond
+/// `MAX_WALK_DEPTH` so a symlink loop terminates instead of stack-
+/// overflowing.
+fn walk_dir_size(dir: &Path, depth: u32) -> std::io::Result<u64> {
+    if depth > MAX_WALK_DEPTH { return Ok(0); }
     let mut total = 0u64;
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let meta = entry.metadata()?;
         if meta.is_dir() {
-            total += walk_dir_size(&entry.path())?;
+            total += walk_dir_size(&entry.path(), depth + 1)?;
         } else {
             total += meta.len();
         }
@@ -137,58 +111,82 @@ fn walk_dir_size(dir: &std::path::Path) -> std::io::Result<u64> {
 mod tests {
     use super::*;
 
-    /// Cross-EP cache collision would corrupt a load if e.g.
-    /// CPU-optimized IR were handed to OpenVINO. Same `model_id`,
-    /// different EP → different paths.
+    /// Cross-EP collision would corrupt a load if e.g. CPU-optimized
+    /// IR were handed to OpenVINO. Same `model_id`, different EP →
+    /// different paths.
     #[test]
-    fn cache_dir_layout_per_ep_is_distinct() {
-        let Some(_root) = cache_root() else { return; };
-        let openvino = cache_dir_for(ModelId::Silueta, CacheEp::OpenVino);
-        let cpu = cache_dir_for(ModelId::Silueta, CacheEp::Cpu);
-        let coreml = cache_dir_for(ModelId::Silueta, CacheEp::CoreMl);
-        match (openvino, cpu, coreml) {
-            (Some(a), Some(b), Some(c)) => {
-                assert_ne!(a, b, "OpenVINO and CPU caches must not collide");
-                assert_ne!(a, c, "OpenVINO and CoreML caches must not collide");
-                assert_ne!(b, c, "CPU and CoreML caches must not collide");
-            }
-            _ => {} // data_dir unavailable in CI sandbox — skip
-        }
+    fn cache_path_per_ep_is_distinct() {
+        let Some(_) = cache_root() else { return };
+        let openvino = cache_path_for(ModelId::Silueta, "OpenVINO");
+        let cpu = cache_path_for(ModelId::Silueta, "CPU");
+        let coreml = cache_path_for(ModelId::Silueta, "CoreML");
+        assert!(openvino.is_some() && cpu.is_some() && coreml.is_some());
+        assert_ne!(openvino, cpu);
+        assert_ne!(openvino, coreml);
+        assert_ne!(cpu, coreml);
     }
 
-    /// Bumping `CACHE_FORMAT_VERSION` (or the descriptor's `version`)
+    /// EP-name casing must not split the cache (e.g. "openvino" and
+    /// "OpenVINO" landing in different subdirs would silently miss the
+    /// warm cache on lookups). Lowercased uniformly.
+    #[test]
+    fn cache_path_normalises_ep_name_case() {
+        let Some(_) = cache_root() else { return };
+        let lower = cache_path_for(ModelId::Silueta, "openvino").unwrap();
+        let upper = cache_path_for(ModelId::Silueta, "OPENVINO").unwrap();
+        let mixed = cache_path_for(ModelId::Silueta, "OpenVINO").unwrap();
+        assert_eq!(lower, upper);
+        assert_eq!(lower, mixed);
+    }
+
+    /// Bumping `CACHE_FORMAT_VERSION` or the descriptor's `version`
     /// must change the cache key so a stale-format cache doesn't get
-    /// loaded against a newer ORT or layout.
+    /// loaded against a newer ORT or layout. Also: stable_name (not
+    /// Debug) means a future variant rename doesn't silently
+    /// invalidate every user's cache.
     #[test]
-    fn cache_key_includes_format_version_and_model_version() {
-        let Some(dir) = cache_dir_for(ModelId::Silueta, CacheEp::OpenVino) else { return };
-        let last = dir.file_name().and_then(|s| s.to_str()).unwrap_or("");
-        assert!(
-            last.contains(&format!("v{}", CACHE_FORMAT_VERSION)),
-            "cache key must contain CACHE_FORMAT_VERSION; got {last:?}",
-        );
-        let descriptor = prunr_models::descriptor(ModelId::Silueta).expect("Silueta in registry");
-        assert!(
-            last.contains(descriptor.version),
-            "cache key must contain model version {}; got {last:?}",
-            descriptor.version,
-        );
+    fn cache_key_includes_stable_name_and_versions() {
+        let Some(dir) = cache_path_for(ModelId::Silueta, "CPU") else { return };
+        let key = dir.file_name().and_then(|s| s.to_str()).unwrap_or("");
+        assert!(key.contains(ModelId::Silueta.stable_name()),
+            "cache key must contain stable_name; got {key:?}");
+        let descriptor = prunr_models::descriptor(ModelId::Silueta).unwrap();
+        assert!(key.contains(descriptor.version),
+            "cache key must contain model version {}; got {key:?}", descriptor.version);
+        assert!(key.contains(&format!("v{CACHE_FORMAT_VERSION}")),
+            "cache key must contain CACHE_FORMAT_VERSION; got {key:?}");
     }
 
-    /// Unknown model_id (registry miss) must return `None` so callers
-    /// fall back to no-cache. A panic here would crash session build.
+    /// Read-only check must not create the cache directory. Pre-fix
+    /// `cache_populated_for` indirected through `cache_dir_for` which
+    /// `create_dir_all`'d every poll — every prewarm decision was
+    /// silently `mkdir`-ing an empty directory.
     #[test]
-    fn cache_dir_returns_none_for_unknown_model() {
-        // ModelId::ALL is the canonical inventory; pick one and
-        // verify the well-known case works. The registry-miss path is
-        // exercised when an old cached enum value is loaded against a
-        // pruned registry — synthesise that with a transmute would be
-        // unsound, so we just verify the happy path here. A future
-        // refactor that drops ModelId::descriptor coverage would
-        // surface via a None return at runtime.
-        let happy = cache_dir_for(ModelId::Silueta, CacheEp::Cpu);
-        if cache_root().is_some() {
-            assert!(happy.is_some(), "Silueta is in the registry");
-        }
+    fn cache_populated_does_not_create_directory() {
+        let Some(path) = cache_path_for(ModelId::DexiNed, "CPU") else { return };
+        let _ = std::fs::remove_dir_all(&path);
+        let exists_before = path.exists();
+        let populated = cache_populated_for(ModelId::DexiNed, "CPU");
+        let exists_after = path.exists();
+        assert!(!populated);
+        assert_eq!(exists_before, exists_after,
+            "cache_populated_for must be read-only");
+    }
+
+    /// True only when the directory exists AND has at least one entry.
+    /// Empty directory still reports false so the prewarm doesn't
+    /// skip a missing-IR case (e.g. partial wipe via `rm -rf` on a
+    /// subdir of the cache root).
+    #[test]
+    fn cache_populated_distinguishes_empty_from_nonempty() {
+        let Some(dir) = cache_dir_for(ModelId::Migan, "CPU") else { return };
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(!cache_populated_for(ModelId::Migan, "CPU"),
+            "empty dir must report unpopulated");
+        std::fs::write(dir.join("optimized.onnx"), b"placeholder").unwrap();
+        assert!(cache_populated_for(ModelId::Migan, "CPU"),
+            "dir with content must report populated");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
