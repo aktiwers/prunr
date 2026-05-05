@@ -155,9 +155,20 @@ impl SubprocessManager {
             })
             .map_err(|e| format!("Failed to spawn reader thread: {e}"))?;
 
-        // Wait for Ready or InitError. 300s timeout covers macOS CoreML
-        // first-run compilation which can take 2-5 minutes on slow systems.
-        let active_provider = match event_rx.recv_timeout(std::time::Duration::from_secs(300)) {
+        // Wait for Ready or InitError. The seg/edge subprocess loads
+        // engine pools at Init (CoreML first-run compilation alone can
+        // take 2–5 min on slow Macs), so it gets the long 300s budget.
+        // The inpaint-only subprocess skips engine creation entirely
+        // (`process_inpaint_with` builds the bundle lazily on first
+        // dispatch), so a 30s budget is plenty AND bounds the bridge's
+        // pre-Ready hang when something like an OpenVINO `is_available()`
+        // probe wedges the worker thread before it can send Ready.
+        let init_timeout = if inpaint_only {
+            std::time::Duration::from_secs(30)
+        } else {
+            std::time::Duration::from_secs(300)
+        };
+        let active_provider = match event_rx.recv_timeout(init_timeout) {
             Ok(ReaderEvent::Event(SubprocessEvent::Ready { active_provider })) => {
                 active_provider
             }
@@ -175,7 +186,13 @@ impl SubprocessManager {
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 let _ = child.kill();
-                return Err("Worker init timed out (300s)".to_string());
+                return Err(format!(
+                    "Worker init timed out ({:?}). \
+                     If this happened on first SD eraser use, the \
+                     OpenVINO availability probe may be wedged — check \
+                     the worker log for 'detect_active_provider' tracing.",
+                    init_timeout,
+                ));
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 let _ = child.kill();
