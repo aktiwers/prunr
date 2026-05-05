@@ -67,6 +67,27 @@ impl ModelId {
         ModelId::SdV15LcmInpaintFp16,
         ModelId::TaesdFp16,
     ];
+
+    /// Stable string identifier used as a persistent key (cache
+    /// directory names, config file fields, IPC payloads). Returned
+    /// as `&'static str` so callers can embed it without allocation.
+    /// **Do not change existing variant strings** — they're stamped
+    /// into user data on disk; renaming silently invalidates every
+    /// existing cache entry. Adding new variants is fine.
+    pub fn stable_name(&self) -> &'static str {
+        match self {
+            ModelId::Silueta => "silueta",
+            ModelId::U2net => "u2net",
+            ModelId::BiRefNetLite => "birefnet_lite",
+            ModelId::DexiNed => "dexined",
+            ModelId::LaMaFp32 => "lama_fp32",
+            ModelId::BigLaMa => "big_lama",
+            ModelId::Migan => "migan",
+            ModelId::SdV15InpaintFp16 => "sd_v15_inpaint_fp16",
+            ModelId::SdV15LcmInpaintFp16 => "sd_v15_lcm_inpaint_fp16",
+            ModelId::TaesdFp16 => "taesd_fp16",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
