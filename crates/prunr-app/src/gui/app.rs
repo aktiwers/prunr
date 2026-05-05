@@ -2836,12 +2836,17 @@ impl PrunrApp {
                 "{} loaded",
                 crate::gui::views::model_name(self.settings.model),
             ));
-            // Drop any cached inpaint subprocess on model switch.
-            // Pairs with the in-process LaMa cache clear (already
-            // fired in adjustments_toolbar) so the previous backend's
-            // residual RAM isn't held across a deterministic "I'm
-            // done with that tool" signal.
+            // Drop every cached engine on model switch — both the
+            // inpaint subprocess (SD bundle / LaMa subprocess
+            // residual) and the seg subprocess's warm engine pool
+            // (BiRefNetLite ~2 GB, U2Net ~800 MB, etc.). The
+            // in-process LaMa cache was already cleared in
+            // `adjustments_toolbar`'s on-model-changed branch.
+            // Combined: every model switch reclaims RAM from every
+            // backend the user is no longer using, regardless of
+            // direction (inpaint→inpaint, seg→seg, inpaint→seg, …).
             self.processor.release_inpaint_subprocess();
+            self.processor.release_seg_warm();
         }
         if toolbar_change.brush_settings_committed {
             self.settings.save();
