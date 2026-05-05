@@ -285,19 +285,26 @@ impl OrtEngine {
                     ort::execution_providers::DirectMLExecutionProvider::default().build(),
                 ]),
                 #[cfg(not(target_os = "macos"))]
-                EpKind::OpenVino => {
+                EpKind::OpenVino => builder.with_execution_providers([
                     // Cap the EP-internal TBB pool to match our outer rayon
                     // budget. Without this OpenVINO spawns its own pool sized
                     // to all logical cores, which oversubscribes against the
                     // rayon worker pool — `sched_yield` accounted for ~2% of
                     // CLI batch wall time in the perf trace.
-                    let mut p = ort::execution_providers::OpenVINOExecutionProvider::default()
-                        .with_num_threads(intra_threads.max(1));
-                    if let Some(dir) = crate::cache::cache_dir_for(model_id, ep.as_str()) {
-                        p = p.with_cache_dir(dir.to_string_lossy());
-                    }
-                    builder.with_execution_providers([p.build()])
-                }
+                    //
+                    // NOT using `with_cache_dir`: retested against SD UNet
+                    // on ort=2.0.0-rc.12 + openvino-1.24.1, Intel HD 530.
+                    // Cold and warm session-commit elapsed are identical
+                    // within noise (cold 23735 ms / warm 23224 ms on UNet),
+                    // and every blob's mtime advances on the warm run —
+                    // OpenVINO computes a different cache key each launch
+                    // and rewrites ~3.3 GB on every cold build. Net-negative
+                    // until ORT or OpenVINO ships a fix; re-evaluate when
+                    // ort bumps.
+                    ort::execution_providers::OpenVINOExecutionProvider::default()
+                        .with_num_threads(intra_threads.max(1))
+                        .build(),
+                ]),
             };
 
             let mut built = match res {

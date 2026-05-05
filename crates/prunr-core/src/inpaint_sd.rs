@@ -982,7 +982,7 @@ fn build_part_with_ep_ladder(
                 ort::execution_providers::DirectMLExecutionProvider::default().build(),
             ]),
             #[cfg(not(target_os = "macos"))]
-            EpKind::OpenVino => {
+            EpKind::OpenVino => builder.with_execution_providers([
                 // SD bundle peaked at ~15 GB RSS delta on a user system
                 // (rss_before=4994 → rss_after=19909 in the reported
                 // trace) — well above the ~3-4 GB the fp16 weights
@@ -993,15 +993,13 @@ fn build_part_with_ep_ladder(
                 // 512² SD tile rather than reserving for arbitrary
                 // input shapes. Both are safe — SD's UNet is run
                 // sequentially under a Mutex, and our tile pipeline
-                // is fixed-shape.
-                let mut p = ort::execution_providers::OpenVINOExecutionProvider::default()
+                // is fixed-shape. (No `with_cache_dir` — see engine.rs
+                // for the SD UNet empirical retest finding.)
+                ort::execution_providers::OpenVINOExecutionProvider::default()
                     .with_num_streams(1)
-                    .with_dynamic_shapes(false);
-                if let Some(dir) = crate::cache::cache_dir_for_part(id, ep.as_str(), key) {
-                    p = p.with_cache_dir(dir.to_string_lossy());
-                }
-                builder.with_execution_providers([p.build()])
-            }
+                    .with_dynamic_shapes(false)
+                    .build(),
+            ]),
         };
         let mut built = match registered {
             Ok(b) => b,

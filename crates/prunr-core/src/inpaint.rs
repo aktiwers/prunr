@@ -752,16 +752,14 @@ fn build_lama_session(
             // (iGPU when present + driver works, NPU on newer Intel,
             // else CPU). Smoke test below catches op-incompat failures.
             // `with_num_threads` caps the EP-internal TBB pool to match
-            // our outer rayon budget.
+            // our outer rayon budget. (No `with_cache_dir` — see
+            // engine.rs for the empirical retest finding.)
             #[cfg(not(target_os = "macos"))]
-            EpKind::OpenVino => {
-                let mut p = ort::execution_providers::OpenVINOExecutionProvider::default()
-                    .with_num_threads(threads.max(1));
-                if let Some(dir) = crate::cache::cache_dir_for(id, ep.as_str()) {
-                    p = p.with_cache_dir(dir.to_string_lossy());
-                }
-                builder.with_execution_providers([p.build()])
-            }
+            EpKind::OpenVino => builder.with_execution_providers([
+                ort::execution_providers::OpenVINOExecutionProvider::default()
+                    .with_num_threads(threads.max(1))
+                    .build(),
+            ]),
         };
         let mut built = match registered {
             Ok(b) => b,
