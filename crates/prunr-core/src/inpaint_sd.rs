@@ -1017,7 +1017,11 @@ fn build_part_with_ep_ladder(
             }
             Err(e) => {
                 tracing::warn!(part = %key, ep = %ep, %e, "SD: GPU session commit failed — trying next");
-                crate::ep_compat::record_failure(ep, id, &format!("{e}"));
+                if matches!(load_path, Cow::Owned(_)) {
+                    crate::engine::clear_suspect_cache(crate::cache::optimized_model_path_for_part(id, ep.as_str(), key).as_deref());
+                } else {
+                    crate::ep_compat::record_failure(ep, id, &format!("{e}"));
+                }
                 continue;
             }
         };
@@ -1028,7 +1032,11 @@ fn build_part_with_ep_ladder(
             }
             Err(e) => {
                 tracing::warn!(part = %key, ep = %ep, %e, "SD: smoke test failed — falling back");
-                crate::ep_compat::record_failure(ep, id, &e);
+                if matches!(load_path, Cow::Owned(_)) {
+                    crate::engine::clear_suspect_cache(crate::cache::optimized_model_path_for_part(id, ep.as_str(), key).as_deref());
+                } else {
+                    crate::ep_compat::record_failure(ep, id, &e);
+                }
             }
         }
     }
