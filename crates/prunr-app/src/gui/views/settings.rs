@@ -183,13 +183,12 @@ fn dispatch_hardware_intent(app: &mut PrunrApp, intent: HardwareSectionIntent) {
         }
         HardwareSectionIntent::ClearCompiledCache => {
             // Off-thread: a multi-GB rmtree on a slow disk would stall
-            // the GUI frame. Toast fires immediately as confirmation
-            // the action started; bytes-reclaimed lands in the log.
+            // the GUI frame.
             std::thread::spawn(|| {
                 let bytes = prunr_core::cache::clear_all();
                 tracing::info!(bytes, "cleared compiled-model cache");
             });
-            app.toasts.success("Clearing compiled-model cache");
+            app.toasts.info("Clearing compiled-model cache…");
         }
     }
 }
