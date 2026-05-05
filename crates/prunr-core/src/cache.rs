@@ -69,6 +69,29 @@ pub fn optimized_model_path(id: ModelId, ep_name: &str) -> Option<PathBuf> {
     cache_path_for(id, ep_name).map(|d| d.join("optimized.onnx"))
 }
 
+/// Per-part variant of `cache_path_for` for multi-part models like the
+/// SD bundle (`text_encoder` / `vae_encoder` / `vae_decoder` / `unet`
+/// share one `ModelId` but each needs an isolated subdir to avoid blob
+/// collision in shared caches).
+pub fn cache_path_for_part(id: ModelId, ep_name: &str, part: &str) -> Option<PathBuf> {
+    cache_path_for(id, ep_name).map(|p| p.join(part))
+}
+
+/// Per-part variant of `cache_dir_for` — creates the part-scoped dir.
+pub fn cache_dir_for_part(id: ModelId, ep_name: &str, part: &str) -> Option<PathBuf> {
+    let dir = cache_path_for_part(id, ep_name, part)?;
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        tracing::warn!(?id, ep = %ep_name, part, %e, "failed to create per-part EP cache dir");
+        return None;
+    }
+    Some(dir)
+}
+
+/// Per-part `optimized_model_path` for SD components.
+pub fn optimized_model_path_for_part(id: ModelId, ep_name: &str, part: &str) -> Option<PathBuf> {
+    cache_path_for_part(id, ep_name, part).map(|d| d.join("optimized.onnx"))
+}
+
 /// True when the cache for `(id, ep_name)` exists on disk and is
 /// non-empty. Read-only — never creates a directory as a side
 /// effect. The EP itself validates contents on load; this check is

@@ -26,8 +26,9 @@
 //! the LCM-distilled checkpoint (4 steps, guidance baked into training).
 //! That gating happens upstream; this module sees the chosen `ModelId`.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -950,6 +951,18 @@ fn build_part_with_ep_ladder(
                 continue;
             }
         };
+        // CUDA: write/read the ORT-optimized graph to a part-scoped cache
+        // file; on hit we load that file directly instead of the source.
+        // OpenVINO/CoreML manage their own caches via provider options.
+        let mut load_path: Cow<'_, std::path::Path> = Cow::Borrowed(path.as_path());
+        #[allow(unused_assignments)] // overwritten on non-macOS CUDA path
+        let mut builder = builder;
+        #[cfg(not(target_os = "macos"))]
+        if matches!(ep, EpKind::Cuda) {
+            let (b, p) = sd_apply_path_cache(builder, path.as_path(), id, ep.as_str(), key);
+            builder = b;
+            load_path = p;
+        }
         let registered = match ep {
             #[cfg(not(target_os = "macos"))]
             EpKind::Cuda => builder.with_execution_providers([
@@ -958,15 +971,19 @@ fn build_part_with_ep_ladder(
                     .build(),
             ]),
             #[cfg(target_os = "macos")]
-            EpKind::CoreMl => builder.with_execution_providers([
-                ort::execution_providers::CoreMLExecutionProvider::default().build(),
-            ]),
+            EpKind::CoreMl => {
+                let mut p = ort::execution_providers::CoreMLExecutionProvider::default();
+                if let Some(dir) = crate::cache::cache_dir_for_part(id, ep.as_str(), key) {
+                    p = p.with_model_cache_dir(dir.to_string_lossy().into_owned());
+                }
+                builder.with_execution_providers([p.build()])
+            }
             #[cfg(windows)]
             EpKind::DirectMl => builder.with_execution_providers([
                 ort::execution_providers::DirectMLExecutionProvider::default().build(),
             ]),
             #[cfg(not(target_os = "macos"))]
-            EpKind::OpenVino => builder.with_execution_providers([
+            EpKind::OpenVino => {
                 // SD bundle peaked at ~15 GB RSS delta on a user system
                 // (rss_before=4994 → rss_after=19909 in the reported
                 // trace) — well above the ~3-4 GB the fp16 weights
@@ -978,11 +995,14 @@ fn build_part_with_ep_ladder(
                 // input shapes. Both are safe — SD's UNet is run
                 // sequentially under a Mutex, and our tile pipeline
                 // is fixed-shape.
-                ort::execution_providers::OpenVINOExecutionProvider::default()
+                let mut p = ort::execution_providers::OpenVINOExecutionProvider::default()
                     .with_num_streams(1)
-                    .with_dynamic_shapes(false)
-                    .build(),
-            ]),
+                    .with_dynamic_shapes(false);
+                if let Some(dir) = crate::cache::cache_dir_for_part(id, ep.as_str(), key) {
+                    p = p.with_cache_dir(dir.to_string_lossy());
+                }
+                builder.with_execution_providers([p.build()])
+            }
         };
         let mut built = match registered {
             Ok(b) => b,
@@ -991,8 +1011,12 @@ fn build_part_with_ep_ladder(
                 continue;
             }
         };
-        let mut session = match built.commit_from_file(path) {
-            Ok(s) => s,
+        let started = Instant::now();
+        let mut session = match built.commit_from_file(&load_path) {
+            Ok(s) => {
+                tracing::info!(?id, part = %key, ep = %ep, elapsed_ms = started.elapsed().as_millis() as u64, "SD: session committed");
+                s
+            }
             Err(e) => {
                 tracing::warn!(part = %key, ep = %ep, %e, "SD: GPU session commit failed — trying next");
                 crate::ep_compat::record_failure(ep, id, &format!("{e}"));
@@ -1014,10 +1038,14 @@ fn build_part_with_ep_ladder(
     // CPU fallback: no EP registration; smoke test skipped — if the CPU
     // EP can't run a typed-zero forward, every real inference will fail
     // at the same point and surface a useful error there.
-    let session = sd_base_builder()
-        .map_err(|e| format!("SD {key}: builder init: {e}"))?
-        .commit_from_file(path)
-        .map_err(|e| format!("SD {key}: load from {}: {e}", path.display()))?;
+    let builder = sd_base_builder()
+        .map_err(|e| format!("SD {key}: builder init: {e}"))?;
+    let (mut builder, load_path) = sd_apply_path_cache(builder, path.as_path(), id, "CPU", key);
+    let started = Instant::now();
+    let session = builder
+        .commit_from_file(&load_path)
+        .map_err(|e| format!("SD {key}: load from {}: {e}", load_path.display()))?;
+    tracing::info!(?id, part = %key, ep = "CPU", elapsed_ms = started.elapsed().as_millis() as u64, "SD: session committed");
     Ok((session, "CPU".to_string()))
 }
 
@@ -1026,6 +1054,40 @@ fn sd_base_builder() -> Result<ort::session::builder::SessionBuilder, String> {
         .map_err(|e| format!("SD: ORT builder init failed: {e}"))?
         .with_optimization_level(GraphOptimizationLevel::Level3)
         .map_err(|e| format!("SD: optimization level: {e}"))
+}
+
+/// Path-based ORT-graph-optimization cache for SD's `commit_from_file`
+/// pattern. On hit returns the cached optimized.onnx path so the load
+/// skips graph optimization; on miss returns the source path with
+/// `with_optimized_model_path` set so ORT writes the optimized graph.
+/// Best-effort — any error logs and falls back to the uncached path.
+fn sd_apply_path_cache<'a>(
+    builder: ort::session::builder::SessionBuilder,
+    source_path: &'a Path,
+    model_id: prunr_models::ModelId,
+    ep_name: &str,
+    part: &str,
+) -> (ort::session::builder::SessionBuilder, Cow<'a, Path>) {
+    let Some(cache_path) = crate::cache::optimized_model_path_for_part(model_id, ep_name, part) else {
+        return (builder, Cow::Borrowed(source_path));
+    };
+    if cache_path.is_file() {
+        tracing::debug!(?model_id, ep = %ep_name, part, "cache hit (optimized graph, file)");
+        return (builder, Cow::Owned(cache_path));
+    }
+    if crate::cache::cache_dir_for_part(model_id, ep_name, part).is_none() {
+        return (builder, Cow::Borrowed(source_path));
+    }
+    match builder.with_optimized_model_path(&cache_path) {
+        Ok(b) => {
+            tracing::debug!(?model_id, ep = %ep_name, part, path = %cache_path.display(), "cache miss (writing optimized graph)");
+            (b, Cow::Borrowed(source_path))
+        }
+        Err(e) => {
+            tracing::warn!(?model_id, ep = %ep_name, part, %e, "with_optimized_model_path failed; cache disabled for this build");
+            (e.recover(), Cow::Borrowed(source_path))
+        }
+    }
 }
 
 // Per-part smoke tests. Each runs ONE forward pass with zero-valued
