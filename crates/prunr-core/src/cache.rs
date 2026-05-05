@@ -110,31 +110,23 @@ pub fn cache_populated_for(id: ModelId, ep_name: &str) -> bool {
 /// older prunr install or model bump left it behind. Best-effort —
 /// any I/O error logs and falls back to leaving entries alone.
 ///
-/// Disambiguation: the registry's other model `stable_name`s are
-/// excluded by prefix-match before deletion, so two models whose names
-/// share a textual prefix (`lama` vs hypothetical `lama_xl`) never
-/// nuke each other's caches.
-///
-/// Concurrent processes are safe: each computes the same current key
-/// and leaves it alone; deletion of stale siblings is idempotent (the
-/// loser of a `remove_dir_all` race sees `NotFound`, logged + ignored).
+/// Same-version processes race idempotently — each computes the same
+/// current key, leaves it alone, and the `remove_dir_all` loser sees
+/// `NotFound`. Cross-version processes (rare: user upgrades while a
+/// prior instance still runs) degrade benignly: the upgraded process
+/// deletes the old key before the old process opens it, so the old
+/// process gets a cache miss and rebuilds cold rather than crashing.
 pub fn gc_stale_for_model(id: ModelId, ep_name: &str) {
-    let Some(root) = cache_root() else { return };
-    let ep_dir = root.join(ep_name.to_ascii_lowercase());
-    if !ep_dir.is_dir() { return; }
-    let Some(current_name) = cache_path_for(id, ep_name)
-        .and_then(|p| p.file_name().map(|n| n.to_owned()))
-    else { return };
+    let Some(current_path) = cache_path_for(id, ep_name) else { return };
+    let Some(ep_dir) = current_path.parent().map(Path::to_path_buf) else { return };
+    let Some(current_name) = current_path.file_name().map(|n| n.to_owned()) else { return };
+    let our_prefix = format!("{}-", id.stable_name());
 
-    let stable = id.stable_name();
-    let other_prefixes: Vec<String> = ModelId::ALL.iter()
-        .filter(|&&m| m.stable_name() != stable)
-        .map(|m| format!("{}-", m.stable_name()))
-        .collect();
-    let our_prefix = format!("{}-", stable);
-
+    // `read_dir` returns `Err(NotFound)` when the directory hasn't been
+    // created yet — common before any session has populated the cache.
     let entries = match std::fs::read_dir(&ep_dir) {
         Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
         Err(e) => {
             tracing::warn!(?id, ep = %ep_name, %e, "gc: read_dir failed");
             return;
@@ -145,7 +137,8 @@ pub fn gc_stale_for_model(id: ModelId, ep_name: &str) {
         let Some(name) = path.file_name() else { continue };
         if name == current_name { continue; }
         let Some(name_str) = name.to_str() else { continue };
-        if other_prefixes.iter().any(|p| name_str.starts_with(p)) { continue; }
+        // `<stable>-` prefix is unambiguous given the registry convention
+        // that `stable_name` uses `_` internally, never `-`.
         if !name_str.starts_with(&our_prefix) { continue; }
         match std::fs::remove_dir_all(&path) {
             Ok(()) => tracing::info!(
@@ -159,6 +152,51 @@ pub fn gc_stale_for_model(id: ModelId, ep_name: &str) {
             ),
         }
     }
+}
+
+/// Wipe every compiled-model cache entry for `id` across **all** EP
+/// subdirs. Called when an OnDemand model is uninstalled via Model
+/// Store — the source weights are gone so the cached compiled
+/// artifacts can never be used again. Returns total bytes reclaimed
+/// (best-effort; based on a pre-removal walk).
+pub fn clear_for_model(id: ModelId) -> u64 {
+    let Some(root) = cache_root() else { return 0 };
+    let our_prefix = format!("{}-", id.stable_name());
+
+    let mut bytes_freed = 0u64;
+    let ep_entries = match std::fs::read_dir(&root) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return 0,
+        Err(e) => {
+            tracing::warn!(?id, %e, "clear_for_model: read_dir(root) failed");
+            return 0;
+        }
+    };
+    for ep_entry in ep_entries.flatten() {
+        let ep_dir = ep_entry.path();
+        let Ok(model_entries) = std::fs::read_dir(&ep_dir) else { continue };
+        for entry in model_entries.flatten() {
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else { continue };
+            if !name.starts_with(&our_prefix) { continue; }
+            let size = walk_dir_size(&path, 0).unwrap_or(0);
+            match std::fs::remove_dir_all(&path) {
+                Ok(()) => {
+                    bytes_freed += size;
+                    tracing::info!(
+                        ?id, dir = %path.display(), bytes = size,
+                        "cleared compiled-model cache for uninstalled model",
+                    );
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => tracing::warn!(
+                    ?id, dir = %path.display(), %e,
+                    "clear_for_model: remove_dir_all failed",
+                ),
+            }
+        }
+    }
+    bytes_freed
 }
 
 /// Wipe the entire EP cache root. Returns the number of bytes
@@ -264,28 +302,57 @@ mod tests {
 
     /// Stale-entry GC must remove sibling dirs from older versions /
     /// older `CACHE_FORMAT_VERSION`s, leave the current entry alone,
-    /// and never touch other models' caches even when their stable
-    /// names share a prefix.
+    /// and never touch other models' caches.
+    ///
+    /// Uses `LaMaFp32` (not used by other tests in this module) to avoid
+    /// races under `cargo test`'s default parallel runner — see also
+    /// `cache_populated_distinguishes_empty_from_nonempty` which owns
+    /// `Migan`.
     #[test]
     fn gc_stale_for_model_removes_siblings_only() {
-        let Some(current) = cache_dir_for(ModelId::Migan, "CPU") else { return };
+        let Some(current) = cache_dir_for(ModelId::LaMaFp32, "CPU") else { return };
         let Some(ep_root) = cache_root().map(|r| r.join("cpu")) else { return };
-        // Sibling: same stable_name, older version.
-        let stale = ep_root.join(format!("{}-0.0.1-v0", ModelId::Migan.stable_name()));
+        let stale = ep_root.join(format!("{}-0.0.1-v0", ModelId::LaMaFp32.stable_name()));
         std::fs::create_dir_all(&stale).unwrap();
         std::fs::write(stale.join("dummy"), b"x").unwrap();
-        // Other model's cache must survive.
-        let other_dir = ep_root.join(format!("{}-1.0.0-v1", ModelId::Silueta.stable_name()));
+        let other_dir = ep_root.join(format!("{}-1.0.0-v1", ModelId::DexiNed.stable_name()));
         std::fs::create_dir_all(&other_dir).unwrap();
         std::fs::write(other_dir.join("dummy"), b"x").unwrap();
 
-        gc_stale_for_model(ModelId::Migan, "CPU");
+        gc_stale_for_model(ModelId::LaMaFp32, "CPU");
 
         assert!(current.is_dir(), "current cache must be preserved");
         assert!(!stale.exists(), "stale sibling must be removed");
         assert!(other_dir.is_dir(), "other model's cache must be untouched");
         let _ = std::fs::remove_dir_all(&current);
         let _ = std::fs::remove_dir_all(&other_dir);
+    }
+
+    /// `clear_for_model` must wipe all version-keyed cache dirs for the
+    /// uninstalled model across every EP subdir, leave other models'
+    /// caches alone, and report the byte size it reclaimed.
+    ///
+    /// Uses `BigLaMa` (not used elsewhere in this module) to avoid
+    /// races with parallel test runs.
+    #[test]
+    fn clear_for_model_removes_across_all_eps() {
+        let Some(root) = cache_root() else { return };
+        let stable = ModelId::BigLaMa.stable_name();
+        let cpu_dir = root.join("cpu").join(format!("{stable}-1.0.0-v1"));
+        let openvino_dir = root.join("openvino").join(format!("{stable}-1.0.0-v1"));
+        let other = root.join("cpu").join(format!("{}-1.0.0-v1", ModelId::U2net.stable_name()));
+        for d in [&cpu_dir, &openvino_dir, &other] {
+            std::fs::create_dir_all(d).unwrap();
+            std::fs::write(d.join("dummy"), b"abc").unwrap();
+        }
+
+        let bytes = clear_for_model(ModelId::BigLaMa);
+
+        assert!(bytes >= 6, "should report bytes from both EPs (got {bytes})");
+        assert!(!cpu_dir.exists());
+        assert!(!openvino_dir.exists());
+        assert!(other.exists(), "other model's cache must be untouched");
+        let _ = std::fs::remove_dir_all(&other);
     }
 
     /// True only when the directory exists AND has at least one entry.
