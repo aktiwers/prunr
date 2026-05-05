@@ -225,35 +225,38 @@ pub(crate) fn render(
         // Inpaint mode: paint is the only input — auto-enable brush so
         // the user doesn't have to click two buttons. Settings stays
         // pinned subtract-equivalent (mode picker is hidden in the
-        // popover anyway when Inpaint is active). Also pre-warm the
-        // LaMa session in the background so the first stroke doesn't
-        // pay the 5-10s zstd-decompress + ORT-session-build cost.
+        // popover anyway when Inpaint is active). Pre-warm the LaMa /
+        // MI-GAN session in the background so the first stroke doesn't
+        // pay the 5-10 s zstd-decompress + ORT-session-build cost.
+        //
+        // SD-family models are NOT prewarmed here. They run in the
+        // dedicated `inpaint_only` subprocess via `inpaint_bridge`, so
+        // building an `SdSession` in this (GUI) process loads ~9 GB
+        // into RAM that no dispatch path will ever read — the GUI
+        // never calls `process_inpaint_with` for SD models. The
+        // observable bug: GUI process bloats to 15 GB on model
+        // switch, then the subprocess loads its own 9 GB on first
+        // stroke → ~24 GB peak → memory-pressure abort on any
+        // 16 GB box.
         if change.model_changed && app_settings.model.is_inpaint() {
             if !brush_state.is_enabled() {
                 brush_state.toggle();
             }
-            // Pre-warm the specific backend the dispatch will actually
-            // use. For SD with FAST mode active, dispatch routes through
-            // `lcm_routing_active()` to the LCM bundle — prewarming the
-            // standard SD bundle here would build TWO bundles (one
-            // standard via prewarm, one LCM via dispatch), each ~15 GB,
-            // tipping a low-RAM machine into the SD-bundle guard's
-            // refusal path.
             let raw_id = app_settings.model.to_model_id();
-            let id = match raw_id {
-                Some(prunr_models::ModelId::SdV15InpaintFp16)
-                    if app_settings.lcm_routing_active(prunr_models::ModelId::SdV15InpaintFp16) =>
-                {
-                    Some(prunr_models::ModelId::SdV15LcmInpaintFp16)
+            let in_process = matches!(
+                raw_id,
+                Some(prunr_models::ModelId::LaMaFp32)
+                    | Some(prunr_models::ModelId::BigLaMa)
+                    | Some(prunr_models::ModelId::Migan)
+            );
+            if in_process {
+                if let Some(id) = raw_id {
+                    rayon::spawn(move || {
+                        if let Err(e) = prunr_core::inpaint::prewarm(id) {
+                            tracing::warn!(?id, %e, "Inpaint prewarm failed");
+                        }
+                    });
                 }
-                other => other,
-            };
-            if let Some(id) = id {
-                rayon::spawn(move || {
-                    if let Err(e) = prunr_core::inpaint::prewarm(id) {
-                        tracing::warn!(?id, %e, "Inpaint prewarm failed");
-                    }
-                });
             }
         }
 
