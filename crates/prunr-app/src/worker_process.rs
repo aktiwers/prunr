@@ -238,9 +238,23 @@ pub fn run_worker() -> ! {
         let _ = writer_handle.join();
         std::process::exit(1);
     };
+    tracing::info!(
+        ?model, jobs, force_cpu, ?line_mode, inpaint_only,
+        "worker: Init received, beginning init sequence",
+    );
 
-    // Detect backend
+    // Detect backend. `detect_active_provider` probes
+    // `OpenVINOExecutionProvider::is_available` on Linux which has been
+    // observed to hang on some iGPU setups — bracket with tracing so a
+    // future hang is diagnosable from the worker log.
+    let probe_started = std::time::Instant::now();
+    tracing::info!("worker: probing detect_active_provider…");
     let has_gpu = !OrtEngine::detect_active_provider().eq_ignore_ascii_case("CPU");
+    tracing::info!(
+        elapsed_ms = probe_started.elapsed().as_millis() as u64,
+        has_gpu,
+        "worker: detect_active_provider returned",
+    );
     let cpu_only = force_cpu || !has_gpu;
 
     // Inpaint-only subprocess: skip seg/edge engine creation entirely.
@@ -283,6 +297,11 @@ pub fn run_worker() -> ! {
     };
 
     let active_provider = OrtEngine::detect_active_provider();
+    tracing::info!(
+        active_provider = %active_provider,
+        inpaint_only,
+        "worker: init complete, sending Ready",
+    );
     let _ = evt_tx.send(SubprocessEvent::Ready {
         active_provider: active_provider.clone(),
     });
