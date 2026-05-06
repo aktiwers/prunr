@@ -67,12 +67,15 @@ fn default_grow() -> f32 { 2.0 }
 /// pick for "match surroundings" use.
 fn default_cfg() -> f32 { 4.0 }
 
-/// Defaults for SD eraser prompts. Conservative on the positive side
-/// (let surroundings dominate; just nudge toward quality + coherence)
-/// and aggressive on the negative side (block the SD-1.5 failure modes
-/// — especially text-shape glyphs which fire on weak conditioning).
+/// Defaults for SD eraser prompts. Style-agnostic — works whether the
+/// source is a photo, drawing, anime, pixel art, render, etc. (avoiding
+/// `"photorealistic"` which would bias non-photo sources). Conservative
+/// on the positive (let surroundings dominate; reinforce eraser intent
+/// via "seamless continuation"); aggressive on the negative (block
+/// SD-1.5 failure modes, especially text-shape glyphs which fire on
+/// weak conditioning).
 fn default_sd_prompt() -> String {
-    "matching surroundings, photorealistic, high quality".to_string()
+    "seamless continuation of the surroundings, matching style, high quality".to_string()
 }
 fn default_sd_negative_prompt() -> String {
     "text, letters, words, watermark, signature, logo, blurry, distorted, \
