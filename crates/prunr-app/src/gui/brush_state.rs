@@ -37,13 +37,18 @@ pub struct BrushSettings {
     /// fills; erosion preserves more original detail at the boundary.
     #[serde(default = "default_grow")]
     pub inpaint_grow: f32,
-    /// SD-only: text prompt for the inpainted region. Empty = unconditional
-    /// (poor quality on flat surrounds — see `inpaint_sd` module docs).
-    #[serde(default)]
+    /// SD-only: text prompt for the inpainted region. Defaults to a
+    /// generic "match surroundings + quality nudge" string suited to
+    /// eraser use; user can rewrite in the brush popover. Empty =
+    /// unconditional (high-variance output, often produces text-shape
+    /// glyphs on textured regions — see `inpaint_sd` module docs).
+    #[serde(default = "default_sd_prompt")]
     pub sd_prompt: String,
-    /// SD-only: negative prompt — content to push *away* from. Useful
-    /// for suppressing the patterned-noise failure mode on uniform regions.
-    #[serde(default)]
+    /// SD-only: negative prompt — content to push *away* from.
+    /// Defaults to the standard SD-1.5 anti-failure-mode list (text,
+    /// watermark, blur, etc.) which suppresses the most common
+    /// artifacts on weakly-conditioned regions.
+    #[serde(default = "default_sd_negative_prompt")]
     pub sd_negative_prompt: String,
     /// SD-only: classifier-free guidance scale. 1.0 = no CFG (cond pass
     /// only). 7.5 is the typical SD-1.5 prompt strength. >1 doubles UNet
@@ -54,7 +59,25 @@ pub struct BrushSettings {
 
 fn default_feather() -> f32 { 4.0 }
 fn default_grow() -> f32 { 2.0 }
-fn default_cfg() -> f32 { 1.0 }
+/// 4.0: enables CFG (cond + uncond passes blended) so the default
+/// negative prompt actually does work. CFG ≤ 1.0 skips the uncond
+/// pass — half the UNet cost, but the negative prompt is unused.
+/// 7.5 is SD-1.5's documented sweet spot but the additional steering
+/// can oversaturate on subtle eraser fills; 4.0 is the conservative
+/// pick for "match surroundings" use.
+fn default_cfg() -> f32 { 4.0 }
+
+/// Defaults for SD eraser prompts. Conservative on the positive side
+/// (let surroundings dominate; just nudge toward quality + coherence)
+/// and aggressive on the negative side (block the SD-1.5 failure modes
+/// — especially text-shape glyphs which fire on weak conditioning).
+fn default_sd_prompt() -> String {
+    "matching surroundings, photorealistic, high quality".to_string()
+}
+fn default_sd_negative_prompt() -> String {
+    "text, letters, words, watermark, signature, logo, blurry, distorted, \
+     low quality, oversaturated, jpeg artifacts".to_string()
+}
 
 impl BrushSettings {
     pub fn stamp(&self) -> Stamp {
@@ -73,8 +96,8 @@ impl Default for BrushSettings {
             inpaint_sharpen: 0.6,
             inpaint_feather: default_feather(),
             inpaint_grow: default_grow(),
-            sd_prompt: String::new(),
-            sd_negative_prompt: String::new(),
+            sd_prompt: default_sd_prompt(),
+            sd_negative_prompt: default_sd_negative_prompt(),
             sd_guidance_scale: default_cfg(),
         }
     }
