@@ -586,7 +586,12 @@ fn run_one_tile(
         p.set_total((total_steps - t_start) as u32);
     }
 
-    let mut latent = if t_start == 0 {
+    // Hold denoising state as Vec<f32> + captured dim. f16 conversion
+    // uses ArrayView4::from_shape (zero-copy on the f32 side); the
+    // scheduler writes via step_array_into into a reused scratch buffer.
+    let latent_dim = (1_usize, 4_usize,
+        SD_LATENT_SIDE as usize, SD_LATENT_SIDE as usize);
+    let mut latent_buf: Vec<f32> = if t_start == 0 {
         let mut l = sample_initial_noise(&mut rng);
         // σ-space schedulers (Euler-A) lift the initial sample onto
         // their σ_max scale; α-space schedulers leave unit variance.
@@ -594,21 +599,19 @@ fn run_one_tile(
         if (init_scale - 1.0).abs() > INIT_NOISE_SIGMA_IDENTITY_EPS {
             l.mapv_inplace(|v| v * init_scale);
         }
-        l
+        l.into_raw_vec_and_offset().0
     } else {
         // Strength < 1: VAE-encode the full source pixels (no mask
         // gate), then have the scheduler mix in noise at sigmas[t_start].
         let image_latents = vae_encode_from_input(vae, image_to_minus1_plus1(&padded_image))?;
-        let dim = image_latents.dim();
         let n = image_latents.len();
         let dist = StandardNormal;
         let noise: Vec<f32> = (0..n).map(|_| dist.sample(&mut rng)).collect();
-        let mixed = scheduler.add_noise(
+        scheduler.add_noise(
             image_latents.as_slice().expect("image latent: standard layout"),
             &noise,
             t_start,
-        );
-        Array4::from_shape_vec(dim, mixed).expect("shape unchanged")
+        )
     };
 
     // Denoising loop. With CFG: noise_pred = uncond + scale * (cond - uncond).
@@ -620,6 +623,9 @@ fn run_one_tile(
     });
     let needs_precondition = scheduler.requires_preconditioning();
     let mut precond_buf: Vec<f32> = Vec::new();
+    // Scratch buffer for step output — hoisted outside the loop so
+    // mem::swap reuses the allocation across steps (no per-step alloc).
+    let mut step_out_buf: Vec<f32> = Vec::with_capacity(latent_buf.len());
     // Skip the first `t_start` entries when strength<1: those are
     // the high-noise steps we're bypassing.
     for (i, &t) in timesteps.iter().enumerate().skip(t_start) {
@@ -635,19 +641,16 @@ fn run_one_tile(
             p.set_step(((i - t_start) as u32) + 1);
         }
         let latent_f16 = if needs_precondition {
-            // mapv/to_owned outputs always have standard layout.
-            scheduler.scale_model_input_into(
-                latent.as_slice().expect("latent: standard layout"),
-                i,
-                &mut precond_buf,
-            );
-            // Build a transient view onto precond_buf (no clone) and
-            // hand it to f32_to_f16_4d. The view drops at end-of-line.
-            let view = ndarray::ArrayView4::from_shape(latent.dim(), &precond_buf)
-                .expect("shape unchanged from latent.dim()");
+            scheduler.scale_model_input_into(&latent_buf, i, &mut precond_buf);
+            // Zero-copy view of precond_buf — only the Array4<f16> output stays.
+            let view = ndarray::ArrayView4::from_shape(latent_dim, &precond_buf)
+                .expect("latent_dim matches latent_buf length by construction");
             f32_to_f16_view(view)
         } else {
-            f32_to_f16_4d(&latent)
+            // Zero-copy view of latent_buf — only the Array4<f16> output stays.
+            let view = ndarray::ArrayView4::from_shape(latent_dim, &latent_buf)
+                .expect("latent_dim matches latent_buf length by construction");
+            f32_to_f16_view(view)
         };
         let latent_in_f16 = concat_inpaint_input_f16(
             &latent_f16, &mask_latent_f16, &masked_latent_f16,
@@ -689,13 +692,21 @@ fn run_one_tile(
         };
         let t_prev = timesteps.get(i + 1).copied().unwrap_or(-1);
         let is_final = i + 1 == timesteps.len();
-        latent = step_array(
-            &mut scheduler, &latent, &noise_pred, i, t, t_prev, is_final,
-            &mut rng,
+        let np_slice = noise_pred.as_slice().expect("noise_pred: standard layout");
+        step_array_into(
+            &mut scheduler, &latent_buf, np_slice, i, t, t_prev, is_final,
+            &mut rng, &mut step_out_buf,
         );
+        // step_out_buf now holds the new denoised state; swap so
+        // latent_buf becomes current and step_out_buf is the stale
+        // scratch (overwritten next iteration).
+        std::mem::swap(&mut latent_buf, &mut step_out_buf);
     }
 
-    let painted = vae_decode(vae, &latent)?;
+    // VAE decode — wrap final buf into Array4 (no extra allocation).
+    let final_array = ndarray::Array4::from_shape_vec(latent_dim, latent_buf)
+        .expect("latent_dim matches latent_buf length by construction");
+    let painted = vae_decode(vae, &final_array)?;
     Ok(composite(image, &painted, mask, w, h))
 }
 
@@ -1715,54 +1726,54 @@ fn cfg_blend(
     Array4::from_shape_vec(uncond.dim(), buf).expect("dim matches by construction")
 }
 
-/// Apply DDIM step element-wise to flat-Vec representations of the
-/// 4D arrays. Avoids one round-trip through Vec<f32> + reshape.
+/// Scheduler step dispatched from `run_one_tile`. Writes the new latent
+/// state into `out` (clear + extend on the EulerA arm; assign-from-Vec on
+/// the others — net-zero on those arms but consistent shape for the caller).
 // `step_idx` is only meaningful to the DPM++ multistep arm, but the
 // dispatch is shared. Threading it through a `StepCtx` struct would
 // force the DDIM/LCM arms to carry a field they never read.
 #[allow(clippy::too_many_arguments)]
-fn step_array(
+fn step_array_into(
     scheduler: &mut Scheduler,
-    latent_t: &Array4<f32>,
-    noise_pred: &Array4<f32>,
+    latent: &[f32],
+    noise_pred: &[f32],
     step_idx: usize,
     t: i64,
     t_prev: i64,
     is_final_step: bool,
     rng: &mut ChaCha8Rng,
-) -> Array4<f32> {
-    // extract_4d returns Array4 via mapv/to_owned, which always produces
-    // standard C layout; as_slice() is infallible on those.
-    let lat = latent_t.as_slice().expect("latent: standard layout");
-    let eps = noise_pred.as_slice().expect("noise pred: standard layout");
-    let next = match scheduler {
-        Scheduler::Ddim(s) => s.step(lat, eps, t, t_prev),
+    out: &mut Vec<f32>,
+) {
+    match scheduler {
+        Scheduler::Ddim(s) => {
+            *out = s.step(latent, noise_pred, t, t_prev);
+        }
         Scheduler::Lcm(s) => {
             if is_final_step {
-                s.step(lat, eps, t, true, &[])
+                *out = s.step(latent, noise_pred, t, true, &[]);
             } else {
                 // LCM mixes Gaussian noise back in on every non-final
                 // step. Sample from the same seeded RNG that drove the
                 // initial latent so the whole denoise stays
                 // reproducible from `seed`.
                 let dist = StandardNormal;
-                let noise: Vec<f32> = (0..lat.len()).map(|_| dist.sample(rng)).collect();
-                s.step_at(lat, eps, t, t_prev, &noise)
+                let noise: Vec<f32> = (0..latent.len()).map(|_| dist.sample(rng)).collect();
+                *out = s.step_at(latent, noise_pred, t, t_prev, &noise);
             }
         }
-        Scheduler::DpmPp2M(s) => s.step(lat, eps, step_idx),
+        Scheduler::DpmPp2M(s) => {
+            *out = s.step(latent, noise_pred, step_idx);
+        }
         Scheduler::EulerA(s) => {
             // Ancestral noise sampled per step from the same seeded
             // RNG so the whole denoise stays reproducible from
             // `seed`. Final step has σ_to=0 → sigma_up=0, so the
             // noise contribution vanishes regardless of value.
             let dist = StandardNormal;
-            let noise: Vec<f32> = (0..lat.len()).map(|_| dist.sample(rng)).collect();
-            s.step(lat, eps, step_idx, &noise)
+            let noise: Vec<f32> = (0..latent.len()).map(|_| dist.sample(rng)).collect();
+            s.step_into(latent, noise_pred, step_idx, &noise, out);
         }
-    };
-    Array4::from_shape_vec(latent_t.dim(), next)
-        .expect("shape unchanged from input")
+    }
 }
 
 /// If the cropped input is smaller than SD_TILE on either axis (image
@@ -2358,17 +2369,17 @@ impl EulerAScheduler {
         out.extend(latent.iter().map(|&v| v * scale));
     }
 
-    /// Euler-Ancestral update at inference step `step_idx`.
-    /// `noise` is a fresh standard-normal sample of the same shape
-    /// as `latent`. On the terminal step (sigma_to=0), `sigma_up=0`
-    /// and the noise term vanishes regardless of value.
-    pub fn step(
+    /// Euler-Ancestral update at inference step `step_idx`, writing the
+    /// new latent into a caller-owned `out` (clear + extend — no per-step
+    /// allocation when `out` already has the right capacity).
+    pub fn step_into(
         &self,
         latent: &[f32],
         noise_pred: &[f32],
         step_idx: usize,
         noise: &[f32],
-    ) -> Vec<f32> {
+        out: &mut Vec<f32>,
+    ) {
         debug_assert_eq!(latent.len(), noise_pred.len(),
             "Euler-A step: latent and noise_pred shapes must match");
         debug_assert_eq!(latent.len(), noise.len(),
@@ -2394,11 +2405,25 @@ impl EulerAScheduler {
         // For epsilon prediction: derivative = (sample - pred_x0) / σ = ε.
         // Step: prev = sample + ε · (σ_down - σ) + noise · σ_up.
         let dt = sigma_down - sigma;
-        latent.iter()
-            .zip(noise_pred.iter())
-            .zip(noise.iter())
-            .map(|((&l, &eps), &n)| l + eps * dt + n * sigma_up)
-            .collect()
+        out.clear();
+        out.extend(
+            latent.iter().zip(noise_pred.iter()).zip(noise.iter())
+                .map(|((&l, &eps), &n)| l + eps * dt + n * sigma_up),
+        );
+    }
+
+    /// Thin wrapper around `step_into` for backwards compatibility with
+    /// existing tests and any future callers that don't own a scratch buffer.
+    pub fn step(
+        &self,
+        latent: &[f32],
+        noise_pred: &[f32],
+        step_idx: usize,
+        noise: &[f32],
+    ) -> Vec<f32> {
+        let mut out = Vec::with_capacity(latent.len());
+        self.step_into(latent, noise_pred, step_idx, noise, &mut out);
+        out
     }
 }
 
