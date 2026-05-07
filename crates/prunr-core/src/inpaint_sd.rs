@@ -554,8 +554,8 @@ fn run_one_tile(
         SchedulerKind::Lcm => Scheduler::Lcm(LcmScheduler::new_sd15(steps, req.use_karras_sigmas)),
         SchedulerKind::Ddim => Scheduler::Ddim(DdimScheduler::new_sd15(steps)),
         SchedulerKind::DpmPp2MKarras => Scheduler::DpmPp2M(DpmPp2MScheduler::new_sd15(steps)),
-        SchedulerKind::EulerA => Scheduler::EulerA(EulerAScheduler::new_sd15(steps)),
-        SchedulerKind::UniPc => Scheduler::UniPc(UniPcScheduler::new_sd15(steps)),
+        SchedulerKind::EulerA => Scheduler::EulerA(EulerAScheduler::new_sd15(steps, req.use_karras_sigmas)),
+        SchedulerKind::UniPc => Scheduler::UniPc(UniPcScheduler::new_sd15(steps, req.use_karras_sigmas)),
     };
     let seed = req.seed.unwrap_or_else(|| {
         std::time::SystemTime::now()
@@ -2341,11 +2341,23 @@ pub struct EulerAScheduler {
 }
 
 impl EulerAScheduler {
-    pub fn new_sd15(num_inference: usize) -> Self {
+    pub fn new_sd15(num_inference: usize, use_karras: bool) -> Self {
         let log_sigmas = compute_log_sigmas_sd15();
         let sigma_min = log_sigmas[0].exp();
         let sigma_max = log_sigmas[log_sigmas.len() - 1].exp();
-        let mut sigmas = compute_karras_sigmas(num_inference, sigma_min, sigma_max);
+        let mut sigmas: Vec<f32> = if use_karras {
+            compute_karras_sigmas(num_inference, sigma_min, sigma_max)
+        } else {
+            // Linear DDIM-style: uniform timestep spacing in train-index space,
+            // each train timestep mapped to its EDM sigma via √((1-α̅)/α̅).
+            let alphas = compute_alphas_cumprod_sd15();
+            let step_ratio = SD15_NUM_TRAIN_TIMESTEPS / num_inference;
+            (0..num_inference).rev().map(|i| {
+                let t = (i * step_ratio + 1).min(SD15_NUM_TRAIN_TIMESTEPS - 1);
+                let alpha_bar = alphas[t];
+                ((1.0 - alpha_bar) / alpha_bar).sqrt()
+            }).collect()
+        };
         // Euler-A terminates at 0 — sigma_up² = σ_to²·(σ²-σ_to²)/σ²
         // vanishes when σ_to=0, giving a deterministic final step
         // and zero residual noise. Different terminal convention
@@ -2354,7 +2366,7 @@ impl EulerAScheduler {
         sigmas.push(0.0);
 
         let timesteps: Vec<i64> = sigmas[..num_inference].iter()
-            .map(|&sigma| sigma_to_t(sigma, &log_sigmas))
+            .map(|&sigma| sigma_to_t(sigma, log_sigmas))
             .collect();
 
         Self {
@@ -2479,11 +2491,23 @@ pub struct UniPcScheduler {
 const CRAMER_DET_FLOOR: f32 = 1e-6;
 
 impl UniPcScheduler {
-    pub fn new_sd15(num_inference: usize) -> Self {
+    pub fn new_sd15(num_inference: usize, use_karras: bool) -> Self {
         let log_sigmas = compute_log_sigmas_sd15();
         let sigma_min = log_sigmas[0].exp();
         let sigma_max = log_sigmas[log_sigmas.len() - 1].exp();
-        let mut sigmas = compute_karras_sigmas(num_inference, sigma_min, sigma_max);
+        let mut sigmas: Vec<f32> = if use_karras {
+            compute_karras_sigmas(num_inference, sigma_min, sigma_max)
+        } else {
+            // Linear DDIM-style: uniform timestep spacing in train-index space,
+            // each train timestep mapped to its EDM sigma via √((1-α̅)/α̅).
+            let alphas = compute_alphas_cumprod_sd15();
+            let step_ratio = SD15_NUM_TRAIN_TIMESTEPS / num_inference;
+            (0..num_inference).rev().map(|i| {
+                let t = (i * step_ratio + 1).min(SD15_NUM_TRAIN_TIMESTEPS - 1);
+                let alpha_bar = alphas[t];
+                ((1.0 - alpha_bar) / alpha_bar).sqrt()
+            }).collect()
+        };
         // Terminal 0: lower_order_final reduces the last predictor to
         // order=1, which doesn't have the lambda=+∞ NaN issue, so 0
         // is safe here (unlike DPM++ which needs sigma_min).
@@ -3161,7 +3185,7 @@ mod tests {
     /// the scheduler's max sigma scale, not at unit variance.
     #[test]
     fn eulera_init_noise_sigma_matches_leading_convention() {
-        let s = EulerAScheduler::new_sd15(25);
+        let s = EulerAScheduler::new_sd15(25, true);
         let sigma_max = s.sigmas[0];
         let expected = (sigma_max * sigma_max + 1.0).sqrt();
         assert!((s.init_noise_sigma() - expected).abs() < 1e-5,
@@ -3172,7 +3196,7 @@ mod tests {
     /// √(σ²+1) so the α-space UNet sees the right scale.
     #[test]
     fn eulera_scale_model_input_divides_by_sqrt_sigma_squared_plus_one() {
-        let s = EulerAScheduler::new_sd15(8);
+        let s = EulerAScheduler::new_sd15(8, true);
         let latent = vec![1.0_f32; 4];
         let mut out = Vec::new();
         s.scale_model_input_into(&latent, 0, &mut out);
@@ -3189,7 +3213,7 @@ mod tests {
     /// to `latent + eps · (-σ)` regardless of the noise vector.
     #[test]
     fn eulera_terminal_step_zeroes_ancestral_noise() {
-        let s = EulerAScheduler::new_sd15(8);
+        let s = EulerAScheduler::new_sd15(8, true);
         let latent = vec![0.5_f32; 4];
         let eps = vec![0.1_f32; 4];
         // Non-zero noise that should be erased by sigma_up=0.
@@ -3210,7 +3234,7 @@ mod tests {
     /// last timestep near zero (sigma_to=0 by construction).
     #[test]
     fn eulera_timesteps_descend_and_terminate_near_zero() {
-        let s = EulerAScheduler::new_sd15(25);
+        let s = EulerAScheduler::new_sd15(25, true);
         let t = s.timesteps();
         assert_eq!(t.len(), 25);
         for w in t.windows(2) {
@@ -3249,8 +3273,8 @@ mod tests {
     /// No square-root mixing — the σ-scale is applied to noise directly.
     #[test]
     fn eulera_add_noise_is_sample_plus_sigma_times_noise() {
-        let euler = EulerAScheduler::new_sd15(8);
-        let s = Scheduler::EulerA(EulerAScheduler::new_sd15(8));
+        let euler = EulerAScheduler::new_sd15(8, true);
+        let s = Scheduler::EulerA(EulerAScheduler::new_sd15(8, true));
         let clean = vec![0.5_f32; 4];
         let noise = vec![1.0_f32; 4];
         let step_idx = 3;
@@ -3730,6 +3754,54 @@ mod tests {
             "Karras and linear LCM schedules should produce different timesteps");
     }
 
+    /// Euler-A `use_karras=false` must produce a different, strictly-descending
+    /// timestep schedule from `use_karras=true`. Both schedules must have the
+    /// same length and terminate correctly.
+    #[test]
+    fn eulera_karras_off_uses_linear_schedule() {
+        let karras = EulerAScheduler::new_sd15(8, true);
+        let linear = EulerAScheduler::new_sd15(8, false);
+        let kar_t = karras.timesteps();
+        let lin_t = linear.timesteps();
+        assert_eq!(kar_t.len(), 8);
+        assert_eq!(lin_t.len(), 8);
+        for w in kar_t.windows(2) {
+            assert!(w[0] > w[1], "karras timesteps must descend: {:?}", kar_t);
+        }
+        for w in lin_t.windows(2) {
+            assert!(w[0] > w[1], "linear timesteps must descend: {:?}", lin_t);
+        }
+        assert_ne!(kar_t, lin_t,
+            "Karras and linear Euler-A schedules should produce different timesteps");
+        // Terminal sigma must still be 0 in both modes.
+        assert_eq!(karras.sigmas[8], 0.0, "Karras terminal sigma must be 0");
+        assert_eq!(linear.sigmas[8], 0.0, "linear terminal sigma must be 0");
+    }
+
+    /// UniPC `use_karras=false` must produce a different, strictly-descending
+    /// timestep schedule from `use_karras=true`. Both schedules must have the
+    /// same length and terminate correctly.
+    #[test]
+    fn unipc_karras_off_uses_linear_schedule() {
+        let karras = UniPcScheduler::new_sd15(8, true);
+        let linear = UniPcScheduler::new_sd15(8, false);
+        let kar_t = karras.timesteps();
+        let lin_t = linear.timesteps();
+        assert_eq!(kar_t.len(), 8);
+        assert_eq!(lin_t.len(), 8);
+        for w in kar_t.windows(2) {
+            assert!(w[0] > w[1], "karras timesteps must descend: {:?}", kar_t);
+        }
+        for w in lin_t.windows(2) {
+            assert!(w[0] > w[1], "linear timesteps must descend: {:?}", lin_t);
+        }
+        assert_ne!(kar_t, lin_t,
+            "Karras and linear UniPC schedules should produce different timesteps");
+        // Terminal sigma must still be 0 in both modes.
+        assert_eq!(karras.sigmas[8], 0.0, "Karras terminal sigma must be 0");
+        assert_eq!(linear.sigmas[8], 0.0, "linear terminal sigma must be 0");
+    }
+
     // ── UniPC tests ─────────────────────────────────────────────────────────
 
     /// At step 0, no history is available, so UniPC falls back to
@@ -3737,7 +3809,7 @@ mod tests {
     /// output manually and compare with the scheduler's output.
     #[test]
     fn unipc_order_1_step_zero_matches_first_order_predictor() {
-        let mut s = UniPcScheduler::new_sd15(8);
+        let mut s = UniPcScheduler::new_sd15(8, true);
         let dim = 4_usize;
         let sample: Vec<f32> = vec![0.5_f32; dim];
         let eps:    Vec<f32> = vec![0.1_f32; dim];
@@ -3780,7 +3852,7 @@ mod tests {
         let samp = vec![0.5_f32; dim];
 
         // Run N-1 steps to get to the state just before the terminal step.
-        let mut s = UniPcScheduler::new_sd15(n);
+        let mut s = UniPcScheduler::new_sd15(n, true);
         let mut state = samp.clone();
         for _ in 0..(n - 1) {
             state = s.step(&eps, &state);
@@ -3891,7 +3963,7 @@ mod tests {
     fn unipc_cramer_guard_prevents_nan_on_collapsed_lambda_spacing() {
         // A 4-step schedule with close sigmas at the start so that by step 2
         // the corrector sees near-degenerate rk values.
-        let mut s = UniPcScheduler::new_sd15(4);
+        let mut s = UniPcScheduler::new_sd15(4, true);
         let dim = 8_usize;
         let eps    = vec![0.1_f32; dim];
         let sample = vec![0.5_f32; dim];
@@ -3914,7 +3986,7 @@ mod tests {
     /// model_outputs[1] = m_2 (most recent), model_outputs[0] = m_1.
     #[test]
     fn unipc_ring_state_after_three_steps() {
-        let mut s = UniPcScheduler::new_sd15(8);
+        let mut s = UniPcScheduler::new_sd15(8, true);
         let sample: Vec<f32> = vec![0.5_f32; 4];
         let eps:    Vec<f32> = vec![0.1_f32; 4];
 
@@ -3954,7 +4026,7 @@ mod tests {
     /// Running UniPC to the terminal step must produce all-finite values.
     #[test]
     fn unipc_terminal_step_produces_finite_output() {
-        let mut s = UniPcScheduler::new_sd15(8);
+        let mut s = UniPcScheduler::new_sd15(8, true);
         let mut sample = vec![0.5_f32; 4];
         let eps = vec![0.1_f32; 4];
         for _ in 0..8 {
@@ -3967,7 +4039,7 @@ mod tests {
     /// Karras schedule must be strictly descending and terminate at 0.
     #[test]
     fn unipc_karras_sigmas_descend_and_terminate_at_zero() {
-        let s = UniPcScheduler::new_sd15(20);
+        let s = UniPcScheduler::new_sd15(20, true);
         assert_eq!(s.sigmas.len(), 21, "sigmas len must be num_inference + 1");
         for w in s.sigmas.windows(2) {
             assert!(w[0] >= w[1],
@@ -3988,7 +4060,7 @@ mod tests {
 
         let n = 8_usize;
         let dim = 16_usize;
-        let mut sched = Scheduler::UniPc(UniPcScheduler::new_sd15(n));
+        let mut sched = Scheduler::UniPc(UniPcScheduler::new_sd15(n, true));
         let latent:    Vec<f32> = (0..dim).map(|i| 0.1 * i as f32).collect();
         let noise_pred:Vec<f32> = (0..dim).map(|i| 0.05 * i as f32).collect();
         let mut out = Vec::new();
