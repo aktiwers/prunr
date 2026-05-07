@@ -123,6 +123,16 @@ pub(crate) struct InpaintTuning {
     pub sd_prompt: String,
     pub sd_negative_prompt: String,
     pub sd_guidance_scale: f32,
+    /// SD-only: scheduler kind. Falls back to `Lcm` at dispatch when
+    /// the user-selected scheduler isn't yet wired to a backend
+    /// (defensive — UI also gates picking via `is_available()`).
+    pub sd_scheduler: super::brush_state::SdScheduler,
+    /// SD-only: number of denoise steps.
+    pub sd_steps: u32,
+    /// SD-only: pinned RNG seed for reproducibility. `None` = random.
+    pub sd_seed: Option<u64>,
+    // `sd_use_karras_sigmas` not yet plumbed — Phase 27.2 wiring will
+    // gate Karras through the scheduler dispatch, not on this struct.
 }
 
 impl Default for InpaintTuning {
@@ -135,6 +145,9 @@ impl Default for InpaintTuning {
             sd_prompt: String::new(),
             sd_negative_prompt: String::new(),
             sd_guidance_scale: 1.0,
+            sd_scheduler: super::brush_state::SdScheduler::Lcm,
+            sd_steps: 8,
+            sd_seed: None,
         }
     }
 }
@@ -388,24 +401,39 @@ impl Processor {
                 raw_mask
             };
             let sd_req = match tuning.backend {
-                prunr_models::ModelId::SdV15InpaintFp16 => Some(prunr_core::inpaint_sd::SdInpaintRequest {
-                    prompt: tuning.sd_prompt.clone(),
-                    negative_prompt: tuning.sd_negative_prompt.clone(),
-                    num_inference_steps: 20,
-                    guidance_scale: tuning.sd_guidance_scale,
-                    seed: None,
-                    use_taesd: false,
-                    use_lcm_scheduler: false,
-                }),
-                prunr_models::ModelId::SdV15LcmInpaintFp16 => Some(prunr_core::inpaint_sd::SdInpaintRequest {
-                    prompt: tuning.sd_prompt.clone(),
-                    negative_prompt: String::new(),
-                    num_inference_steps: 8,
-                    guidance_scale: 1.0,
-                    seed: None,
-                    use_taesd: prunr_models::is_available(prunr_models::ModelId::TaesdFp16),
-                    use_lcm_scheduler: true,
-                }),
+                prunr_models::ModelId::SdV15InpaintFp16
+                | prunr_models::ModelId::SdV15LcmInpaintFp16 => {
+                    use super::brush_state::SdScheduler;
+                    // Defensive: if the user-selected scheduler isn't yet
+                    // wired to a dispatch backend, fall back to LCM.
+                    // UI also gates picking via `is_available()`, so this
+                    // is belt-and-braces against future drift.
+                    let scheduler = if tuning.sd_scheduler.is_available() {
+                        tuning.sd_scheduler
+                    } else {
+                        SdScheduler::Lcm
+                    };
+                    let use_lcm_scheduler = matches!(scheduler, SdScheduler::Lcm);
+                    // LCM weights are calibrated for low CFG (≤2.0); the
+                    // LCM model card recommends staying in 1.0–2.0. Cap
+                    // here so a slider that's range-clamped at 8 doesn't
+                    // ship 7.5 to LCM and degrade output.
+                    let cfg = if use_lcm_scheduler {
+                        tuning.sd_guidance_scale.clamp(1.0, 2.0)
+                    } else {
+                        tuning.sd_guidance_scale
+                    };
+                    Some(prunr_core::inpaint_sd::SdInpaintRequest {
+                        prompt: tuning.sd_prompt.clone(),
+                        negative_prompt: tuning.sd_negative_prompt.clone(),
+                        num_inference_steps: tuning.sd_steps,
+                        guidance_scale: cfg,
+                        seed: tuning.sd_seed,
+                        use_taesd: use_lcm_scheduler
+                            && prunr_models::is_available(prunr_models::ModelId::TaesdFp16),
+                        use_lcm_scheduler,
+                    })
+                }
                 _ => None,
             };
             let dir = crate::subprocess::protocol::ipc_temp_dir();
