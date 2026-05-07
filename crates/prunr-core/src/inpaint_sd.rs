@@ -2211,10 +2211,13 @@ impl DpmPp2MScheduler {
         let sigma_min = log_sigmas[0].exp();
         let sigma_max = log_sigmas[log_sigmas.len() - 1].exp();
         let mut sigmas = compute_karras_sigmas(num_inference, sigma_min, sigma_max);
-        // Terminal sigma = sigma_min, NOT zero. Pushing 0 here makes
-        // sigma_t = 0 at the last step, which sends lambda_t = ln(1) -
-        // ln(0) = +∞ through the multistep update and blows d1 up to
-        // ±∞ / NaN. Mirrors Diffusers' `sigma_last = sigma_min`.
+        // Terminal sigma = sigma_min. Diffusers' default is 0 with a
+        // `lower_order_final` guard that suppresses the second-order D1
+        // term at the terminal step (which would otherwise propagate
+        // lambda_t = +∞ → d1 = NaN). We force first-order at terminal
+        // AND use sigma_min as belt-and-braces — either guard alone is
+        // sufficient, but both keeps the math finite under any future
+        // refactor of the step dispatch.
         sigmas.push(sigma_min);
 
         // Convert each non-terminal sigma to a timestep for UNet input.
@@ -2261,22 +2264,34 @@ impl DpmPp2MScheduler {
         let coef = alpha_t * ((-h).exp() - 1.0);
         let ratio = sigma_t_e / sigma_s0_e;
 
-        let next: Vec<f32> = if let Some(m1) = self.prev_model_output.as_ref() {
-            let sigma_s1 = self.sigmas[step_idx - 1];
-            let (alpha_s1, sigma_s1_e) = sigma_to_alpha_sigma(sigma_s1);
-            let lambda_s1 = alpha_s1.ln() - sigma_s1_e.ln();
-            let r0 = (lambda_s0 - lambda_s1) / h;
-            let inv_r0 = 1.0 / r0;
+        // Second-order only when NOT at the terminal step.
+        // Diffusers' `lower_order_final=True` (default) forces first-order on
+        // the last step because the per-step sigma drop is largest there and
+        // the D1 correction can overshoot. We mirror that guard here.
+        let next: Vec<f32> = if step_idx + 1 < self.num_inference {
+            if let Some(m1) = self.prev_model_output.as_ref() {
+                let sigma_s1 = self.sigmas[step_idx - 1];
+                let (alpha_s1, sigma_s1_e) = sigma_to_alpha_sigma(sigma_s1);
+                let lambda_s1 = alpha_s1.ln() - sigma_s1_e.ln();
+                let r0 = (lambda_s0 - lambda_s1) / h;
+                let inv_r0 = 1.0 / r0;
 
-            latent.iter()
-                .zip(m0.iter())
-                .zip(m1.iter())
-                .map(|((&l, &md0), &md1)| {
-                    let d1 = inv_r0 * (md0 - md1);
-                    ratio * l - coef * md0 - 0.5 * coef * d1
-                })
-                .collect()
+                latent.iter()
+                    .zip(m0.iter())
+                    .zip(m1.iter())
+                    .map(|((&l, &md0), &md1)| {
+                        let d1 = inv_r0 * (md0 - md1);
+                        ratio * l - coef * md0 - 0.5 * coef * d1
+                    })
+                    .collect()
+            } else {
+                latent.iter()
+                    .zip(m0.iter())
+                    .map(|(&l, &md0)| ratio * l - coef * md0)
+                    .collect()
+            }
         } else {
+            // Terminal step: first-order regardless of prev_model_output.
             latent.iter()
                 .zip(m0.iter())
                 .map(|(&l, &md0)| ratio * l - coef * md0)
@@ -2726,12 +2741,37 @@ mod tests {
         let mut s = DpmPp2MScheduler::new_sd15(8);
         let latent = vec![0.5_f32; 4];
         let noise = vec![0.1_f32; 4];
-        // Prime second-order branch so the multistep d1 path runs at
-        // the terminal step (first-order skips d1).
+        // Prime prev_model_output, then verify the terminal step is finite.
+        // The lower_order_final guard ensures first-order runs at terminal;
+        // sigma_min (not 0) is belt-and-braces so both guards are in place.
         let _ = s.step(&latent, &noise, 6);
         let next = s.step(&latent, &noise, 7);
         assert!(next.iter().all(|v| v.is_finite()),
             "terminal step produced non-finite values: {next:?}");
+    }
+
+    /// Terminal step must take the first-order path even when
+    /// `prev_model_output` is populated (lower_order_final guard).
+    /// Verified by comparing against a scheduler whose prev is None —
+    /// both must produce identical output.
+    #[test]
+    fn dpmpp2m_terminal_step_uses_first_order_branch() {
+        let latent = vec![0.5_f32; 4];
+        let noise = vec![0.1_f32; 4];
+
+        // Primed scheduler: populate prev_model_output at step 6, then
+        // call terminal step 7. The guard must suppress the D1 correction.
+        let mut primed = DpmPp2MScheduler::new_sd15(8);
+        let _ = primed.step(&latent, &noise, 6);
+        let primed_terminal = primed.step(&latent, &noise, 7);
+
+        // Fresh scheduler: prev_model_output is None, so the first-order
+        // branch runs unconditionally at step 7.
+        let mut fresh = DpmPp2MScheduler::new_sd15(8);
+        let fresh_terminal = fresh.step(&latent, &noise, 7);
+
+        assert_eq!(primed_terminal, fresh_terminal,
+            "terminal step must be first-order regardless of prev_model_output");
     }
 
     /// First DPM++ step must use first-order math (no prev output)
