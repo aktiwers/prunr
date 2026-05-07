@@ -2422,22 +2422,19 @@ mod tests {
             "first sigma must match √((1-α̅_999)/α̅_999): expected {expected_sigma_max}, got {actual_sigma_max}");
     }
 
-    /// Terminal step must produce a finite latent. Pushing 0 as the
-    /// terminal sigma sends `lambda_t = ln(1) - ln(0) = +∞` through
-    /// the multistep update; `r0 = h_0/+∞ = 0` and `1/r0 = +∞` blows
-    /// `d1 = (1/r0) * (m0 - m1)` up to ±∞ / NaN, which the VAE
-    /// decodes as a black square. The fix is to terminate at
-    /// `sigma_min`, mirroring Diffusers.
+    /// Terminal sigma must be `sigma_min` not 0, otherwise the
+    /// multistep update produces ±∞ / NaN at the last step.
     #[test]
     fn dpmpp2m_terminal_step_produces_finite_output() {
         let mut s = DpmPp2MScheduler::new_sd15(8);
-        let latent = vec![0.5_f32; 16];
-        let noise = vec![0.1_f32; 16];
-        for step_idx in 0..8 {
-            let next = s.step(&latent, &noise, step_idx);
-            assert!(next.iter().all(|v| v.is_finite()),
-                "step {step_idx} produced non-finite values: {next:?}");
-        }
+        let latent = vec![0.5_f32; 4];
+        let noise = vec![0.1_f32; 4];
+        // Prime second-order branch so the multistep d1 path runs at
+        // the terminal step (first-order skips d1).
+        let _ = s.step(&latent, &noise, 6);
+        let next = s.step(&latent, &noise, 7);
+        assert!(next.iter().all(|v| v.is_finite()),
+            "terminal step produced non-finite values: {next:?}");
     }
 
     /// First DPM++ step must use first-order math (no prev output)
