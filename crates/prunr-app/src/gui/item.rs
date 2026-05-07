@@ -9,11 +9,43 @@ use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+/// Unified cap for the action-ordering layer (`actions_undo` / `actions_redo`),
+/// the stroke stacks, and the preset stacks. Each ordering-layer entry is a
+/// 1-byte enum tag; stroke entries are `Option<Arc<MaskCorrection>>` (one
+/// refcount bump); preset entries are ~100-byte `PresetSnapshot` structs.
+/// 100 is generous enough for any realistic session while bounding worst-case
+/// memory to negligible amounts.
+pub(crate) const ACTION_HIST_DEPTH: usize = 100;
+
+/// Tag identifying which per-type stack holds the pre-state for one commit in
+/// the ordering layer. `handle_undo` pops from `actions_undo` and dispatches
+/// to the matching stack's pop method; `handle_redo` mirrors via `actions_redo`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ActionType {
+    Stroke,
+    ClearStrokes,
+    Result,
+    PresetApply,
+}
+
+/// Push a marker onto `actions_undo` (bounded at `ACTION_HIST_DEPTH`) and
+/// clear `actions_redo` — any new edit branches the redo timeline.
+pub(crate) fn push_action_marker(
+    actions_undo: &mut VecDeque<ActionType>,
+    actions_redo: &mut VecDeque<ActionType>,
+    kind: ActionType,
+) {
+    actions_undo.push_back(kind);
+    while actions_undo.len() > ACTION_HIST_DEPTH {
+        actions_undo.pop_front();
+    }
+    actions_redo.clear();
+}
+
 /// Cap on `stroke_undo_stack` / `stroke_redo_stack` length. Each entry
-/// is `Option<Arc<MaskCorrection>>` (one refcount bump), so the cost is
-/// negligible — the cap exists to bound worst-case memory if a session
-/// runs into the thousands of strokes.
-const STROKE_HISTORY_DEPTH: usize = 50;
+/// is `Option<Arc<MaskCorrection>>` (one refcount bump); bounded to match
+/// the ordering layer so stacks never grow past the action log depth.
+const STROKE_HISTORY_DEPTH: usize = ACTION_HIST_DEPTH;
 
 fn push_stroke_bounded(
     stack: &mut VecDeque<Option<Arc<prunr_core::brush::MaskCorrection>>>,
@@ -258,6 +290,12 @@ pub(crate) struct BatchItem {
     /// Bounded; oldest dropped at depth limit.
     pub(crate) stroke_undo_stack: VecDeque<Option<Arc<prunr_core::brush::MaskCorrection>>>,
     pub(crate) stroke_redo_stack: VecDeque<Option<Arc<prunr_core::brush::MaskCorrection>>>,
+    /// Ordering layer: commit-order sequence of action types. Each entry is a
+    /// tag pointing at the per-type stack that holds the corresponding pre-state.
+    /// `handle_undo` pops from the back (most-recent) and dispatches; new commits
+    /// push here in lockstep with pushing to the per-type stack.
+    pub(crate) actions_undo: VecDeque<ActionType>,
+    pub(crate) actions_redo: VecDeque<ActionType>,
     /// Never mutate outside `set_bg_image` / `clear_bg_image` — those are
     /// the only writers that keep `settings.bg_image_hash` in lockstep,
     /// which the recipe-diff dispatch reads to fire CompositeOnly.
@@ -292,6 +330,7 @@ impl BatchItem {
         let pre = self.mask_correction.clone();
         push_stroke_bounded(&mut self.stroke_undo_stack, pre);
         self.stroke_redo_stack.clear();
+        push_action_marker(&mut self.actions_undo, &mut self.actions_redo, ActionType::Stroke);
 
         // Discard a stale correction whose dimensions no longer match the
         // active model (or a previous code-path bug). Without this, `merge`
@@ -323,6 +362,7 @@ impl BatchItem {
             let pre = self.mask_correction.clone();
             push_stroke_bounded(&mut self.stroke_undo_stack, pre);
             self.stroke_redo_stack.clear();
+            push_action_marker(&mut self.actions_undo, &mut self.actions_redo, ActionType::ClearStrokes);
         }
         self.mask_correction = None;
         self.settings.correction_hash = None;
@@ -509,6 +549,8 @@ impl BatchItem {
             mask_correction: None,
             stroke_undo_stack: VecDeque::new(),
             stroke_redo_stack: VecDeque::new(),
+            actions_undo: VecDeque::new(),
+            actions_redo: VecDeque::new(),
             bg_image: None,
             bg_image_texture: None,
             bg_image_tex_pending: false,
