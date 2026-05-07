@@ -181,6 +181,7 @@ fn render_scheduler_chip(ui: &mut egui::Ui, brush: &mut BrushSettings) -> bool {
             SdScheduler::EulerA,
         ] {
             let label = sched.label();
+            let desc = sched.description();
             if sched.is_available() {
                 let selected = brush.sd_scheduler == sched;
                 if ui.selectable_label(selected, label).clicked() {
@@ -190,10 +191,14 @@ fn render_scheduler_chip(ui: &mut egui::Ui, brush: &mut BrushSettings) -> bool {
                     }
                     egui::Popup::close_id(ui.ctx(), pop_id);
                 }
+                super::hint(ui, desc);
+                ui.add_space(theme::SPACE_XS);
             } else {
                 ui.add_enabled_ui(false, |ui| {
                     let _ = ui.selectable_label(false, format!("{label} (coming soon)"));
                 });
+                super::hint(ui, desc);
+                ui.add_space(theme::SPACE_XS);
             }
         }
     });

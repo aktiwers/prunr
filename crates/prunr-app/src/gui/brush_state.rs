@@ -131,6 +131,17 @@ impl SdScheduler {
             SdScheduler::EulerA => "Euler-A",
         }
     }
+
+    /// One-line use-case hint shown under each entry in the scheduler dropdown.
+    pub fn description(&self) -> &'static str {
+        match self {
+            SdScheduler::Lcm => "Distilled — fast preview tier (4-8 steps)",
+            SdScheduler::Ddim => "Conservative baseline (20-30 steps)",
+            SdScheduler::DpmPlusPlus2MKarras => "Best quality at standard SD (15-25 steps)",
+            SdScheduler::UniPc => "Best quality at low step counts (8-12 steps)",
+            SdScheduler::EulerA => "Creative variation per seed (20-30 steps)",
+        }
+    }
 }
 
 impl From<SdScheduler> for prunr_core::inpaint_sd::SchedulerKind {
