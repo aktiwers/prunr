@@ -2268,16 +2268,13 @@ impl DpmPp2MScheduler {
 
         let sigma_s0 = self.sigmas[step_idx];
         let sigma_t = self.sigmas[step_idx + 1];
-        let (alpha_s0, sigma_s0_e) = sigma_to_alpha_sigma(sigma_s0);
+        let (_, sigma_s0_e) = sigma_to_alpha_sigma(sigma_s0);
         let (alpha_t, sigma_t_e) = sigma_to_alpha_sigma(sigma_t);
 
-        let m0: Vec<f32> = latent.iter()
-            .zip(noise_pred.iter())
-            .map(|(&l, &eps)| (l - sigma_s0_e * eps) / alpha_s0)
-            .collect();
+        let m0 = convert_epsilon_to_x0(latent, noise_pred, sigma_s0);
 
-        let lambda_s0 = alpha_s0.ln() - sigma_s0_e.ln();
-        let lambda_t = alpha_t.ln() - sigma_t_e.ln();
+        let lambda_s0 = sigma_to_lambda(sigma_s0);
+        let lambda_t = sigma_to_lambda(sigma_t);
         let h = lambda_t - lambda_s0;
         let coef = alpha_t * ((-h).exp() - 1.0);
         let ratio = sigma_t_e / sigma_s0_e;
@@ -2289,8 +2286,7 @@ impl DpmPp2MScheduler {
         let next: Vec<f32> = if step_idx + 1 < self.num_inference {
             if let Some(m1) = self.prev_model_output.as_ref() {
                 let sigma_s1 = self.sigmas[step_idx - 1];
-                let (alpha_s1, sigma_s1_e) = sigma_to_alpha_sigma(sigma_s1);
-                let lambda_s1 = alpha_s1.ln() - sigma_s1_e.ln();
+                let lambda_s1 = sigma_to_lambda(sigma_s1);
                 let r0 = (lambda_s0 - lambda_s1) / h;
                 let inv_r0 = 1.0 / r0;
 
@@ -2571,10 +2567,7 @@ impl UniPcScheduler {
 
     /// ε → x0_pred conversion for epsilon-prediction mode.
     fn convert_model_output(&self, epsilon: &[f32], sample: &[f32]) -> Vec<f32> {
-        let (alpha_t, sigma_t) = sigma_to_alpha_sigma(self.sigmas[self.step_index]);
-        sample.iter().zip(epsilon.iter())
-            .map(|(&x, &e)| (x - sigma_t * e) / alpha_t)
-            .collect()
+        convert_epsilon_to_x0(sample, epsilon, self.sigmas[self.step_index])
     }
 
     /// Predictor update: `multistep_uni_p_bh_update`.
@@ -2582,11 +2575,11 @@ impl UniPcScheduler {
     /// `k = step_index`. Source sigma = sigmas[k], target = sigmas[k+1].
     fn uni_p_bh_update(&self, sample: &[f32], order: usize) -> Vec<f32> {
         let k = self.step_index;
-        let (alpha_s0, sigma_s0) = sigma_to_alpha_sigma(self.sigmas[k]);
+        let (_, sigma_s0) = sigma_to_alpha_sigma(self.sigmas[k]);
         let (alpha_t, sigma_t) = sigma_to_alpha_sigma(self.sigmas[k + 1]);
 
-        let lambda_s0 = alpha_s0.ln() - sigma_s0.ln();
-        let lambda_t = alpha_t.ln() - sigma_t.ln();
+        let lambda_s0 = sigma_to_lambda(self.sigmas[k]);
+        let lambda_t = sigma_to_lambda(self.sigmas[k + 1]);
         let h = lambda_t - lambda_s0;
         let hh = -h;
         let h_phi_1 = hh.exp_m1();
@@ -2602,8 +2595,7 @@ impl UniPcScheduler {
         } else {
             // order == 2: model_outputs[0] = m_{k-1}.
             let m1 = self.model_outputs[0].as_deref().expect("ring[0] populated for order-2 predictor");
-            let (alpha_si, sigma_si) = sigma_to_alpha_sigma(self.sigmas[k - 1]);
-            let lambda_si = alpha_si.ln() - sigma_si.ln();
+            let lambda_si = sigma_to_lambda(self.sigmas[k - 1]);
             let rk = (lambda_si - lambda_s0) / h;
             let d1: Vec<f32> = m1.iter().zip(m0.iter())
                 .map(|(&a, &b)| (a - b) / rk)
@@ -2631,11 +2623,11 @@ impl UniPcScheduler {
     ) -> Vec<f32> {
         let k = self.step_index;
         // Corrector uses [k-1] → [k], not [k] → [k+1].
-        let (alpha_s0, sigma_s0) = sigma_to_alpha_sigma(self.sigmas[k - 1]);
+        let (_, sigma_s0) = sigma_to_alpha_sigma(self.sigmas[k - 1]);
         let (alpha_t, sigma_t) = sigma_to_alpha_sigma(self.sigmas[k]);
 
-        let lambda_s0 = alpha_s0.ln() - sigma_s0.ln();
-        let lambda_t = alpha_t.ln() - sigma_t.ln();
+        let lambda_s0 = sigma_to_lambda(self.sigmas[k - 1]);
+        let lambda_t = sigma_to_lambda(self.sigmas[k]);
         let h = lambda_t - lambda_s0;
         let hh = -h;
         let h_phi_1 = hh.exp_m1();
@@ -2656,8 +2648,7 @@ impl UniPcScheduler {
                 .collect()
         } else {
             // order == 2: solve full 2×2 via Cramer's rule.
-            let (alpha_si, sigma_si) = sigma_to_alpha_sigma(self.sigmas[k - 2]);
-            let lambda_si = alpha_si.ln() - sigma_si.ln();
+            let lambda_si = sigma_to_lambda(self.sigmas[k - 2]);
             let rk = (lambda_si - lambda_s0) / h;
 
             // phi recurrence (pitfall #7: factorial_i updates BEFORE h_phi_k).
@@ -2709,6 +2700,24 @@ impl UniPcScheduler {
 fn sigma_to_alpha_sigma(sigma: f32) -> (f32, f32) {
     let alpha = 1.0 / (1.0 + sigma * sigma).sqrt();
     (alpha, sigma * alpha)
+}
+
+/// Log-SNR λ(σ) = ln(α) − ln(σ_eff). Used by all multistep
+/// schedulers in lambda-space update formulas.
+fn sigma_to_lambda(sigma: f32) -> f32 {
+    let (alpha, sigma_eff) = sigma_to_alpha_sigma(sigma);
+    alpha.ln() - sigma_eff.ln()
+}
+
+/// VP-parameterization ε prediction → x₀ estimate.
+/// `(sample − σ_eff · ε) / α` where (α, σ_eff) come from
+/// `sigma_to_alpha_sigma(σ_edm)`.
+fn convert_epsilon_to_x0(sample: &[f32], eps: &[f32], sigma_edm: f32) -> Vec<f32> {
+    let (alpha, sigma_eff) = sigma_to_alpha_sigma(sigma_edm);
+    sample.iter()
+        .zip(eps.iter())
+        .map(|(&x, &e)| (x - sigma_eff * e) / alpha)
+        .collect()
 }
 
 /// Karras sigma → train-timestep, via log-sigma linear interpolation
@@ -3719,16 +3728,16 @@ mod tests {
         // Manually compute first-order predictor.
         let sigma_s0_edm = s.sigmas[0]; // before step() advanced step_index
         let sigma_t_edm  = s.sigmas[1];
-        let (alpha_s0, sigma_s0_ddpm) = sigma_to_alpha_sigma(sigma_s0_edm);
+        let (_, sigma_s0_ddpm) = sigma_to_alpha_sigma(sigma_s0_edm);
         let (alpha_t,  sigma_t_ddpm)  = sigma_to_alpha_sigma(sigma_t_edm);
-        let lambda_s0 = alpha_s0.ln() - sigma_s0_ddpm.ln();
-        let lambda_t  = alpha_t.ln()  - sigma_t_ddpm.ln();
+        let lambda_s0 = sigma_to_lambda(sigma_s0_edm);
+        let lambda_t  = sigma_to_lambda(sigma_t_edm);
         let h = lambda_t - lambda_s0;
         let h_phi_1 = (-h).exp_m1();
 
-        let expected: Vec<f32> = sample.iter().zip(eps.iter())
-            .map(|(&x, &e)| {
-                let m0 = (x - sigma_s0_ddpm * e) / alpha_s0;
+        let m_ref = convert_epsilon_to_x0(&sample, &eps, sigma_s0_edm);
+        let expected: Vec<f32> = sample.iter().zip(m_ref.iter())
+            .map(|(&x, &m0)| {
                 (sigma_t_ddpm / sigma_s0_ddpm) * x - alpha_t * h_phi_1 * m0
             })
             .collect();
@@ -3768,17 +3777,15 @@ mod tests {
         let k = s.step_index; // n-1
         let sigma_s0_edm = s.sigmas[k];
         let sigma_t_edm  = s.sigmas[k + 1];
-        let (alpha_s0, sigma_s0_ddpm) = sigma_to_alpha_sigma(sigma_s0_edm);
+        let (_, sigma_s0_ddpm) = sigma_to_alpha_sigma(sigma_s0_edm);
         let (alpha_t,  sigma_t_ddpm)  = sigma_to_alpha_sigma(sigma_t_edm);
-        let lambda_s0 = alpha_s0.ln() - sigma_s0_ddpm.ln();
-        let lambda_t  = alpha_t.ln()  - sigma_t_ddpm.ln();
+        let lambda_s0 = sigma_to_lambda(sigma_s0_edm);
+        let lambda_t  = sigma_to_lambda(sigma_t_edm);
         let h = lambda_t - lambda_s0;
         let h_phi_1 = (-h).exp_m1();
 
         // ε → x0_pred conversion on `state`:
-        let m_new: Vec<f32> = state.iter().zip(eps.iter())
-            .map(|(&x, &e)| (x - sigma_s0_ddpm * e) / alpha_s0)
-            .collect();
+        let m_new = convert_epsilon_to_x0(&state, &eps, sigma_s0_edm);
         // Pure first-order predictor (no D1 correction term):
         let first_order_pred: Vec<f32> = state.iter().zip(m_new.iter())
             .map(|(&x, &m)| (sigma_t_ddpm / sigma_s0_ddpm) * x - alpha_t * h_phi_1 * m)
