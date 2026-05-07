@@ -286,6 +286,14 @@ pub(crate) fn render(
                 },
                 &mut change,
             );
+        } else if matches!(app_settings.model, crate::gui::settings::SettingsModel::SdInpaint) {
+            // SD-eraser chip cluster lives inline in Row 2 next to the
+            // model dropdown. LaMa / MI-GAN have no per-stroke knobs
+            // worth a chip row.
+            let outcome = super::eraser_chip::render(ui, &mut app_settings.brush);
+            if outcome.committed {
+                change.brush_settings_committed = true;
+            }
         }
 
         // Right-aligned cluster: reset, preset. Right-to-left layout fills
@@ -344,10 +352,8 @@ pub(crate) fn render(
         );
     });
 
-    // ── Row 3: Lines mode selector (BG-removal models) OR SD-eraser
-    // chip cluster (SD inpaint models). Eraser-family LaMa/MI-GAN
-    // have no per-stroke knobs worth a row — Row 3 stays empty for
-    // them, same as today.
+    // ── Row 3: Lines mode selector (BG-removal models). SD-eraser
+    // chips moved to Row 2; LaMa / MI-GAN have no per-stroke knobs.
     if !inpaint_mode {
         render_lines_row(
             ui,
@@ -360,11 +366,6 @@ pub(crate) fn render(
             },
             &mut change,
         );
-    } else if matches!(app_settings.model, crate::gui::settings::SettingsModel::SdInpaint) {
-        let outcome = super::eraser_chip::render(ui, &mut app_settings.brush);
-        if outcome.committed {
-            change.brush_settings_committed = true;
-        }
     }
 
     // Line-mode transition: record the signal + cache impact (deterministic

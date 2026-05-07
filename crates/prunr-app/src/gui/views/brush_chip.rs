@@ -56,6 +56,7 @@ pub(super) fn render(
                     |v| format!("{v:.0} px"),
                 );
                 outcome.committed |= r.commit;
+                super::hint(ui, "Brush size in image pixels.");
                 ui.add_space(4.0);
                 let h = chip::slider_row_f32(
                     ui, "Hardness", &mut s.hardness, 0.0..=1.0, false,
@@ -64,6 +65,7 @@ pub(super) fn render(
                     |v| format!("{:.1}%", v * 100.0),
                 );
                 outcome.committed |= h.commit;
+                super::hint(ui, "Edge falloff. 0% = soft smoothstep, 100% = hard disc.");
                 ui.add_space(4.0);
                 if !is_inpaint_mode {
                     // Strength is meaningful for the seg pipeline (multiplicative
@@ -74,6 +76,7 @@ pub(super) fn render(
                         |v| format!("{:.0}%", v * 100.0),
                     );
                     outcome.committed |= st.commit;
+                    super::hint(ui, "How much each stroke shifts the mask. Lower = gentler corrections.");
                 } else {
                     // Eraser-specific knobs. Live-update on release like
                     // every other slider so the user sees the diff.
@@ -83,12 +86,14 @@ pub(super) fn render(
                         |v| format!("{v:+.0} px"),
                     );
                     outcome.committed |= g.commit;
+                    super::hint(ui, "Expand (+) or shrink (−) the painted region in pixels before inpaint.");
                     ui.add_space(4.0);
                     let f = chip::slider_row_f32(
                         ui, "Feather", &mut s.inpaint_feather, 0.0..=32.0, false,
                         |v| format!("{v:.0} px"),
                     );
                     outcome.committed |= f.commit;
+                    super::hint(ui, "Soft blend at the inpaint boundary, in pixels. Hides hard seams.");
                     ui.add_space(4.0);
                     // Sharpen displays as 0-100% on a 0-2 internal range.
                     let sh = chip::slider_row_f32(
@@ -96,6 +101,7 @@ pub(super) fn render(
                         |v| format!("{:.0}%", v * 50.0),
                     );
                     outcome.committed |= sh.commit;
+                    super::hint(ui, "Unsharp-mask amount inside the inpainted region. Counters the model's slight blur.");
                 }
                 if !is_inpaint_mode {
                     // Inpaint has only one direction (paint = erase). Hide
