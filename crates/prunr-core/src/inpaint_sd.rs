@@ -555,10 +555,7 @@ fn run_one_tile(
         SchedulerKind::Ddim => Scheduler::Ddim(DdimScheduler::new_sd15(steps)),
         SchedulerKind::DpmPp2MKarras => Scheduler::DpmPp2M(DpmPp2MScheduler::new_sd15(steps)),
         SchedulerKind::EulerA => Scheduler::EulerA(EulerAScheduler::new_sd15(steps)),
-        // UniPC not yet implemented in the worker; fall back to LCM
-        // as a safe default (UI gates picking, this is belt-and-
-        // braces against a stale persisted choice).
-        SchedulerKind::UniPc => Scheduler::Lcm(LcmScheduler::new_sd15(steps, req.use_karras_sigmas)),
+        SchedulerKind::UniPc => Scheduler::UniPc(UniPcScheduler::new_sd15(steps)),
     };
     let seed = req.seed.unwrap_or_else(|| {
         std::time::SystemTime::now()
@@ -1781,6 +1778,9 @@ fn step_array_into(
             let noise: Vec<f32> = (0..latent.len()).map(|_| dist.sample(rng)).collect();
             s.step_into(latent, noise_pred, step_idx, &noise, out);
         }
+        Scheduler::UniPc(s) => {
+            *out = s.step(noise_pred, latent);
+        }
     }
 }
 
@@ -2736,6 +2736,7 @@ pub enum Scheduler {
     Lcm(LcmScheduler),
     DpmPp2M(DpmPp2MScheduler),
     EulerA(EulerAScheduler),
+    UniPc(UniPcScheduler),
 }
 
 impl Scheduler {
@@ -2745,16 +2746,19 @@ impl Scheduler {
             Scheduler::Lcm(s) => s.timesteps(),
             Scheduler::DpmPp2M(s) => s.timesteps(),
             Scheduler::EulerA(s) => s.timesteps(),
+            Scheduler::UniPc(s) => s.timesteps(),
         }
     }
 
     /// Multiplier on the initial standard-normal noise. 1.0 for
-    /// α-space schedulers (DDIM/LCM/DPM++); √(σ_max²+1) for σ-space
-    /// schedulers (Euler-A) so the initial sample lives on the
-    /// scheduler's expected scale.
+    /// α-space schedulers (DDIM/LCM/DPM++/UniPC); √(σ_max²+1) for
+    /// σ-space schedulers (Euler-A).
     pub fn init_noise_sigma(&self) -> f32 {
         match self {
-            Scheduler::Ddim(_) | Scheduler::Lcm(_) | Scheduler::DpmPp2M(_) => 1.0,
+            Scheduler::Ddim(_)
+            | Scheduler::Lcm(_)
+            | Scheduler::DpmPp2M(_)
+            | Scheduler::UniPc(_) => 1.0,
             Scheduler::EulerA(s) => s.init_noise_sigma(),
         }
     }
@@ -2796,6 +2800,11 @@ impl Scheduler {
                 add_noise_alpha_space(sample, noise, s.alpha_cumprod(t))
             }
             Scheduler::DpmPp2M(s) => {
+                let sigma = s.sigmas[step_idx];
+                let alpha = 1.0 / (sigma * sigma + 1.0).sqrt();
+                add_noise_alpha_space(sample, noise, alpha * alpha)
+            }
+            Scheduler::UniPc(s) => {
                 let sigma = s.sigmas[step_idx];
                 let alpha = 1.0 / (sigma * sigma + 1.0).sqrt();
                 add_noise_alpha_space(sample, noise, alpha * alpha)
@@ -3893,5 +3902,30 @@ mod tests {
         }
         assert!(s.sigmas[0] > 1.0, "first sigma should be well above 1.0");
         assert_eq!(s.sigmas[20], 0.0, "terminal sigma must be exactly 0.0");
+    }
+
+    /// Dispatch-level integration: `Scheduler::UniPc` dispatched through
+    /// `step_array_into` must not panic and must produce output of the
+    /// expected length. Pins the wiring from SchedulerKind → Scheduler →
+    /// step_array_into without requiring a live ORT session.
+    #[test]
+    fn unipc_step_array_into_dispatch_roundtrip() {
+        use rand::SeedableRng;
+        use rand_chacha::ChaCha8Rng;
+
+        let n = 8_usize;
+        let dim = 16_usize;
+        let mut sched = Scheduler::UniPc(UniPcScheduler::new_sd15(n));
+        let latent:    Vec<f32> = (0..dim).map(|i| 0.1 * i as f32).collect();
+        let noise_pred:Vec<f32> = (0..dim).map(|i| 0.05 * i as f32).collect();
+        let mut out = Vec::new();
+        let mut rng = ChaCha8Rng::seed_from_u64(42);
+
+        let ts = sched.timesteps().to_vec();
+        step_array_into(&mut sched, &latent, &noise_pred, 0, ts[0], ts[0], false, &mut rng, &mut out);
+
+        assert_eq!(out.len(), dim, "step_array_into output length must match input");
+        assert!(out.iter().all(|v| v.is_finite()),
+            "step_array_into must produce finite output: {out:?}");
     }
 }
