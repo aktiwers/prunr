@@ -32,7 +32,12 @@ pub fn render(ui: &mut egui::Ui, brush: &mut BrushSettings) -> EraserRowChange {
         change.committed |= render_strength_chip(ui, brush);
         // Karras toggle: LCM (user-toggleable), UniPC, Euler-A.
         // DDIM and DPM++ 2M Karras are pinned to one setting in this build.
-        if matches!(brush.sd_scheduler, SdScheduler::Lcm | SdScheduler::UniPc | SdScheduler::EulerA) {
+        // Karras chip is only meaningful for schedulers whose dispatch
+        // honors the toggle. LCM is the only one wired today; UniPC and
+        // Euler-A both ship Karras-on hardcoded (matches Diffusers'
+        // SD-1.5 reference) and ignore the field. Showing a no-op
+        // toggle confuses users — hide it instead.
+        if matches!(brush.sd_scheduler, SdScheduler::Lcm) {
             change.committed |= render_karras_chip(ui, brush);
         }
         change.committed |= render_seed_chip(ui, brush);
