@@ -696,6 +696,7 @@ impl PrunrApp {
             sd_prompt: bs.sd_prompt.clone(),
             sd_negative_prompt: bs.sd_negative_prompt.clone(),
             sd_guidance_scale: bs.sd_guidance_scale,
+            sd_scheduler: bs.sd_scheduler,
             sd_steps: bs.sd_steps,
             sd_seed: bs.sd_seed,
         };

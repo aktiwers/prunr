@@ -118,16 +118,18 @@ pub(crate) struct InpaintTuning {
     pub feather_px: f32,
     pub grow_px: f32,
     /// Which inpaint backend to use (LaMaFp32, BigLaMa, …). For
-    /// SD-family backends, the choice between `SdV15InpaintFp16` and
-    /// `SdV15LcmInpaintFp16` is driven by the user's scheduler pick
-    /// upstream (`Settings::lcm_routing_active`); dispatch then
-    /// derives `use_lcm_scheduler` directly from this field so the
-    /// scheduler math always matches the loaded weights.
+    /// SD-family backends, the choice between `SdV15InpaintFp16`
+    /// (standard SD weights) and `SdV15LcmInpaintFp16` (LCM weights)
+    /// is driven by the user's scheduler pick upstream
+    /// (`Settings::lcm_routing_active`).
     pub backend: prunr_models::ModelId,
     /// SD-only: text prompt; ignored for LaMa-family backends.
     pub sd_prompt: String,
     pub sd_negative_prompt: String,
     pub sd_guidance_scale: f32,
+    /// SD-only: scheduler kind. Carried through to the worker via
+    /// `SdInpaintRequest::scheduler` so the right denoise math runs.
+    pub sd_scheduler: super::brush_state::SdScheduler,
     /// SD-only: number of denoise steps.
     pub sd_steps: u32,
     /// SD-only: pinned RNG seed for reproducibility. `None` = random.
@@ -144,6 +146,7 @@ impl Default for InpaintTuning {
             sd_prompt: String::new(),
             sd_negative_prompt: String::new(),
             sd_guidance_scale: 1.0,
+            sd_scheduler: super::brush_state::SdScheduler::Lcm,
             sd_steps: 8,
             sd_seed: None,
         }
@@ -401,28 +404,33 @@ impl Processor {
             let sd_req = match tuning.backend {
                 prunr_models::ModelId::SdV15InpaintFp16
                 | prunr_models::ModelId::SdV15LcmInpaintFp16 => {
-                    // Backend resolved upstream — `SdV15LcmInpaintFp16` is
-                    // routed when the user wants LCM; `SdV15InpaintFp16`
-                    // for the standard model. `use_lcm_scheduler` follows
-                    // the backend so the scheduler math always matches
-                    // the loaded weights.
-                    let use_lcm_scheduler = matches!(
-                        tuning.backend,
-                        prunr_models::ModelId::SdV15LcmInpaintFp16,
-                    );
+                    use super::brush_state::SdScheduler;
+                    use prunr_core::inpaint_sd::SchedulerKind;
+                    // Map the user's scheduler pick to the worker's
+                    // dispatchable kind. UI gates picking via
+                    // `is_available()`; defensive fallback to LCM if a
+                    // not-yet-implemented variant ever leaks through.
+                    let scheduler = match tuning.sd_scheduler {
+                        SdScheduler::Lcm => SchedulerKind::Lcm,
+                        SdScheduler::Ddim => SchedulerKind::Ddim,
+                        SdScheduler::DpmPlusPlus2MKarras => SchedulerKind::DpmPp2MKarras,
+                        SdScheduler::UniPc => SchedulerKind::UniPc,
+                        SdScheduler::EulerA => SchedulerKind::EulerA,
+                    };
+                    let lcm = matches!(scheduler, SchedulerKind::Lcm);
                     // LCM weights are calibrated for low CFG. The LCM
                     // model card recommends staying in 1.0–2.0; values
                     // above degrade output. Clamp so the toolbar slider's
                     // full 1.0–15.0 range doesn't pipe an out-of-range
                     // value into LCM.
-                    let cfg = if use_lcm_scheduler {
+                    let cfg = if lcm {
                         tuning.sd_guidance_scale.clamp(1.0, 2.0)
                     } else {
                         tuning.sd_guidance_scale
                     };
                     // TAESD is the distilled fast VAE substitute paired
                     // with LCM. Standard SD weights expect the full VAE.
-                    let use_taesd = use_lcm_scheduler
+                    let use_taesd = lcm
                         && prunr_models::is_available(prunr_models::ModelId::TaesdFp16);
                     Some(prunr_core::inpaint_sd::SdInpaintRequest {
                         prompt: tuning.sd_prompt.clone(),
@@ -431,7 +439,7 @@ impl Processor {
                         guidance_scale: cfg,
                         seed: tuning.sd_seed,
                         use_taesd,
-                        use_lcm_scheduler,
+                        scheduler,
                     })
                 }
                 _ => None,

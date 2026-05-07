@@ -665,7 +665,7 @@ mod tests {
                 guidance_scale: 7.5,
                 seed: Some(42),
                 use_taesd: false,
-                use_lcm_scheduler: false,
+                scheduler: prunr_core::inpaint_sd::SchedulerKind::Ddim,
             }),
             feather_px: 4.5,
             sharpen: 0.6,
