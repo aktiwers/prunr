@@ -25,6 +25,7 @@ pub fn render(ui: &mut egui::Ui, brush: &mut BrushSettings) -> EraserRowChange {
     let mut change = EraserRowChange::default();
     ui.horizontal(|ui| {
         change.committed |= render_quality_preset_chip(ui, brush);
+        change.committed |= render_prompt_chip(ui, brush);
         change.committed |= render_scheduler_chip(ui, brush);
         change.committed |= render_steps_chip(ui, brush);
         change.committed |= render_karras_chip(ui, brush);
@@ -68,12 +69,78 @@ fn render_quality_preset_chip(ui: &mut egui::Ui, brush: &mut BrushSettings) -> b
     changed
 }
 
+fn render_prompt_chip(ui: &mut egui::Ui, brush: &mut BrushSettings) -> bool {
+    let pop_id = egui::Id::new("eraser_prompt_popover");
+    let lcm = brush.sd_scheduler == SdScheduler::Lcm;
+
+    // Chip label: short prompt preview when set, generic placeholder
+    // when empty. Truncate at 18 chars so the chip stays narrow.
+    let preview;
+    let label: &str = if brush.sd_prompt.is_empty() {
+        "Prompt"
+    } else {
+        let trimmed: String = brush.sd_prompt.chars().take(18).collect();
+        preview = if brush.sd_prompt.chars().count() > 18 {
+            format!("{trimmed}…")
+        } else {
+            trimmed
+        };
+        &preview
+    };
+    let resp = chip::chip_tooltip(
+        chip::chip_button(ui, ICON_EDIT_NOTE.codepoint, label, !brush.sd_prompt.is_empty()),
+        "Prompt",
+        "Text prompt + negative + guidance. Empty prompt = unconditional inpaint (often noisy on flat surrounds).",
+    );
+    let mut changed = false;
+    chip::popup_for(ui, pop_id, &resp, |ui| {
+        ui.set_min_width(360.0);
+        ui.label(RichText::new("Prompt").strong().color(theme::TEXT_PRIMARY));
+        let p = ui.add(
+            egui::TextEdit::multiline(&mut brush.sd_prompt)
+                .hint_text("e.g. wooden park bench in autumn forest")
+                .desired_rows(2)
+                .desired_width(f32::INFINITY),
+        );
+        if p.lost_focus() { changed = true; }
+        super::hint(ui, "What should fill the painted area. Be specific: \"wooden park bench in autumn forest\" works better than \"bench\".");
+
+        ui.add_space(theme::SPACE_SM);
+
+        ui.add_enabled_ui(!lcm, |ui| {
+            let neg_color = if lcm { theme::TEXT_SECONDARY } else { theme::TEXT_PRIMARY };
+            ui.label(RichText::new("Negative prompt").strong().color(neg_color));
+            let np = ui.add(
+                egui::TextEdit::multiline(&mut brush.sd_negative_prompt)
+                    .hint_text("e.g. blurry, watermark, low quality")
+                    .desired_rows(2)
+                    .desired_width(f32::INFINITY),
+            );
+            if np.lost_focus() { changed = true; }
+            super::hint(ui, "What to push away from. Only used when Guidance > 1.");
+            ui.add_space(theme::SPACE_SM);
+            let cfg = chip::slider_row_f32(
+                ui, "Guidance", &mut brush.sd_guidance_scale, 1.0..=15.0, false,
+                |v| if v <= 1.0 + 1e-3 { "off".to_string() } else { format!("{v:.1}") },
+            );
+            if cfg.commit { changed = true; }
+            super::hint(ui, "Prompt strength. 1 = ignore prompt (single UNet pass). 7-8 = typical SD strength (UNet runs twice per step). Higher = closer match but oversaturated/burnt.");
+        });
+
+        if lcm {
+            ui.add_space(theme::SPACE_SM);
+            super::hint(ui, "LCM bakes guidance into training and ignores Negative + Guidance. Switch the Scheduler chip to DDIM or DPM++ to use them.");
+        }
+    });
+    changed
+}
+
 fn render_scheduler_chip(ui: &mut egui::Ui, brush: &mut BrushSettings) -> bool {
     let pop_id = egui::Id::new("eraser_scheduler_popover");
     let resp = chip::chip_tooltip(
         chip::chip_button(ui, ICON_TUNE.codepoint, brush.sd_scheduler.label(), false),
         "Scheduler",
-        "Denoise math. LCM = fast (4-8 steps); DDIM = conservative; DPM++ / UniPC / Euler-A coming soon.",
+        "Denoise math. LCM = fast (4-8 steps); DDIM = conservative; DPM++ 2M Karras = best quality (~25 steps); UniPC / Euler-A coming soon.",
     );
     let mut changed = false;
     chip::popup_for(ui, pop_id, &resp, |ui| {
