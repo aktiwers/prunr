@@ -121,6 +121,25 @@ fn render_prompt_chip(ui: &mut egui::Ui, brush: &mut BrushSettings) -> bool {
             ui.add_space(theme::SPACE_SM);
             super::hint(ui, "LCM bakes guidance into training and ignores Negative + Guidance. Switch the Scheduler chip to DDIM or DPM++ to use them.");
         }
+
+        ui.add_space(theme::SPACE_SM);
+        ui.separator();
+        ui.add_space(theme::SPACE_XS);
+        let defaults = BrushSettings::default();
+        let already_default = brush.sd_prompt == defaults.sd_prompt
+            && brush.sd_negative_prompt == defaults.sd_negative_prompt
+            && (brush.sd_guidance_scale - defaults.sd_guidance_scale).abs() < 1e-3;
+        ui.add_enabled_ui(!already_default, |ui| {
+            if ui.button("Reset to default prompt")
+                .on_hover_text("Restore Prompt + Negative + Guidance to the shipped defaults.")
+                .clicked()
+            {
+                brush.sd_prompt = defaults.sd_prompt;
+                brush.sd_negative_prompt = defaults.sd_negative_prompt;
+                brush.sd_guidance_scale = defaults.sd_guidance_scale;
+                changed = true;
+            }
+        });
     });
     changed
 }
