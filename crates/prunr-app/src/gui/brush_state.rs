@@ -96,8 +96,9 @@ pub enum SdScheduler {
     /// default in A1111 / ComfyUI / InvokeAI. 15-25 steps. Not yet
     /// wired to a dispatch backend; see `is_available()`.
     DpmPlusPlus2MKarras,
-    /// UniPC multistep — best quality at low step counts (8-12).
-    /// Not yet wired to a dispatch backend.
+    /// UniPC predictor-corrector multistep — best quality at low step
+    /// counts (8-12). Corrector solves a 2×2 system to compensate for
+    /// the predictor's hardcoded rhos_p=0.5 approximation.
     UniPc,
     /// Euler-Ancestral — adds noise per step → creative variation per
     /// seed (non-deterministic).
@@ -115,7 +116,8 @@ impl SdScheduler {
             SdScheduler::Lcm
                 | SdScheduler::Ddim
                 | SdScheduler::DpmPlusPlus2MKarras
-                | SdScheduler::EulerA,
+                | SdScheduler::EulerA
+                | SdScheduler::UniPc,
         )
     }
 
@@ -520,7 +522,7 @@ mod tests {
         assert!(SdScheduler::Ddim.is_available());
         assert!(SdScheduler::DpmPlusPlus2MKarras.is_available());
         assert!(SdScheduler::EulerA.is_available());
-        assert!(!SdScheduler::UniPc.is_available());
+        assert!(SdScheduler::UniPc.is_available());
     }
 
     /// Old persisted JSON without the new SD-tuning fields must
