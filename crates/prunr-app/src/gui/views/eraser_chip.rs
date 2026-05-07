@@ -149,7 +149,7 @@ fn render_scheduler_chip(ui: &mut egui::Ui, brush: &mut BrushSettings) -> bool {
     let resp = chip::chip_tooltip(
         chip::chip_button(ui, ICON_TUNE.codepoint, brush.sd_scheduler.label(), false),
         "Scheduler",
-        "Denoise math. LCM = fast (4-8 steps); DDIM = conservative; DPM++ 2M Karras = best quality (~25 steps); UniPC / Euler-A coming soon.",
+        "Denoise math. LCM = fast (4-8 steps); DDIM = conservative; DPM++ 2M Karras = best quality (~25 steps); Euler-A = creative per-seed variation; UniPC coming soon.",
     );
     let mut changed = false;
     chip::popup_for(ui, pop_id, &resp, |ui| {
