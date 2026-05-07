@@ -131,35 +131,39 @@ fn render_steps_chip(ui: &mut egui::Ui, brush: &mut BrushSettings) -> bool {
     change.commit
 }
 
-fn render_karras_chip(ui: &mut egui::Ui, brush: &mut BrushSettings) -> bool {
+fn render_karras_chip(ui: &mut egui::Ui, brush: &BrushSettings) -> bool {
     // Karras schedule is orthogonal to scheduler choice (DDIM /
     // DPM++ / UniPC / Euler-A all support it; LCM has its own
     // fixed schedule and ignores the toggle). Greyed until the
     // Karras sigma helper has a dispatch backend.
-    let mut changed = false;
+    //
+    // Pure placeholder: render disabled-visual + tooltip but never
+    // mutate. egui's `add_enabled_ui` greys the appearance but
+    // doesn't suppress `Response::clicked()` for every widget type;
+    // unconditional `return false` is the correctness guarantee.
     ui.add_enabled_ui(false, |ui| {
-        let resp = chip::icon_toggle_button(ui, ICON_BLUR_LINEAR.codepoint, brush.sd_use_karras_sigmas);
-        if resp.on_hover_text("Karras sigma schedule (coming soon)").clicked() {
-            brush.sd_use_karras_sigmas = !brush.sd_use_karras_sigmas;
-            changed = true;
-        }
+        chip::icon_toggle_button(ui, ICON_BLUR_LINEAR.codepoint, brush.sd_use_karras_sigmas)
+            .on_hover_text("Karras sigma schedule (coming soon)");
     });
-    changed
+    false
 }
 
 fn render_seed_chip(ui: &mut egui::Ui, brush: &mut BrushSettings) -> bool {
     let pinned = brush.sd_seed.is_some();
     let icon = if pinned { ICON_LOCK.codepoint } else { ICON_LOCK_OPEN.codepoint };
-    let label = match brush.sd_seed {
+    // Format the seed inline only when pinned — the unpinned arm
+    // uses a `&'static str` to avoid allocating each frame.
+    let pinned_label;
+    let label: &str = match brush.sd_seed {
         Some(s) => {
             // Truncate to last 6 digits so the chip stays narrow.
-            let short = s % 1_000_000;
-            format!("…{short:06}")
+            pinned_label = format!("…{:06}", s % 1_000_000);
+            &pinned_label
         }
-        None => "random".to_string(),
+        None => "random",
     };
     let resp = chip::chip_tooltip(
-        chip::chip_button(ui, icon, &label, pinned),
+        chip::chip_button(ui, icon, label, pinned),
         "Seed",
         "Click to pin / un-pin the RNG seed. Pinned = same output across strokes; useful for A/B testing prompts.",
     );
