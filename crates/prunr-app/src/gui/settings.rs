@@ -112,25 +112,17 @@ pub struct Settings {
 fn default_ram_safety_margin_gb() -> f32 { 2.0 }
 
 impl Settings {
-    /// Resolve `sd_fast_mode` against current hardware. Single source of
-    /// truth — the dispatch path and Brush popover both call this so
-    /// the toggle and the visible UI greying-out can't disagree.
-    pub fn sd_fast_mode_effective(&self) -> bool {
-        crate::hardware::sd_fast_mode_active(
-            self.sd_fast_mode, crate::hardware::profile(),
-        )
-    }
-
     /// Should the SD inpaint dispatcher route to the LCM checkpoint?
-    /// True only when ALL of: user picked SD, fast mode is effectively
-    /// on, the LCM descriptor is in the registry (artifact published),
-    /// and the bundle is downloaded. When any clause fails, raw_backend
+    /// True only when ALL of: user picked SD, scheduler is LCM, the
+    /// LCM descriptor is in the registry (artifact published), and
+    /// the bundle is downloaded. When any clause fails, raw_backend
     /// passes through and standard SD runs. Pinned in one place so
     /// adding a 5th clause (e.g. license-accepted) doesn't silently
     /// diverge between dispatch and UI gating.
     pub fn lcm_routing_active(&self, raw_backend: prunr_models::ModelId) -> bool {
+        use crate::gui::brush_state::SdScheduler;
         raw_backend == prunr_models::ModelId::SdV15InpaintFp16
-            && self.sd_fast_mode_effective()
+            && self.brush.sd_scheduler == SdScheduler::Lcm
             && prunr_models::descriptor(prunr_models::ModelId::SdV15LcmInpaintFp16).is_some()
             && prunr_models::is_available(prunr_models::ModelId::SdV15LcmInpaintFp16)
     }

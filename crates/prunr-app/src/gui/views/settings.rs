@@ -371,9 +371,6 @@ fn render_tab_general(
     hint(ui, &jobs_hint);
     ui.add_space(theme::SPACE_MD);
 
-    render_sd_fast_mode_row(ui, &mut settings.sd_fast_mode);
-    ui.add_space(theme::SPACE_MD);
-
     let has_gpu = !prunr_core::OrtEngine::detect_active_provider().eq_ignore_ascii_case("CPU");
     if has_gpu {
         ui.checkbox(&mut settings.force_cpu, RichText::new("Force CPU this session")
@@ -386,34 +383,6 @@ fn render_tab_general(
         .color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY));
     hint(ui, "Auto-rerun mask and edge tweaks while you drag sliders.");
     intent
-}
-
-fn render_sd_fast_mode_row(ui: &mut egui::Ui, user_override: &mut Option<bool>) {
-    use crate::hardware;
-    let profile = hardware::profile();
-    let auto = hardware::sd_fast_mode_auto_default(profile);
-    let mut effective = user_override.unwrap_or(auto);
-
-    let prev = effective;
-    let resp = ui.checkbox(&mut effective, RichText::new("Fast SD inpaint")
-        .color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY));
-    resp.on_hover_text(
-        "LCM-distilled SD weights — ~5× faster on CPU / Intel iGPU at \
-         lower fidelity. Negative-prompt and Guidance grey out (LCM bakes \
-         guidance into training)."
-    );
-    if effective != prev {
-        // Setting back to the auto value collapses to None so the toggle
-        // keeps tracking hardware changes (e.g. user installs OpenVINO).
-        *user_override = if effective == auto { None } else { Some(effective) };
-    }
-
-    let mode_label = match user_override {
-        None => format!("auto: {}", if auto { "on" } else { "off" }),
-        Some(true) => "user: on".to_string(),
-        Some(false) => "user: off".to_string(),
-    };
-    hint(ui, &format!("Trade quality for speed when SD runs on CPU / Intel iGPU. ({mode_label})"));
 }
 
 fn render_tab_behavior(ui: &mut egui::Ui, settings: &mut Settings) {
