@@ -2522,11 +2522,13 @@ impl UniPcScheduler {
         let m_new = self.convert_model_output(epsilon, sample);
 
         // B. Corrector — reads self.this_order set by the PREVIOUS step.
-        // Clone last_sample before calling uni_c_bh_update to avoid a
-        // simultaneous borrow of `self` through last_sample and through `self`.
+        // take() avoids a simultaneous borrow of self through last_sample and
+        // through the method receiver; we restore it immediately after.
         let working_sample = if self.step_index > 0 {
-            if let Some(ref ls) = self.last_sample.clone() {
-                self.uni_c_bh_update(&m_new, ls, sample, self.this_order)
+            if let Some(ls) = self.last_sample.take() {
+                let out = self.uni_c_bh_update(&m_new, &ls, sample, self.this_order);
+                self.last_sample = Some(ls); // restore allocation
+                out
             } else {
                 sample.to_vec()
             }
@@ -2541,6 +2543,8 @@ impl UniPcScheduler {
         self.timestep_list[1] = Some(self.timesteps[self.step_index]);
 
         // D. Compute this_order for THIS step's predictor (and NEXT step's corrector).
+        // Must come BEFORE E: the predictor uses this_order, and the corrector at
+        // step k+1 reads the value set here — wrong ordering silently feeds stale order.
         let mut order = 2_usize;
         if order > self.num_inference - self.step_index {
             order = self.num_inference - self.step_index;
@@ -2548,11 +2552,15 @@ impl UniPcScheduler {
         order = order.min(self.lower_order_nums + 1);
         self.this_order = order;
 
-        // E. Save corrected sample for next corrector.
-        self.last_sample = Some(working_sample.clone());
+        // E. Move working_sample into last_sample BEFORE the predictor call so
+        // the predictor can borrow from last_sample via &. No clone needed —
+        // one Vec<f32> persists across steps, saving ~64 KB per step.
+        self.last_sample = Some(working_sample);
+        // just stored above, non-empty
+        let last_ref = self.last_sample.as_deref().unwrap();
 
         // F. Predictor.
-        let prev_sample = self.uni_p_bh_update(&working_sample, order);
+        let prev_sample = self.uni_p_bh_update(last_ref, order);
 
         // G. Warmup increment.
         if self.lower_order_nums < 2 {
