@@ -25,6 +25,7 @@ pub fn render(ui: &mut egui::Ui, brush: &mut BrushSettings) -> EraserRowChange {
         change.committed |= render_quality_preset_chip(ui, brush);
         change.committed |= render_scheduler_chip(ui, brush);
         change.committed |= render_steps_chip(ui, brush);
+        change.committed |= render_strength_chip(ui, brush);
         // Karras toggle is meaningful only for the schedulers that
         // accept Karras-on-or-off (UniPC, Euler-A). LCM has its own
         // fixed schedule; DDIM and DPM++ 2M Karras are pinned to one
@@ -36,6 +37,25 @@ pub fn render(ui: &mut egui::Ui, brush: &mut BrushSettings) -> EraserRowChange {
         change.committed |= render_prompt_chip(ui, brush);
     });
     change
+}
+
+fn render_strength_chip(ui: &mut egui::Ui, brush: &mut BrushSettings) -> bool {
+    let change = chip::chip_f32(
+        ui,
+        ChipMeta {
+            id_salt: "eraser_strength",
+            icon: ICON_AUTO_FIX_HIGH.codepoint,
+            label: "Strength",
+            description: "Inpaint aggressiveness. 100% = pure noise init, fully creative rewrite. 70-85% = preserve structure / lighting and make targeted edits. <50% = subtle nudges. 0% = preserve original.",
+            tooltip: "Inpaint strength",
+        },
+        &mut brush.sd_strength,
+        0.0..=1.0,
+        1.0,
+        false,
+        |v| format!("{:.0}%", v * 100.0),
+    );
+    change.commit
 }
 
 fn render_quality_preset_chip(ui: &mut egui::Ui, brush: &mut BrushSettings) -> bool {
