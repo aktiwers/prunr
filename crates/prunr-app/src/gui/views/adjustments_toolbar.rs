@@ -349,14 +349,10 @@ pub(crate) fn render(
         );
     });
 
-    // ── Row 3: Lines mode selector (always visible) + line knobs (when Lines
-    // mode is on). The Lines dropdown is the gate for enabling line
-    // extraction; keeping it visible at all times is how the user turns
-    // lines on. `lines_popover::render` mutates `item_settings.line_mode`
-    // directly — cache invalidation below picks up the change.
-    //
-    // Eraser models hide Row 3 entirely — DexiNed isn't part of the
-    // inpaint pipeline.
+    // ── Row 3: Lines mode selector (BG-removal models) OR SD-eraser
+    // chip cluster (SD inpaint models). Eraser-family LaMa/MI-GAN
+    // have no per-stroke knobs worth a row — Row 3 stays empty for
+    // them, same as today.
     if !inpaint_mode {
         render_lines_row(
             ui,
@@ -369,6 +365,11 @@ pub(crate) fn render(
             },
             &mut change,
         );
+    } else if matches!(app_settings.model, crate::gui::settings::SettingsModel::SdInpaint) {
+        let outcome = super::eraser_chip::render(ui, &mut app_settings.brush);
+        if outcome.committed {
+            change.brush_settings_committed = true;
+        }
     }
 
     // Line-mode transition: record the signal + cache impact (deterministic
