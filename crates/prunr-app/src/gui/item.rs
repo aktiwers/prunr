@@ -388,10 +388,12 @@ impl BatchItem {
         true
     }
 
+    #[cfg(test)]
     pub(crate) fn has_stroke_undo(&self) -> bool {
         !self.stroke_undo_stack.is_empty()
     }
 
+    #[cfg(test)]
     pub(crate) fn has_stroke_redo(&self) -> bool {
         !self.stroke_redo_stack.is_empty()
     }

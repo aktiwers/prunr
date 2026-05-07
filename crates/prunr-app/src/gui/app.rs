@@ -8,7 +8,7 @@ use egui::{Key, ViewportCommand};
 use prunr_core::ProgressStage;
 use super::drag_export_state::DragExportState;
 use super::history_manager::{HistoryDir, HistoryManager};
-use super::item::{BatchItem, BatchStatus, HistoryEntry, HistorySlot, ImageSource, PresetSnapshot};
+use super::item::{ActionType, BatchItem, BatchStatus, HistoryEntry, HistorySlot, ImageSource, PresetSnapshot};
 use super::settings::Settings;
 use super::state::AppState;
 use super::theme;
@@ -546,99 +546,164 @@ impl PrunrApp {
             || self.show_pipeline_flow
     }
 
-    /// Undo background removal on selected items (or current item if none selected).
-    /// Reverts Done/Error items back to Pending, clearing their results.
-    ///
-    /// Brush mode override: while the brush is active, prefer popping a
-    /// stroke off the active item's stroke history. Falls through to the
-    /// result-undo when there are no strokes left to undo.
+    /// Undo the most-recent action on selected items (or current item if none
+    /// selected). Pops one `ActionType` marker from the ordering layer and
+    /// dispatches to the matching per-type stack — mode-agnostic. A stroke
+    /// undo triggers a brush rerun so the canvas reflects the popped state.
     pub fn handle_undo(&mut self, ctx: &egui::Context) {
-        if self.try_brush_undo(ctx) {
-            return;
-        }
         let has_selected = self.batch.has_any_selected();
         let current_id = self.batch.selected_item().map(|b| b.id);
         let mut undone = 0u32;
-        for item in &mut self.batch.items {
-            let target = if has_selected { item.selected } else { Some(item.id) == current_id };
-            if target && HistoryManager::undo_result(item) {
-                item.reset_result_caches();
-                // Undo also needs the SOURCE view rebuilt — the canvas may
-                // now show the unprocessed source instead of a result.
-                item.source_texture = None;
+        let mut last_action: Option<ActionType> = None;
+        for idx in 0..self.batch.items.len() {
+            let target = if has_selected {
+                self.batch.items[idx].selected
+            } else {
+                Some(self.batch.items[idx].id) == current_id
+            };
+            if !target { continue; }
+            if let Some(action) = self.try_undo_one_action(idx) {
                 undone += 1;
+                last_action = Some(action);
             }
         }
         if undone > 0 {
             self.result_switch_id += 1;
             self.canvas_switch_id += 1;
             self.sync_selected_batch_textures(ctx);
-            if undone == 1 {
-                self.toasts.info("Undone");
-            } else {
-                self.toasts.info(format!("Undone {undone} images"));
-            }
+            let label: String = match (undone, last_action) {
+                (1, Some(ActionType::Stroke))       => "Stroke undone".into(),
+                (1, Some(ActionType::ClearStrokes)) => "Strokes restored".into(),
+                (1, Some(ActionType::Result))       => "Undone".into(),
+                (1, Some(ActionType::PresetApply))  => "Preset undone".into(),
+                (n, _)                              => format!("Undone {n} actions"),
+            };
+            self.toasts.info(label);
         }
     }
 
+    /// Redo the most-recently undone action on selected items. Mirrors
+    /// `handle_undo` via the `actions_redo` ordering layer.
     pub fn handle_redo(&mut self, ctx: &egui::Context) {
-        if self.try_brush_redo(ctx) {
-            return;
-        }
         let has_selected = self.batch.has_any_selected();
         let current_id = self.batch.selected_item().map(|b| b.id);
         let mut redone = 0u32;
-        for item in &mut self.batch.items {
-            let target = if has_selected { item.selected } else { Some(item.id) == current_id };
-            if target && HistoryManager::redo_result(item) {
-                item.reset_result_caches();
+        let mut last_action: Option<ActionType> = None;
+        for idx in 0..self.batch.items.len() {
+            let target = if has_selected {
+                self.batch.items[idx].selected
+            } else {
+                Some(self.batch.items[idx].id) == current_id
+            };
+            if !target { continue; }
+            if let Some(action) = self.try_redo_one_action(idx) {
                 redone += 1;
+                last_action = Some(action);
             }
         }
         if redone > 0 {
             self.result_switch_id += 1;
+            self.canvas_switch_id += 1;
             self.sync_selected_batch_textures(ctx);
-            if redone == 1 {
-                self.toasts.info("Result restored");
-            } else {
-                self.toasts.info(format!("Restored {redone} images"));
+            let label: String = match (redone, last_action) {
+                (1, Some(ActionType::Stroke))       => "Stroke restored".into(),
+                (1, Some(ActionType::ClearStrokes)) => "Clear restored".into(),
+                (1, Some(ActionType::Result))       => "Result restored".into(),
+                (1, Some(ActionType::PresetApply))  => "Preset restored".into(),
+                (n, _)                              => format!("Restored {n} actions"),
+            };
+            self.toasts.info(label);
+        }
+    }
+
+    /// Pop the most-recent marker from `actions_undo` for item at `idx` and
+    /// apply the inverse. Skips orphan markers (result stack rotated oldest
+    /// out) and tries the next one. Returns the popped ActionType on success.
+    fn try_undo_one_action(&mut self, idx: usize) -> Option<ActionType> {
+        use super::item::ACTION_HIST_DEPTH;
+        loop {
+            let kind = self.batch.items[idx].actions_undo.pop_back()?;
+            let success = match kind {
+                ActionType::Stroke | ActionType::ClearStrokes => {
+                    if self.batch.items[idx].undo_stroke() {
+                        // Dispatch a rerun so the canvas reflects the popped state.
+                        // Gate: only inpaint / eraser models drive strokes as input.
+                        if self.settings.model.is_inpaint() {
+                            self.dispatch_inpaint_for_item(idx);
+                        } else {
+                            self.dispatch_brush_rerun(idx);
+                        }
+                        true
+                    } else {
+                        false
+                    }
+                }
+                ActionType::Result => {
+                    if HistoryManager::undo_result(&mut self.batch.items[idx]) {
+                        self.batch.items[idx].reset_result_caches();
+                        // Source view may now show the unprocessed source.
+                        self.batch.items[idx].source_texture = None;
+                        true
+                    } else {
+                        false
+                    }
+                }
+                ActionType::PresetApply => {
+                    HistoryManager::swap_preset(&mut self.batch.items[idx], HistoryDir::Undo)
+                }
+            };
+            if success {
+                let item = &mut self.batch.items[idx];
+                item.actions_redo.push_back(kind);
+                while item.actions_redo.len() > ACTION_HIST_DEPTH {
+                    item.actions_redo.pop_front();
+                }
+                return Some(kind);
             }
+            // Orphan marker — per-type stack empty (result stack rotation).
+            // Try the next action in the timeline.
         }
     }
 
-    /// If brush is active and the selected item has a stroke to undo,
-    /// pop it and dispatch a Tier 2 rerun. Returns `true` when handled.
-    fn try_brush_undo(&mut self, _ctx: &egui::Context) -> bool {
-        if !self.brush_state.is_enabled() {
-            return false;
-        }
-        let Some(idx) = self.batch.selected_idx_clamped() else { return false };
-        if !self.batch.items[idx].has_stroke_undo() {
-            return false;
-        }
-        if self.batch.items[idx].undo_stroke() {
-            self.dispatch_brush_rerun(idx);
-            self.toasts.info("Stroke undone");
-            true
-        } else {
-            false
-        }
-    }
-
-    fn try_brush_redo(&mut self, _ctx: &egui::Context) -> bool {
-        if !self.brush_state.is_enabled() {
-            return false;
-        }
-        let Some(idx) = self.batch.selected_idx_clamped() else { return false };
-        if !self.batch.items[idx].has_stroke_redo() {
-            return false;
-        }
-        if self.batch.items[idx].redo_stroke() {
-            self.dispatch_brush_rerun(idx);
-            self.toasts.info("Stroke restored");
-            true
-        } else {
-            false
+    /// Pop the most-recent marker from `actions_redo` for item at `idx` and
+    /// re-apply. Returns the popped ActionType on success.
+    fn try_redo_one_action(&mut self, idx: usize) -> Option<ActionType> {
+        use super::item::ACTION_HIST_DEPTH;
+        loop {
+            let kind = self.batch.items[idx].actions_redo.pop_back()?;
+            let success = match kind {
+                ActionType::Stroke | ActionType::ClearStrokes => {
+                    if self.batch.items[idx].redo_stroke() {
+                        if self.settings.model.is_inpaint() {
+                            self.dispatch_inpaint_for_item(idx);
+                        } else {
+                            self.dispatch_brush_rerun(idx);
+                        }
+                        true
+                    } else {
+                        false
+                    }
+                }
+                ActionType::Result => {
+                    if HistoryManager::redo_result(&mut self.batch.items[idx]) {
+                        self.batch.items[idx].reset_result_caches();
+                        true
+                    } else {
+                        false
+                    }
+                }
+                ActionType::PresetApply => {
+                    HistoryManager::swap_preset(&mut self.batch.items[idx], HistoryDir::Redo)
+                }
+            };
+            if success {
+                let item = &mut self.batch.items[idx];
+                item.actions_undo.push_back(kind);
+                while item.actions_undo.len() > ACTION_HIST_DEPTH {
+                    item.actions_undo.pop_front();
+                }
+                return Some(kind);
+            }
         }
     }
 
