@@ -2360,7 +2360,19 @@ impl PrunrApp {
         }
         let app_state = self.batch.app_state();
         if intents.remove_requested && matches!(app_state, AppState::Loaded | AppState::Done) {
-            self.handle_remove_bg();
+            // Eraser-mode (LaMa / SD inpaint family) repurposes Cmd+R as
+            // "reprocess stroke" — dispatches the current item's committed
+            // mask correction through the inpaint pipeline. Falls through
+            // to the seg pipeline only for non-inpaint backends.
+            if self.settings.model.is_inpaint() {
+                if let Some(idx) = self.batch.selected_idx_clamped() {
+                    if self.batch.items.get(idx).is_some_and(|i| i.mask_correction.is_some()) {
+                        self.dispatch_inpaint_for_item(idx);
+                    }
+                }
+            } else {
+                self.handle_remove_bg();
+            }
         }
         if intents.save_requested && app_state == AppState::Done {
             self.handle_save_selected();

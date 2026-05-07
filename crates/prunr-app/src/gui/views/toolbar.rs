@@ -139,21 +139,41 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
             // Process button — always visible. Clicking while a batch is
             // already running enqueues the new work on the worker bridge;
             // it runs once the current batch finishes (no auto-cancel).
+            //
+            // Eraser-mode (SD / LaMa / MI-GAN inpaint) repurposes Process
+            // as "Reprocess stroke": dispatch the current item's committed
+            // mask correction through the inpaint pipeline using the
+            // current toolbar settings. Enabled only when there's a stroke
+            // to reprocess. The seg pipeline (`handle_remove_bg`) doesn't
+            // apply to inpaint backends and was incorrectly hiding the
+            // canvas image when clicked here.
             {
+                let inpaint_mode = app.settings.model.is_inpaint();
+                let has_correction = app.batch.selected_item()
+                    .and_then(|i| i.mask_correction.as_ref())
+                    .is_some();
                 let label = app.batch.process_button_label();
-                // Enabled when at least one target exists and isn't already
-                // Processing. `any_target_can` is the no-alloc primitive —
-                // building `items_to_process()` here ran a `Vec<u64>::collect`
-                // every frame just to throw it away.
-                let has_processable = app.batch.any_target_can(|it|
-                    !matches!(it.status, BatchStatus::Processing)
-                );
+                // Seg pipeline gating: at least one target exists and isn't
+                // already Processing. `any_target_can` is the no-alloc
+                // primitive — building `items_to_process()` here ran a
+                // `Vec<u64>::collect` every frame just to throw it away.
+                let has_processable = if inpaint_mode {
+                    has_correction
+                } else {
+                    app.batch.any_target_can(|it|
+                        !matches!(it.status, BatchStatus::Processing)
+                    )
+                };
 
-                let (label_text, is_all) = match label {
-                    ProcessButtonLabel::ProcessViewed => ("Process".to_string(), false),
-                    ProcessButtonLabel::ProcessSelected(1) => ("Process 1 selected".to_string(), false),
-                    ProcessButtonLabel::ProcessSelected(n) => (format!("Process {n} selected"), false),
-                    ProcessButtonLabel::ProcessAll(n) => (format!("Process All [{n}]"), true),
+                let (label_text, is_all) = if inpaint_mode {
+                    ("Reprocess stroke".to_string(), false)
+                } else {
+                    match label {
+                        ProcessButtonLabel::ProcessViewed => ("Process".to_string(), false),
+                        ProcessButtonLabel::ProcessSelected(1) => ("Process 1 selected".to_string(), false),
+                        ProcessButtonLabel::ProcessSelected(n) => (format!("Process {n} selected"), false),
+                        ProcessButtonLabel::ProcessAll(n) => (format!("Process All [{n}]"), true),
+                    }
                 };
 
                 let text_color = if has_processable {
@@ -175,24 +195,38 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                     .corner_radius(theme::BUTTON_ROUNDING)
                     .min_size(egui::vec2(0.0, theme::BTN_HEIGHT));
 
-                let tooltip: std::borrow::Cow<'static, str> = match label {
-                    ProcessButtonLabel::ProcessAll(n) => format!("Process all {n} images ({}+R)", KB_MOD).into(),
-                    ProcessButtonLabel::ProcessSelected(n) if n > 1 => {
-                        format!("Process {n} selected images ({}+R)", KB_MOD).into()
+                let tooltip: std::borrow::Cow<'static, str> = if inpaint_mode {
+                    if has_correction {
+                        "Re-dispatch the current stroke through the inpaint model with the current toolbar settings (prompt / scheduler / steps / strength).".into()
+                    } else {
+                        "Paint a stroke first — Process re-dispatches the painted region with current settings.".into()
                     }
-                    _ => {
-                        let target_has_result = app.batch.first_target_item()
-                            .is_some_and(|i| i.result_rgba.is_some());
-                        if app.settings.chain_mode && target_has_result {
-                            kb!("Process current result", "R").into()
-                        } else {
-                            kb!("Process original", "R").into()
+                } else {
+                    match label {
+                        ProcessButtonLabel::ProcessAll(n) => format!("Process all {n} images ({}+R)", KB_MOD).into(),
+                        ProcessButtonLabel::ProcessSelected(n) if n > 1 => {
+                            format!("Process {n} selected images ({}+R)", KB_MOD).into()
+                        }
+                        _ => {
+                            let target_has_result = app.batch.first_target_item()
+                                .is_some_and(|i| i.result_rgba.is_some());
+                            if app.settings.chain_mode && target_has_result {
+                                kb!("Process current result", "R").into()
+                            } else {
+                                kb!("Process original", "R").into()
+                            }
                         }
                     }
                 };
 
                 if ui.add_enabled(has_processable, btn).on_hover_text(tooltip).clicked() {
-                    app.handle_remove_bg();
+                    if inpaint_mode {
+                        if let Some(idx) = app.batch.selected_idx_clamped() {
+                            app.dispatch_inpaint_for_item(idx);
+                        }
+                    } else {
+                        app.handle_remove_bg();
+                    }
                 }
             }
 
