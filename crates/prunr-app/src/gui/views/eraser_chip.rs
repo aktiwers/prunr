@@ -1,11 +1,9 @@
-//! SD-eraser toolbar chips: Quality preset, Scheduler, Steps,
+//! SD-eraser toolbar chips: Quality preset, Prompt, Scheduler, Steps,
 //! Karras toggle, Seed pin. Renders as a horizontal cluster on the
-//! inpaint-mode Row 2 — dropdown chips mirror `lines_popover`'s
+//! inpaint-mode Row 3 — dropdown chips mirror `lines_popover`'s
 //! pattern (chip-button + popover with selectable rows).
-//!
-//! Schedulers without a dispatch backend wired yet appear as greyed
-//! "(coming soon)" entries in the dropdowns. UI gating belt-and-
-//! braces with the `is_available()` check inside dispatch.
+
+use std::borrow::Cow;
 
 use egui::RichText;
 use egui_material_icons::icons::*;
@@ -14,6 +12,11 @@ use crate::gui::brush_state::{BrushSettings, SdQualityPreset, SdScheduler};
 use crate::gui::theme;
 
 use super::chip::{self, ChipMeta};
+
+/// Max chars of prompt text shown on the chip face before eliding with `…`.
+/// Keeps the chip narrow enough that the toolbar doesn't reflow as the
+/// user types.
+const PROMPT_PREVIEW_CHARS: usize = 18;
 
 #[derive(Default)]
 pub struct EraserRowChange {
@@ -72,29 +75,26 @@ fn render_quality_preset_chip(ui: &mut egui::Ui, brush: &mut BrushSettings) -> b
 fn render_prompt_chip(ui: &mut egui::Ui, brush: &mut BrushSettings) -> bool {
     let pop_id = egui::Id::new("eraser_prompt_popover");
     let lcm = brush.sd_scheduler == SdScheduler::Lcm;
+    let neg_color = if lcm { theme::TEXT_SECONDARY } else { theme::TEXT_PRIMARY };
 
-    // Chip label: short prompt preview when set, generic placeholder
-    // when empty. Truncate at 18 chars so the chip stays narrow.
-    let preview;
-    let label: &str = if brush.sd_prompt.is_empty() {
-        "Prompt"
+    // Single O(min(N, PREVIEW+1)) walk via `char_indices().nth` —
+    // borrows whole prompt when short, allocates only when eliding.
+    let label: Cow<'_, str> = if brush.sd_prompt.is_empty() {
+        Cow::Borrowed("Prompt")
     } else {
-        let trimmed: String = brush.sd_prompt.chars().take(18).collect();
-        preview = if brush.sd_prompt.chars().count() > 18 {
-            format!("{trimmed}…")
-        } else {
-            trimmed
-        };
-        &preview
+        match brush.sd_prompt.char_indices().nth(PROMPT_PREVIEW_CHARS) {
+            Some((byte_idx, _)) => Cow::Owned(format!("{}…", &brush.sd_prompt[..byte_idx])),
+            None => Cow::Borrowed(brush.sd_prompt.as_str()),
+        }
     };
     let resp = chip::chip_tooltip(
-        chip::chip_button(ui, ICON_EDIT_NOTE.codepoint, label, !brush.sd_prompt.is_empty()),
+        chip::chip_button(ui, ICON_EDIT_NOTE.codepoint, &label, !brush.sd_prompt.is_empty()),
         "Prompt",
         "Text prompt + negative + guidance. Empty prompt = unconditional inpaint (often noisy on flat surrounds).",
     );
     let mut changed = false;
     chip::popup_for(ui, pop_id, &resp, |ui| {
-        ui.set_min_width(360.0);
+        ui.set_min_width(theme::POPOVER_WIDTH_WIDE);
         ui.label(RichText::new("Prompt").strong().color(theme::TEXT_PRIMARY));
         let p = ui.add(
             egui::TextEdit::multiline(&mut brush.sd_prompt)
@@ -108,7 +108,6 @@ fn render_prompt_chip(ui: &mut egui::Ui, brush: &mut BrushSettings) -> bool {
         ui.add_space(theme::SPACE_SM);
 
         ui.add_enabled_ui(!lcm, |ui| {
-            let neg_color = if lcm { theme::TEXT_SECONDARY } else { theme::TEXT_PRIMARY };
             ui.label(RichText::new("Negative prompt").strong().color(neg_color));
             let np = ui.add(
                 egui::TextEdit::multiline(&mut brush.sd_negative_prompt)

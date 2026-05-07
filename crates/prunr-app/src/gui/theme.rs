@@ -175,6 +175,8 @@ pub const BTN_HEIGHT: f32 = 32.0;
 pub const CHIP_HEIGHT: f32 = 28.0;
 /// Shared popover width for chip / preset dropdowns.
 pub const POPOVER_WIDTH: f32 = 260.0;
+/// Wider popover for chips that host multi-line text (prompt + negative).
+pub const POPOVER_WIDTH_WIDE: f32 = 360.0;
 /// Default stroke width for widget borders and accent outlines.
 pub const STROKE_DEFAULT: f32 = 1.0;
 /// Icon glyph size on toolbar icon-buttons (settings gear, undo, redo).
