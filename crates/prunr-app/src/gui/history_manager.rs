@@ -494,4 +494,45 @@ mod tests {
         assert_eq!(item.settings.line_mode, LineMode::EdgesOnly);
         assert!(item.cached_edge_mask.is_none(), "line_mode change must invalidate edge cache");
     }
+
+    // ── Ordering-layer integration (actions_undo / actions_redo) ───────────
+
+    #[test]
+    fn archive_current_result_pushes_result_marker() {
+        let mut item = fixture(1);
+        item.status = BatchStatus::Done;
+        item.result_rgba = Some(rgba(5));
+
+        HistoryManager::archive_current_result(&mut item, 10, false);
+
+        assert_eq!(item.actions_undo.back(), Some(&crate::gui::item::ActionType::Result),
+            "archive_current_result must push a Result marker onto actions_undo");
+        assert!(item.actions_redo.is_empty(),
+            "archive_current_result must clear actions_redo");
+    }
+
+    #[test]
+    fn archive_current_result_no_marker_when_status_not_done() {
+        let mut item = fixture(1);
+        item.status = BatchStatus::Pending;
+        item.result_rgba = Some(rgba(5));
+
+        HistoryManager::archive_current_result(&mut item, 10, false);
+
+        assert!(item.actions_undo.is_empty(),
+            "no Result marker must be pushed when status is not Done");
+    }
+
+    #[test]
+    fn push_preset_pushes_preset_apply_marker_and_clears_actions_redo() {
+        let mut item = fixture(1);
+        item.actions_redo.push_back(crate::gui::item::ActionType::Stroke);
+
+        HistoryManager::push_preset(&mut item, snap(1.5));
+
+        assert_eq!(item.actions_undo.back(), Some(&crate::gui::item::ActionType::PresetApply),
+            "push_preset must push a PresetApply marker onto actions_undo");
+        assert!(item.actions_redo.is_empty(),
+            "push_preset must clear actions_redo");
+    }
 }
