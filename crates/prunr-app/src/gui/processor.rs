@@ -395,19 +395,16 @@ impl Processor {
                     guidance_scale: tuning.sd_guidance_scale,
                     seed: None,
                     use_taesd: false,
+                    use_lcm_scheduler: false,
                 }),
                 prunr_models::ModelId::SdV15LcmInpaintFp16 => Some(prunr_core::inpaint_sd::SdInpaintRequest {
                     prompt: tuning.sd_prompt.clone(),
                     negative_prompt: String::new(),
-                    // LCM was distilled for 1-8 step inference; 4 is the
-                    // canonical "fast preview" count, 8 is where quality
-                    // plateaus. ~30 s per stroke on iGPU vs 4 min for
-                    // standard SD — still a meaningful speed win, but
-                    // visibly cleaner output than 4-step.
                     num_inference_steps: 8,
                     guidance_scale: 1.0,
                     seed: None,
                     use_taesd: prunr_models::is_available(prunr_models::ModelId::TaesdFp16),
+                    use_lcm_scheduler: true,
                 }),
                 _ => None,
             };
