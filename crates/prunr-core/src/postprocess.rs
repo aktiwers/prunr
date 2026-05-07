@@ -92,7 +92,10 @@ fn tensor_to_mask_core(raw: ArrayView4<f32>, ow: u32, oh: u32, rgba_for_guided: 
 
     let use_sigmoid = matches!(model, ModelKind::BiRefNetLite);
 
-    // rembg models need min-max stats; BiRefNet uses sigmoid instead
+    // Both branches fold over the prediction values to get min/max for stretch.
+    // For rembg models the fold is over raw logits; for BiRefNet the fold is over
+    // sigmoid'd values — canonical rembg birefnet_general.py and BiRefNet/inference.py
+    // both apply (x - min) / (max - min) after sigmoid, not before.
     let (mi, range, uniform_val) = if !use_sigmoid {
         let (mi, ma) = pred.iter().cloned().fold(
             (f32::INFINITY, f32::NEG_INFINITY),
@@ -109,7 +112,19 @@ fn tensor_to_mask_core(raw: ArrayView4<f32>, ow: u32, oh: u32, rgba_for_guided: 
             (mi, r, None)
         }
     } else {
-        (0.0, 1.0, None)
+        // Fold over sigmoid'd logits to get the min/max for re-stretch.
+        let sigmoid = |x: f32| 1.0f32 / (1.0 + (-x).exp());
+        let (si_mi, si_ma) = pred.iter().cloned().fold(
+            (f32::INFINITY, f32::NEG_INFINITY),
+            |(lo, hi), v| { let s = sigmoid(v); (lo.min(s), hi.max(s)) },
+        );
+        let r = si_ma - si_mi;
+        if r < 1e-6 {
+            // Uniform sigmoid output — high confidence (>0.5) means foreground.
+            (si_mi, 1.0, Some(if si_ma > 0.5 { 1.0f32 } else { 0.0 }))
+        } else {
+            (si_mi, r, None)
+        }
     };
 
     let (sh, sw) = (pred.nrows(), pred.ncols());
@@ -126,7 +141,8 @@ fn tensor_to_mask_core(raw: ArrayView4<f32>, ow: u32, oh: u32, rgba_for_guided: 
     let inv_range = 1.0 / range;
     let normalize = |raw_val: f32| -> f32 {
         if use_sigmoid {
-            1.0 / (1.0 + (-raw_val).exp())
+            let s = 1.0 / (1.0 + (-raw_val).exp());
+            ((s - mi) * inv_range).clamp(0.0, 1.0)
         } else {
             ((raw_val - mi) * inv_range).clamp(0.0, 1.0)
         }
@@ -1032,5 +1048,38 @@ mod tests {
         // Bottom-right block (16..17, 16..17) samples at (16, 16).
         let expected_br = pre.get_pixel(16, 16).0;
         assert_eq!(img.get_pixel(16, 16).0[..3], expected_br[..3]);
+    }
+
+    /// BiRefNet sigmoid path must apply min-max stretch after sigmoid.
+    ///
+    /// A logit tensor that, after sigmoid, clusters in [0.35, 0.65] would
+    /// produce u8 values in [89, 166] without the stretch — never reaching
+    /// full black or white. With the stretch the output must span [0, 255].
+    #[test]
+    fn birefnet_sigmoid_stretch_reaches_full_range() {
+        // logit_lo → sigmoid ≈ 0.35, logit_hi → sigmoid ≈ 0.65
+        let logit_lo: f32 = -0.6190; // sigmoid(-0.619) ≈ 0.35
+        let logit_hi: f32 = 0.6190;  // sigmoid( 0.619) ≈ 0.65
+
+        let h = 4usize;
+        let w = 4usize;
+        let n = h * w;
+        // Alternate low/high logits so the tensor has both extremes.
+        let data: Vec<f32> = (0..n).map(|i| if i % 2 == 0 { logit_lo } else { logit_hi }).collect();
+        let raw = ndarray::Array4::from_shape_vec((1, 1, h, w), data).unwrap();
+
+        let original = solid_rgb(w as u32, h as u32);
+        let mask_settings = MaskSettings::default();
+        let opts = PostprocessOpts::new(&mask_settings, ModelKind::BiRefNetLite);
+        let mask = tensor_to_mask(raw.view(), &original, &opts);
+
+        let pixels: Vec<u8> = mask.pixels().map(|p| p[0]).collect();
+        let got_min = *pixels.iter().min().unwrap();
+        let got_max = *pixels.iter().max().unwrap();
+
+        // After stretch the extremes must reach near-0 and near-255.
+        // Allow a 2-gray tolerance for f32 rounding through the pipeline.
+        assert!(got_min <= 2,  "min after sigmoid stretch should be ≈0, got {got_min}");
+        assert!(got_max >= 253, "max after sigmoid stretch should be ≈255, got {got_max}");
     }
 }
