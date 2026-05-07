@@ -98,6 +98,12 @@ pub struct SdInpaintRequest {
     /// bundle is installed; if the bundle isn't installed yet, the
     /// dispatcher silently falls back to standard VAE.
     pub use_taesd: bool,
+    /// Use the LCM-specific noise scheduler. Required for the LCM
+    /// distilled bundle — LCM weights were trained for `LcmScheduler`'s
+    /// `c_skip/c_out` boundary-condition update formula, not DDIM's. The
+    /// step count is also LCM-tuned (4–8 typical) when this is true.
+    #[serde(default)]
+    pub use_lcm_scheduler: bool,
 }
 
 impl Default for SdInpaintRequest {
@@ -109,6 +115,7 @@ impl Default for SdInpaintRequest {
             guidance_scale: 1.0,
             seed: None,
             use_taesd: false,
+            use_lcm_scheduler: false,
         }
     }
 }
@@ -523,14 +530,19 @@ fn run_one_tile(
     drop(masked_latent);
     drop(mask_latent);
 
-    let scheduler = DdimScheduler::new_sd15(req.num_inference_steps as usize);
+    let scheduler = if req.use_lcm_scheduler {
+        Scheduler::Lcm(LcmScheduler::new_sd15(req.num_inference_steps as usize))
+    } else {
+        Scheduler::Ddim(DdimScheduler::new_sd15(req.num_inference_steps as usize))
+    };
     let seed = req.seed.unwrap_or_else(|| {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos() as u64)
             .unwrap_or(0)
     });
-    let mut latent = sample_initial_noise(seed, &scheduler);
+    let mut rng = ChaCha8Rng::seed_from_u64(seed);
+    let mut latent = sample_initial_noise(&mut rng);
 
     // Denoising loop. With CFG: noise_pred = uncond + scale * (cond - uncond).
     // Without CFG: just one UNet pass with cond.
@@ -592,7 +604,8 @@ fn run_one_tile(
             unet_step(bundle, latent_in_f16, t, &text_emb_cond_f16)?
         };
         let t_prev = timesteps.get(i + 1).copied().unwrap_or(-1);
-        latent = step_array(&scheduler, &latent, &noise_pred, t, t_prev);
+        let is_final = i + 1 == timesteps.len();
+        latent = step_array(&scheduler, &latent, &noise_pred, t, t_prev, is_final, &mut rng);
     }
 
     let painted = vae_decode(vae, &latent)?;
@@ -1560,14 +1573,13 @@ fn concat_inpaint_input_f16(
 /// For DDIM with the SD 1.5 schedule, that's 1.0 — the latent itself
 /// starts as plain N(0, 1). Pad here so future schedulers (Euler, DPM++)
 /// that need a different sigma can plug in via the scheduler API.
-fn sample_initial_noise(seed: u64, _scheduler: &DdimScheduler) -> Array4<f32> {
+fn sample_initial_noise(rng: &mut ChaCha8Rng) -> Array4<f32> {
     let l = SD_LATENT_SIDE as usize;
-    let mut rng = ChaCha8Rng::seed_from_u64(seed);
     let dist = StandardNormal;
     let n = 4 * l * l;
     let mut buf = Vec::with_capacity(n);
     for _ in 0..n {
-        let v: f32 = dist.sample(&mut rng);
+        let v: f32 = dist.sample(rng);
         buf.push(v);
     }
     Array4::from_shape_vec((1, 4, l, l), buf)
@@ -1618,17 +1630,34 @@ fn cfg_blend(
 /// Apply DDIM step element-wise to flat-Vec representations of the
 /// 4D arrays. Avoids one round-trip through Vec<f32> + reshape.
 fn step_array(
-    scheduler: &DdimScheduler,
+    scheduler: &Scheduler,
     latent_t: &Array4<f32>,
     noise_pred: &Array4<f32>,
     t: i64,
     t_prev: i64,
+    is_final_step: bool,
+    rng: &mut ChaCha8Rng,
 ) -> Array4<f32> {
     // extract_4d returns Array4 via mapv/to_owned, which always produces
     // standard C layout; as_slice() is infallible on those.
     let lat = latent_t.as_slice().expect("latent: standard layout");
     let eps = noise_pred.as_slice().expect("noise pred: standard layout");
-    let next = scheduler.step(lat, eps, t, t_prev);
+    let next = match scheduler {
+        Scheduler::Ddim(s) => s.step(lat, eps, t, t_prev),
+        Scheduler::Lcm(s) => {
+            if is_final_step {
+                s.step(lat, eps, t, true, &[])
+            } else {
+                // LCM mixes Gaussian noise back in on every non-final
+                // step. Sample from the same seeded RNG that drove the
+                // initial latent so the whole denoise stays
+                // reproducible from `seed`.
+                let dist = StandardNormal;
+                let noise: Vec<f32> = (0..lat.len()).map(|_| dist.sample(rng)).collect();
+                s.step_at(lat, eps, t, t_prev, &noise)
+            }
+        }
+    };
     Array4::from_shape_vec(latent_t.dim(), next)
         .expect("shape unchanged from input")
 }
@@ -1841,6 +1870,222 @@ impl DdimScheduler {
     }
 }
 
+/// LCM (Latent Consistency Model) scheduler — port of HuggingFace
+/// Diffusers' `LCMScheduler` for the SD-1.5 LCM distilled checkpoint.
+///
+/// Differs from DDIM in two ways that matter for our use case:
+///
+/// 1. **Timestep schedule** is *subsampled* from a fixed
+///    `original_inference_steps` skip-step grid (default 50 against
+///    1000 train timesteps), then evenly sampled down to
+///    `num_inference_steps`. DDIM uses a uniform descending grid.
+/// 2. **Step formula** uses a boundary-condition consistency function
+///    `c_skip / c_out` derived from `sigma_data` and a scaled timestep,
+///    mixing the predicted-x0 and the current sample. DDIM uses the
+///    standard `√α x₀ + √(1-α) ε` formula.
+///
+/// LCM weights were *trained* against this update formula. Plugging
+/// LCM weights into DDIM produces drift at every step (the noise
+/// prediction is calibrated for one math, applied via another) — the
+/// over-sharp / off-subject failures we saw on Fast Mode.
+///
+/// Reference: HuggingFace `diffusers/schedulers/scheduling_lcm.py`,
+/// LCM paper arXiv:2310.04378.
+pub struct LcmScheduler {
+    alphas_cumprod: Vec<f32>,
+    timesteps: Vec<i64>,
+    pub num_train: usize,
+    pub num_inference: usize,
+    /// Hard-coded fixed value per LCM paper.
+    sigma_data: f32,
+    /// Multiplier applied to `t` before computing `c_skip`/`c_out`.
+    /// Diffusers default 10.0.
+    timestep_scaling: f32,
+}
+
+impl LcmScheduler {
+    pub fn new_sd15(num_inference: usize) -> Self {
+        const NUM_TRAIN: usize = 1000;
+        const ORIGINAL_INFERENCE_STEPS: usize = 50;
+        const BETA_START: f32 = 0.00085;
+        const BETA_END: f32 = 0.012;
+
+        // Same beta schedule as SD-1.5 DDIM: scaled_linear.
+        let sqrt_start = BETA_START.sqrt();
+        let sqrt_end = BETA_END.sqrt();
+        let mut betas = Vec::with_capacity(NUM_TRAIN);
+        for i in 0..NUM_TRAIN {
+            let t = i as f32 / (NUM_TRAIN as f32 - 1.0);
+            let b = sqrt_start + (sqrt_end - sqrt_start) * t;
+            betas.push(b * b);
+        }
+        let alphas: Vec<f32> = betas.iter().map(|b| 1.0 - b).collect();
+        let mut alphas_cumprod = Vec::with_capacity(NUM_TRAIN);
+        let mut acc = 1.0_f32;
+        for a in &alphas {
+            acc *= *a;
+            alphas_cumprod.push(acc);
+        }
+
+        // Diffusers' LCMScheduler timestep selection:
+        //   k = num_train / original_inference_steps  (= 20 for SD-1.5)
+        //   lcm_origin = [(i+1)*k - 1 for i in 0..original_inference_steps]
+        //                = [19, 39, 59, ..., 999]
+        //   Reverse to descending order: [999, 979, 959, ..., 19]
+        //   Pick `num_inference` indices via floor(linspace(0, len, num,
+        //   endpoint=False)) into the reversed array.
+        let k = NUM_TRAIN / ORIGINAL_INFERENCE_STEPS;
+        let lcm_origin: Vec<i64> = (0..ORIGINAL_INFERENCE_STEPS)
+            .map(|i| ((i + 1) * k - 1) as i64)
+            .collect();
+        let lcm_origin_descending: Vec<i64> = lcm_origin.iter().rev().copied().collect();
+        let n_origin = lcm_origin_descending.len() as f32;
+        let n_inf = num_inference as f32;
+        let timesteps: Vec<i64> = (0..num_inference)
+            .map(|i| {
+                // linspace(0, n_origin, num=n_inf, endpoint=False) → step = n_origin / n_inf
+                let idx = ((i as f32) * n_origin / n_inf).floor() as usize;
+                lcm_origin_descending[idx.min(lcm_origin_descending.len() - 1)]
+            })
+            .collect();
+
+        Self {
+            alphas_cumprod,
+            timesteps,
+            num_train: NUM_TRAIN,
+            num_inference,
+            sigma_data: 0.5,
+            timestep_scaling: 10.0,
+        }
+    }
+
+    pub fn timesteps(&self) -> &[i64] {
+        &self.timesteps
+    }
+
+    pub fn alpha_cumprod(&self, t: i64) -> f32 {
+        let idx = t.clamp(0, self.num_train as i64 - 1) as usize;
+        self.alphas_cumprod[idx]
+    }
+
+    /// LCM consistency-function update. `noise_for_step` is the Gaussian
+    /// noise to mix in for the non-final-step stochastic term — caller
+    /// supplies it from a seeded RNG so the whole denoise is
+    /// deterministic from `(seed, prompt, mask)`. Pass an empty / zero
+    /// slice on the final step (it's unused there).
+    pub fn step(
+        &self,
+        latent_t: &[f32],
+        noise_pred: &[f32],
+        t: i64,
+        is_final_step: bool,
+        noise_for_step: &[f32],
+    ) -> Vec<f32> {
+        debug_assert_eq!(latent_t.len(), noise_pred.len(),
+            "LCM step: latent and noise_pred shapes must match");
+
+        let alpha_t = self.alpha_cumprod(t);
+        let beta_t = 1.0 - alpha_t;
+        let sqrt_alpha_t = alpha_t.sqrt();
+        let sqrt_beta_t = beta_t.sqrt();
+
+        // Boundary-condition coefficients. `scaled_t` rescales the raw
+        // timestep into the consistency-function space the LCM weights
+        // were trained against.
+        let scaled_t = (t as f32) * self.timestep_scaling;
+        let sigma2 = self.sigma_data * self.sigma_data;
+        let c_skip = sigma2 / (scaled_t * scaled_t + sigma2);
+        let c_out = scaled_t / (scaled_t * scaled_t + sigma2).sqrt();
+
+        // Standard ε-prediction → x₀ formula (same as DDIM).
+        // Then mix predicted-x0 with current sample via c_out / c_skip.
+        if is_final_step {
+            // Final step: no stochastic noise injection.
+            latent_t.iter().zip(noise_pred.iter())
+                .map(|(&l, &eps)| {
+                    let pred_x0 = (l - sqrt_beta_t * eps) / sqrt_alpha_t;
+                    c_out * pred_x0 + c_skip * l
+                })
+                .collect()
+        } else {
+            debug_assert_eq!(noise_for_step.len(), latent_t.len(),
+                "LCM step: noise_for_step length must match latent on non-final step");
+            // For the next step's α̅, we look up in the train-timestep
+            // grid using the *next* inference timestep. But we don't
+            // have direct access to t_prev here; the dispatcher builds
+            // a noise tensor sized for this and the formula collapses
+            // alpha_prev/sqrt(beta_prev) back into the latent via the
+            // denoised-then-renoise pattern.
+            //
+            // Diffusers does:
+            //   denoised = c_out * pred_x0 + c_skip * sample
+            //   prev = sqrt(alpha_prev) * denoised + sqrt(beta_prev) * noise
+            //
+            // We expose alpha_prev via `lcm_step_at` below for callers
+            // that need the prev-timestep math. This `step` defaults to
+            // alpha_prev=1.0 for the final step which gets handled by
+            // `is_final_step=true`; non-final uses `lcm_step_at`.
+            unreachable!("non-final LCM step: caller must use lcm_step_at with t_prev")
+        }
+    }
+
+    /// Non-final-step variant that takes the previous inference
+    /// timestep so we can sample correctly into the next noise level.
+    pub fn step_at(
+        &self,
+        latent_t: &[f32],
+        noise_pred: &[f32],
+        t: i64,
+        t_prev: i64,
+        noise_for_step: &[f32],
+    ) -> Vec<f32> {
+        debug_assert_eq!(latent_t.len(), noise_pred.len(),
+            "LCM step_at: latent and noise_pred shapes must match");
+        debug_assert_eq!(noise_for_step.len(), latent_t.len(),
+            "LCM step_at: noise_for_step length must match latent");
+
+        let alpha_t = self.alpha_cumprod(t);
+        let beta_t = 1.0 - alpha_t;
+        let sqrt_alpha_t = alpha_t.sqrt();
+        let sqrt_beta_t = beta_t.sqrt();
+
+        let scaled_t = (t as f32) * self.timestep_scaling;
+        let sigma2 = self.sigma_data * self.sigma_data;
+        let c_skip = sigma2 / (scaled_t * scaled_t + sigma2);
+        let c_out = scaled_t / (scaled_t * scaled_t + sigma2).sqrt();
+
+        let alpha_prev = if t_prev < 0 { 1.0 } else { self.alpha_cumprod(t_prev) };
+        let sqrt_alpha_prev = alpha_prev.sqrt();
+        let sqrt_beta_prev = (1.0 - alpha_prev).sqrt();
+
+        latent_t.iter()
+            .zip(noise_pred.iter())
+            .zip(noise_for_step.iter())
+            .map(|((&l, &eps), &n)| {
+                let pred_x0 = (l - sqrt_beta_t * eps) / sqrt_alpha_t;
+                let denoised = c_out * pred_x0 + c_skip * l;
+                sqrt_alpha_prev * denoised + sqrt_beta_prev * n
+            })
+            .collect()
+    }
+}
+
+/// Runtime-selected scheduler for SD denoise. LCM bundles need
+/// `LcmScheduler` (different math); standard SD uses `DdimScheduler`.
+pub enum Scheduler {
+    Ddim(DdimScheduler),
+    Lcm(LcmScheduler),
+}
+
+impl Scheduler {
+    pub fn timesteps(&self) -> &[i64] {
+        match self {
+            Scheduler::Ddim(s) => s.timesteps(),
+            Scheduler::Lcm(s) => s.timesteps(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1896,6 +2141,109 @@ mod tests {
         for (i, &n) in next.iter().enumerate() {
             let expected = (latent[i] - (1.0 - alpha_t).sqrt() * noise[i]) / alpha_t.sqrt();
             assert!((n - expected).abs() < 1e-5, "step[{i}] = {n}, expected {expected}");
+        }
+    }
+
+    /// LCM timestep schedule matches Diffusers' subsampling pattern: pick
+    /// every k-th index from the reversed `lcm_origin_timesteps`. Values
+    /// computed by running Diffusers' Python `LCMScheduler.set_timesteps(8)`
+    /// and copying the resulting tensor.
+    #[test]
+    fn lcm_timesteps_match_diffusers_reference_for_8_steps() {
+        let s = LcmScheduler::new_sd15(8);
+        let t = s.timesteps();
+        assert_eq!(t.len(), 8);
+        // Reversed lcm_origin = [999, 979, 959, 939, ..., 19].
+        // For 8 inference steps, indices = floor(linspace(0, 50, 8, endpoint=False))
+        //                               = [0, 6, 12, 18, 25, 31, 37, 43]
+        // → reversed[indices] = [999, 879, 759, 639, 499, 379, 259, 139]
+        assert_eq!(t, &[999, 879, 759, 639, 499, 379, 259, 139],
+            "LCM 8-step timesteps must match Diffusers reference");
+    }
+
+    /// LCM timesteps must descend (driving denoising from high noise
+    /// to low) — same direction contract as DDIM. A regression here
+    /// would silently invert the noise schedule.
+    #[test]
+    fn lcm_timesteps_descend_strictly() {
+        let s = LcmScheduler::new_sd15(8);
+        for w in s.timesteps().windows(2) {
+            assert!(w[0] > w[1], "timesteps must descend: {} → {}", w[0], w[1]);
+        }
+    }
+
+    /// LCM and DDIM share the same beta schedule (scaled_linear,
+    /// β_start=0.00085, β_end=0.012). A regression in the beta
+    /// computation would diverge α̅ between schedulers, silently
+    /// breaking LCM math.
+    #[test]
+    fn lcm_alphas_cumprod_match_ddim() {
+        let lcm = LcmScheduler::new_sd15(8);
+        let ddim = DdimScheduler::new_sd15(20);
+        for &t in &[0_i64, 100, 500, 999] {
+            let l = lcm.alpha_cumprod(t);
+            let d = ddim.alpha_cumprod(t);
+            assert!((l - d).abs() < 1e-7,
+                "α̅[{t}] mismatch: LCM={l}, DDIM={d}");
+        }
+    }
+
+    /// Final-step LCM reduces to `c_out * pred_x0 + c_skip * sample`
+    /// — no noise injection. The math is equivalent to DDIM's
+    /// `t_prev = -1` collapse-to-x0 in spirit (deterministic), but
+    /// scaled by the consistency-function coefficients. This test
+    /// verifies the formula directly so a regression in the LCM
+    /// boundary conditions is loud.
+    #[test]
+    fn lcm_final_step_matches_consistency_formula() {
+        let s = LcmScheduler::new_sd15(4);
+        let latent = vec![0.5_f32; 4];
+        let noise = vec![0.1_f32; 4];
+        let t = 500_i64;
+        let next = s.step(&latent, &noise, t, true, &[]);
+
+        let alpha_t = s.alpha_cumprod(t);
+        let beta_t = 1.0 - alpha_t;
+        let scaled_t = (t as f32) * 10.0;
+        let sigma2 = 0.25_f32;
+        let c_skip = sigma2 / (scaled_t * scaled_t + sigma2);
+        let c_out = scaled_t / (scaled_t * scaled_t + sigma2).sqrt();
+
+        for (i, &n) in next.iter().enumerate() {
+            let pred_x0 = (latent[i] - beta_t.sqrt() * noise[i]) / alpha_t.sqrt();
+            let expected = c_out * pred_x0 + c_skip * latent[i];
+            assert!((n - expected).abs() < 1e-5,
+                "lcm final step[{i}] = {n}, expected {expected}");
+        }
+    }
+
+    /// Non-final LCM step adds the stochastic `√β_prev · noise` term
+    /// on top of the consistency-function denoise. With zero noise
+    /// input, the formula collapses to `√α_prev · denoised`, giving
+    /// us a clean reference to verify against.
+    #[test]
+    fn lcm_step_at_with_zero_noise_collapses_to_alpha_prev_scaled_denoise() {
+        let s = LcmScheduler::new_sd15(8);
+        let latent = vec![0.5_f32; 4];
+        let noise_pred = vec![0.1_f32; 4];
+        let zero_noise = vec![0.0_f32; 4];
+        let t = 500_i64;
+        let t_prev = 379_i64;
+        let next = s.step_at(&latent, &noise_pred, t, t_prev, &zero_noise);
+
+        let alpha_t = s.alpha_cumprod(t);
+        let alpha_prev = s.alpha_cumprod(t_prev);
+        let scaled_t = (t as f32) * 10.0;
+        let sigma2 = 0.25_f32;
+        let c_skip = sigma2 / (scaled_t * scaled_t + sigma2);
+        let c_out = scaled_t / (scaled_t * scaled_t + sigma2).sqrt();
+
+        for (i, &n) in next.iter().enumerate() {
+            let pred_x0 = (latent[i] - (1.0 - alpha_t).sqrt() * noise_pred[i]) / alpha_t.sqrt();
+            let denoised = c_out * pred_x0 + c_skip * latent[i];
+            let expected = alpha_prev.sqrt() * denoised;  // zero-noise → β_prev term vanishes
+            assert!((n - expected).abs() < 1e-5,
+                "lcm step_at zero-noise[{i}] = {n}, expected {expected}");
         }
     }
 
@@ -2038,11 +2386,13 @@ mod tests {
 
     #[test]
     fn sample_initial_noise_is_deterministic_with_seed() {
-        let s = DdimScheduler::new_sd15(20);
-        let a = sample_initial_noise(42, &s);
-        let b = sample_initial_noise(42, &s);
+        let mut r1 = ChaCha8Rng::seed_from_u64(42);
+        let mut r2 = ChaCha8Rng::seed_from_u64(42);
+        let mut r3 = ChaCha8Rng::seed_from_u64(43);
+        let a = sample_initial_noise(&mut r1);
+        let b = sample_initial_noise(&mut r2);
         assert_eq!(a, b, "same seed must give identical noise");
-        let c = sample_initial_noise(43, &s);
+        let c = sample_initial_noise(&mut r3);
         assert_ne!(a, c, "different seed must give different noise");
     }
 
@@ -2214,8 +2564,8 @@ mod tests {
 
     #[test]
     fn sample_initial_noise_has_correct_shape() {
-        let s = DdimScheduler::new_sd15(20);
-        let n = sample_initial_noise(0, &s);
+        let mut rng = ChaCha8Rng::seed_from_u64(0);
+        let n = sample_initial_noise(&mut rng);
         assert_eq!(n.shape(), &[1, 4, SD_LATENT_SIDE as usize, SD_LATENT_SIDE as usize]);
     }
 
