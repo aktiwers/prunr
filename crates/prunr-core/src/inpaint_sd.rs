@@ -1998,7 +1998,9 @@ impl DdimScheduler {
         debug_assert_eq!(latent_t.len(), noise_pred.len(),
             "DDIM step: latent and noise_pred shapes must match");
         let alpha_t = self.alpha_cumprod(t);
-        let alpha_prev = if t_prev < 0 { 1.0 } else { self.alpha_cumprod(t_prev) };
+        // SD-1.5 ships set_alpha_to_one=false; final-step alpha_prev =
+        // alphas_cumprod[0] (≈0.99915), not 1.0.
+        let alpha_prev = if t_prev < 0 { self.alpha_cumprod(0) } else { self.alpha_cumprod(t_prev) };
         let sqrt_alpha_t = alpha_t.sqrt();
         let sqrt_one_minus_alpha_t = (1.0 - alpha_t).sqrt();
         let sqrt_alpha_prev = alpha_prev.sqrt();
@@ -2156,7 +2158,9 @@ impl LcmScheduler {
         let sqrt_beta_t = (1.0 - alpha_t).sqrt();
         let (c_skip, c_out) = self.consistency_coefficients(t);
 
-        let alpha_prev = if t_prev < 0 { 1.0 } else { self.alpha_cumprod(t_prev) };
+        // SD-1.5 ships set_alpha_to_one=false; final-step alpha_prev =
+        // alphas_cumprod[0] (≈0.99915), not 1.0.
+        let alpha_prev = if t_prev < 0 { self.alpha_cumprod(0) } else { self.alpha_cumprod(t_prev) };
         let sqrt_alpha_prev = alpha_prev.sqrt();
         let sqrt_beta_prev = (1.0 - alpha_prev).sqrt();
 
@@ -2589,15 +2593,45 @@ mod tests {
     }
 
     #[test]
-    fn ddim_step_at_t_prev_neg_one_collapses_to_clean_x0() {
+    fn ddim_step_at_t_prev_neg_one_uses_alphas_cumprod_zero() {
+        // set_alpha_to_one=false: final step uses alphas_cumprod[0], not 1.0.
         let s = DdimScheduler::new_sd15(20);
         let latent = vec![0.5, 0.6, 0.7, 0.8];
         let noise = vec![0.1, 0.1, 0.1, 0.1];
         let alpha_t = s.alpha_cumprod(500);
+        let alpha_prev = s.alpha_cumprod(0);
         let next = s.step(&latent, &noise, 500, -1);
         for (i, &n) in next.iter().enumerate() {
-            let expected = (latent[i] - (1.0 - alpha_t).sqrt() * noise[i]) / alpha_t.sqrt();
+            let pred_x0 = (latent[i] - (1.0 - alpha_t).sqrt() * noise[i]) / alpha_t.sqrt();
+            let expected = alpha_prev.sqrt() * pred_x0 + (1.0 - alpha_prev).sqrt() * noise[i];
             assert!((n - expected).abs() < 1e-5, "step[{i}] = {n}, expected {expected}");
+        }
+    }
+
+    /// Pins the invariant: DDIM with t_prev=-1 uses alphas_cumprod[0] (≈0.99915),
+    /// not 1.0. Verifies both that the result differs from the 1.0 baseline AND
+    /// matches the expected per-element computation, so any regression is caught.
+    #[test]
+    fn ddim_final_step_uses_alphas_cumprod_zero_not_one() {
+        let s = DdimScheduler::new_sd15(20);
+        let latent = vec![0.3_f32, -0.4, 0.8, 0.1];
+        let noise_pred = vec![0.05_f32, 0.05, 0.05, 0.05];
+        let t = 500_i64;
+        let alpha_t = s.alpha_cumprod(t);
+        let alpha_prev = s.alpha_cumprod(0);
+
+        let next = s.step(&latent, &noise_pred, t, -1);
+
+        for (i, &n) in next.iter().enumerate() {
+            let pred_x0 = (latent[i] - (1.0 - alpha_t).sqrt() * noise_pred[i]) / alpha_t.sqrt();
+            let expected_correct = alpha_prev.sqrt() * pred_x0
+                + (1.0 - alpha_prev).sqrt() * noise_pred[i];
+            // If the old 1.0 path were taken the result would be just pred_x0.
+            let expected_wrong = pred_x0;
+            assert!((n - expected_correct).abs() < 1e-5,
+                "step[{i}] = {n}, expected alphas_cumprod[0]-based {expected_correct}");
+            assert!((n - expected_wrong).abs() > 1e-6,
+                "step[{i}] = {n} matches the wrong 1.0-based result — regression?");
         }
     }
 
