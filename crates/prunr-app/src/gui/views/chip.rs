@@ -206,7 +206,7 @@ pub(super) fn chip_tooltip(resp: Response, label: &str, body: &str) -> Response 
 }
 
 /// Render the standard reset-to-default button at the bottom of a popover.
-fn reset_button(ui: &mut Ui, tooltip: &str) -> bool {
+pub(super) fn reset_button(ui: &mut Ui, tooltip: &str) -> bool {
     ui.small_button(
         RichText::new(format!("{}  Reset", ICON_RESTART_ALT.codepoint))
             .color(theme::TEXT_SECONDARY)

@@ -8,7 +8,11 @@
 use egui::RichText;
 use egui_material_icons::icons::*;
 
-use crate::gui::brush_state::{BrushSettings, SdQualityPreset, SdScheduler};
+use crate::gui::brush_state::{
+    BrushSettings, SdQualityPreset, SdScheduler,
+    DEFAULT_SD_NEGATIVE_PROMPT, DEFAULT_SD_PROMPT,
+    default_cfg,
+};
 use crate::gui::theme;
 
 use super::chip::{self, ChipMeta};
@@ -145,18 +149,14 @@ fn render_prompt_chip(ui: &mut egui::Ui, brush: &mut BrushSettings) -> bool {
         ui.add_space(theme::SPACE_SM);
         ui.separator();
         ui.add_space(theme::SPACE_XS);
-        let defaults = BrushSettings::default();
-        let already_default = brush.sd_prompt == defaults.sd_prompt
-            && brush.sd_negative_prompt == defaults.sd_negative_prompt
-            && (brush.sd_guidance_scale - defaults.sd_guidance_scale).abs() < 1e-3;
+        let already_default = brush.sd_prompt == DEFAULT_SD_PROMPT
+            && brush.sd_negative_prompt == DEFAULT_SD_NEGATIVE_PROMPT
+            && (brush.sd_guidance_scale - default_cfg()).abs() < 1e-3;
         ui.add_enabled_ui(!already_default, |ui| {
-            if ui.button("Reset to default prompt")
-                .on_hover_text("Restore Prompt + Negative + Guidance to the shipped defaults.")
-                .clicked()
-            {
-                brush.sd_prompt = defaults.sd_prompt;
-                brush.sd_negative_prompt = defaults.sd_negative_prompt;
-                brush.sd_guidance_scale = defaults.sd_guidance_scale;
+            if chip::reset_button(ui, "Restore Prompt + Negative + Guidance to the shipped defaults.") {
+                brush.sd_prompt = DEFAULT_SD_PROMPT.to_string();
+                brush.sd_negative_prompt = DEFAULT_SD_NEGATIVE_PROMPT.to_string();
+                brush.sd_guidance_scale = default_cfg();
                 changed = true;
             }
         });
