@@ -1,9 +1,9 @@
-//! SD-eraser toolbar chips: Quality preset, Prompt, Scheduler, Steps,
-//! Karras toggle, Seed pin. Renders as a horizontal cluster on the
-//! inpaint-mode Row 3 — dropdown chips mirror `lines_popover`'s
-//! pattern (chip-button + popover with selectable rows).
-
-use std::borrow::Cow;
+//! SD-eraser toolbar chips: Quality / Scheduler / Steps / Karras /
+//! Seed / Prompt. Renders as a horizontal cluster inline in Row 2
+//! next to the model dropdown — dropdown chips mirror
+//! `lines_popover`'s pattern (chip-button + popover with selectable
+//! rows). Karras only renders for schedulers that accept the toggle
+//! (UniPc, EulerA).
 
 use egui::RichText;
 use egui_material_icons::icons::*;
@@ -12,11 +12,6 @@ use crate::gui::brush_state::{BrushSettings, SdQualityPreset, SdScheduler};
 use crate::gui::theme;
 
 use super::chip::{self, ChipMeta};
-
-/// Max chars of prompt text shown on the chip face before eliding with `…`.
-/// Keeps the chip narrow enough that the toolbar doesn't reflow as the
-/// user types.
-const PROMPT_PREVIEW_CHARS: usize = 18;
 
 #[derive(Default)]
 pub struct EraserRowChange {
@@ -28,11 +23,17 @@ pub fn render(ui: &mut egui::Ui, brush: &mut BrushSettings) -> EraserRowChange {
     let mut change = EraserRowChange::default();
     ui.horizontal(|ui| {
         change.committed |= render_quality_preset_chip(ui, brush);
-        change.committed |= render_prompt_chip(ui, brush);
         change.committed |= render_scheduler_chip(ui, brush);
         change.committed |= render_steps_chip(ui, brush);
-        change.committed |= render_karras_chip(ui, brush);
+        // Karras toggle is meaningful only for the schedulers that
+        // accept Karras-on-or-off (UniPC, Euler-A). LCM has its own
+        // fixed schedule; DDIM and DPM++ 2M Karras are pinned to one
+        // setting in this build.
+        if matches!(brush.sd_scheduler, SdScheduler::UniPc | SdScheduler::EulerA) {
+            change.committed |= render_karras_chip(ui, brush);
+        }
         change.committed |= render_seed_chip(ui, brush);
+        change.committed |= render_prompt_chip(ui, brush);
     });
     change
 }
@@ -77,18 +78,8 @@ fn render_prompt_chip(ui: &mut egui::Ui, brush: &mut BrushSettings) -> bool {
     let lcm = brush.sd_scheduler == SdScheduler::Lcm;
     let neg_color = if lcm { theme::TEXT_SECONDARY } else { theme::TEXT_PRIMARY };
 
-    // Single O(min(N, PREVIEW+1)) walk via `char_indices().nth` —
-    // borrows whole prompt when short, allocates only when eliding.
-    let label: Cow<'_, str> = if brush.sd_prompt.is_empty() {
-        Cow::Borrowed("Prompt")
-    } else {
-        match brush.sd_prompt.char_indices().nth(PROMPT_PREVIEW_CHARS) {
-            Some((byte_idx, _)) => Cow::Owned(format!("{}…", &brush.sd_prompt[..byte_idx])),
-            None => Cow::Borrowed(brush.sd_prompt.as_str()),
-        }
-    };
     let resp = chip::chip_tooltip(
-        chip::chip_button(ui, ICON_EDIT_NOTE.codepoint, &label, !brush.sd_prompt.is_empty()),
+        chip::chip_button(ui, ICON_EDIT_NOTE.codepoint, "Prompt", !brush.sd_prompt.is_empty()),
         "Prompt",
         "Text prompt + negative + guidance. Empty prompt = unconditional inpaint (often noisy on flat surrounds).",
     );
@@ -231,7 +222,7 @@ fn render_seed_chip(ui: &mut egui::Ui, brush: &mut BrushSettings) -> bool {
     let resp = chip::chip_tooltip(
         chip::chip_button(ui, icon, label, pinned),
         "Seed",
-        "Click to pin / un-pin the RNG seed. Pinned = same output across strokes; useful for A/B testing prompts.",
+        "Random by default — every stroke explores a different fill. Click to pin a single seed; the same prompt + scheduler + steps will then produce the exact same fill across strokes (useful for tweaking the prompt while comparing to a previous result, or for re-running an inpaint reproducibly).",
     );
     if resp.clicked() {
         brush.sd_seed = if pinned {
