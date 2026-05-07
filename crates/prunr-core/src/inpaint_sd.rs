@@ -1496,12 +1496,12 @@ fn f32_to_f16_3d(arr: &Array3<f32>) -> Array3<f16> {
     arr.mapv(f16::from_f32)
 }
 
-fn f32_to_f16_4d(arr: &Array4<f32>) -> Array4<f16> {
-    arr.mapv(f16::from_f32)
-}
-
 fn f32_to_f16_view(view: ndarray::ArrayView4<'_, f32>) -> Array4<f16> {
     view.mapv(f16::from_f32)
+}
+
+fn f32_to_f16_4d(arr: &Array4<f32>) -> Array4<f16> {
+    f32_to_f16_view(arr.view())
 }
 
 /// Try f32 first, fall back to f16; either way return f32 ndarray.
@@ -1933,11 +1933,14 @@ fn compute_alphas_cumprod_sd15() -> Vec<f32> {
 /// Per-train-timestep `ln σ_t` where σ_t = √((1-α̅_t)/α̅_t). Shared
 /// schedule input for any Karras-family scheduler that needs to map
 /// a sampling sigma back to a train timestep.
-fn compute_log_sigmas_sd15() -> Vec<f32> {
-    compute_alphas_cumprod_sd15()
-        .iter()
-        .map(|&a| (((1.0 - a) / a).sqrt()).ln())
-        .collect()
+fn compute_log_sigmas_sd15() -> &'static [f32] {
+    static CACHE: std::sync::OnceLock<Vec<f32>> = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| {
+        compute_alphas_cumprod_sd15()
+            .iter()
+            .map(|&a| (((1.0 - a) / a).sqrt()).ln())
+            .collect()
+    })
 }
 
 /// Karras sigma schedule (Karras et al. 2022, ρ=7.0) descending from
