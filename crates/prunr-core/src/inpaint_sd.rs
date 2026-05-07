@@ -2475,6 +2475,11 @@ pub struct UniPcScheduler {
     pub num_inference: usize,
 }
 
+/// Floor for Cramer's-rule denominators in the UniPC corrector.
+/// Prevents ±∞/NaN when `rk → 1` (det = 1−rk → 0) or `rk → 0` at very
+/// low step counts or unusual sigma schedules.
+const CRAMER_DET_FLOOR: f32 = 1e-6;
+
 impl UniPcScheduler {
     pub fn new_sd15(num_inference: usize) -> Self {
         let log_sigmas = compute_log_sigmas_sd15();
@@ -2664,12 +2669,24 @@ impl UniPcScheduler {
             let b1 = h_phi_k * factorial_i / b_h;
 
             // Cramer: R = [[1,1],[rk,1]], det = 1 - rk.
-            let rho_c0 = (b0 - b1) / (1.0 - rk);
+            // Guard rk → 1 (det → 0) and rk → 0 (d1 blows up).
+            let det = 1.0 - rk;
+            debug_assert!(det.abs() > CRAMER_DET_FLOOR,
+                "UniPC corrector: rk too close to 1.0 ({rk}); Cramer det = {det}");
+            debug_assert!(rk.abs() > CRAMER_DET_FLOOR,
+                "UniPC corrector: rk too close to 0 ({rk})");
+            let det_guarded = if det.abs() < CRAMER_DET_FLOOR {
+                CRAMER_DET_FLOOR.copysign(if det == 0.0 { 1.0 } else { det })
+            } else {
+                det
+            };
+            let rk_guarded = rk.abs().max(CRAMER_DET_FLOOR).copysign(rk);
+            let rho_c0 = (b0 - b1) / det_guarded;
             let rho_c1 = b0 - rho_c0;
 
             let m1 = self.model_outputs[0].as_deref().expect("ring[0] populated for order-2 corrector");
             let d1: Vec<f32> = m1.iter().zip(m0.iter())
-                .map(|(&a, &b)| (a - b) / rk)
+                .map(|(&a, &b)| (a - b) / rk_guarded)
                 .collect();
             let d1_t: Vec<f32> = model_t.iter().zip(m0.iter())
                 .map(|(&mt, &m)| mt - m)
@@ -3725,7 +3742,8 @@ mod tests {
     /// At the terminal step (N-1), `lower_order_final` must cap the
     /// predictor at order=1 — no D1 correction term. Verified by
     /// constructing an isolated first-order predictor with the same
-    /// inputs and asserting equality with the full scheduler's output.
+    /// inputs (bypassing the corrector) and asserting the scheduler
+    /// output equals the pure first-order formula to within f32 tol.
     #[test]
     fn unipc_lower_order_final_caps_predictor_at_terminal() {
         let n = 4_usize;
@@ -3742,13 +3760,11 @@ mod tests {
         // step_index is now n-1. D in step() computes:
         //   order = min(2, n - (n-1)) = 1.
         // That order is set as this_order during the terminal call.
-        // We can't read this_order before it's set, so we verify
-        // instead that the terminal output matches a pure first-order
-        // predictor on the same sigma pair.
 
-        // Snapshot the corrected sample (working_sample) that the terminal
-        // predictor sees. For the pure-first-order reference we skip the
-        // corrector and just do x0 conversion + first-order predictor.
+        // Build a pure first-order predictor reference WITHOUT the corrector.
+        // We use `state` directly as the working_sample (i.e., we bypass the
+        // corrector path that would modify it) to isolate the predictor-order
+        // guard.
         let k = s.step_index; // n-1
         let sigma_s0_edm = s.sigmas[k];
         let sigma_t_edm  = s.sigmas[k + 1];
@@ -3759,36 +3775,38 @@ mod tests {
         let h = lambda_t - lambda_s0;
         let h_phi_1 = (-h).exp_m1();
 
-        // The corrector at the terminal step uses this_order from step k-1.
-        // To isolate only the predictor-order guard, build a reference
-        // using state (the input sample) without the corrector:
+        // ε → x0_pred conversion on `state`:
         let m_new: Vec<f32> = state.iter().zip(eps.iter())
             .map(|(&x, &e)| (x - sigma_s0_ddpm * e) / alpha_s0)
             .collect();
-        // Pure first-order predictor (no D1 term):
+        // Pure first-order predictor (no D1 correction term):
         let first_order_pred: Vec<f32> = state.iter().zip(m_new.iter())
             .map(|(&x, &m)| (sigma_t_ddpm / sigma_s0_ddpm) * x - alpha_t * h_phi_1 * m)
             .collect();
 
-        // Run the terminal step.
+        // Run the actual terminal step through the scheduler.
         let terminal_out = s.step(&eps, &state);
 
         // Must be finite.
         assert!(terminal_out.iter().all(|v| v.is_finite()),
             "terminal step produced non-finite output: {terminal_out:?}");
 
-        // The terminal result SHOULD be close to first-order (corrector may
-        // adjust slightly). The key invariant: step_index after the call is n.
+        // step_index must be n after all steps.
         assert_eq!(s.step_index, n,
             "step_index must equal num_inference after all steps");
 
-        // Verify this_order was set to 1 during the terminal step — readable
-        // because the terminal step stores it in self.this_order for the
-        // hypothetical next corrector call.
+        // this_order must be 1 — the lower_order_final guard fired.
         assert_eq!(s.this_order, 1,
             "this_order after terminal step must be 1 (lower_order_final guard)");
 
-        let _ = first_order_pred; // suppress unused-variable warning
+        // The terminal predictor (order=1, no D1 term) must match the
+        // reference formula element-wise. The corrector also runs at the
+        // terminal step and may adjust `working_sample`, so we allow a
+        // small tolerance (1e-3) to accommodate that correction pass.
+        for (i, (&sched, &ref_val)) in terminal_out.iter().zip(first_order_pred.iter()).enumerate() {
+            assert!((sched - ref_val).abs() < 1e-3,
+                "terminal output[{i}]: scheduler={sched}, first-order-ref={ref_val} (diff > 1e-3)");
+        }
     }
 
     /// Verify the Cramer's-rule 2×2 corrector coefficients analytically
@@ -3835,6 +3853,32 @@ mod tests {
             "b[0] mismatch: recurrence {b0} vs direct {b0_ref}");
         assert!((b1 - b1_ref).abs() < 1e-5,
             "b[1] mismatch: recurrence {b1} vs direct {b1_ref}");
+    }
+
+    /// Cramer guard regression: sigmas packed close together collapse the
+    /// lambda spacing, driving `det = 1 − rk` toward 0 or `rk` toward 0.
+    /// The corrector must return all-finite output instead of ±∞/NaN.
+    #[test]
+    fn unipc_cramer_guard_prevents_nan_on_collapsed_lambda_spacing() {
+        // A 4-step schedule with close sigmas at the start so that by step 2
+        // the corrector sees near-degenerate rk values.
+        let mut s = UniPcScheduler::new_sd15(4);
+        let dim = 8_usize;
+        let eps    = vec![0.1_f32; dim];
+        let sample = vec![0.5_f32; dim];
+
+        // Force two adjacent sigmas very close so lambda spacing collapses.
+        // Replace sigmas[1] and sigmas[2] with nearly identical values to
+        // stress both the det=1-rk and rk denominators in the corrector.
+        s.sigmas[1] = s.sigmas[0] * 0.9999;
+        s.sigmas[2] = s.sigmas[0] * 0.9998;
+
+        let mut out = sample.clone();
+        for _ in 0..4 {
+            out = s.step(&eps, &out);
+        }
+        assert!(out.iter().all(|v| v.is_finite()),
+            "Cramer guard failed: output contains NaN/Inf when lambda spacing collapses: {out:?}");
     }
 
     /// After step_index advances to 3, the ring must hold:
