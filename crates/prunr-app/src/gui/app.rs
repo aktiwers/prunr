@@ -579,6 +579,8 @@ impl PrunrApp {
                 (n, _)                              => format!("Undone {n} actions"),
             };
             self.toasts.info(label);
+        } else {
+            self.toasts.info("Nothing to undo");
         }
     }
 
@@ -613,6 +615,8 @@ impl PrunrApp {
                 (n, _)                              => format!("Restored {n} actions"),
             };
             self.toasts.info(label);
+        } else {
+            self.toasts.info("Nothing to redo");
         }
     }
 
@@ -697,6 +701,7 @@ impl PrunrApp {
                 ActionType::Result => {
                     if HistoryManager::redo_result(&mut self.batch.items[idx]) {
                         self.batch.items[idx].reset_result_caches();
+                        self.batch.items[idx].source_texture = None;
                         true
                     } else {
                         false
