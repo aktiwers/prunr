@@ -986,4 +986,79 @@ mod tests {
         item.redo_stroke();
         assert_eq!(item.settings.correction_hash, after_two, "redo restores the next hash");
     }
+
+    // ── Ordering layer (actions_undo / actions_redo) ─────────────────────────
+
+    #[test]
+    fn commit_correction_pushes_stroke_marker_and_clears_actions_redo() {
+        let mut item = fixture_item(1);
+        item.actions_redo.push_back(ActionType::Stroke);
+        item.commit_correction(stamp(8, 8, 5, 50));
+        assert_eq!(item.actions_undo.back(), Some(&ActionType::Stroke),
+            "commit_correction must push a Stroke marker onto actions_undo");
+        assert!(item.actions_redo.is_empty(),
+            "commit_correction must clear actions_redo — new edit branches the timeline");
+    }
+
+    #[test]
+    fn clear_correction_pushes_clear_strokes_marker() {
+        let mut item = fixture_item(1);
+        item.commit_correction(stamp(8, 8, 5, 50));
+        // Drain the marker committed_correction left so we can test clear_correction cleanly.
+        item.actions_undo.clear();
+        item.clear_correction();
+        assert_eq!(item.actions_undo.back(), Some(&ActionType::ClearStrokes),
+            "clear_correction must push a ClearStrokes marker");
+    }
+
+    #[test]
+    fn clear_correction_no_op_when_empty_does_not_push_marker() {
+        let mut item = fixture_item(1);
+        item.clear_correction();
+        assert!(item.actions_undo.is_empty(),
+            "clear_correction on empty correction must not push any marker");
+    }
+
+    #[test]
+    fn action_markers_ordered_across_action_types() {
+        // Simulate: stroke → stroke → (result would be pushed by HistoryManager)
+        // Just test the ordering layer directly via push_action_marker.
+        let mut item = fixture_item(1);
+        item.commit_correction(stamp(8, 8, 1, 1));
+        item.commit_correction(stamp(8, 8, 2, 2));
+        let order: Vec<ActionType> = item.actions_undo.iter().copied().collect();
+        assert_eq!(order, vec![ActionType::Stroke, ActionType::Stroke],
+            "two strokes produce two Stroke markers in order");
+    }
+
+    #[test]
+    fn divergence_clears_redo_in_actions_layer() {
+        // Paint → undo → paint B → redo log must be empty.
+        let mut item = fixture_item(1);
+        item.commit_correction(stamp(8, 8, 1, 1));
+        // Simulate an undo (normally done via try_undo_one_action, here manually).
+        let kind = item.actions_undo.pop_back().unwrap();
+        item.actions_redo.push_back(kind);
+        assert!(!item.actions_redo.is_empty());
+
+        // New commit branches the timeline.
+        item.commit_correction(stamp(8, 8, 3, 3));
+        assert!(item.actions_redo.is_empty(),
+            "fresh commit after undo must wipe actions_redo");
+    }
+
+    #[test]
+    fn action_hist_depth_caps_actions_undo() {
+        let mut item = fixture_item(1);
+        for i in 0..(ACTION_HIST_DEPTH + 5) {
+            push_action_marker(&mut item.actions_undo, &mut item.actions_redo, ActionType::Stroke);
+            // Prevent stroke_undo_stack from overflow (not the subject here).
+            item.stroke_undo_stack.clear();
+            // Refill actions_redo so push_action_marker finds something to clear
+            // (it clears redo on every call — just make sure we don't count that).
+            let _ = i;
+        }
+        assert_eq!(item.actions_undo.len(), ACTION_HIST_DEPTH,
+            "actions_undo must be capped at ACTION_HIST_DEPTH");
+    }
 }
