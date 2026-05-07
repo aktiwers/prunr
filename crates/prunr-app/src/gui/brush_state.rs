@@ -104,7 +104,10 @@ impl SdScheduler {
     /// can't pick something the worker can't run; dispatch should
     /// also gate as a defensive fallback.
     pub fn is_available(&self) -> bool {
-        matches!(self, SdScheduler::Lcm | SdScheduler::Ddim)
+        matches!(
+            self,
+            SdScheduler::Lcm | SdScheduler::Ddim | SdScheduler::DpmPlusPlus2MKarras,
+        )
     }
 
     /// Short user-facing label for dropdowns. Matches A1111 conventions.
@@ -491,7 +494,7 @@ mod tests {
     fn scheduler_availability_reflects_dispatch_readiness() {
         assert!(SdScheduler::Lcm.is_available());
         assert!(SdScheduler::Ddim.is_available());
-        assert!(!SdScheduler::DpmPlusPlus2MKarras.is_available());
+        assert!(SdScheduler::DpmPlusPlus2MKarras.is_available());
         assert!(!SdScheduler::UniPc.is_available());
         assert!(!SdScheduler::EulerA.is_available());
     }
