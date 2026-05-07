@@ -234,6 +234,20 @@ CPU-only for now; GPU EP support deferred until a measured win justifies the EP-
 
 **SD subprocess isolation.** Stable-Diffusion-family inpaint runs in a **dedicated subprocess** spawned via `SubprocessManager::spawn_inpaint_only` (the seg engine pool is skipped in the worker — `inpaint_only: bool` on the `Init` command). `gui/inpaint_bridge.rs` owns the long-lived bridge thread: lazy-spawn on first SD dispatch, drop after 5 min idle to release the ~5 GB resident set, route `InpaintProgress` / `InpaintDone` / `InpaintError` events back into the same `inpaint_rx` channel the in-process path uses so the rest of the GUI can't tell which dispatch served. LaMa / Big-LaMa / MI-GAN stay in-process via rayon — small footprint, no isolation pressure. An OOM during SD inference now kills the subprocess (auto-restarted on the next stroke) instead of taking the GUI down. Worker-side post-processing (color match + seam blend + sharpen) takes `feather_px` + `sharpen` over IPC so SD strokes honor the same toolbar knobs the in-process path applies.
 
+**SD scheduler set.** Five schedulers ship; the user picks via the Scheduler chip:
+
+| Scheduler | Best for |
+|-----------|----------|
+| LCM (default) | Fast results at 4–8 steps; distilled, bakes CFG into training |
+| DDIM | Conservative, deterministic baseline; aligned to Diffusers SD-1.5 reference |
+| DPM++ 2M Karras | Best quality at 15–25 steps; Karras sigma curve always on |
+| Euler-A | Creative variation — different seeds produce meaningfully different results |
+| UniPC | Best quality at 8–12 steps; corrector step on each iteration |
+
+Karras sigma schedule is also user-toggleable for LCM and UniPC (off by default for LCM — it was distilled against linear spacing; on by default for UniPC). The **Strength** slider (0–100%) controls how far the denoiser walks away from the masked region: 100% = full creative fill, lower = more source-texture preservation.
+
+**SD eraser toolbar.** The chip cluster — Quality preset / Scheduler / Steps / Strength / Karras (conditional) / Seed / Prompt — renders inline in **Row 2 of the adjustments toolbar**, next to the model dropdown. Karras is shown only for schedulers that accept the toggle (LCM, UniPC, Euler-A). Prompts live in a dedicated Prompt chip with multiline text input and a Reset button. Math for the full SD pipeline (CLIP, VAE, schedulers, CFG, 9-channel inpaint UNet) is verified against the Diffusers reference; reports archived in `.planning/research/`.
+
 ## Live Preview
 
 Mask and edge tweaks auto-rerun Tier 2 during slider drag. A tweak is debounced ~150 ms; a new tweak on the same item cancels the in-flight one and dispatches a fresh rerun on the rayon pool.
