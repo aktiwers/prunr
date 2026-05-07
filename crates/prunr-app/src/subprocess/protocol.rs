@@ -666,6 +666,7 @@ mod tests {
                 seed: Some(42),
                 use_taesd: false,
                 scheduler: prunr_core::inpaint_sd::SchedulerKind::Ddim,
+                strength: 0.85,
             }),
             feather_px: 4.5,
             sharpen: 0.6,

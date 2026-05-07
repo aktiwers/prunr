@@ -74,6 +74,13 @@ pub struct BrushSettings {
     /// random per stroke (the historical behavior).
     #[serde(default)]
     pub sd_seed: Option<u64>,
+    /// SD-only: inpaint strength in [0, 1]. 1.0 = pure noise init,
+    /// fully creative rewrite (default). Lower values preserve the
+    /// original masked pixels proportionally — the dispatcher VAE-
+    /// encodes the source, mixes with scaled noise, and skips the
+    /// corresponding number of early denoise steps.
+    #[serde(default = "default_strength")]
+    pub sd_strength: f32,
 }
 
 /// SD eraser scheduler choice. Wired into `SdInpaintRequest` at
@@ -261,6 +268,7 @@ fn default_sd_negative_prompt() -> String {
 
 fn default_sd_scheduler() -> SdScheduler { SdScheduler::Lcm }
 fn default_sd_steps() -> u32 { 8 }
+fn default_strength() -> f32 { 1.0 }
 
 impl BrushSettings {
     pub fn stamp(&self) -> Stamp {
@@ -286,6 +294,7 @@ impl Default for BrushSettings {
             sd_steps: default_sd_steps(),
             sd_use_karras_sigmas: false,
             sd_seed: None,
+            sd_strength: default_strength(),
         }
     }
 }

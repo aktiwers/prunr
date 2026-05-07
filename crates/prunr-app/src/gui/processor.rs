@@ -134,6 +134,9 @@ pub(crate) struct InpaintTuning {
     pub sd_steps: u32,
     /// SD-only: pinned RNG seed for reproducibility. `None` = random.
     pub sd_seed: Option<u64>,
+    /// SD-only: inpaint strength in [0, 1]. 1.0 = pure noise init,
+    /// fully creative rewrite. <1.0 preserves the source proportionally.
+    pub sd_strength: f32,
 }
 
 impl Default for InpaintTuning {
@@ -149,6 +152,7 @@ impl Default for InpaintTuning {
             sd_scheduler: super::brush_state::SdScheduler::Lcm,
             sd_steps: 8,
             sd_seed: None,
+            sd_strength: 1.0,
         }
     }
 }
@@ -429,6 +433,7 @@ impl Processor {
                         seed: tuning.sd_seed,
                         use_taesd,
                         scheduler,
+                        strength: tuning.sd_strength,
                     })
                 }
                 _ => None,
