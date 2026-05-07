@@ -30,11 +30,9 @@ pub fn render(ui: &mut egui::Ui, brush: &mut BrushSettings) -> EraserRowChange {
         change.committed |= render_scheduler_chip(ui, brush);
         change.committed |= render_steps_chip(ui, brush);
         change.committed |= render_strength_chip(ui, brush);
-        // Karras toggle is meaningful only for the schedulers that
-        // accept Karras-on-or-off (UniPC, Euler-A). LCM has its own
-        // fixed schedule; DDIM and DPM++ 2M Karras are pinned to one
-        // setting in this build.
-        if matches!(brush.sd_scheduler, SdScheduler::UniPc | SdScheduler::EulerA) {
+        // Karras toggle: LCM (user-toggleable), UniPC, Euler-A.
+        // DDIM and DPM++ 2M Karras are pinned to one setting in this build.
+        if matches!(brush.sd_scheduler, SdScheduler::Lcm | SdScheduler::UniPc | SdScheduler::EulerA) {
             change.committed |= render_karras_chip(ui, brush);
         }
         change.committed |= render_seed_chip(ui, brush);
@@ -227,20 +225,17 @@ fn render_steps_chip(ui: &mut egui::Ui, brush: &mut BrushSettings) -> bool {
     change.commit
 }
 
-fn render_karras_chip(ui: &mut egui::Ui, brush: &BrushSettings) -> bool {
-    // Karras schedule is orthogonal to scheduler choice (DDIM /
-    // DPM++ / UniPC / Euler-A all support it; LCM has its own
-    // fixed schedule and ignores the toggle). Greyed until the
-    // Karras sigma helper has a dispatch backend.
-    //
-    // Pure placeholder: render disabled-visual + tooltip but never
-    // mutate. egui's `add_enabled_ui` greys the appearance but
-    // doesn't suppress `Response::clicked()` for every widget type;
-    // unconditional `return false` is the correctness guarantee.
-    ui.add_enabled_ui(false, |ui| {
-        chip::icon_toggle_button(ui, ICON_BLUR_LINEAR.codepoint, brush.sd_use_karras_sigmas)
-            .on_hover_text("Karras sigma schedule (coming soon)");
-    });
+fn render_karras_chip(ui: &mut egui::Ui, brush: &mut BrushSettings) -> bool {
+    let resp = chip::icon_toggle_button(ui, ICON_BLUR_LINEAR.codepoint, brush.sd_use_karras_sigmas)
+        .on_hover_text(
+            "Karras sigma schedule. LCM was distilled against linear \
+             spacing — Karras shifts the inference timestep distribution \
+             away from training. Toggle to A/B compare on your content.",
+        );
+    if resp.clicked() {
+        brush.sd_use_karras_sigmas = !brush.sd_use_karras_sigmas;
+        return true;
+    }
     false
 }
 

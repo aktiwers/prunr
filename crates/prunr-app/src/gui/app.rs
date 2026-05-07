@@ -700,6 +700,7 @@ impl PrunrApp {
             sd_steps: bs.sd_steps,
             sd_seed: bs.sd_seed,
             sd_strength: bs.sd_strength,
+            sd_use_karras_sigmas: bs.sd_use_karras_sigmas,
         };
         self.processor.dispatch_inpaint(item_id, source, correction, tuning);
     }

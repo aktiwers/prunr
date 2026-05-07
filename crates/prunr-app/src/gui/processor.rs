@@ -137,6 +137,9 @@ pub(crate) struct InpaintTuning {
     /// SD-only: inpaint strength in [0, 1]. 1.0 = pure noise init,
     /// fully creative rewrite. <1.0 preserves the source proportionally.
     pub sd_strength: f32,
+    /// LCM-only: Karras sigma schedule. Default false (linear, matches
+    /// distillation training).
+    pub sd_use_karras_sigmas: bool,
 }
 
 impl Default for InpaintTuning {
@@ -153,6 +156,7 @@ impl Default for InpaintTuning {
             sd_steps: 8,
             sd_seed: None,
             sd_strength: 1.0,
+            sd_use_karras_sigmas: false,
         }
     }
 }
@@ -434,6 +438,7 @@ impl Processor {
                         use_taesd,
                         scheduler,
                         strength: tuning.sd_strength,
+                        use_karras_sigmas: tuning.sd_use_karras_sigmas,
                     })
                 }
                 _ => None,

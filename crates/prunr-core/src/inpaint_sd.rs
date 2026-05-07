@@ -112,6 +112,13 @@ pub struct SdInpaintRequest {
     /// initializes from `add_noise(image_latents, noise, t_start)`.
     #[serde(default = "default_strength")]
     pub strength: f32,
+    /// LCM-only: Karras sigma schedule vs linear (the default). Off
+    /// by default — LCM was distilled against the linear schedule, so
+    /// Karras shifts the inference timestep distribution away from
+    /// training. Surface as a user toggle for A/B comparison rather
+    /// than a silent default.
+    #[serde(default)]
+    pub use_karras_sigmas: bool,
 }
 
 fn default_strength() -> f32 { 1.0 }
@@ -127,6 +134,7 @@ impl Default for SdInpaintRequest {
             use_taesd: false,
             scheduler: SchedulerKind::Lcm,
             strength: default_strength(),
+            use_karras_sigmas: false,
         }
     }
 }
@@ -543,14 +551,14 @@ fn run_one_tile(
 
     let steps = req.num_inference_steps as usize;
     let mut scheduler = match req.scheduler {
-        SchedulerKind::Lcm => Scheduler::Lcm(LcmScheduler::new_sd15(steps)),
+        SchedulerKind::Lcm => Scheduler::Lcm(LcmScheduler::new_sd15(steps, req.use_karras_sigmas)),
         SchedulerKind::Ddim => Scheduler::Ddim(DdimScheduler::new_sd15(steps)),
         SchedulerKind::DpmPp2MKarras => Scheduler::DpmPp2M(DpmPp2MScheduler::new_sd15(steps)),
         SchedulerKind::EulerA => Scheduler::EulerA(EulerAScheduler::new_sd15(steps)),
         // UniPC not yet implemented in the worker; fall back to LCM
         // as a safe default (UI gates picking, this is belt-and-
         // braces against a stale persisted choice).
-        SchedulerKind::UniPc => Scheduler::Lcm(LcmScheduler::new_sd15(steps)),
+        SchedulerKind::UniPc => Scheduler::Lcm(LcmScheduler::new_sd15(steps, req.use_karras_sigmas)),
     };
     let seed = req.seed.unwrap_or_else(|| {
         std::time::SystemTime::now()
@@ -2060,28 +2068,39 @@ pub struct LcmScheduler {
 }
 
 impl LcmScheduler {
-    pub fn new_sd15(num_inference: usize) -> Self {
+    pub fn new_sd15(num_inference: usize, use_karras: bool) -> Self {
         const ORIGINAL_INFERENCE_STEPS: usize = 50;
         let alphas_cumprod = compute_alphas_cumprod_sd15();
 
-        // Diffusers' LCMScheduler timestep selection:
-        //   k = num_train / original_inference_steps  (= 20 for SD-1.5)
-        //   lcm_origin descending = [999, 979, 959, ..., 19]
-        //   Pick `num_inference` indices via floor(linspace(0, len, num,
-        //   endpoint=False)) into the descending array.
-        let k = SD15_NUM_TRAIN_TIMESTEPS / ORIGINAL_INFERENCE_STEPS;
-        let lcm_origin_descending: Vec<i64> = (0..ORIGINAL_INFERENCE_STEPS)
-            .rev()
-            .map(|i| ((i + 1) * k - 1) as i64)
-            .collect();
-        let n_origin = lcm_origin_descending.len() as f32;
-        let n_inf = num_inference as f32;
-        let timesteps: Vec<i64> = (0..num_inference)
-            .map(|i| {
-                let idx = ((i as f32) * n_origin / n_inf).floor() as usize;
-                lcm_origin_descending[idx.min(lcm_origin_descending.len() - 1)]
-            })
-            .collect();
+        let timesteps: Vec<i64> = if use_karras {
+            // Karras sigmas mapped back to train timesteps via sigma_to_t.
+            // LCM's sigma range matches the SD-1.5 training noise schedule.
+            let log_sigmas = compute_log_sigmas_sd15();
+            let sigma_min = (1.0_f32 - alphas_cumprod[0]).sqrt() / alphas_cumprod[0].sqrt();
+            let sigma_max = (1.0_f32 - alphas_cumprod[SD15_NUM_TRAIN_TIMESTEPS - 1]).sqrt()
+                / alphas_cumprod[SD15_NUM_TRAIN_TIMESTEPS - 1].sqrt();
+            let sigmas = compute_karras_sigmas(num_inference, sigma_min, sigma_max);
+            sigmas.iter().map(|&s| sigma_to_t(s, log_sigmas)).collect()
+        } else {
+            // Diffusers' LCMScheduler timestep selection:
+            //   k = num_train / original_inference_steps  (= 20 for SD-1.5)
+            //   lcm_origin descending = [999, 979, 959, ..., 19]
+            //   Pick `num_inference` indices via floor(linspace(0, len, num,
+            //   endpoint=False)) into the descending array.
+            let k = SD15_NUM_TRAIN_TIMESTEPS / ORIGINAL_INFERENCE_STEPS;
+            let lcm_origin_descending: Vec<i64> = (0..ORIGINAL_INFERENCE_STEPS)
+                .rev()
+                .map(|i| ((i + 1) * k - 1) as i64)
+                .collect();
+            let n_origin = lcm_origin_descending.len() as f32;
+            let n_inf = num_inference as f32;
+            (0..num_inference)
+                .map(|i| {
+                    let idx = ((i as f32) * n_origin / n_inf).floor() as usize;
+                    lcm_origin_descending[idx.min(lcm_origin_descending.len() - 1)]
+                })
+                .collect()
+        };
 
         Self {
             alphas_cumprod,
@@ -2666,7 +2685,7 @@ mod tests {
     /// and copying the resulting tensor.
     #[test]
     fn lcm_timesteps_match_diffusers_reference_for_8_steps() {
-        let s = LcmScheduler::new_sd15(8);
+        let s = LcmScheduler::new_sd15(8, false);
         let t = s.timesteps();
         assert_eq!(t.len(), 8);
         // Reversed lcm_origin = [999, 979, 959, 939, ..., 19].
@@ -2682,7 +2701,7 @@ mod tests {
     /// linspace-floor index math at the extremes.
     #[test]
     fn lcm_timesteps_match_diffusers_reference_for_4_steps() {
-        let s = LcmScheduler::new_sd15(4);
+        let s = LcmScheduler::new_sd15(4, false);
         // floor(linspace(0, 50, 4, endpoint=False)) = [0, 12, 25, 37]
         // → reversed[indices] = [999, 759, 499, 259]
         assert_eq!(s.timesteps(), &[999, 759, 499, 259],
@@ -2694,7 +2713,7 @@ mod tests {
     /// would silently invert the noise schedule.
     #[test]
     fn lcm_timesteps_descend_strictly() {
-        let s = LcmScheduler::new_sd15(8);
+        let s = LcmScheduler::new_sd15(8, false);
         for w in s.timesteps().windows(2) {
             assert!(w[0] > w[1], "timesteps must descend: {} → {}", w[0], w[1]);
         }
@@ -2706,7 +2725,7 @@ mod tests {
     /// breaking LCM math.
     #[test]
     fn lcm_alphas_cumprod_match_ddim() {
-        let lcm = LcmScheduler::new_sd15(8);
+        let lcm = LcmScheduler::new_sd15(8, false);
         let ddim = DdimScheduler::new_sd15(20);
         for &t in &[0_i64, 100, 500, 999] {
             let l = lcm.alpha_cumprod(t);
@@ -2724,7 +2743,7 @@ mod tests {
     /// boundary conditions is loud.
     #[test]
     fn lcm_final_step_matches_consistency_formula() {
-        let s = LcmScheduler::new_sd15(4);
+        let s = LcmScheduler::new_sd15(4, false);
         let latent = vec![0.5_f32; 4];
         let noise = vec![0.1_f32; 4];
         let t = 500_i64;
@@ -2956,7 +2975,7 @@ mod tests {
     /// us a clean reference to verify against.
     #[test]
     fn lcm_step_at_with_zero_noise_collapses_to_alpha_prev_scaled_denoise() {
-        let s = LcmScheduler::new_sd15(8);
+        let s = LcmScheduler::new_sd15(8, false);
         let latent = vec![0.5_f32; 4];
         let noise_pred = vec![0.1_f32; 4];
         let zero_noise = vec![0.0_f32; 4];
@@ -3396,5 +3415,24 @@ mod tests {
         }
         assert_eq!(calls.load(Ordering::Relaxed), 1,
             "OnceLock must run the build closure exactly once across concurrent callers");
+    }
+
+    /// LCM with `use_karras=true` must produce a non-linear timestep
+    /// schedule. With Karras sigmas mapped through `sigma_to_t`, the
+    /// timesteps are clustered at the schedule endpoints (not uniform).
+    #[test]
+    fn lcm_karras_timesteps_differ_from_linear_when_enabled() {
+        let linear = LcmScheduler::new_sd15(8, false);
+        let karras = LcmScheduler::new_sd15(8, true);
+        let lin = linear.timesteps();
+        let kar = karras.timesteps();
+        assert_eq!(lin.len(), 8);
+        assert_eq!(kar.len(), 8);
+        // Both descend.
+        for w in lin.windows(2) { assert!(w[0] > w[1], "linear not descending: {:?}", lin); }
+        for w in kar.windows(2) { assert!(w[0] > w[1], "karras not descending: {:?}", kar); }
+        // Schedules MUST differ — at least one timestep should not match.
+        assert_ne!(lin, kar,
+            "Karras and linear LCM schedules should produce different timesteps");
     }
 }
