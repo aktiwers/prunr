@@ -330,13 +330,8 @@ pub(crate) fn render(
                 // somewhere to paint. In the right-to-left layout this
                 // appears LEFT of the toggle.
                 if brush_available && brush_state.is_enabled() {
-                    let is_sd = matches!(app_settings.model, crate::gui::settings::SettingsModel::SdInpaint);
-                    // Same predicate as the dispatch path so UI greying
-                    // and routing can't disagree.
-                    let sd_fast_mode = is_sd
-                        && app_settings.lcm_routing_active(prunr_models::ModelId::SdV15InpaintFp16);
                     let outcome = super::brush_chip::render(
-                        ui, &mut app_settings.brush, app_settings.model.is_inpaint(), is_sd, sd_fast_mode,
+                        ui, &mut app_settings.brush, app_settings.model.is_inpaint(),
                     );
                     if outcome.clear_requested {
                         change.clear_correction_requested = true;
