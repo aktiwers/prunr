@@ -106,7 +106,10 @@ impl SdScheduler {
     pub fn is_available(&self) -> bool {
         matches!(
             self,
-            SdScheduler::Lcm | SdScheduler::Ddim | SdScheduler::DpmPlusPlus2MKarras,
+            SdScheduler::Lcm
+                | SdScheduler::Ddim
+                | SdScheduler::DpmPlusPlus2MKarras
+                | SdScheduler::EulerA,
         )
     }
 
@@ -508,8 +511,8 @@ mod tests {
         assert!(SdScheduler::Lcm.is_available());
         assert!(SdScheduler::Ddim.is_available());
         assert!(SdScheduler::DpmPlusPlus2MKarras.is_available());
+        assert!(SdScheduler::EulerA.is_available());
         assert!(!SdScheduler::UniPc.is_available());
-        assert!(!SdScheduler::EulerA.is_available());
     }
 
     /// Old persisted JSON without the new SD-tuning fields must
