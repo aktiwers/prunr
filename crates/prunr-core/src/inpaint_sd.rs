@@ -2097,8 +2097,11 @@ impl DpmPp2MScheduler {
                 })
                 .collect()
         };
-        // Zero terminal SNR — DPM++ convention.
-        sigmas.push(0.0);
+        // Terminal sigma = sigma_min, NOT zero. Pushing 0 here makes
+        // sigma_t = 0 at the last step, which sends lambda_t = ln(1) -
+        // ln(0) = +∞ through the multistep update and blows d1 up to
+        // ±∞ / NaN. Mirrors Diffusers' `sigma_last = sigma_min`.
+        sigmas.push(sigma_min);
 
         // Convert each non-terminal sigma to a timestep for UNet input.
         let timesteps: Vec<i64> = sigmas[..num_inference].iter()
@@ -2417,6 +2420,24 @@ mod tests {
         let actual_sigma_max = s.sigmas[0];
         assert!((actual_sigma_max - expected_sigma_max).abs() < 1e-3,
             "first sigma must match √((1-α̅_999)/α̅_999): expected {expected_sigma_max}, got {actual_sigma_max}");
+    }
+
+    /// Terminal step must produce a finite latent. Pushing 0 as the
+    /// terminal sigma sends `lambda_t = ln(1) - ln(0) = +∞` through
+    /// the multistep update; `r0 = h_0/+∞ = 0` and `1/r0 = +∞` blows
+    /// `d1 = (1/r0) * (m0 - m1)` up to ±∞ / NaN, which the VAE
+    /// decodes as a black square. The fix is to terminate at
+    /// `sigma_min`, mirroring Diffusers.
+    #[test]
+    fn dpmpp2m_terminal_step_produces_finite_output() {
+        let mut s = DpmPp2MScheduler::new_sd15(8);
+        let latent = vec![0.5_f32; 16];
+        let noise = vec![0.1_f32; 16];
+        for step_idx in 0..8 {
+            let next = s.step(&latent, &noise, step_idx);
+            assert!(next.iter().all(|v| v.is_finite()),
+                "step {step_idx} produced non-finite values: {next:?}");
+        }
     }
 
     /// First DPM++ step must use first-order math (no prev output)
