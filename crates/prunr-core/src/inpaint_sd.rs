@@ -1769,6 +1769,9 @@ fn step_array_into(
         Scheduler::DpmPp2M(s) => {
             *out = s.step(latent, noise_pred, step_idx);
         }
+        Scheduler::UniPc(s) => {
+            *out = s.step(noise_pred, latent);
+        }
         Scheduler::EulerA(s) => {
             // Ancestral noise sampled per step from the same seeded
             // RNG so the whole denoise stays reproducible from
@@ -1777,9 +1780,6 @@ fn step_array_into(
             let dist = StandardNormal;
             let noise: Vec<f32> = (0..latent.len()).map(|_| dist.sample(rng)).collect();
             s.step_into(latent, noise_pred, step_idx, &noise, out);
-        }
-        Scheduler::UniPc(s) => {
-            *out = s.step(noise_pred, latent);
         }
     }
 }
@@ -2464,7 +2464,9 @@ pub struct UniPcScheduler {
     pub(super) lower_order_nums: usize,
     /// Corrected sample from the previous step; input for the corrector.
     pub(super) last_sample: Option<Vec<f32>>,
-    /// Order used by the predictor at step k; read by corrector at step k+1.
+    /// Order used by predictor at step k; read by corrector at step k+1.
+    /// After the terminal step (no corrector call follows), this_order is set
+    /// to 1 (lower_order_final cap) but never read — dangling state, not a bug.
     pub(super) this_order: usize,
     pub(super) step_index: usize,
     pub num_train: usize,
@@ -2518,10 +2520,9 @@ impl UniPcScheduler {
             "UniPC step: step_index {} out of range (sigmas len {})",
             self.step_index, self.sigmas.len());
 
-        // A. Convert ε → x0_pred.
         let m_new = self.convert_model_output(epsilon, sample);
 
-        // B. Corrector — reads self.this_order set by the PREVIOUS step.
+        // Corrector — reads self.this_order set by the PREVIOUS step.
         // take() avoids a simultaneous borrow of self through last_sample and
         // through the method receiver; we restore it immediately after.
         let working_sample = if self.step_index > 0 {
@@ -2536,15 +2537,16 @@ impl UniPcScheduler {
             sample.to_vec()
         };
 
-        // C. Ring shift: [0] ← [1], then [1] ← m_new.
         self.model_outputs[0] = self.model_outputs[1].take();
         self.timestep_list[0] = self.timestep_list[1];
         self.model_outputs[1] = Some(m_new);
         self.timestep_list[1] = Some(self.timesteps[self.step_index]);
 
-        // D. Compute this_order for THIS step's predictor (and NEXT step's corrector).
-        // Must come BEFORE E: the predictor uses this_order, and the corrector at
-        // step k+1 reads the value set here — wrong ordering silently feeds stale order.
+        // Choose order for this step's predictor (stored for the NEXT step's
+        // corrector to read). Must be computed AFTER the corrector (which uses
+        // the previous step's this_order) and BEFORE saving last_sample
+        // (predictor reads it); reordering silently feeds the wrong order to
+        // one or both.
         let mut order = 2_usize;
         if order > self.num_inference - self.step_index {
             order = self.num_inference - self.step_index;
@@ -2552,22 +2554,18 @@ impl UniPcScheduler {
         order = order.min(self.lower_order_nums + 1);
         self.this_order = order;
 
-        // E. Move working_sample into last_sample BEFORE the predictor call so
-        // the predictor can borrow from last_sample via &. No clone needed —
+        // Move working_sample into last_sample before the predictor call so
+        // the predictor can borrow from it via &. No clone needed —
         // one Vec<f32> persists across steps, saving ~64 KB per step.
         self.last_sample = Some(working_sample);
         // just stored above, non-empty
         let last_ref = self.last_sample.as_deref().unwrap();
 
-        // F. Predictor.
         let prev_sample = self.uni_p_bh_update(last_ref, order);
 
-        // G. Warmup increment.
         if self.lower_order_nums < 2 {
             self.lower_order_nums += 1;
         }
-
-        // H. Advance.
         self.step_index += 1;
 
         prev_sample
@@ -2581,8 +2579,13 @@ impl UniPcScheduler {
     /// Predictor update: `multistep_uni_p_bh_update`.
     ///
     /// `k = step_index`. Source sigma = sigmas[k], target = sigmas[k+1].
+    /// Pitfall #2: predictor uses [k+1, k] sigmas; corrector uses [k, k-1] —
+    /// the index windows are offset by one step relative to each other.
     fn uni_p_bh_update(&self, sample: &[f32], order: usize) -> Vec<f32> {
         let k = self.step_index;
+        // sigmas[k] is the EDM-parameterised σ; sigma_to_alpha_sigma converts
+        // it to DDPM-style (α, σ_eff). Pitfall #5: sigma_t here is σ_eff(sigmas[k+1]),
+        // NOT the raw EDM sigma — don't confuse them in the step formula.
         let (_, sigma_s0) = sigma_to_alpha_sigma(self.sigmas[k]);
         let (alpha_t, sigma_t) = sigma_to_alpha_sigma(self.sigmas[k + 1]);
 
@@ -2602,6 +2605,9 @@ impl UniPcScheduler {
                 .collect()
         } else {
             // order == 2: model_outputs[0] = m_{k-1}.
+            // Pitfall #3: model_outputs[0] is None at step 1 (only one output has
+            // been accumulated). The lower_order_nums warmup counter gates order to
+            // 1 until two outputs are available, so this branch is never reached then.
             let m1 = self.model_outputs[0].as_deref().expect("ring[0] populated for order-2 predictor");
             let lambda_si = sigma_to_lambda(self.sigmas[k - 1]);
             let rk = (lambda_si - lambda_s0) / h;
@@ -2609,7 +2615,8 @@ impl UniPcScheduler {
                 .map(|(&a, &b)| (a - b) / rk)
                 .collect();
 
-            // rhos_p = 0.5 HARDCODED for predictor (Pitfall #6).
+            // Adams-Bashforth-style approximation: rho_p = 0.5 hardcoded for the
+            // predictor; the corrector solves the full 2×2 system to compensate.
             sample.iter().zip(m0.iter()).zip(d1.iter())
                 .map(|((&x, &m), &d)| {
                     (sigma_t / sigma_s0) * x - alpha_t * h_phi_1 * m - alpha_t * b_h * (0.5 * d)
@@ -2620,17 +2627,19 @@ impl UniPcScheduler {
 
     /// Corrector update: `multistep_uni_c_bh_update`.
     ///
-    /// Asymmetric sigma indices vs predictor:
-    /// source = sigmas[k-1], target = sigmas[k].
+    /// Pitfall #2 (index asymmetry): corrector source/target are [k-1]/[k];
+    /// predictor is [k]/[k+1]. Windows are shifted by one step.
     fn uni_c_bh_update(
         &self,
         model_t: &[f32],
         last_sample: &[f32],
+        // Retained for signature parity with the Diffusers reference; the
+        // corrector formula doesn't use the current-step sample directly.
         _this_sample: &[f32],
         order: usize,
     ) -> Vec<f32> {
         let k = self.step_index;
-        // Corrector uses [k-1] → [k], not [k] → [k+1].
+        // Pitfall #5: sigma_s0/sigma_t are σ_eff (DDPM-style), not raw EDM sigmas.
         let (_, sigma_s0) = sigma_to_alpha_sigma(self.sigmas[k - 1]);
         let (alpha_t, sigma_t) = sigma_to_alpha_sigma(self.sigmas[k]);
 
@@ -2659,7 +2668,9 @@ impl UniPcScheduler {
             let lambda_si = sigma_to_lambda(self.sigmas[k - 2]);
             let rk = (lambda_si - lambda_s0) / h;
 
-            // phi recurrence (pitfall #7: factorial_i updates BEFORE h_phi_k).
+            // Phi recurrence: factorial_i must update BEFORE h_phi_k in each step.
+            // Reversing the order silently swaps b[0] and b[1], causing the
+            // corrector to weight the wrong derivatives and break the 2nd-order rule.
             let mut factorial_i: f32 = 1.0;
             let mut h_phi_k = h_phi_1 / hh - 1.0;
             let b0 = h_phi_k * factorial_i / b_h;
@@ -2769,8 +2780,8 @@ pub enum Scheduler {
     Ddim(DdimScheduler),
     Lcm(LcmScheduler),
     DpmPp2M(DpmPp2MScheduler),
-    EulerA(EulerAScheduler),
     UniPc(UniPcScheduler),
+    EulerA(EulerAScheduler),
 }
 
 impl Scheduler {
@@ -2779,8 +2790,8 @@ impl Scheduler {
             Scheduler::Ddim(s) => s.timesteps(),
             Scheduler::Lcm(s) => s.timesteps(),
             Scheduler::DpmPp2M(s) => s.timesteps(),
-            Scheduler::EulerA(s) => s.timesteps(),
             Scheduler::UniPc(s) => s.timesteps(),
+            Scheduler::EulerA(s) => s.timesteps(),
         }
     }
 
@@ -3728,8 +3739,8 @@ mod tests {
     fn unipc_order_1_step_zero_matches_first_order_predictor() {
         let mut s = UniPcScheduler::new_sd15(8);
         let dim = 4_usize;
-        let sample: Vec<f32> = (0..dim).map(|i| 0.3 + 0.1 * i as f32).collect();
-        let eps: Vec<f32> = (0..dim).map(|i| 0.05 * i as f32).collect();
+        let sample: Vec<f32> = vec![0.5_f32; dim];
+        let eps:    Vec<f32> = vec![0.1_f32; dim];
 
         let result = s.step(&eps, &sample);
 
@@ -3856,6 +3867,9 @@ mod tests {
             "two Cramer forms must agree: {rho_c1} vs {rho_c1_alt}");
 
         // Verify b[0] and b[1] via the phi definitions directly.
+        // NOTE: an earlier draft of the port spec stated b[1] ≈ 0.401 for hh = -0.5,
+        // but the correct value via the direct phi formula is ≈ 0.376. The spec had
+        // a typo; this test uses the phi derivation, not the stated approximation.
         // phi_1(-0.5) = (e^-0.5 - 1) / (-0.5) ≈ 0.787
         // phi_2(-0.5) = (phi_1 - 1) / (-0.5) ≈ 0.426 → b[0] = phi_2/phi_1 ≈ 0.541
         // phi_3(-0.5) = (phi_2 - 0.5) / (-0.5) ≈ 0.148 → b[1] = 2*phi_3/phi_1 ≈ 0.376
