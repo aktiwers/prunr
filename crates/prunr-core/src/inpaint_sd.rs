@@ -1982,11 +1982,15 @@ impl DdimScheduler {
     pub fn new_sd15(num_inference: usize) -> Self {
         let alphas_cumprod = compute_alphas_cumprod_sd15();
 
-        // Diffusers default: descending evenly-spaced timesteps from
-        // num_train-1 down to 0, length = num_inference.
-        let step = SD15_NUM_TRAIN_TIMESTEPS as f32 / num_inference as f32;
+        // Diffusers DDIMScheduler default: timestep_spacing="leading" +
+        // steps_offset=1. step_ratio = floor(num_train / num_inference)
+        // (integer division, matching Python's // operator). Then:
+        //   arange(0, N) * step_ratio + 1, reversed.
+        // For 20 steps: [951, 901, 851, ..., 51, 1].
+        let step_ratio = SD15_NUM_TRAIN_TIMESTEPS / num_inference;
         let mut timesteps: Vec<i64> = (0..num_inference)
-            .map(|i| ((num_inference - 1 - i) as f32 * step).round() as i64)
+            .rev()
+            .map(|i| (i * step_ratio + 1) as i64)
             .collect();
         for t in &mut timesteps {
             *t = (*t).clamp(0, SD15_NUM_TRAIN_TIMESTEPS as i64 - 1);
@@ -2585,6 +2589,18 @@ mod tests {
             assert!(w[0] > w[1], "timesteps must descend: {} → {}", w[0], w[1]);
         }
         assert!(*t.last().unwrap() < 100, "last timestep should be near 0, got {:?}", t.last());
+    }
+
+    /// Diffusers DDIMScheduler default: timestep_spacing="leading" + steps_offset=1.
+    /// step_ratio = 1000 // 20 = 50; timesteps = arange(0, 20) * 50 + 1, reversed.
+    /// Values verified against Diffusers' Python DDIMScheduler for SD-1.5 at 20 steps.
+    #[test]
+    fn ddim_timesteps_match_diffusers_leading_with_offset_1() {
+        let s = DdimScheduler::new_sd15(20);
+        let t = s.timesteps();
+        assert_eq!(t[0], 951, "first timestep must be 951 (leading+offset=1)");
+        assert_eq!(t[10], 451, "mid timestep (index 10) must be 451");
+        assert_eq!(t[19], 1, "last timestep must be 1 (offset=1, not 0)");
     }
 
     #[test]

@@ -99,9 +99,8 @@ pub enum SdScheduler {
     /// UniPC multistep — best quality at low step counts (8-12).
     /// Not yet wired to a dispatch backend.
     UniPc,
-    /// Euler-Ancestral — adds noise per step → creative variation
-    /// per seed (non-deterministic). Not yet wired to a dispatch
-    /// backend.
+    /// Euler-Ancestral — adds noise per step → creative variation per
+    /// seed (non-deterministic).
     EulerA,
 }
 
