@@ -103,7 +103,18 @@ pub struct SdInpaintRequest {
     /// `Scheduler` variant from this kind.
     #[serde(default)]
     pub scheduler: SchedulerKind,
+    /// Inpaint strength in [0, 1]. 1.0 = pure noise init, fully
+    /// creative rewrite (default, original behavior). 0.7-0.85 =
+    /// VAE-encode the source pixels and add proportional noise →
+    /// preserves structure / lighting, makes targeted edits. 0.0 =
+    /// preserve the original (no work). The dispatcher skips
+    /// `(1-strength) * num_inference_steps` early denoise steps and
+    /// initializes from `add_noise(image_latents, noise, t_start)`.
+    #[serde(default = "default_strength")]
+    pub strength: f32,
 }
+
+fn default_strength() -> f32 { 1.0 }
 
 impl Default for SdInpaintRequest {
     fn default() -> Self {
@@ -115,6 +126,7 @@ impl Default for SdInpaintRequest {
             seed: None,
             use_taesd: false,
             scheduler: SchedulerKind::Lcm,
+            strength: default_strength(),
         }
     }
 }
@@ -547,14 +559,50 @@ fn run_one_tile(
             .unwrap_or(0)
     });
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
-    let mut latent = sample_initial_noise(&mut rng);
-    // σ-space schedulers (Euler-A) want the initial sample lifted
-    // onto their σ_max scale; α-space schedulers leave it at unit
-    // variance.
-    let init_scale = scheduler.init_noise_sigma();
-    if (init_scale - 1.0).abs() > 1e-6 {
-        latent.mapv_inplace(|v| v * init_scale);
+
+    // Strength < 1.0 → skip early denoise steps and initialize from a
+    // VAE-encoded source image mixed with proportional noise. At
+    // strength = 1.0 the path is the original "pure noise init,
+    // run all steps".
+    let strength = req.strength.clamp(0.0, 1.0);
+    let total_steps = scheduler.timesteps().len();
+    let t_start: usize = if strength >= 0.999 {
+        0
+    } else {
+        // Floor so a 0.99 doesn't skip a step on a 4-step LCM run.
+        let skipped = ((1.0 - strength) * total_steps as f32).floor() as usize;
+        skipped.min(total_steps - 1)
+    };
+    // Override the entry-level total so the user sees the actual
+    // step count being run, not the pre-strength budget.
+    if let Some(p) = progress {
+        p.set_total((total_steps - t_start) as u32);
     }
+
+    let mut latent = if t_start == 0 {
+        let mut l = sample_initial_noise(&mut rng);
+        // σ-space schedulers (Euler-A) lift the initial sample onto
+        // their σ_max scale; α-space schedulers leave unit variance.
+        let init_scale = scheduler.init_noise_sigma();
+        if (init_scale - 1.0).abs() > 1e-6 {
+            l.mapv_inplace(|v| v * init_scale);
+        }
+        l
+    } else {
+        // Strength < 1: VAE-encode the full source pixels (no mask
+        // gate), then have the scheduler mix in noise at sigmas[t_start].
+        let image_latents = vae_encode_from_input(vae, image_to_minus1_plus1(&padded_image))?;
+        let dim = image_latents.dim();
+        let n = image_latents.len();
+        let dist = StandardNormal;
+        let noise: Vec<f32> = (0..n).map(|_| dist.sample(&mut rng)).collect();
+        let mixed = scheduler.add_noise(
+            image_latents.as_slice().expect("image latent: standard layout"),
+            &noise,
+            t_start,
+        );
+        Array4::from_shape_vec(dim, mixed).expect("shape unchanged")
+    };
 
     // Denoising loop. With CFG: noise_pred = uncond + scale * (cond - uncond).
     // Without CFG: just one UNet pass with cond.
@@ -565,19 +613,21 @@ fn run_one_tile(
     });
     let needs_precondition = scheduler.requires_preconditioning();
     let mut precond_buf: Vec<f32> = Vec::new();
-    for (i, &t) in timesteps.iter().enumerate() {
+    // Skip the first `t_start` entries when strength<1: those are
+    // the high-noise steps we're bypassing.
+    for (loop_i, &t) in timesteps.iter().enumerate().skip(t_start) {
         // Check cancel between UNet steps. ORT has no per-op cancel, so
         // worst-case latency on cancel is one UNet step (multi-second).
         if is_cancelled() {
             return Err(CoreError::Cancelled);
         }
-        // Publish progress AFTER the cancel check so a cancelled stroke
-        // doesn't briefly tick "step N+1 of M" before exiting.
-        // `i + 1` so the banner reads "step 1 of 20" on the first
-        // iteration rather than "step 0".
+        // Progress is reported relative to the steps actually run
+        // (total_steps - t_start) so the user sees "step 1 of 5" on
+        // a 50%-strength 10-step run, not "step 6 of 10".
         if let Some(p) = progress {
-            p.set_step((i as u32) + 1);
+            p.set_step(((loop_i - t_start) as u32) + 1);
         }
+        let i = loop_i;
         let latent_f16 = if needs_precondition {
             // mapv/to_owned outputs always have standard layout.
             scheduler.scale_model_input_into(
@@ -1505,6 +1555,32 @@ fn extract_4d(value: &ort::value::DynValue, label: &str) -> Result<Array4<f32>, 
 ///
 /// Skips the intermediate RGBA clone the previous `mask_image_for_vae`
 /// → `image_to_minus1_plus1` sequence built (~1 MB at 512×512).
+/// Same as `image_to_minus1_plus1_masked` but without the mask gate —
+/// VAE-encodes the full image (used by the strength<1 init path so
+/// the mixed init latent contains the original masked-region pixels
+/// proportional to (1-strength)).
+fn image_to_minus1_plus1(image: &RgbaImage) -> Array4<f32> {
+    let s = SD_TILE as usize;
+    let (w, h) = image.dimensions();
+    let (w_us, h_us) = (w as usize, h as usize);
+    let mut a = Array4::<f32>::zeros((1, 3, s, s));
+    let buf = a.as_slice_mut().unwrap();
+    let plane = s * s;
+    let raw = image.as_raw();
+    for y in 0..h_us.min(s) {
+        let src_row = y * w_us * 4;
+        let dst_row = y * s;
+        for x in 0..w_us.min(s) {
+            let dst = dst_row + x;
+            let src = src_row + x * 4;
+            buf[dst]              = (raw[src]     as f32 / 127.5) - 1.0;
+            buf[plane + dst]      = (raw[src + 1] as f32 / 127.5) - 1.0;
+            buf[plane * 2 + dst]  = (raw[src + 2] as f32 / 127.5) - 1.0;
+        }
+    }
+    a
+}
+
 fn image_to_minus1_plus1_masked(image: &RgbaImage, mask: &GrayImage) -> Array4<f32> {
     debug_assert_eq!(image.dimensions(), mask.dimensions());
     let s = SD_TILE as usize;
@@ -2419,6 +2495,45 @@ impl Scheduler {
             }
         }
     }
+
+    /// Mix a clean signal `sample` (e.g. VAE-encoded source image)
+    /// with `noise` at the noise level corresponding to inference
+    /// step `step_idx`. Used for strength<1 inpaint init.
+    /// α-space schedulers: `√α̅ · sample + √(1-α̅) · noise`.
+    /// σ-space schedulers (Euler-A): `sample + σ · noise`.
+    pub fn add_noise(&self, sample: &[f32], noise: &[f32], step_idx: usize) -> Vec<f32> {
+        debug_assert_eq!(sample.len(), noise.len());
+        match self {
+            Scheduler::Ddim(s) => {
+                let t = s.timesteps()[step_idx];
+                add_noise_alpha_space(sample, noise, s.alpha_cumprod(t))
+            }
+            Scheduler::Lcm(s) => {
+                let t = s.timesteps()[step_idx];
+                add_noise_alpha_space(sample, noise, s.alpha_cumprod(t))
+            }
+            Scheduler::DpmPp2M(s) => {
+                let sigma = s.sigmas[step_idx];
+                let alpha = 1.0 / (sigma * sigma + 1.0).sqrt();
+                add_noise_alpha_space(sample, noise, alpha * alpha)
+            }
+            Scheduler::EulerA(s) => {
+                let sigma = s.sigmas[step_idx];
+                sample.iter().zip(noise.iter())
+                    .map(|(&x, &n)| x + sigma * n)
+                    .collect()
+            }
+        }
+    }
+}
+
+/// VP forward process: `latent_α = √α̅·clean + √(1-α̅)·noise`.
+fn add_noise_alpha_space(sample: &[f32], noise: &[f32], alpha_cumprod: f32) -> Vec<f32> {
+    let sqrt_alpha = alpha_cumprod.sqrt();
+    let sqrt_one_minus = (1.0 - alpha_cumprod).max(0.0).sqrt();
+    sample.iter().zip(noise.iter())
+        .map(|(&s, &n)| sqrt_alpha * s + sqrt_one_minus * n)
+        .collect()
 }
 
 #[cfg(test)]
@@ -2699,6 +2814,49 @@ mod tests {
                 "Euler-A Karras timesteps must descend: {} → {}", w[0], w[1]);
         }
         assert!(t[0] >= 950, "first timestep should be near max noise, got {}", t[0]);
+    }
+
+    /// `add_noise` for α-space schedulers must implement the VP
+    /// forward process: noisy = √α̅·clean + √(1-α̅)·noise. At step 0
+    /// (high noise, α̅ near 0) the result should be dominated by the
+    /// noise vector; at the final step (low noise, α̅ near 1) it
+    /// should be dominated by the clean signal.
+    #[test]
+    fn ddim_add_noise_at_high_t_is_noise_dominated_at_low_t_is_sample_dominated() {
+        let s = Scheduler::Ddim(DdimScheduler::new_sd15(20));
+        let clean = vec![1.0_f32; 4];
+        let noise = vec![0.1_f32; 4]; // small noise vs clean=1.0
+        // step_idx = 0 → high noise → output dominated by 0.1 (noise scaled by √(1-α̅) ≈ 1)
+        let mixed_high = s.add_noise(&clean, &noise, 0);
+        // Each entry should be much closer to 0.1 (noise · ~1) than to 1.0 (clean · ~0).
+        for v in &mixed_high {
+            assert!(*v < 0.5,
+                "high-t add_noise should be noise-dominated, got {v}");
+        }
+        // step_idx = num_inference - 1 → low noise → output close to clean signal
+        let mixed_low = s.add_noise(&clean, &noise, 19);
+        for v in &mixed_low {
+            assert!(*v > 0.85,
+                "low-t add_noise should be sample-dominated, got {v}");
+        }
+    }
+
+    /// Euler-A `add_noise` is σ-space: noisy = sample + σ·noise.
+    /// No square-root mixing — the σ-scale is applied to noise directly.
+    #[test]
+    fn eulera_add_noise_is_sample_plus_sigma_times_noise() {
+        let euler = EulerAScheduler::new_sd15(8);
+        let s = Scheduler::EulerA(EulerAScheduler::new_sd15(8));
+        let clean = vec![0.5_f32; 4];
+        let noise = vec![1.0_f32; 4];
+        let step_idx = 3;
+        let sigma = euler.sigmas[step_idx];
+        let mixed = s.add_noise(&clean, &noise, step_idx);
+        for v in &mixed {
+            let expected = 0.5 + sigma * 1.0;
+            assert!((v - expected).abs() < 1e-5,
+                "Euler-A add_noise: got {v}, expected {expected}");
+        }
     }
 
     /// Non-final LCM step adds the stochastic `√β_prev · noise` term

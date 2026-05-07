@@ -699,6 +699,7 @@ impl PrunrApp {
             sd_scheduler: bs.sd_scheduler,
             sd_steps: bs.sd_steps,
             sd_seed: bs.sd_seed,
+            sd_strength: bs.sd_strength,
         };
         self.processor.dispatch_inpaint(item_id, source, correction, tuning);
     }
