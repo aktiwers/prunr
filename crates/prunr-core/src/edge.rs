@@ -168,11 +168,16 @@ pub fn tensor_to_edge_mask(
     // Exponential curve: slider 0.0→threshold 0.95, slider 0.5→0.3, slider 1.0→0.01
     let s = line_strength.clamp(0.0, 1.0);
     let threshold = (1.0 - s).powi(2) * 0.95 + 0.01;
+    // Clamp the transition window floor at 0: for line_strength > 0.75 the
+    // threshold falls below 0.10, so `threshold - 0.1` goes negative. Without
+    // the clamp, background pixels (prob ≈ 0) land in the negative-floored
+    // window and produce ~50% alpha — a gray haze across the whole image.
+    let lo = (threshold - 0.1_f32).max(0.0);
     let mut mask_buf = vec![0u8; h * w];
     for i in 0..h * w {
         let prob = 1.0 / (1.0 + (-edge_tensor[i]).exp());
-        // Remap [threshold-0.1, threshold+0.1] to [0, 1] for anti-aliased edges.
-        let edge = ((prob - threshold + 0.1) / 0.2).clamp(0.0, 1.0);
+        // Remap [lo, threshold+0.1] to [0, 1] for anti-aliased edges.
+        let edge = ((prob - lo) / 0.2).clamp(0.0, 1.0);
         mask_buf[i] = (crate::math::smoothstep(edge) * 255.0) as u8;
     }
 
@@ -833,6 +838,35 @@ mod tests {
                 p[0],
             );
         }
+    }
+
+    /// At `line_strength = 1.0` the threshold curve yields 0.01, so
+    /// `threshold - 0.1 = -0.09`. Without the floor clamp, a background
+    /// pixel with `prob = 0.0` computes `edge = (0.0 + 0.09) / 0.2 = 0.45`
+    /// → smoothstep ≈ 0.5 → alpha ≈ 127: a 50%-gray haze across the whole
+    /// image. With the fix, `lo = 0.0` and `prob = 0.0` → `edge = 0.0`
+    /// → alpha = 0. Pin both ends of the range so no regression sneaks back.
+    #[test]
+    fn tensor_to_edge_mask_no_haze_at_max_line_strength() {
+        // Use a tiny 2×2 tensor: 4 representative probability logits.
+        // sigmoid(logit):
+        //   -100  → prob ≈ 0.0  (pure background)
+        //    -2.9 → prob ≈ 0.05 (very faint, below threshold even at max strength)
+        //     0.0 → prob = 0.5  (mid-strength)
+        //     3.0 → prob ≈ 0.95 (strong edge — must remain opaque)
+        let logits = vec![-100.0_f32, -2.9, 0.0, 3.0];
+        let mask = tensor_to_edge_mask(&logits, 2, 2, 2, 2, 1.0);
+        let raw = mask.as_raw();
+        assert!(
+            raw[0] <= 5,
+            "background pixel (prob≈0) must produce alpha≤5 at line_strength=1.0; got {}",
+            raw[0],
+        );
+        assert!(
+            raw[3] >= 250,
+            "strong-edge pixel (prob≈0.95) must produce alpha≥250 at line_strength=1.0; got {}",
+            raw[3],
+        );
     }
 
     #[test]
