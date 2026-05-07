@@ -530,7 +530,7 @@ fn run_one_tile(
     drop(mask_latent);
 
     let steps = req.num_inference_steps as usize;
-    let scheduler = match req.scheduler {
+    let mut scheduler = match req.scheduler {
         SchedulerKind::Lcm => Scheduler::Lcm(LcmScheduler::new_sd15(steps)),
         SchedulerKind::Ddim => Scheduler::Ddim(DdimScheduler::new_sd15(steps)),
         SchedulerKind::DpmPp2MKarras => Scheduler::DpmPp2M(DpmPp2MScheduler::new_sd15(steps)),
@@ -549,10 +549,6 @@ fn run_one_tile(
     });
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
     let mut latent = sample_initial_noise(&mut rng);
-    // DPM++ 2M's multistep update needs the previous step's predicted
-    // x0 ("m_{i-1}"). Other schedulers ignore this. Initialized to
-    // None so the first step takes the first-order branch.
-    let mut prev_model_output: Option<Vec<f32>> = None;
 
     // Denoising loop. With CFG: noise_pred = uncond + scale * (cond - uncond).
     // Without CFG: just one UNet pass with cond.
@@ -616,8 +612,8 @@ fn run_one_tile(
         let t_prev = timesteps.get(i + 1).copied().unwrap_or(-1);
         let is_final = i + 1 == timesteps.len();
         latent = step_array(
-            &scheduler, &latent, &noise_pred, i, t, t_prev, is_final,
-            &mut rng, &mut prev_model_output,
+            &mut scheduler, &latent, &noise_pred, i, t, t_prev, is_final,
+            &mut rng,
         );
     }
 
@@ -1642,9 +1638,12 @@ fn cfg_blend(
 
 /// Apply DDIM step element-wise to flat-Vec representations of the
 /// 4D arrays. Avoids one round-trip through Vec<f32> + reshape.
-#[allow(clippy::too_many_arguments)] // scheduler dispatch needs all of (loop state + per-scheduler context); packing into a struct adds indirection without consolidating call sites
+// `step_idx` is only meaningful to the DPM++ multistep arm, but the
+// dispatch is shared. Threading it through a `StepCtx` struct would
+// force the DDIM/LCM arms to carry a field they never read.
+#[allow(clippy::too_many_arguments)]
 fn step_array(
-    scheduler: &Scheduler,
+    scheduler: &mut Scheduler,
     latent_t: &Array4<f32>,
     noise_pred: &Array4<f32>,
     step_idx: usize,
@@ -1652,7 +1651,6 @@ fn step_array(
     t_prev: i64,
     is_final_step: bool,
     rng: &mut ChaCha8Rng,
-    prev_model_output: &mut Option<Vec<f32>>,
 ) -> Array4<f32> {
     // extract_4d returns Array4 via mapv/to_owned, which always produces
     // standard C layout; as_slice() is infallible on those.
@@ -1673,7 +1671,7 @@ fn step_array(
                 s.step_at(lat, eps, t, t_prev, &noise)
             }
         }
-        Scheduler::DpmPp2M(s) => s.step(lat, eps, step_idx, prev_model_output),
+        Scheduler::DpmPp2M(s) => s.step(lat, eps, step_idx),
     };
     Array4::from_shape_vec(latent_t.dim(), next)
         .expect("shape unchanged from input")
@@ -1819,6 +1817,16 @@ fn compute_alphas_cumprod_sd15() -> Vec<f32> {
         alphas_cumprod.push(acc);
     }
     alphas_cumprod
+}
+
+/// Per-train-timestep `ln σ_t` where σ_t = √((1-α̅_t)/α̅_t). Shared
+/// schedule input for any Karras-family scheduler that needs to map
+/// a sampling sigma back to a train timestep.
+fn compute_log_sigmas_sd15() -> Vec<f32> {
+    compute_alphas_cumprod_sd15()
+        .iter()
+        .map(|&a| (((1.0 - a) / a).sqrt()).ln())
+        .collect()
 }
 
 /// DDIM (Denoising Diffusion Implicit Models) scheduler — pure math,
@@ -2055,44 +2063,23 @@ impl LcmScheduler {
 /// `algorithm_type="dpmsolver++"`, `solver_order=2`,
 /// `use_karras_sigmas=True`, `prediction_type="epsilon"`,
 /// `solver_type="midpoint"`.
-///
-/// **Why this scheduler matters.** DDIM is the original SD-1.5 sampler
-/// but a generation behind. Modern UIs (A1111, ComfyUI, InvokeAI)
-/// default to DPM++ 2M Karras because:
-/// - The Karras sigma schedule (rho=7.0) clusters sigmas around the
-///   mid-noise band where the model has the most signal.
-/// - The multistep solver carries the previous step's predicted x0
-///   forward; the second-order correction makes 12-15 steps land at
-///   DDIM-20-quality.
-///
-/// State: the multistep update needs the *previous step's* model
-/// output. We keep that out of the struct (so `&Scheduler` stays
-/// shareable) and have `step_array` thread it through as
-/// `&mut Option<Vec<f32>>`.
 pub struct DpmPp2MScheduler {
-    /// Length `num_inference + 1`; `sigmas[i]` is the noise level
-    /// entering step `i`, `sigmas[i+1]` is the target after step `i`.
-    /// `sigmas[num_inference] == 0` (zero terminal SNR — DPM++
-    /// convention).
     sigmas: Vec<f32>,
-    /// Length `num_inference`. Per-step UNet timestep input,
-    /// recovered from `sigmas[0..num_inference]` via log-sigma
-    /// interpolation into the train-timestep schedule.
     timesteps: Vec<i64>,
     pub num_train: usize,
     pub num_inference: usize,
+    /// Previous step's predicted x0 — `None` on first step (first-order
+    /// branch), `Some` thereafter (second-order multistep correction).
+    /// Buffer is reused across steps via `clone_from` to avoid a
+    /// per-step allocation.
+    prev_model_output: Option<Vec<f32>>,
 }
 
 impl DpmPp2MScheduler {
     pub fn new_sd15(num_inference: usize) -> Self {
-        let alphas_cumprod = compute_alphas_cumprod_sd15();
-        // VP-space sigma at each train timestep: σ_t = √((1-α̅_t)/α̅_t).
-        let sigma_schedule: Vec<f32> = alphas_cumprod.iter()
-            .map(|&a| ((1.0 - a) / a).sqrt())
-            .collect();
-        let log_sigmas: Vec<f32> = sigma_schedule.iter().map(|s| s.ln()).collect();
-        let sigma_min = sigma_schedule[0];
-        let sigma_max = sigma_schedule[sigma_schedule.len() - 1];
+        let log_sigmas = compute_log_sigmas_sd15();
+        let sigma_min = log_sigmas[0].exp();
+        let sigma_max = log_sigmas[log_sigmas.len() - 1].exp();
 
         // Karras sigma schedule (Karras et al. 2022, ρ=7.0). The
         // formula at ramp=0 → σ_max, ramp=1 → σ_min, so iterating
@@ -2123,22 +2110,17 @@ impl DpmPp2MScheduler {
             timesteps,
             num_train: SD15_NUM_TRAIN_TIMESTEPS,
             num_inference,
+            prev_model_output: None,
         }
     }
 
     pub fn timesteps(&self) -> &[i64] { &self.timesteps }
 
-    /// DPM++ 2M Karras update at inference step `step_idx`.
-    /// `prev_model_output` is the previous step's predicted x0 — `None`
-    /// on the first step (uses first-order DDIM-equivalent update),
-    /// `Some(_)` after; the function updates it in-place for the next
-    /// call.
     pub fn step(
-        &self,
+        &mut self,
         latent: &[f32],
         noise_pred: &[f32],
         step_idx: usize,
-        prev_model_output: &mut Option<Vec<f32>>,
     ) -> Vec<f32> {
         debug_assert_eq!(latent.len(), noise_pred.len(),
             "DPM++ step: latent and noise_pred shapes must match");
@@ -2151,46 +2133,44 @@ impl DpmPp2MScheduler {
         let (alpha_s0, sigma_s0_e) = sigma_to_alpha_sigma(sigma_s0);
         let (alpha_t, sigma_t_e) = sigma_to_alpha_sigma(sigma_t);
 
-        // ε → x₀ in VP parameterization.
         let m0: Vec<f32> = latent.iter()
             .zip(noise_pred.iter())
             .map(|(&l, &eps)| (l - sigma_s0_e * eps) / alpha_s0)
             .collect();
 
-        // Log-SNR-like quantities for the exponential update.
         let lambda_s0 = alpha_s0.ln() - sigma_s0_e.ln();
         let lambda_t = alpha_t.ln() - sigma_t_e.ln();
         let h = lambda_t - lambda_s0;
-        let exp_neg_h = (-h).exp();
-        let coef = alpha_t * (exp_neg_h - 1.0);
+        let coef = alpha_t * ((-h).exp() - 1.0);
         let ratio = sigma_t_e / sigma_s0_e;
 
-        let next = if let Some(m1) = prev_model_output.as_ref() {
-            // Second-order DPM++ 2M update (midpoint solver).
+        let next: Vec<f32> = if let Some(m1) = self.prev_model_output.as_ref() {
             let sigma_s1 = self.sigmas[step_idx - 1];
             let (alpha_s1, sigma_s1_e) = sigma_to_alpha_sigma(sigma_s1);
             let lambda_s1 = alpha_s1.ln() - sigma_s1_e.ln();
-            let h_0 = lambda_s0 - lambda_s1;
-            let r0 = h_0 / h;
+            let r0 = (lambda_s0 - lambda_s1) / h;
+            let inv_r0 = 1.0 / r0;
 
             latent.iter()
                 .zip(m0.iter())
                 .zip(m1.iter())
                 .map(|((&l, &md0), &md1)| {
-                    let d0 = md0;
-                    let d1 = (1.0 / r0) * (md0 - md1);
-                    ratio * l - coef * d0 - 0.5 * coef * d1
+                    let d1 = inv_r0 * (md0 - md1);
+                    ratio * l - coef * md0 - 0.5 * coef * d1
                 })
                 .collect()
         } else {
-            // First step: no prev output → first-order (DDIM-equivalent).
             latent.iter()
                 .zip(m0.iter())
                 .map(|(&l, &md0)| ratio * l - coef * md0)
                 .collect()
         };
 
-        *prev_model_output = Some(m0);
+        // Reuse the prev-buffer's allocation across steps.
+        match &mut self.prev_model_output {
+            Some(buf) => buf.clone_from(&m0),
+            slot @ None => *slot = Some(m0),
+        }
         next
     }
 }
@@ -2204,8 +2184,7 @@ fn sigma_to_alpha_sigma(sigma: f32) -> (f32, f32) {
 }
 
 /// Karras sigma → train-timestep, via log-sigma linear interpolation
-/// into the SD-1.5 train sigma schedule. Mirrors Diffusers'
-/// `_sigma_to_t`.
+/// into the SD-1.5 train sigma schedule.
 fn sigma_to_t(sigma: f32, log_sigmas: &[f32]) -> i64 {
     let log_sigma = sigma.max(1e-10_f32).ln();
     // Train log-sigmas are ascending (low noise at idx 0 → high at idx N-1).
@@ -2229,17 +2208,14 @@ fn sigma_to_t(sigma: f32, log_sigmas: &[f32]) -> i64 {
 /// IPC-portable scheduler kind. Replaces the historical
 /// `use_lcm_scheduler: bool` on `SdInpaintRequest` so we can carry
 /// 5 scheduler choices through to the worker.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SchedulerKind {
     Ddim,
+    #[default]
     Lcm,
     DpmPp2MKarras,
     UniPc,
     EulerA,
-}
-
-impl Default for SchedulerKind {
-    fn default() -> Self { Self::Lcm }
 }
 
 /// Runtime-selected scheduler for SD denoise. Constructed worker-side
@@ -2418,7 +2394,9 @@ mod tests {
         }
         // First step starts near max noise; last is near zero.
         assert!(t[0] >= 950, "first timestep should be near max noise, got {}", t[0]);
-        assert!(*t.last().unwrap() < 50, "last timestep should be near 0, got {:?}", t.last());
+        // len == 25 just asserted, .last() is non-empty.
+        let last = *t.last().unwrap();
+        assert!(last < 50, "last timestep should be near 0, got {last}");
     }
 
     /// DPM++ shares the SD-1.5 alpha schedule with DDIM and LCM.
@@ -2447,13 +2425,13 @@ mod tests {
     /// catches regressions in the first-step branching.
     #[test]
     fn dpmpp2m_first_step_with_prev_none_executes_first_order() {
-        let s = DpmPp2MScheduler::new_sd15(25);
+        let mut s = DpmPp2MScheduler::new_sd15(25);
         let latent = vec![0.5_f32; 4];
         let noise = vec![0.1_f32; 4];
-        let mut prev = None;
-        let next = s.step(&latent, &noise, 0, &mut prev);
+        let next = s.step(&latent, &noise, 0);
         assert_eq!(next.len(), latent.len());
-        assert!(prev.is_some(), "first step must populate prev_model_output for next call");
+        assert!(s.prev_model_output.is_some(),
+            "first step must populate prev_model_output for next call");
         // After first step, latent should have moved.
         assert!(next.iter().any(|&v| (v - 0.5).abs() > 1e-4),
             "first step must produce a non-trivial update");

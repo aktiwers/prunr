@@ -122,6 +122,19 @@ impl SdScheduler {
     }
 }
 
+impl From<SdScheduler> for prunr_core::inpaint_sd::SchedulerKind {
+    fn from(s: SdScheduler) -> Self {
+        use prunr_core::inpaint_sd::SchedulerKind;
+        match s {
+            SdScheduler::Lcm => SchedulerKind::Lcm,
+            SdScheduler::Ddim => SchedulerKind::Ddim,
+            SdScheduler::DpmPlusPlus2MKarras => SchedulerKind::DpmPp2MKarras,
+            SdScheduler::UniPc => SchedulerKind::UniPc,
+            SdScheduler::EulerA => SchedulerKind::EulerA,
+        }
+    }
+}
+
 /// Built-in SD quality presets — bundles scheduler + steps + CFG +
 /// Karras into one knob for users who don't want to tune individually.
 /// Industry-standard pattern (A1111 / Lightroom / DaVinci): touching

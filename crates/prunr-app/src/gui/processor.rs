@@ -404,19 +404,8 @@ impl Processor {
             let sd_req = match tuning.backend {
                 prunr_models::ModelId::SdV15InpaintFp16
                 | prunr_models::ModelId::SdV15LcmInpaintFp16 => {
-                    use super::brush_state::SdScheduler;
                     use prunr_core::inpaint_sd::SchedulerKind;
-                    // Map the user's scheduler pick to the worker's
-                    // dispatchable kind. UI gates picking via
-                    // `is_available()`; defensive fallback to LCM if a
-                    // not-yet-implemented variant ever leaks through.
-                    let scheduler = match tuning.sd_scheduler {
-                        SdScheduler::Lcm => SchedulerKind::Lcm,
-                        SdScheduler::Ddim => SchedulerKind::Ddim,
-                        SdScheduler::DpmPlusPlus2MKarras => SchedulerKind::DpmPp2MKarras,
-                        SdScheduler::UniPc => SchedulerKind::UniPc,
-                        SdScheduler::EulerA => SchedulerKind::EulerA,
-                    };
+                    let scheduler: SchedulerKind = tuning.sd_scheduler.into();
                     let lcm = matches!(scheduler, SchedulerKind::Lcm);
                     // LCM weights are calibrated for low CFG. The LCM
                     // model card recommends staying in 1.0–2.0; values
