@@ -562,7 +562,7 @@ impl PrunrApp {
                 Some(self.batch.items[idx].id) == current_id
             };
             if !target { continue; }
-            if let Some(action) = self.try_undo_one_action(idx) {
+            if let Some(action) = self.try_undo_one_action(idx, ctx) {
                 undone += 1;
                 last_action = Some(action);
             }
@@ -596,7 +596,7 @@ impl PrunrApp {
                 Some(self.batch.items[idx].id) == current_id
             };
             if !target { continue; }
-            if let Some(action) = self.try_redo_one_action(idx) {
+            if let Some(action) = self.try_redo_one_action(idx, ctx) {
                 redone += 1;
                 last_action = Some(action);
             }
@@ -619,7 +619,7 @@ impl PrunrApp {
     /// Pop the most-recent marker from `actions_undo` for item at `idx` and
     /// apply the inverse. Skips orphan markers (result stack rotated oldest
     /// out) and tries the next one. Returns the popped ActionType on success.
-    fn try_undo_one_action(&mut self, idx: usize) -> Option<ActionType> {
+    fn try_undo_one_action(&mut self, idx: usize, ctx: &egui::Context) -> Option<ActionType> {
         use super::item::ACTION_HIST_DEPTH;
         loop {
             let kind = self.batch.items[idx].actions_undo.pop_back()?;
@@ -649,7 +649,17 @@ impl PrunrApp {
                     }
                 }
                 ActionType::PresetApply => {
-                    HistoryManager::swap_preset(&mut self.batch.items[idx], HistoryDir::Undo)
+                    if HistoryManager::swap_preset(&mut self.batch.items[idx], HistoryDir::Undo) {
+                        let target_id = self.batch.items[idx].id;
+                        let should_reprocess = self.batch.items[idx].status == BatchStatus::Done;
+                        self.reconcile_bg_image_after_preset(idx, ctx);
+                        if should_reprocess {
+                            self.process_items(|i| i.id == target_id);
+                        }
+                        true
+                    } else {
+                        false
+                    }
                 }
             };
             if success {
@@ -667,7 +677,7 @@ impl PrunrApp {
 
     /// Pop the most-recent marker from `actions_redo` for item at `idx` and
     /// re-apply. Returns the popped ActionType on success.
-    fn try_redo_one_action(&mut self, idx: usize) -> Option<ActionType> {
+    fn try_redo_one_action(&mut self, idx: usize, ctx: &egui::Context) -> Option<ActionType> {
         use super::item::ACTION_HIST_DEPTH;
         loop {
             let kind = self.batch.items[idx].actions_redo.pop_back()?;
@@ -693,7 +703,17 @@ impl PrunrApp {
                     }
                 }
                 ActionType::PresetApply => {
-                    HistoryManager::swap_preset(&mut self.batch.items[idx], HistoryDir::Redo)
+                    if HistoryManager::swap_preset(&mut self.batch.items[idx], HistoryDir::Redo) {
+                        let target_id = self.batch.items[idx].id;
+                        let should_reprocess = self.batch.items[idx].status == BatchStatus::Done;
+                        self.reconcile_bg_image_after_preset(idx, ctx);
+                        if should_reprocess {
+                            self.process_items(|i| i.id == target_id);
+                        }
+                        true
+                    } else {
+                        false
+                    }
                 }
             };
             if success {
@@ -916,26 +936,6 @@ impl PrunrApp {
         tracing::debug!(item_id = id, "recipe-drift tripwire fired — dispatching Tier-2");
         self.processor.live_preview.mark_tweak(id, PreviewKind::Mask);
         self.processor.live_preview.flush(id);
-    }
-
-    /// Preset undo/redo: rolls back (or re-applies) a preset swap on the
-    /// current image. Does NOT touch the image-result history — that stays on
-    /// Ctrl+Z. Kicks an auto-reprocess on a Done item so the restored settings
-    /// produce a fresh result (same path a live preset apply would take).
-    fn swap_preset_history(&mut self, dir: HistoryDir, ctx: &egui::Context) {
-        if self.batch.items.is_empty() { return; }
-        let idx = self.batch.selected_index.min(self.batch.items.len() - 1);
-        let item = &mut self.batch.items[idx];
-        if !HistoryManager::swap_preset(item, dir) { return; }
-        let target_id = item.id;
-        let should_reprocess = item.status == BatchStatus::Done;
-        // Restoring a preset snapshot rewrites settings.bg_image_hash —
-        // pull the matching bytes back into bg_image so the canvas paint
-        // and recipe diff stay consistent.
-        self.reconcile_bg_image_after_preset(idx, ctx);
-        if should_reprocess {
-            self.process_items(|i| i.id == target_id);
-        }
     }
 
     /// Collect and send batch items matching `filter` for processing.
@@ -2466,10 +2466,8 @@ impl PrunrApp {
         if intents.toggle_sidebar     { self.sidebar_hidden     = !self.sidebar_hidden; }
         if intents.toggle_adjustments { self.adjustments_hidden = !self.adjustments_hidden; }
 
-        if intents.undo_requested        { self.handle_undo(ctx); }
-        if intents.redo_requested        { self.handle_redo(ctx); }
-        if intents.preset_undo_requested { self.swap_preset_history(HistoryDir::Undo, ctx); }
-        if intents.preset_redo_requested { self.swap_preset_history(HistoryDir::Redo, ctx); }
+        if intents.undo_requested { self.handle_undo(ctx); }
+        if intents.redo_requested { self.handle_redo(ctx); }
         if intents.screenshot_requested {
             ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
         }
@@ -3315,8 +3313,6 @@ struct ShortcutIntents {
     toggle_adjustments: bool,
     undo_requested: bool,
     redo_requested: bool,
-    preset_undo_requested: bool,
-    preset_redo_requested: bool,
     screenshot_requested: bool,
 }
 
@@ -3364,17 +3360,14 @@ fn collect_shortcut_intents(ctx: &egui::Context) -> ShortcutIntents {
             if i.key_pressed(Key::Tab) && !i.modifiers.shift { s.toggle_sidebar = true; }
         }
 
-        // Shift variants of Z/Y are preset-only undo/redo — roll back an
-        // accidental preset apply without touching the image-result history.
-        // Without-shift stays bound to image history.
+        // Cmd/Ctrl+Z → undo. Cmd/Ctrl+Shift+Z → redo (Adobe convention).
+        // Cmd/Ctrl+Y → redo (Windows/Linux convention). Both redo bindings
+        // route to the same unified action log.
         if i.modifiers.command && i.key_pressed(Key::Z) {
-            if i.modifiers.shift { s.preset_undo_requested = true; }
+            if i.modifiers.shift { s.redo_requested = true; }
             else                 { s.undo_requested = true; }
         }
-        if i.modifiers.command && i.key_pressed(Key::Y) {
-            if i.modifiers.shift { s.preset_redo_requested = true; }
-            else                 { s.redo_requested = true; }
-        }
+        if i.modifiers.command && i.key_pressed(Key::Y) { s.redo_requested = true; }
     });
     s
 }

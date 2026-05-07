@@ -30,8 +30,8 @@ pub fn render_shortcut_grid(ui: &mut egui::Ui) {
             row(ui, &format!("{modifier}+R"), "Remove background");
             row(ui, &format!("{modifier}+S"), "Save result");
             row(ui, &format!("{modifier}+C"), "Copy result");
-            row(ui, &format!("{modifier}+Z"), "Undo removal (or last brush stroke when brush is active)");
-            row(ui, &format!("{modifier}+Y"), "Redo removal (or stroke when brush is active)");
+            row(ui, &format!("{modifier}+Z"), "Undo last action (stroke, result, or preset)");
+            row(ui, &format!("{modifier}+Shift+Z / {modifier}+Y"), "Redo last undone action");
             row(ui, "Escape", "Cancel / Close");
             row(ui, "F1", "Keyboard shortcuts");
             row(ui, "F2", "CLI reference");
