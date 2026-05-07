@@ -216,7 +216,7 @@ Per-image `BatchItem.mask_correction: Option<Arc<MaskCorrection>>` — a signed 
 
 A safety net (`recipe_drift_tripwire` in `pump_live_preview`) catches drift between `applied_recipe.mask` and the current recipe for the selected item — covers state mutators that don't go through the toolbar dispatch path (brush commits, hotkeys, stroke undo/redo). Tagged `tracing::debug!` when it fires so a future feature that forgets to wire dispatch is auditable.
 
-Per-stroke history lives on `BatchItem.stroke_undo_stack` / `stroke_redo_stack` — bounded at 50 snapshots of `Option<Arc<MaskCorrection>>` (each snapshot is one Arc bump, not a full clone). Ctrl+Z while brush mode is active pops a stroke before falling through to the result-undo handler, so users build up a stroke session non-destructively. The on-screen trail visualization (canvas overlay during drag, popover preview area in the chip) shares one falloff renderer in `gui/views/chip.rs::paint_falloff_{circle,square}` so any tweak to the smoothstep curve shows up in both places at once.
+Per-stroke history lives on `BatchItem.stroke_undo_stack` / `stroke_redo_stack` — bounded at 100 snapshots of `Option<Arc<MaskCorrection>>` (each snapshot is one Arc bump, not a full clone). Each of the four push sites (stroke commit, clear-strokes, result archive, preset apply) also writes a tag to a single per-item ordering log (`BatchItem.actions_undo` / `actions_redo`, `VecDeque<ActionType>`). Cmd+Z pops the most-recent tag from `actions_undo` and dispatches to the matching per-type stack, regardless of the current mode — painting strokes and then disabling the brush no longer causes Cmd+Z to skip over the strokes. The on-screen trail visualization (canvas overlay during drag, popover preview area in the chip) shares one falloff renderer in `gui/views/chip.rs::paint_falloff_{circle,square}` so any tweak to the smoothstep curve shows up in both places at once.
 
 ### Eraser (LaMa inpaint)
 
@@ -260,7 +260,7 @@ Mask and edge tweaks auto-rerun Tier 2 during slider drag. A tweak is debounced 
 
 A preset is a named snapshot of per-image settings, stored as one JSON file per preset in the platform config dir. Human-readable and self-contained: a user sends a `.json` to a friend, the friend drops it in the folder, the preset appears in their dropdown next launch.
 
-A reserved `"Prunr"` entry is the factory default (cannot be overwritten or deleted). Each `BatchItem` carries preset undo/redo stacks (Ctrl+Shift+Z/Y) separate from image-result history, so rolling back an accidental preset swap doesn't touch pixels.
+A reserved `"Prunr"` entry is the factory default (cannot be overwritten or deleted). Preset applies are recorded in the unified action log alongside strokes and result archives, so Cmd+Z pops them in commit order — an accidental preset swap is undone without touching any later strokes or results.
 
 ## Memory Management
 
