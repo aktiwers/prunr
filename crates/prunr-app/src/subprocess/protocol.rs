@@ -665,6 +665,7 @@ mod tests {
                 guidance_scale: 7.5,
                 seed: Some(42),
                 use_taesd: false,
+                use_lcm_scheduler: false,
             }),
             feather_px: 4.5,
             sharpen: 0.6,
