@@ -667,6 +667,7 @@ mod tests {
                 use_taesd: false,
                 scheduler: prunr_core::inpaint_sd::SchedulerKind::Ddim,
                 strength: 0.85,
+                use_karras_sigmas: false,
             }),
             feather_px: 4.5,
             sharpen: 0.6,
