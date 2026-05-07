@@ -57,8 +57,8 @@ pub struct BrushSettings {
     pub sd_guidance_scale: f32,
     /// SD-only: which scheduler runs the denoise loop. LCM is the
     /// default — proven good after the LcmScheduler port; DDIM kept
-    /// as a conservative baseline. DPM++/UniPC/Euler-A enable when
-    /// Phase 27.2 lands.
+    /// as a conservative baseline. Other variants gated by
+    /// `is_available()` until they have a dispatch backend wired.
     #[serde(default = "default_sd_scheduler")]
     pub sd_scheduler: SdScheduler,
     /// SD-only: number of denoise steps. LCM ranges 1-8; standard SD
@@ -67,14 +67,9 @@ pub struct BrushSettings {
     pub sd_steps: u32,
     /// SD-only: use the Karras sigma noise schedule on top of the
     /// chosen scheduler. Disabled for LCM (which has its own fixed
-    /// schedule). Enables once Phase 27.2's Karras helper lands.
+    /// schedule).
     #[serde(default)]
     pub sd_use_karras_sigmas: bool,
-    /// SD-only: built-in quality preset that bundles scheduler +
-    /// steps + CFG + Karras into one knob. `Custom` means "user has
-    /// hand-tweaked individual sliders away from any preset's values."
-    #[serde(default = "default_sd_quality_preset")]
-    pub sd_quality_preset: SdQualityPreset,
     /// SD-only: pinned RNG seed for reproducibility. `None` = fresh
     /// random per stroke (the historical behavior).
     #[serde(default)]
@@ -85,26 +80,29 @@ pub struct BrushSettings {
 /// dispatch time so the worker picks the right denoise math.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SdScheduler {
-    /// LCM-distilled multistep — fast preview tier, requires
-    /// `LcmScheduler` math (Phase 26.5). 4-8 steps typical.
+    /// LCM-distilled multistep. 4-8 steps typical.
     Lcm,
     /// DDIM (Denoising Diffusion Implicit Models) — conservative
     /// baseline. 20-30 steps typical.
     Ddim,
     /// DPM-Solver++ 2M with Karras sigmas — modern Standard SD
-    /// default in A1111 / ComfyUI / InvokeAI. 15-25 steps. Enables
-    /// in Phase 27.2.
+    /// default in A1111 / ComfyUI / InvokeAI. 15-25 steps. Not yet
+    /// wired to a dispatch backend; see `is_available()`.
     DpmPlusPlus2MKarras,
     /// UniPC multistep — best quality at low step counts (8-12).
-    /// Enables in Phase 27.2.
+    /// Not yet wired to a dispatch backend.
     UniPc,
     /// Euler-Ancestral — adds noise per step → creative variation
-    /// per seed (non-deterministic). Enables in Phase 27.2.
+    /// per seed (non-deterministic). Not yet wired to a dispatch
+    /// backend.
     EulerA,
 }
 
 impl SdScheduler {
-    /// Whether the scheduler is implemented today (vs Phase 27.2 placeholder).
+    /// Returns `false` for schedulers that don't have a dispatch
+    /// backend wired yet. UI gates the dropdown on this so users
+    /// can't pick something the worker can't run; dispatch should
+    /// also gate as a defensive fallback.
     pub fn is_available(&self) -> bool {
         matches!(self, SdScheduler::Lcm | SdScheduler::Ddim)
     }
@@ -124,27 +122,36 @@ impl SdScheduler {
 /// Built-in SD quality presets — bundles scheduler + steps + CFG +
 /// Karras into one knob for users who don't want to tune individually.
 /// Industry-standard pattern (A1111 / Lightroom / DaVinci): touching
-/// any individual slider auto-switches to `Custom`.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// any individual slider auto-switches the displayed preset to
+/// `Custom`.
+///
+/// **Stateless.** The "active preset" is computed from the current
+/// brush field values via `detect_from`. There's no persisted
+/// `sd_quality_preset` — picking a preset writes the bundled values
+/// into the individual fields and that's it. This eliminates the
+/// "stored preset says Balanced but values say Custom" desync class
+/// of bug.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum SdQualityPreset {
     /// LCM @ 4 steps, CFG=1.0 — instant preview tier.
     Fast,
-    /// LCM @ 8 steps, CFG=1.5 — current shipped default after the
-    /// LcmScheduler port. Good balance of speed + quality on iGPU.
+    /// LCM @ 8 steps, CFG=1.5 — current shipped default. Good balance
+    /// of speed + quality on iGPU.
     Balanced,
     /// DPM++ 2M Karras @ 25 steps, CFG=4.0 — best quality. Requires
-    /// Phase 27.2 to actually work; until then resolves to Balanced.
+    /// the DPM++ scheduler to be available (`is_available()`); UI
+    /// gates picking and dispatch falls back to LCM otherwise.
     Quality,
-    /// User has tweaked individual sliders away from any preset's
-    /// values. Stored so the dropdown can reflect "you're off-preset"
-    /// without snapping the user back.
+    /// Computed: current brush values don't match any built-in.
+    /// Never an input to `apply_to` — it has no bundled config.
     Custom,
 }
 
 impl SdQualityPreset {
     /// Apply this preset's bundled scheduler + steps + CFG + Karras
-    /// to a `BrushSettings`. The `Custom` variant is a no-op (caller
-    /// already has the right values).
+    /// to a `BrushSettings`. `Custom` is a true no-op — it has no
+    /// bundled config; callers shouldn't call `apply_to(Custom)` and
+    /// the implementation does nothing if they do.
     pub fn apply_to(self, brush: &mut BrushSettings) {
         match self {
             SdQualityPreset::Fast => {
@@ -167,7 +174,6 @@ impl SdQualityPreset {
             }
             SdQualityPreset::Custom => {}
         }
-        brush.sd_quality_preset = self;
     }
 
     /// Detect which preset (if any) the current `BrushSettings`
@@ -236,7 +242,6 @@ fn default_sd_negative_prompt() -> String {
 
 fn default_sd_scheduler() -> SdScheduler { SdScheduler::Lcm }
 fn default_sd_steps() -> u32 { 8 }
-fn default_sd_quality_preset() -> SdQualityPreset { SdQualityPreset::Balanced }
 
 impl BrushSettings {
     pub fn stamp(&self) -> Stamp {
@@ -261,7 +266,6 @@ impl Default for BrushSettings {
             sd_scheduler: default_sd_scheduler(),
             sd_steps: default_sd_steps(),
             sd_use_karras_sigmas: false,
-            sd_quality_preset: default_sd_quality_preset(),
             sd_seed: None,
         }
     }
@@ -439,9 +443,19 @@ mod tests {
             preset.apply_to(&mut s);
             assert_eq!(SdQualityPreset::detect_from(&s), preset,
                 "apply→detect mismatch for {preset:?}");
-            assert_eq!(s.sd_quality_preset, preset,
-                "apply must update the preset field for {preset:?}");
         }
+    }
+
+    /// `apply_to(Custom)` is a true no-op — Custom has no bundled
+    /// config, so no fields are mutated. Pinned because the
+    /// alternative interpretation (silently set a "preset field") was
+    /// flagged as ambiguous in review.
+    #[test]
+    fn apply_to_custom_is_noop() {
+        let mut s = BrushSettings::default();
+        let before = s.clone();
+        SdQualityPreset::Custom.apply_to(&mut s);
+        assert_eq!(s, before, "apply_to(Custom) must not mutate any field");
     }
 
     /// Touching any individual SD knob away from the active preset's
@@ -470,10 +484,11 @@ mod tests {
             "off-preset Karras toggle must detect as Custom");
     }
 
-    /// `is_available()` correctly reflects which schedulers Phase 27.1
-    /// can dispatch today vs Phase 27.2's coming-soon entries.
+    /// `is_available()` reflects which schedulers have a dispatch
+    /// backend wired today. UI gates the dropdown on this; dispatch
+    /// should also gate as a defensive fallback.
     #[test]
-    fn scheduler_availability_matches_phase_status() {
+    fn scheduler_availability_reflects_dispatch_readiness() {
         assert!(SdScheduler::Lcm.is_available());
         assert!(SdScheduler::Ddim.is_available());
         assert!(!SdScheduler::DpmPlusPlus2MKarras.is_available());
@@ -482,13 +497,10 @@ mod tests {
     }
 
     /// Old persisted JSON without the new SD-tuning fields must
-    /// deserialize cleanly into the new defaults — no panic, no
-    /// "Custom" surprise on first load. Pins serde back-compat for
-    /// users carrying older settings.json files.
+    /// deserialize cleanly into the new defaults — no panic. Pins
+    /// serde back-compat for users carrying older settings.json files.
     #[test]
     fn brush_settings_serde_back_compat_old_json_without_new_fields() {
-        // Snippet covers the SD prompt fields that already existed
-        // before Phase 27.1 but omits the new scheduler/steps/preset.
         let old_json = r#"{
             "radius": 24.0,
             "hardness": 0.7,
@@ -503,11 +515,16 @@ mod tests {
             "sd_guidance_scale": 4.0
         }"#;
         let s: BrushSettings = serde_json::from_str(old_json).unwrap();
+        // Missing fields fill with serde defaults:
         assert_eq!(s.sd_scheduler, SdScheduler::Lcm);
         assert_eq!(s.sd_steps, 8);
         assert!(!s.sd_use_karras_sigmas);
-        assert_eq!(s.sd_quality_preset, SdQualityPreset::Balanced);
         assert_eq!(s.sd_seed, None);
+        // The persisted CFG=4.0 is kept; semantically that means the
+        // user's effective preset is Custom (CFG mismatch with all
+        // built-ins). The UI reads detect_from on every render so
+        // this is reported correctly to the dropdown.
+        assert_eq!(SdQualityPreset::detect_from(&s), SdQualityPreset::Custom);
     }
 
     #[test]
