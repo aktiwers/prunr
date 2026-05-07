@@ -248,7 +248,7 @@ fn default_grow() -> f32 { 2.0 }
 /// >2.0 degrade LCM output quality). For Standard SD via DDIM /
 /// DPM++ the user can bump to 4.0–7.5 via the toolbar slider; the
 /// `Quality` preset auto-fills 4.0 when picked.
-fn default_cfg() -> f32 { 1.5 }
+pub(crate) fn default_cfg() -> f32 { 1.5 }
 
 /// Defaults for SD eraser prompts. Style-agnostic — works whether the
 /// source is a photo, drawing, anime, pixel art, render, etc. (avoiding
@@ -257,13 +257,13 @@ fn default_cfg() -> f32 { 1.5 }
 /// via "seamless continuation"); aggressive on the negative (block
 /// SD-1.5 failure modes, especially text-shape glyphs which fire on
 /// weak conditioning).
-fn default_sd_prompt() -> String {
-    "seamless continuation of the surroundings, matching style, high quality".to_string()
-}
-fn default_sd_negative_prompt() -> String {
+pub(crate) const DEFAULT_SD_PROMPT: &str =
+    "seamless continuation of the surroundings, matching style, high quality";
+pub(crate) const DEFAULT_SD_NEGATIVE_PROMPT: &str =
     "text, letters, words, watermark, signature, logo, blurry, distorted, \
-     low quality, oversaturated, jpeg artifacts".to_string()
-}
+     low quality, oversaturated, jpeg artifacts";
+fn default_sd_prompt() -> String { DEFAULT_SD_PROMPT.to_string() }
+fn default_sd_negative_prompt() -> String { DEFAULT_SD_NEGATIVE_PROMPT.to_string() }
 
 fn default_sd_scheduler() -> SdScheduler { SdScheduler::Lcm }
 fn default_sd_steps() -> u32 { 8 }

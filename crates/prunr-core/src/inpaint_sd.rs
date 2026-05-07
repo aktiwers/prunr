@@ -564,9 +564,16 @@ fn run_one_tile(
     // VAE-encoded source image mixed with proportional noise. At
     // strength = 1.0 the path is the original "pure noise init,
     // run all steps".
+    /// Treat strength near 1.0 as full-noise to avoid skipping a step
+    /// on a 4-step run due to f32 rounding.
+    const STRENGTH_FULL_THRESHOLD: f32 = 0.999;
+    /// init_noise_sigma identity guard — schedulers returning ~1.0 skip
+    /// the in-place latent rescale.
+    const INIT_NOISE_SIGMA_IDENTITY_EPS: f32 = 1e-6;
+
     let strength = req.strength.clamp(0.0, 1.0);
     let total_steps = scheduler.timesteps().len();
-    let t_start: usize = if strength >= 0.999 {
+    let t_start: usize = if strength >= STRENGTH_FULL_THRESHOLD {
         0
     } else {
         // Floor so a 0.99 doesn't skip a step on a 4-step LCM run.
@@ -584,7 +591,7 @@ fn run_one_tile(
         // σ-space schedulers (Euler-A) lift the initial sample onto
         // their σ_max scale; α-space schedulers leave unit variance.
         let init_scale = scheduler.init_noise_sigma();
-        if (init_scale - 1.0).abs() > 1e-6 {
+        if (init_scale - 1.0).abs() > INIT_NOISE_SIGMA_IDENTITY_EPS {
             l.mapv_inplace(|v| v * init_scale);
         }
         l
@@ -615,7 +622,7 @@ fn run_one_tile(
     let mut precond_buf: Vec<f32> = Vec::new();
     // Skip the first `t_start` entries when strength<1: those are
     // the high-noise steps we're bypassing.
-    for (loop_i, &t) in timesteps.iter().enumerate().skip(t_start) {
+    for (i, &t) in timesteps.iter().enumerate().skip(t_start) {
         // Check cancel between UNet steps. ORT has no per-op cancel, so
         // worst-case latency on cancel is one UNet step (multi-second).
         if is_cancelled() {
@@ -625,9 +632,8 @@ fn run_one_tile(
         // (total_steps - t_start) so the user sees "step 1 of 5" on
         // a 50%-strength 10-step run, not "step 6 of 10".
         if let Some(p) = progress {
-            p.set_step(((loop_i - t_start) as u32) + 1);
+            p.set_step(((i - t_start) as u32) + 1);
         }
-        let i = loop_i;
         let latent_f16 = if needs_precondition {
             // mapv/to_owned outputs always have standard layout.
             scheduler.scale_model_input_into(
@@ -1537,29 +1543,12 @@ fn extract_4d(value: &ort::value::DynValue, label: &str) -> Result<Array4<f32>, 
 
 // ── Tensor helpers ──────────────────────────────────────────────────────
 
-/// RGBA → NCHW f32 in [-1, 1]. Pads/crops to SD_TILE×SD_TILE; alpha is
-/// dropped because SD operates on RGB. Out-of-bounds pixels are zero.
-/// Convert a 512×512 RGBA into the SD VAE's [-1, 1] f32 input layout,
-/// with mid-gray (0.0) written directly for masked pixels.
-///
-/// Mid-gray for the masked region is the SD inpaint training
-/// convention: diffusers' `prepare_mask_and_masked_image` multiplies
-/// the [-1, 1]-normalized image by `(mask < 0.5)` which puts 0 (mid-
-/// gray) into the masked region. Filling with black (-1 in [-1, 1])
-/// instead drives the masked-image latent out of distribution, and
-/// with empty-prompt CFG=1.0 the denoised output collapses to dark
-/// fills.
-///
-/// An empty mask degenerates to a plain image-to-tensor — the unit
-/// test exercises the byte-endpoint math through that path.
-///
-/// Skips the intermediate RGBA clone the previous `mask_image_for_vae`
-/// → `image_to_minus1_plus1` sequence built (~1 MB at 512×512).
-/// Same as `image_to_minus1_plus1_masked` but without the mask gate —
-/// VAE-encodes the full image (used by the strength<1 init path so
-/// the mixed init latent contains the original masked-region pixels
-/// proportional to (1-strength)).
-fn image_to_minus1_plus1(image: &RgbaImage) -> Array4<f32> {
+/// RGBA → NCHW f32 in [-1, 1] for the SD VAE encoder. Alpha dropped;
+/// masked pixels (mask > 127) write mid-gray (0.0) per the SD inpaint
+/// training convention — diffusers' `prepare_mask_and_masked_image`
+/// zeroes the masked region so filling with -1 (black) drives the
+/// VAE latent out of distribution. `None` mask encodes the full image.
+fn image_to_minus1_plus1_inner(image: &RgbaImage, mask: Option<&GrayImage>) -> Array4<f32> {
     let s = SD_TILE as usize;
     let (w, h) = image.dimensions();
     let (w_us, h_us) = (w as usize, h as usize);
@@ -1567,37 +1556,14 @@ fn image_to_minus1_plus1(image: &RgbaImage) -> Array4<f32> {
     let buf = a.as_slice_mut().unwrap();
     let plane = s * s;
     let raw = image.as_raw();
-    for y in 0..h_us.min(s) {
-        let src_row = y * w_us * 4;
-        let dst_row = y * s;
-        for x in 0..w_us.min(s) {
-            let dst = dst_row + x;
-            let src = src_row + x * 4;
-            buf[dst]              = (raw[src]     as f32 / 127.5) - 1.0;
-            buf[plane + dst]      = (raw[src + 1] as f32 / 127.5) - 1.0;
-            buf[plane * 2 + dst]  = (raw[src + 2] as f32 / 127.5) - 1.0;
-        }
-    }
-    a
-}
-
-fn image_to_minus1_plus1_masked(image: &RgbaImage, mask: &GrayImage) -> Array4<f32> {
-    debug_assert_eq!(image.dimensions(), mask.dimensions());
-    let s = SD_TILE as usize;
-    let (w, h) = image.dimensions();
-    let (w_us, h_us) = (w as usize, h as usize);
-    let mut a = Array4::<f32>::zeros((1, 3, s, s));
-    let buf = a.as_slice_mut().unwrap();
-    let plane = s * s;
-    let raw = image.as_raw();
-    let m = mask.as_raw();
+    let m = mask.map(|m| m.as_raw());
     for y in 0..h_us.min(s) {
         let src_row = y * w_us * 4;
         let dst_row = y * s;
         let mask_row = y * w_us;
         for x in 0..w_us.min(s) {
             let dst = dst_row + x;
-            if m[mask_row + x] > 127 {
+            if m.is_some_and(|m| m[mask_row + x] > 127) {
                 // Match the byte-128 path's bit pattern: same f32
                 // division as the unmasked branch, just on a constant
                 // input. Hardcoding `0.0` would diverge by ~0.00392.
@@ -1614,6 +1580,17 @@ fn image_to_minus1_plus1_masked(image: &RgbaImage, mask: &GrayImage) -> Array4<f
         }
     }
     a
+}
+
+/// Full-image encode — used by the strength<1 init path so the mixed
+/// init latent retains the original masked-region pixels.
+fn image_to_minus1_plus1(image: &RgbaImage) -> Array4<f32> {
+    image_to_minus1_plus1_inner(image, None)
+}
+
+fn image_to_minus1_plus1_masked(image: &RgbaImage, mask: &GrayImage) -> Array4<f32> {
+    debug_assert_eq!(image.dimensions(), mask.dimensions());
+    image_to_minus1_plus1_inner(image, Some(mask))
 }
 
 fn minus1_plus1_to_image(arr: &Array4<f32>) -> RgbaImage {
@@ -2321,12 +2298,8 @@ impl DpmPp2MScheduler {
 /// (initial sample = noise * √(σ_max²+1) for "leading" timestep
 /// spacing). Before each UNet call, `scale_model_input` divides by
 /// √(σ²+1) to map back to the α-space input the UNet was trained
-/// on. The other schedulers in this set (DDIM, LCM, DPM++) hold
-/// the latent in α-space directly and don't need preconditioning.
-///
-/// Stochastic ("ancestral"): adds Gaussian noise scaled by `sigma_up`
-/// on every step, varying outputs across seeds even with identical
-/// prompt + CFG.
+/// on. DDIM/LCM/DPM++ hold the latent in α-space and don't need
+/// preconditioning.
 pub struct EulerAScheduler {
     /// Length `num_inference + 1`. Karras schedule descending from
     /// sigma_max to 0 (terminal sigma=0 makes `sigma_up` vanish on
@@ -2549,7 +2522,7 @@ impl Scheduler {
     }
 }
 
-/// VP forward process: `latent_α = √α̅·clean + √(1-α̅)·noise`.
+/// SD-1.5 forward-noise convention shared by DDIM, LCM, and DPM++ at inference.
 fn add_noise_alpha_space(sample: &[f32], noise: &[f32], alpha_cumprod: f32) -> Vec<f32> {
     let sqrt_alpha = alpha_cumprod.sqrt();
     let sqrt_one_minus = (1.0 - alpha_cumprod).max(0.0).sqrt();
