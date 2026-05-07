@@ -55,17 +55,169 @@ pub struct BrushSettings {
     /// cost per step (cond + uncond passes blended).
     #[serde(default = "default_cfg")]
     pub sd_guidance_scale: f32,
+    /// SD-only: which scheduler runs the denoise loop. LCM is the
+    /// default — proven good after the LcmScheduler port; DDIM kept
+    /// as a conservative baseline. DPM++/UniPC/Euler-A enable when
+    /// Phase 27.2 lands.
+    #[serde(default = "default_sd_scheduler")]
+    pub sd_scheduler: SdScheduler,
+    /// SD-only: number of denoise steps. LCM ranges 1-8; standard SD
+    /// 15-30. UI clamps the slider per scheduler.
+    #[serde(default = "default_sd_steps")]
+    pub sd_steps: u32,
+    /// SD-only: use the Karras sigma noise schedule on top of the
+    /// chosen scheduler. Disabled for LCM (which has its own fixed
+    /// schedule). Enables once Phase 27.2's Karras helper lands.
+    #[serde(default)]
+    pub sd_use_karras_sigmas: bool,
+    /// SD-only: built-in quality preset that bundles scheduler +
+    /// steps + CFG + Karras into one knob. `Custom` means "user has
+    /// hand-tweaked individual sliders away from any preset's values."
+    #[serde(default = "default_sd_quality_preset")]
+    pub sd_quality_preset: SdQualityPreset,
+    /// SD-only: pinned RNG seed for reproducibility. `None` = fresh
+    /// random per stroke (the historical behavior).
+    #[serde(default)]
+    pub sd_seed: Option<u64>,
+}
+
+/// SD eraser scheduler choice. Wired into `SdInpaintRequest` at
+/// dispatch time so the worker picks the right denoise math.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SdScheduler {
+    /// LCM-distilled multistep — fast preview tier, requires
+    /// `LcmScheduler` math (Phase 26.5). 4-8 steps typical.
+    Lcm,
+    /// DDIM (Denoising Diffusion Implicit Models) — conservative
+    /// baseline. 20-30 steps typical.
+    Ddim,
+    /// DPM-Solver++ 2M with Karras sigmas — modern Standard SD
+    /// default in A1111 / ComfyUI / InvokeAI. 15-25 steps. Enables
+    /// in Phase 27.2.
+    DpmPlusPlus2MKarras,
+    /// UniPC multistep — best quality at low step counts (8-12).
+    /// Enables in Phase 27.2.
+    UniPc,
+    /// Euler-Ancestral — adds noise per step → creative variation
+    /// per seed (non-deterministic). Enables in Phase 27.2.
+    EulerA,
+}
+
+impl SdScheduler {
+    /// Whether the scheduler is implemented today (vs Phase 27.2 placeholder).
+    pub fn is_available(&self) -> bool {
+        matches!(self, SdScheduler::Lcm | SdScheduler::Ddim)
+    }
+
+    /// Short user-facing label for dropdowns. Matches A1111 conventions.
+    pub fn label(&self) -> &'static str {
+        match self {
+            SdScheduler::Lcm => "LCM",
+            SdScheduler::Ddim => "DDIM",
+            SdScheduler::DpmPlusPlus2MKarras => "DPM++ 2M Karras",
+            SdScheduler::UniPc => "UniPC",
+            SdScheduler::EulerA => "Euler-A",
+        }
+    }
+}
+
+/// Built-in SD quality presets — bundles scheduler + steps + CFG +
+/// Karras into one knob for users who don't want to tune individually.
+/// Industry-standard pattern (A1111 / Lightroom / DaVinci): touching
+/// any individual slider auto-switches to `Custom`.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SdQualityPreset {
+    /// LCM @ 4 steps, CFG=1.0 — instant preview tier.
+    Fast,
+    /// LCM @ 8 steps, CFG=1.5 — current shipped default after the
+    /// LcmScheduler port. Good balance of speed + quality on iGPU.
+    Balanced,
+    /// DPM++ 2M Karras @ 25 steps, CFG=4.0 — best quality. Requires
+    /// Phase 27.2 to actually work; until then resolves to Balanced.
+    Quality,
+    /// User has tweaked individual sliders away from any preset's
+    /// values. Stored so the dropdown can reflect "you're off-preset"
+    /// without snapping the user back.
+    Custom,
+}
+
+impl SdQualityPreset {
+    /// Apply this preset's bundled scheduler + steps + CFG + Karras
+    /// to a `BrushSettings`. The `Custom` variant is a no-op (caller
+    /// already has the right values).
+    pub fn apply_to(self, brush: &mut BrushSettings) {
+        match self {
+            SdQualityPreset::Fast => {
+                brush.sd_scheduler = SdScheduler::Lcm;
+                brush.sd_steps = 4;
+                brush.sd_guidance_scale = 1.0;
+                brush.sd_use_karras_sigmas = false;
+            }
+            SdQualityPreset::Balanced => {
+                brush.sd_scheduler = SdScheduler::Lcm;
+                brush.sd_steps = 8;
+                brush.sd_guidance_scale = 1.5;
+                brush.sd_use_karras_sigmas = false;
+            }
+            SdQualityPreset::Quality => {
+                brush.sd_scheduler = SdScheduler::DpmPlusPlus2MKarras;
+                brush.sd_steps = 25;
+                brush.sd_guidance_scale = 4.0;
+                brush.sd_use_karras_sigmas = true;
+            }
+            SdQualityPreset::Custom => {}
+        }
+        brush.sd_quality_preset = self;
+    }
+
+    /// Detect which preset (if any) the current `BrushSettings`
+    /// match. Returns `Custom` when the values don't fit any
+    /// built-in. Used after individual-slider edits to update the
+    /// preset dropdown's displayed value.
+    pub fn detect_from(brush: &BrushSettings) -> SdQualityPreset {
+        const EPS: f32 = 1e-3;
+        let cfg_eq = |a: f32, b: f32| (a - b).abs() < EPS;
+        if brush.sd_scheduler == SdScheduler::Lcm
+            && brush.sd_steps == 4
+            && cfg_eq(brush.sd_guidance_scale, 1.0)
+            && !brush.sd_use_karras_sigmas
+        {
+            SdQualityPreset::Fast
+        } else if brush.sd_scheduler == SdScheduler::Lcm
+            && brush.sd_steps == 8
+            && cfg_eq(brush.sd_guidance_scale, 1.5)
+            && !brush.sd_use_karras_sigmas
+        {
+            SdQualityPreset::Balanced
+        } else if brush.sd_scheduler == SdScheduler::DpmPlusPlus2MKarras
+            && brush.sd_steps == 25
+            && cfg_eq(brush.sd_guidance_scale, 4.0)
+            && brush.sd_use_karras_sigmas
+        {
+            SdQualityPreset::Quality
+        } else {
+            SdQualityPreset::Custom
+        }
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            SdQualityPreset::Fast => "Fast",
+            SdQualityPreset::Balanced => "Balanced",
+            SdQualityPreset::Quality => "Quality",
+            SdQualityPreset::Custom => "Custom",
+        }
+    }
 }
 
 fn default_feather() -> f32 { 4.0 }
 fn default_grow() -> f32 { 2.0 }
-/// 4.0: enables CFG (cond + uncond passes blended) so the default
-/// negative prompt actually does work. CFG ≤ 1.0 skips the uncond
-/// pass — half the UNet cost, but the negative prompt is unused.
-/// 7.5 is SD-1.5's documented sweet spot but the additional steering
-/// can oversaturate on subtle eraser fills; 4.0 is the conservative
-/// pick for "match surroundings" use.
-fn default_cfg() -> f32 { 4.0 }
+/// 1.5 matches the `Balanced` preset's CFG (LCM scheduler, CFG up to
+/// 2.0 per Diffusers LCM guidance — community consensus is values
+/// >2.0 degrade LCM output quality). For Standard SD via DDIM /
+/// DPM++ the user can bump to 4.0–7.5 via the toolbar slider; the
+/// `Quality` preset auto-fills 4.0 when picked.
+fn default_cfg() -> f32 { 1.5 }
 
 /// Defaults for SD eraser prompts. Style-agnostic — works whether the
 /// source is a photo, drawing, anime, pixel art, render, etc. (avoiding
@@ -81,6 +233,10 @@ fn default_sd_negative_prompt() -> String {
     "text, letters, words, watermark, signature, logo, blurry, distorted, \
      low quality, oversaturated, jpeg artifacts".to_string()
 }
+
+fn default_sd_scheduler() -> SdScheduler { SdScheduler::Lcm }
+fn default_sd_steps() -> u32 { 8 }
+fn default_sd_quality_preset() -> SdQualityPreset { SdQualityPreset::Balanced }
 
 impl BrushSettings {
     pub fn stamp(&self) -> Stamp {
@@ -102,6 +258,11 @@ impl Default for BrushSettings {
             sd_prompt: default_sd_prompt(),
             sd_negative_prompt: default_sd_negative_prompt(),
             sd_guidance_scale: default_cfg(),
+            sd_scheduler: default_sd_scheduler(),
+            sd_steps: default_sd_steps(),
+            sd_use_karras_sigmas: false,
+            sd_quality_preset: default_sd_quality_preset(),
+            sd_seed: None,
         }
     }
 }
@@ -253,6 +414,100 @@ mod tests {
         let s = BrushState::default();
         assert!(!s.is_enabled());
         assert!(!s.has_active_stroke());
+    }
+
+    /// `BrushSettings::default()` must round-trip cleanly through
+    /// `SdQualityPreset::detect_from` to `Balanced` — i.e. default
+    /// values match the Balanced preset's bundled config. If they
+    /// drift, new users see "Custom" in the dropdown on first launch
+    /// which is misleading.
+    #[test]
+    fn default_brush_settings_match_balanced_preset() {
+        let s = BrushSettings::default();
+        assert_eq!(SdQualityPreset::detect_from(&s), SdQualityPreset::Balanced,
+            "default BrushSettings must align with Balanced preset");
+    }
+
+    /// Each preset's `apply_to` must produce a `BrushSettings` that
+    /// `detect_from` round-trips back to the same preset. Pins the
+    /// auto-fill ↔ detection invariant so a future tweak to one side
+    /// can't silently break the other.
+    #[test]
+    fn quality_presets_round_trip_apply_then_detect() {
+        for preset in [SdQualityPreset::Fast, SdQualityPreset::Balanced, SdQualityPreset::Quality] {
+            let mut s = BrushSettings::default();
+            preset.apply_to(&mut s);
+            assert_eq!(SdQualityPreset::detect_from(&s), preset,
+                "apply→detect mismatch for {preset:?}");
+            assert_eq!(s.sd_quality_preset, preset,
+                "apply must update the preset field for {preset:?}");
+        }
+    }
+
+    /// Touching any individual SD knob away from the active preset's
+    /// bundled values must mark the preset as `Custom`. This is the
+    /// industry-standard pattern (Lightroom, A1111) — the user's
+    /// tweak is preserved without bouncing them between presets.
+    #[test]
+    fn individual_slider_edit_detects_as_custom() {
+        let mut s = BrushSettings::default();
+        // Default == Balanced (LCM, 8 steps, CFG=1.5, no Karras).
+        // Bump CFG to a non-preset value:
+        s.sd_guidance_scale = 3.0;
+        assert_eq!(SdQualityPreset::detect_from(&s), SdQualityPreset::Custom,
+            "off-preset CFG must detect as Custom");
+
+        // Change scheduler away from the preset:
+        let mut s = BrushSettings::default();
+        s.sd_scheduler = SdScheduler::Ddim;
+        assert_eq!(SdQualityPreset::detect_from(&s), SdQualityPreset::Custom,
+            "off-preset scheduler must detect as Custom");
+
+        // Toggle Karras (Balanced has it off; flipping on → Custom):
+        let mut s = BrushSettings::default();
+        s.sd_use_karras_sigmas = true;
+        assert_eq!(SdQualityPreset::detect_from(&s), SdQualityPreset::Custom,
+            "off-preset Karras toggle must detect as Custom");
+    }
+
+    /// `is_available()` correctly reflects which schedulers Phase 27.1
+    /// can dispatch today vs Phase 27.2's coming-soon entries.
+    #[test]
+    fn scheduler_availability_matches_phase_status() {
+        assert!(SdScheduler::Lcm.is_available());
+        assert!(SdScheduler::Ddim.is_available());
+        assert!(!SdScheduler::DpmPlusPlus2MKarras.is_available());
+        assert!(!SdScheduler::UniPc.is_available());
+        assert!(!SdScheduler::EulerA.is_available());
+    }
+
+    /// Old persisted JSON without the new SD-tuning fields must
+    /// deserialize cleanly into the new defaults — no panic, no
+    /// "Custom" surprise on first load. Pins serde back-compat for
+    /// users carrying older settings.json files.
+    #[test]
+    fn brush_settings_serde_back_compat_old_json_without_new_fields() {
+        // Snippet covers the SD prompt fields that already existed
+        // before Phase 27.1 but omits the new scheduler/steps/preset.
+        let old_json = r#"{
+            "radius": 24.0,
+            "hardness": 0.7,
+            "strength": 1.0,
+            "mode": "Subtract",
+            "shape": "Circle",
+            "inpaint_sharpen": 0.6,
+            "inpaint_feather": 4.0,
+            "inpaint_grow": 2.0,
+            "sd_prompt": "x",
+            "sd_negative_prompt": "y",
+            "sd_guidance_scale": 4.0
+        }"#;
+        let s: BrushSettings = serde_json::from_str(old_json).unwrap();
+        assert_eq!(s.sd_scheduler, SdScheduler::Lcm);
+        assert_eq!(s.sd_steps, 8);
+        assert!(!s.sd_use_karras_sigmas);
+        assert_eq!(s.sd_quality_preset, SdQualityPreset::Balanced);
+        assert_eq!(s.sd_seed, None);
     }
 
     #[test]
