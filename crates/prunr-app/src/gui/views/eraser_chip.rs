@@ -2,8 +2,8 @@
 //! Seed / Prompt. Renders as a horizontal cluster inline in Row 2
 //! next to the model dropdown — dropdown chips mirror
 //! `lines_popover`'s pattern (chip-button + popover with selectable
-//! rows). Karras renders for LCM, UniPC, and Euler-A — the three
-//! schedulers whose dispatch honors `use_karras_sigmas`.
+//! rows). Karras only renders for schedulers that accept the toggle
+//! (UniPc, EulerA).
 
 use egui::RichText;
 use egui_material_icons::icons::*;
@@ -30,10 +30,14 @@ pub fn render(ui: &mut egui::Ui, brush: &mut BrushSettings) -> EraserRowChange {
         change.committed |= render_scheduler_chip(ui, brush);
         change.committed |= render_steps_chip(ui, brush);
         change.committed |= render_strength_chip(ui, brush);
-        // Karras toggle for LCM, UniPC, and Euler-A — all three schedulers
-        // honor use_karras_sigmas in dispatch. DDIM is pinned (no sigma
-        // schedule). DPM++ 2M Karras is pinned (Karras is in the name).
-        if matches!(brush.sd_scheduler, SdScheduler::Lcm | SdScheduler::UniPc | SdScheduler::EulerA) {
+        // Karras toggle: LCM (user-toggleable), UniPC, Euler-A.
+        // DDIM and DPM++ 2M Karras are pinned to one setting in this build.
+        // Karras chip is only meaningful for schedulers whose dispatch
+        // honors the toggle. LCM is the only one wired today; UniPC and
+        // Euler-A both ship Karras-on hardcoded (matches Diffusers'
+        // SD-1.5 reference) and ignore the field. Showing a no-op
+        // toggle confuses users — hide it instead.
+        if matches!(brush.sd_scheduler, SdScheduler::Lcm) {
             change.committed |= render_karras_chip(ui, brush);
         }
         change.committed |= render_seed_chip(ui, brush);
