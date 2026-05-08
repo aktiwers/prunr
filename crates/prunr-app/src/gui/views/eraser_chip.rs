@@ -17,6 +17,9 @@ use crate::gui::theme;
 
 use super::chip::{self, ChipMeta};
 
+const LCM_DOWNLOAD_HINT: &str =
+    "Download Eraser (SD 1.5 LCM, fast) in Model Store to enable.";
+
 #[derive(Default)]
 pub struct EraserRowChange {
     pub committed: bool,
@@ -25,9 +28,9 @@ pub struct EraserRowChange {
 /// Render the SD-eraser chip cluster. Caller decides placement.
 pub fn render(ui: &mut egui::Ui, brush: &mut BrushSettings) -> EraserRowChange {
     let mut change = EraserRowChange::default();
+    let lcm_bundle_installed = crate::gui::settings::Settings::can_select_lcm_scheduler();
     ui.horizontal(|ui| {
-        change.committed |= render_quality_preset_chip(ui, brush);
-        let lcm_bundle_installed = crate::gui::settings::Settings::can_select_lcm_scheduler();
+        change.committed |= render_quality_preset_chip(ui, brush, lcm_bundle_installed);
         change.committed |= render_scheduler_chip(ui, brush, lcm_bundle_installed);
         change.committed |= render_steps_chip(ui, brush);
         change.committed |= render_strength_chip(ui, brush);
@@ -66,7 +69,11 @@ fn render_strength_chip(ui: &mut egui::Ui, brush: &mut BrushSettings) -> bool {
     change.commit
 }
 
-fn render_quality_preset_chip(ui: &mut egui::Ui, brush: &mut BrushSettings) -> bool {
+fn render_quality_preset_chip(
+    ui: &mut egui::Ui,
+    brush: &mut BrushSettings,
+    lcm_bundle_installed: bool,
+) -> bool {
     let pop_id = egui::Id::new("eraser_preset_popover");
     let active = SdQualityPreset::detect_from(brush);
     let resp = chip::chip_tooltip(
@@ -85,8 +92,7 @@ fn render_quality_preset_chip(ui: &mut egui::Ui, brush: &mut BrushSettings) -> b
             };
             let label = preset.label();
             let preset_bundle_gated =
-                matches!(preset_scheduler, SdScheduler::Lcm)
-                    && !crate::gui::settings::Settings::can_select_lcm_scheduler();
+                matches!(preset_scheduler, SdScheduler::Lcm) && !lcm_bundle_installed;
             if !preset_scheduler.is_available() {
                 ui.add_enabled_ui(false, |ui| {
                     let _ = ui.selectable_label(false, format!("{label} (coming soon)"));
@@ -95,9 +101,7 @@ fn render_quality_preset_chip(ui: &mut egui::Ui, brush: &mut BrushSettings) -> b
                 let resp = ui.add_enabled_ui(false, |ui| {
                     ui.selectable_label(false, format!("{label} (download required)"))
                 }).inner;
-                resp.on_hover_text(
-                    "Download Eraser (SD 1.5 LCM, fast) in Model Store to enable.",
-                );
+                resp.on_hover_text(LCM_DOWNLOAD_HINT);
             } else {
                 let selected = active == preset;
                 if ui.selectable_label(selected, label).clicked() {
@@ -209,9 +213,7 @@ fn render_scheduler_chip(ui: &mut egui::Ui, brush: &mut BrushSettings, lcm_bundl
                 let resp = ui.add_enabled_ui(false, |ui| {
                     ui.selectable_label(false, format!("{label} (download required)"))
                 }).inner;
-                resp.on_hover_text(
-                    "Download Eraser (SD 1.5 LCM, fast) in Model Store to enable.",
-                );
+                resp.on_hover_text(LCM_DOWNLOAD_HINT);
                 super::hint(ui, desc);
                 ui.add_space(theme::SPACE_XS);
             } else {
