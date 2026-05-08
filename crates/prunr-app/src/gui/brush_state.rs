@@ -314,18 +314,17 @@ impl BrushSettings {
 
     /// Reset the brush popover's slider knobs (radius / hardness /
     /// inpaint_grow / inpaint_feather / inpaint_sharpen) and shape to
-    /// defaults. Leaves `strength` and `mode` alone — those carry
-    /// user intent across reset (the Add/Subtract toggle and seg-mode
-    /// strength) — and SD-tuning fields are owned by the SD chip
-    /// popover.
-    pub fn reset_popover_fields(&mut self) {
-        let d = Self::default();
-        self.radius = d.radius;
-        self.hardness = d.hardness;
-        self.shape = d.shape;
-        self.inpaint_sharpen = d.inpaint_sharpen;
-        self.inpaint_feather = d.inpaint_feather;
-        self.inpaint_grow = d.inpaint_grow;
+    /// the values carried by `source`. Leaves `strength` and `mode`
+    /// alone — those carry user intent across reset (the Add/Subtract
+    /// toggle and seg-mode strength) — and SD-tuning fields are owned
+    /// by the SD chip popover.
+    pub fn reset_popover_fields_from(&mut self, source: &Self) {
+        self.radius = source.radius;
+        self.hardness = source.hardness;
+        self.shape = source.shape;
+        self.inpaint_sharpen = source.inpaint_sharpen;
+        self.inpaint_feather = source.inpaint_feather;
+        self.inpaint_grow = source.inpaint_grow;
     }
 }
 
@@ -737,7 +736,7 @@ mod tests {
 
 
     #[test]
-    fn reset_popover_fields_restores_visible_sliders_and_shape_only() {
+    fn reset_popover_fields_from_default_restores_visible_sliders_and_shape_only() {
         let mut s = BrushSettings {
             radius: 80.0,
             hardness: 0.0,
@@ -757,7 +756,7 @@ mod tests {
             sd_strength: 0.6,
             sd_use_taesd: Some(true),
         };
-        s.reset_popover_fields();
+        s.reset_popover_fields_from(&BrushSettings::default());
 
         let d = BrushSettings::default();
         assert_eq!(s.radius, d.radius);
@@ -780,6 +779,36 @@ mod tests {
         assert!(s.sd_use_karras_sigmas);
         assert_eq!(s.sd_seed, Some(42));
         assert!((s.sd_strength - 0.6).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn reset_popover_fields_from_uses_source_not_factory() {
+        let source = BrushSettings {
+            radius: 99.0,
+            hardness: 0.1,
+            shape: BrushShape::Square,
+            inpaint_sharpen: 1.3,
+            inpaint_feather: 7.0,
+            inpaint_grow: -3.0,
+            ..BrushSettings::default()
+        };
+        let mut target = BrushSettings::default();
+        target.radius = 10.0;
+        target.strength = 0.42;
+        target.mode = BrushMode::Add;
+
+        target.reset_popover_fields_from(&source);
+
+        assert!((target.radius - 99.0).abs() < f32::EPSILON);
+        assert!((target.hardness - 0.1).abs() < f32::EPSILON);
+        assert_eq!(target.shape, BrushShape::Square);
+        assert!((target.inpaint_sharpen - 1.3).abs() < f32::EPSILON);
+        assert!((target.inpaint_feather - 7.0).abs() < f32::EPSILON);
+        assert!((target.inpaint_grow - (-3.0)).abs() < f32::EPSILON);
+
+        // strength + mode carry user intent across reset — must not change.
+        assert!((target.strength - 0.42).abs() < f32::EPSILON);
+        assert_eq!(target.mode, BrushMode::Add);
     }
 
     #[test]
