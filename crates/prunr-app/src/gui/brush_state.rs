@@ -291,6 +291,22 @@ impl BrushSettings {
     pub fn stamp(&self) -> Stamp {
         Stamp { hardness: self.hardness, strength: self.strength, mode: self.mode }
     }
+
+    /// Reset the brush popover's slider knobs (radius / hardness /
+    /// inpaint_grow / inpaint_feather / inpaint_sharpen) and shape to
+    /// defaults. Leaves `strength` and `mode` alone — those carry
+    /// user intent across reset (the Add/Subtract toggle and seg-mode
+    /// strength) — and SD-tuning fields are owned by the SD chip
+    /// popover.
+    pub fn reset_popover_fields(&mut self) {
+        let d = Self::default();
+        self.radius = d.radius;
+        self.hardness = d.hardness;
+        self.shape = d.shape;
+        self.inpaint_sharpen = d.inpaint_sharpen;
+        self.inpaint_feather = d.inpaint_feather;
+        self.inpaint_grow = d.inpaint_grow;
+    }
 }
 
 impl Default for BrushSettings {
@@ -625,6 +641,51 @@ mod tests {
         assert!(!s.has_active_stroke());
     }
 
+
+    #[test]
+    fn reset_popover_fields_restores_visible_sliders_and_shape_only() {
+        let mut s = BrushSettings {
+            radius: 80.0,
+            hardness: 0.0,
+            strength: 0.42,
+            mode: BrushMode::Add,
+            shape: BrushShape::Square,
+            inpaint_sharpen: 1.7,
+            inpaint_feather: 24.0,
+            inpaint_grow: -8.0,
+            sd_prompt: "custom prompt".into(),
+            sd_negative_prompt: "custom negative".into(),
+            sd_guidance_scale: 5.5,
+            sd_scheduler: SdScheduler::DpmPlusPlus2MKarras,
+            sd_steps: 30,
+            sd_use_karras_sigmas: true,
+            sd_seed: Some(42),
+            sd_strength: 0.6,
+        };
+        s.reset_popover_fields();
+
+        let d = BrushSettings::default();
+        assert_eq!(s.radius, d.radius);
+        assert_eq!(s.hardness, d.hardness);
+        assert_eq!(s.shape, d.shape);
+        assert_eq!(s.inpaint_sharpen, d.inpaint_sharpen);
+        assert_eq!(s.inpaint_feather, d.inpaint_feather);
+        assert_eq!(s.inpaint_grow, d.inpaint_grow);
+
+        // strength + mode carry user intent (seg pipeline + Add/Subtract).
+        assert!((s.strength - 0.42).abs() < f32::EPSILON, "strength must survive popover reset");
+        assert_eq!(s.mode, BrushMode::Add, "mode must survive popover reset");
+
+        // SD-tuning fields are owned by the SD chip popover.
+        assert_eq!(s.sd_prompt, "custom prompt");
+        assert_eq!(s.sd_negative_prompt, "custom negative");
+        assert!((s.sd_guidance_scale - 5.5).abs() < f32::EPSILON);
+        assert_eq!(s.sd_scheduler, SdScheduler::DpmPlusPlus2MKarras);
+        assert_eq!(s.sd_steps, 30);
+        assert!(s.sd_use_karras_sigmas);
+        assert_eq!(s.sd_seed, Some(42));
+        assert!((s.sd_strength - 0.6).abs() < f32::EPSILON);
+    }
 
     #[test]
     fn brush_settings_stamp_reflects_fields() {
