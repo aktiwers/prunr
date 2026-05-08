@@ -857,6 +857,83 @@ mod tests {
     }
 
     #[test]
+    fn on_model_change_resolve_brush_swaps_via_resolver() {
+        use crate::gui::brush_state::BrushSettings;
+        use super::super::presets::{model_id_key, ModelPreset, PresetFile, PRESET_FORMAT_VERSION};
+
+        let mut s = Settings::default();
+        s.model = SettingsModel::Silueta;
+        let mut silueta_brush = BrushSettings::default();
+        silueta_brush.radius = 80.0;
+        let mut u2net_brush = BrushSettings::default();
+        u2net_brush.radius = 120.0;
+        let mut models = HashMap::new();
+        models.insert(model_id_key(prunr_models::ModelId::Silueta), ModelPreset {
+            item_settings: ItemSettings::default(),
+            brush: silueta_brush,
+            sd: None,
+        });
+        models.insert(model_id_key(prunr_models::ModelId::U2net), ModelPreset {
+            item_settings: ItemSettings::default(),
+            brush: u2net_brush,
+            sd: None,
+        });
+        let file = PresetFile { format_version: PRESET_FORMAT_VERSION, models };
+        s.presets.insert("Foo".to_string(), file);
+        s.default_preset = "Foo".to_string();
+        s.brush.radius = 80.0;
+
+        s.model = SettingsModel::U2net;
+        s.on_model_change_resolve_brush();
+        assert!((s.brush.radius - 120.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn on_scheduler_change_resolve_sd_swaps_bundle() {
+        use crate::gui::brush_state::SdScheduler;
+        use super::super::presets::{
+            model_id_key, ModelPreset, PresetFile, SdPreset, SdSchedulerBundle,
+            PRESET_FORMAT_VERSION,
+        };
+
+        let mut s = Settings::default();
+        s.model = SettingsModel::SdInpaint;
+        let mut schedulers = HashMap::new();
+        schedulers.insert(SdScheduler::Lcm, SdSchedulerBundle {
+            steps: 8, guidance_scale: 1.5, use_karras_sigmas: false, strength: 1.0,
+        });
+        schedulers.insert(SdScheduler::Ddim, SdSchedulerBundle {
+            steps: 25, guidance_scale: 6.0, use_karras_sigmas: false, strength: 1.0,
+        });
+        let sd = SdPreset {
+            active_scheduler: SdScheduler::Lcm,
+            schedulers,
+            ..SdPreset::default()
+        };
+        let mp = ModelPreset {
+            item_settings: ItemSettings::default(),
+            brush: super::BrushSettings::default(),
+            sd: Some(sd),
+        };
+        let mut models = HashMap::new();
+        models.insert(model_id_key(prunr_models::ModelId::SdV15InpaintFp16), mp);
+        let file = PresetFile { format_version: PRESET_FORMAT_VERSION, models };
+        s.presets.insert("Foo".to_string(), file);
+        s.default_preset = "Foo".to_string();
+        s.brush.sd_scheduler = SdScheduler::Lcm;
+        s.brush.sd_steps = 8;
+        s.brush.radius = 42.0;
+
+        s.on_scheduler_change_resolve_sd(SdScheduler::Ddim);
+
+        assert_eq!(s.brush.sd_scheduler, SdScheduler::Ddim);
+        assert_eq!(s.brush.sd_steps, 25);
+        assert!((s.brush.sd_guidance_scale - 6.0).abs() < f32::EPSILON);
+        // Non-SD field stays put — owned by the brush popover.
+        assert!((s.brush.radius - 42.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
     fn save_creates_parent_dir() {
         // Regression: on a fresh install the parent dir doesn't exist yet;
         // save() must create it rather than silently failing.
