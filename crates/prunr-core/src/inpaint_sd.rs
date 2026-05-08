@@ -1709,10 +1709,24 @@ fn minus1_plus1_to_image(arr: &Array4<f32>) -> RgbaImage {
 }
 
 /// Mask 512×512 → latent space (1, 1, 64, 64) f32 in [0, 1].
-/// Nearest-neighbour 8× center-sample downsample. When mask_blur = 0
-/// (binary mask) the sampled values are still 0 or 1. With a blurred
-/// mask the gradient passes through intact — the UNet sees fractional
-/// conditioning weights at the stroke boundary.
+/// Average-pool 8×8 → 1 (equivalent to `F.interpolate(mode="area")`
+/// in PyTorch, which is what Diffusers uses for mask preprocessing).
+///
+/// Why average-pool, not nearest-neighbour center-sample: when
+/// `mask_blur > 0` the source mask has a fractional-alpha gradient
+/// band at the boundary. Center-sampling picks ONE pixel out of each
+/// 8×8 block, throwing away ~98% of the gradient information — the
+/// model receives only a sparse, jaggy gradient that confuses it
+/// (mask says "70% inpaint" while masked-image latent shows fully
+/// original, out-of-distribution from training). Average-pool
+/// preserves the gradient: each latent cell reflects the LOCAL
+/// average mask alpha within its 8×8 block.
+///
+/// For binary masks (mask_blur = 0) average-pool also produces a
+/// thin natural gradient at the boundary cells (e.g., a cell that
+/// straddles the mask edge averages to ~0.5). That's a small
+/// improvement over nearest-neighbour even before the user enables
+/// mask_blur.
 fn mask_to_latent(mask: &GrayImage) -> Array4<f32> {
     let l = SD_LATENT_SIDE as usize;
     let mut a = Array4::<f32>::zeros((1, 1, l, l));
@@ -1720,14 +1734,21 @@ fn mask_to_latent(mask: &GrayImage) -> Array4<f32> {
     let raw = mask.as_raw();
     let (w, h) = mask.dimensions();
     let (w_us, h_us) = (w as usize, h as usize);
+    let inv = 1.0_f32 / (64.0 * 255.0);
     for ly in 0..l {
-        let sy = (ly * 8 + 4).min(h_us.saturating_sub(1));
         for lx in 0..l {
-            let sx = (lx * 8 + 4).min(w_us.saturating_sub(1));
-            let v = if sy < h_us && sx < w_us && sy * w_us + sx < raw.len() {
-                raw[sy * w_us + sx] as f32 / 255.0
-            } else { 0.0 };
-            buf[ly * l + lx] = v;
+            let mut sum = 0_u32;
+            for dy in 0..8 {
+                let sy = ly * 8 + dy;
+                if sy >= h_us { continue; }
+                let row = sy * w_us;
+                for dx in 0..8 {
+                    let sx = lx * 8 + dx;
+                    if sx >= w_us { continue; }
+                    sum += raw[row + sx] as u32;
+                }
+            }
+            buf[ly * l + lx] = sum as f32 * inv;
         }
     }
     a
@@ -4126,19 +4147,74 @@ mod tests {
 
     #[test]
     fn mask_to_latent_passes_through_gradient_values() {
-        // Float pass-through contract: semantics changed from binary
-        // > 127 → 1.0/0.0 to / 255.0. A mask of all-128 must produce
-        // ~0.502, not 1.0 or 0.0. The existing coverage test uses
-        // Luma([255]) which maps to 1.0 either way and didn't catch the
-        // change.
+        // Float pass-through contract: a uniform-128 mask must average-
+        // pool to ~0.502 in every cell. Pins both the mid-gradient
+        // value AND the average-pool semantic.
         let mask = GrayImage::from_pixel(SD_TILE, SD_TILE, image::Luma([128]));
         let latent = mask_to_latent(&mask);
         let expected = 128.0_f32 / 255.0;
         for v in latent.iter() {
             assert!(
                 (v - expected).abs() < 0.01,
-                "mask_to_latent: gradient pass-through expected ≈{expected}, got {v}"
+                "mask_to_latent: average-pool of uniform 128 mask expected ≈{expected}, got {v}"
             );
         }
+    }
+
+    /// Average-pool downsample contract: a half-binary mask (left half
+    /// = 255, right half = 0) must produce latent cells ≈ 1.0 in the
+    /// fully-masked half, ≈ 0.0 in the unmasked half, AND a single
+    /// transition column at the midpoint reflecting the partial 8×8
+    /// block coverage. Center-sample (the previous behaviour) would
+    /// produce a hard 0/1 step with no transition cell — throwing
+    /// away the boundary gradient information that the model needs
+    /// to interpret a soft mask correctly.
+    #[test]
+    fn mask_to_latent_average_pools_at_boundary_not_center_samples() {
+        // Half/half binary mask: pixels 0..255 = 255, pixels 256..511 = 0.
+        // The 8×8 block at latent x=32 (source x=256..263) straddles
+        // nothing — entirely in the right half. The transition is at
+        // a clean 8-pixel boundary, so each block is fully one side
+        // or the other — average-pool gives clean 1.0 / 0.0 cells.
+        let mut mask = GrayImage::new(SD_TILE, SD_TILE);
+        let s = SD_TILE as usize;
+        for y in 0..s {
+            for x in 0..s {
+                let v = if x < s / 2 { 255 } else { 0 };
+                mask.put_pixel(x as u32, y as u32, image::Luma([v]));
+            }
+        }
+        let latent = mask_to_latent(&mask);
+        let l = SD_LATENT_SIDE as usize;
+        // Left half latent cells (lx = 0..32): ~1.0
+        // Right half latent cells (lx = 32..64): ~0.0
+        let left_cell = latent[(0, 0, 0, 0)];
+        assert!((left_cell - 1.0).abs() < 1e-3, "left half should be 1.0, got {left_cell}");
+        let right_cell = latent[(0, 0, 0, l - 1)];
+        assert!(right_cell.abs() < 1e-3, "right half should be 0.0, got {right_cell}");
+
+        // Critical case: shift the boundary by 4 pixels so it lands
+        // mid-block. The block at lx=32 now spans source x=256..263,
+        // where x=256..259 are in the left half (255) and x=260..263
+        // are in the right half (0). Average-pool: 4/8 columns × 8
+        // rows = 32 of 64 pixels at 255 → average = 0.5.
+        let mut mask2 = GrayImage::new(SD_TILE, SD_TILE);
+        for y in 0..s {
+            for x in 0..s {
+                let v = if x < s / 2 + 4 { 255 } else { 0 };
+                mask2.put_pixel(x as u32, y as u32, image::Luma([v]));
+            }
+        }
+        let latent2 = mask_to_latent(&mask2);
+        // The block at lx=32 (source x=256..263) is half-and-half →
+        // average-pool ≈ 0.5. Center-sample (old behaviour) would
+        // pick source[ly*8+4][lx*8+4] = source[..][260] = 0, missing
+        // the gradient entirely.
+        let mid_cell = latent2[(0, 0, 0, 32)];
+        assert!(
+            (mid_cell - 0.5).abs() < 1e-3,
+            "boundary cell straddling the 4-pixel shift should average to ~0.5 \
+             (proves average-pool, not center-sample), got {mid_cell}"
+        );
     }
 }
