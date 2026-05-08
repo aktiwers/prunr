@@ -119,6 +119,16 @@ pub struct SdInpaintRequest {
     /// than a silent default.
     #[serde(default)]
     pub use_karras_sigmas: bool,
+    /// Gaussian blur sigma applied to the mask in source-pixel space
+    /// before VAE encoding. 0.0 = hard-cliff binary mask (original
+    /// behavior). 4-6 px is the SD-ecosystem default (A1111, ComfyUI,
+    /// InvokeAI all expose this). A soft mask boundary gives the UNet a
+    /// gradient [0→1] at the edge, forcing generated pixels to blend
+    /// toward the surrounding lighting/color and eliminating the
+    /// mismatch seam. Independent of inpaint_feather (composite-time
+    /// pixel blend) — this fixes the GENERATION step.
+    #[serde(default)]
+    pub mask_blur: f32,
 }
 
 fn default_strength() -> f32 { 1.0 }
@@ -135,6 +145,7 @@ impl Default for SdInpaintRequest {
             scheduler: SchedulerKind::Lcm,
             strength: default_strength(),
             use_karras_sigmas: false,
+            mask_blur: 0.0,
         }
     }
 }
@@ -505,6 +516,17 @@ fn run_one_tile(
     let padded_image = pad_to_tile(image);
     let padded_mask = pad_mask_to_tile(mask);
 
+    // Soft mask boundary: blur the mask before encoding so the UNet
+    // sees a gradient [0→1] at the stroke edge instead of a hard cliff.
+    // The model interprets this as "blend toward what's already here"
+    // near the edge, eliminating the lighting/color mismatch seam.
+    // 0.0 = hard cliff (original behavior).
+    let blurred_padded_mask: Cow<'_, GrayImage> = if req.mask_blur > 0.0 {
+        Cow::Owned(image::imageops::blur(&*padded_mask, req.mask_blur))
+    } else {
+        padded_mask
+    };
+
     // CFG threshold: above 1.0 we run the UNet TWICE per step (cond +
     // uncond) and blend by `guidance_scale`. At ≤1.0 the cond pass is
     // all the user wants, so we skip the second to halve UNet cost.
@@ -522,8 +544,8 @@ fn run_one_tile(
                 let np = np.clone();
                 s.spawn(move || encode_text(bundle, &np))
             });
-            let vae_h = s.spawn(|| vae_encode_masked(vae, &padded_image, &padded_mask));
-            let mask_lat = mask_to_latent(&padded_mask);
+            let vae_h = s.spawn(|| vae_encode_masked(vae, &padded_image, &blurred_padded_mask));
+            let mask_lat = mask_to_latent(&blurred_padded_mask);
             let cond = cond_h.join()
                 .map_err(|_| CoreError::Inference("text encoder (cond) thread panicked".into()))??;
             let uncond = match uncond_h {
@@ -1573,25 +1595,34 @@ fn image_to_minus1_plus1_inner(image: &RgbaImage, mask: Option<&GrayImage>) -> A
     let plane = s * s;
     let raw = image.as_raw();
     let m = mask.map(|m| m.as_raw());
+    // Match the byte-128 path's bit pattern: same f32 division as the
+    // unmasked branch, just on a constant input. Hardcoding `0.0`
+    // would diverge by ~0.00392.
+    let v_fill = (128.0_f32 / 127.5) - 1.0;
     for y in 0..h_us.min(s) {
         let src_row = y * w_us * 4;
         let dst_row = y * s;
         let mask_row = y * w_us;
         for x in 0..w_us.min(s) {
             let dst = dst_row + x;
-            if m.is_some_and(|m| m[mask_row + x] > 127) {
-                // Match the byte-128 path's bit pattern: same f32
-                // division as the unmasked branch, just on a constant
-                // input. Hardcoding `0.0` would diverge by ~0.00392.
-                let v = (128.0_f32 / 127.5) - 1.0;
-                buf[dst]             = v;
-                buf[plane + dst]     = v;
-                buf[plane * 2 + dst] = v;
+            let src = src_row + x * 4;
+            let r = (raw[src]     as f32 / 127.5) - 1.0;
+            let g = (raw[src + 1] as f32 / 127.5) - 1.0;
+            let b = (raw[src + 2] as f32 / 127.5) - 1.0;
+            if let Some(m) = m {
+                // Float-alpha blend: original↔mid-gray proportional to
+                // mask value. Binary mask → alpha is 0 or 1 (original
+                // behavior). Blurred mask → smooth gradient at edge so
+                // the model sees a soft boundary and preserves the
+                // surrounding lighting/color near the stroke edge.
+                let alpha = m[mask_row + x] as f32 / 255.0;
+                buf[dst]             = r * (1.0 - alpha) + v_fill * alpha;
+                buf[plane + dst]     = g * (1.0 - alpha) + v_fill * alpha;
+                buf[plane * 2 + dst] = b * (1.0 - alpha) + v_fill * alpha;
             } else {
-                let src = src_row + x * 4;
-                buf[dst]              = (raw[src]     as f32 / 127.5) - 1.0;
-                buf[plane + dst]      = (raw[src + 1] as f32 / 127.5) - 1.0;
-                buf[plane * 2 + dst]  = (raw[src + 2] as f32 / 127.5) - 1.0;
+                buf[dst]             = r;
+                buf[plane + dst]     = g;
+                buf[plane * 2 + dst] = b;
             }
         }
     }
@@ -1631,10 +1662,11 @@ fn minus1_plus1_to_image(arr: &Array4<f32>) -> RgbaImage {
     out
 }
 
-/// Mask 512×512 (binary) → latent space (1, 1, 64, 64) f32 in {0, 1}.
-/// Nearest-neighbour 8× downsample — preserves the inpaint boundary
-/// exactly at the latent grid; smoother resampling drifts the boundary
-/// by a fractional latent pixel which propagates through the denoise.
+/// Mask 512×512 → latent space (1, 1, 64, 64) f32 in [0, 1].
+/// Nearest-neighbour 8× center-sample downsample. When mask_blur = 0
+/// (binary mask) the sampled values are still 0 or 1. With a blurred
+/// mask the gradient passes through intact — the UNet sees fractional
+/// conditioning weights at the stroke boundary.
 fn mask_to_latent(mask: &GrayImage) -> Array4<f32> {
     let l = SD_LATENT_SIDE as usize;
     let mut a = Array4::<f32>::zeros((1, 1, l, l));
@@ -1647,7 +1679,7 @@ fn mask_to_latent(mask: &GrayImage) -> Array4<f32> {
         for lx in 0..l {
             let sx = (lx * 8 + 4).min(w_us.saturating_sub(1));
             let v = if sy < h_us && sx < w_us && sy * w_us + sx < raw.len() {
-                if raw[sy * w_us + sx] > 127 { 1.0 } else { 0.0 }
+                raw[sy * w_us + sx] as f32 / 255.0
             } else { 0.0 };
             buf[ly * l + lx] = v;
         }
@@ -4000,5 +4032,25 @@ mod tests {
         assert_eq!(out.len(), dim, "step_array_into output length must match input");
         assert!(out.iter().all(|v| v.is_finite()),
             "step_array_into must produce finite output: {out:?}");
+    }
+
+    #[test]
+    fn image_to_minus1_plus1_masked_blends_at_partial_alpha() {
+        // 1×1 red image, mask = 128 (≈50% alpha). The blended value
+        // should lie midway between red-in-[-1,1] and mid-gray.
+        let img = RgbaImage::from_pixel(1, 1, image::Rgba([255, 0, 0, 255]));
+        let mut mask = GrayImage::new(1, 1);
+        mask.put_pixel(0, 0, image::Luma([128]));
+        let arr = image_to_minus1_plus1_masked(&img, &mask);
+        // Red channel: original = (255/127.5)-1 = 1.0,
+        //   mid-gray = (128/127.5)-1 ≈ 0.00392,
+        //   alpha = 128/255 ≈ 0.502
+        //   → blend ≈ 1.0 * 0.498 + 0.00392 * 0.502 ≈ 0.500
+        let r = arr[(0, 0, 0, 0)];
+        assert!((r - 0.5).abs() < 0.01, "expected ≈0.5, got {r}");
+        // Green channel: original = (0/127.5)-1 = -1.0
+        //   → blend ≈ -1.0 * 0.498 + 0.00392 * 0.502 ≈ -0.496
+        let g = arr[(0, 1, 0, 0)];
+        assert!((g - (-0.496)).abs() < 0.01, "expected ≈-0.496, got {g}");
     }
 }
