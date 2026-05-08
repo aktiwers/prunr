@@ -20,6 +20,15 @@ use super::chip::{self, ChipMeta};
 const LCM_DOWNLOAD_HINT: &str =
     "Download Eraser (SD 1.5 LCM, fast) in Model Store to enable.";
 
+pub(super) fn sd_active_status_line(lcm_active: bool, taesd_active: bool) -> &'static str {
+    match (lcm_active, taesd_active) {
+        (false, false) => "Active: standard SD",
+        (false, true)  => "Active: standard SD + TAESD",
+        (true,  false) => "Active: LCM",
+        (true,  true)  => "Active: LCM + TAESD",
+    }
+}
+
 #[derive(Default)]
 pub struct EraserRowChange {
     pub committed: bool,
@@ -303,4 +312,29 @@ fn render_seed_chip(ui: &mut egui::Ui, brush: &mut BrushSettings) -> bool {
         return true;
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn status_line_neither_active() {
+        assert_eq!(sd_active_status_line(false, false), "Active: standard SD");
+    }
+
+    #[test]
+    fn status_line_taesd_only() {
+        assert_eq!(sd_active_status_line(false, true), "Active: standard SD + TAESD");
+    }
+
+    #[test]
+    fn status_line_lcm_only() {
+        assert_eq!(sd_active_status_line(true, false), "Active: LCM");
+    }
+
+    #[test]
+    fn status_line_both_active() {
+        assert_eq!(sd_active_status_line(true, true), "Active: LCM + TAESD");
+    }
 }
