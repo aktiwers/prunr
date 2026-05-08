@@ -286,6 +286,7 @@ pub fn render(
         };
 
         let trimmed = name_buf.trim();
+        let is_overwrite = overwrite_target.is_some();
         // Resolve the target name: overwrite button wins, else a valid typed
         // name on commit. Saving the current settings AS a preset makes that
         // preset the now-applied one — label reads "Name ✓" after.
@@ -294,10 +295,8 @@ pub fn render(
                 .then(|| trimmed.to_string())
         });
         if let Some(name) = target_name {
-            // Build a single-entry v2 PresetFile envelope keyed by the
-            // active model. Falls back to the workspace default model
-            // in filter-only mode (no model_id) so the file is still
-            // keyed correctly.
+            // Falls back to the workspace default model in filter-only
+            // mode (no model_id) so the file is still keyed correctly.
             let model_id = settings.model.to_model_id()
                 .or_else(|| Settings::default().model.to_model_id())
                 .expect("Settings::default().model always has a model_id");
@@ -305,24 +304,35 @@ pub fn render(
                 &settings.brush,
                 model_id,
             );
-            let mut models = std::collections::HashMap::new();
-            models.insert(crate::gui::presets::model_id_key(model_id), crate::gui::presets::ModelPreset {
+            let mp = crate::gui::presets::ModelPreset {
                 item_settings: *current_item,
                 brush,
                 sd,
-            });
-            let file = crate::gui::presets::PresetFile {
-                format_version: crate::gui::presets::PRESET_FORMAT_VERSION,
-                models,
             };
-            settings.presets.insert(name.clone(), file.clone());
-            // Write to the filesystem store so the preset survives restart
-            // and is shareable. Log on error — the in-memory copy works for
-            // this session, but the user loses it on restart, which is
-            // surprising if we stay fully silent.
-            if let Err(e) = crate::gui::presets_fs::save(&name, &file) {
+
+            let result = if is_overwrite {
+                // Merge into existing on disk so other-model entries +
+                // other-scheduler bundles stay intact.
+                crate::gui::presets_fs::save_merged(&name, model_id, mp)
+            } else {
+                let mut models = std::collections::HashMap::new();
+                models.insert(crate::gui::presets::model_id_key(model_id), mp);
+                let file = crate::gui::presets::PresetFile {
+                    format_version: crate::gui::presets::PRESET_FORMAT_VERSION,
+                    models,
+                };
+                crate::gui::presets_fs::save(&name, &file)
+            };
+
+            if let Err(e) = result {
                 tracing::error!(preset = %name, %e, "failed to save preset to disk");
             }
+
+            // Reload the in-memory map from disk so the merged file
+            // round-trips through dirty-tracking (`button_label` reads
+            // `settings.preset_values(applied_preset)`).
+            settings.presets = crate::gui::presets_fs::load_all();
+
             applied = Some(name);
             close_dialog();
         } else if cancel {
