@@ -30,15 +30,17 @@ pub enum ModelId {
     SdV15InpaintFp16,
     /// LCM-distilled SD 1.5 Inpainting (FP16). Same UNet architecture as
     /// `SdV15InpaintFp16` but trained to converge in ~4 steps instead of
-    /// 20 — ~5× faster on CPU/iGPU at slight quality cost. Selected
-    /// automatically when `Settings.sd_fast_mode` resolves true.
+    /// 20 — ~5× faster on CPU/iGPU at slight quality cost. Selected when
+    /// the user picks the LCM scheduler on the SD chip and the bundle
+    /// is installed.
     /// Bundle is the output of `scripts/export_lcm_inpaint.py`.
     SdV15LcmInpaintFp16,
     /// TAESD (Tiny AutoEncoder for SD) FP16. Two-part bundle: encoder
     /// + decoder, ~5 MB each. Drop-in replacement for SD 1.5's standard
-    ///   VAE — ~3× faster decode at slight quality cost. Used as the VAE
-    ///   backend when fast mode is on AND the bundle is installed.
-    ///   Bundle is the output of `scripts/export_taesd.py`.
+    /// VAE — ~3× faster decode at slight quality cost. Used as the VAE
+    /// backend when the LCM scheduler is active AND the bundle is
+    /// installed.
+    /// Bundle is the output of `scripts/export_taesd.py`.
     TaesdFp16,
 }
 
@@ -427,8 +429,9 @@ pub const REGISTRY: &[ModelDescriptor] = &[
     // LCM-distilled SD 1.5 Inpaint FP16. ~2 GB total. Same UNet
     // architecture as SdV15InpaintFp16 but trained to converge in ~4
     // steps instead of 20 — ~5× faster on CPU/iGPU at slight quality
-    // cost. Selected automatically when Settings.sd_fast_mode resolves
-    // true. Released at https://github.com/aktiwers/prunr/releases/tag/lcm-inpaint-v1.0.0.
+    // cost. Selected when the user picks the LCM scheduler and the
+    // bundle is installed. Released at
+    // https://github.com/aktiwers/prunr/releases/tag/lcm-inpaint-v1.0.0.
     ModelDescriptor {
         id: ModelId::SdV15LcmInpaintFp16,
         display_name: "Eraser (SD 1.5 LCM, fast)",
