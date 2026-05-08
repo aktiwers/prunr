@@ -193,8 +193,14 @@ fn draw_preview(ui: &mut Ui, settings: &BrushSettings) {
 
     let center = rect.center();
     let max_r = (PREVIEW_SIZE / 2.0) - 4.0;
-    // Map slider radius (1..=200) onto preview pixels with a soft cap.
-    let r = (settings.radius / 200.0 * max_r).clamp(2.0, max_r);
+    // The preview's purpose is to communicate the brush pattern
+    // (hardness curve, blur halo, shape gradient) — at small radii in
+    // linear scale the brush is too tiny to read. Log scale with a 50%
+    // floor: small radii fill ~54% of the preview, max fills 100%,
+    // scale curves smoothly between. Absolute size feedback comes from
+    // the slider value ("20 px"), the preview shows the pattern.
+    let r_norm = (1.0 + (settings.radius / 200.0) * 99.0).log10() / 2.0; // [0, 1]
+    let r = (max_r * 0.5 + max_r * 0.5 * r_norm).clamp(max_r * 0.4, max_r);
 
     let (cr, cg, cb) = match settings.mode {
         BrushMode::Add => (140, 230, 170),
