@@ -328,10 +328,14 @@ pub fn render(
                 tracing::error!(preset = %name, %e, "failed to save preset to disk");
             }
 
-            // Reload the in-memory map from disk so the merged file
-            // round-trips through dirty-tracking (`button_label` reads
-            // `settings.preset_values(applied_preset)`).
-            settings.presets = crate::gui::presets_fs::load_all();
+            // Refresh just the saved entry from disk so dirty-tracking
+            // round-trips against the merged file. Avoids the O(n)
+            // directory rescan that load_all() would do.
+            if let Some(path) = crate::gui::presets_fs::preset_path(&name) {
+                if let Some(reloaded) = crate::gui::presets_fs::load_from_path(&path) {
+                    settings.presets.insert(name.clone(), reloaded);
+                }
+            }
 
             applied = Some(name);
             close_dialog();

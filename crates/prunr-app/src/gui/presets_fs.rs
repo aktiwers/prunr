@@ -62,7 +62,7 @@ pub(crate) fn presets_dir() -> Option<PathBuf> {
 
 /// Resolve the on-disk path for a preset name, rejecting "Prunr" (reserved)
 /// and returning `None` when the config dir is unavailable.
-fn preset_path(name: &str) -> Option<PathBuf> {
+pub(crate) fn preset_path(name: &str) -> Option<PathBuf> {
     if name.eq_ignore_ascii_case(PRUNR_PRESET) { return None; }
     let dir = presets_dir()?;
     Some(dir.join(format!("{}.{PRESET_EXT}", sanitize_filename(name))))
@@ -154,22 +154,37 @@ pub(crate) fn load_all() -> HashMap<String, PresetFile> {
         .filter_map(|path| {
             let name = path.file_stem()?.to_str()?.to_string();
             if name.eq_ignore_ascii_case(PRUNR_PRESET) { return None; }
-            let data = std::fs::read(path)
-                .map_err(|e| tracing::warn!(?path, %e, "skipping unreadable preset")).ok()?;
-            let value: serde_json::Value = serde_json::from_slice(&data)
-                .map_err(|e| tracing::warn!(?path, %e, "skipping malformed-JSON preset")).ok()?;
-            let file = if value.get("format_version").and_then(|v| v.as_u64()) == Some(2) {
-                serde_json::from_value(value)
-                    .map_err(|e| tracing::warn!(?path, %e, "skipping malformed v2 preset")).ok()?
-            } else {
-                migrate_v1_to_v2(&value).or_else(|| {
-                    tracing::warn!(?path, "skipping unrecognised preset shape (not v2 and not v1 ItemSettings)");
-                    None
-                })?
-            };
+            let file = load_from_path(path)?;
             Some((name, file))
         })
         .collect()
+}
+
+/// Parse a `serde_json::Value` into a `PresetFile`. v2 (has
+/// `format_version: 2`) deserializes directly; anything else is
+/// attempted as a v1 `ItemSettings` migration. Returns `None` when
+/// neither path succeeds; the caller decides whether to log + skip.
+fn parse_preset_value(value: serde_json::Value) -> Option<PresetFile> {
+    if value.get("format_version").and_then(|v| v.as_u64()) == Some(2) {
+        serde_json::from_value(value).ok()
+    } else {
+        migrate_v1_to_v2(&value)
+    }
+}
+
+/// Load a single preset file from disk. Returns `None` when the file
+/// is unreadable, malformed, or doesn't match either format. Used by
+/// `load_all`'s parallel scan AND by callers that want to refresh a
+/// single entry without rescanning the whole directory.
+pub(crate) fn load_from_path(path: &std::path::Path) -> Option<PresetFile> {
+    let data = std::fs::read(path)
+        .map_err(|e| tracing::warn!(?path, %e, "skipping unreadable preset")).ok()?;
+    let value: serde_json::Value = serde_json::from_slice(&data)
+        .map_err(|e| tracing::warn!(?path, %e, "skipping malformed-JSON preset")).ok()?;
+    parse_preset_value(value).or_else(|| {
+        tracing::warn!(?path, "skipping unrecognised preset shape (not v2 and not v1 ItemSettings)");
+        None
+    })
 }
 
 /// Write a preset to disk. Overwrites any existing file of the same name.
@@ -190,9 +205,6 @@ pub(crate) fn save(name: &str, values: &PresetFile) -> std::io::Result<()> {
     std::fs::write(path, json)
 }
 
-/// Single source of truth for the merge step. `save_merged` and
-/// `save_merged_to_path` both delegate here. Touching this function
-/// changes both code paths — by design.
 fn merge_into(
     file: &mut PresetFile,
     model_id: prunr_models::ModelId,
@@ -204,21 +216,15 @@ fn merge_into(
 
 /// Read an existing preset file (v1 auto-migrated to v2) into a
 /// `PresetFile`, or `PresetFile::default()` when the path is absent.
-/// Shared by `save_merged` and `save_merged_to_path` so both paths
-/// preserve cross-model + cross-scheduler entries identically.
 fn load_existing_for_merge(path: &std::path::Path) -> std::io::Result<PresetFile> {
     match std::fs::read(path) {
         Ok(data) => {
             let value: serde_json::Value = serde_json::from_slice(&data)
                 .unwrap_or(serde_json::Value::Null);
-            if value.get("format_version").and_then(|v| v.as_u64()) == Some(2) {
-                Ok(serde_json::from_value(value).unwrap_or_default())
-            } else if !value.is_null() {
-                // v1 file on disk: migrate before merging so we don't
-                // lose pre-existing entries.
-                Ok(migrate_v1_to_v2(&value).unwrap_or_default())
-            } else {
+            if value.is_null() {
                 Ok(PresetFile::default())
+            } else {
+                Ok(parse_preset_value(value).unwrap_or_default())
             }
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(PresetFile::default()),
@@ -228,9 +234,10 @@ fn load_existing_for_merge(path: &std::path::Path) -> std::io::Result<PresetFile
 
 /// Merge-aware save. Loads the existing file (v1 auto-migrated to v2),
 /// updates the entry for `model_id` via `merge_into`, writes the
-/// merged result. Preserves entries for other model_ids AND any
-/// scheduler bundles inside `models[model_id_key(other_model_id)]
-/// .sd.schedulers` that the caller didn't touch.
+/// merged result. Preserves entries for other model_ids verbatim.
+/// Scheduler bundles within `model_id`'s entry come straight from
+/// `model_preset.sd.schedulers` — the caller is responsible for
+/// carrying over any prior bundles it wants to retain.
 ///
 /// If no existing file → behaves like `save` with a single-entry
 /// PresetFile. The "save current as new preset" path skips this
@@ -258,7 +265,7 @@ pub(crate) fn save_merged(
 }
 
 #[cfg(test)]
-pub(super) fn save_merged_to_path(
+fn save_merged_to_path(
     path: &std::path::Path,
     model_id: prunr_models::ModelId,
     model_preset: ModelPreset,
@@ -271,17 +278,6 @@ pub(super) fn save_merged_to_path(
         let _ = std::fs::create_dir_all(parent);
     }
     std::fs::write(path, json)
-}
-
-#[cfg(test)]
-pub(super) fn load_from_path(path: &std::path::Path) -> Option<PresetFile> {
-    let data = std::fs::read(path).ok()?;
-    let value: serde_json::Value = serde_json::from_slice(&data).ok()?;
-    if value.get("format_version").and_then(|v| v.as_u64()) == Some(2) {
-        serde_json::from_value(value).ok()
-    } else {
-        migrate_v1_to_v2(&value)
-    }
 }
 
 /// Remove a preset's file. Silent no-op if the file doesn't exist — caller
