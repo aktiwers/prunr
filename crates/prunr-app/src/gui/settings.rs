@@ -117,10 +117,8 @@ impl Settings {
 
     /// Can the user pick the LCM scheduler entry in the scheduler
     /// dropdown? True only when the LCM bundle is published in the
-    /// registry AND downloaded. Shared with `lcm_routing_active`'s
-    /// install clauses — pinned in one place so adding a 5th
-    /// clause (e.g. license-accepted) doesn't silently diverge
-    /// between dropdown gating and dispatch routing.
+    /// registry AND downloaded. Single definition site so adding a
+    /// future clause (e.g. license-accepted) lands in one place.
     pub fn can_select_lcm_scheduler() -> bool {
         prunr_models::descriptor(prunr_models::ModelId::SdV15LcmInpaintFp16).is_some()
             && prunr_models::is_available(prunr_models::ModelId::SdV15LcmInpaintFp16)
@@ -679,17 +677,24 @@ mod tests {
         );
     }
 
-    /// `can_select_lcm_scheduler` must agree with the two registry
-    /// clauses it delegates to — descriptor present AND bundle
-    /// downloaded. The test reads both sides independently so a
-    /// refactor that breaks the delegation is caught regardless of
-    /// whether the bundle is installed on the host.
+    /// Non-LCM scheduler short-circuits before the install gate —
+    /// pins the AND ordering so a refactor can't silently turn the
+    /// scheduler check into an OR.
     #[test]
-    fn can_select_lcm_scheduler_matches_registry_state() {
-        let expected =
-            prunr_models::descriptor(prunr_models::ModelId::SdV15LcmInpaintFp16).is_some()
-                && prunr_models::is_available(prunr_models::ModelId::SdV15LcmInpaintFp16);
-        assert_eq!(Settings::can_select_lcm_scheduler(), expected);
+    fn lcm_routing_inactive_for_non_lcm_scheduler() {
+        use crate::gui::brush_state::SdScheduler;
+        let mut s = Settings::default();
+        s.brush.sd_scheduler = SdScheduler::Ddim;
+        assert!(!s.lcm_routing_active(prunr_models::ModelId::SdV15InpaintFp16));
+    }
+
+    /// Non-SD backend short-circuits before the install gate.
+    #[test]
+    fn lcm_routing_inactive_for_non_sd_backend() {
+        use crate::gui::brush_state::SdScheduler;
+        let mut s = Settings::default();
+        s.brush.sd_scheduler = SdScheduler::Lcm;
+        assert!(!s.lcm_routing_active(prunr_models::ModelId::LaMaFp32));
     }
 
     #[test]
