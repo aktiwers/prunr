@@ -19,6 +19,8 @@ use super::chip::{self, ChipMeta};
 
 const LCM_DOWNLOAD_HINT: &str =
     "Download Eraser (SD 1.5 LCM, fast) in Model Store to enable.";
+const TAESD_DOWNLOAD_HINT: &str =
+    "Download TAESD VAE in Model Store to enable.";
 
 pub(super) fn sd_active_status_line(lcm_active: bool, taesd_active: bool) -> &'static str {
     match (lcm_active, taesd_active) {
@@ -35,16 +37,16 @@ pub struct EraserRowChange {
 }
 
 /// Render the SD-eraser chip cluster. Caller decides placement.
-/// `lcm_active` — whether LCM weights are actually loaded (from
-/// `Settings::lcm_routing_active`). Computed by the caller before the
-/// `&mut BrushSettings` borrow so the two borrows don't overlap.
+/// `lcm_active` is resolved by the caller before the `&mut` borrow on
+/// `BrushSettings` so the two borrows don't overlap.
 pub fn render(
     ui: &mut egui::Ui,
     brush: &mut BrushSettings,
     lcm_active: bool,
 ) -> EraserRowChange {
     let mut change = EraserRowChange::default();
-    let taesd_active = brush.sd_use_taesd_effective();
+    let taesd_installed = prunr_models::is_available(prunr_models::ModelId::TaesdFp16);
+    let taesd_active = brush.sd_use_taesd.unwrap_or(true) && taesd_installed;
     ui.label(
         egui::RichText::new(sd_active_status_line(lcm_active, taesd_active))
             .color(crate::gui::theme::TEXT_PRIMARY),
@@ -66,7 +68,7 @@ pub fn render(
         if matches!(brush.sd_scheduler, SdScheduler::Lcm) {
             change.committed |= render_karras_chip(ui, brush);
         }
-        change.committed |= render_taesd_chip(ui, brush);
+        change.committed |= render_taesd_chip(ui, brush, taesd_installed, taesd_active);
         change.committed |= render_seed_chip(ui, brush);
         change.committed |= render_prompt_chip(ui, brush);
     });
@@ -295,24 +297,27 @@ fn render_karras_chip(ui: &mut egui::Ui, brush: &mut BrushSettings) -> bool {
     false
 }
 
-fn render_taesd_chip(ui: &mut egui::Ui, brush: &mut BrushSettings) -> bool {
-    let taesd_installed = prunr_models::is_available(prunr_models::ModelId::TaesdFp16);
-    let effective = brush.sd_use_taesd_effective();
+fn render_taesd_chip(
+    ui: &mut egui::Ui,
+    brush: &mut BrushSettings,
+    taesd_installed: bool,
+    taesd_effective: bool,
+) -> bool {
     if !taesd_installed {
         let resp = ui.add_enabled_ui(false, |ui| {
-            ui.selectable_label(false, "Fast VAE")
+            chip::chip_button(ui, ICON_BOLT.codepoint, "Fast VAE", false)
         }).inner;
-        resp.on_hover_text("Download TAESD VAE in Model Store to enable.");
+        resp.on_hover_text(TAESD_DOWNLOAD_HINT);
         return false;
     }
     let resp = chip::chip_tooltip(
-        chip::chip_button(ui, ICON_BOLT.codepoint, "Fast VAE", effective),
+        chip::chip_button(ui, ICON_BOLT.codepoint, "Fast VAE", taesd_effective),
         "Fast VAE (TAESD)",
         "Drop-in fast VAE replacement, ~3× faster decode at slight quality cost. Works with any scheduler.",
     );
     if resp.clicked() {
         // Snap to explicit state on first click — preserves auto/None across reinstall
-        brush.sd_use_taesd = Some(!effective);
+        brush.sd_use_taesd = Some(!taesd_effective);
         return true;
     }
     false
