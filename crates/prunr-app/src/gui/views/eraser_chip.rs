@@ -13,6 +13,7 @@ use crate::gui::brush_state::{
     DEFAULT_SD_NEGATIVE_PROMPT, DEFAULT_SD_PROMPT,
     default_cfg,
 };
+use crate::gui::settings::Settings;
 use crate::gui::theme;
 
 use super::chip::{self, ChipMeta};
@@ -28,17 +29,17 @@ pub struct EraserRowChange {
 }
 
 /// Render the SD-eraser chip cluster. Caller decides placement.
-pub fn render(ui: &mut egui::Ui, brush: &mut BrushSettings) -> EraserRowChange {
+pub fn render(ui: &mut egui::Ui, app_settings: &mut Settings) -> EraserRowChange {
     let mut change = EraserRowChange::default();
     let taesd_installed = prunr_models::is_available(prunr_models::ModelId::TaesdFp16);
-    let taesd_active = brush.sd_use_taesd.unwrap_or(true) && taesd_installed;
-    let lcm_bundle_installed = crate::gui::settings::Settings::can_select_lcm_scheduler();
+    let taesd_active = app_settings.brush.sd_use_taesd.unwrap_or(true) && taesd_installed;
+    let lcm_bundle_installed = Settings::can_select_lcm_scheduler();
     ui.horizontal(|ui| {
-        change.committed |= render_quality_preset_chip(ui, brush, lcm_bundle_installed);
-        change.committed |= render_taesd_chip(ui, brush, taesd_installed, taesd_active);
-        change.committed |= render_scheduler_chip(ui, brush, lcm_bundle_installed);
-        change.committed |= render_steps_chip(ui, brush);
-        change.committed |= render_strength_chip(ui, brush);
+        change.committed |= render_quality_preset_chip(ui, app_settings, lcm_bundle_installed);
+        change.committed |= render_taesd_chip(ui, &mut app_settings.brush, taesd_installed, taesd_active);
+        change.committed |= render_scheduler_chip(ui, app_settings, lcm_bundle_installed);
+        change.committed |= render_steps_chip(ui, &mut app_settings.brush);
+        change.committed |= render_strength_chip(ui, &mut app_settings.brush);
         // Karras toggle: LCM (user-toggleable), UniPC, Euler-A.
         // DDIM and DPM++ 2M Karras are pinned to one setting in this build.
         // Karras chip is only meaningful for schedulers whose dispatch
@@ -46,11 +47,11 @@ pub fn render(ui: &mut egui::Ui, brush: &mut BrushSettings) -> EraserRowChange {
         // Euler-A both ship Karras-on hardcoded (matches Diffusers'
         // SD-1.5 reference) and ignore the field. Showing a no-op
         // toggle confuses users — hide it instead.
-        if matches!(brush.sd_scheduler, SdScheduler::Lcm) {
-            change.committed |= render_karras_chip(ui, brush);
+        if matches!(app_settings.brush.sd_scheduler, SdScheduler::Lcm) {
+            change.committed |= render_karras_chip(ui, &mut app_settings.brush);
         }
-        change.committed |= render_seed_chip(ui, brush);
-        change.committed |= render_prompt_chip(ui, brush);
+        change.committed |= render_seed_chip(ui, &mut app_settings.brush);
+        change.committed |= render_prompt_chip(ui, &mut app_settings.brush);
     });
     change
 }
@@ -76,11 +77,11 @@ fn render_strength_chip(ui: &mut egui::Ui, brush: &mut BrushSettings) -> bool {
 
 fn render_quality_preset_chip(
     ui: &mut egui::Ui,
-    brush: &mut BrushSettings,
+    app_settings: &mut Settings,
     lcm_bundle_installed: bool,
 ) -> bool {
     let pop_id = egui::Id::new("eraser_preset_popover");
-    let active = SdQualityPreset::detect_from(brush);
+    let active = SdQualityPreset::detect_from(&app_settings.brush);
     let resp = chip::chip_tooltip(
         chip::chip_button(ui, ICON_AUTO_AWESOME.codepoint, active.label(), false),
         "Quality",
@@ -110,7 +111,7 @@ fn render_quality_preset_chip(
             } else {
                 let selected = active == preset;
                 if ui.selectable_label(selected, label).clicked() {
-                    preset.apply_to(brush);
+                    preset.apply_to_settings(app_settings);
                     changed = true;
                     egui::Popup::close_id(ui.ctx(), pop_id);
                 }
@@ -187,10 +188,10 @@ fn render_prompt_chip(ui: &mut egui::Ui, brush: &mut BrushSettings) -> bool {
     changed
 }
 
-fn render_scheduler_chip(ui: &mut egui::Ui, brush: &mut BrushSettings, lcm_bundle_installed: bool) -> bool {
+fn render_scheduler_chip(ui: &mut egui::Ui, app_settings: &mut Settings, lcm_bundle_installed: bool) -> bool {
     let pop_id = egui::Id::new("eraser_scheduler_popover");
     let resp = chip::chip_tooltip(
-        chip::chip_button(ui, ICON_TUNE.codepoint, brush.sd_scheduler.label(), false),
+        chip::chip_button(ui, ICON_TUNE.codepoint, app_settings.brush.sd_scheduler.label(), false),
         "Scheduler",
         "Denoise math. LCM = fast (4-8 steps); DDIM = conservative; DPM++ 2M Karras = quality at 15-25 steps; Euler-A = creative per-seed variation; UniPC = best quality at 8-12 steps.",
     );
@@ -222,10 +223,10 @@ fn render_scheduler_chip(ui: &mut egui::Ui, brush: &mut BrushSettings, lcm_bundl
                 super::hint(ui, desc);
                 ui.add_space(theme::SPACE_XS);
             } else {
-                let selected = brush.sd_scheduler == sched;
+                let selected = app_settings.brush.sd_scheduler == sched;
                 if ui.selectable_label(selected, label).clicked() {
-                    if brush.sd_scheduler != sched {
-                        brush.sd_scheduler = sched;
+                    if app_settings.brush.sd_scheduler != sched {
+                        app_settings.on_scheduler_change_resolve_sd(sched);
                         changed = true;
                     }
                     egui::Popup::close_id(ui.ctx(), pop_id);

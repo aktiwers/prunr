@@ -2995,6 +2995,7 @@ impl PrunrApp {
             self.reconcile_bg_image_after_preset(idx, ctx);
         }
         if toolbar_change.model_changed {
+            self.settings.on_model_change_resolve_brush();
             self.settings.save();
             self.toasts.info(format!(
                 "{} loaded",

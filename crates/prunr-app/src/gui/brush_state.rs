@@ -223,6 +223,71 @@ impl SdQualityPreset {
         }
     }
 
+    /// Apply this preset's bundled scheduler + steps + CFG + Karras
+    /// into the active preset's `sd.schedulers[<bundled scheduler>]`
+    /// (and switch `active_scheduler`), persist the change to disk via
+    /// `presets_fs::save_merged`, then re-resolve `Settings.brush` so
+    /// the live values reflect the bundle. `inpaint_feather` is always
+    /// applied directly to `settings.brush` since it's a brush-popover
+    /// field, not part of the SD bundle.
+    ///
+    /// `Custom` is a true no-op. When the active preset is "Prunr"
+    /// (synthetic, never written) or the active model isn't SD-family,
+    /// falls through to direct brush mutation — no preset write-through,
+    /// no disk flush.
+    pub fn apply_to_settings(self, settings: &mut crate::gui::settings::Settings) {
+        if matches!(self, SdQualityPreset::Custom) { return; }
+        let (sched, steps, cfg, karras, feather) = match self {
+            SdQualityPreset::Fast =>
+                (SdScheduler::Lcm, 4u32, 1.0_f32, false, 4.0_f32),
+            SdQualityPreset::Balanced =>
+                (SdScheduler::Lcm, 8, 1.5, false, 4.0),
+            SdQualityPreset::Quality =>
+                (SdScheduler::DpmPlusPlus2MKarras, 25, 4.0, true, 8.0),
+            SdQualityPreset::Custom => unreachable!(),
+        };
+
+        settings.brush.inpaint_feather = feather;
+
+        let prunr_or_non_sd = settings.default_preset
+            == crate::gui::settings::PRUNR_PRESET
+            || settings.model.to_model_id().map(|id| !id.is_sd_family()).unwrap_or(true);
+        if prunr_or_non_sd {
+            settings.brush.sd_scheduler = sched;
+            settings.brush.sd_steps = steps;
+            settings.brush.sd_guidance_scale = cfg;
+            settings.brush.sd_use_karras_sigmas = karras;
+            return;
+        }
+
+        let model_id = settings.model.to_model_id()
+            .expect("non-prunr_or_non_sd branch implies SD-family model_id is Some");
+
+        let preset_name = settings.default_preset.clone();
+        let key = crate::gui::presets::model_id_key(model_id);
+        let file = settings.presets.entry(preset_name.clone())
+            .or_insert_with(crate::gui::presets::PresetFile::default);
+        let mp = file.models.entry(key)
+            .or_insert_with(crate::gui::presets::ModelPreset::default);
+        let sd = mp.sd.get_or_insert_with(crate::gui::presets::SdPreset::default);
+        sd.active_scheduler = sched;
+        sd.schedulers.insert(sched, crate::gui::presets::SdSchedulerBundle {
+            steps,
+            guidance_scale: cfg,
+            use_karras_sigmas: karras,
+            strength: settings.brush.sd_strength,
+        });
+
+        let mp_clone = mp.clone();
+        if let Err(e) = crate::gui::presets_fs::save_merged(&preset_name, model_id, mp_clone) {
+            tracing::error!(preset = %preset_name, %e, "failed to persist quality-preset click");
+        }
+
+        let resolved = settings.resolve_active_preset(None);
+        settings.brush = resolved.brush;
+        settings.brush.inpaint_feather = feather;
+    }
+
     /// Detect which preset (if any) the current `BrushSettings`
     /// match. Returns `Custom` when the values don't fit any
     /// built-in. Used after individual-slider edits to update the
@@ -809,6 +874,71 @@ mod tests {
         // strength + mode carry user intent across reset — must not change.
         assert!((target.strength - 0.42).abs() < f32::EPSILON);
         assert_eq!(target.mode, BrushMode::Add);
+    }
+
+    #[test]
+    fn sd_quality_preset_apply_to_settings_writes_through_active_preset() {
+        use crate::gui::presets::{model_id_key, ModelPreset, PresetFile, PRESET_FORMAT_VERSION, SdPreset};
+        use crate::gui::settings::{Settings, SettingsModel};
+
+        let mut s = Settings::default();
+        s.model = SettingsModel::SdInpaint;
+        let mp = ModelPreset {
+            item_settings: Default::default(),
+            brush: BrushSettings::default(),
+            sd: Some(SdPreset::default()),
+        };
+        let mut models = std::collections::HashMap::new();
+        models.insert(model_id_key(prunr_models::ModelId::SdV15InpaintFp16), mp);
+        let file = PresetFile { format_version: PRESET_FORMAT_VERSION, models };
+        // Unique name per test so the on-disk side effect of save_merged
+        // doesn't collide with siblings (the disk write is a best-effort
+        // side effect; this test asserts in-memory state only).
+        let preset_name = "TestApplyToSettingsWriteThrough";
+        s.presets.insert(preset_name.to_string(), file);
+        s.default_preset = preset_name.to_string();
+
+        SdQualityPreset::Quality.apply_to_settings(&mut s);
+
+        assert_eq!(s.brush.sd_scheduler, SdScheduler::DpmPlusPlus2MKarras);
+        assert_eq!(s.brush.sd_steps, 25);
+        assert!((s.brush.sd_guidance_scale - 4.0).abs() < f32::EPSILON);
+        assert!(s.brush.sd_use_karras_sigmas);
+
+        let key = model_id_key(prunr_models::ModelId::SdV15InpaintFp16);
+        let mp_back = s.presets.get(preset_name)
+            .expect("preset stays in map")
+            .models.get(&key)
+            .expect("SD entry");
+        let sd_back = mp_back.sd.as_ref().expect("sd entry written");
+        assert_eq!(sd_back.active_scheduler, SdScheduler::DpmPlusPlus2MKarras);
+        let bundle = sd_back.schedulers.get(&SdScheduler::DpmPlusPlus2MKarras)
+            .copied().expect("bundle written");
+        assert_eq!(bundle.steps, 25);
+        assert!((bundle.guidance_scale - 4.0).abs() < f32::EPSILON);
+        assert!(bundle.use_karras_sigmas);
+
+        // Best-effort: clean up the disk file written as a side effect.
+        let _ = crate::gui::presets_fs::delete(preset_name);
+    }
+
+    #[test]
+    fn sd_quality_preset_apply_to_settings_with_prunr_falls_through_to_brush() {
+        use crate::gui::settings::{Settings, SettingsModel};
+
+        let mut s = Settings::default();
+        s.model = SettingsModel::SdInpaint;
+        // default_preset stays "Prunr" (synthetic, never written).
+        let presets_before = s.presets.clone();
+
+        SdQualityPreset::Fast.apply_to_settings(&mut s);
+
+        // Direct brush mutation — no preset write-through.
+        assert_eq!(s.brush.sd_scheduler, SdScheduler::Lcm);
+        assert_eq!(s.brush.sd_steps, 4);
+        assert!((s.brush.sd_guidance_scale - 1.0).abs() < f32::EPSILON);
+        assert!(!s.brush.sd_use_karras_sigmas);
+        assert_eq!(s.presets, presets_before, "Prunr branch must not touch presets map");
     }
 
     #[test]

@@ -694,6 +694,22 @@ mod tests {
     }
 
     #[test]
+    fn forward_compat_unknown_modelid_entry_loads_silently() {
+        // A preset built on a future binary may carry a ModelId variant
+        // this binary doesn't know. The String-keyed `models` map round-
+        // trips the unknown entry; resolver lookup ignores it because
+        // `model_id_from_key` returns None.
+        let json = r#"{"format_version":2,"models":{"FutureModel":{},"Silueta":{}}}"#;
+        let file: PresetFile = serde_json::from_str(json)
+            .expect("unknown ModelId entries must not break parsing");
+        assert!(file.models.contains_key("Silueta"));
+        assert!(file.models.contains_key("FutureModel"));
+        assert_eq!(model_id_from_key("FutureModel"), None);
+        let resolved = resolve_preset_for_model(&file, ModelId::Silueta, None);
+        assert_eq!(resolved.item_settings, ItemSettings::default());
+    }
+
+    #[test]
     fn reset_button_parity_top_right_matches_brush_popover_subset() {
         use prunr_core::brush::{BrushMode, BrushShape};
         let preset_brush = BrushSettings {

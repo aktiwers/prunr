@@ -35,9 +35,33 @@ fn button_label(settings: &Settings, current: &ItemSettings, applied_preset: &st
     if !exists {
         return format!("{}  Custom  {}", ICON_BOOKMARK.codepoint, ICON_EDIT.codepoint);
     }
-    let is_modified = *current != settings.preset_values(applied_preset);
+    let resolved = resolve_preset_view(settings, applied_preset);
+    let item_diverged = *current != resolved.item_settings;
+    let brush_diverged = settings.brush != resolved.brush;
+    let is_modified = item_diverged || brush_diverged;
     let state_icon = if is_modified { ICON_EDIT.codepoint } else { ICON_CHECK.codepoint };
     format!("{}  {applied_preset}  {state_icon}", ICON_BOOKMARK.codepoint)
+}
+
+/// Resolve an arbitrary preset name to a `ResolvedView` using the
+/// active model. The dirty indicator may show a preset OTHER than
+/// `default_preset`, so this can't piggy-back on
+/// `Settings::resolve_active_preset`.
+fn resolve_preset_view(
+    settings: &Settings,
+    name: &str,
+) -> crate::gui::presets::ResolvedView {
+    use crate::gui::presets;
+    let empty = presets::PresetFile::default();
+    let file = if name == PRUNR_PRESET {
+        &empty
+    } else {
+        settings.presets.get(name).unwrap_or(&empty)
+    };
+    let model_id = settings.model.to_model_id()
+        .or_else(|| Settings::default().model.to_model_id())
+        .expect("Settings::default().model always has a model_id");
+    presets::resolve_preset_for_model(file, model_id, None)
 }
 
 /// Sort USER preset names case-insensitively. The synthetic "Prunr" preset
@@ -414,6 +438,38 @@ mod tests {
         let label = button_label(&s, &portrait_item, PRUNR_PRESET);
         assert!(label.contains("Prunr"), "{label}");
         assert!(label.ends_with(ICON_EDIT.codepoint), "{label}");
+    }
+
+    #[test]
+    fn button_label_dirty_indicator_includes_brush_diff() {
+        use crate::gui::brush_state::BrushSettings;
+        use crate::gui::settings::SettingsModel;
+        use crate::gui::presets::{model_id_key, ModelPreset, PresetFile, PRESET_FORMAT_VERSION};
+
+        let mut s = Settings::default();
+        s.model = SettingsModel::Silueta;
+        let mut preset_brush = BrushSettings::default();
+        preset_brush.radius = 80.0;
+        let mp = ModelPreset {
+            item_settings: ItemSettings::default(),
+            brush: preset_brush,
+            sd: None,
+        };
+        let mut models = HashMap::new();
+        models.insert(model_id_key(prunr_models::ModelId::Silueta), mp);
+        let file = PresetFile { format_version: PRESET_FORMAT_VERSION, models };
+        s.presets.insert("Foo".to_string(), file);
+
+        // ItemSettings still equals the preset's; only brush diverges.
+        let current = ItemSettings::default();
+        s.brush.radius = 10.0;
+
+        let label = button_label(&s, &current, "Foo");
+        assert!(label.contains("Foo"), "{label}");
+        assert!(
+            label.ends_with(ICON_EDIT.codepoint),
+            "brush-only diff must trigger the modified indicator: {label}",
+        );
     }
 
     #[test]
