@@ -540,11 +540,26 @@ fn run_one_tile(
     // latent-space gradient, not photographic output — fast_blur is
     // the right choice here, matching the sister-file pattern in
     // postprocess.rs.
-    let blurred_padded_mask: Cow<'_, GrayImage> = if req.mask_blur >= MASK_BLUR_OFF_THRESHOLD {
-        Cow::Owned(image::imageops::fast_blur(&*padded_mask, req.mask_blur))
+    // Phase 3 fix: split mask handling. The mask conditioning channel
+    // (mask_to_latent) gets the BLURRED mask so the model sees a soft
+    // gradient at the boundary — that's the signal that produces the
+    // smooth-blend effect. The masked-image latent (vae_encode_masked)
+    // gets the ORIGINAL BINARY mask so the encoded image has a clean
+    // cliff between "preserve original" and "fully grey-filled" — a
+    // partial-alpha blend toward grey is out-of-distribution for the
+    // SD-1.5 inpaint UNet (trained on binary-zeroed masks) and the
+    // model treats grey-tinted inputs literally, producing a visible
+    // grey ghost where the boundary band is. A1111/ComfyUI's
+    // mask_blur does the same split.
+    let blurred_padded_mask: Option<GrayImage> = if req.mask_blur >= MASK_BLUR_OFF_THRESHOLD {
+        Some(image::imageops::fast_blur(&*padded_mask, req.mask_blur))
     } else {
-        padded_mask
+        None
     };
+    let mask_for_image: &GrayImage = &padded_mask;
+    let mask_for_conditioning: &GrayImage = blurred_padded_mask
+        .as_ref()
+        .unwrap_or(&padded_mask);
 
     // CFG threshold: above 1.0 we run the UNet TWICE per step (cond +
     // uncond) and blend by `guidance_scale`. At ≤1.0 the cond pass is
@@ -563,8 +578,8 @@ fn run_one_tile(
                 let np = np.clone();
                 s.spawn(move || encode_text(bundle, &np))
             });
-            let vae_h = s.spawn(|| vae_encode_masked(vae, &padded_image, &blurred_padded_mask));
-            let mask_lat = mask_to_latent(&blurred_padded_mask);
+            let vae_h = s.spawn(|| vae_encode_masked(vae, &padded_image, mask_for_image));
+            let mask_lat = mask_to_latent(mask_for_conditioning);
             let cond = cond_h.join()
                 .map_err(|_| CoreError::Inference("text encoder (cond) thread panicked".into()))??;
             let uncond = match uncond_h {
@@ -1601,10 +1616,14 @@ fn extract_4d(value: &ort::value::DynValue, label: &str) -> Result<Array4<f32>, 
 // ── Tensor helpers ──────────────────────────────────────────────────────
 
 /// RGBA → NCHW f32 in [-1, 1] for the SD VAE encoder. Alpha dropped;
-/// masked pixels blend toward mid-gray (0.0) proportional to the mask
-/// value — binary mask = 0 or 1 (original behavior), blurred mask =
-/// smooth gradient so the VAE sees a soft boundary. `None` mask
-/// encodes the full image without any masking blend.
+/// masked pixels (mask > 127) are filled with the byte-128 mid-gray
+/// value (≈ 0.0039 in [-1, 1]). Binary cliff is intentional — the
+/// SD-1.5 inpaint UNet was trained on binary-zeroed masked-image
+/// latents; partial-alpha blends toward grey at the boundary band
+/// produce a visible grey ghost at inference (the mask conditioning
+/// channel handles soft-boundary signaling separately, see
+/// run_one_tile's mask_for_conditioning split). `None` mask encodes
+/// the full image without any masking.
 fn image_to_minus1_plus1_inner(image: &RgbaImage, mask: Option<&GrayImage>) -> Array4<f32> {
     let s = SD_TILE as usize;
     let (w, h) = image.dimensions();
@@ -1629,15 +1648,23 @@ fn image_to_minus1_plus1_inner(image: &RgbaImage, mask: Option<&GrayImage>) -> A
             let g = (raw[src + 1] as f32 / 127.5) - 1.0;
             let b = (raw[src + 2] as f32 / 127.5) - 1.0;
             if let Some(m) = m {
-                // Float-alpha blend: original↔mid-gray proportional to
-                // mask value. Binary mask → alpha is 0 or 1 (original
-                // behavior). Blurred mask → smooth gradient at edge so
-                // the model sees a soft boundary and preserves the
-                // surrounding lighting/color near the stroke edge.
-                let alpha = m[mask_row + x] as f32 / 255.0;
-                buf[dst]             = r * (1.0 - alpha) + v_fill * alpha;
-                buf[plane + dst]     = g * (1.0 - alpha) + v_fill * alpha;
-                buf[plane * 2 + dst] = b * (1.0 - alpha) + v_fill * alpha;
+                // Binary cliff: mask > 127 → fully grey (inpaint
+                // region), else original. The SD-1.5 inpaint UNet was
+                // trained on binary-zeroed masked-image latents — a
+                // partial-alpha blend would put grey-tinted pixels at
+                // the boundary, which the model treats literally and
+                // outputs as a grey ghost. Soft-boundary signaling is
+                // done via the mask conditioning channel
+                // (`mask_to_latent` in `run_one_tile`), not here.
+                if m[mask_row + x] > 127 {
+                    buf[dst]             = v_fill;
+                    buf[plane + dst]     = v_fill;
+                    buf[plane * 2 + dst] = v_fill;
+                } else {
+                    buf[dst]             = r;
+                    buf[plane + dst]     = g;
+                    buf[plane * 2 + dst] = b;
+                }
             } else {
                 buf[dst]             = r;
                 buf[plane + dst]     = g;
@@ -4053,24 +4080,39 @@ mod tests {
             "step_array_into must produce finite output: {out:?}");
     }
 
+    /// `image_to_minus1_plus1_masked` must use a binary cliff at byte
+    /// 127, NOT a float-alpha blend. A blend toward mid-grey at
+    /// partial alpha values (which would happen if the blurred mask
+    /// were passed in here) produces visible grey-ghost artefacts at
+    /// inference — the SD-1.5 inpaint UNet treats grey-tinted inputs
+    /// literally. Soft boundary signalling is done via the mask
+    /// conditioning channel (`mask_to_latent`), not here.
     #[test]
-    fn image_to_minus1_plus1_masked_blends_at_partial_alpha() {
-        // 1×1 red image, mask = 128 (≈50% alpha). The blended value
-        // should lie midway between red-in-[-1,1] and mid-gray.
-        let img = RgbaImage::from_pixel(1, 1, image::Rgba([255, 0, 0, 255]));
-        let mut mask = GrayImage::new(1, 1);
-        mask.put_pixel(0, 0, image::Luma([128]));
+    fn image_to_minus1_plus1_masked_uses_binary_cliff_not_float_blend() {
+        let img = RgbaImage::from_pixel(2, 1, image::Rgba([255, 0, 0, 255]));
+        let mut mask = GrayImage::new(2, 1);
+        // Boundary band: byte 127 → unmasked (original), byte 128 → masked (mid-grey).
+        mask.put_pixel(0, 0, image::Luma([127]));
+        mask.put_pixel(1, 0, image::Luma([128]));
         let arr = image_to_minus1_plus1_masked(&img, &mask);
-        // Red channel: original = (255/127.5)-1 = 1.0,
-        //   mid-gray = (128/127.5)-1 ≈ 0.00392,
-        //   alpha = 128/255 ≈ 0.502
-        //   → blend ≈ 1.0 * 0.498 + 0.00392 * 0.502 ≈ 0.500
-        let r = arr[(0, 0, 0, 0)];
-        assert!((r - 0.5).abs() < 0.01, "expected ≈0.5, got {r}");
-        // Green channel: original = (0/127.5)-1 = -1.0
-        //   → blend ≈ -1.0 * 0.498 + 0.00392 * 0.502 ≈ -0.496
-        let g = arr[(0, 1, 0, 0)];
-        assert!((g - (-0.496)).abs() < 0.01, "expected ≈-0.496, got {g}");
+        // Pixel 0: mask=127 (≤127) → original red = (255/127.5) - 1 = 1.0.
+        let r0 = arr[(0, 0, 0, 0)];
+        assert!((r0 - 1.0).abs() < 1e-5, "byte 127 must be original, got {r0}");
+        // Pixel 1: mask=128 (>127) → mid-grey fill = (128/127.5) - 1 ≈ 0.00392.
+        let r1 = arr[(0, 0, 0, 1)];
+        let v_fill = (128.0_f32 / 127.5) - 1.0;
+        assert!((r1 - v_fill).abs() < 1e-5, "byte 128 must be mid-grey {v_fill}, got {r1}");
+        // CRITICAL: at byte 192 (75% alpha if blending) the output
+        // must STILL be mid-grey (binary cliff), not a partial blend.
+        let mut mask2 = GrayImage::new(1, 1);
+        mask2.put_pixel(0, 0, image::Luma([192]));
+        let arr2 = image_to_minus1_plus1_masked(
+            &RgbaImage::from_pixel(1, 1, image::Rgba([255, 0, 0, 255])),
+            &mask2,
+        );
+        let r2 = arr2[(0, 0, 0, 0)];
+        assert!((r2 - v_fill).abs() < 1e-5,
+            "byte 192 must be binary-cliff mid-grey {v_fill} (NOT float blend ≈ 0.25), got {r2}");
     }
 
     #[test]
