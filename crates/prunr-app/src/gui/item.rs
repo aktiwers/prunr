@@ -404,6 +404,8 @@ impl BatchItem {
         true
     }
 
+    // Test-only — non-test paths use the unified actions_undo/redo log
+    // via try_undo_one_action / try_redo_one_action.
     #[cfg(test)]
     pub(crate) fn has_stroke_undo(&self) -> bool {
         !self.stroke_undo_stack.is_empty()
