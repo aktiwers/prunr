@@ -81,6 +81,15 @@ pub struct BrushSettings {
     /// corresponding number of early denoise steps.
     #[serde(default = "default_strength")]
     pub sd_strength: f32,
+    /// SD-only: pixel sigma for Gaussian blur applied to the mask
+    /// before inference. Soft mask boundary = model sees a gradient
+    /// [0,1] instead of a hard cliff, automatically forcing the
+    /// generated pixels to blend toward surrounding lighting/color
+    /// near the edge. 0 = no blur (hard edge, current behavior). 4-6
+    /// px is the typical SD ecosystem default. Independent of
+    /// inpaint_feather (which is a composite-time pixel blend).
+    #[serde(default = "default_mask_blur")]
+    pub sd_mask_blur: f32,
 }
 
 /// SD eraser scheduler choice. Wired into `SdInpaintRequest` at
@@ -256,6 +265,7 @@ impl SdQualityPreset {
 
 fn default_feather() -> f32 { 4.0 }
 fn default_grow() -> f32 { 2.0 }
+fn default_mask_blur() -> f32 { 4.0 }
 /// 1.5 matches the `Balanced` preset's CFG (LCM scheduler, CFG up to
 /// 2.0 per Diffusers LCM guidance — community consensus is values
 /// >2.0 degrade LCM output quality). For Standard SD via DDIM /
@@ -307,6 +317,7 @@ impl Default for BrushSettings {
             sd_use_karras_sigmas: false,
             sd_seed: None,
             sd_strength: default_strength(),
+            sd_mask_blur: default_mask_blur(),
         }
     }
 }
@@ -560,6 +571,7 @@ mod tests {
         assert_eq!(s.sd_steps, 8);
         assert!(!s.sd_use_karras_sigmas);
         assert_eq!(s.sd_seed, None);
+        assert!((s.sd_mask_blur - 4.0).abs() < f32::EPSILON, "sd_mask_blur default");
         // The persisted CFG=4.0 is kept; semantically that means the
         // user's effective preset is Custom (CFG mismatch with all
         // built-ins). The UI reads detect_from on every render so
