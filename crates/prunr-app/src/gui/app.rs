@@ -551,17 +551,9 @@ impl PrunrApp {
     /// dispatches to the matching per-type stack — mode-agnostic. A stroke
     /// undo triggers a brush rerun so the canvas reflects the popped state.
     pub fn handle_undo(&mut self, ctx: &egui::Context) {
-        let has_selected = self.batch.has_any_selected();
-        let current_id = self.batch.selected_item().map(|b| b.id);
         let mut undone = 0u32;
         let mut last_action: Option<ActionType> = None;
-        for idx in 0..self.batch.items.len() {
-            let target = if has_selected {
-                self.batch.items[idx].selected
-            } else {
-                Some(self.batch.items[idx].id) == current_id
-            };
-            if !target { continue; }
+        for idx in self.batch.targeted_indices() {
             if let Some(action) = self.try_undo_one_action(idx, ctx) {
                 undone += 1;
                 last_action = Some(action);
@@ -587,17 +579,9 @@ impl PrunrApp {
     /// Redo the most-recently undone action on selected items. Mirrors
     /// `handle_undo` via the `actions_redo` ordering layer.
     pub fn handle_redo(&mut self, ctx: &egui::Context) {
-        let has_selected = self.batch.has_any_selected();
-        let current_id = self.batch.selected_item().map(|b| b.id);
         let mut redone = 0u32;
         let mut last_action: Option<ActionType> = None;
-        for idx in 0..self.batch.items.len() {
-            let target = if has_selected {
-                self.batch.items[idx].selected
-            } else {
-                Some(self.batch.items[idx].id) == current_id
-            };
-            if !target { continue; }
+        for idx in self.batch.targeted_indices() {
             if let Some(action) = self.try_redo_one_action(idx, ctx) {
                 redone += 1;
                 last_action = Some(action);
@@ -624,7 +608,7 @@ impl PrunrApp {
     /// apply the inverse. Skips orphan markers (result stack rotated oldest
     /// out) and tries the next one. Returns the popped ActionType on success.
     fn try_undo_one_action(&mut self, idx: usize, ctx: &egui::Context) -> Option<ActionType> {
-        use super::item::ACTION_HIST_DEPTH;
+        use super::item::push_action_bounded;
         loop {
             let kind = self.batch.items[idx].actions_undo.pop_back()?;
             let success = match kind {
@@ -667,11 +651,7 @@ impl PrunrApp {
                 }
             };
             if success {
-                let item = &mut self.batch.items[idx];
-                item.actions_redo.push_back(kind);
-                while item.actions_redo.len() > ACTION_HIST_DEPTH {
-                    item.actions_redo.pop_front();
-                }
+                push_action_bounded(&mut self.batch.items[idx].actions_redo, kind);
                 return Some(kind);
             }
             // Orphan marker — per-type stack empty (result stack rotation).
@@ -682,7 +662,7 @@ impl PrunrApp {
     /// Pop the most-recent marker from `actions_redo` for item at `idx` and
     /// re-apply. Returns the popped ActionType on success.
     fn try_redo_one_action(&mut self, idx: usize, ctx: &egui::Context) -> Option<ActionType> {
-        use super::item::ACTION_HIST_DEPTH;
+        use super::item::push_action_bounded;
         loop {
             let kind = self.batch.items[idx].actions_redo.pop_back()?;
             let success = match kind {
@@ -722,11 +702,7 @@ impl PrunrApp {
                 }
             };
             if success {
-                let item = &mut self.batch.items[idx];
-                item.actions_undo.push_back(kind);
-                while item.actions_undo.len() > ACTION_HIST_DEPTH {
-                    item.actions_undo.pop_front();
-                }
+                push_action_bounded(&mut self.batch.items[idx].actions_undo, kind);
                 return Some(kind);
             }
         }
