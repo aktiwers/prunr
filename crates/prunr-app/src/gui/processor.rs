@@ -140,6 +140,12 @@ pub(crate) struct InpaintTuning {
     /// LCM-only: Karras sigma schedule. Default false (linear, matches
     /// distillation training).
     pub sd_use_karras_sigmas: bool,
+    /// SD-only: post-gate TAESD selection. Caller computes
+    /// `BrushSettings::sd_use_taesd_effective()` (which checks both
+    /// the user preference and the install state) and threads the
+    /// result through. The dispatch path consumes this verbatim —
+    /// no further gating, no `lcm &&` coupling.
+    pub use_taesd: bool,
 }
 
 impl Default for InpaintTuning {
@@ -157,7 +163,49 @@ impl Default for InpaintTuning {
             sd_seed: None,
             sd_strength: 1.0,
             sd_use_karras_sigmas: false,
+            use_taesd: false,
         }
+    }
+}
+
+/// Pure result of resolving the SD dispatch decision from inputs.
+/// Caller copies these into `SdInpaintRequest`. Stays out of the
+/// rayon closure so the boundary test can exercise every input
+/// combo without spawning anything.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct SdDispatchPlan {
+    pub use_taesd: bool,
+    pub effective_cfg: f32,
+}
+
+/// Decide TAESD wiring + CFG clamping for an SD dispatch.
+///
+/// `backend` is the *actually-dispatched* model id (after
+/// `Settings::lcm_routing_active` resolution upstream). `lcm` for
+/// CFG-clamp purposes derives from the backend, NOT from the
+/// user's scheduler request — picking the LCM scheduler without
+/// the LCM bundle installed must NOT clamp CFG against standard
+/// SD weights. (Bug #1 regression contract.)
+///
+/// `use_taesd_requested` is the post-install-gate boolean from
+/// `BrushSettings::sd_use_taesd_effective()`. Orthogonal to
+/// scheduler; works with both standard SD and LCM checkpoints.
+pub(crate) fn resolve_sd_dispatch(
+    backend: prunr_models::ModelId,
+    use_taesd_requested: bool,
+    user_cfg: f32,
+) -> SdDispatchPlan {
+    let lcm_weights = backend == prunr_models::ModelId::SdV15LcmInpaintFp16;
+    // LCM weights are calibrated for low CFG (model card: 1.0–2.0).
+    // Standard SD passes the user's CFG straight through.
+    let effective_cfg = if lcm_weights {
+        user_cfg.clamp(1.0, 2.0)
+    } else {
+        user_cfg
+    };
+    SdDispatchPlan {
+        use_taesd: use_taesd_requested,
+        effective_cfg,
     }
 }
 
@@ -414,28 +462,18 @@ impl Processor {
                 | prunr_models::ModelId::SdV15LcmInpaintFp16 => {
                     use prunr_core::inpaint_sd::SchedulerKind;
                     let scheduler: SchedulerKind = tuning.sd_scheduler.into();
-                    let lcm = matches!(scheduler, SchedulerKind::Lcm);
-                    // LCM weights are calibrated for low CFG. The LCM
-                    // model card recommends staying in 1.0–2.0; values
-                    // above degrade output. Clamp so the toolbar slider's
-                    // full 1.0–15.0 range doesn't pipe an out-of-range
-                    // value into LCM.
-                    let cfg = if lcm {
-                        tuning.sd_guidance_scale.clamp(1.0, 2.0)
-                    } else {
-                        tuning.sd_guidance_scale
-                    };
-                    // TAESD is the distilled fast VAE substitute paired
-                    // with LCM. Standard SD weights expect the full VAE.
-                    let use_taesd = lcm
-                        && prunr_models::is_available(prunr_models::ModelId::TaesdFp16);
+                    let plan = resolve_sd_dispatch(
+                        tuning.backend,
+                        tuning.use_taesd,
+                        tuning.sd_guidance_scale,
+                    );
                     Some(prunr_core::inpaint_sd::SdInpaintRequest {
                         prompt: tuning.sd_prompt.clone(),
                         negative_prompt: tuning.sd_negative_prompt.clone(),
                         num_inference_steps: tuning.sd_steps,
-                        guidance_scale: cfg,
+                        guidance_scale: plan.effective_cfg,
                         seed: tuning.sd_seed,
-                        use_taesd,
+                        use_taesd: plan.use_taesd,
                         scheduler,
                         strength: tuning.sd_strength,
                         use_karras_sigmas: tuning.sd_use_karras_sigmas,
@@ -695,6 +733,77 @@ impl Processor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use prunr_models::ModelId;
+
+    fn cfg_eq(a: f32, b: f32) -> bool { (a - b).abs() < 1e-6 }
+
+    #[test]
+    fn standard_sd_ddim_taesd_off_passes_through() {
+        let p = resolve_sd_dispatch(ModelId::SdV15InpaintFp16, false, 7.5);
+        assert!(!p.use_taesd);
+        assert!(cfg_eq(p.effective_cfg, 7.5),
+            "standard SD must NOT clamp CFG");
+    }
+
+    #[test]
+    fn standard_sd_ddim_taesd_on_when_available() {
+        // Caller (sd_use_taesd_effective) has already gated by install;
+        // here we simulate that with use_taesd_requested=true.
+        let p = resolve_sd_dispatch(ModelId::SdV15InpaintFp16, true, 4.0);
+        assert!(p.use_taesd);
+        assert!(cfg_eq(p.effective_cfg, 4.0));
+    }
+
+    #[test]
+    fn standard_sd_ddim_taesd_requested_but_install_gate_filtered() {
+        // sd_use_taesd_effective returned false (bundle missing) so
+        // caller threads use_taesd_requested=false. Plan stays orthogonal.
+        let p = resolve_sd_dispatch(ModelId::SdV15InpaintFp16, false, 7.5);
+        assert!(!p.use_taesd);
+        assert!(cfg_eq(p.effective_cfg, 7.5));
+    }
+
+    #[test]
+    fn lcm_weights_lcm_scheduler_clamps_cfg() {
+        // user_cfg=7.5 with LCM bundle dispatched: clamp to 2.0.
+        let p = resolve_sd_dispatch(ModelId::SdV15LcmInpaintFp16, false, 7.5);
+        assert!(!p.use_taesd);
+        assert!(cfg_eq(p.effective_cfg, 2.0),
+            "LCM weights must clamp CFG to [1.0, 2.0]");
+    }
+
+    #[test]
+    fn lcm_weights_with_taesd_clamps_cfg_and_keeps_taesd() {
+        let p = resolve_sd_dispatch(ModelId::SdV15LcmInpaintFp16, true, 1.5);
+        assert!(p.use_taesd);
+        assert!(cfg_eq(p.effective_cfg, 1.5),
+            "in-range CFG should round-trip unchanged through clamp");
+    }
+
+    /// Bug #1 regression: user picks LCM scheduler but the LCM
+    /// bundle is NOT installed, so upstream resolves backend back
+    /// to SdV15InpaintFp16. Old code clamped CFG to 1.0-2.0 because
+    /// it gated on `matches!(scheduler, Lcm)`. New code gates on
+    /// `backend == SdV15LcmInpaintFp16` so CFG passes through.
+    #[test]
+    fn lcm_scheduler_without_lcm_bundle_does_not_clamp_cfg() {
+        // Backend is SdV15InpaintFp16 (LCM bundle missing → upstream
+        // fell back). The fact that the user requested LCM scheduler
+        // is irrelevant to this pure helper.
+        let p = resolve_sd_dispatch(ModelId::SdV15InpaintFp16, false, 7.5);
+        assert!(cfg_eq(p.effective_cfg, 7.5),
+            "CFG must NOT clamp when standard SD weights dispatch");
+    }
+
+    #[test]
+    fn bug_one_regression_user_cfg_7_5_survives() {
+        // Tight regression check: the exact contract from CONTEXT.md
+        // — scheduler=LCM, bundle NOT installed, user CFG=7.5 →
+        // worker receives backend=SdV15InpaintFp16 and CFG=7.5.
+        let p = resolve_sd_dispatch(ModelId::SdV15InpaintFp16, false, 7.5);
+        assert!(cfg_eq(p.effective_cfg, 7.5));
+    }
+
 
     fn fixture() -> Processor {
         let (tx, _rx_unused) = mpsc::channel::<WorkerMessage>();
