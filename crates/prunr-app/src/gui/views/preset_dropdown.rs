@@ -294,12 +294,35 @@ pub fn render(
                 .then(|| trimmed.to_string())
         });
         if let Some(name) = target_name {
-            settings.presets.insert(name.clone(), *current_item);
+            // Build a single-entry v2 PresetFile envelope keyed by the
+            // active model. Plan 29-04 widens this to merge-aware so other
+            // model entries survive — for now overwrite is the existing
+            // behaviour of `save`. Falls back to the workspace default
+            // model in filter-only mode (no model_id) so the file is
+            // still keyed correctly.
+            let model_id = settings.model.to_model_id()
+                .or_else(|| Settings::default().model.to_model_id())
+                .expect("Settings::default().model always has a model_id");
+            let (brush, sd) = crate::gui::presets::split_brush_for_save(
+                &settings.brush,
+                model_id,
+            );
+            let mut models = std::collections::HashMap::new();
+            models.insert(crate::gui::presets::model_id_key(model_id), crate::gui::presets::ModelPreset {
+                item_settings: *current_item,
+                brush,
+                sd,
+            });
+            let file = crate::gui::presets::PresetFile {
+                format_version: crate::gui::presets::PRESET_FORMAT_VERSION,
+                models,
+            };
+            settings.presets.insert(name.clone(), file.clone());
             // Write to the filesystem store so the preset survives restart
             // and is shareable. Log on error — the in-memory copy works for
             // this session, but the user loses it on restart, which is
             // surprising if we stay fully silent.
-            if let Err(e) = crate::gui::presets_fs::save(&name, current_item) {
+            if let Err(e) = crate::gui::presets_fs::save(&name, &file) {
                 tracing::error!(preset = %name, %e, "failed to save preset to disk");
             }
             applied = Some(name);
@@ -319,7 +342,22 @@ pub fn render(
 mod tests {
     use super::*;
     use crate::gui::item_settings::item_with_gamma;
+    use crate::gui::presets::{model_id_key, ModelPreset, PresetFile, PRESET_FORMAT_VERSION};
     use std::collections::HashMap;
+
+    /// Wrap an `ItemSettings` into a v2 single-entry `PresetFile` keyed by
+    /// the active model — tests use this where `s.presets.insert` once
+    /// took a bare `ItemSettings`.
+    fn wrap(s: &Settings, item: ItemSettings) -> PresetFile {
+        let mid = s.model.to_model_id().expect("test settings have a model_id");
+        let mut models = HashMap::new();
+        models.insert(model_id_key(mid), ModelPreset {
+            item_settings: item,
+            brush: Default::default(),
+            sd: None,
+        });
+        PresetFile { format_version: PRESET_FORMAT_VERSION, models }
+    }
 
     #[test]
     fn button_label_clean_icon_when_settings_match_applied() {
@@ -352,8 +390,8 @@ mod tests {
     #[test]
     fn button_label_tracks_applied_even_when_current_matches_different_preset() {
         let mut s = Settings::default();
-        let portrait = item_with_gamma(2.0);
-        s.presets.insert("Portrait".to_string(), portrait);
+        let portrait_item = item_with_gamma(2.0);
+        s.presets.insert("Portrait".to_string(), wrap(&s, portrait_item));
         // applied_preset = "Prunr" but current happens to match factory.
         // Label should stay on "Prunr" (the applied one).
         let current = ItemSettings::default();
@@ -361,7 +399,7 @@ mod tests {
         assert!(label.contains("Prunr"), "{label}");
         // …and when current matches the OTHER preset but applied is Prunr,
         // we still show "Prunr ✎" (modified relative to the applied base).
-        let label = button_label(&s, &portrait, PRUNR_PRESET);
+        let label = button_label(&s, &portrait_item, PRUNR_PRESET);
         assert!(label.contains("Prunr"), "{label}");
         assert!(label.ends_with(ICON_EDIT.codepoint), "{label}");
     }
@@ -369,10 +407,11 @@ mod tests {
     #[test]
     fn sorted_preset_names_case_insensitive() {
         let mut s = Settings::default();
-        let mut map: HashMap<String, ItemSettings> = HashMap::new();
-        map.insert("Zeta".to_string(), ItemSettings::default());
-        map.insert("alpha".to_string(), ItemSettings::default());
-        map.insert("Beta".to_string(), ItemSettings::default());
+        let empty = wrap(&s, ItemSettings::default());
+        let mut map: HashMap<String, PresetFile> = HashMap::new();
+        map.insert("Zeta".to_string(), empty.clone());
+        map.insert("alpha".to_string(), empty.clone());
+        map.insert("Beta".to_string(), empty);
         s.presets = map;
         assert_eq!(sorted_preset_names(&s), vec!["alpha", "Beta", "Zeta"]);
     }
@@ -380,8 +419,9 @@ mod tests {
     #[test]
     fn all_preset_names_prunr_first() {
         let mut s = Settings::default();
-        s.presets.insert("Zeta".to_string(), ItemSettings::default());
-        s.presets.insert("alpha".to_string(), ItemSettings::default());
+        let empty = wrap(&s, ItemSettings::default());
+        s.presets.insert("Zeta".to_string(), empty.clone());
+        s.presets.insert("alpha".to_string(), empty);
         let names = all_preset_names(&s);
         assert_eq!(names[0], PRUNR_PRESET);
         assert_eq!(names[1..], vec!["alpha".to_string(), "Zeta".to_string()]);

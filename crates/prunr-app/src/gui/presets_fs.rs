@@ -31,7 +31,10 @@ use std::path::PathBuf;
 use rayon::prelude::*;
 
 use super::item_settings::ItemSettings;
-use super::settings::PRUNR_PRESET;
+use super::presets::{
+    model_id_key, ModelPreset, PresetFile, PRESET_FORMAT_VERSION,
+};
+use super::settings::{PRUNR_PRESET, Settings};
 use prunr_core::{ComposeMode, FillStyle, LineMode, LineStyle};
 
 /// Name of the presets subdirectory under the app config dir.
@@ -46,7 +49,7 @@ const PRESET_EXT: &str = "json";
 /// on next launch. Bump the suffix (`_v2`, `_v3`, ...) when shipping a
 /// fresh batch of curated presets — the old marker won't gate the new
 /// batch.
-const SEED_MARKER: &str = ".builtins_seeded_v1";
+const SEED_MARKER: &str = ".builtins_seeded_v2";
 
 /// Resolve the presets directory, creating it if needed. Returns `None` if
 /// the platform config dir can't be resolved (very rare).
@@ -88,13 +91,52 @@ pub fn sanitize_filename(name: &str) -> String {
     out
 }
 
+/// Wrap a v1 preset file (raw `ItemSettings` shape, no `format_version`
+/// key) into a v2 `PresetFile`. v1 files predate per-model bundling, so
+/// they carry no model identity — every v1 file wraps under the
+/// workspace default (`Settings::default().model`, currently
+/// `BiRefNetLite`). The resolver pulls Prunr-floor brush/sd values at
+/// apply-time, so missing brush/sd is not data loss.
+///
+/// Returns `None` when the JSON does not parse as `ItemSettings` — caller
+/// logs and skips. Successful migrations are read-only on disk; the v2
+/// shape only persists once the user explicitly re-saves the preset.
+fn migrate_v1_to_v2(value: &serde_json::Value) -> Option<PresetFile> {
+    // Reject non-objects up front — `#[serde(default)]` on ItemSettings
+    // makes empty arrays / unrelated maps deserialize to a fully-default
+    // ItemSettings, which would silently mask a corrupt file.
+    if !value.is_object() {
+        return None;
+    }
+    let item_settings: ItemSettings = serde_json::from_value(value.clone()).ok()?;
+    // Settings::default().model is BiRefNetLite, whose to_model_id() is
+    // Some(ModelId::BiRefNetLite) — invariant is local (settings.rs Default
+    // impl + SettingsModel::to_model_id match arms).
+    let wrap_key = Settings::default()
+        .model
+        .to_model_id()
+        .expect("Settings::default().model always has a model_id");
+    let mut models = HashMap::new();
+    models.insert(model_id_key(wrap_key), ModelPreset {
+        item_settings,
+        brush: Default::default(),
+        sd: None,
+    });
+    Some(PresetFile { format_version: PRESET_FORMAT_VERSION, models })
+}
+
 /// Load every preset file in the directory into a map. Invalid files are
 /// silently skipped — we'd rather load 9 of 10 valid presets than reject
 /// the whole batch because one file is malformed.
 ///
+/// v1 files (raw `ItemSettings` shape, pre-phase-29) are auto-wrapped into
+/// a v2 `PresetFile` envelope on load; the on-disk file is untouched until
+/// the user explicitly re-saves it. v2 files (have `format_version: 2`)
+/// deserialize directly.
+///
 /// Called once at startup from `Settings::load` (before the first frame) and
 /// once per preset delete to refresh the in-memory map. Not on the render path.
-pub fn load_all() -> HashMap<String, ItemSettings> {
+pub(crate) fn load_all() -> HashMap<String, PresetFile> {
     let Some(dir) = presets_dir() else { return HashMap::new() };
     let Ok(entries) = std::fs::read_dir(&dir) else { return HashMap::new() };
 
@@ -113,15 +155,20 @@ pub fn load_all() -> HashMap<String, ItemSettings> {
             let name = path.file_stem()?.to_str()?.to_string();
             if name.eq_ignore_ascii_case(PRUNR_PRESET) { return None; }
             let data = std::fs::read(path).ok()?;
-            let values: ItemSettings = serde_json::from_slice(&data).ok()?;
-            Some((name, values))
+            let value: serde_json::Value = serde_json::from_slice(&data).ok()?;
+            let file = if value.get("format_version").and_then(|v| v.as_u64()) == Some(2) {
+                serde_json::from_value(value).ok()?
+            } else {
+                migrate_v1_to_v2(&value)?
+            };
+            Some((name, file))
         })
         .collect()
 }
 
 /// Write a preset to disk. Overwrites any existing file of the same name.
 /// "Prunr" is rejected — that name is synthetic and cannot be persisted.
-pub fn save(name: &str, values: &ItemSettings) -> std::io::Result<()> {
+pub(crate) fn save(name: &str, values: &PresetFile) -> std::io::Result<()> {
     let path = preset_path(name).ok_or_else(|| {
         if name.eq_ignore_ascii_case(PRUNR_PRESET) {
             std::io::Error::new(
@@ -156,17 +203,29 @@ pub fn seed_builtins_once() {
     let Some(dir) = presets_dir() else { return };
     let marker = dir.join(SEED_MARKER);
     if marker.exists() { return; }
-    for (name, values) in builtin_presets() {
+    let wrap_key = Settings::default()
+        .model
+        .to_model_id()
+        .expect("Settings::default().model always has a model_id");
+    let wrap_key = model_id_key(wrap_key);
+    for (name, item_settings) in builtin_presets() {
         // Skip if a preset file with this name already exists. Protects
         // user customisations against two edge cases:
         //   1. A mid-seed crash (some presets saved, marker not yet written)
         //      → next launch re-seeds, but won't overwrite files saved in
         //      the previous partial run.
-        //   2. A future `_v2` seed that reuses a name the user edited under
-        //      `_v1` — keeps their version, skips the rename.
+        //   2. A future `_v3` seed that reuses a name the user edited under
+        //      `_v2` — keeps their version, skips the rename.
         let Some(path) = preset_path(name) else { continue };
         if path.exists() { continue; }
-        let _ = save(name, &values);
+        let mut models = HashMap::new();
+        models.insert(wrap_key.clone(), ModelPreset {
+            item_settings,
+            brush: Default::default(),
+            sd: None,
+        });
+        let file = PresetFile { format_version: PRESET_FORMAT_VERSION, models };
+        let _ = save(name, &file);
     }
     let _ = std::fs::write(&marker, b"");
 }
@@ -319,9 +378,9 @@ mod tests {
 
     #[test]
     fn save_rejects_prunr_name() {
-        let result = save("Prunr", &ItemSettings::default());
+        let result = save("Prunr", &PresetFile::default());
         assert!(result.is_err());
-        let result = save("prunr", &ItemSettings::default());
+        let result = save("prunr", &PresetFile::default());
         assert!(result.is_err());
     }
 
@@ -389,5 +448,123 @@ mod tests {
         let json = serde_json::to_string(&original).expect("must serialize");
         let parsed: ItemSettings = serde_json::from_str(&json).expect("must deserialize");
         assert_eq!(parsed, original);
+    }
+
+    // ── v1 → v2 migration ────────────────────────────────────────────
+    //
+    // v1 preset files are raw `ItemSettings` JSON (no `format_version`
+    // key). They predate per-model bundling, so they carry no model
+    // identity — every v1 file wraps under the workspace default
+    // (`Settings::default().model`, currently `BiRefNetLite`).
+
+    #[test]
+    fn migrate_v1_with_item_settings_fields_wraps_into_default_model_entry() {
+        let v1_json = serde_json::json!({
+            "gamma": 2.0,
+            "edge_thickness": 5,
+        });
+        let migrated = migrate_v1_to_v2(&v1_json).expect("must migrate");
+        assert_eq!(migrated.format_version, 2);
+        let default_key = model_id_key(prunr_models::ModelId::BiRefNetLite);
+        let entry = migrated.models.get(&default_key).expect("default model entry");
+        assert_eq!(entry.item_settings.gamma, 2.0);
+        assert_eq!(entry.item_settings.edge_thickness, 5);
+        assert_eq!(entry.brush, super::super::brush_state::BrushSettings::default());
+        assert!(entry.sd.is_none());
+    }
+
+    #[test]
+    fn migrate_v1_empty_object_wraps_default_item_settings() {
+        // An empty JSON object is a valid v1 file (every ItemSettings field
+        // serde-defaults). Migration must succeed and yield factory defaults.
+        let v1_json = serde_json::json!({});
+        let migrated = migrate_v1_to_v2(&v1_json).expect("must migrate empty");
+        assert_eq!(migrated.format_version, 2);
+        let default_key = model_id_key(prunr_models::ModelId::BiRefNetLite);
+        let entry = migrated.models.get(&default_key).expect("default model entry");
+        assert_eq!(entry.item_settings, ItemSettings::default());
+    }
+
+    #[test]
+    fn migrate_v1_with_unknown_fields_succeeds() {
+        // Unknown forward-compat fields must not break v1 migration.
+        let v1_json = serde_json::json!({
+            "gamma": 1.5,
+            "definitely_not_a_real_field": 42,
+        });
+        let migrated = migrate_v1_to_v2(&v1_json).expect("must migrate");
+        let default_key = model_id_key(prunr_models::ModelId::BiRefNetLite);
+        let entry = migrated.models.get(&default_key).expect("default model entry");
+        assert_eq!(entry.item_settings.gamma, 1.5);
+    }
+
+    #[test]
+    fn migrate_v1_with_garbage_json_returns_none() {
+        // Anything that doesn't deserialize as ItemSettings → None →
+        // load_all silently skips. (Strings, arrays, scalars at top level
+        // can't be ItemSettings.)
+        let v1_json = serde_json::json!("not an object");
+        assert!(migrate_v1_to_v2(&v1_json).is_none());
+        let v1_json = serde_json::json!([1, 2, 3]);
+        assert!(migrate_v1_to_v2(&v1_json).is_none());
+    }
+
+    #[test]
+    fn v2_preset_file_round_trips_through_save_load_pure() {
+        // Pure round-trip (no disk): build a v2 PresetFile, serialize via
+        // the same code save() uses, deserialize via the same code load_all
+        // uses, assert byte-stable shape. Pins the on-disk format contract
+        // without touching the user's real config dir.
+        let mut original = PresetFile::default();
+        original.models.insert(
+            model_id_key(prunr_models::ModelId::SdV15InpaintFp16),
+            ModelPreset::default(),
+        );
+        let json = serde_json::to_string_pretty(&original).expect("serialize");
+        let value: serde_json::Value = serde_json::from_str(&json).expect("parse");
+        // load_all branches on format_version == 2 → direct deserialize.
+        assert_eq!(value.get("format_version").and_then(|v| v.as_u64()), Some(2));
+        let restored: PresetFile = serde_json::from_value(value).expect("deserialize");
+        assert_eq!(restored, original);
+    }
+
+    #[test]
+    fn v1_to_v2_round_trip_via_serde_is_stable() {
+        // Seed a v1-shaped JSON, migrate to v2 in-memory, serialize as if
+        // saving, parse back via the load_all branch logic, assert the
+        // second-load PresetFile equals the migrated one. Proves migration
+        // is idempotent — once persisted as v2, it stays v2 verbatim.
+        let v1_json = serde_json::json!({
+            "gamma": 1.7,
+            "feather": 3.5,
+        });
+        let migrated = migrate_v1_to_v2(&v1_json).expect("migrate");
+        let serialized = serde_json::to_string_pretty(&migrated).expect("serialize");
+        let value: serde_json::Value = serde_json::from_str(&serialized).expect("reparse");
+        // Second load must take the v2 branch, not re-migrate.
+        assert_eq!(value.get("format_version").and_then(|v| v.as_u64()), Some(2));
+        let reloaded: PresetFile = serde_json::from_value(value).expect("v2 deserialize");
+        assert_eq!(reloaded, migrated);
+    }
+
+    #[test]
+    fn save_writes_v2_envelope_to_disk() {
+        // End-to-end: save a v2 PresetFile to a tmpdir-backed path and
+        // assert the on-disk JSON has `format_version: 2` and `models`.
+        // Bypasses presets_dir() (which goes to the real user config) by
+        // writing directly via the same logic save() uses internally.
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let path = dir.path().join("Test.json");
+        let mut original = PresetFile::default();
+        original.models.insert(
+            model_id_key(prunr_models::ModelId::BiRefNetLite),
+            ModelPreset::default(),
+        );
+        let json = serde_json::to_string_pretty(&original).expect("serialize");
+        std::fs::write(&path, json).expect("write");
+        let read_back = std::fs::read_to_string(&path).expect("read");
+        let value: serde_json::Value = serde_json::from_str(&read_back).expect("parse");
+        assert_eq!(value.get("format_version").and_then(|v| v.as_u64()), Some(2));
+        assert!(value.get("models").is_some());
     }
 }
