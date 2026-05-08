@@ -132,7 +132,7 @@ impl Default for ToolbarChange {
 /// regardless of the active preset — predictable single-knob undo.
 /// The top-right ↻ button (above) is the OPPOSITE: it resolves
 /// EVERY knob (item_settings + brush + SD bundle) through the
-/// active preset's resolve_active_preset. Two scopes, two anchors.
+/// active preset. Two scopes, two anchors.
 struct Defaults {
     template: ItemSettings,
     /// "Pick this when user toggles enabled" fallback for Option chips that
