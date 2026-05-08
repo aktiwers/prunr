@@ -373,6 +373,8 @@ impl BatchItem {
     }
 
     /// Drop the brush correction. Reversible via `undo_stroke`.
+    /// User-facing path (the "Clear strokes" button) — pushes a
+    /// ClearStrokes marker onto the action timeline.
     pub(crate) fn clear_correction(&mut self) {
         if self.mask_correction.is_some() {
             let pre = self.mask_correction.clone();
@@ -380,6 +382,16 @@ impl BatchItem {
             self.stroke_redo_stack.clear();
             self.push_action_marker(ActionType::ClearStrokes);
         }
+        self.mask_correction = None;
+        self.settings.correction_hash = None;
+    }
+
+    /// Internal-only post-stroke cleanup. Drops `mask_correction` and
+    /// `correction_hash` WITHOUT pushing an action marker or stroke-
+    /// stack snapshot — the stroke commit already pushed both, and a
+    /// second marker here would force the user to press Cmd+Z twice
+    /// to undo a single stroke.
+    pub(crate) fn clear_correction_post_stroke(&mut self) {
         self.mask_correction = None;
         self.settings.correction_hash = None;
     }

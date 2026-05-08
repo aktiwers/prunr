@@ -613,17 +613,31 @@ impl PrunrApp {
             let kind = self.batch.items[idx].actions_undo.pop_back()?;
             let success = match kind {
                 ActionType::Stroke | ActionType::ClearStrokes => {
-                    if self.batch.items[idx].undo_stroke() {
-                        // Dispatch a rerun so the canvas reflects the popped state.
-                        // Gate: only inpaint / eraser models drive strokes as input.
-                        if self.settings.model.is_inpaint() {
-                            self.dispatch_inpaint_for_item(idx);
+                    if self.settings.model.is_inpaint() {
+                        // Inpaint mode: each stroke archived its prev result_rgba
+                        // at result-receive time. Undo swaps stored RGBAs — instant,
+                        // no re-dispatch (which would re-run the multi-second SD
+                        // UNet pipeline). Sync the mask_correction stack so a
+                        // subsequent stroke commit doesn't drift.
+                        let _ = self.batch.items[idx].undo_stroke();
+                        if HistoryManager::undo_result(&mut self.batch.items[idx]) {
+                            self.batch.items[idx].reset_result_caches();
+                            self.batch.items[idx].source_texture = None;
+                            true
                         } else {
-                            self.dispatch_brush_rerun(idx);
+                            false
                         }
-                        true
                     } else {
-                        false
+                        // Seg-brush: mask_correction state IS the input to the
+                        // pipeline — re-dispatch is required to recompute the
+                        // result. (Seg pipelines are sub-second; rerun cost is
+                        // tolerable. Future work could archive seg results too.)
+                        if self.batch.items[idx].undo_stroke() {
+                            self.dispatch_brush_rerun(idx);
+                            true
+                        } else {
+                            false
+                        }
                     }
                 }
                 ActionType::Result => {
@@ -672,15 +686,24 @@ impl PrunrApp {
             let kind = self.batch.items[idx].actions_redo.pop_back()?;
             let success = match kind {
                 ActionType::Stroke | ActionType::ClearStrokes => {
-                    if self.batch.items[idx].redo_stroke() {
-                        if self.settings.model.is_inpaint() {
-                            self.dispatch_inpaint_for_item(idx);
+                    if self.settings.model.is_inpaint() {
+                        // Inpaint redo: swap stored RGBAs (instant; mirror of
+                        // try_undo_one_action). See comment there.
+                        let _ = self.batch.items[idx].redo_stroke();
+                        if HistoryManager::redo_result(&mut self.batch.items[idx]) {
+                            self.batch.items[idx].reset_result_caches();
+                            self.batch.items[idx].source_texture = None;
+                            true
                         } else {
-                            self.dispatch_brush_rerun(idx);
+                            false
                         }
-                        true
                     } else {
-                        false
+                        if self.batch.items[idx].redo_stroke() {
+                            self.dispatch_brush_rerun(idx);
+                            true
+                        } else {
+                            false
+                        }
                     }
                 }
                 ActionType::Result => {
@@ -796,6 +819,7 @@ impl PrunrApp {
         }
         let handles = self.batch.bg_io.tex_prep_handles();
         let switch = self.result_switch_id;
+        let max_depth = self.settings.history_depth;
         for r in results {
             // Keep old texture visible until tex_prep lands so the canvas
             // doesn't flash empty for one frame between RGBA arriving and
@@ -803,6 +827,24 @@ impl PrunrApp {
             let (item_id, source, result_rgba) = {
                 let Some(item) = self.batch.find_by_id_mut(r.item_id) else { continue };
                 let new_rgba = Arc::new(r.rgba);
+                // Archive the previous result_rgba so Cmd+Z can swap stored
+                // RGBAs instantly instead of re-running the inpaint pipeline.
+                // The Stroke marker was already pushed at commit_correction;
+                // this just stages the snapshot the marker undoes to.
+                if let Some(prev) = item.result_rgba.take() {
+                    item.history.push_back(super::item::HistoryEntry::new(
+                        prev, item.applied_recipe.clone(),
+                    ));
+                    while item.history.len() > max_depth {
+                        if let Some(old) = item.history.pop_front() {
+                            old.cleanup();
+                        }
+                    }
+                    // New edit invalidates the linear redo timeline.
+                    for entry in item.redo_stack.drain(..) {
+                        entry.cleanup();
+                    }
+                }
                 item.result_rgba = Some(new_rgba.clone());
                 if item.status == BatchStatus::Pending {
                     item.status = BatchStatus::Done;
@@ -811,11 +853,9 @@ impl PrunrApp {
                 item.thumb_pending = true;
                 // Stack-based inpaint: this stroke is now baked into
                 // result_rgba; clear the correction so the NEXT stroke's
-                // bbox is just that stroke. Push the pre-clear state to
-                // the undo stack so Ctrl+Z restores it (UX seam: undo
-                // restores the brush-correction overlay, not the result
-                // pixels — full result-pixel undo is separate work).
-                item.clear_correction();
+                // bbox is just that stroke. Internal cleanup ONLY — no
+                // marker push (commit_correction already pushed one).
+                item.clear_correction_post_stroke();
                 Self::spawn_tex_prep(
                     new_rgba.clone(), item.id, Self::tex_name("inpaint", item.id, Some(switch)),
                     true, handles.clone(), ctx.clone(),
