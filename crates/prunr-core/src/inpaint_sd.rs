@@ -22,9 +22,10 @@
 //!   ten minutes ago aren't carrying SD weights for the rest of the
 //!   session.
 //!
-//! When `Settings.sd_fast_mode` resolves true the dispatcher routes to
-//! the LCM-distilled checkpoint (4 steps, guidance baked into training).
-//! That gating happens upstream; this module sees the chosen `ModelId`.
+//! When the user picks the LCM scheduler on the SD chip (and the LCM
+//! bundle is installed), the dispatcher routes to the LCM-distilled
+//! checkpoint — 4 steps, guidance baked into training. That gating
+//! happens upstream; this module sees the chosen `ModelId`.
 
 use std::borrow::Cow;
 use std::collections::HashMap;
