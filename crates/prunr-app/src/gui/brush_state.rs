@@ -611,10 +611,9 @@ mod tests {
     }
 
     /// Forward-compat tripwire: a JSON literal with only `{"radius":24}`
-    /// must deserialize into a fully-defaulted `BrushSettings`. Pins
-    /// CONTEXT.md `### Boundary tests` row 5 (Phase 29) — preset files
-    /// produced by older binaries that lack SD-tuning fields keep
-    /// loading after this phase ships.
+    /// must deserialize into a fully-defaulted `BrushSettings`. Preset
+    /// files produced by older binaries that lack SD-tuning fields must
+    /// keep loading.
     #[test]
     fn brush_settings_loads_with_only_radius() {
         let s: BrushSettings = serde_json::from_str(r#"{"radius":24}"#)
