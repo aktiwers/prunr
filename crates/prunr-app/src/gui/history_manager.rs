@@ -66,6 +66,13 @@ impl HistoryManager {
         }
         if let Some(ref src_rgba) = item.source_rgba {
             item.history.push_back(HistoryEntry::new(src_rgba.clone(), None));
+            // First Process action — push a Result marker so undo can
+            // revert from the upcoming result back to the un-processed
+            // source. archive_current_result early-returns on the first
+            // run (item.status != Done yet); without this push, the
+            // action timeline never records the first Process and Cmd+Z
+            // shows "Nothing to undo" even after a completed Process.
+            item.push_action_marker(ActionType::Result);
         }
     }
 
@@ -332,6 +339,44 @@ mod tests {
         assert_eq!(item.history.len(), 1);
         // Recipe is None for the source-seed entry — it's the unprocessed source.
         assert!(item.history.front().unwrap().recipe.is_none());
+    }
+
+    /// First Process action must record a Result marker on the action
+    /// timeline, even though archive_current_result early-returns
+    /// (status != Done before the result lands). Regression test for
+    /// the "Cmd+Z says 'Nothing to undo' after first Process" bug.
+    #[test]
+    fn seed_with_source_pushes_action_marker_for_first_process() {
+        let mut item = fixture(1);
+        item.source_rgba = Some(rgba(7));
+        assert!(item.actions_undo.is_empty());
+        HistoryManager::seed_with_source(&mut item);
+        assert_eq!(
+            item.actions_undo.len(), 1,
+            "first seed must push an ActionType::Result marker so the upcoming Process is undoable",
+        );
+    }
+
+    /// No marker pushed when source isn't decoded yet — there'd be
+    /// nothing to undo to.
+    #[test]
+    fn seed_with_source_skips_marker_when_no_source() {
+        let mut item = fixture(1);
+        // source_rgba defaults to None
+        HistoryManager::seed_with_source(&mut item);
+        assert!(item.actions_undo.is_empty());
+    }
+
+    /// Second seed call (history already non-empty) must not double-push
+    /// a marker — only the first Process gets the seed-time marker.
+    #[test]
+    fn seed_with_source_does_not_double_push_marker_on_subsequent_calls() {
+        let mut item = fixture(1);
+        item.source_rgba = Some(rgba(7));
+        HistoryManager::seed_with_source(&mut item);
+        assert_eq!(item.actions_undo.len(), 1);
+        HistoryManager::seed_with_source(&mut item);
+        assert_eq!(item.actions_undo.len(), 1, "subsequent seed calls must no-op the marker push too");
     }
 
     // ── archive_current_result ──────────────────────────────────────────
