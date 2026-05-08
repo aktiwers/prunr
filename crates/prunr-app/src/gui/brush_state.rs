@@ -81,6 +81,13 @@ pub struct BrushSettings {
     /// corresponding number of early denoise steps.
     #[serde(default = "default_strength")]
     pub sd_strength: f32,
+    /// SD-only: TAESD fast VAE preference. `None` = auto (on when
+    /// the TAESD bundle is installed). `Some(false)` = explicit
+    /// opt-out. `Some(true)` = explicit opt-in (still gated by
+    /// install at dispatch time). Orthogonal to scheduler — works
+    /// with both standard SD and LCM checkpoints.
+    #[serde(default)]
+    pub sd_use_taesd: Option<bool>,
 }
 
 /// SD eraser scheduler choice. Wired into `SdInpaintRequest` at
@@ -292,6 +299,27 @@ impl BrushSettings {
         Stamp { hardness: self.hardness, strength: self.strength, mode: self.mode }
     }
 
+    /// Test-friendly inner predicate. The public wrapper threads
+    /// `prunr_models::is_available(TaesdFp16)` in; this taking the
+    /// availability boolean lets unit tests exercise every branch
+    /// without poking the on-disk model registry.
+    fn sd_use_taesd_effective_with_avail(&self, taesd_available: bool) -> bool {
+        match self.sd_use_taesd {
+            Some(false) => false,
+            Some(true) => taesd_available,
+            None => taesd_available,
+        }
+    }
+
+    /// True when the user wants TAESD AND the bundle is installed.
+    /// Pinned in one place so the dispatch path and the UI checkbox
+    /// state can't disagree (mirrors `Settings::lcm_routing_active`).
+    pub fn sd_use_taesd_effective(&self) -> bool {
+        self.sd_use_taesd_effective_with_avail(
+            prunr_models::is_available(prunr_models::ModelId::TaesdFp16),
+        )
+    }
+
     /// Reset the brush popover's slider knobs (radius / hardness /
     /// inpaint_grow / inpaint_feather / inpaint_sharpen) and shape to
     /// defaults. Leaves `strength` and `mode` alone — those carry
@@ -328,6 +356,7 @@ impl Default for BrushSettings {
             sd_use_karras_sigmas: false,
             sd_seed: None,
             sd_strength: default_strength(),
+            sd_use_taesd: None,
         }
     }
 }
@@ -589,6 +618,83 @@ mod tests {
     }
 
     #[test]
+    fn sd_use_taesd_default_is_none_auto() {
+        let s = BrushSettings::default();
+        assert_eq!(s.sd_use_taesd, None,
+            "default must be None (auto-on when TAESD bundle installed)");
+    }
+
+    #[test]
+    fn sd_use_taesd_serde_round_trip() {
+        let mut s = BrushSettings::default();
+        s.sd_use_taesd = Some(true);
+        let json = serde_json::to_string(&s).unwrap();
+        let restored: BrushSettings = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.sd_use_taesd, Some(true));
+
+        s.sd_use_taesd = Some(false);
+        let json = serde_json::to_string(&s).unwrap();
+        let restored: BrushSettings = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.sd_use_taesd, Some(false));
+    }
+
+    #[test]
+    fn sd_use_taesd_serde_back_compat_missing_field_is_none() {
+        // Old JSON written before this field existed must deserialize
+        // cleanly with sd_use_taesd == None (auto). #[serde(default)]
+        // on the field is what makes this work.
+        let old_json = r#"{
+            "radius": 24.0,
+            "hardness": 0.7,
+            "strength": 1.0,
+            "mode": "Subtract",
+            "shape": "Circle",
+            "inpaint_sharpen": 0.6,
+            "inpaint_feather": 4.0,
+            "inpaint_grow": 2.0,
+            "sd_prompt": "x",
+            "sd_negative_prompt": "y",
+            "sd_guidance_scale": 1.5,
+            "sd_scheduler": "Lcm",
+            "sd_steps": 8,
+            "sd_use_karras_sigmas": false,
+            "sd_seed": null,
+            "sd_strength": 1.0
+        }"#;
+        let s: BrushSettings = serde_json::from_str(old_json).unwrap();
+        assert_eq!(s.sd_use_taesd, None);
+    }
+
+    #[test]
+    fn sd_use_taesd_effective_explicit_off_beats_install() {
+        let mut s = BrushSettings::default();
+        s.sd_use_taesd = Some(false);
+        assert!(!s.sd_use_taesd_effective_with_avail(true),
+            "explicit opt-out must override installed bundle");
+        assert!(!s.sd_use_taesd_effective_with_avail(false));
+    }
+
+    #[test]
+    fn sd_use_taesd_effective_explicit_on_gated_by_install() {
+        let mut s = BrushSettings::default();
+        s.sd_use_taesd = Some(true);
+        assert!(s.sd_use_taesd_effective_with_avail(true),
+            "explicit opt-in + installed must dispatch TAESD");
+        assert!(!s.sd_use_taesd_effective_with_avail(false),
+            "explicit opt-in but not installed must fall back");
+    }
+
+    #[test]
+    fn sd_use_taesd_effective_auto_follows_install() {
+        let mut s = BrushSettings::default();
+        s.sd_use_taesd = None;
+        assert!(s.sd_use_taesd_effective_with_avail(true),
+            "auto mode + installed = on");
+        assert!(!s.sd_use_taesd_effective_with_avail(false),
+            "auto mode + not installed = off");
+    }
+
+    #[test]
     fn toggle_flips_enabled() {
         let mut s = BrushState::default();
         s.toggle();
@@ -661,6 +767,7 @@ mod tests {
             sd_use_karras_sigmas: true,
             sd_seed: Some(42),
             sd_strength: 0.6,
+            sd_use_taesd: Some(true),
         };
         s.reset_popover_fields();
 
