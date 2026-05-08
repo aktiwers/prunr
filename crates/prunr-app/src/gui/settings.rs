@@ -273,7 +273,7 @@ impl Settings {
     }
 
     pub fn has_accepted_license(&self, id: prunr_models::ModelId) -> bool {
-        let key = format!("{id:?}");
+        let key = super::presets::model_id_key(id);
         self.accepted_licenses.iter().any(|s| s == &key)
     }
 
@@ -281,7 +281,7 @@ impl Settings {
     /// repeated call is a no-op (no duplicate entries, no extra disk write
     /// when the entry already exists).
     pub fn accept_license(&mut self, id: prunr_models::ModelId) {
-        let key = format!("{id:?}");
+        let key = super::presets::model_id_key(id);
         if !self.accepted_licenses.iter().any(|s| s == &key) {
             self.accepted_licenses.push(key);
             self.save();
