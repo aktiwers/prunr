@@ -293,6 +293,14 @@ pub(crate) struct BatchItem {
     /// / `clear_correction`); never mutate the `Arc<MaskCorrection>` from
     /// outside those mutators or the recipe-diff dispatch breaks.
     pub(crate) mask_correction: Option<Arc<prunr_core::brush::MaskCorrection>>,
+    /// Snapshot of the last correction that was actually dispatched
+    /// for inpainting. Set by `dispatch_inpaint_for_item` on each
+    /// dispatch; persists across the post-stroke `mask_correction`
+    /// clear so the toolbar's "Reprocess stroke" button can re-run
+    /// the most-recent stroke even between strokes (when
+    /// `mask_correction` is None). Cleared on item destruction;
+    /// per-item scoping means switching items naturally drops it.
+    pub(crate) last_inpaint_correction: Option<Arc<prunr_core::brush::MaskCorrection>>,
     /// Snapshots of `mask_correction` taken BEFORE each stroke commit.
     /// `Ctrl+Z` while brush mode is active pops the top entry and
     /// restores the snapshot — the user undoes one stroke per press.
@@ -604,6 +612,7 @@ impl BatchItem {
             preset_undo_stack: VecDeque::new(),
             preset_redo_stack: VecDeque::new(),
             mask_correction: None,
+            last_inpaint_correction: None,
             stroke_undo_stack: VecDeque::new(),
             stroke_redo_stack: VecDeque::new(),
             actions_undo: VecDeque::new(),

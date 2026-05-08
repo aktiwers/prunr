@@ -747,7 +747,15 @@ impl PrunrApp {
     pub(crate) fn dispatch_inpaint_for_item(&mut self, idx: usize) {
         let item = &self.batch.items[idx];
         let item_id = item.id;
-        let Some(correction) = item.mask_correction.as_ref().cloned() else {
+        // Prefer the in-progress mask_correction (the user just
+        // committed strokes). Fall back to last_inpaint_correction so
+        // the toolbar's "Reprocess stroke" button works between strokes
+        // (mask_correction is cleared post-result; last_inpaint_correction
+        // persists until the next dispatch).
+        let Some(correction) = item.mask_correction.as_ref()
+            .or(item.last_inpaint_correction.as_ref())
+            .cloned()
+        else {
             tracing::debug!(item_id, "inpaint dispatch skipped: no correction");
             return;
         };
@@ -796,6 +804,10 @@ impl PrunrApp {
             sd_strength: bs.sd_strength,
             sd_use_karras_sigmas: bs.sd_use_karras_sigmas,
         };
+        // Stash so the Reprocess button stays enabled between strokes
+        // (post-stroke clear nulls mask_correction, but we keep this
+        // pointer to the most-recent dispatched correction).
+        self.batch.items[idx].last_inpaint_correction = Some(correction.clone());
         self.processor.dispatch_inpaint(item_id, source, correction, tuning);
     }
 
@@ -2471,7 +2483,10 @@ impl PrunrApp {
             // to the seg pipeline only for non-inpaint backends.
             if self.settings.model.is_inpaint() {
                 if let Some(idx) = self.batch.selected_idx_clamped() {
-                    if self.batch.items.get(idx).is_some_and(|i| i.mask_correction.is_some()) {
+                    let has_correction = self.batch.items.get(idx).is_some_and(
+                        |i| i.mask_correction.is_some() || i.last_inpaint_correction.is_some()
+                    );
+                    if has_correction {
                         self.dispatch_inpaint_for_item(idx);
                     }
                 }
