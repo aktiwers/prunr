@@ -95,11 +95,11 @@ pub(super) fn render(
                     super::hint(ui, "Expand (+) or shrink (−) the painted region in pixels before inpaint.");
                     ui.add_space(4.0);
                     let f = chip::slider_row_f32(
-                        ui, "Feather", &mut s.inpaint_feather, 0.0..=32.0, false,
+                        ui, "Edge softness", &mut s.inpaint_feather, 0.0..=32.0, false,
                         |v| format!("{v:.0} px"),
                     );
                     outcome.committed |= f.commit;
-                    super::hint(ui, "Soft blend at the inpaint boundary, in pixels. Hides hard seams.");
+                    super::hint(ui, "Composite-time Gaussian blend at the boundary. Higher values give smoother transitions. Default 4 px matches A1111 / ComfyUI canonical behavior.");
                     ui.add_space(4.0);
                     // Sharpen displays as 0-100% on a 0-2 internal range.
                     let sh = chip::slider_row_f32(
