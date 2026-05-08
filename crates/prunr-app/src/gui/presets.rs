@@ -7,18 +7,16 @@
 //!
 //! ## Forward-compatibility contract (read before editing any field)
 //!
-//! Mirror the `presets_fs.rs:11-26` rule for ItemSettings. Every new
-//! field on these structs MUST be reachable from default — that is
-//! what the tripwire tests at the bottom enforce. If you add a field
-//! and one of these tests breaks, the fix is `#[serde(default)]` on
-//! the field (or a Default impl that covers the whole struct).
+//! Every new field on these structs MUST be reachable from default —
+//! that is what the tripwire tests at the bottom enforce. If you add
+//! a field and one of these tests breaks, the fix is `#[serde(default)]`
+//! on the field (or a Default impl that covers the whole struct).
 //!
 //! `models` is keyed by `String` (the `ModelId` Debug name), NOT by
 //! `ModelId` directly: a v2 preset file produced by a future binary
 //! that has a `ModelId::FutureModel` variant we don't know about
 //! must still deserialize cleanly on this binary — unknown string
-//! keys round-trip and are silently skipped at lookup time. Same
-//! precedent as `Settings::accepted_licenses` (settings.rs:69-75).
+//! keys round-trip and are silently skipped at lookup time.
 
 use std::collections::HashMap;
 
@@ -29,28 +27,29 @@ use prunr_models::ModelId;
 use super::brush_state::{BrushSettings, SdScheduler};
 use super::item_settings::ItemSettings;
 
-pub const PRESET_FORMAT_VERSION: u32 = 2;
+pub(crate) const PRESET_FORMAT_VERSION: u32 = 2;
 
 fn default_format_version() -> u32 { PRESET_FORMAT_VERSION }
 
 /// Convert a `ModelId` into the JSON key used in `PresetFile.models`.
-/// Single source of truth — every `models.insert` / `.get` site
-/// routes through this function. Same Debug-name convention as
-/// `Settings::accepted_licenses` (settings.rs:69-75).
-pub fn model_id_key(id: ModelId) -> String {
+/// Single source of truth — every `models.insert` / `.get` site routes
+/// through this function. Debug-name format matches the on-disk shape
+/// of `Settings.accepted_licenses` so both consent state and preset
+/// keys stay in lockstep.
+pub(crate) fn model_id_key(id: ModelId) -> String {
     format!("{id:?}")
 }
 
 /// Inverse of `model_id_key`. Returns `None` for unknown keys —
 /// future-binary entries the receiver doesn't know about round-trip
 /// in the JSON but resolve to nothing at lookup time.
-pub fn model_id_from_key(s: &str) -> Option<ModelId> {
+pub(crate) fn model_id_from_key(s: &str) -> Option<ModelId> {
     ModelId::ALL.iter().copied().find(|id| format!("{id:?}") == s)
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
-pub struct PresetFile {
+pub(crate) struct PresetFile {
     pub format_version: u32,
     pub models: HashMap<String, ModelPreset>,
 }
@@ -66,7 +65,7 @@ impl Default for PresetFile {
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
-pub struct ModelPreset {
+pub(crate) struct ModelPreset {
     pub item_settings: ItemSettings,
     pub brush: BrushSettings,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -75,7 +74,7 @@ pub struct ModelPreset {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
-pub struct SdPreset {
+pub(crate) struct SdPreset {
     pub prompt: String,
     pub negative_prompt: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -102,7 +101,7 @@ impl Default for SdPreset {
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
-pub struct SdSchedulerBundle {
+pub(crate) struct SdSchedulerBundle {
     pub steps: u32,
     pub guidance_scale: f32,
     pub use_karras_sigmas: bool,
