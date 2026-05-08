@@ -551,26 +551,23 @@ impl PrunrApp {
     /// dispatches to the matching per-type stack — mode-agnostic. A stroke
     /// undo triggers a brush rerun so the canvas reflects the popped state.
     pub fn handle_undo(&mut self, ctx: &egui::Context) {
-        let mut undone = 0u32;
-        let mut last_action: Option<ActionType> = None;
+        let mut type_counts = [0u32; 4];
+        let mut total = 0u32;
         for idx in self.batch.targeted_indices() {
             if let Some(action) = self.try_undo_one_action(idx, ctx) {
-                undone += 1;
-                last_action = Some(action);
+                total += 1;
+                type_counts[action as usize] += 1;
             }
         }
-        if undone > 0 {
+        if total > 0 {
             self.result_switch_id += 1;
             self.canvas_switch_id += 1;
             self.sync_selected_batch_textures(ctx);
-            let label: String = match (undone, last_action) {
-                (1, Some(ActionType::Stroke))       => "Stroke undone".into(),
-                (1, Some(ActionType::ClearStrokes)) => "Strokes restored".into(),
-                (1, Some(ActionType::Result))       => "Undone".into(),
-                (1, Some(ActionType::PresetApply))  => "Preset undone".into(),
-                (n, _)                              => format!("Undone {n} actions"),
-            };
-            self.toasts.info(label);
+            self.toasts.info(action_toast_label(
+                total, type_counts,
+                ["Stroke undone", "Strokes restored", "Undone", "Preset undone"],
+                "undone",
+            ));
         } else {
             self.toasts.info("Nothing to undo");
         }
@@ -579,26 +576,23 @@ impl PrunrApp {
     /// Redo the most-recently undone action on selected items. Mirrors
     /// `handle_undo` via the `actions_redo` ordering layer.
     pub fn handle_redo(&mut self, ctx: &egui::Context) {
-        let mut redone = 0u32;
-        let mut last_action: Option<ActionType> = None;
+        let mut type_counts = [0u32; 4];
+        let mut total = 0u32;
         for idx in self.batch.targeted_indices() {
             if let Some(action) = self.try_redo_one_action(idx, ctx) {
-                redone += 1;
-                last_action = Some(action);
+                total += 1;
+                type_counts[action as usize] += 1;
             }
         }
-        if redone > 0 {
+        if total > 0 {
             self.result_switch_id += 1;
             self.canvas_switch_id += 1;
             self.sync_selected_batch_textures(ctx);
-            let label: String = match (redone, last_action) {
-                (1, Some(ActionType::Stroke))       => "Stroke restored".into(),
-                (1, Some(ActionType::ClearStrokes)) => "Clear restored".into(),
-                (1, Some(ActionType::Result))       => "Result restored".into(),
-                (1, Some(ActionType::PresetApply))  => "Preset restored".into(),
-                (n, _)                              => format!("Restored {n} actions"),
-            };
-            self.toasts.info(label);
+            self.toasts.info(action_toast_label(
+                total, type_counts,
+                ["Stroke restored", "Clear restored", "Result restored", "Preset restored"],
+                "restored",
+            ));
         } else {
             self.toasts.info("Nothing to redo");
         }
@@ -3108,6 +3102,37 @@ impl PrunrApp {
     }
 }
 
+/// Build a human-readable toast label for a multi-item undo or redo.
+///
+/// - Single item, known type: matches the existing per-type single-item labels.
+/// - Multiple items, uniform type: "N strokes undone", "N results restored", etc.
+/// - Multiple items, mixed types: "N actions undone" (safe fallback).
+///
+/// `single_labels` is `[stroke, clear_strokes, result, preset]` — the four
+/// per-type labels for the single-item case. `multi_verb` is the trailing word
+/// for the multi-item form (e.g. "undone" / "restored").
+fn action_toast_label(
+    total: u32,
+    type_counts: [u32; 4], // indexed by ActionType as usize: Stroke=0, ClearStrokes=1, Result=2, PresetApply=3
+    single_labels: [&str; 4],
+    multi_verb: &str,
+) -> String {
+    // Find whether all successful actions were the same type.
+    let dominant = type_counts.iter().enumerate()
+        .find(|(_, &c)| c == total)
+        .map(|(i, _)| i);
+    match (total, dominant) {
+        (1, Some(i)) => single_labels[i].into(),
+        (1, None)    => format!("Action {multi_verb}"),
+        (n, Some(0)) => format!("{n} strokes {multi_verb}"),
+        (n, Some(1)) => format!("{n} clears {multi_verb}"),
+        (n, Some(2)) => format!("{n} results {multi_verb}"),
+        (n, Some(3)) => format!("{n} presets {multi_verb}"),
+        (n, None)    => format!("{n} actions {multi_verb}"),
+        _            => format!("{total} actions {multi_verb}"),
+    }
+}
+
 /// Drain any `Event::Screenshot` replies and persist them as PNGs. The
 /// directory is `$PRUNR_SCREENSHOT_DIR` (test-harness sets this) or
 /// `<temp>/prunr-screenshots/`. Filename is the unix-millis timestamp
@@ -3362,4 +3387,47 @@ fn collect_shortcut_intents(ctx: &egui::Context) -> ShortcutIntents {
         if i.modifiers.command && i.key_pressed(Key::Y) { s.redo_requested = true; }
     });
     s
+}
+
+#[cfg(test)]
+mod toast_label_tests {
+    use super::action_toast_label;
+
+    const UNDO_LABELS: [&str; 4] = ["Stroke undone", "Strokes restored", "Undone", "Preset undone"];
+    const REDO_LABELS: [&str; 4] = ["Stroke restored", "Clear restored", "Result restored", "Preset restored"];
+
+    #[test]
+    fn single_item_stroke_undo() {
+        assert_eq!(action_toast_label(1, [1, 0, 0, 0], UNDO_LABELS, "undone"), "Stroke undone");
+    }
+
+    #[test]
+    fn single_item_result_undo() {
+        assert_eq!(action_toast_label(1, [0, 0, 1, 0], UNDO_LABELS, "undone"), "Undone");
+    }
+
+    #[test]
+    fn single_item_clear_strokes_undo() {
+        assert_eq!(action_toast_label(1, [0, 1, 0, 0], UNDO_LABELS, "undone"), "Strokes restored");
+    }
+
+    #[test]
+    fn single_item_preset_redo() {
+        assert_eq!(action_toast_label(1, [0, 0, 0, 1], REDO_LABELS, "restored"), "Preset restored");
+    }
+
+    #[test]
+    fn multi_item_uniform_strokes_undone() {
+        assert_eq!(action_toast_label(3, [3, 0, 0, 0], UNDO_LABELS, "undone"), "3 strokes undone");
+    }
+
+    #[test]
+    fn multi_item_uniform_results_restored() {
+        assert_eq!(action_toast_label(2, [0, 0, 2, 0], REDO_LABELS, "restored"), "2 results restored");
+    }
+
+    #[test]
+    fn multi_item_mixed_types_falls_back_to_count() {
+        assert_eq!(action_toast_label(3, [2, 0, 1, 0], UNDO_LABELS, "undone"), "3 actions undone");
+    }
 }
