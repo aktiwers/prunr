@@ -136,22 +136,18 @@ fn morphology_step(mask: &GrayImage, dilate: bool) -> GrayImage {
     out
 }
 
-/// Soft-blend the inpainted output toward `source` within `feather_px`
-/// of the mask boundary. Pixels deep inside the mask stay fully
-/// inpainted; pixels right at the boundary fade toward source. Hides
-/// the LaMa↔source seam.
+/// Soft-blend the inpainted output toward `source` at the mask boundary
+/// using a composite-time Gaussian blur. The binary mask is blurred with
+/// sigma = `feather_px`; the blurred float values [0, 1] become the
+/// per-pixel alpha that blends `inpainted` ↔ `source`. Pixels deep
+/// inside the mask (blurred alpha ≈ 1) stay fully inpainted; pixels
+/// outside (blurred alpha ≈ 0) stay fully source; boundary pixels get
+/// a smooth Gaussian-weighted blend.
 ///
-/// Uses a 2-pass chamfer distance transform — accurate enough for the
-/// small radii exposed (≤32 px) and O(n) on the bbox.
-///
-/// RAM: chamfer + per-pixel walk are bbox-restricted with a
-/// `ceil(feather_px) + 1` margin. The `+1` guarantees a complete ring
-/// of mask=0 chamfer seeds *inside* the cropped image even when
-/// `ceil(feather_px) == 0` rounds to zero margin elsewhere. Without
-/// it a mask=255 pixel at the cropped-image edge would have no seed
-/// to chamfer from. The `tile_compose` / SD pipelines preserve source
-/// byte-for-byte at mask=0, so the original "always copy src" branch
-/// outside the bbox is redundant.
+/// This matches the canonical A1111 / ComfyUI / InvokeAI behavior:
+/// the UNet receives a binary mask; softness is a composite-time
+/// Gaussian on the final alpha, not an in-distribution signal to the
+/// model.
 pub fn feather_inpainted(
     inpainted: &RgbaImage,
     source: &RgbaImage,
@@ -167,87 +163,31 @@ pub fn feather_inpainted(
         tracing::warn!("feather_inpainted: dim mismatch, skipping");
         return inpainted.clone();
     }
-    let margin = feather_px.ceil() as u32 + 1;
-    let Some(bbox) = mask_bbox(mask, 1, margin) else {
-        return inpainted.clone();
-    };
-    let crop_mask =
-        image::imageops::crop_imm(mask, bbox.x, bbox.y, bbox.w, bbox.h).to_image();
-    let dist = chamfer_distance_inside(&crop_mask);
+    let blurred = image::imageops::fast_blur(mask, feather_px);
+    let blurred_raw = blurred.as_raw();
 
-    let (img_w, _) = inpainted.dimensions();
-    let img_w_us = img_w as usize;
-    let bbox_w_us = bbox.w as usize;
     let mut out = inpainted.clone();
     let out_raw = out.as_mut();
     let src_raw = source.as_raw();
     let inp_raw = inpainted.as_raw();
 
-    // Per-row prefix hoisted out of the inner `bx` loop. Rows are
-    // write-disjoint across `by`, so we either parallelise via
-    // `SendMutPtr` (mirrors `sharpen_inpainted` and
-    // `inpaint_blend::composite_channel`) or fall back to sequential
-    // for tiny bboxes where rayon overhead would dominate.
-    use rayon::prelude::*;
-    #[derive(Clone, Copy)]
-    struct SendMutPtr(*mut u8);
-    unsafe impl Send for SendMutPtr {}
-    unsafe impl Sync for SendMutPtr {}
-
-    let row_step = |by: u32, out_writer: &mut dyn FnMut(usize, [u8; 3])| {
-        let global_y = bbox.y + by;
-        let row_off_global = global_y as usize * img_w_us;
-        let row_off_dist = (by as usize) * bbox_w_us;
-        for bx in 0..bbox.w {
-            let global_idx = row_off_global + (bbox.x + bx) as usize;
-            let pix = global_idx * 4;
-            let d = dist[row_off_dist + bx as usize];
-            if d <= 0.0 {
-                out_writer(pix, [src_raw[pix], src_raw[pix + 1], src_raw[pix + 2]]);
-                continue;
-            }
-            if d >= feather_px {
-                continue; // deep inside: keep inpainted
-            }
-            let t = d / feather_px;
-            let s0 = src_raw[pix] as f32;
-            let s1 = src_raw[pix + 1] as f32;
-            let s2 = src_raw[pix + 2] as f32;
-            let p0 = inp_raw[pix] as f32;
-            let p1 = inp_raw[pix + 1] as f32;
-            let p2 = inp_raw[pix + 2] as f32;
-            out_writer(pix, [
-                (s0 + t * (p0 - s0)).clamp(0.0, 255.0) as u8,
-                (s1 + t * (p1 - s1)).clamp(0.0, 255.0) as u8,
-                (s2 + t * (p2 - s2)).clamp(0.0, 255.0) as u8,
-            ]);
+    for (i, &alpha_u8) in blurred_raw.iter().enumerate() {
+        let pix = i * 4;
+        if alpha_u8 == 0 {
+            // Outside mask: copy source.
+            out_raw[pix]     = src_raw[pix];
+            out_raw[pix + 1] = src_raw[pix + 1];
+            out_raw[pix + 2] = src_raw[pix + 2];
+            continue;
         }
-    };
-
-    if bbox.h >= 64 {
-        // Parallel rows. SAFETY: `by` partitions writes by row;
-        // `[pix, pix+3)` for any (by, bx) lies in row `global_y`,
-        // which is unique to this iteration.
-        let dp = SendMutPtr(out_raw.as_mut_ptr());
-        (0..bbox.h).into_par_iter().for_each(|by| {
-            let mut writer = |pix: usize, rgb: [u8; 3]| unsafe {
-                *dp.0.add(pix) = rgb[0];
-                *dp.0.add(pix + 1) = rgb[1];
-                *dp.0.add(pix + 2) = rgb[2];
-            };
-            row_step(by, &mut writer);
-            // Force whole-struct capture (Rust 2021 disjoint-capture
-            // would otherwise grab `dp.0: *mut u8` alone, not Sync).
-            let _ = &dp;
-        });
-    } else {
-        for by in 0..bbox.h {
-            let mut writer = |pix: usize, rgb: [u8; 3]| {
-                out_raw[pix] = rgb[0];
-                out_raw[pix + 1] = rgb[1];
-                out_raw[pix + 2] = rgb[2];
-            };
-            row_step(by, &mut writer);
+        if alpha_u8 == 255 {
+            continue; // Deep inside: keep inpainted.
+        }
+        let t = alpha_u8 as f32 / 255.0;
+        for c in 0..3 {
+            let s = src_raw[pix + c] as f32;
+            let p = inp_raw[pix + c] as f32;
+            out_raw[pix + c] = (s + t * (p - s)).clamp(0.0, 255.0) as u8;
         }
     }
     out
@@ -1415,55 +1355,59 @@ mod tests {
 
     #[test]
     fn feather_inpainted_blends_at_edge() {
-        // Solid mask in the centre; pixel at the boundary should land
-        // somewhere between source and inpainted.
-        let inp = RgbaImage::from_pixel(8, 8, Rgba([200, 200, 200, 255]));
-        let src = RgbaImage::from_pixel(8, 8, Rgba([0, 0, 0, 255]));
-        let mut mask = GrayImage::new(8, 8);
-        for y in 2..=5 { for x in 2..=5 { mask.put_pixel(x, y, Luma([255])); } }
+        // Solid mask in the centre; boundary pixels should blend between
+        // source and inpainted, and the blend should be stronger deeper in.
+        // Use a 32×32 image with a 16×16 mask so the Gaussian (sigma=4)
+        // has enough pixels to produce a visible gradient.
+        let inp = RgbaImage::from_pixel(32, 32, Rgba([200, 200, 200, 255]));
+        let src = RgbaImage::from_pixel(32, 32, Rgba([0, 0, 0, 255]));
+        let mut mask = GrayImage::new(32, 32);
+        for y in 8..24 { for x in 8..24 { mask.put_pixel(x, y, Luma([255])); } }
         let out = feather_inpainted(&inp, &src, &mask, 4.0);
-        // (2, 2) is at the mask edge — distance 1 from boundary.
-        let edge = out.get_pixel(2, 2).0[0];
-        assert!(edge > 0 && edge < 200,
-            "edge pixel must be blended between source(0) and inpainted(200), got {edge}");
-        // (3, 3) is one in from the edge — distance 2.
-        let mid = out.get_pixel(3, 3).0[0];
-        assert!(mid > edge,
-            "deeper-in pixel must be closer to inpainted, got mid={mid} edge={edge}");
+        // Pixel just outside the mask edge (blurred alpha ≈ low): blended.
+        let outside = out.get_pixel(6, 16).0[0]; // 2 px outside boundary
+        assert!(outside < 200,
+            "outside pixel must be blended toward source(0), got {outside}");
+        // Pixel at mask boundary (blurred alpha = mid): blended.
+        let at_edge = out.get_pixel(8, 16).0[0];
+        // Pixel deep inside (blurred alpha ≈ 255): stays inpainted.
+        let deep = out.get_pixel(16, 16).0[0];
+        assert!(deep > at_edge,
+            "deep interior must be closer to inpainted than edge: deep={deep} at_edge={at_edge}");
+        assert!(at_edge > outside,
+            "boundary must be closer to inpainted than outside: at_edge={at_edge} outside={outside}");
     }
 
     #[test]
     fn feather_inpainted_outside_bbox_keeps_inpainted() {
-        // Bbox-feather only operates on the mask bbox + margin. For
-        // mask=0 pixels OUTSIDE that region, output stays as inpainted
-        // (the upstream pipelines — `tile_compose` / SD — preserve
-        // source byte-for-byte at mask=0, so the original "always
-        // copy src" branch was redundant for outside-bbox pixels).
+        // All-zero mask: Gaussian blur of zeros stays zeros → every pixel
+        // copies source (alpha=0 everywhere). The upstream pipelines
+        // preserve source at mask=0, so in practice this path is rarely
+        // hit; the test pins that blurred-alpha=0 → source copy.
         let inp = RgbaImage::from_pixel(4, 4, Rgba([200, 200, 200, 255]));
         let src = RgbaImage::from_pixel(4, 4, Rgba([10, 20, 30, 255]));
-        let mask = GrayImage::new(4, 4); // all zero ⇒ no bbox at all
+        let mask = GrayImage::new(4, 4); // all zero ⇒ blurred mask = all zero
         let out = feather_inpainted(&inp, &src, &mask, 4.0);
-        // Empty mask short-circuits to `inpainted.clone()`.
-        assert_eq!(out, inp);
+        // Blurred all-zero mask → alpha=0 everywhere → copy source.
+        assert_eq!(out, src);
     }
 
-    /// Inside the bbox, mask=0 pixels still get the defensive copy
-    /// (that branch is load-bearing for any pipeline that drifts
-    /// inside the bbox region — e.g. a low-alpha brush stroke pixel
-    /// whose neighbour is mask>=128).
+    /// Pixels far from the mask (blurred alpha ≈ 0) get source values.
+    /// With Gaussian blur, a pixel at distance >> sigma from the single
+    /// masked pixel receives near-zero blurred alpha and stays at source.
     #[test]
-    fn feather_inpainted_inside_bbox_mask_zero_pixels_get_source() {
-        // Mask geometry: single mask=255 pixel at (8, 8). With
-        // feather_px=4.0 → margin=ceil(4)+1=5 → bbox = (3, 3, 11, 11).
-        // The probe pixel (7, 8) sits inside the bbox at offset (4, 5),
-        // mask=0 → defensive copy fires.
-        let mut inp = RgbaImage::from_pixel(16, 16, Rgba([200, 200, 200, 255]));
-        let src = RgbaImage::from_pixel(16, 16, Rgba([10, 20, 30, 255]));
-        let mut mask = GrayImage::new(16, 16);
+    fn feather_inpainted_far_from_mask_stays_source() {
+        // Single mask=255 pixel at (8, 8) in a 32×32 image.
+        // Probe at (0, 0): distance=11, sigma=2.0 — blurred alpha
+        // is negligibly small (Gaussian tail at 5.5σ).
+        let inp = RgbaImage::from_pixel(32, 32, Rgba([200, 200, 200, 255]));
+        let src = RgbaImage::from_pixel(32, 32, Rgba([10, 20, 30, 255]));
+        let mut mask = GrayImage::new(32, 32);
         mask.put_pixel(8, 8, Luma([255]));
-        inp.put_pixel(7, 8, Rgba([200, 200, 200, 255]));
-        let out = feather_inpainted(&inp, &src, &mask, 4.0);
-        assert_eq!(out.get_pixel(7, 8).0, [10, 20, 30, 255]);
+        let out = feather_inpainted(&inp, &src, &mask, 2.0);
+        // Far pixel should be very close to source (blurred mask ≈ 0).
+        let p = out.get_pixel(0, 0).0;
+        assert!(p[0] < 30, "far pixel R should be close to source({}) got {}", 10, p[0]);
     }
 
     #[test]
@@ -1715,79 +1659,6 @@ mod tests {
         }
     }
 
-    /// Reference: the original full-image feather algorithm, inlined
-    /// for regression testing. Same intentional-duplication pattern
-    /// as `reference_sharpen`.
-    #[cfg(test)]
-    fn reference_feather(
-        inpainted: &RgbaImage,
-        source: &RgbaImage,
-        mask: &GrayImage,
-        feather_px: f32,
-    ) -> RgbaImage {
-        if feather_px <= 0.0 { return inpainted.clone(); }
-        let dist = chamfer_distance_inside(mask);
-        let mut out = inpainted.clone();
-        let out_raw = out.as_mut();
-        let src = source.as_raw();
-        let inp = inpainted.as_raw();
-        for (i, &d) in dist.iter().enumerate() {
-            let pix = i * 4;
-            if d <= 0.0 {
-                out_raw[pix] = src[pix];
-                out_raw[pix + 1] = src[pix + 1];
-                out_raw[pix + 2] = src[pix + 2];
-                continue;
-            }
-            if d >= feather_px { continue; }
-            let t = d / feather_px;
-            for c in 0..3 {
-                let s = src[pix + c] as f32;
-                let p = inp[pix + c] as f32;
-                out_raw[pix + c] = (s + t * (p - s)).clamp(0.0, 255.0) as u8;
-            }
-        }
-        out
-    }
-
-    /// Build a (source, inpainted) pair where `inpainted == source`
-    /// at every mask=0 pixel — matches what the real pipelines
-    /// produce (`tile_compose`'s composite loop guarantees this for
-    /// LaMa). With this invariant, bbox-feather and full-image
-    /// reference produce bit-identical output.
-    #[cfg(test)]
-    fn make_realistic_inpaint_pair(w: u32, h: u32, mask: &GrayImage) -> (RgbaImage, RgbaImage) {
-        let source = gradient_image(w, h);
-        let mut inpainted = source.clone();
-        // Only alter pixels inside the mask region — mimics LaMa output.
-        for y in 0..h {
-            for x in 0..w {
-                if mask.get_pixel(x, y).0[0] > 0 {
-                    let p = source.get_pixel(x, y).0;
-                    let inv = Rgba([255 - p[0], 255 - p[1], 255 - p[2], p[3]]);
-                    inpainted.put_pixel(x, y, inv);
-                }
-            }
-        }
-        (source, inpainted)
-    }
-
-    #[cfg(test)]
-    fn assert_bbox_feather_matches_reference(
-        source: &RgbaImage, inpainted: &RgbaImage,
-        mask: &GrayImage, feather_px: f32,
-    ) {
-        let bbox_out = feather_inpainted(inpainted, source, mask, feather_px);
-        let ref_out = reference_feather(inpainted, source, mask, feather_px);
-        for y in 0..source.height() {
-            for x in 0..source.width() {
-                let a = bbox_out.get_pixel(x, y);
-                let b = ref_out.get_pixel(x, y);
-                assert_eq!(a, b, "({x}, {y}) diverged: bbox={a:?} ref={b:?}");
-            }
-        }
-    }
-
     #[test]
     fn feather_inpainted_zero_px_is_clone() {
         let img = RgbaImage::from_pixel(16, 16, Rgba([10, 20, 30, 200]));
@@ -1802,6 +1673,8 @@ mod tests {
         let img = RgbaImage::from_pixel(16, 16, Rgba([10, 20, 30, 200]));
         let mask = GrayImage::new(16, 16);
         let out = feather_inpainted(&img, &img, &mask, 4.0);
+        // Blurred all-zero mask stays all-zero → all pixels copy source.
+        // source == inpainted here so result equals img.
         assert_eq!(out, img);
     }
 
@@ -1813,22 +1686,37 @@ mod tests {
         assert_eq!(out, img);
     }
 
-    /// Bit-exactness — corner mask exercises the boundary clamp.
+    /// Gaussian: deep-interior pixels (blurred alpha ≈ 1) stay as inpainted.
     #[test]
-    fn feather_inpainted_matches_reference_corner_mask() {
-        let mut mask = GrayImage::new(48, 48);
-        for y in 0..16 { for x in 0..16 { mask.put_pixel(x, y, Luma([255])); } }
-        let (src, inp) = make_realistic_inpaint_pair(48, 48, &mask);
-        assert_bbox_feather_matches_reference(&src, &inp, &mask, 6.0);
+    fn feather_inpainted_deep_interior_stays_inpainted() {
+        // Large solid mask; probe the centre — blurred alpha should be ~255.
+        let inp = RgbaImage::from_pixel(64, 64, Rgba([200, 200, 200, 255]));
+        let src = RgbaImage::from_pixel(64, 64, Rgba([0, 0, 0, 255]));
+        let mask = GrayImage::from_pixel(64, 64, Luma([255]));
+        let out = feather_inpainted(&inp, &src, &mask, 4.0);
+        let centre = out.get_pixel(32, 32).0[0];
+        assert!(centre > 180,
+            "deep interior should stay close to inpainted(200), got {centre}");
     }
 
-    /// Bit-exactness — interior mask exercises the pure-bbox path.
+    /// Gaussian: boundary pixels (blurred alpha between 0 and 255) are blended;
+    /// the blend is monotonically stronger toward the interior.
     #[test]
-    fn feather_inpainted_matches_reference_interior_mask() {
-        let mut mask = GrayImage::new(64, 64);
-        for y in 24..40 { for x in 24..40 { mask.put_pixel(x, y, Luma([255])); } }
-        let (src, inp) = make_realistic_inpaint_pair(64, 64, &mask);
-        assert_bbox_feather_matches_reference(&src, &inp, &mask, 8.0);
+    fn feather_inpainted_gaussian_boundary_is_monotone() {
+        let inp = RgbaImage::from_pixel(32, 32, Rgba([200, 200, 200, 255]));
+        let src = RgbaImage::from_pixel(32, 32, Rgba([0, 0, 0, 255]));
+        let mut mask = GrayImage::new(32, 32);
+        for y in 8..24 { for x in 8..24 { mask.put_pixel(x, y, Luma([255])); } }
+        let out = feather_inpainted(&inp, &src, &mask, 4.0);
+        // Moving from the mask boundary inward, blended R should increase.
+        // boundary cell (8, 16), one-in (9, 16), two-in (10, 16).
+        let at_boundary = out.get_pixel(8, 16).0[0];
+        let one_in = out.get_pixel(9, 16).0[0];
+        let two_in = out.get_pixel(10, 16).0[0];
+        assert!(at_boundary <= one_in,
+            "boundary→interior must be non-decreasing: boundary={at_boundary} one_in={one_in}");
+        assert!(one_in <= two_in,
+            "boundary→interior must be non-decreasing: one_in={one_in} two_in={two_in}");
     }
 
     fn gradient_image(w: u32, h: u32) -> RgbaImage {
