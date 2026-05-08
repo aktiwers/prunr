@@ -136,38 +136,12 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                 }
             }
 
-            // Process button — always visible. Clicking while a batch is
-            // already running enqueues the new work on the worker bridge;
-            // it runs once the current batch finishes (no auto-cancel).
-            //
-            // Eraser-mode (SD / LaMa / MI-GAN inpaint) repurposes Process
-            // as "Reprocess stroke": dispatch the current item's committed
-            // mask correction through the inpaint pipeline using the
-            // current toolbar settings. Enabled only when there's a stroke
-            // to reprocess. The seg pipeline (`handle_remove_bg`) doesn't
-            // apply to inpaint backends and was incorrectly hiding the
-            // canvas image when clicked here.
+            // Process button — always visible; routing and gating live in
+            // `handle_process_intent` / `can_process_intent`.
             {
                 let inpaint_mode = app.settings.model.is_inpaint();
-                // Enable when EITHER an in-progress mask_correction is set
-                // (strokes painted, ready to dispatch) OR a previously
-                // dispatched correction is stashed (allows reprocess
-                // between strokes — mask_correction is cleared post-result).
-                let has_correction = app.batch.selected_item()
-                    .map(|i| i.mask_correction.is_some() || i.last_inpaint_correction.is_some())
-                    .unwrap_or(false);
                 let label = app.batch.process_button_label();
-                // Seg pipeline gating: at least one target exists and isn't
-                // already Processing. `any_target_can` is the no-alloc
-                // primitive — building `items_to_process()` here ran a
-                // `Vec<u64>::collect` every frame just to throw it away.
-                let has_processable = if inpaint_mode {
-                    has_correction
-                } else {
-                    app.batch.any_target_can(|it|
-                        !matches!(it.status, BatchStatus::Processing)
-                    )
-                };
+                let has_processable = app.can_process_intent();
 
                 let (label_text, is_all) = if inpaint_mode {
                     ("Reprocess stroke".to_string(), false)
@@ -200,7 +174,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                     .min_size(egui::vec2(0.0, theme::BTN_HEIGHT));
 
                 let tooltip: std::borrow::Cow<'static, str> = if inpaint_mode {
-                    if has_correction {
+                    if has_processable {
                         "Re-dispatch the current stroke through the inpaint model with the current toolbar settings (prompt / scheduler / steps / strength).".into()
                     } else {
                         "Paint a stroke first — Process re-dispatches the painted region with current settings.".into()
@@ -224,13 +198,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                 };
 
                 if ui.add_enabled(has_processable, btn).on_hover_text(tooltip).clicked() {
-                    if inpaint_mode {
-                        if let Some(idx) = app.batch.selected_idx_clamped() {
-                            app.dispatch_inpaint_for_item(idx);
-                        }
-                    } else {
-                        app.handle_remove_bg();
-                    }
+                    app.handle_process_intent();
                 }
             }
 

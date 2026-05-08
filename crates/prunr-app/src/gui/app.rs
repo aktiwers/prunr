@@ -531,6 +531,36 @@ impl PrunrApp {
         self.process_items(|item| ids.contains(&item.id));
     }
 
+    /// Single source of truth for the Process / Reprocess action.
+    /// Routes between inpaint dispatch (eraser models) and the seg pipeline,
+    /// with consistent gating. All input surfaces — toolbar button, Cmd+R
+    /// keyboard shortcut, future menu items — call this.
+    pub fn handle_process_intent(&mut self) {
+        if self.settings.model.is_inpaint() {
+            let Some(idx) = self.batch.selected_idx_clamped() else { return };
+            let has_correction = self.batch.items.get(idx).is_some_and(
+                |i| i.mask_correction.is_some() || i.last_inpaint_correction.is_some(),
+            );
+            if !has_correction { return; }
+            self.dispatch_inpaint_for_item(idx);
+        } else {
+            self.handle_remove_bg();
+        }
+    }
+
+    /// Toolbar mirror for `handle_process_intent`. `add_enabled(...)` reads
+    /// this so the button's disabled state and the dispatch's gating can't
+    /// drift independently.
+    pub fn can_process_intent(&self) -> bool {
+        if self.settings.model.is_inpaint() {
+            self.batch.selected_item().is_some_and(
+                |i| i.mask_correction.is_some() || i.last_inpaint_correction.is_some(),
+            )
+        } else {
+            self.batch.any_target_can(|it| !matches!(it.status, BatchStatus::Processing))
+        }
+    }
+
     pub(crate) fn close_settings(&mut self, _ctx: &egui::Context) {
         self.show_settings = false;
         // Don't carry the half-clicked reset confirm across modal opens.
@@ -2477,22 +2507,7 @@ impl PrunrApp {
         }
         let app_state = self.batch.app_state();
         if intents.remove_requested && matches!(app_state, AppState::Loaded | AppState::Done) {
-            // Eraser-mode (LaMa / SD inpaint family) repurposes Cmd+R as
-            // "reprocess stroke" — dispatches the current item's committed
-            // mask correction through the inpaint pipeline. Falls through
-            // to the seg pipeline only for non-inpaint backends.
-            if self.settings.model.is_inpaint() {
-                if let Some(idx) = self.batch.selected_idx_clamped() {
-                    let has_correction = self.batch.items.get(idx).is_some_and(
-                        |i| i.mask_correction.is_some() || i.last_inpaint_correction.is_some()
-                    );
-                    if has_correction {
-                        self.dispatch_inpaint_for_item(idx);
-                    }
-                }
-            } else {
-                self.handle_remove_bg();
-            }
+            self.handle_process_intent();
         }
         if intents.save_requested && app_state == AppState::Done {
             self.handle_save_selected();
