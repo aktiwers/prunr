@@ -2967,10 +2967,8 @@ impl PrunrApp {
                     bg_image_label,
                 );
             });
-        if toolbar_change.clear_correction_requested {
-            if let Some(idx) = self.batch.selected_idx_clamped() {
-                self.batch.items[idx].clear_correction();
-            }
+        if toolbar_change.reset_brush_requested {
+            self.settings.brush.reset_popover_fields();
         }
         self.apply_toolbar_change(ui.ctx(), toolbar_change, pre_apply_snapshot);
     }
