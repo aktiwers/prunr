@@ -22,39 +22,20 @@ const LCM_DOWNLOAD_HINT: &str =
 const TAESD_DOWNLOAD_HINT: &str =
     "Download TAESD VAE in Model Store to enable.";
 
-pub(super) fn sd_active_status_line(lcm_active: bool, taesd_active: bool) -> &'static str {
-    match (lcm_active, taesd_active) {
-        (false, false) => "Active: standard SD",
-        (false, true)  => "Active: standard SD + TAESD",
-        (true,  false) => "Active: LCM",
-        (true,  true)  => "Active: LCM + TAESD",
-    }
-}
-
 #[derive(Default)]
 pub struct EraserRowChange {
     pub committed: bool,
 }
 
 /// Render the SD-eraser chip cluster. Caller decides placement.
-/// `lcm_active` is resolved by the caller before the `&mut` borrow on
-/// `BrushSettings` so the two borrows don't overlap.
-pub fn render(
-    ui: &mut egui::Ui,
-    brush: &mut BrushSettings,
-    lcm_active: bool,
-) -> EraserRowChange {
+pub fn render(ui: &mut egui::Ui, brush: &mut BrushSettings) -> EraserRowChange {
     let mut change = EraserRowChange::default();
     let taesd_installed = prunr_models::is_available(prunr_models::ModelId::TaesdFp16);
     let taesd_active = brush.sd_use_taesd.unwrap_or(true) && taesd_installed;
-    ui.label(
-        egui::RichText::new(sd_active_status_line(lcm_active, taesd_active))
-            .color(crate::gui::theme::TEXT_PRIMARY),
-    );
-    ui.add_space(crate::gui::theme::SPACE_XS);
     let lcm_bundle_installed = crate::gui::settings::Settings::can_select_lcm_scheduler();
     ui.horizontal(|ui| {
         change.committed |= render_quality_preset_chip(ui, brush, lcm_bundle_installed);
+        change.committed |= render_taesd_chip(ui, brush, taesd_installed, taesd_active);
         change.committed |= render_scheduler_chip(ui, brush, lcm_bundle_installed);
         change.committed |= render_steps_chip(ui, brush);
         change.committed |= render_strength_chip(ui, brush);
@@ -68,7 +49,6 @@ pub fn render(
         if matches!(brush.sd_scheduler, SdScheduler::Lcm) {
             change.committed |= render_karras_chip(ui, brush);
         }
-        change.committed |= render_taesd_chip(ui, brush, taesd_installed, taesd_active);
         change.committed |= render_seed_chip(ui, brush);
         change.committed |= render_prompt_chip(ui, brush);
     });
@@ -356,27 +336,3 @@ fn render_seed_chip(ui: &mut egui::Ui, brush: &mut BrushSettings) -> bool {
     false
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn status_line_neither_active() {
-        assert_eq!(sd_active_status_line(false, false), "Active: standard SD");
-    }
-
-    #[test]
-    fn status_line_taesd_only() {
-        assert_eq!(sd_active_status_line(false, true), "Active: standard SD + TAESD");
-    }
-
-    #[test]
-    fn status_line_lcm_only() {
-        assert_eq!(sd_active_status_line(true, false), "Active: LCM");
-    }
-
-    #[test]
-    fn status_line_both_active() {
-        assert_eq!(sd_active_status_line(true, true), "Active: LCM + TAESD");
-    }
-}
