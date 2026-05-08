@@ -125,13 +125,13 @@ fn migrate_v1_to_v2(value: &serde_json::Value) -> Option<PresetFile> {
     Some(PresetFile { format_version: PRESET_FORMAT_VERSION, models })
 }
 
-/// Load every preset file in the directory into a map. Invalid files are
-/// silently skipped — we'd rather load 9 of 10 valid presets than reject
-/// the whole batch because one file is malformed.
+/// Load every preset file in the directory into a map. Malformed files
+/// are skipped (with a `warn!` for the user's log) so 9 of 10 valid
+/// presets still load when one is broken.
 ///
-/// v1 files (raw `ItemSettings` shape, pre-phase-29) are auto-wrapped into
-/// a v2 `PresetFile` envelope on load; the on-disk file is untouched until
-/// the user explicitly re-saves it. v2 files (have `format_version: 2`)
+/// v1 files (raw `ItemSettings` shape, no `format_version` key) are
+/// auto-wrapped into a v2 `PresetFile` envelope on load; the on-disk
+/// file is untouched until the user explicitly re-saves it. v2 files
 /// deserialize directly.
 ///
 /// Called once at startup from `Settings::load` (before the first frame) and
@@ -154,12 +154,18 @@ pub(crate) fn load_all() -> HashMap<String, PresetFile> {
         .filter_map(|path| {
             let name = path.file_stem()?.to_str()?.to_string();
             if name.eq_ignore_ascii_case(PRUNR_PRESET) { return None; }
-            let data = std::fs::read(path).ok()?;
-            let value: serde_json::Value = serde_json::from_slice(&data).ok()?;
+            let data = std::fs::read(path)
+                .map_err(|e| tracing::warn!(?path, %e, "skipping unreadable preset")).ok()?;
+            let value: serde_json::Value = serde_json::from_slice(&data)
+                .map_err(|e| tracing::warn!(?path, %e, "skipping malformed-JSON preset")).ok()?;
             let file = if value.get("format_version").and_then(|v| v.as_u64()) == Some(2) {
-                serde_json::from_value(value).ok()?
+                serde_json::from_value(value)
+                    .map_err(|e| tracing::warn!(?path, %e, "skipping malformed v2 preset")).ok()?
             } else {
-                migrate_v1_to_v2(&value)?
+                migrate_v1_to_v2(&value).or_else(|| {
+                    tracing::warn!(?path, "skipping unrecognised preset shape (not v2 and not v1 ItemSettings)");
+                    None
+                })?
             };
             Some((name, file))
         })

@@ -274,8 +274,7 @@ impl Settings {
     /// "Prunr" is always `ItemSettings::default()`; user presets come from
     /// the per-model entry keyed by `Settings.model.to_model_id()`. Missing
     /// preset, missing model entry, or filter-only mode (no model id) all
-    /// fall back to factory defaults — the resolver in 29-04 widens this
-    /// to a per-field Prunr-floor merge.
+    /// fall back to factory defaults.
     pub fn preset_values(&self, name: &str) -> ItemSettings {
         if name == PRUNR_PRESET {
             return ItemSettings::default();

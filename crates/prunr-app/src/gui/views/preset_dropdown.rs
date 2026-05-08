@@ -295,11 +295,9 @@ pub fn render(
         });
         if let Some(name) = target_name {
             // Build a single-entry v2 PresetFile envelope keyed by the
-            // active model. Plan 29-04 widens this to merge-aware so other
-            // model entries survive — for now overwrite is the existing
-            // behaviour of `save`. Falls back to the workspace default
-            // model in filter-only mode (no model_id) so the file is
-            // still keyed correctly.
+            // active model. Falls back to the workspace default model
+            // in filter-only mode (no model_id) so the file is still
+            // keyed correctly.
             let model_id = settings.model.to_model_id()
                 .or_else(|| Settings::default().model.to_model_id())
                 .expect("Settings::default().model always has a model_id");
