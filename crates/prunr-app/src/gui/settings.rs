@@ -112,7 +112,17 @@ impl Settings {
         use crate::gui::brush_state::SdScheduler;
         raw_backend == prunr_models::ModelId::SdV15InpaintFp16
             && self.brush.sd_scheduler == SdScheduler::Lcm
-            && prunr_models::descriptor(prunr_models::ModelId::SdV15LcmInpaintFp16).is_some()
+            && Self::can_select_lcm_scheduler()
+    }
+
+    /// Can the user pick the LCM scheduler entry in the scheduler
+    /// dropdown? True only when the LCM bundle is published in the
+    /// registry AND downloaded. Shared with `lcm_routing_active`'s
+    /// install clauses — pinned in one place so adding a 5th
+    /// clause (e.g. license-accepted) doesn't silently diverge
+    /// between dropdown gating and dispatch routing.
+    pub fn can_select_lcm_scheduler() -> bool {
+        prunr_models::descriptor(prunr_models::ModelId::SdV15LcmInpaintFp16).is_some()
             && prunr_models::is_available(prunr_models::ModelId::SdV15LcmInpaintFp16)
     }
 }
@@ -667,6 +677,19 @@ mod tests {
             path.ends_with("prunr/settings.json") || path.ends_with("prunr\\settings.json"),
             "expected .../prunr/settings.json, got {path:?}",
         );
+    }
+
+    /// `can_select_lcm_scheduler` must agree with the two registry
+    /// clauses it delegates to — descriptor present AND bundle
+    /// downloaded. The test reads both sides independently so a
+    /// refactor that breaks the delegation is caught regardless of
+    /// whether the bundle is installed on the host.
+    #[test]
+    fn can_select_lcm_scheduler_matches_registry_state() {
+        let expected =
+            prunr_models::descriptor(prunr_models::ModelId::SdV15LcmInpaintFp16).is_some()
+                && prunr_models::is_available(prunr_models::ModelId::SdV15LcmInpaintFp16);
+        assert_eq!(Settings::can_select_lcm_scheduler(), expected);
     }
 
     #[test]
