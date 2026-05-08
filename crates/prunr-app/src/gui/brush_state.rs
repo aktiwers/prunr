@@ -299,25 +299,17 @@ impl BrushSettings {
         Stamp { hardness: self.hardness, strength: self.strength, mode: self.mode }
     }
 
-    /// Test-friendly inner predicate. The public wrapper threads
-    /// `prunr_models::is_available(TaesdFp16)` in; this taking the
-    /// availability boolean lets unit tests exercise every branch
-    /// without poking the on-disk model registry.
+    #[cfg(test)]
     fn sd_use_taesd_effective_with_avail(&self, taesd_available: bool) -> bool {
-        match self.sd_use_taesd {
-            Some(false) => false,
-            Some(true) => taesd_available,
-            None => taesd_available,
-        }
+        self.sd_use_taesd.unwrap_or(true) && taesd_available
     }
 
     /// True when the user wants TAESD AND the bundle is installed.
     /// Pinned in one place so the dispatch path and the UI checkbox
-    /// state can't disagree (mirrors `Settings::lcm_routing_active`).
+    /// state can't disagree.
     pub fn sd_use_taesd_effective(&self) -> bool {
-        self.sd_use_taesd_effective_with_avail(
-            prunr_models::is_available(prunr_models::ModelId::TaesdFp16),
-        )
+        self.sd_use_taesd.unwrap_or(true)
+            && prunr_models::is_available(prunr_models::ModelId::TaesdFp16)
     }
 
     /// Reset the brush popover's slider knobs (radius / hardness /
@@ -610,6 +602,7 @@ mod tests {
         assert_eq!(s.sd_steps, 8);
         assert!(!s.sd_use_karras_sigmas);
         assert_eq!(s.sd_seed, None);
+        assert_eq!(s.sd_use_taesd, None);
         // The persisted CFG=4.0 is kept; semantically that means the
         // user's effective preset is Custom (CFG mismatch with all
         // built-ins). The UI reads detect_from on every render so
@@ -636,33 +629,6 @@ mod tests {
         let json = serde_json::to_string(&s).unwrap();
         let restored: BrushSettings = serde_json::from_str(&json).unwrap();
         assert_eq!(restored.sd_use_taesd, Some(false));
-    }
-
-    #[test]
-    fn sd_use_taesd_serde_back_compat_missing_field_is_none() {
-        // Old JSON written before this field existed must deserialize
-        // cleanly with sd_use_taesd == None (auto). #[serde(default)]
-        // on the field is what makes this work.
-        let old_json = r#"{
-            "radius": 24.0,
-            "hardness": 0.7,
-            "strength": 1.0,
-            "mode": "Subtract",
-            "shape": "Circle",
-            "inpaint_sharpen": 0.6,
-            "inpaint_feather": 4.0,
-            "inpaint_grow": 2.0,
-            "sd_prompt": "x",
-            "sd_negative_prompt": "y",
-            "sd_guidance_scale": 1.5,
-            "sd_scheduler": "Lcm",
-            "sd_steps": 8,
-            "sd_use_karras_sigmas": false,
-            "sd_seed": null,
-            "sd_strength": 1.0
-        }"#;
-        let s: BrushSettings = serde_json::from_str(old_json).unwrap();
-        assert_eq!(s.sd_use_taesd, None);
     }
 
     #[test]
