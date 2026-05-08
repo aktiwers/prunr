@@ -19,6 +19,11 @@ const LABEL_PAD_WIDTH: f32 = 88.0;
 /// large brush still renders cleanly inside this box.
 const PREVIEW_SIZE: f32 = 80.0;
 
+/// Maximum reduction the mask_blur preview applies to hardness in the
+/// brush stamp render. At slider=MASK_BLUR_MAX, hardness is cut in half
+/// — visualizes the soft-edge effect without literal Gaussian.
+const MASK_BLUR_HARDNESS_REDUCTION_CAP: f32 = 0.5;
+
 #[derive(Default, Clone, Copy)]
 pub(super) struct BrushChipOutcome {
     pub clear_requested: bool,
@@ -200,6 +205,9 @@ fn draw_preview(ui: &mut Ui, settings: &BrushSettings) {
     // floor: small radii fill ~54% of the preview, max fills 100%,
     // scale curves smoothly between. Absolute size feedback comes from
     // the slider value ("20 px"), the preview shows the pattern.
+    // Formula: `(1 + 99×t)` maps t∈[0,1] onto [1, 100]; log10 maps
+    // that onto [0, 2]; dividing by 2 renormalises to [0, 1]. The
+    // 0.5 floor means slider=1 still fills 54% of the box.
     let r_norm = (1.0 + (settings.radius / 200.0) * 99.0).log10() / 2.0; // [0, 1]
     let r = (max_r * 0.5 + max_r * 0.5 * r_norm).clamp(max_r * 0.4, max_r);
 
@@ -208,12 +216,13 @@ fn draw_preview(ui: &mut Ui, settings: &BrushSettings) {
         BrushMode::Subtract => (230, 150, 150),
     };
 
-    // Preview only — actual inference applies a Gaussian blur per the
+    // Preview only — actual inference applies a fast_blur per the
     // mask_blur sigma; this visually hints at the effect by softening
-    // the falloff edge proportional to mask_blur (up to ~50% reduction
-    // at max blur = 16 px).
+    // the falloff edge proportional to mask_blur.
     let mask_blur_norm = (settings.sd_mask_blur / MASK_BLUR_MAX).clamp(0.0, 1.0);
-    let effective_hardness = (settings.hardness * (1.0 - 0.5 * mask_blur_norm)).clamp(0.0, 1.0);
+    let effective_hardness = (settings.hardness
+        * (1.0 - MASK_BLUR_HARDNESS_REDUCTION_CAP * mask_blur_norm))
+        .clamp(0.0, 1.0);
 
     let color = Color32::from_rgb(cr, cg, cb);
     match settings.shape {

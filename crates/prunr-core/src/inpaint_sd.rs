@@ -4081,4 +4081,22 @@ mod tests {
         assert!(MASK_BLUR_OFF_THRESHOLD > 0.0);
         assert!(MASK_BLUR_OFF_THRESHOLD < 1.0);
     }
+
+    #[test]
+    fn mask_to_latent_passes_through_gradient_values() {
+        // Float pass-through contract: semantics changed from binary
+        // > 127 → 1.0/0.0 to / 255.0. A mask of all-128 must produce
+        // ~0.502, not 1.0 or 0.0. The existing coverage test uses
+        // Luma([255]) which maps to 1.0 either way and didn't catch the
+        // change.
+        let mask = GrayImage::from_pixel(SD_TILE, SD_TILE, image::Luma([128]));
+        let latent = mask_to_latent(&mask);
+        let expected = 128.0_f32 / 255.0;
+        for v in latent.iter() {
+            assert!(
+                (v - expected).abs() < 0.01,
+                "mask_to_latent: gradient pass-through expected ≈{expected}, got {v}"
+            );
+        }
+    }
 }
