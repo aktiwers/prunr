@@ -149,9 +149,13 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
             // canvas image when clicked here.
             {
                 let inpaint_mode = app.settings.model.is_inpaint();
+                // Enable when EITHER an in-progress mask_correction is set
+                // (strokes painted, ready to dispatch) OR a previously
+                // dispatched correction is stashed (allows reprocess
+                // between strokes — mask_correction is cleared post-result).
                 let has_correction = app.batch.selected_item()
-                    .and_then(|i| i.mask_correction.as_ref())
-                    .is_some();
+                    .map(|i| i.mask_correction.is_some() || i.last_inpaint_correction.is_some())
+                    .unwrap_or(false);
                 let label = app.batch.process_button_label();
                 // Seg pipeline gating: at least one target exists and isn't
                 // already Processing. `any_target_can` is the no-alloc
