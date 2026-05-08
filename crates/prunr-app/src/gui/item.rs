@@ -28,19 +28,16 @@ pub(crate) enum ActionType {
     PresetApply,
 }
 
-/// Push a marker onto `actions_undo` (bounded at `ACTION_HIST_DEPTH`) and
-/// clear `actions_redo` — any new edit branches the redo timeline.
-pub(crate) fn push_action_marker(
-    actions_undo: &mut VecDeque<ActionType>,
-    actions_redo: &mut VecDeque<ActionType>,
-    kind: ActionType,
-) {
-    actions_undo.push_back(kind);
-    while actions_undo.len() > ACTION_HIST_DEPTH {
-        actions_undo.pop_front();
+/// Bounded push onto a `VecDeque<ActionType>` without clearing the opposite
+/// stack. Used by the undo/redo dispatchers when an action moves between
+/// stacks (same timeline, different end — no divergence).
+pub(crate) fn push_action_bounded(stack: &mut VecDeque<ActionType>, kind: ActionType) {
+    stack.push_back(kind);
+    while stack.len() > ACTION_HIST_DEPTH {
+        stack.pop_front();
     }
-    actions_redo.clear();
 }
+
 
 /// Cap on `stroke_undo_stack` / `stroke_redo_stack` length. Each entry
 /// is `Option<Arc<MaskCorrection>>` (one refcount bump); bounded to match
@@ -309,6 +306,13 @@ pub(crate) struct BatchItem {
 }
 
 impl BatchItem {
+    /// Push a marker onto `actions_undo` and clear `actions_redo` — any new
+    /// edit branches the redo timeline.
+    pub(crate) fn push_action_marker(&mut self, kind: ActionType) {
+        push_action_bounded(&mut self.actions_undo, kind);
+        self.actions_redo.clear();
+    }
+
     /// Clear every edge cache tier together — compressed multi-scale set,
     /// the hot decompressed tensor, and the derived pre-dilation mask. The
     /// mask is always built from the tensor, so any tensor change invalidates
@@ -330,7 +334,7 @@ impl BatchItem {
         let pre = self.mask_correction.clone();
         push_stroke_bounded(&mut self.stroke_undo_stack, pre);
         self.stroke_redo_stack.clear();
-        push_action_marker(&mut self.actions_undo, &mut self.actions_redo, ActionType::Stroke);
+        self.push_action_marker(ActionType::Stroke);
 
         // Discard a stale correction whose dimensions no longer match the
         // active model (or a previous code-path bug). Without this, `merge`
@@ -362,7 +366,7 @@ impl BatchItem {
             let pre = self.mask_correction.clone();
             push_stroke_bounded(&mut self.stroke_undo_stack, pre);
             self.stroke_redo_stack.clear();
-            push_action_marker(&mut self.actions_undo, &mut self.actions_redo, ActionType::ClearStrokes);
+            self.push_action_marker(ActionType::ClearStrokes);
         }
         self.mask_correction = None;
         self.settings.correction_hash = None;
@@ -1048,15 +1052,24 @@ mod tests {
     }
 
     #[test]
+    fn push_action_bounded_does_not_clear_opposite_stack() {
+        // push_action_bounded is the move-between-stacks helper; it must not
+        // clear the opposite stack (that would break the undo↔redo round-trip).
+        let mut undo_stack: std::collections::VecDeque<ActionType> = Default::default();
+        let mut redo_stack: std::collections::VecDeque<ActionType> = Default::default();
+        redo_stack.push_back(ActionType::Stroke);
+        push_action_bounded(&mut undo_stack, ActionType::Result);
+        assert!(!redo_stack.is_empty(), "push_action_bounded must not clear the opposite stack");
+        assert_eq!(undo_stack.back(), Some(&ActionType::Result));
+    }
+
+    #[test]
     fn action_hist_depth_caps_actions_undo() {
         let mut item = fixture_item(1);
-        for i in 0..(ACTION_HIST_DEPTH + 5) {
-            push_action_marker(&mut item.actions_undo, &mut item.actions_redo, ActionType::Stroke);
+        for _ in 0..(ACTION_HIST_DEPTH + 5) {
+            item.push_action_marker(ActionType::Stroke);
             // Prevent stroke_undo_stack from overflow (not the subject here).
             item.stroke_undo_stack.clear();
-            // Refill actions_redo so push_action_marker finds something to clear
-            // (it clears redo on every call — just make sure we don't count that).
-            let _ = i;
         }
         assert_eq!(item.actions_undo.len(), ACTION_HIST_DEPTH,
             "actions_undo must be capped at ACTION_HIST_DEPTH");
