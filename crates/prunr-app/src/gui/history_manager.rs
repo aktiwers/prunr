@@ -19,7 +19,7 @@
 
 use std::collections::VecDeque;
 
-use super::item::{push_action_marker, ActionType, BatchItem, BatchStatus, HistoryEntry, PresetSnapshot};
+use super::item::{ActionType, BatchItem, BatchStatus, HistoryEntry, PresetSnapshot};
 
 /// Bound on the per-item preset undo/redo stacks. Each entry is ~100 bytes;
 /// 100 × ~100 = ~10 KB per image — still negligible next to the result
@@ -89,7 +89,7 @@ impl HistoryManager {
                     old.cleanup();
                 }
             }
-            push_action_marker(&mut item.actions_undo, &mut item.actions_redo, ActionType::Result);
+            item.push_action_marker(ActionType::Result);
         }
         for entry in item.redo_stack.drain(..) {
             entry.cleanup();
@@ -161,7 +161,7 @@ impl HistoryManager {
     /// is cleared because a fresh apply branches the preset timeline.
     pub(crate) fn push_preset(item: &mut BatchItem, snap: PresetSnapshot) {
         push_bounded(&mut item.preset_undo_stack, snap);
-        push_action_marker(&mut item.actions_undo, &mut item.actions_redo, ActionType::PresetApply);
+        item.push_action_marker(ActionType::PresetApply);
         // push_action_marker already cleared actions_redo; also clear preset_redo
         // so the two redo stacks stay in sync.
         item.preset_redo_stack.clear();

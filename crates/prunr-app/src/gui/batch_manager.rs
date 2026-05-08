@@ -246,6 +246,20 @@ impl BatchManager {
         })
     }
 
+    /// Indices of items in the current dispatch target set — all
+    /// `selected == true` items when any are checked, or the single
+    /// currently-viewed item when none are. Mirrors the target-set rule
+    /// used by `items_to_process` and `any_target_can`.
+    pub(crate) fn targeted_indices(&self) -> Vec<usize> {
+        let has_selected = self.has_any_selected();
+        let current_id = self.selected_item().map(|b| b.id);
+        (0..self.items.len())
+            .filter(|&i| {
+                if has_selected { self.items[i].selected } else { Some(self.items[i].id) == current_id }
+            })
+            .collect()
+    }
+
     /// Remove the item at `idx`, cleaning up any on-disk history /
     /// redo entries it owned. Returns `false` (without doing anything)
     /// when `idx` is out of bounds. Caller is responsible for clamping
