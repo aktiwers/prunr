@@ -381,8 +381,8 @@ impl BatchItem {
     }
 
     /// Drop the brush correction. Reversible via `undo_stroke`.
-    /// User-facing path (the "Clear strokes" button) — pushes a
-    /// ClearStrokes marker onto the action timeline.
+    /// Pushes a `ClearStrokes` marker onto the action timeline so the
+    /// undo toast labels the wipe correctly.
     pub(crate) fn clear_correction(&mut self) {
         if self.mask_correction.is_some() {
             let pre = self.mask_correction.clone();

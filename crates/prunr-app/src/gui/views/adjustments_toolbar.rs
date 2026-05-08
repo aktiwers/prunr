@@ -84,8 +84,10 @@ pub struct ToolbarChange {
     /// A render-only knob (bg color) fired — request a repaint even when
     /// no other dispatch kicks in.
     pub render_repaint: bool,
-    /// User clicked "Clear strokes" in the brush popover.
-    pub clear_correction_requested: bool,
+    /// User clicked "Reset brush" in the brush popover. Resets the
+    /// brush-popover-visible fields on `app_settings.brush` to defaults
+    /// via `BrushSettings::reset_popover_fields`.
+    pub reset_brush_requested: bool,
     /// Brush popover settled a change AND `app_settings.brush` was synced.
     pub brush_settings_committed: bool,
     /// Set when the user clicked "More models…" or a not-yet-installed
@@ -117,7 +119,7 @@ impl Default for ToolbarChange {
             cache_impact: CacheImpact::Nothing,
             auto_dispatch: DispatchKind::None,
             render_repaint: false,
-            clear_correction_requested: false,
+            reset_brush_requested: false,
             brush_settings_committed: false,
             open_model_store: None,
             pick_bg_image: false,
@@ -341,8 +343,8 @@ pub(crate) fn render(
                     let outcome = super::brush_chip::render(
                         ui, &mut app_settings.brush, app_settings.model.is_inpaint(),
                     );
-                    if outcome.clear_requested {
-                        change.clear_correction_requested = true;
+                    if outcome.reset_brush_requested {
+                        change.reset_brush_requested = true;
                     }
                     if outcome.committed {
                         change.brush_settings_committed = true;

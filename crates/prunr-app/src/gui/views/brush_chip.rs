@@ -1,4 +1,4 @@
-//! Brush settings chip — radius / hardness / mode + Clear strokes
+//! Brush settings chip — radius / hardness / mode + Reset brush
 //! + a live preview of the brush stamp.
 //!
 //! Rendered next to the brush toggle in Row 2 when brush mode is on.
@@ -29,7 +29,7 @@ const FEATHER_HARDNESS_REDUCTION_CAP: f32 = 0.5;
 
 #[derive(Default, Clone, Copy)]
 pub(super) struct BrushChipOutcome {
-    pub clear_requested: bool,
+    pub reset_brush_requested: bool,
     /// True on slider release / mode / shape click. Caller persists
     /// app-level brush settings on this signal.
     pub committed: bool,
@@ -154,11 +154,11 @@ pub(super) fn render(
         ui.add_space(4.0);
 
         if ui
-            .button("Clear strokes")
-            .on_hover_text("Discard all brush corrections on this image")
+            .button("Reset brush")
+            .on_hover_text("Reset radius, hardness, mask grow, edge softness, sharpen, and shape to defaults")
             .clicked()
         {
-            outcome.clear_requested = true;
+            outcome.reset_brush_requested = true;
         }
     });
 
