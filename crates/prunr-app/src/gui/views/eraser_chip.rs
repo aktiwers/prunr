@@ -27,7 +27,8 @@ pub fn render(ui: &mut egui::Ui, brush: &mut BrushSettings) -> EraserRowChange {
     let mut change = EraserRowChange::default();
     ui.horizontal(|ui| {
         change.committed |= render_quality_preset_chip(ui, brush);
-        change.committed |= render_scheduler_chip(ui, brush);
+        let lcm_bundle_installed = crate::gui::settings::Settings::can_select_lcm_scheduler();
+        change.committed |= render_scheduler_chip(ui, brush, lcm_bundle_installed);
         change.committed |= render_steps_chip(ui, brush);
         change.committed |= render_strength_chip(ui, brush);
         // Karras toggle: LCM (user-toggleable), UniPC, Euler-A.
@@ -83,17 +84,27 @@ fn render_quality_preset_chip(ui: &mut egui::Ui, brush: &mut BrushSettings) -> b
                 _ => SdScheduler::Lcm,
             };
             let label = preset.label();
-            if preset_scheduler.is_available() {
+            let preset_bundle_gated =
+                matches!(preset_scheduler, SdScheduler::Lcm)
+                    && !crate::gui::settings::Settings::can_select_lcm_scheduler();
+            if !preset_scheduler.is_available() {
+                ui.add_enabled_ui(false, |ui| {
+                    let _ = ui.selectable_label(false, format!("{label} (coming soon)"));
+                });
+            } else if preset_bundle_gated {
+                let resp = ui.add_enabled_ui(false, |ui| {
+                    ui.selectable_label(false, format!("{label} (download required)"))
+                }).inner;
+                resp.on_hover_text(
+                    "Download Eraser (SD 1.5 LCM, fast) in Model Store to enable.",
+                );
+            } else {
                 let selected = active == preset;
                 if ui.selectable_label(selected, label).clicked() {
                     preset.apply_to(brush);
                     changed = true;
                     egui::Popup::close_id(ui.ctx(), pop_id);
                 }
-            } else {
-                ui.add_enabled_ui(false, |ui| {
-                    let _ = ui.selectable_label(false, format!("{label} (coming soon)"));
-                });
             }
         }
     });
@@ -167,7 +178,7 @@ fn render_prompt_chip(ui: &mut egui::Ui, brush: &mut BrushSettings) -> bool {
     changed
 }
 
-fn render_scheduler_chip(ui: &mut egui::Ui, brush: &mut BrushSettings) -> bool {
+fn render_scheduler_chip(ui: &mut egui::Ui, brush: &mut BrushSettings, lcm_bundle_installed: bool) -> bool {
     let pop_id = egui::Id::new("eraser_scheduler_popover");
     let resp = chip::chip_tooltip(
         chip::chip_button(ui, ICON_TUNE.codepoint, brush.sd_scheduler.label(), false),
@@ -187,7 +198,23 @@ fn render_scheduler_chip(ui: &mut egui::Ui, brush: &mut BrushSettings) -> bool {
         ] {
             let label = sched.label();
             let desc = sched.description();
-            if sched.is_available() {
+            let bundle_gated = matches!(sched, SdScheduler::Lcm) && !lcm_bundle_installed;
+            if !sched.is_available() {
+                ui.add_enabled_ui(false, |ui| {
+                    let _ = ui.selectable_label(false, format!("{label} (coming soon)"));
+                });
+                super::hint(ui, desc);
+                ui.add_space(theme::SPACE_XS);
+            } else if bundle_gated {
+                let resp = ui.add_enabled_ui(false, |ui| {
+                    ui.selectable_label(false, format!("{label} (download required)"))
+                }).inner;
+                resp.on_hover_text(
+                    "Download Eraser (SD 1.5 LCM, fast) in Model Store to enable.",
+                );
+                super::hint(ui, desc);
+                ui.add_space(theme::SPACE_XS);
+            } else {
                 let selected = brush.sd_scheduler == sched;
                 if ui.selectable_label(selected, label).clicked() {
                     if brush.sd_scheduler != sched {
@@ -196,12 +223,6 @@ fn render_scheduler_chip(ui: &mut egui::Ui, brush: &mut BrushSettings) -> bool {
                     }
                     egui::Popup::close_id(ui.ctx(), pop_id);
                 }
-                super::hint(ui, desc);
-                ui.add_space(theme::SPACE_XS);
-            } else {
-                ui.add_enabled_ui(false, |ui| {
-                    let _ = ui.selectable_label(false, format!("{label} (coming soon)"));
-                });
                 super::hint(ui, desc);
                 ui.add_space(theme::SPACE_XS);
             }
