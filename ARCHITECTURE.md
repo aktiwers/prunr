@@ -248,6 +248,8 @@ Karras sigma schedule is also user-toggleable for LCM and UniPC (off by default 
 
 **SD eraser toolbar.** The chip cluster — Quality preset / Scheduler / Steps / Strength / Karras (conditional) / Seed / Prompt — renders inline in **Row 2 of the adjustments toolbar**, next to the model dropdown. Karras is shown only for schedulers that accept the toggle (LCM, UniPC, Euler-A). Prompts live in a dedicated Prompt chip with multiline text input and a Reset button. Math for the full SD pipeline (CLIP, VAE, schedulers, CFG, 9-channel inpaint UNet) is verified against the Diffusers reference; reports archived in `.planning/research/`.
 
+**Edge softness (inpaint_feather).** A single `inpaint_feather` value (0–32 px, default 4 px) drives boundary softness across all inpaint model classes — SD, LaMa, and seg cutouts. The UNet always receives a binary mask (canonical; SD-1.5 was trained only on binary masks). Softness is composite-time only: the binary mask is blurred with sigma=`inpaint_feather` via `fast_blur`, and the blurred float values [0, 1] weight the blend between model output and source at the boundary. This matches A1111 / ComfyUI / InvokeAI. The slider lives in the brush popover under "Edge softness".
+
 ## Live Preview
 
 Mask and edge tweaks auto-rerun Tier 2 during slider drag. A tweak is debounced ~150 ms; a new tweak on the same item cancels the in-flight one and dispatches a fresh rerun on the rayon pool.
