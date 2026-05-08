@@ -292,11 +292,7 @@ pub(crate) fn render(
             // SD-eraser chip cluster lives inline in Row 2 next to the
             // model dropdown. LaMa / MI-GAN have no per-stroke knobs
             // worth a chip row.
-            let raw_backend = app_settings.model.to_model_id()
-                .unwrap_or(prunr_models::ModelId::LaMaFp32);
-            // snapshot before &mut borrow — &Settings + &mut Settings.brush would overlap
-            let lcm_active = app_settings.lcm_routing_active(raw_backend);
-            let outcome = super::eraser_chip::render(ui, &mut app_settings.brush, lcm_active);
+            let outcome = super::eraser_chip::render(ui, &mut app_settings.brush);
             if outcome.committed {
                 change.brush_settings_committed = true;
             }
