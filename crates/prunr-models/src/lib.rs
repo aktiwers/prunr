@@ -435,7 +435,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
     ModelDescriptor {
         id: ModelId::SdV15LcmInpaintFp16,
         display_name: "Eraser (SD 1.5 LCM, fast)",
-        description: "Latent Consistency Model variant of SD 1.5 inpaint. ~5\u{00d7} faster on CPU/iGPU; lower fidelity. Auto-selected when Fast SD inpaint is on.",
+        description: "Latent Consistency Model variant of SD 1.5 inpaint. ~5\u{00d7} faster on CPU/iGPU; lower fidelity. Active when scheduler = LCM (selected on the SD chip).",
         category: ModelCategory::Inpaint,
         source: ModelSource::MultiPartOnDemand {
             subdir: "sd15-lcm-inpaint-fp16-1.0.0",
@@ -485,11 +485,11 @@ pub const REGISTRY: &[ModelDescriptor] = &[
     },
     // TAESD FP16: Tiny distilled VAE for SD 1.5. ~2.4 MB encoder + ~2.5
     // MB decoder. Released at https://github.com/aktiwers/prunr/releases/tag/taesd-v1.0.0.
-    // Used as the VAE backend when fast mode + LCM are both active.
+    // Used as the VAE backend when the user enables Fast VAE on the SD chip; orthogonal to scheduler.
     ModelDescriptor {
         id: ModelId::TaesdFp16,
         display_name: "TAESD VAE (fast SD)",
-        description: "Tiny distilled VAE for SD 1.5 fast mode. ~3\u{00d7} faster decode at slight quality cost.",
+        description: "Tiny distilled VAE for SD 1.5. Toggle on the SD chip. Works with any scheduler. ~3\u{00d7} faster decode at slight quality cost.",
         category: ModelCategory::Inpaint,
         source: ModelSource::MultiPartOnDemand {
             subdir: "taesd-fp16-1.0.0",
