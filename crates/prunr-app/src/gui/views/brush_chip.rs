@@ -7,6 +7,7 @@ use egui::{Color32, Sense, Stroke, Ui};
 
 use crate::gui::brush_state::BrushSettings;
 use prunr_core::brush::{BrushMode, BrushShape};
+use prunr_core::inpaint_sd::MASK_BLUR_MAX;
 
 use super::chip;
 
@@ -211,7 +212,7 @@ fn draw_preview(ui: &mut Ui, settings: &BrushSettings) {
     // mask_blur sigma; this visually hints at the effect by softening
     // the falloff edge proportional to mask_blur (up to ~50% reduction
     // at max blur = 16 px).
-    let mask_blur_norm = (settings.sd_mask_blur / 16.0).clamp(0.0, 1.0);
+    let mask_blur_norm = (settings.sd_mask_blur / MASK_BLUR_MAX).clamp(0.0, 1.0);
     let effective_hardness = (settings.hardness * (1.0 - 0.5 * mask_blur_norm)).clamp(0.0, 1.0);
 
     let color = Color32::from_rgb(cr, cg, cb);

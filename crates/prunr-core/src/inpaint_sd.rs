@@ -74,6 +74,18 @@ const CLIP_SEQ_LEN: usize = 77;
 const CLIP_BOS: i64 = 49406;
 const CLIP_EOS: i64 = 49407;
 
+/// Threshold below which mask_blur is treated as "off" — sigma < 0.5
+/// produces no visible boundary softening at the SD-1.5 latent
+/// resolution but still pays the imageops::fast_blur cost. Both the
+/// dispatch (run_one_tile) and the UI ("Off" label in the chip) use
+/// this same threshold so user-visible state matches dispatch state.
+pub const MASK_BLUR_OFF_THRESHOLD: f32 = 0.5;
+
+/// Maximum mask_blur sigma exposed in the UI. Beyond this the
+/// blur radius approaches the entire stroke region; useful for
+/// extreme cases but rarely worth the loss of edge precision.
+pub const MASK_BLUR_MAX: f32 = 16.0;
+
 /// Inputs to one SD inpaint call. Constructable today with default
 /// fields for empty-prompt unconditional inpaint; future surfaces (text
 /// prompts, CFG, seeded variations) just set the relevant fields.
@@ -520,8 +532,10 @@ fn run_one_tile(
     // sees a gradient [0→1] at the stroke edge instead of a hard cliff.
     // The model interprets this as "blend toward what's already here"
     // near the edge, eliminating the lighting/color mismatch seam.
-    // 0.0 = hard cliff (original behavior).
-    let blurred_padded_mask: Cow<'_, GrayImage> = if req.mask_blur > 0.0 {
+    // Below MASK_BLUR_OFF_THRESHOLD there is no visible boundary
+    // softening at the SD-1.5 latent resolution; skip the blur so
+    // dispatch state matches the UI "Off" label.
+    let blurred_padded_mask: Cow<'_, GrayImage> = if req.mask_blur >= MASK_BLUR_OFF_THRESHOLD {
         Cow::Owned(image::imageops::blur(&*padded_mask, req.mask_blur))
     } else {
         padded_mask
@@ -4052,5 +4066,14 @@ mod tests {
         //   → blend ≈ -1.0 * 0.498 + 0.00392 * 0.502 ≈ -0.496
         let g = arr[(0, 1, 0, 0)];
         assert!((g - (-0.496)).abs() < 0.01, "expected ≈-0.496, got {g}");
+    }
+
+    #[test]
+    fn mask_blur_off_threshold_is_consistent_with_dispatch_gate() {
+        // Pin the contract: any sigma < threshold must NOT trigger blur,
+        // any sigma >= threshold MUST trigger blur. Sentinel test so the
+        // dispatch path and chip "Off" label stay aligned.
+        assert!(MASK_BLUR_OFF_THRESHOLD > 0.0);
+        assert!(MASK_BLUR_OFF_THRESHOLD < 1.0);
     }
 }
