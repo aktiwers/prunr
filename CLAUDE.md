@@ -238,40 +238,82 @@ Each layer has its own state-ownership rules. The **coordinator pattern** in the
 
 If you're editing `prunr-core`, `prunr-models`, `worker_process.rs`, or the subprocess IPC, **do not apply the GUI coordinator decision table** — it is scoped to the GUI layer only.
 
-## One source of truth — single routing method per user intent
+## One source of truth
 
-A user intent (Process, Undo, Save, Copy, Open, Cancel, …) can be
-triggered by multiple input surfaces — toolbar button, keyboard
-shortcut, menu item, programmatic call. The *routing logic* for that
-intent — gating, mode detection, dispatch selection — lives in **a
-single method** on `PrunrApp`. Each input surface is a thin shim that
-calls it.
+If the same logic, decision, value, or shape exists in two places,
+it's a drift bug waiting to happen. One gets edited, the other
+doesn't, the bug surfaces only via the unmaintained path —
+bisect-hostile and easy to miss in code review. Give every concept
+exactly one definition site.
 
-If the gate logic is more than a one-line boolean, also extract a
-`can_<intent>(&self) -> bool` mirror so the toolbar's
-`add_enabled(...)` reads the same predicate that the dispatch's
-early-return checks.
+This applies to:
 
-Pattern:
+- **Routing / dispatch.** A user intent triggered by multiple input
+  surfaces (button, keyboard, menu, programmatic) calls one method.
+  Each surface is a thin shim that resolves its input → calls the
+  method. See subsection below.
+- **Gates and predicates.** If a UI greys out a button when condition
+  X holds AND the dispatch path early-returns when X holds, those
+  share one named definition. Visible UI state and the actual gate
+  must read the same predicate, or click vs shortcut produce different
+  behaviours.
+- **Constants.** Pixel sizes, threshold values, string identifiers,
+  magic numbers used in more than one place get a named `const`.
+  Don't hardcode `0.18215` in three files; name it once
+  (`VAE_SCALING_FACTOR`). Same goes for paths, regex strings,
+  fallback default values.
+- **Types.** Same shape used in multiple modules → one shared type,
+  not two parallel structs / enums that happen to have the same
+  fields. If you need a wire type and a runtime type with different
+  derives, that's distinct concepts; if they're truly parallel,
+  consolidate.
+- **Helpers.** Before writing a new function, grep for the verb /
+  noun. The helper-menu tables in `## GUI state ownership` and
+  `## prunr-core conventions` name the common targets — extend
+  those tables when you add a helper worth reusing.
+
+Before writing new code, do this 30-second check:
+1. `grep -rn fn_name` for the verb you're about to write.
+2. `grep -rn 0.18215` (or the value) before hardcoding.
+3. Scan the helper menus in this file for the action you need.
+4. Look for an existing enum / struct with the shape you'd reach for.
+
+When NOT to extract: three similar-looking lines that handle
+*genuinely distinct concepts*. DRY targets shared meaning, not
+coincidental shape. The existing rule "three similar lines is better
+than a premature abstraction" still applies — don't unify match arms
+of an enum just because they all do `*out = s.step(...)`; that's the
+pattern, not duplication.
+
+The smell to watch for: editing one site and asking yourself "wait,
+do I need to update somewhere else too?" That hesitation means the
+two sites are coupled and want one definition.
+
+### Routing — `handle_<intent>` / `can_<intent>` pattern
+
+A user intent (Process, Undo, Save, Copy, Open, Cancel, …) lives in
+a single method on `PrunrApp`. Each input surface is a thin shim:
+
 ```rust
 pub fn handle_<intent>_intent(&mut self) { /* routing + dispatch */ }
-pub fn can_<intent>_intent(&self) -> bool { /* same gates as the early-returns */ }
+pub fn can_<intent>_intent(&self) -> bool { /* same gates as early-returns */ }
 ```
 
-Why: parallel routing across input surfaces drifts silently. Button
-gate falls behind keyboard's. Keyboard adds a check menu skips. Click
-vs shortcut vs menu produces three slightly different behaviours,
-manifesting only when the user changes input modality. Bisect-hostile.
+Toolbar uses `can_<intent>_intent()` for `add_enabled(...)` and
+`handle_<intent>_intent()` on click. Keyboard intent handler calls
+the same method. Menu / CLI / programmatic paths the same.
 
-When NOT to extract: a single call site with no plans for additional
-bindings. The rule fires when **two or more** input surfaces trigger
-the same conceptual action.
+Mandatory when ≥2 input surfaces trigger the same intent AND the
+routing has any non-trivial logic (gates, mode detection, dispatch
+selection). For one-line dispatches with no gates a single call site
+is fine; the pattern fires when there's *logic* that could drift.
 
 Examples:
-- `handle_undo` is one method called by both Cmd+Z and the undo
-  button. Adding Cmd+Shift+Z is one more line wiring to the same method.
-- Process button click and Cmd+R keyboard intent each had their own
-  inpaint-vs-seg branch with subtly different gates — fixed by
+- ✓ `handle_undo` is one method called by both Cmd+Z and the undo
+  toolbar button. Adding Cmd+Shift+Z is one more line wiring to the
+  same method, no copy-paste of the gating.
+- ✗ Process button click and Cmd+R keyboard intent each had their
+  own inpaint-vs-seg branch with subtly different gates — fixed by
   extracting `handle_process_intent` / `can_process_intent`.
 
 ## GUI state ownership (prunr-app/src/gui/)
