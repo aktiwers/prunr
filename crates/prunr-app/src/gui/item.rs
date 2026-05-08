@@ -24,10 +24,6 @@ pub(crate) const ACTION_HIST_DEPTH: usize = 100;
 pub(crate) enum ActionType {
     /// Brush stroke commit — pre-state lives in `stroke_undo_stack`.
     Stroke,
-    /// Explicit clear of all brush corrections — pre-state in `stroke_undo_stack`
-    /// (same shape as Stroke; separate variant so the toast distinguishes
-    /// "Strokes restored" from "Stroke undone").
-    ClearStrokes,
     /// Process / inpaint dispatch result — pre-state in `history` / `redo_stack`
     /// (the result archive). Bounded by `MAX_HISTORY_DEPTH`, not
     /// `ACTION_HIST_DEPTH`; result entries are large.
@@ -289,9 +285,9 @@ pub(crate) struct BatchItem {
     /// Redo counterpart — cleared on a fresh preset apply, fed by undos.
     pub(crate) preset_redo_stack: VecDeque<PresetSnapshot>,
     /// Per-item brush correction. The hash for the recipe diff lives on
-    /// `settings.correction_hash` (set in lockstep by `commit_correction`
-    /// / `clear_correction`); never mutate the `Arc<MaskCorrection>` from
-    /// outside those mutators or the recipe-diff dispatch breaks.
+    /// `settings.correction_hash` (set in lockstep by `commit_correction`);
+    /// never mutate the `Arc<MaskCorrection>` from outside that mutator
+    /// or the recipe-diff dispatch breaks.
     pub(crate) mask_correction: Option<Arc<prunr_core::brush::MaskCorrection>>,
     /// Snapshot of the last correction that was actually dispatched
     /// for inpainting. Set by `dispatch_inpaint_for_item` on each
@@ -378,20 +374,6 @@ impl BatchItem {
         let current = Arc::make_mut(arc);
         prunr_core::brush::merge(current, &strokes);
         self.settings.correction_hash = Some(prunr_core::brush::content_hash(current));
-    }
-
-    /// Drop the brush correction. Reversible via `undo_stroke`.
-    /// Pushes a `ClearStrokes` marker onto the action timeline so the
-    /// undo toast labels the wipe correctly.
-    pub(crate) fn clear_correction(&mut self) {
-        if self.mask_correction.is_some() {
-            let pre = self.mask_correction.clone();
-            push_stroke_bounded(&mut self.stroke_undo_stack, pre);
-            self.stroke_redo_stack.clear();
-            self.push_action_marker(ActionType::ClearStrokes);
-        }
-        self.mask_correction = None;
-        self.settings.correction_hash = None;
     }
 
     /// Internal-only post-stroke cleanup. Drops `mask_correction` and
@@ -1036,29 +1018,6 @@ mod tests {
     }
 
     #[test]
-    fn clear_correction_pushes_undo_when_correction_existed() {
-        let mut item = fixture_item(1);
-        item.commit_correction(stamp(8, 8, 5, 50));
-        let undo_before_clear = item.stroke_undo_stack.len();
-        item.clear_correction();
-        assert!(item.mask_correction.is_none());
-        assert_eq!(
-            item.stroke_undo_stack.len(),
-            undo_before_clear + 1,
-            "clear must record an undoable snapshot of the correction it dropped"
-        );
-        assert!(item.undo_stroke(), "the user can undo a clear");
-        assert!(item.mask_correction.is_some());
-    }
-
-    #[test]
-    fn clear_correction_no_op_when_already_empty() {
-        let mut item = fixture_item(1);
-        item.clear_correction();
-        assert!(!item.has_stroke_undo(), "clearing an already-empty correction must not push undo");
-    }
-
-    #[test]
     fn commit_correction_writes_hash_to_settings() {
         let mut item = fixture_item(1);
         assert!(item.settings.correction_hash.is_none());
@@ -1067,15 +1026,6 @@ mod tests {
             item.settings.correction_hash.is_some(),
             "settings.correction_hash must mirror the new correction's hash"
         );
-    }
-
-    #[test]
-    fn clear_correction_clears_settings_hash() {
-        let mut item = fixture_item(1);
-        item.commit_correction(stamp(8, 8, 5, 50));
-        assert!(item.settings.correction_hash.is_some());
-        item.clear_correction();
-        assert!(item.settings.correction_hash.is_none(), "clear must wipe the hash too");
     }
 
     #[test]
@@ -1103,25 +1053,6 @@ mod tests {
             "commit_correction must push a Stroke marker onto actions_undo");
         assert!(item.actions_redo.is_empty(),
             "commit_correction must clear actions_redo — new edit branches the timeline");
-    }
-
-    #[test]
-    fn clear_correction_pushes_clear_strokes_marker() {
-        let mut item = fixture_item(1);
-        item.commit_correction(stamp(8, 8, 5, 50));
-        // Drain the marker committed_correction left so we can test clear_correction cleanly.
-        item.actions_undo.clear();
-        item.clear_correction();
-        assert_eq!(item.actions_undo.back(), Some(&ActionType::ClearStrokes),
-            "clear_correction must push a ClearStrokes marker");
-    }
-
-    #[test]
-    fn clear_correction_no_op_when_empty_does_not_push_marker() {
-        let mut item = fixture_item(1);
-        item.clear_correction();
-        assert!(item.actions_undo.is_empty(),
-            "clear_correction on empty correction must not push any marker");
     }
 
     #[test]
