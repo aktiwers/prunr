@@ -92,7 +92,7 @@ pub struct BrushSettings {
 
 /// SD eraser scheduler choice. Wired into `SdInpaintRequest` at
 /// dispatch time so the worker picks the right denoise math.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SdScheduler {
     /// LCM-distilled multistep. 4-8 steps typical.
     Lcm,
@@ -282,9 +282,9 @@ pub(crate) fn default_cfg() -> f32 { 1.5 }
 /// via "seamless continuation"); aggressive on the negative (block
 /// SD-1.5 failure modes, especially text-shape glyphs which fire on
 /// weak conditioning).
-pub(crate) const DEFAULT_SD_PROMPT: &str =
+pub const DEFAULT_SD_PROMPT: &str =
     "seamless continuation of the surroundings, matching style, high quality";
-pub(crate) const DEFAULT_SD_NEGATIVE_PROMPT: &str =
+pub const DEFAULT_SD_NEGATIVE_PROMPT: &str =
     "text, letters, words, watermark, signature, logo, blurry, distorted, \
      low quality, oversaturated, jpeg artifacts";
 fn default_sd_prompt() -> String { DEFAULT_SD_PROMPT.to_string() }
@@ -608,6 +608,29 @@ mod tests {
         // built-ins). The UI reads detect_from on every render so
         // this is reported correctly to the dropdown.
         assert_eq!(SdQualityPreset::detect_from(&s), SdQualityPreset::Custom);
+    }
+
+    /// Forward-compat tripwire: a JSON literal with only `{"radius":24}`
+    /// must deserialize into a fully-defaulted `BrushSettings`. Pins
+    /// CONTEXT.md `### Boundary tests` row 5 (Phase 29) — preset files
+    /// produced by older binaries that lack SD-tuning fields keep
+    /// loading after this phase ships.
+    #[test]
+    fn brush_settings_loads_with_only_radius() {
+        let s: BrushSettings = serde_json::from_str(r#"{"radius":24}"#)
+            .expect("BrushSettings must deserialize from a single-field JSON literal");
+        assert!((s.radius - 24.0).abs() < f32::EPSILON);
+        assert_eq!(s.sd_use_taesd, None);
+        assert_eq!(s.sd_seed, None);
+        assert_eq!(s.sd_steps, 8);
+        assert!(!s.sd_use_karras_sigmas);
+        assert_eq!(s.sd_scheduler, SdScheduler::Lcm);
+        assert!((s.sd_strength - 1.0).abs() < f32::EPSILON);
+        assert!((s.sd_guidance_scale - 1.5).abs() < f32::EPSILON);
+        assert_eq!(s.sd_prompt, DEFAULT_SD_PROMPT);
+        assert_eq!(s.sd_negative_prompt, DEFAULT_SD_NEGATIVE_PROMPT);
+        assert!((s.inpaint_feather - 4.0).abs() < f32::EPSILON);
+        assert!((s.inpaint_grow - 2.0).abs() < f32::EPSILON);
     }
 
     #[test]

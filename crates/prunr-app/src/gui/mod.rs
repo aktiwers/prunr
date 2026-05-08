@@ -8,6 +8,7 @@ pub mod processor;
 pub mod state;
 pub mod settings;
 pub mod item_settings;
+pub mod presets;
 pub mod presets_fs;
 pub mod worker;
 pub mod inpaint_bridge;
