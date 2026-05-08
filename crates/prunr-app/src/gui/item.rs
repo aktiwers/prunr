@@ -22,9 +22,17 @@ pub(crate) const ACTION_HIST_DEPTH: usize = 100;
 /// to the matching stack's pop method; `handle_redo` mirrors via `actions_redo`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ActionType {
+    /// Brush stroke commit — pre-state lives in `stroke_undo_stack`.
     Stroke,
+    /// Explicit clear of all brush corrections — pre-state in `stroke_undo_stack`
+    /// (same shape as Stroke; separate variant so the toast distinguishes
+    /// "Strokes restored" from "Stroke undone").
     ClearStrokes,
+    /// Process / inpaint dispatch result — pre-state in `history` / `redo_stack`
+    /// (the result archive). Bounded by `MAX_HISTORY_DEPTH`, not
+    /// `ACTION_HIST_DEPTH`; result entries are large.
     Result,
+    /// Preset apply — pre-state in `preset_undo_stack` / `preset_redo_stack`.
     PresetApply,
 }
 
@@ -39,9 +47,13 @@ pub(crate) fn push_action_bounded(stack: &mut VecDeque<ActionType>, kind: Action
 }
 
 
-/// Cap on `stroke_undo_stack` / `stroke_redo_stack` length. Each entry
-/// is `Option<Arc<MaskCorrection>>` (one refcount bump); bounded to match
-/// the ordering layer so stacks never grow past the action log depth.
+/// Per-item brush stroke history depth. Bounded to match `ACTION_HIST_DEPTH`
+/// (the ordering layer cap) so the ordering log and stroke stack stay in sync.
+/// Memory: each entry is `Option<Arc<MaskCorrection>>`; at SD-1.5 latent dims
+/// (64×64×i8) that's ~16 KB per snapshot, ~1.6 MB peak per item at this cap.
+/// At full source-image dims (e.g. 2048×2048 LaMa) entries are ~4 MB; a 100-
+/// deep stack peaks at ~400 MB per item — the user's trade for a generous undo
+/// depth on hi-res content.
 const STROKE_HISTORY_DEPTH: usize = ACTION_HIST_DEPTH;
 
 fn push_stroke_bounded(
