@@ -179,14 +179,14 @@ impl From<SdScheduler> for prunr_core::inpaint_sd::SchedulerKind {
 /// of bug.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum SdQualityPreset {
-    /// LCM @ 4 steps, CFG=1.0 — instant preview tier.
+    /// LCM @ 4 steps, CFG=1.0, mask_blur=4 — instant preview tier.
     Fast,
-    /// LCM @ 8 steps, CFG=1.5 — current shipped default. Good balance
-    /// of speed + quality on iGPU.
+    /// LCM @ 8 steps, CFG=1.5, mask_blur=4 — current shipped default.
+    /// Good balance of speed + quality on iGPU.
     Balanced,
-    /// DPM++ 2M Karras @ 25 steps, CFG=4.0 — best quality. Requires
-    /// the DPM++ scheduler to be available (`is_available()`); UI
-    /// gates picking and dispatch falls back to LCM otherwise.
+    /// DPM++ 2M Karras @ 25 steps, CFG=4.0, mask_blur=6 — best quality.
+    /// Requires the DPM++ scheduler to be available (`is_available()`);
+    /// UI gates picking and dispatch falls back to LCM otherwise.
     Quality,
     /// Computed: current brush values don't match any built-in.
     /// Never an input to `apply_to` — it has no bundled config.
