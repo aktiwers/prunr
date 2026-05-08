@@ -21,7 +21,9 @@ const PREVIEW_SIZE: f32 = 80.0;
 /// Maximum inpaint_feather value exposed in the UI, used to normalize
 /// the hardness-reduction preview. At feather=INPAINT_FEATHER_MAX the
 /// stamp's effective hardness is cut in half — visualizes the soft-edge
-/// effect without rendering a literal Gaussian.
+/// effect approximately. (Production uses an edge-preserving guided
+/// filter, not a literal Gaussian — the preview just gives the user a
+/// rough sense of how the slider value affects the boundary.)
 const INPAINT_FEATHER_MAX: f32 = 32.0;
 const FEATHER_HARDNESS_REDUCTION_CAP: f32 = 0.5;
 
@@ -100,7 +102,7 @@ pub(super) fn render(
                         |v| format!("{v:.0} px"),
                     );
                     outcome.committed |= f.commit;
-                    super::hint(ui, "Composite-time Gaussian blend at the boundary. Higher values give smoother transitions. Default 4 px matches A1111 / ComfyUI canonical behavior.");
+                    super::hint(ui, "Width of the edge-blend band at the inpaint boundary, in pixels. Higher = smoother transition between model output and surroundings. Edge-preserving (guided filter, color-matched against the source ring). Default 4 px.");
                     ui.add_space(4.0);
                     // Sharpen displays as 0-100% on a 0-2 internal range.
                     let sh = chip::slider_row_f32(
