@@ -803,8 +803,22 @@ impl PrunrApp {
         // Bridge → inpaint_rx fan-in must run before the drain.
         self.processor.pump_inpaint_subprocess();
         let (results, cancelled, errors) = self.processor.drain_inpaint_results();
-        for _ in &cancelled {
+        // For each cancelled stroke: roll back the committed
+        // mask_correction + drop its Stroke marker so the cancelled
+        // stroke doesn't ghost on canvas, accumulate into the next
+        // commit, or pollute the undo timeline. The user's mental
+        // model is "cancel = the stroke never happened."
+        let cancelled_count = cancelled.len();
+        for &item_id in &cancelled {
+            if let Some(item) = self.batch.find_by_id_mut(item_id) {
+                item.revert_last_stroke_commit();
+            }
             self.toasts.info("Erase cancelled");
+        }
+        if cancelled_count > 0 {
+            // Repaint so the brush overlay clears even if no result
+            // landed this frame.
+            ctx.request_repaint();
         }
         for msg in &errors {
             // Show the worker's message verbatim — the SD RAM-guard
