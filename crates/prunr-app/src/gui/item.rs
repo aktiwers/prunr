@@ -396,6 +396,31 @@ impl BatchItem {
         self.settings.correction_hash = None;
     }
 
+    /// Roll back the most-recent `commit_correction` as if it never
+    /// happened. Used when an inpaint dispatch is cancelled before
+    /// its result lands — the committed `mask_correction` is the
+    /// input that would have driven the dispatch, so reverting both
+    /// the state AND the matching `ActionType::Stroke` marker
+    /// prevents the cancelled stroke from:
+    ///   - rendering as a ghost brush overlay on canvas, OR
+    ///   - accumulating into the next stroke commit, OR
+    ///   - showing up as a phantom Cmd+Z entry in the action timeline.
+    /// Differs from `undo_stroke`: no redo push (cancel is final, not
+    /// reversible) and explicitly drops the action marker.
+    pub(crate) fn revert_last_stroke_commit(&mut self) {
+        if let Some(prev) = self.stroke_undo_stack.pop_back() {
+            self.set_correction(prev);
+        }
+        // Pop the matching marker. rposition handles edge cases where
+        // a non-Stroke action was pushed between the commit and the
+        // cancel — unlikely with current code paths but defensive.
+        if let Some(idx) = self.actions_undo.iter().rposition(
+            |a| matches!(a, ActionType::Stroke),
+        ) {
+            self.actions_undo.remove(idx);
+        }
+    }
+
     /// Pop the last stroke snapshot, push the current state onto the
     /// redo stack, and apply the snapshot. Returns `true` if anything
     /// changed (caller invalidates result caches and re-dispatches).
@@ -908,6 +933,47 @@ mod tests {
         item.commit_correction(stamp(8, 8, 5, 50));
         assert!(item.has_stroke_undo(), "first stroke must register an undo entry (pre = None)");
         assert!(!item.has_stroke_redo());
+    }
+
+    /// Cancel-mid-process cleanup. After commit_correction the item
+    /// holds the merged stroke + a Stroke marker on the action timeline.
+    /// If the dispatch is cancelled, revert_last_stroke_commit must
+    /// remove BOTH so the next stroke starts fresh and Cmd+Z doesn't
+    /// see a phantom action.
+    #[test]
+    fn revert_last_stroke_commit_clears_state_and_marker() {
+        let mut item = fixture_item(1);
+        item.commit_correction(stamp(8, 8, 5, 50));
+        assert!(item.mask_correction.is_some(), "post-commit mask_correction is set");
+        assert_eq!(item.actions_undo.len(), 1, "post-commit Stroke marker pushed");
+        assert!(matches!(item.actions_undo.back(), Some(ActionType::Stroke)));
+
+        item.revert_last_stroke_commit();
+        assert!(item.mask_correction.is_none(), "mask_correction reverted to pre-stroke state (None)");
+        assert!(
+            !item.actions_undo.iter().any(|a| matches!(a, ActionType::Stroke)),
+            "Stroke marker dropped — cancelled stroke must not appear in the undo timeline",
+        );
+        assert!(item.stroke_redo_stack.is_empty(), "no redo entry — cancel is final, not reversible");
+    }
+
+    /// Two committed strokes, the second one cancelled. Revert removes
+    /// only the most-recent stroke's state + marker; the first survives.
+    #[test]
+    fn revert_last_stroke_commit_only_pops_the_most_recent() {
+        let mut item = fixture_item(1);
+        item.commit_correction(stamp(8, 8, 5, 50));
+        let after_first = item.mask_correction.clone();
+        item.commit_correction(stamp(8, 8, 10, 70));
+        assert_ne!(item.mask_correction, after_first);
+        assert_eq!(item.actions_undo.len(), 2);
+
+        item.revert_last_stroke_commit();
+        assert_eq!(
+            item.mask_correction, after_first,
+            "revert restored the post-stroke-1 state — stroke 1 still in effect",
+        );
+        assert_eq!(item.actions_undo.len(), 1, "only the second Stroke marker dropped");
     }
 
     #[test]
