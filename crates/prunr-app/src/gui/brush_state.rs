@@ -102,8 +102,7 @@ pub enum SdScheduler {
     /// baseline. 20-30 steps typical.
     Ddim,
     /// DPM-Solver++ 2M with Karras sigmas — modern Standard SD
-    /// default in A1111 / ComfyUI / InvokeAI. 15-25 steps. Not yet
-    /// wired to a dispatch backend; see `is_available()`.
+    /// default in A1111 / ComfyUI / InvokeAI. 15-25 steps.
     DpmPlusPlus2MKarras,
     /// UniPC predictor-corrector multistep — best quality at low step
     /// counts (8-12). Corrector solves a 2×2 system to compensate for
@@ -271,7 +270,8 @@ impl SdQualityPreset {
 
 fn default_feather() -> f32 { 4.0 }
 fn default_grow() -> f32 { 2.0 }
-fn default_mask_blur() -> f32 { 4.0 }
+pub const DEFAULT_MASK_BLUR: f32 = 4.0;
+fn default_mask_blur() -> f32 { DEFAULT_MASK_BLUR }
 /// 1.5 matches the `Balanced` preset's CFG (LCM scheduler, CFG up to
 /// 2.0 per Diffusers LCM guidance — community consensus is values
 /// >2.0 degrade LCM output quality). For Standard SD via DDIM /

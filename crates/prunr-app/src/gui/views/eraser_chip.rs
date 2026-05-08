@@ -11,11 +11,11 @@ use egui_material_icons::icons::*;
 use crate::gui::brush_state::{
     BrushSettings, SdQualityPreset, SdScheduler,
     DEFAULT_SD_NEGATIVE_PROMPT, DEFAULT_SD_PROMPT,
+    DEFAULT_MASK_BLUR,
     default_cfg,
 };
 use crate::gui::theme;
-
-const DEFAULT_MASK_BLUR: f32 = 4.0;
+use prunr_core::inpaint_sd::{MASK_BLUR_MAX, MASK_BLUR_OFF_THRESHOLD};
 
 use super::chip::{self, ChipMeta};
 
@@ -81,10 +81,10 @@ fn render_mask_blur_chip(ui: &mut egui::Ui, brush: &mut BrushSettings) -> bool {
             tooltip: "Mask edge softness (px)",
         },
         &mut brush.sd_mask_blur,
-        0.0..=16.0,
+        0.0..=MASK_BLUR_MAX,
         DEFAULT_MASK_BLUR,
         false,
-        |v| if v < 0.5 { "Off".to_string() } else { format!("{v:.0} px") },
+        |v| if v < MASK_BLUR_OFF_THRESHOLD { "Off".to_string() } else { format!("{v:.0} px") },
     );
     change.commit
 }
