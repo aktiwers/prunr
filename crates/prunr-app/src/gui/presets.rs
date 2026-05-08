@@ -156,12 +156,37 @@ impl SdSchedulerBundle {
 }
 
 /// Resolved view of `(file, model, scheduler)` — the values the GUI
-/// applies right now. `item_settings` populates the active item's
-/// settings; `brush` populates `Settings.brush`.
+/// applies right now.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ResolvedView {
     pub item_settings: ItemSettings,
     pub brush: BrushSettings,
+}
+
+/// Overwrite the SD-tuning fields of `brush` from `sd` + the chosen
+/// scheduler's bundle. Shared between `resolve_preset_for_model` and
+/// `fuse_brush_for_apply` — the only two paths that materialise SD
+/// state from a stored `SdPreset` into a live `BrushSettings`.
+fn apply_sd_to_brush(
+    brush: &mut BrushSettings,
+    sd: &SdPreset,
+    scheduler: Option<SdScheduler>,
+) {
+    let chosen = scheduler.unwrap_or(sd.active_scheduler);
+    let bundle = sd
+        .schedulers
+        .get(&chosen)
+        .copied()
+        .unwrap_or_else(|| SdSchedulerBundle::default_for(chosen));
+    brush.sd_scheduler = chosen;
+    brush.sd_steps = bundle.steps;
+    brush.sd_guidance_scale = bundle.guidance_scale;
+    brush.sd_use_karras_sigmas = bundle.use_karras_sigmas;
+    brush.sd_strength = bundle.strength;
+    brush.sd_prompt = sd.prompt.clone();
+    brush.sd_negative_prompt = sd.negative_prompt.clone();
+    brush.sd_seed = sd.seed;
+    brush.sd_use_taesd = sd.use_taesd;
 }
 
 /// Resolve a preset to live values for the given model.
@@ -184,22 +209,7 @@ pub(crate) fn resolve_preset_for_model(
     if model.is_sd_family() {
         let sd_default = SdPreset::default();
         let sd = mp.and_then(|m| m.sd.as_ref()).unwrap_or(&sd_default);
-        let chosen = scheduler.unwrap_or(sd.active_scheduler);
-        let bundle = sd
-            .schedulers
-            .get(&chosen)
-            .copied()
-            .unwrap_or_else(|| SdSchedulerBundle::default_for(chosen));
-
-        brush.sd_scheduler = chosen;
-        brush.sd_steps = bundle.steps;
-        brush.sd_guidance_scale = bundle.guidance_scale;
-        brush.sd_use_karras_sigmas = bundle.use_karras_sigmas;
-        brush.sd_strength = bundle.strength;
-        brush.sd_prompt = sd.prompt.clone();
-        brush.sd_negative_prompt = sd.negative_prompt.clone();
-        brush.sd_seed = sd.seed;
-        brush.sd_use_taesd = sd.use_taesd;
+        apply_sd_to_brush(&mut brush, sd, scheduler);
     }
 
     ResolvedView { item_settings, brush }
@@ -240,27 +250,14 @@ pub(crate) fn split_brush_for_save(
 /// `ModelPreset`. `scheduler = Some(_)` overrides `sd.active_scheduler`
 /// so an in-session scheduler swap can pick a different bundle without
 /// mutating the preset.
-pub(crate) fn fuse_brush_for_apply(
+pub(super) fn fuse_brush_for_apply(
     mp: &ModelPreset,
     scheduler: Option<SdScheduler>,
 ) -> BrushSettings {
     let mut brush = mp.brush.clone();
-    let Some(sd) = mp.sd.as_ref() else { return brush };
-    let chosen = scheduler.unwrap_or(sd.active_scheduler);
-    let bundle = sd
-        .schedulers
-        .get(&chosen)
-        .copied()
-        .unwrap_or_else(|| SdSchedulerBundle::default_for(chosen));
-    brush.sd_scheduler = chosen;
-    brush.sd_steps = bundle.steps;
-    brush.sd_guidance_scale = bundle.guidance_scale;
-    brush.sd_use_karras_sigmas = bundle.use_karras_sigmas;
-    brush.sd_strength = bundle.strength;
-    brush.sd_prompt = sd.prompt.clone();
-    brush.sd_negative_prompt = sd.negative_prompt.clone();
-    brush.sd_seed = sd.seed;
-    brush.sd_use_taesd = sd.use_taesd;
+    if let Some(sd) = mp.sd.as_ref() {
+        apply_sd_to_brush(&mut brush, sd, scheduler);
+    }
     brush
 }
 
