@@ -201,13 +201,20 @@ fn draw_preview(ui: &mut Ui, settings: &BrushSettings) {
         BrushMode::Subtract => (230, 150, 150),
     };
 
+    // Preview only — actual inference applies a Gaussian blur per the
+    // mask_blur sigma; this visually hints at the effect by softening
+    // the falloff edge proportional to mask_blur (up to ~50% reduction
+    // at max blur = 16 px).
+    let mask_blur_norm = (settings.sd_mask_blur / 16.0).clamp(0.0, 1.0);
+    let effective_hardness = (settings.hardness * (1.0 - 0.5 * mask_blur_norm)).clamp(0.0, 1.0);
+
     let color = Color32::from_rgb(cr, cg, cb);
     match settings.shape {
         BrushShape::Circle => {
-            chip::paint_falloff_circle(ui.painter(), center, r, settings.hardness, color, 220, 14);
+            chip::paint_falloff_circle(ui.painter(), center, r, effective_hardness, color, 220, 14);
         }
         BrushShape::Square => {
-            chip::paint_falloff_square(ui.painter(), center, r, settings.hardness, color, 220, 10);
+            chip::paint_falloff_square(ui.painter(), center, r, effective_hardness, color, 220, 10);
         }
         BrushShape::Line => {
             let half = max_r - 4.0;
