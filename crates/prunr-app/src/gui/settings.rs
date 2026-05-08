@@ -293,6 +293,60 @@ impl Settings {
             .unwrap_or_default()
     }
 
+    /// Resolve the active preset to the live `ResolvedView` for the
+    /// active model. `scheduler = None` uses the preset's stored
+    /// `active_scheduler` for SD; `Some(_)` overrides — used by the
+    /// scheduler-change-within-SD handler so a bundle swap doesn't
+    /// rewrite the preset on disk.
+    ///
+    /// Falls back to Prunr (factory defaults) at every level: missing
+    /// preset, missing model entry, missing scheduler bundle.
+    pub(crate) fn resolve_active_preset(
+        &self,
+        scheduler: Option<super::brush_state::SdScheduler>,
+    ) -> super::presets::ResolvedView {
+        let empty = super::presets::PresetFile::default();
+        let file = if self.default_preset == PRUNR_PRESET {
+            &empty
+        } else {
+            self.presets.get(&self.default_preset).unwrap_or(&empty)
+        };
+        let model_id = self.model.to_model_id()
+            .or_else(|| Self::default().model.to_model_id())
+            .expect("Settings::default().model always has a model_id");
+        super::presets::resolve_preset_for_model(file, model_id, scheduler)
+    }
+
+    /// Re-resolve `Settings.brush` from the active preset's per-model
+    /// values for the active model_id. Called after the model dropdown
+    /// flips so the brush state swaps with the model. Item-level
+    /// `ItemSettings` already swap via the existing per-item path; this
+    /// only handles the global brush state.
+    pub fn on_model_change_resolve_brush(&mut self) {
+        let resolved = self.resolve_active_preset(None);
+        self.brush = resolved.brush;
+    }
+
+    /// Update only the SD-tuning fields on `Settings.brush` to match
+    /// the active preset's bundle for `scheduler`. Called from the
+    /// SD-popover scheduler-change handler — non-SD brush fields stay
+    /// owned by the brush popover.
+    pub fn on_scheduler_change_resolve_sd(
+        &mut self,
+        scheduler: super::brush_state::SdScheduler,
+    ) {
+        let resolved = self.resolve_active_preset(Some(scheduler));
+        self.brush.sd_scheduler = resolved.brush.sd_scheduler;
+        self.brush.sd_steps = resolved.brush.sd_steps;
+        self.brush.sd_guidance_scale = resolved.brush.sd_guidance_scale;
+        self.brush.sd_use_karras_sigmas = resolved.brush.sd_use_karras_sigmas;
+        self.brush.sd_strength = resolved.brush.sd_strength;
+        self.brush.sd_prompt = resolved.brush.sd_prompt.clone();
+        self.brush.sd_negative_prompt = resolved.brush.sd_negative_prompt.clone();
+        self.brush.sd_seed = resolved.brush.sd_seed;
+        self.brush.sd_use_taesd = resolved.brush.sd_use_taesd;
+    }
+
     /// ItemSettings template for new batch items — the default_preset's
     /// values, with any `PRUNR_*` knob env-var overrides applied on top
     /// (test-harness only; production env is empty).
@@ -741,6 +795,65 @@ mod tests {
         let mut s = Settings::default();
         s.brush.sd_scheduler = SdScheduler::Lcm;
         assert!(!s.lcm_routing_active(prunr_models::ModelId::LaMaFp32));
+    }
+
+    #[test]
+    fn resolve_active_preset_returns_prunr_floor_when_default_preset_is_prunr() {
+        let s = Settings::default();
+        let r = s.resolve_active_preset(None);
+        assert_eq!(r.item_settings, ItemSettings::default());
+        assert_eq!(r.brush, super::BrushSettings::default());
+    }
+
+    #[test]
+    fn resolve_active_preset_returns_named_preset_values() {
+        let mut s = Settings::default();
+        s.model = SettingsModel::Silueta;
+        let mut brush = super::BrushSettings::default();
+        brush.radius = 80.0;
+        let mp = super::super::presets::ModelPreset {
+            item_settings: item_with_gamma(2.0),
+            brush,
+            sd: None,
+        };
+        let mut models = HashMap::new();
+        models.insert(super::super::presets::model_id_key(prunr_models::ModelId::Silueta), mp);
+        let file = super::super::presets::PresetFile {
+            format_version: super::super::presets::PRESET_FORMAT_VERSION,
+            models,
+        };
+        s.presets.insert("Foo".to_string(), file);
+        s.default_preset = "Foo".to_string();
+
+        let r = s.resolve_active_preset(None);
+        assert!((r.item_settings.gamma - 2.0).abs() < f32::EPSILON);
+        assert!((r.brush.radius - 80.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn resolve_active_preset_returns_prunr_when_named_preset_missing_model_entry() {
+        let mut s = Settings::default();
+        s.model = SettingsModel::U2net;
+        let mut brush = super::BrushSettings::default();
+        brush.radius = 80.0;
+        let mp = super::super::presets::ModelPreset {
+            item_settings: item_with_gamma(2.0),
+            brush,
+            sd: None,
+        };
+        let mut models = HashMap::new();
+        // Foo only has a Silueta entry; active model is U2net.
+        models.insert(super::super::presets::model_id_key(prunr_models::ModelId::Silueta), mp);
+        let file = super::super::presets::PresetFile {
+            format_version: super::super::presets::PRESET_FORMAT_VERSION,
+            models,
+        };
+        s.presets.insert("Foo".to_string(), file);
+        s.default_preset = "Foo".to_string();
+
+        let r = s.resolve_active_preset(None);
+        assert_eq!(r.item_settings, ItemSettings::default());
+        assert_eq!(r.brush, super::BrushSettings::default());
     }
 
     #[test]

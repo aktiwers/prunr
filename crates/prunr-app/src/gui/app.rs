@@ -2969,7 +2969,8 @@ impl PrunrApp {
                 );
             });
         if toolbar_change.reset_brush_requested {
-            self.settings.brush.reset_popover_fields();
+            let resolved = self.settings.resolve_active_preset(None);
+            self.settings.brush.reset_popover_fields_from(&resolved.brush);
         }
         self.apply_toolbar_change(ui.ctx(), toolbar_change, pre_apply_snapshot);
     }

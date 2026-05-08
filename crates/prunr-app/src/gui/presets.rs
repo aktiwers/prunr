@@ -694,6 +694,59 @@ mod tests {
     }
 
     #[test]
+    fn reset_button_parity_top_right_matches_brush_popover_subset() {
+        use prunr_core::brush::{BrushMode, BrushShape};
+        let preset_brush = BrushSettings {
+            radius: 80.0,
+            hardness: 0.3,
+            mode: BrushMode::Add,
+            shape: BrushShape::Square,
+            inpaint_grow: 5.0,
+            inpaint_feather: 6.0,
+            inpaint_sharpen: 1.5,
+            ..BrushSettings::default()
+        };
+        let mp = ModelPreset {
+            item_settings: ItemSettings::default(),
+            brush: preset_brush.clone(),
+            sd: None,
+        };
+        let mut file = PresetFile::default();
+        file.models.insert(model_id_key(ModelId::Silueta), mp);
+
+        // (a) Top-right ↻ path: full re-resolve via the resolver. Brush
+        //     comes back exactly as the preset stored it.
+        let top_right_path_brush =
+            resolve_preset_for_model(&file, ModelId::Silueta, None).brush;
+
+        // (b) Brush popover Reset path: caller has a live `Settings.brush`
+        //     with a user mutation (radius=10) and resets the popover-visible
+        //     subset using the resolver's brush as the source.
+        let mut live_brush = BrushSettings::default();
+        live_brush.radius = 10.0;
+        let mut popover_target = live_brush.clone();
+        popover_target.reset_popover_fields_from(&top_right_path_brush);
+
+        // Parity: every popover-visible knob agrees between the two paths.
+        assert!((top_right_path_brush.radius - 80.0).abs() < f32::EPSILON);
+        assert!((popover_target.radius - top_right_path_brush.radius).abs() < f32::EPSILON);
+        assert!((popover_target.hardness - top_right_path_brush.hardness).abs() < f32::EPSILON);
+        assert_eq!(popover_target.shape, top_right_path_brush.shape);
+        assert!(
+            (popover_target.inpaint_grow - top_right_path_brush.inpaint_grow).abs()
+                < f32::EPSILON,
+        );
+        assert!(
+            (popover_target.inpaint_feather - top_right_path_brush.inpaint_feather).abs()
+                < f32::EPSILON,
+        );
+        assert!(
+            (popover_target.inpaint_sharpen - top_right_path_brush.inpaint_sharpen).abs()
+                < f32::EPSILON,
+        );
+    }
+
+    #[test]
     fn split_then_fuse_round_trips_sd_model() {
         let original = BrushSettings {
             radius: 33.0,
