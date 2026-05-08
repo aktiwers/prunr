@@ -528,38 +528,20 @@ fn run_one_tile(
     let padded_image = pad_to_tile(image);
     let padded_mask = pad_mask_to_tile(mask);
 
-    // Soft mask boundary: blur the mask before encoding so the UNet
-    // sees a gradient [0→1] at the stroke edge instead of a hard cliff.
-    // The model interprets this as "blend toward what's already here"
-    // near the edge, eliminating the lighting/color mismatch seam.
-    // Below MASK_BLUR_OFF_THRESHOLD there is no visible boundary
-    // softening at the SD-1.5 latent resolution; skip the blur so
-    // dispatch state matches the UI "Off" label.
-    // fast_blur is a 3-pass box-filter approximation (~3-4× faster,
-    // visually near-identical at typical UI radii). The mask feeds the
-    // latent-space gradient, not photographic output — fast_blur is
-    // the right choice here, matching the sister-file pattern in
-    // postprocess.rs.
-    // Phase 3 fix: split mask handling. The mask conditioning channel
-    // (mask_to_latent) gets the BLURRED mask so the model sees a soft
-    // gradient at the boundary — that's the signal that produces the
-    // smooth-blend effect. The masked-image latent (vae_encode_masked)
-    // gets the ORIGINAL BINARY mask so the encoded image has a clean
-    // cliff between "preserve original" and "fully grey-filled" — a
-    // partial-alpha blend toward grey is out-of-distribution for the
-    // SD-1.5 inpaint UNet (trained on binary-zeroed masks) and the
-    // model treats grey-tinted inputs literally, producing a visible
-    // grey ghost where the boundary band is. A1111/ComfyUI's
-    // mask_blur does the same split.
+    // Both VAE-encode and mask-to-latent receive the binary mask.
+    // SD-1.5 inpaint UNet was trained exclusively on binary masks;
+    // fractional values in either channel are out-of-distribution
+    // and produce inconsistent results. Composite-time softness
+    // (inpaint_feather) is the canonical mechanism — see
+    // .planning/research/MASK-BLUR-CANONICAL-COMPARISON.md.
     let blurred_padded_mask: Option<GrayImage> = if req.mask_blur >= MASK_BLUR_OFF_THRESHOLD {
         Some(image::imageops::fast_blur(&*padded_mask, req.mask_blur))
     } else {
         None
     };
-    let mask_for_image: &GrayImage = &padded_mask;
-    let mask_for_conditioning: &GrayImage = blurred_padded_mask
-        .as_ref()
-        .unwrap_or(&padded_mask);
+    // blurred_padded_mask is unused now; kept to avoid a larger diff
+    // before the field is fully dropped in the cleanup commit.
+    let _ = &blurred_padded_mask;
 
     // CFG threshold: above 1.0 we run the UNet TWICE per step (cond +
     // uncond) and blend by `guidance_scale`. At ≤1.0 the cond pass is
@@ -578,8 +560,8 @@ fn run_one_tile(
                 let np = np.clone();
                 s.spawn(move || encode_text(bundle, &np))
             });
-            let vae_h = s.spawn(|| vae_encode_masked(vae, &padded_image, mask_for_image));
-            let mask_lat = mask_to_latent(mask_for_conditioning);
+            let vae_h = s.spawn(|| vae_encode_masked(vae, &padded_image, &padded_mask));
+            let mask_lat = mask_to_latent(&padded_mask);
             let cond = cond_h.join()
                 .map_err(|_| CoreError::Inference("text encoder (cond) thread panicked".into()))??;
             let uncond = match uncond_h {
