@@ -833,6 +833,7 @@ impl PrunrApp {
             sd_seed: bs.sd_seed,
             sd_strength: bs.sd_strength,
             sd_use_karras_sigmas: bs.sd_use_karras_sigmas,
+            sd_mask_blur: bs.sd_mask_blur,
         };
         // Stash so the Reprocess button stays enabled between strokes
         // (post-stroke clear nulls mask_correction, but we keep this

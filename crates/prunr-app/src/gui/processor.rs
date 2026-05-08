@@ -140,6 +140,9 @@ pub(crate) struct InpaintTuning {
     /// LCM-only: Karras sigma schedule. Default false (linear, matches
     /// distillation training).
     pub sd_use_karras_sigmas: bool,
+    /// SD-only: Gaussian blur sigma applied to mask before VAE encoding.
+    /// 0.0 = hard-cliff binary mask (original behavior).
+    pub sd_mask_blur: f32,
 }
 
 impl Default for InpaintTuning {
@@ -157,6 +160,7 @@ impl Default for InpaintTuning {
             sd_seed: None,
             sd_strength: 1.0,
             sd_use_karras_sigmas: false,
+            sd_mask_blur: 0.0,
         }
     }
 }
@@ -439,6 +443,7 @@ impl Processor {
                         scheduler,
                         strength: tuning.sd_strength,
                         use_karras_sigmas: tuning.sd_use_karras_sigmas,
+                        mask_blur: tuning.sd_mask_blur,
                     })
                 }
                 _ => None,
