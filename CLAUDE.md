@@ -238,6 +238,42 @@ Each layer has its own state-ownership rules. The **coordinator pattern** in the
 
 If you're editing `prunr-core`, `prunr-models`, `worker_process.rs`, or the subprocess IPC, **do not apply the GUI coordinator decision table** — it is scoped to the GUI layer only.
 
+## One source of truth — single routing method per user intent
+
+A user intent (Process, Undo, Save, Copy, Open, Cancel, …) can be
+triggered by multiple input surfaces — toolbar button, keyboard
+shortcut, menu item, programmatic call. The *routing logic* for that
+intent — gating, mode detection, dispatch selection — lives in **a
+single method** on `PrunrApp`. Each input surface is a thin shim that
+calls it.
+
+If the gate logic is more than a one-line boolean, also extract a
+`can_<intent>(&self) -> bool` mirror so the toolbar's
+`add_enabled(...)` reads the same predicate that the dispatch's
+early-return checks.
+
+Pattern:
+```rust
+pub fn handle_<intent>_intent(&mut self) { /* routing + dispatch */ }
+pub fn can_<intent>_intent(&self) -> bool { /* same gates as the early-returns */ }
+```
+
+Why: parallel routing across input surfaces drifts silently. Button
+gate falls behind keyboard's. Keyboard adds a check menu skips. Click
+vs shortcut vs menu produces three slightly different behaviours,
+manifesting only when the user changes input modality. Bisect-hostile.
+
+When NOT to extract: a single call site with no plans for additional
+bindings. The rule fires when **two or more** input surfaces trigger
+the same conceptual action.
+
+Examples:
+- `handle_undo` is one method called by both Cmd+Z and the undo
+  button. Adding Cmd+Shift+Z is one more line wiring to the same method.
+- Process button click and Cmd+R keyboard intent each had their own
+  inpaint-vs-seg branch with subtly different gates — fixed by
+  extracting `handle_process_intent` / `can_process_intent`.
+
 ## GUI state ownership (prunr-app/src/gui/)
 
 `PrunrApp` is a **coordinator**, not an owner. It holds UI visibility flags and handles to domain coordinators — not business logic.
