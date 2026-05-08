@@ -128,11 +128,11 @@ impl Default for ToolbarChange {
     }
 }
 
-/// Factory default values for per-chip reset. Per-chip reset sends the value
-/// back to ItemSettings::default() (not the user's default preset) — single
-/// knobs should reset predictably, independent of whatever preset is loaded.
-/// The separate "Reset all knobs" button below goes back to the default
-/// preset instead; that's the per-user "what I usually want" anchor.
+/// Per-chip kebab reset reverts ONE knob to ItemSettings::default()
+/// regardless of the active preset — predictable single-knob undo.
+/// The top-right ↻ button (above) is the OPPOSITE: it resolves
+/// EVERY knob (item_settings + brush + SD bundle) through the
+/// active preset's resolve_active_preset. Two scopes, two anchors.
 struct Defaults {
     template: ItemSettings,
     /// "Pick this when user toggles enabled" fallback for Option chips that
@@ -311,8 +311,11 @@ pub(crate) fn render(
                 );
                 let reset_resp = chip::icon_toggle_button(ui, ICON_RESTART_ALT.codepoint, false);
                 if reset_resp.on_hover_text(reset_tooltip).clicked() {
-                    *item_settings = app_settings.preset_values(&reset_target);
+                    let resolved = app_settings.resolve_active_preset(None);
+                    *item_settings = resolved.item_settings;
+                    app_settings.brush = resolved.brush;
                     *applied_preset = reset_target;
+                    change.brush_settings_committed = true;
                     mark_preset_apply(&mut change);
                 }
 
