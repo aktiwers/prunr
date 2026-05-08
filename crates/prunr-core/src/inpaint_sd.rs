@@ -74,18 +74,6 @@ const CLIP_SEQ_LEN: usize = 77;
 const CLIP_BOS: i64 = 49406;
 const CLIP_EOS: i64 = 49407;
 
-/// Threshold below which mask_blur is treated as "off" — sigma < 0.5
-/// produces no visible boundary softening at the SD-1.5 latent
-/// resolution but still pays the imageops::fast_blur cost. Both the
-/// dispatch (run_one_tile) and the UI ("Off" label in the chip) use
-/// this same threshold so user-visible state matches dispatch state.
-pub const MASK_BLUR_OFF_THRESHOLD: f32 = 0.5;
-
-/// Maximum mask_blur sigma exposed in the UI. Beyond this the
-/// blur radius approaches the entire stroke region; useful for
-/// extreme cases but rarely worth the loss of edge precision.
-pub const MASK_BLUR_MAX: f32 = 16.0;
-
 /// Inputs to one SD inpaint call. Constructable today with default
 /// fields for empty-prompt unconditional inpaint; future surfaces (text
 /// prompts, CFG, seeded variations) just set the relevant fields.
@@ -131,16 +119,6 @@ pub struct SdInpaintRequest {
     /// than a silent default.
     #[serde(default)]
     pub use_karras_sigmas: bool,
-    /// Gaussian blur sigma applied to the mask in source-pixel space
-    /// before VAE encoding. 0.0 = hard-cliff binary mask (original
-    /// behavior). 4-6 px is the SD-ecosystem default (A1111, ComfyUI,
-    /// InvokeAI all expose this). A soft mask boundary gives the UNet a
-    /// gradient [0→1] at the edge, forcing generated pixels to blend
-    /// toward the surrounding lighting/color and eliminating the
-    /// mismatch seam. Independent of inpaint_feather (composite-time
-    /// pixel blend) — this fixes the GENERATION step.
-    #[serde(default)]
-    pub mask_blur: f32,
 }
 
 fn default_strength() -> f32 { 1.0 }
@@ -157,7 +135,6 @@ impl Default for SdInpaintRequest {
             scheduler: SchedulerKind::Lcm,
             strength: default_strength(),
             use_karras_sigmas: false,
-            mask_blur: 0.0,
         }
     }
 }
@@ -528,20 +505,6 @@ fn run_one_tile(
     let padded_image = pad_to_tile(image);
     let padded_mask = pad_mask_to_tile(mask);
 
-    // Both VAE-encode and mask-to-latent receive the binary mask.
-    // SD-1.5 inpaint UNet was trained exclusively on binary masks;
-    // fractional values in either channel are out-of-distribution
-    // and produce inconsistent results. Composite-time softness
-    // (inpaint_feather) is the canonical mechanism — see
-    // .planning/research/MASK-BLUR-CANONICAL-COMPARISON.md.
-    let blurred_padded_mask: Option<GrayImage> = if req.mask_blur >= MASK_BLUR_OFF_THRESHOLD {
-        Some(image::imageops::fast_blur(&*padded_mask, req.mask_blur))
-    } else {
-        None
-    };
-    // blurred_padded_mask is unused now; kept to avoid a larger diff
-    // before the field is fully dropped in the cleanup commit.
-    let _ = &blurred_padded_mask;
 
     // CFG threshold: above 1.0 we run the UNet TWICE per step (cond +
     // uncond) and blend by `guidance_scale`. At ≤1.0 the cond pass is
@@ -1602,9 +1565,7 @@ fn extract_4d(value: &ort::value::DynValue, label: &str) -> Result<Array4<f32>, 
 /// value (≈ 0.0039 in [-1, 1]). Binary cliff is intentional — the
 /// SD-1.5 inpaint UNet was trained on binary-zeroed masked-image
 /// latents; partial-alpha blends toward grey at the boundary band
-/// produce a visible grey ghost at inference (the mask conditioning
-/// channel handles soft-boundary signaling separately, see
-/// run_one_tile's mask_for_conditioning split). `None` mask encodes
+/// produce a visible grey ghost at inference. `None` mask encodes
 /// the full image without any masking.
 fn image_to_minus1_plus1_inner(image: &RgbaImage, mask: Option<&GrayImage>) -> Array4<f32> {
     let s = SD_TILE as usize;
@@ -1635,9 +1596,8 @@ fn image_to_minus1_plus1_inner(image: &RgbaImage, mask: Option<&GrayImage>) -> A
                 // trained on binary-zeroed masked-image latents — a
                 // partial-alpha blend would put grey-tinted pixels at
                 // the boundary, which the model treats literally and
-                // outputs as a grey ghost. Soft-boundary signaling is
-                // done via the mask conditioning channel
-                // (`mask_to_latent` in `run_one_tile`), not here.
+                // outputs as a grey ghost. Composite-time softness is
+                // handled by inpaint_feather, not here.
                 if m[mask_row + x] > 127 {
                     buf[dst]             = v_fill;
                     buf[plane + dst]     = v_fill;
@@ -1694,21 +1654,11 @@ fn minus1_plus1_to_image(arr: &Array4<f32>) -> RgbaImage {
 /// Average-pool 8×8 → 1 (equivalent to `F.interpolate(mode="area")`
 /// in PyTorch, which is what Diffusers uses for mask preprocessing).
 ///
-/// Why average-pool, not nearest-neighbour center-sample: when
-/// `mask_blur > 0` the source mask has a fractional-alpha gradient
-/// band at the boundary. Center-sampling picks ONE pixel out of each
-/// 8×8 block, throwing away ~98% of the gradient information — the
-/// model receives only a sparse, jaggy gradient that confuses it
-/// (mask says "70% inpaint" while masked-image latent shows fully
-/// original, out-of-distribution from training). Average-pool
-/// preserves the gradient: each latent cell reflects the LOCAL
-/// average mask alpha within its 8×8 block.
-///
-/// For binary masks (mask_blur = 0) average-pool also produces a
-/// thin natural gradient at the boundary cells (e.g., a cell that
-/// straddles the mask edge averages to ~0.5). That's a small
-/// improvement over nearest-neighbour even before the user enables
-/// mask_blur.
+/// Why average-pool, not nearest-neighbour center-sample: even with
+/// a binary mask, cells that straddle the mask boundary average to
+/// ~0.5, preserving sub-block boundary precision in the latent mask.
+/// Center-sampling throws away that information, producing a jaggy
+/// latent boundary that doesn't faithfully represent the pixel mask.
 fn mask_to_latent(mask: &GrayImage) -> Array4<f32> {
     let l = SD_LATENT_SIDE as usize;
     let mut a = Array4::<f32>::zeros((1, 1, l, l));
@@ -4085,11 +4035,11 @@ mod tests {
 
     /// `image_to_minus1_plus1_masked` must use a binary cliff at byte
     /// 127, NOT a float-alpha blend. A blend toward mid-grey at
-    /// partial alpha values (which would happen if the blurred mask
-    /// were passed in here) produces visible grey-ghost artefacts at
+    /// partial alpha values produces visible grey-ghost artefacts at
     /// inference — the SD-1.5 inpaint UNet treats grey-tinted inputs
-    /// literally. Soft boundary signalling is done via the mask
-    /// conditioning channel (`mask_to_latent`), not here.
+    /// literally. Both the masked-image latent and mask_to_latent
+    /// receive the binary mask; composite-time softness goes through
+    /// inpaint_feather (Gaussian blur on the final alpha).
     #[test]
     fn image_to_minus1_plus1_masked_uses_binary_cliff_not_float_blend() {
         let img = RgbaImage::from_pixel(2, 1, image::Rgba([255, 0, 0, 255]));
@@ -4119,15 +4069,6 @@ mod tests {
     }
 
     #[test]
-    fn mask_blur_off_threshold_is_consistent_with_dispatch_gate() {
-        // Pin the contract: any sigma < threshold must NOT trigger blur,
-        // any sigma >= threshold MUST trigger blur. Sentinel test so the
-        // dispatch path and chip "Off" label stay aligned.
-        assert!(MASK_BLUR_OFF_THRESHOLD > 0.0);
-        assert!(MASK_BLUR_OFF_THRESHOLD < 1.0);
-    }
-
-    #[test]
     fn mask_to_latent_passes_through_gradient_values() {
         // Float pass-through contract: a uniform-128 mask must average-
         // pool to ~0.502 in every cell. Pins both the mid-gradient
@@ -4148,9 +4089,8 @@ mod tests {
     /// fully-masked half, ≈ 0.0 in the unmasked half, AND a single
     /// transition column at the midpoint reflecting the partial 8×8
     /// block coverage. Center-sample (the previous behaviour) would
-    /// produce a hard 0/1 step with no transition cell — throwing
-    /// away the boundary gradient information that the model needs
-    /// to interpret a soft mask correctly.
+    /// produce a hard 0/1 step with no transition cell — losing
+    /// sub-block boundary precision in the latent mask.
     #[test]
     fn mask_to_latent_average_pools_at_boundary_not_center_samples() {
         // Half/half binary mask: pixels 0..255 = 255, pixels 256..511 = 0.

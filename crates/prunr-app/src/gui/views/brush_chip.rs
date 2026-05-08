@@ -7,7 +7,6 @@ use egui::{Color32, Sense, Stroke, Ui};
 
 use crate::gui::brush_state::BrushSettings;
 use prunr_core::brush::{BrushMode, BrushShape};
-use prunr_core::inpaint_sd::MASK_BLUR_MAX;
 
 use super::chip;
 
@@ -19,10 +18,12 @@ const LABEL_PAD_WIDTH: f32 = 88.0;
 /// large brush still renders cleanly inside this box.
 const PREVIEW_SIZE: f32 = 80.0;
 
-/// Maximum reduction the mask_blur preview applies to hardness in the
-/// brush stamp render. At slider=MASK_BLUR_MAX, hardness is cut in half
-/// — visualizes the soft-edge effect without literal Gaussian.
-const MASK_BLUR_HARDNESS_REDUCTION_CAP: f32 = 0.5;
+/// Maximum inpaint_feather value exposed in the UI, used to normalize
+/// the hardness-reduction preview. At feather=INPAINT_FEATHER_MAX the
+/// stamp's effective hardness is cut in half — visualizes the soft-edge
+/// effect without rendering a literal Gaussian.
+const INPAINT_FEATHER_MAX: f32 = 32.0;
+const FEATHER_HARDNESS_REDUCTION_CAP: f32 = 0.5;
 
 #[derive(Default, Clone, Copy)]
 pub(super) struct BrushChipOutcome {
@@ -216,12 +217,11 @@ fn draw_preview(ui: &mut Ui, settings: &BrushSettings) {
         BrushMode::Subtract => (230, 150, 150),
     };
 
-    // Preview only — actual inference applies a fast_blur per the
-    // mask_blur sigma; this visually hints at the effect by softening
-    // the falloff edge proportional to mask_blur.
-    let mask_blur_norm = (settings.sd_mask_blur / MASK_BLUR_MAX).clamp(0.0, 1.0);
+    // Visually hint at the Edge softness setting by softening the
+    // falloff edge proportional to inpaint_feather.
+    let feather_norm = (settings.inpaint_feather / INPAINT_FEATHER_MAX).clamp(0.0, 1.0);
     let effective_hardness = (settings.hardness
-        * (1.0 - MASK_BLUR_HARDNESS_REDUCTION_CAP * mask_blur_norm))
+        * (1.0 - FEATHER_HARDNESS_REDUCTION_CAP * feather_norm))
         .clamp(0.0, 1.0);
 
     let color = Color32::from_rgb(cr, cg, cb);
