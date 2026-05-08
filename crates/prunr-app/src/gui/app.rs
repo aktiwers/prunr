@@ -605,8 +605,14 @@ impl PrunrApp {
     }
 
     /// Pop the most-recent marker from `actions_undo` for item at `idx` and
-    /// apply the inverse. Skips orphan markers (result stack rotated oldest
-    /// out) and tries the next one. Returns the popped ActionType on success.
+    /// apply the inverse. Returns the popped ActionType on success.
+    ///
+    /// The ordering log (`actions_undo`) is capped at `ACTION_HIST_DEPTH`, but
+    /// per-type stacks have their own caps — Result history is smaller because
+    /// each entry is a full RGBA archive. When the result stack rotates an
+    /// oldest entry out, the corresponding marker in `actions_undo` becomes an
+    /// orphan. The loop pops orphans silently and tries the next action rather
+    /// than reporting false failure.
     fn try_undo_one_action(&mut self, idx: usize, ctx: &egui::Context) -> Option<ActionType> {
         use super::item::push_action_bounded;
         loop {
@@ -654,13 +660,18 @@ impl PrunrApp {
                 push_action_bounded(&mut self.batch.items[idx].actions_redo, kind);
                 return Some(kind);
             }
-            // Orphan marker — per-type stack empty (result stack rotation).
-            // Try the next action in the timeline.
         }
     }
 
     /// Pop the most-recent marker from `actions_redo` for item at `idx` and
     /// re-apply. Returns the popped ActionType on success.
+    ///
+    /// The ordering log (`actions_redo`) is capped at `ACTION_HIST_DEPTH`, but
+    /// per-type stacks have their own caps — Result history is smaller because
+    /// each entry is a full RGBA archive. When the result stack rotates an
+    /// oldest entry out, the corresponding marker in `actions_redo` becomes an
+    /// orphan. The loop pops orphans silently and tries the next action rather
+    /// than reporting false failure.
     fn try_redo_one_action(&mut self, idx: usize, ctx: &egui::Context) -> Option<ActionType> {
         use super::item::push_action_bounded;
         loop {

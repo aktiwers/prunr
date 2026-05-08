@@ -162,8 +162,9 @@ impl HistoryManager {
     pub(crate) fn push_preset(item: &mut BatchItem, snap: PresetSnapshot) {
         push_bounded(&mut item.preset_undo_stack, snap);
         item.push_action_marker(ActionType::PresetApply);
-        // push_action_marker already cleared actions_redo; also clear preset_redo
-        // so the two redo stacks stay in sync.
+        // Also drain preset_redo so the per-type stack and the ordering log stay
+        // in sync — try_redo_one_action would otherwise pop a PresetApply marker
+        // against an empty preset stack (orphan).
         item.preset_redo_stack.clear();
     }
 
