@@ -51,7 +51,7 @@ pub struct Settings {
     /// embedded presets in settings.json still deserialize cleanly (the
     /// load path migrates them out on first run).
     #[serde(default, skip_serializing)]
-    pub presets: HashMap<String, ItemSettings>,
+    pub(crate) presets: HashMap<String, super::presets::PresetFile>,
     /// Which preset new imports inherit, and what Reset All Knobs restores.
     /// Always set; defaults to "Prunr". If the named preset goes missing
     /// (user deleted it out of serde state), resolution falls back to "Prunr".
@@ -186,28 +186,45 @@ impl Settings {
             || value.get("apply_bg_color").is_some()
             || value.get("line_mode").is_some();
         const LEGACY_PRESET: &str = "Previous defaults";
+        // Pre-existing presets (from this load path or the embedded-in-
+        // settings.json migration of yore) are now PresetFile-shaped, so
+        // skip_serializing drops them from this binary's settings.json
+        // and this branch only fires for the first launch after a real
+        // v1 → v2 settings.json upgrade.
         if is_v1 && !settings.presets.contains_key(LEGACY_PRESET) {
-            let legacy = migrate_v1_item_settings(&value);
-            if legacy != ItemSettings::default() {
-                settings.presets.insert(LEGACY_PRESET.to_string(), legacy);
+            let legacy_item = migrate_v1_item_settings(&value);
+            if legacy_item != ItemSettings::default() {
+                let wrap_key = Settings::default()
+                    .model
+                    .to_model_id()
+                    .expect("Settings::default().model always has a model_id");
+                let mut models = HashMap::new();
+                models.insert(super::presets::model_id_key(wrap_key), super::presets::ModelPreset {
+                    item_settings: legacy_item,
+                    brush: Default::default(),
+                    sd: None,
+                });
+                let file = super::presets::PresetFile {
+                    format_version: super::presets::PRESET_FORMAT_VERSION,
+                    models,
+                };
+                let _ = super::presets_fs::save(LEGACY_PRESET, &file);
+                settings.presets.insert(LEGACY_PRESET.to_string(), file);
             }
         }
 
-        // One-shot migration: if settings.json still embeds presets from an
-        // older build, write each to the filesystem store and persist the
-        // cleared settings (skip_serializing drops them from settings.json).
-        // The embedded copies stay in memory for this session — no need to
-        // re-parse what we just wrote.
-        if !settings.presets.is_empty() {
-            for (name, values) in &settings.presets {
-                let _ = super::presets_fs::save(name, values);
-            }
-            settings.save();
-            return settings;
+        // Embedded-presets-in-settings.json migration (from a pre-2025
+        // build) is no longer reachable: the field is now
+        // HashMap<String, PresetFile> and any old embedded payload
+        // serde-defaults to empty. Users on that vintage hit `load_all`
+        // below for their actual preset files.
+        let mut loaded = super::presets_fs::load_all();
+        // Preserve the freshly-migrated "Previous defaults" entry above
+        // (load_all picks it up too if save succeeded, but be defensive).
+        for (k, v) in settings.presets.drain() {
+            loaded.entry(k).or_insert(v);
         }
-
-        // Steady state: no embedded presets. Load from the filesystem store.
-        settings.presets = super::presets_fs::load_all();
+        settings.presets = loaded;
         settings
     }
 
@@ -253,14 +270,28 @@ impl Settings {
         }
     }
 
-    /// Resolve a preset name to its values. "Prunr" is always
-    /// `ItemSettings::default()`; user presets come from the map. A missing
-    /// user preset falls back to factory defaults.
+    /// Resolve a preset name to its `ItemSettings` for the active model.
+    /// "Prunr" is always `ItemSettings::default()`; user presets come from
+    /// the per-model entry keyed by `Settings.model.to_model_id()`. Missing
+    /// preset, missing model entry, or filter-only mode (no model id) all
+    /// fall back to factory defaults — the resolver in 29-04 widens this
+    /// to a per-field Prunr-floor merge.
     pub fn preset_values(&self, name: &str) -> ItemSettings {
         if name == PRUNR_PRESET {
             return ItemSettings::default();
         }
-        self.presets.get(name).copied().unwrap_or_default()
+        let Some(file) = self.presets.get(name) else { return ItemSettings::default() };
+        let Some(model_id) = self.model.to_model_id() else {
+            // Filter-only mode has no model id. The active item still has
+            // an ItemSettings — fall back to whichever model entry the
+            // preset stored, or to factory defaults if none.
+            return file.models.values().next()
+                .map(|mp| mp.item_settings)
+                .unwrap_or_default();
+        };
+        file.models.get(&super::presets::model_id_key(model_id))
+            .map(|mp| mp.item_settings)
+            .unwrap_or_default()
     }
 
     /// ItemSettings template for new batch items — the default_preset's
@@ -552,6 +583,22 @@ mod tests {
         assert_eq!(s.default_preset, PRUNR_PRESET);
     }
 
+    /// Wrap an `ItemSettings` into a single-entry v2 `PresetFile` keyed
+    /// by the active model. Mirrors the runtime save flow's wrap step.
+    fn wrap_for_model(s: &Settings, item: ItemSettings) -> super::super::presets::PresetFile {
+        let mid = s.model.to_model_id().expect("test settings have a model_id");
+        let mut models = HashMap::new();
+        models.insert(super::super::presets::model_id_key(mid), super::super::presets::ModelPreset {
+            item_settings: item,
+            brush: Default::default(),
+            sd: None,
+        });
+        super::super::presets::PresetFile {
+            format_version: super::super::presets::PRESET_FORMAT_VERSION,
+            models,
+        }
+    }
+
     #[test]
     fn preset_values_prunr_is_factory() {
         let s = Settings::default();
@@ -561,7 +608,7 @@ mod tests {
     #[test]
     fn preset_values_returns_user_preset() {
         let mut s = Settings::default();
-        let portrait = item_with_gamma(2.0);
+        let portrait = wrap_for_model(&s, item_with_gamma(2.0));
         s.presets.insert("Portrait".to_string(), portrait);
         assert_eq!(s.preset_values("Portrait").gamma, 2.0);
     }
@@ -575,7 +622,7 @@ mod tests {
     #[test]
     fn item_defaults_for_new_item_uses_default_preset() {
         let mut s = Settings::default();
-        let portrait = item_with_gamma(2.0);
+        let portrait = wrap_for_model(&s, item_with_gamma(2.0));
         s.presets.insert("Portrait".to_string(), portrait);
         s.default_preset = "Portrait".to_string();
         assert_eq!(s.item_defaults_for_new_item().gamma, 2.0);
