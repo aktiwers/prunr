@@ -81,15 +81,6 @@ pub struct BrushSettings {
     /// corresponding number of early denoise steps.
     #[serde(default = "default_strength")]
     pub sd_strength: f32,
-    /// SD-only: pixel sigma for Gaussian blur applied to the mask
-    /// before inference. Soft mask boundary = model sees a gradient
-    /// [0,1] instead of a hard cliff, automatically forcing the
-    /// generated pixels to blend toward surrounding lighting/color
-    /// near the edge. 0 = no blur (hard edge, current behavior). 4-6
-    /// px is the typical SD ecosystem default. Independent of
-    /// inpaint_feather (which is a composite-time pixel blend).
-    #[serde(default = "default_mask_blur")]
-    pub sd_mask_blur: f32,
 }
 
 /// SD eraser scheduler choice. Wired into `SdInpaintRequest` at
@@ -179,12 +170,12 @@ impl From<SdScheduler> for prunr_core::inpaint_sd::SchedulerKind {
 /// of bug.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum SdQualityPreset {
-    /// LCM @ 4 steps, CFG=1.0, mask_blur=4 — instant preview tier.
+    /// LCM @ 4 steps, CFG=1.0, feather=4 — instant preview tier.
     Fast,
-    /// LCM @ 8 steps, CFG=1.5, mask_blur=8 — current shipped default.
+    /// LCM @ 8 steps, CFG=1.5, feather=4 — current shipped default.
     /// Good balance of speed + quality on iGPU.
     Balanced,
-    /// DPM++ 2M Karras @ 25 steps, CFG=4.0, mask_blur=12 — best quality.
+    /// DPM++ 2M Karras @ 25 steps, CFG=4.0, feather=8 — best quality.
     /// Requires the DPM++ scheduler to be available (`is_available()`);
     /// UI gates picking and dispatch falls back to LCM otherwise.
     Quality,
@@ -205,21 +196,21 @@ impl SdQualityPreset {
                 brush.sd_steps = 4;
                 brush.sd_guidance_scale = 1.0;
                 brush.sd_use_karras_sigmas = false;
-                brush.sd_mask_blur = 4.0;
+                brush.inpaint_feather = 4.0;
             }
             SdQualityPreset::Balanced => {
                 brush.sd_scheduler = SdScheduler::Lcm;
                 brush.sd_steps = 8;
                 brush.sd_guidance_scale = 1.5;
                 brush.sd_use_karras_sigmas = false;
-                brush.sd_mask_blur = 8.0;
+                brush.inpaint_feather = 4.0;
             }
             SdQualityPreset::Quality => {
                 brush.sd_scheduler = SdScheduler::DpmPlusPlus2MKarras;
                 brush.sd_steps = 25;
                 brush.sd_guidance_scale = 4.0;
                 brush.sd_use_karras_sigmas = true;
-                brush.sd_mask_blur = 12.0;
+                brush.inpaint_feather = 8.0;
             }
             SdQualityPreset::Custom => {}
         }
@@ -236,21 +227,21 @@ impl SdQualityPreset {
             && brush.sd_steps == 4
             && cfg_eq(brush.sd_guidance_scale, 1.0)
             && !brush.sd_use_karras_sigmas
-            && cfg_eq(brush.sd_mask_blur, 4.0)
+            && cfg_eq(brush.inpaint_feather, 4.0)
         {
             SdQualityPreset::Fast
         } else if brush.sd_scheduler == SdScheduler::Lcm
             && brush.sd_steps == 8
             && cfg_eq(brush.sd_guidance_scale, 1.5)
             && !brush.sd_use_karras_sigmas
-            && cfg_eq(brush.sd_mask_blur, 8.0)
+            && cfg_eq(brush.inpaint_feather, 4.0)
         {
             SdQualityPreset::Balanced
         } else if brush.sd_scheduler == SdScheduler::DpmPlusPlus2MKarras
             && brush.sd_steps == 25
             && cfg_eq(brush.sd_guidance_scale, 4.0)
             && brush.sd_use_karras_sigmas
-            && cfg_eq(brush.sd_mask_blur, 12.0)
+            && cfg_eq(brush.inpaint_feather, 8.0)
         {
             SdQualityPreset::Quality
         } else {
@@ -270,8 +261,6 @@ impl SdQualityPreset {
 
 fn default_feather() -> f32 { 4.0 }
 fn default_grow() -> f32 { 2.0 }
-pub const DEFAULT_MASK_BLUR: f32 = 8.0;
-fn default_mask_blur() -> f32 { DEFAULT_MASK_BLUR }
 /// 1.5 matches the `Balanced` preset's CFG (LCM scheduler, CFG up to
 /// 2.0 per Diffusers LCM guidance — community consensus is values
 /// >2.0 degrade LCM output quality). For Standard SD via DDIM /
@@ -323,7 +312,6 @@ impl Default for BrushSettings {
             sd_use_karras_sigmas: false,
             sd_seed: None,
             sd_strength: default_strength(),
-            sd_mask_blur: default_mask_blur(),
         }
     }
 }
@@ -577,7 +565,6 @@ mod tests {
         assert_eq!(s.sd_steps, 8);
         assert!(!s.sd_use_karras_sigmas);
         assert_eq!(s.sd_seed, None);
-        assert!((s.sd_mask_blur - 8.0).abs() < f32::EPSILON, "sd_mask_blur default");
         // The persisted CFG=4.0 is kept; semantically that means the
         // user's effective preset is Custom (CFG mismatch with all
         // built-ins). The UI reads detect_from on every render so
