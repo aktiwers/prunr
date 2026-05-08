@@ -322,7 +322,7 @@ impl Settings {
     /// flips so the brush state swaps with the model. Item-level
     /// `ItemSettings` already swap via the existing per-item path; this
     /// only handles the global brush state.
-    pub fn on_model_change_resolve_brush(&mut self) {
+    pub(crate) fn on_model_change_resolve_brush(&mut self) {
         let resolved = self.resolve_active_preset(None);
         self.brush = resolved.brush;
     }
@@ -331,7 +331,7 @@ impl Settings {
     /// the active preset's bundle for `scheduler`. Called from the
     /// SD-popover scheduler-change handler — non-SD brush fields stay
     /// owned by the brush popover.
-    pub fn on_scheduler_change_resolve_sd(
+    pub(crate) fn on_scheduler_change_resolve_sd(
         &mut self,
         scheduler: super::brush_state::SdScheduler,
     ) {

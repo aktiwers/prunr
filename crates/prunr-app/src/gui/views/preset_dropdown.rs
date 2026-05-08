@@ -44,9 +44,8 @@ fn button_label(settings: &Settings, current: &ItemSettings, applied_preset: &st
 }
 
 /// Resolve an arbitrary preset name to a `ResolvedView` using the
-/// active model. The dirty indicator may show a preset OTHER than
-/// `default_preset`, so this can't piggy-back on
-/// `Settings::resolve_active_preset`.
+/// active model. The dirty indicator may check a preset other than
+/// the active one, so the active-preset shortcut doesn't apply here.
 fn resolve_preset_view(
     settings: &Settings,
     name: &str,

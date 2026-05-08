@@ -192,10 +192,12 @@ pub enum SdQualityPreset {
 }
 
 impl SdQualityPreset {
-    /// Apply this preset's bundled scheduler + steps + CFG + Karras
-    /// to a `BrushSettings`. `Custom` is a true no-op — it has no
-    /// bundled config; callers shouldn't call `apply_to(Custom)` and
-    /// the implementation does nothing if they do.
+    /// In-memory-only apply: writes the preset's bundled values
+    /// directly to a `BrushSettings`. Used by tests that want to
+    /// exercise the value table without touching disk. Production
+    /// callers go through `apply_to_settings` for write-through.
+    /// `Custom` is a no-op.
+    #[cfg(test)]
     pub fn apply_to(self, brush: &mut BrushSettings) {
         match self {
             SdQualityPreset::Fast => {
@@ -223,18 +225,16 @@ impl SdQualityPreset {
         }
     }
 
-    /// Apply this preset's bundled scheduler + steps + CFG + Karras
-    /// into the active preset's `sd.schedulers[<bundled scheduler>]`
-    /// (and switch `active_scheduler`), persist the change to disk via
-    /// `presets_fs::save_merged`, then re-resolve `Settings.brush` so
-    /// the live values reflect the bundle. `inpaint_feather` is always
-    /// applied directly to `settings.brush` since it's a brush-popover
-    /// field, not part of the SD bundle.
+    /// Write this preset's bundled values into the active preset's
+    /// SD-scheduler bundle, flush the change to disk, then re-resolve
+    /// the live brush so the toolbar reflects it. `inpaint_feather`
+    /// is a brush-popover knob (not part of the SD bundle) and is
+    /// applied directly.
     ///
-    /// `Custom` is a true no-op. When the active preset is "Prunr"
+    /// `Custom` is a no-op. When the active preset is "Prunr"
     /// (synthetic, never written) or the active model isn't SD-family,
-    /// falls through to direct brush mutation — no preset write-through,
-    /// no disk flush.
+    /// the function falls through to in-memory-only mutation — no
+    /// preset entry is created and no disk flush happens.
     pub fn apply_to_settings(self, settings: &mut crate::gui::settings::Settings) {
         if matches!(self, SdQualityPreset::Custom) { return; }
         let (sched, steps, cfg, karras, feather) = match self {
