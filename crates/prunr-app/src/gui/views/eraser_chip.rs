@@ -11,11 +11,9 @@ use egui_material_icons::icons::*;
 use crate::gui::brush_state::{
     BrushSettings, SdQualityPreset, SdScheduler,
     DEFAULT_SD_NEGATIVE_PROMPT, DEFAULT_SD_PROMPT,
-    DEFAULT_MASK_BLUR,
     default_cfg,
 };
 use crate::gui::theme;
-use prunr_core::inpaint_sd::{MASK_BLUR_MAX, MASK_BLUR_OFF_THRESHOLD};
 
 use super::chip::{self, ChipMeta};
 
@@ -32,7 +30,6 @@ pub fn render(ui: &mut egui::Ui, brush: &mut BrushSettings) -> EraserRowChange {
         change.committed |= render_scheduler_chip(ui, brush);
         change.committed |= render_steps_chip(ui, brush);
         change.committed |= render_strength_chip(ui, brush);
-        change.committed |= render_mask_blur_chip(ui, brush);
         // Karras toggle: LCM (user-toggleable), UniPC, Euler-A.
         // DDIM and DPM++ 2M Karras are pinned to one setting in this build.
         // Karras chip is only meaningful for schedulers whose dispatch
@@ -64,27 +61,6 @@ fn render_strength_chip(ui: &mut egui::Ui, brush: &mut BrushSettings) -> bool {
         1.0,
         false,
         |v| format!("{:.0}%", v * 100.0),
-    );
-    change.commit
-}
-
-fn render_mask_blur_chip(ui: &mut egui::Ui, brush: &mut BrushSettings) -> bool {
-    let change = chip::chip_f32(
-        ui,
-        ChipMeta {
-            id_salt: "eraser_mask_blur",
-            icon: ICON_BLUR_ON.codepoint,
-            label: "Edge softness",
-            description: "Soft gradient at the mask boundary during inference. Higher = smoother \
-                lighting/color blend with surroundings, fewer visible seams. 0 = hard edge (faster, \
-                more precise but visible boundary). 4-6 px is the typical SD recommendation.",
-            tooltip: "Mask edge softness (px)",
-        },
-        &mut brush.sd_mask_blur,
-        0.0..=MASK_BLUR_MAX,
-        DEFAULT_MASK_BLUR,
-        false,
-        |v| if v < MASK_BLUR_OFF_THRESHOLD { "Off".to_string() } else { format!("{v:.0} px") },
     );
     change.commit
 }
