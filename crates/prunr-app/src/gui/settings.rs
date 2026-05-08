@@ -89,17 +89,6 @@ pub struct Settings {
     #[serde(default)]
     pub brush: BrushSettings,
 
-    /// SD inpaint speed/quality trade-off. `None` = auto (ON for CPU /
-    /// Intel iGPU only, OFF when a real GPU is detected). `Some(true)`
-    /// or `Some(false)` is an explicit user override that survives
-    /// hardware re-detection.
-    ///
-    /// When effective-ON, SD routes through LCM-distilled weights
-    /// (4-step inference) and TAESD when those land. When effective-OFF,
-    /// the standard SD pipeline runs (20 steps, full VAE, full CFG).
-    #[serde(default)]
-    pub sd_fast_mode: Option<bool>,
-
     /// Free RAM the SD pre-flight gate requires *on top of* the model's
     /// declared `working_set_mb`. Default 2 GB matches the historical
     /// hardcoded `SAFETY_MARGIN_MB`. Lower → SD runs in tighter
@@ -487,7 +476,6 @@ impl Default for Settings {
             force_cpu: false,
             active_backend: "CPU".to_string(),
             brush: BrushSettings::default(),
-            sd_fast_mode: None,
             ram_safety_margin_gb: default_ram_safety_margin_gb(),
         }
     }
