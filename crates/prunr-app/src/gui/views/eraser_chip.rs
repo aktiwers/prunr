@@ -1,9 +1,9 @@
-//! SD-eraser toolbar chips: Quality / Scheduler / Steps / Karras /
-//! Seed / Prompt. Renders as a horizontal cluster inline in Row 2
-//! next to the model dropdown — dropdown chips mirror
-//! `lines_popover`'s pattern (chip-button + popover with selectable
-//! rows). Karras only renders for schedulers that accept the toggle
-//! (UniPc, EulerA).
+//! SD-eraser toolbar chips: Quality / Scheduler / Steps / Strength /
+//! EdgeSoftness / Karras / Seed / Prompt. Renders as a horizontal
+//! cluster inline in Row 2 next to the model dropdown — dropdown chips
+//! mirror `lines_popover`'s pattern (chip-button + popover with
+//! selectable rows). Karras only renders for schedulers that accept the
+//! toggle (LCM).
 
 use egui::RichText;
 use egui_material_icons::icons::*;
@@ -14,6 +14,8 @@ use crate::gui::brush_state::{
     default_cfg,
 };
 use crate::gui::theme;
+
+const DEFAULT_MASK_BLUR: f32 = 4.0;
 
 use super::chip::{self, ChipMeta};
 
@@ -30,6 +32,7 @@ pub fn render(ui: &mut egui::Ui, brush: &mut BrushSettings) -> EraserRowChange {
         change.committed |= render_scheduler_chip(ui, brush);
         change.committed |= render_steps_chip(ui, brush);
         change.committed |= render_strength_chip(ui, brush);
+        change.committed |= render_mask_blur_chip(ui, brush);
         // Karras toggle: LCM (user-toggleable), UniPC, Euler-A.
         // DDIM and DPM++ 2M Karras are pinned to one setting in this build.
         // Karras chip is only meaningful for schedulers whose dispatch
@@ -61,6 +64,27 @@ fn render_strength_chip(ui: &mut egui::Ui, brush: &mut BrushSettings) -> bool {
         1.0,
         false,
         |v| format!("{:.0}%", v * 100.0),
+    );
+    change.commit
+}
+
+fn render_mask_blur_chip(ui: &mut egui::Ui, brush: &mut BrushSettings) -> bool {
+    let change = chip::chip_f32(
+        ui,
+        ChipMeta {
+            id_salt: "eraser_mask_blur",
+            icon: ICON_BLUR_ON.codepoint,
+            label: "Edge softness",
+            description: "Soft gradient at the mask boundary during inference. Higher = smoother \
+                lighting/color blend with surroundings, fewer visible seams. 0 = hard edge (faster, \
+                more precise but visible boundary). 4-6 px is the typical SD recommendation.",
+            tooltip: "Mask edge softness (px)",
+        },
+        &mut brush.sd_mask_blur,
+        0.0..=16.0,
+        DEFAULT_MASK_BLUR,
+        false,
+        |v| if v < 0.5 { "Off".to_string() } else { format!("{v:.0} px") },
     );
     change.commit
 }

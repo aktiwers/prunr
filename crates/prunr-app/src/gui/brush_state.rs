@@ -206,18 +206,21 @@ impl SdQualityPreset {
                 brush.sd_steps = 4;
                 brush.sd_guidance_scale = 1.0;
                 brush.sd_use_karras_sigmas = false;
+                brush.sd_mask_blur = 4.0;
             }
             SdQualityPreset::Balanced => {
                 brush.sd_scheduler = SdScheduler::Lcm;
                 brush.sd_steps = 8;
                 brush.sd_guidance_scale = 1.5;
                 brush.sd_use_karras_sigmas = false;
+                brush.sd_mask_blur = 4.0;
             }
             SdQualityPreset::Quality => {
                 brush.sd_scheduler = SdScheduler::DpmPlusPlus2MKarras;
                 brush.sd_steps = 25;
                 brush.sd_guidance_scale = 4.0;
                 brush.sd_use_karras_sigmas = true;
+                brush.sd_mask_blur = 6.0;
             }
             SdQualityPreset::Custom => {}
         }
@@ -234,18 +237,21 @@ impl SdQualityPreset {
             && brush.sd_steps == 4
             && cfg_eq(brush.sd_guidance_scale, 1.0)
             && !brush.sd_use_karras_sigmas
+            && cfg_eq(brush.sd_mask_blur, 4.0)
         {
             SdQualityPreset::Fast
         } else if brush.sd_scheduler == SdScheduler::Lcm
             && brush.sd_steps == 8
             && cfg_eq(brush.sd_guidance_scale, 1.5)
             && !brush.sd_use_karras_sigmas
+            && cfg_eq(brush.sd_mask_blur, 4.0)
         {
             SdQualityPreset::Balanced
         } else if brush.sd_scheduler == SdScheduler::DpmPlusPlus2MKarras
             && brush.sd_steps == 25
             && cfg_eq(brush.sd_guidance_scale, 4.0)
             && brush.sd_use_karras_sigmas
+            && cfg_eq(brush.sd_mask_blur, 6.0)
         {
             SdQualityPreset::Quality
         } else {
