@@ -140,11 +140,9 @@ pub(crate) struct InpaintTuning {
     /// LCM-only: Karras sigma schedule. Default false (linear, matches
     /// distillation training).
     pub sd_use_karras_sigmas: bool,
-    /// SD-only: post-gate TAESD selection. Caller computes
-    /// `BrushSettings::sd_use_taesd_effective()` (which checks both
-    /// the user preference and the install state) and threads the
-    /// result through. The dispatch path consumes this verbatim —
-    /// no further gating, no `lcm &&` coupling.
+    /// SD-only: post-gate TAESD selection — already resolved by the
+    /// caller against user preference + install state. Dispatch
+    /// consumes verbatim; no further gating, no scheduler coupling.
     pub use_taesd: bool,
 }
 
@@ -187,9 +185,9 @@ pub(crate) struct SdDispatchPlan {
 /// the LCM bundle installed must NOT clamp CFG against standard
 /// SD weights. (Bug #1 regression contract.)
 ///
-/// `use_taesd_requested` is the post-install-gate boolean from
-/// `BrushSettings::sd_use_taesd_effective()`. Orthogonal to
-/// scheduler; works with both standard SD and LCM checkpoints.
+/// `use_taesd_requested` is post-install-gate — the caller has
+/// already resolved user preference + bundle availability.
+/// Orthogonal to scheduler; works with standard SD and LCM checkpoints.
 pub(crate) fn resolve_sd_dispatch(
     backend: prunr_models::ModelId,
     use_taesd_requested: bool,
@@ -785,23 +783,13 @@ mod tests {
     /// to SdV15InpaintFp16. Old code clamped CFG to 1.0-2.0 because
     /// it gated on `matches!(scheduler, Lcm)`. New code gates on
     /// `backend == SdV15LcmInpaintFp16` so CFG passes through.
+    /// Bug #1 regression: scheduler=LCM with bundle missing falls
+    /// back to standard SD, so CFG must NOT clamp to 1.0–2.0.
     #[test]
     fn lcm_scheduler_without_lcm_bundle_does_not_clamp_cfg() {
-        // Backend is SdV15InpaintFp16 (LCM bundle missing → upstream
-        // fell back). The fact that the user requested LCM scheduler
-        // is irrelevant to this pure helper.
         let p = resolve_sd_dispatch(ModelId::SdV15InpaintFp16, false, 7.5);
         assert!(cfg_eq(p.effective_cfg, 7.5),
             "CFG must NOT clamp when standard SD weights dispatch");
-    }
-
-    #[test]
-    fn bug_one_regression_user_cfg_7_5_survives() {
-        // Tight regression check: the exact contract from CONTEXT.md
-        // — scheduler=LCM, bundle NOT installed, user CFG=7.5 →
-        // worker receives backend=SdV15InpaintFp16 and CFG=7.5.
-        let p = resolve_sd_dispatch(ModelId::SdV15InpaintFp16, false, 7.5);
-        assert!(cfg_eq(p.effective_cfg, 7.5));
     }
 
 
