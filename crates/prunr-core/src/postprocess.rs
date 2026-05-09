@@ -84,7 +84,13 @@ fn tensor_to_mask_with_rgba(raw: ArrayView4<f32>, rgba: &RgbaImage, opts: &Postp
     tensor_to_mask_core(raw, rgba.width(), rgba.height(), Some(rgba), opts)
 }
 
-fn tensor_to_mask_core(raw: ArrayView4<f32>, ow: u32, oh: u32, rgba_for_guided: Option<&RgbaImage>, opts: &PostprocessOpts<'_>) -> GrayImage {
+fn tensor_to_mask_core(
+    raw: ArrayView4<f32>,
+    ow: u32,
+    oh: u32,
+    rgba_for_guided: Option<&RgbaImage>,
+    opts: &PostprocessOpts<'_>,
+) -> GrayImage {
     let mask_settings = opts.mask_settings;
     let model = opts.model;
     let correction = opts.correction;
@@ -187,7 +193,9 @@ fn tensor_to_mask_core(raw: ArrayView4<f32>, ow: u32, oh: u32, rgba_for_guided: 
                     *m = finalise(normalize(p));
                 });
             } else {
-                for i in 0..sh * sw { mask_buf[i] = finalise(normalize(pred_slice[i])); }
+                for i in 0..sh * sw {
+                    mask_buf[i] = finalise(normalize(pred_slice[i]));
+                }
             }
         } else {
             // Brush correction needs the [0, 1] f32 buffer alive for the
@@ -201,7 +209,9 @@ fn tensor_to_mask_core(raw: ArrayView4<f32>, ow: u32, oh: u32, rgba_for_guided: 
                         *b = normalize(p);
                     });
                 } else {
-                    for i in 0..sh * sw { buf[i] = normalize(pred_slice[i]); }
+                    for i in 0..sh * sw {
+                        buf[i] = normalize(pred_slice[i]);
+                    }
                 }
                 buf
             };
