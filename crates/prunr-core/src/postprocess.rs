@@ -84,7 +84,13 @@ fn tensor_to_mask_with_rgba(raw: ArrayView4<f32>, rgba: &RgbaImage, opts: &Postp
     tensor_to_mask_core(raw, rgba.width(), rgba.height(), Some(rgba), opts)
 }
 
-fn tensor_to_mask_core(raw: ArrayView4<f32>, ow: u32, oh: u32, rgba_for_guided: Option<&RgbaImage>, opts: &PostprocessOpts<'_>) -> GrayImage {
+fn tensor_to_mask_core(
+    raw: ArrayView4<f32>,
+    ow: u32,
+    oh: u32,
+    rgba_for_guided: Option<&RgbaImage>,
+    opts: &PostprocessOpts<'_>,
+) -> GrayImage {
     let mask_settings = opts.mask_settings;
     let model = opts.model;
     let correction = opts.correction;
@@ -92,14 +98,25 @@ fn tensor_to_mask_core(raw: ArrayView4<f32>, ow: u32, oh: u32, rgba_for_guided: 
 
     let use_sigmoid = matches!(model, ModelKind::BiRefNetLite);
 
+    let (sh, sw) = (pred.nrows(), pred.ncols());
+    let contiguous;
+    let pred_slice = match pred.as_slice() {
+        Some(s) => s,
+        // invariant: as_standard_layout() produces a contiguous view, so as_slice() is Some.
+        None => {
+            contiguous = pred.as_standard_layout();
+            contiguous.as_slice().unwrap()
+        }
+    };
+
     // Both branches fold over the prediction values to get min/max for stretch.
     // For rembg models the fold is over raw logits; for BiRefNet the fold is over
     // sigmoid'd values — canonical rembg birefnet_general.py and BiRefNet/inference.py
     // both apply (x - min) / (max - min) after sigmoid, not before.
     let (mi, range, uniform_val) = if !use_sigmoid {
-        let (mi, ma) = pred.iter().cloned().fold(
+        let (mi, ma) = pred_slice.iter().fold(
             (f32::INFINITY, f32::NEG_INFINITY),
-            |(lo, hi), v| (lo.min(v), hi.max(v)),
+            |(lo, hi), &v| (lo.min(v), hi.max(v)),
         );
         let r = ma - mi;
         if r < 1e-6 {
@@ -112,12 +129,16 @@ fn tensor_to_mask_core(raw: ArrayView4<f32>, ow: u32, oh: u32, rgba_for_guided: 
             (mi, r, None)
         }
     } else {
-        // Fold over sigmoid'd logits to get the min/max for re-stretch.
-        let sigmoid = |x: f32| 1.0f32 / (1.0 + (-x).exp());
-        let (si_mi, si_ma) = pred.iter().cloned().fold(
+        // Optimization: sigmoid is monotonic, so min(sigmoid(x)) == sigmoid(min(x)).
+        // Folding over raw logits and applying sigmoid once at the end saves
+        // ~1.05M exp() calls for a 1024² BiRefNet tensor.
+        let (lo, hi) = pred_slice.iter().fold(
             (f32::INFINITY, f32::NEG_INFINITY),
-            |(lo, hi), v| { let s = sigmoid(v); (lo.min(s), hi.max(s)) },
+            |(lo, hi), &v| (lo.min(v), hi.max(v)),
         );
+        let sigmoid = |x: f32| 1.0f32 / (1.0 + (-x).exp());
+        let si_mi = sigmoid(lo);
+        let si_ma = sigmoid(hi);
         let r = si_ma - si_mi;
         if r < 1e-6 {
             // Uniform sigmoid output — high confidence (>0.5) means foreground.
@@ -125,14 +146,6 @@ fn tensor_to_mask_core(raw: ArrayView4<f32>, ow: u32, oh: u32, rgba_for_guided: 
         } else {
             (si_mi, r, None)
         }
-    };
-
-    let (sh, sw) = (pred.nrows(), pred.ncols());
-    let contiguous;
-    let pred_slice = match pred.as_slice() {
-        Some(s) => s,
-        // invariant: as_standard_layout() produces a contiguous view, so as_slice() is Some.
-        None => { contiguous = pred.as_standard_layout(); contiguous.as_slice().unwrap() }
     };
     let gamma = mask_settings.gamma;
     let threshold = mask_settings.threshold;
@@ -162,26 +175,62 @@ fn tensor_to_mask_core(raw: ArrayView4<f32>, ow: u32, oh: u32, rgba_for_guided: 
             // no-correction branch (avoids a ~4 MB f32 alloc at 1024²).
             if let Some(uv) = uniform_val {
                 mask_buf.fill(finalise(uv));
+            } else if sw * sh >= ROW_PAR_THRESHOLD {
+                mask_buf
+                    .par_iter_mut()
+                    .zip(pred_slice.par_iter())
+                    .for_each(|(dst, &src)| {
+                        *dst = finalise(normalize(src));
+                    });
             } else {
-                for i in 0..sh * sw { mask_buf[i] = finalise(normalize(pred_slice[i])); }
+                for i in 0..sh * sw {
+                    mask_buf[i] = finalise(normalize(pred_slice[i]));
+                }
             }
         } else {
             // Brush correction needs the [0, 1] f32 buffer alive for the
             // multiplicative apply step.
             let mut normalized: Vec<f32> = if let Some(uv) = uniform_val {
                 vec![uv; sw * sh]
+            } else if sw * sh >= ROW_PAR_THRESHOLD {
+                let mut buf = vec![0.0f32; sw * sh];
+                buf.par_iter_mut()
+                    .zip(pred_slice.par_iter())
+                    .for_each(|(dst, &src)| {
+                        *dst = normalize(src);
+                    });
+                buf
             } else {
                 let mut buf = vec![0.0f32; sw * sh];
-                for i in 0..sh * sw { buf[i] = normalize(pred_slice[i]); }
+                for i in 0..sh * sw {
+                    buf[i] = normalize(pred_slice[i]);
+                }
                 buf
             };
             crate::brush::apply_correction(&mut normalized, sw, sh, corr);
-            for i in 0..sh * sw {
-                mask_buf[i] = finalise(normalized[i]);
+            if sw * sh >= ROW_PAR_THRESHOLD {
+                mask_buf
+                    .par_iter_mut()
+                    .zip(normalized.par_iter())
+                    .for_each(|(dst, &src)| {
+                        *dst = finalise(src);
+                    });
+            } else {
+                for i in 0..sh * sw {
+                    mask_buf[i] = finalise(normalized[i]);
+                }
             }
         }
     } else if let Some(uv) = uniform_val {
         mask_buf.fill(finalise(uv));
+    } else if sw * sh >= ROW_PAR_THRESHOLD {
+        // Parallel fused walk
+        mask_buf
+            .par_iter_mut()
+            .zip(pred_slice.par_iter())
+            .for_each(|(dst, &src)| {
+                *dst = finalise(normalize(src));
+            });
     } else {
         // Fused walk skips a ~410 KB f32 scratch (4 MB at BiRefNet 1024²)
         // that an intermediate normalize-then-finalise would allocate.
