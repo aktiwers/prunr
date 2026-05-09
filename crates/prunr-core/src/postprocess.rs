@@ -91,48 +91,68 @@ fn tensor_to_mask_core(raw: ArrayView4<f32>, ow: u32, oh: u32, rgba_for_guided: 
     let pred = raw.slice(ndarray::s![0, 0, .., ..]);
 
     let use_sigmoid = matches!(model, ModelKind::BiRefNetLite);
-
-    // Both branches fold over the prediction values to get min/max for stretch.
-    // For rembg models the fold is over raw logits; for BiRefNet the fold is over
-    // sigmoid'd values — canonical rembg birefnet_general.py and BiRefNet/inference.py
-    // both apply (x - min) / (max - min) after sigmoid, not before.
-    let (mi, range, uniform_val) = if !use_sigmoid {
-        let (mi, ma) = pred.iter().cloned().fold(
-            (f32::INFINITY, f32::NEG_INFINITY),
-            |(lo, hi), v| (lo.min(v), hi.max(v)),
-        );
-        let r = ma - mi;
-        if r < 1e-6 {
-            // Uniform output — use the absolute value to decide:
-            // rembg models output ~0 for background, ~1 for foreground
-            // after min-max normalization. A uniform value > 0.5 means
-            // "everything is foreground" → full opacity.
-            (mi, 1.0, Some(if ma > 0.5 { 1.0f32 } else { 0.0 }))
-        } else {
-            (mi, r, None)
-        }
-    } else {
-        // Fold over sigmoid'd logits to get the min/max for re-stretch.
-        let sigmoid = |x: f32| 1.0f32 / (1.0 + (-x).exp());
-        let (si_mi, si_ma) = pred.iter().cloned().fold(
-            (f32::INFINITY, f32::NEG_INFINITY),
-            |(lo, hi), v| { let s = sigmoid(v); (lo.min(s), hi.max(s)) },
-        );
-        let r = si_ma - si_mi;
-        if r < 1e-6 {
-            // Uniform sigmoid output — high confidence (>0.5) means foreground.
-            (si_mi, 1.0, Some(if si_ma > 0.5 { 1.0f32 } else { 0.0 }))
-        } else {
-            (si_mi, r, None)
-        }
-    };
-
     let (sh, sw) = (pred.nrows(), pred.ncols());
     let contiguous;
     let pred_slice = match pred.as_slice() {
         Some(s) => s,
         // invariant: as_standard_layout() produces a contiguous view, so as_slice() is Some.
-        None => { contiguous = pred.as_standard_layout(); contiguous.as_slice().unwrap() }
+        None => {
+            contiguous = pred.as_standard_layout();
+            contiguous.as_slice().unwrap()
+        }
+    };
+
+    let use_par = pred_slice.len() >= ROW_PAR_THRESHOLD;
+
+    // Both branches fold over the prediction values to get min/max for stretch.
+    // For rembg models the fold is over raw logits; for BiRefNet the fold is over
+    // sigmoid'd values — canonical rembg birefnet_general.py and BiRefNet/inference.py
+    // both apply (x - min) / (max - min) after sigmoid, not before.
+    let (mi, range, uniform_val) = {
+        let (mi, ma) = if use_par {
+            pred_slice
+                .par_iter()
+                .cloned()
+                .fold(
+                    || (f32::INFINITY, f32::NEG_INFINITY),
+                    |(lo, hi), v| (lo.min(v), hi.max(v)),
+                )
+                .reduce(
+                    || (f32::INFINITY, f32::NEG_INFINITY),
+                    |(lo1, hi1), (lo2, hi2)| (lo1.min(lo2), hi1.max(hi2)),
+                )
+        } else {
+            pred_slice.iter().cloned().fold(
+                (f32::INFINITY, f32::NEG_INFINITY),
+                |(lo, hi), v| (lo.min(v), hi.max(v)),
+            )
+        };
+
+        if !use_sigmoid {
+            let r = ma - mi;
+            if r < 1e-6 {
+                // Uniform output — use the absolute value to decide:
+                // rembg models output ~0 for background, ~1 for foreground
+                // after min-max normalization. A uniform value > 0.5 means
+                // "everything is foreground" → full opacity.
+                (mi, 1.0, Some(if ma > 0.5 { 1.0f32 } else { 0.0 }))
+            } else {
+                (mi, r, None)
+            }
+        } else {
+            // Sigmoid is monotonic, so min/max of sigmoid(x) matches
+            // sigmoid(min/max of x). Saves ~1M exp() calls at BiRefNet 1024².
+            let sigmoid = |x: f32| 1.0f32 / (1.0 + (-x).exp());
+            let si_mi = sigmoid(mi);
+            let si_ma = sigmoid(ma);
+            let r = si_ma - si_mi;
+            if r < 1e-6 {
+                // Uniform sigmoid output — high confidence (>0.5) means foreground.
+                (si_mi, 1.0, Some(if si_ma > 0.5 { 1.0f32 } else { 0.0 }))
+            } else {
+                (si_mi, r, None)
+            }
+        }
     };
     let gamma = mask_settings.gamma;
     let threshold = mask_settings.threshold;
@@ -162,6 +182,10 @@ fn tensor_to_mask_core(raw: ArrayView4<f32>, ow: u32, oh: u32, rgba_for_guided: 
             // no-correction branch (avoids a ~4 MB f32 alloc at 1024²).
             if let Some(uv) = uniform_val {
                 mask_buf.fill(finalise(uv));
+            } else if use_par {
+                mask_buf.par_iter_mut().zip(pred_slice.par_iter()).for_each(|(m, &p)| {
+                    *m = finalise(normalize(p));
+                });
             } else {
                 for i in 0..sh * sw { mask_buf[i] = finalise(normalize(pred_slice[i])); }
             }
@@ -172,12 +196,24 @@ fn tensor_to_mask_core(raw: ArrayView4<f32>, ow: u32, oh: u32, rgba_for_guided: 
                 vec![uv; sw * sh]
             } else {
                 let mut buf = vec![0.0f32; sw * sh];
-                for i in 0..sh * sw { buf[i] = normalize(pred_slice[i]); }
+                if use_par {
+                    buf.par_iter_mut().zip(pred_slice.par_iter()).for_each(|(b, &p)| {
+                        *b = normalize(p);
+                    });
+                } else {
+                    for i in 0..sh * sw { buf[i] = normalize(pred_slice[i]); }
+                }
                 buf
             };
             crate::brush::apply_correction(&mut normalized, sw, sh, corr);
-            for i in 0..sh * sw {
-                mask_buf[i] = finalise(normalized[i]);
+            if use_par {
+                mask_buf.par_iter_mut().zip(normalized.par_iter()).for_each(|(m, &n)| {
+                    *m = finalise(n);
+                });
+            } else {
+                for i in 0..sh * sw {
+                    mask_buf[i] = finalise(normalized[i]);
+                }
             }
         }
     } else if let Some(uv) = uniform_val {
@@ -185,8 +221,14 @@ fn tensor_to_mask_core(raw: ArrayView4<f32>, ow: u32, oh: u32, rgba_for_guided: 
     } else {
         // Fused walk skips a ~410 KB f32 scratch (4 MB at BiRefNet 1024²)
         // that an intermediate normalize-then-finalise would allocate.
-        for i in 0..sh * sw {
-            mask_buf[i] = finalise(normalize(pred_slice[i]));
+        if use_par {
+            mask_buf.par_iter_mut().zip(pred_slice.par_iter()).for_each(|(m, &p)| {
+                *m = finalise(normalize(p));
+            });
+        } else {
+            for i in 0..sh * sw {
+                mask_buf[i] = finalise(normalize(pred_slice[i]));
+            }
         }
     }
 
