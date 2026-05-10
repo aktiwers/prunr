@@ -169,62 +169,44 @@ fn tensor_to_mask_core(
         (v * 255.0) as u8
     };
 
-    if let Some(corr) = correction {
-        if corr.is_empty() {
-            // Empty correction — take the same fast path as the
-            // no-correction branch (avoids a ~4 MB f32 alloc at 1024²).
-            if let Some(uv) = uniform_val {
-                mask_buf.fill(finalise(uv));
-            } else if sw * sh >= ROW_PAR_THRESHOLD {
-                mask_buf
-                    .par_iter_mut()
-                    .zip(pred_slice.par_iter())
-                    .for_each(|(dst, &src)| {
-                        *dst = finalise(normalize(src));
-                    });
-            } else {
-                for i in 0..sh * sw {
-                    mask_buf[i] = finalise(normalize(pred_slice[i]));
-                }
-            }
+    if let Some(corr) = correction.filter(|c| !c.is_empty()) {
+        // Brush correction needs the [0, 1] f32 buffer alive for the
+        // multiplicative apply step.
+        let mut normalized: Vec<f32> = if let Some(uv) = uniform_val {
+            vec![uv; sw * sh]
+        } else if sw * sh >= ROW_PAR_THRESHOLD {
+            let mut buf = vec![0.0f32; sw * sh];
+            buf.par_iter_mut()
+                .zip(pred_slice.par_iter())
+                .for_each(|(dst, &src)| {
+                    *dst = normalize(src);
+                });
+            buf
         } else {
-            // Brush correction needs the [0, 1] f32 buffer alive for the
-            // multiplicative apply step.
-            let mut normalized: Vec<f32> = if let Some(uv) = uniform_val {
-                vec![uv; sw * sh]
-            } else if sw * sh >= ROW_PAR_THRESHOLD {
-                let mut buf = vec![0.0f32; sw * sh];
-                buf.par_iter_mut()
-                    .zip(pred_slice.par_iter())
-                    .for_each(|(dst, &src)| {
-                        *dst = normalize(src);
-                    });
-                buf
-            } else {
-                let mut buf = vec![0.0f32; sw * sh];
-                for i in 0..sh * sw {
-                    buf[i] = normalize(pred_slice[i]);
-                }
-                buf
-            };
-            crate::brush::apply_correction(&mut normalized, sw, sh, corr);
-            if sw * sh >= ROW_PAR_THRESHOLD {
-                mask_buf
-                    .par_iter_mut()
-                    .zip(normalized.par_iter())
-                    .for_each(|(dst, &src)| {
-                        *dst = finalise(src);
-                    });
-            } else {
-                for i in 0..sh * sw {
-                    mask_buf[i] = finalise(normalized[i]);
-                }
+            let mut buf = vec![0.0f32; sw * sh];
+            for i in 0..sh * sw {
+                buf[i] = normalize(pred_slice[i]);
+            }
+            buf
+        };
+        crate::brush::apply_correction(&mut normalized, sw, sh, corr);
+        if sw * sh >= ROW_PAR_THRESHOLD {
+            mask_buf
+                .par_iter_mut()
+                .zip(normalized.par_iter())
+                .for_each(|(dst, &src)| {
+                    *dst = finalise(src);
+                });
+        } else {
+            for i in 0..sh * sw {
+                mask_buf[i] = finalise(normalized[i]);
             }
         }
     } else if let Some(uv) = uniform_val {
         mask_buf.fill(finalise(uv));
     } else if sw * sh >= ROW_PAR_THRESHOLD {
-        // Parallel fused walk
+        // Fused walk skips a ~410 KB f32 scratch (4 MB at BiRefNet 1024²)
+        // that an intermediate normalize-then-finalise would allocate.
         mask_buf
             .par_iter_mut()
             .zip(pred_slice.par_iter())
@@ -232,8 +214,6 @@ fn tensor_to_mask_core(
                 *dst = finalise(normalize(src));
             });
     } else {
-        // Fused walk skips a ~410 KB f32 scratch (4 MB at BiRefNet 1024²)
-        // that an intermediate normalize-then-finalise would allocate.
         for i in 0..sh * sw {
             mask_buf[i] = finalise(normalize(pred_slice[i]));
         }

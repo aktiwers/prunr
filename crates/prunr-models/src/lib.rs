@@ -36,10 +36,11 @@ pub enum ModelId {
     /// Bundle is the output of `scripts/export_lcm_inpaint.py`.
     SdV15LcmInpaintFp16,
     /// TAESD (Tiny AutoEncoder for SD) FP16. Two-part bundle: encoder
-    /// + decoder, ~5 MB each. Drop-in replacement for SD 1.5's standard
+    /// and decoder, ~5 MB each. Drop-in replacement for SD 1.5's standard
     /// VAE — ~3× faster decode at slight quality cost. Used as the VAE
     /// backend when the LCM scheduler is active AND the bundle is
     /// installed.
+    ///
     /// Bundle is the output of `scripts/export_taesd.py`.
     TaesdFp16,
 }
