@@ -43,7 +43,8 @@ pub(crate) fn model_id_key(id: ModelId) -> String {
 /// Inverse of `model_id_key`. Returns `None` for unknown keys —
 /// future-binary entries the receiver doesn't know about round-trip
 /// in the JSON but resolve to nothing at lookup time.
-pub(crate) fn model_id_from_key(s: &str) -> Option<ModelId> {
+#[cfg(test)]
+fn model_id_from_key(s: &str) -> Option<ModelId> {
     ModelId::ALL.iter().copied().find(|id| format!("{id:?}") == s)
 }
 
@@ -164,9 +165,8 @@ pub(crate) struct ResolvedView {
 }
 
 /// Overwrite the SD-tuning fields of `brush` from `sd` + the chosen
-/// scheduler's bundle. Shared between `resolve_preset_for_model` and
-/// `fuse_brush_for_apply` — the only two paths that materialise SD
-/// state from a stored `SdPreset` into a live `BrushSettings`.
+/// scheduler's bundle. Single materialise-SD-into-brush operation,
+/// shared by every caller that needs the live values.
 fn apply_sd_to_brush(
     brush: &mut BrushSettings,
     sd: &SdPreset,
@@ -250,6 +250,7 @@ pub(crate) fn split_brush_for_save(
 /// `ModelPreset`. `scheduler = Some(_)` overrides `sd.active_scheduler`
 /// so an in-session scheduler swap can pick a different bundle without
 /// mutating the preset.
+#[cfg(test)]
 pub(super) fn fuse_brush_for_apply(
     mp: &ModelPreset,
     scheduler: Option<SdScheduler>,
