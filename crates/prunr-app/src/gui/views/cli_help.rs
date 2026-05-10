@@ -41,7 +41,7 @@ pub(crate) fn render(ctx: &egui::Context, toasts: &mut crate::gui::toasts::Toast
                 0 => {
                     section_heading(ui, "Quick Start");
                     example_row(ui, toasts, "prunr photo.jpg",
-                        "Remove background, save as photo_nobg.png");
+                        "Remove background, save as photo.prunr.png");
                     example_row(ui, toasts, "prunr photo.jpg -o result.png",
                         "Choose where to save the result");
                     example_row(ui, toasts, "prunr *.jpg -o clean/",

@@ -61,7 +61,7 @@ fn write_bg_image_fixture(dir: &std::path::Path) -> std::path::PathBuf {
 
 /// Run the CLI binary with the given args. The CLI's `-o` flag is
 /// directory-typed in batch mode, so we pass the parent dir and rely
-/// on the default `<stem>_nobg.png` naming. Returns Err with a human
+/// on the default `<stem>.prunr.png` naming. Returns Err with a human
 /// message when the runtime is missing (so callers SKIP instead of
 /// fail), Ok(output_path) on success, panics on any other failure.
 fn run_cli(input: &std::path::Path, out_dir: &std::path::Path, extra: &[&str]) -> Result<std::path::PathBuf, String> {
@@ -86,7 +86,7 @@ fn run_cli(input: &std::path::Path, out_dir: &std::path::Path, extra: &[&str]) -
         );
     }
     let stem = input.file_stem().unwrap().to_string_lossy();
-    let expected = out_dir.join(format!("{stem}_nobg.png"));
+    let expected = out_dir.join(format!("{stem}.prunr.png"));
     Ok(expected)
 }
 
