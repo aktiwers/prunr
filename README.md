@@ -60,7 +60,7 @@ All releases: [github.com/aktiwers/prunr/releases](https://github.com/aktiwers/p
 The binary runs headless when given image arguments:
 
 ```bash
-prunr photo.jpg                              # saves photo_nobg.png
+prunr photo.jpg                              # saves photo.prunr.png
 prunr *.jpg -o clean/                        # batch to a folder
 prunr -m u2net portrait.jpg                  # quality model
 prunr -j 4 *.jpg -o out/                     # 4 parallel jobs

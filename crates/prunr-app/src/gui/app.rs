@@ -1454,7 +1454,7 @@ impl PrunrApp {
                     if let Ok(bytes) = prunr_core::encode_rgba_png(&baked) {
                         let stem = Path::new(&item.filename)
                             .file_stem().and_then(|s| s.to_str()).unwrap_or("image");
-                        payload.push((folder.join(format!("{stem}-nobg.png")), bytes));
+                        payload.push((folder.join(format!("{stem}.prunr.png")), bytes));
                     }
                 }
                 continue;
@@ -1475,14 +1475,14 @@ impl PrunrApp {
     }
 
     /// No checkboxes selected — save just the currently-viewed result via a
-    /// save-as dialog. Suggests a `<stem>-nobg.png` name based on the source.
+    /// save-as dialog. Suggests a `<stem>.prunr.png` name based on the source.
     fn save_current_to_file(&mut self) {
         let Some(item) = self.batch.selected_item() else { return };
         let Some(rgba) = item.result_rgba.clone() else { return };
         let default_name = Path::new(&item.filename).file_stem()
             .and_then(|s| s.to_str())
-            .map(|stem| format!("{stem}-nobg.png"))
-            .unwrap_or_else(|| "result-nobg.png".to_string());
+            .map(|stem| format!("{stem}.prunr.png"))
+            .unwrap_or_else(|| "result.prunr.png".to_string());
         let baked = item.bake_export_bg(&rgba);
         self.save_rgba_with_dialog(baked, &default_name);
     }
@@ -1499,7 +1499,7 @@ impl PrunrApp {
                 .file_stem()
                 .and_then(|s| s.to_str())
                 .unwrap_or("image");
-            (item.bake_export_bg(rgba), format!("{stem}-nobg.png"))
+            (item.bake_export_bg(rgba), format!("{stem}.prunr.png"))
         };
         self.save_rgba_with_dialog(baked, &default_name);
     }
@@ -1522,7 +1522,7 @@ impl PrunrApp {
     }
 
     /// One or more sidebar checkboxes selected — pick a folder, write each
-    /// as `<source-stem>-nobg.png`. Encode + write run on a background thread.
+    /// as `<source-stem>.prunr.png`. Encode + write run on a background thread.
     fn save_selected_to_folder(&mut self) {
         let items: Vec<(String, Arc<image::RgbaImage>)> = self.batch.items.iter()
             .filter(|i| i.selected && i.status == BatchStatus::Done && i.result_rgba.is_some())
@@ -3328,7 +3328,7 @@ fn spawn_save_prerendered(payload: Vec<(PathBuf, Vec<u8>)>, tx: mpsc::Sender<Str
     });
 }
 
-/// Encode + write N PNGs into `folder` (named `<source-stem>-nobg.png`) on a
+/// Encode + write N PNGs into `folder` (named `<source-stem>.prunr.png`) on a
 /// background thread; report aggregate counts when done.
 fn spawn_save_batch(
     folder: PathBuf,
@@ -3343,7 +3343,7 @@ fn spawn_save_batch(
                 .file_stem()
                 .and_then(|s| s.to_str())
                 .unwrap_or("image");
-            let out_path = folder.join(format!("{stem}-nobg.png"));
+            let out_path = folder.join(format!("{stem}.prunr.png"));
             match prunr_core::encode_rgba_png(&rgba) {
                 Ok(png_bytes) => match std::fs::write(&out_path, &png_bytes) {
                     Ok(()) => saved += 1,

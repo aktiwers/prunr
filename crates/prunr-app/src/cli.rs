@@ -4,7 +4,7 @@ use std::path::PathBuf;
 /// Prunr — local AI background removal.
 ///
 /// No arguments launches the GUI. Pass image files directly to process them:
-///   prunr photo.jpg              # removes background, saves photo_nobg.png
+///   prunr photo.jpg              # removes background, saves photo.prunr.png
 ///   prunr *.jpg -o clean/        # batch to folder
 ///   prunr -m u2net portrait.jpg  # use quality model
 #[derive(Parser, Debug)]
@@ -337,7 +337,7 @@ fn run_inpaint(args: &Cli) -> i32 {
     0
 }
 
-/// Variant of `output_path` that lets callers override the `_nobg.png`
+/// Variant of `output_path` that lets callers override the `.prunr.png`
 /// suffix. Eraser writes `_erased.png`; the BG-removal path keeps its
 /// existing default.
 fn output_path_with_suffix(
@@ -358,11 +358,11 @@ fn output_path_with_suffix(
 // ── Output path helpers ──────────────────────────────────────────────────────
 
 /// Compute output path for an input image.
-/// Batch mode or -o is a directory: write {stem}_nobg.png into that directory.
+/// Batch mode or -o is a directory: write {stem}.prunr.png into that directory.
 /// Single mode with -o file.png: use that path directly.
-/// No -o: write alongside input as {input_dir}/{stem}_nobg.png.
+/// No -o: write alongside input as {input_dir}/{stem}.prunr.png.
 fn output_path(input: &std::path::Path, output: &Option<PathBuf>, is_batch: bool) -> std::path::PathBuf {
-    output_path_with_suffix(input, output, is_batch, "_nobg.png")
+    output_path_with_suffix(input, output, is_batch, ".prunr.png")
 }
 
 /// Check if output exists and --force is not set. Returns Err with message if blocked.
