@@ -2272,7 +2272,7 @@ impl DpmPp2MScheduler {
 
         // Convert each non-terminal sigma to a timestep for UNet input.
         let timesteps: Vec<i64> = sigmas[..num_inference].iter()
-            .map(|&sigma| sigma_to_t(sigma, &log_sigmas))
+            .map(|&sigma| sigma_to_t(sigma, log_sigmas))
             .collect();
 
         Self {
@@ -2386,7 +2386,7 @@ impl EulerAScheduler {
         sigmas.push(0.0);
 
         let timesteps: Vec<i64> = sigmas[..num_inference].iter()
-            .map(|&sigma| sigma_to_t(sigma, &log_sigmas))
+            .map(|&sigma| sigma_to_t(sigma, log_sigmas))
             .collect();
 
         Self {
