@@ -582,7 +582,7 @@ Self-drop rejection prevents re-ingesting thumbnails. Stuck-drag recovery clears
 
 | Mode | Output | Cached-tensor requirement |
 |------|--------|---------------------------|
-| Composite (default) | `{stem}-{nobg\|lines\|nobg-lines}.png` | None — uses `result_rgba` or raw source |
+| Composite (default) | `{stem}.prunr.png` (bg removed), `{stem}-lines.png` (lines only), `{stem}.prunr-lines.png` (combined) | None — uses `result_rgba` or raw source |
 | Split (`export_split_layers`) | `{stem}-subject.png` + `{stem}-lines.png` + `{stem}-mask.png` | Subject / Mask need `cached_tensor`; Lines needs `cached_edge_tensors` |
 
 Split mode skips layers whose tensor isn't cached (e.g. LineMode::Off items have no edge tensor → 2 files, not 3). Falls back to the composite path when nothing is cached so drags of unprocessed items still work. Subject layer re-runs `postprocess_from_flat` with `fill_style=None`, `bg_effect=None` forced so the receiving app sees clean pixels; other mask tweaks (gamma, threshold, refine, feather, edge_shift) are preserved. The same rendering backs the **Save** button when `export_split_layers` is on — Save asks for a folder and writes the same layer set to it, so Linux users (no drag-out) have a first-class path.

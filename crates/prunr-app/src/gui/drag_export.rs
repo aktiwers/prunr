@@ -8,7 +8,7 @@
 //!
 //! Temp file lifecycle:
 //! - Single subdirectory under `std::env::temp_dir()/prunr-drag/`.
-//! - Filenames derived from source (e.g. `sunset-nobg.png`, `sunset-lines.png`).
+//! - Filenames derived from source (e.g. `sunset.prunr.png`, `sunset-lines.png`).
 //! - Not deleted at drag end — receiving apps may read async.
 //! - Stale cleanup (>10 min old) runs at app start.
 
@@ -74,17 +74,21 @@ fn source_stem(source_filename: &str) -> &str {
 }
 
 /// Build a human-friendly filename stem for a batch item given its processing mode.
+///
+/// Naming convention: `.prunr` is a tool tag (signals "Prunr touched this") that
+/// sits between the source stem and the `.png` extension; the lines-only mode
+/// keeps a plain hyphen suffix because it isn't a Prunr-branded output kind.
 fn make_filename(source_filename: &str, has_result: bool, line_mode: LineMode) -> String {
     if !has_result {
         // No processing yet — drag source as-is with original extension.
         return source_filename.to_string();
     }
-    let suffix = match line_mode {
-        LineMode::Off => "nobg",
-        LineMode::EdgesOnly => "lines",
-        LineMode::SubjectOutline => "nobg-lines",
-    };
-    format!("{}-{suffix}.png", source_stem(source_filename))
+    let stem = source_stem(source_filename);
+    match line_mode {
+        LineMode::Off => format!("{stem}.prunr.png"),
+        LineMode::EdgesOnly => format!("{stem}-lines.png"),
+        LineMode::SubjectOutline => format!("{stem}.prunr-lines.png"),
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -295,7 +299,7 @@ mod tests {
     fn make_filename_uses_source_stem_with_mode_suffix() {
         assert_eq!(
             make_filename("sunset.jpg", true, LineMode::Off),
-            "sunset-nobg.png"
+            "sunset.prunr.png"
         );
         assert_eq!(
             make_filename("sunset.jpg", true, LineMode::EdgesOnly),
@@ -303,7 +307,7 @@ mod tests {
         );
         assert_eq!(
             make_filename("sunset.jpg", true, LineMode::SubjectOutline),
-            "sunset-nobg-lines.png"
+            "sunset.prunr-lines.png"
         );
     }
 
@@ -319,11 +323,11 @@ mod tests {
     fn make_filename_handles_weird_names() {
         assert_eq!(
             make_filename("no-extension", true, LineMode::Off),
-            "no-extension-nobg.png"
+            "no-extension.prunr.png"
         );
         assert_eq!(
             make_filename("", true, LineMode::Off),
-            "image-nobg.png"
+            "image.prunr.png"
         );
     }
 
