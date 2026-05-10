@@ -335,7 +335,7 @@ fn default_feather() -> f32 { 4.0 }
 fn default_grow() -> f32 { 2.0 }
 /// 1.5 matches the `Balanced` preset's CFG (LCM scheduler, CFG up to
 /// 2.0 per Diffusers LCM guidance — community consensus is values
-/// >2.0 degrade LCM output quality). For Standard SD via DDIM /
+/// \>2.0 degrade LCM output quality). For Standard SD via DDIM /
 /// DPM++ the user can bump to 4.0–7.5 via the toolbar slider; the
 /// `Quality` preset auto-fills 4.0 when picked.
 pub(crate) fn default_cfg() -> f32 { 1.5 }
