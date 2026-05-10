@@ -16,6 +16,9 @@ test_cli/
 demo/
 memory/
 
+# Jules (Google's coding agent) — keeps its workspace droppings out of the repo
+.jules/
+
 # Local-only golden fixtures — dev-machine images for richer regression
 # coverage that don't belong in the public repo (personal photos, licensed
 # stock, etc.). Both golden harnesses walk this dir as a second fixture root
