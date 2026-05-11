@@ -1,6 +1,7 @@
 use std::io::Cursor;
 use std::path::Path;
 use image::{DynamicImage, GrayImage, ImageReader, RgbaImage};
+use rayon::prelude::*;
 use image::codecs::png::{PngEncoder, CompressionType, FilterType as PngFilter};
 use image::ImageEncoder;
 use fast_image_resize::{images::{Image, ImageRef}, PixelType, Resizer};
@@ -163,10 +164,7 @@ pub fn downscale_image(img: DynamicImage, max_dim: u32) -> DynamicImage {
 
 /// Alpha-blend an RGBA image onto a solid background color, making all pixels fully opaque.
 pub fn apply_background_color(img: &mut RgbaImage, bg: [u8; 3]) {
-    // Sequential: this runs inside a rayon worker thread (subprocess),
-    // so nested rayon parallelism would cause deadlock or thread starvation.
-    let raw = img.as_mut();
-    for pixel in raw.chunks_mut(4) {
+    let process_pixel = |pixel: &mut [u8]| {
         let a = pixel[3] as f32 / 255.0;
         if a < 1.0 {
             let inv = 1.0 - a;
@@ -174,6 +172,15 @@ pub fn apply_background_color(img: &mut RgbaImage, bg: [u8; 3]) {
             pixel[1] = (pixel[1] as f32 * a + bg[1] as f32 * inv) as u8;
             pixel[2] = (pixel[2] as f32 * a + bg[2] as f32 * inv) as u8;
             pixel[3] = 255;
+        }
+    };
+
+    let raw = img.as_mut();
+    if raw.len() >= 512 * 512 * 4 {
+        raw.par_chunks_exact_mut(4).for_each(process_pixel);
+    } else {
+        for pixel in raw.chunks_exact_mut(4) {
+            process_pixel(pixel);
         }
     }
 }
@@ -199,17 +206,29 @@ pub fn apply_background_image(
     let bg_full = build_bg_layer(bg, fw, fh, fit);
     let raw_bg = bg_full.as_raw();
     let raw = img.as_mut();
-    for (i, pixel) in raw.chunks_mut(4).enumerate() {
+
+    let process_chunk = |(pixel, bg_pixel): (&mut [u8], &[u8])| {
         let a = pixel[3] as f32 / 255.0;
-        if a >= 1.0 { continue; }
-        let bi = i * 4;
-        let bg_a = raw_bg[bi + 3] as f32 / 255.0;
-        if bg_a <= 0.0 { continue; }
-        let inv = (1.0 - a) * bg_a;
-        pixel[0] = (pixel[0] as f32 * a + raw_bg[bi] as f32 * inv) as u8;
-        pixel[1] = (pixel[1] as f32 * a + raw_bg[bi + 1] as f32 * inv) as u8;
-        pixel[2] = (pixel[2] as f32 * a + raw_bg[bi + 2] as f32 * inv) as u8;
-        pixel[3] = ((a + inv) * 255.0).min(255.0) as u8;
+        if a < 1.0 {
+            let bg_a = bg_pixel[3] as f32 / 255.0;
+            if bg_a > 0.0 {
+                let inv = (1.0 - a) * bg_a;
+                pixel[0] = (pixel[0] as f32 * a + bg_pixel[0] as f32 * inv) as u8;
+                pixel[1] = (pixel[1] as f32 * a + bg_pixel[1] as f32 * inv) as u8;
+                pixel[2] = (pixel[2] as f32 * a + bg_pixel[2] as f32 * inv) as u8;
+                pixel[3] = ((a + inv) * 255.0).min(255.0) as u8;
+            }
+        }
+    };
+
+    if raw.len() >= 512 * 512 * 4 {
+        raw.par_chunks_exact_mut(4)
+            .zip(raw_bg.par_chunks_exact(4))
+            .for_each(process_chunk);
+    } else {
+        for (pixel, bg_pixel) in raw.chunks_exact_mut(4).zip(raw_bg.chunks_exact(4)) {
+            process_chunk((pixel, bg_pixel));
+        }
     }
 }
 

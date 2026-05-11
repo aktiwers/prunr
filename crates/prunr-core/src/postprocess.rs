@@ -114,10 +114,20 @@ fn tensor_to_mask_core(
     // sigmoid'd values — canonical rembg birefnet_general.py and BiRefNet/inference.py
     // both apply (x - min) / (max - min) after sigmoid, not before.
     let (mi, range, uniform_val) = if !use_sigmoid {
-        let (mi, ma) = pred_slice.iter().fold(
-            (f32::INFINITY, f32::NEG_INFINITY),
-            |(lo, hi), &v| (lo.min(v), hi.max(v)),
-        );
+        let (mi, ma) = if pred_slice.len() >= ROW_PAR_THRESHOLD {
+            pred_slice.par_iter().fold(
+                || (f32::INFINITY, f32::NEG_INFINITY),
+                |(lo, hi), &v| (lo.min(v), hi.max(v)),
+            ).reduce(
+                || (f32::INFINITY, f32::NEG_INFINITY),
+                |(a_lo, a_hi), (b_lo, b_hi)| (a_lo.min(b_lo), a_hi.max(b_hi))
+            )
+        } else {
+            pred_slice.iter().fold(
+                (f32::INFINITY, f32::NEG_INFINITY),
+                |(lo, hi), &v| (lo.min(v), hi.max(v)),
+            )
+        };
         let r = ma - mi;
         if r < 1e-6 {
             // Uniform output — use the absolute value to decide:
@@ -132,10 +142,20 @@ fn tensor_to_mask_core(
         // Optimization: sigmoid is monotonic, so min(sigmoid(x)) == sigmoid(min(x)).
         // Folding over raw logits and applying sigmoid once at the end saves
         // ~1.05M exp() calls for a 1024² BiRefNet tensor.
-        let (lo, hi) = pred_slice.iter().fold(
-            (f32::INFINITY, f32::NEG_INFINITY),
-            |(lo, hi), &v| (lo.min(v), hi.max(v)),
-        );
+        let (lo, hi) = if pred_slice.len() >= ROW_PAR_THRESHOLD {
+            pred_slice.par_iter().fold(
+                || (f32::INFINITY, f32::NEG_INFINITY),
+                |(lo, hi), &v| (lo.min(v), hi.max(v)),
+            ).reduce(
+                || (f32::INFINITY, f32::NEG_INFINITY),
+                |(a_lo, a_hi), (b_lo, b_hi)| (a_lo.min(b_lo), a_hi.max(b_hi))
+            )
+        } else {
+            pred_slice.iter().fold(
+                (f32::INFINITY, f32::NEG_INFINITY),
+                |(lo, hi), &v| (lo.min(v), hi.max(v)),
+            )
+        };
         let sigmoid = |x: f32| 1.0f32 / (1.0 + (-x).exp());
         let si_mi = sigmoid(lo);
         let si_ma = sigmoid(hi);
@@ -266,92 +286,142 @@ pub fn apply_fill_style(rgba: &mut RgbaImage, style: crate::types::FillStyle) {
     match style {
         FillStyle::None => {}
         FillStyle::Desaturate => {
-            for p in rgba.pixels_mut() {
-                let y = luma_u8(p.0[0], p.0[1], p.0[2]);
-                p.0[0] = y; p.0[1] = y; p.0[2] = y;
+            let process_pixel = |p: &mut [u8]| {
+                let y = luma_u8(p[0], p[1], p[2]);
+                p[0] = y; p[1] = y; p[2] = y;
+            };
+            if rgba.len() >= ROW_PAR_THRESHOLD * 4 {
+                rgba.as_mut().par_chunks_exact_mut(4).for_each(process_pixel);
+            } else {
+                for p in rgba.pixels_mut() { process_pixel(&mut p.0); }
             }
         }
         FillStyle::Invert => {
-            for p in rgba.pixels_mut() {
-                p.0[0] = 255 - p.0[0];
-                p.0[1] = 255 - p.0[1];
-                p.0[2] = 255 - p.0[2];
+            let process_pixel = |p: &mut [u8]| {
+                p[0] = 255 - p[0];
+                p[1] = 255 - p[1];
+                p[2] = 255 - p[2];
+            };
+            if rgba.len() >= ROW_PAR_THRESHOLD * 4 {
+                rgba.as_mut().par_chunks_exact_mut(4).for_each(process_pixel);
+            } else {
+                for p in rgba.pixels_mut() { process_pixel(&mut p.0); }
             }
         }
         FillStyle::Duotone { dark, light } => {
-            for p in rgba.pixels_mut() {
-                let t = luma_u8(p.0[0], p.0[1], p.0[2]) as u16;
+            let process_pixel = |p: &mut [u8]| {
+                let t = luma_u8(p[0], p[1], p[2]) as u16;
                 let inv = 255 - t;
-                p.0[0] = ((dark[0] as u16 * inv + light[0] as u16 * t) / 255) as u8;
-                p.0[1] = ((dark[1] as u16 * inv + light[1] as u16 * t) / 255) as u8;
-                p.0[2] = ((dark[2] as u16 * inv + light[2] as u16 * t) / 255) as u8;
+                p[0] = ((dark[0] as u16 * inv + light[0] as u16 * t) / 255) as u8;
+                p[1] = ((dark[1] as u16 * inv + light[1] as u16 * t) / 255) as u8;
+                p[2] = ((dark[2] as u16 * inv + light[2] as u16 * t) / 255) as u8;
+            };
+            if rgba.len() >= ROW_PAR_THRESHOLD * 4 {
+                rgba.as_mut().par_chunks_exact_mut(4).for_each(process_pixel);
+            } else {
+                for p in rgba.pixels_mut() { process_pixel(&mut p.0); }
             }
         }
         FillStyle::Sepia => {
-            for p in rgba.pixels_mut() {
-                let (r, g, b) = (p.0[0] as u32, p.0[1] as u32, p.0[2] as u32);
+            let process_pixel = |p: &mut [u8]| {
+                let (r, g, b) = (p[0] as u32, p[1] as u32, p[2] as u32);
                 // Standard sepia coefficients (scaled ×1000 for integer math).
-                p.0[0] = ((r * 393 + g * 769 + b * 189) / 1000).min(255) as u8;
-                p.0[1] = ((r * 349 + g * 686 + b * 168) / 1000).min(255) as u8;
-                p.0[2] = ((r * 272 + g * 534 + b * 131) / 1000).min(255) as u8;
+                p[0] = ((r * 393 + g * 769 + b * 189) / 1000).min(255) as u8;
+                p[1] = ((r * 349 + g * 686 + b * 168) / 1000).min(255) as u8;
+                p[2] = ((r * 272 + g * 534 + b * 131) / 1000).min(255) as u8;
+            };
+            if rgba.len() >= ROW_PAR_THRESHOLD * 4 {
+                rgba.as_mut().par_chunks_exact_mut(4).for_each(process_pixel);
+            } else {
+                for p in rgba.pixels_mut() { process_pixel(&mut p.0); }
             }
         }
         FillStyle::Threshold { level } => {
-            for p in rgba.pixels_mut() {
-                let y = luma_u8(p.0[0], p.0[1], p.0[2]);
+            let process_pixel = |p: &mut [u8]| {
+                let y = luma_u8(p[0], p[1], p[2]);
                 let v = if y >= level { 255 } else { 0 };
-                p.0[0] = v; p.0[1] = v; p.0[2] = v;
+                p[0] = v; p[1] = v; p[2] = v;
+            };
+            if rgba.len() >= ROW_PAR_THRESHOLD * 4 {
+                rgba.as_mut().par_chunks_exact_mut(4).for_each(process_pixel);
+            } else {
+                for p in rgba.pixels_mut() { process_pixel(&mut p.0); }
             }
         }
         FillStyle::Posterize { levels } => {
-            let n = levels.max(2) as u16 - 1;
-            for p in rgba.pixels_mut() {
+            let levels_m1 = levels.max(2) as u16 - 1;
+            let process_pixel = |p: &mut [u8]| {
                 for i in 0..3 {
-                    let v = p.0[i] as u16;
-                    p.0[i] = ((v * n / 255) * 255 / n) as u8;
+                    let v = p[i] as u16;
+                    p[i] = ((v * levels_m1 / 255) * 255 / levels_m1) as u8;
                 }
+            };
+            if rgba.len() >= ROW_PAR_THRESHOLD * 4 {
+                rgba.as_mut().par_chunks_exact_mut(4).for_each(process_pixel);
+            } else {
+                for p in rgba.pixels_mut() { process_pixel(&mut p.0); }
             }
         }
         FillStyle::Solarize { pivot } => {
-            for p in rgba.pixels_mut() {
+            let process_pixel = |p: &mut [u8]| {
                 for i in 0..3 {
-                    if p.0[i] >= pivot {
-                        p.0[i] = 255 - p.0[i];
+                    if p[i] >= pivot {
+                        p[i] = 255 - p[i];
                     }
                 }
+            };
+            if rgba.len() >= ROW_PAR_THRESHOLD * 4 {
+                rgba.as_mut().par_chunks_exact_mut(4).for_each(process_pixel);
+            } else {
+                for p in rgba.pixels_mut() { process_pixel(&mut p.0); }
             }
         }
         FillStyle::HueShift { degrees } => {
-            for p in rgba.pixels_mut() {
-                let (h, s, v) = rgb_to_hsv(p.0[0], p.0[1], p.0[2]);
+            let process_pixel = |p: &mut [u8]| {
+                let (h, s, v) = rgb_to_hsv(p[0], p[1], p[2]);
                 let new_h = (h as i32 + degrees as i32).rem_euclid(360) as u16;
                 let (r, g, b) = hsv_to_rgb(new_h, s, v);
-                p.0[0] = r; p.0[1] = g; p.0[2] = b;
+                p[0] = r; p[1] = g; p[2] = b;
+            };
+            if rgba.len() >= ROW_PAR_THRESHOLD * 4 {
+                rgba.as_mut().par_chunks_exact_mut(4).for_each(process_pixel);
+            } else {
+                for p in rgba.pixels_mut() { process_pixel(&mut p.0); }
             }
         }
         FillStyle::Saturate { percent } => {
             // Move each channel toward/away from luma by `percent / 100`.
             // percent=0 → grayscale, 100 → unchanged, >100 → punchy.
             let factor = percent.min(300) as i32;
-            for p in rgba.pixels_mut() {
-                let y = luma_u8(p.0[0], p.0[1], p.0[2]) as i32;
+            let process_pixel = |p: &mut [u8]| {
+                let y = luma_u8(p[0], p[1], p[2]) as i32;
                 for i in 0..3 {
-                    let v = p.0[i] as i32;
+                    let v = p[i] as i32;
                     let shifted = y + ((v - y) * factor / 100);
-                    p.0[i] = shifted.clamp(0, 255) as u8;
+                    p[i] = shifted.clamp(0, 255) as u8;
                 }
+            };
+            if rgba.len() >= ROW_PAR_THRESHOLD * 4 {
+                rgba.as_mut().par_chunks_exact_mut(4).for_each(process_pixel);
+            } else {
+                for p in rgba.pixels_mut() { process_pixel(&mut p.0); }
             }
         }
         FillStyle::ColorSplash { keep_hue, tolerance } => {
             let keep = (keep_hue % 360) as i32;
             let tol = tolerance.min(180) as i32;
-            for p in rgba.pixels_mut() {
-                let (h, _, _) = rgb_to_hsv(p.0[0], p.0[1], p.0[2]);
+            let process_pixel = |p: &mut [u8]| {
+                let (h, _, _) = rgb_to_hsv(p[0], p[1], p[2]);
                 let dist = hue_distance(h as i32, keep);
                 if dist > tol {
-                    let y = luma_u8(p.0[0], p.0[1], p.0[2]);
-                    p.0[0] = y; p.0[1] = y; p.0[2] = y;
+                    let y = luma_u8(p[0], p[1], p[2]);
+                    p[0] = y; p[1] = y; p[2] = y;
                 }
+            };
+            if rgba.len() >= ROW_PAR_THRESHOLD * 4 {
+                rgba.as_mut().par_chunks_exact_mut(4).for_each(process_pixel);
+            } else {
+                for p in rgba.pixels_mut() { process_pixel(&mut p.0); }
             }
         }
         FillStyle::Pixelate { block_size } => {
@@ -391,25 +461,29 @@ pub fn apply_fill_style(rgba: &mut RgbaImage, style: crate::types::FillStyle) {
             // Split-tone by luma: pixels below 128 bend toward `shadow`,
             // above bend toward `highlight`. Preserves midtones, lifts
             // shadows + warms highlights (or whatever the user picked).
-            for p in rgba.pixels_mut() {
-                let y = luma_u8(p.0[0], p.0[1], p.0[2]);
+            let process_pixel = |p: &mut [u8]| {
+                let y = luma_u8(p[0], p[1], p[2]);
                 let (target, t) = if y < 128 {
                     (shadow, (128 - y) as u16) // 0..=128
                 } else {
                     (highlight, (y - 128) as u16) // 0..=127
                 };
-                let w = t.min(128) * 2; // scale to 0..=256 then clamp
-                let w = w.min(255);
-                let inv = 255 - w;
-                p.0[0] = ((p.0[0] as u16 * inv + target[0] as u16 * w) / 255) as u8;
-                p.0[1] = ((p.0[1] as u16 * inv + target[1] as u16 * w) / 255) as u8;
-                p.0[2] = ((p.0[2] as u16 * inv + target[2] as u16 * w) / 255) as u8;
+                let weight = (t.min(128) * 2).min(255);
+                let inv = 255 - weight;
+                p[0] = ((p[0] as u16 * inv + target[0] as u16 * weight) / 255) as u8;
+                p[1] = ((p[1] as u16 * inv + target[1] as u16 * weight) / 255) as u8;
+                p[2] = ((p[2] as u16 * inv + target[2] as u16 * weight) / 255) as u8;
+            };
+            if rgba.len() >= ROW_PAR_THRESHOLD * 4 {
+                rgba.as_mut().par_chunks_exact_mut(4).for_each(process_pixel);
+            } else {
+                for p in rgba.pixels_mut() { process_pixel(&mut p.0); }
             }
         }
         FillStyle::ChannelSwap { variant } => {
             use crate::types::ChannelSwapVariant;
-            for p in rgba.pixels_mut() {
-                let [r, g, b, _] = p.0;
+            let process_pixel = |p: &mut [u8]| {
+                let (r, g, b) = (p[0], p[1], p[2]);
                 let (nr, ng, nb) = match variant {
                     ChannelSwapVariant::Grb => (g, r, b),
                     ChannelSwapVariant::Brg => (b, r, g),
@@ -417,22 +491,26 @@ pub fn apply_fill_style(rgba: &mut RgbaImage, style: crate::types::FillStyle) {
                     ChannelSwapVariant::Bgr => (b, g, r),
                     ChannelSwapVariant::Gbr => (g, b, r),
                 };
-                p.0[0] = nr; p.0[1] = ng; p.0[2] = nb;
+                p[0] = nr; p[1] = ng; p[2] = nb;
+            };
+            if rgba.len() >= ROW_PAR_THRESHOLD * 4 {
+                rgba.as_mut().par_chunks_exact_mut(4).for_each(process_pixel);
+            } else {
+                for p in rgba.pixels_mut() { process_pixel(&mut p.0); }
             }
         }
         FillStyle::Halftone { dot_spacing } => {
-            // Read each pixel's luma BEFORE writing the same pixel. The
-            // earlier bug read cell-top-left luma, which had already been
-            // mutated by the time later rows ran; reading `(x, y)` itself
-            // is safe because the write at `(x, y)` happens after.
+            // Read each pixel's luma BEFORE writing the same pixel.
             let spacing = dot_spacing.clamp(2, 32);
             let (w, h) = rgba.dimensions();
             let half = (spacing / 2) as i32;
             let max_r_sq = (half * half) as u32;
-            for y in 0..h {
+            let row_stride = (w * 4) as usize;
+
+            let process_row = |y: usize, row: &mut [u8]| {
                 for x in 0..w {
-                    let src = rgba.get_pixel(x, y);
-                    let luma = luma_u8(src.0[0], src.0[1], src.0[2]);
+                    let p = x as usize * 4;
+                    let luma = luma_u8(row[p], row[p+1], row[p+2]);
                     let r_sq = max_r_sq * (255 - luma as u32) / 255;
                     let cx = ((x as i32) / spacing as i32) * spacing as i32 + half;
                     let cy = ((y as i32) / spacing as i32) * spacing as i32 + half;
@@ -440,16 +518,25 @@ pub fn apply_fill_style(rgba: &mut RgbaImage, style: crate::types::FillStyle) {
                     let dy = y as i32 - cy;
                     let dist_sq = (dx * dx + dy * dy) as u32;
                     let v = if dist_sq <= r_sq { 0u8 } else { 255 };
-                    let dst = rgba.get_pixel_mut(x, y);
-                    dst.0[0] = v; dst.0[1] = v; dst.0[2] = v;
+                    row[p] = v; row[p+1] = v; row[p+2] = v;
                 }
+            };
+
+            if (w * h) as usize >= ROW_PAR_THRESHOLD {
+                rgba.as_mut().par_chunks_exact_mut(row_stride).enumerate().for_each(|(y, row)| {
+                    process_row(y, row);
+                });
+            } else {
+                rgba.as_mut().chunks_exact_mut(row_stride).enumerate().for_each(|(y, row)| {
+                    process_row(y, row);
+                });
             }
         }
         FillStyle::GradientMap { stops } => {
             // Map luma 0..=255 through 4 colour stops at 0, 85, 170, 255.
             // Linear interp between adjacent stops.
-            for p in rgba.pixels_mut() {
-                let y = luma_u8(p.0[0], p.0[1], p.0[2]) as u16;
+            let process_pixel = |p: &mut [u8]| {
+                let y = luma_u8(p[0], p[1], p[2]) as u16;
                 let (lo, hi, t) = if y <= 85 {
                     (stops[0], stops[1], y * 255 / 85)
                 } else if y <= 170 {
@@ -459,9 +546,14 @@ pub fn apply_fill_style(rgba: &mut RgbaImage, style: crate::types::FillStyle) {
                 };
                 let t = t.min(255);
                 let inv = 255 - t;
-                p.0[0] = ((lo[0] as u16 * inv + hi[0] as u16 * t) / 255) as u8;
-                p.0[1] = ((lo[1] as u16 * inv + hi[1] as u16 * t) / 255) as u8;
-                p.0[2] = ((lo[2] as u16 * inv + hi[2] as u16 * t) / 255) as u8;
+                p[0] = ((lo[0] as u16 * inv + hi[0] as u16 * t) / 255) as u8;
+                p[1] = ((lo[1] as u16 * inv + hi[1] as u16 * t) / 255) as u8;
+                p[2] = ((lo[2] as u16 * inv + hi[2] as u16 * t) / 255) as u8;
+            };
+            if rgba.len() >= ROW_PAR_THRESHOLD * 4 {
+                rgba.as_mut().par_chunks_exact_mut(4).for_each(process_pixel);
+            } else {
+                for p in rgba.pixels_mut() { process_pixel(&mut p.0); }
             }
         }
     }
