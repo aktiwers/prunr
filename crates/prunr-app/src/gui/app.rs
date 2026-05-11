@@ -1836,9 +1836,11 @@ impl PrunrApp {
         // mutably so `build_preview_inputs` can lazily cache an
         // `Arc<DynamicImage>` on the item (built once, reused across every
         // subsequent dispatch of the drag session — see `source_dyn`).
+        let is_filter_only = self.settings.model.to_model_kind().is_none();
+        let chain_mode = self.settings.chain_mode;
         let batch_items = &mut self.batch.items;
         let wait = self.processor.live_preview.tick(|id, kind| {
-            Self::build_preview_inputs(batch_items, id, kind)
+            Self::build_preview_inputs(batch_items, id, kind, is_filter_only, chain_mode)
         });
         // If a future dispatch is waiting, schedule a repaint when the
         // debounce elapses so tick() can fire on its own.
@@ -1870,17 +1872,40 @@ impl PrunrApp {
         items: &mut [BatchItem],
         id: u64,
         kind: super::live_preview::PreviewKind,
+        is_filter_only: bool,
+        chain_mode: bool,
     ) -> Option<super::live_preview::DispatchInputs> {
         use super::live_preview::{DispatchInputs, PreviewKind, decompress_seg};
         let item = items.iter_mut().find(|b| b.id == id)?;
-        // Lazily build the cached `Arc<DynamicImage>` once per decode.
-        if item.source_dyn.is_none() {
-            let rgba = item.source_rgba.as_ref()?;
-            item.source_dyn = Some(Arc::new(image::DynamicImage::ImageRgba8((**rgba).clone())));
-        }
-        // Unwrap: we just set it above if it was None.
-        let original = Arc::clone(item.source_dyn.as_ref().unwrap());
         let seg_tensor = item.cached_tensor.as_ref().and_then(decompress_seg);
+        // A Mask dispatch in a seg model with no cached tensor falls
+        // through to `run_preview`'s source+fill_style fallback and
+        // overwrites any existing `result_rgba`. Filter-only mode is
+        // the legitimate user of that fallback (the filter IS the
+        // pipeline). Anywhere else, refuse — better to skip the
+        // dispatch than discard a prior chained result.
+        if matches!(kind, PreviewKind::Mask)
+            && !is_filter_only
+            && seg_tensor.is_none()
+            && item.result_rgba.is_some()
+        {
+            return None;
+        }
+        // Chain mode + prior result: apply the live-preview mask to the
+        // chained `result_rgba` so stacked edits (e.g. an SD inpaint
+        // stroke) survive a subsequent seg brush stroke. Without this,
+        // Tier-2 mask rerun rebuilds against `source_dyn` and silently
+        // discards every chain step.
+        let original = if chain_mode && item.result_rgba.is_some() {
+            let rgba = item.result_rgba.as_ref().unwrap();
+            Arc::new(image::DynamicImage::ImageRgba8((**rgba).clone()))
+        } else {
+            if item.source_dyn.is_none() {
+                let rgba = item.source_rgba.as_ref()?;
+                item.source_dyn = Some(Arc::new(image::DynamicImage::ImageRgba8((**rgba).clone())));
+            }
+            Arc::clone(item.source_dyn.as_ref().unwrap())
+        };
         let edge_tensor = Self::edge_tensor_for_active_scale(item);
         // DualScale needs TWO edge tensors — the primary (active scale, used
         // as the Fine layer) and a secondary Bold layer. Only decompress the
