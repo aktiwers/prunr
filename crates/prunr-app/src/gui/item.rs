@@ -234,6 +234,14 @@ pub(crate) struct BatchItem {
     pub(crate) thumb_texture: Option<egui::TextureHandle>,
     pub(crate) thumb_pending: bool,
     pub(crate) result_rgba: Option<Arc<image::RgbaImage>>,
+    /// Chain-mode mirror of `source_dyn`: caches a `DynamicImage` wrapping
+    /// the current `result_rgba` so chain-mode live-preview dispatches
+    /// don't re-clone the full RGBA buffer every tick. The tuple stores
+    /// the `result_rgba` Arc that produced the cached `DynamicImage`;
+    /// `Arc::ptr_eq` against the current `result_rgba` is the staleness
+    /// check, so no manual invalidation is needed — every site that
+    /// replaces `result_rgba` with a fresh Arc automatically misses.
+    pub(crate) chain_dyn_cache: Option<(Arc<image::RgbaImage>, Arc<image::DynamicImage>)>,
     pub(crate) result_texture: Option<egui::TextureHandle>,
     /// True while a background thread is building the source ColorImage.
     pub(crate) source_tex_pending: bool,
@@ -575,6 +583,7 @@ impl BatchItem {
             thumb_texture: None,
             thumb_pending: false,
             result_rgba: None,
+            chain_dyn_cache: None,
             result_texture: None,
             source_tex_pending: false,
             result_tex_pending: false,
