@@ -36,7 +36,7 @@ pub fn guided_filter_alpha(
     const REC601_G: f32 = 0.587;
     const REC601_B: f32 = 0.114;
 
-    let channels = (guide.as_raw().len() / n) as usize;
+    let channels = guide.as_raw().len() / n;
 
     guide_f.par_iter_mut()
         .zip(mask_f.par_iter_mut())
@@ -148,13 +148,12 @@ pub(crate) fn box_filter_into(src: &[f32], w: u32, h: u32, radius: u32, dst: &mu
     if do_par_rows {
         integral
             .par_chunks_mut(w)
-            .enumerate()
-            .for_each(|(y, row)| {
-                let src_base = y * w;
+            .zip(src.par_chunks(w))
+            .for_each(|(dst_row, src_row)| {
                 let mut acc = 0.0f32;
-                for x in 0..w {
-                    acc += src[src_base + x];
-                    row[x] = acc;
+                for (&s, d) in src_row.iter().zip(dst_row.iter_mut()) {
+                    acc += s;
+                    *d = acc;
                 }
             });
     } else {
@@ -177,26 +176,25 @@ pub(crate) fn box_filter_into(src: &[f32], w: u32, h: u32, radius: u32, dst: &mu
     if do_par_cols {
         // SAFETY: each chunk of columns accesses disjoint horizontal slices
         // of the 1D integral buffer. No two parallel iterations touch the same element.
-        let integral_ptr = integral.as_mut_ptr();
-        struct SendPtr(*mut f32);
-        unsafe impl Send for SendPtr {}
-        unsafe impl Sync for SendPtr {}
-        let sp = SendPtr(integral_ptr);
+        let integral_ptr_val = integral.as_mut_ptr() as usize;
 
-        (0..w).into_par_iter().chunks(COL_CHUNK).for_each(|chunk| {
-            for y in 1..h {
-                let row_off = y * w;
-                let prev_off = (y - 1) * w;
-                for &x in &chunk {
-                    unsafe {
-                        let cur = sp.0.add(row_off + x);
-                        let prev = sp.0.add(prev_off + x);
-                        *cur += *prev;
+        (0..w)
+            .into_par_iter()
+            .chunks(COL_CHUNK)
+            .for_each(|chunk| {
+                let ptr = integral_ptr_val as *mut f32;
+                for y in 1..h {
+                    let row_off = y * w;
+                    let prev_off = (y - 1) * w;
+                    for &x in &chunk {
+                        unsafe {
+                            let cur = ptr.add(row_off + x);
+                            let prev = ptr.add(prev_off + x);
+                            *cur += *prev;
+                        }
                     }
                 }
-            }
-            let _ = &sp;
-        });
+            });
     } else {
         for cx in (0..w).step_by(COL_CHUNK) {
             let end = (cx + COL_CHUNK).min(w);
@@ -237,20 +235,20 @@ pub(crate) fn box_filter_into(src: &[f32], w: u32, h: u32, radius: u32, dst: &mu
 
         if yi > r && yi < (h as i64 - r) && x_start < x_end {
             // Margin pixels (left)
-            for x in 0..x_start {
+            for (x, slot) in row.iter_mut().enumerate().take(x_start) {
                 let xi = x as i64;
                 let x1 = (xi - r - 1).max(-1);
                 let x2 = (xi + r).min(w as i64 - 1);
                 let area = (x2 - x1) as f32 * (y2 - y1) as f32;
                 let sum = get(x2, y2) - get(x1, y2) - get(x2, y1) + get(x1, y1);
-                row[x] = sum / area.max(1.0);
+                *slot = sum / area.max(1.0);
             }
 
             // Interior fast path: no boundary checks, no area re-calc
             let row_y2 = y2 as usize * w;
             let row_y1 = if y1 < 0 { None } else { Some(y1 as usize * w) };
 
-            for x in x_start..x_end {
+            for (x, slot) in row.iter_mut().enumerate().take(x_end).skip(x_start) {
                 let xi = x as i64;
                 let x2 = (xi + r) as usize;
                 let x1 = (xi - r - 1) as usize;
@@ -261,27 +259,27 @@ pub(crate) fn box_filter_into(src: &[f32], w: u32, h: u32, radius: u32, dst: &mu
                 } else {
                     integral[row_y2 + x2] - integral[row_y2 + x1]
                 };
-                row[x] = sum * inv_area;
+                *slot = sum * inv_area;
             }
 
             // Margin pixels (right)
-            for x in x_end..w {
+            for (x, slot) in row.iter_mut().enumerate().take(w).skip(x_end) {
                 let xi = x as i64;
                 let x1 = (xi - r - 1).max(-1);
                 let x2 = (xi + r).min(w as i64 - 1);
                 let area = (x2 - x1) as f32 * (y2 - y1) as f32;
                 let sum = get(x2, y2) - get(x1, y2) - get(x2, y1) + get(x1, y1);
-                row[x] = sum / area.max(1.0);
+                *slot = sum / area.max(1.0);
             }
         } else {
             // Fully slow row (top/bottom margins)
-            for x in 0..w {
+            for (x, slot) in row.iter_mut().enumerate().take(w) {
                 let xi = x as i64;
                 let x1 = (xi - r - 1).max(-1);
                 let x2 = (xi + r).min(w as i64 - 1);
                 let area = (x2 - x1) as f32 * (y2 - y1) as f32;
                 let sum = get(x2, y2) - get(x1, y2) - get(x2, y1) + get(x1, y1);
-                row[x] = sum / area.max(1.0);
+                *slot = sum / area.max(1.0);
             }
         }
     };
