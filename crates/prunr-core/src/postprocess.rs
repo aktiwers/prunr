@@ -113,29 +113,39 @@ fn tensor_to_mask_core(
     // For rembg models the fold is over raw logits; for BiRefNet the fold is over
     // sigmoid'd values — canonical rembg birefnet_general.py and BiRefNet/inference.py
     // both apply (x - min) / (max - min) after sigmoid, not before.
-    let (mi, range, uniform_val) = if !use_sigmoid {
-        let (mi, ma) = pred_slice.iter().fold(
+    let (lo, hi) = if pred_slice.len() >= ROW_PAR_THRESHOLD {
+        pred_slice
+            .par_iter()
+            .fold(
+                || (f32::INFINITY, f32::NEG_INFINITY),
+                |(lo, hi), &v| (lo.min(v), hi.max(v)),
+            )
+            .reduce(
+                || (f32::INFINITY, f32::NEG_INFINITY),
+                |(l1, h1), (l2, h2)| (l1.min(l2), h1.max(h2)),
+            )
+    } else {
+        pred_slice.iter().fold(
             (f32::INFINITY, f32::NEG_INFINITY),
             |(lo, hi), &v| (lo.min(v), hi.max(v)),
-        );
-        let r = ma - mi;
+        )
+    };
+
+    let (mi, range, uniform_val) = if !use_sigmoid {
+        let r = hi - lo;
         if r < 1e-6 {
             // Uniform output — use the absolute value to decide:
             // rembg models output ~0 for background, ~1 for foreground
             // after min-max normalization. A uniform value > 0.5 means
             // "everything is foreground" → full opacity.
-            (mi, 1.0, Some(if ma > 0.5 { 1.0f32 } else { 0.0 }))
+            (lo, 1.0, Some(if hi > 0.5 { 1.0f32 } else { 0.0 }))
         } else {
-            (mi, r, None)
+            (lo, r, None)
         }
     } else {
         // Optimization: sigmoid is monotonic, so min(sigmoid(x)) == sigmoid(min(x)).
         // Folding over raw logits and applying sigmoid once at the end saves
         // ~1.05M exp() calls for a 1024² BiRefNet tensor.
-        let (lo, hi) = pred_slice.iter().fold(
-            (f32::INFINITY, f32::NEG_INFINITY),
-            |(lo, hi), &v| (lo.min(v), hi.max(v)),
-        );
         let sigmoid = |x: f32| 1.0f32 / (1.0 + (-x).exp());
         let si_mi = sigmoid(lo);
         let si_ma = sigmoid(hi);
