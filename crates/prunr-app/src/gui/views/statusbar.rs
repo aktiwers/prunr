@@ -52,10 +52,14 @@ pub fn render(ui: &mut egui::Ui, app: &PrunrApp) {
 
         ui.label(RichText::new(&status_text).color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY));
 
-        // History/undo depth indicator (visible when chain_mode is on and history exists)
+        // Undo-depth indicator: count of actions the user can actually
+        // undo via Cmd+Z. `history.len()` would lie when stroke-archive
+        // and Result entries diverge from `actions_undo` (e.g. seg
+        // strokes that never archived, or chain-mode strokes that
+        // landed orphans across mode switches).
         if app.settings.chain_mode {
             if let Some(item) = app.batch.selected_item() {
-                let depth = item.history.len();
+                let depth = item.actions_undo.len();
                 if depth > 0 {
                     ui.add_space(theme::SPACE_SM);
                     ui.label(

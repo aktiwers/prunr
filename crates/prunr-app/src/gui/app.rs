@@ -657,11 +657,27 @@ impl PrunrApp {
                         } else {
                             false
                         }
+                    } else if self.settings.chain_mode
+                        && HistoryManager::can_undo(&self.batch.items[idx])
+                    {
+                        // Chain-mode seg: the brush handler archived the
+                        // pre-stroke `result_rgba` at commit. Pop it
+                        // (instant) instead of `dispatch_brush_rerun` —
+                        // the rerun would rebuild against the post-stroke
+                        // chain base and never reach the pre-stroke state.
+                        let _ = self.batch.items[idx].undo_stroke();
+                        if HistoryManager::undo_result(&mut self.batch.items[idx]) {
+                            self.batch.items[idx].reset_result_caches();
+                            self.batch.items[idx].source_texture = None;
+                            true
+                        } else {
+                            false
+                        }
                     } else {
-                        // Seg-brush: mask_correction state IS the input to the
-                        // pipeline — re-dispatch is required to recompute the
-                        // result. (Seg pipelines are sub-second; rerun cost is
-                        // tolerable. Future work could archive seg results too.)
+                        // Non-chain seg: mask_correction state IS the input
+                        // to the pipeline — re-dispatch is required to
+                        // recompute the result. (Seg pipelines are
+                        // sub-second; rerun cost is tolerable.)
                         if self.batch.items[idx].undo_stroke() {
                             self.dispatch_brush_rerun(idx);
                             true
@@ -719,6 +735,20 @@ impl PrunrApp {
                     if self.settings.model.is_inpaint() {
                         // Inpaint redo: swap stored RGBAs (instant; mirror of
                         // try_undo_one_action). See comment there.
+                        let _ = self.batch.items[idx].redo_stroke();
+                        if HistoryManager::redo_result(&mut self.batch.items[idx]) {
+                            self.batch.items[idx].reset_result_caches();
+                            self.batch.items[idx].source_texture = None;
+                            true
+                        } else {
+                            false
+                        }
+                    } else if self.settings.chain_mode
+                        && HistoryManager::can_redo(&self.batch.items[idx])
+                    {
+                        // Chain-mode seg redo mirror of the undo path:
+                        // the post-stroke result lives on `redo_stack`;
+                        // pop it back instead of re-running the brush.
                         let _ = self.batch.items[idx].redo_stroke();
                         if HistoryManager::redo_result(&mut self.batch.items[idx]) {
                             self.batch.items[idx].reset_result_caches();

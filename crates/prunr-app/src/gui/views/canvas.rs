@@ -270,6 +270,34 @@ fn handle_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: Rect) 
         if is_inpaint {
             app.dispatch_inpaint_for_item(idx);
         } else {
+            // Chain mode: archive the pre-stroke result so undo can
+            // restore it. Live preview will overwrite `result_rgba`
+            // with the stroke applied to the chained base
+            // (`build_preview_inputs`), and `dispatch_brush_rerun`-style
+            // undo would rebuild against that post-stroke base — never
+            // reaching the pre-stroke state. With the archive present,
+            // `try_undo_one_action` can pop history and restore
+            // instantly. Inpaint already archives at result-land via
+            // `pump_inpaint_results`; non-chain seg leaves
+            // `result_rgba` derivable from `source_dyn` + cached tensor
+            // so the brush-rerun fallback still works there.
+            if app.settings.chain_mode && app.batch.items[idx].result_rgba.is_some() {
+                let max_depth = app.settings.history_depth;
+                let item = &mut app.batch.items[idx];
+                if let Some(rgba) = item.result_rgba.as_ref().cloned() {
+                    item.history.push_back(crate::gui::item::HistoryEntry::new(
+                        rgba, item.applied_recipe.clone(),
+                    ));
+                    while item.history.len() > max_depth {
+                        if let Some(old) = item.history.pop_front() {
+                            old.cleanup();
+                        }
+                    }
+                    for entry in item.redo_stack.drain(..) {
+                        entry.cleanup();
+                    }
+                }
+            }
             tracing::info!(item_id, "brush stroke committed; dispatching Tier-2 rerun");
             app.processor.live_preview.mark_tweak(item_id, PreviewKind::Mask);
             app.processor.live_preview.flush(item_id);
