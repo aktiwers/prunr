@@ -999,17 +999,10 @@ impl PrunrApp {
     /// editing for no current benefit.
     fn recipe_drift_tripwire(&mut self) {
         use crate::gui::live_preview::PreviewKind;
-        // Inpaint mode owns brush-driven recipe drift via the inpaint
-        // subprocess (`dispatch_inpaint_for_item`). Dispatching a seg
-        // Mask preview here hits `run_preview`'s no-seg-tensor branch
-        // (cached_tensor was cleared on the model switch into inpaint)
-        // and returns the raw source as the "preview" — overwriting
-        // result_rgba with the original photo. The tripwire fires twice
-        // per stroke: once on `commit_correction` (correction_hash 0 →
-        // Some) and once on `clear_correction_post_stroke` after the SD
-        // result lands (Some → 0). Both must be silenced or the canvas
-        // ends up showing the source instead of the stroke result.
-        if !drift_tripwire_applies_to_model(self.settings.model) {
+        // Inpaint strokes commit via the inpaint subprocess; firing
+        // a seg preview here would clobber `result_rgba` with the raw
+        // source through `run_preview`'s no-tensor fallback.
+        if self.settings.model.is_inpaint() {
             return;
         }
         if self.processor.live_preview.has_in_flight() {
@@ -3045,17 +3038,15 @@ impl PrunrApp {
         let item_id = self.batch.items[idx].id;
         let is_done = self.batch.items[idx].status == BatchStatus::Done;
 
-        // Seg live-preview paths (Mask / Edge) only make sense for seg
-        // and filter-only models. In inpaint mode the no-seg-tensor
-        // fallback in `run_preview` would dump the raw source into
-        // result_rgba — see `recipe_drift_tripwire` for the same gate.
-        let live_preview_dispatch_ok =
-            drift_tripwire_applies_to_model(self.settings.model);
+        // Seg live-preview is meaningless in inpaint mode — no seg tensor
+        // to rerun, and the no-tensor fallback would overwrite result_rgba.
+        let seg_preview_active = self.settings.live_preview
+            && !self.settings.model.is_inpaint();
         match dispatch {
             DispatchKind::None => {}
             DispatchKind::Render => {}
             DispatchKind::LivePreviewMask => {
-                if self.settings.live_preview && live_preview_dispatch_ok {
+                if seg_preview_active {
                     self.processor.live_preview.mark_tweak(item_id, PreviewKind::Mask);
                     if toolbar_change.commit {
                         self.processor.live_preview.flush(item_id);
@@ -3066,7 +3057,7 @@ impl PrunrApp {
                 }
             }
             DispatchKind::LivePreviewEdge => {
-                if self.settings.live_preview && live_preview_dispatch_ok {
+                if seg_preview_active {
                     self.processor.live_preview.mark_tweak(item_id, PreviewKind::Edge);
                     if toolbar_change.commit {
                         self.processor.live_preview.flush(item_id);
@@ -3204,19 +3195,6 @@ impl PrunrApp {
         // Toasts — rendered last as foreground overlay.
         self.toasts.show(ctx);
     }
-}
-
-/// Returns true if the seg-style live-preview path (`recipe_drift_tripwire`
-/// and `DispatchKind::LivePreview*` from the toolbar) is the right handler
-/// for the current model.
-///
-/// False for inpaint models: brush strokes there commit through the
-/// inpaint subprocess, and the seg `run_preview` no-seg-tensor fallback
-/// would overwrite `result_rgba` with the raw source. True for seg models
-/// (Silueta / U2Net / BiRefNetLite) and filter-only mode (`None`) where
-/// the fallback IS the intended output.
-fn drift_tripwire_applies_to_model(model: super::settings::SettingsModel) -> bool {
-    !model.is_inpaint()
 }
 
 /// Build a human-readable toast label for a multi-item undo or redo.
@@ -3539,63 +3517,5 @@ mod toast_label_tests {
     #[test]
     fn multi_item_mixed_types_falls_back_to_count() {
         assert_eq!(action_toast_label(3, [2, 1, 0], UNDO_LABELS, "undone"), "3 actions undone");
-    }
-}
-
-#[cfg(test)]
-mod drift_tripwire_gate_tests {
-    use super::drift_tripwire_applies_to_model;
-    use crate::gui::settings::SettingsModel;
-
-    /// Pin the contract that motivates the gate: a brush stroke in inpaint
-    /// mode invalidates the mask recipe (correction_hash flips), but the
-    /// inpaint subprocess is the real handler. Routing through the seg
-    /// live-preview path with no cached tensor overwrites result_rgba
-    /// with the raw source (the "background comes back" bug).
-    #[test]
-    fn inpaint_models_skip_seg_drift_dispatch() {
-        assert!(!drift_tripwire_applies_to_model(SettingsModel::Inpaint));
-        assert!(!drift_tripwire_applies_to_model(SettingsModel::BigInpaint));
-        assert!(!drift_tripwire_applies_to_model(SettingsModel::MiganInpaint));
-        assert!(!drift_tripwire_applies_to_model(SettingsModel::SdInpaint));
-    }
-
-    #[test]
-    fn seg_models_run_seg_drift_dispatch() {
-        assert!(drift_tripwire_applies_to_model(SettingsModel::Silueta));
-        assert!(drift_tripwire_applies_to_model(SettingsModel::U2net));
-        assert!(drift_tripwire_applies_to_model(SettingsModel::BiRefNetLite));
-    }
-
-    /// Filter-only mode (model = None) relies on the seg-live-preview
-    /// dispatch path because the no-seg-tensor branch of `run_preview`
-    /// IS the filter-only pipeline (apply fill_style to source). The
-    /// gate must let this through.
-    #[test]
-    fn filter_only_mode_runs_seg_drift_dispatch() {
-        assert!(drift_tripwire_applies_to_model(SettingsModel::None));
-    }
-
-    /// Cover-every-variant: the gate must classify each `SettingsModel`
-    /// in `ALL` either as "skip drift dispatch" (inpaint) or "run drift
-    /// dispatch" (seg + filter-only). A new variant added without
-    /// extending the gate would silently inherit one branch — this test
-    /// fails compile (exhaustive match) if a variant slips past.
-    #[test]
-    fn every_settings_model_variant_is_classified() {
-        for m in SettingsModel::ALL {
-            let inpaint = matches!(
-                m,
-                SettingsModel::Inpaint
-                    | SettingsModel::BigInpaint
-                    | SettingsModel::MiganInpaint
-                    | SettingsModel::SdInpaint
-            );
-            assert_eq!(
-                drift_tripwire_applies_to_model(m),
-                !inpaint,
-                "drift_tripwire_applies_to_model classification disagrees with is_inpaint for {m:?}",
-            );
-        }
     }
 }

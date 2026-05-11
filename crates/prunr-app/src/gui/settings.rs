@@ -947,4 +947,33 @@ mod tests {
         assert!(nested.exists(), "save_to_path must mkdir -p the parent");
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// Cross-subsystem contract: a dozen call sites across canvas /
+    /// toolbar / app branch on `is_inpaint()`, including the seg
+    /// live-preview gate that prevents the no-tensor fallback from
+    /// clobbering result_rgba. Any new variant added to `ALL` must be
+    /// classified explicitly here.
+    #[test]
+    fn is_inpaint_classifies_every_variant() {
+        for m in SettingsModel::ALL {
+            let expected = matches!(
+                m,
+                SettingsModel::Inpaint
+                    | SettingsModel::BigInpaint
+                    | SettingsModel::MiganInpaint
+                    | SettingsModel::SdInpaint,
+            );
+            assert_eq!(m.is_inpaint(), expected, "{m:?}");
+        }
+    }
+
+    #[test]
+    fn is_inpaint_and_uses_segmentation_are_disjoint() {
+        for m in SettingsModel::ALL {
+            assert!(
+                !(m.is_inpaint() && m.uses_segmentation()),
+                "{m:?} cannot be both inpaint and seg",
+            );
+        }
+    }
 }
