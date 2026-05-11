@@ -1895,10 +1895,22 @@ impl PrunrApp {
         // chained `result_rgba` so stacked edits (e.g. an SD inpaint
         // stroke) survive a subsequent seg brush stroke. Without this,
         // Tier-2 mask rerun rebuilds against `source_dyn` and silently
-        // discards every chain step.
+        // discards every chain step. The `chain_dyn_cache` keeps the
+        // wrapped `DynamicImage` across dispatches so a slider drag at
+        // 4K doesn't re-clone ~50 MB per tick; `Arc::ptr_eq` against the
+        // current `result_rgba` is the self-invalidation check.
         let original = if chain_mode && item.result_rgba.is_some() {
             let rgba = item.result_rgba.as_ref().unwrap();
-            Arc::new(image::DynamicImage::ImageRgba8((**rgba).clone()))
+            let cached = item.chain_dyn_cache.as_ref()
+                .and_then(|(src, dyn_img)| Arc::ptr_eq(rgba, src).then(|| Arc::clone(dyn_img)));
+            match cached {
+                Some(dyn_img) => dyn_img,
+                None => {
+                    let dyn_img = Arc::new(image::DynamicImage::ImageRgba8((**rgba).clone()));
+                    item.chain_dyn_cache = Some((Arc::clone(rgba), Arc::clone(&dyn_img)));
+                    dyn_img
+                }
+            }
         } else {
             if item.source_dyn.is_none() {
                 let rgba = item.source_rgba.as_ref()?;
