@@ -35,14 +35,17 @@ pub fn guided_filter_alpha(
     const REC601_R: f32 = 0.299;
     const REC601_G: f32 = 0.587;
     const REC601_B: f32 = 0.114;
-
-    let channels = guide.as_raw().len() / n;
+    // `guide: &RgbaImage` is part of the signature — 4 bytes per pixel
+    // (RGBA). Hardcoded so `par_chunks_exact(4)` lowers to a tight
+    // stride without runtime division.
+    const RGBA_BYTES_PER_PIXEL: usize = 4;
+    debug_assert_eq!(guide.as_raw().len(), n * RGBA_BYTES_PER_PIXEL);
 
     guide_f.par_iter_mut()
         .zip(mask_f.par_iter_mut())
         .zip(ii.par_iter_mut())
         .zip(ip.par_iter_mut())
-        .zip(guide.as_raw().par_chunks_exact(channels))
+        .zip(guide.as_raw().par_chunks_exact(RGBA_BYTES_PER_PIXEL))
         .zip(mask.as_raw().par_iter())
         .for_each(|(((((gf, mf), iiv), ipv), gp), &mp)| {
             let g = (REC601_R * gp[0] as f32 + REC601_G * gp[1] as f32 + REC601_B * gp[2] as f32) * INV_255;
@@ -52,7 +55,6 @@ pub fn guided_filter_alpha(
             *iiv = g * g;
             *ipv = g * m;
         });
-
 
     // --- Box filter calls 1-4 in parallel ---
     // Each needs its own integral scratch and output buffer.
@@ -244,21 +246,18 @@ pub(crate) fn box_filter_into(src: &[f32], w: u32, h: u32, radius: u32, dst: &mu
                 *slot = sum / area.max(1.0);
             }
 
-            // Interior fast path: no boundary checks, no area re-calc
+            // Interior fast path: no boundary checks, no area re-calc.
+            // The enclosing `yi > r` guard forces y1 = yi - r - 1 ≥ 0,
+            // so row_y1 is always a valid row offset — no Option needed.
             let row_y2 = y2 as usize * w;
-            let row_y1 = if y1 < 0 { None } else { Some(y1 as usize * w) };
+            let row_y1 = y1 as usize * w;
 
             for (x, slot) in row.iter_mut().enumerate().take(x_end).skip(x_start) {
                 let xi = x as i64;
                 let x2 = (xi + r) as usize;
                 let x1 = (xi - r - 1) as usize;
-
-                let sum = if let Some(ry1) = row_y1 {
-                    integral[row_y2 + x2] - integral[row_y2 + x1] - integral[ry1 + x2]
-                        + integral[ry1 + x1]
-                } else {
-                    integral[row_y2 + x2] - integral[row_y2 + x1]
-                };
+                let sum = integral[row_y2 + x2] - integral[row_y2 + x1]
+                    - integral[row_y1 + x2] + integral[row_y1 + x1];
                 *slot = sum * inv_area;
             }
 
@@ -374,6 +373,71 @@ mod tests {
         for (i, &v) in result.iter().enumerate() {
             assert!(v >= -1e-6, "Negative value at {i}: {v}");
             assert!(v <= 1.0 + 1e-6, "Value > 1 at {i}: {v}");
+        }
+    }
+
+    /// Naïve O(N²·(2r+1)²) reference: each pixel = mean of its (2r+1)² window
+    /// clamped to image bounds. No integral image, no fast paths, no parallel
+    /// tricks — just the definition of a box filter.
+    fn brute_force_box(data: &[f32], w: u32, h: u32, radius: u32) -> Vec<f32> {
+        let (wi, hi) = (w as i64, h as i64);
+        let r = radius as i64;
+        let mut out = vec![0.0_f32; data.len()];
+        for y in 0..hi {
+            for x in 0..wi {
+                let mut sum = 0.0_f32;
+                let mut count = 0u32;
+                for dy in -r..=r {
+                    let yy = y + dy;
+                    if yy < 0 || yy >= hi { continue; }
+                    for dx in -r..=r {
+                        let xx = x + dx;
+                        if xx < 0 || xx >= wi { continue; }
+                        sum += data[(yy * wi + xx) as usize];
+                        count += 1;
+                    }
+                }
+                out[(y * wi + x) as usize] = sum / count as f32;
+            }
+        }
+        out
+    }
+
+    /// Pins the interior fast-path against brute-force reference on a grid
+    /// big enough to exercise all three lookup regions (left margin, interior,
+    /// right margin) AND all three row regions (top margin, interior, bottom
+    /// margin). 16×16 + r=2 gives x_start=3, x_end=14 — interior is 11×11
+    /// pixels of fast path, surrounded by 2-wide margin in every direction.
+    #[test]
+    fn test_box_filter_interior_fast_path_matches_brute_force() {
+        let (w, h, r) = (16u32, 16u32, 2u32);
+        let data: Vec<f32> = (0..(w * h) as usize)
+            .map(|i| ((i as f32) * 0.137).sin())
+            .collect();
+        let actual = box_filter(&data, w, h, r);
+        let expected = brute_force_box(&data, w, h, r);
+        for (i, (&a, &e)) in actual.iter().zip(expected.iter()).enumerate() {
+            let (x, y) = (i as u32 % w, i as u32 / w);
+            assert!((a - e).abs() < 1e-4,
+                "box_filter mismatch at ({x},{y}): actual={a} expected={e}");
+        }
+    }
+
+    /// Same brute-force check on a wider image so the column-chunked
+    /// vertical prefix sum (COL_CHUNK = 32) walks a full chunk plus a
+    /// partial chunk in the same pass.
+    #[test]
+    fn test_box_filter_chunked_vertical_pass_matches_brute_force() {
+        let (w, h, r) = (48u32, 24u32, 3u32);
+        let data: Vec<f32> = (0..(w * h) as usize)
+            .map(|i| ((i as f32) * 0.071 + (i as f32).sqrt()).cos())
+            .collect();
+        let actual = box_filter(&data, w, h, r);
+        let expected = brute_force_box(&data, w, h, r);
+        for (i, (&a, &e)) in actual.iter().zip(expected.iter()).enumerate() {
+            let (x, y) = (i as u32 % w, i as u32 / w);
+            assert!((a - e).abs() < 1e-4,
+                "box_filter mismatch at ({x},{y}): actual={a} expected={e}");
         }
     }
 }
