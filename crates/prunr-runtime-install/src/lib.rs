@@ -135,7 +135,9 @@ pub fn pick_wheel_for_host(urls: &[serde_json::Value]) -> Result<WheelInfo, Stri
 /// equivalent on Unix.
 pub fn repackage_target_filename(zip_name: &str) -> Option<String> {
     let stripped = zip_name.strip_prefix("onnxruntime/capi/")?;
-    if stripped.contains('/') || stripped.contains('\\') { return None; }
+    if stripped.is_empty() || stripped.contains('/') || stripped.contains('\\') {
+        return None;
+    }
     if stripped.starts_with("onnxruntime_pybind11_state") { return None; }
     if stripped.ends_with(".py") { return None; }
     if stripped.starts_with("libonnxruntime.so.") {

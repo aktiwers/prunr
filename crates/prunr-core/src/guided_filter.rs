@@ -24,34 +24,36 @@ pub fn guided_filter_alpha(
     let (w, h) = (mask.width(), mask.height());
     let n = (w * h) as usize;
 
-    // Convert guide to grayscale luminance [0,1] and mask to [0,1]
+    // Convert guide to grayscale luminance [0,1] and mask to [0,1],
+    // and compute element-wise products for box_filter in one pass.
     let mut guide_f = vec![0.0f32; n];
     let mut mask_f = vec![0.0f32; n];
-
-    let wu = w as usize;
-    guide_f
-        .par_chunks_mut(wu)
-        .zip(mask_f.par_chunks_mut(wu))
-        .enumerate()
-        .for_each(|(y, (grow, mrow))| {
-            for x in 0..wu {
-                let gp = guide.get_pixel(x as u32, y as u32);
-                grow[x] = (0.299 * gp[0] as f32 + 0.587 * gp[1] as f32 + 0.114 * gp[2] as f32)
-                    / 255.0;
-                mrow[x] = mask.get_pixel(x as u32, y as u32)[0] as f32 / 255.0;
-            }
-        });
-
-    // Prepare element-wise products needed for box_filter calls.
-    // guide_f*guide_f and guide_f*mask_f can be computed in parallel.
     let mut ii = vec![0.0f32; n]; // I*I
     let mut ip = vec![0.0f32; n]; // I*p
-    ii.par_iter_mut()
+
+    const INV_255: f32 = 1.0 / 255.0;
+    const REC601_R: f32 = 0.299;
+    const REC601_G: f32 = 0.587;
+    const REC601_B: f32 = 0.114;
+    // `guide: &RgbaImage` is part of the signature — 4 bytes per pixel
+    // (RGBA). Hardcoded so `par_chunks_exact(4)` lowers to a tight
+    // stride without runtime division.
+    const RGBA_BYTES_PER_PIXEL: usize = 4;
+    debug_assert_eq!(guide.as_raw().len(), n * RGBA_BYTES_PER_PIXEL);
+
+    guide_f.par_iter_mut()
+        .zip(mask_f.par_iter_mut())
+        .zip(ii.par_iter_mut())
         .zip(ip.par_iter_mut())
-        .zip(guide_f.par_iter().zip(mask_f.par_iter()))
-        .for_each(|((ii_v, ip_v), (&g, &m))| {
-            *ii_v = g * g;
-            *ip_v = g * m;
+        .zip(guide.as_raw().par_chunks_exact(RGBA_BYTES_PER_PIXEL))
+        .zip(mask.as_raw().par_iter())
+        .for_each(|(((((gf, mf), iiv), ipv), gp), &mp)| {
+            let g = (REC601_R * gp[0] as f32 + REC601_G * gp[1] as f32 + REC601_B * gp[2] as f32) * INV_255;
+            let m = mp as f32 * INV_255;
+            *gf = g;
+            *mf = m;
+            *iiv = g * g;
+            *ipv = g * m;
         });
 
     // --- Box filter calls 1-4 in parallel ---
@@ -106,16 +108,14 @@ pub fn guided_filter_alpha(
     // (~36 M FMAs at 4K). Buffer is alive through this point and
     // dropped at function end.
     let mut out = GrayImage::new(w, h);
-    let out_buf = out.as_mut();
-    out_buf
-        .par_chunks_mut(wu)
-        .enumerate()
-        .for_each(|(y, row)| {
-            for (x, slot) in row.iter_mut().enumerate() {
-                let idx = y * wu + x;
-                let val = (mean_a[idx] * guide_f[idx] + mean_b[idx]).clamp(0.0, 1.0);
-                *slot = (val * 255.0) as u8;
-            }
+    out.as_mut()
+        .par_iter_mut()
+        .zip(mean_a.par_iter())
+        .zip(mean_b.par_iter())
+        .zip(guide_f.par_iter())
+        .for_each(|(((slot, &ma), &mb), &gf)| {
+            let val = (ma * gf + mb).clamp(0.0, 1.0);
+            *slot = (val * 255.0) as u8;
         });
     out
 }
@@ -150,13 +150,12 @@ pub(crate) fn box_filter_into(src: &[f32], w: u32, h: u32, radius: u32, dst: &mu
     if do_par_rows {
         integral
             .par_chunks_mut(w)
-            .enumerate()
-            .for_each(|(y, row)| {
-                let src_base = y * w;
+            .zip(src.par_chunks(w))
+            .for_each(|(dst_row, src_row)| {
                 let mut acc = 0.0f32;
-                for x in 0..w {
-                    acc += src[src_base + x];
-                    row[x] = acc;
+                for (&s, d) in src_row.iter().zip(dst_row.iter_mut()) {
+                    acc += s;
+                    *d = acc;
                 }
             });
     } else {
@@ -170,32 +169,43 @@ pub(crate) fn box_filter_into(src: &[f32], w: u32, h: u32, radius: u32, dst: &mu
         }
     }
 
-    // Pass 2: vertical prefix sums (each column independent)
+    // Pass 2: vertical prefix sums.
+    // Process columns in chunks (e.g., 32) to improve cache locality: walking
+    // down N columns at once keeps those N horizontal accumulators in L1.
+    const COL_CHUNK: usize = 32;
     let do_par_cols = w >= PAR_PREFIX_THRESHOLD;
 
     if do_par_cols {
-        // SAFETY: each column x accesses indices {x, x+w, x+2w, ...} which are disjoint
-        // across different x values. No two parallel iterations touch the same element.
-        let integral_ptr = integral.as_mut_ptr();
-        struct SendPtr(*mut f32);
-        unsafe impl Send for SendPtr {}
-        unsafe impl Sync for SendPtr {}
-        let sp = SendPtr(integral_ptr);
+        // SAFETY: each chunk of columns accesses disjoint horizontal slices
+        // of the 1D integral buffer. No two parallel iterations touch the same element.
+        let integral_ptr_val = integral.as_mut_ptr() as usize;
 
-        (0..w).into_par_iter().for_each(|x| {
-            for y in 1..h {
-                unsafe {
-                    let cur = sp.0.add(y * w + x);
-                    let prev = sp.0.add((y - 1) * w + x);
-                    *cur += *prev;
+        (0..w)
+            .into_par_iter()
+            .chunks(COL_CHUNK)
+            .for_each(|chunk| {
+                let ptr = integral_ptr_val as *mut f32;
+                for y in 1..h {
+                    let row_off = y * w;
+                    let prev_off = (y - 1) * w;
+                    for &x in &chunk {
+                        unsafe {
+                            let cur = ptr.add(row_off + x);
+                            let prev = ptr.add(prev_off + x);
+                            *cur += *prev;
+                        }
+                    }
                 }
-            }
-            let _ = &sp;
-        });
+            });
     } else {
-        for x in 0..w {
+        for cx in (0..w).step_by(COL_CHUNK) {
+            let end = (cx + COL_CHUNK).min(w);
             for y in 1..h {
-                integral[y * w + x] += integral[(y - 1) * w + x];
+                let row_off = y * w;
+                let prev_off = (y - 1) * w;
+                for x in cx..end {
+                    integral[row_off + x] += integral[prev_off + x];
+                }
             }
         }
     }
@@ -214,32 +224,73 @@ pub(crate) fn box_filter_into(src: &[f32], w: u32, h: u32, radius: u32, dst: &mu
 
     let do_par_lookup = n >= PAR_LOOKUP_THRESHOLD;
 
-    if do_par_lookup {
-        dst.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
-            let yi = y as i64;
-            for (x, slot) in row.iter_mut().enumerate() {
+    let inv_area = 1.0 / ((2 * r + 1) as f32).powi(2);
+
+    let process_row = |y: usize, row: &mut [f32]| {
+        let yi = y as i64;
+        let y1 = (yi - r - 1).max(-1);
+        let y2 = (yi + r).min(h as i64 - 1);
+
+        // Fast path for interior pixels (fully contained box)
+        let x_start = (r + 1) as usize;
+        let x_end = w.saturating_sub(r as usize);
+
+        if yi > r && yi < (h as i64 - r) && x_start < x_end {
+            // Margin pixels (left)
+            for (x, slot) in row.iter_mut().enumerate().take(x_start) {
                 let xi = x as i64;
                 let x1 = (xi - r - 1).max(-1);
-                let y1 = (yi - r - 1).max(-1);
                 let x2 = (xi + r).min(w as i64 - 1);
-                let y2 = (yi + r).min(h as i64 - 1);
                 let area = (x2 - x1) as f32 * (y2 - y1) as f32;
                 let sum = get(x2, y2) - get(x1, y2) - get(x2, y1) + get(x1, y1);
                 *slot = sum / area.max(1.0);
             }
-        });
-    } else {
-        for y in 0..h as i64 {
-            for x in 0..w as i64 {
-                let x1 = (x - r - 1).max(-1);
-                let y1 = (y - r - 1).max(-1);
-                let x2 = (x + r).min(w as i64 - 1);
-                let y2 = (y + r).min(h as i64 - 1);
+
+            // Interior fast path: no boundary checks, no area re-calc.
+            // The enclosing `yi > r` guard forces y1 = yi - r - 1 ≥ 0,
+            // so row_y1 is always a valid row offset — no Option needed.
+            let row_y2 = y2 as usize * w;
+            let row_y1 = y1 as usize * w;
+
+            for (x, slot) in row.iter_mut().enumerate().take(x_end).skip(x_start) {
+                let xi = x as i64;
+                let x2 = (xi + r) as usize;
+                let x1 = (xi - r - 1) as usize;
+                let sum = integral[row_y2 + x2] - integral[row_y2 + x1]
+                    - integral[row_y1 + x2] + integral[row_y1 + x1];
+                *slot = sum * inv_area;
+            }
+
+            // Margin pixels (right)
+            for (x, slot) in row.iter_mut().enumerate().take(w).skip(x_end) {
+                let xi = x as i64;
+                let x1 = (xi - r - 1).max(-1);
+                let x2 = (xi + r).min(w as i64 - 1);
                 let area = (x2 - x1) as f32 * (y2 - y1) as f32;
                 let sum = get(x2, y2) - get(x1, y2) - get(x2, y1) + get(x1, y1);
-                dst[y as usize * w + x as usize] = sum / area.max(1.0);
+                *slot = sum / area.max(1.0);
+            }
+        } else {
+            // Fully slow row (top/bottom margins)
+            for (x, slot) in row.iter_mut().enumerate().take(w) {
+                let xi = x as i64;
+                let x1 = (xi - r - 1).max(-1);
+                let x2 = (xi + r).min(w as i64 - 1);
+                let area = (x2 - x1) as f32 * (y2 - y1) as f32;
+                let sum = get(x2, y2) - get(x1, y2) - get(x2, y1) + get(x1, y1);
+                *slot = sum / area.max(1.0);
             }
         }
+    };
+
+    if do_par_lookup {
+        dst.par_chunks_mut(w)
+            .enumerate()
+            .for_each(|(y, row)| process_row(y, row));
+    } else {
+        dst.chunks_mut(w)
+            .enumerate()
+            .for_each(|(y, row)| process_row(y, row));
     }
 }
 
@@ -322,6 +373,71 @@ mod tests {
         for (i, &v) in result.iter().enumerate() {
             assert!(v >= -1e-6, "Negative value at {i}: {v}");
             assert!(v <= 1.0 + 1e-6, "Value > 1 at {i}: {v}");
+        }
+    }
+
+    /// Naïve O(N²·(2r+1)²) reference: each pixel = mean of its (2r+1)² window
+    /// clamped to image bounds. No integral image, no fast paths, no parallel
+    /// tricks — just the definition of a box filter.
+    fn brute_force_box(data: &[f32], w: u32, h: u32, radius: u32) -> Vec<f32> {
+        let (wi, hi) = (w as i64, h as i64);
+        let r = radius as i64;
+        let mut out = vec![0.0_f32; data.len()];
+        for y in 0..hi {
+            for x in 0..wi {
+                let mut sum = 0.0_f32;
+                let mut count = 0u32;
+                for dy in -r..=r {
+                    let yy = y + dy;
+                    if yy < 0 || yy >= hi { continue; }
+                    for dx in -r..=r {
+                        let xx = x + dx;
+                        if xx < 0 || xx >= wi { continue; }
+                        sum += data[(yy * wi + xx) as usize];
+                        count += 1;
+                    }
+                }
+                out[(y * wi + x) as usize] = sum / count as f32;
+            }
+        }
+        out
+    }
+
+    /// Pins the interior fast-path against brute-force reference on a grid
+    /// big enough to exercise all three lookup regions (left margin, interior,
+    /// right margin) AND all three row regions (top margin, interior, bottom
+    /// margin). 16×16 + r=2 gives x_start=3, x_end=14 — interior is 11×11
+    /// pixels of fast path, surrounded by 2-wide margin in every direction.
+    #[test]
+    fn test_box_filter_interior_fast_path_matches_brute_force() {
+        let (w, h, r) = (16u32, 16u32, 2u32);
+        let data: Vec<f32> = (0..(w * h) as usize)
+            .map(|i| ((i as f32) * 0.137).sin())
+            .collect();
+        let actual = box_filter(&data, w, h, r);
+        let expected = brute_force_box(&data, w, h, r);
+        for (i, (&a, &e)) in actual.iter().zip(expected.iter()).enumerate() {
+            let (x, y) = (i as u32 % w, i as u32 / w);
+            assert!((a - e).abs() < 1e-4,
+                "box_filter mismatch at ({x},{y}): actual={a} expected={e}");
+        }
+    }
+
+    /// Same brute-force check on a wider image so the column-chunked
+    /// vertical prefix sum (COL_CHUNK = 32) walks a full chunk plus a
+    /// partial chunk in the same pass.
+    #[test]
+    fn test_box_filter_chunked_vertical_pass_matches_brute_force() {
+        let (w, h, r) = (48u32, 24u32, 3u32);
+        let data: Vec<f32> = (0..(w * h) as usize)
+            .map(|i| ((i as f32) * 0.071 + (i as f32).sqrt()).cos())
+            .collect();
+        let actual = box_filter(&data, w, h, r);
+        let expected = brute_force_box(&data, w, h, r);
+        for (i, (&a, &e)) in actual.iter().zip(expected.iter()).enumerate() {
+            let (x, y) = (i as u32 % w, i as u32 / w);
+            assert!((a - e).abs() < 1e-4,
+                "box_filter mismatch at ({x},{y}): actual={a} expected={e}");
         }
     }
 }
