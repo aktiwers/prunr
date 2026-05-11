@@ -395,6 +395,7 @@ impl BatchItem {
     ///   - rendering as a ghost brush overlay on canvas, OR
     ///   - accumulating into the next stroke commit, OR
     ///   - showing up as a phantom Cmd+Z entry in the action timeline.
+    ///
     /// Differs from `undo_stroke`: no redo push (cancel is final, not
     /// reversible) and explicitly drops the action marker.
     pub(crate) fn revert_last_stroke_commit(&mut self) {
@@ -633,9 +634,11 @@ impl BatchItem {
 
     /// Resolve the RGBA source for an inpaint stroke. Stack-based inpaint
     /// runs each stroke against the previous result (if any), so:
+    ///
     ///   1. result_rgba (most-recent processed result)
     ///   2. source_rgba (original decoded image)
     ///   3. source_dyn  (lazy decode fallback under memory pressure)
+    ///
     /// Returns None when no decoded source is available — caller should warn
     /// and skip the dispatch.
     pub(crate) fn source_for_inpaint(&self) -> Option<Arc<image::RgbaImage>> {

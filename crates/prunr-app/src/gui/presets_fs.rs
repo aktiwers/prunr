@@ -868,25 +868,27 @@ mod tests {
     #[test]
     fn merge_save_dynamic_field_capture() {
         use super::super::brush_state::{BrushSettings, SdScheduler};
-        use super::super::presets::{fuse_brush_for_apply, split_brush_for_save};
+        use super::super::presets::split_brush_for_save;
         use prunr_models::ModelId;
 
         // Build a BrushSettings with every SD-tuning field mutated to a
         // distinctive value. If a future field is added that doesn't
         // serde-default — or that gets stripped at split/save — the
         // round-trip equality breaks.
-        let mut base = BrushSettings::default();
-        base.radius = 73.0;
-        base.hardness = 0.42;
-        base.sd_prompt = "a-distinctive-prompt".into();
-        base.sd_negative_prompt = "a-distinctive-neg-prompt".into();
-        base.sd_steps = 17;
-        base.sd_guidance_scale = 5.25;
-        base.sd_scheduler = SdScheduler::Ddim;
-        base.sd_use_karras_sigmas = true;
-        base.sd_strength = 0.66;
-        base.sd_seed = Some(13579);
-        base.sd_use_taesd = Some(true);
+        let base = BrushSettings {
+            radius: 73.0,
+            hardness: 0.42,
+            sd_prompt: "a-distinctive-prompt".into(),
+            sd_negative_prompt: "a-distinctive-neg-prompt".into(),
+            sd_steps: 17,
+            sd_guidance_scale: 5.25,
+            sd_scheduler: SdScheduler::Ddim,
+            sd_use_karras_sigmas: true,
+            sd_strength: 0.66,
+            sd_seed: Some(13579),
+            sd_use_taesd: Some(true),
+            ..Default::default()
+        };
 
         let dir = tempfile::tempdir().expect("tmpdir");
         let path = dir.path().join("Dynamic.json");
@@ -904,7 +906,22 @@ mod tests {
             .models
             .get(&model_id_key(ModelId::SdV15InpaintFp16))
             .expect("SD entry");
-        let fused = fuse_brush_for_apply(mp_back, Some(base.sd_scheduler));
+
+        let mut fused = mp_back.brush.clone();
+        if let Some(sd) = mp_back.sd.as_ref() {
+            // Manual fuse for test: copy SD fields back to brush
+            fused.sd_scheduler = sd.active_scheduler;
+            fused.sd_prompt = sd.prompt.clone();
+            fused.sd_negative_prompt = sd.negative_prompt.clone();
+            fused.sd_use_taesd = sd.use_taesd;
+            fused.sd_seed = sd.seed;
+            if let Some(bundle) = sd.schedulers.get(&sd.active_scheduler) {
+                fused.sd_steps = bundle.steps;
+                fused.sd_guidance_scale = bundle.guidance_scale;
+                fused.sd_use_karras_sigmas = bundle.use_karras_sigmas;
+                fused.sd_strength = bundle.strength;
+            }
+        }
         assert_eq!(fused, base, "every BrushSettings field must round-trip");
     }
 }

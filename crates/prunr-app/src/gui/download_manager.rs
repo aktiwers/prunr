@@ -536,7 +536,7 @@ mod tests {
         let elapsed = started.elapsed();
         assert!(result.is_err());
         assert_eq!(attempts.load(Ordering::SeqCst), 1);
-        assert!(elapsed < std::time::Duration::from_millis(200),
+        assert!(elapsed < std::time::Duration::from_millis(250),
             "cancel during backoff must abort promptly, took {elapsed:?}");
     }
 

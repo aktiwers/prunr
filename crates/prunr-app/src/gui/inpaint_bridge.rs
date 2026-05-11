@@ -66,6 +66,7 @@ pub enum InpaintBridgeMsg {
     ///   2. Doesn't surface a "Cancelled" toast — Release is
     ///      driven by deterministic GUI signals (e.g. model
     ///      switch) rather than a user-facing Cancel button.
+    ///
     /// Sent by `apply_toolbar_change` when the user picks a
     /// non-SD-family inpaint backend or a non-inpaint model.
     Release,

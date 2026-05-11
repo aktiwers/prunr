@@ -1387,7 +1387,7 @@ impl PrunrApp {
 
         self.status.pct = 0.0;
         self.status.stage = "Starting".to_string();
-        let _ = self.processor.worker_tx.send(WorkerMessage::BatchProcess {
+        let _ = self.processor.worker_tx.send(WorkerMessage::BatchProcess(Box::new(super::worker::BatchProcessData {
             items,
             tier2_items,
             add_edge_items,
@@ -1401,7 +1401,7 @@ impl PrunrApp {
             },
             cancels: self.processor.cancels.clone(),
             additional_items_rx,
-        });
+        })));
     }
 
 

@@ -733,12 +733,17 @@ mod tests {
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("settings.json");
 
-        let mut original = Settings::default();
-        original.brush.radius = 87.5;
-        original.brush.hardness = 0.42;
-        original.brush.strength = 0.75;
-        original.brush.mode = BrushMode::Add;
-        original.brush.shape = BrushShape::Square;
+        let original = Settings {
+            brush: BrushSettings {
+                radius: 87.5,
+                hardness: 0.42,
+                strength: 0.75,
+                mode: BrushMode::Add,
+                shape: BrushShape::Square,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
         original.save_to_path(&path);
 
         let json = std::fs::read_to_string(&path).expect("settings.json exists");
@@ -807,10 +812,11 @@ mod tests {
 
     #[test]
     fn resolve_active_preset_returns_named_preset_values() {
-        let mut s = Settings::default();
-        s.model = SettingsModel::Silueta;
-        let mut brush = super::BrushSettings::default();
-        brush.radius = 80.0;
+        let mut s = Settings {
+            model: SettingsModel::Silueta,
+            ..Default::default()
+        };
+        let brush = super::BrushSettings { radius: 80.0, ..Default::default() };
         let mp = super::super::presets::ModelPreset {
             item_settings: item_with_gamma(2.0),
             brush,
@@ -832,10 +838,11 @@ mod tests {
 
     #[test]
     fn resolve_active_preset_returns_prunr_when_named_preset_missing_model_entry() {
-        let mut s = Settings::default();
-        s.model = SettingsModel::U2net;
-        let mut brush = super::BrushSettings::default();
-        brush.radius = 80.0;
+        let mut s = Settings {
+            model: SettingsModel::U2net,
+            ..Default::default()
+        };
+        let brush = super::BrushSettings { radius: 80.0, ..Default::default() };
         let mp = super::super::presets::ModelPreset {
             item_settings: item_with_gamma(2.0),
             brush,
@@ -861,12 +868,8 @@ mod tests {
         use crate::gui::brush_state::BrushSettings;
         use super::super::presets::{model_id_key, ModelPreset, PresetFile, PRESET_FORMAT_VERSION};
 
-        let mut s = Settings::default();
-        s.model = SettingsModel::Silueta;
-        let mut silueta_brush = BrushSettings::default();
-        silueta_brush.radius = 80.0;
-        let mut u2net_brush = BrushSettings::default();
-        u2net_brush.radius = 120.0;
+        let silueta_brush = BrushSettings { radius: 80.0, ..Default::default() };
+        let u2net_brush = BrushSettings { radius: 120.0, ..Default::default() };
         let mut models = HashMap::new();
         models.insert(model_id_key(prunr_models::ModelId::Silueta), ModelPreset {
             item_settings: ItemSettings::default(),
@@ -879,9 +882,14 @@ mod tests {
             sd: None,
         });
         let file = PresetFile { format_version: PRESET_FORMAT_VERSION, models };
+
+        let mut s = Settings {
+            model: SettingsModel::Silueta,
+            default_preset: "Foo".to_string(),
+            brush: BrushSettings { radius: 80.0, ..Default::default() },
+            ..Default::default()
+        };
         s.presets.insert("Foo".to_string(), file);
-        s.default_preset = "Foo".to_string();
-        s.brush.radius = 80.0;
 
         s.model = SettingsModel::U2net;
         s.on_model_change_resolve_brush();
@@ -896,8 +904,6 @@ mod tests {
             PRESET_FORMAT_VERSION,
         };
 
-        let mut s = Settings::default();
-        s.model = SettingsModel::SdInpaint;
         let mut schedulers = HashMap::new();
         schedulers.insert(SdScheduler::Lcm, SdSchedulerBundle {
             steps: 8, guidance_scale: 1.5, use_karras_sigmas: false, strength: 1.0,
@@ -908,7 +914,7 @@ mod tests {
         let sd = SdPreset {
             active_scheduler: SdScheduler::Lcm,
             schedulers,
-            ..SdPreset::default()
+            ..Default::default()
         };
         let mp = ModelPreset {
             item_settings: ItemSettings::default(),
@@ -918,11 +924,19 @@ mod tests {
         let mut models = HashMap::new();
         models.insert(model_id_key(prunr_models::ModelId::SdV15InpaintFp16), mp);
         let file = PresetFile { format_version: PRESET_FORMAT_VERSION, models };
+
+        let mut s = Settings {
+            model: SettingsModel::SdInpaint,
+            default_preset: "Foo".to_string(),
+            brush: super::BrushSettings {
+                sd_scheduler: SdScheduler::Lcm,
+                sd_steps: 8,
+                radius: 42.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
         s.presets.insert("Foo".to_string(), file);
-        s.default_preset = "Foo".to_string();
-        s.brush.sd_scheduler = SdScheduler::Lcm;
-        s.brush.sd_steps = 8;
-        s.brush.radius = 42.0;
 
         s.on_scheduler_change_resolve_sd(SdScheduler::Ddim);
 

@@ -175,20 +175,22 @@ pub struct ProcessingConfig {
     pub edge: EdgeSettings,
 }
 
+pub struct BatchProcessData {
+    pub items: Vec<WorkItem>,
+    /// Tier 2 items: re-postprocess from cached tensor (skip inference).
+    pub tier2_items: Vec<Tier2WorkItem>,
+    /// AddEdgeInference items: cached seg tensor + DexiNed on masked image.
+    /// Used for Off → SubjectOutline transitions so enabling the outline
+    /// doesn't force a full seg re-inference.
+    pub add_edge_items: Vec<AddEdgeWorkItem>,
+    pub config: ProcessingConfig,
+    pub cancels: super::processor::CancelRegistry,
+    /// Channel for additional items admitted by the memory controller.
+    pub additional_items_rx: Option<mpsc::Receiver<WorkItem>>,
+}
+
 pub enum WorkerMessage {
-    BatchProcess {
-        items: Vec<WorkItem>,
-        /// Tier 2 items: re-postprocess from cached tensor (skip inference).
-        tier2_items: Vec<Tier2WorkItem>,
-        /// AddEdgeInference items: cached seg tensor + DexiNed on masked image.
-        /// Used for Off → SubjectOutline transitions so enabling the outline
-        /// doesn't force a full seg re-inference.
-        add_edge_items: Vec<AddEdgeWorkItem>,
-        config: ProcessingConfig,
-        cancels: super::processor::CancelRegistry,
-        /// Channel for additional items admitted by the memory controller.
-        additional_items_rx: Option<mpsc::Receiver<WorkItem>>,
-    },
+    BatchProcess(Box<BatchProcessData>),
     /// Drop any warm seg subprocess so its engine pool's resident RAM
     /// is reclaimed. Sent by the GUI on every `model_changed` so a
     /// previous backend (e.g. BiRefNetLite at ~2 GB) doesn't pin
@@ -287,10 +289,11 @@ pub fn spawn_worker(
                             let _ = sub.shutdown_with_timeout(std::time::Duration::from_secs(2));
                         }
                     }
-                    WorkerMessage::BatchProcess {
-                        items, tier2_items, add_edge_items, config, cancels,
-                        additional_items_rx,
-                    } => {
+                    WorkerMessage::BatchProcess(data) => {
+                        let BatchProcessData {
+                            items, tier2_items, add_edge_items, config, cancels,
+                            additional_items_rx,
+                        } = *data;
                         // Reuse the warm sub only when its Init config
                         // matches AND it's still alive. Any mismatch or
                         // dead process drops it and re-spawns.

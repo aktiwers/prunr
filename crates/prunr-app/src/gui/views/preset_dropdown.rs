@@ -443,12 +443,14 @@ mod tests {
     fn button_label_dirty_indicator_includes_brush_diff() {
         use crate::gui::brush_state::BrushSettings;
         use crate::gui::settings::SettingsModel;
-        use crate::gui::presets::{model_id_key, ModelPreset, PresetFile, PRESET_FORMAT_VERSION};
+        use crate::gui::presets::{model_id_key, ModelPreset, PresetFile};
 
-        let mut s = Settings::default();
-        s.model = SettingsModel::Silueta;
-        let mut preset_brush = BrushSettings::default();
-        preset_brush.radius = 80.0;
+        let mut s = Settings {
+            model: SettingsModel::Silueta,
+            brush: BrushSettings { radius: 10.0, ..Default::default() },
+            ..Default::default()
+        };
+        let preset_brush = BrushSettings { radius: 80.0, ..Default::default() };
         let mp = ModelPreset {
             item_settings: ItemSettings::default(),
             brush: preset_brush,
@@ -456,12 +458,11 @@ mod tests {
         };
         let mut models = HashMap::new();
         models.insert(model_id_key(prunr_models::ModelId::Silueta), mp);
-        let file = PresetFile { format_version: PRESET_FORMAT_VERSION, models };
+        let file = PresetFile { models, ..Default::default() };
         s.presets.insert("Foo".to_string(), file);
 
         // ItemSettings still equals the preset's; only brush diverges.
         let current = ItemSettings::default();
-        s.brush.radius = 10.0;
 
         let label = button_label(&s, &current, "Foo");
         assert!(label.contains("Foo"), "{label}");

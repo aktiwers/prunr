@@ -40,13 +40,6 @@ pub(crate) fn model_id_key(id: ModelId) -> String {
     format!("{id:?}")
 }
 
-/// Inverse of `model_id_key`. Returns `None` for unknown keys —
-/// future-binary entries the receiver doesn't know about round-trip
-/// in the JSON but resolve to nothing at lookup time.
-pub(crate) fn model_id_from_key(s: &str) -> Option<ModelId> {
-    ModelId::ALL.iter().copied().find(|id| format!("{id:?}") == s)
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub(crate) struct PresetFile {
@@ -164,9 +157,8 @@ pub(crate) struct ResolvedView {
 }
 
 /// Overwrite the SD-tuning fields of `brush` from `sd` + the chosen
-/// scheduler's bundle. Shared between `resolve_preset_for_model` and
-/// `fuse_brush_for_apply` — the only two paths that materialise SD
-/// state from a stored `SdPreset` into a live `BrushSettings`.
+/// scheduler's bundle. Materialises SD state from a stored `SdPreset`
+/// into a live `BrushSettings`.
 fn apply_sd_to_brush(
     brush: &mut BrushSettings,
     sd: &SdPreset,
@@ -244,21 +236,6 @@ pub(crate) fn split_brush_for_save(
         schedulers,
     };
     (brush.clone(), Some(sd))
-}
-
-/// Apply-time fuse: produce a unified `BrushSettings` from a stored
-/// `ModelPreset`. `scheduler = Some(_)` overrides `sd.active_scheduler`
-/// so an in-session scheduler swap can pick a different bundle without
-/// mutating the preset.
-pub(super) fn fuse_brush_for_apply(
-    mp: &ModelPreset,
-    scheduler: Option<SdScheduler>,
-) -> BrushSettings {
-    let mut brush = mp.brush.clone();
-    if let Some(sd) = mp.sd.as_ref() {
-        apply_sd_to_brush(&mut brush, sd, scheduler);
-    }
-    brush
 }
 
 #[cfg(test)]
@@ -396,12 +373,16 @@ mod tests {
 
     #[test]
     fn preset_file_round_trips_with_one_model_entry() {
-        let mut sd = SdPreset::default();
-        sd.active_scheduler = SdScheduler::Lcm;
-        sd.schedulers.insert(
+        let mut schedulers = HashMap::new();
+        schedulers.insert(
             SdScheduler::Lcm,
             SdSchedulerBundle::default_for(SdScheduler::Lcm),
         );
+        let sd = SdPreset {
+            active_scheduler: SdScheduler::Lcm,
+            schedulers,
+            ..Default::default()
+        };
         let model_preset = ModelPreset {
             sd: Some(sd),
             ..ModelPreset::default()
@@ -451,24 +432,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn model_id_key_round_trips_via_from_key() {
-        for &id in ModelId::ALL {
-            let key = model_id_key(id);
-            assert_eq!(
-                model_id_from_key(&key),
-                Some(id),
-                "round-trip failed for {id:?}",
-            );
-        }
-    }
-
-    #[test]
-    fn model_id_from_key_returns_none_for_unknown() {
-        assert_eq!(model_id_from_key("FutureModel"), None);
-        assert_eq!(model_id_from_key("not a real key"), None);
-        assert_eq!(model_id_from_key(""), None);
-    }
 
     fn brush_with(radius: f32) -> BrushSettings {
         BrushSettings { radius, ..BrushSettings::default() }
@@ -611,9 +574,11 @@ mod tests {
 
     #[test]
     fn split_brush_for_save_non_sd_model_returns_brush_only() {
-        let mut brush = BrushSettings::default();
-        brush.sd_prompt = "carry-over".into();
-        brush.sd_steps = 12;
+        let brush = BrushSettings {
+            sd_prompt: "carry-over".into(),
+            sd_steps: 12,
+            ..Default::default()
+        };
 
         let (out_brush, sd) = split_brush_for_save(&brush, ModelId::Silueta);
         assert_eq!(out_brush, brush);
@@ -651,60 +616,16 @@ mod tests {
     }
 
     #[test]
-    fn fuse_brush_for_apply_uses_sd_bundle_values() {
-        let mut schedulers = HashMap::new();
-        schedulers.insert(SdScheduler::Ddim, SdSchedulerBundle {
-            steps: 30,
-            guidance_scale: 6.0,
-            use_karras_sigmas: false,
-            strength: 0.9,
-        });
-        let sd = SdPreset {
-            prompt: "x".into(),
-            negative_prompt: "y".into(),
-            active_scheduler: SdScheduler::Ddim,
-            schedulers,
-            ..SdPreset::default()
-        };
-        let mp = ModelPreset {
-            brush: brush_with(80.0),
-            sd: Some(sd),
-            ..ModelPreset::default()
-        };
-
-        let fused = fuse_brush_for_apply(&mp, Some(SdScheduler::Ddim));
-        assert!((fused.radius - 80.0).abs() < f32::EPSILON);
-        assert_eq!(fused.sd_steps, 30);
-        assert!((fused.sd_guidance_scale - 6.0).abs() < f32::EPSILON);
-        assert_eq!(fused.sd_prompt, "x");
-        assert_eq!(fused.sd_negative_prompt, "y");
-        assert_eq!(fused.sd_scheduler, SdScheduler::Ddim);
-        assert!((fused.sd_strength - 0.9).abs() < f32::EPSILON);
-    }
-
-    #[test]
-    fn fuse_brush_for_apply_no_sd_entry_uses_brush_sd_fields() {
-        let mut brush = BrushSettings::default();
-        brush.sd_prompt = "kept".into();
-        brush.sd_steps = 11;
-        let mp = ModelPreset { brush: brush.clone(), sd: None, ..ModelPreset::default() };
-
-        let fused = fuse_brush_for_apply(&mp, Some(SdScheduler::Ddim));
-        assert_eq!(fused, brush);
-    }
-
-    #[test]
     fn forward_compat_unknown_modelid_entry_loads_silently() {
         // A preset built on a future binary may carry a ModelId variant
         // this binary doesn't know. The String-keyed `models` map round-
-        // trips the unknown entry; resolver lookup ignores it because
-        // `model_id_from_key` returns None.
+        // trips the unknown entry; resolver lookup ignores it if the key
+        // doesn't match current ModelId debug names.
         let json = r#"{"format_version":2,"models":{"FutureModel":{},"Silueta":{}}}"#;
         let file: PresetFile = serde_json::from_str(json)
             .expect("unknown ModelId entries must not break parsing");
         assert!(file.models.contains_key("Silueta"));
         assert!(file.models.contains_key("FutureModel"));
-        assert_eq!(model_id_from_key("FutureModel"), None);
         let resolved = resolve_preset_for_model(&file, ModelId::Silueta, None);
         assert_eq!(resolved.item_settings, ItemSettings::default());
     }
@@ -720,15 +641,16 @@ mod tests {
             inpaint_grow: 5.0,
             inpaint_feather: 6.0,
             inpaint_sharpen: 1.5,
-            ..BrushSettings::default()
+            ..Default::default()
         };
         let mp = ModelPreset {
             item_settings: ItemSettings::default(),
             brush: preset_brush.clone(),
             sd: None,
         };
-        let mut file = PresetFile::default();
-        file.models.insert(model_id_key(ModelId::Silueta), mp);
+        let mut models = HashMap::new();
+        models.insert(model_id_key(ModelId::Silueta), mp);
+        let file = PresetFile { models, ..Default::default() };
 
         // (a) Top-right ↻ path: full re-resolve via the resolver. Brush
         //     comes back exactly as the preset stored it.
@@ -738,8 +660,7 @@ mod tests {
         // (b) Brush popover Reset path: caller has a live `Settings.brush`
         //     with a user mutation (radius=10) and resets the popover-visible
         //     subset using the resolver's brush as the source.
-        let mut live_brush = BrushSettings::default();
-        live_brush.radius = 10.0;
+        let live_brush = BrushSettings { radius: 10.0, ..Default::default() };
         let mut popover_target = live_brush.clone();
         popover_target.reset_popover_fields_from(&top_right_path_brush);
 
@@ -762,25 +683,4 @@ mod tests {
         );
     }
 
-    #[test]
-    fn split_then_fuse_round_trips_sd_model() {
-        let original = BrushSettings {
-            radius: 33.0,
-            sd_prompt: "rt-prompt".into(),
-            sd_negative_prompt: "rt-neg".into(),
-            sd_steps: 17,
-            sd_guidance_scale: 4.25,
-            sd_scheduler: SdScheduler::Ddim,
-            sd_use_karras_sigmas: true,
-            sd_strength: 0.5,
-            sd_seed: Some(99),
-            sd_use_taesd: Some(false),
-            ..BrushSettings::default()
-        };
-
-        let (brush_out, sd) = split_brush_for_save(&original, ModelId::SdV15InpaintFp16);
-        let mp = ModelPreset { brush: brush_out, sd, ..ModelPreset::default() };
-        let fused = fuse_brush_for_apply(&mp, Some(original.sd_scheduler));
-        assert_eq!(fused, original);
-    }
 }

@@ -265,7 +265,7 @@ fn download_wheel_attempt(
         };
         if n == 0 { break; }
         buf.extend_from_slice(&chunk[..n]);
-        let pct = if total > 0 { buf.len() as u64 * 100 / total } else { 0 };
+        let pct = (buf.len() as u64 * 100).checked_div(total).unwrap_or(0);
         if pct != last_pct {
             last_pct = pct;
             (hooks.progress)(buf.len() as u64, total);
