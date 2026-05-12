@@ -757,13 +757,11 @@ impl PrunrApp {
                         } else {
                             false
                         }
+                    } else if self.batch.items[idx].redo_stroke() {
+                        self.dispatch_brush_rerun(idx);
+                        true
                     } else {
-                        if self.batch.items[idx].redo_stroke() {
-                            self.dispatch_brush_rerun(idx);
-                            true
-                        } else {
-                            false
-                        }
+                        false
                     }
                 }
                 ActionType::Result => {
@@ -1427,14 +1425,14 @@ impl PrunrApp {
             items,
             tier2_items,
             add_edge_items,
-            config: super::worker::ProcessingConfig {
+            config: Box::new(super::worker::ProcessingConfig {
                 model,
                 jobs,
                 mask: current_settings.mask_settings(),
                 force_cpu: self.settings.force_cpu,
                 line_mode: current_settings.line_mode,
                 edge: current_settings.edge_settings(),
-            },
+            }),
             cancels: self.processor.cancels.clone(),
             additional_items_rx,
         });
