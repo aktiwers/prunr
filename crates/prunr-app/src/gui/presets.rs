@@ -397,8 +397,7 @@ mod tests {
 
     #[test]
     fn preset_file_round_trips_with_one_model_entry() {
-        let mut sd = SdPreset::default();
-        sd.active_scheduler = SdScheduler::Lcm;
+        let mut sd = SdPreset { active_scheduler: SdScheduler::Lcm, ..Default::default() };
         sd.schedulers.insert(
             SdScheduler::Lcm,
             SdSchedulerBundle::default_for(SdScheduler::Lcm),
@@ -612,9 +611,11 @@ mod tests {
 
     #[test]
     fn split_brush_for_save_non_sd_model_returns_brush_only() {
-        let mut brush = BrushSettings::default();
-        brush.sd_prompt = "carry-over".into();
-        brush.sd_steps = 12;
+        let brush = BrushSettings {
+            sd_prompt: "carry-over".into(),
+            sd_steps: 12,
+            ..Default::default()
+        };
 
         let (out_brush, sd) = split_brush_for_save(&brush, ModelId::Silueta);
         assert_eq!(out_brush, brush);
@@ -685,9 +686,11 @@ mod tests {
 
     #[test]
     fn fuse_brush_for_apply_no_sd_entry_uses_brush_sd_fields() {
-        let mut brush = BrushSettings::default();
-        brush.sd_prompt = "kept".into();
-        brush.sd_steps = 11;
+        let brush = BrushSettings {
+            sd_prompt: "kept".into(),
+            sd_steps: 11,
+            ..Default::default()
+        };
         let mp = ModelPreset { brush: brush.clone(), sd: None, ..ModelPreset::default() };
 
         let fused = fuse_brush_for_apply(&mp, Some(SdScheduler::Ddim));
@@ -739,8 +742,7 @@ mod tests {
         // (b) Brush popover Reset path: caller has a live `Settings.brush`
         //     with a user mutation (radius=10) and resets the popover-visible
         //     subset using the resolver's brush as the source.
-        let mut live_brush = BrushSettings::default();
-        live_brush.radius = 10.0;
+        let live_brush = BrushSettings { radius: 10.0, ..Default::default() };
         let mut popover_target = live_brush.clone();
         popover_target.reset_popover_fields_from(&top_right_path_brush);
 

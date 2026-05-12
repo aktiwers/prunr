@@ -807,10 +807,8 @@ mod tests {
 
     #[test]
     fn resolve_active_preset_returns_named_preset_values() {
-        let mut s = Settings::default();
-        s.model = SettingsModel::Silueta;
-        let mut brush = super::BrushSettings::default();
-        brush.radius = 80.0;
+        let mut s = Settings { model: SettingsModel::Silueta, ..Default::default() };
+        let brush = super::BrushSettings { radius: 80.0, ..Default::default() };
         let mp = super::super::presets::ModelPreset {
             item_settings: item_with_gamma(2.0),
             brush,
@@ -832,10 +830,8 @@ mod tests {
 
     #[test]
     fn resolve_active_preset_returns_prunr_when_named_preset_missing_model_entry() {
-        let mut s = Settings::default();
-        s.model = SettingsModel::U2net;
-        let mut brush = super::BrushSettings::default();
-        brush.radius = 80.0;
+        let mut s = Settings { model: SettingsModel::U2net, ..Default::default() };
+        let brush = super::BrushSettings { radius: 80.0, ..Default::default() };
         let mp = super::super::presets::ModelPreset {
             item_settings: item_with_gamma(2.0),
             brush,
@@ -861,12 +857,9 @@ mod tests {
         use crate::gui::brush_state::BrushSettings;
         use super::super::presets::{model_id_key, ModelPreset, PresetFile, PRESET_FORMAT_VERSION};
 
-        let mut s = Settings::default();
-        s.model = SettingsModel::Silueta;
-        let mut silueta_brush = BrushSettings::default();
-        silueta_brush.radius = 80.0;
-        let mut u2net_brush = BrushSettings::default();
-        u2net_brush.radius = 120.0;
+        let mut s = Settings { model: SettingsModel::Silueta, ..Default::default() };
+        let silueta_brush = BrushSettings { radius: 80.0, ..Default::default() };
+        let u2net_brush = BrushSettings { radius: 120.0, ..Default::default() };
         let mut models = HashMap::new();
         models.insert(model_id_key(prunr_models::ModelId::Silueta), ModelPreset {
             item_settings: ItemSettings::default(),
@@ -896,8 +889,7 @@ mod tests {
             PRESET_FORMAT_VERSION,
         };
 
-        let mut s = Settings::default();
-        s.model = SettingsModel::SdInpaint;
+        let mut s = Settings { model: SettingsModel::SdInpaint, ..Default::default() };
         let mut schedulers = HashMap::new();
         schedulers.insert(SdScheduler::Lcm, SdSchedulerBundle {
             steps: 8, guidance_scale: 1.5, use_karras_sigmas: false, strength: 1.0,

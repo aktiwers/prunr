@@ -265,10 +265,8 @@ impl SdQualityPreset {
 
         let preset_name = settings.default_preset.clone();
         let key = crate::gui::presets::model_id_key(model_id);
-        let file = settings.presets.entry(preset_name.clone())
-            .or_insert_with(crate::gui::presets::PresetFile::default);
-        let mp = file.models.entry(key)
-            .or_insert_with(crate::gui::presets::ModelPreset::default);
+        let file = settings.presets.entry(preset_name.clone()).or_default();
+        let mp = file.models.entry(key).or_default();
         let sd = mp.sd.get_or_insert_with(crate::gui::presets::SdPreset::default);
         sd.active_scheduler = sched;
         sd.schedulers.insert(sched, crate::gui::presets::SdSchedulerBundle {
@@ -610,22 +608,19 @@ mod tests {
     /// tweak is preserved without bouncing them between presets.
     #[test]
     fn individual_slider_edit_detects_as_custom() {
-        let mut s = BrushSettings::default();
         // Default == Balanced (LCM, 8 steps, CFG=1.5, no Karras).
         // Bump CFG to a non-preset value:
-        s.sd_guidance_scale = 3.0;
+        let s = BrushSettings { sd_guidance_scale: 3.0, ..Default::default() };
         assert_eq!(SdQualityPreset::detect_from(&s), SdQualityPreset::Custom,
             "off-preset CFG must detect as Custom");
 
         // Change scheduler away from the preset:
-        let mut s = BrushSettings::default();
-        s.sd_scheduler = SdScheduler::Ddim;
+        let s = BrushSettings { sd_scheduler: SdScheduler::Ddim, ..Default::default() };
         assert_eq!(SdQualityPreset::detect_from(&s), SdQualityPreset::Custom,
             "off-preset scheduler must detect as Custom");
 
         // Toggle Karras (Balanced has it off; flipping on → Custom):
-        let mut s = BrushSettings::default();
-        s.sd_use_karras_sigmas = true;
+        let s = BrushSettings { sd_use_karras_sigmas: true, ..Default::default() };
         assert_eq!(SdQualityPreset::detect_from(&s), SdQualityPreset::Custom,
             "off-preset Karras toggle must detect as Custom");
     }
@@ -705,13 +700,12 @@ mod tests {
 
     #[test]
     fn sd_use_taesd_serde_round_trip() {
-        let mut s = BrushSettings::default();
-        s.sd_use_taesd = Some(true);
+        let s = BrushSettings { sd_use_taesd: Some(true), ..Default::default() };
         let json = serde_json::to_string(&s).unwrap();
         let restored: BrushSettings = serde_json::from_str(&json).unwrap();
         assert_eq!(restored.sd_use_taesd, Some(true));
 
-        s.sd_use_taesd = Some(false);
+        let s = BrushSettings { sd_use_taesd: Some(false), ..Default::default() };
         let json = serde_json::to_string(&s).unwrap();
         let restored: BrushSettings = serde_json::from_str(&json).unwrap();
         assert_eq!(restored.sd_use_taesd, Some(false));
@@ -719,8 +713,7 @@ mod tests {
 
     #[test]
     fn sd_use_taesd_effective_explicit_off_beats_install() {
-        let mut s = BrushSettings::default();
-        s.sd_use_taesd = Some(false);
+        let s = BrushSettings { sd_use_taesd: Some(false), ..Default::default() };
         assert!(!s.sd_use_taesd_effective_with_avail(true),
             "explicit opt-out must override installed bundle");
         assert!(!s.sd_use_taesd_effective_with_avail(false));
@@ -728,8 +721,7 @@ mod tests {
 
     #[test]
     fn sd_use_taesd_effective_explicit_on_gated_by_install() {
-        let mut s = BrushSettings::default();
-        s.sd_use_taesd = Some(true);
+        let s = BrushSettings { sd_use_taesd: Some(true), ..Default::default() };
         assert!(s.sd_use_taesd_effective_with_avail(true),
             "explicit opt-in + installed must dispatch TAESD");
         assert!(!s.sd_use_taesd_effective_with_avail(false),
@@ -738,8 +730,7 @@ mod tests {
 
     #[test]
     fn sd_use_taesd_effective_auto_follows_install() {
-        let mut s = BrushSettings::default();
-        s.sd_use_taesd = None;
+        let s = BrushSettings { sd_use_taesd: None, ..Default::default() };
         assert!(s.sd_use_taesd_effective_with_avail(true),
             "auto mode + installed = on");
         assert!(!s.sd_use_taesd_effective_with_avail(false),
@@ -857,10 +848,12 @@ mod tests {
             inpaint_grow: -3.0,
             ..BrushSettings::default()
         };
-        let mut target = BrushSettings::default();
-        target.radius = 10.0;
-        target.strength = 0.42;
-        target.mode = BrushMode::Add;
+        let mut target = BrushSettings {
+            radius: 10.0,
+            strength: 0.42,
+            mode: BrushMode::Add,
+            ..Default::default()
+        };
 
         target.reset_popover_fields_from(&source);
 
@@ -881,8 +874,7 @@ mod tests {
         use crate::gui::presets::{model_id_key, ModelPreset, PresetFile, PRESET_FORMAT_VERSION, SdPreset};
         use crate::gui::settings::{Settings, SettingsModel};
 
-        let mut s = Settings::default();
-        s.model = SettingsModel::SdInpaint;
+        let mut s = Settings { model: SettingsModel::SdInpaint, ..Default::default() };
         let mp = ModelPreset {
             item_settings: Default::default(),
             brush: BrushSettings::default(),
@@ -926,8 +918,7 @@ mod tests {
     fn sd_quality_preset_apply_to_settings_with_prunr_falls_through_to_brush() {
         use crate::gui::settings::{Settings, SettingsModel};
 
-        let mut s = Settings::default();
-        s.model = SettingsModel::SdInpaint;
+        let mut s = Settings { model: SettingsModel::SdInpaint, ..Default::default() };
         // default_preset stays "Prunr" (synthetic, never written).
         let presets_before = s.presets.clone();
 

@@ -1427,14 +1427,14 @@ impl PrunrApp {
             items,
             tier2_items,
             add_edge_items,
-            config: super::worker::ProcessingConfig {
+            config: Box::new(super::worker::ProcessingConfig {
                 model,
                 jobs,
                 mask: current_settings.mask_settings(),
                 force_cpu: self.settings.force_cpu,
                 line_mode: current_settings.line_mode,
                 edge: current_settings.edge_settings(),
-            },
+            }),
             cancels: self.processor.cancels.clone(),
             additional_items_rx,
         });
@@ -1929,8 +1929,7 @@ impl PrunrApp {
         // wrapped `DynamicImage` across dispatches so a slider drag at
         // 4K doesn't re-clone ~50 MB per tick; `Arc::ptr_eq` against the
         // current `result_rgba` is the self-invalidation check.
-        let original = if chain_mode && item.result_rgba.is_some() {
-            let rgba = item.result_rgba.as_ref().unwrap();
+        let original = if let (true, Some(rgba)) = (chain_mode, &item.result_rgba) {
             let cached = item.chain_dyn_cache.as_ref()
                 .and_then(|(src, dyn_img)| Arc::ptr_eq(rgba, src).then(|| Arc::clone(dyn_img)));
             match cached {

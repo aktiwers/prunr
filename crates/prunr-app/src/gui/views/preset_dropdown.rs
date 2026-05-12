@@ -445,10 +445,9 @@ mod tests {
         use crate::gui::settings::SettingsModel;
         use crate::gui::presets::{model_id_key, ModelPreset, PresetFile, PRESET_FORMAT_VERSION};
 
-        let mut s = Settings::default();
-        s.model = SettingsModel::Silueta;
-        let mut preset_brush = BrushSettings::default();
-        preset_brush.radius = 80.0;
+        let s_model = SettingsModel::Silueta;
+        let mut s = Settings { model: s_model, ..Default::default() };
+        let preset_brush = BrushSettings { radius: 80.0, ..Default::default() };
         let mp = ModelPreset {
             item_settings: ItemSettings::default(),
             brush: preset_brush,

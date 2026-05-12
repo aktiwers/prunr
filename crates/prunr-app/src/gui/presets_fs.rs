@@ -875,18 +875,20 @@ mod tests {
         // distinctive value. If a future field is added that doesn't
         // serde-default — or that gets stripped at split/save — the
         // round-trip equality breaks.
-        let mut base = BrushSettings::default();
-        base.radius = 73.0;
-        base.hardness = 0.42;
-        base.sd_prompt = "a-distinctive-prompt".into();
-        base.sd_negative_prompt = "a-distinctive-neg-prompt".into();
-        base.sd_steps = 17;
-        base.sd_guidance_scale = 5.25;
-        base.sd_scheduler = SdScheduler::Ddim;
-        base.sd_use_karras_sigmas = true;
-        base.sd_strength = 0.66;
-        base.sd_seed = Some(13579);
-        base.sd_use_taesd = Some(true);
+        let base = BrushSettings {
+            radius: 73.0,
+            hardness: 0.42,
+            sd_prompt: "a-distinctive-prompt".into(),
+            sd_negative_prompt: "a-distinctive-neg-prompt".into(),
+            sd_steps: 17,
+            sd_guidance_scale: 5.25,
+            sd_scheduler: SdScheduler::Ddim,
+            sd_use_karras_sigmas: true,
+            sd_strength: 0.66,
+            sd_seed: Some(13579),
+            sd_use_taesd: Some(true),
+            ..Default::default()
+        };
 
         let dir = tempfile::tempdir().expect("tmpdir");
         let path = dir.path().join("Dynamic.json");
