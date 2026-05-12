@@ -374,6 +374,7 @@ pub fn render(
 }
 
 #[cfg(test)]
+#[allow(clippy::field_reassign_with_default)]
 mod tests {
     use super::*;
     use crate::gui::item_settings::item_with_gamma;

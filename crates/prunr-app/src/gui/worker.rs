@@ -184,7 +184,7 @@ pub enum WorkerMessage {
         /// Used for Off → SubjectOutline transitions so enabling the outline
         /// doesn't force a full seg re-inference.
         add_edge_items: Vec<AddEdgeWorkItem>,
-        config: ProcessingConfig,
+        config: Box<ProcessingConfig>,
         cancels: super::processor::CancelRegistry,
         /// Channel for additional items admitted by the memory controller.
         additional_items_rx: Option<mpsc::Receiver<WorkItem>>,
@@ -298,10 +298,10 @@ pub fn spawn_worker(
                         let respawn_reason = match warm.take() {
                             None => Some("no_prewarm"),
                             Some((mut sub, cfg)) => {
-                                if cfg == config && sub.is_alive() {
+                                if cfg == *config && sub.is_alive() {
                                     reuse = Some(sub);
                                     None
-                                } else if cfg != config {
+                                } else if cfg != *config {
                                     Some("config_mismatch")
                                 } else {
                                     Some("prewarm_dead")
@@ -322,7 +322,7 @@ pub fn spawn_worker(
                         );
                         run_batch_with_retry(
                             reuse,
-                            items, tier2_items, add_edge_items, config, &cancels,
+                            items, tier2_items, add_edge_items, *config, &cancels,
                             additional_items_rx,
                             &res_tx, &ctx,
                         );

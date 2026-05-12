@@ -265,10 +265,8 @@ impl SdQualityPreset {
 
         let preset_name = settings.default_preset.clone();
         let key = crate::gui::presets::model_id_key(model_id);
-        let file = settings.presets.entry(preset_name.clone())
-            .or_insert_with(crate::gui::presets::PresetFile::default);
-        let mp = file.models.entry(key)
-            .or_insert_with(crate::gui::presets::ModelPreset::default);
+        let file = settings.presets.entry(preset_name.clone()).or_default();
+        let mp = file.models.entry(key).or_default();
         let sd = mp.sd.get_or_insert_with(crate::gui::presets::SdPreset::default);
         sd.active_scheduler = sched;
         sd.schedulers.insert(sched, crate::gui::presets::SdSchedulerBundle {
@@ -556,6 +554,7 @@ impl BrushState {
 }
 
 #[cfg(test)]
+#[allow(clippy::field_reassign_with_default)]
 mod tests {
     use super::*;
 
