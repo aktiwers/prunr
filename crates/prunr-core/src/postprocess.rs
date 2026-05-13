@@ -330,17 +330,17 @@ pub fn apply_fill_style(rgba: &mut RgbaImage, style: crate::types::FillStyle) {
         FillStyle::Posterize { levels } => {
             let n = levels.max(2) as u16 - 1;
             apply_pixelwise(rgba, |p| {
-                for i in 0..3 {
-                    let v = p[i] as u16;
-                    p[i] = ((v * n / 255) * 255 / n) as u8;
+                for v in p.iter_mut().take(3) {
+                    let v_u16 = *v as u16;
+                    *v = ((v_u16 * n / 255) * 255 / n) as u8;
                 }
             });
         }
         FillStyle::Solarize { pivot } => {
             apply_pixelwise(rgba, |p| {
-                for i in 0..3 {
-                    if p[i] >= pivot {
-                        p[i] = 255 - p[i];
+                for v in p.iter_mut().take(3) {
+                    if *v >= pivot {
+                        *v = 255 - *v;
                     }
                 }
             });
@@ -357,10 +357,10 @@ pub fn apply_fill_style(rgba: &mut RgbaImage, style: crate::types::FillStyle) {
             let factor = percent.min(300) as i32;
             apply_pixelwise(rgba, |p| {
                 let y = luma_u8(p[0], p[1], p[2]) as i32;
-                for i in 0..3 {
-                    let v = p[i] as i32;
-                    let shifted = y + ((v - y) * factor / 100);
-                    p[i] = shifted.clamp(0, 255) as u8;
+                for v in p.iter_mut().take(3) {
+                    let v_i32 = *v as i32;
+                    let shifted = y + ((v_i32 - y) * factor / 100);
+                    *v = shifted.clamp(0, 255) as u8;
                 }
             });
         }
