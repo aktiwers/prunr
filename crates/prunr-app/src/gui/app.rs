@@ -1927,24 +1927,31 @@ impl PrunrApp {
         // wrapped `DynamicImage` across dispatches so a slider drag at
         // 4K doesn't re-clone ~50 MB per tick; `Arc::ptr_eq` against the
         // current `result_rgba` is the self-invalidation check.
-        let original = if chain_mode && item.result_rgba.is_some() {
-            let rgba = item.result_rgba.as_ref().unwrap();
-            let cached = item.chain_dyn_cache.as_ref()
-                .and_then(|(src, dyn_img)| Arc::ptr_eq(rgba, src).then(|| Arc::clone(dyn_img)));
-            match cached {
-                Some(dyn_img) => dyn_img,
-                None => {
-                    let dyn_img = Arc::new(image::DynamicImage::ImageRgba8((**rgba).clone()));
-                    item.chain_dyn_cache = Some((Arc::clone(rgba), Arc::clone(&dyn_img)));
-                    dyn_img
+        let original = if chain_mode {
+            if let Some(rgba) = item.result_rgba.as_ref() {
+                let cached = item.chain_dyn_cache.as_ref()
+                    .and_then(|(src, dyn_img)| Arc::ptr_eq(rgba, src).then(|| Arc::clone(dyn_img)));
+                match cached {
+                    Some(dyn_img) => dyn_img,
+                    None => {
+                        let dyn_img = Arc::new(image::DynamicImage::ImageRgba8((**rgba).clone()));
+                        item.chain_dyn_cache = Some((Arc::clone(rgba), Arc::clone(&dyn_img)));
+                        dyn_img
+                    }
                 }
+            } else {
+                if item.source_dyn.is_none() {
+                    let rgba = item.source_rgba.as_ref()?;
+                    item.source_dyn = Some(Arc::new(image::DynamicImage::ImageRgba8((**rgba).clone())));
+                }
+                Arc::clone(item.source_dyn.as_ref()?)
             }
         } else {
             if item.source_dyn.is_none() {
                 let rgba = item.source_rgba.as_ref()?;
                 item.source_dyn = Some(Arc::new(image::DynamicImage::ImageRgba8((**rgba).clone())));
             }
-            Arc::clone(item.source_dyn.as_ref().unwrap())
+            Arc::clone(item.source_dyn.as_ref()?)
         };
         let edge_tensor = Self::edge_tensor_for_active_scale(item);
         // DualScale needs TWO edge tensors — the primary (active scale, used
