@@ -70,10 +70,10 @@ impl AdmissionController {
 
     /// Add pending items. Sorts them for best-fit (largest first).
     pub fn enqueue(&mut self, mut costs: Vec<ImageMemCost>) {
-        costs.sort_by(|a, b| b.total.cmp(&a.total));
+        costs.sort_by_key(|b| std::cmp::Reverse(b.total));
         self.pending.extend(costs);
         // Re-sort after extend in case there were existing pending items
-        self.pending.sort_by(|a, b| b.total.cmp(&a.total));
+        self.pending.sort_by_key(|b| std::cmp::Reverse(b.total));
     }
 
     /// Try to admit the next best-fitting image.
