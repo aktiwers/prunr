@@ -16,7 +16,7 @@ use egui::{RichText, Ui};
 use egui_material_icons::icons::*;
 
 use crate::gui::item_settings::ItemSettings;
-use crate::gui::settings::{PRUNR_PRESET, Settings};
+use crate::gui::settings::{Settings, PRUNR_PRESET};
 use crate::gui::theme;
 
 /// Label for the dropdown button — shows the `applied_preset` name and
@@ -30,26 +30,32 @@ use crate::gui::theme;
 /// and that you've diverged from it.
 fn button_label(settings: &Settings, current: &ItemSettings, applied_preset: &str) -> String {
     // If applied_preset was deleted out from under us, fall back gracefully.
-    let exists = applied_preset == PRUNR_PRESET
-        || settings.presets.contains_key(applied_preset);
+    let exists = applied_preset == PRUNR_PRESET || settings.presets.contains_key(applied_preset);
     if !exists {
-        return format!("{}  Custom  {}", ICON_BOOKMARK.codepoint, ICON_EDIT.codepoint);
+        return format!(
+            "{}  Custom  {}",
+            ICON_BOOKMARK.codepoint, ICON_EDIT.codepoint
+        );
     }
     let resolved = resolve_preset_view(settings, applied_preset);
     let item_diverged = *current != resolved.item_settings;
     let brush_diverged = settings.brush != resolved.brush;
     let is_modified = item_diverged || brush_diverged;
-    let state_icon = if is_modified { ICON_EDIT.codepoint } else { ICON_CHECK.codepoint };
-    format!("{}  {applied_preset}  {state_icon}", ICON_BOOKMARK.codepoint)
+    let state_icon = if is_modified {
+        ICON_EDIT.codepoint
+    } else {
+        ICON_CHECK.codepoint
+    };
+    format!(
+        "{}  {applied_preset}  {state_icon}",
+        ICON_BOOKMARK.codepoint
+    )
 }
 
 /// Resolve an arbitrary preset name to a `ResolvedView` using the
 /// active model. The dirty indicator may check a preset other than
 /// the active one, so the active-preset shortcut doesn't apply here.
-fn resolve_preset_view(
-    settings: &Settings,
-    name: &str,
-) -> crate::gui::presets::ResolvedView {
+fn resolve_preset_view(settings: &Settings, name: &str) -> crate::gui::presets::ResolvedView {
     use crate::gui::presets;
     let empty = presets::PresetFile::default();
     let file = if name == PRUNR_PRESET {
@@ -57,7 +63,9 @@ fn resolve_preset_view(
     } else {
         settings.presets.get(name).unwrap_or(&empty)
     };
-    let model_id = settings.model.to_model_id()
+    let model_id = settings
+        .model
+        .to_model_id()
         .or_else(|| Settings::default().model.to_model_id())
         .expect("Settings::default().model always has a model_id");
     presets::resolve_preset_for_model(file, model_id, None)
@@ -109,9 +117,11 @@ pub fn render(
         ui.label(RichText::new("Preset").strong().color(theme::TEXT_PRIMARY));
         ui.add_space(theme::SPACE_XS);
         ui.label(
-            RichText::new(format!("Apply or save a preset. Currently applied: {applied_label}"))
-                .color(theme::TEXT_PRIMARY)
-                .size(theme::FONT_SIZE_MONO),
+            RichText::new(format!(
+                "Apply or save a preset. Currently applied: {applied_label}"
+            ))
+            .color(theme::TEXT_PRIMARY)
+            .size(theme::FONT_SIZE_MONO),
         );
     });
 
@@ -140,60 +150,58 @@ pub fn render(
                     let label_text = RichText::new(&name)
                         .color(theme::TEXT_PRIMARY)
                         .size(theme::FONT_SIZE_BODY);
-                    if ui.selectable_label(false, label_text)
+                    if ui
+                        .selectable_label(false, label_text)
                         .on_hover_text("Click to apply these settings to the current image")
                         .clicked()
                     {
                         *current_item = settings.preset_values(&name);
                         applied = Some(name.clone());
                     }
-                    ui.with_layout(
-                        egui::Layout::right_to_left(egui::Align::Center),
-                        |ui| {
-                            // Delete — hidden for Prunr (non-deletable).
-                            if !is_prunr {
-                                let delete_btn = ui.small_button(
-                                    RichText::new(ICON_DELETE.codepoint)
-                                        .size(theme::FONT_SIZE_MONO)
-                                        .color(theme::DESTRUCTIVE),
-                                );
-                                if delete_btn.on_hover_text("Delete preset").clicked() {
-                                    settings.presets.remove(&name);
-                                    // Remove the on-disk file too; presets are
-                                    // the filesystem-store's source of truth.
-                                    let _ = crate::gui::presets_fs::delete(&name);
-                                    // If the deleted preset was the app's default,
-                                    // fall back to Prunr so default_preset stays valid.
-                                    if is_default {
-                                        settings.default_preset = PRUNR_PRESET.to_string();
-                                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        // Delete — hidden for Prunr (non-deletable).
+                        if !is_prunr {
+                            let delete_btn = ui.small_button(
+                                RichText::new(ICON_DELETE.codepoint)
+                                    .size(theme::FONT_SIZE_MONO)
+                                    .color(theme::DESTRUCTIVE),
+                            );
+                            if delete_btn.on_hover_text("Delete preset").clicked() {
+                                settings.presets.remove(&name);
+                                // Remove the on-disk file too; presets are
+                                // the filesystem-store's source of truth.
+                                let _ = crate::gui::presets_fs::delete(&name);
+                                // If the deleted preset was the app's default,
+                                // fall back to Prunr so default_preset stays valid.
+                                if is_default {
+                                    settings.default_preset = PRUNR_PRESET.to_string();
                                 }
                             }
-                            let star_icon = if is_default {
-                                ICON_STAR.codepoint
-                            } else {
-                                ICON_STAR_OUTLINE.codepoint
-                            };
-                            let star_color = if is_default {
-                                theme::ACCENT
-                            } else {
-                                theme::TEXT_SECONDARY
-                            };
-                            let star_tooltip = if is_default {
-                                "Default for new images (click another preset's star to switch)"
-                            } else {
-                                "Set as default for new images"
-                            };
-                            let star_btn = ui.small_button(
-                                RichText::new(star_icon)
-                                    .size(theme::FONT_SIZE_MONO)
-                                    .color(star_color),
-                            );
-                            if star_btn.on_hover_text(star_tooltip).clicked() && !is_default {
-                                settings.default_preset = name.clone();
-                            }
-                        },
-                    );
+                        }
+                        let star_icon = if is_default {
+                            ICON_STAR.codepoint
+                        } else {
+                            ICON_STAR_OUTLINE.codepoint
+                        };
+                        let star_color = if is_default {
+                            theme::ACCENT
+                        } else {
+                            theme::TEXT_SECONDARY
+                        };
+                        let star_tooltip = if is_default {
+                            "Default for new images (click another preset's star to switch)"
+                        } else {
+                            "Set as default for new images"
+                        };
+                        let star_btn = ui.small_button(
+                            RichText::new(star_icon)
+                                .size(theme::FONT_SIZE_MONO)
+                                .color(star_color),
+                        );
+                        if star_btn.on_hover_text(star_tooltip).clicked() && !is_default {
+                            settings.default_preset = name.clone();
+                        }
+                    });
                 });
             }
 
@@ -202,38 +210,43 @@ pub fn render(
             ui.add_space(theme::SPACE_SM);
 
             let save_btn = egui::Button::new(
-                RichText::new(format!(
-                    "{}  Save current as…",
-                    ICON_BOOKMARK_ADD.codepoint
-                ))
-                .color(theme::TEXT_PRIMARY)
-                .size(theme::FONT_SIZE_BODY),
+                RichText::new(format!("{}  Save current as…", ICON_BOOKMARK_ADD.codepoint))
+                    .color(theme::TEXT_PRIMARY)
+                    .size(theme::FONT_SIZE_BODY),
             )
             .fill(theme::BG_SECONDARY);
             if ui.add(save_btn).clicked() {
                 ui.memory_mut(|m| m.data.insert_temp::<String>(save_dialog_id, String::new()));
                 ui.memory_mut(|m| {
-                    m.data.insert_temp::<bool>(save_dialog_id.with("open"), true);
+                    m.data
+                        .insert_temp::<bool>(save_dialog_id.with("open"), true);
                 });
             }
 
             ui.add_space(theme::SPACE_XS);
             ui.label(
-                RichText::new(format!("Default for new images: {}", settings.default_preset))
-                    .color(theme::TEXT_HINT)
-                    .size(theme::FONT_SIZE_MONO),
+                RichText::new(format!(
+                    "Default for new images: {}",
+                    settings.default_preset
+                ))
+                .color(theme::TEXT_HINT)
+                .size(theme::FONT_SIZE_MONO),
             );
         },
     );
 
     // ── Naming dialog ──
-    let dialog_open = ui
-        .ctx()
-        .memory(|m| m.data.get_temp::<bool>(save_dialog_id.with("open")).unwrap_or(false));
+    let dialog_open = ui.ctx().memory(|m| {
+        m.data
+            .get_temp::<bool>(save_dialog_id.with("open"))
+            .unwrap_or(false)
+    });
     if dialog_open {
-        let mut name_buf = ui
-            .ctx()
-            .memory(|m| m.data.get_temp::<String>(save_dialog_id).unwrap_or_default());
+        let mut name_buf = ui.ctx().memory(|m| {
+            m.data
+                .get_temp::<String>(save_dialog_id)
+                .unwrap_or_default()
+        });
         let mut commit = false;
         let mut cancel = false;
         let mut overwrite_target: Option<String> = None;
@@ -270,7 +283,10 @@ pub fn render(
 
                 ui.add_space(theme::SPACE_SM);
                 ui.horizontal(|ui| {
-                    if ui.add_enabled(!is_prunr_name, egui::Button::new("Save")).clicked() {
+                    if ui
+                        .add_enabled(!is_prunr_name, egui::Button::new("Save"))
+                        .clicked()
+                    {
                         commit = true;
                     }
                     if ui.button("Cancel").clicked() {
@@ -294,7 +310,10 @@ pub fn render(
                                 .color(theme::TEXT_PRIMARY)
                                 .size(theme::FONT_SIZE_BODY),
                         );
-                        if btn.on_hover_text("Overwrite with current settings").clicked() {
+                        if btn
+                            .on_hover_text("Overwrite with current settings")
+                            .clicked()
+                        {
                             overwrite_target = Some(name.clone());
                         }
                     }
@@ -303,7 +322,8 @@ pub fn render(
 
         let close_dialog = || {
             ui.ctx().memory_mut(|m| {
-                m.data.insert_temp::<bool>(save_dialog_id.with("open"), false);
+                m.data
+                    .insert_temp::<bool>(save_dialog_id.with("open"), false);
                 m.data.remove::<String>(save_dialog_id);
             });
         };
@@ -320,13 +340,12 @@ pub fn render(
         if let Some(name) = target_name {
             // Falls back to the workspace default model in filter-only
             // mode (no model_id) so the file is still keyed correctly.
-            let model_id = settings.model.to_model_id()
+            let model_id = settings
+                .model
+                .to_model_id()
                 .or_else(|| Settings::default().model.to_model_id())
                 .expect("Settings::default().model always has a model_id");
-            let (brush, sd) = crate::gui::presets::split_brush_for_save(
-                &settings.brush,
-                model_id,
-            );
+            let (brush, sd) = crate::gui::presets::split_brush_for_save(&settings.brush, model_id);
             let mp = crate::gui::presets::ModelPreset {
                 item_settings: *current_item,
                 brush,
@@ -385,14 +404,23 @@ mod tests {
     /// the active model — tests use this where `s.presets.insert` once
     /// took a bare `ItemSettings`.
     fn wrap(s: &Settings, item: ItemSettings) -> PresetFile {
-        let mid = s.model.to_model_id().expect("test settings have a model_id");
+        let mid = s
+            .model
+            .to_model_id()
+            .expect("test settings have a model_id");
         let mut models = HashMap::new();
-        models.insert(model_id_key(mid), ModelPreset {
-            item_settings: item,
-            brush: Default::default(),
-            sd: None,
-        });
-        PresetFile { format_version: PRESET_FORMAT_VERSION, models }
+        models.insert(
+            model_id_key(mid),
+            ModelPreset {
+                item_settings: item,
+                brush: Default::default(),
+                sd: None,
+            },
+        );
+        PresetFile {
+            format_version: PRESET_FORMAT_VERSION,
+            models,
+        }
     }
 
     #[test]
@@ -427,7 +455,8 @@ mod tests {
     fn button_label_tracks_applied_even_when_current_matches_different_preset() {
         let mut s = Settings::default();
         let portrait_item = item_with_gamma(2.0);
-        s.presets.insert("Portrait".to_string(), wrap(&s, portrait_item));
+        s.presets
+            .insert("Portrait".to_string(), wrap(&s, portrait_item));
         // applied_preset = "Prunr" but current happens to match factory.
         // Label should stay on "Prunr" (the applied one).
         let current = ItemSettings::default();
@@ -443,8 +472,8 @@ mod tests {
     #[test]
     fn button_label_dirty_indicator_includes_brush_diff() {
         use crate::gui::brush_state::BrushSettings;
-        use crate::gui::settings::SettingsModel;
         use crate::gui::presets::{model_id_key, ModelPreset, PresetFile, PRESET_FORMAT_VERSION};
+        use crate::gui::settings::SettingsModel;
 
         let mut s = Settings::default();
         s.model = SettingsModel::Silueta;
@@ -457,7 +486,10 @@ mod tests {
         };
         let mut models = HashMap::new();
         models.insert(model_id_key(prunr_models::ModelId::Silueta), mp);
-        let file = PresetFile { format_version: PRESET_FORMAT_VERSION, models };
+        let file = PresetFile {
+            format_version: PRESET_FORMAT_VERSION,
+            models,
+        };
         s.presets.insert("Foo".to_string(), file);
 
         // ItemSettings still equals the preset's; only brush diverges.

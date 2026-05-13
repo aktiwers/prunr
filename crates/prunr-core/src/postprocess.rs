@@ -23,7 +23,11 @@ pub struct PostprocessOpts<'a> {
 
 impl<'a> PostprocessOpts<'a> {
     pub fn new(mask_settings: &'a MaskSettings, model: ModelKind) -> Self {
-        Self { mask_settings, model, correction: None }
+        Self {
+            mask_settings,
+            model,
+            correction: None,
+        }
     }
     pub fn with_correction(mut self, correction: Option<&'a MaskCorrection>) -> Self {
         self.correction = correction;
@@ -34,7 +38,11 @@ impl<'a> PostprocessOpts<'a> {
 /// Postprocess raw ONNX model output into a transparent RGBA image.
 /// Allocates the RGBA buffer once and reuses it for guided filter (if enabled)
 /// and final mask application — avoids two 4×width×height allocations.
-pub fn postprocess(raw: ArrayView4<f32>, original: &DynamicImage, opts: &PostprocessOpts<'_>) -> RgbaImage {
+pub fn postprocess(
+    raw: ArrayView4<f32>,
+    original: &DynamicImage,
+    opts: &PostprocessOpts<'_>,
+) -> RgbaImage {
     let mut rgba = original.to_rgba8();
     let mask = tensor_to_mask_with_rgba(raw, &rgba, opts);
     apply_mask_inplace(&mut rgba, &mask);
@@ -72,15 +80,33 @@ pub fn tensor_to_mask_from_flat(
 
 /// Convert raw ONNX tensor to a full-resolution grayscale mask (Tier 2).
 /// Applies normalization, gamma, threshold, resize, edge shift, and guided filter.
-pub fn tensor_to_mask(raw: ArrayView4<f32>, original: &DynamicImage, opts: &PostprocessOpts<'_>) -> GrayImage {
+pub fn tensor_to_mask(
+    raw: ArrayView4<f32>,
+    original: &DynamicImage,
+    opts: &PostprocessOpts<'_>,
+) -> GrayImage {
     // Materializing rgba here is wasteful when refine_edges is false; callers on
     // the hot path should use `postprocess()` which shares the RGBA buffer.
-    let rgba = if opts.mask_settings.refine_edges { Some(original.to_rgba8()) } else { None };
-    tensor_to_mask_core(raw, original.width(), original.height(), rgba.as_ref(), opts)
+    let rgba = if opts.mask_settings.refine_edges {
+        Some(original.to_rgba8())
+    } else {
+        None
+    };
+    tensor_to_mask_core(
+        raw,
+        original.width(),
+        original.height(),
+        rgba.as_ref(),
+        opts,
+    )
 }
 
 /// Same as `tensor_to_mask` but reuses an already-materialized RGBA buffer.
-fn tensor_to_mask_with_rgba(raw: ArrayView4<f32>, rgba: &RgbaImage, opts: &PostprocessOpts<'_>) -> GrayImage {
+fn tensor_to_mask_with_rgba(
+    raw: ArrayView4<f32>,
+    rgba: &RgbaImage,
+    opts: &PostprocessOpts<'_>,
+) -> GrayImage {
     tensor_to_mask_core(raw, rgba.width(), rgba.height(), Some(rgba), opts)
 }
 
@@ -125,10 +151,11 @@ fn tensor_to_mask_core(
                 |(l1, h1), (l2, h2)| (l1.min(l2), h1.max(h2)),
             )
     } else {
-        pred_slice.iter().fold(
-            (f32::INFINITY, f32::NEG_INFINITY),
-            |(lo, hi), &v| (lo.min(v), hi.max(v)),
-        )
+        pred_slice
+            .iter()
+            .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), &v| {
+                (lo.min(v), hi.max(v))
+            })
     };
 
     let (mi, range, uniform_val) = if !use_sigmoid {
@@ -172,7 +199,9 @@ fn tensor_to_mask_core(
     };
     let finalise = |val: f32| -> u8 {
         let mut v = val;
-        if gamma != 1.0 { v = v.powf(gamma); }
+        if gamma != 1.0 {
+            v = v.powf(gamma);
+        }
         if let Some(t) = threshold {
             v = if v >= t { 1.0 } else { 0.0 };
         }
@@ -268,6 +297,23 @@ pub fn apply_mask(original: &DynamicImage, mask: &GrayImage) -> RgbaImage {
     rgba
 }
 
+/// Apply a pixel-wise mutation to every pixel in `rgba`.
+/// Parallelizes the walk using Rayon if the image is larger than `ROW_PAR_THRESHOLD`.
+/// Parallel execution avoids the bottleneck of serial iteration on high-resolution
+/// images (e.g. 4K), often reducing processing time by 3-5× on multi-core CPUs.
+fn apply_pixelwise<F>(rgba: &mut RgbaImage, f: F)
+where
+    F: Fn(&mut [u8]) + Send + Sync + Copy,
+{
+    let (w, h) = rgba.dimensions();
+    let raw = rgba.as_mut();
+    if (w as usize * h as usize) >= ROW_PAR_THRESHOLD {
+        raw.par_chunks_exact_mut(4).for_each(f);
+    } else {
+        raw.chunks_exact_mut(4).for_each(f);
+    }
+}
+
 /// Transform the RGB channels of `rgba` according to `style`. Alpha is
 /// preserved. Spatial variants (`Pixelate`) allocate a scratch copy of the
 /// buffer so reads don't race writes; per-pixel variants mutate in place.
@@ -276,96 +322,109 @@ pub fn apply_fill_style(rgba: &mut RgbaImage, style: crate::types::FillStyle) {
     match style {
         FillStyle::None => {}
         FillStyle::Desaturate => {
-            for p in rgba.pixels_mut() {
-                let y = luma_u8(p.0[0], p.0[1], p.0[2]);
-                p.0[0] = y; p.0[1] = y; p.0[2] = y;
-            }
+            apply_pixelwise(rgba, |p| {
+                let y = luma_u8(p[0], p[1], p[2]);
+                p[0] = y;
+                p[1] = y;
+                p[2] = y;
+            });
         }
         FillStyle::Invert => {
-            for p in rgba.pixels_mut() {
-                p.0[0] = 255 - p.0[0];
-                p.0[1] = 255 - p.0[1];
-                p.0[2] = 255 - p.0[2];
-            }
+            apply_pixelwise(rgba, |p| {
+                p[0] = 255 - p[0];
+                p[1] = 255 - p[1];
+                p[2] = 255 - p[2];
+            });
         }
         FillStyle::Duotone { dark, light } => {
-            for p in rgba.pixels_mut() {
-                let t = luma_u8(p.0[0], p.0[1], p.0[2]) as u16;
+            apply_pixelwise(rgba, |p| {
+                let t = luma_u8(p[0], p[1], p[2]) as u16;
                 let inv = 255 - t;
-                p.0[0] = ((dark[0] as u16 * inv + light[0] as u16 * t) / 255) as u8;
-                p.0[1] = ((dark[1] as u16 * inv + light[1] as u16 * t) / 255) as u8;
-                p.0[2] = ((dark[2] as u16 * inv + light[2] as u16 * t) / 255) as u8;
-            }
+                p[0] = ((dark[0] as u16 * inv + light[0] as u16 * t) / 255) as u8;
+                p[1] = ((dark[1] as u16 * inv + light[1] as u16 * t) / 255) as u8;
+                p[2] = ((dark[2] as u16 * inv + light[2] as u16 * t) / 255) as u8;
+            });
         }
         FillStyle::Sepia => {
-            for p in rgba.pixels_mut() {
-                let (r, g, b) = (p.0[0] as u32, p.0[1] as u32, p.0[2] as u32);
+            apply_pixelwise(rgba, |p| {
+                let (r, g, b) = (p[0] as u32, p[1] as u32, p[2] as u32);
                 // Standard sepia coefficients (scaled ×1000 for integer math).
-                p.0[0] = ((r * 393 + g * 769 + b * 189) / 1000).min(255) as u8;
-                p.0[1] = ((r * 349 + g * 686 + b * 168) / 1000).min(255) as u8;
-                p.0[2] = ((r * 272 + g * 534 + b * 131) / 1000).min(255) as u8;
-            }
+                p[0] = ((r * 393 + g * 769 + b * 189) / 1000).min(255) as u8;
+                p[1] = ((r * 349 + g * 686 + b * 168) / 1000).min(255) as u8;
+                p[2] = ((r * 272 + g * 534 + b * 131) / 1000).min(255) as u8;
+            });
         }
         FillStyle::Threshold { level } => {
-            for p in rgba.pixels_mut() {
-                let y = luma_u8(p.0[0], p.0[1], p.0[2]);
+            apply_pixelwise(rgba, |p| {
+                let y = luma_u8(p[0], p[1], p[2]);
                 let v = if y >= level { 255 } else { 0 };
-                p.0[0] = v; p.0[1] = v; p.0[2] = v;
-            }
+                p[0] = v;
+                p[1] = v;
+                p[2] = v;
+            });
         }
         FillStyle::Posterize { levels } => {
             let n = levels.max(2) as u16 - 1;
-            for p in rgba.pixels_mut() {
-                for i in 0..3 {
-                    let v = p.0[i] as u16;
-                    p.0[i] = ((v * n / 255) * 255 / n) as u8;
+            apply_pixelwise(rgba, |p| {
+                for channel in p.iter_mut().take(3) {
+                    let v = *channel as u16;
+                    *channel = ((v * n / 255) * 255 / n) as u8;
                 }
-            }
+            });
         }
         FillStyle::Solarize { pivot } => {
-            for p in rgba.pixels_mut() {
-                for i in 0..3 {
-                    if p.0[i] >= pivot {
-                        p.0[i] = 255 - p.0[i];
+            apply_pixelwise(rgba, |p| {
+                for channel in p.iter_mut().take(3) {
+                    if *channel >= pivot {
+                        *channel = 255 - *channel;
                     }
                 }
-            }
+            });
         }
         FillStyle::HueShift { degrees } => {
-            for p in rgba.pixels_mut() {
-                let (h, s, v) = rgb_to_hsv(p.0[0], p.0[1], p.0[2]);
+            apply_pixelwise(rgba, |p| {
+                let (h, s, v) = rgb_to_hsv(p[0], p[1], p[2]);
                 let new_h = (h as i32 + degrees as i32).rem_euclid(360) as u16;
                 let (r, g, b) = hsv_to_rgb(new_h, s, v);
-                p.0[0] = r; p.0[1] = g; p.0[2] = b;
-            }
+                p[0] = r;
+                p[1] = g;
+                p[2] = b;
+            });
         }
         FillStyle::Saturate { percent } => {
             // Move each channel toward/away from luma by `percent / 100`.
             // percent=0 → grayscale, 100 → unchanged, >100 → punchy.
             let factor = percent.min(300) as i32;
-            for p in rgba.pixels_mut() {
-                let y = luma_u8(p.0[0], p.0[1], p.0[2]) as i32;
-                for i in 0..3 {
-                    let v = p.0[i] as i32;
+            apply_pixelwise(rgba, |p| {
+                let y = luma_u8(p[0], p[1], p[2]) as i32;
+                for channel in p.iter_mut().take(3) {
+                    let v = *channel as i32;
                     let shifted = y + ((v - y) * factor / 100);
-                    p.0[i] = shifted.clamp(0, 255) as u8;
+                    *channel = shifted.clamp(0, 255) as u8;
                 }
-            }
+            });
         }
-        FillStyle::ColorSplash { keep_hue, tolerance } => {
+        FillStyle::ColorSplash {
+            keep_hue,
+            tolerance,
+        } => {
             let keep = (keep_hue % 360) as i32;
             let tol = tolerance.min(180) as i32;
-            for p in rgba.pixels_mut() {
-                let (h, _, _) = rgb_to_hsv(p.0[0], p.0[1], p.0[2]);
+            apply_pixelwise(rgba, |p| {
+                let (h, _, _) = rgb_to_hsv(p[0], p[1], p[2]);
                 let dist = hue_distance(h as i32, keep);
                 if dist > tol {
-                    let y = luma_u8(p.0[0], p.0[1], p.0[2]);
-                    p.0[0] = y; p.0[1] = y; p.0[2] = y;
+                    let y = luma_u8(p[0], p[1], p[2]);
+                    p[0] = y;
+                    p[1] = y;
+                    p[2] = y;
                 }
-            }
+            });
         }
         FillStyle::Pixelate { block_size } => {
-            if block_size < 2 { return; }
+            if block_size < 2 {
+                return;
+            }
             let (w, h) = rgba.dimensions();
             // Sample one pixel per block (top-left corner) into a small
             // LUT before any mutation. Replaces the previous full-image
@@ -374,8 +433,7 @@ pub fn apply_fill_style(rgba: &mut RgbaImage, style: crate::types::FillStyle) {
             let bs = block_size;
             let blocks_x = w.div_ceil(bs);
             let blocks_y = h.div_ceil(bs);
-            let mut lut: Vec<[u8; 3]> =
-                Vec::with_capacity((blocks_x * blocks_y) as usize);
+            let mut lut: Vec<[u8; 3]> = Vec::with_capacity((blocks_x * blocks_y) as usize);
             for by in 0..blocks_y {
                 for bx in 0..blocks_x {
                     let p = rgba.get_pixel(bx * bs, by * bs);
@@ -386,23 +444,26 @@ pub fn apply_fill_style(rgba: &mut RgbaImage, style: crate::types::FillStyle) {
             // never nested inside rayon (so par_chunks_mut won't deadlock).
             use rayon::prelude::*;
             let row_stride = (w * 4) as usize;
-            rgba.as_mut().par_chunks_mut(row_stride).enumerate().for_each(|(y, row)| {
-                let row_block = ((y as u32) / bs) * blocks_x;
-                for x in 0..w as usize {
-                    let s = lut[(row_block + (x as u32) / bs) as usize];
-                    let p = x * 4;
-                    row[p] = s[0];
-                    row[p + 1] = s[1];
-                    row[p + 2] = s[2];
-                }
-            });
+            rgba.as_mut()
+                .par_chunks_mut(row_stride)
+                .enumerate()
+                .for_each(|(y, row)| {
+                    let row_block = ((y as u32) / bs) * blocks_x;
+                    for x in 0..w as usize {
+                        let s = lut[(row_block + (x as u32) / bs) as usize];
+                        let p = x * 4;
+                        row[p] = s[0];
+                        row[p + 1] = s[1];
+                        row[p + 2] = s[2];
+                    }
+                });
         }
         FillStyle::CrossProcess { shadow, highlight } => {
             // Split-tone by luma: pixels below 128 bend toward `shadow`,
             // above bend toward `highlight`. Preserves midtones, lifts
             // shadows + warms highlights (or whatever the user picked).
-            for p in rgba.pixels_mut() {
-                let y = luma_u8(p.0[0], p.0[1], p.0[2]);
+            apply_pixelwise(rgba, |p| {
+                let y = luma_u8(p[0], p[1], p[2]);
                 let (target, t) = if y < 128 {
                     (shadow, (128 - y) as u16) // 0..=128
                 } else {
@@ -411,15 +472,15 @@ pub fn apply_fill_style(rgba: &mut RgbaImage, style: crate::types::FillStyle) {
                 let w = t.min(128) * 2; // scale to 0..=256 then clamp
                 let w = w.min(255);
                 let inv = 255 - w;
-                p.0[0] = ((p.0[0] as u16 * inv + target[0] as u16 * w) / 255) as u8;
-                p.0[1] = ((p.0[1] as u16 * inv + target[1] as u16 * w) / 255) as u8;
-                p.0[2] = ((p.0[2] as u16 * inv + target[2] as u16 * w) / 255) as u8;
-            }
+                p[0] = ((p[0] as u16 * inv + target[0] as u16 * w) / 255) as u8;
+                p[1] = ((p[1] as u16 * inv + target[1] as u16 * w) / 255) as u8;
+                p[2] = ((p[2] as u16 * inv + target[2] as u16 * w) / 255) as u8;
+            });
         }
         FillStyle::ChannelSwap { variant } => {
             use crate::types::ChannelSwapVariant;
-            for p in rgba.pixels_mut() {
-                let [r, g, b, _] = p.0;
+            apply_pixelwise(rgba, |p| {
+                let [r, g, b, _] = [p[0], p[1], p[2], p[3]];
                 let (nr, ng, nb) = match variant {
                     ChannelSwapVariant::Grb => (g, r, b),
                     ChannelSwapVariant::Brg => (b, r, g),
@@ -427,8 +488,10 @@ pub fn apply_fill_style(rgba: &mut RgbaImage, style: crate::types::FillStyle) {
                     ChannelSwapVariant::Bgr => (b, g, r),
                     ChannelSwapVariant::Gbr => (g, b, r),
                 };
-                p.0[0] = nr; p.0[1] = ng; p.0[2] = nb;
-            }
+                p[0] = nr;
+                p[1] = ng;
+                p[2] = nb;
+            });
         }
         FillStyle::Halftone { dot_spacing } => {
             // Read each pixel's luma BEFORE writing the same pixel. The
@@ -439,10 +502,12 @@ pub fn apply_fill_style(rgba: &mut RgbaImage, style: crate::types::FillStyle) {
             let (w, h) = rgba.dimensions();
             let half = (spacing / 2) as i32;
             let max_r_sq = (half * half) as u32;
-            for y in 0..h {
-                for x in 0..w {
-                    let src = rgba.get_pixel(x, y);
-                    let luma = luma_u8(src.0[0], src.0[1], src.0[2]);
+            let row_stride = (w * 4) as usize;
+
+            let process_row = |(y, row): (usize, &mut [u8])| {
+                for x in 0..w as usize {
+                    let p = x * 4;
+                    let luma = luma_u8(row[p], row[p + 1], row[p + 2]);
                     let r_sq = max_r_sq * (255 - luma as u32) / 255;
                     let cx = ((x as i32) / spacing as i32) * spacing as i32 + half;
                     let cy = ((y as i32) / spacing as i32) * spacing as i32 + half;
@@ -450,16 +515,30 @@ pub fn apply_fill_style(rgba: &mut RgbaImage, style: crate::types::FillStyle) {
                     let dy = y as i32 - cy;
                     let dist_sq = (dx * dx + dy * dy) as u32;
                     let v = if dist_sq <= r_sq { 0u8 } else { 255 };
-                    let dst = rgba.get_pixel_mut(x, y);
-                    dst.0[0] = v; dst.0[1] = v; dst.0[2] = v;
+                    row[p] = v;
+                    row[p + 1] = v;
+                    row[p + 2] = v;
                 }
+            };
+
+            // Parallelize by row to saturate CPU cores on large images.
+            if (w as usize * h as usize) >= ROW_PAR_THRESHOLD {
+                rgba.as_mut()
+                    .par_chunks_mut(row_stride)
+                    .enumerate()
+                    .for_each(process_row);
+            } else {
+                rgba.as_mut()
+                    .chunks_mut(row_stride)
+                    .enumerate()
+                    .for_each(process_row);
             }
         }
         FillStyle::GradientMap { stops } => {
             // Map luma 0..=255 through 4 colour stops at 0, 85, 170, 255.
             // Linear interp between adjacent stops.
-            for p in rgba.pixels_mut() {
-                let y = luma_u8(p.0[0], p.0[1], p.0[2]) as u16;
+            apply_pixelwise(rgba, |p| {
+                let y = luma_u8(p[0], p[1], p[2]) as u16;
                 let (lo, hi, t) = if y <= 85 {
                     (stops[0], stops[1], y * 255 / 85)
                 } else if y <= 170 {
@@ -469,10 +548,10 @@ pub fn apply_fill_style(rgba: &mut RgbaImage, style: crate::types::FillStyle) {
                 };
                 let t = t.min(255);
                 let inv = 255 - t;
-                p.0[0] = ((lo[0] as u16 * inv + hi[0] as u16 * t) / 255) as u8;
-                p.0[1] = ((lo[1] as u16 * inv + hi[1] as u16 * t) / 255) as u8;
-                p.0[2] = ((lo[2] as u16 * inv + hi[2] as u16 * t) / 255) as u8;
-            }
+                p[0] = ((lo[0] as u16 * inv + hi[0] as u16 * t) / 255) as u8;
+                p[1] = ((lo[1] as u16 * inv + hi[1] as u16 * t) / 255) as u8;
+                p[2] = ((lo[2] as u16 * inv + hi[2] as u16 * t) / 255) as u8;
+            });
         }
     }
 }
@@ -490,7 +569,11 @@ fn luma_u8(r: u8, g: u8, b: u8) -> u8 {
 /// cost because bg effects only run at postprocess tier, never on the
 /// per-tick live-preview path (live preview keeps transparency so the
 /// canvas's GPU-rect bg render stays instant).
-pub fn apply_bg_effect(rgba: &mut RgbaImage, source: &DynamicImage, effect: crate::types::BgEffect) {
+pub fn apply_bg_effect(
+    rgba: &mut RgbaImage,
+    source: &DynamicImage,
+    effect: crate::types::BgEffect,
+) {
     use crate::types::BgEffect;
     let backdrop: RgbaImage = match effect {
         BgEffect::None => return,
@@ -515,7 +598,9 @@ pub fn apply_bg_effect(rgba: &mut RgbaImage, source: &DynamicImage, effect: crat
             let mut img = source.to_rgba8();
             for p in img.pixels_mut() {
                 let y = luma_u8(p.0[0], p.0[1], p.0[2]);
-                p.0[0] = y; p.0[1] = y; p.0[2] = y;
+                p.0[0] = y;
+                p.0[1] = y;
+                p.0[2] = y;
             }
             img
         }
@@ -533,7 +618,9 @@ pub fn apply_bg_effect(rgba: &mut RgbaImage, source: &DynamicImage, effect: crat
 
     let blend_pixel = |px: &mut [u8], bd_chunk: &[u8]| {
         let a = px[3] as u16;
-        if a == 255 { return; }
+        if a == 255 {
+            return;
+        }
         let inv = 255 - a;
         px[0] = ((px[0] as u16 * a + bd_chunk[0] as u16 * inv) / 255) as u8;
         px[1] = ((px[1] as u16 * a + bd_chunk[1] as u16 * inv) / 255) as u8;
@@ -611,7 +698,11 @@ pub(crate) fn hsv_to_rgb(h: u16, s: u8, v: u8) -> (u8, u8, u8) {
 #[inline]
 fn hue_distance(a: i32, b: i32) -> i32 {
     let d = (a - b).rem_euclid(360);
-    if d > 180 { 360 - d } else { d }
+    if d > 180 {
+        360 - d
+    } else {
+        d
+    }
 }
 
 /// Write the mask into an existing RGBA buffer's alpha channel in place.
@@ -660,7 +751,9 @@ fn apply_mask_inplace(rgba: &mut RgbaImage, mask: &GrayImage) {
 /// painted regions.
 fn feather_mask(mask: &mut GrayImage, sigma: f32) {
     let radius = sigma.round() as u32;
-    if radius == 0 { return; }
+    if radius == 0 {
+        return;
+    }
     // 3-box kernel total reach is 3·radius from each source pixel.
     let margin = 3 * radius;
     let Some(bbox) = crate::inpaint::mask_bbox(mask, 1, margin) else {
@@ -696,13 +789,17 @@ fn feather_mask(mask: &mut GrayImage, sigma: f32) {
 /// Dilate a grayscale mask by N pixels (0 is a fast no-op).
 /// Thin wrapper around `apply_edge_shift` that hides the "negative = dilate" sign convention.
 pub(crate) fn dilate_mask(mask: &mut GrayImage, pixels: u32) {
-    if pixels == 0 { return; }
+    if pixels == 0 {
+        return;
+    }
     apply_edge_shift(mask, -(pixels as f32));
 }
 
 fn apply_edge_shift(mask: &mut GrayImage, shift: f32) {
     let abs = shift.abs();
-    if abs < 0.01 { return; }
+    if abs < 0.01 {
+        return;
+    }
     let erode = shift > 0.0;
     let full = abs.floor() as u32;
     let frac = abs - full as f32;
@@ -753,14 +850,18 @@ fn apply_edge_shift(mask: &mut GrayImage, shift: f32) {
     }
 
     if frac >= 0.01 {
-        if full == 0 { a.copy_from_slice(mask.as_raw()); }
+        if full == 0 {
+            a.copy_from_slice(mask.as_raw());
+        }
         step(&a, &mut b);
         let inv = 1.0 - frac;
         let blend = |a_byte: &mut u8, b_byte: u8| {
             *a_byte = (*a_byte as f32 * inv + b_byte as f32 * frac + 0.5) as u8;
         };
         if use_par {
-            a.par_iter_mut().zip(b.par_iter()).for_each(|(a, &b)| blend(a, b));
+            a.par_iter_mut()
+                .zip(b.par_iter())
+                .for_each(|(a, &b)| blend(a, b));
         } else {
             a.iter_mut().zip(b.iter()).for_each(|(a, &b)| blend(a, b));
         }
@@ -772,7 +873,7 @@ fn apply_edge_shift(mask: &mut GrayImage, shift: f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use image::{DynamicImage, RgbImage, Rgb};
+    use image::{DynamicImage, Rgb, RgbImage};
     use ndarray::Array4;
 
     fn make_raw_tensor(val: f32) -> Array4<f32> {
@@ -787,7 +888,11 @@ mod tests {
     fn test_postprocess_output_dimensions() {
         let raw = make_raw_tensor(0.5);
         let original = solid_rgb(640, 480);
-        let result = postprocess(raw.view(), &original, &PostprocessOpts::new(&MaskSettings::default(), ModelKind::Silueta));
+        let result = postprocess(
+            raw.view(),
+            &original,
+            &PostprocessOpts::new(&MaskSettings::default(), ModelKind::Silueta),
+        );
         assert_eq!(result.width(), 640);
         assert_eq!(result.height(), 480);
     }
@@ -798,7 +903,11 @@ mod tests {
         // (0 - 0) / 1e-6 = 0 -> alpha = 0
         let raw = make_raw_tensor(0.0);
         let original = solid_rgb(32, 32);
-        let result = postprocess(raw.view(), &original, &PostprocessOpts::new(&MaskSettings::default(), ModelKind::Silueta));
+        let result = postprocess(
+            raw.view(),
+            &original,
+            &PostprocessOpts::new(&MaskSettings::default(), ModelKind::Silueta),
+        );
         // All alpha values should be 0
         for (_, _, p) in result.enumerate_pixels() {
             assert_eq!(p[3], 0, "Expected alpha=0 for all-zero tensor");
@@ -810,9 +919,16 @@ mod tests {
         // All-one tensor: uniform high confidence → foreground → alpha=255
         let raw = make_raw_tensor(1.0);
         let original = solid_rgb(32, 32);
-        let result = postprocess(raw.view(), &original, &PostprocessOpts::new(&MaskSettings::default(), ModelKind::Silueta));
+        let result = postprocess(
+            raw.view(),
+            &original,
+            &PostprocessOpts::new(&MaskSettings::default(), ModelKind::Silueta),
+        );
         for (_, _, p) in result.enumerate_pixels() {
-            assert_eq!(p[3], 255, "Expected alpha=255 for uniform high-confidence tensor");
+            assert_eq!(
+                p[3], 255,
+                "Expected alpha=255 for uniform high-confidence tensor"
+            );
         }
     }
 
@@ -843,7 +959,13 @@ mod tests {
         let flat = vec![0.0f32; 10];
         let original = solid_rgb(16, 16);
         let mask = MaskSettings::default();
-        let r = tensor_to_mask_from_flat(&flat, 320, 320, &original, &PostprocessOpts::new(&mask, ModelKind::Silueta));
+        let r = tensor_to_mask_from_flat(
+            &flat,
+            320,
+            320,
+            &original,
+            &PostprocessOpts::new(&mask, ModelKind::Silueta),
+        );
         assert!(r.is_err(), "size mismatch must return Err");
     }
 
@@ -857,7 +979,11 @@ mod tests {
             }
         }
         let original = solid_rgb(320, 320);
-        let result = postprocess(raw.view(), &original, &PostprocessOpts::new(&MaskSettings::default(), ModelKind::Silueta));
+        let result = postprocess(
+            raw.view(),
+            &original,
+            &PostprocessOpts::new(&MaskSettings::default(), ModelKind::Silueta),
+        );
         let unique_alphas: std::collections::HashSet<u8> =
             result.enumerate_pixels().map(|(_, _, p)| p[3]).collect();
         assert!(
@@ -877,18 +1003,44 @@ mod tests {
         let opts = PostprocessOpts::new(&mask_settings, ModelKind::Silueta);
         let baseline = tensor_to_mask(raw.view(), &original, &opts);
         let baseline_at_center = baseline.get_pixel(160, 160)[0];
-        assert!(baseline_at_center > 200, "baseline center should be foreground (got {})", baseline_at_center);
+        assert!(
+            baseline_at_center > 200,
+            "baseline center should be foreground (got {})",
+            baseline_at_center
+        );
 
         let mut correction = MaskCorrection::empty(320, 320);
-        paint_circle(&mut correction, 160.0, 160.0, 20.0, crate::brush::Stamp { hardness: 1.0, strength: 1.0, mode: BrushMode::Subtract });
-        let corrected = tensor_to_mask(raw.view(), &original, &opts.with_correction(Some(&correction)));
+        paint_circle(
+            &mut correction,
+            160.0,
+            160.0,
+            20.0,
+            crate::brush::Stamp {
+                hardness: 1.0,
+                strength: 1.0,
+                mode: BrushMode::Subtract,
+            },
+        );
+        let corrected = tensor_to_mask(
+            raw.view(),
+            &original,
+            &opts.with_correction(Some(&correction)),
+        );
 
         let center_after = corrected.get_pixel(160, 160)[0];
         let edge_after = corrected.get_pixel(10, 10)[0];
         // Full-strength subtract drives 255→1 (i8 grid range × 2 = ±254
         // effect). The 1/255 residue is imperceptible.
-        assert!(center_after <= 1, "subtract stroke should drive painted pixel to ~0, got {}", center_after);
-        assert_eq!(edge_after, baseline.get_pixel(10, 10)[0], "untouched pixels should match baseline");
+        assert!(
+            center_after <= 1,
+            "subtract stroke should drive painted pixel to ~0, got {}",
+            center_after
+        );
+        assert_eq!(
+            edge_after,
+            baseline.get_pixel(10, 10)[0],
+            "untouched pixels should match baseline"
+        );
     }
 
     #[test]
@@ -901,9 +1053,17 @@ mod tests {
         let opts = PostprocessOpts::new(&mask_settings, ModelKind::Silueta);
         let baseline = tensor_to_mask(raw.view(), &original, &opts);
         let wrong_size = MaskCorrection::empty(64, 64);
-        let with_bad = tensor_to_mask(raw.view(), &original, &opts.with_correction(Some(&wrong_size)));
+        let with_bad = tensor_to_mask(
+            raw.view(),
+            &original,
+            &opts.with_correction(Some(&wrong_size)),
+        );
 
-        assert_eq!(baseline.as_raw(), with_bad.as_raw(), "dim mismatch must skip silently, not corrupt the mask");
+        assert_eq!(
+            baseline.as_raw(),
+            with_bad.as_raw(),
+            "dim mismatch must skip silently, not corrupt the mask"
+        );
     }
 
     /// Time `f` N times (with a few warm-up runs) and `eprintln!` min /
@@ -970,10 +1130,21 @@ mod tests {
         let original = solid_rgb(4000, 3000);
         let mask = MaskSettings::default();
 
-        bench_report("postprocess_4k_bench (4000x3000, 320x320 tensor)", 2, 12, || {
-            let _ = postprocess_from_flat(&tensor, 320, 320, &original, &PostprocessOpts::new(&mask, ModelKind::Silueta))
+        bench_report(
+            "postprocess_4k_bench (4000x3000, 320x320 tensor)",
+            2,
+            12,
+            || {
+                let _ = postprocess_from_flat(
+                    &tensor,
+                    320,
+                    320,
+                    &original,
+                    &PostprocessOpts::new(&mask, ModelKind::Silueta),
+                )
                 .expect("postprocess succeeds");
-        });
+            },
+        );
     }
 
     /// Halftone regression: on a uniform-luma input, pixels at the
@@ -989,7 +1160,9 @@ mod tests {
         let mut img = image::RgbaImage::from_pixel(32, 32, image::Rgba([100, 100, 100, 255]));
         apply_fill_style(
             &mut img,
-            crate::types::FillStyle::Halftone { dot_spacing: spacing },
+            crate::types::FillStyle::Halftone {
+                dot_spacing: spacing,
+            },
         );
         // Rows 0, 8, 16, 24 all have dy = -half from their cell centre.
         for &probe_y in &[spacing, spacing * 2, spacing * 3] {
@@ -1022,16 +1195,29 @@ mod tests {
         // variant has substrate to differ on.
         let mut src = image::RgbaImage::new(4, 4);
         let palette: [[u8; 4]; 16] = [
-            [255, 0, 0, 255], [0, 255, 0, 255], [0, 0, 255, 255], [255, 255, 0, 255],
-            [0, 255, 255, 255], [255, 0, 255, 255], [128, 128, 128, 255], [200, 100, 50, 255],
-            [50, 100, 200, 255], [180, 220, 100, 255], [100, 50, 180, 255], [240, 240, 240, 255],
-            [20, 20, 20, 255], [128, 64, 192, 255], [192, 128, 64, 255], [64, 192, 128, 255],
+            [255, 0, 0, 255],
+            [0, 255, 0, 255],
+            [0, 0, 255, 255],
+            [255, 255, 0, 255],
+            [0, 255, 255, 255],
+            [255, 0, 255, 255],
+            [128, 128, 128, 255],
+            [200, 100, 50, 255],
+            [50, 100, 200, 255],
+            [180, 220, 100, 255],
+            [100, 50, 180, 255],
+            [240, 240, 240, 255],
+            [20, 20, 20, 255],
+            [128, 64, 192, 255],
+            [192, 128, 64, 255],
+            [64, 192, 128, 255],
         ];
         for (i, px) in palette.iter().enumerate() {
             src.put_pixel((i % 4) as u32, (i / 4) as u32, image::Rgba(*px));
         }
 
-        let mut outputs: Vec<(String, image::RgbaImage)> = FillStyle::ALL.iter()
+        let mut outputs: Vec<(String, image::RgbaImage)> = FillStyle::ALL
+            .iter()
             .map(|style| {
                 let mut img = src.clone();
                 apply_fill_style(&mut img, *style);
@@ -1040,13 +1226,21 @@ mod tests {
             .collect();
 
         // None is identity.
-        let none_idx = outputs.iter().position(|(n, _)| n == "None")
+        let none_idx = outputs
+            .iter()
+            .position(|(n, _)| n == "None")
             .expect("FillStyle::None must be in ALL");
-        assert_eq!(outputs[none_idx].1, src, "FillStyle::None must be bit-exact identity");
+        assert_eq!(
+            outputs[none_idx].1, src,
+            "FillStyle::None must be bit-exact identity"
+        );
 
         // Every other variant differs from input.
         for (name, img) in outputs.iter().filter(|(n, _)| n != "None") {
-            assert_ne!(img, &src, "FillStyle::{name} produced bit-exact-identity output (variant is dead)");
+            assert_ne!(
+                img, &src,
+                "FillStyle::{name} produced bit-exact-identity output (variant is dead)"
+            );
         }
 
         // No two variants produce the same output.
@@ -1075,7 +1269,10 @@ mod tests {
             }
         }
         let pre = img.clone();
-        apply_fill_style(&mut img, crate::types::FillStyle::Pixelate { block_size: 8 });
+        apply_fill_style(
+            &mut img,
+            crate::types::FillStyle::Pixelate { block_size: 8 },
+        );
         // Sanity: corner blocks sampled at (0,0), (8,0), (16,0), etc.
         // Top-left block (0..8, 0..8) all same colour as pre[(0,0)].
         let expected_tl = pre.get_pixel(0, 0).0;
@@ -1098,13 +1295,15 @@ mod tests {
     fn birefnet_sigmoid_stretch_reaches_full_range() {
         // logit_lo → sigmoid ≈ 0.35, logit_hi → sigmoid ≈ 0.65
         let logit_lo: f32 = -0.6190; // sigmoid(-0.619) ≈ 0.35
-        let logit_hi: f32 = 0.6190;  // sigmoid( 0.619) ≈ 0.65
+        let logit_hi: f32 = 0.6190; // sigmoid( 0.619) ≈ 0.65
 
         let h = 4usize;
         let w = 4usize;
         let n = h * w;
         // Alternate low/high logits so the tensor has both extremes.
-        let data: Vec<f32> = (0..n).map(|i| if i % 2 == 0 { logit_lo } else { logit_hi }).collect();
+        let data: Vec<f32> = (0..n)
+            .map(|i| if i % 2 == 0 { logit_lo } else { logit_hi })
+            .collect();
         let raw = ndarray::Array4::from_shape_vec((1, 1, h, w), data).unwrap();
 
         let original = solid_rgb(w as u32, h as u32);
@@ -1118,7 +1317,13 @@ mod tests {
 
         // After stretch the extremes must reach near-0 and near-255.
         // Allow a 2-gray tolerance for f32 rounding through the pipeline.
-        assert!(got_min <= 2,  "min after sigmoid stretch should be ≈0, got {got_min}");
-        assert!(got_max >= 253, "max after sigmoid stretch should be ≈255, got {got_max}");
+        assert!(
+            got_min <= 2,
+            "min after sigmoid stretch should be ≈0, got {got_min}"
+        );
+        assert!(
+            got_max >= 253,
+            "max after sigmoid stretch should be ≈255, got {got_max}"
+        );
     }
 }

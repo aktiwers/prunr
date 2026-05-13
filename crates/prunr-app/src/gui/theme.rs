@@ -7,20 +7,30 @@ pub fn draw_modal_backdrop(ctx: &egui::Context, id: &str) {
     let screen_rect = ctx.content_rect();
     let layer_id = egui::LayerId::new(egui::Order::Foreground, egui::Id::new(id));
     let painter = ctx.layer_painter(layer_id);
-    painter.rect_filled(screen_rect, 0.0,
-        Color32::from_rgba_unmultiplied(0, 0, 0, 100));
+    painter.rect_filled(
+        screen_rect,
+        0.0,
+        Color32::from_rgba_unmultiplied(0, 0, 0, 100),
+    );
 }
 
 /// Check if the user clicked the backdrop (outside the modal window).
 /// Must be called AFTER the window is rendered so we know the window rect.
-pub fn backdrop_clicked(ctx: &egui::Context, window_response: &Option<egui::InnerResponse<Option<()>>>) -> bool {
+pub fn backdrop_clicked(
+    ctx: &egui::Context,
+    window_response: &Option<egui::InnerResponse<Option<()>>>,
+) -> bool {
     let clicked = ctx.input(|i| i.pointer.primary_clicked());
-    if !clicked { return false; }
+    if !clicked {
+        return false;
+    }
 
     // If any popup is open (color picker, combo box), don't close
     #[allow(deprecated)]
     let popup_open = ctx.memory(|m| m.any_popup_open());
-    if popup_open { return false; }
+    if popup_open {
+        return false;
+    }
 
     // Check click position is outside the window rect
     let click_pos = ctx.input(|i| i.pointer.interact_pos());
@@ -30,7 +40,6 @@ pub fn backdrop_clicked(ctx: &egui::Context, window_response: &Option<egui::Inne
         false
     }
 }
-
 
 /// Standard frame for modal overlay windows.
 pub fn overlay_frame() -> egui::Frame {
@@ -79,9 +88,7 @@ pub fn standard_modal_window(
 ) -> bool {
     let opened_at_key = egui::Id::new(id).with("opened_at");
     let now = ctx.input(|i| i.time);
-    let opened_at = ctx.memory_mut(|m| {
-        *m.data.get_temp_mut_or_insert_with(opened_at_key, || now)
-    });
+    let opened_at = ctx.memory_mut(|m| *m.data.get_temp_mut_or_insert_with(opened_at_key, || now));
     let debounce_passed = (now - opened_at) >= MODAL_BACKDROP_DEBOUNCE_SECS;
 
     let backdrop_id = format!("{id}_backdrop");
@@ -249,7 +256,6 @@ pub const SIDEBAR_ITEM_SELECTED: Color32 = Color32::from_rgb(0x32, 0x28, 0x36);
 pub const SIDEBAR_SELECTED_BORDER: Color32 = ACCENT;
 pub const STATUS_ICON_PENDING: Color32 = Color32::from_rgb(0x88, 0x88, 0x88);
 pub const INSERTION_LINE: Color32 = ACCENT;
-
 
 // === Phase 5: Zoom ===
 pub const ZOOM_MIN: f32 = 0.10;

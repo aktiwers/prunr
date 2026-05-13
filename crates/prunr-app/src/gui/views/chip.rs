@@ -12,8 +12,8 @@
 //! All chip functions return `bool` indicating whether the value changed,
 //! so callers can invalidate textures or kick off live preview.
 
-use egui::{Color32, RichText, Response, Ui};
 use egui::widgets::color_picker::{color_picker_color32, Alpha};
+use egui::{Color32, Response, RichText, Ui};
 use egui_material_icons::icons::*;
 
 use crate::gui::theme;
@@ -70,7 +70,9 @@ pub(super) fn chip_button(ui: &mut Ui, icon: &str, value: &str, accent: bool) ->
     };
     let text = format!("{icon}  {value}");
     let btn = egui::Button::new(
-        RichText::new(text).color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY),
+        RichText::new(text)
+            .color(theme::TEXT_PRIMARY)
+            .size(theme::FONT_SIZE_BODY),
     )
     .fill(fill)
     .stroke(stroke)
@@ -99,7 +101,8 @@ pub(super) fn paint_falloff_circle(
     use prunr_core::math::smoothstep;
     let inner = outer * hardness.clamp(0.0, 1.0);
     if inner >= 0.5 {
-        let solid = egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), base_alpha);
+        let solid =
+            egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), base_alpha);
         painter.circle_filled(center, inner, solid);
     }
     let span = (outer - inner).max(0.001);
@@ -108,8 +111,11 @@ pub(super) fn paint_falloff_circle(
         let dist = inner + span * t;
         let intensity = if span < 0.5 { 0.0 } else { smoothstep(1.0 - t) };
         let a = (base_alpha as f32 * intensity) as u8;
-        if a == 0 { continue; }
-        let stroke_color = egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), a);
+        if a == 0 {
+            continue;
+        }
+        let stroke_color =
+            egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), a);
         let stroke = egui::Stroke::new(span / steps as f32 * 1.4, stroke_color);
         painter.circle_stroke(center, dist, stroke);
     }
@@ -129,7 +135,8 @@ pub(super) fn paint_falloff_square(
     use prunr_core::math::smoothstep;
     let inner = outer * hardness.clamp(0.0, 1.0);
     if inner >= 0.5 {
-        let solid = egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), base_alpha);
+        let solid =
+            egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), base_alpha);
         painter.rect_filled(
             egui::Rect::from_center_size(center, egui::vec2(inner * 2.0, inner * 2.0)),
             0.0,
@@ -142,8 +149,11 @@ pub(super) fn paint_falloff_square(
         let dist = inner + span * t;
         let intensity = if span < 0.5 { 0.0 } else { smoothstep(1.0 - t) };
         let a = (base_alpha as f32 * intensity) as u8;
-        if a == 0 { continue; }
-        let stroke_color = egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), a);
+        if a == 0 {
+            continue;
+        }
+        let stroke_color =
+            egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), a);
         let stroke = egui::Stroke::new(span / steps as f32 * 1.4, stroke_color);
         painter.rect_stroke(
             egui::Rect::from_center_size(center, egui::vec2(dist * 2.0, dist * 2.0)),
@@ -164,10 +174,18 @@ pub(super) fn paint_falloff_square(
 pub(super) fn icon_toggle_button(ui: &mut Ui, icon: &str, active: bool) -> Response {
     let btn = egui::Button::new(
         RichText::new(icon)
-            .color(if active { theme::TEXT_PRIMARY } else { theme::TEXT_SECONDARY })
+            .color(if active {
+                theme::TEXT_PRIMARY
+            } else {
+                theme::TEXT_SECONDARY
+            })
             .size(theme::ICON_SIZE_SMALL),
     )
-    .fill(if active { theme::ACCENT } else { theme::BG_SECONDARY })
+    .fill(if active {
+        theme::ACCENT
+    } else {
+        theme::BG_SECONDARY
+    })
     .corner_radius(theme::BUTTON_ROUNDING)
     .min_size(egui::vec2(theme::CHIP_HEIGHT, theme::CHIP_HEIGHT));
     ui.add(btn)
@@ -222,12 +240,7 @@ use super::hint;
 /// Uses the legacy `popup_below_widget` API; egui's newer `Popup::` builder
 /// is a future cleanup. Deprecation is isolated to this helper.
 #[allow(deprecated)]
-pub(super) fn popup_for(
-    ui: &mut Ui,
-    id: egui::Id,
-    resp: &Response,
-    body: impl FnOnce(&mut Ui),
-) {
+pub(super) fn popup_for(ui: &mut Ui, id: egui::Id, resp: &Response, body: impl FnOnce(&mut Ui)) {
     if resp.clicked() {
         ui.memory_mut(|m| m.toggle_popup(id));
     }
@@ -260,11 +273,19 @@ pub fn chip_f32(
     let pop_id = egui::Id::new(("chip_f32", meta.id_salt));
     let accent = (*value - default_value).abs() > f32::EPSILON;
     let display = format(*value);
-    let resp = chip_tooltip(chip_button(ui, meta.icon, &display, accent), meta.label, meta.tooltip);
+    let resp = chip_tooltip(
+        chip_button(ui, meta.icon, &display, accent),
+        meta.label,
+        meta.tooltip,
+    );
 
     let mut out = ChipChange::default();
     popup_for(ui, pop_id, &resp, |ui| {
-        ui.label(RichText::new(meta.label).strong().color(theme::TEXT_PRIMARY));
+        ui.label(
+            RichText::new(meta.label)
+                .strong()
+                .color(theme::TEXT_PRIMARY),
+        );
         ui.add_space(theme::SPACE_XS);
         // Honour the caller-supplied formatter for the slider's embedded
         // numeric display — the chip's button face already uses `format`,
@@ -277,8 +298,12 @@ pub fn chip_f32(
                 .custom_formatter(|v, _| format_fn(v as f32))
                 .logarithmic(logarithmic),
         );
-        if slider.changed() { out.changed = true; }
-        if slider_settled(&slider) { out.commit = true; }
+        if slider.changed() {
+            out.changed = true;
+        }
+        if slider_settled(&slider) {
+            out.commit = true;
+        }
         hint(ui, meta.description);
         ui.add_space(theme::SPACE_XS);
         if reset_button(ui, "Reset to factory default") {
@@ -302,15 +327,27 @@ pub fn chip_u32(
     let pop_id = egui::Id::new(("chip_u32", meta.id_salt));
     let accent = *value != default_value;
     let display = format(*value);
-    let resp = chip_tooltip(chip_button(ui, meta.icon, &display, accent), meta.label, meta.tooltip);
+    let resp = chip_tooltip(
+        chip_button(ui, meta.icon, &display, accent),
+        meta.label,
+        meta.tooltip,
+    );
 
     let mut out = ChipChange::default();
     popup_for(ui, pop_id, &resp, |ui| {
-        ui.label(RichText::new(meta.label).strong().color(theme::TEXT_PRIMARY));
+        ui.label(
+            RichText::new(meta.label)
+                .strong()
+                .color(theme::TEXT_PRIMARY),
+        );
         ui.add_space(theme::SPACE_XS);
         let slider = ui.add(egui::Slider::new(value, range).show_value(true));
-        if slider.changed() { out.changed = true; }
-        if slider_settled(&slider) { out.commit = true; }
+        if slider.changed() {
+            out.changed = true;
+        }
+        if slider_settled(&slider) {
+            out.commit = true;
+        }
         hint(ui, meta.description);
         ui.add_space(theme::SPACE_XS);
         if reset_button(ui, "Reset to factory default") {
@@ -338,17 +375,29 @@ pub fn chip_option_f32(
         Some(v) => format(*v),
         None => off_label.to_string(),
     };
-    let resp = chip_tooltip(chip_button(ui, meta.icon, &display, accent), meta.label, meta.tooltip);
+    let resp = chip_tooltip(
+        chip_button(ui, meta.icon, &display, accent),
+        meta.label,
+        meta.tooltip,
+    );
 
     let mut out = ChipChange::default();
     popup_for(ui, pop_id, &resp, |ui| {
-        ui.label(RichText::new(meta.label).strong().color(theme::TEXT_PRIMARY));
+        ui.label(
+            RichText::new(meta.label)
+                .strong()
+                .color(theme::TEXT_PRIMARY),
+        );
         ui.add_space(theme::SPACE_XS);
         let mut enabled = value.is_some();
         if ui.checkbox(&mut enabled, "Enabled").changed() {
             out.changed = true;
             out.commit = true; // toggle settles immediately
-            *value = if enabled { Some(default_when_enabled) } else { None };
+            *value = if enabled {
+                Some(default_when_enabled)
+            } else {
+                None
+            };
         }
         if let Some(v) = value.as_mut() {
             ui.add_space(theme::SPACE_XS);
@@ -357,8 +406,12 @@ pub fn chip_option_f32(
                     .show_value(true)
                     .fixed_decimals(3),
             );
-            if slider.changed() { out.changed = true; }
-            if slider_settled(&slider) { out.commit = true; }
+            if slider.changed() {
+                out.changed = true;
+            }
+            if slider_settled(&slider) {
+                out.commit = true;
+            }
         }
         hint(ui, meta.description);
         ui.add_space(theme::SPACE_XS);
@@ -375,11 +428,19 @@ pub fn chip_option_f32(
 pub fn chip_bool(ui: &mut Ui, meta: ChipMeta<'_>, value: &mut bool) -> ChipChange {
     let pop_id = egui::Id::new(("chip_bool", meta.id_salt));
     let display = if *value { "On" } else { "Off" };
-    let resp = chip_tooltip(chip_button(ui, meta.icon, display, *value), meta.label, meta.tooltip);
+    let resp = chip_tooltip(
+        chip_button(ui, meta.icon, display, *value),
+        meta.label,
+        meta.tooltip,
+    );
 
     let mut out = ChipChange::default();
     popup_for(ui, pop_id, &resp, |ui| {
-        ui.label(RichText::new(meta.label).strong().color(theme::TEXT_PRIMARY));
+        ui.label(
+            RichText::new(meta.label)
+                .strong()
+                .color(theme::TEXT_PRIMARY),
+        );
         ui.add_space(theme::SPACE_XS);
         if ui.checkbox(value, meta.label).changed() {
             out.changed = true;
@@ -401,11 +462,19 @@ pub fn chip_bool_with_extras(
 ) -> ChipChange {
     let pop_id = egui::Id::new(("chip_bool_with_extras", meta.id_salt));
     let display = if *value { "On" } else { "Off" };
-    let resp = chip_tooltip(chip_button(ui, meta.icon, display, *value), meta.label, meta.tooltip);
+    let resp = chip_tooltip(
+        chip_button(ui, meta.icon, display, *value),
+        meta.label,
+        meta.tooltip,
+    );
 
     let mut out = ChipChange::default();
     popup_for(ui, pop_id, &resp, |ui| {
-        ui.label(RichText::new(meta.label).strong().color(theme::TEXT_PRIMARY));
+        ui.label(
+            RichText::new(meta.label)
+                .strong()
+                .color(theme::TEXT_PRIMARY),
+        );
         ui.add_space(theme::SPACE_XS);
         if ui.checkbox(value, meta.label).changed() {
             out.changed = true;
@@ -416,8 +485,12 @@ pub fn chip_bool_with_extras(
             ui.separator();
             ui.add_space(theme::SPACE_SM);
             let inner = extras(ui);
-            if inner.changed { out.changed = true; }
-            if inner.commit  { out.commit  = true; }
+            if inner.changed {
+                out.changed = true;
+            }
+            if inner.commit {
+                out.commit = true;
+            }
         }
         hint(ui, meta.description);
     });
@@ -434,15 +507,23 @@ pub fn slider_row_f32(
     format: impl Fn(f32) -> String,
 ) -> ChipChange {
     let mut out = ChipChange::default();
-    ui.label(RichText::new(label).color(theme::TEXT_SECONDARY).size(theme::FONT_SIZE_MONO));
+    ui.label(
+        RichText::new(label)
+            .color(theme::TEXT_SECONDARY)
+            .size(theme::FONT_SIZE_MONO),
+    );
     let slider = ui.add(
         egui::Slider::new(value, range)
             .show_value(true)
             .custom_formatter(move |v, _| format(v as f32))
             .logarithmic(logarithmic),
     );
-    if slider.changed() { out.changed = true; }
-    if slider_settled(&slider) { out.commit = true; }
+    if slider.changed() {
+        out.changed = true;
+    }
+    if slider_settled(&slider) {
+        out.commit = true;
+    }
     out
 }
 
@@ -454,10 +535,18 @@ pub fn slider_row_u32(
     range: std::ops::RangeInclusive<u32>,
 ) -> ChipChange {
     let mut out = ChipChange::default();
-    ui.label(RichText::new(label).color(theme::TEXT_SECONDARY).size(theme::FONT_SIZE_MONO));
+    ui.label(
+        RichText::new(label)
+            .color(theme::TEXT_SECONDARY)
+            .size(theme::FONT_SIZE_MONO),
+    );
     let slider = ui.add(egui::Slider::new(value, range).show_value(true));
-    if slider.changed() { out.changed = true; }
-    if slider_settled(&slider) { out.commit = true; }
+    if slider.changed() {
+        out.changed = true;
+    }
+    if slider_settled(&slider) {
+        out.commit = true;
+    }
     out
 }
 
@@ -483,17 +572,29 @@ pub fn chip_option_rgba(
         Some(_) => "Set".to_string(),
         None => off_label.to_string(),
     };
-    let resp = chip_tooltip(chip_button(ui, meta.icon, &display, accent), meta.label, meta.tooltip);
+    let resp = chip_tooltip(
+        chip_button(ui, meta.icon, &display, accent),
+        meta.label,
+        meta.tooltip,
+    );
 
     let mut out = ChipChange::default();
     popup_for(ui, pop_id, &resp, |ui| {
-        ui.label(RichText::new(meta.label).strong().color(theme::TEXT_PRIMARY));
+        ui.label(
+            RichText::new(meta.label)
+                .strong()
+                .color(theme::TEXT_PRIMARY),
+        );
         ui.add_space(theme::SPACE_XS);
         let mut enabled = value.is_some();
         if ui.checkbox(&mut enabled, "Enabled").changed() {
             out.changed = true;
             out.commit = true;
-            *value = if enabled { Some(default_when_enabled) } else { None };
+            *value = if enabled {
+                Some(default_when_enabled)
+            } else {
+                None
+            };
         }
         if let Some(rgba) = value.as_mut() {
             ui.add_space(theme::SPACE_XS);
@@ -529,17 +630,29 @@ pub fn chip_option_rgb(
         Some(_) => "Set".to_string(),
         None => "Original".to_string(),
     };
-    let resp = chip_tooltip(chip_button(ui, meta.icon, &display, accent), meta.label, meta.tooltip);
+    let resp = chip_tooltip(
+        chip_button(ui, meta.icon, &display, accent),
+        meta.label,
+        meta.tooltip,
+    );
 
     let mut out = ChipChange::default();
     popup_for(ui, pop_id, &resp, |ui| {
-        ui.label(RichText::new(meta.label).strong().color(theme::TEXT_PRIMARY));
+        ui.label(
+            RichText::new(meta.label)
+                .strong()
+                .color(theme::TEXT_PRIMARY),
+        );
         ui.add_space(theme::SPACE_XS);
         let mut enabled = value.is_some();
         if ui.checkbox(&mut enabled, "Override").changed() {
             out.changed = true;
             out.commit = true;
-            *value = if enabled { Some(default_when_enabled) } else { None };
+            *value = if enabled {
+                Some(default_when_enabled)
+            } else {
+                None
+            };
         }
         if let Some(rgb) = value.as_mut() {
             ui.add_space(theme::SPACE_XS);

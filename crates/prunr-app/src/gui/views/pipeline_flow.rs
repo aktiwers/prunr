@@ -53,7 +53,9 @@ const STAGES: &[Stage] = &[
 /// Returns true if the modal should close.
 pub fn render(ctx: &egui::Context) -> bool {
     theme::standard_modal_window(
-        ctx, "pipeline_flow", "Mask Pipeline",
+        ctx,
+        "pipeline_flow",
+        "Mask Pipeline",
         [MODAL_WIDTH, MODAL_HEIGHT],
         |ui| {
             ui.vertical(|ui| {
@@ -69,10 +71,13 @@ pub fn render(ctx: &egui::Context) -> bool {
                 }
 
                 arrow(ui);
-                endpoint_label(ui, &format!(
-                    "Final mask  {}  applied as alpha",
-                    ICON_ARROW_FORWARD.codepoint,
-                ));
+                endpoint_label(
+                    ui,
+                    &format!(
+                        "Final mask  {}  applied as alpha",
+                        ICON_ARROW_FORWARD.codepoint,
+                    ),
+                );
 
                 ui.add_space(theme::SPACE_MD);
                 ui.separator();
