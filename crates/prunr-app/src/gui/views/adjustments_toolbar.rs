@@ -104,6 +104,10 @@ pub struct ToolbarChange {
     /// auto-trigger Process — user must click Process explicitly (same
     /// policy as model changes and Tier-1 knobs).
     pub upscale_scale_changed: bool,
+    /// Set when the toolbar switches TO an upscale model from a non-upscale
+    /// one. The application checks `item.has_result()` before promoting this
+    /// to `chain_mode = true` — the view does not have access to per-item state.
+    pub auto_chain_on: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -129,6 +133,7 @@ impl Default for ToolbarChange {
             pick_bg_image: false,
             clear_bg_image: false,
             upscale_scale_changed: false,
+            auto_chain_on: false,
         }
     }
 }
@@ -1434,6 +1439,9 @@ pub(super) fn render_model_dropdown(
         }
         change.model_changed = true;
         aggregate_bool(true, StaticKnob::Model, change);
+        if app_settings.model.is_upscale() && !prev_model.is_upscale() {
+            change.auto_chain_on = true;
+        }
     }
 }
 
@@ -1449,5 +1457,6 @@ mod tests {
         assert!(c.touched.is_empty());
         assert!(!c.render_repaint);
         assert!(c.line_mode_from.is_none());
+        assert!(!c.auto_chain_on);
     }
 }
