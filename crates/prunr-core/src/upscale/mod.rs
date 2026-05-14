@@ -5,4 +5,4 @@ mod tiling;
 mod alpha;
 
 pub use alpha::upscale_alpha_lanczos3;
-pub use tiling::{plan_upscale_tiles, upscale_tiled, TilePlacement, TilingConfig};
+pub use tiling::{plan_upscale_tiles, upscale_tiled, TilingConfig, UpscaleTilePlacement};

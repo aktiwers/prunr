@@ -194,8 +194,9 @@ pub enum RequiredTier {
 
 /// Determine what processing tier is needed when changing from old to new recipe.
 ///
-/// Ordered by cost (cheapest changes bubble up first):
-/// Skip < CompositeOnly < UpscaleRerun < MaskRerun < EdgeRerun < AddEdgeInference < FullPipeline.
+/// Cost ordering (cheapest → most expensive), matching the `ordered()` table
+/// in `knob_catalog.rs` and the top-down "most-expensive-wins" checks below:
+/// Skip < CompositeOnly < UpscaleRerun < EdgeRerun < MaskRerun < AddEdgeInference < FullPipeline.
 pub fn resolve_tier(old: &ProcessingRecipe, new: &ProcessingRecipe) -> RequiredTier {
     if old == new {
         return RequiredTier::Skip;

@@ -93,8 +93,8 @@ impl ModelId {
             ModelId::SdV15InpaintFp16 => "sd_v15_inpaint_fp16",
             ModelId::SdV15LcmInpaintFp16 => "sd_v15_lcm_inpaint_fp16",
             ModelId::TaesdFp16 => "taesd_fp16",
-            ModelId::RealEsrganX4Plus => "RealEsrganX4Plus",
-            ModelId::Nomos8kSchatL => "Nomos8kSchatL",
+            ModelId::RealEsrganX4Plus => "real_esrgan_x4plus",
+            ModelId::Nomos8kSchatL => "nomos8k_schat_l",
         }
     }
 }
@@ -590,7 +590,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         source: ModelSource::OnDemand {
             filename: "RealESRGAN_x4plus.onnx",
             url: "https://github.com/aktiwers/prunr/releases/download/upscale-v1.0.0/RealESRGAN_x4plus.onnx",
-            sha256: "0000000000000000000000000000000000000000000000000000000000000000",
+            sha256: "PLACEHOLDER_REALESRGAN_V1_FILL_BEFORE_RELEASE",
             size_mb: 67,
             license: LicenseInfo {
                 author: "Xintao Wang",
@@ -615,7 +615,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         source: ModelSource::OnDemand {
             filename: "4xNomos8kSCHAT-L.onnx",
             url: "https://github.com/aktiwers/prunr/releases/download/upscale-v1.0.0/4xNomos8kSCHAT-L.onnx",
-            sha256: "0000000000000000000000000000000000000000000000000000000000000000",
+            sha256: "PLACEHOLDER_NOMOS8K_V1_FILL_BEFORE_RELEASE",
             size_mb: 160,
             license: LicenseInfo {
                 author: "Phhofm / Philip Hofmann",
