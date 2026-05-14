@@ -475,8 +475,7 @@ pub enum SettingsModel {
     /// multi-part bundle. Generative — produces plausible content
     /// rather than smooth fills.
     SdInpaint,
-    /// Real-ESRGAN x4plus upscaler. General-purpose 4× super-resolution;
-    /// dispatches through `upscale_rgba`, not the seg/inpaint pipeline.
+    /// Real-ESRGAN x4plus upscaler. General-purpose 4× super-resolution.
     RealEsrganUpscale,
     /// 4xNomos8kSCHAT-L HAT-L upscaler (fp16). Photo-tuned; higher quality
     /// than Real-ESRGAN, slower on CPU EP.
@@ -518,16 +517,14 @@ impl SettingsModel {
         matches!(self, Self::Inpaint | Self::BigInpaint | Self::MiganInpaint | Self::SdInpaint)
     }
 
-    /// True for any super-resolution upscale mode. These variants dispatch
-    /// through `upscale_rgba` rather than the seg/inpaint pipeline.
+    /// True for any super-resolution upscale mode. Dispatch routes through
+    /// `upscale_rgba`; these variants are not seg/inpaint capacity-priced.
     pub fn is_upscale(self) -> bool {
         matches!(self, Self::RealEsrganUpscale | Self::Nomos8kUpscale)
     }
 
-    /// Convert to `ModelKind`, or `None` for non-seg variants.
-    ///
-    /// Upscale variants return `None` — they route through `upscale_rgba`
-    /// and do not participate in the seg/inpaint memory cap model.
+    /// Convert to `ModelKind`, or `None` for variants outside the
+    /// seg memory-cap model (Inpaint and Upscale both return `None`).
     pub fn to_model_kind(self) -> Option<ModelKind> {
         match self {
             Self::Silueta => Some(ModelKind::Silueta),
