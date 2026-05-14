@@ -1189,8 +1189,9 @@ impl PrunrApp {
             item.apply_cache_impact(impact);
 
             match tier {
-                RequiredTier::Skip | RequiredTier::CompositeOnly => {
-                    // CompositeOnly (bg_color) is handled at display/export time;
+                RequiredTier::Skip | RequiredTier::CompositeOnly | RequiredTier::UpscaleRerun => {
+                    // CompositeOnly (bg_color) and UpscaleRerun are handled at
+                    // display/export time or by the upscale dispatcher (later plan);
                     // sync the stored composite so status reads stay accurate.
                     if let Some(ref mut recipe) = item.applied_recipe {
                         recipe.composite = current_recipe.composite.clone();
@@ -3188,9 +3189,11 @@ impl PrunrApp {
                 Some(old) => {
                     let new = item.settings.current_recipe(model, self.settings.chain_mode);
                     match prunr_core::resolve_tier(old, &new) {
-                        RequiredTier::Skip | RequiredTier::CompositeOnly => {
-                            knob_catalog::DispatchKind::None
-                        }
+                        // Upscale is gated out of live preview; UpscaleRerun
+                        // defers to the dedicated upscale dispatcher (later plan).
+                        RequiredTier::Skip
+                        | RequiredTier::CompositeOnly
+                        | RequiredTier::UpscaleRerun => knob_catalog::DispatchKind::None,
                         RequiredTier::EdgeRerun => knob_catalog::DispatchKind::LivePreviewEdge,
                         RequiredTier::MaskRerun => knob_catalog::DispatchKind::LivePreviewMask,
                         RequiredTier::AddEdgeInference => {

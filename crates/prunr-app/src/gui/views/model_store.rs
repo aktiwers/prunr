@@ -437,6 +437,7 @@ mod tests {
                 sha256: "0".repeat(64).leak(),
                 size_mb: 100,
                 license: prunr_models::LicenseInfo {
+                    author: "test",
                     license: "Apache-2.0",
                     license_url: "https://example.test/lic",
                     source_url: "https://example.test/src",
@@ -446,6 +447,9 @@ mod tests {
             gpu,
             incompatible_eps: &[],
             working_set_mb: 100,
+            tile_size_multiple: None,
+            recommended_tile: None,
+            attribution_required: false,
         }
     }
 
@@ -460,6 +464,9 @@ mod tests {
             gpu: prunr_models::GpuRequirement::None,
             incompatible_eps: &[],
             working_set_mb: 100,
+            tile_size_multiple: None,
+            recommended_tile: None,
+            attribution_required: false,
         }
     }
 
