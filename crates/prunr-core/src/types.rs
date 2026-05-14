@@ -44,6 +44,10 @@ impl From<ModelKind> for prunr_models::ModelId {
 }
 
 impl From<prunr_models::ModelId> for ModelKind {
+    // Callers must restrict the input to variants that have a ModelKind
+    // (the seg + upscale families). The seg/upscale dispatch paths
+    // already filter by category before reaching this conversion;
+    // inpaint/SD/TAESD/edge models never round-trip through ModelKind.
     fn from(id: prunr_models::ModelId) -> Self {
         match id {
             prunr_models::ModelId::Silueta => ModelKind::Silueta,

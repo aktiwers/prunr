@@ -21,11 +21,10 @@ use crate::types::ModelKind;
 ///
 /// Window-attention transformers (HAT, Swin) use Level2 because Level3
 /// bakes the first tile's input shape into the graph during session init.
-/// A second tile with different dimensions then hits an irrecoverable
-/// shape-mismatch. Empirically confirmed against 4xNomos8kSCHAT-L
-/// (PRECONDITIONS.md P-3): Level3 panics with
-/// "Attempting to get index by a name which does not exist:
-/// InsertedPrecisionFreeCast_..."; Level2 succeeds across all tile sizes.
+/// A subsequent tile with different dimensions then hits an irrecoverable
+/// shape-mismatch (observed against 4xNomos8kSCHAT-L: Level3 panics with
+/// `Attempting to get index by a name which does not exist:
+/// InsertedPrecisionFreeCast_…`; Level2 succeeds across all tile sizes).
 fn pick_optimization_level(descriptor: &prunr_models::ModelDescriptor) -> GraphOptimizationLevel {
     if descriptor.tile_size_multiple.is_some() {
         GraphOptimizationLevel::Level2
@@ -34,13 +33,15 @@ fn pick_optimization_level(descriptor: &prunr_models::ModelDescriptor) -> GraphO
     }
 }
 
-/// Tensor input name for an upscale model. Confirmed from PRECONDITIONS.md:
-/// RealESRGAN exports as `"data"`, Nomos8kSCHAT-L (Phhofm) exports as `"input"`.
+/// Tensor input name for an upscale model. RealESRGAN exports as `"data"`;
+/// HAT-family (Phhofm Nomos8kSCHAT-L) exports as `"input"`. New upscale
+/// variants must extend this match — the `unreachable!` fires loud if a
+/// non-upscale `ModelId` is routed here.
 fn upscale_input_name(id: prunr_models::ModelId) -> &'static str {
     match id {
         prunr_models::ModelId::RealEsrganX4Plus => "data",
         prunr_models::ModelId::Nomos8kSchatL => "input",
-        _ => "input",
+        other => unreachable!("upscale_input_name called with non-upscale ModelId: {other:?}"),
     }
 }
 
@@ -48,13 +49,26 @@ fn upscale_input_name(id: prunr_models::ModelId) -> &'static str {
 /// identified by `model_id`.
 ///
 /// Behavior:
-///   - scale = 4: runs the model once, returns the 4x output.
-///   - scale = 2: runs the model at 4x then downscales with
-///     Lanczos3 to halve dimensions.
+///   - scale = 4: runs the model once, returns the 4× output.
+///   - scale = 2: runs the model at 4× then downscales with Lanczos3 to
+///     halve dimensions. This path holds the full 4× RGBA buffer briefly
+///     before the downscale; for a 4K input that is ~768 MB of transient
+///     scratch on top of the tiling accumulators below. The cost is
+///     accepted for v1 — see `30-DEFERRED.md` for the native 2× option.
 ///   - Alpha is upscaled independently via Lanczos3.
-///   - Window-attention models (descriptor.tile_size_multiple.is_some())
-///     are run at GraphOptimizationLevel::Level2 to avoid first-tile
+///   - Window-attention models (`descriptor.tile_size_multiple.is_some()`)
+///     are run at `GraphOptimizationLevel::Level2` to avoid first-tile
 ///     shape baking; other models run at Level3.
+///
+/// Peak working-set RAM (additive to the `upscale_tiled` accumulators
+/// documented in `tiling.rs`):
+///   - Tile input scratch: `3 × padded_w × padded_h × 4 bytes` (f32 CHW).
+///     ~3 MB at 512-tile.
+///   - Tile output scratch: `3 × out_w × out_h bytes` (u8 HWC).
+///     ~12 MB at 512→2048 4× tile.
+///   - scale=2 only: the full 4× RgbaImage (~16× input bytes) lives
+///     until the Lanczos3 downscale completes.
+///   - ONNX session: model-dependent (see `ModelDescriptor.working_set_mb`).
 pub fn upscale_rgba<F>(
     input: &RgbaImage,
     model_id: prunr_models::ModelId,
@@ -91,17 +105,14 @@ where
     let input_name = upscale_input_name(model_id);
 
     let run_tile = |rgb_tile: &RgbImage, padded_w: u32, padded_h: u32| -> Result<RgbImage, CoreError> {
+        const INV_255: f32 = 1.0 / 255.0;
         let pixel_count = (padded_w * padded_h) as usize;
         let mut input_data = vec![0.0_f32; 3 * pixel_count];
         for (i, p) in rgb_tile.pixels().enumerate() {
             let [r, g, b] = p.0;
-            let h_idx = (i as u32) / padded_w;
-            let w_idx = (i as u32) % padded_w;
-            let plane = pixel_count;
-            let pos = (h_idx * padded_w + w_idx) as usize;
-            input_data[pos] = r as f32 / 255.0;
-            input_data[plane + pos] = g as f32 / 255.0;
-            input_data[2 * plane + pos] = b as f32 / 255.0;
+            input_data[i] = r as f32 * INV_255;
+            input_data[pixel_count + i] = g as f32 * INV_255;
+            input_data[2 * pixel_count + i] = b as f32 * INV_255;
         }
 
         let arr = ndarray::Array4::from_shape_vec(
@@ -117,10 +128,11 @@ where
         let out_w = padded_w * 4;
         let plane = (out_w * out_h) as usize;
 
-        // Run inference and extract the output as owned data inside the
-        // session lock. `SessionOutputs` borrows from the session, so we
-        // must convert to `Vec<f32>` before the lock guard drops.
-        let output_vec: Vec<f32> = engine.with_session(|session| {
+        // Pack CHW f32 → HWC u8 directly from the ORT-borrowed slice while
+        // still inside the session lock. Avoids one full output-tensor copy
+        // (~50 MB per tile at 512→2048 4×).
+        let mut packed = vec![0u8; 3 * plane];
+        engine.with_session(|session| {
             let outputs = session
                 .run(inputs![input_name => &tensor])
                 .map_err(|e| CoreError::Inference(format!("upscale: inference failed: {e}")))?;
@@ -131,34 +143,32 @@ where
                 .into_dimensionality::<ndarray::Ix4>()
                 .map_err(|e| CoreError::Inference(format!("upscale: output reshape: {e}")))?;
 
-            // Convert to owned Vec inside the closure so the borrow from
-            // `outputs` ends before the session lock releases.
-            Ok(arr.into_owned().into_raw_vec_and_offset().0)
+            let slice = arr.as_slice().ok_or_else(|| {
+                CoreError::Inference("upscale: output tensor not contiguous".into())
+            })?;
+
+            if slice.len() < 3 * plane {
+                return Err(CoreError::Inference(format!(
+                    "upscale: output tensor too small: {} < {}",
+                    slice.len(),
+                    3 * plane
+                )));
+            }
+
+            for idx in 0..plane {
+                let r = (slice[idx] * 255.0).clamp(0.0, 255.0) as u8;
+                let g = (slice[plane + idx] * 255.0).clamp(0.0, 255.0) as u8;
+                let b = (slice[2 * plane + idx] * 255.0).clamp(0.0, 255.0) as u8;
+                packed[3 * idx] = r;
+                packed[3 * idx + 1] = g;
+                packed[3 * idx + 2] = b;
+            }
+            Ok(())
         })?;
 
-        // Hoist slice extraction outside per-pixel loop. `output_vec` is
-        // already owned so as_slice is always Some.
-        let view_slice = &output_vec;
-
-        if view_slice.len() < 3 * plane {
-            return Err(CoreError::Inference(format!(
-                "upscale: output tensor too small: {} < {}",
-                view_slice.len(),
-                3 * plane
-            )));
-        }
-
-        let mut out_img = RgbImage::new(out_w, out_h);
-        for y in 0..out_h {
-            for x in 0..out_w {
-                let idx = (y * out_w + x) as usize;
-                let r = (view_slice[idx] * 255.0).clamp(0.0, 255.0) as u8;
-                let g = (view_slice[plane + idx] * 255.0).clamp(0.0, 255.0) as u8;
-                let b = (view_slice[2 * plane + idx] * 255.0).clamp(0.0, 255.0) as u8;
-                out_img.put_pixel(x, y, image::Rgb([r, g, b]));
-            }
-        }
-        Ok(out_img)
+        RgbImage::from_raw(out_w, out_h, packed).ok_or_else(|| {
+            CoreError::Inference("upscale: from_raw failed (packed length mismatch)".into())
+        })
     };
 
     let cfg = TilingConfig { tile_size, tile_multiple, overlap };
@@ -170,18 +180,12 @@ where
         let half_w = scale4_result.width() / 2;
         let half_h = scale4_result.height() / 2;
 
-        // Downscale RGB channels from 4x to 2x.
         let rgb4 = image::DynamicImage::ImageRgba8(scale4_result);
         let rgb_half = crate::formats::resize_rgb_lanczos3(&rgb4, half_w, half_h);
 
-        // Upscale alpha from input to 2x directly (skips the intermediate 4x).
-        let alpha_half = crate::formats::resize_gray_lanczos3(
-            &image::GrayImage::from_fn(input.width(), input.height(), |x, y| {
-                image::Luma([input.get_pixel(x, y).0[3]])
-            }),
-            half_w,
-            half_h,
-        );
+        // Resize alpha from the original input — skips the intermediate 4×
+        // pass that the RGB path goes through.
+        let alpha_half = upscale_alpha_lanczos3(input, half_w, half_h);
 
         let mut out = RgbaImage::new(half_w, half_h);
         for (x, y, p) in out.enumerate_pixels_mut() {
@@ -200,9 +204,8 @@ mod tests {
     use super::*;
 
     /// `pick_optimization_level` gates Level2 on `tile_size_multiple.is_some()`.
-    /// This pins the invariant empirically confirmed in PRECONDITIONS.md P-3:
-    /// Level3 panics with shape-mismatch on HAT-family models when the second
-    /// tile has different dimensions than the first.
+    /// Without this, HAT-family models panic on the second tile in the same
+    /// session due to Level3 shape baking during graph optimisation.
     #[test]
     fn pick_optimization_level_uses_level2_for_hat_family() {
         let nomos = prunr_models::REGISTRY
