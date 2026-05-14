@@ -1,7 +1,8 @@
-//! Settings modal — three tabs:
+//! Settings modal — four tabs:
 //! - **General**: hardware + performance knobs that change *what runs*
 //! - **Behavior**: toggles that change *how editing feels*
 //! - **Hotkeys**: read-only shortcut reference (rebinding TBD)
+//! - **Model credits**: installed-model attribution (CC-BY compliance)
 //!
 //! Per-image knobs (gamma, threshold, line mode, …) live on the persistent
 //! adjustments toolbar (rows 2 + 3), not here.
@@ -19,6 +20,7 @@ pub enum SettingsTab {
     General,
     Behavior,
     Hotkeys,
+    ModelCredits,
 }
 
 impl SettingsTab {
@@ -27,9 +29,10 @@ impl SettingsTab {
             Self::General => "General",
             Self::Behavior => "Behavior",
             Self::Hotkeys => "Hotkeys",
+            Self::ModelCredits => "Model credits",
         }
     }
-    const ALL: [SettingsTab; 3] = [Self::General, Self::Behavior, Self::Hotkeys];
+    const ALL: [SettingsTab; 4] = [Self::General, Self::Behavior, Self::Hotkeys, Self::ModelCredits];
 
     /// Parse a label string into a tab. Used by PRUNR_OPEN_TAB.
     pub fn from_label(s: &str) -> Option<Self> {
@@ -105,6 +108,7 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) {
                         }
                         SettingsTab::Behavior => { render_tab_behavior(ui, &mut app.settings); None }
                         SettingsTab::Hotkeys => { render_tab_hotkeys(ui); None }
+                        SettingsTab::ModelCredits => { render_tab_model_credits(ui); None }
                     }
                 })
                 .inner;
@@ -451,4 +455,164 @@ fn render_tab_hotkeys(ui: &mut egui::Ui) {
     ui.add_space(theme::SPACE_MD);
     ui.label(RichText::new("Rebinding will land in a future release.")
         .color(theme::TEXT_HINT).size(theme::FONT_SIZE_MONO));
+}
+
+// ── Model Credits tab ────────────────────────────────────────────────────────
+
+/// Sort installed model descriptors for the Model Credits tab.
+/// Primary: `attribution_required == true` first (CC-BY at top for
+/// legal-compliance scannability). Secondary: alphabetical by `display_name`.
+fn sort_for_model_credits<'a>(
+    entries: &[&'a prunr_models::ModelDescriptor],
+) -> Vec<&'a prunr_models::ModelDescriptor> {
+    let mut out = entries.to_vec();
+    out.sort_by(|a, b| {
+        b.attribution_required
+            .cmp(&a.attribution_required)
+            .then_with(|| a.display_name.cmp(b.display_name))
+    });
+    out
+}
+
+fn render_tab_model_credits(ui: &mut egui::Ui) {
+    ui.label(
+        RichText::new("Model Credits")
+            .size(theme::FONT_SIZE_HEADING)
+            .strong()
+            .color(theme::TEXT_PRIMARY),
+    );
+    ui.add_space(theme::SPACE_SM);
+    super::hint(ui, "All installed models, their authors, and licenses.");
+    ui.add_space(theme::SPACE_SM);
+
+    let installed_raw: Vec<&prunr_models::ModelDescriptor> = prunr_models::REGISTRY
+        .iter()
+        .filter(|d| prunr_models::is_available(d.id))
+        .collect();
+    let installed = sort_for_model_credits(&installed_raw);
+
+    if installed.is_empty() {
+        ui.vertical_centered(|ui| {
+            ui.add_space(theme::SPACE_LG);
+            ui.label(
+                RichText::new("No models installed yet.")
+                    .color(theme::TEXT_SECONDARY),
+            );
+            super::hint(ui, "Visit the Model Store to download models.");
+        });
+        return;
+    }
+
+    egui::ScrollArea::vertical().show(ui, |ui| {
+        for descriptor in installed {
+            render_model_credit_row(ui, descriptor);
+            ui.separator();
+        }
+    });
+}
+
+fn render_model_credit_row(ui: &mut egui::Ui, descriptor: &prunr_models::ModelDescriptor) {
+    let license_info = match descriptor.source {
+        prunr_models::ModelSource::OnDemand { license, .. } => Some(license),
+        prunr_models::ModelSource::MultiPartOnDemand { license, .. } => Some(license),
+        prunr_models::ModelSource::Bundled => None,
+    };
+    let (author, license_name, source_url) = match license_info {
+        Some(info) => (info.author, info.license, info.source_url),
+        None => ("Bundled with Prunr", "Project license", ""),
+    };
+
+    ui.add_space(theme::SPACE_SM);
+    ui.horizontal(|ui| {
+        ui.label(
+            RichText::new(descriptor.display_name)
+                .size(theme::FONT_SIZE_BODY)
+                .strong()
+                .color(theme::TEXT_PRIMARY),
+        );
+        if descriptor.attribution_required {
+            ui.label(
+                RichText::new(" CC-BY")
+                    .size(theme::FONT_SIZE_MONO)
+                    .color(theme::ACCENT),
+            );
+        }
+    });
+    ui.add_space(theme::SPACE_XS);
+    ui.label(
+        RichText::new(format!("Author: {author}"))
+            .size(theme::FONT_SIZE_MONO)
+            .color(theme::TEXT_SECONDARY),
+    );
+    ui.horizontal(|ui| {
+        ui.label(
+            RichText::new(format!("License: {license_name}  "))
+                .size(theme::FONT_SIZE_MONO)
+                .color(theme::TEXT_SECONDARY),
+        );
+        if !source_url.is_empty() {
+            ui.hyperlink_to("↗ source", source_url);
+        }
+    });
+}
+
+#[cfg(test)]
+mod model_credits_tests {
+    use super::sort_for_model_credits;
+    use prunr_models::{ModelCategory, ModelDescriptor, ModelId, ModelSource, GpuRequirement};
+
+    fn make_descriptor(
+        id: ModelId,
+        display_name: &'static str,
+        attribution_required: bool,
+    ) -> ModelDescriptor {
+        ModelDescriptor {
+            id,
+            display_name,
+            description: "",
+            category: ModelCategory::Segmentation,
+            source: ModelSource::Bundled,
+            version: "1.0.0",
+            gpu: GpuRequirement::None,
+            incompatible_eps: &[],
+            working_set_mb: 100,
+            tile_size_multiple: None,
+            recommended_tile: None,
+            attribution_required,
+        }
+    }
+
+    #[test]
+    fn sort_puts_cc_by_first_then_alphabetical() {
+        let z_ccby = make_descriptor(ModelId::Silueta, "Z model", true);
+        let a_bsd = make_descriptor(ModelId::U2net, "A model", false);
+        let b_bsd = make_descriptor(ModelId::BiRefNetLite, "B model", false);
+
+        let entries = vec![&a_bsd, &b_bsd, &z_ccby];
+        let sorted = sort_for_model_credits(&entries);
+
+        assert_eq!(sorted[0].display_name, "Z model", "CC-BY must come first");
+        assert_eq!(sorted[1].display_name, "A model", "alphabetical within non-CC-BY");
+        assert_eq!(sorted[2].display_name, "B model", "alphabetical within non-CC-BY");
+    }
+
+    #[test]
+    fn sort_multiple_cc_by_sorted_alphabetically() {
+        let z_ccby = make_descriptor(ModelId::Silueta, "Z CC model", true);
+        let a_ccby = make_descriptor(ModelId::U2net, "A CC model", true);
+        let m_bsd = make_descriptor(ModelId::BiRefNetLite, "M BSD model", false);
+
+        let entries = vec![&m_bsd, &z_ccby, &a_ccby];
+        let sorted = sort_for_model_credits(&entries);
+
+        assert_eq!(sorted[0].display_name, "A CC model");
+        assert_eq!(sorted[1].display_name, "Z CC model");
+        assert_eq!(sorted[2].display_name, "M BSD model");
+    }
+
+    #[test]
+    fn sort_empty_input_returns_empty() {
+        let sorted = sort_for_model_credits(&[]);
+        assert!(sorted.is_empty());
+    }
 }
