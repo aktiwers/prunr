@@ -280,8 +280,8 @@ impl Processor {
     }
 
     /// `Some((done, total))` while an upscale dispatch is in flight;
-    /// `None` otherwise. Drives the inline progress bar and the
-    /// status bar tile counter — both read the same source.
+    /// `None` otherwise. Stub — the wiring lives in `dispatch_upscale`,
+    /// not yet implemented in this build.
     pub fn upscale_tile_progress(&self) -> Option<(u32, u32)> {
         None
     }
