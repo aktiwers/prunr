@@ -3,12 +3,12 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: unknown
-last_updated: "2026-05-14T21:55:15.572Z"
+last_updated: "2026-05-14T22:19:54.675Z"
 progress:
   total_phases: 12
   completed_phases: 7
   total_plans: 53
-  completed_plans: 37
+  completed_plans: 39
 ---
 
 # Project State
@@ -22,7 +22,7 @@ See: `.planning/PROJECT.md` (updated 2026-04-06)
 ## Current Position
 
 Phase: 30 (upscale-tab-v1) — EXECUTING
-Plan: 6 of 12 (30-01, 30-03, 30-05, 30-08, 30-10 complete)
+Plan: 8 of 12 (30-01, 30-03, 30-05, 30-06, 30-07, 30-08, 30-10 complete)
 
 ## Phase Status (ground truth, derived from git log)
 
@@ -48,7 +48,7 @@ Plan: 6 of 12 (30-01, 30-03, 30-05, 30-08, 30-10 complete)
 | 19 | OpenVINO for Intel | ✅ DONE | All 11 tasks shipped. DEFERRED-1/2/3/5/7/8 closed; -4 (CUDA option drift) and -6 (Windows DXGI) hardware-blocked. |
 | 28 | SD VAE Orthogonality | 🚧 IN PROGRESS (4/5+ plans) | 28-01 dead field deletion (fa06975), 28-02 dispatch fix (97d75c0), 28-03 LCM bundle gate (cb2cbf7, b26bbd6), 28-04 TAESD checkbox + status line + dispatch wiring (107ac15, 8f797ec, 6a64f7b). 28-05+ pending. |
 | 29 | Refine and Wire Presets to All Models | ✅ DONE | 5/5 plans (2026-05-14). Per-model preset bundles, v1→v2 auto-migration, merge-save, top-right ↻ + brush Reset + model/scheduler auto-swap. See `.planning/phases/29-refine-and-wire-presets-to-all-models/29-PHASE-SUMMARY.md`. |
-| 30 | Upscale Tab v1 | 🚧 IN PROGRESS (5/12) | 30-01 prunr-models data model extension (e0fa8a2). 30-03 ItemSettings upscale fields + preset tests (b2ccdc1, 56de3b9). 30-05 OrtEngine Level2/Level3 gate + upscale_rgba entry point (f558345, cc17a73). 30-08 Upscale filter chip in Model Store (3e9926f). 30-10 Model Credits tab (b2ccdc1). |
+| 30 | Upscale Tab v1 | 🚧 IN PROGRESS (7/12) | 30-01 prunr-models data model extension (e0fa8a2). 30-03 ItemSettings upscale fields + preset tests (b2ccdc1, 56de3b9). 30-05 OrtEngine Level2/Level3 gate + upscale_rgba entry point (f558345, cc17a73). 30-06 REGISTRY real SHAs + SettingsModel upscale variants + smoke test (96db8e0, ad44195, 38b1636). 30-08 Upscale filter chip in Model Store (3e9926f). 30-10 Model Credits tab (b2ccdc1). |
 
 Phase 9 was absorbed into Phase 13.
 
@@ -93,3 +93,5 @@ Captured in commit messages and `.planning/phases/12-*/`, `13-*/`, `14-*/`, `28-
 - 2026-05-14 — Phase 30-10 completed: Model Credits tab in Settings modal (b2ccdc1). SettingsTab::ModelCredits + render_tab_model_credits; CC-BY badge for attribution-required models; sort order: CC-BY first then alphabetical. Fallback text used for Bundled sources (no LicenseInfo on ModelSource::Bundled).
 - 2026-05-14 — Phase 30-03 completed: ItemSettings.upscale_model + upscale_scale added with serde defaults; current_recipe() wired; Option<ModelId> niche optimization confirmed (1 byte); preset round-trip test validates Phase 29 dynamic-field serde delivers forward-compat with zero schema changes.
 - 2026-05-14 — Phase 30-05 completed: OrtEngine::new_with_optimization_level constructor; builder_with_base parameterized on level; GraphOptimizationLevel re-exported from engine module; upscale_rgba public entry point gates Level2 (HAT/Swin tile_size_multiple.is_some()) vs Level3 (ESRGAN); pick_optimization_level pure fn under unit test; with_session pattern used to extract Vec<f32> inside session lock (SessionOutputs lifetime resolved).
+- 2026-05-14 — Phase 30-06 completed: Real SHA256/URL/size wired into REGISTRY (Real-ESRGAN fb070c21 64 MB, Nomos8k 919dff28 155 MB); SettingsModel extended with RealEsrganUpscale + Nomos8kUpscale variants + is_upscale predicate; smoke test suite in crates/prunr-core/tests/upscale_smoke.rs (skip-safe, 4 tests). working_set_mb calibration deferred to first local run with models installed.
+- 2026-05-14 — Phase 30-07 completed: Upscale toolbar row (Surfaces 1-3): scale chip (4x/2x via chip_button+popup_for), inline progress bar (stub, wired by 30-11), is_upscale branch in adjustments_toolbar::render, Row 3 suppressed in upscale mode. source_dims chain-mode-aware (243c3ab, c5dbaa1, a975778).
