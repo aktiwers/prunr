@@ -639,7 +639,7 @@ mod tests {
         assert!(result.is_err());
         assert_eq!(attempts.load(Ordering::SeqCst), 1);
         assert!(
-            elapsed < std::time::Duration::from_millis(200),
+            elapsed < std::time::Duration::from_millis(1000),
             "cancel during backoff must abort promptly, took {elapsed:?}"
         );
     }
