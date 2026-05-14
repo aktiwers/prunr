@@ -589,9 +589,9 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         category: ModelCategory::Upscale,
         source: ModelSource::OnDemand {
             filename: "RealESRGAN_x4plus.onnx",
-            url: "https://github.com/aktiwers/prunr/releases/download/upscale-v1.0.0/RealESRGAN_x4plus.onnx",
-            sha256: "PLACEHOLDER_REALESRGAN_V1_FILL_BEFORE_RELEASE",
-            size_mb: 67,
+            url: "https://github.com/aktiwers/prunr/releases/download/models-v1/RealESRGAN_x4plus.onnx",
+            sha256: "fb070c21d1e90102859d52328586a8738ebd4b2b076fe611ef42ba4f58076431",
+            size_mb: 64,
             license: LicenseInfo {
                 author: "Xintao Wang",
                 license: "BSD-3-Clause",
@@ -610,13 +610,13 @@ pub const REGISTRY: &[ModelDescriptor] = &[
     ModelDescriptor {
         id: ModelId::Nomos8kSchatL,
         display_name: "4xNomos8kSCHAT-L",
-        description: "Photo-tuned HAT-L super-resolution. Higher quality, slower than Real-ESRGAN.",
+        description: "Photo-tuned HAT-L super-resolution (fp16). Higher quality, slower than Real-ESRGAN; slow on CPU EP.",
         category: ModelCategory::Upscale,
         source: ModelSource::OnDemand {
             filename: "4xNomos8kSCHAT-L.onnx",
-            url: "https://github.com/aktiwers/prunr/releases/download/upscale-v1.0.0/4xNomos8kSCHAT-L.onnx",
-            sha256: "PLACEHOLDER_NOMOS8K_V1_FILL_BEFORE_RELEASE",
-            size_mb: 160,
+            url: "https://github.com/aktiwers/prunr/releases/download/models-v1/4xNomos8kSCHAT-L.onnx",
+            sha256: "919dff28836ff10fef2d5462e5b82c951211abf24f05196b0a6e2c24f20ed1de",
+            size_mb: 155,
             license: LicenseInfo {
                 author: "Phhofm / Philip Hofmann",
                 license: "CC-BY-4.0",
