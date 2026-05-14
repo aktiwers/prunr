@@ -3018,6 +3018,7 @@ impl PrunrApp {
                 // without a clone + writeback round-trip.
                 let settings_ref = &mut self.settings;
                 let brush_state_ref = &mut self.brush_state;
+                let processor_ref = &self.processor;
                 let item = &mut self.batch.items[idx];
                 // Inpaint mode operates on the source image directly — no
                 // cached seg tensor required. For seg-removal models the
@@ -3028,6 +3029,16 @@ impl PrunrApp {
                     .and_then(|bg| bg.source_path.as_deref())
                     .and_then(|p| p.file_name())
                     .and_then(|n| n.to_str());
+                // Upscale row shows projected output size. When chain mode is
+                // on and a result exists, the upscale input is the result image,
+                // not the source — reflect that in the dimension chip.
+                let source_dims = if settings_ref.chain_mode {
+                    item.result_rgba.as_ref()
+                        .map(|r| r.dimensions())
+                        .unwrap_or(item.dimensions)
+                } else {
+                    item.dimensions
+                };
                 toolbar_change = adjustments_toolbar::render(
                     ui,
                     &mut item.settings,
@@ -3038,6 +3049,8 @@ impl PrunrApp {
                     is_processing,
                     has_bg_image,
                     bg_image_label,
+                    source_dims,
+                    processor_ref,
                 );
             });
         if toolbar_change.reset_brush_requested {
