@@ -108,6 +108,8 @@ pub fn model_name(model: SettingsModel) -> &'static str {
         SettingsModel::BigInpaint => "Eraser (Big-LaMa)",
         SettingsModel::MiganInpaint => "Eraser (MI-GAN)",
         SettingsModel::SdInpaint => "Eraser (SD 1.5)",
+        SettingsModel::RealEsrganUpscale => "Upscale (Real-ESRGAN)",
+        SettingsModel::Nomos8kUpscale => "Upscale (Nomos8k)",
     }
 }
 
@@ -122,6 +124,8 @@ pub fn model_label(model: SettingsModel, short: bool) -> String {
         SettingsModel::BigInpaint => (ICON_BRUSH.codepoint, "Eraser (Big-LaMa)", "sharper fills", "~199 MB"),
         SettingsModel::MiganInpaint => (ICON_BRUSH.codepoint, "Eraser (MI-GAN)", "compact GAN", "~26 MB"),
         SettingsModel::SdInpaint => (ICON_BRUSH.codepoint, "Eraser (SD 1.5)", "generative", "~2 GB"),
+        SettingsModel::RealEsrganUpscale => (ICON_ARROW_UPWARD.codepoint, "Upscale (Real-ESRGAN)", "4× upscale", "~64 MB"),
+        SettingsModel::Nomos8kUpscale => (ICON_ARROW_UPWARD.codepoint, "Upscale (Nomos8k)", "4× upscale fp16", "~155 MB"),
     };
     if short {
         format!("{icon}  {name}")

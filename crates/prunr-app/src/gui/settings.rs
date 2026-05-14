@@ -475,11 +475,17 @@ pub enum SettingsModel {
     /// multi-part bundle. Generative — produces plausible content
     /// rather than smooth fills.
     SdInpaint,
+    /// Real-ESRGAN x4plus upscaler. General-purpose 4× super-resolution;
+    /// dispatches through `upscale_rgba`, not the seg/inpaint pipeline.
+    RealEsrganUpscale,
+    /// 4xNomos8kSCHAT-L HAT-L upscaler (fp16). Photo-tuned; higher quality
+    /// than Real-ESRGAN, slower on CPU EP.
+    Nomos8kUpscale,
 }
 
 impl SettingsModel {
     /// All variants in display order — source of truth for the model dropdown.
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 10] = [
         Self::Silueta,
         Self::U2net,
         Self::BiRefNetLite,
@@ -488,6 +494,8 @@ impl SettingsModel {
         Self::BigInpaint,
         Self::MiganInpaint,
         Self::SdInpaint,
+        Self::RealEsrganUpscale,
+        Self::Nomos8kUpscale,
     ];
 
     /// Parse a Debug-style name ("Silueta", "U2net", "BiRefNetLite", …) into
@@ -510,13 +518,28 @@ impl SettingsModel {
         matches!(self, Self::Inpaint | Self::BigInpaint | Self::MiganInpaint | Self::SdInpaint)
     }
 
+    /// True for any super-resolution upscale mode. These variants dispatch
+    /// through `upscale_rgba` rather than the seg/inpaint pipeline.
+    pub fn is_upscale(self) -> bool {
+        matches!(self, Self::RealEsrganUpscale | Self::Nomos8kUpscale)
+    }
+
     /// Convert to `ModelKind`, or `None` for non-seg variants.
+    ///
+    /// Upscale variants return `None` — they route through `upscale_rgba`
+    /// and do not participate in the seg/inpaint memory cap model.
     pub fn to_model_kind(self) -> Option<ModelKind> {
         match self {
             Self::Silueta => Some(ModelKind::Silueta),
             Self::U2net => Some(ModelKind::U2net),
             Self::BiRefNetLite => Some(ModelKind::BiRefNetLite),
-            Self::None | Self::Inpaint | Self::BigInpaint | Self::MiganInpaint | Self::SdInpaint => None,
+            Self::None
+            | Self::Inpaint
+            | Self::BigInpaint
+            | Self::MiganInpaint
+            | Self::SdInpaint
+            | Self::RealEsrganUpscale
+            | Self::Nomos8kUpscale => None,
         }
     }
 
@@ -530,6 +553,8 @@ impl SettingsModel {
             Self::BigInpaint => Some(prunr_models::ModelId::BigLaMa),
             Self::MiganInpaint => Some(prunr_models::ModelId::Migan),
             Self::SdInpaint => Some(prunr_models::ModelId::SdV15InpaintFp16),
+            Self::RealEsrganUpscale => Some(prunr_models::ModelId::RealEsrganX4Plus),
+            Self::Nomos8kUpscale => Some(prunr_models::ModelId::Nomos8kSchatL),
             Self::None => None,
         }
     }
@@ -541,11 +566,8 @@ impl From<ModelKind> for SettingsModel {
             ModelKind::Silueta => SettingsModel::Silueta,
             ModelKind::U2net => SettingsModel::U2net,
             ModelKind::BiRefNetLite => SettingsModel::BiRefNetLite,
-            // Upscale models dispatch through upscale_rgba, not the seg/inpaint
-            // pipeline; they are never converted to a SettingsModel variant.
-            ModelKind::RealEsrganX4Plus | ModelKind::Nomos8kSchatL => {
-                unreachable!("upscale ModelKind variants have no SettingsModel equivalent")
-            }
+            ModelKind::RealEsrganX4Plus => SettingsModel::RealEsrganUpscale,
+            ModelKind::Nomos8kSchatL => SettingsModel::Nomos8kUpscale,
         }
     }
 }
@@ -981,5 +1003,39 @@ mod tests {
                 "{m:?} cannot be both inpaint and seg",
             );
         }
+    }
+
+    #[test]
+    fn is_upscale_classifies_every_variant() {
+        for m in SettingsModel::ALL {
+            let expected = matches!(
+                m,
+                SettingsModel::RealEsrganUpscale | SettingsModel::Nomos8kUpscale,
+            );
+            assert_eq!(m.is_upscale(), expected, "{m:?}");
+        }
+    }
+
+    #[test]
+    fn upscale_inpaint_seg_mutually_exclusive() {
+        for m in SettingsModel::ALL {
+            let count = [m.is_upscale(), m.is_inpaint(), m.uses_segmentation()]
+                .iter()
+                .filter(|&&b| b)
+                .count();
+            assert!(count <= 1, "{m:?} must belong to at most one category");
+        }
+    }
+
+    #[test]
+    fn to_model_id_returns_some_for_upscale_variants() {
+        assert_eq!(
+            SettingsModel::RealEsrganUpscale.to_model_id(),
+            Some(prunr_models::ModelId::RealEsrganX4Plus),
+        );
+        assert_eq!(
+            SettingsModel::Nomos8kUpscale.to_model_id(),
+            Some(prunr_models::ModelId::Nomos8kSchatL),
+        );
     }
 }
