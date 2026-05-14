@@ -1,13 +1,19 @@
 //! Tile-based upscale with overlap-blend.
 //!
-//! Peak working-set RAM (per dispatch, scale=4, fp32 RGB output buffer +
-//! weight buffer + per-tile working scratch). Numbers are for the OUTPUT
-//! buffers; the input image and the model session are separate.
+//! Peak working-set RAM (per dispatch, scale=4, fp32 RGB accumulator +
+//! weight buffer + per-tile transient scratch + alpha companion buffers).
+//! Numbers are for the OUTPUT buffers; the input image and the model
+//! session are separate.
 //!
-//! | Input        | Output buf (RGB f32) | Weight buf (f32) | Total       |
-//! | 1024 × 1024  | 192 MB               | 64 MB            | ~256 MB     |
-//! | 2048 × 2048  | 768 MB               | 256 MB           | ~1024 MB    |
-//! | 4096 × 4096  | 3072 MB              | 1024 MB          | ~4 GB (!)   |
+//! | Input        | RGB accum f32 | Weight buf f32 | Per-tile transient¹ | Alpha src+dst | Total      |
+//! |--------------|---------------|----------------|---------------------|---------------|------------|
+//! | 1024 × 1024  | 192 MB        | 64 MB          | ~10 MB              | 5 MB          | ~272 MB    |
+//! | 2048 × 2048  | 768 MB        | 256 MB         | ~10 MB              | 20 MB         | ~1054 MB   |
+//! | 4096 × 4096  | 3072 MB       | 1024 MB        | ~10 MB              | 80 MB         | ~4186 MB   |
+//!
+//! ¹ Per-tile transient = padded RGB tile + inferred RGB output (lives only
+//! during one `run_tile` call, dropped before the next tile). The blend
+//! reads `inferred` directly with an offset (no separate trimmed copy).
 //!
 //! 4K → 16K upscale is the limit on a 16 GB machine. The Processor's
 //! working_set_mb admission gate refuses to dispatch when free RAM is
@@ -35,15 +41,15 @@ pub struct TilingConfig {
 }
 
 /// Location and dimensions of one tile within the input image.
+///
+/// Carries the model-padded dimensions (`padded_w` / `padded_h`) alongside
+/// the input-space dimensions; `inpaint::TilePlacement` does not need
+/// padding so it is a distinct, narrower type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TilePlacement {
-    /// Top-left X in the input image (before scale).
+pub struct UpscaleTilePlacement {
     pub x: u32,
-    /// Top-left Y in the input image (before scale).
     pub y: u32,
-    /// Tile width in input pixels (before pad-to-multiple).
     pub w: u32,
-    /// Tile height in input pixels (before pad-to-multiple).
     pub h: u32,
     /// Padded width sent to the model (>= w, multiple of tile_multiple).
     pub padded_w: u32,
@@ -61,7 +67,7 @@ pub fn plan_upscale_tiles(
     width: u32,
     height: u32,
     cfg: TilingConfig,
-) -> Vec<TilePlacement> {
+) -> Vec<UpscaleTilePlacement> {
     let TilingConfig { tile_size, tile_multiple, overlap } = cfg;
     let step = tile_size.saturating_sub(overlap).max(1);
 
@@ -97,7 +103,7 @@ pub fn plan_upscale_tiles(
                 ),
                 _ => (w, h),
             };
-            tiles.push(TilePlacement { x, y, w, h, padded_w, padded_h });
+            tiles.push(UpscaleTilePlacement { x, y, w, h, padded_w, padded_h });
         }
     }
     tiles
@@ -108,8 +114,8 @@ pub fn plan_upscale_tiles(
 ///
 /// `run_tile(rgb_tile, padded_w, padded_h)` must return an RGB image of
 /// dimensions `scale * padded_w × scale * padded_h`. The caller pads
-/// bottom-right before the call; `upscale_tiled` trims the result back to
-/// `scale * tile.w × scale * tile.h` before blending.
+/// bottom-right before the call; `upscale_tiled` reads the unpadded region
+/// of the result directly during blend (no separate trim allocation).
 ///
 /// Alpha is upscaled independently via Lanczos3 and merged into the final
 /// `RgbaImage`.
@@ -143,31 +149,27 @@ where
     let mut rgb_accum: Vec<f32> = vec![0.0; pixel_count * 3];
     let mut weight_buf: Vec<f32> = vec![0.0; pixel_count];
 
+    // Sequential: ort sessions are Mutex-guarded internally and nested
+    // rayon inside the subprocess worker path has caused deadlocks
+    // historically (see `apply_background_color` for the same rule).
     for (tile_idx, tile) in tiles.iter().enumerate() {
         if cancel.as_ref().is_some_and(|c| c.load(Ordering::Acquire)) {
             return Err(CoreError::Cancelled);
         }
 
-        // Extract the RGB tile from the input image.
         let rgb_tile = extract_rgb_tile(input, tile);
-
-        // Pad to tile_multiple if required.
         let padded_tile = if tile.padded_w != tile.w || tile.padded_h != tile.h {
             pad_rgb_tile(&rgb_tile, tile.padded_w, tile.padded_h)
         } else {
             rgb_tile
         };
-
-        // Run inference: produces scale*padded_w × scale*padded_h.
         let inferred = run_tile(&padded_tile, tile.padded_w, tile.padded_h)?;
 
-        // Trim to scale*tile.w × scale*tile.h (discard the padded region).
-        let trimmed = trim_rgb(&inferred, tile.w * scale, tile.h * scale);
-
-        // Blend into the accumulator with smoothstep weights.
-        // The taper only applies on sides where an adjacent tile exists —
-        // image-boundary sides always get weight 1.0 so corner pixels are
-        // never zeroed by the smoothstep taper.
+        // Blend the unpadded `tile.w * scale × tile.h * scale` region of
+        // `inferred` into the accumulator with smoothstep weights. The taper
+        // only applies on sides where an adjacent tile exists — image-
+        // boundary sides always get weight 1.0 so corner pixels are never
+        // zeroed by the taper.
         let out_tile_x = tile.x * scale;
         let out_tile_y = tile.y * scale;
         let out_tile_w = tile.w * scale;
@@ -188,7 +190,7 @@ where
                 let out_y = out_tile_y + py;
                 let out_idx = (out_y as usize) * (out_w as usize) + (out_x as usize);
 
-                let tile_pixel = trimmed.get_pixel(px, py).0;
+                let tile_pixel = inferred.get_pixel(px, py).0;
                 rgb_accum[out_idx * 3] += tile_pixel[0] as f32 * w;
                 rgb_accum[out_idx * 3 + 1] += tile_pixel[1] as f32 * w;
                 rgb_accum[out_idx * 3 + 2] += tile_pixel[2] as f32 * w;
@@ -199,14 +201,14 @@ where
         on_tile_done(tile_idx as u32 + 1, total);
     }
 
-    // Upscale alpha independently via Lanczos3.
     let alpha = upscale_alpha_lanczos3(input, out_w, out_h);
 
-    // Normalize and assemble the final RgbaImage.
     let mut out_img = RgbaImage::new(out_w, out_h);
     for py in 0..out_h {
         for px in 0..out_w {
             let idx = (py as usize) * (out_w as usize) + (px as usize);
+            // Guard against zero weight on unreachable pixels — f32 division
+            // by 0 would otherwise produce inf and saturate the channel.
             let inv_w = 1.0 / weight_buf[idx].max(1e-6);
             let r = (rgb_accum[idx * 3] * inv_w).clamp(0.0, 255.0) as u8;
             let g = (rgb_accum[idx * 3 + 1] * inv_w).clamp(0.0, 255.0) as u8;
@@ -219,25 +221,15 @@ where
     Ok(out_img)
 }
 
-fn extract_rgb_tile(input: &RgbaImage, tile: &TilePlacement) -> RgbImage {
-    RgbImage::from_fn(tile.w, tile.h, |x, y| {
-        let p = input.get_pixel(tile.x + x, tile.y + y).0;
-        image::Rgb([p[0], p[1], p[2]])
-    })
+fn extract_rgb_tile(input: &RgbaImage, tile: &UpscaleTilePlacement) -> RgbImage {
+    let cropped = image::imageops::crop_imm(input, tile.x, tile.y, tile.w, tile.h).to_image();
+    image::DynamicImage::ImageRgba8(cropped).to_rgb8()
 }
 
 fn pad_rgb_tile(src: &RgbImage, padded_w: u32, padded_h: u32) -> RgbImage {
     let mut dst = RgbImage::new(padded_w, padded_h);
-    for y in 0..src.height() {
-        for x in 0..src.width() {
-            dst.put_pixel(x, y, *src.get_pixel(x, y));
-        }
-    }
+    image::imageops::overlay(&mut dst, src, 0, 0);
     dst
-}
-
-fn trim_rgb(src: &RgbImage, w: u32, h: u32) -> RgbImage {
-    RgbImage::from_fn(w, h, |x, y| *src.get_pixel(x, y))
 }
 
 /// Smoothstep weight for a single axis, respecting whether adjacent tiles
@@ -257,7 +249,7 @@ fn blend_weight_sided(x: u32, edge: u32, size: u32, has_low: bool, has_high: boo
         1.0
     };
     let t = t_low.min(t_high).clamp(0.0, 1.0);
-    t * t * (3.0 - 2.0 * t)
+    crate::math::smoothstep(t)
 }
 
 #[cfg(test)]
@@ -311,7 +303,6 @@ mod tests {
     /// 1000×800 (250*4 × 200*4) must produce exactly the expected dimensions.
     #[test]
     fn pad_to_multiple_roundtrip_preserves_dimensions() {
-        // A single tile covering 250×200 with pad-to-16 enabled.
         let tiles = plan_upscale_tiles(250, 200, TilingConfig { tile_size: 256, tile_multiple: Some(16), overlap: 0 });
         assert_eq!(tiles.len(), 1, "expected single tile");
         let tile = tiles[0];
