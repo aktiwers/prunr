@@ -100,6 +100,10 @@ pub struct ToolbarChange {
     /// User picked a non-image bg kind (color or effect) while a bg image
     /// was active — drop the image so the chosen kind takes over.
     pub clear_bg_image: bool,
+    /// User picked a different upscale scale factor (4x ↔ 2x). Does not
+    /// auto-trigger Process — user must click Process explicitly (same
+    /// policy as model changes and Tier-1 knobs).
+    pub upscale_scale_changed: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -124,6 +128,7 @@ impl Default for ToolbarChange {
             open_model_store: None,
             pick_bg_image: false,
             clear_bg_image: false,
+            upscale_scale_changed: false,
         }
     }
 }
@@ -158,6 +163,11 @@ impl Defaults {
 /// `app_settings` exposes model + preset map (Row 2 hosts both dropdowns).
 /// `applied_preset` is read for the button's modified/clean icon and written
 /// in place when the user applies or saves a preset.
+///
+/// `source_dims` is `(w, h)` of the active item's effective input — the
+/// chained result dimensions when chain mode is on and a result exists,
+/// otherwise the raw source image dimensions. Used by the upscale row to
+/// display projected output size. Pass `(0, 0)` when no item is loaded.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render(
     ui: &mut Ui,
@@ -169,6 +179,8 @@ pub(crate) fn render(
     processing: bool,
     has_bg_image: bool,
     bg_image_label: Option<&str>,
+    source_dims: (u32, u32),
+    processor: &crate::gui::processor::Processor,
 ) -> ToolbarChange {
     let mut change = ToolbarChange::default();
     let defaults = Defaults::new();
@@ -197,9 +209,9 @@ pub(crate) fn render(
     let model_uses_seg = app_settings.model.uses_segmentation();
     // Snapshot pre-dropdown — the model dropdown below can mutate
     // `app_settings.model`. Branches that need post-dropdown state
-    // (e.g. the auto-flip-to-Off + brush prewarm at line 218) re-read
-    // `app_settings.model.is_inpaint()` directly.
+    // re-read the predicate directly after the dropdown call.
     let inpaint_mode = app_settings.model.is_inpaint();
+    let upscale_mode = app_settings.model.is_upscale();
     let knob_ctx = KnobContext {
         model_uses_seg,
         model_is_none: matches!(app_settings.model, SettingsModel::None),
@@ -210,156 +222,171 @@ pub(crate) fn render(
     let fill_style_active = knob_catalog::knob_enabled(KnobRequirement::SubjectPresent, knob_ctx);
     let bg_active = knob_catalog::knob_enabled(KnobRequirement::TransparencyProduced, knob_ctx);
 
-    ui.horizontal(|ui| {
-        render_model_dropdown(ui, app_settings, processing, mask_active, &mut change);
+    if upscale_mode {
+        super::upscale_toolbar::render_upscale_row(
+            ui,
+            app_settings,
+            item_settings,
+            applied_preset,
+            source_dims,
+            processing,
+            processor,
+            &mut change,
+        );
+    } else {
+        ui.horizontal(|ui| {
+            render_model_dropdown(ui, app_settings, processing, mask_active, &mut change);
 
-        // If the user just picked "No model" while line_mode was
-        // SubjectOutline, auto-flip to Off — the invalid combination (no
-        // seg but compose-over-subject) would just silently render as
-        // filter-only anyway.
-        if change.model_changed
-            && !app_settings.model.uses_segmentation()
-            && item_settings.line_mode == LineMode::SubjectOutline
-        {
-            item_settings.line_mode = LineMode::Off;
-        }
-
-        // Drop any cached LaMa sessions on model change — fires for
-        // every direction (LaMa→LaMa-FP32, LaMa→SD, Silueta→LaMa, …)
-        // so the previous backend's ~700 MB–2 GB resident set isn't
-        // pinned across the user's "I'm done with that tool" signal.
-        // Safe because in-flight strokes hold their own Arc — we only
-        // drop the cache's ref. Rebuild on next paint is 5–15 s
-        // (well below user perception threshold for an explicit
-        // model switch).
-        if change.model_changed {
-            prunr_core::inpaint::release_all_lama_sessions();
-        }
-
-        // Inpaint mode: paint is the only input — auto-enable brush so
-        // the user doesn't have to click two buttons. Settings stays
-        // pinned subtract-equivalent (mode picker is hidden in the
-        // popover anyway when Inpaint is active). Pre-warm the LaMa /
-        // MI-GAN session in the background so the first stroke doesn't
-        // pay the 5-10 s zstd-decompress + ORT-session-build cost.
-        //
-        // SD-family models are NOT prewarmed here. They run in the
-        // dedicated `inpaint_only` subprocess via `inpaint_bridge`, so
-        // building an `SdSession` in this (GUI) process loads ~9 GB
-        // into RAM that no dispatch path will ever read — the GUI
-        // never calls `process_inpaint_with` for SD models. The
-        // observable bug: GUI process bloats to 15 GB on model
-        // switch, then the subprocess loads its own 9 GB on first
-        // stroke → ~24 GB peak → memory-pressure abort on any
-        // 16 GB box.
-        if change.model_changed && app_settings.model.is_inpaint() {
-            if !brush_state.is_enabled() {
-                brush_state.toggle();
+            // If the user just picked "No model" while line_mode was
+            // SubjectOutline, auto-flip to Off — the invalid combination (no
+            // seg but compose-over-subject) would just silently render as
+            // filter-only anyway.
+            if change.model_changed
+                && !app_settings.model.uses_segmentation()
+                && item_settings.line_mode == LineMode::SubjectOutline
+            {
+                item_settings.line_mode = LineMode::Off;
             }
-            let raw_id = app_settings.model.to_model_id();
-            let in_process = matches!(
-                raw_id,
-                Some(prunr_models::ModelId::LaMaFp32)
-                    | Some(prunr_models::ModelId::BigLaMa)
-                    | Some(prunr_models::ModelId::Migan)
-            );
-            if in_process {
-                if let Some(id) = raw_id {
-                    rayon::spawn(move || {
-                        if let Err(e) = prunr_core::inpaint::prewarm(id) {
-                            tracing::warn!(?id, %e, "Inpaint prewarm failed");
+
+            if !inpaint_mode {
+                render_seg_mask_chips(
+                    ui,
+                    item_settings,
+                    &SegRowFlags {
+                        defaults: &defaults,
+                        mask_active,
+                        fill_style_active,
+                        bg_active,
+                        has_bg_image,
+                        bg_image_label,
+                    },
+                    &mut change,
+                );
+            } else if matches!(app_settings.model, crate::gui::settings::SettingsModel::SdInpaint) {
+                // SD-eraser chip cluster lives inline in Row 2 next to the
+                // model dropdown. LaMa / MI-GAN have no per-stroke knobs
+                // worth a chip row.
+                let outcome = super::eraser_chip::render(ui, app_settings);
+                if outcome.committed {
+                    change.brush_settings_committed = true;
+                }
+            }
+
+            // Right-aligned cluster: reset, preset. Right-to-left layout fills
+            // from the right edge so items stack: [..free space..] [preset] [↺].
+            ui.with_layout(
+                egui::Layout::right_to_left(egui::Align::Center),
+                |ui| {
+                    // Reset-all-knobs button visible directly (per user feedback —
+                    // was previously hidden in the kebab overflow menu).
+                    let reset_target = app_settings.default_preset.clone();
+                    let reset_tooltip = format!(
+                        "Reset all knobs to the \"{reset_target}\" preset (your default)"
+                    );
+                    let reset_resp = chip::icon_toggle_button(ui, ICON_RESTART_ALT.codepoint, false);
+                    if reset_resp.on_hover_text(reset_tooltip).clicked() {
+                        let resolved = app_settings.resolve_active_preset(None);
+                        *item_settings = resolved.item_settings;
+                        app_settings.brush = resolved.brush;
+                        *applied_preset = reset_target;
+                        change.brush_settings_committed = true;
+                        mark_preset_apply(&mut change);
+                    }
+
+                    if let Some(name) = preset_dropdown::render(ui, app_settings, item_settings, applied_preset) {
+                        *applied_preset = name;
+                        mark_preset_apply(&mut change);
+                    }
+
+                    let brush_active = brush_state.is_enabled();
+                    let brush_tooltip = if !brush_available {
+                        "Brush is available after processing — run the image through a model first."
+                    } else if brush_active {
+                        "Brush mode ON — click on canvas to add (positive) / subtract (negative) mask. Click here to disable."
+                    } else {
+                        "Toggle brush mode: paint corrections onto the mask"
+                    };
+                    ui.add_enabled_ui(brush_available, |ui| {
+                        let brush_resp = chip::icon_toggle_button(ui, ICON_BRUSH.codepoint, brush_active);
+                        if brush_resp.on_hover_text(brush_tooltip).clicked() {
+                            brush_state.toggle();
                         }
                     });
-                }
-            }
-        }
 
-        if !inpaint_mode {
-            render_seg_mask_chips(
-                ui,
-                item_settings,
-                &SegRowFlags {
-                    defaults: &defaults,
-                    mask_active,
-                    fill_style_active,
-                    bg_active,
-                    has_bg_image,
-                    bg_image_label,
+                    // Settings chip — only visible when brush is on AND has
+                    // somewhere to paint. In the right-to-left layout this
+                    // appears LEFT of the toggle.
+                    if brush_available && brush_state.is_enabled() {
+                        let outcome = super::brush_chip::render(
+                            ui, &mut app_settings.brush, app_settings.model.is_inpaint(),
+                        );
+                        if outcome.reset_brush_requested {
+                            change.reset_brush_requested = true;
+                        }
+                        if outcome.committed {
+                            change.brush_settings_committed = true;
+                        }
+                    }
                 },
-                &mut change,
             );
-        } else if matches!(app_settings.model, crate::gui::settings::SettingsModel::SdInpaint) {
-            // SD-eraser chip cluster lives inline in Row 2 next to the
-            // model dropdown. LaMa / MI-GAN have no per-stroke knobs
-            // worth a chip row.
-            let outcome = super::eraser_chip::render(ui, app_settings);
-            if outcome.committed {
-                change.brush_settings_committed = true;
-            }
+        });
+    }
+
+    // Model-change hooks: fire regardless of which row is active.
+    // Drop any cached LaMa sessions on model change — fires for
+    // every direction (LaMa→LaMa-FP32, LaMa→SD, Silueta→LaMa, …)
+    // so the previous backend's ~700 MB–2 GB resident set isn't
+    // pinned across the user's "I'm done with that tool" signal.
+    // Safe because in-flight strokes hold their own Arc — we only
+    // drop the cache's ref. Rebuild on next paint is 5–15 s
+    // (well below user perception threshold for an explicit
+    // model switch).
+    if change.model_changed {
+        prunr_core::inpaint::release_all_lama_sessions();
+    }
+
+    // Inpaint mode: paint is the only input — auto-enable brush so
+    // the user doesn't have to click two buttons. Settings stays
+    // pinned subtract-equivalent (mode picker is hidden in the
+    // popover anyway when Inpaint is active). Pre-warm the LaMa /
+    // MI-GAN session in the background so the first stroke doesn't
+    // pay the 5-10 s zstd-decompress + ORT-session-build cost.
+    //
+    // SD-family models are NOT prewarmed here. They run in the
+    // dedicated `inpaint_only` subprocess via `inpaint_bridge`, so
+    // building an `SdSession` in this (GUI) process loads ~9 GB
+    // into RAM that no dispatch path will ever read — the GUI
+    // never calls `process_inpaint_with` for SD models. The
+    // observable bug: GUI process bloats to 15 GB on model
+    // switch, then the subprocess loads its own 9 GB on first
+    // stroke → ~24 GB peak → memory-pressure abort on any
+    // 16 GB box.
+    if change.model_changed && app_settings.model.is_inpaint() {
+        if !brush_state.is_enabled() {
+            brush_state.toggle();
         }
-
-        // Right-aligned cluster: reset, preset. Right-to-left layout fills
-        // from the right edge so items stack: [..free space..] [preset] [↺].
-        ui.with_layout(
-            egui::Layout::right_to_left(egui::Align::Center),
-            |ui| {
-                // Reset-all-knobs button visible directly (per user feedback —
-                // was previously hidden in the kebab overflow menu).
-                let reset_target = app_settings.default_preset.clone();
-                let reset_tooltip = format!(
-                    "Reset all knobs to the \"{reset_target}\" preset (your default)"
-                );
-                let reset_resp = chip::icon_toggle_button(ui, ICON_RESTART_ALT.codepoint, false);
-                if reset_resp.on_hover_text(reset_tooltip).clicked() {
-                    let resolved = app_settings.resolve_active_preset(None);
-                    *item_settings = resolved.item_settings;
-                    app_settings.brush = resolved.brush;
-                    *applied_preset = reset_target;
-                    change.brush_settings_committed = true;
-                    mark_preset_apply(&mut change);
-                }
-
-                if let Some(name) = preset_dropdown::render(ui, app_settings, item_settings, applied_preset) {
-                    *applied_preset = name;
-                    mark_preset_apply(&mut change);
-                }
-
-                let brush_active = brush_state.is_enabled();
-                let brush_tooltip = if !brush_available {
-                    "Brush is available after processing — run the image through a model first."
-                } else if brush_active {
-                    "Brush mode ON — click on canvas to add (positive) / subtract (negative) mask. Click here to disable."
-                } else {
-                    "Toggle brush mode: paint corrections onto the mask"
-                };
-                ui.add_enabled_ui(brush_available, |ui| {
-                    let brush_resp = chip::icon_toggle_button(ui, ICON_BRUSH.codepoint, brush_active);
-                    if brush_resp.on_hover_text(brush_tooltip).clicked() {
-                        brush_state.toggle();
+        let raw_id = app_settings.model.to_model_id();
+        let in_process = matches!(
+            raw_id,
+            Some(prunr_models::ModelId::LaMaFp32)
+                | Some(prunr_models::ModelId::BigLaMa)
+                | Some(prunr_models::ModelId::Migan)
+        );
+        if in_process {
+            if let Some(id) = raw_id {
+                rayon::spawn(move || {
+                    if let Err(e) = prunr_core::inpaint::prewarm(id) {
+                        tracing::warn!(?id, %e, "Inpaint prewarm failed");
                     }
                 });
-
-                // Settings chip — only visible when brush is on AND has
-                // somewhere to paint. In the right-to-left layout this
-                // appears LEFT of the toggle.
-                if brush_available && brush_state.is_enabled() {
-                    let outcome = super::brush_chip::render(
-                        ui, &mut app_settings.brush, app_settings.model.is_inpaint(),
-                    );
-                    if outcome.reset_brush_requested {
-                        change.reset_brush_requested = true;
-                    }
-                    if outcome.committed {
-                        change.brush_settings_committed = true;
-                    }
-                }
-            },
-        );
-    });
+            }
+        }
+    }
 
     // ── Row 3: Lines mode selector (BG-removal models). SD-eraser
     // chips moved to Row 2; LaMa / MI-GAN have no per-stroke knobs.
-    if !inpaint_mode {
+    // Upscale mode has no line knobs — Row 3 is entirely absent.
+    if !inpaint_mode && !upscale_mode {
         render_lines_row(
             ui,
             item_settings,
@@ -1255,10 +1282,43 @@ fn render_compose_mode_chip(ui: &mut Ui, mode: &mut prunr_core::ComposeMode) -> 
     changed
 }
 
+/// Right-aligned reset/preset cluster for the upscale toolbar row.
+///
+/// Reset resolves the active preset and applies it to `item_settings` and
+/// `app_settings.brush` — same behaviour as the segmentation toolbar's Reset
+/// button. Preset dropdown follows. No brush toggle (upscale mode has no
+/// per-item brush controls).
+pub(super) fn render_upscale_right_cluster(
+    ui: &mut Ui,
+    app_settings: &mut Settings,
+    item_settings: &mut ItemSettings,
+    applied_preset: &mut String,
+    change: &mut ToolbarChange,
+) {
+    let reset_target = app_settings.default_preset.clone();
+    let reset_tooltip = format!(
+        "Reset all knobs to the \"{reset_target}\" preset (your default)"
+    );
+    let reset_resp = chip::icon_toggle_button(ui, ICON_RESTART_ALT.codepoint, false);
+    if reset_resp.on_hover_text(reset_tooltip).clicked() {
+        let resolved = app_settings.resolve_active_preset(None);
+        *item_settings = resolved.item_settings;
+        app_settings.brush = resolved.brush;
+        *applied_preset = reset_target;
+        change.brush_settings_committed = true;
+        mark_preset_apply(change);
+    }
+
+    if let Some(name) = preset_dropdown::render(ui, app_settings, item_settings, applied_preset) {
+        *applied_preset = name;
+        mark_preset_apply(change);
+    }
+}
+
 /// Row 2 leftmost: model dropdown. Edits `app_settings.model` directly and
 /// sets `change.model_changed` + `commit` when the selection flips so caller
 /// can invalidate tensor caches and fire a fresh Tier 1.
-fn render_model_dropdown(
+pub(super) fn render_model_dropdown(
     ui: &mut Ui,
     app_settings: &mut Settings,
     processing: bool,
