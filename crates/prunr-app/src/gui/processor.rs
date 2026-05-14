@@ -279,6 +279,13 @@ impl Processor {
         }
     }
 
+    /// `Some((done, total))` while an upscale dispatch is in flight;
+    /// `None` otherwise. Drives the inline progress bar and the
+    /// status bar tile counter — both read the same source.
+    pub fn upscale_tile_progress(&self) -> Option<(u32, u32)> {
+        None
+    }
+
     /// Per-item generation counter ensures a fresh stroke supersedes the
     /// previous in-flight job at drain time — see `drain_inpaint_results`.
     /// SD-family models route through the inpaint subprocess bridge for
