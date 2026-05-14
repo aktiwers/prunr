@@ -138,10 +138,9 @@ impl OrtEngine {
     /// Use `Level2` for window-attention transformers (HAT / Swin) where
     /// `Level3` bakes the first tile's input shape into the graph during
     /// session init, causing an irrecoverable shape-mismatch on the second
-    /// tile in the same session. Empirically confirmed against 4xNomos8kSCHAT-L
-    /// (PRECONDITIONS.md P-3): Level3 panics with
-    /// "Attempting to get index by a name which does not exist:
-    /// InsertedPrecisionFreeCast_..."; Level2 succeeds across all tile sizes.
+    /// tile in the same session (observed against 4xNomos8kSCHAT-L: Level3
+    /// panics with `Attempting to get index by a name which does not exist:
+    /// InsertedPrecisionFreeCast_…`; Level2 succeeds across all tile sizes).
     pub fn new_with_optimization_level(
         model: ModelKind,
         intra_threads: usize,
