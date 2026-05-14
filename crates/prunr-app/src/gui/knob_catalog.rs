@@ -708,10 +708,11 @@ mod tests {
             match t {
                 Skip => 0,
                 CompositeOnly => 1,
-                EdgeRerun => 2,
-                MaskRerun => 3,
-                AddEdgeInference => 4,
-                FullPipeline => 5,
+                UpscaleRerun => 2,
+                EdgeRerun => 3,
+                MaskRerun => 4,
+                AddEdgeInference => 5,
+                FullPipeline => 6,
             }
         };
         for knob in StaticKnob::ALL {
@@ -856,7 +857,7 @@ mod tests {
     #[test]
     fn cache_impact_for_recipe_diff_covers_common_knobs() {
         use prunr_core::{ComposeMode, EdgeScale, FillStyle, InputTransform, LineStyle, ModelKind};
-        use prunr_core::{CompositeRecipe, EdgeRecipe, InferenceRecipe, MaskSettings};
+        use prunr_core::{CompositeRecipe, EdgeRecipe, InferenceRecipe, MaskSettings, UpscaleRecipe};
 
         let base = ProcessingRecipe {
             inference: InferenceRecipe {
@@ -878,6 +879,7 @@ mod tests {
                 ..Default::default()
             }).into(),
             composite: CompositeRecipe::default(),
+            upscale: UpscaleRecipe::default(),
             was_chain: false,
         };
 
