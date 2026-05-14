@@ -27,6 +27,8 @@ pub enum ModelKind {
     Silueta,
     U2net,
     BiRefNetLite,
+    RealEsrganX4Plus,
+    Nomos8kSchatL,
 }
 
 impl From<ModelKind> for prunr_models::ModelId {
@@ -35,6 +37,21 @@ impl From<ModelKind> for prunr_models::ModelId {
             ModelKind::Silueta => prunr_models::ModelId::Silueta,
             ModelKind::U2net => prunr_models::ModelId::U2net,
             ModelKind::BiRefNetLite => prunr_models::ModelId::BiRefNetLite,
+            ModelKind::RealEsrganX4Plus => prunr_models::ModelId::RealEsrganX4Plus,
+            ModelKind::Nomos8kSchatL => prunr_models::ModelId::Nomos8kSchatL,
+        }
+    }
+}
+
+impl From<prunr_models::ModelId> for ModelKind {
+    fn from(id: prunr_models::ModelId) -> Self {
+        match id {
+            prunr_models::ModelId::Silueta => ModelKind::Silueta,
+            prunr_models::ModelId::U2net => ModelKind::U2net,
+            prunr_models::ModelId::BiRefNetLite => ModelKind::BiRefNetLite,
+            prunr_models::ModelId::RealEsrganX4Plus => ModelKind::RealEsrganX4Plus,
+            prunr_models::ModelId::Nomos8kSchatL => ModelKind::Nomos8kSchatL,
+            other => panic!("ModelId::{other:?} has no ModelKind mapping"),
         }
     }
 }
