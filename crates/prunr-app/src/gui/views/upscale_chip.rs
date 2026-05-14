@@ -15,8 +15,7 @@ use crate::gui::theme;
 /// Render the scale chip. Returns `true` if `scale` changed.
 ///
 /// `output_dims` is `(w, h)` of the upscale's projected output —
-/// computed by the caller from source dimensions × scale. The chip
-/// displays the value as `"{scale}x · {w}×{h}"` per UI-SPEC.
+/// computed by the caller from source dimensions × scale.
 pub(crate) fn render_scale_chip(
     ui: &mut Ui,
     scale: &mut u32,
@@ -32,7 +31,7 @@ pub(crate) fn render_scale_chip(
     );
 
     let mut changed = false;
-    let popup_id = ui.make_persistent_id("upscale_scale_popup");
+    let popup_id = egui::Id::new("upscale_scale_popup");
     chip::popup_for(ui, popup_id, &resp, |ui| {
         ui.label(RichText::new("Scale").strong().color(theme::TEXT_PRIMARY));
         ui.add_space(theme::SPACE_XS);
