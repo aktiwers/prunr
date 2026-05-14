@@ -4,10 +4,11 @@ use std::sync::Mutex;
 use std::time::Instant;
 
 use crate::types::{CoreError, ModelKind};
+pub use ort::session::builder::GraphOptimizationLevel;
 use ort::{
     execution_providers::CPUExecutionProvider,
     memory::{AllocationDevice, AllocatorType, MemoryInfo, MemoryType},
-    session::{Session, builder::GraphOptimizationLevel},
+    session::Session,
     value::Tensor,
 };
 
@@ -132,20 +133,42 @@ impl OrtEngine {
         Self::new_with_fallback(model, intra_threads, true)
     }
 
-    /// Try optimized variant (FP16/INT8) first; fall back to FP32 if session creation fails.
+    /// Same as [`Self::new`] but with an explicit optimization-level override.
     ///
-    /// When `cpu_only=false`, we also fall back to CPU-only if the GPU EP's
-    /// session creation crashes at init. Seen in the wild with DirectML on
-    /// some Windows setups (AbiCustomRegistry exception during initialization);
-    /// ORT bubbles the exception out of `commit_from_memory` rather than
-    /// silently skipping the EP, so the CPU fallback in the EP list is never
-    /// reached. Retrying with `cpu_only=true` gives us a working session.
+    /// Use `Level2` for window-attention transformers (HAT / Swin) where
+    /// `Level3` bakes the first tile's input shape into the graph during
+    /// session init, causing an irrecoverable shape-mismatch on the second
+    /// tile in the same session. Empirically confirmed against 4xNomos8kSCHAT-L
+    /// (PRECONDITIONS.md P-3): Level3 panics with
+    /// "Attempting to get index by a name which does not exist:
+    /// InsertedPrecisionFreeCast_..."; Level2 succeeds across all tile sizes.
+    pub fn new_with_optimization_level(
+        model: ModelKind,
+        intra_threads: usize,
+        level: GraphOptimizationLevel,
+    ) -> Result<Self, CoreError> {
+        Self::new_with_fallback_and_level(model, intra_threads, false, level)
+    }
+
     fn new_with_fallback(model: ModelKind, intra_threads: usize, cpu_only: bool) -> Result<Self, CoreError> {
+        Self::new_with_fallback_and_level(model, intra_threads, cpu_only, GraphOptimizationLevel::Level3)
+    }
+
+    /// Core session-creation path shared by `new`, `new_cpu_only`, and
+    /// `new_with_optimization_level`. Tries optimized variant (FP16/INT8)
+    /// first; falls back to FP32 on failure. When `cpu_only=false`, also
+    /// falls back to CPU-only if the GPU EP crashes at init.
+    fn new_with_fallback_and_level(
+        model: ModelKind,
+        intra_threads: usize,
+        cpu_only: bool,
+        level: GraphOptimizationLevel,
+    ) -> Result<Self, CoreError> {
         tracing::debug!(?model, intra_threads, cpu_only, "OrtEngine init");
         // Check if an optimized variant exists (loaded from filesystem, so Vec<u8>).
         if let Some(optimized) = Self::optimized_variant_bytes(model, cpu_only) {
             tracing::debug!(?model, variant_bytes = optimized.len(), "OrtEngine trying optimized variant");
-            match Self::build_session(&optimized, intra_threads, model, cpu_only) {
+            match Self::build_session(&optimized, intra_threads, model, cpu_only, level) {
                 Ok(engine) => {
                     tracing::info!(?model, provider = %engine.provider_name, "OrtEngine ready (optimized variant)");
                     return Ok(engine);
@@ -164,7 +187,7 @@ impl OrtEngine {
         let id: prunr_models::ModelId = model.into();
         let fp32 = prunr_models::resolve_bytes(id)
             .ok_or_else(|| CoreError::Inference(prunr_models::not_installed_error(id)))?;
-        match Self::build_session(&fp32, intra_threads, model, cpu_only) {
+        match Self::build_session(&fp32, intra_threads, model, cpu_only, level) {
             Ok(engine) => {
                 tracing::info!(?model, provider = %engine.provider_name, "OrtEngine ready (FP32)");
                 Ok(engine)
@@ -175,7 +198,7 @@ impl OrtEngine {
                 // CPU-targeted optimized variant (INT8) before falling
                 // back to FP32. Otherwise the GPU-fail-then-CPU path
                 // ends up on FP32 even when an INT8 variant is on disk.
-                let engine = Self::new_with_fallback(model, intra_threads, true)?;
+                let engine = Self::new_with_fallback_and_level(model, intra_threads, true, level)?;
                 tracing::info!(
                     ?model, provider = %engine.provider_name,
                     "OrtEngine ready (CPU fallback after GPU failure)",
@@ -203,12 +226,12 @@ impl OrtEngine {
         }
     }
 
-    fn build_session(model_bytes: &[u8], intra_threads: usize, model: ModelKind, cpu_only: bool) -> Result<Self, CoreError> {
+    fn build_session(model_bytes: &[u8], intra_threads: usize, model: ModelKind, cpu_only: bool, level: GraphOptimizationLevel) -> Result<Self, CoreError> {
         let model_id: prunr_models::ModelId = model.into();
         // CPU-only path: straight shot.
         if cpu_only {
             crate::cache::gc_stale_for_model(model_id, "CPU");
-            let builder = Self::builder_with_base(intra_threads)?;
+            let builder = Self::builder_with_base(intra_threads, level)?;
             let (builder, bytes) = apply_ort_graph_cache(builder, model_bytes, model_id, "CPU");
             let started = Instant::now();
             let session = builder
@@ -251,7 +274,7 @@ impl OrtEngine {
                 continue;
             }
             crate::cache::gc_stale_for_model(model_id, ep.as_str());
-            let builder = Self::builder_with_base(intra_threads)?;
+            let builder = Self::builder_with_base(intra_threads, level)?;
             #[allow(unused_mut)] // mut only used on non-macOS via the CUDA arm
             let mut bytes_owner: Cow<'_, [u8]> = Cow::Borrowed(model_bytes);
             let builder = match ep {
@@ -349,10 +372,10 @@ impl OrtEngine {
         }))
     }
 
-    fn builder_with_base(intra_threads: usize) -> Result<ort::session::builder::SessionBuilder, CoreError> {
+    fn builder_with_base(intra_threads: usize, level: GraphOptimizationLevel) -> Result<ort::session::builder::SessionBuilder, CoreError> {
         Session::builder()
             .map_err(|e| CoreError::Inference(format!("ORT builder init failed: {e}")))?
-            .with_optimization_level(GraphOptimizationLevel::Level3)
+            .with_optimization_level(level)
             .map_err(|e| CoreError::Inference(format!("ORT set optimization level failed: {e}")))?
             .with_intra_threads(intra_threads.max(1))
             .map_err(|e| CoreError::Inference(format!("ORT set intra threads failed: {e}")))
@@ -378,6 +401,7 @@ impl OrtEngine {
                 .unwrap_or_else(|| "CPU".to_string())
         }).clone()
     }
+
 }
 
 /// Whether DirectML is the active GPU provider on this platform.
@@ -645,5 +669,22 @@ mod tests {
             .expect("OrtEngine::new(U2net) should succeed when U2Net is installed");
         let provider = engine.active_provider();
         assert!(!provider.is_empty());
+    }
+
+    /// Level2 is a valid value for all bundled models — the constructor must not
+    /// reject it for non-HAT models. Exercises the no-regression case: explicitly
+    /// passing Level2 to a segmentation model succeeds just as Level3 does.
+    ///
+    /// Gated on `dev-models` because Silueta is bundled only in that feature.
+    #[cfg(feature = "dev-models")]
+    #[test]
+    fn new_with_optimization_level_constructs_for_existing_model() {
+        let engine = OrtEngine::new_with_optimization_level(
+            ModelKind::Silueta,
+            1,
+            GraphOptimizationLevel::Level2,
+        )
+        .expect("Level2 must succeed for Silueta");
+        assert!(!engine.active_provider().is_empty());
     }
 }
