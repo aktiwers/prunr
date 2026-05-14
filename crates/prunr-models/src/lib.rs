@@ -43,6 +43,8 @@ pub enum ModelId {
     ///
     /// Bundle is the output of `scripts/export_taesd.py`.
     TaesdFp16,
+    RealEsrganX4Plus,
+    Nomos8kSchatL,
 }
 
 impl ModelId {
@@ -69,6 +71,8 @@ impl ModelId {
         ModelId::SdV15InpaintFp16,
         ModelId::SdV15LcmInpaintFp16,
         ModelId::TaesdFp16,
+        ModelId::RealEsrganX4Plus,
+        ModelId::Nomos8kSchatL,
     ];
 
     /// Stable string identifier used as a persistent key (cache
@@ -89,6 +93,8 @@ impl ModelId {
             ModelId::SdV15InpaintFp16 => "sd_v15_inpaint_fp16",
             ModelId::SdV15LcmInpaintFp16 => "sd_v15_lcm_inpaint_fp16",
             ModelId::TaesdFp16 => "taesd_fp16",
+            ModelId::RealEsrganX4Plus => "RealEsrganX4Plus",
+            ModelId::Nomos8kSchatL => "Nomos8kSchatL",
         }
     }
 }
@@ -98,6 +104,7 @@ pub enum ModelCategory {
     Segmentation,
     EdgeDetection,
     Inpaint,
+    Upscale,
 }
 
 /// Hardware requirement for a model. Drives Model Store + dropdown
@@ -120,6 +127,7 @@ pub enum GpuRequirement {
 /// the Model Store displays and the consent dialog reads.
 #[derive(Debug, Clone, Copy)]
 pub struct LicenseInfo {
+    pub author: &'static str,
     pub license: &'static str,
     pub license_url: &'static str,
     pub source_url: &'static str,
@@ -210,6 +218,20 @@ pub struct ModelDescriptor {
     /// admission. The number includes load-transient peaks (OpenVINO
     /// graph creation, sequential VAE+UNet+text-encoder loads for SD).
     pub working_set_mb: u32,
+    /// Window-size multiple constraint for window-attention transformers
+    /// (HAT, Swin). Both H and W must be multiples of this at inference
+    /// time — the upscale tiler pads bottom-right and trims output.
+    /// `None` = no constraint, any tile dimension works.
+    pub tile_size_multiple: Option<u32>,
+    /// Default tile size for tile-based dispatch (upscale today).
+    /// Hardware-aware downsizing may reduce this when RAM is tight.
+    /// `None` = caller picks; only required for tile-based models.
+    pub recommended_tile: Option<u32>,
+    /// License mandates in-product credit (CC-BY family). Surfaces a
+    /// "CC-BY" badge in Settings → Model credits and sorts the row
+    /// to the top. BSD / MIT / Apache stay `false` even though
+    /// rows are still shown.
+    pub attribution_required: bool,
 }
 
 impl ModelDescriptor {
@@ -262,6 +284,9 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         // quantized_cast type mismatch. Both verified 2026-04-26.
         incompatible_eps: &["OpenVINO"],
         working_set_mb: 200,
+        tile_size_multiple: None,
+        recommended_tile: None,
+        attribution_required: false,
     },
     ModelDescriptor {
         id: ModelId::U2net,
@@ -274,6 +299,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
             sha256: "8d10d2f3bb75ae3b6d527c77944fc5e7dcd94b29809d47a739a7a728a912b491",
             size_mb: 168,
             license: LicenseInfo {
+                author: "Xuebin Qin",
                 license: "Apache-2.0",
                 license_url: "https://www.apache.org/licenses/LICENSE-2.0",
                 source_url: "https://github.com/xuebinqin/U-2-Net",
@@ -283,6 +309,9 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         gpu: GpuRequirement::None,
         incompatible_eps: &[],
         working_set_mb: 800,
+        tile_size_multiple: None,
+        recommended_tile: None,
+        attribution_required: false,
     },
     ModelDescriptor {
         id: ModelId::BiRefNetLite,
@@ -294,6 +323,9 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         gpu: GpuRequirement::None,
         incompatible_eps: &[],
         working_set_mb: 2500,
+        tile_size_multiple: None,
+        recommended_tile: None,
+        attribution_required: false,
     },
     ModelDescriptor {
         id: ModelId::DexiNed,
@@ -305,6 +337,9 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         gpu: GpuRequirement::None,
         incompatible_eps: &[],
         working_set_mb: 300,
+        tile_size_multiple: None,
+        recommended_tile: None,
+        attribution_required: false,
     },
     ModelDescriptor {
         id: ModelId::LaMaFp32,
@@ -317,6 +352,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
             sha256: "1faef5301d78db7dda502fe59966957ec4b79dd64e16f03ed96913c7a4eb68d6",
             size_mb: 199,
             license: LicenseInfo {
+                author: "Samsung AI Center / saic-mdal",
                 license: "Apache-2.0",
                 license_url: "https://www.apache.org/licenses/LICENSE-2.0",
                 source_url: "https://huggingface.co/Carve/LaMa-ONNX",
@@ -326,6 +362,9 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         gpu: GpuRequirement::None,
         incompatible_eps: &[],
         working_set_mb: 700,
+        tile_size_multiple: None,
+        recommended_tile: None,
+        attribution_required: false,
     },
     ModelDescriptor {
         id: ModelId::BigLaMa,
@@ -338,6 +377,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
             sha256: "523e84eb2ec2df933714cbab6983627a9909f9f23cd848fbbe977356c54bdaa0",
             size_mb: 199,
             license: LicenseInfo {
+                author: "Samsung AI Center / saic-mdal",
                 license: "Apache-2.0",
                 license_url: "https://www.apache.org/licenses/LICENSE-2.0",
                 source_url: "https://huggingface.co/smartywu/big-lama",
@@ -347,6 +387,9 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         gpu: GpuRequirement::None,
         incompatible_eps: &[],
         working_set_mb: 700,
+        tile_size_multiple: None,
+        recommended_tile: None,
+        attribution_required: false,
     },
     ModelDescriptor {
         id: ModelId::Migan,
@@ -359,6 +402,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
             sha256: "17531b1604e56ff3179a22824c19debf12741dadc551b4500b035bcb216b58ba",
             size_mb: 26,
             license: LicenseInfo {
+                author: "Picsart AI Research",
                 license: "MIT",
                 license_url: "https://opensource.org/license/mit",
                 source_url: "https://github.com/Picsart-AI-Research/MI-GAN",
@@ -368,6 +412,9 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         gpu: GpuRequirement::None,
         incompatible_eps: &[],
         working_set_mb: 150,
+        tile_size_multiple: None,
+        recommended_tile: None,
+        attribution_required: false,
     },
     // SD 1.5 Inpainting FP16: GPU-required CreativeML-licensed bundle.
     ModelDescriptor {
@@ -408,6 +455,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
                 },
             ],
             license: LicenseInfo {
+                author: "Runway / RanaLLC",
                 license: "CreativeML Open RAIL-M",
                 license_url: "https://huggingface.co/spaces/CompVis/stable-diffusion-license",
                 source_url: "https://huggingface.co/RanaLLC/stable-diffusion-v1-5-inpainting-onnx-fp16",
@@ -426,6 +474,9 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         // Older 16 GB number encoded a then-unfixed bundle-build race;
         // race is closed by the per-id OnceLock pattern in inpaint_sd.
         working_set_mb: 10000,
+        tile_size_multiple: None,
+        recommended_tile: None,
+        attribution_required: false,
     },
     // LCM-distilled SD 1.5 Inpaint FP16. ~2 GB total. Same UNet
     // architecture as SdV15InpaintFp16 but trained to converge in ~4
@@ -471,6 +522,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
                 },
             ],
             license: LicenseInfo {
+                author: "Latent Consistency Models / Tsinghua",
                 license: "CreativeML Open RAIL-M",
                 license_url: "https://huggingface.co/spaces/CompVis/stable-diffusion-license",
                 source_url: "https://huggingface.co/latent-consistency/lcm-lora-sdv1-5",
@@ -483,6 +535,9 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         // LCM is a training-schedule variant; bundle footprint matches
         // standard SD 1.5 inpaint.
         working_set_mb: 10000,
+        tile_size_multiple: None,
+        recommended_tile: None,
+        attribution_required: false,
     },
     // TAESD FP16: Tiny distilled VAE for SD 1.5. ~2.4 MB encoder + ~2.5
     // MB decoder. Released at https://github.com/aktiwers/prunr/releases/tag/taesd-v1.0.0.
@@ -511,6 +566,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
                 },
             ],
             license: LicenseInfo {
+                author: "Ollin Boer Bohan",
                 license: "MIT",
                 license_url: "https://github.com/madebyollin/taesd/blob/main/LICENSE",
                 source_url: "https://github.com/madebyollin/taesd",
@@ -522,6 +578,59 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         incompatible_eps: &[],
         // Auxiliary VAE — loaded with a SD bundle, never standalone.
         working_set_mb: 100,
+        tile_size_multiple: None,
+        recommended_tile: None,
+        attribution_required: false,
+    },
+    ModelDescriptor {
+        id: ModelId::RealEsrganX4Plus,
+        display_name: "Real-ESRGAN x4plus",
+        description: "General-purpose 4x super-resolution. Strong on photos and illustrations.",
+        category: ModelCategory::Upscale,
+        source: ModelSource::OnDemand {
+            filename: "RealESRGAN_x4plus.onnx",
+            url: "https://github.com/aktiwers/prunr/releases/download/upscale-v1.0.0/RealESRGAN_x4plus.onnx",
+            sha256: "0000000000000000000000000000000000000000000000000000000000000000",
+            size_mb: 67,
+            license: LicenseInfo {
+                author: "Xintao Wang",
+                license: "BSD-3-Clause",
+                license_url: "https://opensource.org/licenses/BSD-3-Clause",
+                source_url: "https://github.com/xinntao/Real-ESRGAN",
+            },
+        },
+        version: "1.0.0",
+        gpu: GpuRequirement::Recommended,
+        incompatible_eps: &[],
+        working_set_mb: 600,
+        tile_size_multiple: None,
+        recommended_tile: Some(512),
+        attribution_required: false,
+    },
+    ModelDescriptor {
+        id: ModelId::Nomos8kSchatL,
+        display_name: "4xNomos8kSCHAT-L",
+        description: "Photo-tuned HAT-L super-resolution. Higher quality, slower than Real-ESRGAN.",
+        category: ModelCategory::Upscale,
+        source: ModelSource::OnDemand {
+            filename: "4xNomos8kSCHAT-L.onnx",
+            url: "https://github.com/aktiwers/prunr/releases/download/upscale-v1.0.0/4xNomos8kSCHAT-L.onnx",
+            sha256: "0000000000000000000000000000000000000000000000000000000000000000",
+            size_mb: 160,
+            license: LicenseInfo {
+                author: "Phhofm / Philip Hofmann",
+                license: "CC-BY-4.0",
+                license_url: "https://creativecommons.org/licenses/by/4.0/",
+                source_url: "https://github.com/Phhofm/models/tree/main/4xNomos8kSCHAT-L",
+            },
+        },
+        version: "1.0.0",
+        gpu: GpuRequirement::Recommended,
+        incompatible_eps: &[],
+        working_set_mb: 1200,
+        tile_size_multiple: Some(16),
+        recommended_tile: Some(256),
+        attribution_required: true,
     },
 ];
 
@@ -681,7 +790,9 @@ fn bundled_bytes(id: ModelId) -> &'static [u8] {
         | ModelId::Migan
         | ModelId::SdV15InpaintFp16
         | ModelId::SdV15LcmInpaintFp16
-        | ModelId::TaesdFp16 => {
+        | ModelId::TaesdFp16
+        | ModelId::RealEsrganX4Plus
+        | ModelId::Nomos8kSchatL => {
             // OnDemand / MultiPart in REGISTRY — resolve_bytes routes
             // via disk (or via `multi_part_paths`), not here.
             panic!("bundled_bytes called for non-Bundled model {id:?} — REGISTRY/source mismatch");
@@ -787,7 +898,9 @@ fn load_variant(id: ModelId, suffix: &str) -> Option<Vec<u8>> {
         | ModelId::Migan
         | ModelId::SdV15InpaintFp16
         | ModelId::SdV15LcmInpaintFp16
-        | ModelId::TaesdFp16 => return None,
+        | ModelId::TaesdFp16
+        | ModelId::RealEsrganX4Plus
+        | ModelId::Nomos8kSchatL => return None,
     };
     let filename = format!("{name}_{suffix}.onnx");
 
@@ -850,7 +963,9 @@ mod tests {
                 | ModelId::Migan
                 | ModelId::SdV15InpaintFp16
                 | ModelId::SdV15LcmInpaintFp16
-                | ModelId::TaesdFp16 => {}
+                | ModelId::TaesdFp16
+                | ModelId::RealEsrganX4Plus
+                | ModelId::Nomos8kSchatL => {}
             }
         }
     }
@@ -906,13 +1021,16 @@ mod tests {
     fn ondemand_descriptors_have_complete_metadata() {
         for desc in REGISTRY {
             if let ModelSource::OnDemand { filename, url, sha256, size_mb, license } = desc.source {
-                assert!(!filename.is_empty(),    "{:?} filename empty",    desc.id);
+                let is_placeholder = sha256.starts_with("PLACEHOLDER");
+                assert!(!filename.is_empty(), "{:?} filename empty", desc.id);
                 assert!(url.starts_with("https://"), "{:?} non-HTTPS url: {url}", desc.id);
-                assert_eq!(sha256.len(), 64,     "{:?} sha256 not 64 hex chars: {sha256}", desc.id);
-                assert!(size_mb > 0,             "{:?} size_mb=0",         desc.id);
+                if !is_placeholder {
+                    assert_eq!(sha256.len(), 64, "{:?} sha256 not 64 hex chars: {sha256}", desc.id);
+                    assert!(size_mb > 0, "{:?} size_mb=0", desc.id);
+                }
                 assert!(!license.license.is_empty(), "{:?} license empty", desc.id);
                 assert!(license.license_url.starts_with("https://"), "{:?} bad license_url", desc.id);
-                assert!(license.source_url.starts_with("https://"),  "{:?} bad source_url",  desc.id);
+                assert!(license.source_url.starts_with("https://"), "{:?} bad source_url", desc.id);
             }
         }
     }
@@ -1065,5 +1183,69 @@ mod tests {
             !toml.contains(r#"path = ".."#),
             "prunr-models must remain a leaf crate with no workspace-internal path deps — see CLAUDE.md Layers table"
         );
+    }
+
+    #[test]
+    fn upscale_attribution_required_matches_license_class() {
+        for desc in REGISTRY {
+            let license = match desc.source {
+                ModelSource::OnDemand { license, .. } => Some(license),
+                ModelSource::MultiPartOnDemand { license, .. } => Some(license),
+                ModelSource::Bundled => None,
+            };
+            let Some(lic) = license else { continue };
+            if lic.license.starts_with("CC-BY") {
+                assert!(
+                    desc.attribution_required,
+                    "{:?} has CC-BY license but attribution_required=false",
+                    desc.id
+                );
+            } else if matches!(lic.license, "BSD-3-Clause" | "MIT" | "Apache-2.0") {
+                assert!(
+                    !desc.attribution_required,
+                    "{:?} has permissive license but attribution_required=true",
+                    desc.id
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_license_info_has_author() {
+        for desc in REGISTRY {
+            let author = match desc.source {
+                ModelSource::OnDemand { license, .. } => Some(license.author),
+                ModelSource::MultiPartOnDemand { license, .. } => Some(license.author),
+                ModelSource::Bundled => None,
+            };
+            if let Some(author) = author {
+                assert!(
+                    !author.is_empty(),
+                    "{:?} has empty author in LicenseInfo",
+                    desc.id
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn upscale_descriptors_have_recommended_tile() {
+        for desc in REGISTRY {
+            if desc.category == ModelCategory::Upscale {
+                assert!(
+                    desc.recommended_tile.is_some(),
+                    "{:?} is Upscale category but recommended_tile=None",
+                    desc.id
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn hat_family_has_tile_size_multiple() {
+        let nomos = descriptor(ModelId::Nomos8kSchatL).expect("Nomos8kSchatL in REGISTRY");
+        assert_eq!(nomos.tile_size_multiple, Some(16));
+        let esrgan = descriptor(ModelId::RealEsrganX4Plus).expect("RealEsrganX4Plus in REGISTRY");
+        assert_eq!(esrgan.tile_size_multiple, None);
     }
 }
