@@ -475,13 +475,7 @@ fn sort_for_model_credits<'a>(
 }
 
 fn render_tab_model_credits(ui: &mut egui::Ui) {
-    ui.label(
-        RichText::new("Model Credits")
-            .size(theme::FONT_SIZE_HEADING)
-            .strong()
-            .color(theme::TEXT_PRIMARY),
-    );
-    ui.add_space(theme::SPACE_SM);
+    super::section_heading(ui, "Model Credits");
     super::hint(ui, "All installed models, their authors, and licenses.");
     ui.add_space(theme::SPACE_SM);
 
@@ -539,17 +533,13 @@ fn render_model_credit_row(ui: &mut egui::Ui, descriptor: &prunr_models::ModelDe
         }
     });
     ui.add_space(theme::SPACE_XS);
-    ui.label(
-        RichText::new(format!("Author: {author}"))
-            .size(theme::FONT_SIZE_MONO)
-            .color(theme::TEXT_SECONDARY),
-    );
     ui.horizontal(|ui| {
-        ui.label(
-            RichText::new(format!("License: {license_name}  "))
-                .size(theme::FONT_SIZE_MONO)
-                .color(theme::TEXT_SECONDARY),
-        );
+        ui.label(RichText::new("Author:").size(theme::FONT_SIZE_MONO).color(theme::TEXT_SECONDARY));
+        ui.label(RichText::new(author).size(theme::FONT_SIZE_MONO).color(theme::TEXT_SECONDARY));
+    });
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("License:").size(theme::FONT_SIZE_MONO).color(theme::TEXT_SECONDARY));
+        ui.label(RichText::new(license_name).size(theme::FONT_SIZE_MONO).color(theme::TEXT_SECONDARY));
         if !source_url.is_empty() {
             ui.hyperlink_to("↗ source", source_url);
         }
