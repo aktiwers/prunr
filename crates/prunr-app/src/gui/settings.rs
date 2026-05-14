@@ -541,6 +541,11 @@ impl From<ModelKind> for SettingsModel {
             ModelKind::Silueta => SettingsModel::Silueta,
             ModelKind::U2net => SettingsModel::U2net,
             ModelKind::BiRefNetLite => SettingsModel::BiRefNetLite,
+            // Upscale models dispatch through upscale_rgba, not the seg/inpaint
+            // pipeline; they are never converted to a SettingsModel variant.
+            ModelKind::RealEsrganX4Plus | ModelKind::Nomos8kSchatL => {
+                unreachable!("upscale ModelKind variants have no SettingsModel equivalent")
+            }
         }
     }
 }

@@ -16,6 +16,11 @@ pub fn preprocess(img: &DynamicImage, model: ModelKind) -> Array4<f32> {
     match model {
         ModelKind::Silueta | ModelKind::U2net => preprocess_rembg(img),
         ModelKind::BiRefNetLite => preprocess_birefnet(img),
+        // Upscale models run through a separate tiled RGB pipeline; they
+        // never enter the segmentation preprocess path.
+        ModelKind::RealEsrganX4Plus | ModelKind::Nomos8kSchatL => {
+            unreachable!("upscale models are dispatched via upscale_rgba, not the seg pipeline")
+        }
     }
 }
 
