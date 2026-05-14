@@ -95,7 +95,17 @@ pub struct ItemSettings {
     /// Default `Cover` matches CSS `background-size: cover`.
     #[serde(default)]
     pub bg_image_fit: BgImageFit,
+
+    /// Upscale model to apply after masking. `None` = upscale disabled.
+    #[serde(default)]
+    pub upscale_model: Option<prunr_models::ModelId>,
+
+    /// Output scale factor for the upscale pass. Default 4 (native model output).
+    #[serde(default = "default_upscale_scale")]
+    pub upscale_scale: u32,
 }
+
+fn default_upscale_scale() -> u32 { 4 }
 
 impl Default for ItemSettings {
     fn default() -> Self {
@@ -121,6 +131,8 @@ impl Default for ItemSettings {
             correction_hash: None,
             bg_image_hash: None,
             bg_image_fit: BgImageFit::default(),
+            upscale_model: None,
+            upscale_scale: 4,
         }
     }
 }
@@ -209,7 +221,10 @@ impl ItemSettings {
                 bg_image_hash: self.bg_image_hash,
                 bg_image_fit: self.bg_image_fit,
             },
-            upscale: prunr_core::UpscaleRecipe::default(),
+            upscale: prunr_core::UpscaleRecipe {
+                model: self.upscale_model,
+                scale: self.upscale_scale,
+            },
             was_chain: chain_mode,
         }
     }
@@ -349,9 +364,65 @@ mod tests {
             correction_hash: Some(0xdeadbeef),
             bg_image_hash: Some(0xfeedface),
             bg_image_fit: prunr_core::BgImageFit::Tile,
+            upscale_model: Some(prunr_models::ModelId::RealEsrganX4Plus),
+            upscale_scale: 2,
         };
         let json = serde_json::to_string(&s).unwrap();
         let recovered: ItemSettings = serde_json::from_str(&json).unwrap();
         assert_eq!(s, recovered);
+    }
+
+    #[test]
+    fn option_modelid_is_niche_optimized() {
+        assert_eq!(
+            std::mem::size_of::<Option<prunr_models::ModelId>>(),
+            std::mem::size_of::<prunr_models::ModelId>(),
+        );
+    }
+
+    #[test]
+    fn serde_json_roundtrip_with_upscale_fields() {
+        let s = ItemSettings {
+            upscale_model: Some(prunr_models::ModelId::RealEsrganX4Plus),
+            upscale_scale: 2,
+            ..ItemSettings::default()
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        let recovered: ItemSettings = serde_json::from_str(&json).unwrap();
+        assert_eq!(recovered.upscale_model, Some(prunr_models::ModelId::RealEsrganX4Plus));
+        assert_eq!(recovered.upscale_scale, 2);
+    }
+
+    #[test]
+    fn serde_loads_old_preset_missing_upscale_fields() {
+        let old_json = r#"{
+            "gamma": 1.0,
+            "threshold": null,
+            "edge_shift": 0.0,
+            "refine_edges": false,
+            "guided_radius": 8,
+            "guided_epsilon": 0.0001,
+            "feather": 0.0,
+            "line_mode": "Off",
+            "line_strength": 0.5,
+            "solid_line_color": null,
+            "edge_thickness": 0,
+            "bg": null
+        }"#;
+        let loaded: ItemSettings = serde_json::from_str(old_json).unwrap();
+        assert_eq!(loaded.upscale_model, None);
+        assert_eq!(loaded.upscale_scale, 4);
+    }
+
+    #[test]
+    fn current_recipe_populates_upscale_slot() {
+        let s = ItemSettings {
+            upscale_model: Some(prunr_models::ModelId::RealEsrganX4Plus),
+            upscale_scale: 2,
+            ..ItemSettings::default()
+        };
+        let recipe = s.current_recipe(prunr_core::ModelKind::Silueta, false);
+        assert_eq!(recipe.upscale.model, Some(prunr_models::ModelId::RealEsrganX4Plus));
+        assert_eq!(recipe.upscale.scale, 2);
     }
 }
