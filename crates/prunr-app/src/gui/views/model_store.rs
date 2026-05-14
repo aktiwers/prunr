@@ -113,6 +113,7 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) -> bool {
                 filter_chip(ui, "Background", Some(ModelCategory::Segmentation), &mut new_filter);
                 filter_chip(ui, "Lines", Some(ModelCategory::EdgeDetection), &mut new_filter);
                 filter_chip(ui, "Eraser", Some(ModelCategory::Inpaint), &mut new_filter);
+                filter_chip(ui, "Upscale", Some(ModelCategory::Upscale), &mut new_filter);
             });
             ui.add_space(theme::SPACE_SM);
             ui.separator();
