@@ -785,4 +785,53 @@ mod tests {
         let fused = fuse_brush_for_apply(&mp, Some(original.sd_scheduler));
         assert_eq!(fused, original);
     }
+
+    #[test]
+    fn roundtrip_with_upscale_fields_via_model_preset() {
+        let item = ItemSettings {
+            upscale_model: Some(ModelId::Nomos8kSchatL),
+            upscale_scale: 2,
+            ..ItemSettings::default()
+        };
+        let mp = ModelPreset { item_settings: item, ..ModelPreset::default() };
+        let mut file = PresetFile::default();
+        file.models.insert(model_id_key(ModelId::Nomos8kSchatL), mp);
+
+        let json = serde_json::to_string(&file).expect("serialize");
+        let restored: PresetFile = serde_json::from_str(&json).expect("deserialize");
+
+        let resolved = resolve_preset_for_model(&restored, ModelId::Nomos8kSchatL, None);
+        assert_eq!(resolved.item_settings.upscale_model, Some(ModelId::Nomos8kSchatL));
+        assert_eq!(resolved.item_settings.upscale_scale, 2);
+    }
+
+    #[test]
+    fn forward_compat_old_preset_without_upscale_keys() {
+        let json = r#"{
+            "format_version": 2,
+            "models": {
+                "Silueta": {
+                    "item_settings": {
+                        "gamma": 1.5,
+                        "threshold": null,
+                        "edge_shift": 0.0,
+                        "refine_edges": false,
+                        "guided_radius": 8,
+                        "guided_epsilon": 0.0001,
+                        "feather": 0.0,
+                        "line_mode": "Off",
+                        "line_strength": 0.5,
+                        "solid_line_color": null,
+                        "edge_thickness": 0,
+                        "bg": null
+                    }
+                }
+            }
+        }"#;
+        let file: PresetFile = serde_json::from_str(json).expect("deserialize");
+        let resolved = resolve_preset_for_model(&file, ModelId::Silueta, None);
+        assert_eq!(resolved.item_settings.upscale_model, None);
+        assert_eq!(resolved.item_settings.upscale_scale, 4);
+        assert!((resolved.item_settings.gamma - 1.5).abs() < f32::EPSILON);
+    }
 }
