@@ -917,7 +917,7 @@ mod tests {
     fn fixture_recipe() -> ProcessingRecipe {
         use prunr_core::{
             CompositeRecipe, EdgeRecipe, EdgeScale, ComposeMode, FillStyle, InferenceRecipe,
-            InputTransform, LineStyle, MaskSettings, ModelKind,
+            InputTransform, LineStyle, MaskSettings, ModelKind, UpscaleRecipe,
         };
         ProcessingRecipe {
             inference: InferenceRecipe {
@@ -936,6 +936,7 @@ mod tests {
             },
             mask: (&MaskSettings { fill_style: FillStyle::None, ..Default::default() }).into(),
             composite: CompositeRecipe::default(),
+            upscale: UpscaleRecipe::default(),
             was_chain: false,
         }
     }

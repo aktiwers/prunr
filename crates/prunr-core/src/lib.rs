@@ -15,9 +15,10 @@ pub mod inpaint;
 pub mod inpaint_sd;
 pub mod inpaint_blend;
 pub mod ep_compat;
+pub mod upscale;
 
 pub use engine::{InferenceEngine, OrtEngine};
-pub use recipe::{ProcessingRecipe, InferenceRecipe, EdgeRecipe, MaskRecipe, CompositeRecipe, RequiredTier, resolve_tier};
+pub use recipe::{ProcessingRecipe, InferenceRecipe, EdgeRecipe, MaskRecipe, CompositeRecipe, UpscaleRecipe, RequiredTier, resolve_tier};
 pub use types::{
     CoreError, ModelKind, ProgressStage, ProcessResult, MaskSettings, EdgeSettings, EdgeScale,
     InferenceResult, LineMode, LARGE_IMAGE_LIMIT, DOWNSCALE_TARGET,

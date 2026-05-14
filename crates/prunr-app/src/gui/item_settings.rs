@@ -209,6 +209,7 @@ impl ItemSettings {
                 bg_image_hash: self.bg_image_hash,
                 bg_image_fit: self.bg_image_fit,
             },
+            upscale: prunr_core::UpscaleRecipe::default(),
             was_chain: chain_mode,
         }
     }

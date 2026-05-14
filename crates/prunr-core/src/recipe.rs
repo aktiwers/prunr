@@ -121,6 +121,21 @@ impl std::hash::Hash for MaskRecipe {
     }
 }
 
+/// Upscale settings. `None` model means upscale is disabled.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct UpscaleRecipe {
+    /// `None` = upscale disabled (no upscale model selected).
+    pub model: Option<prunr_models::ModelId>,
+    /// Output scale factor: 2 or 4. Default 4 (native model output).
+    pub scale: u32,
+}
+
+impl Default for UpscaleRecipe {
+    fn default() -> Self {
+        Self { model: None, scale: 4 }
+    }
+}
+
 /// Tier 3: compositing settings (bg color, bg image).
 /// These can be applied without re-running inference or masking.
 ///
@@ -151,6 +166,8 @@ pub struct ProcessingRecipe {
     pub composite: CompositeRecipe,
     /// True if this result was produced in chain mode (previous result as input).
     pub was_chain: bool,
+    #[serde(default)]
+    pub upscale: UpscaleRecipe,
 }
 
 /// What processing tier is needed to go from old settings to new settings.
@@ -160,6 +177,9 @@ pub enum RequiredTier {
     Skip,
     /// Only compositing changed (bg_color) — parent-local, instant.
     CompositeOnly,
+    /// Only the upscale recipe changed — re-composite then re-upscale; no
+    /// mask or inference work needed.
+    UpscaleRerun,
     /// Mask settings changed — re-run postprocess from cached segmentation tensor (~200ms).
     MaskRerun,
     /// Edge settings changed — re-threshold cached DexiNed tensor (~20-100ms).
@@ -175,7 +195,7 @@ pub enum RequiredTier {
 /// Determine what processing tier is needed when changing from old to new recipe.
 ///
 /// Ordered by cost (cheapest changes bubble up first):
-/// Skip < CompositeOnly < EdgeRerun < MaskRerun < AddEdgeInference < FullPipeline.
+/// Skip < CompositeOnly < UpscaleRerun < MaskRerun < EdgeRerun < AddEdgeInference < FullPipeline.
 pub fn resolve_tier(old: &ProcessingRecipe, new: &ProcessingRecipe) -> RequiredTier {
     if old == new {
         return RequiredTier::Skip;
@@ -219,6 +239,10 @@ pub fn resolve_tier(old: &ProcessingRecipe, new: &ProcessingRecipe) -> RequiredT
     if old.edge != new.edge {
         return RequiredTier::EdgeRerun;
     }
+    if old.upscale != new.upscale {
+        return RequiredTier::UpscaleRerun;
+    }
+    // Composite changes (bg color) do not invalidate the cached upscale — user re-runs Process for upscale-on-new-bg.
     if old.composite != new.composite {
         return RequiredTier::CompositeOnly;
     }
@@ -265,6 +289,7 @@ mod tests {
                 bg_image_hash: None,
                 bg_image_fit: crate::types::BgImageFit::default(),
             },
+            upscale: UpscaleRecipe::default(),
             was_chain: false,
         }
     }
@@ -639,5 +664,60 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(resolve_tier(&a, &b), RequiredTier::MaskRerun);
+    }
+
+    fn upscale(model: Option<prunr_models::ModelId>, scale: u32) -> UpscaleRecipe {
+        UpscaleRecipe { model, scale }
+    }
+
+    #[test]
+    fn upscale_rerun_when_only_upscale_recipe_changed() {
+        let a = make_recipe(ModelKind::Silueta, 1.0, None);
+        let mut b = a.clone();
+        b.upscale = upscale(Some(prunr_models::ModelId::RealEsrganX4Plus), 4);
+        let mut c = a.clone();
+        c.upscale = upscale(Some(prunr_models::ModelId::RealEsrganX4Plus), 2);
+        assert_eq!(resolve_tier(&b, &c), RequiredTier::UpscaleRerun);
+    }
+
+    #[test]
+    fn upscale_rerun_when_only_upscale_model_changed() {
+        let a = make_recipe(ModelKind::Silueta, 1.0, None);
+        let mut old = a.clone();
+        old.upscale = upscale(Some(prunr_models::ModelId::Nomos8kSchatL), 4);
+        let mut new = a.clone();
+        new.upscale = upscale(Some(prunr_models::ModelId::RealEsrganX4Plus), 4);
+        assert_eq!(resolve_tier(&old, &new), RequiredTier::UpscaleRerun);
+    }
+
+    #[test]
+    fn mask_rerun_when_mask_and_upscale_both_changed() {
+        let a = make_recipe(ModelKind::Silueta, 1.0, None);
+        let mut b = a.clone();
+        b.mask = mask(2.2, None, 0.0, false);
+        b.upscale = upscale(Some(prunr_models::ModelId::RealEsrganX4Plus), 2);
+        assert_eq!(resolve_tier(&a, &b), RequiredTier::MaskRerun);
+    }
+
+    #[test]
+    fn composite_only_when_only_composite_changed_upscale_unchanged() {
+        let a = make_recipe(ModelKind::Silueta, 1.0, None);
+        let b = make_recipe(ModelKind::Silueta, 1.0, Some([0, 0, 0]));
+        assert_eq!(resolve_tier(&a, &b), RequiredTier::CompositeOnly);
+    }
+
+    #[test]
+    fn skip_when_upscale_disabled_and_other_recipe_identical() {
+        let a = make_recipe(ModelKind::Silueta, 1.0, None);
+        let b = a.clone();
+        assert_eq!(resolve_tier(&a, &b), RequiredTier::Skip);
+    }
+
+    #[test]
+    fn upscale_rerun_outranks_composite_when_both_changed() {
+        let a = make_recipe(ModelKind::Silueta, 1.0, None);
+        let mut b = make_recipe(ModelKind::Silueta, 1.0, Some([255, 0, 0]));
+        b.upscale = upscale(Some(prunr_models::ModelId::RealEsrganX4Plus), 4);
+        assert_eq!(resolve_tier(&a, &b), RequiredTier::UpscaleRerun);
     }
 }
