@@ -3,12 +3,12 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: unknown
-last_updated: "2026-05-14T22:19:54.675Z"
+last_updated: "2026-05-14T22:51:52.561Z"
 progress:
   total_phases: 12
   completed_phases: 7
   total_plans: 53
-  completed_plans: 39
+  completed_plans: 40
 ---
 
 # Project State
@@ -22,7 +22,7 @@ See: `.planning/PROJECT.md` (updated 2026-04-06)
 ## Current Position
 
 Phase: 30 (upscale-tab-v1) — EXECUTING
-Plan: 8 of 12 (30-01, 30-03, 30-05, 30-06, 30-07, 30-08, 30-10 complete)
+Plan: 9 of 12 (30-01, 30-03, 30-05, 30-06, 30-07, 30-08, 30-09, 30-10 complete)
 
 ## Phase Status (ground truth, derived from git log)
 
@@ -48,7 +48,7 @@ Plan: 8 of 12 (30-01, 30-03, 30-05, 30-06, 30-07, 30-08, 30-10 complete)
 | 19 | OpenVINO for Intel | ✅ DONE | All 11 tasks shipped. DEFERRED-1/2/3/5/7/8 closed; -4 (CUDA option drift) and -6 (Windows DXGI) hardware-blocked. |
 | 28 | SD VAE Orthogonality | 🚧 IN PROGRESS (4/5+ plans) | 28-01 dead field deletion (fa06975), 28-02 dispatch fix (97d75c0), 28-03 LCM bundle gate (cb2cbf7, b26bbd6), 28-04 TAESD checkbox + status line + dispatch wiring (107ac15, 8f797ec, 6a64f7b). 28-05+ pending. |
 | 29 | Refine and Wire Presets to All Models | ✅ DONE | 5/5 plans (2026-05-14). Per-model preset bundles, v1→v2 auto-migration, merge-save, top-right ↻ + brush Reset + model/scheduler auto-swap. See `.planning/phases/29-refine-and-wire-presets-to-all-models/29-PHASE-SUMMARY.md`. |
-| 30 | Upscale Tab v1 | 🚧 IN PROGRESS (7/12) | 30-01 prunr-models data model extension (e0fa8a2). 30-03 ItemSettings upscale fields + preset tests (b2ccdc1, 56de3b9). 30-05 OrtEngine Level2/Level3 gate + upscale_rgba entry point (f558345, cc17a73). 30-06 REGISTRY real SHAs + SettingsModel upscale variants + smoke test (96db8e0, ad44195, 38b1636). 30-08 Upscale filter chip in Model Store (3e9926f). 30-10 Model Credits tab (b2ccdc1). |
+| 30 | Upscale Tab v1 | 🚧 IN PROGRESS (9/12) | 30-01 prunr-models data model extension (e0fa8a2). 30-03 ItemSettings upscale fields + preset tests (b2ccdc1, 56de3b9). 30-05 OrtEngine Level2/Level3 gate + upscale_rgba entry point (f558345, cc17a73). 30-06 REGISTRY real SHAs + SettingsModel upscale variants + smoke test (96db8e0, ad44195, 38b1636). 30-07 Upscale toolbar row (243c3ab, c5dbaa1, a975778). 30-08 Upscale filter chip in Model Store (3e9926f). 30-09 chain-mode auto-on intent (1c3c52b). 30-10 Model Credits tab (b2ccdc1). |
 
 Phase 9 was absorbed into Phase 13.
 
