@@ -168,6 +168,10 @@ impl Defaults {
 /// chained result dimensions when chain mode is on and a result exists,
 /// otherwise the raw source image dimensions. Used by the upscale row to
 /// display projected output size. Pass `(0, 0)` when no item is loaded.
+// args mirror the live render-pass surface (settings + brush + processing
+// flags + processor coordinator) one-for-one; packing into a struct would
+// force a borrow-split of `Settings` from `ItemSettings` that callers
+// don't otherwise need.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render(
     ui: &mut Ui,
@@ -279,24 +283,13 @@ pub(crate) fn render(
                 |ui| {
                     // Reset-all-knobs button visible directly (per user feedback —
                     // was previously hidden in the kebab overflow menu).
-                    let reset_target = app_settings.default_preset.clone();
-                    let reset_tooltip = format!(
-                        "Reset all knobs to the \"{reset_target}\" preset (your default)"
+                    render_reset_preset_cluster(
+                        ui,
+                        app_settings,
+                        item_settings,
+                        applied_preset,
+                        &mut change,
                     );
-                    let reset_resp = chip::icon_toggle_button(ui, ICON_RESTART_ALT.codepoint, false);
-                    if reset_resp.on_hover_text(reset_tooltip).clicked() {
-                        let resolved = app_settings.resolve_active_preset(None);
-                        *item_settings = resolved.item_settings;
-                        app_settings.brush = resolved.brush;
-                        *applied_preset = reset_target;
-                        change.brush_settings_committed = true;
-                        mark_preset_apply(&mut change);
-                    }
-
-                    if let Some(name) = preset_dropdown::render(ui, app_settings, item_settings, applied_preset) {
-                        *applied_preset = name;
-                        mark_preset_apply(&mut change);
-                    }
 
                     let brush_active = brush_state.is_enabled();
                     let brush_tooltip = if !brush_available {
@@ -1282,25 +1275,26 @@ fn render_compose_mode_chip(ui: &mut Ui, mode: &mut prunr_core::ComposeMode) -> 
     changed
 }
 
-/// Right-aligned reset/preset cluster for the upscale toolbar row.
-///
-/// Reset resolves the active preset and applies it to `item_settings` and
-/// `app_settings.brush` — same behaviour as the segmentation toolbar's Reset
-/// button. Preset dropdown follows. No brush toggle (upscale mode has no
-/// per-item brush controls).
-pub(super) fn render_upscale_right_cluster(
+/// Reset-to-default-preset button + preset dropdown. The reset tooltip
+/// embeds the user's default-preset name; it is built lazily inside
+/// `on_hover_ui` so the `format!` only fires when the button is hovered,
+/// not on every frame.
+pub(super) fn render_reset_preset_cluster(
     ui: &mut Ui,
     app_settings: &mut Settings,
     item_settings: &mut ItemSettings,
     applied_preset: &mut String,
     change: &mut ToolbarChange,
 ) {
-    let reset_target = app_settings.default_preset.clone();
-    let reset_tooltip = format!(
-        "Reset all knobs to the \"{reset_target}\" preset (your default)"
-    );
     let reset_resp = chip::icon_toggle_button(ui, ICON_RESTART_ALT.codepoint, false);
-    if reset_resp.on_hover_text(reset_tooltip).clicked() {
+    let reset_resp = reset_resp.on_hover_ui(|ui| {
+        ui.label(format!(
+            "Reset all knobs to the \"{}\" preset (your default)",
+            app_settings.default_preset
+        ));
+    });
+    if reset_resp.clicked() {
+        let reset_target = app_settings.default_preset.clone();
         let resolved = app_settings.resolve_active_preset(None);
         *item_settings = resolved.item_settings;
         app_settings.brush = resolved.brush;
@@ -1343,9 +1337,13 @@ pub(super) fn render_model_dropdown(
         vis.widgets.noninteractive.fg_stroke.color = theme::TEXT_SECONDARY;
 
         ui.spacing_mut().interact_size.y = theme::CHIP_HEIGHT;
-        // Inpaint doesn't use seg ⇒ mask_active is false, but it's not
-        // "bypassed" — it's the Eraser model. Show the model name.
-        let selected_text: String = if mask_active || app_settings.model.is_inpaint() {
+        // "Bypassed" indicates the seg pipeline is bypassed (no mask). Inpaint
+        // and Upscale models bypass seg by design — show their own name, not
+        // the bypass label.
+        let selected_text: String = if mask_active
+            || app_settings.model.is_inpaint()
+            || app_settings.model.is_upscale()
+        {
             model_label(app_settings.model, true)
         } else {
             BYPASSED_LABEL.clone()

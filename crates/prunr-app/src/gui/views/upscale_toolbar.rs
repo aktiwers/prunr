@@ -1,4 +1,4 @@
-//! Upscale toolbar row (UI-SPEC Surface 1).
+//! Upscale toolbar row.
 //!
 //! Rendered when `app_settings.model.is_upscale()` is true, replacing
 //! the segmentation chip row. Layout: model dropdown · scale chip ·
@@ -10,25 +10,28 @@
 
 use egui::Ui;
 
-use super::adjustments_toolbar::{ToolbarChange, render_model_dropdown, render_upscale_right_cluster};
+use super::adjustments_toolbar::{ToolbarChange, render_model_dropdown, render_reset_preset_cluster};
 use super::upscale_chip::render_scale_chip;
 use crate::gui::item_settings::ItemSettings;
 use crate::gui::processor::Processor;
 use crate::gui::settings::Settings;
 use crate::gui::theme;
 
-/// Render the upscale toolbar row (UI-SPEC Surface 1):
-/// model dropdown · scale chip · inline progress bar · right-aligned
-/// reset/preset cluster.
+/// Pixel reserve at the right edge of the progress bar — leaves room for
+/// the reset button + preset dropdown in the right-aligned cluster.
+const PROGRESS_BAR_RIGHT_RESERVE_PX: f32 = 80.0;
+
+/// Render the upscale toolbar row.
 ///
 /// `source_dims` is `(w, h)` of the active item's input image —
 /// `result_rgba` dimensions when chain mode is on and a result exists,
-/// otherwise the raw source image dimensions. Resolved by the caller
-/// (`adjustments_toolbar::render`) which has access to `BatchItem`.
+/// otherwise the raw source image dimensions. Resolved by the caller.
 ///
-/// `processing` mirrors the bool passed to `adjustments_toolbar::render` —
-/// disables the model dropdown while a batch is in flight. The `Processor`
-/// ref is for the `upscale_tile_progress` poll only.
+/// `is_processing` disables the model dropdown while a batch is in
+/// flight. `processor` is the source for the live tile-progress poll.
+// args mirror the ToolbarChange protocol one-for-one — packing into a
+// struct would force borrow-splitting at every caller (the existing
+// adjustments_toolbar::render already passes the same separate borrows).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_upscale_row(
     ui: &mut Ui,
@@ -50,7 +53,7 @@ pub(crate) fn render_upscale_row(
         }
 
         if let Some((done, total)) = processor.upscale_tile_progress() {
-            let avail = (ui.available_width() - 80.0).max(0.0);
+            let avail = (ui.available_width() - PROGRESS_BAR_RIGHT_RESERVE_PX).max(0.0);
             ui.add(
                 egui::ProgressBar::new(done as f32 / total.max(1) as f32)
                     .fill(theme::PROGRESS_FILL)
@@ -60,7 +63,7 @@ pub(crate) fn render_upscale_row(
         }
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            render_upscale_right_cluster(ui, app_settings, item_settings, applied_preset, change);
+            render_reset_preset_cluster(ui, app_settings, item_settings, applied_preset, change);
         });
     });
 }
