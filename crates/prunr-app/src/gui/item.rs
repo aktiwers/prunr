@@ -556,6 +556,11 @@ impl BatchItem {
         }
     }
 
+    /// True when the item carries a prior processing result.
+    pub(crate) fn has_result(&self) -> bool {
+        self.result_rgba.is_some()
+    }
+
     /// Combined compressed size of segmentation + edge tensor caches.
     /// Used by memory governance (`BatchManager::enforce_tensor_budget`)
     /// and any future telemetry / HUD readout.

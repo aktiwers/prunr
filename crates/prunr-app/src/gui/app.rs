@@ -3098,6 +3098,15 @@ impl PrunrApp {
             self.processor.release_inpaint_subprocess();
             self.processor.release_seg_warm();
         }
+        if toolbar_change.auto_chain_on {
+            let item_has_result = self
+                .batch
+                .selected_item()
+                .map(|i| i.has_result())
+                .unwrap_or(false);
+            self.settings.chain_mode =
+                resolve_auto_chain_on(true, item_has_result, self.settings.chain_mode);
+        }
         if toolbar_change.brush_settings_committed {
             self.settings.save();
         }
@@ -3561,6 +3570,43 @@ fn collect_shortcut_intents(ctx: &egui::Context) -> ShortcutIntents {
         if i.modifiers.command && i.key_pressed(Key::Y) { s.redo_requested = true; }
     });
     s
+}
+
+/// Resolve the chain-mode value after an auto-chain-on signal from the toolbar.
+///
+/// The view emits `auto_chain_on = true` on an upscale-entry model switch.
+/// No fresh-item upscale should silently flip chain mode on with no prior
+/// result to chain from — so the application gates the flip on `item_has_result`.
+pub(crate) fn resolve_auto_chain_on(
+    auto_chain_on: bool,
+    item_has_result: bool,
+    current_chain_mode: bool,
+) -> bool {
+    if auto_chain_on && item_has_result {
+        true
+    } else {
+        current_chain_mode
+    }
+}
+
+#[cfg(test)]
+mod auto_chain_on_tests {
+    use super::resolve_auto_chain_on;
+
+    #[test]
+    fn auto_chain_on_sets_when_result_exists() {
+        assert!(resolve_auto_chain_on(true, true, false));
+    }
+
+    #[test]
+    fn auto_chain_on_noop_without_result() {
+        assert!(!resolve_auto_chain_on(true, false, false));
+    }
+
+    #[test]
+    fn auto_chain_on_unchanged_when_view_did_not_emit() {
+        assert!(resolve_auto_chain_on(false, true, true));
+    }
 }
 
 #[cfg(test)]
