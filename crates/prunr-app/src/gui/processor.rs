@@ -279,6 +279,12 @@ pub(crate) struct Processor {
     upscale_tile_total: Arc<AtomicU32>,
     upscale_result_tx: mpsc::Sender<UpscaleResult>,
     upscale_result_rx: mpsc::Receiver<UpscaleResult>,
+    /// Unified progress slot. One source of truth for the banner / modal
+    /// widgets across every dispatch kind. Written by `dispatch_upscale`
+    /// (step 3), `pump_inpaint_subprocess` (step 2 — pending widget
+    /// migration), and the seg path (step 4); read by the new widgets
+    /// added in step 5. `None` when no dispatch is in flight.
+    dispatch_progress: super::dispatch_progress::DispatchProgressSlot,
 }
 
 impl Processor {
@@ -312,7 +318,19 @@ impl Processor {
             upscale_tile_total: Arc::new(AtomicU32::new(0)),
             upscale_result_tx,
             upscale_result_rx,
+            dispatch_progress: super::dispatch_progress::DispatchProgressSlot::new(),
         }
+    }
+
+    /// Unified progress reader for the banner / modal widgets. `None`
+    /// when no dispatch is in flight. Single source of truth that
+    /// replaces the per-dispatch readers (`upscale_tile_progress`,
+    /// `inpaint_progress`) once the widget side migrates in step 5.
+    // Widgets read this in step 5; dead-code allow keeps the migration
+    // green between commits.
+    #[allow(dead_code)]
+    pub(crate) fn dispatch_progress(&self) -> Option<super::dispatch_progress::DispatchProgress> {
+        self.dispatch_progress.read()
     }
 
     /// `Some((done, total))` while an upscale dispatch is in flight;
@@ -818,14 +836,25 @@ impl Processor {
         self.upscale_cancel.store(false, Ordering::Release);
         self.upscale_tile_done.store(0, Ordering::Relaxed);
         self.upscale_tile_total.store(0, Ordering::Relaxed);
+        // Seed the unified slot before the first tile so an early render
+        // already shows "Upscaling — tile 0 of …" rather than the prior
+        // dispatch's stale data.
+        self.dispatch_progress.set(Some(super::dispatch_progress::DispatchProgress {
+            kind: super::dispatch_progress::DispatchKind::Upscale,
+            outer: None,
+            inner: (0, 0),
+            step_label: std::borrow::Cow::Borrowed("Loading model"),
+        }));
 
         let done_counter = Arc::clone(&self.upscale_tile_done);
         let total_counter = Arc::clone(&self.upscale_tile_total);
         let active_flag = Arc::clone(&self.upscale_active);
         let cancel_flag = Arc::clone(&self.upscale_cancel);
         let result_tx = self.upscale_result_tx.clone();
+        let progress_slot = self.dispatch_progress.clone();
 
         std::thread::spawn(move || {
+            let progress_slot_for_callback = progress_slot.clone();
             let result = prunr_core::upscale::upscale_rgba(
                 &input,
                 model_id,
@@ -834,6 +863,12 @@ impl Processor {
                 move |done, total| {
                     done_counter.store(done, Ordering::Relaxed);
                     total_counter.store(total, Ordering::Relaxed);
+                    progress_slot_for_callback.update(|p| {
+                        if let Some(p) = p {
+                            p.inner = (done, total);
+                            p.step_label = std::borrow::Cow::Borrowed("Tile inference");
+                        }
+                    });
                 },
                 Some(cancel_flag),
             );
@@ -843,6 +878,8 @@ impl Processor {
             // the channel.
             let _ = result_tx.send(UpscaleResult { item_id, result, recipe });
             active_flag.store(false, Ordering::Release);
+            // Clear the unified slot — widgets fall back to idle state.
+            progress_slot.set(None);
         });
     }
 
