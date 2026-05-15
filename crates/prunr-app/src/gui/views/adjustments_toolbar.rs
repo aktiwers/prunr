@@ -1432,10 +1432,21 @@ pub(super) fn render_model_dropdown(
         }
         change.model_changed = true;
         aggregate_bool(true, StaticKnob::Model, change);
-        if app_settings.model.is_upscale() && !prev_model.is_upscale() {
+        if should_auto_chain_on_model_switch(prev_model, app_settings.model) {
             change.auto_chain_on = true;
         }
     }
+}
+
+/// Predicate: emit `auto_chain_on = true` only when the model switch
+/// *enters* the upscale family. Stays-in-family (upscale→upscale) or
+/// leaving the family (upscale→non-upscale) must not retrigger
+/// chain-mode, or the user would see the chain toggle flip back on
+/// every time they cycle through the upscale dropdown. Extracted as
+/// a free function so the four-case truth table can be unit-pinned
+/// without standing up the full toolbar render path.
+fn should_auto_chain_on_model_switch(prev: SettingsModel, next: SettingsModel) -> bool {
+    next.is_upscale() && !prev.is_upscale()
 }
 
 #[cfg(test)]
@@ -1451,5 +1462,35 @@ mod tests {
         assert!(!c.render_repaint);
         assert!(c.line_mode_from.is_none());
         assert!(!c.auto_chain_on);
+    }
+
+    /// Truth table for `should_auto_chain_on_model_switch`. The
+    /// emission must fire only on the *entering-upscale-family*
+    /// transition; staying in the family or leaving it must not
+    /// retrigger chain-mode (else cycling through upscale models
+    /// would resurrect the toggle every dropdown click).
+    #[test]
+    fn auto_chain_on_fires_only_when_entering_upscale_family() {
+        // Non-upscale → upscale: fire.
+        assert!(should_auto_chain_on_model_switch(
+            SettingsModel::BiRefNetLite,
+            SettingsModel::RealEsrganUpscale,
+        ));
+        // Already in upscale family: do not fire (user is just
+        // switching between Real-ESRGAN and Nomos8kSCHAT).
+        assert!(!should_auto_chain_on_model_switch(
+            SettingsModel::RealEsrganUpscale,
+            SettingsModel::Nomos8kUpscale,
+        ));
+        // Leaving upscale family: do not fire.
+        assert!(!should_auto_chain_on_model_switch(
+            SettingsModel::RealEsrganUpscale,
+            SettingsModel::BiRefNetLite,
+        ));
+        // Seg → seg: no upscale involved, no fire.
+        assert!(!should_auto_chain_on_model_switch(
+            SettingsModel::Silueta,
+            SettingsModel::BiRefNetLite,
+        ));
     }
 }
