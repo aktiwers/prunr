@@ -655,8 +655,8 @@ mod tests {
 
     #[test]
     fn settings_without_progress_style_falls_back_to_modal() {
-        // Forward-compat: a settings.json saved before Phase 31 has no
-        // `progress_style` key. `#[serde(default)]` + `Default::default()`
+        // Forward-compat: settings.json saved before `progress_style`
+        // existed has no key. `#[serde(default)]` + `Default::default()`
         // resolve to Modal.
         let json = r#"{
             "model": "BiRefNetLite",
