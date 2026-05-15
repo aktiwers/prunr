@@ -227,25 +227,19 @@ pub fn apply_sharpen(img: &mut RgbaImage, strength: f32) {
     let h = img.height() as usize;
     let n = w * h;
 
-    // f32 working buffers: one channel at a time.
     let mut ch_f32 = vec![0.0_f32; n];
     let mut blur_tmp = vec![0.0_f32; n];
     let mut blur_out = vec![0.0_f32; n];
 
     for c in 0..3usize {
-        // Extract channel (read-only borrow ends before mutable borrow below)
-        {
-            let raw_ro = img.as_raw();
-            for i in 0..n {
-                ch_f32[i] = raw_ro[i * 4 + c] as f32;
-            }
+        let raw_ro = img.as_raw();
+        for i in 0..n {
+            ch_f32[i] = raw_ro[i * 4 + c] as f32;
         }
 
-        // Two-pass separable Gaussian
         gauss_h(&ch_f32, &mut blur_tmp, w, h);
         gauss_v(&blur_tmp, &mut blur_out, w, h);
 
-        // Unsharp or blur depending on sign
         let raw = img.as_mut();
         if strength > 0.0 {
             for i in 0..n {
@@ -260,7 +254,6 @@ pub fn apply_sharpen(img: &mut RgbaImage, strength: f32) {
             }
         }
     }
-    // Alpha: untouched (channel 3 stays as-is in all iterations above).
 }
 
 /// Per-pixel lerp from the AI upscale toward a bicubic-resized

@@ -109,7 +109,7 @@ pub(crate) fn median_filter_channel(
 ///
 /// Variance guard: when the denominator (sum of weights) is < 1e-6, the
 /// unfiltered pixel value is used — defends against the `0/0` case on
-/// degenerate inputs (matching `inpaint_blend.rs` pattern).
+/// degenerate inputs.
 pub(crate) fn bilateral_filter_channel(
     src: &[u8],
     width: usize,
@@ -120,7 +120,6 @@ pub(crate) fn bilateral_filter_channel(
     let radius = (2.0 * spatial_sigma).ceil() as usize;
     let kernel_len = 2 * radius + 1;
 
-    // Precompute spatial kernel once (not per-pixel)
     let spatial_kernel: Vec<f32> = (0..kernel_len)
         .map(|i| {
             let d = i as f32 - radius as f32;
@@ -128,13 +127,10 @@ pub(crate) fn bilateral_filter_channel(
         })
         .collect();
 
-    // range_sigma is in normalized 0..1 units
     let range_sigma2 = 2.0 * range_sigma * range_sigma;
 
     let n = width * height;
 
-    // Horizontal pass: src (u8) → h_pass (f32, values in 0..255 scale)
-    // Rows are independent — parallelise over rows
     let mut h_pass = vec![0.0f32; n];
     h_pass
         .par_chunks_mut(width)
@@ -161,8 +157,6 @@ pub(crate) fn bilateral_filter_channel(
             }
         });
 
-    // Vertical pass: h_pass (f32) → out (u8)
-    // Rows are independent — parallelise over rows
     let mut out = vec![0u8; n];
     out.par_chunks_mut(width)
         .enumerate()
@@ -229,7 +223,6 @@ pub fn apply_denoise(img: &RgbaImage, strength: f32) -> RgbaImage {
             let blended = original * (1.0 - s) + filtered * s;
             p.0[c] = blended.clamp(0.0, 255.0) as u8;
         }
-        // originals and bilateral_out drop at end of loop iteration
     }
 
     out
@@ -301,8 +294,6 @@ mod tests {
             Rgba([v, (v.wrapping_add(50)), (v.wrapping_add(100)), 255])
         })
     }
-
-    // ─── Task 1 tests ───────────────────────────────────────────────────────
 
     #[test]
     fn apply_denoise_strength_zero_is_identity() {
@@ -447,8 +438,6 @@ mod tests {
             assert_eq!(p.0[3], 0, "alpha must remain 0");
         }
     }
-
-    // ─── Task 2 tests ───────────────────────────────────────────────────────
 
     #[test]
     fn brightness_lift_zero_is_identity() {
