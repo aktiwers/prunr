@@ -167,7 +167,13 @@ where
             "{id:?} has no ModelKind mapping — upscale dispatch requires a seg/upscale variant"
         ))
     })?;
-    let engine = OrtEngine::new_with_optimization_level(model_kind, intra_threads, level)?;
+    // CPU-only EP: OpenVINO's lazy per-shape graph compilation can stall
+    // a single RRDB upscale dispatch for tens of minutes on the first
+    // tile dimension (RealESRGAN's 23 residual blocks compile slowly
+    // and the EP cache wasn't hitting). The CPU EP has no lazy compile
+    // step — total wall-clock is dominated by inference, which is what
+    // the user actually waited for.
+    let engine = OrtEngine::new_cpu_only_with_optimization_level(model_kind, intra_threads, level)?;
 
     let run_tile = |rgb_tile: &RgbImage, padded_w: u32, padded_h: u32| -> Result<RgbImage, CoreError> {
         const INV_255: f32 = 1.0 / 255.0;
