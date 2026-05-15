@@ -569,6 +569,7 @@ mod model_credits_tests {
             tile_size_multiple: None,
             recommended_tile: None,
             attribution_required,
+            upscale: None,
         }
     }
 

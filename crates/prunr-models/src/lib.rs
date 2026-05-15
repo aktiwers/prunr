@@ -232,6 +232,23 @@ pub struct ModelDescriptor {
     /// to the top. BSD / MIT / Apache stay `false` even though
     /// rows are still shown.
     pub attribution_required: bool,
+    /// Per-model knobs for the upscale dispatch path. `Some` only on
+    /// upscale-category entries — the dispatch reads these instead of
+    /// branching on `ModelId` in core. `None` for every other model.
+    pub upscale: Option<UpscaleModelKnobs>,
+}
+
+/// ONNX export contract for an upscale model. Centralises the bits the
+/// upscale dispatcher needs to know per-model so adding a third model
+/// is a pure data edit, not a code change in `prunr-core/src/upscale`.
+#[derive(Debug, Clone, Copy)]
+pub struct UpscaleModelKnobs {
+    /// Name of the input tensor in the ONNX graph. RealESRGAN exports
+    /// as `"data"`; Phhofm's HAT-L (Nomos8kSCHAT-L) as `"input"`.
+    pub input_name: &'static str,
+    /// `true` when the export expects fp16 inputs and emits fp16
+    /// outputs. Drives the tensor-packing branch in `upscale_rgba`.
+    pub is_fp16: bool,
 }
 
 impl ModelDescriptor {
@@ -287,6 +304,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         tile_size_multiple: None,
         recommended_tile: None,
         attribution_required: false,
+        upscale: None,
     },
     ModelDescriptor {
         id: ModelId::U2net,
@@ -312,6 +330,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         tile_size_multiple: None,
         recommended_tile: None,
         attribution_required: false,
+        upscale: None,
     },
     ModelDescriptor {
         id: ModelId::BiRefNetLite,
@@ -326,6 +345,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         tile_size_multiple: None,
         recommended_tile: None,
         attribution_required: false,
+        upscale: None,
     },
     ModelDescriptor {
         id: ModelId::DexiNed,
@@ -340,6 +360,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         tile_size_multiple: None,
         recommended_tile: None,
         attribution_required: false,
+        upscale: None,
     },
     ModelDescriptor {
         id: ModelId::LaMaFp32,
@@ -365,6 +386,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         tile_size_multiple: None,
         recommended_tile: None,
         attribution_required: false,
+        upscale: None,
     },
     ModelDescriptor {
         id: ModelId::BigLaMa,
@@ -390,6 +412,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         tile_size_multiple: None,
         recommended_tile: None,
         attribution_required: false,
+        upscale: None,
     },
     ModelDescriptor {
         id: ModelId::Migan,
@@ -415,6 +438,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         tile_size_multiple: None,
         recommended_tile: None,
         attribution_required: false,
+        upscale: None,
     },
     // SD 1.5 Inpainting FP16: GPU-required CreativeML-licensed bundle.
     ModelDescriptor {
@@ -477,6 +501,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         tile_size_multiple: None,
         recommended_tile: None,
         attribution_required: false,
+        upscale: None,
     },
     // LCM-distilled SD 1.5 Inpaint FP16. ~2 GB total. Same UNet
     // architecture as SdV15InpaintFp16 but trained to converge in ~4
@@ -538,6 +563,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         tile_size_multiple: None,
         recommended_tile: None,
         attribution_required: false,
+        upscale: None,
     },
     // TAESD FP16: Tiny distilled VAE for SD 1.5. ~2.4 MB encoder + ~2.5
     // MB decoder. Released at https://github.com/aktiwers/prunr/releases/tag/taesd-v1.0.0.
@@ -581,6 +607,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         tile_size_multiple: None,
         recommended_tile: None,
         attribution_required: false,
+        upscale: None,
     },
     ModelDescriptor {
         id: ModelId::RealEsrganX4Plus,
@@ -606,6 +633,10 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         tile_size_multiple: None,
         recommended_tile: Some(512),
         attribution_required: false,
+        upscale: Some(UpscaleModelKnobs {
+            input_name: "data",
+            is_fp16: false,
+        }),
     },
     ModelDescriptor {
         id: ModelId::Nomos8kSchatL,
@@ -631,6 +662,10 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         tile_size_multiple: Some(16),
         recommended_tile: Some(256),
         attribution_required: true,
+        upscale: Some(UpscaleModelKnobs {
+            input_name: "input",
+            is_fp16: true,
+        }),
     },
 ];
 

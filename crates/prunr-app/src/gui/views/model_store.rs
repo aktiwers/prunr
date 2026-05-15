@@ -451,6 +451,7 @@ mod tests {
             tile_size_multiple: None,
             recommended_tile: None,
             attribution_required: false,
+            upscale: None,
         }
     }
 
@@ -468,6 +469,7 @@ mod tests {
             tile_size_multiple: None,
             recommended_tile: None,
             attribution_required: false,
+            upscale: None,
         }
     }
 

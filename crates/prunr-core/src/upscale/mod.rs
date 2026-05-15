@@ -34,28 +34,20 @@ fn pick_optimization_level(descriptor: &prunr_models::ModelDescriptor) -> GraphO
     }
 }
 
-/// Tensor input name for an upscale model. RealESRGAN exports as `"data"`;
-/// HAT-family (Phhofm Nomos8kSCHAT-L) exports as `"input"`. New upscale
-/// variants must extend this match — the `unreachable!` fires loud if a
-/// non-upscale `ModelId` is routed here.
-fn upscale_input_name(id: prunr_models::ModelId) -> &'static str {
-    match id {
-        prunr_models::ModelId::RealEsrganX4Plus => "data",
-        prunr_models::ModelId::Nomos8kSchatL => "input",
-        other => unreachable!("upscale_input_name called with non-upscale ModelId: {other:?}"),
-    }
-}
-
-/// True when the model's ONNX export expects fp16 inputs / emits fp16
-/// outputs. Phhofm's HAT-L ships fp16 only; RealESRGAN is fp32. Drives
-/// the tensor-packing branch in `run_tile` — the wrong dtype fails the
-/// session with `Unexpected input data type` at runtime.
-fn upscale_is_fp16(id: prunr_models::ModelId) -> bool {
-    match id {
-        prunr_models::ModelId::Nomos8kSchatL => true,
-        prunr_models::ModelId::RealEsrganX4Plus => false,
-        other => unreachable!("upscale_is_fp16 called with non-upscale ModelId: {other:?}"),
-    }
+/// Per-model upscale knobs from the REGISTRY. The descriptor's
+/// `upscale: Option<UpscaleModelKnobs>` is `Some` only for
+/// upscale-category entries; this helper unwraps with an
+/// `Inference` error so a non-upscale `ModelId` reaching here fails
+/// loud at the dispatch boundary rather than at the ORT session.
+fn upscale_knobs(descriptor: &prunr_models::ModelDescriptor)
+    -> Result<&prunr_models::UpscaleModelKnobs, CoreError>
+{
+    descriptor.upscale.as_ref().ok_or_else(|| {
+        CoreError::Inference(format!(
+            "{:?} is not an upscale model (no UpscaleModelKnobs in REGISTRY)",
+            descriptor.id
+        ))
+    })
 }
 
 /// CHW f32-or-f16 → HWC u8 inline pack, run inside the session lock so
@@ -165,11 +157,12 @@ where
         None => 16,    // ESRGAN: 16 px safe overlap
     };
 
+    let knobs = upscale_knobs(descriptor)?;
+    let input_name = knobs.input_name;
+    let is_fp16 = knobs.is_fp16;
+
     let model_kind = ModelKind::from(model_id);
     let engine = OrtEngine::new_with_optimization_level(model_kind, intra_threads, level)?;
-
-    let input_name = upscale_input_name(model_id);
-    let is_fp16 = upscale_is_fp16(model_id);
 
     let run_tile = |rgb_tile: &RgbImage, padded_w: u32, padded_h: u32| -> Result<RgbImage, CoreError> {
         const INV_255: f32 = 1.0 / 255.0;
