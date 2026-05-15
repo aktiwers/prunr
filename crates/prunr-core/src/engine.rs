@@ -149,6 +149,20 @@ impl OrtEngine {
         Self::new_with_fallback_and_level(model, intra_threads, false, level)
     }
 
+    /// CPU-only engine with an explicit optimization-level override.
+    /// Used by the upscale dispatcher to avoid OpenVINO's per-input-shape
+    /// lazy graph compilation, which on RRDB-class models (Real-ESRGAN)
+    /// can stall a single dispatch for tens of minutes the first time a
+    /// new tile dimension is seen — the EP cache for upscale wasn't
+    /// hitting in practice.
+    pub fn new_cpu_only_with_optimization_level(
+        model: ModelKind,
+        intra_threads: usize,
+        level: GraphOptimizationLevel,
+    ) -> Result<Self, CoreError> {
+        Self::new_with_fallback_and_level(model, intra_threads, true, level)
+    }
+
     fn new_with_fallback(model: ModelKind, intra_threads: usize, cpu_only: bool) -> Result<Self, CoreError> {
         Self::new_with_fallback_and_level(model, intra_threads, cpu_only, GraphOptimizationLevel::Level3)
     }
