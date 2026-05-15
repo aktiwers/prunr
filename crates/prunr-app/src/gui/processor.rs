@@ -20,7 +20,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::time::Instant;
 
@@ -270,13 +270,13 @@ pub(crate) struct Processor {
     inpaint_bridge_tx: mpsc::Sender<InpaintBridgeMsg>,
     inpaint_bridge_rx: mpsc::Receiver<InpaintBridgeResult>,
     /// In-process upscale dispatch state. A single image is upscaled on a
-    /// background thread; tile progress is exposed to the toolbar via
-    /// `upscale_tile_progress()`. Cancel is a per-dispatch atomic set by
-    /// `cancel_upscale()`; the thread checks it between tiles.
+    /// background thread; live tile progress is published to
+    /// `dispatch_progress` (the canvas overlay reads it). `upscale_active`
+    /// is the in-flight predicate read by `is_upscale_in_flight`. Cancel
+    /// is a per-dispatch atomic set by `cancel_upscale()`; the thread
+    /// checks it between tiles.
     upscale_active: Arc<AtomicBool>,
     upscale_cancel: Arc<AtomicBool>,
-    upscale_tile_done: Arc<AtomicU32>,
-    upscale_tile_total: Arc<AtomicU32>,
     upscale_result_tx: mpsc::Sender<UpscaleResult>,
     upscale_result_rx: mpsc::Receiver<UpscaleResult>,
     /// Unified progress slot. One source of truth for the banner /
@@ -314,22 +314,16 @@ impl Processor {
             inpaint_bridge_rx,
             upscale_active: Arc::new(AtomicBool::new(false)),
             upscale_cancel: Arc::new(AtomicBool::new(false)),
-            upscale_tile_done: Arc::new(AtomicU32::new(0)),
-            upscale_tile_total: Arc::new(AtomicU32::new(0)),
             upscale_result_tx,
             upscale_result_rx,
             dispatch_progress: super::dispatch_progress::DispatchProgressSlot::new(),
         }
     }
 
-    /// Unified progress reader for the banner / modal widgets.
-    /// `None` when no dispatch is in flight. Single source of truth
-    /// that replaces the per-dispatch readers (`upscale_tile_progress`,
-    /// `inpaint_progress`) — they coexist until the widget migration
-    /// is complete.
-    // Reserved for the unified progress widget; not yet wired into a
-    // render path.
-    #[allow(dead_code)]
+    /// Unified progress reader for the canvas overlay
+    /// (`progress_widget::render_banner` / `render_modal`). `None`
+    /// when no dispatch is in flight. Single source of truth across
+    /// the seg, eraser, SD, and upscale paths.
     pub(super) fn dispatch_progress(&self) -> Option<super::dispatch_progress::DispatchProgress> {
         self.dispatch_progress.read()
     }
@@ -345,16 +339,12 @@ impl Processor {
         self.dispatch_progress.set(progress);
     }
 
-    /// `Some((done, total))` while an upscale dispatch is in flight;
-    /// `None` when idle. Both counters are relaxed atomics — the toolbar
-    /// and status bar only need eventual consistency for display purposes.
-    pub fn upscale_tile_progress(&self) -> Option<(u32, u32)> {
-        if !self.upscale_active.load(Ordering::Relaxed) {
-            return None;
-        }
-        let done = self.upscale_tile_done.load(Ordering::Relaxed);
-        let total = self.upscale_tile_total.load(Ordering::Relaxed);
-        Some((done, total))
+    /// `true` while an upscale dispatch is in flight. The intent
+    /// gates (`can_process_intent`, `apply_cancel_shortcut`) read this;
+    /// the live tile counter is on `dispatch_progress` (the canvas
+    /// banner / modal shows it directly).
+    pub fn is_upscale_in_flight(&self) -> bool {
+        self.upscale_active.load(Ordering::Acquire)
     }
 
     /// Per-item generation counter ensures a fresh stroke supersedes the
@@ -862,12 +852,10 @@ impl Processor {
 
         // Release stores pair with the Acquire load in
         // `upscale::tiling::upscale_tiled` (cancel flag) and the Acquire
-        // load in `upscale_tile_progress` (active flag). Without the
+        // load in `is_upscale_in_flight` (active flag). Without the
         // pairing, weakly-ordered architectures can delay propagation.
         self.upscale_active.store(true, Ordering::Release);
         self.upscale_cancel.store(false, Ordering::Release);
-        self.upscale_tile_done.store(0, Ordering::Relaxed);
-        self.upscale_tile_total.store(0, Ordering::Relaxed);
         // Seed the unified slot before the first tile so an early render
         // already shows "Upscaling — tile 0 of …" rather than the prior
         // dispatch's stale data.
@@ -878,8 +866,6 @@ impl Processor {
             step_label: std::borrow::Cow::Borrowed("Loading model"),
         }));
 
-        let done_counter = Arc::clone(&self.upscale_tile_done);
-        let total_counter = Arc::clone(&self.upscale_tile_total);
         let active_flag = Arc::clone(&self.upscale_active);
         let cancel_flag = Arc::clone(&self.upscale_cancel);
         let result_tx = self.upscale_result_tx.clone();
@@ -893,8 +879,6 @@ impl Processor {
                 scale,
                 intra_threads,
                 move |done, total| {
-                    done_counter.store(done, Ordering::Relaxed);
-                    total_counter.store(total, Ordering::Relaxed);
                     progress_slot_for_callback.update(|p| {
                         if let Some(p) = p {
                             p.inner = (done, total);
@@ -940,22 +924,20 @@ mod tests {
     use super::*;
     use prunr_models::ModelId;
 
-    // ── upscale_tile_progress + admission_check ────────────────────────────
+    // ── is_upscale_in_flight + admission_check ─────────────────────────────
 
     #[test]
-    fn upscale_tile_progress_returns_none_when_idle() {
+    fn is_upscale_in_flight_false_when_idle() {
         let p = fixture();
-        assert!(p.upscale_tile_progress().is_none(),
-            "idle Processor must report no tile progress");
+        assert!(!p.is_upscale_in_flight(),
+            "idle Processor must not report an in-flight upscale");
     }
 
     #[test]
-    fn upscale_tile_progress_reads_atomic_counter() {
+    fn is_upscale_in_flight_true_when_active_flag_set() {
         let p = fixture();
-        p.upscale_active.store(true, Ordering::Relaxed);
-        p.upscale_tile_done.store(3, Ordering::Relaxed);
-        p.upscale_tile_total.store(10, Ordering::Relaxed);
-        assert_eq!(p.upscale_tile_progress(), Some((3, 10)));
+        p.upscale_active.store(true, Ordering::Release);
+        assert!(p.is_upscale_in_flight());
     }
 
     #[test]
