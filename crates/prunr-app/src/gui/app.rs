@@ -1846,6 +1846,14 @@ impl PrunrApp {
         self.handle_cancel();
         self.processor.clear_admission();
         self.batch.reset_processing_to_pending();
+        // Clear the unified progress slot so the canvas banner/modal
+        // disappears with the batch reset. Without this, the seg
+        // dispatch_progress lingers from before the cancel and the
+        // overlay keeps painting on top of the idle canvas — the
+        // legacy `render_processing` was AppState-gated so it
+        // disappeared automatically; the unified widget reads the
+        // slot directly and needs an explicit clear.
+        self.processor.set_dispatch_progress(None);
         self.status.text = "Cancelled".to_string();
     }
 
@@ -2619,6 +2627,10 @@ impl PrunrApp {
         self.processor.drain_recipes();
         self.status.text = "Cancelled".to_string();
         self.processor.clear_admission();
+        // Drop the seg dispatch_progress entry so the canvas overlay
+        // disappears with the cancel acknowledgement. Same reason
+        // as `handle_cancel_all_and_reset`.
+        self.processor.set_dispatch_progress(None);
     }
 
     fn on_subprocess_retry(&mut self, reduced_jobs: usize, re_queued_count: usize) {
