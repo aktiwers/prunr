@@ -76,6 +76,19 @@ pub enum PreviewKind {
     Mask,
     /// line_strength / solid_line_color → Tier 2 edge rerun.
     Edge,
+    /// sharpen / ai_blend / saturation / color_match → Tier-2 upscale postprocess
+    /// on the cached upscale_raw buffer. No ORT inference — snapshot provides
+    /// the cached buffer directly.
+    UpscaleTier2,
+}
+
+/// Tier-2 upscale postprocess knob values captured at snapshot time.
+#[derive(Debug, Clone, Copy)]
+pub struct UpscaleTier2Knobs {
+    pub sharpen: f32,
+    pub ai_blend: f32,
+    pub saturation: f32,
+    pub color_match: bool,
 }
 
 /// A completed Tier 2 rerun delivered back to the UI thread.
@@ -342,6 +355,16 @@ pub struct DispatchInputs {
     /// resolution before the resize / refine / feather chain. `None` when
     /// no strokes have been committed.
     pub correction: Option<Arc<prunr_core::brush::MaskCorrection>>,
+    /// For `PreviewKind::UpscaleTier2` only — cached raw upscale buffer from
+    /// Tier-1 inference. Tier-2 postprocess runs on a clone of this buffer.
+    /// `None` for other kinds.
+    pub upscale_raw: Option<Arc<RgbaImage>>,
+    /// For `PreviewKind::UpscaleTier2` only — bicubic baseline at upscale_raw's
+    /// dimensions, used by apply_ai_blend and apply_color_match. Wrapped in Arc
+    /// so repeated preview ticks don't re-resize.
+    pub bicubic_source: Option<Arc<RgbaImage>>,
+    /// For `PreviewKind::UpscaleTier2` only — snapshot of the four Tier-2 knobs.
+    pub upscale_tier2_knobs: Option<UpscaleTier2Knobs>,
 }
 
 pub struct SegTensor {
@@ -394,6 +417,29 @@ impl RunOutput {
 fn run_preview(inputs: DispatchInputs, cancel: &AtomicBool) -> RunOutput {
     if cancel.load(Ordering::Acquire) { return RunOutput::empty(); }
 
+    // UpscaleTier2: no seg/edge tensors involved — run postprocess directly
+    // on the cached upscale_raw buffer.
+    if matches!(inputs.kind, PreviewKind::UpscaleTier2) {
+        let Some(ref raw) = inputs.upscale_raw else { return RunOutput::empty(); };
+        let Some(ref bicubic) = inputs.bicubic_source else { return RunOutput::empty(); };
+        let Some(knobs) = inputs.upscale_tier2_knobs else { return RunOutput::empty(); };
+        let mut out = (**raw).clone();
+        use prunr_core::upscale::{apply_sharpen, apply_ai_blend, apply_saturation, apply_color_match};
+        if knobs.ai_blend < 1.0 - f32::EPSILON {
+            apply_ai_blend(&mut out, bicubic, knobs.ai_blend);
+        }
+        apply_sharpen(&mut out, knobs.sharpen);
+        apply_saturation(&mut out, knobs.saturation);
+        if knobs.color_match {
+            apply_color_match(&mut out, bicubic);
+        }
+        return RunOutput {
+            rgba: Some(out),
+            built_edge_mask: None,
+            built_masked_base: None,
+        };
+    }
+
     // Pipeline shape follows the user's CURRENT `line_mode`, not tensor
     // presence. After a SubjectOutline → Off round-trip we (intentionally)
     // keep both tensors cached, so using tensor-presence as the selector
@@ -433,6 +479,8 @@ fn run_preview(inputs: DispatchInputs, cancel: &AtomicBool) -> RunOutput {
                     }
                 }
             }
+            // Guarded by early-return at the top of run_preview.
+            PreviewKind::UpscaleTier2 => unreachable!(),
         }
     } else {
         (None, None)
@@ -507,6 +555,8 @@ fn run_preview(inputs: DispatchInputs, cancel: &AtomicBool) -> RunOutput {
             };
             RunOutput { rgba: Some(rgba), built_edge_mask, built_masked_base }
         }
+        // Guarded by early-return at the top of run_preview.
+        PreviewKind::UpscaleTier2 => unreachable!(),
     }
 }
 
@@ -863,5 +913,69 @@ mod tests {
         let drained = lp.drain_results();
         assert_eq!(drained.len(), 1);
         assert!(!drained[0].is_final, "pending for this item means drag is still active");
+    }
+
+    #[test]
+    fn preview_kind_upscale_tier2_added() {
+        // UpscaleTier2 is a distinct variant, not aliased to Mask or Edge.
+        assert_ne!(PreviewKind::UpscaleTier2, PreviewKind::Mask);
+        assert_ne!(PreviewKind::UpscaleTier2, PreviewKind::Edge);
+        // Copy + PartialEq + Eq — can be pattern-matched like the others.
+        let kind = PreviewKind::UpscaleTier2;
+        let copied = kind;
+        assert_eq!(kind, copied);
+    }
+
+    #[test]
+    fn live_preview_mark_tweak_upscale_tier2_inserts_pending() {
+        let mut lp = LivePreview::default();
+        lp.mark_tweak(55, PreviewKind::UpscaleTier2);
+        let pending = lp.pending.get(&55).expect("pending entry must exist after mark_tweak");
+        assert_eq!(pending.kind, PreviewKind::UpscaleTier2);
+    }
+
+    #[test]
+    fn live_preview_tier2_run_uses_upscale_raw_not_inference() {
+        // Build a 2×2 upscale_raw buffer: all channels = 100 (mid-grey).
+        let mut raw_buf = RgbaImage::new(2, 2);
+        for p in raw_buf.pixels_mut() {
+            *p = image::Rgba([100u8, 100, 100, 255]);
+        }
+        let raw_arc = Arc::new(raw_buf);
+        // Bicubic source identical (no ai_blend / color_match active).
+        let bicubic_arc = raw_arc.clone();
+
+        let knobs = UpscaleTier2Knobs {
+            sharpen: 0.0,
+            ai_blend: 1.0,
+            saturation: 1.0,
+            color_match: false,
+        };
+
+        // Calling run_preview with UpscaleTier2 + valid buffers must produce
+        // an RGBA output. It must NOT attempt inference (no ORT session in this
+        // process — the result is proof the code path avoids it).
+        use crate::gui::item_settings::ItemSettings;
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let output = run_preview(
+            DispatchInputs {
+                kind: PreviewKind::UpscaleTier2,
+                original: Arc::new(image::DynamicImage::ImageRgba8((*raw_arc).clone())),
+                settings: ItemSettings::default(),
+                seg_tensor: None,
+                edge_tensor: None,
+                secondary_edge_tensor: None,
+                cached_edge_mask: None,
+                cached_masked_base: None,
+                correction: None,
+                upscale_raw: Some(raw_arc.clone()),
+                bicubic_source: Some(bicubic_arc),
+                upscale_tier2_knobs: Some(knobs),
+            },
+            &cancel,
+        );
+        assert!(output.rgba.is_some(), "UpscaleTier2 dispatch must produce an RGBA result");
+        assert!(output.built_edge_mask.is_none(), "UpscaleTier2 must not build an edge mask");
+        assert!(output.built_masked_base.is_none(), "UpscaleTier2 must not build a masked base");
     }
 }
