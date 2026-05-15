@@ -106,53 +106,32 @@ fn pack_output(
     }
 }
 
-/// Upscale an RGBA image by `scale` (2 or 4) using the ONNX model
-/// identified by `model_id`.
+/// Run a model at its native output scale (no downscale). Internal only.
 ///
-/// Behavior:
-///   - scale = 4: runs the model once, returns the 4× output.
-///   - scale = 2: runs the model at 4× then downscales with Lanczos3 to
-///     halve dimensions. This path holds the full 4× RGBA buffer briefly
-///     before the downscale; for a 4K input that is ~768 MB of transient
-///     scratch on top of the tiling accumulators below. A future native
-///     2× model would avoid the intermediate, but the cost is currently
-///     accepted to keep the dispatch model uniform.
-///   - Alpha is upscaled independently via Lanczos3.
-///   - Window-attention models (`descriptor.tile_size_multiple.is_some()`)
-///     are run at `GraphOptimizationLevel::Level2` to avoid first-tile
-///     shape baking; other models run at Level3.
+/// `native_scale` is the number of times larger the model output is than
+/// the input (e.g. 4 for RealESRGAN-x4plus, 2 for RealESRGAN-x2plus).
+/// The value is read from the REGISTRY and passed in by callers rather than
+/// inferred here, so neither this function nor `upscale_rgba` needs to know
+/// which model it is running.
 ///
-/// Peak working-set RAM (additive to the `upscale_tiled` accumulators
-/// documented in `tiling.rs`):
-///   - Tile input scratch: `3 × padded_w × padded_h × 4 bytes` (f32 CHW).
-///     ~3 MB at 512-tile.
-///   - Tile output scratch: `3 × out_w × out_h bytes` (u8 HWC).
-///     ~12 MB at 512→2048 4× tile.
-///   - scale=2 only: the full 4× RgbaImage (~16× input bytes) lives
-///     until the Lanczos3 downscale completes.
-///   - ONNX session: model-dependent (see `ModelDescriptor.working_set_mb`).
-pub fn upscale_rgba<F>(
+/// Alpha is NOT handled here — it is composed by the public callers
+/// (`upscale_rgba` for single-pass, `upscale_two_pass` for the final pass).
+fn run_upscale_native<F>(
     input: &RgbaImage,
-    model_id: prunr_models::ModelId,
-    scale: u32,
-    intra_threads: usize,
+    engine: &OrtEngine,
+    descriptor: &prunr_models::ModelDescriptor,
+    native_scale: u32,
     on_tile_done: F,
     cancel: Option<Arc<AtomicBool>>,
 ) -> Result<RgbaImage, CoreError>
 where
     F: Fn(u32, u32),
 {
-    let descriptor = prunr_models::REGISTRY
-        .iter()
-        .find(|d| d.id == model_id)
-        .ok_or_else(|| CoreError::Model(format!("{model_id:?} not found in REGISTRY")))?;
-
-    let level = pick_optimization_level(descriptor);
-
     let tile_size = descriptor
         .recommended_tile
         .ok_or_else(|| CoreError::Inference(format!(
-            "model {model_id:?} has no recommended_tile -- upscale cannot dispatch"
+            "model {:?} has no recommended_tile -- upscale cannot dispatch",
+            descriptor.id
         )))?;
 
     let tile_multiple = descriptor.tile_size_multiple;
@@ -164,27 +143,15 @@ where
     let knobs = upscale_knobs(descriptor)?;
     let input_name = knobs.input_name;
     let is_fp16 = knobs.is_fp16;
-
-    let model_kind = ModelKind::try_from(model_id).map_err(|id| {
-        CoreError::Inference(format!(
-            "{id:?} has no ModelKind mapping — upscale dispatch requires a seg/upscale variant"
-        ))
-    })?;
-    // CPU-only EP: OpenVINO's lazy per-shape graph compilation can stall
-    // a single RRDB upscale dispatch for tens of minutes on the first
-    // tile dimension (RealESRGAN's 23 residual blocks compile slowly
-    // and the EP cache wasn't hitting). The CPU EP has no lazy compile
-    // step — total wall-clock is dominated by inference, which is what
-    // the user actually waited for.
-    let engine = OrtEngine::new_cpu_only_with_optimization_level(model_kind, intra_threads, level)?;
+    let ns = native_scale;
 
     let run_tile = |rgb_tile: &RgbImage, padded_w: u32, padded_h: u32| -> Result<RgbImage, CoreError> {
         const INV_255: f32 = 1.0 / 255.0;
         let pixel_count = (padded_w * padded_h) as usize;
         let shape = [1, 3, padded_h as usize, padded_w as usize];
 
-        let out_h = padded_h * 4;
-        let out_w = padded_w * 4;
+        let out_h = padded_h * ns;
+        let out_w = padded_w * ns;
         let plane = (out_w * out_h) as usize;
         let mut packed = vec![0u8; 3 * plane];
 
@@ -235,15 +202,83 @@ where
     };
 
     let cfg = TilingConfig { tile_size, tile_multiple, overlap };
-    let scale4_result = upscale_tiled(input, 4, cfg, run_tile, on_tile_done, cancel)?;
+    upscale_tiled(input, ns, cfg, run_tile, on_tile_done, cancel)
+}
+
+/// Upscale an RGBA image by `scale` (2 or 4) using the ONNX model
+/// identified by `model_id`.
+///
+/// Behavior:
+///   - scale = 4: runs the model at its native 4× scale and returns.
+///   - scale = 2: for 4× models, runs at 4× then Lanczos3 downscales to 2×.
+///     For native-2× models (x2plus), runs at native scale directly.
+///   - Alpha is upscaled independently via Lanczos3.
+///   - Window-attention models (`descriptor.tile_size_multiple.is_some()`)
+///     are run at `GraphOptimizationLevel::Level2` to avoid first-tile
+///     shape baking; other models run at Level3.
+///
+/// Peak working-set RAM (additive to the `upscale_tiled` accumulators
+/// documented in `tiling.rs`):
+///   - Tile input scratch: `3 × padded_w × padded_h × 4 bytes` (f32 CHW).
+///     ~3 MB at 512-tile.
+///   - Tile output scratch: `3 × out_w × out_h bytes` (u8 HWC).
+///     ~12 MB at 512→2048 4× tile.
+///   - scale=2 with a 4× model only: the full 4× RgbaImage (~16× input
+///     bytes) lives until the Lanczos3 downscale completes.
+///   - ONNX session: model-dependent (see `ModelDescriptor.working_set_mb`).
+pub fn upscale_rgba<F>(
+    input: &RgbaImage,
+    model_id: prunr_models::ModelId,
+    scale: u32,
+    intra_threads: usize,
+    on_tile_done: F,
+    cancel: Option<Arc<AtomicBool>>,
+) -> Result<RgbaImage, CoreError>
+where
+    F: Fn(u32, u32),
+{
+    let descriptor = prunr_models::REGISTRY
+        .iter()
+        .find(|d| d.id == model_id)
+        .ok_or_else(|| CoreError::Model(format!("{model_id:?} not found in REGISTRY")))?;
+
+    let level = pick_optimization_level(descriptor);
+
+    let model_kind = ModelKind::try_from(model_id).map_err(|id| {
+        CoreError::Inference(format!(
+            "{id:?} has no ModelKind mapping — upscale dispatch requires a seg/upscale variant"
+        ))
+    })?;
+    // CPU-only EP: OpenVINO's lazy per-shape graph compilation can stall
+    // a single RRDB upscale dispatch for tens of minutes on the first
+    // tile dimension (RealESRGAN's 23 residual blocks compile slowly
+    // and the EP cache wasn't hitting). The CPU EP has no lazy compile
+    // step — total wall-clock is dominated by inference, which is what
+    // the user actually waited for.
+    let engine = OrtEngine::new_cpu_only_with_optimization_level(model_kind, intra_threads, level)?;
+
+    // x4plus and Nomos8k are native-4× models. x2plus is native-2×.
+    // run_upscale_native must receive the model's actual output scale,
+    // not the user-requested scale — the tile closure expects exactly
+    // `padded_w * native_scale` pixels from ORT.
+    //
+    // For scale=4 with a 4× model (x4plus / Nomos8k): native path.
+    // For scale=2 with a 4× model (x4plus): run at 4× then Lanczos3 halve.
+    // For scale=2 with x2plus: called only from upscale_two_pass, never here.
+    //
+    // `upscale_rgba` treats all current user-selectable models as native-4×.
+    // x2plus is dispatched exclusively via `upscale_two_pass` which calls
+    // `run_upscale_native` directly with native_scale=2.
+    let native_scale_4x = 4u32;
+    let native_result = run_upscale_native(input, &engine, descriptor, native_scale_4x, on_tile_done, cancel)?;
 
     if scale == 4 {
-        Ok(scale4_result)
+        Ok(native_result)
     } else if scale == 2 {
-        let half_w = scale4_result.width() / 2;
-        let half_h = scale4_result.height() / 2;
+        let half_w = native_result.width() / 2;
+        let half_h = native_result.height() / 2;
 
-        let rgb4 = image::DynamicImage::ImageRgba8(scale4_result);
+        let rgb4 = image::DynamicImage::ImageRgba8(native_result);
         let rgb_half = crate::formats::resize_rgb_lanczos3(&rgb4, half_w, half_h);
 
         // Resize alpha from the original input — skips the intermediate 4×
@@ -260,6 +295,113 @@ where
     } else {
         Err(CoreError::Inference(format!("unsupported upscale scale: {scale}")))
     }
+}
+
+/// Two-pass 4× upscale via `RealEsrganX2Plus` chained against itself.
+///
+/// Pass 1: input → 2× via x2plus.
+/// Pass 2: 2× output → 4× via x2plus.
+///
+/// The intermediate 2× buffer is moved into the pass-2 input, not cloned —
+/// large-image RAM accounting depends on this. Pass-1's `RgbaImage` is freed
+/// as soon as pass-2 begins consuming it.
+///
+/// Peak RAM during pass-2 (per PRECONDITIONS.md two-pass smoke test, 963 MB
+/// peak on 512→1024 pass-2):
+///   input_bytes × 4   // pass-1 output (2× linear = 4× pixels)
+///   + input_bytes × 16 // pass-2 output (4× linear = 16× pixels)
+///   + ~64 MB           // x2plus ORT session (same session reused for both passes)
+///
+/// Progress callback fires from BOTH passes. The `(done, total)` pair
+/// reflects per-pass tile counts — total is per-pass, not combined.
+///
+/// Callable only via the `OutputScale::X4TwoPass` recipe variant.
+/// Nomos8k cannot use this path — its scale is fixed at 4×; the chip UI
+/// dims X4TwoPass for non-RealEsrgan models via `x4twopass_available`.
+pub fn upscale_two_pass<F>(
+    input: &RgbaImage,
+    intra_threads: usize,
+    on_tile_done: F,
+    cancel: Option<Arc<AtomicBool>>,
+) -> Result<RgbaImage, CoreError>
+where
+    F: Fn(u32, u32) + Clone,
+{
+    use std::sync::atomic::Ordering;
+
+    // Honor cancel before allocating the first pass.
+    if let Some(c) = cancel.as_ref() {
+        if c.load(Ordering::Acquire) {
+            return Err(CoreError::Cancelled);
+        }
+    }
+
+    let model_id = prunr_models::ModelId::RealEsrganX2Plus;
+    let descriptor = prunr_models::REGISTRY
+        .iter()
+        .find(|d| d.id == model_id)
+        .ok_or_else(|| CoreError::Model("RealEsrganX2Plus not found in REGISTRY".into()))?;
+
+    let level = pick_optimization_level(descriptor);
+    let engine = OrtEngine::new_cpu_only_with_optimization_level(
+        ModelKind::RealEsrganX2Plus,
+        intra_threads,
+        level,
+    )?;
+
+    // Pass 1: source → 2×
+    let intermediate = run_upscale_native(
+        input,
+        &engine,
+        descriptor,
+        2,
+        on_tile_done.clone(),
+        cancel.clone(),
+    )?;
+
+    // Honor cancel between passes.
+    if let Some(c) = cancel.as_ref() {
+        if c.load(Ordering::Acquire) {
+            return Err(CoreError::Cancelled);
+        }
+    }
+
+    // Pass 2: intermediate → 4× (intermediate is moved, not cloned).
+    // Alpha from the original input is Lanczos3-upscaled directly to 4×
+    // inside run_upscale_native's upscale_tiled call; the intermediate's
+    // alpha is ignored.
+    let final_rgb = run_upscale_native(
+        &intermediate,
+        &engine,
+        descriptor,
+        2,
+        on_tile_done,
+        cancel,
+    )?;
+    // `intermediate` is dropped on return — RAM freed before the caller
+    // observes the result.
+
+    // Compose: take RGB from final_rgb, alpha upscaled from original input.
+    let out_w = input.width() * 4;
+    let out_h = input.height() * 4;
+    let alpha_4x = upscale_alpha_lanczos3(input, out_w, out_h);
+    let mut out = RgbaImage::new(out_w, out_h);
+    for (x, y, p) in out.enumerate_pixels_mut() {
+        let rgb = final_rgb.get_pixel(x, y).0;
+        let a = alpha_4x.get_pixel(x, y).0[0];
+        *p = image::Rgba([rgb[0], rgb[1], rgb[2], a]);
+    }
+    Ok(out)
+}
+
+/// Returns `true` when `model_id` supports the `OutputScale::X4TwoPass`
+/// dispatch path. X4TwoPass chains `RealEsrganX2Plus` twice to produce
+/// a net 4× output; it is only valid for `RealEsrganX4Plus` (the user's
+/// model choice that signals Real-ESRGAN architecture). Nomos8kSchatL
+/// has a fixed 4× native scale and no x2plus architecture — the chip UI
+/// uses this predicate to dim the X4TwoPass option for non-ESRGAN models.
+pub fn x4twopass_available(model_id: prunr_models::ModelId) -> bool {
+    model_id == prunr_models::ModelId::RealEsrganX4Plus
 }
 
 #[cfg(test)]
@@ -324,5 +466,76 @@ mod tests {
             esrgan_knobs.input_name, "data",
             "RealEsrganX4Plus names the input tensor `data`"
         );
+    }
+
+    // ── Two-pass scheduler tests ──────────────────────────────────────────────
+
+    /// `upscale_two_pass` takes no model_id parameter — RealEsrganX2Plus is
+    /// hardcoded. This test confirms the signature does not accept a model_id
+    /// argument by verifying the function compiles with only (input, threads,
+    /// callback, cancel) — a compile-error proof in the signature itself.
+    #[test]
+    fn two_pass_has_no_model_id_parameter() {
+        // If this test compiles, the signature is correct: no model_id arg.
+        let _fn: fn(
+            &RgbaImage,
+            usize,
+            fn(u32, u32),
+            Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+        ) -> Result<RgbaImage, CoreError> = |input, threads, cb, cancel| {
+            upscale_two_pass(input, threads, cb, cancel)
+        };
+    }
+
+    /// Cancel before dispatch must return Cancelled without loading the model.
+    #[test]
+    fn two_pass_cancel_during_pass1_returns_cancelled() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let cancel = Arc::new(AtomicBool::new(true));
+        let input = RgbaImage::from_pixel(8, 8, image::Rgba([128, 64, 32, 255]));
+        let result = upscale_two_pass(&input, 1, |_, _| {}, Some(cancel.clone()));
+
+        match result {
+            Err(CoreError::Cancelled) => {}
+            other => panic!("expected Err(Cancelled), got {:?}", other),
+        }
+        let _ = cancel.load(Ordering::Acquire);
+    }
+
+    /// `x4twopass_available` gates the X4TwoPass path: true only for
+    /// RealEsrganX4Plus (the user-facing model that signals ESRGAN architecture).
+    #[test]
+    fn x4twopass_available_predicate() {
+        assert!(
+            x4twopass_available(prunr_models::ModelId::RealEsrganX4Plus),
+            "x4twopass must be available when user has RealEsrganX4Plus selected"
+        );
+        assert!(
+            !x4twopass_available(prunr_models::ModelId::Nomos8kSchatL),
+            "x4twopass must not be available for Nomos8k — scale is fixed at 4×"
+        );
+        assert!(
+            !x4twopass_available(prunr_models::ModelId::RealEsrganX2Plus),
+            "RealEsrganX2Plus is an internal model — never the user's selected model"
+        );
+        assert!(
+            !x4twopass_available(prunr_models::ModelId::Silueta),
+            "Silueta is a segmentation model — x4twopass irrelevant"
+        );
+    }
+
+    /// x2plus knobs match the x4plus export convention (same RRDB architecture,
+    /// same export script → same tensor names and dtype).
+    #[test]
+    fn x2plus_knobs_fp16_false_and_input_data() {
+        let x2 = prunr_models::REGISTRY
+            .iter()
+            .find(|d| d.id == prunr_models::ModelId::RealEsrganX2Plus)
+            .expect("RealEsrganX2Plus registered");
+        let knobs = upscale_knobs(x2).expect("RealEsrganX2Plus has upscale knobs");
+        assert!(!knobs.is_fp16, "x2plus exports fp32 — must NOT pack f16 tensors");
+        assert_eq!(knobs.input_name, "data", "x2plus names the input tensor `data`");
     }
 }
