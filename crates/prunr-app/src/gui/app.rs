@@ -615,7 +615,7 @@ impl PrunrApp {
             // an `is_file()` syscall per frame would add 60 stats/sec
             // while the toolbar is visible. Deletion-after-select is
             // surfaced at dispatch time by the error toast.
-            let is_in_flight = self.processor.upscale_tile_progress().is_some();
+            let is_in_flight = self.processor.is_upscale_in_flight();
             let item_loaded = self.batch.selected_item().is_some();
             return can_process_upscale(is_in_flight, item_loaded);
         }
@@ -2781,7 +2781,7 @@ impl PrunrApp {
     /// → open modal. Upscale wins because it occupies the whole canvas and
     /// the tile-by-tile display is the primary interactive feedback.
     fn apply_cancel_shortcut(&mut self, ctx: &egui::Context) {
-        if self.processor.upscale_tile_progress().is_some() {
+        if self.processor.is_upscale_in_flight() {
             self.processor.cancel_upscale();
         } else if self.processor.any_inpaint_in_flight() {
             self.processor.cancel_all_inpaints();
