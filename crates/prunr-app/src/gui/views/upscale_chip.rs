@@ -16,8 +16,6 @@ use super::hint;
 use crate::gui::theme;
 
 /// User-visible label for each OutputScale variant.
-/// Single source of truth — both the chip face and the popover's
-/// selectable_label rows read this function.
 pub fn output_scale_label(s: OutputScale) -> &'static str {
     match s {
         OutputScale::X2 => "2\u{00d7}",
@@ -72,12 +70,14 @@ pub(crate) fn render_output_scale_chip(
                 OutputScale::X4TwoPass => x4twopass_available(model_id),
                 _ => true,
             };
-            let row_label = if matches!(option, OutputScale::X4TwoPass) && !available {
-                "4\u{00d7} (two-pass) \u{2014} Real-ESRGAN only"
-            } else {
-                output_scale_label(option)
-            };
             ui.add_enabled_ui(available, |ui| {
+                let label_owned;
+                let row_label: &str = if matches!(option, OutputScale::X4TwoPass) && !available {
+                    label_owned = format!("{} \u{2014} Real-ESRGAN only", output_scale_label(option));
+                    &label_owned
+                } else {
+                    output_scale_label(option)
+                };
                 if ui
                     .selectable_label(*value == option, row_label)
                     .clicked()
