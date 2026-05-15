@@ -27,7 +27,7 @@ use std::sync::{Arc, Mutex};
 /// per-step text source. New variants (depth, mat-cutting, …) extend
 /// this enum and the widget match.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DispatchKind {
+pub enum ProgressKind {
     /// Background-removal segmentation pipeline (BiRefNet, Silueta, …).
     Seg,
     /// Small inpaint models running in-process (LaMa, BigLaMa, MIGAN).
@@ -38,14 +38,14 @@ pub enum DispatchKind {
     Upscale,
 }
 
-impl DispatchKind {
+impl ProgressKind {
     /// Verb form for the headline ("Erasing", "Upscaling", …).
     pub fn headline(self) -> &'static str {
         match self {
-            DispatchKind::Seg => "Processing",
-            DispatchKind::Eraser => "Erasing",
-            DispatchKind::SdInpaint => "Erasing",
-            DispatchKind::Upscale => "Upscaling",
+            ProgressKind::Seg => "Processing",
+            ProgressKind::Eraser => "Erasing",
+            ProgressKind::SdInpaint => "Erasing",
+            ProgressKind::Upscale => "Upscaling",
         }
     }
 
@@ -55,24 +55,24 @@ impl DispatchKind {
     /// reads cleanly.
     pub fn inner_noun(self) -> &'static str {
         match self {
-            DispatchKind::Upscale => "tile",
-            DispatchKind::Seg | DispatchKind::Eraser | DispatchKind::SdInpaint => "step",
+            ProgressKind::Upscale => "tile",
+            ProgressKind::Seg | ProgressKind::Eraser | ProgressKind::SdInpaint => "step",
         }
     }
 
     /// Singular noun for the outer counter when set. Today this is
     /// only SD/Eraser's tile-of-stroke. The match stays exhaustive
-    /// rather than constant — a new `DispatchKind` variant fails the
+    /// rather than constant — a new `ProgressKind` variant fails the
     /// build until someone makes an explicit decision about whether
     /// it has an outer dimension and what to call it.
     pub fn outer_noun(self) -> &'static str {
         match self {
-            DispatchKind::SdInpaint | DispatchKind::Eraser => "tile",
+            ProgressKind::SdInpaint | ProgressKind::Eraser => "tile",
             // Seg and Upscale never set `outer` today, so this label
             // is unreachable in practice. Return the same noun for
             // future-proofing if either grows a per-batch or
             // per-tile-pass outer counter.
-            DispatchKind::Seg | DispatchKind::Upscale => "tile",
+            ProgressKind::Seg | ProgressKind::Upscale => "tile",
         }
     }
 }
@@ -82,7 +82,7 @@ impl DispatchKind {
 /// `Cow::Borrowed(&'static str)`.
 #[derive(Debug, Clone)]
 pub struct DispatchProgress {
-    pub kind: DispatchKind,
+    pub kind: ProgressKind,
     /// Per-stroke / per-batch unit when applicable. `None` for
     /// non-tiled dispatches (Seg, Upscale today). `Some((current, total))`
     /// for SD strokes split into multiple 512² patches.
@@ -225,7 +225,7 @@ mod tests {
 
     fn upscale(inner: (u32, u32)) -> DispatchProgress {
         DispatchProgress {
-            kind: DispatchKind::Upscale,
+            kind: ProgressKind::Upscale,
             outer: None,
             inner,
             step_label: Cow::Borrowed("Real-ESRGAN forward pass"),
@@ -234,7 +234,7 @@ mod tests {
 
     fn sd_nested(outer: (u32, u32), inner: (u32, u32)) -> DispatchProgress {
         DispatchProgress {
-            kind: DispatchKind::SdInpaint,
+            kind: ProgressKind::SdInpaint,
             outer: Some(outer),
             inner,
             step_label: Cow::Borrowed("Denoising"),
@@ -311,7 +311,7 @@ mod tests {
     #[test]
     fn fraction_handles_zero_outer_total_gracefully() {
         let p = DispatchProgress {
-            kind: DispatchKind::SdInpaint,
+            kind: ProgressKind::SdInpaint,
             outer: Some((0, 0)),
             inner: (1, 8),
             step_label: Cow::Borrowed("Denoising"),
@@ -352,11 +352,11 @@ mod tests {
     fn dispatch_kind_headlines_and_nouns_are_distinct() {
         // Pin the strings — widgets concatenate them, so a rename would
         // be a user-visible label change.
-        assert_eq!(DispatchKind::Seg.headline(), "Processing");
-        assert_eq!(DispatchKind::Eraser.headline(), "Erasing");
-        assert_eq!(DispatchKind::SdInpaint.headline(), "Erasing");
-        assert_eq!(DispatchKind::Upscale.headline(), "Upscaling");
-        assert_eq!(DispatchKind::Upscale.inner_noun(), "tile");
-        assert_eq!(DispatchKind::Seg.inner_noun(), "step");
+        assert_eq!(ProgressKind::Seg.headline(), "Processing");
+        assert_eq!(ProgressKind::Eraser.headline(), "Erasing");
+        assert_eq!(ProgressKind::SdInpaint.headline(), "Erasing");
+        assert_eq!(ProgressKind::Upscale.headline(), "Upscaling");
+        assert_eq!(ProgressKind::Upscale.inner_noun(), "tile");
+        assert_eq!(ProgressKind::Seg.inner_noun(), "step");
     }
 }

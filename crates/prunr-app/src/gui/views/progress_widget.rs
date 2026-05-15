@@ -210,12 +210,12 @@ fn render_cancel_button(ui: &mut egui::Ui, canvas_rect: Rect, center_y: f32) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gui::dispatch_progress::DispatchKind;
+    use crate::gui::dispatch_progress::ProgressKind;
     use std::borrow::Cow;
 
     fn upscale(inner: (u32, u32)) -> DispatchProgress {
         DispatchProgress {
-            kind: DispatchKind::Upscale,
+            kind: ProgressKind::Upscale,
             outer: None,
             inner,
             step_label: Cow::Borrowed("Tile inference"),
@@ -224,7 +224,7 @@ mod tests {
 
     fn sd_nested(outer: (u32, u32), inner: (u32, u32)) -> DispatchProgress {
         DispatchProgress {
-            kind: DispatchKind::SdInpaint,
+            kind: ProgressKind::SdInpaint,
             outer: Some(outer),
             inner,
             step_label: Cow::Borrowed("Denoising"),
@@ -258,7 +258,7 @@ mod tests {
     #[test]
     fn banner_label_indeterminate_uses_step_label() {
         let p = DispatchProgress {
-            kind: DispatchKind::Seg,
+            kind: ProgressKind::Seg,
             outer: None,
             inner: (0, 0),
             step_label: Cow::Borrowed("Loading model"),
