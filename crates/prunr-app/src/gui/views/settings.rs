@@ -407,6 +407,23 @@ fn render_tab_behavior(ui: &mut egui::Ui, settings: &mut Settings) {
     hint(ui, "Collapse the toolbar when the cursor leaves it. Toggle with Shift+H.");
     ui.add_space(theme::SPACE_MD);
 
+    section_heading(ui, "Progress display");
+    ui.horizontal(|ui| {
+        ui.radio_value(
+            &mut settings.progress_style,
+            crate::gui::settings::ProgressStyle::Modal,
+            RichText::new("Modal").color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY),
+        );
+        ui.add_space(theme::SPACE_SM);
+        ui.radio_value(
+            &mut settings.progress_style,
+            crate::gui::settings::ProgressStyle::Banner,
+            RichText::new("Banner").color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY),
+        );
+    });
+    hint(ui, "Modal: centered pill with step details + Esc hint. Banner: top strip with inline Cancel.");
+    ui.add_space(theme::SPACE_MD);
+
     section_heading(ui, "Stack passes (chain mode)");
     ui.checkbox(&mut settings.chain_mode, RichText::new("Use last result as input")
         .color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY));
