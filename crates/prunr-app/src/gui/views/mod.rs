@@ -122,7 +122,7 @@ pub fn model_label(model: SettingsModel, short: bool) -> String {
         SettingsModel::Silueta => (ICON_SPRINT.codepoint, "Silueta", "fast", "~4 MB"),
         SettingsModel::U2net => (ICON_SMART_TOY.codepoint, "U2Net", "quality", "~170 MB"),
         SettingsModel::BiRefNetLite => (ICON_NEUROLOGY.codepoint, "BiRefNet", "detail", "~214 MB"),
-        SettingsModel::None => (ICON_BLOCK.codepoint, "No model", "No background removal", "0 MB"),
+        SettingsModel::None => (ICON_BLOCK.codepoint, "No model", "No model selected", "0 MB"),
         SettingsModel::Inpaint => (ICON_BRUSH.codepoint, "Eraser (LaMa)", "object removal", "~199 MB"),
         SettingsModel::BigInpaint => (ICON_BRUSH.codepoint, "Eraser (Big-LaMa)", "sharper fills", "~199 MB"),
         SettingsModel::MiganInpaint => (ICON_BRUSH.codepoint, "Eraser (MI-GAN)", "compact GAN", "~26 MB"),
