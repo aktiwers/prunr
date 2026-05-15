@@ -286,4 +286,40 @@ mod tests {
             "RealEsrganX4Plus must use Level3 (no tile_size_multiple)"
         );
     }
+
+    /// `is_fp16` selects the output-extraction dtype in `pack_output`.
+    /// A regression that flipped Nomos8kSCHAT-L's flag to `false` (or
+    /// RealESRGAN's to `true`) would surface as a runtime ORT
+    /// "Unexpected input data type" panic on the first dispatch —
+    /// caught here at compile-time-of-the-test instead.
+    #[test]
+    fn upscale_knobs_fp16_matches_export() {
+        let nomos = prunr_models::REGISTRY
+            .iter()
+            .find(|d| d.id == prunr_models::ModelId::Nomos8kSchatL)
+            .expect("Nomos8kSchatL registered");
+        let nomos_knobs = upscale_knobs(nomos).expect("Nomos8kSchatL has upscale knobs");
+        assert!(
+            nomos_knobs.is_fp16,
+            "Nomos8kSchatL exports fp16 — dispatch must pack f16 tensors"
+        );
+        assert_eq!(
+            nomos_knobs.input_name, "input",
+            "Nomos8kSchatL (Phhofm HAT-L) names the input tensor `input`"
+        );
+
+        let esrgan = prunr_models::REGISTRY
+            .iter()
+            .find(|d| d.id == prunr_models::ModelId::RealEsrganX4Plus)
+            .expect("RealEsrganX4Plus registered");
+        let esrgan_knobs = upscale_knobs(esrgan).expect("RealEsrganX4Plus has upscale knobs");
+        assert!(
+            !esrgan_knobs.is_fp16,
+            "RealEsrganX4Plus exports f32 — dispatch must NOT pack f16"
+        );
+        assert_eq!(
+            esrgan_knobs.input_name, "data",
+            "RealEsrganX4Plus names the input tensor `data`"
+        );
+    }
 }
