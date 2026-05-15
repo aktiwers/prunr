@@ -366,9 +366,12 @@ impl BatchItem {
     }
 
     /// Clear the cached upscale_raw buffer and the derived bicubic_source.
-    /// Called on any Tier-1 upscale knob change (output_scale / pre_denoise /
-    /// brightness_lift), model switch into/out of an upscale model, or
-    /// chain-mode input change.
+    /// Called on model switch and on item error. Tier-1 knob changes do NOT
+    /// call this — the next dispatch's pump_upscale_results overwrites the
+    /// buffer in-place, so explicit invalidation would just drop work the
+    /// next dispatch is about to redo. Model switch is special because the
+    /// next dispatch may never happen (user may drag a Tier-2 knob first),
+    /// and the stale buffer is from the wrong model.
     pub(crate) fn invalidate_upscale_cache(&mut self) {
         self.upscale_raw = None;
         self.bicubic_source = None;
