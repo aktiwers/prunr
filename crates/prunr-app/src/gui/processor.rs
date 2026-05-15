@@ -603,14 +603,14 @@ impl Processor {
                     }
                     // Mirror into the unified slot so the banner / modal
                     // sees the SD inpaint's two-level counter.
-                    use super::dispatch_progress::{DispatchKind, DispatchProgress};
+                    use super::dispatch_progress::{ProgressKind, DispatchProgress};
                     let outer = if outer_total > 0 {
                         Some((outer_current, outer_total))
                     } else {
                         None
                     };
                     self.dispatch_progress.set(Some(DispatchProgress {
-                        kind: DispatchKind::SdInpaint,
+                        kind: ProgressKind::SdInpaint,
                         outer,
                         inner: (current, total),
                         step_label: std::borrow::Cow::Borrowed("Denoising"),
@@ -860,7 +860,7 @@ impl Processor {
         // already shows "Upscaling — tile 0 of …" rather than the prior
         // dispatch's stale data.
         self.dispatch_progress.set(Some(super::dispatch_progress::DispatchProgress {
-            kind: super::dispatch_progress::DispatchKind::Upscale,
+            kind: super::dispatch_progress::ProgressKind::Upscale,
             outer: None,
             inner: (0, 0),
             step_label: std::borrow::Cow::Borrowed("Loading model"),
