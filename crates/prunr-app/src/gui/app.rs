@@ -532,10 +532,17 @@ impl PrunrApp {
     }
 
     /// Single source of truth for the Process / Reprocess action.
-    /// Routes between inpaint dispatch (eraser models) and the seg pipeline,
-    /// with consistent gating. All input surfaces — toolbar button, Cmd+R
-    /// keyboard shortcut, future menu items — call this.
+    /// Routes between upscale dispatch, inpaint dispatch (eraser models),
+    /// and the seg pipeline, with consistent gating. All input surfaces —
+    /// toolbar button, Cmd+R keyboard shortcut, future menu items — call this.
     pub fn handle_process_intent(&mut self) {
+        if !self.can_process_intent() {
+            return;
+        }
+        if self.settings.model.is_upscale() {
+            self.dispatch_upscale_intent();
+            return;
+        }
         if self.settings.model.is_inpaint() {
             let Some(idx) = self.batch.selected_idx_clamped() else { return };
             let has_correction = self.batch.items.get(idx).is_some_and(
@@ -548,10 +555,60 @@ impl PrunrApp {
         }
     }
 
+    /// Upscale branch of `handle_process_intent`. Resolves the input image
+    /// (chain mode: use existing result; otherwise: source), then hands off
+    /// to `Processor::dispatch_upscale`. Must only be called after
+    /// `can_process_intent()` confirms the model is installed and idle.
+    fn dispatch_upscale_intent(&mut self) {
+        let item = match self.batch.selected_item() {
+            Some(i) => i,
+            None => return,
+        };
+        let item_id = item.id;
+        let model_id = match self.settings.model.to_model_id() {
+            Some(id) => id,
+            None => return,
+        };
+        let input: image::RgbaImage = if self.settings.chain_mode {
+            match item.result_rgba.as_ref() {
+                Some(arc) => (**arc).clone(),
+                None => match item.source_rgba.as_ref() {
+                    Some(arc) => (**arc).clone(),
+                    None => {
+                        tracing::warn!(item_id, "upscale dispatch skipped: no source RGBA available");
+                        return;
+                    }
+                },
+            }
+        } else {
+            match item.source_rgba.as_ref() {
+                Some(arc) => (**arc).clone(),
+                None => {
+                    tracing::warn!(item_id, "upscale dispatch skipped: source RGBA unavailable");
+                    return;
+                }
+            }
+        };
+        let scale = item.settings.upscale_scale;
+        let intra_threads = prunr_core::batch::ort_intra_threads(self.settings.parallel_jobs);
+        tracing::info!(item_id, ?model_id, scale, "upscale dispatched");
+        self.processor.dispatch_upscale(item_id, input, model_id, scale, intra_threads);
+    }
+
     /// Toolbar mirror for `handle_process_intent`. `add_enabled(...)` reads
     /// this so the button's disabled state and the dispatch's gating can't
     /// drift independently.
     pub fn can_process_intent(&self) -> bool {
+        if self.settings.model.is_upscale() {
+            let model_id = match self.settings.model.to_model_id() {
+                Some(id) => id,
+                None => return false,
+            };
+            let is_available = prunr_models::is_available(model_id);
+            let is_in_flight = self.processor.upscale_tile_progress().is_some();
+            let item_loaded = self.batch.selected_item().is_some();
+            return can_process_upscale(is_available, is_in_flight, item_loaded);
+        }
         if self.settings.model.is_inpaint() {
             self.batch.selected_item().is_some_and(
                 |i| i.mask_correction.is_some() || i.last_inpaint_correction.is_some(),
@@ -948,6 +1005,51 @@ impl PrunrApp {
                 (item.id, item.source.clone(), Some(new_rgba))
             };
             self.batch.request_thumbnail(item_id, &source, result_rgba.as_ref());
+        }
+        ctx.request_repaint();
+    }
+
+    /// Drain completed upscale results and apply them to the matching item.
+    /// A stale result (the user fired a new dispatch before the previous one
+    /// finished, or an admission-refused run delivered nothing) is silently
+    /// dropped when no in-flight dispatch is registered. `.try_recv()` keeps
+    /// this non-blocking.
+    fn pump_upscale_results(&mut self, ctx: &egui::Context) {
+        let results = self.processor.pump_upscale_results();
+        if results.is_empty() {
+            return;
+        }
+        let handles = self.batch.bg_io.tex_prep_handles();
+        let switch = self.result_switch_id;
+        for r in results {
+            let item_id = r.item_id;
+            match r.result {
+                Ok(rgba) => {
+                    let new_rgba = Arc::new(rgba);
+                    let Some(item) = self.batch.find_by_id_mut(item_id) else { continue };
+                    item.result_rgba = Some(new_rgba.clone());
+                    item.status = BatchStatus::Done;
+                    item.result_tex_pending = true;
+                    item.thumb_pending = true;
+                    let source = item.source.clone();
+                    Self::spawn_tex_prep(
+                        new_rgba.clone(), item.id,
+                        Self::tex_name("upscale", item.id, Some(switch)),
+                        true, handles.clone(), ctx.clone(),
+                    );
+                    self.batch.request_thumbnail(item_id, &source, Some(&new_rgba));
+                    tracing::info!(item_id, "upscale result applied");
+                }
+                Err(prunr_core::CoreError::Cancelled) => {
+                    tracing::info!(item_id, "upscale cancelled by user");
+                    self.toasts.info("Upscale cancelled");
+                }
+                Err(e) => {
+                    let msg = e.to_string();
+                    tracing::error!(item_id, %msg, "upscale dispatch failed");
+                    self.toasts.error(format!("Upscale failed: {msg}"));
+                }
+            }
         }
         ctx.request_repaint();
     }
@@ -1697,9 +1799,13 @@ impl PrunrApp {
 
     pub fn handle_cancel(&mut self) {
         self.processor.cancels.request_global_cancel();
-        // Esc cancels both the batch path and any in-flight eraser
-        // stroke (SD on CPU takes minutes — needs the same escape valve).
+        // Esc cancels both the batch path and any in-flight eraser stroke
+        // (SD on CPU takes minutes — needs the same escape valve).
         self.processor.cancel_all_inpaints();
+        // Also cancel any in-flight upscale dispatch.
+        if self.settings.model.is_upscale() {
+            self.processor.cancel_upscale();
+        }
     }
 
     /// Cancel-All from the toolbar / Escape: request the global cancel,
@@ -1856,6 +1962,7 @@ impl PrunrApp {
             self.toasts.info(msg);
         }
         self.pump_inpaint_results(ctx);
+        self.pump_upscale_results(ctx);
         self.pump_download_manager(ctx);
         self.pump_runtime_install(ctx);
         self.recipe_drift_tripwire();
@@ -2622,12 +2729,13 @@ impl PrunrApp {
     }
 
     /// Escape dismisses the topmost interruptable state. Priority order:
-    /// in-flight eraser stroke → active batch processing → open modal
-    /// (settings / shortcuts / cli help). Eraser strokes win over batch
-    /// because the canvas banner is the most prominent active operation
-    /// when both are running, and SD strokes on CPU eat minutes of work.
+    /// in-flight upscale → in-flight eraser stroke → active batch processing
+    /// → open modal. Upscale wins because it occupies the whole canvas and
+    /// the tile-by-tile display is the primary interactive feedback.
     fn apply_cancel_shortcut(&mut self, ctx: &egui::Context) {
-        if self.processor.any_inpaint_in_flight() {
+        if self.processor.upscale_tile_progress().is_some() {
+            self.processor.cancel_upscale();
+        } else if self.processor.any_inpaint_in_flight() {
             self.processor.cancel_all_inpaints();
         } else if self.batch.status_counts().processing > 0 {
             self.handle_cancel_all_and_reset();
@@ -3574,6 +3682,30 @@ fn collect_shortcut_intents(ctx: &egui::Context) -> ShortcutIntents {
 
 /// Resolve the chain-mode value after an auto-chain-on signal from the toolbar.
 ///
+/// Pure gate for `can_process_intent` when the active model is an upscale model.
+/// Extracted so unit tests can exercise the gate without constructing `PrunrApp`.
+///
+/// Returns `true` only when all three conditions hold:
+/// - `item_loaded`: at least one item is selected and its source RGBA is available.
+/// - `is_available`: the upscale model ONNX bundle is installed on disk.
+/// - `!is_in_flight`: no upscale dispatch is currently running.
+pub(crate) fn can_process_upscale(is_available: bool, is_in_flight: bool, item_loaded: bool) -> bool {
+    item_loaded && is_available && !is_in_flight
+}
+
+#[cfg(test)]
+mod can_process_upscale_tests {
+    use super::can_process_upscale;
+
+    #[test]
+    fn can_process_upscale_requires_installed_and_idle() {
+        assert!(can_process_upscale(true, false, true),    "happy path");
+        assert!(!can_process_upscale(false, false, true),  "model not installed");
+        assert!(!can_process_upscale(true, true, true),    "already in flight");
+        assert!(!can_process_upscale(true, false, false),  "no item loaded");
+    }
+}
+
 /// The view emits `auto_chain_on = true` on an upscale-entry model switch.
 /// No fresh-item upscale should silently flip chain mode on with no prior
 /// result to chain from — so the application gates the flip on `item_has_result`.
