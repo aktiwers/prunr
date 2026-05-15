@@ -569,20 +569,19 @@ impl PrunrApp {
             Some(id) => id,
             None => return,
         };
-        let input: image::RgbaImage = if self.settings.chain_mode {
-            match item.result_rgba.as_ref() {
-                Some(arc) => (**arc).clone(),
-                None => match item.source_rgba.as_ref() {
-                    Some(arc) => (**arc).clone(),
-                    None => {
-                        tracing::warn!(item_id, "upscale dispatch skipped: no source RGBA available");
-                        return;
-                    }
-                },
+        // Share the input via Arc — full RGBA payload would otherwise
+        // be deep-cloned (tens of MB at 4K) for every Process click.
+        let input: std::sync::Arc<image::RgbaImage> = if self.settings.chain_mode {
+            match item.result_rgba.as_ref().or(item.source_rgba.as_ref()) {
+                Some(arc) => std::sync::Arc::clone(arc),
+                None => {
+                    tracing::warn!(item_id, "upscale dispatch skipped: no source RGBA available");
+                    return;
+                }
             }
         } else {
             match item.source_rgba.as_ref() {
-                Some(arc) => (**arc).clone(),
+                Some(arc) => std::sync::Arc::clone(arc),
                 None => {
                     tracing::warn!(item_id, "upscale dispatch skipped: source RGBA unavailable");
                     return;
@@ -600,14 +599,14 @@ impl PrunrApp {
     /// drift independently.
     pub fn can_process_intent(&self) -> bool {
         if self.settings.model.is_upscale() {
-            let model_id = match self.settings.model.to_model_id() {
-                Some(id) => id,
-                None => return false,
-            };
-            let is_available = prunr_models::is_available(model_id);
+            // Model installed-ness is enforced by the dropdown filter
+            // (only `is_available` models can be selected). Re-checking
+            // here would `is_file()`-stat every frame the toolbar is
+            // visible — see 30-DEFERRED.md. Deletion-after-select is
+            // surfaced at dispatch time by the error toast.
             let is_in_flight = self.processor.upscale_tile_progress().is_some();
             let item_loaded = self.batch.selected_item().is_some();
-            return can_process_upscale(is_available, is_in_flight, item_loaded);
+            return can_process_upscale(is_in_flight, item_loaded);
         }
         if self.settings.model.is_inpaint() {
             self.batch.selected_item().is_some_and(
@@ -1802,10 +1801,10 @@ impl PrunrApp {
         // Esc cancels both the batch path and any in-flight eraser stroke
         // (SD on CPU takes minutes — needs the same escape valve).
         self.processor.cancel_all_inpaints();
-        // Also cancel any in-flight upscale dispatch.
-        if self.settings.model.is_upscale() {
-            self.processor.cancel_upscale();
-        }
+        // Always cancel in-flight upscale; the call is idempotent and
+        // gating on `model.is_upscale()` would drop the signal if the
+        // user switched model mid-flight.
+        self.processor.cancel_upscale();
     }
 
     /// Cancel-All from the toolbar / Escape: request the global cancel,
@@ -3686,11 +3685,14 @@ fn collect_shortcut_intents(ctx: &egui::Context) -> ShortcutIntents {
 /// Extracted so unit tests can exercise the gate without constructing `PrunrApp`.
 ///
 /// Returns `true` only when all three conditions hold:
-/// - `item_loaded`: at least one item is selected and its source RGBA is available.
-/// - `is_available`: the upscale model ONNX bundle is installed on disk.
 /// - `!is_in_flight`: no upscale dispatch is currently running.
-pub(crate) fn can_process_upscale(is_available: bool, is_in_flight: bool, item_loaded: bool) -> bool {
-    item_loaded && is_available && !is_in_flight
+/// - `item_loaded`: at least one item is selected and its source RGBA is available.
+///
+/// Install-state is NOT a parameter — the model dropdown filter already
+/// restricts selection to installed models, and re-checking every frame
+/// would `is_file()`-stat the disk at 60 Hz.
+pub(crate) fn can_process_upscale(is_in_flight: bool, item_loaded: bool) -> bool {
+    item_loaded && !is_in_flight
 }
 
 #[cfg(test)]
@@ -3698,11 +3700,10 @@ mod can_process_upscale_tests {
     use super::can_process_upscale;
 
     #[test]
-    fn can_process_upscale_requires_installed_and_idle() {
-        assert!(can_process_upscale(true, false, true),    "happy path");
-        assert!(!can_process_upscale(false, false, true),  "model not installed");
-        assert!(!can_process_upscale(true, true, true),    "already in flight");
-        assert!(!can_process_upscale(true, false, false),  "no item loaded");
+    fn can_process_upscale_requires_idle_and_item_loaded() {
+        assert!(can_process_upscale(false, true),    "happy path: idle + item loaded");
+        assert!(!can_process_upscale(true, true),    "already in flight");
+        assert!(!can_process_upscale(false, false),  "no item loaded");
     }
 }
 
