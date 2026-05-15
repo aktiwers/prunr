@@ -141,6 +141,20 @@ impl Default for OutputScale {
     fn default() -> Self { OutputScale::X4 }
 }
 
+impl OutputScale {
+    /// User-facing multiplicative output factor. `X4TwoPass` runs the model
+    /// twice but still produces a 4× image — the factor is the *display*
+    /// factor the user sees, not the inference count.
+    #[inline]
+    pub fn factor(self) -> u32 {
+        match self {
+            OutputScale::X2 => 2,
+            OutputScale::X3 => 3,
+            OutputScale::X4 | OutputScale::X4TwoPass => 4,
+        }
+    }
+}
+
 /// Upscale settings. `None` model means upscale is disabled.
 ///
 /// All f32 knobs are stored as `u32::from_bits` for safe `PartialEq` + `Hash`
