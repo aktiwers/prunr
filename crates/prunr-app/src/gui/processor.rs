@@ -20,7 +20,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc;
 use std::time::Instant;
 
@@ -108,6 +108,21 @@ pub(crate) struct InpaintResult {
     /// `drain_inpaint_results` so the user sees WHY the stroke did
     /// nothing instead of guessing it was lost.
     pub error: Option<String>,
+}
+
+/// Result delivered from a background upscale thread back to the main thread.
+/// Keyed on `(item_id, generation)` so a superseded dispatch can be dropped.
+pub(crate) struct UpscaleResult {
+    pub item_id: u64,
+    pub generation: u64,
+    pub result: Result<image::RgbaImage, prunr_core::CoreError>,
+}
+
+/// Pure admission check: returns `true` when `free_ram_mb >= working_set_mb`.
+/// Extracted as a free function so unit tests can exercise it without
+/// constructing a `Processor`.
+pub(crate) fn admission_check(working_set_mb: u32, free_ram_mb: u32) -> bool {
+    free_ram_mb >= working_set_mb
 }
 
 /// Eraser-specific tuning passed from `BrushSettings` into the dispatch.
@@ -250,6 +265,16 @@ pub(crate) struct Processor {
     /// subprocess lazily and drops it on a 5-min idle timer.
     inpaint_bridge_tx: mpsc::Sender<InpaintBridgeMsg>,
     inpaint_bridge_rx: mpsc::Receiver<InpaintBridgeResult>,
+    /// In-process upscale dispatch state. A single image is upscaled on a
+    /// background thread; tile progress is exposed to the toolbar via
+    /// `upscale_tile_progress()`. Cancel is a per-dispatch atomic set by
+    /// `cancel_upscale()`; the thread checks it between tiles.
+    upscale_active: Arc<AtomicBool>,
+    upscale_cancel: Arc<AtomicBool>,
+    upscale_tile_done: Arc<AtomicU32>,
+    upscale_tile_total: Arc<AtomicU32>,
+    upscale_result_tx: mpsc::Sender<UpscaleResult>,
+    upscale_result_rx: mpsc::Receiver<UpscaleResult>,
 }
 
 impl Processor {
@@ -259,6 +284,7 @@ impl Processor {
     ) -> Self {
         let (inpaint_tx, inpaint_rx) = mpsc::channel();
         let (inpaint_bridge_tx, inpaint_bridge_rx) = spawn_inpaint_bridge();
+        let (upscale_result_tx, upscale_result_rx) = mpsc::channel();
         Self {
             worker_tx,
             worker_rx,
@@ -276,14 +302,25 @@ impl Processor {
             inpaint_progress: HashMap::new(),
             inpaint_bridge_tx,
             inpaint_bridge_rx,
+            upscale_active: Arc::new(AtomicBool::new(false)),
+            upscale_cancel: Arc::new(AtomicBool::new(false)),
+            upscale_tile_done: Arc::new(AtomicU32::new(0)),
+            upscale_tile_total: Arc::new(AtomicU32::new(0)),
+            upscale_result_tx,
+            upscale_result_rx,
         }
     }
 
     /// `Some((done, total))` while an upscale dispatch is in flight;
-    /// `None` otherwise. Stub — the wiring lives in `dispatch_upscale`,
-    /// not yet implemented in this build.
+    /// `None` when idle. Both counters are relaxed atomics — the toolbar
+    /// and status bar only need eventual consistency for display purposes.
     pub fn upscale_tile_progress(&self) -> Option<(u32, u32)> {
-        None
+        if !self.upscale_active.load(Ordering::Relaxed) {
+            return None;
+        }
+        let done = self.upscale_tile_done.load(Ordering::Relaxed);
+        let total = self.upscale_tile_total.load(Ordering::Relaxed);
+        Some((done, total))
     }
 
     /// Per-item generation counter ensures a fresh stroke supersedes the
@@ -739,6 +776,42 @@ impl Processor {
 mod tests {
     use super::*;
     use prunr_models::ModelId;
+
+    // ── upscale_tile_progress + admission_check (Task 1a) ──────────────────
+
+    #[test]
+    fn upscale_tile_progress_returns_none_when_idle() {
+        let p = fixture();
+        assert!(p.upscale_tile_progress().is_none(),
+            "idle Processor must report no tile progress");
+    }
+
+    #[test]
+    fn upscale_tile_progress_reads_atomic_counter() {
+        let p = fixture();
+        p.upscale_active.store(true, Ordering::Relaxed);
+        p.upscale_tile_done.store(3, Ordering::Relaxed);
+        p.upscale_tile_total.store(10, Ordering::Relaxed);
+        assert_eq!(p.upscale_tile_progress(), Some((3, 10)));
+    }
+
+    #[test]
+    fn admission_refuses_when_working_set_exceeds_free() {
+        assert!(!admission_check(2000, 1500),
+            "2000 MB working set must not fit in 1500 MB free RAM");
+    }
+
+    #[test]
+    fn admission_allows_when_working_set_fits() {
+        assert!(admission_check(500, 1500),
+            "500 MB working set fits in 1500 MB free RAM");
+    }
+
+    #[test]
+    fn admission_allows_exact_match() {
+        assert!(admission_check(1500, 1500),
+            "exact match (working_set == free_ram) must be allowed");
+    }
 
     fn cfg_eq(a: f32, b: f32) -> bool { (a - b).abs() < 1e-6 }
 
