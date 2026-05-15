@@ -478,8 +478,7 @@ fn run_preview(inputs: DispatchInputs, cancel: &AtomicBool) -> RunOutput {
                     }
                 }
             }
-            // Guarded by early-return at the top of run_preview.
-            PreviewKind::UpscaleTier2 => unreachable!(),
+            PreviewKind::UpscaleTier2 => unreachable!("UpscaleTier2 is handled by the early-return above"),
         }
     } else {
         (None, None)
@@ -554,8 +553,7 @@ fn run_preview(inputs: DispatchInputs, cancel: &AtomicBool) -> RunOutput {
             };
             RunOutput { rgba: Some(rgba), built_edge_mask, built_masked_base }
         }
-        // Guarded by early-return at the top of run_preview.
-        PreviewKind::UpscaleTier2 => unreachable!(),
+        PreviewKind::UpscaleTier2 => unreachable!("UpscaleTier2 is handled by the early-return above"),
     }
 }
 

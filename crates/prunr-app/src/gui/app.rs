@@ -3977,12 +3977,12 @@ mod upscale_tier2_routing_tests {
     fn app_tier_upscaletier2_routes_to_mark_tweak() {
         // A diff where only sharpen changed must resolve to UpscaleTier2 so the
         // apply_toolbar_change block fires mark_tweak(PreviewKind::UpscaleTier2).
-        let mut old_s = ItemSettings::default();
-        old_s.output_scale = OutputScale::X4;
-        old_s.sharpen = 0.0;
-
-        let mut new_s = old_s;
-        new_s.sharpen = 0.5;
+        let old_s = ItemSettings {
+            output_scale: OutputScale::X4,
+            sharpen: 0.0,
+            ..ItemSettings::default()
+        };
+        let new_s = ItemSettings { sharpen: 0.5, ..old_s };
 
         let old_recipe = recipe_for(&old_s);
         let new_recipe = recipe_for(&new_s);
@@ -3997,11 +3997,8 @@ mod upscale_tier2_routing_tests {
     fn app_tier_upscale_rerun_still_gates_out_of_live_preview() {
         // A diff where output_scale changed must resolve to UpscaleRerun (Tier-1),
         // NOT UpscaleTier2 — so mark_tweak(UpscaleTier2) is NOT called.
-        let mut old_s = ItemSettings::default();
-        old_s.output_scale = OutputScale::X4;
-
-        let mut new_s = old_s;
-        new_s.output_scale = OutputScale::X2;
+        let old_s = ItemSettings { output_scale: OutputScale::X4, ..ItemSettings::default() };
+        let new_s = ItemSettings { output_scale: OutputScale::X2, ..old_s };
 
         let old_recipe = recipe_for(&old_s);
         let new_recipe = recipe_for(&new_s);
