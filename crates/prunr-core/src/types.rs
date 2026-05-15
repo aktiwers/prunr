@@ -43,19 +43,21 @@ impl From<ModelKind> for prunr_models::ModelId {
     }
 }
 
-impl From<prunr_models::ModelId> for ModelKind {
-    // Callers must restrict the input to variants that have a ModelKind
-    // (the seg + upscale families). The seg/upscale dispatch paths
-    // already filter by category before reaching this conversion;
-    // inpaint/SD/TAESD/edge models never round-trip through ModelKind.
-    fn from(id: prunr_models::ModelId) -> Self {
+impl TryFrom<prunr_models::ModelId> for ModelKind {
+    type Error = prunr_models::ModelId;
+
+    /// Maps seg + upscale ModelIds to ModelKind. Inpaint / SD / TAESD /
+    /// edge variants have no ModelKind mapping and return `Err(id)`;
+    /// callers must filter by category first (e.g. via `is_upscale()`
+    /// or `uses_segmentation()`) before reaching this conversion.
+    fn try_from(id: prunr_models::ModelId) -> Result<Self, Self::Error> {
         match id {
-            prunr_models::ModelId::Silueta => ModelKind::Silueta,
-            prunr_models::ModelId::U2net => ModelKind::U2net,
-            prunr_models::ModelId::BiRefNetLite => ModelKind::BiRefNetLite,
-            prunr_models::ModelId::RealEsrganX4Plus => ModelKind::RealEsrganX4Plus,
-            prunr_models::ModelId::Nomos8kSchatL => ModelKind::Nomos8kSchatL,
-            other => panic!("ModelId::{other:?} has no ModelKind mapping"),
+            prunr_models::ModelId::Silueta => Ok(ModelKind::Silueta),
+            prunr_models::ModelId::U2net => Ok(ModelKind::U2net),
+            prunr_models::ModelId::BiRefNetLite => Ok(ModelKind::BiRefNetLite),
+            prunr_models::ModelId::RealEsrganX4Plus => Ok(ModelKind::RealEsrganX4Plus),
+            prunr_models::ModelId::Nomos8kSchatL => Ok(ModelKind::Nomos8kSchatL),
+            other => Err(other),
         }
     }
 }
