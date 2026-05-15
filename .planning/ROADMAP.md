@@ -261,6 +261,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8. Ph
 | 28. SD VAE Orthogonality | 2/5 | In Progress|  |
 | 29. Refine and Wire Presets to All Models | 5/5 | Complete    | 2026-05-14 |
 | 30. Upscale Tab v1 | 12/12 | Complete   | 2026-05-15 |
+| 32. Upscale Refinement Knobs | 1/8 | In Progress|  |
 
 ### Phase 30: Upscale Tab v1
 
@@ -298,3 +299,36 @@ Plans:
 - [ ] 30-10-PLAN.md — Settings "Model credits" tab (Surface 5)
 - [ ] 30-11-PLAN.md — Processor::dispatch_upscale + handle_process_intent routing + live-preview gate + admission
 - [ ] 30-12-PLAN.md — ARCHITECTURE.md update + human verification of all 11 criteria
+
+### Phase 32: Upscale Refinement Knobs
+
+**Goal:** Add a seven-knob refinement set to both upscale models (Real-ESRGAN x4plus, Nomos8kSCHAT-L) matching the existing chip / preset / recipe architecture. Tier-1 knobs re-run inference; Tier-2 knobs operate in real-time on a cached upscale RGBA buffer (mirrors BiRefNet's Tier-1/Tier-2 split). A new `RealESRGAN_x2plus` model entry powers a `4× (two-pass)` Output-Scale dropdown variant that runs the 2× model twice for noisy / low-light inputs.
+
+**Depends on:** Phase 30 (upscale dispatch + REGISTRY infrastructure — done), Phase 29 (per-model presets — done)
+
+**Requirements:** New (Phase 32 introduces 11 numbered success criteria below; referenced as "Criterion 1..11" in plan frontmatter)
+
+**Success Criteria** (what must be TRUE):
+  1. `UpscaleRecipe` carries seven new fields: `pre_denoise: f32 ∈ [0,1]`, `brightness_lift: f32 ∈ [-2,2]` (EV stops), `output_scale: OutputScale` (enum: `X2`, `X3`, `X4`, `X4TwoPass`), `sharpen: f32 ∈ [-1,1]`, `ai_blend: f32 ∈ [0,1]`, `saturation: f32 ∈ [-1,1]`, `color_match: bool`
+  2. `resolve_tier` returns the existing `RequiredTier::UpscaleRerun` when any Tier-1 knob (`pre_denoise`, `brightness_lift`, `output_scale`) changes; returns a new `RequiredTier::UpscaleTier2` between `CompositeOnly` and `UpscaleRerun` when only Tier-2 knobs (`sharpen`, `ai_blend`, `saturation`, `color_match`) change
+  3. `BatchItem` caches the raw model output as `upscale_raw: Option<Arc<RgbaImage>>` so Tier-2 dispatches re-apply postprocess without re-running inference; cache invalidates on any Tier-1 change or model switch
+  4. New `prunr-core/src/denoise/` module ships classical median + bilateral filters that operate bbox-aware, sequential per-channel, and reuse buffers per CLAUDE.md `## RAM discipline` (canonical pattern from `guided_filter_alpha`)
+  5. New `prunr-core/src/upscale/postprocess.rs` module ships sharpen (unsharp mask), AI-blend (lerp upscale ↔ bicubic-of-source), saturation (HSL-space), color-match (Reinhard Lab-space histogram transfer) as pure functions operating on `RgbaImage`
+  6. `RealESRGAN_x2plus` registered as an `OnDemand` ModelDescriptor (`ModelCategory::Upscale`, `UpscaleModelKnobs { is_fp16: false, input_name: "data" }`); used only for the `X4TwoPass` dispatch path
+  7. `X4TwoPass` dispatch runs `RealESRGAN_x2plus` twice (output of pass 1 → input of pass 2); the chip is hidden / dimmed in the dropdown when Nomos8k is selected (no 2× HAT variant ships)
+  8. Adjustments toolbar gains 7 new chips in a dedicated "Refinement" row when the active model is upscale: pre-denoise, brightness-lift, output-scale (enum dropdown chip), sharpen, ai-blend, saturation, color-match — chip layout, theme, tooltip pattern matches existing knob chips (see `chip::popup_for`, `chip::slider_row_f32`)
+  9. All seven knobs persist via the existing per-ModelId preset machinery — preset round-trip test covers each; `ItemSettings` stays under 128-byte budget after the additions
+ 10. Live preview (10 Hz Tier-2 dispatch) drives the real-time Tier-2 knob feel on the cached `upscale_raw` buffer — same debounced dispatch hook BiRefNet uses; Tier-1 knobs continue to gate out of live preview
+ 11. `prunr-core` unit tests cover each new pure function (denoise filters, postprocess ops, two-pass scheduler); `prunr-models` test asserts `X4TwoPass` recipe variant routes through `RealESRGAN_x2plus`
+
+**Plans:** 1/8 plans executed
+
+Plans:
+- [ ] 32-01-PLAN.md — Data layer: UpscaleRecipe + OutputScale + RequiredTier::UpscaleTier2 + resolve_tier extension
+- [ ] 32-02-PLAN.md — ItemSettings byte-budget rework (six new fields, output_scale replaces upscale_scale, edge_thickness/guided_radius narrowed)
+- [ ] 32-03-PLAN.md — prunr-core/src/denoise/ module: histogram-window median + separable bilateral + apply_denoise
+- [ ] 32-04-PLAN.md — prunr-core/src/upscale/postprocess.rs: apply_sharpen + apply_ai_blend + apply_saturation + apply_color_match
+- [ ] 32-05-PLAN.md — RealEsrganX2Plus REGISTRY entry (PRECONDITIONS-gated) + upscale_two_pass scheduler
+- [ ] 32-06-PLAN.md — BatchItem.upscale_raw + bicubic_source caches + Processor dispatch branching + LivePreview UpscaleTier2 routing
+- [ ] 32-07-PLAN.md — Refinement chip row + render_output_scale_chip (4 variants + Nomos8k gating)
+- [ ] 32-08-PLAN.md — ARCHITECTURE.md row + manual smoke + human verification

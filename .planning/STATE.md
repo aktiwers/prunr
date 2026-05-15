@@ -3,12 +3,12 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: unknown
-last_updated: "2026-05-15T07:32:31.144Z"
+last_updated: "2026-05-15T19:02:20.635Z"
 progress:
-  total_phases: 12
+  total_phases: 13
   completed_phases: 8
-  total_plans: 53
-  completed_plans: 42
+  total_plans: 61
+  completed_plans: 43
 ---
 
 # Project State
@@ -21,8 +21,8 @@ See: `.planning/PROJECT.md` (updated 2026-04-06)
 
 ## Current Position
 
-Phase: 30 (upscale-tab-v1) — EXECUTING
-Plan: 10 of 12 (30-01, 30-03, 30-05, 30-06, 30-07, 30-08, 30-09, 30-10, 30-11 complete)
+Phase: 32 (upscale-refinement-knobs) — EXECUTING
+Plan: 2 of 8
 
 ## Phase Status (ground truth, derived from git log)
 
@@ -96,3 +96,4 @@ Captured in commit messages and `.planning/phases/12-*/`, `13-*/`, `14-*/`, `28-
 - 2026-05-14 — Phase 30-06 completed: Real SHA256/URL/size wired into REGISTRY (Real-ESRGAN fb070c21 64 MB, Nomos8k 919dff28 155 MB); SettingsModel extended with RealEsrganUpscale + Nomos8kUpscale variants + is_upscale predicate; smoke test suite in crates/prunr-core/tests/upscale_smoke.rs (skip-safe, 4 tests). working_set_mb calibration deferred to first local run with models installed.
 - 2026-05-14 — Phase 30-07 completed: Upscale toolbar row (Surfaces 1-3): scale chip (4x/2x via chip_button+popup_for), inline progress bar (stub, wired by 30-11), is_upscale branch in adjustments_toolbar::render, Row 3 suppressed in upscale mode. source_dims chain-mode-aware (243c3ab, c5dbaa1, a975778).
 - 2026-05-14 — Phase 30-11 completed: Dispatch wiring (Wave 6). Processor gains upscale atomic fields + admission_check (5c37039); dispatch_upscale + cancel_upscale + pump_upscale_results (fdd99f0); handle_process_intent/can_process_intent routing + status-bar tile counter (64dddb1); live-preview gate with should_dispatch_live_preview + 4 tests (15a923c). WorkKind: no new variant — upscale uses std::thread bypass. Admission: free_ram >= working_set, exact match allowed.
+- 2026-05-15 — Phase 32-01 completed: Data layer foundation. OutputScale #[repr(u8)] enum (X2/X3/X4/X4TwoPass); UpscaleRecipe extended with 7 knobs (5 f32-as-bits + OutputScale + bool); ai_blend_bits defaults to 1.0 (full AI, not 0 which regresses Phase 30). RequiredTier::UpscaleTier2 added between CompositeOnly and UpscaleRerun; ordered() table bumped; resolve_tier routes Tier-2-only changes correctly. 13 new tests; all workspace tests green. Commits: 9d68a87 + 686296c.
