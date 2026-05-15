@@ -3,12 +3,12 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: unknown
-last_updated: "2026-05-15T21:08:24.037Z"
+last_updated: "2026-05-15T22:37:27.469Z"
 progress:
   total_phases: 13
   completed_phases: 8
   total_plans: 61
-  completed_plans: 47
+  completed_plans: 48
 ---
 
 # Project State
@@ -22,7 +22,7 @@ See: `.planning/PROJECT.md` (updated 2026-04-06)
 ## Current Position
 
 Phase: 32 (upscale-refinement-knobs) — EXECUTING
-Plan: 5 of 8
+Plan: 6 of 8
 
 ## Phase Status (ground truth, derived from git log)
 
@@ -100,3 +100,4 @@ Captured in commit messages and `.planning/phases/12-*/`, `13-*/`, `14-*/`, `28-
 - 2026-05-15 — Phase 32-02 completed: ItemSettings refactor. upscale_scale: u32 removed; output_scale: OutputScale added. edge_thickness/guided_radius narrowed to u8. Six Phase-32 knob fields added (pre_denoise, brightness_lift, sharpen, ai_blend=1.0, saturation, color_match). correction_hash/bg_image_hash changed to Option<NonZeroU64> (niche saves 16 bytes). size_of::<ItemSettings>() == 128 exactly. current_recipe() wires all fields into UpscaleRecipe. 10 new tests. Commits: 07f69d6 + 04f232b.
 - 2026-05-15 — Phase 32-04 completed: Tier-2 postprocess primitives. Four pure functions: apply_sharpen (5-tap Gaussian σ≈1.0 unsharp), apply_ai_blend (per-pixel RGB lerp), apply_saturation (HSL-space, not HSV), apply_color_match (Reinhard Lab with stddev.max(1e-6) variance guard). Hand-rolled IEC 61966-2-1 sRGB↔Lab + HSL — zero new deps. 18 unit tests green. Commit: 6002472.
 - 2026-05-15 — Phase 32-05 completed: RealEsrganX2Plus REGISTRY entry with real SHA256 (7e0860bb…), working_set_mb=1000, tile_size_multiple=Some(2). run_upscale_native private helper (native_scale param) fixes ORT dimension mismatch for x2plus. upscale_two_pass chains x2plus twice for net 4× output; intermediate moved not cloned. x4twopass_available() predicate for chip UI. is_user_visible() gates model_store. 11 new tests; 900 workspace tests green. Commits: d6e76f9 + c0a4432.
+- 2026-05-15 — Phase 32-06 completed: GUI wiring wave. BatchItem.upscale_raw + bicubic_source cache (mirrors cached_tensor contract); dispatch_upscale branches on OutputScale (X4TwoPass→upscale_two_pass, others→upscale_rgba) with build_inference_input/apply_post_inference helpers for pre/post denoise+brightness_lift; PreviewKind::UpscaleTier2 + UpscaleTier2Knobs in live_preview.rs with early-return before seg/edge pipeline; apply_toolbar_change detects UpscaleTier2 tier via recipe diff and fires mark_tweak; UpscaleRerun stays gated out. 13 new tests. Commits: 0b1005b + 0354c16 + f5c943b.
