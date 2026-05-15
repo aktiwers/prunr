@@ -60,19 +60,16 @@ impl ProgressKind {
         }
     }
 
-    /// Singular noun for the outer counter when set. Today this is
-    /// only SD/Eraser's tile-of-stroke. The match stays exhaustive
-    /// rather than constant — a new `ProgressKind` variant fails the
-    /// build until someone makes an explicit decision about whether
-    /// it has an outer dimension and what to call it.
-    pub fn outer_noun(self) -> &'static str {
+    /// Singular noun for the outer counter when set. `Some` only for
+    /// kinds that meaningfully nest today (SD/Eraser tile-of-stroke);
+    /// `None` for kinds that never set `outer`. Returning `Option`
+    /// rather than a placeholder string means a caller reaching for
+    /// the noun without first checking `outer.is_some()` fails at
+    /// the type level instead of rendering a misleading "Tile 0 of 0".
+    pub fn outer_noun(self) -> Option<&'static str> {
         match self {
-            ProgressKind::SdInpaint | ProgressKind::Eraser => "tile",
-            // Seg and Upscale never set `outer` today, so this label
-            // is unreachable in practice. Return the same noun for
-            // future-proofing if either grows a per-batch or
-            // per-tile-pass outer counter.
-            ProgressKind::Seg | ProgressKind::Upscale => "tile",
+            ProgressKind::SdInpaint | ProgressKind::Eraser => Some("tile"),
+            ProgressKind::Seg | ProgressKind::Upscale => None,
         }
     }
 }
@@ -183,7 +180,12 @@ impl DispatchProgress {
         if it == 0 {
             return None;
         }
-        let outer_noun = capitalise_first(self.kind.outer_noun());
+        // `outer_noun` is `Some` only when `outer.is_some()` makes
+        // sense for the kind. We already short-circuited above when
+        // `self.outer` was `None`; if `outer_noun` is `None` here the
+        // kind set `outer` despite having no noun (mis-wiring at the
+        // dispatch site) — fall back to "outer" for visibility.
+        let outer_noun = capitalise_first(self.kind.outer_noun().unwrap_or("outer"));
         let inner_noun = self.kind.inner_noun();
         Some(format!(
             "{outer_noun} {oc} of {ot} \u{2014} {inner_noun} {ic} of {it}",

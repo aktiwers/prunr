@@ -328,14 +328,19 @@ impl Processor {
         self.dispatch_progress.read()
     }
 
-    /// Publish progress for the seg path. Called by `refresh_batch_progress_status`
-    /// once per frame while a batch is in flight (and once with `None`
-    /// when it completes). Inpaint and upscale write to the same slot
-    /// directly from their dispatch threads.
+    /// Publish progress for the seg path. Called by
+    /// `refresh_batch_progress_status` whenever batch state could have
+    /// changed (per-frame during a batch; once when it completes).
+    /// Skips the Mutex write when the new value is `None` and the slot
+    /// is already empty — covers the steady-state idle case where this
+    /// would otherwise grab the lock every frame.
     pub(crate) fn set_dispatch_progress(
         &self,
         progress: Option<super::dispatch_progress::DispatchProgress>,
     ) {
+        if progress.is_none() && self.dispatch_progress.read().is_none() {
+            return;
+        }
         self.dispatch_progress.set(progress);
     }
 
