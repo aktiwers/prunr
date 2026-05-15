@@ -121,19 +121,76 @@ impl std::hash::Hash for MaskRecipe {
     }
 }
 
+/// User-facing output scale choice for upscale dispatches.
+///
+/// `X4TwoPass` is Real-ESRGAN-only (runs `RealEsrganX2Plus` twice);
+/// the dispatch layer rejects it for non-x4plus models. `#[repr(u8)]`
+/// keeps the enum at 1 byte so it fits inside the `ItemSettings`
+/// cache-line budget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[repr(u8)]
+pub enum OutputScale {
+    X2 = 0,
+    X3 = 1,
+    X4 = 2,
+    X4TwoPass = 3,
+}
+
+impl Default for OutputScale {
+    /// `X4` = native model output. This is the no-op default (the upscale model is trained at 4×).
+    fn default() -> Self { OutputScale::X4 }
+}
+
 /// Upscale settings. `None` model means upscale is disabled.
+///
+/// All f32 knobs are stored as `u32::from_bits` for safe `PartialEq`
+/// + `Hash` (matches the `MaskRecipe::gamma_bits` pattern). The
+/// `From<&UpscaleSettings>` impl converts at construction time.
+// scale: u32 replaced by output_scale: OutputScale — enum variant selected by the dispatch layer
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct UpscaleRecipe {
     /// `None` = upscale disabled (no upscale model selected).
     pub model: Option<prunr_models::ModelId>,
-    /// Output scale factor: 2 or 4. Default 4 (native model output).
-    pub scale: u32,
+    /// User-facing output scale (replaces the prior `scale: u32`).
+    pub output_scale: OutputScale,
+    // ----- Tier-1 knobs (re-inference) -----
+    /// Pre-inference denoise blend strength, range [0.0, 1.0].
+    pub pre_denoise_bits: u32,
+    /// Pre-inference EV-stop exposure adjustment, range [-2.0, 2.0].
+    pub brightness_lift_bits: u32,
+    // ----- Tier-2 knobs (postprocess only) -----
+    /// Unsharp-mask strength, range [-1.0, 1.0]. Negative = blur.
+    pub sharpen_bits: u32,
+    /// Lerp weight toward AI output vs bicubic source, range [0.0, 1.0].
+    /// 1.0 = full AI (default), 0.0 = pure bicubic.
+    pub ai_blend_bits: u32,
+    /// HSL-space saturation adjustment, range [-1.0, 1.0].
+    pub saturation_bits: u32,
+    /// Reinhard Lab mean+stddev color match against source.
+    pub color_match: bool,
 }
 
 impl Default for UpscaleRecipe {
     fn default() -> Self {
-        Self { model: None, scale: 4 }
+        Self {
+            model: None,
+            output_scale: OutputScale::X4,
+            pre_denoise_bits: 0_u32,          // 0.0_f32.to_bits() == 0
+            brightness_lift_bits: 0_u32,
+            sharpen_bits: 0_u32,
+            ai_blend_bits: 1.0_f32.to_bits(), // default = full AI; 0 = pure bicubic which regresses Phase 30 output
+            saturation_bits: 0_u32,
+            color_match: false,
+        }
     }
+}
+
+impl UpscaleRecipe {
+    #[inline] pub fn pre_denoise(&self) -> f32 { f32::from_bits(self.pre_denoise_bits) }
+    #[inline] pub fn brightness_lift(&self) -> f32 { f32::from_bits(self.brightness_lift_bits) }
+    #[inline] pub fn sharpen(&self) -> f32 { f32::from_bits(self.sharpen_bits) }
+    #[inline] pub fn ai_blend(&self) -> f32 { f32::from_bits(self.ai_blend_bits) }
+    #[inline] pub fn saturation(&self) -> f32 { f32::from_bits(self.saturation_bits) }
 }
 
 /// Tier 3: compositing settings (bg color, bg image).
@@ -667,17 +724,17 @@ mod tests {
         assert_eq!(resolve_tier(&a, &b), RequiredTier::MaskRerun);
     }
 
-    fn upscale(model: Option<prunr_models::ModelId>, scale: u32) -> UpscaleRecipe {
-        UpscaleRecipe { model, scale }
+    fn upscale_with_scale(model: Option<prunr_models::ModelId>, scale: OutputScale) -> UpscaleRecipe {
+        UpscaleRecipe { model, output_scale: scale, ..UpscaleRecipe::default() }
     }
 
     #[test]
     fn upscale_rerun_when_only_upscale_recipe_changed() {
         let a = make_recipe(ModelKind::Silueta, 1.0, None);
         let mut b = a.clone();
-        b.upscale = upscale(Some(prunr_models::ModelId::RealEsrganX4Plus), 4);
+        b.upscale = upscale_with_scale(Some(prunr_models::ModelId::RealEsrganX4Plus), OutputScale::X4);
         let mut c = a.clone();
-        c.upscale = upscale(Some(prunr_models::ModelId::RealEsrganX4Plus), 2);
+        c.upscale = upscale_with_scale(Some(prunr_models::ModelId::RealEsrganX4Plus), OutputScale::X2);
         assert_eq!(resolve_tier(&b, &c), RequiredTier::UpscaleRerun);
     }
 
@@ -685,9 +742,9 @@ mod tests {
     fn upscale_rerun_when_only_upscale_model_changed() {
         let a = make_recipe(ModelKind::Silueta, 1.0, None);
         let mut old = a.clone();
-        old.upscale = upscale(Some(prunr_models::ModelId::Nomos8kSchatL), 4);
+        old.upscale = upscale_with_scale(Some(prunr_models::ModelId::Nomos8kSchatL), OutputScale::X4);
         let mut new = a.clone();
-        new.upscale = upscale(Some(prunr_models::ModelId::RealEsrganX4Plus), 4);
+        new.upscale = upscale_with_scale(Some(prunr_models::ModelId::RealEsrganX4Plus), OutputScale::X4);
         assert_eq!(resolve_tier(&old, &new), RequiredTier::UpscaleRerun);
     }
 
@@ -696,7 +753,7 @@ mod tests {
         let a = make_recipe(ModelKind::Silueta, 1.0, None);
         let mut b = a.clone();
         b.mask = mask(2.2, None, 0.0, false);
-        b.upscale = upscale(Some(prunr_models::ModelId::RealEsrganX4Plus), 2);
+        b.upscale = upscale_with_scale(Some(prunr_models::ModelId::RealEsrganX4Plus), OutputScale::X2);
         assert_eq!(resolve_tier(&a, &b), RequiredTier::MaskRerun);
     }
 
@@ -718,7 +775,56 @@ mod tests {
     fn upscale_rerun_outranks_composite_when_both_changed() {
         let a = make_recipe(ModelKind::Silueta, 1.0, None);
         let mut b = make_recipe(ModelKind::Silueta, 1.0, Some([255, 0, 0]));
-        b.upscale = upscale(Some(prunr_models::ModelId::RealEsrganX4Plus), 4);
+        b.upscale = upscale_with_scale(Some(prunr_models::ModelId::RealEsrganX4Plus), OutputScale::X4);
         assert_eq!(resolve_tier(&a, &b), RequiredTier::UpscaleRerun);
+    }
+
+    #[test]
+    fn output_scale_size_is_one_byte() {
+        assert_eq!(std::mem::size_of::<OutputScale>(), 1);
+    }
+
+    #[test]
+    fn output_scale_serde_roundtrip() {
+        for variant in [OutputScale::X2, OutputScale::X3, OutputScale::X4, OutputScale::X4TwoPass] {
+            let json = serde_json::to_string(&variant).unwrap();
+            let recovered: OutputScale = serde_json::from_str(&json).unwrap();
+            assert_eq!(variant, recovered, "{variant:?}");
+        }
+    }
+
+    #[test]
+    fn upscale_recipe_default_matches_existing_behaviour() {
+        let r = UpscaleRecipe::default();
+        assert_eq!(r.output_scale, OutputScale::X4);
+        assert_eq!(r.pre_denoise_bits, 0_u32);
+        assert_eq!(r.brightness_lift_bits, 0_u32);
+        assert_eq!(r.sharpen_bits, 0_u32);
+        assert_eq!(r.ai_blend_bits, 1.0_f32.to_bits());
+        assert_eq!(r.saturation_bits, 0_u32);
+        assert!(!r.color_match);
+    }
+
+    #[test]
+    fn upscale_recipe_bit_fields_eq_hash_consistent() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let a = UpscaleRecipe {
+            pre_denoise_bits: 0.5_f32.to_bits(),
+            ..UpscaleRecipe::default()
+        };
+        let b = UpscaleRecipe {
+            pre_denoise_bits: 0.5_f32.to_bits(),
+            ..UpscaleRecipe::default()
+        };
+        assert_eq!(a, b);
+
+        let hash_of = |r: &UpscaleRecipe| {
+            let mut h = DefaultHasher::new();
+            r.hash(&mut h);
+            h.finish()
+        };
+        assert_eq!(hash_of(&a), hash_of(&b));
     }
 }
