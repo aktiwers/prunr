@@ -23,6 +23,17 @@
 //!   | bilateral h-pass (f32)      | ~19.7 MB  |
 //!   | bilateral v-pass / out (f32)| ~19.7 MB  |
 //!   | peak (one channel at a time)| ~49 MB    |
+//!
+//! Concurrency assumption — load-bearing, NOT yet verified end-to-end:
+//! `apply_denoise` is intended to run in the *pre-inference* Tier-1
+//! pipeline, before the upscale model's `session.run()` call. Under that
+//! assumption the rayon row-parallelism here is safe: it's not nested
+//! inside ORT's own threading or the tiled-inference inner loop.
+//!
+//! If wave-4 dispatch wiring (32-06) places `apply_denoise` inside a
+//! tiled inference loop or any callback the ort session drives, this
+//! reproduces the deadlock pattern from `apply_background_color`
+//! (commit b2306bb). See DEFERRED.md `Phase 32-DEFER-4`.
 
 use image::RgbaImage;
 use rayon::prelude::*;
