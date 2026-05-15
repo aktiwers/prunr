@@ -36,12 +36,14 @@ pub(crate) fn render_upscale_row(
     ui.horizontal(|ui| {
         render_model_dropdown(ui, app_settings, is_processing, false, change);
 
-        let out_w = source_dims.0.saturating_mul(item_settings.upscale_scale);
-        let out_h = source_dims.1.saturating_mul(item_settings.upscale_scale);
-        // Scale chip writes `item_settings.upscale_scale` directly; the
-        // recipe diff at dispatch time picks the change up. No separate
-        // ToolbarChange signal needed.
-        render_scale_chip(ui, &mut item_settings.upscale_scale, (out_w, out_h));
+        let factor = match item_settings.output_scale {
+            prunr_core::OutputScale::X2 => 2u32,
+            prunr_core::OutputScale::X3 => 3,
+            prunr_core::OutputScale::X4 | prunr_core::OutputScale::X4TwoPass => 4,
+        };
+        let out_w = source_dims.0.saturating_mul(factor);
+        let out_h = source_dims.1.saturating_mul(factor);
+        render_scale_chip(ui, &mut item_settings.output_scale, (out_w, out_h));
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             render_reset_preset_cluster(ui, app_settings, item_settings, applied_preset, change);

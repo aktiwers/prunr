@@ -7,22 +7,32 @@
 
 use egui::{RichText, Ui};
 use egui_material_icons::icons::ICON_OPEN_IN_FULL;
+use prunr_core::OutputScale;
 
 use super::chip;
 use super::hint;
 use crate::gui::theme;
 
+fn output_scale_to_factor(scale: OutputScale) -> u32 {
+    match scale {
+        OutputScale::X2 => 2,
+        OutputScale::X3 => 3,
+        OutputScale::X4 | OutputScale::X4TwoPass => 4,
+    }
+}
+
 /// Render the scale chip. Returns `true` if `scale` changed.
 ///
 /// `output_dims` is `(w, h)` of the upscale's projected output —
-/// computed by the caller from source dimensions × scale.
+/// computed by the caller from source dimensions × scale factor.
 pub(crate) fn render_scale_chip(
     ui: &mut Ui,
-    scale: &mut u32,
+    scale: &mut OutputScale,
     output_dims: (u32, u32),
 ) -> bool {
-    let label = format!("{}x · {}×{}", scale, output_dims.0, output_dims.1);
-    let accent = *scale != 4;
+    let factor = output_scale_to_factor(*scale);
+    let label = format!("{}x · {}×{}", factor, output_dims.0, output_dims.1);
+    let accent = *scale != OutputScale::X4;
     let resp = chip::chip_button(ui, ICON_OPEN_IN_FULL.codepoint, &label, accent);
     let resp = chip::chip_tooltip(
         resp,
@@ -37,19 +47,19 @@ pub(crate) fn render_scale_chip(
         ui.add_space(theme::SPACE_XS);
 
         if ui
-            .selectable_label(*scale == 4, "4x  —  native model output")
+            .selectable_label(*scale == OutputScale::X4, "4x  —  native model output")
             .clicked()
-            && *scale != 4
+            && *scale != OutputScale::X4
         {
-            *scale = 4;
+            *scale = OutputScale::X4;
             changed = true;
         }
         if ui
-            .selectable_label(*scale == 2, "2x  —  Lanczos3 downscale after model")
+            .selectable_label(*scale == OutputScale::X2, "2x  —  Lanczos3 downscale after model")
             .clicked()
-            && *scale != 2
+            && *scale != OutputScale::X2
         {
-            *scale = 2;
+            *scale = OutputScale::X2;
             changed = true;
         }
 
@@ -57,8 +67,8 @@ pub(crate) fn render_scale_chip(
         hint(ui, "4x is the native model output. 2x runs at 4x internally then halves the result.");
         ui.add_space(theme::SPACE_XS);
 
-        if chip::reset_button(ui, "Reset to 4x (native)") && *scale != 4 {
-            *scale = 4;
+        if chip::reset_button(ui, "Reset to 4x (native)") && *scale != OutputScale::X4 {
+            *scale = OutputScale::X4;
             changed = true;
         }
     });

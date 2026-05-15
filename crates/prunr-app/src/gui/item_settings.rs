@@ -40,7 +40,8 @@ pub struct ItemSettings {
     /// Guided-filter refinement of mask edges.
     pub refine_edges: bool,
     /// Guided filter window radius (pixels). Only used when refine_edges.
-    pub guided_radius: u32,
+    /// Range 4-32 in the UI; stored as u8 to fit the ItemSettings byte budget.
+    pub guided_radius: u8,
     /// Guided filter regularization. Only used when refine_edges.
     pub guided_epsilon: f32,
     /// Gaussian blur sigma applied to mask (softens edges, color-agnostic).
@@ -53,7 +54,8 @@ pub struct ItemSettings {
     /// Solid color override for edges. `None` = preserve original RGB.
     pub solid_line_color: Option<[u8; 3]>,
     /// Dilate edge mask by N pixels after threshold — thickens thin lines.
-    pub edge_thickness: u32,
+    /// Range 0-10 in the UI; stored as u8 to fit the ItemSettings byte budget.
+    pub edge_thickness: u8,
     /// Which DexiNed output scale to read from the cached tensor set.
     pub edge_scale: EdgeScale,
 
@@ -96,14 +98,13 @@ pub struct ItemSettings {
     #[serde(default)]
     pub bg_image_fit: BgImageFit,
 
-    /// Output scale factor for the upscale pass. Default 4 (native model output).
-    /// The active upscale variant is driven by the global `Settings.model`,
-    /// not by a per-item field — see `current_recipe()` for derivation.
-    #[serde(default = "default_upscale_scale")]
-    pub upscale_scale: u32,
+    /// User-facing output scale. Older presets that carried `upscale_scale: u32`
+    /// silently drop the field via `#[serde(default)]` — they reload at
+    /// `OutputScale::X4` (the no-op default matching the prior native upscale
+    /// model behaviour).
+    #[serde(default)]
+    pub output_scale: prunr_core::OutputScale,
 }
-
-fn default_upscale_scale() -> u32 { 4 }
 
 impl Default for ItemSettings {
     fn default() -> Self {
@@ -129,7 +130,7 @@ impl Default for ItemSettings {
             correction_hash: None,
             bg_image_hash: None,
             bg_image_fit: BgImageFit::default(),
-            upscale_scale: 4,
+            output_scale: prunr_core::OutputScale::X4,
         }
     }
 }
@@ -148,7 +149,7 @@ impl ItemSettings {
             threshold: self.threshold,
             edge_shift: self.edge_shift,
             refine_edges: self.refine_edges,
-            guided_radius: self.guided_radius,
+            guided_radius: self.guided_radius as u32,
             guided_epsilon: self.guided_epsilon,
             feather: self.feather,
             fill_style: self.fill_style,
@@ -162,7 +163,7 @@ impl ItemSettings {
         EdgeSettings {
             line_strength: self.line_strength,
             solid_line_color: self.solid_line_color,
-            edge_thickness: self.edge_thickness,
+            edge_thickness: self.edge_thickness as u32,
             edge_scale: self.edge_scale,
             compose_mode: self.compose_mode,
             line_style: self.line_style,
@@ -219,25 +220,18 @@ impl ItemSettings {
                 bg_image_fit: self.bg_image_fit,
             },
             upscale: prunr_core::UpscaleRecipe {
-                // Derive from the active `model`: an upscale-family
-                // ModelKind populates the recipe slot, anything else
-                // leaves it `None` (recipe diff against an idle item
-                // stays clean). Single source of truth — the per-item
-                // `upscale_model` field was removed because the global
-                // Settings.model already pins which variant is active.
                 model: match model {
                     prunr_core::ModelKind::RealEsrganX4Plus
                     | prunr_core::ModelKind::Nomos8kSchatL => Some(model.into()),
                     _ => None,
                 },
-                // upscale_scale: u32 (2 or 4) mapped to OutputScale enum;
-                // plan 32-02 replaces this field with output_scale: OutputScale directly.
-                output_scale: if self.upscale_scale <= 2 {
-                    prunr_core::OutputScale::X2
-                } else {
-                    prunr_core::OutputScale::X4
-                },
-                ..prunr_core::UpscaleRecipe::default()
+                output_scale: self.output_scale,
+                pre_denoise_bits: 0_u32,
+                brightness_lift_bits: 0_u32,
+                sharpen_bits: 0_u32,
+                ai_blend_bits: 1.0_f32.to_bits(),
+                saturation_bits: 0_u32,
+                color_match: false,
             },
             was_chain: chain_mode,
         }
@@ -378,7 +372,7 @@ mod tests {
             correction_hash: Some(0xdeadbeef),
             bg_image_hash: Some(0xfeedface),
             bg_image_fit: prunr_core::BgImageFit::Tile,
-            upscale_scale: 2,
+            output_scale: prunr_core::OutputScale::X2,
         };
         let json = serde_json::to_string(&s).unwrap();
         let recovered: ItemSettings = serde_json::from_str(&json).unwrap();
@@ -386,22 +380,10 @@ mod tests {
     }
 
     #[test]
-    fn serde_json_roundtrip_with_upscale_scale() {
-        let s = ItemSettings {
-            upscale_scale: 2,
-            ..ItemSettings::default()
-        };
-        let json = serde_json::to_string(&s).unwrap();
-        let recovered: ItemSettings = serde_json::from_str(&json).unwrap();
-        assert_eq!(recovered.upscale_scale, 2);
-    }
-
-    #[test]
     fn serde_loads_old_preset_missing_upscale_fields() {
-        // Old preset JSON may also carry an `upscale_model` field from
-        // the pre-refactor schema — serde should ignore the unknown
-        // key and still load cleanly. The defaulted `upscale_scale`
-        // (4 = native) is the only invariant.
+        // Old preset JSON that carried `upscale_model` or `upscale_scale` from
+        // the pre-refactor schema — serde should ignore unknown keys and load
+        // cleanly. Missing `output_scale` defaults to X4 (native).
         let old_json = r#"{
             "gamma": 1.0,
             "threshold": null,
@@ -417,12 +399,12 @@ mod tests {
             "bg": null
         }"#;
         let loaded: ItemSettings = serde_json::from_str(old_json).unwrap();
-        assert_eq!(loaded.upscale_scale, 4);
+        assert_eq!(loaded.output_scale, prunr_core::OutputScale::X4);
     }
 
     #[test]
     fn current_recipe_derives_upscale_model_from_active_model_kind() {
-        let s = ItemSettings { upscale_scale: 2, ..ItemSettings::default() };
+        let s = ItemSettings { output_scale: prunr_core::OutputScale::X2, ..ItemSettings::default() };
         // Active upscale model → recipe slot populated.
         let r = s.current_recipe(prunr_core::ModelKind::RealEsrganX4Plus, false);
         assert_eq!(r.upscale.model, Some(prunr_models::ModelId::RealEsrganX4Plus));
@@ -430,5 +412,58 @@ mod tests {
         // Active seg model → upscale slot empty.
         let r = s.current_recipe(prunr_core::ModelKind::Silueta, false);
         assert_eq!(r.upscale.model, None);
+    }
+
+    // ----- Task 1 tests: output_scale replaces upscale_scale -----
+
+    #[test]
+    fn output_scale_replaces_upscale_scale_default() {
+        assert_eq!(ItemSettings::default().output_scale, prunr_core::OutputScale::X4);
+    }
+
+    #[test]
+    fn edge_thickness_shrunk_to_u8() {
+        assert_eq!(std::mem::size_of::<u8>(), 1);
+        assert_eq!(ItemSettings::default().edge_thickness, 0u8);
+    }
+
+    #[test]
+    fn guided_radius_shrunk_to_u8() {
+        assert_eq!(std::mem::size_of::<u8>(), 1);
+        assert_eq!(ItemSettings::default().guided_radius, 8u8);
+    }
+
+    #[test]
+    fn current_recipe_passes_output_scale_through() {
+        let s = ItemSettings {
+            output_scale: prunr_core::OutputScale::X2,
+            ..ItemSettings::default()
+        };
+        let r = s.current_recipe(prunr_core::ModelKind::RealEsrganX4Plus, false);
+        assert_eq!(r.upscale.output_scale, prunr_core::OutputScale::X2);
+    }
+
+    #[test]
+    fn serde_loads_old_preset_with_upscale_scale_int() {
+        // Phase-30 preset JSON with `"upscale_scale": 2` — the field is
+        // unknown to ItemSettings after this plan; serde silently drops it
+        // and defaults `output_scale` to X4.
+        let old_json = r#"{
+            "gamma": 1.0,
+            "threshold": null,
+            "edge_shift": 0.0,
+            "refine_edges": false,
+            "guided_radius": 8,
+            "guided_epsilon": 0.0001,
+            "feather": 0.0,
+            "line_mode": "Off",
+            "line_strength": 0.5,
+            "solid_line_color": null,
+            "edge_thickness": 0,
+            "bg": null,
+            "upscale_scale": 2
+        }"#;
+        let loaded: ItemSettings = serde_json::from_str(old_json).unwrap();
+        assert_eq!(loaded.output_scale, prunr_core::OutputScale::X4);
     }
 }

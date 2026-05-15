@@ -489,11 +489,13 @@ fn render_seg_mask_chips(
             &mut item_settings.refine_edges,
             |ui| {
                 let mut inner = chip::ChipChange::default();
+                let mut radius_u32 = item_settings.guided_radius as u32;
                 let r = chip::slider_row_u32(
                     ui, "Refine radius (px)",
-                    &mut item_settings.guided_radius,
+                    &mut radius_u32,
                     1..=64,
                 );
+                item_settings.guided_radius = radius_u32.min(255) as u8;
                 if r.changed { inner.changed = true; }
                 if r.commit  { inner.commit  = true; }
                 let e = chip::slider_row_f32(
@@ -620,19 +622,24 @@ fn render_row2_right_cluster(
         |v| format!("{v:.2}"),
     ), StaticKnob::LineStrength, change);
 
-    aggregate_knob(chip::chip_u32(
-        ui,
-        chip::ChipMeta {
-            id_salt: "edge_thickness",
-            icon: ICON_LINE_WEIGHT.codepoint,
-            label: "Edge thickness",
-            description: "Thicken edges by dilating the mask. 0 = native DexiNed width; higher = bolder outlines.",
-            tooltip: "Stage 3 of 4 in the lines pipeline. Dilates the thresholded edge mask by N pixels. 0 = native DexiNed width; higher = bolder outlines that stay readable at display resolution. Runs before solid color, so bolder edges still inherit the paint choice.",
-        },
-        &mut item_settings.edge_thickness,
-        0..=20, defaults.template.edge_thickness,
-        |v| if v == 0 { "off".into() } else { format!("+{v}px") },
-    ), StaticKnob::EdgeThickness, change);
+    {
+        let mut thickness_u32 = item_settings.edge_thickness as u32;
+        let result = chip::chip_u32(
+            ui,
+            chip::ChipMeta {
+                id_salt: "edge_thickness",
+                icon: ICON_LINE_WEIGHT.codepoint,
+                label: "Edge thickness",
+                description: "Thicken edges by dilating the mask. 0 = native DexiNed width; higher = bolder outlines.",
+                tooltip: "Stage 3 of 4 in the lines pipeline. Dilates the thresholded edge mask by N pixels. 0 = native DexiNed width; higher = bolder outlines that stay readable at display resolution. Runs before solid color, so bolder edges still inherit the paint choice.",
+            },
+            &mut thickness_u32,
+            0..=20, defaults.template.edge_thickness as u32,
+            |v| if v == 0 { "off".into() } else { format!("+{v}px") },
+        );
+        item_settings.edge_thickness = thickness_u32.min(255) as u8;
+        aggregate_knob(result, StaticKnob::EdgeThickness, change);
+    }
 
     ui.separator();
 
