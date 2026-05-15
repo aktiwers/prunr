@@ -235,9 +235,6 @@ pub(crate) fn render(
             processing,
             &mut change,
         );
-        // Second row: Refinement knobs (pre-denoise, brightness-lift,
-        // sharpen, ai-blend, saturation, color-match). Only visible
-        // when upscale_mode is true — the same gate as the row above.
         super::refinement_row::render_refinement_row(ui, item_settings);
     } else {
         ui.horizontal(|ui| {
