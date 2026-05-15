@@ -3174,7 +3174,6 @@ impl PrunrApp {
                 // without a clone + writeback round-trip.
                 let settings_ref = &mut self.settings;
                 let brush_state_ref = &mut self.brush_state;
-                let processor_ref = &self.processor;
                 let item = &mut self.batch.items[idx];
                 // Inpaint mode operates on the source image directly — no
                 // cached seg tensor required. For seg-removal models the
@@ -3206,7 +3205,6 @@ impl PrunrApp {
                     has_bg_image,
                     bg_image_label,
                     source_dims,
-                    processor_ref,
                 );
             });
         if toolbar_change.reset_brush_requested {

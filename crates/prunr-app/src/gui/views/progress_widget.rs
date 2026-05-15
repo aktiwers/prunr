@@ -21,12 +21,6 @@
 //! callsite passes the user's choice; both functions accept the
 //! same inputs so the swap is a one-line branch.
 
-// Widgets land in this commit but the canvas render path doesn't
-// route to them until the legacy `render_processing` /
-// `render_inpaint_progress` paths are deleted. Dead-code allow
-// covers the module surface while it's unwired.
-#![allow(dead_code)]
-
 use egui::{Color32, FontId, Pos2, Rect, RichText, Vec2};
 
 use crate::gui::dispatch_progress::DispatchProgress;
