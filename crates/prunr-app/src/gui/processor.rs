@@ -113,9 +113,13 @@ pub(crate) struct InpaintResult {
 /// Result delivered from a background upscale thread back to the main thread.
 /// Keyed on `item_id`; only one upscale is in flight at a time (gated by
 /// `can_process_intent`), so generation-based stale-drop is not needed today.
+/// The `recipe` is captured at dispatch time so the pump can stamp
+/// `item.applied_recipe` against what actually ran — drift between the
+/// running dispatch and a user mid-edit is invisible to the recipe.
 pub(crate) struct UpscaleResult {
     pub item_id: u64,
     pub result: Result<image::RgbaImage, prunr_core::CoreError>,
+    pub recipe: ProcessingRecipe,
 }
 
 /// Pure admission check: returns `true` when `free_ram_mb >= working_set_mb`.
@@ -787,6 +791,7 @@ impl Processor {
         model_id: prunr_models::ModelId,
         scale: u32,
         intra_threads: usize,
+        recipe: ProcessingRecipe,
     ) {
         let free_mb = (crate::hardware::available_ram_bytes_throttled() / (1024 * 1024)) as u32;
         if let Some(d) = prunr_models::descriptor(model_id) {
@@ -832,7 +837,7 @@ impl Processor {
             // ordering would let the UI thread observe `is_in_flight=false`
             // and enable Process before the previous result has landed in
             // the channel.
-            let _ = result_tx.send(UpscaleResult { item_id, result });
+            let _ = result_tx.send(UpscaleResult { item_id, result, recipe });
             active_flag.store(false, Ordering::Release);
         });
     }
