@@ -36,11 +36,7 @@ pub(crate) fn render_upscale_row(
     ui.horizontal(|ui| {
         render_model_dropdown(ui, app_settings, is_processing, false, change);
 
-        let factor = match item_settings.output_scale {
-            prunr_core::OutputScale::X2 => 2u32,
-            prunr_core::OutputScale::X3 => 3,
-            prunr_core::OutputScale::X4 | prunr_core::OutputScale::X4TwoPass => 4,
-        };
+        let factor = item_settings.output_scale.factor();
         let out_w = source_dims.0.saturating_mul(factor);
         let out_h = source_dims.1.saturating_mul(factor);
         render_scale_chip(ui, &mut item_settings.output_scale, (out_w, out_h));
