@@ -27,6 +27,7 @@ pub mod system_bridge;
 pub mod download_manager;
 pub mod hardware_cache;
 pub mod env_overrides;
+pub mod dispatch_progress;
 
 #[cfg(test)]
 mod tests;
