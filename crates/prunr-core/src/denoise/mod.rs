@@ -386,11 +386,11 @@ mod tests {
         let h = 32usize;
         let n = w * h;
         let mut src = vec![0u8; n];
-        for i in 0..n {
+        for (i, slot) in src.iter_mut().enumerate() {
             let mut hasher = DefaultHasher::new();
             i.hash(&mut hasher);
-            let noise = ((hasher.finish() % 17) as i32 - 8) as i32;
-            src[i] = (128i32 + noise).clamp(0, 255) as u8;
+            let noise = (hasher.finish() % 17) as i32 - 8;
+            *slot = (128i32 + noise).clamp(0, 255) as u8;
         }
         let input_var: f32 = src.iter().map(|&v| {
             let d = v as f32 - 128.0;
@@ -420,7 +420,7 @@ mod tests {
         for (i, p) in img.pixels_mut().enumerate() {
             let mut hasher = DefaultHasher::new();
             i.hash(&mut hasher);
-            let noise = ((hasher.finish() % 41) as i32 - 20) as i32;
+            let noise = (hasher.finish() % 41) as i32 - 20;
             let v = (100i32 + noise).clamp(0, 255) as u8;
             *p = Rgba([v, v, v, 255]);
         }
