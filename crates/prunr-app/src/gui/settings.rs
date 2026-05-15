@@ -727,6 +727,41 @@ mod tests {
         assert_eq!(s.default_preset, PRUNR_PRESET);
     }
 
+    /// Whole-shape snapshot of `Settings::default()`. The individual
+    /// helper tests (`progress_style_default_is_modal`,
+    /// `default_preset_is_prunr`, …) each pin one field — a new
+    /// field that lands without a default-aware test slips through.
+    /// This pins the entire surface so a `parallel_jobs: 0` or
+    /// `chain_mode: false` regression has to break this test on the
+    /// way out.
+    ///
+    /// `parallel_jobs` is host-dependent (CPU count), so its row
+    /// asserts a lower bound rather than an exact value.
+    #[test]
+    fn default_settings_snapshot() {
+        let s = Settings::default();
+        assert_eq!(s.model, SettingsModel::BiRefNetLite);
+        assert!(!s.auto_process_on_import);
+        assert!(s.parallel_jobs >= 1,
+            "parallel_jobs must clamp to >= 1 even on a single-core host");
+        assert_eq!(s.history_depth, 10);
+        assert!(s.chain_mode, "chain_mode default flipped to true in Phase 30");
+        assert!(!s.dark_checker);
+        assert!(s.live_preview);
+        assert!(!s.auto_hide_adjustments);
+        assert_eq!(s.progress_style, ProgressStyle::Modal);
+        assert!(!s.export_split_layers);
+        assert!(s.shortcuts.is_empty());
+        assert!(s.presets.is_empty());
+        assert_eq!(s.default_preset, PRUNR_PRESET);
+        assert!(s.bg_image_paths.is_empty());
+        assert!(s.accepted_licenses.is_empty());
+        assert!(s.runtime_prompt_snoozed_until.is_empty());
+        assert!(!s.force_cpu);
+        assert_eq!(s.active_backend, "CPU");
+        assert_eq!(s.ram_safety_margin_gb, 2.0);
+    }
+
     /// Wrap an `ItemSettings` into a single-entry v2 `PresetFile` keyed
     /// by the active model. Mirrors the runtime save flow's wrap step.
     fn wrap_for_model(s: &Settings, item: ItemSettings) -> super::super::presets::PresetFile {
