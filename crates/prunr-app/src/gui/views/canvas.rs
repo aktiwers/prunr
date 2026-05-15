@@ -489,8 +489,6 @@ fn render_processing_canvas(ui: &mut egui::Ui, app: &PrunrApp) {
 /// inpaint state for the selected item (LaMa's rayon dispatch writes
 /// `InpaintProgress` directly and never publishes to the slot).
 fn read_dispatch_progress(app: &PrunrApp) -> Option<crate::gui::dispatch_progress::DispatchProgress> {
-    use crate::gui::dispatch_progress::{ProgressKind, DispatchProgress};
-
     if let Some(slot) = app.processor.dispatch_progress() {
         return Some(slot);
     }
@@ -500,14 +498,8 @@ fn read_dispatch_progress(app: &PrunrApp) -> Option<crate::gui::dispatch_progres
     if !app.processor.is_inpaint_in_flight(item_id) {
         return None;
     }
-    let ((oc, ot), (ic, it)) = app.processor.inpaint_progress_nested(item_id);
-    let outer = if ot > 0 { Some((oc, ot)) } else { None };
-    Some(DispatchProgress {
-        kind: ProgressKind::Eraser,
-        outer,
-        inner: (ic, it),
-        step_label: std::borrow::Cow::Borrowed("Inpainting"),
-    })
+    let ((oc, ot), inner) = app.processor.inpaint_progress_nested(item_id);
+    Some(crate::gui::dispatch_progress::DispatchProgress::lama_inpaint(oc, ot, inner))
 }
 
 fn render_done(ui: &mut egui::Ui, app: &PrunrApp) {
