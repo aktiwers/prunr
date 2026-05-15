@@ -783,13 +783,13 @@ impl Processor {
     pub(crate) fn dispatch_upscale(
         &mut self,
         item_id: u64,
-        input: image::RgbaImage,
+        input: Arc<image::RgbaImage>,
         model_id: prunr_models::ModelId,
         scale: u32,
         intra_threads: usize,
     ) {
         let free_mb = (crate::hardware::available_ram_bytes_throttled() / (1024 * 1024)) as u32;
-        if let Some(d) = prunr_models::REGISTRY.iter().find(|d| d.id == model_id) {
+        if let Some(d) = prunr_models::descriptor(model_id) {
             if !admission_check(d.working_set_mb, free_mb) {
                 tracing::warn!(
                     model = ?model_id,
@@ -801,8 +801,12 @@ impl Processor {
             }
         }
 
-        self.upscale_active.store(true, Ordering::Relaxed);
-        self.upscale_cancel.store(false, Ordering::Relaxed);
+        // Release stores pair with the Acquire load in
+        // `upscale::tiling::upscale_tiled` (cancel flag) and the Acquire
+        // load in `upscale_tile_progress` (active flag). Without the
+        // pairing, weakly-ordered architectures can delay propagation.
+        self.upscale_active.store(true, Ordering::Release);
+        self.upscale_cancel.store(false, Ordering::Release);
         self.upscale_tile_done.store(0, Ordering::Relaxed);
         self.upscale_tile_total.store(0, Ordering::Relaxed);
 
@@ -824,8 +828,12 @@ impl Processor {
                 },
                 Some(cancel_flag),
             );
-            active_flag.store(false, Ordering::Relaxed);
+            // Send the result BEFORE clearing the active flag. Reversed
+            // ordering would let the UI thread observe `is_in_flight=false`
+            // and enable Process before the previous result has landed in
+            // the channel.
             let _ = result_tx.send(UpscaleResult { item_id, result });
+            active_flag.store(false, Ordering::Release);
         });
     }
 
@@ -833,13 +841,13 @@ impl Processor {
     /// thread checks the flag between tiles; latency to actually stopping
     /// is one tile (~0.5 s at 4K with ESRGAN). Idempotent.
     pub(crate) fn cancel_upscale(&self) {
-        self.upscale_cancel.store(true, Ordering::Relaxed);
+        // Release pairs with Acquire in `upscale::tiling::upscale_tiled`.
+        self.upscale_cancel.store(true, Ordering::Release);
     }
 
-    /// Drain completed upscale results from the background thread. Returns
-    /// `Some(UpscaleResult)` for each completed dispatch, or `None` when
-    /// nothing is ready. Uses `.try_recv()` so this never blocks the UI thread.
-    /// Caller is responsible for applying the result to the matching `BatchItem`.
+    /// Drain completed upscale results from the background thread.
+    /// Non-blocking; returns an empty `Vec` when nothing is ready. Caller
+    /// applies each result to the matching `BatchItem`.
     pub(crate) fn pump_upscale_results(&mut self) -> Vec<UpscaleResult> {
         let mut out = Vec::new();
         while let Ok(r) = self.upscale_result_rx.try_recv() {
@@ -854,7 +862,7 @@ mod tests {
     use super::*;
     use prunr_models::ModelId;
 
-    // ── upscale_tile_progress + admission_check (Task 1a) ──────────────────
+    // ── upscale_tile_progress + admission_check ────────────────────────────
 
     #[test]
     fn upscale_tile_progress_returns_none_when_idle() {
@@ -888,6 +896,12 @@ mod tests {
     fn admission_allows_exact_match() {
         assert!(admission_check(1500, 1500),
             "exact match (working_set == free_ram) must be allowed");
+    }
+
+    #[test]
+    fn admission_refuses_when_free_ram_is_zero() {
+        assert!(!admission_check(600, 0),
+            "any positive working-set must be refused when free RAM is zero");
     }
 
     fn cfg_eq(a: f32, b: f32) -> bool { (a - b).abs() < 1e-6 }
