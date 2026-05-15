@@ -493,14 +493,15 @@ impl PrunrApp {
         let Some(item) = self.batch.items.get_mut(idx) else { return };
         let want = item.settings.bg_image_hash;
         let have = item.bg_image.as_ref().map(|b| b.hash);
-        if want == have { return; }
+        if want.map(|nz| nz.get()) == have { return; }
         let Some(want_hash) = want else {
             // Preset has no bg image — drop the stale bytes.
             item.clear_bg_image();
             return;
         };
+        let want_hash_u64 = want_hash.get();
         // New hash from preset — try to reload via the persisted path map.
-        let path = self.settings.bg_image_paths.get(&want_hash).cloned();
+        let path = self.settings.bg_image_paths.get(&want_hash_u64).cloned();
         let Some(path) = path else {
             // Hash isn't in our path map (preset shared from another user,
             // or the path entry was wiped). Drop both bytes and hash so the

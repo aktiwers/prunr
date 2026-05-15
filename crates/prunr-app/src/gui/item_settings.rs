@@ -87,12 +87,19 @@ pub struct ItemSettings {
     /// Fingerprint of the active brush correction. The bytes themselves
     /// live on the parent `BatchItem`; this hash is what the recipe diff
     /// reads to fire MaskRerun on stroke commit.
+    ///
+    /// `NonZeroU64` niche optimization keeps this at 8 bytes vs 16 for
+    /// `Option<u64>`. Hash=0 is treated as None (content_hash never yields 0
+    /// in practice; the fnv1a of empty bytes is non-zero).
     #[serde(default)]
-    pub correction_hash: Option<u64>,
+    pub correction_hash: Option<std::num::NonZeroU64>,
     /// Drives the CompositeOnly recipe diff when the user picks a different
     /// background image. `None` when no image bg is set.
+    ///
+    /// `NonZeroU64` niche saves 8 bytes vs `Option<u64>` (same layout trick
+    /// as `correction_hash`).
     #[serde(default)]
-    pub bg_image_hash: Option<u64>,
+    pub bg_image_hash: Option<std::num::NonZeroU64>,
     /// How the background image is positioned/scaled inside the result frame.
     /// Default `Cover` matches CSS `background-size: cover`.
     #[serde(default)]
@@ -104,7 +111,32 @@ pub struct ItemSettings {
     /// model behaviour).
     #[serde(default)]
     pub output_scale: prunr_core::OutputScale,
+    /// Pre-inference classical denoise blend strength, range [0.0, 1.0].
+    /// 0.0 = no denoise (output bit-identical to the un-touched source).
+    #[serde(default)]
+    pub pre_denoise: f32,
+    /// Pre-inference exposure adjustment in EV stops, range [-2.0, 2.0].
+    /// 0.0 = no change.
+    #[serde(default)]
+    pub brightness_lift: f32,
+    /// Unsharp-mask strength applied after inference, range [-1.0, 1.0].
+    /// Negative = blur, 0.0 = no-op, positive = sharpen.
+    #[serde(default)]
+    pub sharpen: f32,
+    /// Lerp weight: 1.0 = full AI upscale (default), 0.0 = pure bicubic.
+    /// Default is 1.0 so a preset that omits this field reads as full AI —
+    /// the no-op state where the upscale model's output passes through.
+    #[serde(default = "default_ai_blend")]
+    pub ai_blend: f32,
+    /// HSL-space saturation adjustment, range [-1.0, 1.0]. 0.0 = no-op.
+    #[serde(default)]
+    pub saturation: f32,
+    /// Reinhard Lab mean+stddev color match against source RGB.
+    #[serde(default)]
+    pub color_match: bool,
 }
+
+fn default_ai_blend() -> f32 { 1.0 }
 
 impl Default for ItemSettings {
     fn default() -> Self {
@@ -131,6 +163,12 @@ impl Default for ItemSettings {
             bg_image_hash: None,
             bg_image_fit: BgImageFit::default(),
             output_scale: prunr_core::OutputScale::X4,
+            pre_denoise: 0.0,
+            brightness_lift: 0.0,
+            sharpen: 0.0,
+            ai_blend: 1.0,
+            saturation: 0.0,
+            color_match: false,
         }
     }
 }
@@ -154,7 +192,7 @@ impl ItemSettings {
             feather: self.feather,
             fill_style: self.fill_style,
             bg_effect: self.bg_effect,
-            correction_hash: self.correction_hash,
+            correction_hash: self.correction_hash.map(|nz| nz.get()),
         }
     }
 
@@ -216,7 +254,7 @@ impl ItemSettings {
             mask,
             composite: prunr_core::CompositeRecipe {
                 bg_color: bg_rgb,
-                bg_image_hash: self.bg_image_hash,
+                bg_image_hash: self.bg_image_hash.map(|nz| nz.get()),
                 bg_image_fit: self.bg_image_fit,
             },
             upscale: prunr_core::UpscaleRecipe {
@@ -226,12 +264,12 @@ impl ItemSettings {
                     _ => None,
                 },
                 output_scale: self.output_scale,
-                pre_denoise_bits: 0_u32,
-                brightness_lift_bits: 0_u32,
-                sharpen_bits: 0_u32,
-                ai_blend_bits: 1.0_f32.to_bits(),
-                saturation_bits: 0_u32,
-                color_match: false,
+                pre_denoise_bits: self.pre_denoise.to_bits(),
+                brightness_lift_bits: self.brightness_lift.to_bits(),
+                sharpen_bits: self.sharpen.to_bits(),
+                ai_blend_bits: self.ai_blend.to_bits(),
+                saturation_bits: self.saturation.to_bits(),
+                color_match: self.color_match,
             },
             was_chain: chain_mode,
         }
@@ -369,10 +407,16 @@ mod tests {
             fill_style: prunr_core::FillStyle::Duotone { dark: [10, 10, 40], light: [240, 240, 200] },
             bg_effect: prunr_core::BgEffect::BlurredSource { radius: 8 },
             input_transform: prunr_core::InputTransform::ContrastBoost { percent: 150 },
-            correction_hash: Some(0xdeadbeef),
-            bg_image_hash: Some(0xfeedface),
+            correction_hash: std::num::NonZeroU64::new(0xdeadbeef),
+            bg_image_hash: std::num::NonZeroU64::new(0xfeedface),
             bg_image_fit: prunr_core::BgImageFit::Tile,
             output_scale: prunr_core::OutputScale::X2,
+            pre_denoise: 0.4,
+            brightness_lift: 0.7,
+            sharpen: 0.3,
+            ai_blend: 0.6,
+            saturation: -0.2,
+            color_match: true,
         };
         let json = serde_json::to_string(&s).unwrap();
         let recovered: ItemSettings = serde_json::from_str(&json).unwrap();
@@ -465,5 +509,93 @@ mod tests {
         }"#;
         let loaded: ItemSettings = serde_json::from_str(old_json).unwrap();
         assert_eq!(loaded.output_scale, prunr_core::OutputScale::X4);
+    }
+
+    // ----- Task 2 tests: six new upscale knob fields -----
+
+    #[test]
+    fn new_knobs_default_to_no_op() {
+        let s = ItemSettings::default();
+        assert_eq!(s.pre_denoise, 0.0);
+        assert_eq!(s.brightness_lift, 0.0);
+        assert_eq!(s.sharpen, 0.0);
+        assert_eq!(s.ai_blend, 1.0);
+        assert_eq!(s.saturation, 0.0);
+        assert!(!s.color_match);
+    }
+
+    #[test]
+    fn current_recipe_wires_all_new_fields() {
+        let s = ItemSettings {
+            pre_denoise: 0.4,
+            brightness_lift: 0.7,
+            sharpen: 0.3,
+            ai_blend: 0.6,
+            saturation: -0.2,
+            color_match: true,
+            output_scale: prunr_core::OutputScale::X4TwoPass,
+            ..ItemSettings::default()
+        };
+        let r = s.current_recipe(prunr_core::ModelKind::RealEsrganX4Plus, false);
+        assert_eq!(r.upscale.pre_denoise_bits, 0.4_f32.to_bits());
+        assert_eq!(r.upscale.brightness_lift_bits, 0.7_f32.to_bits());
+        assert_eq!(r.upscale.sharpen_bits, 0.3_f32.to_bits());
+        assert_eq!(r.upscale.ai_blend_bits, 0.6_f32.to_bits());
+        assert_eq!(r.upscale.saturation_bits, (-0.2_f32).to_bits());
+        assert!(r.upscale.color_match);
+        assert_eq!(r.upscale.output_scale, prunr_core::OutputScale::X4TwoPass);
+    }
+
+    #[test]
+    fn serde_roundtrip_all_phase32_fields() {
+        let s = ItemSettings {
+            pre_denoise: 0.4,
+            brightness_lift: 0.7,
+            sharpen: 0.3,
+            ai_blend: 0.6,
+            saturation: -0.2,
+            color_match: true,
+            output_scale: prunr_core::OutputScale::X4TwoPass,
+            ..ItemSettings::default()
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        let recovered: ItemSettings = serde_json::from_str(&json).unwrap();
+        assert_eq!(s, recovered);
+    }
+
+    #[test]
+    fn serde_loads_old_preset_missing_phase32_fields() {
+        // Phase-30 preset JSON missing all Phase-32 fields must load with
+        // no-op defaults: pre_denoise=0, ai_blend=1 (the critical one).
+        let old_json = r#"{
+            "gamma": 1.0,
+            "threshold": null,
+            "edge_shift": 0.0,
+            "refine_edges": false,
+            "guided_radius": 8,
+            "guided_epsilon": 0.0001,
+            "feather": 0.0,
+            "line_mode": "Off",
+            "line_strength": 0.5,
+            "solid_line_color": null,
+            "edge_thickness": 0,
+            "bg": null
+        }"#;
+        let loaded: ItemSettings = serde_json::from_str(old_json).unwrap();
+        assert_eq!(loaded.pre_denoise, 0.0);
+        assert_eq!(loaded.brightness_lift, 0.0);
+        assert_eq!(loaded.sharpen, 0.0);
+        assert_eq!(loaded.ai_blend, 1.0);
+        assert_eq!(loaded.saturation, 0.0);
+        assert!(!loaded.color_match);
+    }
+
+    #[test]
+    fn budget_still_under_128_bytes() {
+        assert!(
+            std::mem::size_of::<ItemSettings>() <= 128,
+            "ItemSettings is {} bytes after Phase-32 fields, budget is 128",
+            std::mem::size_of::<ItemSettings>()
+        );
     }
 }
