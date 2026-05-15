@@ -18,7 +18,7 @@ pub mod ep_compat;
 pub mod upscale;
 
 pub use engine::{InferenceEngine, OrtEngine};
-pub use recipe::{ProcessingRecipe, InferenceRecipe, EdgeRecipe, MaskRecipe, CompositeRecipe, UpscaleRecipe, RequiredTier, resolve_tier};
+pub use recipe::{ProcessingRecipe, InferenceRecipe, EdgeRecipe, MaskRecipe, CompositeRecipe, UpscaleRecipe, OutputScale, RequiredTier, resolve_tier};
 pub use types::{
     CoreError, ModelKind, ProgressStage, ProcessResult, MaskSettings, EdgeSettings, EdgeScale,
     InferenceResult, LineMode, LARGE_IMAGE_LIMIT, DOWNSCALE_TARGET,
