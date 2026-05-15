@@ -175,6 +175,7 @@ Re-processing avoids redundant work by classifying each change into a tier:
 | 1b | AddEdgeInference | Only `uses_edge_detection` flipped false→true and seg cache hot | Reuse cached seg, run DexiNed only |
 | 2a | MaskRerun | Mask params changed (gamma, threshold, edge_shift, refine_edges, fill_style, bg_effect) | Postprocess cached seg tensor (~50-200ms; BgEffect adds ~30-100 ms for the backdrop compose) |
 | 2b | EdgeRerun | Line params changed (line_strength, solid_line_color, compose_mode, line_style) | Re-threshold cached DexiNed tensor (~20-100ms) |
+| 2c | UpscaleRerun | Upscale model or scale changed | Re-runs `upscale_rgba` in-process on a background thread; bypasses subprocess |
 | 3 | CompositeOnly | bg_color changed | Render-time GPU rect — zero CPU |
 | — | Skip | Recipe identical | No work |
 
@@ -457,6 +458,27 @@ ignore than to investigate. Reference numbers (8-core x86_64,
 The other three benches (`tile_compose`, `resize_lanczos3`,
 `tensor_to_mask`) are committed and runnable; their reference numbers
 land here on the next perf sweep when they're actually measured.
+
+## Upscale
+
+Tile-based super-resolution that runs **in-process** via `OrtEngine` on a background thread — not through the subprocess. The upscale module (`crates/prunr-core/src/upscale/`) is distinct from the LaMa inpaint tiler: same smoothstep overlap-blend, but a different IO shape (`RgbaImage → scale × size` vs `(RgbaImage, GrayMask) → same-size`). Sharing the tiler would obscure both; the smoothstep weight is intentionally duplicated because it is coincidental shape, not shared meaning.
+
+Two model families today:
+
+| Model | Tile | Overlap | ORT level | Why |
+|-------|------|---------|-----------|-----|
+| Real-ESRGAN x4plus | 512 | 16 px | Level3 | CNN; no window constraint |
+| 4xNomos8kSCHAT-L | 256 | 32 px | **Level2** | Window-attention transformer; Level3 bakes the first tile's input shape into the graph, breaking subsequent tiles with different padded dimensions |
+
+**Alpha companion.** Models are 3-channel. Alpha is upscaled independently via Lanczos3 at the output dimensions and recombined at the end — the RGB tiling path never sees the alpha channel.
+
+**scale=2 path.** There is no native 2× model. `scale=2` runs the 4× model and Lanczos3-downscales the result. The full 4× RGBA buffer lives briefly during downscale; for a 4K input that is ~768 MB of transient scratch on top of the tiling accumulators. Per-tile scratch and the full ONNX session footprint are documented in the module doc-comment.
+
+**Single-flight dispatch.** `Processor::dispatch_upscale` uses an atomic cancel flag and a dedicated mpsc channel; only one upscale job runs at a time. Tile progress is exposed via an `AtomicU32` counter (done, total) — the toolbar reads it each frame with zero contention.
+
+**Live preview gated out.** `RequiredTier::UpscaleRerun` is refused by the 10 Hz preview path. A multi-second job at 10 Hz would appear to hang; the user commits explicitly with Process.
+
+**Admission.** `Processor` refuses dispatch when system free RAM falls below `descriptor.working_set_mb` — same field the subprocess admission controller reads for segmentation/inpaint.
 
 ## Edge Detection (DexiNed)
 
