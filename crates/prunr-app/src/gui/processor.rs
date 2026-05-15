@@ -279,11 +279,11 @@ pub(crate) struct Processor {
     upscale_tile_total: Arc<AtomicU32>,
     upscale_result_tx: mpsc::Sender<UpscaleResult>,
     upscale_result_rx: mpsc::Receiver<UpscaleResult>,
-    /// Unified progress slot. One source of truth for the banner / modal
-    /// widgets across every dispatch kind. Written by `dispatch_upscale`
-    /// (step 3), `pump_inpaint_subprocess` (step 2 — pending widget
-    /// migration), and the seg path (step 4); read by the new widgets
-    /// added in step 5. `None` when no dispatch is in flight.
+    /// Unified progress slot. One source of truth for the banner /
+    /// modal widgets across every dispatch kind. Written by
+    /// `dispatch_upscale`, `pump_inpaint_subprocess`, and the seg
+    /// path's `refresh_batch_progress_status`; `None` when no dispatch
+    /// is in flight.
     dispatch_progress: super::dispatch_progress::DispatchProgressSlot,
 }
 
@@ -322,14 +322,15 @@ impl Processor {
         }
     }
 
-    /// Unified progress reader for the banner / modal widgets. `None`
-    /// when no dispatch is in flight. Single source of truth that
-    /// replaces the per-dispatch readers (`upscale_tile_progress`,
-    /// `inpaint_progress`) once the widget side migrates in step 5.
-    // Widgets read this in step 5; dead-code allow keeps the migration
-    // green between commits.
+    /// Unified progress reader for the banner / modal widgets.
+    /// `None` when no dispatch is in flight. Single source of truth
+    /// that replaces the per-dispatch readers (`upscale_tile_progress`,
+    /// `inpaint_progress`) — they coexist until the widget migration
+    /// is complete.
+    // Reserved for the unified progress widget; not yet wired into a
+    // render path.
     #[allow(dead_code)]
-    pub(crate) fn dispatch_progress(&self) -> Option<super::dispatch_progress::DispatchProgress> {
+    pub(super) fn dispatch_progress(&self) -> Option<super::dispatch_progress::DispatchProgress> {
         self.dispatch_progress.read()
     }
 
