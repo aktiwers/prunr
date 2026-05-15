@@ -184,7 +184,6 @@ pub(crate) fn render(
     has_bg_image: bool,
     bg_image_label: Option<&str>,
     source_dims: (u32, u32),
-    processor: &crate::gui::processor::Processor,
 ) -> ToolbarChange {
     let mut change = ToolbarChange::default();
     let defaults = Defaults::new();
@@ -234,7 +233,6 @@ pub(crate) fn render(
             applied_preset,
             source_dims,
             processing,
-            processor,
             &mut change,
         );
     } else {

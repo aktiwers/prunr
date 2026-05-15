@@ -141,24 +141,40 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
     match app_state {
         AppState::Empty => render_empty(ui, app),
         AppState::Loaded => render_loaded(ui, app),
-        AppState::Processing => render_processing(ui, app),
+        AppState::Processing => render_processing_canvas(ui, app),
         AppState::Done => render_done(ui, app),
     }
 
-    // Inpaint progress overlay — LaMa runs on rayon, takes seconds at
-    // CPU speed; SD on CPU is multi-minute. Show an "Erasing..." banner
-    // with a Cancel button so the user can escape a slow stroke instead
-    // of guessing whether the click was lost.
-    if let Some(idx) = app.batch.selected_idx_clamped() {
-        let item_id = app.batch.items[idx].id;
-        if app.processor.is_inpaint_in_flight(item_id) {
-            let progress = app.processor.inpaint_progress(item_id);
-            let cancelling = app.processor.is_inpaint_cancelling(item_id);
-            if render_inpaint_progress(ui, canvas_rect, progress, cancelling) {
-                app.cancel_inpaint_for(item_id);
+    // Unified progress overlay — reads `Processor.dispatch_progress`
+    // for seg / SD inpaint / upscale, falls back to synthesising from
+    // the in-process LaMa inpaint state (the LaMa rayon path writes
+    // `InpaintProgress` directly without going through the
+    // subprocess bridge that populates the slot).
+    if let Some(progress) = read_dispatch_progress(app) {
+        let active_inpaint_item = app.batch.selected_idx_clamped()
+            .map(|idx| app.batch.items[idx].id)
+            .filter(|&id| app.processor.is_inpaint_in_flight(id));
+        let cancelling = active_inpaint_item
+            .map(|id| app.processor.is_inpaint_cancelling(id))
+            .unwrap_or(false);
+        let cancelled = match app.settings.progress_style {
+            crate::gui::settings::ProgressStyle::Banner => {
+                super::progress_widget::render_banner(ui, canvas_rect, &progress, cancelling)
             }
-            ui.ctx().request_repaint();
+            crate::gui::settings::ProgressStyle::Modal => {
+                super::progress_widget::render_modal(ui, canvas_rect, &progress, cancelling)
+            }
+        };
+        if cancelled {
+            if let Some(item_id) = active_inpaint_item {
+                app.cancel_inpaint_for(item_id);
+            } else {
+                // Slot is populated by seg / upscale; route to the
+                // global cancel intent which handles both.
+                app.handle_cancel();
+            }
         }
+        ui.ctx().request_repaint();
     }
 
     // Suppress brush input + cursor + trail when a popup or widget has
@@ -168,82 +184,6 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
     if brush_active && !modal_open && !popup_open && !widget_has_pointer {
         handle_brush_input(ui, app, canvas_rect);
     }
-}
-
-/// Translucent banner + animated dots + Cancel button shown while an
-/// eraser stroke is in flight. Returns `true` when Cancel was clicked
-/// this frame. Banner copy: "Cancelling…" when `cancelling`, else
-/// "Erasing — step N of M" when `progress.total > 0`, else "Erasing…".
-fn render_inpaint_progress(
-    ui: &mut egui::Ui,
-    canvas_rect: Rect,
-    progress: (u32, u32),
-    cancelling: bool,
-) -> bool {
-    let t = ui.ctx().input(|i| i.time) as f32;
-    let banner_h = 44.0;
-    let banner = Rect::from_min_size(
-        canvas_rect.min,
-        Vec2::new(canvas_rect.width(), banner_h),
-    );
-    ui.painter().rect_filled(banner, 0.0, Color32::from_rgba_unmultiplied(0, 0, 0, 160));
-    let center = banner.center();
-    // Three pulsing dots for the activity indicator.
-    for i in 0..3 {
-        let phase = t * 3.0 - i as f32 * 0.6;
-        let a = (phase.sin() * 0.5 + 0.5).clamp(0.3, 1.0);
-        let dot_x = center.x - 56.0 + i as f32 * 10.0;
-        ui.painter().circle_filled(
-            Pos2::new(dot_x, center.y),
-            3.5,
-            theme::ACCENT.gamma_multiply(a),
-        );
-    }
-    let label: std::borrow::Cow<'static, str> = if cancelling {
-        std::borrow::Cow::Borrowed("Cancelling…")
-    } else {
-        match progress {
-            (cur, total) if total > 0 && cur > 0 => format!("Erasing — step {cur} of {total}").into(),
-            _ => std::borrow::Cow::Borrowed("Erasing…"),
-        }
-    };
-    ui.painter().text(
-        Pos2::new(center.x - 22.0, center.y),
-        egui::Align2::LEFT_CENTER,
-        &*label,
-        egui::FontId::proportional(14.0),
-        theme::TEXT_PRIMARY,
-    );
-
-    // Hide once cancelling — a still-clickable button reads as "the
-    // first click didn't take" while the worker finishes its tile/step.
-    if cancelling {
-        return false;
-    }
-
-    // Cancel button on the right side of the banner. Interactive widget
-    // so we can't paint-only here; allocate a child Ui at the banner's
-    // right region and return whether it was clicked.
-    let btn_w = 90.0; // banner-button width — no precedent in theme.rs.
-    let btn_size = Vec2::new(btn_w, theme::CHIP_HEIGHT);
-    let btn_rect = Rect::from_center_size(
-        Pos2::new(canvas_rect.right() - 16.0 - btn_w / 2.0, center.y),
-        btn_size,
-    );
-    let mut child = ui.new_child(
-        egui::UiBuilder::new()
-            .max_rect(btn_rect)
-            .layout(egui::Layout::centered_and_justified(egui::Direction::LeftToRight)),
-    );
-    let resp = child.add(
-        egui::Button::new(
-            egui::RichText::new("Cancel (Esc)")
-                .size(theme::FONT_SIZE_BODY - 1.0)
-                .color(theme::TEXT_PRIMARY),
-        )
-        .min_size(btn_size),
-    );
-    resp.clicked()
 }
 
 /// Run the brush overlay (cursor + pointer events) and commit any
@@ -483,12 +423,17 @@ fn render_loaded(ui: &mut egui::Ui, app: &PrunrApp) {
     }
 }
 
-fn render_processing(ui: &mut egui::Ui, app: &PrunrApp) {
+/// Paint the canvas-background "work in progress" effect: gentle
+/// wiggle/breathing of the source image + horizontal shimmer sweep.
+/// The progress pill that used to live here moved to the unified
+/// `progress_widget` (banner / modal); the canvas effect stays as
+/// its own visual cue.
+fn render_processing_canvas(ui: &mut egui::Ui, app: &PrunrApp) {
     let canvas_rect = ui.available_rect_before_wrap();
-
     let t = ui.ctx().input(|i| i.time) as f32;
 
-    // In chain mode with an existing result, show the result being processed (not the original)
+    // In chain mode with an existing result, show the result being processed
+    // (not the original).
     let item = app.batch.selected_item();
     let result_tex = item.and_then(|i| i.result_texture.as_ref());
     let display_texture = if app.settings.chain_mode && result_tex.is_some() {
@@ -499,7 +444,6 @@ fn render_processing(ui: &mut egui::Ui, app: &PrunrApp) {
 
     if let Some(texture) = display_texture {
         let tex_size = texture.size_vec2();
-        // Gentle wiggle/breathing effect on background image
         let wiggle_zoom = 1.0 + (t * 1.5).sin() * 0.003;
         let wiggle_x = (t * 0.8).sin() * 2.0;
         let wiggle_y = (t * 1.1).cos() * 1.5;
@@ -512,7 +456,6 @@ fn render_processing(ui: &mut egui::Ui, app: &PrunrApp) {
             Color32::from_rgba_unmultiplied(255, 255, 255, 140),
         );
 
-        // Shimmer sweep
         let sweep_x = ((t * 0.6).fract()) * (img_rect.width() + 80.0) - 40.0 + img_rect.min.x;
         let shimmer_rect = Rect::from_min_max(
             Pos2::new(sweep_x - 40.0, img_rect.min.y),
@@ -524,38 +467,33 @@ fn render_processing(ui: &mut egui::Ui, app: &PrunrApp) {
         }
     }
 
-    const PROCESSING_DOTS: [&str; 4] = ["Processing.", "Processing..", "Processing...", "Processing...."];
-    let label = PROCESSING_DOTS[(t * 2.0) as usize % 4];
-    let center = canvas_rect.center();
-
-    // Dark pill behind text
-    let pill_rect = Rect::from_center_size(center + Vec2::new(0.0, 14.0), Vec2::new(280.0, 80.0));
-    ui.painter().rect_filled(pill_rect, 14.0,
-        Color32::from_rgba_unmultiplied(0, 0, 0, 180));
-
-    ui.painter().text(
-        center - Vec2::new(0.0, 6.0),
-        egui::Align2::CENTER_CENTER,
-        label,
-        egui::FontId::proportional(theme::FONT_SIZE_HEADING),
-        theme::TEXT_PRIMARY,
-    );
-    ui.painter().text(
-        center + Vec2::new(0.0, 14.0),
-        egui::Align2::CENTER_CENTER,
-        &app.status.stage,
-        egui::FontId::proportional(theme::FONT_SIZE_BODY),
-        theme::TEXT_SECONDARY,
-    );
-    ui.painter().text(
-        center + Vec2::new(0.0, 34.0),
-        egui::Align2::CENTER_CENTER,
-        "Press Escape to cancel",
-        egui::FontId::proportional(theme::FONT_SIZE_MONO),
-        theme::TEXT_SECONDARY,
-    );
-
     ui.ctx().request_repaint_after(std::time::Duration::from_millis(66));
+}
+
+/// Synthesise a `DispatchProgress` for the canvas overlay. Reads the
+/// unified slot first; if empty, falls back to the in-process LaMa
+/// inpaint state for the selected item (LaMa's rayon dispatch writes
+/// `InpaintProgress` directly and never publishes to the slot).
+fn read_dispatch_progress(app: &PrunrApp) -> Option<crate::gui::dispatch_progress::DispatchProgress> {
+    use crate::gui::dispatch_progress::{DispatchKind, DispatchProgress};
+
+    if let Some(slot) = app.processor.dispatch_progress() {
+        return Some(slot);
+    }
+
+    let idx = app.batch.selected_idx_clamped()?;
+    let item_id = app.batch.items[idx].id;
+    if !app.processor.is_inpaint_in_flight(item_id) {
+        return None;
+    }
+    let ((oc, ot), (ic, it)) = app.processor.inpaint_progress_nested(item_id);
+    let outer = if ot > 0 { Some((oc, ot)) } else { None };
+    Some(DispatchProgress {
+        kind: DispatchKind::Eraser,
+        outer,
+        inner: (ic, it),
+        step_label: std::borrow::Cow::Borrowed("Inpainting"),
+    })
 }
 
 fn render_done(ui: &mut egui::Ui, app: &PrunrApp) {
