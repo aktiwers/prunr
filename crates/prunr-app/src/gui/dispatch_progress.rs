@@ -77,6 +77,25 @@ impl ProgressKind {
     }
 }
 
+/// Per-dispatch step-label strings. Defined once here so the dispatch
+/// sites + tests + comments don't drift independently — a rename here
+/// is a one-site edit, and grep-finding a label landing in the wrong
+/// widget is trivial.
+pub mod step_labels {
+    pub const LOADING_MODEL: &str = "Loading model";
+    pub const TILE_INFERENCE: &str = "Tile inference";
+    pub const DENOISING: &str = "Denoising";
+    pub const INPAINTING: &str = "Inpainting";
+}
+
+/// Translate the IPC sentinel `outer_total == 0` (= "no nesting") into
+/// the `Option<(current, total)>` shape `DispatchProgress.outer` wants.
+/// One definition so the SD pump and the LaMa-fallback synthesiser
+/// can't drift on the sentinel meaning.
+pub fn outer_from_atomics(outer_current: u32, outer_total: u32) -> Option<(u32, u32)> {
+    (outer_total > 0).then_some((outer_current, outer_total))
+}
+
 /// Snapshot of a single in-flight dispatch. Cheap to clone — only the
 /// step_label can be a heap `String`, and short labels live as
 /// `Cow::Borrowed(&'static str)`.
@@ -94,6 +113,55 @@ pub struct DispatchProgress {
     /// ("Decode", "Inference") are `Borrowed`; valued text
     /// ("Denoising at sigma 0.42") is `Owned`.
     pub step_label: Cow<'static, str>,
+}
+
+impl DispatchProgress {
+    /// Builder for the seg / batch pipeline. `step` is whatever
+    /// `BatchManager::progress().stage` reports ("Processing 3/5").
+    pub fn seg(done: u32, total: u32, step: impl Into<Cow<'static, str>>) -> Self {
+        Self {
+            kind: ProgressKind::Seg,
+            outer: None,
+            inner: (done, total),
+            step_label: step.into(),
+        }
+    }
+
+    /// Builder for the upscale dispatch. `tile_total = 0` is OK at the
+    /// "loading model" pre-dispatch point — the counter is then
+    /// indeterminate.
+    pub fn upscale(tile_done: u32, tile_total: u32, label: &'static str) -> Self {
+        Self {
+            kind: ProgressKind::Upscale,
+            outer: None,
+            inner: (tile_done, tile_total),
+            step_label: Cow::Borrowed(label),
+        }
+    }
+
+    /// Builder for the SD inpaint subprocess pump. Wraps the
+    /// `outer_total == 0 → None` sentinel translation so call sites
+    /// don't have to repeat it.
+    pub fn sd_inpaint(outer_current: u32, outer_total: u32, inner: (u32, u32)) -> Self {
+        Self {
+            kind: ProgressKind::SdInpaint,
+            outer: outer_from_atomics(outer_current, outer_total),
+            inner,
+            step_label: Cow::Borrowed(step_labels::DENOISING),
+        }
+    }
+
+    /// Builder for the in-process LaMa dispatch (read-time synthesise
+    /// from `InpaintProgress` in the canvas, since LaMa doesn't go
+    /// through the subprocess bridge that publishes the slot).
+    pub fn lama_inpaint(outer_current: u32, outer_total: u32, inner: (u32, u32)) -> Self {
+        Self {
+            kind: ProgressKind::Eraser,
+            outer: outer_from_atomics(outer_current, outer_total),
+            inner,
+            step_label: Cow::Borrowed(step_labels::INPAINTING),
+        }
+    }
 }
 
 impl DispatchProgress {
