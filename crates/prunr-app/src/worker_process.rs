@@ -973,10 +973,11 @@ pub fn run_worker() -> ! {
                 // CPU (1-3 s/step). Acquire reads pair with the worker's
                 // Release writes in `process_inpaint_with`.
                 let pump_handle = std::thread::spawn(move || {
-                    let mut last_current = u32::MAX;
+                    let mut last_signature: (u32, u32) = (u32::MAX, u32::MAX);
                     loop {
                         if pump_done_for_thread.load(Ordering::Acquire) { break; }
-                        let (current, total) = progress_for_pump.read();
+                        let ((outer_current, outer_total), (current, total)) =
+                            progress_for_pump.read_nested();
                         // Re-check after the read but before the send. Without
                         // this, the worker could flip pump_done between the
                         // top-of-loop check and the send, putting an
@@ -987,11 +988,15 @@ pub fn run_worker() -> ! {
                         // to honour the "no Progress after Done" invariant
                         // documented above.
                         if pump_done_for_thread.load(Ordering::Acquire) { break; }
-                        if current != last_current {
+                        // Re-emit when either dimension advanced so a tile
+                        // boundary (inner resets to 0, outer bumps) lands
+                        // as a single observable transition.
+                        let signature = (current, outer_current);
+                        if signature != last_signature {
                             let _ = evt_tx_for_pump.send(SubprocessEvent::InpaintProgress {
-                                item_id, current, total,
+                                item_id, current, total, outer_current, outer_total,
                             });
-                            last_current = current;
+                            last_signature = signature;
                         }
                         std::thread::sleep(std::time::Duration::from_millis(250));
                     }

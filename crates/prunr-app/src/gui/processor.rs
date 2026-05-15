@@ -572,10 +572,14 @@ impl Processor {
     pub(crate) fn pump_inpaint_subprocess(&mut self) {
         while let Ok(evt) = self.inpaint_bridge_rx.try_recv() {
             match evt {
-                InpaintBridgeResult::Progress { item_id, current, total } => {
+                InpaintBridgeResult::Progress {
+                    item_id, current, total, outer_current, outer_total,
+                } => {
                     if let Some(p) = self.inpaint_progress.get(&item_id) {
                         p.set_total(total);
                         p.set_step(current);
+                        p.set_outer_total(outer_total);
+                        p.set_outer_step(outer_current);
                     }
                 }
                 InpaintBridgeResult::Done { item_id, gen, rgba_path, width, height } => {

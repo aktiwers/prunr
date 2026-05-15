@@ -169,14 +169,15 @@ pub fn process_inpaint_with(
     let cancel = hooks.cancel.as_ref();
     let progress = hooks.progress.as_ref();
     if let Some(p) = progress {
-        // Total = steps × tiles is approximate; tiles aren't known
-        // until mask_components runs below. We seed total = steps and
-        // surface tile-count via the rolling `current` step counter
-        // wrapping past `total` per tile. Banner reads (current,
-        // total) raw; total stays the per-tile UNet step budget so
-        // "step 5 of 20" reads cleanly even on multi-tile strokes.
+        // Inner = per-tile UNet step budget. Outer (total tile count
+        // across all components) is set below once `mask_components`
+        // has run; pre-seeded to 0 here so a render between dispatch
+        // and the outer-total set doesn't show a stale value from a
+        // previous stroke.
         p.set_total(req.num_inference_steps);
         p.set_step(0);
+        p.set_outer_total(0);
+        p.set_outer_step(0);
     }
     if image.dimensions() != mask.dimensions() {
         return Err(CoreError::Inference(format!(
@@ -196,6 +197,29 @@ pub fn process_inpaint_with(
     if components.is_empty() {
         return Ok(image.clone());
     }
+
+    // Pre-count tiles across all components so the outer progress
+    // counter advances monotonically over the full stroke. Without
+    // this, the inner `set_step(0..N)` would reset every time we move
+    // from one tile to the next and the banner would appear to start
+    // over. Components that fit in SD_TILE count as one tile each.
+    let outer_total: u32 = components
+        .iter()
+        .map(|comp| {
+            let w = comp.x_max - comp.x_min + 1;
+            let h = comp.y_max - comp.y_min + 1;
+            if w <= SD_TILE && h <= SD_TILE {
+                1
+            } else {
+                (tile_count(w) * tile_count(h)).max(1)
+            }
+        })
+        .sum();
+    if let Some(p) = progress {
+        p.set_outer_total(outer_total);
+        p.set_outer_step(0);
+    }
+    let mut tile_idx: u32 = 0;
 
     // Hold an Arc through the run so the idle sweep can't drop sessions
     // mid-inference.
@@ -233,6 +257,8 @@ pub fn process_inpaint_with(
         let painted_h = component.y_max - component.y_min + 1;
         if painted_w <= SD_TILE && painted_h <= SD_TILE {
             // Fast path: single 512×512 crop centred on the component.
+            tile_idx += 1;
+            if let Some(p) = progress { p.set_outer_step(tile_idx); }
             let (cx, cy, cw, ch) = compute_sd_crop(component, img_w, img_h);
             let cropped_img = image::imageops::crop_imm(&out, cx, cy, cw, ch).to_image();
             let cropped_mask = image::imageops::crop_imm(mask, cx, cy, cw, ch).to_image();
@@ -253,6 +279,8 @@ pub fn process_inpaint_with(
         );
         for tile in tiles {
             if is_cancelled() { return Err(CoreError::Cancelled); }
+            tile_idx += 1;
+            if let Some(p) = progress { p.set_outer_step(tile_idx); }
             let cropped_img = image::imageops::crop_imm(&out, tile.x, tile.y, tile.w, tile.h).to_image();
             let cropped_mask = image::imageops::crop_imm(mask, tile.x, tile.y, tile.w, tile.h).to_image();
             match run_one_tile(&bundle, &vae, &cropped_img, &cropped_mask, &req, hooks) {
