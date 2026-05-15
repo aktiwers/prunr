@@ -708,11 +708,12 @@ mod tests {
             match t {
                 Skip => 0,
                 CompositeOnly => 1,
-                UpscaleRerun => 2,
-                EdgeRerun => 3,
-                MaskRerun => 4,
-                AddEdgeInference => 5,
-                FullPipeline => 6,
+                UpscaleTier2 => 2,
+                UpscaleRerun => 3,
+                EdgeRerun => 4,
+                MaskRerun => 5,
+                AddEdgeInference => 6,
+                FullPipeline => 7,
             }
         };
         for knob in StaticKnob::ALL {
