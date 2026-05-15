@@ -202,6 +202,17 @@ fn pixel_weight(image_bytes: &[u8]) -> usize {
     }
 }
 
+/// Pure predicate for the inpaint-progress pump: should we emit
+/// a new `InpaintProgress` event given the previous and current
+/// signatures? Signature is `(inner_current, outer_current)`.
+/// Returns true when EITHER dimension advanced — a tile boundary
+/// (inner resets to 0, outer bumps) lands as a single observable
+/// transition. Extracted as a free function so the contract can
+/// be unit-tested without standing up the pump thread.
+fn pump_signature_advanced(prev: (u32, u32), curr: (u32, u32)) -> bool {
+    prev != curr
+}
+
 /// Entry point for `prunr --worker`.
 pub fn run_worker() -> ! {
     let stdin = std::io::stdin();
@@ -988,11 +999,8 @@ pub fn run_worker() -> ! {
                         // to honour the "no Progress after Done" invariant
                         // documented above.
                         if pump_done_for_thread.load(Ordering::Acquire) { break; }
-                        // Re-emit when either dimension advanced so a tile
-                        // boundary (inner resets to 0, outer bumps) lands
-                        // as a single observable transition.
                         let signature = (current, outer_current);
-                        if signature != last_signature {
+                        if pump_signature_advanced(last_signature, signature) {
                             let _ = evt_tx_for_pump.send(SubprocessEvent::InpaintProgress {
                                 item_id, current, total, outer_current, outer_total,
                             });
@@ -1278,5 +1286,40 @@ mod tests {
         assert!(max_live.load(std::sync::atomic::Ordering::Acquire) >= 4,
             "expected at least 4 concurrent small acquirers, got {}",
             max_live.load(std::sync::atomic::Ordering::Acquire));
+    }
+
+    /// `pump_signature_advanced` returns true when either dimension of
+    /// the `(inner, outer)` signature changes — including the tile-
+    /// boundary case where inner resets to 0 while outer bumps. Pinning
+    /// this contract means a future refactor that compares only one
+    /// dimension (or the wrong dimension) fails loudly.
+    #[test]
+    fn pump_signature_advanced_static_signature_does_not_emit() {
+        assert!(!pump_signature_advanced((0, 0), (0, 0)));
+        assert!(!pump_signature_advanced((0, 1), (0, 1)));
+        assert!(!pump_signature_advanced((7, 3), (7, 3)));
+    }
+
+    #[test]
+    fn pump_signature_advanced_inner_step_emits() {
+        assert!(pump_signature_advanced((0, 0), (1, 0)));
+        assert!(pump_signature_advanced((4, 2), (5, 2)));
+    }
+
+    #[test]
+    fn pump_signature_advanced_outer_bump_with_inner_reset_emits() {
+        // Tile boundary: inner counter resets to 0 as outer (tile idx)
+        // advances. Both move on the same observation — must still
+        // register as an advance, not be silently masked by the inner
+        // reset.
+        assert!(pump_signature_advanced((8, 0), (0, 1)));
+        assert!(pump_signature_advanced((19, 2), (0, 3)));
+    }
+
+    #[test]
+    fn pump_signature_advanced_outer_only_emits() {
+        // Same inner index, outer bumps (rare but possible if a tile
+        // boundary lands exactly on a same-step inner): still emits.
+        assert!(pump_signature_advanced((5, 1), (5, 2)));
     }
 }
