@@ -261,7 +261,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8. Ph
 | 28. SD VAE Orthogonality | 2/5 | In Progress|  |
 | 29. Refine and Wire Presets to All Models | 5/5 | Complete    | 2026-05-14 |
 | 30. Upscale Tab v1 | 12/12 | Complete   | 2026-05-15 |
-| 32. Upscale Refinement Knobs | 4/8 | In Progress|  |
+| 32. Upscale Refinement Knobs | 5/8 | In Progress|  |
 
 ### Phase 30: Upscale Tab v1
 
@@ -321,7 +321,7 @@ Plans:
  10. Live preview (10 Hz Tier-2 dispatch) drives the real-time Tier-2 knob feel on the cached `upscale_raw` buffer — same debounced dispatch hook BiRefNet uses; Tier-1 knobs continue to gate out of live preview
  11. `prunr-core` unit tests cover each new pure function (denoise filters, postprocess ops, two-pass scheduler); `prunr-models` test asserts `X4TwoPass` recipe variant routes through `RealESRGAN_x2plus`
 
-**Plans:** 4/8 plans executed
+**Plans:** 5/8 plans executed
 
 Plans:
 - [ ] 32-01-PLAN.md — Data layer: UpscaleRecipe + OutputScale + RequiredTier::UpscaleTier2 + resolve_tier extension
