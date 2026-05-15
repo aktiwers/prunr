@@ -92,6 +92,12 @@ impl CancelRegistry {
 struct InFlightBatch {
     recipe: ProcessingRecipe,
     pending: HashSet<u64>,
+    /// Total items registered for this dispatch — frozen at
+    /// `track_dispatch` time. Used by `current_dispatch_progress` to
+    /// report "done / total" scoped to the *current* dispatch, so
+    /// previously-Done items from prior dispatches don't inflate the
+    /// counter when the user reprocesses a single item.
+    total: usize,
 }
 
 pub(crate) struct InpaintResult {
@@ -770,10 +776,23 @@ impl Processor {
         recipe: ProcessingRecipe,
         ids: impl IntoIterator<Item = u64>,
     ) {
-        self.in_flight = Some(InFlightBatch {
-            recipe,
-            pending: ids.into_iter().collect(),
-        });
+        let pending: HashSet<u64> = ids.into_iter().collect();
+        let total = pending.len();
+        self.in_flight = Some(InFlightBatch { recipe, pending, total });
+    }
+
+    /// `(done, total)` for the currently in-flight dispatch, or `None`
+    /// when idle. `total` is the count registered at `track_dispatch`,
+    /// `done = total - pending.len()`. Streamed-admission items bump
+    /// `total` via `track_streamed`.
+    ///
+    /// Scopes the seg progress counter to the *current* dispatch so a
+    /// previously-Done item from an earlier reprocess doesn't inflate
+    /// the displayed total ("1 of 2" when only one item was dispatched).
+    pub(crate) fn current_dispatch_progress(&self) -> Option<(u32, u32)> {
+        let b = self.in_flight.as_ref()?;
+        let done = b.total.saturating_sub(b.pending.len());
+        Some((done as u32, b.total as u32))
     }
 
     /// Add a streamed (admission-pool) item to the current batch. The
@@ -782,7 +801,11 @@ impl Processor {
     /// single late delivery can't take down a real batch.
     pub(crate) fn track_streamed(&mut self, id: u64) {
         match self.in_flight.as_mut() {
-            Some(b) => { b.pending.insert(id); }
+            Some(b) => {
+                if b.pending.insert(id) {
+                    b.total += 1;
+                }
+            }
             None => debug_assert!(false, "track_streamed called without active batch"),
         }
     }
@@ -1214,6 +1237,61 @@ mod tests {
         assert!(p.take_recipe(999).is_none(), "unknown id must not return a recipe");
         // Tracked id still works.
         assert!(p.take_recipe(1).is_some());
+    }
+
+    #[test]
+    fn current_dispatch_progress_is_none_when_idle() {
+        let p = fixture();
+        assert!(p.current_dispatch_progress().is_none(),
+            "idle Processor must report no in-flight dispatch progress");
+    }
+
+    #[test]
+    fn current_dispatch_progress_reports_done_over_total() {
+        // The user's "1 of 2" bug repro: a batch of two items was
+        // tracked; one finished; counter must report (1, 2). Scoping
+        // to in_flight (rather than whole-batch status_counts) ensures
+        // a previously-Done item from a prior dispatch can't inflate
+        // total.
+        let mut p = fixture();
+        p.track_dispatch(fixture_recipe(), [10, 20].iter().copied());
+        assert_eq!(p.current_dispatch_progress(), Some((0, 2)),
+            "fresh dispatch starts at 0/total");
+        assert!(p.take_recipe(10).is_some());
+        assert_eq!(p.current_dispatch_progress(), Some((1, 2)),
+            "one item delivered → 1/2");
+        assert!(p.take_recipe(20).is_some());
+        // Last delivery self-drains the slot, so progress reports None
+        // — the seg slot is cleared by the publisher on the next refresh.
+        assert!(p.current_dispatch_progress().is_none(),
+            "slot drains when the last item completes");
+    }
+
+    #[test]
+    fn current_dispatch_progress_includes_streamed_items() {
+        // Admission-pool items bump the total so the user sees the
+        // queue grow as the worker accepts more. Without this, a
+        // streamed item would deliver and decrement done-from-total
+        // → counter goes negative-ish (saturating_sub clamps it).
+        let mut p = fixture();
+        p.track_dispatch(fixture_recipe(), [1].iter().copied());
+        assert_eq!(p.current_dispatch_progress(), Some((0, 1)));
+        p.track_streamed(2);
+        assert_eq!(p.current_dispatch_progress(), Some((0, 2)),
+            "streamed item must bump total");
+        assert!(p.take_recipe(1).is_some());
+        assert_eq!(p.current_dispatch_progress(), Some((1, 2)));
+    }
+
+    #[test]
+    fn track_streamed_dedup_does_not_double_count() {
+        // Re-registering an already-tracked id (defensive against a
+        // worker echo) must not inflate total — only first-insert bumps.
+        let mut p = fixture();
+        p.track_dispatch(fixture_recipe(), [1, 2].iter().copied());
+        p.track_streamed(1);
+        assert_eq!(p.current_dispatch_progress(), Some((0, 2)),
+            "duplicate streamed id must not bump total");
     }
 
     #[test]

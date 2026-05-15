@@ -2591,14 +2591,13 @@ impl PrunrApp {
         self.status.stage = report.stage.clone();
         self.status.pct = report.pct;
 
-        // Mirror the seg batch state into the unified slot. Active
-        // (counts.processing > 0) → publish; idle → clear.
-        let counts = self.batch.status_counts();
-        let total = counts.batch_total();
-        let progress = (counts.processing > 0).then(|| {
-            crate::gui::dispatch_progress::DispatchProgress::seg(
-                counts.done as u32, total as u32, report.stage,
-            )
+        // Scope the seg slot counter to the *current* dispatch via
+        // `processor.current_dispatch_progress()` — not whole-batch
+        // status_counts, which would inflate the total with items
+        // Done from a previous dispatch (e.g. reprocessing one image
+        // after the other was already finished).
+        let progress = self.processor.current_dispatch_progress().map(|(done, total)| {
+            crate::gui::dispatch_progress::DispatchProgress::seg(done, total, report.stage)
         });
         self.processor.set_dispatch_progress(progress);
     }
