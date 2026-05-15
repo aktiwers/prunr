@@ -600,9 +600,7 @@ impl BatchItem {
     }
 
     /// Combined size of all caches on this item: segmentation + edge tensors
-    /// + upscale_raw + bicubic_source. Used by memory governance
-    /// (`BatchManager::enforce_tensor_budget`) and any future telemetry / HUD
-    /// readout.
+    /// + upscale_raw + bicubic_source. Used by memory governance and telemetry.
     ///
     /// Note: `upscale_raw` is the largest single cached artifact (≈500 MB at
     /// 4K × 4× upscale). The governor must see this to make correct eviction
@@ -1209,7 +1207,7 @@ mod tests {
 
     #[test]
     fn cache_size_includes_upscale_raw() {
-        let mut item_without = fixture_item(1);
+        let item_without = fixture_item(1);
         let base_size = item_without.cache_size();
 
         let mut item_with = fixture_item(2);
