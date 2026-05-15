@@ -200,9 +200,15 @@ pub fn process_inpaint_with(
 
     // Pre-count tiles across all components so the outer progress
     // counter advances monotonically over the full stroke. Without
-    // this, the inner `set_step(0..N)` would reset every time we move
-    // from one tile to the next and the banner would appear to start
-    // over. Components that fit in SD_TILE count as one tile each.
+    // this, the inner `set_step(0..N)` would reset every time we
+    // move from one tile to the next and the banner would appear
+    // to start over. Components that fit in SD_TILE count as one
+    // tile each. The multi-tile branch calls `tile_bbox` directly
+    // (rather than recomputing `tile_count(w) * tile_count(h)`) so
+    // the pre-count cannot diverge from the actual loop count when
+    // a bbox abuts an image edge and `tile_bbox`'s anchor clamping
+    // collapses the grid.
+    let (img_w_for_count, img_h_for_count) = image.dimensions();
     let outer_total: u32 = components
         .iter()
         .map(|comp| {
@@ -211,7 +217,7 @@ pub fn process_inpaint_with(
             if w <= SD_TILE && h <= SD_TILE {
                 1
             } else {
-                (tile_count(w) * tile_count(h)).max(1)
+                tile_bbox(comp, img_w_for_count, img_h_for_count).len() as u32
             }
         })
         .sum();
