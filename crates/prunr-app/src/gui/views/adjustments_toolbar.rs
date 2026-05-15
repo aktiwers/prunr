@@ -100,10 +100,6 @@ pub struct ToolbarChange {
     /// User picked a non-image bg kind (color or effect) while a bg image
     /// was active — drop the image so the chosen kind takes over.
     pub clear_bg_image: bool,
-    /// User picked a different upscale scale factor (4x ↔ 2x). Does not
-    /// auto-trigger Process — user must click Process explicitly (same
-    /// policy as model changes and Tier-1 knobs).
-    pub upscale_scale_changed: bool,
     /// Set when the toolbar switches TO an upscale model from a non-upscale
     /// one. The application checks `item.has_result()` before promoting this
     /// to `chain_mode = true` — the view does not have access to per-item state.
@@ -132,7 +128,6 @@ impl Default for ToolbarChange {
             open_model_store: None,
             pick_bg_image: false,
             clear_bg_image: false,
-            upscale_scale_changed: false,
             auto_chain_on: false,
         }
     }

@@ -48,9 +48,10 @@ pub(crate) fn render_upscale_row(
 
         let out_w = source_dims.0.saturating_mul(item_settings.upscale_scale);
         let out_h = source_dims.1.saturating_mul(item_settings.upscale_scale);
-        if render_scale_chip(ui, &mut item_settings.upscale_scale, (out_w, out_h)) {
-            change.upscale_scale_changed = true;
-        }
+        // Scale chip writes `item_settings.upscale_scale` directly; the
+        // recipe diff at dispatch time picks the change up. No separate
+        // ToolbarChange signal needed.
+        render_scale_chip(ui, &mut item_settings.upscale_scale, (out_w, out_h));
 
         if let Some((done, total)) = processor.upscale_tile_progress() {
             let avail = (ui.available_width() - PROGRESS_BAR_RIGHT_RESERVE_PX).max(0.0);
