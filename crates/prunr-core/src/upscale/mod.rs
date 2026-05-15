@@ -111,8 +111,9 @@ fn pack_output(
 ///   - scale = 2: runs the model at 4× then downscales with Lanczos3 to
 ///     halve dimensions. This path holds the full 4× RGBA buffer briefly
 ///     before the downscale; for a 4K input that is ~768 MB of transient
-///     scratch on top of the tiling accumulators below. The cost is
-///     accepted for v1 — see `30-DEFERRED.md` for the native 2× option.
+///     scratch on top of the tiling accumulators below. A future native
+///     2× model would avoid the intermediate, but the cost is currently
+///     accepted to keep the dispatch model uniform.
 ///   - Alpha is upscaled independently via Lanczos3.
 ///   - Window-attention models (`descriptor.tile_size_multiple.is_some()`)
 ///     are run at `GraphOptimizationLevel::Level2` to avoid first-tile
@@ -161,7 +162,11 @@ where
     let input_name = knobs.input_name;
     let is_fp16 = knobs.is_fp16;
 
-    let model_kind = ModelKind::from(model_id);
+    let model_kind = ModelKind::try_from(model_id).map_err(|id| {
+        CoreError::Inference(format!(
+            "{id:?} has no ModelKind mapping — upscale dispatch requires a seg/upscale variant"
+        ))
+    })?;
     let engine = OrtEngine::new_with_optimization_level(model_kind, intra_threads, level)?;
 
     let run_tile = |rgb_tile: &RgbImage, padded_w: u32, padded_h: u32| -> Result<RgbImage, CoreError> {

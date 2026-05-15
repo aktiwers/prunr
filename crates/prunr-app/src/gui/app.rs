@@ -593,7 +593,13 @@ impl PrunrApp {
         // Capture the recipe at dispatch time so the pump can stamp
         // `item.applied_recipe` against what actually ran (not what the
         // user has tweaked to since).
-        let model_kind = prunr_core::ModelKind::from(model_id);
+        let model_kind = match prunr_core::ModelKind::try_from(model_id) {
+            Ok(k) => k,
+            Err(id) => {
+                tracing::error!(?id, "upscale dispatch skipped: ModelId has no ModelKind mapping");
+                return;
+            }
+        };
         let recipe = item.settings.current_recipe(model_kind, self.settings.chain_mode);
         tracing::info!(item_id, ?model_id, scale, "upscale dispatched");
         self.processor.dispatch_upscale(item_id, input, model_id, scale, intra_threads, recipe);
@@ -604,10 +610,10 @@ impl PrunrApp {
     /// drift independently.
     pub fn can_process_intent(&self) -> bool {
         if self.settings.model.is_upscale() {
-            // Model installed-ness is enforced by the dropdown filter
-            // (only `is_available` models can be selected). Re-checking
-            // here would `is_file()`-stat every frame the toolbar is
-            // visible — see 30-DEFERRED.md. Deletion-after-select is
+            // Install-state is not re-checked here: the dropdown filter
+            // already restricts selection to `is_available` models, and
+            // an `is_file()` syscall per frame would add 60 stats/sec
+            // while the toolbar is visible. Deletion-after-select is
             // surfaced at dispatch time by the error toast.
             let is_in_flight = self.processor.upscale_tile_progress().is_some();
             let item_loaded = self.batch.selected_item().is_some();
