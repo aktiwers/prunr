@@ -1052,7 +1052,7 @@ impl PrunrApp {
                     // upscaled bicubically to match upscale_raw's dimensions.
                     let bicubic = build_or_reuse_bicubic(item, &raw_arc);
                     let mut displayed = (*raw_arc).clone();
-                    apply_tier2_postprocess(&mut displayed, item, &bicubic);
+                    apply_tier2_postprocess(&mut displayed, item, bicubic.as_ref());
                     let new_rgba = Arc::new(displayed);
                     // Archive the pre-upscale result so Cmd+Z swaps stored
                     // RGBAs instead of re-running the whole pipeline. Mirrors
@@ -2130,28 +2130,9 @@ impl PrunrApp {
         // upscale_raw + bicubic_source + knob snapshot. Return None if there is
         // no cached upscale output yet (Tier-1 must run first).
         if matches!(kind, PreviewKind::UpscaleTier2) {
-            use super::live_preview::{UpscaleTier2Knobs};
+            use super::live_preview::UpscaleTier2Knobs;
             let upscale_raw = item.upscale_raw.as_ref()?.clone();
-            // Build or reuse the bicubic baseline at upscale_raw's dimensions.
-            let bicubic_arc = if let Some(cached) = item.bicubic_source.as_ref().filter(|c| {
-                c.width() == upscale_raw.width() && c.height() == upscale_raw.height()
-            }) {
-                cached.clone()
-            } else {
-                let b = if let Some(src) = item.source_rgba.as_ref() {
-                    image::imageops::resize(
-                        src.as_ref(),
-                        upscale_raw.width(),
-                        upscale_raw.height(),
-                        image::imageops::FilterType::CatmullRom,
-                    )
-                } else {
-                    (*upscale_raw).clone()
-                };
-                let arc = Arc::new(b);
-                item.bicubic_source = Some(arc.clone());
-                arc
-            };
+            let bicubic_arc = build_or_reuse_bicubic(item, &upscale_raw);
             let knobs = UpscaleTier2Knobs {
                 sharpen: item.settings.sharpen,
                 ai_blend: item.settings.ai_blend,
@@ -3904,11 +3885,10 @@ pub(crate) fn apply_tier2_postprocess(
 pub(crate) fn build_or_reuse_bicubic(
     item: &mut super::item::BatchItem,
     upscale_raw: &Arc<image::RgbaImage>,
-) -> image::RgbaImage {
+) -> Arc<image::RgbaImage> {
     if let Some(cached) = item.bicubic_source.as_ref() {
-        // Cached at the same dimensions? Reuse.
         if cached.width() == upscale_raw.width() && cached.height() == upscale_raw.height() {
-            return (**cached).clone();
+            return Arc::clone(cached);
         }
     }
     // Build from the original source. Falls back to the upscale_raw itself
@@ -3923,8 +3903,9 @@ pub(crate) fn build_or_reuse_bicubic(
     } else {
         (**upscale_raw).clone()
     };
-    item.bicubic_source = Some(Arc::new(bicubic.clone()));
-    bicubic
+    let arc = Arc::new(bicubic);
+    item.bicubic_source = Some(Arc::clone(&arc));
+    arc
 }
 
 /// Install-state is NOT a parameter — the model dropdown filter already
