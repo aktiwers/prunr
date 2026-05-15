@@ -45,11 +45,8 @@ pub enum ModelId {
     TaesdFp16,
     RealEsrganX4Plus,
     Nomos8kSchatL,
-    /// Real-ESRGAN x2plus (RRDB, fp32). OnDemand. Hidden from the
-    /// user-facing model picker — exists only to power the
-    /// `OutputScale::X4TwoPass` dispatch path. The two-pass dispatch
-    /// chains this model twice; net 4× output with the noise-handling
-    /// characteristics of two narrower upscales.
+    /// Real-ESRGAN x2plus (RRDB, fp32). OnDemand; internally dispatched
+    /// via `OutputScale::X4TwoPass` (chains x2plus twice for a net 4×).
     RealEsrganX2Plus,
 }
 
@@ -106,11 +103,11 @@ impl ModelId {
         }
     }
 
-    /// True when this model is user-visible in the model picker and
-    /// Model Store. Returns `false` for internal-only models that are
-    /// selected indirectly (e.g. `RealEsrganX2Plus` is selected via
-    /// `OutputScale::X4TwoPass`, never by the user directly).
-    pub fn is_user_visible(self) -> bool {
+    /// True when this model is dispatched by direct user selection.
+    /// Returns `false` for variants chained from a higher-level recipe
+    /// knob (e.g. `RealEsrganX2Plus` is dispatched via
+    /// `OutputScale::X4TwoPass`, never picked directly).
+    pub fn is_directly_selectable(self) -> bool {
         !matches!(self, ModelId::RealEsrganX2Plus)
     }
 }
@@ -1416,11 +1413,11 @@ mod tests {
     }
 
     #[test]
-    fn x2plus_is_not_user_visible() {
-        assert!(!ModelId::RealEsrganX2Plus.is_user_visible(),
-            "x2plus is selected indirectly via OutputScale::X4TwoPass, never by the user");
-        assert!(ModelId::RealEsrganX4Plus.is_user_visible());
-        assert!(ModelId::Nomos8kSchatL.is_user_visible());
-        assert!(ModelId::Silueta.is_user_visible());
+    fn x2plus_is_not_directly_selectable() {
+        assert!(!ModelId::RealEsrganX2Plus.is_directly_selectable(),
+            "x2plus is dispatched indirectly via OutputScale::X4TwoPass, never by the user");
+        assert!(ModelId::RealEsrganX4Plus.is_directly_selectable());
+        assert!(ModelId::Nomos8kSchatL.is_directly_selectable());
+        assert!(ModelId::Silueta.is_directly_selectable());
     }
 }
