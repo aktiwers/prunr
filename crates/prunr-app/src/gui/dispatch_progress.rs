@@ -85,6 +85,34 @@ pub mod step_labels {
     pub const INPAINTING: &str = "Inpainting";
 }
 
+/// What a banner-Cancel click should target, derived purely from the
+/// snapshot's `kind` plus an optional selected-item handle. Surfaces
+/// the routing as data so the canvas closure can stay a one-line
+/// `match`, and the four arms are unit-testable without a fixture
+/// `PrunrApp`.
+///
+/// `Eraser` / `SdInpaint` need the item handle (per-stroke cancel);
+/// when none is supplied the routing returns `None` (the banner
+/// click is a no-op rather than collateral-damaging another item).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CancelTarget {
+    InpaintForItem(u64),
+    Upscale,
+    SegBatchAndReset,
+}
+
+/// Pure routing: given the slot's `kind` and the active inpaint
+/// item (if any), what should the banner Cancel button target?
+pub fn cancel_target_for(kind: ProgressKind, active_inpaint_item: Option<u64>) -> Option<CancelTarget> {
+    match kind {
+        ProgressKind::Eraser | ProgressKind::SdInpaint => {
+            active_inpaint_item.map(CancelTarget::InpaintForItem)
+        }
+        ProgressKind::Upscale => Some(CancelTarget::Upscale),
+        ProgressKind::Seg => Some(CancelTarget::SegBatchAndReset),
+    }
+}
+
 /// Translate the IPC sentinel `outer_total == 0` (= "no nesting") into
 /// the `Option<(current, total)>` shape `DispatchProgress.outer` wants.
 /// Only consumed by the two `DispatchProgress` builders in this module
@@ -500,6 +528,59 @@ mod tests {
         // Single-pass (no outer dim): outer is None.
         let p_single = DispatchProgress::lama_inpaint(0, 0, (0, 0));
         assert_eq!(p_single.outer, None);
+    }
+
+    #[test]
+    fn cancel_target_eraser_needs_active_item() {
+        assert_eq!(
+            cancel_target_for(ProgressKind::Eraser, Some(42)),
+            Some(CancelTarget::InpaintForItem(42)),
+        );
+        assert_eq!(
+            cancel_target_for(ProgressKind::Eraser, None),
+            None,
+            "no active item → click is a no-op (the inpaint isn't ours to cancel)",
+        );
+    }
+
+    #[test]
+    fn cancel_target_sd_inpaint_needs_active_item() {
+        assert_eq!(
+            cancel_target_for(ProgressKind::SdInpaint, Some(7)),
+            Some(CancelTarget::InpaintForItem(7)),
+        );
+        assert_eq!(cancel_target_for(ProgressKind::SdInpaint, None), None);
+    }
+
+    #[test]
+    fn cancel_target_upscale_ignores_item() {
+        // Upscale is single-flight on the Processor; the item handle
+        // is irrelevant — there's only one upscale to cancel.
+        assert_eq!(
+            cancel_target_for(ProgressKind::Upscale, None),
+            Some(CancelTarget::Upscale),
+        );
+        assert_eq!(
+            cancel_target_for(ProgressKind::Upscale, Some(99)),
+            Some(CancelTarget::Upscale),
+        );
+    }
+
+    #[test]
+    fn cancel_target_seg_routes_to_batch_reset() {
+        // Seg banner Cancel → batch cancel, not an inpaint cancel.
+        // Pins the H1 audit fix: a future refactor that maps
+        // ProgressKind::Seg → cancel_all_inpaints() (the wrong call)
+        // fails this assertion before users see a dropped click.
+        assert_eq!(
+            cancel_target_for(ProgressKind::Seg, None),
+            Some(CancelTarget::SegBatchAndReset),
+        );
+        assert_eq!(
+            cancel_target_for(ProgressKind::Seg, Some(1)),
+            Some(CancelTarget::SegBatchAndReset),
+            "seg routes to batch reset regardless of selection",
+        );
     }
 
     #[test]
