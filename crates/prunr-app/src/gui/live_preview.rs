@@ -424,15 +424,14 @@ fn run_preview(inputs: DispatchInputs, cancel: &AtomicBool) -> RunOutput {
         let Some(ref bicubic) = inputs.bicubic_source else { return RunOutput::empty(); };
         let Some(knobs) = inputs.upscale_tier2_knobs else { return RunOutput::empty(); };
         let mut out = (**raw).clone();
-        use prunr_core::upscale::{apply_sharpen, apply_ai_blend, apply_saturation, apply_color_match};
-        if knobs.ai_blend < 1.0 - f32::EPSILON {
-            apply_ai_blend(&mut out, bicubic, knobs.ai_blend);
-        }
-        apply_sharpen(&mut out, knobs.sharpen);
-        apply_saturation(&mut out, knobs.saturation);
-        if knobs.color_match {
-            apply_color_match(&mut out, bicubic);
-        }
+        super::app::apply_tier2_postprocess(
+            &mut out,
+            knobs.sharpen,
+            knobs.ai_blend,
+            knobs.saturation,
+            knobs.color_match,
+            bicubic,
+        );
         return RunOutput {
             rgba: Some(out),
             built_edge_mask: None,

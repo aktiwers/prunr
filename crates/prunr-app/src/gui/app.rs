@@ -1052,7 +1052,15 @@ impl PrunrApp {
                     // upscaled bicubically to match upscale_raw's dimensions.
                     let bicubic = build_or_reuse_bicubic(item, &raw_arc);
                     let mut displayed = (*raw_arc).clone();
-                    apply_tier2_postprocess(&mut displayed, item, bicubic.as_ref());
+                    let s = &item.settings;
+                    apply_tier2_postprocess(
+                        &mut displayed,
+                        s.sharpen,
+                        s.ai_blend,
+                        s.saturation,
+                        s.color_match,
+                        bicubic.as_ref(),
+                    );
                     let new_rgba = Arc::new(displayed);
                     // Archive the pre-upscale result so Cmd+Z swaps stored
                     // RGBAs instead of re-running the whole pipeline. Mirrors
@@ -3838,15 +3846,6 @@ fn collect_shortcut_intents(ctx: &egui::Context) -> ShortcutIntents {
     s
 }
 
-/// Resolve the chain-mode value after an auto-chain-on signal from the toolbar.
-///
-/// Pure gate for `can_process_intent` when the active model is an upscale model.
-/// Extracted so unit tests can exercise the gate without constructing `PrunrApp`.
-///
-/// Returns `true` only when all three conditions hold:
-/// - `!is_in_flight`: no upscale dispatch is currently running.
-/// - `item_loaded`: at least one item is selected and its source RGBA is available.
-///
 /// Apply all Tier-2 upscale postprocess knobs to `img` in the canonical order:
 /// ai_blend → sharpen → saturation → color_match.
 ///
@@ -3860,17 +3859,19 @@ fn collect_shortcut_intents(ctx: &egui::Context) -> ShortcutIntents {
 /// `apply_color_match` (reference for Lab statistics).
 pub(crate) fn apply_tier2_postprocess(
     img: &mut image::RgbaImage,
-    item: &super::item::BatchItem,
+    sharpen: f32,
+    ai_blend: f32,
+    saturation: f32,
+    color_match: bool,
     bicubic_source: &image::RgbaImage,
 ) {
     use prunr_core::upscale::{apply_sharpen, apply_ai_blend, apply_saturation, apply_color_match};
-    let s = &item.settings;
-    if s.ai_blend < 1.0 - f32::EPSILON {
-        apply_ai_blend(img, bicubic_source, s.ai_blend);
+    if ai_blend < 1.0 - f32::EPSILON {
+        apply_ai_blend(img, bicubic_source, ai_blend);
     }
-    apply_sharpen(img, s.sharpen);
-    apply_saturation(img, s.saturation);
-    if s.color_match {
+    apply_sharpen(img, sharpen);
+    apply_saturation(img, saturation);
+    if color_match {
         apply_color_match(img, bicubic_source);
     }
 }
