@@ -940,6 +940,29 @@ mod tests {
     }
 
     #[test]
+    fn set_dispatch_progress_none_over_none_is_a_no_op() {
+        // The dirty-check inside `set_dispatch_progress` skips the
+        // Mutex write when the slot is already None. Verify both:
+        // (a) calling with None on an empty slot leaves it empty;
+        // (b) calling with None on a populated slot clears it.
+        use crate::gui::dispatch_progress::DispatchProgress;
+        let p = fixture();
+
+        // Empty → None: still empty.
+        assert!(p.dispatch_progress().is_none(), "fixture starts empty");
+        p.set_dispatch_progress(None);
+        assert!(p.dispatch_progress().is_none(),
+            "set(None) on already-empty slot must not flip state");
+
+        // Populated → None: cleared.
+        p.set_dispatch_progress(Some(DispatchProgress::seg(1, 3, "Processing 1/3")));
+        assert!(p.dispatch_progress().is_some(), "Some was published");
+        p.set_dispatch_progress(None);
+        assert!(p.dispatch_progress().is_none(),
+            "Some→None clear must write through the dirty-check");
+    }
+
+    #[test]
     fn admission_refuses_when_working_set_exceeds_free() {
         assert!(!admission_check(2000, 1500),
             "2000 MB working set must not fit in 1500 MB free RAM");

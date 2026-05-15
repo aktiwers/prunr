@@ -87,9 +87,10 @@ pub mod step_labels {
 
 /// Translate the IPC sentinel `outer_total == 0` (= "no nesting") into
 /// the `Option<(current, total)>` shape `DispatchProgress.outer` wants.
-/// One definition so the SD pump and the LaMa-fallback synthesiser
-/// can't drift on the sentinel meaning.
-pub fn outer_from_atomics(outer_current: u32, outer_total: u32) -> Option<(u32, u32)> {
+/// Only consumed by the two `DispatchProgress` builders in this module
+/// — `pub(crate)` so the unit tests can pin the sentinel meaning, but
+/// not part of the public surface.
+pub(crate) fn outer_from_atomics(outer_current: u32, outer_total: u32) -> Option<(u32, u32)> {
     (outer_total > 0).then_some((outer_current, outer_total))
 }
 
@@ -307,7 +308,9 @@ mod tests {
             kind: ProgressKind::SdInpaint,
             outer: Some(outer),
             inner,
-            step_label: Cow::Borrowed("Denoising"),
+            // Use the constant rather than a literal so a `step_labels`
+            // rename keeps both production and test in lockstep.
+            step_label: Cow::Borrowed(step_labels::DENOISING),
         }
     }
 
@@ -482,6 +485,32 @@ mod tests {
         // outer_total == 0 → outer is None (single-tile stroke).
         let p_single = DispatchProgress::sd_inpaint(0, 0, (5, 8));
         assert_eq!(p_single.outer, None);
-        assert_eq!(p_single.step_label.as_ref(), "Denoising");
+        assert_eq!(p_single.step_label.as_ref(), step_labels::DENOISING);
+    }
+
+    #[test]
+    fn lama_inpaint_builder_sets_kind_label_and_outer() {
+        // Tile-of-stroke nested: outer surfaces as Some.
+        let p = DispatchProgress::lama_inpaint(1, 2, (3, 4));
+        assert_eq!(p.kind, ProgressKind::Eraser);
+        assert_eq!(p.outer, Some((1, 2)));
+        assert_eq!(p.inner, (3, 4));
+        assert_eq!(p.step_label.as_ref(), step_labels::INPAINTING);
+
+        // Single-pass (no outer dim): outer is None.
+        let p_single = DispatchProgress::lama_inpaint(0, 0, (0, 0));
+        assert_eq!(p_single.outer, None);
+    }
+
+    #[test]
+    fn seg_builder_borrowed_arm_works_for_static_str() {
+        // The Owned arm is covered by the dynamic-stage test above; this
+        // pins the Borrowed arm so the `impl Into<Cow>` signature can't
+        // silently regress to `String`-only.
+        let p = DispatchProgress::seg(0, 0, "Ready");
+        assert_eq!(p.inner, (0, 0));
+        assert_eq!(p.step_label.as_ref(), "Ready");
+        assert!(matches!(p.step_label, Cow::Borrowed(_)),
+            "static-str literal must produce Cow::Borrowed (zero alloc)");
     }
 }
