@@ -260,7 +260,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8. Ph
 | 10. Engineering Quality Bar | 5/8 | In Progress | (10-01..10-05 done) |
 | 28. SD VAE Orthogonality | 2/5 | In Progress|  |
 | 29. Refine and Wire Presets to All Models | 5/5 | Complete    | 2026-05-14 |
-| 30. Upscale Tab v1 | 10/12 | In Progress|  |
+| 30. Upscale Tab v1 | 11/12 | In Progress|  |
 
 ### Phase 30: Upscale Tab v1
 
@@ -283,7 +283,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8. Ph
  10. fp32 ONNX only for v1 (fp16 sibling deferred until GPU users request); upscale runs in-process via `OrtEngine` (subprocess routing deferred to v2 unless OOM analysis says otherwise)
  11. OOM protection: tile-based inference bounds per-tile working set; `working_set_mb` calibrated per model and gates admission like other models
 
-**Plans:** 10/12 plans executed
+**Plans:** 11/12 plans executed
 
 Plans:
 - [ ] 30-01-PLAN.md — ModelDescriptor + LicenseInfo extensions, ModelCategory::Upscale, ModelId variants (placeholder SHA)
