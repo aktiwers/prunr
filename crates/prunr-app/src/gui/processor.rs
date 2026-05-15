@@ -692,15 +692,16 @@ impl Processor {
         }
     }
 
-    /// Read the in-flight inpaint stroke's progress for `item_id` as
-    /// `(current_step, total_steps)`. Returns `(0, 0)` when no stroke
-    /// is in flight or the worker hasn't started stepping yet (LaMa
-    /// stays here for the whole stroke; only SD's UNet loop publishes
-    /// step counts).
-    pub(crate) fn inpaint_progress(&self, item_id: u64) -> (u32, u32) {
+    /// Read the in-flight inpaint stroke's progress as
+    /// `((outer_current, outer_total), (inner_current, inner_total))`.
+    /// Used by the unified progress widget when the slot is empty but
+    /// an in-process LaMa dispatch is mid-flight (LaMa writes
+    /// `InpaintProgress` directly via the hooks and doesn't go
+    /// through the subprocess bridge that publishes the slot).
+    pub(crate) fn inpaint_progress_nested(&self, item_id: u64) -> ((u32, u32), (u32, u32)) {
         self.inpaint_progress.get(&item_id)
-            .map(|p| p.read())
-            .unwrap_or((0, 0))
+            .map(|p| p.read_nested())
+            .unwrap_or(((0, 0), (0, 0)))
     }
 
     /// Drain in-flight inpaint results.
