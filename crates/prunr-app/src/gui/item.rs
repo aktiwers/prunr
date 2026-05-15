@@ -381,7 +381,7 @@ impl BatchItem {
         });
         let current = Arc::make_mut(arc);
         prunr_core::brush::merge(current, &strokes);
-        self.settings.correction_hash = Some(prunr_core::brush::content_hash(current));
+        self.settings.correction_hash = std::num::NonZeroU64::new(prunr_core::brush::content_hash(current));
     }
 
     /// Internal-only post-stroke cleanup. Drops `mask_correction` and
@@ -453,7 +453,9 @@ impl BatchItem {
     }
 
     fn set_correction(&mut self, c: Option<Arc<prunr_core::brush::MaskCorrection>>) {
-        self.settings.correction_hash = c.as_deref().map(prunr_core::brush::content_hash);
+        self.settings.correction_hash = c.as_deref()
+            .map(prunr_core::brush::content_hash)
+            .and_then(std::num::NonZeroU64::new);
         self.mask_correction = c;
     }
 
@@ -636,7 +638,7 @@ impl BatchItem {
         }));
         self.bg_image_texture = None;
         self.bg_image_tex_pending = false;
-        self.settings.bg_image_hash = Some(hash);
+        self.settings.bg_image_hash = std::num::NonZeroU64::new(hash);
     }
 
     pub(crate) fn clear_bg_image(&mut self) {
