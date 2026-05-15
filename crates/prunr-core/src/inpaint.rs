@@ -1143,6 +1143,33 @@ mod tests {
     use image::{Luma, Rgba};
 
     #[test]
+    fn inpaint_progress_read_nested_returns_set_values() {
+        // Pure-function unit test for the InpaintProgress atomic
+        // round-trip — CLAUDE.md `## Test expectations` requires new
+        // prunr-core pure fns to earn a test in the same file.
+        let p = InpaintProgress::new();
+        // Indeterminate when nothing's been written.
+        assert_eq!(p.read_nested(), ((0, 0), (0, 0)));
+
+        p.set_total(8);
+        p.set_step(5);
+        // No outer set — outer slots stay 0.
+        assert_eq!(p.read_nested(), ((0, 0), (5, 8)));
+
+        p.set_outer_total(3);
+        p.set_outer_step(2);
+        // Both dimensions populated.
+        assert_eq!(p.read_nested(), ((2, 3), (5, 8)));
+
+        // Setting outer_total back to 0 = "no nesting" sentinel.
+        // outer_current is unchanged (the consumer reads the tuple as
+        // a whole; the `outer_from_atomics` helper in gui ignores
+        // current when total is 0).
+        p.set_outer_total(0);
+        assert_eq!(p.read_nested(), ((2, 0), (5, 8)));
+    }
+
+    #[test]
     fn plan_tiles_small_image_single_tile() {
         let tiles = plan_tiles(400, 300);
         assert_eq!(tiles.len(), 1);

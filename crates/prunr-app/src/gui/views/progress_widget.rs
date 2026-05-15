@@ -26,6 +26,11 @@ use egui::{Color32, FontId, Pos2, Rect, RichText, Vec2};
 use crate::gui::dispatch_progress::DispatchProgress;
 use crate::gui::theme;
 
+/// Label shown in place of the dispatch headline while a cancel
+/// is in flight (between user-click and worker-acknowledge). Const
+/// so the banner and modal can't drift on copy.
+const CANCELLING_LABEL: &str = "Cancelling\u{2026}";
+
 const BANNER_HEIGHT_PX: f32 = 44.0;
 const MODAL_WIDTH_PX: f32 = 320.0;
 const MODAL_HEIGHT_PX: f32 = 120.0;
@@ -147,7 +152,7 @@ fn paint_pulse_dots(ui: &egui::Ui, anchor_left: Pos2, t: f32) {
 
 fn banner_label(progress: &DispatchProgress, cancelling: bool) -> String {
     if cancelling {
-        return "Cancelling…".to_string();
+        return CANCELLING_LABEL.to_string();
     }
     let headline = progress.kind.headline();
     match progress.flat_counter_text() {
@@ -161,7 +166,7 @@ fn banner_label(progress: &DispatchProgress, cancelling: bool) -> String {
 
 fn modal_headline(progress: &DispatchProgress, cancelling: bool, t: f32) -> String {
     if cancelling {
-        return "Cancelling…".to_string();
+        return CANCELLING_LABEL.to_string();
     }
     // Animated trailing dots — matches the legacy `render_processing`
     // feel so the modal style continues to read as "active work".
@@ -210,15 +215,17 @@ fn render_cancel_button(ui: &mut egui::Ui, canvas_rect: Rect, center_y: f32) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gui::dispatch_progress::ProgressKind;
+    use crate::gui::dispatch_progress::{step_labels, ProgressKind};
     use std::borrow::Cow;
 
     fn upscale(inner: (u32, u32)) -> DispatchProgress {
+        // Test fixtures reference the `step_labels` constants so a rename
+        // there can't quietly leave tests asserting against a stale string.
         DispatchProgress {
             kind: ProgressKind::Upscale,
             outer: None,
             inner,
-            step_label: Cow::Borrowed("Tile inference"),
+            step_label: Cow::Borrowed(step_labels::TILE_INFERENCE),
         }
     }
 
@@ -227,7 +234,7 @@ mod tests {
             kind: ProgressKind::SdInpaint,
             outer: Some(outer),
             inner,
-            step_label: Cow::Borrowed("Denoising"),
+            step_label: Cow::Borrowed(step_labels::DENOISING),
         }
     }
 
@@ -261,11 +268,11 @@ mod tests {
             kind: ProgressKind::Seg,
             outer: None,
             inner: (0, 0),
-            step_label: Cow::Borrowed("Loading model"),
+            step_label: Cow::Borrowed(step_labels::LOADING_MODEL),
         };
         let label = banner_label(&p, false);
         assert!(label.contains("Processing"), "got: {label}");
-        assert!(label.contains("Loading model"), "got: {label}");
+        assert!(label.contains(step_labels::LOADING_MODEL), "got: {label}");
     }
 
     #[test]
