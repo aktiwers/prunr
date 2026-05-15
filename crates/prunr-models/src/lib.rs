@@ -45,6 +45,12 @@ pub enum ModelId {
     TaesdFp16,
     RealEsrganX4Plus,
     Nomos8kSchatL,
+    /// Real-ESRGAN x2plus (RRDB, fp32). OnDemand. Hidden from the
+    /// user-facing model picker — exists only to power the
+    /// `OutputScale::X4TwoPass` dispatch path. The two-pass dispatch
+    /// chains this model twice; net 4× output with the noise-handling
+    /// characteristics of two narrower upscales.
+    RealEsrganX2Plus,
 }
 
 impl ModelId {
@@ -73,6 +79,7 @@ impl ModelId {
         ModelId::TaesdFp16,
         ModelId::RealEsrganX4Plus,
         ModelId::Nomos8kSchatL,
+        ModelId::RealEsrganX2Plus,
     ];
 
     /// Stable string identifier used as a persistent key (cache
@@ -95,7 +102,16 @@ impl ModelId {
             ModelId::TaesdFp16 => "taesd_fp16",
             ModelId::RealEsrganX4Plus => "real_esrgan_x4plus",
             ModelId::Nomos8kSchatL => "nomos8k_schat_l",
+            ModelId::RealEsrganX2Plus => "real_esrgan_x2plus",
         }
+    }
+
+    /// True when this model is user-visible in the model picker and
+    /// Model Store. Returns `false` for internal-only models that are
+    /// selected indirectly (e.g. `RealEsrganX2Plus` is selected via
+    /// `OutputScale::X4TwoPass`, never by the user directly).
+    pub fn is_user_visible(self) -> bool {
+        !matches!(self, ModelId::RealEsrganX2Plus)
     }
 }
 
@@ -667,6 +683,35 @@ pub const REGISTRY: &[ModelDescriptor] = &[
             is_fp16: true,
         }),
     },
+    ModelDescriptor {
+        id: ModelId::RealEsrganX2Plus,
+        display_name: "Real-ESRGAN x2plus",
+        description: "Internal upscale model — powers the 4\u{d7} (two-pass) refinement variant of Real-ESRGAN. Hidden from the model picker; selected indirectly via Output Scale.",
+        category: ModelCategory::Upscale,
+        source: ModelSource::OnDemand {
+            filename: "RealESRGAN_x2plus.onnx",
+            url: "https://github.com/aktiwers/prunr/releases/download/models-v1/RealESRGAN_x2plus.onnx",
+            sha256: "7e0860bb32d903520a244c327b6e3d5e08d680b95c29b3fa8a02cb6ecd230c60",
+            size_mb: 64,
+            license: LicenseInfo {
+                author: "Xintao Wang",
+                license: "BSD-3-Clause",
+                license_url: "https://opensource.org/licenses/BSD-3-Clause",
+                source_url: "https://github.com/xinntao/Real-ESRGAN",
+            },
+        },
+        version: "1.0.0",
+        gpu: GpuRequirement::Recommended,
+        incompatible_eps: &[],
+        working_set_mb: 1000,
+        tile_size_multiple: Some(2),
+        recommended_tile: Some(512),
+        attribution_required: false,
+        upscale: Some(UpscaleModelKnobs {
+            input_name: "data",
+            is_fp16: false,
+        }),
+    },
 ];
 
 pub fn descriptor(id: ModelId) -> Option<&'static ModelDescriptor> {
@@ -827,7 +872,8 @@ fn bundled_bytes(id: ModelId) -> &'static [u8] {
         | ModelId::SdV15LcmInpaintFp16
         | ModelId::TaesdFp16
         | ModelId::RealEsrganX4Plus
-        | ModelId::Nomos8kSchatL => {
+        | ModelId::Nomos8kSchatL
+        | ModelId::RealEsrganX2Plus => {
             // OnDemand / MultiPart in REGISTRY — resolve_bytes routes
             // via disk (or via `multi_part_paths`), not here.
             panic!("bundled_bytes called for non-Bundled model {id:?} — REGISTRY/source mismatch");
@@ -935,7 +981,8 @@ fn load_variant(id: ModelId, suffix: &str) -> Option<Vec<u8>> {
         | ModelId::SdV15LcmInpaintFp16
         | ModelId::TaesdFp16
         | ModelId::RealEsrganX4Plus
-        | ModelId::Nomos8kSchatL => return None,
+        | ModelId::Nomos8kSchatL
+        | ModelId::RealEsrganX2Plus => return None,
     };
     let filename = format!("{name}_{suffix}.onnx");
 
@@ -1000,7 +1047,8 @@ mod tests {
                 | ModelId::SdV15LcmInpaintFp16
                 | ModelId::TaesdFp16
                 | ModelId::RealEsrganX4Plus
-                | ModelId::Nomos8kSchatL => {}
+                | ModelId::Nomos8kSchatL
+                | ModelId::RealEsrganX2Plus => {}
             }
         }
     }
@@ -1309,5 +1357,70 @@ mod tests {
         assert_eq!(nomos.tile_size_multiple, Some(16));
         let esrgan = descriptor(ModelId::RealEsrganX4Plus).expect("RealEsrganX4Plus in REGISTRY");
         assert_eq!(esrgan.tile_size_multiple, None);
+    }
+
+    // ── RealEsrganX2Plus tests ────────────────────────────────────────────
+
+    #[test]
+    fn x2plus_registered() {
+        assert!(descriptor(ModelId::RealEsrganX2Plus).is_some());
+    }
+
+    #[test]
+    fn x2plus_sha256_is_real_hex() {
+        let desc = descriptor(ModelId::RealEsrganX2Plus).expect("x2plus in REGISTRY");
+        if let ModelSource::OnDemand { sha256, .. } = desc.source {
+            assert_eq!(sha256.len(), 64, "sha256 must be 64 hex chars, got {}", sha256.len());
+            assert!(
+                sha256.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()),
+                "sha256 must be lowercase hex, got: {sha256}"
+            );
+            assert!(
+                !sha256.starts_with("PLACEHOLDER"),
+                "sha256 must not be a placeholder"
+            );
+        } else {
+            panic!("RealEsrganX2Plus must be OnDemand");
+        }
+    }
+
+    #[test]
+    fn x2plus_upscale_knobs_match_x4plus() {
+        let x2 = descriptor(ModelId::RealEsrganX2Plus).expect("x2plus in REGISTRY");
+        let x4 = descriptor(ModelId::RealEsrganX4Plus).expect("x4plus in REGISTRY");
+        let k2 = x2.upscale.expect("x2plus must have upscale knobs");
+        let k4 = x4.upscale.expect("x4plus must have upscale knobs");
+        assert_eq!(k2.input_name, "data");
+        assert_eq!(k4.input_name, "data");
+        assert_eq!(k2.is_fp16, false);
+        assert_eq!(k4.is_fp16, false);
+    }
+
+    #[test]
+    fn x2plus_is_upscale_category() {
+        let desc = descriptor(ModelId::RealEsrganX2Plus).expect("x2plus in REGISTRY");
+        assert_eq!(desc.category, ModelCategory::Upscale);
+    }
+
+    #[test]
+    fn x2plus_recommended_tile_set() {
+        let desc = descriptor(ModelId::RealEsrganX2Plus).expect("x2plus in REGISTRY");
+        assert_eq!(desc.recommended_tile, Some(512));
+    }
+
+    #[test]
+    fn x2plus_tile_size_multiple_is_some_2() {
+        let desc = descriptor(ModelId::RealEsrganX2Plus).expect("x2plus in REGISTRY");
+        assert_eq!(desc.tile_size_multiple, Some(2),
+            "pixel_unshuffle asserts even H/W — tile_size_multiple must be Some(2)");
+    }
+
+    #[test]
+    fn x2plus_is_not_user_visible() {
+        assert!(!ModelId::RealEsrganX2Plus.is_user_visible(),
+            "x2plus is selected indirectly via OutputScale::X4TwoPass, never by the user");
+        assert!(ModelId::RealEsrganX4Plus.is_user_visible());
+        assert!(ModelId::Nomos8kSchatL.is_user_visible());
+        assert!(ModelId::Silueta.is_user_visible());
     }
 }

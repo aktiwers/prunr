@@ -29,6 +29,7 @@ pub enum ModelKind {
     BiRefNetLite,
     RealEsrganX4Plus,
     Nomos8kSchatL,
+    RealEsrganX2Plus,
 }
 
 impl From<ModelKind> for prunr_models::ModelId {
@@ -39,6 +40,7 @@ impl From<ModelKind> for prunr_models::ModelId {
             ModelKind::BiRefNetLite => prunr_models::ModelId::BiRefNetLite,
             ModelKind::RealEsrganX4Plus => prunr_models::ModelId::RealEsrganX4Plus,
             ModelKind::Nomos8kSchatL => prunr_models::ModelId::Nomos8kSchatL,
+            ModelKind::RealEsrganX2Plus => prunr_models::ModelId::RealEsrganX2Plus,
         }
     }
 }
@@ -57,6 +59,7 @@ impl TryFrom<prunr_models::ModelId> for ModelKind {
             prunr_models::ModelId::BiRefNetLite => Ok(ModelKind::BiRefNetLite),
             prunr_models::ModelId::RealEsrganX4Plus => Ok(ModelKind::RealEsrganX4Plus),
             prunr_models::ModelId::Nomos8kSchatL => Ok(ModelKind::Nomos8kSchatL),
+            prunr_models::ModelId::RealEsrganX2Plus => Ok(ModelKind::RealEsrganX2Plus),
             other => Err(other),
         }
     }
@@ -701,6 +704,14 @@ mod tests {
         let _cloned = silueta;
         let _cloned2 = u2net;
         assert_ne!(silueta, u2net);
+    }
+
+    #[test]
+    fn model_kind_x2plus_roundtrips() {
+        let model_id: prunr_models::ModelId = ModelKind::RealEsrganX2Plus.into();
+        assert_eq!(model_id, prunr_models::ModelId::RealEsrganX2Plus);
+        let roundtrip = ModelKind::try_from(prunr_models::ModelId::RealEsrganX2Plus).unwrap();
+        assert_eq!(roundtrip, ModelKind::RealEsrganX2Plus);
     }
 
     #[test]

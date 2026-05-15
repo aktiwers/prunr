@@ -590,6 +590,12 @@ impl From<ModelKind> for SettingsModel {
             ModelKind::BiRefNetLite => SettingsModel::BiRefNetLite,
             ModelKind::RealEsrganX4Plus => SettingsModel::RealEsrganUpscale,
             ModelKind::Nomos8kSchatL => SettingsModel::Nomos8kUpscale,
+            ModelKind::RealEsrganX2Plus => {
+                // RealEsrganX2Plus is never the user-selected active model — it's
+                // selected indirectly via OutputScale::X4TwoPass. This conversion
+                // is unreachable in production; guard loudly if it ever fires.
+                unreachable!("RealEsrganX2Plus is an internal dispatch model — it has no SettingsModel variant")
+            }
         }
     }
 }
