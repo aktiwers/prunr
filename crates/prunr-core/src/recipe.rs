@@ -143,9 +143,8 @@ impl Default for OutputScale {
 
 /// Upscale settings. `None` model means upscale is disabled.
 ///
-/// All f32 knobs are stored as `u32::from_bits` for safe `PartialEq`
-/// + `Hash` (matches the `MaskRecipe::gamma_bits` pattern). The
-/// `From<&UpscaleSettings>` impl converts at construction time.
+/// All f32 knobs are stored as `u32::from_bits` for safe `PartialEq` + `Hash`
+/// (matches the `MaskRecipe::gamma_bits` pattern).
 // scale: u32 replaced by output_scale: OutputScale — enum variant selected by the dispatch layer
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct UpscaleRecipe {
@@ -234,8 +233,12 @@ pub enum RequiredTier {
     Skip,
     /// Only compositing changed (bg_color) — parent-local, instant.
     CompositeOnly,
-    /// Only the upscale recipe changed — re-composite then re-upscale; no
-    /// mask or inference work needed.
+    /// Only Tier-2 upscale fields (sharpen / ai_blend / saturation /
+    /// color_match) changed — re-apply postprocess on the cached
+    /// `upscale_raw` buffer; no re-inference needed.
+    UpscaleTier2,
+    /// Only the upscale recipe changed (Tier-1 fields) — re-composite then
+    /// re-upscale; no mask or inference work needed.
     UpscaleRerun,
     /// Mask settings changed — re-run postprocess from cached segmentation tensor (~200ms).
     MaskRerun,
@@ -249,11 +252,23 @@ pub enum RequiredTier {
     FullPipeline,
 }
 
+/// True when two `UpscaleRecipe` values differ ONLY in Tier-2 fields
+/// (sharpen, ai_blend, saturation, color_match). Used by `resolve_tier`
+/// to pick between `UpscaleTier2` (cheap, postprocess-only) and
+/// `UpscaleRerun` (re-inference).
+fn only_tier2_changed(old: &UpscaleRecipe, new: &UpscaleRecipe) -> bool {
+    // Tier-1 fields MUST be identical to qualify as Tier-2.
+    old.model == new.model
+        && old.output_scale == new.output_scale
+        && old.pre_denoise_bits == new.pre_denoise_bits
+        && old.brightness_lift_bits == new.brightness_lift_bits
+}
+
 /// Determine what processing tier is needed when changing from old to new recipe.
 ///
 /// Cost ordering (cheapest → most expensive), matching the `ordered()` table
 /// in `knob_catalog.rs` and the top-down "most-expensive-wins" checks below:
-/// Skip < CompositeOnly < UpscaleRerun < EdgeRerun < MaskRerun < AddEdgeInference < FullPipeline.
+/// Skip < CompositeOnly < UpscaleTier2 < UpscaleRerun < EdgeRerun < MaskRerun < AddEdgeInference < FullPipeline.
 pub fn resolve_tier(old: &ProcessingRecipe, new: &ProcessingRecipe) -> RequiredTier {
     if old == new {
         return RequiredTier::Skip;
@@ -298,6 +313,9 @@ pub fn resolve_tier(old: &ProcessingRecipe, new: &ProcessingRecipe) -> RequiredT
         return RequiredTier::EdgeRerun;
     }
     if old.upscale != new.upscale {
+        if only_tier2_changed(&old.upscale, &new.upscale) {
+            return RequiredTier::UpscaleTier2;
+        }
         return RequiredTier::UpscaleRerun;
     }
     // Composite changes (bg color) do not invalidate the cached upscale — user re-runs Process for upscale-on-new-bg.
@@ -826,5 +844,89 @@ mod tests {
             h.finish()
         };
         assert_eq!(hash_of(&a), hash_of(&b));
+    }
+
+    // --- Task 2: UpscaleTier2 routing tests ---
+
+    fn make_upscale_recipe_with_model() -> ProcessingRecipe {
+        let mut r = make_recipe(ModelKind::Silueta, 1.0, None);
+        r.upscale = UpscaleRecipe {
+            model: Some(prunr_models::ModelId::RealEsrganX4Plus),
+            ..UpscaleRecipe::default()
+        };
+        r
+    }
+
+    #[test]
+    fn upscale_tier1_change_returns_upscale_rerun() {
+        let a = make_upscale_recipe_with_model();
+        let mut b = a.clone();
+        b.upscale.pre_denoise_bits = 0.6_f32.to_bits();
+        assert_eq!(resolve_tier(&a, &b), RequiredTier::UpscaleRerun);
+    }
+
+    #[test]
+    fn brightness_lift_change_returns_upscale_rerun() {
+        let a = make_upscale_recipe_with_model();
+        let mut b = a.clone();
+        b.upscale.brightness_lift_bits = (-0.5_f32).to_bits();
+        assert_eq!(resolve_tier(&a, &b), RequiredTier::UpscaleRerun);
+    }
+
+    #[test]
+    fn output_scale_change_returns_upscale_rerun() {
+        let a = make_upscale_recipe_with_model();
+        let mut b = a.clone();
+        b.upscale.output_scale = OutputScale::X2;
+        assert_eq!(resolve_tier(&a, &b), RequiredTier::UpscaleRerun);
+    }
+
+    #[test]
+    fn sharpen_change_returns_upscale_tier2() {
+        let a = make_upscale_recipe_with_model();
+        let mut b = a.clone();
+        b.upscale.sharpen_bits = 0.5_f32.to_bits();
+        assert_eq!(resolve_tier(&a, &b), RequiredTier::UpscaleTier2);
+    }
+
+    #[test]
+    fn ai_blend_change_returns_upscale_tier2() {
+        let a = make_upscale_recipe_with_model();
+        let mut b = a.clone();
+        b.upscale.ai_blend_bits = 0.4_f32.to_bits();
+        assert_eq!(resolve_tier(&a, &b), RequiredTier::UpscaleTier2);
+    }
+
+    #[test]
+    fn saturation_change_returns_upscale_tier2() {
+        let a = make_upscale_recipe_with_model();
+        let mut b = a.clone();
+        b.upscale.saturation_bits = 0.3_f32.to_bits();
+        assert_eq!(resolve_tier(&a, &b), RequiredTier::UpscaleTier2);
+    }
+
+    #[test]
+    fn color_match_toggle_returns_upscale_tier2() {
+        let a = make_upscale_recipe_with_model();
+        let mut b = a.clone();
+        b.upscale.color_match = true;
+        assert_eq!(resolve_tier(&a, &b), RequiredTier::UpscaleTier2);
+    }
+
+    #[test]
+    fn mixed_tier1_and_tier2_change_returns_upscale_rerun() {
+        let a = make_upscale_recipe_with_model();
+        let mut b = a.clone();
+        b.upscale.pre_denoise_bits = 0.4_f32.to_bits();
+        b.upscale.sharpen_bits = 0.5_f32.to_bits();
+        assert_eq!(resolve_tier(&a, &b), RequiredTier::UpscaleRerun);
+    }
+
+    #[test]
+    fn model_swap_within_upscale_returns_upscale_rerun() {
+        let a = make_upscale_recipe_with_model();
+        let mut b = a.clone();
+        b.upscale.model = Some(prunr_models::ModelId::Nomos8kSchatL);
+        assert_eq!(resolve_tier(&a, &b), RequiredTier::UpscaleRerun);
     }
 }
