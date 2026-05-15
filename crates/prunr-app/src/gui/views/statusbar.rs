@@ -23,8 +23,13 @@ pub fn render(ui: &mut egui::Ui, app: &PrunrApp) {
         // Only count items involved in processing (not idle Pending items)
         let batch_total = counts.batch_total();
         let inpaint_busy = app.processor.any_inpaint_in_flight();
+        let upscale_progress = app.processor.upscale_tile_progress();
 
-        let status_text = if inpaint_busy {
+        let status_text = if let Some((done, total)) = upscale_progress {
+            // Upscale tile counter takes priority over other status text
+            // so the user sees exactly how many tiles remain at a glance.
+            format!("Upscaling \u{2014} tile {done}/{total}")
+        } else if inpaint_busy {
             // Eraser dispatch lives outside the seg-pipeline status track,
             // so check it first — otherwise the "All done" branch wins.
             "Erasing\u{2026}".to_string()
