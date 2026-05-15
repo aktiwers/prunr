@@ -925,7 +925,8 @@ impl Processor {
 
         // Tier-1 pre-inference pass — runs OUTSIDE the ORT session, so the
         // row-parallel rayon inside apply_denoise is not nested in the inference
-        // thread pool. Keeps DEFER-4 invariant.
+        // thread pool (the nested-rayon pattern that deadlocked apply_background_color
+        // in b2306bb). Do not move this below upscale_active.store(true).
         let pre_denoise = recipe.upscale.pre_denoise();
         let brightness_lift = recipe.upscale.brightness_lift();
         let input_for_inference: Arc<image::RgbaImage> = build_inference_input(
