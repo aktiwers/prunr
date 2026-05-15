@@ -111,10 +111,10 @@ pub(crate) struct InpaintResult {
 }
 
 /// Result delivered from a background upscale thread back to the main thread.
-/// Keyed on `(item_id, generation)` so a superseded dispatch can be dropped.
+/// Keyed on `item_id`; only one upscale is in flight at a time (gated by
+/// `can_process_intent`), so generation-based stale-drop is not needed today.
 pub(crate) struct UpscaleResult {
     pub item_id: u64,
-    pub generation: u64,
     pub result: Result<image::RgbaImage, prunr_core::CoreError>,
 }
 
@@ -769,6 +769,83 @@ impl Processor {
     pub(crate) fn clear_admission(&mut self) {
         self.admission = None;
         self.admission_tx = None;
+    }
+
+    /// Spawn a background thread that calls `upscale_rgba` and posts the
+    /// result back via `upscale_result_rx`. The caller is responsible for
+    /// having verified that the model is installed before dispatching.
+    ///
+    /// Pre-flight admission check refuses the dispatch when free RAM is
+    /// below `descriptor.working_set_mb`; a warning is logged and the
+    /// function returns without spawning. The toolbar's `can_process_intent`
+    /// gate should have prevented reaching this path, but the check here
+    /// is the last-resort guard at the dispatch layer.
+    pub(crate) fn dispatch_upscale(
+        &mut self,
+        item_id: u64,
+        input: image::RgbaImage,
+        model_id: prunr_models::ModelId,
+        scale: u32,
+        intra_threads: usize,
+    ) {
+        let free_mb = (crate::hardware::available_ram_bytes_throttled() / (1024 * 1024)) as u32;
+        if let Some(d) = prunr_models::REGISTRY.iter().find(|d| d.id == model_id) {
+            if !admission_check(d.working_set_mb, free_mb) {
+                tracing::warn!(
+                    model = ?model_id,
+                    working_set_mb = d.working_set_mb,
+                    free_mb,
+                    "upscale admission refused: insufficient RAM"
+                );
+                return;
+            }
+        }
+
+        self.upscale_active.store(true, Ordering::Relaxed);
+        self.upscale_cancel.store(false, Ordering::Relaxed);
+        self.upscale_tile_done.store(0, Ordering::Relaxed);
+        self.upscale_tile_total.store(0, Ordering::Relaxed);
+
+        let done_counter = Arc::clone(&self.upscale_tile_done);
+        let total_counter = Arc::clone(&self.upscale_tile_total);
+        let active_flag = Arc::clone(&self.upscale_active);
+        let cancel_flag = Arc::clone(&self.upscale_cancel);
+        let result_tx = self.upscale_result_tx.clone();
+
+        std::thread::spawn(move || {
+            let result = prunr_core::upscale::upscale_rgba(
+                &input,
+                model_id,
+                scale,
+                intra_threads,
+                move |done, total| {
+                    done_counter.store(done, Ordering::Relaxed);
+                    total_counter.store(total, Ordering::Relaxed);
+                },
+                Some(cancel_flag),
+            );
+            active_flag.store(false, Ordering::Relaxed);
+            let _ = result_tx.send(UpscaleResult { item_id, result });
+        });
+    }
+
+    /// Set the cancel flag for any in-flight upscale dispatch. The worker
+    /// thread checks the flag between tiles; latency to actually stopping
+    /// is one tile (~0.5 s at 4K with ESRGAN). Idempotent.
+    pub(crate) fn cancel_upscale(&self) {
+        self.upscale_cancel.store(true, Ordering::Relaxed);
+    }
+
+    /// Drain completed upscale results from the background thread. Returns
+    /// `Some(UpscaleResult)` for each completed dispatch, or `None` when
+    /// nothing is ready. Uses `.try_recv()` so this never blocks the UI thread.
+    /// Caller is responsible for applying the result to the matching `BatchItem`.
+    pub(crate) fn pump_upscale_results(&mut self) -> Vec<UpscaleResult> {
+        let mut out = Vec::new();
+        while let Ok(r) = self.upscale_result_rx.try_recv() {
+            out.push(r);
+        }
+        out
     }
 }
 
