@@ -3325,6 +3325,13 @@ impl PrunrApp {
             // changes model mid-run — the result would land on the
             // wrong selection otherwise.
             self.processor.cancel_upscale();
+            // Drop every item's upscale_raw / bicubic_source — the buffers
+            // were produced by the previous model. A subsequent Tier-2
+            // preview tick would otherwise display the old model's output
+            // under the new model's knobs.
+            for item in &mut self.batch.items {
+                item.invalidate_upscale_cache();
+            }
             self.settings.save();
             self.toasts.info(format!(
                 "{} loaded",
