@@ -12,7 +12,7 @@
 use egui::Ui;
 
 use super::adjustments_toolbar::{ToolbarChange, render_model_dropdown, render_reset_preset_cluster};
-use super::upscale_chip::render_scale_chip;
+use super::upscale_chip::render_output_scale_chip;
 use crate::gui::item_settings::ItemSettings;
 use crate::gui::settings::Settings;
 
@@ -39,7 +39,13 @@ pub(crate) fn render_upscale_row(
         let factor = item_settings.output_scale.factor();
         let out_w = source_dims.0.saturating_mul(factor);
         let out_h = source_dims.1.saturating_mul(factor);
-        render_scale_chip(ui, &mut item_settings.output_scale, (out_w, out_h));
+        // Invariant: caller gates on app_settings.model.is_upscale(), so
+        // to_model_id() is always Some here.
+        let model_id = app_settings
+            .model
+            .to_model_id()
+            .expect("upscale_mode caller guarantees model.is_upscale() — to_model_id is Some");
+        render_output_scale_chip(ui, &mut item_settings.output_scale, (out_w, out_h), model_id);
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             render_reset_preset_cluster(ui, app_settings, item_settings, applied_preset, change);
