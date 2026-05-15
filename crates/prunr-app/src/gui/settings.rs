@@ -14,6 +14,22 @@ pub const PRUNR_PRESET: &str = "Prunr";
 /// live on `BatchItem.settings: ItemSettings` instead. New images inherit
 /// whichever preset `default_preset` points at; the adjustments toolbar
 /// edits the current image's `ItemSettings` directly.
+/// User preference for the dispatch-progress visual style. Both
+/// variants read the same `DispatchProgress` data; only the
+/// painting layout differs (top strip vs centered pill).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ProgressStyle {
+    /// Top-of-canvas 44 px strip with inline Cancel button.
+    /// Minimal canvas obscuring; flat counter only.
+    Banner,
+    /// Centered pill with animated headline + nested counter +
+    /// rich step label + Esc hint. Default — carries more info
+    /// per frame and matches the legacy seg-pipeline modal feel.
+    #[default]
+    Modal,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Settings {
     pub model: SettingsModel,
@@ -39,6 +55,11 @@ pub struct Settings {
     /// Auto-hide the adjustments toolbar when the cursor leaves it.
     #[serde(default)]
     pub auto_hide_adjustments: bool,
+    /// Visual style for the dispatch-progress overlay (banner across
+    /// the top of the canvas vs centered modal pill). Both read the
+    /// same data; users pick which form they prefer.
+    #[serde(default)]
+    pub progress_style: ProgressStyle,
     /// Drag-out and Save emit subject/lines/mask PNGs instead of a single
     /// composite. Single toggle, both export paths.
     #[serde(default)]
@@ -586,6 +607,7 @@ impl Default for Settings {
             dark_checker: false,
             live_preview: true,
             auto_hide_adjustments: false,
+            progress_style: ProgressStyle::default(),
             export_split_layers: false,
             shortcuts: HashMap::new(),
             presets: HashMap::new(),
