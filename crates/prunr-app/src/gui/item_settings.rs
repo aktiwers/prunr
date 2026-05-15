@@ -230,7 +230,14 @@ impl ItemSettings {
                     | prunr_core::ModelKind::Nomos8kSchatL => Some(model.into()),
                     _ => None,
                 },
-                scale: self.upscale_scale,
+                // upscale_scale: u32 (2 or 4) mapped to OutputScale enum;
+                // plan 32-02 replaces this field with output_scale: OutputScale directly.
+                output_scale: if self.upscale_scale <= 2 {
+                    prunr_core::OutputScale::X2
+                } else {
+                    prunr_core::OutputScale::X4
+                },
+                ..prunr_core::UpscaleRecipe::default()
             },
             was_chain: chain_mode,
         }
@@ -419,7 +426,7 @@ mod tests {
         // Active upscale model → recipe slot populated.
         let r = s.current_recipe(prunr_core::ModelKind::RealEsrganX4Plus, false);
         assert_eq!(r.upscale.model, Some(prunr_models::ModelId::RealEsrganX4Plus));
-        assert_eq!(r.upscale.scale, 2);
+        assert_eq!(r.upscale.output_scale, prunr_core::OutputScale::X2);
         // Active seg model → upscale slot empty.
         let r = s.current_recipe(prunr_core::ModelKind::Silueta, false);
         assert_eq!(r.upscale.model, None);
