@@ -285,23 +285,13 @@ pub fn apply_ai_blend(img: &mut RgbaImage, bicubic_source: &RgbaImage, weight: f
     let n = (img.width() * img.height()) as usize;
     let n = n.min((bicubic_source.width() * bicubic_source.height()) as usize);
     let src_raw = bicubic_source.as_raw();
-    // Build per-pixel RGB result into a flat buffer, then write back.
-    let mut results = vec![0u8; n * 3];
-    {
-        let ai_raw = img.as_raw();
-        for i in 0..n {
-            for c in 0..3usize {
-                let ai = ai_raw[i * 4 + c] as f32;
-                let src = src_raw[i * 4 + c] as f32;
-                results[i * 3 + c] = (ai * w + src * (1.0 - w)).clamp(0.0, 255.0) as u8;
-            }
-        }
-    }
-    let ai_raw_mut = img.as_mut();
+    let raw = img.as_mut();
     for i in 0..n {
-        ai_raw_mut[i * 4] = results[i * 3];
-        ai_raw_mut[i * 4 + 1] = results[i * 3 + 1];
-        ai_raw_mut[i * 4 + 2] = results[i * 3 + 2];
+        for c in 0..3usize {
+            let ai = raw[i * 4 + c] as f32;
+            let src = src_raw[i * 4 + c] as f32;
+            raw[i * 4 + c] = (ai * w + src * (1.0 - w)).clamp(0.0, 255.0) as u8;
+        }
         // channel 3 (alpha): from the AI input unchanged
     }
 }
@@ -318,28 +308,21 @@ pub fn apply_saturation(img: &mut RgbaImage, amount: f32) {
         return;
     }
     let n = (img.width() * img.height()) as usize;
-    let mut results = vec![[0u8; 3]; n];
-    {
-        let raw = img.as_raw();
-        for i in 0..n {
-            let r = raw[i * 4];
-            let g = raw[i * 4 + 1];
-            let b = raw[i * 4 + 2];
-            let (h, s, l) = srgb_to_hsl(r, g, b);
-            let s_new = if amount >= 0.0 {
-                (s + amount * (1.0 - s)).clamp(0.0, 1.0)
-            } else {
-                (s * (1.0 + amount)).clamp(0.0, 1.0)
-            };
-            let (ro, go, bo) = hsl_to_srgb(h, s_new, l);
-            results[i] = [ro, go, bo];
-        }
-    }
     let raw = img.as_mut();
     for i in 0..n {
-        raw[i * 4] = results[i][0];
-        raw[i * 4 + 1] = results[i][1];
-        raw[i * 4 + 2] = results[i][2];
+        let r = raw[i * 4];
+        let g = raw[i * 4 + 1];
+        let b = raw[i * 4 + 2];
+        let (h, s, l) = srgb_to_hsl(r, g, b);
+        let s_new = if amount >= 0.0 {
+            (s + amount * (1.0 - s)).clamp(0.0, 1.0)
+        } else {
+            (s * (1.0 + amount)).clamp(0.0, 1.0)
+        };
+        let (ro, go, bo) = hsl_to_srgb(h, s_new, l);
+        raw[i * 4] = ro;
+        raw[i * 4 + 1] = go;
+        raw[i * 4 + 2] = bo;
         // raw[i * 4 + 3]: alpha unchanged
     }
 }
@@ -356,7 +339,6 @@ pub fn apply_saturation(img: &mut RgbaImage, amount: f32) {
 ///
 /// Alpha unchanged.
 pub fn apply_color_match(target: &mut RgbaImage, source: &RgbaImage) {
-    // Collect Lab values for source
     let src_n = (source.width() * source.height()) as usize;
     let mut src_l = Vec::with_capacity(src_n);
     let mut src_a = Vec::with_capacity(src_n);
@@ -373,8 +355,11 @@ pub fn apply_color_match(target: &mut RgbaImage, source: &RgbaImage) {
     let (s_mean_l, s_std_l) = mean_std(&src_l);
     let (s_mean_a, s_std_a) = mean_std(&src_a);
     let (s_mean_b, s_std_b) = mean_std(&src_b);
+    // free ~3 × src_n × 4 bytes before allocating the target Lab buffers
+    drop(src_l);
+    drop(src_a);
+    drop(src_b);
 
-    // Collect Lab values for target
     let tgt_n = (target.width() * target.height()) as usize;
     let mut tgt_l = Vec::with_capacity(tgt_n);
     let mut tgt_a_ch = Vec::with_capacity(tgt_n);
@@ -392,7 +377,6 @@ pub fn apply_color_match(target: &mut RgbaImage, source: &RgbaImage) {
     let (t_mean_a, t_std_a) = mean_std(&tgt_a_ch);
     let (t_mean_b, t_std_b) = mean_std(&tgt_b_ch);
 
-    // Transfer and write back
     let raw = target.as_mut();
     for i in 0..tgt_n {
         let l_new = (tgt_l[i] - t_mean_l) * (s_std_l / t_std_l.max(1e-6)) + s_mean_l;
