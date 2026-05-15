@@ -39,12 +39,10 @@ pub(crate) fn render_upscale_row(
         let factor = item_settings.output_scale.factor();
         let out_w = source_dims.0.saturating_mul(factor);
         let out_h = source_dims.1.saturating_mul(factor);
-        // Invariant: caller gates on app_settings.model.is_upscale(), so
-        // to_model_id() is always Some here.
-        let model_id = app_settings
-            .model
-            .to_model_id()
-            .expect("upscale_mode caller guarantees model.is_upscale() — to_model_id is Some");
+        // Caller in adjustments_toolbar gates on model.is_upscale(), but
+        // that invariant lives in a different scope. Skip the chip if it
+        // ever stops holding — no model_id means no upscale, so no chip.
+        let Some(model_id) = app_settings.model.to_model_id() else { return; };
         render_output_scale_chip(ui, &mut item_settings.output_scale, (out_w, out_h), model_id);
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
