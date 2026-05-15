@@ -590,8 +590,13 @@ impl PrunrApp {
         };
         let scale = item.settings.upscale_scale;
         let intra_threads = prunr_core::batch::ort_intra_threads(self.settings.parallel_jobs);
+        // Capture the recipe at dispatch time so the pump can stamp
+        // `item.applied_recipe` against what actually ran (not what the
+        // user has tweaked to since).
+        let model_kind = prunr_core::ModelKind::from(model_id);
+        let recipe = item.settings.current_recipe(model_kind, self.settings.chain_mode);
         tracing::info!(item_id, ?model_id, scale, "upscale dispatched");
-        self.processor.dispatch_upscale(item_id, input, model_id, scale, intra_threads);
+        self.processor.dispatch_upscale(item_id, input, model_id, scale, intra_threads, recipe);
     }
 
     /// Toolbar mirror for `handle_process_intent`. `add_enabled(...)` reads
@@ -1020,13 +1025,33 @@ impl PrunrApp {
         }
         let handles = self.batch.bg_io.tex_prep_handles();
         let switch = self.result_switch_id;
+        let max_depth = self.settings.history_depth;
         for r in results {
             let item_id = r.item_id;
+            let result_recipe = r.recipe.clone();
             match r.result {
                 Ok(rgba) => {
                     let new_rgba = Arc::new(rgba);
                     let Some(item) = self.batch.find_by_id_mut(item_id) else { continue };
+                    // Archive the pre-upscale result so Cmd+Z swaps stored
+                    // RGBAs instead of re-running the whole pipeline. Mirrors
+                    // the inpaint pump's archive block.
+                    if let Some(prev) = item.result_rgba.take() {
+                        item.history.push_back(super::item::HistoryEntry::new(
+                            prev, item.applied_recipe.clone(),
+                        ));
+                        while item.history.len() > max_depth {
+                            if let Some(old) = item.history.pop_front() {
+                                old.cleanup();
+                            }
+                        }
+                        // New edit invalidates the linear redo timeline.
+                        for entry in item.redo_stack.drain(..) {
+                            entry.cleanup();
+                        }
+                    }
                     item.result_rgba = Some(new_rgba.clone());
+                    item.applied_recipe = Some(result_recipe);
                     item.status = BatchStatus::Done;
                     item.result_tex_pending = true;
                     item.thumb_pending = true;
