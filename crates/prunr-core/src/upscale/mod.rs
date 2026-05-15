@@ -10,6 +10,7 @@ pub use tiling::{plan_upscale_tiles, upscale_tiled, TilingConfig, UpscaleTilePla
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
+use half::f16;
 use image::{RgbImage, RgbaImage};
 use ort::{inputs, value::Tensor};
 
@@ -42,6 +43,71 @@ fn upscale_input_name(id: prunr_models::ModelId) -> &'static str {
         prunr_models::ModelId::RealEsrganX4Plus => "data",
         prunr_models::ModelId::Nomos8kSchatL => "input",
         other => unreachable!("upscale_input_name called with non-upscale ModelId: {other:?}"),
+    }
+}
+
+/// True when the model's ONNX export expects fp16 inputs / emits fp16
+/// outputs. Phhofm's HAT-L ships fp16 only; RealESRGAN is fp32. Drives
+/// the tensor-packing branch in `run_tile` — the wrong dtype fails the
+/// session with `Unexpected input data type` at runtime.
+fn upscale_is_fp16(id: prunr_models::ModelId) -> bool {
+    match id {
+        prunr_models::ModelId::Nomos8kSchatL => true,
+        prunr_models::ModelId::RealEsrganX4Plus => false,
+        other => unreachable!("upscale_is_fp16 called with non-upscale ModelId: {other:?}"),
+    }
+}
+
+/// CHW f32-or-f16 → HWC u8 inline pack, run inside the session lock so
+/// the ORT-borrowed slice doesn't need an `into_owned()` copy. `is_fp16`
+/// selects which dtype to extract; both paths normalise to f32 before
+/// the clamp + cast.
+fn pack_output(
+    value: &ort::value::DynValue,
+    plane: usize,
+    packed: &mut [u8],
+    is_fp16: bool,
+) -> Result<(), CoreError> {
+    fn write_u8(packed: &mut [u8], plane: usize, slice: &[f32]) -> Result<(), CoreError> {
+        if slice.len() < 3 * plane {
+            return Err(CoreError::Inference(format!(
+                "upscale: output tensor too small: {} < {}",
+                slice.len(),
+                3 * plane
+            )));
+        }
+        for idx in 0..plane {
+            packed[3 * idx]     = (slice[idx] * 255.0).clamp(0.0, 255.0) as u8;
+            packed[3 * idx + 1] = (slice[plane + idx] * 255.0).clamp(0.0, 255.0) as u8;
+            packed[3 * idx + 2] = (slice[2 * plane + idx] * 255.0).clamp(0.0, 255.0) as u8;
+        }
+        Ok(())
+    }
+
+    if is_fp16 {
+        let arr = value
+            .try_extract_array::<f16>()
+            .map_err(|e| CoreError::Inference(format!("upscale: output extract (f16): {e}")))?
+            .into_dimensionality::<ndarray::Ix4>()
+            .map_err(|e| CoreError::Inference(format!("upscale: output reshape (f16): {e}")))?;
+        // f16 → f32 conversion is required before clamp/cast; the f16
+        // payload from ORT is borrowed, so the owned f32 buffer here is
+        // unavoidable.
+        let owned: ndarray::Array4<f32> = arr.mapv(|x| x.to_f32());
+        let slice = owned.as_slice().ok_or_else(|| {
+            CoreError::Inference("upscale: output tensor not contiguous (f16)".into())
+        })?;
+        write_u8(packed, plane, slice)
+    } else {
+        let arr = value
+            .try_extract_array::<f32>()
+            .map_err(|e| CoreError::Inference(format!("upscale: output extract: {e}")))?
+            .into_dimensionality::<ndarray::Ix4>()
+            .map_err(|e| CoreError::Inference(format!("upscale: output reshape: {e}")))?;
+        let slice = arr.as_slice().ok_or_else(|| {
+            CoreError::Inference("upscale: output tensor not contiguous".into())
+        })?;
+        write_u8(packed, plane, slice)
     }
 }
 
@@ -103,68 +169,58 @@ where
     let engine = OrtEngine::new_with_optimization_level(model_kind, intra_threads, level)?;
 
     let input_name = upscale_input_name(model_id);
+    let is_fp16 = upscale_is_fp16(model_id);
 
     let run_tile = |rgb_tile: &RgbImage, padded_w: u32, padded_h: u32| -> Result<RgbImage, CoreError> {
         const INV_255: f32 = 1.0 / 255.0;
         let pixel_count = (padded_w * padded_h) as usize;
-        let mut input_data = vec![0.0_f32; 3 * pixel_count];
-        for (i, p) in rgb_tile.pixels().enumerate() {
-            let [r, g, b] = p.0;
-            input_data[i] = r as f32 * INV_255;
-            input_data[pixel_count + i] = g as f32 * INV_255;
-            input_data[2 * pixel_count + i] = b as f32 * INV_255;
-        }
-
-        let arr = ndarray::Array4::from_shape_vec(
-            [1, 3, padded_h as usize, padded_w as usize],
-            input_data,
-        )
-        .map_err(|e| CoreError::Inference(format!("upscale: input shape: {e}")))?;
-
-        let tensor = Tensor::from_array(arr)
-            .map_err(|e| CoreError::Inference(format!("upscale: input tensor: {e}")))?;
+        let shape = [1, 3, padded_h as usize, padded_w as usize];
 
         let out_h = padded_h * 4;
         let out_w = padded_w * 4;
         let plane = (out_w * out_h) as usize;
-
-        // Pack CHW f32 → HWC u8 directly from the ORT-borrowed slice while
-        // still inside the session lock. Avoids one full output-tensor copy
-        // (~50 MB per tile at 512→2048 4×).
         let mut packed = vec![0u8; 3 * plane];
-        engine.with_session(|session| {
-            let outputs = session
-                .run(inputs![input_name => &tensor])
-                .map_err(|e| CoreError::Inference(format!("upscale: inference failed: {e}")))?;
 
-            let arr = outputs[0]
-                .try_extract_array::<f32>()
-                .map_err(|e| CoreError::Inference(format!("upscale: output extract: {e}")))?
-                .into_dimensionality::<ndarray::Ix4>()
-                .map_err(|e| CoreError::Inference(format!("upscale: output reshape: {e}")))?;
-
-            let slice = arr.as_slice().ok_or_else(|| {
-                CoreError::Inference("upscale: output tensor not contiguous".into())
+        // The two branches keep the f16/f32 buffers + tensor scoped to
+        // the relevant arm so the unused dtype's buffer doesn't sit
+        // allocated during inference.
+        if is_fp16 {
+            let mut input_data = vec![f16::ZERO; 3 * pixel_count];
+            for (i, p) in rgb_tile.pixels().enumerate() {
+                let [r, g, b] = p.0;
+                input_data[i] = f16::from_f32(r as f32 * INV_255);
+                input_data[pixel_count + i] = f16::from_f32(g as f32 * INV_255);
+                input_data[2 * pixel_count + i] = f16::from_f32(b as f32 * INV_255);
+            }
+            let arr = ndarray::Array4::from_shape_vec(shape, input_data)
+                .map_err(|e| CoreError::Inference(format!("upscale: input shape: {e}")))?;
+            let tensor = Tensor::from_array(arr)
+                .map_err(|e| CoreError::Inference(format!("upscale: input tensor: {e}")))?;
+            engine.with_session(|session| {
+                let outputs = session
+                    .run(inputs![input_name => &tensor])
+                    .map_err(|e| CoreError::Inference(format!("upscale: inference failed: {e}")))?;
+                pack_output(&outputs[0], plane, &mut packed, is_fp16)
             })?;
-
-            if slice.len() < 3 * plane {
-                return Err(CoreError::Inference(format!(
-                    "upscale: output tensor too small: {} < {}",
-                    slice.len(),
-                    3 * plane
-                )));
+        } else {
+            let mut input_data = vec![0.0_f32; 3 * pixel_count];
+            for (i, p) in rgb_tile.pixels().enumerate() {
+                let [r, g, b] = p.0;
+                input_data[i] = r as f32 * INV_255;
+                input_data[pixel_count + i] = g as f32 * INV_255;
+                input_data[2 * pixel_count + i] = b as f32 * INV_255;
             }
-
-            for idx in 0..plane {
-                let r = (slice[idx] * 255.0).clamp(0.0, 255.0) as u8;
-                let g = (slice[plane + idx] * 255.0).clamp(0.0, 255.0) as u8;
-                let b = (slice[2 * plane + idx] * 255.0).clamp(0.0, 255.0) as u8;
-                packed[3 * idx] = r;
-                packed[3 * idx + 1] = g;
-                packed[3 * idx + 2] = b;
-            }
-            Ok(())
-        })?;
+            let arr = ndarray::Array4::from_shape_vec(shape, input_data)
+                .map_err(|e| CoreError::Inference(format!("upscale: input shape: {e}")))?;
+            let tensor = Tensor::from_array(arr)
+                .map_err(|e| CoreError::Inference(format!("upscale: input tensor: {e}")))?;
+            engine.with_session(|session| {
+                let outputs = session
+                    .run(inputs![input_name => &tensor])
+                    .map_err(|e| CoreError::Inference(format!("upscale: inference failed: {e}")))?;
+                pack_output(&outputs[0], plane, &mut packed, is_fp16)
+            })?;
+        }
 
         RgbImage::from_raw(out_w, out_h, packed).ok_or_else(|| {
             CoreError::Inference("upscale: from_raw failed (packed length mismatch)".into())
