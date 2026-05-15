@@ -257,20 +257,9 @@ where
     // the user actually waited for.
     let engine = OrtEngine::new_cpu_only_with_optimization_level(model_kind, intra_threads, level)?;
 
-    // x4plus and Nomos8k are native-4× models. x2plus is native-2×.
-    // run_upscale_native must receive the model's actual output scale,
-    // not the user-requested scale — the tile closure expects exactly
-    // `padded_w * native_scale` pixels from ORT.
-    //
-    // For scale=4 with a 4× model (x4plus / Nomos8k): native path.
-    // For scale=2 with a 4× model (x4plus): run at 4× then Lanczos3 halve.
-    // For scale=2 with x2plus: called only from upscale_two_pass, never here.
-    //
-    // `upscale_rgba` treats all current user-selectable models as native-4×.
-    // x2plus is dispatched exclusively via `upscale_two_pass` which calls
-    // `run_upscale_native` directly with native_scale=2.
-    let native_scale_4x = 4u32;
-    let native_result = run_upscale_native(input, &engine, descriptor, native_scale_4x, on_tile_done, cancel)?;
+    // All user-selectable upscale models are native-4×. x2plus (native-2×)
+    // is dispatched exclusively via upscale_two_pass — never reaches here.
+    let native_result = run_upscale_native(input, &engine, descriptor, 4, on_tile_done, cancel)?;
 
     if scale == 4 {
         Ok(native_result)
@@ -311,6 +300,9 @@ where
 ///   input_bytes × 4   // pass-1 output (2× linear = 4× pixels)
 ///   + input_bytes × 16 // pass-2 output (4× linear = 16× pixels)
 ///   + ~64 MB           // x2plus ORT session (same session reused for both passes)
+///
+/// Compose stage allocates a 4× GrayImage for alpha (input × 4) and mutates
+/// pass-2's RgbaImage in place — no parallel 4× RgbaImage allocation.
 ///
 /// Progress callback fires from BOTH passes. The `(done, total)` pair
 /// reflects per-pass tile counts — total is per-pass, not combined.
@@ -367,9 +359,6 @@ where
     }
 
     // Pass 2: intermediate → 4× (intermediate is moved, not cloned).
-    // Alpha from the original input is Lanczos3-upscaled directly to 4×
-    // inside run_upscale_native's upscale_tiled call; the intermediate's
-    // alpha is ignored.
     let final_rgb = run_upscale_native(
         &intermediate,
         &engine,
@@ -378,28 +367,23 @@ where
         on_tile_done,
         cancel,
     )?;
-    // `intermediate` is dropped on return — RAM freed before the caller
-    // observes the result.
+    drop(intermediate);
 
-    // Compose: take RGB from final_rgb, alpha upscaled from original input.
+    // Compose alpha into final_rgb in place: take RGB from pass-2 output,
+    // overwrite its alpha with the Lanczos3-upscaled alpha from the original
+    // input. Mutating final_rgb saves a parallel 4× RgbaImage allocation.
     let out_w = input.width() * 4;
     let out_h = input.height() * 4;
     let alpha_4x = upscale_alpha_lanczos3(input, out_w, out_h);
-    let mut out = RgbaImage::new(out_w, out_h);
+    let mut out = final_rgb;
     for (x, y, p) in out.enumerate_pixels_mut() {
-        let rgb = final_rgb.get_pixel(x, y).0;
-        let a = alpha_4x.get_pixel(x, y).0[0];
-        *p = image::Rgba([rgb[0], rgb[1], rgb[2], a]);
+        p.0[3] = alpha_4x.get_pixel(x, y).0[0];
     }
     Ok(out)
 }
 
-/// Returns `true` when `model_id` supports the `OutputScale::X4TwoPass`
-/// dispatch path. X4TwoPass chains `RealEsrganX2Plus` twice to produce
-/// a net 4× output; it is only valid for `RealEsrganX4Plus` (the user's
-/// model choice that signals Real-ESRGAN architecture). Nomos8kSchatL
-/// has a fixed 4× native scale and no x2plus architecture — the chip UI
-/// uses this predicate to dim the X4TwoPass option for non-ESRGAN models.
+/// Returns `true` when `model_id` supports `OutputScale::X4TwoPass`
+/// (chains `RealEsrganX2Plus` twice). Currently only `RealEsrganX4Plus`.
 pub fn x4twopass_available(model_id: prunr_models::ModelId) -> bool {
     model_id == prunr_models::ModelId::RealEsrganX4Plus
 }
