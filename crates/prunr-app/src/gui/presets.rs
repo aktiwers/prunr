@@ -787,9 +787,8 @@ mod tests {
     }
 
     #[test]
-    fn roundtrip_with_upscale_fields_via_model_preset() {
+    fn roundtrip_with_upscale_scale_via_model_preset() {
         let item = ItemSettings {
-            upscale_model: Some(ModelId::Nomos8kSchatL),
             upscale_scale: 2,
             ..ItemSettings::default()
         };
@@ -801,7 +800,6 @@ mod tests {
         let restored: PresetFile = serde_json::from_str(&json).expect("deserialize");
 
         let resolved = resolve_preset_for_model(&restored, ModelId::Nomos8kSchatL, None);
-        assert_eq!(resolved.item_settings.upscale_model, Some(ModelId::Nomos8kSchatL));
         assert_eq!(resolved.item_settings.upscale_scale, 2);
     }
 
@@ -830,7 +828,6 @@ mod tests {
         }"#;
         let file: PresetFile = serde_json::from_str(json).expect("deserialize");
         let resolved = resolve_preset_for_model(&file, ModelId::Silueta, None);
-        assert_eq!(resolved.item_settings.upscale_model, None);
         assert_eq!(resolved.item_settings.upscale_scale, 4);
         assert!((resolved.item_settings.gamma - 1.5).abs() < f32::EPSILON);
     }
