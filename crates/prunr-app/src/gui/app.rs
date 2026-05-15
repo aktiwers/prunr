@@ -589,11 +589,7 @@ impl PrunrApp {
                 }
             }
         };
-        let scale: u32 = match item.settings.output_scale {
-            prunr_core::OutputScale::X2 => 2,
-            prunr_core::OutputScale::X3 => 3,
-            prunr_core::OutputScale::X4 | prunr_core::OutputScale::X4TwoPass => 4,
-        };
+        let scale: u32 = item.settings.output_scale.factor();
         let intra_threads = prunr_core::batch::ort_intra_threads(self.settings.parallel_jobs);
         // Capture the recipe at dispatch time so the pump can stamp
         // `item.applied_recipe` against what actually ran (not what the

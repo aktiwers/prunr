@@ -13,14 +13,6 @@ use super::chip;
 use super::hint;
 use crate::gui::theme;
 
-fn output_scale_to_factor(scale: OutputScale) -> u32 {
-    match scale {
-        OutputScale::X2 => 2,
-        OutputScale::X3 => 3,
-        OutputScale::X4 | OutputScale::X4TwoPass => 4,
-    }
-}
-
 /// Render the scale chip. Returns `true` if `scale` changed.
 ///
 /// `output_dims` is `(w, h)` of the upscale's projected output —
@@ -30,7 +22,7 @@ pub(crate) fn render_scale_chip(
     scale: &mut OutputScale,
     output_dims: (u32, u32),
 ) -> bool {
-    let factor = output_scale_to_factor(*scale);
+    let factor = scale.factor();
     let label = format!("{}x · {}×{}", factor, output_dims.0, output_dims.1);
     let accent = *scale != OutputScale::X4;
     let resp = chip::chip_button(ui, ICON_OPEN_IN_FULL.codepoint, &label, accent);
