@@ -166,12 +166,26 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
             }
         };
         if cancelled {
-            if let Some(item_id) = active_inpaint_item {
-                app.cancel_inpaint_for(item_id);
-            } else {
-                // Slot is populated by seg / upscale; route to the
-                // global cancel intent which handles both.
-                app.handle_cancel();
+            // Route by what's actually in flight per the slot's `kind`,
+            // not by "any inpaint in flight" — a banner Cancel during a
+            // seg batch must cancel only the seg batch, not also any
+            // unrelated in-flight inpaint on a different item.
+            use crate::gui::dispatch_progress::DispatchKind;
+            match progress.kind {
+                DispatchKind::Eraser | DispatchKind::SdInpaint => {
+                    if let Some(item_id) = active_inpaint_item {
+                        app.cancel_inpaint_for(item_id);
+                    }
+                }
+                DispatchKind::Upscale => {
+                    app.processor.cancel_upscale();
+                }
+                DispatchKind::Seg => {
+                    // Seg batch cancel — surgical, doesn't touch inpaint
+                    // or upscale state. Same surface the Esc shortcut
+                    // hits when the batch is the only thing in flight.
+                    app.handle_cancel_all_and_reset();
+                }
             }
         }
         ui.ctx().request_repaint();
