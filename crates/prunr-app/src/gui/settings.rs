@@ -10,10 +10,6 @@ use super::item_settings::ItemSettings;
 /// values are `ItemSettings::default()` regardless of what's in the map.
 pub const PRUNR_PRESET: &str = "Prunr";
 
-/// Global app config. Per-image knobs (gamma, threshold, line mode, bg, ...)
-/// live on `BatchItem.settings: ItemSettings` instead. New images inherit
-/// whichever preset `default_preset` points at; the adjustments toolbar
-/// edits the current image's `ItemSettings` directly.
 /// User preference for the dispatch-progress visual style. Both
 /// variants read the same `DispatchProgress` data; only the
 /// painting layout differs (top strip vs centered pill).
@@ -30,6 +26,10 @@ pub enum ProgressStyle {
     Modal,
 }
 
+/// Global app config. Per-image knobs (gamma, threshold, line mode, bg, ...)
+/// live on `BatchItem.settings: ItemSettings` instead. New images inherit
+/// whichever preset `default_preset` points at; the adjustments toolbar
+/// edits the current image's `ItemSettings` directly.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Settings {
     pub model: SettingsModel,
