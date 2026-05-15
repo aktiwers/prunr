@@ -1338,13 +1338,19 @@ impl PrunrApp {
             match tier {
                 RequiredTier::Skip
                 | RequiredTier::CompositeOnly
-                | RequiredTier::UpscaleTier2
                 | RequiredTier::UpscaleRerun => {
-                    // CompositeOnly (bg_color), UpscaleRerun, and UpscaleTier2
-                    // re-render at display/export time, not via the seg/edge
-                    // dispatcher; sync the stored composite so status reads
-                    // stay accurate. UpscaleTier2 live-preview dispatch is
-                    // wired separately in the upscale dispatch path.
+                    // CompositeOnly (bg_color) and UpscaleRerun re-render at
+                    // display/export time, not via the seg/edge dispatcher;
+                    // sync the stored composite so status reads stay accurate.
+                    if let Some(ref mut recipe) = item.applied_recipe {
+                        recipe.composite = current_recipe.composite.clone();
+                    }
+                    tiers.skip_count += 1;
+                }
+                RequiredTier::UpscaleTier2 => {
+                    // Tier-2 upscale (sharpen/ai_blend/saturation/color_match)
+                    // dispatches the cached-buffer postprocess via live preview
+                    // — no subprocess admission, no re-inference.
                     if let Some(ref mut recipe) = item.applied_recipe {
                         recipe.composite = current_recipe.composite.clone();
                     }
@@ -2120,6 +2126,53 @@ impl PrunrApp {
         let secondary_edge_tensor = matches!(item.settings.line_style, prunr_core::LineStyle::DualScale { .. })
             .then(|| Self::edge_tensor_for_scale(item, prunr_core::EdgeScale::Bold))
             .flatten();
+        // UpscaleTier2: short-circuit the seg/edge path entirely. We need only
+        // upscale_raw + bicubic_source + knob snapshot. Return None if there is
+        // no cached upscale output yet (Tier-1 must run first).
+        if matches!(kind, PreviewKind::UpscaleTier2) {
+            use super::live_preview::{UpscaleTier2Knobs};
+            let upscale_raw = item.upscale_raw.as_ref()?.clone();
+            // Build or reuse the bicubic baseline at upscale_raw's dimensions.
+            let bicubic_arc = if let Some(cached) = item.bicubic_source.as_ref().filter(|c| {
+                c.width() == upscale_raw.width() && c.height() == upscale_raw.height()
+            }) {
+                cached.clone()
+            } else {
+                let b = if let Some(src) = item.source_rgba.as_ref() {
+                    image::imageops::resize(
+                        src.as_ref(),
+                        upscale_raw.width(),
+                        upscale_raw.height(),
+                        image::imageops::FilterType::CatmullRom,
+                    )
+                } else {
+                    (*upscale_raw).clone()
+                };
+                let arc = Arc::new(b);
+                item.bicubic_source = Some(arc.clone());
+                arc
+            };
+            let knobs = UpscaleTier2Knobs {
+                sharpen: item.settings.sharpen,
+                ai_blend: item.settings.ai_blend,
+                saturation: item.settings.saturation,
+                color_match: item.settings.color_match,
+            };
+            return Some(DispatchInputs {
+                kind,
+                original,
+                settings: item.settings,
+                seg_tensor: None,
+                edge_tensor: None,
+                secondary_edge_tensor: None,
+                cached_edge_mask: None,
+                cached_masked_base: None,
+                correction: None,
+                upscale_raw: Some(upscale_raw),
+                bicubic_source: Some(bicubic_arc),
+                upscale_tier2_knobs: Some(knobs),
+            });
+        }
         match kind {
             // Mask kind without a seg tensor is the filter-only path:
             // `run_preview` applies fill_style to the raw source. No tensor
@@ -2143,6 +2196,9 @@ impl PrunrApp {
             seg_tensor, edge_tensor, secondary_edge_tensor,
             cached_edge_mask, cached_masked_base,
             correction: item.mask_correction.clone(),
+            upscale_raw: None,
+            bicubic_source: None,
+            upscale_tier2_knobs: None,
         })
     }
 
@@ -3350,6 +3406,36 @@ impl PrunrApp {
             }
         }
 
+        // Upscale Tier-2 live preview: sharpen / ai_blend / saturation / color_match
+        // tweaks don't produce a DispatchKind (they aren't in the knob catalog and
+        // resolve_auto_dispatch returns None for them). Detect them by checking
+        // the recipe diff directly: if the model is upscale, live preview is enabled,
+        // the item has a cached upscale_raw buffer, and the diff resolves to
+        // UpscaleTier2 — fire mark_tweak so the debounced postprocess kicks in.
+        if self.settings.live_preview && self.settings.model.is_upscale() {
+            let item = &self.batch.items[idx];
+            if item.upscale_raw.is_some() {
+                if let Some(ref old_recipe) = item.applied_recipe {
+                    let model = self.settings.model
+                        .to_model_kind()
+                        .unwrap_or(prunr_core::ModelKind::BiRefNetLite);
+                    let new_recipe = item.settings.current_recipe(model, self.settings.chain_mode);
+                    if matches!(
+                        prunr_core::resolve_tier(old_recipe, &new_recipe),
+                        prunr_core::RequiredTier::UpscaleTier2
+                    ) {
+                        self.processor.live_preview.mark_tweak(item_id, PreviewKind::UpscaleTier2);
+                        if toolbar_change.commit {
+                            self.processor.live_preview.flush(item_id);
+                            ctx.request_repaint();
+                        } else {
+                            ctx.request_repaint_after(crate::gui::live_preview::DEBOUNCE);
+                        }
+                    }
+                }
+            }
+        }
+
         if toolbar_change.render_repaint {
             // bg paints as a GPU rect behind the transparent result texture —
             // no CPU composite, no texture rebuild. Also fires on preset
@@ -3399,14 +3485,15 @@ impl PrunrApp {
                 Some(old) => {
                     let new = item.settings.current_recipe(model, self.settings.chain_mode);
                     match prunr_core::resolve_tier(old, &new) {
-                        // Upscale tiers are gated out of this live-preview path
-                        // — the upscale Tier-2 live preview is wired separately
-                        // in the upscale dispatch path; user re-clicks Process
-                        // for Tier-1 upscale changes.
+                        // UpscaleRerun (Tier-1): user must re-click Process.
                         RequiredTier::Skip
                         | RequiredTier::CompositeOnly
-                        | RequiredTier::UpscaleTier2
                         | RequiredTier::UpscaleRerun => knob_catalog::DispatchKind::None,
+                        // UpscaleTier2: route to live preview via the upscale
+                        // dispatch path. DispatchKind doesn't have an UpscaleTier2
+                        // variant — the caller handles it specially after this
+                        // function returns when the model is in upscale mode.
+                        RequiredTier::UpscaleTier2 => knob_catalog::DispatchKind::None,
                         RequiredTier::EdgeRerun => knob_catalog::DispatchKind::LivePreviewEdge,
                         RequiredTier::MaskRerun => knob_catalog::DispatchKind::LivePreviewMask,
                         RequiredTier::AddEdgeInference => {
@@ -3884,6 +3971,56 @@ mod auto_chain_on_tests {
     #[test]
     fn auto_chain_on_unchanged_when_view_did_not_emit() {
         assert!(resolve_auto_chain_on(false, true, true));
+    }
+}
+
+#[cfg(test)]
+mod upscale_tier2_routing_tests {
+    use prunr_core::{RequiredTier, resolve_tier};
+    use crate::gui::item_settings::ItemSettings;
+    use prunr_core::OutputScale;
+
+    fn recipe_for(settings: &ItemSettings) -> prunr_core::ProcessingRecipe {
+        settings.current_recipe(prunr_core::ModelKind::BiRefNetLite, false)
+    }
+
+    #[test]
+    fn app_tier_upscaletier2_routes_to_mark_tweak() {
+        // A diff where only sharpen changed must resolve to UpscaleTier2 so the
+        // apply_toolbar_change block fires mark_tweak(PreviewKind::UpscaleTier2).
+        let mut old_s = ItemSettings::default();
+        old_s.output_scale = OutputScale::X4;
+        old_s.sharpen = 0.0;
+
+        let mut new_s = old_s;
+        new_s.sharpen = 0.5;
+
+        let old_recipe = recipe_for(&old_s);
+        let new_recipe = recipe_for(&new_s);
+        assert_eq!(
+            resolve_tier(&old_recipe, &new_recipe),
+            RequiredTier::UpscaleTier2,
+            "sharpen-only diff must resolve to UpscaleTier2 so the live-preview gate opens",
+        );
+    }
+
+    #[test]
+    fn app_tier_upscale_rerun_still_gates_out_of_live_preview() {
+        // A diff where output_scale changed must resolve to UpscaleRerun (Tier-1),
+        // NOT UpscaleTier2 — so mark_tweak(UpscaleTier2) is NOT called.
+        let mut old_s = ItemSettings::default();
+        old_s.output_scale = OutputScale::X4;
+
+        let mut new_s = old_s;
+        new_s.output_scale = OutputScale::X2;
+
+        let old_recipe = recipe_for(&old_s);
+        let new_recipe = recipe_for(&new_s);
+        assert_eq!(
+            resolve_tier(&old_recipe, &new_recipe),
+            RequiredTier::UpscaleRerun,
+            "output_scale diff must remain UpscaleRerun — Tier-1 stays gated out of live preview",
+        );
     }
 }
 
