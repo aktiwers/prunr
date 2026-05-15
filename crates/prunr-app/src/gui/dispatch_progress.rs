@@ -429,4 +429,59 @@ mod tests {
         assert_eq!(ProgressKind::Upscale.inner_noun(), "tile");
         assert_eq!(ProgressKind::Seg.inner_noun(), "step");
     }
+
+    #[test]
+    fn outer_noun_is_some_only_for_nesting_kinds() {
+        // Pinning the variant set that has an outer dimension —
+        // adding a new ProgressKind variant forces an explicit
+        // decision here.
+        assert_eq!(ProgressKind::SdInpaint.outer_noun(), Some("tile"));
+        assert_eq!(ProgressKind::Eraser.outer_noun(), Some("tile"));
+        assert_eq!(ProgressKind::Seg.outer_noun(), None);
+        assert_eq!(ProgressKind::Upscale.outer_noun(), None);
+    }
+
+    #[test]
+    fn outer_from_atomics_translates_sentinel() {
+        // outer_total == 0 is the IPC sentinel for "no nesting"; the
+        // GUI layer converts it to None via this helper. Both call
+        // sites (SD pump + LaMa fallback) must agree on the sentinel
+        // meaning — that's what this test pins.
+        assert_eq!(outer_from_atomics(2, 3), Some((2, 3)));
+        assert_eq!(outer_from_atomics(0, 0), None);
+        // outer_current is ignored when outer_total is 0 — the sentinel
+        // is solely on outer_total.
+        assert_eq!(outer_from_atomics(99, 0), None);
+    }
+
+    #[test]
+    fn seg_builder_accepts_owned_string_for_dynamic_stage() {
+        // `BatchManager::progress()` returns `stage: String`. The
+        // builder must accept that without forcing the caller into a
+        // `.into()` dance.
+        let stage: String = "Processing 3 of 5".to_string();
+        let p = DispatchProgress::seg(3, 5, stage);
+        assert_eq!(p.inner, (3, 5));
+        assert_eq!(p.step_label.as_ref(), "Processing 3 of 5");
+    }
+
+    #[test]
+    fn upscale_builder_uses_borrowed_label() {
+        let p = DispatchProgress::upscale(12, 49, step_labels::TILE_INFERENCE);
+        assert_eq!(p.kind, ProgressKind::Upscale);
+        assert_eq!(p.outer, None);
+        assert_eq!(p.inner, (12, 49));
+        assert_eq!(p.step_label.as_ref(), "Tile inference");
+    }
+
+    #[test]
+    fn sd_inpaint_builder_lifts_outer_sentinel() {
+        // outer_total > 0 → outer is Some.
+        let p = DispatchProgress::sd_inpaint(2, 3, (5, 8));
+        assert_eq!(p.outer, Some((2, 3)));
+        // outer_total == 0 → outer is None (single-tile stroke).
+        let p_single = DispatchProgress::sd_inpaint(0, 0, (5, 8));
+        assert_eq!(p_single.outer, None);
+        assert_eq!(p_single.step_label.as_ref(), "Denoising");
+    }
 }

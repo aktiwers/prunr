@@ -631,6 +631,46 @@ mod tests {
     use prunr_core::LineMode;
 
     #[test]
+    fn progress_style_default_is_modal() {
+        assert_eq!(ProgressStyle::default(), ProgressStyle::Modal);
+    }
+
+    #[test]
+    fn progress_style_round_trips_both_variants() {
+        for style in [ProgressStyle::Banner, ProgressStyle::Modal] {
+            let json = serde_json::to_string(&style).unwrap();
+            let back: ProgressStyle = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, style, "round-trip of {style:?}");
+        }
+    }
+
+    #[test]
+    fn progress_style_uses_snake_case_on_wire() {
+        // Pinned because the user's settings.json carries this string;
+        // a `rename_all` regression would silently land users on the
+        // default and quietly lose their saved preference.
+        assert_eq!(serde_json::to_string(&ProgressStyle::Banner).unwrap(), "\"banner\"");
+        assert_eq!(serde_json::to_string(&ProgressStyle::Modal).unwrap(), "\"modal\"");
+    }
+
+    #[test]
+    fn settings_without_progress_style_falls_back_to_modal() {
+        // Forward-compat: a settings.json saved before Phase 31 has no
+        // `progress_style` key. `#[serde(default)]` + `Default::default()`
+        // resolve to Modal.
+        let json = r#"{
+            "model": "BiRefNetLite",
+            "auto_process_on_import": false,
+            "parallel_jobs": 4,
+            "history_depth": 10,
+            "chain_mode": true,
+            "default_preset": "Prunr"
+        }"#;
+        let settings: Settings = serde_json::from_str(json).unwrap();
+        assert_eq!(settings.progress_style, ProgressStyle::Modal);
+    }
+
+    #[test]
     fn v1_migration_parses_all_per_image_fields() {
         let v1_json = serde_json::json!({
             "model": "Silueta",
