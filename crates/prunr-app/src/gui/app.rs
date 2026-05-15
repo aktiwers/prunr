@@ -3188,6 +3188,16 @@ impl PrunrApp {
         }
         if toolbar_change.model_changed {
             self.settings.on_model_change_resolve_brush();
+            // Upscale has no brush surface — force-off so a leftover
+            // enabled state from seg/inpaint doesn't leak into a mode
+            // where the brush canvas overlay is hidden.
+            if self.settings.model.is_upscale() {
+                self.brush_state.disable();
+            }
+            // Cancel any in-flight upscale dispatch when the user
+            // changes model mid-run — the result would land on the
+            // wrong selection otherwise.
+            self.processor.cancel_upscale();
             self.settings.save();
             self.toasts.info(format!(
                 "{} loaded",

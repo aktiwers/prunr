@@ -457,6 +457,14 @@ impl BrushState {
         }
     }
 
+    /// Force the brush off. Used when the active model changes to a
+    /// mode that has no brush surface (upscale) so a stray enabled
+    /// state from a previous mode doesn't leak through.
+    pub fn disable(&mut self) {
+        self.enabled = false;
+        self.active = None;
+    }
+
     /// True while the user is mid-drag.
     pub fn has_active_stroke(&self) -> bool {
         self.active.is_some()
