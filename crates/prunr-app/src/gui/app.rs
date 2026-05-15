@@ -2580,8 +2580,26 @@ impl PrunrApp {
 
     fn refresh_batch_progress_status(&mut self) {
         let report = self.batch.progress();
-        self.status.stage = report.stage;
+        self.status.stage = report.stage.clone();
         self.status.pct = report.pct;
+
+        // Mirror the seg batch state into the unified slot. Active
+        // (counts.processing > 0) → publish `kind=Seg, inner=(done, total),
+        // step_label=stage` for the banner / modal. Idle → clear.
+        use crate::gui::dispatch_progress::{DispatchKind, DispatchProgress};
+        let counts = self.batch.status_counts();
+        let total = counts.batch_total();
+        let progress = if counts.processing > 0 {
+            Some(DispatchProgress {
+                kind: DispatchKind::Seg,
+                outer: None,
+                inner: (counts.done as u32, total as u32),
+                step_label: report.stage.into(),
+            })
+        } else {
+            None
+        };
+        self.processor.set_dispatch_progress(progress);
     }
 
     fn on_batch_complete(&mut self) {

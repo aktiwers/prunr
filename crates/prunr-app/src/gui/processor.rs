@@ -333,6 +333,17 @@ impl Processor {
         self.dispatch_progress.read()
     }
 
+    /// Publish progress for the seg path. Called by `refresh_batch_progress_status`
+    /// once per frame while a batch is in flight (and once with `None`
+    /// when it completes). Inpaint and upscale write to the same slot
+    /// directly from their dispatch threads.
+    pub(crate) fn set_dispatch_progress(
+        &self,
+        progress: Option<super::dispatch_progress::DispatchProgress>,
+    ) {
+        self.dispatch_progress.set(progress);
+    }
+
     /// `Some((done, total))` while an upscale dispatch is in flight;
     /// `None` when idle. Both counters are relaxed atomics — the toolbar
     /// and status bar only need eventual consistency for display purposes.
@@ -599,6 +610,20 @@ impl Processor {
                         p.set_outer_total(outer_total);
                         p.set_outer_step(outer_current);
                     }
+                    // Mirror into the unified slot so the banner / modal
+                    // sees the SD inpaint's two-level counter.
+                    use super::dispatch_progress::{DispatchKind, DispatchProgress};
+                    let outer = if outer_total > 0 {
+                        Some((outer_current, outer_total))
+                    } else {
+                        None
+                    };
+                    self.dispatch_progress.set(Some(DispatchProgress {
+                        kind: DispatchKind::SdInpaint,
+                        outer,
+                        inner: (current, total),
+                        step_label: std::borrow::Cow::Borrowed("Denoising"),
+                    }));
                 }
                 InpaintBridgeResult::Done { item_id, gen, rgba_path, width, height } => {
                     let result = match super::worker::read_and_delete(&rgba_path) {
@@ -630,6 +655,10 @@ impl Processor {
                         },
                     };
                     let _ = self.inpaint_tx.send(result);
+                    // Clear the unified slot — the dispatch is done from
+                    // the bridge's perspective. The GUI's drain will
+                    // surface the result on the next frame.
+                    self.dispatch_progress.set(None);
                 }
                 InpaintBridgeResult::Error { item_id, error } => {
                     // Translate bridge sentinels to user-facing text at
@@ -656,6 +685,7 @@ impl Processor {
                         cancelled,
                         error: user_error,
                     });
+                    self.dispatch_progress.set(None);
                 }
             }
         }
