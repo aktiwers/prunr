@@ -1389,8 +1389,8 @@ mod tests {
         let k4 = x4.upscale.expect("x4plus must have upscale knobs");
         assert_eq!(k2.input_name, "data");
         assert_eq!(k4.input_name, "data");
-        assert_eq!(k2.is_fp16, false);
-        assert_eq!(k4.is_fp16, false);
+        assert!(!k2.is_fp16);
+        assert!(!k4.is_fp16);
     }
 
     #[test]

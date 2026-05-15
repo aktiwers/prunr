@@ -459,6 +459,7 @@ mod tests {
     /// argument by verifying the function compiles with only (input, threads,
     /// callback, cancel) — a compile-error proof in the signature itself.
     #[test]
+    #[allow(clippy::type_complexity)] // the explicit fn-pointer type IS the test — it pins the signature
     fn two_pass_has_no_model_id_parameter() {
         // If this test compiles, the signature is correct: no model_id arg.
         let _fn: fn(
