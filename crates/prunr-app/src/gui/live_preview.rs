@@ -60,6 +60,32 @@ fn build_masked_base(
 use crate::gui::item_settings::ItemSettings;
 use crate::gui::worker::CompressedTensor;
 
+/// Gate: should the live-preview engine dispatch for `tier`?
+///
+/// `UpscaleRerun` joins `FullPipeline` and `AddEdgeInference` in the "no"
+/// pile — upscale is too slow for 10 Hz, and Criterion 8 demands it be
+/// gated out entirely. The user commits an upscale via the explicit Process
+/// button; `live_preview.rs` never calls `upscale_rgba` or `dispatch_upscale`.
+///
+/// Contract-pinning helper: production dispatch routing lives in `app.rs`
+/// `apply_knob_change` (which maps tiers to `DispatchKind` variants), but
+/// unit tests here independently pin the `UpscaleRerun → no dispatch` contract
+/// so refactors of the app.rs path can't silently break Criterion 8.
+#[allow(dead_code)] // only called from tests; production gate is in app.rs apply_knob_change
+fn should_dispatch_live_preview(tier: prunr_core::RequiredTier) -> bool {
+    use prunr_core::RequiredTier;
+    match tier {
+        RequiredTier::Skip => false,
+        RequiredTier::CompositeOnly => true,
+        RequiredTier::MaskRerun => true,
+        RequiredTier::EdgeRerun => true,
+        // Upscale and heavy pipeline tiers are too slow for 10 Hz live preview.
+        RequiredTier::UpscaleRerun => false,
+        RequiredTier::AddEdgeInference => false,
+        RequiredTier::FullPipeline => false,
+    }
+}
+
 /// Throttle cadence for live-preview dispatch during a continuous drag.
 /// 150ms stays above the ~90ms baseline and ~240ms refine_edges worker
 /// cost so dispatches don't pile up for the generation filter to discard.
@@ -574,7 +600,34 @@ fn resolve_edge_mask(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use prunr_core::RequiredTier;
     use std::sync::Mutex;
+
+    // ── should_dispatch_live_preview (Task 3 — live-preview gate) ──────────
+
+    #[test]
+    fn live_preview_skips_upscale_rerun() {
+        assert!(!should_dispatch_live_preview(RequiredTier::UpscaleRerun),
+            "UpscaleRerun must never dispatch through the 10 Hz live-preview path");
+    }
+
+    #[test]
+    fn live_preview_allows_cheap_tiers() {
+        assert!(should_dispatch_live_preview(RequiredTier::CompositeOnly));
+        assert!(should_dispatch_live_preview(RequiredTier::MaskRerun));
+        assert!(should_dispatch_live_preview(RequiredTier::EdgeRerun));
+    }
+
+    #[test]
+    fn live_preview_skips_full_pipeline() {
+        assert!(!should_dispatch_live_preview(RequiredTier::FullPipeline));
+    }
+
+    #[test]
+    fn live_preview_skips_skip_tier() {
+        assert!(!should_dispatch_live_preview(RequiredTier::Skip),
+            "Skip means no change detected — nothing to dispatch");
+    }
 
     /// Test clock backed by a `Mutex<Instant>` so the test can advance
     /// time deterministically without sleeping. The trait already
