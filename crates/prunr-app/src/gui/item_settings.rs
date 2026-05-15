@@ -96,11 +96,9 @@ pub struct ItemSettings {
     #[serde(default)]
     pub bg_image_fit: BgImageFit,
 
-    /// Upscale model to apply after masking. `None` = upscale disabled.
-    #[serde(default)]
-    pub upscale_model: Option<prunr_models::ModelId>,
-
     /// Output scale factor for the upscale pass. Default 4 (native model output).
+    /// The active upscale variant is driven by the global `Settings.model`,
+    /// not by a per-item field — see `current_recipe()` for derivation.
     #[serde(default = "default_upscale_scale")]
     pub upscale_scale: u32,
 }
@@ -131,7 +129,6 @@ impl Default for ItemSettings {
             correction_hash: None,
             bg_image_hash: None,
             bg_image_fit: BgImageFit::default(),
-            upscale_model: None,
             upscale_scale: 4,
         }
     }
@@ -222,7 +219,17 @@ impl ItemSettings {
                 bg_image_fit: self.bg_image_fit,
             },
             upscale: prunr_core::UpscaleRecipe {
-                model: self.upscale_model,
+                // Derive from the active `model`: an upscale-family
+                // ModelKind populates the recipe slot, anything else
+                // leaves it `None` (recipe diff against an idle item
+                // stays clean). Single source of truth — the per-item
+                // `upscale_model` field was removed because the global
+                // Settings.model already pins which variant is active.
+                model: match model {
+                    prunr_core::ModelKind::RealEsrganX4Plus
+                    | prunr_core::ModelKind::Nomos8kSchatL => Some(model.into()),
+                    _ => None,
+                },
                 scale: self.upscale_scale,
             },
             was_chain: chain_mode,
@@ -364,7 +371,6 @@ mod tests {
             correction_hash: Some(0xdeadbeef),
             bg_image_hash: Some(0xfeedface),
             bg_image_fit: prunr_core::BgImageFit::Tile,
-            upscale_model: Some(prunr_models::ModelId::RealEsrganX4Plus),
             upscale_scale: 2,
         };
         let json = serde_json::to_string(&s).unwrap();
@@ -373,28 +379,22 @@ mod tests {
     }
 
     #[test]
-    fn option_modelid_is_niche_optimized() {
-        assert_eq!(
-            std::mem::size_of::<Option<prunr_models::ModelId>>(),
-            std::mem::size_of::<prunr_models::ModelId>(),
-        );
-    }
-
-    #[test]
-    fn serde_json_roundtrip_with_upscale_fields() {
+    fn serde_json_roundtrip_with_upscale_scale() {
         let s = ItemSettings {
-            upscale_model: Some(prunr_models::ModelId::RealEsrganX4Plus),
             upscale_scale: 2,
             ..ItemSettings::default()
         };
         let json = serde_json::to_string(&s).unwrap();
         let recovered: ItemSettings = serde_json::from_str(&json).unwrap();
-        assert_eq!(recovered.upscale_model, Some(prunr_models::ModelId::RealEsrganX4Plus));
         assert_eq!(recovered.upscale_scale, 2);
     }
 
     #[test]
     fn serde_loads_old_preset_missing_upscale_fields() {
+        // Old preset JSON may also carry an `upscale_model` field from
+        // the pre-refactor schema — serde should ignore the unknown
+        // key and still load cleanly. The defaulted `upscale_scale`
+        // (4 = native) is the only invariant.
         let old_json = r#"{
             "gamma": 1.0,
             "threshold": null,
@@ -410,19 +410,18 @@ mod tests {
             "bg": null
         }"#;
         let loaded: ItemSettings = serde_json::from_str(old_json).unwrap();
-        assert_eq!(loaded.upscale_model, None);
         assert_eq!(loaded.upscale_scale, 4);
     }
 
     #[test]
-    fn current_recipe_populates_upscale_slot() {
-        let s = ItemSettings {
-            upscale_model: Some(prunr_models::ModelId::RealEsrganX4Plus),
-            upscale_scale: 2,
-            ..ItemSettings::default()
-        };
-        let recipe = s.current_recipe(prunr_core::ModelKind::Silueta, false);
-        assert_eq!(recipe.upscale.model, Some(prunr_models::ModelId::RealEsrganX4Plus));
-        assert_eq!(recipe.upscale.scale, 2);
+    fn current_recipe_derives_upscale_model_from_active_model_kind() {
+        let s = ItemSettings { upscale_scale: 2, ..ItemSettings::default() };
+        // Active upscale model → recipe slot populated.
+        let r = s.current_recipe(prunr_core::ModelKind::RealEsrganX4Plus, false);
+        assert_eq!(r.upscale.model, Some(prunr_models::ModelId::RealEsrganX4Plus));
+        assert_eq!(r.upscale.scale, 2);
+        // Active seg model → upscale slot empty.
+        let r = s.current_recipe(prunr_core::ModelKind::Silueta, false);
+        assert_eq!(r.upscale.model, None);
     }
 }
