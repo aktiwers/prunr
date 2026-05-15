@@ -676,6 +676,8 @@ mod tests {
                 item_id: 2,
                 current: 5,
                 total: 20,
+                outer_current: 0,
+                outer_total: 0,
             },
         );
 

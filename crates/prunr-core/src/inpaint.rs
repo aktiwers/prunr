@@ -24,10 +24,21 @@ use crate::types::CoreError;
 /// `Acquire` so a banner in the middle of a frame never sees a
 /// partial update. `total == 0` means "indeterminate" — the banner
 /// falls back to the spinner-only form.
+///
+/// `outer_current` / `outer_total` carry the per-tile (or per-component
+/// × per-tile, flattened) outer counter for dispatches that split a
+/// stroke into multiple sub-regions. SD inpaint at a large stroke runs
+/// the full denoise loop on each 512² patch; without the outer counter,
+/// the inner `current` resets to 0 at every tile boundary and the
+/// banner appears to start over. `outer_total == 0` means
+/// "no outer dimension" — the LaMa-class small inpaint path stays
+/// at 0/0 because it processes the full image at once.
 #[derive(Debug, Default)]
 pub struct InpaintProgress {
     pub current: AtomicU32,
     pub total: AtomicU32,
+    pub outer_current: AtomicU32,
+    pub outer_total: AtomicU32,
 }
 
 impl InpaintProgress {
@@ -40,9 +51,30 @@ impl InpaintProgress {
     pub fn set_step(&self, step: u32) {
         self.current.store(step, Ordering::Release);
     }
+    pub fn set_outer_total(&self, total: u32) {
+        self.outer_total.store(total, Ordering::Release);
+    }
+    pub fn set_outer_step(&self, step: u32) {
+        self.outer_current.store(step, Ordering::Release);
+    }
     /// Returns `(current, total)`. `(0, 0)` means no progress yet.
     pub fn read(&self) -> (u32, u32) {
         (self.current.load(Ordering::Acquire), self.total.load(Ordering::Acquire))
+    }
+    /// Returns `((outer_current, outer_total), (inner_current, inner_total))`.
+    /// `outer_total == 0` means the dispatch has no outer dimension
+    /// (LaMa-style single-pass); widgets render inner-only.
+    pub fn read_nested(&self) -> ((u32, u32), (u32, u32)) {
+        (
+            (
+                self.outer_current.load(Ordering::Acquire),
+                self.outer_total.load(Ordering::Acquire),
+            ),
+            (
+                self.current.load(Ordering::Acquire),
+                self.total.load(Ordering::Acquire),
+            ),
+        )
     }
 }
 

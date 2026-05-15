@@ -76,7 +76,16 @@ pub enum InpaintBridgeMsg {
 /// `SubprocessEvent` — the bridge filters out seg events the inpaint-
 /// only subprocess can't emit anyway.
 pub enum InpaintBridgeResult {
-    Progress { item_id: u64, current: u32, total: u32 },
+    Progress {
+        item_id: u64,
+        current: u32,
+        total: u32,
+        /// Outer (tile-of-stroke) counter. `outer_total == 0` means
+        /// single-tile / no nesting — `(current, total)` is the full
+        /// picture, same as the original 3-field shape.
+        outer_current: u32,
+        outer_total: u32,
+    },
     Done { item_id: u64, gen: u64, rgba_path: std::path::PathBuf, width: u32, height: u32 },
     Error { item_id: u64, error: String },
 }
@@ -235,8 +244,12 @@ fn run(msg_rx: mpsc::Receiver<InpaintBridgeMsg>, res_tx: mpsc::Sender<InpaintBri
         if let SubState::Ready(s) = &mut sub_state {
             for evt in s.poll_events() {
                 match evt {
-                    SubprocessEvent::InpaintProgress { item_id, current, total } => {
-                        let _ = res_tx.send(InpaintBridgeResult::Progress { item_id, current, total });
+                    SubprocessEvent::InpaintProgress {
+                        item_id, current, total, outer_current, outer_total,
+                    } => {
+                        let _ = res_tx.send(InpaintBridgeResult::Progress {
+                            item_id, current, total, outer_current, outer_total,
+                        });
                     }
                     SubprocessEvent::InpaintDone { item_id, rgba_path, width, height } => {
                         last_used = Instant::now();
