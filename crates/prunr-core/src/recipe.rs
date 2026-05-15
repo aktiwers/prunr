@@ -145,7 +145,6 @@ impl Default for OutputScale {
 ///
 /// All f32 knobs are stored as `u32::from_bits` for safe `PartialEq` + `Hash`
 /// (matches the `MaskRecipe::gamma_bits` pattern).
-// scale: u32 replaced by output_scale: OutputScale — enum variant selected by the dispatch layer
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct UpscaleRecipe {
     /// `None` = upscale disabled (no upscale model selected).
@@ -177,7 +176,7 @@ impl Default for UpscaleRecipe {
             pre_denoise_bits: 0_u32,          // 0.0_f32.to_bits() == 0
             brightness_lift_bits: 0_u32,
             sharpen_bits: 0_u32,
-            ai_blend_bits: 1.0_f32.to_bits(), // default = full AI; 0 = pure bicubic which regresses Phase 30 output
+            ai_blend_bits: 1.0_f32.to_bits(), // default = full AI; 0 = pure bicubic (disables AI output)
             saturation_bits: 0_u32,
             color_match: false,
         }
@@ -846,7 +845,6 @@ mod tests {
         assert_eq!(hash_of(&a), hash_of(&b));
     }
 
-    // --- Task 2: UpscaleTier2 routing tests ---
 
     fn make_upscale_recipe_with_model() -> ProcessingRecipe {
         let mut r = make_recipe(ModelKind::Silueta, 1.0, None);

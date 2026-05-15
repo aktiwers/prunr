@@ -96,8 +96,8 @@ pub struct ItemSettings {
     /// Drives the CompositeOnly recipe diff when the user picks a different
     /// background image. `None` when no image bg is set.
     ///
-    /// `NonZeroU64` niche saves 8 bytes vs `Option<u64>` (same layout trick
-    /// as `correction_hash`).
+    /// `NonZeroU64` niche saves 8 bytes vs `Option<u64>`. Hash=0 is treated
+    /// as None (content_hash never yields 0 in practice).
     #[serde(default)]
     pub bg_image_hash: Option<std::num::NonZeroU64>,
     /// How the background image is positioned/scaled inside the result frame.
@@ -458,7 +458,6 @@ mod tests {
         assert_eq!(r.upscale.model, None);
     }
 
-    // ----- Task 1 tests: output_scale replaces upscale_scale -----
 
     #[test]
     fn output_scale_replaces_upscale_scale_default() {
@@ -511,7 +510,6 @@ mod tests {
         assert_eq!(loaded.output_scale, prunr_core::OutputScale::X4);
     }
 
-    // ----- Task 2 tests: six new upscale knob fields -----
 
     #[test]
     fn new_knobs_default_to_no_op() {
