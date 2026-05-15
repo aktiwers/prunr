@@ -16,6 +16,7 @@ pub mod inpaint_sd;
 pub mod inpaint_blend;
 pub mod ep_compat;
 pub mod upscale;
+pub mod denoise;
 
 pub use engine::{InferenceEngine, OrtEngine};
 pub use recipe::{ProcessingRecipe, InferenceRecipe, EdgeRecipe, MaskRecipe, CompositeRecipe, UpscaleRecipe, OutputScale, RequiredTier, resolve_tier};
