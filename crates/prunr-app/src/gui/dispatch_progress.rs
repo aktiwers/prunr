@@ -60,11 +60,20 @@ impl DispatchKind {
         }
     }
 
-    /// Singular noun for the outer counter when set. Today this is only
-    /// SD/Eraser's tile-of-stroke (long brush strokes split into 512²
-    /// patches). Upscale has no outer; seg is single-image per dispatch.
+    /// Singular noun for the outer counter when set. Today this is
+    /// only SD/Eraser's tile-of-stroke. The match stays exhaustive
+    /// rather than constant — a new `DispatchKind` variant fails the
+    /// build until someone makes an explicit decision about whether
+    /// it has an outer dimension and what to call it.
     pub fn outer_noun(self) -> &'static str {
-        "tile"
+        match self {
+            DispatchKind::SdInpaint | DispatchKind::Eraser => "tile",
+            // Seg and Upscale never set `outer` today, so this label
+            // is unreachable in practice. Return the same noun for
+            // future-proofing if either grows a per-batch or
+            // per-tile-pass outer counter.
+            DispatchKind::Seg | DispatchKind::Upscale => "tile",
+        }
     }
 }
 
