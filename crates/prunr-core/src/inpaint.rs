@@ -57,10 +57,6 @@ impl InpaintProgress {
     pub fn set_outer_step(&self, step: u32) {
         self.outer_current.store(step, Ordering::Release);
     }
-    /// Returns `(current, total)`. `(0, 0)` means no progress yet.
-    pub fn read(&self) -> (u32, u32) {
-        (self.current.load(Ordering::Acquire), self.total.load(Ordering::Acquire))
-    }
     /// Returns `((outer_current, outer_total), (inner_current, inner_total))`.
     /// `outer_total == 0` means the dispatch has no outer dimension
     /// (LaMa-style single-pass); widgets render inner-only.
