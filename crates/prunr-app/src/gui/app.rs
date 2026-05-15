@@ -589,7 +589,7 @@ impl PrunrApp {
                 }
             }
         };
-        let scale: u32 = item.settings.output_scale.factor();
+        let output_scale = item.settings.output_scale;
         let intra_threads = prunr_core::batch::ort_intra_threads(self.settings.parallel_jobs);
         // Capture the recipe at dispatch time so the pump can stamp
         // `item.applied_recipe` against what actually ran (not what the
@@ -602,8 +602,8 @@ impl PrunrApp {
             }
         };
         let recipe = item.settings.current_recipe(model_kind, self.settings.chain_mode);
-        tracing::info!(item_id, ?model_id, scale, "upscale dispatched");
-        self.processor.dispatch_upscale(item_id, input, model_id, scale, intra_threads, recipe);
+        tracing::info!(item_id, ?model_id, ?output_scale, "upscale dispatched");
+        self.processor.dispatch_upscale(item_id, input, model_id, output_scale, intra_threads, recipe);
     }
 
     /// Toolbar mirror for `handle_process_intent`. `add_enabled(...)` reads
@@ -1037,9 +1037,23 @@ impl PrunrApp {
             let item_id = r.item_id;
             let result_recipe = r.recipe.clone();
             match r.result {
-                Ok(rgba) => {
-                    let new_rgba = Arc::new(rgba);
+                Ok(raw_rgba) => {
+                    // Cache the raw upscale output (pre-Tier-2-postprocess) so
+                    // Tier-2 tweaks can reprocess without re-inferring.
+                    let raw_arc = Arc::new(raw_rgba);
                     let Some(item) = self.batch.find_by_id_mut(item_id) else { continue };
+                    item.upscale_raw = Some(raw_arc.clone());
+                    // Invalidate the stale bicubic_source — the upscale output
+                    // dimensions changed (new Tier-1 run), so any prior bicubic
+                    // cache at the old dimensions is wrong.
+                    item.bicubic_source = None;
+                    // Apply Tier-2 postprocess to produce the displayed result.
+                    // The source for ai_blend / color_match is the original input
+                    // upscaled bicubically to match upscale_raw's dimensions.
+                    let bicubic = build_or_reuse_bicubic(item, &raw_arc);
+                    let mut displayed = (*raw_arc).clone();
+                    apply_tier2_postprocess(&mut displayed, item, &bicubic);
+                    let new_rgba = Arc::new(displayed);
                     // Archive the pre-upscale result so Cmd+Z swaps stored
                     // RGBAs instead of re-running the whole pipeline. Mirrors
                     // the inpaint pump's archive block.
@@ -3758,6 +3772,67 @@ fn collect_shortcut_intents(ctx: &egui::Context) -> ShortcutIntents {
 /// - `!is_in_flight`: no upscale dispatch is currently running.
 /// - `item_loaded`: at least one item is selected and its source RGBA is available.
 ///
+/// Apply all Tier-2 upscale postprocess knobs to `img` in the canonical order:
+/// ai_blend → sharpen → saturation → color_match.
+///
+/// Order rationale: ai_blend changes the underlying texture (blending AI output
+/// with bicubic baseline at low weights); sharpen amplifies whatever texture
+/// exists after the blend; saturation modifies perceived colour warmth; color_match
+/// snaps global statistics last so it operates on the fully-sharpened result.
+///
+/// `bicubic_source` is the original source image upscaled bicubically to match
+/// `img`'s dimensions. Used by `apply_ai_blend` (blending baseline) and
+/// `apply_color_match` (reference for Lab statistics).
+pub(crate) fn apply_tier2_postprocess(
+    img: &mut image::RgbaImage,
+    item: &super::item::BatchItem,
+    bicubic_source: &image::RgbaImage,
+) {
+    use prunr_core::upscale::{apply_sharpen, apply_ai_blend, apply_saturation, apply_color_match};
+    let s = &item.settings;
+    if s.ai_blend < 1.0 - f32::EPSILON {
+        apply_ai_blend(img, bicubic_source, s.ai_blend);
+    }
+    apply_sharpen(img, s.sharpen);
+    apply_saturation(img, s.saturation);
+    if s.color_match {
+        apply_color_match(img, bicubic_source);
+    }
+}
+
+/// Return the bicubic-resized source for the upscale postprocess pipeline.
+/// Builds the resize if `item.bicubic_source` is absent; stores it for reuse.
+///
+/// `upscale_raw` provides the target dimensions. The source is taken from
+/// `item.source_rgba` (original decoded image). When the source is unavailable,
+/// falls back to a copy of `upscale_raw` so the color_match stage sees an
+/// uninformative but safe reference (no NaN from zero-dimension division).
+pub(crate) fn build_or_reuse_bicubic(
+    item: &mut super::item::BatchItem,
+    upscale_raw: &Arc<image::RgbaImage>,
+) -> image::RgbaImage {
+    if let Some(cached) = item.bicubic_source.as_ref() {
+        // Cached at the same dimensions? Reuse.
+        if cached.width() == upscale_raw.width() && cached.height() == upscale_raw.height() {
+            return (**cached).clone();
+        }
+    }
+    // Build from the original source. Falls back to the upscale_raw itself
+    // (zero-information color_match) when source_rgba is unavailable.
+    let bicubic = if let Some(src) = item.source_rgba.as_ref() {
+        image::imageops::resize(
+            src.as_ref(),
+            upscale_raw.width(),
+            upscale_raw.height(),
+            image::imageops::FilterType::CatmullRom,
+        )
+    } else {
+        (**upscale_raw).clone()
+    };
+    item.bicubic_source = Some(Arc::new(bicubic.clone()));
+    bicubic
+}
+
 /// Install-state is NOT a parameter — the model dropdown filter already
 /// restricts selection to installed models, and re-checking every frame
 /// would `is_file()`-stat the disk at 60 Hz.
