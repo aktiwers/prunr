@@ -152,7 +152,14 @@ pub fn render(ui: &mut egui::Ui, app: &PrunrApp) {
                 );
             }
 
-            if let Some((w, h)) = app.batch.selected_item().map(|i| i.dimensions) {
+            // Dimensions of what's currently shown on canvas: the processed
+            // result if there is one (so an upscale's 4× output reads
+            // correctly), otherwise the source dimensions captured at decode.
+            if let Some(item) = app.batch.selected_item() {
+                let (w, h) = item.result_rgba
+                    .as_ref()
+                    .map(|r| r.dimensions())
+                    .unwrap_or(item.dimensions);
                 ui.add_space(theme::SPACE_SM);
                 ui.label(
                     RichText::new(format!("{w}×{h}"))

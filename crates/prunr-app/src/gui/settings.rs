@@ -25,7 +25,10 @@ pub struct Settings {
     pub parallel_jobs: usize,
     /// Maximum number of undo steps per image.
     pub history_depth: usize,
-    /// When true, Process uses the current result as input instead of the original.
+    /// When true, Process uses the current result as input instead of the
+    /// original. Defaults ON — the common workflow (seg → upscale, mask →
+    /// erase → upscale) stacks naturally; opting *out* is the rare case.
+    #[serde(default = "default_chain_mode")]
     pub chain_mode: bool,
     /// Canvas transparency checkerboard uses dark tones instead of light.
     #[serde(default)]
@@ -126,6 +129,7 @@ impl Settings {
 }
 
 fn default_live_preview() -> bool { true }
+fn default_chain_mode() -> bool { true }
 fn default_preset_name() -> String { PRUNR_PRESET.to_string() }
 
 impl Settings {
@@ -578,7 +582,7 @@ impl Default for Settings {
             auto_process_on_import: false,
             parallel_jobs: (num_cpus::get() / 2).max(1),
             history_depth: 10,
-            chain_mode: false,
+            chain_mode: default_chain_mode(),
             dark_checker: false,
             live_preview: true,
             auto_hide_adjustments: false,
