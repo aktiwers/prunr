@@ -63,14 +63,14 @@ use crate::gui::worker::CompressedTensor;
 /// Gate: should the live-preview engine dispatch for `tier`?
 ///
 /// `UpscaleRerun` joins `FullPipeline` and `AddEdgeInference` in the "no"
-/// pile — upscale is too slow for 10 Hz, and Criterion 8 demands it be
-/// gated out entirely. The user commits an upscale via the explicit Process
-/// button; `live_preview.rs` never calls `upscale_rgba` or `dispatch_upscale`.
+/// pile — multi-second jobs would queue up under the 10 Hz live-preview
+/// cadence. The user commits an upscale via the explicit Process button;
+/// `live_preview.rs` never calls `upscale_rgba` or `dispatch_upscale`.
 ///
-/// Contract-pinning helper: production dispatch routing lives in `app.rs`
-/// `apply_knob_change` (which maps tiers to `DispatchKind` variants), but
-/// unit tests here independently pin the `UpscaleRerun → no dispatch` contract
-/// so refactors of the app.rs path can't silently break Criterion 8.
+/// Contract-pinning helper: production routing lives in `app.rs`
+/// `apply_knob_change` (mapping tiers to `DispatchKind`). Tests here
+/// independently pin the variants so refactors of the production path
+/// can't silently change the contract.
 #[allow(dead_code)] // only called from tests; production gate is in app.rs apply_knob_change
 fn should_dispatch_live_preview(tier: prunr_core::RequiredTier) -> bool {
     use prunr_core::RequiredTier;
@@ -603,7 +603,7 @@ mod tests {
     use prunr_core::RequiredTier;
     use std::sync::Mutex;
 
-    // ── should_dispatch_live_preview (Task 3 — live-preview gate) ──────────
+    // ── should_dispatch_live_preview ───────────────────────────────────────
 
     #[test]
     fn live_preview_skips_upscale_rerun() {
@@ -621,6 +621,12 @@ mod tests {
     #[test]
     fn live_preview_skips_full_pipeline() {
         assert!(!should_dispatch_live_preview(RequiredTier::FullPipeline));
+    }
+
+    #[test]
+    fn live_preview_skips_add_edge_inference() {
+        assert!(!should_dispatch_live_preview(RequiredTier::AddEdgeInference),
+            "AddEdgeInference runs DexiNed inference — too heavy for the 10 Hz path");
     }
 
     #[test]
