@@ -321,14 +321,14 @@ Plans:
  10. Live preview (10 Hz Tier-2 dispatch) drives the real-time Tier-2 knob feel on the cached `upscale_raw` buffer — same debounced dispatch hook BiRefNet uses; Tier-1 knobs continue to gate out of live preview
  11. `prunr-core` unit tests cover each new pure function (denoise filters, postprocess ops, two-pass scheduler); `prunr-models` test asserts `X4TwoPass` recipe variant routes through `RealESRGAN_x2plus`
 
-**Plans:** 6/8 plans executed
+**Plans:** 7/8 plans executed
 
 Plans:
-- [ ] 32-01-PLAN.md — Data layer: UpscaleRecipe + OutputScale + RequiredTier::UpscaleTier2 + resolve_tier extension
-- [ ] 32-02-PLAN.md — ItemSettings byte-budget rework (six new fields, output_scale replaces upscale_scale, edge_thickness/guided_radius narrowed)
+- [x] 32-01-PLAN.md — Data layer: UpscaleRecipe + OutputScale + RequiredTier::UpscaleTier2 + resolve_tier extension
+- [x] 32-02-PLAN.md — ItemSettings byte-budget rework (six new fields, output_scale replaces upscale_scale, edge_thickness/guided_radius narrowed)
 - [ ] 32-03-PLAN.md — prunr-core/src/denoise/ module: histogram-window median + separable bilateral + apply_denoise
-- [ ] 32-04-PLAN.md — prunr-core/src/upscale/postprocess.rs: apply_sharpen + apply_ai_blend + apply_saturation + apply_color_match
-- [ ] 32-05-PLAN.md — RealEsrganX2Plus REGISTRY entry (PRECONDITIONS-gated) + upscale_two_pass scheduler
-- [ ] 32-06-PLAN.md — BatchItem.upscale_raw + bicubic_source caches + Processor dispatch branching + LivePreview UpscaleTier2 routing
-- [ ] 32-07-PLAN.md — Refinement chip row + render_output_scale_chip (4 variants + Nomos8k gating)
+- [x] 32-04-PLAN.md — prunr-core/src/upscale/postprocess.rs: apply_sharpen + apply_ai_blend + apply_saturation + apply_color_match
+- [x] 32-05-PLAN.md — RealEsrganX2Plus REGISTRY entry (PRECONDITIONS-gated) + upscale_two_pass scheduler
+- [x] 32-06-PLAN.md — BatchItem.upscale_raw + bicubic_source caches + Processor dispatch branching + LivePreview UpscaleTier2 routing
+- [x] 32-07-PLAN.md — Refinement chip row + render_output_scale_chip (4 variants + Nomos8k gating)
 - [ ] 32-08-PLAN.md — ARCHITECTURE.md row + manual smoke + human verification
