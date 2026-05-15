@@ -170,17 +170,17 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
             // not by "any inpaint in flight" — a banner Cancel during a
             // seg batch must cancel only the seg batch, not also any
             // unrelated in-flight inpaint on a different item.
-            use crate::gui::dispatch_progress::DispatchKind;
+            use crate::gui::dispatch_progress::ProgressKind;
             match progress.kind {
-                DispatchKind::Eraser | DispatchKind::SdInpaint => {
+                ProgressKind::Eraser | ProgressKind::SdInpaint => {
                     if let Some(item_id) = active_inpaint_item {
                         app.cancel_inpaint_for(item_id);
                     }
                 }
-                DispatchKind::Upscale => {
+                ProgressKind::Upscale => {
                     app.processor.cancel_upscale();
                 }
-                DispatchKind::Seg => {
+                ProgressKind::Seg => {
                     // Seg batch cancel — surgical, doesn't touch inpaint
                     // or upscale state. Same surface the Esc shortcut
                     // hits when the batch is the only thing in flight.
@@ -489,7 +489,7 @@ fn render_processing_canvas(ui: &mut egui::Ui, app: &PrunrApp) {
 /// inpaint state for the selected item (LaMa's rayon dispatch writes
 /// `InpaintProgress` directly and never publishes to the slot).
 fn read_dispatch_progress(app: &PrunrApp) -> Option<crate::gui::dispatch_progress::DispatchProgress> {
-    use crate::gui::dispatch_progress::{DispatchKind, DispatchProgress};
+    use crate::gui::dispatch_progress::{ProgressKind, DispatchProgress};
 
     if let Some(slot) = app.processor.dispatch_progress() {
         return Some(slot);
@@ -503,7 +503,7 @@ fn read_dispatch_progress(app: &PrunrApp) -> Option<crate::gui::dispatch_progres
     let ((oc, ot), (ic, it)) = app.processor.inpaint_progress_nested(item_id);
     let outer = if ot > 0 { Some((oc, ot)) } else { None };
     Some(DispatchProgress {
-        kind: DispatchKind::Eraser,
+        kind: ProgressKind::Eraser,
         outer,
         inner: (ic, it),
         step_label: std::borrow::Cow::Borrowed("Inpainting"),
