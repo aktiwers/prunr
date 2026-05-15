@@ -1276,6 +1276,33 @@ mod tests {
         }
     }
 
+    /// `upscale: Option<UpscaleModelKnobs>` carries the per-model
+    /// dispatch knobs the upscale path reads (input-tensor name, fp16
+    /// flag). It must be `Some` iff `category == Upscale` — a mismatch
+    /// either makes a Segmentation/Inpaint descriptor accidentally
+    /// expose upscale knobs, or leaves an Upscale entry without the
+    /// data the dispatcher needs. Either direction silently breaks
+    /// the data-only "add a third upscale model" contract.
+    #[test]
+    fn upscale_knobs_set_iff_category_is_upscale() {
+        for desc in REGISTRY {
+            match desc.category {
+                ModelCategory::Upscale => assert!(
+                    desc.upscale.is_some(),
+                    "{:?} is Upscale category but upscale=None — \
+                     dispatcher would read default knobs",
+                    desc.id
+                ),
+                _ => assert!(
+                    desc.upscale.is_none(),
+                    "{:?} is non-Upscale category but upscale=Some — \
+                     non-upscale models must not carry upscale knobs",
+                    desc.id
+                ),
+            }
+        }
+    }
+
     #[test]
     fn hat_family_has_tile_size_multiple() {
         let nomos = descriptor(ModelId::Nomos8kSchatL).expect("Nomos8kSchatL in REGISTRY");
