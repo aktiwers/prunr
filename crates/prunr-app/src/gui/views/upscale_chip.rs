@@ -29,13 +29,15 @@ pub fn output_scale_label(s: OutputScale) -> &'static str {
 ///
 /// `output_dims` is the projected output size at the current scale
 /// (caller computes `(source.0 * factor, source.1 * factor)` using
-/// `value.factor()`). `model_id` drives X4TwoPass availability —
-/// dimmed for non-x4plus models.
+/// `value.factor()`). `model_id` drives X4TwoPass architectural
+/// availability; `is_x2plus_installed` gates the install-state half —
+/// both must hold for the X4TwoPass row to be selectable.
 pub(crate) fn render_output_scale_chip(
     ui: &mut Ui,
     value: &mut OutputScale,
     output_dims: (u32, u32),
     model_id: ModelId,
+    is_x2plus_installed: bool,
 ) -> bool {
     let label = format!(
         "{} \u{00b7} {}\u{00d7}{}",
@@ -60,6 +62,7 @@ pub(crate) fn render_output_scale_chip(
         ui.label(RichText::new("Output Scale").strong().color(theme::TEXT_PRIMARY));
         ui.add_space(theme::SPACE_XS);
 
+        let arch_ok = x4twopass_available(model_id);
         for &option in &[
             OutputScale::X2,
             OutputScale::X3,
@@ -67,16 +70,21 @@ pub(crate) fn render_output_scale_chip(
             OutputScale::X4TwoPass,
         ] {
             let available = match option {
-                OutputScale::X4TwoPass => x4twopass_available(model_id),
+                OutputScale::X4TwoPass => arch_ok && is_x2plus_installed,
                 _ => true,
             };
             ui.add_enabled_ui(available, |ui| {
                 let label_owned;
-                let row_label: &str = if matches!(option, OutputScale::X4TwoPass) && !available {
-                    label_owned = format!("{} \u{2014} Real-ESRGAN only", output_scale_label(option));
-                    &label_owned
-                } else {
-                    output_scale_label(option)
+                let row_label: &str = match option {
+                    OutputScale::X4TwoPass if !arch_ok => {
+                        label_owned = format!("{} \u{2014} Real-ESRGAN only", output_scale_label(option));
+                        &label_owned
+                    }
+                    OutputScale::X4TwoPass if !is_x2plus_installed => {
+                        label_owned = format!("{} \u{2014} install x2plus from Model Store", output_scale_label(option));
+                        &label_owned
+                    }
+                    _ => output_scale_label(option),
                 };
                 if ui
                     .selectable_label(*value == option, row_label)

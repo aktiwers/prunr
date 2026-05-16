@@ -103,13 +103,6 @@ impl ModelId {
         }
     }
 
-    /// True when this model is dispatched by direct user selection.
-    /// Returns `false` for variants chained from a higher-level recipe
-    /// knob (e.g. `RealEsrganX2Plus` is dispatched via
-    /// `OutputScale::X4TwoPass`, never picked directly).
-    pub fn is_directly_selectable(self) -> bool {
-        !matches!(self, ModelId::RealEsrganX2Plus)
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1412,12 +1405,4 @@ mod tests {
             "pixel_unshuffle asserts even H/W — tile_size_multiple must be Some(2)");
     }
 
-    #[test]
-    fn x2plus_is_not_directly_selectable() {
-        assert!(!ModelId::RealEsrganX2Plus.is_directly_selectable(),
-            "x2plus is dispatched indirectly via OutputScale::X4TwoPass, never by the user");
-        assert!(ModelId::RealEsrganX4Plus.is_directly_selectable());
-        assert!(ModelId::Nomos8kSchatL.is_directly_selectable());
-        assert!(ModelId::Silueta.is_directly_selectable());
-    }
 }
