@@ -16,10 +16,20 @@ use std::sync::atomic::AtomicBool;
 use half::f16;
 use image::{RgbImage, RgbaImage};
 use ort::{inputs, value::Tensor};
+use ort::session::{NoSelectedOutputs, RunOptions};
+use ort::value::TensorElementType;
 
 use crate::CoreError;
 use crate::engine::{GraphOptimizationLevel, OrtEngine};
 use crate::types::ModelKind;
+
+/// Shared `RunOptions` handle used by callers that want to terminate a
+/// running upscale session mid-tile. The owning thread holds the `Arc`
+/// and passes it through the dispatch path; another thread (typically
+/// the GUI's Cancel handler) calls `terminate()` on the same `RunOptions`
+/// to abort the C++ `Session::run` within ~50ms instead of waiting for
+/// the next tile-boundary cancel-flag check.
+pub type UpscaleRunOptions = RunOptions<NoSelectedOutputs>;
 
 /// Select the ORT graph optimization level for a given model descriptor.
 ///
@@ -125,6 +135,7 @@ fn run_upscale_native<F>(
     native_scale: u32,
     on_tile_done: F,
     cancel: Option<Arc<AtomicBool>>,
+    terminate: Option<&Arc<UpscaleRunOptions>>,
 ) -> Result<RgbaImage, CoreError>
 where
     F: Fn(u32, u32),
@@ -141,7 +152,22 @@ where
     let overlap = knobs.tile_overlap();
 
     let input_name = knobs.input_name;
-    let is_fp16 = knobs.is_fp16;
+    // Probe the actual loaded session's input dtype. The REGISTRY's
+    // `knobs.is_fp16` flag describes the MAIN ONNX URL; when the engine
+    // promoted to an fp16 sibling via `optimized_variant_bytes`, the
+    // graph expects fp16 inputs even though the REGISTRY knob still
+    // reads false. Without this probe the dispatch would feed fp32
+    // tensors into an fp16 graph and ORT errors with "Unexpected input
+    // data type" (observed 2026-05-16 against Siax-CX / Superscale fp16
+    // variants on OpenVINO).
+    let is_fp16 = engine.with_session(|session| {
+        let dtype = session
+            .inputs()
+            .first()
+            .map(|outlet| outlet.dtype())
+            .and_then(|vt| vt.tensor_type());
+        Ok(matches!(dtype, Some(TensorElementType::Float16)))
+    })?;
     let ns = native_scale;
 
     let run_tile = |rgb_tile: &RgbImage, padded_w: u32, padded_h: u32| -> Result<RgbImage, CoreError> {
@@ -156,7 +182,11 @@ where
 
         // The two branches keep the f16/f32 buffers + tensor scoped to
         // the relevant arm so the unused dtype's buffer doesn't sit
-        // allocated during inference.
+        // allocated during inference. When `terminate` is Some, the
+        // session.run is wired through RunOptions — another thread can
+        // call `terminate.terminate()` to abort the running tile within
+        // ~50ms, far shorter than waiting for the between-tiles cancel
+        // check at multi-second tile granularity.
         if is_fp16 {
             let mut input_data = vec![f16::ZERO; 3 * pixel_count];
             for (i, p) in rgb_tile.pixels().enumerate() {
@@ -170,9 +200,11 @@ where
             let tensor = Tensor::from_array(arr)
                 .map_err(|e| CoreError::Inference(format!("upscale: input tensor: {e}")))?;
             engine.with_session(|session| {
-                let outputs = session
-                    .run(inputs![input_name => &tensor])
-                    .map_err(|e| CoreError::Inference(format!("upscale: inference failed: {e}")))?;
+                let outputs = match terminate {
+                    Some(opts) => session.run_with_options(inputs![input_name => &tensor], opts.as_ref()),
+                    None => session.run(inputs![input_name => &tensor]),
+                }
+                .map_err(|e| classify_run_error(e))?;
                 pack_output(&outputs[0], plane, &mut packed, is_fp16)
             })?;
         } else {
@@ -188,9 +220,11 @@ where
             let tensor = Tensor::from_array(arr)
                 .map_err(|e| CoreError::Inference(format!("upscale: input tensor: {e}")))?;
             engine.with_session(|session| {
-                let outputs = session
-                    .run(inputs![input_name => &tensor])
-                    .map_err(|e| CoreError::Inference(format!("upscale: inference failed: {e}")))?;
+                let outputs = match terminate {
+                    Some(opts) => session.run_with_options(inputs![input_name => &tensor], opts.as_ref()),
+                    None => session.run(inputs![input_name => &tensor]),
+                }
+                .map_err(|e| classify_run_error(e))?;
                 pack_output(&outputs[0], plane, &mut packed, is_fp16)
             })?;
         }
@@ -202,6 +236,20 @@ where
 
     let cfg = TilingConfig { tile_size, tile_multiple, overlap };
     upscale_tiled(input, ns, cfg, run_tile, on_tile_done, cancel)
+}
+
+/// Map an ORT run-time error to a `CoreError`. ORT reports a session
+/// aborted via `RunOptions::terminate()` as a generic error containing
+/// "terminate flag" in its message; surface that as `Cancelled` so the
+/// dispatcher's existing cancellation handling (toast, no error log)
+/// fires instead of treating it as a real inference failure.
+fn classify_run_error(err: ort::Error) -> CoreError {
+    let msg = err.to_string();
+    if msg.contains("terminate flag") || msg.contains("Exiting due to terminate") {
+        CoreError::Cancelled
+    } else {
+        CoreError::Inference(format!("upscale: inference failed: {msg}"))
+    }
 }
 
 /// Engine-parameterized upscale. Caller constructs and owns the
@@ -223,6 +271,7 @@ pub fn upscale_rgba_with_engine<F>(
     scale: u32,
     on_tile_done: F,
     cancel: Option<Arc<AtomicBool>>,
+    terminate: Option<&Arc<UpscaleRunOptions>>,
 ) -> Result<RgbaImage, CoreError>
 where
     F: Fn(u32, u32),
@@ -233,7 +282,7 @@ where
         .ok_or_else(|| CoreError::Model(format!("{model_id:?} not found in REGISTRY")))?;
 
     let knobs = upscale_knobs(descriptor)?;
-    let native_result = run_upscale_native(input, engine, descriptor, knobs.native_scale, on_tile_done, cancel)?;
+    let native_result = run_upscale_native(input, engine, descriptor, knobs.native_scale, on_tile_done, cancel, terminate)?;
 
     if scale == 4 {
         Ok(native_result)
@@ -297,7 +346,7 @@ where
         ))
     })?;
     let engine = OrtEngine::new_with_optimization_level(model_kind, intra_threads, level)?;
-    upscale_rgba_with_engine(input, &engine, model_id, scale, on_tile_done, cancel)
+    upscale_rgba_with_engine(input, &engine, model_id, scale, on_tile_done, cancel, None)
 }
 
 /// Engine-parameterized two-pass 4× upscale via `RealEsrganX2Plus`
@@ -316,6 +365,7 @@ pub fn upscale_two_pass_with_engine<F>(
     engine: &OrtEngine,
     on_tile_done: F,
     cancel: Option<Arc<AtomicBool>>,
+    terminate: Option<&Arc<UpscaleRunOptions>>,
 ) -> Result<RgbaImage, CoreError>
 where
     F: Fn(u32, u32) + Clone,
@@ -344,6 +394,7 @@ where
         knobs.native_scale,
         on_tile_done.clone(),
         cancel.clone(),
+        terminate,
     )?;
 
     // Honor cancel between passes.
@@ -361,6 +412,7 @@ where
         knobs.native_scale,
         on_tile_done,
         cancel,
+        terminate,
     )?;
     drop(intermediate);
 
@@ -433,7 +485,7 @@ where
         intra_threads,
         level,
     )?;
-    upscale_two_pass_with_engine(input, &engine, on_tile_done, cancel)
+    upscale_two_pass_with_engine(input, &engine, on_tile_done, cancel, None)
 }
 
 /// Returns `true` when `model_id` supports `OutputScale::X4TwoPass`

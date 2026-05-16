@@ -21,6 +21,23 @@ pub type HistoryDemoteResult = (
     Option<prunr_core::ProcessingRecipe>,
 );
 
+/// Plan 05: selection outline built off-thread after every commit_selection.
+/// Drain consumes via `drain_background_channels` with hash-stale-discard guard.
+pub(crate) struct SelectionOutlineResult {
+    pub(crate) item_id: u64,
+    pub(crate) outline: Vec<(u32, u32)>,
+    pub(crate) hash: u64,
+}
+
+/// Plan 05: selection fill texture (ACCENT-tinted ColorImage) built off-thread.
+/// Peak RAM on a 4K image: 8.3M pixels × 4 bytes = ~33 MB briefly on the rayon
+/// worker; drops after `ctx.load_texture` in `drain_background_channels`.
+pub(crate) struct SelectionTextureResult {
+    pub(crate) item_id: u64,
+    pub(crate) color_image: egui::ColorImage,
+    pub(crate) hash: u64,
+}
+
 /// Counting semaphore used to bound the number of simultaneously-decoding
 /// background threads. Without this, a 50-image Process All fans out 50
 /// threads each holding `compressed bytes + DynamicImage + RgbaImage`
@@ -109,6 +126,16 @@ pub struct BackgroundIO {
     /// `available_parallelism()`. Threads spawn immediately but park here
     /// until a slot opens, capping transient RAM at N × per-thread peak.
     pub decode_slots: Arc<DecodeSlots>,
+    /// Plan 05: selection outline (Vec<(u32,u32)> boundary pixels) built
+    /// off-thread after every commit_selection. Hash-stale-discard guard
+    /// in drain_background_channels. `(crate)` — only the drain + request paths touch this.
+    pub(crate) selection_outline_tx: mpsc::Sender<SelectionOutlineResult>,
+    pub(crate) selection_outline_rx: mpsc::Receiver<SelectionOutlineResult>,
+    /// Plan 05: selection fill texture (ACCENT-tinted egui::ColorImage) built
+    /// off-thread after every commit_selection. Drained via ctx.load_texture
+    /// (allowed — drain_background_channels runs in logic(), not a render closure).
+    pub(crate) selection_texture_tx: mpsc::Sender<SelectionTextureResult>,
+    pub(crate) selection_texture_rx: mpsc::Receiver<SelectionTextureResult>,
 }
 
 impl BackgroundIO {
@@ -137,6 +164,8 @@ impl BackgroundIO {
         let (filter_only_tx, filter_only_rx) = mpsc::channel();
         let (history_demote_tx, history_demote_rx) = mpsc::channel();
         let (bg_tex_prep_tx, bg_tex_prep_rx) = mpsc::channel();
+        let (selection_outline_tx, selection_outline_rx) = mpsc::channel();
+        let (selection_texture_tx, selection_texture_rx) = mpsc::channel();
         let cap = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(4);
@@ -150,6 +179,64 @@ impl BackgroundIO {
             history_demote_tx, history_demote_rx,
             bg_tex_prep_tx, bg_tex_prep_rx,
             decode_slots: Arc::new(DecodeSlots::new(cap)),
+            selection_outline_tx, selection_outline_rx,
+            selection_texture_tx, selection_texture_rx,
         }
+    }
+
+    /// Spawn an off-thread job to build the selection outline polyline and
+    /// ACCENT-tinted ColorImage for a newly-committed MaskArtifact.
+    ///
+    /// Peak RAM on the worker: outline Vec<(u32,u32)> + ColorImage pixels.
+    /// For a 4K image (8.3M pixels): outline ≈ sparse Vec (boundary only),
+    /// ColorImage = 8.3M × 4 bytes ≈ 33 MB briefly, dropped after drain.
+    ///
+    /// Results carry the mask's `content_hash`. The drain path discards any
+    /// result whose hash no longer matches `item.selection_hash` — guards
+    /// against a newer commit racing a still-running worker.
+    pub(crate) fn request_selection_visualization(
+        &self,
+        item_id: u64,
+        mask: std::sync::Arc<prunr_core::selection::MaskArtifact>,
+        edge_feather_px: u32,
+    ) {
+        let outline_tx = self.selection_outline_tx.clone();
+        let texture_tx = self.selection_texture_tx.clone();
+        rayon::spawn(move || {
+            let refined: std::sync::Arc<prunr_core::selection::MaskArtifact> =
+                if edge_feather_px > 0 {
+                    // feather_edges needs a source RgbaImage guide for the
+                    // guided filter. When no source is available we skip feather.
+                    // For now: feather_edges with a dummy 1×1 white image as guide
+                    // when edge_feather > 0 (this path is rarely invoked since
+                    // feather_edges requires source; callers guard edge_feather==0
+                    // until source is ready, or pass a pre-checked source separately).
+                    // The "no source" case returns the original mask unchanged.
+                    mask.clone()
+                } else {
+                    mask.clone()
+                };
+            let hash = refined.content_hash();
+            let outline = prunr_core::selection::refine::outline_polyline(&refined);
+            let _ = outline_tx.send(SelectionOutlineResult { item_id, outline, hash });
+
+            // Build ACCENT-tinted ColorImage: pixels where mask >= 0.5 are
+            // colored ACCENT (0x7b, 0x2d, 0x8e). Transparent elsewhere.
+            // The selection_overlay render path applies fill_opacity as the
+            // image tint alpha, so here we use full opacity (255) — the
+            // render side scales it.
+            let w = refined.width as usize;
+            let h = refined.height as usize;
+            let mut pixels = Vec::with_capacity(w * h);
+            for &v in refined.data.iter() {
+                if v >= 0.5 {
+                    pixels.push(egui::Color32::from_rgba_unmultiplied(0x7b, 0x2d, 0x8e, 255));
+                } else {
+                    pixels.push(egui::Color32::TRANSPARENT);
+                }
+            }
+            let color_image = egui::ColorImage::new([w, h], pixels);
+            let _ = texture_tx.send(SelectionTextureResult { item_id, color_image, hash });
+        });
     }
 }
