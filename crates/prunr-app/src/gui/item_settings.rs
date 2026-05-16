@@ -121,7 +121,7 @@ pub struct ItemSettings {
     pub brightness_lift: f32,
     /// Unsharp-mask strength applied after inference, range [-1.0, 1.0].
     /// Negative = blur, 0.0 = no-op, positive = sharpen.
-    #[serde(default)]
+    #[serde(default = "default_sharpen")]
     pub sharpen: f32,
     /// Lerp weight: 1.0 = full AI upscale (default), 0.0 = pure bicubic.
     /// Default is 1.0 so a preset that omits this field reads as full AI —
@@ -136,6 +136,7 @@ pub struct ItemSettings {
     pub color_match: bool,
 }
 
+fn default_sharpen() -> f32 { 0.2 }
 fn default_ai_blend() -> f32 { 1.0 }
 
 impl Default for ItemSettings {
@@ -165,7 +166,7 @@ impl Default for ItemSettings {
             output_scale: prunr_core::OutputScale::X4,
             pre_denoise: 0.0,
             brightness_lift: 0.0,
-            sharpen: 0.0,
+            sharpen: 0.2,
             ai_blend: 1.0,
             saturation: 0.0,
             color_match: false,
@@ -516,10 +517,21 @@ mod tests {
         let s = ItemSettings::default();
         assert_eq!(s.pre_denoise, 0.0);
         assert_eq!(s.brightness_lift, 0.0);
-        assert_eq!(s.sharpen, 0.0);
+        assert_eq!(s.sharpen, 0.2); // mild default; see UpscaleRecipe::default
         assert_eq!(s.ai_blend, 1.0);
         assert_eq!(s.saturation, 0.0);
         assert!(!s.color_match);
+    }
+
+    #[test]
+    fn item_settings_default_sharpen_is_0_2() {
+        assert_eq!(ItemSettings::default().sharpen, 0.2);
+    }
+
+    #[test]
+    fn default_current_recipe_carries_sharpen_0_2() {
+        let r = ItemSettings::default().current_recipe(prunr_core::ModelKind::RealEsrganX4Plus, false);
+        assert_eq!(r.upscale.sharpen(), 0.2);
     }
 
     #[test]
@@ -564,7 +576,8 @@ mod tests {
     #[test]
     fn serde_loads_old_preset_missing_phase32_fields() {
         // Phase-30 preset JSON missing all Phase-32 fields must load with
-        // no-op defaults: pre_denoise=0, ai_blend=1 (the critical one).
+        // sensible defaults: pre_denoise=0, sharpen=0.2 (from default_sharpen()),
+        // ai_blend=1 (the critical one — zero here would disable AI output).
         let old_json = r#"{
             "gamma": 1.0,
             "threshold": null,
@@ -582,7 +595,7 @@ mod tests {
         let loaded: ItemSettings = serde_json::from_str(old_json).unwrap();
         assert_eq!(loaded.pre_denoise, 0.0);
         assert_eq!(loaded.brightness_lift, 0.0);
-        assert_eq!(loaded.sharpen, 0.0);
+        assert_eq!(loaded.sharpen, 0.2); // #[serde(default = "default_sharpen")] → 0.2
         assert_eq!(loaded.ai_blend, 1.0);
         assert_eq!(loaded.saturation, 0.0);
         assert!(!loaded.color_match);
