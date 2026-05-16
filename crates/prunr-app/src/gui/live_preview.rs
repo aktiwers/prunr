@@ -95,6 +95,10 @@ pub struct UpscaleTier2Knobs {
 pub struct PreviewResult {
     pub item_id: u64,
     pub rgba: RgbaImage,
+    /// The preview kind that produced this result. Used by
+    /// `apply_completed_previews` to route kind-specific side-effects
+    /// (e.g. advancing `applied_recipe.upscale` for UpscaleTier2 results).
+    pub kind: PreviewKind,
     /// Generation counter — used to discard results from stale dispatches
     /// that completed after a newer tweak cancelled them.
     pub generation: u64,
@@ -113,6 +117,12 @@ pub struct PreviewResult {
     /// tripwire doesn't immediately re-fire on a result it already
     /// applied.
     pub applied_mask: prunr_core::MaskRecipe,
+    /// Tier-2 knob values captured at dispatch time. `apply_completed_previews`
+    /// patches `applied_recipe.upscale`'s four Tier-2 fields to match so
+    /// resolve_tier sees Skip (not UpscaleTier2) on the next frame and
+    /// mark_tweak stops firing between settled drags.
+    /// `None` for non-UpscaleTier2 kinds.
+    pub applied_tier2_knobs: Option<UpscaleTier2Knobs>,
     /// `true` when no further tweaks are pending for this item at drain
     /// time — the drag has settled and this is the last result of the
     /// session. Callers gate heavy side-effects (sidebar thumb rebuild)
@@ -180,10 +190,20 @@ impl LivePreview {
     /// `tick`'s removal-on-dispatch starts the next window.
     pub fn mark_tweak(&mut self, item_id: u64, kind: PreviewKind) {
         let now = self.clock.now();
+        let is_new = !self.pending.contains_key(&item_id);
         self.pending
             .entry(item_id)
             .and_modify(|p| p.kind = kind)
             .or_insert_with(|| Pending { last_tweak_at: now, kind });
+        tracing::debug!(
+            event = "upscale_tier2_mark_tweak",
+            item_id,
+            ?kind,
+            is_new_entry = is_new,
+            pending_count = self.pending.len(),
+            in_flight_count = self.in_flight.len(),
+            "mark_tweak registered"
+        );
     }
 
     /// Flush: expire the pending tweak timer so the next `tick` dispatches
@@ -236,7 +256,20 @@ impl LivePreview {
                 Some(p) => p.kind,
                 None => continue,
             };
+            tracing::debug!(
+                event = "upscale_tier2_tick_ready",
+                item_id = id,
+                ?kind,
+                in_flight_count = self.in_flight.len(),
+                "tick: item ready for dispatch"
+            );
             let Some(inputs) = snapshot(id, kind) else {
+                tracing::debug!(
+                    event = "upscale_tier2_tick_no_snapshot",
+                    item_id = id,
+                    ?kind,
+                    "tick: snapshot returned None — dispatch skipped, will retry"
+                );
                 // Snapshot couldn't assemble inputs this frame. Possibilities:
                 // (a) `source_rgba` is None (decode pending after view
                 //     switch) — retry once the decode lands.
@@ -257,8 +290,16 @@ impl LivePreview {
                 let ls_bits = inputs.settings.line_strength.to_bits();
                 let scale = inputs.settings.edge_scale;
                 let is_edge = matches!(inputs.kind, PreviewKind::Edge);
+                let dispatch_kind = inputs.kind;
                 let mask_recipe = prunr_core::MaskRecipe::from(&inputs.settings.mask_settings());
                 let seg_model = inputs.seg_tensor.as_ref().map(|s| s.model);
+                // Capture Tier-2 knob values at dispatch time. When the result
+                // lands, apply_completed_previews patches only the 4 Tier-2
+                // fields (sharpen/ai_blend/saturation/color_match) on
+                // applied_recipe.upscale so the next resolve_tier diff sees Skip
+                // instead of UpscaleTier2, stopping the per-frame mark_tweak loop
+                // after the user stops dragging.
+                let applied_tier2_knobs = inputs.upscale_tier2_knobs;
                 let output = run_preview(inputs, &cancel);
                 if cancel.load(Ordering::Acquire) {
                     return;
@@ -276,8 +317,10 @@ impl LivePreview {
                     // thread can read `self.pending` atomically. The worker
                     // ships a placeholder and doesn't care.
                     let _ = tx.send(PreviewResult {
-                        item_id: id, rgba, generation, new_edge_mask, new_masked_base,
+                        item_id: id, rgba, kind: dispatch_kind, generation,
+                        new_edge_mask, new_masked_base,
                         applied_mask: mask_recipe,
+                        applied_tier2_knobs,
                         is_final: false,
                     });
                 }
@@ -420,9 +463,30 @@ fn run_preview(inputs: DispatchInputs, cancel: &AtomicBool) -> RunOutput {
     // UpscaleTier2: no seg/edge tensors involved — run postprocess directly
     // on the cached upscale_raw buffer.
     if matches!(inputs.kind, PreviewKind::UpscaleTier2) {
-        let Some(ref raw) = inputs.upscale_raw else { return RunOutput::empty(); };
-        let Some(ref bicubic) = inputs.bicubic_source else { return RunOutput::empty(); };
-        let Some(knobs) = inputs.upscale_tier2_knobs else { return RunOutput::empty(); };
+        let Some(ref raw) = inputs.upscale_raw else {
+            tracing::debug!(event = "upscale_tier2_run_abort", reason = "upscale_raw is None");
+            return RunOutput::empty();
+        };
+        let Some(ref bicubic) = inputs.bicubic_source else {
+            tracing::debug!(event = "upscale_tier2_run_abort", reason = "bicubic_source is None");
+            return RunOutput::empty();
+        };
+        let Some(knobs) = inputs.upscale_tier2_knobs else {
+            tracing::debug!(event = "upscale_tier2_run_abort", reason = "upscale_tier2_knobs is None");
+            return RunOutput::empty();
+        };
+        let (w, h) = (raw.width(), raw.height());
+        tracing::debug!(
+            event = "upscale_tier2_run_start",
+            width = w,
+            height = h,
+            sharpen = knobs.sharpen,
+            ai_blend = knobs.ai_blend,
+            saturation = knobs.saturation,
+            color_match = knobs.color_match,
+            "run_preview: starting Tier-2 postprocess"
+        );
+        let t0 = std::time::Instant::now();
         let mut out = (**raw).clone();
         super::app::apply_tier2_postprocess(
             &mut out,
@@ -431,6 +495,14 @@ fn run_preview(inputs: DispatchInputs, cancel: &AtomicBool) -> RunOutput {
             knobs.saturation,
             knobs.color_match,
             bicubic,
+        );
+        let elapsed_ms = t0.elapsed().as_millis();
+        tracing::debug!(
+            event = "upscale_tier2_run_done",
+            width = out.width(),
+            height = out.height(),
+            elapsed_ms,
+            "run_preview: Tier-2 postprocess complete"
         );
         return RunOutput {
             rgba: Some(out),
@@ -802,10 +874,12 @@ mod tests {
         lp.result_tx.send(PreviewResult {
             item_id: 42,
             rgba: RgbaImage::new(1, 1),
+            kind: PreviewKind::Mask,
             generation: 1,
             new_edge_mask: None,
             new_masked_base: None,
             applied_mask: prunr_core::MaskRecipe::from(&prunr_core::MaskSettings::default()),
+            applied_tier2_knobs: None,
             is_final: false,
         }).unwrap();
 
@@ -827,10 +901,12 @@ mod tests {
         lp.result_tx.send(PreviewResult {
             item_id: 99,
             rgba: RgbaImage::new(2, 2),
+            kind: PreviewKind::Mask,
             generation: 7,
             new_edge_mask: None,
             new_masked_base: None,
             applied_mask: prunr_core::MaskRecipe::from(&prunr_core::MaskSettings::default()),
+            applied_tier2_knobs: None,
             is_final: false,
         }).unwrap();
 
@@ -851,10 +927,12 @@ mod tests {
         lp.result_tx.send(PreviewResult {
             item_id: 777,
             rgba: RgbaImage::new(1, 1),
+            kind: PreviewKind::Mask,
             generation: 1,
             new_edge_mask: None,
             new_masked_base: None,
             applied_mask: prunr_core::MaskRecipe::from(&prunr_core::MaskSettings::default()),
+            applied_tier2_knobs: None,
             is_final: false,
         }).unwrap();
         let drained = lp.drain_results();
@@ -872,10 +950,12 @@ mod tests {
         lp.result_tx.send(PreviewResult {
             item_id: 11,
             rgba: RgbaImage::new(1, 1),
+            kind: PreviewKind::Mask,
             generation: 3,
             new_edge_mask: None,
             new_masked_base: None,
             applied_mask: prunr_core::MaskRecipe::from(&prunr_core::MaskSettings::default()),
+            applied_tier2_knobs: None,
             is_final: false,
         }).unwrap();
 
@@ -900,10 +980,12 @@ mod tests {
         lp.result_tx.send(PreviewResult {
             item_id: 22,
             rgba: RgbaImage::new(1, 1),
+            kind: PreviewKind::Mask,
             generation: 2,
             new_edge_mask: None,
             new_masked_base: None,
             applied_mask: prunr_core::MaskRecipe::from(&prunr_core::MaskSettings::default()),
+            applied_tier2_knobs: None,
             is_final: false,
         }).unwrap();
 
