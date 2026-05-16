@@ -336,6 +336,13 @@ pub(crate) struct Processor {
     /// path's `refresh_batch_progress_status`; `None` when no dispatch
     /// is in flight.
     dispatch_progress: super::dispatch_progress::DispatchProgressSlot,
+    /// Warm-cached upscale engine: kept alive across consecutive upscale
+    /// dispatches so the second click skips the 1-3s graph-optimization
+    /// stall (Level3 for ESRGAN, Level2 for HAT). Single-slot — caching
+    /// multiple upscale engines simultaneously is YAGNI. Evicted on
+    /// model swap (any switch away from the cached ModelKind) and on
+    /// full release.
+    warm_upscale_engine: Option<(prunr_core::ModelKind, Arc<prunr_core::OrtEngine>)>,
 }
 
 impl Processor {
@@ -368,6 +375,7 @@ impl Processor {
             upscale_result_tx,
             upscale_result_rx,
             dispatch_progress: super::dispatch_progress::DispatchProgressSlot::new(),
+            warm_upscale_engine: None,
         }
     }
 
@@ -532,6 +540,67 @@ impl Processor {
     /// model" signal.
     pub(crate) fn release_seg_warm(&self) {
         let _ = self.worker_tx.send(WorkerMessage::ReleaseWarm);
+    }
+
+    /// Cache-lookup helper: returns the cached `Arc<OrtEngine>` on a
+    /// ModelKind hit, evicts the slot on a ModelKind mismatch, and
+    /// returns `None` in both miss cases. Never constructs a new engine.
+    /// Called first by `ensure_upscale_engine`; if it returns `None`,
+    /// the caller constructs and caches a fresh engine.
+    fn try_cached_upscale_engine(
+        &mut self,
+        model_kind: prunr_core::ModelKind,
+    ) -> Option<Arc<prunr_core::OrtEngine>> {
+        match &self.warm_upscale_engine {
+            Some((cached_kind, engine)) if *cached_kind == model_kind => {
+                Some(Arc::clone(engine))
+            }
+            Some(_) => {
+                // Different model — evict the old cache before the caller
+                // constructs a fresh engine.
+                self.warm_upscale_engine = None;
+                None
+            }
+            None => None,
+        }
+    }
+
+    /// Returns a cached `Arc<OrtEngine>` for the given ModelKind,
+    /// constructing one if absent or if the cached ModelKind differs.
+    /// Eviction on ModelKind mismatch drops the previous Arc (its
+    /// strong_count goes to zero once outstanding dispatches release
+    /// their clones).
+    fn ensure_upscale_engine(
+        &mut self,
+        model_kind: prunr_core::ModelKind,
+        intra_threads: usize,
+        level: prunr_core::engine::GraphOptimizationLevel,
+    ) -> Result<Arc<prunr_core::OrtEngine>, prunr_core::CoreError> {
+        if let Some(cached) = self.try_cached_upscale_engine(model_kind) {
+            return Ok(cached);
+        }
+        let fresh = Arc::new(
+            prunr_core::OrtEngine::new_with_optimization_level(model_kind, intra_threads, level)?,
+        );
+        self.warm_upscale_engine = Some((model_kind, Arc::clone(&fresh)));
+        Ok(fresh)
+    }
+
+    /// Drops the cached upscale engine. Call on:
+    /// - User switches to any model (model dropdown swap — even
+    ///   upscale→upscale; `ensure_upscale_engine` evicts on ModelKind
+    ///   mismatch, so this is the switch-away-from-upscale case).
+    /// - Hardware settings change.
+    pub(crate) fn release_upscale_engine(&mut self) {
+        self.warm_upscale_engine = None;
+    }
+
+    /// Test-only accessor for injecting or inspecting the warm-engine slot.
+    #[cfg(test)]
+    pub(crate) fn warm_upscale_engine_for_test(
+        &mut self,
+    ) -> &mut Option<(prunr_core::ModelKind, Arc<prunr_core::OrtEngine>)> {
+        &mut self.warm_upscale_engine
     }
 
     /// SD inpaint dispatch via the dedicated subprocess bridge. Encodes
@@ -933,6 +1002,42 @@ impl Processor {
             &input, pre_denoise, brightness_lift,
         );
 
+        // Resolve ModelKind + optimization level so we can look up the
+        // warm-engine cache. X4TwoPass always routes through RealEsrganX2Plus;
+        // other variants use the user-selected model.
+        let cache_model_kind = if use_two_pass {
+            prunr_core::ModelKind::RealEsrganX2Plus
+        } else {
+            match prunr_core::ModelKind::try_from(model_id) {
+                Ok(k) => k,
+                Err(id) => {
+                    tracing::error!(
+                        model = ?id,
+                        "upscale dispatch: ModelKind mapping missing — refusing dispatch"
+                    );
+                    return;
+                }
+            }
+        };
+        let cache_descriptor = match prunr_models::REGISTRY.iter().find(|d| {
+            d.id == if use_two_pass { prunr_models::ModelId::RealEsrganX2Plus } else { model_id }
+        }) {
+            Some(d) => d,
+            None => {
+                tracing::error!(model = ?model_id, "upscale dispatch: model not in REGISTRY");
+                return;
+            }
+        };
+        let level = prunr_core::upscale::pick_optimization_level(cache_descriptor);
+
+        let engine = match self.ensure_upscale_engine(cache_model_kind, intra_threads, level) {
+            Ok(e) => e,
+            Err(err) => {
+                tracing::error!(model = ?model_id, %err, "upscale dispatch: engine construction failed");
+                return;
+            }
+        };
+
         // Release stores pair with the Acquire load in
         // `upscale::tiling::upscale_tiled` (cancel flag) and the Acquire
         // load in `is_upscale_in_flight` (active flag). Without the
@@ -952,6 +1057,10 @@ impl Processor {
         let cancel_flag = Arc::clone(&self.upscale_cancel);
         let result_tx = self.upscale_result_tx.clone();
         let progress_slot = self.dispatch_progress.clone();
+        // Clone the Arc so the worker thread owns a reference to the engine
+        // independently of the cached slot. The slot may be evicted (e.g.
+        // model swap mid-dispatch) without invalidating the in-flight session.
+        let engine_for_thread = Arc::clone(&engine);
 
         std::thread::spawn(move || {
             let progress_slot_for_callback = progress_slot.clone();
@@ -966,18 +1075,18 @@ impl Processor {
                 });
             };
             let result = if use_two_pass {
-                prunr_core::upscale::upscale_two_pass(
+                prunr_core::upscale::upscale_two_pass_with_engine(
                     &input_for_inference,
-                    intra_threads,
+                    &engine_for_thread,
                     on_tile,
                     Some(cancel_flag),
                 )
             } else {
-                prunr_core::upscale::upscale_rgba(
+                prunr_core::upscale::upscale_rgba_with_engine(
                     &input_for_inference,
+                    &engine_for_thread,
                     model_id,
                     scale_factor,
-                    intra_threads,
                     on_tile,
                     Some(cancel_flag),
                 )
@@ -1520,6 +1629,126 @@ mod upscale_dispatch_tests {
         apply_post_inference(&mut img, 0.0);
         assert_eq!(img.as_raw(), original.as_raw(),
             "apply_post_inference must be a no-op when brightness_lift=0");
+    }
+}
+
+// ── Warm-engine cache boundary contract ──────────────────────────────────────
+//
+// The four tests below pin the cache-hit / cache-eviction / release semantics
+// on `Processor::warm_upscale_engine` without exercising real upscale inference.
+// Tests 1-3 inject a sentinel Arc<OrtEngine> via the test-only accessor and
+// assert pointer-identity or slot emptiness. Test 4 needs no engine at all.
+//
+// OrtEngine construction requires ort_runtime::init() (the ORT dylib must be
+// loaded). Tests 1-3 call `ensure_ort_for_test()` which skips gracefully when
+// the dylib isn't available — matching the pattern from prunr-core's
+// integration test suite. Test 4 has no ORT dependency and always runs.
+#[cfg(test)]
+mod warm_cache_tests {
+    use super::*;
+    use prunr_core::{ModelKind, OrtEngine};
+    use prunr_core::engine::GraphOptimizationLevel;
+
+    fn make_processor() -> Processor {
+        let (tx, _rx) = mpsc::channel::<WorkerMessage>();
+        let (_tx, rx) = mpsc::channel::<WorkerResult>();
+        Processor::new(tx, rx)
+    }
+
+    /// Call `ort_runtime::init()` once per process, then return whether
+    /// the ORT runtime is available. `false` means the dylib wasn't found
+    /// and the caller should skip. Matching the `skip_if_no_ort` pattern
+    /// from `prunr-core/tests/test_common/mod.rs`.
+    fn ensure_ort_for_test() -> bool {
+        static INIT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *INIT.get_or_init(|| crate::ort_runtime::init().is_ok())
+    }
+
+    /// Construct one real engine (Silueta, ~4 MB bundled) and reuse it
+    /// across the three Arc-identity tests via OnceLock. Silueta bytes
+    /// are always available — no download required. Returns None when
+    /// ORT isn't available (no dylib found).
+    fn sentinel_engine() -> Option<Arc<OrtEngine>> {
+        if !ensure_ort_for_test() {
+            return None;
+        }
+        static CELL: std::sync::OnceLock<Arc<OrtEngine>> = std::sync::OnceLock::new();
+        Some(
+            CELL.get_or_init(|| {
+                Arc::new(
+                    OrtEngine::new_cpu_only_with_optimization_level(
+                        ModelKind::Silueta,
+                        1,
+                        GraphOptimizationLevel::Level1,
+                    )
+                    .expect("Silueta is bundled and must construct without errors once ORT is init"),
+                )
+            })
+            .clone(),
+        )
+    }
+
+    #[test]
+    fn warm_upscale_engine_field_starts_empty() {
+        let mut p = make_processor();
+        assert!(
+            p.warm_upscale_engine_for_test().is_none(),
+            "Processor::new must not pre-populate the warm-engine cache"
+        );
+    }
+
+    #[test]
+    fn cache_hit_reuses_arc_on_same_modelkind() {
+        let Some(sentinel) = sentinel_engine() else {
+            eprintln!("[cache_hit_reuses_arc_on_same_modelkind] SKIP: ORT runtime not found");
+            return;
+        };
+        let mut p = make_processor();
+        *p.warm_upscale_engine_for_test() =
+            Some((ModelKind::RealEsrganX4Plus, Arc::clone(&sentinel)));
+        let got = p
+            .try_cached_upscale_engine(ModelKind::RealEsrganX4Plus)
+            .expect("cache hit must return the sentinel Arc");
+        assert!(
+            Arc::ptr_eq(&sentinel, &got),
+            "cache hit must return the SAME Arc that was inserted"
+        );
+    }
+
+    #[test]
+    fn model_swap_evicts_cached_arc() {
+        let Some(sentinel) = sentinel_engine() else {
+            eprintln!("[model_swap_evicts_cached_arc] SKIP: ORT runtime not found");
+            return;
+        };
+        let mut p = make_processor();
+        *p.warm_upscale_engine_for_test() =
+            Some((ModelKind::RealEsrganX4Plus, Arc::clone(&sentinel)));
+        let got = p.try_cached_upscale_engine(ModelKind::Nomos8kSchatL);
+        assert!(
+            got.is_none(),
+            "cache miss on ModelKind mismatch must return None"
+        );
+        assert!(
+            p.warm_upscale_engine_for_test().is_none(),
+            "slot must be evicted after a ModelKind mismatch lookup"
+        );
+    }
+
+    #[test]
+    fn release_upscale_engine_clears_slot() {
+        let Some(sentinel) = sentinel_engine() else {
+            eprintln!("[release_upscale_engine_clears_slot] SKIP: ORT runtime not found");
+            return;
+        };
+        let mut p = make_processor();
+        *p.warm_upscale_engine_for_test() =
+            Some((ModelKind::RealEsrganX4Plus, Arc::clone(&sentinel)));
+        p.release_upscale_engine();
+        assert!(
+            p.warm_upscale_engine_for_test().is_none(),
+            "release_upscale_engine must clear the slot"
+        );
     }
 }
 
