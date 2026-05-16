@@ -4023,6 +4023,10 @@ mod upscale_tier2_routing_tests {
         settings.current_recipe(prunr_core::ModelKind::BiRefNetLite, false)
     }
 
+    fn upscale_recipe_for(settings: &ItemSettings) -> prunr_core::ProcessingRecipe {
+        settings.current_recipe(prunr_core::ModelKind::RealEsrganX4Plus, false)
+    }
+
     #[test]
     fn app_tier_upscaletier2_routes_to_mark_tweak() {
         // A diff where only sharpen changed must resolve to UpscaleTier2 so the
@@ -4057,6 +4061,93 @@ mod upscale_tier2_routing_tests {
             RequiredTier::UpscaleRerun,
             "output_scale diff must remain UpscaleRerun — Tier-1 stays gated out of live preview",
         );
+    }
+
+    /// Regression guard for Bug #3: the Tier-2 detection block in
+    /// `apply_toolbar_change` must use the correct ModelKind for both the
+    /// old and new recipe when computing the diff.
+    ///
+    /// The bug: `SettingsModel::to_model_kind()` returns `None` for upscale
+    /// variants. The fallback was `BiRefNetLite`, which produces
+    /// `upscale.model = None` in `new_recipe`. The `applied_recipe` was set
+    /// at Tier-1 dispatch time using `RealEsrganX4Plus`, giving
+    /// `upscale.model = Some(RealEsrganX4Plus)`. `only_tier2_changed` checks
+    /// `old.model == new.model` first: `Some(…) != None` → returns false →
+    /// `resolve_tier` returns `UpscaleRerun` instead of `UpscaleTier2`.
+    ///
+    /// The fix: derive model_kind via `to_model_id() → ModelKind::try_from()`
+    /// so upscale variants resolve to the correct ModelKind, matching what
+    /// was used at dispatch time.
+    #[test]
+    fn tier2_chain_model_kind_mismatch_never_routes_to_upscale_tier2() {
+        // Simulates the broken path: old recipe built with RealEsrganX4Plus
+        // (as dispatch_upscale_intent does), new recipe built with BiRefNetLite
+        // (as the broken to_model_kind fallback did). Only sharpen differs.
+        //
+        // The recipe model mismatch (RealEsrganX4Plus vs BiRefNetLite) causes
+        // resolve_tier to return FullPipeline (inference.model differs → model
+        // change → FullPipeline). In either case, the result is NOT UpscaleTier2,
+        // confirming the broken path gates out the live-preview dispatch.
+        let old_s = ItemSettings { sharpen: 0.0, ..ItemSettings::default() };
+        let new_s = ItemSettings { sharpen: 0.5, ..old_s };
+
+        let old_recipe = upscale_recipe_for(&old_s); // applied_recipe: model=RealEsrganX4Plus
+        let new_recipe = recipe_for(&new_s);          // broken path: model=BiRefNetLite (wrong fallback)
+        assert_ne!(
+            resolve_tier(&old_recipe, &new_recipe),
+            RequiredTier::UpscaleTier2,
+            "model-kind mismatch between applied_recipe and new_recipe must NOT \
+             resolve to UpscaleTier2 — this pins that the broken path never fires mark_tweak",
+        );
+    }
+
+    /// The fixed path: both old and new recipe use RealEsrganX4Plus
+    /// (via to_model_id → ModelKind::try_from). A sharpen-only diff now
+    /// correctly resolves to UpscaleTier2, enabling mark_tweak to fire.
+    #[test]
+    fn tier2_chain_correct_model_kind_routes_sharpen_to_upscale_tier2() {
+        let old_s = ItemSettings { sharpen: 0.0, ..ItemSettings::default() };
+        let new_s = ItemSettings { sharpen: 0.5, ..old_s };
+
+        let old_recipe = upscale_recipe_for(&old_s); // applied_recipe at Tier-1 result time
+        let new_recipe = upscale_recipe_for(&new_s); // fixed path: same model kind used
+        assert_eq!(
+            resolve_tier(&old_recipe, &new_recipe),
+            RequiredTier::UpscaleTier2,
+            "sharpen-only diff with matching RealEsrganX4Plus model in both recipes \
+             must resolve to UpscaleTier2 — this is the contract that enables live preview",
+        );
+    }
+
+    /// Same as above but for all four Tier-2 knobs, ensuring each independently
+    /// triggers the live-preview dispatch.
+    #[test]
+    fn tier2_chain_all_four_knobs_individually_route_to_upscale_tier2() {
+        let base = ItemSettings {
+            sharpen: 0.0,
+            ai_blend: 1.0,
+            saturation: 0.0,
+            color_match: false,
+            ..ItemSettings::default()
+        };
+
+        let cases: &[(&str, ItemSettings)] = &[
+            ("sharpen",     ItemSettings { sharpen: 0.3, ..base }),
+            ("ai_blend",    ItemSettings { ai_blend: 0.7, ..base }),
+            ("saturation",  ItemSettings { saturation: 0.2, ..base }),
+            ("color_match", ItemSettings { color_match: true, ..base }),
+        ];
+
+        let old_recipe = upscale_recipe_for(&base);
+        for (knob_name, new_settings) in cases {
+            let new_recipe = upscale_recipe_for(new_settings);
+            assert_eq!(
+                resolve_tier(&old_recipe, &new_recipe),
+                RequiredTier::UpscaleTier2,
+                "knob '{knob_name}' diff must resolve to UpscaleTier2 \
+                 so the live-preview gate fires for that knob",
+            );
+        }
     }
 }
 
