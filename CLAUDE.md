@@ -165,6 +165,38 @@ Before adding a CI step (or `xtask`, or shell snippet) that copies, references, 
 
 Specific case that prompted this rule: Phase 6-01 assumed `pykeio/ort` `download-binaries` placed `libonnxruntime.so` next to the binary on Linux/Windows. It doesn't — that runtime is statically linked into the binary on those platforms; only GPU-provider plugins ship as separate `.so` files. A single `ldd target/release/prunr` would have shown the assumption was wrong before any YAML got written.
 
+## Scoped workarounds, not blanket gates
+
+When you write a workaround for "Foo is broken", name Foo and gate the
+workaround on Foo. Don't extend the gate to Foo's siblings or to the
+broader category Foo belongs to — those paths probably work fine, and
+the bisect from "competitor is 10-50× faster than us" → "we silently
+disabled every GPU EP because one provider had a specific stall" is
+brutal.
+
+Concrete: upscale dispatch hardcoded `cpu_only=true` because OpenVINO's
+lazy per-shape graph compilation stalled tens of minutes on the first
+tile (RealESRGAN's 23 RRDB blocks compile slowly, EP cache wasn't
+hitting). The workspace ships `cuda`, `directml`, `coreml`, `openvino`,
+and `half` ort features — locking ALL of them out left a 10-50× speedup
+on the table for unaffected hardware. The right gate is "skip OpenVINO"
+via EP-selection in the engine, not "no GPU at all" via the constructor.
+
+When the workaround MUST be broad (the framework only offers a binary
+toggle, the upstream bug isn't isolated to one provider, etc.), say so
+explicitly in the comment and link to the upstream issue. The comment
+becomes the receipt that narrower options were considered and rejected
+— without that receipt, a future reader assumes the gate was lazy and
+removes it without realising it's load-bearing.
+
+Apply this wherever a workaround naturally tempts a broader gate:
+- "X feature flag failed → disable the feature" instead of "the feature
+  failed because of A → disable A's path".
+- "X test was flaky → mark all tests in the module ignored" instead of
+  "X test had a race in setup → fix the setup".
+- "Y crate panicked at startup → drop the dependency" instead of
+  "Y crate panicked because of B → patch B or wrap the call".
+
 ## Goal-driven for bug fixes
 
 When fixing a perf or correctness bug, write the test that **reproduces** it first. Pin the invariant in code, then make the fix turn the test green. Without the failing-then-passing transition, you've shipped a fix-shaped change, not a verified one — and the regression has nothing guarding against its return.
