@@ -23,24 +23,21 @@ const MIN_SCREEN_RADIUS_PX: f32 = 2.0;
 /// has been used so it can route the commit through the app's normal
 /// dispatch / cache-invalidation path.
 pub(crate) enum BrushAction {
-    /// User finished a stroke. Caller writes it to the BatchItem.
-    Committed(prunr_core::brush::MaskCorrection),
+    /// User finished a stroke. Contains a MaskArtifact at source-image
+    /// resolution ready to pass to `BatchManager::commit_selection`.
+    Committed(prunr_core::selection::MaskArtifact),
     /// User clicked or moved without committing a stroke yet.
     None,
 }
 
-fn brush_grid_dims(item: &BatchItem, is_inpaint: bool) -> Option<(u16, u16)> {
-    // Inpaint: brush mask = source image. Mask mode: brush mask = model
-    // tensor (`postprocess::apply_correction` runs at tensor resolution,
-    // e.g. 1024×1024 for BiRefNet, 320×320 for Silueta). u16 max is
-    // 65535 — fine for any reasonable image.
-    if is_inpaint {
-        let (w, h) = item.dimensions;
-        Some((w as u16, h as u16))
-    } else {
-        let t = item.cached_tensor.as_ref()?;
-        Some((t.width as u16, t.height as u16))
-    }
+fn brush_grid_dims(item: &BatchItem) -> Option<(u16, u16)> {
+    // Phase 33: all brush paths (BG-removal, inpaint, selection-category)
+    // now write to `selection_mask` which lives at SOURCE image resolution.
+    // Using tensor dims here was "Pitfall 1" in 33-RESEARCH.md — it caused
+    // strokes to be misaligned after `to_mask_correction` upsampled them
+    // back to source res. u16 max is 65535; fine for any reasonable image.
+    let (w, h) = item.dimensions;
+    Some((w as u16, h as u16))
 }
 
 /// Handle pointer input + paint cursor for one frame. The canvas calls
@@ -54,13 +51,11 @@ pub(crate) fn handle_input(
     settings: &BrushSettings,
     item: &BatchItem,
     img_rect: Rect,
-    is_inpaint: bool,
 ) -> BrushAction {
-    let Some((model_w, model_h)) = brush_grid_dims(item, is_inpaint) else {
-        // No cached tensor → brush has nothing to write into. Render a
-        // muted cursor so the user gets feedback that brush is ON, but
-        // skip pointer wiring.
-        tracing::debug!(item_id = item.id, "brush active but no cached_tensor — cursor only");
+    let Some((model_w, model_h)) = brush_grid_dims(item) else {
+        // Item has no dimensions yet (zero-dim source). Render a muted
+        // cursor so the user gets feedback that brush is ON, but skip wiring.
+        tracing::debug!(item_id = item.id, "brush active but item has no dimensions — cursor only");
         draw_cursor(ui, img_rect, settings, /*armed=*/ false);
         return BrushAction::None;
     };
@@ -114,9 +109,23 @@ pub(crate) fn handle_input(
     }
 
     if primary_released && brush_state.has_active_stroke() {
-        if let Some(strokes) = brush_state.commit_stroke(stamp) {
+        if let Some(correction) = brush_state.commit_stroke(stamp) {
             tracing::debug!("brush release — commit");
-            return BrushAction::Committed(strokes);
+            // Convert the per-stroke MaskCorrection (i8 at source res) into
+            // a MaskArtifact (f32 at source res) for storage in selection_mask.
+            // to_binary_mask at source dims gives a GrayImage (255=selected, 0=not).
+            let w = correction.width as u32;
+            let h = correction.height as u32;
+            let binary = correction.to_binary_mask(w, h);
+            let data: Vec<f32> = binary.as_raw().iter()
+                .map(|&v| if v > 0 { 1.0_f32 } else { 0.0_f32 })
+                .collect();
+            let mask = prunr_core::selection::MaskArtifact {
+                width: w,
+                height: h,
+                data: std::sync::Arc::new(data),
+            };
+            return BrushAction::Committed(mask);
         }
     }
 

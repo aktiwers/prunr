@@ -45,16 +45,16 @@ pub(crate) fn push_action_bounded(stack: &mut VecDeque<ActionType>, kind: Action
 
 /// Per-item brush stroke history depth. Bounded to match `ACTION_HIST_DEPTH`
 /// (the ordering layer cap) so the ordering log and stroke stack stay in sync.
-/// Memory: each entry is `Option<Arc<MaskCorrection>>`; at SD-1.5 latent dims
-/// (64×64×i8) that's ~16 KB per snapshot, ~1.6 MB peak per item at this cap.
-/// At full source-image dims (e.g. 2048×2048 LaMa) entries are ~4 MB; a 100-
-/// deep stack peaks at ~400 MB per item — the user's trade for a generous undo
-/// depth on hi-res content.
+/// Memory: each entry is `Option<Arc<MaskArtifact>>`; at source image dims
+/// (e.g. 2048×2048) an f32 mask is ~16 MB per snapshot. A 100-deep stack
+/// peaks at ~1.6 GB per item — the user's trade for a generous undo depth on
+/// hi-res content. The Arc wrapping means undo snapshots are O(1) refcount
+/// bumps; the payload is only copied if the snapshot is mutated (it never is).
 const STROKE_HISTORY_DEPTH: usize = ACTION_HIST_DEPTH;
 
 fn push_stroke_bounded(
-    stack: &mut VecDeque<Option<Arc<prunr_core::brush::MaskCorrection>>>,
-    snap: Option<Arc<prunr_core::brush::MaskCorrection>>,
+    stack: &mut VecDeque<Option<Arc<prunr_core::selection::MaskArtifact>>>,
+    snap: Option<Arc<prunr_core::selection::MaskArtifact>>,
 ) {
     stack.push_back(snap);
     while stack.len() > STROKE_HISTORY_DEPTH {
@@ -310,25 +310,15 @@ pub(crate) struct BatchItem {
     pub(crate) preset_undo_stack: VecDeque<PresetSnapshot>,
     /// Redo counterpart — cleared on a fresh preset apply, fed by undos.
     pub(crate) preset_redo_stack: VecDeque<PresetSnapshot>,
-    /// Per-item brush correction. The hash for the recipe diff lives on
-    /// `settings.correction_hash` (set in lockstep by `commit_correction`);
-    /// never mutate the `Arc<MaskCorrection>` from outside that mutator
-    /// or the recipe-diff dispatch breaks.
-    pub(crate) mask_correction: Option<Arc<prunr_core::brush::MaskCorrection>>,
-    /// Snapshot of the last correction that was actually dispatched
-    /// for inpainting. Set by `dispatch_inpaint_for_item` on each
-    /// dispatch; persists across the post-stroke `mask_correction`
-    /// clear so the toolbar's "Reprocess stroke" button can re-run
-    /// the most-recent stroke even between strokes (when
-    /// `mask_correction` is None). Cleared on item destruction;
-    /// per-item scoping means switching items naturally drops it.
-    pub(crate) last_inpaint_correction: Option<Arc<prunr_core::brush::MaskCorrection>>,
-    /// Snapshots of `mask_correction` taken BEFORE each stroke commit.
+    /// Snapshots of `selection_mask` taken BEFORE each stroke commit.
     /// `Ctrl+Z` while brush mode is active pops the top entry and
     /// restores the snapshot — the user undoes one stroke per press.
-    /// Bounded; oldest dropped at depth limit.
-    pub(crate) stroke_undo_stack: VecDeque<Option<Arc<prunr_core::brush::MaskCorrection>>>,
-    pub(crate) stroke_redo_stack: VecDeque<Option<Arc<prunr_core::brush::MaskCorrection>>>,
+    /// Bounded to STROKE_HISTORY_DEPTH; oldest entries dropped when full.
+    /// Retyped from `MaskCorrection` in Plan 04 — snapshots are now at
+    /// source resolution so both Paint Brush and Magic Brush undo share
+    /// the same stack.
+    pub(crate) stroke_undo_stack: VecDeque<Option<Arc<prunr_core::selection::MaskArtifact>>>,
+    pub(crate) stroke_redo_stack: VecDeque<Option<Arc<prunr_core::selection::MaskArtifact>>>,
     /// Ordering layer: commit-order sequence of action types. Each entry is a
     /// tag pointing at the per-type stack that holds the corresponding pre-state.
     /// `handle_undo` pops from the back (most-recent) and dispatches; new commits
@@ -430,59 +420,26 @@ impl BatchItem {
         self.selection_texture = None;
     }
 
-    /// Merge brush strokes into the existing correction. Uses
-    /// `Arc::make_mut` so the common single-owner case skips the full
-    /// clone. The new hash lands on `settings.correction_hash` —
-    /// `mask_settings()` reads it for the recipe diff.
-    pub(crate) fn commit_correction(
-        &mut self,
-        strokes: prunr_core::brush::MaskCorrection,
-    ) {
-        let pre = self.mask_correction.clone();
+    /// Prepare for a stroke commit: snapshot the current selection_mask onto
+    /// the undo stack, clear the redo stack, and push a Stroke marker onto
+    /// the action ordering layer. Must be called BEFORE BatchManager::commit_selection
+    /// writes the new mask. `revert_last_stroke_commit` can then undo it cleanly.
+    ///
+    /// Callers: canvas::handle_brush_input (Paint Brush); Plan 07 Magic Brush
+    /// commit path. Both must call this before commit_selection — the pairing is
+    /// the invariant that keeps undo correct.
+    pub(crate) fn begin_stroke_commit(&mut self) {
+        let pre = self.selection_mask.clone();
         push_stroke_bounded(&mut self.stroke_undo_stack, pre);
         self.stroke_redo_stack.clear();
         self.push_action_marker(ActionType::Stroke);
-
-        // Discard a stale correction whose dimensions no longer match the
-        // active model (or a previous code-path bug). Without this, `merge`
-        // silently drops the new strokes and the user sees the brush "do
-        // nothing" — the undo stack still captures the pre-state, so the
-        // reset is reversible.
-        if self.mask_correction.as_ref().is_some_and(|c|
-            c.width != strokes.width || c.height != strokes.height
-        ) {
-            tracing::info!(
-                old = ?self.mask_correction.as_ref().map(|c| (c.width, c.height)),
-                new = ?(strokes.width, strokes.height),
-                "discarding stale correction with mismatched dims",
-            );
-            self.mask_correction = None;
-        }
-
-        let arc = self.mask_correction.get_or_insert_with(|| {
-            Arc::new(prunr_core::brush::MaskCorrection::empty(strokes.width, strokes.height))
-        });
-        let current = Arc::make_mut(arc);
-        prunr_core::brush::merge(current, &strokes);
-        self.settings.correction_hash = std::num::NonZeroU64::new(prunr_core::brush::content_hash(current));
     }
 
-    /// Internal-only post-stroke cleanup. Drops `mask_correction` and
-    /// `correction_hash` WITHOUT pushing an action marker or stroke-
-    /// stack snapshot — the stroke commit already pushed both, and a
-    /// second marker here would force the user to press Cmd+Z twice
-    /// to undo a single stroke.
-    pub(crate) fn clear_correction_post_stroke(&mut self) {
-        self.mask_correction = None;
-        self.settings.correction_hash = None;
-    }
-
-    /// Roll back the most-recent `commit_correction` as if it never
-    /// happened. Used when an inpaint dispatch is cancelled before
-    /// its result lands — the committed `mask_correction` is the
-    /// input that would have driven the dispatch, so reverting both
-    /// the state AND the matching `ActionType::Stroke` marker
-    /// prevents the cancelled stroke from:
+    /// Roll back the most-recent stroke commit as if it never happened.
+    /// Used when an inpaint dispatch is cancelled before its result lands —
+    /// the committed `selection_mask` was the input that would have driven
+    /// the dispatch, so reverting both the state AND the matching
+    /// `ActionType::Stroke` marker prevents the cancelled stroke from:
     ///   - rendering as a ghost brush overlay on canvas, OR
     ///   - accumulating into the next stroke commit, OR
     ///   - showing up as a phantom Cmd+Z entry in the action timeline.
@@ -491,7 +448,10 @@ impl BatchItem {
     /// reversible) and explicitly drops the action marker.
     pub(crate) fn revert_last_stroke_commit(&mut self) {
         if let Some(prev) = self.stroke_undo_stack.pop_back() {
-            self.set_correction(prev);
+            self.selection_mask = prev;
+            self.selection_hash = self.selection_mask.as_ref().map(|m| m.content_hash());
+            self.selection_outline = None;
+            self.selection_texture = None;
         }
         // Pop the matching marker. rposition handles edge cases where
         // a non-Stroke action was pushed between the commit and the
@@ -504,22 +464,28 @@ impl BatchItem {
     }
 
     /// Pop the last stroke snapshot, push the current state onto the
-    /// redo stack, and apply the snapshot. Returns `true` if anything
-    /// changed (caller invalidates result caches and re-dispatches).
+    /// redo stack, and restore the snapshot. Returns `true` if anything
+    /// changed (caller invalidates caches and re-dispatches).
     pub(crate) fn undo_stroke(&mut self) -> bool {
         let Some(prev) = self.stroke_undo_stack.pop_back() else { return false };
-        let current = self.mask_correction.clone();
+        let current = self.selection_mask.clone();
         push_stroke_bounded(&mut self.stroke_redo_stack, current);
-        self.set_correction(prev);
+        self.selection_mask = prev;
+        self.selection_hash = self.selection_mask.as_ref().map(|m| m.content_hash());
+        self.selection_outline = None;
+        self.selection_texture = None;
         true
     }
 
     /// Inverse of `undo_stroke`.
     pub(crate) fn redo_stroke(&mut self) -> bool {
         let Some(next) = self.stroke_redo_stack.pop_back() else { return false };
-        let current = self.mask_correction.clone();
+        let current = self.selection_mask.clone();
         push_stroke_bounded(&mut self.stroke_undo_stack, current);
-        self.set_correction(next);
+        self.selection_mask = next;
+        self.selection_hash = self.selection_mask.as_ref().map(|m| m.content_hash());
+        self.selection_outline = None;
+        self.selection_texture = None;
         true
     }
 
@@ -533,13 +499,6 @@ impl BatchItem {
     #[cfg(test)]
     pub(crate) fn has_stroke_redo(&self) -> bool {
         !self.stroke_redo_stack.is_empty()
-    }
-
-    fn set_correction(&mut self, c: Option<Arc<prunr_core::brush::MaskCorrection>>) {
-        self.settings.correction_hash = c.as_deref()
-            .map(prunr_core::brush::content_hash)
-            .and_then(std::num::NonZeroU64::new);
-        self.mask_correction = c;
     }
 
     /// Drop whatever caches a `CacheImpact` says are stale. Single entry
@@ -737,8 +696,6 @@ impl BatchItem {
             applied_preset,
             preset_undo_stack: VecDeque::new(),
             preset_redo_stack: VecDeque::new(),
-            mask_correction: None,
-            last_inpaint_correction: None,
             stroke_undo_stack: VecDeque::new(),
             stroke_redo_stack: VecDeque::new(),
             actions_undo: VecDeque::new(),
@@ -1053,44 +1010,60 @@ mod tests {
         }
     }
 
-    fn stamp(width: u16, height: u16, idx: usize, _value: i8) -> prunr_core::brush::MaskCorrection {
-        // Stamp a real circle near the requested cell so the correction
-        // is non-empty without poking private fields. The exact magnitude
-        // doesn't matter — these tests only check undo/redo bookkeeping.
-        let mut c = prunr_core::brush::MaskCorrection::empty(width, height);
-        let cx = (idx as u16 % width) as f32 + 0.5;
-        let cy = (idx as u16 / width) as f32 + 0.5;
-        prunr_core::brush::paint_circle(
-            &mut c, cx, cy, 1.0,
-            prunr_core::brush::Stamp { hardness: 1.0, strength: 1.0, mode: prunr_core::brush::BrushMode::Add },
-        );
-        c
+    /// Build a distinct MaskArtifact for testing. Uses hash to create
+    /// distinguishable masks without needing actual painted pixels.
+    fn make_mask(tag: u64, w: u32, h: u32) -> Arc<prunr_core::selection::MaskArtifact> {
+        let mut data = vec![0.0_f32; (w * h) as usize];
+        // Write the tag into the first few pixels so masks with different
+        // tags compare as non-equal (content_hash differs).
+        let tag_f = (tag as f32) / u64::MAX as f32;
+        for i in 0..data.len().min(4) {
+            data[i] = tag_f;
+        }
+        Arc::new(prunr_core::selection::MaskArtifact {
+            width: w,
+            height: h,
+            data: Arc::new(data),
+        })
+    }
+
+    /// Simulate a stroke commit: push pre-state, write new mask,
+    /// push Stroke marker, clear redo stacks.
+    fn simulate_stroke_commit(item: &mut BatchItem, mask: Arc<prunr_core::selection::MaskArtifact>) {
+        let pre = item.selection_mask.clone();
+        push_stroke_bounded(&mut item.stroke_undo_stack, pre);
+        item.stroke_redo_stack.clear();
+        item.push_action_marker(ActionType::Stroke);
+        item.selection_mask = Some(mask);
+        item.selection_hash = item.selection_mask.as_ref().map(|m| m.content_hash());
+        item.selection_outline = None;
+        item.selection_texture = None;
     }
 
     #[test]
-    fn commit_correction_pushes_pre_state_onto_undo_stack() {
+    fn stroke_commit_pushes_pre_state_onto_undo_stack() {
         let mut item = fixture_item(1);
         assert!(!item.has_stroke_undo());
-        item.commit_correction(stamp(8, 8, 5, 50));
+        simulate_stroke_commit(&mut item, make_mask(1, 8, 8));
         assert!(item.has_stroke_undo(), "first stroke must register an undo entry (pre = None)");
         assert!(!item.has_stroke_redo());
     }
 
-    /// Cancel-mid-process cleanup. After commit_correction the item
-    /// holds the merged stroke + a Stroke marker on the action timeline.
+    /// Cancel-mid-process cleanup. After commit the item holds the new
+    /// selection_mask + a Stroke marker on the action timeline.
     /// If the dispatch is cancelled, revert_last_stroke_commit must
     /// remove BOTH so the next stroke starts fresh and Cmd+Z doesn't
     /// see a phantom action.
     #[test]
     fn revert_last_stroke_commit_clears_state_and_marker() {
         let mut item = fixture_item(1);
-        item.commit_correction(stamp(8, 8, 5, 50));
-        assert!(item.mask_correction.is_some(), "post-commit mask_correction is set");
+        simulate_stroke_commit(&mut item, make_mask(1, 8, 8));
+        assert!(item.selection_mask.is_some(), "post-commit selection_mask is set");
         assert_eq!(item.actions_undo.len(), 1, "post-commit Stroke marker pushed");
         assert!(matches!(item.actions_undo.back(), Some(ActionType::Stroke)));
 
         item.revert_last_stroke_commit();
-        assert!(item.mask_correction.is_none(), "mask_correction reverted to pre-stroke state (None)");
+        assert!(item.selection_mask.is_none(), "selection_mask reverted to pre-stroke state (None)");
         assert!(
             !item.actions_undo.iter().any(|a| matches!(a, ActionType::Stroke)),
             "Stroke marker dropped — cancelled stroke must not appear in the undo timeline",
@@ -1103,62 +1076,50 @@ mod tests {
     #[test]
     fn revert_last_stroke_commit_only_pops_the_most_recent() {
         let mut item = fixture_item(1);
-        item.commit_correction(stamp(8, 8, 5, 50));
-        let after_first = item.mask_correction.clone();
-        item.commit_correction(stamp(8, 8, 10, 70));
-        assert_ne!(item.mask_correction, after_first);
+        simulate_stroke_commit(&mut item, make_mask(1, 8, 8));
+        let after_first_hash = item.selection_hash;
+        simulate_stroke_commit(&mut item, make_mask(2, 8, 8));
+        assert_ne!(item.selection_hash, after_first_hash);
         assert_eq!(item.actions_undo.len(), 2);
 
         item.revert_last_stroke_commit();
         assert_eq!(
-            item.mask_correction, after_first,
+            item.selection_hash, after_first_hash,
             "revert restored the post-stroke-1 state — stroke 1 still in effect",
         );
         assert_eq!(item.actions_undo.len(), 1, "only the second Stroke marker dropped");
     }
 
     #[test]
-    fn undo_stroke_restores_pre_state() {
+    fn undo_stroke_restores_previous_selection_mask() {
         let mut item = fixture_item(1);
-        item.commit_correction(stamp(8, 8, 5, 50));
-        let after_first = item.mask_correction.clone();
-        item.commit_correction(stamp(8, 8, 10, 70));
-        assert_ne!(item.mask_correction, after_first, "second stroke changed the grid");
+        simulate_stroke_commit(&mut item, make_mask(1, 8, 8));
+        let after_first_hash = item.selection_hash;
+        simulate_stroke_commit(&mut item, make_mask(2, 8, 8));
+        assert_ne!(item.selection_hash, after_first_hash, "second stroke changed hash");
 
         assert!(item.undo_stroke(), "stroke 2 must be undoable");
-        assert_eq!(item.mask_correction, after_first, "undo restored the post-stroke-1 state");
+        assert_eq!(item.selection_hash, after_first_hash, "undo restored the post-stroke-1 hash");
         assert!(item.has_stroke_redo(), "undone stroke goes onto the redo stack");
     }
 
     #[test]
-    fn redo_stroke_inverts_undo() {
+    fn redo_stroke_replays_selection_mask() {
         let mut item = fixture_item(1);
-        item.commit_correction(stamp(8, 8, 5, 50));
-        item.commit_correction(stamp(8, 8, 10, 70));
-        let after_two = item.mask_correction.clone();
+        simulate_stroke_commit(&mut item, make_mask(1, 8, 8));
+        simulate_stroke_commit(&mut item, make_mask(2, 8, 8));
+        let after_two_hash = item.selection_hash;
 
         item.undo_stroke();
         assert!(item.redo_stroke(), "redo available after undo");
-        assert_eq!(item.mask_correction, after_two);
-    }
-
-    #[test]
-    fn fresh_commit_after_undo_clears_redo() {
-        let mut item = fixture_item(1);
-        item.commit_correction(stamp(8, 8, 5, 50));
-        item.commit_correction(stamp(8, 8, 10, 70));
-        item.undo_stroke();
-        assert!(item.has_stroke_redo());
-
-        item.commit_correction(stamp(8, 8, 12, 30));
-        assert!(!item.has_stroke_redo(), "fresh stroke after undo must wipe the redo stack");
+        assert_eq!(item.selection_hash, after_two_hash, "redo replays the second selection");
     }
 
     #[test]
     fn stroke_history_caps_at_depth() {
         let mut item = fixture_item(1);
         for i in 0..(STROKE_HISTORY_DEPTH + 5) {
-            item.commit_correction(stamp(8, 8, i % 64, 1 + (i % 100) as i8));
+            simulate_stroke_commit(&mut item, make_mask(i as u64, 8, 8));
         }
         assert_eq!(
             item.stroke_undo_stack.len(),
@@ -1168,50 +1129,37 @@ mod tests {
     }
 
     #[test]
-    fn commit_correction_writes_hash_to_settings() {
+    fn undo_stroke_rederives_selection_hash() {
         let mut item = fixture_item(1);
-        assert!(item.settings.correction_hash.is_none());
-        item.commit_correction(stamp(8, 8, 5, 50));
-        assert!(
-            item.settings.correction_hash.is_some(),
-            "settings.correction_hash must mirror the new correction's hash"
-        );
-    }
+        simulate_stroke_commit(&mut item, make_mask(1, 8, 8));
+        let expected_hash = item.selection_hash;
+        simulate_stroke_commit(&mut item, make_mask(2, 8, 8));
 
-    #[test]
-    fn undo_redo_keeps_settings_hash_in_sync() {
-        let mut item = fixture_item(1);
-        item.commit_correction(stamp(8, 8, 5, 50));
-        let after_commit = item.settings.correction_hash;
-        item.commit_correction(stamp(8, 8, 12, 30));
-        let after_two = item.settings.correction_hash;
-        assert_ne!(after_commit, after_two);
         item.undo_stroke();
-        assert_eq!(item.settings.correction_hash, after_commit, "undo restores the prior hash");
-        item.redo_stroke();
-        assert_eq!(item.settings.correction_hash, after_two, "redo restores the next hash");
+        assert_eq!(
+            item.selection_hash, expected_hash,
+            "undo must re-derive selection_hash from the restored mask",
+        );
     }
 
     // ── Ordering layer (actions_undo / actions_redo) ─────────────────────────
 
     #[test]
-    fn commit_correction_pushes_stroke_marker_and_clears_actions_redo() {
+    fn stroke_commit_pushes_marker_and_clears_actions_redo() {
         let mut item = fixture_item(1);
         item.actions_redo.push_back(ActionType::Stroke);
-        item.commit_correction(stamp(8, 8, 5, 50));
+        simulate_stroke_commit(&mut item, make_mask(1, 8, 8));
         assert_eq!(item.actions_undo.back(), Some(&ActionType::Stroke),
-            "commit_correction must push a Stroke marker onto actions_undo");
+            "stroke commit must push a Stroke marker onto actions_undo");
         assert!(item.actions_redo.is_empty(),
-            "commit_correction must clear actions_redo — new edit branches the timeline");
+            "stroke commit must clear actions_redo — new edit branches the timeline");
     }
 
     #[test]
     fn action_markers_ordered_across_action_types() {
-        // Simulate: stroke → stroke → (result would be pushed by HistoryManager)
-        // Just test the ordering layer directly via push_action_marker.
         let mut item = fixture_item(1);
-        item.commit_correction(stamp(8, 8, 1, 1));
-        item.commit_correction(stamp(8, 8, 2, 2));
+        simulate_stroke_commit(&mut item, make_mask(1, 8, 8));
+        simulate_stroke_commit(&mut item, make_mask(2, 8, 8));
         let order: Vec<ActionType> = item.actions_undo.iter().copied().collect();
         assert_eq!(order, vec![ActionType::Stroke, ActionType::Stroke],
             "two strokes produce two Stroke markers in order");
@@ -1219,16 +1167,15 @@ mod tests {
 
     #[test]
     fn divergence_clears_redo_in_actions_layer() {
-        // Paint → undo → paint B → redo log must be empty.
         let mut item = fixture_item(1);
-        item.commit_correction(stamp(8, 8, 1, 1));
+        simulate_stroke_commit(&mut item, make_mask(1, 8, 8));
         // Simulate an undo (normally done via try_undo_one_action, here manually).
         let kind = item.actions_undo.pop_back().unwrap();
         item.actions_redo.push_back(kind);
         assert!(!item.actions_redo.is_empty());
 
         // New commit branches the timeline.
-        item.commit_correction(stamp(8, 8, 3, 3));
+        simulate_stroke_commit(&mut item, make_mask(3, 8, 8));
         assert!(item.actions_redo.is_empty(),
             "fresh commit after undo must wipe actions_redo");
     }

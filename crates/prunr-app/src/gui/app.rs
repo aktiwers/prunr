@@ -546,10 +546,10 @@ impl PrunrApp {
         }
         if self.settings.model.is_inpaint() {
             let Some(idx) = self.batch.selected_idx_clamped() else { return };
-            let has_correction = self.batch.items.get(idx).is_some_and(
-                |i| i.mask_correction.is_some() || i.last_inpaint_correction.is_some(),
+            let has_selection = self.batch.items.get(idx).is_some_and(
+                |i| i.selection_mask.is_some(),
             );
-            if !has_correction { return; }
+            if !has_selection { return; }
             self.dispatch_inpaint_for_item(idx);
         } else {
             self.handle_remove_bg();
@@ -628,7 +628,7 @@ impl PrunrApp {
         }
         if self.settings.model.is_inpaint() {
             self.batch.selected_item().is_some_and(
-                |i| i.mask_correction.is_some() || i.last_inpaint_correction.is_some(),
+                |i| i.selection_mask.is_some(),
             )
         } else {
             self.batch.any_target_can(|it| !matches!(it.status, BatchStatus::Processing))
@@ -876,21 +876,57 @@ impl PrunrApp {
         self.processor.live_preview.flush(item_id);
     }
 
+    /// Phase 33 per-model interpretation rule. Called immediately after
+    /// `commit_selection` so the BG-removal continuous-auto-apply UX is
+    /// preserved while SD/LaMa wait for explicit Process. See
+    /// `.planning/phases/33-magic-brush/33-CONTEXT.md` rule table.
+    ///
+    /// IMPORTANT: every call site that calls `BatchManager::commit_selection`
+    /// MUST follow up with this method. Both Paint Brush and Magic Brush
+    /// (Plan 07) must pair them to prevent per-model dispatch rules from
+    /// drifting between input surfaces.
+    pub(crate) fn apply_selection_to_active_model(&mut self, item_id: u64) {
+        let Some(idx) = self.batch.items.iter().position(|i| i.id == item_id) else { return };
+        let category = self.settings.model.to_model_id()
+            .and_then(prunr_models::descriptor)
+            .map(|d| d.category);
+        match category {
+            Some(prunr_models::ModelCategory::Segmentation) => {
+                if !self.settings.protect_selection {
+                    self.dispatch_brush_rerun(idx);
+                }
+            }
+            Some(prunr_models::ModelCategory::Inpaint) => {
+                // Selection IS the inpaint region; user clicks Process.
+            }
+            Some(prunr_models::ModelCategory::Selection) => {
+                // Magic Brush model itself; no downstream action.
+            }
+            Some(prunr_models::ModelCategory::Upscale)
+            | Some(prunr_models::ModelCategory::EdgeDetection)
+            | None => {
+                // Mask-only actions work; no model dispatch.
+            }
+        }
+    }
+
     pub(crate) fn dispatch_inpaint_for_item(&mut self, idx: usize) {
         let item = &self.batch.items[idx];
         let item_id = item.id;
-        // Prefer the in-progress mask_correction (the user just
-        // committed strokes). Fall back to last_inpaint_correction so
-        // the toolbar's "Reprocess stroke" button works between strokes
-        // (mask_correction is cleared post-result; last_inpaint_correction
-        // persists until the next dispatch).
-        let Some(correction) = item.mask_correction.as_ref()
-            .or(item.last_inpaint_correction.as_ref())
-            .cloned()
-        else {
-            tracing::debug!(item_id, "inpaint dispatch skipped: no correction");
+        // Read selection_mask — the single source of truth for inpaint region.
+        // Selection persists post-result (Criterion 8) so "Reprocess" is always
+        // available as long as any selection exists. Phase 33 removes the old
+        // last_inpaint_correction fallback — selection_mask covers both the
+        // "just drew" and "reprocess" cases.
+        let Some(selection) = item.selection_mask.as_ref().cloned() else {
+            tracing::debug!(item_id, "inpaint dispatch skipped: no selection_mask");
             return;
         };
+        // Build a MaskCorrection at source resolution for the inpaint pipeline.
+        // source dims are always u16-safe (images > 65535px in either axis are
+        // rejected at load time by formats::check_large_image).
+        let (src_w, src_h) = item.dimensions;
+        let correction = std::sync::Arc::new(selection.to_mask_correction(src_w as u16, src_h as u16));
         // Stack-based inpaint: each stroke runs against the previous
         // result so earlier strokes stay intact. source_for_inpaint
         // walks result_rgba → source_rgba → source_dyn, the last arm
@@ -937,10 +973,9 @@ impl PrunrApp {
             sd_use_karras_sigmas: bs.sd_use_karras_sigmas,
             use_taesd: bs.sd_use_taesd_effective(),
         };
-        // Stash so the Reprocess button stays enabled between strokes
-        // (post-stroke clear nulls mask_correction, but we keep this
-        // pointer to the most-recent dispatched correction).
-        self.batch.items[idx].last_inpaint_correction = Some(correction.clone());
+        // selection_mask persists post-result (Criterion 8) and post-dispatch,
+        // so no "last_inpaint_correction" stash is needed — the Reprocess
+        // button reads selection_mask directly each time.
         self.processor.dispatch_inpaint(item_id, source, correction, tuning);
     }
 
@@ -1010,11 +1045,8 @@ impl PrunrApp {
                 }
                 item.result_tex_pending = true;
                 item.thumb_pending = true;
-                // Stack-based inpaint: this stroke is now baked into
-                // result_rgba; clear the correction so the NEXT stroke's
-                // bbox is just that stroke. Internal cleanup ONLY — no
-                // marker push (commit_correction already pushed one).
-                item.clear_correction_post_stroke();
+                // selection_mask persists post-result (Criterion 8 — Phase 33).
+                // The region stays highlighted and is available for Reprocess.
                 Self::spawn_tex_prep(
                     new_rgba.clone(), item.id, Self::tex_name("inpaint", item.id, Some(switch)),
                     true, handles.clone(), ctx.clone(),
@@ -2171,11 +2203,19 @@ impl PrunrApp {
             let seg_model_match = seg_tensor.as_ref().is_some_and(|s| s.model == *model);
             (*recipe == current_recipe && seg_model_match).then(|| base.clone())
         });
+        // Build correction from selection_mask at tensor resolution (not source
+        // resolution — postprocess_from_flat runs at tensor dims). When no
+        // seg tensor is available, correction is irrelevant (filter-only path).
+        let correction = item.selection_mask.as_ref().and_then(|sel| {
+            seg_tensor.as_ref().map(|seg| {
+                std::sync::Arc::new(sel.to_mask_correction(seg.width as u16, seg.height as u16))
+            })
+        });
         Some(DispatchInputs {
             kind, original, settings: item.settings,
             seg_tensor, edge_tensor, secondary_edge_tensor,
             cached_edge_mask, cached_masked_base,
-            correction: item.mask_correction.clone(),
+            correction,
             upscale_raw: None,
             bicubic_source: None,
             upscale_tier2_knobs: None,
