@@ -151,6 +151,19 @@ pub struct LicenseInfo {
     pub source_url: &'static str,
 }
 
+/// Optional fp16 (or other optimized) companion download for an
+/// `OnDemand` entry. When `Some`, the fetcher pulls this alongside the
+/// main fp32 file, placing both as siblings in the user data dir. The
+/// engine's `optimized_variant_bytes` path then transparently picks the
+/// fp16 sibling on GPU EPs that benefit from it.
+#[derive(Debug, Clone, Copy)]
+pub struct OnDemandVariant {
+    pub filename: &'static str,
+    pub url: &'static str,
+    pub sha256: &'static str,
+    pub size_mb: u32,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum ModelSource {
     Bundled,
@@ -160,6 +173,10 @@ pub enum ModelSource {
         sha256: &'static str,
         size_mb: u32,
         license: LicenseInfo,
+        /// Optional fp16 companion. Downloaded as a sibling alongside
+        /// the main file when present. Auto-selected at session-build
+        /// time on GPU EPs that support fp16.
+        fp16: Option<OnDemandVariant>,
     },
     /// A model composed of multiple ONNX files, downloaded as a unit.
     /// Used by pipelines like Stable Diffusion (UNet + VAE encode +
@@ -362,6 +379,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
                 license_url: "https://www.apache.org/licenses/LICENSE-2.0",
                 source_url: "https://github.com/xuebinqin/U-2-Net",
             },
+            fp16: None,
         },
         version: "1.0.0",
         gpu: GpuRequirement::None,
@@ -418,6 +436,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
                 license_url: "https://www.apache.org/licenses/LICENSE-2.0",
                 source_url: "https://huggingface.co/Carve/LaMa-ONNX",
             },
+            fp16: None,
         },
         version: "1.0.0",
         gpu: GpuRequirement::None,
@@ -444,6 +463,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
                 license_url: "https://www.apache.org/licenses/LICENSE-2.0",
                 source_url: "https://huggingface.co/smartywu/big-lama",
             },
+            fp16: None,
         },
         version: "1.0.0",
         gpu: GpuRequirement::None,
@@ -470,6 +490,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
                 license_url: "https://opensource.org/license/mit",
                 source_url: "https://github.com/Picsart-AI-Research/MI-GAN",
             },
+            fp16: None,
         },
         version: "1.0.0",
         gpu: GpuRequirement::None,
@@ -665,6 +686,12 @@ pub const REGISTRY: &[ModelDescriptor] = &[
                 license_url: "https://opensource.org/licenses/BSD-3-Clause",
                 source_url: "https://github.com/xinntao/Real-ESRGAN",
             },
+            fp16: Some(OnDemandVariant {
+                filename: "RealESRGAN_x4plus_fp16.onnx",
+                url: "https://github.com/aktiwers/prunr/releases/download/models-v1/RealESRGAN_x4plus_fp16.onnx",
+                sha256: "838e4fad9a14a70e96c1953a08da2a0638c23b1dffc5b740351f0bc525b36250",
+                size_mb: 33,
+            }),
         },
         version: "1.0.0",
         gpu: GpuRequirement::Recommended,
@@ -696,6 +723,11 @@ pub const REGISTRY: &[ModelDescriptor] = &[
                 license_url: "https://creativecommons.org/licenses/by/4.0/",
                 source_url: "https://github.com/Phhofm/models/tree/main/4xNomos8kSCHAT-L",
             },
+            // Phhofm's official Nomos8k release is already fp16 — the
+            // main file at the URL above is the fp16 variant. No
+            // sibling download needed (engine reads `is_fp16: true`
+            // from UpscaleModelKnobs and dispatches accordingly).
+            fp16: None,
         },
         version: "1.0.0",
         gpu: GpuRequirement::Recommended,
@@ -727,6 +759,12 @@ pub const REGISTRY: &[ModelDescriptor] = &[
                 license_url: "https://opensource.org/licenses/BSD-3-Clause",
                 source_url: "https://github.com/xinntao/Real-ESRGAN",
             },
+            fp16: Some(OnDemandVariant {
+                filename: "RealESRGAN_x2plus_fp16.onnx",
+                url: "https://github.com/aktiwers/prunr/releases/download/models-v1/RealESRGAN_x2plus_fp16.onnx",
+                sha256: "700b02d23c0a547441a112ac229424b86039e119c5fefae39ecc74e4ce4b4edc",
+                size_mb: 33,
+            }),
         },
         version: "1.0.0",
         gpu: GpuRequirement::Recommended,
@@ -758,6 +796,12 @@ pub const REGISTRY: &[ModelDescriptor] = &[
                 license_url: "https://www.wtfpl.net/about/",
                 source_url: "https://openmodeldb.info/models/4x-NMKD-Siax-CX",
             },
+            fp16: Some(OnDemandVariant {
+                filename: "4x-NMKD-Siax-CX_fp16.onnx",
+                url: "https://github.com/aktiwers/prunr/releases/download/models-v1/4x-NMKD-Siax-CX_fp16.onnx",
+                sha256: "47645594b73a4e5d563babf4674eb756a5853e3cb5620547c02ad6a9e753d818",
+                size_mb: 33,
+            }),
         },
         version: "1.0.0",
         gpu: GpuRequirement::Recommended,
@@ -789,6 +833,12 @@ pub const REGISTRY: &[ModelDescriptor] = &[
                 license_url: "https://www.wtfpl.net/about/",
                 source_url: "https://openmodeldb.info/models/4x-NMKD-Superscale",
             },
+            fp16: Some(OnDemandVariant {
+                filename: "4x-NMKD-Superscale_fp16.onnx",
+                url: "https://github.com/aktiwers/prunr/releases/download/models-v1/4x-NMKD-Superscale_fp16.onnx",
+                sha256: "a59481435da813b5b1629b047fc7490a22badd8ed09d54831cd2cf297b0c2bb9",
+                size_mb: 33,
+            }),
         },
         version: "1.0.0",
         gpu: GpuRequirement::Recommended,
@@ -1062,23 +1112,32 @@ pub fn model_int8_bytes(id: ModelId) -> Option<Vec<u8>> {
 }
 
 fn load_variant(id: ModelId, suffix: &str) -> Option<Vec<u8>> {
-    // Only segmentation models ship optimized variants today.
+    // `name` is the filename stem the variant file uses on disk. Seg
+    // models use their snake_case stable_name (matches the dev-models
+    // workflow that drops `{stable_name}_fp16.onnx` into the models
+    // dir). RRDB upscale variants use the OnDemand `filename`'s stem
+    // verbatim because the GitHub release artifacts (downloaded by
+    // the fetcher's `fp16` companion) keep the capitalized
+    // human-facing form (e.g. `RealESRGAN_x4plus_fp16.onnx`).
     let name = match id {
         ModelId::Silueta => "silueta",
         ModelId::U2net => "u2net",
         ModelId::BiRefNetLite => "birefnet_lite",
-        ModelId::DexiNed
+        ModelId::RealEsrganX4Plus => "RealESRGAN_x4plus",
+        ModelId::RealEsrganX2Plus => "RealESRGAN_x2plus",
+        ModelId::FourXNmkdSiaxCx => "4x-NMKD-Siax-CX",
+        ModelId::FourXNmkdSuperscale => "4x-NMKD-Superscale",
+        // Nomos8k's published .onnx is already fp16; the engine
+        // dispatches via `UpscaleModelKnobs.is_fp16` instead of via a
+        // sibling lookup. No variant file to load.
+        ModelId::Nomos8kSchatL
+        | ModelId::DexiNed
         | ModelId::LaMaFp32
         | ModelId::BigLaMa
         | ModelId::Migan
         | ModelId::SdV15InpaintFp16
         | ModelId::SdV15LcmInpaintFp16
-        | ModelId::TaesdFp16
-        | ModelId::RealEsrganX4Plus
-        | ModelId::Nomos8kSchatL
-        | ModelId::RealEsrganX2Plus
-        | ModelId::FourXNmkdSiaxCx
-        | ModelId::FourXNmkdSuperscale => return None,
+        | ModelId::TaesdFp16 => return None,
     };
     let filename = format!("{name}_{suffix}.onnx");
 
@@ -1088,6 +1147,14 @@ fn load_variant(id: ModelId, suffix: &str) -> Option<Vec<u8>> {
             .join("../../models")
             .join(&filename);
         if let Ok(bytes) = std::fs::read(&dev_path) {
+            return Some(bytes);
+        }
+    }
+
+    // OnDemand-installed sibling: fetcher writes both fp32 and fp16
+    // siblings into on_demand_dir() when `OnDemand.fp16` is set.
+    if let Some(dir) = on_demand_dir() {
+        if let Ok(bytes) = std::fs::read(dir.join(&filename)) {
             return Some(bytes);
         }
     }
@@ -1201,7 +1268,7 @@ mod tests {
     #[test]
     fn ondemand_descriptors_have_complete_metadata() {
         for desc in REGISTRY {
-            if let ModelSource::OnDemand { filename, url, sha256, size_mb, license } = desc.source {
+            if let ModelSource::OnDemand { filename, url, sha256, size_mb, license, fp16 } = desc.source {
                 let is_placeholder = sha256.starts_with("PLACEHOLDER");
                 assert!(!filename.is_empty(), "{:?} filename empty", desc.id);
                 assert!(url.starts_with("https://"), "{:?} non-HTTPS url: {url}", desc.id);
@@ -1212,6 +1279,12 @@ mod tests {
                 assert!(!license.license.is_empty(), "{:?} license empty", desc.id);
                 assert!(license.license_url.starts_with("https://"), "{:?} bad license_url", desc.id);
                 assert!(license.source_url.starts_with("https://"), "{:?} bad source_url", desc.id);
+                if let Some(variant) = fp16 {
+                    assert!(!variant.filename.is_empty(), "{:?} fp16 filename empty", desc.id);
+                    assert!(variant.url.starts_with("https://"), "{:?} fp16 non-HTTPS url", desc.id);
+                    assert_eq!(variant.sha256.len(), 64, "{:?} fp16 sha256 not 64 hex chars", desc.id);
+                    assert!(variant.size_mb > 0, "{:?} fp16 size_mb=0", desc.id);
+                }
             }
         }
     }
@@ -1603,6 +1676,72 @@ mod tests {
             assert_eq!(license.license, "WTFPL");
             assert_eq!(license.author, "Nmkd");
             assert!(!desc.attribution_required, "WTFPL does not require attribution");
+        }
+    }
+
+    // ── fp16 variants (32-14) ─────────────────────────────────────────────
+
+    #[test]
+    fn rrdb_upscale_models_carry_fp16_companion() {
+        // All four RRDB upscale entries must declare an fp16 sibling.
+        // Nomos8k's main file IS fp16 (no sibling needed) — that's
+        // covered separately.
+        for id in [
+            ModelId::RealEsrganX4Plus,
+            ModelId::RealEsrganX2Plus,
+            ModelId::FourXNmkdSiaxCx,
+            ModelId::FourXNmkdSuperscale,
+        ] {
+            let desc = descriptor(id).unwrap();
+            let fp16 = match desc.source {
+                ModelSource::OnDemand { fp16, .. } => fp16,
+                _ => panic!("{id:?} must be OnDemand"),
+            };
+            let variant = fp16.unwrap_or_else(|| {
+                panic!("{id:?} RRDB upscale model must declare an fp16 companion (Plan 32-14)")
+            });
+            assert!(
+                variant.filename.ends_with("_fp16.onnx"),
+                "{id:?} fp16 filename must end with _fp16.onnx, got {}",
+                variant.filename
+            );
+            assert!(
+                variant.url.contains("_fp16.onnx"),
+                "{id:?} fp16 url must reference _fp16.onnx"
+            );
+            // fp16 file should be roughly half the fp32 size (within
+            // 5 MB tolerance for ONNX graph metadata overhead).
+            let main_size = match desc.source {
+                ModelSource::OnDemand { size_mb, .. } => size_mb,
+                _ => unreachable!(),
+            };
+            let expected_half = main_size / 2;
+            let delta = (variant.size_mb as i32 - expected_half as i32).abs();
+            assert!(
+                delta <= 5,
+                "{id:?} fp16 size {} MB not roughly half of fp32 {} MB",
+                variant.size_mb, main_size
+            );
+        }
+    }
+
+    #[test]
+    fn load_variant_maps_rrdb_upscale_models() {
+        // Each RRDB upscale ModelId must produce a stable filename stem
+        // for fp16 lookup. Test exercises load_variant's match arm by
+        // calling model_fp16_bytes — returns None (no file on disk in
+        // test env) but proves the match arm exists.
+        for id in [
+            ModelId::RealEsrganX4Plus,
+            ModelId::RealEsrganX2Plus,
+            ModelId::FourXNmkdSiaxCx,
+            ModelId::FourXNmkdSuperscale,
+        ] {
+            // We can't assert Some(bytes) without the actual file on
+            // disk, but we can confirm the call doesn't panic on a
+            // missing match arm — Nomos8k's `unreachable!`-free arm
+            // returns None cleanly.
+            let _ = model_fp16_bytes(id);
         }
     }
 

@@ -443,6 +443,7 @@ mod tests {
                     license_url: "https://example.test/lic",
                     source_url: "https://example.test/src",
                 },
+                fp16: None,
             },
             version: "1.0.0",
             gpu,
