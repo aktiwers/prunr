@@ -188,6 +188,17 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
         handle_brush_input(ui, app, canvas_rect);
     }
 
+    // Magic Brush click/stroke input. Suppressed during encoder run (silently —
+    // per UI-SPEC, clicks while encoder_pending are ignored without a toast).
+    if app.magic_brush_state.is_active()
+        && !app.magic_brush_state.has_pending_encoder()
+        && !modal_open
+        && !popup_open
+        && !widget_has_pointer
+    {
+        handle_magic_brush_input(ui, app, canvas_rect);
+    }
+
     // Magic Brush "Preparing..." overlay — shown while the SAM encoder is
     // in flight for the selected item. Canvas centre, TEXT_SECONDARY text +
     // ACCENT spinner below.
@@ -270,6 +281,126 @@ fn handle_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: Rect) 
         // persists mask, fires per-model dispatch rule, spawns off-thread
         // outline + texture visualization build.
         app.commit_selection_and_dispatch(item_id, merged);
+    }
+}
+
+/// Handle Magic Brush pointer events (click + drag-stroke) on the canvas.
+/// Suppressed when encoder is pending — clicks during "Preparing..." are
+/// silently ignored (per 33-UI-SPEC). Dispatches a SAM decoder job on
+/// every click or completed stroke; modifier keys control mask combination.
+fn handle_magic_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: Rect) {
+    use crate::gui::processor::PromptModifier;
+
+    let Some(item) = app.batch.selected_item() else { return };
+    let Some(tex) = item.result_texture.as_ref().or(item.source_texture.as_ref()) else { return };
+    let img_rect = compute_img_rect(
+        canvas_rect,
+        tex.size_vec2(),
+        app.zoom_state.zoom,
+        app.zoom_state.pan_offset,
+    );
+
+    let Some(idx) = app.batch.selected_idx_clamped() else { return };
+    let item = &app.batch.items[idx];
+    let Some(embedding) = item.magic_brush_embedding.clone() else { return };
+    let item_id = item.id;
+    let (source_w, source_h) = item.dimensions;
+
+    // Determine modifier from held keys. Read once to avoid per-call InputState borrow.
+    let modifier = ui.ctx().input(|i| {
+        if i.modifiers.shift {
+            PromptModifier::Add
+        } else if i.modifiers.alt {
+            PromptModifier::Subtract
+        } else {
+            PromptModifier::Replace
+        }
+    });
+
+    // Convert screen position to source-image pixel coordinates.
+    let screen_to_src = |pos: egui::Pos2| -> (f32, f32) {
+        if img_rect.width() <= 0.0 || img_rect.height() <= 0.0 {
+            return (0.0, 0.0);
+        }
+        let rel_x = (pos.x - img_rect.min.x) / img_rect.width();
+        let rel_y = (pos.y - img_rect.min.y) / img_rect.height();
+        let px = rel_x * source_w as f32;
+        let py = rel_y * source_h as f32;
+        (px.clamp(0.0, source_w as f32 - 1.0), py.clamp(0.0, source_h as f32 - 1.0))
+    };
+
+    let (clicked, drag_started, dragging, released, hover_pos) = ui.ctx().input(|i| {
+        let hover = i.pointer.hover_pos();
+        let clicked = i.pointer.primary_clicked()
+            && hover.is_some_and(|p| canvas_rect.contains(p));
+        let drag_started = i.pointer.primary_pressed()
+            && hover.is_some_and(|p| canvas_rect.contains(p));
+        let dragging = i.pointer.primary_down()
+            && hover.is_some_and(|p| canvas_rect.contains(p));
+        let released = i.pointer.primary_released();
+        (clicked, drag_started, dragging, released, hover)
+    });
+
+    if drag_started {
+        app.magic_brush_state.active_stroke.clear();
+    }
+
+    if dragging {
+        if let Some(pos) = hover_pos {
+            if canvas_rect.contains(pos) {
+                let (px, py) = screen_to_src(pos);
+                let stroke = &mut app.magic_brush_state.active_stroke;
+                // Deduplicate consecutive identical points to reduce noise.
+                if stroke.last().map_or(true, |&last| last != (px, py)) {
+                    stroke.push((px, py));
+                }
+            }
+        }
+    }
+
+    if released && app.magic_brush_state.active_stroke.len() > 1 {
+        // Stroke completed — dispatch decoder with stroke prompt.
+        let stroke_pts = std::mem::take(&mut app.magic_brush_state.active_stroke);
+        match prunr_core::sam::prompt::build_stroke_prompt(
+            &stroke_pts,
+            source_w as u32,
+            source_h as u32,
+        ) {
+            Ok(prompt) => {
+                app.processor.dispatch_sam_decoder(item_id, embedding, prompt, modifier);
+            }
+            Err(e) => {
+                tracing::warn!(item_id, "SAM stroke prompt failed: {e:?}");
+            }
+        }
+    } else if clicked {
+        // Single click — dispatch decoder with click prompt.
+        if let Some(pos) = hover_pos {
+            let (px, py) = screen_to_src(pos);
+            let prompt = match modifier {
+                PromptModifier::Subtract => {
+                    prunr_core::sam::prompt::build_alt_modifier_prompt(
+                        px, py, source_w as u32, source_h as u32,
+                    )
+                }
+                PromptModifier::Add => {
+                    prunr_core::sam::prompt::build_shift_modifier_prompt(
+                        px, py, source_w as u32, source_h as u32,
+                    )
+                }
+                PromptModifier::Replace => {
+                    prunr_core::sam::prompt::build_click_prompt(
+                        px, py, source_w as u32, source_h as u32,
+                    )
+                }
+            };
+            // Only dispatch if hover was inside the canvas and a single click
+            // (not the tail of a drag).
+            if app.magic_brush_state.active_stroke.is_empty() {
+                app.processor.dispatch_sam_decoder(item_id, embedding, prompt, modifier);
+            }
+        }
+        app.magic_brush_state.active_stroke.clear();
     }
 }
 
