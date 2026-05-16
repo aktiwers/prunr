@@ -16,6 +16,9 @@ path = "src/lib.rs"
 # Enable runtime model loading from filesystem (for development without embedding ONNX files).
 # Usage: cargo check -p prunr-app --features dev-models
 dev-models = ["prunr-core/dev-models"]
+# Expose test-only constructors (e.g. BatchItem::new_for_test) for integration
+# tests in sibling crates that can't use #[cfg(test)] across crate boundaries.
+test-utils = []
 
 [dependencies]
 prunr-core = { path = "../prunr-core" }

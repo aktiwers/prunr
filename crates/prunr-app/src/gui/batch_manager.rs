@@ -486,6 +486,53 @@ impl BatchManager {
             }
         }
     }
+
+    /// Commit a new selection mask to the named item. Recomputes the
+    /// content hash, drops the outline + texture caches (Plan 05's
+    /// off-thread rebuilder will fill them). Does NOT fire any dispatch
+    /// — Plan 04 owns the per-model interpretation rule via
+    /// `apply_selection_to_active_model`.
+    ///
+    /// Returns true if the item was found and updated.
+    pub(crate) fn commit_selection(
+        &mut self,
+        item_id: u64,
+        mask: prunr_core::selection::MaskArtifact,
+    ) -> bool {
+        let Some(item) = self.find_by_id_mut(item_id) else { return false };
+        let hash = mask.content_hash();
+        item.selection_mask = Some(Arc::new(mask));
+        item.selection_hash = Some(hash);
+        // Outline + texture rebuilt off-thread by Plan 05.
+        item.selection_outline = None;
+        item.selection_texture = None;
+        true
+    }
+
+    /// Drop the entire selection state on the named item (Esc, Clear button,
+    /// image switch is implicit via per-item ownership). Returns true if
+    /// anything was cleared.
+    pub(crate) fn clear_selection(&mut self, item_id: u64) -> bool {
+        let Some(item) = self.find_by_id_mut(item_id) else { return false };
+        let was_present = item.selection_mask.is_some()
+            || item.selection_hash.is_some()
+            || item.selection_outline.is_some()
+            || item.selection_texture.is_some();
+        item.invalidate_selection();
+        was_present
+    }
+
+    /// Called when source_rgba is replaced on an item (re-decode, image
+    /// switch into a previously-evicted item). Drops the selection AND
+    /// the SAM encoder embedding — both are bound to the source bytes
+    /// they were derived from.
+    pub(crate) fn invalidate_selection_on_source_change(&mut self, item_id: u64) -> bool {
+        let Some(item) = self.find_by_id_mut(item_id) else { return false };
+        let any = item.selection_mask.is_some() || item.magic_brush_embedding.is_some();
+        item.invalidate_selection();
+        item.invalidate_magic_brush_embedding();
+        any
+    }
 }
 
 /// Compute dimensions that fit within `max_w` × `max_h` preserving aspect ratio.
@@ -1049,5 +1096,69 @@ mod tests {
         for id in [10, 20] { bm.items.push(item_with_cache(id, 0)); }
         bm.reorder(5, 0);
         assert_eq!(bm.items.iter().map(|i| i.id).collect::<Vec<_>>(), [10, 20]);
+    }
+
+    // ── selection lifecycle ─────────────────────────────────────────────
+
+    #[test]
+    fn commit_selection_sets_hash_in_lockstep() {
+        let mut bm = fixture();
+        bm.items.push(item_with_cache(1, 0));
+        let mask = prunr_core::selection::MaskArtifact::new_empty(32, 32);
+        let expected_hash = mask.content_hash();
+        assert!(bm.commit_selection(1, mask));
+        let item = bm.find_by_id(1).unwrap();
+        assert_eq!(
+            item.selection_hash,
+            Some(expected_hash),
+            "selection_hash must mirror content_hash() of the committed mask",
+        );
+        assert!(item.selection_mask.is_some());
+    }
+
+    #[test]
+    fn clear_selection_is_idempotent() {
+        let mut bm = fixture();
+        bm.items.push(item_with_cache(1, 0));
+        let mask = prunr_core::selection::MaskArtifact::new_empty(16, 16);
+        bm.commit_selection(1, mask);
+        assert!(bm.clear_selection(1), "first clear must return true (was present)");
+        assert!(!bm.clear_selection(1), "second clear must return false (nothing to clear)");
+    }
+
+    /// Criterion 8 contract test: selection survives Process clicks.
+    /// `reset_result_caches()` must NOT touch selection_mask / selection_hash.
+    #[test]
+    fn reset_result_caches_does_not_clear_selection() {
+        let mut item = super::super::item::BatchItem::new_for_test();
+        let mask = prunr_core::selection::MaskArtifact::new_empty(32, 32);
+        let hash = mask.content_hash();
+        item.selection_mask = Some(Arc::new(mask));
+        item.selection_hash = Some(hash);
+        item.reset_result_caches();
+        assert!(
+            item.selection_mask.is_some(),
+            "selection_mask must survive reset_result_caches (Criterion 8)",
+        );
+        assert!(
+            item.selection_hash.is_some(),
+            "selection_hash must survive reset_result_caches (Criterion 8)",
+        );
+    }
+
+    #[test]
+    fn invalidate_selection_on_source_change_drops_embedding() {
+        let mut bm = fixture();
+        bm.items.push(item_with_cache(1, 0));
+        {
+            let item = bm.find_by_id_mut(1).unwrap();
+            let mask = prunr_core::selection::MaskArtifact::new_empty(8, 8);
+            item.selection_mask = Some(Arc::new(mask));
+            item.magic_brush_embedding = Some(Arc::new(()));
+        }
+        bm.invalidate_selection_on_source_change(1);
+        let item = bm.find_by_id(1).unwrap();
+        assert!(item.selection_mask.is_none(), "selection_mask must be cleared on source change");
+        assert!(item.magic_brush_embedding.is_none(), "embedding must be cleared on source change");
     }
 }
