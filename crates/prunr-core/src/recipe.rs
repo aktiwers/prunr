@@ -189,7 +189,7 @@ impl Default for UpscaleRecipe {
             output_scale: OutputScale::X4,
             pre_denoise_bits: 0_u32,          // 0.0_f32.to_bits() == 0
             brightness_lift_bits: 0_u32,
-            sharpen_bits: 0_u32,
+            sharpen_bits: 0.2_f32.to_bits(),  // mild default sharpen counters Real-ESRGAN softness
             ai_blend_bits: 1.0_f32.to_bits(), // default = full AI; 0 = pure bicubic (disables AI output)
             saturation_bits: 0_u32,
             color_match: false,
@@ -830,10 +830,18 @@ mod tests {
         assert_eq!(r.output_scale, OutputScale::X4);
         assert_eq!(r.pre_denoise_bits, 0_u32);
         assert_eq!(r.brightness_lift_bits, 0_u32);
-        assert_eq!(r.sharpen_bits, 0_u32);
+        assert_eq!(r.sharpen_bits, 0.2_f32.to_bits());
         assert_eq!(r.ai_blend_bits, 1.0_f32.to_bits());
         assert_eq!(r.saturation_bits, 0_u32);
         assert!(!r.color_match);
+    }
+
+    #[test]
+    fn upscale_recipe_default_sharpen_is_0_2() {
+        let r = UpscaleRecipe::default();
+        assert_eq!(r.sharpen_bits, 0.2_f32.to_bits(),
+            "default sharpen=0.2 is the perceived-quality baseline for Real-ESRGAN's slightly soft output");
+        assert_eq!(r.sharpen(), 0.2);
     }
 
     #[test]
