@@ -629,6 +629,15 @@ fn run_preview(inputs: DispatchInputs, cancel: &AtomicBool) -> RunOutput {
     }
 }
 
+impl LivePreview {
+    /// Test-only spy: true iff `dispatch_brush_rerun` queued a preview for
+    /// this item (i.e. `mark_tweak` was called with this item_id).
+    #[cfg(test)]
+    pub(crate) fn is_pending_for(&self, item_id: u64) -> bool {
+        self.pending.contains_key(&item_id)
+    }
+}
+
 /// Pick between single-scale (`compose_edges_styled`) and dual-scale
 /// (`compose_edges_dual_styled`) composition based on the selected
 /// `LineStyle`. For dual-scale, uses `primary_mask` as the Fine layer and
