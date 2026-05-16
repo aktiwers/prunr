@@ -3,12 +3,12 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: unknown
-last_updated: "2026-05-16T10:50:45.792Z"
+last_updated: "2026-05-16T10:52:02.504Z"
 progress:
   total_phases: 14
   completed_phases: 8
   total_plans: 74
-  completed_plans: 58
+  completed_plans: 59
 ---
 
 # Project State
@@ -22,7 +22,7 @@ See: `.planning/PROJECT.md` (updated 2026-04-06)
 ## Current Position
 
 Phase: 33 (magic-brush) — EXECUTING
-Plan: 3 of 7 (33-01 + 33-02 + 33-03 complete)
+Plan: 6 of 7 (33-01 + 33-02 + 33-03 + 33-04 + 33-05 + 33-06 complete)
 
 ## Phase Status (ground truth, derived from git log)
 
@@ -106,4 +106,5 @@ Captured in commit messages and `.planning/phases/12-*/`, `13-*/`, `14-*/`, `28-
 - 2026-05-16 — Phase 32-11 completed: Gap-4 + Gap-8 closure. UpscaleRecipe::default() sharpen_bits changed to 0.2_f32.to_bits(); ItemSettings::default() sharpen changed to 0.2; #[serde(default = "default_sharpen")] ensures old presets without the field load as 0.2 (mirrors default_ai_blend pattern). 5 new tests pin the default. Chip-copy style policy added to CLAUDE.md under GUI state ownership: silence on timing, active-voice "Requires reprocessing." for Tier-1 only, no internal vocab in user-facing text. refinement_row.rs was already compliant from 32-07. 924 workspace tests green. Commits: c4d32b4 + ab63c55.
 - 2026-05-16 — Phase 33-02 completed: SAM 2 Hiera Small model registry. ModelCategory::Selection + ModelId::Sam2HieraSmall added; MultiPartOnDemand REGISTRY entry (encoder ~200 MB + decoder ~20 MB, Apache 2.0, working_set_mb=800); SHA256 placeholders (64-char hex zeros, Plan 07 replaces); resolve_part_bytes + ResolveError enum for Plan 07 SAM dispatch; 10 new tests (4 descriptor + 3 resolver + 2 boundary + 1 coverage). 948 workspace tests green. Commits: fce2c7c + 4ce9300 + 9fbf8a7.
 - 2026-05-16 — Phase 33-01 completed: MaskArtifact foundation. f32 Arc<Vec<f32>> single-channel mask at source image resolution; add_mask (pixel max) / subtract_mask (clamped diff) / invert / content_hash / alpha_cut / copy_to_rgba / to_mask_correction (nearest-neighbour to tensor res, +127/0 quantization); outline_polyline (8-connected boundary scan) + feather_edges (guided-filter edge refinement); 20 unit tests green (14 core + 6 refine). Adapted feather_edges to actual guided_filter_alpha return signature. 970 workspace tests green. Commits: 23dcf39 + 648e863. Key decision: Arc<Vec<f32>> for O(1) undo snapshot clones.
+- 2026-05-16 — Phase 33-06 completed: prunr_core::sam pure-function module. SamEmbedding (16 MB cached encoder output, validate_shapes), SamDecoderOutput, decode_to_mask_artifact (bilinear upsample 256→source, logit threshold → binary MaskArtifact), preprocess_for_sam (1024×1024 NCHW ImageNet-normalized f32 tensor), 4 prompt builders (build_click_prompt/build_stroke_prompt/build_shift_modifier_prompt/build_alt_modifier_prompt) + SamPrompt + PromptError + MAX_STROKE_POINTS=8. Zero ORT dependency; 20 unit tests green; 991 workspace tests green. Commits: 22b3573 + c8e60ff. Key decision: preprocess_for_sam wraps RgbaImage as DynamicImage (resize_rgb_lanczos3 actual signature). Plan 07 will retype BatchItem.magic_brush_embedding from Arc<()> to Arc<SamEmbedding>.
 - 2026-05-16 — Phase 33-03 completed: BatchItem selection fields + lifecycle. 5 new fields: selection_mask (Arc<MaskArtifact>), selection_hash (u64), selection_outline (Arc<Vec<(u32,u32)>>), selection_texture (TextureHandle), magic_brush_embedding (Arc<()> placeholder for Plan 07). BatchManager gains commit_selection / clear_selection / invalidate_selection_on_source_change helpers. reset_result_caches() does NOT touch selection fields (Criterion 8). cache_size() includes selection bytes + 16 MB embedding constant. 8 boundary tests green; 553 workspace tests green. Commits: 875fd81 + 2337be2. Key decision: Arc<()> placeholder for embedding avoids cross-plan dependency before Plan 06 lands.
