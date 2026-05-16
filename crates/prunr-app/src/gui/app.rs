@@ -910,6 +910,34 @@ impl PrunrApp {
         }
     }
 
+    /// Single-source-of-truth call for writing a new selection and triggering
+    /// all three lockstep side-effects: persist mask, fire per-model dispatch
+    /// rule, spawn off-thread visualization build (outline + texture).
+    ///
+    /// Every call site that authors a selection (Paint Brush, Magic Brush Plan
+    /// 07, Invert action, any future tool) calls THIS method — never the three
+    /// methods individually.
+    pub(crate) fn commit_selection_and_dispatch(
+        &mut self,
+        item_id: u64,
+        mask: prunr_core::selection::MaskArtifact,
+    ) {
+        if self.batch.commit_selection(item_id, mask) {
+            self.apply_selection_to_active_model(item_id);
+            // Spawn off-thread outline + texture build with hash guard.
+            if let Some(item) = self.batch.find_by_id(item_id) {
+                if let Some(mask_arc) = item.selection_mask.clone() {
+                    let feather_px = self.settings.brush.edge_feather as u32;
+                    self.batch.bg_io.request_selection_visualization(
+                        item_id,
+                        mask_arc,
+                        feather_px,
+                    );
+                }
+            }
+        }
+    }
+
     pub(crate) fn dispatch_inpaint_for_item(&mut self, idx: usize) {
         let item = &self.batch.items[idx];
         let item_id = item.id;
@@ -3055,6 +3083,33 @@ impl PrunrApp {
 
         self.pump_thumbnail_results(ctx);
         self.pump_history_demote_results();
+
+        // Plan 05: drain selection outline results (off-thread outline_polyline).
+        // Hash guard: if item.selection_hash no longer matches, a newer commit
+        // superseded this result — silently drop it (the newer job is in flight).
+        while let Ok(result) = self.batch.bg_io.selection_outline_rx.try_recv() {
+            if let Some(item) = self.batch.find_by_id_mut(result.item_id) {
+                if item.selection_hash == Some(result.hash) {
+                    item.selection_outline = Some(std::sync::Arc::new(result.outline));
+                }
+            }
+        }
+
+        // Plan 05: drain selection texture results (off-thread ColorImage build).
+        // ctx.load_texture is allowed here — drain_background_channels runs in
+        // logic(), not in a render closure (CLAUDE.md ## Hot paths exception).
+        while let Ok(result) = self.batch.bg_io.selection_texture_rx.try_recv() {
+            if let Some(item) = self.batch.find_by_id_mut(result.item_id) {
+                if item.selection_hash == Some(result.hash) {
+                    let tex = ctx.load_texture(
+                        format!("selection_{}", result.item_id),
+                        result.color_image,
+                        egui::TextureOptions::LINEAR,
+                    );
+                    item.selection_texture = Some(tex);
+                }
+            }
+        }
 
         // Drain bg-image texture preps. Hash match guards against a
         // user pick that swapped to a different bg image while the

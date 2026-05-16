@@ -1080,6 +1080,7 @@ impl Processor {
                     &engine_for_thread,
                     on_tile,
                     Some(cancel_flag),
+                    None,
                 )
             } else {
                 prunr_core::upscale::upscale_rgba_with_engine(
@@ -1089,6 +1090,7 @@ impl Processor {
                     scale_factor,
                     on_tile,
                     Some(cancel_flag),
+                    None,
                 )
             };
             // Tier-1 post-inference: undo the brightness lift so the final
