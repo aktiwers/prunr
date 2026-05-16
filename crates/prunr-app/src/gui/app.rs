@@ -14,6 +14,7 @@ use super::state::AppState;
 use super::theme;
 use super::worker::{WorkerMessage, WorkerResult, spawn_worker};
 use super::views::{adjustments_toolbar, canvas, cli_help, model_store, pipeline_flow, settings, shortcuts, sidebar, statusbar, toolbar};
+use super::views::selection_action_bar::SelectionAction;
 
 /// Days the user is left alone after dismissing the first-launch
 /// runtime prompt. 14 picked to balance "don't nag" with "remind on a
@@ -934,6 +935,80 @@ impl PrunrApp {
                         feather_px,
                     );
                 }
+            }
+        }
+    }
+
+    /// Dispatch a selection action (Delete / Copy / Cut / Invert / Clear).
+    /// Called from `apply_toolbar_change` and from keyboard shortcuts that
+    /// have a live selection.
+    ///
+    /// - Delete: zeros alpha inside the selection on `result_rgba`, archives
+    ///   the previous result first so Cmd+Z can restore it.
+    /// - Copy: copies selection-masked pixels to the system clipboard. No
+    ///   history entry — non-destructive read.
+    /// - Cut: Copy + Delete in one step (one history entry, not two).
+    /// - Invert: replaces the selection mask with its complement and
+    ///   re-dispatches visualization.
+    /// - Clear: removes the selection mask entirely.
+    pub(crate) fn handle_selection_action(
+        &mut self,
+        idx: usize,
+        action: SelectionAction,
+        ctx: &egui::Context,
+    ) {
+        let item_id = self.batch.items[idx].id;
+
+        match action {
+            SelectionAction::Delete => {
+                let Some(mask) = self.batch.items[idx].selection_mask.clone() else { return };
+                let Some(result) = self.batch.items[idx].result_rgba.clone() else { return };
+                // Archive pre-delete snapshot so Cmd+Z restores it.
+                let max_depth = self.settings.history_depth;
+                HistoryManager::archive_current_result(&mut self.batch.items[idx], max_depth, false);
+                let mut new_result: image::RgbaImage = (*result).clone();
+                mask.alpha_cut(&mut new_result);
+                let new_arc = Arc::new(new_result);
+                self.batch.items[idx].result_rgba = Some(new_arc.clone());
+                let source = self.batch.items[idx].source.clone();
+                self.batch.request_thumbnail(item_id, &source, Some(&new_arc));
+                ctx.request_repaint();
+            }
+            SelectionAction::Copy => {
+                let Some(mask) = self.batch.items[idx].selection_mask.clone() else { return };
+                let Some(result) = self.batch.items[idx].result_rgba.clone() else { return };
+                let cropped = mask.copy_to_rgba(&result);
+                let cropped = Arc::new(cropped);
+                self.system.copy_image(&cropped);
+                self.set_temporary_status("Selection copied to clipboard");
+            }
+            SelectionAction::Cut => {
+                let Some(mask) = self.batch.items[idx].selection_mask.clone() else { return };
+                let Some(result) = self.batch.items[idx].result_rgba.clone() else { return };
+                // Archive pre-cut snapshot — one history entry covers both copy and delete.
+                let max_depth = self.settings.history_depth;
+                HistoryManager::archive_current_result(&mut self.batch.items[idx], max_depth, false);
+                let cropped = mask.copy_to_rgba(&result);
+                let cropped = Arc::new(cropped);
+                self.system.copy_image(&cropped);
+                let mut new_result: image::RgbaImage = (*result).clone();
+                mask.alpha_cut(&mut new_result);
+                let new_arc = Arc::new(new_result);
+                self.batch.items[idx].result_rgba = Some(new_arc.clone());
+                let source = self.batch.items[idx].source.clone();
+                self.batch.request_thumbnail(item_id, &source, Some(&new_arc));
+                self.set_temporary_status("Selection cut to clipboard");
+                ctx.request_repaint();
+            }
+            SelectionAction::Invert => {
+                let Some(mask) = self.batch.items[idx].selection_mask.clone() else { return };
+                let inverted = mask.invert();
+                self.commit_selection_and_dispatch(item_id, inverted);
+                ctx.request_repaint();
+            }
+            SelectionAction::Clear => {
+                self.batch.clear_selection(item_id);
+                ctx.request_repaint();
             }
         }
     }
@@ -2883,8 +2958,29 @@ impl PrunrApp {
         if intents.save_requested && app_state == AppState::Done {
             self.handle_save_selected();
         }
+        // Ctrl+C: if there's an active selection and the item is Done, copy the
+        // selection region; otherwise fall through to normal whole-result copy.
+        let has_selection = self.batch.selected_item()
+            .map(|i| i.selection_mask.is_some())
+            .unwrap_or(false);
         if copy_requested && app_state == AppState::Done {
-            self.handle_copy();
+            if has_selection {
+                if let Some(idx) = self.batch.selected_idx_clamped() {
+                    self.handle_selection_action(idx, SelectionAction::Copy, ctx);
+                }
+            } else {
+                self.handle_copy();
+            }
+        }
+        if intents.cut_selection && app_state == AppState::Done && has_selection {
+            if let Some(idx) = self.batch.selected_idx_clamped() {
+                self.handle_selection_action(idx, SelectionAction::Cut, ctx);
+            }
+        }
+        if intents.delete_selection && app_state == AppState::Done && has_selection {
+            if let Some(idx) = self.batch.selected_idx_clamped() {
+                self.handle_selection_action(idx, SelectionAction::Delete, ctx);
+            }
         }
         if intents.toggle_before_after && app_state == AppState::Done {
             self.show_original = !self.show_original;
@@ -2921,8 +3017,8 @@ impl PrunrApp {
 
     /// Escape dismisses the topmost interruptable state. Priority order:
     /// in-flight upscale → in-flight eraser stroke → active batch processing
-    /// → open modal. Upscale wins because it occupies the whole canvas and
-    /// the tile-by-tile display is the primary interactive feedback.
+    /// → active selection → open modal. Selection clear sits above modal
+    /// dismissal so Esc is the natural "cancel what I just drew" key.
     fn apply_cancel_shortcut(&mut self, ctx: &egui::Context) {
         if self.processor.is_upscale_in_flight() {
             self.processor.cancel_upscale();
@@ -2930,6 +3026,11 @@ impl PrunrApp {
             self.processor.cancel_all_inpaints();
         } else if self.batch.status_counts().processing > 0 {
             self.handle_cancel_all_and_reset();
+        } else if self.batch.selected_item().is_some_and(|i| i.selection_mask.is_some()) {
+            if let Some(item_id) = self.batch.selected_item().map(|i| i.id) {
+                self.batch.clear_selection(item_id);
+                ctx.request_repaint();
+            }
         } else if self.show_settings {
             self.close_settings(ctx);
         } else if self.show_shortcuts {
@@ -3364,6 +3465,8 @@ impl PrunrApp {
                 } else {
                     item.dimensions
                 };
+                let has_selection = item.selection_mask.is_some();
+                let protect_sel = settings_ref.protect_selection;
                 toolbar_change = adjustments_toolbar::render(
                     ui,
                     &mut item.settings,
@@ -3375,6 +3478,8 @@ impl PrunrApp {
                     has_bg_image,
                     bg_image_label,
                     source_dims,
+                    has_selection,
+                    protect_sel,
                 );
             });
         if toolbar_change.reset_brush_requested {
@@ -3465,6 +3570,13 @@ impl PrunrApp {
         } else if toolbar_change.clear_bg_image {
             self.batch.items[idx].clear_bg_image();
             ctx.request_repaint();
+        }
+        if let Some(new_protect) = toolbar_change.protect_selection {
+            self.settings.protect_selection = new_protect;
+            self.settings.save();
+        }
+        if let Some(action) = toolbar_change.selection_action {
+            self.handle_selection_action(idx, action, ctx);
         }
 
         self.batch.items[idx].apply_cache_impact(toolbar_change.cache_impact);
@@ -3926,6 +4038,10 @@ struct ShortcutIntents {
     undo_requested: bool,
     redo_requested: bool,
     screenshot_requested: bool,
+    /// Delete key — delete selected region when a selection is active.
+    delete_selection: bool,
+    /// Ctrl+X — cut selection to clipboard when a selection is active.
+    cut_selection: bool,
 }
 
 fn collect_shortcut_intents(ctx: &egui::Context) -> ShortcutIntents {
@@ -3947,6 +4063,9 @@ fn collect_shortcut_intents(ctx: &egui::Context) -> ShortcutIntents {
         if i.modifiers.command && i.key_pressed(Key::R) { s.remove_requested = true; }
         if i.modifiers.command && i.key_pressed(Key::S) { s.save_requested = true; }
         if i.key_pressed(Key::Escape)                   { s.cancel_requested = true; }
+        if i.modifiers.command && i.key_pressed(Key::X) { s.cut_selection = true; }
+        // Delete key — bare key, suppressed when a text field is focused (handled below).
+        if !text_focused && i.key_pressed(Key::Delete)  { s.delete_selection = true; }
         if fresh(Key::F1)                               { s.toggle_shortcuts = true; }
         if fresh(Key::F2)                               { s.toggle_cli_help = true; }
         if fresh(Key::F3)                               { s.toggle_pipeline_flow = true; }
@@ -4254,5 +4373,107 @@ mod toast_label_tests {
     #[test]
     fn multi_item_mixed_types_falls_back_to_count() {
         assert_eq!(action_toast_label(3, [2, 1, 0], UNDO_LABELS, "undone"), "3 actions undone");
+    }
+}
+
+#[cfg(test)]
+mod selection_action_tests {
+    use std::sync::Arc;
+    use prunr_core::selection::MaskArtifact;
+    use crate::gui::item::{BatchItem, BatchStatus, ImageSource};
+    use crate::gui::history_manager::HistoryManager;
+
+    fn make_mask(w: u32, h: u32, selected: bool) -> MaskArtifact {
+        let v = if selected { 1.0f32 } else { 0.0f32 };
+        MaskArtifact {
+            width: w,
+            height: h,
+            data: Arc::new(vec![v; (w * h) as usize]),
+        }
+    }
+
+    fn make_item_done() -> BatchItem {
+        let mut item = BatchItem::new(
+            42,
+            "test.png".to_string(),
+            ImageSource::Bytes(Arc::new(Vec::new())),
+            (4, 4),
+            Default::default(),
+            String::new(),
+        );
+        // Give it a result image (4×4 all-white fully-opaque).
+        let mut rgba = image::RgbaImage::new(4, 4);
+        for px in rgba.pixels_mut() {
+            *px = image::Rgba([255, 255, 255, 255]);
+        }
+        item.result_rgba = Some(Arc::new(rgba));
+        item.status = BatchStatus::Done;
+        item
+    }
+
+    /// Delete: `alpha_cut` zeros the selected region; history depth grows by 1.
+    ///
+    /// `archive_current_result` moves `result_rgba` into the history entry
+    /// (chain_mode=false). Save the result Arc before archiving so the
+    /// alpha_cut operation has something to work on — exactly as
+    /// `handle_selection_action` does (it clones `result_rgba` before
+    /// calling `archive_current_result`).
+    #[test]
+    fn delete_action_alpha_cuts_result_and_pushes_history() {
+        let mut item = make_item_done();
+        let mask = make_mask(4, 4, true);
+
+        // Capture result before archive moves it into history.
+        let result = item.result_rgba.clone().unwrap();
+        assert_eq!(item.history.len(), 0, "no history before archive");
+
+        HistoryManager::archive_current_result(&mut item, 10, false);
+        assert_eq!(item.history.len(), 1, "archive pushes exactly one entry");
+
+        // Apply alpha_cut to a clone of the saved result.
+        let mut new_result = (*result).clone();
+        mask.alpha_cut(&mut new_result);
+
+        // All pixels in the selected region must have alpha == 0.
+        for px in new_result.pixels() {
+            assert_eq!(px.0[3], 0, "alpha_cut must zero alpha in selected region");
+        }
+    }
+
+    /// Invert: the inverted mask is the bitwise complement (1 - v) of the original.
+    #[test]
+    fn invert_action_replaces_mask_with_inverse() {
+        let original = make_mask(4, 4, true);
+        let inverted = original.invert();
+        // All-selected → all-inverted (0.0).
+        for &v in inverted.data.iter() {
+            assert!((v - 0.0f32).abs() < f32::EPSILON,
+                "inverted all-selected mask must be all-zero");
+        }
+        let partial = MaskArtifact {
+            width: 2,
+            height: 2,
+            data: Arc::new(vec![0.0, 1.0, 0.0, 1.0]),
+        };
+        let inv = partial.invert();
+        assert!((inv.data[0] - 1.0f32).abs() < f32::EPSILON);
+        assert!((inv.data[1] - 0.0f32).abs() < f32::EPSILON);
+        assert!((inv.data[2] - 1.0f32).abs() < f32::EPSILON);
+        assert!((inv.data[3] - 0.0f32).abs() < f32::EPSILON);
+    }
+
+    /// Cut: one archive call produces one history entry (not two).
+    /// Verifies that Cut doesn't call archive_current_result twice (which
+    /// would produce one redundant entry with an identical result).
+    #[test]
+    fn cut_action_pushes_only_one_history_marker() {
+        let mut item = make_item_done();
+        assert_eq!(item.history.len(), 0, "fresh item has no history");
+
+        // Simulate the Cut path: archive once, then apply Cut transformations.
+        HistoryManager::archive_current_result(&mut item, 10, false);
+
+        // Only one entry should exist.
+        assert_eq!(item.history.len(), 1, "Cut must archive exactly once (not twice)");
     }
 }

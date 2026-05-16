@@ -564,6 +564,16 @@ fn render_done(ui: &mut egui::Ui, app: &PrunrApp) {
             Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
             Color32::from_rgba_unmultiplied(255, 255, 255, result_alpha),
         );
+
+        // Selection overlay: outline + fill, zero-alloc read of pre-built texture +
+        // polyline. render_selection_overlay is RENDER-ONLY — no I/O, no decode,
+        // no GPU upload (all pre-computed via background_io channels).
+        if let Some(it) = app.batch.selected_item() {
+            let (src_w, src_h) = it.dimensions;
+            super::selection_overlay::render_selection_overlay(
+                ui, it, &app.settings.brush, img_rect, src_w, src_h,
+            );
+        }
     }
 
     if app.show_original {
