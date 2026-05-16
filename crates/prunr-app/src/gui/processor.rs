@@ -362,7 +362,14 @@ pub(crate) struct Processor {
     /// abort the running `Session::run` within ~50ms instead of waiting
     /// for the next tile boundary's cancel-flag check. Reset via
     /// `.unterminate()` before each new dispatch.
-    upscale_run_options: Arc<prunr_core::upscale::UpscaleRunOptions>,
+    ///
+    /// Lazy because `RunOptions::new()` requires the ORT runtime to be
+    /// loaded — `Processor::new()` runs from tests that don't init ORT,
+    /// and an eager construction blocks on dlopen of the unloaded
+    /// runtime (deadlock observed 2026-05-16 in the workspace lib test
+    /// pass). First dispatch (which already requires ORT) initializes
+    /// the slot; cancel before any dispatch is a no-op.
+    upscale_run_options: std::sync::OnceLock<Arc<prunr_core::upscale::UpscaleRunOptions>>,
     upscale_result_tx: mpsc::Sender<UpscaleResult>,
     upscale_result_rx: mpsc::Receiver<UpscaleResult>,
     /// Unified progress slot. One source of truth for the banner /
@@ -417,10 +424,7 @@ impl Processor {
             inpaint_bridge_rx,
             upscale_active: Arc::new(AtomicBool::new(false)),
             upscale_cancel: Arc::new(AtomicBool::new(false)),
-            upscale_run_options: Arc::new(
-                prunr_core::upscale::UpscaleRunOptions::new()
-                    .expect("RunOptions::new is infallible on a healthy ORT runtime"),
-            ),
+            upscale_run_options: std::sync::OnceLock::new(),
             upscale_result_tx,
             upscale_result_rx,
             dispatch_progress: super::dispatch_progress::DispatchProgressSlot::new(),
@@ -1097,12 +1101,17 @@ impl Processor {
         // pairing, weakly-ordered architectures can delay propagation.
         self.upscale_active.store(true, Ordering::Release);
         self.upscale_cancel.store(false, Ordering::Release);
-        // Clear any sticky terminate flag left over from the previous
-        // dispatch's cancel. Ignore the result — the only failure mode
-        // here is the underlying ORT call returning an error code, which
-        // would also break session.run; if it's broken we'll see it
-        // during the actual inference call.
-        let _ = self.upscale_run_options.unterminate();
+        // First dispatch initializes the shared RunOptions; subsequent
+        // dispatches reuse it. ORT runtime is guaranteed loaded here —
+        // we already have a session-ready `engine` above.
+        let run_options = self.upscale_run_options.get_or_init(|| {
+            Arc::new(
+                prunr_core::upscale::UpscaleRunOptions::new()
+                    .expect("RunOptions::new requires an initialized ORT runtime"),
+            )
+        });
+        // Clear any sticky terminate flag from the prior dispatch's cancel.
+        let _ = run_options.unterminate();
         // Seed the unified slot before the first tile so an early render
         // already shows "Upscaling — tile 0 of …" rather than the prior
         // dispatch's stale data.
@@ -1122,7 +1131,7 @@ impl Processor {
         let engine_for_thread = Arc::clone(&engine);
         // Shared with the GUI thread's `cancel_upscale()` — terminating
         // this RunOptions aborts the running `Session::run` mid-tile.
-        let run_options_for_thread = Arc::clone(&self.upscale_run_options);
+        let run_options_for_thread = Arc::clone(run_options);
 
         std::thread::spawn(move || {
             let progress_slot_for_callback = progress_slot.clone();
@@ -1190,8 +1199,11 @@ impl Processor {
         // Release pairs with Acquire in `upscale::tiling::upscale_tiled`.
         self.upscale_cancel.store(true, Ordering::Release);
         // The terminate call returns immediately; ORT aborts the running
-        // session as soon as it checks between kernel launches.
-        let _ = self.upscale_run_options.terminate();
+        // session as soon as it checks between kernel launches. No-op
+        // when the OnceLock is empty (cancel before any dispatch).
+        if let Some(opts) = self.upscale_run_options.get() {
+            let _ = opts.terminate();
+        }
     }
 
     /// Drain completed upscale results from the background thread.
