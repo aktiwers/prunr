@@ -7,7 +7,7 @@ use crate::types::{CoreError, ModelKind};
 use ort::{
     execution_providers::CPUExecutionProvider,
     memory::{AllocationDevice, AllocatorType, MemoryInfo, MemoryType},
-    session::{Session, builder::GraphOptimizationLevel},
+    session::{builder::GraphOptimizationLevel, Session},
     value::Tensor,
 };
 
@@ -73,28 +73,46 @@ impl std::fmt::Display for EpKind {
 pub(crate) fn available_gpu_eps() -> &'static [EpKind] {
     use std::sync::OnceLock;
     static CACHED: OnceLock<Vec<EpKind>> = OnceLock::new();
-    CACHED.get_or_init(|| {
-        use ort::ep::ExecutionProvider;
-        let mut eps: Vec<EpKind> = Vec::new();
-        #[cfg(target_os = "macos")]
-        {
-            if ort::execution_providers::CoreMLExecutionProvider::default()
-                .is_available().unwrap_or(false) { eps.push(EpKind::CoreMl); }
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            if ort::execution_providers::OpenVINOExecutionProvider::default()
-                .is_available().unwrap_or(false) { eps.push(EpKind::OpenVino); }
-            if ort::execution_providers::CUDAExecutionProvider::default()
-                .is_available().unwrap_or(false) { eps.push(EpKind::Cuda); }
-            #[cfg(windows)]
-            if ort::execution_providers::DirectMLExecutionProvider::default()
-                .is_available().unwrap_or(false) { eps.push(EpKind::DirectMl); }
-        }
-        let eps_str: Vec<&'static str> = eps.iter().map(EpKind::as_str).collect();
-        tracing::info!(eps = ?eps_str, "Available GPU execution providers");
-        eps
-    }).as_slice()
+    CACHED
+        .get_or_init(|| {
+            use ort::ep::ExecutionProvider;
+            let mut eps: Vec<EpKind> = Vec::new();
+            #[cfg(target_os = "macos")]
+            {
+                if ort::execution_providers::CoreMLExecutionProvider::default()
+                    .is_available()
+                    .unwrap_or(false)
+                {
+                    eps.push(EpKind::CoreMl);
+                }
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                if ort::execution_providers::OpenVINOExecutionProvider::default()
+                    .is_available()
+                    .unwrap_or(false)
+                {
+                    eps.push(EpKind::OpenVino);
+                }
+                if ort::execution_providers::CUDAExecutionProvider::default()
+                    .is_available()
+                    .unwrap_or(false)
+                {
+                    eps.push(EpKind::Cuda);
+                }
+                #[cfg(windows)]
+                if ort::execution_providers::DirectMLExecutionProvider::default()
+                    .is_available()
+                    .unwrap_or(false)
+                {
+                    eps.push(EpKind::DirectMl);
+                }
+            }
+            let eps_str: Vec<&'static str> = eps.iter().map(EpKind::as_str).collect();
+            tracing::info!(eps = ?eps_str, "Available GPU execution providers");
+            eps
+        })
+        .as_slice()
 }
 
 /// ORT-backed inference engine. Holds one Session per model selection.
@@ -140,11 +158,19 @@ impl OrtEngine {
     /// ORT bubbles the exception out of `commit_from_memory` rather than
     /// silently skipping the EP, so the CPU fallback in the EP list is never
     /// reached. Retrying with `cpu_only=true` gives us a working session.
-    fn new_with_fallback(model: ModelKind, intra_threads: usize, cpu_only: bool) -> Result<Self, CoreError> {
+    fn new_with_fallback(
+        model: ModelKind,
+        intra_threads: usize,
+        cpu_only: bool,
+    ) -> Result<Self, CoreError> {
         tracing::debug!(?model, intra_threads, cpu_only, "OrtEngine init");
         // Check if an optimized variant exists (loaded from filesystem, so Vec<u8>).
         if let Some(optimized) = Self::optimized_variant_bytes(model, cpu_only) {
-            tracing::debug!(?model, variant_bytes = optimized.len(), "OrtEngine trying optimized variant");
+            tracing::debug!(
+                ?model,
+                variant_bytes = optimized.len(),
+                "OrtEngine trying optimized variant"
+            );
             match Self::build_session(&optimized, intra_threads, model, cpu_only) {
                 Ok(engine) => {
                     tracing::info!(?model, provider = %engine.provider_name, "OrtEngine ready (optimized variant)");
@@ -190,7 +216,9 @@ impl OrtEngine {
     /// Returns None if no variant is available (falls back to embedded FP32).
     fn optimized_variant_bytes(model: ModelKind, cpu_only: bool) -> Option<Vec<u8>> {
         #[cfg(target_os = "macos")]
-        { return None; } // macOS uses FP32 — CoreML does its own FP16 conversion
+        {
+            return None;
+        } // macOS uses FP32 — CoreML does its own FP16 conversion
 
         #[cfg(not(target_os = "macos"))]
         {
@@ -203,7 +231,12 @@ impl OrtEngine {
         }
     }
 
-    fn build_session(model_bytes: &[u8], intra_threads: usize, model: ModelKind, cpu_only: bool) -> Result<Self, CoreError> {
+    fn build_session(
+        model_bytes: &[u8],
+        intra_threads: usize,
+        model: ModelKind,
+        cpu_only: bool,
+    ) -> Result<Self, CoreError> {
         let model_id: prunr_models::ModelId = model.into();
         // CPU-only path: straight shot.
         if cpu_only {
@@ -212,15 +245,20 @@ impl OrtEngine {
             let (builder, bytes) = apply_ort_graph_cache(builder, model_bytes, model_id, "CPU");
             let started = Instant::now();
             let session = builder
-                .with_execution_providers([
-                    CPUExecutionProvider::default()
-                        .with_arena_allocator(false) // lower memory baseline; subprocess handles OOM
-                        .build(),
-                ])
+                .with_execution_providers([CPUExecutionProvider::default()
+                    .with_arena_allocator(false) // lower memory baseline; subprocess handles OOM
+                    .build()])
                 .map_err(|e| CoreError::Inference(format!("ORT set CPU EP failed: {e}")))?
                 .commit_from_memory(&bytes)
-                .map_err(|e| CoreError::Inference(format!("ORT session creation failed (CPU): {e}")))?;
-            tracing::info!(?model, ep = "CPU", elapsed_ms = started.elapsed().as_millis() as u64, "session committed");
+                .map_err(|e| {
+                    CoreError::Inference(format!("ORT session creation failed (CPU): {e}"))
+                })?;
+            tracing::info!(
+                ?model,
+                ep = "CPU",
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "session committed"
+            );
             return Ok(Self {
                 session: Mutex::new(session),
                 provider_name: "CPU".to_string(),
@@ -257,7 +295,8 @@ impl OrtEngine {
             let builder = match ep {
                 #[cfg(not(target_os = "macos"))]
                 EpKind::Cuda => {
-                    let (b, bytes) = apply_ort_graph_cache(builder, model_bytes, model_id, ep.as_str());
+                    let (b, bytes) =
+                        apply_ort_graph_cache(builder, model_bytes, model_id, ep.as_str());
                     bytes_owner = bytes;
                     b
                 }
@@ -331,11 +370,13 @@ impl OrtEngine {
                     });
                 }
                 Err(e) => {
-                    let err = CoreError::Inference(format!("ORT session creation failed ({ep}): {e}"));
+                    let err =
+                        CoreError::Inference(format!("ORT session creation failed ({ep}): {e}"));
                     tracing::warn!(?model, ep = %ep, error = %err, "GPU session creation failed — trying next EP");
                     handle_commit_failure(
                         matches!(bytes_owner, Cow::Owned(_)),
-                        ep, model_id,
+                        ep,
+                        model_id,
                         || crate::cache::optimized_model_path(model_id, ep.as_str()),
                         &format!("{e}"),
                     );
@@ -349,7 +390,9 @@ impl OrtEngine {
         }))
     }
 
-    fn builder_with_base(intra_threads: usize) -> Result<ort::session::builder::SessionBuilder, CoreError> {
+    fn builder_with_base(
+        intra_threads: usize,
+    ) -> Result<ort::session::builder::SessionBuilder, CoreError> {
         Session::builder()
             .map_err(|e| CoreError::Inference(format!("ORT builder init failed: {e}")))?
             .with_optimization_level(GraphOptimizationLevel::Level3)
@@ -367,16 +410,18 @@ impl OrtEngine {
     /// `Ready` event, so the UI corrects itself if this guess was wrong.
     pub fn detect_active_provider() -> String {
         static CACHED: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-        CACHED.get_or_init(|| {
-            // First entry from `available_gpu_eps` is the most likely
-            // winner — same probe drives the actual EP ladder. CPU is
-            // the universal fallback when the loaded libonnxruntime
-            // has no GPU EPs compiled in.
-            available_gpu_eps()
-                .first()
-                .map(|ep| ep.as_str().to_string())
-                .unwrap_or_else(|| "CPU".to_string())
-        }).clone()
+        CACHED
+            .get_or_init(|| {
+                // First entry from `available_gpu_eps` is the most likely
+                // winner — same probe drives the actual EP ladder. CPU is
+                // the universal fallback when the loaded libonnxruntime
+                // has no GPU EPs compiled in.
+                available_gpu_eps()
+                    .first()
+                    .map(|ep| ep.as_str().to_string())
+                    .unwrap_or_else(|| "CPU".to_string())
+            })
+            .clone()
     }
 }
 
@@ -390,8 +435,7 @@ impl OrtEngine {
 pub(crate) fn directml_active() -> bool {
     #[cfg(windows)]
     {
-        OrtEngine::detect_active_provider()
-            .eq_ignore_ascii_case(EpKind::DirectMl.as_str())
+        OrtEngine::detect_active_provider().eq_ignore_ascii_case(EpKind::DirectMl.as_str())
     }
     #[cfg(not(windows))]
     {
@@ -447,9 +491,11 @@ impl OrtEngine {
         let input_tensor = Tensor::from_array(input_array)
             .map_err(|e| CoreError::Inference(format!("Failed to create input tensor: {e}")))?;
 
-        let mut binding = session.create_binding()
+        let mut binding = session
+            .create_binding()
             .map_err(|e| CoreError::Inference(format!("Failed to create IoBinding: {e}")))?;
-        binding.bind_input(&input_name, &input_tensor)
+        binding
+            .bind_input(&input_name, &input_tensor)
             .map_err(|e| CoreError::Inference(format!("Failed to bind input: {e}")))?;
 
         // CPU output memory works for every EP we register today: CPU,
@@ -457,12 +503,18 @@ impl OrtEngine {
         // copy before writing here. If a future GPU-resident postprocess
         // path lands, switch to the EP's native device.
         let mem_info = MemoryInfo::new(
-            AllocationDevice::CPU, 0, AllocatorType::Device, MemoryType::CPUOutput,
-        ).map_err(|e| CoreError::Inference(format!("MemoryInfo: {e}")))?;
-        binding.bind_output_to_device(&output_name, &mem_info)
+            AllocationDevice::CPU,
+            0,
+            AllocatorType::Device,
+            MemoryType::CPUOutput,
+        )
+        .map_err(|e| CoreError::Inference(format!("MemoryInfo: {e}")))?;
+        binding
+            .bind_output_to_device(&output_name, &mem_info)
             .map_err(|e| CoreError::Inference(format!("Failed to bind output: {e}")))?;
 
-        let outputs = session.run_binding(&binding)
+        let outputs = session
+            .run_binding(&binding)
             .map_err(|e| CoreError::Inference(format!("ORT run_binding failed: {e}")))?;
         let view = outputs[0]
             .try_extract_array::<f32>()
@@ -562,7 +614,9 @@ mod tests {
 
     struct MockEngine;
     impl InferenceEngine for MockEngine {
-        fn active_provider(&self) -> &str { "CPU" }
+        fn active_provider(&self) -> &str {
+            "CPU"
+        }
     }
 
     #[test]
@@ -602,20 +656,25 @@ mod tests {
         use prunr_models::ModelId;
         let id = ModelId::TaesdFp16;
         let ep = EpKind::Cuda;
-        let Some(dir) = crate::cache::cache_dir_for(id, ep.as_str()) else { return };
+        let Some(dir) = crate::cache::cache_dir_for(id, ep.as_str()) else {
+            return;
+        };
         let cache_file = dir.join("optimized.onnx");
         std::fs::write(&cache_file, b"stale").unwrap();
         let initial = crate::ep_compat::is_known_failure(ep, id);
 
         handle_commit_failure(
-            true, ep, id,
+            true,
+            ep,
+            id,
             || crate::cache::optimized_model_path(id, ep.as_str()),
             "test cache failure",
         );
 
         assert!(!cache_file.exists(), "cache file must be deleted");
         assert_eq!(
-            crate::ep_compat::is_known_failure(ep, id), initial,
+            crate::ep_compat::is_known_failure(ep, id),
+            initial,
             "record_failure must NOT fire on was_cached=true",
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -629,7 +688,10 @@ mod tests {
         let engine = OrtEngine::new(ModelKind::Silueta, 1)
             .expect("OrtEngine::new should succeed with dev-models and downloaded models");
         let provider = engine.active_provider();
-        assert!(!provider.is_empty(), "active_provider() returned empty string");
+        assert!(
+            !provider.is_empty(),
+            "active_provider() returned empty string"
+        );
     }
 
     #[cfg(feature = "dev-models")]

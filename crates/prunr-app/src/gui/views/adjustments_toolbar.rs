@@ -380,7 +380,10 @@ pub(crate) fn render(
     // SubprocessAddEdge instead of LivePreviewMask).
     if item_settings.line_mode != before_line_mode {
         let spec = knob_catalog::line_mode_spec(
-            LineModeChange { from: before_line_mode, to: item_settings.line_mode },
+            LineModeChange {
+                from: before_line_mode,
+                to: item_settings.line_mode,
+            },
             false,
         );
         change.cache_impact = change.cache_impact.union(spec.cache_impact);
@@ -521,14 +524,18 @@ fn render_seg_mask_chips(
     // effects. The two underlying fields (`bg`, `bg_effect`) stay orthogonal;
     // the chip enforces mutual exclusivity at the UI layer.
     ui.add_enabled_ui(flags.bg_active, |ui| {
-        render_background_chip(ui, BgChipState {
-            bg: &mut item_settings.bg,
-            bg_effect: &mut item_settings.bg_effect,
-            bg_image_fit: &mut item_settings.bg_image_fit,
-            default_color: defaults.bg_value,
-            has_bg_image: flags.has_bg_image,
-            bg_image_label: flags.bg_image_label,
-        }, change);
+        render_background_chip(
+            ui,
+            BgChipState {
+                bg: &mut item_settings.bg,
+                bg_effect: &mut item_settings.bg_effect,
+                bg_image_fit: &mut item_settings.bg_image_fit,
+                default_color: defaults.bg_value,
+                has_bg_image: flags.has_bg_image,
+                bg_image_label: flags.bg_image_label,
+            },
+            change,
+        );
     });
 }
 
@@ -550,16 +557,14 @@ fn render_lines_row(
         let seg_model_name = super::model_name(flags.app_settings.model);
         let subject_available = flags.app_settings.model.uses_segmentation();
         ui.add_enabled_ui(!flags.processing, |ui| {
-            let _ = super::lines_popover::render(ui, item_settings, seg_model_name, subject_available);
+            let _ =
+                super::lines_popover::render(ui, item_settings, seg_model_name, subject_available);
         });
         if !flags.mask_active {
             ui.label(
-                RichText::new(format!(
-                    "{}  DexiNed only",
-                    ICON_BLOCK.codepoint,
-                ))
-                .color(theme::TEXT_SECONDARY)
-                .size(theme::FONT_SIZE_MONO),
+                RichText::new(format!("{}  DexiNed only", ICON_BLOCK.codepoint,))
+                    .color(theme::TEXT_SECONDARY)
+                    .size(theme::FONT_SIZE_MONO),
             );
         }
         if item_settings.line_mode != LineMode::Off {
@@ -578,7 +583,10 @@ fn render_row2_right_cluster(
 ) {
     // DualScale generates Fine + Bold internally and ignores `edge_scale`
     // (see `prunr-core/src/edge.rs::finalize_dual_scale`).
-    let scale_active = !matches!(item_settings.line_style, prunr_core::LineStyle::DualScale { .. });
+    let scale_active = !matches!(
+        item_settings.line_style,
+        prunr_core::LineStyle::DualScale { .. }
+    );
     let scale_changed = chip::guarded(
         ui,
         scale_active,
@@ -676,7 +684,14 @@ fn aggregate_knob(ch: chip::ChipChange, knob: StaticKnob, acc: &mut ToolbarChang
 /// Shorthand for chips that return a bool (commit-on-change). Builds a
 /// `ChipChange` where `changed == commit == b` and folds via the catalog.
 fn aggregate_bool(b: bool, knob: StaticKnob, acc: &mut ToolbarChange) {
-    aggregate_knob(chip::ChipChange { changed: b, commit: b }, knob, acc);
+    aggregate_knob(
+        chip::ChipChange {
+            changed: b,
+            commit: b,
+        },
+        knob,
+        acc,
+    );
 }
 
 /// Flag a preset application. Dispatch is deferred — the caller checks the
@@ -713,7 +728,11 @@ fn render_input_transform_chip(ui: &mut Ui, transform: &mut prunr_core::InputTra
     let popup_id = ui.make_persistent_id("input_transform_popup");
     let mut changed = false;
     chip::popup_for(ui, popup_id, &resp, |ui| {
-        ui.label(RichText::new("Pre-inference transform").strong().color(theme::TEXT_PRIMARY));
+        ui.label(
+            RichText::new("Pre-inference transform")
+                .strong()
+                .color(theme::TEXT_PRIMARY),
+        );
         ui.add_space(theme::SPACE_XS);
         for option in InputTransform::ALL {
             let selected = std::mem::discriminant(option) == std::mem::discriminant(transform);
@@ -725,16 +744,25 @@ fn render_input_transform_chip(ui: &mut Ui, transform: &mut prunr_core::InputTra
         ui.separator();
         match transform {
             InputTransform::None | InputTransform::Grayscale => {
-                ui.label(RichText::new("No parameters.").color(theme::TEXT_SECONDARY)
-                    .size(theme::FONT_SIZE_MONO));
+                ui.label(
+                    RichText::new("No parameters.")
+                        .color(theme::TEXT_SECONDARY)
+                        .size(theme::FONT_SIZE_MONO),
+                );
             }
             InputTransform::ContrastBoost { percent } => {
-                if ui.add(egui::Slider::new(percent, 50..=300).text("Percent")).changed() {
+                if ui
+                    .add(egui::Slider::new(percent, 50..=300).text("Percent"))
+                    .changed()
+                {
                     changed = true;
                 }
             }
             InputTransform::Posterize { levels } => {
-                if ui.add(egui::Slider::new(levels, 2..=8).text("Levels")).changed() {
+                if ui
+                    .add(egui::Slider::new(levels, 2..=8).text("Levels"))
+                    .changed()
+                {
                     changed = true;
                 }
             }
@@ -759,7 +787,11 @@ fn render_line_style_chip(ui: &mut Ui, style: &mut prunr_core::LineStyle) -> boo
     let popup_id = ui.make_persistent_id("line_style_popup");
     let mut changed = false;
     chip::popup_for(ui, popup_id, &resp, |ui| {
-        ui.label(RichText::new("Line style").strong().color(theme::TEXT_PRIMARY));
+        ui.label(
+            RichText::new("Line style")
+                .strong()
+                .color(theme::TEXT_PRIMARY),
+        );
         ui.add_space(theme::SPACE_XS);
         for option in LineStyle::ALL {
             let selected = std::mem::discriminant(option) == std::mem::discriminant(style);
@@ -781,8 +813,11 @@ fn line_style_params(ui: &mut Ui, style: &mut prunr_core::LineStyle) -> bool {
     let mut changed = false;
     match style {
         LineStyle::Solid => {
-            ui.label(RichText::new("Uses Solid line color chip.").color(theme::TEXT_SECONDARY)
-                .size(theme::FONT_SIZE_MONO));
+            ui.label(
+                RichText::new("Uses Solid line color chip.")
+                    .color(theme::TEXT_SECONDARY)
+                    .size(theme::FONT_SIZE_MONO),
+            );
         }
         LineStyle::GradientY { top, bottom } => {
             changed |= rgb_picker_row(ui, "Top", top);
@@ -792,38 +827,60 @@ fn line_style_params(ui: &mut Ui, style: &mut prunr_core::LineStyle) -> bool {
             changed |= rgb_picker_row(ui, "Left", left);
             changed |= rgb_picker_row(ui, "Right", right);
         }
-        LineStyle::RadialGradient { center, inner, outer } => {
+        LineStyle::RadialGradient {
+            center,
+            inner,
+            outer,
+        } => {
             changed |= rgb_picker_row(ui, "Inner", inner);
             changed |= rgb_picker_row(ui, "Outer", outer);
             ui.horizontal(|ui| {
                 ui.label("Centre");
-                if ui.add(egui::Slider::new(&mut center[0], 0..=255).text("X")).changed() {
+                if ui
+                    .add(egui::Slider::new(&mut center[0], 0..=255).text("X"))
+                    .changed()
+                {
                     changed = true;
                 }
             });
             ui.horizontal(|ui| {
                 ui.label("");
-                if ui.add(egui::Slider::new(&mut center[1], 0..=255).text("Y")).changed() {
+                if ui
+                    .add(egui::Slider::new(&mut center[1], 0..=255).text("Y"))
+                    .changed()
+                {
                     changed = true;
                 }
             });
         }
         LineStyle::Rainbow { cycles } => {
-            if ui.add(egui::Slider::new(cycles, 1..=10).text("Cycles")).changed() {
+            if ui
+                .add(egui::Slider::new(cycles, 1..=10).text("Cycles"))
+                .changed()
+            {
                 changed = true;
             }
         }
         LineStyle::Chromatic { offset } => {
-            if ui.add(egui::Slider::new(offset, 1..=16).text("Offset px")).changed() {
+            if ui
+                .add(egui::Slider::new(offset, 1..=16).text("Offset px"))
+                .changed()
+            {
                 changed = true;
             }
         }
         LineStyle::Noise { amount } => {
-            if ui.add(egui::Slider::new(amount, 0..=255).text("Amount")).changed() {
+            if ui
+                .add(egui::Slider::new(amount, 0..=255).text("Amount"))
+                .changed()
+            {
                 changed = true;
             }
         }
-        LineStyle::DualScale { fine_color, bold_color } => {
+        LineStyle::DualScale {
+            fine_color,
+            bold_color,
+        } => {
             changed |= rgb_picker_row(ui, "Fine (detail)", fine_color);
             changed |= rgb_picker_row(ui, "Bold (structure)", bold_color);
         }
@@ -849,7 +906,11 @@ fn render_fill_style_chip(ui: &mut Ui, style: &mut prunr_core::FillStyle) -> boo
         // instead of stacking above it — otherwise 4-stop GradientMap makes
         // the popover taller than most screens.
         ui.set_min_width(FILL_STYLE_POPOVER_WIDTH);
-        ui.label(RichText::new("Fill style").strong().color(theme::TEXT_PRIMARY));
+        ui.label(
+            RichText::new("Fill style")
+                .strong()
+                .color(theme::TEXT_PRIMARY),
+        );
         ui.add_space(theme::SPACE_XS);
         ui.horizontal_top(|ui| {
             ui.vertical(|ui| {
@@ -882,44 +943,74 @@ fn fill_style_params(ui: &mut Ui, style: &mut prunr_core::FillStyle) -> bool {
     let mut changed = false;
     match style {
         FillStyle::None | FillStyle::Desaturate | FillStyle::Invert | FillStyle::Sepia => {
-            ui.label(RichText::new("No parameters.").color(theme::TEXT_SECONDARY)
-                .size(theme::FONT_SIZE_MONO));
+            ui.label(
+                RichText::new("No parameters.")
+                    .color(theme::TEXT_SECONDARY)
+                    .size(theme::FONT_SIZE_MONO),
+            );
         }
         FillStyle::Threshold { level } => {
-            if ui.add(egui::Slider::new(level, 0..=255).text("Level")).changed() {
+            if ui
+                .add(egui::Slider::new(level, 0..=255).text("Level"))
+                .changed()
+            {
                 changed = true;
             }
         }
         FillStyle::Posterize { levels } => {
-            if ui.add(egui::Slider::new(levels, 2..=8).text("Levels")).changed() {
+            if ui
+                .add(egui::Slider::new(levels, 2..=8).text("Levels"))
+                .changed()
+            {
                 changed = true;
             }
         }
         FillStyle::Solarize { pivot } => {
-            if ui.add(egui::Slider::new(pivot, 0..=255).text("Pivot")).changed() {
+            if ui
+                .add(egui::Slider::new(pivot, 0..=255).text("Pivot"))
+                .changed()
+            {
                 changed = true;
             }
         }
         FillStyle::HueShift { degrees } => {
-            if ui.add(egui::Slider::new(degrees, -180..=180).text("Degrees")).changed() {
+            if ui
+                .add(egui::Slider::new(degrees, -180..=180).text("Degrees"))
+                .changed()
+            {
                 changed = true;
             }
         }
         FillStyle::Saturate { percent } => {
-            if ui.add(egui::Slider::new(percent, 0..=300).text("Percent")).changed() {
+            if ui
+                .add(egui::Slider::new(percent, 0..=300).text("Percent"))
+                .changed()
+            {
                 changed = true;
             }
         }
-        FillStyle::ColorSplash { keep_hue, tolerance } => {
-            if ui.add(egui::Slider::new(keep_hue, 0..=359).text("Hue°")).changed() {
+        FillStyle::ColorSplash {
+            keep_hue,
+            tolerance,
+        } => {
+            if ui
+                .add(egui::Slider::new(keep_hue, 0..=359).text("Hue°"))
+                .changed()
+            {
                 changed = true;
             }
-            if ui.add(egui::Slider::new(tolerance, 0..=180).text("Tolerance°")).changed() {
+            if ui
+                .add(egui::Slider::new(tolerance, 0..=180).text("Tolerance°"))
+                .changed()
+            {
                 changed = true;
             }
         }
         FillStyle::Pixelate { block_size } => {
-            if ui.add(egui::Slider::new(block_size, 2..=64).text("Block size")).changed() {
+            if ui
+                .add(egui::Slider::new(block_size, 2..=64).text("Block size"))
+                .changed()
+            {
                 changed = true;
             }
         }
@@ -933,7 +1024,11 @@ fn fill_style_params(ui: &mut Ui, style: &mut prunr_core::FillStyle) -> bool {
         }
         FillStyle::ChannelSwap { variant } => {
             use prunr_core::ChannelSwapVariant;
-            ui.label(RichText::new("Channel order").color(theme::TEXT_SECONDARY).size(theme::FONT_SIZE_MONO));
+            ui.label(
+                RichText::new("Channel order")
+                    .color(theme::TEXT_SECONDARY)
+                    .size(theme::FONT_SIZE_MONO),
+            );
             // 5 three-letter codes fit comfortably on one horizontal row —
             // a stacked column wasted the right-hand column of the popover.
             ui.horizontal_wrapped(|ui| {
@@ -947,7 +1042,10 @@ fn fill_style_params(ui: &mut Ui, style: &mut prunr_core::FillStyle) -> bool {
             });
         }
         FillStyle::Halftone { dot_spacing } => {
-            if ui.add(egui::Slider::new(dot_spacing, 2..=32).text("Dot spacing px")).changed() {
+            if ui
+                .add(egui::Slider::new(dot_spacing, 2..=32).text("Dot spacing px"))
+                .changed()
+            {
                 changed = true;
             }
         }
@@ -985,12 +1083,23 @@ fn fill_style_params(ui: &mut Ui, style: &mut prunr_core::FillStyle) -> bool {
 /// orthogonal data fields (`bg`, `bg_effect`) — effects take precedence
 /// over solid colour at render time, and the chip mirrors that precedence.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum BgKind { Transparent, Solid, Image, BlurredSource, InvertedSource, DesaturatedSource }
+enum BgKind {
+    Transparent,
+    Solid,
+    Image,
+    BlurredSource,
+    InvertedSource,
+    DesaturatedSource,
+}
 
 impl BgKind {
     const ALL: [Self; 6] = [
-        Self::Transparent, Self::Solid, Self::Image,
-        Self::BlurredSource, Self::InvertedSource, Self::DesaturatedSource,
+        Self::Transparent,
+        Self::Solid,
+        Self::Image,
+        Self::BlurredSource,
+        Self::InvertedSource,
+        Self::DesaturatedSource,
     ];
 
     fn name(self) -> &'static str {
@@ -1015,9 +1124,13 @@ impl BgKind {
             BgEffect::InvertedSource => Self::InvertedSource,
             BgEffect::DesaturatedSource => Self::DesaturatedSource,
             BgEffect::None => {
-                if has_image { Self::Image }
-                else if bg.is_some() { Self::Solid }
-                else { Self::Transparent }
+                if has_image {
+                    Self::Image
+                } else if bg.is_some() {
+                    Self::Solid
+                } else {
+                    Self::Transparent
+                }
             }
         }
     }
@@ -1025,7 +1138,10 @@ impl BgKind {
     /// Effects require a postprocess rerun (baked into the output RGBA);
     /// Transparent / Solid / Image only change the render-time bg fill.
     fn needs_postprocess(self) -> bool {
-        matches!(self, Self::BlurredSource | Self::InvertedSource | Self::DesaturatedSource)
+        matches!(
+            self,
+            Self::BlurredSource | Self::InvertedSource | Self::DesaturatedSource
+        )
     }
 }
 
@@ -1043,11 +1159,7 @@ struct BgChipState<'a> {
     bg_image_label: Option<&'a str>,
 }
 
-fn render_background_chip(
-    ui: &mut Ui,
-    state: BgChipState<'_>,
-    change: &mut ToolbarChange,
-) {
+fn render_background_chip(ui: &mut Ui, state: BgChipState<'_>, change: &mut ToolbarChange) {
     let BgChipState {
         bg,
         bg_effect,
@@ -1071,7 +1183,11 @@ fn render_background_chip(
     let popup_id = ui.make_persistent_id("background_popup");
     chip::popup_for(ui, popup_id, &resp, |ui| {
         ui.set_min_width(BACKGROUND_POPOVER_WIDTH);
-        ui.label(RichText::new("Background").strong().color(theme::TEXT_PRIMARY));
+        ui.label(
+            RichText::new("Background")
+                .strong()
+                .color(theme::TEXT_PRIMARY),
+        );
         ui.add_space(theme::SPACE_XS);
         ui.horizontal_top(|ui| {
             ui.vertical(|ui| {
@@ -1194,7 +1310,9 @@ fn apply_bg_kind(
             *bg_effect = BgEffect::None;
         }
         BgKind::Solid => {
-            if bg.is_none() { *bg = Some(default_color); }
+            if bg.is_none() {
+                *bg = Some(default_color);
+            }
             *bg_effect = BgEffect::None;
         }
         BgKind::BlurredSource => {
@@ -1208,7 +1326,9 @@ fn apply_bg_kind(
         }
         // Image bg lives on BatchItem, not on these two ItemSettings fields —
         // the chip emits `change.pick_bg_image` and skips this fn for Image.
-        BgKind::Image => unreachable!("Image kind is handled via change.pick_bg_image, not apply_bg_kind"),
+        BgKind::Image => {
+            unreachable!("Image kind is handled via change.pick_bg_image, not apply_bg_kind")
+        }
     }
 }
 
@@ -1216,7 +1336,11 @@ fn apply_bg_kind(
 /// `chip::rgb_picker` — the label is purely visual context so the user
 /// knows which colour they're editing.
 fn rgb_picker_row(ui: &mut Ui, label: &str, rgb: &mut [u8; 3]) -> bool {
-    ui.label(RichText::new(label).color(theme::TEXT_SECONDARY).size(theme::FONT_SIZE_MONO));
+    ui.label(
+        RichText::new(label)
+            .color(theme::TEXT_SECONDARY)
+            .size(theme::FONT_SIZE_MONO),
+    );
     chip::rgb_picker(ui, rgb)
 }
 

@@ -35,7 +35,8 @@ pub(crate) const MODELS: &[ModelSpec] = &[
     ModelSpec {
         id: prunr_models::ModelId::BiRefNetLite,
         name: "birefnet_lite.onnx",
-        url: "https://huggingface.co/onnx-community/BiRefNet_lite-ONNX/resolve/main/onnx/model.onnx",
+        url:
+            "https://huggingface.co/onnx-community/BiRefNet_lite-ONNX/resolve/main/onnx/model.onnx",
         sha256: "5600024376f572a557870a5eb0afb1e5961636bef4e1e22132025467d0f03333",
     },
     // DexiNed is exported from PyTorch weights via scripts/export_dexined.py
@@ -90,8 +91,14 @@ mod tests {
     #[test]
     fn xtask_models_match_registry_ondemand_sha256() {
         for spec in MODELS {
-            let Some(desc) = prunr_models::descriptor(spec.id) else { continue };
-            let ModelSource::OnDemand { sha256: registry_sha, filename, .. } = desc.source
+            let Some(desc) = prunr_models::descriptor(spec.id) else {
+                continue;
+            };
+            let ModelSource::OnDemand {
+                sha256: registry_sha,
+                filename,
+                ..
+            } = desc.source
             else {
                 continue;
             };
@@ -114,7 +121,9 @@ mod tests {
         let xtask_ids: std::collections::HashSet<prunr_models::ModelId> =
             MODELS.iter().map(|s| s.id).collect();
         for id in prunr_models::ModelId::ALL {
-            let Some(desc) = prunr_models::descriptor(*id) else { continue };
+            let Some(desc) = prunr_models::descriptor(*id) else {
+                continue;
+            };
             if matches!(desc.source, ModelSource::OnDemand { .. }) && !xtask_ids.contains(id) {
                 panic!(
                     "registry has OnDemand entry for {id:?} but xtask MODELS has no matching row \

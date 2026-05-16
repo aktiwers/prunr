@@ -30,13 +30,21 @@ pub fn slice_stats(s: &[f32]) -> (f32, f32, f32) {
         let mut hi = f32::NEG_INFINITY;
         let mut sum = 0.0_f32;
         for &v in s {
-            if v < lo { lo = v; }
-            if v > hi { hi = v; }
+            if v < lo {
+                lo = v;
+            }
+            if v > hi {
+                hi = v;
+            }
             sum += v;
         }
         (lo, hi, sum)
     };
-    let mean = if s.is_empty() { 0.0 } else { sum / s.len() as f32 };
+    let mean = if s.is_empty() {
+        0.0
+    } else {
+        sum / s.len() as f32
+    };
     (lo, hi, mean)
 }
 

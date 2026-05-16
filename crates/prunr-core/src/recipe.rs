@@ -4,8 +4,10 @@
 //! When settings change, `resolve_tier()` determines which pipeline
 //! tier needs to re-run (or if processing can be skipped entirely).
 
-use serde::{Serialize, Deserialize};
-use crate::types::{ModelKind, EdgeScale, ComposeMode, LineStyle, FillStyle, BgEffect, InputTransform};
+use crate::types::{
+    BgEffect, ComposeMode, EdgeScale, FillStyle, InputTransform, LineStyle, ModelKind,
+};
+use serde::{Deserialize, Serialize};
 
 /// Tier 1: settings that require AI model inference.
 ///
@@ -196,7 +198,10 @@ pub fn resolve_tier(old: &ProcessingRecipe, new: &ProcessingRecipe) -> RequiredT
         if old.inference.uses_segmentation != new.inference.uses_segmentation {
             return RequiredTier::FullPipeline;
         }
-        match (old.inference.uses_edge_detection, new.inference.uses_edge_detection) {
+        match (
+            old.inference.uses_edge_detection,
+            new.inference.uses_edge_detection,
+        ) {
             // Enabling edges (or already on with `input_transform` flipped):
             // seg tensor cached → skip seg inference, run DexiNed on the
             // masked image.
@@ -549,54 +554,109 @@ mod tests {
         // (name, old, new, expected)
         let cases: Vec<(&str, ProcessingRecipe, ProcessingRecipe, RequiredTier)> = vec![
             ("identical", base.clone(), base.clone(), RequiredTier::Skip),
-            ("bg only", base.clone(), with_bg([255, 0, 0]), RequiredTier::CompositeOnly),
-            ("gamma only", base.clone(), with_gamma(1.5), RequiredTier::MaskRerun),
-            ("line only", base.clone(), with_line(0.9), RequiredTier::EdgeRerun),
-            ("model only", base.clone(), make_recipe(ModelKind::BiRefNetLite, 1.0, None), RequiredTier::FullPipeline),
-            ("input_transform+edges → add_edge", edges_on(), with_input_transform(InputTransform::Grayscale), RequiredTier::AddEdgeInference),
+            (
+                "bg only",
+                base.clone(),
+                with_bg([255, 0, 0]),
+                RequiredTier::CompositeOnly,
+            ),
+            (
+                "gamma only",
+                base.clone(),
+                with_gamma(1.5),
+                RequiredTier::MaskRerun,
+            ),
+            (
+                "line only",
+                base.clone(),
+                with_line(0.9),
+                RequiredTier::EdgeRerun,
+            ),
+            (
+                "model only",
+                base.clone(),
+                make_recipe(ModelKind::BiRefNetLite, 1.0, None),
+                RequiredTier::FullPipeline,
+            ),
+            (
+                "input_transform+edges → add_edge",
+                edges_on(),
+                with_input_transform(InputTransform::Grayscale),
+                RequiredTier::AddEdgeInference,
+            ),
             // input_transform with edges off both sides: dead state (the
             // field only affects the DexiNed input), so output is bit-
             // identical → Skip rather than MaskRerun.
-            ("input_transform alone, edges off → skip", base.clone(), {
-                let mut r = base.clone();
-                r.inference.input_transform = InputTransform::Grayscale;
-                r
-            }, RequiredTier::Skip),
+            (
+                "input_transform alone, edges off → skip",
+                base.clone(),
+                {
+                    let mut r = base.clone();
+                    r.inference.input_transform = InputTransform::Grayscale;
+                    r
+                },
+                RequiredTier::Skip,
+            ),
             // Edges on→off with concurrent edge-recipe drift: the edge
             // recipe is dead state once edges are off, so MaskRerun beats
             // EdgeRerun (no point re-composing edges that won't render).
-            ("edges on→off + line_strength → mask", edges_on(), {
-                let mut r = edges_on();
-                r.inference.uses_edge_detection = false;
-                r.edge.line_strength_bits = 0.9f32.to_bits();
-                r
-            }, RequiredTier::MaskRerun),
+            (
+                "edges on→off + line_strength → mask",
+                edges_on(),
+                {
+                    let mut r = edges_on();
+                    r.inference.uses_edge_detection = false;
+                    r.edge.line_strength_bits = 0.9f32.to_bits();
+                    r
+                },
+                RequiredTier::MaskRerun,
+            ),
             // Priority: mask changes dominate composite changes.
-            ("gamma+bg → mask", base.clone(), {
-                let mut r = with_gamma(1.5);
-                r.composite.bg_color = Some([9, 9, 9]);
-                r
-            }, RequiredTier::MaskRerun),
+            (
+                "gamma+bg → mask",
+                base.clone(),
+                {
+                    let mut r = with_gamma(1.5);
+                    r.composite.bg_color = Some([9, 9, 9]);
+                    r
+                },
+                RequiredTier::MaskRerun,
+            ),
             // Priority: edge changes dominate composite changes.
-            ("line+bg → edge", base.clone(), {
-                let mut r = with_line(0.2);
-                r.composite.bg_color = Some([9, 9, 9]);
-                r
-            }, RequiredTier::EdgeRerun),
+            (
+                "line+bg → edge",
+                base.clone(),
+                {
+                    let mut r = with_line(0.2);
+                    r.composite.bg_color = Some([9, 9, 9]);
+                    r
+                },
+                RequiredTier::EdgeRerun,
+            ),
             // Priority: AddEdgeInference dominates mask + edge + composite.
-            ("input_transform+gamma+line+bg → add_edge", edges_on(), {
-                let mut r = with_input_transform(InputTransform::Grayscale);
-                r.mask = mask(1.5, None, 0.0, false);
-                r.edge.line_strength_bits = 0.2f32.to_bits();
-                r.composite.bg_color = Some([9, 9, 9]);
-                r
-            }, RequiredTier::AddEdgeInference),
+            (
+                "input_transform+gamma+line+bg → add_edge",
+                edges_on(),
+                {
+                    let mut r = with_input_transform(InputTransform::Grayscale);
+                    r.mask = mask(1.5, None, 0.0, false);
+                    r.edge.line_strength_bits = 0.2f32.to_bits();
+                    r.composite.bg_color = Some([9, 9, 9]);
+                    r
+                },
+                RequiredTier::AddEdgeInference,
+            ),
             // Priority: model change dominates everything.
-            ("model+gamma+line+bg → full", base.clone(), {
-                let mut r = make_recipe(ModelKind::U2net, 1.5, Some([9, 9, 9]));
-                r.edge.line_strength_bits = 0.2f32.to_bits();
-                r
-            }, RequiredTier::FullPipeline),
+            (
+                "model+gamma+line+bg → full",
+                base.clone(),
+                {
+                    let mut r = make_recipe(ModelKind::U2net, 1.5, Some([9, 9, 9]));
+                    r.edge.line_strength_bits = 0.2f32.to_bits();
+                    r
+                },
+                RequiredTier::FullPipeline,
+            ),
         ];
 
         for (name, old, new, expected) in &cases {

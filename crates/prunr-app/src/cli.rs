@@ -167,19 +167,20 @@ pub enum LargeImagePolicy {
     Process,
 }
 
-use std::time::Instant;
-use indicatif::{ProgressBar, ProgressStyle, MultiProgress};
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use prunr_core::{
-    MaskSettings, ModelKind, ProgressStage, CoreError,
-    DOWNSCALE_TARGET,
-    load_image_from_path, check_large_image, downscale_image, encode_rgba_png,
+    check_large_image, downscale_image, encode_rgba_png, load_image_from_path, CoreError,
+    MaskSettings, ModelKind, ProgressStage, DOWNSCALE_TARGET,
 };
+use std::time::Instant;
 
 use crate::gui::settings::LineMode;
 
 fn parse_hex_color(s: &str) -> Option<[u8; 3]> {
     let s = s.strip_prefix('#').unwrap_or(s);
-    if s.len() != 6 { return None; }
+    if s.len() != 6 {
+        return None;
+    }
     let r = u8::from_str_radix(&s[0..2], 16).ok()?;
     let g = u8::from_str_radix(&s[2..4], 16).ok()?;
     let b = u8::from_str_radix(&s[4..6], 16).ok()?;
@@ -224,11 +225,17 @@ pub fn run_remove(args: &Cli) -> i32 {
     if let Some(ref out) = args.output {
         if args.inputs.len() > 1 {
             if let Err(e) = std::fs::create_dir_all(out) {
-                eprintln!("error: cannot create output directory {}: {e}", out.display());
+                eprintln!(
+                    "error: cannot create output directory {}: {e}",
+                    out.display()
+                );
                 return 1;
             }
             if !out.is_dir() {
-                eprintln!("error: --output must be a directory for batch input (got a file path: {})", out.display());
+                eprintln!(
+                    "error: --output must be a directory for batch input (got a file path: {})",
+                    out.display()
+                );
                 return 1;
             }
         }
@@ -241,12 +248,24 @@ pub fn run_remove(args: &Cli) -> i32 {
         // ff0000 --mask m.png photo.jpg` doesn't get a quiet erase
         // with no hint that those flags were thrown away.
         let mut conflicts: Vec<&'static str> = Vec::new();
-        if args.lines { conflicts.push("--lines"); }
-        if args.lines_after_bg { conflicts.push("--lines-after-bg"); }
-        if args.line_color.is_some() { conflicts.push("--line-color"); }
-        if args.bg_color.is_some() { conflicts.push("--bg-color"); }
-        if args.bg_image.is_some() { conflicts.push("--bg-image"); }
-        if args.threshold.is_some() { conflicts.push("--threshold"); }
+        if args.lines {
+            conflicts.push("--lines");
+        }
+        if args.lines_after_bg {
+            conflicts.push("--lines-after-bg");
+        }
+        if args.line_color.is_some() {
+            conflicts.push("--line-color");
+        }
+        if args.bg_color.is_some() {
+            conflicts.push("--bg-color");
+        }
+        if args.bg_image.is_some() {
+            conflicts.push("--bg-image");
+        }
+        if args.threshold.is_some() {
+            conflicts.push("--threshold");
+        }
         if !conflicts.is_empty() {
             eprintln!(
                 "error: --inpaint cannot be combined with {} \u{2014} those flags belong to background-removal mode.",
@@ -266,7 +285,10 @@ pub fn run_remove(args: &Cli) -> i32 {
 /// would need a `--mask-dir` flag (not yet wired).
 fn run_inpaint(args: &Cli) -> i32 {
     if args.inputs.len() != 1 {
-        eprintln!("error: --inpaint accepts exactly one input image (got {})", args.inputs.len());
+        eprintln!(
+            "error: --inpaint accepts exactly one input image (got {})",
+            args.inputs.len()
+        );
         return 1;
     }
     let input = &args.inputs[0];
@@ -298,31 +320,41 @@ fn run_inpaint(args: &Cli) -> i32 {
     if img.dimensions() != mask.dimensions() {
         eprintln!(
             "error: mask {:?} dimensions don't match image {:?}",
-            mask.dimensions(), img.dimensions()
+            mask.dimensions(),
+            img.dimensions()
         );
         return 1;
     }
 
     if !args.quiet {
-        eprintln!("Inpainting {} (mask: {})...", input.display(), mask_path.display());
+        eprintln!(
+            "Inpainting {} (mask: {})...",
+            input.display(),
+            mask_path.display()
+        );
     }
     // CLI defaults to LaMaFp32 — Big-LaMa selection from the CLI is
     // tracked in PLAN 17-10 (would add `--inpaint-backend big-lama`).
-    let raw = match prunr_core::inpaint::process_inpaint(&img, &mask, prunr_models::ModelId::LaMaFp32) {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("error: inpaint failed: {e}");
-            return 1;
-        }
-    };
+    let raw =
+        match prunr_core::inpaint::process_inpaint(&img, &mask, prunr_models::ModelId::LaMaFp32) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("error: inpaint failed: {e}");
+                return 1;
+            }
+        };
     // Post-process: color-match + seam guided blend. Same defaults as
     // the GUI path so CLI output matches what the user sees on-screen.
     let color_matched = prunr_core::inpaint_blend::color_match_inpainted(
-        &raw, &img, &mask,
+        &raw,
+        &img,
+        &mask,
         prunr_core::inpaint_blend::COLOR_MATCH_RING_PX,
     );
     let result = prunr_core::inpaint_blend::seam_guided_blend(
-        &color_matched, &img, &mask,
+        &color_matched,
+        &img,
+        &mask,
         prunr_core::inpaint_blend::SEAM_BLEND_RADIUS,
         prunr_core::inpaint_blend::SEAM_BLEND_EPSILON,
         prunr_core::inpaint_blend::SEAM_BLEND_BAND_PX,
@@ -361,7 +393,11 @@ fn output_path_with_suffix(
 /// Batch mode or -o is a directory: write {stem}.prunr.png into that directory.
 /// Single mode with -o file.png: use that path directly.
 /// No -o: write alongside input as {input_dir}/{stem}.prunr.png.
-fn output_path(input: &std::path::Path, output: &Option<PathBuf>, is_batch: bool) -> std::path::PathBuf {
+fn output_path(
+    input: &std::path::Path,
+    output: &Option<PathBuf>,
+    is_batch: bool,
+) -> std::path::PathBuf {
     output_path_with_suffix(input, output, is_batch, ".prunr.png")
 }
 
@@ -425,12 +461,12 @@ fn stage_label(stage: ProgressStage) -> &'static str {
     match stage {
         ProgressStage::LoadingModel => "Loading model...",
         ProgressStage::LoadingModelCpuFallback => "GPU warming up \u{2014} using CPU...",
-        ProgressStage::Decode      => "Decoding...",
-        ProgressStage::Resize      => "Resizing...",
-        ProgressStage::Normalize   => "Normalizing...",
-        ProgressStage::Infer       => "Inferring...",
+        ProgressStage::Decode => "Decoding...",
+        ProgressStage::Resize => "Resizing...",
+        ProgressStage::Normalize => "Normalizing...",
+        ProgressStage::Infer => "Inferring...",
         ProgressStage::Postprocess => "Postprocessing...",
-        ProgressStage::Alpha       => "Applying alpha...",
+        ProgressStage::Alpha => "Applying alpha...",
     }
 }
 
@@ -471,7 +507,7 @@ fn run_batch(args: &Cli) -> i32 {
         let pb = m.add(ProgressBar::new(args.inputs.len() as u64));
         pb.set_style(
             ProgressStyle::with_template(
-                "{bar:40.cyan/blue} {pos}/{len} images  {elapsed_precise}"
+                "{bar:40.cyan/blue} {pos}/{len} images  {elapsed_precise}",
             )
             .expect("static indicatif template compiles"),
         );
@@ -479,25 +515,29 @@ fn run_batch(args: &Cli) -> i32 {
     });
 
     // Per-image spinners (one per input, added to MultiProgress)
-    let spinners: Vec<Option<ProgressBar>> = args.inputs.iter().map(|input| {
-        mp.as_ref().map(|m| {
-            let pb = m.add(ProgressBar::new_spinner());
-            pb.set_style(
-                ProgressStyle::with_template("{spinner:.cyan} {msg}")
-                    .expect("static indicatif template compiles")
-                    .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]),
-            );
-            pb.set_message(format!("{} (waiting...)", input.display()));
-            // 250 ms (was 80 ms): the worker emits Progress at fixed
-            // pipeline checkpoints, with multi-second silence across
-            // `session.run()`. Without a tick the spinner glyph would
-            // freeze during the most-uncertain wait. The outer
-            // `MultiProgress` 4 Hz cap throttles total redraws, so
-            // per-spinner cost is bounded regardless of N.
-            pb.enable_steady_tick(std::time::Duration::from_millis(250));
-            pb
+    let spinners: Vec<Option<ProgressBar>> = args
+        .inputs
+        .iter()
+        .map(|input| {
+            mp.as_ref().map(|m| {
+                let pb = m.add(ProgressBar::new_spinner());
+                pb.set_style(
+                    ProgressStyle::with_template("{spinner:.cyan} {msg}")
+                        .expect("static indicatif template compiles")
+                        .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]),
+                );
+                pb.set_message(format!("{} (waiting...)", input.display()));
+                // 250 ms (was 80 ms): the worker emits Progress at fixed
+                // pipeline checkpoints, with multi-second silence across
+                // `session.run()`. Without a tick the spinner glyph would
+                // freeze during the most-uncertain wait. The outer
+                // `MultiProgress` 4 Hz cap throttles total redraws, so
+                // per-spinner cost is bounded regardless of N.
+                pb.enable_steady_tick(std::time::Duration::from_millis(250));
+                pb
+            })
         })
-    }).collect();
+        .collect();
 
     // Validate images lazily — only check dimensions, don't load bytes into RAM.
     // The subprocess reads file bytes on demand when processing each image.
@@ -507,17 +547,15 @@ fn run_batch(args: &Cli) -> i32 {
     let mut load_fail_count = 0usize;
 
     for (idx, input) in args.inputs.iter().enumerate() {
-        match std::fs::File::open(input)
-            .ok()
-            .and_then(|f| {
-                image::ImageReader::new(std::io::BufReader::new(f))
-                    .with_guessed_format()
-                    .ok()
-                    .and_then(|r| r.into_dimensions().ok())
-            })
-        {
-            Some((w, h)) if args.large_image == LargeImagePolicy::Downscale
-                && (w > prunr_core::LARGE_IMAGE_LIMIT || h > prunr_core::LARGE_IMAGE_LIMIT) =>
+        match std::fs::File::open(input).ok().and_then(|f| {
+            image::ImageReader::new(std::io::BufReader::new(f))
+                .with_guessed_format()
+                .ok()
+                .and_then(|r| r.into_dimensions().ok())
+        }) {
+            Some((w, h))
+                if args.large_image == LargeImagePolicy::Downscale
+                    && (w > prunr_core::LARGE_IMAGE_LIMIT || h > prunr_core::LARGE_IMAGE_LIMIT) =>
             {
                 // Oversized — downscale to temp file, pass temp path to subprocess
                 match load_with_policy(input, args.large_image, args.quiet) {
@@ -596,9 +634,20 @@ fn run_batch(args: &Cli) -> i32 {
         input_transform: prunr_core::InputTransform::default(),
     };
     let batch_results = run_batch_subprocess(
-        &valid_paths, &valid_indices, model, args.jobs, mask, args.cpu,
-        line_mode, edge, bg_color, bg_image.clone(), bg_image_fit,
-        &spinners_arc, &inputs_arc, quiet,
+        &valid_paths,
+        &valid_indices,
+        model,
+        args.jobs,
+        mask,
+        args.cpu,
+        line_mode,
+        edge,
+        bg_color,
+        bg_image.clone(),
+        bg_image_fit,
+        &spinners_arc,
+        &inputs_arc,
+        quiet,
     );
 
     // Compute output paths and write results
@@ -631,7 +680,10 @@ fn run_batch(args: &Cli) -> i32 {
                     Err(e) => {
                         fail_count += 1;
                         if let Some(pb) = spinner_opt {
-                            pb.finish_with_message(format!("X {} — encode error: {e}", input.display()));
+                            pb.finish_with_message(format!(
+                                "X {} — encode error: {e}",
+                                input.display()
+                            ));
                         }
                         continue;
                     }
@@ -651,12 +703,17 @@ fn run_batch(args: &Cli) -> i32 {
                             // skips go to stderr. Spinner path uses indicatif (stderr).
                             println!("✓ {} ({:.1}s)", input.display(), elapsed.as_secs_f32());
                         }
-                        if let Some(ref opb) = overall { opb.inc(1); }
+                        if let Some(ref opb) = overall {
+                            opb.inc(1);
+                        }
                     }
                     Err(e) => {
                         fail_count += 1;
                         if let Some(pb) = spinner_opt {
-                            pb.finish_with_message(format!("X {} — write error: {e}", input.display()));
+                            pb.finish_with_message(format!(
+                                "X {} — write error: {e}",
+                                input.display()
+                            ));
                         } else {
                             eprintln!("error writing '{}': {e}", input.display());
                         }
@@ -674,7 +731,9 @@ fn run_batch(args: &Cli) -> i32 {
         }
     }
 
-    if let Some(ref opb) = overall { opb.finish_and_clear(); }
+    if let Some(ref opb) = overall {
+        opb.finish_and_clear();
+    }
 
     if !args.quiet {
         println!("{} succeeded, {} failed.", success_count, fail_count);
@@ -731,22 +790,24 @@ fn run_batch_subprocess(
         .collect();
 
     loop {
-        if pending.is_empty() { break; }
+        if pending.is_empty() {
+            break;
+        }
 
         // Spawn subprocess — cap engines at pending item count
         let effective_jobs = max_jobs.min(pending.len());
-        let (mut sub, _provider) = match SubprocessManager::spawn(
-            model, effective_jobs, mask, force_cpu, line_mode, edge,
-        ) {
-            Ok(s) => s,
-            Err(e) => {
-                // Can't spawn — fail all remaining
-                for &idx in &pending {
-                    results[idx] = Some(Err(CoreError::Model(e.clone())));
+        let (mut sub, _provider) =
+            match SubprocessManager::spawn(model, effective_jobs, mask, force_cpu, line_mode, edge)
+            {
+                Ok(s) => s,
+                Err(e) => {
+                    // Can't spawn — fail all remaining
+                    for &idx in &pending {
+                        results[idx] = Some(Err(CoreError::Model(e.clone())));
+                    }
+                    break;
                 }
-                break;
-            }
-        };
+            };
 
         let mut in_flight: Vec<usize> = Vec::new();
 
@@ -755,7 +816,10 @@ fn run_batch_subprocess(
         for _ in 0..burst {
             if let Some(idx) = pending.pop_front() {
                 let item_id = valid_indices[idx] as u64;
-                if sub.send_image_path(item_id, valid_paths[idx].clone()).is_err() {
+                if sub
+                    .send_image_path(item_id, valid_paths[idx].clone())
+                    .is_err()
+                {
                     pending.push_front(idx);
                     break;
                 }
@@ -794,9 +858,17 @@ fn run_batch_subprocess(
                             }
                         }
                     }
-                    SubprocessEvent::ImageDone { item_id, result_path, width, height, .. } => {
+                    SubprocessEvent::ImageDone {
+                        item_id,
+                        result_path,
+                        width,
+                        height,
+                        ..
+                    } => {
                         let orig_idx = item_id as usize;
-                        let batch_idx = in_flight.iter().position(|&i| valid_indices[i] as u64 == item_id);
+                        let batch_idx = in_flight
+                            .iter()
+                            .position(|&i| valid_indices[i] as u64 == item_id);
                         if let Some(pos) = batch_idx {
                             in_flight.remove(pos);
                         }
@@ -807,7 +879,11 @@ fn run_batch_subprocess(
                             .map(|mut rgba_image| {
                                 // Image bg wins over color bg — matches GUI mutual exclusion.
                                 if let Some(bg) = bg_image.as_deref() {
-                                    prunr_core::apply_background_image(&mut rgba_image, bg, bg_image_fit);
+                                    prunr_core::apply_background_image(
+                                        &mut rgba_image,
+                                        bg,
+                                        bg_image_fit,
+                                    );
                                 } else if let Some(bg) = bg_color {
                                     prunr_core::apply_background_color(&mut rgba_image, bg);
                                 }
@@ -816,7 +892,9 @@ fn run_batch_subprocess(
                                     active_provider: String::new(),
                                 }
                             })
-                            .ok_or_else(|| CoreError::Model("Failed to read subprocess result".into()));
+                            .ok_or_else(|| {
+                                CoreError::Model("Failed to read subprocess result".into())
+                            });
                         let _ = std::fs::remove_file(&result_path);
 
                         if let Some(&ridx) = orig_to_batch.get(&orig_idx) {
@@ -827,7 +905,10 @@ fn run_batch_subprocess(
                         if !sub.should_pause_admission() {
                             if let Some(next) = pending.pop_front() {
                                 let next_id = valid_indices[next] as u64;
-                                if sub.send_image_path(next_id, valid_paths[next].clone()).is_ok() {
+                                if sub
+                                    .send_image_path(next_id, valid_paths[next].clone())
+                                    .is_ok()
+                                {
                                     in_flight.push(next);
                                 }
                             }
@@ -835,7 +916,9 @@ fn run_batch_subprocess(
                     }
                     SubprocessEvent::ImageError { item_id, error } => {
                         let orig_idx = item_id as usize;
-                        let batch_idx = in_flight.iter().position(|&i| valid_indices[i] as u64 == item_id);
+                        let batch_idx = in_flight
+                            .iter()
+                            .position(|&i| valid_indices[i] as u64 == item_id);
                         if let Some(pos) = batch_idx {
                             in_flight.remove(pos);
                         }
@@ -852,7 +935,9 @@ fn run_batch_subprocess(
                 }
             }
 
-            if in_flight.is_empty() && pending.is_empty() { break; }
+            if in_flight.is_empty() && pending.is_empty() {
+                break;
+            }
             // No sleep here — `poll_events_blocking` above already
             // waited up to 50 ms (or returned immediately when an event
             // arrived). Re-sleeping would just stack idle delay.
@@ -869,13 +954,16 @@ fn run_batch_subprocess(
                 // Give up on remaining
                 for &idx in &pending {
                     results[idx] = Some(Err(CoreError::Model(
-                        "Insufficient memory \u{2014} try a smaller model".into()
+                        "Insufficient memory \u{2014} try a smaller model".into(),
                     )));
                 }
                 break;
             }
             if !quiet {
-                eprintln!("Memory pressure \u{2014} retrying with {} parallel jobs", max_jobs);
+                eprintln!(
+                    "Memory pressure \u{2014} retrying with {} parallel jobs",
+                    max_jobs
+                );
             }
             sub.kill();
             prunr_app::subprocess::protocol::cleanup_seg_pipeline_temps();
@@ -896,7 +984,8 @@ fn run_batch_subprocess(
     prunr_app::subprocess::protocol::cleanup_cli_persistent_temps();
 
     // Convert Option<Result> to Result (None should not happen, but handle gracefully)
-    results.into_iter()
+    results
+        .into_iter()
         .map(|r| r.unwrap_or_else(|| Err(CoreError::Model("Not processed".into()))))
         .collect()
 }
@@ -912,22 +1001,39 @@ pub fn run_doctor() {
     println!("{}", "=".repeat(23));
     println!();
     println!("Version: {}", env!("CARGO_PKG_VERSION"));
-    println!("Build:   {}", if cfg!(debug_assertions) { "debug" } else { "release" });
+    println!(
+        "Build:   {}",
+        if cfg!(debug_assertions) {
+            "debug"
+        } else {
+            "release"
+        }
+    );
     println!("OS:      {} {}", p.os, p.arch);
     println!();
 
     section("Hardware");
     println!("CPU vendor:  {}", p.cpu_vendor);
     println!("CPU brand:   {}", p.cpu_brand);
-    println!("dGPU:        {}", p.dgpu.map_or("None".to_string(), |g| g.to_string()));
-    println!("iGPU:        {}", p.igpu.map_or("None".to_string(), |g| g.to_string()));
+    println!(
+        "dGPU:        {}",
+        p.dgpu.map_or("None".to_string(), |g| g.to_string())
+    );
+    println!(
+        "iGPU:        {}",
+        p.igpu.map_or("None".to_string(), |g| g.to_string())
+    );
     println!("Recommends OpenVINO: {}", p.recommends_openvino());
     println!("Recommends ROCm:     {}", p.recommends_rocm());
     println!();
 
     section("ONNX Runtime");
-    println!("ORT_DYLIB_PATH: {}", diag.env_path.as_ref()
-        .map_or("(unset)".to_string(), |p| p.display().to_string()));
+    println!(
+        "ORT_DYLIB_PATH: {}",
+        diag.env_path
+            .as_ref()
+            .map_or("(unset)".to_string(), |p| p.display().to_string())
+    );
     match (&diag.store_root, diag.store_entries.is_empty()) {
         (None, _) => println!("Runtime store:  (not present)"),
         (Some(root), true) => println!("Runtime store:  {} (empty)", root.display()),
@@ -951,23 +1057,40 @@ pub fn run_doctor() {
 
     section("Models");
     for desc in prunr_models::REGISTRY {
-        let avail = if prunr_models::is_available(desc.id) { "installed" } else { "not installed" };
-        println!("  {:<32} {:<10} {avail}",
-            desc.display_name, desc.source.kind_label());
+        let avail = if prunr_models::is_available(desc.id) {
+            "installed"
+        } else {
+            "not installed"
+        };
+        println!(
+            "  {:<32} {:<10} {avail}",
+            desc.display_name,
+            desc.source.kind_label()
+        );
     }
     println!();
 
     section("Paths");
-    println!("Data dir:     {}", path_or_unknown(prunr_models::data_dir()));
-    println!("Models dir:   {}", path_or_unknown(prunr_models::on_demand_dir()));
-    println!("Settings:     {}", path_or_unknown(
-        dirs::config_dir().map(|d| d.join("prunr").join("settings.json"))));
+    println!(
+        "Data dir:     {}",
+        path_or_unknown(prunr_models::data_dir())
+    );
+    println!(
+        "Models dir:   {}",
+        path_or_unknown(prunr_models::on_demand_dir())
+    );
+    println!(
+        "Settings:     {}",
+        path_or_unknown(dirs::config_dir().map(|d| d.join("prunr").join("settings.json")))
+    );
     println!();
 
     section("Environment");
     for var in ["RUST_LOG", "ORT_DYLIB_PATH", "PRUNR_DEBUG_LOG"] {
-        println!("  {var}: {}",
-            std::env::var(var).unwrap_or_else(|_| "(unset)".to_string()));
+        println!(
+            "  {var}: {}",
+            std::env::var(var).unwrap_or_else(|_| "(unset)".to_string())
+        );
     }
 }
 
@@ -977,6 +1100,7 @@ fn section(title: &str) {
 }
 
 fn path_or_unknown(p: Option<std::path::PathBuf>) -> String {
-    p.map_or("(unresolvable on this platform)".to_string(),
-        |p| p.display().to_string())
+    p.map_or("(unresolvable on this platform)".to_string(), |p| {
+        p.display().to_string()
+    })
 }

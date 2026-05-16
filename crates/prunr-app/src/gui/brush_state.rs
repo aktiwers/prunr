@@ -3,7 +3,9 @@
 //! `BatchManager.items` — the caller hands it the active grid size
 //! and writes the committed strokes back via `BatchItem`'s mutator.
 
-use prunr_core::brush::{paint_circle, paint_line, paint_square, BrushMode, BrushShape, MaskCorrection, Stamp};
+use prunr_core::brush::{
+    paint_circle, paint_line, paint_square, BrushMode, BrushShape, MaskCorrection, Stamp,
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -236,22 +238,24 @@ impl SdQualityPreset {
     /// the function falls through to in-memory-only mutation — no
     /// preset entry is created and no disk flush happens.
     pub fn apply_to_settings(self, settings: &mut crate::gui::settings::Settings) {
-        if matches!(self, SdQualityPreset::Custom) { return; }
+        if matches!(self, SdQualityPreset::Custom) {
+            return;
+        }
         let (sched, steps, cfg, karras, feather) = match self {
-            SdQualityPreset::Fast =>
-                (SdScheduler::Lcm, 4u32, 1.0_f32, false, 4.0_f32),
-            SdQualityPreset::Balanced =>
-                (SdScheduler::Lcm, 8, 1.5, false, 4.0),
-            SdQualityPreset::Quality =>
-                (SdScheduler::DpmPlusPlus2MKarras, 25, 4.0, true, 8.0),
+            SdQualityPreset::Fast => (SdScheduler::Lcm, 4u32, 1.0_f32, false, 4.0_f32),
+            SdQualityPreset::Balanced => (SdScheduler::Lcm, 8, 1.5, false, 4.0),
+            SdQualityPreset::Quality => (SdScheduler::DpmPlusPlus2MKarras, 25, 4.0, true, 8.0),
             SdQualityPreset::Custom => unreachable!(),
         };
 
         settings.brush.inpaint_feather = feather;
 
-        let prunr_or_non_sd = settings.default_preset
-            == crate::gui::settings::PRUNR_PRESET
-            || settings.model.to_model_id().map(|id| !id.is_sd_family()).unwrap_or(true);
+        let prunr_or_non_sd = settings.default_preset == crate::gui::settings::PRUNR_PRESET
+            || settings
+                .model
+                .to_model_id()
+                .map(|id| !id.is_sd_family())
+                .unwrap_or(true);
         if prunr_or_non_sd {
             settings.brush.sd_scheduler = sched;
             settings.brush.sd_steps = steps;
@@ -260,21 +264,28 @@ impl SdQualityPreset {
             return;
         }
 
-        let model_id = settings.model.to_model_id()
+        let model_id = settings
+            .model
+            .to_model_id()
             .expect("non-prunr_or_non_sd branch implies SD-family model_id is Some");
 
         let preset_name = settings.default_preset.clone();
         let key = crate::gui::presets::model_id_key(model_id);
         let file = settings.presets.entry(preset_name.clone()).or_default();
         let mp = file.models.entry(key).or_default();
-        let sd = mp.sd.get_or_insert_with(crate::gui::presets::SdPreset::default);
+        let sd = mp
+            .sd
+            .get_or_insert_with(crate::gui::presets::SdPreset::default);
         sd.active_scheduler = sched;
-        sd.schedulers.insert(sched, crate::gui::presets::SdSchedulerBundle {
-            steps,
-            guidance_scale: cfg,
-            use_karras_sigmas: karras,
-            strength: settings.brush.sd_strength,
-        });
+        sd.schedulers.insert(
+            sched,
+            crate::gui::presets::SdSchedulerBundle {
+                steps,
+                guidance_scale: cfg,
+                use_karras_sigmas: karras,
+                strength: settings.brush.sd_strength,
+            },
+        );
 
         let mp_clone = mp.clone();
         if let Err(e) = crate::gui::presets_fs::save_merged(&preset_name, model_id, mp_clone) {
@@ -329,14 +340,20 @@ impl SdQualityPreset {
     }
 }
 
-fn default_feather() -> f32 { 4.0 }
-fn default_grow() -> f32 { 2.0 }
+fn default_feather() -> f32 {
+    4.0
+}
+fn default_grow() -> f32 {
+    2.0
+}
 /// 1.5 matches the `Balanced` preset's CFG (LCM scheduler, CFG up to
 /// 2.0 per Diffusers LCM guidance — community consensus is values
 /// \>2.0 degrade LCM output quality). For Standard SD via DDIM /
 /// DPM++ the user can bump to 4.0–7.5 via the toolbar slider; the
 /// `Quality` preset auto-fills 4.0 when picked.
-pub(crate) fn default_cfg() -> f32 { 1.5 }
+pub(crate) fn default_cfg() -> f32 {
+    1.5
+}
 
 /// Defaults for SD eraser prompts. Style-agnostic — works whether the
 /// source is a photo, drawing, anime, pixel art, render, etc. (avoiding
@@ -350,16 +367,30 @@ pub const DEFAULT_SD_PROMPT: &str =
 pub const DEFAULT_SD_NEGATIVE_PROMPT: &str =
     "text, letters, words, watermark, signature, logo, blurry, distorted, \
      low quality, oversaturated, jpeg artifacts";
-fn default_sd_prompt() -> String { DEFAULT_SD_PROMPT.to_string() }
-fn default_sd_negative_prompt() -> String { DEFAULT_SD_NEGATIVE_PROMPT.to_string() }
+fn default_sd_prompt() -> String {
+    DEFAULT_SD_PROMPT.to_string()
+}
+fn default_sd_negative_prompt() -> String {
+    DEFAULT_SD_NEGATIVE_PROMPT.to_string()
+}
 
-fn default_sd_scheduler() -> SdScheduler { SdScheduler::Lcm }
-fn default_sd_steps() -> u32 { 8 }
-fn default_strength() -> f32 { 1.0 }
+fn default_sd_scheduler() -> SdScheduler {
+    SdScheduler::Lcm
+}
+fn default_sd_steps() -> u32 {
+    8
+}
+fn default_strength() -> f32 {
+    1.0
+}
 
 impl BrushSettings {
     pub fn stamp(&self) -> Stamp {
-        Stamp { hardness: self.hardness, strength: self.strength, mode: self.mode }
+        Stamp {
+            hardness: self.hardness,
+            strength: self.strength,
+            mode: self.mode,
+        }
     }
 
     #[cfg(test)]
@@ -486,7 +517,9 @@ impl BrushState {
     /// only every-half-radius cuts the per-frame paint count without
     /// changing what the user sees.
     pub fn record_trail_stamp(&mut self, sx: f32, sy: f32, screen_radius: f32) {
-        let Some(active) = self.active.as_mut() else { return };
+        let Some(active) = self.active.as_mut() else {
+            return;
+        };
         if let Some(&(px, py, _)) = active.trail.last() {
             let dx = sx - px;
             let dy = sy - py;
@@ -511,7 +544,9 @@ impl BrushState {
     /// converts screen→model so screen-radius confusion can't reach
     /// the grid. Line strokes wait for `commit_stroke` to paint.
     pub fn extend_stroke_with_radius(&mut self, x: f32, y: f32, radius: f32, stamp: Stamp) {
-        let Some(active) = self.active.as_mut() else { return };
+        let Some(active) = self.active.as_mut() else {
+            return;
+        };
         match active.shape {
             BrushShape::Circle => {
                 paint_circle(&mut active.grid, x, y, radius, stamp);
@@ -538,8 +573,10 @@ impl BrushState {
         if let Some(line) = active.line {
             paint_line(
                 &mut active.grid,
-                line.first.0, line.first.1,
-                line.last.0, line.last.1,
+                line.first.0,
+                line.first.1,
+                line.last.0,
+                line.last.1,
                 line.radius,
                 stamp,
             );
@@ -550,7 +587,6 @@ impl BrushState {
         }
         Some(active.grid)
     }
-
 }
 
 #[cfg(test)]
@@ -573,8 +609,11 @@ mod tests {
     #[test]
     fn default_brush_settings_match_balanced_preset() {
         let s = BrushSettings::default();
-        assert_eq!(SdQualityPreset::detect_from(&s), SdQualityPreset::Balanced,
-            "default BrushSettings must align with Balanced preset");
+        assert_eq!(
+            SdQualityPreset::detect_from(&s),
+            SdQualityPreset::Balanced,
+            "default BrushSettings must align with Balanced preset"
+        );
     }
 
     /// Each preset's `apply_to` must produce a `BrushSettings` that
@@ -583,11 +622,18 @@ mod tests {
     /// can't silently break the other.
     #[test]
     fn quality_presets_round_trip_apply_then_detect() {
-        for preset in [SdQualityPreset::Fast, SdQualityPreset::Balanced, SdQualityPreset::Quality] {
+        for preset in [
+            SdQualityPreset::Fast,
+            SdQualityPreset::Balanced,
+            SdQualityPreset::Quality,
+        ] {
             let mut s = BrushSettings::default();
             preset.apply_to(&mut s);
-            assert_eq!(SdQualityPreset::detect_from(&s), preset,
-                "apply→detect mismatch for {preset:?}");
+            assert_eq!(
+                SdQualityPreset::detect_from(&s),
+                preset,
+                "apply→detect mismatch for {preset:?}"
+            );
         }
     }
 
@@ -613,20 +659,29 @@ mod tests {
         // Default == Balanced (LCM, 8 steps, CFG=1.5, no Karras).
         // Bump CFG to a non-preset value:
         s.sd_guidance_scale = 3.0;
-        assert_eq!(SdQualityPreset::detect_from(&s), SdQualityPreset::Custom,
-            "off-preset CFG must detect as Custom");
+        assert_eq!(
+            SdQualityPreset::detect_from(&s),
+            SdQualityPreset::Custom,
+            "off-preset CFG must detect as Custom"
+        );
 
         // Change scheduler away from the preset:
         let mut s = BrushSettings::default();
         s.sd_scheduler = SdScheduler::Ddim;
-        assert_eq!(SdQualityPreset::detect_from(&s), SdQualityPreset::Custom,
-            "off-preset scheduler must detect as Custom");
+        assert_eq!(
+            SdQualityPreset::detect_from(&s),
+            SdQualityPreset::Custom,
+            "off-preset scheduler must detect as Custom"
+        );
 
         // Toggle Karras (Balanced has it off; flipping on → Custom):
         let mut s = BrushSettings::default();
         s.sd_use_karras_sigmas = true;
-        assert_eq!(SdQualityPreset::detect_from(&s), SdQualityPreset::Custom,
-            "off-preset Karras toggle must detect as Custom");
+        assert_eq!(
+            SdQualityPreset::detect_from(&s),
+            SdQualityPreset::Custom,
+            "off-preset Karras toggle must detect as Custom"
+        );
     }
 
     /// `is_available()` reflects which schedulers have a dispatch
@@ -698,8 +753,10 @@ mod tests {
     #[test]
     fn sd_use_taesd_default_is_none_auto() {
         let s = BrushSettings::default();
-        assert_eq!(s.sd_use_taesd, None,
-            "default must be None (auto-on when TAESD bundle installed)");
+        assert_eq!(
+            s.sd_use_taesd, None,
+            "default must be None (auto-on when TAESD bundle installed)"
+        );
     }
 
     #[test]
@@ -720,8 +777,10 @@ mod tests {
     fn sd_use_taesd_effective_explicit_off_beats_install() {
         let mut s = BrushSettings::default();
         s.sd_use_taesd = Some(false);
-        assert!(!s.sd_use_taesd_effective_with_avail(true),
-            "explicit opt-out must override installed bundle");
+        assert!(
+            !s.sd_use_taesd_effective_with_avail(true),
+            "explicit opt-out must override installed bundle"
+        );
         assert!(!s.sd_use_taesd_effective_with_avail(false));
     }
 
@@ -729,20 +788,28 @@ mod tests {
     fn sd_use_taesd_effective_explicit_on_gated_by_install() {
         let mut s = BrushSettings::default();
         s.sd_use_taesd = Some(true);
-        assert!(s.sd_use_taesd_effective_with_avail(true),
-            "explicit opt-in + installed must dispatch TAESD");
-        assert!(!s.sd_use_taesd_effective_with_avail(false),
-            "explicit opt-in but not installed must fall back");
+        assert!(
+            s.sd_use_taesd_effective_with_avail(true),
+            "explicit opt-in + installed must dispatch TAESD"
+        );
+        assert!(
+            !s.sd_use_taesd_effective_with_avail(false),
+            "explicit opt-in but not installed must fall back"
+        );
     }
 
     #[test]
     fn sd_use_taesd_effective_auto_follows_install() {
         let mut s = BrushSettings::default();
         s.sd_use_taesd = None;
-        assert!(s.sd_use_taesd_effective_with_avail(true),
-            "auto mode + installed = on");
-        assert!(!s.sd_use_taesd_effective_with_avail(false),
-            "auto mode + not installed = off");
+        assert!(
+            s.sd_use_taesd_effective_with_avail(true),
+            "auto mode + installed = on"
+        );
+        assert!(
+            !s.sd_use_taesd_effective_with_avail(false),
+            "auto mode + not installed = off"
+        );
     }
 
     #[test]
@@ -798,7 +865,6 @@ mod tests {
         assert!(!s.has_active_stroke());
     }
 
-
     #[test]
     fn reset_popover_fields_from_default_restores_visible_sliders_and_shape_only() {
         let mut s = BrushSettings {
@@ -831,7 +897,10 @@ mod tests {
         assert_eq!(s.inpaint_grow, d.inpaint_grow);
 
         // strength + mode carry user intent (seg pipeline + Add/Subtract).
-        assert!((s.strength - 0.42).abs() < f32::EPSILON, "strength must survive popover reset");
+        assert!(
+            (s.strength - 0.42).abs() < f32::EPSILON,
+            "strength must survive popover reset"
+        );
         assert_eq!(s.mode, BrushMode::Add, "mode must survive popover reset");
 
         // SD-tuning fields are owned by the SD chip popover.
@@ -877,7 +946,9 @@ mod tests {
 
     #[test]
     fn sd_quality_preset_apply_to_settings_writes_through_active_preset() {
-        use crate::gui::presets::{model_id_key, ModelPreset, PresetFile, PRESET_FORMAT_VERSION, SdPreset};
+        use crate::gui::presets::{
+            model_id_key, ModelPreset, PresetFile, SdPreset, PRESET_FORMAT_VERSION,
+        };
         use crate::gui::settings::{Settings, SettingsModel};
 
         let mut s = Settings::default();
@@ -889,7 +960,10 @@ mod tests {
         };
         let mut models = std::collections::HashMap::new();
         models.insert(model_id_key(prunr_models::ModelId::SdV15InpaintFp16), mp);
-        let file = PresetFile { format_version: PRESET_FORMAT_VERSION, models };
+        let file = PresetFile {
+            format_version: PRESET_FORMAT_VERSION,
+            models,
+        };
         // Unique name per test so the on-disk side effect of save_merged
         // doesn't collide with siblings (the disk write is a best-effort
         // side effect; this test asserts in-memory state only).
@@ -905,14 +979,20 @@ mod tests {
         assert!(s.brush.sd_use_karras_sigmas);
 
         let key = model_id_key(prunr_models::ModelId::SdV15InpaintFp16);
-        let mp_back = s.presets.get(preset_name)
+        let mp_back = s
+            .presets
+            .get(preset_name)
             .expect("preset stays in map")
-            .models.get(&key)
+            .models
+            .get(&key)
             .expect("SD entry");
         let sd_back = mp_back.sd.as_ref().expect("sd entry written");
         assert_eq!(sd_back.active_scheduler, SdScheduler::DpmPlusPlus2MKarras);
-        let bundle = sd_back.schedulers.get(&SdScheduler::DpmPlusPlus2MKarras)
-            .copied().expect("bundle written");
+        let bundle = sd_back
+            .schedulers
+            .get(&SdScheduler::DpmPlusPlus2MKarras)
+            .copied()
+            .expect("bundle written");
         assert_eq!(bundle.steps, 25);
         assert!((bundle.guidance_scale - 4.0).abs() < f32::EPSILON);
         assert!(bundle.use_karras_sigmas);
@@ -937,12 +1017,20 @@ mod tests {
         assert_eq!(s.brush.sd_steps, 4);
         assert!((s.brush.sd_guidance_scale - 1.0).abs() < f32::EPSILON);
         assert!(!s.brush.sd_use_karras_sigmas);
-        assert_eq!(s.presets, presets_before, "Prunr branch must not touch presets map");
+        assert_eq!(
+            s.presets, presets_before,
+            "Prunr branch must not touch presets map"
+        );
     }
 
     #[test]
     fn brush_settings_stamp_reflects_fields() {
-        let s = BrushSettings { hardness: 0.3, strength: 0.8, mode: BrushMode::Add, ..BrushSettings::default() };
+        let s = BrushSettings {
+            hardness: 0.3,
+            strength: 0.8,
+            mode: BrushMode::Add,
+            ..BrushSettings::default()
+        };
         let stamp = s.stamp();
         assert!((stamp.hardness - 0.3).abs() < f32::EPSILON);
         assert!((stamp.strength - 0.8).abs() < f32::EPSILON);
