@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
 
-use prunr_models::{descriptor, on_demand_dir, ModelId, ModelPart, ModelSource};
+use prunr_models::{descriptor, on_demand_dir, ModelId, ModelPart, ModelSource, OnDemandVariant};
 use sha2::{Digest, Sha256};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -149,8 +149,8 @@ impl DownloadManager {
             ModelSource::Bundled => {
                 self.send_failure(id, format!("{id:?} is bundled — no download path"), false);
             }
-            ModelSource::OnDemand { url, sha256, filename, size_mb, .. } => {
-                self.kick_off_single(id, url, sha256, filename, size_mb);
+            ModelSource::OnDemand { url, sha256, filename, size_mb, fp16, .. } => {
+                self.kick_off_single(id, url, sha256, filename, size_mb, fp16);
             }
             ModelSource::MultiPartOnDemand { subdir, parts, .. } => {
                 self.kick_off_multi(id, subdir, parts);
@@ -165,6 +165,7 @@ impl DownloadManager {
         sha256: &'static str,
         filename: &'static str,
         size_mb: u32,
+        fp16: Option<OnDemandVariant>,
     ) {
         let Some(dir) = on_demand_dir() else {
             self.send_failure(id, "Could not resolve user data directory".into(), false);
@@ -175,13 +176,19 @@ impl DownloadManager {
             return;
         }
         let dest = dir.join(filename);
-        let total = (size_mb as u64) * 1024 * 1024;
+        let fp16_dest = fp16.as_ref().map(|v| dir.join(v.filename));
+        // Combined byte budget for progress: main file + optional fp16
+        // companion. The UI bar tracks both as one logical download so
+        // the user sees a single progress trajectory.
+        let main_bytes = (size_mb as u64) * 1024 * 1024;
+        let fp16_bytes = fp16.as_ref().map(|v| (v.size_mb as u64) * 1024 * 1024).unwrap_or(0);
+        let total = main_bytes + fp16_bytes;
         let cancel = self.begin_active(id, total);
         let tx = self.progress_tx.clone();
         std::thread::spawn(move || {
-            let on_progress = {
+            let on_progress_main = {
                 let tx = tx.clone();
-                move |bytes_so_far: u64, total: u64| {
+                move |bytes_so_far: u64, _part_total: u64| {
                     let _ = tx.send(DownloadEvent::Progress { id, bytes_so_far, total });
                 }
             };
@@ -191,14 +198,37 @@ impl DownloadManager {
                     let _ = tx.send(DownloadEvent::Verifying { id });
                 }
             };
-            match download_to_file(url, &dest, sha256, cancel, &on_progress, &on_verifying) {
-                Ok(()) => { let _ = tx.send(DownloadEvent::Complete { id }); }
-                Err(e) => {
-                    let _ = tx.send(DownloadEvent::Failed {
-                        id, error: e.message, retryable: e.retryable,
-                    });
+            if let Err(e) = download_to_file(url, &dest, sha256, cancel.clone(), &on_progress_main, &on_verifying) {
+                let _ = tx.send(DownloadEvent::Failed {
+                    id, error: e.message, retryable: e.retryable,
+                });
+                return;
+            }
+
+            if let (Some(variant), Some(dest_fp16)) = (fp16.as_ref(), fp16_dest.as_ref()) {
+                let on_progress_fp16 = {
+                    let tx = tx.clone();
+                    move |part_so_far: u64, _part_total: u64| {
+                        let _ = tx.send(DownloadEvent::Progress {
+                            id, bytes_so_far: main_bytes + part_so_far, total,
+                        });
+                    }
+                };
+                if let Err(e) = download_to_file(variant.url, dest_fp16, variant.sha256, cancel, &on_progress_fp16, &on_verifying) {
+                    // fp16 companion failed: keep the main fp32 install
+                    // and surface a non-fatal warning. The engine falls
+                    // back to fp32 automatically (see
+                    // `engine.rs::optimized_variant_bytes` -> None ->
+                    // FP32 path).
+                    tracing::warn!(
+                        ?id,
+                        error = %e.message,
+                        "fp16 companion download failed — fp32 install succeeded; engine will use fp32"
+                    );
                 }
             }
+
+            let _ = tx.send(DownloadEvent::Complete { id });
         });
     }
 
