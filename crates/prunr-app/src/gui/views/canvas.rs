@@ -187,6 +187,26 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
     if brush_active && !modal_open && !popup_open && !widget_has_pointer {
         handle_brush_input(ui, app, canvas_rect);
     }
+
+    // Magic Brush "Preparing..." overlay — shown while the SAM encoder is
+    // in flight for the selected item. Canvas centre, TEXT_SECONDARY text +
+    // ACCENT spinner below.
+    if app.magic_brush_state.is_active() && app.magic_brush_state.has_pending_encoder() {
+        let center = canvas_rect.center();
+        ui.painter().text(
+            center,
+            egui::Align2::CENTER_CENTER,
+            "Preparing\u{2026}",
+            egui::FontId::proportional(14.0),
+            theme::TEXT_SECONDARY,
+        );
+        egui::Area::new(egui::Id::new("magic_preparing_spinner"))
+            .fixed_pos(center + egui::vec2(0.0, 24.0))
+            .show(ui.ctx(), |ui| {
+                ui.spinner();
+            });
+        ui.ctx().request_repaint();
+    }
 }
 
 /// Run the brush overlay (cursor + pointer events) and commit any

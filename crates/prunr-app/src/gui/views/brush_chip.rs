@@ -153,42 +153,10 @@ pub(super) fn render(
         ui.separator();
         ui.add_space(4.0);
 
-        // Selection visualization knobs — always shown when brush chip is visible
-        // so the user can pre-configure the overlay before committing a selection.
-        ui.label(
-            egui::RichText::new("Selection")
-                .strong()
-                .color(crate::gui::theme::TEXT_PRIMARY)
-                .size(crate::gui::theme::FONT_SIZE_BODY),
-        );
-        ui.add_space(2.0);
-        let fe = chip::slider_row_f32(
-            ui, "Edge feather", &mut s.edge_feather, 0.0..=20.0, false,
-            |v| if v < 0.1 { "off".into() } else { format!("{v:.0} px") },
-        );
-        outcome.committed |= fe.commit;
-        super::hint(ui, "Soften selection edges, 0\u{2013}20 pixels.");
-        ui.add_space(2.0);
-        let ot = chip::slider_row_f32(
-            ui, "Outline thickness", &mut s.outline_thickness, 0.0..=10.0, false,
-            |v| format!("{v:.1} px"),
-        );
-        outcome.committed |= ot.commit;
-        super::hint(ui, "0\u{2013}10 pixels.");
-        ui.add_space(2.0);
-        let oo = chip::slider_row_f32(
-            ui, "Outline opacity", &mut s.outline_opacity, 0.0..=1.0, false,
-            |v| format!("{:.0}%", v * 100.0),
-        );
-        outcome.committed |= oo.commit;
-        super::hint(ui, "0 = hidden, 1 = fully visible.");
-        ui.add_space(2.0);
-        let fo = chip::slider_row_f32(
-            ui, "Fill opacity", &mut s.fill_opacity, 0.0..=1.0, false,
-            |v| format!("{:.0}%", v * 100.0),
-        );
-        outcome.committed |= fo.commit;
-        super::hint(ui, "0 = no fill, 1 = solid fill.");
+        // Selection visualization knobs — shared with Magic Brush chip via
+        // render_shared_selection_section.
+        let sel_committed = render_shared_selection_section(ui, s);
+        outcome.committed |= sel_committed;
 
         ui.add_space(4.0);
         ui.separator();
@@ -204,6 +172,47 @@ pub(super) fn render(
     });
 
     outcome
+}
+
+/// Selection visualization knobs shared between the Paint Brush chip and
+/// the Magic Brush chip. Returns `true` if any slider committed this frame.
+pub(super) fn render_shared_selection_section(ui: &mut egui::Ui, s: &mut BrushSettings) -> bool {
+    let mut committed = false;
+    ui.label(
+        egui::RichText::new("Selection")
+            .strong()
+            .color(crate::gui::theme::TEXT_PRIMARY)
+            .size(crate::gui::theme::FONT_SIZE_BODY),
+    );
+    ui.add_space(2.0);
+    let fe = chip::slider_row_f32(
+        ui, "Edge feather", &mut s.edge_feather, 0.0..=20.0, false,
+        |v| if v < 0.1 { "off".into() } else { format!("{v:.0} px") },
+    );
+    committed |= fe.commit;
+    super::hint(ui, "Soften selection edges, 0\u{2013}20 pixels.");
+    ui.add_space(2.0);
+    let ot = chip::slider_row_f32(
+        ui, "Outline thickness", &mut s.outline_thickness, 0.0..=10.0, false,
+        |v| format!("{v:.1} px"),
+    );
+    committed |= ot.commit;
+    super::hint(ui, "0\u{2013}10 pixels.");
+    ui.add_space(2.0);
+    let oo = chip::slider_row_f32(
+        ui, "Outline opacity", &mut s.outline_opacity, 0.0..=1.0, false,
+        |v| format!("{:.0}%", v * 100.0),
+    );
+    committed |= oo.commit;
+    super::hint(ui, "0 = hidden, 1 = fully visible.");
+    ui.add_space(2.0);
+    let fo = chip::slider_row_f32(
+        ui, "Fill opacity", &mut s.fill_opacity, 0.0..=1.0, false,
+        |v| format!("{:.0}%", v * 100.0),
+    );
+    committed |= fo.commit;
+    super::hint(ui, "0 = no fill, 1 = solid fill.");
+    committed
 }
 
 /// Right-padded label so 1-, 2-, 3-digit radius values render at the
