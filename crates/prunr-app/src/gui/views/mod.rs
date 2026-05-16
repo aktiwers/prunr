@@ -114,6 +114,8 @@ pub fn model_name(model: SettingsModel) -> &'static str {
         SettingsModel::SdInpaint => "Eraser (SD 1.5)",
         SettingsModel::RealEsrganUpscale => "Upscale (Real-ESRGAN)",
         SettingsModel::Nomos8kUpscale => "Upscale (Nomos8k)",
+        SettingsModel::FourXNmkdSiaxCxUpscale => "Upscale (NMKD Siax-CX)",
+        SettingsModel::FourXNmkdSuperscaleUpscale => "Upscale (NMKD Superscale)",
     }
 }
 
@@ -130,6 +132,8 @@ pub fn model_label(model: SettingsModel, short: bool) -> String {
         SettingsModel::SdInpaint => (ICON_BRUSH.codepoint, "Eraser (SD 1.5)", "generative", "~2 GB"),
         SettingsModel::RealEsrganUpscale => (ICON_ARROW_UPWARD.codepoint, "Upscale (Real-ESRGAN)", "4× upscale", "~64 MB"),
         SettingsModel::Nomos8kUpscale => (ICON_ARROW_UPWARD.codepoint, "Upscale (Nomos8k)", "4× upscale fp16", "~155 MB"),
+        SettingsModel::FourXNmkdSiaxCxUpscale => (ICON_ARROW_UPWARD.codepoint, "Upscale (NMKD Siax-CX)", "4× clean photos", "~64 MB"),
+        SettingsModel::FourXNmkdSuperscaleUpscale => (ICON_ARROW_UPWARD.codepoint, "Upscale (NMKD Superscale)", "4× restoration", "~64 MB"),
     };
     if short {
         format!("{icon}  {name}")

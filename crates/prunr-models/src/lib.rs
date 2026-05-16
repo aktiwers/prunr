@@ -48,6 +48,14 @@ pub enum ModelId {
     /// Real-ESRGAN x2plus (RRDB, fp32). OnDemand; internally dispatched
     /// via `OutputScale::X4TwoPass` (chains x2plus twice for a net 4×).
     RealEsrganX2Plus,
+    /// 4x NMKD Siax-CX (RRDB-23, fp32). OnDemand. Community-trained
+    /// universal upscaler for clean / mildly-compressed photos.
+    /// WTFPL — no attribution required.
+    FourXNmkdSiaxCx,
+    /// 4x NMKD Superscale (RRDB-23, fp32). OnDemand. Community-trained
+    /// restoration upscaler — handles noise and JPEG artifacts on real
+    /// photos. WTFPL — no attribution required.
+    FourXNmkdSuperscale,
 }
 
 impl ModelId {
@@ -77,6 +85,8 @@ impl ModelId {
         ModelId::RealEsrganX4Plus,
         ModelId::Nomos8kSchatL,
         ModelId::RealEsrganX2Plus,
+        ModelId::FourXNmkdSiaxCx,
+        ModelId::FourXNmkdSuperscale,
     ];
 
     /// Stable string identifier used as a persistent key (cache
@@ -100,6 +110,8 @@ impl ModelId {
             ModelId::RealEsrganX4Plus => "real_esrgan_x4plus",
             ModelId::Nomos8kSchatL => "nomos8k_schat_l",
             ModelId::RealEsrganX2Plus => "real_esrgan_x2plus",
+            ModelId::FourXNmkdSiaxCx => "four_x_nmkd_siax_cx",
+            ModelId::FourXNmkdSuperscale => "four_x_nmkd_superscale",
         }
     }
 
@@ -730,6 +742,68 @@ pub const REGISTRY: &[ModelDescriptor] = &[
             uses_window_attention: false,
         }),
     },
+    ModelDescriptor {
+        id: ModelId::FourXNmkdSiaxCx,
+        display_name: "4x NMKD Siax-CX",
+        description: "Community-trained universal upscaler. Sharper than Real-ESRGAN x4plus on clean and mildly compressed photos.",
+        category: ModelCategory::Upscale,
+        source: ModelSource::OnDemand {
+            filename: "4x-NMKD-Siax-CX.onnx",
+            url: "https://github.com/aktiwers/prunr/releases/download/models-v1/4x-NMKD-Siax-CX.onnx",
+            sha256: "d7db322397ae1041076a3f9fe9736a7bf9d3364e435eb5b0ece912e050a29f87",
+            size_mb: 64,
+            license: LicenseInfo {
+                author: "Nmkd",
+                license: "WTFPL",
+                license_url: "https://www.wtfpl.net/about/",
+                source_url: "https://openmodeldb.info/models/4x-NMKD-Siax-CX",
+            },
+        },
+        version: "1.0.0",
+        gpu: GpuRequirement::Recommended,
+        incompatible_eps: &[],
+        working_set_mb: 600,
+        tile_size_multiple: None,
+        recommended_tile: Some(512),
+        attribution_required: false,
+        upscale: Some(UpscaleModelKnobs {
+            input_name: "data",
+            is_fp16: false,
+            native_scale: 4,
+            uses_window_attention: false,
+        }),
+    },
+    ModelDescriptor {
+        id: ModelId::FourXNmkdSuperscale,
+        display_name: "4x NMKD Superscale",
+        description: "Community-trained restoration upscaler. Handles noise and JPEG artifacts on real photos.",
+        category: ModelCategory::Upscale,
+        source: ModelSource::OnDemand {
+            filename: "4x-NMKD-Superscale.onnx",
+            url: "https://github.com/aktiwers/prunr/releases/download/models-v1/4x-NMKD-Superscale.onnx",
+            sha256: "6b790a203b341d2db71735040f4f1b26c2bdc5440fdc850e217c2234cd996618",
+            size_mb: 64,
+            license: LicenseInfo {
+                author: "Nmkd",
+                license: "WTFPL",
+                license_url: "https://www.wtfpl.net/about/",
+                source_url: "https://openmodeldb.info/models/4x-NMKD-Superscale",
+            },
+        },
+        version: "1.0.0",
+        gpu: GpuRequirement::Recommended,
+        incompatible_eps: &[],
+        working_set_mb: 600,
+        tile_size_multiple: None,
+        recommended_tile: Some(512),
+        attribution_required: false,
+        upscale: Some(UpscaleModelKnobs {
+            input_name: "data",
+            is_fp16: false,
+            native_scale: 4,
+            uses_window_attention: false,
+        }),
+    },
 ];
 
 pub fn descriptor(id: ModelId) -> Option<&'static ModelDescriptor> {
@@ -891,7 +965,9 @@ fn bundled_bytes(id: ModelId) -> &'static [u8] {
         | ModelId::TaesdFp16
         | ModelId::RealEsrganX4Plus
         | ModelId::Nomos8kSchatL
-        | ModelId::RealEsrganX2Plus => {
+        | ModelId::RealEsrganX2Plus
+        | ModelId::FourXNmkdSiaxCx
+        | ModelId::FourXNmkdSuperscale => {
             // OnDemand / MultiPart in REGISTRY — resolve_bytes routes
             // via disk (or via `multi_part_paths`), not here.
             panic!("bundled_bytes called for non-Bundled model {id:?} — REGISTRY/source mismatch");
@@ -1000,7 +1076,9 @@ fn load_variant(id: ModelId, suffix: &str) -> Option<Vec<u8>> {
         | ModelId::TaesdFp16
         | ModelId::RealEsrganX4Plus
         | ModelId::Nomos8kSchatL
-        | ModelId::RealEsrganX2Plus => return None,
+        | ModelId::RealEsrganX2Plus
+        | ModelId::FourXNmkdSiaxCx
+        | ModelId::FourXNmkdSuperscale => return None,
     };
     let filename = format!("{name}_{suffix}.onnx");
 
@@ -1066,7 +1144,9 @@ mod tests {
                 | ModelId::TaesdFp16
                 | ModelId::RealEsrganX4Plus
                 | ModelId::Nomos8kSchatL
-                | ModelId::RealEsrganX2Plus => {}
+                | ModelId::RealEsrganX2Plus
+                | ModelId::FourXNmkdSiaxCx
+                | ModelId::FourXNmkdSuperscale => {}
             }
         }
     }
@@ -1476,6 +1556,54 @@ mod tests {
         assert_eq!(nomos.upscale.unwrap().tile_overlap(), 32);
         assert_eq!(esrgan.upscale.unwrap().tile_overlap(), 16);
         assert_eq!(esrgan2.upscale.unwrap().tile_overlap(), 16);
+    }
+
+    // ── NMKD community RRDB models (32-13) ────────────────────────────────
+
+    #[test]
+    fn nmkd_siax_cx_in_all() {
+        assert!(ModelId::ALL.contains(&ModelId::FourXNmkdSiaxCx));
+    }
+
+    #[test]
+    fn nmkd_superscale_in_all() {
+        assert!(ModelId::ALL.contains(&ModelId::FourXNmkdSuperscale));
+    }
+
+    #[test]
+    fn nmkd_siax_cx_descriptor_complete() {
+        let desc = descriptor(ModelId::FourXNmkdSiaxCx).expect("FourXNmkdSiaxCx in REGISTRY");
+        assert_eq!(desc.category, ModelCategory::Upscale);
+        let knobs = desc.upscale.expect("FourXNmkdSiaxCx must have upscale knobs");
+        assert_eq!(knobs.native_scale, 4, "Siax-CX is native-4×");
+        assert!(!knobs.uses_window_attention, "Siax-CX is RRDB/CNN — 16 px overlap");
+        assert_eq!(knobs.input_name, "data");
+        assert!(!knobs.is_fp16);
+    }
+
+    #[test]
+    fn nmkd_superscale_descriptor_complete() {
+        let desc = descriptor(ModelId::FourXNmkdSuperscale).expect("FourXNmkdSuperscale in REGISTRY");
+        assert_eq!(desc.category, ModelCategory::Upscale);
+        let knobs = desc.upscale.expect("FourXNmkdSuperscale must have upscale knobs");
+        assert_eq!(knobs.native_scale, 4);
+        assert!(!knobs.uses_window_attention);
+        assert_eq!(knobs.input_name, "data");
+        assert!(!knobs.is_fp16);
+    }
+
+    #[test]
+    fn nmkd_models_have_wtfpl_license() {
+        for id in [ModelId::FourXNmkdSiaxCx, ModelId::FourXNmkdSuperscale] {
+            let desc = descriptor(id).unwrap();
+            let license = match desc.source {
+                ModelSource::OnDemand { license, .. } => license,
+                _ => panic!("{id:?} must be OnDemand"),
+            };
+            assert_eq!(license.license, "WTFPL");
+            assert_eq!(license.author, "Nmkd");
+            assert!(!desc.attribution_required, "WTFPL does not require attribution");
+        }
     }
 
 }
