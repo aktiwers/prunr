@@ -56,6 +56,11 @@ pub enum ModelId {
     /// restoration upscaler — handles noise and JPEG artifacts on real
     /// photos. WTFPL — no attribution required.
     FourXNmkdSuperscale,
+    /// SAM 2 Hiera Small. Two-part OnDemand bundle (encoder + decoder
+    /// ONNX). Apache 2.0 from Meta. Used by Magic Brush for selection
+    /// authoring. Encoder cached on BatchItem; decoder runs per
+    /// click/stroke.
+    Sam2HieraSmall,
 }
 
 impl ModelId {
@@ -87,6 +92,7 @@ impl ModelId {
         ModelId::RealEsrganX2Plus,
         ModelId::FourXNmkdSiaxCx,
         ModelId::FourXNmkdSuperscale,
+        ModelId::Sam2HieraSmall,
     ];
 
     /// Stable string identifier used as a persistent key (cache
@@ -112,6 +118,7 @@ impl ModelId {
             ModelId::RealEsrganX2Plus => "real_esrgan_x2plus",
             ModelId::FourXNmkdSiaxCx => "four_x_nmkd_siax_cx",
             ModelId::FourXNmkdSuperscale => "four_x_nmkd_superscale",
+            ModelId::Sam2HieraSmall => "sam2_hiera_small",
         }
     }
 
@@ -123,6 +130,11 @@ pub enum ModelCategory {
     EdgeDetection,
     Inpaint,
     Upscale,
+    /// Magic Brush — authors a selection mask rather than a final
+    /// segmentation. Routes through Phase 33 SAM dispatch, not the
+    /// BG-removal pipeline. Encoder + decoder ship as separate ONNX
+    /// files (`MultiPartOnDemand`).
+    Selection,
 }
 
 /// Hardware requirement for a model. Drives Model Store + dropdown
@@ -1017,7 +1029,8 @@ fn bundled_bytes(id: ModelId) -> &'static [u8] {
         | ModelId::Nomos8kSchatL
         | ModelId::RealEsrganX2Plus
         | ModelId::FourXNmkdSiaxCx
-        | ModelId::FourXNmkdSuperscale => {
+        | ModelId::FourXNmkdSuperscale
+        | ModelId::Sam2HieraSmall => {
             // OnDemand / MultiPart in REGISTRY — resolve_bytes routes
             // via disk (or via `multi_part_paths`), not here.
             panic!("bundled_bytes called for non-Bundled model {id:?} — REGISTRY/source mismatch");
@@ -1127,9 +1140,8 @@ fn load_variant(id: ModelId, suffix: &str) -> Option<Vec<u8>> {
         ModelId::RealEsrganX2Plus => "RealESRGAN_x2plus",
         ModelId::FourXNmkdSiaxCx => "4x-NMKD-Siax-CX",
         ModelId::FourXNmkdSuperscale => "4x-NMKD-Superscale",
-        // Nomos8k's published .onnx is already fp16; the engine
-        // dispatches via `UpscaleModelKnobs.is_fp16` instead of via a
-        // sibling lookup. No variant file to load.
+        // Nomos8k's published .onnx is already fp16; SAM 2 is
+        // MultiPartOnDemand with no fp16 sibling.
         ModelId::Nomos8kSchatL
         | ModelId::DexiNed
         | ModelId::LaMaFp32
@@ -1137,7 +1149,8 @@ fn load_variant(id: ModelId, suffix: &str) -> Option<Vec<u8>> {
         | ModelId::Migan
         | ModelId::SdV15InpaintFp16
         | ModelId::SdV15LcmInpaintFp16
-        | ModelId::TaesdFp16 => return None,
+        | ModelId::TaesdFp16
+        | ModelId::Sam2HieraSmall => return None,
     };
     let filename = format!("{name}_{suffix}.onnx");
 
@@ -1213,7 +1226,8 @@ mod tests {
                 | ModelId::Nomos8kSchatL
                 | ModelId::RealEsrganX2Plus
                 | ModelId::FourXNmkdSiaxCx
-                | ModelId::FourXNmkdSuperscale => {}
+                | ModelId::FourXNmkdSuperscale
+                | ModelId::Sam2HieraSmall => {}
             }
         }
     }
