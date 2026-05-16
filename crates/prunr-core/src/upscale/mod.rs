@@ -29,7 +29,9 @@ use crate::types::ModelKind;
 /// shape-mismatch (observed against 4xNomos8kSCHAT-L: Level3 panics with
 /// `Attempting to get index by a name which does not exist:
 /// InsertedPrecisionFreeCast_…`; Level2 succeeds across all tile sizes).
-fn pick_optimization_level(descriptor: &prunr_models::ModelDescriptor) -> GraphOptimizationLevel {
+/// Exposed `pub` so the Processor's warm-engine cache can derive the
+/// same level without duplicating the branch.
+pub fn pick_optimization_level(descriptor: &prunr_models::ModelDescriptor) -> GraphOptimizationLevel {
     if descriptor.tile_size_multiple.is_some() {
         GraphOptimizationLevel::Level2
     } else {
@@ -202,17 +204,65 @@ where
     upscale_tiled(input, ns, cfg, run_tile, on_tile_done, cancel)
 }
 
-/// Upscale an RGBA image by `scale` (2 or 4) using the ONNX model
-/// identified by `model_id`.
+/// Engine-parameterized upscale. Caller constructs and owns the
+/// `OrtEngine`; used by the Processor's warm-engine cache so the
+/// 1-3 s Level3 graph-optimization stall is paid only on the first
+/// dispatch.
 ///
 /// Behavior:
 ///   - scale = 4: runs the model at its native 4× scale and returns.
 ///   - scale = 2: for 4× models, runs at 4× then Lanczos3 downscales to 2×.
 ///     For native-2× models (x2plus), runs at native scale directly.
 ///   - Alpha is upscaled independently via Lanczos3.
-///   - Window-attention models (`uses_window_attention`) run at
-///     `GraphOptimizationLevel::Level2` to avoid first-tile shape
-///     baking; other models run at Level3.
+///
+/// Peak working-set RAM: same as `upscale_rgba` (see that doc).
+pub fn upscale_rgba_with_engine<F>(
+    input: &RgbaImage,
+    engine: &OrtEngine,
+    model_id: prunr_models::ModelId,
+    scale: u32,
+    on_tile_done: F,
+    cancel: Option<Arc<AtomicBool>>,
+) -> Result<RgbaImage, CoreError>
+where
+    F: Fn(u32, u32),
+{
+    let descriptor = prunr_models::REGISTRY
+        .iter()
+        .find(|d| d.id == model_id)
+        .ok_or_else(|| CoreError::Model(format!("{model_id:?} not found in REGISTRY")))?;
+
+    let knobs = upscale_knobs(descriptor)?;
+    let native_result = run_upscale_native(input, engine, descriptor, knobs.native_scale, on_tile_done, cancel)?;
+
+    if scale == 4 {
+        Ok(native_result)
+    } else if scale == 2 {
+        let half_w = native_result.width() / 2;
+        let half_h = native_result.height() / 2;
+
+        let rgb4 = image::DynamicImage::ImageRgba8(native_result);
+        let rgb_half = crate::formats::resize_rgb_lanczos3(&rgb4, half_w, half_h);
+
+        // Resize alpha from the original input — skips the intermediate 4×
+        // pass that the RGB path goes through.
+        let alpha_half = upscale_alpha_lanczos3(input, half_w, half_h);
+
+        let mut out = RgbaImage::new(half_w, half_h);
+        for (x, y, p) in out.enumerate_pixels_mut() {
+            let rgb = rgb_half.get_pixel(x, y).0;
+            let a = alpha_half.get_pixel(x, y).0[0];
+            *p = image::Rgba([rgb[0], rgb[1], rgb[2], a]);
+        }
+        Ok(out)
+    } else {
+        Err(CoreError::Inference(format!("unsupported upscale scale: {scale}")))
+    }
+}
+
+/// Convenience wrapper: constructs an engine internally then delegates to
+/// `upscale_rgba_with_engine`. Preserves the existing public API for
+/// callers that don't need the warm-engine cache (CLI, tests).
 ///
 /// Peak working-set RAM (additive to the `upscale_tiled` accumulators
 /// documented in `tiling.rs`):
@@ -247,36 +297,89 @@ where
         ))
     })?;
     let engine = OrtEngine::new_with_optimization_level(model_kind, intra_threads, level)?;
-
-    let knobs = upscale_knobs(descriptor)?;
-    let native_result = run_upscale_native(input, &engine, descriptor, knobs.native_scale, on_tile_done, cancel)?;
-
-    if scale == 4 {
-        Ok(native_result)
-    } else if scale == 2 {
-        let half_w = native_result.width() / 2;
-        let half_h = native_result.height() / 2;
-
-        let rgb4 = image::DynamicImage::ImageRgba8(native_result);
-        let rgb_half = crate::formats::resize_rgb_lanczos3(&rgb4, half_w, half_h);
-
-        // Resize alpha from the original input — skips the intermediate 4×
-        // pass that the RGB path goes through.
-        let alpha_half = upscale_alpha_lanczos3(input, half_w, half_h);
-
-        let mut out = RgbaImage::new(half_w, half_h);
-        for (x, y, p) in out.enumerate_pixels_mut() {
-            let rgb = rgb_half.get_pixel(x, y).0;
-            let a = alpha_half.get_pixel(x, y).0[0];
-            *p = image::Rgba([rgb[0], rgb[1], rgb[2], a]);
-        }
-        Ok(out)
-    } else {
-        Err(CoreError::Inference(format!("unsupported upscale scale: {scale}")))
-    }
+    upscale_rgba_with_engine(input, &engine, model_id, scale, on_tile_done, cancel)
 }
 
-/// Two-pass 4× upscale via `RealEsrganX2Plus` chained against itself.
+/// Engine-parameterized two-pass 4× upscale via `RealEsrganX2Plus`
+/// chained against itself. Caller constructs and owns the `OrtEngine`;
+/// used by the Processor's warm-engine cache so the graph-optimization
+/// stall is paid only on the first dispatch.
+///
+/// Pass 1: input → 2× via x2plus.
+/// Pass 2: 2× output → 4× via x2plus.
+///
+/// The engine must have been constructed for `ModelKind::RealEsrganX2Plus`.
+///
+/// Peak RAM: same as `upscale_two_pass` (see that doc).
+pub fn upscale_two_pass_with_engine<F>(
+    input: &RgbaImage,
+    engine: &OrtEngine,
+    on_tile_done: F,
+    cancel: Option<Arc<AtomicBool>>,
+) -> Result<RgbaImage, CoreError>
+where
+    F: Fn(u32, u32) + Clone,
+{
+    use std::sync::atomic::Ordering;
+
+    // Honor cancel before allocating the first pass.
+    if let Some(c) = cancel.as_ref() {
+        if c.load(Ordering::Acquire) {
+            return Err(CoreError::Cancelled);
+        }
+    }
+
+    let model_id = prunr_models::ModelId::RealEsrganX2Plus;
+    let descriptor = prunr_models::REGISTRY
+        .iter()
+        .find(|d| d.id == model_id)
+        .ok_or_else(|| CoreError::Model("RealEsrganX2Plus not found in REGISTRY".into()))?;
+
+    let knobs = upscale_knobs(descriptor)?;
+    // Pass 1: source → 2×
+    let intermediate = run_upscale_native(
+        input,
+        engine,
+        descriptor,
+        knobs.native_scale,
+        on_tile_done.clone(),
+        cancel.clone(),
+    )?;
+
+    // Honor cancel between passes.
+    if let Some(c) = cancel.as_ref() {
+        if c.load(Ordering::Acquire) {
+            return Err(CoreError::Cancelled);
+        }
+    }
+
+    // Pass 2: intermediate → 4× (intermediate is moved, not cloned).
+    let final_rgb = run_upscale_native(
+        &intermediate,
+        engine,
+        descriptor,
+        knobs.native_scale,
+        on_tile_done,
+        cancel,
+    )?;
+    drop(intermediate);
+
+    // Compose alpha into final_rgb in place: take RGB from pass-2 output,
+    // overwrite its alpha with the Lanczos3-upscaled alpha from the original
+    // input. Mutating final_rgb saves a parallel 4× RgbaImage allocation.
+    let out_w = input.width() * 4;
+    let out_h = input.height() * 4;
+    let alpha_4x = upscale_alpha_lanczos3(input, out_w, out_h);
+    let mut out = final_rgb;
+    for (x, y, p) in out.enumerate_pixels_mut() {
+        p.0[3] = alpha_4x.get_pixel(x, y).0[0];
+    }
+    Ok(out)
+}
+
+/// Convenience wrapper: constructs an engine internally then delegates to
+/// `upscale_two_pass_with_engine`. Preserves the existing public API for
+/// callers that don't need the warm-engine cache (CLI, tests).
 ///
 /// Pass 1: input → 2× via x2plus.
 /// Pass 2: 2× output → 4× via x2plus.
@@ -309,11 +412,11 @@ pub fn upscale_two_pass<F>(
 where
     F: Fn(u32, u32) + Clone,
 {
-    use std::sync::atomic::Ordering;
+    use std::sync::atomic::Ordering as _Ordering;
 
-    // Honor cancel before allocating the first pass.
+    // Honor cancel before constructing the engine.
     if let Some(c) = cancel.as_ref() {
-        if c.load(Ordering::Acquire) {
+        if c.load(_Ordering::Acquire) {
             return Err(CoreError::Cancelled);
         }
     }
@@ -330,47 +433,7 @@ where
         intra_threads,
         level,
     )?;
-
-    let knobs = upscale_knobs(descriptor)?;
-    // Pass 1: source → 2×
-    let intermediate = run_upscale_native(
-        input,
-        &engine,
-        descriptor,
-        knobs.native_scale,
-        on_tile_done.clone(),
-        cancel.clone(),
-    )?;
-
-    // Honor cancel between passes.
-    if let Some(c) = cancel.as_ref() {
-        if c.load(Ordering::Acquire) {
-            return Err(CoreError::Cancelled);
-        }
-    }
-
-    // Pass 2: intermediate → 4× (intermediate is moved, not cloned).
-    let final_rgb = run_upscale_native(
-        &intermediate,
-        &engine,
-        descriptor,
-        knobs.native_scale,
-        on_tile_done,
-        cancel,
-    )?;
-    drop(intermediate);
-
-    // Compose alpha into final_rgb in place: take RGB from pass-2 output,
-    // overwrite its alpha with the Lanczos3-upscaled alpha from the original
-    // input. Mutating final_rgb saves a parallel 4× RgbaImage allocation.
-    let out_w = input.width() * 4;
-    let out_h = input.height() * 4;
-    let alpha_4x = upscale_alpha_lanczos3(input, out_w, out_h);
-    let mut out = final_rgb;
-    for (x, y, p) in out.enumerate_pixels_mut() {
-        p.0[3] = alpha_4x.get_pixel(x, y).0[0];
-    }
-    Ok(out)
+    upscale_two_pass_with_engine(input, &engine, on_tile_done, cancel)
 }
 
 /// Returns `true` when `model_id` supports `OutputScale::X4TwoPass`
