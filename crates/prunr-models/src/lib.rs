@@ -1467,14 +1467,30 @@ mod tests {
 
     #[test]
     fn load_variant_returns_none_for_models_without_variants() {
-        // Variant-bearing models (segmentation only today). Update this
-        // set when a new model gains an .fp16 / .int8 export.
-        let with_variants = |id| matches!(
+        // Models whose `load_variant` match arm explicitly returns None
+        // (no variant lookup possible regardless of disk state). Update
+        // this set when a new model's arm in `load_variant` changes from
+        // a return-None arm to a stable-name-returning arm.
+        //
+        // Excludes (these resolve to a filename stem and may legitimately
+        // pick up a real `_fp16.onnx` / `_int8.onnx` file from the user's
+        // dev path / on_demand_dir / exe-adjacent dir, so asserting None
+        // here would be machine-dependent):
+        //   Silueta, U2net, BiRefNetLite — seg fp16/int8 dev artifacts
+        //   RealEsrganX4Plus, RealEsrganX2Plus, FourXNmkdSiaxCx,
+        //   FourXNmkdSuperscale — RRDB upscale fp16 siblings (32-14)
+        let resolves_to_filename_stem = |id| matches!(
             id,
-            ModelId::Silueta | ModelId::U2net | ModelId::BiRefNetLite,
+            ModelId::Silueta
+                | ModelId::U2net
+                | ModelId::BiRefNetLite
+                | ModelId::RealEsrganX4Plus
+                | ModelId::RealEsrganX2Plus
+                | ModelId::FourXNmkdSiaxCx
+                | ModelId::FourXNmkdSuperscale,
         );
         for &id in ModelId::ALL {
-            if with_variants(id) {
+            if resolves_to_filename_stem(id) {
                 continue;
             }
             assert!(model_fp16_bytes(id).is_none(), "{id:?} fp16");
