@@ -565,6 +565,15 @@ impl SettingsModel {
         }
     }
 
+    /// `ModelKind` for any registered model (seg, inpaint, upscale).
+    /// Returns `None` only for `Self::None`. Use this at recipe-diff
+    /// sites where the actually-dispatched model's kind matters; use
+    /// `to_model_kind` only when you specifically need the
+    /// seg-memory-cap-eligible subset.
+    pub fn dispatch_model_kind(self) -> Option<ModelKind> {
+        self.to_model_id().and_then(|id| ModelKind::try_from(id).ok())
+    }
+
     /// Registry id, or `None` for the no-model variant.
     pub fn to_model_id(self) -> Option<prunr_models::ModelId> {
         match self {
