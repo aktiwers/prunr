@@ -424,6 +424,41 @@ Row 2 / 3 chip rendering has its own set of pub(super) helpers in `chip.rs`. Bef
 
 Any new chip-shaped control (e.g. the Scale chip in `lines_popover.rs`) uses these three primitives — matches the visual rhythm of every other chip and keeps stroke / rounding / padding in one file.
 
+### Chip copy style
+
+Chip tooltips describe what a knob *does* — never how the dispatch
+plumbing works underneath. Internal engineering vocabulary (Tier-1,
+Tier-2, mark_tweak, debounce, inference, postprocess) belongs in
+source comments and `ARCHITECTURE.md`, not in user-facing text.
+
+**Rules:**
+- DO NOT write "updates live", "real-time", "Tier-2", "reprocesses on
+  change", "no reprocessing needed", or any other description of *when*
+  the result updates. Silence is the default; the user discovers timing
+  by dragging the slider. State timing only when it is NON-default
+  (i.e. the knob requires reprocessing).
+- DO write "Requires reprocessing." in active voice for chips whose
+  change triggers a re-dispatch (Tier-1 knobs, model swaps, etc.).
+  Active voice ("Requires") beats passive ("Reprocesses on change").
+- DO NOT write engineering vocabulary: "Tier-1", "Tier-2", "inference",
+  "postprocess", "debounce", "mark_tweak", "subprocess", "ORT". These
+  are *our* words, not the user's.
+- DO use standard imaging vocabulary: "Strength", "EV stops", "HSL",
+  "unsharp mask", "Reinhard transfer", "Lanczos3". Prefer the
+  Wikipedia term over our internal name.
+- Numeric ranges and units are always welcome: "Range: -1 to +1",
+  "EV stops (-2 to +2)", "0 = pure bicubic, 1 = full AI".
+
+**Canonical good examples** (`adjustments_toolbar.rs` mask / edge chips):
+- "Subject mask gamma. Lower = darker subject."
+- "Edge thickness, 0-10 pixels."
+
+**Canonical bad examples — the rule was authored after these shipped
+in 32-07 and were rewritten in 32-11:**
+- ~~"Re-runs inference on change (Tier-1)."~~ → "Requires reprocessing."
+- ~~"Real-time (Tier-2). Range: -1 to +1."~~ → "Range: -1 to +1."
+- ~~"Real-time (Tier-2)."~~ → (silence — drop the body line)
+
 ### View → app intent pattern (Phase 17)
 
 Views shouldn't poke `PrunrApp` fields directly. Return an intent on the corresponding `*Change` struct (e.g. `ToolbarChange.open_model_store: Option<ModelStoreRequest>`) and let `apply_*_change` decide what to do. Same shape for any future "view requests app open a modal / fire a coordinator action" — `Option<Request>` where `Request` carries the args.
