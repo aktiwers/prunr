@@ -41,14 +41,16 @@ pub fn guided_filter_alpha(
     const RGBA_BYTES_PER_PIXEL: usize = 4;
     debug_assert_eq!(guide.as_raw().len(), n * RGBA_BYTES_PER_PIXEL);
 
-    guide_f.par_iter_mut()
+    guide_f
+        .par_iter_mut()
         .zip(mask_f.par_iter_mut())
         .zip(ii.par_iter_mut())
         .zip(ip.par_iter_mut())
         .zip(guide.as_raw().par_chunks_exact(RGBA_BYTES_PER_PIXEL))
         .zip(mask.as_raw().par_iter())
         .for_each(|(((((gf, mf), iiv), ipv), gp), &mp)| {
-            let g = (REC601_R * gp[0] as f32 + REC601_G * gp[1] as f32 + REC601_B * gp[2] as f32) * INV_255;
+            let g = (REC601_R * gp[0] as f32 + REC601_G * gp[1] as f32 + REC601_B * gp[2] as f32)
+                * INV_255;
             let m = mp as f32 * INV_255;
             *gf = g;
             *mf = m;
@@ -67,8 +69,8 @@ pub fn guided_filter_alpha(
         },
         || {
             rayon::join(
-                || box_filter(&ii, w, h, radius),  // mean(I*I)
-                || box_filter(&ip, w, h, radius),  // mean(I*p)
+                || box_filter(&ii, w, h, radius), // mean(I*I)
+                || box_filter(&ip, w, h, radius), // mean(I*p)
             )
         },
     );
@@ -180,23 +182,20 @@ pub(crate) fn box_filter_into(src: &[f32], w: u32, h: u32, radius: u32, dst: &mu
         // of the 1D integral buffer. No two parallel iterations touch the same element.
         let integral_ptr_val = integral.as_mut_ptr() as usize;
 
-        (0..w)
-            .into_par_iter()
-            .chunks(COL_CHUNK)
-            .for_each(|chunk| {
-                let ptr = integral_ptr_val as *mut f32;
-                for y in 1..h {
-                    let row_off = y * w;
-                    let prev_off = (y - 1) * w;
-                    for &x in &chunk {
-                        unsafe {
-                            let cur = ptr.add(row_off + x);
-                            let prev = ptr.add(prev_off + x);
-                            *cur += *prev;
-                        }
+        (0..w).into_par_iter().chunks(COL_CHUNK).for_each(|chunk| {
+            let ptr = integral_ptr_val as *mut f32;
+            for y in 1..h {
+                let row_off = y * w;
+                let prev_off = (y - 1) * w;
+                for &x in &chunk {
+                    unsafe {
+                        let cur = ptr.add(row_off + x);
+                        let prev = ptr.add(prev_off + x);
+                        *cur += *prev;
                     }
                 }
-            });
+            }
+        });
     } else {
         for cx in (0..w).step_by(COL_CHUNK) {
             let end = (cx + COL_CHUNK).min(w);
@@ -211,7 +210,11 @@ pub(crate) fn box_filter_into(src: &[f32], w: u32, h: u32, radius: u32, dst: &mu
     }
 
     // --- Lookup pass (embarrassingly parallel) ---
-    debug_assert_eq!(dst.len(), n, "box_filter_into: dst.len() must equal src.len()");
+    debug_assert_eq!(
+        dst.len(),
+        n,
+        "box_filter_into: dst.len() must equal src.len()"
+    );
 
     let get = |x: i64, y: i64| -> f32 {
         if x < 0 || y < 0 {
@@ -256,8 +259,8 @@ pub(crate) fn box_filter_into(src: &[f32], w: u32, h: u32, radius: u32, dst: &mu
                 let xi = x as i64;
                 let x2 = (xi + r) as usize;
                 let x1 = (xi - r - 1) as usize;
-                let sum = integral[row_y2 + x2] - integral[row_y2 + x1]
-                    - integral[row_y1 + x2] + integral[row_y1 + x1];
+                let sum = integral[row_y2 + x2] - integral[row_y2 + x1] - integral[row_y1 + x2]
+                    + integral[row_y1 + x1];
                 *slot = sum * inv_area;
             }
 
@@ -330,7 +333,9 @@ mod tests {
         let guide = RgbaImage::from_pixel(48, 48, Rgba([128, 128, 128, 255]));
         let mask = GrayImage::from_pixel(48, 48, Luma([200]));
         let result = guided_filter_alpha(&guide, &mask, 4, 1e-4);
-        let (min, max) = result.pixels().map(|p| p[0])
+        let (min, max) = result
+            .pixels()
+            .map(|p| p[0])
             .fold((u8::MAX, u8::MIN), |(lo, hi), v| (lo.min(v), hi.max(v)));
         assert!(max - min <= 1, "flat input produced spread {min}..={max}");
     }
@@ -389,10 +394,14 @@ mod tests {
                 let mut count = 0u32;
                 for dy in -r..=r {
                     let yy = y + dy;
-                    if yy < 0 || yy >= hi { continue; }
+                    if yy < 0 || yy >= hi {
+                        continue;
+                    }
                     for dx in -r..=r {
                         let xx = x + dx;
-                        if xx < 0 || xx >= wi { continue; }
+                        if xx < 0 || xx >= wi {
+                            continue;
+                        }
                         sum += data[(yy * wi + xx) as usize];
                         count += 1;
                     }
@@ -418,8 +427,10 @@ mod tests {
         let expected = brute_force_box(&data, w, h, r);
         for (i, (&a, &e)) in actual.iter().zip(expected.iter()).enumerate() {
             let (x, y) = (i as u32 % w, i as u32 / w);
-            assert!((a - e).abs() < 1e-4,
-                "box_filter mismatch at ({x},{y}): actual={a} expected={e}");
+            assert!(
+                (a - e).abs() < 1e-4,
+                "box_filter mismatch at ({x},{y}): actual={a} expected={e}"
+            );
         }
     }
 
@@ -436,8 +447,10 @@ mod tests {
         let expected = brute_force_box(&data, w, h, r);
         for (i, (&a, &e)) in actual.iter().zip(expected.iter()).enumerate() {
             let (x, y) = (i as u32 % w, i as u32 / w);
-            assert!((a - e).abs() < 1e-4,
-                "box_filter mismatch at ({x},{y}): actual={a} expected={e}");
+            assert!(
+                (a - e).abs() < 1e-4,
+                "box_filter mismatch at ({x},{y}): actual={a} expected={e}"
+            );
         }
     }
 }

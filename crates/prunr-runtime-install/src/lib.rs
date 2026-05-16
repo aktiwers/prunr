@@ -41,14 +41,23 @@ pub const MACOS_CORE_ML_ORT_VERSION: &str = "1.20.0";
 /// Host runtime identifier — `linux-x64`, `macos-arm64`, etc. `unknown`
 /// for unsupported platforms; `host_pypi_token` rejects those explicitly.
 pub fn host_rid() -> &'static str {
-    if cfg!(all(target_os = "linux", target_arch = "x86_64")) { "linux-x64" }
-    else if cfg!(all(target_os = "linux", target_arch = "aarch64")) { "linux-arm64" }
-    else if cfg!(all(target_os = "windows", target_arch = "x86_64")) { "windows-x64" }
-    else if cfg!(all(target_os = "windows", target_arch = "aarch64")) { "windows-arm64" }
-    else if cfg!(target_os = "macos") {
-        if cfg!(target_arch = "aarch64") { "macos-arm64" } else { "macos-x64" }
+    if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+        "linux-x64"
+    } else if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
+        "linux-arm64"
+    } else if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
+        "windows-x64"
+    } else if cfg!(all(target_os = "windows", target_arch = "aarch64")) {
+        "windows-arm64"
+    } else if cfg!(target_os = "macos") {
+        if cfg!(target_arch = "aarch64") {
+            "macos-arm64"
+        } else {
+            "macos-x64"
+        }
+    } else {
+        "unknown"
     }
-    else { "unknown" }
 }
 
 /// PyPI wheel filename token for the host platform.
@@ -81,12 +90,7 @@ pub fn install_subdir(short_name: &str, version: &str) -> String {
 /// be passing a value produced by `install_subdir`, but a future API
 /// taking a user-supplied `--target` flag could otherwise traverse out.
 pub fn validate_subdir(name: &str) -> Result<(), String> {
-    if name.is_empty()
-        || name == "."
-        || name == ".."
-        || name.contains('/')
-        || name.contains('\\')
-    {
+    if name.is_empty() || name == "." || name == ".." || name.contains('/') || name.contains('\\') {
         return Err(format!("invalid runtime subdirectory name: {name:?}"));
     }
     Ok(())
@@ -103,27 +107,34 @@ pub struct WheelInfo {
 /// Pick the right wheel for the host platform. Prefers cp313, falls
 /// back to any cp tag.
 pub fn pick_wheel_for_host(urls: &[serde_json::Value]) -> Result<WheelInfo, String> {
-    let host_token = host_pypi_token().ok_or_else(||
-        format!("unsupported host platform `{}`", host_rid())
-    )?;
-    let pick = |require_cp313: bool| urls.iter().find_map(|u| {
-        let name = u["filename"].as_str()?;
-        // Reject sdists / non-wheel artifacts up front so a future PyPI
-        // release that includes a wheel-flavour token in a `.tar.gz`
-        // filename can't slip through to `extract_wheel` (which would
-        // fail at `ZipArchive::new` with a confusing error).
-        if !name.ends_with(".whl") { return None; }
-        if !name.contains(host_token) { return None; }
-        if require_cp313 && !name.contains("cp313") { return None; }
-        Some(WheelInfo {
-            url: u["url"].as_str()?.to_string(),
-            sha256: u["digests"]["sha256"].as_str()?.to_string(),
-            size_bytes: u["size"].as_u64().unwrap_or(0),
+    let host_token =
+        host_pypi_token().ok_or_else(|| format!("unsupported host platform `{}`", host_rid()))?;
+    let pick = |require_cp313: bool| {
+        urls.iter().find_map(|u| {
+            let name = u["filename"].as_str()?;
+            // Reject sdists / non-wheel artifacts up front so a future PyPI
+            // release that includes a wheel-flavour token in a `.tar.gz`
+            // filename can't slip through to `extract_wheel` (which would
+            // fail at `ZipArchive::new` with a confusing error).
+            if !name.ends_with(".whl") {
+                return None;
+            }
+            if !name.contains(host_token) {
+                return None;
+            }
+            if require_cp313 && !name.contains("cp313") {
+                return None;
+            }
+            Some(WheelInfo {
+                url: u["url"].as_str()?.to_string(),
+                sha256: u["digests"]["sha256"].as_str()?.to_string(),
+                size_bytes: u["size"].as_u64().unwrap_or(0),
+            })
         })
-    });
-    pick(true).or_else(|| pick(false)).ok_or_else(||
-        format!("no wheel for host platform `{}`", host_rid()),
-    )
+    };
+    pick(true)
+        .or_else(|| pick(false))
+        .ok_or_else(|| format!("no wheel for host platform `{}`", host_rid()))
 }
 
 /// Filter + rename for files extracted from an `onnxruntime-*` wheel.
@@ -138,8 +149,12 @@ pub fn repackage_target_filename(zip_name: &str) -> Option<String> {
     if stripped.is_empty() || stripped.contains('/') || stripped.contains('\\') {
         return None;
     }
-    if stripped.starts_with("onnxruntime_pybind11_state") { return None; }
-    if stripped.ends_with(".py") { return None; }
+    if stripped.starts_with("onnxruntime_pybind11_state") {
+        return None;
+    }
+    if stripped.ends_with(".py") {
+        return None;
+    }
     if stripped.starts_with("libonnxruntime.so.") {
         return Some("libonnxruntime.so".to_string());
     }
@@ -157,7 +172,9 @@ pub fn repackage_target_filename(zip_name: &str) -> Option<String> {
 pub fn verify_sha256(bytes: &[u8], expected: &str) -> Result<(), String> {
     let actual = hex::encode(Sha256::digest(bytes));
     if !actual.eq_ignore_ascii_case(expected) {
-        return Err(format!("SHA256 mismatch — expected {expected}, got {actual}"));
+        return Err(format!(
+            "SHA256 mismatch — expected {expected}, got {actual}"
+        ));
     }
     Ok(())
 }
@@ -171,7 +188,10 @@ pub struct DownloadHooks<'a> {
 impl<'a> DownloadHooks<'a> {
     /// Hooks with a no-op cancel — for non-cancellable callers (xtask).
     pub fn progress_only(progress: &'a mut dyn FnMut(u64, u64)) -> Self {
-        Self { progress, cancel: Arc::new(AtomicBool::new(false)) }
+        Self {
+            progress,
+            cancel: Arc::new(AtomicBool::new(false)),
+        }
     }
 }
 
@@ -186,7 +206,10 @@ impl<'a> DownloadHooks<'a> {
 /// payload, mid-flight bit flip, MITM-injected garbage — would otherwise
 /// fail fast with one shot at the network; folding it inside lets the
 /// retry loop give it ~3 chances before escalating.
-pub fn download_wheel(info: &WheelInfo, hooks: &mut DownloadHooks<'_>) -> Result<bytes::Bytes, String> {
+pub fn download_wheel(
+    info: &WheelInfo,
+    hooks: &mut DownloadHooks<'_>,
+) -> Result<bytes::Bytes, String> {
     let cancel = Arc::clone(&hooks.cancel);
     retry_with_backoff(&cancel, 3, 500, |attempt| {
         if attempt > 0 {
@@ -197,7 +220,8 @@ pub fn download_wheel(info: &WheelInfo, hooks: &mut DownloadHooks<'_>) -> Result
             return Err(DlError::transient(msg));
         }
         Ok(bytes)
-    }).map_err(|e| e.message)
+    })
+    .map_err(|e| e.message)
 }
 
 /// Implemented by error types whose values distinguish transient
@@ -218,13 +242,27 @@ struct DlError {
 }
 
 impl DlError {
-    fn fatal(msg: impl Into<String>) -> Self { Self { message: msg.into(), retryable: false } }
-    fn transient(msg: impl Into<String>) -> Self { Self { message: msg.into(), retryable: true } }
+    fn fatal(msg: impl Into<String>) -> Self {
+        Self {
+            message: msg.into(),
+            retryable: false,
+        }
+    }
+    fn transient(msg: impl Into<String>) -> Self {
+        Self {
+            message: msg.into(),
+            retryable: true,
+        }
+    }
 }
 
 impl Retryable for DlError {
-    fn is_retryable(&self) -> bool { self.retryable }
-    fn cancelled() -> Self { DlError::fatal("cancelled") }
+    fn is_retryable(&self) -> bool {
+        self.retryable
+    }
+    fn cancelled() -> Self {
+        DlError::fatal("cancelled")
+    }
 }
 
 /// Single download attempt — used by the retry wrapper. Streams chunks,
@@ -239,7 +277,9 @@ fn download_wheel_attempt(
         .user_agent(concat!("prunr-runtime-install/", env!("CARGO_PKG_VERSION")))
         .build()
         .map_err(|e| DlError::fatal(format!("HTTP client: {e}")))?;
-    let response = client.get(&info.url).send()
+    let response = client
+        .get(&info.url)
+        .send()
         .map_err(|e| DlError::transient(format!("connect: {e}")))?;
 
     // 4xx is the user/server contract being wrong (bad URL, gone wheel) —
@@ -248,7 +288,11 @@ fn download_wheel_attempt(
     let status = response.status();
     if !status.is_success() {
         let msg = format!("HTTP {status}");
-        return Err(if status.is_server_error() { DlError::transient(msg) } else { DlError::fatal(msg) });
+        return Err(if status.is_server_error() {
+            DlError::transient(msg)
+        } else {
+            DlError::fatal(msg)
+        });
     }
     let total = response.content_length().unwrap_or(info.size_bytes);
 
@@ -265,9 +309,15 @@ fn download_wheel_attempt(
             // Partial-stream errors (broken pipe, timeout) are transient.
             Err(e) => return Err(DlError::transient(format!("read: {e}"))),
         };
-        if n == 0 { break; }
+        if n == 0 {
+            break;
+        }
         buf.extend_from_slice(&chunk[..n]);
-        let pct = if total > 0 { buf.len() as u64 * 100 / total } else { 0 };
+        let pct = if total > 0 {
+            buf.len() as u64 * 100 / total
+        } else {
+            0
+        };
         if pct != last_pct {
             last_pct = pct;
             (hooks.progress)(buf.len() as u64, total);
@@ -301,7 +351,8 @@ where
             Err(e) if tries + 1 >= max_attempts => return Err(e),
             Err(_e) => {
                 tries += 1;
-                let delay = std::time::Duration::from_millis(base_ms.saturating_mul(1 << tries.min(6)));
+                let delay =
+                    std::time::Duration::from_millis(base_ms.saturating_mul(1 << tries.min(6)));
                 tracing::warn!(tries, ?delay, "transient error — retrying");
                 let deadline = std::time::Instant::now() + delay;
                 while std::time::Instant::now() < deadline {
@@ -327,12 +378,11 @@ where
 /// a 0-byte symlink-flattened entry could shadow the real dylib if it
 /// happened to come second in archive order.
 pub fn extract_wheel(bytes: &[u8], target_dir: &std::path::Path) -> Result<PathBuf, String> {
-    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes))
-        .map_err(|e| format!("zip parse: {e}"))?;
+    let mut archive =
+        zip::ZipArchive::new(std::io::Cursor::new(bytes)).map_err(|e| format!("zip parse: {e}"))?;
     let mut written: std::collections::HashSet<String> = std::collections::HashSet::new();
     for i in 0..archive.len() {
-        let mut entry = archive.by_index(i)
-            .map_err(|e| format!("zip entry: {e}"))?;
+        let mut entry = archive.by_index(i).map_err(|e| format!("zip entry: {e}"))?;
         let name = entry.name().to_string();
         let Some(target_filename) = repackage_target_filename(&name) else {
             continue;
@@ -343,8 +393,8 @@ pub fn extract_wheel(bytes: &[u8], target_dir: &std::path::Path) -> Result<PathB
             continue;
         }
         let dest = target_dir.join(&target_filename);
-        let mut out = std::fs::File::create(&dest)
-            .map_err(|e| format!("create {}: {e}", dest.display()))?;
+        let mut out =
+            std::fs::File::create(&dest).map_err(|e| format!("create {}: {e}", dest.display()))?;
         std::io::copy(&mut entry, &mut out)
             .map_err(|e| format!("extract {}: {e}", dest.display()))?;
     }
@@ -360,9 +410,13 @@ pub fn extract_wheel(bytes: &[u8], target_dir: &std::path::Path) -> Result<PathB
 }
 
 pub fn dylib_name() -> &'static str {
-    if cfg!(windows) { "onnxruntime.dll" }
-    else if cfg!(target_os = "macos") { "libonnxruntime.dylib" }
-    else { "libonnxruntime.so" }
+    if cfg!(windows) {
+        "onnxruntime.dll"
+    } else if cfg!(target_os = "macos") {
+        "libonnxruntime.dylib"
+    } else {
+        "libonnxruntime.so"
+    }
 }
 
 #[cfg(test)]
@@ -384,13 +438,12 @@ mod tests {
         // (path, expected occurrence count)
         let cases: &[(&str, usize)] = &[
             ("/../../.github/workflows/release.yml", 2), // Linux + Windows staging
-            ("/../../.github/workflows/ci.yml",      1), // Linux ORT install before tests
+            ("/../../.github/workflows/ci.yml", 1),      // Linux ORT install before tests
         ];
         let needle = format!("install-runtime onnxruntime {}", PINNED_ORT_VERSION);
         for (rel, expected) in cases {
             let abs = format!("{}{rel}", env!("CARGO_MANIFEST_DIR"));
-            let yml = std::fs::read_to_string(&abs)
-                .unwrap_or_else(|e| panic!("read {abs}: {e}"));
+            let yml = std::fs::read_to_string(&abs).unwrap_or_else(|e| panic!("read {abs}: {e}"));
             let count = yml.matches(&needle).count();
             assert_eq!(
                 count, *expected,
@@ -415,12 +468,8 @@ mod tests {
             "{}/../../.github/workflows/release.yml",
             env!("CARGO_MANIFEST_DIR"),
         );
-        let yml = std::fs::read_to_string(&abs)
-            .unwrap_or_else(|e| panic!("read {abs}: {e}"));
-        let expected_decl = format!(
-            "MACOS_ORT_VERSION: '{}'",
-            MACOS_CORE_ML_ORT_VERSION,
-        );
+        let yml = std::fs::read_to_string(&abs).unwrap_or_else(|e| panic!("read {abs}: {e}"));
+        let expected_decl = format!("MACOS_ORT_VERSION: '{}'", MACOS_CORE_ML_ORT_VERSION,);
         assert!(
             yml.contains(&expected_decl),
             "release.yml is missing the workflow env declaration `{expected_decl}` — \
@@ -443,10 +492,19 @@ mod tests {
     #[test]
     fn host_rid_is_supported_or_unknown() {
         let r = host_rid();
-        assert!(matches!(r,
-            "linux-x64" | "linux-arm64" | "windows-x64" | "windows-arm64"
-            | "macos-arm64" | "macos-x64" | "unknown"
-        ), "unexpected rid: {r}");
+        assert!(
+            matches!(
+                r,
+                "linux-x64"
+                    | "linux-arm64"
+                    | "windows-x64"
+                    | "windows-arm64"
+                    | "macos-arm64"
+                    | "macos-x64"
+                    | "unknown"
+            ),
+            "unexpected rid: {r}"
+        );
     }
 
     /// Contract: every rid that `host_rid` produces (other than the
@@ -457,9 +515,12 @@ mod tests {
     #[test]
     fn every_supported_rid_has_a_pypi_token() {
         for rid in [
-            "linux-x64", "linux-arm64",
-            "windows-x64", "windows-arm64",
-            "macos-arm64", "macos-x64",
+            "linux-x64",
+            "linux-arm64",
+            "windows-x64",
+            "windows-arm64",
+            "macos-arm64",
+            "macos-x64",
         ] {
             let token = match rid {
                 "linux-x64" => "manylinux_2_28_x86_64",
@@ -510,7 +571,9 @@ mod tests {
 
     #[test]
     fn pick_wheel_prefers_cp313() {
-        let Some(token) = host_pypi_token() else { return; };
+        let Some(token) = host_pypi_token() else {
+            return;
+        };
         let urls = vec![
             json!({"filename": format!("ort-cp310-cp310-{token}.whl"),
                    "url": "https://example.com/cp310.whl",
@@ -525,7 +588,9 @@ mod tests {
 
     #[test]
     fn pick_wheel_falls_back_to_any_cp_tag() {
-        let Some(token) = host_pypi_token() else { return; };
+        let Some(token) = host_pypi_token() else {
+            return;
+        };
         let urls = vec![json!({
             "filename": format!("ort-cp311-cp311-{token}.whl"),
             "url": "https://example.com/cp311.whl",
@@ -552,7 +617,9 @@ mod tests {
     /// to parse a tarball as a zip and fail with a confusing error.
     #[test]
     fn pick_wheel_skips_sdist_even_with_matching_token() {
-        let Some(token) = host_pypi_token() else { return; };
+        let Some(token) = host_pypi_token() else {
+            return;
+        };
         let urls = vec![
             json!({"filename": format!("ort-{token}.tar.gz"),
                    "url": "https://example.com/sdist.tar.gz",
@@ -562,8 +629,10 @@ mod tests {
                    "digests": {"sha256": "ff".repeat(32)}, "size": 0}),
         ];
         let pick = pick_wheel_for_host(&urls).expect("wheel pick should succeed");
-        assert_eq!(pick.url, "https://example.com/cp313.whl",
-            "must skip sdist and pick the .whl");
+        assert_eq!(
+            pick.url, "https://example.com/cp313.whl",
+            "must skip sdist and pick the .whl"
+        );
     }
 
     #[test]
@@ -590,7 +659,9 @@ mod tests {
 
     #[test]
     fn repackage_drops_python_files_and_pybind() {
-        assert!(repackage_target_filename("onnxruntime/capi/onnxruntime_pybind11_state.so").is_none());
+        assert!(
+            repackage_target_filename("onnxruntime/capi/onnxruntime_pybind11_state.so").is_none()
+        );
         assert!(repackage_target_filename("onnxruntime/capi/__init__.py").is_none());
         assert!(repackage_target_filename("onnxruntime/__init__.py").is_none());
     }
@@ -631,7 +702,11 @@ mod tests {
         let mut calls = 0;
         let r: Result<u32, DlError> = retry_with_backoff(&cancel, 3, 1, |_attempt| {
             calls += 1;
-            if calls == 1 { Err(DlError::transient("flaky")) } else { Ok(42) }
+            if calls == 1 {
+                Err(DlError::transient("flaky"))
+            } else {
+                Ok(42)
+            }
         });
         assert_eq!(r.expect("eventual success"), 42);
         assert_eq!(calls, 2);

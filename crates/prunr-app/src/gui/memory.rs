@@ -138,7 +138,9 @@ pub fn under_memory_pressure() -> bool {
     with_system(|sys| {
         let total = sys.total_memory();
         let available = sys.available_memory();
-        if total == 0 { return false; }
+        if total == 0 {
+            return false;
+        }
         (available as f64 / total as f64) < 0.20
     })
 }
@@ -169,7 +171,9 @@ pub fn safe_max_jobs(model: ModelKind) -> usize {
     let available = available_ram();
     let budget = available / 2; // 50% of available RAM for engines
     let cost = per_engine_cost(model);
-    if cost == 0 { return 4; }
+    if cost == 0 {
+        return 4;
+    }
     (budget / cost).clamp(1, 8)
 }
 
@@ -228,9 +232,12 @@ mod tests {
     #[test]
     fn is_complete_after_all_released() {
         let mut ctrl = make_ctrl(100_000_000);
-        ctrl.enqueue(vec![
-            AdmissionController::estimate_cost(1, (100, 100), 100, 0),
-        ]);
+        ctrl.enqueue(vec![AdmissionController::estimate_cost(
+            1,
+            (100, 100),
+            100,
+            0,
+        )]);
         let id = ctrl.try_admit_next().unwrap();
         assert!(!ctrl.is_complete());
         ctrl.release(id);
@@ -263,7 +270,12 @@ mod tests {
     #[test]
     fn double_release_does_not_underflow() {
         let mut ctrl = make_ctrl(100_000_000);
-        ctrl.enqueue(vec![AdmissionController::estimate_cost(1, (100, 100), 100, 0)]);
+        ctrl.enqueue(vec![AdmissionController::estimate_cost(
+            1,
+            (100, 100),
+            100,
+            0,
+        )]);
         let id = ctrl.try_admit_next().unwrap();
         ctrl.release(id);
         ctrl.release(id); // second release must be a no-op
@@ -325,12 +337,12 @@ mod tests {
     #[test]
     fn per_engine_cost_is_descriptor_driven() {
         let silueta = per_engine_cost(ModelKind::Silueta);
-        let u2net   = per_engine_cost(ModelKind::U2net);
+        let u2net = per_engine_cost(ModelKind::U2net);
         let birefnet = per_engine_cost(ModelKind::BiRefNetLite);
         // BiRefNet's bigger activation footprint must charge strictly
         // more than Silueta — the whole point of model-aware admission.
-        assert!(birefnet > u2net,   "BiRefNet ({birefnet}) ≤ U2Net ({u2net})");
-        assert!(u2net    > silueta, "U2Net ({u2net}) ≤ Silueta ({silueta})");
+        assert!(birefnet > u2net, "BiRefNet ({birefnet}) ≤ U2Net ({u2net})");
+        assert!(u2net > silueta, "U2Net ({u2net}) ≤ Silueta ({silueta})");
         // Tie back to MB → bytes derivation: 200 MB Silueta ≈ 209 MB.
         assert_eq!(silueta, 200 * 1024 * 1024);
     }

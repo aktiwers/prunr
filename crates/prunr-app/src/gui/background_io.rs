@@ -35,12 +35,21 @@ pub struct DecodeSlots {
 
 impl DecodeSlots {
     pub fn new(slots: usize) -> Self {
-        Self { state: Mutex::new(slots.max(1)), cv: Condvar::new() }
+        Self {
+            state: Mutex::new(slots.max(1)),
+            cv: Condvar::new(),
+        }
     }
     pub fn acquire(self: &Arc<Self>) -> DecodeSlotGuard {
-        let mut s = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut s = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         while *s == 0 {
-            s = self.cv.wait(s).unwrap_or_else(std::sync::PoisonError::into_inner);
+            s = self
+                .cv
+                .wait(s)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
         }
         *s -= 1;
         DecodeSlotGuard { sem: self.clone() }
@@ -53,7 +62,11 @@ pub struct DecodeSlotGuard {
 
 impl Drop for DecodeSlotGuard {
     fn drop(&mut self) {
-        let mut s = self.sem.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut s = self
+            .sem
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         *s += 1;
         self.sem.cv.notify_one();
     }
@@ -141,14 +154,22 @@ impl BackgroundIO {
             .map(|n| n.get())
             .unwrap_or(4);
         Self {
-            file_load_tx, file_load_rx,
-            thumb_tx, thumb_rx,
-            decode_tx, decode_rx,
-            save_done_tx, save_done_rx,
-            tex_prep_tx, tex_prep_rx,
-            filter_only_tx, filter_only_rx,
-            history_demote_tx, history_demote_rx,
-            bg_tex_prep_tx, bg_tex_prep_rx,
+            file_load_tx,
+            file_load_rx,
+            thumb_tx,
+            thumb_rx,
+            decode_tx,
+            decode_rx,
+            save_done_tx,
+            save_done_rx,
+            tex_prep_tx,
+            tex_prep_rx,
+            filter_only_tx,
+            filter_only_rx,
+            history_demote_tx,
+            history_demote_rx,
+            bg_tex_prep_tx,
+            bg_tex_prep_rx,
             decode_slots: Arc::new(DecodeSlots::new(cap)),
         }
     }
