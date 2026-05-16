@@ -136,11 +136,7 @@ where
 
     let tile_multiple = descriptor.tile_size_multiple;
     let knobs = upscale_knobs(descriptor)?;
-    let overlap = if knobs.uses_window_attention {
-        32 // HAT / Swin: 2 window widths to hide attention-window seams
-    } else {
-        16 // CNN / RRDB: 16 px safe overlap (covers receptive field)
-    };
+    let overlap = knobs.tile_overlap();
 
     let input_name = knobs.input_name;
     let is_fp16 = knobs.is_fp16;
@@ -214,9 +210,9 @@ where
 ///   - scale = 2: for 4× models, runs at 4× then Lanczos3 downscales to 2×.
 ///     For native-2× models (x2plus), runs at native scale directly.
 ///   - Alpha is upscaled independently via Lanczos3.
-///   - Window-attention models (`descriptor.tile_size_multiple.is_some()`)
-///     are run at `GraphOptimizationLevel::Level2` to avoid first-tile
-///     shape baking; other models run at Level3.
+///   - Window-attention models (`uses_window_attention`) run at
+///     `GraphOptimizationLevel::Level2` to avoid first-tile shape
+///     baking; other models run at Level3.
 ///
 /// Peak working-set RAM (additive to the `upscale_tiled` accumulators
 /// documented in `tiling.rs`):
@@ -253,8 +249,6 @@ where
     let engine = OrtEngine::new_with_optimization_level(model_kind, intra_threads, level)?;
 
     let knobs = upscale_knobs(descriptor)?;
-    // native_scale is data-driven from the REGISTRY: x4plus / Nomos8k = 4,
-    // x2plus = 2 (only reached via upscale_two_pass).
     let native_result = run_upscale_native(input, &engine, descriptor, knobs.native_scale, on_tile_done, cancel)?;
 
     if scale == 4 {
