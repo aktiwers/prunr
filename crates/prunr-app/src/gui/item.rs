@@ -345,6 +345,41 @@ pub(crate) struct BatchItem {
     /// the next frame. Cleared by the drain in
     /// `drain_background_channels`.
     pub(crate) bg_image_tex_pending: bool,
+
+    /// Shared selection mask. Both Paint Brush and Magic Brush write
+    /// here (Plan 04 migrates Paint Brush; Plan 07 wires Magic Brush).
+    /// f32 single-channel at source image resolution.
+    ///
+    /// LIFECYCLE: NOT cleared by `reset_result_caches()` (selection
+    /// survives Process clicks — Criterion 8). Cleared by:
+    /// - `BatchManager::clear_selection` (Esc / Clear button)
+    /// - `invalidate_selection_on_source_change` (source replaced)
+    /// - Item destruction (image switch — per-BatchItem naturally clears)
+    pub(crate) selection_mask: Option<Arc<prunr_core::selection::MaskArtifact>>,
+
+    /// Content hash of `selection_mask`. Set in lockstep with the mask
+    /// via `BatchManager::commit_selection`. Used by:
+    /// - Outline + texture invalidation (only rebuild when hash changes)
+    /// - BG-removal auto-apply rerun trigger (Plan 04)
+    pub(crate) selection_hash: Option<u64>,
+
+    /// Pre-computed outline polyline in source-pixel coords. Built
+    /// off-thread on stroke commit (Plan 05 owns the channel). The
+    /// render closure reads this Arc<Vec> directly — clone is O(N)
+    /// refcount bump.
+    pub(crate) selection_outline: Option<Arc<Vec<(u32, u32)>>>,
+
+    /// Cached selection visualization texture. Built off-thread and
+    /// uploaded via `drain_background_channels` (Plan 05). Rebuilt
+    /// only when `selection_hash` changes.
+    pub(crate) selection_texture: Option<egui::TextureHandle>,
+
+    /// Cached SAM 2 image embedding. Filled by Plan 07 (Magic Brush GUI
+    /// integration). Typed as `Arc<()>` until Plan 07 retypes this to
+    /// `Option<Arc<prunr_core::sam::SamEmbedding>>` — no GUI surface
+    /// reads it before then.
+    // TODO_PLAN_07_RETYPE: change to Option<Arc<prunr_core::sam::SamEmbedding>>
+    pub(crate) magic_brush_embedding: Option<Arc<()>>,
 }
 
 impl BatchItem {
@@ -375,6 +410,24 @@ impl BatchItem {
     pub(crate) fn invalidate_upscale_cache(&mut self) {
         self.upscale_raw = None;
         self.bicubic_source = None;
+    }
+
+    /// Clear the cached SAM encoder embedding. Called on:
+    /// - Source image change (re-decode)
+    /// - Model switch to a non-Selection category
+    /// Plan 07 owns the call sites.
+    pub(crate) fn invalidate_magic_brush_embedding(&mut self) {
+        self.magic_brush_embedding = None;
+    }
+
+    /// Clear every selection-related cache: mask, hash, outline, texture.
+    /// Called by `BatchManager::clear_selection` (Esc / Clear) and
+    /// `invalidate_selection_on_source_change`.
+    pub(crate) fn invalidate_selection(&mut self) {
+        self.selection_mask = None;
+        self.selection_hash = None;
+        self.selection_outline = None;
+        self.selection_texture = None;
     }
 
     /// Merge brush strokes into the existing correction. Uses
@@ -603,7 +656,8 @@ impl BatchItem {
     }
 
     /// Combined size of all caches on this item: segmentation + edge tensors
-    /// + upscale_raw + bicubic_source. Used by memory governance and telemetry.
+    /// + upscale_raw + bicubic_source + selection_mask + magic_brush_embedding.
+    /// Used by memory governance and telemetry.
     ///
     /// Note: `upscale_raw` is the largest single cached artifact (≈500 MB at
     /// 4K × 4× upscale). The governor must see this to make correct eviction
@@ -617,7 +671,30 @@ impl BatchItem {
         let bicubic = self.bicubic_source.as_ref().map_or(0, |r| {
             r.width() as usize * r.height() as usize * 4
         });
-        seg + edge + upscale + bicubic
+        // Selection mask: source-res f32, Arc-wrapped (count refcount once)
+        let selection_bytes = self.selection_mask.as_ref()
+            .map(|m| m.data.len() * 4)
+            .unwrap_or(0);
+        // Magic Brush embedding: fixed ~16 MB per RESEARCH.md Pattern 2
+        // (image_embed 4 MB + high_res_feats_0 8 MB + high_res_feats_1 4 MB).
+        // Plan 07 may refine this once SamEmbedding's real shape lands.
+        let embedding_bytes = if self.magic_brush_embedding.is_some() { 16 * 1024 * 1024 } else { 0 };
+        seg + edge + upscale + bicubic + selection_bytes + embedding_bytes
+    }
+
+    /// Test-only constructor: returns a BatchItem with all fields at their
+    /// zero/None default. Use in tests that need a real BatchItem without
+    /// building a full batch pipeline. Not compiled into release binaries.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(crate) fn new_for_test() -> Self {
+        Self::new(
+            0,
+            "test.png".to_string(),
+            ImageSource::Bytes(Arc::new(Vec::new())),
+            (100, 100),
+            super::item_settings::ItemSettings::default(),
+            String::new(),
+        )
     }
 
     pub(crate) fn new(
@@ -669,6 +746,11 @@ impl BatchItem {
             bg_image: None,
             bg_image_texture: None,
             bg_image_tex_pending: false,
+            selection_mask: None,
+            selection_hash: None,
+            selection_outline: None,
+            selection_texture: None,
+            magic_brush_embedding: None,
         }
     }
 
@@ -1236,6 +1318,59 @@ mod tests {
         assert!(
             Arc::strong_count(item.upscale_raw.as_ref().unwrap()) >= 2,
             "Arc::clone of upscale_raw must be free (refcount bump only)"
+        );
+    }
+
+    // ── selection_* fields ───────────────────────────────────────────────
+
+    #[test]
+    fn default_batch_item_has_no_selection() {
+        let item = fixture_item(1);
+        assert!(item.selection_mask.is_none());
+        assert!(item.selection_hash.is_none());
+        assert!(item.selection_outline.is_none());
+        assert!(item.selection_texture.is_none());
+        assert!(item.magic_brush_embedding.is_none());
+    }
+
+    #[test]
+    fn invalidate_selection_clears_all_four_fields() {
+        let mut item = fixture_item(1);
+        let mask = prunr_core::selection::MaskArtifact::new_empty(32, 32);
+        let hash = mask.content_hash();
+        item.selection_mask = Some(Arc::new(mask));
+        item.selection_hash = Some(hash);
+        item.selection_outline = Some(Arc::new(vec![(0, 0), (1, 1)]));
+        item.invalidate_selection();
+        assert!(item.selection_mask.is_none(), "selection_mask must be cleared");
+        assert!(item.selection_hash.is_none(), "selection_hash must be cleared");
+        assert!(item.selection_outline.is_none(), "selection_outline must be cleared");
+        assert!(item.selection_texture.is_none(), "selection_texture must be cleared");
+    }
+
+    #[test]
+    fn cache_size_includes_selection_bytes() {
+        let base = fixture_item(1).cache_size();
+        let mut item = fixture_item(2);
+        let mask = prunr_core::selection::MaskArtifact::new_empty(64, 64);
+        let expected = mask.data.len() * 4;
+        item.selection_mask = Some(Arc::new(mask));
+        assert_eq!(
+            item.cache_size() - base,
+            expected,
+            "cache_size must include selection_mask pixel bytes (64×64×4={})", expected,
+        );
+    }
+
+    #[test]
+    fn cache_size_includes_embedding_when_present() {
+        let base = fixture_item(1).cache_size();
+        let mut item = fixture_item(2);
+        item.magic_brush_embedding = Some(Arc::new(()));
+        assert_eq!(
+            item.cache_size() - base,
+            16 * 1024 * 1024,
+            "cache_size must account for ~16 MB SAM embedding placeholder",
         );
     }
 }
