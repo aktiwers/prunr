@@ -3343,6 +3343,12 @@ impl PrunrApp {
             // direction (inpaint→inpaint, seg→seg, inpaint→seg, …).
             self.processor.release_inpaint_subprocess();
             self.processor.release_seg_warm();
+            // Drop the warm upscale engine on every model switch — both
+            // upscale→upscale and upscale→seg/inpaint. ensure_upscale_engine
+            // evicts on ModelKind mismatch anyway, but this explicit drop
+            // covers the switch-away-from-upscale case where ensure is never
+            // called again.
+            self.processor.release_upscale_engine();
         }
         if toolbar_change.auto_chain_on {
             let item_has_result = self
