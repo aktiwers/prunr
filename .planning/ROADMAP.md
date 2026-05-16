@@ -332,3 +332,27 @@ Plans:
 - [x] 32-06-PLAN.md — BatchItem.upscale_raw + bicubic_source caches + Processor dispatch branching + LivePreview UpscaleTier2 routing
 - [x] 32-07-PLAN.md — Refinement chip row + render_output_scale_chip (4 variants + Nomos8k gating)
 - [ ] 32-08-PLAN.md — ARCHITECTURE.md row + manual smoke + human verification
+
+### Phase 33: Magic Brush — Selection-First Refactor + SAM-based Author
+
+**Goal:** Decouple the brush from the active model by introducing a shared per-item `selection_mask` artifact — the single source of truth for "what's selected." Refactor the existing Paint Brush to author the selection (instead of writing to model-coupled state). Add Magic Brush as a second author backed by SAM 2 Hiera Small (Apache 2.0, ~46 MB, OnDemand) — click/stroke → SAM decoder → mask candidate → commit to shared selection. SAM's encoder/decoder split mirrors Phase 32's Tier-1/Tier-2 cache pattern (encoder cached on BatchItem, decoder runs per interaction). Per-model interpretation rules preserve existing immediate-feedback UX while enabling new alpha-cut / copy / cut actions on any active selection.
+
+**Depends on:** Phase 32 (Tier-1/Tier-2 cache pattern + admission gate model — must complete first), Phase 30 (OnDemand model store + REGISTRY infrastructure — done), Phase 29 (per-model preset machinery — done)
+
+**Requirements:** New (Phase 33 introduces 12 numbered success criteria below; referenced as "Criterion 1..12" in plan frontmatter)
+
+**Success Criteria** (what must be TRUE):
+  1. `BatchItem` carries `selection_mask: Option<MaskArtifact>` + `selection_hash: Option<u64>` as the single per-item selection; replaces the model-coupled `mask_correction` semantic
+  2. Paint Brush refactored to author the shared `selection_mask` (strokes accumulate); no longer writes directly to model-specific correction state
+  3. Magic Brush registered as a second selection author with **Click** + **Stroke** interaction modes and **Shift (add)** + **Alt (subtract)** modifiers
+  4. `SAM2HieraSmall` registered as an `OnDemand` ModelDescriptor (`ModelCategory::Selection`, encoder + decoder as separate ONNX entries, Apache 2.0); MobileSAM available as a research-time fallback descriptor if SAM 2 ONNX export proves immature
+  5. Encoder output cached on `BatchItem.magic_brush_embedding: Option<Arc<Tensor>>`, invalidates on source change; eager encoder run on Magic Brush activation with a "preparing..." spinner
+  6. Per-model interpretation rule table enforced as code: BG-removal = continuous auto-apply + "Protect selection" toggle; SD inpaint = selection IS inpaint region; LaMa = selection IS erase region; no model loaded = mask-only actions enabled
+  7. Shared action menu surfaces 5 model-free actions when a selection exists: Delete (alpha-cut), Copy to clipboard, Cut to clipboard, Clear, Invert — with keyboard bindings (Del, Ctrl+C, Ctrl+X, Esc, Enter; Shift/Alt modifiers for add/subtract)
+  8. Selection lifecycle gates: survives Process clicks and model switches; cleared on image switch (per-`BatchItem` ownership)
+  9. Selection visualization renders outline (default opacity 1.0, thickness 0–10 px) + low-opacity fill (default 0.15–0.20, range 0–1); marching ants deferred to Phase 35
+ 10. v1 knobs available on both brushes via shared brush settings: edge feather (0–20 px), outline thickness (0–10 px), outline opacity (0–1), fill opacity (0–1); Magic-specific confidence threshold knob
+ 11. Existing model-coupled brush behaviors regress-tested under the new selection-first dispatch — Paint Brush in BG-removal mode continues to produce immediate-feedback output identical to pre-refactor
+ 12. `prunr-core` unit tests cover the selection-mask data layout, per-model interpretation logic, and SAM decoder prompt construction; `prunr-models` test asserts SAM 2 Hiera Small (or fallback) routes encoder + decoder through separate `OrtEngine` instances
+
+**Plans:** Not yet planned
