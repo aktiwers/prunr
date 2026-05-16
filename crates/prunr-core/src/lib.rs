@@ -18,6 +18,7 @@ pub mod ep_compat;
 pub mod upscale;
 pub mod denoise;
 pub mod selection;
+pub mod sam;
 
 pub use engine::{InferenceEngine, OrtEngine};
 pub use recipe::{ProcessingRecipe, InferenceRecipe, EdgeRecipe, MaskRecipe, CompositeRecipe, UpscaleRecipe, OutputScale, RequiredTier, resolve_tier, DEFAULT_SHARPEN};
@@ -34,3 +35,4 @@ pub use types::{ComposeMode, LineStyle, FillStyle, BgEffect, BgImageFit, Channel
 pub use edge::apply_input_transform;
 pub use postprocess::{apply_fill_style, apply_bg_effect};
 pub use selection::{MaskArtifact, SelectionError};
+pub use sam::{SamEmbedding, SamDecoderOutput, decode_to_mask_artifact, SAM_ENCODER_INPUT, SAM_MASK_RESOLUTION};
