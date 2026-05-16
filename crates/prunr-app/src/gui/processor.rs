@@ -328,6 +328,12 @@ pub(crate) struct Processor {
     /// checks it between tiles.
     upscale_active: Arc<AtomicBool>,
     upscale_cancel: Arc<AtomicBool>,
+    /// Shared ORT `RunOptions` for the in-flight upscale session. The GUI
+    /// thread calls `.terminate()` on this from `cancel_upscale()` to
+    /// abort the running `Session::run` within ~50ms instead of waiting
+    /// for the next tile boundary's cancel-flag check. Reset via
+    /// `.unterminate()` before each new dispatch.
+    upscale_run_options: Arc<prunr_core::upscale::UpscaleRunOptions>,
     upscale_result_tx: mpsc::Sender<UpscaleResult>,
     upscale_result_rx: mpsc::Receiver<UpscaleResult>,
     /// Unified progress slot. One source of truth for the banner /
@@ -372,6 +378,10 @@ impl Processor {
             inpaint_bridge_rx,
             upscale_active: Arc::new(AtomicBool::new(false)),
             upscale_cancel: Arc::new(AtomicBool::new(false)),
+            upscale_run_options: Arc::new(
+                prunr_core::upscale::UpscaleRunOptions::new()
+                    .expect("RunOptions::new is infallible on a healthy ORT runtime"),
+            ),
             upscale_result_tx,
             upscale_result_rx,
             dispatch_progress: super::dispatch_progress::DispatchProgressSlot::new(),
@@ -1044,6 +1054,12 @@ impl Processor {
         // pairing, weakly-ordered architectures can delay propagation.
         self.upscale_active.store(true, Ordering::Release);
         self.upscale_cancel.store(false, Ordering::Release);
+        // Clear any sticky terminate flag left over from the previous
+        // dispatch's cancel. Ignore the result — the only failure mode
+        // here is the underlying ORT call returning an error code, which
+        // would also break session.run; if it's broken we'll see it
+        // during the actual inference call.
+        let _ = self.upscale_run_options.unterminate();
         // Seed the unified slot before the first tile so an early render
         // already shows "Upscaling — tile 0 of …" rather than the prior
         // dispatch's stale data.
@@ -1061,6 +1077,9 @@ impl Processor {
         // independently of the cached slot. The slot may be evicted (e.g.
         // model swap mid-dispatch) without invalidating the in-flight session.
         let engine_for_thread = Arc::clone(&engine);
+        // Shared with the GUI thread's `cancel_upscale()` — terminating
+        // this RunOptions aborts the running `Session::run` mid-tile.
+        let run_options_for_thread = Arc::clone(&self.upscale_run_options);
 
         std::thread::spawn(move || {
             let progress_slot_for_callback = progress_slot.clone();
@@ -1080,7 +1099,7 @@ impl Processor {
                     &engine_for_thread,
                     on_tile,
                     Some(cancel_flag),
-                    None,
+                    Some(&run_options_for_thread),
                 )
             } else {
                 prunr_core::upscale::upscale_rgba_with_engine(
@@ -1090,7 +1109,7 @@ impl Processor {
                     scale_factor,
                     on_tile,
                     Some(cancel_flag),
-                    None,
+                    Some(&run_options_for_thread),
                 )
             };
             // Tier-1 post-inference: undo the brightness lift so the final
@@ -1111,12 +1130,25 @@ impl Processor {
         });
     }
 
-    /// Set the cancel flag for any in-flight upscale dispatch. The worker
-    /// thread checks the flag between tiles; latency to actually stopping
-    /// is one tile (~0.5 s at 4K with ESRGAN). Idempotent.
+    /// Cancel any in-flight upscale dispatch.
+    ///
+    /// Two-stage abort:
+    /// 1. `RunOptions::terminate()` signals ORT to abort the running
+    ///    `Session::run` within ~50ms — much shorter than waiting for
+    ///    the next tile boundary's cancel-flag check (5-15 s on CPU
+    ///    EP). The worker thread sees a "terminate flag" error from
+    ///    ORT, which `classify_run_error` maps to `CoreError::Cancelled`.
+    /// 2. The atomic flag still gets set as a safety net — it handles
+    ///    the case where the worker happens to be BETWEEN tiles when
+    ///    cancel fires (no running session.run to terminate), and it
+    ///    pins the two-pass mid-pass checks in `upscale_two_pass_with_engine`.
+    /// Idempotent.
     pub(crate) fn cancel_upscale(&self) {
         // Release pairs with Acquire in `upscale::tiling::upscale_tiled`.
         self.upscale_cancel.store(true, Ordering::Release);
+        // The terminate call returns immediately; ORT aborts the running
+        // session as soon as it checks between kernel launches.
+        let _ = self.upscale_run_options.terminate();
     }
 
     /// Drain completed upscale results from the background thread.
