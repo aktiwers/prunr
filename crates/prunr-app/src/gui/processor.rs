@@ -116,6 +116,35 @@ pub(crate) struct InpaintResult {
     pub error: Option<String>,
 }
 
+/// Result from a background SAM encoder thread. Carries the embedding or
+/// a human-readable error string. The item_id lets pump_sam_encoder_results
+/// route the result to the right BatchItem even if the user switched selection.
+pub(crate) struct SamEncoderResult {
+    pub(crate) item_id: u64,
+    pub(crate) result: Result<prunr_core::sam::SamEmbedding, String>,
+}
+
+/// Which selection operation the Magic Brush click/stroke was performing.
+/// Mirrors the Shift/Alt modifier semantics from 33-UI-SPEC.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PromptModifier {
+    /// Plain click / plain stroke — replaces the current selection.
+    Replace,
+    /// Shift + click/stroke — union with the current selection.
+    Add,
+    /// Alt + click/stroke — difference from the current selection.
+    Subtract,
+}
+
+/// Result from a background SAM decoder thread. Carries the raw decoder
+/// output (masks + IoU scores) or a human-readable error. The modifier
+/// tells pump_sam_decoder_results how to combine with the existing mask.
+pub(crate) struct SamDecoderResult {
+    pub(crate) item_id: u64,
+    pub(crate) modifier: PromptModifier,
+    pub(crate) result: Result<prunr_core::sam::SamDecoderOutput, String>,
+}
+
 /// Result delivered from a background upscale thread back to the main thread.
 /// Keyed on `item_id`; only one upscale is in flight at a time (gated by
 /// `can_process_intent`), so generation-based stale-drop is not needed today.
@@ -349,6 +378,14 @@ pub(crate) struct Processor {
     /// model swap (any switch away from the cached ModelKind) and on
     /// full release.
     warm_upscale_engine: Option<(prunr_core::ModelKind, Arc<prunr_core::OrtEngine>)>,
+    /// SAM 2 encoder results channel. The rayon job sends here when
+    /// the embedding is ready (or an error). Drained each frame from
+    /// pump_sam_encoder_results (called via drain_background_channels).
+    sam_encoder_tx: mpsc::Sender<SamEncoderResult>,
+    sam_encoder_rx: mpsc::Receiver<SamEncoderResult>,
+    /// SAM 2 decoder results channel. One result per click/stroke dispatch.
+    sam_decoder_tx: mpsc::Sender<SamDecoderResult>,
+    sam_decoder_rx: mpsc::Receiver<SamDecoderResult>,
 }
 
 impl Processor {
@@ -359,6 +396,8 @@ impl Processor {
         let (inpaint_tx, inpaint_rx) = mpsc::channel();
         let (inpaint_bridge_tx, inpaint_bridge_rx) = spawn_inpaint_bridge();
         let (upscale_result_tx, upscale_result_rx) = mpsc::channel();
+        let (sam_encoder_tx, sam_encoder_rx) = mpsc::channel();
+        let (sam_decoder_tx, sam_decoder_rx) = mpsc::channel();
         Self {
             worker_tx,
             worker_rx,
@@ -386,6 +425,10 @@ impl Processor {
             upscale_result_rx,
             dispatch_progress: super::dispatch_progress::DispatchProgressSlot::new(),
             warm_upscale_engine: None,
+            sam_encoder_tx,
+            sam_encoder_rx,
+            sam_decoder_tx,
+            sam_decoder_rx,
         }
     }
 
@@ -1160,6 +1203,302 @@ impl Processor {
             out.push(r);
         }
         out
+    }
+
+    /// Dispatch the SAM 2 encoder for `item_id`. Runs once per source image;
+    /// the result is cached on `BatchItem.magic_brush_embedding`. Admission
+    /// gate: refuses when `available_ram_mb < 800 MB` (RESEARCH.md estimate).
+    ///
+    /// Returns `Err(reason)` synchronously on admission failure (caller shows
+    /// a toast). Returns `Ok(())` after spawning the background rayon job;
+    /// the result arrives via `pump_sam_encoder_results`.
+    pub(crate) fn dispatch_sam_encoder(
+        &self,
+        item_id: u64,
+        source: std::sync::Arc<image::RgbaImage>,
+        available_ram_mb: u32,
+    ) -> Result<(), String> {
+        const ENCODER_COST_MB: u32 = 800;
+        if !admission_check(ENCODER_COST_MB, available_ram_mb) {
+            return Err(format!(
+                "Magic Brush requires ~{} MB free RAM; only {} MB available.",
+                ENCODER_COST_MB, available_ram_mb,
+            ));
+        }
+        let tx = self.sam_encoder_tx.clone();
+        rayon::spawn(move || {
+            let result = run_sam_encoder_inline(&source);
+            let _ = tx.send(SamEncoderResult { item_id, result });
+        });
+        Ok(())
+    }
+
+    /// Dispatch the SAM 2 decoder for a click or stroke. No admission gate —
+    /// the decoder model is small (~20 MB) and runs quickly. The embedding
+    /// is the cached output from a prior `dispatch_sam_encoder` call.
+    ///
+    /// The `modifier` tells pump_sam_decoder_results whether to replace, union,
+    /// or subtract from the existing selection. Result arrives via
+    /// `pump_sam_decoder_results`.
+    pub(crate) fn dispatch_sam_decoder(
+        &self,
+        item_id: u64,
+        embedding: std::sync::Arc<prunr_core::sam::SamEmbedding>,
+        prompt: prunr_core::sam::prompt::SamPrompt,
+        modifier: PromptModifier,
+    ) {
+        let tx = self.sam_decoder_tx.clone();
+        rayon::spawn(move || {
+            let result = run_sam_decoder_inline(&embedding, &prompt);
+            let _ = tx.send(SamDecoderResult { item_id, modifier, result });
+        });
+    }
+
+    /// Drain completed SAM encoder results. Non-blocking; returns an empty
+    /// `Vec` when nothing is ready. Caller writes embedding to BatchItem and
+    /// clears encoder_pending.
+    pub(crate) fn pump_sam_encoder_results(&mut self) -> Vec<SamEncoderResult> {
+        let mut out = Vec::new();
+        while let Ok(r) = self.sam_encoder_rx.try_recv() {
+            out.push(r);
+        }
+        out
+    }
+
+    /// Drain completed SAM decoder results. Non-blocking; returns an empty
+    /// `Vec` when nothing is ready. Caller converts to MaskArtifact and
+    /// calls commit_selection_and_dispatch.
+    pub(crate) fn pump_sam_decoder_results(&mut self) -> Vec<SamDecoderResult> {
+        let mut out = Vec::new();
+        while let Ok(r) = self.sam_decoder_rx.try_recv() {
+            out.push(r);
+        }
+        out
+    }
+}
+
+/// Run the SAM 2 encoder. Loads ONNX bytes via `resolve_part_bytes`, builds
+/// an ORT session directly (no OrtEngine wrapper — SAM has no ModelKind
+/// variant), preprocesses the source image, runs inference, and marshals
+/// the three named outputs into a SamEmbedding.
+///
+/// ORT session.run() lives here so `prunr_core::sam` stays ORT-free per
+/// Plan 06's design contract.
+fn run_sam_encoder_inline(
+    source: &image::RgbaImage,
+) -> Result<prunr_core::sam::SamEmbedding, String> {
+    use ort::{inputs, session::Session, value::Tensor};
+
+    let bytes = prunr_models::resolve_part_bytes(
+        prunr_models::ModelId::Sam2HieraSmall, "encoder",
+    ).map_err(|e| format!("resolve encoder bytes: {e:?}"))?;
+
+    let mut session = Session::builder()
+        .map_err(|e| format!("ORT builder: {e}"))?
+        .commit_from_memory(&bytes)
+        .map_err(|e| format!("ORT session (encoder): {e}"))?;
+
+    // prunr_core::sam::preprocess is ORT-free pure math.
+    let input_vec = prunr_core::sam::preprocess::preprocess_for_sam(source);
+    // Shape: [1, 3, 1024, 1024] — NCHW, ImageNet-normalized f32.
+    let arr = ndarray::Array4::from_shape_vec([1, 3, 1024, 1024], input_vec)
+        .map_err(|e| format!("encoder input shape: {e}"))?;
+    let tensor = Tensor::from_array(arr)
+        .map_err(|e| format!("encoder input tensor: {e}"))?;
+
+    let input_name = session.inputs()[0].name().to_string();
+    let outputs = session.run(inputs![input_name => &tensor])
+        .map_err(|e| format!("encoder session.run: {e}"))?;
+
+    // SAM 2 Hiera Small encoder outputs (in order):
+    //   image_embed      [1, 256, 64, 64]   — 1_048_576 f32
+    //   high_res_feats_0 [1, 32, 256, 256]  — 2_097_152 f32
+    //   high_res_feats_1 [1, 64, 128, 128]  — 1_048_576 f32
+    let image_embed = outputs[0]
+        .try_extract_array::<f32>()
+        .map_err(|e| format!("encoder: extract image_embed: {e}"))?
+        .as_standard_layout()
+        .into_owned()
+        .into_raw_vec_and_offset().0;
+    let high_res_feats_0 = outputs[1]
+        .try_extract_array::<f32>()
+        .map_err(|e| format!("encoder: extract high_res_feats_0: {e}"))?
+        .as_standard_layout()
+        .into_owned()
+        .into_raw_vec_and_offset().0;
+    let high_res_feats_1 = outputs[2]
+        .try_extract_array::<f32>()
+        .map_err(|e| format!("encoder: extract high_res_feats_1: {e}"))?
+        .as_standard_layout()
+        .into_owned()
+        .into_raw_vec_and_offset().0;
+
+    let embedding = prunr_core::sam::SamEmbedding {
+        image_embed,
+        high_res_feats_0,
+        high_res_feats_1,
+    };
+    embedding.validate_shapes()
+        .map_err(|e| format!("encoder output shape mismatch: {e}"))?;
+    Ok(embedding)
+}
+
+/// Run the SAM 2 decoder. Loads decoder ONNX bytes, builds an ORT session,
+/// packs the embedding + prompt into 7 named inputs, runs inference, and
+/// marshals the two outputs (masks + iou_predictions) into SamDecoderOutput.
+///
+/// ORT session.run() lives here so `prunr_core::sam` stays ORT-free per
+/// Plan 06's design contract.
+fn run_sam_decoder_inline(
+    embedding: &prunr_core::sam::SamEmbedding,
+    prompt: &prunr_core::sam::prompt::SamPrompt,
+) -> Result<prunr_core::sam::SamDecoderOutput, String> {
+    use ort::{inputs, session::Session, value::Tensor};
+
+    let bytes = prunr_models::resolve_part_bytes(
+        prunr_models::ModelId::Sam2HieraSmall, "decoder",
+    ).map_err(|e| format!("resolve decoder bytes: {e:?}"))?;
+
+    let mut session = Session::builder()
+        .map_err(|e| format!("ORT builder: {e}"))?
+        .commit_from_memory(&bytes)
+        .map_err(|e| format!("ORT session (decoder): {e}"))?;
+
+    // image_embed [1, 256, 64, 64]
+    let embed_arr = ndarray::Array4::from_shape_vec(
+        [1, 256, 64, 64],
+        embedding.image_embed.clone(),
+    ).map_err(|e| format!("decoder: image_embed shape: {e}"))?;
+    let embed_tensor = Tensor::from_array(embed_arr)
+        .map_err(|e| format!("decoder: image_embed tensor: {e}"))?;
+
+    // high_res_feats_0 [1, 32, 256, 256]
+    let feats0_arr = ndarray::Array4::from_shape_vec(
+        [1, 32, 256, 256],
+        embedding.high_res_feats_0.clone(),
+    ).map_err(|e| format!("decoder: high_res_feats_0 shape: {e}"))?;
+    let feats0_tensor = Tensor::from_array(feats0_arr)
+        .map_err(|e| format!("decoder: high_res_feats_0 tensor: {e}"))?;
+
+    // high_res_feats_1 [1, 64, 128, 128]
+    let feats1_arr = ndarray::Array4::from_shape_vec(
+        [1, 64, 128, 128],
+        embedding.high_res_feats_1.clone(),
+    ).map_err(|e| format!("decoder: high_res_feats_1 shape: {e}"))?;
+    let feats1_tensor = Tensor::from_array(feats1_arr)
+        .map_err(|e| format!("decoder: high_res_feats_1 tensor: {e}"))?;
+
+    // point_coords [1, N, 2]
+    let n_points = prompt.point_labels.len();
+    let coords_arr = ndarray::Array3::from_shape_vec(
+        [1, n_points, 2],
+        prompt.point_coords.clone(),
+    ).map_err(|e| format!("decoder: point_coords shape: {e}"))?;
+    let coords_tensor = Tensor::from_array(coords_arr)
+        .map_err(|e| format!("decoder: point_coords tensor: {e}"))?;
+
+    // point_labels [1, N]
+    let labels_arr = ndarray::Array2::from_shape_vec(
+        [1, n_points],
+        prompt.point_labels.clone(),
+    ).map_err(|e| format!("decoder: point_labels shape: {e}"))?;
+    let labels_tensor = Tensor::from_array(labels_arr)
+        .map_err(|e| format!("decoder: point_labels tensor: {e}"))?;
+
+    // mask_input [1, 1, 256, 256]
+    let mask_arr = ndarray::Array4::from_shape_vec(
+        [1, 1, 256, 256],
+        prompt.mask_input.clone(),
+    ).map_err(|e| format!("decoder: mask_input shape: {e}"))?;
+    let mask_tensor = Tensor::from_array(mask_arr)
+        .map_err(|e| format!("decoder: mask_input tensor: {e}"))?;
+
+    // has_mask_input scalar [1]
+    let has_mask_arr = ndarray::Array1::from_vec(vec![prompt.has_mask_input]);
+    let has_mask_tensor = Tensor::from_array(has_mask_arr)
+        .map_err(|e| format!("decoder: has_mask_input tensor: {e}"))?;
+
+    let outputs = session.run(inputs![
+        "image_embed"       => &embed_tensor,
+        "high_res_feats_0"  => &feats0_tensor,
+        "high_res_feats_1"  => &feats1_tensor,
+        "point_coords"      => &coords_tensor,
+        "point_labels"      => &labels_tensor,
+        "mask_input"        => &mask_tensor,
+        "has_mask_input"    => &has_mask_tensor,
+    ]).map_err(|e| format!("decoder session.run: {e}"))?;
+
+    // Outputs: masks [1, 3, 256, 256] and iou_predictions [1, 3]
+    let masks = outputs[0]
+        .try_extract_array::<f32>()
+        .map_err(|e| format!("decoder: extract masks: {e}"))?
+        .as_standard_layout()
+        .into_owned()
+        .into_raw_vec_and_offset().0;
+    let iou_raw = outputs[1]
+        .try_extract_array::<f32>()
+        .map_err(|e| format!("decoder: extract iou_predictions: {e}"))?
+        .as_standard_layout()
+        .into_owned()
+        .into_raw_vec_and_offset().0;
+
+    if iou_raw.len() != 3 {
+        return Err(format!("decoder: expected 3 IoU predictions, got {}", iou_raw.len()));
+    }
+    let iou_predictions = [iou_raw[0], iou_raw[1], iou_raw[2]];
+
+    Ok(prunr_core::sam::SamDecoderOutput { masks, iou_predictions })
+}
+
+// ── SAM dispatch channels tests ─────────────────────────────────────────────
+// Tests avoid constructing Processor (which initialises ORT RunOptions and
+// spawns the inpaint bridge thread). Admission and enum correctness use the
+// shared `admission_check` free function directly.
+#[cfg(test)]
+mod sam_dispatch_tests {
+    use super::*;
+
+    #[test]
+    fn sam_admission_gate_refuses_below_800mb() {
+        assert!(!admission_check(800, 799));
+    }
+
+    #[test]
+    fn sam_admission_gate_allows_at_800mb() {
+        assert!(admission_check(800, 800));
+    }
+
+    #[test]
+    fn prompt_modifier_variants_are_distinct() {
+        assert_ne!(PromptModifier::Replace, PromptModifier::Add);
+        assert_ne!(PromptModifier::Replace, PromptModifier::Subtract);
+        assert_ne!(PromptModifier::Add, PromptModifier::Subtract);
+    }
+
+    #[test]
+    fn sam_encoder_result_channel_round_trip() {
+        let (tx, rx) = mpsc::channel::<SamEncoderResult>();
+        tx.send(SamEncoderResult {
+            item_id: 99,
+            result: Err("test error".to_string()),
+        }).unwrap();
+        let out = rx.try_recv().unwrap();
+        assert_eq!(out.item_id, 99);
+        assert!(out.result.is_err());
+    }
+
+    #[test]
+    fn sam_decoder_result_channel_round_trip() {
+        let (tx, rx) = mpsc::channel::<SamDecoderResult>();
+        tx.send(SamDecoderResult {
+            item_id: 77,
+            modifier: PromptModifier::Add,
+            result: Err("decoder test".to_string()),
+        }).unwrap();
+        let out = rx.try_recv().unwrap();
+        assert_eq!(out.item_id, 77);
+        assert_eq!(out.modifier, PromptModifier::Add);
+        assert!(out.result.is_err());
     }
 }
 
