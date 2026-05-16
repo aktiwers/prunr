@@ -16,6 +16,7 @@ pub mod theme;
 pub mod views;
 pub mod zoom_state;
 pub mod brush_state;
+pub(crate) mod magic_brush_state;
 pub mod status_state;
 pub mod background_io;
 pub mod drag_export;

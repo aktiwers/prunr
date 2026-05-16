@@ -112,6 +112,10 @@ pub struct ToolbarChange {
     /// User toggled the "Protect selection" chip. `Some(true/false)` when
     /// flipped; `None` when unchanged.
     pub protect_selection: Option<bool>,
+    /// User clicked the Paint Brush toggle button.
+    pub(crate) toggle_paint: bool,
+    /// User clicked the Magic Brush toggle button.
+    pub(crate) toggle_magic: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -139,6 +143,8 @@ impl Default for ToolbarChange {
             auto_chain_on: false,
             selection_action: None,
             protect_selection: None,
+            toggle_paint: false,
+            toggle_magic: false,
         }
     }
 }
@@ -189,6 +195,8 @@ pub(crate) fn render(
     app_settings: &mut Settings,
     applied_preset: &mut String,
     brush_state: &mut BrushState,
+    magic_brush_active: bool,
+    magic_encoder_pending: bool,
     brush_available: bool,
     processing: bool,
     has_bg_image: bool,
@@ -302,31 +310,52 @@ pub(crate) fn render(
                         &mut change,
                     );
 
-                    let brush_active = brush_state.is_enabled();
-                    let brush_tooltip = if !brush_available {
-                        "Brush is available after processing — run the image through a model first."
-                    } else if brush_active {
-                        "Brush mode ON — click on canvas to add (positive) / subtract (negative) mask. Click here to disable."
-                    } else {
-                        "Toggle brush mode: paint corrections onto the mask"
-                    };
+                    // Tool switcher: [ Paint ] [ Magic ] — mutually exclusive.
+                    // Right-to-left layout: Magic toggle → Paint toggle →
+                    // settings chip (left of Paint or Magic toggle).
+                    let paint_active = brush_state.is_enabled();
+                    let magic_active = magic_brush_active;
                     ui.add_enabled_ui(brush_available, |ui| {
-                        let brush_resp = chip::icon_toggle_button(ui, ICON_BRUSH.codepoint, brush_active);
-                        if brush_resp.on_hover_text(brush_tooltip).clicked() {
-                            brush_state.toggle();
+                        let magic_resp = chip::icon_toggle_button(
+                            ui, ICON_AUTO_AWESOME.codepoint, magic_active,
+                        );
+                        if magic_resp.on_hover_text(
+                            "Click or stroke to select objects automatically. Requires reprocessing."
+                        ).clicked() {
+                            change.toggle_magic = true;
+                        }
+                    });
+                    ui.add_enabled_ui(brush_available, |ui| {
+                        let paint_resp = chip::icon_toggle_button(
+                            ui, ICON_BRUSH.codepoint, paint_active,
+                        );
+                        if paint_resp.on_hover_text(if paint_active {
+                            "Paint Brush ON — click to disable."
+                        } else {
+                            "Toggle Paint Brush: paint corrections onto the mask."
+                        }).clicked() {
+                            change.toggle_paint = true;
                         }
                     });
 
-                    // Settings chip — only visible when brush is on AND has
-                    // somewhere to paint. In the right-to-left layout this
-                    // appears LEFT of the toggle.
-                    if brush_available && brush_state.is_enabled() {
+                    // Settings chip — LEFT of the active tool toggle.
+                    if brush_available && paint_active && !magic_active {
                         let outcome = super::brush_chip::render(
                             ui, &mut app_settings.brush, app_settings.model.is_inpaint(),
                         );
                         if outcome.reset_brush_requested {
                             change.reset_brush_requested = true;
                         }
+                        if outcome.committed {
+                            change.brush_settings_committed = true;
+                        }
+                    }
+                    if brush_available && magic_active {
+                        let outcome = super::magic_brush_chip::render(
+                            ui,
+                            &mut app_settings.brush,
+                            magic_encoder_pending,
+                        );
                         if outcome.committed {
                             change.brush_settings_committed = true;
                         }

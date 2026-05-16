@@ -364,12 +364,9 @@ pub(crate) struct BatchItem {
     /// only when `selection_hash` changes.
     pub(crate) selection_texture: Option<egui::TextureHandle>,
 
-    /// Cached SAM 2 image embedding. Filled by Plan 07 (Magic Brush GUI
-    /// integration). Typed as `Arc<()>` until Plan 07 retypes this to
-    /// `Option<Arc<prunr_core::sam::SamEmbedding>>` — no GUI surface
-    /// reads it before then.
-    // TODO_PLAN_07_RETYPE: change to Option<Arc<prunr_core::sam::SamEmbedding>>
-    pub(crate) magic_brush_embedding: Option<Arc<()>>,
+    /// Cached SAM 2 image embedding. Filled on Magic Brush activation
+    /// (eager-encoder UX). Invalidated on source change and item switch.
+    pub(crate) magic_brush_embedding: Option<std::sync::Arc<prunr_core::sam::SamEmbedding>>,
 }
 
 impl BatchItem {
@@ -634,10 +631,9 @@ impl BatchItem {
         let selection_bytes = self.selection_mask.as_ref()
             .map(|m| m.data.len() * 4)
             .unwrap_or(0);
-        // Magic Brush embedding: fixed ~16 MB per RESEARCH.md Pattern 2
-        // (image_embed 4 MB + high_res_feats_0 8 MB + high_res_feats_1 4 MB).
-        // Plan 07 may refine this once SamEmbedding's real shape lands.
-        let embedding_bytes = if self.magic_brush_embedding.is_some() { 16 * 1024 * 1024 } else { 0 };
+        let embedding_bytes = if self.magic_brush_embedding.is_some() {
+            prunr_core::sam::SamEmbedding::expected_bytes()
+        } else { 0 };
         seg + edge + upscale + bicubic + selection_bytes + embedding_bytes
     }
 
@@ -1313,11 +1309,16 @@ mod tests {
     fn cache_size_includes_embedding_when_present() {
         let base = fixture_item(1).cache_size();
         let mut item = fixture_item(2);
-        item.magic_brush_embedding = Some(Arc::new(()));
+        // Minimal SamEmbedding with correct lengths to satisfy expected_bytes()
+        item.magic_brush_embedding = Some(std::sync::Arc::new(prunr_core::sam::SamEmbedding {
+            image_embed: vec![0.0; 1_048_576],
+            high_res_feats_0: vec![0.0; 2_097_152],
+            high_res_feats_1: vec![0.0; 1_048_576],
+        }));
         assert_eq!(
             item.cache_size() - base,
-            16 * 1024 * 1024,
-            "cache_size must account for ~16 MB SAM embedding placeholder",
+            prunr_core::sam::SamEmbedding::expected_bytes(),
+            "cache_size must account for SamEmbedding::expected_bytes()",
         );
     }
 }
