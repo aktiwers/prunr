@@ -261,7 +261,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8. Ph
 | 28. SD VAE Orthogonality | 2/5 | In Progress|  |
 | 29. Refine and Wire Presets to All Models | 5/5 | Complete    | 2026-05-14 |
 | 30. Upscale Tab v1 | 12/12 | Complete   | 2026-05-15 |
-| 32. Upscale Refinement Knobs | 11/14 | In Progress|  |
+| 32. Upscale Refinement Knobs | 12/14 | In Progress|  |
 
 ### Phase 30: Upscale Tab v1
 
@@ -321,7 +321,7 @@ Plans:
  10. Live preview (10 Hz Tier-2 dispatch) drives the real-time Tier-2 knob feel on the cached `upscale_raw` buffer — same debounced dispatch hook BiRefNet uses; Tier-1 knobs continue to gate out of live preview
  11. `prunr-core` unit tests cover each new pure function (denoise filters, postprocess ops, two-pass scheduler); `prunr-models` test asserts `X4TwoPass` recipe variant routes through `RealESRGAN_x2plus`
 
-**Plans:** 11/14 plans executed
+**Plans:** 12/14 plans executed
 
 Plans:
 - [x] 32-01-PLAN.md — Data layer: UpscaleRecipe + OutputScale + RequiredTier::UpscaleTier2 + resolve_tier extension
@@ -355,4 +355,13 @@ Plans:
  11. Existing model-coupled brush behaviors regress-tested under the new selection-first dispatch — Paint Brush in BG-removal mode continues to produce immediate-feedback output identical to pre-refactor
  12. `prunr-core` unit tests cover the selection-mask data layout, per-model interpretation logic, and SAM decoder prompt construction; `prunr-models` test asserts SAM 2 Hiera Small (or fallback) routes encoder + decoder through separate `OrtEngine` instances
 
-**Plans:** Not yet planned
+**Plans:** 7 plans across 4 waves
+
+Plans:
+- [ ] 33-01-PLAN.md — prunr-core::selection: MaskArtifact + add/sub/invert/alpha_cut/copy_to_rgba + outline polyline + feather refinement (Wave 1)
+- [ ] 33-02-PLAN.md — prunr-models: ModelCategory::Selection + Sam2HieraSmall MultiPartOnDemand REGISTRY entry + boundary tests (Wave 1)
+- [ ] 33-03-PLAN.md — BatchItem selection_* fields + magic_brush_embedding placeholder + lifecycle gates (commit_selection / clear_selection / invalidate_on_source_change) (Wave 2)
+- [ ] 33-04-PLAN.md — Paint Brush migration to selection_mask + per-model interpretation rules + protect_selection toggle + BG-removal regression test (Wave 3)
+- [ ] 33-05-PLAN.md — Selection visualization (60Hz overlay) + action bar (Delete/Copy/Cut/Invert/Clear) + shared brush knobs + off-thread outline/texture build (Wave 3)
+- [ ] 33-06-PLAN.md — prunr-core::sam: preprocess_for_sam + 4 prompt builders (Click/Stroke/Shift/Alt) + decode_to_mask_artifact + SamEmbedding type (Wave 2)
+- [ ] 33-07-PLAN.md — Magic Brush GUI integration: encoder dispatch (Processor) + click/stroke handlers + Preparing... overlay + manual smoke checkpoint (Wave 4)
