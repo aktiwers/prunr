@@ -56,6 +56,7 @@ pub struct PrunrApp {
 
     pub(crate) zoom_state: super::zoom_state::ZoomState,
     pub(crate) brush_state: super::brush_state::BrushState,
+    pub(crate) magic_brush_state: super::magic_brush_state::MagicBrushState,
     pub(crate) download_manager: super::download_manager::DownloadManager,
 
     // Before/After toggle
@@ -273,6 +274,7 @@ impl PrunrApp {
             pending_copy: false,
             zoom_state: Default::default(),
             brush_state: super::brush_state::BrushState::default(),
+            magic_brush_state: super::magic_brush_state::MagicBrushState::default(),
             download_manager: super::download_manager::DownloadManager::new(),
             show_original: false,
             title_state: TitleState::default(),
@@ -3467,12 +3469,16 @@ impl PrunrApp {
                 };
                 let has_selection = item.selection_mask.is_some();
                 let protect_sel = settings_ref.protect_selection;
+                let magic_active = self.magic_brush_state.is_active();
+                let magic_pending = self.magic_brush_state.has_pending_encoder();
                 toolbar_change = adjustments_toolbar::render(
                     ui,
                     &mut item.settings,
                     settings_ref,
                     &mut item.applied_preset,
                     brush_state_ref,
+                    magic_active,
+                    magic_pending,
                     brush_available,
                     is_processing,
                     has_bg_image,
@@ -3577,6 +3583,19 @@ impl PrunrApp {
         }
         if let Some(action) = toolbar_change.selection_action {
             self.handle_selection_action(idx, action, ctx);
+        }
+        if toolbar_change.toggle_paint {
+            self.brush_state.toggle();
+            if self.brush_state.is_enabled() {
+                self.magic_brush_state.deactivate();
+            }
+        }
+        if toolbar_change.toggle_magic {
+            if self.magic_brush_state.is_active() {
+                self.magic_brush_state.deactivate();
+            } else if self.magic_brush_state.activate() {
+                self.brush_state.disable();
+            }
         }
 
         self.batch.items[idx].apply_cache_impact(toolbar_change.cache_impact);
@@ -4475,5 +4494,48 @@ mod selection_action_tests {
 
         // Only one entry should exist.
         assert_eq!(item.history.len(), 1, "Cut must archive exactly once (not twice)");
+    }
+}
+
+#[cfg(test)]
+mod tool_mutual_exclusion_tests {
+    use crate::gui::brush_state::BrushState;
+    use crate::gui::magic_brush_state::MagicBrushState;
+
+    #[test]
+    fn magic_activation_deactivates_paint_brush() {
+        let mut brush = BrushState::default();
+        let mut magic = MagicBrushState::default();
+
+        brush.toggle();
+        assert!(brush.is_enabled(), "paint brush must start enabled");
+
+        // Activating magic must deactivate paint brush — mutual exclusion contract.
+        let activated = magic.activate();
+        assert!(activated, "first activate() must return true");
+        if magic.is_active() {
+            brush.disable();
+        }
+
+        assert!(magic.is_active(), "magic brush must be active");
+        assert!(!brush.is_enabled(), "paint brush must be disabled when magic activates");
+    }
+
+    #[test]
+    fn paint_activation_deactivates_magic_brush() {
+        let mut brush = BrushState::default();
+        let mut magic = MagicBrushState::default();
+
+        magic.activate();
+        assert!(magic.is_active(), "magic brush must start active");
+
+        // Enabling paint brush must deactivate magic — mutual exclusion contract.
+        brush.toggle();
+        if brush.is_enabled() {
+            magic.deactivate();
+        }
+
+        assert!(brush.is_enabled(), "paint brush must be enabled");
+        assert!(!magic.is_active(), "magic brush must be deactivated when paint activates");
     }
 }

@@ -1154,7 +1154,11 @@ mod tests {
             let item = bm.find_by_id_mut(1).unwrap();
             let mask = prunr_core::selection::MaskArtifact::new_empty(8, 8);
             item.selection_mask = Some(Arc::new(mask));
-            item.magic_brush_embedding = Some(Arc::new(()));
+            item.magic_brush_embedding = Some(Arc::new(prunr_core::sam::SamEmbedding {
+                image_embed: vec![0.0; 1_048_576],
+                high_res_feats_0: vec![0.0; 2_097_152],
+                high_res_feats_1: vec![0.0; 1_048_576],
+            }));
         }
         bm.invalidate_selection_on_source_change(1);
         let item = bm.find_by_id(1).unwrap();
