@@ -14,6 +14,8 @@ use std::sync::LazyLock;
 use egui::{RichText, Ui};
 use egui_material_icons::icons::*;
 
+use super::selection_action_bar::{render_selection_action_bar, SelectionAction};
+
 /// Pre-baked "Bypassed" combobox label. Built once on first access so
 /// the model dropdown's selected-text branch doesn't allocate a fresh
 /// String per frame the modal is open. The leading codepoint mirrors
@@ -104,6 +106,12 @@ pub struct ToolbarChange {
     /// one. The application checks `item.has_result()` before promoting this
     /// to `chain_mode = true` — the view does not have access to per-item state.
     pub auto_chain_on: bool,
+    /// User clicked a selection action button (Delete/Copy/Cut/Invert/Clear).
+    /// `None` when no action was clicked this frame.
+    pub(crate) selection_action: Option<SelectionAction>,
+    /// User toggled the "Protect selection" chip. `Some(true/false)` when
+    /// flipped; `None` when unchanged.
+    pub protect_selection: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -129,6 +137,8 @@ impl Default for ToolbarChange {
             pick_bg_image: false,
             clear_bg_image: false,
             auto_chain_on: false,
+            selection_action: None,
+            protect_selection: None,
         }
     }
 }
@@ -184,6 +194,8 @@ pub(crate) fn render(
     has_bg_image: bool,
     bg_image_label: Option<&str>,
     source_dims: (u32, u32),
+    has_selection: bool,
+    protect_selection: bool,
 ) -> ToolbarChange {
     let mut change = ToolbarChange::default();
     let defaults = Defaults::new();
@@ -319,6 +331,22 @@ pub(crate) fn render(
                             change.brush_settings_committed = true;
                         }
                     }
+
+                    // Protect-selection chip: visible when seg model + selection
+                    // exists. Prevents background-removal from clobbering the
+                    // user's painted selection region on next Process.
+                    if model_uses_seg && has_selection {
+                        let accent = protect_selection;
+                        let icon = egui_material_icons::icons::ICON_LOCK.codepoint;
+                        let resp = chip::chip_tooltip(
+                            chip::icon_toggle_button(ui, icon, accent),
+                            "Protect selection",
+                            "Prevent the selection from being overwritten by background removal.",
+                        );
+                        if resp.clicked() {
+                            change.protect_selection = Some(!protect_selection);
+                        }
+                    }
                 },
             );
         });
@@ -405,6 +433,15 @@ pub(crate) fn render(
         change.cache_impact = change.cache_impact.union(spec.cache_impact);
         change.line_mode_from = Some(before_line_mode);
         change.commit = true;
+    }
+
+    // Selection action bar — rendered below all rows when a selection exists.
+    // Skipped in upscale mode (no mask surface there).
+    if has_selection && !upscale_mode {
+        ui.add_space(theme::SPACE_XS);
+        if let Some(action) = render_selection_action_bar(ui) {
+            change.selection_action = Some(action);
+        }
     }
 
     change

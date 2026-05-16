@@ -153,6 +153,47 @@ pub(super) fn render(
         ui.separator();
         ui.add_space(4.0);
 
+        // Selection visualization knobs — always shown when brush chip is visible
+        // so the user can pre-configure the overlay before committing a selection.
+        ui.label(
+            egui::RichText::new("Selection")
+                .strong()
+                .color(crate::gui::theme::TEXT_PRIMARY)
+                .size(crate::gui::theme::FONT_SIZE_BODY),
+        );
+        ui.add_space(2.0);
+        let fe = chip::slider_row_f32(
+            ui, "Edge feather", &mut s.edge_feather, 0.0..=20.0, false,
+            |v| if v < 0.1 { "off".into() } else { format!("{v:.0} px") },
+        );
+        outcome.committed |= fe.commit;
+        super::hint(ui, "Soften selection edges, 0\u{2013}20 pixels.");
+        ui.add_space(2.0);
+        let ot = chip::slider_row_f32(
+            ui, "Outline thickness", &mut s.outline_thickness, 0.0..=10.0, false,
+            |v| format!("{v:.1} px"),
+        );
+        outcome.committed |= ot.commit;
+        super::hint(ui, "0\u{2013}10 pixels.");
+        ui.add_space(2.0);
+        let oo = chip::slider_row_f32(
+            ui, "Outline opacity", &mut s.outline_opacity, 0.0..=1.0, false,
+            |v| format!("{:.0}%", v * 100.0),
+        );
+        outcome.committed |= oo.commit;
+        super::hint(ui, "0 = hidden, 1 = fully visible.");
+        ui.add_space(2.0);
+        let fo = chip::slider_row_f32(
+            ui, "Fill opacity", &mut s.fill_opacity, 0.0..=1.0, false,
+            |v| format!("{:.0}%", v * 100.0),
+        );
+        outcome.committed |= fo.commit;
+        super::hint(ui, "0 = no fill, 1 = solid fill.");
+
+        ui.add_space(4.0);
+        ui.separator();
+        ui.add_space(4.0);
+
         if ui
             .button("Reset brush")
             .on_hover_text("Reset radius, hardness, mask grow, edge softness, sharpen, and shape to defaults")
