@@ -3,12 +3,12 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: unknown
-last_updated: "2026-05-16T10:37:20.037Z"
+last_updated: "2026-05-16T10:42:07.517Z"
 progress:
   total_phases: 14
   completed_phases: 8
   total_plans: 74
-  completed_plans: 56
+  completed_plans: 57
 ---
 
 # Project State
@@ -22,7 +22,7 @@ See: `.planning/PROJECT.md` (updated 2026-04-06)
 ## Current Position
 
 Phase: 33 (magic-brush) — EXECUTING
-Plan: 2 of 7 (33-02 complete)
+Plan: 2 of 7 (33-01 + 33-02 complete)
 
 ## Phase Status (ground truth, derived from git log)
 
@@ -105,3 +105,4 @@ Captured in commit messages and `.planning/phases/12-*/`, `13-*/`, `14-*/`, `28-
 - 2026-05-16 — Phase 32-10 completed: Gap-1 + Gap-6 closure. EP ladder (new_with_optimization_level) replaces cpu_only in upscale dispatch — 10-50x GPU speedup on CUDA/DirectML/CoreML machines. native_scale: u32 + uses_window_attention: bool added to UpscaleModelKnobs; all 3 REGISTRY entries (x4plus=4/false, Nomos8k=4/true, x2plus=2/false) populated; hardcoded 4/2 literals removed from dispatch. Tiler overlap now branches on uses_window_attention (not tile_size_multiple.is_some()) — x2plus gets 16-px CNN overlap, not 32-px HAT overlap. Source-text contract test upscale_dispatch_does_not_force_cpu_only pins the invariant. DEFER-5 closeable. Commits: c131d87 + 1ad5870.
 - 2026-05-16 — Phase 32-11 completed: Gap-4 + Gap-8 closure. UpscaleRecipe::default() sharpen_bits changed to 0.2_f32.to_bits(); ItemSettings::default() sharpen changed to 0.2; #[serde(default = "default_sharpen")] ensures old presets without the field load as 0.2 (mirrors default_ai_blend pattern). 5 new tests pin the default. Chip-copy style policy added to CLAUDE.md under GUI state ownership: silence on timing, active-voice "Requires reprocessing." for Tier-1 only, no internal vocab in user-facing text. refinement_row.rs was already compliant from 32-07. 924 workspace tests green. Commits: c4d32b4 + ab63c55.
 - 2026-05-16 — Phase 33-02 completed: SAM 2 Hiera Small model registry. ModelCategory::Selection + ModelId::Sam2HieraSmall added; MultiPartOnDemand REGISTRY entry (encoder ~200 MB + decoder ~20 MB, Apache 2.0, working_set_mb=800); SHA256 placeholders (64-char hex zeros, Plan 07 replaces); resolve_part_bytes + ResolveError enum for Plan 07 SAM dispatch; 10 new tests (4 descriptor + 3 resolver + 2 boundary + 1 coverage). 948 workspace tests green. Commits: fce2c7c + 4ce9300 + 9fbf8a7.
+- 2026-05-16 — Phase 33-01 completed: MaskArtifact foundation. f32 Arc<Vec<f32>> single-channel mask at source image resolution; add_mask (pixel max) / subtract_mask (clamped diff) / invert / content_hash / alpha_cut / copy_to_rgba / to_mask_correction (nearest-neighbour to tensor res, +127/0 quantization); outline_polyline (8-connected boundary scan) + feather_edges (guided-filter edge refinement); 20 unit tests green (14 core + 6 refine). Adapted feather_edges to actual guided_filter_alpha return signature. 970 workspace tests green. Commits: 23dcf39 + 648e863. Key decision: Arc<Vec<f32>> for O(1) undo snapshot clones.
