@@ -113,6 +113,16 @@ pub struct Settings {
     #[serde(default)]
     pub brush: BrushSettings,
 
+    /// Global "Protect selection" toggle (Phase 33). When true, the
+    /// BG-removal continuous auto-apply rule does NOT fire on stroke
+    /// commit — the user can paint without immediate visual feedback,
+    /// then click Process to commit. SD / LaMa already require explicit
+    /// Process; this toggle ONLY affects Segmentation-category models.
+    /// Default false preserves pre-Phase-33 immediate-feedback UX
+    /// (Criterion 11 regression contract).
+    #[serde(default)]
+    pub protect_selection: bool,
+
     /// Free RAM the SD pre-flight gate requires *on top of* the model's
     /// declared `working_set_mb`. Default 2 GB matches the historical
     /// hardcoded `SAFETY_MARGIN_MB`. Lower → SD runs in tighter
@@ -654,6 +664,7 @@ impl Default for Settings {
             active_backend: "CPU".to_string(),
             brush: BrushSettings::default(),
             ram_safety_margin_gb: default_ram_safety_margin_gb(),
+            protect_selection: false,
         }
     }
 }
