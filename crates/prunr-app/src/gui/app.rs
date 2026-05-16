@@ -2262,11 +2262,6 @@ impl PrunrApp {
                 // a result it has already consumed.
                 if let Some(applied) = item.applied_recipe.as_mut() {
                     applied.mask = r.applied_mask;
-                    // For Tier-2 upscale previews, also patch the 4 Tier-2
-                    // fields in applied_recipe.upscale. Without this update,
-                    // applied_recipe.upscale stays at the Tier-1 dispatch values
-                    // forever — resolve_tier always sees a diff and mark_tweak
-                    // fires every frame even after the user stops dragging.
                     if let Some(knobs) = r.applied_tier2_knobs {
                         applied.upscale.sharpen_bits = knobs.sharpen.to_bits();
                         applied.upscale.ai_blend_bits = knobs.ai_blend.to_bits();
@@ -2278,8 +2273,6 @@ impl PrunrApp {
                     event = "upscale_tier2_apply",
                     item_id = item.id,
                     is_upscale_tier2,
-                    replaced_result_rgba = true,
-                    tex_rebuild_scheduled = true,
                     is_final = r.is_final,
                     "apply_completed_previews: result drained"
                 );
@@ -3437,16 +3430,8 @@ impl PrunrApp {
             );
             if has_raw {
                 if let Some(ref old_recipe) = item.applied_recipe {
-                    // Use to_model_id → ModelKind::try_from so the upscale model
-                    // variants (which return None from to_model_kind) resolve to
-                    // the correct ModelKind for the recipe diff. Using to_model_kind
-                    // with its BiRefNetLite fallback produces a model mismatch:
-                    // applied_recipe.upscale.model = Some(RealEsrganX4Plus) but
-                    // new_recipe.upscale.model = None → only_tier2_changed returns
-                    // false → resolve_tier returns UpscaleRerun, never UpscaleTier2.
                     let model = self.settings.model
-                        .to_model_id()
-                        .and_then(|id| prunr_core::ModelKind::try_from(id).ok())
+                        .dispatch_model_kind()
                         .unwrap_or(prunr_core::ModelKind::BiRefNetLite);
                     let new_recipe = item.settings.current_recipe(model, self.settings.chain_mode);
                     let tier = prunr_core::resolve_tier(old_recipe, &new_recipe);
@@ -3520,11 +3505,13 @@ impl PrunrApp {
 
         if tc.preset_applied {
             // `None` model = filter-only mode; pick an arbitrary ModelKind for
-            // the diff since the seg stage is skipped regardless.
+            // the diff since the seg stage is skipped regardless. Upscale and
+            // inpaint variants must resolve to their own ModelKind here, not
+            // the seg-only `to_model_kind` — see Bug #3.
             let model = self
                 .settings
                 .model
-                .to_model_kind()
+                .dispatch_model_kind()
                 .unwrap_or(prunr_core::ModelKind::BiRefNetLite);
             let preset_dispatch = match &item.applied_recipe {
                 None => knob_catalog::DispatchKind::SubprocessFullPipeline,
@@ -4063,36 +4050,17 @@ mod upscale_tier2_routing_tests {
         );
     }
 
-    /// Regression guard for Bug #3: the Tier-2 detection block in
-    /// `apply_toolbar_change` must use the correct ModelKind for both the
-    /// old and new recipe when computing the diff.
-    ///
-    /// The bug: `SettingsModel::to_model_kind()` returns `None` for upscale
-    /// variants. The fallback was `BiRefNetLite`, which produces
-    /// `upscale.model = None` in `new_recipe`. The `applied_recipe` was set
-    /// at Tier-1 dispatch time using `RealEsrganX4Plus`, giving
-    /// `upscale.model = Some(RealEsrganX4Plus)`. `only_tier2_changed` checks
-    /// `old.model == new.model` first: `Some(…) != None` → returns false →
-    /// `resolve_tier` returns `UpscaleRerun` instead of `UpscaleTier2`.
-    ///
-    /// The fix: derive model_kind via `to_model_id() → ModelKind::try_from()`
-    /// so upscale variants resolve to the correct ModelKind, matching what
-    /// was used at dispatch time.
+    /// Regression guard for Bug #3: a recipe-diff built with a model-kind
+    /// mismatch (BiRefNetLite vs RealEsrganX4Plus) must NOT resolve to
+    /// UpscaleTier2 — the bug was caused by the broken fallback masking
+    /// upscale variants as seg models.
     #[test]
     fn tier2_chain_model_kind_mismatch_never_routes_to_upscale_tier2() {
-        // Simulates the broken path: old recipe built with RealEsrganX4Plus
-        // (as dispatch_upscale_intent does), new recipe built with BiRefNetLite
-        // (as the broken to_model_kind fallback did). Only sharpen differs.
-        //
-        // The recipe model mismatch (RealEsrganX4Plus vs BiRefNetLite) causes
-        // resolve_tier to return FullPipeline (inference.model differs → model
-        // change → FullPipeline). In either case, the result is NOT UpscaleTier2,
-        // confirming the broken path gates out the live-preview dispatch.
         let old_s = ItemSettings { sharpen: 0.0, ..ItemSettings::default() };
         let new_s = ItemSettings { sharpen: 0.5, ..old_s };
 
-        let old_recipe = upscale_recipe_for(&old_s); // applied_recipe: model=RealEsrganX4Plus
-        let new_recipe = recipe_for(&new_s);          // broken path: model=BiRefNetLite (wrong fallback)
+        let old_recipe = upscale_recipe_for(&old_s);
+        let new_recipe = recipe_for(&new_s);
         assert_ne!(
             resolve_tier(&old_recipe, &new_recipe),
             RequiredTier::UpscaleTier2,
@@ -4101,9 +4069,8 @@ mod upscale_tier2_routing_tests {
         );
     }
 
-    /// The fixed path: both old and new recipe use RealEsrganX4Plus
-    /// (via to_model_id → ModelKind::try_from). A sharpen-only diff now
-    /// correctly resolves to UpscaleTier2, enabling mark_tweak to fire.
+    /// The fixed path: both recipes use RealEsrganX4Plus. Sharpen-only
+    /// diff must resolve to UpscaleTier2.
     #[test]
     fn tier2_chain_correct_model_kind_routes_sharpen_to_upscale_tier2() {
         let old_s = ItemSettings { sharpen: 0.0, ..ItemSettings::default() };
