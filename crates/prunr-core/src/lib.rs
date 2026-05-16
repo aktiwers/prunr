@@ -17,6 +17,7 @@ pub mod inpaint_blend;
 pub mod ep_compat;
 pub mod upscale;
 pub mod denoise;
+pub mod selection;
 
 pub use engine::{InferenceEngine, OrtEngine};
 pub use recipe::{ProcessingRecipe, InferenceRecipe, EdgeRecipe, MaskRecipe, CompositeRecipe, UpscaleRecipe, OutputScale, RequiredTier, resolve_tier, DEFAULT_SHARPEN};
@@ -32,3 +33,4 @@ pub use edge::{EdgeEngine, EdgeInferenceResult, EDGE_SCALE_COUNT, finalize_edges
 pub use types::{ComposeMode, LineStyle, FillStyle, BgEffect, BgImageFit, ChannelSwapVariant, InputTransform};
 pub use edge::apply_input_transform;
 pub use postprocess::{apply_fill_style, apply_bg_effect};
+pub use selection::{MaskArtifact, SelectionError};
