@@ -3,12 +3,12 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: unknown
-last_updated: "2026-05-15T22:37:27.469Z"
+last_updated: "2026-05-16T02:17:05.677Z"
 progress:
   total_phases: 13
   completed_phases: 8
-  total_plans: 61
-  completed_plans: 49
+  total_plans: 67
+  completed_plans: 50
 ---
 
 # Project State
@@ -22,7 +22,7 @@ See: `.planning/PROJECT.md` (updated 2026-04-06)
 ## Current Position
 
 Phase: 32 (upscale-refinement-knobs) — EXECUTING
-Plan: 7 of 8
+Plan: 10 of 14
 
 ## Phase Status (ground truth, derived from git log)
 
@@ -102,3 +102,4 @@ Captured in commit messages and `.planning/phases/12-*/`, `13-*/`, `14-*/`, `28-
 - 2026-05-15 — Phase 32-05 completed: RealEsrganX2Plus REGISTRY entry with real SHA256 (7e0860bb…), working_set_mb=1000, tile_size_multiple=Some(2). run_upscale_native private helper (native_scale param) fixes ORT dimension mismatch for x2plus. upscale_two_pass chains x2plus twice for net 4× output; intermediate moved not cloned. x4twopass_available() predicate for chip UI. is_user_visible() gates model_store. 11 new tests; 900 workspace tests green. Commits: d6e76f9 + c0a4432.
 - 2026-05-15 — Phase 32-06 completed: GUI wiring wave. BatchItem.upscale_raw + bicubic_source cache (mirrors cached_tensor contract); dispatch_upscale branches on OutputScale (X4TwoPass→upscale_two_pass, others→upscale_rgba) with build_inference_input/apply_post_inference helpers for pre/post denoise+brightness_lift; PreviewKind::UpscaleTier2 + UpscaleTier2Knobs in live_preview.rs with early-return before seg/edge pipeline; apply_toolbar_change detects UpscaleTier2 tier via recipe diff and fires mark_tweak; UpscaleRerun stays gated out. 13 new tests. Commits: 0b1005b + 0354c16 + f5c943b.
 - 2026-05-15 — Phase 32-07 completed: Refinement chip row surface. render_scale_chip (2-state) replaced with render_output_scale_chip (4-state: X2/X3/X4/X4TwoPass); X4TwoPass dims for Nomos8k via x4twopass_available from prunr_core::upscale. output_scale_label() single source of truth for user-visible strings. refinement_row.rs created with 6 chips (pre-denoise, brightness-lift, sharpen, ai-blend, saturation, color-match) using canonical chip helpers; wired into adjustments_toolbar upscale_mode branch. 3 new tests; 918 workspace tests green. Commits: ca8f2cc + 93a2fbf.
+- 2026-05-16 — Phase 32-10 completed: Gap-1 + Gap-6 closure. EP ladder (new_with_optimization_level) replaces cpu_only in upscale dispatch — 10-50x GPU speedup on CUDA/DirectML/CoreML machines. native_scale: u32 + uses_window_attention: bool added to UpscaleModelKnobs; all 3 REGISTRY entries (x4plus=4/false, Nomos8k=4/true, x2plus=2/false) populated; hardcoded 4/2 literals removed from dispatch. Tiler overlap now branches on uses_window_attention (not tile_size_multiple.is_some()) — x2plus gets 16-px CNN overlap, not 32-px HAT overlap. Source-text contract test upscale_dispatch_does_not_force_cpu_only pins the invariant. DEFER-5 closeable. Commits: c131d87 + 1ad5870.
