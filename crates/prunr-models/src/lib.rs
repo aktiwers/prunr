@@ -866,6 +866,57 @@ pub const REGISTRY: &[ModelDescriptor] = &[
             uses_window_attention: false,
         }),
     },
+    // SAM 2 Hiera Small: Phase 33 Magic Brush. Apache 2.0 from Meta.
+    // Two ONNX files (encoder + decoder). Encoder is the heavy one cached
+    // on BatchItem.magic_brush_embedding; decoder runs per click/stroke.
+    // Total ~220 MB (encoder ~200 MB + decoder ~20 MB).
+    //
+    // SHA256 placeholders below are 64-char hex zeros. Replace with real
+    // values from vietanhdev/segment-anything-2-onnx-models before the
+    // Model Store download gate ships (Plan 07 Task 2).
+    ModelDescriptor {
+        id: ModelId::Sam2HieraSmall,
+        display_name: "Magic Brush (SAM 2 Hiera Small)",
+        description: "Click or stroke to select objects automatically. Apache 2.0 from Meta. Encoder runs once per image; decoder runs per click for real-time feel.",
+        category: ModelCategory::Selection,
+        source: ModelSource::MultiPartOnDemand {
+            subdir: "sam2-hiera-small-v1.0.0",
+            parts: &[
+                ModelPart {
+                    key: "encoder",
+                    filename: "sam2_hiera_small.encoder.onnx",
+                    url: "https://github.com/aktiwers/prunr/releases/download/sam2-v1.0.0/sam2_hiera_small.encoder.onnx",
+                    sha256: "0000000000000000000000000000000000000000000000000000000000000001",
+                    size_bytes: 209_715_200,
+                },
+                ModelPart {
+                    key: "decoder",
+                    filename: "sam2_hiera_small.decoder.onnx",
+                    url: "https://github.com/aktiwers/prunr/releases/download/sam2-v1.0.0/sam2_hiera_small.decoder.onnx",
+                    sha256: "0000000000000000000000000000000000000000000000000000000000000002",
+                    size_bytes: 20_971_520,
+                },
+            ],
+            license: LicenseInfo {
+                author: "Meta / facebookresearch",
+                license: "Apache 2.0",
+                license_url: "https://github.com/facebookresearch/segment-anything-2/blob/main/LICENSE",
+                source_url: "https://huggingface.co/vietanhdev/segment-anything-2-onnx-models",
+            },
+            license_acceptance_required: false,
+        },
+        version: "1.0.0",
+        gpu: GpuRequirement::None,
+        incompatible_eps: &[],
+        // Conservative estimate: encoder weights ~200 MB; transformer
+        // activation scratch typical 2-3× = 400-800 MB peak.
+        // Validate empirically on a 4 GB RAM machine before bumping.
+        working_set_mb: 800,
+        tile_size_multiple: None,
+        recommended_tile: None,
+        attribution_required: false,
+        upscale: None,
+    },
 ];
 
 pub fn descriptor(id: ModelId) -> Option<&'static ModelDescriptor> {
@@ -1757,6 +1808,59 @@ mod tests {
             // returns None cleanly.
             let _ = model_fp16_bytes(id);
         }
+    }
+
+    // ── SAM 2 Hiera Small boundary tests (33-02) ─────────────────────────
+
+    #[test]
+    fn sam2_registry_entry() {
+        let desc = REGISTRY.iter().find(|d| d.id == ModelId::Sam2HieraSmall)
+            .expect("Sam2HieraSmall must be registered");
+        assert_eq!(desc.category, ModelCategory::Selection);
+        assert!(matches!(desc.source, ModelSource::MultiPartOnDemand { .. }));
+        assert_eq!(desc.working_set_mb, 800);
+        assert!(!desc.attribution_required);
+        assert!(desc.upscale.is_none());
+    }
+
+    #[test]
+    fn sam2_has_encoder_and_decoder_parts() {
+        let desc = REGISTRY.iter().find(|d| d.id == ModelId::Sam2HieraSmall).unwrap();
+        let ModelSource::MultiPartOnDemand { parts, .. } = desc.source else {
+            panic!("expected MultiPartOnDemand");
+        };
+        assert_eq!(parts.len(), 2);
+        let keys: Vec<&str> = parts.iter().map(|p| p.key).collect();
+        assert!(keys.contains(&"encoder"));
+        assert!(keys.contains(&"decoder"));
+    }
+
+    #[test]
+    fn sam2_license_is_apache_2_no_acceptance_required() {
+        let desc = REGISTRY.iter().find(|d| d.id == ModelId::Sam2HieraSmall).unwrap();
+        let ModelSource::MultiPartOnDemand { license, license_acceptance_required, .. } = desc.source else {
+            panic!("expected MultiPartOnDemand");
+        };
+        assert_eq!(license.license, "Apache 2.0");
+        assert!(!license_acceptance_required);
+    }
+
+    /// Pins the contract that encoder and decoder are SEPARATE ONNX files —
+    /// dispatched through SEPARATE OrtEngine instances (Criterion 12).
+    /// If a future change consolidates them into one part, this test fails.
+    #[test]
+    fn sam2_encoder_decoder_separate_engines() {
+        let desc = REGISTRY.iter().find(|d| d.id == ModelId::Sam2HieraSmall).unwrap();
+        let ModelSource::MultiPartOnDemand { parts, .. } = desc.source else {
+            panic!("expected MultiPartOnDemand");
+        };
+        // Distinct filenames => distinct OrtEngine sessions when loaded.
+        let filenames: std::collections::HashSet<&str> =
+            parts.iter().map(|p| p.filename).collect();
+        assert_eq!(filenames.len(), parts.len(),
+            "every part must have a distinct filename");
+        assert!(parts.iter().any(|p| p.key == "encoder" && p.filename.contains("encoder")));
+        assert!(parts.iter().any(|p| p.key == "decoder" && p.filename.contains("decoder")));
     }
 
 }
