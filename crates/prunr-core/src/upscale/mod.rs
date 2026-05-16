@@ -135,12 +135,13 @@ where
         )))?;
 
     let tile_multiple = descriptor.tile_size_multiple;
-    let overlap = match tile_multiple {
-        Some(_) => 32, // HAT: 2 window widths
-        None => 16,    // ESRGAN: 16 px safe overlap
+    let knobs = upscale_knobs(descriptor)?;
+    let overlap = if knobs.uses_window_attention {
+        32 // HAT / Swin: 2 window widths to hide attention-window seams
+    } else {
+        16 // CNN / RRDB: 16 px safe overlap (covers receptive field)
     };
 
-    let knobs = upscale_knobs(descriptor)?;
     let input_name = knobs.input_name;
     let is_fp16 = knobs.is_fp16;
     let ns = native_scale;
@@ -249,17 +250,12 @@ where
             "{id:?} has no ModelKind mapping — upscale dispatch requires a seg/upscale variant"
         ))
     })?;
-    // CPU-only EP: OpenVINO's lazy per-shape graph compilation can stall
-    // a single RRDB upscale dispatch for tens of minutes on the first
-    // tile dimension (RealESRGAN's 23 residual blocks compile slowly
-    // and the EP cache wasn't hitting). The CPU EP has no lazy compile
-    // step — total wall-clock is dominated by inference, which is what
-    // the user actually waited for.
-    let engine = OrtEngine::new_cpu_only_with_optimization_level(model_kind, intra_threads, level)?;
+    let engine = OrtEngine::new_with_optimization_level(model_kind, intra_threads, level)?;
 
-    // All user-selectable upscale models are native-4×. x2plus (native-2×)
-    // is dispatched exclusively via upscale_two_pass — never reaches here.
-    let native_result = run_upscale_native(input, &engine, descriptor, 4, on_tile_done, cancel)?;
+    let knobs = upscale_knobs(descriptor)?;
+    // native_scale is data-driven from the REGISTRY: x4plus / Nomos8k = 4,
+    // x2plus = 2 (only reached via upscale_two_pass).
+    let native_result = run_upscale_native(input, &engine, descriptor, knobs.native_scale, on_tile_done, cancel)?;
 
     if scale == 4 {
         Ok(native_result)
@@ -335,18 +331,19 @@ where
         .ok_or_else(|| CoreError::Model("RealEsrganX2Plus not found in REGISTRY".into()))?;
 
     let level = pick_optimization_level(descriptor);
-    let engine = OrtEngine::new_cpu_only_with_optimization_level(
+    let engine = OrtEngine::new_with_optimization_level(
         ModelKind::RealEsrganX2Plus,
         intra_threads,
         level,
     )?;
 
+    let knobs = upscale_knobs(descriptor)?;
     // Pass 1: source → 2×
     let intermediate = run_upscale_native(
         input,
         &engine,
         descriptor,
-        2,
+        knobs.native_scale,
         on_tile_done.clone(),
         cancel.clone(),
     )?;
@@ -363,7 +360,7 @@ where
         &intermediate,
         &engine,
         descriptor,
-        2,
+        knobs.native_scale,
         on_tile_done,
         cancel,
     )?;
