@@ -935,6 +935,22 @@ pub fn descriptors_for(category: ModelCategory) -> impl Iterator<Item = &'static
     REGISTRY.iter().filter(move |d| d.category == category)
 }
 
+/// Error variants for `resolve_part_bytes`. Each arm is locally
+/// verifiable from the call site and carries the minimal context
+/// needed to surface a diagnostic.
+#[derive(Debug, PartialEq)]
+pub enum ResolveError {
+    /// ModelId not found in REGISTRY.
+    NotInRegistry,
+    /// Model is Bundled or single-file OnDemand — has no named parts.
+    NotMultiPart,
+    /// Part key not present in this bundle's parts list.
+    UnknownPart(String),
+    /// File exists in the registry but could not be read from disk
+    /// (not yet downloaded, or I/O error).
+    Io(String),
+}
+
 /// Resolve bytes for a model. Returns `None` for `OnDemand` entries that
 /// haven't been downloaded yet. Bundled entries return `Cow::Borrowed`
 /// (zero-copy from the embedded zstd cache); OnDemand entries are read
@@ -949,6 +965,36 @@ pub fn resolve_bytes(id: ModelId) -> Option<Cow<'static, [u8]>> {
         // Multi-part bundles aren't a single byte-blob — callers go
         // through `multi_part_paths(id)` and load each part separately.
         ModelSource::MultiPartOnDemand { .. } => None,
+    }
+}
+
+/// Resolve bytes for a specific part of a MultiPartOnDemand bundle.
+///
+/// Returns `Err` if the model is not in REGISTRY, is not MultiPart,
+/// the part key is unknown, or the file cannot be read from disk.
+/// The UnknownPart check happens before any disk I/O — callers with
+/// a bad key get an immediate error without touching the filesystem.
+///
+/// Used by Magic Brush dispatch (Plan 07) to load SAM 2 encoder and
+/// decoder ONNX files separately so each drives its own OrtEngine session.
+pub fn resolve_part_bytes(
+    id: ModelId,
+    part_key: &str,
+) -> Result<Cow<'static, [u8]>, ResolveError> {
+    let desc = REGISTRY.iter().find(|d| d.id == id)
+        .ok_or(ResolveError::NotInRegistry)?;
+    match desc.source {
+        ModelSource::MultiPartOnDemand { subdir, parts, .. } => {
+            let part = parts.iter().find(|p| p.key == part_key)
+                .ok_or_else(|| ResolveError::UnknownPart(part_key.to_string()))?;
+            let dir = on_demand_dir()
+                .ok_or_else(|| ResolveError::Io("on_demand_dir not resolvable".to_string()))?;
+            let path = dir.join(subdir).join(part.filename);
+            let bytes = std::fs::read(&path)
+                .map_err(|e| ResolveError::Io(format!("read {}: {e}", path.display())))?;
+            Ok(Cow::Owned(bytes))
+        }
+        _ => Err(ResolveError::NotMultiPart),
     }
 }
 
@@ -1861,6 +1907,33 @@ mod tests {
             "every part must have a distinct filename");
         assert!(parts.iter().any(|p| p.key == "encoder" && p.filename.contains("encoder")));
         assert!(parts.iter().any(|p| p.key == "decoder" && p.filename.contains("decoder")));
+    }
+
+    // ── resolve_part_bytes error-path tests (33-02) ───────────────────────
+
+    #[test]
+    fn resolve_part_bytes_non_multipart_returns_not_multipart() {
+        // Silueta is Bundled — has no named parts.
+        let result = resolve_part_bytes(ModelId::Silueta, "encoder");
+        assert_eq!(result, Err(ResolveError::NotMultiPart));
+    }
+
+    #[test]
+    fn resolve_part_bytes_non_multipart_ondemand_returns_not_multipart() {
+        // U2net is single-file OnDemand — not a MultiPartOnDemand bundle.
+        let result = resolve_part_bytes(ModelId::U2net, "encoder");
+        assert_eq!(result, Err(ResolveError::NotMultiPart));
+    }
+
+    #[test]
+    fn resolve_part_bytes_unknown_key_returns_unknown_part() {
+        // UnknownPart is checked before disk I/O — this passes even
+        // when the model file is not downloaded.
+        let result = resolve_part_bytes(ModelId::Sam2HieraSmall, "nonexistent");
+        assert!(
+            matches!(result, Err(ResolveError::UnknownPart(_))),
+            "expected UnknownPart, got {result:?}"
+        );
     }
 
 }
