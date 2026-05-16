@@ -1235,6 +1235,73 @@ impl PrunrApp {
         ctx.request_repaint();
     }
 
+    /// Drain SAM encoder and decoder results from the background rayon threads.
+    /// Encoder results: write embedding to BatchItem, clear encoder_pending.
+    /// Decoder results: convert to MaskArtifact, apply modifier, commit.
+    fn pump_sam_results(&mut self, ctx: &egui::Context) {
+        use crate::gui::processor::PromptModifier;
+
+        let encoder_results = self.processor.pump_sam_encoder_results();
+        for result in encoder_results {
+            self.magic_brush_state.set_encoder_pending(false);
+            match result.result {
+                Ok(embedding) => {
+                    if let Some(item) = self.batch.find_by_id_mut(result.item_id) {
+                        item.magic_brush_embedding = Some(std::sync::Arc::new(embedding));
+                        tracing::info!(item_id = result.item_id, "SAM encoder embedding cached");
+                    }
+                    ctx.request_repaint();
+                }
+                Err(err) => {
+                    tracing::error!(item_id = result.item_id, %err, "SAM encoder failed");
+                    self.toasts.error(format!("Magic Brush unavailable: {err}"));
+                    self.magic_brush_state.deactivate();
+                }
+            }
+        }
+
+        let decoder_results = self.processor.pump_sam_decoder_results();
+        for result in decoder_results {
+            let decoder_output = match result.result {
+                Ok(out) => out,
+                Err(err) => {
+                    tracing::error!(item_id = result.item_id, %err, "SAM decoder failed");
+                    self.toasts.error(format!("Magic Brush decoder failed: {err}"));
+                    continue;
+                }
+            };
+            let (source_w, source_h) = {
+                let Some(item) = self.batch.find_by_id(result.item_id) else { continue };
+                item.dimensions
+            };
+            let threshold = self.settings.brush.magic_confidence_threshold;
+            let Some(new_mask) = prunr_core::sam::decode_to_mask_artifact(
+                &decoder_output,
+                source_w as u32,
+                source_h as u32,
+                threshold,
+            ) else {
+                self.toasts.info("No selection candidate met the confidence threshold.");
+                continue;
+            };
+            let existing = self.batch
+                .find_by_id(result.item_id)
+                .and_then(|i| i.selection_mask.clone());
+            let final_mask = match (result.modifier, existing) {
+                (PromptModifier::Replace, _) => new_mask,
+                (PromptModifier::Add, Some(existing)) => {
+                    existing.add_mask(&new_mask).unwrap_or(new_mask)
+                }
+                (PromptModifier::Subtract, Some(existing)) => {
+                    existing.subtract_mask(&new_mask).unwrap_or(new_mask)
+                }
+                (PromptModifier::Add, None) | (PromptModifier::Subtract, None) => new_mask,
+            };
+            tracing::info!(item_id = result.item_id, modifier = ?result.modifier, "SAM decoder mask committed");
+            self.commit_selection_and_dispatch(result.item_id, final_mask);
+        }
+    }
+
     pub(crate) fn maybe_evaluate_runtime_prompt(&mut self) {
         if self.runtime_prompt_evaluated { return; }
         self.runtime_prompt_evaluated = true;
@@ -2163,6 +2230,7 @@ impl PrunrApp {
         }
         self.pump_inpaint_results(ctx);
         self.pump_upscale_results(ctx);
+        self.pump_sam_results(ctx);
         self.pump_download_manager(ctx);
         self.pump_runtime_install(ctx);
         self.recipe_drift_tripwire();
@@ -3595,6 +3663,33 @@ impl PrunrApp {
                 self.magic_brush_state.deactivate();
             } else if self.magic_brush_state.activate() {
                 self.brush_state.disable();
+                // Eager encoder: dispatch now if embedding not yet cached.
+                let needs_encoder = self.batch
+                    .selected_item()
+                    .is_some_and(|i| i.magic_brush_embedding.is_none());
+                if needs_encoder {
+                    if let Some(item) = self.batch.selected_item() {
+                        if let Some(source) = item.source_rgba.clone() {
+                            let item_id = item.id;
+                            let avail_ram =
+                                (crate::hardware::available_ram_bytes_throttled()
+                                    / (1024 * 1024)) as u32;
+                            match self.processor.dispatch_sam_encoder(
+                                item_id, source, avail_ram,
+                            ) {
+                                Ok(()) => {
+                                    self.magic_brush_state.set_encoder_pending(true);
+                                }
+                                Err(err) => {
+                                    self.toasts.error(format!(
+                                        "Magic Brush unavailable: {err}"
+                                    ));
+                                    self.magic_brush_state.deactivate();
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
 
