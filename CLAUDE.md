@@ -453,8 +453,7 @@ source comments and `ARCHITECTURE.md`, not in user-facing text.
 - "Subject mask gamma. Lower = darker subject."
 - "Edge thickness, 0-10 pixels."
 
-**Canonical bad examples — the rule was authored after these shipped
-in 32-07 and were rewritten in 32-11:**
+**Canonical bad examples** (→ rewritten):
 - ~~"Re-runs inference on change (Tier-1)."~~ → "Requires reprocessing."
 - ~~"Real-time (Tier-2). Range: -1 to +1."~~ → "Range: -1 to +1."
 - ~~"Real-time (Tier-2)."~~ → (silence — drop the body line)
