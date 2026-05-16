@@ -505,11 +505,17 @@ pub enum SettingsModel {
     /// 4xNomos8kSCHAT-L HAT-L upscaler (fp16). Photo-tuned; higher quality
     /// than Real-ESRGAN, slower on CPU EP.
     Nomos8kUpscale,
+    /// 4x NMKD Siax-CX (RRDB-23, fp32). Community-trained universal
+    /// upscaler — sharper than x4plus on clean / mildly-compressed photos.
+    FourXNmkdSiaxCxUpscale,
+    /// 4x NMKD Superscale (RRDB-23, fp32). Community-trained restoration
+    /// upscaler — handles noise and JPEG artifacts on real photos.
+    FourXNmkdSuperscaleUpscale,
 }
 
 impl SettingsModel {
     /// All variants in display order — source of truth for the model dropdown.
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 12] = [
         Self::Silueta,
         Self::U2net,
         Self::BiRefNetLite,
@@ -520,6 +526,8 @@ impl SettingsModel {
         Self::SdInpaint,
         Self::RealEsrganUpscale,
         Self::Nomos8kUpscale,
+        Self::FourXNmkdSiaxCxUpscale,
+        Self::FourXNmkdSuperscaleUpscale,
     ];
 
     /// Parse a Debug-style name ("Silueta", "U2net", "BiRefNetLite", …) into
@@ -545,7 +553,13 @@ impl SettingsModel {
     /// True for any super-resolution upscale mode. Dispatch routes through
     /// `upscale_rgba`; these variants are not seg/inpaint capacity-priced.
     pub fn is_upscale(self) -> bool {
-        matches!(self, Self::RealEsrganUpscale | Self::Nomos8kUpscale)
+        matches!(
+            self,
+            Self::RealEsrganUpscale
+                | Self::Nomos8kUpscale
+                | Self::FourXNmkdSiaxCxUpscale
+                | Self::FourXNmkdSuperscaleUpscale
+        )
     }
 
     /// Convert to `ModelKind`, or `None` for variants outside the
@@ -561,7 +575,9 @@ impl SettingsModel {
             | Self::MiganInpaint
             | Self::SdInpaint
             | Self::RealEsrganUpscale
-            | Self::Nomos8kUpscale => None,
+            | Self::Nomos8kUpscale
+            | Self::FourXNmkdSiaxCxUpscale
+            | Self::FourXNmkdSuperscaleUpscale => None,
         }
     }
 
@@ -586,6 +602,8 @@ impl SettingsModel {
             Self::SdInpaint => Some(prunr_models::ModelId::SdV15InpaintFp16),
             Self::RealEsrganUpscale => Some(prunr_models::ModelId::RealEsrganX4Plus),
             Self::Nomos8kUpscale => Some(prunr_models::ModelId::Nomos8kSchatL),
+            Self::FourXNmkdSiaxCxUpscale => Some(prunr_models::ModelId::FourXNmkdSiaxCx),
+            Self::FourXNmkdSuperscaleUpscale => Some(prunr_models::ModelId::FourXNmkdSuperscale),
             Self::None => None,
         }
     }
@@ -599,6 +617,8 @@ impl From<ModelKind> for SettingsModel {
             ModelKind::BiRefNetLite => SettingsModel::BiRefNetLite,
             ModelKind::RealEsrganX4Plus => SettingsModel::RealEsrganUpscale,
             ModelKind::Nomos8kSchatL => SettingsModel::Nomos8kUpscale,
+            ModelKind::FourXNmkdSiaxCx => SettingsModel::FourXNmkdSiaxCxUpscale,
+            ModelKind::FourXNmkdSuperscale => SettingsModel::FourXNmkdSuperscaleUpscale,
             ModelKind::RealEsrganX2Plus => {
                 // RealEsrganX2Plus is never the user-selected active model — it's
                 // selected indirectly via OutputScale::X4TwoPass. This conversion
@@ -1123,7 +1143,10 @@ mod tests {
         for m in SettingsModel::ALL {
             let expected = matches!(
                 m,
-                SettingsModel::RealEsrganUpscale | SettingsModel::Nomos8kUpscale,
+                SettingsModel::RealEsrganUpscale
+                    | SettingsModel::Nomos8kUpscale
+                    | SettingsModel::FourXNmkdSiaxCxUpscale
+                    | SettingsModel::FourXNmkdSuperscaleUpscale,
             );
             assert_eq!(m.is_upscale(), expected, "{m:?}");
         }

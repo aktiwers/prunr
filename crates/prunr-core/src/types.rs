@@ -30,6 +30,8 @@ pub enum ModelKind {
     RealEsrganX4Plus,
     Nomos8kSchatL,
     RealEsrganX2Plus,
+    FourXNmkdSiaxCx,
+    FourXNmkdSuperscale,
 }
 
 impl From<ModelKind> for prunr_models::ModelId {
@@ -41,6 +43,8 @@ impl From<ModelKind> for prunr_models::ModelId {
             ModelKind::RealEsrganX4Plus => prunr_models::ModelId::RealEsrganX4Plus,
             ModelKind::Nomos8kSchatL => prunr_models::ModelId::Nomos8kSchatL,
             ModelKind::RealEsrganX2Plus => prunr_models::ModelId::RealEsrganX2Plus,
+            ModelKind::FourXNmkdSiaxCx => prunr_models::ModelId::FourXNmkdSiaxCx,
+            ModelKind::FourXNmkdSuperscale => prunr_models::ModelId::FourXNmkdSuperscale,
         }
     }
 }
@@ -60,6 +64,8 @@ impl TryFrom<prunr_models::ModelId> for ModelKind {
             prunr_models::ModelId::RealEsrganX4Plus => Ok(ModelKind::RealEsrganX4Plus),
             prunr_models::ModelId::Nomos8kSchatL => Ok(ModelKind::Nomos8kSchatL),
             prunr_models::ModelId::RealEsrganX2Plus => Ok(ModelKind::RealEsrganX2Plus),
+            prunr_models::ModelId::FourXNmkdSiaxCx => Ok(ModelKind::FourXNmkdSiaxCx),
+            prunr_models::ModelId::FourXNmkdSuperscale => Ok(ModelKind::FourXNmkdSuperscale),
             other => Err(other),
         }
     }
