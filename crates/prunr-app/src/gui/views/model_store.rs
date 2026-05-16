@@ -124,7 +124,6 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) -> bool {
                 .show(ui, |ui| {
                     let mut shown = 0;
                     for desc in REGISTRY {
-                        if !desc.id.is_directly_selectable() { continue; }
                         if let Some(c) = new_filter {
                             if desc.category != c { continue; }
                         }
