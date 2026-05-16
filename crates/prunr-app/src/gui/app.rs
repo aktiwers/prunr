@@ -603,6 +603,12 @@ impl PrunrApp {
         };
         let recipe = item.settings.current_recipe(model_kind, self.settings.chain_mode);
         tracing::info!(item_id, ?model_id, ?output_scale, "upscale dispatched");
+        // Seed the action timeline so Cmd+Z can revert this Process. Seg/inpaint
+        // routes through process_items → seed_history_for_reprocess; the upscale
+        // path bypasses that, so the marker push lives here.
+        let mut ids = HashSet::new();
+        ids.insert(item_id);
+        self.seed_history_for_reprocess(&ids, self.settings.chain_mode);
         self.processor.dispatch_upscale(item_id, input, model_id, output_scale, intra_threads, recipe);
     }
 
@@ -1032,7 +1038,6 @@ impl PrunrApp {
         }
         let handles = self.batch.bg_io.tex_prep_handles();
         let switch = self.result_switch_id;
-        let max_depth = self.settings.history_depth;
         for r in results {
             let item_id = r.item_id;
             let result_recipe = r.recipe.clone();
@@ -1062,23 +1067,9 @@ impl PrunrApp {
                         bicubic.as_ref(),
                     );
                     let new_rgba = Arc::new(displayed);
-                    // Archive the pre-upscale result so Cmd+Z swaps stored
-                    // RGBAs instead of re-running the whole pipeline. Mirrors
-                    // the inpaint pump's archive block.
-                    if let Some(prev) = item.result_rgba.take() {
-                        item.history.push_back(super::item::HistoryEntry::new(
-                            prev, item.applied_recipe.clone(),
-                        ));
-                        while item.history.len() > max_depth {
-                            if let Some(old) = item.history.pop_front() {
-                                old.cleanup();
-                            }
-                        }
-                        // New edit invalidates the linear redo timeline.
-                        for entry in item.redo_stack.drain(..) {
-                            entry.cleanup();
-                        }
-                    }
+                    // Archive happened at dispatch time via seed_history_for_reprocess;
+                    // here we just stamp the new result. result_rgba was already
+                    // taken (chain_mode replanted it; non-chain left it None).
                     item.result_rgba = Some(new_rgba.clone());
                     item.applied_recipe = Some(result_recipe);
                     item.status = BatchStatus::Done;
