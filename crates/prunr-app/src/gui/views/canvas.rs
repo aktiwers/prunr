@@ -246,15 +246,10 @@ fn handle_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: Rect) 
         }
 
         tracing::info!(item_id, "brush stroke committed; writing to selection_mask");
-        // commit_selection writes mask + hash in lockstep, clears outline + texture.
-        if app.batch.commit_selection(item_id, merged) {
-            // Per-model interpretation rule:
-            //   Segmentation + !protect_selection → immediate rerun (BG-removal UX)
-            //   Inpaint  → user clicks Process / Enter (no auto-dispatch)
-            //   Selection / Upscale / None → no dispatch
-            // Task 2 (33-04) wires this; Task 1 compiles with a no-op stub.
-            app.apply_selection_to_active_model(item_id);
-        }
+        // commit_selection_and_dispatch is the single-source-of-truth entry:
+        // persists mask, fires per-model dispatch rule, spawns off-thread
+        // outline + texture visualization build.
+        app.commit_selection_and_dispatch(item_id, merged);
     }
 }
 

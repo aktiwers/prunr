@@ -88,6 +88,28 @@ pub struct BrushSettings {
     /// with both standard SD and LCM checkpoints.
     #[serde(default)]
     pub sd_use_taesd: Option<bool>,
+    /// Phase 33 shared selection visualization knob: edge feather in
+    /// pixels. 0 = sharp edges. Applied via
+    /// `prunr_core::selection::refine::feather_edges` at consumer
+    /// action time (Delete/Copy/Cut) AND before outline polyline
+    /// extraction.
+    #[serde(default)]
+    pub edge_feather: f32,
+    /// Outline stroke width in pixels.
+    #[serde(default = "default_outline_thickness")]
+    pub outline_thickness: f32,
+    /// Outline stroke alpha. 0 = hidden, 1 = solid.
+    #[serde(default = "default_outline_opacity")]
+    pub outline_opacity: f32,
+    /// Selection fill alpha (tinted ACCENT). 0 = no fill, 1 = solid.
+    #[serde(default = "default_fill_opacity")]
+    pub fill_opacity: f32,
+    /// Magic Brush only: SAM decoder confidence threshold. Plan 07
+    /// reads. Lives in shared BrushSettings to mirror the
+    /// inpaint_sharpen / inpaint_feather pattern (per-tool knobs on a
+    /// shared settings struct).
+    #[serde(default = "default_magic_confidence_threshold")]
+    pub magic_confidence_threshold: f32,
 }
 
 /// SD eraser scheduler choice. Wired into `SdInpaintRequest` at
@@ -331,6 +353,10 @@ impl SdQualityPreset {
 
 fn default_feather() -> f32 { 4.0 }
 fn default_grow() -> f32 { 2.0 }
+fn default_outline_thickness() -> f32 { 2.0 }
+fn default_outline_opacity() -> f32 { 1.0 }
+fn default_fill_opacity() -> f32 { 0.15 }
+fn default_magic_confidence_threshold() -> f32 { 0.5 }
 /// 1.5 matches the `Balanced` preset's CFG (LCM scheduler, CFG up to
 /// 2.0 per Diffusers LCM guidance — community consensus is values
 /// \>2.0 degrade LCM output quality). For Standard SD via DDIM /
@@ -411,6 +437,11 @@ impl Default for BrushSettings {
             sd_seed: None,
             sd_strength: default_strength(),
             sd_use_taesd: None,
+            edge_feather: 0.0,
+            outline_thickness: default_outline_thickness(),
+            outline_opacity: default_outline_opacity(),
+            fill_opacity: default_fill_opacity(),
+            magic_confidence_threshold: default_magic_confidence_threshold(),
         }
     }
 }
@@ -565,6 +596,34 @@ impl BrushState {
 #[allow(clippy::field_reassign_with_default)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn brush_settings_default_edge_feather_is_zero() {
+        let s = BrushSettings::default();
+        assert!((s.edge_feather - 0.0).abs() < f32::EPSILON,
+            "edge_feather default must be 0 (sharp edges)");
+    }
+
+    #[test]
+    fn brush_settings_default_outline_thickness_is_2_px() {
+        let s = BrushSettings::default();
+        assert!((s.outline_thickness - 2.0).abs() < f32::EPSILON,
+            "outline_thickness default must be 2.0 px");
+    }
+
+    #[test]
+    fn brush_settings_default_fill_opacity_is_15_percent() {
+        let s = BrushSettings::default();
+        assert!((s.fill_opacity - 0.15).abs() < f32::EPSILON,
+            "fill_opacity default must be 0.15 (15%)");
+    }
+
+    #[test]
+    fn brush_settings_default_magic_confidence_is_0_5() {
+        let s = BrushSettings::default();
+        assert!((s.magic_confidence_threshold - 0.5).abs() < f32::EPSILON,
+            "magic_confidence_threshold default must be 0.5");
+    }
 
     #[test]
     fn default_disabled() {
@@ -827,6 +886,11 @@ mod tests {
             sd_seed: Some(42),
             sd_strength: 0.6,
             sd_use_taesd: Some(true),
+            edge_feather: 5.0,
+            outline_thickness: 4.0,
+            outline_opacity: 0.5,
+            fill_opacity: 0.8,
+            magic_confidence_threshold: 0.7,
         };
         s.reset_popover_fields_from(&BrushSettings::default());
 
