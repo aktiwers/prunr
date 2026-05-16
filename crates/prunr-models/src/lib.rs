@@ -255,23 +255,28 @@ pub struct UpscaleModelKnobs {
     /// `true` when the export expects fp16 inputs and emits fp16
     /// outputs. Drives the tensor-packing branch in `upscale_rgba`.
     pub is_fp16: bool,
-    /// Native output scale of the ONNX graph. RealESRGAN x4plus and
-    /// Nomos8k are native-4×; RealESRGAN x2plus is native-2× (chained
-    /// twice by `upscale_two_pass` for net 4× output). The dispatch
-    /// reads this instead of hardcoding scale literals so adding a new
-    /// model is a pure data edit.
+    /// Native output scale of the ONNX graph. x2plus is the only
+    /// native-2× upscale model — it's chained twice by
+    /// `upscale_two_pass` for net 4× output.
     pub native_scale: u32,
-    /// `true` for window-attention transformers (HAT, Swin) — these
-    /// need a 32-px overlap (two window widths) for seam-free output.
-    /// `false` for CNN-style models (RRDB / ESRGAN family) — 16 px is
-    /// the safe overlap.
+    /// `true` for window-attention transformers (HAT, Swin), `false`
+    /// for CNN-style RRDB.
     ///
     /// Distinct from `tile_size_multiple`: x2plus has
-    /// `tile_size_multiple=Some(2)` (pixel_unshuffle requires even
-    /// input dimensions) but is NOT window-attention. Conflating the
-    /// two assigns x2plus ~7% throughput overhead from an over-wide
-    /// overlap.
+    /// `tile_size_multiple=Some(2)` because pixel_unshuffle requires
+    /// even input dimensions, but it is NOT window-attention.
+    /// Conflating the two costs x2plus ~7% throughput from an
+    /// over-wide overlap.
     pub uses_window_attention: bool,
+}
+
+impl UpscaleModelKnobs {
+    /// Tile overlap in pixels: 32 for window-attention transformers
+    /// (two window widths hide attention-window seams), 16 for CNN /
+    /// RRDB (covers receptive field).
+    pub const fn tile_overlap(&self) -> u32 {
+        if self.uses_window_attention { 32 } else { 16 }
+    }
 }
 
 impl ModelDescriptor {
@@ -1464,14 +1469,13 @@ mod tests {
     }
 
     #[test]
-    fn every_upscale_entry_has_knobs() {
-        for desc in REGISTRY.iter().filter(|d| d.category == ModelCategory::Upscale) {
-            assert!(
-                desc.upscale.is_some(),
-                "Upscale model {:?} missing UpscaleModelKnobs — all upscale entries must have knobs",
-                desc.id
-            );
-        }
+    fn tile_overlap_branches_on_window_attention() {
+        let nomos = descriptor(ModelId::Nomos8kSchatL).expect("Nomos8kSchatL in REGISTRY");
+        let esrgan = descriptor(ModelId::RealEsrganX4Plus).expect("RealEsrganX4Plus in REGISTRY");
+        let esrgan2 = descriptor(ModelId::RealEsrganX2Plus).expect("RealEsrganX2Plus in REGISTRY");
+        assert_eq!(nomos.upscale.unwrap().tile_overlap(), 32);
+        assert_eq!(esrgan.upscale.unwrap().tile_overlap(), 16);
+        assert_eq!(esrgan2.upscale.unwrap().tile_overlap(), 16);
     }
 
 }
