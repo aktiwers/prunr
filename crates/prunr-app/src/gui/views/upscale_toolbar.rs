@@ -43,7 +43,8 @@ pub(crate) fn render_upscale_row(
         // that invariant lives in a different scope. Skip the chip if it
         // ever stops holding — no model_id means no upscale, so no chip.
         let Some(model_id) = app_settings.model.to_model_id() else { return; };
-        render_output_scale_chip(ui, &mut item_settings.output_scale, (out_w, out_h), model_id);
+        let is_x2plus_installed = prunr_models::is_available(prunr_models::ModelId::RealEsrganX2Plus);
+        render_output_scale_chip(ui, &mut item_settings.output_scale, (out_w, out_h), model_id, is_x2plus_installed);
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             render_reset_preset_cluster(ui, app_settings, item_settings, applied_preset, change);
