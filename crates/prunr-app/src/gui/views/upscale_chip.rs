@@ -50,10 +50,10 @@ pub(crate) fn render_output_scale_chip(
     let resp = chip::chip_tooltip(
         resp,
         "Output Scale",
-        "Output size relative to the source. 4\u{00d7} is native model output. \
-         2\u{00d7} and 3\u{00d7} run the model at 4\u{00d7} then downscale with Lanczos3. \
-         4\u{00d7} (two-pass) runs Real-ESRGAN x2plus twice \u{2014} better for \
-         noisy / low-light input. Available with Real-ESRGAN only.",
+        "How much to enlarge the image. 4\u{00d7} is the model's native size. \
+         2\u{00d7} and 3\u{00d7} shrink the 4\u{00d7} output with high-quality \
+         resampling. 4\u{00d7} (two-pass) runs the upscale in two halves for \
+         cleaner results on noisy or low-light photos \u{2014} Real-ESRGAN only.",
     );
 
     let mut changed = false;
@@ -98,7 +98,7 @@ pub(crate) fn render_output_scale_chip(
         }
 
         ui.add_space(theme::SPACE_XS);
-        hint(ui, "4\u{00d7} (two-pass) handles noise better but uses Real-ESRGAN x2plus internally. Nomos8k cannot use this variant.");
+        hint(ui, "4\u{00d7} (two-pass) runs Real-ESRGAN twice for cleaner output on noisy photos. Costs roughly double the wall-clock time.");
         ui.add_space(theme::SPACE_XS);
 
         if chip::reset_button(ui, "Reset to 4\u{00d7} (native)") && *value != OutputScale::X4 {

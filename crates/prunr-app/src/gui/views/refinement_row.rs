@@ -1,7 +1,7 @@
 //! Refinement chip row for the upscale toolbar.
 //!
 //! Mutations land on `item_settings` directly; the recipe diff at the
-//! next dispatch decides Tier-1 (re-inference) vs Tier-2 (real-time).
+//! next dispatch decides whether to reprocess or update live.
 
 use egui::Ui;
 use egui_material_icons::icons::{
@@ -15,16 +15,15 @@ use crate::gui::theme;
 pub(crate) fn render_refinement_row(ui: &mut Ui, item_settings: &mut ItemSettings) {
     ui.add_space(theme::SPACE_XS);
     ui.horizontal(|ui| {
-        // Tier-1 (re-runs inference)
+        // Pre-process knobs (reprocess on change)
         chip::chip_f32(
             ui,
             ChipMeta {
                 id_salt: "refinement_pre_denoise",
                 icon: ICON_BLUR_ON.codepoint,
                 label: "Pre-denoise",
-                description: "Re-runs inference on change (Tier-1).",
-                tooltip: "Classical denoise applied BEFORE inference. Median + bilateral. \
-                          Kills chromatic dot speckles from low-light input. 0.0 = off.",
+                description: "Strength of the noise smoother. Higher values reduce fine detail along with the noise. Reprocesses on change.",
+                tooltip: "Smooth chromatic speckles and grain before upscaling. Useful for low-light or high-ISO photos where the AI would otherwise amplify the noise. 0 leaves the image untouched.",
             },
             &mut item_settings.pre_denoise,
             0.0..=1.0,
@@ -38,10 +37,8 @@ pub(crate) fn render_refinement_row(ui: &mut Ui, item_settings: &mut ItemSetting
                 id_salt: "refinement_brightness_lift",
                 icon: ICON_BRIGHTNESS_6.codepoint,
                 label: "Brightness Lift",
-                description: "Re-runs inference on change (Tier-1).",
-                tooltip: "Pre-inference exposure adjustment in EV stops. Lifts dark inputs \
-                          so the model has more signal; reciprocal tone-map applied post-\
-                          inference. 0 = off. Range: -2 to +2 EV.",
+                description: "Pre-upscale exposure boost in EV stops (camera units). The inverse curve restores the original brightness after. Reprocesses on change.",
+                tooltip: "Brighten dark areas before upscaling so the AI sees more shadow detail, then return to the original brightness. Especially helpful on underexposed photos. \u{00b1}2 EV range.",
             },
             &mut item_settings.brightness_lift,
             -2.0..=2.0,
@@ -52,16 +49,15 @@ pub(crate) fn render_refinement_row(ui: &mut Ui, item_settings: &mut ItemSetting
 
         ui.add_space(4.0);
 
-        // Tier-2 (real-time postprocess)
+        // Post-process knobs (live, no reprocess)
         chip::chip_f32(
             ui,
             ChipMeta {
                 id_salt: "refinement_sharpen",
                 icon: ICON_DEBLUR.codepoint,
                 label: "Sharpen",
-                description: "Real-time (Tier-2) \u{2014} no re-inference.",
-                tooltip: "Unsharp mask applied after inference. Negative = blur, 0 = off, \
-                          positive = sharpen. Range: -1 to +1.",
+                description: "Sharpening amount. Negative values blur, positive values sharpen. Updates live.",
+                tooltip: "Unsharp-mask pass on the upscaled image. Real-ESRGAN intentionally outputs slightly soft so you can choose how crisp the result looks; lift this above 0 to taste.",
             },
             &mut item_settings.sharpen,
             -1.0..=1.0,
@@ -75,10 +71,8 @@ pub(crate) fn render_refinement_row(ui: &mut Ui, item_settings: &mut ItemSetting
                 id_salt: "refinement_ai_blend",
                 icon: ICON_PSYCHOLOGY.codepoint,
                 label: "AI Blend",
-                description: "1.0 = full AI, 0.0 = pure bicubic. Real-time (Tier-2).",
-                tooltip: "Lerp between AI upscale output (1.0 = full AI) and a bicubic-of-\
-                          source baseline (0.0 = pure bicubic). Ease back the plastic look \
-                          from over-aggressive AI smoothing.",
+                description: "Blend between the AI upscale (100%) and a plain enlargement (0%). Lower values dial back the AI's plastic look. Updates live.",
+                tooltip: "AI upscalers sometimes smooth faces, skin, or fine texture into a plastic look. Drop this below 100% to mix in the original photo's grain and detail. 100% is pure AI.",
             },
             &mut item_settings.ai_blend,
             0.0..=1.0,
@@ -92,9 +86,8 @@ pub(crate) fn render_refinement_row(ui: &mut Ui, item_settings: &mut ItemSetting
                 id_salt: "refinement_saturation",
                 icon: ICON_PALETTE.codepoint,
                 label: "Saturation",
-                description: "Real-time (Tier-2) \u{2014} no re-inference.",
-                tooltip: "HSL-space saturation adjustment. Negative = desaturate toward \
-                          grey, 0 = off, positive = saturate.",
+                description: "Colour intensity. Negative fades toward grey, positive saturates. Updates live.",
+                tooltip: "Boost or mute colour without touching brightness (HSL-based, so bright reds stay bright when you saturate). Range -1 to +1.",
             },
             &mut item_settings.saturation,
             -1.0..=1.0,
@@ -108,10 +101,8 @@ pub(crate) fn render_refinement_row(ui: &mut Ui, item_settings: &mut ItemSetting
                 id_salt: "refinement_color_match",
                 icon: ICON_TUNE.codepoint,
                 label: "Color Match",
-                description: "Transfers source RGB mean+stddev in Lab space. Real-time (Tier-2).",
-                tooltip: "Reinhard Lab-space mean+stddev color transfer from the source \
-                          image. Snaps the upscale's color statistics back to source \u{2014} \
-                          cancels model color drift.",
+                description: "Snap the upscale's colour balance back to the source photo. Updates live.",
+                tooltip: "Some AI upscalers shift hues or saturation subtly during the run. This compares the upscale's overall colour statistics to the source image and corrects the drift, so the result matches the original tone.",
             },
             &mut item_settings.color_match,
         );
