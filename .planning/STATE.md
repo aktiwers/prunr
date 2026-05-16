@@ -3,12 +3,12 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: unknown
-last_updated: "2026-05-16T11:15:30.232Z"
+last_updated: "2026-05-16T12:00:00.000Z"
 progress:
   total_phases: 14
   completed_phases: 8
   total_plans: 74
-  completed_plans: 60
+  completed_plans: 62
 ---
 
 # Project State
@@ -22,7 +22,7 @@ See: `.planning/PROJECT.md` (updated 2026-04-06)
 ## Current Position
 
 Phase: 33 (magic-brush) — EXECUTING
-Plan: 7 of 7 (33-01 + 33-02 + 33-03 + 33-04 + 33-05 + 33-06 + 33-04 complete)
+Plan: 7 of 7 (33-01 + 33-02 + 33-03 + 33-04 + 33-05 + 33-06 all complete)
 
 ## Phase Status (ground truth, derived from git log)
 
@@ -109,3 +109,4 @@ Captured in commit messages and `.planning/phases/12-*/`, `13-*/`, `14-*/`, `28-
 - 2026-05-16 — Phase 33-06 completed: prunr_core::sam pure-function module. SamEmbedding (16 MB cached encoder output, validate_shapes), SamDecoderOutput, decode_to_mask_artifact (bilinear upsample 256→source, logit threshold → binary MaskArtifact), preprocess_for_sam (1024×1024 NCHW ImageNet-normalized f32 tensor), 4 prompt builders (build_click_prompt/build_stroke_prompt/build_shift_modifier_prompt/build_alt_modifier_prompt) + SamPrompt + PromptError + MAX_STROKE_POINTS=8. Zero ORT dependency; 20 unit tests green; 991 workspace tests green. Commits: 22b3573 + c8e60ff. Key decision: preprocess_for_sam wraps RgbaImage as DynamicImage (resize_rgb_lanczos3 actual signature). Plan 07 will retype BatchItem.magic_brush_embedding from Arc<()> to Arc<SamEmbedding>.
 - 2026-05-16 — Phase 33-03 completed: BatchItem selection fields + lifecycle. 5 new fields: selection_mask (Arc<MaskArtifact>), selection_hash (u64), selection_outline (Arc<Vec<(u32,u32)>>), selection_texture (TextureHandle), magic_brush_embedding (Arc<()> placeholder for Plan 07). BatchManager gains commit_selection / clear_selection / invalidate_selection_on_source_change helpers. reset_result_caches() does NOT touch selection fields (Criterion 8). cache_size() includes selection bytes + 16 MB embedding constant. 8 boundary tests green; 553 workspace tests green. Commits: 875fd81 + 2337be2. Key decision: Arc<()> placeholder for embedding avoids cross-plan dependency before Plan 06 lands.
 - 2026-05-16 — Phase 33-04 completed: Paint Brush selection_mask migration. Removed mask_correction + last_inpaint_correction from BatchItem; stroke stacks retyped to Arc<MaskArtifact> snapshots; brush_overlay emits MaskArtifact at source resolution (fixes Pitfall 1 tensor-dim misalignment); apply_selection_to_active_model enforces 4-row per-model dispatch table (Segmentation+!protect→rerun, Inpaint→wait, Selection→no-op, Upscale/None→no-op); protect_selection toggle added; 7 new tests (6 boundary + 1 regression). correction_hash left as always-None dead field in prunr-core (removal requires updating 10+ golden JSON fixtures). 558 prunr-app tests green. Commits: 66b0201 + 347c98f.
+- 2026-05-16 — Phase 33-05 completed: Selection UI surface. BrushSettings: 5 new fields (edge_feather/outline_thickness/outline_opacity/fill_opacity/magic_confidence_threshold) with serde back-compat. BackgroundIO: two new channel pairs for off-thread outline polyline + ACCENT-tinted ColorImage; request_selection_visualization rayon worker; drain with hash-stale-discard guard. commit_selection_and_dispatch single-source-of-truth. selection_overlay.rs: 60 Hz zero-alloc render (fill + outline). selection_action_bar.rs: Delete/Copy/Cut/Invert/Clear with ACCENT border + DESTRUCTIVE Delete. adjustments_toolbar: ToolbarChange gains selection_action/protect_selection; Protect chip in right cluster (seg+selection gated); action bar below rows. brush_chip: Selection knobs section (4 sliders). app: handle_selection_action (Delete/Copy/Cut/Invert/Clear), keyboard bindings (Del/Ctrl+X/Esc/Ctrl+C-with-selection). 3 pinning tests. Commits: 7be3825 + 77699a4.
