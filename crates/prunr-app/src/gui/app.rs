@@ -2231,12 +2231,14 @@ impl PrunrApp {
         ctx: &egui::Context,
         results: Vec<super::live_preview::PreviewResult>,
     ) {
+        use super::live_preview::PreviewKind;
         let handles = self.batch.bg_io.tex_prep_handles();
         for r in results {
             let (item_id, source, is_final) = {
                 let Some(item) = self.batch.find_by_id_mut(r.item_id) else {
                     continue;
                 };
+                let is_upscale_tier2 = matches!(r.kind, PreviewKind::UpscaleTier2);
                 let new_rgba = Arc::new(r.rgba);
                 item.result_rgba = Some(new_rgba.clone());
                 // Filter-only mode (model=None) never clicks Process — the
@@ -2260,7 +2262,27 @@ impl PrunrApp {
                 // a result it has already consumed.
                 if let Some(applied) = item.applied_recipe.as_mut() {
                     applied.mask = r.applied_mask;
+                    // For Tier-2 upscale previews, also patch the 4 Tier-2
+                    // fields in applied_recipe.upscale. Without this update,
+                    // applied_recipe.upscale stays at the Tier-1 dispatch values
+                    // forever — resolve_tier always sees a diff and mark_tweak
+                    // fires every frame even after the user stops dragging.
+                    if let Some(knobs) = r.applied_tier2_knobs {
+                        applied.upscale.sharpen_bits = knobs.sharpen.to_bits();
+                        applied.upscale.ai_blend_bits = knobs.ai_blend.to_bits();
+                        applied.upscale.saturation_bits = knobs.saturation.to_bits();
+                        applied.upscale.color_match = knobs.color_match;
+                    }
                 }
+                tracing::debug!(
+                    event = "upscale_tier2_apply",
+                    item_id = item.id,
+                    is_upscale_tier2,
+                    replaced_result_rgba = true,
+                    tex_rebuild_scheduled = true,
+                    is_final = r.is_final,
+                    "apply_completed_previews: result drained"
+                );
                 let switch = self.result_switch_id;
                 Self::spawn_tex_prep(
                     new_rgba, item.id, Self::tex_name("result", item.id, Some(switch)),
@@ -3401,16 +3423,53 @@ impl PrunrApp {
         // UpscaleTier2 — fire mark_tweak so the debounced postprocess kicks in.
         if self.settings.live_preview && self.settings.model.is_upscale() {
             let item = &self.batch.items[idx];
-            if item.upscale_raw.is_some() {
+            let has_raw = item.upscale_raw.is_some();
+            let has_applied = item.applied_recipe.is_some();
+            tracing::debug!(
+                event = "upscale_tier2_check",
+                item_id,
+                live_preview = self.settings.live_preview,
+                model_is_upscale = self.settings.model.is_upscale(),
+                has_upscale_raw = has_raw,
+                has_applied_recipe = has_applied,
+                commit = toolbar_change.commit,
+                "tier2 detection gate"
+            );
+            if has_raw {
                 if let Some(ref old_recipe) = item.applied_recipe {
+                    // Use to_model_id → ModelKind::try_from so the upscale model
+                    // variants (which return None from to_model_kind) resolve to
+                    // the correct ModelKind for the recipe diff. Using to_model_kind
+                    // with its BiRefNetLite fallback produces a model mismatch:
+                    // applied_recipe.upscale.model = Some(RealEsrganX4Plus) but
+                    // new_recipe.upscale.model = None → only_tier2_changed returns
+                    // false → resolve_tier returns UpscaleRerun, never UpscaleTier2.
                     let model = self.settings.model
-                        .to_model_kind()
+                        .to_model_id()
+                        .and_then(|id| prunr_core::ModelKind::try_from(id).ok())
                         .unwrap_or(prunr_core::ModelKind::BiRefNetLite);
                     let new_recipe = item.settings.current_recipe(model, self.settings.chain_mode);
-                    if matches!(
-                        prunr_core::resolve_tier(old_recipe, &new_recipe),
-                        prunr_core::RequiredTier::UpscaleTier2
-                    ) {
+                    let tier = prunr_core::resolve_tier(old_recipe, &new_recipe);
+                    tracing::debug!(
+                        event = "upscale_tier2_resolve",
+                        item_id,
+                        resolved_tier = ?tier,
+                        old_model = ?old_recipe.upscale.model,
+                        new_model = ?new_recipe.upscale.model,
+                        old_sharpen_bits = old_recipe.upscale.sharpen_bits,
+                        new_sharpen_bits = new_recipe.upscale.sharpen_bits,
+                        old_ai_blend_bits = old_recipe.upscale.ai_blend_bits,
+                        new_ai_blend_bits = new_recipe.upscale.ai_blend_bits,
+                        old_saturation_bits = old_recipe.upscale.saturation_bits,
+                        new_saturation_bits = new_recipe.upscale.saturation_bits,
+                        old_color_match = old_recipe.upscale.color_match,
+                        new_color_match = new_recipe.upscale.color_match,
+                        old_output_scale = ?old_recipe.upscale.output_scale,
+                        new_output_scale = ?new_recipe.upscale.output_scale,
+                        "tier2 recipe diff"
+                    );
+                    if matches!(tier, prunr_core::RequiredTier::UpscaleTier2) {
+                        tracing::debug!(event = "upscale_tier2_mark", item_id, "calling mark_tweak");
                         self.processor.live_preview.mark_tweak(item_id, PreviewKind::UpscaleTier2);
                         if toolbar_change.commit {
                             self.processor.live_preview.flush(item_id);
