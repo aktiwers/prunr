@@ -11,8 +11,8 @@
 //! `ep_compat.json` cache keys — strings rather than an enum because
 //! the rest of the codebase already treats EP identity as a string.
 
-use std::path::{Path, PathBuf};
 use prunr_models::ModelId;
+use std::path::{Path, PathBuf};
 
 /// Cache format version. Bump when the cache layout changes OR when
 /// the `ort` crate version bumps — cached optimized graphs and EP
@@ -45,7 +45,9 @@ pub fn cache_path_for(id: ModelId, ep_name: &str) -> Option<PathBuf> {
     let descriptor = prunr_models::descriptor(id)?;
     let key = format!(
         "{}-{}-v{}",
-        id.stable_name(), descriptor.version, CACHE_FORMAT_VERSION,
+        id.stable_name(),
+        descriptor.version,
+        CACHE_FORMAT_VERSION,
     );
     Some(root.join(ep_name.to_ascii_lowercase()).join(key))
 }
@@ -100,8 +102,12 @@ pub fn optimized_model_path_for_part(id: ModelId, ep_name: &str, part: &str) -> 
 /// effect. The EP itself validates contents on load; this check is
 /// just "should we skip the prewarm work?".
 pub fn cache_populated_for(id: ModelId, ep_name: &str) -> bool {
-    let Some(dir) = cache_path_for(id, ep_name) else { return false };
-    if !dir.is_dir() { return false; }
+    let Some(dir) = cache_path_for(id, ep_name) else {
+        return false;
+    };
+    if !dir.is_dir() {
+        return false;
+    }
     std::fs::read_dir(&dir)
         .map(|mut entries| entries.next().is_some())
         .unwrap_or(false)
@@ -120,9 +126,15 @@ pub fn cache_populated_for(id: ModelId, ep_name: &str) -> bool {
 /// deletes the old key before the old process opens it, so the old
 /// process gets a cache miss and rebuilds cold rather than crashing.
 pub fn gc_stale_for_model(id: ModelId, ep_name: &str) {
-    let Some(current_path) = cache_path_for(id, ep_name) else { return };
-    let Some(ep_dir) = current_path.parent().map(Path::to_path_buf) else { return };
-    let Some(current_name) = current_path.file_name().map(|n| n.to_owned()) else { return };
+    let Some(current_path) = cache_path_for(id, ep_name) else {
+        return;
+    };
+    let Some(ep_dir) = current_path.parent().map(Path::to_path_buf) else {
+        return;
+    };
+    let Some(current_name) = current_path.file_name().map(|n| n.to_owned()) else {
+        return;
+    };
     let our_prefix = format!("{}-", id.stable_name());
 
     // `read_dir` returns `Err(NotFound)` when the directory hasn't been
@@ -137,12 +149,20 @@ pub fn gc_stale_for_model(id: ModelId, ep_name: &str) {
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        let Some(name) = path.file_name() else { continue };
-        if name == current_name { continue; }
-        let Some(name_str) = name.to_str() else { continue };
+        let Some(name) = path.file_name() else {
+            continue;
+        };
+        if name == current_name {
+            continue;
+        }
+        let Some(name_str) = name.to_str() else {
+            continue;
+        };
         // `<stable>-` prefix is unambiguous given the registry convention
         // that `stable_name` uses `_` internally, never `-`.
-        if !name_str.starts_with(&our_prefix) { continue; }
+        if !name_str.starts_with(&our_prefix) {
+            continue;
+        }
         match std::fs::remove_dir_all(&path) {
             Ok(()) => tracing::info!(
                 ?id, ep = %ep_name, dir = %path.display(),
@@ -177,11 +197,17 @@ pub fn clear_for_model(id: ModelId) -> u64 {
     };
     for ep_entry in ep_entries.flatten() {
         let ep_dir = ep_entry.path();
-        let Ok(model_entries) = std::fs::read_dir(&ep_dir) else { continue };
+        let Ok(model_entries) = std::fs::read_dir(&ep_dir) else {
+            continue;
+        };
         for entry in model_entries.flatten() {
             let path = entry.path();
-            let Some(name) = path.file_name().and_then(|n| n.to_str()) else { continue };
-            if !name.starts_with(&our_prefix) { continue; }
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if !name.starts_with(&our_prefix) {
+                continue;
+            }
             let size = walk_dir_size(&path, 0).unwrap_or(0);
             match std::fs::remove_dir_all(&path) {
                 Ok(()) => {
@@ -209,7 +235,9 @@ pub fn clear_for_model(id: ModelId) -> u64 {
 /// slow disks.
 pub fn clear_all() -> u64 {
     let Some(root) = cache_root() else { return 0 };
-    if !root.exists() { return 0 }
+    if !root.exists() {
+        return 0;
+    }
     let bytes = walk_dir_size(&root, 0).unwrap_or(0);
     if let Err(e) = std::fs::remove_dir_all(&root) {
         tracing::warn!(%e, dir = %root.display(), "failed to clear EP cache");
@@ -223,7 +251,9 @@ pub fn clear_all() -> u64 {
 /// `MAX_WALK_DEPTH` so a symlink loop terminates instead of stack-
 /// overflowing.
 fn walk_dir_size(dir: &Path, depth: u32) -> std::io::Result<u64> {
-    if depth > MAX_WALK_DEPTH { return Ok(0); }
+    if depth > MAX_WALK_DEPTH {
+        return Ok(0);
+    }
     let mut total = 0u64;
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
@@ -276,15 +306,24 @@ mod tests {
     /// invalidate every user's cache.
     #[test]
     fn cache_key_includes_stable_name_and_versions() {
-        let Some(dir) = cache_path_for(ModelId::Silueta, "CPU") else { return };
+        let Some(dir) = cache_path_for(ModelId::Silueta, "CPU") else {
+            return;
+        };
         let key = dir.file_name().and_then(|s| s.to_str()).unwrap_or("");
-        assert!(key.contains(ModelId::Silueta.stable_name()),
-            "cache key must contain stable_name; got {key:?}");
+        assert!(
+            key.contains(ModelId::Silueta.stable_name()),
+            "cache key must contain stable_name; got {key:?}"
+        );
         let descriptor = prunr_models::descriptor(ModelId::Silueta).unwrap();
-        assert!(key.contains(descriptor.version),
-            "cache key must contain model version {}; got {key:?}", descriptor.version);
-        assert!(key.contains(&format!("v{CACHE_FORMAT_VERSION}")),
-            "cache key must contain CACHE_FORMAT_VERSION; got {key:?}");
+        assert!(
+            key.contains(descriptor.version),
+            "cache key must contain model version {}; got {key:?}",
+            descriptor.version
+        );
+        assert!(
+            key.contains(&format!("v{CACHE_FORMAT_VERSION}")),
+            "cache key must contain CACHE_FORMAT_VERSION; got {key:?}"
+        );
     }
 
     /// Read-only check must not create the cache directory. Pre-fix
@@ -293,14 +332,18 @@ mod tests {
     /// silently `mkdir`-ing an empty directory.
     #[test]
     fn cache_populated_does_not_create_directory() {
-        let Some(path) = cache_path_for(ModelId::DexiNed, "CPU") else { return };
+        let Some(path) = cache_path_for(ModelId::DexiNed, "CPU") else {
+            return;
+        };
         let _ = std::fs::remove_dir_all(&path);
         let exists_before = path.exists();
         let populated = cache_populated_for(ModelId::DexiNed, "CPU");
         let exists_after = path.exists();
         assert!(!populated);
-        assert_eq!(exists_before, exists_after,
-            "cache_populated_for must be read-only");
+        assert_eq!(
+            exists_before, exists_after,
+            "cache_populated_for must be read-only"
+        );
     }
 
     /// Stale-entry GC must remove sibling dirs from older versions /
@@ -313,8 +356,12 @@ mod tests {
     /// `Migan`.
     #[test]
     fn gc_stale_for_model_removes_siblings_only() {
-        let Some(current) = cache_dir_for(ModelId::LaMaFp32, "CPU") else { return };
-        let Some(ep_root) = cache_root().map(|r| r.join("cpu")) else { return };
+        let Some(current) = cache_dir_for(ModelId::LaMaFp32, "CPU") else {
+            return;
+        };
+        let Some(ep_root) = cache_root().map(|r| r.join("cpu")) else {
+            return;
+        };
         let stale = ep_root.join(format!("{}-0.0.1-v0", ModelId::LaMaFp32.stable_name()));
         std::fs::create_dir_all(&stale).unwrap();
         std::fs::write(stale.join("dummy"), b"x").unwrap();
@@ -343,7 +390,9 @@ mod tests {
         let stable = ModelId::BigLaMa.stable_name();
         let cpu_dir = root.join("cpu").join(format!("{stable}-1.0.0-v1"));
         let openvino_dir = root.join("openvino").join(format!("{stable}-1.0.0-v1"));
-        let other = root.join("cpu").join(format!("{}-1.0.0-v1", ModelId::U2net.stable_name()));
+        let other = root
+            .join("cpu")
+            .join(format!("{}-1.0.0-v1", ModelId::U2net.stable_name()));
         for d in [&cpu_dir, &openvino_dir, &other] {
             std::fs::create_dir_all(d).unwrap();
             std::fs::write(d.join("dummy"), b"abc").unwrap();
@@ -351,7 +400,10 @@ mod tests {
 
         let bytes = clear_for_model(ModelId::BigLaMa);
 
-        assert!(bytes >= 6, "should report bytes from both EPs (got {bytes})");
+        assert!(
+            bytes >= 6,
+            "should report bytes from both EPs (got {bytes})"
+        );
         assert!(!cpu_dir.exists());
         assert!(!openvino_dir.exists());
         assert!(other.exists(), "other model's cache must be untouched");
@@ -364,14 +416,20 @@ mod tests {
     /// subdir of the cache root).
     #[test]
     fn cache_populated_distinguishes_empty_from_nonempty() {
-        let Some(dir) = cache_dir_for(ModelId::Migan, "CPU") else { return };
+        let Some(dir) = cache_dir_for(ModelId::Migan, "CPU") else {
+            return;
+        };
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        assert!(!cache_populated_for(ModelId::Migan, "CPU"),
-            "empty dir must report unpopulated");
+        assert!(
+            !cache_populated_for(ModelId::Migan, "CPU"),
+            "empty dir must report unpopulated"
+        );
         std::fs::write(dir.join("optimized.onnx"), b"placeholder").unwrap();
-        assert!(cache_populated_for(ModelId::Migan, "CPU"),
-            "dir with content must report populated");
+        assert!(
+            cache_populated_for(ModelId::Migan, "CPU"),
+            "dir with content must report populated"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
