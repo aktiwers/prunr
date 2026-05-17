@@ -45,11 +45,12 @@ pub(crate) fn push_action_bounded(stack: &mut VecDeque<ActionType>, kind: Action
 
 /// Per-item brush stroke history depth. Bounded to match `ACTION_HIST_DEPTH`
 /// (the ordering layer cap) so the ordering log and stroke stack stay in sync.
-/// Memory: each entry is `Option<Arc<MaskArtifact>>`; at source image dims
-/// (e.g. 2048×2048) an f32 mask is ~16 MB per snapshot. A 100-deep stack
-/// peaks at ~1.6 GB per item — the user's trade for a generous undo depth on
-/// hi-res content. The Arc wrapping means undo snapshots are O(1) refcount
-/// bumps; the payload is only copied if the snapshot is mutated (it never is).
+/// Memory: each entry is `Option<Arc<MaskArtifact>>` at source resolution —
+/// ~16 MB per snapshot at 2048², ~33 MB at 4K. A 100-deep stack peaks at
+/// 1.6 GB on 2K content, 3.3 GB on 4K — the user's trade for a generous
+/// undo depth on hi-res images. The Arc wrapping makes snapshots O(1)
+/// refcount bumps; payload is shared until mutated (it never is, since
+/// MaskArtifact is immutable through `Arc`).
 const STROKE_HISTORY_DEPTH: usize = ACTION_HIST_DEPTH;
 
 fn push_stroke_bounded(
