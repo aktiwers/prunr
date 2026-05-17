@@ -39,6 +39,13 @@ Run `cargo run -p prunr-app`, load an image, exercise:
    - Shift + click → mask ADDS to selection.
    - Alt + click → mask SUBTRACTS from selection.
 
+7. **Keyboard bindings on the selection action bar** (closes Criterion 7) — with a selection active and no text field focused:
+   - `Del` → Delete (alpha-cut).
+   - `Ctrl+C` → Copy to clipboard.
+   - `Ctrl+X` → Cut to clipboard.
+   - `Enter` → Invert.  ← *added 2026-05-17 to close gap*
+   - `Esc` → Clear.
+
 ## What to report back
 
 Either:
