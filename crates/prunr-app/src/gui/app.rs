@@ -879,15 +879,14 @@ impl PrunrApp {
         self.processor.live_preview.flush(item_id);
     }
 
-    /// Phase 33 per-model interpretation rule. Called immediately after
-    /// `commit_selection` so the BG-removal continuous-auto-apply UX is
-    /// preserved while SD/LaMa wait for explicit Process. See
-    /// `.planning/phases/33-magic-brush/33-CONTEXT.md` rule table.
+    /// Per-model interpretation rule for a newly-committed selection.
+    /// Called immediately after `commit_selection` so the BG-removal
+    /// continuous-auto-apply UX is preserved while SD / LaMa wait for
+    /// explicit Process.
     ///
     /// IMPORTANT: every call site that calls `BatchManager::commit_selection`
-    /// MUST follow up with this method. Both Paint Brush and Magic Brush
-    /// (Plan 07) must pair them to prevent per-model dispatch rules from
-    /// drifting between input surfaces.
+    /// MUST follow up with this method. Pairing the two prevents per-model
+    /// dispatch rules from drifting between input surfaces.
     pub(crate) fn apply_selection_to_active_model(&mut self, item_id: u64) {
         let Some(idx) = self.batch.items.iter().position(|i| i.id == item_id) else { return };
         let category = self.settings.model.to_model_id()
@@ -1018,11 +1017,9 @@ impl PrunrApp {
     pub(crate) fn dispatch_inpaint_for_item(&mut self, idx: usize) {
         let item = &self.batch.items[idx];
         let item_id = item.id;
-        // Read selection_mask — the single source of truth for inpaint region.
-        // Selection persists post-result (Criterion 8) so "Reprocess" is always
-        // available as long as any selection exists. Phase 33 removes the old
-        // last_inpaint_correction fallback — selection_mask covers both the
-        // "just drew" and "reprocess" cases.
+        // selection_mask is the single source of truth for the inpaint
+        // region. It persists across Process, so Reprocess is available
+        // whenever any selection exists — no separate "last_inpaint" cache.
         let Some(selection) = item.selection_mask.as_ref().cloned() else {
             tracing::debug!(item_id, "inpaint dispatch skipped: no selection_mask");
             return;
@@ -1078,9 +1075,6 @@ impl PrunrApp {
             sd_use_karras_sigmas: bs.sd_use_karras_sigmas,
             use_taesd: bs.sd_use_taesd_effective(),
         };
-        // selection_mask persists post-result (Criterion 8) and post-dispatch,
-        // so no "last_inpaint_correction" stash is needed — the Reprocess
-        // button reads selection_mask directly each time.
         self.processor.dispatch_inpaint(item_id, source, correction, tuning);
     }
 
@@ -1150,8 +1144,8 @@ impl PrunrApp {
                 }
                 item.result_tex_pending = true;
                 item.thumb_pending = true;
-                // selection_mask persists post-result (Criterion 8 — Phase 33).
-                // The region stays highlighted and is available for Reprocess.
+                // selection_mask intentionally persists — the region stays
+                // highlighted and is available for Reprocess.
                 Self::spawn_tex_prep(
                     new_rgba.clone(), item.id, Self::tex_name("inpaint", item.id, Some(switch)),
                     true, handles.clone(), ctx.clone(),
@@ -3101,10 +3095,13 @@ impl PrunrApp {
             self.processor.cancel_all_inpaints();
         } else if self.batch.status_counts().processing > 0 {
             self.handle_cancel_all_and_reset();
-        } else if self.batch.selected_item().is_some_and(|i| i.selection_mask.is_some()) {
-            if let Some(item_id) = self.batch.selected_item().map(|i| i.id) {
-                self.batch.clear_selection(item_id);
-                ctx.request_repaint();
+        } else if self
+            .batch
+            .selected_item()
+            .is_some_and(|i| i.selection_mask.is_some())
+        {
+            if let Some(idx) = self.batch.selected_idx_clamped() {
+                self.handle_selection_action(idx, SelectionAction::Clear, ctx);
             }
         } else if self.show_settings {
             self.close_settings(ctx);
@@ -3260,9 +3257,9 @@ impl PrunrApp {
         self.pump_thumbnail_results(ctx);
         self.pump_history_demote_results();
 
-        // Plan 05: drain selection outline results (off-thread outline_polyline).
-        // Hash guard: if item.selection_hash no longer matches, a newer commit
-        // superseded this result — silently drop it (the newer job is in flight).
+        // Drain off-thread outline polylines. Hash guard: if
+        // item.selection_hash no longer matches, a newer commit superseded
+        // this result — silently drop it.
         while let Ok(result) = self.batch.bg_io.selection_outline_rx.try_recv() {
             if let Some(item) = self.batch.find_by_id_mut(result.item_id) {
                 if item.selection_hash == Some(result.hash) {
@@ -3271,9 +3268,9 @@ impl PrunrApp {
             }
         }
 
-        // Plan 05: drain selection texture results (off-thread ColorImage build).
-        // ctx.load_texture is allowed here — drain_background_channels runs in
-        // logic(), not in a render closure (CLAUDE.md ## Hot paths exception).
+        // Drain off-thread selection-visualization textures.
+        // `ctx.load_texture` is allowed here — this drain runs from
+        // `logic()`, not a render closure.
         while let Ok(result) = self.batch.bg_io.selection_texture_rx.try_recv() {
             if let Some(item) = self.batch.find_by_id_mut(result.item_id) {
                 if item.selection_hash == Some(result.hash) {

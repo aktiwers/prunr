@@ -113,13 +113,13 @@ pub struct Settings {
     #[serde(default)]
     pub brush: BrushSettings,
 
-    /// Global "Protect selection" toggle (Phase 33). When true, the
-    /// BG-removal continuous auto-apply rule does NOT fire on stroke
-    /// commit — the user can paint without immediate visual feedback,
-    /// then click Process to commit. SD / LaMa already require explicit
-    /// Process; this toggle ONLY affects Segmentation-category models.
-    /// Default false preserves pre-Phase-33 immediate-feedback UX
-    /// (Criterion 11 regression contract).
+    /// Global "Protect selection" toggle. When true, the BG-removal
+    /// continuous auto-apply rule does NOT fire on stroke commit — the
+    /// user can paint without immediate visual feedback, then click
+    /// Process to commit. SD / LaMa already require explicit Process;
+    /// this toggle ONLY affects Segmentation-category models. Default
+    /// false preserves the historical immediate-feedback UX where
+    /// strokes auto-trigger a BG-removal rerun.
     #[serde(default)]
     pub protect_selection: bool,
 

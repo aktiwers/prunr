@@ -8,8 +8,10 @@ use crate::types::ModelKind;
 
 const REMBG_SIZE: u32 = 320;
 const BIREFNET_SIZE: u32 = 1024;
-const MEAN: [f32; 3] = [0.485, 0.456, 0.406];
-const STD:  [f32; 3] = [0.229, 0.224, 0.225];
+
+/// Standard ImageNet normalization used by every vision backbone in this crate.
+pub(crate) const IMAGENET_MEAN: [f32; 3] = [0.485, 0.456, 0.406];
+pub(crate) const IMAGENET_STD:  [f32; 3] = [0.229, 0.224, 0.225];
 
 /// Preprocess for the given model. Returns NCHW tensor at the model's expected resolution.
 pub fn preprocess(img: &DynamicImage, model: ModelKind) -> Array4<f32> {
@@ -33,8 +35,8 @@ fn to_nchw(resized: &image::RgbImage, size: u32, divisor: f32) -> Array4<f32> {
     let s = size as usize;
     let raw = resized.as_raw();
     let inv_div = 1.0 / divisor;
-    let scale: [f32; 3] = std::array::from_fn(|c| inv_div / STD[c]);
-    let bias: [f32; 3] = std::array::from_fn(|c| MEAN[c] / STD[c]);
+    let scale: [f32; 3] = std::array::from_fn(|c| inv_div / IMAGENET_STD[c]);
+    let bias: [f32; 3] = std::array::from_fn(|c| IMAGENET_MEAN[c] / IMAGENET_STD[c]);
 
     // `Array4::zeros` writes 12 MB at BiRefNet 1024² before the loop
     // overwrites every element. `uninit` skips the zero-fill — saves
@@ -131,7 +133,7 @@ mod tests {
     #[test]
     fn test_preprocess_black_image_no_nan() {
         // All-black image: max_val = 1e-6 (clamped), pixel/max_val = 0.0
-        // Result = (0.0 - MEAN[c]) / STD[c] — all finite
+        // Result = (0.0 - IMAGENET_MEAN[c]) / IMAGENET_STD[c] — all finite
         let img = solid_rgb_image(0, 0, 0, 32, 32);
         let tensor = preprocess(&img, ModelKind::Silueta);
         for &val in tensor.iter() {

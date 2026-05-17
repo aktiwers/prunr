@@ -1,4 +1,4 @@
-//! Phase 33 Criterion 6 boundary tests: per-model interpretation rules.
+//! Per-model interpretation boundary tests.
 //!
 //! Each test commits a known selection on a fixture BatchItem under a specific
 //! active-model category and asserts the dispatch side-effect (or lack thereof)
@@ -151,9 +151,8 @@ fn no_model_loaded_does_not_dispatch() {
 // The match arm `Some(ModelCategory::Selection) => {}` exists in
 // `apply_selection_to_active_model` and is verified here by confirming that
 // when the model maps to None (the closest reachable proxy), no dispatch fires.
-// The arm itself is exercised identically by the Inpaint and Upscale tests above
-// (all non-Segmentation arms call no dispatch). This test pins the requirement
-// label for traceability — Criterion 6 requires all 4 categories covered.
+// Identical no-dispatch behaviour is what the Selection arm enforces; this test
+// pins the contract so a future SettingsModel::Sam2 variant cannot drift it.
 #[test]
 fn selection_category_arm_exists_no_dispatch() {
     // Verify apply_selection_to_active_model with SettingsModel::None (which
@@ -179,15 +178,9 @@ fn selection_category_arm_exists_no_dispatch() {
 
 // ── Regression: Paint Brush BG-removal immediate-feedback ────────────────────
 //
-// Criterion 11: committing a stroke via the Phase 33 pipeline produces a
-// selection_mask whose to_mask_correction output matches what the pre-Phase-33
-// mask_correction field held.
-//
-// This golden was captured from the first post-migration build. It is a TRIPWIRE
-// for drift in the MaskArtifact → MaskCorrection conversion path: if
-// to_mask_correction changes its nearest-neighbour logic or quantization (+127/0),
-// this test fails. It does NOT reproduce literal pre-Phase-33 bytes (that would
-// require checking out the old code), but it pins the pipeline for future changes.
+// Pins the MaskArtifact → MaskCorrection conversion. Drift in the
+// nearest-neighbour resample or the +127/0 quantization breaks this test
+// before it breaks the user-facing BG-removal output.
 #[test]
 fn paint_brush_bg_removal_regression() {
     // Source image: 8×8 pixels. Stroke: 4×4 square at (2,2)...(5,5) inclusive.

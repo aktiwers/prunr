@@ -1294,8 +1294,7 @@ impl Processor {
 /// variant), preprocesses the source image, runs inference, and marshals
 /// the three named outputs into a SamEmbedding.
 ///
-/// ORT session.run() lives here so `prunr_core::sam` stays ORT-free per
-/// Plan 06's design contract.
+/// ORT session.run() lives here so `prunr_core::sam` stays ORT-free.
 fn run_sam_encoder_inline(
     source: &image::RgbaImage,
 ) -> Result<prunr_core::sam::SamEmbedding, String> {
@@ -1359,8 +1358,7 @@ fn run_sam_encoder_inline(
 /// packs the embedding + prompt into 7 named inputs, runs inference, and
 /// marshals the two outputs (masks + iou_predictions) into SamDecoderOutput.
 ///
-/// ORT session.run() lives here so `prunr_core::sam` stays ORT-free per
-/// Plan 06's design contract.
+/// ORT session.run() lives here so `prunr_core::sam` stays ORT-free.
 fn run_sam_decoder_inline(
     embedding: &prunr_core::sam::SamEmbedding,
     prompt: &prunr_core::sam::prompt::SamPrompt,
