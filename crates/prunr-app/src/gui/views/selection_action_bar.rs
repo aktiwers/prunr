@@ -39,18 +39,16 @@ pub(crate) fn render_selection_action_bar(ui: &mut Ui) -> Option<SelectionAction
     ui.add_space(SPACE_XS);
 
     ui.horizontal(|ui| {
-        // Group 1: destructive-adjacent (Delete, Copy, Cut)
-        if action_button(ui, "🗑", "Delete", "Del", Some(DESTRUCTIVE)).clicked() {
+        if action_button(ui, "🗑  Delete", "Delete", "Del", Some(DESTRUCTIVE)).clicked() {
             chosen = Some(SelectionAction::Delete);
         }
-        if action_button(ui, "📋", "Copy", "Ctrl+C", None).clicked() {
+        if action_button(ui, "📋  Copy", "Copy", "Ctrl+C", None).clicked() {
             chosen = Some(SelectionAction::Copy);
         }
-        if action_button(ui, "✂", "Cut", "Ctrl+X", None).clicked() {
+        if action_button(ui, "✂  Cut", "Cut", "Ctrl+X", None).clicked() {
             chosen = Some(SelectionAction::Cut);
         }
 
-        // Vertical separator between groups.
         ui.add_space(SPACE_XS);
         let sep_rect = ui.available_rect_before_wrap();
         ui.painter().line_segment(
@@ -59,11 +57,10 @@ pub(crate) fn render_selection_action_bar(ui: &mut Ui) -> Option<SelectionAction
         );
         ui.add_space(SPACE_XS);
 
-        // Group 2: selection-modifying (Invert, Clear)
-        if action_button(ui, "⇄", "Invert", "Enter", None).clicked() {
+        if action_button(ui, "⇄  Invert", "Invert", "Enter", None).clicked() {
             chosen = Some(SelectionAction::Invert);
         }
-        if action_button(ui, "✕", "Clear", "Esc", None).clicked() {
+        if action_button(ui, "✕  Clear", "Clear", "Esc", None).clicked() {
             chosen = Some(SelectionAction::Clear);
         }
     });
@@ -71,18 +68,20 @@ pub(crate) fn render_selection_action_bar(ui: &mut Ui) -> Option<SelectionAction
     chosen
 }
 
-/// Render a single action button: icon + label, keyboard hint in tooltip.
+/// Render a single action button. `text` is the pre-joined "icon + label"
+/// rendered on the button face — passing a `&'static str` keeps the
+/// render closure alloc-free at 60 Hz. `label` is the bare action name
+/// used only inside the hover-gated tooltip header.
 /// Delete uses DESTRUCTIVE border; others use the standard stroke color.
 fn action_button(
     ui: &mut Ui,
-    icon: &'static str,
+    text: &'static str,
     label: &'static str,
     keyboard_hint: &'static str,
     border_color: Option<Color32>,
 ) -> egui::Response {
     let border = border_color.unwrap_or(Color32::from_rgb(0x50, 0x50, 0x50));
     let stroke = Stroke::new(STROKE_DEFAULT, border);
-    let text = format!("{}  {}", icon, label);
 
     let saved_padding = ui.spacing().button_padding;
     ui.spacing_mut().button_padding = egui::vec2(8.0, 4.0);
@@ -97,8 +96,9 @@ fn action_button(
     );
     ui.spacing_mut().button_padding = saved_padding;
 
-    // Attach tooltip with keyboard hint.
     if !keyboard_hint.is_empty() {
+        // Tooltip body is built only when hover fires — the format! here
+        // is hover-gated, not per-frame.
         let tooltip_text = format!("{}  ({})", label, keyboard_hint);
         resp.clone().on_hover_ui(|ui| {
             ui.label(RichText::new(label).strong().color(TEXT_PRIMARY));

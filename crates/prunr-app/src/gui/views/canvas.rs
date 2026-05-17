@@ -216,7 +216,9 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
             .show(ui.ctx(), |ui| {
                 ui.spinner();
             });
-        ui.ctx().request_repaint();
+        // 10 Hz polling while the encoder runs — a 60 Hz busy-render of a
+        // static spinner spins up the fan for no visible benefit.
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
     }
 }
 

@@ -25,15 +25,13 @@ pub(crate) fn render_selection_overlay(
     src_w: u32,
     src_h: u32,
 ) {
-    // Early-return: nothing to draw if there's no selection.
     let Some(_) = item.selection_mask.as_ref() else { return };
 
     let painter = ui.painter();
 
-    // 1. Fill — paint the pre-built selection texture as an egui image over the
-    //    image rect, tinted with ACCENT at fill_opacity. The texture's pixels are
-    //    already ACCENT-colored where mask >= 0.5; we apply fill_opacity as the
-    //    image alpha here so the render loop reads one f32, no allocation.
+    // Pre-built selection_texture carries ACCENT pixels at opacity 255;
+    // fill_opacity is applied at render time via the image tint alpha so
+    // this closure stays alloc-free.
     if brush.fill_opacity > 0.001 {
         if let Some(tex) = item.selection_texture.as_ref() {
             let alpha = (brush.fill_opacity * 255.0).clamp(0.0, 255.0) as u8;
@@ -47,11 +45,6 @@ pub(crate) fn render_selection_overlay(
         }
     }
 
-    // 2. Outline — trace the pre-built polyline in screen space.
-    //    Convert source-pixel coords to egui::Pos2 via the img_rect transform.
-    //    This Vec<Pos2> allocation (O(N) over existing data) is acceptable per
-    //    CLAUDE.md ## Hot paths: it's a tight transform over a pre-existing Arc<Vec>
-    //    with no I/O, no GPU upload, no heavy math.
     if brush.outline_opacity > 0.001 && brush.outline_thickness > 0.001 {
         if let Some(outline) = item.selection_outline.as_ref() {
             if !outline.is_empty() {
@@ -61,8 +54,11 @@ pub(crate) fn render_selection_overlay(
                 );
                 let stroke = Stroke::new(brush.outline_thickness, stroke_color);
 
-                // Source → screen transform: the image occupies `img_rect` at
-                // `src_w x src_h` logical pixels; each source pixel maps linearly.
+                // Source → screen transform: image occupies `img_rect` at
+                // `src_w x src_h` logical pixels; each source pixel maps
+                // linearly. The outline is capped at OUTLINE_MAX_POINTS
+                // in `background_io::request_selection_visualization`, so
+                // this per-frame Vec<Pos2> is bounded.
                 let iw = img_rect.width() / src_w.max(1) as f32;
                 let ih = img_rect.height() / src_h.max(1) as f32;
                 let ox = img_rect.min.x;
