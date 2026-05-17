@@ -3052,6 +3052,11 @@ impl PrunrApp {
                 self.handle_selection_action(idx, SelectionAction::Delete, ctx);
             }
         }
+        if intents.invert_selection && app_state == AppState::Done && has_selection {
+            if let Some(idx) = self.batch.selected_idx_clamped() {
+                self.handle_selection_action(idx, SelectionAction::Invert, ctx);
+            }
+        }
         if intents.toggle_before_after && app_state == AppState::Done {
             self.show_original = !self.show_original;
         }
@@ -4156,6 +4161,8 @@ struct ShortcutIntents {
     delete_selection: bool,
     /// Ctrl+X — cut selection to clipboard when a selection is active.
     cut_selection: bool,
+    /// Enter key — invert the active selection.
+    invert_selection: bool,
 }
 
 fn collect_shortcut_intents(ctx: &egui::Context) -> ShortcutIntents {
@@ -4180,6 +4187,7 @@ fn collect_shortcut_intents(ctx: &egui::Context) -> ShortcutIntents {
         if i.modifiers.command && i.key_pressed(Key::X) { s.cut_selection = true; }
         // Delete key — bare key, suppressed when a text field is focused (handled below).
         if !text_focused && i.key_pressed(Key::Delete)  { s.delete_selection = true; }
+        if !text_focused && i.key_pressed(Key::Enter)   { s.invert_selection = true; }
         if fresh(Key::F1)                               { s.toggle_shortcuts = true; }
         if fresh(Key::F2)                               { s.toggle_cli_help = true; }
         if fresh(Key::F3)                               { s.toggle_pipeline_flow = true; }
