@@ -355,7 +355,7 @@ Plans:
  11. Existing model-coupled brush behaviors regress-tested under the new selection-first dispatch — Paint Brush in BG-removal mode continues to produce immediate-feedback output identical to pre-refactor
  12. `prunr-core` unit tests cover the selection-mask data layout, per-model interpretation logic, and SAM decoder prompt construction; `prunr-models` test asserts SAM 2 Hiera Small (or fallback) routes encoder + decoder through separate `OrtEngine` instances
 
-**Plans:** 5/7 plans executed
+**Plans:** 7/7 plans complete
 
 Plans:
 - [ ] 33-01-PLAN.md — prunr-core::selection: MaskArtifact + add/sub/invert/alpha_cut/copy_to_rgba + outline polyline + feather refinement (Wave 1)
