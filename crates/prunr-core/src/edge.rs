@@ -68,7 +68,11 @@ impl EdgeEngine {
         // Validate the output layout. If a model re-export ever renames /
         // reorders the outputs, we want a clear init error instead of a
         // silent wrong-scale result downstream.
-        let names: Vec<String> = session.outputs().iter().map(|o| o.name().to_string()).collect();
+        let names: Vec<String> = session
+            .outputs()
+            .iter()
+            .map(|o| o.name().to_string())
+            .collect();
         tracing::info!(?names, "DexiNed output layout");
         let last = names.last().map(String::as_str);
         if last != Some("block_cat") {
@@ -85,19 +89,31 @@ impl EdgeEngine {
             )));
         }
 
-        Ok(Self { session: Mutex::new(session) })
+        Ok(Self {
+            session: Mutex::new(session),
+        })
     }
 
     /// One-shot: inference + finalize_edges for CLI / single-shot flows.
-    pub fn detect(&self, original: &DynamicImage, edge: &crate::EdgeSettings) -> Result<RgbaImage, CoreError> {
+    pub fn detect(
+        &self,
+        original: &DynamicImage,
+        edge: &crate::EdgeSettings,
+    ) -> Result<RgbaImage, CoreError> {
         let (tensor, h, w) = self.infer_tensor(original, edge.edge_scale)?;
         Ok(finalize_edges(&tensor, h, w, original, edge))
     }
 
     /// Extract a single scale from one inference run. Use when the caller
     /// doesn't cache per-scale tensors (CLI).
-    pub fn infer_tensor(&self, original: &DynamicImage, scale: EdgeScale) -> Result<(Vec<f32>, u32, u32), CoreError> {
-        let mut session = self.session.lock()
+    pub fn infer_tensor(
+        &self,
+        original: &DynamicImage,
+        scale: EdgeScale,
+    ) -> Result<(Vec<f32>, u32, u32), CoreError> {
+        let mut session = self
+            .session
+            .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let outputs = run_inference(&mut session, original)?;
         let idx = scale_to_output_index(scale, outputs.len() - 1);
@@ -107,8 +123,13 @@ impl EdgeEngine {
 
     /// Extract all 4 scales from one inference run. Used by the GUI subprocess
     /// path so scale switching in live preview is a cached tensor lookup.
-    pub fn infer_all_tensors(&self, original: &DynamicImage) -> Result<EdgeInferenceResult, CoreError> {
-        let mut session = self.session.lock()
+    pub fn infer_all_tensors(
+        &self,
+        original: &DynamicImage,
+    ) -> Result<EdgeInferenceResult, CoreError> {
+        let mut session = self
+            .session
+            .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let outputs = run_inference(&mut session, original)?;
         let last = outputs.len() - 1;
@@ -141,11 +162,15 @@ fn run_inference<'s>(
 }
 
 /// Pull one output tensor from a session result by index, copying into a Vec.
-fn extract_output(outputs: &ort::session::SessionOutputs, idx: usize) -> Result<Vec<f32>, CoreError> {
-    let edge_map = outputs[idx]
-        .try_extract_array::<f32>()
-        .map_err(|e| CoreError::Inference(format!("Failed to extract edge output at index {idx}: {e}")))?;
-    let slice = edge_map.as_slice()
+fn extract_output(
+    outputs: &ort::session::SessionOutputs,
+    idx: usize,
+) -> Result<Vec<f32>, CoreError> {
+    let edge_map = outputs[idx].try_extract_array::<f32>().map_err(|e| {
+        CoreError::Inference(format!("Failed to extract edge output at index {idx}: {e}"))
+    })?;
+    let slice = edge_map
+        .as_slice()
         .ok_or_else(|| CoreError::Inference("Edge output tensor is not contiguous".to_string()))?;
     Ok(slice.to_vec())
 }
@@ -206,7 +231,7 @@ pub fn compose_edges(
     if let Some(c) = solid_line_color {
         let mut buf = vec![0u8; (ow * oh * 4) as usize];
         for i in 0..(ow * oh) as usize {
-            buf[i * 4]     = c[0];
+            buf[i * 4] = c[0];
             buf[i * 4 + 1] = c[1];
             buf[i * 4 + 2] = c[2];
             buf[i * 4 + 3] = mask_raw[i];
@@ -270,21 +295,24 @@ pub fn compose_edges_styled(
 
     // Precompute geometry for radial gradient so the hot loop doesn't
     // redo the centre conversion per pixel.
-    let (rg_cx, rg_cy, rg_max_dist_sq) = if let LineStyle::RadialGradient { center, .. } = line_style {
-        let cx = (center[0] as u32 * ow / 255) as i32;
-        let cy = (center[1] as u32 * oh / 255) as i32;
-        let far_x = cx.max(ow as i32 - cx);
-        let far_y = cy.max(oh as i32 - cy);
-        (cx, cy, (far_x * far_x + far_y * far_y).max(1))
-    } else {
-        (0, 0, 1)
-    };
+    let (rg_cx, rg_cy, rg_max_dist_sq) =
+        if let LineStyle::RadialGradient { center, .. } = line_style {
+            let cx = (center[0] as u32 * ow / 255) as i32;
+            let cy = (center[1] as u32 * oh / 255) as i32;
+            let far_x = cx.max(ow as i32 - cx);
+            let far_y = cy.max(oh as i32 - cy);
+            (cx, cy, (far_x * far_x + far_y * far_y).max(1))
+        } else {
+            (0, 0, 1)
+        };
 
     for i in 0..pixel_count {
         let subject = out_raw[i * 4 + 3] as i32;
         let edge = mask_raw[i] as i32;
         out_raw[i * 4 + 3] = alpha_fn(subject, edge);
-        if edge == 0 { continue; }
+        if edge == 0 {
+            continue;
+        }
 
         let gradient_target: Option<[u8; 3]> = match line_style {
             LineStyle::Solid => solid_tint,
@@ -312,7 +340,8 @@ pub fn compose_edges_styled(
             LineStyle::Rainbow { cycles } => {
                 // Hue cycles along pixel index so the colour changes smoothly
                 // across the whole image.
-                let hue = ((i as u64 * 360 * cycles.max(1) as u64 / pixel_count.max(1) as u64) % 360) as u16;
+                let hue = ((i as u64 * 360 * cycles.max(1) as u64 / pixel_count.max(1) as u64)
+                    % 360) as u16;
                 let (r, g, b) = crate::postprocess::hsv_to_rgb(hue, 255, 255);
                 Some([r, g, b])
             }
@@ -342,8 +371,8 @@ pub fn compose_edges_styled(
                 let jitter = (h & 0xFF) as i32 - 128; // -128..=127
                 let strength = amount as i32;
                 let shift = (jitter * strength) / 128; // -amount..=amount
-                // i64 to survive the multiply past ~5.96 M pixels
-                // (2700×2200) — Rainbow above already does the same.
+                                                       // i64 to survive the multiply past ~5.96 M pixels
+                                                       // (2700×2200) — Rainbow above already does the same.
                 let hue = (((i as i64 * 360) / pixel_count.max(1) as i64) + shift as i64)
                     .rem_euclid(360) as u16;
                 let (r, g, b) = crate::postprocess::hsv_to_rgb(hue, 200, 240);
@@ -463,35 +492,51 @@ pub fn compose_subject_outline(
     };
     let active = &edge_res.tensors[primary_scale as usize];
     let primary_mask = tensor_to_edge_mask(
-        active, edge_res.height, edge_res.width,
-        masked_rgba.width(), masked_rgba.height(),
+        active,
+        edge_res.height,
+        edge_res.width,
+        masked_rgba.width(),
+        masked_rgba.height(),
         edge.line_strength,
     );
-    if let LineStyle::DualScale { fine_color, bold_color } = edge.line_style {
+    if let LineStyle::DualScale {
+        fine_color,
+        bold_color,
+    } = edge.line_style
+    {
         let bold = &edge_res.tensors[EdgeScale::Bold as usize];
         let bold_mask = tensor_to_edge_mask(
-            bold, edge_res.height, edge_res.width,
-            masked_rgba.width(), masked_rgba.height(),
+            bold,
+            edge_res.height,
+            edge_res.width,
+            masked_rgba.width(),
+            masked_rgba.height(),
             edge.line_strength,
         );
         // Fine and Bold must come from distinct tensor slots — equal raw
         // pointers mean the caller collapsed to single-scale output.
         debug_assert_ne!(
-            active.as_ptr(), bold.as_ptr(),
+            active.as_ptr(),
+            bold.as_ptr(),
             "DualScale collapsed to single-scale: primary and bold tensors are the same slice",
         );
         compose_edges_dual_styled(
-            &primary_mask, &bold_mask, masked_rgba,
+            &primary_mask,
+            &bold_mask,
+            masked_rgba,
             edge.compose_mode,
-            fine_color, bold_color,
+            fine_color,
+            bold_color,
             edge.edge_thickness,
         )
     } else {
         compose_edges_styled(
-            &primary_mask, masked_rgba,
+            &primary_mask,
+            masked_rgba,
             edge.compose_mode,
             edge.line_style,
-            edge.solid_line_color, edge.edge_thickness,
+            edge.solid_line_color,
+            edge.edge_thickness,
         )
     }
 }
@@ -536,8 +581,11 @@ pub fn apply_input_transform<'a>(
         InputTransform::None => unreachable!(),
         InputTransform::Grayscale => {
             for p in rgba.pixels_mut() {
-                let y = ((p.0[0] as u32 * 2126 + p.0[1] as u32 * 7152 + p.0[2] as u32 * 722) / 10000) as u8;
-                p.0[0] = y; p.0[1] = y; p.0[2] = y;
+                let y = ((p.0[0] as u32 * 2126 + p.0[1] as u32 * 7152 + p.0[2] as u32 * 722)
+                    / 10000) as u8;
+                p.0[0] = y;
+                p.0[1] = y;
+                p.0[2] = y;
             }
         }
         InputTransform::ContrastBoost { percent } => {
@@ -583,7 +631,7 @@ fn flatten_on_white(img: &DynamicImage) -> DynamicImage {
             let a = row[p + 3] as f32 / 255.0;
             if a < 1.0 {
                 let inv_a = 1.0 - a;
-                row[p]     = (row[p]     as f32 * a + 255.0 * inv_a) as u8;
+                row[p] = (row[p] as f32 * a + 255.0 * inv_a) as u8;
                 row[p + 1] = (row[p + 1] as f32 * a + 255.0 * inv_a) as u8;
                 row[p + 2] = (row[p + 2] as f32 * a + 255.0 * inv_a) as u8;
             }
@@ -625,7 +673,7 @@ fn preprocess(img: &DynamicImage) -> Array4<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use image::{DynamicImage, RgbImage, Rgb};
+    use image::{DynamicImage, Rgb, RgbImage};
 
     fn solid_rgb(w: u32, h: u32) -> DynamicImage {
         DynamicImage::ImageRgb8(RgbImage::from_pixel(w, h, Rgb([120, 120, 120])))
@@ -641,7 +689,15 @@ mod tests {
             *slot = 10.0; // sigmoid → ~1 → edge
         }
         let original = solid_rgb(64, 48);
-        let edge = crate::EdgeSettings { line_strength: 0.5, solid_line_color: Some([255, 0, 0]), edge_thickness: 0, edge_scale: crate::EdgeScale::Fused, compose_mode: crate::ComposeMode::default(), line_style: crate::LineStyle::default(), input_transform: crate::InputTransform::default() };
+        let edge = crate::EdgeSettings {
+            line_strength: 0.5,
+            solid_line_color: Some([255, 0, 0]),
+            edge_thickness: 0,
+            edge_scale: crate::EdgeScale::Fused,
+            compose_mode: crate::ComposeMode::default(),
+            line_style: crate::LineStyle::default(),
+            input_transform: crate::InputTransform::default(),
+        };
         let out = finalize_edges(&tensor, h as u32, w as u32, &original, &edge);
         assert_eq!(out.width(), 64);
         assert_eq!(out.height(), 48);
@@ -663,15 +719,10 @@ mod tests {
     fn dual_scale_uses_fine_for_primary_even_when_edge_scale_is_bold() {
         let h = DEXINED_H as usize;
         let w = DEXINED_W as usize;
-        let fine_tensor: Vec<f32> = vec![10.0; h * w];   // sigmoid → ~1
-        let bold_tensor: Vec<f32> = vec![-10.0; h * w];  // sigmoid → ~0
+        let fine_tensor: Vec<f32> = vec![10.0; h * w]; // sigmoid → ~1
+        let bold_tensor: Vec<f32> = vec![-10.0; h * w]; // sigmoid → ~0
         let edge_res = EdgeInferenceResult {
-            tensors: [
-                fine_tensor,
-                vec![0.0; h * w],
-                bold_tensor,
-                vec![0.0; h * w],
-            ],
+            tensors: [fine_tensor, vec![0.0; h * w], bold_tensor, vec![0.0; h * w]],
             height: DEXINED_H,
             width: DEXINED_W,
         };
@@ -697,8 +748,10 @@ mod tests {
         // the way to fine_color. Pre-fix this pixel would be ≈[10,10,10]
         // (no Bold edges, so neither blend fires).
         assert_eq!(
-            [p[0], p[1], p[2]], [200, 80, 40],
-            "DualScale primary must come from Fine tensor; got {:?}", p,
+            [p[0], p[1], p[2]],
+            [200, 80, 40],
+            "DualScale primary must come from Fine tensor; got {:?}",
+            p,
         );
     }
 
@@ -718,21 +771,23 @@ mod tests {
         let mask = image::GrayImage::from_pixel(w, h, image::Luma([255]));
         let base = RgbaImage::from_pixel(w, h, image::Rgba([10, 10, 10, 200]));
         let out = compose_edges_styled(
-            &mask, &base,
+            &mask,
+            &base,
             crate::ComposeMode::SubjectFilled,
             crate::LineStyle::RadialGradient {
                 center: [0, 0],
                 inner: [0, 0, 0],
                 outer: [255, 255, 255],
             },
-            None, 0,
+            None,
+            0,
         );
         // `dist_sq * 255` first overflows i32 at x ≈ 2900 (255·x² > 2^31).
         // Sample on either side: monotonic ramp toward outer means
         // mid > early and far ≥ mid - small slack for u8 quantisation.
         let early = out.get_pixel(2000, 0)[0];
-        let mid = out.get_pixel(3500, 0)[0];   // past overflow threshold
-        let far = out.get_pixel(w - 1, 0)[0];  // near image edge
+        let mid = out.get_pixel(3500, 0)[0]; // past overflow threshold
+        let far = out.get_pixel(w - 1, 0)[0]; // near image edge
         assert!(
             early < mid && mid <= far,
             "radial gradient must stay monotonic across the i32 overflow \
@@ -762,10 +817,12 @@ mod tests {
         // whole image. The contract worth pinning is "function doesn't
         // overflow at the project's image-size cap".
         let out = compose_edges_styled(
-            &mask, &base,
+            &mask,
+            &base,
             crate::ComposeMode::SubjectFilled,
             crate::LineStyle::Noise { amount: 80 },
-            None, 0,
+            None,
+            0,
         );
         assert_eq!(out.dimensions(), (w, h));
     }
@@ -805,7 +862,8 @@ mod tests {
     fn apply_input_transform_contrast_boost_around_pivot() {
         let boost = crate::types::InputTransform::ContrastBoost { percent: 200 };
         for (input, expected) in [(128_u8, 128_u8), (0, 0), (255, 255)] {
-            let img = DynamicImage::ImageRgb8(RgbImage::from_pixel(1, 1, Rgb([input, input, input])));
+            let img =
+                DynamicImage::ImageRgb8(RgbImage::from_pixel(1, 1, Rgb([input, input, input])));
             let out = apply_input_transform(&img, boost);
             let p = out.to_rgba8().get_pixel(0, 0).0;
             assert_eq!(
@@ -822,14 +880,9 @@ mod tests {
     #[test]
     fn apply_input_transform_posterize_steps() {
         let post = crate::types::InputTransform::Posterize { levels: 4 };
-        for (input, expected) in [
-            (0_u8, 0_u8),
-            (84, 0),
-            (85, 85),
-            (170, 170),
-            (255, 255),
-        ] {
-            let img = DynamicImage::ImageRgb8(RgbImage::from_pixel(1, 1, Rgb([input, input, input])));
+        for (input, expected) in [(0_u8, 0_u8), (84, 0), (85, 85), (170, 170), (255, 255)] {
+            let img =
+                DynamicImage::ImageRgb8(RgbImage::from_pixel(1, 1, Rgb([input, input, input])));
             let out = apply_input_transform(&img, post);
             let p = out.to_rgba8().get_pixel(0, 0).0;
             assert_eq!(
@@ -875,7 +928,15 @@ mod tests {
         let h = DEXINED_H as usize;
         let tensor = vec![10.0_f32; h * w]; // all edges
         let original = solid_rgb(32, 32);
-        let edge = crate::EdgeSettings { line_strength: 0.5, solid_line_color: None, edge_thickness: 0, edge_scale: crate::EdgeScale::Fused, compose_mode: crate::ComposeMode::default(), line_style: crate::LineStyle::default(), input_transform: crate::InputTransform::default() };
+        let edge = crate::EdgeSettings {
+            line_strength: 0.5,
+            solid_line_color: None,
+            edge_thickness: 0,
+            edge_scale: crate::EdgeScale::Fused,
+            compose_mode: crate::ComposeMode::default(),
+            line_style: crate::LineStyle::default(),
+            input_transform: crate::InputTransform::default(),
+        };
         let out = finalize_edges(&tensor, h as u32, w as u32, &original, &edge);
         // Original color preserved
         assert_eq!(out.get_pixel(0, 0)[0], 120);
