@@ -198,37 +198,27 @@ impl BackgroundIO {
         &self,
         item_id: u64,
         mask: std::sync::Arc<prunr_core::selection::MaskArtifact>,
-        edge_feather_px: u32,
+        hash: u64,
+        _edge_feather_px: u32,
     ) {
+        // _edge_feather_px is reserved for the source-RGBA-guided feather
+        // wiring (see DEFERRED.md). Until that lands, feather has no
+        // effect on the visualization — the parameter stays in the
+        // signature so callers can be wired straight through later.
         let outline_tx = self.selection_outline_tx.clone();
         let texture_tx = self.selection_texture_tx.clone();
         rayon::spawn(move || {
-            let refined: std::sync::Arc<prunr_core::selection::MaskArtifact> =
-                if edge_feather_px > 0 {
-                    // feather_edges needs a source RgbaImage guide for the
-                    // guided filter. When no source is available we skip feather.
-                    // For now: feather_edges with a dummy 1×1 white image as guide
-                    // when edge_feather > 0 (this path is rarely invoked since
-                    // feather_edges requires source; callers guard edge_feather==0
-                    // until source is ready, or pass a pre-checked source separately).
-                    // The "no source" case returns the original mask unchanged.
-                    mask.clone()
-                } else {
-                    mask.clone()
-                };
-            let hash = refined.content_hash();
-            let outline = prunr_core::selection::refine::outline_polyline(&refined);
+            let mut outline = prunr_core::selection::refine::outline_polyline(&mask);
+            decimate_outline_in_place(&mut outline, OUTLINE_MAX_POINTS);
             let _ = outline_tx.send(SelectionOutlineResult { item_id, outline, hash });
 
-            // Build ACCENT-tinted ColorImage: pixels where mask >= 0.5 are
-            // colored ACCENT (0x7b, 0x2d, 0x8e). Transparent elsewhere.
-            // The selection_overlay render path applies fill_opacity as the
-            // image tint alpha, so here we use full opacity (255) — the
-            // render side scales it.
-            let w = refined.width as usize;
-            let h = refined.height as usize;
+            // ACCENT-tinted ColorImage: pixels where mask >= 0.5 carry
+            // full-opacity ACCENT; render-time fill_opacity scales the
+            // alpha so we ship pre-tinted at 255 here.
+            let w = mask.width as usize;
+            let h = mask.height as usize;
             let mut pixels = Vec::with_capacity(w * h);
-            for &v in refined.data.iter() {
+            for &v in mask.data.iter() {
                 if v >= 0.5 {
                     pixels.push(egui::Color32::from_rgba_unmultiplied(0x7b, 0x2d, 0x8e, 255));
                 } else {
@@ -238,5 +228,44 @@ impl BackgroundIO {
             let color_image = egui::ColorImage::new([w, h], pixels);
             let _ = texture_tx.send(SelectionTextureResult { item_id, color_image, hash });
         });
+    }
+}
+
+/// Cap on the outline polyline length sent to the render closure. Above
+/// this length the renderer allocates a Vec<Pos2> per frame whose size
+/// dominates the per-frame heap churn — and a polyline with > 50k vertices
+/// is well past the screen-pixel density at any reasonable canvas size,
+/// so uniform-stride decimation costs nothing visible.
+const OUTLINE_MAX_POINTS: usize = 50_000;
+
+fn decimate_outline_in_place(outline: &mut Vec<(u32, u32)>, cap: usize) {
+    if outline.len() <= cap {
+        return;
+    }
+    let stride = outline.len() as f32 / cap as f32;
+    let original = std::mem::take(outline);
+    outline.reserve(cap);
+    for i in 0..cap {
+        let idx = ((i as f32) * stride) as usize;
+        outline.push(original[idx.min(original.len() - 1)]);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decimate_under_cap_is_noop() {
+        let mut v = vec![(0u32, 0u32), (1, 1), (2, 2)];
+        decimate_outline_in_place(&mut v, 10);
+        assert_eq!(v.len(), 3);
+    }
+
+    #[test]
+    fn decimate_over_cap_yields_exactly_cap_entries() {
+        let mut v: Vec<(u32, u32)> = (0..200_000u32).map(|i| (i, i)).collect();
+        decimate_outline_in_place(&mut v, OUTLINE_MAX_POINTS);
+        assert_eq!(v.len(), OUTLINE_MAX_POINTS);
     }
 }

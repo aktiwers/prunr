@@ -924,18 +924,17 @@ impl PrunrApp {
         item_id: u64,
         mask: prunr_core::selection::MaskArtifact,
     ) {
-        if self.batch.commit_selection(item_id, mask) {
-            self.apply_selection_to_active_model(item_id);
-            // Spawn off-thread outline + texture build with hash guard.
-            if let Some(item) = self.batch.find_by_id(item_id) {
-                if let Some(mask_arc) = item.selection_mask.clone() {
-                    let feather_px = self.settings.brush.edge_feather as u32;
-                    self.batch.bg_io.request_selection_visualization(
-                        item_id,
-                        mask_arc,
-                        feather_px,
-                    );
-                }
+        let Some(hash) = self.batch.commit_selection(item_id, mask) else { return };
+        self.apply_selection_to_active_model(item_id);
+        if let Some(item) = self.batch.find_by_id(item_id) {
+            if let Some(mask_arc) = item.selection_mask.clone() {
+                let feather_px = self.settings.brush.edge_feather as u32;
+                self.batch.bg_io.request_selection_visualization(
+                    item_id,
+                    mask_arc,
+                    hash,
+                    feather_px,
+                );
             }
         }
     }
