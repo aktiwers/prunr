@@ -314,9 +314,8 @@ pub(crate) struct BatchItem {
     /// `Ctrl+Z` while brush mode is active pops the top entry and
     /// restores the snapshot — the user undoes one stroke per press.
     /// Bounded to STROKE_HISTORY_DEPTH; oldest entries dropped when full.
-    /// Retyped from `MaskCorrection` in Plan 04 — snapshots are now at
-    /// source resolution so both Paint Brush and Magic Brush undo share
-    /// the same stack.
+    /// Snapshots live at source resolution so Paint Brush and Magic Brush
+    /// share one undo stack.
     pub(crate) stroke_undo_stack: VecDeque<Option<Arc<prunr_core::selection::MaskArtifact>>>,
     pub(crate) stroke_redo_stack: VecDeque<Option<Arc<prunr_core::selection::MaskArtifact>>>,
     /// Ordering layer: commit-order sequence of action types. Each entry is a
@@ -337,31 +336,28 @@ pub(crate) struct BatchItem {
     pub(crate) bg_image_tex_pending: bool,
 
     /// Shared selection mask. Both Paint Brush and Magic Brush write
-    /// here (Plan 04 migrates Paint Brush; Plan 07 wires Magic Brush).
-    /// f32 single-channel at source image resolution.
+    /// here. f32 single-channel at source image resolution.
     ///
-    /// LIFECYCLE: NOT cleared by `reset_result_caches()` (selection
-    /// survives Process clicks — Criterion 8). Cleared by:
+    /// LIFECYCLE: NOT cleared by `reset_result_caches()` — selection
+    /// survives Process clicks intentionally. Cleared by:
     /// - `BatchManager::clear_selection` (Esc / Clear button)
     /// - `invalidate_selection_on_source_change` (source replaced)
     /// - Item destruction (image switch — per-BatchItem naturally clears)
     pub(crate) selection_mask: Option<Arc<prunr_core::selection::MaskArtifact>>,
 
     /// Content hash of `selection_mask`. Set in lockstep with the mask
-    /// via `BatchManager::commit_selection`. Used by:
-    /// - Outline + texture invalidation (only rebuild when hash changes)
-    /// - BG-removal auto-apply rerun trigger (Plan 04)
+    /// via `BatchManager::commit_selection`. Used by outline + texture
+    /// invalidation and the BG-removal auto-apply rerun trigger.
     pub(crate) selection_hash: Option<u64>,
 
     /// Pre-computed outline polyline in source-pixel coords. Built
-    /// off-thread on stroke commit (Plan 05 owns the channel). The
-    /// render closure reads this Arc<Vec> directly — clone is O(N)
-    /// refcount bump.
+    /// off-thread on stroke commit; the render closure reads this
+    /// Arc<Vec> directly — clone is an O(1) refcount bump.
     pub(crate) selection_outline: Option<Arc<Vec<(u32, u32)>>>,
 
     /// Cached selection visualization texture. Built off-thread and
-    /// uploaded via `drain_background_channels` (Plan 05). Rebuilt
-    /// only when `selection_hash` changes.
+    /// uploaded via `drain_background_channels`. Rebuilt only when
+    /// `selection_hash` changes.
     pub(crate) selection_texture: Option<egui::TextureHandle>,
 
     /// Cached SAM 2 image embedding. Filled on Magic Brush activation
@@ -399,10 +395,8 @@ impl BatchItem {
         self.bicubic_source = None;
     }
 
-    /// Clear the cached SAM encoder embedding. Called on:
-    /// - Source image change (re-decode)
-    /// - Model switch to a non-Selection category
-    /// Plan 07 owns the call sites.
+    /// Clear the cached SAM encoder embedding. Called on source image
+    /// change and on model switch to a non-Selection category.
     pub(crate) fn invalidate_magic_brush_embedding(&mut self) {
         self.magic_brush_embedding = None;
     }
@@ -419,12 +413,9 @@ impl BatchItem {
 
     /// Prepare for a stroke commit: snapshot the current selection_mask onto
     /// the undo stack, clear the redo stack, and push a Stroke marker onto
-    /// the action ordering layer. Must be called BEFORE BatchManager::commit_selection
-    /// writes the new mask. `revert_last_stroke_commit` can then undo it cleanly.
-    ///
-    /// Callers: canvas::handle_brush_input (Paint Brush); Plan 07 Magic Brush
-    /// commit path. Both must call this before commit_selection — the pairing is
-    /// the invariant that keeps undo correct.
+    /// the action ordering layer. Must be called BEFORE
+    /// `BatchManager::commit_selection` writes the new mask — pairing the
+    /// two calls is what keeps undo correct.
     pub(crate) fn begin_stroke_commit(&mut self) {
         let pre = self.selection_mask.clone();
         push_stroke_bounded(&mut self.stroke_undo_stack, pre);

@@ -488,10 +488,9 @@ impl BatchManager {
     }
 
     /// Commit a new selection mask to the named item. Recomputes the
-    /// content hash, drops the outline + texture caches (Plan 05's
-    /// off-thread rebuilder will fill them). Does NOT fire any dispatch
-    /// — Plan 04 owns the per-model interpretation rule via
-    /// `apply_selection_to_active_model`.
+    /// content hash and drops the outline + texture caches — both are
+    /// rebuilt off-thread after this call. Does NOT fire any model
+    /// dispatch; `apply_selection_to_active_model` owns that decision.
     ///
     /// Returns true if the item was found and updated.
     pub(crate) fn commit_selection(
@@ -503,7 +502,6 @@ impl BatchManager {
         let hash = mask.content_hash();
         item.selection_mask = Some(Arc::new(mask));
         item.selection_hash = Some(hash);
-        // Outline + texture rebuilt off-thread by Plan 05.
         item.selection_outline = None;
         item.selection_texture = None;
         true
@@ -1126,8 +1124,8 @@ mod tests {
         assert!(!bm.clear_selection(1), "second clear must return false (nothing to clear)");
     }
 
-    /// Criterion 8 contract test: selection survives Process clicks.
-    /// `reset_result_caches()` must NOT touch selection_mask / selection_hash.
+    /// Selection survives Process clicks: `reset_result_caches()` must
+    /// NOT touch selection_mask / selection_hash.
     #[test]
     fn reset_result_caches_does_not_clear_selection() {
         let mut item = super::super::item::BatchItem::new_for_test();
@@ -1138,11 +1136,11 @@ mod tests {
         item.reset_result_caches();
         assert!(
             item.selection_mask.is_some(),
-            "selection_mask must survive reset_result_caches (Criterion 8)",
+            "selection_mask must survive reset_result_caches",
         );
         assert!(
             item.selection_hash.is_some(),
-            "selection_hash must survive reset_result_caches (Criterion 8)",
+            "selection_hash must survive reset_result_caches",
         );
     }
 

@@ -1,17 +1,14 @@
 //! SAM 2 decoder prompt construction. Click + Stroke interactions
 //! with Shift (add) + Alt (subtract) modifiers. All coordinate
-//! normalization through the SAM_ENCODER_INPUT space convention — Pitfall 5
-//! in 33-RESEARCH.md: source pixel / source_dim * SAM_ENCODER_INPUT; never
-//! pass raw screen coords or source-pixel coords directly.
+//! normalization runs through `normalize` — source-pixel coords are
+//! mapped to 0..SAM_ENCODER_INPUT space; screen-pixel or raw click coords
+//! must NOT reach the decoder, the resulting mask would be off-by-scale.
 
-use super::SAM_ENCODER_INPUT;
+use super::{SAM_ENCODER_INPUT, SAM_MASK_RESOLUTION};
 
 /// Decimation cap for stroke prompts. 8 points is the practical sweet
 /// spot — more add noise to the decoder without improving mask quality.
 pub const MAX_STROKE_POINTS: usize = 8;
-
-/// Mask resolution for `mask_input` zero-fill.
-const MASK_RES: usize = 256;
 
 /// Decoder prompt: the four tensors the SAM 2 decoder expects
 /// for point-based interaction.
@@ -35,7 +32,8 @@ pub enum PromptError {
 }
 
 fn empty_mask_input() -> Vec<f32> {
-    vec![0.0; MASK_RES * MASK_RES]
+    let m = SAM_MASK_RESOLUTION as usize;
+    vec![0.0; m * m]
 }
 
 /// Normalize source-pixel coords to 0–1024 space, clamping out-of-bounds
@@ -105,18 +103,6 @@ pub fn build_stroke_prompt(
         mask_input: empty_mask_input(),
         has_mask_input: 0.0,
     })
-}
-
-/// Shift modifier — identical prompt shape to `build_click_prompt`.
-/// Caller applies the resulting MaskArtifact via `MaskArtifact::add_mask`
-/// to accumulate a selection.
-pub fn build_shift_modifier_prompt(
-    x_pixel: f32,
-    y_pixel: f32,
-    source_w: u32,
-    source_h: u32,
-) -> SamPrompt {
-    build_click_prompt(x_pixel, y_pixel, source_w, source_h)
 }
 
 /// Alt modifier — background hint (label 0.0). Caller applies the resulting
@@ -222,16 +208,10 @@ mod tests {
     }
 
     #[test]
-    fn shift_prompt_uses_label_one_like_click() {
-        let p = build_shift_modifier_prompt(50.0, 50.0, 100, 100);
-        assert_eq!(p.point_labels[0], 1.0, "shift should be fg (1.0)");
-        assert_eq!(p.point_labels[1], -1.0, "second slot should be padding");
-    }
-
-    #[test]
-    fn mask_input_is_zero_filled_256x256() {
+    fn mask_input_is_zero_filled_at_sam_mask_resolution() {
         let p = build_click_prompt(0.0, 0.0, 100, 100);
-        assert_eq!(p.mask_input.len(), 256 * 256);
+        let m = SAM_MASK_RESOLUTION as usize;
+        assert_eq!(p.mask_input.len(), m * m);
         assert!(p.mask_input.iter().all(|&v| v == 0.0));
         assert_eq!(p.has_mask_input, 0.0);
     }
