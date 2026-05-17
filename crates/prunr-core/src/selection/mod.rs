@@ -128,7 +128,6 @@ impl MaskArtifact {
         let sw = self.width;
         let sh = self.height;
         let mut correction = crate::brush::MaskCorrection::empty(tensor_w, tensor_h);
-        // Access the grid via the pub(crate) field directly.
         // Nearest-neighbour: map each tensor pixel to its source pixel.
         for ty in 0..th {
             let sy = ((ty as u64 * sh as u64) / th as u64) as u32;

@@ -1,12 +1,11 @@
-//! Magic Brush settings chip + popover. Mirrors `brush_chip.rs`.
+//! Magic Brush settings chip + popover.
 //!
 //! Rendered next to the [ Magic ] toggle in Row 2 when Magic Brush mode is
-//! on. Contains the shared Selection section (delegated to
-//! `brush_chip::render_shared_selection_section`) plus a Magic-only
-//! Confidence threshold slider.
+//! on. Contains the shared Selection section (delegated to the brush-chip
+//! helper) plus a Magic-only Confidence threshold slider.
 //!
-//! The "Preparing..." spinner is shown inside the popover (when
-//! `encoder_pending` is true) AND as a canvas overlay (wired in canvas.rs).
+//! The "Preparing..." spinner shows in the popover while `encoder_pending`
+//! is true; the canvas overlay (separate render path) shows the same.
 
 use egui::Ui;
 

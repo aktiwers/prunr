@@ -374,28 +374,20 @@ fn handle_magic_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: 
             }
         }
     } else if clicked {
-        // Single click — dispatch decoder with click prompt.
         if let Some(pos) = hover_pos {
             let (px, py) = screen_to_src(pos);
+            // The `.is_empty()` guard below distinguishes a real click from
+            // the synthetic tail-click that fires at drag release.
             let prompt = match modifier {
-                PromptModifier::Subtract => {
-                    prunr_core::sam::prompt::build_alt_modifier_prompt(
-                        px, py, source_w as u32, source_h as u32,
-                    )
-                }
-                PromptModifier::Add => {
-                    prunr_core::sam::prompt::build_shift_modifier_prompt(
-                        px, py, source_w as u32, source_h as u32,
-                    )
-                }
-                PromptModifier::Replace => {
+                PromptModifier::Subtract => prunr_core::sam::prompt::build_alt_modifier_prompt(
+                    px, py, source_w as u32, source_h as u32,
+                ),
+                PromptModifier::Add | PromptModifier::Replace => {
                     prunr_core::sam::prompt::build_click_prompt(
                         px, py, source_w as u32, source_h as u32,
                     )
                 }
             };
-            // Only dispatch if hover was inside the canvas and a single click
-            // (not the tail of a drag).
             if app.magic_brush_state.active_stroke.is_empty() {
                 app.processor.dispatch_sam_decoder(item_id, embedding, prompt, modifier);
             }

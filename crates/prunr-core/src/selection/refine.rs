@@ -61,12 +61,10 @@ pub fn feather_edges(
         return mask.clone();
     }
     let (w, h) = (source.width(), source.height());
-    // Build quantized GrayImage mask for the guided filter.
     let mut mask_lo = image::GrayImage::new(w, h);
     for (i, pixel) in mask_lo.pixels_mut().enumerate() {
         pixel.0[0] = if mask.data[i] >= 0.5 { 255 } else { 0 };
     }
-    // Call guided_filter_alpha: returns a refined GrayImage.
     // eps=1e-3 matches the standard refinement default for 8-bit alpha.
     let refined_gray = crate::guided_filter::guided_filter_alpha(source, &mask_lo, feather_px, 1e-3);
     let refined: Vec<f32> = refined_gray

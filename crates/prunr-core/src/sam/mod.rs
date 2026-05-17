@@ -1,9 +1,9 @@
 //! SAM 2 inference primitives — encoder preprocessing, decoder prompt
 //! construction, and decoder output → MaskArtifact conversion.
 //!
-//! PURE module — no ORT dependency. Plan 07 wires the ort::Session
-//! calls from `prunr-app`. The split keeps math unit-testable and
-//! keeps `prunr-core` ORT-free at this layer.
+//! PURE module — no ORT dependency. The ort::Session.run plumbing
+//! lives in `prunr-app/src/gui/processor.rs` so this module stays
+//! unit-testable from prunr-core alone.
 
 use std::sync::Arc;
 
@@ -17,12 +17,7 @@ pub const SAM_ENCODER_INPUT: u32 = 1024;
 /// caller upsamples to source resolution.
 pub const SAM_MASK_RESOLUTION: u32 = 256;
 
-pub(crate) const SAM_MEAN: [f32; 3] = [0.485, 0.456, 0.406];
-pub(crate) const SAM_STD: [f32; 3] = [0.229, 0.224, 0.225];
-
-/// Cached encoder output for one source image. Plan 03's BatchItem
-/// stores `Option<Arc<SamEmbedding>>`; Plan 07 fills it on Magic
-/// Brush activation.
+/// Cached encoder output for one source image.
 #[derive(Debug)]
 pub struct SamEmbedding {
     /// f32[1, 256, 64, 64] — 1_048_576 f32 ≈ 4 MB
@@ -40,8 +35,7 @@ impl SamEmbedding {
     }
 
     /// Verify the three Vec<f32> lengths match SAM 2 Hiera Small
-    /// expected output shapes. Used by Plan 07 to gate ORT session
-    /// outputs before caching.
+    /// expected output shapes.
     pub fn validate_shapes(&self) -> Result<(), String> {
         if self.image_embed.len() != 1_048_576 {
             return Err(format!(
@@ -65,13 +59,12 @@ impl SamEmbedding {
     }
 }
 
-/// Decoder output as returned by the ORT session. Plan 07 marshals
-/// raw ort::Tensor outputs into this struct; this module's
-/// `decode_to_mask_artifact` consumes it.
+/// Decoder output as returned by the ORT session. Consumed by
+/// `decode_to_mask_artifact`.
 pub struct SamDecoderOutput {
-    /// 3 candidates × 256×256 logits = 196_608 f32
+    /// 3 candidates × SAM_MASK_RESOLUTION² logits.
     pub masks: Vec<f32>,
-    /// IoU prediction per candidate
+    /// IoU prediction per candidate.
     pub iou_predictions: [f32; 3],
 }
 
@@ -97,31 +90,33 @@ pub fn decode_to_mask_artifact(
         .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
         .map(|(i, _)| i)?;
 
-    let mask_256: &[f32] =
-        &output.masks[best_idx * 256 * 256..(best_idx + 1) * 256 * 256];
+    let m = SAM_MASK_RESOLUTION as usize;
+    let m_max = (SAM_MASK_RESOLUTION - 1) as u32;
+    let m_max_f = (SAM_MASK_RESOLUTION - 1) as f32;
+    let mask_logits: &[f32] = &output.masks[best_idx * m * m..(best_idx + 1) * m * m];
 
     let mut data = vec![0.0f32; (source_w * source_h) as usize];
-    let scale_x = 256.0 / source_w as f32;
-    let scale_y = 256.0 / source_h as f32;
+    let scale_x = SAM_MASK_RESOLUTION as f32 / source_w as f32;
+    let scale_y = SAM_MASK_RESOLUTION as f32 / source_h as f32;
     for y in 0..source_h {
         for x in 0..source_w {
             // Half-pixel offset for correct bilinear alignment.
             let sx = (x as f32 + 0.5) * scale_x - 0.5;
             let sy = (y as f32 + 0.5) * scale_y - 0.5;
-            let x0 = sx.floor().clamp(0.0, 255.0) as u32;
-            let y0 = sy.floor().clamp(0.0, 255.0) as u32;
-            let x1 = (x0 + 1).min(255);
-            let y1 = (y0 + 1).min(255);
+            let x0 = sx.floor().clamp(0.0, m_max_f) as u32;
+            let y0 = sy.floor().clamp(0.0, m_max_f) as u32;
+            let x1 = (x0 + 1).min(m_max);
+            let y1 = (y0 + 1).min(m_max);
             let fx = (sx - x0 as f32).clamp(0.0, 1.0);
             let fy = (sy - y0 as f32).clamp(0.0, 1.0);
-            let i00 = (y0 * 256 + x0) as usize;
-            let i01 = (y0 * 256 + x1) as usize;
-            let i10 = (y1 * 256 + x0) as usize;
-            let i11 = (y1 * 256 + x1) as usize;
-            let v = mask_256[i00] * (1.0 - fx) * (1.0 - fy)
-                + mask_256[i01] * fx * (1.0 - fy)
-                + mask_256[i10] * (1.0 - fx) * fy
-                + mask_256[i11] * fx * fy;
+            let i00 = (y0 as usize) * m + x0 as usize;
+            let i01 = (y0 as usize) * m + x1 as usize;
+            let i10 = (y1 as usize) * m + x0 as usize;
+            let i11 = (y1 as usize) * m + x1 as usize;
+            let v = mask_logits[i00] * (1.0 - fx) * (1.0 - fy)
+                + mask_logits[i01] * fx * (1.0 - fy)
+                + mask_logits[i10] * (1.0 - fx) * fy
+                + mask_logits[i11] * fx * fy;
             data[(y * source_w + x) as usize] = if v >= 0.0 { 1.0 } else { 0.0 };
         }
     }

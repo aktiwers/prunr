@@ -1,7 +1,5 @@
 //! Magic Brush coordinator. Owns the tool-active flag, the encoder-pending
 //! flag, and the in-progress stroke point buffer for SAM decoder prompts.
-//! Mirrors `BrushState` so the [ Paint ]  [ Magic ] tool toggle pair has
-//! symmetric ownership.
 //!
 //! Does NOT own the selection mask (lives on BatchItem) or the encoder
 //! embedding cache (also BatchItem). This struct is purely transient UI
