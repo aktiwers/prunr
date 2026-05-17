@@ -1,6 +1,6 @@
 //! Selection action bar — Delete / Copy / Cut / Invert / Clear.
 //! Renders below the adjustments toolbar when a selection exists.
-//! Keyboard bindings: Del / Ctrl+C / Ctrl+X / (none) / Esc.
+//! Keyboard bindings: Del / Ctrl+C / Ctrl+X / Enter / Esc.
 
 use egui::{Color32, RichText, Stroke, Ui};
 
@@ -60,7 +60,7 @@ pub(crate) fn render_selection_action_bar(ui: &mut Ui) -> Option<SelectionAction
         ui.add_space(SPACE_XS);
 
         // Group 2: selection-modifying (Invert, Clear)
-        if action_button(ui, "⇄", "Invert", "", None).clicked() {
+        if action_button(ui, "⇄", "Invert", "Enter", None).clicked() {
             chosen = Some(SelectionAction::Invert);
         }
         if action_button(ui, "✕", "Clear", "Esc", None).clicked() {
