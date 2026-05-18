@@ -15,16 +15,36 @@ use super::item_settings::ItemSettings;
 /// untouched. Bad values are silently ignored — defensive parse so a typo
 /// in a harness script doesn't kill the launch.
 pub fn apply_to_item_settings(item: &mut ItemSettings) {
-    if let Some(v) = read_f32("PRUNR_GAMMA") { item.gamma = v; }
-    if let Some(v) = read_f32("PRUNR_THRESHOLD") { item.threshold = Some(v); }
-    if let Some(v) = read_f32("PRUNR_EDGE_SHIFT") { item.edge_shift = v; }
-    if let Some(v) = read_bool("PRUNR_REFINE_EDGES") { item.refine_edges = v; }
-    if let Some(v) = read_f32("PRUNR_FEATHER") { item.feather = v; }
-    if let Some(v) = read_hex_rgba("PRUNR_BG_COLOR") { item.bg = Some(v); }
-    if let Some(v) = read_line_mode("PRUNR_LINE_MODE") { item.line_mode = v; }
-    if let Some(v) = read_f32("PRUNR_LINE_STRENGTH") { item.line_strength = v; }
-    if let Some(v) = read_fill_style("PRUNR_FILL_STYLE") { item.fill_style = v; }
-    if let Some(v) = read_bg_effect("PRUNR_BG_EFFECT") { item.bg_effect = v; }
+    if let Some(v) = read_f32("PRUNR_GAMMA") {
+        item.gamma = v;
+    }
+    if let Some(v) = read_f32("PRUNR_THRESHOLD") {
+        item.threshold = Some(v);
+    }
+    if let Some(v) = read_f32("PRUNR_EDGE_SHIFT") {
+        item.edge_shift = v;
+    }
+    if let Some(v) = read_bool("PRUNR_REFINE_EDGES") {
+        item.refine_edges = v;
+    }
+    if let Some(v) = read_f32("PRUNR_FEATHER") {
+        item.feather = v;
+    }
+    if let Some(v) = read_hex_rgba("PRUNR_BG_COLOR") {
+        item.bg = Some(v);
+    }
+    if let Some(v) = read_line_mode("PRUNR_LINE_MODE") {
+        item.line_mode = v;
+    }
+    if let Some(v) = read_f32("PRUNR_LINE_STRENGTH") {
+        item.line_strength = v;
+    }
+    if let Some(v) = read_fill_style("PRUNR_FILL_STYLE") {
+        item.fill_style = v;
+    }
+    if let Some(v) = read_bg_effect("PRUNR_BG_EFFECT") {
+        item.bg_effect = v;
+    }
 }
 
 /// `PRUNR_AUTO_PROCESS=1` flips `auto_process_on_import` so imported images
@@ -52,13 +72,16 @@ fn read_hex_rgba(var: &str) -> Option<[u8; 4]> {
     let raw = std::env::var(var).ok()?;
     let s = raw.trim().trim_start_matches('#');
     let bytes = match s.len() {
-        6 | 8 => (0..s.len()).step_by(2)
+        6 | 8 => (0..s.len())
+            .step_by(2)
             .map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
             .collect::<Option<Vec<_>>>()?,
         _ => return None,
     };
     let mut out = [0, 0, 0, 255];
-    for (i, b) in bytes.into_iter().enumerate() { out[i] = b; }
+    for (i, b) in bytes.into_iter().enumerate() {
+        out[i] = b;
+    }
     Some(out)
 }
 
@@ -103,10 +126,20 @@ mod tests {
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn with_env<F: FnOnce()>(vars: &[(&str, &str)], f: F) {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        for (k, v) in vars { unsafe { std::env::set_var(k, v); } }
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for (k, v) in vars {
+            unsafe {
+                std::env::set_var(k, v);
+            }
+        }
         f();
-        for (k, _) in vars { unsafe { std::env::remove_var(k); } }
+        for (k, _) in vars {
+            unsafe {
+                std::env::remove_var(k);
+            }
+        }
     }
 
     #[test]
@@ -121,8 +154,11 @@ mod tests {
     #[test]
     fn gamma_threshold_edge_shift_parse() {
         with_env(
-            &[("PRUNR_GAMMA", "2.5"), ("PRUNR_THRESHOLD", "0.4"),
-              ("PRUNR_EDGE_SHIFT", "-3")],
+            &[
+                ("PRUNR_GAMMA", "2.5"),
+                ("PRUNR_THRESHOLD", "0.4"),
+                ("PRUNR_EDGE_SHIFT", "-3"),
+            ],
             || {
                 let mut item = ItemSettings::default();
                 apply_to_item_settings(&mut item);

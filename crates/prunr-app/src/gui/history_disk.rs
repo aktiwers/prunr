@@ -67,7 +67,11 @@ pub fn decompress_from_ram(entry: &CompressedEntry) -> std::io::Result<image::Rg
 }
 
 /// Write a CompressedEntry to disk (demote Tier 2 → Tier 3).
-pub fn demote_to_disk(entry: &CompressedEntry, item_id: u64, seq: usize) -> std::io::Result<DiskHistoryEntry> {
+pub fn demote_to_disk(
+    entry: &CompressedEntry,
+    item_id: u64,
+    seq: usize,
+) -> std::io::Result<DiskHistoryEntry> {
     let path = cache_dir().join(format!("{item_id}_{seq}.zraw"));
     std::fs::write(&path, &entry.data)?;
     Ok(DiskHistoryEntry { path })
@@ -142,11 +146,15 @@ pub fn delete_entry(entry: &DiskHistoryEntry) {
 /// Remove stale history files left behind by previous sessions or crashes.
 pub fn cleanup_stale() {
     let dir = cache_dir();
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     let now = SystemTime::now();
     for entry in entries.flatten() {
         let path = entry.path();
-        if !path.is_file() { continue; }
+        if !path.is_file() {
+            continue;
+        }
         let Ok(meta) = entry.metadata() else { continue };
         let age = meta
             .modified()

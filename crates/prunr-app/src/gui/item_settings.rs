@@ -11,7 +11,7 @@
 //! Target size: under 40 bytes to fit in a single cache line alongside the
 //! BatchItem's lightweight metadata fields.
 
-use prunr_core::{LineMode, MaskSettings, EdgeSettings, EdgeScale, BgImageFit};
+use prunr_core::{BgImageFit, EdgeScale, EdgeSettings, LineMode, MaskSettings};
 use serde::{Deserialize, Serialize};
 
 /// Per-image processing settings. Edited via the adjustments toolbar.
@@ -166,7 +166,11 @@ impl ItemSettings {
     /// knob changes don't trigger reprocessing when the mask isn't used.
     ///
     /// `model` and `chain_mode` are app-global, not per-item — caller provides them.
-    pub fn current_recipe(&self, model: prunr_core::ModelKind, chain_mode: bool) -> prunr_core::ProcessingRecipe {
+    pub fn current_recipe(
+        &self,
+        model: prunr_core::ModelKind,
+        chain_mode: bool,
+    ) -> prunr_core::ProcessingRecipe {
         let uses_segmentation = self.line_mode != LineMode::EdgesOnly;
         let uses_edge_detection = self.line_mode != LineMode::Off;
         let bg_rgb = self.bg.map(|[r, g, b, _]| [r, g, b]);
@@ -217,13 +221,19 @@ impl ItemSettings {
 /// Test fixture: `ItemSettings::default()` with `gamma` overridden.
 #[cfg(test)]
 pub(crate) fn item_with_gamma(gamma: f32) -> ItemSettings {
-    ItemSettings { gamma, ..ItemSettings::default() }
+    ItemSettings {
+        gamma,
+        ..ItemSettings::default()
+    }
 }
 
 /// Test fixture: `ItemSettings::default()` with `line_mode` overridden.
 #[cfg(test)]
 pub(crate) fn item_with_line_mode(line_mode: prunr_core::LineMode) -> ItemSettings {
-    ItemSettings { line_mode, ..ItemSettings::default() }
+    ItemSettings {
+        line_mode,
+        ..ItemSettings::default()
+    }
 }
 
 #[cfg(test)]
@@ -282,7 +292,10 @@ mod tests {
 
     #[test]
     fn bg_rgb_stripped_in_recipe() {
-        let s = ItemSettings { bg: Some([10, 20, 30, 200]), ..ItemSettings::default() };
+        let s = ItemSettings {
+            bg: Some([10, 20, 30, 200]),
+            ..ItemSettings::default()
+        };
         let r = s.current_recipe(prunr_core::ModelKind::Silueta, false);
         assert_eq!(r.composite.bg_color, Some([10, 20, 30]));
     }
@@ -341,8 +354,14 @@ mod tests {
             edge_scale: EdgeScale::Bold,
             bg: Some([100, 150, 200, 240]),
             compose_mode: prunr_core::ComposeMode::Ghost,
-            line_style: prunr_core::LineStyle::GradientY { top: [255, 0, 0], bottom: [0, 0, 255] },
-            fill_style: prunr_core::FillStyle::Duotone { dark: [10, 10, 40], light: [240, 240, 200] },
+            line_style: prunr_core::LineStyle::GradientY {
+                top: [255, 0, 0],
+                bottom: [0, 0, 255],
+            },
+            fill_style: prunr_core::FillStyle::Duotone {
+                dark: [10, 10, 40],
+                light: [240, 240, 200],
+            },
             bg_effect: prunr_core::BgEffect::BlurredSource { radius: 8 },
             input_transform: prunr_core::InputTransform::ContrastBoost { percent: 150 },
             correction_hash: Some(0xdeadbeef),

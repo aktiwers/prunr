@@ -16,7 +16,11 @@
 #![allow(dead_code)] // Each test binary uses a subset; suppress per-binary warnings.
 
 use image::{ImageBuffer, Rgba, RgbaImage};
-use std::{env, fs, path::{Path, PathBuf}, sync::OnceLock};
+use std::{
+    env, fs,
+    path::{Path, PathBuf},
+    sync::OnceLock,
+};
 
 /// Returns Ok(()) when ORT is committed and ready for `OrtEngine::new_*`.
 /// Returns Err with a clear human message when no runtime can be found —
@@ -42,10 +46,7 @@ fn try_init_ort() -> Result<(), String> {
     if let Some(env_path) = env::var_os("ORT_DYLIB_PATH") {
         let path = PathBuf::from(env_path);
         if !path.is_file() {
-            return Err(format!(
-                "ORT_DYLIB_PATH={} is not a file",
-                path.display()
-            ));
+            return Err(format!("ORT_DYLIB_PATH={} is not a file", path.display()));
         }
         return commit_ort(&path);
     }
@@ -67,8 +68,8 @@ fn try_init_ort() -> Result<(), String> {
 }
 
 fn commit_ort(path: &Path) -> Result<(), String> {
-    let env = ort::init_from(path)
-        .map_err(|e| format!("ort::init_from({}): {e}", path.display()))?;
+    let env =
+        ort::init_from(path).map_err(|e| format!("ort::init_from({}): {e}", path.display()))?;
     let _ = env.commit();
     Ok(())
 }
@@ -115,13 +116,48 @@ pub struct SyntheticSpec {
 /// and the e2e tier (with real Silueta inference at update time).
 pub fn synthetic_specs() -> &'static [SyntheticSpec] {
     &[
-        SyntheticSpec { id: "block_color_synth",       width: 256, height: 256, draw_source: draw_block_color },
-        SyntheticSpec { id: "thin_features_synth",     width: 256, height: 256, draw_source: draw_thin_features },
-        SyntheticSpec { id: "subject_to_border_synth", width: 256, height: 256, draw_source: draw_subject_to_border },
-        SyntheticSpec { id: "alpha_input_synth",       width: 256, height: 256, draw_source: draw_alpha_input },
-        SyntheticSpec { id: "multi_subject_synth",     width: 256, height: 256, draw_source: draw_multi_subject },
-        SyntheticSpec { id: "tiny_mask_huge_synth",    width: 512, height: 512, draw_source: draw_tiny_mask_huge },
-        SyntheticSpec { id: "hard_edge_synth",         width: 256, height: 256, draw_source: draw_hard_edge },
+        SyntheticSpec {
+            id: "block_color_synth",
+            width: 256,
+            height: 256,
+            draw_source: draw_block_color,
+        },
+        SyntheticSpec {
+            id: "thin_features_synth",
+            width: 256,
+            height: 256,
+            draw_source: draw_thin_features,
+        },
+        SyntheticSpec {
+            id: "subject_to_border_synth",
+            width: 256,
+            height: 256,
+            draw_source: draw_subject_to_border,
+        },
+        SyntheticSpec {
+            id: "alpha_input_synth",
+            width: 256,
+            height: 256,
+            draw_source: draw_alpha_input,
+        },
+        SyntheticSpec {
+            id: "multi_subject_synth",
+            width: 256,
+            height: 256,
+            draw_source: draw_multi_subject,
+        },
+        SyntheticSpec {
+            id: "tiny_mask_huge_synth",
+            width: 512,
+            height: 512,
+            draw_source: draw_tiny_mask_huge,
+        },
+        SyntheticSpec {
+            id: "hard_edge_synth",
+            width: 256,
+            height: 256,
+            draw_source: draw_hard_edge,
+        },
     ]
 }
 

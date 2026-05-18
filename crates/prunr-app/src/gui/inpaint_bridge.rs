@@ -76,9 +76,22 @@ pub enum InpaintBridgeMsg {
 /// `SubprocessEvent` — the bridge filters out seg events the inpaint-
 /// only subprocess can't emit anyway.
 pub enum InpaintBridgeResult {
-    Progress { item_id: u64, current: u32, total: u32 },
-    Done { item_id: u64, gen: u64, rgba_path: std::path::PathBuf, width: u32, height: u32 },
-    Error { item_id: u64, error: String },
+    Progress {
+        item_id: u64,
+        current: u32,
+        total: u32,
+    },
+    Done {
+        item_id: u64,
+        gen: u64,
+        rgba_path: std::path::PathBuf,
+        width: u32,
+        height: u32,
+    },
+    Error {
+        item_id: u64,
+        error: String,
+    },
 }
 
 /// Spawn the inpaint bridge thread. Returns send/receive channels.
@@ -169,7 +182,9 @@ fn run(msg_rx: mpsc::Receiver<InpaintBridgeMsg>, res_tx: mpsc::Sender<InpaintBri
                     Ok(m) => m,
                     Err(mpsc::TryRecvError::Empty) => break,
                     Err(mpsc::TryRecvError::Disconnected) => {
-                        if let SubState::Ready(mut s) = std::mem::replace(&mut sub_state, SubState::Idle) {
+                        if let SubState::Ready(mut s) =
+                            std::mem::replace(&mut sub_state, SubState::Idle)
+                        {
                             let _ = s.shutdown_with_timeout(Duration::from_secs(2));
                         }
                         return;
@@ -177,13 +192,27 @@ fn run(msg_rx: mpsc::Receiver<InpaintBridgeMsg>, res_tx: mpsc::Sender<InpaintBri
                 },
             };
             match msg {
-                InpaintBridgeMsg::Dispatch { item_id, gen, model_id, image_path, mask_path, sd_req, feather_px, sharpen } => {
+                InpaintBridgeMsg::Dispatch {
+                    item_id,
+                    gen,
+                    model_id,
+                    image_path,
+                    mask_path,
+                    sd_req,
+                    feather_px,
+                    sharpen,
+                } => {
                     last_used = Instant::now();
                     inflight_gens.insert(item_id, gen);
                     let _ = gen;
                     let params = PendingDispatch {
-                        item_id, model_id, image_path, mask_path,
-                        sd_req, feather_px, sharpen,
+                        item_id,
+                        model_id,
+                        image_path,
+                        mask_path,
+                        sd_req,
+                        feather_px,
+                        sharpen,
                     };
                     handle_dispatch(&mut sub_state, &mut inflight_gens, &res_tx, params);
                 }
@@ -224,7 +253,9 @@ fn run(msg_rx: mpsc::Receiver<InpaintBridgeMsg>, res_tx: mpsc::Sender<InpaintBri
                     "memory-pressure abort: killing inpaint subprocess",
                 );
                 kill_ready_and_drain(
-                    &mut sub_state, &mut inflight_gens, &res_tx,
+                    &mut sub_state,
+                    &mut inflight_gens,
+                    &res_tx,
                     crate::subprocess::protocol::MEMORY_PRESSURE_ABORT_MSG,
                     "inpaint subprocess killed by memory-pressure watchdog",
                 );
@@ -235,13 +266,32 @@ fn run(msg_rx: mpsc::Receiver<InpaintBridgeMsg>, res_tx: mpsc::Sender<InpaintBri
         if let SubState::Ready(s) = &mut sub_state {
             for evt in s.poll_events() {
                 match evt {
-                    SubprocessEvent::InpaintProgress { item_id, current, total } => {
-                        let _ = res_tx.send(InpaintBridgeResult::Progress { item_id, current, total });
+                    SubprocessEvent::InpaintProgress {
+                        item_id,
+                        current,
+                        total,
+                    } => {
+                        let _ = res_tx.send(InpaintBridgeResult::Progress {
+                            item_id,
+                            current,
+                            total,
+                        });
                     }
-                    SubprocessEvent::InpaintDone { item_id, rgba_path, width, height } => {
+                    SubprocessEvent::InpaintDone {
+                        item_id,
+                        rgba_path,
+                        width,
+                        height,
+                    } => {
                         last_used = Instant::now();
                         let gen = inflight_gens.remove(&item_id).unwrap_or(0);
-                        let _ = res_tx.send(InpaintBridgeResult::Done { item_id, gen, rgba_path, width, height });
+                        let _ = res_tx.send(InpaintBridgeResult::Done {
+                            item_id,
+                            gen,
+                            rgba_path,
+                            width,
+                            height,
+                        });
                     }
                     SubprocessEvent::InpaintError { item_id, error } => {
                         last_used = Instant::now();
@@ -262,7 +312,9 @@ fn run(msg_rx: mpsc::Receiver<InpaintBridgeMsg>, res_tx: mpsc::Sender<InpaintBri
         if let SubState::Ready(s) = &mut sub_state {
             let no_in_flight = s.in_flight_items().is_empty();
             if no_in_flight && last_used.elapsed() > IDLE_RELEASE {
-                if let SubState::Ready(mut owned) = std::mem::replace(&mut sub_state, SubState::Idle) {
+                if let SubState::Ready(mut owned) =
+                    std::mem::replace(&mut sub_state, SubState::Idle)
+                {
                     let _ = owned.shutdown_with_timeout(Duration::from_secs(2));
                     tracing::info!("inpaint subprocess released after idle window");
                 }
@@ -283,10 +335,18 @@ fn handle_dispatch(
     match sub_state {
         SubState::Ready(s) => {
             if let Err(e) = s.send_inpaint(
-                params.item_id, params.model_id, params.image_path, params.mask_path,
-                params.sd_req, params.feather_px, params.sharpen,
+                params.item_id,
+                params.model_id,
+                params.image_path,
+                params.mask_path,
+                params.sd_req,
+                params.feather_px,
+                params.sharpen,
             ) {
-                let _ = res_tx.send(InpaintBridgeResult::Error { item_id: params.item_id, error: e });
+                let _ = res_tx.send(InpaintBridgeResult::Error {
+                    item_id: params.item_id,
+                    error: e,
+                });
                 inflight_gens.remove(&params.item_id);
             }
         }
@@ -326,7 +386,9 @@ fn handle_cancel(
         }
         SubState::Ready(_) => {
             kill_ready_and_drain(
-                sub_state, inflight_gens, res_tx,
+                sub_state,
+                inflight_gens,
+                res_tx,
                 crate::subprocess::protocol::CANCELLED_ERR_MSG,
                 "inpaint subprocess killed by Cancel",
             );
@@ -348,13 +410,21 @@ fn handle_release(
 ) {
     match std::mem::replace(sub_state, SubState::Idle) {
         SubState::Idle => {}
-        SubState::Spawning { pending: _, cancelled: _, rx } => {
+        SubState::Spawning {
+            pending: _,
+            cancelled: _,
+            rx,
+        } => {
             // Spawn is still in flight. We can't kill the helper
             // thread; let it complete and the result will be ignored
             // (state is now Idle, the spawn-completion poller will
             // see it and discard). Drain inflight + restore the
             // Spawning state so the rx is still polled.
-            *sub_state = SubState::Spawning { rx, pending: Vec::new(), cancelled: true };
+            *sub_state = SubState::Spawning {
+                rx,
+                pending: Vec::new(),
+                cancelled: true,
+            };
             for (id, _gen) in inflight_gens.drain() {
                 let _ = res_tx.send(InpaintBridgeResult::Error {
                     item_id: id,
@@ -395,7 +465,11 @@ fn kick_spawn(pending: Vec<PendingDispatch>) -> SubState {
             let _ = tx.send(result);
         })
         .expect("failed to spawn inpaint-spawn helper");
-    SubState::Spawning { rx, pending, cancelled: false }
+    SubState::Spawning {
+        rx,
+        pending,
+        cancelled: false,
+    }
 }
 
 /// Non-blocking poll for spawn completion. On Ok with `cancelled =
@@ -409,7 +483,9 @@ fn poll_spawn_result(
     inflight_gens: &mut HashMap<u64, u64>,
     res_tx: &mpsc::Sender<InpaintBridgeResult>,
 ) {
-    let SubState::Spawning { rx, .. } = sub_state else { return };
+    let SubState::Spawning { rx, .. } = sub_state else {
+        return;
+    };
     let result = match rx.try_recv() {
         Ok(r) => r,
         Err(mpsc::TryRecvError::Empty) => return,
@@ -418,8 +494,12 @@ fn poll_spawn_result(
             Err("inpaint spawn helper thread died".to_string())
         }
     };
-    let SubState::Spawning { pending, cancelled, .. } =
-        std::mem::replace(sub_state, SubState::Idle) else { return };
+    let SubState::Spawning {
+        pending, cancelled, ..
+    } = std::mem::replace(sub_state, SubState::Idle)
+    else {
+        return;
+    };
     match (result, cancelled) {
         (Ok((mut mgr, provider)), true) => {
             tracing::info!(provider = %provider,
@@ -430,10 +510,18 @@ fn poll_spawn_result(
             tracing::info!(provider = %provider, "inpaint subprocess ready");
             for params in pending {
                 if let Err(e) = mgr.send_inpaint(
-                    params.item_id, params.model_id, params.image_path, params.mask_path,
-                    params.sd_req, params.feather_px, params.sharpen,
+                    params.item_id,
+                    params.model_id,
+                    params.image_path,
+                    params.mask_path,
+                    params.sd_req,
+                    params.feather_px,
+                    params.sharpen,
                 ) {
-                    let _ = res_tx.send(InpaintBridgeResult::Error { item_id: params.item_id, error: e });
+                    let _ = res_tx.send(InpaintBridgeResult::Error {
+                        item_id: params.item_id,
+                        error: e,
+                    });
                     inflight_gens.remove(&params.item_id);
                 }
             }

@@ -19,17 +19,17 @@
 //!   operate on the batch take `&mut BatchManager` per call, never as a field.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use prunr_core::ProcessingRecipe;
 
-use super::inpaint_bridge::{InpaintBridgeMsg, InpaintBridgeResult, spawn_inpaint_bridge};
+use super::inpaint_bridge::{spawn_inpaint_bridge, InpaintBridgeMsg, InpaintBridgeResult};
 use super::live_preview::LivePreview;
 use super::memory::AdmissionController;
-use super::worker::{WorkerMessage, WorkerResult, WorkItem};
+use super::worker::{WorkItem, WorkerMessage, WorkerResult};
 
 #[derive(Clone)]
 pub struct CancelRegistry {
@@ -60,8 +60,13 @@ impl CancelRegistry {
         if !self.has_per_item.load(Ordering::Acquire) {
             return false;
         }
-        let guard = self.per_item.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        guard.get(&item_id).is_some_and(|f| f.load(Ordering::Acquire))
+        let guard = self
+            .per_item
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard
+            .get(&item_id)
+            .is_some_and(|f| f.load(Ordering::Acquire))
     }
 
     pub(crate) fn request_global_cancel(&self) {
@@ -69,8 +74,12 @@ impl CancelRegistry {
     }
 
     pub(crate) fn request_item_cancel(&self, item_id: u64) {
-        let mut guard = self.per_item.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        guard.entry(item_id)
+        let mut guard = self
+            .per_item
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard
+            .entry(item_id)
             .or_insert_with(|| Arc::new(AtomicBool::new(false)))
             .store(true, Ordering::Release);
         self.has_per_item.store(true, Ordering::Release);
@@ -78,7 +87,10 @@ impl CancelRegistry {
 
     pub(crate) fn reset(&self) {
         self.global.store(false, Ordering::Release);
-        let mut guard = self.per_item.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut guard = self
+            .per_item
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         guard.clear();
         self.has_per_item.store(false, Ordering::Release);
     }
@@ -323,12 +335,28 @@ impl Processor {
                 cancel: Some(cancel.clone()),
                 progress: Some(progress.clone()),
             };
-            match prunr_core::inpaint::process_inpaint_with(&image, &mask, tuning.backend, sd_req, &hooks) {
+            match prunr_core::inpaint::process_inpaint_with(
+                &image,
+                &mask,
+                tuning.backend,
+                sd_req,
+                &hooks,
+            ) {
                 Ok(rgba) => {
                     let out = prunr_core::inpaint_blend::finalize_inpaint(
-                        &rgba, &image, &mask, tuning.feather_px, tuning.sharpen,
+                        &rgba,
+                        &image,
+                        &mask,
+                        tuning.feather_px,
+                        tuning.sharpen,
                     );
-                    let _ = tx.send(InpaintResult { item_id, rgba: out, generation: gen, cancelled: false, error: None });
+                    let _ = tx.send(InpaintResult {
+                        item_id,
+                        rgba: out,
+                        generation: gen,
+                        cancelled: false,
+                        error: None,
+                    });
                 }
                 Err(prunr_core::CoreError::Cancelled) => {
                     tracing::info!(item_id, "inpaint cancelled by user");
@@ -371,7 +399,9 @@ impl Processor {
             flag.store(true, std::sync::atomic::Ordering::Release);
         }
         for &item_id in self.inpaint_cancels.keys() {
-            let _ = self.inpaint_bridge_tx.send(InpaintBridgeMsg::Cancel { item_id });
+            let _ = self
+                .inpaint_bridge_tx
+                .send(InpaintBridgeMsg::Cancel { item_id });
         }
     }
 
@@ -385,7 +415,9 @@ impl Processor {
         if let Some(flag) = self.inpaint_cancels.get(&item_id) {
             flag.store(true, std::sync::atomic::Ordering::Release);
         }
-        let _ = self.inpaint_bridge_tx.send(InpaintBridgeMsg::Cancel { item_id });
+        let _ = self
+            .inpaint_bridge_tx
+            .send(InpaintBridgeMsg::Cancel { item_id });
     }
 
     /// Tell the inpaint bridge to drop its cached subprocess. Idempotent;
@@ -438,7 +470,11 @@ impl Processor {
         // the SD bundle on a stroke the user already discarded.
         let cancel = self.inpaint_cancels.get(&item_id).cloned();
         rayon::spawn(move || {
-            let cancelled = || cancel.as_ref().is_some_and(|c| c.load(std::sync::atomic::Ordering::Acquire));
+            let cancelled = || {
+                cancel
+                    .as_ref()
+                    .is_some_and(|c| c.load(std::sync::atomic::Ordering::Acquire))
+            };
             let send_cancelled = || {
                 let _ = inpaint_tx.send(InpaintResult {
                     item_id,
@@ -448,7 +484,10 @@ impl Processor {
                     error: None,
                 });
             };
-            if cancelled() { send_cancelled(); return; }
+            if cancelled() {
+                send_cancelled();
+                return;
+            }
             let raw_mask = correction.to_binary_mask(image.width(), image.height());
             let mask = if tuning.grow_px != 0.0 {
                 prunr_core::inpaint::grow_mask(&raw_mask, tuning.grow_px.round() as i32)
@@ -480,17 +519,17 @@ impl Processor {
                 _ => None,
             };
             let dir = crate::subprocess::protocol::ipc_temp_dir();
-            let image_path = crate::subprocess::protocol::IpcKind::InpaintImg.path_for_gen(dir, item_id, gen);
-            let mask_path  = crate::subprocess::protocol::IpcKind::InpaintMask.path_for_gen(dir, item_id, gen);
+            let image_path =
+                crate::subprocess::protocol::IpcKind::InpaintImg.path_for_gen(dir, item_id, gen);
+            let mask_path =
+                crate::subprocess::protocol::IpcKind::InpaintMask.path_for_gen(dir, item_id, gen);
             let res: Result<(), String> = (|| {
                 let img_bytes = prunr_core::encode_rgba_png(&image)
                     .map_err(|e| format!("encode source: {e:?}"))?;
-                std::fs::write(&image_path, img_bytes)
-                    .map_err(|e| format!("write source: {e}"))?;
+                std::fs::write(&image_path, img_bytes).map_err(|e| format!("write source: {e}"))?;
                 let mask_bytes = prunr_core::encode_gray_png(&mask)
                     .map_err(|e| format!("encode mask: {e:?}"))?;
-                std::fs::write(&mask_path, mask_bytes)
-                    .map_err(|e| format!("write mask: {e}"))
+                std::fs::write(&mask_path, mask_bytes).map_err(|e| format!("write mask: {e}"))
             })();
             if let Err(e) = res {
                 let _ = inpaint_tx.send(InpaintResult {
@@ -512,7 +551,12 @@ impl Processor {
                 return;
             }
             let _ = bridge_tx.send(InpaintBridgeMsg::Dispatch {
-                item_id, gen, model_id: tuning.backend, image_path, mask_path, sd_req,
+                item_id,
+                gen,
+                model_id: tuning.backend,
+                image_path,
+                mask_path,
+                sd_req,
                 feather_px: tuning.feather_px,
                 sharpen: tuning.sharpen,
             });
@@ -524,13 +568,23 @@ impl Processor {
     pub(crate) fn pump_inpaint_subprocess(&mut self) {
         while let Ok(evt) = self.inpaint_bridge_rx.try_recv() {
             match evt {
-                InpaintBridgeResult::Progress { item_id, current, total } => {
+                InpaintBridgeResult::Progress {
+                    item_id,
+                    current,
+                    total,
+                } => {
                     if let Some(p) = self.inpaint_progress.get(&item_id) {
                         p.set_total(total);
                         p.set_step(current);
                     }
                 }
-                InpaintBridgeResult::Done { item_id, gen, rgba_path, width, height } => {
+                InpaintBridgeResult::Done {
+                    item_id,
+                    gen,
+                    rgba_path,
+                    width,
+                    height,
+                } => {
                     let result = match super::worker::read_and_delete(&rgba_path) {
                         Some(b) => match image::load_from_memory(&b) {
                             Ok(img) => {
@@ -541,21 +595,26 @@ impl Processor {
                                 // bumped `inpaint_latest_gen` while this
                                 // one was in the subprocess.
                                 InpaintResult {
-                                    item_id, rgba, generation: gen,
-                                    cancelled: false, error: None,
+                                    item_id,
+                                    rgba,
+                                    generation: gen,
+                                    cancelled: false,
+                                    error: None,
                                 }
                             }
                             Err(e) => InpaintResult {
                                 item_id,
                                 rgba: image::RgbaImage::new(0, 0),
-                                generation: 0, cancelled: false,
+                                generation: 0,
+                                cancelled: false,
                                 error: Some(format!("decode SD result: {e}")),
                             },
                         },
                         None => InpaintResult {
                             item_id,
                             rgba: image::RgbaImage::new(0, 0),
-                            generation: 0, cancelled: false,
+                            generation: 0,
+                            cancelled: false,
                             error: Some(format!("read SD result missing: {}", rgba_path.display())),
                         },
                     };
@@ -565,7 +624,9 @@ impl Processor {
                     // Translate bridge sentinels to user-facing text at
                     // this seam so `drain_inpaint_results` doesn't have
                     // to know about IPC strings.
-                    use crate::subprocess::protocol::{CANCELLED_ERR_MSG, MEMORY_PRESSURE_ABORT_MSG};
+                    use crate::subprocess::protocol::{
+                        CANCELLED_ERR_MSG, MEMORY_PRESSURE_ABORT_MSG,
+                    };
                     let cancelled = error == CANCELLED_ERR_MSG;
                     let user_error = if cancelled {
                         None
@@ -597,7 +658,8 @@ impl Processor {
     /// stays here for the whole stroke; only SD's UNet loop publishes
     /// step counts).
     pub(crate) fn inpaint_progress(&self, item_id: u64) -> (u32, u32) {
-        self.inpaint_progress.get(&item_id)
+        self.inpaint_progress
+            .get(&item_id)
             .map(|p| p.read())
             .unwrap_or((0, 0))
     }
@@ -668,7 +730,8 @@ impl Processor {
     /// state — without this signal the click looks unacknowledged
     /// during the multi-second latency to the next worker checkpoint.
     pub(crate) fn is_inpaint_cancelling(&self, item_id: u64) -> bool {
-        self.inpaint_cancels.get(&item_id)
+        self.inpaint_cancels
+            .get(&item_id)
             .is_some_and(|f| f.load(std::sync::atomic::Ordering::Acquire))
     }
 
@@ -692,7 +755,9 @@ impl Processor {
     /// single late delivery can't take down a real batch.
     pub(crate) fn track_streamed(&mut self, id: u64) {
         match self.in_flight.as_mut() {
-            Some(b) => { b.pending.insert(id); }
+            Some(b) => {
+                b.pending.insert(id);
+            }
             None => debug_assert!(false, "track_streamed called without active batch"),
         }
     }
@@ -733,14 +798,18 @@ mod tests {
     use super::*;
     use prunr_models::ModelId;
 
-    fn cfg_eq(a: f32, b: f32) -> bool { (a - b).abs() < 1e-6 }
+    fn cfg_eq(a: f32, b: f32) -> bool {
+        (a - b).abs() < 1e-6
+    }
 
     #[test]
     fn standard_sd_ddim_taesd_off_passes_through() {
         let p = resolve_sd_dispatch(ModelId::SdV15InpaintFp16, false, 7.5);
         assert!(!p.use_taesd);
-        assert!(cfg_eq(p.effective_cfg, 7.5),
-            "standard SD must NOT clamp CFG");
+        assert!(
+            cfg_eq(p.effective_cfg, 7.5),
+            "standard SD must NOT clamp CFG"
+        );
     }
 
     #[test]
@@ -766,16 +835,20 @@ mod tests {
         // user_cfg=7.5 with LCM bundle dispatched: clamp to 2.0.
         let p = resolve_sd_dispatch(ModelId::SdV15LcmInpaintFp16, false, 7.5);
         assert!(!p.use_taesd);
-        assert!(cfg_eq(p.effective_cfg, 2.0),
-            "LCM weights must clamp CFG to [1.0, 2.0]");
+        assert!(
+            cfg_eq(p.effective_cfg, 2.0),
+            "LCM weights must clamp CFG to [1.0, 2.0]"
+        );
     }
 
     #[test]
     fn lcm_weights_with_taesd_clamps_cfg_and_keeps_taesd() {
         let p = resolve_sd_dispatch(ModelId::SdV15LcmInpaintFp16, true, 1.5);
         assert!(p.use_taesd);
-        assert!(cfg_eq(p.effective_cfg, 1.5),
-            "in-range CFG should round-trip unchanged through clamp");
+        assert!(
+            cfg_eq(p.effective_cfg, 1.5),
+            "in-range CFG should round-trip unchanged through clamp"
+        );
     }
 
     /// Bug #1 regression: user picks LCM scheduler but the LCM
@@ -788,10 +861,11 @@ mod tests {
     #[test]
     fn lcm_scheduler_without_lcm_bundle_does_not_clamp_cfg() {
         let p = resolve_sd_dispatch(ModelId::SdV15InpaintFp16, false, 7.5);
-        assert!(cfg_eq(p.effective_cfg, 7.5),
-            "CFG must NOT clamp when standard SD weights dispatch");
+        assert!(
+            cfg_eq(p.effective_cfg, 7.5),
+            "CFG must NOT clamp when standard SD weights dispatch"
+        );
     }
-
 
     fn fixture() -> Processor {
         let (tx, _rx_unused) = mpsc::channel::<WorkerMessage>();
@@ -811,12 +885,24 @@ mod tests {
     fn drain_filters_stale_generations() {
         let mut p = fixture();
         p.inpaint_latest_gen.insert(7, 2);
-        p.inpaint_tx.send(InpaintResult {
-            item_id: 7, rgba: image::RgbaImage::new(1, 1), generation: 1, cancelled: false, error: None,
-        }).unwrap();
-        p.inpaint_tx.send(InpaintResult {
-            item_id: 7, rgba: image::RgbaImage::new(1, 1), generation: 2, cancelled: false, error: None,
-        }).unwrap();
+        p.inpaint_tx
+            .send(InpaintResult {
+                item_id: 7,
+                rgba: image::RgbaImage::new(1, 1),
+                generation: 1,
+                cancelled: false,
+                error: None,
+            })
+            .unwrap();
+        p.inpaint_tx
+            .send(InpaintResult {
+                item_id: 7,
+                rgba: image::RgbaImage::new(1, 1),
+                generation: 2,
+                cancelled: false,
+                error: None,
+            })
+            .unwrap();
         let (drained, cancelled, errors) = p.drain_inpaint_results();
         assert_eq!(drained.len(), 1, "stale gen=1 must be dropped");
         assert_eq!(drained[0].generation, 2);
@@ -829,35 +915,55 @@ mod tests {
         let mut p = fixture();
         p.inpaint_latest_gen.insert(7, 5);
         p.inpaint_pending.insert(7, 1);
-        p.inpaint_tx.send(InpaintResult {
-            item_id: 7, rgba: image::RgbaImage::new(0, 0),
-            generation: 0, cancelled: true, error: None,
-        }).unwrap();
+        p.inpaint_tx
+            .send(InpaintResult {
+                item_id: 7,
+                rgba: image::RgbaImage::new(0, 0),
+                generation: 0,
+                cancelled: true,
+                error: None,
+            })
+            .unwrap();
         let (drained, cancelled, errors) = p.drain_inpaint_results();
-        assert!(drained.is_empty(),
-            "cancelled stroke must not commit a result");
-        assert_eq!(cancelled, vec![7],
-            "cancellation event must surface for the toast");
-        assert!(errors.is_empty(),
-            "cancel must not be reported as a dispatch error");
+        assert!(
+            drained.is_empty(),
+            "cancelled stroke must not commit a result"
+        );
+        assert_eq!(
+            cancelled,
+            vec![7],
+            "cancellation event must surface for the toast"
+        );
+        assert!(
+            errors.is_empty(),
+            "cancel must not be reported as a dispatch error"
+        );
     }
 
     #[test]
     fn drain_routes_dispatch_errors_to_error_list() {
         let mut p = fixture();
         p.inpaint_pending.insert(7, 1);
-        p.inpaint_tx.send(InpaintResult {
-            item_id: 7, rgba: image::RgbaImage::new(0, 0),
-            generation: 0, cancelled: false,
-            error: Some("SD inpaint refused to load: only 13.4 GB free".to_string()),
-        }).unwrap();
+        p.inpaint_tx
+            .send(InpaintResult {
+                item_id: 7,
+                rgba: image::RgbaImage::new(0, 0),
+                generation: 0,
+                cancelled: false,
+                error: Some("SD inpaint refused to load: only 13.4 GB free".to_string()),
+            })
+            .unwrap();
         let (drained, cancelled, errors) = p.drain_inpaint_results();
-        assert!(drained.is_empty(),
-            "errored stroke must not commit a result");
-        assert!(cancelled.is_empty(),
-            "errored stroke is not a cancel");
-        assert_eq!(errors.len(), 1,
-            "dispatch error must surface for the user toast");
+        assert!(
+            drained.is_empty(),
+            "errored stroke must not commit a result"
+        );
+        assert!(cancelled.is_empty(), "errored stroke is not a cancel");
+        assert_eq!(
+            errors.len(),
+            1,
+            "dispatch error must surface for the user toast"
+        );
         assert!(errors[0].contains("13.4 GB"));
     }
 
@@ -873,8 +979,10 @@ mod tests {
 
         assert!(p.admission.is_none());
         assert!(p.admission_tx.is_none());
-        assert!(p.cancels.is_cancelled(999),
-            "clear_admission must leave cancel registry untouched — that's the caller's protocol");
+        assert!(
+            p.cancels.is_cancelled(999),
+            "clear_admission must leave cancel registry untouched — that's the caller's protocol"
+        );
     }
 
     #[test]
@@ -885,7 +993,10 @@ mod tests {
         let handle = r.clone();
         assert!(!handle.is_cancelled(5));
         r.request_global_cancel();
-        assert!(handle.is_cancelled(5), "Clone must observe the global store");
+        assert!(
+            handle.is_cancelled(5),
+            "Clone must observe the global store"
+        );
     }
 
     #[test]
@@ -893,7 +1004,10 @@ mod tests {
         let r = CancelRegistry::new();
         r.request_item_cancel(42);
         assert!(r.is_cancelled(42));
-        assert!(!r.is_cancelled(7), "per-item cancel must not leak to other ids");
+        assert!(
+            !r.is_cancelled(7),
+            "per-item cancel must not leak to other ids"
+        );
     }
 
     #[test]
@@ -916,7 +1030,7 @@ mod tests {
 
     fn fixture_recipe() -> ProcessingRecipe {
         use prunr_core::{
-            CompositeRecipe, EdgeRecipe, EdgeScale, ComposeMode, FillStyle, InferenceRecipe,
+            ComposeMode, CompositeRecipe, EdgeRecipe, EdgeScale, FillStyle, InferenceRecipe,
             InputTransform, LineStyle, MaskSettings, ModelKind,
         };
         ProcessingRecipe {
@@ -934,7 +1048,11 @@ mod tests {
                 compose_mode: ComposeMode::LinesOnly,
                 line_style: LineStyle::Solid,
             },
-            mask: (&MaskSettings { fill_style: FillStyle::None, ..Default::default() }).into(),
+            mask: (&MaskSettings {
+                fill_style: FillStyle::None,
+                ..Default::default()
+            })
+                .into(),
             composite: CompositeRecipe::default(),
             was_chain: false,
         }
@@ -957,7 +1075,10 @@ mod tests {
     fn take_recipe_unknown_id_is_none() {
         let mut p = fixture();
         p.track_dispatch(fixture_recipe(), [1].iter().copied());
-        assert!(p.take_recipe(999).is_none(), "unknown id must not return a recipe");
+        assert!(
+            p.take_recipe(999).is_none(),
+            "unknown id must not return a recipe"
+        );
         // Tracked id still works.
         assert!(p.take_recipe(1).is_some());
     }
@@ -971,7 +1092,10 @@ mod tests {
         p.track_dispatch(fixture_recipe(), [1].iter().copied());
         p.track_streamed(2);
         assert!(p.take_recipe(1).is_some());
-        assert!(p.take_recipe(2).is_some(), "streamed item must have a recipe");
+        assert!(
+            p.take_recipe(2).is_some(),
+            "streamed item must have a recipe"
+        );
     }
 
     #[test]
@@ -986,8 +1110,10 @@ mod tests {
         let mut p = fixture();
         p.track_dispatch(fixture_recipe(), [1, 2, 3].iter().copied());
         p.drain_recipes();
-        assert!(p.take_recipe(1).is_none(),
-            "drain must drop the slot so late deliveries fall back");
+        assert!(
+            p.take_recipe(1).is_none(),
+            "drain must drop the slot so late deliveries fall back"
+        );
     }
 
     // ── Brush gate boundary contract (M-GUI-9) ───────────────────────────────
@@ -1006,11 +1132,15 @@ mod tests {
         // Simulate an in-flight inpaint for item 42 by bumping the pending counter.
         *p.inpaint_pending.entry(42).or_insert(0) += 1;
         // The gate must block: is_inpaint_in_flight returns true.
-        assert!(p.is_inpaint_in_flight(42),
-            "pending count > 0 must report in-flight for the canvas brush gate");
+        assert!(
+            p.is_inpaint_in_flight(42),
+            "pending count > 0 must report in-flight for the canvas brush gate"
+        );
         // A different item must not be affected.
-        assert!(!p.is_inpaint_in_flight(99),
-            "in-flight state must be item-scoped, not global");
+        assert!(
+            !p.is_inpaint_in_flight(99),
+            "in-flight state must be item-scoped, not global"
+        );
     }
 
     #[test]
@@ -1021,8 +1151,14 @@ mod tests {
         let mut p = fixture();
         *p.inpaint_pending.entry(7).or_insert(0) += 1;
         p.inpaint_cancels.insert(7, Arc::new(AtomicBool::new(true)));
-        assert!(p.is_inpaint_in_flight(7), "in-flight must still be true during cancel");
-        assert!(p.is_inpaint_cancelling(7), "cancelling must reflect the atomic flag");
+        assert!(
+            p.is_inpaint_in_flight(7),
+            "in-flight must still be true during cancel"
+        );
+        assert!(
+            p.is_inpaint_cancelling(7),
+            "cancelling must reflect the atomic flag"
+        );
     }
 
     #[test]
@@ -1037,9 +1173,9 @@ mod tests {
         let _ = std::thread::spawn(move || {
             let _guard = p.lock().unwrap();
             panic!("deliberate poison");
-        }).join();
+        })
+        .join();
         // has_per_item is still false → no lock taken → no panic propagation.
         assert!(!r.is_cancelled(42));
     }
 }
-

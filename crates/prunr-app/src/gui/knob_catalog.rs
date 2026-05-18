@@ -107,7 +107,6 @@ pub struct LineModeChange {
     pub to: LineMode,
 }
 
-
 /// Runtime condition under which a knob's chip is enabled.
 /// Declared on each `StaticKnob` via `requirement()` so new knobs
 /// must think about model affinity at definition time.
@@ -140,12 +139,13 @@ pub struct KnobContext {
 pub fn knob_enabled(req: KnobRequirement, ctx: KnobContext) -> bool {
     match req {
         KnobRequirement::Always => true,
-        KnobRequirement::MaskProduced =>
-            ctx.model_uses_seg && (ctx.line_mode != LineMode::EdgesOnly || ctx.chain_mode),
-        KnobRequirement::SubjectPresent =>
-            ctx.line_mode != LineMode::EdgesOnly,
-        KnobRequirement::TransparencyProduced =>
-            !(ctx.model_is_none && ctx.line_mode == LineMode::Off),
+        KnobRequirement::MaskProduced => {
+            ctx.model_uses_seg && (ctx.line_mode != LineMode::EdgesOnly || ctx.chain_mode)
+        }
+        KnobRequirement::SubjectPresent => ctx.line_mode != LineMode::EdgesOnly,
+        KnobRequirement::TransparencyProduced => {
+            !(ctx.model_is_none && ctx.line_mode == LineMode::Off)
+        }
     }
 }
 
@@ -163,9 +163,9 @@ impl StaticKnob {
 
             StaticKnob::FillStyle => KnobRequirement::SubjectPresent,
 
-            StaticKnob::BgEffect
-            | StaticKnob::BgColor
-            | StaticKnob::BgImageFit => KnobRequirement::TransparencyProduced,
+            StaticKnob::BgEffect | StaticKnob::BgColor | StaticKnob::BgImageFit => {
+                KnobRequirement::TransparencyProduced
+            }
 
             StaticKnob::LineStrength
             | StaticKnob::EdgeThickness
@@ -303,8 +303,7 @@ pub fn spec(knob: StaticKnob) -> KnobSpec {
         | StaticKnob::ComposeMode
         | StaticKnob::LineStyle => s(EdgeRerun, Nothing, LivePreviewEdge, true),
 
-        StaticKnob::BgColor
-        | StaticKnob::BgImageFit => s(CompositeOnly, Nothing, Render, true),
+        StaticKnob::BgColor | StaticKnob::BgImageFit => s(CompositeOnly, Nothing, Render, true),
 
         // Model / ChainMode: user must click Process.
         StaticKnob::Model => s(FullPipeline, SegCache, SubprocessFullPipeline, false),
@@ -391,7 +390,10 @@ pub fn cache_impact_for_recipe_diff(old: &ProcessingRecipe, new: &ProcessingReci
         new.inference.uses_edge_detection,
     );
     if old_mode != new_mode {
-        let change = LineModeChange { from: old_mode, to: new_mode };
+        let change = LineModeChange {
+            from: old_mode,
+            to: new_mode,
+        };
         impact = impact.union(line_mode_spec(change, false).cache_impact);
     }
     impact
@@ -441,7 +443,11 @@ mod tests {
             (StaticKnob::Model, Always),
             (StaticKnob::ChainMode, Always),
         ];
-        assert_eq!(expected.len(), StaticKnob::ALL.len(), "table covers all variants");
+        assert_eq!(
+            expected.len(),
+            StaticKnob::ALL.len(),
+            "table covers all variants"
+        );
         for &(knob, req) in expected {
             assert_eq!(knob.requirement(), req, "{knob:?}");
         }
@@ -452,17 +458,22 @@ mod tests {
         use LineMode::*;
         let cases: &[(bool, bool, LineMode, bool)] = &[
             // (uses_seg, model_is_none, line_mode, chain_mode)
-            (true,  false, Off,            false),
-            (true,  false, SubjectOutline, false),
-            (true,  false, EdgesOnly,      false),
-            (true,  false, EdgesOnly,      true),  // chain rescues mask
-            (false, false, Off,            false),  // inpaint model
-            (false, true,  Off,            false),  // No-model + Off
-            (false, true,  SubjectOutline, false),
-            (false, true,  EdgesOnly,      false),
+            (true, false, Off, false),
+            (true, false, SubjectOutline, false),
+            (true, false, EdgesOnly, false),
+            (true, false, EdgesOnly, true), // chain rescues mask
+            (false, false, Off, false),     // inpaint model
+            (false, true, Off, false),      // No-model + Off
+            (false, true, SubjectOutline, false),
+            (false, true, EdgesOnly, false),
         ];
         for &(uses_seg, is_none, line_mode, chain_mode) in cases {
-            let ctx = KnobContext { model_uses_seg: uses_seg, model_is_none: is_none, line_mode, chain_mode };
+            let ctx = KnobContext {
+                model_uses_seg: uses_seg,
+                model_is_none: is_none,
+                line_mode,
+                chain_mode,
+            };
             let expected_mask = uses_seg && (line_mode != EdgesOnly || chain_mode);
             let expected_subject = line_mode != EdgesOnly;
             let expected_bg = !(is_none && line_mode == Off);
@@ -471,11 +482,13 @@ mod tests {
                 "MaskProduced uses_seg={uses_seg} is_none={is_none} {line_mode:?} chain={chain_mode}",
             );
             assert_eq!(
-                knob_enabled(KnobRequirement::SubjectPresent, ctx), expected_subject,
+                knob_enabled(KnobRequirement::SubjectPresent, ctx),
+                expected_subject,
                 "SubjectPresent {line_mode:?}",
             );
             assert_eq!(
-                knob_enabled(KnobRequirement::TransparencyProduced, ctx), expected_bg,
+                knob_enabled(KnobRequirement::TransparencyProduced, ctx),
+                expected_bg,
                 "TransparencyProduced is_none={is_none} {line_mode:?}",
             );
         }
@@ -536,12 +549,18 @@ mod tests {
     #[test]
     fn dispatch_max_prefers_stronger() {
         use DispatchKind::*;
-        assert_eq!(SubprocessFullPipeline.max(LivePreviewMask), SubprocessFullPipeline);
+        assert_eq!(
+            SubprocessFullPipeline.max(LivePreviewMask),
+            SubprocessFullPipeline
+        );
         assert_eq!(LivePreviewMask.max(SubprocessAddEdge), SubprocessAddEdge);
         assert_eq!(LivePreviewMask.max(LivePreviewEdge), LivePreviewMask);
         assert_eq!(LivePreviewEdge.max(LivePreviewMask), LivePreviewMask);
         assert_eq!(Render.max(DispatchKind::None), Render);
-        assert_eq!(DispatchKind::None.max(DispatchKind::None), DispatchKind::None);
+        assert_eq!(
+            DispatchKind::None.max(DispatchKind::None),
+            DispatchKind::None
+        );
     }
 
     fn lmc(from: LineMode, to: LineMode) -> LineModeChange {
@@ -575,9 +594,21 @@ mod tests {
             (Off, SubjectOutline, true, Nothing, LivePreviewMask),
             (Off, EdgesOnly, false, EdgeCache, SubprocessFullPipeline),
             (SubjectOutline, Off, false, Nothing, LivePreviewMask),
-            (SubjectOutline, EdgesOnly, false, EdgeCache, SubprocessFullPipeline),
+            (
+                SubjectOutline,
+                EdgesOnly,
+                false,
+                EdgeCache,
+                SubprocessFullPipeline,
+            ),
             (EdgesOnly, Off, false, Nothing, SubprocessFullPipeline),
-            (EdgesOnly, SubjectOutline, false, EdgeCache, SubprocessFullPipeline),
+            (
+                EdgesOnly,
+                SubjectOutline,
+                false,
+                EdgeCache,
+                SubprocessFullPipeline,
+            ),
         ];
         for (old, new, cached, cache, dispatch) in cases {
             let s = line_mode_spec(lmc(old, new), cached);
@@ -623,9 +654,10 @@ mod tests {
 
     /// Apply a single-knob mutation to `ItemSettings`. Picks a value that
     /// differs from the default so `resolve_tier` detects the change.
-    fn mutate_static(knob: StaticKnob, base: crate::gui::item_settings::ItemSettings)
-        -> crate::gui::item_settings::ItemSettings
-    {
+    fn mutate_static(
+        knob: StaticKnob,
+        base: crate::gui::item_settings::ItemSettings,
+    ) -> crate::gui::item_settings::ItemSettings {
         use prunr_core::{ComposeMode, EdgeScale, FillStyle, LineStyle};
         let mut new = base;
         match knob {
@@ -782,10 +814,7 @@ mod tests {
             &old.current_recipe(ModelKind::Silueta, false),
             &new.current_recipe(ModelKind::Silueta, false),
         );
-        assert_eq!(
-            input_transform_spec(true).cache_impact,
-            diff,
-        );
+        assert_eq!(input_transform_spec(true).cache_impact, diff,);
     }
 
     proptest::proptest! {
@@ -876,7 +905,8 @@ mod tests {
             mask: (&MaskSettings {
                 fill_style: FillStyle::None,
                 ..Default::default()
-            }).into(),
+            })
+                .into(),
             composite: CompositeRecipe::default(),
             was_chain: false,
         };

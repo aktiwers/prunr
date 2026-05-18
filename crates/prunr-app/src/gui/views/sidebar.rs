@@ -1,11 +1,11 @@
 use std::collections::HashSet;
 use std::sync::atomic::Ordering;
 
-use egui::{Color32, Pos2, Rect, RichText, Stroke, Vec2};
-use egui_material_icons::icons::*;
 use crate::gui::app::PrunrApp;
 use crate::gui::item::{BatchItem, BatchStatus};
 use crate::gui::theme;
+use egui::{Color32, Pos2, Rect, RichText, Stroke, Vec2};
+use egui_material_icons::icons::*;
 
 /// Manual pointer hit test for a rect — returns (hovered, clicked).
 fn hit_test(ui: &egui::Ui, rect: Rect) -> (bool, bool) {
@@ -53,11 +53,18 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
         ui.add_space(theme::SPACE_XS);
 
         let anim_time = ui.ctx().input(|i| i.time) as f32;
-        let actions = render_item_list(ui, app, dragging_ids.as_ref(), sidebar_escape_rect, anim_time);
+        let actions = render_item_list(
+            ui,
+            app,
+            dragging_ids.as_ref(),
+            sidebar_escape_rect,
+            anim_time,
+        );
 
         // Request repaint for animations/pending thumbnails — throttled to ~15fps.
         if actions.needs_repaint || app.batch.items.iter().any(|i| i.thumb_pending) {
-            ui.ctx().request_repaint_after(std::time::Duration::from_millis(66));
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(66));
         }
         apply_actions(app, &actions);
     });
@@ -182,8 +189,14 @@ fn render_item_row(
         actions.needs_repaint = true;
     }
 
-    let close_clicked =
-        paint_hover_buttons(ui, &app.batch.items[i], i, item_rect, &item_response, actions);
+    let close_clicked = paint_hover_buttons(
+        ui,
+        &app.batch.items[i],
+        i,
+        item_rect,
+        &item_response,
+        actions,
+    );
 
     // DnD: set drag payload (intra-sidebar reorder) and check for drops.
     item_response.dnd_set_drag_payload(i);
@@ -290,7 +303,10 @@ fn paint_item_background(ui: &egui::Ui, item_rect: Rect, is_selected: bool) {
 
 fn draw_loading_spinner(ui: &mut egui::Ui, item_rect: Rect) {
     let spinner_rect = Rect::from_center_size(item_rect.center(), Vec2::splat(20.0));
-    ui.put(spinner_rect, egui::Spinner::new().size(20.0).color(theme::ACCENT));
+    ui.put(
+        spinner_rect,
+        egui::Spinner::new().size(20.0).color(theme::ACCENT),
+    );
 }
 
 fn paint_thumbnail(
@@ -384,8 +400,7 @@ fn paint_selection_checkbox(ui: &egui::Ui, item: &mut BatchItem, item_rect: Rect
 
 fn paint_processing_animation(ui: &egui::Ui, item_rect: Rect, anim_time: f32) {
     // Shimmer sweep.
-    let sweep =
-        ((anim_time * 0.7).fract()) * (item_rect.width() + 40.0) - 20.0 + item_rect.min.x;
+    let sweep = ((anim_time * 0.7).fract()) * (item_rect.width() + 40.0) - 20.0 + item_rect.min.x;
     let shimmer = Rect::from_min_max(
         Pos2::new(sweep - 20.0, item_rect.min.y),
         Pos2::new(sweep + 20.0, item_rect.max.y),
@@ -423,7 +438,8 @@ fn paint_status_indicator(
     match status {
         BatchStatus::Pending => {
             let dot = Pos2::new(item_rect.max.x - 8.0, item_rect.max.y - 8.0);
-            ui.painter().circle_filled(dot, 3.0, theme::STATUS_ICON_PENDING);
+            ui.painter()
+                .circle_filled(dot, 3.0, theme::STATUS_ICON_PENDING);
             false
         }
         BatchStatus::Processing => {
@@ -480,7 +496,13 @@ fn paint_hover_buttons(
         item_rect.max.x - 4.0 - btn_size * 0.5,
         item_rect.min.y + 4.0 + btn_size * 0.5,
     );
-    if paint_hover_circle_btn(ui, del_center, btn_size, ICON_DELETE.codepoint, theme::DESTRUCTIVE) {
+    if paint_hover_circle_btn(
+        ui,
+        del_center,
+        btn_size,
+        ICON_DELETE.codepoint,
+        theme::DESTRUCTIVE,
+    ) {
         actions.remove_idx = Some(i);
         close_clicked = true;
     }
@@ -491,7 +513,13 @@ fn paint_hover_buttons(
             item_rect.min.x + 4.0 + btn_size * 0.5,
             item_rect.max.y - 4.0 - btn_size * 0.5,
         );
-        if paint_hover_circle_btn(ui, save_center, btn_size, ICON_SAVE.codepoint, theme::ACCENT) {
+        if paint_hover_circle_btn(
+            ui,
+            save_center,
+            btn_size,
+            ICON_SAVE.codepoint,
+            theme::ACCENT,
+        ) {
             actions.save_idx = Some(i);
             close_clicked = true;
         }
