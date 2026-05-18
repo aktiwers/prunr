@@ -9,7 +9,7 @@ use crate::types::ModelKind;
 const REMBG_SIZE: u32 = 320;
 const BIREFNET_SIZE: u32 = 1024;
 const MEAN: [f32; 3] = [0.485, 0.456, 0.406];
-const STD:  [f32; 3] = [0.229, 0.224, 0.225];
+const STD: [f32; 3] = [0.229, 0.224, 0.225];
 
 /// Preprocess for the given model. Returns NCHW tensor at the model's expected resolution.
 pub fn preprocess(img: &DynamicImage, model: ModelKind) -> Array4<f32> {
@@ -71,7 +71,7 @@ fn preprocess_birefnet(img: &DynamicImage) -> Array4<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use image::{DynamicImage, RgbImage, Rgb};
+    use image::{DynamicImage, Rgb, RgbImage};
 
     fn solid_rgb_image(r: u8, g: u8, b: u8, w: u32, h: u32) -> DynamicImage {
         let mut img = RgbImage::new(w, h);
@@ -104,7 +104,10 @@ mod tests {
         let tensor = preprocess(&img, ModelKind::Silueta);
         for &val in tensor.iter() {
             assert!(val.is_finite(), "Tensor contains NaN or Inf: {val}");
-            assert!(val > -5.0 && val < 5.0, "Value out of expected range: {val}");
+            assert!(
+                val > -5.0 && val < 5.0,
+                "Value out of expected range: {val}"
+            );
         }
     }
 
@@ -116,7 +119,10 @@ mod tests {
         let tensor = preprocess(&img, ModelKind::Silueta);
         let r_center = tensor[[0, 0, 160, 160]];
         let g_center = tensor[[0, 1, 160, 160]];
-        assert!(r_center > g_center, "Channel 0 (R) should be normalized higher than channel 1 (G) for red image");
+        assert!(
+            r_center > g_center,
+            "Channel 0 (R) should be normalized higher than channel 1 (G) for red image"
+        );
     }
 
     #[test]

@@ -103,7 +103,9 @@ pub fn available_ram_bytes_throttled() -> u64 {
     use std::time::Instant;
     static CACHE: OnceLock<Mutex<Option<(Instant, u64)>>> = OnceLock::new();
     let cell = CACHE.get_or_init(|| Mutex::new(None));
-    let mut guard = cell.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut guard = cell
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = Instant::now();
     if let Some((at, bytes)) = *guard {
         if now.duration_since(at).as_secs_f32() < 1.0 {
@@ -194,21 +196,35 @@ fn detect_cpu() -> (CpuVendor, String) {
 
 fn classify_cpu_vendor(vendor_id: &str, brand: &str) -> CpuVendor {
     let vid = vendor_id.to_ascii_lowercase();
-    if vid.contains("genuineintel") { return CpuVendor::Intel; }
-    if vid.contains("authenticamd") { return CpuVendor::Amd; }
-    if vid.contains("apple") { return CpuVendor::Apple; }
+    if vid.contains("genuineintel") {
+        return CpuVendor::Intel;
+    }
+    if vid.contains("authenticamd") {
+        return CpuVendor::Amd;
+    }
+    if vid.contains("apple") {
+        return CpuVendor::Apple;
+    }
     // sysinfo on macOS sometimes returns empty vendor_id; fall back
     // to brand inspection since "Apple M1/M2/M3..." is unambiguous.
     let brand_lower = brand.to_ascii_lowercase();
-    if brand_lower.starts_with("apple ") { return CpuVendor::Apple; }
-    if brand_lower.contains("intel") { return CpuVendor::Intel; }
-    if brand_lower.contains("amd") || brand_lower.contains("ryzen") { return CpuVendor::Amd; }
+    if brand_lower.starts_with("apple ") {
+        return CpuVendor::Apple;
+    }
+    if brand_lower.contains("intel") {
+        return CpuVendor::Intel;
+    }
+    if brand_lower.contains("amd") || brand_lower.contains("ryzen") {
+        return CpuVendor::Amd;
+    }
     CpuVendor::Other
 }
 
 fn detect_gpus(cpu_vendor: CpuVendor) -> (Option<GpuVendor>, Option<GpuVendor>) {
     #[cfg(target_os = "linux")]
-    { detect_gpus_linux(cpu_vendor) }
+    {
+        detect_gpus_linux(cpu_vendor)
+    }
     #[cfg(target_os = "macos")]
     {
         // Apple Silicon: GPU is part of the SoC. Intel Macs return None
@@ -245,9 +261,13 @@ fn detect_gpus_linux(cpu_vendor: CpuVendor) -> (Option<GpuVendor>, Option<GpuVen
     for entry in read.flatten() {
         let name = entry.file_name();
         let name_s = name.to_string_lossy();
-        if !is_card_dir(&name_s) { continue; }
+        if !is_card_dir(&name_s) {
+            continue;
+        }
         let vendor_path = entry.path().join("device").join("vendor");
-        let Ok(vendor_raw) = std::fs::read_to_string(&vendor_path) else { continue };
+        let Ok(vendor_raw) = std::fs::read_to_string(&vendor_path) else {
+            continue;
+        };
         let gpu_vendor = parse_pci_vendor(&vendor_raw);
         // Heuristic: GPU vendor matching CPU vendor is the iGPU; distinct
         // vendor is dGPU. Known limitation — AMD CPU + AMD dGPU (Ryzen +
@@ -269,9 +289,7 @@ fn detect_gpus_linux(cpu_vendor: CpuVendor) -> (Option<GpuVendor>, Option<GpuVen
 fn is_card_dir(name: &str) -> bool {
     // Match `card0`, `card1`, ... but not `card0-DP-1` (those are
     // connector subnodes, not GPUs).
-    name.starts_with("card")
-        && name.len() >= 5
-        && name[4..].chars().all(|c| c.is_ascii_digit())
+    name.starts_with("card") && name.len() >= 5 && name[4..].chars().all(|c| c.is_ascii_digit())
 }
 
 /// Parse a `/sys/class/drm/.../device/vendor` value (e.g. `0x10de\n`).
@@ -311,18 +329,12 @@ mod tests {
 
     #[test]
     fn classify_apple_falls_back_to_brand() {
-        assert_eq!(
-            classify_cpu_vendor("", "Apple M3 Pro"),
-            CpuVendor::Apple,
-        );
+        assert_eq!(classify_cpu_vendor("", "Apple M3 Pro"), CpuVendor::Apple,);
     }
 
     #[test]
     fn classify_amd_via_ryzen_brand_when_vendor_id_missing() {
-        assert_eq!(
-            classify_cpu_vendor("", "AMD Ryzen 9 7950X"),
-            CpuVendor::Amd,
-        );
+        assert_eq!(classify_cpu_vendor("", "AMD Ryzen 9 7950X"), CpuVendor::Amd,);
     }
 
     #[test]
@@ -359,7 +371,8 @@ mod tests {
             cpu_brand: "Intel Core i7".into(),
             dgpu: None,
             igpu: Some(GpuVendor::Intel),
-            os: "linux", arch: "x86_64",
+            os: "linux",
+            arch: "x86_64",
         };
         assert!(p.recommends_openvino());
         p.igpu = None;
@@ -375,7 +388,8 @@ mod tests {
             cpu_brand: "Intel Core i7".into(),
             dgpu: Some(GpuVendor::Amd),
             igpu: None,
-            os: "linux", arch: "x86_64",
+            os: "linux",
+            arch: "x86_64",
         };
         assert!(p.recommends_rocm());
         // APU iGPU isn't dGPU — should be excluded.
@@ -387,7 +401,7 @@ mod tests {
     #[test]
     fn ram_verdict_thresholds() {
         const WS: u64 = 6 * 1024 * 1024 * 1024; // 6 GB working set
-        // Below working set → insufficient
+                                                // Below working set → insufficient
         assert_eq!(ram_verdict(WS, WS - 1), RamVerdict::Insufficient);
         // Exactly working set → tight (we want >1.5× for comfortable)
         assert_eq!(ram_verdict(WS, WS), RamVerdict::Tight);

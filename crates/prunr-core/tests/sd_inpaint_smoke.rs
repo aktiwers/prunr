@@ -18,8 +18,10 @@ fn sd_inpaint_modifies_painted_region() {
     let _ = tracing_subscriber::fmt::try_init();
     let id = prunr_models::ModelId::SdV15InpaintFp16;
     if !prunr_models::is_available(id) {
-        eprintln!("SKIP: SD 1.5 Inpaint bundle not installed at {:?}",
-            prunr_models::on_demand_dir());
+        eprintln!(
+            "SKIP: SD 1.5 Inpaint bundle not installed at {:?}",
+            prunr_models::on_demand_dir()
+        );
         return;
     }
 
@@ -27,7 +29,9 @@ fn sd_inpaint_modifies_painted_region() {
     let w: u32 = 512;
     let h: u32 = 512;
     let mut image = RgbaImage::new(w, h);
-    for p in image.pixels_mut() { *p = Rgba([40, 80, 200, 255]); }
+    for p in image.pixels_mut() {
+        *p = Rgba([40, 80, 200, 255]);
+    }
     let mut mask = GrayImage::new(w, h);
     for y in 192..320 {
         for x in 192..320 {
@@ -58,10 +62,17 @@ fn sd_inpaint_modifies_painted_region() {
     }
     let total = 128 * 128;
     eprintln!("SD inpaint: {diffs}/{total} masked pixels differ from source");
-    eprintln!("Sample painted pixel at (256,256): {:?} → {:?}",
-        image.get_pixel(256, 256), result.get_pixel(256, 256));
-    assert!(diffs > total / 2,
-        "SD returned ≤ half-changed for {} of {} masked pixels", total - diffs, total);
+    eprintln!(
+        "Sample painted pixel at (256,256): {:?} → {:?}",
+        image.get_pixel(256, 256),
+        result.get_pixel(256, 256)
+    );
+    assert!(
+        diffs > total / 2,
+        "SD returned ≤ half-changed for {} of {} masked pixels",
+        total - diffs,
+        total
+    );
 
     // Outside the mask: source must be preserved exactly (no scaling
     // drift from the VAE round-trip leaking out of the masked region).

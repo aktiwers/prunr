@@ -39,7 +39,11 @@ pub fn create_engine_pool(
     };
 
     let create = |threads| {
-        if cpu_only { OrtEngine::new_cpu_only(model, threads) } else { OrtEngine::new(model, threads) }
+        if cpu_only {
+            OrtEngine::new_cpu_only(model, threads)
+        } else {
+            OrtEngine::new(model, threads)
+        }
     };
 
     // Build engines in parallel where the EP allows it. CPU, OpenVINO,
@@ -102,7 +106,14 @@ pub fn batch_process<F>(
 where
     F: Fn(usize, ProgressStage, f32) + Send + Sync,
 {
-    batch_process_with_mask(images, model, jobs, &MaskSettings::default(), false, progress)
+    batch_process_with_mask(
+        images,
+        model,
+        jobs,
+        &MaskSettings::default(),
+        false,
+        progress,
+    )
 }
 
 /// Like `batch_process` but with custom mask settings.
@@ -127,13 +138,19 @@ where
 
     let engines = match create_engine_pool(model, jobs, cpu_only) {
         Ok(e) => e,
-        Err(e) => return images.iter().map(|_| Err(CoreError::Model(e.to_string()))).collect(),
+        Err(e) => {
+            return images
+                .iter()
+                .map(|_| Err(CoreError::Model(e.to_string())))
+                .collect()
+        }
     };
     let pool_size = engines.len();
     let pool = build_batch_pool(pool_size);
 
-    let mut results: Vec<Result<ProcessResult, CoreError>> =
-        (0..images.len()).map(|_| Err(CoreError::Model("not processed".into()))).collect();
+    let mut results: Vec<Result<ProcessResult, CoreError>> = (0..images.len())
+        .map(|_| Err(CoreError::Model("not processed".into())))
+        .collect();
 
     // Write each result directly into its pre-sized slot via
     // `par_iter_mut().zip(...)`. The previous version `.collect`-ed
@@ -148,9 +165,9 @@ where
             .enumerate()
             .for_each(|(idx, (slot, img_bytes))| {
                 let engine = &engines[idx % engines.len()];
-                let cb = progress.as_ref().map(|f| {
-                    move |stage: ProgressStage, pct: f32| f(idx, stage, pct)
-                });
+                let cb = progress
+                    .as_ref()
+                    .map(|f| move |stage: ProgressStage, pct: f32| f(idx, stage, pct));
                 *slot = process_image_with_mask(img_bytes, engine, mask, cb, None);
             });
     });
@@ -234,13 +251,14 @@ mod tests {
     #[cfg(feature = "dev-models")]
     #[test]
     fn test_batch_process_jobs_1_sequential() {
-        use image::{DynamicImage, RgbImage, Rgb};
+        use image::{DynamicImage, Rgb, RgbImage};
         use std::io::Cursor;
 
         fn make_png_bytes() -> Vec<u8> {
             let img = DynamicImage::ImageRgb8(RgbImage::from_pixel(64, 64, Rgb([100, 150, 200])));
             let mut buf = Vec::new();
-            img.write_to(&mut Cursor::new(&mut buf), image::ImageFormat::Png).unwrap();
+            img.write_to(&mut Cursor::new(&mut buf), image::ImageFormat::Png)
+                .unwrap();
             buf
         }
 
@@ -253,19 +271,24 @@ mod tests {
             None::<fn(usize, ProgressStage, f32)>,
         );
         assert_eq!(results.len(), 1);
-        assert!(results[0].is_ok(), "Expected Ok result, got {:?}", results[0]);
+        assert!(
+            results[0].is_ok(),
+            "Expected Ok result, got {:?}",
+            results[0]
+        );
     }
 
     #[cfg(feature = "dev-models")]
     #[test]
     fn test_batch_process_preserves_order() {
-        use image::{DynamicImage, RgbImage, Rgb};
+        use image::{DynamicImage, Rgb, RgbImage};
         use std::io::Cursor;
 
         fn make_png(r: u8) -> Vec<u8> {
             let img = DynamicImage::ImageRgb8(RgbImage::from_pixel(32, 32, Rgb([r, 100, 100])));
             let mut buf = Vec::new();
-            img.write_to(&mut Cursor::new(&mut buf), image::ImageFormat::Png).unwrap();
+            img.write_to(&mut Cursor::new(&mut buf), image::ImageFormat::Png)
+                .unwrap();
             buf
         }
 

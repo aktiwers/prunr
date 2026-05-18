@@ -1,5 +1,5 @@
-use std::sync::{LazyLock, OnceLock};
 use egui::{Color32, Pos2, Rect, Stroke, TextureHandle, TextureOptions, Vec2};
+use std::sync::{LazyLock, OnceLock};
 
 use crate::gui::app::PrunrApp;
 use crate::gui::state::AppState;
@@ -13,8 +13,7 @@ static IS_WAYLAND: LazyLock<bool> = LazyLock::new(|| std::env::var_os("WAYLAND_D
 pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
     // Set background
     let avail_rect = ui.available_rect_before_wrap();
-    ui.painter()
-        .rect_filled(avail_rect, 0.0, theme::BG_PRIMARY);
+    ui.painter().rect_filled(avail_rect, 0.0, theme::BG_PRIMARY);
 
     let canvas_rect = ui.available_rect_before_wrap();
 
@@ -42,7 +41,8 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
     // first via dispatch_inpaint's generation counter, wasting the
     // 5+ minutes of CPU work just performed. Visible signal is the
     // banner with "Cancel (Esc)" button rendered below.
-    let inpaint_in_flight_for_selected = app.batch
+    let inpaint_in_flight_for_selected = app
+        .batch
         .selected_idx_clamped()
         .map(|idx| app.batch.items[idx].id)
         .is_some_and(|id| app.processor.is_inpaint_in_flight(id));
@@ -61,16 +61,21 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
         // Handle scroll-wheel zoom (cursor-centered)
         ui.ctx().input(|i| {
             for event in &i.events {
-                if let egui::Event::MouseWheel { delta, modifiers, .. } = event {
+                if let egui::Event::MouseWheel {
+                    delta, modifiers, ..
+                } = event
+                {
                     if !modifiers.any() {
                         let scroll_y = delta.y;
                         let zoom_delta = theme::ZOOM_STEP.powf(scroll_y);
-                        let new_zoom = (app.zoom_state.zoom * zoom_delta).clamp(theme::ZOOM_MIN, theme::ZOOM_MAX);
+                        let new_zoom = (app.zoom_state.zoom * zoom_delta)
+                            .clamp(theme::ZOOM_MIN, theme::ZOOM_MAX);
                         if let Some(cursor) = i.pointer.hover_pos() {
                             if canvas_rect.contains(cursor) {
                                 let cursor_rel = cursor - canvas_rect.center();
-                                app.zoom_state.pan_offset =
-                                    cursor_rel / app.zoom_state.zoom - cursor_rel / new_zoom + app.zoom_state.pan_offset;
+                                app.zoom_state.pan_offset = cursor_rel / app.zoom_state.zoom
+                                    - cursor_rel / new_zoom
+                                    + app.zoom_state.pan_offset;
                                 app.zoom_state.zoom = new_zoom;
                             }
                         }
@@ -84,9 +89,15 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
             // Click+drag pan: enter panning ONLY on a fresh press inside the canvas.
             // This avoids false pan when egui's pointer state is desynced — e.g. after
             // an OS drag-out session where Prunr's window never saw the mouse-up.
-            let hovered_inside = i.pointer.hover_pos().is_some_and(|p| canvas_rect.contains(p));
+            let hovered_inside = i
+                .pointer
+                .hover_pos()
+                .is_some_and(|p| canvas_rect.contains(p));
             let (pressed, down) = if brush_active {
-                (i.pointer.secondary_pressed(), i.pointer.button_down(egui::PointerButton::Secondary))
+                (
+                    i.pointer.secondary_pressed(),
+                    i.pointer.button_down(egui::PointerButton::Secondary),
+                )
             } else {
                 (i.pointer.primary_pressed(), i.pointer.primary_down())
             };
@@ -109,7 +120,11 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
     // Handle pending Ctrl+0 (fit to window) / Ctrl+1 (actual size).
     // Only consume the flag when the texture is ready — with lazy decode,
     // the texture may not exist on the first frame after opening.
-    if let Some(tex) = app.batch.selected_item().and_then(|i| i.source_texture.as_ref()) {
+    if let Some(tex) = app
+        .batch
+        .selected_item()
+        .and_then(|i| i.source_texture.as_ref())
+    {
         let tex_size = tex.size_vec2();
         let canvas_size = canvas_rect.size();
 
@@ -182,11 +197,9 @@ fn render_inpaint_progress(
 ) -> bool {
     let t = ui.ctx().input(|i| i.time) as f32;
     let banner_h = 44.0;
-    let banner = Rect::from_min_size(
-        canvas_rect.min,
-        Vec2::new(canvas_rect.width(), banner_h),
-    );
-    ui.painter().rect_filled(banner, 0.0, Color32::from_rgba_unmultiplied(0, 0, 0, 160));
+    let banner = Rect::from_min_size(canvas_rect.min, Vec2::new(canvas_rect.width(), banner_h));
+    ui.painter()
+        .rect_filled(banner, 0.0, Color32::from_rgba_unmultiplied(0, 0, 0, 160));
     let center = banner.center();
     // Three pulsing dots for the activity indicator.
     for i in 0..3 {
@@ -203,7 +216,9 @@ fn render_inpaint_progress(
         std::borrow::Cow::Borrowed("Cancelling…")
     } else {
         match progress {
-            (cur, total) if total > 0 && cur > 0 => format!("Erasing — step {cur} of {total}").into(),
+            (cur, total) if total > 0 && cur > 0 => {
+                format!("Erasing — step {cur} of {total}").into()
+            }
             _ => std::borrow::Cow::Borrowed("Erasing…"),
         }
     };
@@ -230,11 +245,9 @@ fn render_inpaint_progress(
         Pos2::new(canvas_rect.right() - 16.0 - btn_w / 2.0, center.y),
         btn_size,
     );
-    let mut child = ui.new_child(
-        egui::UiBuilder::new()
-            .max_rect(btn_rect)
-            .layout(egui::Layout::centered_and_justified(egui::Direction::LeftToRight)),
-    );
+    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(btn_rect).layout(
+        egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
+    ));
     let resp = child.add(
         egui::Button::new(
             egui::RichText::new("Cancel (Esc)")
@@ -254,15 +267,37 @@ fn render_inpaint_progress(
 fn handle_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: Rect) {
     use super::brush_overlay::{self, BrushAction};
     use crate::gui::live_preview::PreviewKind;
-    let Some(item) = app.batch.selected_item() else { return };
-    let Some(tex) = item.result_texture.as_ref().or(item.source_texture.as_ref()) else { return };
-    let img_rect = compute_img_rect(canvas_rect, tex.size_vec2(), app.zoom_state.zoom, app.zoom_state.pan_offset);
+    let Some(item) = app.batch.selected_item() else {
+        return;
+    };
+    let Some(tex) = item
+        .result_texture
+        .as_ref()
+        .or(item.source_texture.as_ref())
+    else {
+        return;
+    };
+    let img_rect = compute_img_rect(
+        canvas_rect,
+        tex.size_vec2(),
+        app.zoom_state.zoom,
+        app.zoom_state.pan_offset,
+    );
 
-    let Some(idx) = app.batch.selected_idx_clamped() else { return };
+    let Some(idx) = app.batch.selected_idx_clamped() else {
+        return;
+    };
     let is_inpaint = app.settings.model.is_inpaint();
     let action = {
         let item = &app.batch.items[idx];
-        brush_overlay::handle_input(ui, &mut app.brush_state, &app.settings.brush, item, img_rect, is_inpaint)
+        brush_overlay::handle_input(
+            ui,
+            &mut app.brush_state,
+            &app.settings.brush,
+            item,
+            img_rect,
+            is_inpaint,
+        )
     };
     if let BrushAction::Committed(strokes) = action {
         let item_id = app.batch.items[idx].id;
@@ -286,7 +321,8 @@ fn handle_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: Rect) 
                 let item = &mut app.batch.items[idx];
                 if let Some(rgba) = item.result_rgba.as_ref().cloned() {
                     item.history.push_back(crate::gui::item::HistoryEntry::new(
-                        rgba, item.applied_recipe.clone(),
+                        rgba,
+                        item.applied_recipe.clone(),
                     ));
                     while item.history.len() > max_depth {
                         if let Some(old) = item.history.pop_front() {
@@ -299,7 +335,9 @@ fn handle_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: Rect) 
                 }
             }
             tracing::info!(item_id, "brush stroke committed; dispatching Tier-2 rerun");
-            app.processor.live_preview.mark_tweak(item_id, PreviewKind::Mask);
+            app.processor
+                .live_preview
+                .mark_tweak(item_id, PreviewKind::Mask);
             app.processor.live_preview.flush(item_id);
         }
     }
@@ -451,21 +489,35 @@ fn render_empty(ui: &mut egui::Ui, _app: &PrunrApp) {
         ui.ctx().request_repaint(); // smooth fade
     } else {
         let secs_until_fade_out = TIP_CYCLE_SECS - TIP_FADE_SECS - phase;
-        ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(secs_until_fade_out.max(0.016)));
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_secs_f64(
+                secs_until_fade_out.max(0.016),
+            ));
     }
 }
 
 fn render_loaded(ui: &mut egui::Ui, app: &PrunrApp) {
     let canvas_rect = ui.available_rect_before_wrap();
-    if let Some(texture) = app.batch.selected_item().and_then(|i| i.source_texture.as_ref()) {
-        let img_rect = compute_img_rect(canvas_rect, texture.size_vec2(), app.zoom_state.zoom, app.zoom_state.pan_offset);
+    if let Some(texture) = app
+        .batch
+        .selected_item()
+        .and_then(|i| i.source_texture.as_ref())
+    {
+        let img_rect = compute_img_rect(
+            canvas_rect,
+            texture.size_vec2(),
+            app.zoom_state.zoom,
+            app.zoom_state.pan_offset,
+        );
         let fade = ui.ctx().animate_bool_with_time(
             egui::Id::new(("canvas_fade", app.canvas_switch_id)),
             true,
             0.2,
         );
         let alpha = (fade * 255.0) as u8;
-        if fade < 1.0 { ui.ctx().request_repaint(); }
+        if fade < 1.0 {
+            ui.ctx().request_repaint();
+        }
         ui.painter().image(
             texture.id(),
             img_rect,
@@ -504,7 +556,12 @@ fn render_processing(ui: &mut egui::Ui, app: &PrunrApp) {
         let wiggle_x = (t * 0.8).sin() * 2.0;
         let wiggle_y = (t * 1.1).cos() * 1.5;
         let wiggle_offset = app.zoom_state.pan_offset + Vec2::new(wiggle_x, wiggle_y);
-        let img_rect = compute_img_rect(canvas_rect, tex_size, app.zoom_state.zoom * wiggle_zoom, wiggle_offset);
+        let img_rect = compute_img_rect(
+            canvas_rect,
+            tex_size,
+            app.zoom_state.zoom * wiggle_zoom,
+            wiggle_offset,
+        );
         ui.painter().image(
             texture.id(),
             img_rect,
@@ -517,21 +574,33 @@ fn render_processing(ui: &mut egui::Ui, app: &PrunrApp) {
         let shimmer_rect = Rect::from_min_max(
             Pos2::new(sweep_x - 40.0, img_rect.min.y),
             Pos2::new(sweep_x + 40.0, img_rect.max.y),
-        ).intersect(img_rect);
+        )
+        .intersect(img_rect);
         if shimmer_rect.width() > 0.0 && shimmer_rect.height() > 0.0 {
-            ui.painter().rect_filled(shimmer_rect, 0.0,
-                Color32::from_rgba_unmultiplied(255, 255, 255, 18));
+            ui.painter().rect_filled(
+                shimmer_rect,
+                0.0,
+                Color32::from_rgba_unmultiplied(255, 255, 255, 18),
+            );
         }
     }
 
-    const PROCESSING_DOTS: [&str; 4] = ["Processing.", "Processing..", "Processing...", "Processing...."];
+    const PROCESSING_DOTS: [&str; 4] = [
+        "Processing.",
+        "Processing..",
+        "Processing...",
+        "Processing....",
+    ];
     let label = PROCESSING_DOTS[(t * 2.0) as usize % 4];
     let center = canvas_rect.center();
 
     // Dark pill behind text
     let pill_rect = Rect::from_center_size(center + Vec2::new(0.0, 14.0), Vec2::new(280.0, 80.0));
-    ui.painter().rect_filled(pill_rect, 14.0,
-        Color32::from_rgba_unmultiplied(0, 0, 0, 180));
+    ui.painter().rect_filled(
+        pill_rect,
+        14.0,
+        Color32::from_rgba_unmultiplied(0, 0, 0, 180),
+    );
 
     ui.painter().text(
         center - Vec2::new(0.0, 6.0),
@@ -555,7 +624,8 @@ fn render_processing(ui: &mut egui::Ui, app: &PrunrApp) {
         theme::TEXT_SECONDARY,
     );
 
-    ui.ctx().request_repaint_after(std::time::Duration::from_millis(66));
+    ui.ctx()
+        .request_repaint_after(std::time::Duration::from_millis(66));
 }
 
 fn render_done(ui: &mut egui::Ui, app: &PrunrApp) {
@@ -567,13 +637,19 @@ fn render_done(ui: &mut egui::Ui, app: &PrunrApp) {
         true,
         0.4,
     );
-    if fade < 1.0 { ui.ctx().request_repaint(); }
+    if fade < 1.0 {
+        ui.ctx().request_repaint();
+    }
 
     let item = app.batch.selected_item();
     if app.show_original {
         if let Some(texture) = item.and_then(|i| i.source_texture.as_ref()) {
-            let img_rect =
-                compute_img_rect(canvas_rect, texture.size_vec2(), app.zoom_state.zoom, app.zoom_state.pan_offset);
+            let img_rect = compute_img_rect(
+                canvas_rect,
+                texture.size_vec2(),
+                app.zoom_state.zoom,
+                app.zoom_state.pan_offset,
+            );
             ui.painter().image(
                 texture.id(),
                 img_rect,
@@ -582,8 +658,12 @@ fn render_done(ui: &mut egui::Ui, app: &PrunrApp) {
             );
         }
     } else if let Some(result_tex) = item.and_then(|i| i.result_texture.as_ref()) {
-        let img_rect =
-            compute_img_rect(canvas_rect, result_tex.size_vec2(), app.zoom_state.zoom, app.zoom_state.pan_offset);
+        let img_rect = compute_img_rect(
+            canvas_rect,
+            result_tex.size_vec2(),
+            app.zoom_state.zoom,
+            app.zoom_state.pan_offset,
+        );
 
         // During crossfade: show source fading out behind checkerboard + result fading in
         if fade < 1.0 {
@@ -666,13 +746,24 @@ fn checker_texture(ctx: &egui::Context, dark: bool) -> TextureHandle {
     if dark {
         DARK.get_or_init(|| {
             let (light, dark) = theme::CHECKER_DARK_MODE;
-            ctx.load_texture("checker_dark", build_checker_image(light, dark), TextureOptions::NEAREST)
-        }).clone()
+            ctx.load_texture(
+                "checker_dark",
+                build_checker_image(light, dark),
+                TextureOptions::NEAREST,
+            )
+        })
+        .clone()
     } else {
-        LIGHT.get_or_init(|| {
-            let (light, dark) = theme::CHECKER_LIGHT_MODE;
-            ctx.load_texture("checker_light", build_checker_image(light, dark), TextureOptions::NEAREST)
-        }).clone()
+        LIGHT
+            .get_or_init(|| {
+                let (light, dark) = theme::CHECKER_LIGHT_MODE;
+                ctx.load_texture(
+                    "checker_light",
+                    build_checker_image(light, dark),
+                    TextureOptions::NEAREST,
+                )
+            })
+            .clone()
     }
 }
 
@@ -706,23 +797,31 @@ pub(super) fn paint_bg_image(
                 let pad = (1.0 - visible) * 0.5;
                 (Pos2::new(0.0, pad), Pos2::new(1.0, 1.0 - pad))
             };
-            ui.painter().image(tex.id(), bounds, Rect::from_min_max(uv_min, uv_max), Color32::WHITE);
+            ui.painter().image(
+                tex.id(),
+                bounds,
+                Rect::from_min_max(uv_min, uv_max),
+                Color32::WHITE,
+            );
         }
         BgImageFit::Stretch => {
-            ui.painter().image(tex.id(), bounds, unit_uv, Color32::WHITE);
+            ui.painter()
+                .image(tex.id(), bounds, unit_uv, Color32::WHITE);
         }
         BgImageFit::Contain => {
             let scale = (bw / tw).min(bh / th);
             let inner = egui::vec2(tw * scale, th * scale);
             let inner_rect = Rect::from_center_size(bounds.center(), inner);
-            ui.painter().image(tex.id(), inner_rect, unit_uv, Color32::WHITE);
+            ui.painter()
+                .image(tex.id(), inner_rect, unit_uv, Color32::WHITE);
         }
         BgImageFit::Center => {
             // 1:1 native size centred. May overflow `bounds` but the
             // canvas painter clips to the painter's clip rect (egui's
             // panel clipping handles overflow).
             let inner_rect = Rect::from_center_size(bounds.center(), egui::vec2(tw, th));
-            ui.painter().image(tex.id(), inner_rect, unit_uv, Color32::WHITE);
+            ui.painter()
+                .image(tex.id(), inner_rect, unit_uv, Color32::WHITE);
         }
         BgImageFit::Tile => {
             // UV scaled by bounds/tex_size triggers WrapMode::Repeat in
@@ -748,7 +847,8 @@ fn draw_checkerboard(ui: &egui::Ui, bounds: Rect, dark: bool) {
             // UV: fraction of tile actually visible (for edge tiles that are clipped)
             let uv_max = Pos2::new(col_w / tile_px, row_h / tile_px);
             painter.image(
-                tex.id(), tile_rect,
+                tex.id(),
+                tile_rect,
                 Rect::from_min_max(Pos2::ZERO, uv_max),
                 Color32::WHITE,
             );

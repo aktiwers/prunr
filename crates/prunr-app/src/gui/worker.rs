@@ -2,10 +2,13 @@ use std::collections::VecDeque;
 use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
-use prunr_core::{MaskSettings, EdgeSettings, EdgeScale, ModelKind, ProgressStage, ProcessResult, EDGE_SCALE_COUNT};
 use crate::gui::settings::LineMode;
-use crate::subprocess::protocol::{SubprocessEvent, CANCELLED_ERR_MSG};
 use crate::subprocess::manager::SubprocessManager;
+use crate::subprocess::protocol::{SubprocessEvent, CANCELLED_ERR_MSG};
+use prunr_core::{
+    EdgeScale, EdgeSettings, MaskSettings, ModelKind, ProcessResult, ProgressStage,
+    EDGE_SCALE_COUNT,
+};
 
 /// Maximum time the subprocess may stay silent with in-flight work before we
 /// treat it as a hung crash. Real batches emit Progress events every few
@@ -20,11 +23,7 @@ const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 /// True when the subprocess is alive but hasn't produced events for too long.
 /// Pure so it's unit-testable — the event loop calls this each iteration and
 /// treats `true` as a crash, reusing the existing re-queue + retry path.
-fn is_stalled(
-    last_event_age: Duration,
-    in_flight_count: usize,
-    hang_timeout: Duration,
-) -> bool {
+fn is_stalled(last_event_age: Duration, in_flight_count: usize, hang_timeout: Duration) -> bool {
     in_flight_count > 0 && last_event_age > hang_timeout
 }
 
@@ -51,11 +50,14 @@ impl CompressedTensor {
     /// Compress raw tensor data with zstd (level 1 for speed).
     /// Returns None if compression fails (caller skips caching).
     pub fn from_raw(tc: TensorCache) -> Option<Self> {
-        let compressed = zstd::encode_all(
-            crate::subprocess::ipc::f32s_as_le_bytes(&tc.data),
-            1,
-        ).ok()?;
-        Some(Self { compressed, height: tc.height, width: tc.width, model: tc.model })
+        let compressed =
+            zstd::encode_all(crate::subprocess::ipc::f32s_as_le_bytes(&tc.data), 1).ok()?;
+        Some(Self {
+            compressed,
+            height: tc.height,
+            width: tc.width,
+            model: tc.model,
+        })
     }
 
     /// Decompress to raw f32 tensor data for Tier 2 dispatch.
@@ -93,13 +95,24 @@ impl CompressedEdgeTensors {
     /// Returns None if any compression fails.
     pub fn from_raw(raw: EdgeTensorCache) -> Option<Self> {
         use rayon::prelude::*;
-        let parts: Vec<Vec<u8>> = raw.tensors.par_iter().map(|t| {
-            zstd::encode_all(crate::subprocess::ipc::f32s_as_le_bytes(t), 1)
-                .ok().unwrap_or_default()
-        }).collect();
-        if parts.iter().any(|p| p.is_empty()) { return None; }
+        let parts: Vec<Vec<u8>> = raw
+            .tensors
+            .par_iter()
+            .map(|t| {
+                zstd::encode_all(crate::subprocess::ipc::f32s_as_le_bytes(t), 1)
+                    .ok()
+                    .unwrap_or_default()
+            })
+            .collect();
+        if parts.iter().any(|p| p.is_empty()) {
+            return None;
+        }
         let [a, b, c, d] = parts.try_into().ok()?;
-        Some(Self { tensors: [a, b, c, d], height: raw.height, width: raw.width })
+        Some(Self {
+            tensors: [a, b, c, d],
+            height: raw.height,
+            width: raw.width,
+        })
     }
 
     /// Decompress one scale's tensor. Called per-dispatch in the hot path,
@@ -388,7 +401,14 @@ fn run_batch_with_retry(
     res_tx: &mpsc::Sender<WorkerResult>,
     ctx: &egui::Context,
 ) {
-    let ProcessingConfig { model, jobs: initial_jobs, mask, force_cpu, line_mode, edge } = config;
+    let ProcessingConfig {
+        model,
+        jobs: initial_jobs,
+        mask,
+        force_cpu,
+        line_mode,
+        edge,
+    } = config;
     let mut state = BatchRunState {
         pending: initial_items.into(),
         pending_tier2: initial_tier2.into(),
@@ -424,23 +444,52 @@ fn run_batch_with_retry(
         }
 
         let Some(burst) = spawn_and_initial_burst(
-            prewarm.take(), &mut state, model, mask, force_cpu, line_mode, edge, cancels, res_tx, ctx,
+            prewarm.take(),
+            &mut state,
+            model,
+            mask,
+            force_cpu,
+            line_mode,
+            edge,
+            cancels,
+            res_tx,
+            ctx,
         ) else {
             return; // spawn failed — errors + BatchComplete already sent
         };
-        let InitialBurst { mut sub, mut sent_tier1, mut sent_tier2_ids, mut sent_add_edge_ids } = burst;
+        let InitialBurst {
+            mut sub,
+            mut sent_tier1,
+            mut sent_tier2_ids,
+            mut sent_add_edge_ids,
+        } = burst;
 
         let outcome = run_event_loop(
-            &mut sub, &mut state, &mut sent_tier1, &mut sent_tier2_ids, &mut sent_add_edge_ids,
-            additional_items_rx, cancels, model, res_tx, ctx,
+            &mut sub,
+            &mut state,
+            &mut sent_tier1,
+            &mut sent_tier2_ids,
+            &mut sent_add_edge_ids,
+            additional_items_rx,
+            cancels,
+            model,
+            res_tx,
+            ctx,
         );
 
         match outcome {
             EventLoopOutcome::Cancelled => return,
             EventLoopOutcome::Crashed(reason) => {
                 let should_retry = handle_crash_and_retry(
-                    &mut state, sent_tier1, sent_tier2_ids, sent_add_edge_ids, reason,
-                    &mut sub, additional_items_rx, res_tx, ctx,
+                    &mut state,
+                    sent_tier1,
+                    sent_tier2_ids,
+                    sent_add_edge_ids,
+                    reason,
+                    &mut sub,
+                    additional_items_rx,
+                    res_tx,
+                    ctx,
                 );
                 if !should_retry {
                     return;
@@ -462,7 +511,10 @@ fn emit_loading_status(
     res_tx: &mpsc::Sender<WorkerResult>,
     ctx: &egui::Context,
 ) {
-    let first_id = state.pending.front().map(|(id, _, _)| *id)
+    let first_id = state
+        .pending
+        .front()
+        .map(|(id, _, _)| *id)
         .or_else(|| state.pending_tier2.front().map(|t| t.item_id))
         .or_else(|| state.pending_add_edge.front().map(|a| a.item_id));
     if let Some(fid) = first_id {
@@ -481,7 +533,10 @@ fn poll_additional_items(
     state: &mut BatchRunState,
     additional_items_rx: Option<&mpsc::Receiver<WorkItem>>,
 ) -> WaitAction {
-    if !state.pending.is_empty() || !state.pending_tier2.is_empty() || !state.pending_add_edge.is_empty() {
+    if !state.pending.is_empty()
+        || !state.pending_tier2.is_empty()
+        || !state.pending_add_edge.is_empty()
+    {
         return WaitAction::Continue;
     }
     let Some(rx) = additional_items_rx else {
@@ -527,7 +582,8 @@ fn spawn_and_initial_burst(
     // Drop anything cancelled before spawn — they don't count toward
     // `effective_jobs` and shouldn't occupy burst slots either.
     drop_cancelled_pending(state, cancels, res_tx, ctx);
-    let total_pending = state.pending.len() + state.pending_tier2.len() + state.pending_add_edge.len();
+    let total_pending =
+        state.pending.len() + state.pending_tier2.len() + state.pending_add_edge.len();
     if total_pending == 0 {
         let _ = res_tx.send(WorkerResult::BatchComplete);
         ctx.request_repaint();
@@ -539,21 +595,22 @@ fn spawn_and_initial_burst(
 
     let mut sub = match prewarm {
         Some(sub) => sub,
-        None => match SubprocessManager::spawn(
-            model, effective_jobs, mask, force_cpu, line_mode, edge,
-        ) {
-            Ok((s, active_provider)) => {
-                let _ = res_tx.send(WorkerResult::BackendReady(active_provider));
-                ctx.request_repaint();
-                s
+        None => {
+            match SubprocessManager::spawn(model, effective_jobs, mask, force_cpu, line_mode, edge)
+            {
+                Ok((s, active_provider)) => {
+                    let _ = res_tx.send(WorkerResult::BackendReady(active_provider));
+                    ctx.request_repaint();
+                    s
+                }
+                Err(e) => {
+                    emit_pending_errors(state, &e, res_tx);
+                    let _ = res_tx.send(WorkerResult::BatchComplete);
+                    ctx.request_repaint();
+                    return None;
+                }
             }
-            Err(e) => {
-                emit_pending_errors(state, &e, res_tx);
-                let _ = res_tx.send(WorkerResult::BatchComplete);
-                ctx.request_repaint();
-                return None;
-            }
-        },
+        }
     };
 
     let mut sent_items: Vec<WorkItem> = Vec::new();
@@ -563,7 +620,11 @@ fn spawn_and_initial_burst(
     let mut sent_count = 0;
     while sent_count < burst {
         if try_send_tier2(&mut sub, &mut state.pending_tier2, &mut sent_tier2_ids)
-            || try_send_add_edge(&mut sub, &mut state.pending_add_edge, &mut sent_add_edge_ids)
+            || try_send_add_edge(
+                &mut sub,
+                &mut state.pending_add_edge,
+                &mut sent_add_edge_ids,
+            )
         {
             sent_count += 1;
         } else if let Some(item) = state.pending.pop_front() {
@@ -615,7 +676,12 @@ fn run_event_loop(
         // Notify subprocess of newly cancelled in-flight items so it can drop
         // them at the next dispatch check instead of finishing the work.
         forward_item_cancels(
-            sub, sent_items, sent_tier2_ids, sent_add_edge_ids, cancels, &mut cancel_notified,
+            sub,
+            sent_items,
+            sent_tier2_ids,
+            sent_add_edge_ids,
+            cancels,
+            &mut cancel_notified,
         );
 
         // Real-crash check first so a segfault is reported as such rather
@@ -646,14 +712,28 @@ fn run_event_loop(
                 continue;
             }
             handle_subprocess_event(
-                event, sub, state, sent_items, sent_tier2_ids, sent_add_edge_ids,
-                additional_items_rx, cancels, model, res_tx, ctx,
+                event,
+                sub,
+                state,
+                sent_items,
+                sent_tier2_ids,
+                sent_add_edge_ids,
+                additional_items_rx,
+                cancels,
+                model,
+                res_tx,
+                ctx,
             );
         }
 
         // If everything drained and no more coming, mark finished.
-        let all_sent_empty = sent_items.is_empty() && sent_tier2_ids.is_empty() && sent_add_edge_ids.is_empty();
-        if all_sent_empty && state.pending.is_empty() && state.pending_tier2.is_empty() && state.pending_add_edge.is_empty() {
+        let all_sent_empty =
+            sent_items.is_empty() && sent_tier2_ids.is_empty() && sent_add_edge_ids.is_empty();
+        if all_sent_empty
+            && state.pending.is_empty()
+            && state.pending_tier2.is_empty()
+            && state.pending_add_edge.is_empty()
+        {
             if let Some(rx) = additional_items_rx {
                 match rx.try_recv() {
                     Ok(item) => state.pending.push_back(item),
@@ -686,21 +766,42 @@ fn handle_subprocess_event(
     ctx: &egui::Context,
 ) {
     match event {
-        SubprocessEvent::Progress { item_id, stage, pct } => {
-            let _ = res_tx.send(WorkerResult::BatchProgress { item_id, stage, pct });
+        SubprocessEvent::Progress {
+            item_id,
+            stage,
+            pct,
+        } => {
+            let _ = res_tx.send(WorkerResult::BatchProgress {
+                item_id,
+                stage,
+                pct,
+            });
             ctx.request_repaint();
         }
         SubprocessEvent::ImageDone {
-            item_id, result_path, width, height, active_provider,
-            tensor_cache_path, tensor_cache_height, tensor_cache_width,
-            edge_cache_path, edge_cache_height, edge_cache_width,
+            item_id,
+            result_path,
+            width,
+            height,
+            active_provider,
+            tensor_cache_path,
+            tensor_cache_height,
+            tensor_cache_width,
+            edge_cache_path,
+            edge_cache_height,
+            edge_cache_width,
         } => {
             let result = read_result_image(&result_path, width, height, &active_provider);
             let tensor_cache = read_tensor_cache(
-                tensor_cache_path.as_ref(), tensor_cache_height, tensor_cache_width, model,
+                tensor_cache_path.as_ref(),
+                tensor_cache_height,
+                tensor_cache_width,
+                model,
             );
             let edge_cache = read_edge_tensor_cache(
-                edge_cache_path.as_ref(), edge_cache_height, edge_cache_width,
+                edge_cache_path.as_ref(),
+                edge_cache_height,
+                edge_cache_width,
             );
 
             state.completed.insert(item_id);
@@ -709,11 +810,24 @@ fn handle_subprocess_event(
             sent_add_edge_ids.retain(|id| *id != item_id);
 
             let _ = res_tx.send(WorkerResult::BatchItemDone {
-                item_id, result, tensor_cache, edge_cache,
+                item_id,
+                result,
+                tensor_cache,
+                edge_cache,
             });
             ctx.request_repaint();
 
-            admit_next_item(sub, state, sent_items, sent_tier2_ids, sent_add_edge_ids, additional_items_rx, cancels, res_tx, ctx);
+            admit_next_item(
+                sub,
+                state,
+                sent_items,
+                sent_tier2_ids,
+                sent_add_edge_ids,
+                additional_items_rx,
+                cancels,
+                res_tx,
+                ctx,
+            );
         }
         SubprocessEvent::ImageError { item_id, error } => {
             state.completed.insert(item_id);
@@ -788,7 +902,12 @@ fn read_tensor_cache(
             "seg tensor length mismatch — mask will be garbage",
         );
     }
-    Some(TensorCache { data, height: h, width: w, model })
+    Some(TensorCache {
+        data,
+        height: h,
+        width: w,
+        model,
+    })
 }
 
 /// Read the DexiNed multi-scale cache. Child concatenates 4 tensors into
@@ -814,14 +933,17 @@ fn read_edge_tensor_cache(
     }
 
     let mut chunks = raw_bytes.chunks_exact(per_tensor_bytes);
-    let mut next = || -> Option<Vec<f32>> {
-        Some(crate::subprocess::ipc::le_bytes_to_f32s(chunks.next()?))
-    };
+    let mut next =
+        || -> Option<Vec<f32>> { Some(crate::subprocess::ipc::le_bytes_to_f32s(chunks.next()?)) };
     let a = next()?;
     let b = next()?;
     let c = next()?;
     let d = next()?;
-    Some(EdgeTensorCache { tensors: [a, b, c, d], height: h, width: w })
+    Some(EdgeTensorCache {
+        tensors: [a, b, c, d],
+        height: h,
+        width: w,
+    })
 }
 
 /// After an ImageDone, pull one more item into the subprocess if RSS allows.
@@ -878,18 +1000,32 @@ fn drop_cancelled_pending(
 ) {
     let mut cancelled: Vec<u64> = Vec::new();
     for (id, _, _) in &state.pending {
-        if cancels.is_cancelled(*id) { cancelled.push(*id); }
+        if cancels.is_cancelled(*id) {
+            cancelled.push(*id);
+        }
     }
     for w in &state.pending_tier2 {
-        if cancels.is_cancelled(w.item_id) { cancelled.push(w.item_id); }
+        if cancels.is_cancelled(w.item_id) {
+            cancelled.push(w.item_id);
+        }
     }
     for w in &state.pending_add_edge {
-        if cancels.is_cancelled(w.item_id) { cancelled.push(w.item_id); }
+        if cancels.is_cancelled(w.item_id) {
+            cancelled.push(w.item_id);
+        }
     }
-    if cancelled.is_empty() { return; }
-    state.pending.retain(|(id, _, _)| !cancels.is_cancelled(*id));
-    state.pending_tier2.retain(|w| !cancels.is_cancelled(w.item_id));
-    state.pending_add_edge.retain(|w| !cancels.is_cancelled(w.item_id));
+    if cancelled.is_empty() {
+        return;
+    }
+    state
+        .pending
+        .retain(|(id, _, _)| !cancels.is_cancelled(*id));
+    state
+        .pending_tier2
+        .retain(|w| !cancels.is_cancelled(w.item_id));
+    state
+        .pending_add_edge
+        .retain(|w| !cancels.is_cancelled(w.item_id));
     for id in cancelled {
         report_cancelled(id, state, res_tx, ctx);
     }
@@ -905,7 +1041,9 @@ fn forward_item_cancels(
     cancels: &super::processor::CancelRegistry,
     notified: &mut std::collections::HashSet<u64>,
 ) {
-    let in_flight = sent_items.iter().map(|(id, _, _)| *id)
+    let in_flight = sent_items
+        .iter()
+        .map(|(id, _, _)| *id)
         .chain(sent_tier2_ids.iter().copied())
         .chain(sent_add_edge_ids.iter().copied());
     for id in in_flight {
@@ -976,7 +1114,8 @@ fn handle_crash_and_retry(
         }
     }
 
-    let re_queued: Vec<WorkItem> = sent_items.into_iter()
+    let re_queued: Vec<WorkItem> = sent_items
+        .into_iter()
         .filter(|(id, _, _)| !state.completed.contains(id))
         .collect();
     let re_count = re_queued.len();
@@ -1016,11 +1155,7 @@ fn handle_crash_and_retry(
 
 /// Emit `BatchItemDone(Err)` for every pending Tier 1 + Tier 2 item that
 /// hasn't already completed. Used on spawn failure and at max-retries.
-fn emit_pending_errors(
-    state: &BatchRunState,
-    err_msg: &str,
-    res_tx: &mpsc::Sender<WorkerResult>,
-) {
+fn emit_pending_errors(state: &BatchRunState, err_msg: &str, res_tx: &mpsc::Sender<WorkerResult>) {
     for (id, _, _) in &state.pending {
         if !state.completed.contains(id) {
             let _ = res_tx.send(WorkerResult::BatchItemDone {
@@ -1059,7 +1194,10 @@ fn finalize_or_continue(
     res_tx: &mpsc::Sender<WorkerResult>,
     ctx: &egui::Context,
 ) -> bool {
-    if state.pending.is_empty() && state.pending_tier2.is_empty() && state.pending_add_edge.is_empty() {
+    if state.pending.is_empty()
+        && state.pending_tier2.is_empty()
+        && state.pending_add_edge.is_empty()
+    {
         if let Some(rx) = additional_items_rx {
             match rx.try_recv() {
                 Err(mpsc::TryRecvError::Disconnected) => {
@@ -1088,9 +1226,9 @@ fn finalize_or_continue(
 /// Send a WorkItem to the subprocess via temp file IPC.
 fn send_item_to_sub(sub: &mut SubprocessManager, item: &WorkItem) -> Result<(), String> {
     let (item_id, bytes, chain) = item;
-    let chain_input = chain.as_ref().map(|rgba| {
-        (rgba.as_ref(), rgba.width(), rgba.height())
-    });
+    let chain_input = chain
+        .as_ref()
+        .map(|rgba| (rgba.as_ref(), rgba.width(), rgba.height()));
     sub.send_image(*item_id, bytes, chain_input)
 }
 
@@ -1102,15 +1240,20 @@ fn try_send_tier2(
 ) -> bool {
     if let Some(t2) = pending_tier2.pop_front() {
         let tid = t2.item_id;
-        if sub.send_repostprocess(
-            t2.item_id,
-            &crate::subprocess::manager::TensorView {
-                data: &t2.tensor_data,
-                height: t2.tensor_height,
-                width: t2.tensor_width,
-            },
-            t2.model, &t2.original_bytes, t2.mask,
-        ).is_ok() {
+        if sub
+            .send_repostprocess(
+                t2.item_id,
+                &crate::subprocess::manager::TensorView {
+                    data: &t2.tensor_data,
+                    height: t2.tensor_height,
+                    width: t2.tensor_width,
+                },
+                t2.model,
+                &t2.original_bytes,
+                t2.mask,
+            )
+            .is_ok()
+        {
             sent_tier2_ids.push(tid);
             return true;
         }
@@ -1127,15 +1270,20 @@ fn try_send_add_edge(
 ) -> bool {
     if let Some(ae) = pending_add_edge.pop_front() {
         let tid = ae.item_id;
-        if sub.send_add_edge_inference(
-            ae.item_id,
-            &crate::subprocess::manager::TensorView {
-                data: &ae.tensor_data,
-                height: ae.tensor_height,
-                width: ae.tensor_width,
-            },
-            ae.model, &ae.original_bytes, ae.mask,
-        ).is_ok() {
+        if sub
+            .send_add_edge_inference(
+                ae.item_id,
+                &crate::subprocess::manager::TensorView {
+                    data: &ae.tensor_data,
+                    height: ae.tensor_height,
+                    width: ae.tensor_width,
+                },
+                ae.model,
+                &ae.original_bytes,
+                ae.mask,
+            )
+            .is_ok()
+        {
             sent_add_edge_ids.push(tid);
             return true;
         }
@@ -1152,29 +1300,49 @@ mod tests {
     fn is_stalled_false_when_no_work_in_flight() {
         // Idle subprocess waiting for admission is NOT a stall — we only flag
         // the subprocess as hung if it's sitting on work it hasn't reported.
-        assert!(!is_stalled(Duration::from_secs(120), 0, Duration::from_secs(60)));
+        assert!(!is_stalled(
+            Duration::from_secs(120),
+            0,
+            Duration::from_secs(60)
+        ));
     }
 
     #[test]
     fn is_stalled_true_when_silence_exceeds_timeout_with_work() {
-        assert!(is_stalled(Duration::from_secs(61), 1, Duration::from_secs(60)));
+        assert!(is_stalled(
+            Duration::from_secs(61),
+            1,
+            Duration::from_secs(60)
+        ));
     }
 
     #[test]
     fn is_stalled_false_when_under_timeout() {
-        assert!(!is_stalled(Duration::from_secs(59), 1, Duration::from_secs(60)));
+        assert!(!is_stalled(
+            Duration::from_secs(59),
+            1,
+            Duration::from_secs(60)
+        ));
     }
 
     #[test]
     fn is_stalled_at_exact_boundary_is_false() {
         // Strict `>` not `>=`: a subprocess that emits an event every
         // `hang_timeout` seconds on the dot is not considered stalled.
-        assert!(!is_stalled(Duration::from_secs(60), 1, Duration::from_secs(60)));
+        assert!(!is_stalled(
+            Duration::from_secs(60),
+            1,
+            Duration::from_secs(60)
+        ));
     }
 
     #[test]
     fn is_stalled_scales_with_in_flight_count() {
         // Any non-zero in-flight count triggers the detector given silence.
-        assert!(is_stalled(Duration::from_secs(90), 5, Duration::from_secs(60)));
+        assert!(is_stalled(
+            Duration::from_secs(90),
+            5,
+            Duration::from_secs(60)
+        ));
     }
 }
