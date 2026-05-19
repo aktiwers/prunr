@@ -8,23 +8,21 @@
 //! The reference test (test_rembg_reference) is the CORE-05 hard gate.
 //! It must pass before any CLI or GUI work proceeds.
 
-use prunr_core::{
-    CoreError, InferenceEngine, ModelKind, OrtEngine, ProgressStage,
-    LARGE_IMAGE_LIMIT, DOWNSCALE_TARGET,
-    process_image, batch_process,
-    check_large_image, downscale_image,
-};
-use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 use image::{DynamicImage, RgbaImage};
+use prunr_core::{
+    batch_process, check_large_image, downscale_image, process_image, CoreError, InferenceEngine,
+    ModelKind, OrtEngine, ProgressStage, DOWNSCALE_TARGET, LARGE_IMAGE_LIMIT,
+};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 
 fn repo_root() -> PathBuf {
     // Integration tests run from workspace root with `cargo test -p prunr-core`
     Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()   // crates/
+        .parent() // crates/
         .unwrap()
-        .parent()   // workspace root
+        .parent() // workspace root
         .unwrap()
         .to_path_buf()
 }
@@ -42,22 +40,40 @@ fn references_dir() -> PathBuf {
 fn load_reference_mask(stem: &str) -> Option<image::GrayImage> {
     let mask_path = references_dir().join(format!("{stem}_u2net_mask.png"));
     if !mask_path.exists() {
-        eprintln!("Reference mask not found: {} — skipping", mask_path.display());
+        eprintln!(
+            "Reference mask not found: {} — skipping",
+            mask_path.display()
+        );
         return None;
     }
-    Some(image::open(&mask_path)
-        .expect("Failed to open reference mask")
-        .to_luma8())
+    Some(
+        image::open(&mask_path)
+            .expect("Failed to open reference mask")
+            .to_luma8(),
+    )
 }
 
 /// Calculate pixel match percentage between two alpha channels.
 /// A pixel matches if |prunr_alpha - reference_alpha| <= tolerance.
-fn pixel_match_percent(our_rgba: &RgbaImage, reference_mask: &image::GrayImage, tolerance: u8) -> f64 {
-    assert_eq!(our_rgba.width(), reference_mask.width(),
-        "Width mismatch: {}x{} vs {}x{}", our_rgba.width(), our_rgba.height(),
-        reference_mask.width(), reference_mask.height());
-    assert_eq!(our_rgba.height(), reference_mask.height(),
-        "Height mismatch");
+fn pixel_match_percent(
+    our_rgba: &RgbaImage,
+    reference_mask: &image::GrayImage,
+    tolerance: u8,
+) -> f64 {
+    assert_eq!(
+        our_rgba.width(),
+        reference_mask.width(),
+        "Width mismatch: {}x{} vs {}x{}",
+        our_rgba.width(),
+        our_rgba.height(),
+        reference_mask.width(),
+        reference_mask.height()
+    );
+    assert_eq!(
+        our_rgba.height(),
+        reference_mask.height(),
+        "Height mismatch"
+    );
 
     let total = (our_rgba.width() * our_rgba.height()) as f64;
     let mut matched = 0u64;
@@ -93,25 +109,33 @@ fn test_rembg_reference() {
         eprintln!("Skipping rembg reference: U2Net not installed in user data dir");
         return;
     }
-    let engine = OrtEngine::new(ModelKind::U2net, 1)
-        .expect("Failed to create OrtEngine — U2Net reported available but session creation failed");
+    let engine = OrtEngine::new(ModelKind::U2net, 1).expect(
+        "Failed to create OrtEngine — U2Net reported available but session creation failed",
+    );
 
     let test_cases = ["car-1", "car-2", "car-3"];
-    let tolerance: u8 = 5;   // |our_alpha - ref_alpha| <= 5 counts as match
+    let tolerance: u8 = 5; // |our_alpha - ref_alpha| <= 5 counts as match
     let required_pct: f64 = 95.0;
 
     for stem in &test_cases {
         let image_path = test_images_dir().join(format!("{stem}.jpg"));
         if !image_path.exists() {
-            eprintln!("Skipping reference test for {stem}: image not found at {}", image_path.display());
+            eprintln!(
+                "Skipping reference test for {stem}: image not found at {}",
+                image_path.display()
+            );
             continue;
         }
 
-        let img_bytes = std::fs::read(&image_path)
-            .expect("Failed to read test image");
+        let img_bytes = std::fs::read(&image_path).expect("Failed to read test image");
 
-        let result = process_image(&img_bytes, &engine, None::<fn(ProgressStage, f32)>, None::<Arc<AtomicBool>>)
-            .unwrap_or_else(|e| panic!("process_image failed for {stem}: {e}"));
+        let result = process_image(
+            &img_bytes,
+            &engine,
+            None::<fn(ProgressStage, f32)>,
+            None::<Arc<AtomicBool>>,
+        )
+        .unwrap_or_else(|e| panic!("process_image failed for {stem}: {e}"));
 
         let our_rgba = result.rgba_image;
 
@@ -122,16 +146,17 @@ fn test_rembg_reference() {
         // Reference mask is at full-size (rembg returns full-size output matching the input).
         // If reference mask dimensions differ from our output, resize reference mask to match
         // (using nearest neighbor for pixel-accurate comparison).
-        let ref_mask = if ref_mask.width() != our_rgba.width() || ref_mask.height() != our_rgba.height() {
-            image::imageops::resize(
-                &ref_mask,
-                our_rgba.width(),
-                our_rgba.height(),
-                image::imageops::FilterType::Nearest,
-            )
-        } else {
-            ref_mask
-        };
+        let ref_mask =
+            if ref_mask.width() != our_rgba.width() || ref_mask.height() != our_rgba.height() {
+                image::imageops::resize(
+                    &ref_mask,
+                    our_rgba.width(),
+                    our_rgba.height(),
+                    image::imageops::FilterType::Nearest,
+                )
+            } else {
+                ref_mask
+            };
 
         let pct = pixel_match_percent(&our_rgba, &ref_mask, tolerance);
 
@@ -154,8 +179,7 @@ fn test_rembg_reference() {
 
 #[test]
 fn test_process_image_produces_valid_rgba_png() {
-    let engine = OrtEngine::new(ModelKind::Silueta, 1)
-        .expect("Failed to create OrtEngine");
+    let engine = OrtEngine::new(ModelKind::Silueta, 1).expect("Failed to create OrtEngine");
 
     let image_path = test_images_dir().join("car-1.jpg");
     if !image_path.exists() {
@@ -164,12 +188,20 @@ fn test_process_image_produces_valid_rgba_png() {
     }
 
     let img_bytes = std::fs::read(&image_path).unwrap();
-    let result = process_image(&img_bytes, &engine, None::<fn(ProgressStage, f32)>, None::<Arc<AtomicBool>>)
-        .expect("process_image should succeed");
+    let result = process_image(
+        &img_bytes,
+        &engine,
+        None::<fn(ProgressStage, f32)>,
+        None::<Arc<AtomicBool>>,
+    )
+    .expect("process_image should succeed");
 
     // Verify output has transparency (not all-opaque)
     let has_transparency = result.rgba_image.pixels().any(|p| p[3] < 255);
-    assert!(has_transparency, "Background removal must produce at least some transparent pixels");
+    assert!(
+        has_transparency,
+        "Background removal must produce at least some transparent pixels"
+    );
 }
 
 // ============================================================
@@ -179,8 +211,7 @@ fn test_process_image_produces_valid_rgba_png() {
 #[test]
 fn test_model_selection_silueta_and_u2net() {
     // Silueta is bundled — must always load.
-    let _silueta = OrtEngine::new(ModelKind::Silueta, 1)
-        .expect("Silueta model should load");
+    let _silueta = OrtEngine::new(ModelKind::Silueta, 1).expect("Silueta model should load");
     // U2Net is OnDemand — only load when present.
     if prunr_models::is_available(prunr_models::ModelId::U2net) {
         let _u2net = OrtEngine::new(ModelKind::U2net, 1)
@@ -194,10 +225,12 @@ fn test_model_selection_silueta_and_u2net() {
 
 #[test]
 fn test_active_provider_queryable() {
-    let engine = OrtEngine::new(ModelKind::Silueta, 1)
-        .expect("OrtEngine::new should succeed");
+    let engine = OrtEngine::new(ModelKind::Silueta, 1).expect("OrtEngine::new should succeed");
     let provider = engine.active_provider();
-    assert!(!provider.is_empty(), "active_provider() must return a non-empty string");
+    assert!(
+        !provider.is_empty(),
+        "active_provider() must return a non-empty string"
+    );
     println!("Active execution provider: {provider}");
 }
 
@@ -209,8 +242,7 @@ fn test_active_provider_queryable() {
 fn test_progress_callback_all_stages() {
     use std::sync::{Arc, Mutex};
 
-    let engine = OrtEngine::new(ModelKind::Silueta, 1)
-        .expect("OrtEngine::new should succeed");
+    let engine = OrtEngine::new(ModelKind::Silueta, 1).expect("OrtEngine::new should succeed");
 
     let image_path = test_images_dir().join("car-1.jpg");
     if !image_path.exists() {
@@ -223,13 +255,25 @@ fn test_progress_callback_all_stages() {
     let stages: Arc<Mutex<Vec<ProgressStage>>> = Arc::new(Mutex::new(Vec::new()));
     let stages_clone = stages.clone();
 
-    let _ = process_image(&img_bytes, &engine, Some(move |stage, pct| {
-        stages_clone.lock().unwrap().push(stage);
-        assert!((0.0..=1.0).contains(&pct), "Progress pct must be in [0.0, 1.0], got {pct}");
-    }), None::<Arc<AtomicBool>>);
+    let _ = process_image(
+        &img_bytes,
+        &engine,
+        Some(move |stage, pct| {
+            stages_clone.lock().unwrap().push(stage);
+            assert!(
+                (0.0..=1.0).contains(&pct),
+                "Progress pct must be in [0.0, 1.0], got {pct}"
+            );
+        }),
+        None::<Arc<AtomicBool>>,
+    );
 
     let recorded = stages.lock().unwrap();
-    assert!(recorded.len() >= 5, "Expected at least 5 progress stages, got {}", recorded.len());
+    assert!(
+        recorded.len() >= 5,
+        "Expected at least 5 progress stages, got {}",
+        recorded.len()
+    );
 
     // Verify Infer stage is present (most important for UI feedback)
     assert!(
@@ -244,7 +288,7 @@ fn test_progress_callback_all_stages() {
 
 #[test]
 fn test_format_support_png_jpeg_webp_bmp() {
-    use image::{DynamicImage, RgbImage, Rgb};
+    use image::{DynamicImage, Rgb, RgbImage};
     use std::io::Cursor;
 
     let test_img = DynamicImage::ImageRgb8(RgbImage::from_pixel(32, 32, Rgb([100, 150, 200])));
@@ -252,27 +296,46 @@ fn test_format_support_png_jpeg_webp_bmp() {
 
     // Test each format by encoding to bytes then calling process_image
     let formats = [
-        ("PNG",  image::ImageFormat::Png),
+        ("PNG", image::ImageFormat::Png),
         ("JPEG", image::ImageFormat::Jpeg),
-        ("BMP",  image::ImageFormat::Bmp),
+        ("BMP", image::ImageFormat::Bmp),
     ];
 
     for (name, fmt) in &formats {
         let mut buf = Vec::new();
         test_img.write_to(&mut Cursor::new(&mut buf), *fmt).unwrap();
 
-        let result = process_image(&buf, &engine, None::<fn(ProgressStage, f32)>, None::<Arc<AtomicBool>>);
-        assert!(result.is_ok(), "Format {name} should be supported: {:?}", result.err());
+        let result = process_image(
+            &buf,
+            &engine,
+            None::<fn(ProgressStage, f32)>,
+            None::<Arc<AtomicBool>>,
+        );
+        assert!(
+            result.is_ok(),
+            "Format {name} should be supported: {:?}",
+            result.err()
+        );
     }
 
     // WebP: generate via image crate (requires webp feature)
     // image 0.25 supports WebP encode; create a small WebP from RGB data
     {
         let mut buf = Vec::new();
-        test_img.write_to(&mut Cursor::new(&mut buf), image::ImageFormat::WebP)
+        test_img
+            .write_to(&mut Cursor::new(&mut buf), image::ImageFormat::WebP)
             .expect("WebP encode should work with image 0.25 webp feature");
-        let result = process_image(&buf, &engine, None::<fn(ProgressStage, f32)>, None::<Arc<AtomicBool>>);
-        assert!(result.is_ok(), "WebP format should be supported: {:?}", result.err());
+        let result = process_image(
+            &buf,
+            &engine,
+            None::<fn(ProgressStage, f32)>,
+            None::<Arc<AtomicBool>>,
+        );
+        assert!(
+            result.is_ok(),
+            "WebP format should be supported: {:?}",
+            result.err()
+        );
     }
 }
 
@@ -285,9 +348,16 @@ fn test_large_image_warning() {
     // check_large_image returns LargeImage error for > 8000px images
     let large = DynamicImage::ImageRgb8(image::RgbImage::new(9000, 100));
     let err = check_large_image(&large);
-    assert!(err.is_some(), "Expected LargeImage warning for 9000px image");
+    assert!(
+        err.is_some(),
+        "Expected LargeImage warning for 9000px image"
+    );
     match err.unwrap() {
-        CoreError::LargeImage { width, height: _, limit } => {
+        CoreError::LargeImage {
+            width,
+            height: _,
+            limit,
+        } => {
             assert_eq!(width, 9000);
             assert_eq!(limit, LARGE_IMAGE_LIMIT);
         }
@@ -304,7 +374,8 @@ fn test_downscale_image_preserves_aspect_ratio() {
     assert!(
         scaled.width().max(scaled.height()) <= DOWNSCALE_TARGET,
         "Downscaled max dimension {} exceeds {}",
-        scaled.width().max(scaled.height()), DOWNSCALE_TARGET
+        scaled.width().max(scaled.height()),
+        DOWNSCALE_TARGET
     );
 
     let aspect_original = 8000.0_f64 / 4000.0;
@@ -340,7 +411,11 @@ fn test_batch_process_multiple_images() {
         None::<fn(usize, ProgressStage, f32)>,
     );
 
-    assert_eq!(results.len(), 2, "batch_process must return one result per input");
+    assert_eq!(
+        results.len(),
+        2,
+        "batch_process must return one result per input"
+    );
     for (i, r) in results.iter().enumerate() {
         assert!(r.is_ok(), "Batch result {} failed: {:?}", i, r);
     }
@@ -399,7 +474,8 @@ fn test_inpaint_smoke() {
         for x in 0..w {
             if mask.get_pixel(x, y).0[0] == 0 {
                 assert_eq!(
-                    result.get_pixel(x, y), img.get_pixel(x, y),
+                    result.get_pixel(x, y),
+                    img.get_pixel(x, y),
                     "unmasked pixel ({x}, {y}) was modified — decode_tile passthrough broken",
                 );
             }
@@ -410,13 +486,17 @@ fn test_inpaint_smoke() {
     let mut any_changed = false;
     for y in cy.saturating_sub(r)..(cy + r).min(h) {
         for x in cx.saturating_sub(r)..(cx + r).min(w) {
-            if mask.get_pixel(x, y).0[0] != 0
-                && result.get_pixel(x, y) != img.get_pixel(x, y) {
+            if mask.get_pixel(x, y).0[0] != 0 && result.get_pixel(x, y) != img.get_pixel(x, y) {
                 any_changed = true;
                 break;
             }
         }
-        if any_changed { break; }
+        if any_changed {
+            break;
+        }
     }
-    assert!(any_changed, "no masked pixel was changed — LaMa returned source unchanged");
+    assert!(
+        any_changed,
+        "no masked pixel was changed — LaMa returned source unchanged"
+    );
 }

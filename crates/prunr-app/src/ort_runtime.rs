@@ -36,15 +36,16 @@ impl std::fmt::Display for DylibSource {
 }
 
 pub fn init() -> Result<DylibSource, String> {
-    let (path, source) = resolve_dylib_path()
-        .ok_or_else(|| format!(
+    let (path, source) = resolve_dylib_path().ok_or_else(|| {
+        format!(
             "ONNX Runtime not found. Looked for `{DYLIB_NAME}` in (in order): \
              ORT_DYLIB_PATH env, user Runtime Store, bundled location next to executable. \
              Phase 19's Runtime Store will install one on first launch."
-        ))?;
+        )
+    })?;
 
-    let env = ort::init_from(&path)
-        .map_err(|e| format!("ort::init_from({}): {e}", path.display()))?;
+    let env =
+        ort::init_from(&path).map_err(|e| format!("ort::init_from({}): {e}", path.display()))?;
     // `commit()` returns false when an env was already committed (e.g.
     // double-init in tests, or future re-entry). ORT is initialized
     // either way — treat as success.
@@ -74,14 +75,16 @@ fn runtime_store_dylib() -> Option<PathBuf> {
     if !root.is_dir() {
         return None;
     }
-    let mut entries: Vec<_> = std::fs::read_dir(&root).ok()?
+    let mut entries: Vec<_> = std::fs::read_dir(&root)
+        .ok()?
         .filter_map(Result::ok)
         .filter(|e| e.file_type().ok().is_some_and(|ft| ft.is_dir()))
         .collect();
     // Deterministic order so logs reproduce; meaningful EP selection
     // happens at the per-session ladder, not at this layer.
     entries.sort_by_key(|e| e.file_name());
-    entries.into_iter()
+    entries
+        .into_iter()
         .map(|e| e.path().join(DYLIB_NAME))
         .find(|p| p.is_file())
 }
@@ -100,7 +103,8 @@ pub struct Diagnostics {
 pub fn diagnose() -> Diagnostics {
     let env_path = std::env::var_os("ORT_DYLIB_PATH").map(PathBuf::from);
     let store_root = prunr_models::data_dir().map(|d| d.join("runtimes"));
-    let store_entries = store_root.as_ref()
+    let store_entries = store_root
+        .as_ref()
         .filter(|p| p.is_dir())
         .and_then(|root| std::fs::read_dir(root).ok())
         .map(|read| {
@@ -116,11 +120,18 @@ pub fn diagnose() -> Diagnostics {
             v
         })
         .unwrap_or_default();
-    let bundled = std::env::current_exe().ok()
+    let bundled = std::env::current_exe()
+        .ok()
         .and_then(|exe| exe.parent().map(|p| p.join("runtime").join(DYLIB_NAME)))
-        .map(|p| { let exists = p.is_file(); (p, exists) });
+        .map(|p| {
+            let exists = p.is_file();
+            (p, exists)
+        });
     Diagnostics {
-        env_path, store_root, store_entries, bundled,
+        env_path,
+        store_root,
+        store_entries,
+        bundled,
         resolved: resolve_dylib_path(),
     }
 }
@@ -133,7 +144,9 @@ pub fn diagnose() -> Diagnostics {
 pub fn has_fallback_excluding(excluding: &Path) -> bool {
     if let Some(env) = std::env::var_os("ORT_DYLIB_PATH") {
         let p = PathBuf::from(env);
-        if p.is_file() && p != excluding { return true; }
+        if p.is_file() && p != excluding {
+            return true;
+        }
     }
     if let Some(root) = prunr_models::data_dir().map(|d| d.join("runtimes")) {
         if let Ok(read) = std::fs::read_dir(&root) {
