@@ -48,10 +48,16 @@ fn main() -> anyhow::Result<()> {
             eprintln!("Usage: cargo xtask <task>");
             eprintln!("Tasks:");
             eprintln!("  fetch-models           Download and verify ONNX model files to models/");
-            eprintln!("  probe-load-dynamic     [Phase 19-02b] Verify ort's `load-dynamic` mechanism");
+            eprintln!(
+                "  probe-load-dynamic     [Phase 19-02b] Verify ort's `load-dynamic` mechanism"
+            );
             eprintln!("                         can swap libonnxruntime at runtime end-to-end.");
-            eprintln!("                         Pass dylib path as second arg, or set ORT_DYLIB_PATH.");
-            eprintln!("  install-runtime        [Phase 19-09] Download + extract an `onnxruntime-*`");
+            eprintln!(
+                "                         Pass dylib path as second arg, or set ORT_DYLIB_PATH."
+            );
+            eprintln!(
+                "  install-runtime        [Phase 19-09] Download + extract an `onnxruntime-*`"
+            );
             eprintln!("                         PyPI wheel into the user runtime store. Args:");
             eprintln!("                         <package> <version> [target-name]");
             eprintln!("                         e.g. install-runtime onnxruntime-openvino 1.24.1");
@@ -77,7 +83,7 @@ fn main() -> anyhow::Result<()> {
 fn probe_load_dynamic() -> anyhow::Result<()> {
     use ort::{
         inputs as ort_inputs,
-        session::{Session, builder::GraphOptimizationLevel},
+        session::{builder::GraphOptimizationLevel, Session},
         value::Tensor,
     };
 
@@ -88,12 +94,13 @@ fn probe_load_dynamic() -> anyhow::Result<()> {
         move |e| anyhow::anyhow!("{stage}: {e}")
     }
 
-    let dylib_path: std::path::PathBuf = std::env::args().nth(2)
+    let dylib_path: std::path::PathBuf = std::env::args()
+        .nth(2)
         .map(std::path::PathBuf::from)
         .or_else(|| std::env::var_os("ORT_DYLIB_PATH").map(std::path::PathBuf::from))
-        .ok_or_else(|| anyhow::anyhow!(
-            "no dylib path supplied — pass as 2nd arg or set ORT_DYLIB_PATH"
-        ))?;
+        .ok_or_else(|| {
+            anyhow::anyhow!("no dylib path supplied — pass as 2nd arg or set ORT_DYLIB_PATH")
+        })?;
 
     if !dylib_path.is_file() {
         anyhow::bail!("dylib not found: {}", dylib_path.display());
@@ -109,23 +116,37 @@ fn probe_load_dynamic() -> anyhow::Result<()> {
     println!("OK ort::init_from + commit");
 
     let silueta = prunr_models::silueta_bytes();
-    println!("Building session against bundled Silueta ({} bytes)", silueta.len());
+    println!(
+        "Building session against bundled Silueta ({} bytes)",
+        silueta.len()
+    );
 
-    let mut session = Session::builder().map_err(ort_err("Session::builder"))?
-        .with_optimization_level(GraphOptimizationLevel::Level3).map_err(ort_err("opt level"))?
-        .commit_from_memory(silueta).map_err(ort_err("commit_from_memory"))?;
+    let mut session = Session::builder()
+        .map_err(ort_err("Session::builder"))?
+        .with_optimization_level(GraphOptimizationLevel::Level3)
+        .map_err(ort_err("opt level"))?
+        .commit_from_memory(silueta)
+        .map_err(ort_err("commit_from_memory"))?;
 
     let inputs = session.inputs();
     let outputs = session.outputs();
     println!("OK Session built");
-    println!("  Inputs:  {:?}", inputs.iter().map(|i| i.name()).collect::<Vec<_>>());
-    println!("  Outputs: {:?}", outputs.iter().map(|o| o.name()).collect::<Vec<_>>());
+    println!(
+        "  Inputs:  {:?}",
+        inputs.iter().map(|i| i.name()).collect::<Vec<_>>()
+    );
+    println!(
+        "  Outputs: {:?}",
+        outputs.iter().map(|o| o.name()).collect::<Vec<_>>()
+    );
 
     let input_name = inputs[0].name().to_string();
     // Silueta input: 1×3×320×320 f32 in [0, 1].
     let arr = ndarray::Array4::<f32>::zeros((1, 3, 320, 320));
     let t = Tensor::from_array(arr).map_err(ort_err("tensor build"))?;
-    let out = session.run(ort_inputs![input_name.as_str() => &t]).map_err(ort_err("session.run"))?;
+    let out = session
+        .run(ort_inputs![input_name.as_str() => &t])
+        .map_err(ort_err("session.run"))?;
     println!("OK Inference ran, {} output(s)", out.len());
 
     println!();
@@ -170,11 +191,7 @@ fn fetch_models() -> anyhow::Result<()> {
 
         let response = client.get(spec.url).send()?;
         if !response.status().is_success() {
-            anyhow::bail!(
-                "HTTP {} downloading {}",
-                response.status(),
-                spec.name
-            );
+            anyhow::bail!("HTTP {} downloading {}", response.status(), spec.name);
         }
         let bytes = response.bytes()?;
         let hash = hex::encode(Sha256::digest(&bytes));
@@ -209,7 +226,9 @@ fn fetch_models() -> anyhow::Result<()> {
     // xtask and the .zst step never ran.
     for spec in MODELS {
         let dest = std::path::Path::new("models").join(spec.name);
-        if !dest.exists() { continue; }
+        if !dest.exists() {
+            continue;
+        }
         let zst_path = dest.with_extension("onnx.zst");
         let needs = match (dest.metadata(), zst_path.metadata()) {
             (Ok(_), Err(_)) => true,
@@ -237,7 +256,9 @@ fn compress_to_zst(onnx_path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
     std::fs::write(&zst_path, &compressed)?;
     println!(
         "  Compressed {} ({:.1} MB → {:.1} MB)",
-        zst_path.display(), onnx_mb, zst_mb,
+        zst_path.display(),
+        onnx_mb,
+        zst_mb,
     );
     Ok(())
 }
@@ -269,9 +290,11 @@ fn compress_to_zst(onnx_path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
 /// `prunr_app::ort_runtime::resolve_dylib_path()` picks up.
 fn install_runtime() -> anyhow::Result<()> {
     use prunr_runtime_install as ri;
-    let package = std::env::args().nth(2)
+    let package = std::env::args()
+        .nth(2)
         .ok_or_else(|| anyhow::anyhow!("missing <package> arg, e.g. onnxruntime-openvino"))?;
-    let version = std::env::args().nth(3)
+    let version = std::env::args()
+        .nth(3)
         .ok_or_else(|| anyhow::anyhow!("missing <version> arg, e.g. 1.24.1"))?;
 
     // Either `--stage-to <DIR>` (CI bundle path) or a positional
@@ -283,8 +306,9 @@ fn install_runtime() -> anyhow::Result<()> {
     while i < extra.len() {
         let arg = &extra[i];
         if arg == "--stage-to" {
-            stage_to = Some(PathBuf::from(extra.get(i + 1)
-                .ok_or_else(|| anyhow::anyhow!("--stage-to requires a directory argument"))?));
+            stage_to = Some(PathBuf::from(extra.get(i + 1).ok_or_else(|| {
+                anyhow::anyhow!("--stage-to requires a directory argument")
+            })?));
             i += 2;
         } else if arg.starts_with("--") {
             // Fail loud on unknown flags so a typo like `--stagee-to`
@@ -313,14 +337,16 @@ fn install_runtime() -> anyhow::Result<()> {
         if stage.is_absolute() {
             anyhow::bail!("--stage-to must be a relative path: {}", stage.display());
         }
-        if stage.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+        if stage
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
             anyhow::bail!("--stage-to must not contain `..`: {}", stage.display());
         }
         println!("Stage-to: {}", stage.display());
         stage.clone()
     } else {
-        let target_name = target_name
-            .unwrap_or_else(|| ri::install_subdir(short, &version));
+        let target_name = target_name.unwrap_or_else(|| ri::install_subdir(short, &version));
         ri::validate_subdir(&target_name).map_err(|e| anyhow::anyhow!(e))?;
         let dir = prunr_models::data_dir()
             .ok_or_else(|| anyhow::anyhow!("could not resolve user data dir"))?
@@ -336,7 +362,8 @@ fn install_runtime() -> anyhow::Result<()> {
         .user_agent("prunr-xtask/0.1")
         .build()?;
     let metadata: serde_json::Value = client.get(&json_url).send()?.json()?;
-    let urls = metadata["urls"].as_array()
+    let urls = metadata["urls"]
+        .as_array()
         .ok_or_else(|| anyhow::anyhow!("PyPI metadata missing `urls`"))?;
 
     let wheel = ri::pick_wheel_for_host(urls).map_err(|e| anyhow::anyhow!(e))?;
@@ -425,8 +452,9 @@ fn render_golden_diff() -> anyhow::Result<()> {
     let mut total_new = 0usize;
 
     for phase in phases {
-        let fixture_root =
-            workspace_root.join("crates/prunr-core/tests/golden_data").join(phase);
+        let fixture_root = workspace_root
+            .join("crates/prunr-core/tests/golden_data")
+            .join(phase);
         if !fixture_root.is_dir() {
             continue;
         }
@@ -484,10 +512,17 @@ fn render_golden_diff() -> anyhow::Result<()> {
             }
 
             let before = image::load_from_memory(&head_bytes)
-                .map_err(|e| anyhow::anyhow!("decode HEAD expected.png ({}): {e}", rel_path.display()))?
+                .map_err(|e| {
+                    anyhow::anyhow!("decode HEAD expected.png ({}): {e}", rel_path.display())
+                })?
                 .to_rgba8();
             let after = image::load_from_memory(&disk_bytes)
-                .map_err(|e| anyhow::anyhow!("decode disk expected.png ({}): {e}", expected_path.display()))?
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "decode disk expected.png ({}): {e}",
+                        expected_path.display()
+                    )
+                })?
                 .to_rgba8();
 
             if before.dimensions() != after.dimensions() {
@@ -614,10 +649,7 @@ fn compose_triptych(
     out
 }
 
-fn compose_dim_mismatch(
-    before: &image::RgbaImage,
-    after: &image::RgbaImage,
-) -> image::RgbaImage {
+fn compose_dim_mismatch(before: &image::RgbaImage, after: &image::RgbaImage) -> image::RgbaImage {
     let (bw, bh) = before.dimensions();
     let (aw, ah) = after.dimensions();
     let sep = 2u32;
@@ -644,4 +676,3 @@ fn blit(dst: &mut image::RgbaImage, src: &image::RgbaImage, dx: u32, dy: u32) {
         }
     }
 }
-

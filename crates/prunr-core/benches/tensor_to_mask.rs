@@ -9,10 +9,7 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
 use image::{DynamicImage, Rgb, RgbImage};
 use ndarray::Array4;
-use prunr_core::{
-    tensor_to_mask, ModelKind, MaskSettings,
-    postprocess::PostprocessOpts,
-};
+use prunr_core::{postprocess::PostprocessOpts, tensor_to_mask, MaskSettings, ModelKind};
 
 fn make_original(w: u32, h: u32) -> DynamicImage {
     let mut img = RgbImage::new(w, h);
@@ -44,8 +41,14 @@ pub fn bench(c: &mut Criterion) {
     // live-preview drag.
     let original = make_original(4096, 3072);
     let tensor = make_tensor(1024, 1024);
-    let mask_no_refine = MaskSettings { refine_edges: false, ..Default::default() };
-    let mask_refine = MaskSettings { refine_edges: true, ..Default::default() };
+    let mask_no_refine = MaskSettings {
+        refine_edges: false,
+        ..Default::default()
+    };
+    let mask_refine = MaskSettings {
+        refine_edges: true,
+        ..Default::default()
+    };
 
     let mut group = c.benchmark_group("tensor_to_mask");
     group.throughput(Throughput::Elements((4096 * 3072) as u64));

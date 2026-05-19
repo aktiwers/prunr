@@ -31,7 +31,10 @@ use std::time::{Duration, Instant};
 
 use image::{DynamicImage, GrayImage, RgbaImage};
 
-use prunr_core::{LineMode, ModelKind, postprocess_from_flat, tensor_to_edge_mask, compose_edges, compose_edges_styled, compose_edges_dual_styled};
+use prunr_core::{
+    compose_edges, compose_edges_dual_styled, compose_edges_styled, postprocess_from_flat,
+    tensor_to_edge_mask, LineMode, ModelKind,
+};
 
 /// Build the "masked base" for SubjectOutline live preview — run Tier 2 mask
 /// from the cached seg tensor to reproduce the segmented subject, so edges
@@ -44,8 +47,8 @@ fn build_masked_base(
     correction: Option<&prunr_core::brush::MaskCorrection>,
 ) -> Option<DynamicImage> {
     let mask_settings = settings.mask_settings();
-    let opts = prunr_core::PostprocessOpts::new(&mask_settings, seg.model)
-        .with_correction(correction);
+    let opts =
+        prunr_core::PostprocessOpts::new(&mask_settings, seg.model).with_correction(correction);
     postprocess_from_flat(
         &seg.data,
         seg.height as usize,
@@ -90,11 +93,19 @@ pub struct PreviewResult {
     /// Some only when Kind was Edge and the mask was built (not reused).
     /// Keyed by (line_strength bits, scale) so scale switches don't reuse a
     /// stale mask built from a different tensor.
-    pub new_edge_mask: Option<(Arc<GrayImage>, u32 /* line_strength bits */, prunr_core::EdgeScale)>,
+    pub new_edge_mask: Option<(
+        Arc<GrayImage>,
+        u32, /* line_strength bits */
+        prunr_core::EdgeScale,
+    )>,
     /// Masked subject base built during this dispatch (SubjectOutline only),
     /// for the parent to cache so subsequent Edge tweaks whose mask recipe
     /// matches can skip `postprocess_from_flat`. Keyed by (MaskRecipe, model).
-    pub new_masked_base: Option<(Arc<image::RgbaImage>, prunr_core::MaskRecipe, prunr_core::ModelKind)>,
+    pub new_masked_base: Option<(
+        Arc<image::RgbaImage>,
+        prunr_core::MaskRecipe,
+        prunr_core::ModelKind,
+    )>,
     /// MaskRecipe snapshot taken when this dispatch was kicked off. The
     /// parent updates `applied_recipe.mask` to match so the recipe-drift
     /// tripwire doesn't immediately re-fire on a result it already
@@ -117,7 +128,9 @@ pub trait Clock: Send + Sync {
 /// Production clock: just delegates to `Instant::now`.
 pub struct SystemClock;
 impl Clock for SystemClock {
-    fn now(&self) -> Instant { Instant::now() }
+    fn now(&self) -> Instant {
+        Instant::now()
+    }
 }
 
 /// State for a pending (debounced) preview dispatch.
@@ -170,7 +183,10 @@ impl LivePreview {
         self.pending
             .entry(item_id)
             .and_modify(|p| p.kind = kind)
-            .or_insert_with(|| Pending { last_tweak_at: now, kind });
+            .or_insert_with(|| Pending {
+                last_tweak_at: now,
+                kind,
+            });
     }
 
     /// Flush: expire the pending tweak timer so the next `tick` dispatches
@@ -237,7 +253,13 @@ impl LivePreview {
             self.generation_counter = self.generation_counter.wrapping_add(1);
             let generation = self.generation_counter;
             let cancel = Arc::new(AtomicBool::new(false));
-            self.in_flight.insert(id, InFlight { cancel: cancel.clone(), generation });
+            self.in_flight.insert(
+                id,
+                InFlight {
+                    cancel: cancel.clone(),
+                    generation,
+                },
+            );
 
             let tx = self.result_tx.clone();
             rayon::spawn(move || {
@@ -256,14 +278,19 @@ impl LivePreview {
                     } else {
                         None
                     };
-                    let new_masked_base = output.built_masked_base
+                    let new_masked_base = output
+                        .built_masked_base
                         .zip(seg_model)
                         .map(|(base, model)| (base, mask_recipe, model));
                     // `is_final` is set by `drain_results`, where the UI
                     // thread can read `self.pending` atomically. The worker
                     // ships a placeholder and doesn't care.
                     let _ = tx.send(PreviewResult {
-                        item_id: id, rgba, generation, new_edge_mask, new_masked_base,
+                        item_id: id,
+                        rgba,
+                        generation,
+                        new_edge_mask,
+                        new_masked_base,
                         applied_mask: mask_recipe,
                         is_final: false,
                     });
@@ -283,7 +310,8 @@ impl LivePreview {
         while let Ok(mut r) = self.result_rx.try_recv() {
             // Drop stale: if generation doesn't match the last dispatch for
             // this item, a newer tweak superseded it.
-            let is_latest = self.in_flight
+            let is_latest = self
+                .in_flight
                 .get(&r.item_id)
                 .is_some_and(|f| f.generation == r.generation);
             if is_latest {
@@ -387,12 +415,18 @@ struct RunOutput {
 
 impl RunOutput {
     fn empty() -> Self {
-        Self { rgba: None, built_edge_mask: None, built_masked_base: None }
+        Self {
+            rgba: None,
+            built_edge_mask: None,
+            built_masked_base: None,
+        }
     }
 }
 
 fn run_preview(inputs: DispatchInputs, cancel: &AtomicBool) -> RunOutput {
-    if cancel.load(Ordering::Acquire) { return RunOutput::empty(); }
+    if cancel.load(Ordering::Acquire) {
+        return RunOutput::empty();
+    }
 
     // Pipeline shape follows the user's CURRENT `line_mode`, not tensor
     // presence. After a SubjectOutline → Off round-trip we (intentionally)
@@ -411,7 +445,12 @@ fn run_preview(inputs: DispatchInputs, cancel: &AtomicBool) -> RunOutput {
             PreviewKind::Mask => {
                 // invariant: is_subject_outline → seg_tensor is Some.
                 let seg = inputs.seg_tensor.as_ref().unwrap();
-                match build_masked_base(seg, &inputs.original, &inputs.settings, inputs.correction.as_deref()) {
+                match build_masked_base(
+                    seg,
+                    &inputs.original,
+                    &inputs.settings,
+                    inputs.correction.as_deref(),
+                ) {
                     Some(img) => {
                         let arc = Arc::new(img.to_rgba8());
                         (Some(arc.clone()), Some(arc))
@@ -424,7 +463,12 @@ fn run_preview(inputs: DispatchInputs, cancel: &AtomicBool) -> RunOutput {
                     (Some(cached), None)
                 } else {
                     let seg = inputs.seg_tensor.as_ref().unwrap();
-                    match build_masked_base(seg, &inputs.original, &inputs.settings, inputs.correction.as_deref()) {
+                    match build_masked_base(
+                        seg,
+                        &inputs.original,
+                        &inputs.settings,
+                        inputs.correction.as_deref(),
+                    ) {
                         Some(img) => {
                             let arc = Arc::new(img.to_rgba8());
                             (Some(arc.clone()), Some(arc))
@@ -455,8 +499,14 @@ fn run_preview(inputs: DispatchInputs, cancel: &AtomicBool) -> RunOutput {
                     };
                 };
                 // Off mode with seg tensor: rebuild masked RGBA (no edge compose).
-                let Some(masked) = build_masked_base(seg, &inputs.original, &inputs.settings, inputs.correction.as_deref())
-                else { return RunOutput::empty(); };
+                let Some(masked) = build_masked_base(
+                    seg,
+                    &inputs.original,
+                    &inputs.settings,
+                    inputs.correction.as_deref(),
+                ) else {
+                    return RunOutput::empty();
+                };
                 return RunOutput {
                     rgba: Some(masked.to_rgba8()),
                     built_edge_mask: None,
@@ -465,21 +515,32 @@ fn run_preview(inputs: DispatchInputs, cancel: &AtomicBool) -> RunOutput {
             }
             // SubjectOutline: compose subject + edges via the selected mode.
             // All modes are compose-time only — no re-inference.
-            let Some(base_arc) = masked_base else { return RunOutput::empty(); };
+            let Some(base_arc) = masked_base else {
+                return RunOutput::empty();
+            };
             // invariant: is_subject_outline → edge_tensor is Some.
             let edge = inputs.edge_tensor.as_ref().unwrap();
             let edge_settings = inputs.settings.edge_settings();
             let out_dims = (base_arc.width(), base_arc.height());
-            let (mask, _) = resolve_edge_mask(&inputs.cached_edge_mask, edge, out_dims, &edge_settings);
+            let (mask, _) =
+                resolve_edge_mask(&inputs.cached_edge_mask, edge, out_dims, &edge_settings);
             let rgba = dispatch_compose(
-                &mask, &base_arc, &edge_settings,
+                &mask,
+                &base_arc,
+                &edge_settings,
                 inputs.secondary_edge_tensor.as_ref(),
                 out_dims,
             );
-            RunOutput { rgba: Some(rgba), built_edge_mask: None, built_masked_base }
+            RunOutput {
+                rgba: Some(rgba),
+                built_edge_mask: None,
+                built_masked_base,
+            }
         }
         PreviewKind::Edge => {
-            let Some(edge) = inputs.edge_tensor.as_ref() else { return RunOutput::empty(); };
+            let Some(edge) = inputs.edge_tensor.as_ref() else {
+                return RunOutput::empty();
+            };
             let edge_settings = inputs.settings.edge_settings();
 
             // Base for compose: masked subject (SubjectOutline) or raw original (EdgesOnly).
@@ -489,23 +550,31 @@ fn run_preview(inputs: DispatchInputs, cancel: &AtomicBool) -> RunOutput {
                 Some(arc) => (arc.width(), arc.height()),
                 None => (inputs.original.width(), inputs.original.height()),
             };
-            let (mask, built_edge_mask) = resolve_edge_mask(&inputs.cached_edge_mask, edge, out_dims, &edge_settings);
+            let (mask, built_edge_mask) =
+                resolve_edge_mask(&inputs.cached_edge_mask, edge, out_dims, &edge_settings);
             // SubjectOutline: dispatch to the selected ComposeMode (with dual-scale if active).
             // EdgesOnly: plain lines-on-transparent via compose_edges.
             let rgba = if let Some(ref base_arc) = masked_base {
                 dispatch_compose(
-                    &mask, base_arc, &edge_settings,
+                    &mask,
+                    base_arc,
+                    &edge_settings,
                     inputs.secondary_edge_tensor.as_ref(),
                     (base_arc.width(), base_arc.height()),
                 )
             } else {
                 compose_edges(
-                    &mask, &inputs.original,
+                    &mask,
+                    &inputs.original,
                     edge_settings.solid_line_color,
                     edge_settings.edge_thickness,
                 )
             };
-            RunOutput { rgba: Some(rgba), built_edge_mask, built_masked_base }
+            RunOutput {
+                rgba: Some(rgba),
+                built_edge_mask,
+                built_masked_base,
+            }
         }
     }
 }
@@ -523,21 +592,35 @@ fn dispatch_compose(
 ) -> image::RgbaImage {
     use prunr_core::LineStyle;
     match (edge_settings.line_style, secondary_tensor) {
-        (LineStyle::DualScale { fine_color, bold_color }, Some(secondary)) => {
+        (
+            LineStyle::DualScale {
+                fine_color,
+                bold_color,
+            },
+            Some(secondary),
+        ) => {
             let (w, h) = base_dims;
             let bold_mask = tensor_to_edge_mask(
-                &secondary.data, secondary.height, secondary.width,
-                w, h, edge_settings.line_strength,
+                &secondary.data,
+                secondary.height,
+                secondary.width,
+                w,
+                h,
+                edge_settings.line_strength,
             );
             compose_edges_dual_styled(
-                primary_mask, &bold_mask, base,
+                primary_mask,
+                &bold_mask,
+                base,
                 edge_settings.compose_mode,
-                fine_color, bold_color,
+                fine_color,
+                bold_color,
                 edge_settings.edge_thickness,
             )
         }
         _ => compose_edges_styled(
-            primary_mask, base,
+            primary_mask,
+            base,
             edge_settings.compose_mode,
             edge_settings.line_style,
             edge_settings.solid_line_color,
@@ -586,14 +669,20 @@ mod tests {
             Arc::new(Self(Mutex::new(start)))
         }
         fn advance(&self, by: Duration) {
-            let mut g = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut g = self
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             *g += by;
         }
     }
 
     impl Clock for MockClock {
         fn now(&self) -> Instant {
-            *self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+            *self
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
         }
     }
 
@@ -618,7 +707,10 @@ mod tests {
         assert!(!lp.has_in_flight(), "fresh LivePreview is idle");
         lp.in_flight.insert(
             1,
-            InFlight { cancel: Arc::new(AtomicBool::new(false)), generation: 1 },
+            InFlight {
+                cancel: Arc::new(AtomicBool::new(false)),
+                generation: 1,
+            },
         );
         assert!(lp.has_in_flight());
         lp.cancel_all();
@@ -634,7 +726,10 @@ mod tests {
         let cancel = Arc::new(AtomicBool::new(false));
         lp.in_flight.insert(
             7,
-            InFlight { cancel: cancel.clone(), generation: 1 },
+            InFlight {
+                cancel: cancel.clone(),
+                generation: 1,
+            },
         );
         lp.mark_tweak(7, PreviewKind::Edge);
         assert!(
@@ -727,7 +822,10 @@ mod tests {
         lp.mark_tweak(1, PreviewKind::Mask);
         let wait = lp.tick(|_, _| None);
         assert!(wait.is_some(), "should still be pending");
-        assert!(lp.in_flight.is_empty(), "no dispatch before debounce expires");
+        assert!(
+            lp.in_flight.is_empty(),
+            "no dispatch before debounce expires"
+        );
     }
 
     #[test]
@@ -736,7 +834,10 @@ mod tests {
         lp.mark_tweak(1, PreviewKind::Mask);
         lp.in_flight.insert(
             2,
-            InFlight { cancel: Arc::new(AtomicBool::new(false)), generation: 1 },
+            InFlight {
+                cancel: Arc::new(AtomicBool::new(false)),
+                generation: 1,
+            },
         );
         lp.cancel_all();
         assert!(lp.pending.is_empty());
@@ -750,17 +851,22 @@ mod tests {
         let mut lp = LivePreview::default();
         lp.in_flight.insert(
             42,
-            InFlight { cancel: Arc::new(AtomicBool::new(false)), generation: 5 },
+            InFlight {
+                cancel: Arc::new(AtomicBool::new(false)),
+                generation: 5,
+            },
         );
-        lp.result_tx.send(PreviewResult {
-            item_id: 42,
-            rgba: RgbaImage::new(1, 1),
-            generation: 1,
-            new_edge_mask: None,
-            new_masked_base: None,
-            applied_mask: prunr_core::MaskRecipe::from(&prunr_core::MaskSettings::default()),
-            is_final: false,
-        }).unwrap();
+        lp.result_tx
+            .send(PreviewResult {
+                item_id: 42,
+                rgba: RgbaImage::new(1, 1),
+                generation: 1,
+                new_edge_mask: None,
+                new_masked_base: None,
+                applied_mask: prunr_core::MaskRecipe::from(&prunr_core::MaskSettings::default()),
+                is_final: false,
+            })
+            .unwrap();
 
         let drained = lp.drain_results();
         assert!(drained.is_empty(), "stale generation must not be returned");
@@ -775,17 +881,22 @@ mod tests {
         let mut lp = LivePreview::default();
         lp.in_flight.insert(
             99,
-            InFlight { cancel: Arc::new(AtomicBool::new(false)), generation: 7 },
+            InFlight {
+                cancel: Arc::new(AtomicBool::new(false)),
+                generation: 7,
+            },
         );
-        lp.result_tx.send(PreviewResult {
-            item_id: 99,
-            rgba: RgbaImage::new(2, 2),
-            generation: 7,
-            new_edge_mask: None,
-            new_masked_base: None,
-            applied_mask: prunr_core::MaskRecipe::from(&prunr_core::MaskSettings::default()),
-            is_final: false,
-        }).unwrap();
+        lp.result_tx
+            .send(PreviewResult {
+                item_id: 99,
+                rgba: RgbaImage::new(2, 2),
+                generation: 7,
+                new_edge_mask: None,
+                new_masked_base: None,
+                applied_mask: prunr_core::MaskRecipe::from(&prunr_core::MaskSettings::default()),
+                is_final: false,
+            })
+            .unwrap();
 
         let drained = lp.drain_results();
         assert_eq!(drained.len(), 1);
@@ -801,15 +912,17 @@ mod tests {
         // No in-flight entry at all (user cancel_all'd or never dispatched).
         // A late result arriving for an unknown id must be dropped cleanly.
         let mut lp = LivePreview::default();
-        lp.result_tx.send(PreviewResult {
-            item_id: 777,
-            rgba: RgbaImage::new(1, 1),
-            generation: 1,
-            new_edge_mask: None,
-            new_masked_base: None,
-            applied_mask: prunr_core::MaskRecipe::from(&prunr_core::MaskSettings::default()),
-            is_final: false,
-        }).unwrap();
+        lp.result_tx
+            .send(PreviewResult {
+                item_id: 777,
+                rgba: RgbaImage::new(1, 1),
+                generation: 1,
+                new_edge_mask: None,
+                new_masked_base: None,
+                applied_mask: prunr_core::MaskRecipe::from(&prunr_core::MaskSettings::default()),
+                is_final: false,
+            })
+            .unwrap();
         let drained = lp.drain_results();
         assert!(drained.is_empty());
     }
@@ -820,21 +933,29 @@ mod tests {
         let mut lp = LivePreview::default();
         lp.in_flight.insert(
             11,
-            InFlight { cancel: Arc::new(AtomicBool::new(false)), generation: 3 },
+            InFlight {
+                cancel: Arc::new(AtomicBool::new(false)),
+                generation: 3,
+            },
         );
-        lp.result_tx.send(PreviewResult {
-            item_id: 11,
-            rgba: RgbaImage::new(1, 1),
-            generation: 3,
-            new_edge_mask: None,
-            new_masked_base: None,
-            applied_mask: prunr_core::MaskRecipe::from(&prunr_core::MaskSettings::default()),
-            is_final: false,
-        }).unwrap();
+        lp.result_tx
+            .send(PreviewResult {
+                item_id: 11,
+                rgba: RgbaImage::new(1, 1),
+                generation: 3,
+                new_edge_mask: None,
+                new_masked_base: None,
+                applied_mask: prunr_core::MaskRecipe::from(&prunr_core::MaskSettings::default()),
+                is_final: false,
+            })
+            .unwrap();
 
         let drained = lp.drain_results();
         assert_eq!(drained.len(), 1);
-        assert!(drained[0].is_final, "empty pending at drain time → result is final");
+        assert!(
+            drained[0].is_final,
+            "empty pending at drain time → result is final"
+        );
     }
 
     #[test]
@@ -844,24 +965,35 @@ mod tests {
         let mut lp = LivePreview::default();
         lp.in_flight.insert(
             22,
-            InFlight { cancel: Arc::new(AtomicBool::new(false)), generation: 2 },
+            InFlight {
+                cancel: Arc::new(AtomicBool::new(false)),
+                generation: 2,
+            },
         );
         lp.pending.insert(
             22,
-            Pending { last_tweak_at: Instant::now(), kind: PreviewKind::Mask },
+            Pending {
+                last_tweak_at: Instant::now(),
+                kind: PreviewKind::Mask,
+            },
         );
-        lp.result_tx.send(PreviewResult {
-            item_id: 22,
-            rgba: RgbaImage::new(1, 1),
-            generation: 2,
-            new_edge_mask: None,
-            new_masked_base: None,
-            applied_mask: prunr_core::MaskRecipe::from(&prunr_core::MaskSettings::default()),
-            is_final: false,
-        }).unwrap();
+        lp.result_tx
+            .send(PreviewResult {
+                item_id: 22,
+                rgba: RgbaImage::new(1, 1),
+                generation: 2,
+                new_edge_mask: None,
+                new_masked_base: None,
+                applied_mask: prunr_core::MaskRecipe::from(&prunr_core::MaskSettings::default()),
+                is_final: false,
+            })
+            .unwrap();
 
         let drained = lp.drain_results();
         assert_eq!(drained.len(), 1);
-        assert!(!drained[0].is_final, "pending for this item means drag is still active");
+        assert!(
+            !drained[0].is_final,
+            "pending for this item means drag is still active"
+        );
     }
 }

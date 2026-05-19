@@ -7,12 +7,17 @@ use super::super::state::AppState;
 #[test]
 fn handle_cancel_raises_global_flag_during_processing() {
     let mut app = PrunrApp::new_for_test();
-    assert!(!app.processor.cancels.is_cancelled(0), "cancel registry should start clean");
+    assert!(
+        !app.processor.cancels.is_cancelled(0),
+        "cancel registry should start clean"
+    );
 
     app.handle_cancel();
 
-    assert!(app.processor.cancels.is_cancelled(0),
-        "handle_cancel must raise the global flag (every id reports cancelled)");
+    assert!(
+        app.processor.cancels.is_cancelled(0),
+        "handle_cancel must raise the global flag (every id reports cancelled)"
+    );
 }
 
 #[test]
@@ -22,7 +27,11 @@ fn handle_cancel_selected_raises_only_selected_item_flags() {
 
     let mut app = PrunrApp::new_for_test();
     // Seed batch: id 1 selected+processing, id 2 selected+done, id 3 unselected+processing.
-    for (id, selected, status) in [(1u64, true, BatchStatus::Processing), (2, true, BatchStatus::Done), (3, false, BatchStatus::Processing)] {
+    for (id, selected, status) in [
+        (1u64, true, BatchStatus::Processing),
+        (2, true, BatchStatus::Done),
+        (3, false, BatchStatus::Processing),
+    ] {
         let item = push_test_item(&mut app, id);
         item.selected = selected;
         item.status = status;
@@ -31,16 +40,29 @@ fn handle_cancel_selected_raises_only_selected_item_flags() {
     app.handle_cancel_selected();
 
     // Only id 1 matches selected + Processing.
-    assert!(app.processor.cancels.is_cancelled(1), "selected processing item must be cancelled");
-    assert!(!app.processor.cancels.is_cancelled(2), "selected-but-done item must not be cancelled");
-    assert!(!app.processor.cancels.is_cancelled(3), "unselected item must not be cancelled");
+    assert!(
+        app.processor.cancels.is_cancelled(1),
+        "selected processing item must be cancelled"
+    );
+    assert!(
+        !app.processor.cancels.is_cancelled(2),
+        "selected-but-done item must not be cancelled"
+    );
+    assert!(
+        !app.processor.cancels.is_cancelled(3),
+        "unselected item must not be cancelled"
+    );
 
     // Cancelled item flipped immediately → thumbnail / canvas spinners stop
     // before the subprocess acknowledges the cancel.
     let item1 = app.batch.find_by_id(1).expect("id 1 still present");
     assert_eq!(item1.status, BatchStatus::Pending);
     let item3 = app.batch.find_by_id(3).expect("id 3 still present");
-    assert_eq!(item3.status, BatchStatus::Processing, "unselected item keeps running");
+    assert_eq!(
+        item3.status,
+        BatchStatus::Processing,
+        "unselected item keeps running"
+    );
 }
 
 #[test]
