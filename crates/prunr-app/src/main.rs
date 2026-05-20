@@ -29,11 +29,15 @@ fn main() {
     if cli.debug {
         // SAFETY: single-threaded at this point in main.
         if std::env::var_os("RUST_LOG").is_none() {
-            unsafe { std::env::set_var("RUST_LOG", "prunr=debug"); }
+            unsafe {
+                std::env::set_var("RUST_LOG", "prunr=debug");
+            }
         }
         if std::env::var_os("PRUNR_DEBUG_LOG").is_none() {
             let log_path = std::env::temp_dir().join("prunr-debug.log");
-            unsafe { std::env::set_var("PRUNR_DEBUG_LOG", &log_path); }
+            unsafe {
+                std::env::set_var("PRUNR_DEBUG_LOG", &log_path);
+            }
         }
     }
 
@@ -55,7 +59,10 @@ fn main() {
 
     if cli.clear_ep_cache {
         let n = prunr_core::ep_compat::clear();
-        println!("Cleared {n} cached EP failure entr{}", if n == 1 { "y" } else { "ies" });
+        println!(
+            "Cleared {n} cached EP failure entr{}",
+            if n == 1 { "y" } else { "ies" }
+        );
         std::process::exit(0);
     }
 
@@ -77,7 +84,9 @@ fn main() {
             // worker subprocess is a separate process, ORT init does not
             // spawn user-visible threads, and `gui::run` is reached
             // immediately after this block.
-            unsafe { std::env::set_var("PRUNR_OPEN_FILE", s); }
+            unsafe {
+                std::env::set_var("PRUNR_OPEN_FILE", s);
+            }
         }
     } else if !cli.inputs.is_empty() {
         let exit_code = cli::run_remove(&cli);
@@ -104,12 +113,9 @@ fn init_tracing() {
     use std::sync::Mutex;
     use tracing_subscriber::{fmt, prelude::*, EnvFilter, Registry};
 
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("prunr=info"));
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("prunr=info"));
 
-    let stderr_layer = fmt::layer()
-        .with_target(false)
-        .with_writer(std::io::stderr);
+    let stderr_layer = fmt::layer().with_target(false).with_writer(std::io::stderr);
 
     let file_layer = std::env::var_os("PRUNR_DEBUG_LOG")
         .and_then(|p| {

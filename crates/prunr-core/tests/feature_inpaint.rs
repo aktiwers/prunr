@@ -44,7 +44,9 @@ fn fixture_mask() -> GrayImage {
 }
 
 fn run_inpaint_test(model_id: ModelId, label: &str) {
-    if skip_if_no_ort(label) { return; }
+    if skip_if_no_ort(label) {
+        return;
+    }
     if !is_available(model_id) {
         eprintln!(
             "[{label}] SKIP: {model_id:?} is not installed. Run `cargo xtask fetch-models` \

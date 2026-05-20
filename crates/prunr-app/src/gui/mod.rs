@@ -1,32 +1,32 @@
 pub mod app;
-pub mod toasts;
-pub mod item;
-pub mod history_manager;
-pub mod drag_export_state;
+pub mod background_io;
 pub mod batch_manager;
-pub mod processor;
-pub mod state;
-pub mod settings;
+pub mod brush_state;
+pub mod download_manager;
+pub mod drag_export;
+pub mod drag_export_state;
+pub mod env_overrides;
+pub mod hardware_cache;
+pub mod history_disk;
+pub mod history_manager;
+pub mod inpaint_bridge;
+pub mod item;
 pub mod item_settings;
+pub mod knob_catalog;
+pub mod live_preview;
+pub mod memory;
 pub mod presets;
 pub mod presets_fs;
-pub mod worker;
-pub mod inpaint_bridge;
-pub mod theme;
-pub mod views;
-pub mod zoom_state;
-pub mod brush_state;
+pub mod processor;
+pub mod settings;
+pub mod state;
 pub mod status_state;
-pub mod background_io;
-pub mod drag_export;
-pub mod history_disk;
-pub mod memory;
-pub mod live_preview;
-pub mod knob_catalog;
 pub mod system_bridge;
-pub mod download_manager;
-pub mod hardware_cache;
-pub mod env_overrides;
+pub mod theme;
+pub mod toasts;
+pub mod views;
+pub mod worker;
+pub mod zoom_state;
 
 #[cfg(test)]
 mod tests;
@@ -55,7 +55,11 @@ pub fn run() -> eframe::Result {
         ..Default::default()
     };
 
-    let app_factory = || Box::new(|cc: &eframe::CreationContext<'_>| Ok(Box::new(app::PrunrApp::new(cc)) as Box<dyn eframe::App>));
+    let app_factory = || {
+        Box::new(|cc: &eframe::CreationContext<'_>| {
+            Ok(Box::new(app::PrunrApp::new(cc)) as Box<dyn eframe::App>)
+        })
+    };
 
     // Try default renderer (glow/OpenGL). On Windows-on-Mac VMs and older Intel
     // GPUs OpenGL drivers are unreliable; fall back to wgpu (DX12/Metal/Vulkan)
@@ -78,7 +82,9 @@ pub fn run() -> eframe::Result {
 /// machines without a console (Windows GUI subsystem) can still diagnose.
 fn log_startup_error(stage: &str, err: &eframe::Error) {
     tracing::error!(stage, %err, "startup failed");
-    let Ok(exe) = std::env::current_exe() else { return };
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
     let Some(dir) = exe.parent() else { return };
     let path = dir.join("prunr-startup-error.log");
     let _ = std::fs::write(

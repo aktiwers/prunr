@@ -9,14 +9,11 @@ use std::io::{BufReader, BufWriter};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 
-use prunr_core::{
-    create_engine_pool,
-    OrtEngine, ProcessResult, ProgressStage, EdgeEngine,
-};
+use prunr_core::{create_engine_pool, EdgeEngine, OrtEngine, ProcessResult, ProgressStage};
 
-use prunr_app::subprocess::protocol::*;
-use prunr_app::subprocess::ipc::{read_message, write_message};
 use prunr_app::gui::settings::LineMode;
+use prunr_app::subprocess::ipc::{read_message, write_message};
+use prunr_app::subprocess::protocol::*;
 
 /// Weighted memory semaphore for processing.
 /// Instead of a binary lock, this tracks "pixel units" (1 unit = 1M pixels).
@@ -60,7 +57,10 @@ impl WeightedSemaphore {
         let capped = weight.min(self.total_units);
         // Poison recovery: the semaphore state is just bookkeeping. A
         // panicking user of the semaphore must not deadlock the worker pool.
-        let mut state = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let my_ticket = state.next_ticket;
         state.next_ticket += 1;
         state.waiters.push_back((my_ticket, capped));
@@ -73,8 +73,12 @@ impl WeightedSemaphore {
                 // Leave room for the head waiter so it isn't starved.
                 state.units_remaining >= capped + head_weight
             };
-            if can_go { break; }
-            state = self.available.wait(state)
+            if can_go {
+                break;
+            }
+            state = self
+                .available
+                .wait(state)
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
         }
         // Remove our entry (could be head or interior — interior happens when
@@ -83,7 +87,10 @@ impl WeightedSemaphore {
         state.units_remaining -= capped;
         // Wake other waiters in case one of them now fits behind us.
         self.available.notify_all();
-        SemaphoreGuard { sem: self.clone(), acquired: capped }
+        SemaphoreGuard {
+            sem: self.clone(),
+            acquired: capped,
+        }
     }
 }
 
@@ -96,7 +103,11 @@ struct SemaphoreGuard {
 impl Drop for SemaphoreGuard {
     fn drop(&mut self) {
         // Poison recovery: drop must not panic (would abort under double-panic).
-        let mut state = self.sem.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut state = self
+            .sem
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         state.units_remaining += self.acquired;
         self.sem.available.notify_all();
     }
@@ -111,11 +122,10 @@ impl Drop for SemaphoreGuard {
 /// safe because the parent only ever queues one in-flight dispatch per
 /// id, and any later re-process would emit a fresh `CancelItem` if the
 /// user wanted it cancelled too.
-fn is_item_cancelled(
-    set: &Arc<Mutex<std::collections::HashSet<u64>>>,
-    item_id: u64,
-) -> bool {
-    let mut guard = set.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+fn is_item_cancelled(set: &Arc<Mutex<std::collections::HashSet<u64>>>, item_id: u64) -> bool {
+    let mut guard = set
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     guard.remove(&item_id)
 }
 
@@ -125,7 +135,8 @@ type CancelMap = Arc<Mutex<std::collections::HashMap<u64, Arc<AtomicBool>>>>;
 /// registered one. Used twice from `CancelItem` (seg + inpaint maps);
 /// shared so both sites keep the same lock-then-store sequence.
 fn flip_cancel_flag(map: &CancelMap, item_id: u64) {
-    if let Some(flag) = map.lock()
+    if let Some(flag) = map
+        .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .get(&item_id)
     {
@@ -156,7 +167,8 @@ struct CancelMapGuard {
 
 impl Drop for CancelMapGuard {
     fn drop(&mut self) {
-        self.map.lock()
+        self.map
+            .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&self.item_id);
     }
@@ -236,7 +248,14 @@ pub fn run_worker() -> ! {
 
     // Read Init command
     let Ok(Some(SubprocessCommand::Init {
-        model, jobs, mask, force_cpu, line_mode, edge, ipc_dir, inpaint_only,
+        model,
+        jobs,
+        mask,
+        force_cpu,
+        line_mode,
+        edge,
+        ipc_dir,
+        inpaint_only,
     })) = read_message::<_, SubprocessCommand>(&mut reader)
     else {
         let _ = evt_tx.send(SubprocessEvent::InitError {
@@ -247,7 +266,11 @@ pub fn run_worker() -> ! {
         std::process::exit(1);
     };
     tracing::info!(
-        ?model, jobs, force_cpu, ?line_mode, inpaint_only,
+        ?model,
+        jobs,
+        force_cpu,
+        ?line_mode,
+        inpaint_only,
         "worker: Init received, beginning init sequence",
     );
 
@@ -354,7 +377,11 @@ pub fn run_worker() -> ! {
         };
 
         match cmd {
-            SubprocessCommand::ProcessImage { item_id, image_path, chain_input } => {
+            SubprocessCommand::ProcessImage {
+                item_id,
+                image_path,
+                chain_input,
+            } => {
                 let engine = if !engines.is_empty() {
                     Some(engines[engine_idx % engines.len()].clone())
                 } else {
@@ -727,8 +754,13 @@ pub fn run_worker() -> ! {
             }
 
             SubprocessCommand::RePostProcess {
-                item_id, tensor_path, tensor_height, tensor_width,
-                model, original_image_path, mask: repost_mask,
+                item_id,
+                tensor_path,
+                tensor_height,
+                tensor_width,
+                model,
+                original_image_path,
+                mask: repost_mask,
             } => {
                 let evt_tx = evt_tx.clone();
                 let in_flight = in_flight.clone();
@@ -740,7 +772,8 @@ pub fn run_worker() -> ! {
                 pool.spawn(move || {
                     if is_item_cancelled(&cancelled_items, item_id) {
                         let _ = evt_tx.send(SubprocessEvent::ImageError {
-                            item_id, error: CANCELLED_ERR_MSG.into(),
+                            item_id,
+                            error: CANCELLED_ERR_MSG.into(),
                         });
                         cleanup_ipc_temps(&ipc, &[&tensor_path, &original_image_path]);
                         in_flight.fetch_sub(1, Ordering::AcqRel);
@@ -760,9 +793,13 @@ pub fn run_worker() -> ! {
                         let original = prunr_core::load_image_from_bytes(&img_bytes)
                             .map_err(|e| format!("Failed to decode original: {e}"))?;
                         prunr_core::postprocess_from_flat(
-                            &floats, tensor_height as usize, tensor_width as usize,
-                            &original, &prunr_core::PostprocessOpts::new(&repost_mask, model),
-                        ).map_err(|e| e.to_string())
+                            &floats,
+                            tensor_height as usize,
+                            tensor_width as usize,
+                            &original,
+                            &prunr_core::PostprocessOpts::new(&repost_mask, model),
+                        )
+                        .map_err(|e| e.to_string())
                     })();
 
                     match tensor_result {
@@ -811,8 +848,12 @@ pub fn run_worker() -> ! {
             }
 
             SubprocessCommand::AddEdgeInference {
-                item_id, image_path, seg_tensor_path,
-                seg_tensor_height, seg_tensor_width, model: cmd_model,
+                item_id,
+                image_path,
+                seg_tensor_path,
+                seg_tensor_height,
+                seg_tensor_width,
+                model: cmd_model,
                 mask: cmd_mask,
             } => {
                 let evt_tx = evt_tx.clone();
@@ -921,7 +962,8 @@ pub fn run_worker() -> ! {
 
             SubprocessCommand::CancelItem { item_id } => {
                 {
-                    let mut guard = cancelled_items.lock()
+                    let mut guard = cancelled_items
+                        .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
                     guard.insert(item_id);
                 }
@@ -931,7 +973,15 @@ pub fn run_worker() -> ! {
                 flip_cancel_flag(&cancel_flags, item_id);
             }
 
-            SubprocessCommand::Inpaint { item_id, model_id, image_path, mask_path, sd_req, feather_px, sharpen } => {
+            SubprocessCommand::Inpaint {
+                item_id,
+                model_id,
+                image_path,
+                mask_path,
+                sd_req,
+                feather_px,
+                sharpen,
+            } => {
                 // Inpaint runs independent of the seg/edge engine pool —
                 // a fresh thread per dispatch keeps inference from
                 // blocking batched seg work. Bump `in_flight` so a
@@ -975,7 +1025,9 @@ pub fn run_worker() -> ! {
                 let pump_handle = std::thread::spawn(move || {
                     let mut last_current = u32::MAX;
                     loop {
-                        if pump_done_for_thread.load(Ordering::Acquire) { break; }
+                        if pump_done_for_thread.load(Ordering::Acquire) {
+                            break;
+                        }
                         let (current, total) = progress_for_pump.read();
                         // Re-check after the read but before the send. Without
                         // this, the worker could flip pump_done between the
@@ -986,10 +1038,14 @@ pub fn run_worker() -> ! {
                         // finishes, so the pre-send re-check is the only way
                         // to honour the "no Progress after Done" invariant
                         // documented above.
-                        if pump_done_for_thread.load(Ordering::Acquire) { break; }
+                        if pump_done_for_thread.load(Ordering::Acquire) {
+                            break;
+                        }
                         if current != last_current {
                             let _ = evt_tx_for_pump.send(SubprocessEvent::InpaintProgress {
-                                item_id, current, total,
+                                item_id,
+                                current,
+                                total,
                             });
                             last_current = current;
                         }
@@ -999,125 +1055,131 @@ pub fn run_worker() -> ! {
                 let spawn_result = std::thread::Builder::new()
                     .name("prunr-inpaint".into())
                     .spawn(move || {
-                    // RAII guard: stops pump + clears registry + decrements
-                    // in_flight on Drop. Runs even if the inference closure
-                    // panics — without this the pump thread loops forever
-                    // holding evt_tx and the parent's cancel flag is never
-                    // reclaimed. Joining the pump before any final send
-                    // closes the "stale Progress after Done" race: pump
-                    // can't be mid-iteration when InpaintDone goes on the wire.
-                    //
-                    // Cancel-map cleanup happens BEFORE `in_flight.fetch_sub`
-                    // so a `Shutdown` waiting on `in_flight == 0` never
-                    // observes the count drop while the cancel-flag entry
-                    // for this item is still present.
-                    //
-                    // `cancel_guard` is the only owner of (item_id, map);
-                    // the body removes through it explicitly and the
-                    // guard's own drop is then a no-op. The guard stays
-                    // for panic-safety — if the body panics between the
-                    // explicit remove and `fetch_sub`, drop still runs
-                    // and (idempotent) re-removes. The parent only ever
-                    // queues one in-flight dispatch per id, so a `CancelItem`
-                    // can't insert a fresh flag between the body's remove and
-                    // the guard's drop — no accidental re-registration.
-                    struct Cleanup {
-                        pump_done: Arc<AtomicBool>,
-                        pump_handle: Option<std::thread::JoinHandle<()>>,
-                        in_flight: Arc<std::sync::atomic::AtomicUsize>,
-                        cancel_guard: CancelMapGuard,
-                    }
-                    impl Drop for Cleanup {
-                        fn drop(&mut self) {
-                            self.pump_done.store(true, Ordering::Release);
-                            if let Some(h) = self.pump_handle.take() {
-                                let _ = h.join();
-                            }
-                            self.cancel_guard.map.lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                .remove(&self.cancel_guard.item_id);
-                            self.in_flight.fetch_sub(1, Ordering::AcqRel);
+                        // RAII guard: stops pump + clears registry + decrements
+                        // in_flight on Drop. Runs even if the inference closure
+                        // panics — without this the pump thread loops forever
+                        // holding evt_tx and the parent's cancel flag is never
+                        // reclaimed. Joining the pump before any final send
+                        // closes the "stale Progress after Done" race: pump
+                        // can't be mid-iteration when InpaintDone goes on the wire.
+                        //
+                        // Cancel-map cleanup happens BEFORE `in_flight.fetch_sub`
+                        // so a `Shutdown` waiting on `in_flight == 0` never
+                        // observes the count drop while the cancel-flag entry
+                        // for this item is still present.
+                        //
+                        // `cancel_guard` is the only owner of (item_id, map);
+                        // the body removes through it explicitly and the
+                        // guard's own drop is then a no-op. The guard stays
+                        // for panic-safety — if the body panics between the
+                        // explicit remove and `fetch_sub`, drop still runs
+                        // and (idempotent) re-removes. The parent only ever
+                        // queues one in-flight dispatch per id, so a `CancelItem`
+                        // can't insert a fresh flag between the body's remove and
+                        // the guard's drop — no accidental re-registration.
+                        struct Cleanup {
+                            pump_done: Arc<AtomicBool>,
+                            pump_handle: Option<std::thread::JoinHandle<()>>,
+                            in_flight: Arc<std::sync::atomic::AtomicUsize>,
+                            cancel_guard: CancelMapGuard,
                         }
-                    }
-                    let _cleanup = Cleanup {
-                        pump_done: pump_done.clone(),
-                        pump_handle: Some(pump_handle),
-                        in_flight: in_flight_for_thread,
-                        cancel_guard: CancelMapGuard {
-                            item_id,
-                            map: inpaint_cancels.clone(),
-                        },
-                    };
-                    let result = (|| -> Result<image::RgbaImage, String> {
-                        // Inner scope drops encoded bytes + DynamicImage as
-                        // soon as `to_rgba8`/`to_luma8` produces the final
-                        // buffer — encoded source (~5–20 MB at 4 K) and
-                        // intermediate DynamicImage (~50 MB RGBA at 4 K)
-                        // would otherwise overlap with model weights.
-                        let image: image::RgbaImage = {
-                            let bytes = std::fs::read(&image_path)
-                                .map_err(|e| format!("read source: {e}"))?;
-                            let _ = std::fs::remove_file(&image_path);
-                            image::load_from_memory(&bytes)
-                                .map_err(|e| format!("decode source: {e}"))?
-                                .to_rgba8()
+                        impl Drop for Cleanup {
+                            fn drop(&mut self) {
+                                self.pump_done.store(true, Ordering::Release);
+                                if let Some(h) = self.pump_handle.take() {
+                                    let _ = h.join();
+                                }
+                                self.cancel_guard
+                                    .map
+                                    .lock()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                    .remove(&self.cancel_guard.item_id);
+                                self.in_flight.fetch_sub(1, Ordering::AcqRel);
+                            }
+                        }
+                        let _cleanup = Cleanup {
+                            pump_done: pump_done.clone(),
+                            pump_handle: Some(pump_handle),
+                            in_flight: in_flight_for_thread,
+                            cancel_guard: CancelMapGuard {
+                                item_id,
+                                map: inpaint_cancels.clone(),
+                            },
                         };
-                        let mask: image::GrayImage = {
-                            let bytes = std::fs::read(&mask_path)
-                                .map_err(|e| format!("read mask: {e}"))?;
-                            let _ = std::fs::remove_file(&mask_path);
-                            image::load_from_memory(&bytes)
-                                .map_err(|e| format!("decode mask: {e}"))?
-                                .to_luma8()
-                        };
-                        let hooks = prunr_core::inpaint::InpaintHooks {
-                            cancel: Some(inpaint_cancel.clone()),
-                            progress: Some(inpaint_progress.clone()),
-                        };
-                        let raw = prunr_core::inpaint::process_inpaint_with(
-                            &image, &mask, model_id, sd_req.clone(), &hooks,
-                        ).map_err(|e| format!("inpaint: {e:?}"))?;
-                        Ok(prunr_core::inpaint_blend::finalize_inpaint(
-                            &raw, &image, &mask, feather_px, sharpen,
-                        ))
-                    })();
-                    // Drop _cleanup HERE so InpaintDone goes after pump join.
-                    drop(_cleanup);
-                    match result {
-                        Ok(rgba) => {
-                            let path = IpcKind::InpaintOut.path_for(&ipc_dir_for_spawn, item_id);
-                            match prunr_core::encode_rgba_png(&rgba) {
-                                Ok(bytes) => {
-                                    if let Err(e) = std::fs::write(&path, &bytes) {
+                        let result = (|| -> Result<image::RgbaImage, String> {
+                            // Inner scope drops encoded bytes + DynamicImage as
+                            // soon as `to_rgba8`/`to_luma8` produces the final
+                            // buffer — encoded source (~5–20 MB at 4 K) and
+                            // intermediate DynamicImage (~50 MB RGBA at 4 K)
+                            // would otherwise overlap with model weights.
+                            let image: image::RgbaImage = {
+                                let bytes = std::fs::read(&image_path)
+                                    .map_err(|e| format!("read source: {e}"))?;
+                                let _ = std::fs::remove_file(&image_path);
+                                image::load_from_memory(&bytes)
+                                    .map_err(|e| format!("decode source: {e}"))?
+                                    .to_rgba8()
+                            };
+                            let mask: image::GrayImage = {
+                                let bytes = std::fs::read(&mask_path)
+                                    .map_err(|e| format!("read mask: {e}"))?;
+                                let _ = std::fs::remove_file(&mask_path);
+                                image::load_from_memory(&bytes)
+                                    .map_err(|e| format!("decode mask: {e}"))?
+                                    .to_luma8()
+                            };
+                            let hooks = prunr_core::inpaint::InpaintHooks {
+                                cancel: Some(inpaint_cancel.clone()),
+                                progress: Some(inpaint_progress.clone()),
+                            };
+                            let raw = prunr_core::inpaint::process_inpaint_with(
+                                &image,
+                                &mask,
+                                model_id,
+                                sd_req.clone(),
+                                &hooks,
+                            )
+                            .map_err(|e| format!("inpaint: {e:?}"))?;
+                            Ok(prunr_core::inpaint_blend::finalize_inpaint(
+                                &raw, &image, &mask, feather_px, sharpen,
+                            ))
+                        })();
+                        // Drop _cleanup HERE so InpaintDone goes after pump join.
+                        drop(_cleanup);
+                        match result {
+                            Ok(rgba) => {
+                                let path =
+                                    IpcKind::InpaintOut.path_for(&ipc_dir_for_spawn, item_id);
+                                match prunr_core::encode_rgba_png(&rgba) {
+                                    Ok(bytes) => {
+                                        if let Err(e) = std::fs::write(&path, &bytes) {
+                                            let _ = evt_tx.send(SubprocessEvent::InpaintError {
+                                                item_id,
+                                                error: format!("write result: {e}"),
+                                            });
+                                            return;
+                                        }
+                                        let _ = evt_tx.send(SubprocessEvent::InpaintDone {
+                                            item_id,
+                                            rgba_path: path,
+                                            width: rgba.width(),
+                                            height: rgba.height(),
+                                        });
+                                    }
+                                    Err(e) => {
                                         let _ = evt_tx.send(SubprocessEvent::InpaintError {
                                             item_id,
-                                            error: format!("write result: {e}"),
+                                            error: format!("encode result: {e:?}"),
                                         });
-                                        return;
                                     }
-                                    let _ = evt_tx.send(SubprocessEvent::InpaintDone {
-                                        item_id,
-                                        rgba_path: path,
-                                        width: rgba.width(),
-                                        height: rgba.height(),
-                                    });
-                                }
-                                Err(e) => {
-                                    let _ = evt_tx.send(SubprocessEvent::InpaintError {
-                                        item_id,
-                                        error: format!("encode result: {e:?}"),
-                                    });
                                 }
                             }
+                            Err(e) => {
+                                let _ = evt_tx
+                                    .send(SubprocessEvent::InpaintError { item_id, error: e });
+                            }
                         }
-                        Err(e) => {
-                            let _ = evt_tx.send(SubprocessEvent::InpaintError {
-                                item_id,
-                                error: e,
-                            });
-                        }
-                    }
-                });
+                    });
                 // Builder::spawn returns Result; std::thread::spawn would
                 // panic on resource exhaustion. On failure we've already
                 // bumped `in_flight` and inserted the cancel flag, so
@@ -1126,7 +1188,10 @@ pub fn run_worker() -> ! {
                 if let Err(e) = spawn_result {
                     in_flight.fetch_sub(1, Ordering::AcqRel);
                     // Drops on scope exit, removing the cancel-map entry.
-                    let _ = CancelMapGuard { item_id, map: inpaint_cancels_on_err };
+                    let _ = CancelMapGuard {
+                        item_id,
+                        map: inpaint_cancels_on_err,
+                    };
                     pump_done_on_err.store(true, Ordering::Release);
                     // The healthy path's `read_and_delete` inside the
                     // spawned closure never ran — clean the parent-
@@ -1175,10 +1240,15 @@ mod tests {
     fn wait_for_waiters(sem: &WeightedSemaphore, n: usize) {
         let deadline = Instant::now() + Duration::from_secs(2);
         while Instant::now() < deadline {
-            let len = sem.state.lock()
+            let len = sem
+                .state
+                .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .waiters.len();
-            if len >= n { return; }
+                .waiters
+                .len();
+            if len >= n {
+                return;
+            }
             std::thread::sleep(Duration::from_millis(2));
         }
         panic!("expected ≥{n} waiters in 2s — test setup wedged");
@@ -1222,10 +1292,14 @@ mod tests {
         // a buggy small-acquirer past the giant — if the fairness rule
         // were broken, the small would have completed by now.
         std::thread::sleep(Duration::from_millis(20));
-        assert!(!small_done.load(std::sync::atomic::Ordering::Acquire),
-            "small acquirer skipped past starving giant");
-        assert!(!giant_done.load(std::sync::atomic::Ordering::Acquire),
-            "giant should still be waiting (50 + 40 > 64)");
+        assert!(
+            !small_done.load(std::sync::atomic::Ordering::Acquire),
+            "small acquirer skipped past starving giant"
+        );
+        assert!(
+            !giant_done.load(std::sync::atomic::Ordering::Acquire),
+            "giant should still be waiting (50 + 40 > 64)"
+        );
 
         // Releasing the 50-unit hold lets the giant proceed.
         drop(_hold);
@@ -1242,10 +1316,14 @@ mod tests {
         }
         let _ = giant_thread.join();
         let _ = small_thread.join();
-        assert!(giant_done.load(std::sync::atomic::Ordering::Acquire),
-            "giant should have completed once head's hold released");
-        assert!(small_done.load(std::sync::atomic::Ordering::Acquire),
-            "small should have completed after giant cleared the head");
+        assert!(
+            giant_done.load(std::sync::atomic::Ordering::Acquire),
+            "giant should have completed once head's hold released"
+        );
+        assert!(
+            small_done.load(std::sync::atomic::Ordering::Acquire),
+            "small should have completed after giant cleared the head"
+        );
     }
 
     /// Concurrent small acquirers must run in parallel (the fairness rule
@@ -1269,9 +1347,13 @@ mod tests {
                 live.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
             }));
         }
-        for h in handles { h.join().unwrap(); }
-        assert!(max_live.load(std::sync::atomic::Ordering::Acquire) >= 4,
+        for h in handles {
+            h.join().unwrap();
+        }
+        assert!(
+            max_live.load(std::sync::atomic::Ordering::Acquire) >= 4,
             "expected at least 4 concurrent small acquirers, got {}",
-            max_live.load(std::sync::atomic::Ordering::Acquire));
+            max_live.load(std::sync::atomic::Ordering::Acquire)
+        );
     }
 }

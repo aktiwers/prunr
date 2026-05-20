@@ -28,10 +28,22 @@ pub enum DownloadState {
 
 #[derive(Debug)]
 pub enum DownloadEvent {
-    Progress { id: ModelId, bytes_so_far: u64, total: u64 },
-    Verifying { id: ModelId },
-    Complete { id: ModelId },
-    Failed { id: ModelId, error: String, retryable: bool },
+    Progress {
+        id: ModelId,
+        bytes_so_far: u64,
+        total: u64,
+    },
+    Verifying {
+        id: ModelId,
+    },
+    Complete {
+        id: ModelId,
+    },
+    Failed {
+        id: ModelId,
+        error: String,
+        retryable: bool,
+    },
 }
 
 pub(crate) struct DownloadManager {
@@ -73,9 +85,9 @@ impl DownloadManager {
             return;
         }
         match self.state(id) {
-            DownloadState::InProgress { .. }
-            | DownloadState::Queued
-            | DownloadState::Verifying => return,
+            DownloadState::InProgress { .. } | DownloadState::Queued | DownloadState::Verifying => {
+                return
+            }
             _ => {}
         }
         if self.active.is_some() {
@@ -117,8 +129,18 @@ impl DownloadManager {
 
     fn apply_event(&mut self, event: &DownloadEvent) {
         match *event {
-            DownloadEvent::Progress { id, bytes_so_far, total } => {
-                self.states.insert(id, DownloadState::InProgress { bytes_so_far, total_bytes: total });
+            DownloadEvent::Progress {
+                id,
+                bytes_so_far,
+                total,
+            } => {
+                self.states.insert(
+                    id,
+                    DownloadState::InProgress {
+                        bytes_so_far,
+                        total_bytes: total,
+                    },
+                );
             }
             DownloadEvent::Verifying { id } => {
                 self.states.insert(id, DownloadState::Verifying);
@@ -130,8 +152,18 @@ impl DownloadManager {
                     self.active = None;
                 }
             }
-            DownloadEvent::Failed { id, ref error, retryable } => {
-                self.states.insert(id, DownloadState::Failed { error: error.clone(), retryable });
+            DownloadEvent::Failed {
+                id,
+                ref error,
+                retryable,
+            } => {
+                self.states.insert(
+                    id,
+                    DownloadState::Failed {
+                        error: error.clone(),
+                        retryable,
+                    },
+                );
                 self.cancel_flags.remove(&id);
                 if self.active == Some(id) {
                     self.active = None;
@@ -149,7 +181,13 @@ impl DownloadManager {
             ModelSource::Bundled => {
                 self.send_failure(id, format!("{id:?} is bundled — no download path"), false);
             }
-            ModelSource::OnDemand { url, sha256, filename, size_mb, .. } => {
+            ModelSource::OnDemand {
+                url,
+                sha256,
+                filename,
+                size_mb,
+                ..
+            } => {
                 self.kick_off_single(id, url, sha256, filename, size_mb);
             }
             ModelSource::MultiPartOnDemand { subdir, parts, .. } => {
@@ -182,7 +220,11 @@ impl DownloadManager {
             let on_progress = {
                 let tx = tx.clone();
                 move |bytes_so_far: u64, total: u64| {
-                    let _ = tx.send(DownloadEvent::Progress { id, bytes_so_far, total });
+                    let _ = tx.send(DownloadEvent::Progress {
+                        id,
+                        bytes_so_far,
+                        total,
+                    });
                 }
             };
             let on_verifying = {
@@ -192,10 +234,14 @@ impl DownloadManager {
                 }
             };
             match download_to_file(url, &dest, sha256, cancel, &on_progress, &on_verifying) {
-                Ok(()) => { let _ = tx.send(DownloadEvent::Complete { id }); }
+                Ok(()) => {
+                    let _ = tx.send(DownloadEvent::Complete { id });
+                }
                 Err(e) => {
                     let _ = tx.send(DownloadEvent::Failed {
-                        id, error: e.message, retryable: e.retryable,
+                        id,
+                        error: e.message,
+                        retryable: e.retryable,
                     });
                 }
             }
@@ -207,12 +253,7 @@ impl DownloadManager {
     /// `InProgress { bytes_so_far, total_bytes }` tracks the bundle as a
     /// whole. Already-renamed parts are skipped on retry — gives the
     /// user effective resume across cancels without HTTP Range support.
-    fn kick_off_multi(
-        &mut self,
-        id: ModelId,
-        subdir: &'static str,
-        parts: &'static [ModelPart],
-    ) {
+    fn kick_off_multi(&mut self, id: ModelId, subdir: &'static str, parts: &'static [ModelPart]) {
         let Some(root) = on_demand_dir() else {
             self.send_failure(id, "Could not resolve user data directory".into(), false);
             return;
@@ -231,7 +272,11 @@ impl DownloadManager {
                 let dest = bundle_dir.join(part.filename);
                 if dest.is_file() {
                     bytes_done += part.size_bytes;
-                    let _ = tx.send(DownloadEvent::Progress { id, bytes_so_far: bytes_done, total });
+                    let _ = tx.send(DownloadEvent::Progress {
+                        id,
+                        bytes_so_far: bytes_done,
+                        total,
+                    });
                     continue;
                 }
                 let on_progress = {
@@ -239,16 +284,29 @@ impl DownloadManager {
                     let so_far = bytes_done;
                     move |part_so_far: u64, _part_total: u64| {
                         let _ = tx.send(DownloadEvent::Progress {
-                            id, bytes_so_far: so_far + part_so_far, total,
+                            id,
+                            bytes_so_far: so_far + part_so_far,
+                            total,
                         });
                     }
                 };
                 let on_verifying = {
                     let tx = tx.clone();
-                    move || { let _ = tx.send(DownloadEvent::Verifying { id }); }
+                    move || {
+                        let _ = tx.send(DownloadEvent::Verifying { id });
+                    }
                 };
-                match download_to_file(part.url, &dest, part.sha256, cancel.clone(), &on_progress, &on_verifying) {
-                    Ok(()) => { bytes_done += part.size_bytes; }
+                match download_to_file(
+                    part.url,
+                    &dest,
+                    part.sha256,
+                    cancel.clone(),
+                    &on_progress,
+                    &on_verifying,
+                ) {
+                    Ok(()) => {
+                        bytes_done += part.size_bytes;
+                    }
                     Err(e) => {
                         let _ = tx.send(DownloadEvent::Failed {
                             id,
@@ -271,13 +329,29 @@ impl DownloadManager {
         let cancel = Arc::new(AtomicBool::new(false));
         self.cancel_flags.insert(id, cancel.clone());
         self.active = Some(id);
-        self.states.insert(id, DownloadState::InProgress { bytes_so_far: 0, total_bytes });
+        self.states.insert(
+            id,
+            DownloadState::InProgress {
+                bytes_so_far: 0,
+                total_bytes,
+            },
+        );
         cancel
     }
 
     fn send_failure(&mut self, id: ModelId, error: String, retryable: bool) {
-        self.states.insert(id, DownloadState::Failed { error: error.clone(), retryable });
-        let _ = self.progress_tx.send(DownloadEvent::Failed { id, error, retryable });
+        self.states.insert(
+            id,
+            DownloadState::Failed {
+                error: error.clone(),
+                retryable,
+            },
+        );
+        let _ = self.progress_tx.send(DownloadEvent::Failed {
+            id,
+            error,
+            retryable,
+        });
     }
 }
 
@@ -289,16 +363,26 @@ struct DownloadError {
 
 impl DownloadError {
     fn fatal(msg: impl Into<String>) -> Self {
-        Self { message: msg.into(), retryable: false }
+        Self {
+            message: msg.into(),
+            retryable: false,
+        }
     }
     fn transient(msg: impl Into<String>) -> Self {
-        Self { message: msg.into(), retryable: true }
+        Self {
+            message: msg.into(),
+            retryable: true,
+        }
     }
 }
 
 impl prunr_runtime_install::Retryable for DownloadError {
-    fn is_retryable(&self) -> bool { self.retryable }
-    fn cancelled() -> Self { DownloadError::fatal("Cancelled by user") }
+    fn is_retryable(&self) -> bool {
+        self.retryable
+    }
+    fn cancelled() -> Self {
+        DownloadError::fatal("Cancelled by user")
+    }
 }
 
 /// Download `url` to `dest`, verifying SHA256 against `expected_sha`.
@@ -341,7 +425,9 @@ fn download_attempt(
         .build()
         .map_err(|e| DownloadError::fatal(format!("HTTP client init failed: {e}")))?;
 
-    let response = client.get(url).send()
+    let response = client
+        .get(url)
+        .send()
         .map_err(|e| DownloadError::transient(format!("Network error: {e}")))?;
 
     let status = response.status();
@@ -355,8 +441,9 @@ fn download_attempt(
 
     let total = response.content_length().unwrap_or(0);
     let mut response = response;
-    let mut file = std::fs::File::create(&partial)
-        .map_err(|e| DownloadError::fatal(format!("Could not create {}: {e}", partial.display())))?;
+    let mut file = std::fs::File::create(&partial).map_err(|e| {
+        DownloadError::fatal(format!("Could not create {}: {e}", partial.display()))
+    })?;
     let mut hasher = Sha256::new();
     let mut buf = [0u8; 64 * 1024];
     let mut written: u64 = 0;
@@ -435,10 +522,15 @@ mod tests {
     fn apply_event_progress_updates_bytes_so_far() {
         let mut dm = fixture();
         dm.apply_event(&DownloadEvent::Progress {
-            id: ModelId::U2net, bytes_so_far: 1024, total: 4096,
+            id: ModelId::U2net,
+            bytes_so_far: 1024,
+            total: 4096,
         });
         match dm.state(ModelId::U2net) {
-            DownloadState::InProgress { bytes_so_far, total_bytes } => {
+            DownloadState::InProgress {
+                bytes_so_far,
+                total_bytes,
+            } => {
                 assert_eq!(bytes_so_far, 1024);
                 assert_eq!(total_bytes, 4096);
             }
@@ -459,7 +551,9 @@ mod tests {
     fn apply_event_failed_records_retryable_flag() {
         let mut dm = fixture();
         dm.apply_event(&DownloadEvent::Failed {
-            id: ModelId::U2net, error: "timeout".into(), retryable: true,
+            id: ModelId::U2net,
+            error: "timeout".into(),
+            retryable: true,
         });
         match dm.state(ModelId::U2net) {
             DownloadState::Failed { retryable, .. } => assert!(retryable),
@@ -483,14 +577,15 @@ mod tests {
     fn retry_succeeds_after_two_transient_failures() {
         let attempts = std::sync::atomic::AtomicU32::new(0);
         let cancel = never_cancel();
-        let result: Result<(), DownloadError> = prunr_runtime_install::retry_with_backoff(&cancel, 3, 1, |_attempt| {
-            let n = attempts.fetch_add(1, Ordering::SeqCst);
-            if n < 2 {
-                Err(DownloadError::transient("simulated timeout"))
-            } else {
-                Ok(())
-            }
-        });
+        let result: Result<(), DownloadError> =
+            prunr_runtime_install::retry_with_backoff(&cancel, 3, 1, |_attempt| {
+                let n = attempts.fetch_add(1, Ordering::SeqCst);
+                if n < 2 {
+                    Err(DownloadError::transient("simulated timeout"))
+                } else {
+                    Ok(())
+                }
+            });
         assert!(result.is_ok());
         assert_eq!(attempts.load(Ordering::SeqCst), 3);
     }
@@ -499,22 +594,28 @@ mod tests {
     fn retry_fails_fast_on_fatal_error() {
         let attempts = std::sync::atomic::AtomicU32::new(0);
         let cancel = never_cancel();
-        let result: Result<(), DownloadError> = prunr_runtime_install::retry_with_backoff(&cancel, 3, 1, |_attempt| {
-            attempts.fetch_add(1, Ordering::SeqCst);
-            Err(DownloadError::fatal("404"))
-        });
+        let result: Result<(), DownloadError> =
+            prunr_runtime_install::retry_with_backoff(&cancel, 3, 1, |_attempt| {
+                attempts.fetch_add(1, Ordering::SeqCst);
+                Err(DownloadError::fatal("404"))
+            });
         assert!(result.is_err());
-        assert_eq!(attempts.load(Ordering::SeqCst), 1, "fatal error must not retry");
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            1,
+            "fatal error must not retry"
+        );
     }
 
     #[test]
     fn retry_exhausts_max_attempts() {
         let attempts = std::sync::atomic::AtomicU32::new(0);
         let cancel = never_cancel();
-        let result: Result<(), DownloadError> = prunr_runtime_install::retry_with_backoff(&cancel, 3, 1, |_attempt| {
-            attempts.fetch_add(1, Ordering::SeqCst);
-            Err(DownloadError::transient("network"))
-        });
+        let result: Result<(), DownloadError> =
+            prunr_runtime_install::retry_with_backoff(&cancel, 3, 1, |_attempt| {
+                attempts.fetch_add(1, Ordering::SeqCst);
+                Err(DownloadError::transient("network"))
+            });
         assert!(result.is_err());
         assert_eq!(attempts.load(Ordering::SeqCst), 3);
     }
@@ -529,15 +630,18 @@ mod tests {
         });
         let attempts = std::sync::atomic::AtomicU32::new(0);
         let started = std::time::Instant::now();
-        let result: Result<(), DownloadError> = prunr_runtime_install::retry_with_backoff(&cancel, 3, 200, |_attempt| {
-            attempts.fetch_add(1, Ordering::SeqCst);
-            Err(DownloadError::transient("network"))
-        });
+        let result: Result<(), DownloadError> =
+            prunr_runtime_install::retry_with_backoff(&cancel, 3, 200, |_attempt| {
+                attempts.fetch_add(1, Ordering::SeqCst);
+                Err(DownloadError::transient("network"))
+            });
         let elapsed = started.elapsed();
         assert!(result.is_err());
         assert_eq!(attempts.load(Ordering::SeqCst), 1);
-        assert!(elapsed < std::time::Duration::from_millis(200),
-            "cancel during backoff must abort promptly, took {elapsed:?}");
+        assert!(
+            elapsed < std::time::Duration::from_millis(200),
+            "cancel during backoff must abort promptly, took {elapsed:?}"
+        );
     }
 
     // ── Multi-part dispatch ──────────────────────────────────────────────
@@ -550,9 +654,16 @@ mod tests {
         let mut dm = fixture();
         let id = ModelId::SdV15InpaintFp16;
         // Simulate part-1 finishing (e.g. 1 GB) toward a 2 GB total.
-        dm.apply_event(&DownloadEvent::Progress { id, bytes_so_far: 1_073_741_824, total: 2_147_483_648 });
+        dm.apply_event(&DownloadEvent::Progress {
+            id,
+            bytes_so_far: 1_073_741_824,
+            total: 2_147_483_648,
+        });
         match dm.state(id) {
-            DownloadState::InProgress { bytes_so_far, total_bytes } => {
+            DownloadState::InProgress {
+                bytes_so_far,
+                total_bytes,
+            } => {
                 assert_eq!(bytes_so_far, 1_073_741_824);
                 assert_eq!(total_bytes, 2_147_483_648);
             }
@@ -576,7 +687,10 @@ mod tests {
 
         assert!(dm.queue.is_empty());
         assert_eq!(dm.state(ModelId::LaMaFp32), DownloadState::Idle);
-        assert_eq!(dm.active(), Some(ModelId::U2net),
-            "cancelling a queued id must not clear the active download");
+        assert_eq!(
+            dm.active(),
+            Some(ModelId::U2net),
+            "cancelling a queued id must not clear the active download"
+        );
     }
 }
