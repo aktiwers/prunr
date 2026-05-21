@@ -728,8 +728,6 @@ fn apply_edge_shift(mask: &mut GrayImage, shift: f32) {
     let full = abs.floor() as u32;
     let frac = abs - full as f32;
     let (w, h) = (mask.width() as usize, mask.height() as usize);
-    let wi = w as i32;
-    let hi = h as i32;
     let use_par = h >= 512;
 
     // Skip the unconditional `mask.as_raw().clone()` (~12 MB at 4 K) by
@@ -739,23 +737,105 @@ fn apply_edge_shift(mask: &mut GrayImage, shift: f32) {
 
     let step = |src: &[u8], dst: &mut [u8]| {
         let process_row = |(y, row): (usize, &mut [u8])| {
+            let (w, h) = (w, h);
             let yi = y as i32;
-            for (x, slot) in row.iter_mut().enumerate() {
-                let xi = x as i32;
-                let mut extremum: u8 = if erode { 255 } else { 0 };
-                for dy in -1i32..=1 {
-                    let ny = (yi + dy).clamp(0, hi - 1) as usize;
-                    for dx in -1i32..=1 {
-                        let nx = (xi + dx).clamp(0, wi - 1) as usize;
-                        let v = src[ny * w + nx];
-                        if erode {
-                            extremum = extremum.min(v);
-                        } else {
-                            extremum = extremum.max(v);
+            let hi = h as i32;
+            let wi = w as i32;
+
+            // Interior fast-path (hoisted 'erode' branch, no clamping, unrolled 3x3).
+            if y > 0 && y < h - 1 && w >= 3 {
+                let r0 = (y - 1) * w;
+                let r1 = y * w;
+                let r2 = (y + 1) * w;
+
+                if erode {
+                    // Head
+                    let mut e = 255u8;
+                    for dy in -1..=1 {
+                        let ny = (yi + dy).clamp(0, hi - 1) as usize;
+                        for dx in 0..=1 {
+                            e = e.min(src[ny * w + dx as usize]);
                         }
                     }
+                    row[0] = e;
+
+                    // Interior
+                    for x in 1..(w - 1) {
+                        let v0 = src[r0 + x - 1];
+                        let v1 = src[r0 + x];
+                        let v2 = src[r0 + x + 1];
+                        let v3 = src[r1 + x - 1];
+                        let v4 = src[r1 + x];
+                        let v5 = src[r1 + x + 1];
+                        let v6 = src[r2 + x - 1];
+                        let v7 = src[r2 + x];
+                        let v8 = src[r2 + x + 1];
+                        row[x] = v0.min(v1).min(v2).min(v3).min(v4).min(v5).min(v6).min(v7).min(v8);
+                    }
+
+                    // Tail
+                    let mut e = 255u8;
+                    for dy in -1..=1 {
+                        let ny = (yi + dy).clamp(0, hi - 1) as usize;
+                        for dx in (wi - 2)..(wi) {
+                            e = e.min(src[ny * w + dx as usize]);
+                        }
+                    }
+                    row[w - 1] = e;
+                } else {
+                    // Head
+                    let mut e = 0u8;
+                    for dy in -1..=1 {
+                        let ny = (yi + dy).clamp(0, hi - 1) as usize;
+                        for dx in 0..=1 {
+                            e = e.max(src[ny * w + dx as usize]);
+                        }
+                    }
+                    row[0] = e;
+
+                    // Interior
+                    for x in 1..(w - 1) {
+                        let v0 = src[r0 + x - 1];
+                        let v1 = src[r0 + x];
+                        let v2 = src[r0 + x + 1];
+                        let v3 = src[r1 + x - 1];
+                        let v4 = src[r1 + x];
+                        let v5 = src[r1 + x + 1];
+                        let v6 = src[r2 + x - 1];
+                        let v7 = src[r2 + x];
+                        let v8 = src[r2 + x + 1];
+                        row[x] = v0.max(v1).max(v2).max(v3).max(v4).max(v5).max(v6).max(v7).max(v8);
+                    }
+
+                    // Tail
+                    let mut e = 0u8;
+                    for dy in -1..=1 {
+                        let ny = (yi + dy).clamp(0, hi - 1) as usize;
+                        for dx in (wi - 2)..(wi) {
+                            e = e.max(src[ny * w + dx as usize]);
+                        }
+                    }
+                    row[w - 1] = e;
                 }
-                *slot = extremum;
+            } else {
+                // Top/bottom rows (or narrow images): generic slow path
+                for (x, slot) in row.iter_mut().enumerate() {
+                    let xi = x as i32;
+                    let mut extremum: u8 = if erode { 255 } else { 0 };
+                    for dy in -1..=1 {
+                        let ny = (yi + dy).clamp(0, hi - 1) as usize;
+                        for dx in -1..=1 {
+                            let nx = (xi + dx).clamp(0, wi - 1) as usize;
+                            let v = src[ny * w + nx];
+                            if erode {
+                                extremum = extremum.min(v);
+                            } else {
+                                extremum = extremum.max(v);
+                            }
+                        }
+                    }
+                    *slot = extremum;
+                }
             }
         };
         if use_par {
