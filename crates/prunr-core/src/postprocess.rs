@@ -740,22 +740,79 @@ fn apply_edge_shift(mask: &mut GrayImage, shift: f32) {
     let step = |src: &[u8], dst: &mut [u8]| {
         let process_row = |(y, row): (usize, &mut [u8])| {
             let yi = y as i32;
-            for (x, slot) in row.iter_mut().enumerate() {
-                let xi = x as i32;
-                let mut extremum: u8 = if erode { 255 } else { 0 };
-                for dy in -1i32..=1 {
-                    let ny = (yi + dy).clamp(0, hi - 1) as usize;
-                    for dx in -1i32..=1 {
-                        let nx = (xi + dx).clamp(0, wi - 1) as usize;
-                        let v = src[ny * w + nx];
-                        if erode {
-                            extremum = extremum.min(v);
-                        } else {
-                            extremum = extremum.max(v);
+            if y > 0 && y < h - 1 {
+                let r0 = (y - 1) * w;
+                let r1 = y * w;
+                let r2 = (y + 1) * w;
+
+                // Left edge pixel (clamped dx)
+                {
+                    let mut ex = if erode { 255 } else { 0 };
+                    for row_off in [r0, r1, r2] {
+                        for dx in [0, 1] {
+                            let v = src[row_off + dx];
+                            ex = if erode { ex.min(v) } else { ex.max(v) };
                         }
                     }
+                    row[0] = ex;
                 }
-                *slot = extremum;
+
+                // Interior fast-path: no clamps, branch hoisted
+                if erode {
+                    for x in 1..w - 1 {
+                        let mut min_v = src[r0 + x - 1];
+                        min_v = min_v.min(src[r0 + x]);
+                        min_v = min_v.min(src[r0 + x + 1]);
+                        min_v = min_v.min(src[r1 + x - 1]);
+                        min_v = min_v.min(src[r1 + x]);
+                        min_v = min_v.min(src[r1 + x + 1]);
+                        min_v = min_v.min(src[r2 + x - 1]);
+                        min_v = min_v.min(src[r2 + x]);
+                        min_v = min_v.min(src[r2 + x + 1]);
+                        row[x] = min_v;
+                    }
+                } else {
+                    for x in 1..w - 1 {
+                        let mut max_v = src[r0 + x - 1];
+                        max_v = max_v.max(src[r0 + x]);
+                        max_v = max_v.max(src[r0 + x + 1]);
+                        max_v = max_v.max(src[r1 + x - 1]);
+                        max_v = max_v.max(src[r1 + x]);
+                        max_v = max_v.max(src[r1 + x + 1]);
+                        max_v = max_v.max(src[r2 + x - 1]);
+                        max_v = max_v.max(src[r2 + x]);
+                        max_v = max_v.max(src[r2 + x + 1]);
+                        row[x] = max_v;
+                    }
+                }
+
+                // Right edge pixel (clamped dx)
+                {
+                    let mut ex = if erode { 255 } else { 0 };
+                    for row_off in [r0, r1, r2] {
+                        for dx in [w - 2, w - 1] {
+                            let v = src[row_off + dx];
+                            ex = if erode { ex.min(v) } else { ex.max(v) };
+                        }
+                    }
+                    row[w - 1] = ex;
+                }
+            } else {
+                // Top/bottom rows: use boundary clamps
+                for x in 0..w {
+                    let xi = x as i32;
+                    let mut ex = if erode { 255 } else { 0 };
+                    for dy in -1..=1 {
+                        let ny = (yi + dy).clamp(0, hi - 1) as usize;
+                        let row_off = ny * w;
+                        for dx in -1..=1 {
+                            let nx = (xi + dx).clamp(0, wi - 1) as usize;
+                            let v = src[row_off + nx];
+                            ex = if erode { ex.min(v) } else { ex.max(v) };
+                        }
+                    }
+                    row[x] = ex;
+                }
             }
         };
         if use_par {
