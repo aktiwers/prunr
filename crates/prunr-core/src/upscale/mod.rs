@@ -200,11 +200,28 @@ where
             let tensor = Tensor::from_array(arr)
                 .map_err(|e| CoreError::Inference(format!("upscale: input tensor: {e}")))?;
             engine.with_session(|session| {
+                let t0 = std::time::Instant::now();
+                tracing::debug!(
+                    padded_w, padded_h, fp16 = true,
+                    has_terminate = terminate.is_some(),
+                    "upscale tile: session.run entered"
+                );
                 let outputs = match terminate {
                     Some(opts) => session.run_with_options(inputs![input_name => &tensor], opts.as_ref()),
                     None => session.run(inputs![input_name => &tensor]),
                 }
-                .map_err(|e| classify_run_error(e))?;
+                .map_err(|e| {
+                    tracing::debug!(
+                        elapsed_ms = t0.elapsed().as_millis() as u64,
+                        err = %e,
+                        "upscale tile: session.run returned ERROR"
+                    );
+                    classify_run_error(e)
+                })?;
+                tracing::debug!(
+                    elapsed_ms = t0.elapsed().as_millis() as u64,
+                    "upscale tile: session.run completed"
+                );
                 pack_output(&outputs[0], plane, &mut packed, is_fp16)
             })?;
         } else {
@@ -220,11 +237,28 @@ where
             let tensor = Tensor::from_array(arr)
                 .map_err(|e| CoreError::Inference(format!("upscale: input tensor: {e}")))?;
             engine.with_session(|session| {
+                let t0 = std::time::Instant::now();
+                tracing::debug!(
+                    padded_w, padded_h, fp16 = false,
+                    has_terminate = terminate.is_some(),
+                    "upscale tile: session.run entered"
+                );
                 let outputs = match terminate {
                     Some(opts) => session.run_with_options(inputs![input_name => &tensor], opts.as_ref()),
                     None => session.run(inputs![input_name => &tensor]),
                 }
-                .map_err(|e| classify_run_error(e))?;
+                .map_err(|e| {
+                    tracing::debug!(
+                        elapsed_ms = t0.elapsed().as_millis() as u64,
+                        err = %e,
+                        "upscale tile: session.run returned ERROR"
+                    );
+                    classify_run_error(e)
+                })?;
+                tracing::debug!(
+                    elapsed_ms = t0.elapsed().as_millis() as u64,
+                    "upscale tile: session.run completed"
+                );
                 pack_output(&outputs[0], plane, &mut packed, is_fp16)
             })?;
         }

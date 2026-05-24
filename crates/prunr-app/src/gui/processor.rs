@@ -1201,9 +1201,17 @@ impl Processor {
         // The terminate call returns immediately; ORT aborts the running
         // session as soon as it checks between kernel launches. No-op
         // when the OnceLock is empty (cancel before any dispatch).
-        if let Some(opts) = self.upscale_run_options.get() {
-            let _ = opts.terminate();
-        }
+        let terminate_result = if let Some(opts) = self.upscale_run_options.get() {
+            Some(opts.terminate())
+        } else {
+            None
+        };
+        tracing::info!(
+            cancel_flag_was_set = true,
+            terminate_called = terminate_result.is_some(),
+            terminate_ok = terminate_result.as_ref().is_some_and(|r| r.is_ok()),
+            "upscale cancel requested"
+        );
     }
 
     /// Drain completed upscale results from the background thread.
