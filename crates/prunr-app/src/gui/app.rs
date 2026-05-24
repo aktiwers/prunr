@@ -3172,19 +3172,29 @@ impl PrunrApp {
     fn drain_background_channels(&mut self, ctx: &egui::Context) {
         let mut decode_arrived = false;
         while let Ok((item_id, result)) = self.batch.bg_io.decode_rx.try_recv() {
-            let Some(item) = self.batch.find_by_id_mut(item_id) else { continue };
-            item.decode_pending = false;
-            match result {
-                Ok(rgba) => {
-                    item.source_rgba = Some(rgba);
-                    // Live-preview DynamicImage cache is built from source_rgba;
-                    // invalidate so the next dispatch rebuilds against the new one.
-                    item.source_dyn = None;
-                    decode_arrived = true;
+            let source_replaced = {
+                let Some(item) = self.batch.find_by_id_mut(item_id) else { continue };
+                item.decode_pending = false;
+                match result {
+                    Ok(rgba) => {
+                        item.source_rgba = Some(rgba);
+                        // Live-preview DynamicImage cache is built from source_rgba;
+                        // invalidate so the next dispatch rebuilds against the new one.
+                        item.source_dyn = None;
+                        decode_arrived = true;
+                        true
+                    }
+                    Err(msg) => {
+                        item.status = BatchStatus::Error(msg);
+                        false
+                    }
                 }
-                Err(msg) => {
-                    item.status = BatchStatus::Error(msg);
-                }
+            };
+            if source_replaced {
+                // Selection mask + SAM encoder embedding were derived from
+                // the old source bytes — drop them so the next stroke /
+                // dispatch rebuilds against the new image.
+                self.batch.invalidate_selection_on_source_change(item_id);
             }
         }
         if decode_arrived {
