@@ -1329,23 +1329,28 @@ fn run_sam_encoder_inline(
     let outputs = session.run(inputs![input_name => &tensor])
         .map_err(|e| format!("encoder session.run: {e}"))?;
 
-    // SAM 2 Hiera Small encoder outputs (in order):
+    // Address by NAME — vietanhdev's SAM 2 ONNX export emits outputs
+    // in the order high_res_feats_0, high_res_feats_1, image_embed,
+    // which is the reverse of the documented logical order. Indexing
+    // by name keeps the dispatch immune to export-order changes.
+    //
+    // Expected shapes (from SAM 2 Hiera Small):
     //   image_embed      [1, 256, 64, 64]   — 1_048_576 f32
     //   high_res_feats_0 [1, 32, 256, 256]  — 2_097_152 f32
     //   high_res_feats_1 [1, 64, 128, 128]  — 1_048_576 f32
-    let image_embed = outputs[0]
+    let image_embed = outputs["image_embed"]
         .try_extract_array::<f32>()
         .map_err(|e| format!("encoder: extract image_embed: {e}"))?
         .as_standard_layout()
         .into_owned()
         .into_raw_vec_and_offset().0;
-    let high_res_feats_0 = outputs[1]
+    let high_res_feats_0 = outputs["high_res_feats_0"]
         .try_extract_array::<f32>()
         .map_err(|e| format!("encoder: extract high_res_feats_0: {e}"))?
         .as_standard_layout()
         .into_owned()
         .into_raw_vec_and_offset().0;
-    let high_res_feats_1 = outputs[2]
+    let high_res_feats_1 = outputs["high_res_feats_1"]
         .try_extract_array::<f32>()
         .map_err(|e| format!("encoder: extract high_res_feats_1: {e}"))?
         .as_standard_layout()
@@ -1446,14 +1451,16 @@ fn run_sam_decoder_inline(
         "has_mask_input"    => &has_mask_tensor,
     ]).map_err(|e| format!("decoder session.run: {e}"))?;
 
-    // Outputs: masks [1, 3, 256, 256] and iou_predictions [1, 3]
-    let masks = outputs[0]
+    // Outputs: masks [1, 3, 256, 256] and iou_predictions [1, 3].
+    // Address by name for the same export-order resilience as the
+    // encoder path above.
+    let masks = outputs["masks"]
         .try_extract_array::<f32>()
         .map_err(|e| format!("decoder: extract masks: {e}"))?
         .as_standard_layout()
         .into_owned()
         .into_raw_vec_and_offset().0;
-    let iou_raw = outputs[1]
+    let iou_raw = outputs["iou_predictions"]
         .try_extract_array::<f32>()
         .map_err(|e| format!("decoder: extract iou_predictions: {e}"))?
         .as_standard_layout()
