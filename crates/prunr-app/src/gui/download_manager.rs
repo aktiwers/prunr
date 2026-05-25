@@ -146,7 +146,7 @@ impl DownloadManager {
             return;
         };
         match desc.source {
-            ModelSource::Bundled => {
+            ModelSource::Bundled | ModelSource::MultiPartBundled { .. } => {
                 self.send_failure(id, format!("{id:?} is bundled — no download path"), false);
             }
             ModelSource::OnDemand { url, sha256, filename, size_mb, fp16, .. } => {

@@ -526,6 +526,7 @@ fn render_model_credit_row(ui: &mut egui::Ui, descriptor: &prunr_models::ModelDe
     let license_info = match descriptor.source {
         prunr_models::ModelSource::OnDemand { license, .. } => Some(license),
         prunr_models::ModelSource::MultiPartOnDemand { license, .. } => Some(license),
+        prunr_models::ModelSource::MultiPartBundled { license, .. } => Some(license),
         prunr_models::ModelSource::Bundled => None,
     };
     let (author, license_name, source_url) = match license_info {
