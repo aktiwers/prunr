@@ -74,6 +74,25 @@ pub(crate) const MODELS: &[ModelSpec] = &[
         url: "https://github.com/aktiwers/prunr/releases/download/models-v1/big_lama-1.0.0.onnx",
         sha256: "523e84eb2ec2df933714cbab6983627a9909f9f23cd848fbbe977356c54bdaa0",
     },
+    // SAM 2 Hiera Small — bundled (MultiPartBundled) so each file ships
+    // as a zstd-compressed `include_bytes!` blob in the release binary.
+    // Two rows share the same ModelId because the model is a single
+    // logical entry with two parts; `ondemand_target` returns None for
+    // MultiPartBundled, so xtask fetches + compresses but does not mirror
+    // to the user data dir. URLs are HuggingFace upstream (vietanhdev's
+    // ONNX exports of Meta's SAM 2 Hiera Small).
+    ModelSpec {
+        id: prunr_models::ModelId::Sam2HieraSmall,
+        name: "sam2_hiera_small.encoder.onnx",
+        url: "https://huggingface.co/vietanhdev/segment-anything-2-onnx-models/resolve/main/sam2_hiera_small.encoder.onnx",
+        sha256: "f6a7c74dee5b2e71cce3f0475b778f0f28fa3e6c3646c79027302123d2197f40",
+    },
+    ModelSpec {
+        id: prunr_models::ModelId::Sam2HieraSmall,
+        name: "sam2_hiera_small.decoder.onnx",
+        url: "https://huggingface.co/vietanhdev/segment-anything-2-onnx-models/resolve/main/sam2_hiera_small.decoder.onnx",
+        sha256: "e07f799d2afe8640ef21f47096ad154d9289bb53041191499ebbea8933ef047b",
+    },
 ];
 
 #[cfg(test)]

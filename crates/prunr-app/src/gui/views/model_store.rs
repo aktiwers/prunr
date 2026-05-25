@@ -30,7 +30,7 @@ pub(crate) fn card_action(
     is_installed: bool,
     download_state: &DownloadState,
 ) -> CardAction {
-    if matches!(desc.source, ModelSource::Bundled) {
+    if matches!(desc.source, ModelSource::Bundled | ModelSource::MultiPartBundled { .. }) {
         return CardAction::Bundled;
     }
     // Exhaustive on purpose — adding a new `DownloadState` variant
@@ -229,6 +229,9 @@ fn render_card(
             );
             let meta = match desc.source {
                 ModelSource::Bundled => "Built-in".to_string(),
+                ModelSource::MultiPartBundled { license, .. } => {
+                    format!("Built-in · {} · {}", license.license, license.source_url)
+                }
                 ModelSource::OnDemand { license, size_mb, .. } => {
                     format!("{} · {} · {size_mb} MB", license.license, license.source_url)
                 }
@@ -313,7 +316,7 @@ fn delete_installed_model(app: &mut PrunrApp, id: ModelId) {
     let result = match desc.source {
         ModelSource::OnDemand { filename, .. } => std::fs::remove_file(dir.join(filename)),
         ModelSource::MultiPartOnDemand { subdir, .. } => std::fs::remove_dir_all(dir.join(subdir)),
-        ModelSource::Bundled => return,
+        ModelSource::Bundled | ModelSource::MultiPartBundled { .. } => return,
     };
     match result {
         Ok(()) => {
@@ -354,8 +357,8 @@ pub fn render_license_dialog(
     let license = match desc.source {
         ModelSource::MultiPartOnDemand { license, .. } => license,
         ModelSource::OnDemand { license, .. } => license,
-        // Bundled never requires acceptance — defensive, shouldn't reach here.
-        ModelSource::Bundled => return (true, false),
+        // Bundled variants never require acceptance — defensive, shouldn't reach here.
+        ModelSource::Bundled | ModelSource::MultiPartBundled { .. } => return (true, false),
     };
 
     let mut close_requested = false;
