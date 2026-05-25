@@ -91,8 +91,11 @@ jobs:
             fi
           done
 
+      # --workspace is required because `default-members` in the root
+      # Cargo.toml excludes xtask (see comment there). Without --workspace,
+      # plain `cargo build` would skip xtask and leave it un-compile-checked.
       - name: Build
-        run: cargo build --target ${{ matrix.target }}
+        run: cargo build --workspace --target ${{ matrix.target }}
 
       # Phase 20-05: install the ORT runtime on Linux x86_64 so the
       # `golden_e2e` integration test (and `reference_test` family)
@@ -113,4 +116,4 @@ jobs:
         run: cargo xtask install-runtime onnxruntime 1.24.1
 
       - name: Test
-        run: cargo test --target ${{ matrix.target }} --features prunr-models/dev-models
+        run: cargo test --workspace --target ${{ matrix.target }} --features prunr-models/dev-models
