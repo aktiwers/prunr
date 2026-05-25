@@ -74,6 +74,45 @@ pub(crate) const MODELS: &[ModelSpec] = &[
         url: "https://github.com/aktiwers/prunr/releases/download/models-v1/big_lama-1.0.0.onnx",
         sha256: "523e84eb2ec2df933714cbab6983627a9909f9f23cd848fbbe977356c54bdaa0",
     },
+    // RRDB upscale models. xtask fetches only the fp32 main file; the
+    // registry's `OnDemand.fp16` companion is downloaded at runtime by
+    // DownloadManager, not at build/dev-fetch time. Filenames use the
+    // capitalized human-facing form from the GitHub release artefacts
+    // (matching `load_variant`'s per-model stems).
+    ModelSpec {
+        id: prunr_models::ModelId::RealEsrganX4Plus,
+        name: "RealESRGAN_x4plus.onnx",
+        url: "https://github.com/aktiwers/prunr/releases/download/models-v1/RealESRGAN_x4plus.onnx",
+        sha256: "fb070c21d1e90102859d52328586a8738ebd4b2b076fe611ef42ba4f58076431",
+    },
+    ModelSpec {
+        id: prunr_models::ModelId::RealEsrganX2Plus,
+        name: "RealESRGAN_x2plus.onnx",
+        url: "https://github.com/aktiwers/prunr/releases/download/models-v1/RealESRGAN_x2plus.onnx",
+        sha256: "7e0860bb32d903520a244c327b6e3d5e08d680b95c29b3fa8a02cb6ecd230c60",
+    },
+    ModelSpec {
+        id: prunr_models::ModelId::FourXNmkdSiaxCx,
+        name: "4x-NMKD-Siax-CX.onnx",
+        url: "https://github.com/aktiwers/prunr/releases/download/models-v1/4x-NMKD-Siax-CX.onnx",
+        sha256: "d7db322397ae1041076a3f9fe9736a7bf9d3364e435eb5b0ece912e050a29f87",
+    },
+    ModelSpec {
+        id: prunr_models::ModelId::FourXNmkdSuperscale,
+        name: "4x-NMKD-Superscale.onnx",
+        url: "https://github.com/aktiwers/prunr/releases/download/models-v1/4x-NMKD-Superscale.onnx",
+        sha256: "6b790a203b341d2db71735040f4f1b26c2bdc5440fdc850e217c2234cd996618",
+    },
+    // Phhofm's official Nomos8k release IS fp16 (single file, no fp32
+    // sibling) — `UpscaleModelKnobs::is_fp16: true` drives runtime
+    // dispatch. Filename is `4xNomos8kSCHAT-L.onnx` with no `_fp16`
+    // suffix because the upstream artefact doesn't carry one.
+    ModelSpec {
+        id: prunr_models::ModelId::Nomos8kSchatL,
+        name: "4xNomos8kSCHAT-L.onnx",
+        url: "https://github.com/aktiwers/prunr/releases/download/models-v1/4xNomos8kSCHAT-L.onnx",
+        sha256: "919dff28836ff10fef2d5462e5b82c951211abf24f05196b0a6e2c24f20ed1de",
+    },
     // SAM 2 Hiera Small — bundled (MultiPartBundled) so each file ships
     // as a zstd-compressed `include_bytes!` blob in the release binary.
     // Two rows share the same ModelId because the model is a single
