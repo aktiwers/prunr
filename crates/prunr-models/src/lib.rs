@@ -204,6 +204,17 @@ pub enum ModelSource {
         /// require explicit user acceptance before the download starts.
         license_acceptance_required: bool,
     },
+    /// Multi-part model whose ONNX files are zstd-compressed and embedded
+    /// in the binary via `include_bytes!`. Used by SAM 2 (encoder +
+    /// decoder ~163 MiB combined zstd). Each part decompresses lazily
+    /// into a per-part `&'static [u8]` cache so repeated dispatch is
+    /// zero-copy. The license is carried through (unlike single-file
+    /// `Bundled`) so the Settings credits row still displays the
+    /// upstream author + license.
+    MultiPartBundled {
+        parts: &'static [BundledPart],
+        license: LicenseInfo,
+    },
 }
 
 impl ModelSource {
@@ -211,11 +222,25 @@ impl ModelSource {
     /// fails this match loudly — there's no `_ =>` fall-through.
     pub fn kind_label(&self) -> &'static str {
         match self {
-            ModelSource::Bundled => "Bundled",
+            ModelSource::Bundled | ModelSource::MultiPartBundled { .. } => "Bundled",
             ModelSource::OnDemand { .. } => "OnDemand",
             ModelSource::MultiPartOnDemand { .. } => "MultiPart",
         }
     }
+}
+
+/// One component of a `MultiPartBundled` model. The bytes are resolved
+/// by `bundled_multipart_bytes(id, key)` — under release builds via
+/// `include_bytes!` + zstd decompress, under `dev-models` via on-disk
+/// read of `filename`. Adding a new bundled multipart model means
+/// adding a row here AND an arm in `bundled_multipart_bytes`.
+#[derive(Debug, Clone, Copy)]
+pub struct BundledPart {
+    /// Logical key for inference dispatch, e.g. `"encoder"` / `"decoder"`.
+    pub key: &'static str,
+    /// Source filename. Used by the `dev-models` feature to locate the
+    /// uncompressed ONNX in the workspace `models/` directory.
+    pub filename: &'static str,
 }
 
 /// One component of a `MultiPartOnDemand` bundle. SHA256 verified
@@ -321,8 +346,9 @@ impl UpscaleModelKnobs {
 }
 
 impl ModelDescriptor {
-    /// Download size in MB for OnDemand entries, `None` for Bundled.
-    /// Multi-part bundles return the sum of all parts.
+    /// Download size in MB for OnDemand entries, `None` for Bundled
+    /// (the size is already paid in the binary). Multi-part on-demand
+    /// bundles return the sum of all parts.
     pub fn size_mb(&self) -> Option<u32> {
         match self.source {
             ModelSource::OnDemand { size_mb, .. } => Some(size_mb),
@@ -330,12 +356,13 @@ impl ModelDescriptor {
                 let total: u64 = parts.iter().map(|p| p.size_bytes).sum();
                 Some((total / (1024 * 1024)) as u32)
             }
-            ModelSource::Bundled => None,
+            ModelSource::Bundled | ModelSource::MultiPartBundled { .. } => None,
         }
     }
 
     /// True when this bundle requires explicit license-acceptance click
     /// before the download starts (CreativeML Open RAIL, NVIDIA SCL, …).
+    /// Bundled variants are accepted at build time, so they never gate.
     pub fn requires_license_acceptance(&self) -> bool {
         matches!(self.source, ModelSource::MultiPartOnDemand { license_acceptance_required: true, .. })
     }
@@ -869,32 +896,22 @@ pub const REGISTRY: &[ModelDescriptor] = &[
     // SAM 2 Hiera Small: Phase 33 Magic Brush. Apache 2.0 from Meta.
     // Two ONNX files (encoder + decoder). Encoder is the heavy one cached
     // on BatchItem.magic_brush_embedding; decoder runs per click/stroke.
-    // Total ~220 MB (encoder ~200 MB + decoder ~20 MB).
-    //
-    // SHA256 placeholders below are 64-char hex zeros. Replace with real
-    // values from vietanhdev/segment-anything-2-onnx-models before the
-    // Model Store download gate ships (Plan 07 Task 2).
+    // Bundled as zstd-compressed include_bytes! (~162 MiB combined) to
+    // avoid a first-run download gate.
     ModelDescriptor {
         id: ModelId::Sam2HieraSmall,
         display_name: "Magic Brush (SAM 2 Hiera Small)",
         description: "Click or stroke to select objects automatically. Apache 2.0 from Meta. Encoder runs once per image; decoder runs per click for real-time feel.",
         category: ModelCategory::Selection,
-        source: ModelSource::MultiPartOnDemand {
-            subdir: "sam2-hiera-small-v1.0.0",
+        source: ModelSource::MultiPartBundled {
             parts: &[
-                ModelPart {
+                BundledPart {
                     key: "encoder",
                     filename: "sam2_hiera_small.encoder.onnx",
-                    url: "https://github.com/aktiwers/prunr/releases/download/sam2-v1.0.0/sam2_hiera_small.encoder.onnx",
-                    sha256: "0000000000000000000000000000000000000000000000000000000000000001",
-                    size_bytes: 209_715_200,
                 },
-                ModelPart {
+                BundledPart {
                     key: "decoder",
                     filename: "sam2_hiera_small.decoder.onnx",
-                    url: "https://github.com/aktiwers/prunr/releases/download/sam2-v1.0.0/sam2_hiera_small.decoder.onnx",
-                    sha256: "0000000000000000000000000000000000000000000000000000000000000002",
-                    size_bytes: 20_971_520,
                 },
             ],
             license: LicenseInfo {
@@ -903,7 +920,6 @@ pub const REGISTRY: &[ModelDescriptor] = &[
                 license_url: "https://github.com/facebookresearch/segment-anything-2/blob/main/LICENSE",
                 source_url: "https://huggingface.co/vietanhdev/segment-anything-2-onnx-models",
             },
-            license_acceptance_required: false,
         },
         version: "1.0.0",
         gpu: GpuRequirement::None,
@@ -962,21 +978,24 @@ pub fn resolve_bytes(id: ModelId) -> Option<Cow<'static, [u8]>> {
     match desc.source {
         ModelSource::Bundled => Some(Cow::Borrowed(bundled_bytes(id))),
         ModelSource::OnDemand { filename, .. } => on_demand_bytes(id, filename).map(Cow::Borrowed),
-        // Multi-part bundles aren't a single byte-blob — callers go
-        // through `multi_part_paths(id)` and load each part separately.
-        ModelSource::MultiPartOnDemand { .. } => None,
+        // Multi-part models aren't a single byte-blob — callers go
+        // through `resolve_part_bytes(id, key)` or `multi_part_paths(id)`
+        // and load each part separately.
+        ModelSource::MultiPartOnDemand { .. } | ModelSource::MultiPartBundled { .. } => None,
     }
 }
 
-/// Resolve bytes for a specific part of a MultiPartOnDemand bundle.
+/// Resolve bytes for a specific part of a multi-part model.
 ///
-/// Returns `Err` if the model is not in REGISTRY, is not MultiPart,
-/// the part key is unknown, or the file cannot be read from disk.
-/// The UnknownPart check happens before any disk I/O — callers with
-/// a bad key get an immediate error without touching the filesystem.
+/// Handles both `MultiPartOnDemand` (reads from `on_demand_dir`) and
+/// `MultiPartBundled` (decompresses from the embedded zstd blob, cached
+/// for the process lifetime). Returns `Err` if the model is not in
+/// REGISTRY, is not multi-part, the part key is unknown, or — for
+/// on-demand bundles only — the file cannot be read from disk. The
+/// UnknownPart check happens before any disk I/O or decompression.
 ///
-/// Used by Magic Brush dispatch (Plan 07) to load SAM 2 encoder and
-/// decoder ONNX files separately so each drives its own OrtEngine session.
+/// Used by Magic Brush dispatch to load SAM 2 encoder and decoder
+/// ONNX files separately so each drives its own OrtEngine session.
 pub fn resolve_part_bytes(
     id: ModelId,
     part_key: &str,
@@ -993,6 +1012,11 @@ pub fn resolve_part_bytes(
             let bytes = std::fs::read(&path)
                 .map_err(|e| ResolveError::Io(format!("read {}: {e}", path.display())))?;
             Ok(Cow::Owned(bytes))
+        }
+        ModelSource::MultiPartBundled { parts, .. } => {
+            let part = parts.iter().find(|p| p.key == part_key)
+                .ok_or_else(|| ResolveError::UnknownPart(part_key.to_string()))?;
+            Ok(Cow::Borrowed(bundled_multipart_bytes(id, part.key)))
         }
         _ => Err(ResolveError::NotMultiPart),
     }
@@ -1058,7 +1082,7 @@ pub fn not_installed_error(id: ModelId) -> String {
 
 pub fn is_available(id: ModelId) -> bool {
     match descriptor(id).map(|d| d.source) {
-        Some(ModelSource::Bundled) => true,
+        Some(ModelSource::Bundled) | Some(ModelSource::MultiPartBundled { .. }) => true,
         Some(ModelSource::OnDemand { filename, .. }) => {
             on_demand_dir().is_some_and(|d| d.join(filename).is_file())
         }
@@ -1143,6 +1167,10 @@ static SILUETA_ZST: &[u8] = include_bytes!("../../../models/silueta.onnx.zst");
 static BIREFNET_LITE_ZST: &[u8] = include_bytes!("../../../models/birefnet_lite.onnx.zst");
 #[cfg(not(feature = "dev-models"))]
 static DEXINED_ZST: &[u8] = include_bytes!("../../../models/dexined.onnx.zst");
+#[cfg(not(feature = "dev-models"))]
+static SAM2_ENCODER_ZST: &[u8] = include_bytes!("../../../models/sam2_hiera_small.encoder.onnx.zst");
+#[cfg(not(feature = "dev-models"))]
+static SAM2_DECODER_ZST: &[u8] = include_bytes!("../../../models/sam2_hiera_small.decoder.onnx.zst");
 
 #[cfg(not(feature = "dev-models"))]
 static SILUETA_CACHE: OnceLock<Vec<u8>> = OnceLock::new();
@@ -1150,6 +1178,10 @@ static SILUETA_CACHE: OnceLock<Vec<u8>> = OnceLock::new();
 static BIREFNET_LITE_CACHE: OnceLock<Vec<u8>> = OnceLock::new();
 #[cfg(not(feature = "dev-models"))]
 static DEXINED_CACHE: OnceLock<Vec<u8>> = OnceLock::new();
+#[cfg(not(feature = "dev-models"))]
+static SAM2_ENCODER_CACHE: OnceLock<Vec<u8>> = OnceLock::new();
+#[cfg(not(feature = "dev-models"))]
+static SAM2_DECODER_CACHE: OnceLock<Vec<u8>> = OnceLock::new();
 
 #[cfg(not(feature = "dev-models"))]
 pub fn silueta_bytes() -> &'static [u8] {
@@ -1175,12 +1207,32 @@ pub fn dexined_bytes() -> &'static [u8] {
     })
 }
 
+#[cfg(not(feature = "dev-models"))]
+pub fn sam2_encoder_bytes() -> &'static [u8] {
+    SAM2_ENCODER_CACHE.get_or_init(|| {
+        zstd::bulk::decompress(SAM2_ENCODER_ZST, 200 * 1024 * 1024)
+            .expect("failed to decompress embedded SAM 2 encoder")
+    })
+}
+
+#[cfg(not(feature = "dev-models"))]
+pub fn sam2_decoder_bytes() -> &'static [u8] {
+    SAM2_DECODER_CACHE.get_or_init(|| {
+        zstd::bulk::decompress(SAM2_DECODER_ZST, 32 * 1024 * 1024)
+            .expect("failed to decompress embedded SAM 2 decoder")
+    })
+}
+
 #[cfg(feature = "dev-models")]
 static DEV_SILUETA: OnceLock<Vec<u8>> = OnceLock::new();
 #[cfg(feature = "dev-models")]
 static DEV_BIREFNET: OnceLock<Vec<u8>> = OnceLock::new();
 #[cfg(feature = "dev-models")]
 static DEV_DEXINED: OnceLock<Vec<u8>> = OnceLock::new();
+#[cfg(feature = "dev-models")]
+static DEV_SAM2_ENCODER: OnceLock<Vec<u8>> = OnceLock::new();
+#[cfg(feature = "dev-models")]
+static DEV_SAM2_DECODER: OnceLock<Vec<u8>> = OnceLock::new();
 
 #[cfg(feature = "dev-models")]
 fn dev_model_path(name: &str) -> std::path::PathBuf {
@@ -1206,6 +1258,36 @@ pub fn dexined_bytes() -> &'static [u8] {
     let path = dev_model_path("dexined.onnx");
     DEV_DEXINED.get_or_init(|| std::fs::read(&path)
         .unwrap_or_else(|_| panic!("dev-models requires {} — run `cargo xtask fetch-models` from the workspace root", path.display())))
+}
+
+#[cfg(feature = "dev-models")]
+pub fn sam2_encoder_bytes() -> &'static [u8] {
+    let path = dev_model_path("sam2_hiera_small.encoder.onnx");
+    DEV_SAM2_ENCODER.get_or_init(|| std::fs::read(&path)
+        .unwrap_or_else(|_| panic!("dev-models requires {} — run `cargo xtask fetch-models` from the workspace root", path.display())))
+}
+
+#[cfg(feature = "dev-models")]
+pub fn sam2_decoder_bytes() -> &'static [u8] {
+    let path = dev_model_path("sam2_hiera_small.decoder.onnx");
+    DEV_SAM2_DECODER.get_or_init(|| std::fs::read(&path)
+        .unwrap_or_else(|_| panic!("dev-models requires {} — run `cargo xtask fetch-models` from the workspace root", path.display())))
+}
+
+/// Dispatcher for `MultiPartBundled` byte resolution. Mirrors the
+/// `bundled_bytes(id)` pattern but keyed by `(ModelId, part_key)`.
+/// Adding a new `MultiPartBundled` REGISTRY row means adding an arm
+/// here AND a per-part accessor above. The fallback panic guards
+/// against a REGISTRY row that declares a part with no backing bytes.
+fn bundled_multipart_bytes(id: ModelId, part_key: &'static str) -> &'static [u8] {
+    match (id, part_key) {
+        (ModelId::Sam2HieraSmall, "encoder") => sam2_encoder_bytes(),
+        (ModelId::Sam2HieraSmall, "decoder") => sam2_decoder_bytes(),
+        _ => panic!(
+            "bundled_multipart_bytes called for unknown ({id:?}, {part_key:?}) — \
+             REGISTRY declares a part that has no byte accessor"
+        ),
+    }
 }
 
 // ── Optimized model variants (FP16 for GPU, INT8 for CPU) ───────────────────
@@ -1336,7 +1418,7 @@ mod tests {
         // Bundled entry with `Required` doesn't silently render as
         // Built-in while ignoring its own gate.
         for desc in REGISTRY {
-            if matches!(desc.source, ModelSource::Bundled) {
+            if matches!(desc.source, ModelSource::Bundled | ModelSource::MultiPartBundled { .. }) {
                 assert!(
                     !matches!(desc.gpu, GpuRequirement::Required),
                     "Bundled descriptor {:?} declares GpuRequirement::Required — \
@@ -1370,7 +1452,7 @@ mod tests {
     #[test]
     fn bundled_descriptors_are_always_available() {
         for desc in REGISTRY {
-            if matches!(desc.source, ModelSource::Bundled) {
+            if matches!(desc.source, ModelSource::Bundled | ModelSource::MultiPartBundled { .. }) {
                 assert!(is_available(desc.id), "Bundled {:?} reports unavailable", desc.id);
             }
         }
@@ -1572,6 +1654,7 @@ mod tests {
             let license = match desc.source {
                 ModelSource::OnDemand { license, .. } => Some(license),
                 ModelSource::MultiPartOnDemand { license, .. } => Some(license),
+                ModelSource::MultiPartBundled { license, .. } => Some(license),
                 ModelSource::Bundled => None,
             };
             let Some(lic) = license else { continue };
@@ -1597,6 +1680,7 @@ mod tests {
             let author = match desc.source {
                 ModelSource::OnDemand { license, .. } => Some(license.author),
                 ModelSource::MultiPartOnDemand { license, .. } => Some(license.author),
+                ModelSource::MultiPartBundled { license, .. } => Some(license.author),
                 ModelSource::Bundled => None,
             };
             if let Some(author) = author {
@@ -1872,14 +1956,14 @@ mod tests {
         }
     }
 
-    // ── SAM 2 Hiera Small boundary tests (33-02) ─────────────────────────
+    // ── SAM 2 Hiera Small boundary tests ─────────────────────────────────
 
     #[test]
     fn sam2_registry_entry() {
         let desc = REGISTRY.iter().find(|d| d.id == ModelId::Sam2HieraSmall)
             .expect("Sam2HieraSmall must be registered");
         assert_eq!(desc.category, ModelCategory::Selection);
-        assert!(matches!(desc.source, ModelSource::MultiPartOnDemand { .. }));
+        assert!(matches!(desc.source, ModelSource::MultiPartBundled { .. }));
         assert_eq!(desc.working_set_mb, 800);
         assert!(!desc.attribution_required);
         assert!(desc.upscale.is_none());
@@ -1888,8 +1972,8 @@ mod tests {
     #[test]
     fn sam2_has_encoder_and_decoder_parts() {
         let desc = REGISTRY.iter().find(|d| d.id == ModelId::Sam2HieraSmall).unwrap();
-        let ModelSource::MultiPartOnDemand { parts, .. } = desc.source else {
-            panic!("expected MultiPartOnDemand");
+        let ModelSource::MultiPartBundled { parts, .. } = desc.source else {
+            panic!("expected MultiPartBundled");
         };
         assert_eq!(parts.len(), 2);
         let keys: Vec<&str> = parts.iter().map(|p| p.key).collect();
@@ -1900,23 +1984,22 @@ mod tests {
     #[test]
     fn sam2_license_is_apache_2_no_acceptance_required() {
         let desc = REGISTRY.iter().find(|d| d.id == ModelId::Sam2HieraSmall).unwrap();
-        let ModelSource::MultiPartOnDemand { license, license_acceptance_required, .. } = desc.source else {
-            panic!("expected MultiPartOnDemand");
+        let ModelSource::MultiPartBundled { license, .. } = desc.source else {
+            panic!("expected MultiPartBundled");
         };
         assert_eq!(license.license, "Apache 2.0");
-        assert!(!license_acceptance_required);
+        assert!(!desc.requires_license_acceptance());
     }
 
     /// Pins the contract that encoder and decoder are SEPARATE ONNX files —
-    /// dispatched through SEPARATE OrtEngine instances (Criterion 12).
-    /// If a future change consolidates them into one part, this test fails.
+    /// dispatched through SEPARATE OrtEngine instances. If a future change
+    /// consolidates them into one part, this test fails.
     #[test]
     fn sam2_encoder_decoder_separate_engines() {
         let desc = REGISTRY.iter().find(|d| d.id == ModelId::Sam2HieraSmall).unwrap();
-        let ModelSource::MultiPartOnDemand { parts, .. } = desc.source else {
-            panic!("expected MultiPartOnDemand");
+        let ModelSource::MultiPartBundled { parts, .. } = desc.source else {
+            panic!("expected MultiPartBundled");
         };
-        // Distinct filenames => distinct OrtEngine sessions when loaded.
         let filenames: std::collections::HashSet<&str> =
             parts.iter().map(|p| p.filename).collect();
         assert_eq!(filenames.len(), parts.len(),
@@ -1925,7 +2008,41 @@ mod tests {
         assert!(parts.iter().any(|p| p.key == "decoder" && p.filename.contains("decoder")));
     }
 
-    // ── resolve_part_bytes error-path tests (33-02) ───────────────────────
+    #[test]
+    fn sam2_is_always_available_when_bundled() {
+        assert!(is_available(ModelId::Sam2HieraSmall),
+            "MultiPartBundled SAM 2 must report available without disk presence");
+    }
+
+    /// `resolve_part_bytes` for a bundled multi-part returns real bytes —
+    /// pins the contract that Magic Brush dispatch can load SAM 2 without
+    /// any prior download step.
+    #[test]
+    fn sam2_bundled_resolve_returns_bytes() {
+        let enc = resolve_part_bytes(ModelId::Sam2HieraSmall, "encoder")
+            .expect("encoder bytes must resolve");
+        let dec = resolve_part_bytes(ModelId::Sam2HieraSmall, "decoder")
+            .expect("decoder bytes must resolve");
+        // ONNX files start with the protobuf magic bytes 0x08 0x07 0x12 (or
+        // similar varint headers); 4 MiB is a sane lower-bound smoke test —
+        // the real encoder is ~150 MiB, the decoder ~20 MiB.
+        assert!(enc.len() > 4 * 1024 * 1024,
+            "SAM 2 encoder decompressed too small: {} bytes", enc.len());
+        assert!(dec.len() > 4 * 1024 * 1024,
+            "SAM 2 decoder decompressed too small: {} bytes", dec.len());
+    }
+
+    /// Second call must return the same `&'static [u8]` — pin the cache so
+    /// per-click decoder dispatch doesn't re-decompress 150 MiB each time.
+    #[test]
+    fn sam2_bundled_resolve_is_cached() {
+        let a = resolve_part_bytes(ModelId::Sam2HieraSmall, "encoder").unwrap();
+        let b = resolve_part_bytes(ModelId::Sam2HieraSmall, "encoder").unwrap();
+        assert_eq!(a.as_ptr(), b.as_ptr(),
+            "MultiPartBundled bytes must be cached, not re-decompressed");
+    }
+
+    // ── resolve_part_bytes error-path tests ──────────────────────────────
 
     #[test]
     fn resolve_part_bytes_non_multipart_returns_not_multipart() {
@@ -1936,15 +2053,13 @@ mod tests {
 
     #[test]
     fn resolve_part_bytes_non_multipart_ondemand_returns_not_multipart() {
-        // U2net is single-file OnDemand — not a MultiPartOnDemand bundle.
+        // U2net is single-file OnDemand — not a MultiPart bundle.
         let result = resolve_part_bytes(ModelId::U2net, "encoder");
         assert_eq!(result, Err(ResolveError::NotMultiPart));
     }
 
     #[test]
     fn resolve_part_bytes_unknown_key_returns_unknown_part() {
-        // UnknownPart is checked before disk I/O — this passes even
-        // when the model file is not downloaded.
         let result = resolve_part_bytes(ModelId::Sam2HieraSmall, "nonexistent");
         assert!(
             matches!(result, Err(ResolveError::UnknownPart(_))),

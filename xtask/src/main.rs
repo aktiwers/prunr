@@ -12,9 +12,11 @@ fn ondemand_target(id: prunr_models::ModelId) -> Option<&'static str> {
     match prunr_models::descriptor(id)?.source {
         prunr_models::ModelSource::OnDemand { filename, .. } => Some(filename),
         // Multi-part bundles aren't single-file targets — xtask doesn't
-        // mirror them today; the production DownloadManager handles them.
+        // mirror them today; the production DownloadManager handles
+        // on-demand bundles, and bundled variants live in the binary.
         prunr_models::ModelSource::Bundled
-        | prunr_models::ModelSource::MultiPartOnDemand { .. } => None,
+        | prunr_models::ModelSource::MultiPartOnDemand { .. }
+        | prunr_models::ModelSource::MultiPartBundled { .. } => None,
     }
 }
 
