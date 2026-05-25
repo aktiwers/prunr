@@ -740,24 +740,63 @@ fn apply_edge_shift(mask: &mut GrayImage, shift: f32) {
     let step = |src: &[u8], dst: &mut [u8]| {
         let process_row = |(y, row): (usize, &mut [u8])| {
             let yi = y as i32;
-            for (x, slot) in row.iter_mut().enumerate() {
-                let xi = x as i32;
-                let mut extremum: u8 = if erode { 255 } else { 0 };
-                for dy in -1i32..=1 {
-                    let ny = (yi + dy).clamp(0, hi - 1) as usize;
-                    for dx in -1i32..=1 {
-                        let nx = (xi + dx).clamp(0, wi - 1) as usize;
-                        let v = src[ny * w + nx];
-                        if erode {
-                            extremum = extremum.min(v);
-                        } else {
-                            extremum = extremum.max(v);
-                        }
+            // Interior fast-path: the 3x3 window is fully within image bounds
+            // for x in [1, w-2] and y in [1, h-2].
+            if y > 0 && y < h - 1 && w >= 3 {
+                let center_off = y * w;
+                let top_off = center_off - w;
+                let bottom_off = center_off + w;
+
+                let r0 = &src[top_off..top_off + w];
+                let r1 = &src[center_off..center_off + w];
+                let r2 = &src[bottom_off..bottom_off + w];
+
+                if erode {
+                    for x in 1..w - 1 {
+                        row[x] = r0[x - 1].min(r0[x]).min(r0[x + 1])
+                            .min(r1[x - 1]).min(r1[x]).min(r1[x + 1])
+                            .min(r2[x - 1]).min(r2[x]).min(r2[x + 1]);
+                    }
+                } else {
+                    for x in 1..w - 1 {
+                        row[x] = r0[x - 1].max(r0[x]).max(r0[x + 1])
+                            .max(r1[x - 1]).max(r1[x]).max(r1[x + 1])
+                            .max(r2[x - 1]).max(r2[x]).max(r2[x + 1]);
                     }
                 }
-                *slot = extremum;
+
+                // Handle edge pixels (x=0, x=w-1) for this row with clamping
+                for &x in &[0, w - 1] {
+                    let mut extremum = if erode { 255 } else { 0 };
+                    let xi = x as i32;
+                    for dy in -1..=1 {
+                        let ny = (yi + dy) as usize; // y is in [1, h-2], so no clamp needed
+                        for dx in -1..=1 {
+                            let nx = (xi + dx).clamp(0, wi - 1) as usize;
+                            let v = src[ny * w + nx];
+                            if erode { extremum = extremum.min(v); } else { extremum = extremum.max(v); }
+                        }
+                    }
+                    row[x] = extremum;
+                }
+            } else {
+                // Border rows (y=0, y=h-1) or narrow image: full clamping path
+                for x in 0..w {
+                    let mut extremum = if erode { 255 } else { 0 };
+                    let xi = x as i32;
+                    for dy in -1..=1 {
+                        let ny = (yi + dy).clamp(0, hi - 1) as usize;
+                        for dx in -1..=1 {
+                            let nx = (xi + dx).clamp(0, wi - 1) as usize;
+                            let v = src[ny * w + nx];
+                            if erode { extremum = extremum.min(v); } else { extremum = extremum.max(v); }
+                        }
+                    }
+                    row[x] = extremum;
+                }
             }
         };
+
         if use_par {
             dst.par_chunks_mut(w).enumerate().for_each(process_row);
         } else {
@@ -995,6 +1034,29 @@ mod tests {
             let _ = postprocess_from_flat(&tensor, 320, 320, &original, &PostprocessOpts::new(&mask, ModelKind::Silueta))
                 .expect("postprocess succeeds");
         });
+    }
+
+    /// Bench for `apply_edge_shift` on a 4K mask.
+    ///   `cargo test -p prunr-core --release apply_edge_shift_4k_bench -- --nocapture --ignored`
+    #[test]
+    #[ignore]
+    fn apply_edge_shift_4k_bench() {
+        let (w, h) = (4000u32, 3000u32);
+        // Create a mask with some content so we don't just benchmark empty loops
+        let mut mask = GrayImage::from_fn(w, h, |x, y| {
+            if (x as i32 - 2000).pow(2) + (y as i32 - 1500).pow(2) < 1000 * 1000 {
+                image::Luma([255])
+            } else {
+                image::Luma([0])
+            }
+        });
+
+        bench_report(
+            &format!("apply_edge_shift_4k_bench ({w}x{h})"),
+            1,
+            5,
+            || apply_edge_shift(&mut mask, 2.0),
+        );
     }
 
     /// Halftone regression: on a uniform-luma input, pixels at the
