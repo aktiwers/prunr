@@ -6,6 +6,27 @@ members = [
     "crates/prunr-runtime-install",
     "xtask",
 ]
+# xtask is excluded from the default build set so plain `cargo build` /
+# `cargo build --release` from the workspace root match CI's release
+# command (`cargo build --release -p prunr-app`). xtask declares
+# `prunr-models = { features = ["dev-models"] }` as a hard dep so its
+# own compilation can call `silueta_bytes()` etc. before the .zst blobs
+# exist — but including xtask in the default build set unifies that
+# feature across prunr-models for everyone, gating out the
+# `include_bytes!` paths and producing a release binary without any
+# bundled models (~39 MB instead of ~500 MB).
+#
+# `cargo xtask <task>` still works because the alias in
+# `.cargo/config.toml` is `cargo run --package xtask --` — explicit
+# package selection bypasses default-members.
+# `cargo test --workspace ...` and `cargo build --workspace ...` still
+# include xtask via the explicit `--workspace` flag.
+default-members = [
+    "crates/prunr-core",
+    "crates/prunr-models",
+    "crates/prunr-app",
+    "crates/prunr-runtime-install",
+]
 resolver = "2"
 
 [workspace.package]
