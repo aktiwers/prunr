@@ -51,11 +51,20 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
         && !inpaint_in_flight_for_selected
         && (matches!(app_state, AppState::Done)
             || (matches!(app_state, AppState::Loaded) && app.settings.model.is_inpaint()));
+    // Magic Brush is treated as a brush tool for pan-gate purposes — when
+    // it's active and the encoder is ready, left-drag belongs to the
+    // brush and pan moves to secondary (right) button, matching Paint
+    // Brush. Suppressed while encoder is pending so the "Preparing..."
+    // overlay doesn't accidentally steal pan from a frustrated user.
+    let magic_brush_active = app.magic_brush_state.is_active()
+        && !app.magic_brush_state.has_pending_encoder()
+        && matches!(app_state, AppState::Loaded | AppState::Done);
+    let any_brush_tool_active = brush_active || magic_brush_active;
     // Scroll-zoom always works: it doesn't conflict with brush strokes
     // and the zoom feedback is reassuring even mid-painting.
     let canvas_gets_zoom = !modal_open && !popup_open && !widget_has_pointer;
     // Pan binding: primary (left) drag normally; secondary (right) drag
-    // in brush mode so left-click is free for the brush stroke.
+    // in any brush-tool mode so left-click is free for the brush stroke.
     let canvas_gets_pan = canvas_gets_zoom;
     if canvas_gets_zoom {
         // Handle scroll-wheel zoom (cursor-centered)
@@ -85,7 +94,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
             // This avoids false pan when egui's pointer state is desynced — e.g. after
             // an OS drag-out session where Prunr's window never saw the mouse-up.
             let hovered_inside = i.pointer.hover_pos().is_some_and(|p| canvas_rect.contains(p));
-            let (pressed, down) = if brush_active {
+            let (pressed, down) = if any_brush_tool_active {
                 (i.pointer.secondary_pressed(), i.pointer.button_down(egui::PointerButton::Secondary))
             } else {
                 (i.pointer.primary_pressed(), i.pointer.primary_down())
@@ -203,6 +212,11 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
     // in flight for the selected item. Canvas centre, TEXT_SECONDARY text +
     // ACCENT spinner below.
     if app.magic_brush_state.is_active() && app.magic_brush_state.has_pending_encoder() {
+        // Cursor over the canvas reads as Wait while the encoder is in
+        // flight (secondary cue to the centered "Preparing…" overlay).
+        if ui.ctx().input(|i| i.pointer.hover_pos().is_some_and(|p| canvas_rect.contains(p))) {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Wait);
+        }
         let center = canvas_rect.center();
         ui.painter().text(
             center,
@@ -219,6 +233,35 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
         // 10 Hz polling while the encoder runs — a 60 Hz busy-render of a
         // static spinner spins up the fan for no visible benefit.
         ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+    }
+
+    // Bottom-left modifier hint — shown whenever Magic Brush is the active
+    // tool (regardless of encoder state) so users discover Shift / Alt
+    // before they need them. Active modifier tints to ACCENT; the rest stays
+    // TEXT_SECONDARY. Mono 12px per 33-UI-SPEC §Selection Visualization.
+    if app.magic_brush_state.is_active() {
+        let (shift, alt) = ui.ctx().input(|i| (i.modifiers.shift, i.modifiers.alt));
+        let base_color = theme::TEXT_SECONDARY;
+        let active_color = theme::ACCENT;
+        let pos = egui::pos2(
+            canvas_rect.min.x + theme::SPACE_SM,
+            canvas_rect.max.y - theme::SPACE_SM - theme::FONT_SIZE_MONO,
+        );
+        let font = egui::FontId::monospace(theme::FONT_SIZE_MONO);
+        let painter = ui.painter();
+        let shift_color = if shift { active_color } else { base_color };
+        let shift_rect = painter.text(
+            pos, egui::Align2::LEFT_TOP, "Shift = add", font.clone(), shift_color,
+        );
+        let sep_rect = painter.text(
+            egui::pos2(shift_rect.max.x, pos.y), egui::Align2::LEFT_TOP,
+            "  ", font.clone(), base_color,
+        );
+        let alt_color = if alt { active_color } else { base_color };
+        painter.text(
+            egui::pos2(sep_rect.max.x, pos.y), egui::Align2::LEFT_TOP,
+            "Alt = subtract", font, alt_color,
+        );
     }
 }
 
@@ -290,6 +333,11 @@ fn handle_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: Rect) 
 /// Suppressed when encoder is pending — clicks during "Preparing..." are
 /// silently ignored (per 33-UI-SPEC). Dispatches a SAM decoder job on
 /// every click or completed stroke; modifier keys control mask combination.
+///
+/// Also owns the per-frame visual feedback for the tool: crosshair cursor
+/// icon, brush-shape cursor outline (via `brush_overlay::draw_cursor`),
+/// trail rendering during drag (via `brush_overlay::draw_trail_for`),
+/// and the modifier glyph (+ / −) at the cursor when Shift / Alt is held.
 fn handle_magic_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: Rect) {
     use crate::gui::processor::PromptModifier;
 
@@ -304,9 +352,34 @@ fn handle_magic_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: 
 
     let Some(idx) = app.batch.selected_idx_clamped() else { return };
     let item = &app.batch.items[idx];
-    let Some(embedding) = item.magic_brush_embedding.clone() else { return };
     let item_id = item.id;
     let (source_w, source_h) = item.dimensions;
+    // Embedding may be None for one frame between encoder dispatch and
+    // result pump. Cursor + trail should still render so the user gets
+    // immediate feedback that Magic Brush is the active tool; only the
+    // dispatch is gated on a real embedding.
+    let embedding = item.magic_brush_embedding.clone();
+
+    // Cursor icon: Crosshair while over the canvas, default elsewhere.
+    let hover_pos_for_cursor = ui.ctx().input(|i| i.pointer.hover_pos());
+    if hover_pos_for_cursor.is_some_and(|p| canvas_rect.contains(p)) {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+    }
+
+    // Brush-shape cursor outline + in-progress trail. Same helpers Paint
+    // Brush uses, reading the same BrushSettings — single source of truth
+    // for size / shape / hardness / strength means a tweak in either
+    // popover applies to both tools.
+    let pointer_on_img = hover_pos_for_cursor.filter(|p| img_rect.contains(*p));
+    super::brush_overlay::draw_trail_for(
+        ui,
+        &app.settings.brush,
+        app.settings.brush.shape,
+        app.magic_brush_state.active_trail.iter().copied(),
+    );
+    super::brush_overlay::draw_cursor(
+        ui, img_rect, &app.settings.brush, pointer_on_img.is_some(),
+    );
 
     // Determine modifier from held keys. Read once to avoid per-call InputState borrow.
     let modifier = ui.ctx().input(|i| {
@@ -318,6 +391,28 @@ fn handle_magic_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: 
             PromptModifier::Replace
         }
     });
+
+    // Modifier glyph at the cursor — `+` for Shift, `−` for Alt. Painted
+    // below-right of the hover position per 33-UI-SPEC §"Modifier cursor
+    // annotation" (offset matches the macOS modifier-indicator convention).
+    if let Some(p) = hover_pos_for_cursor {
+        if canvas_rect.contains(p) {
+            let glyph = match modifier {
+                PromptModifier::Add => Some("+"),
+                PromptModifier::Subtract => Some("\u{2212}"), // U+2212 MINUS SIGN — visually heavier than ASCII hyphen.
+                PromptModifier::Replace => None,
+            };
+            if let Some(g) = glyph {
+                ui.painter().text(
+                    p + egui::vec2(12.0, 12.0),
+                    egui::Align2::CENTER_CENTER,
+                    g,
+                    egui::FontId::proportional(14.0),
+                    theme::ACCENT,
+                );
+            }
+        }
+    }
 
     // Convert screen position to source-image pixel coordinates.
     let screen_to_src = |pos: egui::Pos2| -> (f32, f32) {
@@ -343,18 +438,38 @@ fn handle_magic_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: 
         (clicked, drag_started, dragging, released, hover)
     });
 
+    // No embedding yet? Render cursor + trail above but skip dispatch —
+    // the encoder must finish before a SAM prompt can run.
+    let Some(embedding) = embedding else { return };
+
+    let screen_radius = app.settings.brush.radius;
+    let min_trail_step_sq = (screen_radius * 0.5).max(1.0).powi(2);
+
     if drag_started {
-        app.magic_brush_state.active_stroke.clear();
+        app.magic_brush_state.clear_stroke();
     }
 
     if dragging {
         if let Some(pos) = hover_pos {
             if canvas_rect.contains(pos) {
                 let (px, py) = screen_to_src(pos);
-                let stroke = &mut app.magic_brush_state.active_stroke;
-                // Deduplicate consecutive identical points to reduce noise.
-                if stroke.last().map_or(true, |&last| last != (px, py)) {
-                    stroke.push((px, py));
+                let state = &mut app.magic_brush_state;
+                // Dedup the source-coords list on bit-exact repeats; SAM
+                // doesn't benefit from duplicate points and we cap at 8
+                // anyway in build_stroke_prompt.
+                if state.active_stroke.last().map_or(true, |&last| last != (px, py)) {
+                    state.active_stroke.push((px, py));
+                }
+                // Dedup the screen-coords trail on half-radius steps —
+                // matches BrushState.record_trail_stamp's policy so the
+                // two tools render visually identical trails.
+                let push_trail = state.active_trail.last().map_or(true, |&(lx, ly, _)| {
+                    let dx = pos.x - lx;
+                    let dy = pos.y - ly;
+                    dx * dx + dy * dy >= min_trail_step_sq
+                });
+                if push_trail {
+                    state.active_trail.push((pos.x, pos.y, screen_radius));
                 }
             }
         }
@@ -363,6 +478,7 @@ fn handle_magic_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: 
     if released && app.magic_brush_state.active_stroke.len() > 1 {
         // Stroke completed — dispatch decoder with stroke prompt.
         let stroke_pts = std::mem::take(&mut app.magic_brush_state.active_stroke);
+        app.magic_brush_state.active_trail.clear();
         match prunr_core::sam::prompt::build_stroke_prompt(
             &stroke_pts,
             source_w as u32,
@@ -394,7 +510,7 @@ fn handle_magic_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: 
                 app.processor.dispatch_sam_decoder(item_id, embedding, prompt, modifier);
             }
         }
-        app.magic_brush_state.active_stroke.clear();
+        app.magic_brush_state.clear_stroke();
     }
 }
 
@@ -565,6 +681,46 @@ fn render_loaded(ui: &mut egui::Ui, app: &PrunrApp) {
             Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
             Color32::from_rgba_unmultiplied(255, 255, 255, alpha),
         );
+
+        // Selection overlay — same call as `render_done`. Required here too
+        // because Magic Brush authors selections directly on the source
+        // image, before any Process click; without this the action bar
+        // shows but the user sees no mask. See `33-UI-SPEC.md` §"Selection
+        // Visualization — Render gating".
+        if let Some(it) = app.batch.selected_item() {
+            let (src_w, src_h) = it.dimensions;
+            super::selection_overlay::render_selection_overlay(
+                ui, it, &app.settings.brush, img_rect, src_w, src_h,
+            );
+        }
+
+        // Empty-state hint — guides discovery when a brush tool is active
+        // but no selection exists yet. Per 33-UI-SPEC §"Empty-state hint":
+        // 50% alpha so it sits under the imagery without competing.
+        let has_selection = app.batch
+            .selected_item()
+            .is_some_and(|i| i.selection_mask.is_some());
+        if !has_selection {
+            let hint = if app.magic_brush_state.is_active()
+                && !app.magic_brush_state.has_pending_encoder()
+            {
+                Some("Click or stroke to select")
+            } else if app.brush_state.is_enabled() {
+                Some("Paint to select")
+            } else {
+                None
+            };
+            if let Some(text) = hint {
+                let color = theme::TEXT_SECONDARY.linear_multiply(0.5);
+                ui.painter().text(
+                    img_rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    text,
+                    egui::FontId::monospace(theme::FONT_SIZE_MONO),
+                    color,
+                );
+            }
+        }
     } else {
         // Source not decoded yet — show spinner
         let center = canvas_rect.center();
@@ -663,6 +819,17 @@ fn render_done(ui: &mut egui::Ui, app: &PrunrApp) {
                 Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
                 Color32::WHITE,
             );
+            // Selection overlay also renders in show_original — the user
+            // is reviewing the source pre-mask, and the selection is
+            // authored against source coordinates, so it should be visible
+            // here too. Per 33-UI-SPEC §"Selection Visualization — Render
+            // gating".
+            if let Some(it) = item {
+                let (src_w, src_h) = it.dimensions;
+                super::selection_overlay::render_selection_overlay(
+                    ui, it, &app.settings.brush, img_rect, src_w, src_h,
+                );
+            }
         }
     } else if let Some(result_tex) = item.and_then(|i| i.result_texture.as_ref()) {
         let img_rect =

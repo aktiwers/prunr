@@ -145,6 +145,20 @@ fn screen_to_model(p: Pos2, img_rect: Rect, model_w: u16, model_h: u16) -> Pos2 
 /// brighter than the theme ACCENT so the trail is legible on dark
 /// images too.
 fn draw_trail(ui: &Ui, brush_state: &BrushState, s: &BrushSettings) {
+    let Some(shape) = brush_state.active_shape() else { return };
+    draw_trail_for(ui, s, shape, brush_state.trail_stamps());
+}
+
+/// Paint the in-progress trail from an arbitrary stamp iterator. Shared
+/// by Paint Brush (reads `BrushState.trail_stamps`) and Magic Brush
+/// (reads `MagicBrushState.active_trail`). Same visual contract — the
+/// only difference between the two tools is what they commit on release.
+pub(crate) fn draw_trail_for(
+    ui: &Ui,
+    s: &BrushSettings,
+    shape: prunr_core::brush::BrushShape,
+    stamps: impl IntoIterator<Item = (f32, f32, f32)>,
+) {
     if s.strength <= 0.0 {
         return;
     }
@@ -160,24 +174,22 @@ fn draw_trail(ui: &Ui, brush_state: &BrushState, s: &BrushSettings) {
     let hardness = s.hardness.clamp(0.0, 1.0);
     let solid = Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), center_alpha);
 
-    let Some(shape) = brush_state.active_shape() else { return };
     match shape {
         prunr_core::brush::BrushShape::Line => {
-            // Collect only when needed — the Line branch wants first + last.
-            let stamps: Vec<_> = brush_state.trail_stamps().collect();
+            let stamps: Vec<_> = stamps.into_iter().collect();
             let (Some(&first), Some(&last)) = (stamps.first(), stamps.last()) else { return };
             let stroke = egui::Stroke::new(first.2 * 2.0, solid);
             painter.line_segment([Pos2::new(first.0, first.1), Pos2::new(last.0, last.1)], stroke);
         }
         prunr_core::brush::BrushShape::Circle => {
-            for (sx, sy, outer_r) in brush_state.trail_stamps() {
+            for (sx, sy, outer_r) in stamps {
                 super::chip::paint_falloff_circle(
                     &painter, Pos2::new(sx, sy), outer_r, hardness, accent, center_alpha, 8,
                 );
             }
         }
         prunr_core::brush::BrushShape::Square => {
-            for (sx, sy, outer_r) in brush_state.trail_stamps() {
+            for (sx, sy, outer_r) in stamps {
                 super::chip::paint_falloff_square(
                     &painter, Pos2::new(sx, sy), outer_r, hardness, accent, center_alpha, 6,
                 );
@@ -187,7 +199,7 @@ fn draw_trail(ui: &Ui, brush_state: &BrushState, s: &BrushSettings) {
     let _ = solid;
 }
 
-fn draw_cursor(ui: &Ui, img_rect: Rect, s: &BrushSettings, armed: bool) {
+pub(crate) fn draw_cursor(ui: &Ui, img_rect: Rect, s: &BrushSettings, armed: bool) {
     let pointer = ui.input(|i| i.pointer.hover_pos());
     let Some(p) = pointer else { return };
     if !img_rect.contains(p) {
