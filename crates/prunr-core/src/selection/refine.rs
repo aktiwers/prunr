@@ -139,6 +139,37 @@ mod tests {
         assert_eq!(pts[0], (3, 3));
     }
 
+    /// Two disjoint selected regions produce boundary points from BOTH —
+    /// the row-major scan visits the whole mask and the renderer (in
+    /// `selection_overlay::render_selection_overlay`) emits one filled
+    /// rect per pixel, never connecting them. This test pins the boundary
+    /// scan's output; the no-connecting-line invariant is upheld at the
+    /// render side by virtue of NOT using `Shape::line` (see the comment
+    /// in `selection_overlay.rs` for the design rationale).
+    #[test]
+    fn outline_two_disjoint_regions_returns_points_from_both() {
+        // 16x16 mask, two non-overlapping 2x2 squares far apart.
+        // Region A: (1,1)..(2,2). Region B: (12,12)..(13,13).
+        let mut data = vec![0.0f32; 256];
+        for (rx, ry) in [(1usize, 1usize), (2, 1), (1, 2), (2, 2)] {
+            data[ry * 16 + rx] = 1.0;
+        }
+        for (rx, ry) in [(12usize, 12usize), (13, 12), (12, 13), (13, 13)] {
+            data[ry * 16 + rx] = 1.0;
+        }
+        let mask = make_mask(16, 16, data);
+        let pts = outline_polyline(&mask);
+        // Both regions contribute boundary points.
+        assert!(
+            pts.iter().any(|&(x, y)| x <= 2 && y <= 2),
+            "expected at least one boundary point from region A: {:?}", pts,
+        );
+        assert!(
+            pts.iter().any(|&(x, y)| x >= 12 && y >= 12),
+            "expected at least one boundary point from region B: {:?}", pts,
+        );
+    }
+
     #[test]
     fn feather_with_zero_px_returns_identity_clone() {
         let mask = make_mask(4, 4, vec![0.5f32; 16]);
