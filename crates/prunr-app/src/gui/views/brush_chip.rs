@@ -55,7 +55,6 @@ pub(super) fn render(
 
     let mut outcome = BrushChipOutcome::default();
     chip::popup_for(ui, ui.id().with("brush_chip_popover"), &resp, |ui| {
-
         ui.horizontal(|ui| {
             ui.vertical(|ui| {
                 ui.set_min_width(220.0);
@@ -155,7 +154,9 @@ pub(super) fn render(
 
         if ui
             .button("Reset brush")
-            .on_hover_text("Reset radius, hardness, mask grow, edge softness, sharpen, and shape to defaults")
+            .on_hover_text(
+                "Reset radius, hardness, mask grow, edge softness, sharpen, and shape to defaults",
+            )
             .clicked()
         {
             outcome.reset_brush_requested = true;
@@ -182,17 +183,11 @@ fn chip_label(s: &BrushSettings) -> String {
 /// user-chosen pixel value, so a 200 px brush and a 4 px brush both
 /// render readably inside the popover.
 fn draw_preview(ui: &mut Ui, settings: &BrushSettings) {
-    let (rect, _) = ui.allocate_exact_size(
-        egui::vec2(PREVIEW_SIZE, PREVIEW_SIZE),
-        Sense::hover(),
-    );
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(PREVIEW_SIZE, PREVIEW_SIZE), Sense::hover());
     // Soft contrast frame so the brush silhouette reads against the
     // popover background regardless of the surface colour.
-    ui.painter().rect_filled(
-        rect,
-        4.0,
-        Color32::from_rgba_premultiplied(0, 0, 0, 100),
-    );
+    ui.painter()
+        .rect_filled(rect, 4.0, Color32::from_rgba_premultiplied(0, 0, 0, 100));
     ui.painter().rect_stroke(
         rect,
         4.0,
@@ -222,9 +217,8 @@ fn draw_preview(ui: &mut Ui, settings: &BrushSettings) {
     // Visually hint at the Edge softness setting by softening the
     // falloff edge proportional to inpaint_feather.
     let feather_norm = (settings.inpaint_feather / INPAINT_FEATHER_MAX).clamp(0.0, 1.0);
-    let effective_hardness = (settings.hardness
-        * (1.0 - FEATHER_HARDNESS_REDUCTION_CAP * feather_norm))
-        .clamp(0.0, 1.0);
+    let effective_hardness =
+        (settings.hardness * (1.0 - FEATHER_HARDNESS_REDUCTION_CAP * feather_norm)).clamp(0.0, 1.0);
 
     let color = Color32::from_rgb(cr, cg, cb);
     match settings.shape {
