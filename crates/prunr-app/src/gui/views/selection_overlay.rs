@@ -5,15 +5,16 @@
 //! `request_selection_visualization`). This file is RENDER-ONLY — no I/O,
 //! no decode, no GPU upload.
 
-use egui::{Color32, Pos2, Rect, Stroke, Ui};
+use egui::{Color32, Pos2, Rect, Ui};
 
 use crate::gui::brush_state::BrushSettings;
 use crate::gui::item::BatchItem;
 use crate::gui::theme::ACCENT;
 
 /// Called from canvas render after the item image is painted.
-/// No allocation except the per-frame Vec<Pos2> transform of the pre-built
-/// outline (O(N) over existing data). No decode, no GPU upload, no I/O.
+/// No allocation in the render closure — outline rendering iterates the
+/// pre-built `Vec<(u32, u32)>` and emits one `rect_filled` shape per
+/// boundary pixel directly into the painter.
 ///
 /// `img_rect` — the on-screen rect of the displayed texture (post-zoom).
 /// `src_w / src_h` — source image dimensions for the pixel→screen transform.
@@ -49,26 +50,55 @@ pub(crate) fn render_selection_overlay(
         if let Some(outline) = item.selection_outline.as_ref() {
             if !outline.is_empty() {
                 let alpha = (brush.outline_opacity * 255.0).clamp(0.0, 255.0) as u8;
-                let stroke_color = Color32::from_rgba_unmultiplied(
+                let color = Color32::from_rgba_unmultiplied(
                     ACCENT.r(), ACCENT.g(), ACCENT.b(), alpha,
                 );
-                let stroke = Stroke::new(brush.outline_thickness, stroke_color);
 
                 // Source → screen transform: image occupies `img_rect` at
                 // `src_w x src_h` logical pixels; each source pixel maps
-                // linearly. The outline is capped at OUTLINE_MAX_POINTS
-                // in `background_io::request_selection_visualization`, so
-                // this per-frame Vec<Pos2> is bounded.
+                // linearly.
                 let iw = img_rect.width() / src_w.max(1) as f32;
                 let ih = img_rect.height() / src_h.max(1) as f32;
                 let ox = img_rect.min.x;
                 let oy = img_rect.min.y;
 
-                let pts: Vec<Pos2> = outline.iter()
-                    .map(|&(px, py)| Pos2::new(ox + px as f32 * iw, oy + py as f32 * ih))
-                    .collect();
+                // One filled rect per boundary pixel. Replacing the old
+                // `Shape::line` polyline rendering — the polyline drew a
+                // continuous line between EVERY consecutive pair of boundary
+                // pixels in row-major scan order, which produced spurious
+                // connections in two pathological cases:
+                //   1. Multiple disjoint selected regions: the polyline
+                //      bridged them with a line through empty space.
+                //   2. Inverted mask (most pixels selected): the row-major
+                //      scan jumps left-to-right on every row, producing a
+                //      spider-web of full-image-width lines that flooded the
+                //      canvas with purple at outline_opacity=1.0.
+                // Per-pixel rects have no connection geometry at all — they
+                // form a continuous outline because boundary pixels are
+                // adjacent in source space; disjoint regions stay visually
+                // disjoint with no extra lines.
+                //
+                // Rect side length: outline_thickness, but never smaller than
+                // the source-pixel-to-screen-pixel scale, so adjacent
+                // boundary pixels' rects touch (or overlap) at any zoom.
+                // Without this floor, zooming in beyond 1.0× would produce
+                // a visibly dotted outline.
+                let pixel_scale = iw.max(ih).max(1.0);
+                let side = brush.outline_thickness.max(pixel_scale);
+                let half = side * 0.5;
 
-                painter.add(egui::Shape::line(pts, stroke));
+                for &(px, py) in outline.iter() {
+                    let cx = ox + (px as f32 + 0.5) * iw;
+                    let cy = oy + (py as f32 + 0.5) * ih;
+                    painter.rect_filled(
+                        Rect::from_min_max(
+                            Pos2::new(cx - half, cy - half),
+                            Pos2::new(cx + half, cy + half),
+                        ),
+                        0.0,
+                        color,
+                    );
+                }
             }
         }
     }
