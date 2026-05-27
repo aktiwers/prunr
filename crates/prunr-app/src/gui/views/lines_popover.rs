@@ -159,11 +159,7 @@ pub fn render(
             ui.set_min_width(POPOVER_WIDTH);
 
             // ── Output mode picker ──
-            ui.label(
-                RichText::new("Output")
-                    .strong()
-                    .color(theme::TEXT_PRIMARY),
-            );
+            ui.label(RichText::new("Output").strong().color(theme::TEXT_PRIMARY));
             ui.add_space(theme::SPACE_XS);
             // Track which mode the pointer is currently over so the Model
             // section below can preview the model set that mode would use.
@@ -175,7 +171,8 @@ pub fn render(
                 // picked "No model" so the invalid combination isn't
                 // reachable through clicking.
                 let mode_available = mode != LineMode::SubjectOutline || subject_available;
-                let resp = ui.add_enabled(mode_available, egui::SelectableLabel::new(selected, label));
+                let resp =
+                    ui.add_enabled(mode_available, egui::SelectableLabel::new(selected, label));
                 if resp.hovered() {
                     hovered_mode = Some(mode);
                 }
@@ -200,27 +197,21 @@ pub fn render(
             // currently-selected mode when nothing is hovered. Subject sketch
             // runs seg → DexiNed, so both models appear; other modes show just
             // DexiNed (or nothing for Off).
-            ui.label(
-                RichText::new("Model")
-                    .strong()
-                    .color(theme::TEXT_PRIMARY),
-            );
+            ui.label(RichText::new("Model").strong().color(theme::TEXT_PRIMARY));
             ui.add_space(theme::SPACE_XS);
             let effective_mode = hovered_mode.unwrap_or(settings.line_mode);
             let model_text = match effective_mode {
                 LineMode::Off => format!("{}  (no model used)", ICON_NEUROLOGY.codepoint),
                 LineMode::EdgesOnly => format!("{}  DexiNed", ICON_NEUROLOGY.codepoint),
-                LineMode::SubjectOutline => format!(
-                    "{}  {seg_model_name} + DexiNed",
-                    ICON_NEUROLOGY.codepoint,
-                ),
+                LineMode::SubjectOutline => {
+                    format!("{}  {seg_model_name} + DexiNed", ICON_NEUROLOGY.codepoint,)
+                }
             };
             ui.label(
                 RichText::new(model_text)
                     .color(theme::TEXT_PRIMARY)
                     .size(theme::FONT_SIZE_BODY),
             );
-
         },
     );
 
@@ -246,7 +237,12 @@ pub fn render_scale_chip(ui: &mut egui::Ui, settings: &mut ItemSettings) -> bool
     chip::popup_for(ui, pop_id, &resp, |ui| {
         ui.label(RichText::new("Scale").strong().color(theme::TEXT_PRIMARY));
         ui.add_space(theme::SPACE_XS);
-        for scale in [EdgeScale::Fine, EdgeScale::Balanced, EdgeScale::Bold, EdgeScale::Fused] {
+        for scale in [
+            EdgeScale::Fine,
+            EdgeScale::Balanced,
+            EdgeScale::Bold,
+            EdgeScale::Fused,
+        ] {
             let selected = settings.edge_scale == scale;
             let label = two_line_label(scale_label(scale), scale_description(scale));
             if ui.selectable_label(selected, label).clicked() {

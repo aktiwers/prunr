@@ -32,13 +32,17 @@ pub fn bench(c: &mut Criterion) {
     for &(label, mask_frac) in &[("4K_small_mask_10pct", 0.10), ("4K_full_mask_90pct", 0.90)] {
         let (image, mask) = make_inputs(4096, 3072, mask_frac);
         let mut group = c.benchmark_group("tile_compose");
-        group.throughput(Throughput::Elements((image.width() * image.height()) as u64));
+        group.throughput(Throughput::Elements(
+            (image.width() * image.height()) as u64,
+        ));
         group.sample_size(10); // 4K compose is multi-second per iter — keep run time bounded
         group.bench_function(label, |b| {
             b.iter(|| {
-                let out = tile_compose(black_box(&image), black_box(&mask), |tile_rgba, _tile_mask| {
-                    tile_rgba.clone()
-                })
+                let out = tile_compose(
+                    black_box(&image),
+                    black_box(&mask),
+                    |tile_rgba, _tile_mask| tile_rgba.clone(),
+                )
                 .expect("tile_compose passthrough must not fail");
                 black_box(out);
             });

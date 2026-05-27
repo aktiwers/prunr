@@ -9,7 +9,9 @@ use std::path::Path;
 ///
 /// Silent on errors — best-effort housekeeping.
 pub(crate) fn sweep_dir_files(dir: &Path) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     for entry in entries.flatten() {
         if entry.file_type().ok().is_some_and(|t| t.is_file()) {
             let _ = std::fs::remove_file(entry.path());

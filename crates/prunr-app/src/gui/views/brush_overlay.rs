@@ -60,7 +60,10 @@ pub(crate) fn handle_input(
         // No cached tensor → brush has nothing to write into. Render a
         // muted cursor so the user gets feedback that brush is ON, but
         // skip pointer wiring.
-        tracing::debug!(item_id = item.id, "brush active but no cached_tensor — cursor only");
+        tracing::debug!(
+            item_id = item.id,
+            "brush active but no cached_tensor — cursor only"
+        );
         draw_cursor(ui, img_rect, settings, /*armed=*/ false);
         return BrushAction::None;
     };
@@ -151,26 +154,45 @@ fn draw_trail(ui: &Ui, brush_state: &BrushState, s: &BrushSettings) {
     let hardness = s.hardness.clamp(0.0, 1.0);
     let solid = Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), center_alpha);
 
-    let Some(shape) = brush_state.active_shape() else { return };
+    let Some(shape) = brush_state.active_shape() else {
+        return;
+    };
     match shape {
         prunr_core::brush::BrushShape::Line => {
             // Collect only when needed — the Line branch wants first + last.
             let stamps: Vec<_> = brush_state.trail_stamps().collect();
-            let (Some(&first), Some(&last)) = (stamps.first(), stamps.last()) else { return };
+            let (Some(&first), Some(&last)) = (stamps.first(), stamps.last()) else {
+                return;
+            };
             let stroke = egui::Stroke::new(first.2 * 2.0, solid);
-            painter.line_segment([Pos2::new(first.0, first.1), Pos2::new(last.0, last.1)], stroke);
+            painter.line_segment(
+                [Pos2::new(first.0, first.1), Pos2::new(last.0, last.1)],
+                stroke,
+            );
         }
         prunr_core::brush::BrushShape::Circle => {
             for (sx, sy, outer_r) in brush_state.trail_stamps() {
                 super::chip::paint_falloff_circle(
-                    &painter, Pos2::new(sx, sy), outer_r, hardness, accent, center_alpha, 8,
+                    &painter,
+                    Pos2::new(sx, sy),
+                    outer_r,
+                    hardness,
+                    accent,
+                    center_alpha,
+                    8,
                 );
             }
         }
         prunr_core::brush::BrushShape::Square => {
             for (sx, sy, outer_r) in brush_state.trail_stamps() {
                 super::chip::paint_falloff_square(
-                    &painter, Pos2::new(sx, sy), outer_r, hardness, accent, center_alpha, 6,
+                    &painter,
+                    Pos2::new(sx, sy),
+                    outer_r,
+                    hardness,
+                    accent,
+                    center_alpha,
+                    6,
                 );
             }
         }
@@ -204,8 +226,10 @@ fn draw_cursor(ui: &Ui, img_rect: Rect, s: &BrushSettings, armed: bool) {
             );
         }
         prunr_core::brush::BrushShape::Line => {
-            ui.painter().line_segment([Pos2::new(p.x - r, p.y), Pos2::new(p.x + r, p.y)], stroke);
-            ui.painter().line_segment([Pos2::new(p.x, p.y - r), Pos2::new(p.x, p.y + r)], stroke);
+            ui.painter()
+                .line_segment([Pos2::new(p.x - r, p.y), Pos2::new(p.x + r, p.y)], stroke);
+            ui.painter()
+                .line_segment([Pos2::new(p.x, p.y - r), Pos2::new(p.x, p.y + r)], stroke);
         }
     }
     // Inner dot for precision targeting.
@@ -240,6 +264,9 @@ mod tests {
     fn screen_to_model_handles_zero_width_safely() {
         let img_rect = Rect::from_min_size(Pos2::new(0.0, 0.0), egui::vec2(0.0, 0.0));
         let p = screen_to_model(Pos2::new(50.0, 50.0), img_rect, 320, 240);
-        assert!(p.x.is_finite() && p.y.is_finite(), "must not return NaN/inf on degenerate rect");
+        assert!(
+            p.x.is_finite() && p.y.is_finite(),
+            "must not return NaN/inf on degenerate rect"
+        );
     }
 }

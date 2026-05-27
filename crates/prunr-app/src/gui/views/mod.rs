@@ -1,25 +1,25 @@
-pub mod toolbar;
-pub mod canvas;
-pub mod statusbar;
-pub mod shortcuts;
-pub mod cli_help;
-pub mod settings;
-pub mod sidebar;
-pub mod chip;
-pub mod lines_popover;
-pub mod preset_dropdown;
 pub mod adjustments_toolbar;
 pub mod brush_chip;
-pub mod eraser_chip;
 pub mod brush_overlay;
-pub mod pipeline_flow;
+pub mod canvas;
+pub mod chip;
+pub mod cli_help;
+pub mod eraser_chip;
+pub mod lines_popover;
 pub mod model_store;
+pub mod pipeline_flow;
+pub mod preset_dropdown;
 pub mod runtime_prompt;
+pub mod settings;
+pub mod shortcuts;
+pub mod sidebar;
+pub mod statusbar;
+pub mod toolbar;
 
-use egui::RichText;
-use egui_material_icons::icons::*;
 use crate::gui::settings::SettingsModel;
 use crate::gui::theme;
+use egui::RichText;
+use egui_material_icons::icons::*;
 
 /// Bold section heading used in modals (settings, CLI help).
 pub fn section_heading(ui: &mut egui::Ui, title: &str) {
@@ -39,7 +39,9 @@ pub fn section_heading(ui: &mut egui::Ui, title: &str) {
 /// which forces parents to grow to the longest hint, which is what we
 /// don't want inside narrow popovers (brush_chip) and fixed-width modals.
 pub fn hint(ui: &mut egui::Ui, text: &str) {
-    if text.is_empty() { return; }
+    if text.is_empty() {
+        return;
+    }
     ui.add(
         egui::Label::new(
             RichText::new(text)
@@ -50,7 +52,11 @@ pub fn hint(ui: &mut egui::Ui, text: &str) {
     );
 }
 
-pub const KB_MOD: &str = if cfg!(target_os = "macos") { "Cmd" } else { "Ctrl" };
+pub const KB_MOD: &str = if cfg!(target_os = "macos") {
+    "Cmd"
+} else {
+    "Ctrl"
+};
 
 /// Build a keyboard-shortcut tooltip as a `&'static str`.
 /// `kb!("Open image(s)", "O")` → `"Open image(s) (Cmd+O)"` on macOS.
@@ -91,10 +97,15 @@ pub fn format_byte_size(bytes: u64) -> String {
     const KB: u64 = 1024;
     const MB: u64 = 1024 * 1024;
     const GB: u64 = 1024 * MB;
-    if bytes >= GB { format!("{:.2} GB", bytes as f64 / GB as f64) }
-    else if bytes >= MB { format!("{:.0} MB", bytes as f64 / MB as f64) }
-    else if bytes >= KB { format!("{} KB", bytes / KB) }
-    else { format!("{bytes} B") }
+    if bytes >= GB {
+        format!("{:.2} GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.0} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{} KB", bytes / KB)
+    } else {
+        format!("{bytes} B")
+    }
 }
 
 /// Model display name (no icon).
@@ -117,11 +128,36 @@ pub fn model_label(model: SettingsModel, short: bool) -> String {
         SettingsModel::Silueta => (ICON_SPRINT.codepoint, "Silueta", "fast", "~4 MB"),
         SettingsModel::U2net => (ICON_SMART_TOY.codepoint, "U2Net", "quality", "~170 MB"),
         SettingsModel::BiRefNetLite => (ICON_NEUROLOGY.codepoint, "BiRefNet", "detail", "~214 MB"),
-        SettingsModel::None => (ICON_BLOCK.codepoint, "No model", "No background removal", "0 MB"),
-        SettingsModel::Inpaint => (ICON_BRUSH.codepoint, "Eraser (LaMa)", "object removal", "~199 MB"),
-        SettingsModel::BigInpaint => (ICON_BRUSH.codepoint, "Eraser (Big-LaMa)", "sharper fills", "~199 MB"),
-        SettingsModel::MiganInpaint => (ICON_BRUSH.codepoint, "Eraser (MI-GAN)", "compact GAN", "~26 MB"),
-        SettingsModel::SdInpaint => (ICON_BRUSH.codepoint, "Eraser (SD 1.5)", "generative", "~2 GB"),
+        SettingsModel::None => (
+            ICON_BLOCK.codepoint,
+            "No model",
+            "No background removal",
+            "0 MB",
+        ),
+        SettingsModel::Inpaint => (
+            ICON_BRUSH.codepoint,
+            "Eraser (LaMa)",
+            "object removal",
+            "~199 MB",
+        ),
+        SettingsModel::BigInpaint => (
+            ICON_BRUSH.codepoint,
+            "Eraser (Big-LaMa)",
+            "sharper fills",
+            "~199 MB",
+        ),
+        SettingsModel::MiganInpaint => (
+            ICON_BRUSH.codepoint,
+            "Eraser (MI-GAN)",
+            "compact GAN",
+            "~26 MB",
+        ),
+        SettingsModel::SdInpaint => (
+            ICON_BRUSH.codepoint,
+            "Eraser (SD 1.5)",
+            "generative",
+            "~2 GB",
+        ),
     };
     if short {
         format!("{icon}  {name}")
