@@ -45,7 +45,10 @@ use prunr_core::{
     ProgressStage,
 };
 use serde::{Deserialize, Serialize};
-use std::{env, fs, path::{Path, PathBuf}};
+use std::{
+    env, fs,
+    path::{Path, PathBuf},
+};
 use test_common::{ensure_ort_initialized, render_synthetic_source, synthetic_specs};
 
 const FIXTURE_ROOT_COMMITTED: &str = "tests/golden_data/postprocess";
@@ -140,8 +143,8 @@ fn run_fixture(dir: &Path, update: bool) -> Result<(), String> {
     }
 
     let sidecar_bytes = fs::read(&sidecar_path).map_err(|e| format!("read sidecar: {e}"))?;
-    let sidecar: Sidecar = serde_json::from_slice(&sidecar_bytes)
-        .map_err(|e| format!("sidecar parse: {e}"))?;
+    let sidecar: Sidecar =
+        serde_json::from_slice(&sidecar_bytes).map_err(|e| format!("sidecar parse: {e}"))?;
 
     let source = image::open(&source_path).map_err(|e| format!("source decode: {e}"))?;
     let tensor_bytes = fs::read(&tensor_path).map_err(|e| format!("read tensor: {e}"))?;
@@ -161,7 +164,9 @@ fn run_fixture(dir: &Path, update: bool) -> Result<(), String> {
         .map_err(|e| format!("postprocess: {e:?}"))?;
 
     if update || !expected_path.exists() {
-        actual.save(&expected_path).map_err(|e| format!("write expected: {e}"))?;
+        actual
+            .save(&expected_path)
+            .map_err(|e| format!("write expected: {e}"))?;
         return Ok(());
     }
 
@@ -237,7 +242,9 @@ fn bootstrap_circle_silueta_basic(root: &Path) {
             source.put_pixel(x, y, Rgba([r, g, b, 255]));
         }
     }
-    source.save(dir.join("source.png")).expect("write source.png");
+    source
+        .save(dir.join("source.png"))
+        .expect("write source.png");
 
     let cx = w as f32 / 2.0;
     let cy = h as f32 / 2.0;
@@ -257,8 +264,7 @@ fn bootstrap_circle_silueta_basic(root: &Path) {
             tensor[(y * w + x) as usize] = v;
         }
     }
-    fs::write(dir.join("tensor.bin"), f32s_to_bytes_le(&tensor))
-        .expect("write tensor.bin");
+    fs::write(dir.join("tensor.bin"), f32s_to_bytes_le(&tensor)).expect("write tensor.bin");
 
     let sidecar = Sidecar {
         shape: [1, 1, h as usize, w as usize],
@@ -290,8 +296,7 @@ fn bootstrap_synthetic_postprocess_fixtures(root: &Path) {
         img.save(dir.join("source.png")).expect("write source.png");
 
         let tensor = synthesize_circle_tensor(SYNTH_TENSOR_W, SYNTH_TENSOR_H);
-        fs::write(dir.join("tensor.bin"), f32s_to_bytes_le(&tensor))
-            .expect("write tensor.bin");
+        fs::write(dir.join("tensor.bin"), f32s_to_bytes_le(&tensor)).expect("write tensor.bin");
 
         let sidecar = Sidecar {
             shape: [1, 1, SYNTH_TENSOR_H, SYNTH_TENSOR_W],
@@ -304,7 +309,10 @@ fn bootstrap_synthetic_postprocess_fixtures(root: &Path) {
         )
         .expect("write sidecar.json");
 
-        eprintln!("bootstrapped synthetic postprocess fixture: {}", dir.display());
+        eprintln!(
+            "bootstrapped synthetic postprocess fixture: {}",
+            dir.display()
+        );
     }
 }
 
@@ -375,7 +383,10 @@ fn bootstrap_local_real_fixtures(root: &Path) {
         let img = match image::open(&source_path) {
             Ok(i) => i,
             Err(e) => {
-                eprintln!("[bootstrap-local] {}: source decode failed: {e}", dir.display());
+                eprintln!(
+                    "[bootstrap-local] {}: source decode failed: {e}",
+                    dir.display()
+                );
                 continue;
             }
         };
@@ -383,13 +394,19 @@ fn bootstrap_local_real_fixtures(root: &Path) {
         let result = match infer_only(&img, &engine, None::<fn(ProgressStage, f32)>, None) {
             Ok(r) => r,
             Err(e) => {
-                eprintln!("[bootstrap-local] {}: inference failed: {e:?}", dir.display());
+                eprintln!(
+                    "[bootstrap-local] {}: inference failed: {e:?}",
+                    dir.display()
+                );
                 continue;
             }
         };
 
-        fs::write(dir.join("tensor.bin"), f32s_to_bytes_le(&result.tensor_data))
-            .expect("write tensor.bin");
+        fs::write(
+            dir.join("tensor.bin"),
+            f32s_to_bytes_le(&result.tensor_data),
+        )
+        .expect("write tensor.bin");
 
         let sidecar = Sidecar {
             shape: [1, 1, result.tensor_height, result.tensor_width],

@@ -36,7 +36,11 @@ fn nav_prev_wraps_around() {
     let mut idx: usize = 0;
     let len: usize = 5;
     // Simulate [ key at index 0
-    if idx == 0 { idx = len - 1; } else { idx -= 1; }
+    if idx == 0 {
+        idx = len - 1;
+    } else {
+        idx -= 1;
+    }
     assert_eq!(idx, 4);
 }
 

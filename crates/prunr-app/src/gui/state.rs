@@ -12,4 +12,3 @@ pub enum AppState {
     /// Inference complete. Result available.
     Done,
 }
-

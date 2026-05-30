@@ -52,7 +52,10 @@ impl ModelId {
     /// previously duplicated in `prunr-core::inpaint` and
     /// `prunr-app::gui::processor`.
     pub fn is_sd_family(&self) -> bool {
-        matches!(self, ModelId::SdV15InpaintFp16 | ModelId::SdV15LcmInpaintFp16)
+        matches!(
+            self,
+            ModelId::SdV15InpaintFp16 | ModelId::SdV15LcmInpaintFp16
+        )
     }
 
     /// Canonical iteration of every variant. Drift catcher: a test below
@@ -229,7 +232,13 @@ impl ModelDescriptor {
     /// True when this bundle requires explicit license-acceptance click
     /// before the download starts (CreativeML Open RAIL, NVIDIA SCL, …).
     pub fn requires_license_acceptance(&self) -> bool {
-        matches!(self.source, ModelSource::MultiPartOnDemand { license_acceptance_required: true, .. })
+        matches!(
+            self.source,
+            ModelSource::MultiPartOnDemand {
+                license_acceptance_required: true,
+                ..
+            }
+        )
     }
 
     /// Human-facing reason this model is gated, or `None` if unrestricted.
@@ -238,9 +247,13 @@ impl ModelDescriptor {
         let cpu_only = provider.eq_ignore_ascii_case("CPU");
         match self.gpu {
             GpuRequirement::None => None,
-            GpuRequirement::Recommended if cpu_only => Some("Slow on CPU — pick a smaller model unless you have a GPU"),
+            GpuRequirement::Recommended if cpu_only => {
+                Some("Slow on CPU — pick a smaller model unless you have a GPU")
+            }
             GpuRequirement::Recommended => None,
-            GpuRequirement::Required if cpu_only => Some("Very slow on CPU — a GPU (CUDA / CoreML / DirectML) is strongly recommended"),
+            GpuRequirement::Required if cpu_only => {
+                Some("Very slow on CPU — a GPU (CUDA / CoreML / DirectML) is strongly recommended")
+            }
             GpuRequirement::Required => None,
         }
     }
@@ -533,7 +546,11 @@ pub fn descriptor(id: ModelId) -> Option<&'static ModelDescriptor> {
 /// be attempted. Cheap — pointer-walk a small `&'static [&str]`.
 pub fn is_ep_compatible(model: ModelId, ep: &str) -> bool {
     descriptor(model)
-        .map(|d| !d.incompatible_eps.iter().any(|s| s.eq_ignore_ascii_case(ep)))
+        .map(|d| {
+            !d.incompatible_eps
+                .iter()
+                .any(|s| s.eq_ignore_ascii_case(ep))
+        })
         .unwrap_or(true)
 }
 
@@ -570,14 +587,16 @@ fn on_demand_cache() -> &'static Mutex<HashMap<ModelId, &'static [u8]>> {
 
 fn on_demand_bytes(id: ModelId, filename: &str) -> Option<&'static [u8]> {
     {
-        let cache = on_demand_cache().lock()
+        let cache = on_demand_cache()
+            .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(slice) = cache.get(&id) {
             return Some(slice);
         }
     }
     let bytes = read_on_demand_from_any_path(filename)?;
-    let mut cache = on_demand_cache().lock()
+    let mut cache = on_demand_cache()
+        .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     // Re-check under lock: a concurrent caller may have already loaded +
     // inserted while we were reading. If so, return their slice and let
@@ -603,7 +622,8 @@ fn read_on_demand_from_any_path(filename: &str) -> Option<Vec<u8>> {
 /// already received it (e.g. a still-loaded session) keeps using it
 /// safely; the OS reclaims on process exit.
 pub fn evict_on_demand_cache(id: ModelId) {
-    let mut cache = on_demand_cache().lock()
+    let mut cache = on_demand_cache()
+        .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     cache.remove(&id);
 }
@@ -633,7 +653,9 @@ pub fn is_available(id: ModelId) -> bool {
 /// returned slice to load each part by its `key`.
 pub fn multi_part_paths(id: ModelId) -> Option<Vec<(&'static str, std::path::PathBuf)>> {
     let desc = descriptor(id)?;
-    let ModelSource::MultiPartOnDemand { subdir, parts, .. } = desc.source else { return None };
+    let ModelSource::MultiPartOnDemand { subdir, parts, .. } = desc.source else {
+        return None;
+    };
     let root = on_demand_dir()?;
     let bundle_dir = root.join(subdir);
     let mut out = Vec::with_capacity(parts.len());
@@ -738,28 +760,48 @@ static DEV_DEXINED: OnceLock<Vec<u8>> = OnceLock::new();
 
 #[cfg(feature = "dev-models")]
 fn dev_model_path(name: &str) -> std::path::PathBuf {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../models").join(name)
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../models")
+        .join(name)
 }
 
 #[cfg(feature = "dev-models")]
 pub fn silueta_bytes() -> &'static [u8] {
     let path = dev_model_path("silueta.onnx");
-    DEV_SILUETA.get_or_init(|| std::fs::read(&path)
-        .unwrap_or_else(|_| panic!("dev-models requires {} — run `cargo xtask fetch-models` from the workspace root", path.display())))
+    DEV_SILUETA.get_or_init(|| {
+        std::fs::read(&path).unwrap_or_else(|_| {
+            panic!(
+                "dev-models requires {} — run `cargo xtask fetch-models` from the workspace root",
+                path.display()
+            )
+        })
+    })
 }
 
 #[cfg(feature = "dev-models")]
 pub fn birefnet_lite_bytes() -> &'static [u8] {
     let path = dev_model_path("birefnet_lite.onnx");
-    DEV_BIREFNET.get_or_init(|| std::fs::read(&path)
-        .unwrap_or_else(|_| panic!("dev-models requires {} — run `cargo xtask fetch-models` from the workspace root", path.display())))
+    DEV_BIREFNET.get_or_init(|| {
+        std::fs::read(&path).unwrap_or_else(|_| {
+            panic!(
+                "dev-models requires {} — run `cargo xtask fetch-models` from the workspace root",
+                path.display()
+            )
+        })
+    })
 }
 
 #[cfg(feature = "dev-models")]
 pub fn dexined_bytes() -> &'static [u8] {
     let path = dev_model_path("dexined.onnx");
-    DEV_DEXINED.get_or_init(|| std::fs::read(&path)
-        .unwrap_or_else(|_| panic!("dev-models requires {} — run `cargo xtask fetch-models` from the workspace root", path.display())))
+    DEV_DEXINED.get_or_init(|| {
+        std::fs::read(&path).unwrap_or_else(|_| {
+            panic!(
+                "dev-models requires {} — run `cargo xtask fetch-models` from the workspace root",
+                path.display()
+            )
+        })
+    })
 }
 
 // ── Optimized model variants (FP16 for GPU, INT8 for CPU) ───────────────────
@@ -829,7 +871,10 @@ mod tests {
         // Add a ModelId variant ⇒ add a REGISTRY row. Guards against a
         // half-finished addition that compiles but has no metadata.
         for &id in ModelId::ALL {
-            assert!(descriptor(id).is_some(), "ModelId::{id:?} missing from REGISTRY");
+            assert!(
+                descriptor(id).is_some(),
+                "ModelId::{id:?} missing from REGISTRY"
+            );
         }
 
         // Exhaustiveness fence: adding a variant to `ModelId` without
@@ -897,7 +942,11 @@ mod tests {
     fn bundled_descriptors_are_always_available() {
         for desc in REGISTRY {
             if matches!(desc.source, ModelSource::Bundled) {
-                assert!(is_available(desc.id), "Bundled {:?} reports unavailable", desc.id);
+                assert!(
+                    is_available(desc.id),
+                    "Bundled {:?} reports unavailable",
+                    desc.id
+                );
             }
         }
     }
@@ -905,14 +954,38 @@ mod tests {
     #[test]
     fn ondemand_descriptors_have_complete_metadata() {
         for desc in REGISTRY {
-            if let ModelSource::OnDemand { filename, url, sha256, size_mb, license } = desc.source {
-                assert!(!filename.is_empty(),    "{:?} filename empty",    desc.id);
-                assert!(url.starts_with("https://"), "{:?} non-HTTPS url: {url}", desc.id);
-                assert_eq!(sha256.len(), 64,     "{:?} sha256 not 64 hex chars: {sha256}", desc.id);
-                assert!(size_mb > 0,             "{:?} size_mb=0",         desc.id);
+            if let ModelSource::OnDemand {
+                filename,
+                url,
+                sha256,
+                size_mb,
+                license,
+            } = desc.source
+            {
+                assert!(!filename.is_empty(), "{:?} filename empty", desc.id);
+                assert!(
+                    url.starts_with("https://"),
+                    "{:?} non-HTTPS url: {url}",
+                    desc.id
+                );
+                assert_eq!(
+                    sha256.len(),
+                    64,
+                    "{:?} sha256 not 64 hex chars: {sha256}",
+                    desc.id
+                );
+                assert!(size_mb > 0, "{:?} size_mb=0", desc.id);
                 assert!(!license.license.is_empty(), "{:?} license empty", desc.id);
-                assert!(license.license_url.starts_with("https://"), "{:?} bad license_url", desc.id);
-                assert!(license.source_url.starts_with("https://"),  "{:?} bad source_url",  desc.id);
+                assert!(
+                    license.license_url.starts_with("https://"),
+                    "{:?} bad license_url",
+                    desc.id
+                );
+                assert!(
+                    license.source_url.starts_with("https://"),
+                    "{:?} bad source_url",
+                    desc.id
+                );
             }
         }
     }
@@ -945,12 +1018,14 @@ mod tests {
             assert!(
                 desc.working_set_mb >= 50,
                 "{:?} working_set_mb={} too small — every real model uses ≥ 50 MB resident",
-                desc.id, desc.working_set_mb,
+                desc.id,
+                desc.working_set_mb,
             );
             assert!(
                 desc.working_set_mb < 65_536,
                 "{:?} working_set_mb={} suspiciously large (> 64 GB)",
-                desc.id, desc.working_set_mb,
+                desc.id,
+                desc.working_set_mb,
             );
         }
     }
@@ -958,18 +1033,42 @@ mod tests {
     #[test]
     fn multi_part_descriptors_have_at_least_one_part() {
         for desc in REGISTRY {
-            if let ModelSource::MultiPartOnDemand { subdir, parts, license, .. } = desc.source {
+            if let ModelSource::MultiPartOnDemand {
+                subdir,
+                parts,
+                license,
+                ..
+            } = desc.source
+            {
                 assert!(!subdir.is_empty(), "{:?} subdir empty", desc.id);
-                assert!(!parts.is_empty(),  "{:?} multi-part has zero parts", desc.id);
+                assert!(!parts.is_empty(), "{:?} multi-part has zero parts", desc.id);
                 for p in parts {
-                    assert!(!p.key.is_empty(),       "{:?} part key empty",       desc.id);
-                    assert!(!p.filename.is_empty(),  "{:?} part filename empty",  desc.id);
-                    assert!(p.url.starts_with("https://"), "{:?} part non-HTTPS: {}", desc.id, p.url);
-                    assert_eq!(p.sha256.len(), 64,   "{:?} part sha256 not 64 hex chars", desc.id);
-                    assert!(p.size_bytes > 0,        "{:?} part size_bytes=0",    desc.id);
+                    assert!(!p.key.is_empty(), "{:?} part key empty", desc.id);
+                    assert!(!p.filename.is_empty(), "{:?} part filename empty", desc.id);
+                    assert!(
+                        p.url.starts_with("https://"),
+                        "{:?} part non-HTTPS: {}",
+                        desc.id,
+                        p.url
+                    );
+                    assert_eq!(
+                        p.sha256.len(),
+                        64,
+                        "{:?} part sha256 not 64 hex chars",
+                        desc.id
+                    );
+                    assert!(p.size_bytes > 0, "{:?} part size_bytes=0", desc.id);
                 }
-                assert!(license.license_url.starts_with("https://"), "{:?} bad license_url", desc.id);
-                assert!(license.source_url.starts_with("https://"),  "{:?} bad source_url",  desc.id);
+                assert!(
+                    license.license_url.starts_with("https://"),
+                    "{:?} bad license_url",
+                    desc.id
+                );
+                assert!(
+                    license.source_url.starts_with("https://"),
+                    "{:?} bad source_url",
+                    desc.id
+                );
             }
         }
     }
@@ -986,10 +1085,12 @@ mod tests {
     fn load_variant_returns_none_for_models_without_variants() {
         // Variant-bearing models (segmentation only today). Update this
         // set when a new model gains an .fp16 / .int8 export.
-        let with_variants = |id| matches!(
-            id,
-            ModelId::Silueta | ModelId::U2net | ModelId::BiRefNetLite,
-        );
+        let with_variants = |id| {
+            matches!(
+                id,
+                ModelId::Silueta | ModelId::U2net | ModelId::BiRefNetLite,
+            )
+        };
         for &id in ModelId::ALL {
             if with_variants(id) {
                 continue;
@@ -1002,8 +1103,11 @@ mod tests {
     #[test]
     fn on_demand_dir_path_ends_with_prunr_models() {
         let p = on_demand_dir().expect("data_dir resolves on supported platforms");
-        assert!(p.ends_with(std::path::Path::new("prunr/models")),
-            "unexpected path tail: {}", p.display());
+        assert!(
+            p.ends_with(std::path::Path::new("prunr/models")),
+            "unexpected path tail: {}",
+            p.display()
+        );
     }
 
     #[test]
@@ -1049,8 +1153,14 @@ mod tests {
     fn is_ep_compatible_empty_list_accepts_every_ep() {
         for ep in ["CPU", "CUDA", "CoreML", "DirectML", "OpenVINO"] {
             assert!(is_ep_compatible(ModelId::U2net, ep), "U2Net + {ep}");
-            assert!(is_ep_compatible(ModelId::BiRefNetLite, ep), "BiRefNet + {ep}");
-            assert!(is_ep_compatible(ModelId::SdV15InpaintFp16, ep), "SD15 + {ep}");
+            assert!(
+                is_ep_compatible(ModelId::BiRefNetLite, ep),
+                "BiRefNet + {ep}"
+            );
+            assert!(
+                is_ep_compatible(ModelId::SdV15InpaintFp16, ep),
+                "SD15 + {ep}"
+            );
         }
     }
 
@@ -1058,9 +1168,8 @@ mod tests {
     fn prunr_models_has_no_workspace_deps() {
         // prunr-models must remain a leaf — no path deps on sibling workspace crates.
         // Adding one would risk creating circular deps through prunr-core → prunr-models.
-        let toml = std::fs::read_to_string(
-            concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml")
-        ).expect("Cargo.toml must be readable");
+        let toml = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"))
+            .expect("Cargo.toml must be readable");
         assert!(
             !toml.contains(r#"path = ".."#),
             "prunr-models must remain a leaf crate with no workspace-internal path deps — see CLAUDE.md Layers table"

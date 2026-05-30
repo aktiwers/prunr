@@ -17,10 +17,13 @@ use test_common::{multi_subject_canary, skip_if_no_ort};
 
 fn run_with_bg_effect(engine: &OrtEngine, bg_effect: BgEffect) -> image::RgbaImage {
     let img = multi_subject_canary();
-    let mask = MaskSettings { bg_effect, ..MaskSettings::default() };
-    let result = process_image_from_decoded(
-        &img, engine, &mask, None::<fn(ProgressStage, f32)>, None,
-    ).expect("pipeline should succeed");
+    let mask = MaskSettings {
+        bg_effect,
+        ..MaskSettings::default()
+    };
+    let result =
+        process_image_from_decoded(&img, engine, &mask, None::<fn(ProgressStage, f32)>, None)
+            .expect("pipeline should succeed");
     result.rgba_image
 }
 
@@ -28,9 +31,11 @@ fn run_with_bg_effect(engine: &OrtEngine, bg_effect: BgEffect) -> image::RgbaIma
 /// vary across the image.
 #[test]
 fn bg_effect_none_preserves_transparency() {
-    if skip_if_no_ort("bg_effect_none") { return; }
-    let engine = OrtEngine::new_cpu_only(ModelKind::Silueta, 1)
-        .expect("OrtEngine::new_cpu_only(Silueta)");
+    if skip_if_no_ort("bg_effect_none") {
+        return;
+    }
+    let engine =
+        OrtEngine::new_cpu_only(ModelKind::Silueta, 1).expect("OrtEngine::new_cpu_only(Silueta)");
     let out = run_with_bg_effect(&engine, BgEffect::None);
     assert_eq!(out.dimensions(), (256, 256));
 
@@ -40,20 +45,32 @@ fn bg_effect_none_preserves_transparency() {
     let (mut min_a, mut max_a) = (255u8, 0u8);
     for p in out.pixels() {
         let a = p.0[3];
-        if a < min_a { min_a = a; }
-        if a > max_a { max_a = a; }
+        if a < min_a {
+            min_a = a;
+        }
+        if a > max_a {
+            max_a = a;
+        }
     }
-    assert!(max_a > 200, "expected at least one near-opaque subject pixel, got max α={max_a}");
-    assert!(min_a < 50, "expected at least one near-transparent bg pixel, got min α={min_a}");
+    assert!(
+        max_a > 200,
+        "expected at least one near-opaque subject pixel, got max α={max_a}"
+    );
+    assert!(
+        min_a < 50,
+        "expected at least one near-transparent bg pixel, got min α={min_a}"
+    );
 }
 
 /// `BgEffect::BlurredSource` fills transparent areas with a blurred copy
 /// of the source — the result must be fully opaque everywhere.
 #[test]
 fn bg_effect_blurred_source_produces_opaque_result() {
-    if skip_if_no_ort("bg_effect_blurred_source") { return; }
-    let engine = OrtEngine::new_cpu_only(ModelKind::Silueta, 1)
-        .expect("OrtEngine::new_cpu_only(Silueta)");
+    if skip_if_no_ort("bg_effect_blurred_source") {
+        return;
+    }
+    let engine =
+        OrtEngine::new_cpu_only(ModelKind::Silueta, 1).expect("OrtEngine::new_cpu_only(Silueta)");
     let out = run_with_bg_effect(&engine, BgEffect::BlurredSource { radius: 8 });
     assert_eq!(out.dimensions(), (256, 256));
     assert_all_alpha_opaque(&out, "BlurredSource");
@@ -63,9 +80,11 @@ fn bg_effect_blurred_source_produces_opaque_result() {
 /// of the source — fully opaque everywhere.
 #[test]
 fn bg_effect_inverted_source_produces_opaque_result() {
-    if skip_if_no_ort("bg_effect_inverted_source") { return; }
-    let engine = OrtEngine::new_cpu_only(ModelKind::Silueta, 1)
-        .expect("OrtEngine::new_cpu_only(Silueta)");
+    if skip_if_no_ort("bg_effect_inverted_source") {
+        return;
+    }
+    let engine =
+        OrtEngine::new_cpu_only(ModelKind::Silueta, 1).expect("OrtEngine::new_cpu_only(Silueta)");
     let out = run_with_bg_effect(&engine, BgEffect::InvertedSource);
     assert_eq!(out.dimensions(), (256, 256));
     assert_all_alpha_opaque(&out, "InvertedSource");
@@ -75,9 +94,11 @@ fn bg_effect_inverted_source_produces_opaque_result() {
 /// fully opaque everywhere; bg pixels should be near-grey.
 #[test]
 fn bg_effect_desaturated_source_produces_opaque_result() {
-    if skip_if_no_ort("bg_effect_desaturated_source") { return; }
-    let engine = OrtEngine::new_cpu_only(ModelKind::Silueta, 1)
-        .expect("OrtEngine::new_cpu_only(Silueta)");
+    if skip_if_no_ort("bg_effect_desaturated_source") {
+        return;
+    }
+    let engine =
+        OrtEngine::new_cpu_only(ModelKind::Silueta, 1).expect("OrtEngine::new_cpu_only(Silueta)");
     let out = run_with_bg_effect(&engine, BgEffect::DesaturatedSource);
     assert_eq!(out.dimensions(), (256, 256));
     assert_all_alpha_opaque(&out, "DesaturatedSource");
@@ -100,7 +121,12 @@ fn bg_effect_all_variants_have_a_feature_test() {
 fn assert_all_alpha_opaque(img: &image::RgbaImage, label: &str) {
     let mut min_a: u8 = 255;
     for p in img.pixels() {
-        if p.0[3] < min_a { min_a = p.0[3]; }
+        if p.0[3] < min_a {
+            min_a = p.0[3];
+        }
     }
-    assert_eq!(min_a, 255, "{label}: expected all alpha=255, found min α={min_a}");
+    assert_eq!(
+        min_a, 255,
+        "{label}: expected all alpha=255, found min α={min_a}"
+    );
 }
