@@ -739,25 +739,83 @@ fn apply_edge_shift(mask: &mut GrayImage, shift: f32) {
 
     let step = |src: &[u8], dst: &mut [u8]| {
         let process_row = |(y, row): (usize, &mut [u8])| {
-            let yi = y as i32;
-            for (x, slot) in row.iter_mut().enumerate() {
-                let xi = x as i32;
-                let mut extremum: u8 = if erode { 255 } else { 0 };
-                for dy in -1i32..=1 {
-                    let ny = (yi + dy).clamp(0, hi - 1) as usize;
-                    for dx in -1i32..=1 {
-                        let nx = (xi + dx).clamp(0, wi - 1) as usize;
-                        let v = src[ny * w + nx];
-                        if erode {
-                            extremum = extremum.min(v);
-                        } else {
-                            extremum = extremum.max(v);
+            if y == 0 || y == h - 1 || w < 3 {
+                // Boundary rows or very thin image: use safe clamped path
+                let yi = y as i32;
+                for (x, slot) in row.iter_mut().enumerate() {
+                    let xi = x as i32;
+                    let mut extremum: u8 = if erode { 255 } else { 0 };
+                    for dy in -1..=1 {
+                        let ny = (yi + dy).clamp(0, hi - 1) as usize;
+                        for dx in -1..=1 {
+                            let nx = (xi + dx).clamp(0, wi - 1) as usize;
+                            let v = src[ny * w + nx];
+                            extremum = if erode { extremum.min(v) } else { extremum.max(v) };
                         }
                     }
+                    *slot = extremum;
                 }
-                *slot = extremum;
+            } else {
+                // Interior fast-path: unrolled 3x3 min/max without clamping
+                let prev_row = (y - 1) * w;
+                let curr_row = y * w;
+                let next_row = (y + 1) * w;
+
+                // Left boundary pixel of interior row
+                let mut extremum: u8 = if erode { 255 } else { 0 };
+                for dy in -1..=1 {
+                    let ny = (y as i32 + dy).clamp(0, hi - 1) as usize;
+                    for dx in 0..=1 {
+                        let v = src[ny * w + dx];
+                        extremum = if erode { extremum.min(v) } else { extremum.max(v) };
+                    }
+                }
+                row[0] = extremum;
+
+                // Middle pixels: the real hot path
+                if erode {
+                    for (x, slot) in row.iter_mut().enumerate().take(w - 1).skip(1) {
+                        let p = prev_row + x;
+                        let c = curr_row + x;
+                        let n = next_row + x;
+
+                        let v0 = src[p - 1]; let v1 = src[p]; let v2 = src[p + 1];
+                        let v3 = src[c - 1]; let v4 = src[c]; let v5 = src[c + 1];
+                        let v6 = src[n - 1]; let v7 = src[n]; let v8 = src[n + 1];
+
+                        *slot = v0.min(v1).min(v2)
+                            .min(v3).min(v4).min(v5)
+                            .min(v6).min(v7).min(v8);
+                    }
+                } else {
+                    for (x, slot) in row.iter_mut().enumerate().take(w - 1).skip(1) {
+                        let p = prev_row + x;
+                        let c = curr_row + x;
+                        let n = next_row + x;
+
+                        let v0 = src[p - 1]; let v1 = src[p]; let v2 = src[p + 1];
+                        let v3 = src[c - 1]; let v4 = src[c]; let v5 = src[c + 1];
+                        let v6 = src[n - 1]; let v7 = src[n]; let v8 = src[n + 1];
+
+                        *slot = v0.max(v1).max(v2)
+                            .max(v3).max(v4).max(v5)
+                            .max(v6).max(v7).max(v8);
+                    }
+                }
+
+                // Right boundary pixel of interior row
+                let mut extremum: u8 = if erode { 255 } else { 0 };
+                for dy in -1..=1 {
+                    let ny = (y as i32 + dy).clamp(0, hi - 1) as usize;
+                    for dx in (w - 2)..w {
+                        let v = src[ny * w + dx];
+                        extremum = if erode { extremum.min(v) } else { extremum.max(v) };
+                    }
+                }
+                row[w - 1] = extremum;
             }
         };
+
         if use_par {
             dst.par_chunks_mut(w).enumerate().for_each(process_row);
         } else {
@@ -995,6 +1053,27 @@ mod tests {
             let _ = postprocess_from_flat(&tensor, 320, 320, &original, &PostprocessOpts::new(&mask, ModelKind::Silueta))
                 .expect("postprocess succeeds");
         });
+    }
+
+    ///   `cargo test -p prunr-core --release apply_edge_shift_4k_bench -- --nocapture --ignored`
+    #[test]
+    #[ignore]
+    fn apply_edge_shift_4k_bench() {
+        let (w, h) = (4000, 3000);
+        let mut mask = GrayImage::from_fn(w, h, |x, y| {
+            if (x - 2000) * (x - 2000) + (y - 1500) * (y - 1500) < 1000 * 1000 {
+                image::Luma([255])
+            } else {
+                image::Luma([0])
+            }
+        });
+
+        bench_report(
+            "apply_edge_shift_4k_bench (4000x3000, shift=2.0)",
+            3,
+            20,
+            || apply_edge_shift(&mut mask, 2.0),
+        );
     }
 
     /// Halftone regression: on a uniform-luma input, pixels at the
