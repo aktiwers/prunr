@@ -740,22 +740,66 @@ fn apply_edge_shift(mask: &mut GrayImage, shift: f32) {
     let step = |src: &[u8], dst: &mut [u8]| {
         let process_row = |(y, row): (usize, &mut [u8])| {
             let yi = y as i32;
-            for (x, slot) in row.iter_mut().enumerate() {
-                let xi = x as i32;
-                let mut extremum: u8 = if erode { 255 } else { 0 };
-                for dy in -1i32..=1 {
-                    let ny = (yi + dy).clamp(0, hi - 1) as usize;
-                    for dx in -1i32..=1 {
-                        let nx = (xi + dx).clamp(0, wi - 1) as usize;
-                        let v = src[ny * w + nx];
-                        if erode {
-                            extremum = extremum.min(v);
-                        } else {
-                            extremum = extremum.max(v);
+            // Interior fast-path: rows away from top/bottom boundaries and
+            // image wide enough to have interior pixels.
+            if y > 0 && y < h - 1 && w >= 2 {
+                let r_prev = (y - 1) * w;
+                let r_curr = y * w;
+                let r_next = (y + 1) * w;
+
+                let process_boundary_pixel = |x: usize| {
+                    let xi = x as i32;
+                    let mut extremum: u8 = if erode { 255 } else { 0 };
+                    for dy in -1i32..=1 {
+                        let ny = (yi + dy) as usize; // Guaranteed in [0, h-1]
+                        for dx in -1i32..=1 {
+                            let nx = (xi + dx).clamp(0, wi - 1) as usize;
+                            let v = src[ny * w + nx];
+                            if erode { extremum = extremum.min(v); }
+                            else { extremum = extremum.max(v); }
+                        }
+                    }
+                    extremum
+                };
+
+                // Row-boundary pixels (left/right) still need clamping.
+                row[0] = process_boundary_pixel(0);
+                row[w - 1] = process_boundary_pixel(w - 1);
+
+                // Interior pixels: no clamping, unrolled 3x3 min/max.
+                if w > 2 {
+                    if erode {
+                        for x in 1..w - 1 {
+                            let m = src[r_prev + x - 1].min(src[r_prev + x]).min(src[r_prev + x + 1])
+                                .min(src[r_curr + x - 1].min(src[r_curr + x]).min(src[r_curr + x + 1]))
+                                .min(src[r_next + x - 1].min(src[r_next + x]).min(src[r_next + x + 1]));
+                            row[x] = m;
+                        }
+                    } else {
+                        for x in 1..w - 1 {
+                            let m = src[r_prev + x - 1].max(src[r_prev + x]).max(src[r_prev + x + 1])
+                                .max(src[r_curr + x - 1].max(src[r_curr + x]).max(src[r_curr + x + 1]))
+                                .max(src[r_next + x - 1].max(src[r_next + x]).max(src[r_next + x + 1]));
+                            row[x] = m;
                         }
                     }
                 }
-                *slot = extremum;
+            } else {
+                // Fully slow path for boundary rows (top/bottom) or tiny images.
+                for (x, slot) in row.iter_mut().enumerate() {
+                    let xi = x as i32;
+                    let mut extremum: u8 = if erode { 255 } else { 0 };
+                    for dy in -1i32..=1 {
+                        let ny = (yi + dy).clamp(0, hi - 1) as usize;
+                        for dx in -1i32..=1 {
+                            let nx = (xi + dx).clamp(0, wi - 1) as usize;
+                            let v = src[ny * w + nx];
+                            if erode { extremum = extremum.min(v); }
+                            else { extremum = extremum.max(v); }
+                        }
+                    }
+                    *slot = extremum;
+                }
             }
         };
         if use_par {
