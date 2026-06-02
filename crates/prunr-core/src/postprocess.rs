@@ -525,19 +525,19 @@ pub fn apply_bg_effect(rgba: &mut RgbaImage, source: &DynamicImage, effect: crat
         }
         BgEffect::InvertedSource => {
             let mut img = source.to_rgba8();
-            for p in img.pixels_mut() {
-                p.0[0] = 255 - p.0[0];
-                p.0[1] = 255 - p.0[1];
-                p.0[2] = 255 - p.0[2];
-            }
+            apply_pixelwise(&mut img, |p| {
+                p[0] = 255 - p[0];
+                p[1] = 255 - p[1];
+                p[2] = 255 - p[2];
+            });
             img
         }
         BgEffect::DesaturatedSource => {
             let mut img = source.to_rgba8();
-            for p in img.pixels_mut() {
-                let y = luma_u8(p.0[0], p.0[1], p.0[2]);
-                p.0[0] = y; p.0[1] = y; p.0[2] = y;
-            }
+            apply_pixelwise(&mut img, |p| {
+                let y = luma_u8(p[0], p[1], p[2]);
+                p[0] = y; p[1] = y; p[2] = y;
+            });
             img
         }
     };
@@ -728,8 +728,6 @@ fn apply_edge_shift(mask: &mut GrayImage, shift: f32) {
     let full = abs.floor() as u32;
     let frac = abs - full as f32;
     let (w, h) = (mask.width() as usize, mask.height() as usize);
-    let wi = w as i32;
-    let hi = h as i32;
     let use_par = h >= 512;
 
     // Skip the unconditional `mask.as_raw().clone()` (~12 MB at 4 K) by
@@ -740,22 +738,72 @@ fn apply_edge_shift(mask: &mut GrayImage, shift: f32) {
     let step = |src: &[u8], dst: &mut [u8]| {
         let process_row = |(y, row): (usize, &mut [u8])| {
             let yi = y as i32;
-            for (x, slot) in row.iter_mut().enumerate() {
-                let xi = x as i32;
-                let mut extremum: u8 = if erode { 255 } else { 0 };
-                for dy in -1i32..=1 {
-                    let ny = (yi + dy).clamp(0, hi - 1) as usize;
-                    for dx in -1i32..=1 {
-                        let nx = (xi + dx).clamp(0, wi - 1) as usize;
-                        let v = src[ny * w + nx];
-                        if erode {
-                            extremum = extremum.min(v);
-                        } else {
-                            extremum = extremum.max(v);
+            let (w_idx, h_idx) = (w as i32, h as i32);
+
+            // Interior fast-path (no clamping, unrolled)
+            let x_end = w.saturating_sub(1);
+            if y > 0 && y < (h - 1) && w >= 3 {
+                let row_prev = (y - 1) * w;
+                let row_curr = y * w;
+                let row_next = (y + 1) * w;
+
+                // First pixel (boundary)
+                row[0] = if erode {
+                    src[row_prev].min(src[row_prev + 1])
+                        .min(src[row_curr]).min(src[row_curr + 1])
+                        .min(src[row_next]).min(src[row_next + 1])
+                } else {
+                    src[row_prev].max(src[row_prev + 1])
+                        .max(src[row_curr]).max(src[row_curr + 1])
+                        .max(src[row_next]).max(src[row_next + 1])
+                };
+
+                for x in 1..x_end {
+                    let p = row_curr + x;
+                    let p_prev = row_prev + x;
+                    let p_next = row_next + x;
+
+                    row[x] = if erode {
+                        src[p_prev - 1].min(src[p_prev]).min(src[p_prev + 1])
+                            .min(src[p - 1]).min(src[p]).min(src[p + 1])
+                            .min(src[p_next - 1]).min(src[p_next]).min(src[p_next + 1])
+                    } else {
+                        src[p_prev - 1].max(src[p_prev]).max(src[p_prev + 1])
+                            .max(src[p - 1]).max(src[p]).max(src[p + 1])
+                            .max(src[p_next - 1]).max(src[p_next]).max(src[p_next + 1])
+                    };
+                }
+
+                // Last pixel (boundary)
+                row[x_end] = if erode {
+                    src[row_prev + x_end - 1].min(src[row_prev + x_end])
+                        .min(src[row_curr + x_end - 1]).min(src[row_curr + x_end])
+                        .min(src[row_next + x_end - 1]).min(src[row_next + x_end])
+                } else {
+                    src[row_prev + x_end - 1].max(src[row_prev + x_end])
+                        .max(src[row_curr + x_end - 1]).max(src[row_curr + x_end])
+                        .max(src[row_next + x_end - 1]).max(src[row_next + x_end])
+                };
+            } else {
+                // Top/Bottom boundary rows
+                for (x, slot) in row.iter_mut().enumerate() {
+                    let xi = x as i32;
+                    let mut extremum: u8 = if erode { 255 } else { 0 };
+                    for dy in -1..=1 {
+                        let ny = (yi + dy).clamp(0, h_idx - 1) as usize;
+                        let row_off = ny * w;
+                        for dx in -1..=1 {
+                            let nx = (xi + dx).clamp(0, w_idx - 1) as usize;
+                            let v = src[row_off + nx];
+                            if erode {
+                                extremum = extremum.min(v);
+                            } else {
+                                extremum = extremum.max(v);
+                            }
                         }
                     }
+                    *slot = extremum;
                 }
-                *slot = extremum;
             }
         };
         if use_par {
@@ -973,6 +1021,44 @@ mod tests {
             3,
             20,
             || apply_mask_inplace(&mut rgba, &mask),
+        );
+    }
+
+    ///   `cargo test -p prunr-core --release apply_edge_shift_4k_bench -- --nocapture --ignored`
+    #[test]
+    #[ignore]
+    fn apply_edge_shift_4k_bench() {
+        let (w, h) = (4000, 3000);
+        let mut mask = GrayImage::from_fn(w, h, |x, y| {
+            image::Luma([((x ^ y) & 0xFF) as u8])
+        });
+        bench_report(
+            &format!("apply_edge_shift_4k_bench ({w}x{h}, +2.5px)"),
+            3,
+            20,
+            || apply_edge_shift(&mut mask, 2.5),
+        );
+    }
+
+    ///   `cargo test -p prunr-core --release apply_bg_effect_4k_bench -- --nocapture --ignored`
+    #[test]
+    #[ignore]
+    fn apply_bg_effect_4k_bench() {
+        let (w, h) = (4000, 3000);
+        let mut rgba = RgbaImage::new(w, h);
+        for (i, px) in rgba.chunks_exact_mut(4).enumerate() {
+            px[0] = (i & 0xFF) as u8;
+            px[1] = ((i >> 8) & 0xFF) as u8;
+            px[2] = ((i >> 16) & 0xFF) as u8;
+            px[3] = 128; // partial alpha to trigger blend
+        }
+        let source = DynamicImage::ImageRgba8(rgba.clone());
+
+        bench_report(
+            &format!("apply_bg_effect_4k_bench ({w}x{h}, Desaturated)"),
+            3,
+            20,
+            || apply_bg_effect(&mut rgba, &source, crate::types::BgEffect::DesaturatedSource),
         );
     }
 
