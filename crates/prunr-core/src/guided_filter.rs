@@ -24,17 +24,25 @@ pub fn guided_filter_alpha(
     let (w, h) = (mask.width(), mask.height());
     let n = (w * h) as usize;
 
+    // Helper to allocate uninitialized f32 buffers (overwritten before read).
+    // Avoids zeroing costs on large images (e.g., ~576MB for 12 4K buffers).
+    let uninit_f32_vec = |size: usize| -> Vec<f32> {
+        let mut v = Vec::with_capacity(size);
+        unsafe { v.set_len(size); }
+        v
+    };
+
     // Convert guide to grayscale luminance [0,1] and mask to [0,1],
     // and compute element-wise products for box_filter in one pass.
-    let mut guide_f = vec![0.0f32; n];
-    let mut mask_f = vec![0.0f32; n];
-    let mut ii = vec![0.0f32; n]; // I*I
-    let mut ip = vec![0.0f32; n]; // I*p
+    let mut guide_f = uninit_f32_vec(n);
+    let mut mask_f = uninit_f32_vec(n);
+    let mut ii = uninit_f32_vec(n); // I*I
+    let mut ip = uninit_f32_vec(n); // I*p
 
     const INV_255: f32 = 1.0 / 255.0;
-    const REC601_R: f32 = 0.299;
-    const REC601_G: f32 = 0.587;
-    const REC601_B: f32 = 0.114;
+    const REC601_R: f32 = 0.299 * INV_255;
+    const REC601_G: f32 = 0.587 * INV_255;
+    const REC601_B: f32 = 0.114 * INV_255;
     // `guide: &RgbaImage` is part of the signature — 4 bytes per pixel
     // (RGBA). Hardcoded so `par_chunks_exact(4)` lowers to a tight
     // stride without runtime division.
@@ -48,7 +56,7 @@ pub fn guided_filter_alpha(
         .zip(guide.as_raw().par_chunks_exact(RGBA_BYTES_PER_PIXEL))
         .zip(mask.as_raw().par_iter())
         .for_each(|(((((gf, mf), iiv), ipv), gp), &mp)| {
-            let g = (REC601_R * gp[0] as f32 + REC601_G * gp[1] as f32 + REC601_B * gp[2] as f32) * INV_255;
+            let g = REC601_R * gp[0] as f32 + REC601_G * gp[1] as f32 + REC601_B * gp[2] as f32;
             let m = mp as f32 * INV_255;
             *gf = g;
             *mf = m;
@@ -57,27 +65,33 @@ pub fn guided_filter_alpha(
         });
 
     // --- Box filter calls 1-4 in parallel ---
-    // Each needs its own integral scratch and output buffer.
-    let ((mean_i, mean_p), (mean_ii, mean_ip)) = rayon::join(
+    let mut mean_i = uninit_f32_vec(n);
+    let mut mean_p = uninit_f32_vec(n);
+    let mut mean_ii = uninit_f32_vec(n);
+    let mut mean_ip = uninit_f32_vec(n);
+
+    let mut s1 = uninit_f32_vec(n);
+    let mut s2 = uninit_f32_vec(n);
+    let mut s3 = uninit_f32_vec(n);
+    let mut s4 = uninit_f32_vec(n);
+
+    rayon::join(
         || {
             rayon::join(
-                || box_filter(&guide_f, w, h, radius), // mean_I
-                || box_filter(&mask_f, w, h, radius),  // mean_p
+                || box_filter_with_scratch(&guide_f, w, h, radius, &mut mean_i, &mut s1),
+                || box_filter_with_scratch(&mask_f, w, h, radius, &mut mean_p, &mut s2),
             )
         },
         || {
             rayon::join(
-                || box_filter(&ii, w, h, radius),  // mean(I*I)
-                || box_filter(&ip, w, h, radius),  // mean(I*p)
+                || box_filter_with_scratch(&ii, w, h, radius, &mut mean_ii, &mut s3),
+                || box_filter_with_scratch(&ip, w, h, radius, &mut mean_ip, &mut s4),
             )
         },
     );
 
     // Compute a and b element-wise: a = cov_ip / (var_i + eps), b = mean_p - a * mean_i.
     // Reuse ii/ip buffers for a/b to avoid allocation.
-    // `var_i.max(0.0)` guards against sub-epsilon negative variance from f32
-    // rounding on flat regions — would otherwise feed `/(var+eps)` a value
-    // below `eps` and amplify noise on completely uniform input.
     let mut a_buf = ii; // reuse
     let mut b_buf = ip; // reuse
     a_buf
@@ -97,9 +111,13 @@ pub fn guided_filter_alpha(
         });
 
     // --- Box filter calls 5-6 in parallel ---
-    let (mean_a, mean_b) = rayon::join(
-        || box_filter(&a_buf, w, h, radius),
-        || box_filter(&b_buf, w, h, radius),
+    // Reuse mean_ii and mean_ip as output buffers for mean_a and mean_b.
+    let mut mean_a = mean_ii;
+    let mut mean_b = mean_ip;
+
+    rayon::join(
+        || box_filter_with_scratch(&a_buf, w, h, radius, &mut mean_a, &mut s1),
+        || box_filter_with_scratch(&b_buf, w, h, radius, &mut mean_b, &mut s2),
     );
 
     // Output: q = mean_a * I_original + mean_b. Reuse the `guide_f`
@@ -123,28 +141,41 @@ pub fn guided_filter_alpha(
 /// O(1) box filter using integral image (two-pass parallel prefix sums).
 ///
 /// Returns a newly-allocated output buffer. For inner-loop callers that
-/// run many filters in sequence, use [`box_filter_into`] to reuse a
-/// caller-owned output buffer and skip the per-call allocation.
+/// run many filters in sequence, use [`box_filter_into`] or
+/// [`box_filter_with_scratch`] to reuse buffers and skip allocations.
 pub(crate) fn box_filter(src: &[f32], w: u32, h: u32, radius: u32) -> Vec<f32> {
     let mut out = vec![0.0f32; src.len()];
     box_filter_into(src, w, h, radius, &mut out);
     out
 }
 
-/// Buffer-reusing variant: writes the filtered result into `dst` (which
-/// must equal `src.len()`). The integral-image scratch is still
-/// allocated internally; lifting that requires a `box_filter_with_scratch`
-/// — not yet justified.
+/// Buffer-reusing variant: writes the filtered result into `dst`.
+/// The integral-image scratch is still allocated internally.
 pub(crate) fn box_filter_into(src: &[f32], w: u32, h: u32, radius: u32, dst: &mut [f32]) {
+    let mut integral = vec![0.0f32; src.len()];
+    box_filter_with_scratch(src, w, h, radius, dst, &mut integral);
+}
+
+/// Zero-allocation variant: writes filtered result into `dst` using
+/// `integral` as scratch space. Both must match `src.len()`.
+pub(crate) fn box_filter_with_scratch(
+    src: &[f32],
+    w: u32,
+    h: u32,
+    radius: u32,
+    dst: &mut [f32],
+    integral: &mut [f32],
+) {
     let w = w as usize;
     let h = h as usize;
     let n = w * h;
     let r = radius as i64;
 
+    debug_assert_eq!(dst.len(), n);
+    debug_assert_eq!(integral.len(), n);
+
     // --- Build integral image via two separable passes ---
     // Pass 1: horizontal prefix sums (each row independent)
-    let mut integral = vec![0.0f32; n];
-
     let do_par_rows = h >= PAR_PREFIX_THRESHOLD;
 
     if do_par_rows {
@@ -170,8 +201,7 @@ pub(crate) fn box_filter_into(src: &[f32], w: u32, h: u32, radius: u32, dst: &mu
     }
 
     // Pass 2: vertical prefix sums.
-    // Process columns in chunks (e.g., 32) to improve cache locality: walking
-    // down N columns at once keeps those N horizontal accumulators in L1.
+    // Process columns in chunks (e.g., 32) to improve cache locality.
     const COL_CHUNK: usize = 32;
     let do_par_cols = w >= PAR_PREFIX_THRESHOLD;
 
@@ -186,13 +216,11 @@ pub(crate) fn box_filter_into(src: &[f32], w: u32, h: u32, radius: u32, dst: &mu
             .for_each(|chunk| {
                 let ptr = integral_ptr_val as *mut f32;
                 for y in 1..h {
-                    let row_off = y * w;
-                    let prev_off = (y - 1) * w;
+                    let row_ptr = unsafe { ptr.add(y * w) };
+                    let prev_ptr = unsafe { ptr.add((y - 1) * w) };
                     for &x in &chunk {
                         unsafe {
-                            let cur = ptr.add(row_off + x);
-                            let prev = ptr.add(prev_off + x);
-                            *cur += *prev;
+                            *row_ptr.add(x) += *prev_ptr.add(x);
                         }
                     }
                 }
@@ -201,19 +229,19 @@ pub(crate) fn box_filter_into(src: &[f32], w: u32, h: u32, radius: u32, dst: &mu
         for cx in (0..w).step_by(COL_CHUNK) {
             let end = (cx + COL_CHUNK).min(w);
             for y in 1..h {
-                let row_off = y * w;
-                let prev_off = (y - 1) * w;
+                let (prev_row, cur_row) = {
+                    let (p1, p2) = integral.split_at_mut(y * w);
+                    (&p1[(y - 1) * w..y * w], &mut p2[0..w])
+                };
                 for x in cx..end {
-                    integral[row_off + x] += integral[prev_off + x];
+                    cur_row[x] += prev_row[x];
                 }
             }
         }
     }
 
     // --- Lookup pass (embarrassingly parallel) ---
-    debug_assert_eq!(dst.len(), n, "box_filter_into: dst.len() must equal src.len()");
-
-    let get = |x: i64, y: i64| -> f32 {
+    let get = |integral: &[f32], x: i64, y: i64| -> f32 {
         if x < 0 || y < 0 {
             return 0.0;
         }
@@ -242,7 +270,7 @@ pub(crate) fn box_filter_into(src: &[f32], w: u32, h: u32, radius: u32, dst: &mu
                 let x1 = (xi - r - 1).max(-1);
                 let x2 = (xi + r).min(w as i64 - 1);
                 let area = (x2 - x1) as f32 * (y2 - y1) as f32;
-                let sum = get(x2, y2) - get(x1, y2) - get(x2, y1) + get(x1, y1);
+                let sum = get(integral, x2, y2) - get(integral, x1, y2) - get(integral, x2, y1) + get(integral, x1, y1);
                 *slot = sum / area.max(1.0);
             }
 
@@ -253,9 +281,8 @@ pub(crate) fn box_filter_into(src: &[f32], w: u32, h: u32, radius: u32, dst: &mu
             let row_y1 = y1 as usize * w;
 
             for (x, slot) in row.iter_mut().enumerate().take(x_end).skip(x_start) {
-                let xi = x as i64;
-                let x2 = (xi + r) as usize;
-                let x1 = (xi - r - 1) as usize;
+                let x2 = x + r as usize;
+                let x1 = x - r as usize - 1;
                 let sum = integral[row_y2 + x2] - integral[row_y2 + x1]
                     - integral[row_y1 + x2] + integral[row_y1 + x1];
                 *slot = sum * inv_area;
@@ -267,7 +294,7 @@ pub(crate) fn box_filter_into(src: &[f32], w: u32, h: u32, radius: u32, dst: &mu
                 let x1 = (xi - r - 1).max(-1);
                 let x2 = (xi + r).min(w as i64 - 1);
                 let area = (x2 - x1) as f32 * (y2 - y1) as f32;
-                let sum = get(x2, y2) - get(x1, y2) - get(x2, y1) + get(x1, y1);
+                let sum = get(integral, x2, y2) - get(integral, x1, y2) - get(integral, x2, y1) + get(integral, x1, y1);
                 *slot = sum / area.max(1.0);
             }
         } else {
@@ -277,7 +304,7 @@ pub(crate) fn box_filter_into(src: &[f32], w: u32, h: u32, radius: u32, dst: &mu
                 let x1 = (xi - r - 1).max(-1);
                 let x2 = (xi + r).min(w as i64 - 1);
                 let area = (x2 - x1) as f32 * (y2 - y1) as f32;
-                let sum = get(x2, y2) - get(x1, y2) - get(x2, y1) + get(x1, y1);
+                let sum = get(integral, x2, y2) - get(integral, x1, y2) - get(integral, x2, y1) + get(integral, x1, y1);
                 *slot = sum / area.max(1.0);
             }
         }
