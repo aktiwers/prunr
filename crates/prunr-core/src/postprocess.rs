@@ -739,25 +739,78 @@ fn apply_edge_shift(mask: &mut GrayImage, shift: f32) {
 
     let step = |src: &[u8], dst: &mut [u8]| {
         let process_row = |(y, row): (usize, &mut [u8])| {
-            let yi = y as i32;
-            for (x, slot) in row.iter_mut().enumerate() {
-                let xi = x as i32;
-                let mut extremum: u8 = if erode { 255 } else { 0 };
-                for dy in -1i32..=1 {
-                    let ny = (yi + dy).clamp(0, hi - 1) as usize;
-                    for dx in -1i32..=1 {
-                        let nx = (xi + dx).clamp(0, wi - 1) as usize;
-                        let v = src[ny * w + nx];
-                        if erode {
-                            extremum = extremum.min(v);
-                        } else {
-                            extremum = extremum.max(v);
+            if y == 0 || y == h - 1 || w < 2 {
+                // Top/bottom rows or tiny images: use slow path with clamping.
+                let yi = y as i32;
+                for (x, slot) in row.iter_mut().enumerate() {
+                    let xi = x as i32;
+                    let mut extremum: u8 = if erode { 255 } else { 0 };
+                    for dy in -1..=1 {
+                        let ny = (yi + dy).clamp(0, hi - 1) as usize;
+                        let row_off = ny * w;
+                        for dx in -1..=1 {
+                            let nx = (xi + dx).clamp(0, wi - 1) as usize;
+                            let v = src[row_off + nx];
+                            extremum = if erode { extremum.min(v) } else { extremum.max(v) };
                         }
                     }
+                    *slot = extremum;
                 }
-                *slot = extremum;
+            } else {
+                // Interior row: fast path for middle pixels, slow for first/last col.
+                let y_off = y * w;
+                let prev_off = (y - 1) * w;
+                let next_off = (y + 1) * w;
+
+                // First pixel in row: boundary clamping on X.
+                let mut e0: u8 = if erode { 255 } else { 0 };
+                for &off in &[prev_off, y_off, next_off] {
+                    let v0 = src[off];
+                    let v1 = src[off + 1];
+                    e0 = if erode { e0.min(v0).min(v1) } else { e0.max(v0).max(v1) };
+                }
+                row[0] = e0;
+
+                // Interior pixels: unrolled 3x3 min/max, no clamping.
+                if erode {
+                    for x in 1..w - 1 {
+                        let mut m = src[prev_off + x - 1];
+                        m = m.min(src[prev_off + x]);
+                        m = m.min(src[prev_off + x + 1]);
+                        m = m.min(src[y_off + x - 1]);
+                        m = m.min(src[y_off + x]);
+                        m = m.min(src[y_off + x + 1]);
+                        m = m.min(src[next_off + x - 1]);
+                        m = m.min(src[next_off + x]);
+                        m = m.min(src[next_off + x + 1]);
+                        row[x] = m;
+                    }
+                } else {
+                    for x in 1..w - 1 {
+                        let mut m = src[prev_off + x - 1];
+                        m = m.max(src[prev_off + x]);
+                        m = m.max(src[prev_off + x + 1]);
+                        m = m.max(src[y_off + x - 1]);
+                        m = m.max(src[y_off + x]);
+                        m = m.max(src[y_off + x + 1]);
+                        m = m.max(src[next_off + x - 1]);
+                        m = m.max(src[next_off + x]);
+                        m = m.max(src[next_off + x + 1]);
+                        row[x] = m;
+                    }
+                }
+
+                // Last pixel in row: boundary clamping on X.
+                let mut en: u8 = if erode { 255 } else { 0 };
+                for &off in &[prev_off, y_off, next_off] {
+                    let v0 = src[off + w - 2];
+                    let v1 = src[off + w - 1];
+                    en = if erode { en.min(v0).min(v1) } else { en.max(v0).max(v1) };
+                }
+                row[w - 1] = en;
             }
         };
+
         if use_par {
             dst.par_chunks_mut(w).enumerate().for_each(process_row);
         } else {
@@ -996,6 +1049,7 @@ mod tests {
                 .expect("postprocess succeeds");
         });
     }
+
 
     /// Halftone regression: on a uniform-luma input, pixels at the
     /// same offset within their respective cells must produce
