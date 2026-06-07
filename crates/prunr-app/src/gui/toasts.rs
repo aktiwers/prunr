@@ -21,7 +21,11 @@ pub(crate) struct Toasts(egui_notify::Toasts);
 
 impl Toasts {
     pub fn new(anchor: Anchor, margin: Vec2) -> Self {
-        Self(egui_notify::Toasts::default().with_anchor(anchor).with_margin(margin))
+        Self(
+            egui_notify::Toasts::default()
+                .with_anchor(anchor)
+                .with_margin(margin),
+        )
     }
 
     pub fn success(&mut self, caption: impl Into<String>) -> &mut Toast {
@@ -51,7 +55,6 @@ impl Toasts {
     }
 }
 
-
 /// Greedy word-wrap: break on whitespace into lines of at most
 /// `TOAST_LINE_CHARS` chars (counted in unicode scalar values, which is
 /// close enough to display width for our use cases). Words longer than
@@ -74,7 +77,10 @@ fn wrap_one_line(line: &str, out: &mut String) {
     for word in line.split_whitespace() {
         let wlen = word.chars().count();
         if wlen >= TOAST_LINE_CHARS {
-            if !first { out.push('\n'); col = 0; }
+            if !first {
+                out.push('\n');
+                col = 0;
+            }
             // Hard-break very long words so the toast still fits.
             for ch in word.chars() {
                 if col >= TOAST_LINE_CHARS {
@@ -93,7 +99,10 @@ fn wrap_one_line(line: &str, out: &mut String) {
             col = 0;
             first = true;
         }
-        if !first { out.push(' '); col += 1; }
+        if !first {
+            out.push(' ');
+            col += 1;
+        }
         out.push_str(word);
         col += wlen;
         first = false;
@@ -115,8 +124,10 @@ mod tests {
         let s = "The brush correction grid was discarded because the model resolution changed";
         let w = wrap(s);
         for line in w.lines() {
-            assert!(line.chars().count() <= TOAST_LINE_CHARS,
-                "line too long: {line:?}");
+            assert!(
+                line.chars().count() <= TOAST_LINE_CHARS,
+                "line too long: {line:?}"
+            );
         }
         // Original words are all preserved.
         let normalised_in: String = s.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -129,7 +140,10 @@ mod tests {
         let s = format!("path={}", "x".repeat(120));
         let w = wrap(&s);
         for line in w.lines() {
-            assert!(line.chars().count() <= TOAST_LINE_CHARS, "line too long: {line:?}");
+            assert!(
+                line.chars().count() <= TOAST_LINE_CHARS,
+                "line too long: {line:?}"
+            );
         }
     }
 

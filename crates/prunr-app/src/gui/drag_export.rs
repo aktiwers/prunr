@@ -49,11 +49,15 @@ pub(crate) fn cleanup_all() {
 /// Silent on errors — this is best-effort housekeeping.
 pub(crate) fn cleanup_stale() {
     let dir = temp_dir();
-    let Ok(entries) = std::fs::read_dir(&dir) else { return };
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return;
+    };
     let now = SystemTime::now();
     for entry in entries.flatten() {
         let path = entry.path();
-        if !path.is_file() { continue; }
+        if !path.is_file() {
+            continue;
+        }
         let Ok(meta) = entry.metadata() else { continue };
         let age = meta
             .modified()
@@ -115,7 +119,9 @@ fn make_layer_filename(source_filename: &str, kind: LayerKind) -> String {
 }
 
 fn decode_source(item: &BatchItem) -> Option<DynamicImage> {
-    let bytes = item.source.load_bytes()
+    let bytes = item
+        .source
+        .load_bytes()
         .map_err(|err| tracing::warn!(item_id = item.id, %err, "split drag-out: source read"))
         .ok()?;
     prunr_core::load_image_from_bytes(&bytes)
@@ -142,29 +148,39 @@ fn render_layer(
                 ..item.settings.mask_settings()
             };
             let rgba = prunr_core::postprocess_from_flat(
-                &seg.data, seg.height as usize, seg.width as usize,
-                original, &prunr_core::PostprocessOpts::new(&mask, seg.model),
+                &seg.data,
+                seg.height as usize,
+                seg.width as usize,
+                original,
+                &prunr_core::PostprocessOpts::new(&mask, seg.model),
             )
-                .map_err(|err| tracing::warn!(item_id, %err, "subject layer postprocess"))
-                .ok()?;
+            .map_err(|err| tracing::warn!(item_id, %err, "subject layer postprocess"))
+            .ok()?;
             Some(LayerOutput::Rgba(rgba))
         }
         LayerKind::Lines => {
             let et = item.cached_edge_tensors.as_ref()?;
             let tensor = et.decompress(item.settings.edge_scale)?;
             let rgba = prunr_core::finalize_edges(
-                &tensor, et.height, et.width, original, &item.settings.edge_settings(),
+                &tensor,
+                et.height,
+                et.width,
+                original,
+                &item.settings.edge_settings(),
             );
             Some(LayerOutput::Rgba(rgba))
         }
         LayerKind::Mask => {
             let seg = seg?;
             let gray = prunr_core::tensor_to_mask_from_flat(
-                &seg.data, seg.height as usize, seg.width as usize,
-                original, &prunr_core::PostprocessOpts::new(&item.settings.mask_settings(), seg.model),
+                &seg.data,
+                seg.height as usize,
+                seg.width as usize,
+                original,
+                &prunr_core::PostprocessOpts::new(&item.settings.mask_settings(), seg.model),
             )
-                .map_err(|err| tracing::warn!(item_id, %err, "mask layer reshape"))
-                .ok()?;
+            .map_err(|err| tracing::warn!(item_id, %err, "mask layer reshape"))
+            .ok()?;
             Some(LayerOutput::Gray(gray))
         }
     }
@@ -183,7 +199,9 @@ fn write_layer(
     original: &DynamicImage,
     seg: Option<&SegBundle>,
 ) -> std::io::Result<Option<PathBuf>> {
-    let Some(layer) = render_layer(item, kind, original, seg) else { return Ok(None) };
+    let Some(layer) = render_layer(item, kind, original, seg) else {
+        return Ok(None);
+    };
     let path = temp_dir().join(make_layer_filename(&item.filename, kind));
     let file = std::fs::File::create(&path)?;
     let mut w = std::io::BufWriter::new(file);
@@ -192,11 +210,9 @@ fn write_layer(
         // No streaming variant for Gray yet — encode_gray_png allocates
         // a small Vec (mask is single-channel, ~12 MB at 4 K vs ~50 MB
         // RGBA). Acceptable for this layer's traffic.
-        LayerOutput::Gray(gray) => prunr_core::encode_gray_png(&gray)
-            .and_then(|bytes| {
-                std::io::Write::write_all(&mut w, &bytes)
-                    .map_err(prunr_core::CoreError::Io)
-            }),
+        LayerOutput::Gray(gray) => prunr_core::encode_gray_png(&gray).and_then(|bytes| {
+            std::io::Write::write_all(&mut w, &bytes).map_err(prunr_core::CoreError::Io)
+        }),
     };
     res.map_err(|e| std::io::Error::other(e.to_string()))?;
     std::io::Write::flush(&mut w)?;
@@ -212,7 +228,11 @@ fn write_layer(
 /// copy. Split-layer drags don't go through here (`render_layer` keeps
 /// each layer clean for downstream compositing).
 pub(crate) fn prepare(item: &BatchItem) -> std::io::Result<PathBuf> {
-    let name = make_filename(&item.filename, item.result_rgba.is_some(), item.settings.line_mode);
+    let name = make_filename(
+        &item.filename,
+        item.result_rgba.is_some(),
+        item.settings.line_mode,
+    );
     let path = temp_dir().join(&name);
     match &item.result_rgba {
         Some(rgba) => {
@@ -251,7 +271,8 @@ pub(crate) fn prepare_for_drag(item: &BatchItem, split: bool) -> std::io::Result
     };
     let seg = item.cached_tensor.as_ref().and_then(|ct| ct.bundle());
 
-    let paths: Vec<PathBuf> = LayerKind::ALL.iter()
+    let paths: Vec<PathBuf> = LayerKind::ALL
+        .iter()
         .copied()
         .filter_map(|k| write_layer(item, k, &original, seg.as_ref()).transpose())
         .collect::<std::io::Result<Vec<_>>>()?;
@@ -271,9 +292,12 @@ pub(crate) fn prepare_for_drag(item: &BatchItem, split: bool) -> std::io::Result
 /// caches evicted under memory pressure) — callers should fall back to the
 /// composite PNG in that case.
 pub(crate) fn render_layer_bytes(item: &BatchItem) -> Vec<(String, Vec<u8>)> {
-    let Some(original) = decode_source(item) else { return Vec::new() };
+    let Some(original) = decode_source(item) else {
+        return Vec::new();
+    };
     let seg = item.cached_tensor.as_ref().and_then(|ct| ct.bundle());
-    LayerKind::ALL.iter()
+    LayerKind::ALL
+        .iter()
         .copied()
         .filter_map(|kind| {
             let layer = render_layer(item, kind, &original, seg.as_ref())?;
@@ -325,10 +349,7 @@ mod tests {
             make_filename("no-extension", true, LineMode::Off),
             "no-extension.prunr.png"
         );
-        assert_eq!(
-            make_filename("", true, LineMode::Off),
-            "image.prunr.png"
-        );
+        assert_eq!(make_filename("", true, LineMode::Off), "image.prunr.png");
     }
 
     #[test]

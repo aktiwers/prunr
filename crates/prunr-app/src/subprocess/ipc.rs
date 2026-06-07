@@ -5,7 +5,7 @@
 //! data travels via temp files. If a frame exceeds this limit it is a bug
 //! (e.g. an accidental inline payload), not a legitimate large message.
 
-use std::io::{self, Read, Write, BufReader, BufWriter};
+use std::io::{self, BufReader, BufWriter, Read, Write};
 
 const MAX_MESSAGE_SIZE: u32 = 1024 * 1024; // 1 MB
 
@@ -54,10 +54,8 @@ pub fn read_message<R: Read, T: serde::de::DeserializeOwned>(
         ));
     }
     let mut limited = reader.take(len as u64);
-    let msg: T = bincode::serde::decode_from_std_read(
-        &mut limited,
-        bincode::config::standard(),
-    ).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    let msg: T = bincode::serde::decode_from_std_read(&mut limited, bincode::config::standard())
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     Ok(Some(msg))
 }
 
@@ -71,9 +69,13 @@ pub fn f32s_as_le_bytes(data: &[f32]) -> &[u8] {
     // Prunr ships only LE platforms — the conditional makes the big-endian
     // case a compile error rather than a silent wrong-byte bug.
     #[cfg(target_endian = "little")]
-    { bytemuck::cast_slice(data) }
+    {
+        bytemuck::cast_slice(data)
+    }
     #[cfg(not(target_endian = "little"))]
-    { compile_error!("prunr IPC assumes little-endian f32 layout"); }
+    {
+        compile_error!("prunr IPC assumes little-endian f32 layout");
+    }
 }
 
 /// Read raw little-endian bytes back to a Vec<f32>. `pod_collect_to_vec`
@@ -81,9 +83,13 @@ pub fn f32s_as_le_bytes(data: &[f32]) -> &[u8] {
 /// `cast_slice::<_, f32>` which would panic on an unaligned source.
 pub fn le_bytes_to_f32s(bytes: &[u8]) -> Vec<f32> {
     #[cfg(target_endian = "little")]
-    { bytemuck::pod_collect_to_vec(bytes) }
+    {
+        bytemuck::pod_collect_to_vec(bytes)
+    }
     #[cfg(not(target_endian = "little"))]
-    { compile_error!("prunr IPC assumes little-endian f32 layout"); }
+    {
+        compile_error!("prunr IPC assumes little-endian f32 layout");
+    }
 }
 
 #[cfg(test)]
@@ -101,7 +107,9 @@ mod tests {
     #[test]
     fn roundtrip_single_message() {
         let mut buf = Vec::new();
-        let msg = TestMsg::Hello { name: "prunr".to_string() };
+        let msg = TestMsg::Hello {
+            name: "prunr".to_string(),
+        };
         {
             let mut writer = BufWriter::new(&mut buf);
             write_message(&mut writer, &msg).unwrap();

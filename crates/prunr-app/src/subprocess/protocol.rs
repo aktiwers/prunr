@@ -3,10 +3,10 @@
 //! All types are serde-serializable and sent as length-prefixed bincode
 //! frames over stdin/stdout.
 
-use prunr_core::{ModelKind, MaskSettings, EdgeSettings, ProgressStage, LineMode};
 use prunr_core::inpaint_sd::SdInpaintRequest;
+use prunr_core::{EdgeSettings, LineMode, MaskSettings, ModelKind, ProgressStage};
 use prunr_models::ModelId;
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 /// `ImageError.error` value emitted when a per-item `CancelItem` trips at
 /// dispatch. The parent matches on this exact string to revert the item to
@@ -129,9 +129,7 @@ pub struct ChainInput {
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub enum SubprocessEvent {
     /// Engine pool created successfully.
-    Ready {
-        active_provider: String,
-    },
+    Ready { active_provider: String },
     /// Per-stage progress for an image.
     Progress {
         item_id: u64,
@@ -162,10 +160,7 @@ pub enum SubprocessEvent {
         edge_cache_width: Option<u32>,
     },
     /// Image processing failed (non-fatal).
-    ImageError {
-        item_id: u64,
-        error: String,
-    },
+    ImageError { item_id: u64, error: String },
     /// Inpaint completed — RGBA result lives at `rgba_path`. Same
     /// read-and-delete contract as `ImageDone.result_path`.
     InpaintDone {
@@ -175,10 +170,7 @@ pub enum SubprocessEvent {
         height: u32,
     },
     /// Inpaint dispatch failed (model missing, ORT error, IO error).
-    InpaintError {
-        item_id: u64,
-        error: String,
-    },
+    InpaintError { item_id: u64, error: String },
     /// Per-step progress during a long inpaint stroke. Fired between
     /// SD UNet steps; `total = num_inference_steps`. LaMa / MI-GAN
     /// don't fire this (single-pass, sub-second on GPU).
@@ -188,15 +180,11 @@ pub enum SubprocessEvent {
         total: u32,
     },
     /// Current RSS of the subprocess (sent after each image).
-    RssUpdate {
-        rss_bytes: u64,
-    },
+    RssUpdate { rss_bytes: u64 },
     /// All work complete (or cancelled).
     Finished,
     /// Fatal initialization error (engine creation failed).
-    InitError {
-        error: String,
-    },
+    InitError { error: String },
 }
 
 /// PID-namespaced IPC temp dir, RAM-backed (/dev/shm) on Linux when available.
@@ -213,7 +201,8 @@ pub fn ipc_temp_dir() -> &'static std::path::Path {
         let dir = init_temp_dir_for_pid(pid);
         sweep_stale_pid_dirs(&dir, pid);
         dir
-    }).as_path()
+    })
+    .as_path()
 }
 
 /// Body of `ipc_temp_dir()`'s OnceLock init, exposed for unit tests
@@ -236,15 +225,29 @@ fn init_temp_dir_for_pid(pid: u32) -> std::path::PathBuf {
 /// "older than 24h", which is conservative enough to avoid clobbering a
 /// concurrent prunr instance without sleeping forever on stale dirs.
 fn sweep_stale_pid_dirs(self_dir: &std::path::Path, self_pid: u32) {
-    let Some(parent) = self_dir.parent() else { return };
-    let Ok(entries) = std::fs::read_dir(parent) else { return };
+    let Some(parent) = self_dir.parent() else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return;
+    };
     for entry in entries.flatten() {
         let name_os = entry.file_name();
-        let Some(name) = name_os.to_str() else { continue };
-        let Some(pid_str) = name.strip_prefix("prunr-ipc-") else { continue };
-        let Ok(other_pid) = pid_str.parse::<u32>() else { continue };
-        if other_pid == self_pid { continue; }
-        if !is_pid_dead(other_pid, &entry) { continue; }
+        let Some(name) = name_os.to_str() else {
+            continue;
+        };
+        let Some(pid_str) = name.strip_prefix("prunr-ipc-") else {
+            continue;
+        };
+        let Ok(other_pid) = pid_str.parse::<u32>() else {
+            continue;
+        };
+        if other_pid == self_pid {
+            continue;
+        }
+        if !is_pid_dead(other_pid, &entry) {
+            continue;
+        }
         let _ = std::fs::remove_dir_all(entry.path());
     }
 }
@@ -260,9 +263,15 @@ fn is_pid_dead(_pid: u32, entry: &std::fs::DirEntry) -> bool {
     // Fallback: drop dirs untouched for >24h. Fresh siblings of a running
     // prunr instance are spared; truly stale dirs from past crashes get
     // reclaimed without polling kernel APIs per platform.
-    let Ok(meta) = entry.metadata() else { return false };
-    let Ok(modified) = meta.modified() else { return false };
-    let Ok(age) = modified.elapsed() else { return false };
+    let Ok(meta) = entry.metadata() else {
+        return false;
+    };
+    let Ok(modified) = meta.modified() else {
+        return false;
+    };
+    let Ok(age) = modified.elapsed() else {
+        return false;
+    };
     age > std::time::Duration::from_secs(86_400)
 }
 
@@ -277,11 +286,15 @@ fn resolve_temp_dir_path(pid: u32) -> std::path::PathBuf {
 /// Remove every file directly inside `dir`, restricted to files whose name
 /// starts with one of the supplied prefixes.
 fn sweep_dir_with_prefix(dir: &std::path::Path, prefixes: &[&str]) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     for entry in entries.flatten() {
         // `file_name` must be bound so `to_str()`'s &str doesn't dangle.
         let file_name = entry.file_name();
-        let Some(name) = file_name.to_str() else { continue };
+        let Some(name) = file_name.to_str() else {
+            continue;
+        };
         if prefixes.iter().any(|p| name.starts_with(p)) {
             let _ = std::fs::remove_file(entry.path());
         }
@@ -354,7 +367,9 @@ impl IpcKind {
     pub const fn ext(self) -> &'static str {
         match self {
             IpcKind::Input | IpcKind::Orig | IpcKind::CliDs => "img",
-            IpcKind::Chain | IpcKind::Seg | IpcKind::Tensor | IpcKind::Result | IpcKind::Edge => "raw",
+            IpcKind::Chain | IpcKind::Seg | IpcKind::Tensor | IpcKind::Result | IpcKind::Edge => {
+                "raw"
+            }
             IpcKind::InpaintImg | IpcKind::InpaintMask | IpcKind::InpaintOut => "png",
         }
     }
@@ -425,9 +440,7 @@ pub const SEG_PIPELINE_PREFIXES: &[&str] = &[
 ];
 
 /// File-name prefixes owned by the inpaint subprocess.
-pub const INPAINT_PREFIXES: &[&str] = &[
-    "inpaint-",
-];
+pub const INPAINT_PREFIXES: &[&str] = &["inpaint-"];
 
 /// File-name prefixes the CLI parent owns *across* worker crashes.
 /// `cli_ds_*` are the downscaled temps the CLI writes once before the
@@ -435,9 +448,7 @@ pub const INPAINT_PREFIXES: &[&str] = &[
 /// Crash-recovery cleanup (`cleanup_seg_pipeline_temps`) deliberately
 /// skips these; the CLI sweeps them itself once the batch loop has
 /// fully exited.
-pub const CLI_PERSISTENT_PREFIXES: &[&str] = &[
-    IpcKind::CliDs.prefix(),
-];
+pub const CLI_PERSISTENT_PREFIXES: &[&str] = &[IpcKind::CliDs.prefix()];
 
 /// Cleanup scoped to a single subprocess's owned filenames. Use from
 /// crash-recovery paths so the wipe doesn't race a sibling subprocess
@@ -484,8 +495,7 @@ mod tests {
         T: serde::Serialize + DeserializeOwned + PartialEq + Debug,
     {
         let bytes = bincode::serde::encode_to_vec(value, standard()).unwrap();
-        let (decoded, _): (T, _) =
-            bincode::serde::decode_from_slice(&bytes, standard()).unwrap();
+        let (decoded, _): (T, _) = bincode::serde::decode_from_slice(&bytes, standard()).unwrap();
         assert_eq!(value, &decoded);
     }
 
@@ -497,7 +507,15 @@ mod tests {
             mask: MaskSettings::default(),
             force_cpu: false,
             line_mode: LineMode::Off,
-            edge: EdgeSettings { line_strength: 0.5, solid_line_color: Some([255, 0, 0]), edge_thickness: 0, edge_scale: prunr_core::EdgeScale::Bold, compose_mode: prunr_core::ComposeMode::default(), line_style: prunr_core::LineStyle::default(), input_transform: prunr_core::InputTransform::default() },
+            edge: EdgeSettings {
+                line_strength: 0.5,
+                solid_line_color: Some([255, 0, 0]),
+                edge_thickness: 0,
+                edge_scale: prunr_core::EdgeScale::Bold,
+                compose_mode: prunr_core::ComposeMode::default(),
+                line_style: prunr_core::LineStyle::default(),
+                input_transform: prunr_core::InputTransform::default(),
+            },
             ipc_dir: PathBuf::from("/tmp/prunr-ipc-test"),
             inpaint_only: false,
         });
@@ -690,9 +708,21 @@ mod tests {
 
     #[test]
     fn event_inpaint_progress_roundtrip() {
-        roundtrip(&SubprocessEvent::InpaintProgress { item_id: 12, current: 0, total: 20 });
-        roundtrip(&SubprocessEvent::InpaintProgress { item_id: 12, current: 7, total: 20 });
-        roundtrip(&SubprocessEvent::InpaintProgress { item_id: 12, current: 20, total: 20 });
+        roundtrip(&SubprocessEvent::InpaintProgress {
+            item_id: 12,
+            current: 0,
+            total: 20,
+        });
+        roundtrip(&SubprocessEvent::InpaintProgress {
+            item_id: 12,
+            current: 7,
+            total: 20,
+        });
+        roundtrip(&SubprocessEvent::InpaintProgress {
+            item_id: 12,
+            current: 20,
+            total: 20,
+        });
     }
 
     // ---------- ipc_temp_dir lifecycle ----------
@@ -767,10 +797,21 @@ mod tests {
         let scratch = tempfile::tempdir().unwrap();
         let dir = scratch.path();
 
-        let seg = ["chain_42.raw", "edge_5.bin", "input_3.img",
-                   "orig_3.img", "result_3.raw", "seg_3.png", "tensor_3.raw"];
+        let seg = [
+            "chain_42.raw",
+            "edge_5.bin",
+            "input_3.img",
+            "orig_3.img",
+            "result_3.raw",
+            "seg_3.png",
+            "tensor_3.raw",
+        ];
         let cli = ["cli_ds_0.img"];
-        let inpaint = ["inpaint-img-7-0.png", "inpaint-mask-7-0.png", "inpaint-out-7.png"];
+        let inpaint = [
+            "inpaint-img-7-0.png",
+            "inpaint-mask-7-0.png",
+            "inpaint-out-7.png",
+        ];
         poison(dir, &seg);
         poison(dir, &cli);
         poison(dir, &inpaint);
@@ -779,11 +820,16 @@ mod tests {
 
         assert_gone(dir, &seg);
         for f in &inpaint {
-            assert!(dir.join(f).exists(), "inpaint file {f} must survive a seg-scoped cleanup");
+            assert!(
+                dir.join(f).exists(),
+                "inpaint file {f} must survive a seg-scoped cleanup"
+            );
         }
         for f in &cli {
-            assert!(dir.join(f).exists(),
-                "CLI-persistent file {f} must survive a seg-scoped cleanup (B-CLI-1)");
+            assert!(
+                dir.join(f).exists(),
+                "CLI-persistent file {f} must survive a seg-scoped cleanup (B-CLI-1)"
+            );
         }
     }
 
@@ -804,7 +850,10 @@ mod tests {
         super::sweep_dir_with_prefix(dir, INPAINT_PREFIXES);
 
         for f in &seg {
-            assert!(dir.join(f).exists(), "seg file {f} must survive an inpaint-scoped cleanup");
+            assert!(
+                dir.join(f).exists(),
+                "seg file {f} must survive an inpaint-scoped cleanup"
+            );
         }
         assert_gone(dir, &inpaint);
     }
@@ -831,9 +880,17 @@ mod tests {
     #[test]
     fn every_ipc_filename_in_tree_matches_a_known_prefix() {
         let production_filenames = [
-            "chain_42.raw", "cli_ds_0.img", "edge_5.bin", "input_3.img",
-            "orig_3.img", "result_3.raw", "seg_3.png", "tensor_3.raw",
-            "inpaint-img-7-0.png", "inpaint-mask-7-0.png", "inpaint-out-7.png",
+            "chain_42.raw",
+            "cli_ds_0.img",
+            "edge_5.bin",
+            "input_3.img",
+            "orig_3.img",
+            "result_3.raw",
+            "seg_3.png",
+            "tensor_3.raw",
+            "inpaint-img-7-0.png",
+            "inpaint-mask-7-0.png",
+            "inpaint-out-7.png",
         ];
         for name in &production_filenames {
             assert!(
@@ -853,9 +910,8 @@ mod tests {
     /// errors whose actual cause was self-inflicted (B-CLI-1).
     #[test]
     fn seg_pipeline_cleanup_preserves_cli_persistent_temps() {
-        let dir = std::env::temp_dir().join(format!(
-            "prunr-test-cli-ds-survive-{}", std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("prunr-test-cli-ds-survive-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         // Seed one cli_ds file (CLI-owned) and one seg file (worker-owned).
         std::fs::write(dir.join("cli_ds_42.img"), b"retry-input").unwrap();
@@ -863,15 +919,21 @@ mod tests {
 
         super::sweep_dir_with_prefix(&dir, SEG_PIPELINE_PREFIXES);
 
-        assert!(dir.join("cli_ds_42.img").exists(),
-            "cli_ds_*.img must survive crash-recovery cleanup");
-        assert!(!dir.join("seg_42.raw").exists(),
-            "seg_*.raw must be wiped by crash-recovery cleanup");
+        assert!(
+            dir.join("cli_ds_42.img").exists(),
+            "cli_ds_*.img must survive crash-recovery cleanup"
+        );
+        assert!(
+            !dir.join("seg_42.raw").exists(),
+            "seg_*.raw must be wiped by crash-recovery cleanup"
+        );
 
         // CLI-driven end-of-batch cleanup wipes the cli_ds_ file.
         super::sweep_dir_with_prefix(&dir, CLI_PERSISTENT_PREFIXES);
-        assert!(!dir.join("cli_ds_42.img").exists(),
-            "cli_ds_*.img must be wiped by CLI end-of-batch cleanup");
+        assert!(
+            !dir.join("cli_ds_42.img").exists(),
+            "cli_ds_*.img must be wiped by CLI end-of-batch cleanup"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
