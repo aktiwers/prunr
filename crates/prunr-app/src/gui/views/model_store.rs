@@ -8,10 +8,10 @@ use prunr_models::{
     ModelSource, REGISTRY,
 };
 
+use super::format_byte_size;
 use crate::gui::app::PrunrApp;
 use crate::gui::download_manager::DownloadState;
 use crate::gui::theme;
-use super::format_byte_size;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum CardAction {
@@ -22,7 +22,9 @@ pub(crate) enum CardAction {
     Verifying,
     Delete,
     /// `retryable=false` renders disabled (e.g. SHA-mismatch is fatal).
-    Retry { retryable: bool },
+    Retry {
+        retryable: bool,
+    },
 }
 
 pub(crate) fn card_action(
@@ -39,23 +41,30 @@ pub(crate) fn card_action(
     match download_state {
         DownloadState::InProgress { .. } | DownloadState::Queued => CardAction::Cancel,
         DownloadState::Verifying => CardAction::Verifying,
-        DownloadState::Failed { retryable, .. } if !is_installed => {
-            CardAction::Retry { retryable: *retryable }
-        }
+        DownloadState::Failed { retryable, .. } if !is_installed => CardAction::Retry {
+            retryable: *retryable,
+        },
         DownloadState::Failed { .. } | DownloadState::Done | DownloadState::Idle => {
-            if is_installed { CardAction::Delete } else { CardAction::Download }
+            if is_installed {
+                CardAction::Delete
+            } else {
+                CardAction::Download
+            }
         }
     }
 }
 
 fn disk_usage_bytes_uncached() -> u64 {
     let Some(dir) = on_demand_dir() else { return 0 };
-    REGISTRY.iter().filter_map(|d| match d.source {
-        ModelSource::OnDemand { filename, .. } => {
-            std::fs::metadata(dir.join(filename)).ok().map(|m| m.len())
-        }
-        _ => None,
-    }).sum()
+    REGISTRY
+        .iter()
+        .filter_map(|d| match d.source {
+            ModelSource::OnDemand { filename, .. } => {
+                std::fs::metadata(dir.join(filename)).ok().map(|m| m.len())
+            }
+            _ => None,
+        })
+        .sum()
 }
 
 /// 1 s TTL cache around the per-OnDemand-model `fs::metadata` walk —
@@ -68,7 +77,9 @@ fn disk_usage_bytes() -> u64 {
     use std::time::Instant;
     static CACHE: OnceLock<Mutex<Option<(Instant, u64)>>> = OnceLock::new();
     let cell = CACHE.get_or_init(|| Mutex::new(None));
-    let mut guard = cell.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut guard = cell
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = Instant::now();
     if let Some((at, bytes)) = *guard {
         if now.duration_since(at).as_secs_f32() < 1.0 {
@@ -90,7 +101,9 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) -> bool {
     let mut pending_actions: Vec<(ModelId, CardAction)> = Vec::with_capacity(REGISTRY.len());
 
     let backdrop_closed = theme::standard_modal_window(
-        ctx, "model_store", "Model Store",
+        ctx,
+        "model_store",
+        "Model Store",
         [theme::SETTINGS_DIALOG_WIDTH, 560.0],
         |ui| {
             ui.horizontal(|ui| {
@@ -110,8 +123,18 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) -> bool {
 
             ui.horizontal(|ui| {
                 filter_chip(ui, "All", None, &mut new_filter);
-                filter_chip(ui, "Background", Some(ModelCategory::Segmentation), &mut new_filter);
-                filter_chip(ui, "Lines", Some(ModelCategory::EdgeDetection), &mut new_filter);
+                filter_chip(
+                    ui,
+                    "Background",
+                    Some(ModelCategory::Segmentation),
+                    &mut new_filter,
+                );
+                filter_chip(
+                    ui,
+                    "Lines",
+                    Some(ModelCategory::EdgeDetection),
+                    &mut new_filter,
+                );
                 filter_chip(ui, "Eraser", Some(ModelCategory::Inpaint), &mut new_filter);
             });
             ui.add_space(theme::SPACE_SM);
@@ -124,7 +147,9 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) -> bool {
                     let mut shown = 0;
                     for desc in REGISTRY {
                         if let Some(c) = new_filter {
-                            if desc.category != c { continue; }
+                            if desc.category != c {
+                                continue;
+                            }
                         }
                         if shown > 0 {
                             ui.add_space(theme::SPACE_XS);
@@ -191,9 +216,17 @@ fn filter_chip(
     let selected = *current == category;
     let text = RichText::new(label)
         .size(theme::FONT_SIZE_BODY)
-        .color(if selected { theme::TEXT_PRIMARY } else { theme::TEXT_SECONDARY });
+        .color(if selected {
+            theme::TEXT_PRIMARY
+        } else {
+            theme::TEXT_SECONDARY
+        });
     let btn = egui::Button::new(text)
-        .fill(if selected { theme::BG_SECONDARY } else { egui::Color32::TRANSPARENT })
+        .fill(if selected {
+            theme::BG_SECONDARY
+        } else {
+            egui::Color32::TRANSPARENT
+        })
         .corner_radius(theme::BUTTON_ROUNDING)
         .min_size(egui::vec2(0.0, theme::CHIP_HEIGHT));
     if ui.add(btn).clicked() {
@@ -228,12 +261,20 @@ fn render_card(
             );
             let meta = match desc.source {
                 ModelSource::Bundled => "Built-in".to_string(),
-                ModelSource::OnDemand { license, size_mb, .. } => {
-                    format!("{} · {} · {size_mb} MB", license.license, license.source_url)
+                ModelSource::OnDemand {
+                    license, size_mb, ..
+                } => {
+                    format!(
+                        "{} · {} · {size_mb} MB",
+                        license.license, license.source_url
+                    )
                 }
                 ModelSource::MultiPartOnDemand { license, parts, .. } => {
                     let total_mb = parts.iter().map(|p| p.size_bytes).sum::<u64>() / (1024 * 1024);
-                    format!("{} · {} · {total_mb} MB", license.license, license.source_url)
+                    format!(
+                        "{} · {} · {total_mb} MB",
+                        license.license, license.source_url
+                    )
                 }
             };
             ui.label(
@@ -241,14 +282,21 @@ fn render_card(
                     .size(theme::FONT_SIZE_MONO)
                     .color(theme::TEXT_SECONDARY),
             );
-            if let DownloadState::InProgress { bytes_so_far, total_bytes } = *state {
+            if let DownloadState::InProgress {
+                bytes_so_far,
+                total_bytes,
+            } = *state
+            {
                 let pct = if total_bytes > 0 {
                     (bytes_so_far as f32 / total_bytes as f32 * 100.0).round() as u32
-                } else { 0 };
+                } else {
+                    0
+                };
                 ui.label(
                     RichText::new(format!(
                         "Downloading: {} / {} ({pct}%)",
-                        format_byte_size(bytes_so_far), format_byte_size(total_bytes),
+                        format_byte_size(bytes_so_far),
+                        format_byte_size(total_bytes),
                     ))
                     .size(theme::FONT_SIZE_MONO)
                     .color(theme::TEXT_SECONDARY),
@@ -296,15 +344,16 @@ fn button_label(action: CardAction) -> Option<&'static str> {
 }
 
 fn action_enabled(action: CardAction) -> bool {
-    !matches!(action,
-        CardAction::Bundled
-        | CardAction::Verifying
-        | CardAction::Retry { retryable: false }
+    !matches!(
+        action,
+        CardAction::Bundled | CardAction::Verifying | CardAction::Retry { retryable: false }
     )
 }
 
 fn delete_installed_model(app: &mut PrunrApp, id: ModelId) {
-    let Some(desc) = model_descriptor(id) else { return };
+    let Some(desc) = model_descriptor(id) else {
+        return;
+    };
     let Some(dir) = on_demand_dir() else {
         app.toasts.error("Could not resolve user data directory");
         return;
@@ -330,26 +379,31 @@ fn delete_installed_model(app: &mut PrunrApp, id: ModelId) {
             tracing::info!(?id, "deleted on-demand model");
         }
         Err(e) => {
-            app.toasts.error(format!("Could not delete {}: {e}", desc.display_name));
+            app.toasts
+                .error(format!("Could not delete {}: {e}", desc.display_name));
         }
     }
 }
 
 /// True when the descriptor for `id` declares a restrictive license that
 /// the user hasn't yet accepted in `Settings::accepted_licenses`.
-pub(crate) fn requires_license_gate(id: ModelId, settings: &super::super::settings::Settings) -> bool {
-    let Some(desc) = model_descriptor(id) else { return false };
+pub(crate) fn requires_license_gate(
+    id: ModelId,
+    settings: &super::super::settings::Settings,
+) -> bool {
+    let Some(desc) = model_descriptor(id) else {
+        return false;
+    };
     desc.requires_license_acceptance() && !settings.has_accepted_license(id)
 }
 
 /// License-acceptance modal. Returns `(close_requested, accepted)`:
 /// - `close_requested`: the modal should be dismissed (Cancel or backdrop)
 /// - `accepted`: the user clicked Accept — caller persists + starts download
-pub fn render_license_dialog(
-    ctx: &egui::Context,
-    id: ModelId,
-) -> (bool, bool) {
-    let Some(desc) = model_descriptor(id) else { return (true, false) };
+pub fn render_license_dialog(ctx: &egui::Context, id: ModelId) -> (bool, bool) {
+    let Some(desc) = model_descriptor(id) else {
+        return (true, false);
+    };
     let license = match desc.source {
         ModelSource::MultiPartOnDemand { license, .. } => license,
         ModelSource::OnDemand { license, .. } => license,
@@ -361,7 +415,9 @@ pub fn render_license_dialog(
     let mut accepted = false;
 
     let backdrop_closed = theme::standard_modal_window(
-        ctx, "license_dialog", "License acceptance",
+        ctx,
+        "license_dialog",
+        "License acceptance",
         [theme::SETTINGS_DIALOG_WIDTH, 360.0],
         |ui| {
             ui.label(
@@ -384,9 +440,12 @@ pub fn render_license_dialog(
             );
             ui.add_space(theme::SPACE_XS);
             ui.label(
-                RichText::new("This model is distributed under terms that you must \
+                RichText::new(
+                    "This model is distributed under terms that you must \
                      review and accept before downloading. The full text \
-                     is published at the URL below.".to_string())
+                     is published at the URL below."
+                        .to_string(),
+                )
                 .size(theme::FONT_SIZE_BODY)
                 .color(theme::TEXT_SECONDARY),
             );
@@ -415,15 +474,32 @@ pub fn render_license_dialog(
 mod tests {
     use super::*;
 
-    fn dl_idle() -> DownloadState { DownloadState::Idle }
-    fn dl_in_progress() -> DownloadState { DownloadState::InProgress { bytes_so_far: 1, total_bytes: 100 } }
-    fn dl_verifying() -> DownloadState { DownloadState::Verifying }
-    fn dl_done() -> DownloadState { DownloadState::Done }
+    fn dl_idle() -> DownloadState {
+        DownloadState::Idle
+    }
+    fn dl_in_progress() -> DownloadState {
+        DownloadState::InProgress {
+            bytes_so_far: 1,
+            total_bytes: 100,
+        }
+    }
+    fn dl_verifying() -> DownloadState {
+        DownloadState::Verifying
+    }
+    fn dl_done() -> DownloadState {
+        DownloadState::Done
+    }
     fn dl_failed_retryable() -> DownloadState {
-        DownloadState::Failed { error: "x".into(), retryable: true }
+        DownloadState::Failed {
+            error: "x".into(),
+            retryable: true,
+        }
     }
     fn dl_failed_fatal() -> DownloadState {
-        DownloadState::Failed { error: "x".into(), retryable: false }
+        DownloadState::Failed {
+            error: "x".into(),
+            retryable: false,
+        }
     }
     fn synthetic(gpu: prunr_models::GpuRequirement) -> prunr_models::ModelDescriptor {
         prunr_models::ModelDescriptor {
@@ -467,7 +543,10 @@ mod tests {
     fn bundled_always_renders_as_none() {
         let d = synthetic_bundled();
         assert_eq!(card_action(&d, true, &dl_idle()), CardAction::Bundled);
-        assert_eq!(card_action(&d, false, &dl_failed_retryable()), CardAction::Bundled);
+        assert_eq!(
+            card_action(&d, false, &dl_failed_retryable()),
+            CardAction::Bundled
+        );
     }
 
     #[test]
@@ -485,7 +564,10 @@ mod tests {
     #[test]
     fn ondemand_in_progress_is_cancel() {
         let d = synthetic(prunr_models::GpuRequirement::None);
-        assert_eq!(card_action(&d, false, &dl_in_progress()), CardAction::Cancel);
+        assert_eq!(
+            card_action(&d, false, &dl_in_progress()),
+            CardAction::Cancel
+        );
     }
 
     #[test]
@@ -515,7 +597,10 @@ mod tests {
     #[test]
     fn ondemand_failed_but_already_installed_shows_delete() {
         let d = synthetic(prunr_models::GpuRequirement::None);
-        assert_eq!(card_action(&d, true, &dl_failed_retryable()), CardAction::Delete);
+        assert_eq!(
+            card_action(&d, true, &dl_failed_retryable()),
+            CardAction::Delete
+        );
     }
 
     // ── Hardware advisory ─────────────────────────────────────────────
@@ -525,9 +610,13 @@ mod tests {
     #[test]
     fn hardware_advisory_required_warns_on_cpu() {
         let d = synthetic(prunr_models::GpuRequirement::Required);
-        let tip = d.hardware_advisory("CPU").expect("Required must warn on CPU");
-        assert!(tip.contains("Very slow") || tip.to_lowercase().contains("gpu"),
-            "advisory should warn about CPU performance: {tip}");
+        let tip = d
+            .hardware_advisory("CPU")
+            .expect("Required must warn on CPU");
+        assert!(
+            tip.contains("Very slow") || tip.to_lowercase().contains("gpu"),
+            "advisory should warn about CPU performance: {tip}"
+        );
         assert!(d.hardware_advisory("CUDA").is_none());
         assert!(d.hardware_advisory("CoreML").is_none());
     }
@@ -552,12 +641,19 @@ mod tests {
     fn license_gate_blocks_when_descriptor_requires_acceptance_and_settings_empty() {
         // SD V1.5 is the only license-gated entry today; relies on REGISTRY.
         let mut s = super::super::super::settings::Settings::default();
-        assert!(requires_license_gate(prunr_models::ModelId::SdV15InpaintFp16, &s));
+        assert!(requires_license_gate(
+            prunr_models::ModelId::SdV15InpaintFp16,
+            &s
+        ));
         // Push directly into the field — `accept_license` would persist
         // to the user's real config file from test scope, which we don't
         // want; behaviour under test is the gate itself, not the writer.
-        s.accepted_licenses.push(format!("{:?}", prunr_models::ModelId::SdV15InpaintFp16));
-        assert!(!requires_license_gate(prunr_models::ModelId::SdV15InpaintFp16, &s));
+        s.accepted_licenses
+            .push(format!("{:?}", prunr_models::ModelId::SdV15InpaintFp16));
+        assert!(!requires_license_gate(
+            prunr_models::ModelId::SdV15InpaintFp16,
+            &s
+        ));
     }
 
     #[test]
