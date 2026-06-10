@@ -739,25 +739,79 @@ fn apply_edge_shift(mask: &mut GrayImage, shift: f32) {
 
     let step = |src: &[u8], dst: &mut [u8]| {
         let process_row = |(y, row): (usize, &mut [u8])| {
-            let yi = y as i32;
-            for (x, slot) in row.iter_mut().enumerate() {
-                let xi = x as i32;
-                let mut extremum: u8 = if erode { 255 } else { 0 };
-                for dy in -1i32..=1 {
-                    let ny = (yi + dy).clamp(0, hi - 1) as usize;
-                    for dx in -1i32..=1 {
-                        let nx = (xi + dx).clamp(0, wi - 1) as usize;
-                        let v = src[ny * w + nx];
-                        if erode {
-                            extremum = extremum.min(v);
-                        } else {
-                            extremum = extremum.max(v);
+            if y == 0 || y == h - 1 {
+                // Top/bottom boundary rows (with clamping)
+                let yi = y as i32;
+                for (x, slot) in row.iter_mut().enumerate() {
+                    let xi = x as i32;
+                    let mut extremum = if erode { 255 } else { 0 };
+                    for dy in -1..=1 {
+                        let ny = (yi + dy).clamp(0, hi - 1) as usize;
+                        for dx in -1..=1 {
+                            let nx = (xi + dx).clamp(0, wi - 1) as usize;
+                            let v = src[ny * w + nx];
+                            extremum = if erode { extremum.min(v) } else { extremum.max(v) };
+                        }
+                    }
+                    *slot = extremum;
+                }
+            } else {
+                // Interior row fast-path
+                let y_off = y * w;
+                let prev_off = y_off - w;
+                let next_off = y_off + w;
+
+                // Left boundary pixel
+                {
+                    let mut extremum = if erode { 255 } else { 0 };
+                    let max_dx = if w > 1 { 1 } else { 0 };
+                    for &off in &[prev_off, y_off, next_off] {
+                        for dx in 0..=max_dx {
+                            let v = src[off + dx as usize];
+                            extremum = if erode { extremum.min(v) } else { extremum.max(v) };
+                        }
+                    }
+                    row[0] = extremum;
+                }
+
+                // Interior pixels: unrolled 3x3 kernel, no clamping, no branching
+                if w >= 3 {
+                    let r0 = &src[prev_off..prev_off + w];
+                    let r1 = &src[y_off..y_off + w];
+                    let r2 = &src[next_off..next_off + w];
+
+                    if erode {
+                        for x in 1..(w - 1) {
+                            let v0 = r0[x-1].min(r0[x]).min(r0[x+1]);
+                            let v1 = r1[x-1].min(r1[x]).min(r1[x+1]);
+                            let v2 = r2[x-1].min(r2[x]).min(r2[x+1]);
+                            row[x] = v0.min(v1).min(v2);
+                        }
+                    } else {
+                        for x in 1..(w - 1) {
+                            let v0 = r0[x-1].max(r0[x]).max(r0[x+1]);
+                            let v1 = r1[x-1].max(r1[x]).max(r1[x+1]);
+                            let v2 = r2[x-1].max(r2[x]).max(r2[x+1]);
+                            row[x] = v0.max(v1).max(v2);
                         }
                     }
                 }
-                *slot = extremum;
+
+                // Right boundary pixel
+                if w >= 2 {
+                    let mut extremum = if erode { 255 } else { 0 };
+                    let x = w - 1;
+                    for &off in &[prev_off, y_off, next_off] {
+                        for dx in -1..=0 {
+                            let v = src[off + x + dx as usize];
+                            extremum = if erode { extremum.min(v) } else { extremum.max(v) };
+                        }
+                    }
+                    row[x] = extremum;
+                }
             }
         };
+
         if use_par {
             dst.par_chunks_mut(w).enumerate().for_each(process_row);
         } else {
@@ -1141,5 +1195,36 @@ mod tests {
         // Allow a 2-gray tolerance for f32 rounding through the pipeline.
         assert!(got_min <= 2,  "min after sigmoid stretch should be ≈0, got {got_min}");
         assert!(got_max >= 253, "max after sigmoid stretch should be ≈255, got {got_max}");
+    }
+
+    #[test]
+    fn test_apply_edge_shift_width_1() {
+        let (w, h) = (1, 3);
+        let mut mask = GrayImage::from_pixel(w, h, image::Luma([255]));
+        // Should not panic
+        apply_edge_shift(&mut mask, 1.0);
+    }
+
+    /// Benchmark for `apply_edge_shift` on a 4K image with a 2.0px erode shift.
+    ///   `cargo test -p prunr-core --release apply_edge_shift_4k_bench -- --nocapture --ignored`
+    #[test]
+    #[ignore]
+    fn apply_edge_shift_4k_bench() {
+        let (w, h) = (4000u32, 3000u32);
+        let mut mask = GrayImage::from_fn(w, h, |x, y| {
+            // Non-uniform content to avoid branch predictor over-optimization
+            if (x / 100 + y / 100) % 2 == 0 {
+                image::Luma([255])
+            } else {
+                image::Luma([0])
+            }
+        });
+
+        bench_report(
+            &format!("apply_edge_shift_4k_bench ({w}x{h}, shift=2.0)"),
+            3,
+            20,
+            || apply_edge_shift(&mut mask, 2.0),
+        );
     }
 }
