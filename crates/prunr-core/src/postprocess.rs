@@ -728,8 +728,6 @@ fn apply_edge_shift(mask: &mut GrayImage, shift: f32) {
     let full = abs.floor() as u32;
     let frac = abs - full as f32;
     let (w, h) = (mask.width() as usize, mask.height() as usize);
-    let wi = w as i32;
-    let hi = h as i32;
     let use_par = h >= 512;
 
     // Skip the unconditional `mask.as_raw().clone()` (~12 MB at 4 K) by
@@ -739,25 +737,67 @@ fn apply_edge_shift(mask: &mut GrayImage, shift: f32) {
 
     let step = |src: &[u8], dst: &mut [u8]| {
         let process_row = |(y, row): (usize, &mut [u8])| {
-            let yi = y as i32;
-            for (x, slot) in row.iter_mut().enumerate() {
-                let xi = x as i32;
-                let mut extremum: u8 = if erode { 255 } else { 0 };
-                for dy in -1i32..=1 {
-                    let ny = (yi + dy).clamp(0, hi - 1) as usize;
-                    for dx in -1i32..=1 {
-                        let nx = (xi + dx).clamp(0, wi - 1) as usize;
-                        let v = src[ny * w + nx];
-                        if erode {
-                            extremum = extremum.min(v);
-                        } else {
-                            extremum = extremum.max(v);
-                        }
+            let y_mid = y * w;
+            let y_top = if y > 0 { y_mid - w } else { y_mid };
+            let y_bot = if y < h - 1 { y_mid + w } else { y_mid };
+
+            if erode {
+                if w == 0 { return; }
+                // Left boundary (x=0)
+                let mut ext = src[y_top].min(src[y_mid]).min(src[y_bot]);
+                if w > 1 {
+                    ext = ext.min(src[y_top + 1]).min(src[y_mid + 1]).min(src[y_bot + 1]);
+                }
+                row[0] = ext;
+
+                if w >= 3 {
+                    // Interior fast-path (unrolled, no clamping)
+                    for x in 1..w - 1 {
+                        let t = y_top + x;
+                        let m = y_mid + x;
+                        let b = y_bot + x;
+                        row[x] = src[t - 1].min(src[t]).min(src[t + 1])
+                            .min(src[m - 1]).min(src[m]).min(src[m + 1])
+                            .min(src[b - 1]).min(src[b]).min(src[b + 1]);
                     }
                 }
-                *slot = extremum;
+
+                // Right boundary (x=w-1)
+                if w > 1 {
+                    let x = w - 1;
+                    let mut ext = src[y_top + x].min(src[y_mid + x]).min(src[y_bot + x]);
+                    ext = ext.min(src[y_top + x - 1]).min(src[y_mid + x - 1]).min(src[y_bot + x - 1]);
+                    row[x] = ext;
+                }
+            } else {
+                if w == 0 { return; }
+                // Left boundary (x=0)
+                let mut ext = src[y_top].max(src[y_mid]).max(src[y_bot]);
+                if w > 1 {
+                    ext = ext.max(src[y_top + 1]).max(src[y_mid + 1]).max(src[y_bot + 1]);
+                }
+                row[0] = ext;
+
+                if w >= 3 {
+                    for x in 1..w - 1 {
+                        let t = y_top + x;
+                        let m = y_mid + x;
+                        let b = y_bot + x;
+                        row[x] = src[t - 1].max(src[t]).max(src[t + 1])
+                            .max(src[m - 1]).max(src[m]).max(src[m + 1])
+                            .max(src[b - 1]).max(src[b]).max(src[b + 1]);
+                    }
+                }
+
+                if w > 1 {
+                    let x = w - 1;
+                    let mut ext = src[y_top + x].max(src[y_mid + x]).max(src[y_bot + x]);
+                    ext = ext.max(src[y_top + x - 1]).max(src[y_mid + x - 1]).max(src[y_bot + x - 1]);
+                    row[x] = ext;
+                }
             }
         };
+
         if use_par {
             dst.par_chunks_mut(w).enumerate().for_each(process_row);
         } else {
@@ -1141,5 +1181,29 @@ mod tests {
         // Allow a 2-gray tolerance for f32 rounding through the pipeline.
         assert!(got_min <= 2,  "min after sigmoid stretch should be ≈0, got {got_min}");
         assert!(got_max >= 253, "max after sigmoid stretch should be ≈255, got {got_max}");
+    }
+    /// Isolated bench for the 3x3 min/max kernel in `apply_edge_shift`.
+    ///   `cargo test -p prunr-core --release apply_edge_shift_4k_bench -- --nocapture --ignored`
+    #[test]
+    #[ignore]
+    fn apply_edge_shift_4k_bench() {
+        let (w, h) = (4000u32, 3000u32);
+        let mut mask = GrayImage::from_fn(w, h, |x, y| {
+            // Non-uniform content to prevent branch predictors from getting too lucky
+            let dx = x as i32 - 2000;
+            let dy = y as i32 - 1500;
+            if dx * dx + dy * dy < 500_000 {
+                image::Luma([255])
+            } else {
+                image::Luma([0])
+            }
+        });
+
+        bench_report(
+            &format!("apply_edge_shift_4k_bench ({w}x{h}, shift=1.0)"),
+            3,
+            20,
+            || apply_edge_shift(&mut mask, 1.0),
+        );
     }
 }
