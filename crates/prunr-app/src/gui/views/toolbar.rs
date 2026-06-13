@@ -8,8 +8,8 @@ use crate::gui::item::BatchStatus;
 use crate::gui::state::AppState;
 use crate::gui::theme;
 
-use crate::kb;
 use super::KB_MOD;
+use crate::kb;
 
 pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
     ui.horizontal_centered(|ui| {

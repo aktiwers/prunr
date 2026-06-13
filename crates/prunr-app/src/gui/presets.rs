@@ -29,7 +29,9 @@ use super::item_settings::ItemSettings;
 
 pub(crate) const PRESET_FORMAT_VERSION: u32 = 2;
 
-fn default_format_version() -> u32 { PRESET_FORMAT_VERSION }
+fn default_format_version() -> u32 {
+    PRESET_FORMAT_VERSION
+}
 
 /// Convert a `ModelId` into the JSON key used in `PresetFile.models`.
 /// Single source of truth — every `models.insert` / `.get` site routes
@@ -45,7 +47,10 @@ pub(crate) fn model_id_key(id: ModelId) -> String {
 /// in the JSON but resolve to nothing at lookup time.
 #[cfg(test)]
 fn model_id_from_key(s: &str) -> Option<ModelId> {
-    ModelId::ALL.iter().copied().find(|id| format!("{id:?}") == s)
+    ModelId::ALL
+        .iter()
+        .copied()
+        .find(|id| format!("{id:?}") == s)
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -167,11 +172,7 @@ pub(crate) struct ResolvedView {
 /// Overwrite the SD-tuning fields of `brush` from `sd` + the chosen
 /// scheduler's bundle. Single materialise-SD-into-brush operation,
 /// shared by every caller that needs the live values.
-fn apply_sd_to_brush(
-    brush: &mut BrushSettings,
-    sd: &SdPreset,
-    scheduler: Option<SdScheduler>,
-) {
+fn apply_sd_to_brush(brush: &mut BrushSettings, sd: &SdPreset, scheduler: Option<SdScheduler>) {
     let chosen = scheduler.unwrap_or(sd.active_scheduler);
     let bundle = sd
         .schedulers
@@ -212,7 +213,10 @@ pub(crate) fn resolve_preset_for_model(
         apply_sd_to_brush(&mut brush, sd, scheduler);
     }
 
-    ResolvedView { item_settings, brush }
+    ResolvedView {
+        item_settings,
+        brush,
+    }
 }
 
 /// Save-time split: produce the on-disk shape from a unified live
@@ -337,16 +341,18 @@ mod tests {
 
     #[test]
     fn presets_loads_empty_object_as_defaults_modelpreset() {
-        let parsed: ModelPreset = serde_json::from_str("{}")
-            .expect("ModelPreset must deserialize from `{}` — add #[serde(default)] to any new field");
+        let parsed: ModelPreset = serde_json::from_str("{}").expect(
+            "ModelPreset must deserialize from `{}` — add #[serde(default)] to any new field",
+        );
         assert_eq!(parsed, ModelPreset::default());
     }
 
     #[test]
     fn presets_loads_unknown_fields_modelpreset() {
         let json = r#"{ "made_up_field": 42, "another_future_field": "hello" }"#;
-        let parsed: ModelPreset = serde_json::from_str(json)
-            .expect("ModelPreset must ignore unknown fields — do NOT add #[serde(deny_unknown_fields)]");
+        let parsed: ModelPreset = serde_json::from_str(json).expect(
+            "ModelPreset must ignore unknown fields — do NOT add #[serde(deny_unknown_fields)]",
+        );
         assert_eq!(parsed, ModelPreset::default());
     }
 
@@ -360,38 +366,39 @@ mod tests {
     #[test]
     fn presets_loads_unknown_fields_sdpreset() {
         let json = r#"{ "future_field": true, "another": [1, 2, 3] }"#;
-        let parsed: SdPreset = serde_json::from_str(json)
-            .expect("SdPreset must ignore unknown fields");
+        let parsed: SdPreset =
+            serde_json::from_str(json).expect("SdPreset must ignore unknown fields");
         assert_eq!(parsed, SdPreset::default());
     }
 
     #[test]
     fn presets_loads_empty_object_as_defaults_sdschedulerbundle() {
-        let parsed: SdSchedulerBundle = serde_json::from_str("{}")
-            .expect("SdSchedulerBundle must deserialize from `{}` — add #[serde(default)] to any new field");
+        let parsed: SdSchedulerBundle = serde_json::from_str("{}").expect(
+            "SdSchedulerBundle must deserialize from `{}` — add #[serde(default)] to any new field",
+        );
         assert_eq!(parsed, SdSchedulerBundle::default());
     }
 
     #[test]
     fn presets_loads_unknown_fields_sdschedulerbundle() {
         let json = r#"{ "tomorrows_field": 1.5 }"#;
-        let parsed: SdSchedulerBundle = serde_json::from_str(json)
-            .expect("SdSchedulerBundle must ignore unknown fields");
+        let parsed: SdSchedulerBundle =
+            serde_json::from_str(json).expect("SdSchedulerBundle must ignore unknown fields");
         assert_eq!(parsed, SdSchedulerBundle::default());
     }
 
     #[test]
     fn presets_loads_empty_object_as_defaults_presetfile() {
-        let parsed: PresetFile = serde_json::from_str("{}")
-            .expect("PresetFile must deserialize from `{}`");
+        let parsed: PresetFile =
+            serde_json::from_str("{}").expect("PresetFile must deserialize from `{}`");
         assert_eq!(parsed, PresetFile::default());
     }
 
     #[test]
     fn presets_loads_unknown_fields_presetfile() {
         let json = r#"{ "format_version": 2, "models": {}, "extra_top_level": "ignored" }"#;
-        let parsed: PresetFile = serde_json::from_str(json)
-            .expect("PresetFile must ignore unknown top-level fields");
+        let parsed: PresetFile =
+            serde_json::from_str(json).expect("PresetFile must ignore unknown top-level fields");
         assert_eq!(parsed.format_version, 2);
         assert!(parsed.models.is_empty());
     }
@@ -473,11 +480,17 @@ mod tests {
     }
 
     fn brush_with(radius: f32) -> BrushSettings {
-        BrushSettings { radius, ..BrushSettings::default() }
+        BrushSettings {
+            radius,
+            ..BrushSettings::default()
+        }
     }
 
     fn item_with(gamma: f32) -> ItemSettings {
-        ItemSettings { gamma, ..ItemSettings::default() }
+        ItemSettings {
+            gamma,
+            ..ItemSettings::default()
+        }
     }
 
     #[test]
@@ -522,20 +535,27 @@ mod tests {
     #[test]
     fn resolve_sd_full_bundle_uses_bundle_values() {
         let mut schedulers = HashMap::new();
-        schedulers.insert(SdScheduler::Lcm, SdSchedulerBundle {
-            steps: 4,
-            guidance_scale: 1.0,
-            use_karras_sigmas: false,
-            strength: 1.0,
-        });
+        schedulers.insert(
+            SdScheduler::Lcm,
+            SdSchedulerBundle {
+                steps: 4,
+                guidance_scale: 1.0,
+                use_karras_sigmas: false,
+                strength: 1.0,
+            },
+        );
         let sd = SdPreset {
             active_scheduler: SdScheduler::Lcm,
             schedulers,
             ..SdPreset::default()
         };
-        let mp = ModelPreset { sd: Some(sd), ..ModelPreset::default() };
+        let mp = ModelPreset {
+            sd: Some(sd),
+            ..ModelPreset::default()
+        };
         let mut file = PresetFile::default();
-        file.models.insert(model_id_key(ModelId::SdV15InpaintFp16), mp);
+        file.models
+            .insert(model_id_key(ModelId::SdV15InpaintFp16), mp);
 
         let r = resolve_preset_for_model(&file, ModelId::SdV15InpaintFp16, Some(SdScheduler::Lcm));
         assert_eq!(r.brush.sd_steps, 4);
@@ -550,9 +570,13 @@ mod tests {
             schedulers: HashMap::new(),
             ..SdPreset::default()
         };
-        let mp = ModelPreset { sd: Some(sd), ..ModelPreset::default() };
+        let mp = ModelPreset {
+            sd: Some(sd),
+            ..ModelPreset::default()
+        };
         let mut file = PresetFile::default();
-        file.models.insert(model_id_key(ModelId::SdV15InpaintFp16), mp);
+        file.models
+            .insert(model_id_key(ModelId::SdV15InpaintFp16), mp);
 
         let r = resolve_preset_for_model(&file, ModelId::SdV15InpaintFp16, Some(SdScheduler::Ddim));
         let ddim = SdSchedulerBundle::default_for(SdScheduler::Ddim);
@@ -563,9 +587,13 @@ mod tests {
 
     #[test]
     fn resolve_sd_no_sd_entry_uses_prunr_sdpreset() {
-        let mp = ModelPreset { sd: None, ..ModelPreset::default() };
+        let mp = ModelPreset {
+            sd: None,
+            ..ModelPreset::default()
+        };
         let mut file = PresetFile::default();
-        file.models.insert(model_id_key(ModelId::SdV15InpaintFp16), mp);
+        file.models
+            .insert(model_id_key(ModelId::SdV15InpaintFp16), mp);
 
         let r = resolve_preset_for_model(&file, ModelId::SdV15InpaintFp16, Some(SdScheduler::Lcm));
         let lcm = SdSchedulerBundle::default_for(SdScheduler::Lcm);
@@ -581,7 +609,8 @@ mod tests {
             ..ModelPreset::default()
         };
         let mut file = PresetFile::default();
-        file.models.insert(model_id_key(ModelId::Silueta), mp.clone());
+        file.models
+            .insert(model_id_key(ModelId::Silueta), mp.clone());
 
         let r = resolve_preset_for_model(&file, ModelId::Silueta, Some(SdScheduler::Lcm));
         assert_eq!(r.brush, mp.brush);
@@ -590,20 +619,27 @@ mod tests {
     #[test]
     fn resolve_sd_uses_active_scheduler_when_caller_passes_none() {
         let mut schedulers = HashMap::new();
-        schedulers.insert(SdScheduler::Ddim, SdSchedulerBundle {
-            steps: 20,
-            guidance_scale: 7.5,
-            use_karras_sigmas: false,
-            strength: 1.0,
-        });
+        schedulers.insert(
+            SdScheduler::Ddim,
+            SdSchedulerBundle {
+                steps: 20,
+                guidance_scale: 7.5,
+                use_karras_sigmas: false,
+                strength: 1.0,
+            },
+        );
         let sd = SdPreset {
             active_scheduler: SdScheduler::Ddim,
             schedulers,
             ..SdPreset::default()
         };
-        let mp = ModelPreset { sd: Some(sd), ..ModelPreset::default() };
+        let mp = ModelPreset {
+            sd: Some(sd),
+            ..ModelPreset::default()
+        };
         let mut file = PresetFile::default();
-        file.models.insert(model_id_key(ModelId::SdV15InpaintFp16), mp);
+        file.models
+            .insert(model_id_key(ModelId::SdV15InpaintFp16), mp);
 
         let r = resolve_preset_for_model(&file, ModelId::SdV15InpaintFp16, None);
         assert_eq!(r.brush.sd_scheduler, SdScheduler::Ddim);
@@ -645,7 +681,11 @@ mod tests {
         assert_eq!(sd.seed, Some(7));
         assert_eq!(sd.active_scheduler, SdScheduler::Ddim);
 
-        let bundle = sd.schedulers.get(&SdScheduler::Ddim).copied().expect("Ddim bundle");
+        let bundle = sd
+            .schedulers
+            .get(&SdScheduler::Ddim)
+            .copied()
+            .expect("Ddim bundle");
         assert_eq!(bundle.steps, 12);
         assert!((bundle.guidance_scale - 6.5).abs() < f32::EPSILON);
         assert!(bundle.use_karras_sigmas);
@@ -655,12 +695,15 @@ mod tests {
     #[test]
     fn fuse_brush_for_apply_uses_sd_bundle_values() {
         let mut schedulers = HashMap::new();
-        schedulers.insert(SdScheduler::Ddim, SdSchedulerBundle {
-            steps: 30,
-            guidance_scale: 6.0,
-            use_karras_sigmas: false,
-            strength: 0.9,
-        });
+        schedulers.insert(
+            SdScheduler::Ddim,
+            SdSchedulerBundle {
+                steps: 30,
+                guidance_scale: 6.0,
+                use_karras_sigmas: false,
+                strength: 0.9,
+            },
+        );
         let sd = SdPreset {
             prompt: "x".into(),
             negative_prompt: "y".into(),
@@ -689,7 +732,11 @@ mod tests {
         let mut brush = BrushSettings::default();
         brush.sd_prompt = "kept".into();
         brush.sd_steps = 11;
-        let mp = ModelPreset { brush: brush.clone(), sd: None, ..ModelPreset::default() };
+        let mp = ModelPreset {
+            brush: brush.clone(),
+            sd: None,
+            ..ModelPreset::default()
+        };
 
         let fused = fuse_brush_for_apply(&mp, Some(SdScheduler::Ddim));
         assert_eq!(fused, brush);
@@ -702,8 +749,8 @@ mod tests {
         // trips the unknown entry; resolver lookup ignores it because
         // `model_id_from_key` returns None.
         let json = r#"{"format_version":2,"models":{"FutureModel":{},"Silueta":{}}}"#;
-        let file: PresetFile = serde_json::from_str(json)
-            .expect("unknown ModelId entries must not break parsing");
+        let file: PresetFile =
+            serde_json::from_str(json).expect("unknown ModelId entries must not break parsing");
         assert!(file.models.contains_key("Silueta"));
         assert!(file.models.contains_key("FutureModel"));
         assert_eq!(model_id_from_key("FutureModel"), None);
@@ -734,8 +781,7 @@ mod tests {
 
         // (a) Top-right ↻ path: full re-resolve via the resolver. Brush
         //     comes back exactly as the preset stored it.
-        let top_right_path_brush =
-            resolve_preset_for_model(&file, ModelId::Silueta, None).brush;
+        let top_right_path_brush = resolve_preset_for_model(&file, ModelId::Silueta, None).brush;
 
         // (b) Brush popover Reset path: caller has a live `Settings.brush`
         //     with a user mutation (radius=10) and resets the popover-visible
@@ -751,8 +797,7 @@ mod tests {
         assert!((popover_target.hardness - top_right_path_brush.hardness).abs() < f32::EPSILON);
         assert_eq!(popover_target.shape, top_right_path_brush.shape);
         assert!(
-            (popover_target.inpaint_grow - top_right_path_brush.inpaint_grow).abs()
-                < f32::EPSILON,
+            (popover_target.inpaint_grow - top_right_path_brush.inpaint_grow).abs() < f32::EPSILON,
         );
         assert!(
             (popover_target.inpaint_feather - top_right_path_brush.inpaint_feather).abs()
@@ -781,7 +826,11 @@ mod tests {
         };
 
         let (brush_out, sd) = split_brush_for_save(&original, ModelId::SdV15InpaintFp16);
-        let mp = ModelPreset { brush: brush_out, sd, ..ModelPreset::default() };
+        let mp = ModelPreset {
+            brush: brush_out,
+            sd,
+            ..ModelPreset::default()
+        };
         let fused = fuse_brush_for_apply(&mp, Some(original.sd_scheduler));
         assert_eq!(fused, original);
     }
