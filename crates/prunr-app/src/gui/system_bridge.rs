@@ -18,7 +18,9 @@ impl Default for SystemBridge {
 
 impl SystemBridge {
     pub fn new() -> Self {
-        Self { clipboard: arboard::Clipboard::new().ok() }
+        Self {
+            clipboard: arboard::Clipboard::new().ok(),
+        }
     }
 
     /// Multi-file image picker. Returns `None` on cancel.
@@ -33,11 +35,7 @@ impl SystemBridge {
     }
 
     /// PNG save-as dialog. Returns `None` on cancel.
-    pub fn save_png_dialog(
-        &self,
-        start_dir: Option<&Path>,
-        default_name: &str,
-    ) -> Option<PathBuf> {
+    pub fn save_png_dialog(&self, start_dir: Option<&Path>, default_name: &str) -> Option<PathBuf> {
         let mut dlg = rfd::FileDialog::new()
             .add_filter("PNG Image", &["png"])
             .set_file_name(default_name)
@@ -49,11 +47,7 @@ impl SystemBridge {
     }
 
     /// Single-file image picker with a custom title. Returns `None` on cancel.
-    pub fn pick_image_dialog(
-        &self,
-        start_dir: Option<&Path>,
-        title: &str,
-    ) -> Option<PathBuf> {
+    pub fn pick_image_dialog(&self, start_dir: Option<&Path>, title: &str) -> Option<PathBuf> {
         let mut dlg = rfd::FileDialog::new()
             .add_filter("Images", &["png", "jpg", "jpeg", "webp", "bmp"])
             .set_title(title);
@@ -64,11 +58,7 @@ impl SystemBridge {
     }
 
     /// Folder picker with custom title. Returns `None` on cancel.
-    pub fn pick_folder_dialog(
-        &self,
-        start_dir: Option<&Path>,
-        title: &str,
-    ) -> Option<PathBuf> {
+    pub fn pick_folder_dialog(&self, start_dir: Option<&Path>, title: &str) -> Option<PathBuf> {
         let mut dlg = rfd::FileDialog::new().set_title(title);
         if let Some(dir) = start_dir {
             dlg = dlg.set_directory(dir);
@@ -80,7 +70,9 @@ impl SystemBridge {
     /// clipboard was available — `false` means no platform clipboard
     /// (callers fall back to a "save instead" suggestion).
     pub fn copy_image(&mut self, rgba: &image::RgbaImage) -> bool {
-        let Some(clipboard) = self.clipboard.as_mut() else { return false };
+        let Some(clipboard) = self.clipboard.as_mut() else {
+            return false;
+        };
         let samples = rgba.as_flat_samples();
         let image_data = arboard::ImageData {
             width: rgba.width() as usize,
@@ -90,4 +82,3 @@ impl SystemBridge {
         clipboard.set_image(image_data).is_ok()
     }
 }
-

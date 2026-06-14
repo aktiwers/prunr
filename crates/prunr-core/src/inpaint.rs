@@ -5,13 +5,17 @@
 
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use image::{GrayImage, RgbaImage};
 use ndarray::Array4;
-use ort::{inputs, session::{Session, builder::GraphOptimizationLevel}, value::Tensor};
+use ort::{
+    inputs,
+    session::{builder::GraphOptimizationLevel, Session},
+    value::Tensor,
+};
 
 use crate::engine::{apply_ort_graph_cache, EpKind};
 use crate::types::CoreError;
@@ -42,7 +46,10 @@ impl InpaintProgress {
     }
     /// Returns `(current, total)`. `(0, 0)` means no progress yet.
     pub fn read(&self) -> (u32, u32) {
-        (self.current.load(Ordering::Acquire), self.total.load(Ordering::Acquire))
+        (
+            self.current.load(Ordering::Acquire),
+            self.total.load(Ordering::Acquire),
+        )
     }
 }
 
@@ -66,7 +73,7 @@ pub const OVERLAP: u32 = 64;
 /// invariant: `mask_bbox` must expand by `kernel.len() / 2` so the
 /// clamped reads at bbox edges land on the same source pixels the
 /// full-image variant would have hit.
-const SHARPEN_KERNEL: [f32; 5] = [1.0/16.0, 4.0/16.0, 6.0/16.0, 4.0/16.0, 1.0/16.0];
+const SHARPEN_KERNEL: [f32; 5] = [1.0 / 16.0, 4.0 / 16.0, 6.0 / 16.0, 4.0 / 16.0, 1.0 / 16.0];
 const SHARPEN_MARGIN: u32 = (SHARPEN_KERNEL.len() / 2) as u32;
 
 /// Region of interest in pixel coordinates. Distinct from `TilePlacement`
@@ -144,7 +151,9 @@ pub(crate) fn chamfer_distance_inside(mask: &GrayImage) -> Vec<f32> {
     let w_us = w as usize;
     let h_us = h as usize;
     let large = (w + h) as f32;
-    let mut d: Vec<f32> = mask.as_raw().iter()
+    let mut d: Vec<f32> = mask
+        .as_raw()
+        .iter()
         .map(|&v| if v > 127 { large } else { 0.0 })
         .collect();
     const DIAG: f32 = std::f32::consts::SQRT_2;
@@ -152,12 +161,22 @@ pub(crate) fn chamfer_distance_inside(mask: &GrayImage) -> Vec<f32> {
     for y in 0..h_us {
         for x in 0..w_us {
             let i = y * w_us + x;
-            if d[i] == 0.0 { continue; }
+            if d[i] == 0.0 {
+                continue;
+            }
             let mut best = d[i];
-            if x > 0 { best = best.min(d[i - 1] + 1.0); }
-            if y > 0 { best = best.min(d[i - w_us] + 1.0); }
-            if x > 0 && y > 0 { best = best.min(d[i - w_us - 1] + DIAG); }
-            if x + 1 < w_us && y > 0 { best = best.min(d[i - w_us + 1] + DIAG); }
+            if x > 0 {
+                best = best.min(d[i - 1] + 1.0);
+            }
+            if y > 0 {
+                best = best.min(d[i - w_us] + 1.0);
+            }
+            if x > 0 && y > 0 {
+                best = best.min(d[i - w_us - 1] + DIAG);
+            }
+            if x + 1 < w_us && y > 0 {
+                best = best.min(d[i - w_us + 1] + DIAG);
+            }
             d[i] = best;
         }
     }
@@ -165,12 +184,22 @@ pub(crate) fn chamfer_distance_inside(mask: &GrayImage) -> Vec<f32> {
     for y in (0..h_us).rev() {
         for x in (0..w_us).rev() {
             let i = y * w_us + x;
-            if d[i] == 0.0 { continue; }
+            if d[i] == 0.0 {
+                continue;
+            }
             let mut best = d[i];
-            if x + 1 < w_us { best = best.min(d[i + 1] + 1.0); }
-            if y + 1 < h_us { best = best.min(d[i + w_us] + 1.0); }
-            if x + 1 < w_us && y + 1 < h_us { best = best.min(d[i + w_us + 1] + DIAG); }
-            if x > 0 && y + 1 < h_us { best = best.min(d[i + w_us - 1] + DIAG); }
+            if x + 1 < w_us {
+                best = best.min(d[i + 1] + 1.0);
+            }
+            if y + 1 < h_us {
+                best = best.min(d[i + w_us] + 1.0);
+            }
+            if x + 1 < w_us && y + 1 < h_us {
+                best = best.min(d[i + w_us + 1] + DIAG);
+            }
+            if x > 0 && y + 1 < h_us {
+                best = best.min(d[i + w_us - 1] + DIAG);
+            }
             d[i] = best;
         }
     }
@@ -223,21 +252,23 @@ pub fn sharpen_inpainted(image: &RgbaImage, mask: &GrayImage, amount: f32) -> Rg
     // alpha never changes). Rows are independent → parallelise.
     let mut tmp: Vec<f32> = vec![0.0; bbox_w * bbox_h * 3];
     use rayon::prelude::*;
-    tmp.par_chunks_mut(bbox_w * 3).enumerate().for_each(|(by, row)| {
-        let global_y = bbox_y + by;
-        for bx in 0..bbox_w {
-            let global_x = bbox_x + bx;
-            for c in 0..3 {
-                let mut sum = 0.0;
-                for (k, &kv) in SHARPEN_KERNEL.iter().enumerate() {
-                    let xi = (global_x as isize + k as isize - 2)
-                        .clamp(0, img_w as isize - 1) as usize;
-                    sum += kv * src[(global_y * img_w + xi) * 4 + c] as f32;
+    tmp.par_chunks_mut(bbox_w * 3)
+        .enumerate()
+        .for_each(|(by, row)| {
+            let global_y = bbox_y + by;
+            for bx in 0..bbox_w {
+                let global_x = bbox_x + bx;
+                for c in 0..3 {
+                    let mut sum = 0.0;
+                    for (k, &kv) in SHARPEN_KERNEL.iter().enumerate() {
+                        let xi = (global_x as isize + k as isize - 2).clamp(0, img_w as isize - 1)
+                            as usize;
+                        sum += kv * src[(global_y * img_w + xi) * 4 + c] as f32;
+                    }
+                    row[bx * 3 + c] = sum;
                 }
-                row[bx * 3 + c] = sum;
             }
-        }
-    });
+        });
 
     // Output starts as image clone. Pixels outside the bbox are
     // mask <= 127 by definition (bbox covers all mask >= 128) — they
@@ -268,8 +299,8 @@ pub fn sharpen_inpainted(image: &RgbaImage, mask: &GrayImage, amount: f32) -> Rg
                     // region by `SHARPEN_MARGIN`, so the clamped index
                     // points at the same source pixel a full-image
                     // variant's clamp would have hit.
-                    let by_kernel = (by as isize + k as isize - 2)
-                        .clamp(0, bbox_h as isize - 1) as usize;
+                    let by_kernel =
+                        (by as isize + k as isize - 2).clamp(0, bbox_h as isize - 1) as usize;
                     blur += kv * tmp[(by_kernel * bbox_w + bx) * 3 + c];
                 }
                 let s = src[pix + c] as f32;
@@ -278,7 +309,9 @@ pub fn sharpen_inpainted(image: &RgbaImage, mask: &GrayImage, amount: f32) -> Rg
                 // at global rows {global_y} only — different `by`s are
                 // row-disjoint. Channels (c=0,1,2) within one pixel
                 // are also distinct bytes. No race.
-                unsafe { *dp.0.add(pix + c) = sharp.clamp(0.0, 255.0) as u8; }
+                unsafe {
+                    *dp.0.add(pix + c) = sharp.clamp(0.0, 255.0) as u8;
+                }
             }
         }
         // Force whole-struct capture of `dp` (Rust 2021 disjoint
@@ -293,7 +326,11 @@ pub fn sharpen_inpainted(image: &RgbaImage, mask: &GrayImage, amount: f32) -> Rg
 /// (LaMaFp32, BigLaMa, MI-GAN, SD …). Returns the input unchanged when
 /// the mask is all-zero (no work). SD-family ids dispatch to the
 /// `inpaint_sd` module which has its own multi-model pipeline.
-pub fn process_inpaint(image: &RgbaImage, mask: &GrayImage, id: prunr_models::ModelId) -> Result<RgbaImage, CoreError> {
+pub fn process_inpaint(
+    image: &RgbaImage,
+    mask: &GrayImage,
+    id: prunr_models::ModelId,
+) -> Result<RgbaImage, CoreError> {
     process_inpaint_with(image, mask, id, None, &InpaintHooks::default())
 }
 
@@ -396,7 +433,9 @@ fn lama_cache() -> &'static Mutex<LamaCache> {
 /// they're no longer using.
 pub fn release_all_lama_sessions() {
     let cache = lama_cache();
-    let mut guard = cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut guard = cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let dropped = guard.len();
     guard.clear();
     if dropped > 0 {
@@ -419,11 +458,10 @@ fn ensure_lama_sweeper_running() {
                 loop {
                     std::thread::sleep(interval);
                     let cache = lama_cache();
-                    let mut guard = cache.lock()
+                    let mut guard = cache
+                        .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    let dropped = crate::inpaint_sd::sweep_idle(
-                        &mut guard, Instant::now(), idle,
-                    );
+                    let dropped = crate::inpaint_sd::sweep_idle(&mut guard, Instant::now(), idle);
                     if dropped > 0 {
                         tracing::info!(
                             dropped,
@@ -458,7 +496,9 @@ impl LamaSession {
         // Cache lock held only for the HashMap lookup and at most one
         // Arc<OnceLock> allocation — never for the seconds-long build.
         let slot: LamaSlot = {
-            let mut guard = cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut guard = cache
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let dropped = crate::inpaint_sd::sweep_idle(&mut guard, now, idle);
             if dropped > 0 {
                 tracing::info!(
@@ -468,10 +508,12 @@ impl LamaSession {
                     "LaMa: released idle session(s)",
                 );
             }
-            let entry = guard.entry(id).or_insert_with(|| crate::inpaint_sd::CacheEntry {
-                value: Arc::new(OnceLock::new()),
-                last_used: now,
-            });
+            let entry = guard
+                .entry(id)
+                .or_insert_with(|| crate::inpaint_sd::CacheEntry {
+                    value: Arc::new(OnceLock::new()),
+                    last_used: now,
+                });
             // Don't refresh last_used on Err entries — sticky failures
             // shouldn't keep refreshing their idle timer (mirrors SD).
             if !matches!(entry.value.get(), Some(Err(_))) {
@@ -489,8 +531,8 @@ impl LamaSession {
     }
 
     fn new_inner(id: prunr_models::ModelId) -> Result<LamaSession, String> {
-        let bytes = prunr_models::resolve_bytes(id)
-            .ok_or_else(|| prunr_models::not_installed_error(id))?;
+        let bytes =
+            prunr_models::resolve_bytes(id).ok_or_else(|| prunr_models::not_installed_error(id))?;
         let bytes = bytes.as_ref();
         // Match physical cores so LaMa convolutions saturate the CPU.
         // Unlike the seg models (single-image dispatch with intra=1),
@@ -505,11 +547,16 @@ impl LamaSession {
         // abort the whole session creation. Logs which EP won.
         let (session, provider) = build_lama_session(id, bytes, threads)?;
 
-        let inputs = session.inputs().iter()
+        let inputs = session
+            .inputs()
+            .iter()
             .map(|i| i.name().to_string())
             .collect::<Vec<_>>();
         if inputs.len() < 2 {
-            return Err(format!("LaMa: expected 2 inputs, got {}: {inputs:?}", inputs.len()));
+            return Err(format!(
+                "LaMa: expected 2 inputs, got {}: {inputs:?}",
+                inputs.len()
+            ));
         }
         let (img_name, mask_name) = pick_input_names(&inputs);
         tracing::info!(
@@ -535,16 +582,19 @@ impl LamaSession {
         // `.to_owned()` between extract and decode. The session lock
         // is held across the closure so the ORT-allocated buffer the
         // view points into stays alive. Saves one 3 MB clone per tile.
-        let mut session = self.session.lock()
+        let mut session = self
+            .session
+            .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let img_t = Tensor::from_array(img_in)
             .map_err(|e| CoreError::Inference(format!("LaMa: image tensor: {e}")))?;
         let mask_t = Tensor::from_array(mask_in)
             .map_err(|e| CoreError::Inference(format!("LaMa: mask tensor: {e}")))?;
-        let outputs = session.run(inputs![
-            self.image_input_name.as_str() => &img_t,
-            self.mask_input_name.as_str() => &mask_t,
-        ])
+        let outputs = session
+            .run(inputs![
+                self.image_input_name.as_str() => &img_t,
+                self.mask_input_name.as_str() => &mask_t,
+            ])
             .map_err(|e| CoreError::Inference(format!("LaMa: inference failed: {e}")))?;
         let view = outputs[0]
             .try_extract_array::<f32>()
@@ -662,7 +712,8 @@ fn build_lama_session(
                 tracing::warn!(ep = %ep, %e, "LaMa: GPU session commit failed — trying next");
                 crate::engine::handle_commit_failure(
                     matches!(bytes_owner, Cow::Owned(_)),
-                    ep, id,
+                    ep,
+                    id,
                     || crate::cache::optimized_model_path(id, ep.as_str()),
                     &format!("{e}"),
                 );
@@ -681,7 +732,8 @@ fn build_lama_session(
                 );
                 crate::engine::handle_commit_failure(
                     matches!(bytes_owner, Cow::Owned(_)),
-                    ep, id,
+                    ep,
+                    id,
                     || crate::cache::optimized_model_path(id, ep.as_str()),
                     &e,
                 );
@@ -697,7 +749,12 @@ fn build_lama_session(
     let session = builder
         .commit_from_memory(&cpu_bytes)
         .map_err(|e| format!("LaMa: CPU session commit failed: {e}"))?;
-    tracing::info!(?id, ep = "CPU", elapsed_ms = started.elapsed().as_millis() as u64, "LaMa: session committed");
+    tracing::info!(
+        ?id,
+        ep = "CPU",
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "LaMa: session committed"
+    );
     Ok((session, "CPU".to_string()))
 }
 
@@ -708,21 +765,22 @@ fn smoke_test_session(session: &mut Session) -> Result<(), String> {
     let s = TILE as usize;
     let img = ndarray::Array4::<f32>::zeros((1, 3, s, s));
     let msk = ndarray::Array4::<f32>::zeros((1, 1, s, s));
-    let inputs = session.inputs().iter()
+    let inputs = session
+        .inputs()
+        .iter()
         .map(|i| i.name().to_string())
         .collect::<Vec<_>>();
     if inputs.len() < 2 {
         return Err(format!("smoke test: need 2 inputs, got {inputs:?}"));
     }
     let (img_name, mask_name) = pick_input_names(&inputs);
-    let img_t = Tensor::from_array(img)
-        .map_err(|e| format!("smoke test: image tensor: {e}"))?;
-    let msk_t = Tensor::from_array(msk)
-        .map_err(|e| format!("smoke test: mask tensor: {e}"))?;
-    session.run(inputs![
-        img_name.as_str() => &img_t,
-        mask_name.as_str() => &msk_t,
-    ])
+    let img_t = Tensor::from_array(img).map_err(|e| format!("smoke test: image tensor: {e}"))?;
+    let msk_t = Tensor::from_array(msk).map_err(|e| format!("smoke test: mask tensor: {e}"))?;
+    session
+        .run(inputs![
+            img_name.as_str() => &img_t,
+            mask_name.as_str() => &msk_t,
+        ])
         .map_err(|e| format!("smoke test: inference failed: {e}"))?;
     Ok(())
 }
@@ -743,11 +801,19 @@ fn pick_input_names(names: &[String]) -> (String, String) {
     let mut mask = None;
     for n in names {
         let l = n.to_ascii_lowercase();
-        if img.is_none() && l.contains("image") { img = Some(n.clone()); continue; }
-        if mask.is_none() && l.contains("mask") { mask = Some(n.clone()); continue; }
+        if img.is_none() && l.contains("image") {
+            img = Some(n.clone());
+            continue;
+        }
+        if mask.is_none() && l.contains("mask") {
+            mask = Some(n.clone());
+            continue;
+        }
     }
-    (img.unwrap_or_else(|| names[0].clone()),
-     mask.unwrap_or_else(|| names[1].clone()))
+    (
+        img.unwrap_or_else(|| names[0].clone()),
+        mask.unwrap_or_else(|| names[1].clone()),
+    )
 }
 
 /// Encode an RGBA tile + binary mask into the two NCHW float tensors LaMa
@@ -779,7 +845,11 @@ fn encode_tile(image: &RgbaImage, mask: &GrayImage) -> (Array4<f32>, Array4<f32>
             img_buf[dst] = img_raw[src] as f32 / 255.0;
             img_buf[plane + dst] = img_raw[src + 1] as f32 / 255.0;
             img_buf[plane * 2 + dst] = img_raw[src + 2] as f32 / 255.0;
-            msk_buf[dst] = if msk_raw[mask_row + x] > 127 { 1.0 } else { 0.0 };
+            msk_buf[dst] = if msk_raw[mask_row + x] > 127 {
+                1.0
+            } else {
+                0.0
+            };
         }
     }
     (img, msk)
@@ -801,7 +871,10 @@ fn decode_tile(
     let plane = s * s;
     let buf = output.as_slice().unwrap_or(&[]);
     if buf.len() < plane * 3 {
-        tracing::warn!(buf_len = buf.len(), "LaMa output smaller than expected; returning source");
+        tracing::warn!(
+            buf_len = buf.len(),
+            "LaMa output smaller than expected; returning source"
+        );
         return source.clone();
     }
     // Heuristic: max > 1.5 ⇒ output is in [0, 255], else [0, 1].
@@ -860,7 +933,12 @@ pub struct TilePlacement {
 /// size (LaMa accepts smaller inputs after pad-to-512 in the wrapper).
 pub(crate) fn plan_tiles(width: u32, height: u32) -> Vec<TilePlacement> {
     if width <= TILE && height <= TILE {
-        return vec![TilePlacement { x: 0, y: 0, w: width, h: height }];
+        return vec![TilePlacement {
+            x: 0,
+            y: 0,
+            w: width,
+            h: height,
+        }];
     }
     let step = TILE - OVERLAP;
     let mut xs: Vec<u32> = (0..)
@@ -992,7 +1070,7 @@ where
                 // untouched: source clone already filled it, and LaMa
                 // is RGB-only.
                 let pix = global_idx * 4;
-                out_raw[pix]     = (c[0] * inv).clamp(0.0, 255.0) as u8;
+                out_raw[pix] = (c[0] * inv).clamp(0.0, 255.0) as u8;
                 out_raw[pix + 1] = (c[1] * inv).clamp(0.0, 255.0) as u8;
                 out_raw[pix + 2] = (c[2] * inv).clamp(0.0, 255.0) as u8;
             }
@@ -1032,16 +1110,20 @@ pub(crate) fn mask_bbox(mask: &GrayImage, min_value: u8, margin: u32) -> Option<
             let mut any = false;
             for (x, &v) in row.iter().enumerate() {
                 if v >= min_value {
-                    if !any { min_x = x; }
+                    if !any {
+                        min_x = x;
+                    }
                     max_x = x;
                     any = true;
                 }
             }
-            if any { Some((min_x, y, max_x, y)) } else { None }
+            if any {
+                Some((min_x, y, max_x, y))
+            } else {
+                None
+            }
         })
-        .reduce_with(|a, b| {
-            (a.0.min(b.0), a.1.min(b.1), a.2.max(b.2), a.3.max(b.3))
-        })?;
+        .reduce_with(|a, b| (a.0.min(b.0), a.1.min(b.1), a.2.max(b.2), a.3.max(b.3)))?;
     let (min_x, min_y, max_x, max_y) = merged;
     let m = margin as usize;
     let bx = min_x.saturating_sub(m);
@@ -1070,8 +1152,10 @@ fn accumulate_tile(
     let bbox_y_end = bbox.y + bbox.h;
     let tile_x_end = placement.x + placement.w;
     let tile_y_end = placement.y + placement.h;
-    if placement.x >= bbox_x_end || placement.y >= bbox_y_end
-        || tile_x_end <= bbox.x || tile_y_end <= bbox.y
+    if placement.x >= bbox_x_end
+        || placement.y >= bbox_y_end
+        || tile_x_end <= bbox.x
+        || tile_y_end <= bbox.y
     {
         return; // tile and bbox don't overlap — nothing to accumulate
     }
@@ -1100,7 +1184,7 @@ fn accumulate_tile(
             // reconstruction `tile.get_pixel(tx, ty).0` would do.
             let p_off = (tile_row + tx as usize) * 4;
             let acc = &mut color_acc[dst_idx];
-            acc[0] += tile_raw[p_off]     as f32 * w;
+            acc[0] += tile_raw[p_off] as f32 * w;
             acc[1] += tile_raw[p_off + 1] as f32 * w;
             acc[2] += tile_raw[p_off + 2] as f32 * w;
             acc[3] += tile_raw[p_off + 3] as f32 * w;
@@ -1118,14 +1202,30 @@ mod tests {
     fn plan_tiles_small_image_single_tile() {
         let tiles = plan_tiles(400, 300);
         assert_eq!(tiles.len(), 1);
-        assert_eq!(tiles[0], TilePlacement { x: 0, y: 0, w: 400, h: 300 });
+        assert_eq!(
+            tiles[0],
+            TilePlacement {
+                x: 0,
+                y: 0,
+                w: 400,
+                h: 300
+            }
+        );
     }
 
     #[test]
     fn plan_tiles_exact_tile_size_single_tile() {
         let tiles = plan_tiles(TILE, TILE);
         assert_eq!(tiles.len(), 1);
-        assert_eq!(tiles[0], TilePlacement { x: 0, y: 0, w: TILE, h: TILE });
+        assert_eq!(
+            tiles[0],
+            TilePlacement {
+                x: 0,
+                y: 0,
+                w: TILE,
+                h: TILE
+            }
+        );
     }
 
     #[test]
@@ -1136,7 +1236,10 @@ mod tests {
         assert!(tiles.len() >= 2, "1024-wide must produce >=2 tiles");
         let xs: Vec<u32> = tiles.iter().map(|t| t.x).collect();
         assert!(xs.contains(&0));
-        assert!(xs.iter().any(|&x| x + TILE == 1024), "must cover the right edge");
+        assert!(
+            xs.iter().any(|&x| x + TILE == 1024),
+            "must cover the right edge"
+        );
     }
 
     #[test]
@@ -1146,7 +1249,11 @@ mod tests {
         // therefore packs 3 tiles per axis with proper overlap and
         // an extra row/column hugging the right/bottom edge.
         let tiles = plan_tiles(1024, 1024);
-        assert!(tiles.len() >= 4, "must have at least 2×2 coverage, got {}", tiles.len());
+        assert!(
+            tiles.len() >= 4,
+            "must have at least 2×2 coverage, got {}",
+            tiles.len()
+        );
         for t in &tiles {
             assert_eq!(t.w, TILE);
             assert_eq!(t.h, TILE);
@@ -1163,9 +1270,9 @@ mod tests {
         let tiles = plan_tiles(w, h);
         for y in 0..h {
             for x in 0..w {
-                let covered = tiles.iter().any(|t| {
-                    x >= t.x && x < t.x + t.w && y >= t.y && y < t.y + t.h
-                });
+                let covered = tiles
+                    .iter()
+                    .any(|t| x >= t.x && x < t.x + t.w && y >= t.y && y < t.y + t.h);
                 assert!(covered, "pixel ({x}, {y}) uncovered");
             }
         }
@@ -1188,7 +1295,10 @@ mod tests {
         let mut prev = 0.0;
         for d in 0..=OVERLAP {
             let w = feather_weight(d);
-            assert!(w >= prev - 1e-6, "feather weight must be monotonic non-decreasing");
+            assert!(
+                w >= prev - 1e-6,
+                "feather weight must be monotonic non-decreasing"
+            );
             prev = w;
         }
     }
@@ -1208,8 +1318,8 @@ mod tests {
             *p = Rgba([10, 20, 30, 255]);
         }
         let mask = GrayImage::new(64, 64); // all zero
-        // Empty mask short-circuits BEFORE the model-load check, so this
-        // works even when LaMa isn't available.
+                                           // Empty mask short-circuits BEFORE the model-load check, so this
+                                           // works even when LaMa isn't available.
         let result = process_inpaint(&img, &mask, prunr_models::ModelId::LaMaFp32)
             .expect("empty mask is no-op");
         assert_eq!(result.as_raw(), img.as_raw());
@@ -1278,7 +1388,11 @@ mod tests {
         // 3×3 filled block surrounded by zero. Erosion strips the
         // boundary down to a single pixel.
         let mut m = GrayImage::new(5, 5);
-        for y in 1..=3 { for x in 1..=3 { m.put_pixel(x, y, Luma([255])); } }
+        for y in 1..=3 {
+            for x in 1..=3 {
+                m.put_pixel(x, y, Luma([255]));
+            }
+        }
         let out = grow_mask(&m, -1);
         // Only the centre survives — corners and edges of the 3×3 had
         // a zero neighbour.
@@ -1299,9 +1413,15 @@ mod tests {
         let s = TILE as usize;
         // Fill output with junk to prove we don't read it.
         let mut output = Array4::<f32>::zeros((1, 3, s, s));
-        for v in output.iter_mut() { *v = 0.5; }
+        for v in output.iter_mut() {
+            *v = 0.5;
+        }
         let out = decode_tile(output.view(), &src, &mask, 64, 64);
-        assert_eq!(out.as_raw(), src.as_raw(), "unmasked pixels must equal source");
+        assert_eq!(
+            out.as_raw(),
+            src.as_raw(),
+            "unmasked pixels must equal source"
+        );
     }
 
     #[test]
@@ -1335,9 +1455,15 @@ mod tests {
         let s = TILE as usize;
         let mut output = Array4::<f32>::zeros((1, 3, s, s));
         // Big values across the whole tile so the heuristic picks 1.0 scale.
-        for v in output.iter_mut() { *v = 200.0; }
+        for v in output.iter_mut() {
+            *v = 200.0;
+        }
         let out = decode_tile(output.view(), &src, &mask, 8, 8);
-        assert_eq!(out.get_pixel(4, 4).0[0], 200, "200.0 in [0,255] range stays 200");
+        assert_eq!(
+            out.get_pixel(4, 4).0[0],
+            200,
+            "200.0 in [0,255] range stays 200"
+        );
     }
 
     #[test]
@@ -1366,7 +1492,15 @@ mod tests {
         let mut mask = GrayImage::new(64, 64);
         mask.put_pixel(10, 20, Luma([1]));
         let bbox = mask_bbox(&mask, 1, 0).expect("non-empty");
-        assert_eq!(bbox, Bbox { x: 10, y: 20, w: 1, h: 1 });
+        assert_eq!(
+            bbox,
+            Bbox {
+                x: 10,
+                y: 20,
+                w: 1,
+                h: 1
+            }
+        );
     }
 
     #[test]
@@ -1375,14 +1509,30 @@ mod tests {
         // Hit the corner — margin 4 on a corner pixel must clamp.
         mask.put_pixel(0, 0, Luma([255]));
         let bbox = mask_bbox(&mask, 128, 4).expect("non-empty");
-        assert_eq!(bbox, Bbox { x: 0, y: 0, w: 5, h: 5 });
+        assert_eq!(
+            bbox,
+            Bbox {
+                x: 0,
+                y: 0,
+                w: 5,
+                h: 5
+            }
+        );
     }
 
     #[test]
     fn mask_bbox_full_image_no_margin() {
         let mask = GrayImage::from_pixel(32, 32, Luma([255]));
         let bbox = mask_bbox(&mask, 1, 0).expect("non-empty");
-        assert_eq!(bbox, Bbox { x: 0, y: 0, w: 32, h: 32 });
+        assert_eq!(
+            bbox,
+            Bbox {
+                x: 0,
+                y: 0,
+                w: 32,
+                h: 32
+            }
+        );
     }
 
     #[test]
@@ -1390,8 +1540,14 @@ mod tests {
         // A pixel with value 100 counts at threshold=1 but NOT at 128.
         let mut mask = GrayImage::new(32, 32);
         mask.put_pixel(10, 10, Luma([100]));
-        assert!(mask_bbox(&mask, 1, 0).is_some(), "low value present at threshold 1");
-        assert!(mask_bbox(&mask, 128, 0).is_none(), "low value absent at threshold 128");
+        assert!(
+            mask_bbox(&mask, 1, 0).is_some(),
+            "low value present at threshold 1"
+        );
+        assert!(
+            mask_bbox(&mask, 128, 0).is_none(),
+            "low value absent at threshold 128"
+        );
     }
 
     #[test]
@@ -1461,7 +1617,8 @@ mod tests {
                     continue;
                 }
                 assert_eq!(
-                    out.get_pixel(x, y), img.get_pixel(x, y),
+                    out.get_pixel(x, y),
+                    img.get_pixel(x, y),
                     "unmasked pixel ({x}, {y}) must be byte-identical to source",
                 );
             }
@@ -1475,7 +1632,7 @@ mod tests {
     /// test that locks the math.
     #[cfg(test)]
     fn reference_sharpen(image: &RgbaImage, mask: &GrayImage, amount: f32) -> RgbaImage {
-        let kernel: [f32; 5] = [1.0/16.0, 4.0/16.0, 6.0/16.0, 4.0/16.0, 1.0/16.0];
+        let kernel: [f32; 5] = [1.0 / 16.0, 4.0 / 16.0, 6.0 / 16.0, 4.0 / 16.0, 1.0 / 16.0];
         let (w, h) = image.dimensions();
         let src = image.as_raw();
         let w_us = w as usize;
@@ -1486,8 +1643,7 @@ mod tests {
                 for c in 0..3 {
                     let mut sum = 0.0;
                     for (k, &kv) in kernel.iter().enumerate() {
-                        let xi = (x as isize + k as isize - 2)
-                            .clamp(0, w_us as isize - 1) as usize;
+                        let xi = (x as isize + k as isize - 2).clamp(0, w_us as isize - 1) as usize;
                         sum += kv * src[(y * w_us + xi) * 4 + c] as f32;
                     }
                     tmp[(y * w_us + x) * 3 + c] = sum;
@@ -1510,8 +1666,7 @@ mod tests {
                 for c in 0..3 {
                     let mut blur = 0.0;
                     for (k, &kv) in kernel.iter().enumerate() {
-                        let yi = (y as isize + k as isize - 2)
-                            .clamp(0, h_us as isize - 1) as usize;
+                        let yi = (y as isize + k as isize - 2).clamp(0, h_us as isize - 1) as usize;
                         blur += kv * tmp[(yi * w_us + x) * 3 + c];
                     }
                     let s = src[pix + c] as f32;
@@ -1621,7 +1776,8 @@ mod tests {
                 }
             }
             t
-        }).unwrap();
+        })
+        .unwrap();
         // Spot-check: every pixel outside the masked region is identical.
         for y in 0..128 {
             for x in 0..128 {
@@ -1629,7 +1785,8 @@ mod tests {
                     continue;
                 }
                 assert_eq!(
-                    out.get_pixel(x, y), img.get_pixel(x, y),
+                    out.get_pixel(x, y),
+                    img.get_pixel(x, y),
                     "unmasked pixel ({x}, {y}) must be unchanged",
                 );
             }

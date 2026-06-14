@@ -35,7 +35,13 @@ pub fn process_image<F>(
 where
     F: Fn(ProgressStage, f32),
 {
-    process_image_with_mask(img_bytes, engine, &MaskSettings::default(), progress, cancel)
+    process_image_with_mask(
+        img_bytes,
+        engine,
+        &MaskSettings::default(),
+        progress,
+        cancel,
+    )
 }
 
 /// Process a single image with custom mask settings.
@@ -108,11 +114,7 @@ pub fn process_image_from_decoded<F>(
 where
     F: Fn(ProgressStage, f32),
 {
-    let is_cancelled = || {
-        cancel
-            .as_ref()
-            .is_some_and(|c| c.load(Ordering::Acquire))
-    };
+    let is_cancelled = || cancel.as_ref().is_some_and(|c| c.load(Ordering::Acquire));
 
     let report = |stage: ProgressStage, pct: f32| {
         if let Some(ref cb) = progress {
@@ -172,10 +174,16 @@ where
     F: Fn(ProgressStage, f32),
 {
     let is_cancelled = || cancel.as_ref().is_some_and(|c| c.load(Ordering::Acquire));
-    let report = |stage: ProgressStage, pct: f32| { if let Some(ref cb) = progress { cb(stage, pct); } };
+    let report = |stage: ProgressStage, pct: f32| {
+        if let Some(ref cb) = progress {
+            cb(stage, pct);
+        }
+    };
 
     report(ProgressStage::Resize, 0.2);
-    if is_cancelled() { return Err(CoreError::Cancelled); }
+    if is_cancelled() {
+        return Err(CoreError::Cancelled);
+    }
 
     report(ProgressStage::Normalize, 0.4);
     let model = engine.model_kind();
@@ -193,7 +201,9 @@ where
         );
     }
 
-    if is_cancelled() { return Err(CoreError::Cancelled); }
+    if is_cancelled() {
+        return Err(CoreError::Cancelled);
+    }
 
     report(ProgressStage::Infer, 0.5);
     let raw_output = engine.with_session(|session| {
@@ -236,7 +246,8 @@ where
                 debug_assert!(
                     off + h * w <= buf.len(),
                     "ndarray returned offset {off} + h*w {} > buf.len {}",
-                    h * w, buf.len(),
+                    h * w,
+                    buf.len(),
                 );
                 buf[off..off + h * w].to_vec()
             }
@@ -253,9 +264,14 @@ where
         let (lo, hi, mean) = crate::math::slice_stats(&tensor_data);
         let head: Vec<f32> = tensor_data.iter().take(6).copied().collect();
         tracing::debug!(
-            ?model, h, w, tensor_len = tensor_data.len(),
+            ?model,
+            h,
+            w,
+            tensor_len = tensor_data.len(),
             owned_was_standard = is_std_owned,
-            tensor_min = lo, tensor_max = hi, tensor_mean = mean,
+            tensor_min = lo,
+            tensor_max = hi,
+            tensor_mean = mean,
             ?head,
             "infer_only raw tensor flattened",
         );
@@ -272,9 +288,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use image::{DynamicImage, RgbImage};
     #[cfg(feature = "dev-models")]
     use image::Rgb;
+    use image::{DynamicImage, RgbImage};
     #[cfg(feature = "dev-models")]
     use std::io::Cursor;
 
@@ -303,7 +319,10 @@ mod tests {
         use crate::formats::check_large_image;
         let big = DynamicImage::ImageRgb8(RgbImage::new(9000, 100));
         let err = check_large_image(&big);
-        assert!(err.is_some(), "Expected LargeImage error for 9000px wide image");
+        assert!(
+            err.is_some(),
+            "Expected LargeImage error for 9000px wide image"
+        );
         match err.unwrap() {
             CoreError::LargeImage { width, .. } => assert_eq!(width, 9000),
             other => panic!("Expected LargeImage, got {:?}", other),
@@ -341,16 +360,20 @@ mod tests {
         use crate::{engine::OrtEngine, types::ModelKind};
         use std::sync::{Arc, Mutex};
 
-        let engine = OrtEngine::new(ModelKind::Silueta, 1)
-            .expect("Need downloaded models");
+        let engine = OrtEngine::new(ModelKind::Silueta, 1).expect("Need downloaded models");
 
         let stages: Arc<Mutex<Vec<ProgressStage>>> = Arc::new(Mutex::new(Vec::new()));
         let stages_clone = stages.clone();
 
         let png_bytes = make_png(64, 64);
-        let _ = process_image(&png_bytes, &engine, Some(move |stage, _pct| {
-            stages_clone.lock().unwrap().push(stage);
-        }), None);
+        let _ = process_image(
+            &png_bytes,
+            &engine,
+            Some(move |stage, _pct| {
+                stages_clone.lock().unwrap().push(stage);
+            }),
+            None,
+        );
 
         let recorded = stages.lock().unwrap();
         assert!(

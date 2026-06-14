@@ -1,19 +1,23 @@
+use crate::types::{CoreError, LARGE_IMAGE_LIMIT};
+use fast_image_resize::{
+    images::{Image, ImageRef},
+    PixelType, Resizer,
+};
+use image::codecs::png::{CompressionType, FilterType as PngFilter, PngEncoder};
+use image::ImageEncoder;
+use image::{DynamicImage, GrayImage, ImageReader, RgbaImage};
 use std::io::Cursor;
 use std::path::Path;
-use image::{DynamicImage, GrayImage, ImageReader, RgbaImage};
-use image::codecs::png::{PngEncoder, CompressionType, FilterType as PngFilter};
-use image::ImageEncoder;
-use fast_image_resize::{images::{Image, ImageRef}, PixelType, Resizer};
-use crate::types::{CoreError, LARGE_IMAGE_LIMIT};
 
 /// SIMD-accelerated Lanczos3 resize for single-channel (gray) images.
 /// Source buffer is borrowed via `ImageRef` — no clone needed.
 pub fn resize_gray_lanczos3(src: &GrayImage, dst_width: u32, dst_height: u32) -> GrayImage {
-    let src_image = ImageRef::new(
-        src.width(), src.height(), src.as_raw(), PixelType::U8,
-    ).expect("valid gray image buffer");
+    let src_image = ImageRef::new(src.width(), src.height(), src.as_raw(), PixelType::U8)
+        .expect("valid gray image buffer");
     let mut dst_image = Image::new(dst_width, dst_height, PixelType::U8);
-    Resizer::new().resize(&src_image, &mut dst_image, None).expect("resize failed");
+    Resizer::new()
+        .resize(&src_image, &mut dst_image, None)
+        .expect("resize failed");
     GrayImage::from_raw(dst_width, dst_height, dst_image.into_vec()).expect("valid dimensions")
 }
 
@@ -26,7 +30,9 @@ pub fn resize_rgb_lanczos3(img: &DynamicImage, dst_width: u32, dst_height: u32) 
     let src = ImageRef::new(rgb.width(), rgb.height(), rgb.as_raw(), PixelType::U8x3)
         .expect("valid RGB buffer");
     let mut dst = Image::new(dst_width, dst_height, PixelType::U8x3);
-    Resizer::new().resize(&src, &mut dst, None).expect("resize failed");
+    Resizer::new()
+        .resize(&src, &mut dst, None)
+        .expect("resize failed");
     image::RgbImage::from_raw(dst_width, dst_height, dst.into_vec()).expect("valid dimensions")
 }
 
@@ -97,7 +103,11 @@ fn rasterize_svg(bytes: &[u8]) -> Result<DynamicImage, CoreError> {
 
     let mut pixmap = Pixmap::new(render_w, render_h)
         .ok_or_else(|| CoreError::ImageFormat("SVG render: invalid dimensions".into()))?;
-    resvg::render(&tree, Transform::from_scale(scale, scale), &mut pixmap.as_mut());
+    resvg::render(
+        &tree,
+        Transform::from_scale(scale, scale),
+        &mut pixmap.as_mut(),
+    );
 
     // tiny_skia stores premultiplied RGBA; demultiply so the result matches
     // the alpha convention used by the rest of the pipeline (the seg models
@@ -134,7 +144,11 @@ fn unmultiply_alpha(buf: &mut [u8]) {
 pub fn check_large_image(img: &DynamicImage) -> Option<CoreError> {
     let (w, h) = (img.width(), img.height());
     if w > LARGE_IMAGE_LIMIT || h > LARGE_IMAGE_LIMIT {
-        Some(CoreError::LargeImage { width: w, height: h, limit: LARGE_IMAGE_LIMIT })
+        Some(CoreError::LargeImage {
+            width: w,
+            height: h,
+            limit: LARGE_IMAGE_LIMIT,
+        })
     } else {
         None
     }
@@ -153,10 +167,17 @@ pub fn downscale_image(img: DynamicImage, max_dim: u32) -> DynamicImage {
     let nw = ((w as f32 * scale).round() as u32).max(1);
     let nh = ((h as f32 * scale).round() as u32).max(1);
     let rgba = img.to_rgba8();
-    let src = Image::from_vec_u8(rgba.width(), rgba.height(), rgba.into_raw(), PixelType::U8x4)
-        .expect("valid RGBA buffer");
+    let src = Image::from_vec_u8(
+        rgba.width(),
+        rgba.height(),
+        rgba.into_raw(),
+        PixelType::U8x4,
+    )
+    .expect("valid RGBA buffer");
     let mut dst = Image::new(nw, nh, PixelType::U8x4);
-    Resizer::new().resize(&src, &mut dst, None).expect("resize failed");
+    Resizer::new()
+        .resize(&src, &mut dst, None)
+        .expect("resize failed");
     let out = image::RgbaImage::from_raw(nw, nh, dst.into_vec()).expect("valid dimensions");
     DynamicImage::ImageRgba8(out)
 }
@@ -201,10 +222,14 @@ pub fn apply_background_image(
     let raw = img.as_mut();
     for (i, pixel) in raw.chunks_mut(4).enumerate() {
         let a = pixel[3] as f32 / 255.0;
-        if a >= 1.0 { continue; }
+        if a >= 1.0 {
+            continue;
+        }
         let bi = i * 4;
         let bg_a = raw_bg[bi + 3] as f32 / 255.0;
-        if bg_a <= 0.0 { continue; }
+        if bg_a <= 0.0 {
+            continue;
+        }
         let inv = (1.0 - a) * bg_a;
         pixel[0] = (pixel[0] as f32 * a + raw_bg[bi] as f32 * inv) as u8;
         pixel[1] = (pixel[1] as f32 * a + raw_bg[bi + 1] as f32 * inv) as u8;
@@ -255,7 +280,8 @@ fn build_bg_layer(
             let inner_h = sh.min(dst_h);
             let src_x = sw.saturating_sub(dst_w) / 2;
             let src_y = sh.saturating_sub(dst_h) / 2;
-            let cropped = image::imageops::crop_imm(&bg.to_rgb8(), src_x, src_y, inner_w, inner_h).to_image();
+            let cropped =
+                image::imageops::crop_imm(&bg.to_rgb8(), src_x, src_y, inner_w, inner_h).to_image();
             let ox = ((dst_w - inner_w) / 2) as i64;
             let oy = ((dst_h - inner_h) / 2) as i64;
             image::imageops::replace(&mut out, &rgb_to_rgba(&cropped), ox, oy);
@@ -285,7 +311,13 @@ fn rgb_to_rgba(rgb: &image::RgbImage) -> RgbaImage {
 /// per encode at 4 K. Sink is flushed by the caller.
 pub fn encode_rgba_png_into<W: std::io::Write>(img: &RgbaImage, w: W) -> Result<(), CoreError> {
     let encoder = PngEncoder::new_with_quality(w, CompressionType::Fast, PngFilter::Sub);
-    encoder.write_image(img.as_raw(), img.width(), img.height(), image::ExtendedColorType::Rgba8)
+    encoder
+        .write_image(
+            img.as_raw(),
+            img.width(),
+            img.height(),
+            image::ExtendedColorType::Rgba8,
+        )
         .map_err(CoreError::from)
 }
 
@@ -303,7 +335,13 @@ pub fn encode_rgba_png(img: &RgbaImage) -> Result<Vec<u8>, CoreError> {
 pub fn encode_gray_png(img: &GrayImage) -> Result<Vec<u8>, CoreError> {
     let mut buf = Vec::with_capacity(img.as_raw().len() / 2);
     let encoder = PngEncoder::new_with_quality(&mut buf, CompressionType::Fast, PngFilter::Sub);
-    encoder.write_image(img.as_raw(), img.width(), img.height(), image::ExtendedColorType::L8)
+    encoder
+        .write_image(
+            img.as_raw(),
+            img.width(),
+            img.height(),
+            image::ExtendedColorType::L8,
+        )
         .map_err(CoreError::from)?;
     Ok(buf)
 }
@@ -312,7 +350,7 @@ pub fn encode_gray_png(img: &GrayImage) -> Result<Vec<u8>, CoreError> {
 mod tests {
     use super::*;
     use crate::types::DOWNSCALE_TARGET;
-    use image::{DynamicImage, RgbaImage, Rgba};
+    use image::{DynamicImage, Rgba, RgbaImage};
 
     /// Minimal 1x1 red PNG as raw bytes (generated once, hardcoded for unit test isolation)
     fn minimal_png_bytes() -> Vec<u8> {
@@ -320,10 +358,8 @@ mod tests {
         let mut img = RgbaImage::new(1, 1);
         img.put_pixel(0, 0, Rgba([255, 0, 0, 255]));
         let mut buf = Vec::new();
-        img.write_to(
-            &mut Cursor::new(&mut buf),
-            image::ImageFormat::Png,
-        ).unwrap();
+        img.write_to(&mut Cursor::new(&mut buf), image::ImageFormat::Png)
+            .unwrap();
         buf
     }
 
@@ -331,7 +367,11 @@ mod tests {
     fn test_load_image_from_bytes_png() {
         let bytes = minimal_png_bytes();
         let result = load_image_from_bytes(&bytes);
-        assert!(result.is_ok(), "Failed to load PNG bytes: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to load PNG bytes: {:?}",
+            result.err()
+        );
         let img = result.unwrap();
         assert_eq!(img.width(), 1);
         assert_eq!(img.height(), 1);
@@ -372,8 +412,7 @@ mod tests {
 
     #[test]
     fn load_image_from_bytes_rasterizes_svg() {
-        let img = load_image_from_bytes(SAMPLE_SVG)
-            .expect("SVG bytes should rasterize");
+        let img = load_image_from_bytes(SAMPLE_SVG).expect("SVG bytes should rasterize");
         assert_eq!(img.width(), 32);
         assert_eq!(img.height(), 16);
         // The center pixel should be roughly pure red after demultiplying.
@@ -401,7 +440,11 @@ mod tests {
         // Premultiplied (128, 0, 0, 128) → straight (~255, 0, 0, 128).
         let mut buf = vec![128, 0, 0, 128];
         unmultiply_alpha(&mut buf);
-        assert!(buf[0] >= 254, "unmultiplied red should be ~255, got {}", buf[0]);
+        assert!(
+            buf[0] >= 254,
+            "unmultiplied red should be ~255, got {}",
+            buf[0]
+        );
         assert_eq!(buf[3], 128, "alpha must not change");
         // Fully transparent stays untouched.
         let mut zero = vec![0, 0, 0, 0];
@@ -418,9 +461,16 @@ mod tests {
         // Create a thin but wide image > 8000px
         let img = DynamicImage::ImageRgb8(image::RgbImage::new(9000, 100));
         let result = check_large_image(&img);
-        assert!(result.is_some(), "Expected LargeImage error for 9000px wide image");
+        assert!(
+            result.is_some(),
+            "Expected LargeImage error for 9000px wide image"
+        );
         match result.unwrap() {
-            CoreError::LargeImage { width, height: _, limit } => {
+            CoreError::LargeImage {
+                width,
+                height: _,
+                limit,
+            } => {
                 assert_eq!(width, 9000);
                 assert_eq!(limit, LARGE_IMAGE_LIMIT);
             }
@@ -447,18 +497,24 @@ mod tests {
         }
         let bg_dyn = DynamicImage::ImageRgb8(bg);
         apply_background_image(&mut fg, &bg_dyn, crate::types::BgImageFit::Cover);
-        assert_eq!(fg.get_pixel(0, 0), &Rgba([255, 0, 0, 255]),
-            "opaque pixel must stay unchanged");
-        assert_eq!(fg.get_pixel(1, 0), &Rgba([0, 255, 0, 255]),
-            "transparent pixel must reveal bg, alpha forced to 255");
+        assert_eq!(
+            fg.get_pixel(0, 0),
+            &Rgba([255, 0, 0, 255]),
+            "opaque pixel must stay unchanged"
+        );
+        assert_eq!(
+            fg.get_pixel(1, 0),
+            &Rgba([0, 255, 0, 255]),
+            "transparent pixel must reveal bg, alpha forced to 255"
+        );
     }
 
     #[test]
     fn apply_background_image_preserves_partial_alpha_blend() {
         let mut fg = RgbaImage::new(1, 1);
         fg.put_pixel(0, 0, Rgba([200, 0, 0, 128])); // half-transparent red
-        let bg_dyn = DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
-            1, 1, image::Rgb([0, 0, 200])));
+        let bg_dyn =
+            DynamicImage::ImageRgb8(image::RgbImage::from_pixel(1, 1, image::Rgb([0, 0, 200])));
         apply_background_image(&mut fg, &bg_dyn, crate::types::BgImageFit::Cover);
         let p = fg.get_pixel(0, 0);
         // a = 128/255 ≈ 0.502; blended R ≈ 200*0.502 = 100, B ≈ 200*0.498 = 99
@@ -485,13 +541,20 @@ mod tests {
         // the bg into a 1×1 block — the surrounding alpha-0 pixels in the
         // foreground stay alpha-0 (transparent letterbox).
         let mut fg = RgbaImage::from_pixel(4, 1, Rgba([0, 0, 0, 0]));
-        let bg = DynamicImage::ImageRgb8(image::RgbImage::from_pixel(1, 1, image::Rgb([0, 255, 0])));
+        let bg =
+            DynamicImage::ImageRgb8(image::RgbImage::from_pixel(1, 1, image::Rgb([0, 255, 0])));
         apply_background_image(&mut fg, &bg, crate::types::BgImageFit::Contain);
         // Centre column (or close to it) gets the bg green; edges stay transparent.
         let opaque_count = fg.pixels().filter(|p| p[3] > 0).count();
         let transparent_count = fg.pixels().filter(|p| p[3] == 0).count();
-        assert!(opaque_count >= 1, "Contain must paint at least one pixel of bg");
-        assert!(transparent_count >= 2, "Contain must letterbox the rest as transparent");
+        assert!(
+            opaque_count >= 1,
+            "Contain must paint at least one pixel of bg"
+        );
+        assert!(
+            transparent_count >= 2,
+            "Contain must letterbox the rest as transparent"
+        );
     }
 
     #[test]
@@ -517,7 +580,9 @@ mod tests {
         assert!(
             scaled.width().max(scaled.height()) <= DOWNSCALE_TARGET,
             "Downscaled image {}x{} exceeds max_dim {}",
-            scaled.width(), scaled.height(), DOWNSCALE_TARGET
+            scaled.width(),
+            scaled.height(),
+            DOWNSCALE_TARGET
         );
     }
 
@@ -554,7 +619,9 @@ mod tests {
         }
         let bytes = encode_gray_png(&img).expect("gray encode");
         assert_eq!(&bytes[0..4], &[0x89, 0x50, 0x4E, 0x47]);
-        let decoded = image::load_from_memory(&bytes).expect("decode back").to_luma8();
+        let decoded = image::load_from_memory(&bytes)
+            .expect("decode back")
+            .to_luma8();
         assert_eq!(decoded.dimensions(), (8, 1));
         for x in 0..8 {
             assert_eq!(decoded.get_pixel(x, 0).0[0], (x * 32) as u8);
