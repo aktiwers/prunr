@@ -525,18 +525,35 @@ pub fn apply_bg_effect(rgba: &mut RgbaImage, source: &DynamicImage, effect: crat
         }
         BgEffect::InvertedSource => {
             let mut img = source.to_rgba8();
-            for p in img.pixels_mut() {
-                p.0[0] = 255 - p.0[0];
-                p.0[1] = 255 - p.0[1];
-                p.0[2] = 255 - p.0[2];
+            let (w, h) = img.dimensions();
+            if (w as usize * h as usize) >= ROW_PAR_THRESHOLD {
+                img.as_mut().par_chunks_exact_mut(4).for_each(|p| {
+                    p[0] = 255 - p[0];
+                    p[1] = 255 - p[1];
+                    p[2] = 255 - p[2];
+                });
+            } else {
+                for p in img.pixels_mut() {
+                    p.0[0] = 255 - p.0[0];
+                    p.0[1] = 255 - p.0[1];
+                    p.0[2] = 255 - p.0[2];
+                }
             }
             img
         }
         BgEffect::DesaturatedSource => {
             let mut img = source.to_rgba8();
-            for p in img.pixels_mut() {
-                let y = luma_u8(p.0[0], p.0[1], p.0[2]);
-                p.0[0] = y; p.0[1] = y; p.0[2] = y;
+            let (w, h) = img.dimensions();
+            if (w as usize * h as usize) >= ROW_PAR_THRESHOLD {
+                img.as_mut().par_chunks_exact_mut(4).for_each(|p| {
+                    let y = luma_u8(p[0], p[1], p[2]);
+                    p[0] = y; p[1] = y; p[2] = y;
+                });
+            } else {
+                for p in img.pixels_mut() {
+                    let y = luma_u8(p.0[0], p.0[1], p.0[2]);
+                    p.0[0] = y; p.0[1] = y; p.0[2] = y;
+                }
             }
             img
         }
@@ -739,23 +756,71 @@ fn apply_edge_shift(mask: &mut GrayImage, shift: f32) {
 
     let step = |src: &[u8], dst: &mut [u8]| {
         let process_row = |(y, row): (usize, &mut [u8])| {
-            let yi = y as i32;
-            for (x, slot) in row.iter_mut().enumerate() {
-                let xi = x as i32;
-                let mut extremum: u8 = if erode { 255 } else { 0 };
-                for dy in -1i32..=1 {
-                    let ny = (yi + dy).clamp(0, hi - 1) as usize;
-                    for dx in -1i32..=1 {
-                        let nx = (xi + dx).clamp(0, wi - 1) as usize;
-                        let v = src[ny * w + nx];
-                        if erode {
-                            extremum = extremum.min(v);
-                        } else {
-                            extremum = extremum.max(v);
+            if y == 0 || y == h - 1 || w < 3 {
+                // Boundary row or too thin — use slow path with clamping.
+                let yi = y as i32;
+                for (x, slot) in row.iter_mut().enumerate() {
+                    let xi = x as i32;
+                    let mut ex: u8 = if erode { 255 } else { 0 };
+                    for dy in -1..=1 {
+                        let ny = (yi + dy).clamp(0, hi - 1) as usize;
+                        let row_off = ny * w;
+                        for dx in -1..=1 {
+                            let nx = (xi + dx).clamp(0, wi - 1) as usize;
+                            let v = src[row_off + nx];
+                            ex = if erode { ex.min(v) } else { ex.max(v) };
                         }
                     }
+                    *slot = ex;
                 }
-                *slot = extremum;
+                return;
+            }
+
+            // Interior row (y: 1..h-1). Use unrolled 3x3 kernel and skip clamping.
+            let prev_row = (y - 1) * w;
+            let curr_row = y * w;
+            let next_row = (y + 1) * w;
+
+            // First column (x=0) — needs dx clamping.
+            {
+                let (p, c, n) = (prev_row, curr_row, next_row);
+                row[0] = if erode {
+                    src[p].min(src[p + 1]).min(src[c]).min(src[c + 1]).min(src[n]).min(src[n + 1])
+                } else {
+                    src[p].max(src[p + 1]).max(src[c]).max(src[c + 1]).max(src[n]).max(src[n + 1])
+                };
+            }
+
+            // Interior columns (x: 1..w-1) — full 3x3 unrolled fast-path.
+            if erode {
+                for x in 1..w - 1 {
+                    let p = prev_row + x;
+                    let c = curr_row + x;
+                    let n = next_row + x;
+                    row[x] = src[p - 1].min(src[p]).min(src[p + 1])
+                        .min(src[c - 1]).min(src[c]).min(src[c + 1])
+                        .min(src[n - 1]).min(src[n]).min(src[n + 1]);
+                }
+            } else {
+                for x in 1..w - 1 {
+                    let p = prev_row + x;
+                    let c = curr_row + x;
+                    let n = next_row + x;
+                    row[x] = src[p - 1].max(src[p]).max(src[p + 1])
+                        .max(src[c - 1]).max(src[c]).max(src[c + 1])
+                        .max(src[n - 1]).max(src[n]).max(src[n + 1]);
+                }
+            }
+
+            // Last column (x=w-1) — needs dx clamping.
+            {
+                let x = w - 1;
+                let (p, c, n) = (prev_row + x, curr_row + x, next_row + x);
+                row[x] = if erode {
+                    src[p - 1].min(src[p]).min(src[c - 1]).min(src[c]).min(src[n - 1]).min(src[n])
+                } else {
+                    src[p - 1].max(src[p]).max(src[c - 1]).max(src[c]).max(src[n - 1]).max(src[n])
+                };
             }
         };
         if use_par {
@@ -776,10 +841,14 @@ fn apply_edge_shift(mask: &mut GrayImage, shift: f32) {
     if frac >= 0.01 {
         if full == 0 { a.copy_from_slice(mask.as_raw()); }
         step(&a, &mut b);
-        let inv = 1.0 - frac;
+
+        // Linear blend with fixed-point integer math to avoid f32 overhead.
+        let ifrac = (frac * 256.0 + 0.5) as u32;
+        let iinv = 256 - ifrac;
         let blend = |a_byte: &mut u8, b_byte: u8| {
-            *a_byte = (*a_byte as f32 * inv + b_byte as f32 * frac + 0.5) as u8;
+            *a_byte = ((*a_byte as u32 * iinv + b_byte as u32 * ifrac + 128) >> 8) as u8;
         };
+
         if use_par {
             a.par_iter_mut().zip(b.par_iter()).for_each(|(a, &b)| blend(a, b));
         } else {
@@ -1141,5 +1210,55 @@ mod tests {
         // Allow a 2-gray tolerance for f32 rounding through the pipeline.
         assert!(got_min <= 2,  "min after sigmoid stretch should be ≈0, got {got_min}");
         assert!(got_max >= 253, "max after sigmoid stretch should be ≈255, got {got_max}");
+    }
+
+    #[test]
+    fn test_apply_edge_shift_correctness() {
+        let (w, h) = (5, 5);
+        let mut mask = GrayImage::from_pixel(w, h, image::Luma([0]));
+        mask.put_pixel(2, 2, image::Luma([255]));
+
+        // Dilate by 1px
+        let mut dilate = mask.clone();
+        apply_edge_shift(&mut dilate, -1.0);
+        // Center 3x3 should be 255
+        for y in 1..4 {
+            for x in 1..4 {
+                assert_eq!(dilate.get_pixel(x, y)[0], 255, "at ({x}, {y})");
+            }
+        }
+        assert_eq!(dilate.get_pixel(0, 0)[0], 0);
+
+        // Erode by 1px
+        let mut erode = GrayImage::from_pixel(w, h, image::Luma([255]));
+        erode.put_pixel(2, 2, image::Luma([0]));
+        apply_edge_shift(&mut erode, 1.0);
+        // Center 3x3 should be 0
+        for y in 1..4 {
+            for x in 1..4 {
+                assert_eq!(erode.get_pixel(x, y)[0], 0, "at ({x}, {y})");
+            }
+        }
+        assert_eq!(erode.get_pixel(0, 0)[0], 255);
+    }
+
+    /// Benchmark for morphological edge shift on a 4K mask.
+    ///   `cargo test -p prunr-core --release apply_edge_shift_4k_bench -- --nocapture --ignored`
+    #[test]
+    #[ignore]
+    fn apply_edge_shift_4k_bench() {
+        let (w, h) = (4000, 3000);
+        let mut mask = GrayImage::from_fn(w, h, |x, y| {
+            // Non-uniform content to prevent branch predictor over-optimization
+            if (x - 2000).pow(2) + (y - 1500).pow(2) < 500 * 500 {
+                image::Luma([255])
+            } else {
+                image::Luma([0])
+            }
+        });
+
+        bench_report("apply_edge_shift_4k_bench (4000x3000, 2px erode)", 2, 10, || {
+            apply_edge_shift(&mut mask, 2.0);
+        });
     }
 }
