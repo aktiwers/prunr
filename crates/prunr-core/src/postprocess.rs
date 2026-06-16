@@ -723,41 +723,100 @@ pub(crate) fn dilate_mask(mask: &mut GrayImage, pixels: u32) {
 
 fn apply_edge_shift(mask: &mut GrayImage, shift: f32) {
     let abs = shift.abs();
-    if abs < 0.01 { return; }
+    if abs < 0.01 {
+        return;
+    }
     let erode = shift > 0.0;
     let full = abs.floor() as u32;
     let frac = abs - full as f32;
     let (w, h) = (mask.width() as usize, mask.height() as usize);
-    let wi = w as i32;
-    let hi = h as i32;
+    if w == 0 || h == 0 {
+        return;
+    }
     let use_par = h >= 512;
 
-    // Skip the unconditional `mask.as_raw().clone()` (~12 MB at 4 K) by
-    // letting the first `step` read `mask.as_raw()` directly into `a`.
     let mut a = vec![0u8; w * h];
     let mut b = vec![0u8; w * h];
 
-    let step = |src: &[u8], dst: &mut [u8]| {
+    let step = |src: &[u8], dst: &mut [u8], erode: bool| {
         let process_row = |(y, row): (usize, &mut [u8])| {
-            let yi = y as i32;
-            for (x, slot) in row.iter_mut().enumerate() {
-                let xi = x as i32;
-                let mut extremum: u8 = if erode { 255 } else { 0 };
-                for dy in -1i32..=1 {
-                    let ny = (yi + dy).clamp(0, hi - 1) as usize;
-                    for dx in -1i32..=1 {
-                        let nx = (xi + dx).clamp(0, wi - 1) as usize;
-                        let v = src[ny * w + nx];
-                        if erode {
-                            extremum = extremum.min(v);
-                        } else {
-                            extremum = extremum.max(v);
-                        }
+            let y = y as i32;
+            let prev_y = (y - 1).max(0) as usize * w;
+            let curr_y = y as usize * w;
+            let next_y = (y + 1).min(h as i32 - 1) as usize * w;
+
+            if erode {
+                // First column
+                {
+                    let nx0 = 0;
+                    let nx1 = if w > 1 { 1 } else { 0 };
+                    let mut m = src[prev_y + nx0].min(src[prev_y + nx1]);
+                    m = m.min(src[curr_y + nx0]).min(src[curr_y + nx1]);
+                    m = m.min(src[next_y + nx0]).min(src[next_y + nx1]);
+                    row[0] = m;
+                }
+
+                if w > 2 {
+                    // Interior fast-path: no clamping, unrolled 3x3
+                    for (x, slot) in row.iter_mut().enumerate().take(w - 1).skip(1) {
+                        let nx0 = x - 1;
+                        let nx1 = x;
+                        let nx2 = x + 1;
+                        let mut m = src[prev_y + nx0].min(src[prev_y + nx1]).min(src[prev_y + nx2]);
+                        m = m.min(src[curr_y + nx0]).min(src[curr_y + nx1]).min(src[curr_y + nx2]);
+                        m = m.min(src[next_y + nx0]).min(src[next_y + nx1]).min(src[next_y + nx2]);
+                        *slot = m;
                     }
                 }
-                *slot = extremum;
+
+                // Last column
+                if w > 1 {
+                    let x = w - 1;
+                    let nx0 = x - 1;
+                    let nx1 = x;
+                    let mut m = src[prev_y + nx0].min(src[prev_y + nx1]);
+                    m = m.min(src[curr_y + nx0]).min(src[curr_y + nx1]);
+                    m = m.min(src[next_y + nx0]).min(src[next_y + nx1]);
+                    row[x] = m;
+                }
+            } else {
+                // Dilate
+                // First column
+                {
+                    let nx0 = 0;
+                    let nx1 = if w > 1 { 1 } else { 0 };
+                    let mut m = src[prev_y + nx0].max(src[prev_y + nx1]);
+                    m = m.max(src[curr_y + nx0]).max(src[curr_y + nx1]);
+                    m = m.max(src[next_y + nx0]).max(src[next_y + nx1]);
+                    row[0] = m;
+                }
+
+                if w > 2 {
+                    // Interior fast-path
+                    for (x, slot) in row.iter_mut().enumerate().take(w - 1).skip(1) {
+                        let nx0 = x - 1;
+                        let nx1 = x;
+                        let nx2 = x + 1;
+                        let mut m = src[prev_y + nx0].max(src[prev_y + nx1]).max(src[prev_y + nx2]);
+                        m = m.max(src[curr_y + nx0]).max(src[curr_y + nx1]).max(src[curr_y + nx2]);
+                        m = m.max(src[next_y + nx0]).max(src[next_y + nx1]).max(src[next_y + nx2]);
+                        *slot = m;
+                    }
+                }
+
+                // Last column
+                if w > 1 {
+                    let x = w - 1;
+                    let nx0 = x - 1;
+                    let nx1 = x;
+                    let mut m = src[prev_y + nx0].max(src[prev_y + nx1]);
+                    m = m.max(src[curr_y + nx0]).max(src[curr_y + nx1]);
+                    m = m.max(src[next_y + nx0]).max(src[next_y + nx1]);
+                    row[x] = m;
+                }
             }
         };
+
         if use_par {
             dst.par_chunks_mut(w).enumerate().for_each(process_row);
         } else {
@@ -766,19 +825,23 @@ fn apply_edge_shift(mask: &mut GrayImage, shift: f32) {
     };
 
     if full > 0 {
-        step(mask.as_raw(), &mut a);
+        step(mask.as_raw(), &mut a, erode);
         for _ in 1..full {
             std::mem::swap(&mut a, &mut b);
-            step(&b, &mut a);
+            step(&b, &mut a, erode);
         }
     }
 
     if frac >= 0.01 {
-        if full == 0 { a.copy_from_slice(mask.as_raw()); }
-        step(&a, &mut b);
-        let inv = 1.0 - frac;
+        if full == 0 {
+            a.copy_from_slice(mask.as_raw());
+        }
+        step(&a, &mut b, erode);
+        // Fixed-point blend: 1.0 = 256
+        let ifrac = (frac * 256.0 + 0.5) as u32;
+        let iinv = 256 - ifrac;
         let blend = |a_byte: &mut u8, b_byte: u8| {
-            *a_byte = (*a_byte as f32 * inv + b_byte as f32 * frac + 0.5) as u8;
+            *a_byte = ((*a_byte as u32 * iinv + b_byte as u32 * ifrac + 128) >> 8) as u8;
         };
         if use_par {
             a.par_iter_mut().zip(b.par_iter()).for_each(|(a, &b)| blend(a, b));
