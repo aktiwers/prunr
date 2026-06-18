@@ -48,10 +48,18 @@ fn cache() -> &'static Mutex<HashMap<String, String>> {
 }
 
 fn load_from_disk() -> HashMap<String, String> {
-    let Some(path) = cache_path() else { return HashMap::new() };
-    let Ok(data) = std::fs::read_to_string(&path) else { return HashMap::new() };
-    let Ok(file) = serde_json::from_str::<CacheFile>(&data) else { return HashMap::new() };
-    if file.version != APP_VERSION { return HashMap::new(); }
+    let Some(path) = cache_path() else {
+        return HashMap::new();
+    };
+    let Ok(data) = std::fs::read_to_string(&path) else {
+        return HashMap::new();
+    };
+    let Ok(file) = serde_json::from_str::<CacheFile>(&data) else {
+        return HashMap::new();
+    };
+    if file.version != APP_VERSION {
+        return HashMap::new();
+    }
     file.failures
 }
 
@@ -72,7 +80,9 @@ fn save_to_disk(map: &HashMap<String, String>) {
 /// True when this (EP, model) combo is on the persistent skip list.
 /// Cheap: in-memory hashmap lookup behind a Mutex.
 pub(crate) fn is_known_failure(ep: EpKind, model: prunr_models::ModelId) -> bool {
-    let map = cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let map = cache()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     map.contains_key(&key(ep, model))
 }
 
@@ -81,8 +91,12 @@ pub(crate) fn is_known_failure(ep: EpKind, model: prunr_models::ModelId) -> bool
 /// fatal — next session will re-discover the failure.
 pub(crate) fn record_failure(ep: EpKind, model: prunr_models::ModelId, error: &str) {
     let k = key(ep, model);
-    let mut map = cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    if map.contains_key(&k) { return; }
+    let mut map = cache()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if map.contains_key(&k) {
+        return;
+    }
     tracing::info!(%ep, ?model, %error, "recording EP failure to skip cache");
     map.insert(k, error.to_string());
     save_to_disk(&map);
@@ -92,7 +106,9 @@ pub(crate) fn record_failure(ep: EpKind, model: prunr_models::ModelId, error: &s
 /// Settings → Hardware "Reset" button. Returns the number of entries
 /// removed for the caller's confirmation message.
 pub fn clear() -> usize {
-    let mut map = cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut map = cache()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let n = map.len();
     map.clear();
     save_to_disk(&map);

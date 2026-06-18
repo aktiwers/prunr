@@ -128,8 +128,9 @@ impl Default for MaskSettings {
 /// DexiNed output-scale selector. The model produces 6 side outputs
 /// (`block0`..`block5`, fine → coarse) plus a fused `block_cat`. One inference
 /// pass computes all 7; picking a scale just indexes into the outputs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-#[derive(Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, Default,
+)]
 pub enum EdgeScale {
     /// `block0` — finest, crispest micro-edges.
     Fine,
@@ -141,7 +142,6 @@ pub enum EdgeScale {
     #[default]
     Fused,
 }
-
 
 impl std::fmt::Display for EdgeScale {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -162,7 +162,9 @@ impl std::str::FromStr for EdgeScale {
             "balanced" => Ok(Self::Balanced),
             "bold" => Ok(Self::Bold),
             "fused" => Ok(Self::Fused),
-            _ => Err(format!("unknown edge scale '{s}' (expected: fine, balanced, bold, fused)")),
+            _ => Err(format!(
+                "unknown edge scale '{s}' (expected: fine, balanced, bold, fused)"
+            )),
         }
     }
 }
@@ -211,8 +213,7 @@ impl Default for EdgeSettings {
 /// DexiNed "sees", so switching `InputTransform` invalidates the edge tensor
 /// cache and triggers a FullPipeline rerun. Not live-previewable.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash,
-    serde::Serialize, serde::Deserialize, Default,
+    Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, Default,
 )]
 #[serde(rename_all = "snake_case")]
 pub enum InputTransform {
@@ -258,8 +259,7 @@ impl std::fmt::Display for InputTransform {
 /// Each variant is a compose-time formula over the already-cached tensors, so
 /// switching modes is instant in live preview — no re-inference.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash,
-    serde::Serialize, serde::Deserialize, Default,
+    Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, Default,
 )]
 #[serde(rename_all = "snake_case")]
 pub enum ComposeMode {
@@ -309,8 +309,7 @@ impl ComposeMode {
 /// through if that's unset). Gradient variants carry their own endpoints and
 /// ignore `solid_line_color` — they paint at edge pixels only.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash,
-    serde::Serialize, serde::Deserialize, Default,
+    Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, Default,
 )]
 #[serde(rename_all = "snake_case")]
 pub enum LineStyle {
@@ -323,7 +322,11 @@ pub enum LineStyle {
     GradientX { left: [u8; 3], right: [u8; 3] },
     /// Radial gradient — `center` (x, y) normalised 0..=255, `inner` at
     /// centre, `outer` at image-diagonal distance.
-    RadialGradient { center: [u8; 2], inner: [u8; 3], outer: [u8; 3] },
+    RadialGradient {
+        center: [u8; 2],
+        inner: [u8; 3],
+        outer: [u8; 3],
+    },
     /// Hue rotates through the colour wheel along pixel index —
     /// `cycles` = how many full rotations across the image.
     Rainbow { cycles: u16 },
@@ -337,19 +340,35 @@ pub enum LineStyle {
     /// Bold at `bold_color` for structural edges. Both sets share
     /// `line_strength` and `edge_thickness` from the chip; colours are
     /// independent.
-    DualScale { fine_color: [u8; 3], bold_color: [u8; 3] },
+    DualScale {
+        fine_color: [u8; 3],
+        bold_color: [u8; 3],
+    },
 }
 
 impl LineStyle {
     pub const ALL: &'static [Self] = &[
         LineStyle::Solid,
-        LineStyle::GradientY { top: [255, 50, 50], bottom: [50, 50, 255] },
-        LineStyle::GradientX { left: [255, 50, 50], right: [50, 50, 255] },
-        LineStyle::RadialGradient { center: [128, 128], inner: [255, 200, 50], outer: [30, 20, 60] },
+        LineStyle::GradientY {
+            top: [255, 50, 50],
+            bottom: [50, 50, 255],
+        },
+        LineStyle::GradientX {
+            left: [255, 50, 50],
+            right: [50, 50, 255],
+        },
+        LineStyle::RadialGradient {
+            center: [128, 128],
+            inner: [255, 200, 50],
+            outer: [30, 20, 60],
+        },
         LineStyle::Rainbow { cycles: 3 },
         LineStyle::Chromatic { offset: 3 },
         LineStyle::Noise { amount: 80 },
-        LineStyle::DualScale { fine_color: [50, 180, 230], bold_color: [30, 20, 60] },
+        LineStyle::DualScale {
+            fine_color: [50, 180, 230],
+            bold_color: [30, 20, 60],
+        },
     ];
 
     pub fn name(&self) -> &'static str {
@@ -376,8 +395,7 @@ impl std::fmt::Display for LineStyle {
 /// that produces a masked subject (`Off` or `SubjectOutline`). `EdgesOnly`
 /// has no subject silhouette — this is a no-op there.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash,
-    serde::Serialize, serde::Deserialize, Default,
+    Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, Default,
 )]
 #[serde(rename_all = "snake_case")]
 pub enum FillStyle {
@@ -427,8 +445,7 @@ pub enum FillStyle {
 /// Channel permutation. Values are the new position for each input channel —
 /// `Grb` means `output = (g, r, b)`.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash,
-    serde::Serialize, serde::Deserialize, Default,
+    Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, Default,
 )]
 #[serde(rename_all = "snake_case")]
 pub enum ChannelSwapVariant {
@@ -462,8 +479,7 @@ impl ChannelSwapVariant {
 /// any other variant hands the pipeline a derived backdrop built from the
 /// source image.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash,
-    serde::Serialize, serde::Deserialize, Default,
+    Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, Default,
 )]
 #[serde(rename_all = "snake_case")]
 pub enum BgEffect {
@@ -506,8 +522,7 @@ impl std::fmt::Display for BgEffect {
 /// How a per-image background image is positioned and scaled inside the
 /// result frame. CSS-style.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash,
-    serde::Serialize, serde::Deserialize, Default,
+    Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, Default,
 )]
 #[serde(rename_all = "snake_case")]
 pub enum BgImageFit {
@@ -584,13 +599,31 @@ impl FillStyle {
         FillStyle::Solarize { pivot: 128 },
         FillStyle::HueShift { degrees: 90 },
         FillStyle::Saturate { percent: 180 },
-        FillStyle::ColorSplash { keep_hue: 0, tolerance: 30 },
+        FillStyle::ColorSplash {
+            keep_hue: 0,
+            tolerance: 30,
+        },
         FillStyle::Pixelate { block_size: 12 },
-        FillStyle::Duotone { dark: [20, 20, 60], light: [240, 220, 180] },
-        FillStyle::CrossProcess { shadow: [30, 60, 110], highlight: [245, 220, 180] },
-        FillStyle::ChannelSwap { variant: ChannelSwapVariant::Grb },
+        FillStyle::Duotone {
+            dark: [20, 20, 60],
+            light: [240, 220, 180],
+        },
+        FillStyle::CrossProcess {
+            shadow: [30, 60, 110],
+            highlight: [245, 220, 180],
+        },
+        FillStyle::ChannelSwap {
+            variant: ChannelSwapVariant::Grb,
+        },
         FillStyle::Halftone { dot_spacing: 8 },
-        FillStyle::GradientMap { stops: [[20, 20, 60], [120, 60, 140], [240, 120, 80], [255, 230, 180]] },
+        FillStyle::GradientMap {
+            stops: [
+                [20, 20, 60],
+                [120, 60, 140],
+                [240, 120, 80],
+                [255, 230, 180],
+            ],
+        },
     ];
 
     pub fn name(&self) -> &'static str {
@@ -664,8 +697,16 @@ mod tests {
             limit: 8000,
         };
         let msg = err.to_string();
-        assert!(msg.contains("9000"), "Expected message to contain '9000', got: {}", msg);
-        assert!(msg.contains("8000"), "Expected message to contain '8000', got: {}", msg);
+        assert!(
+            msg.contains("9000"),
+            "Expected message to contain '9000', got: {}",
+            msg
+        );
+        assert!(
+            msg.contains("8000"),
+            "Expected message to contain '8000', got: {}",
+            msg
+        );
     }
 
     #[test]
@@ -711,7 +752,10 @@ mod tests {
     fn edge_scale_from_str_accepts_all_variants_case_insensitive() {
         use std::str::FromStr;
         assert_eq!(EdgeScale::from_str("fine").unwrap(), EdgeScale::Fine);
-        assert_eq!(EdgeScale::from_str("Balanced").unwrap(), EdgeScale::Balanced);
+        assert_eq!(
+            EdgeScale::from_str("Balanced").unwrap(),
+            EdgeScale::Balanced
+        );
         assert_eq!(EdgeScale::from_str("BOLD").unwrap(), EdgeScale::Bold);
         assert_eq!(EdgeScale::from_str("fused").unwrap(), EdgeScale::Fused);
         assert!(EdgeScale::from_str("ultra").is_err());

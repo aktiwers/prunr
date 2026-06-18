@@ -44,11 +44,12 @@
 mod test_common;
 
 use image::{ImageBuffer, Rgba, RgbaImage};
-use prunr_core::{
-    process_image_from_decoded, MaskSettings, ModelKind, OrtEngine, ProgressStage,
-};
+use prunr_core::{process_image_from_decoded, MaskSettings, ModelKind, OrtEngine, ProgressStage};
 use serde::{Deserialize, Serialize};
-use std::{env, fs, path::{Path, PathBuf}};
+use std::{
+    env, fs,
+    path::{Path, PathBuf},
+};
 use test_common::{ensure_ort_initialized, render_synthetic_source, synthetic_specs};
 
 const FIXTURE_ROOT_COMMITTED: &str = "tests/golden_data/e2e";
@@ -146,8 +147,8 @@ fn run_fixture(dir: &Path, engine: &OrtEngine, update: bool) -> Result<(), Strin
     }
 
     let recipe_bytes = fs::read(&recipe_path).map_err(|e| format!("read recipe: {e}"))?;
-    let recipe: Recipe = serde_json::from_slice(&recipe_bytes)
-        .map_err(|e| format!("recipe parse: {e}"))?;
+    let recipe: Recipe =
+        serde_json::from_slice(&recipe_bytes).map_err(|e| format!("recipe parse: {e}"))?;
 
     if recipe.model != engine.model_kind() {
         return Err(format!(
@@ -170,7 +171,9 @@ fn run_fixture(dir: &Path, engine: &OrtEngine, update: bool) -> Result<(), Strin
     let actual = result.rgba_image;
 
     if update || !expected_path.exists() {
-        actual.save(&expected_path).map_err(|e| format!("write expected: {e}"))?;
+        actual
+            .save(&expected_path)
+            .map_err(|e| format!("write expected: {e}"))?;
         return Ok(());
     }
 
@@ -224,7 +227,9 @@ fn compare_pixels(actual: &RgbaImage, expected: &RgbaImage) -> Result<(), String
         return Err(format!(
             "{}; {diff_pixels}/{total} pixels differ; max channel diff {max_observed} \
              (threshold {MAX_DIFF})",
-            first_mismatch.as_deref().unwrap_or("(no first-mismatch recorded)"),
+            first_mismatch
+                .as_deref()
+                .unwrap_or("(no first-mismatch recorded)"),
         ));
     }
     Ok(())
@@ -271,11 +276,18 @@ fn bootstrap_circle_silueta_e2e(root: &Path) {
             source.put_pixel(
                 x,
                 y,
-                Rgba([lerp(bg[0], fg[0]), lerp(bg[1], fg[1]), lerp(bg[2], fg[2]), 255]),
+                Rgba([
+                    lerp(bg[0], fg[0]),
+                    lerp(bg[1], fg[1]),
+                    lerp(bg[2], fg[2]),
+                    255,
+                ]),
             );
         }
     }
-    source.save(dir.join("source.png")).expect("write source.png");
+    source
+        .save(dir.join("source.png"))
+        .expect("write source.png");
     write_default_recipe(&dir.join("recipe.json"));
     eprintln!("bootstrapped e2e fixture: {}", dir.display());
 }
@@ -320,7 +332,9 @@ fn bootstrap_recipes_for_local(root: &Path) {
     if !root.is_dir() {
         return;
     }
-    let Ok(entries) = fs::read_dir(root) else { return };
+    let Ok(entries) = fs::read_dir(root) else {
+        return;
+    };
     for entry in entries.filter_map(Result::ok) {
         let dir = entry.path();
         if !dir.is_dir() {
@@ -330,8 +344,10 @@ fn bootstrap_recipes_for_local(root: &Path) {
         let recipe = dir.join("recipe.json");
         if source.is_file() && !recipe.exists() {
             write_default_recipe(&recipe);
-            eprintln!("bootstrapped recipe.json for local fixture: {}", dir.display());
+            eprintln!(
+                "bootstrapped recipe.json for local fixture: {}",
+                dir.display()
+            );
         }
     }
 }
-

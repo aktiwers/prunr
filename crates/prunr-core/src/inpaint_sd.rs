@@ -38,7 +38,7 @@ use image::{GrayImage, RgbaImage};
 use ndarray::{Array2, Array3, Array4, Axis};
 use ort::{
     inputs,
-    session::{Session, builder::GraphOptimizationLevel},
+    session::{builder::GraphOptimizationLevel, Session},
     value::Tensor,
 };
 use rand::SeedableRng;
@@ -122,7 +122,9 @@ pub struct SdInpaintRequest {
     pub use_karras_sigmas: bool,
 }
 
-fn default_strength() -> f32 { 1.0 }
+fn default_strength() -> f32 {
+    1.0
+}
 
 impl Default for SdInpaintRequest {
     fn default() -> Self {
@@ -149,8 +151,13 @@ pub fn process_inpaint(
     num_steps: u32,
 ) -> Result<RgbaImage, CoreError> {
     process_inpaint_with(
-        image, mask, id,
-        SdInpaintRequest { num_inference_steps: num_steps, ..Default::default() },
+        image,
+        mask,
+        id,
+        SdInpaintRequest {
+            num_inference_steps: num_steps,
+            ..Default::default()
+        },
         &crate::inpaint::InpaintHooks::default(),
     )
 }
@@ -218,7 +225,11 @@ pub fn process_inpaint_with(
     // is installed (the request flag carries that decision from
     // dispatch). Until the TAESD artifact ships, get() errors and we
     // silently fall back to standard VAE — same graceful pattern as LCM.
-    let taesd = if req.use_taesd { TaesdSession::get().ok() } else { None };
+    let taesd = if req.use_taesd {
+        TaesdSession::get().ok()
+    } else {
+        None
+    };
     let vae: VaeBackend = match taesd.as_ref() {
         Some(t) => VaeBackend::Taesd(t),
         None => VaeBackend::Standard(&bundle),
@@ -228,7 +239,9 @@ pub fn process_inpaint_with(
     let is_cancelled = || cancel.as_ref().is_some_and(|c| c.load(Ordering::Acquire));
 
     for component in &components {
-        if is_cancelled() { return Err(CoreError::Cancelled); }
+        if is_cancelled() {
+            return Err(CoreError::Cancelled);
+        }
         let painted_w = component.x_max - component.x_min + 1;
         let painted_h = component.y_max - component.y_min + 1;
         if painted_w <= SD_TILE && painted_h <= SD_TILE {
@@ -252,9 +265,13 @@ pub fn process_inpaint_with(
             "SD: tiling oversized component",
         );
         for tile in tiles {
-            if is_cancelled() { return Err(CoreError::Cancelled); }
-            let cropped_img = image::imageops::crop_imm(&out, tile.x, tile.y, tile.w, tile.h).to_image();
-            let cropped_mask = image::imageops::crop_imm(mask, tile.x, tile.y, tile.w, tile.h).to_image();
+            if is_cancelled() {
+                return Err(CoreError::Cancelled);
+            }
+            let cropped_img =
+                image::imageops::crop_imm(&out, tile.x, tile.y, tile.w, tile.h).to_image();
+            let cropped_mask =
+                image::imageops::crop_imm(mask, tile.x, tile.y, tile.w, tile.h).to_image();
             match run_one_tile(&bundle, &vae, &cropped_img, &cropped_mask, &req, hooks) {
                 Ok(painted) => blend_tile(&mut out, &painted, &tile),
                 Err(CoreError::Cancelled) => return Err(CoreError::Cancelled),
@@ -262,7 +279,9 @@ pub fn process_inpaint_with(
             }
         }
     }
-    if is_cancelled() { return Err(CoreError::Cancelled); }
+    if is_cancelled() {
+        return Err(CoreError::Cancelled);
+    }
     Ok(out)
 }
 
@@ -276,7 +295,10 @@ const TILE_STEP_PX: u32 = SD_TILE - TILE_OVERLAP_PX;
 
 #[derive(Debug, Clone, Copy)]
 struct TileWindow {
-    x: u32, y: u32, w: u32, h: u32,
+    x: u32,
+    y: u32,
+    w: u32,
+    h: u32,
     /// True iff this edge abuts another tile (i.e. needs feathering).
     /// Edges at the bbox/image boundary stay full-strength.
     feather_left: bool,
@@ -311,7 +333,10 @@ fn tile_bbox(bbox: &MaskBbox, img_w: u32, img_h: u32) -> Vec<TileWindow> {
             let x = x_raw.min(max_anchor_x);
             let y = y_raw.min(max_anchor_y);
             tiles.push(TileWindow {
-                x, y, w: tile_w, h: tile_h,
+                x,
+                y,
+                w: tile_w,
+                h: tile_h,
                 feather_left: i > 0,
                 feather_right: i + 1 < n_x,
                 feather_top: j > 0,
@@ -323,8 +348,9 @@ fn tile_bbox(bbox: &MaskBbox, img_w: u32, img_h: u32) -> Vec<TileWindow> {
 }
 
 fn tile_count(span: u32) -> u32 {
-    if span <= SD_TILE { 1 }
-    else {
+    if span <= SD_TILE {
+        1
+    } else {
         // Number of step-advances needed beyond the first tile, ceiling.
         let extra = span - SD_TILE;
         extra.div_ceil(TILE_STEP_PX) + 1
@@ -374,16 +400,25 @@ fn blend_tile(canvas: &mut image::RgbaImage, painted: &image::RgbaImage, tile: &
 /// than TILE_OVERLAP_PX in. When neither edge is feathered, returns 1.
 fn edge_alpha(pos: u32, length: u32, feather_lo: bool, feather_hi: bool) -> f32 {
     let f = TILE_OVERLAP_PX as f32;
-    let a_lo = if feather_lo { (pos as f32 / f).min(1.0) } else { 1.0 };
+    let a_lo = if feather_lo {
+        (pos as f32 / f).min(1.0)
+    } else {
+        1.0
+    };
     let a_hi = if feather_hi {
         ((length.saturating_sub(pos + 1)) as f32 / f).min(1.0)
-    } else { 1.0 };
+    } else {
+        1.0
+    };
     a_lo.min(a_hi)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct MaskBbox {
-    x_min: u32, y_min: u32, x_max: u32, y_max: u32,
+    x_min: u32,
+    y_min: u32,
+    x_max: u32,
+    y_max: u32,
 }
 
 /// Find the bounding box of every disjoint painted region in `mask`
@@ -402,7 +437,12 @@ fn mask_components(mask: &GrayImage) -> Vec<MaskBbox> {
     let Some(outer) = crate::inpaint::mask_bbox(mask, 128, 0) else {
         return Vec::new();
     };
-    let map = BboxMap { bbox_x: outer.x, bbox_y: outer.y, image_w: w, bbox_w: outer.w };
+    let map = BboxMap {
+        bbox_x: outer.x,
+        bbox_y: outer.y,
+        image_w: w,
+        bbox_w: outer.w,
+    };
     let xmax = outer.x + outer.w;
     let ymax = outer.y + outer.h;
     let mut visited = vec![false; (outer.w as usize) * (outer.h as usize)];
@@ -417,12 +457,25 @@ fn mask_components(mask: &GrayImage) -> Vec<MaskBbox> {
             }
             visited[lidx] = true;
             queue.push_back((sx, sy));
-            let mut bbox = MaskBbox { x_min: sx, y_min: sy, x_max: sx, y_max: sy };
+            let mut bbox = MaskBbox {
+                x_min: sx,
+                y_min: sy,
+                x_max: sx,
+                y_max: sy,
+            };
             while let Some((x, y)) = queue.pop_front() {
-                if x < bbox.x_min { bbox.x_min = x; }
-                if x > bbox.x_max { bbox.x_max = x; }
-                if y < bbox.y_min { bbox.y_min = y; }
-                if y > bbox.y_max { bbox.y_max = y; }
+                if x < bbox.x_min {
+                    bbox.x_min = x;
+                }
+                if x > bbox.x_max {
+                    bbox.x_max = x;
+                }
+                if y < bbox.y_min {
+                    bbox.y_min = y;
+                }
+                if y > bbox.y_max {
+                    bbox.y_max = y;
+                }
                 // 4-connectivity: up / down / left / right.
                 if x > outer.x {
                     push_if_unvisited(x - 1, y, map, raw, &mut visited, &mut queue);
@@ -444,7 +497,12 @@ fn mask_components(mask: &GrayImage) -> Vec<MaskBbox> {
 }
 
 #[derive(Clone, Copy)]
-struct BboxMap { bbox_x: u32, bbox_y: u32, image_w: u32, bbox_w: u32 }
+struct BboxMap {
+    bbox_x: u32,
+    bbox_y: u32,
+    image_w: u32,
+    bbox_w: u32,
+}
 
 impl BboxMap {
     #[inline]
@@ -459,8 +517,11 @@ impl BboxMap {
 
 #[inline]
 fn push_if_unvisited(
-    x: u32, y: u32, map: BboxMap,
-    raw: &[u8], visited: &mut [bool],
+    x: u32,
+    y: u32,
+    map: BboxMap,
+    raw: &[u8],
+    visited: &mut [bool],
     queue: &mut std::collections::VecDeque<(u32, u32)>,
 ) {
     let lidx = map.local_idx(x, y);
@@ -506,7 +567,6 @@ fn run_one_tile(
     let padded_image = pad_to_tile(image);
     let padded_mask = pad_mask_to_tile(mask);
 
-
     // CFG threshold: above 1.0 we run the UNet TWICE per step (cond +
     // uncond) and blend by `guidance_scale`. At ≤1.0 the cond pass is
     // all the user wants, so we skip the second to halve UNet cost.
@@ -516,7 +576,11 @@ fn run_one_tile(
     // when CFG), VAE encode, mask-to-latent. Each ORT call holds a
     // distinct session mutex (or none) so they run concurrently.
     let prompt = req.prompt.clone();
-    let neg_prompt = if use_cfg { Some(req.negative_prompt.clone()) } else { None };
+    let neg_prompt = if use_cfg {
+        Some(req.negative_prompt.clone())
+    } else {
+        None
+    };
     let (text_emb_cond, text_emb_uncond, masked_latent, mask_latent) =
         std::thread::scope(|s| -> Result<_, CoreError> {
             let cond_h = s.spawn(|| encode_text(bundle, &prompt));
@@ -526,14 +590,17 @@ fn run_one_tile(
             });
             let vae_h = s.spawn(|| vae_encode_masked(vae, &padded_image, &padded_mask));
             let mask_lat = mask_to_latent(&padded_mask);
-            let cond = cond_h.join()
-                .map_err(|_| CoreError::Inference("text encoder (cond) thread panicked".into()))??;
+            let cond = cond_h.join().map_err(|_| {
+                CoreError::Inference("text encoder (cond) thread panicked".into())
+            })??;
             let uncond = match uncond_h {
-                Some(h) => Some(h.join()
-                    .map_err(|_| CoreError::Inference("text encoder (uncond) thread panicked".into()))??),
+                Some(h) => Some(h.join().map_err(|_| {
+                    CoreError::Inference("text encoder (uncond) thread panicked".into())
+                })??),
                 None => None,
             };
-            let vae = vae_h.join()
+            let vae = vae_h
+                .join()
                 .map_err(|_| CoreError::Inference("vae encoder thread panicked".into()))??;
             Ok((cond, uncond, vae, mask_lat))
         })?;
@@ -596,8 +663,12 @@ fn run_one_tile(
     // Hold denoising state as Vec<f32> + captured dim. f16 conversion
     // uses ArrayView4::from_shape (zero-copy on the f32 side); the
     // scheduler writes via step_array_into into a reused scratch buffer.
-    let latent_dim = (1_usize, 4_usize,
-        SD_LATENT_SIDE as usize, SD_LATENT_SIDE as usize);
+    let latent_dim = (
+        1_usize,
+        4_usize,
+        SD_LATENT_SIDE as usize,
+        SD_LATENT_SIDE as usize,
+    );
     let mut latent_buf: Vec<f32> = if t_start == 0 {
         let mut l = sample_initial_noise(&mut rng);
         // σ-space schedulers (Euler-A) lift the initial sample onto
@@ -615,7 +686,9 @@ fn run_one_tile(
         let dist = StandardNormal;
         let noise: Vec<f32> = (0..n).map(|_| dist.sample(&mut rng)).collect();
         scheduler.add_noise(
-            image_latents.as_slice().expect("image latent: standard layout"),
+            image_latents
+                .as_slice()
+                .expect("image latent: standard layout"),
             &noise,
             t_start,
         )
@@ -625,9 +698,7 @@ fn run_one_tile(
     // Without CFG: just one UNet pass with cond.
     let timesteps = scheduler.timesteps().to_vec();
     let scale = req.guidance_scale;
-    let is_cancelled = || cancel.is_some_and(|c| {
-        c.load(std::sync::atomic::Ordering::Acquire)
-    });
+    let is_cancelled = || cancel.is_some_and(|c| c.load(std::sync::atomic::Ordering::Acquire));
     let needs_precondition = scheduler.requires_preconditioning();
     let mut precond_buf: Vec<f32> = Vec::new();
     // Scratch buffer for step output — hoisted outside the loop so
@@ -659,9 +730,8 @@ fn run_one_tile(
                 .expect("latent_dim matches latent_buf length by construction");
             f32_to_f16_view(view)
         };
-        let latent_in_f16 = concat_inpaint_input_f16(
-            &latent_f16, &mask_latent_f16, &masked_latent_f16,
-        );
+        let latent_in_f16 =
+            concat_inpaint_input_f16(&latent_f16, &mask_latent_f16, &masked_latent_f16);
         let noise_pred = if let Some(uncond_f16) = text_emb_uncond_f16.as_ref() {
             // CFG path: prefer batched UNet (one ORT call instead of two)
             // when the export supports a dynamic batch dim. On
@@ -683,8 +753,11 @@ fn run_one_tile(
                         tracing::warn!(%e,
                             "SD: batched CFG UNet rejected (likely static batch=1 ONNX); \
                              falling back to sequential cond+uncond for this session");
-                        bundle.cfg_fallback_to_sequential.store(true, Ordering::Relaxed);
-                        let pred_cond = unet_step(bundle, latent_in_f16.clone(), t, &text_emb_cond_f16)?;
+                        bundle
+                            .cfg_fallback_to_sequential
+                            .store(true, Ordering::Relaxed);
+                        let pred_cond =
+                            unet_step(bundle, latent_in_f16.clone(), t, &text_emb_cond_f16)?;
                         let pred_uncond = unet_step(bundle, latent_in_f16, t, uncond_f16)?;
                         cfg_blend(pred_uncond.view(), pred_cond.view(), scale)
                     }
@@ -701,8 +774,15 @@ fn run_one_tile(
         let is_final = i + 1 == timesteps.len();
         let np_slice = noise_pred.as_slice().expect("noise_pred: standard layout");
         step_array_into(
-            &mut scheduler, &latent_buf, np_slice, i, t, t_prev, is_final,
-            &mut rng, &mut step_out_buf,
+            &mut scheduler,
+            &latent_buf,
+            np_slice,
+            i,
+            t,
+            t_prev,
+            is_final,
+            &mut rng,
+            &mut step_out_buf,
         );
         // step_out_buf now holds the new denoised state; swap so
         // latent_buf becomes current and step_out_buf is the stale
@@ -738,20 +818,25 @@ impl TaesdSession {
         // through a String — the stored Result must be cloneable so
         // every caller can take an owned copy of the cached outcome.
         static CACHE: OnceLock<Result<Arc<TaesdSession>, String>> = OnceLock::new();
-        CACHE.get_or_init(|| Self::new_inner().map(Arc::new).map_err(|e| e.to_string()))
+        CACHE
+            .get_or_init(|| Self::new_inner().map(Arc::new).map_err(|e| e.to_string()))
             .clone()
             .map_err(CoreError::Inference)
     }
 
     fn new_inner() -> Result<TaesdSession, CoreError> {
-        let parts = prunr_models::multi_part_paths(prunr_models::ModelId::TaesdFp16)
-            .ok_or_else(|| CoreError::Inference(
-                prunr_models::not_installed_error(prunr_models::ModelId::TaesdFp16)
-            ))?;
+        let parts =
+            prunr_models::multi_part_paths(prunr_models::ModelId::TaesdFp16).ok_or_else(|| {
+                CoreError::Inference(prunr_models::not_installed_error(
+                    prunr_models::ModelId::TaesdFp16,
+                ))
+            })?;
         let by_key: HashMap<&str, PathBuf> = parts.into_iter().collect();
-        let encoder_path = by_key.get("encoder")
+        let encoder_path = by_key
+            .get("encoder")
             .ok_or_else(|| CoreError::Inference("TAESD bundle missing encoder part".into()))?;
-        let decoder_path = by_key.get("decoder")
+        let decoder_path = by_key
+            .get("decoder")
             .ok_or_else(|| CoreError::Inference("TAESD bundle missing decoder part".into()))?;
 
         // Build encoder + decoder in parallel — saves ~1-2 s of cold
@@ -773,12 +858,18 @@ impl TaesdSession {
         let encoder = enc_res?;
         let decoder = dec_res?;
 
-        let encoder_input = encoder.inputs().first()
+        let encoder_input = encoder
+            .inputs()
+            .first()
             .ok_or_else(|| CoreError::Inference("TAESD encoder: no inputs".into()))?
-            .name().to_string();
-        let decoder_input = decoder.inputs().first()
+            .name()
+            .to_string();
+        let decoder_input = decoder
+            .inputs()
+            .first()
             .ok_or_else(|| CoreError::Inference("TAESD decoder: no inputs".into()))?
-            .name().to_string();
+            .name()
+            .to_string();
 
         tracing::info!(
             encoder_input = %encoder_input, decoder_input = %decoder_input,
@@ -855,7 +946,9 @@ fn sd_cache() -> &'static Mutex<SdCache> {
 /// next stroke.
 pub(crate) fn release(id: prunr_models::ModelId) {
     let cache = sd_cache();
-    let mut guard = cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut guard = cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if guard.remove(&id).is_some() {
         tracing::info!(?id, "SD: cache entry released after dispatch");
     }
@@ -896,7 +989,8 @@ fn ensure_sweeper_running() {
                 loop {
                     std::thread::sleep(interval);
                     let cache = sd_cache();
-                    let mut guard = cache.lock()
+                    let mut guard = cache
+                        .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
                     let dropped = sweep_idle(&mut guard, Instant::now(), idle);
                     if dropped > 0 {
@@ -923,7 +1017,9 @@ impl SdSession {
         // Cache lock held only for the HashMap lookup and at most one
         // Arc<OnceLock> allocation — never for the bundle build.
         let slot: SdBundleSlot = {
-            let mut guard = cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut guard = cache
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let dropped = sweep_idle(&mut guard, now, idle);
             if dropped > 0 {
                 tracing::info!(
@@ -973,9 +1069,9 @@ impl SdSession {
         type SmokeFn = fn(&mut Session, &str) -> Result<(), String>;
         const PARTS: [(&str, SmokeFn); 4] = [
             ("text_encoder", smoke_test_text_encoder),
-            ("vae_encoder",  smoke_test_vae_encoder),
-            ("vae_decoder",  smoke_test_vae_decoder),
-            ("unet",         smoke_test_unet),
+            ("vae_encoder", smoke_test_vae_encoder),
+            ("vae_decoder", smoke_test_vae_decoder),
+            ("unet", smoke_test_unet),
         ];
 
         let build = |&(key, smoke): &(&'static str, SmokeFn)|
@@ -984,27 +1080,28 @@ impl SdSession {
                 Ok((key, s, ep))
             };
 
-        let mut parts: Vec<(&'static str, Session, String)> =
-            if crate::engine::directml_active() {
-                PARTS.iter().map(build).collect::<Result<_, _>>()?
-            } else {
-                use rayon::prelude::*;
-                PARTS.par_iter().map(build).collect::<Result<_, _>>()?
-            };
+        let mut parts: Vec<(&'static str, Session, String)> = if crate::engine::directml_active() {
+            PARTS.iter().map(build).collect::<Result<_, _>>()?
+        } else {
+            use rayon::prelude::*;
+            PARTS.par_iter().map(build).collect::<Result<_, _>>()?
+        };
 
         // Match by key so the destructure below survives reordering of
         // PARTS. `IndexedParallelIterator::collect` preserves order, so
         // this is defensive — cheap at N=4.
         let mut take = |want: &str| -> Result<(Session, String), String> {
-            let pos = parts.iter().position(|(k, _, _)| *k == want)
+            let pos = parts
+                .iter()
+                .position(|(k, _, _)| *k == want)
                 .ok_or_else(|| format!("SD bundle missing built part: {want}"))?;
             let (_, s, ep) = parts.swap_remove(pos);
             Ok((s, ep))
         };
         let (text_encoder, text_ep) = take("text_encoder")?;
-        let (vae_encoder,  vae_enc_ep) = take("vae_encoder")?;
-        let (vae_decoder,  vae_dec_ep) = take("vae_decoder")?;
-        let (unet,         unet_ep)    = take("unet")?;
+        let (vae_encoder, vae_enc_ep) = take("vae_encoder")?;
+        let (vae_decoder, vae_dec_ep) = take("vae_decoder")?;
+        let (unet, unet_ep) = take("unet")?;
 
         let unet_inputs = take_three_inputs(&unet, "unet")?;
         let vae_encoder_input = take_first_input(&vae_encoder, "vae_encoder")?;
@@ -1048,7 +1145,8 @@ fn build_part_with_ep_ladder(
     by_key: &HashMap<&str, PathBuf>,
     smoke_test: fn(&mut Session, &str) -> Result<(), String>,
 ) -> Result<(Session, String), String> {
-    let path = by_key.get(key)
+    let path = by_key
+        .get(key)
         .ok_or_else(|| format!("SD bundle missing required part: {key}"))?;
 
     let gpu_eps = crate::engine::available_gpu_eps();
@@ -1137,7 +1235,8 @@ fn build_part_with_ep_ladder(
                 tracing::warn!(part = %key, ep = %ep, %e, "SD: GPU session commit failed — trying next");
                 crate::engine::handle_commit_failure(
                     matches!(load_path, Cow::Owned(_)),
-                    ep, id,
+                    ep,
+                    id,
                     || crate::cache::optimized_model_path_for_part(id, ep.as_str(), key),
                     &format!("{e}"),
                 );
@@ -1153,7 +1252,8 @@ fn build_part_with_ep_ladder(
                 tracing::warn!(part = %key, ep = %ep, %e, "SD: smoke test failed — falling back");
                 crate::engine::handle_commit_failure(
                     matches!(load_path, Cow::Owned(_)),
-                    ep, id,
+                    ep,
+                    id,
                     || crate::cache::optimized_model_path_for_part(id, ep.as_str(), key),
                     &e,
                 );
@@ -1163,21 +1263,21 @@ fn build_part_with_ep_ladder(
 
     // SD bundle weights are FP16; the ORT CPU EP runs them but produces
     // text-like artifacts instead of a coherent fill. GPU EP required.
-    debug_assert!(id.is_sd_family(),
-        "build_part_with_ep_ladder is SD-only; non-SD id reached CPU fallback");
+    debug_assert!(
+        id.is_sd_family(),
+        "build_part_with_ep_ladder is SD-only; non-SD id reached CPU fallback"
+    );
     if id.is_sd_family() {
         tracing::warn!(?id, part = %key,
             "SD bundle build refused: no compatible GPU EP, CPU produces wrong output");
-        return Err(
-            "SD inpaint requires GPU acceleration. No compatible GPU \
+        return Err("SD inpaint requires GPU acceleration. No compatible GPU \
              execution provider is available; SD on CPU produces \
              incorrect output. Install OpenVINO Runtime (Settings → \
-             Hardware) or pick LaMa as the eraser instead.".to_string(),
-        );
+             Hardware) or pick LaMa as the eraser instead."
+            .to_string());
     }
     crate::cache::gc_stale_for_model(id, "CPU");
-    let builder = sd_base_builder()
-        .map_err(|e| format!("SD {key}: builder init: {e}"))?;
+    let builder = sd_base_builder().map_err(|e| format!("SD {key}: builder init: {e}"))?;
     let (mut builder, load_path) = sd_apply_path_cache(builder, path.as_path(), id, "CPU", key);
     let started = Instant::now();
     let session = builder
@@ -1206,7 +1306,8 @@ fn sd_apply_path_cache<'a>(
     ep_name: &str,
     part: &str,
 ) -> (ort::session::builder::SessionBuilder, Cow<'a, Path>) {
-    let Some(cache_path) = crate::cache::optimized_model_path_for_part(model_id, ep_name, part) else {
+    let Some(cache_path) = crate::cache::optimized_model_path_for_part(model_id, ep_name, part)
+    else {
         return (builder, Cow::Borrowed(source_path));
     };
     if cache_path.is_file() {
@@ -1234,10 +1335,11 @@ fn sd_apply_path_cache<'a>(
 
 fn smoke_test_text_encoder(s: &mut Session, label: &str) -> Result<(), String> {
     let tokens = clip_tokenize("");
-    let t = Tensor::from_array(tokens)
-        .map_err(|e| format!("{label}: smoke input: {e}"))?;
+    let t = Tensor::from_array(tokens).map_err(|e| format!("{label}: smoke input: {e}"))?;
     let inputs = s.inputs();
-    let name = inputs.first().map(|i| i.name().to_string())
+    let name = inputs
+        .first()
+        .map(|i| i.name().to_string())
         .ok_or_else(|| format!("{label}: no inputs"))?;
     s.run(inputs![name.as_str() => &t])
         .map_err(|e| format!("{label}: smoke run: {e}"))?;
@@ -1246,10 +1348,11 @@ fn smoke_test_text_encoder(s: &mut Session, label: &str) -> Result<(), String> {
 
 fn smoke_test_vae_encoder(s: &mut Session, label: &str) -> Result<(), String> {
     let img = Array4::<f16>::zeros((1, 3, SD_TILE as usize, SD_TILE as usize));
-    let t = Tensor::from_array(img)
-        .map_err(|e| format!("{label}: smoke input: {e}"))?;
+    let t = Tensor::from_array(img).map_err(|e| format!("{label}: smoke input: {e}"))?;
     let inputs = s.inputs();
-    let name = inputs.first().map(|i| i.name().to_string())
+    let name = inputs
+        .first()
+        .map(|i| i.name().to_string())
         .ok_or_else(|| format!("{label}: no inputs"))?;
     s.run(inputs![name.as_str() => &t])
         .map_err(|e| format!("{label}: smoke run: {e}"))?;
@@ -1258,10 +1361,11 @@ fn smoke_test_vae_encoder(s: &mut Session, label: &str) -> Result<(), String> {
 
 fn smoke_test_vae_decoder(s: &mut Session, label: &str) -> Result<(), String> {
     let lat = Array4::<f16>::zeros((1, 4, SD_LATENT_SIDE as usize, SD_LATENT_SIDE as usize));
-    let t = Tensor::from_array(lat)
-        .map_err(|e| format!("{label}: smoke input: {e}"))?;
+    let t = Tensor::from_array(lat).map_err(|e| format!("{label}: smoke input: {e}"))?;
     let inputs = s.inputs();
-    let name = inputs.first().map(|i| i.name().to_string())
+    let name = inputs
+        .first()
+        .map(|i| i.name().to_string())
         .ok_or_else(|| format!("{label}: no inputs"))?;
     s.run(inputs![name.as_str() => &t])
         .map_err(|e| format!("{label}: smoke run: {e}"))?;
@@ -1278,7 +1382,10 @@ fn smoke_test_unet(s: &mut Session, label: &str) -> Result<(), String> {
     let emb_t = Tensor::from_array(emb).map_err(|e| format!("{label}: smoke emb: {e}"))?;
     let inputs = s.inputs();
     if inputs.len() < 3 {
-        return Err(format!("{label}: smoke needs ≥3 inputs, got {}", inputs.len()));
+        return Err(format!(
+            "{label}: smoke needs ≥3 inputs, got {}",
+            inputs.len()
+        ));
     }
     let n0 = inputs[0].name().to_string();
     let n1 = inputs[1].name().to_string();
@@ -1287,13 +1394,15 @@ fn smoke_test_unet(s: &mut Session, label: &str) -> Result<(), String> {
         n0.as_str() => &lat_t,
         n1.as_str() => &ts_t,
         n2.as_str() => &emb_t,
-    ]).map_err(|e| format!("{label}: smoke run: {e}"))?;
+    ])
+    .map_err(|e| format!("{label}: smoke run: {e}"))?;
     Ok(())
 }
 
 fn take_first_input(s: &Session, label: &str) -> Result<String, String> {
     let inputs = s.inputs();
-    inputs.first()
+    inputs
+        .first()
         .map(|i| i.name().to_string())
         .ok_or_else(|| format!("SD {label}: no inputs declared"))
 }
@@ -1301,7 +1410,10 @@ fn take_first_input(s: &Session, label: &str) -> Result<String, String> {
 fn take_three_inputs(s: &Session, label: &str) -> Result<[String; 3], String> {
     let inputs = s.inputs();
     if inputs.len() < 3 {
-        return Err(format!("SD {label}: expected ≥3 inputs, got {}", inputs.len()));
+        return Err(format!(
+            "SD {label}: expected ≥3 inputs, got {}",
+            inputs.len()
+        ));
     }
     Ok([
         inputs[0].name().to_string(),
@@ -1343,9 +1455,12 @@ fn encode_text(bundle: &SdSession, prompt: &str) -> Result<Array3<f32>, CoreErro
     let tokens = clip_tokenize(prompt);
     let t = Tensor::from_array(tokens)
         .map_err(|e| CoreError::Inference(format!("SD text encoder: input tensor: {e}")))?;
-    let mut session = bundle.text_encoder.lock()
+    let mut session = bundle
+        .text_encoder
+        .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let outputs = session.run(inputs![bundle.text_encoder_input.as_str() => &t])
+    let outputs = session
+        .run(inputs![bundle.text_encoder_input.as_str() => &t])
         .map_err(|e| CoreError::Inference(format!("SD text encoder: run: {e}")))?;
     extract_3d(&outputs[0], "text encoder")
 }
@@ -1375,7 +1490,10 @@ fn vae_encode_masked(
     vae_encode_from_input(backend, input)
 }
 
-fn vae_encode_from_input(backend: &VaeBackend, input: Array4<f32>) -> Result<Array4<f32>, CoreError> {
+fn vae_encode_from_input(
+    backend: &VaeBackend,
+    input: Array4<f32>,
+) -> Result<Array4<f32>, CoreError> {
     let input_f16 = f32_to_f16_4d(&input);
     // Belt-and-suspenders: NLL would drop `input` at end of statement
     // anyway since it's unused below. The explicit drop documents
@@ -1388,18 +1506,24 @@ fn vae_encode_from_input(backend: &VaeBackend, input: Array4<f32>) -> Result<Arr
         .map_err(|e| CoreError::Inference(format!("vae encoder: input tensor: {e}")))?;
     match backend {
         VaeBackend::Standard(bundle) => {
-            let mut session = bundle.vae_encoder.lock()
+            let mut session = bundle
+                .vae_encoder
+                .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let outputs = session.run(inputs![bundle.vae_encoder_input.as_str() => &t])
+            let outputs = session
+                .run(inputs![bundle.vae_encoder_input.as_str() => &t])
                 .map_err(|e| CoreError::Inference(format!("SD vae encoder: run: {e}")))?;
             let mut latent = extract_4d(&outputs[0], "vae encoder")?;
             latent *= VAE_SCALING_FACTOR;
             Ok(latent)
         }
         VaeBackend::Taesd(taesd) => {
-            let mut session = taesd.encoder.lock()
+            let mut session = taesd
+                .encoder
+                .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let outputs = session.run(inputs![taesd.encoder_input.as_str() => &t])
+            let outputs = session
+                .run(inputs![taesd.encoder_input.as_str() => &t])
                 .map_err(|e| CoreError::Inference(format!("TAESD encoder: run: {e}")))?;
             extract_4d(&outputs[0], "TAESD encoder")
         }
@@ -1415,9 +1539,12 @@ fn vae_decode(backend: &VaeBackend, latent: &Array4<f32>) -> Result<RgbaImage, C
             let unscaled_f16 = latent.mapv(|v| f16::from_f32(v / VAE_SCALING_FACTOR));
             let t = Tensor::from_array(unscaled_f16)
                 .map_err(|e| CoreError::Inference(format!("SD vae decoder: input tensor: {e}")))?;
-            let mut session = bundle.vae_decoder.lock()
+            let mut session = bundle
+                .vae_decoder
+                .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let outputs = session.run(inputs![bundle.vae_decoder_input.as_str() => &t])
+            let outputs = session
+                .run(inputs![bundle.vae_decoder_input.as_str() => &t])
                 .map_err(|e| CoreError::Inference(format!("SD vae decoder: run: {e}")))?;
             let arr = extract_4d(&outputs[0], "vae decoder")?;
             Ok(minus1_plus1_to_image(&arr))
@@ -1426,9 +1553,12 @@ fn vae_decode(backend: &VaeBackend, latent: &Array4<f32>) -> Result<RgbaImage, C
             let latent_f16 = f32_to_f16_4d(latent);
             let t = Tensor::from_array(latent_f16)
                 .map_err(|e| CoreError::Inference(format!("TAESD decoder: input tensor: {e}")))?;
-            let mut session = taesd.decoder.lock()
+            let mut session = taesd
+                .decoder
+                .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let outputs = session.run(inputs![taesd.decoder_input.as_str() => &t])
+            let outputs = session
+                .run(inputs![taesd.decoder_input.as_str() => &t])
                 .map_err(|e| CoreError::Inference(format!("TAESD decoder: run: {e}")))?;
             let arr = extract_4d(&outputs[0], "TAESD decoder")?;
             Ok(minus1_plus1_to_image(&arr))
@@ -1458,13 +1588,16 @@ fn unet_step(
         .map_err(|e| CoreError::Inference(format!("SD unet: timestep tensor: {e}")))?;
     let emb_t = Tensor::from_array(text_emb_f16.clone())
         .map_err(|e| CoreError::Inference(format!("SD unet: text emb tensor: {e}")))?;
-    let mut session = bundle.unet.lock()
+    let mut session = bundle
+        .unet
+        .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let outputs = session.run(inputs![
-        bundle.unet_inputs[0].as_str() => &lat_t,
-        bundle.unet_inputs[1].as_str() => &ts_t,
-        bundle.unet_inputs[2].as_str() => &emb_t,
-    ])
+    let outputs = session
+        .run(inputs![
+            bundle.unet_inputs[0].as_str() => &lat_t,
+            bundle.unet_inputs[1].as_str() => &ts_t,
+            bundle.unet_inputs[2].as_str() => &emb_t,
+        ])
         .map_err(|e| CoreError::Inference(format!("SD unet: run: {e}")))?;
     extract_4d(&outputs[0], "unet")
 }
@@ -1484,12 +1617,14 @@ fn unet_step_batched(
     text_emb_cond_f16: &Array3<f16>,
     text_emb_uncond_f16: &Array3<f16>,
 ) -> Result<Array4<f32>, CoreError> {
-    let latent_pair = ndarray::concatenate(
-        Axis(0), &[latent_9ch_f16.view(), latent_9ch_f16.view()],
-    ).map_err(|e| CoreError::Inference(format!("SD unet batched: latent concat: {e}")))?;
+    let latent_pair =
+        ndarray::concatenate(Axis(0), &[latent_9ch_f16.view(), latent_9ch_f16.view()])
+            .map_err(|e| CoreError::Inference(format!("SD unet batched: latent concat: {e}")))?;
     let text_pair = ndarray::concatenate(
-        Axis(0), &[text_emb_cond_f16.view(), text_emb_uncond_f16.view()],
-    ).map_err(|e| CoreError::Inference(format!("SD unet batched: text concat: {e}")))?;
+        Axis(0),
+        &[text_emb_cond_f16.view(), text_emb_uncond_f16.view()],
+    )
+    .map_err(|e| CoreError::Inference(format!("SD unet batched: text concat: {e}")))?;
     let timestep = ndarray::Array1::<f16>::from_elem(2, f16::from_f32(t as f32));
 
     let lat_t = Tensor::from_array(latent_pair)
@@ -1498,13 +1633,16 @@ fn unet_step_batched(
         .map_err(|e| CoreError::Inference(format!("SD unet batched: timestep tensor: {e}")))?;
     let emb_t = Tensor::from_array(text_pair)
         .map_err(|e| CoreError::Inference(format!("SD unet batched: text tensor: {e}")))?;
-    let mut session = bundle.unet.lock()
+    let mut session = bundle
+        .unet
+        .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let outputs = session.run(inputs![
-        bundle.unet_inputs[0].as_str() => &lat_t,
-        bundle.unet_inputs[1].as_str() => &ts_t,
-        bundle.unet_inputs[2].as_str() => &emb_t,
-    ])
+    let outputs = session
+        .run(inputs![
+            bundle.unet_inputs[0].as_str() => &lat_t,
+            bundle.unet_inputs[1].as_str() => &ts_t,
+            bundle.unet_inputs[2].as_str() => &emb_t,
+        ])
         .map_err(|e| CoreError::Inference(format!("SD unet batched: run: {e}")))?;
     extract_4d(&outputs[0], "unet (batched)")
 }
@@ -1533,7 +1671,8 @@ fn f32_to_f16_4d(arr: &Array4<f32>) -> Array4<f16> {
 /// so each session site is one line at the boundary.
 fn extract_3d(value: &ort::value::DynValue, label: &str) -> Result<Array3<f32>, CoreError> {
     if let Ok(arr) = value.try_extract_array::<f32>() {
-        return arr.into_dimensionality::<ndarray::Ix3>()
+        return arr
+            .into_dimensionality::<ndarray::Ix3>()
             .map(|a| a.to_owned())
             .map_err(|e| CoreError::Inference(format!("SD {label}: shape ≠ 3D: {e}")));
     }
@@ -1547,7 +1686,8 @@ fn extract_3d(value: &ort::value::DynValue, label: &str) -> Result<Array3<f32>, 
 
 fn extract_4d(value: &ort::value::DynValue, label: &str) -> Result<Array4<f32>, CoreError> {
     if let Ok(arr) = value.try_extract_array::<f32>() {
-        return arr.into_dimensionality::<ndarray::Ix4>()
+        return arr
+            .into_dimensionality::<ndarray::Ix4>()
             .map(|a| a.to_owned())
             .map_err(|e| CoreError::Inference(format!("SD {label}: shape ≠ 4D: {e}")));
     }
@@ -1588,7 +1728,7 @@ fn image_to_minus1_plus1_inner(image: &RgbaImage, mask: Option<&GrayImage>) -> A
         for x in 0..w_us.min(s) {
             let dst = dst_row + x;
             let src = src_row + x * 4;
-            let r = (raw[src]     as f32 / 127.5) - 1.0;
+            let r = (raw[src] as f32 / 127.5) - 1.0;
             let g = (raw[src + 1] as f32 / 127.5) - 1.0;
             let b = (raw[src + 2] as f32 / 127.5) - 1.0;
             if let Some(m) = m {
@@ -1600,17 +1740,17 @@ fn image_to_minus1_plus1_inner(image: &RgbaImage, mask: Option<&GrayImage>) -> A
                 // outputs as a grey ghost. Composite-time softness is
                 // handled by inpaint_feather, not here.
                 if m[mask_row + x] > 127 {
-                    buf[dst]             = v_fill;
-                    buf[plane + dst]     = v_fill;
+                    buf[dst] = v_fill;
+                    buf[plane + dst] = v_fill;
                     buf[plane * 2 + dst] = v_fill;
                 } else {
-                    buf[dst]             = r;
-                    buf[plane + dst]     = g;
+                    buf[dst] = r;
+                    buf[plane + dst] = g;
                     buf[plane * 2 + dst] = b;
                 }
             } else {
-                buf[dst]             = r;
-                buf[plane + dst]     = g;
+                buf[dst] = r;
+                buf[plane + dst] = g;
                 buf[plane * 2 + dst] = b;
             }
         }
@@ -1634,16 +1774,19 @@ fn minus1_plus1_to_image(arr: &Array4<f32>) -> RgbaImage {
     let plane = s * s;
     let buf = arr.as_slice().unwrap_or(&[]);
     if buf.len() < plane * 3 {
-        tracing::warn!(buf_len = buf.len(), "SD vae decode: buffer smaller than tile");
+        tracing::warn!(
+            buf_len = buf.len(),
+            "SD vae decode: buffer smaller than tile"
+        );
         return RgbaImage::new(SD_TILE, SD_TILE);
     }
     let mut out = RgbaImage::new(SD_TILE, SD_TILE);
     let dst = out.as_mut();
     for i in 0..plane {
-        let r = ((buf[i]              + 1.0) * 127.5).clamp(0.0, 255.0) as u8;
-        let g = ((buf[plane + i]      + 1.0) * 127.5).clamp(0.0, 255.0) as u8;
-        let b = ((buf[plane * 2 + i]  + 1.0) * 127.5).clamp(0.0, 255.0) as u8;
-        dst[i * 4]     = r;
+        let r = ((buf[i] + 1.0) * 127.5).clamp(0.0, 255.0) as u8;
+        let g = ((buf[plane + i] + 1.0) * 127.5).clamp(0.0, 255.0) as u8;
+        let b = ((buf[plane * 2 + i] + 1.0) * 127.5).clamp(0.0, 255.0) as u8;
+        dst[i * 4] = r;
         dst[i * 4 + 1] = g;
         dst[i * 4 + 2] = b;
         dst[i * 4 + 3] = 255;
@@ -1673,11 +1816,15 @@ fn mask_to_latent(mask: &GrayImage) -> Array4<f32> {
             let mut sum = 0_u32;
             for dy in 0..8 {
                 let sy = ly * 8 + dy;
-                if sy >= h_us { continue; }
+                if sy >= h_us {
+                    continue;
+                }
                 let row = sy * w_us;
                 for dx in 0..8 {
                     let sx = lx * 8 + dx;
-                    if sx >= w_us { continue; }
+                    if sx >= w_us {
+                        continue;
+                    }
                     sum += raw[row + sx] as u32;
                 }
             }
@@ -1697,11 +1844,10 @@ fn concat_inpaint_input_f16(
     mask_lat: &Array4<f16>,
     masked_lat: &Array4<f16>,
 ) -> Array4<f16> {
-    ndarray::concatenate(Axis(1), &[
-        latent.view(),
-        mask_lat.view(),
-        masked_lat.view(),
-    ])
+    ndarray::concatenate(
+        Axis(1),
+        &[latent.view(), mask_lat.view(), masked_lat.view()],
+    )
     .expect("concat: shapes pre-validated to (1, *, 64, 64)")
 }
 
@@ -1718,13 +1864,18 @@ fn sample_initial_noise(rng: &mut ChaCha8Rng) -> Array4<f32> {
         let v: f32 = dist.sample(rng);
         buf.push(v);
     }
-    Array4::from_shape_vec((1, 4, l, l), buf)
-        .expect("shape pre-computed; buf length matches")
+    Array4::from_shape_vec((1, 4, l, l), buf).expect("shape pre-computed; buf length matches")
 }
 
 /// Composite painted output back onto source: source-byte-identical
 /// outside the mask (no VAE round-trip drift), painted bytes inside.
-fn composite(source: &RgbaImage, painted: &RgbaImage, mask: &GrayImage, w: u32, h: u32) -> RgbaImage {
+fn composite(
+    source: &RgbaImage,
+    painted: &RgbaImage,
+    mask: &GrayImage,
+    w: u32,
+    h: u32,
+) -> RgbaImage {
     let mut out = source.clone();
     let dst = out.as_mut();
     let pnt = painted.as_raw();
@@ -1733,10 +1884,12 @@ fn composite(source: &RgbaImage, painted: &RgbaImage, mask: &GrayImage, w: u32, 
     for y in 0..h as usize {
         for x in 0..w as usize {
             let i = y * w as usize + x;
-            if i >= m.len() { continue; }
+            if i >= m.len() {
+                continue;
+            }
             if m[i] > 127 {
                 let pi = (y * painted_w + x) * 4;
-                dst[i * 4]     = pnt[pi];
+                dst[i * 4] = pnt[pi];
                 dst[i * 4 + 1] = pnt[pi + 1];
                 dst[i * 4 + 2] = pnt[pi + 2];
             }
@@ -1757,7 +1910,9 @@ fn cfg_blend(
     scale: f32,
 ) -> Array4<f32> {
     debug_assert_eq!(uncond.dim(), cond.dim(), "CFG blend: shape mismatch");
-    let buf: Vec<f32> = uncond.iter().zip(cond.iter())
+    let buf: Vec<f32> = uncond
+        .iter()
+        .zip(cond.iter())
         .map(|(&u, &c)| u + scale * (c - u))
         .collect();
     Array4::from_shape_vec(uncond.dim(), buf).expect("dim matches by construction")
@@ -1865,7 +2020,11 @@ pub(crate) fn available_ram_bytes() -> Option<u64> {
         sys.refresh_memory();
         sys.available_memory()
     });
-    if avail == 0 { None } else { Some(avail) }
+    if avail == 0 {
+        None
+    } else {
+        Some(avail)
+    }
 }
 
 /// Current process RSS in MB. `None` when sysinfo can't read the process
@@ -1905,10 +2064,14 @@ const SAFETY_MARGIN_MB: u64 = 2_000;
 /// calls it on every dispatch; `SdSession::new_inner` calls it on
 /// bundle build for the prewarm path that bypasses the inpaint entry.
 pub(crate) fn check_ram_for(id: prunr_models::ModelId) -> Result<(), String> {
-    let Some(desc) = prunr_models::descriptor(id) else { return Ok(()) };
+    let Some(desc) = prunr_models::descriptor(id) else {
+        return Ok(());
+    };
     let need_mb = desc.working_set_mb as u64 + SAFETY_MARGIN_MB;
     let need = need_mb * 1024 * 1024;
-    let Some(free) = available_ram_bytes() else { return Ok(()) };
+    let Some(free) = available_ram_bytes() else {
+        return Ok(());
+    };
     if free >= need {
         return Ok(());
     }
@@ -2046,18 +2209,27 @@ impl DdimScheduler {
 
     /// Standard DDIM update with `eta = 0` (deterministic).
     pub fn step(&self, latent_t: &[f32], noise_pred: &[f32], t: i64, t_prev: i64) -> Vec<f32> {
-        debug_assert_eq!(latent_t.len(), noise_pred.len(),
-            "DDIM step: latent and noise_pred shapes must match");
+        debug_assert_eq!(
+            latent_t.len(),
+            noise_pred.len(),
+            "DDIM step: latent and noise_pred shapes must match"
+        );
         let alpha_t = self.alpha_cumprod(t);
         // SD-1.5 ships set_alpha_to_one=false; final-step alpha_prev =
         // alphas_cumprod[0] (≈0.99915), not 1.0.
-        let alpha_prev = if t_prev < 0 { self.alpha_cumprod(0) } else { self.alpha_cumprod(t_prev) };
+        let alpha_prev = if t_prev < 0 {
+            self.alpha_cumprod(0)
+        } else {
+            self.alpha_cumprod(t_prev)
+        };
         let sqrt_alpha_t = alpha_t.sqrt();
         let sqrt_one_minus_alpha_t = (1.0 - alpha_t).sqrt();
         let sqrt_alpha_prev = alpha_prev.sqrt();
         let sqrt_one_minus_alpha_prev = (1.0 - alpha_prev).sqrt();
 
-        latent_t.iter().zip(noise_pred.iter())
+        latent_t
+            .iter()
+            .zip(noise_pred.iter())
             .map(|(&l, &eps)| {
                 let pred_x0 = (l - sqrt_one_minus_alpha_t * eps) / sqrt_alpha_t;
                 sqrt_alpha_prev * pred_x0 + sqrt_one_minus_alpha_prev * eps
@@ -2179,8 +2351,11 @@ impl LcmScheduler {
         is_final_step: bool,
         _noise_for_step: &[f32],
     ) -> Vec<f32> {
-        debug_assert_eq!(latent_t.len(), noise_pred.len(),
-            "LCM step: latent and noise_pred shapes must match");
+        debug_assert_eq!(
+            latent_t.len(),
+            noise_pred.len(),
+            "LCM step: latent and noise_pred shapes must match"
+        );
         // step_array routes is_final_step=false to step_at — the
         // non-final branch here is structurally unreachable.
         if !is_final_step {
@@ -2192,7 +2367,9 @@ impl LcmScheduler {
         let sqrt_beta_t = (1.0 - alpha_t).sqrt();
         let (c_skip, c_out) = self.consistency_coefficients(t);
 
-        latent_t.iter().zip(noise_pred.iter())
+        latent_t
+            .iter()
+            .zip(noise_pred.iter())
             .map(|(&l, &eps)| {
                 let pred_x0 = (l - sqrt_beta_t * eps) / sqrt_alpha_t;
                 c_out * pred_x0 + c_skip * l
@@ -2210,10 +2387,16 @@ impl LcmScheduler {
         t_prev: i64,
         noise_for_step: &[f32],
     ) -> Vec<f32> {
-        debug_assert_eq!(latent_t.len(), noise_pred.len(),
-            "LCM step_at: latent and noise_pred shapes must match");
-        debug_assert_eq!(noise_for_step.len(), latent_t.len(),
-            "LCM step_at: noise_for_step length must match latent");
+        debug_assert_eq!(
+            latent_t.len(),
+            noise_pred.len(),
+            "LCM step_at: latent and noise_pred shapes must match"
+        );
+        debug_assert_eq!(
+            noise_for_step.len(),
+            latent_t.len(),
+            "LCM step_at: noise_for_step length must match latent"
+        );
 
         let alpha_t = self.alpha_cumprod(t);
         let sqrt_alpha_t = alpha_t.sqrt();
@@ -2222,11 +2405,16 @@ impl LcmScheduler {
 
         // SD-1.5 ships set_alpha_to_one=false; final-step alpha_prev =
         // alphas_cumprod[0] (≈0.99915), not 1.0.
-        let alpha_prev = if t_prev < 0 { self.alpha_cumprod(0) } else { self.alpha_cumprod(t_prev) };
+        let alpha_prev = if t_prev < 0 {
+            self.alpha_cumprod(0)
+        } else {
+            self.alpha_cumprod(t_prev)
+        };
         let sqrt_alpha_prev = alpha_prev.sqrt();
         let sqrt_beta_prev = (1.0 - alpha_prev).sqrt();
 
-        latent_t.iter()
+        latent_t
+            .iter()
             .zip(noise_pred.iter())
             .zip(noise_for_step.iter())
             .map(|((&l, &eps), &n)| {
@@ -2271,7 +2459,8 @@ impl DpmPp2MScheduler {
         sigmas.push(sigma_min);
 
         // Convert each non-terminal sigma to a timestep for UNet input.
-        let timesteps: Vec<i64> = sigmas[..num_inference].iter()
+        let timesteps: Vec<i64> = sigmas[..num_inference]
+            .iter()
             .map(|&sigma| sigma_to_t(sigma, log_sigmas))
             .collect();
 
@@ -2284,19 +2473,21 @@ impl DpmPp2MScheduler {
         }
     }
 
-    pub fn timesteps(&self) -> &[i64] { &self.timesteps }
+    pub fn timesteps(&self) -> &[i64] {
+        &self.timesteps
+    }
 
-    pub fn step(
-        &mut self,
-        latent: &[f32],
-        noise_pred: &[f32],
-        step_idx: usize,
-    ) -> Vec<f32> {
-        debug_assert_eq!(latent.len(), noise_pred.len(),
-            "DPM++ step: latent and noise_pred shapes must match");
-        debug_assert!(step_idx + 1 < self.sigmas.len(),
+    pub fn step(&mut self, latent: &[f32], noise_pred: &[f32], step_idx: usize) -> Vec<f32> {
+        debug_assert_eq!(
+            latent.len(),
+            noise_pred.len(),
+            "DPM++ step: latent and noise_pred shapes must match"
+        );
+        debug_assert!(
+            step_idx + 1 < self.sigmas.len(),
             "DPM++ step: step_idx {step_idx} out of range for sigmas len {}",
-            self.sigmas.len());
+            self.sigmas.len()
+        );
 
         let sigma_s0 = self.sigmas[step_idx];
         let sigma_t = self.sigmas[step_idx + 1];
@@ -2322,7 +2513,8 @@ impl DpmPp2MScheduler {
                 let r0 = (lambda_s0 - lambda_s1) / h;
                 let inv_r0 = 1.0 / r0;
 
-                latent.iter()
+                latent
+                    .iter()
                     .zip(m0.iter())
                     .zip(m1.iter())
                     .map(|((&l, &md0), &md1)| {
@@ -2331,14 +2523,16 @@ impl DpmPp2MScheduler {
                     })
                     .collect()
             } else {
-                latent.iter()
+                latent
+                    .iter()
                     .zip(m0.iter())
                     .map(|(&l, &md0)| ratio * l - coef * md0)
                     .collect()
             }
         } else {
             // Terminal step: first-order regardless of prev_model_output.
-            latent.iter()
+            latent
+                .iter()
                 .zip(m0.iter())
                 .map(|(&l, &md0)| ratio * l - coef * md0)
                 .collect()
@@ -2385,7 +2579,8 @@ impl EulerAScheduler {
         // the multistep formula).
         sigmas.push(0.0);
 
-        let timesteps: Vec<i64> = sigmas[..num_inference].iter()
+        let timesteps: Vec<i64> = sigmas[..num_inference]
+            .iter()
             .map(|&sigma| sigma_to_t(sigma, log_sigmas))
             .collect();
 
@@ -2397,7 +2592,9 @@ impl EulerAScheduler {
         }
     }
 
-    pub fn timesteps(&self) -> &[i64] { &self.timesteps }
+    pub fn timesteps(&self) -> &[i64] {
+        &self.timesteps
+    }
 
     /// Multiplier applied to the initial standard-normal noise before
     /// the denoise loop. Diffusers' "leading" timestep spacing:
@@ -2427,10 +2624,16 @@ impl EulerAScheduler {
         noise: &[f32],
         out: &mut Vec<f32>,
     ) {
-        debug_assert_eq!(latent.len(), noise_pred.len(),
-            "Euler-A step: latent and noise_pred shapes must match");
-        debug_assert_eq!(latent.len(), noise.len(),
-            "Euler-A step: latent and noise shapes must match");
+        debug_assert_eq!(
+            latent.len(),
+            noise_pred.len(),
+            "Euler-A step: latent and noise_pred shapes must match"
+        );
+        debug_assert_eq!(
+            latent.len(),
+            noise.len(),
+            "Euler-A step: latent and noise shapes must match"
+        );
         debug_assert!(step_idx + 1 < self.sigmas.len());
 
         let sigma = self.sigmas[step_idx];
@@ -2441,8 +2644,7 @@ impl EulerAScheduler {
         //   sigma_down = √(σ_to² - sigma_up²)
         // At terminal (σ_to=0), sigma_up = sigma_down = 0 → next = sample + ε * (-σ).
         let sigma_up = if sigma > 0.0 {
-            let raw = sigma_to * sigma_to * (sigma * sigma - sigma_to * sigma_to)
-                / (sigma * sigma);
+            let raw = sigma_to * sigma_to * (sigma * sigma - sigma_to * sigma_to) / (sigma * sigma);
             raw.max(0.0).sqrt()
         } else {
             0.0
@@ -2454,7 +2656,10 @@ impl EulerAScheduler {
         let dt = sigma_down - sigma;
         out.clear();
         out.extend(
-            latent.iter().zip(noise_pred.iter()).zip(noise.iter())
+            latent
+                .iter()
+                .zip(noise_pred.iter())
+                .zip(noise.iter())
                 .map(|((&l, &eps), &n)| l + eps * dt + n * sigma_up),
         );
     }
@@ -2521,7 +2726,8 @@ impl UniPcScheduler {
         // is safe here (unlike DPM++ which needs sigma_min).
         sigmas.push(0.0);
 
-        let timesteps: Vec<i64> = sigmas[..num_inference].iter()
+        let timesteps: Vec<i64> = sigmas[..num_inference]
+            .iter()
             .map(|&s| sigma_to_t(s, log_sigmas))
             .collect();
 
@@ -2539,7 +2745,9 @@ impl UniPcScheduler {
         }
     }
 
-    pub fn timesteps(&self) -> &[i64] { &self.timesteps }
+    pub fn timesteps(&self) -> &[i64] {
+        &self.timesteps
+    }
 
     /// Full UniPC step (predictor-corrector). Returns the denoised
     /// latent estimate for the next timestep.
@@ -2548,9 +2756,12 @@ impl UniPcScheduler {
     /// - `epsilon`: UNet noise prediction (ε) at the current timestep.
     /// - `sample`: Current latent x_k in α-space.
     pub fn step(&mut self, epsilon: &[f32], sample: &[f32]) -> Vec<f32> {
-        debug_assert!(self.step_index + 1 < self.sigmas.len(),
+        debug_assert!(
+            self.step_index + 1 < self.sigmas.len(),
             "UniPC step: step_index {} out of range (sigmas len {})",
-            self.step_index, self.sigmas.len());
+            self.step_index,
+            self.sigmas.len()
+        );
 
         let m_new = self.convert_model_output(epsilon, sample);
 
@@ -2629,10 +2840,14 @@ impl UniPcScheduler {
         let b_h = h_phi_1;
 
         // model_outputs[1] = m_k (just inserted during ring shift).
-        let m0 = self.model_outputs[1].as_deref().expect("ring[1] populated before predictor");
+        let m0 = self.model_outputs[1]
+            .as_deref()
+            .expect("ring[1] populated before predictor");
 
         if order == 1 {
-            sample.iter().zip(m0.iter())
+            sample
+                .iter()
+                .zip(m0.iter())
                 .map(|(&x, &m)| (sigma_t / sigma_s0) * x - alpha_t * h_phi_1 * m)
                 .collect()
         } else {
@@ -2640,16 +2855,23 @@ impl UniPcScheduler {
             // Pitfall #3: model_outputs[0] is None at step 1 (only one output has
             // been accumulated). The lower_order_nums warmup counter gates order to
             // 1 until two outputs are available, so this branch is never reached then.
-            let m1 = self.model_outputs[0].as_deref().expect("ring[0] populated for order-2 predictor");
+            let m1 = self.model_outputs[0]
+                .as_deref()
+                .expect("ring[0] populated for order-2 predictor");
             let lambda_si = sigma_to_lambda(self.sigmas[k - 1]);
             let rk = (lambda_si - lambda_s0) / h;
-            let d1: Vec<f32> = m1.iter().zip(m0.iter())
+            let d1: Vec<f32> = m1
+                .iter()
+                .zip(m0.iter())
                 .map(|(&a, &b)| (a - b) / rk)
                 .collect();
 
             // Adams-Bashforth-style approximation: rho_p = 0.5 hardcoded for the
             // predictor; the corrector solves the full 2×2 system to compensate.
-            sample.iter().zip(m0.iter()).zip(d1.iter())
+            sample
+                .iter()
+                .zip(m0.iter())
+                .zip(d1.iter())
                 .map(|((&x, &m), &d)| {
                     (sigma_t / sigma_s0) * x - alpha_t * h_phi_1 * m - alpha_t * b_h * (0.5 * d)
                 })
@@ -2683,14 +2905,21 @@ impl UniPcScheduler {
         let b_h = h_phi_1;
 
         // model_outputs[1] = m_{k-1} (BEFORE ring shift — pitfall #4).
-        let m0 = self.model_outputs[1].as_deref().expect("ring[1] populated before corrector");
+        let m0 = self.model_outputs[1]
+            .as_deref()
+            .expect("ring[1] populated before corrector");
 
         if order == 1 {
             // Corrector order-1: rho_c = 0.5 hardcoded.
-            let d1_t: Vec<f32> = model_t.iter().zip(m0.iter())
+            let d1_t: Vec<f32> = model_t
+                .iter()
+                .zip(m0.iter())
                 .map(|(&mt, &m)| mt - m)
                 .collect();
-            last_sample.iter().zip(m0.iter()).zip(d1_t.iter())
+            last_sample
+                .iter()
+                .zip(m0.iter())
+                .zip(d1_t.iter())
                 .map(|((&ls, &m), &d)| {
                     (sigma_t / sigma_s0) * ls - alpha_t * h_phi_1 * m - alpha_t * b_h * (0.5 * d)
                 })
@@ -2713,10 +2942,14 @@ impl UniPcScheduler {
             // Cramer: R = [[1,1],[rk,1]], det = 1 - rk.
             // Guard rk → 1 (det → 0) and rk → 0 (d1 blows up).
             let det = 1.0 - rk;
-            debug_assert!(det.abs() > CRAMER_DET_FLOOR,
-                "UniPC corrector: rk too close to 1.0 ({rk}); Cramer det = {det}");
-            debug_assert!(rk.abs() > CRAMER_DET_FLOOR,
-                "UniPC corrector: rk too close to 0 ({rk})");
+            debug_assert!(
+                det.abs() > CRAMER_DET_FLOOR,
+                "UniPC corrector: rk too close to 1.0 ({rk}); Cramer det = {det}"
+            );
+            debug_assert!(
+                rk.abs() > CRAMER_DET_FLOOR,
+                "UniPC corrector: rk too close to 0 ({rk})"
+            );
             let det_guarded = if det.abs() < CRAMER_DET_FLOOR {
                 CRAMER_DET_FLOOR.copysign(if det == 0.0 { 1.0 } else { det })
             } else {
@@ -2726,15 +2959,25 @@ impl UniPcScheduler {
             let rho_c0 = (b0 - b1) / det_guarded;
             let rho_c1 = b0 - rho_c0;
 
-            let m1 = self.model_outputs[0].as_deref().expect("ring[0] populated for order-2 corrector");
-            let d1: Vec<f32> = m1.iter().zip(m0.iter())
+            let m1 = self.model_outputs[0]
+                .as_deref()
+                .expect("ring[0] populated for order-2 corrector");
+            let d1: Vec<f32> = m1
+                .iter()
+                .zip(m0.iter())
                 .map(|(&a, &b)| (a - b) / rk_guarded)
                 .collect();
-            let d1_t: Vec<f32> = model_t.iter().zip(m0.iter())
+            let d1_t: Vec<f32> = model_t
+                .iter()
+                .zip(m0.iter())
                 .map(|(&mt, &m)| mt - m)
                 .collect();
 
-            last_sample.iter().zip(m0.iter()).zip(d1.iter()).zip(d1_t.iter())
+            last_sample
+                .iter()
+                .zip(m0.iter())
+                .zip(d1.iter())
+                .zip(d1_t.iter())
                 .map(|(((&ls, &m), &d), &dt)| {
                     (sigma_t / sigma_s0) * ls
                         - alpha_t * h_phi_1 * m
@@ -2765,7 +3008,8 @@ fn sigma_to_lambda(sigma: f32) -> f32 {
 /// `sigma_to_alpha_sigma(σ_edm)`.
 fn convert_epsilon_to_x0(sample: &[f32], eps: &[f32], sigma_edm: f32) -> Vec<f32> {
     let (alpha, sigma_eff) = sigma_to_alpha_sigma(sigma_edm);
-    sample.iter()
+    sample
+        .iter()
         .zip(eps.iter())
         .map(|(&x, &e)| (x - sigma_eff * e) / alpha)
         .collect()
@@ -2779,7 +3023,9 @@ fn sigma_to_t(sigma: f32, log_sigmas: &[f32]) -> i64 {
     // Find the largest index where log_sigmas[i] <= log_sigma.
     let mut low_idx = 0_usize;
     for (i, &ls) in log_sigmas.iter().enumerate() {
-        if ls > log_sigma { break; }
+        if ls > log_sigma {
+            break;
+        }
         low_idx = i;
     }
     let high_idx = (low_idx + 1).min(log_sigmas.len() - 1);
@@ -2888,7 +3134,9 @@ impl Scheduler {
             }
             Scheduler::EulerA(s) => {
                 let sigma = s.sigmas[step_idx];
-                sample.iter().zip(noise.iter())
+                sample
+                    .iter()
+                    .zip(noise.iter())
                     .map(|(&x, &n)| x + sigma * n)
                     .collect()
             }
@@ -2900,7 +3148,9 @@ impl Scheduler {
 fn add_noise_alpha_space(sample: &[f32], noise: &[f32], alpha_cumprod: f32) -> Vec<f32> {
     let sqrt_alpha = alpha_cumprod.sqrt();
     let sqrt_one_minus = (1.0 - alpha_cumprod).max(0.0).sqrt();
-    sample.iter().zip(noise.iter())
+    sample
+        .iter()
+        .zip(noise.iter())
         .map(|(&s, &n)| sqrt_alpha * s + sqrt_one_minus * n)
         .collect()
 }
@@ -2916,7 +3166,10 @@ mod tests {
         let mut prev = s.alpha_cumprod(0);
         for t in 1..s.num_train as i64 {
             let cur = s.alpha_cumprod(t);
-            assert!(cur < prev, "α̅ should decrease with t: t={t}, prev={prev}, cur={cur}");
+            assert!(
+                cur < prev,
+                "α̅ should decrease with t: t={t}, prev={prev}, cur={cur}"
+            );
             prev = cur;
         }
     }
@@ -2938,7 +3191,11 @@ mod tests {
         for w in t.windows(2) {
             assert!(w[0] > w[1], "timesteps must descend: {} → {}", w[0], w[1]);
         }
-        assert!(*t.last().unwrap() < 100, "last timestep should be near 0, got {:?}", t.last());
+        assert!(
+            *t.last().unwrap() < 100,
+            "last timestep should be near 0, got {:?}",
+            t.last()
+        );
     }
 
     /// Diffusers DDIMScheduler default: timestep_spacing="leading" + steps_offset=1.
@@ -2974,7 +3231,10 @@ mod tests {
         for (i, &n) in next.iter().enumerate() {
             let pred_x0 = (latent[i] - (1.0 - alpha_t).sqrt() * noise[i]) / alpha_t.sqrt();
             let expected = alpha_prev.sqrt() * pred_x0 + (1.0 - alpha_prev).sqrt() * noise[i];
-            assert!((n - expected).abs() < 1e-5, "step[{i}] = {n}, expected {expected}");
+            assert!(
+                (n - expected).abs() < 1e-5,
+                "step[{i}] = {n}, expected {expected}"
+            );
         }
     }
 
@@ -2994,14 +3254,18 @@ mod tests {
 
         for (i, &n) in next.iter().enumerate() {
             let pred_x0 = (latent[i] - (1.0 - alpha_t).sqrt() * noise_pred[i]) / alpha_t.sqrt();
-            let expected_correct = alpha_prev.sqrt() * pred_x0
-                + (1.0 - alpha_prev).sqrt() * noise_pred[i];
+            let expected_correct =
+                alpha_prev.sqrt() * pred_x0 + (1.0 - alpha_prev).sqrt() * noise_pred[i];
             // If the old 1.0 path were taken the result would be just pred_x0.
             let expected_wrong = pred_x0;
-            assert!((n - expected_correct).abs() < 1e-5,
-                "step[{i}] = {n}, expected alphas_cumprod[0]-based {expected_correct}");
-            assert!((n - expected_wrong).abs() > 1e-6,
-                "step[{i}] = {n} matches the wrong 1.0-based result — regression?");
+            assert!(
+                (n - expected_correct).abs() < 1e-5,
+                "step[{i}] = {n}, expected alphas_cumprod[0]-based {expected_correct}"
+            );
+            assert!(
+                (n - expected_wrong).abs() > 1e-6,
+                "step[{i}] = {n} matches the wrong 1.0-based result — regression?"
+            );
         }
     }
 
@@ -3018,8 +3282,11 @@ mod tests {
         // For 8 inference steps, indices = floor(linspace(0, 50, 8, endpoint=False))
         //                               = [0, 6, 12, 18, 25, 31, 37, 43]
         // → reversed[indices] = [999, 879, 759, 639, 499, 379, 259, 139]
-        assert_eq!(t, &[999, 879, 759, 639, 499, 379, 259, 139],
-            "LCM 8-step timesteps must match Diffusers reference");
+        assert_eq!(
+            t,
+            &[999, 879, 759, 639, 499, 379, 259, 139],
+            "LCM 8-step timesteps must match Diffusers reference"
+        );
     }
 
     /// 4-step is the canonical "fast preview" LCM count from the paper.
@@ -3030,8 +3297,11 @@ mod tests {
         let s = LcmScheduler::new_sd15(4, false);
         // floor(linspace(0, 50, 4, endpoint=False)) = [0, 12, 25, 37]
         // → reversed[indices] = [999, 759, 499, 259]
-        assert_eq!(s.timesteps(), &[999, 759, 499, 259],
-            "LCM 4-step timesteps must match Diffusers reference");
+        assert_eq!(
+            s.timesteps(),
+            &[999, 759, 499, 259],
+            "LCM 4-step timesteps must match Diffusers reference"
+        );
     }
 
     /// LCM timesteps must descend (driving denoising from high noise
@@ -3056,8 +3326,7 @@ mod tests {
         for &t in &[0_i64, 100, 500, 999] {
             let l = lcm.alpha_cumprod(t);
             let d = ddim.alpha_cumprod(t);
-            assert!((l - d).abs() < 1e-7,
-                "α̅[{t}] mismatch: LCM={l}, DDIM={d}");
+            assert!((l - d).abs() < 1e-7, "α̅[{t}] mismatch: LCM={l}, DDIM={d}");
         }
     }
 
@@ -3085,8 +3354,10 @@ mod tests {
         for (i, &n) in next.iter().enumerate() {
             let pred_x0 = (latent[i] - beta_t.sqrt() * noise[i]) / alpha_t.sqrt();
             let expected = c_out * pred_x0 + c_skip * latent[i];
-            assert!((n - expected).abs() < 1e-5,
-                "lcm final step[{i}] = {n}, expected {expected}");
+            assert!(
+                (n - expected).abs() < 1e-5,
+                "lcm final step[{i}] = {n}, expected {expected}"
+            );
         }
     }
 
@@ -3101,10 +3372,19 @@ mod tests {
         assert_eq!(t.len(), 25);
         // Strict descent through the noise schedule.
         for w in t.windows(2) {
-            assert!(w[0] > w[1], "DPM++ 2M Karras timesteps must descend: {} → {}", w[0], w[1]);
+            assert!(
+                w[0] > w[1],
+                "DPM++ 2M Karras timesteps must descend: {} → {}",
+                w[0],
+                w[1]
+            );
         }
         // First step starts near max noise; last is near zero.
-        assert!(t[0] >= 950, "first timestep should be near max noise, got {}", t[0]);
+        assert!(
+            t[0] >= 950,
+            "first timestep should be near max noise, got {}",
+            t[0]
+        );
         // len == 25 just asserted, .last() is non-empty.
         let last = *t.last().unwrap();
         assert!(last < 50, "last timestep should be near 0, got {last}");
@@ -3142,8 +3422,10 @@ mod tests {
         // sigma_min (not 0) is belt-and-braces so both guards are in place.
         let _ = s.step(&latent, &noise, 6);
         let next = s.step(&latent, &noise, 7);
-        assert!(next.iter().all(|v| v.is_finite()),
-            "terminal step produced non-finite values: {next:?}");
+        assert!(
+            next.iter().all(|v| v.is_finite()),
+            "terminal step produced non-finite values: {next:?}"
+        );
     }
 
     /// Terminal step must take the first-order path even when
@@ -3166,8 +3448,10 @@ mod tests {
         let mut fresh = DpmPp2MScheduler::new_sd15(8);
         let fresh_terminal = fresh.step(&latent, &noise, 7);
 
-        assert_eq!(primed_terminal, fresh_terminal,
-            "terminal step must be first-order regardless of prev_model_output");
+        assert_eq!(
+            primed_terminal, fresh_terminal,
+            "terminal step must be first-order regardless of prev_model_output"
+        );
     }
 
     /// First DPM++ step must use first-order math (no prev output)
@@ -3181,11 +3465,15 @@ mod tests {
         let noise = vec![0.1_f32; 4];
         let next = s.step(&latent, &noise, 0);
         assert_eq!(next.len(), latent.len());
-        assert!(s.prev_model_output.is_some(),
-            "first step must populate prev_model_output for next call");
+        assert!(
+            s.prev_model_output.is_some(),
+            "first step must populate prev_model_output for next call"
+        );
         // After first step, latent should have moved.
-        assert!(next.iter().any(|&v| (v - 0.5).abs() > 1e-4),
-            "first step must produce a non-trivial update");
+        assert!(
+            next.iter().any(|&v| (v - 0.5).abs() > 1e-4),
+            "first step must produce a non-trivial update"
+        );
     }
 
     /// Euler-A `init_noise_sigma` for "leading" timestep spacing
@@ -3196,8 +3484,12 @@ mod tests {
         let s = EulerAScheduler::new_sd15(25);
         let sigma_max = s.sigmas[0];
         let expected = (sigma_max * sigma_max + 1.0).sqrt();
-        assert!((s.init_noise_sigma() - expected).abs() < 1e-5,
-            "init_noise_sigma {} != √(σ_max² + 1) = {}", s.init_noise_sigma(), expected);
+        assert!(
+            (s.init_noise_sigma() - expected).abs() < 1e-5,
+            "init_noise_sigma {} != √(σ_max² + 1) = {}",
+            s.init_noise_sigma(),
+            expected
+        );
     }
 
     /// Pre-UNet preconditioning must divide the σ-space sample by
@@ -3211,8 +3503,10 @@ mod tests {
         let sigma = s.sigmas[0];
         let expected = 1.0 / (sigma * sigma + 1.0).sqrt();
         for v in &out {
-            assert!((v - expected).abs() < 1e-6,
-                "scaled latent {v} != 1.0 / √(σ²+1) = {expected}");
+            assert!(
+                (v - expected).abs() < 1e-6,
+                "scaled latent {v} != 1.0 / √(σ²+1) = {expected}"
+            );
         }
     }
 
@@ -3229,12 +3523,16 @@ mod tests {
         let terminal = s.num_inference - 1;
         let next = s.step(&latent, &eps, terminal, &noise);
         let sigma = s.sigmas[terminal];
-        let expected: Vec<f32> = latent.iter().zip(eps.iter())
+        let expected: Vec<f32> = latent
+            .iter()
+            .zip(eps.iter())
             .map(|(&l, &e)| l + e * (0.0 - sigma))
             .collect();
         for (a, b) in next.iter().zip(expected.iter()) {
-            assert!((a - b).abs() < 1e-5,
-                "terminal step leaked ancestral noise: got {a}, expected {b}");
+            assert!(
+                (a - b).abs() < 1e-5,
+                "terminal step leaked ancestral noise: got {a}, expected {b}"
+            );
         }
     }
 
@@ -3246,10 +3544,18 @@ mod tests {
         let t = s.timesteps();
         assert_eq!(t.len(), 25);
         for w in t.windows(2) {
-            assert!(w[0] > w[1],
-                "Euler-A Karras timesteps must descend: {} → {}", w[0], w[1]);
+            assert!(
+                w[0] > w[1],
+                "Euler-A Karras timesteps must descend: {} → {}",
+                w[0],
+                w[1]
+            );
         }
-        assert!(t[0] >= 950, "first timestep should be near max noise, got {}", t[0]);
+        assert!(
+            t[0] >= 950,
+            "first timestep should be near max noise, got {}",
+            t[0]
+        );
     }
 
     /// `add_noise` for α-space schedulers must implement the VP
@@ -3262,18 +3568,22 @@ mod tests {
         let s = Scheduler::Ddim(DdimScheduler::new_sd15(20));
         let clean = vec![1.0_f32; 4];
         let noise = vec![0.1_f32; 4]; // small noise vs clean=1.0
-        // step_idx = 0 → high noise → output dominated by 0.1 (noise scaled by √(1-α̅) ≈ 1)
+                                      // step_idx = 0 → high noise → output dominated by 0.1 (noise scaled by √(1-α̅) ≈ 1)
         let mixed_high = s.add_noise(&clean, &noise, 0);
         // Each entry should be much closer to 0.1 (noise · ~1) than to 1.0 (clean · ~0).
         for v in &mixed_high {
-            assert!(*v < 0.5,
-                "high-t add_noise should be noise-dominated, got {v}");
+            assert!(
+                *v < 0.5,
+                "high-t add_noise should be noise-dominated, got {v}"
+            );
         }
         // step_idx = num_inference - 1 → low noise → output close to clean signal
         let mixed_low = s.add_noise(&clean, &noise, 19);
         for v in &mixed_low {
-            assert!(*v > 0.85,
-                "low-t add_noise should be sample-dominated, got {v}");
+            assert!(
+                *v > 0.85,
+                "low-t add_noise should be sample-dominated, got {v}"
+            );
         }
     }
 
@@ -3290,8 +3600,10 @@ mod tests {
         let mixed = s.add_noise(&clean, &noise, step_idx);
         for v in &mixed {
             let expected = 0.5 + sigma * 1.0;
-            assert!((v - expected).abs() < 1e-5,
-                "Euler-A add_noise: got {v}, expected {expected}");
+            assert!(
+                (v - expected).abs() < 1e-5,
+                "Euler-A add_noise: got {v}, expected {expected}"
+            );
         }
     }
 
@@ -3319,9 +3631,11 @@ mod tests {
         for (i, &n) in next.iter().enumerate() {
             let pred_x0 = (latent[i] - (1.0 - alpha_t).sqrt() * noise_pred[i]) / alpha_t.sqrt();
             let denoised = c_out * pred_x0 + c_skip * latent[i];
-            let expected = alpha_prev.sqrt() * denoised;  // zero-noise → β_prev term vanishes
-            assert!((n - expected).abs() < 1e-5,
-                "lcm step_at zero-noise[{i}] = {n}, expected {expected}");
+            let expected = alpha_prev.sqrt() * denoised; // zero-noise → β_prev term vanishes
+            assert!(
+                (n - expected).abs() < 1e-5,
+                "lcm step_at zero-noise[{i}] = {n}, expected {expected}"
+            );
         }
     }
 
@@ -3332,7 +3646,11 @@ mod tests {
         assert_eq!(toks.shape(), [1, CLIP_SEQ_LEN]);
         assert_eq!(toks[(0, 0)], CLIP_BOS as i32);
         for i in 1..CLIP_SEQ_LEN {
-            assert_eq!(toks[(0, i)], CLIP_EOS as i32, "expected EOS pad at index {i}");
+            assert_eq!(
+                toks[(0, i)],
+                CLIP_EOS as i32,
+                "expected EOS pad at index {i}"
+            );
         }
     }
 
@@ -3348,7 +3666,10 @@ mod tests {
         // Prompt actually produced different tokens than empty (otherwise
         // the tokenizer is broken).
         let empty = clip_tokenize("");
-        assert_ne!(toks, empty, "real prompt must tokenize differently than empty");
+        assert_ne!(
+            toks, empty,
+            "real prompt must tokenize differently than empty"
+        );
     }
 
     #[test]
@@ -3377,9 +3698,16 @@ mod tests {
     /// `.to_owned()` per CFG step.
     #[test]
     fn cfg_blend_accepts_axis0_slices_directly() {
-        let pair = Array4::<f32>::from_shape_fn((2, 4, 2, 2), |(b, _, _, _)| {
-            if b == 0 { 1.0 } else { 5.0 }
-        });
+        let pair = Array4::<f32>::from_shape_fn(
+            (2, 4, 2, 2),
+            |(b, _, _, _)| {
+                if b == 0 {
+                    1.0
+                } else {
+                    5.0
+                }
+            },
+        );
         let uncond = pair.slice(ndarray::s![0..1, .., .., ..]);
         let cond = pair.slice(ndarray::s![1..2, .., .., ..]);
         let out = cfg_blend(uncond, cond, 7.5);
@@ -3407,7 +3735,11 @@ mod tests {
         assert!((buf[0] - (-1.0)).abs() < 1e-3, "R got {}", buf[0]);
         let plane = (SD_TILE * SD_TILE) as usize;
         assert!(buf[plane].abs() < 0.01, "G got {}", buf[plane]);
-        assert!((buf[plane * 2] - 1.0).abs() < 1e-3, "B got {}", buf[plane * 2]);
+        assert!(
+            (buf[plane * 2] - 1.0).abs() < 1e-3,
+            "B got {}",
+            buf[plane * 2]
+        );
     }
 
     #[test]
@@ -3422,7 +3754,10 @@ mod tests {
         let lat = mask_to_latent(&m);
         let buf = lat.as_slice().unwrap();
         let coverage: f32 = buf.iter().sum::<f32>() / buf.len() as f32;
-        assert!((coverage - 0.5).abs() < 0.05, "expected ~0.5 coverage, got {coverage}");
+        assert!(
+            (coverage - 0.5).abs() < 0.05,
+            "expected ~0.5 coverage, got {coverage}"
+        );
     }
 
     #[test]
@@ -3432,7 +3767,9 @@ mod tests {
         // equivalent of the old `mask_image_for_vae` RGBA-fill helper:
         // bit-pattern matches `(128/127.5) - 1 ≈ 0.00392` exactly.
         let mut img = RgbaImage::new(SD_TILE, SD_TILE);
-        for p in img.pixels_mut() { *p = Rgba([100, 200, 50, 255]); }
+        for p in img.pixels_mut() {
+            *p = Rgba([100, 200, 50, 255]);
+        }
         let mut mask = GrayImage::new(SD_TILE, SD_TILE);
         mask.put_pixel(2, 3, Luma([255]));
         let arr = image_to_minus1_plus1_masked(&img, &mask);
@@ -3447,9 +3784,9 @@ mod tests {
         assert!((buf[plane * 2 + masked_idx] - mid_gray).abs() < 1e-6);
         // Untouched pixel: original 100/200/50 byte values, [-1, 1].
         let unmasked_idx = 0;
-        assert!((buf[unmasked_idx] - (100.0/127.5 - 1.0)).abs() < 1e-6);
-        assert!((buf[plane + unmasked_idx] - (200.0/127.5 - 1.0)).abs() < 1e-6);
-        assert!((buf[plane*2 + unmasked_idx] - (50.0/127.5 - 1.0)).abs() < 1e-6);
+        assert!((buf[unmasked_idx] - (100.0 / 127.5 - 1.0)).abs() < 1e-6);
+        assert!((buf[plane + unmasked_idx] - (200.0 / 127.5 - 1.0)).abs() < 1e-6);
+        assert!((buf[plane * 2 + unmasked_idx] - (50.0 / 127.5 - 1.0)).abs() < 1e-6);
     }
 
     #[test]
@@ -3506,7 +3843,15 @@ mod tests {
         m.put_pixel(3, 4, Luma([255]));
         let comps = mask_components(&m);
         assert_eq!(comps.len(), 1);
-        assert_eq!(comps[0], MaskBbox { x_min: 2, y_min: 2, x_max: 3, y_max: 4 });
+        assert_eq!(
+            comps[0],
+            MaskBbox {
+                x_min: 2,
+                y_min: 2,
+                x_max: 3,
+                y_max: 4
+            }
+        );
     }
 
     #[test]
@@ -3538,7 +3883,12 @@ mod tests {
 
     #[test]
     fn tile_bbox_single_for_small_component() {
-        let bbox = MaskBbox { x_min: 100, y_min: 100, x_max: 300, y_max: 300 };
+        let bbox = MaskBbox {
+            x_min: 100,
+            y_min: 100,
+            x_max: 300,
+            y_max: 300,
+        };
         let tiles = tile_bbox(&bbox, 4096, 4096);
         assert_eq!(tiles.len(), 1);
         let t = &tiles[0];
@@ -3551,7 +3901,12 @@ mod tests {
         // 1500×400 bbox → 4 tiles wide × 1 tile tall (400 ≤ SD_TILE).
         // span 1500, step 384, tile 512: tiles at 0, 384, 768, 1152;
         // last tile reaches 1664 ≥ span, so 4 tiles cover it.
-        let bbox = MaskBbox { x_min: 100, y_min: 100, x_max: 1599, y_max: 499 };
+        let bbox = MaskBbox {
+            x_min: 100,
+            y_min: 100,
+            x_max: 1599,
+            y_max: 499,
+        };
         let tiles = tile_bbox(&bbox, 4096, 4096);
         assert_eq!(tiles.len(), 4, "expected 4 tiles, got {}", tiles.len());
         // Middle tiles feather on both horizontal edges.
@@ -3584,7 +3939,15 @@ mod tests {
         m.put_pixel(8, 8, Luma([200]));
         let comps = mask_components(&m);
         assert_eq!(comps.len(), 1);
-        assert_eq!(comps[0], MaskBbox { x_min: 8, y_min: 8, x_max: 8, y_max: 8 });
+        assert_eq!(
+            comps[0],
+            MaskBbox {
+                x_min: 8,
+                y_min: 8,
+                x_max: 8,
+                y_max: 8
+            }
+        );
     }
 
     #[test]
@@ -3597,12 +3960,25 @@ mod tests {
         m.put_pixel(1901, 1850, Luma([200]));
         let comps = mask_components(&m);
         assert_eq!(comps.len(), 1);
-        assert_eq!(comps[0], MaskBbox { x_min: 1900, y_min: 1850, x_max: 1901, y_max: 1850 });
+        assert_eq!(
+            comps[0],
+            MaskBbox {
+                x_min: 1900,
+                y_min: 1850,
+                x_max: 1901,
+                y_max: 1850
+            }
+        );
     }
 
     #[test]
     fn compute_sd_crop_centres_on_bbox_in_large_image() {
-        let bbox = MaskBbox { x_min: 1000, y_min: 1000, x_max: 1100, y_max: 1100 };
+        let bbox = MaskBbox {
+            x_min: 1000,
+            y_min: 1000,
+            x_max: 1100,
+            y_max: 1100,
+        };
         let (x, y, w, h) = compute_sd_crop(&bbox, 4096, 4096);
         assert_eq!((w, h), (SD_TILE, SD_TILE));
         // Centre of bbox is (1050, 1050); crop top-left should land at
@@ -3613,7 +3989,12 @@ mod tests {
 
     #[test]
     fn compute_sd_crop_clamps_to_right_edge() {
-        let bbox = MaskBbox { x_min: 3900, y_min: 100, x_max: 3990, y_max: 200 };
+        let bbox = MaskBbox {
+            x_min: 3900,
+            y_min: 100,
+            x_max: 3990,
+            y_max: 200,
+        };
         let (x, y, w, h) = compute_sd_crop(&bbox, 4096, 4096);
         // Crop must fit inside image; right-edge crop starts at img_w - SD_TILE.
         assert_eq!(x + w, 4096, "crop must end at right edge");
@@ -3624,7 +4005,12 @@ mod tests {
 
     #[test]
     fn compute_sd_crop_clamps_to_top_left_corner() {
-        let bbox = MaskBbox { x_min: 5, y_min: 10, x_max: 50, y_max: 60 };
+        let bbox = MaskBbox {
+            x_min: 5,
+            y_min: 10,
+            x_max: 50,
+            y_max: 60,
+        };
         let (x, y, _, _) = compute_sd_crop(&bbox, 4096, 4096);
         // Centre is (27, 35); centre - 256 underflows → saturates at 0.
         assert_eq!(x, 0);
@@ -3633,7 +4019,12 @@ mod tests {
 
     #[test]
     fn compute_sd_crop_shrinks_to_image_for_small_inputs() {
-        let bbox = MaskBbox { x_min: 10, y_min: 10, x_max: 100, y_max: 100 };
+        let bbox = MaskBbox {
+            x_min: 10,
+            y_min: 10,
+            x_max: 100,
+            y_max: 100,
+        };
         let (x, y, w, h) = compute_sd_crop(&bbox, 200, 300);
         // Image smaller than SD_TILE on both axes → crop is the whole
         // image.
@@ -3644,7 +4035,10 @@ mod tests {
     fn sample_initial_noise_has_correct_shape() {
         let mut rng = ChaCha8Rng::seed_from_u64(0);
         let n = sample_initial_noise(&mut rng);
-        assert_eq!(n.shape(), &[1, 4, SD_LATENT_SIDE as usize, SD_LATENT_SIDE as usize]);
+        assert_eq!(
+            n.shape(),
+            &[1, 4, SD_LATENT_SIDE as usize, SD_LATENT_SIDE as usize]
+        );
     }
 
     #[test]
@@ -3656,21 +4050,31 @@ mod tests {
         let stale = now - Duration::from_secs(600);
 
         let mut cache: HashMap<ModelId, CacheEntry<Arc<()>>> = HashMap::new();
-        cache.insert(ModelId::SdV15InpaintFp16, CacheEntry {
-            value: Arc::new(()),
-            last_used: stale,
-        });
-        cache.insert(ModelId::LaMaFp32, CacheEntry {
-            value: Arc::new(()),
-            last_used: fresh,
-        });
+        cache.insert(
+            ModelId::SdV15InpaintFp16,
+            CacheEntry {
+                value: Arc::new(()),
+                last_used: stale,
+            },
+        );
+        cache.insert(
+            ModelId::LaMaFp32,
+            CacheEntry {
+                value: Arc::new(()),
+                last_used: fresh,
+            },
+        );
 
         let dropped = sweep_idle(&mut cache, now, idle);
         assert_eq!(dropped, 1, "exactly one stale entry should evict");
-        assert!(!cache.contains_key(&ModelId::SdV15InpaintFp16),
-            "stale entry must be removed");
-        assert!(cache.contains_key(&ModelId::LaMaFp32),
-            "fresh entry must remain");
+        assert!(
+            !cache.contains_key(&ModelId::SdV15InpaintFp16),
+            "stale entry must be removed"
+        );
+        assert!(
+            cache.contains_key(&ModelId::LaMaFp32),
+            "fresh entry must remain"
+        );
     }
 
     #[test]
@@ -3682,17 +4086,22 @@ mod tests {
         let weak = Arc::downgrade(&payload);
 
         let mut cache: HashMap<ModelId, CacheEntry<Arc<()>>> = HashMap::new();
-        cache.insert(ModelId::SdV15InpaintFp16, CacheEntry {
-            value: payload,
-            last_used: now - Duration::from_secs(600),
-        });
+        cache.insert(
+            ModelId::SdV15InpaintFp16,
+            CacheEntry {
+                value: payload,
+                last_used: now - Duration::from_secs(600),
+            },
+        );
 
         sweep_idle(&mut cache, now, idle);
         // The cache held the only strong ref; eviction must drop the
         // payload and release upgrades. This pins the use-after-free
         // contract — an in-flight caller would still own a clone.
-        assert!(weak.upgrade().is_none(),
-            "evicted payload must be the last strong ref so memory releases");
+        assert!(
+            weak.upgrade().is_none(),
+            "evicted payload must be the last strong ref so memory releases"
+        );
     }
 
     #[test]
@@ -3702,10 +4111,13 @@ mod tests {
         let idle = Duration::from_secs(300);
         let mut cache: HashMap<ModelId, CacheEntry<Arc<()>>> = HashMap::new();
         // Just-under-the-boundary entry must NOT evict.
-        cache.insert(ModelId::SdV15InpaintFp16, CacheEntry {
-            value: Arc::new(()),
-            last_used: now - Duration::from_secs(299),
-        });
+        cache.insert(
+            ModelId::SdV15InpaintFp16,
+            CacheEntry {
+                value: Arc::new(()),
+                last_used: now - Duration::from_secs(299),
+            },
+        );
         let dropped = sweep_idle(&mut cache, now, idle);
         assert_eq!(dropped, 0);
         assert!(cache.contains_key(&ModelId::SdV15InpaintFp16));
@@ -3719,28 +4131,33 @@ mod tests {
     /// loser dropped) — and ~30 GB peak RSS.
     #[test]
     fn concurrent_get_or_init_runs_build_closure_only_once() {
-        use std::sync::OnceLock as Cell;
         use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::OnceLock as Cell;
         let slot: Arc<Cell<u32>> = Arc::new(Cell::new());
         let calls = Arc::new(AtomicUsize::new(0));
 
-        let handles: Vec<_> = (0..8).map(|_| {
-            let slot = Arc::clone(&slot);
-            let calls = Arc::clone(&calls);
-            std::thread::spawn(move || {
-                *slot.get_or_init(|| {
-                    calls.fetch_add(1, Ordering::Relaxed);
-                    std::thread::sleep(Duration::from_millis(50));
-                    42u32
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let slot = Arc::clone(&slot);
+                let calls = Arc::clone(&calls);
+                std::thread::spawn(move || {
+                    *slot.get_or_init(|| {
+                        calls.fetch_add(1, Ordering::Relaxed);
+                        std::thread::sleep(Duration::from_millis(50));
+                        42u32
+                    })
                 })
             })
-        }).collect();
+            .collect();
 
         for h in handles {
             assert_eq!(h.join().unwrap(), 42);
         }
-        assert_eq!(calls.load(Ordering::Relaxed), 1,
-            "OnceLock must run the build closure exactly once across concurrent callers");
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            1,
+            "OnceLock must run the build closure exactly once across concurrent callers"
+        );
     }
 
     /// LCM with `use_karras=true` must produce a non-linear timestep
@@ -3755,11 +4172,17 @@ mod tests {
         assert_eq!(lin.len(), 8);
         assert_eq!(kar.len(), 8);
         // Both descend.
-        for w in lin.windows(2) { assert!(w[0] > w[1], "linear not descending: {:?}", lin); }
-        for w in kar.windows(2) { assert!(w[0] > w[1], "karras not descending: {:?}", kar); }
+        for w in lin.windows(2) {
+            assert!(w[0] > w[1], "linear not descending: {:?}", lin);
+        }
+        for w in kar.windows(2) {
+            assert!(w[0] > w[1], "karras not descending: {:?}", kar);
+        }
         // Schedules MUST differ — at least one timestep should not match.
-        assert_ne!(lin, kar,
-            "Karras and linear LCM schedules should produce different timesteps");
+        assert_ne!(
+            lin, kar,
+            "Karras and linear LCM schedules should produce different timesteps"
+        );
     }
 
     // ── UniPC tests ─────────────────────────────────────────────────────────
@@ -3772,30 +4195,32 @@ mod tests {
         let mut s = UniPcScheduler::new_sd15(8);
         let dim = 4_usize;
         let sample: Vec<f32> = vec![0.5_f32; dim];
-        let eps:    Vec<f32> = vec![0.1_f32; dim];
+        let eps: Vec<f32> = vec![0.1_f32; dim];
 
         let result = s.step(&eps, &sample);
 
         // Manually compute first-order predictor.
         let sigma_s0_edm = s.sigmas[0]; // before step() advanced step_index
-        let sigma_t_edm  = s.sigmas[1];
+        let sigma_t_edm = s.sigmas[1];
         let (_, sigma_s0_ddpm) = sigma_to_alpha_sigma(sigma_s0_edm);
-        let (alpha_t,  sigma_t_ddpm)  = sigma_to_alpha_sigma(sigma_t_edm);
+        let (alpha_t, sigma_t_ddpm) = sigma_to_alpha_sigma(sigma_t_edm);
         let lambda_s0 = sigma_to_lambda(sigma_s0_edm);
-        let lambda_t  = sigma_to_lambda(sigma_t_edm);
+        let lambda_t = sigma_to_lambda(sigma_t_edm);
         let h = lambda_t - lambda_s0;
         let h_phi_1 = (-h).exp_m1();
 
         let m_ref = convert_epsilon_to_x0(&sample, &eps, sigma_s0_edm);
-        let expected: Vec<f32> = sample.iter().zip(m_ref.iter())
-            .map(|(&x, &m0)| {
-                (sigma_t_ddpm / sigma_s0_ddpm) * x - alpha_t * h_phi_1 * m0
-            })
+        let expected: Vec<f32> = sample
+            .iter()
+            .zip(m_ref.iter())
+            .map(|(&x, &m0)| (sigma_t_ddpm / sigma_s0_ddpm) * x - alpha_t * h_phi_1 * m0)
             .collect();
 
         for (i, (&r, &ex)) in result.iter().zip(expected.iter()).enumerate() {
-            assert!((r - ex).abs() < 1e-5,
-                "unipc step-0 output[{i}]: got {r}, expected {ex}");
+            assert!(
+                (r - ex).abs() < 1e-5,
+                "unipc step-0 output[{i}]: got {r}, expected {ex}"
+            );
         }
     }
 
@@ -3808,7 +4233,7 @@ mod tests {
     fn unipc_lower_order_final_caps_predictor_at_terminal() {
         let n = 4_usize;
         let dim = 4_usize;
-        let eps  = vec![0.1_f32; dim];
+        let eps = vec![0.1_f32; dim];
         let samp = vec![0.5_f32; dim];
 
         // Run N-1 steps to get to the state just before the terminal step.
@@ -3827,18 +4252,20 @@ mod tests {
         // guard.
         let k = s.step_index; // n-1
         let sigma_s0_edm = s.sigmas[k];
-        let sigma_t_edm  = s.sigmas[k + 1];
+        let sigma_t_edm = s.sigmas[k + 1];
         let (_, sigma_s0_ddpm) = sigma_to_alpha_sigma(sigma_s0_edm);
-        let (alpha_t,  sigma_t_ddpm)  = sigma_to_alpha_sigma(sigma_t_edm);
+        let (alpha_t, sigma_t_ddpm) = sigma_to_alpha_sigma(sigma_t_edm);
         let lambda_s0 = sigma_to_lambda(sigma_s0_edm);
-        let lambda_t  = sigma_to_lambda(sigma_t_edm);
+        let lambda_t = sigma_to_lambda(sigma_t_edm);
         let h = lambda_t - lambda_s0;
         let h_phi_1 = (-h).exp_m1();
 
         // ε → x0_pred conversion on `state`:
         let m_new = convert_epsilon_to_x0(&state, &eps, sigma_s0_edm);
         // Pure first-order predictor (no D1 correction term):
-        let first_order_pred: Vec<f32> = state.iter().zip(m_new.iter())
+        let first_order_pred: Vec<f32> = state
+            .iter()
+            .zip(m_new.iter())
             .map(|(&x, &m)| (sigma_t_ddpm / sigma_s0_ddpm) * x - alpha_t * h_phi_1 * m)
             .collect();
 
@@ -3846,24 +4273,33 @@ mod tests {
         let terminal_out = s.step(&eps, &state);
 
         // Must be finite.
-        assert!(terminal_out.iter().all(|v| v.is_finite()),
-            "terminal step produced non-finite output: {terminal_out:?}");
+        assert!(
+            terminal_out.iter().all(|v| v.is_finite()),
+            "terminal step produced non-finite output: {terminal_out:?}"
+        );
 
         // step_index must be n after all steps.
-        assert_eq!(s.step_index, n,
-            "step_index must equal num_inference after all steps");
+        assert_eq!(
+            s.step_index, n,
+            "step_index must equal num_inference after all steps"
+        );
 
         // this_order must be 1 — the lower_order_final guard fired.
-        assert_eq!(s.this_order, 1,
-            "this_order after terminal step must be 1 (lower_order_final guard)");
+        assert_eq!(
+            s.this_order, 1,
+            "this_order after terminal step must be 1 (lower_order_final guard)"
+        );
 
         // The terminal predictor (order=1, no D1 term) must match the
         // reference formula element-wise. The corrector also runs at the
         // terminal step and may adjust `working_sample`, so we allow a
         // small tolerance (1e-3) to accommodate that correction pass.
-        for (i, (&sched, &ref_val)) in terminal_out.iter().zip(first_order_pred.iter()).enumerate() {
-            assert!((sched - ref_val).abs() < 1e-3,
-                "terminal output[{i}]: scheduler={sched}, first-order-ref={ref_val} (diff > 1e-3)");
+        for (i, (&sched, &ref_val)) in terminal_out.iter().zip(first_order_pred.iter()).enumerate()
+        {
+            assert!(
+                (sched - ref_val).abs() < 1e-3,
+                "terminal output[{i}]: scheduler={sched}, first-order-ref={ref_val} (diff > 1e-3)"
+            );
         }
     }
 
@@ -3890,13 +4326,17 @@ mod tests {
         let rho_c1 = b0 - rho_c0;
 
         // Sanity: rho_c0 + rho_c1 = b0 (from derivation).
-        assert!((rho_c0 + rho_c1 - b0).abs() < 1e-6,
-            "rho_c0 + rho_c1 must equal b0: {rho_c0} + {rho_c1} != {b0}");
+        assert!(
+            (rho_c0 + rho_c1 - b0).abs() < 1e-6,
+            "rho_c0 + rho_c1 must equal b0: {rho_c0} + {rho_c1} != {b0}"
+        );
 
         // Alternatively: rho_c1 = (b1 - rk*b0)/(1-rk).
         let rho_c1_alt = (b1 - rk * b0) / (1.0 - rk);
-        assert!((rho_c1 - rho_c1_alt).abs() < 1e-6,
-            "two Cramer forms must agree: {rho_c1} vs {rho_c1_alt}");
+        assert!(
+            (rho_c1 - rho_c1_alt).abs() < 1e-6,
+            "two Cramer forms must agree: {rho_c1} vs {rho_c1_alt}"
+        );
 
         // Verify b[0] and b[1] via the phi definitions directly.
         // NOTE: an earlier draft of the port spec stated b[1] ≈ 0.401 for hh = -0.5,
@@ -3910,10 +4350,14 @@ mod tests {
         let phi3 = (phi2 - 0.5) / hh;
         let b0_ref = phi2 / phi1;
         let b1_ref = 2.0 * phi3 / phi1;
-        assert!((b0 - b0_ref).abs() < 1e-5,
-            "b[0] mismatch: recurrence {b0} vs direct {b0_ref}");
-        assert!((b1 - b1_ref).abs() < 1e-5,
-            "b[1] mismatch: recurrence {b1} vs direct {b1_ref}");
+        assert!(
+            (b0 - b0_ref).abs() < 1e-5,
+            "b[0] mismatch: recurrence {b0} vs direct {b0_ref}"
+        );
+        assert!(
+            (b1 - b1_ref).abs() < 1e-5,
+            "b[1] mismatch: recurrence {b1} vs direct {b1_ref}"
+        );
     }
 
     /// Cramer guard regression: sigmas packed close together collapse the
@@ -3925,7 +4369,7 @@ mod tests {
         // the corrector sees near-degenerate rk values.
         let mut s = UniPcScheduler::new_sd15(4);
         let dim = 8_usize;
-        let eps    = vec![0.1_f32; dim];
+        let eps = vec![0.1_f32; dim];
         let sample = vec![0.5_f32; dim];
 
         // Force two adjacent sigmas very close so lambda spacing collapses.
@@ -3938,8 +4382,10 @@ mod tests {
         for _ in 0..4 {
             out = s.step(&eps, &out);
         }
-        assert!(out.iter().all(|v| v.is_finite()),
-            "Cramer guard failed: output contains NaN/Inf when lambda spacing collapses: {out:?}");
+        assert!(
+            out.iter().all(|v| v.is_finite()),
+            "Cramer guard failed: output contains NaN/Inf when lambda spacing collapses: {out:?}"
+        );
     }
 
     /// After step_index advances to 3, the ring must hold:
@@ -3948,7 +4394,7 @@ mod tests {
     fn unipc_ring_state_after_three_steps() {
         let mut s = UniPcScheduler::new_sd15(8);
         let sample: Vec<f32> = vec![0.5_f32; 4];
-        let eps:    Vec<f32> = vec![0.1_f32; 4];
+        let eps: Vec<f32> = vec![0.1_f32; 4];
 
         // Track the converted x0 at each step by pre-computing.
         // We call step() 3 times and verify ring contents.
@@ -3959,7 +4405,8 @@ mod tests {
             // Record what m_new will be before calling step.
             let expected_m: Vec<f32> = {
                 let (alpha, sigma_ddpm) = sigma_to_alpha_sigma(s.sigmas[i]);
-                st.iter().zip(eps.iter())
+                st.iter()
+                    .zip(eps.iter())
                     .map(|(&x, &e)| (x - sigma_ddpm * e) / alpha)
                     .collect()
             };
@@ -3968,15 +4415,23 @@ mod tests {
             // After step 1: ring[1]=m1, ring[0]=m0; step_index=2.
             // After step 2: ring[1]=m2, ring[0]=m1; step_index=3.
             if i == 0 {
-                assert!(s.model_outputs[1].is_some(), "ring[1] must be set after step 0");
-                assert!(s.model_outputs[0].is_none(), "ring[0] must still be None after step 0");
+                assert!(
+                    s.model_outputs[1].is_some(),
+                    "ring[1] must be set after step 0"
+                );
+                assert!(
+                    s.model_outputs[0].is_none(),
+                    "ring[0] must still be None after step 0"
+                );
             }
             if i == 2 {
                 // ring[1] must be m2 — the x0 conversion at step 2.
                 let ring1 = s.model_outputs[1].as_ref().unwrap();
                 for (j, (&r, &ex)) in ring1.iter().zip(expected_m.iter()).enumerate() {
-                    assert!((r - ex).abs() < 1e-5,
-                        "ring[1] at step 2 mismatch at [{j}]: {r} vs {ex}");
+                    assert!(
+                        (r - ex).abs() < 1e-5,
+                        "ring[1] at step 2 mismatch at [{j}]: {r} vs {ex}"
+                    );
                 }
                 assert_eq!(s.step_index, 3, "step_index must be 3 after 3 calls");
             }
@@ -3992,8 +4447,10 @@ mod tests {
         for _ in 0..8 {
             sample = s.step(&eps, &sample);
         }
-        assert!(sample.iter().all(|v| v.is_finite()),
-            "UniPC terminal step produced non-finite output: {sample:?}");
+        assert!(
+            sample.iter().all(|v| v.is_finite()),
+            "UniPC terminal step produced non-finite output: {sample:?}"
+        );
     }
 
     /// Karras schedule must be strictly descending and terminate at 0.
@@ -4002,8 +4459,12 @@ mod tests {
         let s = UniPcScheduler::new_sd15(20);
         assert_eq!(s.sigmas.len(), 21, "sigmas len must be num_inference + 1");
         for w in s.sigmas.windows(2) {
-            assert!(w[0] >= w[1],
-                "sigmas must be non-increasing: {} → {}", w[0], w[1]);
+            assert!(
+                w[0] >= w[1],
+                "sigmas must be non-increasing: {} → {}",
+                w[0],
+                w[1]
+            );
         }
         assert!(s.sigmas[0] > 1.0, "first sigma should be well above 1.0");
         assert_eq!(s.sigmas[20], 0.0, "terminal sigma must be exactly 0.0");
@@ -4021,17 +4482,33 @@ mod tests {
         let n = 8_usize;
         let dim = 16_usize;
         let mut sched = Scheduler::UniPc(UniPcScheduler::new_sd15(n));
-        let latent:    Vec<f32> = (0..dim).map(|i| 0.1 * i as f32).collect();
-        let noise_pred:Vec<f32> = (0..dim).map(|i| 0.05 * i as f32).collect();
+        let latent: Vec<f32> = (0..dim).map(|i| 0.1 * i as f32).collect();
+        let noise_pred: Vec<f32> = (0..dim).map(|i| 0.05 * i as f32).collect();
         let mut out = Vec::new();
         let mut rng = ChaCha8Rng::seed_from_u64(42);
 
         let ts = sched.timesteps().to_vec();
-        step_array_into(&mut sched, &latent, &noise_pred, 0, ts[0], ts[0], false, &mut rng, &mut out);
+        step_array_into(
+            &mut sched,
+            &latent,
+            &noise_pred,
+            0,
+            ts[0],
+            ts[0],
+            false,
+            &mut rng,
+            &mut out,
+        );
 
-        assert_eq!(out.len(), dim, "step_array_into output length must match input");
-        assert!(out.iter().all(|v| v.is_finite()),
-            "step_array_into must produce finite output: {out:?}");
+        assert_eq!(
+            out.len(),
+            dim,
+            "step_array_into output length must match input"
+        );
+        assert!(
+            out.iter().all(|v| v.is_finite()),
+            "step_array_into must produce finite output: {out:?}"
+        );
     }
 
     /// `image_to_minus1_plus1_masked` must use a binary cliff at byte
@@ -4051,11 +4528,17 @@ mod tests {
         let arr = image_to_minus1_plus1_masked(&img, &mask);
         // Pixel 0: mask=127 (≤127) → original red = (255/127.5) - 1 = 1.0.
         let r0 = arr[(0, 0, 0, 0)];
-        assert!((r0 - 1.0).abs() < 1e-5, "byte 127 must be original, got {r0}");
+        assert!(
+            (r0 - 1.0).abs() < 1e-5,
+            "byte 127 must be original, got {r0}"
+        );
         // Pixel 1: mask=128 (>127) → mid-grey fill = (128/127.5) - 1 ≈ 0.00392.
         let r1 = arr[(0, 0, 0, 1)];
         let v_fill = (128.0_f32 / 127.5) - 1.0;
-        assert!((r1 - v_fill).abs() < 1e-5, "byte 128 must be mid-grey {v_fill}, got {r1}");
+        assert!(
+            (r1 - v_fill).abs() < 1e-5,
+            "byte 128 must be mid-grey {v_fill}, got {r1}"
+        );
         // CRITICAL: at byte 192 (75% alpha if blending) the output
         // must STILL be mid-grey (binary cliff), not a partial blend.
         let mut mask2 = GrayImage::new(1, 1);
@@ -4065,8 +4548,10 @@ mod tests {
             &mask2,
         );
         let r2 = arr2[(0, 0, 0, 0)];
-        assert!((r2 - v_fill).abs() < 1e-5,
-            "byte 192 must be binary-cliff mid-grey {v_fill} (NOT float blend ≈ 0.25), got {r2}");
+        assert!(
+            (r2 - v_fill).abs() < 1e-5,
+            "byte 192 must be binary-cliff mid-grey {v_fill} (NOT float blend ≈ 0.25), got {r2}"
+        );
     }
 
     #[test]
@@ -4112,9 +4597,15 @@ mod tests {
         // Left half latent cells (lx = 0..32): ~1.0
         // Right half latent cells (lx = 32..64): ~0.0
         let left_cell = latent[(0, 0, 0, 0)];
-        assert!((left_cell - 1.0).abs() < 1e-3, "left half should be 1.0, got {left_cell}");
+        assert!(
+            (left_cell - 1.0).abs() < 1e-3,
+            "left half should be 1.0, got {left_cell}"
+        );
         let right_cell = latent[(0, 0, 0, l - 1)];
-        assert!(right_cell.abs() < 1e-3, "right half should be 0.0, got {right_cell}");
+        assert!(
+            right_cell.abs() < 1e-3,
+            "right half should be 0.0, got {right_cell}"
+        );
 
         // Critical case: shift the boundary by 4 pixels so it lands
         // mid-block. The block at lx=32 now spans source x=256..263,
