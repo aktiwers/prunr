@@ -48,8 +48,7 @@ pub(crate) struct HistoryManager;
 impl HistoryManager {
     /// True if `undo_result` on this item would change anything.
     pub(crate) fn can_undo(item: &BatchItem) -> bool {
-        item.status == BatchStatus::Done
-            && (!item.history.is_empty() || item.result_rgba.is_some())
+        item.status == BatchStatus::Done && (!item.history.is_empty() || item.result_rgba.is_some())
     }
 
     /// True if `redo_result` on this item would change anything.
@@ -65,7 +64,8 @@ impl HistoryManager {
             return;
         }
         if let Some(ref src_rgba) = item.source_rgba {
-            item.history.push_back(HistoryEntry::new(src_rgba.clone(), None));
+            item.history
+                .push_back(HistoryEntry::new(src_rgba.clone(), None));
             // First Process action — push a Result marker so undo can
             // revert from the upcoming result back to the un-processed
             // source. archive_current_result early-returns on the first
@@ -90,7 +90,8 @@ impl HistoryManager {
             if chain_mode {
                 item.result_rgba = Some(current.clone());
             }
-            item.history.push_back(HistoryEntry::new(current, item.applied_recipe.clone()));
+            item.history
+                .push_back(HistoryEntry::new(current, item.applied_recipe.clone()));
             while item.history.len() > max_depth {
                 if let Some(old) = item.history.pop_front() {
                     old.cleanup();
@@ -119,14 +120,16 @@ impl HistoryManager {
             // No history to walk back into; capture current as redo target,
             // then transition to Pending (the unprocessed source state).
             if let Some(current) = item.result_rgba.take() {
-                item.redo_stack.push_back(HistoryEntry::new(current, current_recipe));
+                item.redo_stack
+                    .push_back(HistoryEntry::new(current, current_recipe));
             }
             item.status = BatchStatus::Pending;
             item.result_rgba = None;
             return true;
         }
         if let Some(current) = item.result_rgba.take() {
-            item.redo_stack.push_back(HistoryEntry::new(current, current_recipe));
+            item.redo_stack
+                .push_back(HistoryEntry::new(current, current_recipe));
         }
         if let Some(entry) = item.history.pop_back() {
             let (slot, recipe) = entry.into_parts();
@@ -152,7 +155,8 @@ impl HistoryManager {
         }
         let current_recipe = item.applied_recipe.take();
         if let Some(current) = item.result_rgba.take() {
-            item.history.push_back(HistoryEntry::new(current, current_recipe));
+            item.history
+                .push_back(HistoryEntry::new(current, current_recipe));
         }
         if let Some(entry) = item.redo_stack.pop_back() {
             let (slot, recipe) = entry.into_parts();
@@ -255,8 +259,8 @@ mod tests {
     //! Tests for the `HistoryManager` methods themselves — the policy layer
     //! over per-item history stacks. Build a `BatchItem` fixture, call the
     //! methods, assert state.
-    use super::*;
     use super::preset_stack_tests::snap; // shared with the push_bounded tests
+    use super::*;
     use crate::gui::item::ImageSource;
     use crate::gui::item_settings::ItemSettings;
     use std::sync::Arc;
@@ -273,7 +277,11 @@ mod tests {
     }
 
     fn rgba(r: u8) -> Arc<image::RgbaImage> {
-        Arc::new(image::RgbaImage::from_pixel(2, 2, image::Rgba([r, 0, 0, 255])))
+        Arc::new(image::RgbaImage::from_pixel(
+            2,
+            2,
+            image::Rgba([r, 0, 0, 255]),
+        ))
     }
 
     // ── can_undo / can_redo ─────────────────────────────────────────────
@@ -320,7 +328,11 @@ mod tests {
         item.source_rgba = Some(rgba(0));
         let before = item.history.len();
         HistoryManager::seed_with_source(&mut item);
-        assert_eq!(item.history.len(), before, "should not push when history non-empty");
+        assert_eq!(
+            item.history.len(),
+            before,
+            "should not push when history non-empty"
+        );
     }
 
     #[test]
@@ -328,7 +340,10 @@ mod tests {
         let mut item = fixture(1);
         // source_rgba defaults to None
         HistoryManager::seed_with_source(&mut item);
-        assert!(item.history.is_empty(), "should not push without source_rgba");
+        assert!(
+            item.history.is_empty(),
+            "should not push without source_rgba"
+        );
     }
 
     #[test]
@@ -352,7 +367,8 @@ mod tests {
         assert!(item.actions_undo.is_empty());
         HistoryManager::seed_with_source(&mut item);
         assert_eq!(
-            item.actions_undo.len(), 1,
+            item.actions_undo.len(),
+            1,
             "first seed must push an ActionType::Result marker so the upcoming Process is undoable",
         );
     }
@@ -376,7 +392,11 @@ mod tests {
         HistoryManager::seed_with_source(&mut item);
         assert_eq!(item.actions_undo.len(), 1);
         HistoryManager::seed_with_source(&mut item);
-        assert_eq!(item.actions_undo.len(), 1, "subsequent seed calls must no-op the marker push too");
+        assert_eq!(
+            item.actions_undo.len(),
+            1,
+            "subsequent seed calls must no-op the marker push too"
+        );
     }
 
     // ── archive_current_result ──────────────────────────────────────────
@@ -388,7 +408,10 @@ mod tests {
         item.result_rgba = Some(rgba(5));
         HistoryManager::archive_current_result(&mut item, 10, false);
         assert_eq!(item.history.len(), 0);
-        assert!(item.result_rgba.is_some(), "result_rgba should be untouched");
+        assert!(
+            item.result_rgba.is_some(),
+            "result_rgba should be untouched"
+        );
     }
 
     #[test]
@@ -401,8 +424,14 @@ mod tests {
         HistoryManager::archive_current_result(&mut item, 10, false);
 
         assert_eq!(item.history.len(), 1, "current pushed onto history");
-        assert!(item.redo_stack.is_empty(), "redo cleared on fresh process branch");
-        assert!(item.result_rgba.is_none(), "non-chain mode releases result_rgba");
+        assert!(
+            item.redo_stack.is_empty(),
+            "redo cleared on fresh process branch"
+        );
+        assert!(
+            item.result_rgba.is_none(),
+            "non-chain mode releases result_rgba"
+        );
     }
 
     #[test]
@@ -414,7 +443,10 @@ mod tests {
         HistoryManager::archive_current_result(&mut item, 10, true);
 
         assert_eq!(item.history.len(), 1);
-        assert!(item.result_rgba.is_some(), "chain mode keeps result_rgba populated");
+        assert!(
+            item.result_rgba.is_some(),
+            "chain mode keeps result_rgba populated"
+        );
     }
 
     #[test]
@@ -464,8 +496,8 @@ mod tests {
         // that after undo pops `prior_result`, history is non-empty and
         // status stays Done. (Single-entry history is the source-seed case
         // and walks back to Pending — covered by `undo_result_empty_history_*`.)
-        item.history.push_back(HistoryEntry::new(rgba(0), None));   // source seed
-        item.history.push_back(HistoryEntry::new(rgba(11), None));  // prior real result
+        item.history.push_back(HistoryEntry::new(rgba(0), None)); // source seed
+        item.history.push_back(HistoryEntry::new(rgba(11), None)); // prior real result
 
         // Undo: pops prior_result onto current, current_42 goes to redo.
         assert!(HistoryManager::undo_result(&mut item));
@@ -498,7 +530,10 @@ mod tests {
         HistoryManager::push_preset(&mut item, snap(1.5));
         assert_eq!(item.preset_undo_stack.len(), 1);
         assert_eq!(item.preset_undo_stack.front().unwrap().settings.gamma, 1.5);
-        assert!(item.preset_redo_stack.is_empty(), "fresh apply branches the timeline");
+        assert!(
+            item.preset_redo_stack.is_empty(),
+            "fresh apply branches the timeline"
+        );
     }
 
     #[test]
@@ -529,7 +564,11 @@ mod tests {
         use prunr_core::LineMode;
         let mut item = fixture(1);
         item.settings.line_mode = LineMode::Off;
-        item.cached_edge_mask = Some((Arc::new(image::GrayImage::new(1, 1)), 0, prunr_core::EdgeScale::Fused));
+        item.cached_edge_mask = Some((
+            Arc::new(image::GrayImage::new(1, 1)),
+            0,
+            prunr_core::EdgeScale::Fused,
+        ));
         let snap_with_edges = item_with_line_mode(LineMode::EdgesOnly);
         item.preset_undo_stack.push_back(PresetSnapshot {
             settings: snap_with_edges,
@@ -538,7 +577,10 @@ mod tests {
 
         assert!(HistoryManager::swap_preset(&mut item, HistoryDir::Undo));
         assert_eq!(item.settings.line_mode, LineMode::EdgesOnly);
-        assert!(item.cached_edge_mask.is_none(), "line_mode change must invalidate edge cache");
+        assert!(
+            item.cached_edge_mask.is_none(),
+            "line_mode change must invalidate edge cache"
+        );
     }
 
     // ── source_texture invariant across archive → undo → redo ──────────────
@@ -595,10 +637,15 @@ mod tests {
 
         HistoryManager::archive_current_result(&mut item, 10, false);
 
-        assert_eq!(item.actions_undo.back(), Some(&crate::gui::item::ActionType::Result),
-            "archive_current_result must push a Result marker onto actions_undo");
-        assert!(item.actions_redo.is_empty(),
-            "archive_current_result must clear actions_redo");
+        assert_eq!(
+            item.actions_undo.back(),
+            Some(&crate::gui::item::ActionType::Result),
+            "archive_current_result must push a Result marker onto actions_undo"
+        );
+        assert!(
+            item.actions_redo.is_empty(),
+            "archive_current_result must clear actions_redo"
+        );
     }
 
     #[test]
@@ -609,20 +656,28 @@ mod tests {
 
         HistoryManager::archive_current_result(&mut item, 10, false);
 
-        assert!(item.actions_undo.is_empty(),
-            "no Result marker must be pushed when status is not Done");
+        assert!(
+            item.actions_undo.is_empty(),
+            "no Result marker must be pushed when status is not Done"
+        );
     }
 
     #[test]
     fn push_preset_pushes_preset_apply_marker_and_clears_actions_redo() {
         let mut item = fixture(1);
-        item.actions_redo.push_back(crate::gui::item::ActionType::Stroke);
+        item.actions_redo
+            .push_back(crate::gui::item::ActionType::Stroke);
 
         HistoryManager::push_preset(&mut item, snap(1.5));
 
-        assert_eq!(item.actions_undo.back(), Some(&crate::gui::item::ActionType::PresetApply),
-            "push_preset must push a PresetApply marker onto actions_undo");
-        assert!(item.actions_redo.is_empty(),
-            "push_preset must clear actions_redo");
+        assert_eq!(
+            item.actions_undo.back(),
+            Some(&crate::gui::item::ActionType::PresetApply),
+            "push_preset must push a PresetApply marker onto actions_undo"
+        );
+        assert!(
+            item.actions_redo.is_empty(),
+            "push_preset must clear actions_redo"
+        );
     }
 }

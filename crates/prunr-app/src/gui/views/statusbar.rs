@@ -12,7 +12,7 @@ pub fn render(ui: &mut egui::Ui, app: &PrunrApp) {
         let logo_w = logo_h * theme::LOGO_ASPECT;
         ui.add(
             egui::Image::new(egui::include_image!("../../../../../img/logo-nobg.png"))
-                .fit_to_exact_size(egui::vec2(logo_w, logo_h))
+                .fit_to_exact_size(egui::vec2(logo_w, logo_h)),
         );
         ui.add_space(theme::SPACE_XS);
 
@@ -50,7 +50,11 @@ pub fn render(ui: &mut egui::Ui, app: &PrunrApp) {
             }
         };
 
-        ui.label(RichText::new(&status_text).color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY));
+        ui.label(
+            RichText::new(&status_text)
+                .color(theme::TEXT_PRIMARY)
+                .size(theme::FONT_SIZE_BODY),
+        );
 
         // Undo-depth indicator: count of actions the user can actually
         // undo via Cmd+Z. `history.len()` would lie when stroke-archive
@@ -85,20 +89,17 @@ pub fn render(ui: &mut egui::Ui, app: &PrunrApp) {
             let bar_width = available_width.max(50.0);
             let bar_height = theme::PROGRESS_BAR_HEIGHT;
 
-            let (rect, _) = ui.allocate_exact_size(
-                egui::Vec2::new(bar_width, bar_height),
-                egui::Sense::hover(),
-            );
+            let (rect, _) = ui
+                .allocate_exact_size(egui::Vec2::new(bar_width, bar_height), egui::Sense::hover());
 
             ui.painter().rect_filled(rect, 2.0, theme::PROGRESS_BAR_BG);
 
             let fill_w = rect.width() * app.status.pct.clamp(0.0, 1.0);
             if fill_w > 0.0 {
-                let fill_rect = Rect::from_min_max(
-                    rect.min,
-                    Pos2::new(rect.min.x + fill_w, rect.max.y),
-                );
-                ui.painter().rect_filled(fill_rect, 2.0, theme::PROGRESS_FILL);
+                let fill_rect =
+                    Rect::from_min_max(rect.min, Pos2::new(rect.min.x + fill_w, rect.max.y));
+                ui.painter()
+                    .rect_filled(fill_rect, 2.0, theme::PROGRESS_FILL);
             }
         } else {
             // Teach-the-user hint when ≥ 2 checkboxes are set: the canvas
@@ -112,7 +113,7 @@ pub fn render(ui: &mut egui::Ui, app: &PrunrApp) {
                 ui.label(
                     RichText::new(
                         "Live editing applies to the viewed image only \u{2014} \
-                         click Process to apply to all selected."
+                         click Process to apply to all selected.",
                     )
                     .size(theme::FONT_SIZE_MONO)
                     .color(theme::TEXT_SECONDARY),
@@ -141,9 +142,12 @@ pub fn render(ui: &mut egui::Ui, app: &PrunrApp) {
                 ui.add_space(theme::SPACE_SM);
                 let zoom_pct = (app.zoom_state.zoom * 100.0).round() as u32;
                 ui.label(
-                    RichText::new(format!("{} {zoom_pct}%", egui_material_icons::icons::ICON_SEARCH.codepoint))
-                        .size(theme::FONT_SIZE_BODY)
-                        .color(theme::TEXT_SECONDARY),
+                    RichText::new(format!(
+                        "{} {zoom_pct}%",
+                        egui_material_icons::icons::ICON_SEARCH.codepoint
+                    ))
+                    .size(theme::FONT_SIZE_BODY)
+                    .color(theme::TEXT_SECONDARY),
                 );
             }
 

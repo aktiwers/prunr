@@ -123,7 +123,8 @@ impl BatchManager {
     /// IDs of checkbox-selected items currently in a given status. Used by
     /// the partial-cancel path to decide which in-flight items to stop.
     pub(crate) fn selected_ids_with_status(&self, status: BatchStatus) -> Vec<u64> {
-        self.items.iter()
+        self.items
+            .iter()
             .filter(|i| i.selected && i.status == status)
             .map(|i| i.id)
             .collect()
@@ -162,7 +163,11 @@ impl BatchManager {
     /// changed; `false` when it was already selected. Callers use the return value
     /// to decide whether to reset the canvas (zoom/pan/texture sync).
     pub(crate) fn select_item(&mut self, idx: usize) -> bool {
-        debug_assert!(idx < self.items.len(), "select_item: idx {idx} out of bounds (len={})", self.items.len());
+        debug_assert!(
+            idx < self.items.len(),
+            "select_item: idx {idx} out of bounds (len={})",
+            self.items.len()
+        );
         if self.selected_index == idx {
             return false;
         }
@@ -207,7 +212,9 @@ impl BatchManager {
     /// if any are checked, else the currently-viewed item. Empty when the
     /// batch is empty.
     pub(crate) fn items_to_process(&self) -> Vec<u64> {
-        let checked: Vec<u64> = self.items.iter()
+        let checked: Vec<u64> = self
+            .items
+            .iter()
             .filter(|i| i.selected)
             .map(|i| i.id)
             .collect();
@@ -228,7 +235,11 @@ impl BatchManager {
         let has_selected = self.has_any_selected();
         let current_id = self.selected_item().map(|b| b.id);
         self.items.iter().any(|item| {
-            let is_target = if has_selected { item.selected } else { Some(item.id) == current_id };
+            let is_target = if has_selected {
+                item.selected
+            } else {
+                Some(item.id) == current_id
+            };
             is_target && f(item)
         })
     }
@@ -242,7 +253,11 @@ impl BatchManager {
         let has_selected = self.has_any_selected();
         let current_id = self.selected_item().map(|b| b.id);
         self.items.iter().find(|item| {
-            if has_selected { item.selected } else { Some(item.id) == current_id }
+            if has_selected {
+                item.selected
+            } else {
+                Some(item.id) == current_id
+            }
         })
     }
 
@@ -255,7 +270,11 @@ impl BatchManager {
         let current_id = self.selected_item().map(|b| b.id);
         (0..self.items.len())
             .filter(|&i| {
-                if has_selected { self.items[i].selected } else { Some(self.items[i].id) == current_id }
+                if has_selected {
+                    self.items[i].selected
+                } else {
+                    Some(self.items[i].id) == current_id
+                }
             })
             .collect()
     }
@@ -266,10 +285,16 @@ impl BatchManager {
     /// `selected_index` and triggering any downstream sync — this helper
     /// only mutates `items` and the removed entries' on-disk state.
     pub(crate) fn remove(&mut self, idx: usize) -> bool {
-        if idx >= self.items.len() { return false; }
+        if idx >= self.items.len() {
+            return false;
+        }
         let item = self.items.remove(idx);
-        for entry in item.history { entry.cleanup(); }
-        for entry in item.redo_stack { entry.cleanup(); }
+        for entry in item.history {
+            entry.cleanup();
+        }
+        for entry in item.redo_stack {
+            entry.cleanup();
+        }
         true
     }
 
@@ -394,7 +419,8 @@ impl BatchManager {
             // Drop bytes / DynamicImage / RGBA before send so concurrent
             // threads don't pile per-image peaks.
             let result: Result<Arc<image::RgbaImage>, String> = (|| {
-                let bytes = source.load_bytes()
+                let bytes = source
+                    .load_bytes()
                     .map_err(|e| format!("Failed to load: {e}"))?;
                 let original = prunr_core::load_image_from_bytes(&bytes)
                     .map_err(|_| "Decode failed".to_string())?;
@@ -428,8 +454,14 @@ impl BatchManager {
             let rgba = rgba.clone();
             std::thread::spawn(move || {
                 let _slot = slots.acquire();
-                let (w, h) = fit_dimensions(rgba.width(), rgba.height(), THUMB_MAX_PX, THUMB_MAX_PX);
-                let thumb = image::imageops::resize(rgba.as_ref(), w, h, image::imageops::FilterType::Triangle);
+                let (w, h) =
+                    fit_dimensions(rgba.width(), rgba.height(), THUMB_MAX_PX, THUMB_MAX_PX);
+                let thumb = image::imageops::resize(
+                    rgba.as_ref(),
+                    w,
+                    h,
+                    image::imageops::FilterType::Triangle,
+                );
                 let _ = tx.send((item_id, thumb.width(), thumb.height(), thumb.into_raw()));
             });
         } else {
@@ -447,8 +479,14 @@ impl BatchManager {
                     drop(bytes);
                     let rgba = img.to_rgba8();
                     drop(img);
-                    let (w, h) = fit_dimensions(rgba.width(), rgba.height(), THUMB_MAX_PX, THUMB_MAX_PX);
-                    Some(image::imageops::resize(&rgba, w, h, image::imageops::FilterType::Triangle))
+                    let (w, h) =
+                        fit_dimensions(rgba.width(), rgba.height(), THUMB_MAX_PX, THUMB_MAX_PX);
+                    Some(image::imageops::resize(
+                        &rgba,
+                        w,
+                        h,
+                        image::imageops::FilterType::Triangle,
+                    ))
                 })();
                 if let Some(thumb) = thumb {
                     let _ = tx.send((item_id, thumb.width(), thumb.height(), thumb.into_raw()));
@@ -463,13 +501,19 @@ impl BatchManager {
     /// item (segmentation cached but edges gone, or vice versa) which is useless.
     pub(crate) fn enforce_tensor_budget(&mut self) {
         let total: usize = self.items.iter().map(BatchItem::cache_size).sum();
-        if total <= TENSOR_BUDGET { return; }
+        if total <= TENSOR_BUDGET {
+            return;
+        }
         let selected_id = self.selected_item().map(|b| b.id);
         let mut remaining = total;
         for item in &mut self.items {
-            if remaining <= TENSOR_BUDGET { break; }
+            if remaining <= TENSOR_BUDGET {
+                break;
+            }
             // Preserve the selected item's tensors (most likely to be reused).
-            if Some(item.id) == selected_id { continue; }
+            if Some(item.id) == selected_id {
+                continue;
+            }
             remaining -= item.cache_size();
             item.cached_tensor = None;
             item.invalidate_edge_cache();
@@ -490,9 +534,13 @@ impl BatchManager {
 
 /// Compute dimensions that fit within `max_w` × `max_h` preserving aspect ratio.
 fn fit_dimensions(src_w: u32, src_h: u32, max_w: u32, max_h: u32) -> (u32, u32) {
-    let scale = (max_w as f32 / src_w as f32).min(max_h as f32 / src_h as f32).min(1.0);
-    ((src_w as f32 * scale).round().max(1.0) as u32,
-     (src_h as f32 * scale).round().max(1.0) as u32)
+    let scale = (max_w as f32 / src_w as f32)
+        .min(max_h as f32 / src_h as f32)
+        .min(1.0);
+    (
+        (src_w as f32 * scale).round().max(1.0) as u32,
+        (src_h as f32 * scale).round().max(1.0) as u32,
+    )
 }
 
 #[cfg(test)]
@@ -521,7 +569,12 @@ mod tests {
         if tensor_floats > 0 {
             // Real CompressedTensor: zstd-compress f32 data via from_raw.
             let data: Vec<f32> = vec![0.5; tensor_floats];
-            let cache = TensorCache { data, height: 10, width: 10, model: ModelKind::Silueta };
+            let cache = TensorCache {
+                data,
+                height: 10,
+                width: 10,
+                model: ModelKind::Silueta,
+            };
             item.cached_tensor = CompressedTensor::from_raw(cache);
         }
         item
@@ -622,7 +675,11 @@ mod tests {
         assert_eq!(c.done, 2);
         assert_eq!(c.processing, 1);
         assert_eq!(c.errored, 1);
-        assert_eq!(c.batch_total(), 4, "Pending items are excluded from batch_total");
+        assert_eq!(
+            c.batch_total(),
+            4,
+            "Pending items are excluded from batch_total"
+        );
     }
 
     #[test]
@@ -715,7 +772,7 @@ mod tests {
         bm.items.push(item_with_cache(2, 100));
         bm.items.push(item_with_cache(3, 100));
         bm.selected_index = 1; // item id=2
-        // Sanity: all three start with caches.
+                               // Sanity: all three start with caches.
         assert!(bm.items.iter().all(|i| i.cached_tensor.is_some()));
 
         bm.evict_all_tensors();
@@ -729,7 +786,11 @@ mod tests {
     fn evict_all_tensors_clears_edge_cache_too() {
         let mut bm = fixture();
         let mut item = item_with_cache(1, 100);
-        item.cached_edge_mask = Some((Arc::new(image::GrayImage::new(1, 1)), 0, prunr_core::EdgeScale::Fused));
+        item.cached_edge_mask = Some((
+            Arc::new(image::GrayImage::new(1, 1)),
+            0,
+            prunr_core::EdgeScale::Fused,
+        ));
         bm.items.push(item);
         bm.items.push(item_with_cache(2, 100));
         bm.selected_index = 1; // selected = id=2
@@ -760,7 +821,10 @@ mod tests {
         let png = Arc::new(one_pixel_png());
         bm.request_decode_bytes(42, png);
 
-        let (id, result) = bm.bg_io.decode_rx.recv_timeout(Duration::from_secs(2))
+        let (id, result) = bm
+            .bg_io
+            .decode_rx
+            .recv_timeout(Duration::from_secs(2))
             .expect("decode_tx must produce a result within 2s");
         assert_eq!(id, 42);
         let rgba = result.expect("valid PNG must decode");
@@ -774,7 +838,10 @@ mod tests {
         let source = ImageSource::Bytes(Arc::new(one_pixel_png()));
         bm.request_decode_source(99, &source);
 
-        let (id, result) = bm.bg_io.decode_rx.recv_timeout(Duration::from_secs(2))
+        let (id, result) = bm
+            .bg_io
+            .decode_rx
+            .recv_timeout(Duration::from_secs(2))
             .expect("decode_tx must produce a result within 2s");
         assert_eq!(id, 99);
         assert!(result.is_ok());
@@ -789,21 +856,34 @@ mod tests {
         let garbage = Arc::new(b"not an image".to_vec());
         bm.request_decode_bytes(7, garbage);
 
-        let (id, result) = bm.bg_io.decode_rx.recv_timeout(Duration::from_secs(2))
+        let (id, result) = bm
+            .bg_io
+            .decode_rx
+            .recv_timeout(Duration::from_secs(2))
             .expect("decode_tx must produce a result within 2s");
         assert_eq!(id, 7);
         let err = result.expect_err("garbage bytes must produce Err");
-        assert!(err.contains("decode failed"), "expected 'decode failed' prefix, got: {err}");
+        assert!(
+            err.contains("decode failed"),
+            "expected 'decode failed' prefix, got: {err}"
+        );
     }
 
     #[test]
     fn request_thumbnail_with_result_rgba_emits_to_thumb_rx() {
         let bm = fixture();
-        let result = Arc::new(image::RgbaImage::from_pixel(200, 200, image::Rgba([10, 20, 30, 255])));
+        let result = Arc::new(image::RgbaImage::from_pixel(
+            200,
+            200,
+            image::Rgba([10, 20, 30, 255]),
+        ));
         let source = ImageSource::Bytes(Arc::new(Vec::new())); // unused when result_rgba is Some
         bm.request_thumbnail(7, &source, Some(&result));
 
-        let (id, w, h, pixels) = bm.bg_io.thumb_rx.recv_timeout(Duration::from_secs(2))
+        let (id, w, h, pixels) = bm
+            .bg_io
+            .thumb_rx
+            .recv_timeout(Duration::from_secs(2))
             .expect("thumb_tx must produce a result within 2s");
         assert_eq!(id, 7);
         // 200x200 fits within 160x160 → scaled to 160x160.
@@ -817,7 +897,10 @@ mod tests {
         let source = ImageSource::Bytes(Arc::new(one_pixel_png()));
         bm.request_thumbnail(8, &source, None);
 
-        let (id, w, h, pixels) = bm.bg_io.thumb_rx.recv_timeout(Duration::from_secs(2))
+        let (id, w, h, pixels) = bm
+            .bg_io
+            .thumb_rx
+            .recv_timeout(Duration::from_secs(2))
             .expect("thumb_tx must produce a result within 2s");
         assert_eq!(id, 8);
         // 1x1 fits trivially → stays 1x1.
@@ -877,7 +960,10 @@ mod tests {
         bm.items.push(checked(1));
         bm.items.push(item_with_cache(2, 0));
         bm.items.push(item_with_cache(3, 0));
-        assert_eq!(bm.process_button_label(), ProcessButtonLabel::ProcessSelected(1));
+        assert_eq!(
+            bm.process_button_label(),
+            ProcessButtonLabel::ProcessSelected(1)
+        );
     }
 
     #[test]
@@ -886,7 +972,10 @@ mod tests {
         bm.items.push(checked(1));
         bm.items.push(checked(2));
         bm.items.push(item_with_cache(3, 0));
-        assert_eq!(bm.process_button_label(), ProcessButtonLabel::ProcessSelected(2));
+        assert_eq!(
+            bm.process_button_label(),
+            ProcessButtonLabel::ProcessSelected(2)
+        );
     }
 
     #[test]
@@ -903,7 +992,10 @@ mod tests {
         // "Process All [1]" reads as a glitch — the t>=2 guard keeps it Selected.
         let mut bm = fixture();
         bm.items.push(checked(1));
-        assert_eq!(bm.process_button_label(), ProcessButtonLabel::ProcessSelected(1));
+        assert_eq!(
+            bm.process_button_label(),
+            ProcessButtonLabel::ProcessSelected(1)
+        );
     }
 
     // ── items_to_process ─────────────────────────────────────────────────
@@ -964,7 +1056,10 @@ mod tests {
         let source = ImageSource::Bytes(Arc::new(one_pixel_png()));
         bm.request_filter_only(7, &source, prunr_core::FillStyle::default());
 
-        let (id, result) = bm.bg_io.filter_only_rx.recv_timeout(Duration::from_secs(2))
+        let (id, result) = bm
+            .bg_io
+            .filter_only_rx
+            .recv_timeout(Duration::from_secs(2))
             .expect("filter_only_tx must produce a result within 2s");
         assert_eq!(id, 7);
         let rgba = result.expect("default FillStyle on a 1x1 source must succeed");
@@ -978,14 +1073,20 @@ mod tests {
     fn request_filter_only_emits_load_failure_via_err_variant() {
         let bm = fixture();
         let source = ImageSource::Path(std::path::PathBuf::from(
-            "/nonexistent/prunr-test-missing.png"
+            "/nonexistent/prunr-test-missing.png",
         ));
         bm.request_filter_only(11, &source, prunr_core::FillStyle::default());
 
-        let (id, result) = bm.bg_io.filter_only_rx.recv_timeout(Duration::from_secs(2))
+        let (id, result) = bm
+            .bg_io
+            .filter_only_rx
+            .recv_timeout(Duration::from_secs(2))
             .expect("filter_only_tx must produce a result within 2s");
         assert_eq!(id, 11);
-        assert!(result.is_err(), "missing file must surface as Err, not stall");
+        assert!(
+            result.is_err(),
+            "missing file must surface as Err, not stall"
+        );
     }
 
     // ── select_item ─────────────────────────────────────────────────────
@@ -1015,38 +1116,61 @@ mod tests {
     fn reorder_moves_item_forward_and_adjusts_selected() {
         // [A B C D] selected=1(B), move from=0(A) to=3 → [B C A D] selected=0(B)
         let mut bm = fixture();
-        for id in [10, 20, 30, 40] { bm.items.push(item_with_cache(id, 0)); }
+        for id in [10, 20, 30, 40] {
+            bm.items.push(item_with_cache(id, 0));
+        }
         bm.selected_index = 1;
         bm.reorder(0, 3);
-        assert_eq!(bm.items.iter().map(|i| i.id).collect::<Vec<_>>(), [20, 30, 10, 40]);
-        assert_eq!(bm.selected_index, 0, "selected item B must follow its new position");
+        assert_eq!(
+            bm.items.iter().map(|i| i.id).collect::<Vec<_>>(),
+            [20, 30, 10, 40]
+        );
+        assert_eq!(
+            bm.selected_index, 0,
+            "selected item B must follow its new position"
+        );
     }
 
     #[test]
     fn reorder_moves_item_backward_and_adjusts_selected() {
         // [A B C D] selected=2(C), move from=3(D) to=1 → [A D B C] selected=3(C)
         let mut bm = fixture();
-        for id in [10, 20, 30, 40] { bm.items.push(item_with_cache(id, 0)); }
+        for id in [10, 20, 30, 40] {
+            bm.items.push(item_with_cache(id, 0));
+        }
         bm.selected_index = 2;
         bm.reorder(3, 1);
-        assert_eq!(bm.items.iter().map(|i| i.id).collect::<Vec<_>>(), [10, 40, 20, 30]);
-        assert_eq!(bm.selected_index, 3, "selected item C must follow its new position");
+        assert_eq!(
+            bm.items.iter().map(|i| i.id).collect::<Vec<_>>(),
+            [10, 40, 20, 30]
+        );
+        assert_eq!(
+            bm.selected_index, 3,
+            "selected item C must follow its new position"
+        );
     }
 
     #[test]
     fn reorder_noop_when_from_equals_to() {
         let mut bm = fixture();
-        for id in [10, 20, 30] { bm.items.push(item_with_cache(id, 0)); }
+        for id in [10, 20, 30] {
+            bm.items.push(item_with_cache(id, 0));
+        }
         bm.selected_index = 1;
         bm.reorder(1, 1);
-        assert_eq!(bm.items.iter().map(|i| i.id).collect::<Vec<_>>(), [10, 20, 30]);
+        assert_eq!(
+            bm.items.iter().map(|i| i.id).collect::<Vec<_>>(),
+            [10, 20, 30]
+        );
         assert_eq!(bm.selected_index, 1);
     }
 
     #[test]
     fn reorder_noop_when_from_out_of_bounds() {
         let mut bm = fixture();
-        for id in [10, 20] { bm.items.push(item_with_cache(id, 0)); }
+        for id in [10, 20] {
+            bm.items.push(item_with_cache(id, 0));
+        }
         bm.reorder(5, 0);
         assert_eq!(bm.items.iter().map(|i| i.id).collect::<Vec<_>>(), [10, 20]);
     }

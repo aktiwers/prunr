@@ -31,10 +31,8 @@ use std::path::PathBuf;
 use rayon::prelude::*;
 
 use super::item_settings::ItemSettings;
-use super::presets::{
-    model_id_key, ModelPreset, PresetFile, PRESET_FORMAT_VERSION,
-};
-use super::settings::{PRUNR_PRESET, Settings};
+use super::presets::{model_id_key, ModelPreset, PresetFile, PRESET_FORMAT_VERSION};
+use super::settings::{Settings, PRUNR_PRESET};
 use prunr_core::{ComposeMode, FillStyle, LineMode, LineStyle};
 
 /// Name of the presets subdirectory under the app config dir.
@@ -63,7 +61,9 @@ pub(crate) fn presets_dir() -> Option<PathBuf> {
 /// Resolve the on-disk path for a preset name, rejecting "Prunr" (reserved)
 /// and returning `None` when the config dir is unavailable.
 pub(crate) fn preset_path(name: &str) -> Option<PathBuf> {
-    if name.eq_ignore_ascii_case(PRUNR_PRESET) { return None; }
+    if name.eq_ignore_ascii_case(PRUNR_PRESET) {
+        return None;
+    }
     let dir = presets_dir()?;
     Some(dir.join(format!("{}.{PRESET_EXT}", sanitize_filename(name))))
 }
@@ -117,12 +117,18 @@ fn migrate_v1_to_v2(value: &serde_json::Value) -> Option<PresetFile> {
         .to_model_id()
         .expect("Settings::default().model always has a model_id");
     let mut models = HashMap::new();
-    models.insert(model_id_key(wrap_key), ModelPreset {
-        item_settings,
-        brush: Default::default(),
-        sd: None,
-    });
-    Some(PresetFile { format_version: PRESET_FORMAT_VERSION, models })
+    models.insert(
+        model_id_key(wrap_key),
+        ModelPreset {
+            item_settings,
+            brush: Default::default(),
+            sd: None,
+        },
+    );
+    Some(PresetFile {
+        format_version: PRESET_FORMAT_VERSION,
+        models,
+    })
 }
 
 /// Load every preset file in the directory into a map. Malformed files
@@ -137,15 +143,18 @@ fn migrate_v1_to_v2(value: &serde_json::Value) -> Option<PresetFile> {
 /// Called once at startup from `Settings::load` (before the first frame) and
 /// once per preset delete to refresh the in-memory map. Not on the render path.
 pub(crate) fn load_all() -> HashMap<String, PresetFile> {
-    let Some(dir) = presets_dir() else { return HashMap::new() };
-    let Ok(entries) = std::fs::read_dir(&dir) else { return HashMap::new() };
+    let Some(dir) = presets_dir() else {
+        return HashMap::new();
+    };
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return HashMap::new();
+    };
 
     let paths: Vec<PathBuf> = entries
         .flatten()
         .filter_map(|e| {
             let p = e.path();
-            (p.extension().and_then(|s| s.to_str()) == Some(PRESET_EXT))
-                .then_some(p)
+            (p.extension().and_then(|s| s.to_str()) == Some(PRESET_EXT)).then_some(p)
         })
         .collect();
 
@@ -153,7 +162,9 @@ pub(crate) fn load_all() -> HashMap<String, PresetFile> {
         .par_iter()
         .filter_map(|path| {
             let name = path.file_stem()?.to_str()?.to_string();
-            if name.eq_ignore_ascii_case(PRUNR_PRESET) { return None; }
+            if name.eq_ignore_ascii_case(PRUNR_PRESET) {
+                return None;
+            }
             let file = load_from_path(path)?;
             Some((name, file))
         })
@@ -178,11 +189,16 @@ fn parse_preset_value(value: serde_json::Value) -> Option<PresetFile> {
 /// single entry without rescanning the whole directory.
 pub(crate) fn load_from_path(path: &std::path::Path) -> Option<PresetFile> {
     let data = std::fs::read(path)
-        .map_err(|e| tracing::warn!(?path, %e, "skipping unreadable preset")).ok()?;
+        .map_err(|e| tracing::warn!(?path, %e, "skipping unreadable preset"))
+        .ok()?;
     let value: serde_json::Value = serde_json::from_slice(&data)
-        .map_err(|e| tracing::warn!(?path, %e, "skipping malformed-JSON preset")).ok()?;
+        .map_err(|e| tracing::warn!(?path, %e, "skipping malformed-JSON preset"))
+        .ok()?;
     parse_preset_value(value).or_else(|| {
-        tracing::warn!(?path, "skipping unrecognised preset shape (not v2 and not v1 ItemSettings)");
+        tracing::warn!(
+            ?path,
+            "skipping unrecognised preset shape (not v2 and not v1 ItemSettings)"
+        );
         None
     })
 }
@@ -205,11 +221,7 @@ pub(crate) fn save(name: &str, values: &PresetFile) -> std::io::Result<()> {
     std::fs::write(path, json)
 }
 
-fn merge_into(
-    file: &mut PresetFile,
-    model_id: prunr_models::ModelId,
-    mp: ModelPreset,
-) {
+fn merge_into(file: &mut PresetFile, model_id: prunr_models::ModelId, mp: ModelPreset) {
     file.format_version = PRESET_FORMAT_VERSION;
     file.models.insert(model_id_key(model_id), mp);
 }
@@ -219,8 +231,8 @@ fn merge_into(
 fn load_existing_for_merge(path: &std::path::Path) -> std::io::Result<PresetFile> {
     match std::fs::read(path) {
         Ok(data) => {
-            let value: serde_json::Value = serde_json::from_slice(&data)
-                .unwrap_or(serde_json::Value::Null);
+            let value: serde_json::Value =
+                serde_json::from_slice(&data).unwrap_or(serde_json::Value::Null);
             if value.is_null() {
                 Ok(PresetFile::default())
             } else {
@@ -284,7 +296,9 @@ fn save_merged_to_path(
 /// already drops the in-memory entry, and we don't want to surface "already
 /// deleted" as an error.
 pub fn delete(name: &str) -> std::io::Result<()> {
-    let Some(path) = preset_path(name) else { return Ok(()); };
+    let Some(path) = preset_path(name) else {
+        return Ok(());
+    };
     match std::fs::remove_file(&path) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -298,7 +312,9 @@ pub fn delete(name: &str) -> std::io::Result<()> {
 pub fn seed_builtins_once() {
     let Some(dir) = presets_dir() else { return };
     let marker = dir.join(SEED_MARKER);
-    if marker.exists() { return; }
+    if marker.exists() {
+        return;
+    }
     let wrap_key = Settings::default()
         .model
         .to_model_id()
@@ -312,15 +328,25 @@ pub fn seed_builtins_once() {
         //      the previous partial run.
         //   2. A future `_v3` seed that reuses a name the user edited under
         //      `_v2` — keeps their version, skips the rename.
-        let Some(path) = preset_path(name) else { continue };
-        if path.exists() { continue; }
+        let Some(path) = preset_path(name) else {
+            continue;
+        };
+        if path.exists() {
+            continue;
+        }
         let mut models = HashMap::new();
-        models.insert(wrap_key.clone(), ModelPreset {
-            item_settings,
-            brush: Default::default(),
-            sd: None,
-        });
-        let file = PresetFile { format_version: PRESET_FORMAT_VERSION, models };
+        models.insert(
+            wrap_key.clone(),
+            ModelPreset {
+                item_settings,
+                brush: Default::default(),
+                sd: None,
+            },
+        );
+        let file = PresetFile {
+            format_version: PRESET_FORMAT_VERSION,
+            models,
+        };
         let _ = save(name, &file);
     }
     let _ = std::fs::write(&marker, b"");
@@ -332,102 +358,135 @@ pub fn seed_builtins_once() {
 fn builtin_presets() -> Vec<(&'static str, ItemSettings)> {
     let base = ItemSettings::default();
     vec![
-        ("Comic", ItemSettings {
-            line_mode: LineMode::SubjectOutline,
-            compose_mode: ComposeMode::LinesOnly,
-            line_strength: 0.7,
-            edge_thickness: 2,
-            solid_line_color: Some([0, 0, 0]),
-            fill_style: FillStyle::Posterize { levels: 4 },
-            gamma: 1.3,
-            ..base
-        }),
-        ("Pencil Sketch", ItemSettings {
-            line_mode: LineMode::SubjectOutline,
-            compose_mode: ComposeMode::LinesOnly,
-            line_strength: 0.8,
-            edge_thickness: 0,
-            solid_line_color: None,
-            fill_style: FillStyle::Desaturate,
-            gamma: 1.1,
-            ..base
-        }),
-        ("Neon Glow", ItemSettings {
-            line_mode: LineMode::SubjectOutline,
-            compose_mode: ComposeMode::Ghost,
-            line_strength: 0.6,
-            edge_thickness: 3,
-            line_style: LineStyle::Rainbow { cycles: 2 },
-            fill_style: FillStyle::Saturate { percent: 220 },
-            ..base
-        }),
-        ("Sepia", ItemSettings {
-            line_mode: LineMode::SubjectOutline,
-            compose_mode: ComposeMode::LinesOnly,
-            line_strength: 0.6,
-            edge_thickness: 1,
-            solid_line_color: Some([70, 45, 20]),
-            fill_style: FillStyle::Sepia,
-            ..base
-        }),
-        ("Duotone Poster", ItemSettings {
-            line_mode: LineMode::SubjectOutline,
-            compose_mode: ComposeMode::SubjectFilled,
-            line_strength: 0.6,
-            edge_thickness: 2,
-            solid_line_color: Some([10, 10, 40]),
-            fill_style: FillStyle::Duotone { dark: [20, 20, 60], light: [240, 220, 180] },
-            ..base
-        }),
-        ("X-Ray", ItemSettings {
-            line_mode: LineMode::SubjectOutline,
-            compose_mode: ComposeMode::Ghost,
-            line_strength: 0.8,
-            edge_thickness: 1,
-            solid_line_color: Some([200, 230, 255]),
-            fill_style: FillStyle::Invert,
-            bg: Some([0, 0, 30, 255]),
-            ..base
-        }),
-        ("Pop Art", ItemSettings {
-            line_mode: LineMode::SubjectOutline,
-            compose_mode: ComposeMode::SubjectFilled,
-            line_strength: 0.65,
-            edge_thickness: 3,
-            solid_line_color: Some([0, 0, 0]),
-            fill_style: FillStyle::Posterize { levels: 3 },
-            gamma: 1.4,
-            ..base
-        }),
-        ("Ghost", ItemSettings {
-            line_mode: LineMode::SubjectOutline,
-            compose_mode: ComposeMode::Ghost,
-            line_strength: 0.55,
-            edge_thickness: 1,
-            solid_line_color: Some([230, 230, 235]),
-            fill_style: FillStyle::Desaturate,
-            ..base
-        }),
-        ("Sunset Lines", ItemSettings {
-            line_mode: LineMode::SubjectOutline,
-            compose_mode: ComposeMode::LinesOnly,
-            line_strength: 0.7,
-            edge_thickness: 2,
-            line_style: LineStyle::GradientY {
-                top: [255, 180, 40],
-                bottom: [120, 20, 90],
+        (
+            "Comic",
+            ItemSettings {
+                line_mode: LineMode::SubjectOutline,
+                compose_mode: ComposeMode::LinesOnly,
+                line_strength: 0.7,
+                edge_thickness: 2,
+                solid_line_color: Some([0, 0, 0]),
+                fill_style: FillStyle::Posterize { levels: 4 },
+                gamma: 1.3,
+                ..base
             },
-            ..base
-        }),
-        ("Pixel Art", ItemSettings {
-            line_mode: LineMode::SubjectOutline,
-            compose_mode: ComposeMode::SubjectFilled,
-            line_strength: 0.5,
-            edge_thickness: 2,
-            solid_line_color: Some([0, 0, 0]),
-            fill_style: FillStyle::Pixelate { block_size: 10 },
-            ..base
-        }),
+        ),
+        (
+            "Pencil Sketch",
+            ItemSettings {
+                line_mode: LineMode::SubjectOutline,
+                compose_mode: ComposeMode::LinesOnly,
+                line_strength: 0.8,
+                edge_thickness: 0,
+                solid_line_color: None,
+                fill_style: FillStyle::Desaturate,
+                gamma: 1.1,
+                ..base
+            },
+        ),
+        (
+            "Neon Glow",
+            ItemSettings {
+                line_mode: LineMode::SubjectOutline,
+                compose_mode: ComposeMode::Ghost,
+                line_strength: 0.6,
+                edge_thickness: 3,
+                line_style: LineStyle::Rainbow { cycles: 2 },
+                fill_style: FillStyle::Saturate { percent: 220 },
+                ..base
+            },
+        ),
+        (
+            "Sepia",
+            ItemSettings {
+                line_mode: LineMode::SubjectOutline,
+                compose_mode: ComposeMode::LinesOnly,
+                line_strength: 0.6,
+                edge_thickness: 1,
+                solid_line_color: Some([70, 45, 20]),
+                fill_style: FillStyle::Sepia,
+                ..base
+            },
+        ),
+        (
+            "Duotone Poster",
+            ItemSettings {
+                line_mode: LineMode::SubjectOutline,
+                compose_mode: ComposeMode::SubjectFilled,
+                line_strength: 0.6,
+                edge_thickness: 2,
+                solid_line_color: Some([10, 10, 40]),
+                fill_style: FillStyle::Duotone {
+                    dark: [20, 20, 60],
+                    light: [240, 220, 180],
+                },
+                ..base
+            },
+        ),
+        (
+            "X-Ray",
+            ItemSettings {
+                line_mode: LineMode::SubjectOutline,
+                compose_mode: ComposeMode::Ghost,
+                line_strength: 0.8,
+                edge_thickness: 1,
+                solid_line_color: Some([200, 230, 255]),
+                fill_style: FillStyle::Invert,
+                bg: Some([0, 0, 30, 255]),
+                ..base
+            },
+        ),
+        (
+            "Pop Art",
+            ItemSettings {
+                line_mode: LineMode::SubjectOutline,
+                compose_mode: ComposeMode::SubjectFilled,
+                line_strength: 0.65,
+                edge_thickness: 3,
+                solid_line_color: Some([0, 0, 0]),
+                fill_style: FillStyle::Posterize { levels: 3 },
+                gamma: 1.4,
+                ..base
+            },
+        ),
+        (
+            "Ghost",
+            ItemSettings {
+                line_mode: LineMode::SubjectOutline,
+                compose_mode: ComposeMode::Ghost,
+                line_strength: 0.55,
+                edge_thickness: 1,
+                solid_line_color: Some([230, 230, 235]),
+                fill_style: FillStyle::Desaturate,
+                ..base
+            },
+        ),
+        (
+            "Sunset Lines",
+            ItemSettings {
+                line_mode: LineMode::SubjectOutline,
+                compose_mode: ComposeMode::LinesOnly,
+                line_strength: 0.7,
+                edge_thickness: 2,
+                line_style: LineStyle::GradientY {
+                    top: [255, 180, 40],
+                    bottom: [120, 20, 90],
+                },
+                ..base
+            },
+        ),
+        (
+            "Pixel Art",
+            ItemSettings {
+                line_mode: LineMode::SubjectOutline,
+                compose_mode: ComposeMode::SubjectFilled,
+                line_strength: 0.5,
+                edge_thickness: 2,
+                solid_line_color: Some([0, 0, 0]),
+                fill_style: FillStyle::Pixelate { block_size: 10 },
+                ..base
+            },
+        ),
     ]
 }
 
@@ -500,8 +559,9 @@ mod tests {
         // An empty JSON object must deserialize to full defaults — proves
         // every field has a default value and old presets (pre-dating new
         // fields) still load.
-        let parsed: ItemSettings = serde_json::from_str("{}")
-            .expect("ItemSettings must deserialize from `{}` — add #[serde(default)] to any new field");
+        let parsed: ItemSettings = serde_json::from_str("{}").expect(
+            "ItemSettings must deserialize from `{}` — add #[serde(default)] to any new field",
+        );
         assert_eq!(parsed, ItemSettings::default());
     }
 
@@ -513,15 +573,20 @@ mod tests {
             "definitely_not_a_real_field": 42,
             "another_future_field": "hello"
         }"#;
-        let parsed: ItemSettings = serde_json::from_str(json)
-            .expect("ItemSettings must ignore unknown fields — do NOT add #[serde(deny_unknown_fields)]");
+        let parsed: ItemSettings = serde_json::from_str(json).expect(
+            "ItemSettings must ignore unknown fields — do NOT add #[serde(deny_unknown_fields)]",
+        );
         assert_eq!(parsed, ItemSettings::default());
     }
 
     #[test]
     fn builtins_have_unique_names_and_serialize() {
         let presets = super::builtin_presets();
-        assert!(presets.len() >= 5, "ship at least 5 curated looks; got {}", presets.len());
+        assert!(
+            presets.len() >= 5,
+            "ship at least 5 curated looks; got {}",
+            presets.len()
+        );
         let mut seen = std::collections::HashSet::new();
         for (name, settings) in &presets {
             assert!(seen.insert(*name), "duplicate builtin preset name: {name}");
@@ -563,10 +628,16 @@ mod tests {
         let migrated = migrate_v1_to_v2(&v1_json).expect("must migrate");
         assert_eq!(migrated.format_version, 2);
         let default_key = model_id_key(prunr_models::ModelId::BiRefNetLite);
-        let entry = migrated.models.get(&default_key).expect("default model entry");
+        let entry = migrated
+            .models
+            .get(&default_key)
+            .expect("default model entry");
         assert_eq!(entry.item_settings.gamma, 2.0);
         assert_eq!(entry.item_settings.edge_thickness, 5);
-        assert_eq!(entry.brush, super::super::brush_state::BrushSettings::default());
+        assert_eq!(
+            entry.brush,
+            super::super::brush_state::BrushSettings::default()
+        );
         assert!(entry.sd.is_none());
     }
 
@@ -578,7 +649,10 @@ mod tests {
         let migrated = migrate_v1_to_v2(&v1_json).expect("must migrate empty");
         assert_eq!(migrated.format_version, 2);
         let default_key = model_id_key(prunr_models::ModelId::BiRefNetLite);
-        let entry = migrated.models.get(&default_key).expect("default model entry");
+        let entry = migrated
+            .models
+            .get(&default_key)
+            .expect("default model entry");
         assert_eq!(entry.item_settings, ItemSettings::default());
     }
 
@@ -591,7 +665,10 @@ mod tests {
         });
         let migrated = migrate_v1_to_v2(&v1_json).expect("must migrate");
         let default_key = model_id_key(prunr_models::ModelId::BiRefNetLite);
-        let entry = migrated.models.get(&default_key).expect("default model entry");
+        let entry = migrated
+            .models
+            .get(&default_key)
+            .expect("default model entry");
         assert_eq!(entry.item_settings.gamma, 1.5);
     }
 
@@ -620,7 +697,10 @@ mod tests {
         let json = serde_json::to_string_pretty(&original).expect("serialize");
         let value: serde_json::Value = serde_json::from_str(&json).expect("parse");
         // load_all branches on format_version == 2 → direct deserialize.
-        assert_eq!(value.get("format_version").and_then(|v| v.as_u64()), Some(2));
+        assert_eq!(
+            value.get("format_version").and_then(|v| v.as_u64()),
+            Some(2)
+        );
         let restored: PresetFile = serde_json::from_value(value).expect("deserialize");
         assert_eq!(restored, original);
     }
@@ -639,7 +719,10 @@ mod tests {
         let serialized = serde_json::to_string_pretty(&migrated).expect("serialize");
         let value: serde_json::Value = serde_json::from_str(&serialized).expect("reparse");
         // Second load must take the v2 branch, not re-migrate.
-        assert_eq!(value.get("format_version").and_then(|v| v.as_u64()), Some(2));
+        assert_eq!(
+            value.get("format_version").and_then(|v| v.as_u64()),
+            Some(2)
+        );
         let reloaded: PresetFile = serde_json::from_value(value).expect("v2 deserialize");
         assert_eq!(reloaded, migrated);
     }
@@ -661,7 +744,10 @@ mod tests {
         std::fs::write(&path, json).expect("write");
         let read_back = std::fs::read_to_string(&path).expect("read");
         let value: serde_json::Value = serde_json::from_str(&read_back).expect("parse");
-        assert_eq!(value.get("format_version").and_then(|v| v.as_u64()), Some(2));
+        assert_eq!(
+            value.get("format_version").and_then(|v| v.as_u64()),
+            Some(2)
+        );
         assert!(value.get("models").is_some());
     }
 
@@ -684,23 +770,36 @@ mod tests {
 
         // Seed: Silueta entry with custom gamma + an SD entry alongside.
         let silueta_mp = ModelPreset {
-            item_settings: ItemSettings { gamma: 1.5, ..ItemSettings::default() },
+            item_settings: ItemSettings {
+                gamma: 1.5,
+                ..ItemSettings::default()
+            },
             brush: BrushSettings::default(),
             sd: None,
         };
         let mut seed = PresetFile::default();
-        seed.models.insert(model_id_key(ModelId::Silueta), silueta_mp.clone());
+        seed.models
+            .insert(model_id_key(ModelId::Silueta), silueta_mp.clone());
         seed.models.insert(
             model_id_key(ModelId::SdV15InpaintFp16),
-            ModelPreset { sd: Some(SdPreset::default()), ..ModelPreset::default() },
+            ModelPreset {
+                sd: Some(SdPreset::default()),
+                ..ModelPreset::default()
+            },
         );
         std::fs::write(&path, serde_json::to_string_pretty(&seed).unwrap()).unwrap();
 
         // Save-merge a fresh SD entry. Silueta must survive untouched.
         let new_sd_mp = ModelPreset {
-            item_settings: ItemSettings { gamma: 2.5, ..ItemSettings::default() },
+            item_settings: ItemSettings {
+                gamma: 2.5,
+                ..ItemSettings::default()
+            },
             brush: BrushSettings::default(),
-            sd: Some(SdPreset { prompt: "rewritten".into(), ..SdPreset::default() }),
+            sd: Some(SdPreset {
+                prompt: "rewritten".into(),
+                ..SdPreset::default()
+            }),
         };
         save_merged_to_path(&path, ModelId::SdV15InpaintFp16, new_sd_mp.clone()).unwrap();
 
@@ -709,12 +808,18 @@ mod tests {
             .models
             .get(&model_id_key(ModelId::Silueta))
             .expect("Silueta entry preserved");
-        assert_eq!(*silueta_back, silueta_mp, "Silueta entry must be byte-equal");
+        assert_eq!(
+            *silueta_back, silueta_mp,
+            "Silueta entry must be byte-equal"
+        );
         let sd_back = reloaded
             .models
             .get(&model_id_key(ModelId::SdV15InpaintFp16))
             .expect("SD entry exists");
-        assert_eq!(*sd_back, new_sd_mp, "SD entry must equal the merged-in preset");
+        assert_eq!(
+            *sd_back, new_sd_mp,
+            "SD entry must equal the merged-in preset"
+        );
     }
 
     #[test]
@@ -727,10 +832,16 @@ mod tests {
         let path = dir.path().join("Foo.json");
 
         let lcm_bundle = SdSchedulerBundle {
-            steps: 8, guidance_scale: 1.5, use_karras_sigmas: false, strength: 1.0,
+            steps: 8,
+            guidance_scale: 1.5,
+            use_karras_sigmas: false,
+            strength: 1.0,
         };
         let ddim_bundle_old = SdSchedulerBundle {
-            steps: 20, guidance_scale: 7.5, use_karras_sigmas: false, strength: 1.0,
+            steps: 20,
+            guidance_scale: 7.5,
+            use_karras_sigmas: false,
+            strength: 1.0,
         };
         let mut schedulers_seed = HashMap::new();
         schedulers_seed.insert(SdScheduler::Lcm, lcm_bundle);
@@ -748,12 +859,17 @@ mod tests {
             ..ModelPreset::default()
         };
         let mut seed_file = PresetFile::default();
-        seed_file.models.insert(model_id_key(ModelId::SdV15InpaintFp16), seed_mp);
+        seed_file
+            .models
+            .insert(model_id_key(ModelId::SdV15InpaintFp16), seed_mp);
         std::fs::write(&path, serde_json::to_string_pretty(&seed_file).unwrap()).unwrap();
 
         // Save-merge: caller only touched DDIM. LCM must survive.
         let ddim_bundle_new = SdSchedulerBundle {
-            steps: 30, guidance_scale: 8.0, use_karras_sigmas: true, strength: 0.85,
+            steps: 30,
+            guidance_scale: 8.0,
+            use_karras_sigmas: true,
+            strength: 0.85,
         };
         let mut new_schedulers = HashMap::new();
         new_schedulers.insert(SdScheduler::Ddim, ddim_bundle_new);
@@ -765,7 +881,10 @@ mod tests {
             active_scheduler: SdScheduler::Ddim,
             schedulers: new_schedulers,
         };
-        let new_mp = ModelPreset { sd: Some(new_sd), ..ModelPreset::default() };
+        let new_mp = ModelPreset {
+            sd: Some(new_sd),
+            ..ModelPreset::default()
+        };
         save_merged_to_path(&path, ModelId::SdV15InpaintFp16, new_mp).unwrap();
 
         let reloaded = load_from_path(&path).expect("reload");
@@ -802,7 +921,10 @@ mod tests {
         assert!(!path.exists());
 
         let mp = ModelPreset {
-            item_settings: ItemSettings { gamma: 1.9, ..ItemSettings::default() },
+            item_settings: ItemSettings {
+                gamma: 1.9,
+                ..ItemSettings::default()
+            },
             ..ModelPreset::default()
         };
         save_merged_to_path(&path, ModelId::Silueta, mp.clone()).unwrap();
@@ -833,7 +955,10 @@ mod tests {
         // Save-merge a different model on top. v1 → v2 migration runs
         // before merge so the v1 entry survives.
         let lama_mp = ModelPreset {
-            item_settings: ItemSettings { gamma: 2.0, ..ItemSettings::default() },
+            item_settings: ItemSettings {
+                gamma: 2.0,
+                ..ItemSettings::default()
+            },
             ..ModelPreset::default()
         };
         save_merged_to_path(&path, ModelId::LaMaFp32, lama_mp.clone()).unwrap();
