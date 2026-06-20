@@ -9,19 +9,16 @@ use egui::RichText;
 use egui_material_icons::icons::*;
 
 use crate::gui::brush_state::{
-    BrushSettings, SdQualityPreset, SdScheduler,
-    DEFAULT_SD_NEGATIVE_PROMPT, DEFAULT_SD_PROMPT,
-    default_cfg,
+    default_cfg, BrushSettings, SdQualityPreset, SdScheduler, DEFAULT_SD_NEGATIVE_PROMPT,
+    DEFAULT_SD_PROMPT,
 };
 use crate::gui::settings::Settings;
 use crate::gui::theme;
 
 use super::chip::{self, ChipMeta};
 
-const LCM_DOWNLOAD_HINT: &str =
-    "Download Eraser (SD 1.5 LCM, fast) in Model Store to enable.";
-const TAESD_DOWNLOAD_HINT: &str =
-    "Download TAESD VAE in Model Store to enable.";
+const LCM_DOWNLOAD_HINT: &str = "Download Eraser (SD 1.5 LCM, fast) in Model Store to enable.";
+const TAESD_DOWNLOAD_HINT: &str = "Download TAESD VAE in Model Store to enable.";
 
 #[derive(Default)]
 pub struct EraserRowChange {
@@ -36,7 +33,8 @@ pub fn render(ui: &mut egui::Ui, app_settings: &mut Settings) -> EraserRowChange
     let lcm_bundle_installed = Settings::can_select_lcm_scheduler();
     ui.horizontal(|ui| {
         change.committed |= render_quality_preset_chip(ui, app_settings, lcm_bundle_installed);
-        change.committed |= render_taesd_chip(ui, &mut app_settings.brush, taesd_installed, taesd_active);
+        change.committed |=
+            render_taesd_chip(ui, &mut app_settings.brush, taesd_installed, taesd_active);
         change.committed |= render_scheduler_chip(ui, app_settings, lcm_bundle_installed);
         change.committed |= render_steps_chip(ui, &mut app_settings.brush);
         change.committed |= render_strength_chip(ui, &mut app_settings.brush);
@@ -91,7 +89,11 @@ fn render_quality_preset_chip(
     chip::popup_for(ui, pop_id, &resp, |ui| {
         ui.label(RichText::new("Quality").strong().color(theme::TEXT_PRIMARY));
         ui.add_space(theme::SPACE_XS);
-        for preset in [SdQualityPreset::Fast, SdQualityPreset::Balanced, SdQualityPreset::Quality] {
+        for preset in [
+            SdQualityPreset::Fast,
+            SdQualityPreset::Balanced,
+            SdQualityPreset::Quality,
+        ] {
             let preset_scheduler = match preset {
                 SdQualityPreset::Quality => SdScheduler::DpmPlusPlus2MKarras,
                 _ => SdScheduler::Lcm,
@@ -104,9 +106,11 @@ fn render_quality_preset_chip(
                     let _ = ui.selectable_label(false, format!("{label} (coming soon)"));
                 });
             } else if preset_bundle_gated {
-                let resp = ui.add_enabled_ui(false, |ui| {
-                    ui.selectable_label(false, format!("{label} (download required)"))
-                }).inner;
+                let resp = ui
+                    .add_enabled_ui(false, |ui| {
+                        ui.selectable_label(false, format!("{label} (download required)"))
+                    })
+                    .inner;
                 resp.on_hover_text(LCM_DOWNLOAD_HINT);
             } else {
                 let selected = active == preset;
@@ -124,7 +128,11 @@ fn render_quality_preset_chip(
 fn render_prompt_chip(ui: &mut egui::Ui, brush: &mut BrushSettings) -> bool {
     let pop_id = egui::Id::new("eraser_prompt_popover");
     let lcm = brush.sd_scheduler == SdScheduler::Lcm;
-    let neg_color = if lcm { theme::TEXT_SECONDARY } else { theme::TEXT_PRIMARY };
+    let neg_color = if lcm {
+        theme::TEXT_SECONDARY
+    } else {
+        theme::TEXT_PRIMARY
+    };
 
     let resp = chip::chip_tooltip(
         chip::chip_button(ui, ICON_EDIT_NOTE.codepoint, "Prompt", !brush.sd_prompt.is_empty()),
@@ -141,7 +149,9 @@ fn render_prompt_chip(ui: &mut egui::Ui, brush: &mut BrushSettings) -> bool {
                 .desired_rows(2)
                 .desired_width(f32::INFINITY),
         );
-        if p.lost_focus() { changed = true; }
+        if p.lost_focus() {
+            changed = true;
+        }
         super::hint(ui, "What should fill the painted area. Be specific: \"wooden park bench in autumn forest\" works better than \"bench\".");
 
         ui.add_space(theme::SPACE_SM);
@@ -177,7 +187,10 @@ fn render_prompt_chip(ui: &mut egui::Ui, brush: &mut BrushSettings) -> bool {
             && brush.sd_negative_prompt == DEFAULT_SD_NEGATIVE_PROMPT
             && (brush.sd_guidance_scale - default_cfg()).abs() < 1e-3;
         ui.add_enabled_ui(!already_default, |ui| {
-            if chip::reset_button(ui, "Restore Prompt + Negative + Guidance to the shipped defaults.") {
+            if chip::reset_button(
+                ui,
+                "Restore Prompt + Negative + Guidance to the shipped defaults.",
+            ) {
                 brush.sd_prompt = DEFAULT_SD_PROMPT.to_string();
                 brush.sd_negative_prompt = DEFAULT_SD_NEGATIVE_PROMPT.to_string();
                 brush.sd_guidance_scale = default_cfg();
@@ -188,7 +201,11 @@ fn render_prompt_chip(ui: &mut egui::Ui, brush: &mut BrushSettings) -> bool {
     changed
 }
 
-fn render_scheduler_chip(ui: &mut egui::Ui, app_settings: &mut Settings, lcm_bundle_installed: bool) -> bool {
+fn render_scheduler_chip(
+    ui: &mut egui::Ui,
+    app_settings: &mut Settings,
+    lcm_bundle_installed: bool,
+) -> bool {
     let pop_id = egui::Id::new("eraser_scheduler_popover");
     let resp = chip::chip_tooltip(
         chip::chip_button(ui, ICON_TUNE.codepoint, app_settings.brush.sd_scheduler.label(), false),
@@ -197,7 +214,11 @@ fn render_scheduler_chip(ui: &mut egui::Ui, app_settings: &mut Settings, lcm_bun
     );
     let mut changed = false;
     chip::popup_for(ui, pop_id, &resp, |ui| {
-        ui.label(RichText::new("Scheduler").strong().color(theme::TEXT_PRIMARY));
+        ui.label(
+            RichText::new("Scheduler")
+                .strong()
+                .color(theme::TEXT_PRIMARY),
+        );
         ui.add_space(theme::SPACE_XS);
         for sched in [
             SdScheduler::Lcm,
@@ -216,9 +237,11 @@ fn render_scheduler_chip(ui: &mut egui::Ui, app_settings: &mut Settings, lcm_bun
                 super::hint(ui, desc);
                 ui.add_space(theme::SPACE_XS);
             } else if bundle_gated {
-                let resp = ui.add_enabled_ui(false, |ui| {
-                    ui.selectable_label(false, format!("{label} (download required)"))
-                }).inner;
+                let resp = ui
+                    .add_enabled_ui(false, |ui| {
+                        ui.selectable_label(false, format!("{label} (download required)"))
+                    })
+                    .inner;
                 resp.on_hover_text(LCM_DOWNLOAD_HINT);
                 super::hint(ui, desc);
                 ui.add_space(theme::SPACE_XS);
@@ -245,7 +268,9 @@ fn render_steps_chip(ui: &mut egui::Ui, brush: &mut BrushSettings) -> bool {
     // beyond 8); standard SD ranges 1-30. Clamp first to handle a
     // scheduler-switch that left a too-large step count behind.
     let max: u32 = if lcm { 8 } else { 30 };
-    if brush.sd_steps > max { brush.sd_steps = max; }
+    if brush.sd_steps > max {
+        brush.sd_steps = max;
+    }
     let default_steps: u32 = if lcm { 8 } else { 20 };
     let change = chip::chip_u32(
         ui,
@@ -285,9 +310,11 @@ fn render_taesd_chip(
     taesd_effective: bool,
 ) -> bool {
     if !taesd_installed {
-        let resp = ui.add_enabled_ui(false, |ui| {
-            chip::chip_button(ui, ICON_BOLT.codepoint, "Fast VAE", false)
-        }).inner;
+        let resp = ui
+            .add_enabled_ui(false, |ui| {
+                chip::chip_button(ui, ICON_BOLT.codepoint, "Fast VAE", false)
+            })
+            .inner;
         resp.on_hover_text(TAESD_DOWNLOAD_HINT);
         return false;
     }
@@ -306,7 +333,11 @@ fn render_taesd_chip(
 
 fn render_seed_chip(ui: &mut egui::Ui, brush: &mut BrushSettings) -> bool {
     let pinned = brush.sd_seed.is_some();
-    let icon = if pinned { ICON_LOCK.codepoint } else { ICON_LOCK_OPEN.codepoint };
+    let icon = if pinned {
+        ICON_LOCK.codepoint
+    } else {
+        ICON_LOCK_OPEN.codepoint
+    };
     // Format the seed inline only when pinned — the unpinned arm
     // uses a `&'static str` to avoid allocating each frame.
     let pinned_label;
@@ -327,13 +358,14 @@ fn render_seed_chip(ui: &mut egui::Ui, brush: &mut BrushSettings) -> bool {
         brush.sd_seed = if pinned {
             None
         } else {
-            Some(std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos() as u64)
-                .unwrap_or(0))
+            Some(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos() as u64)
+                    .unwrap_or(0),
+            )
         };
         return true;
     }
     false
 }
-

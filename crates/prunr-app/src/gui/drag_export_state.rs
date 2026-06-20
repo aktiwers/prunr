@@ -120,7 +120,13 @@ mod tests {
         });
         handle.join().expect("reset thread must not panic");
 
-        assert!(!s.active.load(Ordering::Acquire), "parent must observe the off-thread store");
-        assert!(s.items.lock().unwrap().is_empty(), "parent must observe the off-thread clear");
+        assert!(
+            !s.active.load(Ordering::Acquire),
+            "parent must observe the off-thread store"
+        );
+        assert!(
+            s.items.lock().unwrap().is_empty(),
+            "parent must observe the off-thread clear"
+        );
     }
 }
