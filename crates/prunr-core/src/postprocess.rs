@@ -723,13 +723,13 @@ pub(crate) fn dilate_mask(mask: &mut GrayImage, pixels: u32) {
 
 fn apply_edge_shift(mask: &mut GrayImage, shift: f32) {
     let abs = shift.abs();
-    if abs < 0.01 { return; }
+    if abs < 0.01 {
+        return;
+    }
     let erode = shift > 0.0;
     let full = abs.floor() as u32;
     let frac = abs - full as f32;
     let (w, h) = (mask.width() as usize, mask.height() as usize);
-    let wi = w as i32;
-    let hi = h as i32;
     let use_par = h >= 512;
 
     // Skip the unconditional `mask.as_raw().clone()` (~12 MB at 4 K) by
@@ -738,30 +738,127 @@ fn apply_edge_shift(mask: &mut GrayImage, shift: f32) {
     let mut b = vec![0u8; w * h];
 
     let step = |src: &[u8], dst: &mut [u8]| {
-        let process_row = |(y, row): (usize, &mut [u8])| {
-            let yi = y as i32;
-            for (x, slot) in row.iter_mut().enumerate() {
-                let xi = x as i32;
-                let mut extremum: u8 = if erode { 255 } else { 0 };
-                for dy in -1i32..=1 {
-                    let ny = (yi + dy).clamp(0, hi - 1) as usize;
-                    for dx in -1i32..=1 {
-                        let nx = (xi + dx).clamp(0, wi - 1) as usize;
-                        let v = src[ny * w + nx];
-                        if erode {
-                            extremum = extremum.min(v);
-                        } else {
-                            extremum = extremum.max(v);
+        let h_minus_1 = h.saturating_sub(1);
+        if erode {
+            let process_row = |(y, row): (usize, &mut [u8])| {
+                if y == 0 || y == h_minus_1 || w < 3 {
+                    // Boundary rows or very narrow images: keep the safe path
+                    let yi = y as i32;
+                    let hi = h as i32;
+                    let wi = w as i32;
+                    for (x, slot) in row.iter_mut().enumerate() {
+                        let xi = x as i32;
+                        let mut extremum: u8 = 255;
+                        for dy in -1..=1 {
+                            let ny = (yi + dy).clamp(0, hi - 1) as usize;
+                            for dx in -1..=1 {
+                                let nx = (xi + dx).clamp(0, wi - 1) as usize;
+                                extremum = extremum.min(src[ny * w + nx]);
+                            }
+                        }
+                        *slot = extremum;
+                    }
+                } else {
+                    // Interior rows: handle column boundaries separately
+                    let mut extremum: u8;
+                    let yi = y as i32;
+
+                    // Column 0
+                    extremum = 255;
+                    for dy in -1..=1 {
+                        let ny = (yi + dy) as usize;
+                        for dx in 0..=1 {
+                            extremum = extremum.min(src[ny * w + dx]);
                         }
                     }
+                    row[0] = extremum;
+
+                    // Interior columns
+                    let p_ptr = &src[(yi - 1) as usize * w..];
+                    let c_ptr = &src[yi as usize * w..];
+                    let n_ptr = &src[(yi + 1) as usize * w..];
+                    for x in 1..w - 1 {
+                        let r0 = p_ptr[x - 1].min(p_ptr[x]).min(p_ptr[x + 1]);
+                        let r1 = c_ptr[x - 1].min(c_ptr[x]).min(c_ptr[x + 1]);
+                        let r2 = n_ptr[x - 1].min(n_ptr[x]).min(n_ptr[x + 1]);
+                        row[x] = r0.min(r1).min(r2);
+                    }
+
+                    // Column w-1
+                    extremum = 255;
+                    for dy in -1..=1 {
+                        let ny = (yi + dy) as usize;
+                        for dx in -1..=0 {
+                            extremum = extremum.min(src[ny * w + (w as i32 - 1 + dx) as usize]);
+                        }
+                    }
+                    row[w - 1] = extremum;
                 }
-                *slot = extremum;
+            };
+            if use_par {
+                dst.par_chunks_mut(w).enumerate().for_each(process_row);
+            } else {
+                dst.chunks_mut(w).enumerate().for_each(process_row);
             }
-        };
-        if use_par {
-            dst.par_chunks_mut(w).enumerate().for_each(process_row);
         } else {
-            dst.chunks_mut(w).enumerate().for_each(process_row);
+            let process_row = |(y, row): (usize, &mut [u8])| {
+                if y == 0 || y == h_minus_1 || w < 3 {
+                    let yi = y as i32;
+                    let hi = h as i32;
+                    let wi = w as i32;
+                    for (x, slot) in row.iter_mut().enumerate() {
+                        let xi = x as i32;
+                        let mut extremum: u8 = 0;
+                        for dy in -1..=1 {
+                            let ny = (yi + dy).clamp(0, hi - 1) as usize;
+                            for dx in -1..=1 {
+                                let nx = (xi + dx).clamp(0, wi - 1) as usize;
+                                extremum = extremum.max(src[ny * w + nx]);
+                            }
+                        }
+                        *slot = extremum;
+                    }
+                } else {
+                    let mut extremum: u8;
+                    let yi = y as i32;
+
+                    // Column 0
+                    extremum = 0;
+                    for dy in -1..=1 {
+                        let ny = (yi + dy) as usize;
+                        for dx in 0..=1 {
+                            extremum = extremum.max(src[ny * w + dx]);
+                        }
+                    }
+                    row[0] = extremum;
+
+                    // Interior columns
+                    let p_ptr = &src[(yi - 1) as usize * w..];
+                    let c_ptr = &src[yi as usize * w..];
+                    let n_ptr = &src[(yi + 1) as usize * w..];
+                    for x in 1..w - 1 {
+                        let r0 = p_ptr[x - 1].max(p_ptr[x]).max(p_ptr[x + 1]);
+                        let r1 = c_ptr[x - 1].max(c_ptr[x]).max(c_ptr[x + 1]);
+                        let r2 = n_ptr[x - 1].max(n_ptr[x]).max(n_ptr[x + 1]);
+                        row[x] = r0.max(r1).max(r2);
+                    }
+
+                    // Column w-1
+                    extremum = 0;
+                    for dy in -1..=1 {
+                        let ny = (yi + dy) as usize;
+                        for dx in -1..=0 {
+                            extremum = extremum.max(src[ny * w + (w as i32 - 1 + dx) as usize]);
+                        }
+                    }
+                    row[w - 1] = extremum;
+                }
+            };
+            if use_par {
+                dst.par_chunks_mut(w).enumerate().for_each(process_row);
+            } else {
+                dst.chunks_mut(w).enumerate().for_each(process_row);
+            }
         }
     };
 
@@ -774,11 +871,14 @@ fn apply_edge_shift(mask: &mut GrayImage, shift: f32) {
     }
 
     if frac >= 0.01 {
-        if full == 0 { a.copy_from_slice(mask.as_raw()); }
+        if full == 0 {
+            a.copy_from_slice(mask.as_raw());
+        }
         step(&a, &mut b);
-        let inv = 1.0 - frac;
+        let ifrac = (frac * 256.0).round() as u32;
+        let iinv = 256 - ifrac;
         let blend = |a_byte: &mut u8, b_byte: u8| {
-            *a_byte = (*a_byte as f32 * inv + b_byte as f32 * frac + 0.5) as u8;
+            *a_byte = ((*a_byte as u32 * iinv + b_byte as u32 * ifrac + 128) >> 8) as u8;
         };
         if use_par {
             a.par_iter_mut().zip(b.par_iter()).for_each(|(a, &b)| blend(a, b));
@@ -1141,5 +1241,29 @@ mod tests {
         // Allow a 2-gray tolerance for f32 rounding through the pipeline.
         assert!(got_min <= 2,  "min after sigmoid stretch should be ≈0, got {got_min}");
         assert!(got_max >= 253, "max after sigmoid stretch should be ≈255, got {got_max}");
+    }
+
+    /// Benchmark for `apply_edge_shift` on a 4K mask (4000x3000).
+    ///   `cargo test -p prunr-core --release apply_edge_shift_4k_bench -- --nocapture --ignored`
+    #[test]
+    #[ignore]
+    fn apply_edge_shift_4k_bench() {
+        let (w, h) = (4000, 3000);
+        let mut mask = GrayImage::from_fn(w, h, |x, y| {
+            let dx = x as i32 - 2000;
+            let dy = y as i32 - 1500;
+            if dx * dx + dy * dy < 1000 * 1000 {
+                image::Luma([255])
+            } else {
+                image::Luma([0])
+            }
+        });
+
+        bench_report(
+            &format!("apply_edge_shift_4k_bench ({w}x{h}, shift=2.5)"),
+            2,
+            10,
+            || apply_edge_shift(&mut mask, 2.5),
+        );
     }
 }
