@@ -728,8 +728,7 @@ fn apply_edge_shift(mask: &mut GrayImage, shift: f32) {
     let full = abs.floor() as u32;
     let frac = abs - full as f32;
     let (w, h) = (mask.width() as usize, mask.height() as usize);
-    let wi = w as i32;
-    let hi = h as i32;
+    if w == 0 || h == 0 { return; }
     let use_par = h >= 512;
 
     // Skip the unconditional `mask.as_raw().clone()` (~12 MB at 4 K) by
@@ -739,29 +738,81 @@ fn apply_edge_shift(mask: &mut GrayImage, shift: f32) {
 
     let step = |src: &[u8], dst: &mut [u8]| {
         let process_row = |(y, row): (usize, &mut [u8])| {
-            let yi = y as i32;
-            for (x, slot) in row.iter_mut().enumerate() {
-                let xi = x as i32;
-                let mut extremum: u8 = if erode { 255 } else { 0 };
-                for dy in -1i32..=1 {
-                    let ny = (yi + dy).clamp(0, hi - 1) as usize;
-                    for dx in -1i32..=1 {
-                        let nx = (xi + dx).clamp(0, wi - 1) as usize;
-                        let v = src[ny * w + nx];
-                        if erode {
-                            extremum = extremum.min(v);
-                        } else {
-                            extremum = extremum.max(v);
+            if y == 0 || y == h - 1 || w < 3 {
+                // Boundary rows or very thin image: use slow path with clamping
+                for (x, slot) in row.iter_mut().enumerate() {
+                    let mut extremum = if erode { 255 } else { 0 };
+                    let y_min = y.saturating_sub(1);
+                    let y_max = (y + 1).min(h - 1);
+                    let x_min = x.saturating_sub(1);
+                    let x_max = (x + 1).min(w - 1);
+
+                    for ny in y_min..=y_max {
+                        let offset = ny * w;
+                        for nx in x_min..=x_max {
+                            let v = src[offset + nx];
+                            if erode { extremum = extremum.min(v); }
+                            else { extremum = extremum.max(v); }
                         }
                     }
+                    *slot = extremum;
                 }
-                *slot = extremum;
+                return;
+            }
+
+            // Interior rows: specialized fast path
+            let prev_row = &src[(y - 1) * w..];
+            let curr_row = &src[y * w..];
+            let next_row = &src[(y + 1) * w..];
+
+            // Left boundary pixel of interior row
+            {
+                let mut extremum = if erode { 255 } else { 0 };
+                for r in &[prev_row, curr_row, next_row] {
+                    for x in 0..=1 {
+                        let v = r[x];
+                        if erode { extremum = extremum.min(v); }
+                        else { extremum = extremum.max(v); }
+                    }
+                }
+                row[0] = extremum;
+            }
+
+            // Interior pixels: unrolled 3x3
+            if erode {
+                for x in 1..w - 1 {
+                    let v1 = prev_row[x - 1]; let v2 = prev_row[x]; let v3 = prev_row[x + 1];
+                    let v4 = curr_row[x - 1]; let v5 = curr_row[x]; let v6 = curr_row[x + 1];
+                    let v7 = next_row[x - 1]; let v8 = next_row[x]; let v9 = next_row[x + 1];
+                    row[x] = v1.min(v2).min(v3).min(v4).min(v5).min(v6).min(v7).min(v8).min(v9);
+                }
+            } else {
+                for x in 1..w - 1 {
+                    let v1 = prev_row[x - 1]; let v2 = prev_row[x]; let v3 = prev_row[x + 1];
+                    let v4 = curr_row[x - 1]; let v5 = curr_row[x]; let v6 = curr_row[x + 1];
+                    let v7 = next_row[x - 1]; let v8 = next_row[x]; let v9 = next_row[x + 1];
+                    row[x] = v1.max(v2).max(v3).max(v4).max(v5).max(v6).max(v7).max(v8).max(v9);
+                }
+            }
+
+            // Right boundary pixel of interior row
+            {
+                let mut extremum = if erode { 255 } else { 0 };
+                for r in &[prev_row, curr_row, next_row] {
+                    for x in w - 2..w {
+                        let v = r[x];
+                        if erode { extremum = extremum.min(v); }
+                        else { extremum = extremum.max(v); }
+                    }
+                }
+                row[w - 1] = extremum;
             }
         };
+
         if use_par {
-            dst.par_chunks_mut(w).enumerate().for_each(process_row);
+            dst.par_chunks_exact_mut(w).enumerate().for_each(process_row);
         } else {
-            dst.chunks_mut(w).enumerate().for_each(process_row);
+            dst.chunks_exact_mut(w).enumerate().for_each(process_row);
         }
     };
 
@@ -776,10 +827,14 @@ fn apply_edge_shift(mask: &mut GrayImage, shift: f32) {
     if frac >= 0.01 {
         if full == 0 { a.copy_from_slice(mask.as_raw()); }
         step(&a, &mut b);
-        let inv = 1.0 - frac;
+
+        let ifrac = (frac * 256.0 + 0.5) as u32;
+        let iinv = 256 - ifrac;
+
         let blend = |a_byte: &mut u8, b_byte: u8| {
-            *a_byte = (*a_byte as f32 * inv + b_byte as f32 * frac + 0.5) as u8;
+            *a_byte = ((*a_byte as u32 * iinv + b_byte as u32 * ifrac + 128) >> 8) as u8;
         };
+
         if use_par {
             a.par_iter_mut().zip(b.par_iter()).for_each(|(a, &b)| blend(a, b));
         } else {
@@ -997,6 +1052,23 @@ mod tests {
         });
     }
 
+    #[test]
+    #[ignore]
+    fn apply_edge_shift_4k_bench() {
+        let (w, h) = (4000u32, 3000u32);
+        let mut mask = GrayImage::from_fn(w, h, |x, y| {
+            if (x - 2000).pow(2) + (y - 1500).pow(2) < 500 * 500 {
+                image::Luma([255])
+            } else {
+                image::Luma([0])
+            }
+        });
+
+        bench_report("apply_edge_shift_4k_bench (4000x3000, shift=2.5)", 2, 10, || {
+            apply_edge_shift(&mut mask, 2.5);
+        });
+    }
+
     /// Halftone regression: on a uniform-luma input, pixels at the
     /// same offset within their respective cells must produce
     /// identical output. The pre-fix version read from the already-
@@ -1115,6 +1187,52 @@ mod tests {
     /// A logit tensor that, after sigmoid, clusters in [0.35, 0.65] would
     /// produce u8 values in [89, 166] without the stretch — never reaching
     /// full black or white. With the stretch the output must span [0, 255].
+    #[test]
+    fn test_apply_edge_shift_correctness() {
+        // 5x5 grid with a single 255 at center.
+        // Erode (shift=1.0) should make it all 0.
+        // Dilate (shift=-1.0) should make a 3x3 block of 255 at center.
+        let mask = GrayImage::from_fn(5, 5, |x, y| {
+            if x == 2 && y == 2 { image::Luma([255]) } else { image::Luma([0]) }
+        });
+
+        // Test Dilate
+        let mut dilate = mask.clone();
+        apply_edge_shift(&mut dilate, -1.0);
+        for y in 0..5 {
+            for x in 0..5 {
+                let p = dilate.get_pixel(x, y)[0];
+                if x >= 1 && x <= 3 && y >= 1 && y <= 3 {
+                    assert_eq!(p, 255, "Dilate failed at {},{}", x, y);
+                } else {
+                    assert_eq!(p, 0, "Dilate failed at {},{}", x, y);
+                }
+            }
+        }
+
+        // Test Erode
+        let mut erode = dilate.clone();
+        apply_edge_shift(&mut erode, 1.0);
+        // Eroding the 3x3 block should return to a 1x1 block (the original)
+        for y in 0..5 {
+            for x in 0..5 {
+                let p = erode.get_pixel(x, y)[0];
+                if x == 2 && y == 2 {
+                    assert_eq!(p, 255, "Erode failed at 2,2");
+                } else {
+                    assert_eq!(p, 0, "Erode failed at {},{}", x, y);
+                }
+            }
+        }
+
+        // Test Fractional
+        let mut frac = mask.clone();
+        // 0.5 shift: 50% original (0) + 50% 1-iter dilate (255) = 127 or 128
+        apply_edge_shift(&mut frac, -0.5);
+        let p = frac.get_pixel(1, 1)[0];
+        assert!(p >= 127 && p <= 128, "Fractional blend failed, got {}", p);
+    }
+
     #[test]
     fn birefnet_sigmoid_stretch_reaches_full_range() {
         // logit_lo → sigmoid ≈ 0.35, logit_hi → sigmoid ≈ 0.65
