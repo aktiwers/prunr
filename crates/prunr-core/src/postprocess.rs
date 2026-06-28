@@ -525,19 +525,19 @@ pub fn apply_bg_effect(rgba: &mut RgbaImage, source: &DynamicImage, effect: crat
         }
         BgEffect::InvertedSource => {
             let mut img = source.to_rgba8();
-            for p in img.pixels_mut() {
-                p.0[0] = 255 - p.0[0];
-                p.0[1] = 255 - p.0[1];
-                p.0[2] = 255 - p.0[2];
-            }
+            apply_pixelwise(&mut img, |p| {
+                p[0] = 255 - p[0];
+                p[1] = 255 - p[1];
+                p[2] = 255 - p[2];
+            });
             img
         }
         BgEffect::DesaturatedSource => {
             let mut img = source.to_rgba8();
-            for p in img.pixels_mut() {
-                let y = luma_u8(p.0[0], p.0[1], p.0[2]);
-                p.0[0] = y; p.0[1] = y; p.0[2] = y;
-            }
+            apply_pixelwise(&mut img, |p| {
+                let y = luma_u8(p[0], p[1], p[2]);
+                p[0] = y; p[1] = y; p[2] = y;
+            });
             img
         }
     };
@@ -728,8 +728,6 @@ fn apply_edge_shift(mask: &mut GrayImage, shift: f32) {
     let full = abs.floor() as u32;
     let frac = abs - full as f32;
     let (w, h) = (mask.width() as usize, mask.height() as usize);
-    let wi = w as i32;
-    let hi = h as i32;
     let use_par = h >= 512;
 
     // Skip the unconditional `mask.as_raw().clone()` (~12 MB at 4 K) by
@@ -739,25 +737,71 @@ fn apply_edge_shift(mask: &mut GrayImage, shift: f32) {
 
     let step = |src: &[u8], dst: &mut [u8]| {
         let process_row = |(y, row): (usize, &mut [u8])| {
-            let yi = y as i32;
-            for (x, slot) in row.iter_mut().enumerate() {
-                let xi = x as i32;
-                let mut extremum: u8 = if erode { 255 } else { 0 };
-                for dy in -1i32..=1 {
-                    let ny = (yi + dy).clamp(0, hi - 1) as usize;
-                    for dx in -1i32..=1 {
-                        let nx = (xi + dx).clamp(0, wi - 1) as usize;
-                        let v = src[ny * w + nx];
-                        if erode {
-                            extremum = extremum.min(v);
-                        } else {
-                            extremum = extremum.max(v);
+            if y == 0 || y == h - 1 || w < 3 {
+                let yi = y as i32;
+                for (x, slot) in row.iter_mut().enumerate() {
+                    let xi = x as i32;
+                    let mut extremum: u8 = if erode { 255 } else { 0 };
+                    for dy in -1..=1 {
+                        let ny = (yi + dy).clamp(0, h as i32 - 1) as usize;
+                        for dx in -1..=1 {
+                            let nx = (xi + dx).clamp(0, w as i32 - 1) as usize;
+                            let v = src[ny * w + nx];
+                            if erode { extremum = extremum.min(v); }
+                            else { extremum = extremum.max(v); }
                         }
                     }
+                    *slot = extremum;
                 }
-                *slot = extremum;
+                return;
+            }
+
+            let r_p = (y - 1) * w;
+            let r_c = y * w;
+            let r_n = (y + 1) * w;
+            let src_p = &src[r_p..];
+            let src_c = &src[r_c..];
+            let src_n = &src[r_n..];
+
+            if erode {
+                // First column
+                row[0] = src_p[0].min(src_p[1])
+                    .min(src_c[0]).min(src_c[1])
+                    .min(src_n[0]).min(src_n[1]);
+
+                // Middle columns (unrolled 3x3)
+                for x in 1..w - 1 {
+                    row[x] = src_p[x-1].min(src_p[x]).min(src_p[x+1])
+                        .min(src_c[x-1]).min(src_c[x]).min(src_c[x+1])
+                        .min(src_n[x-1]).min(src_n[x]).min(src_n[x+1]);
+                }
+
+                // Last column
+                let x = w - 1;
+                row[x] = src_p[x-1].min(src_p[x])
+                    .min(src_c[x-1]).min(src_c[x])
+                    .min(src_n[x-1]).min(src_n[x]);
+            } else {
+                // First column
+                row[0] = src_p[0].max(src_p[1])
+                    .max(src_c[0]).max(src_c[1])
+                    .max(src_n[0]).max(src_n[1]);
+
+                // Middle columns (unrolled 3x3)
+                for x in 1..w - 1 {
+                    row[x] = src_p[x-1].max(src_p[x]).max(src_p[x+1])
+                        .max(src_c[x-1]).max(src_c[x]).max(src_c[x+1])
+                        .max(src_n[x-1]).max(src_n[x]).max(src_n[x+1]);
+                }
+
+                // Last column
+                let x = w - 1;
+                row[x] = src_p[x-1].max(src_p[x])
+                    .max(src_c[x-1]).max(src_c[x])
+                    .max(src_n[x-1]).max(src_n[x]);
             }
         };
+
         if use_par {
             dst.par_chunks_mut(w).enumerate().for_each(process_row);
         } else {
@@ -776,9 +820,10 @@ fn apply_edge_shift(mask: &mut GrayImage, shift: f32) {
     if frac >= 0.01 {
         if full == 0 { a.copy_from_slice(mask.as_raw()); }
         step(&a, &mut b);
-        let inv = 1.0 - frac;
+        let ifrac = (frac * 256.0 + 0.5) as u32;
+        let iinv = 256 - ifrac;
         let blend = |a_byte: &mut u8, b_byte: u8| {
-            *a_byte = (*a_byte as f32 * inv + b_byte as f32 * frac + 0.5) as u8;
+            *a_byte = ((*a_byte as u32 * iinv + b_byte as u32 * ifrac + 128) >> 8) as u8;
         };
         if use_par {
             a.par_iter_mut().zip(b.par_iter()).for_each(|(a, &b)| blend(a, b));
@@ -1141,5 +1186,25 @@ mod tests {
         // Allow a 2-gray tolerance for f32 rounding through the pipeline.
         assert!(got_min <= 2,  "min after sigmoid stretch should be ≈0, got {got_min}");
         assert!(got_max >= 253, "max after sigmoid stretch should be ≈255, got {got_max}");
+    }
+
+    #[test]
+    fn test_apply_edge_shift_correctness() {
+        let mut mask = GrayImage::new(10, 10);
+        mask.put_pixel(5, 5, image::Luma([255]));
+
+        // Dilate (expand foreground)
+        apply_edge_shift(&mut mask, -1.0);
+        assert_eq!(mask.get_pixel(5, 5)[0], 255);
+        assert_eq!(mask.get_pixel(4, 5)[0], 255);
+        assert_eq!(mask.get_pixel(6, 5)[0], 255);
+        assert_eq!(mask.get_pixel(5, 4)[0], 255);
+        assert_eq!(mask.get_pixel(5, 6)[0], 255);
+        assert_eq!(mask.get_pixel(0, 0)[0], 0);
+
+        // Erode (shrink foreground)
+        apply_edge_shift(&mut mask, 1.0);
+        assert_eq!(mask.get_pixel(5, 5)[0], 255);
+        assert_eq!(mask.get_pixel(4, 5)[0], 0);
     }
 }
