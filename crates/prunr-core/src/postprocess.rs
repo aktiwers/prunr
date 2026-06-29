@@ -525,19 +525,19 @@ pub fn apply_bg_effect(rgba: &mut RgbaImage, source: &DynamicImage, effect: crat
         }
         BgEffect::InvertedSource => {
             let mut img = source.to_rgba8();
-            for p in img.pixels_mut() {
-                p.0[0] = 255 - p.0[0];
-                p.0[1] = 255 - p.0[1];
-                p.0[2] = 255 - p.0[2];
-            }
+            apply_pixelwise(&mut img, |p| {
+                p[0] = 255 - p[0];
+                p[1] = 255 - p[1];
+                p[2] = 255 - p[2];
+            });
             img
         }
         BgEffect::DesaturatedSource => {
             let mut img = source.to_rgba8();
-            for p in img.pixels_mut() {
-                let y = luma_u8(p.0[0], p.0[1], p.0[2]);
-                p.0[0] = y; p.0[1] = y; p.0[2] = y;
-            }
+            apply_pixelwise(&mut img, |p| {
+                let y = luma_u8(p[0], p[1], p[2]);
+                p[0] = y; p[1] = y; p[2] = y;
+            });
             img
         }
     };
@@ -728,8 +728,7 @@ fn apply_edge_shift(mask: &mut GrayImage, shift: f32) {
     let full = abs.floor() as u32;
     let frac = abs - full as f32;
     let (w, h) = (mask.width() as usize, mask.height() as usize);
-    let wi = w as i32;
-    let hi = h as i32;
+    if w == 0 || h == 0 { return; }
     let use_par = h >= 512;
 
     // Skip the unconditional `mask.as_raw().clone()` (~12 MB at 4 K) by
@@ -737,27 +736,78 @@ fn apply_edge_shift(mask: &mut GrayImage, shift: f32) {
     let mut a = vec![0u8; w * h];
     let mut b = vec![0u8; w * h];
 
-    let step = |src: &[u8], dst: &mut [u8]| {
+    let step = |src: &[u8], dst: &mut [u8], erode: bool| {
         let process_row = |(y, row): (usize, &mut [u8])| {
-            let yi = y as i32;
-            for (x, slot) in row.iter_mut().enumerate() {
-                let xi = x as i32;
-                let mut extremum: u8 = if erode { 255 } else { 0 };
-                for dy in -1i32..=1 {
-                    let ny = (yi + dy).clamp(0, hi - 1) as usize;
-                    for dx in -1i32..=1 {
-                        let nx = (xi + dx).clamp(0, wi - 1) as usize;
-                        let v = src[ny * w + nx];
-                        if erode {
-                            extremum = extremum.min(v);
-                        } else {
-                            extremum = extremum.max(v);
-                        }
+            let y_prev = y.saturating_sub(1);
+            let y_next = (y + 1).min(h - 1);
+            let r_p = y_prev * w;
+            let r_c = y * w;
+            let r_n = y_next * w;
+
+            let src_p = &src[r_p..];
+            let src_c = &src[r_c..];
+            let src_n = &src[r_n..];
+
+            if erode {
+                // First pixel
+                {
+                    let x = 0;
+                    let x_n = if w > 1 { 1 } else { 0 };
+                    let mut m = src_p[x].min(src_p[x_n]);
+                    m = m.min(src_c[x]).min(src_c[x_n]);
+                    m = m.min(src_n[x]).min(src_n[x_n]);
+                    row[x] = m;
+                }
+                // Interior fast-path (no clamping, unrolled)
+                if w > 2 {
+                    for x in 1..w - 1 {
+                        let mut m = src_p[x - 1].min(src_p[x]).min(src_p[x + 1]);
+                        m = m.min(src_c[x - 1]).min(src_c[x]).min(src_c[x + 1]);
+                        m = m.min(src_n[x - 1]).min(src_n[x]).min(src_n[x + 1]);
+                        row[x] = m;
                     }
                 }
-                *slot = extremum;
+                // Last pixel
+                if w > 1 {
+                    let x = w - 1;
+                    let x_p = x - 1;
+                    let mut m = src_p[x_p].min(src_p[x]);
+                    m = m.min(src_c[x_p]).min(src_c[x]);
+                    m = m.min(src_n[x_p]).min(src_n[x]);
+                    row[x] = m;
+                }
+            } else {
+                // Dilate
+                // First pixel
+                {
+                    let x = 0;
+                    let x_n = if w > 1 { 1 } else { 0 };
+                    let mut m = src_p[x].max(src_p[x_n]);
+                    m = m.max(src_c[x]).max(src_c[x_n]);
+                    m = m.max(src_n[x]).max(src_n[x_n]);
+                    row[x] = m;
+                }
+                // Interior fast-path (no clamping, unrolled)
+                if w > 2 {
+                    for x in 1..w - 1 {
+                        let mut m = src_p[x - 1].max(src_p[x]).max(src_p[x + 1]);
+                        m = m.max(src_c[x - 1]).max(src_c[x]).max(src_c[x + 1]);
+                        m = m.max(src_n[x - 1]).max(src_n[x]).max(src_n[x + 1]);
+                        row[x] = m;
+                    }
+                }
+                // Last pixel
+                if w > 1 {
+                    let x = w - 1;
+                    let x_p = x - 1;
+                    let mut m = src_p[x_p].max(src_p[x]);
+                    m = m.max(src_c[x_p]).max(src_c[x]);
+                    m = m.max(src_n[x_p]).max(src_n[x]);
+                    row[x] = m;
+                }
             }
         };
+
         if use_par {
             dst.par_chunks_mut(w).enumerate().for_each(process_row);
         } else {
@@ -766,19 +816,20 @@ fn apply_edge_shift(mask: &mut GrayImage, shift: f32) {
     };
 
     if full > 0 {
-        step(mask.as_raw(), &mut a);
+        step(mask.as_raw(), &mut a, erode);
         for _ in 1..full {
             std::mem::swap(&mut a, &mut b);
-            step(&b, &mut a);
+            step(&b, &mut a, erode);
         }
     }
 
     if frac >= 0.01 {
         if full == 0 { a.copy_from_slice(mask.as_raw()); }
-        step(&a, &mut b);
-        let inv = 1.0 - frac;
+        step(&a, &mut b, erode);
+        let ifrac = (frac * 256.0) as u32;
+        let iinv = 256 - ifrac;
         let blend = |a_byte: &mut u8, b_byte: u8| {
-            *a_byte = (*a_byte as f32 * inv + b_byte as f32 * frac + 0.5) as u8;
+            *a_byte = ((*a_byte as u32 * iinv + b_byte as u32 * ifrac + 128) >> 8) as u8;
         };
         if use_par {
             a.par_iter_mut().zip(b.par_iter()).for_each(|(a, &b)| blend(a, b));
@@ -997,6 +1048,24 @@ mod tests {
         });
     }
 
+    ///   `cargo test -p prunr-core --release apply_edge_shift_4k_bench -- --nocapture --ignored`
+    #[test]
+    #[ignore]
+    fn apply_edge_shift_4k_bench() {
+        let (w, h) = (4000, 3000);
+        let mut mask = GrayImage::from_fn(w, h, |x, y| {
+            if (x - 2000).pow(2) + (y - 1500).pow(2) < 1000u32.pow(2) {
+                image::Luma([255])
+            } else {
+                image::Luma([0])
+            }
+        });
+
+        bench_report("apply_edge_shift_4k_bench (4000x3000, shift=2.5)", 2, 10, || {
+            apply_edge_shift(&mut mask, 2.5);
+        });
+    }
+
     /// Halftone regression: on a uniform-luma input, pixels at the
     /// same offset within their respective cells must produce
     /// identical output. The pre-fix version read from the already-
@@ -1141,5 +1210,39 @@ mod tests {
         // Allow a 2-gray tolerance for f32 rounding through the pipeline.
         assert!(got_min <= 2,  "min after sigmoid stretch should be ≈0, got {got_min}");
         assert!(got_max >= 253, "max after sigmoid stretch should be ≈255, got {got_max}");
+    }
+
+    #[test]
+    fn test_apply_edge_shift_correctness() {
+        // 3x3 mask, center 255, others 0
+        let mask = GrayImage::from_raw(3, 3, vec![
+            0,   0, 0,
+            0, 255, 0,
+            0,   0, 0,
+        ]).unwrap();
+
+        // Erode 1.0: 3x3 min should drive center to 0
+        let mut m = mask.clone();
+        apply_edge_shift(&mut m, 1.0);
+        assert_eq!(m.as_raw(), &[0, 0, 0, 0, 0, 0, 0, 0, 0]);
+
+        // Dilate 1.0: 3x3 max should drive all to 255
+        let mut m = mask.clone();
+        apply_edge_shift(&mut m, -1.0);
+        assert_eq!(m.as_raw(), &[255; 9]);
+
+        // Fractional shift 0.5 erode: 50% identity (255) + 50% erode1 (0) = 127/128
+        let mut m = mask.clone();
+        apply_edge_shift(&mut m, 0.5);
+        let center = m.get_pixel(1, 1)[0];
+        assert!(center >= 127 && center <= 128, "Expected ~127, got {center}");
+        assert_eq!(m.get_pixel(0, 0)[0], 0);
+
+        // Fractional shift 0.5 dilate: 50% identity (0) + 50% dilate1 (255) = 127/128
+        let mut m = mask.clone();
+        apply_edge_shift(&mut m, -0.5);
+        let corner = m.get_pixel(0, 0)[0];
+        assert!(corner >= 127 && corner <= 128, "Expected ~127, got {corner}");
+        assert_eq!(m.get_pixel(1, 1)[0], 255);
     }
 }
