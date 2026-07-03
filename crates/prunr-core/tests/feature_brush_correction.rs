@@ -9,8 +9,8 @@ mod test_common;
 
 use prunr_core::{
     brush::{paint_circle, BrushMode, MaskCorrection, Stamp},
-    infer_only, postprocess_from_flat, MaskSettings, ModelKind, OrtEngine,
-    PostprocessOpts, ProgressStage,
+    infer_only, postprocess_from_flat, MaskSettings, ModelKind, OrtEngine, PostprocessOpts,
+    ProgressStage,
 };
 use test_common::{multi_subject_canary, skip_if_no_ort};
 
@@ -18,34 +18,49 @@ const SIZE: u32 = 256;
 
 #[test]
 fn brush_correction_stroke_alters_the_painted_region_only() {
-    if skip_if_no_ort("brush_correction") { return; }
+    if skip_if_no_ort("brush_correction") {
+        return;
+    }
 
-    let engine = OrtEngine::new_cpu_only(ModelKind::Silueta, 1)
-        .expect("OrtEngine::new_cpu_only(Silueta)");
+    let engine =
+        OrtEngine::new_cpu_only(ModelKind::Silueta, 1).expect("OrtEngine::new_cpu_only(Silueta)");
     let img = multi_subject_canary();
     let mask_settings = MaskSettings::default();
 
     // Step 1: run inference once; reuse the tensor for both postprocess
     // passes (changing only the correction between them).
-    let ir = infer_only(&img, &engine, None::<fn(ProgressStage, f32)>, None)
-        .expect("infer_only");
+    let ir = infer_only(&img, &engine, None::<fn(ProgressStage, f32)>, None).expect("infer_only");
     let opts = PostprocessOpts::new(&mask_settings, ModelKind::Silueta);
 
     // Step 2a: baseline result, no correction.
     let baseline = postprocess_from_flat(
-        &ir.tensor_data, ir.tensor_height, ir.tensor_width, &img, &opts,
-    ).expect("postprocess baseline");
+        &ir.tensor_data,
+        ir.tensor_height,
+        ir.tensor_width,
+        &img,
+        &opts,
+    )
+    .expect("postprocess baseline");
 
     // Step 2b: apply a `Subtract` brush stroke covering a small disk.
     // Subtract drives mask alpha → 0 in the painted region, so the
     // result's alpha there should drop noticeably.
     let mut correction = MaskCorrection::empty(SIZE as u16, SIZE as u16);
-    let stamp = Stamp { hardness: 1.0, strength: 1.0, mode: BrushMode::Subtract };
+    let stamp = Stamp {
+        hardness: 1.0,
+        strength: 1.0,
+        mode: BrushMode::Subtract,
+    };
     paint_circle(&mut correction, 80.0, 128.0, 25.0, stamp);
     let opts_with_corr = opts.with_correction(Some(&correction));
     let corrected = postprocess_from_flat(
-        &ir.tensor_data, ir.tensor_height, ir.tensor_width, &img, &opts_with_corr,
-    ).expect("postprocess corrected");
+        &ir.tensor_data,
+        ir.tensor_height,
+        ir.tensor_width,
+        &img,
+        &opts_with_corr,
+    )
+    .expect("postprocess corrected");
 
     assert_eq!(baseline.dimensions(), corrected.dimensions());
 
@@ -90,26 +105,44 @@ fn brush_correction_stroke_alters_the_painted_region_only() {
 /// the cache misses or stales — both failure modes caught by byte equality.
 #[test]
 fn brush_correction_is_deterministic_across_runs() {
-    if skip_if_no_ort("brush_correction_deterministic") { return; }
-    let engine = OrtEngine::new_cpu_only(ModelKind::Silueta, 1)
-        .expect("OrtEngine::new_cpu_only(Silueta)");
+    if skip_if_no_ort("brush_correction_deterministic") {
+        return;
+    }
+    let engine =
+        OrtEngine::new_cpu_only(ModelKind::Silueta, 1).expect("OrtEngine::new_cpu_only(Silueta)");
     let img = multi_subject_canary();
     let mask_settings = MaskSettings::default();
-    let ir = infer_only(&img, &engine, None::<fn(ProgressStage, f32)>, None)
-        .expect("infer_only");
+    let ir = infer_only(&img, &engine, None::<fn(ProgressStage, f32)>, None).expect("infer_only");
     let opts = PostprocessOpts::new(&mask_settings, ModelKind::Silueta);
 
     let mut correction = MaskCorrection::empty(SIZE as u16, SIZE as u16);
-    let stamp = Stamp { hardness: 1.0, strength: 1.0, mode: BrushMode::Subtract };
+    let stamp = Stamp {
+        hardness: 1.0,
+        strength: 1.0,
+        mode: BrushMode::Subtract,
+    };
     paint_circle(&mut correction, 80.0, 128.0, 25.0, stamp);
 
     let opts_with_corr = opts.with_correction(Some(&correction));
     let run1 = postprocess_from_flat(
-        &ir.tensor_data, ir.tensor_height, ir.tensor_width, &img, &opts_with_corr,
-    ).expect("run 1");
+        &ir.tensor_data,
+        ir.tensor_height,
+        ir.tensor_width,
+        &img,
+        &opts_with_corr,
+    )
+    .expect("run 1");
     let run2 = postprocess_from_flat(
-        &ir.tensor_data, ir.tensor_height, ir.tensor_width, &img, &opts_with_corr,
-    ).expect("run 2");
-    assert_eq!(run1.as_raw(), run2.as_raw(),
-        "same correction + same inputs must produce identical bytes");
+        &ir.tensor_data,
+        ir.tensor_height,
+        ir.tensor_width,
+        &img,
+        &opts_with_corr,
+    )
+    .expect("run 2");
+    assert_eq!(
+        run1.as_raw(),
+        run2.as_raw(),
+        "same correction + same inputs must produce identical bytes"
+    );
 }

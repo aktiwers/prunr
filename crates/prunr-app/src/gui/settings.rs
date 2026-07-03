@@ -1,6 +1,6 @@
+use prunr_core::ModelKind;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use prunr_core::ModelKind;
 
 use super::brush_state::BrushSettings;
 use super::item_settings::ItemSettings;
@@ -98,7 +98,9 @@ pub struct Settings {
     pub ram_safety_margin_gb: f32,
 }
 
-fn default_ram_safety_margin_gb() -> f32 { 2.0 }
+fn default_ram_safety_margin_gb() -> f32 {
+    2.0
+}
 
 impl Settings {
     /// Should the SD inpaint dispatcher route to the LCM checkpoint?
@@ -125,8 +127,12 @@ impl Settings {
     }
 }
 
-fn default_live_preview() -> bool { true }
-fn default_preset_name() -> String { PRUNR_PRESET.to_string() }
+fn default_live_preview() -> bool {
+    true
+}
+fn default_preset_name() -> String {
+    PRUNR_PRESET.to_string()
+}
 
 impl Settings {
     /// Config file path: ~/.config/prunr/settings.json (Linux),
@@ -151,7 +157,9 @@ impl Settings {
         // etc. in the dropdown on first launch.
         super::presets_fs::seed_builtins_once();
 
-        let Some(path) = Self::config_path() else { return Self::default() };
+        let Some(path) = Self::config_path() else {
+            return Self::default();
+        };
         let Ok(data) = std::fs::read_to_string(&path) else {
             // No settings.json, but the user may still have preset files
             // dropped into the folder. Pick those up.
@@ -199,11 +207,14 @@ impl Settings {
                     .to_model_id()
                     .expect("Settings::default().model always has a model_id");
                 let mut models = HashMap::new();
-                models.insert(super::presets::model_id_key(wrap_key), super::presets::ModelPreset {
-                    item_settings: legacy_item,
-                    brush: Default::default(),
-                    sd: None,
-                });
+                models.insert(
+                    super::presets::model_id_key(wrap_key),
+                    super::presets::ModelPreset {
+                        item_settings: legacy_item,
+                        brush: Default::default(),
+                        sd: None,
+                    },
+                );
                 let file = super::presets::PresetFile {
                     format_version: super::presets::PRESET_FORMAT_VERSION,
                     models,
@@ -230,7 +241,9 @@ impl Settings {
 
     /// Save to disk. Errors are silently ignored (best-effort).
     pub fn save(&self) {
-        let Some(path) = Self::config_path() else { return };
+        let Some(path) = Self::config_path() else {
+            return;
+        };
         self.save_to_path(&path);
     }
 
@@ -254,7 +267,11 @@ impl Settings {
     /// filter-only mode (`SettingsModel::None`) the pipeline runs pure CPU
     /// on already-decoded pixels, so the ORT-memory cap doesn't apply.
     pub fn default_jobs(&self) -> usize {
-        let base = if self.is_gpu() { 2 } else { (num_cpus::get() / 2).max(1) };
+        let base = if self.is_gpu() {
+            2
+        } else {
+            (num_cpus::get() / 2).max(1)
+        };
         match self.model.to_model_kind() {
             Some(model) => base.min(super::memory::safe_max_jobs(model)),
             None => base,
@@ -279,16 +296,22 @@ impl Settings {
         if name == PRUNR_PRESET {
             return ItemSettings::default();
         }
-        let Some(file) = self.presets.get(name) else { return ItemSettings::default() };
+        let Some(file) = self.presets.get(name) else {
+            return ItemSettings::default();
+        };
         let Some(model_id) = self.model.to_model_id() else {
             // Filter-only mode has no model id. The active item still has
             // an ItemSettings — fall back to whichever model entry the
             // preset stored, or to factory defaults if none.
-            return file.models.values().next()
+            return file
+                .models
+                .values()
+                .next()
                 .map(|mp| mp.item_settings)
                 .unwrap_or_default();
         };
-        file.models.get(&super::presets::model_id_key(model_id))
+        file.models
+            .get(&super::presets::model_id_key(model_id))
             .map(|mp| mp.item_settings)
             .unwrap_or_default()
     }
@@ -311,7 +334,9 @@ impl Settings {
         } else {
             self.presets.get(&self.default_preset).unwrap_or(&empty)
         };
-        let model_id = self.model.to_model_id()
+        let model_id = self
+            .model
+            .to_model_id()
             .or_else(|| Self::default().model.to_model_id())
             .expect("Settings::default().model always has a model_id");
         super::presets::resolve_preset_for_model(file, model_id, scheduler)
@@ -375,12 +400,15 @@ impl Settings {
     pub fn is_runtime_prompt_snoozed(&self, runtime: crate::runtime_install::RuntimeId) -> bool {
         self.runtime_prompt_snoozed_until
             .get(runtime.settings_key())
-            .copied().unwrap_or(0) > now_unix_secs()
+            .copied()
+            .unwrap_or(0)
+            > now_unix_secs()
     }
 
     pub fn snooze_runtime_prompt(&mut self, runtime: crate::runtime_install::RuntimeId, days: i64) {
         let until = now_unix_secs() + days * 24 * 3600;
-        self.runtime_prompt_snoozed_until.insert(runtime.settings_key().to_string(), until);
+        self.runtime_prompt_snoozed_until
+            .insert(runtime.settings_key().to_string(), until);
         self.save();
     }
 
@@ -403,7 +431,8 @@ impl Settings {
 fn now_unix_secs() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64).unwrap_or(0)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 /// Extract v1 per-image settings from raw JSON into ItemSettings.
@@ -412,14 +441,20 @@ fn migrate_v1_item_settings(v: &serde_json::Value) -> ItemSettings {
     use prunr_core::LineMode;
 
     let mut s = ItemSettings::default();
-    if let Some(x) = v.get("mask_gamma").and_then(|x| x.as_f64()) { s.gamma = x as f32; }
+    if let Some(x) = v.get("mask_gamma").and_then(|x| x.as_f64()) {
+        s.gamma = x as f32;
+    }
     if v.get("mask_threshold_enabled").and_then(|x| x.as_bool()) == Some(true) {
         if let Some(x) = v.get("mask_threshold").and_then(|x| x.as_f64()) {
             s.threshold = Some(x as f32);
         }
     }
-    if let Some(x) = v.get("edge_shift").and_then(|x| x.as_f64()) { s.edge_shift = x as f32; }
-    if let Some(x) = v.get("refine_edges").and_then(|x| x.as_bool()) { s.refine_edges = x; }
+    if let Some(x) = v.get("edge_shift").and_then(|x| x.as_f64()) {
+        s.edge_shift = x as f32;
+    }
+    if let Some(x) = v.get("refine_edges").and_then(|x| x.as_bool()) {
+        s.refine_edges = x;
+    }
     if let Some(mode) = v.get("line_mode").and_then(|x| x.as_str()) {
         s.line_mode = match mode {
             "Off" => LineMode::Off,
@@ -428,7 +463,9 @@ fn migrate_v1_item_settings(v: &serde_json::Value) -> ItemSettings {
             _ => LineMode::Off,
         };
     }
-    if let Some(x) = v.get("line_strength").and_then(|x| x.as_f64()) { s.line_strength = x as f32; }
+    if let Some(x) = v.get("line_strength").and_then(|x| x.as_f64()) {
+        s.line_strength = x as f32;
+    }
     if v.get("solid_line_color").and_then(|x| x.as_bool()) == Some(true) {
         if let Some(arr) = v.get("line_color").and_then(|x| x.as_array()) {
             if let [r, g, b, ..] = arr.as_slice() {
@@ -507,7 +544,10 @@ impl SettingsModel {
     /// True for any object-removal mode. Branches that drive the inpaint
     /// pipeline (brush auto-enable, popover simplification) check this.
     pub fn is_inpaint(self) -> bool {
-        matches!(self, Self::Inpaint | Self::BigInpaint | Self::MiganInpaint | Self::SdInpaint)
+        matches!(
+            self,
+            Self::Inpaint | Self::BigInpaint | Self::MiganInpaint | Self::SdInpaint
+        )
     }
 
     /// Convert to `ModelKind`, or `None` for non-seg variants.
@@ -516,7 +556,11 @@ impl SettingsModel {
             Self::Silueta => Some(ModelKind::Silueta),
             Self::U2net => Some(ModelKind::U2net),
             Self::BiRefNetLite => Some(ModelKind::BiRefNetLite),
-            Self::None | Self::Inpaint | Self::BigInpaint | Self::MiganInpaint | Self::SdInpaint => None,
+            Self::None
+            | Self::Inpaint
+            | Self::BigInpaint
+            | Self::MiganInpaint
+            | Self::SdInpaint => None,
         }
     }
 
@@ -640,13 +684,19 @@ mod tests {
     /// Wrap an `ItemSettings` into a single-entry v2 `PresetFile` keyed
     /// by the active model. Mirrors the runtime save flow's wrap step.
     fn wrap_for_model(s: &Settings, item: ItemSettings) -> super::super::presets::PresetFile {
-        let mid = s.model.to_model_id().expect("test settings have a model_id");
+        let mid = s
+            .model
+            .to_model_id()
+            .expect("test settings have a model_id");
         let mut models = HashMap::new();
-        models.insert(super::super::presets::model_id_key(mid), super::super::presets::ModelPreset {
-            item_settings: item,
-            brush: Default::default(),
-            sd: None,
-        });
+        models.insert(
+            super::super::presets::model_id_key(mid),
+            super::super::presets::ModelPreset {
+                item_settings: item,
+                brush: Default::default(),
+                sd: None,
+            },
+        );
         super::super::presets::PresetFile {
             format_version: super::super::presets::PRESET_FORMAT_VERSION,
             models,
@@ -694,10 +744,7 @@ mod tests {
         // primary cross-platform contract for settings persistence.
         // Platform path resolution (config_dir) is delegated to the `dirs`
         // crate and tested separately.
-        let dir = std::env::temp_dir().join(format!(
-            "prunr-test-{}",
-            std::process::id(),
-        ));
+        let dir = std::env::temp_dir().join(format!("prunr-test-{}", std::process::id(),));
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("settings.json");
 
@@ -727,10 +774,7 @@ mod tests {
     #[test]
     fn brush_settings_round_trip() {
         use prunr_core::brush::{BrushMode, BrushShape};
-        let dir = std::env::temp_dir().join(format!(
-            "prunr-brush-test-{}",
-            std::process::id(),
-        ));
+        let dir = std::env::temp_dir().join(format!("prunr-brush-test-{}", std::process::id(),));
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("settings.json");
 
@@ -818,7 +862,10 @@ mod tests {
             sd: None,
         };
         let mut models = HashMap::new();
-        models.insert(super::super::presets::model_id_key(prunr_models::ModelId::Silueta), mp);
+        models.insert(
+            super::super::presets::model_id_key(prunr_models::ModelId::Silueta),
+            mp,
+        );
         let file = super::super::presets::PresetFile {
             format_version: super::super::presets::PRESET_FORMAT_VERSION,
             models,
@@ -844,7 +891,10 @@ mod tests {
         };
         let mut models = HashMap::new();
         // Foo only has a Silueta entry; active model is U2net.
-        models.insert(super::super::presets::model_id_key(prunr_models::ModelId::Silueta), mp);
+        models.insert(
+            super::super::presets::model_id_key(prunr_models::ModelId::Silueta),
+            mp,
+        );
         let file = super::super::presets::PresetFile {
             format_version: super::super::presets::PRESET_FORMAT_VERSION,
             models,
@@ -859,8 +909,8 @@ mod tests {
 
     #[test]
     fn on_model_change_resolve_brush_swaps_via_resolver() {
-        use crate::gui::brush_state::BrushSettings;
         use super::super::presets::{model_id_key, ModelPreset, PresetFile, PRESET_FORMAT_VERSION};
+        use crate::gui::brush_state::BrushSettings;
 
         let mut s = Settings::default();
         s.model = SettingsModel::Silueta;
@@ -869,17 +919,26 @@ mod tests {
         let mut u2net_brush = BrushSettings::default();
         u2net_brush.radius = 120.0;
         let mut models = HashMap::new();
-        models.insert(model_id_key(prunr_models::ModelId::Silueta), ModelPreset {
-            item_settings: ItemSettings::default(),
-            brush: silueta_brush,
-            sd: None,
-        });
-        models.insert(model_id_key(prunr_models::ModelId::U2net), ModelPreset {
-            item_settings: ItemSettings::default(),
-            brush: u2net_brush,
-            sd: None,
-        });
-        let file = PresetFile { format_version: PRESET_FORMAT_VERSION, models };
+        models.insert(
+            model_id_key(prunr_models::ModelId::Silueta),
+            ModelPreset {
+                item_settings: ItemSettings::default(),
+                brush: silueta_brush,
+                sd: None,
+            },
+        );
+        models.insert(
+            model_id_key(prunr_models::ModelId::U2net),
+            ModelPreset {
+                item_settings: ItemSettings::default(),
+                brush: u2net_brush,
+                sd: None,
+            },
+        );
+        let file = PresetFile {
+            format_version: PRESET_FORMAT_VERSION,
+            models,
+        };
         s.presets.insert("Foo".to_string(), file);
         s.default_preset = "Foo".to_string();
         s.brush.radius = 80.0;
@@ -891,21 +950,33 @@ mod tests {
 
     #[test]
     fn on_scheduler_change_resolve_sd_swaps_bundle() {
-        use crate::gui::brush_state::SdScheduler;
         use super::super::presets::{
             model_id_key, ModelPreset, PresetFile, SdPreset, SdSchedulerBundle,
             PRESET_FORMAT_VERSION,
         };
+        use crate::gui::brush_state::SdScheduler;
 
         let mut s = Settings::default();
         s.model = SettingsModel::SdInpaint;
         let mut schedulers = HashMap::new();
-        schedulers.insert(SdScheduler::Lcm, SdSchedulerBundle {
-            steps: 8, guidance_scale: 1.5, use_karras_sigmas: false, strength: 1.0,
-        });
-        schedulers.insert(SdScheduler::Ddim, SdSchedulerBundle {
-            steps: 25, guidance_scale: 6.0, use_karras_sigmas: false, strength: 1.0,
-        });
+        schedulers.insert(
+            SdScheduler::Lcm,
+            SdSchedulerBundle {
+                steps: 8,
+                guidance_scale: 1.5,
+                use_karras_sigmas: false,
+                strength: 1.0,
+            },
+        );
+        schedulers.insert(
+            SdScheduler::Ddim,
+            SdSchedulerBundle {
+                steps: 25,
+                guidance_scale: 6.0,
+                use_karras_sigmas: false,
+                strength: 1.0,
+            },
+        );
         let sd = SdPreset {
             active_scheduler: SdScheduler::Lcm,
             schedulers,
@@ -918,7 +989,10 @@ mod tests {
         };
         let mut models = HashMap::new();
         models.insert(model_id_key(prunr_models::ModelId::SdV15InpaintFp16), mp);
-        let file = PresetFile { format_version: PRESET_FORMAT_VERSION, models };
+        let file = PresetFile {
+            format_version: PRESET_FORMAT_VERSION,
+            models,
+        };
         s.presets.insert("Foo".to_string(), file);
         s.default_preset = "Foo".to_string();
         s.brush.sd_scheduler = SdScheduler::Lcm;
@@ -938,10 +1012,7 @@ mod tests {
     fn save_creates_parent_dir() {
         // Regression: on a fresh install the parent dir doesn't exist yet;
         // save() must create it rather than silently failing.
-        let dir = std::env::temp_dir().join(format!(
-            "prunr-mkdir-test-{}",
-            std::process::id(),
-        ));
+        let dir = std::env::temp_dir().join(format!("prunr-mkdir-test-{}", std::process::id(),));
         let _ = std::fs::remove_dir_all(&dir);
         let nested = dir.join("nested").join("settings.json");
         Settings::default().save_to_path(&nested);

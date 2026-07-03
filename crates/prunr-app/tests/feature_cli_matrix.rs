@@ -64,7 +64,11 @@ fn write_bg_image_fixture(dir: &std::path::Path) -> std::path::PathBuf {
 /// on the default `<stem>.prunr.png` naming. Returns Err with a human
 /// message when the runtime is missing (so callers SKIP instead of
 /// fail), Ok(output_path) on success, panics on any other failure.
-fn run_cli(input: &std::path::Path, out_dir: &std::path::Path, extra: &[&str]) -> Result<std::path::PathBuf, String> {
+fn run_cli(
+    input: &std::path::Path,
+    out_dir: &std::path::Path,
+    extra: &[&str],
+) -> Result<std::path::PathBuf, String> {
     let mut cmd = Command::new(CLI_BIN);
     cmd.arg(input).arg("-o").arg(out_dir).arg("-f");
     cmd.args(extra);
@@ -91,8 +95,8 @@ fn run_cli(input: &std::path::Path, out_dir: &std::path::Path, extra: &[&str]) -
 }
 
 fn assert_output_decodes(path: &std::path::Path, label: &str) {
-    let img = image::open(path)
-        .unwrap_or_else(|e| panic!("{label}: output PNG didn't decode: {e}"));
+    let img =
+        image::open(path).unwrap_or_else(|e| panic!("{label}: output PNG didn't decode: {e}"));
     let (w, h) = (img.width(), img.height());
     assert!(w > 0 && h > 0, "{label}: zero-dim output ({w}x{h})");
 }
@@ -103,7 +107,10 @@ fn cli_default_flags_produce_valid_output() {
     let input = write_fixture_png(dir.path());
     let output = match run_cli(&input, dir.path(), &[]) {
         Ok(p) => p,
-        Err(skip) => { eprintln!("[cli_default] {skip}"); return; }
+        Err(skip) => {
+            eprintln!("[cli_default] {skip}");
+            return;
+        }
     };
     assert_output_decodes(&output, "default");
 }
@@ -114,7 +121,10 @@ fn cli_silueta_model_flag() {
     let input = write_fixture_png(dir.path());
     let output = match run_cli(&input, dir.path(), &["-m", "silueta"]) {
         Ok(p) => p,
-        Err(skip) => { eprintln!("[cli_silueta] {skip}"); return; }
+        Err(skip) => {
+            eprintln!("[cli_silueta] {skip}");
+            return;
+        }
     };
     assert_output_decodes(&output, "silueta");
 }
@@ -125,7 +135,10 @@ fn cli_lines_only_flag() {
     let input = write_fixture_png(dir.path());
     let output = match run_cli(&input, dir.path(), &["--lines"]) {
         Ok(p) => p,
-        Err(skip) => { eprintln!("[cli_lines] {skip}"); return; }
+        Err(skip) => {
+            eprintln!("[cli_lines] {skip}");
+            return;
+        }
     };
     assert_output_decodes(&output, "lines");
 }
@@ -134,9 +147,16 @@ fn cli_lines_only_flag() {
 fn cli_bg_color_flag() {
     let dir = tempdir().expect("tempdir");
     let input = write_fixture_png(dir.path());
-    let output = match run_cli(&input, dir.path(), &["--bg-color", "ff00ff", "-m", "silueta"]) {
+    let output = match run_cli(
+        &input,
+        dir.path(),
+        &["--bg-color", "ff00ff", "-m", "silueta"],
+    ) {
         Ok(p) => p,
-        Err(skip) => { eprintln!("[cli_bg_color] {skip}"); return; }
+        Err(skip) => {
+            eprintln!("[cli_bg_color] {skip}");
+            return;
+        }
     };
     assert_output_decodes(&output, "bg-color");
 }
@@ -147,11 +167,22 @@ fn cli_bg_image_with_fit_flag() {
     let input = write_fixture_png(dir.path());
     let bg = write_bg_image_fixture(dir.path());
     let output = match run_cli(
-        &input, dir.path(),
-        &["--bg-image", bg.to_str().unwrap(), "--bg-image-fit", "tile", "-m", "silueta"],
+        &input,
+        dir.path(),
+        &[
+            "--bg-image",
+            bg.to_str().unwrap(),
+            "--bg-image-fit",
+            "tile",
+            "-m",
+            "silueta",
+        ],
     ) {
         Ok(p) => p,
-        Err(skip) => { eprintln!("[cli_bg_image] {skip}"); return; }
+        Err(skip) => {
+            eprintln!("[cli_bg_image] {skip}");
+            return;
+        }
     };
     assert_output_decodes(&output, "bg-image");
 }

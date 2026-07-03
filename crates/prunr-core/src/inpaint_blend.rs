@@ -114,7 +114,11 @@ pub fn color_match_inpainted(
             let img_y = byu + j;
             let row_off = img_y * img_wu + bxu;
             for (i, slot) in row.iter_mut().enumerate() {
-                *slot = if msk_raw[row_off + i] >= 128 { 1.0 } else { 0.0 };
+                *slot = if msk_raw[row_off + i] >= 128 {
+                    1.0
+                } else {
+                    0.0
+                };
             }
         });
     let mean = box_filter(&mask_bin, bbox.w, bbox.h, ring_px);
@@ -218,8 +222,7 @@ pub fn seam_guided_blend(
     // Distance-from-edge inside the mask, evaluated on the cropped mask
     // so chamfer cost scales with bbox not image. (Reused across channels
     // — distance is independent of colour.)
-    let crop_mask =
-        image::imageops::crop_imm(mask, bbox.x, bbox.y, bbox.w, bbox.h).to_image();
+    let crop_mask = image::imageops::crop_imm(mask, bbox.x, bbox.y, bbox.w, bbox.h).to_image();
     let dist = crate::inpaint::chamfer_distance_inside(&crop_mask);
     let crop_mask_raw = crop_mask.as_raw();
 
@@ -258,8 +261,7 @@ pub fn seam_guided_blend(
         // writes into a pre-allocated buffer, no per-call allocation.
         // Buffers are aliased only as exclusive `&mut` slices passed into
         // independent rayon::join branches → no overlap, sound.
-        let (mg, mi, mgi, mgg) =
-            (&mut mean_g, &mut mean_i, &mut mean_gi, &mut mean_gg);
+        let (mg, mi, mgi, mgg) = (&mut mean_g, &mut mean_i, &mut mean_gi, &mut mean_gg);
         rayon::join(
             || {
                 rayon::join(
@@ -303,8 +305,15 @@ pub fn seam_guided_blend(
         // Composite back into `out`: q = mean_a * source_pixel + mean_b,
         // blended toward raw inpaint deeper in the mask.
         composite_channel(
-            &mut out, source, bbox, c, crop_mask_raw,
-            &dist, &mean_a, &mean_b, inv_band,
+            &mut out,
+            source,
+            bbox,
+            c,
+            crop_mask_raw,
+            &dist,
+            &mean_a,
+            &mean_b,
+            inv_band,
         );
     }
 
@@ -315,12 +324,7 @@ pub fn seam_guided_blend(
 /// clamped to image bounds. Parallel row-reduction — each row computes
 /// its own min/max in parallel, then merged. Returns `None` for an
 /// all-zero mask.
-fn mask_bbox_expanded(
-    mask: &GrayImage,
-    margin: u32,
-    img_w: u32,
-    img_h: u32,
-) -> Option<Bbox> {
+fn mask_bbox_expanded(mask: &GrayImage, margin: u32, img_w: u32, img_h: u32) -> Option<Bbox> {
     let raw = mask.as_raw();
     let w = mask.width() as usize;
     let h = mask.height() as usize;
@@ -332,7 +336,9 @@ fn mask_bbox_expanded(
         let mut any = false;
         for (x, &v) in row.iter().enumerate() {
             if v >= 128 {
-                if !any { min_x = x; }
+                if !any {
+                    min_x = x;
+                }
                 max_x = x;
                 any = true;
             }
@@ -367,7 +373,12 @@ fn mask_bbox_expanded(
     let by = min_y.saturating_sub(m) as u32;
     let bx_end = (max_x + m + 1).min(img_w as usize) as u32;
     let by_end = (max_y + m + 1).min(img_h as usize) as u32;
-    Some(Bbox { x: bx, y: by, w: bx_end - bx, h: by_end - by })
+    Some(Bbox {
+        x: bx,
+        y: by,
+        w: bx_end - bx,
+        h: by_end - by,
+    })
 }
 
 fn load_channel(img: &RgbaImage, bbox: Bbox, channel: usize, out: &mut [f32]) {
@@ -460,10 +471,18 @@ pub fn finalize_inpaint(
     sharpen: f32,
 ) -> RgbaImage {
     let color_matched = color_match_inpainted(raw, source, mask, COLOR_MATCH_RING_PX);
-    let band_px = if feather_px > 0.0 { feather_px } else { SEAM_BLEND_BAND_PX };
+    let band_px = if feather_px > 0.0 {
+        feather_px
+    } else {
+        SEAM_BLEND_BAND_PX
+    };
     let mut out = seam_guided_blend(
-        &color_matched, source, mask,
-        SEAM_BLEND_RADIUS, SEAM_BLEND_EPSILON, band_px,
+        &color_matched,
+        source,
+        mask,
+        SEAM_BLEND_RADIUS,
+        SEAM_BLEND_EPSILON,
+        band_px,
     );
     if sharpen > 0.0 {
         out = crate::inpaint::sharpen_inpainted(&out, mask, sharpen);
@@ -552,8 +571,8 @@ mod tests {
         let out = color_match_inpainted(&inp, &src, &mask, ring_px);
         for y in 0..512 {
             for x in 0..512 {
-                let inside = x >= bbox.x && x < bbox.x + bbox.w
-                    && y >= bbox.y && y < bbox.y + bbox.h;
+                let inside =
+                    x >= bbox.x && x < bbox.x + bbox.w && y >= bbox.y && y < bbox.y + bbox.h;
                 if !inside {
                     assert_eq!(
                         out.get_pixel(x, y),
@@ -642,7 +661,15 @@ mod tests {
             }
         }
         let bbox = mask_bbox_expanded(&mask, 4, 64, 64);
-        assert_eq!(bbox, Some(Bbox { x: 21, y: 16, w: 18, h: 18 }));
+        assert_eq!(
+            bbox,
+            Some(Bbox {
+                x: 21,
+                y: 16,
+                w: 18,
+                h: 18
+            })
+        );
     }
 
     #[test]
@@ -650,7 +677,15 @@ mod tests {
         let mut mask = empty_mask(32, 32);
         mask.put_pixel(0, 0, Luma([255]));
         let bbox = mask_bbox_expanded(&mask, 8, 32, 32);
-        assert_eq!(bbox, Some(Bbox { x: 0, y: 0, w: 9, h: 9 }));
+        assert_eq!(
+            bbox,
+            Some(Bbox {
+                x: 0,
+                y: 0,
+                w: 9,
+                h: 9
+            })
+        );
     }
 
     #[test]
@@ -664,6 +699,14 @@ mod tests {
     fn bbox_full_image_mask() {
         let mask = GrayImage::from_pixel(32, 32, Luma([255]));
         let bbox = mask_bbox_expanded(&mask, 4, 32, 32);
-        assert_eq!(bbox, Some(Bbox { x: 0, y: 0, w: 32, h: 32 }));
+        assert_eq!(
+            bbox,
+            Some(Bbox {
+                x: 0,
+                y: 0,
+                w: 32,
+                h: 32
+            })
+        );
     }
 }

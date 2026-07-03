@@ -8,10 +8,10 @@ use std::io::{BufReader, BufWriter};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 
-use prunr_core::{ModelKind, MaskSettings, EdgeSettings};
-use crate::gui::settings::LineMode;
+use super::ipc::{flush_writer, read_message, write_message};
 use super::protocol::*;
-use super::ipc::{write_message, flush_writer, read_message};
+use crate::gui::settings::LineMode;
+use prunr_core::{EdgeSettings, MaskSettings, ModelKind};
 
 /// Borrowed `(data, height, width)` triple so subprocess `send_*` helpers
 /// don't carry three parallel args.
@@ -80,9 +80,12 @@ impl SubprocessManager {
     /// during the bundle build kills the subprocess, not the GUI.
     pub fn spawn_inpaint_only() -> Result<(Self, String), String> {
         Self::spawn_inner(
-            ModelKind::Silueta, 1,
-            MaskSettings::default(), false,
-            LineMode::Off, EdgeSettings::default(),
+            ModelKind::Silueta,
+            1,
+            MaskSettings::default(),
+            false,
+            LineMode::Off,
+            EdgeSettings::default(),
             true,
         )
     }
@@ -101,8 +104,7 @@ impl SubprocessManager {
         // callers like the CLI downscale path and the inpaint bridge's
         // lazy first-dispatch write input files BEFORE spawn, so a
         // spawn-time wipe would race those writes.
-        let exe = std::env::current_exe()
-            .map_err(|e| format!("Failed to get current exe: {e}"))?;
+        let exe = std::env::current_exe().map_err(|e| format!("Failed to get current exe: {e}"))?;
 
         let mut child = Command::new(&exe)
             .arg("--worker")
@@ -112,20 +114,30 @@ impl SubprocessManager {
             .spawn()
             .map_err(|e| format!("Failed to spawn worker: {e}"))?;
 
-        let child_stdin = child.stdin.take()
-            .ok_or("Failed to capture worker stdin")?;
-        let child_stdout = child.stdout.take()
+        let child_stdin = child.stdin.take().ok_or("Failed to capture worker stdin")?;
+        let child_stdout = child
+            .stdout
+            .take()
             .ok_or("Failed to capture worker stdout")?;
 
         let mut stdin_writer = BufWriter::new(child_stdin);
 
         // Send Init command — flush immediately so the child's blocking
         // `read_message` sees it without waiting for the buffer to fill.
-        write_message(&mut stdin_writer, &SubprocessCommand::Init {
-            model, jobs, mask, force_cpu, line_mode, edge,
-            ipc_dir: ipc_temp_dir().to_path_buf(),
-            inpaint_only,
-        }).map_err(|e| format!("Failed to send Init: {e}"))?;
+        write_message(
+            &mut stdin_writer,
+            &SubprocessCommand::Init {
+                model,
+                jobs,
+                mask,
+                force_cpu,
+                line_mode,
+                edge,
+                ipc_dir: ipc_temp_dir().to_path_buf(),
+                inpaint_only,
+            },
+        )
+        .map_err(|e| format!("Failed to send Init: {e}"))?;
         flush_writer(&mut stdin_writer).map_err(|e| format!("Failed to flush Init: {e}"))?;
 
         // Spawn reader thread for non-blocking stdout consumption
@@ -169,9 +181,7 @@ impl SubprocessManager {
             std::time::Duration::from_secs(300)
         };
         let active_provider = match event_rx.recv_timeout(init_timeout) {
-            Ok(ReaderEvent::Event(SubprocessEvent::Ready { active_provider })) => {
-                active_provider
-            }
+            Ok(ReaderEvent::Event(SubprocessEvent::Ready { active_provider })) => active_provider,
             Ok(ReaderEvent::Event(SubprocessEvent::InitError { error })) => {
                 let _ = child.kill();
                 return Err(format!("Worker init failed: {error}"));
@@ -203,16 +213,19 @@ impl SubprocessManager {
         // Calculate RSS limits from available system RAM
         let (rss_limit, rss_resume) = current_rss_thresholds();
 
-        Ok((Self {
-            child,
-            stdin_writer,
-            event_rx,
-            in_flight: HashSet::new(),
-            rss_limit,
-            rss_resume,
-            rss_paused: false,
-            rss_update_count: 0,
-        }, active_provider))
+        Ok((
+            Self {
+                child,
+                stdin_writer,
+                event_rx,
+                in_flight: HashSet::new(),
+                rss_limit,
+                rss_resume,
+                rss_paused: false,
+                rss_update_count: 0,
+            },
+            active_provider,
+        ))
     }
 
     /// Send an image for processing. Writes bytes to a temp file first.
@@ -237,7 +250,11 @@ impl SubprocessManager {
                 let path = super::protocol::IpcKind::Chain.path_for(ipc_temp_dir(), item_id);
                 std::fs::write(&path, rgba.as_raw())
                     .map_err(|e| format!("Failed to write chain temp file: {e}"))?;
-                Ok(ChainInput { path, width: w, height: h })
+                Ok(ChainInput {
+                    path,
+                    width: w,
+                    height: h,
+                })
             })
             .transpose()?;
 
@@ -245,7 +262,8 @@ impl SubprocessManager {
             item_id,
             image_path,
             chain_input: chain,
-        }).map_err(|e| format!("Failed to send ProcessImage: {e}"))?;
+        })
+        .map_err(|e| format!("Failed to send ProcessImage: {e}"))?;
 
         self.in_flight.insert(item_id);
         Ok(())
@@ -262,7 +280,8 @@ impl SubprocessManager {
             item_id,
             image_path,
             chain_input: None,
-        }).map_err(|e| format!("Failed to send ProcessImage: {e}"))?;
+        })
+        .map_err(|e| format!("Failed to send ProcessImage: {e}"))?;
         self.in_flight.insert(item_id);
         Ok(())
     }
@@ -374,8 +393,15 @@ impl SubprocessManager {
         sharpen: f32,
     ) -> Result<(), String> {
         self.send_cmd(&SubprocessCommand::Inpaint {
-            item_id, model_id, image_path, mask_path, sd_req, feather_px, sharpen,
-        }).map_err(|e| format!("Failed to send Inpaint: {e}"))?;
+            item_id,
+            model_id,
+            image_path,
+            mask_path,
+            sd_req,
+            feather_px,
+            sharpen,
+        })
+        .map_err(|e| format!("Failed to send Inpaint: {e}"))?;
         self.in_flight.insert(item_id);
         Ok(())
     }
@@ -448,7 +474,10 @@ impl SubprocessManager {
     /// (in-flight removal, RSS pause/resume). `None` timeout = `try_recv`,
     /// `Some(t)` = `recv_timeout`. Disconnected and recv-error both
     /// collapse to `None`; caller checks `is_alive`.
-    fn next_event_with_state(&mut self, timeout: Option<std::time::Duration>) -> Option<SubprocessEvent> {
+    fn next_event_with_state(
+        &mut self,
+        timeout: Option<std::time::Duration>,
+    ) -> Option<SubprocessEvent> {
         let raw = match timeout {
             None => self.event_rx.try_recv().ok(),
             Some(t) => self.event_rx.recv_timeout(t).ok(),
@@ -462,7 +491,10 @@ impl SubprocessManager {
         // shifts our pause/resume bands accordingly.
         if matches!(evt, SubprocessEvent::RssUpdate { .. }) {
             self.rss_update_count = self.rss_update_count.wrapping_add(1);
-            if self.rss_update_count.is_multiple_of(RSS_LIMIT_REFRESH_EVERY) {
+            if self
+                .rss_update_count
+                .is_multiple_of(RSS_LIMIT_REFRESH_EVERY)
+            {
                 let (limit, resume) = current_rss_thresholds();
                 self.rss_limit = limit;
                 self.rss_resume = resume;
@@ -645,10 +677,22 @@ mod tests {
             step((&mut in_flight, &mut rss_paused), e);
         }
 
-        assert!(!in_flight.contains(&1), "ImageDone must decrement in_flight");
-        assert!(!in_flight.contains(&2), "ImageError must decrement in_flight");
-        assert!(!in_flight.contains(&3), "InpaintDone must decrement in_flight (B1 regression)");
-        assert!(!in_flight.contains(&4), "InpaintError must decrement in_flight (B1 regression)");
+        assert!(
+            !in_flight.contains(&1),
+            "ImageDone must decrement in_flight"
+        );
+        assert!(
+            !in_flight.contains(&2),
+            "ImageError must decrement in_flight"
+        );
+        assert!(
+            !in_flight.contains(&3),
+            "InpaintDone must decrement in_flight (B1 regression)"
+        );
+        assert!(
+            !in_flight.contains(&4),
+            "InpaintError must decrement in_flight (B1 regression)"
+        );
         // Items not referenced by any event are still in flight
         for id in 5..10 {
             assert!(in_flight.contains(&id));
@@ -679,8 +723,14 @@ mod tests {
             },
         );
 
-        assert!(in_flight.contains(&1), "Progress is mid-flight — in_flight must NOT change");
-        assert!(in_flight.contains(&2), "InpaintProgress is mid-flight — in_flight must NOT change");
+        assert!(
+            in_flight.contains(&1),
+            "Progress is mid-flight — in_flight must NOT change"
+        );
+        assert!(
+            in_flight.contains(&2),
+            "InpaintProgress is mid-flight — in_flight must NOT change"
+        );
     }
 
     /// One-off lifecycle variants don't carry an `item_id` (or shouldn't
