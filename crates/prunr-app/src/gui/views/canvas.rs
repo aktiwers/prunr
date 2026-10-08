@@ -277,9 +277,14 @@ fn handle_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: Rect) 
     let img_rect = compute_img_rect(canvas_rect, tex.size_vec2(), app.zoom_state.zoom, app.zoom_state.pan_offset);
 
     let Some(idx) = app.batch.selected_idx_clamped() else { return };
+    let stamp = if app.settings.model.is_inpaint() {
+        app.settings.brush.region_stamp()
+    } else {
+        app.settings.brush.stamp()
+    };
     let action = {
         let item = &app.batch.items[idx];
-        brush_overlay::handle_input(ui, &mut app.brush_state, &app.settings.brush, item, img_rect)
+        brush_overlay::handle_input(ui, &mut app.brush_state, &app.settings.brush, stamp, item, img_rect)
     };
     if let BrushAction::Committed(stroke_mask) = action {
         let item_id = app.batch.items[idx].id;
@@ -289,10 +294,9 @@ fn handle_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: Rect) 
         // clears redo stack, pushes Stroke marker on the action timeline.
         app.batch.items[idx].begin_stroke_commit();
 
-        // Accumulate this stroke onto the existing selection (additive).
-        // On the first stroke the new mask becomes the full selection.
-        // On subsequent strokes, add_mask takes the pixel max so earlier
-        // strokes are never erased by later ones.
+        // Merge this stroke onto the existing selection: same-direction
+        // overlap keeps the stronger stroke, an opposite-direction stroke
+        // wins where it lands.
         let merged = match app.batch.items[idx].selection_mask.clone() {
             Some(existing) => existing.add_mask(&stroke_mask)
                 .unwrap_or(stroke_mask),
@@ -485,7 +489,7 @@ fn handle_magic_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: 
             source_h,
         ) {
             Ok(prompt) => {
-                app.processor.dispatch_sam_decoder(item_id, embedding, prompt, modifier);
+                app.processor.dispatch_sam_decoder(sam_request(app, item_id, embedding, prompt, modifier));
             }
             Err(e) => {
                 tracing::warn!(item_id, "SAM stroke prompt failed: {e:?}");
@@ -507,10 +511,31 @@ fn handle_magic_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: 
                 }
             };
             if app.magic_brush_state.active_stroke.is_empty() {
-                app.processor.dispatch_sam_decoder(item_id, embedding, prompt, modifier);
+                app.processor.dispatch_sam_decoder(sam_request(app, item_id, embedding, prompt, modifier));
             }
         }
         app.magic_brush_state.clear_stroke();
+    }
+}
+
+/// Snapshot everything a decoder run needs at click time: a chip change
+/// while SAM runs must not re-polarise or re-threshold the result.
+fn sam_request(
+    app: &PrunrApp,
+    item_id: u64,
+    embedding: std::sync::Arc<prunr_core::sam::SamEmbedding>,
+    prompt: prunr_core::sam::prompt::SamPrompt,
+    modifier: crate::gui::processor::PromptModifier,
+) -> crate::gui::processor::SamDecodeRequest {
+    let source_dims = app.batch.find_by_id(item_id).map(|i| i.dimensions).unwrap_or((0, 0));
+    crate::gui::processor::SamDecodeRequest {
+        item_id,
+        embedding,
+        prompt,
+        modifier,
+        mode: app.settings.brush.mode,
+        source_dims,
+        confidence_threshold: app.settings.brush.magic_confidence_threshold,
     }
 }
 

@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 /// Unified cap for the action-ordering layer (`actions_undo` / `actions_redo`),
 /// the stroke stacks, and the preset stacks. Each ordering-layer entry is a
-/// 1-byte enum tag; stroke entries are `Option<Arc<MaskCorrection>>` (one
+/// 1-byte enum tag; stroke entries are `Option<Arc<MaskArtifact>>` (one
 /// refcount bump); preset entries are ~100-byte `PresetSnapshot` structs.
 /// 100 is generous enough for any realistic session while bounding worst-case
 /// memory to negligible amounts.
@@ -45,12 +45,12 @@ pub(crate) fn push_action_bounded(stack: &mut VecDeque<ActionType>, kind: Action
 
 /// Per-item brush stroke history depth. Bounded to match `ACTION_HIST_DEPTH`
 /// (the ordering layer cap) so the ordering log and stroke stack stay in sync.
-/// Memory: each entry is `Option<Arc<MaskArtifact>>` at source resolution —
-/// ~16 MB per snapshot at 2048², ~33 MB at 4K. A 100-deep stack peaks at
-/// 1.6 GB on 2K content, 3.3 GB on 4K — the user's trade for a generous
-/// undo depth on hi-res images. The Arc wrapping makes snapshots O(1)
-/// refcount bumps; payload is shared until mutated (it never is, since
-/// MaskArtifact is immutable through `Arc`).
+/// Memory: each entry is `Option<Arc<MaskArtifact>>` at source resolution,
+/// one byte per pixel — ~4 MB per snapshot at 2048², ~8 MB at 4K. A
+/// 100-deep stack peaks at 0.4 GB on 2K content, 0.8 GB on 4K — the
+/// user's trade for a generous undo depth on hi-res images. The Arc
+/// wrapping makes snapshots O(1) refcount bumps; payload is shared until
+/// mutated (it never is, since MaskArtifact is immutable through `Arc`).
 const STROKE_HISTORY_DEPTH: usize = ACTION_HIST_DEPTH;
 
 fn push_stroke_bounded(
@@ -337,7 +337,7 @@ pub(crate) struct BatchItem {
     pub(crate) bg_image_tex_pending: bool,
 
     /// Shared selection mask. Both Paint Brush and Magic Brush write
-    /// here. f32 single-channel at source image resolution.
+    /// here. Signed i8 plane at source image resolution.
     ///
     /// LIFECYCLE: NOT cleared by `reset_result_caches()` — selection
     /// survives Process clicks intentionally. Cleared by:
@@ -619,9 +619,7 @@ impl BatchItem {
             r.width() as usize * r.height() as usize * 4
         });
         // Selection mask: source-res i8, Arc-wrapped (count refcount once)
-        let selection_bytes = self.selection_mask.as_ref()
-            .map(|m| m.data.len())
-            .unwrap_or(0);
+        let selection_bytes = self.selection_mask.as_ref().map_or(0, |m| m.data.len());
         let embedding_bytes = if self.magic_brush_embedding.is_some() {
             prunr_core::sam::SamEmbedding::expected_bytes()
         } else { 0 };
@@ -1001,11 +999,8 @@ mod tests {
     /// distinguishable masks without needing actual painted pixels.
     fn make_mask(tag: u64, w: u32, h: u32) -> Arc<prunr_core::selection::MaskArtifact> {
         let mut data = vec![0i8; (w * h) as usize];
-        // Write the tag into the first few cells so masks with different
-        // tags compare as non-equal (content_hash differs).
-        for (i, cell) in data.iter_mut().take(4).enumerate() {
-            *cell = ((tag >> (i * 8)) & 0x7f) as i8;
-        }
+        // Tag the first cell so masks with different tags hash differently.
+        data[0] = tag as i8;
         Arc::new(prunr_core::selection::MaskArtifact {
             width: w,
             height: h,

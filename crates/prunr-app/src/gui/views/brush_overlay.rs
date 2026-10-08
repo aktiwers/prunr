@@ -12,6 +12,7 @@
 use egui::{Color32, Pos2, Rect, Stroke, Ui};
 
 use crate::gui::brush_state::{BrushSettings, BrushState};
+use prunr_core::brush::Stamp;
 use crate::gui::item::BatchItem;
 use crate::gui::theme;
 
@@ -47,6 +48,7 @@ pub(crate) fn handle_input(
     ui: &mut Ui,
     brush_state: &mut BrushState,
     settings: &BrushSettings,
+    stamp: Stamp,
     item: &BatchItem,
     img_rect: Rect,
 ) -> BrushAction {
@@ -83,7 +85,6 @@ pub(crate) fn handle_input(
     // img_rect width vs model width. One isotropic factor is enough:
     // letterboxed images keep proportional w/h.
     let screen_radius = settings.radius;
-    let stamp = settings.stamp();
     let model_radius_for = |screen_radius: f32| -> f32 {
         screen_radius * (model_w as f32 / img_rect.width().max(1.0))
     };
@@ -110,7 +111,7 @@ pub(crate) fn handle_input(
         if let Some(correction) = brush_state.commit_stroke(stamp) {
             tracing::debug!("brush release — commit");
             return BrushAction::Committed(
-                prunr_core::selection::MaskArtifact::from_correction(&correction),
+                prunr_core::selection::MaskArtifact::from_correction(correction),
             );
         }
     }

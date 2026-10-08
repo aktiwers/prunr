@@ -174,12 +174,10 @@ fn selection_category_arm_exists_no_dispatch() {
 
 // ── Regression: Paint Brush BG-removal immediate-feedback ────────────────────
 //
-// A Paint stroke must reach `apply_correction` exactly as Phase 15 painted
-// it: its direction (Subtract is the default brush mode), its hardness
-// falloff and its strength. Phase 33 flattened strokes to a binary,
-// add-only region, which made the default brush restore subject instead
-// of removing it; this pins the signed, soft round trip through the
-// shared selection and the per-model dispatch.
+// A Paint stroke on a BG-removal model must reach the live-preview rerun
+// exactly as painted: direction (Subtract is the default), hardness
+// falloff and strength. The core suite pins the lossless round trip; this
+// pins the app wiring that stores and dispatches it.
 #[test]
 fn paint_brush_bg_removal_keeps_stroke_direction_and_softness() {
     use prunr_core::brush::{paint_circle, BrushMode, MaskCorrection, Stamp};
@@ -190,57 +188,21 @@ fn paint_brush_bg_removal_keeps_stroke_direction_and_softness() {
     item.dimensions = (32, 32);
     let item_id = 7u64;
 
-    // The stroke exactly as brush_overlay commits it.
     let mut stroke = MaskCorrection::empty(32, 32);
     let stamp = Stamp { hardness: 0.3, strength: 0.8, mode: BrushMode::Subtract };
     paint_circle(&mut stroke, 16.0, 16.0, 8.0, stamp);
-    let committed = prunr_core::selection::MaskArtifact::from_correction(&stroke);
+    let committed = prunr_core::selection::MaskArtifact::from_correction(stroke.clone());
 
-    app.commit_selection_and_dispatch(item_id, committed);
+    app.commit_selection_and_dispatch(item_id, committed.clone());
     assert!(
         app.processor.live_preview.is_pending_for(item_id),
         "a Paint stroke on a BG-removal model must queue the immediate rerun"
     );
-
-    // What the rerun will hand to postprocess: the correction at tensor
-    // resolution (same dims here, so it must be the stroke itself).
-    let selection = app.batch.find_by_id(item_id).unwrap().selection_mask.clone().unwrap();
-    let correction = selection.to_mask_correction(32, 32);
-    assert_eq!(correction.cells(), stroke.cells(), "stroke must round-trip bit-exact");
+    let stored = app.batch.find_by_id(item_id).unwrap().selection_mask.clone().unwrap();
+    assert_eq!(stored.data, committed.data, "the stored selection is the stroke, cell for cell");
+    assert!(stored.data.iter().any(|&v| v < 0), "Subtract stroke must stay negative");
     assert!(
-        correction.cells().iter().any(|&v| v < 0),
-        "Subtract stroke must arrive as a negative (remove-subject) correction"
-    );
-    assert!(
-        correction.cells().iter().any(|&v| v < 0 && v > -prunr_core::selection::FULL),
+        stored.data.iter().any(|&v| v < 0 && v > -prunr_core::selection::FULL),
         "hardness falloff must survive as intermediate magnitudes"
     );
-}
-
-// An Add stroke over a Subtract region restores it (newer stroke wins on
-// sign conflict) — the Phase 15 merge rule, now on the shared selection.
-#[test]
-fn later_add_stroke_overrides_earlier_subtract_stroke() {
-    use prunr_core::brush::{paint_circle, BrushMode, MaskCorrection, Stamp};
-
-    let mut app = app_with_model(SettingsModel::BiRefNetLite);
-    let item = push_test_item(&mut app, 8);
-    item.dimensions = (16, 16);
-    let item_id = 8u64;
-
-    let mut first = MaskCorrection::empty(16, 16);
-    paint_circle(&mut first, 8.0, 8.0, 6.0, Stamp { hardness: 1.0, strength: 1.0, mode: BrushMode::Subtract });
-    app.commit_selection_and_dispatch(item_id, prunr_core::selection::MaskArtifact::from_correction(&first));
-
-    let mut second = MaskCorrection::empty(16, 16);
-    paint_circle(&mut second, 8.0, 8.0, 2.0, Stamp { hardness: 1.0, strength: 1.0, mode: BrushMode::Add });
-    let existing = app.batch.find_by_id(item_id).unwrap().selection_mask.clone().unwrap();
-    let merged = existing.add_mask(&prunr_core::selection::MaskArtifact::from_correction(&second)).unwrap();
-    app.commit_selection_and_dispatch(item_id, merged);
-
-    let selection = app.batch.find_by_id(item_id).unwrap().selection_mask.clone().unwrap();
-    let centre = selection.data[8 * 16 + 8];
-    let ring = selection.data[8 * 16 + 3];
-    assert!(centre > 0, "centre repainted with Add must be positive, got {centre}");
-    assert!(ring < 0, "untouched ring must stay negative, got {ring}");
 }

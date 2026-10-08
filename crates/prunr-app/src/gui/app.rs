@@ -550,7 +550,7 @@ impl PrunrApp {
         if self.settings.model.is_inpaint() {
             let Some(idx) = self.batch.selected_idx_clamped() else { return };
             let has_selection = self.batch.items.get(idx).is_some_and(
-                |i| i.selection_mask.is_some(),
+                |i| i.selection_mask.as_ref().is_some_and(|m| m.has_selected_region()),
             );
             if !has_selection { return; }
             self.dispatch_inpaint_for_item(idx);
@@ -631,7 +631,7 @@ impl PrunrApp {
         }
         if self.settings.model.is_inpaint() {
             self.batch.selected_item().is_some_and(
-                |i| i.selection_mask.is_some(),
+                |i| i.selection_mask.as_ref().is_some_and(|m| m.has_selected_region()),
             )
         } else {
             self.batch.any_target_can(|it| !matches!(it.status, BatchStatus::Processing))
@@ -943,8 +943,9 @@ impl PrunrApp {
     /// Called from `apply_toolbar_change` and from keyboard shortcuts that
     /// have a live selection.
     ///
-    /// - Delete: zeros alpha inside the selection on `result_rgba`, archives
-    ///   the previous result first so Cmd+Z can restore it.
+    /// - Delete: scales alpha by coverage inside the selection on
+    ///   `result_rgba`, archiving the previous result first so Cmd+Z can
+    ///   restore it.
     /// - Copy: copies selection-masked pixels to the system clipboard. No
     ///   history entry — non-destructive read.
     /// - Cut: Copy + Delete in one step (one history entry, not two).
@@ -1023,11 +1024,6 @@ impl PrunrApp {
             tracing::debug!(item_id, "inpaint dispatch skipped: no selection_mask");
             return;
         };
-        // Build a MaskCorrection at source resolution for the inpaint pipeline.
-        // source dims are always u16-safe (images > 65535px in either axis are
-        // rejected at load time by formats::check_large_image).
-        let (src_w, src_h) = item.dimensions;
-        let correction = std::sync::Arc::new(selection.to_mask_correction(src_w as u16, src_h as u16));
         // Stack-based inpaint: each stroke runs against the previous
         // result so earlier strokes stay intact. source_for_inpaint
         // walks result_rgba → source_rgba → source_dyn, the last arm
@@ -1074,7 +1070,7 @@ impl PrunrApp {
             sd_use_karras_sigmas: bs.sd_use_karras_sigmas,
             use_taesd: bs.sd_use_taesd_effective(),
         };
-        self.processor.dispatch_inpaint(item_id, source, correction, tuning);
+        self.processor.dispatch_inpaint(item_id, source, selection, tuning);
     }
 
     fn pump_inpaint_results(&mut self, ctx: &egui::Context) {
@@ -1228,6 +1224,13 @@ impl PrunrApp {
         ctx.request_repaint();
     }
 
+    /// Turn Magic Brush off and drop its ORT sessions (~180 MB). Cached
+    /// embeddings stay on their items, so re-activating is cheap.
+    pub(crate) fn deactivate_magic_brush(&mut self) {
+        self.magic_brush_state.deactivate();
+        self.processor.release_sam_sessions();
+    }
+
     /// Drain SAM encoder and decoder results from the background rayon threads.
     /// Encoder results: write embedding to BatchItem, clear encoder_pending.
     /// Decoder results: convert to MaskArtifact, apply modifier, commit.
@@ -1248,38 +1251,25 @@ impl PrunrApp {
                 Err(err) => {
                     tracing::error!(item_id = result.item_id, %err, "SAM encoder failed");
                     self.toasts.error(format!("Magic Brush unavailable: {err}"));
-                    self.magic_brush_state.deactivate();
+                    self.deactivate_magic_brush();
                 }
             }
         }
 
         let decoder_results = self.processor.pump_sam_decoder_results();
         for result in decoder_results {
-            let decoder_output = match result.result {
-                Ok(out) => out,
+            let new_mask = match result.result {
+                Ok(Some(mask)) => mask,
+                Ok(None) => {
+                    self.toasts.info("No selection candidate met the confidence threshold.");
+                    continue;
+                }
                 Err(err) => {
                     tracing::error!(item_id = result.item_id, %err, "SAM decoder failed");
                     self.toasts.error(format!("Magic Brush decoder failed: {err}"));
                     continue;
                 }
             };
-            let (source_w, source_h) = {
-                let Some(item) = self.batch.find_by_id(result.item_id) else { continue };
-                item.dimensions
-            };
-            let threshold = self.settings.brush.magic_confidence_threshold;
-            let Some(new_mask) = prunr_core::sam::decode_to_mask_artifact(
-                &decoder_output,
-                source_w,
-                source_h,
-                threshold,
-            ) else {
-                self.toasts.info("No selection candidate met the confidence threshold.");
-                continue;
-            };
-            // SAM returns an unsigned region; the brush mode decides whether
-            // it restores (Add) or removes (Subtract) subject in BG-removal.
-            let new_mask = new_mask.with_mode(self.settings.brush.mode);
             let existing = self.batch
                 .find_by_id(result.item_id)
                 .and_then(|i| i.selection_mask.clone());
@@ -3669,12 +3659,12 @@ impl PrunrApp {
         if toolbar_change.toggle_paint {
             self.brush_state.toggle();
             if self.brush_state.is_enabled() {
-                self.magic_brush_state.deactivate();
+                self.deactivate_magic_brush();
             }
         }
         if toolbar_change.toggle_magic {
             if self.magic_brush_state.is_active() {
-                self.magic_brush_state.deactivate();
+                self.deactivate_magic_brush();
             } else if self.magic_brush_state.activate() {
                 self.brush_state.disable();
                 // Eager encoder: dispatch now if embedding not yet cached.
@@ -3698,7 +3688,7 @@ impl PrunrApp {
                                     self.toasts.error(format!(
                                         "Magic Brush unavailable: {err}"
                                     ));
-                                    self.magic_brush_state.deactivate();
+                                    self.deactivate_magic_brush();
                                 }
                             }
                         }
