@@ -37,6 +37,9 @@ pub fn ensure_ort_initialized() -> Result<(), String> {
 /// across every suite in this directory.
 pub fn skip_if_no_ort(label: &str) -> bool {
     if let Err(msg) = ensure_ort_initialized() {
+        if env::var_os("PRUNR_REQUIRE_ORT").is_some_and(|v| v == "1") {
+            panic!("[{label}] PRUNR_REQUIRE_ORT=1 but no runtime: {msg}");
+        }
         eprintln!("[{label}] SKIP: {msg}");
         return true;
     }
