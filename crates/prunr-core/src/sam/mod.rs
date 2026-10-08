@@ -7,6 +7,7 @@
 
 use std::sync::Arc;
 
+use crate::brush::BrushMode;
 use crate::selection::FULL;
 
 pub mod preprocess;
@@ -72,8 +73,7 @@ pub struct SamDecoderOutput {
 
 /// Pick the highest-IoU candidate above `confidence_threshold`; bilinear-
 /// upsample its 256×256 logits to source resolution; threshold at logit
-/// 0.0 (sigmoid 0.5) into a binary, unsigned MaskArtifact (`FULL` / 0).
-/// The caller signs it with the active brush mode (`with_mode`).
+/// 0.0 (sigmoid 0.5) into a binary MaskArtifact signed by `mode`.
 ///
 /// Returns `None` if no candidate passes the confidence threshold.
 ///
@@ -84,6 +84,7 @@ pub fn decode_to_mask_artifact(
     source_w: u32,
     source_h: u32,
     confidence_threshold: f32,
+    mode: BrushMode,
 ) -> Option<crate::selection::MaskArtifact> {
     let best_idx = output
         .iou_predictions
@@ -98,6 +99,7 @@ pub fn decode_to_mask_artifact(
     let m_max_f = m_max as f32;
     let mask_logits: &[f32] = &output.masks[best_idx * m * m..(best_idx + 1) * m * m];
 
+    let selected = mode.sign() * FULL;
     let mut data = vec![0i8; (source_w * source_h) as usize];
     let scale_x = SAM_MASK_RESOLUTION as f32 / source_w as f32;
     let scale_y = SAM_MASK_RESOLUTION as f32 / source_h as f32;
@@ -120,7 +122,7 @@ pub fn decode_to_mask_artifact(
                 + mask_logits[i01] * fx * (1.0 - fy)
                 + mask_logits[i10] * (1.0 - fx) * fy
                 + mask_logits[i11] * fx * fy;
-            data[(y * source_w + x) as usize] = if v >= 0.0 { FULL } else { 0 };
+            data[(y * source_w + x) as usize] = if v >= 0.0 { selected } else { 0 };
         }
     }
 
@@ -184,11 +186,13 @@ mod tests {
             masks,
             iou_predictions: [0.3, 0.7, 0.5],
         };
-        let result = decode_to_mask_artifact(&output, 64, 64, 0.4).unwrap();
+        let result = decode_to_mask_artifact(&output, 64, 64, 0.4, BrushMode::Add).unwrap();
         assert_eq!(result.width, 64);
         assert_eq!(result.height, 64);
         // All upsampled pixels are fully selected (candidate 1, all +1 logits)
         assert!(result.data.iter().all(|&v| v == FULL));
+        let result = decode_to_mask_artifact(&output, 64, 64, 0.4, BrushMode::Subtract).unwrap();
+        assert!(result.data.iter().all(|&v| v == -FULL), "Subtract mode signs the region negative");
     }
 
     #[test]
@@ -198,7 +202,7 @@ mod tests {
             masks,
             iou_predictions: [0.1, 0.2, 0.3],
         };
-        let result = decode_to_mask_artifact(&output, 64, 64, 0.5);
+        let result = decode_to_mask_artifact(&output, 64, 64, 0.5, BrushMode::Add);
         assert!(result.is_none());
     }
 
@@ -213,7 +217,7 @@ mod tests {
             masks,
             iou_predictions: [0.9, 0.1, 0.1],
         };
-        let result = decode_to_mask_artifact(&output, 32, 32, 0.5).unwrap();
+        let result = decode_to_mask_artifact(&output, 32, 32, 0.5, BrushMode::Subtract).unwrap();
         assert!(result.data.iter().all(|&v| v == 0));
     }
 }

@@ -174,6 +174,40 @@ fn ensure_upscale_engine(
     Ok(fresh)
 }
 
+/// SAM 2 encoder + decoder sessions, built on first use and reused for
+/// every click until Magic Brush is deactivated. Both run on the CPU EP;
+/// ~180 MB resident while cached.
+pub(crate) struct SamSessions {
+    encoder: Mutex<ort::session::Session>,
+    decoder: Mutex<ort::session::Session>,
+}
+
+type SamSessionSlot = Arc<Mutex<Option<Arc<SamSessions>>>>;
+
+fn build_sam_session(part: &str) -> Result<ort::session::Session, String> {
+    let bytes = prunr_models::resolve_part_bytes(prunr_models::ModelId::Sam2HieraSmall, part)
+        .map_err(|e| format!("resolve {part} bytes: {e:?}"))?;
+    ort::session::Session::builder()
+        .map_err(|e| format!("ORT builder: {e}"))?
+        .commit_from_memory(&bytes)
+        .map_err(|e| format!("ORT session ({part}): {e}"))
+}
+
+/// Cached sessions, built outside the lock so a release on the GUI
+/// thread never waits on the ~1 s encoder parse.
+fn ensure_sam_sessions(slot: &SamSessionSlot) -> Result<Arc<SamSessions>, String> {
+    if let Some(cached) = slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref() {
+        return Ok(Arc::clone(cached));
+    }
+    let built = Arc::new(SamSessions {
+        encoder: Mutex::new(build_sam_session("encoder")?),
+        decoder: Mutex::new(build_sam_session("decoder")?),
+    });
+    let mut guard = slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    // Two clicks racing on a cold cache both build; keep whichever landed.
+    Ok(Arc::clone(guard.get_or_insert(built)))
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PromptModifier {
     /// Plain click / plain stroke — replaces the current selection.
@@ -190,7 +224,20 @@ pub(crate) enum PromptModifier {
 pub(crate) struct SamDecoderResult {
     pub(crate) item_id: u64,
     pub(crate) modifier: PromptModifier,
-    pub(crate) result: Result<prunr_core::sam::SamDecoderOutput, String>,
+    /// `Ok(None)` when no candidate met the confidence threshold.
+    pub(crate) result: Result<Option<prunr_core::selection::MaskArtifact>, String>,
+}
+
+/// One Magic Brush click or stroke, captured at request time so a chip
+/// change while the decoder runs cannot re-polarise the result.
+pub(crate) struct SamDecodeRequest {
+    pub(crate) item_id: u64,
+    pub(crate) embedding: Arc<prunr_core::sam::SamEmbedding>,
+    pub(crate) prompt: prunr_core::sam::prompt::SamPrompt,
+    pub(crate) modifier: PromptModifier,
+    pub(crate) mode: prunr_core::brush::BrushMode,
+    pub(crate) source_dims: (u32, u32),
+    pub(crate) confidence_threshold: f32,
 }
 
 /// Result delivered from a background upscale thread back to the main thread.
@@ -441,6 +488,7 @@ pub(crate) struct Processor {
     /// SAM 2 decoder results channel. One result per click/stroke dispatch.
     sam_decoder_tx: mpsc::Sender<SamDecoderResult>,
     sam_decoder_rx: mpsc::Receiver<SamDecoderResult>,
+    sam_sessions: SamSessionSlot,
 }
 
 impl Processor {
@@ -481,6 +529,7 @@ impl Processor {
             sam_encoder_rx,
             sam_decoder_tx,
             sam_decoder_rx,
+            sam_sessions: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -525,7 +574,7 @@ impl Processor {
         &mut self,
         item_id: u64,
         image: std::sync::Arc<image::RgbaImage>,
-        correction: std::sync::Arc<prunr_core::brush::MaskCorrection>,
+        correction: std::sync::Arc<prunr_core::selection::MaskArtifact>,
         tuning: InpaintTuning,
     ) {
         let generation = self.inpaint_latest_gen.entry(item_id).or_insert(0);
@@ -547,7 +596,7 @@ impl Processor {
         }
         let tx = self.inpaint_tx.clone();
         rayon::spawn(move || {
-            let raw_mask = correction.to_binary_mask(image.width(), image.height());
+            let raw_mask = correction.region_mask(image.width(), image.height());
             // Pre-process: grow/erode the painted area before LaMa runs.
             let mask = if tuning.grow_px != 0.0 {
                 prunr_core::inpaint::grow_mask(&raw_mask, tuning.grow_px.round() as i32)
@@ -682,12 +731,12 @@ impl Processor {
         item_id: u64,
         gen: u64,
         image: &std::sync::Arc<image::RgbaImage>,
-        correction: &std::sync::Arc<prunr_core::brush::MaskCorrection>,
+        correction: &std::sync::Arc<prunr_core::selection::MaskArtifact>,
         tuning: &InpaintTuning,
     ) {
         // PNG-encode + temp-file write is 150-300 ms per stroke at 4K
         // — moving it onto rayon keeps the egui frame loop responsive
-        // mid-paint. Mask construction (`to_binary_mask`, `grow_mask`)
+        // mid-paint. Mask construction (`region_mask`, `grow_mask`)
         // is also CPU work and rides along.
         let image = image.clone();
         let correction = correction.clone();
@@ -711,7 +760,7 @@ impl Processor {
                 });
             };
             if cancelled() { send_cancelled(); return; }
-            let raw_mask = correction.to_binary_mask(image.width(), image.height());
+            let raw_mask = correction.region_mask(image.width(), image.height());
             let mask = if tuning.grow_px != 0.0 {
                 prunr_core::inpaint::grow_mask(&raw_mask, tuning.grow_px.round() as i32)
             } else {
@@ -1271,31 +1320,39 @@ impl Processor {
             ));
         }
         let tx = self.sam_encoder_tx.clone();
+        let sessions = Arc::clone(&self.sam_sessions);
         rayon::spawn(move || {
-            let result = run_sam_encoder_inline(&source);
+            let result = ensure_sam_sessions(&sessions)
+                .and_then(|s| run_sam_encoder_inline(&s, &source));
             let _ = tx.send(SamEncoderResult { item_id, result });
         });
         Ok(())
     }
 
+    /// Drop the cached SAM sessions (~180 MB). Call when Magic Brush is
+    /// deactivated; the next activation rebuilds them on first use.
+    pub(crate) fn release_sam_sessions(&self) {
+        *self.sam_sessions.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    }
+
     /// Dispatch the SAM 2 decoder for a click or stroke. No admission gate —
     /// the decoder model is small (~20 MB) and runs quickly. The embedding
     /// is the cached output from a prior `dispatch_sam_encoder` call.
-    ///
-    /// The `modifier` tells pump_sam_decoder_results whether to replace, union,
-    /// or subtract from the existing selection. Result arrives via
-    /// `pump_sam_decoder_results`.
-    pub(crate) fn dispatch_sam_decoder(
-        &self,
-        item_id: u64,
-        embedding: std::sync::Arc<prunr_core::sam::SamEmbedding>,
-        prompt: prunr_core::sam::prompt::SamPrompt,
-        modifier: PromptModifier,
-    ) {
+    /// Decoding the logits into a source-resolution mask (~100 ms at 4K)
+    /// happens on the worker too, so the UI thread only merges the result.
+    pub(crate) fn dispatch_sam_decoder(&self, req: SamDecodeRequest) {
         let tx = self.sam_decoder_tx.clone();
+        let sessions = Arc::clone(&self.sam_sessions);
         rayon::spawn(move || {
-            let result = run_sam_decoder_inline(&embedding, &prompt);
-            let _ = tx.send(SamDecoderResult { item_id, modifier, result });
+            let (w, h) = req.source_dims;
+            let result = ensure_sam_sessions(&sessions)
+                .and_then(|s| run_sam_decoder_inline(&s, &req.embedding, &req.prompt))
+                .map(|out| {
+                    prunr_core::sam::decode_to_mask_artifact(
+                        &out, w, h, req.confidence_threshold, req.mode,
+                    )
+                });
+            let _ = tx.send(SamDecoderResult { item_id: req.item_id, modifier: req.modifier, result });
         });
     }
 
@@ -1322,25 +1379,17 @@ impl Processor {
     }
 }
 
-/// Run the SAM 2 encoder. Loads ONNX bytes via `resolve_part_bytes`, builds
-/// an ORT session directly (no OrtEngine wrapper — SAM has no ModelKind
-/// variant), preprocesses the source image, runs inference, and marshals
-/// the three named outputs into a SamEmbedding.
+/// Run the SAM 2 encoder on the cached session: preprocess the source,
+/// run inference, marshal the three named outputs into a SamEmbedding.
 ///
 /// ORT session.run() lives here so `prunr_core::sam` stays ORT-free.
 fn run_sam_encoder_inline(
+    sessions: &SamSessions,
     source: &image::RgbaImage,
 ) -> Result<prunr_core::sam::SamEmbedding, String> {
-    use ort::{inputs, session::Session, value::Tensor};
+    use ort::{inputs, value::Tensor};
 
-    let bytes = prunr_models::resolve_part_bytes(
-        prunr_models::ModelId::Sam2HieraSmall, "encoder",
-    ).map_err(|e| format!("resolve encoder bytes: {e:?}"))?;
-
-    let mut session = Session::builder()
-        .map_err(|e| format!("ORT builder: {e}"))?
-        .commit_from_memory(&bytes)
-        .map_err(|e| format!("ORT session (encoder): {e}"))?;
+    let mut session = sessions.encoder.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
 
     // prunr_core::sam::preprocess is ORT-free pure math.
     let input_vec = prunr_core::sam::preprocess::preprocess_for_sam(source);
@@ -1392,49 +1441,30 @@ fn run_sam_encoder_inline(
     Ok(embedding)
 }
 
-/// Run the SAM 2 decoder. Loads decoder ONNX bytes, builds an ORT session,
-/// packs the embedding + prompt into 7 named inputs, runs inference, and
-/// marshals the two outputs (masks + iou_predictions) into SamDecoderOutput.
+/// Run the SAM 2 decoder on the cached session: pack the embedding +
+/// prompt into 7 named inputs, run inference, marshal the two outputs
+/// (masks + iou_predictions) into SamDecoderOutput.
 ///
 /// ORT session.run() lives here so `prunr_core::sam` stays ORT-free.
 fn run_sam_decoder_inline(
+    sessions: &SamSessions,
     embedding: &prunr_core::sam::SamEmbedding,
     prompt: &prunr_core::sam::prompt::SamPrompt,
 ) -> Result<prunr_core::sam::SamDecoderOutput, String> {
-    use ort::{inputs, session::Session, value::Tensor};
+    use ort::{inputs, value::{Tensor, TensorRef}};
 
-    let bytes = prunr_models::resolve_part_bytes(
-        prunr_models::ModelId::Sam2HieraSmall, "decoder",
-    ).map_err(|e| format!("resolve decoder bytes: {e:?}"))?;
+    let mut session = sessions.decoder.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
 
-    let mut session = Session::builder()
-        .map_err(|e| format!("ORT builder: {e}"))?
-        .commit_from_memory(&bytes)
-        .map_err(|e| format!("ORT session (decoder): {e}"))?;
-
-    // image_embed [1, 256, 64, 64]
-    let embed_arr = ndarray::Array4::from_shape_vec(
-        [1, 256, 64, 64],
-        embedding.image_embed.clone(),
-    ).map_err(|e| format!("decoder: image_embed shape: {e}"))?;
-    let embed_tensor = Tensor::from_array(embed_arr)
-        .map_err(|e| format!("decoder: image_embed tensor: {e}"))?;
-
-    // high_res_feats_0 [1, 32, 256, 256]
-    let feats0_arr = ndarray::Array4::from_shape_vec(
-        [1, 32, 256, 256],
-        embedding.high_res_feats_0.clone(),
-    ).map_err(|e| format!("decoder: high_res_feats_0 shape: {e}"))?;
-    let feats0_tensor = Tensor::from_array(feats0_arr)
-        .map_err(|e| format!("decoder: high_res_feats_0 tensor: {e}"))?;
-
-    // high_res_feats_1 [1, 64, 128, 128]
-    let feats1_arr = ndarray::Array4::from_shape_vec(
-        [1, 64, 128, 128],
-        embedding.high_res_feats_1.clone(),
-    ).map_err(|e| format!("decoder: high_res_feats_1 shape: {e}"))?;
-    let feats1_tensor = Tensor::from_array(feats1_arr)
-        .map_err(|e| format!("decoder: high_res_feats_1 tensor: {e}"))?;
+    // The 16 MB embedding is borrowed for the run — no per-click copy.
+    let embed_tensor = TensorRef::from_array_view(
+        ([1usize, 256, 64, 64], embedding.image_embed.as_slice()),
+    ).map_err(|e| format!("decoder: image_embed tensor: {e}"))?;
+    let feats0_tensor = TensorRef::from_array_view(
+        ([1usize, 32, 256, 256], embedding.high_res_feats_0.as_slice()),
+    ).map_err(|e| format!("decoder: high_res_feats_0 tensor: {e}"))?;
+    let feats1_tensor = TensorRef::from_array_view(
+        ([1usize, 64, 128, 128], embedding.high_res_feats_1.as_slice()),
+    ).map_err(|e| format!("decoder: high_res_feats_1 tensor: {e}"))?;
 
     // point_coords [1, N, 2]
     let n_points = prompt.point_labels.len();
@@ -1467,9 +1497,9 @@ fn run_sam_decoder_inline(
         .map_err(|e| format!("decoder: has_mask_input tensor: {e}"))?;
 
     let outputs = session.run(inputs![
-        "image_embed"       => &embed_tensor,
-        "high_res_feats_0"  => &feats0_tensor,
-        "high_res_feats_1"  => &feats1_tensor,
+        "image_embed"       => embed_tensor,
+        "high_res_feats_0"  => feats0_tensor,
+        "high_res_feats_1"  => feats1_tensor,
         "point_coords"      => &coords_tensor,
         "point_labels"      => &labels_tensor,
         "mask_input"        => &mask_tensor,

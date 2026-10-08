@@ -5,31 +5,34 @@
 //! resolution, wrapped in `Arc<Vec<i8>>` so undo snapshots and
 //! cross-thread reads are refcount bumps, not memcpy.
 //!
-//! Each cell is a signed coverage in `-127..=127`:
-//! - magnitude / 127 = how selected the pixel is. Soft values come from
-//!   brush hardness and strength; Magic Brush writes full magnitude.
+//! Each cell is a signed coverage in `-CELL_MAX..=CELL_MAX`:
+//! - magnitude / `CELL_MAX` = how selected the pixel is. Soft values come
+//!   from brush hardness and strength; Magic Brush writes full magnitude.
 //! - sign = what a segmentation correction does with the pixel:
 //!   positive pushes it toward subject (`BrushMode::Add`), negative
-//!   toward background (`BrushMode::Subtract`). Region actions
-//!   (Delete / Copy / Cut, outline, inpaint region) ignore the sign.
+//!   toward background (`BrushMode::Subtract`).
+//!
+//! Consumers fall into two groups, each with one definition:
+//! - binary region consumers (outline, fill, inpaint region, bounding
+//!   box) use `is_selected`, i.e. at least half coverage;
+//! - continuous consumers (Delete / Copy alpha, the segmentation
+//!   correction, invert) use the coverage or the signed cell as-is.
 //!
 //! The layout is bit-compatible with `brush::MaskCorrection`, so a Paint
-//! stroke round-trips to the postprocess correction without loss — the
-//! Phase 15 brush feel (soft edges, strength, per-stroke direction) is
-//! preserved through the shared selection.
+//! stroke round-trips to the postprocess correction without loss.
 
 use std::sync::Arc;
 
-use crate::brush::{BrushMode, MaskCorrection};
+use crate::brush::{merge_cell, BrushMode, MaskCorrection};
 
 pub mod refine;
 
 /// Magnitude of a fully selected cell.
-pub const FULL: i8 = 127;
+pub const FULL: i8 = crate::brush::CELL_MAX;
 
 /// Cells at or above this magnitude count as selected for region
-/// actions and visualization (≈ 0.5 coverage).
-pub const SELECTED_THRESHOLD: u8 = 64;
+/// consumers (≈ 0.5 coverage).
+const SELECTED_THRESHOLD: u8 = 64;
 
 #[derive(Debug, Clone)]
 pub struct MaskArtifact {
@@ -45,14 +48,6 @@ pub enum SelectionError {
     DimensionMismatch { lhs: (u32, u32), rhs: (u32, u32) },
 }
 
-#[inline]
-fn mode_sign(mode: BrushMode) -> i8 {
-    match mode {
-        BrushMode::Add => 1,
-        BrushMode::Subtract => -1,
-    }
-}
-
 impl MaskArtifact {
     /// All-zero mask at source image resolution.
     pub fn new_empty(width: u32, height: u32) -> Self {
@@ -65,15 +60,14 @@ impl MaskArtifact {
 
     /// A committed Paint stroke, cell-for-cell. The correction already
     /// carries sign (mode), hardness falloff and strength.
-    pub fn from_correction(correction: &MaskCorrection) -> Self {
+    pub fn from_correction(correction: MaskCorrection) -> Self {
         Self {
             width: correction.width as u32,
             height: correction.height as u32,
-            data: Arc::new(correction.grid.clone()),
+            data: Arc::new(correction.grid),
         }
     }
 
-    /// True when the cell counts as selected for region actions.
     #[inline]
     pub fn is_selected(v: i8) -> bool {
         v.unsigned_abs() >= SELECTED_THRESHOLD
@@ -85,33 +79,33 @@ impl MaskArtifact {
         v.unsigned_abs() as f32 / FULL as f32
     }
 
-    fn check_dims(&self, other: &Self) -> Result<(), SelectionError> {
+    /// True when at least one cell is selected — the gate for region
+    /// actions and inpaint dispatch. Distinct from "all cells zero": a
+    /// stroke below half coverage still feeds the segmentation correction.
+    pub fn has_selected_region(&self) -> bool {
+        self.data.iter().any(|&v| Self::is_selected(v))
+    }
+
+    fn map_with(&self, other: &Self, f: impl Fn(i8, i8) -> i8) -> Result<Self, SelectionError> {
         if self.width != other.width || self.height != other.height {
             return Err(SelectionError::DimensionMismatch {
                 lhs: (self.width, self.height),
                 rhs: (other.width, other.height),
             });
         }
-        Ok(())
-    }
-
-    fn map_with(&self, other: &Self, f: impl Fn(i8, i8) -> i8) -> Result<Self, SelectionError> {
-        self.check_dims(other)?;
         let data = self.data.iter().zip(other.data.iter()).map(|(&a, &b)| f(a, b)).collect();
         Ok(Self { width: self.width, height: self.height, data: Arc::new(data) })
     }
 
-    /// Union, `other` being the newer stroke or candidate. Same-sign
-    /// overlap keeps the stronger magnitude (painting twice does not
-    /// double up); opposite-sign overlap lets the newer stroke win, so an
-    /// Add stroke over a Subtract region restores it. Shift modifier.
+    fn map(&self, f: impl Fn(i8) -> i8) -> Self {
+        let data = self.data.iter().map(|&v| f(v)).collect();
+        Self { width: self.width, height: self.height, data: Arc::new(data) }
+    }
+
+    /// Union with `other` as the newer stroke or candidate, using the
+    /// brush merge rule (`merge_cell`). Shift modifier.
     pub fn add_mask(&self, other: &Self) -> Result<Self, SelectionError> {
-        self.map_with(other, |a, b| {
-            let same_sign = (a < 0) == (b < 0);
-            let keep_existing = b == 0
-                || (a != 0 && same_sign && a.unsigned_abs() >= b.unsigned_abs());
-            if keep_existing { a } else { b }
-        })
+        self.map_with(other, merge_cell)
     }
 
     /// Region difference: `|self| - |other|` clamped at zero, keeping
@@ -123,27 +117,10 @@ impl MaskArtifact {
         })
     }
 
-    /// Region inversion: `127 - |v|`, signed by `mode`.
+    /// Region inversion: `FULL - |v|`, signed by `mode`.
     pub fn invert(&self, mode: BrushMode) -> Self {
-        let sign = mode_sign(mode);
+        let sign = mode.sign();
         self.map(|v| sign * (FULL - v.unsigned_abs() as i8))
-    }
-
-    /// Same coverage, re-signed by `mode`. Used for Magic Brush
-    /// candidates, which carry no direction of their own.
-    pub fn with_mode(&self, mode: BrushMode) -> Self {
-        let sign = mode_sign(mode);
-        self.map(|v| sign * v.unsigned_abs() as i8)
-    }
-
-    fn map(&self, f: impl Fn(i8) -> i8) -> Self {
-        let data = self.data.iter().map(|&v| f(v)).collect();
-        Self { width: self.width, height: self.height, data: Arc::new(data) }
-    }
-
-    /// True when no cell is selected.
-    pub fn is_empty(&self) -> bool {
-        !self.data.iter().any(|&v| Self::is_selected(v))
     }
 
     /// Stable content hash. Uses DefaultHasher (SipHasher13) — deterministic
@@ -158,66 +135,70 @@ impl MaskArtifact {
         h.finish()
     }
 
-    /// Bounding box `(x0, y0, x1, y1)`, inclusive, of the selected cells.
-    /// `None` when nothing is selected.
-    pub fn selected_bbox(&self) -> Option<(u32, u32, u32, u32)> {
-        let w = self.width as usize;
-        let mut bbox: Option<(u32, u32, u32, u32)> = None;
-        for (i, &v) in self.data.iter().enumerate() {
-            if !Self::is_selected(v) {
+    fn scale_alpha(&self, rgba: &mut image::RgbaImage, factor: impl Fn(f32) -> f32) {
+        // Fully selected and untouched cells are the bulk of any plane;
+        // only soft edges pay for the float multiply.
+        let (at_zero, at_full) = (factor(0.0), factor(1.0));
+        for (pixel, &m) in rgba.pixels_mut().zip(self.data.iter()) {
+            let f = match m.unsigned_abs() {
+                0 => at_zero,
+                v if v >= FULL as u8 => at_full,
+                _ => factor(Self::coverage(m)),
+            };
+            if f >= 1.0 {
                 continue;
             }
-            let (x, y) = ((i % w) as u32, (i / w) as u32);
-            bbox = Some(match bbox {
-                None => (x, y, x, y),
-                Some((x0, y0, x1, y1)) => (x0.min(x), y0.min(y), x1.max(x), y1.max(y)),
-            });
+            pixel.0[3] = if f <= 0.0 { 0 } else { (pixel.0[3] as f32 * f).round() as u8 };
         }
-        bbox
     }
 
     /// Scales alpha by `1 - coverage` — a fully selected pixel becomes
     /// transparent, soft edges fade. RGB is preserved.
     pub fn alpha_cut(&self, rgba: &mut image::RgbaImage) {
-        let buf = rgba.as_flat_samples_mut().samples;
-        for (i, &m) in self.data.iter().enumerate() {
-            if m != 0 {
-                let a = &mut buf[i * 4 + 3];
-                *a = (*a as f32 * (1.0 - Self::coverage(m))).round() as u8;
-            }
-        }
+        self.scale_alpha(rgba, |c| 1.0 - c);
     }
 
     /// Returns a copy of `source` with alpha scaled by coverage — pixels
     /// outside the selection become transparent. Basis of clipboard Copy/Cut.
     pub fn copy_to_rgba(&self, source: &image::RgbaImage) -> image::RgbaImage {
         let mut out = source.clone();
-        let buf = out.as_flat_samples_mut().samples;
-        for (i, &m) in self.data.iter().enumerate() {
-            let a = &mut buf[i * 4 + 3];
-            *a = (*a as f32 * Self::coverage(m)).round() as u8;
-        }
+        self.scale_alpha(&mut out, |c| c);
         out
+    }
+
+    fn resample<T: Copy>(&self, out_w: u32, out_h: u32, cell: impl Fn(i8) -> T, out: &mut [T]) {
+        if (out_w, out_h) == (self.width, self.height) {
+            for (o, &v) in out.iter_mut().zip(self.data.iter()) {
+                *o = cell(v);
+            }
+            return;
+        }
+        let (sw, sh) = (self.width as u64, self.height as u64);
+        let xs: Vec<usize> = (0..out_w as u64).map(|tx| ((tx * sw) / out_w as u64) as usize).collect();
+        for ty in 0..out_h as u64 {
+            let src_row = &self.data[(((ty * sh) / out_h as u64) * sw) as usize..];
+            let row = &mut out[(ty * out_w as u64) as usize..][..out_w as usize];
+            for (o, &sx) in row.iter_mut().zip(xs.iter()) {
+                *o = cell(src_row[sx]);
+            }
+        }
     }
 
     /// Nearest-neighbour resample to model tensor resolution, cell values
     /// carried as-is (sign, hardness falloff and strength intact).
     pub fn to_mask_correction(&self, tensor_w: u16, tensor_h: u16) -> MaskCorrection {
-        let tw = tensor_w as u32;
-        let th = tensor_h as u32;
-        let sw = self.width;
-        let sh = self.height;
         let mut correction = MaskCorrection::empty(tensor_w, tensor_h);
-        for ty in 0..th {
-            let sy = ((ty as u64 * sh as u64) / th as u64) as u32;
-            let row_base = (ty * tw) as usize;
-            let src_row = (sy * sw) as usize;
-            for tx in 0..tw {
-                let sx = ((tx as u64 * sw as u64) / tw as u64) as u32;
-                correction.grid[row_base + tx as usize] = self.data[src_row + sx as usize];
-            }
-        }
+        self.resample(tensor_w as u32, tensor_h as u32, |v| v, &mut correction.grid);
         correction
+    }
+
+    /// The selected region as a binary mask (255 where `is_selected`),
+    /// nearest-neighbour resampled to `w × h`. This is the inpaint region —
+    /// the same contour the overlay and outline show.
+    pub fn region_mask(&self, w: u32, h: u32) -> image::GrayImage {
+        let mut out = image::GrayImage::new(w, h);
+        self.resample(w, h, |v| if Self::is_selected(v) { 255 } else { 0 }, out.as_mut());
+        out
     }
 }
 
@@ -237,7 +218,7 @@ mod tests {
         assert_eq!(m.height, 1080);
         assert_eq!(m.data.len(), 1920 * 1080);
         assert!(m.data.iter().all(|&v| v == 0));
-        assert!(m.is_empty());
+        assert!(!m.has_selected_region());
     }
 
     #[test]
@@ -247,6 +228,8 @@ mod tests {
         assert!(MaskArtifact::is_selected(-64));
         assert!(MaskArtifact::is_selected(FULL));
         assert!((MaskArtifact::coverage(-FULL) - 1.0).abs() < 1e-6);
+        assert!(!mask(2, 1, vec![40, -63]).has_selected_region());
+        assert!(mask(2, 1, vec![0, -64]).has_selected_region());
     }
 
     #[test]
@@ -259,8 +242,8 @@ mod tests {
 
     #[test]
     fn add_mask_opposite_sign_lets_newer_stroke_win() {
-        // An Add stroke (positive) painted over a Subtract region restores it,
-        // and vice versa — matches MaskCorrection::merge from Phase 15.
+        // An Add stroke painted over a Subtract region restores it, and
+        // vice versa.
         let existing = mask(2, 1, vec![-100, 80]);
         let newer = mask(2, 1, vec![30, -10]);
         let r = existing.add_mask(&newer).unwrap();
@@ -286,17 +269,8 @@ mod tests {
     #[test]
     fn invert_flips_coverage_with_requested_sign() {
         let m = mask(2, 2, vec![0, 64, FULL, -32]);
-        let inv = m.invert(BrushMode::Subtract);
-        assert_eq!(inv.data.as_slice(), &[-127, -63, 0, -95]);
-        let inv = m.invert(BrushMode::Add);
-        assert_eq!(inv.data.as_slice(), &[127, 63, 0, 95]);
-    }
-
-    #[test]
-    fn with_mode_resigns_without_changing_coverage() {
-        let m = mask(3, 1, vec![127, -50, 0]);
-        assert_eq!(m.with_mode(BrushMode::Subtract).data.as_slice(), &[-127, -50, 0]);
-        assert_eq!(m.with_mode(BrushMode::Add).data.as_slice(), &[127, 50, 0]);
+        assert_eq!(m.invert(BrushMode::Subtract).data.as_slice(), &[-127, -63, 0, -95]);
+        assert_eq!(m.invert(BrushMode::Add).data.as_slice(), &[127, 63, 0, 95]);
     }
 
     #[test]
@@ -339,17 +313,6 @@ mod tests {
             a.subtract_mask(&b),
             Err(SelectionError::DimensionMismatch { lhs: (4, 4), rhs: (2, 8) })
         ));
-    }
-
-    #[test]
-    fn selected_bbox_covers_selected_cells_only() {
-        let mut data = vec![0i8; 16];
-        data[5] = -FULL; // (1, 1)
-        data[11] = FULL; // (3, 2)
-        data[12] = 10; // (0, 3): below threshold — ignored
-        let m = mask(4, 4, data);
-        assert_eq!(m.selected_bbox(), Some((1, 1, 3, 2)));
-        assert_eq!(MaskArtifact::new_empty(4, 4).selected_bbox(), None);
     }
 
     #[test]
@@ -397,21 +360,51 @@ mod tests {
         assert_eq!(corr.grid.as_slice(), &[-90, 0, 0, 0]);
     }
 
-    /// The Phase 15 contract: a soft Subtract stroke survives the trip
-    /// stroke → selection → correction bit-for-bit, so hardness, strength
-    /// and direction all reach `apply_correction` unchanged.
+    /// A soft stroke survives the trip stroke → selection → correction
+    /// bit-for-bit, so hardness, strength and direction all reach
+    /// `apply_correction` unchanged.
     #[test]
     fn paint_stroke_round_trips_through_selection_losslessly() {
         let mut stroke = MaskCorrection::empty(32, 32);
         let stamp = Stamp { hardness: 0.3, strength: 0.8, mode: BrushMode::Subtract };
         paint_circle(&mut stroke, 16.0, 16.0, 10.0, stamp);
-        let selection = MaskArtifact::from_correction(&stroke);
+        let selection = MaskArtifact::from_correction(stroke.clone());
         assert!(selection.data.iter().any(|&v| v < 0), "subtract stroke must be negative");
         assert!(
             selection.data.iter().any(|&v| v < 0 && v > -FULL),
             "soft falloff must survive as intermediate magnitudes"
         );
-        let back = selection.to_mask_correction(32, 32);
-        assert_eq!(back.grid, stroke.grid);
+        assert_eq!(selection.to_mask_correction(32, 32), stroke);
+    }
+
+    /// The inpaint region is the thresholded contour the overlay shows,
+    /// not every cell the brush touched: a soft stroke's faint falloff is
+    /// excluded from both, consistently.
+    #[test]
+    fn region_mask_uses_the_same_selected_predicate_as_the_overlay() {
+        let mut stroke = MaskCorrection::empty(32, 32);
+        let stamp = Stamp { hardness: 0.3, strength: 0.8, mode: BrushMode::Subtract };
+        paint_circle(&mut stroke, 16.0, 16.0, 10.0, stamp);
+        let selection = MaskArtifact::from_correction(stroke);
+        let region = selection.region_mask(32, 32);
+        let mut faint_touched = 0;
+        for (&cell, px) in selection.data.iter().zip(region.pixels()) {
+            assert_eq!(px.0[0] == 255, MaskArtifact::is_selected(cell));
+            if cell != 0 && !MaskArtifact::is_selected(cell) {
+                faint_touched += 1;
+            }
+        }
+        assert!(faint_touched > 0, "a soft stroke must have cells below the threshold");
+    }
+
+    #[test]
+    fn region_mask_resamples_to_the_requested_size() {
+        let mut data = vec![0i8; 16];
+        data[0] = FULL;
+        data[1] = FULL;
+        data[4] = -FULL;
+        data[5] = -FULL;
+        let region = mask(4, 4, data).region_mask(2, 2);
+        assert_eq!(region.as_raw().as_slice(), &[255, 0, 0, 0]);
     }
 }

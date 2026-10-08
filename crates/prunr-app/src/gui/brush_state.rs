@@ -388,6 +388,15 @@ impl BrushSettings {
         Stamp { hardness: self.hardness, strength: self.strength, mode: self.mode }
     }
 
+    /// Stamp for region-only consumers (inpaint). The Strength and
+    /// Add/Subtract chips are hidden there, so the hidden values must not
+    /// leak into the stroke: full strength, direction pinned to Subtract
+    /// (an erased region reads as "remove" if the selection later meets a
+    /// segmentation model).
+    pub fn region_stamp(&self) -> Stamp {
+        Stamp { hardness: self.hardness, strength: 1.0, mode: BrushMode::Subtract }
+    }
+
     #[cfg(test)]
     fn sd_use_taesd_effective_with_avail(&self, taesd_available: bool) -> bool {
         self.sd_use_taesd.unwrap_or(true) && taesd_available
