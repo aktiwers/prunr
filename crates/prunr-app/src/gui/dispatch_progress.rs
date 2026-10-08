@@ -81,6 +81,9 @@ impl ProgressKind {
 pub mod step_labels {
     pub const LOADING_MODEL: &str = "Loading model";
     pub const TILE_INFERENCE: &str = "Tile inference";
+    /// Cancel was requested but the EP finishes its current tile first
+    /// (OpenVINO ignores `RunOptions::terminate` mid-run).
+    pub const CANCELLING: &str = "Cancelling… finishing current tile";
     pub const DENOISING: &str = "Denoising";
     pub const INPAINTING: &str = "Inpainting";
 }

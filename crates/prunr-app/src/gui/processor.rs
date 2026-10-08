@@ -126,6 +126,54 @@ pub(crate) struct SamEncoderResult {
 
 /// Which selection operation the Magic Brush click/stroke was performing.
 /// Mirrors the Shift/Alt modifier semantics from 33-UI-SPEC.
+/// Single-slot warm upscale engine. Shared with the dispatch thread so
+/// session construction (seconds on a cold EP) never runs on the GUI
+/// thread; single-slot because caching several upscale engines is YAGNI.
+type WarmUpscaleEngine =
+    Arc<Mutex<Option<(prunr_core::ModelKind, Arc<prunr_core::OrtEngine>)>>>;
+
+fn lock_warm_engine(
+    slot: &WarmUpscaleEngine,
+) -> std::sync::MutexGuard<'_, Option<(prunr_core::ModelKind, Arc<prunr_core::OrtEngine>)>> {
+    slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// The cached engine on a ModelKind hit; a mismatch evicts the slot and
+/// returns `None`. Never constructs an engine.
+fn cached_upscale_engine(
+    slot: &WarmUpscaleEngine,
+    model_kind: prunr_core::ModelKind,
+) -> Option<Arc<prunr_core::OrtEngine>> {
+    let mut guard = lock_warm_engine(slot);
+    match guard.as_ref() {
+        Some((kind, engine)) if *kind == model_kind => Some(Arc::clone(engine)),
+        Some(_) => {
+            *guard = None;
+            None
+        }
+        None => None,
+    }
+}
+
+/// Cached engine for `model_kind`, constructing and caching one when
+/// absent. The lock is released during construction so the GUI thread's
+/// `release_upscale_engine` never waits on a session build.
+fn ensure_upscale_engine(
+    slot: &WarmUpscaleEngine,
+    model_kind: prunr_core::ModelKind,
+    intra_threads: usize,
+    level: prunr_core::engine::GraphOptimizationLevel,
+) -> Result<Arc<prunr_core::OrtEngine>, prunr_core::CoreError> {
+    if let Some(cached) = cached_upscale_engine(slot, model_kind) {
+        return Ok(cached);
+    }
+    let fresh = Arc::new(
+        prunr_core::OrtEngine::new_with_optimization_level(model_kind, intra_threads, level)?,
+    );
+    *lock_warm_engine(slot) = Some((model_kind, Arc::clone(&fresh)));
+    Ok(fresh)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PromptModifier {
     /// Plain click / plain stroke — replaces the current selection.
@@ -384,7 +432,7 @@ pub(crate) struct Processor {
     /// multiple upscale engines simultaneously is YAGNI. Evicted on
     /// model swap (any switch away from the cached ModelKind) and on
     /// full release.
-    warm_upscale_engine: Option<(prunr_core::ModelKind, Arc<prunr_core::OrtEngine>)>,
+    warm_upscale_engine: WarmUpscaleEngine,
     /// SAM 2 encoder results channel. The rayon job sends here when
     /// the embedding is ready (or an error). Drained each frame from
     /// pump_sam_encoder_results (called via drain_background_channels).
@@ -428,7 +476,7 @@ impl Processor {
             upscale_result_tx,
             upscale_result_rx,
             dispatch_progress: super::dispatch_progress::DispatchProgressSlot::new(),
-            warm_upscale_engine: None,
+            warm_upscale_engine: Arc::new(Mutex::new(None)),
             sam_encoder_tx,
             sam_encoder_rx,
             sam_decoder_tx,
@@ -599,48 +647,12 @@ impl Processor {
         let _ = self.worker_tx.send(WorkerMessage::ReleaseWarm);
     }
 
-    /// Cache-lookup helper: returns the cached `Arc<OrtEngine>` on a
-    /// ModelKind hit, evicts the slot on a ModelKind mismatch, and
-    /// returns `None` in both miss cases. Never constructs a new engine.
-    /// Called first by `ensure_upscale_engine`; if it returns `None`,
-    /// the caller constructs and caches a fresh engine.
+    #[cfg(test)]
     fn try_cached_upscale_engine(
         &mut self,
         model_kind: prunr_core::ModelKind,
     ) -> Option<Arc<prunr_core::OrtEngine>> {
-        match &self.warm_upscale_engine {
-            Some((cached_kind, engine)) if *cached_kind == model_kind => {
-                Some(Arc::clone(engine))
-            }
-            Some(_) => {
-                // Different model — evict the old cache before the caller
-                // constructs a fresh engine.
-                self.warm_upscale_engine = None;
-                None
-            }
-            None => None,
-        }
-    }
-
-    /// Returns a cached `Arc<OrtEngine>` for the given ModelKind,
-    /// constructing one if absent or if the cached ModelKind differs.
-    /// Eviction on ModelKind mismatch drops the previous Arc (its
-    /// strong_count goes to zero once outstanding dispatches release
-    /// their clones).
-    fn ensure_upscale_engine(
-        &mut self,
-        model_kind: prunr_core::ModelKind,
-        intra_threads: usize,
-        level: prunr_core::engine::GraphOptimizationLevel,
-    ) -> Result<Arc<prunr_core::OrtEngine>, prunr_core::CoreError> {
-        if let Some(cached) = self.try_cached_upscale_engine(model_kind) {
-            return Ok(cached);
-        }
-        let fresh = Arc::new(
-            prunr_core::OrtEngine::new_with_optimization_level(model_kind, intra_threads, level)?,
-        );
-        self.warm_upscale_engine = Some((model_kind, Arc::clone(&fresh)));
-        Ok(fresh)
+        cached_upscale_engine(&self.warm_upscale_engine, model_kind)
     }
 
     /// Drops the cached upscale engine. Call on:
@@ -649,15 +661,15 @@ impl Processor {
     ///   mismatch, so this is the switch-away-from-upscale case).
     /// - Hardware settings change.
     pub(crate) fn release_upscale_engine(&mut self) {
-        self.warm_upscale_engine = None;
+        *lock_warm_engine(&self.warm_upscale_engine) = None;
     }
 
     /// Test-only accessor for injecting or inspecting the warm-engine slot.
     #[cfg(test)]
     pub(crate) fn warm_upscale_engine_for_test(
         &mut self,
-    ) -> &mut Option<(prunr_core::ModelKind, Arc<prunr_core::OrtEngine>)> {
-        &mut self.warm_upscale_engine
+    ) -> std::sync::MutexGuard<'_, Option<(prunr_core::ModelKind, Arc<prunr_core::OrtEngine>)>> {
+        lock_warm_engine(&self.warm_upscale_engine)
     }
 
     /// SD inpaint dispatch via the dedicated subprocess bridge. Encodes
@@ -1087,14 +1099,6 @@ impl Processor {
         };
         let level = prunr_core::upscale::pick_optimization_level(cache_descriptor);
 
-        let engine = match self.ensure_upscale_engine(cache_model_kind, intra_threads, level) {
-            Ok(e) => e,
-            Err(err) => {
-                tracing::error!(model = ?model_id, %err, "upscale dispatch: engine construction failed");
-                return;
-            }
-        };
-
         // Release stores pair with the Acquire load in
         // `upscale::tiling::upscale_tiled` (cancel flag) and the Acquire
         // load in `is_upscale_in_flight` (active flag). Without the
@@ -1102,8 +1106,7 @@ impl Processor {
         self.upscale_active.store(true, Ordering::Release);
         self.upscale_cancel.store(false, Ordering::Release);
         // First dispatch initializes the shared RunOptions; subsequent
-        // dispatches reuse it. ORT runtime is guaranteed loaded here —
-        // we already have a session-ready `engine` above.
+        // dispatches reuse it. ORT itself is initialised at app start.
         let run_options = self.upscale_run_options.get_or_init(|| {
             Arc::new(
                 prunr_core::upscale::UpscaleRunOptions::new()
@@ -1125,15 +1128,29 @@ impl Processor {
         let cancel_flag = Arc::clone(&self.upscale_cancel);
         let result_tx = self.upscale_result_tx.clone();
         let progress_slot = self.dispatch_progress.clone();
-        // Clone the Arc so the worker thread owns a reference to the engine
-        // independently of the cached slot. The slot may be evicted (e.g.
-        // model swap mid-dispatch) without invalidating the in-flight session.
-        let engine_for_thread = Arc::clone(&engine);
+        let engine_slot = Arc::clone(&self.warm_upscale_engine);
         // Shared with the GUI thread's `cancel_upscale()` — terminating
         // this RunOptions aborts the running `Session::run` mid-tile.
         let run_options_for_thread = Arc::clone(run_options);
 
         std::thread::spawn(move || {
+            // Session construction runs here, not on the GUI thread: a cold
+            // EP (OpenVINO compiles the graph) can take tens of seconds and
+            // the window must stay responsive so Cancel is reachable. The
+            // thread holds its own Arc, so a model swap that evicts the slot
+            // mid-run never invalidates this session.
+            let engine_for_thread = match ensure_upscale_engine(
+                &engine_slot, cache_model_kind, intra_threads, level,
+            ) {
+                Ok(engine) => engine,
+                Err(err) => {
+                    tracing::error!(model = ?model_id, %err, "upscale dispatch: engine construction failed");
+                    let _ = result_tx.send(UpscaleResult { item_id, result: Err(err), recipe });
+                    active_flag.store(false, Ordering::Release);
+                    progress_slot.set(None);
+                    return;
+                }
+            };
             let progress_slot_for_callback = progress_slot.clone();
             let on_tile = move |done, total| {
                 progress_slot_for_callback.update(|p| {
@@ -1197,18 +1214,29 @@ impl Processor {
     ///
     /// Idempotent.
     pub(crate) fn cancel_upscale(&self) {
+        // Esc and the model-change hook call this unconditionally.
+        if !self.is_upscale_in_flight() {
+            return;
+        }
         // Release pairs with Acquire in `upscale::tiling::upscale_tiled`.
         self.upscale_cancel.store(true, Ordering::Release);
         // The terminate call returns immediately; ORT aborts the running
-        // session as soon as it checks between kernel launches. No-op
-        // when the OnceLock is empty (cancel before any dispatch).
-        let terminate_result = self.upscale_run_options.get().map(|opts| opts.terminate());
-        tracing::info!(
-            cancel_flag_was_set = true,
-            terminate_called = terminate_result.is_some(),
-            terminate_ok = terminate_result.as_ref().is_some_and(|r| r.is_ok()),
-            "upscale cancel requested"
-        );
+        // session as soon as it checks between kernel launches.
+        let terminate_ok = self
+            .upscale_run_options
+            .get()
+            .is_some_and(|opts| opts.terminate().is_ok());
+        // Not every EP honours terminate mid-run: OpenVINO measured 54 s
+        // from terminate() to return on a cold 512 px tile (it only checks
+        // the between-tiles flag). Say so instead of looking frozen.
+        self.dispatch_progress.update(|p| {
+            if let Some(p) = p {
+                p.step_label = std::borrow::Cow::Borrowed(
+                    super::dispatch_progress::step_labels::CANCELLING,
+                );
+            }
+        });
+        tracing::debug!(terminate_ok, "upscale cancel requested");
     }
 
     /// Drain completed upscale results from the background thread.
