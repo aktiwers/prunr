@@ -212,14 +212,14 @@ impl BackgroundIO {
             decimate_outline_in_place(&mut outline, OUTLINE_MAX_POINTS);
             let _ = outline_tx.send(SelectionOutlineResult { item_id, outline, hash });
 
-            // ACCENT-tinted ColorImage: pixels where mask >= 0.5 carry
-            // full-opacity ACCENT; render-time fill_opacity scales the
-            // alpha so we ship pre-tinted at 255 here.
+            // ACCENT-tinted ColorImage: selected pixels carry full-opacity
+            // ACCENT; render-time fill_opacity scales the alpha so we ship
+            // pre-tinted at 255 here.
             let w = mask.width as usize;
             let h = mask.height as usize;
             let mut pixels = Vec::with_capacity(w * h);
             for &v in mask.data.iter() {
-                if v >= 0.5 {
+                if prunr_core::selection::MaskArtifact::is_selected(v) {
                     pixels.push(egui::Color32::from_rgba_unmultiplied(0x7b, 0x2d, 0x8e, 255));
                 } else {
                     pixels.push(egui::Color32::TRANSPARENT);
