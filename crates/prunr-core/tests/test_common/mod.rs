@@ -28,8 +28,13 @@ pub fn ensure_ort_initialized() -> Result<(), String> {
 
 /// Returns `true` when ORT couldn't be initialised, after printing a
 /// `[label] SKIP:` line. Caller pattern: `if skip_if_no_ort("foo") { return; }`.
-/// Centralises the boilerplate that otherwise repeats at the top of every
-/// feature-test fn.
+///
+/// Mandatory before anything that creates a session (`OrtEngine::new*`,
+/// `process_inpaint*`, `upscale_*`): under `load-dynamic`, creating a
+/// session before the runtime path is known does not fail — ort re-enters
+/// its own loader lock while building the "library not found" error and
+/// the thread parks forever. A source-scan tripwire test enforces this
+/// across every suite in this directory.
 pub fn skip_if_no_ort(label: &str) -> bool {
     if let Err(msg) = ensure_ort_initialized() {
         eprintln!("[{label}] SKIP: {msg}");
