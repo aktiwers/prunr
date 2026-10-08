@@ -22,6 +22,8 @@ jobs:
   build:
     name: Build (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
+    # Cold macOS ORT build (~30 min) + fat-LTO release build + model fetch.
+    timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
@@ -472,6 +474,7 @@ jobs:
     name: Create Release
     needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     # Only publish on tag pushes. workflow_dispatch test runs build the
     # artifacts (proves the matrix works) but skip the GH Release step,
     # which would otherwise fail with "GitHub Releases requires a tag".

@@ -140,8 +140,12 @@ fn probe_load_dynamic() -> anyhow::Result<()> {
 
 fn fetch_models() -> anyhow::Result<()> {
     std::fs::create_dir_all("models")?;
+    // Whole-request deadline: a stalled download otherwise hangs the CI
+    // job until the runner's 6-hour kill (observed on every platform in
+    // May 2026). 20 minutes covers the largest asset (~225 MB) at 200 KB/s.
     let client = reqwest::blocking::Client::builder()
         .user_agent("prunr-xtask/0.1")
+        .timeout(std::time::Duration::from_secs(20 * 60))
         .build()?;
 
     for spec in MODELS {
