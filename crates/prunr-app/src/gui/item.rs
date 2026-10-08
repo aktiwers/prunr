@@ -603,9 +603,9 @@ impl BatchItem {
         self.result_rgba.is_some()
     }
 
-    /// Combined size of all caches on this item: segmentation + edge tensors
-    /// + upscale_raw + bicubic_source + selection_mask + magic_brush_embedding.
-    /// Used by memory governance and telemetry.
+    /// Combined size of all caches on this item (segmentation and edge
+    /// tensors, upscale_raw, bicubic_source, selection_mask,
+    /// magic_brush_embedding). Used by memory governance and telemetry.
     ///
     /// Note: `upscale_raw` is the largest single cached artifact (≈500 MB at
     /// 4K × 4× upscale). The governor must see this to make correct eviction

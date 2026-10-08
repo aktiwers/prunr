@@ -1194,6 +1194,7 @@ impl Processor {
     ///    the case where the worker happens to be BETWEEN tiles when
     ///    cancel fires (no running session.run to terminate), and it
     ///    pins the two-pass mid-pass checks in `upscale_two_pass_with_engine`.
+    ///
     /// Idempotent.
     pub(crate) fn cancel_upscale(&self) {
         // Release pairs with Acquire in `upscale::tiling::upscale_tiled`.
@@ -1201,11 +1202,7 @@ impl Processor {
         // The terminate call returns immediately; ORT aborts the running
         // session as soon as it checks between kernel launches. No-op
         // when the OnceLock is empty (cancel before any dispatch).
-        let terminate_result = if let Some(opts) = self.upscale_run_options.get() {
-            Some(opts.terminate())
-        } else {
-            None
-        };
+        let terminate_result = self.upscale_run_options.get().map(|opts| opts.terminate());
         tracing::info!(
             cancel_flag_was_set = true,
             terminate_called = terminate_result.is_some(),
