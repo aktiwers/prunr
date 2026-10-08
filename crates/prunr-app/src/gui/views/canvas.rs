@@ -457,7 +457,7 @@ fn handle_magic_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: 
                 // Dedup the source-coords list on bit-exact repeats; SAM
                 // doesn't benefit from duplicate points and we cap at 8
                 // anyway in build_stroke_prompt.
-                if state.active_stroke.last().is_none_or(|&last| last != (px, py)) {
+                if state.active_stroke.last() != Some(&(px, py)) {
                     state.active_stroke.push((px, py));
                 }
                 // Dedup the screen-coords trail on half-radius steps —
