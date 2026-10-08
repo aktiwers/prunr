@@ -119,8 +119,13 @@ jobs:
 
       - name: Install ORT runtime (Linux x86_64)
         if: matrix.target == 'x86_64-unknown-linux-gnu' && steps.cache-ci-runtime.outputs.cache-hit != 'true'
+        timeout-minutes: 15
         run: cargo xtask install-runtime onnxruntime 1.24.1
 
+      # Linux has a runtime installed above, so a suite that soft-skips
+      # there means the install or cache broke — fail instead of passing.
       - name: Test
         timeout-minutes: 45
+        env:
+          PRUNR_REQUIRE_ORT: ${{ matrix.target == 'x86_64-unknown-linux-gnu' && '1' || '' }}
         run: cargo test --workspace --target ${{ matrix.target }} --features prunr-models/dev-models
