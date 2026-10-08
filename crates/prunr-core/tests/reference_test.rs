@@ -7,6 +7,14 @@
 //!
 //! The reference test (test_rembg_reference) is the CORE-05 hard gate.
 //! It must pass before any CLI or GUI work proceeds.
+//!
+//! Every test that builds an `OrtEngine` goes through `skip_if_no_ort`
+//! first. With `load-dynamic`, creating a session before the runtime
+//! library path is known does not fail — ort 2.0.0-rc.12 re-enters its
+//! own loader lock while building the "library not found" error and the
+//! thread parks forever (this hung CI for 6 h per job).
+
+mod test_common;
 
 use prunr_core::{
     CoreError, InferenceEngine, ModelKind, OrtEngine, ProgressStage,
@@ -18,6 +26,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use image::{DynamicImage, RgbaImage};
 use std::path::{Path, PathBuf};
+use test_common::skip_if_no_ort;
 
 fn repo_root() -> PathBuf {
     // Integration tests run from workspace root with `cargo test -p prunr-core`
@@ -88,6 +97,7 @@ fn pixel_match_percent(our_rgba: &RgbaImage, reference_mask: &image::GrayImage, 
 /// See tests/test_images/README.md for image download instructions.
 #[test]
 fn test_rembg_reference() {
+    if skip_if_no_ort("test_rembg_reference") { return; }
     // U2Net is OnDemand — skip unless installed.
     if !prunr_models::is_available(prunr_models::ModelId::U2net) {
         eprintln!("Skipping rembg reference: U2Net not installed in user data dir");
@@ -154,6 +164,7 @@ fn test_rembg_reference() {
 
 #[test]
 fn test_process_image_produces_valid_rgba_png() {
+    if skip_if_no_ort("test_process_image_produces_valid_rgba_png") { return; }
     let engine = OrtEngine::new(ModelKind::Silueta, 1)
         .expect("Failed to create OrtEngine");
 
@@ -178,6 +189,7 @@ fn test_process_image_produces_valid_rgba_png() {
 
 #[test]
 fn test_model_selection_silueta_and_u2net() {
+    if skip_if_no_ort("test_model_selection_silueta_and_u2net") { return; }
     // Silueta is bundled — must always load.
     let _silueta = OrtEngine::new(ModelKind::Silueta, 1)
         .expect("Silueta model should load");
@@ -194,6 +206,7 @@ fn test_model_selection_silueta_and_u2net() {
 
 #[test]
 fn test_active_provider_queryable() {
+    if skip_if_no_ort("test_active_provider_queryable") { return; }
     let engine = OrtEngine::new(ModelKind::Silueta, 1)
         .expect("OrtEngine::new should succeed");
     let provider = engine.active_provider();
@@ -207,6 +220,7 @@ fn test_active_provider_queryable() {
 
 #[test]
 fn test_progress_callback_all_stages() {
+    if skip_if_no_ort("test_progress_callback_all_stages") { return; }
     use std::sync::{Arc, Mutex};
 
     let engine = OrtEngine::new(ModelKind::Silueta, 1)
@@ -244,6 +258,7 @@ fn test_progress_callback_all_stages() {
 
 #[test]
 fn test_format_support_png_jpeg_webp_bmp() {
+    if skip_if_no_ort("test_format_support_png_jpeg_webp_bmp") { return; }
     use image::{DynamicImage, RgbImage, Rgb};
     use std::io::Cursor;
 
@@ -321,6 +336,7 @@ fn test_downscale_image_preserves_aspect_ratio() {
 
 #[test]
 fn test_batch_process_multiple_images() {
+    if skip_if_no_ort("test_batch_process_multiple_images") { return; }
     let image_path_1 = test_images_dir().join("car-1.jpg");
     let image_path_2 = test_images_dir().join("car-2.jpg");
 
@@ -364,6 +380,7 @@ fn test_batch_process_multiple_images() {
 #[test]
 #[cfg(feature = "dev-models")]
 fn test_inpaint_smoke() {
+    if skip_if_no_ort("test_inpaint_smoke") { return; }
     let image_path = test_images_dir().join("car-1.jpg");
     if !image_path.exists() {
         eprintln!("Skipping inpaint smoke test: car-1.jpg not found");
