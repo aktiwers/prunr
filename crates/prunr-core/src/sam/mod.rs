@@ -95,7 +95,7 @@ pub fn decode_to_mask_artifact(
 
     let m = SAM_MASK_RESOLUTION as usize;
     let m_max = SAM_MASK_RESOLUTION - 1;
-    let m_max_f = (SAM_MASK_RESOLUTION - 1) as f32;
+    let m_max_f = m_max as f32;
     let mask_logits: &[f32] = &output.masks[best_idx * m * m..(best_idx + 1) * m * m];
 
     let mut data = vec![0i8; (source_w * source_h) as usize];
