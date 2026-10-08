@@ -10,12 +10,16 @@
 //!   - The painted region differs materially from the source
 //!     (i.e. the pipeline is doing real work, not returning input)
 
+mod test_common;
+
 use image::{GrayImage, Luma, Rgba, RgbaImage};
 use prunr_core::inpaint_sd::{self, SdInpaintRequest};
+use test_common::skip_if_no_ort;
 
 #[test]
 fn sd_inpaint_modifies_painted_region() {
     let _ = tracing_subscriber::fmt::try_init();
+    if skip_if_no_ort("sd_inpaint_smoke") { return; }
     let id = prunr_models::ModelId::SdV15InpaintFp16;
     if !prunr_models::is_available(id) {
         eprintln!("SKIP: SD 1.5 Inpaint bundle not installed at {:?}",
@@ -41,8 +45,16 @@ fn sd_inpaint_modifies_painted_region() {
         ..Default::default()
     };
     let hooks = prunr_core::inpaint::InpaintHooks::default();
-    let result = inpaint_sd::process_inpaint_with(&image, &mask, id, req, &hooks)
-        .expect("SD inpaint should succeed");
+    let result = match inpaint_sd::process_inpaint_with(&image, &mask, id, req, &hooks) {
+        Ok(r) => r,
+        // The pre-flight RAM gate is an environmental refusal (SD wants
+        // ~12 GB free), not a pipeline failure — skip like a missing bundle.
+        Err(e) if e.to_string().contains("RAM free") => {
+            eprintln!("[sd_inpaint_smoke] SKIP: {e}");
+            return;
+        }
+        Err(e) => panic!("SD inpaint should succeed: {e}"),
+    };
 
     assert_eq!(result.dimensions(), image.dimensions());
 

@@ -5,12 +5,15 @@
 //! fail CI on a fresh checkout. Run with:
 //!   cargo test -p prunr-core --test big_lama_smoke -- --nocapture
 
+mod test_common;
+
 use image::{GrayImage, Luma, Rgba, RgbaImage};
 use prunr_core::inpaint;
+use test_common::skip_if_no_ort;
 
 #[test]
 fn big_lama_modifies_painted_region() {
-
+    if skip_if_no_ort("big_lama_smoke") { return; }
     let id = prunr_models::ModelId::BigLaMa;
     if !prunr_models::is_available(id) {
         eprintln!("SKIP: Big-LaMa not installed at {:?}",

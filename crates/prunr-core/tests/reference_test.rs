@@ -7,12 +7,6 @@
 //!
 //! The reference test (test_rembg_reference) is the CORE-05 hard gate.
 //! It must pass before any CLI or GUI work proceeds.
-//!
-//! Every test that builds an `OrtEngine` goes through `skip_if_no_ort`
-//! first. With `load-dynamic`, creating a session before the runtime
-//! library path is known does not fail — ort 2.0.0-rc.12 re-enters its
-//! own loader lock while building the "library not found" error and the
-//! thread parks forever (this hung CI for 6 h per job).
 
 mod test_common;
 
@@ -220,9 +214,9 @@ fn test_active_provider_queryable() {
 
 #[test]
 fn test_progress_callback_all_stages() {
-    if skip_if_no_ort("test_progress_callback_all_stages") { return; }
     use std::sync::{Arc, Mutex};
 
+    if skip_if_no_ort("test_progress_callback_all_stages") { return; }
     let engine = OrtEngine::new(ModelKind::Silueta, 1)
         .expect("OrtEngine::new should succeed");
 
@@ -258,10 +252,10 @@ fn test_progress_callback_all_stages() {
 
 #[test]
 fn test_format_support_png_jpeg_webp_bmp() {
-    if skip_if_no_ort("test_format_support_png_jpeg_webp_bmp") { return; }
     use image::{DynamicImage, RgbImage, Rgb};
     use std::io::Cursor;
 
+    if skip_if_no_ort("test_format_support_png_jpeg_webp_bmp") { return; }
     let test_img = DynamicImage::ImageRgb8(RgbImage::from_pixel(32, 32, Rgb([100, 150, 200])));
     let engine = OrtEngine::new(ModelKind::Silueta, 1).expect("Engine");
 
