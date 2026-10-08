@@ -1,5 +1,10 @@
 use sha2::{Digest, Sha256};
-use std::io::Write;
+use std::io::{Read, Write};
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
+use std::time::Duration;
+
+use prunr_runtime_install::{retry_with_backoff, Retryable};
 use std::path::{Path, PathBuf};
 
 mod models;
@@ -138,15 +143,74 @@ fn probe_load_dynamic() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Shared HTTP client for every xtask network call. `timeout` is the
+/// budget per socket operation — reqwest re-arms it on each read when
+/// the body is streamed — not a whole-download cap, so slow links still
+/// finish and a stalled one fails within a minute.
+fn http_client() -> reqwest::Result<reqwest::blocking::Client> {
+    reqwest::blocking::Client::builder()
+        .user_agent("prunr-xtask/0.1")
+        .connect_timeout(Duration::from_secs(15))
+        .timeout(Duration::from_secs(60))
+        .build()
+}
+
+enum FetchError {
+    Transient(String),
+    Fatal(String),
+}
+
+impl Retryable for FetchError {
+    fn is_retryable(&self) -> bool {
+        matches!(self, Self::Transient(_))
+    }
+    fn cancelled() -> Self {
+        Self::Fatal("cancelled".into())
+    }
+}
+
+impl std::fmt::Display for FetchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Transient(m) | Self::Fatal(m) => f.write_str(m),
+        }
+    }
+}
+
+/// GET `url` into memory, streaming the body so a stall surfaces as a
+/// read timeout. Connection, read and 5xx failures retry with backoff;
+/// 4xx fails immediately.
+fn download(client: &reqwest::blocking::Client, url: &str) -> anyhow::Result<Vec<u8>> {
+    let cancel = Arc::new(AtomicBool::new(false));
+    retry_with_backoff(&cancel, 3, 1000, |attempt| {
+        if attempt > 0 {
+            println!("  retry {attempt}/2");
+        }
+        let mut response = client
+            .get(url)
+            .send()
+            .map_err(|e| FetchError::Transient(format!("connect: {e}")))?;
+        let status = response.status();
+        if !status.is_success() {
+            let msg = format!("HTTP {status}");
+            return Err(if status.is_server_error() {
+                FetchError::Transient(msg)
+            } else {
+                FetchError::Fatal(msg)
+            });
+        }
+        let mut buf = Vec::with_capacity(response.content_length().unwrap_or(0) as usize);
+        response
+            .read_to_end(&mut buf)
+            .map_err(|e| FetchError::Transient(format!("read: {e}")))?;
+        Ok(buf)
+    })
+    .map_err(|e| anyhow::anyhow!("{e} downloading {url}"))
+}
+
 fn fetch_models() -> anyhow::Result<()> {
     std::fs::create_dir_all("models")?;
-    // Whole-request deadline: a stalled download otherwise hangs the CI
-    // job until the runner's 6-hour kill (observed on every platform in
-    // May 2026). 20 minutes covers the largest asset (~225 MB) at 200 KB/s.
-    let client = reqwest::blocking::Client::builder()
-        .user_agent("prunr-xtask/0.1")
-        .timeout(std::time::Duration::from_secs(20 * 60))
-        .build()?;
+    let client = http_client()?;
 
     for spec in MODELS {
         let dest = std::path::Path::new("models").join(spec.name);
@@ -174,15 +238,7 @@ fn fetch_models() -> anyhow::Result<()> {
             println!("{}: downloading from {}", spec.name, spec.url);
         }
 
-        let response = client.get(spec.url).send()?;
-        if !response.status().is_success() {
-            anyhow::bail!(
-                "HTTP {} downloading {}",
-                response.status(),
-                spec.name
-            );
-        }
-        let bytes = response.bytes()?;
+        let bytes = download(&client, spec.url)?;
         let hash = hex::encode(Sha256::digest(&bytes));
 
         if spec.sha256.is_empty() {
@@ -338,9 +394,7 @@ fn install_runtime() -> anyhow::Result<()> {
 
     let json_url = format!("https://pypi.org/pypi/{package}/{version}/json");
     println!("Querying {json_url}");
-    let client = reqwest::blocking::Client::builder()
-        .user_agent("prunr-xtask/0.1")
-        .build()?;
+    let client = http_client()?;
     let metadata: serde_json::Value = client.get(&json_url).send()?.json()?;
     let urls = metadata["urls"].as_array()
         .ok_or_else(|| anyhow::anyhow!("PyPI metadata missing `urls`"))?;
