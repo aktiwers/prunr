@@ -183,10 +183,9 @@ where
         // The two branches keep the f16/f32 buffers + tensor scoped to
         // the relevant arm so the unused dtype's buffer doesn't sit
         // allocated during inference. When `terminate` is Some, the
-        // session.run is wired through RunOptions — another thread can
-        // call `terminate.terminate()` to abort the running tile within
-        // ~50ms, far shorter than waiting for the between-tiles cancel
-        // check at multi-second tile granularity.
+        // session.run is wired through RunOptions so another thread can
+        // abort the running tile — on EPs that honour it (CPU does;
+        // OpenVINO only returns at the tile boundary).
         if is_fp16 {
             let mut input_data = vec![f16::ZERO; 3 * pixel_count];
             for (i, p) in rgb_tile.pixels().enumerate() {
@@ -200,28 +199,11 @@ where
             let tensor = Tensor::from_array(arr)
                 .map_err(|e| CoreError::Inference(format!("upscale: input tensor: {e}")))?;
             engine.with_session(|session| {
-                let t0 = std::time::Instant::now();
-                tracing::debug!(
-                    padded_w, padded_h, fp16 = true,
-                    has_terminate = terminate.is_some(),
-                    "upscale tile: session.run entered"
-                );
                 let outputs = match terminate {
                     Some(opts) => session.run_with_options(inputs![input_name => &tensor], opts.as_ref()),
                     None => session.run(inputs![input_name => &tensor]),
                 }
-                .map_err(|e| {
-                    tracing::debug!(
-                        elapsed_ms = t0.elapsed().as_millis() as u64,
-                        err = %e,
-                        "upscale tile: session.run returned ERROR"
-                    );
-                    classify_run_error(e)
-                })?;
-                tracing::debug!(
-                    elapsed_ms = t0.elapsed().as_millis() as u64,
-                    "upscale tile: session.run completed"
-                );
+                .map_err(classify_run_error)?;
                 pack_output(&outputs[0], plane, &mut packed, is_fp16)
             })?;
         } else {
@@ -237,28 +219,11 @@ where
             let tensor = Tensor::from_array(arr)
                 .map_err(|e| CoreError::Inference(format!("upscale: input tensor: {e}")))?;
             engine.with_session(|session| {
-                let t0 = std::time::Instant::now();
-                tracing::debug!(
-                    padded_w, padded_h, fp16 = false,
-                    has_terminate = terminate.is_some(),
-                    "upscale tile: session.run entered"
-                );
                 let outputs = match terminate {
                     Some(opts) => session.run_with_options(inputs![input_name => &tensor], opts.as_ref()),
                     None => session.run(inputs![input_name => &tensor]),
                 }
-                .map_err(|e| {
-                    tracing::debug!(
-                        elapsed_ms = t0.elapsed().as_millis() as u64,
-                        err = %e,
-                        "upscale tile: session.run returned ERROR"
-                    );
-                    classify_run_error(e)
-                })?;
-                tracing::debug!(
-                    elapsed_ms = t0.elapsed().as_millis() as u64,
-                    "upscale tile: session.run completed"
-                );
+                .map_err(classify_run_error)?;
                 pack_output(&outputs[0], plane, &mut packed, is_fp16)
             })?;
         }
