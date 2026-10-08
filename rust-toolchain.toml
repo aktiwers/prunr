@@ -1,0 +1,5 @@
+# Pinned so clippy -D warnings and release binaries do not drift with
+# whatever stable is current. Bump deliberately, together with the
+# dtolnay/rust-toolchain refs in .github/workflows/.
+[toolchain]
+channel = "1.92.0"
