@@ -1002,7 +1002,7 @@ impl PrunrApp {
             }
             SelectionAction::Invert => {
                 let Some(mask) = self.batch.items[idx].selection_mask.clone() else { return };
-                let inverted = mask.invert();
+                let inverted = mask.invert(self.settings.brush.mode);
                 self.commit_selection_and_dispatch(item_id, inverted);
                 ctx.request_repaint();
             }
@@ -1277,6 +1277,9 @@ impl PrunrApp {
                 self.toasts.info("No selection candidate met the confidence threshold.");
                 continue;
             };
+            // SAM returns an unsigned region; the brush mode decides whether
+            // it restores (Add) or removes (Subtract) subject in BG-removal.
+            let new_mask = new_mask.with_mode(self.settings.brush.mode);
             let existing = self.batch
                 .find_by_id(result.item_id)
                 .and_then(|i| i.selection_mask.clone());
@@ -4512,7 +4515,7 @@ mod selection_action_tests {
     use crate::gui::history_manager::HistoryManager;
 
     fn make_mask(w: u32, h: u32, selected: bool) -> MaskArtifact {
-        let v = if selected { 1.0f32 } else { 0.0f32 };
+        let v = if selected { prunr_core::selection::FULL } else { 0 };
         MaskArtifact {
             width: w,
             height: h,
@@ -4568,26 +4571,21 @@ mod selection_action_tests {
         }
     }
 
-    /// Invert: the inverted mask is the bitwise complement (1 - v) of the original.
+    /// Invert: coverage complement, signed by the active brush mode.
     #[test]
     fn invert_action_replaces_mask_with_inverse() {
+        use prunr_core::brush::BrushMode;
+        use prunr_core::selection::FULL;
         let original = make_mask(4, 4, true);
-        let inverted = original.invert();
-        // All-selected → all-inverted (0.0).
-        for &v in inverted.data.iter() {
-            assert!((v - 0.0f32).abs() < f32::EPSILON,
-                "inverted all-selected mask must be all-zero");
-        }
+        let inverted = original.invert(BrushMode::Subtract);
+        assert!(inverted.data.iter().all(|&v| v == 0), "inverted all-selected mask must be all-zero");
         let partial = MaskArtifact {
             width: 2,
             height: 2,
-            data: Arc::new(vec![0.0, 1.0, 0.0, 1.0]),
+            data: Arc::new(vec![0, FULL, 0, FULL]),
         };
-        let inv = partial.invert();
-        assert!((inv.data[0] - 1.0f32).abs() < f32::EPSILON);
-        assert!((inv.data[1] - 0.0f32).abs() < f32::EPSILON);
-        assert!((inv.data[2] - 1.0f32).abs() < f32::EPSILON);
-        assert!((inv.data[3] - 0.0f32).abs() < f32::EPSILON);
+        assert_eq!(partial.invert(BrushMode::Subtract).data.as_slice(), &[-FULL, 0, -FULL, 0]);
+        assert_eq!(partial.invert(BrushMode::Add).data.as_slice(), &[FULL, 0, FULL, 0]);
     }
 
     /// Cut: one archive call produces one history entry (not two).

@@ -7,6 +7,8 @@
 
 use std::sync::Arc;
 
+use crate::selection::FULL;
+
 pub mod preprocess;
 pub mod prompt;
 
@@ -70,12 +72,13 @@ pub struct SamDecoderOutput {
 
 /// Pick the highest-IoU candidate above `confidence_threshold`; bilinear-
 /// upsample its 256×256 logits to source resolution; threshold at logit
-/// 0.0 (sigmoid 0.5) into a binary MaskArtifact.
+/// 0.0 (sigmoid 0.5) into a binary, unsigned MaskArtifact (`FULL` / 0).
+/// The caller signs it with the active brush mode (`with_mode`).
 ///
 /// Returns `None` if no candidate passes the confidence threshold.
 ///
-/// Peak working set: source_w * source_h * 4 bytes output + 256*256*4 bytes
-/// slice view (read-only). At 4K source: ~32 MB output.
+/// Peak working set: source_w * source_h bytes output + 256*256*4 bytes
+/// slice view (read-only). At 4K source: ~8 MB output.
 pub fn decode_to_mask_artifact(
     output: &SamDecoderOutput,
     source_w: u32,
@@ -95,7 +98,7 @@ pub fn decode_to_mask_artifact(
     let m_max_f = (SAM_MASK_RESOLUTION - 1) as f32;
     let mask_logits: &[f32] = &output.masks[best_idx * m * m..(best_idx + 1) * m * m];
 
-    let mut data = vec![0.0f32; (source_w * source_h) as usize];
+    let mut data = vec![0i8; (source_w * source_h) as usize];
     let scale_x = SAM_MASK_RESOLUTION as f32 / source_w as f32;
     let scale_y = SAM_MASK_RESOLUTION as f32 / source_h as f32;
     for y in 0..source_h {
@@ -117,7 +120,7 @@ pub fn decode_to_mask_artifact(
                 + mask_logits[i01] * fx * (1.0 - fy)
                 + mask_logits[i10] * (1.0 - fx) * fy
                 + mask_logits[i11] * fx * fy;
-            data[(y * source_w + x) as usize] = if v >= 0.0 { 1.0 } else { 0.0 };
+            data[(y * source_w + x) as usize] = if v >= 0.0 { FULL } else { 0 };
         }
     }
 
@@ -184,8 +187,8 @@ mod tests {
         let result = decode_to_mask_artifact(&output, 64, 64, 0.4).unwrap();
         assert_eq!(result.width, 64);
         assert_eq!(result.height, 64);
-        // All upsampled pixels should be 1.0 (from candidate 1, all +1 logits)
-        assert!(result.data.iter().all(|&v| v == 1.0));
+        // All upsampled pixels are fully selected (candidate 1, all +1 logits)
+        assert!(result.data.iter().all(|&v| v == FULL));
     }
 
     #[test]
@@ -211,6 +214,6 @@ mod tests {
             iou_predictions: [0.9, 0.1, 0.1],
         };
         let result = decode_to_mask_artifact(&output, 32, 32, 0.5).unwrap();
-        assert!(result.data.iter().all(|&v| v == 0.0));
+        assert!(result.data.iter().all(|&v| v == 0));
     }
 }
