@@ -19,11 +19,11 @@ use crate::gui::settings::SettingsModel;
 use super::fixtures::push_test_item;
 
 fn make_mask(w: u32, h: u32) -> prunr_core::selection::MaskArtifact {
-    let mut data = vec![0.0f32; (w * h) as usize];
+    let mut data = vec![0i8; (w * h) as usize];
     // Paint a 4x4 square at (2, 2) — non-trivial but small.
     for y in 2..6_u32.min(h) {
         for x in 2..6_u32.min(w) {
-            data[(y * w + x) as usize] = 1.0;
+            data[(y * w + x) as usize] = prunr_core::selection::FULL;
         }
     }
     prunr_core::selection::MaskArtifact { width: w, height: h, data: Arc::new(data) }
@@ -174,50 +174,73 @@ fn selection_category_arm_exists_no_dispatch() {
 
 // ── Regression: Paint Brush BG-removal immediate-feedback ────────────────────
 //
-// Pins the MaskArtifact → MaskCorrection conversion. Drift in the
-// nearest-neighbour resample or the +127/0 quantization breaks this test
-// before it breaks the user-facing BG-removal output.
+// A Paint stroke must reach `apply_correction` exactly as Phase 15 painted
+// it: its direction (Subtract is the default brush mode), its hardness
+// falloff and its strength. Phase 33 flattened strokes to a binary,
+// add-only region, which made the default brush restore subject instead
+// of removing it; this pins the signed, soft round trip through the
+// shared selection and the per-model dispatch.
 #[test]
-fn paint_brush_bg_removal_regression() {
-    // Source image: 8×8 pixels. Stroke: 4×4 square at (2,2)...(5,5) inclusive.
-    let src_w = 8u32;
-    let src_h = 8u32;
-    let mut data = vec![0.0f32; (src_w * src_h) as usize];
-    for y in 2..=5u32 {
-        for x in 2..=5u32 {
-            data[(y * src_w + x) as usize] = 1.0;
-        }
-    }
-    let artifact = prunr_core::selection::MaskArtifact {
-        width: src_w,
-        height: src_h,
-        data: Arc::new(data),
-    };
+fn paint_brush_bg_removal_keeps_stroke_direction_and_softness() {
+    use prunr_core::brush::{paint_circle, BrushMode, MaskCorrection, Stamp};
 
-    // Simulate a tensor at the same dimensions (1:1 ratio keeps the math simple
-    // and deterministic — no NN interpolation rounding ambiguity at boundaries).
-    let tensor_w = 8u16;
-    let tensor_h = 8u16;
-    let correction = artifact.to_mask_correction(tensor_w, tensor_h);
+    let mut app = app_with_model(SettingsModel::BiRefNetLite);
+    app.settings.protect_selection = false;
+    let item = push_test_item(&mut app, 7);
+    item.dimensions = (32, 32);
+    let item_id = 7u64;
 
-    // Build the expected grid: 127 inside the 4×4 block, 0 outside.
-    let mut expected = vec![0i8; 64];
-    for y in 2..=5usize {
-        for x in 2..=5usize {
-            expected[y * 8 + x] = 127;
-        }
-    }
+    // The stroke exactly as brush_overlay commits it.
+    let mut stroke = MaskCorrection::empty(32, 32);
+    let stamp = Stamp { hardness: 0.3, strength: 0.8, mode: BrushMode::Subtract };
+    paint_circle(&mut stroke, 16.0, 16.0, 8.0, stamp);
+    let committed = prunr_core::selection::MaskArtifact::from_correction(&stroke);
 
-    // to_binary_mask exposes the grid as a GrayImage (255 = selected, 0 = not).
-    let binary = correction.to_binary_mask(tensor_w as u32, tensor_h as u32);
-    let raw: &[u8] = binary.as_raw();
-
-    let actual_i8: Vec<i8> = raw.iter()
-        .map(|&v| if v > 0 { 127i8 } else { 0i8 })
-        .collect();
-
-    assert_eq!(
-        actual_i8, expected,
-        "MaskArtifact→to_mask_correction pipeline output drifted from post-migration golden"
+    app.commit_selection_and_dispatch(item_id, committed);
+    assert!(
+        app.processor.live_preview.is_pending_for(item_id),
+        "a Paint stroke on a BG-removal model must queue the immediate rerun"
     );
+
+    // What the rerun will hand to postprocess: the correction at tensor
+    // resolution (same dims here, so it must be the stroke itself).
+    let selection = app.batch.find_by_id(item_id).unwrap().selection_mask.clone().unwrap();
+    let correction = selection.to_mask_correction(32, 32);
+    assert_eq!(correction.cells(), stroke.cells(), "stroke must round-trip bit-exact");
+    assert!(
+        correction.cells().iter().any(|&v| v < 0),
+        "Subtract stroke must arrive as a negative (remove-subject) correction"
+    );
+    assert!(
+        correction.cells().iter().any(|&v| v < 0 && v > -prunr_core::selection::FULL),
+        "hardness falloff must survive as intermediate magnitudes"
+    );
+}
+
+// An Add stroke over a Subtract region restores it (newer stroke wins on
+// sign conflict) — the Phase 15 merge rule, now on the shared selection.
+#[test]
+fn later_add_stroke_overrides_earlier_subtract_stroke() {
+    use prunr_core::brush::{paint_circle, BrushMode, MaskCorrection, Stamp};
+
+    let mut app = app_with_model(SettingsModel::BiRefNetLite);
+    let item = push_test_item(&mut app, 8);
+    item.dimensions = (16, 16);
+    let item_id = 8u64;
+
+    let mut first = MaskCorrection::empty(16, 16);
+    paint_circle(&mut first, 8.0, 8.0, 6.0, Stamp { hardness: 1.0, strength: 1.0, mode: BrushMode::Subtract });
+    app.commit_selection_and_dispatch(item_id, prunr_core::selection::MaskArtifact::from_correction(&first));
+
+    let mut second = MaskCorrection::empty(16, 16);
+    paint_circle(&mut second, 8.0, 8.0, 2.0, Stamp { hardness: 1.0, strength: 1.0, mode: BrushMode::Add });
+    let existing = app.batch.find_by_id(item_id).unwrap().selection_mask.clone().unwrap();
+    let merged = existing.add_mask(&prunr_core::selection::MaskArtifact::from_correction(&second)).unwrap();
+    app.commit_selection_and_dispatch(item_id, merged);
+
+    let selection = app.batch.find_by_id(item_id).unwrap().selection_mask.clone().unwrap();
+    let centre = selection.data[8 * 16 + 8];
+    let ring = selection.data[8 * 16 + 3];
+    assert!(centre > 0, "centre repainted with Add must be positive, got {centre}");
+    assert!(ring < 0, "untouched ring must stay negative, got {ring}");
 }

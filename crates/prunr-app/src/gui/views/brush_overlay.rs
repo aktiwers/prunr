@@ -23,19 +23,17 @@ const MIN_SCREEN_RADIUS_PX: f32 = 2.0;
 /// has been used so it can route the commit through the app's normal
 /// dispatch / cache-invalidation path.
 pub(crate) enum BrushAction {
-    /// User finished a stroke. Contains a MaskArtifact at source-image
-    /// resolution ready to pass to `BatchManager::commit_selection`.
+    /// User finished a stroke: the signed, soft stroke at source-image
+    /// resolution, ready to merge into the item's selection.
     Committed(prunr_core::selection::MaskArtifact),
     /// User clicked or moved without committing a stroke yet.
     None,
 }
 
 fn brush_grid_dims(item: &BatchItem) -> Option<(u16, u16)> {
-    // Phase 33: all brush paths (BG-removal, inpaint, selection-category)
-    // now write to `selection_mask` which lives at SOURCE image resolution.
-    // Using tensor dims here was "Pitfall 1" in 33-RESEARCH.md — it caused
-    // strokes to be misaligned after `to_mask_correction` upsampled them
-    // back to source res. u16 max is 65535; fine for any reasonable image.
+    // Strokes are authored at SOURCE resolution because the selection lives
+    // there; painting at tensor resolution misaligned strokes once they were
+    // resampled back. u16 max is 65535; fine for any reasonable image.
     let (w, h) = item.dimensions;
     Some((w as u16, h as u16))
 }
@@ -111,21 +109,9 @@ pub(crate) fn handle_input(
     if primary_released && brush_state.has_active_stroke() {
         if let Some(correction) = brush_state.commit_stroke(stamp) {
             tracing::debug!("brush release — commit");
-            // Convert the per-stroke MaskCorrection (i8 at source res) into
-            // a MaskArtifact (f32 at source res) for storage in selection_mask.
-            // to_binary_mask at source dims gives a GrayImage (255=selected, 0=not).
-            let w = correction.width as u32;
-            let h = correction.height as u32;
-            let binary = correction.to_binary_mask(w, h);
-            let data: Vec<f32> = binary.as_raw().iter()
-                .map(|&v| if v > 0 { 1.0_f32 } else { 0.0_f32 })
-                .collect();
-            let mask = prunr_core::selection::MaskArtifact {
-                width: w,
-                height: h,
-                data: std::sync::Arc::new(data),
-            };
-            return BrushAction::Committed(mask);
+            return BrushAction::Committed(
+                prunr_core::selection::MaskArtifact::from_correction(&correction),
+            );
         }
     }
 

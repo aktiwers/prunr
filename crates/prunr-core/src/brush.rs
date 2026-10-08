@@ -64,6 +64,11 @@ impl MaskCorrection {
         }
     }
 
+    /// Row-major signed cells, `width × height`.
+    pub fn cells(&self) -> &[i8] {
+        &self.grid
+    }
+
     /// O(n). Caller-controlled — `apply_correction` does NOT short-circuit
     /// on empty (the saturating-add loop is fast enough that a pre-scan
     /// pays for itself only when the correction stays empty across many

@@ -619,9 +619,9 @@ impl BatchItem {
         let bicubic = self.bicubic_source.as_ref().map_or(0, |r| {
             r.width() as usize * r.height() as usize * 4
         });
-        // Selection mask: source-res f32, Arc-wrapped (count refcount once)
+        // Selection mask: source-res i8, Arc-wrapped (count refcount once)
         let selection_bytes = self.selection_mask.as_ref()
-            .map(|m| m.data.len() * 4)
+            .map(|m| m.data.len())
             .unwrap_or(0);
         let embedding_bytes = if self.magic_brush_embedding.is_some() {
             prunr_core::sam::SamEmbedding::expected_bytes()
@@ -1001,12 +1001,11 @@ mod tests {
     /// Build a distinct MaskArtifact for testing. Uses hash to create
     /// distinguishable masks without needing actual painted pixels.
     fn make_mask(tag: u64, w: u32, h: u32) -> Arc<prunr_core::selection::MaskArtifact> {
-        let mut data = vec![0.0_f32; (w * h) as usize];
-        // Write the tag into the first few pixels so masks with different
+        let mut data = vec![0i8; (w * h) as usize];
+        // Write the tag into the first few cells so masks with different
         // tags compare as non-equal (content_hash differs).
-        let tag_f = (tag as f32) / u64::MAX as f32;
-        for i in 0..data.len().min(4) {
-            data[i] = tag_f;
+        for (i, cell) in data.iter_mut().take(4).enumerate() {
+            *cell = ((tag >> (i * 8)) & 0x7f) as i8;
         }
         Arc::new(prunr_core::selection::MaskArtifact {
             width: w,
@@ -1288,12 +1287,12 @@ mod tests {
         let base = fixture_item(1).cache_size();
         let mut item = fixture_item(2);
         let mask = prunr_core::selection::MaskArtifact::new_empty(64, 64);
-        let expected = mask.data.len() * 4;
+        let expected = mask.data.len();
         item.selection_mask = Some(Arc::new(mask));
         assert_eq!(
             item.cache_size() - base,
             expected,
-            "cache_size must include selection_mask pixel bytes (64×64×4={})", expected,
+            "cache_size must include selection_mask pixel bytes (64×64={})", expected,
         );
     }
 
