@@ -14,7 +14,7 @@
 use std::sync::Arc;
 
 use crate::gui::app::PrunrApp;
-use crate::gui::settings::{Settings, SettingsModel};
+use crate::gui::settings::SettingsModel;
 
 use super::fixtures::push_test_item;
 
@@ -30,10 +30,6 @@ fn make_mask(w: u32, h: u32) -> prunr_core::selection::MaskArtifact {
 }
 
 fn app_with_model(model: SettingsModel) -> PrunrApp {
-    let mut settings = Settings::default();
-    settings.model = model;
-    // PrunrApp::new_for_test uses Settings::default; rebuild with our model.
-    // There's no constructor that accepts custom settings, so we patch post-new.
     let mut app = PrunrApp::new_for_test();
     app.settings.model = model;
     app

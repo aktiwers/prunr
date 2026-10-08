@@ -457,13 +457,13 @@ fn handle_magic_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: 
                 // Dedup the source-coords list on bit-exact repeats; SAM
                 // doesn't benefit from duplicate points and we cap at 8
                 // anyway in build_stroke_prompt.
-                if state.active_stroke.last().map_or(true, |&last| last != (px, py)) {
+                if state.active_stroke.last().is_none_or(|&last| last != (px, py)) {
                     state.active_stroke.push((px, py));
                 }
                 // Dedup the screen-coords trail on half-radius steps —
                 // matches BrushState.record_trail_stamp's policy so the
                 // two tools render visually identical trails.
-                let push_trail = state.active_trail.last().map_or(true, |&(lx, ly, _)| {
+                let push_trail = state.active_trail.last().is_none_or(|&(lx, ly, _)| {
                     let dx = pos.x - lx;
                     let dy = pos.y - ly;
                     dx * dx + dy * dy >= min_trail_step_sq
@@ -481,8 +481,8 @@ fn handle_magic_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: 
         app.magic_brush_state.active_trail.clear();
         match prunr_core::sam::prompt::build_stroke_prompt(
             &stroke_pts,
-            source_w as u32,
-            source_h as u32,
+            source_w,
+            source_h,
         ) {
             Ok(prompt) => {
                 app.processor.dispatch_sam_decoder(item_id, embedding, prompt, modifier);
@@ -498,11 +498,11 @@ fn handle_magic_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: 
             // the synthetic tail-click that fires at drag release.
             let prompt = match modifier {
                 PromptModifier::Subtract => prunr_core::sam::prompt::build_alt_modifier_prompt(
-                    px, py, source_w as u32, source_h as u32,
+                    px, py, source_w, source_h,
                 ),
                 PromptModifier::Add | PromptModifier::Replace => {
                     prunr_core::sam::prompt::build_click_prompt(
-                        px, py, source_w as u32, source_h as u32,
+                        px, py, source_w, source_h,
                     )
                 }
             };
