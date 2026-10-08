@@ -91,7 +91,7 @@ pub fn decode_to_mask_artifact(
         .map(|(i, _)| i)?;
 
     let m = SAM_MASK_RESOLUTION as usize;
-    let m_max = (SAM_MASK_RESOLUTION - 1) as u32;
+    let m_max = SAM_MASK_RESOLUTION - 1;
     let m_max_f = (SAM_MASK_RESOLUTION - 1) as f32;
     let mask_logits: &[f32] = &output.masks[best_idx * m * m..(best_idx + 1) * m * m];
 

@@ -1270,8 +1270,8 @@ impl PrunrApp {
             let threshold = self.settings.brush.magic_confidence_threshold;
             let Some(new_mask) = prunr_core::sam::decode_to_mask_artifact(
                 &decoder_output,
-                source_w as u32,
-                source_h as u32,
+                source_w,
+                source_h,
                 threshold,
             ) else {
                 self.toasts.info("No selection candidate met the confidence threshold.");
