@@ -9,8 +9,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::math::smoothstep;
 
-/// Range of a single brush stamp's contribution into the i8 grid.
-const STAMP_SCALE: f32 = 127.0;
+/// Magnitude of a fully painted cell; the shared scale of every i8
+/// mask plane (`MaskCorrection`, `selection::MaskArtifact`).
+pub const CELL_MAX: i8 = 127;
+const STAMP_SCALE: f32 = CELL_MAX as f32;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BrushMode {
@@ -19,11 +21,12 @@ pub enum BrushMode {
 }
 
 impl BrushMode {
+    /// `+1` pushes toward subject, `-1` toward background.
     #[inline]
-    fn sign(self) -> f32 {
+    pub(crate) fn sign(self) -> i8 {
         match self {
-            BrushMode::Add => 1.0,
-            BrushMode::Subtract => -1.0,
+            BrushMode::Add => 1,
+            BrushMode::Subtract => -1,
         }
     }
 }
@@ -64,11 +67,6 @@ impl MaskCorrection {
         }
     }
 
-    /// Row-major signed cells, `width × height`.
-    pub fn cells(&self) -> &[i8] {
-        &self.grid
-    }
-
     /// O(n). Caller-controlled — `apply_correction` does NOT short-circuit
     /// on empty (the saturating-add loop is fast enough that a pre-scan
     /// pays for itself only when the correction stays empty across many
@@ -77,36 +75,6 @@ impl MaskCorrection {
         self.grid.iter().all(|&v| v == 0)
     }
 
-    /// Project the signed-magnitude grid onto a binary `GrayImage` at the
-    /// target image dimensions. Any non-zero cell paints 255; zero cells
-    /// stay 0. Resamples via nearest-neighbour when grid resolution
-    /// differs from the image; the equal-size path runs as a tight
-    /// `cells()`-vs-pixel-buffer pair iteration.
-    pub fn to_binary_mask(&self, target_w: u32, target_h: u32) -> image::GrayImage {
-        let cw = self.width as u32;
-        let ch = self.height as u32;
-        let mut out = image::GrayImage::new(target_w, target_h);
-        if cw == target_w && ch == target_h {
-            for (px, &v) in out.as_mut().iter_mut().zip(self.grid.iter()) {
-                *px = if v != 0 { 255 } else { 0 };
-            }
-            return out;
-        }
-        let cw_us = cw as usize;
-        let buf = out.as_mut();
-        for y in 0..target_h {
-            let gy = ((y as u64 * ch as u64) / target_h as u64) as usize;
-            let row_base = gy * cw_us;
-            let out_row = (y as usize) * (target_w as usize);
-            for x in 0..target_w {
-                let gx = ((x as u64 * cw as u64) / target_w as u64) as usize;
-                if self.grid[row_base + gx] != 0 {
-                    buf[out_row + x as usize] = 255;
-                }
-            }
-        }
-        out
-    }
 }
 
 /// In-place multiplicative correction in normalized [0, 1] mask space.
@@ -146,7 +114,7 @@ pub fn apply_correction(mask: &mut [f32], mask_w: usize, mask_h: usize, correcti
     }
 
     // Resample path: nearest-neighbour sample the correction grid into
-    // mask space. Same arithmetic as MaskCorrection::to_binary_mask.
+    // mask space.
     if cw == 0 || ch == 0 { return; }
     for y in 0..mask_h {
         let cy = (y as u64 * ch as u64 / mask_h as u64) as usize;
@@ -165,7 +133,7 @@ pub fn apply_correction(mask: &mut [f32], mask_w: usize, mask_h: usize, correcti
 #[inline]
 fn apply_one(m: &mut f32, g: i8) {
     if g == 0 { return; }
-    let s = (g as f32) / 127.0;
+    let s = (g as f32) / STAMP_SCALE;
     if s > 0.0 {
         *m += (1.0 - *m) * s;
     } else {
@@ -195,7 +163,7 @@ where
     let h_i = target.height as i32;
     let inner = outer * stamp.hardness.clamp(0.0, 1.0);
     let span = (outer - inner).max(1e-6);
-    let sign = stamp.mode.sign();
+    let sign = f32::from(stamp.mode.sign());
     let strength = stamp.strength.clamp(0.0, 1.0);
 
     let xmin = ((cx - outer).floor() as i32).max(0);
@@ -227,7 +195,7 @@ where
                 BrushMode::Add => prev.max(value),
                 BrushMode::Subtract => prev.min(value),
             };
-            grid[idx] = combined.clamp(-127, 127) as i8;
+            grid[idx] = combined.clamp(-(CELL_MAX as i32), CELL_MAX as i32) as i8;
         }
     }
 }
@@ -282,14 +250,19 @@ pub fn merge(target: &mut MaskCorrection, addition: &MaskCorrection) {
         return;
     }
     for (t, &a) in target.grid.iter_mut().zip(addition.grid.iter()) {
-        if a == 0 {
-            continue;
-        }
-        if a > 0 {
-            *t = (*t).max(a);
-        } else {
-            *t = (*t).min(a);
-        }
+        *t = merge_cell(*t, a);
+    }
+}
+
+/// How a newer stroke cell lands on an existing one: zero leaves the
+/// existing cell, same sign keeps the stronger magnitude (painting twice
+/// does not double up), opposite sign lets the newer stroke win.
+#[inline]
+pub(crate) fn merge_cell(existing: i8, newer: i8) -> i8 {
+    match newer {
+        0 => existing,
+        n if n > 0 => existing.max(n),
+        n => existing.min(n),
     }
 }
 
@@ -320,30 +293,6 @@ mod tests {
         let mut mask = vec![0.5f32; 100];
         apply_correction(&mut mask, 10, 10, &c);
         assert!(mask.iter().all(|&v| v == 0.5));
-    }
-
-    #[test]
-    fn to_binary_mask_marks_painted_cells() {
-        let mut c = MaskCorrection::empty(64, 64);
-        paint_circle(
-            &mut c, 32.0, 32.0, 4.0,
-            Stamp { hardness: 1.0, strength: 1.0, mode: BrushMode::Subtract },
-        );
-        let mask = c.to_binary_mask(64, 64);
-        assert_eq!(mask.get_pixel(32, 32).0[0], 255, "centre of stroke must be 255");
-        assert_eq!(mask.get_pixel(0, 0).0[0], 0, "untouched corner stays 0");
-    }
-
-    #[test]
-    fn to_binary_mask_resizes_to_target() {
-        let mut c = MaskCorrection::empty(32, 32);
-        paint_circle(
-            &mut c, 16.0, 16.0, 4.0,
-            Stamp { hardness: 1.0, strength: 1.0, mode: BrushMode::Subtract },
-        );
-        let mask = c.to_binary_mask(64, 64);
-        assert_eq!(mask.dimensions(), (64, 64));
-        assert_eq!(mask.get_pixel(32, 32).0[0], 255);
     }
 
     #[test]

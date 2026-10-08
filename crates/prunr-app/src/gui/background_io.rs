@@ -217,14 +217,10 @@ impl BackgroundIO {
             // pre-tinted at 255 here.
             let w = mask.width as usize;
             let h = mask.height as usize;
-            let mut pixels = Vec::with_capacity(w * h);
-            for &v in mask.data.iter() {
-                if prunr_core::selection::MaskArtifact::is_selected(v) {
-                    pixels.push(egui::Color32::from_rgba_unmultiplied(0x7b, 0x2d, 0x8e, 255));
-                } else {
-                    pixels.push(egui::Color32::TRANSPARENT);
-                }
-            }
+            let accent = egui::Color32::from_rgba_unmultiplied(0x7b, 0x2d, 0x8e, 255);
+            let pixels: Vec<egui::Color32> = mask.data.iter()
+                .map(|&v| if prunr_core::selection::MaskArtifact::is_selected(v) { accent } else { egui::Color32::TRANSPARENT })
+                .collect();
             let color_image = egui::ColorImage::new([w, h], pixels);
             let _ = texture_tx.send(SelectionTextureResult { item_id, color_image, hash });
         });
