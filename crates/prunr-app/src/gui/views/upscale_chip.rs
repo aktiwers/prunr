@@ -5,7 +5,7 @@
 //! reset button. The X4TwoPass row dims when the active model is not
 //! Real-ESRGAN x4plus (Nomos8k has no native 2× variant).
 
-use egui::{RichText, Ui};
+use egui::Ui;
 use egui_material_icons::icons::ICON_OPEN_IN_FULL;
 use prunr_core::upscale::x4twopass_available;
 use prunr_core::OutputScale;
@@ -49,7 +49,7 @@ pub(crate) fn render_output_scale_chip(
     let resp = chip::chip_button(ui, ICON_OPEN_IN_FULL.codepoint, &label, accent);
     let resp = chip::tooltip(
         resp,
-        "Output Scale",
+        "Scale",
         "How much to enlarge the image. 4\u{00d7} is the model's native size. \
          2\u{00d7} and 3\u{00d7} shrink the 4\u{00d7} output with high-quality \
          resampling. 4\u{00d7} (two-pass) runs the upscale in two halves for \
@@ -60,8 +60,10 @@ pub(crate) fn render_output_scale_chip(
     let mut changed = false;
     let popup_id = egui::Id::new("upscale_output_scale_popup");
     chip::popup_for(ui, popup_id, &resp, |ui| {
-        ui.label(RichText::new("Output Scale").strong().color(theme::TEXT_PRIMARY));
-        ui.add_space(theme::SPACE_XS);
+        if chip::popover_header(ui, "Scale", Some("Back to 4\u{00d7}, the model's native size")) && *value != OutputScale::X4 {
+            *value = OutputScale::X4;
+            changed = true;
+        }
 
         let arch_ok = x4twopass_available(model_id);
         for &option in &[
@@ -90,13 +92,7 @@ pub(crate) fn render_output_scale_chip(
         }
 
         ui.add_space(theme::SPACE_XS);
-        hint(ui, "4\u{00d7} (two-pass) runs Real-ESRGAN twice for cleaner output on noisy photos. Costs roughly double the wall-clock time.");
-        ui.add_space(theme::SPACE_XS);
-
-        if chip::reset_button(ui, "Reset to 4\u{00d7} (native)") && *value != OutputScale::X4 {
-            *value = OutputScale::X4;
-            changed = true;
-        }
+        hint(ui, "Two-pass runs the upscaler twice for a cleaner result on noisy photos, in about twice the time.");
     });
     changed
 }

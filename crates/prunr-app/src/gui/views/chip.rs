@@ -398,19 +398,27 @@ pub(super) fn group_chip<R>(
     let mut out = None;
     popup_for(ui, pop_id, &resp, |ui| {
         ui.set_min_width(g.width);
-        let reset = ui
-            .horizontal(|ui| {
-                ui.label(RichText::new(g.label).strong().color(theme::TEXT_PRIMARY));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    reset_button(ui, "Reset every knob in this group")
-                })
-                .inner
-            })
-            .inner;
-        ui.add_space(theme::SPACE_XS);
+        let reset = popover_header(ui, g.label, Some("Reset every knob in this group"));
         out = Some(body(ui, reset));
     });
     out
+}
+
+/// The first row of every popover: the control's title on the left and,
+/// when the popover has a default, Reset on the right. Returns true on
+/// the frame Reset was clicked.
+pub(super) fn popover_header(ui: &mut Ui, title: &str, reset_tooltip: Option<&str>) -> bool {
+    let reset = ui
+        .horizontal(|ui| {
+            ui.label(RichText::new(title).strong().color(theme::TEXT_PRIMARY));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                reset_tooltip.is_some_and(|tip| reset_button(ui, tip))
+            })
+            .inner
+        })
+        .inner;
+    ui.add_space(theme::SPACE_XS);
+    reset
 }
 
 /// "default" or "n tuned", for a group chip face.

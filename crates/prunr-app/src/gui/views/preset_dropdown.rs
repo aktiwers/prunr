@@ -117,8 +117,7 @@ pub fn render(
         egui::PopupCloseBehavior::CloseOnClickOutside,
         |ui| {
             ui.set_min_width(theme::POPOVER_WIDTH);
-            ui.label(RichText::new("Presets").strong().color(theme::TEXT_PRIMARY));
-            ui.add_space(theme::SPACE_XS);
+            crate::gui::views::chip::popover_header(ui, "Presets", None);
 
             // List in display order: Prunr first, then user presets. Prunr is
             // a synthetic entry — applies ItemSettings::default() and cannot be
