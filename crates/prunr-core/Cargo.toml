@@ -67,3 +67,7 @@ harness = false
 [[bench]]
 name = "sam_decode"
 harness = false
+
+[[bench]]
+name = "sam_preprocess"
+harness = false
