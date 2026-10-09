@@ -714,13 +714,6 @@ fn feather_mask(mask: &mut GrayImage, sigma: f32) {
     }
 }
 
-/// Dilate a grayscale mask by N pixels (0 is a fast no-op).
-/// Thin wrapper around `morphology::shift_mask` that hides the "negative = dilate" sign convention.
-pub(crate) fn dilate_mask(mask: &mut GrayImage, pixels: u32) {
-    if pixels == 0 { return; }
-    crate::morphology::shift_mask(mask, -(pixels as f32));
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

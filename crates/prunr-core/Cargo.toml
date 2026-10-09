@@ -71,3 +71,7 @@ harness = false
 [[bench]]
 name = "sam_preprocess"
 harness = false
+
+[[bench]]
+name = "edge_compose"
+harness = false
