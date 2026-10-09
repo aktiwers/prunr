@@ -508,6 +508,26 @@ pub(super) fn picker_row(ui: &mut Ui, selected: bool, title: &str, description: 
     ui.selectable_label(selected, job)
 }
 
+/// Horizontal tab strip: the active tab is filled, the rest are flat.
+/// Used by Settings, the CLI reference and the Model Store filters.
+pub(super) fn tab_strip(ui: &mut Ui, labels: &[&str], selected: &mut usize) {
+    ui.horizontal(|ui| {
+        for (i, label) in labels.iter().enumerate() {
+            let active = *selected == i;
+            let text = RichText::new(*label)
+                .size(theme::FONT_SIZE_BODY)
+                .color(if active { theme::TEXT_PRIMARY } else { theme::TEXT_SECONDARY });
+            let btn = egui::Button::new(text)
+                .fill(if active { theme::BG_SECONDARY } else { Color32::TRANSPARENT })
+                .corner_radius(theme::BUTTON_ROUNDING)
+                .min_size(egui::vec2(0.0, theme::CHIP_HEIGHT));
+            if ui.add(btn).clicked() {
+                *selected = i;
+            }
+        }
+    });
+}
+
 /// Optional RGBA chip (bg color). Toggle enables; inline color picker sets the value.
 /// Displays "None" when disabled, a swatch preview when enabled.
 ///

@@ -289,18 +289,10 @@ fn render_ram_safety_margin_row(ui: &mut egui::Ui, value: &mut f32) {
 }
 
 fn render_tab_strip(ui: &mut egui::Ui, current: &mut SettingsTab) {
-    ui.horizontal(|ui| {
-        for tab in SettingsTab::ALL.iter().copied() {
-            let is_active = *current == tab;
-            let label = RichText::new(tab.label())
-                .color(if is_active { theme::TEXT_PRIMARY } else { theme::TEXT_SECONDARY })
-                .size(theme::FONT_SIZE_BODY)
-                .strong();
-            if ui.selectable_label(is_active, label).clicked() {
-                *current = tab;
-            }
-        }
-    });
+    let labels = SettingsTab::ALL.map(|t| t.label());
+    let mut idx = SettingsTab::ALL.iter().position(|t| t == current).unwrap_or(0);
+    super::chip::tab_strip(ui, &labels, &mut idx);
+    *current = SettingsTab::ALL[idx];
     ui.separator();
 }
 
