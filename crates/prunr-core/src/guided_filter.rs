@@ -57,21 +57,15 @@ pub fn guided_filter_alpha(
         });
 
     // --- Box filter calls 1-4 in parallel ---
-    // Each needs its own integral scratch and output buffer.
+    // Four integral scratches alive at once is the peak of the whole
+    // filter; two at a time would drop two planes but measured ~9 %
+    // slower at 2048², so the pairing is a RAM-for-speed trade that
+    // stays open rather than applied.
     let ((mean_i, mean_p), (mean_ii, mean_ip)) = rayon::join(
-        || {
-            rayon::join(
-                || box_filter(&guide_f, w, h, radius), // mean_I
-                || box_filter(&mask_f, w, h, radius),  // mean_p
-            )
-        },
-        || {
-            rayon::join(
-                || box_filter(&ii, w, h, radius),  // mean(I*I)
-                || box_filter(&ip, w, h, radius),  // mean(I*p)
-            )
-        },
+        || rayon::join(|| box_filter(&guide_f, w, h, radius), || box_filter(&mask_f, w, h, radius)),
+        || rayon::join(|| box_filter(&ii, w, h, radius), || box_filter(&ip, w, h, radius)),
     );
+    drop(mask_f);
 
     // Compute a and b element-wise: a = cov_ip / (var_i + eps), b = mean_p - a * mean_i.
     // Reuse ii/ip buffers for a/b to avoid allocation.
@@ -95,6 +89,8 @@ pub fn guided_filter_alpha(
             *a = cov_ip / (var_i + epsilon);
             *b = mp - *a * mi;
         });
+
+    drop((mean_i, mean_p, mean_ii, mean_ip));
 
     // --- Box filter calls 5-6 in parallel ---
     let (mean_a, mean_b) = rayon::join(

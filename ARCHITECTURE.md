@@ -425,6 +425,7 @@ Tier 2 path uses postprocess_from_flat(tensor: &[f32], h, w, original, mask, mod
 - Uniform-output detection before the per-pixel loop
 - Alpha composition row-parallel via `par_chunks_mut` above 256k pixels (memory-bandwidth-bound, so the ceiling is ~1.1-1.2× on 4K regardless of core count)
 - Guided filter uses `f32` prefix sums (halved bandwidth vs f64)
+- Guided filter drops each f32 plane at its last use; peak stays at the four parallel box filters (12 planes, 576 MB at 4K) because pairing them measured ~9 % slower (open trade)
 - Edge shift is two separable window passes (van Herk / Gil-Werman), constant time per pixel whatever the shift; a fractional shift blends with the next integer shift computed in place in the same two scratch planes
 - Single RGBA allocation in `postprocess()` — shared across guided filter and mask application (saves ~48 MB per Tier 2 run on a 4000×3000 image)
 
@@ -452,8 +453,8 @@ ignore than to investigate. Reference numbers (8-core x86_64,
 
 | Kernel                              | Configuration            | Time (median) |
 |-------------------------------------|--------------------------|--------------:|
-| `guided_filter_alpha`               | 512² guide + mask        |        9.9 ms |
-| `guided_filter_alpha`               | 2048² guide + mask       |        243 ms |
+| `guided_filter_alpha`               | 512² guide + mask        |        4.4 ms |
+| `guided_filter_alpha`               | 2048² guide + mask       |         80 ms |
 | `morphology::shift_mask`            | 4K mask, 1 px            |         16 ms |
 | `morphology::shift_mask`            | 4K mask, 2.5 px          |         35 ms |
 | `morphology::shift_mask`            | 4K mask, 10 px           |         15 ms |
