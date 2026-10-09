@@ -162,11 +162,7 @@ pub(super) fn render(
         ui.separator();
         ui.add_space(4.0);
 
-        if ui
-            .button("Reset brush")
-            .on_hover_text("Reset radius, hardness, mask grow, edge softness, sharpen, and shape to defaults")
-            .clicked()
-        {
+        if chip::reset_button(ui, "Reset radius, hardness, mask grow, edge softness, sharpen, and shape to defaults") {
             outcome.reset_brush_requested = true;
         }
     });

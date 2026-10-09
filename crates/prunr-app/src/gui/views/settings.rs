@@ -13,6 +13,7 @@ use crate::gui::app::PrunrApp;
 use crate::gui::settings::Settings;
 use crate::gui::theme;
 
+use super::chip::{button, ButtonKind};
 use super::{hint, kv_row, section_heading};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -115,14 +116,10 @@ fn render_modal_footer(ui: &mut egui::Ui, app: &mut PrunrApp) {
             ui.label(RichText::new("Reset all settings to defaults?")
                 .color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.small_button(RichText::new("Cancel")
-                    .color(theme::TEXT_SECONDARY).size(theme::FONT_SIZE_BODY)).clicked()
-                {
+                if button(ui, ButtonKind::Secondary, "Cancel").clicked() {
                     app.pending_reset_confirm = false;
                 }
-                if ui.small_button(RichText::new("Reset")
-                    .color(theme::DESTRUCTIVE).size(theme::FONT_SIZE_BODY).strong()).clicked()
-                {
+                if button(ui, ButtonKind::Destructive, "Reset").clicked() {
                     app.settings.reset_preserving_identity();
                     app.pending_reset_confirm = false;
                 }
@@ -131,9 +128,7 @@ fn render_modal_footer(ui: &mut egui::Ui, app: &mut PrunrApp) {
             ui.label(RichText::new("Auto-saved")
                 .color(theme::TEXT_HINT).size(theme::FONT_SIZE_MONO));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.small_button(RichText::new("Reset to defaults")
-                    .color(theme::TEXT_SECONDARY).size(theme::FONT_SIZE_MONO)).clicked()
-                {
+                if button(ui, ButtonKind::Secondary, "Reset to defaults").clicked() {
                     app.pending_reset_confirm = true;
                 }
             });
@@ -246,17 +241,14 @@ fn render_hardware_section(
             .color(theme::TEXT_SECONDARY).size(theme::FONT_SIZE_MONO));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ctx.install_in_progress {
-                if ui.button(RichText::new("Cancel")
-                    .color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY)).clicked() {
+                if button(ui, ButtonKind::Secondary, "Cancel").clicked() {
                     intent = Some(HardwareSectionIntent::CancelInstall);
                 }
             } else if installed {
-                if ui.button(RichText::new("Uninstall")
-                    .color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY)).clicked() {
+                if button(ui, ButtonKind::Destructive, "Uninstall").clicked() {
                     intent = Some(HardwareSectionIntent::Uninstall(rt));
                 }
-            } else if ui.button(RichText::new("Install")
-                .color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY)).clicked() {
+            } else if button(ui, ButtonKind::Primary, "Install").clicked() {
                 intent = Some(HardwareSectionIntent::StartInstall(rt));
             }
         });
@@ -271,8 +263,7 @@ fn render_hardware_section(
         ui.label(RichText::new("Compiled-model cache")
             .color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui.button(RichText::new("Clear")
-                .color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY)).clicked() {
+            if button(ui, ButtonKind::Secondary, "Clear").clicked() {
                 intent = Some(HardwareSectionIntent::ClearCompiledCache);
             }
         });
