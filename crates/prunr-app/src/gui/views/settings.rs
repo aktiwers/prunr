@@ -197,7 +197,7 @@ fn render_hardware_section(
             };
             kv_row(ui, "GPU", &gpu_label, theme::TEXT_SECONDARY);
             let active_provider = prunr_core::OrtEngine::detect_active_provider();
-            kv_row(ui, "Active EP", &active_provider, theme::TEXT_SECONDARY);
+            kv_row(ui, "Accelerator", &active_provider, theme::TEXT_SECONDARY);
             let total_ram = hardware::total_ram_bytes();
             kv_row(ui, "RAM",
                 &format!("{:.1} / {:.1} GB free",
@@ -254,7 +254,7 @@ fn render_hardware_section(
         });
     });
     if p.recommends_openvino() && !installed && !ctx.install_in_progress {
-        hint(ui, "Recommended for Intel hardware — 2-3× faster inference, plus iGPU acceleration for SD inpaint.");
+        hint(ui, "Recommended for Intel hardware: 2 to 3 times faster, and the built-in GPU can run the SD eraser.");
     }
 
     ui.add_space(theme::SPACE_MD);
@@ -268,7 +268,7 @@ fn render_hardware_section(
             }
         });
     });
-    hint(ui, "Wipes per-EP compiled artifacts (CUDA optimized graphs, CoreML mlmodelc). Models recompile on next use. Use if a cached file is corrupt or you want the disk space back.");
+    hint(ui, "Models are compiled for your graphics hardware the first time they run. Clear the cache if a compiled file is corrupt or to free disk space; models recompile on next use.");
 
     ui.add_space(theme::SPACE_MD);
     intent
@@ -276,7 +276,7 @@ fn render_hardware_section(
 
 fn render_ram_safety_margin_row(ui: &mut egui::Ui, value: &mut f32) {
     super::chip::slider_row_f32(ui, "SD safety margin", value, 0.0..=8.0, false, |v| format!("{v:.1} GB"));
-    hint(ui, "Free RAM the SD eraser keeps clear on top of the model's working set. Higher = more conservative on systems where other apps spike during inference. Default 2 GB.");
+    hint(ui, "Free memory the SD eraser keeps clear on top of what the model needs. Raise it if other apps use a lot of memory while it runs. Default 2 GB.");
 }
 
 fn render_tab_strip(ui: &mut egui::Ui, current: &mut SettingsTab) {
