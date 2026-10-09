@@ -1,12 +1,14 @@
 //! Selection action bar — Delete / Copy / Cut / Invert / Clear.
 //! Renders below the adjustments toolbar when a selection exists.
-//! Keyboard bindings: Del / Ctrl+C / Ctrl+X / Enter / Esc.
+//! Keyboard hints come from the shortcut table.
 
 use egui::{Color32, RichText, Stroke, Ui};
 
+use super::chip::tooltip;
+use super::shortcuts::{keys, Action};
 use crate::gui::theme::{
-    ACCENT, BG_SECONDARY, BUTTON_ROUNDING, CHIP_HEIGHT, DESTRUCTIVE, FONT_SIZE_BODY,
-    FONT_SIZE_MONO, SPACE_XS, STROKE_DEFAULT, TEXT_PRIMARY, TEXT_SECONDARY,
+    ACCENT, BG_SECONDARY, BUTTON_ROUNDING, CHIP_HEIGHT, DESTRUCTIVE, FONT_SIZE_BODY, SPACE_XS,
+    STROKE_DEFAULT, TEXT_PRIMARY,
 };
 
 /// What the action bar wants the app to do. Returned to the caller
@@ -39,13 +41,13 @@ pub(crate) fn render_selection_action_bar(ui: &mut Ui) -> Option<SelectionAction
     ui.add_space(SPACE_XS);
 
     ui.horizontal(|ui| {
-        if action_button(ui, "🗑  Delete", "Delete", "Del", Some(DESTRUCTIVE)).clicked() {
+        if action_button(ui, "🗑  Delete", "Delete", keys(Action::Delete), Some(DESTRUCTIVE)).clicked() {
             chosen = Some(SelectionAction::Delete);
         }
-        if action_button(ui, "📋  Copy", "Copy", "Ctrl+C", None).clicked() {
+        if action_button(ui, "📋  Copy", "Copy", keys(Action::Copy), None).clicked() {
             chosen = Some(SelectionAction::Copy);
         }
-        if action_button(ui, "✂  Cut", "Cut", "Ctrl+X", None).clicked() {
+        if action_button(ui, "✂  Cut", "Cut", keys(Action::Cut), None).clicked() {
             chosen = Some(SelectionAction::Cut);
         }
 
@@ -57,10 +59,10 @@ pub(crate) fn render_selection_action_bar(ui: &mut Ui) -> Option<SelectionAction
         );
         ui.add_space(SPACE_XS);
 
-        if action_button(ui, "⇄  Invert", "Invert", "Enter", None).clicked() {
+        if action_button(ui, "⇄  Invert", "Invert", keys(Action::Invert), None).clicked() {
             chosen = Some(SelectionAction::Invert);
         }
-        if action_button(ui, "✕  Clear", "Clear", "Esc", None).clicked() {
+        if action_button(ui, "✕  Clear", "Clear", keys(Action::Cancel), None).clicked() {
             chosen = Some(SelectionAction::Clear);
         }
     });
@@ -71,7 +73,7 @@ pub(crate) fn render_selection_action_bar(ui: &mut Ui) -> Option<SelectionAction
 /// Render a single action button. `text` is the pre-joined "icon + label"
 /// rendered on the button face — passing a `&'static str` keeps the
 /// render closure alloc-free at 60 Hz. `label` is the bare action name
-/// used only inside the hover-gated tooltip header.
+/// used as the tooltip title.
 /// Delete uses DESTRUCTIVE border; others use the standard stroke color.
 fn action_button(
     ui: &mut Ui,
@@ -96,21 +98,7 @@ fn action_button(
     );
     ui.spacing_mut().button_padding = saved_padding;
 
-    if !keyboard_hint.is_empty() {
-        // Tooltip body is built only when hover fires — the format! here
-        // is hover-gated, not per-frame.
-        let tooltip_text = format!("{}  ({})", label, keyboard_hint);
-        resp.clone().on_hover_ui(|ui| {
-            ui.label(RichText::new(label).strong().color(TEXT_PRIMARY));
-            ui.add_space(SPACE_XS);
-            ui.label(
-                RichText::new(&tooltip_text)
-                    .color(TEXT_SECONDARY)
-                    .size(FONT_SIZE_MONO),
-            );
-        });
-    }
-    resp
+    tooltip(resp, label, "", Some(keyboard_hint))
 }
 
 #[cfg(test)]

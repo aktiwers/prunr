@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::{mpsc, Arc};
 
-use egui::{Key, ViewportCommand};
+use egui::ViewportCommand;
 
 use prunr_core::ProgressStage;
 use super::drag_export_state::DragExportState;
@@ -3064,18 +3064,19 @@ impl PrunrApp {
     }
 
     fn handle_keyboard_shortcuts(&mut self, ctx: &egui::Context) {
-        let intents = collect_shortcut_intents(ctx);
+        use crate::gui::views::shortcuts::{self, Action};
+        let pressed = shortcuts::pressed(ctx);
         let copy_requested = std::mem::take(&mut self.pending_copy);
         let pending_open = std::mem::take(&mut self.pending_open_dialog);
 
-        if intents.open_requested || pending_open {
+        if pressed.is(Action::Open) || pending_open {
             self.handle_open_dialog();
         }
         let app_state = self.batch.app_state();
-        if intents.remove_requested && matches!(app_state, AppState::Loaded | AppState::Done) {
+        if pressed.is(Action::Process) && matches!(app_state, AppState::Loaded | AppState::Done) {
             self.handle_process_intent();
         }
-        if intents.save_requested && app_state == AppState::Done {
+        if pressed.is(Action::Save) && app_state == AppState::Done {
             self.handle_save_selected();
         }
         // Selection shortcuts share the action bar's gate; Ctrl+C without
@@ -3090,39 +3091,39 @@ impl PrunrApp {
         }
         if let Some(idx) = selection_idx {
             for (wanted, action) in [
-                (intents.cut_selection, SelectionAction::Cut),
-                (intents.delete_selection, SelectionAction::Delete),
-                (intents.invert_selection, SelectionAction::Invert),
+                (pressed.is(Action::Cut), SelectionAction::Cut),
+                (pressed.is(Action::Delete), SelectionAction::Delete),
+                (pressed.is(Action::Invert), SelectionAction::Invert),
             ] {
                 if wanted {
                     self.handle_selection_action(idx, action, ctx);
                 }
             }
         }
-        if intents.toggle_before_after && app_state == AppState::Done {
+        if pressed.is(Action::BeforeAfter) && app_state == AppState::Done {
             self.show_original = !self.show_original;
         }
-        if intents.fit_to_window { self.zoom_state.pending_fit_zoom = true; }
-        if intents.actual_size   { self.zoom_state.pending_actual_size = true; }
+        if pressed.is(Action::FitToWindow) { self.zoom_state.pending_fit_zoom = true; }
+        if pressed.is(Action::ActualSize)   { self.zoom_state.pending_actual_size = true; }
 
-        if intents.cancel_requested {
+        if pressed.is(Action::Cancel) {
             self.apply_cancel_shortcut(ctx);
         }
 
-        if intents.toggle_shortcuts { self.show_shortcuts = !self.show_shortcuts; }
-        if intents.toggle_cli_help  { self.show_cli_help  = !self.show_cli_help;  }
-        if intents.toggle_pipeline_flow { self.show_pipeline_flow = !self.show_pipeline_flow; }
-        if intents.toggle_settings  { self.toggle_settings_panel(ctx); }
+        if pressed.is(Action::Shortcuts) { self.show_shortcuts = !self.show_shortcuts; }
+        if pressed.is(Action::CliHelp)  { self.show_cli_help  = !self.show_cli_help;  }
+        if pressed.is(Action::PipelineFlow) { self.show_pipeline_flow = !self.show_pipeline_flow; }
+        if pressed.is(Action::Settings)  { self.toggle_settings_panel(ctx); }
 
-        if intents.nav_prev { self.navigate_batch(ctx, NavDir::Prev); }
-        if intents.nav_next { self.navigate_batch(ctx, NavDir::Next); }
+        if pressed.is(Action::PrevImage) { self.navigate_batch(ctx, NavDir::Prev); }
+        if pressed.is(Action::NextImage) { self.navigate_batch(ctx, NavDir::Next); }
 
-        if intents.toggle_sidebar     { self.sidebar_hidden     = !self.sidebar_hidden; }
-        if intents.toggle_adjustments { self.adjustments_hidden = !self.adjustments_hidden; }
+        if pressed.is(Action::ToggleQueue)     { self.sidebar_hidden     = !self.sidebar_hidden; }
+        if pressed.is(Action::ToggleAdjustments) { self.adjustments_hidden = !self.adjustments_hidden; }
 
-        if intents.undo_requested { self.handle_undo(ctx); }
-        if intents.redo_requested { self.handle_redo(ctx); }
-        if intents.screenshot_requested {
+        if pressed.is(Action::Undo) { self.handle_undo(ctx); }
+        if pressed.is(Action::Redo) { self.handle_redo(ctx); }
+        if pressed.is(Action::Screenshot) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
         }
 
@@ -4160,97 +4161,6 @@ impl ClassifiedTiers {
             .chain(self.tier_add_edge.iter())
             .copied().collect()
     }
-}
-
-/// Pure aggregate of "user pressed a shortcut this frame" flags, collected
-/// from `ctx.input` in a single pass. Separating collect from apply lets the
-/// apply phase freely borrow `&mut self` without fighting egui's input lock.
-#[derive(Default)]
-struct ShortcutIntents {
-    open_requested: bool,
-    remove_requested: bool,
-    save_requested: bool,
-    cancel_requested: bool,
-    toggle_shortcuts: bool,
-    toggle_cli_help: bool,
-    toggle_pipeline_flow: bool,
-    toggle_before_after: bool,
-    fit_to_window: bool,
-    actual_size: bool,
-    toggle_settings: bool,
-    nav_prev: bool,
-    nav_next: bool,
-    toggle_sidebar: bool,
-    toggle_adjustments: bool,
-    undo_requested: bool,
-    redo_requested: bool,
-    screenshot_requested: bool,
-    /// Delete key — delete selected region when a selection is active.
-    delete_selection: bool,
-    /// Ctrl+X — cut selection to clipboard when a selection is active.
-    cut_selection: bool,
-    /// Enter key — invert the active selection.
-    invert_selection: bool,
-}
-
-fn collect_shortcut_intents(ctx: &egui::Context) -> ShortcutIntents {
-    // Suppress bare-key shortcuts when any widget has focus (e.g., hex color input).
-    let text_focused = ctx.memory(|m| m.focused().is_some());
-    let mut s = ShortcutIntents::default();
-    ctx.input(|i| {
-        // Fresh-press filter: egui's `key_pressed` includes OS key-repeat
-        // events, which flip toggle-shortcuts on/off many times a second if
-        // the user holds the key for more than the repeat-delay. Bind toggle
-        // intents via this instead.
-        let fresh = |k: Key| i.events.iter().any(|e| matches!(
-            e,
-            egui::Event::Key { key, pressed: true, repeat: false, .. } if *key == k,
-        ));
-
-        // Modifier shortcuts always work, even with a text field focused.
-        if i.modifiers.command && i.key_pressed(Key::O) { s.open_requested = true; }
-        if i.modifiers.command && i.key_pressed(Key::R) { s.remove_requested = true; }
-        if i.modifiers.command && i.key_pressed(Key::S) { s.save_requested = true; }
-        if i.key_pressed(Key::Escape)                   { s.cancel_requested = true; }
-        if i.modifiers.command && i.key_pressed(Key::X) { s.cut_selection = true; }
-        // Delete key — bare key, suppressed when a text field is focused (handled below).
-        if !text_focused && i.key_pressed(Key::Delete)  { s.delete_selection = true; }
-        if !text_focused && i.key_pressed(Key::Enter)   { s.invert_selection = true; }
-        if fresh(Key::F1)                               { s.toggle_shortcuts = true; }
-        if fresh(Key::F2)                               { s.toggle_cli_help = true; }
-        if fresh(Key::F3)                               { s.toggle_pipeline_flow = true; }
-        // Test-harness hook (also doubles as a bug-report capture).
-        // Writes to `$PRUNR_SCREENSHOT_DIR` (default `<temp>/prunr-screenshots/`).
-        if i.modifiers.shift && fresh(Key::F12)         { s.screenshot_requested = true; }
-        if i.modifiers.command && i.key_pressed(Key::Num0)  { s.fit_to_window = true; }
-        if i.modifiers.command && i.key_pressed(Key::Num1)  { s.actual_size = true; }
-        if i.modifiers.command && i.key_pressed(Key::Space) { s.toggle_settings = true; }
-
-        // Bare-key shortcuts — only when no text field is focused.
-        if !text_focused {
-            if i.key_pressed(Key::B) { s.toggle_before_after = true; }
-            if i.key_pressed(Key::ArrowLeft)  || i.key_pressed(Key::A) { s.nav_prev = true; }
-            if i.key_pressed(Key::ArrowRight) || i.key_pressed(Key::D) { s.nav_next = true; }
-            // H = toggle sidebar, Shift+H = toggle adjustments toolbar.
-            // Tab stays reserved for egui's focus traversal (accessibility),
-            // kept here as a fallback for v1 muscle memory.
-            if i.key_pressed(Key::H) {
-                if i.modifiers.shift { s.toggle_adjustments = true; }
-                else                 { s.toggle_sidebar = true; }
-            }
-            if i.key_pressed(Key::Tab) && !i.modifiers.shift { s.toggle_sidebar = true; }
-        }
-
-        // Cmd/Ctrl+Z → undo. Cmd/Ctrl+Shift+Z → redo (Adobe convention).
-        // Cmd/Ctrl+Y → redo (Windows/Linux convention). Both redo bindings
-        // route to the same unified action log.
-        if i.modifiers.command && i.key_pressed(Key::Z) {
-            if i.modifiers.shift { s.redo_requested = true; }
-            else                 { s.undo_requested = true; }
-        }
-        if i.modifiers.command && i.key_pressed(Key::Y) { s.redo_requested = true; }
-    });
-    s
 }
 
 /// Apply all Tier-2 upscale postprocess knobs to `img` in the canonical order:
