@@ -108,13 +108,9 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) -> bool {
             });
             ui.add_space(theme::SPACE_SM);
 
-            ui.horizontal(|ui| {
-                filter_chip(ui, "All", None, &mut new_filter);
-                filter_chip(ui, "Background", Some(ModelCategory::Segmentation), &mut new_filter);
-                filter_chip(ui, "Lines", Some(ModelCategory::EdgeDetection), &mut new_filter);
-                filter_chip(ui, "Eraser", Some(ModelCategory::Inpaint), &mut new_filter);
-                filter_chip(ui, "Upscale", Some(ModelCategory::Upscale), &mut new_filter);
-            });
+            let mut idx = FILTERS.iter().position(|(_, c)| *c == new_filter).unwrap_or(0);
+            super::chip::tab_strip(ui, &FILTERS.map(|(label, _)| label), &mut idx);
+            new_filter = FILTERS[idx].1;
             ui.add_space(theme::SPACE_SM);
             ui.separator();
 
@@ -183,24 +179,14 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) -> bool {
     backdrop_closed || close_requested
 }
 
-fn filter_chip(
-    ui: &mut egui::Ui,
-    label: &str,
-    category: Option<ModelCategory>,
-    current: &mut Option<ModelCategory>,
-) {
-    let selected = *current == category;
-    let text = RichText::new(label)
-        .size(theme::FONT_SIZE_BODY)
-        .color(if selected { theme::TEXT_PRIMARY } else { theme::TEXT_SECONDARY });
-    let btn = egui::Button::new(text)
-        .fill(if selected { theme::BG_SECONDARY } else { egui::Color32::TRANSPARENT })
-        .corner_radius(theme::BUTTON_ROUNDING)
-        .min_size(egui::vec2(0.0, theme::CHIP_HEIGHT));
-    if ui.add(btn).clicked() {
-        *current = category;
-    }
-}
+/// Filter tabs in display order; `None` is "All".
+const FILTERS: [(&str, Option<ModelCategory>); 5] = [
+    ("All", None),
+    ("Background", Some(ModelCategory::Segmentation)),
+    ("Lines", Some(ModelCategory::EdgeDetection)),
+    ("Eraser", Some(ModelCategory::Inpaint)),
+    ("Upscale", Some(ModelCategory::Upscale)),
+];
 
 fn render_card(
     ui: &mut egui::Ui,
