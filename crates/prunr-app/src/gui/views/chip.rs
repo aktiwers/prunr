@@ -60,10 +60,25 @@ fn slider_settled(resp: &egui::Response) -> bool {
     resp.drag_stopped() || (resp.changed() && !resp.dragged())
 }
 
+/// Run `body` with `base` as the resting fill of every button inside,
+/// brightening it on hover and again while pressed. A fixed `.fill()`
+/// on a button would freeze all three states, which reads as a dead
+/// control; this is the one place the three shades are defined.
+pub(super) fn with_fill<R>(ui: &mut Ui, base: Color32, body: impl FnOnce(&mut Ui) -> R) -> R {
+    ui.scope(|ui| {
+        let w = &mut ui.visuals_mut().widgets;
+        w.inactive.weak_bg_fill = base;
+        w.hovered.weak_bg_fill = base.lerp_to_gamma(Color32::WHITE, 0.08);
+        w.active.weak_bg_fill = base.lerp_to_gamma(Color32::WHITE, 0.18);
+        w.open.weak_bg_fill = base.lerp_to_gamma(Color32::WHITE, 0.08);
+        body(ui)
+    })
+    .inner
+}
+
 /// Shared chip-button renderer. Returns the response for popup wiring.
 /// `accent` = true draws an accent border (non-default value indicator).
 pub(super) fn chip_button(ui: &mut Ui, icon: &str, value: &str, accent: bool) -> Response {
-    let fill = theme::BG_SECONDARY;
     let stroke = if accent {
         egui::Stroke::new(theme::STROKE_DEFAULT, theme::ACCENT)
     } else {
@@ -73,15 +88,16 @@ pub(super) fn chip_button(ui: &mut Ui, icon: &str, value: &str, accent: bool) ->
     let btn = egui::Button::new(
         RichText::new(text).color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY),
     )
-    .fill(fill)
     .stroke(stroke)
     .corner_radius(theme::BUTTON_ROUNDING)
     .min_size(egui::vec2(0.0, theme::CHIP_HEIGHT));
-    let saved_padding = ui.spacing().button_padding;
-    ui.spacing_mut().button_padding = egui::vec2(CHIP_PADDING_X, 4.0);
-    let resp = ui.add(btn);
-    ui.spacing_mut().button_padding = saved_padding;
-    resp
+    with_fill(ui, theme::BG_SECONDARY, |ui| {
+        let saved_padding = ui.spacing().button_padding;
+        ui.spacing_mut().button_padding = egui::vec2(CHIP_PADDING_X, 4.0);
+        let resp = ui.add(btn);
+        ui.spacing_mut().button_padding = saved_padding;
+        resp
+    })
 }
 
 /// Solid inner + concentric soft-falloff strokes following the same
@@ -177,12 +193,13 @@ pub(super) fn icon_action_button(ui: &mut Ui, icon: &str) -> Response {
 }
 
 fn icon_square_button(ui: &mut Ui, icon: &str, color: Color32, fill: Color32) -> Response {
-    ui.add(
-        egui::Button::new(RichText::new(icon).color(color).size(theme::ICON_SIZE_SMALL))
-            .fill(fill)
-            .corner_radius(theme::BUTTON_ROUNDING)
-            .min_size(egui::vec2(theme::CHIP_HEIGHT, theme::CHIP_HEIGHT)),
-    )
+    with_fill(ui, fill, |ui| {
+        ui.add(
+            egui::Button::new(RichText::new(icon).color(color).size(theme::ICON_SIZE_SMALL))
+                .corner_radius(theme::BUTTON_ROUNDING)
+                .min_size(egui::vec2(theme::CHIP_HEIGHT, theme::CHIP_HEIGHT)),
+        )
+    })
 }
 
 /// Wrap a chip render in `add_enabled_ui(active, ...)` and, when disabled,
@@ -521,10 +538,10 @@ pub(super) fn tab_strip(ui: &mut Ui, labels: &[&str], selected: &mut usize) {
                 .size(theme::FONT_SIZE_BODY)
                 .color(if active { theme::TEXT_PRIMARY } else { theme::TEXT_SECONDARY });
             let btn = egui::Button::new(text)
-                .fill(if active { theme::BG_SECONDARY } else { Color32::TRANSPARENT })
                 .corner_radius(theme::BUTTON_ROUNDING)
                 .min_size(egui::vec2(0.0, theme::CHIP_HEIGHT));
-            if ui.add(btn).clicked() {
+            let fill = if active { theme::BG_SECONDARY } else { Color32::TRANSPARENT };
+            if with_fill(ui, fill, |ui| ui.add(btn)).clicked() {
                 *selected = i;
             }
         }
@@ -549,12 +566,13 @@ pub(super) fn button(ui: &mut Ui, kind: ButtonKind, text: &str) -> Response {
         ButtonKind::Secondary => (theme::BG_SECONDARY, theme::TEXT_PRIMARY),
         ButtonKind::Destructive => (theme::DESTRUCTIVE, Color32::WHITE),
     };
-    ui.add(
-        egui::Button::new(RichText::new(text).color(color).size(theme::FONT_SIZE_BODY))
-            .fill(fill)
-            .corner_radius(theme::BUTTON_ROUNDING)
-            .min_size(egui::vec2(0.0, theme::CHIP_HEIGHT)),
-    )
+    with_fill(ui, fill, |ui| {
+        ui.add(
+            egui::Button::new(RichText::new(text).color(color).size(theme::FONT_SIZE_BODY))
+                .corner_radius(theme::BUTTON_ROUNDING)
+                .min_size(egui::vec2(0.0, theme::CHIP_HEIGHT)),
+        )
+    })
 }
 
 /// Optional RGBA chip (bg color). Toggle enables; inline color picker sets the value.
