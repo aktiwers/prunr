@@ -274,7 +274,7 @@ pub(crate) struct BatchItem {
     /// the postprocess functions are re-run on every Tier-2 dispatch.
     ///
     /// RAM impact: at 4K source × 4× upscale = 15360×8640 RGBA ≈ 500 MB.
-    /// The memory governor's `cache_size()` accounts for this. The Arc
+    /// Not under the tensor budget (`evictable_tensor_bytes`). The Arc
     /// wraps the buffer so cheap clones in live-preview snapshots
     /// don't duplicate.
     pub(crate) upscale_raw: Option<Arc<image::RgbaImage>>,
@@ -348,23 +348,27 @@ pub(crate) struct BatchItem {
     /// - Item destruction (image switch — per-BatchItem naturally clears)
     pub(crate) selection_mask: Option<Arc<prunr_core::selection::MaskArtifact>>,
 
-    /// Content hash of `selection_mask`. Set in lockstep with the mask
-    /// via `BatchManager::commit_selection`. Used by outline + texture
-    /// invalidation and the BG-removal auto-apply rerun trigger.
+    /// Content hash of `selection_mask`, set in lockstep with the mask by
+    /// `commit_selection_mask`. Half of the selection texture's key.
     pub(crate) selection_hash: Option<u64>,
 
-    /// Set while an off-thread selection texture build is in flight;
-    /// cleared when it lands or is dropped as stale.
-    pub(crate) selection_tex_pending: bool,
+    /// Key of the selection texture build in flight, if any; cleared when
+    /// that build lands or is dropped as stale.
+    pub(crate) selection_tex_pending: Option<super::background_io::SelectionTextureKey>,
 
-    /// Cached selection visualization texture. Built off-thread and
-    /// uploaded via `drain_background_channels`. Rebuilt only when
-    /// `selection_hash` changes.
-    pub(crate) selection_texture: Option<egui::TextureHandle>,
+    /// Selection overlay texture with the key it was built from. Rebuilt
+    /// whenever the mask or the baked style differs from the key.
+    pub(crate) selection_texture: Option<SelectionTexture>,
 
-    /// Cached SAM 2 image embedding. Filled on Magic Brush activation
-    /// (eager-encoder UX). Invalidated on source change and item switch.
+    /// Cached SAM 2 image embedding, filled whenever Magic Brush is active
+    /// and this item is selected. Invalidated on source change.
     pub(crate) magic_brush_embedding: Option<std::sync::Arc<prunr_core::sam::SamEmbedding>>,
+}
+
+/// A selection overlay texture and what it was built from.
+pub(crate) struct SelectionTexture {
+    pub(crate) key: super::background_io::SelectionTextureKey,
+    pub(crate) handle: egui::TextureHandle,
 }
 
 impl BatchItem {
@@ -410,7 +414,7 @@ impl BatchItem {
         self.selection_mask = None;
         self.selection_hash = None;
         self.selection_texture = None;
-        self.selection_tex_pending = false;
+        self.selection_tex_pending = None;
     }
 
     /// Make `mask` the selection and register the change for undo: the
@@ -427,7 +431,6 @@ impl BatchItem {
         }
         let pre = self.selection_mask.replace(mask);
         self.selection_hash = Some(hash);
-        self.selection_texture = None;
         if push_stroke_bounded(&mut self.stroke_undo_stack, pre) {
             // The dropped snapshot's marker would otherwise undo nothing.
             if let Some(pos) = self.actions_undo.iter().position(|a| matches!(a, ActionType::Stroke)) {
@@ -454,7 +457,6 @@ impl BatchItem {
         if let Some(prev) = self.stroke_undo_stack.pop_back() {
             self.selection_mask = prev;
             self.selection_hash = self.selection_mask.as_ref().map(|m| m.content_hash());
-            self.selection_texture = None;
         }
         // Pop the matching marker. rposition handles edge cases where
         // a non-Stroke action was pushed between the commit and the
@@ -475,7 +477,6 @@ impl BatchItem {
         push_stroke_bounded(&mut self.stroke_redo_stack, current);
         self.selection_mask = prev;
         self.selection_hash = self.selection_mask.as_ref().map(|m| m.content_hash());
-        self.selection_texture = None;
         true
     }
 
@@ -486,7 +487,6 @@ impl BatchItem {
         push_stroke_bounded(&mut self.stroke_undo_stack, current);
         self.selection_mask = next;
         self.selection_hash = self.selection_mask.as_ref().map(|m| m.content_hash());
-        self.selection_texture = None;
         true
     }
 
@@ -615,47 +615,12 @@ impl BatchItem {
         self.result_rgba.is_some()
     }
 
-    /// Combined size of all caches on this item. Used by memory governance
-    /// and telemetry.
-    ///
-    /// Note: `upscale_raw` is the largest single cached artifact (≈500 MB at
-    /// 4K × 4× upscale). The governor must see this to make correct eviction
-    /// decisions.
-    pub(crate) fn cache_size(&self) -> usize {
-        let seg = self.cached_tensor.as_ref().map(|ct| ct.compressed_size()).unwrap_or(0);
-        let edge = self.cached_edge_tensors.as_ref().map(|ct| ct.compressed_size()).unwrap_or(0);
-        let upscale = self.upscale_raw.as_ref().map_or(0, |r| {
-            r.width() as usize * r.height() as usize * 4
-        });
-        let bicubic = self.bicubic_source.as_ref().map_or(0, |r| {
-            r.width() as usize * r.height() as usize * 4
-        });
-        // Selection mask: source-res i8, Arc-wrapped (count refcount once)
-        let selection_bytes = self.selection_mask.as_ref().map_or(0, |m| m.data.len());
-        // Undo/redo snapshots share Arcs with each other and with the live
-        // mask; count each distinct plane once.
-        let mut seen: Vec<*const Vec<i8>> = self
-            .selection_mask
-            .iter()
-            .map(|m| Arc::as_ptr(&m.data))
-            .collect();
-        let stroke_bytes: usize = self
-            .stroke_undo_stack
-            .iter()
-            .chain(self.stroke_redo_stack.iter())
-            .flatten()
-            .filter_map(|m| {
-                let ptr = Arc::as_ptr(&m.data);
-                (!seen.contains(&ptr)).then(|| {
-                    seen.push(ptr);
-                    m.data.len()
-                })
-            })
-            .sum();
-        let embedding_bytes = if self.magic_brush_embedding.is_some() {
-            prunr_core::sam::SamEmbedding::expected_bytes()
-        } else { 0 };
-        seg + edge + upscale + bicubic + selection_bytes + stroke_bytes + embedding_bytes
+    /// What `enforce_tensor_budget` can free: the compressed segmentation
+    /// and edge tensors.
+    pub(crate) fn evictable_tensor_bytes(&self) -> usize {
+        let seg = self.cached_tensor.as_ref().map_or(0, |ct| ct.compressed_size());
+        let edge = self.cached_edge_tensors.as_ref().map_or(0, |ct| ct.compressed_size());
+        seg + edge
     }
 
     /// Test-only constructor: returns a BatchItem with all fields at their
@@ -722,7 +687,7 @@ impl BatchItem {
             bg_image_tex_pending: false,
             selection_mask: None,
             selection_hash: None,
-            selection_tex_pending: false,
+            selection_tex_pending: None,
             selection_texture: None,
             magic_brush_embedding: None,
         }
@@ -844,12 +809,6 @@ mod tests {
         assert!(!item.source_tex_pending);
         assert!(!item.result_tex_pending);
         assert!(!item.decode_pending);
-    }
-
-    #[test]
-    fn cache_size_zero_when_caches_empty() {
-        let item = fixture_item(1);
-        assert_eq!(item.cache_size(), 0);
     }
 
     fn fixture_recipe() -> prunr_core::ProcessingRecipe {
@@ -1136,6 +1095,15 @@ mod tests {
     }
 
     #[test]
+    fn evictable_bytes_count_only_the_tensor_caches() {
+        let mut item = fixture_item(1);
+        assert_eq!(item.evictable_tensor_bytes(), 0);
+        item.selection_mask = Some(Arc::new(prunr_core::selection::MaskArtifact::new_empty(16, 16)));
+        item.upscale_raw = Some(Arc::new(image::RgbaImage::new(4, 4)));
+        assert_eq!(item.evictable_tensor_bytes(), 0, "planes and upscale buffers are not evictable");
+    }
+
+    #[test]
     fn stroke_history_caps_at_depth() {
         let mut item = fixture_item(1);
         for i in 0..(STROKE_HISTORY_DEPTH + 5) {
@@ -1258,24 +1226,6 @@ mod tests {
     }
 
     #[test]
-    fn cache_size_includes_upscale_raw() {
-        let item_without = fixture_item(1);
-        let base_size = item_without.cache_size();
-
-        let mut item_with = fixture_item(2);
-        let img = Arc::new(image::RgbaImage::new(256, 256));
-        item_with.upscale_raw = Some(img.clone());
-        let size_with = item_with.cache_size();
-        let expected_upscale_bytes = 256 * 256 * 4;
-        assert_eq!(
-            size_with - base_size,
-            expected_upscale_bytes,
-            "cache_size must include upscale_raw pixel bytes (256×256×4 = {})",
-            expected_upscale_bytes,
-        );
-    }
-
-    #[test]
     fn upscale_raw_arc_clone_zero_cost() {
         let mut item = fixture_item(1);
         let img = Arc::new(image::RgbaImage::new(4, 4));
@@ -1306,25 +1256,14 @@ mod tests {
         let hash = mask.content_hash();
         item.selection_mask = Some(Arc::new(mask));
         item.selection_hash = Some(hash);
-        item.selection_tex_pending = true;
+        item.selection_tex_pending = Some((hash, crate::gui::background_io::SelectionStyle {
+            fill_opacity: 0.15, outline_opacity: 1.0, outline_thickness: 2.0, edge_feather_px: 0,
+        }));
         item.invalidate_selection();
         assert!(item.selection_mask.is_none(), "selection_mask must be cleared");
         assert!(item.selection_hash.is_none(), "selection_hash must be cleared");
         assert!(item.selection_texture.is_none(), "selection_texture must be cleared");
-        assert!(!item.selection_tex_pending, "pending build flag must be cleared");
-    }
-
-    #[test]
-    fn cache_size_counts_each_undo_snapshot_plane_once() {
-        let base = fixture_item(1).cache_size();
-        let mut item = fixture_item(2);
-        let first = Arc::new(prunr_core::selection::MaskArtifact::new_empty(16, 16));
-        item.selection_mask = Some(first.clone());
-        // The live mask is also the top undo snapshot: shared plane, counted once.
-        item.stroke_undo_stack.push_back(Some(first.clone()));
-        // A distinct older snapshot adds its own bytes.
-        item.stroke_undo_stack.push_back(Some(Arc::new(prunr_core::selection::MaskArtifact::new_empty(16, 16))));
-        assert_eq!(item.cache_size() - base, 2 * 256, "two distinct 16×16 planes");
+        assert!(item.selection_tex_pending.is_none(), "pending build key must be cleared");
     }
 
     #[test]
@@ -1336,34 +1275,4 @@ mod tests {
         assert_eq!(stack.len(), STROKE_HISTORY_DEPTH);
     }
 
-    #[test]
-    fn cache_size_includes_selection_bytes() {
-        let base = fixture_item(1).cache_size();
-        let mut item = fixture_item(2);
-        let mask = prunr_core::selection::MaskArtifact::new_empty(64, 64);
-        let expected = mask.data.len();
-        item.selection_mask = Some(Arc::new(mask));
-        assert_eq!(
-            item.cache_size() - base,
-            expected,
-            "cache_size must include selection_mask pixel bytes (64×64={})", expected,
-        );
-    }
-
-    #[test]
-    fn cache_size_includes_embedding_when_present() {
-        let base = fixture_item(1).cache_size();
-        let mut item = fixture_item(2);
-        // Minimal SamEmbedding with correct lengths to satisfy expected_bytes()
-        item.magic_brush_embedding = Some(std::sync::Arc::new(prunr_core::sam::SamEmbedding {
-            image_embed: vec![0.0; 1_048_576],
-            high_res_feats_0: vec![0.0; 2_097_152],
-            high_res_feats_1: vec![0.0; 1_048_576],
-        }));
-        assert_eq!(
-            item.cache_size() - base,
-            prunr_core::sam::SamEmbedding::expected_bytes(),
-            "cache_size must account for SamEmbedding::expected_bytes()",
-        );
-    }
 }

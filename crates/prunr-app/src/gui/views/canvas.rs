@@ -708,7 +708,7 @@ fn render_loaded(ui: &mut egui::Ui, app: &PrunrApp) {
         // Visualization — Render gating".
         if let Some(it) = app.batch.selected_item() {
             super::selection_overlay::render_selection_overlay(
-                ui, it, &app.settings.brush, img_rect,
+                ui, it, img_rect,
             );
         }
 
@@ -844,7 +844,7 @@ fn render_done(ui: &mut egui::Ui, app: &PrunrApp) {
             // gating".
             if let Some(it) = item {
                 super::selection_overlay::render_selection_overlay(
-                    ui, it, &app.settings.brush, img_rect,
+                    ui, it, img_rect,
                 );
             }
         }
@@ -898,7 +898,7 @@ fn render_done(ui: &mut egui::Ui, app: &PrunrApp) {
         // no decode, no GPU upload here.
         if let Some(it) = app.batch.selected_item() {
             super::selection_overlay::render_selection_overlay(
-                ui, it, &app.settings.brush, img_rect,
+                ui, it, img_rect,
             );
         }
     }
