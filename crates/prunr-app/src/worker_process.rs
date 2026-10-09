@@ -263,7 +263,7 @@ pub fn run_worker() -> ! {
     );
 
     // Detect backend. `detect_active_provider` probes
-    // `OpenVINOExecutionProvider::is_available` on Linux which has been
+    // `OpenVINO::is_available` on Linux which has been
     // observed to hang on some iGPU setups — bracket with tracing so a
     // future hang is diagnosable from the worker log.
     let probe_started = std::time::Instant::now();

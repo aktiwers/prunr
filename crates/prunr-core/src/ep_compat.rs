@@ -3,7 +3,7 @@
 //! Phase 19's `is_available()` filter answers "did the loaded ORT
 //! compile this EP in?" but it doesn't know the EP can't actually run
 //! a specific model — e.g. OpenVINO rejects Silueta's ONNX graph
-//! because of cycles, but `OpenVINOExecutionProvider::is_available()`
+//! because of cycles, but `OpenVINO::is_available()`
 //! still returns true.
 //!
 //! Without a cache, every cold-start re-tries the doomed (EP, model)
