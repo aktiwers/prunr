@@ -14,6 +14,10 @@ use crate::gui::brush_state::BrushSettings;
 use crate::gui::theme;
 use crate::gui::views::{chip, fmt};
 
+/// Width budget for the chip label, padded so 1- to 3-digit sizes don't
+/// reflow the popover anchor while the slider is dragged.
+const LABEL_PAD_WIDTH: f32 = 72.0;
+
 /// Minimum popover width so the confidence slider has room to render cleanly.
 const MAGIC_POPOVER_MIN_WIDTH: f32 = 220.0;
 
@@ -36,11 +40,17 @@ pub(crate) fn render(
     encoder_pending: bool,
     protect: Option<bool>,
 ) -> MagicChipOutcome {
-    let resp = chip::chip_button(ui, ICON_AUTO_AWESOME.codepoint, "Magic", /*accent=*/ true);
+    let label = format!("{:>3} px", bs.radius as u32);
+    let resp = ui
+        .scope(|ui| {
+            ui.set_min_width(LABEL_PAD_WIDTH);
+            chip::chip_button(ui, ICON_AUTO_AWESOME.codepoint, &label, /*accent=*/ true)
+        })
+        .inner;
     let resp = chip::tooltip(
         resp,
-        "Magic Brush",
-        "Click or stroke to select an object; Shift adds, Alt subtracts.",
+        "Magic Brush settings",
+        "Stroke size, confidence and how the selection is shown.",
         None,
     );
 
@@ -65,8 +75,12 @@ pub(crate) fn render(
                 ui.add_space(6.0);
             }
 
-            // Shared selection knobs (edge feather, outline thickness,
-            // outline opacity, fill opacity) — same as Paint Brush chip.
+            // The stroke size is shared with the Paint Brush: one brush, two tools.
+            let size = chip::slider_row_f32(ui, "Size", &mut bs.radius, 1.0..=200.0, true, |v| fmt::px(v, 0));
+            outcome.committed |= size.commit;
+            super::hint(ui, "Stroke width for drag-selecting; clicks ignore it.");
+            ui.add_space(4.0);
+
             let sel_committed = super::brush_chip::render_shared_selection_section(ui, bs);
             outcome.committed |= sel_committed;
             outcome.protect_selection = super::brush_chip::render_auto_apply_row(ui, protect);
