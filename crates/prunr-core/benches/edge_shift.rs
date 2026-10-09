@@ -6,7 +6,7 @@
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
 use image::GrayImage;
-use prunr_core::postprocess::apply_edge_shift;
+use prunr_core::morphology::shift_mask;
 
 fn make_mask(w: u32, h: u32) -> GrayImage {
     // A soft disc: interior 255, a ~40 px ramp, exterior 0, so every
@@ -31,7 +31,7 @@ pub fn bench(c: &mut Criterion) {
             b.iter_batched(
                 || mask.clone(),
                 |mut m| {
-                    apply_edge_shift(&mut m, black_box(shift));
+                    shift_mask(&mut m, black_box(shift));
                     black_box(m);
                 },
                 criterion::BatchSize::LargeInput,
