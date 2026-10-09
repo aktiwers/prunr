@@ -235,7 +235,7 @@ pub(crate) struct SamDecodeRequest {
     pub(crate) embedding: Arc<prunr_core::sam::SamEmbedding>,
     pub(crate) prompt: prunr_core::sam::prompt::SamPrompt,
     pub(crate) modifier: PromptModifier,
-    pub(crate) mode: prunr_core::brush::BrushMode,
+    pub(crate) mode: prunr_core::selection::BrushMode,
     pub(crate) source_dims: (u32, u32),
     pub(crate) confidence_threshold: f32,
 }

@@ -8,8 +8,8 @@
 mod test_common;
 
 use prunr_core::{
-    brush::{paint_circle, BrushMode, Stamp},
-    selection::MaskArtifact,
+    brush::{paint_circle, Stamp},
+    selection::{BrushMode, MaskArtifact},
     infer_only, postprocess_from_flat, MaskSettings, ModelKind, OrtEngine,
     PostprocessOpts, ProgressStage,
 };

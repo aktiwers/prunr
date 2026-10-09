@@ -190,7 +190,8 @@ fn selection_category_arm_exists_no_dispatch() {
 // pins the app wiring that stores and dispatches it.
 #[test]
 fn paint_brush_bg_removal_keeps_stroke_direction_and_softness() {
-    use prunr_core::brush::{paint_circle, BrushMode, Stamp};
+    use prunr_core::brush::{paint_circle, Stamp};
+    use prunr_core::selection::BrushMode;
 
     let mut app = app_with_model(SettingsModel::BiRefNetLite);
     app.settings.protect_selection = false;

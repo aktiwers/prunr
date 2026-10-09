@@ -199,7 +199,7 @@ fn tensor_to_mask_core(
             }
             buf
         };
-        crate::brush::apply_correction(&mut normalized, sw, sh, corr);
+        corr.apply_to_mask(&mut normalized, sw, sh);
         if sw * sh >= ROW_PAR_THRESHOLD {
             mask_buf
                 .par_iter_mut()
@@ -890,7 +890,8 @@ mod tests {
 
     #[test]
     fn brush_correction_subtract_drives_mask_to_zero_at_painted_pixels() {
-        use crate::brush::{paint_circle, BrushMode};
+        use crate::brush::paint_circle;
+        use crate::selection::BrushMode;
         let raw = make_raw_tensor(1.0);
         let original = solid_rgb(320, 320);
         let mask_settings = MaskSettings::default();

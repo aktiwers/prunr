@@ -5,8 +5,7 @@
 //! lives in `prunr-app/src/gui/processor.rs` so this module stays
 //! unit-testable from prunr-core alone.
 
-use crate::brush::BrushMode;
-use crate::selection::FULL;
+use crate::selection::{BrushMode, FULL};
 
 pub mod preprocess;
 pub mod prompt;
