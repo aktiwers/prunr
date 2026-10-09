@@ -74,7 +74,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if has_selected {
                 let remove_sel_btn = egui::Button::new(
-                    RichText::new(format!("{}  Remove Selected", ICON_DELETE.codepoint)).color(Color32::WHITE),
+                    RichText::new(format!("{}  Remove selected", ICON_DELETE.codepoint)).color(Color32::WHITE),
                 )
                 .corner_radius(theme::BUTTON_ROUNDING);
                 if tooltip(with_fill(ui, theme::DESTRUCTIVE, |ui| ui.add(remove_sel_btn)), "Remove selected", "Take the selected images out of the queue.", None).clicked() {
@@ -87,7 +87,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
             let show_save = can_save_copy || has_saveable_selected;
             if show_save {
                 let (save_title, save_label) = if has_selected {
-                    ("Save selected", format!("{}  Save Selected", ICON_SAVE.codepoint))
+                    ("Save selected", format!("{}  Save selected", ICON_SAVE.codepoint))
                 } else {
                     ("Save", format!("{}  Save", ICON_SAVE.codepoint))
                 };
@@ -135,13 +135,13 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                 let has_processable = app.can_process_intent();
 
                 let (label_text, is_all) = if inpaint_mode {
-                    ("Reprocess stroke".to_string(), false)
+                    ("Process".to_string(), false)
                 } else {
                     match label {
                         ProcessButtonLabel::ProcessViewed => ("Process".to_string(), false),
                         ProcessButtonLabel::ProcessSelected(1) => ("Process 1 selected".to_string(), false),
                         ProcessButtonLabel::ProcessSelected(n) => (format!("Process {n} selected"), false),
-                        ProcessButtonLabel::ProcessAll(n) => (format!("Process All [{n}]"), true),
+                        ProcessButtonLabel::ProcessAll(n) => (format!("Process all ({n})"), true),
                     }
                 };
 

@@ -241,7 +241,7 @@ fn draw_preview(ui: &mut Ui, settings: &BrushSettings) {
         Sense::hover(),
     );
     // Soft contrast frame so the brush silhouette reads against the
-    // popover background regardless of the surface colour.
+    // popover background regardless of the surface color.
     ui.painter().rect_filled(
         rect,
         4.0,

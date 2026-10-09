@@ -16,7 +16,7 @@ pub(crate) fn render(ctx: &egui::Context, toasts: &mut crate::gui::toasts::Toast
             let tab_id = egui::Id::new("cli_help_tab");
             let mut tab: usize = ui.data(|d| d.get_temp(tab_id).unwrap_or(0));
 
-            super::chip::tab_strip(ui, &["Quick Start", "Lines", "Mask", "Eraser", "Advanced"], &mut tab);
+            super::chip::tab_strip(ui, &["Quick start", "Lines", "Mask", "Eraser", "Advanced"], &mut tab);
             ui.separator();
             ui.add_space(theme::SPACE_SM);
 
@@ -25,7 +25,7 @@ pub(crate) fn render(ctx: &egui::Context, toasts: &mut crate::gui::toasts::Toast
             match tab {
                 // ── Quick Start ──
                 0 => {
-                    section_heading(ui, "Quick Start");
+                    section_heading(ui, "Quick start");
                     example_row(ui, toasts, "prunr photo.jpg",
                         "Remove background, save as photo.prunr.png");
                     example_row(ui, toasts, "prunr photo.jpg -o result.png",
@@ -61,7 +61,7 @@ pub(crate) fn render(ctx: &egui::Context, toasts: &mut crate::gui::toasts::Toast
                 // ── Lines ──
                 1 => {
                     section_heading(ui, "Line Extraction");
-                    hint(ui, "Extract edges and outlines using DexiNed AI model.");
+                    hint(ui, "Trace edges and outlines with the line-detection model.");
                     hint(ui, "Great for logos, graffiti, and illustrations.");
 
                     ui.add_space(theme::SPACE_MD);
@@ -92,7 +92,7 @@ pub(crate) fn render(ctx: &egui::Context, toasts: &mut crate::gui::toasts::Toast
                     example_row(ui, toasts, "prunr --lines --line-color 333333 --bg-color eeeeee sketch.jpg",
                         "Dark gray lines on light gray background");
                     example_row(ui, toasts, "prunr --lines --line-scale bold sketch.jpg",
-                        "Bold, abstracted outlines (DexiNed block5 output)");
+                        "Bold, abstracted outlines");
                 }
 
                 // ── Mask ──
@@ -133,7 +133,7 @@ pub(crate) fn render(ctx: &egui::Context, toasts: &mut crate::gui::toasts::Toast
                 // ── Eraser ──
                 3 => {
                     section_heading(ui, "Object Removal (Eraser)");
-                    hint(ui, "Paint over an unwanted object and let LaMa fill it in.");
+                    hint(ui, "Paint over an unwanted object and let the eraser fill it in.");
                     hint(ui, "Pass a binary mask (white = remove here, black = keep).");
 
                     ui.add_space(theme::SPACE_MD);
@@ -143,7 +143,7 @@ pub(crate) fn render(ctx: &egui::Context, toasts: &mut crate::gui::toasts::Toast
                         .num_columns(2)
                         .spacing([theme::SPACE_LG, theme::SPACE_SM])
                         .show(ui, |ui| {
-                            opt_row(ui, "--inpaint", "Switch to Eraser mode (LaMa inpaint)");
+                            opt_row(ui, "--inpaint", "Switch to Eraser mode");
                             opt_row(ui, "--mask <path>", "Binary mask, must match input dimensions");
                         });
 
