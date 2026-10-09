@@ -6,6 +6,7 @@ pub mod cli_help;
 pub mod settings;
 pub mod sidebar;
 pub mod chip;
+pub mod fmt;
 pub mod lines_popover;
 pub mod preset_dropdown;
 pub mod adjustments_toolbar;

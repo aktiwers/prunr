@@ -9,6 +9,7 @@ use egui_material_icons::icons::{
 };
 
 use super::chip::{self, ChipMeta};
+use super::fmt;
 use crate::gui::item_settings::ItemSettings;
 use crate::gui::theme;
 
@@ -29,7 +30,7 @@ pub(crate) fn render_refinement_row(ui: &mut Ui, item_settings: &mut ItemSetting
             0.0..=1.0,
             0.0,
             false,
-            |v| if v == 0.0 { "Off".to_string() } else { format!("{:.2}", v) },
+            |v| fmt::off_or(v, f32::EPSILON, |v| fmt::plain(v, 2)),
         );
         chip::chip_f32(
             ui,
@@ -44,7 +45,7 @@ pub(crate) fn render_refinement_row(ui: &mut Ui, item_settings: &mut ItemSetting
             -2.0..=2.0,
             0.0,
             false,
-            |v| if v == 0.0 { "0 EV".to_string() } else { format!("{:+.1} EV", v) },
+            fmt::ev,
         );
 
         ui.add_space(4.0);
@@ -63,7 +64,7 @@ pub(crate) fn render_refinement_row(ui: &mut Ui, item_settings: &mut ItemSetting
             -1.0..=1.0,
             0.0,
             false,
-            |v| if v == 0.0 { "Off".to_string() } else { format!("{:+.2}", v) },
+            |v| fmt::off_or(v, f32::EPSILON, |v| fmt::signed_plain(v, 2)),
         );
         chip::chip_f32(
             ui,
@@ -78,7 +79,7 @@ pub(crate) fn render_refinement_row(ui: &mut Ui, item_settings: &mut ItemSetting
             0.0..=1.0,
             1.0,
             false,
-            |v| if v >= 1.0 - f32::EPSILON { "Full AI".to_string() } else { format!("{:.0}% AI", v * 100.0) },
+            fmt::percent,
         );
         chip::chip_f32(
             ui,
@@ -93,7 +94,7 @@ pub(crate) fn render_refinement_row(ui: &mut Ui, item_settings: &mut ItemSetting
             -1.0..=1.0,
             0.0,
             false,
-            |v| if v == 0.0 { "Off".to_string() } else { format!("{:+.2}", v) },
+            |v| fmt::off_or(v, f32::EPSILON, |v| fmt::signed_plain(v, 2)),
         );
         chip::chip_bool(
             ui,
