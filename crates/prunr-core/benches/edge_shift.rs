@@ -1,5 +1,5 @@
 //! Microbench for the edge-shift kernel (erode / dilate by N pixels)
-//! behind the Edge shift knob and `dilate_mask`. Runs on a 4K mask at
+//! behind the Edge shift knob and the Lines thickness. Runs on a 4K mask at
 //! the shifts the knob reaches.
 //!
 //! Run: `cargo bench -p prunr-core --bench edge_shift`.

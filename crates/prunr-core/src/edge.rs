@@ -186,205 +186,211 @@ pub fn tensor_to_edge_mask(
     crate::formats::resize_gray_lanczos3(&mask, out_w, out_h)
 }
 
-/// Binds `$alpha` to the alpha rule of a `ComposeMode` as a distinct
-/// closure per arm, so `$body` is compiled once per mode with the rule
-/// inlined — a `fn` pointer would cost an indirect call per pixel and
-/// block vectorisation.
-macro_rules! with_alpha_rule {
-    ($compose:expr, |$alpha:ident| $body:expr) => {{
-        use crate::types::ComposeMode;
-        match $compose {
-            ComposeMode::LinesOnly => { let $alpha = |s: i32, e: i32| (s * e / 255) as u8; $body }
-            ComposeMode::SubjectFilled => { let $alpha = |s: i32, e: i32| s.max(e) as u8; $body }
-            ComposeMode::Engraving => { let $alpha = |s: i32, e: i32| (s - e).max(0) as u8; $body }
-            // 0.3 * subject + 0.8 * edge, clamped. Sums to > 1.0 on purpose —
-            // saturates to fully opaque where subject AND edge both contribute.
-            ComposeMode::Ghost => { let $alpha = |s: i32, e: i32| ((s * 77 + e * 204) / 255).clamp(0, 255) as u8; $body }
-            ComposeMode::InverseMask => { let $alpha = |s: i32, e: i32| ((255 - s) * e / 255) as u8; $body }
-        }
-    }};
+/// The edge plane a composition draws: `tensor_to_edge_mask` dilated by
+/// `thickness` pixels. Live preview caches it per (strength, scale,
+/// thickness), so a colour or compose tweak costs the composition only.
+pub fn edge_plane(
+    edge_tensor: &[f32],
+    tensor_h: u32,
+    tensor_w: u32,
+    out_w: u32,
+    out_h: u32,
+    line_strength: f32,
+    thickness: u32,
+) -> image::GrayImage {
+    let mut mask = tensor_to_edge_mask(edge_tensor, tensor_h, tensor_w, out_w, out_h, line_strength);
+    if thickness > 0 {
+        crate::morphology::shift_mask(&mut mask, -(thickness as f32));
+    }
+    mask
 }
 
-/// Dilate + composite a pre-built edge mask into an RGBA. Cheap; safe to call
-/// every live-preview tweak.
+/// Composite a dilated edge plane into an RGBA. Cheap; safe to call every
+/// live-preview tweak.
 ///
-/// Semantics: the output alpha channel IS the dilated edge mask — any alpha
+/// Semantics: the output alpha channel IS the edge plane — any alpha
 /// already on `original` is overwritten. That's what `LineMode::EdgesOnly`
 /// wants (show only the lines, transparent everywhere else). For
-/// `LineMode::SubjectOutline`, use `compose_edges_over_rgba` instead — it
-/// merges the edge mask with the base's existing alpha so the masked subject
-/// stays visible under the outline.
+/// `LineMode::SubjectOutline`, use `compose_edges_styled` instead — it
+/// merges the edge plane with the base's existing alpha so the masked
+/// subject stays visible under the outline.
 pub fn compose_edges(
     mask: &image::GrayImage,
     original: &DynamicImage,
     solid_line_color: Option<[u8; 3]>,
-    edge_thickness: u32,
 ) -> RgbaImage {
     let (ow, oh) = (original.width(), original.height());
-    let mask_raw = dilate_to_bytes(mask, edge_thickness);
-    let row_len = ow as usize * 4;
-    if let Some(c) = solid_line_color {
-        let mut buf = vec![0u8; (ow * oh * 4) as usize];
-        buf.par_chunks_mut(row_len).zip(mask_raw.as_ref().par_chunks(ow as usize)).for_each(|(row, mrow)| {
-            for (px, &a) in row.chunks_exact_mut(4).zip(mrow) {
-                px.copy_from_slice(&[c[0], c[1], c[2], a]);
-            }
-        });
-        RgbaImage::from_raw(ow, oh, buf).expect("edge output buffer size matches dimensions")
-    } else {
-        let mut rgba = original.to_rgba8();
-        rgba.as_mut().par_chunks_mut(row_len).zip(mask_raw.as_ref().par_chunks(ow as usize)).for_each(|(row, mrow)| {
-            for (px, &a) in row.chunks_exact_mut(4).zip(mrow) {
-                px[3] = a;
-            }
-        });
-        rgba
+    let (row_len, mask_raw) = (ow as usize * 4, mask.as_raw());
+    let mut buf = vec![0u8; (ow * oh * 4) as usize];
+    match (solid_line_color, original.as_rgba8()) {
+        (Some(c), _) => {
+            buf.par_chunks_mut(row_len).zip(mask_raw.par_chunks(ow as usize)).for_each(|(row, mrow)| {
+                for (px, &a) in row.chunks_exact_mut(4).zip(mrow) {
+                    px.copy_from_slice(&[c[0], c[1], c[2], a]);
+                }
+            });
+        }
+        (None, Some(rgba)) => {
+            buf.par_chunks_mut(row_len)
+                .zip(rgba.as_raw().par_chunks(row_len))
+                .zip(mask_raw.par_chunks(ow as usize))
+                .for_each(|((row, srow), mrow)| {
+                    for ((px, src), &a) in row.chunks_exact_mut(4).zip(srow.chunks_exact(4)).zip(mrow) {
+                        px.copy_from_slice(&[src[0], src[1], src[2], a]);
+                    }
+                });
+        }
+        (None, None) => {
+            buf = original.to_rgba8().into_raw();
+            buf.par_chunks_mut(row_len).zip(mask_raw.par_chunks(ow as usize)).for_each(|(row, mrow)| {
+                for (px, &a) in row.chunks_exact_mut(4).zip(mrow) {
+                    px[3] = a;
+                }
+            });
+        }
     }
+    RgbaImage::from_raw(ow, oh, buf).expect("edge output buffer size matches dimensions")
 }
 
-/// Composite edges and subject mask using a named `ComposeMode` formula.
-/// Used by `LineMode::SubjectOutline` — picks how the two cached masks
-/// combine into the final alpha. All modes run at compose time on already-
-/// cached tensors, so switching modes is instant in live preview.
+/// Composite a dilated edge plane and the subject mask using a named
+/// `ComposeMode` formula. Used by `LineMode::SubjectOutline` — picks how
+/// the two cached masks combine into the final alpha. All modes run at
+/// compose time on already-cached tensors, so switching modes is instant
+/// in live preview.
 ///
 /// `base` carries the subject silhouette in its alpha channel (output of
-/// `postprocess::postprocess_from_flat`). `mask` is the raw edge mask from
-/// `tensor_to_edge_mask`. With a `solid_line_color`, line pixels are blended
-/// toward that color weighted by edge strength; otherwise base RGB shows
-/// through at line pixels.
+/// `postprocess::postprocess_from_flat`). With a `solid_line_color`, line
+/// pixels are blended toward that color weighted by edge strength;
+/// otherwise base RGB shows through at line pixels.
 pub fn compose_edges_styled(
     mask: &image::GrayImage,
     base: &RgbaImage,
     compose: crate::types::ComposeMode,
     line_style: crate::types::LineStyle,
     solid_line_color: Option<[u8; 3]>,
-    edge_thickness: u32,
 ) -> RgbaImage {
     use crate::types::LineStyle;
     let (ow, oh) = (base.width(), base.height());
-    let mask_raw = dilate_to_bytes(mask, edge_thickness);
-    let mut rgba = base.clone();
+    let mask_raw = mask.as_raw();
+    let mut out = vec![0u8; (ow * oh * 4) as usize];
     let pixel_count = (ow * oh) as usize;
-
-    // LineStyle gradients supersede `solid_line_color` — they compute the
-    // target colour per pixel from position. Solid style defers to the
-    // user's colour chip (or passes source RGB through if None).
-    let solid_tint = match line_style {
-        LineStyle::Solid => solid_line_color,
-        _ => None,
-    };
-
-    // Precompute geometry for radial gradient so the hot loop doesn't
-    // redo the centre conversion per pixel.
-    let (rg_cx, rg_cy, rg_max_dist_sq) = if let LineStyle::RadialGradient { center, .. } = line_style {
-        let cx = (center[0] as u32 * ow / 255) as i32;
-        let cy = (center[1] as u32 * oh / 255) as i32;
-        let far_x = cx.max(ow as i32 - cx);
-        let far_y = cy.max(oh as i32 - cy);
-        (cx, cy, (far_x * far_x + far_y * far_y).max(1))
-    } else {
-        (0, 0, 1)
-    };
 
     // One monomorphised row loop per style, so the colour rule is
     // inlined and the per-pixel work carries no dispatch.
-    let out = rgba.as_mut();
-    with_alpha_rule!(compose, |alpha| match line_style {
-        LineStyle::Solid | LineStyle::DualScale { .. } => {
-            styled_rows(out, &mask_raw, ow, alpha, |_, _, _, _| solid_tint)
-        }
-        LineStyle::GradientY { top, bottom } => styled_rows(out, &mask_raw, ow, alpha, |_, y, _, _| {
+    match line_style {
+        // LineStyle gradients supersede `solid_line_color` — they compute
+        // the target colour per pixel from position. Solid style defers
+        // to the user's colour chip (or passes source RGB through if None).
+        LineStyle::Solid => styled_rows(&mut out, base.as_raw(), mask_raw, ow, compose, |_, _, _| solid_line_color),
+        // DualScale belongs to `compose_edges_dual_styled`; here it only
+        // renders the active scale with the base RGB showing through.
+        LineStyle::DualScale { .. } => styled_rows(&mut out, base.as_raw(), mask_raw, ow, compose, |_, _, _| None),
+        LineStyle::GradientY { top, bottom } => styled_rows(&mut out, base.as_raw(), mask_raw, ow, compose, |_, y, _| {
             let t = (y as u32 * 255 / oh.max(1)) as u16;
             Some(lerp_rgb(top, bottom, t))
         }),
-        LineStyle::GradientX { left, right } => styled_rows(out, &mask_raw, ow, alpha, |x, _, _, _| {
+        LineStyle::GradientX { left, right } => styled_rows(&mut out, base.as_raw(), mask_raw, ow, compose, |x, _, _| {
             let t = (x as u32 * 255 / ow.max(1)) as u16;
             Some(lerp_rgb(left, right, t))
         }),
-        LineStyle::RadialGradient { inner, outer, .. } => styled_rows(out, &mask_raw, ow, alpha, |x, y, _, _| {
-            let dx = (x as i32 - rg_cx) as i64;
-            let dy = (y as i32 - rg_cy) as i64;
-            // i64 to survive `dist_sq * 255` past ~1830² (i32 caps
-            // at 2.147 G, dist_sq * 255 hits that threshold there).
-            let dist_sq = dx * dx + dy * dy;
-            let t = ((dist_sq * 255) / (rg_max_dist_sq as i64)).min(255) as u16;
-            Some(lerp_rgb(inner, outer, t))
-        }),
-        LineStyle::Rainbow { cycles } => styled_rows(out, &mask_raw, ow, alpha, |x, y, _, _| {
+        LineStyle::RadialGradient { center, inner, outer } => {
+            let cx = (center[0] as u32 * ow / 255) as i32;
+            let cy = (center[1] as u32 * oh / 255) as i32;
+            let far_x = cx.max(ow as i32 - cx);
+            let far_y = cy.max(oh as i32 - cy);
+            let max_dist_sq = (far_x * far_x + far_y * far_y).max(1) as i64;
+            styled_rows(&mut out, base.as_raw(), mask_raw, ow, compose, |x, y, _| {
+                let dx = (x as i32 - cx) as i64;
+                let dy = (y as i32 - cy) as i64;
+                // i64 to survive `dist_sq * 255` past ~1830² (i32 caps
+                // at 2.147 G, dist_sq * 255 hits that threshold there).
+                let dist_sq = dx * dx + dy * dy;
+                let t = ((dist_sq * 255) / max_dist_sq).min(255) as u16;
+                Some(lerp_rgb(inner, outer, t))
+            })
+        }
+        LineStyle::Rainbow { cycles } => {
             // Hue cycles along pixel index so the colour changes smoothly
-            // across the whole image.
-            let i = (y * ow as usize + x) as u64;
-            let hue = ((i * 360 * cycles.max(1) as u64 / pixel_count.max(1) as u64) % 360) as u16;
-            let (r, g, b) = crate::postprocess::hsv_to_rgb(hue, 255, 255);
-            Some([r, g, b])
-        }),
-        LineStyle::Chromatic { offset } => styled_rows(out, &mask_raw, ow, alpha, |x, _, edge, mrow| {
+            // across the whole image. 360 hues, so the conversion is a table.
+            let lut = hue_table(255, 255);
+            styled_rows(&mut out, base.as_raw(), mask_raw, ow, compose, |x, y, _| {
+                let i = (y * ow as usize + x) as u64;
+                let hue = ((i * 360 * cycles.max(1) as u64 / pixel_count.max(1) as u64) % 360) as usize;
+                Some(lut[hue])
+            })
+        }
+        LineStyle::Chromatic { offset } => styled_rows(&mut out, base.as_raw(), mask_raw, ow, compose, |x, _, mrow| {
             // RGB-split ghosting: sample the edge mask at horizontal
             // offsets for R and B so line colour drifts between channels.
             // Green stays at the centre. Output clamps at image edges.
             let o = (offset.min(64)) as i32;
             let r_x = (x as i32 - o).clamp(0, ow as i32 - 1) as usize;
             let b_x = (x as i32 + o).clamp(0, ow as i32 - 1) as usize;
-            Some([mrow[r_x], edge, mrow[b_x]])
+            Some([mrow[r_x], mrow[x], mrow[b_x]])
         }),
-        LineStyle::Noise { amount } => styled_rows(out, &mask_raw, ow, alpha, |x, y, _, _| {
-            // Deterministic hash → per-pixel hue jitter. Cheap integer
-            // mixer (Wang-like) avoids RNG setup cost per dispatch.
-            let i = y * ow as usize + x;
-            let mut h = (i as u32).wrapping_mul(0x9e37_79b1);
-            h ^= h >> 16;
-            h = h.wrapping_mul(0x7feb_352d);
-            h ^= h >> 15;
-            let jitter = (h & 0xFF) as i32 - 128; // -128..=127
-            let strength = amount as i32;
-            let shift = (jitter * strength) / 128; // -amount..=amount
-            // i64 to survive the multiply past ~5.96 M pixels
-            // (2700×2200) — Rainbow above already does the same.
-            let hue = (((i as i64 * 360) / pixel_count.max(1) as i64) + shift as i64)
-                .rem_euclid(360) as u16;
-            let (r, g, b) = crate::postprocess::hsv_to_rgb(hue, 200, 240);
-            Some([r, g, b])
-        }),
-    });
-    rgba
+        LineStyle::Noise { amount } => {
+            let lut = hue_table(200, 240);
+            styled_rows(&mut out, base.as_raw(), mask_raw, ow, compose, |x, y, _| {
+                // Deterministic hash → per-pixel hue jitter. Cheap integer
+                // mixer (Wang-like) avoids RNG setup cost per dispatch.
+                let i = y * ow as usize + x;
+                let mut h = (i as u32).wrapping_mul(0x9e37_79b1);
+                h ^= h >> 16;
+                h = h.wrapping_mul(0x7feb_352d);
+                h ^= h >> 15;
+                let jitter = (h & 0xFF) as i32 - 128; // -128..=127
+                let strength = amount as i32;
+                let shift = (jitter * strength) / 128; // -amount..=amount
+                // i64 to survive the multiply past ~5.96 M pixels
+                // (2700×2200) — Rainbow above already does the same.
+                let hue = (((i as i64 * 360) / pixel_count.max(1) as i64) + shift as i64).rem_euclid(360) as usize;
+                Some(lut[hue])
+            })
+        }
+    }
+    RgbaImage::from_raw(ow, oh, out).expect("edge output buffer size matches dimensions")
 }
 
-/// Row-parallel compose: `alpha` for every pixel, then the colour
-/// `target(x, y, edge, mask_row)` blended in by edge strength where the
+/// `hsv_to_rgb` for every whole hue at one saturation and value.
+fn hue_table(s: u8, v: u8) -> [[u8; 3]; 360] {
+    std::array::from_fn(|h| {
+        let (r, g, b) = crate::postprocess::hsv_to_rgb(h as u16, s, v);
+        [r, g, b]
+    })
+}
+
+/// Row-parallel compose into `out`: first every pixel's RGB from `base`
+/// and its alpha from `compose` (branch-free, so it vectorises), then the
+/// colour `target(x, y, mask_row)` blended in by edge strength where the
 /// edge is non-zero.
-fn styled_rows<A, T>(out: &mut [u8], mask: &[u8], ow: u32, alpha: A, target: T)
+fn styled_rows<T>(out: &mut [u8], base: &[u8], mask: &[u8], ow: u32, compose: crate::types::ComposeMode, target: T)
 where
-    A: Fn(i32, i32) -> u8 + Copy + Sync,
-    T: Fn(usize, usize, u8, &[u8]) -> Option<[u8; 3]> + Sync,
+    T: Fn(usize, usize, &[u8]) -> Option<[u8; 3]> + Sync,
 {
     let ow = ow as usize;
-    out.par_chunks_mut(ow * 4).zip(mask.par_chunks(ow)).enumerate().for_each(|(y, (row, mrow))| {
-        for (x, (px, &edge)) in row.chunks_exact_mut(4).zip(mrow).enumerate() {
-            px[3] = alpha(px[3] as i32, edge as i32);
-            if edge == 0 {
-                continue;
+    out.par_chunks_mut(ow * 4)
+        .zip(base.par_chunks(ow * 4))
+        .zip(mask.par_chunks(ow))
+        .enumerate()
+        .for_each(|(y, ((row, brow), mrow))| {
+            for ((px, src), &edge) in row.chunks_exact_mut(4).zip(brow.chunks_exact(4)).zip(mrow) {
+                px.copy_from_slice(&[src[0], src[1], src[2], compose.alpha(src[3] as i32, edge as i32)]);
             }
-            if let Some(t) = target(x, y, edge, mrow) {
-                blend_rgb(&mut px[..3], t, edge as u16);
+            for (x, &edge) in mrow.iter().enumerate() {
+                if edge == 0 {
+                    continue;
+                }
+                if let Some(t) = target(x, y, mrow) {
+                    blend_rgb(&mut row[x * 4..x * 4 + 3], t, edge as u16);
+                }
             }
-        }
-    });
+        });
 }
 
-/// Clone + dilate + return the raw byte buffer. Every compose path
-/// (`compose_edges`, `compose_edges_styled`, `compose_edges_dual_styled`)
-/// needs this prelude; a zero thickness borrows the mask as is.
-fn dilate_to_bytes(mask: &image::GrayImage, thickness: u32) -> std::borrow::Cow<'_, [u8]> {
-    if thickness == 0 {
-        return std::borrow::Cow::Borrowed(mask.as_raw());
-    }
-    std::borrow::Cow::Owned(crate::morphology::shifted(mask, -(thickness as f32)).into_raw())
-}
-
-/// Compose two edge masks from different DexiNed scales with independent
-/// colours. Used by `LineStyle::DualScale` — fine details at `fine_color`,
-/// structural edges at `bold_color`. Alpha merges via the same ComposeMode
-/// formulas, using the max of the two edges.
+/// Compose two dilated edge planes from different DexiNed scales with
+/// independent colours. Used by `LineStyle::DualScale` — fine details at
+/// `fine_color`, structural edges at `bold_color`. Alpha merges via the
+/// same ComposeMode formulas, using the max of the two edges.
 pub fn compose_edges_dual_styled(
     fine_mask: &image::GrayImage,
     bold_mask: &image::GrayImage,
@@ -392,36 +398,38 @@ pub fn compose_edges_dual_styled(
     compose: crate::types::ComposeMode,
     fine_color: [u8; 3],
     bold_color: [u8; 3],
-    edge_thickness: u32,
 ) -> RgbaImage {
-    let ow = base.width() as usize;
-    let fine_raw = dilate_to_bytes(fine_mask, edge_thickness);
-    let bold_raw = dilate_to_bytes(bold_mask, edge_thickness);
-    let mut rgba = base.clone();
-    with_alpha_rule!(compose, |alpha| {
-        rgba.as_mut()
-            .par_chunks_mut(ow * 4)
-            .zip(fine_raw.as_ref().par_chunks(ow))
-            .zip(bold_raw.as_ref().par_chunks(ow))
-            .for_each(|((row, frow), brow)| {
-                for ((px, &fine), &bold) in row.chunks_exact_mut(4).zip(frow).zip(brow) {
-                    px[3] = alpha(px[3] as i32, fine.max(bold) as i32);
-                    if fine > 0 {
-                        blend_rgb(&mut px[..3], fine_color, fine as u16);
-                    }
-                    if bold > 0 {
-                        blend_rgb(&mut px[..3], bold_color, bold as u16);
-                    }
+    let (ow, oh) = (base.width(), base.height());
+    let ow_us = ow as usize;
+    let mut out = vec![0u8; (ow * oh * 4) as usize];
+    out.par_chunks_mut(ow_us * 4)
+        .zip(base.as_raw().par_chunks(ow_us * 4))
+        .zip(fine_mask.as_raw().par_chunks(ow_us))
+        .zip(bold_mask.as_raw().par_chunks(ow_us))
+        .for_each(|(((row, brow), frow), bold_row)| {
+            for (((px, src), &fine), &bold) in row.chunks_exact_mut(4).zip(brow.chunks_exact(4)).zip(frow).zip(bold_row) {
+                px.copy_from_slice(&[src[0], src[1], src[2], compose.alpha(src[3] as i32, fine.max(bold) as i32)]);
+            }
+            for (x, (&fine, &bold)) in frow.iter().zip(bold_row).enumerate() {
+                if fine > 0 {
+                    blend_rgb(&mut row[x * 4..x * 4 + 3], fine_color, fine as u16);
                 }
-            });
-    });
-    rgba
+                if bold > 0 {
+                    blend_rgb(&mut row[x * 4..x * 4 + 3], bold_color, bold as u16);
+                }
+            }
+        });
+    RgbaImage::from_raw(ow, oh, out).expect("edge output buffer size matches dimensions")
 }
 
 /// Blend `rgb` toward `target` using `weight` (0..=255 as a /255 fraction).
 /// Used where an edge pixel is painted with the user's `solid_line_color`.
 #[inline]
 fn blend_rgb(rgb: &mut [u8], target: [u8; 3], weight: u16) {
+    if weight == 255 {
+        rgb.copy_from_slice(&target);
+        return;
+    }
     let inv = 255 - weight;
     rgb[0] = ((rgb[0] as u16 * inv + target[0] as u16 * weight) / 255) as u8;
     rgb[1] = ((rgb[1] as u16 * inv + target[1] as u16 * weight) / 255) as u8;
@@ -463,17 +471,17 @@ pub fn compose_subject_outline(
         edge.edge_scale
     };
     let active = &edge_res.tensors[primary_scale as usize];
-    let primary_mask = tensor_to_edge_mask(
+    let primary_mask = edge_plane(
         active, edge_res.height, edge_res.width,
         masked_rgba.width(), masked_rgba.height(),
-        edge.line_strength,
+        edge.line_strength, edge.edge_thickness,
     );
     if let LineStyle::DualScale { fine_color, bold_color } = edge.line_style {
         let bold = &edge_res.tensors[EdgeScale::Bold as usize];
-        let bold_mask = tensor_to_edge_mask(
+        let bold_mask = edge_plane(
             bold, edge_res.height, edge_res.width,
             masked_rgba.width(), masked_rgba.height(),
-            edge.line_strength,
+            edge.line_strength, edge.edge_thickness,
         );
         // Fine and Bold must come from distinct tensor slots — equal raw
         // pointers mean the caller collapsed to single-scale output.
@@ -485,14 +493,13 @@ pub fn compose_subject_outline(
             &primary_mask, &bold_mask, masked_rgba,
             edge.compose_mode,
             fine_color, bold_color,
-            edge.edge_thickness,
         )
     } else {
         compose_edges_styled(
             &primary_mask, masked_rgba,
             edge.compose_mode,
             edge.line_style,
-            edge.solid_line_color, edge.edge_thickness,
+            edge.solid_line_color,
         )
     }
 }
@@ -506,15 +513,16 @@ pub fn finalize_edges(
     original: &DynamicImage,
     edge: &crate::EdgeSettings,
 ) -> RgbaImage {
-    let mask = tensor_to_edge_mask(
+    let mask = edge_plane(
         edge_tensor,
         tensor_h,
         tensor_w,
         original.width(),
         original.height(),
         edge.line_strength,
+        edge.edge_thickness,
     );
-    compose_edges(&mask, original, edge.solid_line_color, edge.edge_thickness)
+    compose_edges(&mask, original, edge.solid_line_color)
 }
 
 /// Pre-process an image according to the user's `InputTransform`. The
@@ -628,7 +636,15 @@ mod tests {
     use super::*;
 
     // The compositions as shipped before the row-parallel rewrite: the
-    // bit-exact oracle for every style and compose mode.
+    // bit-exact oracle for every style and compose mode. They dilate the
+    // mask themselves; production receives the dilated plane.
+    fn reference_dilated(mask: &image::GrayImage, thickness: u32) -> Vec<u8> {
+        let mut out = mask.clone();
+        if thickness > 0 {
+            crate::morphology::shift_mask(&mut out, -(thickness as f32));
+        }
+        out.into_raw()
+    }
     fn reference_compose_edges(
         mask: &image::GrayImage,
         original: &DynamicImage,
@@ -636,7 +652,7 @@ mod tests {
         edge_thickness: u32,
     ) -> RgbaImage {
         let (ow, oh) = (original.width(), original.height());
-        let mask_raw = dilate_to_bytes(mask, edge_thickness).into_owned();
+        let mask_raw = reference_dilated(mask, edge_thickness);
         if let Some(c) = solid_line_color {
             let mut buf = vec![0u8; (ow * oh * 4) as usize];
             for i in 0..(ow * oh) as usize {
@@ -666,7 +682,7 @@ mod tests {
     ) -> RgbaImage {
         use crate::types::{ComposeMode, LineStyle};
         let (ow, oh) = (base.width(), base.height());
-        let mask_raw = dilate_to_bytes(mask, edge_thickness).into_owned();
+        let mask_raw = reference_dilated(mask, edge_thickness);
         let mut rgba = base.clone();
         let out_raw = rgba.as_mut();
         let pixel_count = (ow * oh) as usize;
@@ -799,8 +815,8 @@ mod tests {
     ) -> RgbaImage {
         use crate::types::ComposeMode;
         let (ow, oh) = (base.width(), base.height());
-        let fine_raw = dilate_to_bytes(fine_mask, edge_thickness).into_owned();
-        let bold_raw = dilate_to_bytes(bold_mask, edge_thickness).into_owned();
+        let fine_raw = reference_dilated(fine_mask, edge_thickness);
+        let bold_raw = reference_dilated(bold_mask, edge_thickness);
         let mut rgba = base.clone();
         let out_raw = rgba.as_mut();
         let pixel_count = (ow * oh) as usize;
@@ -860,17 +876,19 @@ mod tests {
             LineStyle::Noise { amount: 90 },
             LineStyle::DualScale { fine_color: [1, 2, 3], bold_color: [4, 5, 6] },
         ];
+        let dilated = |m: &image::GrayImage, t: u32| image::GrayImage::from_raw(w, h, reference_dilated(m, t)).unwrap();
         for thickness in [0, 2] {
+            let (dm, db) = (dilated(&mask, thickness), dilated(&bold, thickness));
             for color in [None, Some([10u8, 200, 30])] {
-                assert!(compose_edges(&mask, &original, color, thickness) == reference_compose_edges(&mask, &original, color, thickness), "plain t={thickness} {color:?}");
+                assert!(compose_edges(&dm, &original, color) == reference_compose_edges(&mask, &original, color, thickness), "plain t={thickness} {color:?}");
             }
             for &compose in ComposeMode::ALL {
                 for &style in &styles {
-                    let fast = compose_edges_styled(&mask, &base, compose, style, Some([10, 200, 30]), thickness);
+                    let fast = compose_edges_styled(&dm, &base, compose, style, Some([10, 200, 30]));
                     let slow = reference_compose_edges_styled(&mask, &base, compose, style, Some([10, 200, 30]), thickness);
                     assert!(fast == slow, "{compose:?} {style:?} t={thickness}");
                 }
-                let fast = compose_edges_dual_styled(&mask, &bold, &base, compose, [255, 0, 0], [0, 0, 255], thickness);
+                let fast = compose_edges_dual_styled(&dm, &db, &base, compose, [255, 0, 0], [0, 0, 255]);
                 let slow = reference_compose_edges_dual_styled(&mask, &bold, &base, compose, [255, 0, 0], [0, 0, 255], thickness);
                 assert!(fast == slow, "dual {compose:?} t={thickness}");
             }
@@ -976,7 +994,7 @@ mod tests {
                 inner: [0, 0, 0],
                 outer: [255, 255, 255],
             },
-            None, 0,
+            None,
         );
         // `dist_sq * 255` first overflows i32 at x ≈ 2900 (255·x² > 2^31).
         // Sample on either side: monotonic ramp toward outer means
@@ -1016,7 +1034,7 @@ mod tests {
             &mask, &base,
             crate::ComposeMode::SubjectFilled,
             crate::LineStyle::Noise { amount: 80 },
-            None, 0,
+            None,
         );
         assert_eq!(out.dimensions(), (w, h));
     }
