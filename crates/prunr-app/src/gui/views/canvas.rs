@@ -548,22 +548,31 @@ const TIP_CYCLE_SECS: f64 = 5.0;
 const TIP_FADE_SECS: f64 = 0.5;
 
 static TIPS: LazyLock<Vec<String>> = LazyLock::new(|| {
-    let m = super::KB_MOD;
+    use super::shortcuts::{keys, label, Action};
+    let press = |a: Action| {
+        let mut chars = label(a).chars();
+        let first = chars.next().map(|c| c.to_lowercase().to_string()).unwrap_or_default();
+        format!("Press {} to {first}{}", keys(a), chars.as_str())
+    };
     vec![
-        "Press F1 to view keyboard shortcuts".to_string(),
-        "Press F2 to view CLI usage examples".to_string(),
-        format!("Press {m}+R to remove the background"),
-        "Press B to toggle before/after comparison".to_string(),
-        "Use Arrow keys or A/D to navigate between images".to_string(),
-        format!("Press {m}+0 to fit image to window"),
+        press(Action::Shortcuts),
+        press(Action::CliHelp),
+        press(Action::Process),
+        press(Action::BeforeAfter),
+        format!("Use {} or {} to switch images", keys(Action::PrevImage), keys(Action::NextImage)),
+        press(Action::FitToWindow),
         "Scroll to zoom, drag to pan".to_string(),
-        "Press Tab to show/hide the image queue".to_string(),
-        format!("Press {m}+Space to open settings"),
-        format!("Press {m}+S to save the result"),
-        format!("Press {m}+C to copy result to clipboard"),
-        format!("Press {m}+Z to undo background removal"),
+        press(Action::ToggleQueue),
+        press(Action::Settings),
+        press(Action::Save),
+        press(Action::Copy),
+        press(Action::Undo),
         "Open multiple images for batch processing".to_string(),
     ]
+});
+
+static OPEN_HINT: LazyLock<String> = LazyLock::new(|| {
+    format!("or press {} to open a file", super::shortcuts::keys(super::shortcuts::Action::Open))
 });
 
 fn render_empty(ui: &mut egui::Ui, _app: &PrunrApp) {
@@ -615,15 +624,10 @@ fn render_empty(ui: &mut egui::Ui, _app: &PrunrApp) {
         theme::TEXT_PRIMARY,
     );
 
-    let hint = if cfg!(target_os = "macos") {
-        "or press Cmd+O to open a file"
-    } else {
-        "or press Ctrl+O to open a file"
-    };
     painter.text(
         Pos2::new(center.x, text_y + 28.0),
         egui::Align2::CENTER_CENTER,
-        hint,
+        OPEN_HINT.as_str(),
         egui::FontId::proportional(theme::FONT_SIZE_BODY),
         theme::TEXT_SECONDARY,
     );

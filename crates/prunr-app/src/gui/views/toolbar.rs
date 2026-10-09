@@ -8,8 +8,8 @@ use crate::gui::item::BatchStatus;
 use crate::gui::state::AppState;
 use crate::gui::theme;
 
-use crate::kb;
-use super::KB_MOD;
+use super::chip::tooltip;
+use super::shortcuts::{keys, Action};
 
 pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
     ui.horizontal_centered(|ui| {
@@ -26,7 +26,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
         .fill(theme::BG_SECONDARY)
         .corner_radius(theme::BUTTON_ROUNDING)
         .min_size(egui::vec2(0.0, theme::BTN_HEIGHT));
-        if ui.add(open_btn).on_hover_text(kb!("Open image(s)", "O")).clicked() {
+        if tooltip(ui.add(open_btn), "Open", "Open one or more images.", Some(keys(Action::Open))).clicked() {
             app.pending_open_dialog = true;
         }
 
@@ -40,7 +40,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
         .fill(theme::BG_SECONDARY)
         .corner_radius(theme::BUTTON_ROUNDING)
         .min_size(egui::vec2(theme::BTN_HEIGHT, theme::BTN_HEIGHT));
-        if ui.add(gear_btn).on_hover_text(kb!("Settings", "Space")).clicked() {
+        if tooltip(ui.add(gear_btn), "Settings", "Hardware, performance and behavior.", Some(keys(Action::Settings))).clicked() {
             if app.show_settings {
                 app.close_settings(ui.ctx());
             } else {
@@ -62,14 +62,12 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
             .corner_radius(theme::BUTTON_ROUNDING)
             .min_size(egui::vec2(theme::BTN_HEIGHT, theme::BTN_HEIGHT));
 
-            if ui.add_enabled(can_undo, icon_btn(ICON_UNDO.codepoint))
-                .on_hover_text(kb!("Undo", "Z"))
+            if tooltip(ui.add_enabled(can_undo, icon_btn(ICON_UNDO.codepoint)), "Undo", "", Some(keys(Action::Undo)))
                 .clicked()
             {
                 app.handle_undo(ui.ctx());
             }
-            if ui.add_enabled(can_redo, icon_btn(ICON_REDO.codepoint))
-                .on_hover_text(kb!("Redo", "Y"))
+            if tooltip(ui.add_enabled(can_redo, icon_btn(ICON_REDO.codepoint)), "Redo", "", Some(keys(Action::Redo)))
                 .clicked()
             {
                 app.handle_redo(ui.ctx());
@@ -84,7 +82,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                 )
                 .fill(theme::DESTRUCTIVE)
                 .corner_radius(theme::BUTTON_ROUNDING);
-                if ui.add(remove_sel_btn).clicked() {
+                if tooltip(ui.add(remove_sel_btn), "Remove selected", "Take the selected images out of the queue.", None).clicked() {
                     app.remove_selected();
                 }
             }
@@ -93,17 +91,17 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                 && app.batch.items.iter().any(|i| i.selected && i.status == BatchStatus::Done);
             let show_save = can_save_copy || has_saveable_selected;
             if show_save {
-                let save_label = if has_selected {
-                    format!("{}  Save Selected", ICON_SAVE.codepoint)
+                let (save_title, save_label) = if has_selected {
+                    ("Save selected", format!("{}  Save Selected", ICON_SAVE.codepoint))
                 } else {
-                    format!("{}  Save", ICON_SAVE.codepoint)
+                    ("Save", format!("{}  Save", ICON_SAVE.codepoint))
                 };
                 let save_btn = egui::Button::new(
                     RichText::new(save_label).color(theme::TEXT_PRIMARY),
                 )
                 .fill(theme::BG_SECONDARY)
                 .corner_radius(theme::BUTTON_ROUNDING);
-                if ui.add(save_btn).on_hover_text(kb!("Save result", "S")).clicked() {
+                if tooltip(ui.add(save_btn), save_title, "Save the result as PNG.", Some(keys(Action::Save))).clicked() {
                     app.handle_save_selected();
                 }
             }
@@ -122,12 +120,12 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                 .fill(theme::DESTRUCTIVE)
                 .corner_radius(theme::BUTTON_ROUNDING)
                 .min_size(egui::vec2(0.0, theme::BTN_HEIGHT));
-                let tip = if partial {
-                    "Stop the selected items — others keep running"
+                let (title, body) = if partial {
+                    ("Cancel selected", "Stop the selected images; the others keep running.")
                 } else {
-                    "Cancel all processing (Escape)"
+                    ("Cancel all", "Stop all processing.")
                 };
-                if ui.add(cancel_btn).on_hover_text(tip).clicked() {
+                if tooltip(ui.add(cancel_btn), title, body, Some(keys(Action::Cancel))).clicked() {
                     if partial {
                         app.handle_cancel_selected();
                     } else {
@@ -173,31 +171,31 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                     .corner_radius(theme::BUTTON_ROUNDING)
                     .min_size(egui::vec2(0.0, theme::BTN_HEIGHT));
 
-                let tooltip: std::borrow::Cow<'static, str> = if inpaint_mode {
+                let body: std::borrow::Cow<'static, str> = if inpaint_mode {
                     if has_processable {
-                        "Re-dispatch the current stroke through the inpaint model with the current toolbar settings (prompt / scheduler / steps / strength).".into()
+                        "Run the eraser again over the painted region with the current settings.".into()
                     } else {
-                        "Paint a stroke first — Process re-dispatches the painted region with current settings.".into()
+                        "Paint a region first; Process then runs the eraser over it.".into()
                     }
                 } else {
                     match label {
-                        ProcessButtonLabel::ProcessAll(n) => format!("Process all {n} images ({}+R)", KB_MOD).into(),
+                        ProcessButtonLabel::ProcessAll(n) => format!("Process all {n} images.").into(),
                         ProcessButtonLabel::ProcessSelected(n) if n > 1 => {
-                            format!("Process {n} selected images ({}+R)", KB_MOD).into()
+                            format!("Process the {n} selected images.").into()
                         }
                         _ => {
                             let target_has_result = app.batch.first_target_item()
                                 .is_some_and(|i| i.result_rgba.is_some());
                             if app.settings.chain_mode && target_has_result {
-                                kb!("Process current result", "R").into()
+                                "Process the current result again.".into()
                             } else {
-                                kb!("Process original", "R").into()
+                                "Process the current image.".into()
                             }
                         }
                     }
                 };
 
-                if ui.add_enabled(has_processable, btn).on_hover_text(tooltip).clicked() {
+                if tooltip(ui.add_enabled(has_processable, btn), "Process", &body, Some(keys(Action::Process))).clicked() {
                     app.handle_process_intent();
                 }
             }

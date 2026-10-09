@@ -191,18 +191,34 @@ pub(super) fn guarded<R>(
     resp.inner
 }
 
-/// Attach a rich hover tooltip: strong setting-name heading + body text.
-/// Every chip uses this so the user always sees what they're hovering.
-pub(super) fn chip_tooltip(resp: Response, label: &str, body: &str) -> Response {
+/// The one hover tooltip for every control: strong title, one-sentence
+/// body, and the shortcut when the action has one. Pass an empty body
+/// for icon buttons whose title says it all.
+pub(super) fn tooltip(resp: Response, title: &str, body: &str, shortcut: Option<&str>) -> Response {
     resp.on_hover_ui(|ui| {
-        ui.label(RichText::new(label).strong().color(theme::TEXT_PRIMARY));
-        ui.add_space(theme::SPACE_XS);
-        ui.label(
-            RichText::new(body)
-                .color(theme::TEXT_PRIMARY)
-                .size(theme::FONT_SIZE_MONO),
-        );
+        ui.label(RichText::new(title).strong().color(theme::TEXT_PRIMARY));
+        if !body.is_empty() {
+            ui.add_space(theme::SPACE_XS);
+            ui.label(
+                RichText::new(body)
+                    .color(theme::TEXT_PRIMARY)
+                    .size(theme::FONT_SIZE_MONO),
+            );
+        }
+        if let Some(keys) = shortcut {
+            ui.add_space(theme::SPACE_XS);
+            ui.label(
+                RichText::new(keys)
+                    .color(theme::TEXT_SECONDARY)
+                    .size(theme::FONT_SIZE_MONO),
+            );
+        }
     })
+}
+
+/// `tooltip` for chips, which never carry a shortcut.
+pub(super) fn chip_tooltip(resp: Response, label: &str, body: &str) -> Response {
+    tooltip(resp, label, body, None)
 }
 
 /// Render the standard reset-to-default button at the bottom of a popover.
