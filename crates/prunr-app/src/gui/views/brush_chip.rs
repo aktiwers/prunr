@@ -66,83 +66,34 @@ pub(super) fn render(
         if chip::popover_header(ui, "Brush", Some(("Reset size, hardness, expand, edge blend, sharpen and shape", false))) {
             outcome.reset_brush_requested = true;
         }
-        ui.horizontal(|ui| {
-            ui.vertical(|ui| {
-                ui.set_min_width(220.0);
-                ui.set_max_width(280.0);
-                let r = chip::slider_row_f32(
-                    ui, "Size", &mut s.radius, 1.0..=200.0, true,
-                    |v| fmt::px(v, 0),
-                );
-                outcome.committed |= r.commit;
-                ui.add_space(4.0);
-                let h = chip::slider_row_f32(
-                    ui, "Hardness", &mut s.hardness, 0.0..=1.0, false,
-                    // tenths give ~0.5% drag granularity for fine edge tuning
-                    fmt::percent_tenths,
-                );
-                outcome.committed |= h.commit;
-                super::hint(ui, "0% is a soft edge, 100% a hard one.");
-                ui.add_space(4.0);
-                if !is_inpaint_mode {
-                    // The eraser binarizes the region, so opacity would have
-                    // no effect there — hide it.
-                    let st = chip::slider_row_f32(
-                        ui, "Opacity", &mut s.strength, 0.0..=1.0, false,
-                        fmt::percent,
-                    );
-                    outcome.committed |= st.commit;
-                    super::hint(ui, "How strongly each stroke changes the selection.");
-                } else {
-                    // Eraser-specific knobs. Live-update on release like
-                    // every other slider so the user sees the diff.
-                    ui.add_space(4.0);
-                    let g = chip::slider_row_f32(
-                        ui, "Expand region", &mut s.inpaint_grow, -16.0..=16.0, false,
-                        |v| fmt::signed_px(v, 0),
-                    );
-                    outcome.committed |= g.commit;
-                    super::hint(ui, "Grow or shrink the painted region before the fill.");
-                    ui.add_space(4.0);
-                    let f = chip::slider_row_f32(
-                        ui, "Edge blend", &mut s.inpaint_feather, 0.0..=32.0, false,
-                        |v| fmt::px(v, 0),
-                    );
-                    outcome.committed |= f.commit;
-                    super::hint(ui, "Width of the band where the fill blends into the photo.");
-                    ui.add_space(4.0);
-                    // Sharpen displays as 0-100% on a 0-2 internal range.
-                    let sh = chip::slider_row_f32(
-                        ui, "Sharpen", &mut s.inpaint_sharpen, 0.0..=2.0, false,
-                        |v| fmt::percent(v / 2.0),
-                    );
-                    outcome.committed |= sh.commit;
-                    super::hint(ui, "Sharpen the filled area, which comes out slightly soft.");
-                }
-                if !is_inpaint_mode {
-                    // The eraser has one direction (paint = erase), so the
-                    // mode switch is hidden there.
-                    ui.add_space(6.0);
-                    let modes = [
-                        chip::Choice { value: BrushMode::Add, name: "Add", description: "Strokes add to the selection", enabled: true },
-                        chip::Choice { value: BrushMode::Subtract, name: "Subtract", description: "Strokes remove from the selection", enabled: true },
-                    ];
-                    outcome.committed |= chip::choice_row(ui, "Mode", &modes, &mut s.mode);
-                }
-            });
-
-            ui.add_space(8.0);
-            ui.vertical(|ui| {
-                draw_preview(ui, s);
-                ui.add_space(6.0);
-                let shapes = [
-                    chip::Choice { value: BrushShape::Circle, name: "Circle", description: "", enabled: true },
-                    chip::Choice { value: BrushShape::Square, name: "Square", description: "", enabled: true },
-                    chip::Choice { value: BrushShape::Line, name: "Line", description: "", enabled: true },
-                ];
-                outcome.committed |= chip::choice_row(ui, "Shape", &shapes, &mut s.shape);
-            });
-        });
+        outcome.committed |= render_cursor_section(ui, s);
+        ui.add_space(4.0);
+        if !is_inpaint_mode {
+            // The eraser binarizes the region and paints in one direction,
+            // so opacity and mode would have no effect there.
+            let st = chip::slider_row_f32(ui, "Opacity", &mut s.strength, 0.0..=1.0, false, fmt::percent);
+            outcome.committed |= st.commit;
+            super::hint(ui, "How strongly each stroke changes the selection.");
+            ui.add_space(6.0);
+            let modes = [
+                chip::Choice { value: BrushMode::Add, name: "Add", description: "Strokes add to the selection", enabled: true },
+                chip::Choice { value: BrushMode::Subtract, name: "Subtract", description: "Strokes remove from the selection", enabled: true },
+            ];
+            outcome.committed |= chip::choice_row(ui, "Mode", &modes, &mut s.mode);
+        } else {
+            let g = chip::slider_row_f32(ui, "Expand region", &mut s.inpaint_grow, -16.0..=16.0, false, |v| fmt::signed_px(v, 0));
+            outcome.committed |= g.commit;
+            super::hint(ui, "Grow or shrink the painted region before the fill.");
+            ui.add_space(4.0);
+            let f = chip::slider_row_f32(ui, "Edge blend", &mut s.inpaint_feather, 0.0..=32.0, false, |v| fmt::px(v, 0));
+            outcome.committed |= f.commit;
+            super::hint(ui, "Width of the band where the fill blends into the photo.");
+            ui.add_space(4.0);
+            // Sharpen displays as 0-100% on a 0-2 internal range.
+            let sh = chip::slider_row_f32(ui, "Sharpen", &mut s.inpaint_sharpen, 0.0..=2.0, false, |v| fmt::percent(v / 2.0));
+            outcome.committed |= sh.commit;
+            super::hint(ui, "Sharpen the filled area, which comes out slightly soft.");
+        }
 
         ui.add_space(4.0);
         ui.separator();
@@ -156,6 +107,38 @@ pub(super) fn render(
     });
 
     outcome
+}
+
+/// The cursor block shared by both brushes: Size and Hardness on the
+/// left, the live stamp preview and Shape on the right. Returns true if
+/// anything committed this frame.
+pub(super) fn render_cursor_section(ui: &mut Ui, s: &mut BrushSettings) -> bool {
+    let mut committed = false;
+    ui.horizontal(|ui| {
+        ui.vertical(|ui| {
+            ui.set_min_width(220.0);
+            ui.set_max_width(280.0);
+            let r = chip::slider_row_f32(ui, "Size", &mut s.radius, 1.0..=200.0, true, |v| fmt::px(v, 0));
+            committed |= r.commit;
+            ui.add_space(4.0);
+            // tenths give ~0.5% drag granularity for fine edge tuning
+            let h = chip::slider_row_f32(ui, "Hardness", &mut s.hardness, 0.0..=1.0, false, fmt::percent_tenths);
+            committed |= h.commit;
+            super::hint(ui, "0% is a soft edge, 100% a hard one.");
+        });
+        ui.add_space(8.0);
+        ui.vertical(|ui| {
+            draw_preview(ui, s);
+            ui.add_space(6.0);
+            let shapes = [
+                chip::Choice { value: BrushShape::Circle, name: "Circle", description: "", enabled: true },
+                chip::Choice { value: BrushShape::Square, name: "Square", description: "", enabled: true },
+                chip::Choice { value: BrushShape::Line, name: "Line", description: "", enabled: true },
+            ];
+            committed |= chip::choice_row(ui, "Shape", &shapes, &mut s.shape);
+        });
+    });
+    committed
 }
 
 /// The "Auto-apply strokes" switch, shared by both brush popovers. It is
