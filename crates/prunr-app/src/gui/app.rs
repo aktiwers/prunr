@@ -3353,13 +3353,25 @@ impl PrunrApp {
                 if item.selection_tex_pending == Some(result.key) {
                     item.selection_tex_pending = None;
                 }
-                if item.selection_hash == Some(result.key.0) {
-                    let handle = ctx.load_texture(
-                        format!("selection_{}", result.item_id),
-                        result.color_image,
-                        egui::TextureOptions::LINEAR,
-                    );
-                    item.selection_texture = Some(super::item::SelectionTexture { key: result.key, handle });
+                let Some(shown) = item.selection_mask.clone().filter(|_| item.selection_hash == Some(result.key.0)) else { continue };
+                match result.image {
+                    super::background_io::SelectionImage::Full(image) => {
+                        let handle = ctx.load_texture(
+                            format!("selection_{}", result.item_id),
+                            image,
+                            egui::TextureOptions::LINEAR,
+                        );
+                        item.selection_texture = Some(super::item::SelectionTexture { key: result.key, handle, shown });
+                    }
+                    // A patch for a texture that has moved on is dropped;
+                    // `ensure_selection_texture` asks again against the new base.
+                    super::background_io::SelectionImage::Patch { base_hash, pos, image } => {
+                        if let Some(tex) = item.selection_texture.as_mut().filter(|t| t.key == (base_hash, result.key.1)) {
+                            tex.handle.set_partial(pos, image, egui::TextureOptions::LINEAR);
+                            tex.key = result.key;
+                            tex.shown = shown;
+                        }
+                    }
                 }
             }
         }

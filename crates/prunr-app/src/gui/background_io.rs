@@ -27,13 +27,20 @@ pub type HistoryDemoteResult = (
 pub(crate) type SelectionTextureKey = (u64, SelectionStyle);
 
 /// Selection texture (fill + outline, ACCENT-tinted ColorImage) built
-/// off-thread. Peak RAM on a 4K image: 8.3M pixels × 4 bytes = ~33 MB
-/// briefly on the rayon worker; drops after `ctx.load_texture` in
-/// `drain_background_channels`.
+/// off-thread. A full image is 4 B/px (~48 MB at 4K) briefly on the
+/// rayon worker; a patch is the changed region only. Either drops
+/// after the upload in `drain_background_channels`.
 pub(crate) struct SelectionTextureResult {
     pub(crate) item_id: u64,
-    pub(crate) color_image: egui::ColorImage,
+    pub(crate) image: SelectionImage,
     pub(crate) key: SelectionTextureKey,
+}
+
+pub(crate) enum SelectionImage {
+    Full(egui::ColorImage),
+    /// The pixels that differ from the texture showing `base_hash`,
+    /// to upload at `pos` into that texture.
+    Patch { base_hash: u64, pos: [usize; 2], image: egui::ColorImage },
 }
 
 /// Counting semaphore used to bound the number of simultaneously-decoding
@@ -181,20 +188,31 @@ impl BackgroundIO {
     /// with feather > 0, the bbox-sized guided-filter scratch documented on
     /// `feather_edges`. The result carries its key; the drain installs it
     /// only while the item's mask still matches.
+    ///
+    /// `base` is the plane the item's texture currently shows, with its
+    /// hash; when the style has no feather the result is a patch of the
+    /// changed region instead of a full image.
     pub(crate) fn request_selection_visualization(
         &self,
         item_id: u64,
-        mask: std::sync::Arc<prunr_core::selection::MaskArtifact>,
+        mask: Arc<prunr_core::selection::MaskArtifact>,
         key: SelectionTextureKey,
-        source: Option<std::sync::Arc<image::RgbaImage>>,
+        source: Option<Arc<image::RgbaImage>>,
+        base: Option<(u64, Arc<prunr_core::selection::MaskArtifact>)>,
         ctx: egui::Context,
     ) {
         let texture_tx = self.selection_texture_tx.clone();
         rayon::spawn(move || {
             let style = key.1;
-            let shown = style.feathered(mask, source.as_deref());
-            let color_image = build_selection_image(&shown, style);
-            let _ = texture_tx.send(SelectionTextureResult { item_id, color_image, key });
+            let patch = base.filter(|_| style.edge_feather_px == 0).and_then(|(base_hash, base)| {
+                let (pos, image) = build_selection_patch(&base, &mask, style)?;
+                Some(SelectionImage::Patch { base_hash, pos, image })
+            });
+            let image = patch.unwrap_or_else(|| {
+                let shown = style.feathered(mask, source.as_deref());
+                SelectionImage::Full(build_selection_image(&shown, style))
+            });
+            let _ = texture_tx.send(SelectionTextureResult { item_id, image, key });
             // Some compositors drop thread-initiated wake-ups while the
             // window is idle; the pending key's poll in `logic()` is the
             // fallback.
@@ -285,6 +303,57 @@ pub(crate) fn build_selection_image(
     egui::ColorImage::new([w, h], pixels)
 }
 
+/// The region of the rendered selection that differs between `base`
+/// and `mask`, as `(top-left, image)`, or `None` when the planes are
+/// identical or differ in size. A changed cell can change the rendering
+/// of the pixels within the outline radius plus one (boundary status),
+/// so that margin is kept; to render those correctly the crop needs the
+/// same margin again, because `outline_polyline` treats the crop edge
+/// as unselected.
+pub(crate) fn build_selection_patch(
+    base: &prunr_core::selection::MaskArtifact,
+    mask: &prunr_core::selection::MaskArtifact,
+    style: SelectionStyle,
+) -> Option<([usize; 2], egui::ColorImage)> {
+    use rayon::prelude::*;
+    if (base.width, base.height) != (mask.width, mask.height) {
+        return None;
+    }
+    let (w, h) = (mask.width as usize, mask.height as usize);
+    let (x0, y0, x1, y1) = base
+        .cells()
+        .par_chunks(w)
+        .zip(mask.cells().par_chunks(w))
+        .enumerate()
+        .filter_map(|(y, (a, b))| {
+            let first = a.iter().zip(b).position(|(p, q)| p != q)?;
+            let last = a.iter().zip(b).rposition(|(p, q)| p != q).unwrap_or(first);
+            Some((first, y, last, y))
+        })
+        .reduce(|| (usize::MAX, usize::MAX, 0, 0), |a, b| (a.0.min(b.0), a.1.min(b.1), a.2.max(b.2), a.3.max(b.3)));
+    if x0 == usize::MAX {
+        return None;
+    }
+    let margin = style.band_radius().unwrap_or(0) as usize + 1;
+    let grow = |x0: usize, y0: usize, x1: usize, y1: usize, m: usize| {
+        (x0.saturating_sub(m), y0.saturating_sub(m), (x1 + m).min(w - 1), (y1 + m).min(h - 1))
+    };
+    let keep = grow(x0, y0, x1, y1, margin);
+    let crop = grow(keep.0, keep.1, keep.2, keep.3, margin);
+    let (cw, ch) = (crop.2 - crop.0 + 1, crop.3 - crop.1 + 1);
+    let cells: Vec<i8> = (crop.1..=crop.3)
+        .flat_map(|y| mask.cells()[y * w + crop.0..y * w + crop.0 + cw].iter().copied())
+        .collect();
+    let cropped = prunr_core::selection::MaskArtifact::from_cells(cw as u32, ch as u32, cells);
+    let full = build_selection_image(&cropped, style);
+    let (kw, kh) = (keep.2 - keep.0 + 1, keep.3 - keep.1 + 1);
+    let (ox, oy) = (keep.0 - crop.0, keep.1 - crop.1);
+    let pixels = (0..kh)
+        .flat_map(|y| full.pixels[(oy + y) * cw + ox..(oy + y) * cw + ox + kw].iter().copied())
+        .collect();
+    Some(([keep.0, keep.1], egui::ColorImage::new([kw, kh], pixels)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -322,6 +391,36 @@ mod tests {
         assert_eq!(img.pixels[2 * 8 + 2].a(), 38, "no band: boundary pixel is plain fill");
         let img = build_selection_image(&centre_block(), style(0.15, 0.0, 4.0));
         assert_eq!(img.pixels[2 * 8 + 2].a(), 38, "invisible outline: boundary pixel is plain fill");
+    }
+
+    /// The patch must reproduce the full build inside its region, and
+    /// the full build must be unchanged outside it.
+    #[test]
+    fn patch_equals_the_full_build_where_it_matters() {
+        use prunr_core::brush::{paint_circle, Stamp};
+        use prunr_core::selection::BrushMode;
+        let mut base = MaskArtifact::new_empty(40, 30);
+        paint_circle(&mut base, 12.0, 15.0, 7.0, Stamp { hardness: 1.0, strength: 1.0, mode: BrushMode::Add });
+        let mut mask = base.clone();
+        paint_circle(&mut mask, 20.0, 14.0, 5.0, Stamp { hardness: 0.5, strength: 1.0, mode: BrushMode::Add });
+        for thickness in [0.0, 1.0, 3.0, 7.0] {
+            let style = style(0.3, 0.8, thickness);
+            let (pos, patch) = build_selection_patch(&base, &mask, style).expect("masks differ");
+            let before = build_selection_image(&base, style);
+            let after = build_selection_image(&mask, style);
+            for y in 0..30 {
+                for x in 0..40 {
+                    let inside = (pos[0]..pos[0] + patch.size[0]).contains(&x) && (pos[1]..pos[1] + patch.size[1]).contains(&y);
+                    let expected = after.pixels[y * 40 + x];
+                    if inside {
+                        assert_eq!(patch.pixels[(y - pos[1]) * patch.size[0] + (x - pos[0])], expected, "patch ({x},{y}) t={thickness}");
+                    } else {
+                        assert_eq!(before.pixels[y * 40 + x], expected, "outside ({x},{y}) t={thickness}");
+                    }
+                }
+            }
+        }
+        assert!(build_selection_patch(&base, &base, style(0.3, 0.8, 1.0)).is_none(), "identical planes: nothing to patch");
     }
 
     #[test]
