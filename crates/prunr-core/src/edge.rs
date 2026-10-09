@@ -56,8 +56,7 @@ impl EdgeEngine {
     /// Create a new DexiNed edge detection engine.
     pub fn new() -> Result<Self, CoreError> {
         let edge_bytes = prunr_models::dexined_bytes();
-        let session = Session::builder()
-            .map_err(|e| CoreError::Inference(format!("Edge builder init failed: {e}")))?
+        let session = crate::ort_runtime::session_builder()?
             .with_optimization_level(ort::session::builder::GraphOptimizationLevel::Level3)
             .map_err(|e| CoreError::Inference(format!("Edge set opt level failed: {e}")))?
             .with_intra_threads(num_cpus::get().max(1))
