@@ -415,6 +415,12 @@ impl BatchItem {
         self.selection_tex_pending = None;
     }
 
+    /// True while a background thread owes this item a decode or a texture.
+    pub(crate) fn has_pending_work(&self) -> bool {
+        self.result_tex_pending || self.source_tex_pending || self.decode_pending
+            || self.selection_tex_pending.is_some()
+    }
+
     /// Make `mask` the selection and register the change for undo: the
     /// previous mask is snapshotted onto the stroke stack with a Stroke
     /// marker on the ordering layer, redo is cleared. Every author — Paint
