@@ -24,10 +24,7 @@ pub fn bench(c: &mut Criterion) {
     let mut group = c.benchmark_group("sam_decode");
     group.throughput(Throughput::Elements((w * h) as u64));
     group.bench_function("4K", |b| {
-        b.iter(|| {
-            let out = decode_to_mask_artifact(black_box(&output), w, h, 0.5, BrushMode::Add);
-            black_box(out);
-        });
+        b.iter(|| black_box(decode_to_mask_artifact(black_box(&output), w, h, 0.5, BrushMode::Add)));
     });
     group.finish();
 }
