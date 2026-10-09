@@ -508,7 +508,7 @@ pub(super) fn toggle_row(ui: &mut Ui, label: &str, value: &mut bool) -> ChipChan
 /// (the inline hue ring + sliders) rather than `color_edit_button_srgb`
 /// (which opens its own popup — the parent popover's `CloseOnClickOutside`
 /// treats that as "outside" and dismisses on first click).
-/// Returns `true` when the user changed the colour.
+/// Returns `true` when the user changed the color.
 pub(super) fn rgb_picker(ui: &mut Ui, rgb: &mut [u8; 3]) -> bool {
     let mut c = Color32::from_rgb(rgb[0], rgb[1], rgb[2]);
     if color_picker_color32(ui, &mut c, Alpha::Opaque) {

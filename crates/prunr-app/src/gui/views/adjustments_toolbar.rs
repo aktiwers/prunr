@@ -544,6 +544,31 @@ fn render_lines_group(
                     return;
                 }
                 ui.add_space(theme::SPACE_XS);
+                chip::section_label(ui, "Pre-filter");
+                let mut filter_changed = false;
+                ui.horizontal_wrapped(|ui| {
+                    for option in InputTransform::ALL {
+                        let selected = std::mem::discriminant(option) == std::mem::discriminant(&s.input_transform);
+                        if ui.selectable_label(selected, option.name()).clicked() && !selected {
+                            s.input_transform = *option;
+                            filter_changed = true;
+                        }
+                    }
+                });
+                match &mut s.input_transform {
+                    InputTransform::None | InputTransform::Grayscale => {}
+                    InputTransform::ContrastBoost { percent } => {
+                        filter_changed |= chip::slider_row(ui, "Contrast (%)", percent, 50..=300).changed;
+                    }
+                    InputTransform::Posterize { levels } => {
+                        filter_changed |= chip::slider_row(ui, "Levels", levels, 2..=8).changed;
+                    }
+                }
+                if filter_changed {
+                    mark_input_transform_change(change);
+                }
+                hint(ui, "Applied to the image before the lines are traced. Requires reprocessing.");
+                ui.add_space(theme::SPACE_XS);
 
                 // Dual scale draws Fine and Bold itself, so the scale has no effect.
                 let scale_active = !matches!(s.line_style, LineStyle::DualScale { .. });
@@ -583,30 +608,6 @@ fn render_lines_group(
                     ui.add_space(theme::SPACE_XS);
                 }
 
-                chip::section_label(ui, "Pre-filter");
-                let mut filter_changed = false;
-                ui.horizontal_wrapped(|ui| {
-                    for option in InputTransform::ALL {
-                        let selected = std::mem::discriminant(option) == std::mem::discriminant(&s.input_transform);
-                        if ui.selectable_label(selected, option.name()).clicked() && !selected {
-                            s.input_transform = *option;
-                            filter_changed = true;
-                        }
-                    }
-                });
-                match &mut s.input_transform {
-                    InputTransform::None | InputTransform::Grayscale => {}
-                    InputTransform::ContrastBoost { percent } => {
-                        filter_changed |= chip::slider_row(ui, "Contrast (%)", percent, 50..=300).changed;
-                    }
-                    InputTransform::Posterize { levels } => {
-                        filter_changed |= chip::slider_row(ui, "Levels", levels, 2..=8).changed;
-                    }
-                }
-                if filter_changed {
-                    mark_input_transform_change(change);
-                }
-                hint(ui, "Applied to the image before the lines are traced. Requires reprocessing.");
             });
 
             if !on {
@@ -754,7 +755,7 @@ fn render_fill_style_chip(ui: &mut Ui, style: &mut prunr_core::FillStyle) -> boo
     let resp = chip::tooltip(
         chip::chip_button(ui, ICON_FORMAT_PAINT.codepoint, style.name(), accent),
         "Fill style",
-        "How the subject RGB is transformed before compose.",
+        "Recolor the cut-out subject.",
         None,
     );
 
@@ -883,7 +884,7 @@ fn fill_style_params(ui: &mut Ui, style: &mut prunr_core::FillStyle) -> bool {
 
 /// The five backgrounds a user can choose. Derived from the two
 /// orthogonal data fields (`bg`, `bg_effect`) — effects take precedence
-/// over solid colour at render time, and the chip mirrors that precedence.
+/// over solid color at render time, and the chip mirrors that precedence.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum BgKind { Transparent, Solid, Image, BlurredSource, InvertedSource, DesaturatedSource }
 
@@ -896,7 +897,7 @@ impl BgKind {
     fn name(self) -> &'static str {
         match self {
             Self::Transparent => "Transparent",
-            Self::Solid => "Solid colour",
+            Self::Solid => "Solid color",
             Self::Image => "Image",
             Self::BlurredSource => "Blurred source",
             Self::InvertedSource => "Inverted source",
@@ -905,7 +906,7 @@ impl BgKind {
     }
 
     /// Derive the current kind from the underlying fields. Effects win over
-    /// solid colour (render-time precedence); image bg sits between effects
+    /// solid color (render-time precedence); image bg sits between effects
     /// and solid — picking image clears bg_color and effect, picking effect
     /// or color clears the image (mutual exclusion enforced by the chip).
     fn current(bg: &Option<[u8; 4]>, effect: &prunr_core::BgEffect, has_image: bool) -> Self {
@@ -930,7 +931,7 @@ impl BgKind {
 }
 
 /// Unified Background chip: one control for "what fills the transparent
-/// area behind the subject" — solid colour or a source-derived effect.
+/// area behind the subject" — solid color or a source-derived effect.
 /// Editable + display state for the background chip. Grouped because the
 /// chip needs three live-edit fields plus image-availability metadata —
 /// past the param-count alarm without this grouping.
@@ -964,8 +965,7 @@ fn render_background_chip(
     let resp = chip::tooltip(
         chip::chip_button(ui, ICON_PALETTE.codepoint, current.name(), accent),
         "Background",
-        "What fills transparent areas behind the subject: a solid colour, \
-         a chosen image, or a source-derived effect (blurred / inverted / desaturated).",
+        "What fills the transparent area behind the subject: a solid color, an image, or a blurred, inverted or desaturated copy of the photo.",
     None,
 );
 
@@ -1025,7 +1025,7 @@ fn render_background_chip(
             ui.vertical(|ui| {
                 match current {
                     BgKind::Transparent => {
-                        hint(ui, "No background — alpha is preserved on export.");
+                        hint(ui, "No background; the exported PNG keeps its transparency.");
                     }
                     BgKind::Solid => {
                         if let Some(rgba) = bg.as_mut() {
@@ -1035,7 +1035,7 @@ fn render_background_chip(
                                 *rgba = [r, g, b, a];
                                 aggregate_bool(true, StaticKnob::BgColor, change);
                             }
-                            hint(ui, "Solid colour fills transparent areas at render / export.");
+                            hint(ui, "Solid color fills transparent areas at render / export.");
                         }
                     }
                     BgKind::Image => {
@@ -1062,20 +1062,20 @@ fn render_background_chip(
                                 }
                             }
                         }
-                        hint(ui, "Picked image fills transparent areas at render / export. Fit follows CSS conventions (Cover / Contain / Stretch / Tile / Center).");
+                        hint(ui, "The image fills the transparent area on screen and in the export.");
                     }
                     BgKind::BlurredSource => {
                         if let BgEffect::BlurredSource { radius } = bg_effect {
                             let r = chip::slider_row(ui, "Blur radius (px)", radius, 1..=64);
                             aggregate_bool(r.changed, StaticKnob::BgEffect, change);
                         }
-                        hint(ui, "Transparent areas filled with a Gaussian-blurred copy of the source image.");
+                        hint(ui, "A blurred copy of the photo fills the transparent area.");
                     }
                     BgKind::InvertedSource => {
-                        hint(ui, "Transparent areas filled with the RGB-inverted source image.");
+                        hint(ui, "An inverted copy of the photo fills the transparent area.");
                     }
                     BgKind::DesaturatedSource => {
-                        hint(ui, "Transparent areas filled with the luma-grayscale source.");
+                        hint(ui, "A grayscale copy of the photo fills the transparent area.");
                     }
                 }
             });
@@ -1087,9 +1087,9 @@ const BACKGROUND_POPOVER_WIDTH: f32 = 480.0;
 const BACKGROUND_LIST_WIDTH: f32 = 150.0;
 
 /// Mutate the two bg fields to match `kind`. Transparent clears both; Solid
-/// sets `bg` (picking up an existing colour if present, falling back to the
+/// sets `bg` (picking up an existing color if present, falling back to the
 /// default) and clears the effect; effects set `bg_effect` without touching
-/// `bg` so the user's colour survives a round-trip through an effect.
+/// `bg` so the user's color survives a round-trip through an effect.
 fn apply_bg_kind(
     bg: &mut Option<[u8; 4]>,
     bg_effect: &mut prunr_core::BgEffect,
@@ -1121,9 +1121,9 @@ fn apply_bg_kind(
     }
 }
 
-/// Label + inline colour picker on two stacked rows. Thin wrapper over
+/// Label + inline color picker on two stacked rows. Thin wrapper over
 /// `chip::rgb_picker` — the label is purely visual context so the user
-/// knows which colour they're editing.
+/// knows which color they're editing.
 fn rgb_picker_row(ui: &mut Ui, label: &str, rgb: &mut [u8; 3]) -> bool {
     ui.label(RichText::new(label).color(theme::TEXT_SECONDARY).size(theme::FONT_SIZE_MONO));
     chip::rgb_picker(ui, rgb)

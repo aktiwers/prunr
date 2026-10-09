@@ -18,11 +18,11 @@ pub fn render_runtime_prompt(ctx: &egui::Context, rt: RuntimeId) -> Option<Runti
     let mut result: Option<RuntimePromptAction> = None;
 
     let backdrop_closed = theme::standard_modal_window(
-        ctx, "runtime_prompt", "Faster inference is available",
+        ctx, "runtime_prompt", "Faster processing is available",
         [theme::SETTINGS_DIALOG_WIDTH, 280.0],
         |ui| {
             ui.label(
-                RichText::new("Faster inference is available")
+                RichText::new("Faster processing is available")
                     .size(theme::FONT_SIZE_HEADING)
                     .strong()
                     .color(theme::TEXT_PRIMARY),

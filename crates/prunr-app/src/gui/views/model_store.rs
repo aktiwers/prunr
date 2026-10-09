@@ -2,6 +2,7 @@
 //! installing, cancelling, and deleting on-demand models.
 
 use egui::RichText;
+use egui_material_icons::icons::ICON_WARNING;
 
 use prunr_models::{
     descriptor as model_descriptor, on_demand_dir, ModelCategory, ModelDescriptor, ModelId,
@@ -253,7 +254,7 @@ fn render_card(
             }
             if let Some(msg) = advisory {
                 ui.label(
-                    RichText::new(format!("⚠ {msg}"))
+                    RichText::new(format!("{} {msg}", ICON_WARNING.codepoint))
                         .size(theme::FONT_SIZE_MONO)
                         .color(theme::TEXT_HINT),
                 );
