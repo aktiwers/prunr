@@ -10,9 +10,10 @@ tests/test_images/*.webp
 tests/test_images/*.bmp
 test_cli/
 
-# Internal dev planning — not for public repo
+# Internal dev planning and agent instructions — not for public repo
 .planning/
 .claude/
+/CLAUDE.md
 demo/
 memory/
 
