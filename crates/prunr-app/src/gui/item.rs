@@ -363,10 +363,12 @@ pub(crate) struct BatchItem {
     pub(crate) magic_brush_embedding: Option<std::sync::Arc<prunr_core::sam::SamEmbedding>>,
 }
 
-/// A selection overlay texture and what it was built from.
+/// A selection overlay texture and what it was built from. `shown` is
+/// the plane on the GPU, so the next change can upload only its patch.
 pub(crate) struct SelectionTexture {
     pub(crate) key: super::background_io::SelectionTextureKey,
     pub(crate) handle: egui::TextureHandle,
+    pub(crate) shown: Arc<prunr_core::selection::MaskArtifact>,
 }
 
 impl BatchItem {
