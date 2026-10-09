@@ -33,9 +33,9 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
     // Also check egui's global "wants pointer input" — this is true when any
     // widget (slider, button, text field) is currently capturing the pointer.
     let widget_has_pointer = ui.ctx().egui_wants_pointer_input();
-    // Brush is live in Done (correcting an existing seg result) and in
-    // Loaded when Eraser is selected (paint directly on source — there's
-    // no prior result to correct, the stroke IS the input).
+    // The brush authors the selection against the source, so it is live
+    // as soon as an image is loaded; segmentation corrections apply once
+    // a result exists.
     //
     // While an inpaint stroke is in flight on the selected item, the
     // brush is locked: another stroke would silently supersede the
@@ -49,8 +49,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
     let app_state = app.batch.app_state();
     let brush_active = app.brush_state.is_enabled()
         && !inpaint_in_flight_for_selected
-        && (matches!(app_state, AppState::Done)
-            || (matches!(app_state, AppState::Loaded) && app.settings.model.is_inpaint()));
+        && matches!(app_state, AppState::Loaded | AppState::Done);
     // Magic Brush is treated as a brush tool for pan-gate purposes — when
     // it's active and the encoder is ready, left-drag belongs to the
     // brush and pan moves to secondary (right) button, matching Paint

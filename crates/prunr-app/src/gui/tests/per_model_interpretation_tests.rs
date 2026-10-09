@@ -17,6 +17,15 @@ use crate::gui::app::PrunrApp;
 use crate::gui::settings::SettingsModel;
 
 use super::fixtures::push_test_item;
+use crate::gui::item::BatchItem;
+use crate::gui::worker::{CompressedTensor, TensorCache};
+
+/// A segmentation result exists for the item: the correction has a tensor
+/// to apply to.
+fn give_tensor(item: &mut BatchItem) {
+    let cache = TensorCache { data: vec![0.5; 64], height: 8, width: 8, model: prunr_core::ModelKind::Silueta };
+    item.cached_tensor = CompressedTensor::from_raw(cache);
+}
 
 fn make_mask(w: u32, h: u32) -> prunr_core::selection::MaskArtifact {
     let mut data = vec![0i8; (w * h) as usize];
@@ -44,6 +53,7 @@ fn bg_removal_fires_rerun_on_selection_commit() {
 
     let item = push_test_item(&mut app, 1);
     item.dimensions = (64, 64);
+    give_tensor(item);
     let item_id = 1u64;
 
     let mask = make_mask(64, 64);
@@ -65,6 +75,7 @@ fn bg_removal_with_protect_selection_does_not_fire_rerun() {
 
     let item = push_test_item(&mut app, 2);
     item.dimensions = (64, 64);
+    give_tensor(item);
     let item_id = 2u64;
 
     let mask = make_mask(64, 64);
@@ -186,6 +197,7 @@ fn paint_brush_bg_removal_keeps_stroke_direction_and_softness() {
     app.settings.protect_selection = false;
     let item = push_test_item(&mut app, 7);
     item.dimensions = (32, 32);
+    give_tensor(item);
     let item_id = 7u64;
 
     let mut stroke = MaskCorrection::empty(32, 32);
@@ -204,5 +216,35 @@ fn paint_brush_bg_removal_keeps_stroke_direction_and_softness() {
     assert!(
         stored.data.iter().any(|&v| v < 0 && v > -prunr_core::selection::FULL),
         "hardness falloff must survive as intermediate magnitudes"
+    );
+}
+
+// ── Segmentation without a tensor → the selection waits for the result ───────
+//
+// A brush is usable as soon as an image is loaded. With no tensor there is
+// nothing to correct, so the commit must not queue a rerun (the no-tensor
+// live-preview path would paint the raw source as a "result"); once a result
+// lands, the same selection is applied.
+#[test]
+fn bg_removal_without_tensor_waits_until_a_result_lands() {
+    let mut app = app_with_model(SettingsModel::BiRefNetLite);
+    app.settings.protect_selection = false;
+
+    let item = push_test_item(&mut app, 9);
+    item.dimensions = (64, 64);
+    let item_id = 9u64;
+
+    app.commit_selection_and_dispatch(item_id, make_mask(64, 64));
+    assert!(
+        !app.processor.live_preview.is_pending_for(item_id),
+        "no tensor: a stroke must author the selection without dispatching"
+    );
+    assert!(app.batch.find_by_id(item_id).unwrap().selection_mask.is_some());
+
+    give_tensor(app.batch.find_by_id_mut(item_id).unwrap());
+    app.apply_selection_to_active_model(item_id);
+    assert!(
+        app.processor.live_preview.is_pending_for(item_id),
+        "once a tensor exists the waiting selection must be applied"
     );
 }

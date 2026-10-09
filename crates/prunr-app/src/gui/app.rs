@@ -894,7 +894,10 @@ impl PrunrApp {
             .map(|d| d.category);
         match category {
             Some(prunr_models::ModelCategory::Segmentation) => {
-                if !self.settings.protect_selection {
+                // Without a tensor there is nothing to correct yet; the
+                // selection waits and `on_batch_item_done` applies it when
+                // the first result lands.
+                if !self.settings.protect_selection && self.batch.items[idx].cached_tensor.is_some() {
                     self.dispatch_brush_rerun(idx);
                 }
             }
@@ -2825,6 +2828,16 @@ impl PrunrApp {
 
         self.refresh_batch_progress_status();
 
+        // A selection authored before this result, or kept across Process,
+        // is applied now that there is a tensor to correct.
+        let has_selection = self
+            .batch
+            .find_by_id(item_id)
+            .is_some_and(|i| i.status == BatchStatus::Done && i.selection_mask.is_some());
+        if has_selection {
+            self.apply_selection_to_active_model(item_id);
+        }
+
         if is_selected {
             self.result_switch_id += 1;
             self.sync_selected_batch_textures(ctx);
@@ -3520,10 +3533,10 @@ impl PrunrApp {
                 let settings_ref = &mut self.settings;
                 let brush_state_ref = &mut self.brush_state;
                 let item = &mut self.batch.items[idx];
-                // Inpaint mode operates on the source image directly — no
-                // cached seg tensor required. For seg-removal models the
-                // brush corrects the AI mask so it needs the tensor.
-                let brush_available = settings_ref.model.is_inpaint() || item.cached_tensor.is_some();
+                // Both brushes author the selection against the source, so
+                // they only need a decoded image; a segmentation correction
+                // waits for the tensor (see `apply_selection_to_active_model`).
+                let brush_available = item.source_rgba.is_some() || item.cached_tensor.is_some();
                 let has_bg_image = item.bg_image.is_some();
                 let bg_image_label = item.bg_image.as_deref()
                     .and_then(|bg| bg.source_path.as_deref())
