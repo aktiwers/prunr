@@ -499,8 +499,10 @@ impl BatchManager {
         let Some(mask) = item.selection_mask.clone() else { return };
         item.selection_tex_pending = Some(key);
         let (item_id, source) = (item.id, item.source_rgba.clone());
+        // A patch applies only to a texture of the same style, and only
+        // without feather: feathering reshapes the plane beyond the stroke.
         let base = item.selection_texture.as_ref()
-            .filter(|t| t.key.1 == style)
+            .filter(|t| t.key.1 == style && style.edge_feather_px == 0)
             .map(|t| (t.key.0, Arc::clone(&t.shown)));
         self.bg_io.request_selection_visualization(item_id, mask, key, source, base, ctx.clone());
     }

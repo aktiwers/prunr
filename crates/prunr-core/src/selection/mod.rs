@@ -21,9 +21,43 @@
 
 use std::sync::Arc;
 
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 pub mod refine;
+
+/// An inclusive rectangle of cells.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CellRect {
+    pub x0: u32,
+    pub y0: u32,
+    pub x1: u32,
+    pub y1: u32,
+}
+
+impl CellRect {
+    pub fn width(self) -> u32 {
+        self.x1 - self.x0 + 1
+    }
+
+    pub fn height(self) -> u32 {
+        self.y1 - self.y0 + 1
+    }
+
+    pub fn union(self, o: Self) -> Self {
+        Self { x0: self.x0.min(o.x0), y0: self.y0.min(o.y0), x1: self.x1.max(o.x1), y1: self.y1.max(o.y1) }
+    }
+
+    /// Grown by `margin` on every side, clamped to a `w × h` plane.
+    pub fn grown(self, margin: u32, w: u32, h: u32) -> Self {
+        Self {
+            x0: self.x0.saturating_sub(margin),
+            y0: self.y0.saturating_sub(margin),
+            x1: (self.x1 + margin).min(w - 1),
+            y1: (self.y1 + margin).min(h - 1),
+        }
+    }
+}
 
 /// Magnitude of a fully selected cell.
 pub const FULL: i8 = 127;
@@ -109,6 +143,39 @@ impl MaskArtifact {
     /// nothing. O(1): decided when the plane is built.
     pub fn is_blank(&self) -> bool {
         !self.painted
+    }
+
+    /// The bounding rectangle of the cells that differ from `other`;
+    /// `None` when the planes are identical or differ in size.
+    pub fn diff_bbox(&self, other: &Self) -> Option<CellRect> {
+        if (self.width, self.height) != (other.width, other.height) {
+            return None;
+        }
+        let w = self.width as usize;
+        self.data
+            .par_chunks(w)
+            .zip(other.data.par_chunks(w))
+            .enumerate()
+            .filter(|(_, (a, b))| a != b)
+            .map(|(y, (a, b))| {
+                let differs = |(p, q): (&i8, &i8)| p != q;
+                // the row differs, so both positions exist
+                let x0 = a.iter().zip(b).position(differs).unwrap_or(0) as u32;
+                let x1 = a.iter().zip(b).rposition(differs).unwrap_or(0) as u32;
+                CellRect { x0, y0: y as u32, x1, y1: y as u32 }
+            })
+            .reduce_with(CellRect::union)
+    }
+
+    /// The cells inside `r` as their own plane.
+    pub fn crop(&self, r: CellRect) -> Self {
+        let (w, cw) = (self.width as usize, r.width() as usize);
+        let mut cells = Vec::with_capacity(cw * r.height() as usize);
+        for y in r.y0..=r.y1 {
+            let start = y as usize * w + r.x0 as usize;
+            cells.extend_from_slice(&self.data[start..start + cw]);
+        }
+        Self::from_cells(r.width(), r.height(), cells)
     }
 
     #[inline]
@@ -505,6 +572,24 @@ mod tests {
             }
         }
         assert!(faint_touched > 0, "a soft stroke must have cells below the threshold");
+    }
+
+    #[test]
+    fn diff_bbox_and_crop_round_trip() {
+        let a = mask(6, 5, vec![0; 30]);
+        let mut cells = vec![0i8; 30];
+        cells[6 + 2] = 50;
+        cells[3 * 6 + 4] = -70;
+        let b = mask(6, 5, cells);
+        assert_eq!(a.diff_bbox(&a), None);
+        assert_eq!(a.diff_bbox(&MaskArtifact::new_empty(5, 5)), None, "size mismatch");
+        let r = a.diff_bbox(&b).unwrap();
+        assert_eq!(r, CellRect { x0: 2, y0: 1, x1: 4, y1: 3 });
+        assert_eq!(r.grown(1, 6, 5), CellRect { x0: 1, y0: 0, x1: 5, y1: 4 });
+        assert_eq!(r.grown(9, 6, 5), CellRect { x0: 0, y0: 0, x1: 5, y1: 4 });
+        let c = b.crop(r);
+        assert_eq!((c.width, c.height), (3, 3));
+        assert_eq!(c.cells(), &[50, 0, 0, 0, 0, 0, 0, 0, -70]);
     }
 
     #[test]

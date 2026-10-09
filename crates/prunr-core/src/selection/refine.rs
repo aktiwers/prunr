@@ -3,7 +3,7 @@
 //! `is_selected` region; feathering keeps each cell's sign and gives
 //! newly reached cells the selection's dominant sign.
 
-use super::{MaskArtifact, FULL};
+use super::{CellRect, MaskArtifact, FULL};
 
 /// 8-connected boundary scan. Returns source-pixel coords of selected
 /// pixels with at least one unselected or out-of-bounds neighbour.
@@ -44,21 +44,19 @@ pub fn outline_polyline(mask: &MaskArtifact) -> Vec<(u32, u32)> {
     out
 }
 
-/// Bounding box `(x0, y0, x1, y1)`, inclusive, of the selected cells.
-fn selected_bbox(mask: &MaskArtifact) -> Option<(u32, u32, u32, u32)> {
+/// Bounding rectangle of the selected cells.
+fn selected_bbox(mask: &MaskArtifact) -> Option<CellRect> {
     let w = mask.width as usize;
-    let mut bbox: Option<(u32, u32, u32, u32)> = None;
-    for (y, row) in mask.cells().chunks_exact(w.max(1)).enumerate() {
-        let Some(first) = row.iter().position(|&v| MaskArtifact::is_selected(v)) else { continue };
-        // just found one, so rposition is Some
-        let last = row.iter().rposition(|&v| MaskArtifact::is_selected(v)).unwrap_or(first);
-        let (first, last, y) = (first as u32, last as u32, y as u32);
-        bbox = Some(match bbox {
-            None => (first, y, last, y),
-            Some((x0, y0, x1, _)) => (x0.min(first), y0, x1.max(last), y),
-        });
-    }
-    bbox
+    mask.cells()
+        .chunks_exact(w.max(1))
+        .enumerate()
+        .filter_map(|(y, row)| {
+            let x0 = row.iter().position(|&v| MaskArtifact::is_selected(v))? as u32;
+            // just found one, so rposition is Some
+            let x1 = row.iter().rposition(|&v| MaskArtifact::is_selected(v)).unwrap_or(0) as u32;
+            Some(CellRect { x0, y0: y as u32, x1, y1: y as u32 })
+        })
+        .reduce(CellRect::union)
 }
 
 /// Edge-aware feather. `feather_px == 0` or an empty selection returns a
@@ -93,15 +91,11 @@ pub fn feather_edges(
         );
         return mask.clone();
     }
-    let Some((x0, y0, x1, y1)) = selected_bbox(mask) else {
+    let Some(selected) = selected_bbox(mask) else {
         return mask.clone();
     };
-    let margin = 3 * feather_px;
-    let bx0 = x0.saturating_sub(margin);
-    let by0 = y0.saturating_sub(margin);
-    let bx1 = (x1 + margin).min(w - 1);
-    let by1 = (y1 + margin).min(h - 1);
-    let (bw, bh) = (bx1 - bx0 + 1, by1 - by0 + 1);
+    let work = selected.grown(3 * feather_px, w, h);
+    let (bx0, by0, bw, bh) = (work.x0, work.y0, work.width(), work.height());
     let bw_us = bw as usize;
     let crop_row = |y: u32| -> std::ops::Range<usize> {
         let start = ((by0 + y) * w + bx0) as usize;
@@ -221,7 +215,7 @@ mod tests {
         data[5] = -FULL; // (1, 1)
         data[11] = FULL; // (3, 2)
         data[12] = 10; // (0, 3): below threshold — ignored
-        assert_eq!(selected_bbox(&make_mask(4, 4, data)), Some((1, 1, 3, 2)));
+        assert_eq!(selected_bbox(&make_mask(4, 4, data)), Some(CellRect { x0: 1, y0: 1, x1: 3, y1: 2 }));
         assert_eq!(selected_bbox(&MaskArtifact::new_empty(4, 4)), None);
     }
 

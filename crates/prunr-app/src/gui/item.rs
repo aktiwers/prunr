@@ -364,7 +364,9 @@ pub(crate) struct BatchItem {
 }
 
 /// A selection overlay texture and what it was built from. `shown` is
-/// the plane on the GPU, so the next change can upload only its patch.
+/// the plane on the GPU, so the next change can upload only its patch;
+/// it is usually the item's own mask (one Arc), and at most one extra
+/// plane per item while a newer mask awaits its patch.
 pub(crate) struct SelectionTexture {
     pub(crate) key: super::background_io::SelectionTextureKey,
     pub(crate) handle: egui::TextureHandle,

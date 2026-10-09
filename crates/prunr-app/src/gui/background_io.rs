@@ -189,9 +189,9 @@ impl BackgroundIO {
     /// `feather_edges`. The result carries its key; the drain installs it
     /// only while the item's mask still matches.
     ///
-    /// `base` is the plane the item's texture currently shows, with its
-    /// hash; when the style has no feather the result is a patch of the
-    /// changed region instead of a full image.
+    /// With `base` (the plane the item's texture shows, and its hash)
+    /// the result is a patch of the changed region instead of a full
+    /// image.
     pub(crate) fn request_selection_visualization(
         &self,
         item_id: u64,
@@ -204,7 +204,7 @@ impl BackgroundIO {
         let texture_tx = self.selection_texture_tx.clone();
         rayon::spawn(move || {
             let style = key.1;
-            let patch = base.filter(|_| style.edge_feather_px == 0).and_then(|(base_hash, base)| {
+            let patch = base.and_then(|(base_hash, base)| {
                 let (pos, image) = build_selection_patch(&base, &mask, style)?;
                 Some(SelectionImage::Patch { base_hash, pos, image })
             });
@@ -315,43 +315,25 @@ pub(crate) fn build_selection_patch(
     mask: &prunr_core::selection::MaskArtifact,
     style: SelectionStyle,
 ) -> Option<([usize; 2], egui::ColorImage)> {
-    use rayon::prelude::*;
-    if (base.width, base.height) != (mask.width, mask.height) {
-        return None;
-    }
-    let (w, h) = (mask.width as usize, mask.height as usize);
-    let (x0, y0, x1, y1) = base
-        .cells()
-        .par_chunks(w)
-        .zip(mask.cells().par_chunks(w))
-        .enumerate()
-        .filter_map(|(y, (a, b))| {
-            let first = a.iter().zip(b).position(|(p, q)| p != q)?;
-            let last = a.iter().zip(b).rposition(|(p, q)| p != q).unwrap_or(first);
-            Some((first, y, last, y))
-        })
-        .reduce(|| (usize::MAX, usize::MAX, 0, 0), |a, b| (a.0.min(b.0), a.1.min(b.1), a.2.max(b.2), a.3.max(b.3)));
-    if x0 == usize::MAX {
-        return None;
-    }
-    let margin = style.band_radius().unwrap_or(0) as usize + 1;
-    let grow = |x0: usize, y0: usize, x1: usize, y1: usize, m: usize| {
-        (x0.saturating_sub(m), y0.saturating_sub(m), (x1 + m).min(w - 1), (y1 + m).min(h - 1))
-    };
-    let keep = grow(x0, y0, x1, y1, margin);
-    let crop = grow(keep.0, keep.1, keep.2, keep.3, margin);
-    let (cw, ch) = (crop.2 - crop.0 + 1, crop.3 - crop.1 + 1);
-    let cells: Vec<i8> = (crop.1..=crop.3)
-        .flat_map(|y| mask.cells()[y * w + crop.0..y * w + crop.0 + cw].iter().copied())
-        .collect();
-    let cropped = prunr_core::selection::MaskArtifact::from_cells(cw as u32, ch as u32, cells);
-    let full = build_selection_image(&cropped, style);
-    let (kw, kh) = (keep.2 - keep.0 + 1, keep.3 - keep.1 + 1);
-    let (ox, oy) = (keep.0 - crop.0, keep.1 - crop.1);
-    let pixels = (0..kh)
-        .flat_map(|y| full.pixels[(oy + y) * cw + ox..(oy + y) * cw + ox + kw].iter().copied())
-        .collect();
-    Some(([keep.0, keep.1], egui::ColorImage::new([kw, kh], pixels)))
+    let (w, h) = (mask.width, mask.height);
+    let margin = style.band_radius().unwrap_or(0) + 1;
+    let keep = base.diff_bbox(mask)?.grown(margin, w, h);
+    let crop = keep.grown(margin, w, h);
+    let rendered = build_selection_image(&mask.crop(crop), style);
+    let pixels = sub_rect(
+        &rendered.pixels,
+        crop.width() as usize,
+        (keep.x0 - crop.x0) as usize,
+        (keep.y0 - crop.y0) as usize,
+        keep.width() as usize,
+        keep.height() as usize,
+    );
+    Some(([keep.x0 as usize, keep.y0 as usize], egui::ColorImage::new([keep.width() as usize, keep.height() as usize], pixels)))
+}
+
+/// The `w × h` block at `(x, y)` of a row-major buffer with `stride`.
+fn sub_rect<T: Copy>(src: &[T], stride: usize, x: usize, y: usize, w: usize, h: usize) -> Vec<T> {
+    src.chunks(stride).skip(y).take(h).flat_map(|row| row[x..x + w].iter().copied()).collect()
 }
 
 #[cfg(test)]
