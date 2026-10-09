@@ -2,7 +2,6 @@ use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
-use std::time::Duration;
 
 use prunr_runtime_install::{retry_with_backoff, Retryable};
 use std::path::{Path, PathBuf};
@@ -143,16 +142,8 @@ fn probe_load_dynamic() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Shared HTTP client for every xtask network call. `timeout` is the
-/// budget per socket operation — reqwest re-arms it on each read when
-/// the body is streamed — not a whole-download cap, so slow links still
-/// finish and a stalled one fails within a minute.
 fn http_client() -> reqwest::Result<reqwest::blocking::Client> {
-    reqwest::blocking::Client::builder()
-        .user_agent("prunr-xtask/0.1")
-        .connect_timeout(Duration::from_secs(15))
-        .timeout(Duration::from_secs(60))
-        .build()
+    prunr_runtime_install::http_client("prunr-xtask/0.1")
 }
 
 enum FetchError {

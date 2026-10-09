@@ -227,6 +227,17 @@ impl Retryable for DlError {
     fn cancelled() -> Self { DlError::fatal("cancelled") }
 }
 
+/// The HTTP client every download site shares. `timeout` is the budget
+/// per socket operation, re-armed on each read while a body streams, so
+/// a slow link still finishes and a stalled one fails within a minute.
+pub fn http_client(user_agent: &str) -> reqwest::Result<reqwest::blocking::Client> {
+    reqwest::blocking::Client::builder()
+        .user_agent(user_agent)
+        .connect_timeout(std::time::Duration::from_secs(15))
+        .timeout(std::time::Duration::from_secs(60))
+        .build()
+}
+
 /// Single download attempt — used by the retry wrapper. Streams chunks,
 /// fires progress per percentage point, polls cancel per chunk.
 /// `Content-Length` not pre-allocated (untrusted; bogus 9999999999 would
@@ -235,9 +246,7 @@ fn download_wheel_attempt(
     info: &WheelInfo,
     hooks: &mut DownloadHooks<'_>,
 ) -> Result<bytes::Bytes, DlError> {
-    let client = reqwest::blocking::Client::builder()
-        .user_agent(concat!("prunr-runtime-install/", env!("CARGO_PKG_VERSION")))
-        .build()
+    let client = http_client(concat!("prunr-runtime-install/", env!("CARGO_PKG_VERSION")))
         .map_err(|e| DlError::fatal(format!("HTTP client: {e}")))?;
     let response = client.get(&info.url).send()
         .map_err(|e| DlError::transient(format!("connect: {e}")))?;
