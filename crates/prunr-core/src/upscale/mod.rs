@@ -282,30 +282,26 @@ where
 
     let knobs = upscale_knobs(descriptor)?;
     let native_result = run_upscale_native(input, engine, descriptor, knobs.native_scale, on_tile_done, cancel, terminate)?;
+    Ok(fit_to_scale(native_result, input, scale))
+}
 
-    if scale == 4 {
-        Ok(native_result)
-    } else if scale == 2 {
-        let half_w = native_result.width() / 2;
-        let half_h = native_result.height() / 2;
-
-        let rgb4 = image::DynamicImage::ImageRgba8(native_result);
-        let rgb_half = crate::formats::resize_rgb_lanczos3(&rgb4, half_w, half_h);
-
-        // Resize alpha from the original input — skips the intermediate 4×
-        // pass that the RGB path goes through.
-        let alpha_half = upscale_alpha_lanczos3(input, half_w, half_h);
-
-        let mut out = RgbaImage::new(half_w, half_h);
-        for (x, y, p) in out.enumerate_pixels_mut() {
-            let rgb = rgb_half.get_pixel(x, y).0;
-            let a = alpha_half.get_pixel(x, y).0[0];
-            *p = image::Rgba([rgb[0], rgb[1], rgb[2], a]);
-        }
-        Ok(out)
-    } else {
-        Err(CoreError::Inference(format!("unsupported upscale scale: {scale}")))
+/// Bring the model's native output to `scale ×` the input: returned as
+/// is when the sizes already agree, otherwise Lanczos3-resampled (down
+/// for 2× or 3× from a 4× model, up when the factor exceeds the model's
+/// native scale). Alpha is resampled from the input directly.
+fn fit_to_scale(native: RgbaImage, input: &RgbaImage, scale: u32) -> RgbaImage {
+    let (w, h) = (input.width() * scale, input.height() * scale);
+    if native.dimensions() == (w, h) {
+        return native;
     }
+    let rgb = crate::formats::resize_rgb_lanczos3(&image::DynamicImage::ImageRgba8(native), w, h);
+    let alpha = upscale_alpha_lanczos3(input, w, h);
+    let mut out = RgbaImage::new(w, h);
+    for (x, y, p) in out.enumerate_pixels_mut() {
+        let rgb = rgb.get_pixel(x, y).0;
+        *p = image::Rgba([rgb[0], rgb[1], rgb[2], alpha.get_pixel(x, y).0[0]]);
+    }
+    out
 }
 
 /// Convenience wrapper: constructs an engine internally then delegates to
@@ -526,6 +522,20 @@ mod tests {
     /// RealESRGAN's to `true`) would surface as a runtime ORT
     /// "Unexpected input data type" panic on the first dispatch —
     /// caught here at compile-time-of-the-test instead.
+    #[test]
+    fn fit_to_scale_resamples_to_every_offered_factor() {
+        let input = RgbaImage::from_pixel(4, 6, image::Rgba([10, 20, 30, 200]));
+        let native4 = RgbaImage::from_pixel(16, 24, image::Rgba([40, 50, 60, 255]));
+        assert_eq!(fit_to_scale(native4.clone(), &input, 4).dimensions(), (16, 24));
+        assert_eq!(fit_to_scale(native4.clone(), &input, 3).dimensions(), (12, 18));
+        let two = fit_to_scale(native4, &input, 2);
+        assert_eq!(two.dimensions(), (8, 12));
+        assert_eq!(two.get_pixel(3, 3).0, [40, 50, 60, 200], "RGB from the model, alpha from the input");
+        // A native-2× model asked for 4× resamples up instead of returning the 2× plane.
+        let native2 = RgbaImage::from_pixel(8, 12, image::Rgba([1, 2, 3, 255]));
+        assert_eq!(fit_to_scale(native2, &input, 4).dimensions(), (16, 24));
+    }
+
     #[test]
     fn upscale_knobs_fp16_matches_export() {
         let nomos = prunr_models::REGISTRY

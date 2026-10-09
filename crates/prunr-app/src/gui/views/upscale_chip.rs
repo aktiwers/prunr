@@ -50,10 +50,10 @@ pub(crate) fn render_output_scale_chip(
     let resp = chip::tooltip(
         resp,
         "Scale",
-        "How much to enlarge the image. 4\u{00d7} is the model's native size. \
-         2\u{00d7} and 3\u{00d7} shrink the 4\u{00d7} output with high-quality \
-         resampling. 4\u{00d7} (two-pass) runs the upscale in two halves for \
-         cleaner results on noisy or low-light photos \u{2014} Real-ESRGAN only.",
+        "How much to enlarge the image. Most models produce 4\u{00d7}; other \
+         factors resample that output with high-quality Lanczos. 4\u{00d7} \
+         (two-pass) runs the 2\u{00d7} model twice for cleaner results on noisy \
+         or low-light photos \u{2014} Real-ESRGAN only.",
     None,
 );
 
