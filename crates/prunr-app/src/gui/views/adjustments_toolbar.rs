@@ -1,7 +1,7 @@
-//! Rows 2 + 3 of the persistent toolbar. Row 2 holds the mask / composite
-//! adjustments (gamma, threshold, edge shift, refine edges, bg color).
-//! Row 3 holds the line-specific knobs (line strength, solid line color)
-//! and is only visible when `line_mode != Off`.
+//! Row 2 of the persistent toolbar: `Model`, then one group chip per
+//! pipeline stage for the active mode, then the tool cluster and the
+//! preset controls. Each group popover lists its knobs in the order the
+//! pipeline applies them.
 //!
 //! View Component discipline: `render` takes `&mut ItemSettings` + a `&AppSettings`
 //! reference for defaults / live-preview flag lookups. Never `&mut PrunrApp`.
@@ -12,7 +12,8 @@
 use egui::{RichText, Ui};
 use egui_material_icons::icons::*;
 
-use super::selection_action_bar::{render_selection_action_bar, SelectionAction};
+use super::selection_action_bar::{render_selection_actions, SelectionAction};
+use super::shortcuts::Action;
 
 use crate::gui::brush_state::BrushState;
 use crate::gui::item_settings::ItemSettings;
@@ -23,18 +24,10 @@ use crate::gui::knob_catalog::{
 use crate::gui::settings::{Settings, SettingsModel};
 use crate::gui::theme;
 use crate::gui::views::{chip, fmt, hint, preset_dropdown};
-use prunr_core::LineMode;
+use prunr_core::{EdgeScale, LineMode};
 
+use super::lines_popover::{compose_description, mode_description, mode_label, scale_description, scale_label};
 use super::{installed_models, model_info};
-
-/// Append the "Press F3 for the full pipeline." hint to a chip tooltip at
-/// compile time. Single-point of truth for the hint suffix so an F3 rebind
-/// or rewording doesn't require touching every chip.
-macro_rules! tip {
-    ($body:literal) => {
-        concat!($body, "\n\nPress F3 for the full pipeline.")
-    };
-}
 
 /// Summary of what a toolbar render cycle changed.
 ///
@@ -107,6 +100,26 @@ pub struct ToolbarChange {
     pub(crate) toggle_paint: bool,
     /// User clicked the Magic Brush toggle button.
     pub(crate) toggle_magic: bool,
+    /// User clicked the Compare toggle (show the original over the result).
+    pub(crate) toggle_compare: bool,
+}
+
+/// Read-only per-frame facts the toolbar renders against. Built by the
+/// app from the selected item and the coordinators.
+pub(crate) struct ToolbarState<'a> {
+    pub magic_brush_active: bool,
+    pub magic_encoder_pending: bool,
+    pub brush_available: bool,
+    pub processing: bool,
+    pub has_bg_image: bool,
+    pub bg_image_label: Option<&'a str>,
+    /// `(w, h)` of the active item's effective input — the chained result
+    /// when chain mode is on and a result exists, else the source.
+    pub source_dims: (u32, u32),
+    pub has_selection: bool,
+    pub protect_selection: bool,
+    pub show_original: bool,
+    pub has_result: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -136,6 +149,7 @@ impl Default for ToolbarChange {
             protect_selection: None,
             toggle_paint: false,
             toggle_magic: false,
+            toggle_compare: false,
         }
     }
 }
@@ -166,64 +180,28 @@ impl Defaults {
     }
 }
 
-/// Render rows 2 + 3. Returns a `ToolbarChange` summarizing what was edited.
-/// `app_settings` exposes model + preset map (Row 2 hosts both dropdowns).
-/// `applied_preset` is read for the button's modified/clean icon and written
-/// in place when the user applies or saves a preset.
-///
-/// `source_dims` is `(w, h)` of the active item's effective input — the
-/// chained result dimensions when chain mode is on and a result exists,
-/// otherwise the raw source image dimensions. Used by the upscale row to
-/// display projected output size. Pass `(0, 0)` when no item is loaded.
-// args mirror the live render-pass surface (settings + brush + processing
-// flags + processor coordinator) one-for-one; packing into a struct would
-// force a borrow-split of `Settings` from `ItemSettings` that callers
-// don't otherwise need.
-#[allow(clippy::too_many_arguments)]
+/// Render row 2. Returns a `ToolbarChange` summarizing what was edited.
+/// `app_settings` exposes model + preset map. `applied_preset` is read for
+/// the button's modified/clean icon and written in place when the user
+/// applies or saves a preset.
 pub(crate) fn render(
     ui: &mut Ui,
     item_settings: &mut ItemSettings,
     app_settings: &mut Settings,
     applied_preset: &mut String,
     brush_state: &mut BrushState,
-    magic_brush_active: bool,
-    magic_encoder_pending: bool,
-    brush_available: bool,
-    processing: bool,
-    has_bg_image: bool,
-    bg_image_label: Option<&str>,
-    source_dims: (u32, u32),
-    has_selection: bool,
-    protect_selection: bool,
+    state: ToolbarState<'_>,
 ) -> ToolbarChange {
     let mut change = ToolbarChange::default();
     let defaults = Defaults::new();
 
     ui.spacing_mut().item_spacing.x = theme::SPACE_SM;
 
-    // Snapshots for smart cache invalidation. We compare before/after so we
-    // only clear caches whose INPUT actually changed, not every cache on
-    // every apply. Matters for live preview: a preset apply that keeps
-    // line_mode the same leaves the edge tensor valid, so subsequent
-    // line_strength tweaks still live-preview without needing a Process.
+    // Compared after the render so the line-mode transition is recorded
+    // once, whichever row changed it.
     let before_line_mode = item_settings.line_mode;
 
-    // Knob-enablement rules:
-    // - mask_active:   mask chips (gamma/threshold/edge_shift/refine/
-    //                  feather) operate on the seg mask. Dead when model
-    //                  skips seg (No model), or when line_mode is
-    //                  EdgesOnly without chain mode (edges-only doesn't
-    //                  produce a mask).
-    // - fill_style:    transforms subject RGB. Dead when there IS no
-    //                  subject — i.e. EdgesOnly (lines only, transparent
-    //                  bg).
-    // - bg_active:     fills transparent areas. Dead only when there's no
-    //                  transparency at all — filter-only mode (No model +
-    //                  Off) outputs a full-RGB image with nothing to fill.
     let model_uses_seg = app_settings.model.uses_segmentation();
-    // Snapshot pre-dropdown — the model dropdown below can mutate
-    // `app_settings.model`. Branches that need post-dropdown state
-    // re-read the predicate directly after the dropdown call.
     let inpaint_mode = app_settings.model.is_inpaint();
     let upscale_mode = app_settings.model.is_upscale();
     let knob_ctx = KnobContext {
@@ -236,132 +214,144 @@ pub(crate) fn render(
     let fill_style_active = knob_catalog::knob_enabled(KnobRequirement::SubjectPresent, knob_ctx);
     let bg_active = knob_catalog::knob_enabled(KnobRequirement::TransparencyProduced, knob_ctx);
 
-    if upscale_mode {
-        super::upscale_toolbar::render_upscale_row(
-            ui,
-            app_settings,
-            item_settings,
-            applied_preset,
-            source_dims,
-            processing,
-            &mut change,
-        );
-        super::refinement_row::render_refinement_row(ui, item_settings);
-    } else {
-        ui.horizontal(|ui| {
-            render_model_dropdown(ui, app_settings, processing, mask_active, &mut change);
+    ui.horizontal(|ui| {
+        render_model_dropdown(ui, app_settings, state.processing, mask_active, &mut change);
 
-            // If the user just picked "No model" while line_mode was
-            // SubjectOutline, auto-flip to Off — the invalid combination (no
-            // seg but compose-over-subject) would just silently render as
-            // filter-only anyway.
-            if change.model_changed
-                && !app_settings.model.uses_segmentation()
-                && item_settings.line_mode == LineMode::SubjectOutline
-            {
-                item_settings.line_mode = LineMode::Off;
-            }
+        // Picking "No model" while Sketch is Subject would be an invalid
+        // combination (no mask to outline); fall back to Off.
+        if change.model_changed
+            && !app_settings.model.uses_segmentation()
+            && item_settings.line_mode == LineMode::SubjectOutline
+        {
+            item_settings.line_mode = LineMode::Off;
+        }
 
-            if !inpaint_mode {
-                render_seg_mask_chips(
-                    ui,
-                    item_settings,
-                    &SegRowFlags {
-                        defaults: &defaults,
-                        mask_active,
-                        fill_style_active,
-                        bg_active,
-                        has_bg_image,
-                        bg_image_label,
-                    },
-                    &mut change,
-                );
-            } else if matches!(app_settings.model, crate::gui::settings::SettingsModel::SdInpaint) {
-                // SD-eraser chip cluster lives inline in Row 2 next to the
-                // model dropdown. LaMa / MI-GAN have no per-stroke knobs
-                // worth a chip row.
+        if upscale_mode {
+            super::upscale_toolbar::render_upscale_chips(ui, app_settings, item_settings, state.source_dims);
+        } else if inpaint_mode {
+            if matches!(app_settings.model, SettingsModel::SdInpaint) {
                 let outcome = super::eraser_chip::render(ui, app_settings);
                 if outcome.committed {
                     change.brush_settings_committed = true;
                 }
             }
+        } else {
+            let mask_inactive_reason = if matches!(app_settings.model, SettingsModel::None) {
+                Some("No model is selected, so there is no mask to adjust.")
+            } else if !mask_active {
+                Some("Sketch is set to Full, so the subject mask is not used.")
+            } else {
+                None
+            };
+            render_mask_group(ui, item_settings, &defaults, mask_inactive_reason, &mut change);
+            render_lines_group(ui, item_settings, &defaults, model_uses_seg, &mut change);
+            // Fill works without a mask (filter-only mode); only Full sketch
+            // has no subject to fill.
+            ui.add_enabled_ui(fill_style_active, |ui| {
+                let changed = render_fill_style_chip(ui, &mut item_settings.fill_style);
+                aggregate_bool(changed, StaticKnob::FillStyle, &mut change);
+            })
+            .response
+            .on_disabled_hover_text("Sketch is set to Full, so there is no subject to fill.");
+            ui.add_enabled_ui(bg_active, |ui| {
+                render_background_chip(ui, BgChipState {
+                    bg: &mut item_settings.bg,
+                    bg_effect: &mut item_settings.bg_effect,
+                    bg_image_fit: &mut item_settings.bg_image_fit,
+                    default_color: defaults.bg_value,
+                    has_bg_image: state.has_bg_image,
+                    bg_image_label: state.bg_image_label,
+                }, &mut change);
+            })
+            .response
+            .on_disabled_hover_text("Nothing is transparent in this mode, so there is no background to fill.");
+        }
 
-            // Right-aligned cluster. Right-to-left layout fills from the
-            // right edge: [Magic][Paint][tool chip][Protect] | [Preset][Reset].
-            ui.with_layout(
-                egui::Layout::right_to_left(egui::Align::Center),
-                |ui| {
-                    // Reset-all-knobs button visible directly (per user feedback —
-                    // was previously hidden in the kebab overflow menu).
-                    render_reset_preset_cluster(
-                        ui,
-                        app_settings,
-                        item_settings,
-                        applied_preset,
-                        &mut change,
-                    );
+        // Right-aligned cluster. Right-to-left layout fills from the right
+        // edge: [Magic][Paint][tool chip][selection actions][Compare] | [Preset][Reset].
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            render_reset_preset_cluster(ui, app_settings, item_settings, applied_preset, &mut change);
+            ui.separator();
 
-                    ui.separator();
+            ui.add_enabled_ui(state.has_result, |ui| {
+                let resp = chip::tooltip(
+                    chip::icon_toggle_button(ui, ICON_VISIBILITY.codepoint, state.show_original),
+                    "Compare",
+                    "Show the original image instead of the result.",
+                    Some(Action::BeforeAfter),
+                );
+                if resp.clicked() {
+                    change.toggle_compare = true;
+                }
+            })
+            .response
+            .on_disabled_hover_text("Process the image first.");
 
-                    // Tool cluster, right-to-left: Protect, tool settings,
-                    // Paint, Magic — so the settings chip appearing never
-                    // moves the toggles.
-                    let paint_active = brush_state.is_enabled();
-                    if model_uses_seg && has_selection {
-                        let resp = chip::tooltip(
-                            chip::icon_toggle_button(ui, ICON_LOCK.codepoint, protect_selection),
-                            "Protect selection",
-                            "Keep background removal from overwriting the selection on the next Process.",
-                            None,
-                        );
-                        if resp.clicked() {
-                            change.protect_selection = Some(!protect_selection);
-                        }
-                    }
-                    if brush_available && magic_brush_active {
-                        let outcome = super::magic_brush_chip::render(
-                            ui,
-                            &mut app_settings.brush,
-                            magic_encoder_pending,
-                        );
-                        if outcome.committed {
-                            change.brush_settings_committed = true;
-                        }
-                    } else if brush_available && paint_active {
-                        let outcome = super::brush_chip::render(
-                            ui, &mut app_settings.brush, app_settings.model.is_inpaint(),
-                        );
-                        if outcome.reset_brush_requested {
-                            change.reset_brush_requested = true;
-                        }
-                        if outcome.committed {
-                            change.brush_settings_committed = true;
-                        }
-                    }
-                    ui.add_enabled_ui(brush_available, |ui| {
-                        let paint_resp = chip::tooltip(
-                            chip::icon_toggle_button(ui, ICON_BRUSH.codepoint, paint_active),
-                            "Paint Brush",
-                            "Paint the selection by hand.",
-                            None,
-                        );
-                        if paint_resp.clicked() {
-                            change.toggle_paint = true;
-                        }
-                        let magic_resp = chip::tooltip(
-                            chip::icon_toggle_button(ui, ICON_AUTO_AWESOME.codepoint, magic_brush_active),
-                            "Magic Brush",
-                            "Click or stroke to select an object; Shift adds, Alt subtracts.",
-                            None,
-                        );
-                        if magic_resp.clicked() {
-                            change.toggle_magic = true;
-                        }
-                    });
-                },
-            );
+            if upscale_mode {
+                return;
+            }
+
+            if state.has_selection {
+                if let Some(action) = render_selection_actions(ui) {
+                    change.selection_action = Some(action);
+                }
+            }
+
+            // Tool cluster, right-to-left: tool settings, Paint, Magic — so
+            // the settings chip appearing never moves the toggles.
+            let paint_active = brush_state.is_enabled();
+            let auto_apply = model_uses_seg.then_some(!state.protect_selection);
+            if state.brush_available && state.magic_brush_active {
+                let outcome = super::magic_brush_chip::render(
+                    ui,
+                    &mut app_settings.brush,
+                    state.magic_encoder_pending,
+                    auto_apply,
+                );
+                if outcome.committed {
+                    change.brush_settings_committed = true;
+                }
+                if let Some(on) = outcome.auto_apply {
+                    change.protect_selection = Some(!on);
+                }
+            } else if state.brush_available && paint_active {
+                let outcome = super::brush_chip::render(
+                    ui, &mut app_settings.brush, app_settings.model.is_inpaint(), auto_apply,
+                );
+                if outcome.reset_brush_requested {
+                    change.reset_brush_requested = true;
+                }
+                if outcome.committed {
+                    change.brush_settings_committed = true;
+                }
+                if let Some(on) = outcome.auto_apply {
+                    change.protect_selection = Some(!on);
+                }
+            }
+            ui.add_enabled_ui(state.brush_available, |ui| {
+                let paint_resp = chip::tooltip(
+                    chip::icon_toggle_button(ui, ICON_BRUSH.codepoint, paint_active),
+                    "Paint Brush",
+                    "Paint the selection by hand.",
+                    None,
+                );
+                if paint_resp.clicked() {
+                    change.toggle_paint = true;
+                }
+                let magic_resp = chip::tooltip(
+                    chip::icon_toggle_button(ui, ICON_AUTO_AWESOME.codepoint, state.magic_brush_active),
+                    "Magic Brush",
+                    "Click or stroke to select an object; Shift adds, Alt subtracts.",
+                    None,
+                );
+                if magic_resp.clicked() {
+                    change.toggle_magic = true;
+                }
+            })
+            .response
+            .on_disabled_hover_text("Open an image first.");
         });
-    }
+    });
 
     // Model-change hooks: fire regardless of which row is active.
     // Drop any cached LaMa sessions on model change — fires for
@@ -414,23 +404,6 @@ pub(crate) fn render(
         }
     }
 
-    // ── Row 3: Lines mode selector (BG-removal models). SD-eraser
-    // chips moved to Row 2; LaMa / MI-GAN have no per-stroke knobs.
-    // Upscale mode has no line knobs — Row 3 is entirely absent.
-    if !inpaint_mode && !upscale_mode {
-        render_lines_row(
-            ui,
-            item_settings,
-            &LinesRowFlags {
-                app_settings,
-                defaults: &defaults,
-                processing,
-                mask_active,
-            },
-            &mut change,
-        );
-    }
-
     // Line-mode transition: record the signal + cache impact (deterministic
     // in `(from, to)`). The dispatcher owns dispatch resolution — folding a
     // worst-case here would dominate the refined fast path via `.max()`
@@ -446,283 +419,309 @@ pub(crate) fn render(
         change.commit = true;
     }
 
-    // Selection action bar — rendered below all rows when a selection exists.
-    // Skipped in upscale mode (no mask surface there).
-    if has_selection && !upscale_mode {
-        ui.add_space(theme::SPACE_XS);
-        if let Some(action) = render_selection_action_bar(ui) {
-            change.selection_action = Some(action);
-        }
-    }
-
     change
 }
 
-/// Read-only bundle for the seg/filter row 2 chip cluster. Bundles the
-/// inputs that don't need mutation to keep `render_seg_mask_chips` at
-/// 4 params (under the 6-param alarm).
-struct SegRowFlags<'a> {
-    defaults: &'a Defaults,
-    mask_active: bool,
-    fill_style_active: bool,
-    bg_active: bool,
-    has_bg_image: bool,
-    bg_image_label: Option<&'a str>,
+const LINES_POPOVER_WIDTH: f32 = 560.0;
+const LINES_LEFT_COLUMN_WIDTH: f32 = 260.0;
+const LINES_COLOR_LIST_WIDTH: f32 = 170.0;
+
+fn differs(a: f32, b: f32) -> bool {
+    (a - b).abs() > f32::EPSILON
 }
 
-fn render_seg_mask_chips(
+/// The five mask stages, in the order the pipeline applies them.
+fn render_mask_group(
     ui: &mut Ui,
-    item_settings: &mut ItemSettings,
-    flags: &SegRowFlags<'_>,
+    s: &mut ItemSettings,
+    defaults: &Defaults,
+    inactive_reason: Option<&str>,
     change: &mut ToolbarChange,
 ) {
-    let defaults = flags.defaults;
-    ui.add_enabled_ui(flags.mask_active, |ui| {
-        aggregate_knob(chip::chip_f32(
-            ui,
-            chip::ChipMeta {
-                id_salt: "gamma",
-                icon: ICON_TONALITY.codepoint,
-                label: "Gamma",
-                description: "How hard the mask cuts. >1 is more aggressive; <1 is gentler.",
-                tooltip: tip!("Stage 1 of 5. How hard the mask cuts. >1 removes more aggressively, <1 is gentler on fine edges. Feeds every stage below."),
-            },
-            &mut item_settings.gamma,
-            0.01..=10.0, defaults.template.gamma,
-            true, // log scale — matches perceptual symmetry around 1.0
-            |v| fmt::plain(v, 2),
-        ), StaticKnob::Gamma, change);
+    let d = &defaults.template;
+    let tuned = usize::from(differs(s.gamma, d.gamma))
+        + usize::from(s.threshold.is_some())
+        + usize::from(differs(s.edge_shift, d.edge_shift))
+        + usize::from(s.refine_edges != d.refine_edges)
+        + usize::from(
+            s.refine_edges
+                && (s.guided_radius != d.guided_radius || differs(s.guided_epsilon, d.guided_epsilon)),
+        )
+        + usize::from(differs(s.feather, d.feather));
+    let summary = chip::tuned_summary(tuned);
+    let group = chip::GroupChip {
+        id_salt: "mask",
+        icon: ICON_TONALITY.codepoint,
+        label: "Mask",
+        summary: &summary,
+        tooltip: "How the subject is cut out, in five steps. Each step works on the result of the one above it.",
+        tuned: tuned > 0,
+        width: theme::POPOVER_WIDTH,
+    };
+    if let Some(reason) = inactive_reason {
+        ui.add_enabled_ui(false, |ui| chip::group_chip(ui, group, |_, _| ()))
+            .response
+            .on_disabled_hover_text(reason);
+        return;
+    }
+    chip::group_chip(ui, group, |ui, reset| {
+        if reset {
+            s.gamma = d.gamma;
+            s.threshold = d.threshold;
+            s.edge_shift = d.edge_shift;
+            s.refine_edges = d.refine_edges;
+            s.guided_radius = d.guided_radius;
+            s.guided_epsilon = d.guided_epsilon;
+            s.feather = d.feather;
+            for knob in [
+                StaticKnob::Gamma, StaticKnob::Threshold, StaticKnob::EdgeShift,
+                StaticKnob::RefineEdges, StaticKnob::GuidedRadius, StaticKnob::GuidedEpsilon,
+                StaticKnob::Feather,
+            ] {
+                aggregate_bool(true, knob, change);
+            }
+        }
 
-        aggregate_knob(chip::chip_option_f32(
-            ui,
-            chip::ChipMeta {
-                id_salt: "threshold",
-                icon: ICON_BOLT.codepoint,
-                label: "Hard threshold",
-                description: "Snap the mask to fully opaque or fully transparent at this cutoff.",
-                tooltip: tip!("Stage 2 of 5. Snaps the mask to fully opaque or fully transparent at this cutoff. Soft = smooth alpha, on = crisp silhouette. When on, downstream stages lose the gradient — Refine can only clean up stairsteps."),
-            },
-            &mut item_settings.threshold,
-            0.001..=0.999, defaults.threshold_value, "Soft",
-            fmt::percent_tenths,
-        ), StaticKnob::Threshold, change);
+        aggregate_knob(
+            chip::slider_row_f32(ui, "Gamma", &mut s.gamma, 0.01..=10.0, true, |v| fmt::plain(v, 2)),
+            StaticKnob::Gamma, change,
+        );
+        hint(ui, "How hard the mask cuts. Above 1 removes more; below 1 keeps more of the edge.");
+        ui.add_space(theme::SPACE_XS);
 
-        aggregate_knob(chip::chip_f32(
-            ui,
-            chip::ChipMeta {
-                id_salt: "edge_shift",
-                icon: ICON_SWAP_HORIZ.codepoint,
-                label: "Edge shift",
-                description: "Shrink or grow the mask outline. Positive erodes; negative dilates.",
-                tooltip: tip!("Stage 3 of 5. Shrink or grow the mask outline. Positive = erode (trim fringe pixels), negative = dilate (keep more edge detail). Refine Edges then snaps the shifted boundary to image color."),
-            },
-            &mut item_settings.edge_shift,
-            -50.0..=50.0, defaults.template.edge_shift,
-            false,
-            |v| {
+        let mut hard = s.threshold.is_some();
+        let t = chip::toggle_row(ui, "Hard threshold", &mut hard);
+        if t.changed {
+            s.threshold = hard.then_some(defaults.threshold_value);
+        }
+        aggregate_knob(t, StaticKnob::Threshold, change);
+        if let Some(v) = s.threshold.as_mut() {
+            aggregate_knob(
+                chip::slider_row_f32(ui, "Cutoff", v, 0.001..=0.999, false, fmt::percent_tenths),
+                StaticKnob::Threshold, change,
+            );
+        }
+        hint(ui, "Snap every pixel to fully kept or fully removed at the cutoff.");
+        ui.add_space(theme::SPACE_XS);
+
+        aggregate_knob(
+            chip::slider_row_f32(ui, "Edge shift", &mut s.edge_shift, -50.0..=50.0, false, |v| {
                 if v > 0.05 { format!("erode {v:.1} px") }
                 else if v < -0.05 { format!("dilate {:.1} px", v.abs()) }
                 else { "0 px".to_string() }
-            },
-        ), StaticKnob::EdgeShift, change);
-
-        aggregate_knob(chip::chip_bool_with_extras(
-            ui,
-            chip::ChipMeta {
-                id_salt: "refine_edges",
-                icon: ICON_AUTO_FIX_HIGH.codepoint,
-                label: "Refine edges",
-                description: "Use the original image's colors to sharpen the mask around fine detail like hair or leaves.",
-                tooltip: tip!("Stage 4 of 5. Uses the original image's colors to sharpen the mask around fine detail like hair or leaves. Sees whatever threshold + edge shift produced, so tighter upstream input gives a tighter result. Slower but higher quality."),
-            },
-            &mut item_settings.refine_edges,
-            |ui| {
-                let mut inner = chip::ChipChange::default();
-                let mut radius_u32 = item_settings.guided_radius as u32;
-                let r = chip::slider_row(
-                    ui, "Refine radius (px)",
-                    &mut radius_u32,
-                    1..=64,
-                );
-                item_settings.guided_radius = radius_u32.min(255) as u8;
-                if r.changed { inner.changed = true; }
-                if r.commit  { inner.commit  = true; }
-                let e = chip::slider_row_f32(
-                    ui, "Refine strength (ε)",
-                    &mut item_settings.guided_epsilon,
-                    1e-6..=1e-2,
-                    true,
-                    |v| format!("{v:.1e}"),
-                );
-                if e.changed { inner.changed = true; }
-                if e.commit  { inner.commit  = true; }
-                inner
-            },
-        ), StaticKnob::RefineEdges, change);
-
-        aggregate_knob(chip::chip_f32(
-            ui,
-            chip::ChipMeta {
-                id_salt: "feather",
-                icon: ICON_BLUR_LINEAR.codepoint,
-                label: "Feather",
-                description: "Soften mask edges with a Gaussian blur.",
-                tooltip: tip!("Stage 5 of 5. Final softening pass — Gaussian blur over the finished mask. Runs last so it smooths whatever Refine Edges sharpened; reach for Feather when Refine can't pick up the right detail."),
-            },
-            &mut item_settings.feather,
-            0.0..=10.0, defaults.template.feather,
-            false,
-            |v| fmt::off_or(v, 0.1, |v| fmt::px(v, 1)),
-        ), StaticKnob::Feather, change);
-    });
-
-    // FillStyle is independent of the seg mask — it also works in
-    // filter-only mode (No model + Off), where it applies to the raw
-    // source. Only EdgesOnly (no subject) kills it.
-    ui.add_enabled_ui(flags.fill_style_active, |ui| {
-        let changed = render_fill_style_chip(ui, &mut item_settings.fill_style);
-        aggregate_bool(changed, StaticKnob::FillStyle, change);
-    });
-
-    ui.separator();
-
-    // Unified Background chip — Transparent / Solid colour / source-derived
-    // effects. The two underlying fields (`bg`, `bg_effect`) stay orthogonal;
-    // the chip enforces mutual exclusivity at the UI layer.
-    ui.add_enabled_ui(flags.bg_active, |ui| {
-        render_background_chip(ui, BgChipState {
-            bg: &mut item_settings.bg,
-            bg_effect: &mut item_settings.bg_effect,
-            bg_image_fit: &mut item_settings.bg_image_fit,
-            default_color: defaults.bg_value,
-            has_bg_image: flags.has_bg_image,
-            bg_image_label: flags.bg_image_label,
-        }, change);
-    });
-}
-
-struct LinesRowFlags<'a> {
-    app_settings: &'a Settings,
-    defaults: &'a Defaults,
-    processing: bool,
-    mask_active: bool,
-}
-
-fn render_lines_row(
-    ui: &mut Ui,
-    item_settings: &mut ItemSettings,
-    flags: &LinesRowFlags<'_>,
-    change: &mut ToolbarChange,
-) {
-    ui.add_space(theme::SPACE_XS);
-    ui.horizontal(|ui| {
-        let seg_model_name = super::model_name(flags.app_settings.model);
-        let subject_available = flags.app_settings.model.uses_segmentation();
-        ui.add_enabled_ui(!flags.processing, |ui| {
-            let _ = super::lines_popover::render(ui, item_settings, seg_model_name, subject_available);
-        });
-        if !flags.mask_active {
-            ui.label(
-                RichText::new(format!(
-                    "{}  DexiNed only",
-                    ICON_BLOCK.codepoint,
-                ))
-                .color(theme::TEXT_SECONDARY)
-                .size(theme::FONT_SIZE_MONO),
-            );
-        }
-        if item_settings.line_mode != LineMode::Off {
-            render_row2_right_cluster(ui, item_settings, flags.defaults, change);
-        }
-    });
-}
-
-/// Compose-mode is hidden outside SubjectOutline because the worker
-/// ignores it there — no point showing a dead control.
-fn render_row2_right_cluster(
-    ui: &mut Ui,
-    item_settings: &mut ItemSettings,
-    defaults: &Defaults,
-    change: &mut ToolbarChange,
-) {
-    // DualScale generates Fine + Bold internally and ignores `edge_scale`
-    // (see `prunr-core/src/edge.rs::finalize_dual_scale`).
-    let scale_active = !matches!(item_settings.line_style, prunr_core::LineStyle::DualScale { .. });
-    let scale_changed = chip::guarded(
-        ui,
-        scale_active,
-        "DualScale uses Fine + Bold internally; the scale chip has no effect under this line style.",
-        |ui| super::lines_popover::render_scale_chip(ui, item_settings),
-    );
-    aggregate_bool(scale_changed, StaticKnob::EdgeScale, change);
-
-    aggregate_knob(chip::chip_f32(
-        ui,
-        chip::ChipMeta {
-            id_salt: "line_strength",
-            icon: ICON_TUNE.codepoint,
-            label: "Line strength",
-            description: "How much edge detail to capture. Lower = bold outlines only; higher = fine texture.",
-            tooltip: "Stage 2 of 4 in the lines pipeline. Threshold on DexiNed's raw edge tensor. Lower = bold outlines only; higher = fine texture and subtle edges. Feeds edge thickness + solid color.",
-        },
-        &mut item_settings.line_strength,
-        0.0..=1.0, defaults.template.line_strength,
-        false,
-        |v| fmt::plain(v, 2),
-    ), StaticKnob::LineStrength, change);
-
-    {
-        let mut thickness_u32 = item_settings.edge_thickness as u32;
-        let result = chip::chip_u32(
-            ui,
-            chip::ChipMeta {
-                id_salt: "edge_thickness",
-                icon: ICON_LINE_WEIGHT.codepoint,
-                label: "Edge thickness",
-                description: "Thicken edges by dilating the mask. 0 = native DexiNed width; higher = bolder outlines.",
-                tooltip: "Stage 3 of 4 in the lines pipeline. Dilates the thresholded edge mask by N pixels. 0 = native DexiNed width; higher = bolder outlines that stay readable at display resolution. Runs before solid color, so bolder edges still inherit the paint choice.",
-            },
-            &mut thickness_u32,
-            0..=20, defaults.template.edge_thickness as u32,
-            |v| if v == 0 { "Off".into() } else { fmt::signed_px(v as f32, 0) },
+            }),
+            StaticKnob::EdgeShift, change,
         );
-        item_settings.edge_thickness = thickness_u32.min(255) as u8;
-        aggregate_knob(result, StaticKnob::EdgeThickness, change);
-    }
+        hint(ui, "Erode trims fringe pixels; dilate keeps more of the edge.");
+        ui.add_space(theme::SPACE_XS);
 
-    ui.separator();
+        aggregate_knob(chip::toggle_row(ui, "Refine edges", &mut s.refine_edges), StaticKnob::RefineEdges, change);
+        hint(ui, "Snap the mask to color edges in the photo, for hair and leaves. Slower.");
+        if s.refine_edges {
+            let mut radius = s.guided_radius as u32;
+            let r = chip::slider_row(ui, "Refine radius (px)", &mut radius, 1..=64);
+            s.guided_radius = radius.min(255) as u8;
+            aggregate_knob(r, StaticKnob::GuidedRadius, change);
+            aggregate_knob(
+                chip::slider_row_f32(ui, "Refine precision", &mut s.guided_epsilon, 1e-6..=1e-2, true, |v| format!("{v:.1e}")),
+                StaticKnob::GuidedEpsilon, change,
+            );
+            hint(ui, "Lower follows finer color edges.");
+        }
+        ui.add_space(theme::SPACE_XS);
 
-    if item_settings.line_mode == LineMode::SubjectOutline {
-        let compose_changed = render_compose_mode_chip(ui, &mut item_settings.compose_mode);
-        aggregate_bool(compose_changed, StaticKnob::ComposeMode, change);
-    }
-    let style_changed = render_line_style_chip(ui, &mut item_settings.line_style);
-    aggregate_bool(style_changed, StaticKnob::LineStyle, change);
-    if render_input_transform_chip(ui, &mut item_settings.input_transform) {
-        mark_input_transform_change(change);
-    }
+        aggregate_knob(
+            chip::slider_row_f32(ui, "Feather", &mut s.feather, 0.0..=10.0, false, |v| fmt::off_or(v, 0.1, |v| fmt::px(v, 1))),
+            StaticKnob::Feather, change,
+        );
+        hint(ui, "Soften the mask edge. Runs last.");
+        ui.add_space(theme::SPACE_SM);
+        hint(ui, "Press F3 for the pipeline diagram.");
+    });
+}
 
-    // Edge.rs forces `solid_tint = None` for any non-`Solid` LineStyle, so
-    // the chip's value is silently ignored otherwise.
-    let solid_tint_active = matches!(item_settings.line_style, prunr_core::LineStyle::Solid);
-    let solid_change = chip::guarded(
-        ui,
-        solid_tint_active,
-        "Only takes effect when line style is Solid. Other styles use the source RGB beneath each edge pixel.",
-        |ui| chip::chip_option_rgb(
-            ui,
-            chip::ChipMeta {
-                id_salt: "solid_line_color",
-                icon: ICON_BRUSH.codepoint,
-                label: "Solid line color",
-                description: "Paint every edge the same color.",
-                tooltip: "Stage 4 of 4 in the lines pipeline. Paint every visible edge the same color, or leave unset to keep the original RGB beneath the mask. Runs after edge thickness.",
-            },
-            &mut item_settings.solid_line_color,
-            defaults.solid_line_color_value,
-        ),
-    );
-    aggregate_knob(solid_change, StaticKnob::SolidLineColor, change);
+/// Sketch mode plus every line knob, in processing order; the line color
+/// list sits in its own column.
+fn render_lines_group(
+    ui: &mut Ui,
+    s: &mut ItemSettings,
+    defaults: &Defaults,
+    subject_available: bool,
+    change: &mut ToolbarChange,
+) {
+    use prunr_core::{ComposeMode, InputTransform, LineStyle};
+    let d = &defaults.template;
+    let on = s.line_mode != LineMode::Off;
+    let tuned = on
+        && (s.edge_scale != d.edge_scale
+            || differs(s.line_strength, d.line_strength)
+            || s.edge_thickness != d.edge_thickness
+            || s.compose_mode != d.compose_mode
+            || s.line_style != d.line_style
+            || s.solid_line_color != d.solid_line_color
+            || s.input_transform != d.input_transform);
+    let group = chip::GroupChip {
+        id_salt: "lines",
+        icon: ICON_DRAW.codepoint,
+        label: "Lines",
+        summary: mode_label(s.line_mode),
+        tooltip: "Trace the outlines of the image or of the subject, then style the lines.",
+        tuned,
+        width: if on { LINES_POPOVER_WIDTH } else { theme::POPOVER_WIDTH },
+    };
+    chip::group_chip(ui, group, |ui, reset| {
+        if reset {
+            s.line_mode = d.line_mode;
+            s.edge_scale = d.edge_scale;
+            s.line_strength = d.line_strength;
+            s.edge_thickness = d.edge_thickness;
+            s.compose_mode = d.compose_mode;
+            s.line_style = d.line_style;
+            s.solid_line_color = d.solid_line_color;
+            s.input_transform = d.input_transform;
+            for knob in [
+                StaticKnob::EdgeScale, StaticKnob::LineStrength, StaticKnob::EdgeThickness,
+                StaticKnob::ComposeMode, StaticKnob::LineStyle, StaticKnob::SolidLineColor,
+            ] {
+                aggregate_bool(true, knob, change);
+            }
+            mark_input_transform_change(change);
+        }
+
+        ui.horizontal_top(|ui| {
+            ui.vertical(|ui| {
+                ui.set_min_width(LINES_LEFT_COLUMN_WIDTH);
+                ui.set_max_width(LINES_LEFT_COLUMN_WIDTH);
+
+                let modes = [LineMode::Off, LineMode::SubjectOutline, LineMode::EdgesOnly].map(|m| chip::Choice {
+                    value: m,
+                    name: mode_label(m),
+                    description: mode_description(m),
+                    enabled: m != LineMode::SubjectOutline || subject_available,
+                });
+                // The caller records the mode transition after the render.
+                chip::choice_row(ui, "Sketch", &modes, &mut s.line_mode);
+                if !on {
+                    hint(ui, "Off: no lines are drawn.");
+                    return;
+                }
+                ui.add_space(theme::SPACE_XS);
+
+                // Dual scale draws Fine and Bold itself, so the scale has no effect.
+                let scale_active = !matches!(s.line_style, LineStyle::DualScale { .. });
+                let scales = [EdgeScale::Fine, EdgeScale::Balanced, EdgeScale::Bold, EdgeScale::Fused].map(|sc| chip::Choice {
+                    value: sc,
+                    name: scale_label(sc),
+                    description: scale_description(sc),
+                    enabled: scale_active,
+                });
+                let scale_changed = chip::choice_row(ui, "Scale", &scales, &mut s.edge_scale);
+                aggregate_bool(scale_changed, StaticKnob::EdgeScale, change);
+                if !scale_active {
+                    hint(ui, "Dual scale draws Fine and Bold itself.");
+                }
+                ui.add_space(theme::SPACE_XS);
+
+                aggregate_knob(
+                    chip::slider_row_f32(ui, "Line detail", &mut s.line_strength, 0.0..=1.0, false, |v| fmt::plain(v, 2)),
+                    StaticKnob::LineStrength, change,
+                );
+                hint(ui, "Lower keeps bold outlines only; higher adds fine texture.");
+                ui.add_space(theme::SPACE_XS);
+
+                let mut thickness = s.edge_thickness as u32;
+                let t = chip::slider_row(ui, "Line thickness (px)", &mut thickness, 0..=20);
+                s.edge_thickness = thickness.min(255) as u8;
+                aggregate_knob(t, StaticKnob::EdgeThickness, change);
+                ui.add_space(theme::SPACE_XS);
+
+                if s.line_mode == LineMode::SubjectOutline {
+                    let compositions = [
+                        ComposeMode::LinesOnly, ComposeMode::SubjectFilled, ComposeMode::Engraving,
+                        ComposeMode::Ghost, ComposeMode::InverseMask,
+                    ].map(|c| chip::Choice { value: c, name: compose_label(c), description: compose_description(c), enabled: true });
+                    let changed = chip::choice_row(ui, "Composition", &compositions, &mut s.compose_mode);
+                    aggregate_bool(changed, StaticKnob::ComposeMode, change);
+                    ui.add_space(theme::SPACE_XS);
+                }
+
+                ui.label(RichText::new("Pre-filter").color(theme::TEXT_SECONDARY).size(theme::FONT_SIZE_MONO));
+                let mut filter_changed = false;
+                ui.horizontal_wrapped(|ui| {
+                    for option in InputTransform::ALL {
+                        let selected = std::mem::discriminant(option) == std::mem::discriminant(&s.input_transform);
+                        if ui.selectable_label(selected, option.name()).clicked() && !selected {
+                            s.input_transform = *option;
+                            filter_changed = true;
+                        }
+                    }
+                });
+                match &mut s.input_transform {
+                    InputTransform::None | InputTransform::Grayscale => {}
+                    InputTransform::ContrastBoost { percent } => {
+                        filter_changed |= chip::slider_row(ui, "Contrast (%)", percent, 50..=300).changed;
+                    }
+                    InputTransform::Posterize { levels } => {
+                        filter_changed |= chip::slider_row(ui, "Levels", levels, 2..=8).changed;
+                    }
+                }
+                if filter_changed {
+                    mark_input_transform_change(change);
+                }
+                hint(ui, "Applied to the image before the lines are traced. Requires reprocessing.");
+            });
+
+            if !on {
+                return;
+            }
+            ui.separator();
+            ui.vertical(|ui| {
+                ui.set_min_width(LINES_COLOR_LIST_WIDTH);
+                ui.label(RichText::new("Line color").color(theme::TEXT_SECONDARY).size(theme::FONT_SIZE_MONO));
+                let is_solid = matches!(s.line_style, LineStyle::Solid);
+                if chip::picker_row(ui, is_solid && s.solid_line_color.is_none(), "Original", "the photo's own colors").clicked() {
+                    s.line_style = LineStyle::Solid;
+                    s.solid_line_color = None;
+                    aggregate_bool(true, StaticKnob::LineStyle, change);
+                    aggregate_bool(true, StaticKnob::SolidLineColor, change);
+                }
+                if chip::picker_row(ui, is_solid && s.solid_line_color.is_some(), "Solid color", "one color for every line").clicked() {
+                    s.line_style = LineStyle::Solid;
+                    s.solid_line_color = Some(defaults.solid_line_color_value);
+                    aggregate_bool(true, StaticKnob::LineStyle, change);
+                    aggregate_bool(true, StaticKnob::SolidLineColor, change);
+                }
+                for option in &LineStyle::ALL[1..] {
+                    let selected = std::mem::discriminant(option) == std::mem::discriminant(&s.line_style);
+                    if chip::picker_row(ui, selected, option.name(), "").clicked() && !selected {
+                        s.line_style = *option;
+                        aggregate_bool(true, StaticKnob::LineStyle, change);
+                    }
+                }
+                ui.add_space(theme::SPACE_XS);
+                if is_solid {
+                    if let Some(rgb) = s.solid_line_color.as_mut() {
+                        let changed = rgb_picker_row(ui, "Color", rgb);
+                        aggregate_bool(changed, StaticKnob::SolidLineColor, change);
+                    }
+                } else {
+                    let changed = line_style_params(ui, &mut s.line_style);
+                    aggregate_bool(changed, StaticKnob::LineStyle, change);
+                }
+            });
+        });
+    });
+}
+
+fn compose_label(mode: prunr_core::ComposeMode) -> &'static str {
+    use prunr_core::ComposeMode;
+    match mode {
+        ComposeMode::LinesOnly => "Lines only",
+        ComposeMode::SubjectFilled => "Subject filled",
+        ComposeMode::Engraving => "Engraving",
+        ComposeMode::Ghost => "Ghost",
+        ComposeMode::InverseMask => "Inverse mask",
+    }
 }
 
 /// Fold a static chip's `ChipChange` into the aggregate, routing via the
@@ -769,83 +768,6 @@ fn mark_input_transform_change(acc: &mut ToolbarChange) {
     acc.input_transform_changed = true;
     acc.commit = true;
     acc.cache_impact = acc.cache_impact.union(CacheImpact::EdgeCache);
-}
-
-/// Input-transform picker. Changes invalidate the DexiNed edge tensor cache
-/// (and seg cache for conservatism) — not live-previewable. Label accent
-/// reminds the user their next Process will re-run inference.
-fn render_input_transform_chip(ui: &mut Ui, transform: &mut prunr_core::InputTransform) -> bool {
-    use prunr_core::InputTransform;
-    let accent = !matches!(transform, InputTransform::None);
-    let resp = chip::tooltip(
-        chip::chip_button(ui, ICON_TUNE.codepoint, transform.name(), accent),
-        "Pre-inference transform",
-        "Transform applied to the image BEFORE edge detection. Changing this\
-         invalidates the edge cache and re-runs DexiNed on the next Process.",
-    None,
-);
-
-    let popup_id = ui.make_persistent_id("input_transform_popup");
-    let mut changed = false;
-    chip::popup_for(ui, popup_id, &resp, |ui| {
-        ui.label(RichText::new("Pre-inference transform").strong().color(theme::TEXT_PRIMARY));
-        ui.add_space(theme::SPACE_XS);
-        for option in InputTransform::ALL {
-            let selected = std::mem::discriminant(option) == std::mem::discriminant(transform);
-            if ui.selectable_label(selected, option.name()).clicked() && !selected {
-                *transform = *option;
-                changed = true;
-            }
-        }
-        ui.separator();
-        match transform {
-            InputTransform::None | InputTransform::Grayscale => {
-                ui.label(RichText::new("No parameters.").color(theme::TEXT_SECONDARY)
-                    .size(theme::FONT_SIZE_MONO));
-            }
-            InputTransform::ContrastBoost { percent } => {
-                changed |= chip::slider_row(ui, "Percent", percent, 50..=300).changed;
-            }
-            InputTransform::Posterize { levels } => {
-                changed |= chip::slider_row(ui, "Levels", levels, 2..=8).changed;
-            }
-        }
-    });
-    changed
-}
-
-/// Line-style picker. Solid defers to the user's `solid_line_color` chip;
-/// every other variant carries its own colours / params. Picking a variant
-/// keeps the popover open so the user can tune the params below — click
-/// outside to dismiss.
-fn render_line_style_chip(ui: &mut Ui, style: &mut prunr_core::LineStyle) -> bool {
-    use prunr_core::LineStyle;
-    let accent = !matches!(style, LineStyle::Solid);
-    let resp = chip::tooltip(
-        chip::chip_button(ui, ICON_GRADIENT.codepoint, style.name(), accent),
-        "Line style",
-        "How line pixels are coloured.",
-        None,
-    );
-
-    let popup_id = ui.make_persistent_id("line_style_popup");
-    let mut changed = false;
-    chip::popup_for(ui, popup_id, &resp, |ui| {
-        ui.label(RichText::new("Line style").strong().color(theme::TEXT_PRIMARY));
-        ui.add_space(theme::SPACE_XS);
-        for option in LineStyle::ALL {
-            let selected = std::mem::discriminant(option) == std::mem::discriminant(style);
-            if ui.selectable_label(selected, option.name()).clicked() && !selected {
-                *style = *option;
-                changed = true;
-            }
-        }
-        ui.separator();
-        if line_style_params(ui, style) {
-            changed = true;
-        }
-    });
-    changed
 }
 
 fn line_style_params(ui: &mut Ui, style: &mut prunr_core::LineStyle) -> bool {
@@ -1262,42 +1184,6 @@ fn rgb_picker_row(ui: &mut Ui, label: &str, rgb: &mut [u8; 3]) -> bool {
     chip::rgb_picker(ui, rgb)
 }
 
-/// SubjectOutline compose-mode picker — dropdown chip listing the 5 modes.
-/// Returns true when the user changed the mode.
-fn render_compose_mode_chip(ui: &mut Ui, mode: &mut prunr_core::ComposeMode) -> bool {
-    use prunr_core::ComposeMode;
-    let accent = *mode != ComposeMode::default();
-    let resp = chip::tooltip(
-        chip::chip_button(ui, ICON_LAYERS.codepoint, &mode.to_string(), accent),
-        "Style",
-        "How the subject mask and outline combine.\n\
-         • Lines only — outline inside the subject, transparent bg.\n\
-         • Subject filled — solid subject with outline on top.\n\
-         • Engraving — outline cut through the filled subject.\n\
-         • Ghost — faded subject with a strong outline.\n\
-         • Inverse mask — outline in the background, subject invisible.",
-    None,
-);
-
-    let popup_id = ui.make_persistent_id("compose_mode_popup");
-    let mut changed = false;
-    chip::popup_for(ui, popup_id, &resp, |ui| {
-        ui.label(RichText::new("Style").strong().color(theme::TEXT_PRIMARY));
-        ui.add_space(theme::SPACE_XS);
-        for option in ComposeMode::ALL {
-            let selected = *option == *mode;
-            if ui.selectable_label(selected, option.to_string()).clicked() {
-                if !selected {
-                    *mode = *option;
-                    changed = true;
-                }
-                egui::Popup::close_id(ui.ctx(), popup_id);
-            }
-        }
-    });
-    changed
-}
-
 /// Reset-to-default-preset button + preset dropdown.
 pub(super) fn render_reset_preset_cluster(
     ui: &mut Ui,
@@ -1307,7 +1193,7 @@ pub(super) fn render_reset_preset_cluster(
     change: &mut ToolbarChange,
 ) {
     let reset_resp = chip::tooltip(
-        chip::icon_action_button(ui, ICON_RESTART_ALT.codepoint),
+        chip::icon_action_button(ui, ICON_RESTART_ALT.codepoint, theme::TEXT_PRIMARY),
         "Reset",
         "Return every knob to your default preset.",
         None,

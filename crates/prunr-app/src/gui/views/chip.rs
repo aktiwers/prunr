@@ -186,10 +186,11 @@ pub(super) fn icon_toggle_button(ui: &mut Ui, icon: &str, active: bool) -> Respo
     }
 }
 
-/// Momentary icon button (Reset, Help). Same size as `icon_toggle_button`
-/// but never filled with the accent — the fill is the toggle's "on" state.
-pub(super) fn icon_action_button(ui: &mut Ui, icon: &str) -> Response {
-    icon_square_button(ui, icon, theme::TEXT_PRIMARY, theme::BG_SECONDARY)
+/// Momentary icon button (Reset, Help, Delete). Same size as
+/// `icon_toggle_button` but never filled with the accent — the fill is
+/// the toggle's "on" state. `color` tints the glyph (DESTRUCTIVE for Delete).
+pub(super) fn icon_action_button(ui: &mut Ui, icon: &str, color: Color32) -> Response {
+    icon_square_button(ui, icon, color, theme::BG_SECONDARY)
 }
 
 fn icon_square_button(ui: &mut Ui, icon: &str, color: Color32, fill: Color32) -> Response {
@@ -200,24 +201,6 @@ fn icon_square_button(ui: &mut Ui, icon: &str, color: Color32, fill: Color32) ->
                 .min_size(egui::vec2(theme::CHIP_HEIGHT, theme::CHIP_HEIGHT)),
         )
     })
-}
-
-/// Wrap a chip render in `add_enabled_ui(active, ...)` and, when disabled,
-/// attach `disabled_hint` as a hover tooltip on the wrapper. Use for
-/// dependency-greyed chips where the user needs to know *why* they can't
-/// edit the value (e.g. `solid_line_color` only applies under
-/// `LineStyle::Solid`; `edge_scale` is ignored under `DualScale`).
-pub(super) fn guarded<R>(
-    ui: &mut Ui,
-    active: bool,
-    disabled_hint: &str,
-    body: impl FnOnce(&mut Ui) -> R,
-) -> R {
-    let resp = ui.add_enabled_ui(active, body);
-    if !active {
-        resp.response.on_hover_text(disabled_hint);
-    }
-    resp.inner
 }
 
 /// The one hover tooltip for every control: strong title, one-sentence
@@ -573,6 +556,102 @@ pub(super) fn button(ui: &mut Ui, kind: ButtonKind, text: &str) -> Response {
                 .min_size(egui::vec2(0.0, theme::CHIP_HEIGHT)),
         )
     })
+}
+
+/// One pipeline stage on the toolbar. The face reads "{label} · {summary}"
+/// and carries the accent outline while any knob inside is off its
+/// default; the popover opens with a title row and a Reset for the
+/// whole group, then `body` lists the knobs in processing order.
+pub(super) struct GroupChip<'a> {
+    pub id_salt: &'a str,
+    pub icon: &'a str,
+    pub label: &'a str,
+    pub summary: &'a str,
+    pub tooltip: &'a str,
+    pub tuned: bool,
+    pub width: f32,
+}
+
+/// Render a group chip. `body` receives `reset == true` on the frame the
+/// group's Reset was clicked, before any of its rows render. Returns the
+/// body's value while the popover is open.
+pub(super) fn group_chip<R>(
+    ui: &mut Ui,
+    g: GroupChip<'_>,
+    body: impl FnOnce(&mut Ui, bool) -> R,
+) -> Option<R> {
+    let face = if g.summary.is_empty() {
+        g.label.to_string()
+    } else {
+        format!("{} \u{00b7} {}", g.label, g.summary)
+    };
+    let resp = tooltip(chip_button(ui, g.icon, &face, g.tuned), g.label, g.tooltip, None);
+    let pop_id = egui::Id::new(("group_chip", g.id_salt));
+    let mut out = None;
+    popup_for(ui, pop_id, &resp, |ui| {
+        ui.set_min_width(g.width);
+        let reset = ui
+            .horizontal(|ui| {
+                ui.label(RichText::new(g.label).strong().color(theme::TEXT_PRIMARY));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    reset_button(ui, "Reset every knob in this group")
+                })
+                .inner
+            })
+            .inner;
+        ui.add_space(theme::SPACE_XS);
+        out = Some(body(ui, reset));
+    });
+    out
+}
+
+/// "default" or "n tuned", for a group chip face.
+pub(super) fn tuned_summary(tuned: usize) -> String {
+    match tuned {
+        0 => "default".to_string(),
+        n => format!("{n} tuned"),
+    }
+}
+
+/// One option of a `choice_row`.
+pub(super) struct Choice<T> {
+    pub value: T,
+    pub name: &'static str,
+    pub description: &'static str,
+    pub enabled: bool,
+}
+
+/// Label above a wrapped row of selectable options, for enums with a
+/// handful of values. Each option explains itself on hover. Returns true
+/// when the value changed.
+pub(super) fn choice_row<T: Copy + PartialEq>(
+    ui: &mut Ui,
+    label: &str,
+    options: &[Choice<T>],
+    value: &mut T,
+) -> bool {
+    ui.label(RichText::new(label).color(theme::TEXT_SECONDARY).size(theme::FONT_SIZE_MONO));
+    let mut changed = false;
+    ui.horizontal_wrapped(|ui| {
+        for opt in options {
+            let selected = *value == opt.value;
+            let resp = ui
+                .add_enabled_ui(opt.enabled, |ui| ui.selectable_label(selected, opt.name))
+                .inner;
+            let resp = if opt.description.is_empty() { resp } else { resp.on_hover_text(opt.description) };
+            if resp.clicked() && !selected {
+                *value = opt.value;
+                changed = true;
+            }
+        }
+    });
+    changed
+}
+
+/// On/off row inside a popover.
+pub(super) fn toggle_row(ui: &mut Ui, label: &str, value: &mut bool) -> ChipChange {
+    let changed = ui.checkbox(value, label).changed();
+    ChipChange { changed, commit: changed }
 }
 
 /// Optional RGBA chip (bg color). Toggle enables; inline color picker sets the value.

@@ -3548,9 +3548,7 @@ impl PrunrApp {
 
     fn render_adjustments_toolbar(&mut self, ui: &mut egui::Ui, panel_frame: egui::Frame) {
         let Some(idx) = self.batch.selected_idx_clamped() else { return };
-        // Row 3 is always visible (Lines mode selector lives there), so the
-        // toolbar always reserves two rows of height.
-        let height = theme::CHIP_HEIGHT * 2.0 + theme::SPACE_XS + theme::SPACE_SM * 2.0;
+        let height = theme::CHIP_HEIGHT + theme::SPACE_SM * 2.0;
         let mut toolbar_change = adjustments_toolbar::ToolbarChange::default();
         let is_processing = self.batch.app_state() == AppState::Processing;
         // Snapshot taken BEFORE adjustments_toolbar::render runs — if the
@@ -3592,25 +3590,26 @@ impl PrunrApp {
                 } else {
                     item.dimensions
                 };
-                let has_selection = item.selection_mask.is_some();
-                let protect_sel = settings_ref.protect_selection;
-                let magic_active = self.magic_brush_state.is_active();
-                let magic_pending = self.magic_brush_state.has_pending_encoder();
+                let state = adjustments_toolbar::ToolbarState {
+                    magic_brush_active: self.magic_brush_state.is_active(),
+                    magic_encoder_pending: self.magic_brush_state.has_pending_encoder(),
+                    brush_available,
+                    processing: is_processing,
+                    has_bg_image,
+                    bg_image_label,
+                    source_dims,
+                    has_selection: item.selection_mask.is_some(),
+                    protect_selection: settings_ref.protect_selection,
+                    show_original: self.show_original,
+                    has_result: item.has_result(),
+                };
                 toolbar_change = adjustments_toolbar::render(
                     ui,
                     &mut item.settings,
                     settings_ref,
                     &mut item.applied_preset,
                     brush_state_ref,
-                    magic_active,
-                    magic_pending,
-                    brush_available,
-                    is_processing,
-                    has_bg_image,
-                    bg_image_label,
-                    source_dims,
-                    has_selection,
-                    protect_sel,
+                    state,
                 );
             });
         if toolbar_change.reset_brush_requested {
@@ -3711,6 +3710,9 @@ impl PrunrApp {
         }
         if let Some(action) = toolbar_change.selection_action {
             self.handle_selection_action(idx, action, ctx);
+        }
+        if toolbar_change.toggle_compare {
+            self.show_original = !self.show_original;
         }
         if toolbar_change.toggle_paint {
             self.brush_state.toggle();
