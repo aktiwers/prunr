@@ -60,7 +60,7 @@ pub(crate) fn render_output_scale_chip(
     let mut changed = false;
     let popup_id = egui::Id::new("upscale_output_scale_popup");
     chip::popup_for(ui, popup_id, &resp, |ui| {
-        if chip::popover_header(ui, "Scale", Some("Back to 4\u{00d7}, the model's native size")) && *value != OutputScale::X4 {
+        if chip::popover_header(ui, "Scale", Some(("Back to 4\u{00d7}, the model's native size", *value == OutputScale::X4))) {
             *value = OutputScale::X4;
             changed = true;
         }
@@ -72,23 +72,18 @@ pub(crate) fn render_output_scale_chip(
             OutputScale::X4,
             OutputScale::X4TwoPass,
         ] {
-            let available = match option {
-                OutputScale::X4TwoPass => arch_ok && is_x2plus_installed,
-                _ => true,
+            let reason = match option {
+                OutputScale::X4TwoPass if !arch_ok => Some("Only the Real-ESRGAN model can run two passes."),
+                OutputScale::X4TwoPass if !is_x2plus_installed => Some("Install Real-ESRGAN x2plus from the Model Store first."),
+                _ => None,
             };
-            ui.add_enabled_ui(available, |ui| {
-                let reason = match option {
-                    OutputScale::X4TwoPass if !arch_ok => "Real-ESRGAN only",
-                    OutputScale::X4TwoPass if !is_x2plus_installed => "Install x2plus from the Model Store",
-                    _ => "",
-                };
-                if chip::picker_row(ui, *value == option, output_scale_label(option), reason).clicked()
-                    && *value != option
-                {
-                    *value = option;
-                    changed = true;
-                }
+            let clicked = chip::gated(ui, reason, |ui| {
+                chip::picker_row(ui, *value == option, output_scale_label(option), "").clicked()
             });
+            if clicked && *value != option {
+                *value = option;
+                changed = true;
+            }
         }
 
         ui.add_space(theme::SPACE_XS);

@@ -12,6 +12,16 @@ use super::adjustments_toolbar::ModelStoreRequest;
 use super::chip::{picker_row, popover_header, popup_for, tooltip, with_fill};
 use super::shortcuts::{keys, Action};
 
+/// Row-1 icon button: taller than a chip, filled like one.
+fn icon_button(ui: &mut egui::Ui, icon: &'static str) -> egui::Response {
+    let btn = egui::Button::new(
+        RichText::new(icon).size(theme::ICON_SIZE_BUTTON).color(theme::TEXT_PRIMARY),
+    )
+    .corner_radius(theme::BUTTON_ROUNDING)
+    .min_size(egui::vec2(theme::BTN_HEIGHT, theme::BTN_HEIGHT));
+    with_fill(ui, theme::BG_SECONDARY, |ui| ui.add(btn))
+}
+
 pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
     ui.horizontal_centered(|ui| {
         ui.spacing_mut().item_spacing.x = theme::SPACE_SM;
@@ -30,16 +40,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
             app.pending_open_dialog = true;
         }
 
-        // ── Settings gear + Model dropdown ──
-
-        let gear_btn = egui::Button::new(
-            RichText::new(ICON_SETTINGS.codepoint)
-                .size(theme::ICON_SIZE_BUTTON)
-                .color(theme::TEXT_PRIMARY),
-        )
-        .corner_radius(theme::BUTTON_ROUNDING)
-        .min_size(egui::vec2(theme::BTN_HEIGHT, theme::BTN_HEIGHT));
-        if tooltip(with_fill(ui, theme::BG_SECONDARY, |ui| ui.add(gear_btn)), "Settings", "Hardware, performance and behavior.", Some(Action::Settings)).clicked() {
+        if tooltip(icon_button(ui, ICON_SETTINGS.codepoint), "Settings", "Hardware, performance and behavior.", Some(Action::Settings)).clicked() {
             if app.show_settings {
                 app.close_settings(ui.ctx());
             } else {
@@ -47,15 +48,8 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
             }
         }
 
-        let help_btn = egui::Button::new(
-            RichText::new(ICON_HELP.codepoint)
-                .size(theme::ICON_SIZE_BUTTON)
-                .color(theme::TEXT_PRIMARY),
-        )
-        .corner_radius(theme::BUTTON_ROUNDING)
-        .min_size(egui::vec2(theme::BTN_HEIGHT, theme::BTN_HEIGHT));
         let help_resp = tooltip(
-            with_fill(ui, theme::BG_SECONDARY, |ui| ui.add(help_btn)),
+            icon_button(ui, ICON_HELP.codepoint),
             "Help",
             "Shortcuts, the command-line reference, the pipelines and the Model Store.",
             None,
@@ -68,18 +62,20 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                 ("Command-line reference", Action::CliHelp),
                 ("Pipelines", Action::PipelineFlow),
             ];
+            let mut chosen = false;
             for (label, action) in entries {
                 if picker_row(ui, false, label, keys(action)).clicked() {
-                    match action {
-                        Action::Shortcuts => app.show_shortcuts = true,
-                        Action::CliHelp => app.show_cli_help = true,
-                        _ => app.show_pipeline_flow = true,
+                    if let Some(open) = app.help_modal_mut(action) {
+                        *open = true;
                     }
-                    egui::Popup::close_id(ui.ctx(), help_id);
+                    chosen = true;
                 }
             }
             if picker_row(ui, false, "Model Store", "Download and manage models").clicked() {
                 app.model_store = Some(ModelStoreRequest::default());
+                chosen = true;
+            }
+            if chosen {
                 egui::Popup::close_id(ui.ctx(), help_id);
             }
         });
@@ -90,18 +86,12 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
         if !app.batch.items.is_empty() {
             let can_undo = app.batch.any_target_can(HistoryManager::can_undo);
             let can_redo = app.batch.any_target_can(HistoryManager::can_redo);
-            let icon_btn = |icon: &'static str| egui::Button::new(
-                RichText::new(icon).size(theme::ICON_SIZE_BUTTON).color(theme::TEXT_PRIMARY),
-            )
-            .corner_radius(theme::BUTTON_ROUNDING)
-            .min_size(egui::vec2(theme::BTN_HEIGHT, theme::BTN_HEIGHT));
-
-            if tooltip(with_fill(ui, theme::BG_SECONDARY, |ui| ui.add_enabled(can_undo, icon_btn(ICON_UNDO.codepoint))), "Undo", "", Some(Action::Undo))
+            if tooltip(ui.add_enabled_ui(can_undo, |ui| icon_button(ui, ICON_UNDO.codepoint)).inner, "Undo", "", Some(Action::Undo))
                 .clicked()
             {
                 app.handle_undo(ui.ctx());
             }
-            if tooltip(with_fill(ui, theme::BG_SECONDARY, |ui| ui.add_enabled(can_redo, icon_btn(ICON_REDO.codepoint))), "Redo", "", Some(Action::Redo))
+            if tooltip(ui.add_enabled_ui(can_redo, |ui| icon_button(ui, ICON_REDO.codepoint)).inner, "Redo", "", Some(Action::Redo))
                 .clicked()
             {
                 app.handle_redo(ui.ctx());

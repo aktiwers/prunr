@@ -84,15 +84,9 @@ fn render_advanced_group(ui: &mut egui::Ui, app_settings: &mut Settings, lcm_bun
             let desc = sched.description();
             let bundle_gated = matches!(sched, SdScheduler::Lcm) && !lcm_bundle_installed;
             if !sched.is_available() {
-                ui.add_enabled_ui(false, |ui| {
-                    chip::picker_row(ui, false, &format!("{label} (coming soon)"), desc);
-                });
+                chip::gated(ui, Some("Not available in this build yet."), |ui| chip::picker_row(ui, false, label, desc));
             } else if bundle_gated {
-                ui.add_enabled_ui(false, |ui| {
-                    chip::picker_row(ui, false, &format!("{label} (download required)"), desc)
-                })
-                .inner
-                .on_disabled_hover_text(LCM_DOWNLOAD_HINT);
+                chip::gated(ui, Some(LCM_DOWNLOAD_HINT), |ui| chip::picker_row(ui, false, label, desc));
             } else {
                 let selected = app_settings.brush.sd_scheduler == sched;
                 if chip::picker_row(ui, selected, label, desc).clicked() && !selected {
@@ -137,13 +131,10 @@ fn render_advanced_group(ui: &mut egui::Ui, app_settings: &mut Settings, lcm_bun
         ui.add_space(theme::SPACE_XS);
 
         let mut fast = brush.sd_use_taesd.unwrap_or(true) && taesd_installed;
-        let row = ui.add_enabled_ui(taesd_installed, |ui| chip::toggle_row(ui, "Fast decoder", &mut fast));
-        if row.inner.changed {
+        let reason = (!taesd_installed).then_some(TAESD_DOWNLOAD_HINT);
+        if chip::gated(ui, reason, |ui| chip::toggle_row(ui, "Fast decoder", &mut fast)).changed {
             brush.sd_use_taesd = Some(fast);
             committed = true;
-        }
-        if !taesd_installed {
-            row.response.on_disabled_hover_text(TAESD_DOWNLOAD_HINT);
         }
         hint(ui, "About three times faster decoding at a slight quality cost.");
     });
@@ -175,15 +166,9 @@ fn render_quality_preset_chip(
             let preset_bundle_gated =
                 matches!(preset_scheduler, SdScheduler::Lcm) && !lcm_bundle_installed;
             if !preset_scheduler.is_available() {
-                ui.add_enabled_ui(false, |ui| {
-                    chip::picker_row(ui, false, &format!("{label} (coming soon)"), "");
-                });
+                chip::gated(ui, Some("Not available in this build yet."), |ui| chip::picker_row(ui, false, label, ""));
             } else if preset_bundle_gated {
-                ui.add_enabled_ui(false, |ui| {
-                    chip::picker_row(ui, false, &format!("{label} (download required)"), "")
-                })
-                .inner
-                .on_disabled_hover_text(LCM_DOWNLOAD_HINT);
+                chip::gated(ui, Some(LCM_DOWNLOAD_HINT), |ui| chip::picker_row(ui, false, label, ""));
             } else {
                 let selected = active == preset;
                 if chip::picker_row(ui, selected, label, "").clicked() {
@@ -214,7 +199,7 @@ fn render_prompt_chip(ui: &mut egui::Ui, brush: &mut BrushSettings) -> bool {
         let already_default = brush.sd_prompt == DEFAULT_SD_PROMPT
             && brush.sd_negative_prompt == DEFAULT_SD_NEGATIVE_PROMPT
             && (brush.sd_guidance_scale - default_cfg()).abs() < 1e-3;
-        if chip::popover_header(ui, "Prompt", Some("Back to the shipped prompt, negative prompt and guidance")) && !already_default {
+        if chip::popover_header(ui, "Prompt", Some(("Back to the shipped prompt, negative prompt and guidance", already_default))) {
             brush.sd_prompt = DEFAULT_SD_PROMPT.to_string();
             brush.sd_negative_prompt = DEFAULT_SD_NEGATIVE_PROMPT.to_string();
             brush.sd_guidance_scale = default_cfg();

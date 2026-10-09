@@ -398,27 +398,31 @@ pub(super) fn group_chip<R>(
     let mut out = None;
     popup_for(ui, pop_id, &resp, |ui| {
         ui.set_min_width(g.width);
-        let reset = popover_header(ui, g.label, Some("Reset every knob in this group"));
+        let reset = popover_header(ui, g.label, Some(("Reset every knob in this group", !g.tuned)));
         out = Some(body(ui, reset));
     });
     out
 }
 
 /// The first row of every popover: the control's title on the left and,
-/// when the popover has a default, Reset on the right. Returns true on
-/// the frame Reset was clicked.
-pub(super) fn popover_header(ui: &mut Ui, title: &str, reset_tooltip: Option<&str>) -> bool {
-    let reset = ui
+/// when the popover has a default, Reset on the right. `reset` carries
+/// the tooltip and whether the popover already sits at its default, in
+/// which case Reset is greyed out. Returns true on the frame Reset was
+/// clicked.
+pub(super) fn popover_header(ui: &mut Ui, title: &str, reset: Option<(&str, bool)>) -> bool {
+    let clicked = ui
         .horizontal(|ui| {
             ui.label(RichText::new(title).strong().color(theme::TEXT_PRIMARY));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                reset_tooltip.is_some_and(|tip| reset_button(ui, tip))
+                reset.is_some_and(|(tip, at_default)| {
+                    ui.add_enabled_ui(!at_default, |ui| reset_button(ui, tip)).inner
+                })
             })
             .inner
         })
         .inner;
     ui.add_space(theme::SPACE_XS);
-    reset
+    clicked
 }
 
 /// "default" or "n tuned", for a group chip face.
