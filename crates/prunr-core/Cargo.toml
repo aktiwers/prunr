@@ -59,3 +59,7 @@ harness = false
 [[bench]]
 name = "tensor_to_mask"
 harness = false
+
+[[bench]]
+name = "edge_shift"
+harness = false
