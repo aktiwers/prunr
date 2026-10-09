@@ -4247,11 +4247,11 @@ pub(crate) fn build_or_reuse_bicubic(
     // Build from the original source. Falls back to the upscale_raw itself
     // (zero-information color_match) when source_rgba is unavailable.
     let bicubic = if let Some(src) = item.source_rgba.as_ref() {
-        image::imageops::resize(
-            src.as_ref(),
+        prunr_core::formats::resize_rgba(
+            src,
             upscale_raw.width(),
             upscale_raw.height(),
-            image::imageops::FilterType::CatmullRom,
+            prunr_core::formats::ResizeFilter::CatmullRom,
         )
     } else {
         (**upscale_raw).clone()

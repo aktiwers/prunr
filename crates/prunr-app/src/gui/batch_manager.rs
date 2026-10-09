@@ -429,7 +429,7 @@ impl BatchManager {
             std::thread::spawn(move || {
                 let _slot = slots.acquire();
                 let (w, h) = fit_dimensions(rgba.width(), rgba.height(), THUMB_MAX_PX, THUMB_MAX_PX);
-                let thumb = image::imageops::resize(rgba.as_ref(), w, h, image::imageops::FilterType::Triangle);
+                let thumb = prunr_core::formats::resize_rgba(&rgba, w, h, prunr_core::formats::ResizeFilter::Bilinear);
                 let _ = tx.send((item_id, thumb.width(), thumb.height(), thumb.into_raw()));
             });
         } else {
@@ -448,7 +448,7 @@ impl BatchManager {
                     let rgba = img.to_rgba8();
                     drop(img);
                     let (w, h) = fit_dimensions(rgba.width(), rgba.height(), THUMB_MAX_PX, THUMB_MAX_PX);
-                    Some(image::imageops::resize(&rgba, w, h, image::imageops::FilterType::Triangle))
+                    Some(prunr_core::formats::resize_rgba(&rgba, w, h, prunr_core::formats::ResizeFilter::Bilinear))
                 })();
                 if let Some(thumb) = thumb {
                     let _ = tx.send((item_id, thumb.width(), thumb.height(), thumb.into_raw()));
