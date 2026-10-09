@@ -3523,7 +3523,7 @@ impl eframe::App for PrunrApp {
 }
 
 impl PrunrApp {
-    /// Whether the row 2+3 adjustments toolbar should render this frame.
+    /// Whether the adjustments toolbar should render this frame.
     /// Shift+H and an empty batch always hide it. `auto_hide_adjustments`
     /// hides it unless the cursor is in a peek zone near the top of the
     /// window or a popup (combo / color picker) is open.

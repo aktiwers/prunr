@@ -46,9 +46,8 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
             }
         }
 
-        // Model + Preset dropdowns live on row 2 (adjustments_toolbar); the
-        // Lines mode selector lives on row 3's left edge alongside its own
-        // chips. Row 1 stays minimal: Open, Settings, and the action cluster.
+        // Model, groups and presets live on the adjustments toolbar; this
+        // row stays minimal: Open, Settings, and the action cluster.
 
         if !app.batch.items.is_empty() {
             let can_undo = app.batch.any_target_can(HistoryManager::can_undo);
