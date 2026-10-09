@@ -2426,10 +2426,26 @@ impl PrunrApp {
             (*recipe == current_recipe && seg_model_match).then(|| base.clone())
         });
         // Without a seg tensor the correction has nothing to apply to
-        // (filter-only path).
-        let correction = seg_tensor.as_ref()
-            .and_then(|_| item.selection_mask.clone())
-            .filter(|m| !m.is_blank());
+        // (filter-only path). With one, the selection goes in at the
+        // tensor's size, resampled once per selection change.
+        let correction = match (&seg_tensor, item.selection_mask.clone(), item.selection_hash) {
+            (Some(seg), Some(sel), Some(hash)) if !sel.is_blank() => {
+                let dims = (seg.width, seg.height);
+                let hit = item.selection_tensor_plane.as_ref()
+                    .filter(|(_, h, d)| *h == hash && *d == dims)
+                    .map(|(p, _, _)| Arc::clone(p));
+                Some(hit.unwrap_or_else(|| {
+                    let plane = if (sel.width, sel.height) == dims {
+                        sel
+                    } else {
+                        Arc::new(sel.resampled(seg.width, seg.height))
+                    };
+                    item.selection_tensor_plane = Some((Arc::clone(&plane), hash, dims));
+                    plane
+                }))
+            }
+            _ => None,
+        };
         Some(DispatchInputs {
             kind, original, settings: item.settings,
             seg_tensor, edge_tensor, secondary_edge_tensor,
