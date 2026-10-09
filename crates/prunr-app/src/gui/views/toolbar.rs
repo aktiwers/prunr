@@ -8,8 +8,9 @@ use crate::gui::item::BatchStatus;
 use crate::gui::state::AppState;
 use crate::gui::theme;
 
-use super::chip::{tooltip, with_fill};
-use super::shortcuts::Action;
+use super::adjustments_toolbar::ModelStoreRequest;
+use super::chip::{picker_row, popover_header, popup_for, tooltip, with_fill};
+use super::shortcuts::{keys, Action};
 
 pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
     ui.horizontal_centered(|ui| {
@@ -46,8 +47,45 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
             }
         }
 
+        let help_btn = egui::Button::new(
+            RichText::new(ICON_HELP.codepoint)
+                .size(theme::ICON_SIZE_BUTTON)
+                .color(theme::TEXT_PRIMARY),
+        )
+        .corner_radius(theme::BUTTON_ROUNDING)
+        .min_size(egui::vec2(theme::BTN_HEIGHT, theme::BTN_HEIGHT));
+        let help_resp = tooltip(
+            with_fill(ui, theme::BG_SECONDARY, |ui| ui.add(help_btn)),
+            "Help",
+            "Shortcuts, the command-line reference, the pipelines and the Model Store.",
+            None,
+        );
+        let help_id = egui::Id::new("help_menu");
+        popup_for(ui, help_id, &help_resp, |ui| {
+            popover_header(ui, "Help", None);
+            let entries = [
+                ("Keyboard shortcuts", Action::Shortcuts),
+                ("Command-line reference", Action::CliHelp),
+                ("Pipelines", Action::PipelineFlow),
+            ];
+            for (label, action) in entries {
+                if picker_row(ui, false, label, keys(action)).clicked() {
+                    match action {
+                        Action::Shortcuts => app.show_shortcuts = true,
+                        Action::CliHelp => app.show_cli_help = true,
+                        _ => app.show_pipeline_flow = true,
+                    }
+                    egui::Popup::close_id(ui.ctx(), help_id);
+                }
+            }
+            if picker_row(ui, false, "Model Store", "Download and manage models").clicked() {
+                app.model_store = Some(ModelStoreRequest::default());
+                egui::Popup::close_id(ui.ctx(), help_id);
+            }
+        });
+
         // Model, groups and presets live on the adjustments toolbar; this
-        // row stays minimal: Open, Settings, and the action cluster.
+        // row stays minimal: Open, Settings, Help, and the action cluster.
 
         if !app.batch.items.is_empty() {
             let can_undo = app.batch.any_target_can(HistoryManager::can_undo);
