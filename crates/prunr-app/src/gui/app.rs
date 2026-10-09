@@ -1227,6 +1227,32 @@ impl PrunrApp {
         ctx.request_repaint();
     }
 
+    /// Eager encoder: while Magic Brush is active, the selected image gets
+    /// an embedding as soon as it has a decoded source. Runs on activation
+    /// and once per frame, so switching images keeps the tool usable
+    /// without toggling it off and on. Admission or encoder failure turns
+    /// the tool off, so this cannot retry in a loop.
+    fn ensure_magic_embedding_for_selected(&mut self) {
+        if !self.magic_brush_state.is_active() || self.magic_brush_state.has_pending_encoder() {
+            return;
+        }
+        let Some(item) = self.batch.selected_item() else { return };
+        if item.magic_brush_embedding.is_some() {
+            return;
+        }
+        // Decode still pending: try again next frame.
+        let Some(source) = item.source_rgba.clone() else { return };
+        let item_id = item.id;
+        let avail_ram = (crate::hardware::available_ram_bytes_throttled() / (1024 * 1024)) as u32;
+        match self.processor.dispatch_sam_encoder(item_id, source, avail_ram) {
+            Ok(()) => self.magic_brush_state.set_encoder_pending(true),
+            Err(err) => {
+                self.toasts.error(format!("Magic Brush unavailable: {err}"));
+                self.deactivate_magic_brush();
+            }
+        }
+    }
+
     /// Turn Magic Brush off and drop its ORT sessions (~180 MB). Cached
     /// embeddings stay on their items, so re-activating is cheap.
     pub(crate) fn deactivate_magic_brush(&mut self) {
@@ -1240,6 +1266,7 @@ impl PrunrApp {
     fn pump_sam_results(&mut self, ctx: &egui::Context) {
         use crate::gui::processor::PromptModifier;
 
+        self.ensure_magic_embedding_for_selected();
         let encoder_results = self.processor.pump_sam_encoder_results();
         for result in encoder_results {
             self.magic_brush_state.set_encoder_pending(false);
@@ -3680,33 +3707,7 @@ impl PrunrApp {
                 self.deactivate_magic_brush();
             } else if self.magic_brush_state.activate() {
                 self.brush_state.disable();
-                // Eager encoder: dispatch now if embedding not yet cached.
-                let needs_encoder = self.batch
-                    .selected_item()
-                    .is_some_and(|i| i.magic_brush_embedding.is_none());
-                if needs_encoder {
-                    if let Some(item) = self.batch.selected_item() {
-                        if let Some(source) = item.source_rgba.clone() {
-                            let item_id = item.id;
-                            let avail_ram =
-                                (crate::hardware::available_ram_bytes_throttled()
-                                    / (1024 * 1024)) as u32;
-                            match self.processor.dispatch_sam_encoder(
-                                item_id, source, avail_ram,
-                            ) {
-                                Ok(()) => {
-                                    self.magic_brush_state.set_encoder_pending(true);
-                                }
-                                Err(err) => {
-                                    self.toasts.error(format!(
-                                        "Magic Brush unavailable: {err}"
-                                    ));
-                                    self.deactivate_magic_brush();
-                                }
-                            }
-                        }
-                    }
-                }
+                self.ensure_magic_embedding_for_selected();
             }
         }
 
