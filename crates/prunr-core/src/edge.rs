@@ -3,6 +3,7 @@ use std::sync::Mutex;
 
 use image::{DynamicImage, RgbaImage};
 use ndarray::Array4;
+use rayon::prelude::*;
 use ort::{inputs, session::Session, value::Tensor};
 
 use crate::types::{CoreError, EdgeScale};
@@ -185,6 +186,25 @@ pub fn tensor_to_edge_mask(
     crate::formats::resize_gray_lanczos3(&mask, out_w, out_h)
 }
 
+/// Binds `$alpha` to the alpha rule of a `ComposeMode` as a distinct
+/// closure per arm, so `$body` is compiled once per mode with the rule
+/// inlined — a `fn` pointer would cost an indirect call per pixel and
+/// block vectorisation.
+macro_rules! with_alpha_rule {
+    ($compose:expr, |$alpha:ident| $body:expr) => {{
+        use crate::types::ComposeMode;
+        match $compose {
+            ComposeMode::LinesOnly => { let $alpha = |s: i32, e: i32| (s * e / 255) as u8; $body }
+            ComposeMode::SubjectFilled => { let $alpha = |s: i32, e: i32| s.max(e) as u8; $body }
+            ComposeMode::Engraving => { let $alpha = |s: i32, e: i32| (s - e).max(0) as u8; $body }
+            // 0.3 * subject + 0.8 * edge, clamped. Sums to > 1.0 on purpose —
+            // saturates to fully opaque where subject AND edge both contribute.
+            ComposeMode::Ghost => { let $alpha = |s: i32, e: i32| ((s * 77 + e * 204) / 255).clamp(0, 255) as u8; $body }
+            ComposeMode::InverseMask => { let $alpha = |s: i32, e: i32| ((255 - s) * e / 255) as u8; $body }
+        }
+    }};
+}
+
 /// Dilate + composite a pre-built edge mask into an RGBA. Cheap; safe to call
 /// every live-preview tweak.
 ///
@@ -202,21 +222,22 @@ pub fn compose_edges(
 ) -> RgbaImage {
     let (ow, oh) = (original.width(), original.height());
     let mask_raw = dilate_to_bytes(mask, edge_thickness);
+    let row_len = ow as usize * 4;
     if let Some(c) = solid_line_color {
         let mut buf = vec![0u8; (ow * oh * 4) as usize];
-        for i in 0..(ow * oh) as usize {
-            buf[i * 4]     = c[0];
-            buf[i * 4 + 1] = c[1];
-            buf[i * 4 + 2] = c[2];
-            buf[i * 4 + 3] = mask_raw[i];
-        }
+        buf.par_chunks_mut(row_len).zip(mask_raw.as_ref().par_chunks(ow as usize)).for_each(|(row, mrow)| {
+            for (px, &a) in row.chunks_exact_mut(4).zip(mrow) {
+                px.copy_from_slice(&[c[0], c[1], c[2], a]);
+            }
+        });
         RgbaImage::from_raw(ow, oh, buf).expect("edge output buffer size matches dimensions")
     } else {
         let mut rgba = original.to_rgba8();
-        let out_raw = rgba.as_mut();
-        for i in 0..(ow * oh) as usize {
-            out_raw[i * 4 + 3] = mask_raw[i];
-        }
+        rgba.as_mut().par_chunks_mut(row_len).zip(mask_raw.as_ref().par_chunks(ow as usize)).for_each(|(row, mrow)| {
+            for (px, &a) in row.chunks_exact_mut(4).zip(mrow) {
+                px[3] = a;
+            }
+        });
         rgba
     }
 }
@@ -239,25 +260,11 @@ pub fn compose_edges_styled(
     solid_line_color: Option<[u8; 3]>,
     edge_thickness: u32,
 ) -> RgbaImage {
-    use crate::types::{ComposeMode, LineStyle};
+    use crate::types::LineStyle;
     let (ow, oh) = (base.width(), base.height());
     let mask_raw = dilate_to_bytes(mask, edge_thickness);
     let mut rgba = base.clone();
-    let out_raw = rgba.as_mut();
     let pixel_count = (ow * oh) as usize;
-
-    // Single alpha-formula dispatch keeps the mode match out of the per-pixel
-    // loop. LLVM will typically hoist it anyway, but spelling it out makes
-    // the cost predictable regardless of optimization settings.
-    let alpha_fn: fn(i32, i32) -> u8 = match compose {
-        ComposeMode::LinesOnly => |s, e| (s * e / 255) as u8,
-        ComposeMode::SubjectFilled => |s, e| s.max(e) as u8,
-        ComposeMode::Engraving => |s, e| (s - e).max(0) as u8,
-        // 0.3 * subject + 0.8 * edge, clamped. Sums to > 1.0 on purpose —
-        // saturates to fully opaque where subject AND edge both contribute.
-        ComposeMode::Ghost => |s, e| ((s * 77 + e * 204) / 255).clamp(0, 255) as u8,
-        ComposeMode::InverseMask => |s, e| ((255 - s) * e / 255) as u8,
-    };
 
     // LineStyle gradients supersede `solid_line_color` — they compute the
     // target colour per pixel from position. Solid style defers to the
@@ -279,96 +286,99 @@ pub fn compose_edges_styled(
         (0, 0, 1)
     };
 
-    for i in 0..pixel_count {
-        let subject = out_raw[i * 4 + 3] as i32;
-        let edge = mask_raw[i] as i32;
-        out_raw[i * 4 + 3] = alpha_fn(subject, edge);
-        if edge == 0 { continue; }
-
-        let gradient_target: Option<[u8; 3]> = match line_style {
-            LineStyle::Solid => solid_tint,
-            LineStyle::GradientY { top, bottom } => {
-                let y = (i as u32 / ow) as u16;
-                let t = (y as u32 * 255 / oh.max(1)) as u16;
-                Some(lerp_rgb(top, bottom, t))
-            }
-            LineStyle::GradientX { left, right } => {
-                let x = (i as u32 % ow) as u16;
-                let t = (x as u32 * 255 / ow.max(1)) as u16;
-                Some(lerp_rgb(left, right, t))
-            }
-            LineStyle::RadialGradient { inner, outer, .. } => {
-                let x = (i as u32 % ow) as i32;
-                let y = (i as u32 / ow) as i32;
-                let dx = (x - rg_cx) as i64;
-                let dy = (y - rg_cy) as i64;
-                // i64 to survive `dist_sq * 255` past ~1830² (i32 caps
-                // at 2.147 G, dist_sq * 255 hits that threshold there).
-                let dist_sq = dx * dx + dy * dy;
-                let t = ((dist_sq * 255) / (rg_max_dist_sq as i64)).min(255) as u16;
-                Some(lerp_rgb(inner, outer, t))
-            }
-            LineStyle::Rainbow { cycles } => {
-                // Hue cycles along pixel index so the colour changes smoothly
-                // across the whole image.
-                let hue = ((i as u64 * 360 * cycles.max(1) as u64 / pixel_count.max(1) as u64) % 360) as u16;
-                let (r, g, b) = crate::postprocess::hsv_to_rgb(hue, 255, 255);
-                Some([r, g, b])
-            }
-            LineStyle::Chromatic { offset } => {
-                // RGB-split ghosting: sample the edge mask at horizontal
-                // offsets for R and B so line colour drifts between channels.
-                // Green stays at the centre. Output clamps at image edges.
-                let x = (i as u32 % ow) as i32;
-                let y = (i as u32 / ow) as i32;
-                let o = (offset.min(64)) as i32;
-                let r_x = (x - o).clamp(0, ow as i32 - 1) as u32;
-                let b_x = (x + o).clamp(0, ow as i32 - 1) as u32;
-                let r_idx = (y as u32 * ow + r_x) as usize;
-                let b_idx = (y as u32 * ow + b_x) as usize;
-                let rv = mask_raw[r_idx];
-                let gv = edge as u8;
-                let bv = mask_raw[b_idx];
-                Some([rv, gv, bv])
-            }
-            LineStyle::Noise { amount } => {
-                // Deterministic hash → per-pixel hue jitter. Cheap integer
-                // mixer (Wang-like) avoids RNG setup cost per dispatch.
-                let mut h = (i as u32).wrapping_mul(0x9e37_79b1);
-                h ^= h >> 16;
-                h = h.wrapping_mul(0x7feb_352d);
-                h ^= h >> 15;
-                let jitter = (h & 0xFF) as i32 - 128; // -128..=127
-                let strength = amount as i32;
-                let shift = (jitter * strength) / 128; // -amount..=amount
-                // i64 to survive the multiply past ~5.96 M pixels
-                // (2700×2200) — Rainbow above already does the same.
-                let hue = (((i as i64 * 360) / pixel_count.max(1) as i64) + shift as i64)
-                    .rem_euclid(360) as u16;
-                let (r, g, b) = crate::postprocess::hsv_to_rgb(hue, 200, 240);
-                Some([r, g, b])
-            }
-            // DualScale is handled by `compose_edges_dual_styled` — the
-            // single-mask path here renders only the active scale. Callers
-            // that select DualScale must dispatch to the dual function; the
-            // fallthrough here prevents compile errors and degrades to the
-            // user's solid_line_color for correctness.
-            LineStyle::DualScale { .. } => solid_tint,
-        };
-        if let Some(target) = gradient_target {
-            blend_rgb(&mut out_raw[i * 4..i * 4 + 3], target, edge as u16);
+    // One monomorphised row loop per style, so the colour rule is
+    // inlined and the per-pixel work carries no dispatch.
+    let out = rgba.as_mut();
+    with_alpha_rule!(compose, |alpha| match line_style {
+        LineStyle::Solid | LineStyle::DualScale { .. } => {
+            styled_rows(out, &mask_raw, ow, alpha, |_, _, _, _| solid_tint)
         }
-    }
+        LineStyle::GradientY { top, bottom } => styled_rows(out, &mask_raw, ow, alpha, |_, y, _, _| {
+            let t = (y as u32 * 255 / oh.max(1)) as u16;
+            Some(lerp_rgb(top, bottom, t))
+        }),
+        LineStyle::GradientX { left, right } => styled_rows(out, &mask_raw, ow, alpha, |x, _, _, _| {
+            let t = (x as u32 * 255 / ow.max(1)) as u16;
+            Some(lerp_rgb(left, right, t))
+        }),
+        LineStyle::RadialGradient { inner, outer, .. } => styled_rows(out, &mask_raw, ow, alpha, |x, y, _, _| {
+            let dx = (x as i32 - rg_cx) as i64;
+            let dy = (y as i32 - rg_cy) as i64;
+            // i64 to survive `dist_sq * 255` past ~1830² (i32 caps
+            // at 2.147 G, dist_sq * 255 hits that threshold there).
+            let dist_sq = dx * dx + dy * dy;
+            let t = ((dist_sq * 255) / (rg_max_dist_sq as i64)).min(255) as u16;
+            Some(lerp_rgb(inner, outer, t))
+        }),
+        LineStyle::Rainbow { cycles } => styled_rows(out, &mask_raw, ow, alpha, |x, y, _, _| {
+            // Hue cycles along pixel index so the colour changes smoothly
+            // across the whole image.
+            let i = (y * ow as usize + x) as u64;
+            let hue = ((i * 360 * cycles.max(1) as u64 / pixel_count.max(1) as u64) % 360) as u16;
+            let (r, g, b) = crate::postprocess::hsv_to_rgb(hue, 255, 255);
+            Some([r, g, b])
+        }),
+        LineStyle::Chromatic { offset } => styled_rows(out, &mask_raw, ow, alpha, |x, _, edge, mrow| {
+            // RGB-split ghosting: sample the edge mask at horizontal
+            // offsets for R and B so line colour drifts between channels.
+            // Green stays at the centre. Output clamps at image edges.
+            let o = (offset.min(64)) as i32;
+            let r_x = (x as i32 - o).clamp(0, ow as i32 - 1) as usize;
+            let b_x = (x as i32 + o).clamp(0, ow as i32 - 1) as usize;
+            Some([mrow[r_x], edge, mrow[b_x]])
+        }),
+        LineStyle::Noise { amount } => styled_rows(out, &mask_raw, ow, alpha, |x, y, _, _| {
+            // Deterministic hash → per-pixel hue jitter. Cheap integer
+            // mixer (Wang-like) avoids RNG setup cost per dispatch.
+            let i = y * ow as usize + x;
+            let mut h = (i as u32).wrapping_mul(0x9e37_79b1);
+            h ^= h >> 16;
+            h = h.wrapping_mul(0x7feb_352d);
+            h ^= h >> 15;
+            let jitter = (h & 0xFF) as i32 - 128; // -128..=127
+            let strength = amount as i32;
+            let shift = (jitter * strength) / 128; // -amount..=amount
+            // i64 to survive the multiply past ~5.96 M pixels
+            // (2700×2200) — Rainbow above already does the same.
+            let hue = (((i as i64 * 360) / pixel_count.max(1) as i64) + shift as i64)
+                .rem_euclid(360) as u16;
+            let (r, g, b) = crate::postprocess::hsv_to_rgb(hue, 200, 240);
+            Some([r, g, b])
+        }),
+    });
     rgba
+}
+
+/// Row-parallel compose: `alpha` for every pixel, then the colour
+/// `target(x, y, edge, mask_row)` blended in by edge strength where the
+/// edge is non-zero.
+fn styled_rows<A, T>(out: &mut [u8], mask: &[u8], ow: u32, alpha: A, target: T)
+where
+    A: Fn(i32, i32) -> u8 + Copy + Sync,
+    T: Fn(usize, usize, u8, &[u8]) -> Option<[u8; 3]> + Sync,
+{
+    let ow = ow as usize;
+    out.par_chunks_mut(ow * 4).zip(mask.par_chunks(ow)).enumerate().for_each(|(y, (row, mrow))| {
+        for (x, (px, &edge)) in row.chunks_exact_mut(4).zip(mrow).enumerate() {
+            px[3] = alpha(px[3] as i32, edge as i32);
+            if edge == 0 {
+                continue;
+            }
+            if let Some(t) = target(x, y, edge, mrow) {
+                blend_rgb(&mut px[..3], t, edge as u16);
+            }
+        }
+    });
 }
 
 /// Clone + dilate + return the raw byte buffer. Every compose path
 /// (`compose_edges`, `compose_edges_styled`, `compose_edges_dual_styled`)
-/// needs this prelude.
-fn dilate_to_bytes(mask: &image::GrayImage, thickness: u32) -> Vec<u8> {
-    let mut out = mask.clone();
-    crate::postprocess::dilate_mask(&mut out, thickness);
-    out.into_raw()
+/// needs this prelude; a zero thickness borrows the mask as is.
+fn dilate_to_bytes(mask: &image::GrayImage, thickness: u32) -> std::borrow::Cow<'_, [u8]> {
+    if thickness == 0 {
+        return std::borrow::Cow::Borrowed(mask.as_raw());
+    }
+    std::borrow::Cow::Owned(crate::morphology::shifted(mask, -(thickness as f32)).into_raw())
 }
 
 /// Compose two edge masks from different DexiNed scales with independent
@@ -384,35 +394,27 @@ pub fn compose_edges_dual_styled(
     bold_color: [u8; 3],
     edge_thickness: u32,
 ) -> RgbaImage {
-    use crate::types::ComposeMode;
-    let (ow, oh) = (base.width(), base.height());
+    let ow = base.width() as usize;
     let fine_raw = dilate_to_bytes(fine_mask, edge_thickness);
     let bold_raw = dilate_to_bytes(bold_mask, edge_thickness);
     let mut rgba = base.clone();
-    let out_raw = rgba.as_mut();
-    let pixel_count = (ow * oh) as usize;
-
-    let alpha_fn: fn(i32, i32) -> u8 = match compose {
-        ComposeMode::LinesOnly => |s, e| (s * e / 255) as u8,
-        ComposeMode::SubjectFilled => |s, e| s.max(e) as u8,
-        ComposeMode::Engraving => |s, e| (s - e).max(0) as u8,
-        ComposeMode::Ghost => |s, e| ((s * 77 + e * 204) / 255).clamp(0, 255) as u8,
-        ComposeMode::InverseMask => |s, e| ((255 - s) * e / 255) as u8,
-    };
-
-    for i in 0..pixel_count {
-        let subject = out_raw[i * 4 + 3] as i32;
-        let fine = fine_raw[i] as i32;
-        let bold = bold_raw[i] as i32;
-        let edge = fine.max(bold);
-        out_raw[i * 4 + 3] = alpha_fn(subject, edge);
-        if fine > 0 {
-            blend_rgb(&mut out_raw[i * 4..i * 4 + 3], fine_color, fine as u16);
-        }
-        if bold > 0 {
-            blend_rgb(&mut out_raw[i * 4..i * 4 + 3], bold_color, bold as u16);
-        }
-    }
+    with_alpha_rule!(compose, |alpha| {
+        rgba.as_mut()
+            .par_chunks_mut(ow * 4)
+            .zip(fine_raw.as_ref().par_chunks(ow))
+            .zip(bold_raw.as_ref().par_chunks(ow))
+            .for_each(|((row, frow), brow)| {
+                for ((px, &fine), &bold) in row.chunks_exact_mut(4).zip(frow).zip(brow) {
+                    px[3] = alpha(px[3] as i32, fine.max(bold) as i32);
+                    if fine > 0 {
+                        blend_rgb(&mut px[..3], fine_color, fine as u16);
+                    }
+                    if bold > 0 {
+                        blend_rgb(&mut px[..3], bold_color, bold as u16);
+                    }
+                }
+            });
+    });
     rgba
 }
 
@@ -624,6 +626,256 @@ fn preprocess(img: &DynamicImage) -> Array4<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The compositions as shipped before the row-parallel rewrite: the
+    // bit-exact oracle for every style and compose mode.
+    fn reference_compose_edges(
+        mask: &image::GrayImage,
+        original: &DynamicImage,
+        solid_line_color: Option<[u8; 3]>,
+        edge_thickness: u32,
+    ) -> RgbaImage {
+        let (ow, oh) = (original.width(), original.height());
+        let mask_raw = dilate_to_bytes(mask, edge_thickness).into_owned();
+        if let Some(c) = solid_line_color {
+            let mut buf = vec![0u8; (ow * oh * 4) as usize];
+            for i in 0..(ow * oh) as usize {
+                buf[i * 4]     = c[0];
+                buf[i * 4 + 1] = c[1];
+                buf[i * 4 + 2] = c[2];
+                buf[i * 4 + 3] = mask_raw[i];
+            }
+            RgbaImage::from_raw(ow, oh, buf).expect("edge output buffer size matches dimensions")
+        } else {
+            let mut rgba = original.to_rgba8();
+            let out_raw = rgba.as_mut();
+            for i in 0..(ow * oh) as usize {
+                out_raw[i * 4 + 3] = mask_raw[i];
+            }
+            rgba
+        }
+    }
+
+    fn reference_compose_edges_styled(
+        mask: &image::GrayImage,
+        base: &RgbaImage,
+        compose: crate::types::ComposeMode,
+        line_style: crate::types::LineStyle,
+        solid_line_color: Option<[u8; 3]>,
+        edge_thickness: u32,
+    ) -> RgbaImage {
+        use crate::types::{ComposeMode, LineStyle};
+        let (ow, oh) = (base.width(), base.height());
+        let mask_raw = dilate_to_bytes(mask, edge_thickness).into_owned();
+        let mut rgba = base.clone();
+        let out_raw = rgba.as_mut();
+        let pixel_count = (ow * oh) as usize;
+
+        // Single alpha-formula dispatch keeps the mode match out of the per-pixel
+        // loop. LLVM will typically hoist it anyway, but spelling it out makes
+        // the cost predictable regardless of optimization settings.
+        let alpha_fn: fn(i32, i32) -> u8 = match compose {
+            ComposeMode::LinesOnly => |s, e| (s * e / 255) as u8,
+            ComposeMode::SubjectFilled => |s, e| s.max(e) as u8,
+            ComposeMode::Engraving => |s, e| (s - e).max(0) as u8,
+            // 0.3 * subject + 0.8 * edge, clamped. Sums to > 1.0 on purpose —
+            // saturates to fully opaque where subject AND edge both contribute.
+            ComposeMode::Ghost => |s, e| ((s * 77 + e * 204) / 255).clamp(0, 255) as u8,
+            ComposeMode::InverseMask => |s, e| ((255 - s) * e / 255) as u8,
+        };
+
+        // LineStyle gradients supersede `solid_line_color` — they compute the
+        // target colour per pixel from position. Solid style defers to the
+        // user's colour chip (or passes source RGB through if None).
+        let solid_tint = match line_style {
+            LineStyle::Solid => solid_line_color,
+            _ => None,
+        };
+
+        // Precompute geometry for radial gradient so the hot loop doesn't
+        // redo the centre conversion per pixel.
+        let (rg_cx, rg_cy, rg_max_dist_sq) = if let LineStyle::RadialGradient { center, .. } = line_style {
+            let cx = (center[0] as u32 * ow / 255) as i32;
+            let cy = (center[1] as u32 * oh / 255) as i32;
+            let far_x = cx.max(ow as i32 - cx);
+            let far_y = cy.max(oh as i32 - cy);
+            (cx, cy, (far_x * far_x + far_y * far_y).max(1))
+        } else {
+            (0, 0, 1)
+        };
+
+        for i in 0..pixel_count {
+            let subject = out_raw[i * 4 + 3] as i32;
+            let edge = mask_raw[i] as i32;
+            out_raw[i * 4 + 3] = alpha_fn(subject, edge);
+            if edge == 0 { continue; }
+
+            let gradient_target: Option<[u8; 3]> = match line_style {
+                LineStyle::Solid => solid_tint,
+                LineStyle::GradientY { top, bottom } => {
+                    let y = (i as u32 / ow) as u16;
+                    let t = (y as u32 * 255 / oh.max(1)) as u16;
+                    Some(lerp_rgb(top, bottom, t))
+                }
+                LineStyle::GradientX { left, right } => {
+                    let x = (i as u32 % ow) as u16;
+                    let t = (x as u32 * 255 / ow.max(1)) as u16;
+                    Some(lerp_rgb(left, right, t))
+                }
+                LineStyle::RadialGradient { inner, outer, .. } => {
+                    let x = (i as u32 % ow) as i32;
+                    let y = (i as u32 / ow) as i32;
+                    let dx = (x - rg_cx) as i64;
+                    let dy = (y - rg_cy) as i64;
+                    // i64 to survive `dist_sq * 255` past ~1830² (i32 caps
+                    // at 2.147 G, dist_sq * 255 hits that threshold there).
+                    let dist_sq = dx * dx + dy * dy;
+                    let t = ((dist_sq * 255) / (rg_max_dist_sq as i64)).min(255) as u16;
+                    Some(lerp_rgb(inner, outer, t))
+                }
+                LineStyle::Rainbow { cycles } => {
+                    // Hue cycles along pixel index so the colour changes smoothly
+                    // across the whole image.
+                    let hue = ((i as u64 * 360 * cycles.max(1) as u64 / pixel_count.max(1) as u64) % 360) as u16;
+                    let (r, g, b) = crate::postprocess::hsv_to_rgb(hue, 255, 255);
+                    Some([r, g, b])
+                }
+                LineStyle::Chromatic { offset } => {
+                    // RGB-split ghosting: sample the edge mask at horizontal
+                    // offsets for R and B so line colour drifts between channels.
+                    // Green stays at the centre. Output clamps at image edges.
+                    let x = (i as u32 % ow) as i32;
+                    let y = (i as u32 / ow) as i32;
+                    let o = (offset.min(64)) as i32;
+                    let r_x = (x - o).clamp(0, ow as i32 - 1) as u32;
+                    let b_x = (x + o).clamp(0, ow as i32 - 1) as u32;
+                    let r_idx = (y as u32 * ow + r_x) as usize;
+                    let b_idx = (y as u32 * ow + b_x) as usize;
+                    let rv = mask_raw[r_idx];
+                    let gv = edge as u8;
+                    let bv = mask_raw[b_idx];
+                    Some([rv, gv, bv])
+                }
+                LineStyle::Noise { amount } => {
+                    // Deterministic hash → per-pixel hue jitter. Cheap integer
+                    // mixer (Wang-like) avoids RNG setup cost per dispatch.
+                    let mut h = (i as u32).wrapping_mul(0x9e37_79b1);
+                    h ^= h >> 16;
+                    h = h.wrapping_mul(0x7feb_352d);
+                    h ^= h >> 15;
+                    let jitter = (h & 0xFF) as i32 - 128; // -128..=127
+                    let strength = amount as i32;
+                    let shift = (jitter * strength) / 128; // -amount..=amount
+                    // i64 to survive the multiply past ~5.96 M pixels
+                    // (2700×2200) — Rainbow above already does the same.
+                    let hue = (((i as i64 * 360) / pixel_count.max(1) as i64) + shift as i64)
+                        .rem_euclid(360) as u16;
+                    let (r, g, b) = crate::postprocess::hsv_to_rgb(hue, 200, 240);
+                    Some([r, g, b])
+                }
+                // DualScale is handled by `compose_edges_dual_styled` — the
+                // single-mask path here renders only the active scale. Callers
+                // that select DualScale must dispatch to the dual function; the
+                // fallthrough here prevents compile errors and degrades to the
+                // user's solid_line_color for correctness.
+                LineStyle::DualScale { .. } => solid_tint,
+            };
+            if let Some(target) = gradient_target {
+                blend_rgb(&mut out_raw[i * 4..i * 4 + 3], target, edge as u16);
+            }
+        }
+        rgba
+    }
+
+
+    fn reference_compose_edges_dual_styled(
+        fine_mask: &image::GrayImage,
+        bold_mask: &image::GrayImage,
+        base: &RgbaImage,
+        compose: crate::types::ComposeMode,
+        fine_color: [u8; 3],
+        bold_color: [u8; 3],
+        edge_thickness: u32,
+    ) -> RgbaImage {
+        use crate::types::ComposeMode;
+        let (ow, oh) = (base.width(), base.height());
+        let fine_raw = dilate_to_bytes(fine_mask, edge_thickness).into_owned();
+        let bold_raw = dilate_to_bytes(bold_mask, edge_thickness).into_owned();
+        let mut rgba = base.clone();
+        let out_raw = rgba.as_mut();
+        let pixel_count = (ow * oh) as usize;
+
+        let alpha_fn: fn(i32, i32) -> u8 = match compose {
+            ComposeMode::LinesOnly => |s, e| (s * e / 255) as u8,
+            ComposeMode::SubjectFilled => |s, e| s.max(e) as u8,
+            ComposeMode::Engraving => |s, e| (s - e).max(0) as u8,
+            ComposeMode::Ghost => |s, e| ((s * 77 + e * 204) / 255).clamp(0, 255) as u8,
+            ComposeMode::InverseMask => |s, e| ((255 - s) * e / 255) as u8,
+        };
+
+        for i in 0..pixel_count {
+            let subject = out_raw[i * 4 + 3] as i32;
+            let fine = fine_raw[i] as i32;
+            let bold = bold_raw[i] as i32;
+            let edge = fine.max(bold);
+            out_raw[i * 4 + 3] = alpha_fn(subject, edge);
+            if fine > 0 {
+                blend_rgb(&mut out_raw[i * 4..i * 4 + 3], fine_color, fine as u16);
+            }
+            if bold > 0 {
+                blend_rgb(&mut out_raw[i * 4..i * 4 + 3], bold_color, bold as u16);
+            }
+        }
+        rgba
+    }
+
+
+    fn noisy_gray(w: u32, h: u32, seed: u64) -> image::GrayImage {
+        use rand::{Rng, SeedableRng};
+        let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(seed);
+        image::GrayImage::from_fn(w, h, |_, _| image::Luma([if rng.random::<u8>() < 40 { rng.random() } else { 0 }]))
+    }
+
+    fn noisy_rgba(w: u32, h: u32, seed: u64) -> RgbaImage {
+        use rand::{Rng, SeedableRng};
+        let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(seed);
+        RgbaImage::from_fn(w, h, |_, _| image::Rgba(rng.random()))
+    }
+
+    #[test]
+    fn compositions_match_the_reference_for_every_style_and_mode() {
+        use crate::types::{ComposeMode, LineStyle};
+        let (w, h) = (97, 61);
+        let mask = noisy_gray(w, h, 1);
+        let bold = noisy_gray(w, h, 2);
+        let base = noisy_rgba(w, h, 3);
+        let original = DynamicImage::ImageRgba8(base.clone());
+        let styles = [
+            LineStyle::Solid,
+            LineStyle::GradientY { top: [255, 0, 0], bottom: [0, 0, 255] },
+            LineStyle::GradientX { left: [0, 255, 0], right: [255, 0, 255] },
+            LineStyle::RadialGradient { center: [40, 200], inner: [255, 255, 0], outer: [0, 255, 255] },
+            LineStyle::Rainbow { cycles: 3 },
+            LineStyle::Chromatic { offset: 5 },
+            LineStyle::Noise { amount: 90 },
+            LineStyle::DualScale { fine_color: [1, 2, 3], bold_color: [4, 5, 6] },
+        ];
+        for thickness in [0, 2] {
+            for color in [None, Some([10u8, 200, 30])] {
+                assert!(compose_edges(&mask, &original, color, thickness) == reference_compose_edges(&mask, &original, color, thickness), "plain t={thickness} {color:?}");
+            }
+            for &compose in ComposeMode::ALL {
+                for &style in &styles {
+                    let fast = compose_edges_styled(&mask, &base, compose, style, Some([10, 200, 30]), thickness);
+                    let slow = reference_compose_edges_styled(&mask, &base, compose, style, Some([10, 200, 30]), thickness);
+                    assert!(fast == slow, "{compose:?} {style:?} t={thickness}");
+                }
+                let fast = compose_edges_dual_styled(&mask, &bold, &base, compose, [255, 0, 0], [0, 0, 255], thickness);
+                let slow = reference_compose_edges_dual_styled(&mask, &bold, &base, compose, [255, 0, 0], [0, 0, 255], thickness);
+                assert!(fast == slow, "dual {compose:?} t={thickness}");
+            }
+        }
+    }
     use image::{DynamicImage, RgbImage, Rgb};
 
     fn solid_rgb(w: u32, h: u32) -> DynamicImage {
