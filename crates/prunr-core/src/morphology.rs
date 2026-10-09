@@ -20,109 +20,39 @@ const PAR_MIN_ROWS: usize = 512;
 ///
 /// Peak working set: two mask-sized planes (24 MB at 4K).
 pub fn shift_mask(mask: &mut GrayImage, shift: f32) {
-    let Some(plan) = Plan::new(mask.width(), mask.height(), shift) else { return };
-    let (mut hz, mut scratch) = plan.scratch();
-    if plan.full > 0 {
-        plan.rows(mask.as_raw(), &mut hz);
-        plan.cols_into(&mut hz, &mut scratch, mask.as_mut());
+    let abs = shift.abs();
+    if abs < 0.01 || mask.width() == 0 || mask.height() == 0 {
+        return;
     }
-    plan.blend_partner(mask.as_mut(), &mut hz, &mut scratch);
-}
-
-/// `shift_mask` into a new image, leaving `mask` untouched: the live
-/// preview dilates a cached mask on every tick and must keep the cached
-/// one. Saves the clone an in-place call would need.
-pub fn shifted(mask: &GrayImage, shift: f32) -> GrayImage {
-    let Some(plan) = Plan::new(mask.width(), mask.height(), shift) else { return mask.clone() };
-    let (mut hz, mut scratch) = plan.scratch();
-    let mut out = GrayImage::new(mask.width(), mask.height());
-    if plan.full > 0 {
-        plan.rows(mask.as_raw(), &mut hz);
-        plan.cols_into(&mut hz, &mut scratch, out.as_mut());
+    let full = abs.floor() as usize;
+    let frac = abs - full as f32;
+    // Monomorphised per extremum so the elementwise loops vectorise.
+    if shift > 0.0 {
+        shift_by(mask, full, frac, u8::min);
     } else {
-        out.as_mut().copy_from_slice(mask.as_raw());
-    }
-    plan.blend_partner(out.as_mut(), &mut hz, &mut scratch);
-    out
-}
-
-/// One shift: its integer part, the fractional blend, and the direction.
-/// Each pass is monomorphised per extremum so the elementwise loops
-/// vectorise.
-struct Plan {
-    w: usize,
-    h: usize,
-    full: usize,
-    frac: f32,
-    erode: bool,
-}
-
-impl Plan {
-    fn new(w: u32, h: u32, shift: f32) -> Option<Self> {
-        let abs = shift.abs();
-        if abs < 0.01 || w == 0 || h == 0 {
-            return None;
-        }
-        let full = abs.floor() as usize;
-        Some(Self { w: w as usize, h: h as usize, full, frac: abs - full as f32, erode: shift > 0.0 })
-    }
-
-    /// The two mask-sized planes every pass works in.
-    fn scratch(&self) -> (Vec<u8>, Vec<u8>) {
-        (vec![0u8; self.w * self.h], vec![0u8; self.w * self.h])
-    }
-
-    fn with_window<R>(&self, f: impl FnOnce(&dyn WindowPass) -> R) -> R {
-        let par = self.h >= PAR_MIN_ROWS;
-        if self.erode {
-            f(&Window { w: self.w, h: self.h, pick: u8::min, par })
-        } else {
-            f(&Window { w: self.w, h: self.h, pick: u8::max, par })
-        }
-    }
-
-    fn rows(&self, src: &[u8], dst: &mut [u8]) {
-        self.with_window(|win| win.rows_pass(src, dst, self.full));
-    }
-
-    fn cols_into(&self, plane: &mut [u8], suffix: &mut [u8], dst: &mut [u8]) {
-        self.with_window(|win| win.cols_copy(plane, suffix, dst, self.full));
-    }
-
-    /// Partner = the integer result shifted one more pixel, blended into
-    /// `mask` as it is produced.
-    fn blend_partner(&self, mask: &mut [u8], hz: &mut [u8], scratch: &mut [u8]) {
-        if self.frac < 0.01 {
-            return;
-        }
-        let (frac, inv) = (self.frac, 1.0 - self.frac);
-        self.with_window(|win| {
-            win.rows_pass(mask, hz, 1);
-            win.cols_blend(hz, scratch, mask, frac, inv);
-        });
+        shift_by(mask, full, frac, u8::max);
     }
 }
 
-/// The passes of one extremum, behind one vtable call per pass (not
-/// per pixel), so the two directions share the plan code.
-trait WindowPass: Sync {
-    fn rows_pass(&self, src: &[u8], dst: &mut [u8], r: usize);
-    fn cols_copy(&self, plane: &mut [u8], suffix: &mut [u8], dst: &mut [u8], r: usize);
-    fn cols_blend(&self, plane: &mut [u8], suffix: &mut [u8], dst: &mut [u8], frac: f32, inv: f32);
-}
-
-impl<F: Fn(u8, u8) -> u8 + Copy + Sync> WindowPass for Window<F> {
-    fn rows_pass(&self, src: &[u8], dst: &mut [u8], r: usize) {
-        self.rows(src, dst, r);
+fn shift_by<F: Fn(u8, u8) -> u8 + Copy + Sync>(mask: &mut GrayImage, full: usize, frac: f32, pick: F) {
+    let (w, h) = (mask.width() as usize, mask.height() as usize);
+    let win = Window { w, h, pick, par: h >= PAR_MIN_ROWS };
+    let mut hz = vec![0u8; w * h];
+    let mut scratch = vec![0u8; w * h];
+    if full > 0 {
+        win.rows(mask.as_raw(), &mut hz, full);
+        win.cols(&mut hz, &mut scratch, mask.as_mut(), full, |o, v| *o = v);
     }
-
-    fn cols_copy(&self, plane: &mut [u8], suffix: &mut [u8], dst: &mut [u8], r: usize) {
-        self.cols(plane, suffix, dst, r, |o, v| *o = v);
+    if frac < 0.01 {
+        return;
     }
-
-    fn cols_blend(&self, plane: &mut [u8], suffix: &mut [u8], dst: &mut [u8], frac: f32, inv: f32) {
-        self.cols(plane, suffix, dst, 1, move |a, b| *a = (*a as f32 * inv + b as f32 * frac + 0.5) as u8);
-    }
+    // Partner = the integer result shifted one more pixel, blended into
+    // the mask as it is produced.
+    let inv = 1.0 - frac;
+    win.rows(mask.as_raw(), &mut hz, 1);
+    win.cols(&mut hz, &mut scratch, mask.as_mut(), 1, |a, b| {
+        *a = (*a as f32 * inv + b as f32 * frac + 0.5) as u8;
+    });
 }
 
 /// The suffix and prefix taps whose `pick` is the clamped window
@@ -316,16 +246,6 @@ mod tests {
                 shift_mask(&mut fast, shift);
                 assert!(fast.as_raw() == &brute_force_shift(&source, shift), "{w}x{h} shift {shift}");
             }
-        }
-    }
-
-    #[test]
-    fn shifted_matches_shift_mask() {
-        let source = noise_mask(37, 23, 11);
-        for &shift in &[1.0f32, 2.5, -3.0, 0.0] {
-            let mut in_place = source.clone();
-            shift_mask(&mut in_place, shift);
-            assert_eq!(shifted(&source, shift).as_raw(), in_place.as_raw(), "shift {shift}");
         }
     }
 

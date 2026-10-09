@@ -5,7 +5,7 @@
 
 use criterion::{black_box, criterion_group, criterion_main, BatchSize, Criterion, Throughput};
 use image::{DynamicImage, Rgba, RgbaImage};
-use prunr_core::{compose_edges, compose_edges_dual_styled, compose_edges_styled, tensor_to_edge_mask, ComposeMode, LineStyle};
+use prunr_core::{compose_edges, compose_edges_dual_styled, compose_edges_styled, edge_plane, ComposeMode, LineStyle};
 
 const W: u32 = 4096;
 const H: u32 = 3072;
@@ -27,20 +27,20 @@ pub fn bench(c: &mut Criterion) {
     let bold = tensor(1.0);
     let base = base();
     let original = DynamicImage::ImageRgba8(base.clone());
-    let mask = tensor_to_edge_mask(&fine, 480, 640, W, H, 0.5);
-    let bold_mask = tensor_to_edge_mask(&bold, 480, 640, W, H, 0.5);
+    let mask = edge_plane(&fine, 480, 640, W, H, 0.5, 2);
+    let bold_mask = edge_plane(&bold, 480, 640, W, H, 0.5, 2);
 
     let mut group = c.benchmark_group("edge_4K");
     group.throughput(Throughput::Elements((W * H) as u64));
     group.sample_size(10);
-    group.bench_function("tensor_to_edge_mask", |b| {
-        b.iter(|| black_box(tensor_to_edge_mask(black_box(&fine), 480, 640, W, H, 0.5)))
+    group.bench_function("edge_plane", |b| {
+        b.iter(|| black_box(edge_plane(black_box(&fine), 480, 640, W, H, 0.5, 2)))
     });
     group.bench_function("compose_edges_plain", |b| {
-        b.iter(|| black_box(compose_edges(black_box(&mask), &original, None, 2)))
+        b.iter(|| black_box(compose_edges(black_box(&mask), &original, None)))
     });
     group.bench_function("compose_edges_solid_color", |b| {
-        b.iter(|| black_box(compose_edges(black_box(&mask), &original, Some([0, 0, 0]), 2)))
+        b.iter(|| black_box(compose_edges(black_box(&mask), &original, Some([0, 0, 0]))))
     });
     for (name, style) in [
         ("styled_solid", LineStyle::Solid),
@@ -53,13 +53,13 @@ pub fn bench(c: &mut Criterion) {
         group.bench_function(name, |b| {
             b.iter_batched(
                 || (),
-                |_| black_box(compose_edges_styled(black_box(&mask), &base, ComposeMode::SubjectFilled, style, Some([0, 0, 0]), 2)),
+                |_| black_box(compose_edges_styled(black_box(&mask), &base, ComposeMode::SubjectFilled, style, Some([0, 0, 0]))),
                 BatchSize::LargeInput,
             )
         });
     }
     group.bench_function("dual_styled", |b| {
-        b.iter(|| black_box(compose_edges_dual_styled(black_box(&mask), &bold_mask, &base, ComposeMode::Ghost, [255, 0, 0], [0, 0, 255], 2)))
+        b.iter(|| black_box(compose_edges_dual_styled(black_box(&mask), &bold_mask, &base, ComposeMode::Ghost, [255, 0, 0], [0, 0, 255])))
     });
     group.finish();
 }

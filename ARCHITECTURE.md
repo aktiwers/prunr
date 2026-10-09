@@ -206,7 +206,7 @@ On top of the AI pipeline sit four orthogonal compose-time enums, all stored on 
 | `BgEffect` | Source-derived backdrop baked into transparent areas (BlurredSource / InvertedSource / DesaturatedSource) | Any mode | MaskRerun |
 | `InputTransform` | Pre-inference image transform (Grayscale / ContrastBoost / Posterize). Changes what DexiNed sees | EdgesOnly, SubjectOutline | FullPipeline (edge cache invalid) |
 
-All four land in the same `postprocess → compose` step in `prunr-core`; live preview threads them through `DispatchInputs`. Shared helpers: `luma_u8`, `rgb_to_hsv`, `hsv_to_rgb`, `blend_rgb`, `lerp_rgb` in `prunr-core`. `#[inline]` on every per-pixel primitive; `LinesOnly` / `SubjectFilled` etc. resolve to a `fn(i32,i32)->u8` once per dispatch so the 5-way compose-mode match stays out of the per-pixel loop.
+All four land in the same `postprocess → compose` step in `prunr-core`; live preview threads them through `DispatchInputs`. Shared helpers: `luma_u8`, `rgb_to_hsv`, `hsv_to_rgb`, `blend_rgb`, `lerp_rgb` in `prunr-core`. `#[inline]` on every per-pixel primitive; `ComposeMode::alpha` is inlined into the row loop, which the compiler unswitches on the loop-invariant mode.
 
 **Dual-scale edge overlay.** `LineStyle::DualScale` uses TWO DexiNed scales at once — Fine for micro-details in one colour, Bold for structure in another. The worker builds both masks from the cached `EdgeInferenceResult` and calls `compose_edges_dual_styled`. Live preview decompresses the Bold tensor on demand (only when DualScale is active), and `edge_tensor_for_scale` keeps the `volatile_edge_tensor` hot cache pinned to the active scale so the Bold decompress doesn't evict it — otherwise the next Edge tweak would miss the cache.
 
@@ -442,7 +442,7 @@ Tier 2 path uses postprocess_from_flat(tensor: &[f32], h, w, original, mask, mod
 - Guided filter uses `f32` prefix sums (halved bandwidth vs f64)
 - Guided filter drops each f32 plane at its last use; peak stays at the four parallel box filters (12 planes, 576 MB at 4K) because pairing them measured ~9 % slower (open trade)
 - Edge shift is two separable window passes (van Herk / Gil-Werman), constant time per pixel whatever the shift; a fractional shift blends with the next integer shift computed in place in the same two scratch planes. `morphology::shifted` writes a new image so the Lines path dilates its cached mask without cloning it first
-- Edge composition runs row-parallel with the compose-mode alpha rule inlined per mode (a macro expands the loop once per rule) and the line style's colour rule inlined per style; before the rewrite a styled 4K composition cost 120–410 ms per live-preview tick
+- Edge composition runs row-parallel: each row copies RGB and writes alpha through `ComposeMode::alpha` in one branch-free pass, then blends the style colour (a 360-entry hue table for Rainbow / Noise) only at edge pixels. The dilated edge plane is cached per (strength, scale, thickness), the Bold plane of a dual-scale style too, so a colour or compose tweak costs the composition alone; before this a styled 4K composition cost 120–410 ms per live-preview tick, now 19–37 ms
 - Single RGBA allocation in `postprocess()` — shared across guided filter and mask application (saves ~48 MB per Tier 2 run on a 4000×3000 image)
 
 #### Benchmark numbers (4000×3000 image, 8-core x86_64, `cargo test --release`)
@@ -477,9 +477,11 @@ ignore than to investigate. Reference numbers (8-core x86_64,
 | `morphology::shift_mask`            | 4K mask, 50 px           |         16 ms |
 | `sam::decode_to_mask_artifact`      | 256² logits → 4K plane   |          8 ms |
 | `sam::preprocess_for_sam`           | 4K photo → 1024² tensor  |         48 ms |
-| `compose_edges_styled`              | 4K, Solid / GradientY    |  57 / 68 ms   |
-| `compose_edges_styled`              | 4K, Rainbow / Noise      |  98 / 108 ms  |
-| `compose_edges_dual_styled`         | 4K                       |         76 ms |
+| `edge_plane`                        | 640×480 tensor → 4K, 2 px |        32 ms |
+| `compose_edges`                     | 4K, lines only           |   11 / 9 ms   |
+| `compose_edges_styled`              | 4K, Solid / GradientY    |  19 / 32 ms   |
+| `compose_edges_styled`              | 4K, Rainbow / Noise      |  36 / 37 ms   |
+| `compose_edges_dual_styled`         | 4K                       |         34 ms |
 
 Before the separable rewrite the same 4K mask took 52 ms at 1 px,
 156 ms at 2.5 px, 493 ms at 10 px and 2.46 s at 50 px. The other
