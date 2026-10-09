@@ -22,8 +22,8 @@ use crate::gui::views::chip::{button, ButtonKind};
 
 /// Label for the dropdown button — shows the `applied_preset` name and
 /// whether current settings still match it.
-///   - Match → `🔖 Portrait ✓` (check icon, clean)
-///   - Diverged → `🔖 Portrait ✎` (edit icon, modified)
+///   - Match → `Portrait ✓` (check icon, clean)
+///   - Diverged → `Portrait ✎` (edit icon, modified)
 ///
 /// Tracks the preset the user LAST APPLIED (via dropdown click or Reset All),
 /// not whichever preset happens to match current settings. This way
@@ -34,14 +34,14 @@ fn button_label(settings: &Settings, current: &ItemSettings, applied_preset: &st
     let exists = applied_preset == PRUNR_PRESET
         || settings.presets.contains_key(applied_preset);
     if !exists {
-        return format!("{}  Custom  {}", ICON_BOOKMARK.codepoint, ICON_EDIT.codepoint);
+        return format!("Custom  {}", ICON_EDIT.codepoint);
     }
     let resolved = resolve_preset_view(settings, applied_preset);
     let item_diverged = *current != resolved.item_settings;
     let brush_diverged = settings.brush != resolved.brush;
     let is_modified = item_diverged || brush_diverged;
     let state_icon = if is_modified { ICON_EDIT.codepoint } else { ICON_CHECK.codepoint };
-    format!("{}  {applied_preset}  {state_icon}", ICON_BOOKMARK.codepoint)
+    format!("{applied_preset}  {state_icon}")
 }
 
 /// Resolve an arbitrary preset name to a `ResolvedView` using the
@@ -97,16 +97,9 @@ pub fn render(
     let pop_id = egui::Id::new("preset_popover");
     let save_dialog_id = egui::Id::new("preset_save_dialog");
 
-    let btn = egui::Button::new(
-        RichText::new(button_label(settings, current_item, applied_preset))
-            .color(theme::TEXT_PRIMARY)
-            .size(theme::FONT_SIZE_BODY),
-    )
-    .fill(theme::BG_SECONDARY)
-    .corner_radius(theme::BUTTON_ROUNDING)
-    .min_size(egui::vec2(0.0, theme::CHIP_HEIGHT));
+    let label = button_label(settings, current_item, applied_preset);
     let resp = crate::gui::views::chip::tooltip(
-        ui.add(btn),
+        crate::gui::views::chip::chip_button(ui, ICON_BOOKMARK.codepoint, &label, false),
         "Preset",
         "Apply a saved preset to the current image, or save the current settings as one.",
         None,
