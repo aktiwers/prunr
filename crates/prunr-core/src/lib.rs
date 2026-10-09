@@ -6,6 +6,7 @@ pub mod pipeline;
 pub mod preprocess;
 pub mod postprocess;
 pub mod guided_filter;
+pub mod morphology;
 pub mod batch;
 pub mod formats;
 pub mod edge;
