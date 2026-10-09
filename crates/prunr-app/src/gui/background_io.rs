@@ -37,7 +37,9 @@ pub(crate) struct SelectionTextureResult {
 }
 
 pub(crate) enum SelectionImage {
-    Full(egui::ColorImage),
+    /// The whole overlay, and the feathered plane it was built from when
+    /// the style feathers (so actions can reuse it).
+    Full { image: egui::ColorImage, feathered: Option<Arc<prunr_core::selection::MaskArtifact>> },
     /// The pixels that differ from the texture showing `base_hash`,
     /// to upload at `pos` into that texture.
     Patch { base_hash: u64, pos: [usize; 2], image: egui::ColorImage },
@@ -209,8 +211,9 @@ impl BackgroundIO {
                 Some(SelectionImage::Patch { base_hash, pos, image })
             });
             let image = patch.unwrap_or_else(|| {
-                let shown = style.feathered(mask, source.as_deref());
-                SelectionImage::Full(build_selection_image(&shown, style))
+                let shown = style.feathered(Arc::clone(&mask), source.as_deref());
+                let feathered = (!Arc::ptr_eq(&shown, &mask)).then(|| Arc::clone(&shown));
+                SelectionImage::Full { image: build_selection_image(&shown, style), feathered }
             });
             let _ = texture_tx.send(SelectionTextureResult { item_id, image, key });
             // Some compositors drop thread-initiated wake-ups while the
