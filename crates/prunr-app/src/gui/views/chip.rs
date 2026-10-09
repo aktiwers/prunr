@@ -479,6 +479,35 @@ pub fn slider_row<T: egui::emath::Numeric>(
     out
 }
 
+/// A selectable option with a title and a one-line description, for
+/// every picker popover. Returns the row's response.
+pub(super) fn picker_row(ui: &mut Ui, selected: bool, title: &str, description: &str) -> Response {
+    use egui::text::{LayoutJob, TextFormat};
+    let mut job = LayoutJob::default();
+    job.append(
+        title,
+        0.0,
+        TextFormat {
+            color: theme::TEXT_PRIMARY,
+            font_id: egui::FontId::proportional(theme::FONT_SIZE_BODY),
+            ..Default::default()
+        },
+    );
+    if !description.is_empty() {
+        job.append("\n", 0.0, TextFormat::default());
+        job.append(
+            description,
+            0.0,
+            TextFormat {
+                color: theme::TEXT_SECONDARY,
+                font_id: egui::FontId::proportional(theme::FONT_SIZE_MONO),
+                ..Default::default()
+            },
+        );
+    }
+    ui.selectable_label(selected, job)
+}
+
 /// Optional RGBA chip (bg color). Toggle enables; inline color picker sets the value.
 /// Displays "None" when disabled, a swatch preview when enabled.
 ///
