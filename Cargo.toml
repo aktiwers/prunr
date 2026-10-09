@@ -48,7 +48,7 @@ repository = "https://github.com/aktiwers/prunr"
 # https://github.com/pykeio/ort/milestones before bumping. api-23
 # pin avoids the rc.12 vitis.rs build bug under load-dynamic at
 # api-24.
-ort = { version = "=2.0.0-rc.12", default-features = false, features = ["cuda", "coreml", "directml", "openvino", "ndarray", "load-dynamic", "api-23", "half"] }
+ort = { version = "=2.0.0-rc.13", default-features = false, features = ["cuda", "coreml", "directml", "openvino", "ndarray", "load-dynamic", "api-23", "half"] }
 
 # Image + tensor core
 ndarray = "0.17"

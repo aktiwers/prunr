@@ -6,7 +6,7 @@ use std::time::Instant;
 use crate::types::{CoreError, ModelKind};
 pub use ort::session::builder::GraphOptimizationLevel;
 use ort::{
-    execution_providers::CPUExecutionProvider,
+    ep::CPU,
     memory::{AllocationDevice, AllocatorType, MemoryInfo, MemoryType},
     session::Session,
     value::Tensor,
@@ -79,17 +79,17 @@ pub(crate) fn available_gpu_eps() -> &'static [EpKind] {
         let mut eps: Vec<EpKind> = Vec::new();
         #[cfg(target_os = "macos")]
         {
-            if ort::execution_providers::CoreMLExecutionProvider::default()
+            if ort::ep::CoreML::default()
                 .is_available().unwrap_or(false) { eps.push(EpKind::CoreMl); }
         }
         #[cfg(not(target_os = "macos"))]
         {
-            if ort::execution_providers::OpenVINOExecutionProvider::default()
+            if ort::ep::OpenVINO::default()
                 .is_available().unwrap_or(false) { eps.push(EpKind::OpenVino); }
-            if ort::execution_providers::CUDAExecutionProvider::default()
+            if ort::ep::CUDA::default()
                 .is_available().unwrap_or(false) { eps.push(EpKind::Cuda); }
             #[cfg(windows)]
-            if ort::execution_providers::DirectMLExecutionProvider::default()
+            if ort::ep::DirectML::default()
                 .is_available().unwrap_or(false) { eps.push(EpKind::DirectMl); }
         }
         let eps_str: Vec<&'static str> = eps.iter().map(EpKind::as_str).collect();
@@ -249,7 +249,7 @@ impl OrtEngine {
             let started = Instant::now();
             let session = builder
                 .with_execution_providers([
-                    CPUExecutionProvider::default()
+                    CPU::default()
                         .with_arena_allocator(false) // lower memory baseline; subprocess handles OOM
                         .build(),
                 ])
@@ -302,7 +302,7 @@ impl OrtEngine {
             let res = match ep {
                 #[cfg(not(target_os = "macos"))]
                 EpKind::Cuda => builder.with_execution_providers([
-                    ort::execution_providers::CUDAExecutionProvider::default()
+                    ort::ep::CUDA::default()
                         .with_device_id(0)
                         .with_arena_extend_strategy(ort::ep::ArenaExtendStrategy::SameAsRequested)
                         .with_conv_algorithm_search(ort::ep::cuda::ConvAlgorithmSearch::Default)
@@ -312,7 +312,7 @@ impl OrtEngine {
                 ]),
                 #[cfg(target_os = "macos")]
                 EpKind::CoreMl => {
-                    let mut p = ort::execution_providers::CoreMLExecutionProvider::default();
+                    let mut p = ort::ep::CoreML::default();
                     if let Some(dir) = crate::cache::cache_dir_for(model_id, ep.as_str()) {
                         p = p.with_model_cache_dir(dir.to_string_lossy().into_owned());
                     }
@@ -321,7 +321,7 @@ impl OrtEngine {
                 #[cfg(windows)]
                 EpKind::DirectMl => builder.with_execution_providers([
                     // No application-level cache; rely on OS DXIL cache.
-                    ort::execution_providers::DirectMLExecutionProvider::default().build(),
+                    ort::ep::DirectML::default().build(),
                 ]),
                 #[cfg(not(target_os = "macos"))]
                 EpKind::OpenVino => builder.with_execution_providers([
@@ -340,7 +340,7 @@ impl OrtEngine {
                     // and rewrites ~3.3 GB on every cold build. Net-negative
                     // until ORT or OpenVINO ships a fix; re-evaluate when
                     // ort bumps.
-                    ort::execution_providers::OpenVINOExecutionProvider::default()
+                    ort::ep::OpenVINO::default()
                         .with_num_threads(intra_threads.max(1))
                         .build(),
                 ]),

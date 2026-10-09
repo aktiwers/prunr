@@ -1320,13 +1320,13 @@ fn build_part_with_ep_ladder(
         let registered = match ep {
             #[cfg(not(target_os = "macos"))]
             EpKind::Cuda => builder.with_execution_providers([
-                ort::execution_providers::CUDAExecutionProvider::default()
+                ort::ep::CUDA::default()
                     .with_device_id(0)
                     .build(),
             ]),
             #[cfg(target_os = "macos")]
             EpKind::CoreMl => {
-                let mut p = ort::execution_providers::CoreMLExecutionProvider::default();
+                let mut p = ort::ep::CoreML::default();
                 if let Some(dir) = crate::cache::cache_dir_for_part(id, ep.as_str(), key) {
                     p = p.with_model_cache_dir(dir.to_string_lossy().into_owned());
                 }
@@ -1334,7 +1334,7 @@ fn build_part_with_ep_ladder(
             }
             #[cfg(windows)]
             EpKind::DirectMl => builder.with_execution_providers([
-                ort::execution_providers::DirectMLExecutionProvider::default().build(),
+                ort::ep::DirectML::default().build(),
             ]),
             #[cfg(not(target_os = "macos"))]
             EpKind::OpenVino => builder.with_execution_providers([
@@ -1345,7 +1345,7 @@ fn build_part_with_ep_ladder(
                 // 512×768 crop. (No `with_cache_dir` — see engine.rs
                 // for the SD UNet empirical retest.)
                 {
-                    let mut p = ort::execution_providers::OpenVINOExecutionProvider::default()
+                    let mut p = ort::ep::OpenVINO::default()
                         .with_num_streams(1)
                         .with_dynamic_shapes(true);
                     if let Some(dev) = &session_key.ov_device {
