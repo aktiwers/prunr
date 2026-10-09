@@ -31,7 +31,7 @@ use crate::gui::knob_catalog::{
 };
 use crate::gui::settings::{Settings, SettingsModel};
 use crate::gui::theme;
-use crate::gui::views::{chip, hint, preset_dropdown};
+use crate::gui::views::{chip, fmt, hint, preset_dropdown};
 use prunr_core::LineMode;
 
 use super::model_label;
@@ -508,7 +508,7 @@ fn render_seg_mask_chips(
             &mut item_settings.gamma,
             0.01..=10.0, defaults.template.gamma,
             true, // log scale — matches perceptual symmetry around 1.0
-            |v| format!("{v:.2}"),
+            |v| fmt::plain(v, 2),
         ), StaticKnob::Gamma, change);
 
         aggregate_knob(chip::chip_option_f32(
@@ -522,7 +522,7 @@ fn render_seg_mask_chips(
             },
             &mut item_settings.threshold,
             0.001..=0.999, defaults.threshold_value, "Soft",
-            |v| format!("{:.1}%", v * 100.0),
+            fmt::percent_tenths,
         ), StaticKnob::Threshold, change);
 
         aggregate_knob(chip::chip_f32(
@@ -538,9 +538,9 @@ fn render_seg_mask_chips(
             -50.0..=50.0, defaults.template.edge_shift,
             false,
             |v| {
-                if v > 0.05 { format!("erode {v:.1}px") }
-                else if v < -0.05 { format!("dilate {:.1}px", v.abs()) }
-                else { "0px".to_string() }
+                if v > 0.05 { format!("erode {}", fmt::px(v, 1)) }
+                else if v < -0.05 { format!("dilate {}", fmt::px(v.abs(), 1)) }
+                else { fmt::px(0.0, 0) }
             },
         ), StaticKnob::EdgeShift, change);
 
@@ -557,7 +557,7 @@ fn render_seg_mask_chips(
             |ui| {
                 let mut inner = chip::ChipChange::default();
                 let mut radius_u32 = item_settings.guided_radius as u32;
-                let r = chip::slider_row_u32(
+                let r = chip::slider_row(
                     ui, "Refine radius (px)",
                     &mut radius_u32,
                     1..=64,
@@ -590,7 +590,7 @@ fn render_seg_mask_chips(
             &mut item_settings.feather,
             0.0..=10.0, defaults.template.feather,
             false,
-            |v| if v < 0.1 { "off".into() } else { format!("σ {v:.1}") },
+            |v| fmt::off_or(v, 0.1, |v| fmt::px(v, 1)),
         ), StaticKnob::Feather, change);
     });
 
@@ -686,7 +686,7 @@ fn render_row2_right_cluster(
         &mut item_settings.line_strength,
         0.0..=1.0, defaults.template.line_strength,
         false,
-        |v| format!("{v:.2}"),
+        |v| fmt::plain(v, 2),
     ), StaticKnob::LineStrength, change);
 
     {
@@ -702,7 +702,7 @@ fn render_row2_right_cluster(
             },
             &mut thickness_u32,
             0..=20, defaults.template.edge_thickness as u32,
-            |v| if v == 0 { "off".into() } else { format!("+{v}px") },
+            |v| if v == 0 { "Off".into() } else { fmt::signed_px(v as f32, 0) },
         );
         item_settings.edge_thickness = thickness_u32.min(255) as u8;
         aggregate_knob(result, StaticKnob::EdgeThickness, change);
@@ -821,14 +821,10 @@ fn render_input_transform_chip(ui: &mut Ui, transform: &mut prunr_core::InputTra
                     .size(theme::FONT_SIZE_MONO));
             }
             InputTransform::ContrastBoost { percent } => {
-                if ui.add(egui::Slider::new(percent, 50..=300).text("Percent")).changed() {
-                    changed = true;
-                }
+                changed |= chip::slider_row(ui, "Percent", percent, 50..=300).changed;
             }
             InputTransform::Posterize { levels } => {
-                if ui.add(egui::Slider::new(levels, 2..=8).text("Levels")).changed() {
-                    changed = true;
-                }
+                changed |= chip::slider_row(ui, "Levels", levels, 2..=8).changed;
             }
         }
     });
@@ -887,33 +883,17 @@ fn line_style_params(ui: &mut Ui, style: &mut prunr_core::LineStyle) -> bool {
         LineStyle::RadialGradient { center, inner, outer } => {
             changed |= rgb_picker_row(ui, "Inner", inner);
             changed |= rgb_picker_row(ui, "Outer", outer);
-            ui.horizontal(|ui| {
-                ui.label("Centre");
-                if ui.add(egui::Slider::new(&mut center[0], 0..=255).text("X")).changed() {
-                    changed = true;
-                }
-            });
-            ui.horizontal(|ui| {
-                ui.label("");
-                if ui.add(egui::Slider::new(&mut center[1], 0..=255).text("Y")).changed() {
-                    changed = true;
-                }
-            });
+            changed |= chip::slider_row(ui, "Center X", &mut center[0], 0..=255).changed;
+            changed |= chip::slider_row(ui, "Center Y", &mut center[1], 0..=255).changed;
         }
         LineStyle::Rainbow { cycles } => {
-            if ui.add(egui::Slider::new(cycles, 1..=10).text("Cycles")).changed() {
-                changed = true;
-            }
+            changed |= chip::slider_row(ui, "Cycles", cycles, 1..=10).changed;
         }
         LineStyle::Chromatic { offset } => {
-            if ui.add(egui::Slider::new(offset, 1..=16).text("Offset px")).changed() {
-                changed = true;
-            }
+            changed |= chip::slider_row(ui, "Offset (px)", offset, 1..=16).changed;
         }
         LineStyle::Noise { amount } => {
-            if ui.add(egui::Slider::new(amount, 0..=255).text("Amount")).changed() {
-                changed = true;
-            }
+            changed |= chip::slider_row(ui, "Amount", amount, 0..=255).changed;
         }
         LineStyle::DualScale { fine_color, bold_color } => {
             changed |= rgb_picker_row(ui, "Fine (detail)", fine_color);
@@ -978,42 +958,26 @@ fn fill_style_params(ui: &mut Ui, style: &mut prunr_core::FillStyle) -> bool {
                 .size(theme::FONT_SIZE_MONO));
         }
         FillStyle::Threshold { level } => {
-            if ui.add(egui::Slider::new(level, 0..=255).text("Level")).changed() {
-                changed = true;
-            }
+            changed |= chip::slider_row(ui, "Level", level, 0..=255).changed;
         }
         FillStyle::Posterize { levels } => {
-            if ui.add(egui::Slider::new(levels, 2..=8).text("Levels")).changed() {
-                changed = true;
-            }
+            changed |= chip::slider_row(ui, "Levels", levels, 2..=8).changed;
         }
         FillStyle::Solarize { pivot } => {
-            if ui.add(egui::Slider::new(pivot, 0..=255).text("Pivot")).changed() {
-                changed = true;
-            }
+            changed |= chip::slider_row(ui, "Pivot", pivot, 0..=255).changed;
         }
         FillStyle::HueShift { degrees } => {
-            if ui.add(egui::Slider::new(degrees, -180..=180).text("Degrees")).changed() {
-                changed = true;
-            }
+            changed |= chip::slider_row(ui, "Degrees", degrees, -180..=180).changed;
         }
         FillStyle::Saturate { percent } => {
-            if ui.add(egui::Slider::new(percent, 0..=300).text("Percent")).changed() {
-                changed = true;
-            }
+            changed |= chip::slider_row(ui, "Percent", percent, 0..=300).changed;
         }
         FillStyle::ColorSplash { keep_hue, tolerance } => {
-            if ui.add(egui::Slider::new(keep_hue, 0..=359).text("Hue°")).changed() {
-                changed = true;
-            }
-            if ui.add(egui::Slider::new(tolerance, 0..=180).text("Tolerance°")).changed() {
-                changed = true;
-            }
+            changed |= chip::slider_row(ui, "Hue (degrees)", keep_hue, 0..=359).changed;
+            changed |= chip::slider_row(ui, "Tolerance (degrees)", tolerance, 0..=180).changed;
         }
         FillStyle::Pixelate { block_size } => {
-            if ui.add(egui::Slider::new(block_size, 2..=64).text("Block size")).changed() {
-                changed = true;
-            }
+            changed |= chip::slider_row(ui, "Block size (px)", block_size, 2..=64).changed;
         }
         FillStyle::Duotone { dark, light } => {
             changed |= rgb_picker_row(ui, "Dark", dark);
@@ -1039,9 +1003,7 @@ fn fill_style_params(ui: &mut Ui, style: &mut prunr_core::FillStyle) -> bool {
             });
         }
         FillStyle::Halftone { dot_spacing } => {
-            if ui.add(egui::Slider::new(dot_spacing, 2..=32).text("Dot spacing px")).changed() {
-                changed = true;
-            }
+            changed |= chip::slider_row(ui, "Dot spacing (px)", dot_spacing, 2..=32).changed;
         }
         FillStyle::GradientMap { stops } => {
             // 2×2 grid keeps the 4-stop popover within one screen height; a
@@ -1249,8 +1211,8 @@ fn render_background_chip(
                     }
                     BgKind::BlurredSource => {
                         if let BgEffect::BlurredSource { radius } = bg_effect {
-                            let r = ui.add(egui::Slider::new(radius, 1..=64).text("Blur radius"));
-                            aggregate_bool(r.changed(), StaticKnob::BgEffect, change);
+                            let r = chip::slider_row(ui, "Blur radius (px)", radius, 1..=64);
+                            aggregate_bool(r.changed, StaticKnob::BgEffect, change);
                         }
                         hint(ui, "Transparent areas filled with a Gaussian-blurred copy of the source image.");
                     }

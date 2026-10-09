@@ -9,6 +9,7 @@ use crate::gui::brush_state::BrushSettings;
 use prunr_core::brush::{BrushMode, BrushShape};
 
 use super::chip;
+use super::fmt;
 
 /// Width budget for the chip label, padded so 1- to 3-digit radii
 /// don't reflow the popover anchor as the user drags the slider.
@@ -62,16 +63,15 @@ pub(super) fn render(
                 ui.set_max_width(280.0);
                 let r = chip::slider_row_f32(
                     ui, "Radius", &mut s.radius, 1.0..=200.0, true,
-                    |v| format!("{v:.0} px"),
+                    |v| fmt::px(v, 0),
                 );
                 outcome.committed |= r.commit;
                 super::hint(ui, "Brush size in image pixels.");
                 ui.add_space(4.0);
                 let h = chip::slider_row_f32(
                     ui, "Hardness", &mut s.hardness, 0.0..=1.0, false,
-                    // 1-decimal % gives ~0.5% drag granularity for fine
-                    // edge-softness tuning.
-                    |v| format!("{:.1}%", v * 100.0),
+                    // tenths give ~0.5% drag granularity for fine edge tuning
+                    fmt::percent_tenths,
                 );
                 outcome.committed |= h.commit;
                 super::hint(ui, "Edge falloff. 0% = soft smoothstep, 100% = hard disc.");
@@ -82,7 +82,7 @@ pub(super) fn render(
                     // LaMa boundary, so Strength has no effect — hide it.
                     let st = chip::slider_row_f32(
                         ui, "Strength", &mut s.strength, 0.0..=1.0, false,
-                        |v| format!("{:.0}%", v * 100.0),
+                        fmt::percent,
                     );
                     outcome.committed |= st.commit;
                     super::hint(ui, "How much each stroke shifts the mask. Lower = gentler corrections.");
@@ -92,14 +92,14 @@ pub(super) fn render(
                     ui.add_space(4.0);
                     let g = chip::slider_row_f32(
                         ui, "Mask grow", &mut s.inpaint_grow, -16.0..=16.0, false,
-                        |v| format!("{v:+.0} px"),
+                        |v| fmt::signed_px(v, 0),
                     );
                     outcome.committed |= g.commit;
                     super::hint(ui, "Expand (+) or shrink (−) the painted region in pixels before inpaint.");
                     ui.add_space(4.0);
                     let f = chip::slider_row_f32(
                         ui, "Edge softness", &mut s.inpaint_feather, 0.0..=32.0, false,
-                        |v| format!("{v:.0} px"),
+                        |v| fmt::px(v, 0),
                     );
                     outcome.committed |= f.commit;
                     super::hint(ui, "Width of the edge-blend band at the inpaint boundary, in pixels. Higher = smoother transition between model output and surroundings. Edge-preserving (guided filter, color-matched against the source ring). Default 4 px.");
@@ -107,7 +107,7 @@ pub(super) fn render(
                     // Sharpen displays as 0-100% on a 0-2 internal range.
                     let sh = chip::slider_row_f32(
                         ui, "Sharpen", &mut s.inpaint_sharpen, 0.0..=2.0, false,
-                        |v| format!("{:.0}%", v * 50.0),
+                        |v| fmt::percent(v / 2.0),
                     );
                     outcome.committed |= sh.commit;
                     super::hint(ui, "Unsharp-mask amount inside the inpainted region. Counters the model's slight blur.");
@@ -187,28 +187,28 @@ pub(super) fn render_shared_selection_section(ui: &mut egui::Ui, s: &mut BrushSe
     ui.add_space(2.0);
     let fe = chip::slider_row_f32(
         ui, "Edge feather", &mut s.edge_feather, 0.0..=20.0, false,
-        |v| if v < 0.1 { "off".into() } else { format!("{v:.0} px") },
+        |v| fmt::off_or(v, 0.1, |v| fmt::px(v, 0)),
     );
     committed |= fe.commit;
     super::hint(ui, "Soften selection edges, 0\u{2013}20 pixels.");
     ui.add_space(2.0);
     let ot = chip::slider_row_f32(
         ui, "Outline thickness", &mut s.outline_thickness, 0.0..=10.0, false,
-        |v| format!("{v:.1} px"),
+        |v| fmt::px(v, 1),
     );
     committed |= ot.commit;
     super::hint(ui, "0\u{2013}10 image pixels.");
     ui.add_space(2.0);
     let oo = chip::slider_row_f32(
         ui, "Outline opacity", &mut s.outline_opacity, 0.0..=1.0, false,
-        |v| format!("{:.0}%", v * 100.0),
+        fmt::percent,
     );
     committed |= oo.commit;
     super::hint(ui, "0 = hidden, 1 = fully visible.");
     ui.add_space(2.0);
     let fo = chip::slider_row_f32(
         ui, "Fill opacity", &mut s.fill_opacity, 0.0..=1.0, false,
-        |v| format!("{:.0}%", v * 100.0),
+        fmt::percent,
     );
     committed |= fo.commit;
     super::hint(ui, "0 = no fill, 1 = solid fill.");

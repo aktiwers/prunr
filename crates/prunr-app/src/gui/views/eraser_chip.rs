@@ -17,6 +17,7 @@ use crate::gui::settings::Settings;
 use crate::gui::theme;
 
 use super::chip::{self, ChipMeta};
+use super::fmt;
 
 const LCM_DOWNLOAD_HINT: &str =
     "Download Eraser (SD 1.5 LCM, fast) in Model Store to enable.";
@@ -70,7 +71,7 @@ fn render_strength_chip(ui: &mut egui::Ui, brush: &mut BrushSettings) -> bool {
         0.0..=1.0,
         1.0,
         false,
-        |v| format!("{:.0}%", v * 100.0),
+        fmt::percent,
     );
     change.commit
 }
@@ -159,7 +160,7 @@ fn render_prompt_chip(ui: &mut egui::Ui, brush: &mut BrushSettings) -> bool {
             ui.add_space(theme::SPACE_SM);
             let cfg = chip::slider_row_f32(
                 ui, "Guidance", &mut brush.sd_guidance_scale, 1.0..=15.0, false,
-                |v| if v <= 1.0 + 1e-3 { "off".to_string() } else { format!("{v:.1}") },
+                |v| if v <= 1.0 + 1e-3 { "Off".to_string() } else { fmt::plain(v, 1) },
             );
             if cfg.commit { changed = true; }
             super::hint(ui, "Prompt strength. 1 = ignore prompt (single UNet pass). 7-8 = typical SD strength (UNet runs twice per step). Higher = closer match but oversaturated/burnt.");
@@ -316,7 +317,7 @@ fn render_seed_chip(ui: &mut egui::Ui, brush: &mut BrushSettings) -> bool {
             pinned_label = format!("…{:06}", s % 1_000_000);
             &pinned_label
         }
-        None => "random",
+        None => "Random",
     };
     let resp = chip::chip_tooltip(
         chip::chip_button(ui, icon, label, pinned),

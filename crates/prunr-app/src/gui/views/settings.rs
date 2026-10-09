@@ -58,25 +58,6 @@ pub(crate) enum HardwareSectionIntent {
     ClearCompiledCache,
 }
 
-/// Slider row: label left, slider fills middle, value right.
-fn slider_row(
-    ui: &mut egui::Ui,
-    label: &str,
-    value: &mut f32,
-    range: std::ops::RangeInclusive<f32>,
-    value_text: &str,
-    step: Option<f64>,
-) {
-    ui.horizontal(|ui| {
-        ui.label(RichText::new(label).color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY));
-        let avail = ui.available_width() - 52.0;
-        let mut slider = egui::Slider::new(value, range).show_value(false);
-        if let Some(s) = step { slider = slider.step_by(s); }
-        ui.add_sized([avail.max(100.0), 18.0], slider);
-        ui.label(RichText::new(value_text).monospace().size(theme::FONT_SIZE_MONO).color(theme::TEXT_PRIMARY));
-    });
-}
-
 pub fn render(ctx: &egui::Context, app: &mut PrunrApp) {
     let mut hardware_intent: Option<HardwareSectionIntent> = None;
     let closed = theme::standard_modal_window(
@@ -303,14 +284,7 @@ fn render_hardware_section(
 }
 
 fn render_ram_safety_margin_row(ui: &mut egui::Ui, value: &mut f32) {
-    slider_row(
-        ui,
-        "SD safety margin",
-        value,
-        0.0..=8.0,
-        &format!("{value:.1} GB"),
-        Some(0.5),
-    );
+    super::chip::slider_row_f32(ui, "SD safety margin", value, 0.0..=8.0, false, |v| format!("{v:.1} GB"));
     hint(ui, "Free RAM the SD eraser keeps clear on top of the model's working set. Higher = more conservative on systems where other apps spike during inference. Default 2 GB.");
 }
 
@@ -430,10 +404,7 @@ fn render_tab_behavior(ui: &mut egui::Ui, settings: &mut Settings) {
     hint(ui, "Process feeds on the previous output instead of the original — stack effects.");
     if settings.chain_mode {
         ui.add_space(theme::SPACE_SM);
-        let mut depth_f32 = settings.history_depth as f32;
-        let depth_text = format!("{}", settings.history_depth);
-        slider_row(ui, "History depth", &mut depth_f32, 1.0..=50.0, &depth_text, Some(1.0));
-        settings.history_depth = depth_f32 as usize;
+        super::chip::slider_row(ui, "History depth", &mut settings.history_depth, 1..=50);
         hint(ui, "Maximum undo steps per image. Higher = more memory.");
     }
     ui.add_space(theme::SPACE_MD);

@@ -462,12 +462,14 @@ pub fn slider_row_f32(
     out
 }
 
-/// Label + u32 slider.
-pub fn slider_row_u32(
+/// Label above a full-width slider whose box shows the value — the one
+/// slider layout for popovers and Settings. `slider_row_f32` adds the
+/// log scale and formatter that float knobs need.
+pub fn slider_row<T: egui::emath::Numeric>(
     ui: &mut Ui,
     label: &str,
-    value: &mut u32,
-    range: std::ops::RangeInclusive<u32>,
+    value: &mut T,
+    range: std::ops::RangeInclusive<T>,
 ) -> ChipChange {
     let mut out = ChipChange::default();
     ui.label(RichText::new(label).color(theme::TEXT_SECONDARY).size(theme::FONT_SIZE_MONO));

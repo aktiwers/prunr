@@ -11,7 +11,7 @@ use egui::Ui;
 
 use crate::gui::brush_state::BrushSettings;
 use crate::gui::theme;
-use crate::gui::views::chip;
+use crate::gui::views::{chip, fmt};
 
 /// Minimum popover width so the confidence slider has room to render cleanly.
 const MAGIC_POPOVER_MIN_WIDTH: f32 = 220.0;
@@ -90,7 +90,7 @@ pub(crate) fn render(
                 &mut bs.magic_confidence_threshold,
                 0.0..=1.0,
                 false,
-                |v| format!("{:.0}%", v * 100.0),
+                fmt::percent,
             );
             outcome.committed |= ct.commit;
             super::hint(
