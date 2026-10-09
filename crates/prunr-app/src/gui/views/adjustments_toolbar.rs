@@ -765,8 +765,10 @@ fn render_fill_style_chip(ui: &mut Ui, style: &mut prunr_core::FillStyle) -> boo
         // instead of stacking above it — otherwise 4-stop GradientMap makes
         // the popover taller than most screens.
         ui.set_min_width(FILL_STYLE_POPOVER_WIDTH);
-        ui.label(RichText::new("Fill style").strong().color(theme::TEXT_PRIMARY));
-        ui.add_space(theme::SPACE_XS);
+        if chip::popover_header(ui, "Fill style", Some("Back to the subject's own colors")) && !matches!(style, FillStyle::None) {
+            *style = FillStyle::None;
+            changed = true;
+        }
         ui.horizontal_top(|ui| {
             ui.vertical(|ui| {
                 ui.set_min_width(FILL_STYLE_LIST_WIDTH);
@@ -970,8 +972,14 @@ fn render_background_chip(
     let popup_id = ui.make_persistent_id("background_popup");
     chip::popup_for(ui, popup_id, &resp, |ui| {
         ui.set_min_width(BACKGROUND_POPOVER_WIDTH);
-        ui.label(RichText::new("Background").strong().color(theme::TEXT_PRIMARY));
-        ui.add_space(theme::SPACE_XS);
+        if chip::popover_header(ui, "Background", Some("Back to transparent")) && current != BgKind::Transparent {
+            apply_bg_kind(bg, bg_effect, BgKind::Transparent, default_color);
+            if has_bg_image {
+                change.clear_bg_image = true;
+            }
+            let knob = if current.needs_postprocess() { StaticKnob::BgEffect } else { StaticKnob::BgColor };
+            aggregate_bool(true, knob, change);
+        }
         ui.horizontal_top(|ui| {
             ui.vertical(|ui| {
                 ui.set_min_width(BACKGROUND_LIST_WIDTH);
@@ -1188,8 +1196,7 @@ pub(super) fn render_model_dropdown(
         let resp = chip::tooltip(resp, heading, body, None);
         let pop_id = egui::Id::new("adjustments_model_popup");
         chip::popup_for(ui, pop_id, &resp, |ui| {
-            ui.label(RichText::new("Model").strong().color(theme::TEXT_PRIMARY));
-            ui.add_space(theme::SPACE_XS);
+            chip::popover_header(ui, "Model", None);
             for variant in installed_models() {
                 if variant == SettingsModel::None {
                     ui.separator();

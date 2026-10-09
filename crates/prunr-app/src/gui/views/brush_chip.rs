@@ -63,7 +63,9 @@ pub(super) fn render(
 
     let mut outcome = BrushChipOutcome::default();
     chip::popup_for(ui, ui.id().with("brush_chip_popover"), &resp, |ui| {
-
+        if chip::popover_header(ui, "Brush", Some("Reset size, hardness, expand, edge blend, sharpen and shape")) {
+            outcome.reset_brush_requested = true;
+        }
         ui.horizontal(|ui| {
             ui.vertical(|ui| {
                 ui.set_min_width(220.0);
@@ -163,14 +165,6 @@ pub(super) fn render(
         let sel_committed = render_shared_selection_section(ui, s);
         outcome.committed |= sel_committed;
         outcome.protect_selection = render_auto_apply_row(ui, protect);
-
-        ui.add_space(4.0);
-        ui.separator();
-        ui.add_space(4.0);
-
-        if chip::reset_button(ui, "Reset size, hardness, expand, edge blend, sharpen and shape") {
-            outcome.reset_brush_requested = true;
-        }
     });
 
     outcome
