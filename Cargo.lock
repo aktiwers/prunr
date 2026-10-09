@@ -4425,7 +4425,6 @@ dependencies = [
  "prunr-models",
  "prunr-runtime-install",
  "rayon",
- "reqwest",
  "rfd",
  "serde",
  "serde_json",

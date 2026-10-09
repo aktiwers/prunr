@@ -906,7 +906,7 @@ fn run_batch_subprocess(
 /// here instead of aborting the whole process.
 pub fn run_doctor() {
     let p = prunr_app::hardware::profile();
-    let diag = prunr_app::ort_runtime::diagnose();
+    let diag = prunr_core::ort_runtime::diagnose();
 
     println!("Prunr Diagnostic Report");
     println!("{}", "=".repeat(23));

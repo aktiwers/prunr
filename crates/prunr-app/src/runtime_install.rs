@@ -64,12 +64,12 @@ impl RuntimeId {
     }
 
     pub fn install_dir(self) -> Option<PathBuf> {
-        prunr_models::data_dir().map(|d| d.join("runtimes").join(self.install_subdir()))
+        prunr_models::runtime_store_dir().map(|d| d.join(self.install_subdir()))
     }
 
     pub fn is_installed(self) -> bool {
         self.install_dir()
-            .map(|d| d.join(crate::ort_runtime::DYLIB_NAME))
+            .map(|d| d.join(prunr_core::ort_runtime::DYLIB_NAME))
             .is_some_and(|p| p.is_file())
     }
 
@@ -145,7 +145,7 @@ pub fn uninstall(runtime: RuntimeId) -> Result<(), String> {
     if !dir.exists() {
         return Ok(()); // already absent — nothing to do
     }
-    if !crate::ort_runtime::has_fallback_excluding(&dir) {
+    if !prunr_core::ort_runtime::has_fallback_excluding(&dir) {
         return Err(
             "this is the only ONNX Runtime installed — uninstalling would leave \
              the app unable to start. Install another runtime first, or set \
@@ -205,9 +205,8 @@ fn query_pypi(rt: RuntimeId) -> Result<ri::WheelInfo, String> {
 fn prepare_and_extract(bytes: &[u8], rt: RuntimeId) -> Result<PathBuf, String> {
     ri::validate_subdir(&rt.install_subdir())
         .map_err(|e| format!("install_subdir invariant broken: {e}"))?;
-    let target_dir = prunr_models::data_dir()
+    let target_dir = prunr_models::runtime_store_dir()
         .ok_or_else(|| "could not resolve user data dir".to_string())?
-        .join("runtimes")
         .join(rt.install_subdir());
     if target_dir.exists() {
         std::fs::remove_dir_all(&target_dir)
