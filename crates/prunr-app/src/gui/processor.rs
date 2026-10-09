@@ -1094,7 +1094,7 @@ impl Processor {
         intra_threads: usize,
         recipe: ProcessingRecipe,
     ) {
-        let free_mb = (crate::hardware::available_ram_bytes_throttled() / (1024 * 1024)) as u32;
+        let free_mb = crate::hardware::available_ram_mb_throttled();
         if let Some(d) = prunr_models::descriptor(model_id) {
             if !admission_check(d.working_set_mb, free_mb) {
                 tracing::warn!(
