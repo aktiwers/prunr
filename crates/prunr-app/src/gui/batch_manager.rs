@@ -490,12 +490,13 @@ impl BatchManager {
     ) {
         let Some(idx) = self.selected_idx_clamped() else { return };
         let item = &mut self.items[idx];
-        let (Some(mask), Some(hash)) = (item.selection_mask.clone(), item.selection_hash) else { return };
+        let Some(hash) = item.selection_hash else { return };
         let key = (hash, style);
         let current = item.selection_texture.as_ref().is_some_and(|t| t.key == key);
         if current || item.selection_tex_pending == Some(key) {
             return;
         }
+        let Some(mask) = item.selection_mask.clone() else { return };
         item.selection_tex_pending = Some(key);
         let (item_id, source) = (item.id, item.source_rgba.clone());
         self.bg_io.request_selection_visualization(item_id, mask, key, source, ctx.clone());

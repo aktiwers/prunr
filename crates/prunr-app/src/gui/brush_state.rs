@@ -491,10 +491,6 @@ impl Trail {
         self.0.clear();
     }
 
-    #[cfg(test)]
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
 }
 
 /// Mid-drag stroke buffer at the active item's model resolution.
@@ -641,7 +637,7 @@ mod tests {
         t.push_spaced(15.0, 10.0, 8.0); // 5 px from the first: kept
         assert_eq!(t.stamps().collect::<Vec<_>>(), vec![(10.0, 10.0, 8.0), (15.0, 10.0, 8.0)]);
         t.clear();
-        assert!(t.is_empty());
+        assert!(t.stamps().next().is_none());
     }
 
     #[test]
