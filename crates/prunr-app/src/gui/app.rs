@@ -926,7 +926,7 @@ impl PrunrApp {
         item_id: u64,
         mask: prunr_core::selection::MaskArtifact,
     ) {
-        if self.batch.commit_selection(item_id, mask).is_none() {
+        if !self.batch.commit_selection(item_id, mask) {
             return;
         }
         self.apply_selection_to_active_model(item_id);
