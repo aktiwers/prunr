@@ -2418,7 +2418,9 @@ impl PrunrApp {
         });
         // Without a seg tensor the correction has nothing to apply to
         // (filter-only path).
-        let correction = seg_tensor.as_ref().and_then(|_| item.selection_mask.clone());
+        let correction = seg_tensor.as_ref()
+            .and_then(|_| item.selection_mask.clone())
+            .filter(|m| !m.is_blank());
         Some(DispatchInputs {
             kind, original, settings: item.settings,
             seg_tensor, edge_tensor, secondary_edge_tensor,
@@ -4555,7 +4557,7 @@ mod selection_action_tests {
     /// Invert: coverage complement, signed by the active brush mode.
     #[test]
     fn invert_action_replaces_mask_with_inverse() {
-        use prunr_core::brush::BrushMode;
+        use prunr_core::selection::BrushMode;
         use prunr_core::selection::FULL;
         let original = make_mask(4, 4, true);
         let inverted = original.invert(BrushMode::Subtract);

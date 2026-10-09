@@ -897,7 +897,8 @@ mod tests {
 
     #[test]
     fn brush_settings_round_trip() {
-        use prunr_core::brush::{BrushMode, BrushShape};
+        use prunr_core::brush::BrushShape;
+        use prunr_core::selection::BrushMode;
         let dir = std::env::temp_dir().join(format!(
             "prunr-brush-test-{}",
             std::process::id(),

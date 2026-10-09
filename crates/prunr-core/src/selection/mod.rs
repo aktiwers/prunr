@@ -6,8 +6,8 @@
 //! lives at source-image resolution, wrapped in `Arc<Vec<i8>>` so undo
 //! snapshots and cross-thread reads are refcount bumps, not memcpy.
 //!
-//! Each cell is a signed coverage in `-CELL_MAX..=CELL_MAX`:
-//! - magnitude / `CELL_MAX` = how selected the pixel is. Soft values come
+//! Each cell is a signed coverage in `-FULL..=FULL`:
+//! - magnitude / `FULL` = how selected the pixel is. Soft values come
 //!   from brush hardness and strength; Magic Brush writes full magnitude.
 //! - sign = what a segmentation correction does with the pixel:
 //!   positive pushes it toward subject (`BrushMode::Add`), negative
@@ -21,16 +21,45 @@
 
 use std::sync::Arc;
 
-use crate::brush::{merge_cell, BrushMode};
+use serde::{Deserialize, Serialize};
 
 pub mod refine;
 
 /// Magnitude of a fully selected cell.
-pub const FULL: i8 = crate::brush::CELL_MAX;
+pub const FULL: i8 = 127;
 
 /// Cells at or above this magnitude count as selected for region
 /// consumers (≈ 0.5 coverage).
 const SELECTED_THRESHOLD: u8 = 64;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BrushMode {
+    Add,
+    Subtract,
+}
+
+impl BrushMode {
+    /// `+1` pushes toward subject, `-1` toward background.
+    #[inline]
+    pub(crate) fn sign(self) -> i8 {
+        match self {
+            BrushMode::Add => 1,
+            BrushMode::Subtract => -1,
+        }
+    }
+}
+
+/// How a newer stroke cell lands on an existing one: zero leaves the
+/// existing cell, same sign keeps the stronger magnitude (painting twice
+/// does not double up), opposite sign lets the newer stroke win.
+#[inline]
+fn merge_cell(existing: i8, newer: i8) -> i8 {
+    match newer {
+        0 => existing,
+        n if n > 0 => existing.max(n),
+        n => existing.min(n),
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct MaskArtifact {
@@ -39,6 +68,10 @@ pub struct MaskArtifact {
     /// `width × height` cells; writers go through the brush painters or
     /// `from_cells`, which pin that invariant.
     data: Arc<Vec<i8>>,
+    /// False only when every cell is known to be zero. Painting sets it
+    /// without looking, so it can be true for a blank plane; the
+    /// dispatch path only uses it to skip the correction work.
+    painted: bool,
 }
 
 /// Returned by add_mask / subtract_mask when dimensions disagree.
@@ -51,16 +84,14 @@ pub enum SelectionError {
 impl MaskArtifact {
     /// All-zero mask at source image resolution.
     pub fn new_empty(width: u32, height: u32) -> Self {
-        Self {
-            width,
-            height,
-            data: Arc::new(vec![0; (width as usize) * (height as usize)]),
-        }
+        let cells = vec![0; (width as usize) * (height as usize)];
+        Self { width, height, data: Arc::new(cells), painted: false }
     }
 
     pub fn from_cells(width: u32, height: u32, cells: Vec<i8>) -> Self {
         debug_assert_eq!(cells.len(), (width as usize) * (height as usize), "cell count != width × height");
-        Self { width, height, data: Arc::new(cells) }
+        let painted = cells.iter().any(|&v| v != 0);
+        Self { width, height, data: Arc::new(cells), painted }
     }
 
     pub fn cells(&self) -> &[i8] {
@@ -70,7 +101,14 @@ impl MaskArtifact {
     /// Mutable cells; copies the plane first only when a snapshot still
     /// shares it, so the mid-stroke buffer paints in place.
     pub(crate) fn cells_mut(&mut self) -> &mut [i8] {
+        self.painted = true;
         Arc::make_mut(&mut self.data).as_mut_slice()
+    }
+
+    /// True when every cell is zero, so applying the plane changes
+    /// nothing. O(1): decided when the plane is built.
+    pub fn is_blank(&self) -> bool {
+        !self.painted
     }
 
     #[inline]
@@ -99,12 +137,12 @@ impl MaskArtifact {
             });
         }
         let data = self.data.iter().zip(other.data.iter()).map(|(&a, &b)| f(a, b)).collect();
-        Ok(Self { width: self.width, height: self.height, data: Arc::new(data) })
+        Ok(Self::from_cells(self.width, self.height, data))
     }
 
     fn map(&self, f: impl Fn(i8) -> i8) -> Self {
         let data = self.data.iter().map(|&v| f(v)).collect();
-        Self { width: self.width, height: self.height, data: Arc::new(data) }
+        Self::from_cells(self.width, self.height, data)
     }
 
     /// Union with `other` as the newer stroke or candidate, using the
@@ -172,9 +210,8 @@ impl MaskArtifact {
     }
 
     /// Visit every cell of an `out_w × out_h` nearest-neighbour resample
-    /// as `(output index, cell)`, row by row. Same-size planes stream
-    /// straight through.
-    pub(crate) fn for_each_resampled(&self, out_w: u32, out_h: u32, mut f: impl FnMut(usize, i8)) {
+    /// as `(output index, cell)`, row by row.
+    fn for_each_resampled(&self, out_w: u32, out_h: u32, mut f: impl FnMut(usize, i8)) {
         if (out_w, out_h) == (self.width, self.height) {
             for (i, &v) in self.data.iter().enumerate() {
                 f(i, v);
@@ -195,14 +232,6 @@ impl MaskArtifact {
         }
     }
 
-    /// Nearest-neighbour resample to `w × h`, cell values carried as-is
-    /// (sign, hardness falloff and strength intact).
-    pub fn resampled(&self, w: u32, h: u32) -> Self {
-        let mut cells = vec![0i8; (w as usize) * (h as usize)];
-        self.for_each_resampled(w, h, |i, v| cells[i] = v);
-        Self::from_cells(w, h, cells)
-    }
-
     /// The selected region as a binary mask (255 where `is_selected`),
     /// nearest-neighbour resampled to `w × h`. This is the inpaint region —
     /// the same contour the overlay and outline show.
@@ -211,6 +240,30 @@ impl MaskArtifact {
         let px = out.as_mut();
         self.for_each_resampled(w, h, |i, v| px[i] = if Self::is_selected(v) { 255 } else { 0 });
         out
+    }
+
+    /// In-place multiplicative correction of a `mask_w × mask_h` mask in
+    /// normalized [0, 1] space, applied BEFORE gamma/threshold so later
+    /// gamma tweaks modulate the painted regions naturally — a 50%
+    /// subtract stroke halves the local mask, then a higher gamma further
+    /// attenuates. The plane is resampled to the mask's size inline.
+    ///
+    /// Per cell: `g > 0` does `m → lerp(m, 1.0, g/FULL)`, `g < 0` does
+    /// `m → m * (1 + g/FULL)`, `g == 0` leaves `m`.
+    pub fn apply_to_mask(&self, mask: &mut [f32], mask_w: usize, mask_h: usize) {
+        debug_assert_eq!(mask.len(), mask_w * mask_h, "apply_to_mask: mask len != w*h");
+        self.for_each_resampled(mask_w as u32, mask_h as u32, |i, g| {
+            if g == 0 {
+                return;
+            }
+            let s = (g as f32) / FULL as f32;
+            let m = &mut mask[i];
+            if s > 0.0 {
+                *m += (1.0 - *m) * s;
+            } else {
+                *m *= 1.0 + s;
+            }
+        });
     }
 }
 
@@ -223,13 +276,65 @@ mod tests {
         MaskArtifact::from_cells(w, h, data)
     }
 
+    fn approx(mask: &[f32], expected: &[f32], tol: f32) -> bool {
+        mask.len() == expected.len()
+            && mask.iter().zip(expected).all(|(a, b)| (a - b).abs() < tol)
+    }
+
+    #[test]
+    fn blank_plane_is_a_no_op_correction() {
+        let c = MaskArtifact::new_empty(10, 10);
+        assert!(c.is_blank());
+        let mut m = vec![0.5f32; 100];
+        c.apply_to_mask(&mut m, 10, 10);
+        assert!(m.iter().all(|&v| v == 0.5));
+        assert!(!mask(2, 1, vec![0, 1]).is_blank());
+        assert!(mask(2, 1, vec![0, 0]).is_blank());
+    }
+
+    #[test]
+    fn apply_resamples_a_smaller_plane_inline() {
+        // One painted cell in a 5×5 plane lands on a 2×2 block of a
+        // 10×10 mask instead of being dropped.
+        let mut cells = vec![0i8; 25];
+        cells[2 * 5 + 2] = 127;
+        let c = mask(5, 5, cells);
+        let mut m = vec![0.0f32; 100];
+        c.apply_to_mask(&mut m, 10, 10);
+        assert_eq!(m.iter().filter(|&&v| v > 0.0).count(), 4);
+        assert!(m.iter().all(|&v| v == 0.0 || (v - 1.0).abs() < 1e-6));
+    }
+
+    #[test]
+    fn apply_full_add_and_subtract_saturate() {
+        let mut m = vec![0.3f32; 4];
+        mask(2, 2, vec![127; 4]).apply_to_mask(&mut m, 2, 2);
+        assert!(approx(&m, &[1.0; 4], 1e-6));
+        let mut m = vec![0.95f32; 4];
+        mask(2, 2, vec![-127; 4]).apply_to_mask(&mut m, 2, 2);
+        assert!(approx(&m, &[0.0; 4], 1e-6));
+    }
+
+    #[test]
+    fn apply_half_strength_scales_and_lerps() {
+        // s = 64/127 ≈ 0.504: subtract does m * (1 - s), add does
+        // m + (1 - m) * s, zero leaves m.
+        let s = 64.0 / 127.0;
+        let mut m = vec![1.0f32, 0.6, 0.5];
+        mask(3, 1, vec![-64, -64, 0]).apply_to_mask(&mut m, 3, 1);
+        assert!(approx(&m, &[1.0 - s, 0.6 * (1.0 - s), 0.5], 1e-5));
+        let mut m = vec![0.0f32, 0.5];
+        mask(2, 1, vec![64, 64]).apply_to_mask(&mut m, 2, 1);
+        assert!(approx(&m, &[s, 0.5 + 0.5 * s], 1e-5));
+    }
+
     #[test]
     fn empty_mask_has_zero_data_of_correct_length() {
         let m = MaskArtifact::new_empty(1920, 1080);
         assert_eq!(m.width, 1920);
         assert_eq!(m.height, 1080);
-        assert_eq!(m.data.len(), 1920 * 1080);
-        assert!(m.data.iter().all(|&v| v == 0));
+        assert_eq!(m.cells().len(), 1920 * 1080);
+        assert!(m.cells().iter().all(|&v| v == 0));
         assert!(!m.has_selected_region());
     }
 
@@ -249,7 +354,7 @@ mod tests {
         let a = mask(2, 2, vec![30, 100, 0, -40]);
         let b = mask(2, 2, vec![90, 20, 0, -80]);
         let r = a.add_mask(&b).unwrap();
-        assert_eq!(r.data.as_slice(), &[90, 100, 0, -80]);
+        assert_eq!(r.cells(), &[90, 100, 0, -80]);
     }
 
     #[test]
@@ -259,7 +364,7 @@ mod tests {
         let existing = mask(2, 1, vec![-100, 80]);
         let newer = mask(2, 1, vec![30, -10]);
         let r = existing.add_mask(&newer).unwrap();
-        assert_eq!(r.data.as_slice(), &[30, -10]);
+        assert_eq!(r.cells(), &[30, -10]);
     }
 
     #[test]
@@ -267,7 +372,7 @@ mod tests {
         let a = mask(2, 1, vec![-50, 0]);
         let b = mask(2, 1, vec![0, 70]);
         let r = a.add_mask(&b).unwrap();
-        assert_eq!(r.data.as_slice(), &[-50, 70]);
+        assert_eq!(r.cells(), &[-50, 70]);
     }
 
     #[test]
@@ -275,14 +380,14 @@ mod tests {
         let a = mask(3, 1, vec![100, -40, 60]);
         let b = mask(3, 1, vec![30, 127, -60]);
         let r = a.subtract_mask(&b).unwrap();
-        assert_eq!(r.data.as_slice(), &[70, 0, 0]);
+        assert_eq!(r.cells(), &[70, 0, 0]);
     }
 
     #[test]
     fn invert_flips_coverage_with_requested_sign() {
         let m = mask(2, 2, vec![0, 64, FULL, -32]);
-        assert_eq!(m.invert(BrushMode::Subtract).data.as_slice(), &[-127, -63, 0, -95]);
-        assert_eq!(m.invert(BrushMode::Add).data.as_slice(), &[127, 63, 0, 95]);
+        assert_eq!(m.invert(BrushMode::Subtract).cells(), &[-127, -63, 0, -95]);
+        assert_eq!(m.invert(BrushMode::Add).cells(), &[127, 63, 0, 95]);
     }
 
     #[test]
@@ -358,21 +463,6 @@ mod tests {
         assert_eq!(out.get_pixel(1, 1).0[3], 200);
     }
 
-    #[test]
-    fn resampled_downsamples_with_nearest_neighbour() {
-        let mut data = vec![0i8; 16];
-        for y in 0..2usize {
-            for x in 0..2usize {
-                data[y * 4 + x] = -90;
-            }
-        }
-        let m = mask(4, 4, data);
-        let small = m.resampled(2, 2);
-        assert_eq!((small.width, small.height), (2, 2));
-        assert_eq!(small.cells(), &[-90, 0, 0, 0]);
-        assert_eq!(m.resampled(4, 4), m, "same size is the identity");
-    }
-
     /// A soft stroke keeps hardness, strength and direction in the plane
     /// `apply_correction` reads, cell for cell.
     #[test]
@@ -408,7 +498,7 @@ mod tests {
         paint_circle(&mut selection, 16.0, 16.0, 10.0, stamp);
         let region = selection.region_mask(32, 32);
         let mut faint_touched = 0;
-        for (&cell, px) in selection.data.iter().zip(region.pixels()) {
+        for (&cell, px) in selection.cells().iter().zip(region.pixels()) {
             assert_eq!(px.0[0] == 255, MaskArtifact::is_selected(cell));
             if cell != 0 && !MaskArtifact::is_selected(cell) {
                 faint_touched += 1;

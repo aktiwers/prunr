@@ -1,35 +1,12 @@
-//! Pure mask-correction brush.
-//!
-//! Strokes paint into a `MaskArtifact` (signed `i8` plane). Positive
-//! cells push toward foreground, negative toward background.
-//! `apply_correction` runs in postprocess BEFORE the guided filter so
-//! refine still feathers strokes naturally.
+//! Pure stroke painters for a `MaskArtifact`: circle, square and line
+//! stamps with hardness falloff and strength.
 
 use serde::{Deserialize, Serialize};
 
 use crate::math::smoothstep;
-use crate::selection::MaskArtifact;
+use crate::selection::{BrushMode, MaskArtifact, FULL};
 
-/// Magnitude of a fully painted cell; the scale of every i8 mask plane.
-pub const CELL_MAX: i8 = 127;
-const STAMP_SCALE: f32 = CELL_MAX as f32;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum BrushMode {
-    Add,
-    Subtract,
-}
-
-impl BrushMode {
-    /// `+1` pushes toward subject, `-1` toward background.
-    #[inline]
-    pub(crate) fn sign(self) -> i8 {
-        match self {
-            BrushMode::Add => 1,
-            BrushMode::Subtract => -1,
-        }
-    }
-}
+const STAMP_SCALE: f32 = FULL as f32;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BrushShape {
@@ -46,35 +23,6 @@ pub struct Stamp {
     /// 0.0 = no effect, 1.0 = full magnitude.
     pub strength: f32,
     pub mode: BrushMode,
-}
-
-/// In-place multiplicative correction in normalized [0, 1] mask space.
-/// Applied BEFORE gamma/threshold so subsequent gamma slider tweaks
-/// modulate the painted regions naturally — a 50% subtract stroke
-/// halves the local mask, then a higher gamma further attenuates.
-///
-/// Semantics per cell:
-/// - `g > 0` (add direction):    `m → lerp(m, 1.0, g/127)`
-/// - `g < 0` (subtract direction): `m → m * (1 + g/127)` (toward 0)
-/// - `g == 0`:                   no-op
-///
-/// Caller passes the post-normalize, pre-gamma mask in [0, 1] along with
-/// its 2D dims. The correction is usually at source resolution while the
-/// mask is at tensor resolution; it is nearest-neighbour resampled inline.
-pub fn apply_correction(mask: &mut [f32], mask_w: usize, mask_h: usize, correction: &MaskArtifact) {
-    debug_assert_eq!(mask.len(), mask_w * mask_h, "apply_correction: mask len != w*h");
-    correction.for_each_resampled(mask_w as u32, mask_h as u32, |i, g| apply_one(&mut mask[i], g));
-}
-
-#[inline]
-fn apply_one(m: &mut f32, g: i8) {
-    if g == 0 { return; }
-    let s = (g as f32) / STAMP_SCALE;
-    if s > 0.0 {
-        *m += (1.0 - *m) * s;
-    } else {
-        *m *= 1.0 + s;
-    }
 }
 
 /// Generic stamp painter. The distance function decides shape:
@@ -131,7 +79,7 @@ where
                 BrushMode::Add => prev.max(value),
                 BrushMode::Subtract => prev.min(value),
             };
-            grid[idx] = combined.clamp(-(CELL_MAX as i32), CELL_MAX as i32) as i8;
+            grid[idx] = combined.clamp(-(FULL as i32), FULL as i32) as i8;
         }
     }
 }
@@ -170,101 +118,12 @@ pub fn paint_line(
     }
 }
 
-/// How a newer stroke cell lands on an existing one: zero leaves the
-/// existing cell, same sign keeps the stronger magnitude (painting twice
-/// does not double up), opposite sign lets the newer stroke win.
-#[inline]
-pub(crate) fn merge_cell(existing: i8, newer: i8) -> i8 {
-    match newer {
-        0 => existing,
-        n if n > 0 => existing.max(n),
-        n => existing.min(n),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn approx(mask: &[f32], expected: &[f32], tol: f32) -> bool {
-        mask.len() == expected.len()
-            && mask.iter().zip(expected).all(|(a, b)| (a - b).abs() < tol)
-    }
-
-    fn plane(w: u32, h: u32, cells: Vec<i8>) -> MaskArtifact {
-        MaskArtifact::from_cells(w, h, cells)
-    }
-
     fn add(hardness: f32, strength: f32) -> Stamp {
         Stamp { hardness, strength, mode: BrushMode::Add }
-    }
-
-    #[test]
-    fn empty_correction_is_no_op() {
-        let c = MaskArtifact::new_empty(10, 10);
-        let mut mask = vec![0.5f32; 100];
-        apply_correction(&mut mask, 10, 10, &c);
-        assert!(mask.iter().all(|&v| v == 0.5));
-    }
-
-    #[test]
-    fn dimension_mismatch_resamples_inline() {
-        // 5×5 correction with one painted cell at (2, 2): nearest-neighbour
-        // resample into a 10×10 mask lands paint in a 2×2 block at
-        // (4..6, 4..6) instead of being dropped.
-        let mut cells = vec![0i8; 25];
-        cells[2 * 5 + 2] = 127;
-        let c = plane(5, 5, cells);
-        let mut mask = vec![0.0f32; 100];
-        apply_correction(&mut mask, 10, 10, &c);
-        let painted = mask.iter().filter(|&&v| v > 0.0).count();
-        assert_eq!(painted, 4);
-        assert!(mask.iter().all(|&v| v == 0.0 || (v - 1.0).abs() < 1e-6));
-    }
-
-    #[test]
-    fn full_add_drives_to_one() {
-        let c = plane(2, 2, vec![127; 4]);
-        let mut mask = vec![0.3f32; 4];
-        apply_correction(&mut mask, 2, 2, &c);
-        assert!(approx(&mask, &[1.0, 1.0, 1.0, 1.0], 1e-6));
-    }
-
-    #[test]
-    fn full_subtract_drives_to_zero() {
-        let c = plane(2, 2, vec![-127; 4]);
-        let mut mask = vec![0.95f32; 4];
-        apply_correction(&mut mask, 2, 2, &c);
-        assert!(approx(&mask, &[0.0, 0.0, 0.0, 0.0], 1e-6));
-    }
-
-    #[test]
-    fn half_subtract_halves_the_value() {
-        // s = -64/127 ≈ -0.504, so m → m * (1 - 0.504) = m * 0.496.
-        let c = plane(2, 1, vec![-64, -64]);
-        let mut mask = vec![1.0f32, 0.6];
-        apply_correction(&mut mask, 2, 1, &c);
-        let expected_factor = 1.0 - 64.0 / 127.0;
-        assert!(approx(&mask, &[expected_factor, 0.6 * expected_factor], 1e-5));
-    }
-
-    #[test]
-    fn half_add_lerps_toward_one() {
-        // s = +64/127 ≈ 0.504, so m → m + (1 - m) * 0.504.
-        let c = plane(2, 1, vec![64, 64]);
-        let mut mask = vec![0.0f32, 0.5];
-        apply_correction(&mut mask, 2, 1, &c);
-        let s = 64.0 / 127.0;
-        assert!(approx(&mask, &[s, 0.5 + 0.5 * s], 1e-5));
-    }
-
-    #[test]
-    fn apply_correction_non_uniform_grid() {
-        let c = plane(3, 1, vec![64, 0, -64]);
-        let mut mask = vec![0.5f32, 0.5, 0.5];
-        apply_correction(&mut mask, 3, 1, &c);
-        let s = 64.0 / 127.0;
-        assert!(approx(&mask, &[0.5 + 0.5 * s, 0.5, 0.5 * (1.0 - s)], 1e-5));
     }
 
     #[test]

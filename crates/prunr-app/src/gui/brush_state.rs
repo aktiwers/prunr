@@ -3,8 +3,8 @@
 //! `BatchManager.items` — the caller hands it the active grid size
 //! and writes the committed strokes back via `BatchItem`'s mutator.
 
-use prunr_core::brush::{paint_circle, paint_line, paint_square, BrushMode, BrushShape, Stamp};
-use prunr_core::selection::MaskArtifact;
+use prunr_core::brush::{paint_circle, paint_line, paint_square, BrushShape, Stamp};
+use prunr_core::selection::{BrushMode, MaskArtifact};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -466,7 +466,7 @@ impl Default for BrushSettings {
 struct ActiveStroke {
     grid: MaskArtifact,
     /// Set the first time the stamp runs against `grid`. Lets
-    /// `commit_stroke` skip an O(W·H) is_empty scan on click-without-drag.
+    /// `commit_stroke` skip an O(W·H) any-nonzero scan on click-without-drag.
     dirty: bool,
     /// Screen-space stamps painted so far. Drawn each frame as the
     /// in-progress trail until the stroke commits.
@@ -517,9 +517,9 @@ impl BrushState {
         self.active.is_some()
     }
 
-    pub fn begin_stroke(&mut self, width: u16, height: u16, shape: BrushShape) {
+    pub fn begin_stroke(&mut self, width: u32, height: u32, shape: BrushShape) {
         self.active = Some(ActiveStroke {
-            grid: MaskArtifact::new_empty(u32::from(width), u32::from(height)),
+            grid: MaskArtifact::new_empty(width, height),
             dirty: false,
             trail: Vec::new(),
             shape,

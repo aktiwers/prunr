@@ -713,7 +713,8 @@ mod tests {
 
     #[test]
     fn reset_button_parity_top_right_matches_brush_popover_subset() {
-        use prunr_core::brush::{BrushMode, BrushShape};
+        use prunr_core::brush::BrushShape;
+        use prunr_core::selection::BrushMode;
         let preset_brush = BrushSettings {
             radius: 80.0,
             hardness: 0.3,
