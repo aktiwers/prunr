@@ -880,7 +880,7 @@ impl PrunrApp {
     }
 
     /// Per-model interpretation rule for a newly-committed selection.
-    /// Called immediately after `commit_selection` so the BG-removal
+    /// Called after every commit, and again when a result lands, so the BG-removal
     /// continuous-auto-apply UX is preserved while SD / LaMa wait for
     /// explicit Process.
     ///
@@ -943,7 +943,7 @@ impl PrunrApp {
     ///   history entry — non-destructive read.
     /// - Cut: Copy + Delete in one step (one history entry, not two).
     /// - Invert: replaces the selection mask with its complement and
-    ///   re-dispatches visualization.
+    ///   commits it like any other author.
     /// - Clear: removes the selection mask entirely.
     pub(crate) fn handle_selection_action(
         &mut self,
@@ -1284,7 +1284,8 @@ impl PrunrApp {
         self.processor.release_sam_sessions();
     }
 
-    /// Drain SAM encoder and decoder results from the background rayon threads.
+    /// Keep the selected image's embedding current, then drain SAM encoder
+    /// and decoder results from the background rayon threads.
     /// Encoder results: write embedding to BatchItem, clear encoder_pending.
     /// Decoder results: convert to MaskArtifact, apply modifier, commit.
     fn pump_sam_results(&mut self, ctx: &egui::Context) {

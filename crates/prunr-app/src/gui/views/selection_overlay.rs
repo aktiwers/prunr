@@ -1,7 +1,6 @@
 //! Selection overlay: one untinted textured quad per frame. Fill,
-//! outline and feather are baked into `BatchItem.selection_texture`
-//! off-thread (`background_io::build_selection_image`). RENDER-ONLY —
-//! no I/O, no decode, no GPU upload.
+//! outline and feather are already baked into the item's selection
+//! texture off-thread. RENDER-ONLY — no I/O, no decode, no GPU upload.
 
 use egui::{Color32, Pos2, Rect, Ui};
 
