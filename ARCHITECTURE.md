@@ -454,10 +454,10 @@ ignore than to investigate. Reference numbers (8-core x86_64,
 |-------------------------------------|--------------------------|--------------:|
 | `guided_filter_alpha`               | 512² guide + mask        |        9.9 ms |
 | `guided_filter_alpha`               | 2048² guide + mask       |        243 ms |
-| `apply_edge_shift`                  | 4K mask, 1 px            |         30 ms |
-| `apply_edge_shift`                  | 4K mask, 2.5 px          |         60 ms |
-| `apply_edge_shift`                  | 4K mask, 10 px           |         29 ms |
-| `apply_edge_shift`                  | 4K mask, 50 px           |         29 ms |
+| `morphology::shift_mask`            | 4K mask, 1 px            |         16 ms |
+| `morphology::shift_mask`            | 4K mask, 2.5 px          |         35 ms |
+| `morphology::shift_mask`            | 4K mask, 10 px           |         15 ms |
+| `morphology::shift_mask`            | 4K mask, 50 px           |         16 ms |
 
 Before the separable rewrite the same 4K mask took 52 ms at 1 px,
 156 ms at 2.5 px, 493 ms at 10 px and 2.46 s at 50 px. The other
