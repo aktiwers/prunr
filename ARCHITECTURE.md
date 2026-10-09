@@ -459,7 +459,7 @@ these numbers.
 
 #### Criterion microbenches
 
-`crates/prunr-core/benches/` ships criterion benches for the six
+`crates/prunr-core/benches/` ships criterion benches for the seven
 kernels regression most likely to hide under E2E noise. Run with
 `cargo bench -p prunr-core --bench <name>`. CI does NOT run them —
 runner wall-clock variance produces false regressions cheaper to
@@ -475,6 +475,7 @@ ignore than to investigate. Reference numbers (8-core x86_64,
 | `morphology::shift_mask`            | 4K mask, 10 px           |         15 ms |
 | `morphology::shift_mask`            | 4K mask, 50 px           |         16 ms |
 | `sam::decode_to_mask_artifact`      | 256² logits → 4K plane   |          8 ms |
+| `sam::preprocess_for_sam`           | 4K photo → 1024² tensor  |         65 ms |
 
 Before the separable rewrite the same 4K mask took 52 ms at 1 px,
 156 ms at 2.5 px, 493 ms at 10 px and 2.46 s at 50 px. The other
