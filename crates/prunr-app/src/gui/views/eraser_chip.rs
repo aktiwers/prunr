@@ -212,28 +212,23 @@ fn render_scheduler_chip(ui: &mut egui::Ui, app_settings: &mut Settings, lcm_bun
             let bundle_gated = matches!(sched, SdScheduler::Lcm) && !lcm_bundle_installed;
             if !sched.is_available() {
                 ui.add_enabled_ui(false, |ui| {
-                    let _ = ui.selectable_label(false, format!("{label} (coming soon)"));
+                    chip::picker_row(ui, false, &format!("{label} (coming soon)"), desc);
                 });
-                super::hint(ui, desc);
-                ui.add_space(theme::SPACE_XS);
             } else if bundle_gated {
-                let resp = ui.add_enabled_ui(false, |ui| {
-                    ui.selectable_label(false, format!("{label} (download required)"))
-                }).inner;
-                resp.on_hover_text(LCM_DOWNLOAD_HINT);
-                super::hint(ui, desc);
-                ui.add_space(theme::SPACE_XS);
+                ui.add_enabled_ui(false, |ui| {
+                    chip::picker_row(ui, false, &format!("{label} (download required)"), desc)
+                })
+                .inner
+                .on_disabled_hover_text(LCM_DOWNLOAD_HINT);
             } else {
                 let selected = app_settings.brush.sd_scheduler == sched;
-                if ui.selectable_label(selected, label).clicked() {
+                if chip::picker_row(ui, selected, label, desc).clicked() {
                     if app_settings.brush.sd_scheduler != sched {
                         app_settings.on_scheduler_change_resolve_sd(sched);
                         changed = true;
                     }
                     egui::Popup::close_id(ui.ctx(), pop_id);
                 }
-                super::hint(ui, desc);
-                ui.add_space(theme::SPACE_XS);
             }
         }
     });
