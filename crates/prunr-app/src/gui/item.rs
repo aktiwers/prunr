@@ -351,10 +351,9 @@ pub(crate) struct BatchItem {
     /// invalidation and the BG-removal auto-apply rerun trigger.
     pub(crate) selection_hash: Option<u64>,
 
-    /// Pre-computed outline polyline in source-pixel coords. Built
-    /// off-thread on stroke commit; the render closure reads this
-    /// Arc<Vec> directly — clone is an O(1) refcount bump.
-    pub(crate) selection_outline: Option<Arc<Vec<(u32, u32)>>>,
+    /// Set while an off-thread selection texture build is in flight;
+    /// cleared when it lands or is dropped as stale.
+    pub(crate) selection_tex_pending: bool,
 
     /// Cached selection visualization texture. Built off-thread and
     /// uploaded via `drain_background_channels`. Rebuilt only when
@@ -408,8 +407,8 @@ impl BatchItem {
     pub(crate) fn invalidate_selection(&mut self) {
         self.selection_mask = None;
         self.selection_hash = None;
-        self.selection_outline = None;
         self.selection_texture = None;
+        self.selection_tex_pending = false;
     }
 
     /// Prepare for a stroke commit: snapshot the current selection_mask onto
@@ -439,7 +438,6 @@ impl BatchItem {
         if let Some(prev) = self.stroke_undo_stack.pop_back() {
             self.selection_mask = prev;
             self.selection_hash = self.selection_mask.as_ref().map(|m| m.content_hash());
-            self.selection_outline = None;
             self.selection_texture = None;
         }
         // Pop the matching marker. rposition handles edge cases where
@@ -461,7 +459,6 @@ impl BatchItem {
         push_stroke_bounded(&mut self.stroke_redo_stack, current);
         self.selection_mask = prev;
         self.selection_hash = self.selection_mask.as_ref().map(|m| m.content_hash());
-        self.selection_outline = None;
         self.selection_texture = None;
         true
     }
@@ -473,7 +470,6 @@ impl BatchItem {
         push_stroke_bounded(&mut self.stroke_undo_stack, current);
         self.selection_mask = next;
         self.selection_hash = self.selection_mask.as_ref().map(|m| m.content_hash());
-        self.selection_outline = None;
         self.selection_texture = None;
         true
     }
@@ -690,7 +686,7 @@ impl BatchItem {
             bg_image_tex_pending: false,
             selection_mask: None,
             selection_hash: None,
-            selection_outline: None,
+            selection_tex_pending: false,
             selection_texture: None,
             magic_brush_embedding: None,
         }
@@ -1017,7 +1013,6 @@ mod tests {
         item.push_action_marker(ActionType::Stroke);
         item.selection_mask = Some(mask);
         item.selection_hash = item.selection_mask.as_ref().map(|m| m.content_hash());
-        item.selection_outline = None;
         item.selection_texture = None;
     }
 
@@ -1256,7 +1251,6 @@ mod tests {
         let item = fixture_item(1);
         assert!(item.selection_mask.is_none());
         assert!(item.selection_hash.is_none());
-        assert!(item.selection_outline.is_none());
         assert!(item.selection_texture.is_none());
         assert!(item.magic_brush_embedding.is_none());
     }
@@ -1268,12 +1262,12 @@ mod tests {
         let hash = mask.content_hash();
         item.selection_mask = Some(Arc::new(mask));
         item.selection_hash = Some(hash);
-        item.selection_outline = Some(Arc::new(vec![(0, 0), (1, 1)]));
+        item.selection_tex_pending = true;
         item.invalidate_selection();
         assert!(item.selection_mask.is_none(), "selection_mask must be cleared");
         assert!(item.selection_hash.is_none(), "selection_hash must be cleared");
-        assert!(item.selection_outline.is_none(), "selection_outline must be cleared");
         assert!(item.selection_texture.is_none(), "selection_texture must be cleared");
+        assert!(!item.selection_tex_pending, "pending build flag must be cleared");
     }
 
     #[test]

@@ -507,7 +507,6 @@ impl BatchManager {
         }
         item.selection_mask = Some(Arc::new(mask));
         item.selection_hash = Some(hash);
-        item.selection_outline = None;
         item.selection_texture = None;
         Some(hash)
     }
@@ -519,7 +518,6 @@ impl BatchManager {
         let Some(item) = self.find_by_id_mut(item_id) else { return false };
         let was_present = item.selection_mask.is_some()
             || item.selection_hash.is_some()
-            || item.selection_outline.is_some()
             || item.selection_texture.is_some();
         item.invalidate_selection();
         was_present

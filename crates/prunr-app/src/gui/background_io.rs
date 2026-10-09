@@ -21,17 +21,10 @@ pub type HistoryDemoteResult = (
     Option<prunr_core::ProcessingRecipe>,
 );
 
-/// Plan 05: selection outline built off-thread after every commit_selection.
-/// Drain consumes via `drain_background_channels` with hash-stale-discard guard.
-pub(crate) struct SelectionOutlineResult {
-    pub(crate) item_id: u64,
-    pub(crate) outline: Vec<(u32, u32)>,
-    pub(crate) hash: u64,
-}
-
-/// Plan 05: selection fill texture (ACCENT-tinted ColorImage) built off-thread.
-/// Peak RAM on a 4K image: 8.3M pixels × 4 bytes = ~33 MB briefly on the rayon
-/// worker; drops after `ctx.load_texture` in `drain_background_channels`.
+/// Selection texture (fill + outline, ACCENT-tinted ColorImage) built
+/// off-thread. Peak RAM on a 4K image: 8.3M pixels × 4 bytes = ~33 MB
+/// briefly on the rayon worker; drops after `ctx.load_texture` in
+/// `drain_background_channels`.
 pub(crate) struct SelectionTextureResult {
     pub(crate) item_id: u64,
     pub(crate) color_image: egui::ColorImage,
@@ -126,14 +119,9 @@ pub struct BackgroundIO {
     /// `available_parallelism()`. Threads spawn immediately but park here
     /// until a slot opens, capping transient RAM at N × per-thread peak.
     pub decode_slots: Arc<DecodeSlots>,
-    /// Plan 05: selection outline (Vec<(u32,u32)> boundary pixels) built
-    /// off-thread after every commit_selection. Hash-stale-discard guard
-    /// in drain_background_channels. `(crate)` — only the drain + request paths touch this.
-    pub(crate) selection_outline_tx: mpsc::Sender<SelectionOutlineResult>,
-    pub(crate) selection_outline_rx: mpsc::Receiver<SelectionOutlineResult>,
-    /// Plan 05: selection fill texture (ACCENT-tinted egui::ColorImage) built
-    /// off-thread after every commit_selection. Drained via ctx.load_texture
-    /// (allowed — drain_background_channels runs in logic(), not a render closure).
+    /// Selection texture built off-thread whenever the selected item's
+    /// texture is missing. Drained via ctx.load_texture (allowed —
+    /// drain_background_channels runs in logic(), not a render closure).
     pub(crate) selection_texture_tx: mpsc::Sender<SelectionTextureResult>,
     pub(crate) selection_texture_rx: mpsc::Receiver<SelectionTextureResult>,
 }
@@ -164,7 +152,6 @@ impl BackgroundIO {
         let (filter_only_tx, filter_only_rx) = mpsc::channel();
         let (history_demote_tx, history_demote_rx) = mpsc::channel();
         let (bg_tex_prep_tx, bg_tex_prep_rx) = mpsc::channel();
-        let (selection_outline_tx, selection_outline_rx) = mpsc::channel();
         let (selection_texture_tx, selection_texture_rx) = mpsc::channel();
         let cap = std::thread::available_parallelism()
             .map(|n| n.get())
@@ -179,17 +166,15 @@ impl BackgroundIO {
             history_demote_tx, history_demote_rx,
             bg_tex_prep_tx, bg_tex_prep_rx,
             decode_slots: Arc::new(DecodeSlots::new(cap)),
-            selection_outline_tx, selection_outline_rx,
             selection_texture_tx, selection_texture_rx,
         }
     }
 
-    /// Spawn an off-thread job to build the selection outline polyline and
-    /// ACCENT-tinted ColorImage for a newly-committed MaskArtifact.
+    /// Spawn an off-thread job to build the selection texture for a mask.
     ///
-    /// Peak RAM on the worker: outline Vec<(u32,u32)> + ColorImage pixels.
-    /// For a 4K image (8.3M pixels): outline ≈ sparse Vec (boundary only),
-    /// ColorImage = 8.3M × 4 bytes ≈ 33 MB briefly, dropped after drain.
+    /// Peak RAM on the worker: the ColorImage (4 B/px, ~33 MB at 4K) plus
+    /// the outline band (1 B/px) and, with feather > 0, the bbox-sized
+    /// guided-filter scratch documented on `feather_edges`.
     ///
     /// Results carry the mask's `content_hash`. The drain path discards any
     /// result whose hash no longer matches `item.selection_hash` — guards
@@ -199,69 +184,147 @@ impl BackgroundIO {
         item_id: u64,
         mask: std::sync::Arc<prunr_core::selection::MaskArtifact>,
         hash: u64,
-        _edge_feather_px: u32,
+        source: Option<std::sync::Arc<image::RgbaImage>>,
+        style: SelectionStyle,
     ) {
-        // _edge_feather_px is reserved for the source-RGBA-guided feather
-        // wiring (see DEFERRED.md). Until that lands, feather has no
-        // effect on the visualization — the parameter stays in the
-        // signature so callers can be wired straight through later.
-        let outline_tx = self.selection_outline_tx.clone();
         let texture_tx = self.selection_texture_tx.clone();
         rayon::spawn(move || {
-            let mut outline = prunr_core::selection::refine::outline_polyline(&mask);
-            decimate_outline_in_place(&mut outline, OUTLINE_MAX_POINTS);
-            let _ = outline_tx.send(SelectionOutlineResult { item_id, outline, hash });
-
-            // ACCENT-tinted ColorImage: selected pixels carry full-opacity
-            // ACCENT; render-time fill_opacity scales the alpha so we ship
-            // pre-tinted at 255 here.
-            let w = mask.width as usize;
-            let h = mask.height as usize;
-            let accent = egui::Color32::from_rgba_unmultiplied(0x7b, 0x2d, 0x8e, 255);
-            let pixels: Vec<egui::Color32> = mask.data.iter()
-                .map(|&v| if prunr_core::selection::MaskArtifact::is_selected(v) { accent } else { egui::Color32::TRANSPARENT })
-                .collect();
-            let color_image = egui::ColorImage::new([w, h], pixels);
+            let shown = match (style.edge_feather_px, source) {
+                (0, _) | (_, None) => mask,
+                (px, Some(src)) => std::sync::Arc::new(
+                    prunr_core::selection::refine::feather_edges(&mask, &src, px),
+                ),
+            };
+            let color_image = build_selection_image(&shown, style);
             let _ = texture_tx.send(SelectionTextureResult { item_id, color_image, hash });
         });
     }
 }
 
-/// Cap on the outline polyline length sent to the render closure. Above
-/// this length the renderer allocates a Vec<Pos2> per frame whose size
-/// dominates the per-frame heap churn — and a polyline with > 50k vertices
-/// is well past the screen-pixel density at any reasonable canvas size,
-/// so uniform-stride decimation costs nothing visible.
-const OUTLINE_MAX_POINTS: usize = 50_000;
+/// The style knobs a selection texture bakes in. Fill and outline alpha
+/// are stored relative to the larger of the two, so one render-time tint
+/// (`tint_alpha`) scales both and the overlay stays a single textured
+/// quad per frame.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct SelectionStyle {
+    pub(crate) fill_opacity: f32,
+    pub(crate) outline_opacity: f32,
+    /// Outline width in image pixels.
+    pub(crate) outline_thickness: f32,
+    pub(crate) edge_feather_px: u32,
+}
 
-fn decimate_outline_in_place(outline: &mut Vec<(u32, u32)>, cap: usize) {
-    if outline.len() <= cap {
-        return;
+impl SelectionStyle {
+    pub(crate) fn from_brush(b: &super::brush_state::BrushSettings) -> Self {
+        Self {
+            fill_opacity: b.fill_opacity,
+            outline_opacity: b.outline_opacity,
+            outline_thickness: b.outline_thickness,
+            edge_feather_px: b.edge_feather.round().max(0.0) as u32,
+        }
     }
-    let stride = outline.len() as f32 / cap as f32;
-    let original = std::mem::take(outline);
-    outline.reserve(cap);
-    for i in 0..cap {
-        let idx = ((i as f32) * stride) as usize;
-        outline.push(original[idx.min(original.len() - 1)]);
+
+    /// Alpha of the single tint applied at render time.
+    pub(crate) fn tint_alpha(&self) -> f32 {
+        self.fill_opacity.max(self.outline_opacity).clamp(0.0, 1.0)
     }
+
+    fn relative_alpha(&self, opacity: f32) -> u8 {
+        let scale = self.tint_alpha();
+        if scale <= 0.0 {
+            return 0;
+        }
+        (opacity / scale * 255.0).round().clamp(0.0, 255.0) as u8
+    }
+
+    /// Dilation radius for the outline band: thickness 1 → the boundary
+    /// pixels only, 10 → an 11 px band.
+    fn band_radius(&self) -> Option<u32> {
+        if self.outline_thickness < 0.5 || self.relative_alpha(self.outline_opacity) == 0 {
+            return None;
+        }
+        Some(((self.outline_thickness - 1.0) / 2.0).round().max(0.0) as u32)
+    }
+}
+
+/// ACCENT-tinted image with the outline band at the outline's relative
+/// alpha, the selected interior at the fill's, and transparent elsewhere.
+pub(crate) fn build_selection_image(
+    mask: &prunr_core::selection::MaskArtifact,
+    style: SelectionStyle,
+) -> egui::ColorImage {
+    use prunr_core::selection::MaskArtifact;
+    let (w, h) = (mask.width as usize, mask.height as usize);
+    let band = style
+        .band_radius()
+        .map(|r| prunr_core::selection::refine::outline_band(mask, r))
+        .unwrap_or_default();
+    let accent = super::theme::ACCENT;
+    let paint = |a: u8| egui::Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), a);
+    let (fill, outline) = (paint(style.relative_alpha(style.fill_opacity)), paint(style.relative_alpha(style.outline_opacity)));
+    let pixels = mask
+        .data
+        .iter()
+        .enumerate()
+        .map(|(i, &v)| {
+            if band.get(i).is_some_and(|&b| b != 0) {
+                outline
+            } else if MaskArtifact::is_selected(v) {
+                fill
+            } else {
+                egui::Color32::TRANSPARENT
+            }
+        })
+        .collect();
+    egui::ColorImage::new([w, h], pixels)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use prunr_core::selection::{MaskArtifact, FULL};
+    use std::sync::Arc;
 
-    #[test]
-    fn decimate_under_cap_is_noop() {
-        let mut v = vec![(0u32, 0u32), (1, 1), (2, 2)];
-        decimate_outline_in_place(&mut v, 10);
-        assert_eq!(v.len(), 3);
+    fn centre_block() -> MaskArtifact {
+        let mut data = vec![0i8; 64];
+        for y in 2..6usize {
+            for x in 2..6usize {
+                data[y * 8 + x] = FULL;
+            }
+        }
+        MaskArtifact { width: 8, height: 8, data: Arc::new(data) }
+    }
+
+    fn style(fill: f32, outline: f32, thickness: f32) -> SelectionStyle {
+        SelectionStyle { fill_opacity: fill, outline_opacity: outline, outline_thickness: thickness, edge_feather_px: 0 }
     }
 
     #[test]
-    fn decimate_over_cap_yields_exactly_cap_entries() {
-        let mut v: Vec<(u32, u32)> = (0..200_000u32).map(|i| (i, i)).collect();
-        decimate_outline_in_place(&mut v, OUTLINE_MAX_POINTS);
-        assert_eq!(v.len(), OUTLINE_MAX_POINTS);
+    fn texture_stores_fill_and_outline_alpha_relative_to_the_tint() {
+        let img = build_selection_image(&centre_block(), style(0.15, 1.0, 1.0));
+        assert_eq!(img.pixels[2 * 8 + 2].a(), 255, "boundary pixel carries the outline alpha");
+        assert_eq!(img.pixels[3 * 8 + 3].a(), 38, "interior carries fill/tint = 0.15");
+        assert_eq!(img.pixels[0].a(), 0, "outside is transparent");
+
+        let img = build_selection_image(&centre_block(), style(0.5, 0.25, 1.0));
+        assert!((style(0.5, 0.25, 1.0).tint_alpha() - 0.5).abs() < 1e-6);
+        assert_eq!(img.pixels[3 * 8 + 3].a(), 255, "fill is the stronger knob here");
+        assert_eq!(img.pixels[2 * 8 + 2].a(), 128, "outline at half the tint");
+    }
+
+    #[test]
+    fn zero_thickness_or_invisible_outline_bakes_no_band() {
+        let img = build_selection_image(&centre_block(), style(0.15, 1.0, 0.0));
+        assert_eq!(img.pixels[2 * 8 + 2].a(), 38, "no band: boundary pixel is plain fill");
+        let img = build_selection_image(&centre_block(), style(0.15, 0.0, 4.0));
+        assert_eq!(img.pixels[2 * 8 + 2].a(), 255, "fill is the only knob, so it is the tint");
+    }
+
+    #[test]
+    fn thickness_widens_the_band_outward_in_image_pixels() {
+        let img = build_selection_image(&centre_block(), style(0.15, 1.0, 3.0));
+        // radius 1: the band reaches one pixel outside the block.
+        assert_eq!(img.pixels[9].a(), 255); // (1, 1)
+        assert_eq!(img.pixels[0].a(), 0);
     }
 }
