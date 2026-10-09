@@ -197,7 +197,7 @@ pub(super) fn render_shared_selection_section(ui: &mut egui::Ui, s: &mut BrushSe
         |v| format!("{v:.1} px"),
     );
     committed |= ot.commit;
-    super::hint(ui, "0\u{2013}10 pixels.");
+    super::hint(ui, "0\u{2013}10 image pixels.");
     ui.add_space(2.0);
     let oo = chip::slider_row_f32(
         ui, "Outline opacity", &mut s.outline_opacity, 0.0..=1.0, false,

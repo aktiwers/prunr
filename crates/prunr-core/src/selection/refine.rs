@@ -45,6 +45,26 @@ pub fn outline_polyline(mask: &MaskArtifact) -> Vec<(u32, u32)> {
     out
 }
 
+/// 1 for every cell within `radius` cells (Chebyshev) of a boundary
+/// pixel, 0 elsewhere; `radius == 0` marks the boundary pixels only.
+/// O(boundary × (2r+1)²) — r is at most 5 for a 10 px outline.
+pub fn outline_band(mask: &MaskArtifact, radius: u32) -> Vec<u8> {
+    let (w, h) = (mask.width as usize, mask.height as usize);
+    let mut band = vec![0u8; w * h];
+    if w == 0 || h == 0 {
+        return band;
+    }
+    let r = radius as usize;
+    for (x, y) in outline_polyline(mask) {
+        let (x, y) = (x as usize, y as usize);
+        let (x0, x1) = (x.saturating_sub(r), (x + r).min(w - 1));
+        for row in y.saturating_sub(r)..=(y + r).min(h - 1) {
+            band[row * w + x0..=row * w + x1].fill(1);
+        }
+    }
+    band
+}
+
 /// Bounding box `(x0, y0, x1, y1)`, inclusive, of the selected cells.
 fn selected_bbox(mask: &MaskArtifact) -> Option<(u32, u32, u32, u32)> {
     let w = mask.width as usize;
@@ -214,6 +234,19 @@ mod tests {
         let pts = outline_polyline(&mask);
         assert!(pts.iter().any(|&(x, y)| x <= 2 && y <= 2), "region A missing: {:?}", pts);
         assert!(pts.iter().any(|&(x, y)| x >= 12 && y >= 12), "region B missing: {:?}", pts);
+    }
+
+    #[test]
+    fn outline_band_dilates_the_boundary_by_the_radius() {
+        let mut data = vec![0i8; 64];
+        data[3 * 8 + 3] = FULL;
+        let mask = make_mask(8, 8, data);
+        let thin = outline_band(&mask, 0);
+        assert_eq!(thin.iter().filter(|&&b| b == 1).count(), 1);
+        let wide = outline_band(&mask, 1);
+        assert_eq!(wide.iter().filter(|&&b| b == 1).count(), 9, "radius 1 = 3×3 block");
+        assert_eq!(wide[2 * 8 + 2], 1);
+        assert_eq!(wide[5 * 8 + 5], 0);
     }
 
     #[test]
