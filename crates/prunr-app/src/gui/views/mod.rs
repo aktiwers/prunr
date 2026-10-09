@@ -57,21 +57,6 @@ pub fn hint(ui: &mut egui::Ui, text: &str) {
     );
 }
 
-pub const KB_MOD: &str = if cfg!(target_os = "macos") { "Cmd" } else { "Ctrl" };
-
-/// Build a keyboard-shortcut tooltip as a `&'static str`.
-/// `kb!("Open image(s)", "O")` → `"Open image(s) (Cmd+O)"` on macOS.
-#[macro_export]
-macro_rules! kb {
-    ($text:literal, $key:literal) => {
-        if cfg!(target_os = "macos") {
-            concat!($text, " (Cmd+", $key, ")")
-        } else {
-            concat!($text, " (Ctrl+", $key, ")")
-        }
-    };
-}
-
 /// Two-column key/value row for use inside `egui::Grid::new(..).num_columns(2)`.
 /// Key uses monospace at FONT_SIZE_MONO; value uses sans at FONT_SIZE_BODY in
 /// TEXT_PRIMARY. `key_color` lets callers pick TEXT_PRIMARY (CLI flags,
