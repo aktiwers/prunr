@@ -13,6 +13,7 @@ use egui_material_icons::icons::*;
 
 use crate::gui::item_settings::ItemSettings;
 use crate::gui::theme;
+use crate::gui::views::chip;
 use prunr_core::{EdgeScale, LineMode};
 
 /// Popover width.
@@ -66,34 +67,6 @@ fn scale_description(scale: EdgeScale) -> &'static str {
         EdgeScale::Bold => "abstract outlines, coarsest",
         EdgeScale::Fused => "combined scales (default, highest quality)",
     }
-}
-
-/// Build a two-line selectable label: bold title on top, secondary-coloured
-/// description underneath. Matches the visual hierarchy of other descriptive
-/// controls in the app.
-fn two_line_label(title: &str, description: &str) -> egui::text::LayoutJob {
-    use egui::text::{LayoutJob, TextFormat};
-    let mut job = LayoutJob::default();
-    job.append(
-        title,
-        0.0,
-        TextFormat {
-            color: theme::TEXT_PRIMARY,
-            font_id: egui::FontId::proportional(theme::FONT_SIZE_BODY),
-            ..Default::default()
-        },
-    );
-    job.append("\n", 0.0, TextFormat::default());
-    job.append(
-        description,
-        0.0,
-        TextFormat {
-            color: theme::TEXT_PRIMARY,
-            font_id: egui::FontId::proportional(theme::FONT_SIZE_MONO),
-            ..Default::default()
-        },
-    );
-    job
 }
 
 /// Summary of what the Lines popover changed this frame.
@@ -170,12 +143,15 @@ pub fn render(
             let mut hovered_mode: Option<LineMode> = None;
             for mode in [LineMode::Off, LineMode::SubjectOutline, LineMode::EdgesOnly] {
                 let selected = settings.line_mode == mode;
-                let label = two_line_label(mode_label(mode), mode_description(mode));
                 // Subject requires a seg model — grey it out when the user
                 // picked "No model" so the invalid combination isn't
                 // reachable through clicking.
                 let mode_available = mode != LineMode::SubjectOutline || subject_available;
-                let resp = ui.add_enabled(mode_available, egui::SelectableLabel::new(selected, label));
+                let resp = ui
+                    .add_enabled_ui(mode_available, |ui| {
+                        chip::picker_row(ui, selected, mode_label(mode), mode_description(mode))
+                    })
+                    .inner;
                 if resp.hovered() {
                     hovered_mode = Some(mode);
                 }
@@ -230,7 +206,6 @@ pub fn render(
 /// Row 3 DexiNed-scale chip. Popover picks one of 4 scales. Returns true
 /// when the user flipped the scale this frame.
 pub fn render_scale_chip(ui: &mut egui::Ui, settings: &mut ItemSettings) -> bool {
-    use crate::gui::views::chip;
     const TOOLTIP: &str = "How zoomed-in the edge detector looks. Fine picks up tiny texture; Bold keeps only the big silhouettes. Balanced sits between the two; Fused combines every scale for the most detailed result.";
 
     let pop_id = egui::Id::new("edge_scale_popover");
@@ -248,8 +223,7 @@ pub fn render_scale_chip(ui: &mut egui::Ui, settings: &mut ItemSettings) -> bool
         ui.add_space(theme::SPACE_XS);
         for scale in [EdgeScale::Fine, EdgeScale::Balanced, EdgeScale::Bold, EdgeScale::Fused] {
             let selected = settings.edge_scale == scale;
-            let label = two_line_label(scale_label(scale), scale_description(scale));
-            if ui.selectable_label(selected, label).clicked() {
+            if chip::picker_row(ui, selected, scale_label(scale), scale_description(scale)).clicked() {
                 if !selected {
                     settings.edge_scale = scale;
                     changed = true;
