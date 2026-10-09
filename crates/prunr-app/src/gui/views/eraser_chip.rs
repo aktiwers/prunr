@@ -165,8 +165,7 @@ fn render_quality_preset_chip(
     );
     let mut changed = false;
     chip::popup_for(ui, pop_id, &resp, |ui| {
-        ui.label(RichText::new("Quality").strong().color(theme::TEXT_PRIMARY));
-        ui.add_space(theme::SPACE_XS);
+        chip::popover_header(ui, "Quality", None);
         for preset in [SdQualityPreset::Fast, SdQualityPreset::Balanced, SdQualityPreset::Quality] {
             let preset_scheduler = match preset {
                 SdQualityPreset::Quality => SdScheduler::DpmPlusPlus2MKarras,
@@ -212,7 +211,15 @@ fn render_prompt_chip(ui: &mut egui::Ui, brush: &mut BrushSettings) -> bool {
     let mut changed = false;
     chip::popup_for(ui, pop_id, &resp, |ui| {
         ui.set_min_width(theme::POPOVER_WIDTH_WIDE);
-        ui.label(RichText::new("Prompt").strong().color(theme::TEXT_PRIMARY));
+        let already_default = brush.sd_prompt == DEFAULT_SD_PROMPT
+            && brush.sd_negative_prompt == DEFAULT_SD_NEGATIVE_PROMPT
+            && (brush.sd_guidance_scale - default_cfg()).abs() < 1e-3;
+        if chip::popover_header(ui, "Prompt", Some("Back to the shipped prompt, negative prompt and guidance")) && !already_default {
+            brush.sd_prompt = DEFAULT_SD_PROMPT.to_string();
+            brush.sd_negative_prompt = DEFAULT_SD_NEGATIVE_PROMPT.to_string();
+            brush.sd_guidance_scale = default_cfg();
+            changed = true;
+        }
         let p = ui.add(
             egui::TextEdit::multiline(&mut brush.sd_prompt)
                 .hint_text("e.g. wooden park bench in autumn forest")
@@ -247,21 +254,6 @@ fn render_prompt_chip(ui: &mut egui::Ui, brush: &mut BrushSettings) -> bool {
             ui.add_space(theme::SPACE_SM);
             super::hint(ui, "The LCM scheduler ignores the negative prompt and guidance. Pick another scheduler under Advanced to use them.");
         }
-
-        ui.add_space(theme::SPACE_SM);
-        ui.separator();
-        ui.add_space(theme::SPACE_XS);
-        let already_default = brush.sd_prompt == DEFAULT_SD_PROMPT
-            && brush.sd_negative_prompt == DEFAULT_SD_NEGATIVE_PROMPT
-            && (brush.sd_guidance_scale - default_cfg()).abs() < 1e-3;
-        ui.add_enabled_ui(!already_default, |ui| {
-            if chip::reset_button(ui, "Restore Prompt + Negative + Guidance to the shipped defaults.") {
-                brush.sd_prompt = DEFAULT_SD_PROMPT.to_string();
-                brush.sd_negative_prompt = DEFAULT_SD_NEGATIVE_PROMPT.to_string();
-                brush.sd_guidance_scale = default_cfg();
-                changed = true;
-            }
-        });
     });
     changed
 }

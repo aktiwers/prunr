@@ -51,14 +51,7 @@ pub(crate) fn render(
         &resp,
         |ui| {
             ui.set_min_width(MAGIC_POPOVER_MIN_WIDTH);
-
-            ui.label(
-                egui::RichText::new("Magic Brush")
-                    .strong()
-                    .color(theme::TEXT_PRIMARY)
-                    .size(theme::FONT_SIZE_BODY),
-            );
-            ui.add_space(4.0);
+            chip::popover_header(ui, "Magic Brush", None);
 
             if encoder_pending {
                 ui.horizontal(|ui| {
