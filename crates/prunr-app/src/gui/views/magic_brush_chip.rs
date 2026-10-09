@@ -22,6 +22,8 @@ const MAGIC_POPOVER_MIN_WIDTH: f32 = 220.0;
 pub(crate) struct MagicChipOutcome {
     /// True on slider release / toggle — caller persists brush settings.
     pub(crate) committed: bool,
+    /// The "Auto-apply strokes" switch flipped to this value.
+    pub(crate) auto_apply: Option<bool>,
 }
 
 /// Render the Magic Brush chip button + popover.
@@ -32,6 +34,7 @@ pub(crate) fn render(
     ui: &mut Ui,
     bs: &mut BrushSettings,
     encoder_pending: bool,
+    auto_apply: Option<bool>,
 ) -> MagicChipOutcome {
     let resp = chip::chip_button(ui, ICON_AUTO_AWESOME.codepoint, "Magic", /*accent=*/ true);
     let resp = chip::tooltip(
@@ -73,6 +76,7 @@ pub(crate) fn render(
             // outline opacity, fill opacity) — same as Paint Brush chip.
             let sel_committed = super::brush_chip::render_shared_selection_section(ui, bs);
             outcome.committed |= sel_committed;
+            outcome.auto_apply = super::brush_chip::render_auto_apply_row(ui, auto_apply);
 
             ui.add_space(4.0);
             ui.separator();
@@ -97,7 +101,7 @@ pub(crate) fn render(
             outcome.committed |= ct.commit;
             super::hint(
                 ui,
-                "Filter low-confidence regions. Lower = more permissive.",
+                "Keep only the parts the model is sure about. Lower selects more.",
             );
         },
     );

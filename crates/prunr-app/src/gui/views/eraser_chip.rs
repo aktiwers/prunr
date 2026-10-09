@@ -1,9 +1,6 @@
-//! SD-eraser toolbar chips: Quality / Scheduler / Steps / Strength /
-//! EdgeSoftness / Karras / Seed / Prompt. Renders as a horizontal
-//! cluster inline in Row 2 next to the model dropdown — dropdown chips
-//! mirror `lines_popover`'s pattern (chip-button + popover with
-//! selectable rows). Karras only renders for schedulers that accept the
-//! toggle (LCM).
+//! SD-eraser chips for row 2: Quality, Prompt, and an Advanced group
+//! holding the scheduler, steps, denoising strength, Karras, seed and the
+//! fast decoder.
 
 use egui::RichText;
 use egui_material_icons::icons::*;
@@ -16,64 +13,148 @@ use crate::gui::brush_state::{
 use crate::gui::settings::Settings;
 use crate::gui::theme;
 
-use super::chip::{self, ChipMeta};
+use super::chip::{self, GroupChip};
 use super::fmt;
+use super::hint;
 
 const LCM_DOWNLOAD_HINT: &str =
-    "Download Eraser (SD 1.5 LCM, fast) in Model Store to enable.";
+    "Download Eraser (SD 1.5 LCM, fast) in the Model Store to enable.";
 const TAESD_DOWNLOAD_HINT: &str =
-    "Download TAESD VAE in Model Store to enable.";
+    "Download the fast decoder in the Model Store to enable.";
 
 #[derive(Default)]
 pub struct EraserRowChange {
     pub committed: bool,
 }
 
-/// Render the SD-eraser chip cluster. Caller decides placement.
+/// Render the SD-eraser chips. Caller decides placement.
 pub fn render(ui: &mut egui::Ui, app_settings: &mut Settings) -> EraserRowChange {
     let mut change = EraserRowChange::default();
-    let taesd_installed = prunr_models::is_available(prunr_models::ModelId::TaesdFp16);
-    let taesd_active = app_settings.brush.sd_use_taesd.unwrap_or(true) && taesd_installed;
     let lcm_bundle_installed = Settings::can_select_lcm_scheduler();
-    ui.horizontal(|ui| {
-        change.committed |= render_quality_preset_chip(ui, app_settings, lcm_bundle_installed);
-        change.committed |= render_taesd_chip(ui, &mut app_settings.brush, taesd_installed, taesd_active);
-        change.committed |= render_scheduler_chip(ui, app_settings, lcm_bundle_installed);
-        change.committed |= render_steps_chip(ui, &mut app_settings.brush);
-        change.committed |= render_strength_chip(ui, &mut app_settings.brush);
-        // Karras toggle: LCM (user-toggleable), UniPC, Euler-A.
-        // DDIM and DPM++ 2M Karras are pinned to one setting in this build.
-        // Karras chip is only meaningful for schedulers whose dispatch
-        // honors the toggle. LCM is the only one wired today; UniPC and
-        // Euler-A both ship Karras-on hardcoded (matches Diffusers'
-        // SD-1.5 reference) and ignore the field. Showing a no-op
-        // toggle confuses users — hide it instead.
-        if matches!(app_settings.brush.sd_scheduler, SdScheduler::Lcm) {
-            change.committed |= render_karras_chip(ui, &mut app_settings.brush);
-        }
-        change.committed |= render_seed_chip(ui, &mut app_settings.brush);
-        change.committed |= render_prompt_chip(ui, &mut app_settings.brush);
-    });
+    change.committed |= render_quality_preset_chip(ui, app_settings, lcm_bundle_installed);
+    change.committed |= render_prompt_chip(ui, &mut app_settings.brush);
+    change.committed |= render_advanced_group(ui, app_settings, lcm_bundle_installed);
     change
 }
 
-fn render_strength_chip(ui: &mut egui::Ui, brush: &mut BrushSettings) -> bool {
-    let change = chip::chip_f32(
-        ui,
-        ChipMeta {
-            id_salt: "eraser_strength",
-            icon: ICON_AUTO_FIX_HIGH.codepoint,
-            label: "Strength",
-            description: "Inpaint aggressiveness. 100% = pure noise init, fully creative rewrite. 70-85% = preserve structure / lighting and make targeted edits. <50% = subtle nudges. 0% = preserve original.",
-            tooltip: "Inpaint strength",
-        },
-        &mut brush.sd_strength,
-        0.0..=1.0,
-        1.0,
-        false,
-        fmt::percent,
-    );
-    change.commit
+/// Steps the scheduler is trained for: LCM caps at 8, standard SD runs
+/// to 30. Clamps a stale count left behind by a scheduler switch.
+fn steps_range(brush: &mut BrushSettings) -> (u32, u32) {
+    let lcm = brush.sd_scheduler == SdScheduler::Lcm;
+    let max = if lcm { 8 } else { 30 };
+    if brush.sd_steps > max {
+        brush.sd_steps = max;
+    }
+    (max, if lcm { 8 } else { 20 })
+}
+
+fn render_advanced_group(ui: &mut egui::Ui, app_settings: &mut Settings, lcm_bundle_installed: bool) -> bool {
+    let taesd_installed = prunr_models::is_available(prunr_models::ModelId::TaesdFp16);
+    let (max_steps, default_steps) = steps_range(&mut app_settings.brush);
+    let brush = &app_settings.brush;
+    let tuned = usize::from(brush.sd_steps != default_steps)
+        + usize::from((brush.sd_strength - 1.0).abs() > f32::EPSILON)
+        + usize::from(brush.sd_use_karras_sigmas)
+        + usize::from(brush.sd_seed.is_some())
+        + usize::from(brush.sd_use_taesd == Some(false));
+    let summary = chip::tuned_summary(tuned);
+    let group = GroupChip {
+        id_salt: "eraser_advanced",
+        icon: ICON_TUNE.codepoint,
+        label: "Advanced",
+        summary: &summary,
+        tooltip: "How the eraser generates the fill: scheduler, steps, strength, seed.",
+        tuned: tuned > 0,
+        width: theme::POPOVER_WIDTH,
+    };
+    let mut committed = false;
+    chip::group_chip(ui, group, |ui, reset| {
+        if reset {
+            let b = &mut app_settings.brush;
+            b.sd_steps = default_steps;
+            b.sd_strength = 1.0;
+            b.sd_use_karras_sigmas = false;
+            b.sd_seed = None;
+            b.sd_use_taesd = None;
+            committed = true;
+        }
+
+        ui.label(RichText::new("Scheduler").color(theme::TEXT_SECONDARY).size(theme::FONT_SIZE_MONO));
+        for sched in [
+            SdScheduler::Lcm,
+            SdScheduler::Ddim,
+            SdScheduler::DpmPlusPlus2MKarras,
+            SdScheduler::UniPc,
+            SdScheduler::EulerA,
+        ] {
+            let label = sched.label();
+            let desc = sched.description();
+            let bundle_gated = matches!(sched, SdScheduler::Lcm) && !lcm_bundle_installed;
+            if !sched.is_available() {
+                ui.add_enabled_ui(false, |ui| {
+                    chip::picker_row(ui, false, &format!("{label} (coming soon)"), desc);
+                });
+            } else if bundle_gated {
+                ui.add_enabled_ui(false, |ui| {
+                    chip::picker_row(ui, false, &format!("{label} (download required)"), desc)
+                })
+                .inner
+                .on_disabled_hover_text(LCM_DOWNLOAD_HINT);
+            } else {
+                let selected = app_settings.brush.sd_scheduler == sched;
+                if chip::picker_row(ui, selected, label, desc).clicked() && !selected {
+                    app_settings.on_scheduler_change_resolve_sd(sched);
+                    committed = true;
+                }
+            }
+        }
+        ui.add_space(theme::SPACE_XS);
+
+        let brush = &mut app_settings.brush;
+        committed |= chip::slider_row(ui, "Steps", &mut brush.sd_steps, 1..=max_steps).commit;
+        hint(ui, "More steps refine the fill and take longer.");
+        ui.add_space(theme::SPACE_XS);
+        committed |= chip::slider_row_f32(ui, "Denoising strength", &mut brush.sd_strength, 0.0..=1.0, false, fmt::percent).commit;
+        hint(ui, "100% invents the fill from scratch; lower keeps more of the original.");
+        ui.add_space(theme::SPACE_XS);
+
+        // Only LCM honours the Karras toggle; the other schedulers ship with
+        // their own fixed schedule.
+        if brush.sd_scheduler == SdScheduler::Lcm {
+            committed |= chip::toggle_row(ui, "Karras schedule", &mut brush.sd_use_karras_sigmas).changed;
+            hint(ui, "An alternative step spacing. Try both on your photo.");
+            ui.add_space(theme::SPACE_XS);
+        }
+
+        let mut pinned = brush.sd_seed.is_some();
+        let seed_label = match brush.sd_seed {
+            Some(seed) => format!("Pin seed  \u{2026}{:06}", seed % 1_000_000),
+            None => "Pin seed".to_string(),
+        };
+        if chip::toggle_row(ui, &seed_label, &mut pinned).changed {
+            brush.sd_seed = pinned.then(|| {
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos() as u64)
+                    .unwrap_or(0)
+            });
+            committed = true;
+        }
+        hint(ui, "Pinned: the same prompt and settings give the same fill every time.");
+        ui.add_space(theme::SPACE_XS);
+
+        let mut fast = brush.sd_use_taesd.unwrap_or(true) && taesd_installed;
+        let row = ui.add_enabled_ui(taesd_installed, |ui| chip::toggle_row(ui, "Fast decoder", &mut fast));
+        if row.inner.changed {
+            brush.sd_use_taesd = Some(fast);
+            committed = true;
+        }
+        if !taesd_installed {
+            row.response.on_disabled_hover_text(TAESD_DOWNLOAD_HINT);
+        }
+        hint(ui, "About three times faster decoding at a slight quality cost.");
+    });
+    committed
 }
 
 fn render_quality_preset_chip(
@@ -86,7 +167,7 @@ fn render_quality_preset_chip(
     let resp = chip::tooltip(
         chip::chip_button(ui, ICON_AUTO_AWESOME.codepoint, active.label(), false),
         "Quality",
-        "Picks scheduler + steps + CFG + Karras. Tweaking individual sliders flips to Custom.",
+        "Fast, Balanced or Quality picks the scheduler and steps for you. Changing them by hand shows Custom.",
         None,
     );
     let mut changed = false;
@@ -132,7 +213,7 @@ fn render_prompt_chip(ui: &mut egui::Ui, brush: &mut BrushSettings) -> bool {
     let resp = chip::tooltip(
         chip::chip_button(ui, ICON_EDIT_NOTE.codepoint, "Prompt", !brush.sd_prompt.is_empty()),
         "Prompt",
-        "Text prompt + negative + guidance. Empty prompt = unconditional inpaint (often noisy on flat surrounds).",
+        "Describe what should fill the painted area. Leave it empty for a plain fill, which can look noisy on flat areas.",
         None,
     );
     let mut changed = false;
@@ -166,12 +247,12 @@ fn render_prompt_chip(ui: &mut egui::Ui, brush: &mut BrushSettings) -> bool {
                 |v| if v <= 1.0 + 1e-3 { "Off".to_string() } else { fmt::plain(v, 1) },
             );
             if cfg.commit { changed = true; }
-            super::hint(ui, "Prompt strength. 1 = ignore prompt (single UNet pass). 7-8 = typical SD strength (UNet runs twice per step). Higher = closer match but oversaturated/burnt.");
+            super::hint(ui, "How closely to follow the prompt. 1 ignores it; 7 to 8 is typical; higher matches closer but burns colors.");
         });
 
         if lcm {
             ui.add_space(theme::SPACE_SM);
-            super::hint(ui, "LCM bakes guidance into training and ignores Negative + Guidance. Switch the Scheduler chip to DDIM or DPM++ to use them.");
+            super::hint(ui, "The LCM scheduler ignores the negative prompt and guidance. Pick another scheduler under Advanced to use them.");
         }
 
         ui.add_space(theme::SPACE_SM);
@@ -190,152 +271,5 @@ fn render_prompt_chip(ui: &mut egui::Ui, brush: &mut BrushSettings) -> bool {
         });
     });
     changed
-}
-
-fn render_scheduler_chip(ui: &mut egui::Ui, app_settings: &mut Settings, lcm_bundle_installed: bool) -> bool {
-    let pop_id = egui::Id::new("eraser_scheduler_popover");
-    let resp = chip::tooltip(
-        chip::chip_button(ui, ICON_TUNE.codepoint, app_settings.brush.sd_scheduler.label(), false),
-        "Scheduler",
-        "Denoise math. LCM = fast (4-8 steps); DDIM = conservative; DPM++ 2M Karras = quality at 15-25 steps; Euler-A = creative per-seed variation; UniPC = best quality at 8-12 steps.",
-        None,
-    );
-    let mut changed = false;
-    chip::popup_for(ui, pop_id, &resp, |ui| {
-        ui.label(RichText::new("Scheduler").strong().color(theme::TEXT_PRIMARY));
-        ui.add_space(theme::SPACE_XS);
-        for sched in [
-            SdScheduler::Lcm,
-            SdScheduler::Ddim,
-            SdScheduler::DpmPlusPlus2MKarras,
-            SdScheduler::UniPc,
-            SdScheduler::EulerA,
-        ] {
-            let label = sched.label();
-            let desc = sched.description();
-            let bundle_gated = matches!(sched, SdScheduler::Lcm) && !lcm_bundle_installed;
-            if !sched.is_available() {
-                ui.add_enabled_ui(false, |ui| {
-                    chip::picker_row(ui, false, &format!("{label} (coming soon)"), desc);
-                });
-            } else if bundle_gated {
-                ui.add_enabled_ui(false, |ui| {
-                    chip::picker_row(ui, false, &format!("{label} (download required)"), desc)
-                })
-                .inner
-                .on_disabled_hover_text(LCM_DOWNLOAD_HINT);
-            } else {
-                let selected = app_settings.brush.sd_scheduler == sched;
-                if chip::picker_row(ui, selected, label, desc).clicked() {
-                    if app_settings.brush.sd_scheduler != sched {
-                        app_settings.on_scheduler_change_resolve_sd(sched);
-                        changed = true;
-                    }
-                    egui::Popup::close_id(ui.ctx(), pop_id);
-                }
-            }
-        }
-    });
-    changed
-}
-
-fn render_steps_chip(ui: &mut egui::Ui, brush: &mut BrushSettings) -> bool {
-    let lcm = brush.sd_scheduler == SdScheduler::Lcm;
-    // LCM caps at 8 by training (community consensus is no benefit
-    // beyond 8); standard SD ranges 1-30. Clamp first to handle a
-    // scheduler-switch that left a too-large step count behind.
-    let max: u32 = if lcm { 8 } else { 30 };
-    if brush.sd_steps > max { brush.sd_steps = max; }
-    let default_steps: u32 = if lcm { 8 } else { 20 };
-    let change = chip::chip_u32(
-        ui,
-        ChipMeta {
-            id_salt: "eraser_steps",
-            icon: ICON_REPLAY.codepoint,
-            label: "Steps",
-            description: "Denoise iteration count. LCM: 4-8 typical; Standard SD: 15-25.",
-            tooltip: "Denoise iteration count",
-        },
-        &mut brush.sd_steps,
-        1..=max,
-        default_steps,
-        |v| format!("{v}"),
-    );
-    change.commit
-}
-
-fn render_karras_chip(ui: &mut egui::Ui, brush: &mut BrushSettings) -> bool {
-    let resp = chip::icon_toggle_button(ui, ICON_BLUR_LINEAR.codepoint, brush.sd_use_karras_sigmas)
-        .on_hover_text(
-            "Karras sigma schedule. LCM was distilled against linear \
-             spacing — Karras shifts the inference timestep distribution \
-             away from training. Toggle to A/B compare on your content.",
-        );
-    if resp.clicked() {
-        brush.sd_use_karras_sigmas = !brush.sd_use_karras_sigmas;
-        return true;
-    }
-    false
-}
-
-fn render_taesd_chip(
-    ui: &mut egui::Ui,
-    brush: &mut BrushSettings,
-    taesd_installed: bool,
-    taesd_effective: bool,
-) -> bool {
-    if !taesd_installed {
-        let resp = ui.add_enabled_ui(false, |ui| {
-            chip::chip_button(ui, ICON_BOLT.codepoint, "Fast VAE", false)
-        }).inner;
-        resp.on_hover_text(TAESD_DOWNLOAD_HINT);
-        return false;
-    }
-    let resp = chip::tooltip(
-        chip::chip_button(ui, ICON_BOLT.codepoint, "Fast VAE", taesd_effective),
-        "Fast VAE (TAESD)",
-        "Drop-in fast VAE replacement, ~3× faster decode at slight quality cost. Works with any scheduler.",
-        None,
-    );
-    if resp.clicked() {
-        // Snap to explicit state on first click — preserves auto/None across reinstall
-        brush.sd_use_taesd = Some(!taesd_effective);
-        return true;
-    }
-    false
-}
-
-fn render_seed_chip(ui: &mut egui::Ui, brush: &mut BrushSettings) -> bool {
-    let pinned = brush.sd_seed.is_some();
-    let icon = if pinned { ICON_LOCK.codepoint } else { ICON_LOCK_OPEN.codepoint };
-    // Format the seed inline only when pinned — the unpinned arm
-    // uses a `&'static str` to avoid allocating each frame.
-    let pinned_label;
-    let label: &str = match brush.sd_seed {
-        Some(s) => {
-            // Truncate to last 6 digits so the chip stays narrow.
-            pinned_label = format!("…{:06}", s % 1_000_000);
-            &pinned_label
-        }
-        None => "Random",
-    };
-    let resp = chip::tooltip(
-        chip::chip_button(ui, icon, label, pinned),
-        "Seed",
-        "Random by default — every stroke explores a different fill. Click to pin a single seed; the same prompt + scheduler + steps will then produce the exact same fill across strokes (useful for tweaking the prompt while comparing to a previous result, or for re-running an inpaint reproducibly).",
-        None,
-    );
-    if resp.clicked() {
-        brush.sd_seed = if pinned {
-            None
-        } else {
-            Some(std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos() as u64)
-                .unwrap_or(0))
-        };
-        return true;
-    }
-    false
 }
 
