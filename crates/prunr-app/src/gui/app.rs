@@ -1249,9 +1249,9 @@ impl PrunrApp {
 
     /// Eager encoder: while Magic Brush is active, the selected image gets
     /// an embedding as soon as it has a decoded source. Runs on activation
-    /// and once per frame, so switching images keeps the tool usable
-    /// without toggling it off and on. Admission or encoder failure turns
-    /// the tool off, so this cannot retry in a loop.
+    /// and from `reconcile_selected` every frame, so switching images keeps
+    /// the tool usable without toggling it off and on. Admission or encoder
+    /// failure turns the tool off, so this cannot retry in a loop.
     fn ensure_magic_embedding_for_selected(&mut self) {
         if !self.magic_brush_state.is_active() || self.magic_brush_state.has_pending_encoder() {
             return;
@@ -1291,7 +1291,6 @@ impl PrunrApp {
     fn pump_sam_results(&mut self, ctx: &egui::Context) {
         use crate::gui::processor::PromptModifier;
 
-        self.ensure_magic_embedding_for_selected();
         let encoder_results = self.processor.pump_sam_encoder_results();
         for result in encoder_results {
             self.magic_brush_state.set_encoder_pending(false);
@@ -2551,14 +2550,30 @@ impl PrunrApp {
         ctx.request_repaint();
     }
 
+    /// Edge-triggered on a selection change: free the background items'
+    /// results, bring the newly selected item up to date and leave
+    /// Compare mode.
     pub(crate) fn sync_selected_batch_textures(&mut self, ctx: &egui::Context) {
         let Some(idx) = self.batch.selected_idx_clamped() else { return };
-
         self.evict_result_rgba_for_background_items(idx);
-        self.restore_selected_result_from_history(idx);
-        self.ensure_selected_source_decoded(idx);
-        self.request_selected_textures(idx, ctx);
+        self.reconcile_selected(ctx);
         self.show_original = false;
+    }
+
+    /// Level-triggered, once per frame: everything the selected item
+    /// lazily needs — a restored result, a decoded source, the two canvas
+    /// textures, the selection texture and the Magic Brush embedding.
+    /// Every arm is idempotent behind its pending flag, so a frame with
+    /// nothing missing costs a few field reads.
+    fn reconcile_selected(&mut self, ctx: &egui::Context) {
+        if let Some(idx) = self.batch.selected_idx_clamped() {
+            self.restore_selected_result_from_history(idx);
+            self.ensure_selected_source_decoded(idx);
+            self.request_selected_textures(idx, ctx);
+        }
+        let style = super::background_io::SelectionStyle::from_brush(&self.settings.brush);
+        self.batch.ensure_selection_texture(style, ctx);
+        self.ensure_magic_embedding_for_selected();
     }
 
     /// Free full-resolution `result_rgba` for every Done item that isn't
@@ -3349,8 +3364,6 @@ impl PrunrApp {
                 }
             }
         }
-        let style = super::background_io::SelectionStyle::from_brush(&self.settings.brush);
-        self.batch.ensure_selection_texture(style, ctx);
 
         // Drain bg-image texture preps. Hash match guards against a
         // user pick that swapped to a different bg image while the
@@ -3459,23 +3472,15 @@ impl eframe::App for PrunrApp {
         self.drain_background_channels(ctx);
         self.update_window_title(ctx);
         self.status.tick();
-        if self.batch.selected_item().is_some_and(|i| i.source_texture.is_none()) {
-            self.sync_selected_batch_textures(ctx);
-        }
+        self.reconcile_selected(ctx);
         // Keep the event loop awake while any async texture / decode work is
         // pending. `ctx.request_repaint()` from the tex_prep / decode threads
         // is supposed to wake egui, but some compositors (notably Wayland)
         // drop thread-initiated wake-ups when the window is idle, leaving the
         // canvas stuck on the old image until a mouse event fires. Polling
         // from the UI thread is reliable; it costs one frame per 50ms while
-        // async work is in flight, then self-extinguishes. See item 6 in
-        // `.planning/phases/12-ux-refinement-and-bugs/12-01-FINDINGS.md` for
-        // the full incident analysis.
-        let any_tex_pending = self.batch.items.iter().any(|it| {
-            it.result_tex_pending || it.source_tex_pending || it.decode_pending
-                || it.selection_tex_pending.is_some()
-        });
-        if any_tex_pending {
+        // async work is in flight, then self-extinguishes.
+        if self.batch.items.iter().any(|it| it.has_pending_work()) {
             ctx.request_repaint_after(std::time::Duration::from_millis(50));
         }
         // Periodic cleanup of stale on-disk history files.
