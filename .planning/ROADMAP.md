@@ -365,3 +365,41 @@ Plans:
 - [ ] 33-05-PLAN.md — Selection visualization (60Hz overlay) + action bar (Delete/Copy/Cut/Invert/Clear) + shared brush knobs + off-thread outline/texture build (Wave 3)
 - [ ] 33-06-PLAN.md — prunr-core::sam: preprocess_for_sam + 4 prompt builders (Click/Stroke/Shift/Alt) + decode_to_mask_artifact + SamEmbedding type (Wave 2)
 - [ ] 33-07-PLAN.md — Magic Brush GUI integration: encoder dispatch (Processor) + click/stroke handlers + Preparing... overlay + manual smoke checkpoint (Wave 4)
+
+---
+
+## v0.5 Plan (set 2026-10-09)
+
+**Release rule (user decision 2026-10-09):** no v0.5 binaries until Phases 34–38 are all done — bug fixes, UI consistency, performance, cleanup and docs ship together as v0.5.0 against the published v0.4.8. Pushing to master as we go is authorised; publishing is not.
+
+**Order and why:** 34 (finish what is half-built) → 35 (UI, the largest block, so measurements later land on the final widgets) → 36 (structural cleanup before perf, so optimisations build on the final data structures) → 37 (perf) → 38 (docs + release). Recommended exception: one manual `workflow_dispatch` run of release.yml at the end of Phase 34 — artifacts only, no release — because its last six runs failed and the tree has since gained SAM bundling and a pinned toolchain. Awaiting user decision.
+
+### Phase 34: Magic Brush Polish
+**Goal:** Magic Brush and the shared selection feel finished: usable before a result exists, correct on image switch, every visible knob does something, bounded memory, smooth overlay.
+**Success Criteria** (what must be TRUE):
+  1. Paint and Magic toggles are enabled whenever the selected item has a decoded source; a stroke on a segmentation model with no tensor authors the selection without dispatching a rerun, and the selection is applied automatically when the first result lands
+  2. Switching to another image while Magic is active dispatches the encoder for that image (or waits for its decode) without toggling the tool; Preparing… shows meanwhile
+  3. Delete / Cut with no result operate on the source and produce a result; every Delete / Cut refreshes the result texture (today it does not)
+  4. Edge feather feathers both the visualization and the Delete / Copy / Cut region; changing feather, fill opacity, outline opacity or thickness rebuilds the visualization
+  5. Stroke undo depth is 32 and `cache_size()` counts the undo/redo planes
+  6. The outline is baked into the selection texture (no per-frame rect list, no decimation); the overlay is one textured quad per frame
+  7. The Phase 33 manual smoke checklist (`33-magic-brush/PENDING-MANUAL-VERIFICATION.md`) is run by the user and recorded
+  8. `/simplify` run after each item; tests green; pushed
+
+### Phase 35: UI Consistency
+**Goal:** One visual and interaction system across all modes; settings a user can understand without the source.
+**Approach:** (1) audit via `/gsd:ui-review` plus a manual walk of the four flows (BG removal, eraser, upscale, Magic Brush) producing an inventory of every chip, popover, label and tooltip; (2) a one-page design contract (hierarchy of settings: primary / refinement / advanced, naming rules, where timing hints appear, empty states, error states, keyboard conventions); (3) implementation in slices per toolbar row; (4) copy pass under the CLAUDE.md chip-copy rules.
+**Candidates surfaced so far:** chips that differ in shape between rows; Add/Subtract + Strength hidden in Eraser but visible elsewhere; "Protect selection" only in seg mode with no explanation; Silueta on OpenVINO logs two warnings per load; tips list and shortcuts drift from the real bindings.
+
+### Phase 36: Structural Cleanup (pre-perf)
+**Goal:** Remove the duplicated mechanisms the 2026-10-08 reviews found, before measuring performance on them.
+**Items:** DEFERRED L-1 (one ORT init + `session_builder()` + clippy `disallowed-methods`, then delete the tripwire), L-5 (one mask plane type; `DispatchInputs.correction` carries the plane), L-3 (one HTTP client in prunr-runtime-install), trail de-dup shared between Paint and Magic, ort rc.13 branch experiment (L-2), delete `rust_out`, prune DEFERRED.md of resolved items, update the CLAUDE.md commit-trailer wording.
+
+### Phase 37: Performance
+**Goal:** Push the hot paths to the limit without changing output; every quality or RAM trade surfaced for a decision.
+**Method:** `cargo build --profile profiling` + samply on the four flows; criterion benches for kernels; golden suites as the bit-exact guard.
+**Target list:** `apply_edge_shift` (separable / van Herk, replaces the 45 Bolt PRs), guided filter RAM (drop `mask_f` after stage one; box filters two at a time is a [TRADE]), selection texture upload per stroke (alpha-only or dirty-rect), SAM decode row-parallel, SAM sessions on the GPU EP ladder, OpenVINO upscale tile cap 256 (cancel latency; ~10–20 % throughput [TRADE]), live-preview tick allocations (32-DEFER-7), undo snapshots as bbox patches (L-6), startup (lazy model decompress), DEFERRED § J items.
+
+### Phase 38: Docs and Release
+**Goal:** Ship v0.5.0.
+**Items:** ARCHITECTURE.md (brush/selection/Magic Brush sections are pre-Phase-33; upscale section lacks refinement knobs), README (upscale, Magic Brush, SAM, models table, toolchain), CHANGELOG since v0.4.8, bump workspace version to 0.5.0 (check the Info.plist / version-sync test), release workflow green on all three targets, tag.

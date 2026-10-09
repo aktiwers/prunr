@@ -3,7 +3,7 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: unknown
-last_updated: "2026-05-17T00:00:00.000Z"
+last_updated: "2026-10-09T00:00:00.000Z"
 progress:
   total_phases: 14
   completed_phases: 8
@@ -21,10 +21,25 @@ See: `.planning/PROJECT.md` (updated 2026-04-06)
 
 ## Current Position
 
-Phase: 33 (magic-brush) — CODE COMPLETE, AWAITING MANUAL SMOKE
-Plan: 7 of 7 (all 7 plans committed)
+**2026-10-09 — Phase 34 code complete and reviewed (criteria 1–6 + /simplify pass landed, pushed through 0716c2b); criterion 7 = user smoke (`phases/34-magic-brush-polish/SMOKE.md`).** Bolt PRs: all 45 closed 2026-10-09 (branches left in place). CI: clippy + all four builds green; Linux Test still red only on `big_lama_smoke` because the hosted Big-LaMa asset is the unpatched export (DEFERRED L-11) — patched file ready in the scratchpad, upload awaits the user's go. See `ROADMAP.md` § "v0.5 Plan".
 
-**Awaiting:** Manual regression smoke for plan 07 (see `.planning/phases/33-magic-brush/PENDING-MANUAL-VERIFICATION.md`). User away from computer; ETA ~2026-05-24. Resume signal: "test 33 done — approved".
+Done in the 2026-10-08 recovery session (all pushed): CI unblocked (ort load-dynamic deadlock in `reference_test`, clippy, timeouts, cache key, streamed downloads, toolchain pin 1.92.0); Paint Brush regression fixed (signed i8 selection plane, one `is_selected` predicate shared by overlay, outline and inpaint region); Magic Brush SAM sessions cached + decode off the UI thread; upscale engine built off the GUI thread + "Cancelling… finishing current tile"; measured that OpenVINO ignores `RunOptions::terminate` mid-tile.
+
+Phase 33 manual smoke (`33-magic-brush/PENDING-MANUAL-VERIFICATION.md`) is still unrun — scheduled as Phase 34 criterion 7.
+
+## Open Decisions (2026-10-09) — recommendation in bold
+
+| Decision | Options | Recommendation |
+|---|---|---|
+| 45 open Bolt (Jules) PRs | close all + stop the schedule / cherry-pick PR 45 | **Close all, stop the schedule.** PR 45's kernel idea is re-derived in Phase 37 with goldens; the PRs are rustfmt noise on stale bases. |
+| Release dry run before Phases 35–38 | run `workflow_dispatch` once now (artifacts, no release) / wait | **Run once now** (Phase 34 is code complete). Last six runs failed; find mac/win breakage early. Awaiting go. |
+| Big-LaMa asset (DEFERRED L-11) | upload patched `big_lama-1.0.1.onnx` to models-v1 + switch registry / keep broken | **Upload.** The Model Store download cannot load today. Awaiting go. |
+| OpenVINO cancel latency | cap tile at 256 on OpenVINO / keep 512 + label | **Cap at 256** (Phase 37, after measuring). |
+| SAM 2 distribution | bundled (+170 MB) / on-demand | **Bundled** (user decided 2026-10-08). |
+| ort 2.0.0-rc.13 | upgrade (fixes the deadlock, breaking EP gating, ORT baseline 1.28) / stay | **Branch experiment in Phase 36**, not before. |
+| Edge feather slider | wire / hide | **Wire** (Phase 34). |
+| Stroke undo depth | 100 / 32 | **32** (Phase 34). |
+| Toolchain | pinned 1.92.0 / floating stable | **Pinned**, bump quarterly. |
 
 ## Phase Status (ground truth, derived from git log)
 
