@@ -3681,10 +3681,17 @@ mod tests {
         assert_eq!(n.shape(), &[1, 4, SD_LATENT_SIDE as usize, SD_LATENT_SIDE as usize]);
     }
 
+    /// A "now" far enough from the clock's origin to subtract minutes from.
+    /// On Windows `Instant` counts from boot, and a fresh CI runner can be
+    /// seconds old — `Instant::now() - 600 s` then panics with an overflow.
+    fn sweep_now() -> Instant {
+        Instant::now() + Duration::from_secs(3600)
+    }
+
     #[test]
     fn sweep_idle_drops_only_stale_entries() {
         use prunr_models::ModelId;
-        let now = Instant::now();
+        let now = sweep_now();
         let idle = Duration::from_secs(300);
         let fresh = now - Duration::from_secs(60);
         let stale = now - Duration::from_secs(600);
@@ -3710,7 +3717,7 @@ mod tests {
     #[test]
     fn sweep_idle_releases_arc_so_payload_drops() {
         use prunr_models::ModelId;
-        let now = Instant::now();
+        let now = sweep_now();
         let idle = Duration::from_secs(300);
         let payload = Arc::new(());
         let weak = Arc::downgrade(&payload);
@@ -3732,7 +3739,7 @@ mod tests {
     #[test]
     fn sweep_idle_keeps_entry_at_exactly_the_idle_boundary_safe() {
         use prunr_models::ModelId;
-        let now = Instant::now();
+        let now = sweep_now();
         let idle = Duration::from_secs(300);
         let mut cache: HashMap<ModelId, CacheEntry<Arc<()>>> = HashMap::new();
         // Just-under-the-boundary entry must NOT evict.
