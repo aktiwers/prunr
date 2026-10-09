@@ -186,9 +186,19 @@ pub fn tensor_to_edge_mask(
     crate::formats::resize_gray_lanczos3(&mask, out_w, out_h)
 }
 
+/// `base` dilated by `thickness` pixels; `None` at 0, where the base
+/// already is the plane a composition draws.
+pub fn thickened_edges(base: &image::GrayImage, thickness: u32) -> Option<image::GrayImage> {
+    (thickness > 0).then(|| {
+        let mut m = base.clone();
+        crate::morphology::shift_mask(&mut m, -(thickness as f32));
+        m
+    })
+}
+
 /// The edge plane a composition draws: `tensor_to_edge_mask` dilated by
-/// `thickness` pixels. Live preview caches it per (strength, scale,
-/// thickness), so a colour or compose tweak costs the composition only.
+/// `thickness` pixels. Live preview caches the two steps separately so a
+/// thickness drag redoes the dilation only.
 pub fn edge_plane(
     edge_tensor: &[f32],
     tensor_h: u32,
@@ -198,11 +208,8 @@ pub fn edge_plane(
     line_strength: f32,
     thickness: u32,
 ) -> image::GrayImage {
-    let mut mask = tensor_to_edge_mask(edge_tensor, tensor_h, tensor_w, out_w, out_h, line_strength);
-    if thickness > 0 {
-        crate::morphology::shift_mask(&mut mask, -(thickness as f32));
-    }
-    mask
+    let base = tensor_to_edge_mask(edge_tensor, tensor_h, tensor_w, out_w, out_h, line_strength);
+    thickened_edges(&base, thickness).unwrap_or(base)
 }
 
 /// Composite a dilated edge plane into an RGBA. Cheap; safe to call every

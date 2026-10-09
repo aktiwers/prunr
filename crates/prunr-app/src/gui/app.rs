@@ -1006,10 +1006,10 @@ impl PrunrApp {
         // What gets cut is what the overlay shows: the feathered mask, which
         // the texture build already computed when it is current.
         let style = super::background_io::SelectionStyle::from_brush(&self.settings.brush);
-        let shown = item.selection_texture.as_ref()
-            .filter(|t| item.selection_hash.is_some_and(|h| t.key == (h, style)))
+        let shown = item.current_selection_texture(style)
             .and_then(|t| t.feathered.clone())
-            .unwrap_or_else(|| style.feathered(mask, item.source_rgba.as_deref()));
+            .or_else(|| style.feather(&mask, item.source_rgba.as_deref()))
+            .unwrap_or(mask);
         Some((shown, base))
     }
 
@@ -2428,26 +2428,8 @@ impl PrunrApp {
             (*recipe == current_recipe && seg_model_match).then(|| base.clone())
         });
         // Without a seg tensor the correction has nothing to apply to
-        // (filter-only path). With one, the selection goes in at the
-        // tensor's size, resampled once per selection change.
-        let correction = match (&seg_tensor, item.selection_mask.clone(), item.selection_hash) {
-            (Some(seg), Some(sel), Some(hash)) if !sel.is_blank() => {
-                let dims = (seg.width, seg.height);
-                let hit = item.selection_tensor_plane.as_ref()
-                    .filter(|(_, h, d)| *h == hash && *d == dims)
-                    .map(|(p, _, _)| Arc::clone(p));
-                Some(hit.unwrap_or_else(|| {
-                    let plane = if (sel.width, sel.height) == dims {
-                        sel
-                    } else {
-                        Arc::new(sel.resampled(seg.width, seg.height))
-                    };
-                    item.selection_tensor_plane = Some((Arc::clone(&plane), hash, dims));
-                    plane
-                }))
-            }
-            _ => None,
-        };
+        // (filter-only path).
+        let correction = seg_tensor.as_ref().and_then(|seg| item.selection_plane_at((seg.width, seg.height)));
         Some(DispatchInputs {
             kind, original, settings: item.settings,
             seg_tensor, edge_tensor, secondary_edge_tensor,
@@ -2528,8 +2510,12 @@ impl PrunrApp {
                 // Mark pending so reconcile_selected doesn't also
                 // spawn its own prep on this same frame.
                 item.result_tex_pending = true;
-                item.cached_edge.store(r.new_edge.0, r.new_edge.1);
-                item.cached_bold.store(r.new_bold.0, r.new_bold.1);
+                if let Some((planes, key)) = r.new_edge {
+                    item.cached_edge.store(planes, key);
+                }
+                if let Some((planes, key)) = r.new_bold {
+                    item.cached_bold.store(planes, key);
+                }
                 if let Some((base, recipe, model)) = r.new_masked_base {
                     item.cached_masked_base = Some((base, recipe, model));
                 }

@@ -490,8 +490,7 @@ impl BatchManager {
         let item = &mut self.items[idx];
         let Some(hash) = item.selection_hash else { return };
         let key = (hash, style);
-        let current = item.selection_texture.as_ref().is_some_and(|t| t.key == key);
-        if current || item.selection_tex_pending == Some(key) {
+        if item.current_selection_texture(style).is_some() || item.selection_tex_pending == Some(key) {
             return;
         }
         let Some(mask) = item.selection_mask.clone() else { return };

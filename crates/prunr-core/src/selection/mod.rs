@@ -329,7 +329,7 @@ impl MaskArtifact {
     pub fn resampled(&self, w: u32, h: u32) -> Self {
         let mut cells = vec![0i8; (w as usize) * (h as usize)];
         self.for_each_resampled(w, h, |i, v| cells[i] = v);
-        Self::from_cells(w, h, cells)
+        Self { width: w, height: h, data: Arc::new(cells), flags: OnceLock::new() }
     }
 
     /// The selected region as a binary mask (255 where `is_selected`),
