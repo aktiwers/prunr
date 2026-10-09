@@ -1,40 +1,21 @@
 //! Shared test utilities for prunr-core integration tests.
 //!
-//! `ensure_ort_initialized` — `ort` `load-dynamic` requires an explicit
-//! `init_from(<dylib path>)` before any session creation. Production binaries
-//! call this from `prunr_app::ort_runtime::init()`; integration tests in
-//! `prunr-core` need to do it themselves (and can't depend on `prunr-app`).
-//!
-//! Resolution order (matches `prunr-app::ort_runtime::resolve_dylib_path`):
-//!   1. `ORT_DYLIB_PATH` env var (escape hatch + dev override + CI override)
-//!   2. Runtime Store install at `<data>/prunr/runtimes/<ep>/libonnxruntime.{so,dylib,dll}`
-//!
-//! Bundled fallback (`<exe parent>/runtime/`) is intentionally skipped — test
-//! binaries don't ship a sibling runtime dir, and falling through to that path
-//! would be a confusing failure mode in tests.
+//! `skip_if_no_ort` — suites that build sessions skip when no runtime is
+//! installed (`ORT_DYLIB_PATH` or the Runtime Store), unless
+//! `PRUNR_REQUIRE_ORT=1` turns the skip into a failure (CI).
 
 #![allow(dead_code)] // Each test binary uses a subset; suppress per-binary warnings.
 
 use image::{ImageBuffer, Rgba, RgbaImage};
-use std::{env, fs, path::{Path, PathBuf}, sync::OnceLock};
+use std::env;
 
-/// Returns Ok(()) when ORT is committed and ready for `OrtEngine::new_*`.
-/// Returns Err with a clear human message when no runtime can be found —
-/// caller decides whether to skip the test or panic.
+/// Returns Ok(()) when ORT is loaded and ready for `OrtEngine::new_*`.
 pub fn ensure_ort_initialized() -> Result<(), String> {
-    static RESULT: OnceLock<Result<(), String>> = OnceLock::new();
-    RESULT.get_or_init(try_init_ort).clone()
+    prunr_core::ort_runtime::ensure_initialized().map(|_| ())
 }
 
 /// Returns `true` when ORT couldn't be initialised, after printing a
 /// `[label] SKIP:` line. Caller pattern: `if skip_if_no_ort("foo") { return; }`.
-///
-/// Mandatory before anything that creates a session (`OrtEngine::new*`,
-/// `process_inpaint*`, `upscale_*`): under `load-dynamic`, creating a
-/// session before the runtime path is known does not fail — ort re-enters
-/// its own loader lock while building the "library not found" error and
-/// the thread parks forever. A source-scan tripwire test enforces this
-/// across every suite in this directory.
 pub fn skip_if_no_ort(label: &str) -> bool {
     if let Err(msg) = ensure_ort_initialized() {
         if env::var_os("PRUNR_REQUIRE_ORT").is_some_and(|v| v == "1") {
@@ -44,66 +25,6 @@ pub fn skip_if_no_ort(label: &str) -> bool {
         return true;
     }
     false
-}
-
-fn try_init_ort() -> Result<(), String> {
-    if let Some(env_path) = env::var_os("ORT_DYLIB_PATH") {
-        let path = PathBuf::from(env_path);
-        if !path.is_file() {
-            return Err(format!(
-                "ORT_DYLIB_PATH={} is not a file",
-                path.display()
-            ));
-        }
-        return commit_ort(&path);
-    }
-
-    if let Some(path) = find_runtime_store_dylib() {
-        return commit_ort(&path);
-    }
-
-    Err(format!(
-        "no ORT runtime found. Set ORT_DYLIB_PATH=<path/to/{}> or run \
-         `cargo xtask install-runtime onnxruntime <version>` to populate the \
-         runtime store",
-        match env::consts::OS {
-            "windows" => "onnxruntime.dll",
-            "macos" => "libonnxruntime.dylib",
-            _ => "libonnxruntime.so",
-        }
-    ))
-}
-
-fn commit_ort(path: &Path) -> Result<(), String> {
-    let env = ort::init_from(path)
-        .map_err(|e| format!("ort::init_from({}): {e}", path.display()))?;
-    let _ = env.commit();
-    Ok(())
-}
-
-fn find_runtime_store_dylib() -> Option<PathBuf> {
-    let dylib_name = match env::consts::OS {
-        "windows" => "onnxruntime.dll",
-        "macos" => "libonnxruntime.dylib",
-        _ => "libonnxruntime.so",
-    };
-    let root = dirs::data_dir()?.join("prunr").join("runtimes");
-    if !root.is_dir() {
-        return None;
-    }
-    let mut entries: Vec<_> = fs::read_dir(&root)
-        .ok()?
-        .filter_map(Result::ok)
-        .filter(|e| e.file_type().ok().is_some_and(|ft| ft.is_dir()))
-        .collect();
-    entries.sort_by_key(|e| e.path());
-    for entry in entries {
-        let candidate = entry.path().join(dylib_name);
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-    }
-    None
 }
 
 // ---------- synthetic fixture catalog (shared by both golden harnesses) ----------

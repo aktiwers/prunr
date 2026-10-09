@@ -756,8 +756,8 @@ fn smoke_test_session(session: &mut Session) -> Result<(), String> {
 }
 
 fn base_builder(threads: usize) -> Result<ort::session::builder::SessionBuilder, String> {
-    Session::builder()
-        .map_err(|e| format!("LaMa: ORT builder init failed: {e}"))?
+    crate::ort_runtime::session_builder()
+        .map_err(|e| format!("LaMa: {e}"))?
         .with_optimization_level(GraphOptimizationLevel::Level3)
         .map_err(|e| format!("LaMa: optimization level: {e}"))?
         .with_intra_threads(threads)

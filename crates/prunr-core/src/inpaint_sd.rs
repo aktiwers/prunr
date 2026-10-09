@@ -793,8 +793,7 @@ impl TaesdSession {
         // parallel build is well under 50 MB. No DirectML carve-out
         // needed since TAESD has no GPU EP ladder.
         let build = |path: &PathBuf, label: &'static str| -> Result<Session, CoreError> {
-            Session::builder()
-                .map_err(|e| CoreError::Inference(format!("TAESD: builder init: {e}")))?
+            crate::ort_runtime::session_builder()?
                 .with_optimization_level(GraphOptimizationLevel::Level3)
                 .map_err(|e| CoreError::Inference(format!("TAESD: opt level: {e}")))?
                 .commit_from_file(path)
@@ -1222,8 +1221,8 @@ fn build_part_with_ep_ladder(
 }
 
 fn sd_base_builder() -> Result<ort::session::builder::SessionBuilder, String> {
-    Session::builder()
-        .map_err(|e| format!("SD: ORT builder init failed: {e}"))?
+    crate::ort_runtime::session_builder()
+        .map_err(|e| format!("SD: {e}"))?
         .with_optimization_level(GraphOptimizationLevel::Level3)
         .map_err(|e| format!("SD: optimization level: {e}"))
 }

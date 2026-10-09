@@ -386,8 +386,7 @@ impl OrtEngine {
     }
 
     fn builder_with_base(intra_threads: usize, level: GraphOptimizationLevel) -> Result<ort::session::builder::SessionBuilder, CoreError> {
-        Session::builder()
-            .map_err(|e| CoreError::Inference(format!("ORT builder init failed: {e}")))?
+        crate::ort_runtime::session_builder()?
             .with_optimization_level(level)
             .map_err(|e| CoreError::Inference(format!("ORT set optimization level failed: {e}")))?
             .with_intra_threads(intra_threads.max(1))

@@ -517,7 +517,7 @@ Both layers skip the EP entirely instead of paying the failed-load tax. CLI: `pr
 
 ### `load-dynamic` ORT + Runtime Store
 
-The app uses `ort` with the `load-dynamic` feature — no ORT is statically linked at compile time. At startup, `prunr_app::ort_runtime::init()` resolves a `libonnxruntime` from this chain:
+The app uses `ort` with the `load-dynamic` feature — no ORT is statically linked at compile time. `prunr_core::ort_runtime::ensure_initialized()` runs once per process (at startup, and from every `session_builder()` call, so a session can never be built on an unloaded runtime — under `load-dynamic` that hangs instead of failing) and resolves a `libonnxruntime` from this chain:
 
 1. `ORT_DYLIB_PATH` env var (developer override)
 2. **User Runtime Store**: `<data>/prunr/runtimes/<id>/libonnxruntime.so` — populated on demand via Settings → Hardware install or `cargo xtask install-runtime`

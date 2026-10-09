@@ -1,0 +1,3 @@
+disallowed-methods = [
+    { path = "ort::session::Session::builder", reason = "use prunr_core::ort_runtime::session_builder(), which loads the runtime first; a builder on an unloaded runtime hangs instead of failing" },
+]
