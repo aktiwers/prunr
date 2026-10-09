@@ -323,6 +323,15 @@ impl MaskArtifact {
         }
     }
 
+    /// Nearest-neighbour resample to `w × h`, cell values carried as-is.
+    /// The same index rule as `apply_to_mask`, so applying the result at
+    /// its own size equals applying `self` resampled inline.
+    pub fn resampled(&self, w: u32, h: u32) -> Self {
+        let mut cells = vec![0i8; (w as usize) * (h as usize)];
+        self.for_each_resampled(w, h, |i, v| cells[i] = v);
+        Self::from_cells(w, h, cells)
+    }
+
     /// The selected region as a binary mask (255 where `is_selected`),
     /// nearest-neighbour resampled to `w × h`. This is the inpaint region —
     /// the same contour the overlay and outline show.
@@ -623,6 +632,18 @@ mod tests {
         assert_ne!(mask(n as u32, 1, flipped).content_hash(), hash);
     }
     const PINNED_HASH: u64 = 0xa774abdc0c587095;
+
+    #[test]
+    fn resampled_applies_like_the_inline_resample() {
+        let mut data = vec![0i8; 64];
+        data[2 * 8 + 3] = -90;
+        data[5 * 8 + 6] = 120;
+        let m = mask(8, 8, data);
+        let (mut inline, mut pre) = (vec![0.5f32; 9], vec![0.5f32; 9]);
+        m.apply_to_mask(&mut inline, 3, 3);
+        m.resampled(3, 3).apply_to_mask(&mut pre, 3, 3);
+        assert_eq!(inline, pre);
+    }
 
     #[test]
     fn diff_bbox_and_crop_round_trip() {

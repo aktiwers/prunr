@@ -297,6 +297,10 @@ pub(crate) struct BatchItem {
     pub(crate) cached_edge_mask: Option<(Arc<image::GrayImage>, super::live_preview::EdgePlaneKey)>,
     /// The Bold plane of a dual-scale style, cached the same way.
     pub(crate) cached_bold_edge_mask: Option<(Arc<image::GrayImage>, super::live_preview::EdgePlaneKey)>,
+    /// The selection resampled to the segmentation tensor's size, keyed by
+    /// the selection hash and that size, so a live-preview tick applies a
+    /// same-size plane instead of resampling the source-resolution one.
+    pub(crate) selection_tensor_plane: Option<(Arc<prunr_core::selection::MaskArtifact>, u64, (u32, u32))>,
     /// SubjectOutline live-preview cache: the "masked subject" base
     /// (`postprocess_from_flat` output) that edge composition draws onto.
     /// Keyed by `(MaskRecipe, ModelKind)` — when mask settings change, the
@@ -408,6 +412,7 @@ impl BatchItem {
     pub(crate) fn drop_hot_tensors(&mut self) {
         self.volatile_seg_tensor = None;
         self.volatile_edge_tensor = None;
+        self.selection_tensor_plane = None;
     }
 
     /// Clear the cached upscale_raw buffer and the derived bicubic_source.
@@ -718,6 +723,7 @@ impl BatchItem {
             volatile_seg_tensor: None,
             cached_edge_mask: None,
             cached_bold_edge_mask: None,
+            selection_tensor_plane: None,
             cached_masked_base: None,
             applied_preset,
             preset_undo_stack: VecDeque::new(),
