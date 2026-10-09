@@ -3,7 +3,8 @@ use std::path::Path;
 use image::{DynamicImage, GrayImage, ImageReader, RgbaImage};
 use image::codecs::png::{PngEncoder, CompressionType, FilterType as PngFilter};
 use image::ImageEncoder;
-use fast_image_resize::{images::{Image, ImageRef}, PixelType, Resizer};
+use fast_image_resize::{images::{Image, ImageRef}, PixelType, ResizeAlg, ResizeOptions, Resizer};
+pub use fast_image_resize::FilterType as ResizeFilter;
 use crate::types::{CoreError, LARGE_IMAGE_LIMIT};
 
 /// SIMD-accelerated Lanczos3 resize for single-channel (gray) images.
@@ -15,6 +16,18 @@ pub fn resize_gray_lanczos3(src: &GrayImage, dst_width: u32, dst_height: u32) ->
     let mut dst_image = Image::new(dst_width, dst_height, PixelType::U8);
     Resizer::new().resize(&src_image, &mut dst_image, None).expect("resize failed");
     GrayImage::from_raw(dst_width, dst_height, dst_image.into_vec()).expect("valid dimensions")
+}
+
+/// SIMD-accelerated resize of an RGBA image with the given filter, on
+/// straight (un-premultiplied) alpha like the rest of the pipeline. The
+/// source is borrowed, so a 4K photo costs one pass, no copy.
+pub fn resize_rgba(src: &RgbaImage, dst_width: u32, dst_height: u32, filter: ResizeFilter) -> RgbaImage {
+    let src_image = ImageRef::new(src.width(), src.height(), src.as_raw(), PixelType::U8x4)
+        .expect("valid RGBA buffer");
+    let mut dst = Image::new(dst_width, dst_height, PixelType::U8x4);
+    let options = ResizeOptions::new().resize_alg(ResizeAlg::Convolution(filter));
+    Resizer::new().resize(&src_image, &mut dst, Some(&options)).expect("resize failed");
+    RgbaImage::from_raw(dst_width, dst_height, dst.into_vec()).expect("valid dimensions")
 }
 
 /// SIMD-accelerated Lanczos3 resize for RGB images. The `to_rgb8` call

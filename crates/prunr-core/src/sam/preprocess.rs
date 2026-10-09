@@ -6,37 +6,38 @@
 //! | Stage        | RAM    |
 //! |--------------|--------|
 //! | Input RGBA   | caller-owned, not counted |
-//! | Resized RGB  | 1024×1024×3 ≈ 3 MB scratch |
+//! | Resized RGBA | 1024×1024×4 ≈ 4 MB scratch |
 //! | NCHW output  | 1024×1024×3×4 ≈ 12 MB returned |
 //! | Total peak   | ~15 MB transient |
-
-use image::DynamicImage;
 
 use super::SAM_ENCODER_INPUT;
 use crate::preprocess::{IMAGENET_MEAN, IMAGENET_STD};
 
 /// Build the SAM 2 encoder input tensor from a source RGBA image.
 ///
-/// 1. Drop alpha — SAM 2 encoder is RGB-only.
-/// 2. Stretch-resize to 1024×1024 via existing SIMD Lanczos3.
+/// 1. Stretch-resize to 1024×1024 via SIMD Lanczos3, straight from the
+///    borrowed RGBA (no full-resolution copy).
+/// 2. Drop alpha — SAM 2 encoder is RGB-only.
 /// 3. Normalize per-channel: `(pixel/255.0 - mean) / std`.
 /// 4. Layout: NCHW — output[0..n] = all R values, output[n..2n] = G, output[2n..3n] = B,
 ///    where n = 1024*1024.
 ///
 /// Returns a `Vec<f32>` of length 3_145_728 (3 × 1024 × 1024).
 pub fn preprocess_for_sam(source: &image::RgbaImage) -> Vec<f32> {
-    let dyn_img = DynamicImage::ImageRgba8(source.clone());
-    let resized = crate::formats::resize_rgb_lanczos3(&dyn_img, SAM_ENCODER_INPUT, SAM_ENCODER_INPUT);
-
+    let resized = crate::formats::resize_rgba(
+        source,
+        SAM_ENCODER_INPUT,
+        SAM_ENCODER_INPUT,
+        crate::formats::ResizeFilter::Lanczos3,
+    );
     let n = (SAM_ENCODER_INPUT * SAM_ENCODER_INPUT) as usize;
     let mut out = vec![0.0f32; 3 * n];
-    for (i, pixel) in resized.pixels().enumerate() {
-        let r = pixel.0[0] as f32 / 255.0;
-        let g = pixel.0[1] as f32 / 255.0;
-        let b = pixel.0[2] as f32 / 255.0;
-        out[i] = (r - IMAGENET_MEAN[0]) / IMAGENET_STD[0];
-        out[n + i] = (g - IMAGENET_MEAN[1]) / IMAGENET_STD[1];
-        out[2 * n + i] = (b - IMAGENET_MEAN[2]) / IMAGENET_STD[2];
+    let (r, gb) = out.split_at_mut(n);
+    let (g, b) = gb.split_at_mut(n);
+    for (((r, g), b), px) in r.iter_mut().zip(g).zip(b).zip(resized.as_raw().chunks_exact(4)) {
+        *r = (px[0] as f32 / 255.0 - IMAGENET_MEAN[0]) / IMAGENET_STD[0];
+        *g = (px[1] as f32 / 255.0 - IMAGENET_MEAN[1]) / IMAGENET_STD[1];
+        *b = (px[2] as f32 / 255.0 - IMAGENET_MEAN[2]) / IMAGENET_STD[2];
     }
     out
 }
