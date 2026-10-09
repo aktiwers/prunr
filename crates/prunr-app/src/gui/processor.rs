@@ -1338,8 +1338,8 @@ impl Processor {
     /// Dispatch the SAM 2 decoder for a click or stroke. No admission gate —
     /// the decoder model is small (~20 MB) and runs quickly. The embedding
     /// is the cached output from a prior `dispatch_sam_encoder` call.
-    /// Decoding the logits into a source-resolution mask (~100 ms at 4K)
-    /// happens on the worker too, so the UI thread only merges the result.
+    /// Decoding the logits into a source-resolution mask happens on the
+    /// worker too, so the UI thread only merges the result.
     pub(crate) fn dispatch_sam_decoder(&self, req: SamDecodeRequest) {
         let tx = self.sam_decoder_tx.clone();
         let sessions = Arc::clone(&self.sam_sessions);
