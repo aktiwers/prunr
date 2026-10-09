@@ -2590,8 +2590,7 @@ impl PrunrApp {
 
     /// For every item that is not selected: drop the decoded tensors kept
     /// for slider drags, and free the full-resolution `result_rgba` of Done
-    /// items. Places an in-memory placeholder at
-    /// the selected one. Places an in-memory placeholder at
+    /// items, placing an in-memory placeholder at
     /// `history.back()` so `restore_selected_result_from_history` can
     /// read pixels back instantly, then kicks an off-thread zstd
     /// compression that swaps the placeholder for `HistorySlot::Compressed`
