@@ -9,12 +9,10 @@ use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-/// Unified cap for the action-ordering layer (`actions_undo` / `actions_redo`),
-/// the stroke stacks, and the preset stacks. Each ordering-layer entry is a
-/// 1-byte enum tag; stroke entries are `Option<Arc<MaskArtifact>>` (one
-/// refcount bump); preset entries are ~100-byte `PresetSnapshot` structs.
-/// 100 is generous enough for any realistic session while bounding worst-case
-/// memory to negligible amounts.
+/// Cap for the action-ordering layer (`actions_undo` / `actions_redo`) and
+/// the preset stacks: 1-byte enum tags and ~100-byte `PresetSnapshot`s, so
+/// 100 entries cost nothing. Stroke snapshots are full planes and use the
+/// shallower `STROKE_HISTORY_DEPTH`.
 pub(crate) const ACTION_HIST_DEPTH: usize = 100;
 
 /// Tag identifying which per-type stack holds the pre-state for one commit in
@@ -46,8 +44,8 @@ pub(crate) fn push_action_bounded(stack: &mut VecDeque<ActionType>, kind: Action
 /// Per-item brush stroke history depth. Each entry is a full source-
 /// resolution plane (1 B/px: ~4 MB at 2048², ~8 MB at 4K), so 32 strokes
 /// cap the stack at ~0.26 GB on 4K content. Shallower than
-/// `ACTION_HIST_DEPTH`: the ordering log tolerates stroke entries that
-/// have already been dropped (`try_undo_one_action` pops orphans).
+/// `ACTION_HIST_DEPTH`; `commit_selection_mask` drops the matching Stroke
+/// marker whenever a snapshot falls off the stack.
 const STROKE_HISTORY_DEPTH: usize = 32;
 
 /// Push a snapshot; returns `true` when the oldest one was dropped to
@@ -407,7 +405,7 @@ impl BatchItem {
         self.magic_brush_embedding = None;
     }
 
-    /// Clear every selection-related cache: mask, hash, outline, texture.
+    /// Clear every selection-related cache: mask, hash, texture, pending build.
     /// Called by `BatchManager::clear_selection` (Esc / Clear) and
     /// `invalidate_selection_on_source_change`.
     pub(crate) fn invalidate_selection(&mut self) {
