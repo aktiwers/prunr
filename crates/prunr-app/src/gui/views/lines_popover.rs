@@ -28,15 +28,11 @@ fn mode_label(mode: LineMode) -> &'static str {
     }
 }
 
-/// Static-str sketch-button label per mode. The codepoint is hand-baked
-/// (matching `ICON_BRUSH = "\u{e3ae}"`) so the label survives a render
-/// closure without per-frame `format!` allocation. Three constants beat
-/// 60 String allocations/sec for a piece of visual chrome.
 fn sketch_button_label(mode: LineMode) -> &'static str {
     match mode {
-        LineMode::Off => "\u{e3ae}  Sketch: Off",
-        LineMode::EdgesOnly => "\u{e3ae}  Sketch: Full",
-        LineMode::SubjectOutline => "\u{e3ae}  Sketch: Subject",
+        LineMode::Off => "Sketch: Off",
+        LineMode::EdgesOnly => "Sketch: Full",
+        LineMode::SubjectOutline => "Sketch: Subject",
     }
 }
 
@@ -93,21 +89,8 @@ pub fn render(
     let label = sketch_button_label(settings.line_mode);
     let accent = settings.line_mode != LineMode::Off;
 
-    let btn = egui::Button::new(
-        RichText::new(label)
-            .color(theme::TEXT_PRIMARY)
-            .size(theme::FONT_SIZE_BODY),
-    )
-    .fill(theme::BG_SECONDARY)
-    .stroke(if accent {
-        egui::Stroke::new(theme::STROKE_DEFAULT, theme::ACCENT)
-    } else {
-        egui::Stroke::new(theme::STROKE_DEFAULT, egui::Color32::TRANSPARENT)
-    })
-    .corner_radius(theme::BUTTON_ROUNDING)
-    .min_size(egui::vec2(0.0, theme::CHIP_HEIGHT));
     let resp = chip::tooltip(
-        ui.add(btn),
+        chip::chip_button(ui, ICON_DRAW.codepoint, label, accent),
         "Sketch",
         "Stage 1 of 4 in the lines pipeline. Picks what DexiNed sees: Off (skipped), Subject (seg model masks to subject-on-white first, then DexiNed), Full (DexiNed runs on the whole scene). The knobs to the right are no-ops when Sketch is Off.",
         None,
@@ -210,8 +193,8 @@ pub fn render_scale_chip(ui: &mut egui::Ui, settings: &mut ItemSettings) -> bool
         chip::chip_button(ui, icon_str, scale_label(settings.edge_scale), accent),
         "Scale",
         TOOLTIP,
-    None,
-);
+        None,
+    );
 
     let mut changed = false;
     chip::popup_for(ui, pop_id, &resp, |ui| {

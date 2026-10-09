@@ -9,19 +9,10 @@
 //! Returns a `ToolbarChange` summarizing WHAT changed so the caller can
 //! invalidate the right textures and schedule live-preview reruns.
 
-use std::sync::LazyLock;
-
 use egui::{RichText, Ui};
 use egui_material_icons::icons::*;
 
 use super::selection_action_bar::{render_selection_action_bar, SelectionAction};
-
-/// Pre-baked "Bypassed" combobox label. Built once on first access so
-/// the model dropdown's selected-text branch doesn't allocate a fresh
-/// String per frame the modal is open. The leading codepoint mirrors
-/// `ICON_BLOCK.codepoint` — pinned by `bypassed_label_codepoint_matches`.
-static BYPASSED_LABEL: LazyLock<String> =
-    LazyLock::new(|| format!("{}  Bypassed", ICON_BLOCK.codepoint));
 
 use crate::gui::brush_state::BrushState;
 use crate::gui::item_settings::ItemSettings;
@@ -34,7 +25,7 @@ use crate::gui::theme;
 use crate::gui::views::{chip, fmt, hint, preset_dropdown};
 use prunr_core::LineMode;
 
-use super::model_label;
+use super::model_info;
 
 /// Append the "Press F3 for the full pipeline." hint to a chip tooltip at
 /// compile time. Single-point of truth for the hint suffix so an F3 rebind
@@ -295,8 +286,8 @@ pub(crate) fn render(
                 }
             }
 
-            // Right-aligned cluster: reset, preset. Right-to-left layout fills
-            // from the right edge so items stack: [..free space..] [preset] [↺].
+            // Right-aligned cluster. Right-to-left layout fills from the
+            // right edge: [Magic][Paint][tool chip][Protect] | [Preset][Reset].
             ui.with_layout(
                 egui::Layout::right_to_left(egui::Align::Center),
                 |ui| {
@@ -310,44 +301,22 @@ pub(crate) fn render(
                         &mut change,
                     );
 
-                    // Tool switcher: [ Paint ] [ Magic ] — mutually exclusive.
-                    // Right-to-left layout: Magic toggle → Paint toggle →
-                    // settings chip (left of Paint or Magic toggle).
+                    ui.separator();
+
+                    // Tool cluster, right-to-left: Protect, tool settings,
+                    // Paint, Magic — so the settings chip appearing never
+                    // moves the toggles.
                     let paint_active = brush_state.is_enabled();
                     let magic_active = magic_brush_active;
-                    ui.add_enabled_ui(brush_available, |ui| {
-                        let magic_resp = chip::icon_toggle_button(
-                            ui, ICON_AUTO_AWESOME.codepoint, magic_active,
+                    if model_uses_seg && has_selection {
+                        let resp = chip::tooltip(
+                            chip::icon_toggle_button(ui, ICON_LOCK.codepoint, protect_selection),
+                            "Protect selection",
+                            "Keep background removal from overwriting the selection on the next Process.",
+                            None,
                         );
-                        if magic_resp.on_hover_text(
-                            "Click or stroke to select objects automatically. Requires reprocessing."
-                        ).clicked() {
-                            change.toggle_magic = true;
-                        }
-                    });
-                    ui.add_enabled_ui(brush_available, |ui| {
-                        let paint_resp = chip::icon_toggle_button(
-                            ui, ICON_BRUSH.codepoint, paint_active,
-                        );
-                        if paint_resp.on_hover_text(if paint_active {
-                            "Paint Brush ON — click to disable."
-                        } else {
-                            "Toggle Paint Brush: paint corrections onto the mask."
-                        }).clicked() {
-                            change.toggle_paint = true;
-                        }
-                    });
-
-                    // Settings chip — LEFT of the active tool toggle.
-                    if brush_available && paint_active && !magic_active {
-                        let outcome = super::brush_chip::render(
-                            ui, &mut app_settings.brush, app_settings.model.is_inpaint(),
-                        );
-                        if outcome.reset_brush_requested {
-                            change.reset_brush_requested = true;
-                        }
-                        if outcome.committed {
-                            change.brush_settings_committed = true;
+                        if resp.clicked() {
+                            change.protect_selection = Some(!protect_selection);
                         }
                     }
                     if brush_available && magic_active {
@@ -359,24 +328,37 @@ pub(crate) fn render(
                         if outcome.committed {
                             change.brush_settings_committed = true;
                         }
-                    }
-
-                    // Protect-selection chip: visible when seg model + selection
-                    // exists. Prevents background-removal from clobbering the
-                    // user's painted selection region on next Process.
-                    if model_uses_seg && has_selection {
-                        let accent = protect_selection;
-                        let icon = egui_material_icons::icons::ICON_LOCK.codepoint;
-                        let resp = chip::tooltip(
-                            chip::icon_toggle_button(ui, icon, accent),
-                            "Protect selection",
-                            "Prevent the selection from being overwritten by background removal.",
-                        None,
-                    );
-                        if resp.clicked() {
-                            change.protect_selection = Some(!protect_selection);
+                    } else if brush_available && paint_active {
+                        let outcome = super::brush_chip::render(
+                            ui, &mut app_settings.brush, app_settings.model.is_inpaint(),
+                        );
+                        if outcome.reset_brush_requested {
+                            change.reset_brush_requested = true;
+                        }
+                        if outcome.committed {
+                            change.brush_settings_committed = true;
                         }
                     }
+                    ui.add_enabled_ui(brush_available, |ui| {
+                        let paint_resp = chip::tooltip(
+                            chip::icon_toggle_button(ui, ICON_BRUSH.codepoint, paint_active),
+                            "Paint Brush",
+                            "Paint the selection by hand.",
+                            None,
+                        );
+                        if paint_resp.clicked() {
+                            change.toggle_paint = true;
+                        }
+                        let magic_resp = chip::tooltip(
+                            chip::icon_toggle_button(ui, ICON_AUTO_AWESOME.codepoint, magic_active),
+                            "Magic Brush",
+                            "Click or stroke to select an object; Shift adds, Alt subtracts.",
+                            None,
+                        );
+                        if magic_resp.clicked() {
+                            change.toggle_magic = true;
+                        }
+                    });
                 },
             );
         });
@@ -501,7 +483,7 @@ fn render_seg_mask_chips(
             ui,
             chip::ChipMeta {
                 id_salt: "gamma",
-                icon: "γ",
+                icon: ICON_TONALITY.codepoint,
                 label: "Gamma",
                 description: "How hard the mask cuts. >1 is more aggressive; <1 is gentler.",
                 tooltip: tip!("Stage 1 of 5. How hard the mask cuts. >1 removes more aggressively, <1 is gentler on fine edges. Feeds every stage below."),
@@ -844,8 +826,8 @@ fn render_line_style_chip(ui: &mut Ui, style: &mut prunr_core::LineStyle) -> boo
         chip::chip_button(ui, ICON_GRADIENT.codepoint, style.name(), accent),
         "Line style",
         "How line pixels are coloured.",
-    None,
-);
+        None,
+    );
 
     let popup_id = ui.make_persistent_id("line_style_popup");
     let mut changed = false;
@@ -915,8 +897,8 @@ fn render_fill_style_chip(ui: &mut Ui, style: &mut prunr_core::FillStyle) -> boo
         chip::chip_button(ui, ICON_FORMAT_PAINT.codepoint, style.name(), accent),
         "Fill style",
         "How the subject RGB is transformed before compose.",
-    None,
-);
+        None,
+    );
 
     let popup_id = ui.make_persistent_id("fill_style_popup");
     let mut changed = false;
@@ -1326,7 +1308,7 @@ pub(super) fn render_reset_preset_cluster(
     change: &mut ToolbarChange,
 ) {
     let reset_resp = chip::tooltip(
-        chip::icon_toggle_button(ui, ICON_RESTART_ALT.codepoint, false),
+        chip::icon_action_button(ui, ICON_RESTART_ALT.codepoint),
         "Reset",
         "Return every knob to your default preset.",
         None,
@@ -1363,93 +1345,62 @@ pub(super) fn render_model_dropdown(
     // made the dropdown unreachable in EdgesOnly.
     let enabled = !processing;
     ui.add_enabled_ui(enabled, |ui| {
-        // Match the combobox visuals used by row 1's other dropdowns.
-        let vis = ui.visuals_mut();
-        vis.widgets.inactive.weak_bg_fill = theme::BG_SECONDARY;
-        vis.widgets.inactive.fg_stroke.color = theme::TEXT_PRIMARY;
-        vis.widgets.hovered.weak_bg_fill = egui::Color32::from_rgb(0x30, 0x2e, 0x32);
-        vis.widgets.hovered.fg_stroke.color = theme::TEXT_PRIMARY;
-        vis.widgets.open.weak_bg_fill = theme::BG_SECONDARY;
-        vis.widgets.open.fg_stroke.color = theme::TEXT_PRIMARY;
-        vis.widgets.active.fg_stroke.color = theme::TEXT_PRIMARY;
-        vis.widgets.noninteractive.fg_stroke.color = theme::TEXT_SECONDARY;
-
-        ui.spacing_mut().interact_size.y = theme::CHIP_HEIGHT;
-        // "Bypassed" indicates the seg pipeline is bypassed (no mask). Inpaint
-        // and Upscale models bypass seg by design — show their own name, not
-        // the bypass label.
-        let selected_text: String = if mask_active
-            || app_settings.model.is_inpaint()
-            || app_settings.model.is_upscale()
-        {
-            model_label(app_settings.model, true)
-        } else {
-            BYPASSED_LABEL.clone()
-        };
-        let combo = egui::ComboBox::from_id_salt("adjustments_model")
-            .selected_text(
-                RichText::new(selected_text)
-                    .color(theme::TEXT_PRIMARY),
-            )
-            .height(420.0)
-            .show_ui(ui, |ui| {
-                ui.label(RichText::new("Models").strong().color(theme::TEXT_PRIMARY));
-                ui.add_space(theme::SPACE_XS);
-                ui.separator();
-                ui.add_space(theme::SPACE_XS);
-                // Filter to installed models only — `None` (filter-only)
-                // and Bundled descriptors are always available; OnDemand
-                // entries appear only after the user has downloaded them.
-                // `None` is pinned last regardless of position in `ALL`.
-                let installed: Vec<SettingsModel> = SettingsModel::ALL.iter()
-                    .copied()
-                    .filter(|v| *v != SettingsModel::None)
-                    .filter(|v| v.to_model_id().is_none_or(prunr_models::is_available))
-                    .collect();
-                for variant in &installed {
-                    let model_id = variant.to_model_id();
-                    let desc = model_id.and_then(prunr_models::descriptor);
-                    let advisory = desc.and_then(|d| d.hardware_advisory(&app_settings.active_backend));
-                    let resp = ui.selectable_value(
-                        &mut app_settings.model,
-                        *variant,
-                        RichText::new(model_label(*variant, false))
-                            .color(theme::TEXT_PRIMARY),
-                    );
-                    if let Some(tip) = advisory {
-                        resp.on_hover_text(tip);
-                    }
-                }
-                ui.separator();
-                ui.selectable_value(
-                    &mut app_settings.model,
-                    SettingsModel::None,
-                    RichText::new(model_label(SettingsModel::None, false))
-                        .color(theme::TEXT_PRIMARY),
-                );
-                ui.separator();
-                if chip::button(ui, chip::ButtonKind::Secondary, "More models…").clicked() {
-                    change.open_model_store = Some(ModelStoreRequest::default());
-                }
-            })
-            .response;
+        let (icon, name, _) = model_info(app_settings.model);
+        let resp = chip::chip_button(ui, icon, name, false);
         let (heading, body) = if app_settings.model.is_inpaint() {
             (
                 "Eraser (LaMa inpaint)",
                 "Object-removal mode. Paint over an unwanted area with the brush; LaMa fills it in. Brush is auto-enabled in this mode.",
             )
-        } else if mask_active {
+        } else if mask_active || app_settings.model.is_upscale() {
             (
-                "Segmentation model",
-                "Which AI model extracts the subject. Trade quality, speed, and memory footprint — per-row labels show each option's position on those three axes.",
+                "Model",
+                "Which AI model does the work. Each row shows its strength and download size.",
             )
         } else {
             (
-                "Mask model bypassed",
-                "Sketch is set to Full, so DexiNed runs over the whole image and the subject-extraction model isn't needed. Switch Sketch to Off or Subject to re-enable.",
+                "Model not used",
+                "Sketch is set to Full, so the line detector runs over the whole image and the subject model is skipped. Switch Sketch to Off or Subject to use it again.",
             )
         };
-        chip::tooltip(combo, heading, body, None);
+        let resp = chip::tooltip(resp, heading, body, None);
+        let pop_id = egui::Id::new("adjustments_model_popup");
+        chip::popup_for(ui, pop_id, &resp, |ui| {
+            ui.label(RichText::new("Model").strong().color(theme::TEXT_PRIMARY));
+            ui.add_space(theme::SPACE_XS);
+            // Installed models only — `None` (filter-only) and Bundled
+            // descriptors are always available; OnDemand entries appear
+            // once downloaded. `None` is pinned last.
+            let installed = SettingsModel::ALL.iter()
+                .copied()
+                .filter(|v| *v != SettingsModel::None)
+                .filter(|v| v.to_model_id().is_none_or(prunr_models::is_available))
+                .chain(std::iter::once(SettingsModel::None));
+            for variant in installed {
+                if variant == SettingsModel::None {
+                    ui.separator();
+                }
+                let advisory = variant
+                    .to_model_id()
+                    .and_then(prunr_models::descriptor)
+                    .and_then(|d| d.hardware_advisory(&app_settings.active_backend));
+                let (_, name, blurb) = model_info(variant);
+                let row = chip::picker_row(ui, app_settings.model == variant, name, blurb);
+                let row = match advisory {
+                    Some(tip) => row.on_hover_text(tip),
+                    None => row,
+                };
+                if row.clicked() {
+                    app_settings.model = variant;
+                    egui::Popup::close_id(ui.ctx(), pop_id);
+                }
+            }
+            ui.separator();
+            if chip::button(ui, chip::ButtonKind::Secondary, "More models…").clicked() {
+                change.open_model_store = Some(ModelStoreRequest::default());
+                egui::Popup::close_id(ui.ctx(), pop_id);
+            }
+        });
     });
 
     if app_settings.model != prev_model {

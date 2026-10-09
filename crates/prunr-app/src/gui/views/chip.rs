@@ -174,6 +174,18 @@ pub(super) fn icon_toggle_button(ui: &mut Ui, icon: &str, active: bool) -> Respo
     ui.add(btn)
 }
 
+/// Momentary icon button (Reset, Help). Same size as `icon_toggle_button`
+/// but never filled with the accent — the fill is the toggle's "on" state.
+pub(super) fn icon_action_button(ui: &mut Ui, icon: &str) -> Response {
+    let btn = egui::Button::new(
+        RichText::new(icon).color(theme::TEXT_PRIMARY).size(theme::ICON_SIZE_SMALL),
+    )
+    .fill(theme::BG_SECONDARY)
+    .corner_radius(theme::BUTTON_ROUNDING)
+    .min_size(egui::vec2(theme::CHIP_HEIGHT, theme::CHIP_HEIGHT));
+    ui.add(btn)
+}
+
 /// Wrap a chip render in `add_enabled_ui(active, ...)` and, when disabled,
 /// attach `disabled_hint` as a hover tooltip on the wrapper. Use for
 /// dependency-greyed chips where the user needs to know *why* they can't

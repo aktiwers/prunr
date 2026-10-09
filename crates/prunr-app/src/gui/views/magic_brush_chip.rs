@@ -8,6 +8,7 @@
 //! is true; the canvas overlay (separate render path) shows the same.
 
 use egui::Ui;
+use egui_material_icons::icons::ICON_AUTO_AWESOME;
 
 use crate::gui::brush_state::BrushSettings;
 use crate::gui::theme;
@@ -32,13 +33,13 @@ pub(crate) fn render(
     bs: &mut BrushSettings,
     encoder_pending: bool,
 ) -> MagicChipOutcome {
-    let resp = chip::chip_button(ui, "\u{2728}", "Magic", /*accent=*/ true);
+    let resp = chip::chip_button(ui, ICON_AUTO_AWESOME.codepoint, "Magic", /*accent=*/ true);
     let resp = chip::tooltip(
         resp,
         "Magic Brush",
-        "Click or stroke to select objects automatically. Requires reprocessing.",
-    None,
-);
+        "Click or stroke to select an object; Shift adds, Alt subtracts.",
+        None,
+    );
 
     let mut outcome = MagicChipOutcome::default();
     chip::popup_for(
