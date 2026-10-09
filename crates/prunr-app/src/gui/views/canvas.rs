@@ -288,11 +288,6 @@ fn handle_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: Rect) 
     if let BrushAction::Committed(stroke_mask) = action {
         let item_id = app.batch.items[idx].id;
 
-        // Snapshot pre-state onto undo stack BEFORE writing the new mask.
-        // begin_stroke_commit: pushes current selection_mask as pre-state,
-        // clears redo stack, pushes Stroke marker on the action timeline.
-        app.batch.items[idx].begin_stroke_commit();
-
         // Merge this stroke onto the existing selection: same-direction
         // overlap keeps the stronger stroke, an opposite-direction stroke
         // wins where it lands.
