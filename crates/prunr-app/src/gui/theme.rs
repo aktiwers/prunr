@@ -198,10 +198,9 @@ pub const ACCENT_DISABLED: Color32 = Color32::from_rgba_premultiplied(49, 18, 57
 // === Window ===
 
 pub const DEFAULT_WINDOW_SIZE: [f32; 2] = [1280.0, 800.0];
-// Empirical fit point: adjustments toolbar Row 1 (model dropdown + 5 mask
-// chips + fill_style + bg chip + reset/preset cluster) needs ~1080 px to lay
-// out without overlap. Phase 12-06 (kebab overflow) is deferred — until
-// then this floor prevents the visual bug. Fits 1366×768 laptops cleanly.
+// Floor so the adjustments toolbar's longest configuration lays out
+// without overlap; nothing in it wraps. Measured for the old two-row
+// layout, so it is generous for the single row. Fits 1366×768 laptops.
 pub const MIN_WINDOW_SIZE: [f32; 2] = [1100.0, 540.0];
 
 // === Typography (sizes for egui TextStyle overrides) ===

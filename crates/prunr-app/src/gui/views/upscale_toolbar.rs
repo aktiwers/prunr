@@ -1,4 +1,4 @@
-//! Upscale chips for row 2: the Scale picker and the Refine group.
+//! Upscale chips for the toolbar: the Scale picker and the Refine group.
 //! The Model picker and the preset cluster are rendered by the caller.
 
 use egui::Ui;

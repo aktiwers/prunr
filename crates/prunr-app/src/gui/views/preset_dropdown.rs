@@ -1,4 +1,4 @@
-//! Row 1 "Preset" dropdown: quick-apply named settings snapshots and save
+//! The "Preset" dropdown: quick-apply named settings snapshots and save
 //! the current item's settings as a new preset.
 //!
 //! View Component discipline: takes `&mut AppSettings` (for the preset map

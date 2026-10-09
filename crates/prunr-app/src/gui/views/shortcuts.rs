@@ -111,7 +111,7 @@ pub const SHORTCUTS: &[Shortcut] = &[
     Shortcut { action: Action::Settings, chords: &[chord(Command, Key::Space)], label: "Open settings", delivery: FreshPress },
     Shortcut { action: Action::Shortcuts, chords: &[chord(NoMods, Key::F1)], label: "Show keyboard shortcuts", delivery: FreshPress },
     Shortcut { action: Action::CliHelp, chords: &[chord(NoMods, Key::F2)], label: "Show the command-line reference", delivery: FreshPress },
-    Shortcut { action: Action::PipelineFlow, chords: &[chord(NoMods, Key::F3)], label: "Show the mask pipeline", delivery: FreshPress },
+    Shortcut { action: Action::PipelineFlow, chords: &[chord(NoMods, Key::F3)], label: "Show the pipelines", delivery: FreshPress },
     Shortcut { action: Action::Screenshot, chords: &[chord(Shift, Key::F12)], label: "Save a window screenshot", delivery: FreshPress },
 ];
 
@@ -234,7 +234,7 @@ pub fn label(action: Action) -> &'static str {
 /// Returns true if the modal should close.
 pub fn render(ctx: &egui::Context) -> bool {
     theme::standard_modal_window(
-        ctx, "shortcuts", "Keyboard Shortcuts",
+        ctx, "shortcuts", "Keyboard shortcuts",
         [theme::SHORTCUT_OVERLAY_WIDTH, theme::SHORTCUT_OVERLAY_HEIGHT],
         |ui| {
             ui.vertical(|ui| {
