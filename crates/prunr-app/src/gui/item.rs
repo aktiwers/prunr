@@ -286,6 +286,10 @@ pub(crate) struct BatchItem {
     /// Decompressed hot copy of the active scale. Lets a slider drag reuse
     /// the same Arc instead of paying zstd per dispatch.
     pub(crate) volatile_edge_tensor: Option<(prunr_core::EdgeScale, Arc<Vec<f32>>)>,
+    /// Decompressed segmentation tensor kept across the ticks of one
+    /// slider drag; cleared with `cached_tensor` and when the item
+    /// leaves the selection.
+    pub(crate) volatile_seg_tensor: Option<Arc<super::live_preview::SegTensor>>,
     /// Post-resize, pre-dilation edge mask for the (line_strength, scale) that
     /// produced it. Lets `edge_thickness` / `solid_line_color` tweaks skip the
     /// expensive tensor→mask resize. Keyed by BOTH dimensions because scale
@@ -389,6 +393,20 @@ impl BatchItem {
         self.cached_edge_tensors = None;
         self.volatile_edge_tensor = None;
         self.cached_edge_mask = None;
+    }
+
+    /// The one writer of `cached_tensor`: the decompressed copy the
+    /// live preview keeps hot is tied to it.
+    pub(crate) fn set_cached_tensor(&mut self, tensor: Option<super::worker::CompressedTensor>) {
+        self.cached_tensor = tensor;
+        self.volatile_seg_tensor = None;
+    }
+
+    /// Drop the decompressed tensors kept for slider drags; the
+    /// compressed caches stay, so the next drag rebuilds them once.
+    pub(crate) fn drop_hot_tensors(&mut self) {
+        self.volatile_seg_tensor = None;
+        self.volatile_edge_tensor = None;
     }
 
     /// Clear the cached upscale_raw buffer and the derived bicubic_source.
@@ -522,9 +540,9 @@ impl BatchItem {
         match impact {
             CacheImpact::Nothing => {}
             CacheImpact::EdgeCache => self.invalidate_edge_cache(),
-            CacheImpact::SegCache => self.cached_tensor = None,
+            CacheImpact::SegCache => self.set_cached_tensor(None),
             CacheImpact::Both => {
-                self.cached_tensor = None;
+                self.set_cached_tensor(None);
                 self.invalidate_edge_cache();
             }
         }
@@ -584,7 +602,7 @@ impl BatchItem {
                 // preview after any tier-2 result — the next gamma tweak had
                 // nothing to postprocess from.
                 if let Some(new) = tensor_cache.and_then(super::worker::CompressedTensor::from_raw) {
-                    self.cached_tensor = Some(new);
+                    self.set_cached_tensor(Some(new));
                 }
                 if let Some(new) = edge_cache.and_then(super::worker::CompressedEdgeTensors::from_raw) {
                     self.cached_edge_tensors = Some(new);
@@ -611,7 +629,7 @@ impl BatchItem {
                 // Clear recipe + tensors so retry runs a fresh Tier 1
                 // (otherwise resolve_tier might return Skip for an errored item).
                 self.status = BatchStatus::Error(e);
-                self.cached_tensor = None;
+                self.set_cached_tensor(None);
                 self.invalidate_edge_cache();
                 self.invalidate_upscale_cache();
                 self.applied_recipe = None;
@@ -683,6 +701,7 @@ impl BatchItem {
             bicubic_source: None,
             cached_edge_tensors: None,
             volatile_edge_tensor: None,
+            volatile_seg_tensor: None,
             cached_edge_mask: None,
             cached_masked_base: None,
             applied_preset,

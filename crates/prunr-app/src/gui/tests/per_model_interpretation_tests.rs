@@ -23,7 +23,29 @@ use crate::gui::worker::{CompressedTensor, TensorCache};
 /// to apply to.
 fn give_tensor(item: &mut BatchItem) {
     let cache = TensorCache { data: vec![0.5; 64], height: 8, width: 8, model: prunr_core::ModelKind::Silueta };
-    item.cached_tensor = CompressedTensor::from_raw(cache);
+    item.set_cached_tensor(CompressedTensor::from_raw(cache));
+}
+
+/// The live preview decompresses the segmentation tensor once per drag:
+/// consecutive dispatch inputs share one plane, and replacing the cached
+/// tensor drops it.
+#[test]
+fn preview_inputs_reuse_the_decompressed_tensor_until_it_changes() {
+    use crate::gui::live_preview::PreviewKind;
+    use std::sync::Arc;
+    let mut app = app_with_model(SettingsModel::Silueta);
+    let item = push_test_item(&mut app, 3);
+    item.dimensions = (8, 8);
+    item.source_rgba = Some(Arc::new(image::RgbaImage::new(8, 8)));
+    give_tensor(item);
+    let first = crate::gui::app::PrunrApp::build_preview_inputs(&mut app.batch.items, 3, PreviewKind::Mask, false, false)
+        .expect("inputs").seg_tensor.expect("tensor");
+    let second = crate::gui::app::PrunrApp::build_preview_inputs(&mut app.batch.items, 3, PreviewKind::Mask, false, false)
+        .expect("inputs").seg_tensor.expect("tensor");
+    assert!(Arc::ptr_eq(&first, &second), "second tick must reuse the hot tensor");
+    let item = app.batch.find_by_id_mut(3).unwrap();
+    item.set_cached_tensor(None);
+    assert!(item.volatile_seg_tensor.is_none());
 }
 
 fn make_mask(w: u32, h: u32) -> prunr_core::selection::MaskArtifact {
