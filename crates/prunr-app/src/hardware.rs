@@ -98,6 +98,12 @@ pub fn available_ram_bytes_now() -> u64 {
 /// per-frame UI code (~10 ns on cache hit). The 1 s freshness is fine
 /// for a settings panel — RAM displays are read at human speed, not
 /// frame speed. First call on cold start does the full ~1 ms read.
+/// `available_ram_bytes_throttled` in MiB, the unit the admission gates
+/// compare against `working_set_mb`.
+pub fn available_ram_mb_throttled() -> u32 {
+    (available_ram_bytes_throttled() / (1024 * 1024)) as u32
+}
+
 pub fn available_ram_bytes_throttled() -> u64 {
     use std::sync::Mutex;
     use std::time::Instant;
