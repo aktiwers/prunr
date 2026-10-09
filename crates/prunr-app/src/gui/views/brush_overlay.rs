@@ -110,9 +110,7 @@ pub(crate) fn handle_input(
     if primary_released && brush_state.has_active_stroke() {
         if let Some(correction) = brush_state.commit_stroke(stamp) {
             tracing::debug!("brush release — commit");
-            return BrushAction::Committed(
-                prunr_core::selection::MaskArtifact::from_correction(correction),
-            );
+            return BrushAction::Committed(correction);
         }
     }
 

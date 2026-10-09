@@ -2,7 +2,7 @@ use image::{DynamicImage, GrayImage, RgbaImage};
 use ndarray::ArrayView4;
 use rayon::prelude::*;
 
-use crate::brush::MaskCorrection;
+use crate::selection::MaskArtifact;
 use crate::formats::resize_gray_lanczos3;
 use crate::guided_filter::guided_filter_alpha;
 use crate::types::{MaskSettings, ModelKind};
@@ -18,14 +18,14 @@ const ROW_PAR_THRESHOLD: usize = 512 * 512;
 pub struct PostprocessOpts<'a> {
     pub mask_settings: &'a MaskSettings,
     pub model: ModelKind,
-    pub correction: Option<&'a MaskCorrection>,
+    pub correction: Option<&'a MaskArtifact>,
 }
 
 impl<'a> PostprocessOpts<'a> {
     pub fn new(mask_settings: &'a MaskSettings, model: ModelKind) -> Self {
         Self { mask_settings, model, correction: None }
     }
-    pub fn with_correction(mut self, correction: Option<&'a MaskCorrection>) -> Self {
+    pub fn with_correction(mut self, correction: Option<&'a MaskArtifact>) -> Self {
         self.correction = correction;
         self
     }
@@ -179,7 +179,7 @@ fn tensor_to_mask_core(
         (v * 255.0) as u8
     };
 
-    if let Some(corr) = correction.filter(|c| !c.is_empty()) {
+    if let Some(corr) = correction {
         // Brush correction needs the [0, 1] f32 buffer alive for the
         // multiplicative apply step.
         let mut normalized: Vec<f32> = if let Some(uv) = uniform_val {
@@ -890,7 +890,7 @@ mod tests {
 
     #[test]
     fn brush_correction_subtract_drives_mask_to_zero_at_painted_pixels() {
-        use crate::brush::{paint_circle, BrushMode, MaskCorrection};
+        use crate::brush::{paint_circle, BrushMode};
         let raw = make_raw_tensor(1.0);
         let original = solid_rgb(320, 320);
         let mask_settings = MaskSettings::default();
@@ -900,7 +900,7 @@ mod tests {
         let baseline_at_center = baseline.get_pixel(160, 160)[0];
         assert!(baseline_at_center > 200, "baseline center should be foreground (got {})", baseline_at_center);
 
-        let mut correction = MaskCorrection::empty(320, 320);
+        let mut correction = MaskArtifact::new_empty(320, 320);
         paint_circle(&mut correction, 160.0, 160.0, 20.0, crate::brush::Stamp { hardness: 1.0, strength: 1.0, mode: BrushMode::Subtract });
         let corrected = tensor_to_mask(raw.view(), &original, &opts.with_correction(Some(&correction)));
 
@@ -914,14 +914,13 @@ mod tests {
 
     #[test]
     fn brush_correction_dim_mismatch_skipped() {
-        use crate::brush::MaskCorrection;
         let raw = make_raw_tensor(1.0);
         let original = solid_rgb(320, 320);
         let mask_settings = MaskSettings::default();
 
         let opts = PostprocessOpts::new(&mask_settings, ModelKind::Silueta);
         let baseline = tensor_to_mask(raw.view(), &original, &opts);
-        let wrong_size = MaskCorrection::empty(64, 64);
+        let wrong_size = MaskArtifact::new_empty(64, 64);
         let with_bad = tensor_to_mask(raw.view(), &original, &opts.with_correction(Some(&wrong_size)));
 
         assert_eq!(baseline.as_raw(), with_bad.as_raw(), "dim mismatch must skip silently, not corrupt the mask");

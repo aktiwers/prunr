@@ -11,7 +11,6 @@
 //! `SettingsModel::None` covers the no-model path, which is the closest
 //! testable proxy for "no active model".
 
-use std::sync::Arc;
 
 use crate::gui::app::PrunrApp;
 use crate::gui::settings::SettingsModel;
@@ -35,7 +34,7 @@ fn make_mask(w: u32, h: u32) -> prunr_core::selection::MaskArtifact {
             data[(y * w + x) as usize] = prunr_core::selection::FULL;
         }
     }
-    prunr_core::selection::MaskArtifact { width: w, height: h, data: Arc::new(data) }
+    prunr_core::selection::MaskArtifact::from_cells(w, h, data)
 }
 
 fn app_with_model(model: SettingsModel) -> PrunrApp {
@@ -191,7 +190,7 @@ fn selection_category_arm_exists_no_dispatch() {
 // pins the app wiring that stores and dispatches it.
 #[test]
 fn paint_brush_bg_removal_keeps_stroke_direction_and_softness() {
-    use prunr_core::brush::{paint_circle, BrushMode, MaskCorrection, Stamp};
+    use prunr_core::brush::{paint_circle, BrushMode, Stamp};
 
     let mut app = app_with_model(SettingsModel::BiRefNetLite);
     app.settings.protect_selection = false;
@@ -200,10 +199,9 @@ fn paint_brush_bg_removal_keeps_stroke_direction_and_softness() {
     give_tensor(item);
     let item_id = 7u64;
 
-    let mut stroke = MaskCorrection::empty(32, 32);
+    let mut committed = prunr_core::selection::MaskArtifact::new_empty(32, 32);
     let stamp = Stamp { hardness: 0.3, strength: 0.8, mode: BrushMode::Subtract };
-    paint_circle(&mut stroke, 16.0, 16.0, 8.0, stamp);
-    let committed = prunr_core::selection::MaskArtifact::from_correction(stroke.clone());
+    paint_circle(&mut committed, 16.0, 16.0, 8.0, stamp);
 
     app.commit_selection_and_dispatch(item_id, committed.clone());
     assert!(
@@ -211,10 +209,10 @@ fn paint_brush_bg_removal_keeps_stroke_direction_and_softness() {
         "a Paint stroke on a BG-removal model must queue the immediate rerun"
     );
     let stored = app.batch.find_by_id(item_id).unwrap().selection_mask.clone().unwrap();
-    assert_eq!(stored.data, committed.data, "the stored selection is the stroke, cell for cell");
-    assert!(stored.data.iter().any(|&v| v < 0), "Subtract stroke must stay negative");
+    assert_eq!(stored.cells(), committed.cells(), "the stored selection is the stroke, cell for cell");
+    assert!(stored.cells().iter().any(|&v| v < 0), "Subtract stroke must stay negative");
     assert!(
-        stored.data.iter().any(|&v| v < 0 && v > -prunr_core::selection::FULL),
+        stored.cells().iter().any(|&v| v < 0 && v > -prunr_core::selection::FULL),
         "hardness falloff must survive as intermediate magnitudes"
     );
 }

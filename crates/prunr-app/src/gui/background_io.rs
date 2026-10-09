@@ -267,7 +267,7 @@ pub(crate) fn build_selection_image(
     let paint = |a: u8| egui::Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), a);
     let fill = paint(SelectionStyle::alpha(style.fill_opacity));
     let mut pixels: Vec<egui::Color32> = mask
-        .data
+        .cells()
         .iter()
         .map(|&v| if MaskArtifact::is_selected(v) { fill } else { egui::Color32::TRANSPARENT })
         .collect();
@@ -289,7 +289,6 @@ pub(crate) fn build_selection_image(
 mod tests {
     use super::*;
     use prunr_core::selection::{MaskArtifact, FULL};
-    use std::sync::Arc;
 
     fn centre_block() -> MaskArtifact {
         let mut data = vec![0i8; 64];
@@ -298,7 +297,7 @@ mod tests {
                 data[y * 8 + x] = FULL;
             }
         }
-        MaskArtifact { width: 8, height: 8, data: Arc::new(data) }
+        MaskArtifact::from_cells(8, 8, data)
     }
 
     fn style(fill: f32, outline: f32, thickness: f32) -> SelectionStyle {
