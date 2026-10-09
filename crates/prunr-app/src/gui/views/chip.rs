@@ -528,6 +528,32 @@ pub(super) fn tab_strip(ui: &mut Ui, labels: &[&str], selected: &mut usize) {
     });
 }
 
+/// Visual weight of a text button. Process is the only `Primary` on the
+/// toolbar; modals use `Primary` for their one confirming action,
+/// `Secondary` for the rest and `Destructive` for anything that deletes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum ButtonKind {
+    Primary,
+    Secondary,
+    Destructive,
+}
+
+/// Themed text button at chip height. Row 1 builds its own taller
+/// buttons; everything else goes through here.
+pub(super) fn button(ui: &mut Ui, kind: ButtonKind, text: &str) -> Response {
+    let (fill, color) = match kind {
+        ButtonKind::Primary => (theme::ACCENT, Color32::WHITE),
+        ButtonKind::Secondary => (theme::BG_SECONDARY, theme::TEXT_PRIMARY),
+        ButtonKind::Destructive => (theme::DESTRUCTIVE, Color32::WHITE),
+    };
+    ui.add(
+        egui::Button::new(RichText::new(text).color(color).size(theme::FONT_SIZE_BODY))
+            .fill(fill)
+            .corner_radius(theme::BUTTON_ROUNDING)
+            .min_size(egui::vec2(0.0, theme::CHIP_HEIGHT)),
+    )
+}
+
 /// Optional RGBA chip (bg color). Toggle enables; inline color picker sets the value.
 /// Displays "None" when disabled, a swatch preview when enabled.
 ///

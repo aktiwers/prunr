@@ -18,6 +18,7 @@ use egui_material_icons::icons::*;
 use crate::gui::item_settings::ItemSettings;
 use crate::gui::settings::{PRUNR_PRESET, Settings};
 use crate::gui::theme;
+use crate::gui::views::chip::{button, ButtonKind};
 
 /// Label for the dropdown button — shows the `applied_preset` name and
 /// whether current settings still match it.
@@ -201,16 +202,8 @@ pub fn render(
             ui.separator();
             ui.add_space(theme::SPACE_SM);
 
-            let save_btn = egui::Button::new(
-                RichText::new(format!(
-                    "{}  Save current as…",
-                    ICON_BOOKMARK_ADD.codepoint
-                ))
-                .color(theme::TEXT_PRIMARY)
-                .size(theme::FONT_SIZE_BODY),
-            )
-            .fill(theme::BG_SECONDARY);
-            if ui.add(save_btn).clicked() {
+            let save_label = format!("{}  Save current as…", ICON_BOOKMARK_ADD.codepoint);
+            if button(ui, ButtonKind::Secondary, &save_label).clicked() {
                 ui.memory_mut(|m| m.data.insert_temp::<String>(save_dialog_id, String::new()));
                 ui.memory_mut(|m| {
                     m.data.insert_temp::<bool>(save_dialog_id.with("open"), true);
@@ -270,10 +263,14 @@ pub fn render(
 
                 ui.add_space(theme::SPACE_SM);
                 ui.horizontal(|ui| {
-                    if ui.add_enabled(!is_prunr_name, egui::Button::new("Save")).clicked() {
+                    if ui
+                        .add_enabled_ui(!is_prunr_name, |ui| button(ui, ButtonKind::Primary, "Save"))
+                        .inner
+                        .clicked()
+                    {
                         commit = true;
                     }
-                    if ui.button("Cancel").clicked() {
+                    if button(ui, ButtonKind::Secondary, "Cancel").clicked() {
                         cancel = true;
                     }
                 });
@@ -289,11 +286,8 @@ pub fn render(
                     );
                     ui.add_space(theme::SPACE_XS);
                     for name in &existing_names {
-                        let btn = ui.button(
-                            RichText::new(format!("{}  {name}", ICON_BOOKMARK.codepoint))
-                                .color(theme::TEXT_PRIMARY)
-                                .size(theme::FONT_SIZE_BODY),
-                        );
+                        let label = format!("{}  {name}", ICON_BOOKMARK.codepoint);
+                        let btn = button(ui, ButtonKind::Secondary, &label);
                         if btn.on_hover_text("Overwrite with current settings").clicked() {
                             overwrite_target = Some(name.clone());
                         }
