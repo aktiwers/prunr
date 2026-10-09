@@ -475,7 +475,7 @@ ignore than to investigate. Reference numbers (8-core x86_64,
 | `morphology::shift_mask`            | 4K mask, 10 px           |         15 ms |
 | `morphology::shift_mask`            | 4K mask, 50 px           |         16 ms |
 | `sam::decode_to_mask_artifact`      | 256² logits → 4K plane   |          8 ms |
-| `sam::preprocess_for_sam`           | 4K photo → 1024² tensor  |         65 ms |
+| `sam::preprocess_for_sam`           | 4K photo → 1024² tensor  |         48 ms |
 
 Before the separable rewrite the same 4K mask took 52 ms at 1 px,
 156 ms at 2.5 px, 493 ms at 10 px and 2.46 s at 50 px. The other
