@@ -5,6 +5,8 @@
 //! lives in `prunr-app/src/gui/processor.rs` so this module stays
 //! unit-testable from prunr-core alone.
 
+use rayon::prelude::*;
+
 use crate::selection::{BrushMode, FULL};
 
 pub mod preprocess;
@@ -97,31 +99,29 @@ pub fn decode_to_mask_artifact(
     let mask_logits: &[f32] = &output.masks[best_idx * m * m..(best_idx + 1) * m * m];
 
     let selected = mode.sign() * FULL;
+    // Bilinear taps are separable: the x taps repeat on every row and
+    // the y taps on every column, so each is computed once. Half-pixel
+    // offset for correct bilinear alignment.
+    let taps = |i: u32, n: u32| -> (usize, usize, f32) {
+        let scale = SAM_MASK_RESOLUTION as f32 / n as f32;
+        let s = (i as f32 + 0.5) * scale - 0.5;
+        let i0 = s.floor().clamp(0.0, m_max_f) as u32;
+        let i1 = (i0 + 1).min(m_max);
+        (i0 as usize, i1 as usize, (s - i0 as f32).clamp(0.0, 1.0))
+    };
+    let xs: Vec<(usize, usize, f32)> = (0..source_w).map(|x| taps(x, source_w)).collect();
     let mut data = vec![0i8; (source_w * source_h) as usize];
-    let scale_x = SAM_MASK_RESOLUTION as f32 / source_w as f32;
-    let scale_y = SAM_MASK_RESOLUTION as f32 / source_h as f32;
-    for y in 0..source_h {
-        for x in 0..source_w {
-            // Half-pixel offset for correct bilinear alignment.
-            let sx = (x as f32 + 0.5) * scale_x - 0.5;
-            let sy = (y as f32 + 0.5) * scale_y - 0.5;
-            let x0 = sx.floor().clamp(0.0, m_max_f) as u32;
-            let y0 = sy.floor().clamp(0.0, m_max_f) as u32;
-            let x1 = (x0 + 1).min(m_max);
-            let y1 = (y0 + 1).min(m_max);
-            let fx = (sx - x0 as f32).clamp(0.0, 1.0);
-            let fy = (sy - y0 as f32).clamp(0.0, 1.0);
-            let i00 = (y0 as usize) * m + x0 as usize;
-            let i01 = (y0 as usize) * m + x1 as usize;
-            let i10 = (y1 as usize) * m + x0 as usize;
-            let i11 = (y1 as usize) * m + x1 as usize;
-            let v = mask_logits[i00] * (1.0 - fx) * (1.0 - fy)
-                + mask_logits[i01] * fx * (1.0 - fy)
-                + mask_logits[i10] * (1.0 - fx) * fy
-                + mask_logits[i11] * fx * fy;
-            data[(y * source_w + x) as usize] = if v >= 0.0 { selected } else { 0 };
+    data.par_chunks_mut(source_w as usize).enumerate().for_each(|(y, row)| {
+        let (y0, y1, fy) = taps(y as u32, source_h);
+        let (top, bottom) = (&mask_logits[y0 * m..(y0 + 1) * m], &mask_logits[y1 * m..(y1 + 1) * m]);
+        for (cell, &(x0, x1, fx)) in row.iter_mut().zip(&xs) {
+            let v = top[x0] * (1.0 - fx) * (1.0 - fy)
+                + top[x1] * fx * (1.0 - fy)
+                + bottom[x0] * (1.0 - fx) * fy
+                + bottom[x1] * fx * fy;
+            *cell = if v >= 0.0 { selected } else { 0 };
         }
-    }
+    });
 
     Some(crate::selection::MaskArtifact::from_cells(source_w, source_h, data))
 }
@@ -197,6 +197,49 @@ mod tests {
         };
         let result = decode_to_mask_artifact(&output, 64, 64, 0.5, BrushMode::Add);
         assert!(result.is_none());
+    }
+
+    /// Per-pixel bilinear sample written the long way, as the spec for
+    /// the row-parallel decode.
+    fn brute_force_decode(logits: &[f32], w: u32, h: u32, selected: i8) -> Vec<i8> {
+        let m = SAM_MASK_RESOLUTION as usize;
+        let m_max_f = (SAM_MASK_RESOLUTION - 1) as f32;
+        let mut out = Vec::with_capacity((w * h) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                let sx = (x as f32 + 0.5) * (SAM_MASK_RESOLUTION as f32 / w as f32) - 0.5;
+                let sy = (y as f32 + 0.5) * (SAM_MASK_RESOLUTION as f32 / h as f32) - 0.5;
+                let x0 = sx.floor().clamp(0.0, m_max_f) as usize;
+                let y0 = sy.floor().clamp(0.0, m_max_f) as usize;
+                let x1 = (x0 + 1).min(m - 1);
+                let y1 = (y0 + 1).min(m - 1);
+                let fx = (sx - x0 as f32).clamp(0.0, 1.0);
+                let fy = (sy - y0 as f32).clamp(0.0, 1.0);
+                let v = logits[y0 * m + x0] * (1.0 - fx) * (1.0 - fy)
+                    + logits[y0 * m + x1] * fx * (1.0 - fy)
+                    + logits[y1 * m + x0] * (1.0 - fx) * fy
+                    + logits[y1 * m + x1] * fx * fy;
+                out.push(if v >= 0.0 { selected } else { 0 });
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn decode_matches_the_per_pixel_bilinear_sample() {
+        use rand::{Rng, SeedableRng};
+        let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(42);
+        let n = (SAM_MASK_RESOLUTION * SAM_MASK_RESOLUTION) as usize;
+        let mut masks = vec![0.0f32; 3 * n];
+        for v in &mut masks[n..2 * n] {
+            *v = rng.random_range(-2.0f32..2.0);
+        }
+        let output = SamDecoderOutput { masks, iou_predictions: [0.1, 0.9, 0.2] };
+        for (w, h) in [(1, 1), (7, 3), (300, 200), (641, 97), (1024, 1024)] {
+            let result = decode_to_mask_artifact(&output, w, h, 0.5, BrushMode::Subtract).unwrap();
+            let expected = brute_force_decode(&output.masks[n..2 * n], w, h, -FULL);
+            assert!(result.cells() == expected.as_slice(), "{w}x{h}");
+        }
     }
 
     #[test]
