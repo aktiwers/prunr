@@ -22,13 +22,6 @@ pub fn render_runtime_prompt(ctx: &egui::Context, rt: RuntimeId) -> Option<Runti
         [theme::SETTINGS_DIALOG_WIDTH, 280.0],
         |ui| {
             ui.label(
-                RichText::new("Faster processing is available")
-                    .size(theme::FONT_SIZE_HEADING)
-                    .strong()
-                    .color(theme::TEXT_PRIMARY),
-            );
-            ui.add_space(theme::SPACE_SM);
-            ui.label(
                 RichText::new(rt.first_launch_prompt_body())
                 .size(theme::FONT_SIZE_BODY)
                 .color(theme::TEXT_PRIMARY),

@@ -84,7 +84,6 @@ fn disk_usage_bytes() -> u64 {
 
 /// Returns true when the user closed the modal this frame.
 pub fn render(ctx: &egui::Context, app: &mut PrunrApp) -> bool {
-    let mut close_requested = false;
     let provider = app.settings.active_backend.clone();
 
     let initial_filter = app.model_store.as_ref().and_then(|r| r.filter);
@@ -95,21 +94,6 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) -> bool {
         ctx, "model_store", "Model Store",
         [theme::SETTINGS_DIALOG_WIDTH, 560.0],
         |ui| {
-            ui.horizontal(|ui| {
-                ui.label(
-                    RichText::new("Model Store")
-                        .size(theme::FONT_SIZE_HEADING)
-                        .strong()
-                        .color(theme::TEXT_PRIMARY),
-                );
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if button(ui, ButtonKind::Secondary, "Close").clicked() {
-                        close_requested = true;
-                    }
-                });
-            });
-            ui.add_space(theme::SPACE_SM);
-
             let mut idx = FILTERS.iter().position(|(_, c)| *c == new_filter).unwrap_or(0);
             super::chip::tab_strip(ui, &FILTERS.map(|(label, _)| label), &mut idx);
             new_filter = FILTERS[idx].1;
@@ -178,7 +162,7 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) -> bool {
         }
     }
 
-    backdrop_closed || close_requested
+    backdrop_closed
 }
 
 /// Filter tabs in display order; `None` is "All".
@@ -363,13 +347,6 @@ pub fn render_license_dialog(
         ctx, "license_dialog", "License acceptance",
         [theme::SETTINGS_DIALOG_WIDTH, 360.0],
         |ui| {
-            ui.label(
-                RichText::new("License acceptance")
-                    .size(theme::FONT_SIZE_HEADING)
-                    .strong()
-                    .color(theme::TEXT_PRIMARY),
-            );
-            ui.add_space(theme::SPACE_SM);
             ui.label(
                 RichText::new(desc.display_name)
                     .size(theme::FONT_SIZE_BODY)
