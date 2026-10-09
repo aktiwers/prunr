@@ -35,12 +35,17 @@ pub(super) struct BrushChipOutcome {
     /// True on slider release / mode / shape click. Caller persists
     /// app-level brush settings on this signal.
     pub committed: bool,
+    /// The "Auto-apply strokes" switch flipped to this value.
+    pub auto_apply: Option<bool>,
 }
 
+/// `auto_apply` is `Some(current)` for models whose strokes can apply on
+/// their own (background removal); `None` hides the switch.
 pub(super) fn render(
     ui: &mut Ui,
     s: &mut BrushSettings,
     is_inpaint_mode: bool,
+    auto_apply: Option<bool>,
 ) -> BrushChipOutcome {
     let label = chip_label(s);
     let resp = ui
@@ -52,7 +57,7 @@ pub(super) fn render(
     let resp = chip::tooltip(
         resp,
         "Brush settings",
-        "Configure brush radius, edge hardness, and add/subtract mode. Click strokes to remove or restore subject regions on the result.",
+        "Size, hardness and whether strokes add to or subtract from the selection.",
         None,
     );
 
@@ -64,11 +69,10 @@ pub(super) fn render(
                 ui.set_min_width(220.0);
                 ui.set_max_width(280.0);
                 let r = chip::slider_row_f32(
-                    ui, "Radius", &mut s.radius, 1.0..=200.0, true,
+                    ui, "Size", &mut s.radius, 1.0..=200.0, true,
                     |v| fmt::px(v, 0),
                 );
                 outcome.committed |= r.commit;
-                super::hint(ui, "Brush size in image pixels.");
                 ui.add_space(4.0);
                 let h = chip::slider_row_f32(
                     ui, "Hardness", &mut s.hardness, 0.0..=1.0, false,
@@ -76,35 +80,34 @@ pub(super) fn render(
                     fmt::percent_tenths,
                 );
                 outcome.committed |= h.commit;
-                super::hint(ui, "Edge falloff. 0% = soft smoothstep, 100% = hard disc.");
+                super::hint(ui, "0% is a soft edge, 100% a hard one.");
                 ui.add_space(4.0);
                 if !is_inpaint_mode {
-                    // Strength is meaningful for the seg pipeline (multiplicative
-                    // mask correction). For Eraser the mask is binarized at the
-                    // LaMa boundary, so Strength has no effect — hide it.
+                    // The eraser binarizes the region, so opacity would have
+                    // no effect there — hide it.
                     let st = chip::slider_row_f32(
-                        ui, "Strength", &mut s.strength, 0.0..=1.0, false,
+                        ui, "Opacity", &mut s.strength, 0.0..=1.0, false,
                         fmt::percent,
                     );
                     outcome.committed |= st.commit;
-                    super::hint(ui, "How much each stroke shifts the mask. Lower = gentler corrections.");
+                    super::hint(ui, "How strongly each stroke changes the selection.");
                 } else {
                     // Eraser-specific knobs. Live-update on release like
                     // every other slider so the user sees the diff.
                     ui.add_space(4.0);
                     let g = chip::slider_row_f32(
-                        ui, "Mask grow", &mut s.inpaint_grow, -16.0..=16.0, false,
+                        ui, "Expand region", &mut s.inpaint_grow, -16.0..=16.0, false,
                         |v| fmt::signed_px(v, 0),
                     );
                     outcome.committed |= g.commit;
-                    super::hint(ui, "Expand (+) or shrink (−) the painted region in pixels before inpaint.");
+                    super::hint(ui, "Grow or shrink the painted region before the fill.");
                     ui.add_space(4.0);
                     let f = chip::slider_row_f32(
-                        ui, "Edge softness", &mut s.inpaint_feather, 0.0..=32.0, false,
+                        ui, "Edge blend", &mut s.inpaint_feather, 0.0..=32.0, false,
                         |v| fmt::px(v, 0),
                     );
                     outcome.committed |= f.commit;
-                    super::hint(ui, "Width of the edge-blend band at the inpaint boundary, in pixels. Higher = smoother transition between model output and surroundings. Edge-preserving (guided filter, color-matched against the source ring). Default 4 px.");
+                    super::hint(ui, "Width of the band where the fill blends into the photo.");
                     ui.add_space(4.0);
                     // Sharpen displays as 0-100% on a 0-2 internal range.
                     let sh = chip::slider_row_f32(
@@ -112,7 +115,7 @@ pub(super) fn render(
                         |v| fmt::percent(v / 2.0),
                     );
                     outcome.committed |= sh.commit;
-                    super::hint(ui, "Unsharp-mask amount inside the inpainted region. Counters the model's slight blur.");
+                    super::hint(ui, "Sharpen the filled area, which comes out slightly soft.");
                 }
                 if !is_inpaint_mode {
                     // Inpaint has only one direction (paint = erase). Hide
@@ -159,17 +162,29 @@ pub(super) fn render(
         // render_shared_selection_section.
         let sel_committed = render_shared_selection_section(ui, s);
         outcome.committed |= sel_committed;
+        outcome.auto_apply = render_auto_apply_row(ui, auto_apply);
 
         ui.add_space(4.0);
         ui.separator();
         ui.add_space(4.0);
 
-        if chip::reset_button(ui, "Reset radius, hardness, mask grow, edge softness, sharpen, and shape to defaults") {
+        if chip::reset_button(ui, "Reset size, hardness, expand, edge blend, sharpen and shape") {
             outcome.reset_brush_requested = true;
         }
     });
 
     outcome
+}
+
+/// The "Auto-apply strokes" switch, shared by both brush popovers. Returns
+/// the new value when flipped.
+pub(super) fn render_auto_apply_row(ui: &mut egui::Ui, auto_apply: Option<bool>) -> Option<bool> {
+    let current = auto_apply?;
+    ui.add_space(4.0);
+    let mut on = current;
+    let flipped = chip::toggle_row(ui, "Auto-apply strokes", &mut on).changed;
+    super::hint(ui, "Apply each stroke to the result at once. Off: paint freely, then click Process.");
+    flipped.then_some(on)
 }
 
 /// Selection visualization knobs shared between the Paint Brush chip and
@@ -184,32 +199,31 @@ pub(super) fn render_shared_selection_section(ui: &mut egui::Ui, s: &mut BrushSe
     );
     ui.add_space(2.0);
     let fe = chip::slider_row_f32(
-        ui, "Edge feather", &mut s.edge_feather, 0.0..=20.0, false,
+        ui, "Feather", &mut s.edge_feather, 0.0..=20.0, false,
         |v| fmt::off_or(v, 0.1, |v| fmt::px(v, 0)),
     );
     committed |= fe.commit;
-    super::hint(ui, "Soften selection edges, 0\u{2013}20 pixels.");
+    super::hint(ui, "Soften the selection edge.");
     ui.add_space(2.0);
     let ot = chip::slider_row_f32(
-        ui, "Outline thickness", &mut s.outline_thickness, 0.0..=10.0, false,
+        ui, "Outline width", &mut s.outline_thickness, 0.0..=10.0, false,
         |v| fmt::px(v, 1),
     );
     committed |= ot.commit;
-    super::hint(ui, "0\u{2013}10 image pixels.");
     ui.add_space(2.0);
     let oo = chip::slider_row_f32(
         ui, "Outline opacity", &mut s.outline_opacity, 0.0..=1.0, false,
         fmt::percent,
     );
     committed |= oo.commit;
-    super::hint(ui, "0 = hidden, 1 = fully visible.");
+
     ui.add_space(2.0);
     let fo = chip::slider_row_f32(
         ui, "Fill opacity", &mut s.fill_opacity, 0.0..=1.0, false,
         fmt::percent,
     );
     committed |= fo.commit;
-    super::hint(ui, "0 = no fill, 1 = solid fill.");
+
     committed
 }
 
