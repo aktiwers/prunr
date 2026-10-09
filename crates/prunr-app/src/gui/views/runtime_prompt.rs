@@ -2,6 +2,7 @@
 
 use egui::RichText;
 
+use super::chip::{button, ButtonKind};
 use crate::gui::theme;
 use crate::runtime_install::RuntimeId;
 
@@ -41,21 +42,14 @@ pub fn render_runtime_prompt(ctx: &egui::Context, rt: RuntimeId) -> Option<Runti
             ui.add_space(theme::SPACE_MD);
 
             ui.horizontal(|ui| {
-                if ui.button(RichText::new("Not now")
-                    .color(theme::TEXT_PRIMARY)
-                    .size(theme::FONT_SIZE_BODY)).clicked() {
+                if button(ui, ButtonKind::Secondary, "Not now").clicked() {
                     result = Some(RuntimePromptAction::NotNow);
                 }
-                if ui.button(RichText::new("Open Settings")
-                    .color(theme::TEXT_PRIMARY)
-                    .size(theme::FONT_SIZE_BODY)).clicked() {
+                if button(ui, ButtonKind::Secondary, "Open Settings").clicked() {
                     result = Some(RuntimePromptAction::OpenSettings);
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button(RichText::new(rt.install_button_label())
-                        .color(theme::TEXT_PRIMARY)
-                        .size(theme::FONT_SIZE_BODY)
-                        .strong()).clicked() {
+                    if button(ui, ButtonKind::Primary, rt.install_button_label()).clicked() {
                         result = Some(RuntimePromptAction::Install);
                     }
                 });

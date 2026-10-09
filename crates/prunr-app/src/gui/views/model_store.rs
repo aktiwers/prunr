@@ -11,6 +11,7 @@ use prunr_models::{
 use crate::gui::app::PrunrApp;
 use crate::gui::download_manager::DownloadState;
 use crate::gui::theme;
+use super::chip::{button, ButtonKind};
 use super::format_byte_size;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -101,7 +102,7 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) -> bool {
                         .color(theme::TEXT_PRIMARY),
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("Close").clicked() {
+                    if button(ui, ButtonKind::Secondary, "Close").clicked() {
                         close_requested = true;
                     }
                 });
@@ -260,7 +261,14 @@ fn render_card(
         });
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if let Some(label) = button_label(action) {
-                let mut resp = ui.add_enabled(action_enabled(action), egui::Button::new(label));
+                let kind = match action {
+                    CardAction::Delete => ButtonKind::Destructive,
+                    CardAction::Download | CardAction::Retry { .. } => ButtonKind::Primary,
+                    _ => ButtonKind::Secondary,
+                };
+                let mut resp = ui
+                    .add_enabled_ui(action_enabled(action), |ui| button(ui, kind, label))
+                    .inner;
                 if let Some(tip) = advisory {
                     resp = resp.on_disabled_hover_text(tip);
                 }
@@ -386,11 +394,11 @@ pub fn render_license_dialog(
             ui.add_space(theme::SPACE_MD);
 
             ui.horizontal(|ui| {
-                if ui.button("Cancel").clicked() {
+                if button(ui, ButtonKind::Secondary, "Cancel").clicked() {
                     close_requested = true;
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("Accept and download").clicked() {
+                    if button(ui, ButtonKind::Primary, "Accept and download").clicked() {
                         accepted = true;
                     }
                 });
