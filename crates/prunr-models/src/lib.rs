@@ -1239,39 +1239,53 @@ fn dev_model_path(name: &str) -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../models").join(name)
 }
 
+/// On-disk model bytes for `dev-models` builds: the raw `.onnx`, or the
+/// `.onnx.zst` sibling decompressed. CI caches only the `.zst` files
+/// (half the size), so the fallback is what lets tests run there.
+#[cfg(feature = "dev-models")]
+fn dev_model_bytes(name: &str) -> Vec<u8> {
+    dev_model_bytes_in(&dev_model_path(name))
+}
+
+#[cfg(feature = "dev-models")]
+fn dev_model_bytes_in(raw: &std::path::Path) -> Vec<u8> {
+    if let Ok(bytes) = std::fs::read(raw) {
+        return bytes;
+    }
+    let compressed = raw.with_extension("onnx.zst");
+    if let Ok(file) = std::fs::File::open(&compressed) {
+        return zstd::stream::decode_all(std::io::BufReader::new(file))
+            .unwrap_or_else(|e| panic!("dev-models: {} is not valid zstd: {e}", compressed.display()));
+    }
+    panic!(
+        "dev-models requires {} (or its .zst sibling) — run `cargo xtask fetch-models` from the workspace root",
+        raw.display()
+    )
+}
+
 #[cfg(feature = "dev-models")]
 pub fn silueta_bytes() -> &'static [u8] {
-    let path = dev_model_path("silueta.onnx");
-    DEV_SILUETA.get_or_init(|| std::fs::read(&path)
-        .unwrap_or_else(|_| panic!("dev-models requires {} — run `cargo xtask fetch-models` from the workspace root", path.display())))
+    DEV_SILUETA.get_or_init(|| dev_model_bytes("silueta.onnx"))
 }
 
 #[cfg(feature = "dev-models")]
 pub fn birefnet_lite_bytes() -> &'static [u8] {
-    let path = dev_model_path("birefnet_lite.onnx");
-    DEV_BIREFNET.get_or_init(|| std::fs::read(&path)
-        .unwrap_or_else(|_| panic!("dev-models requires {} — run `cargo xtask fetch-models` from the workspace root", path.display())))
+    DEV_BIREFNET.get_or_init(|| dev_model_bytes("birefnet_lite.onnx"))
 }
 
 #[cfg(feature = "dev-models")]
 pub fn dexined_bytes() -> &'static [u8] {
-    let path = dev_model_path("dexined.onnx");
-    DEV_DEXINED.get_or_init(|| std::fs::read(&path)
-        .unwrap_or_else(|_| panic!("dev-models requires {} — run `cargo xtask fetch-models` from the workspace root", path.display())))
+    DEV_DEXINED.get_or_init(|| dev_model_bytes("dexined.onnx"))
 }
 
 #[cfg(feature = "dev-models")]
 pub fn sam2_encoder_bytes() -> &'static [u8] {
-    let path = dev_model_path("sam2_hiera_small.encoder.onnx");
-    DEV_SAM2_ENCODER.get_or_init(|| std::fs::read(&path)
-        .unwrap_or_else(|_| panic!("dev-models requires {} — run `cargo xtask fetch-models` from the workspace root", path.display())))
+    DEV_SAM2_ENCODER.get_or_init(|| dev_model_bytes("sam2_hiera_small.encoder.onnx"))
 }
 
 #[cfg(feature = "dev-models")]
 pub fn sam2_decoder_bytes() -> &'static [u8] {
-    let path = dev_model_path("sam2_hiera_small.decoder.onnx");
-    DEV_SAM2_DECODER.get_or_init(|| std::fs::read(&path)
-        .unwrap_or_else(|_| panic!("dev-models requires {} — run `cargo xtask fetch-models` from the workspace root", path.display())))
+    DEV_SAM2_DECODER.get_or_init(|| dev_model_bytes("sam2_hiera_small.decoder.onnx"))
 }
 
 /// Dispatcher for `MultiPartBundled` byte resolution. Mirrors the
@@ -1360,6 +1374,25 @@ fn load_variant(id: ModelId, suffix: &str) -> Option<Vec<u8>> {
     }
 
     None
+}
+
+#[cfg(all(test, feature = "dev-models"))]
+mod dev_model_bytes_tests {
+    use super::dev_model_bytes_in;
+    use std::io::Write;
+
+    #[test]
+    fn falls_back_to_the_zst_sibling_when_the_raw_file_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let raw = dir.path().join("fake.onnx");
+        let payload = b"not really onnx but good enough".to_vec();
+        let compressed = zstd::bulk::compress(&payload, 3).unwrap();
+        std::fs::File::create(dir.path().join("fake.onnx.zst")).unwrap().write_all(&compressed).unwrap();
+        assert_eq!(dev_model_bytes_in(&raw), payload);
+
+        std::fs::write(&raw, b"raw wins").unwrap();
+        assert_eq!(dev_model_bytes_in(&raw), b"raw wins");
+    }
 }
 
 #[cfg(test)]
