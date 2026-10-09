@@ -415,9 +415,11 @@ impl BatchItem {
         self.selection_tex_pending = None;
     }
 
-    /// True while a background thread owes this item a decode or a texture.
+    /// True while a background thread owes this item a decode, a texture
+    /// or a thumbnail.
     pub(crate) fn has_pending_work(&self) -> bool {
         self.result_tex_pending || self.source_tex_pending || self.decode_pending
+            || self.thumb_pending || self.bg_image_tex_pending
             || self.selection_tex_pending.is_some()
     }
 

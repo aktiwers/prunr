@@ -61,6 +61,9 @@ pub struct PrunrApp {
 
     // Before/After toggle
     pub(crate) show_original: bool,
+    /// Which item the view was last brought up to date for; a change
+    /// runs the selection-change work in `reconcile_selected`.
+    synced_selected: Option<u64>,
 
     title_state: TitleState,
 
@@ -114,7 +117,7 @@ pub struct PrunrApp {
     /// Incremented when a result completes, drives crossfade in render_done
     pub(crate) result_switch_id: u64,
 
-    /// Set by add_to_batch — triggers sync_selected_batch_textures in next logic()
+    /// Set by add_to_batch — forces the selection-change work in the next logic()
     pending_batch_sync: bool,
     /// Set by toolbar Open button — processed in logic() where ctx is available
     pub(crate) pending_open_dialog: bool,
@@ -277,6 +280,7 @@ impl PrunrApp {
             magic_brush_state: super::magic_brush_state::MagicBrushState::default(),
             download_manager: super::download_manager::DownloadManager::new(),
             show_original: false,
+            synced_selected: None,
             title_state: TitleState::default(),
             last_drift_check: None,
             batch: super::batch_manager::BatchManager::new(),
@@ -2497,7 +2501,7 @@ impl PrunrApp {
                 if item.status == BatchStatus::Pending {
                     item.status = BatchStatus::Done;
                 }
-                // Mark pending so sync_selected_batch_textures doesn't also
+                // Mark pending so reconcile_selected doesn't also
                 // spawn its own prep on this same frame.
                 item.result_tex_pending = true;
                 if let Some((mask, bits, scale)) = r.new_edge_mask {
@@ -2550,26 +2554,34 @@ impl PrunrApp {
         ctx.request_repaint();
     }
 
-    /// Edge-triggered on a selection change: free the background items'
-    /// results, bring the newly selected item up to date and leave
-    /// Compare mode.
+    /// Run the selection-change work even though the selected id is
+    /// unchanged: the result or history behind it was replaced.
     pub(crate) fn sync_selected_batch_textures(&mut self, ctx: &egui::Context) {
-        let Some(idx) = self.batch.selected_idx_clamped() else { return };
-        self.evict_result_rgba_for_background_items(idx);
+        self.synced_selected = None;
         self.reconcile_selected(ctx);
-        self.show_original = false;
     }
 
-    /// Level-triggered, once per frame: everything the selected item
-    /// lazily needs — a restored result, a decoded source, the two canvas
-    /// textures, the selection texture and the Magic Brush embedding.
-    /// Every arm is idempotent behind its pending flag, so a frame with
-    /// nothing missing costs a few field reads.
+    /// Once per frame. On a selection change (detected here, so no
+    /// selection path can forget it): free the background items' results,
+    /// restore the selected one from history, leave Compare. Every frame:
+    /// the decoded source, the canvas textures, the bg-image texture, the
+    /// selection texture and the Magic Brush embedding the selected item
+    /// lacks. Every arm is idempotent behind its pending flag.
     fn reconcile_selected(&mut self, ctx: &egui::Context) {
-        if let Some(idx) = self.batch.selected_idx_clamped() {
-            self.restore_selected_result_from_history(idx);
+        let selected = self.batch.selected_item().map(|i| i.id);
+        let idx = self.batch.selected_idx_clamped();
+        if selected != self.synced_selected {
+            self.synced_selected = selected;
+            if let Some(idx) = idx {
+                self.evict_result_rgba_for_background_items(idx);
+                self.restore_selected_result_from_history(idx);
+            }
+            self.show_original = false;
+        }
+        if let (Some(idx), Some(id)) = (idx, selected) {
             self.ensure_selected_source_decoded(idx);
             self.request_selected_textures(idx, ctx);
+            self.kick_bg_image_tex_prep(id, ctx);
         }
         let style = super::background_io::SelectionStyle::from_brush(&self.settings.brush);
         self.batch.ensure_selection_texture(style, ctx);
@@ -2706,8 +2718,6 @@ impl PrunrApp {
     fn request_selected_textures(&mut self, idx: usize, ctx: &egui::Context) {
         let item_id = self.batch.items[idx].id;
 
-        let handles = self.batch.bg_io.tex_prep_handles();
-
         if self.batch.items[idx].source_texture.is_none()
             && !self.batch.items[idx].source_tex_pending
         {
@@ -2715,7 +2725,7 @@ impl PrunrApp {
                 self.batch.items[idx].source_tex_pending = true;
                 Self::spawn_tex_prep(
                     rgba, item_id, Self::tex_name("source", item_id, None), false,
-                    handles.clone(), ctx.clone(),
+                    self.batch.bg_io.tex_prep_handles(), ctx.clone(),
                 );
             }
         }
@@ -2728,7 +2738,7 @@ impl PrunrApp {
                 self.batch.items[idx].result_tex_pending = true;
                 Self::spawn_tex_prep(
                     rgba, item_id, Self::tex_name("result", item_id, Some(switch)), true,
-                    handles.clone(), ctx.clone(),
+                    self.batch.bg_io.tex_prep_handles(), ctx.clone(),
                 );
             }
         }
@@ -3282,14 +3292,9 @@ impl PrunrApp {
             // previous_zoom / pan_offset around, which lets `canvas.rs`'s
             // toggle-back branch fire against the old image's state.
             self.zoom_state.reset();
-            self.sync_selected_batch_textures(ctx);
+            self.show_original = false;
         }
 
-        // `sync_selected_batch_textures` calls
-        // `evict_result_rgba_for_background_items`, which races any tex_prep
-        // running for a non-selected item — gate sync on the selected
-        // item's own arrival.
-        let mut tex_arrived_for_selected = false;
         while let Ok((item_id, name, color_image, is_result)) = self.batch.bg_io.tex_prep_rx.try_recv() {
             let tex = ctx.load_texture(name, color_image, egui::TextureOptions::default());
             if let Some(item) = self.batch.find_by_id_mut(item_id) {
@@ -3302,13 +3307,7 @@ impl PrunrApp {
                     item.source_tex_pending = false;
                     tracing::info!(item_id, kind = "source", "texture uploaded");
                 }
-                if self.batch.is_selected(item_id) {
-                    tex_arrived_for_selected = true;
-                }
             }
-        }
-        if tex_arrived_for_selected {
-            self.sync_selected_batch_textures(ctx);
         }
 
         // Drain filter-only Process results (model=None path).

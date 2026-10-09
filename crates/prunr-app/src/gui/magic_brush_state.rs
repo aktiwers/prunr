@@ -76,7 +76,7 @@ mod tests {
         assert!(!m.is_active());
         assert!(!m.has_pending_encoder());
         assert!(m.active_stroke.is_empty());
-        assert!(m.active_trail.is_empty());
+        assert!(m.active_trail.stamps().next().is_none());
     }
 
     #[test]
@@ -108,6 +108,6 @@ mod tests {
         m.active_trail.push_spaced(100.0, 200.0, 8.0);
         m.clear_stroke();
         assert!(m.active_stroke.is_empty());
-        assert!(m.active_trail.is_empty());
+        assert!(m.active_trail.stamps().next().is_none());
     }
 }

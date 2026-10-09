@@ -56,7 +56,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
         let actions = render_item_list(ui, app, dragging_ids.as_ref(), sidebar_escape_rect, anim_time);
 
         // Request repaint for animations/pending thumbnails — throttled to ~15fps.
-        if actions.needs_repaint || app.batch.items.iter().any(|i| i.thumb_pending) {
+        if actions.needs_repaint || app.batch.items.iter().any(|i| i.has_pending_work()) {
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(66));
         }
         apply_actions(app, &actions);
