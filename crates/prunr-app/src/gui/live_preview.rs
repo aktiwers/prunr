@@ -41,7 +41,7 @@ fn build_masked_base(
     seg: &SegTensor,
     original: &DynamicImage,
     settings: &ItemSettings,
-    correction: Option<&prunr_core::brush::MaskCorrection>,
+    correction: Option<&prunr_core::selection::MaskArtifact>,
 ) -> Option<DynamicImage> {
     let mask_settings = settings.mask_settings();
     let opts = prunr_core::PostprocessOpts::new(&mask_settings, seg.model)
@@ -394,10 +394,10 @@ pub struct DispatchInputs {
     /// from a previous dispatch whose mask recipe matches the current one.
     /// Populated when available so Edge tweaks skip Lanczos + guided filter.
     pub cached_masked_base: Option<Arc<image::RgbaImage>>,
-    /// Brush mask correction snapshot. Tier 2 reruns apply this at model
-    /// resolution before the resize / refine / feather chain. `None` when
-    /// no strokes have been committed.
-    pub correction: Option<Arc<prunr_core::brush::MaskCorrection>>,
+    /// The item's selection, applied to the segmentation mask before the
+    /// resize / refine / feather chain (resampled to tensor resolution
+    /// inline). `None` when nothing is selected.
+    pub correction: Option<Arc<prunr_core::selection::MaskArtifact>>,
     /// For `PreviewKind::UpscaleTier2` only — cached raw upscale buffer from
     /// Tier-1 inference. Tier-2 postprocess runs on a clone of this buffer.
     /// `None` for other kinds.

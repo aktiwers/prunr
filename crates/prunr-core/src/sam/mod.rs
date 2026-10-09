@@ -5,8 +5,6 @@
 //! lives in `prunr-app/src/gui/processor.rs` so this module stays
 //! unit-testable from prunr-core alone.
 
-use std::sync::Arc;
-
 use crate::brush::BrushMode;
 use crate::selection::FULL;
 
@@ -126,11 +124,7 @@ pub fn decode_to_mask_artifact(
         }
     }
 
-    Some(crate::selection::MaskArtifact {
-        width: source_w,
-        height: source_h,
-        data: Arc::new(data),
-    })
+    Some(crate::selection::MaskArtifact::from_cells(source_w, source_h, data))
 }
 
 #[cfg(test)]
@@ -190,9 +184,9 @@ mod tests {
         assert_eq!(result.width, 64);
         assert_eq!(result.height, 64);
         // All upsampled pixels are fully selected (candidate 1, all +1 logits)
-        assert!(result.data.iter().all(|&v| v == FULL));
+        assert!(result.cells().iter().all(|&v| v == FULL));
         let result = decode_to_mask_artifact(&output, 64, 64, 0.4, BrushMode::Subtract).unwrap();
-        assert!(result.data.iter().all(|&v| v == -FULL), "Subtract mode signs the region negative");
+        assert!(result.cells().iter().all(|&v| v == -FULL), "Subtract mode signs the region negative");
     }
 
     #[test]
@@ -218,6 +212,6 @@ mod tests {
             iou_predictions: [0.9, 0.1, 0.1],
         };
         let result = decode_to_mask_artifact(&output, 32, 32, 0.5, BrushMode::Subtract).unwrap();
-        assert!(result.data.iter().all(|&v| v == 0));
+        assert!(result.cells().iter().all(|&v| v == 0));
     }
 }

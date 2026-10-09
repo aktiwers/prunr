@@ -1,16 +1,16 @@
 //! Pure mask-correction brush.
 //!
-//! `MaskCorrection` is a signed magnitude grid the size of the model's
-//! output mask. Positive values push toward foreground, negative toward
-//! background. `apply_correction` runs in postprocess BEFORE the guided
-//! filter so refine still feathers strokes naturally.
+//! Strokes paint into a `MaskArtifact` (signed `i8` plane). Positive
+//! cells push toward foreground, negative toward background.
+//! `apply_correction` runs in postprocess BEFORE the guided filter so
+//! refine still feathers strokes naturally.
 
 use serde::{Deserialize, Serialize};
 
 use crate::math::smoothstep;
+use crate::selection::MaskArtifact;
 
-/// Magnitude of a fully painted cell; the shared scale of every i8
-/// mask plane (`MaskCorrection`, `selection::MaskArtifact`).
+/// Magnitude of a fully painted cell; the scale of every i8 mask plane.
 pub const CELL_MAX: i8 = 127;
 const STAMP_SCALE: f32 = CELL_MAX as f32;
 
@@ -48,35 +48,6 @@ pub struct Stamp {
     pub mode: BrushMode,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct MaskCorrection {
-    pub width: u16,
-    pub height: u16,
-    /// Direct mutation can violate the `width × height == grid.len()`
-    /// invariant. External writers go through `paint_circle` /
-    /// `paint_square` / `paint_line` / `merge`.
-    pub(crate) grid: Vec<i8>,
-}
-
-impl MaskCorrection {
-    pub fn empty(width: u16, height: u16) -> Self {
-        Self {
-            width,
-            height,
-            grid: vec![0; (width as usize) * (height as usize)],
-        }
-    }
-
-    /// O(n). Caller-controlled — `apply_correction` does NOT short-circuit
-    /// on empty (the saturating-add loop is fast enough that a pre-scan
-    /// pays for itself only when the correction stays empty across many
-    /// dispatches, which is not the brush-session common case).
-    pub fn is_empty(&self) -> bool {
-        self.grid.iter().all(|&v| v == 0)
-    }
-
-}
-
 /// In-place multiplicative correction in normalized [0, 1] mask space.
 /// Applied BEFORE gamma/threshold so subsequent gamma slider tweaks
 /// modulate the painted regions naturally — a 50% subtract stroke
@@ -88,46 +59,11 @@ impl MaskCorrection {
 /// - `g == 0`:                   no-op
 ///
 /// Caller passes the post-normalize, pre-gamma mask in [0, 1] along with
-/// its 2D dims. When the correction grid is at a different resolution
-/// (model switch, mode change) we nearest-neighbour resample inline —
-/// no skipping, no warning spam during live preview.
-pub fn apply_correction(mask: &mut [f32], mask_w: usize, mask_h: usize, correction: &MaskCorrection) {
+/// its 2D dims. The correction is usually at source resolution while the
+/// mask is at tensor resolution; it is nearest-neighbour resampled inline.
+pub fn apply_correction(mask: &mut [f32], mask_w: usize, mask_h: usize, correction: &MaskArtifact) {
     debug_assert_eq!(mask.len(), mask_w * mask_h, "apply_correction: mask len != w*h");
-    let cw = correction.width as usize;
-    let ch = correction.height as usize;
-
-    // Empty correction (no stamps): skip both the fast path and the
-    // resample loop. Common when the user has cleared their strokes or
-    // the BatchItem holds an empty correction that hasn't been dropped
-    // yet. The is_empty scan is O(grid) but cheap relative to either
-    // loop and avoids the resample's u64 division per target pixel.
-    if correction.is_empty() {
-        return;
-    }
-
-    // Fast path: dims match, single linear pass.
-    if cw == mask_w && ch == mask_h {
-        for (m, &g) in mask.iter_mut().zip(correction.grid.iter()) {
-            apply_one(m, g);
-        }
-        return;
-    }
-
-    // Resample path: nearest-neighbour sample the correction grid into
-    // mask space.
-    if cw == 0 || ch == 0 { return; }
-    for y in 0..mask_h {
-        let cy = (y as u64 * ch as u64 / mask_h as u64) as usize;
-        let row_base = cy * cw;
-        let m_row = y * mask_w;
-        for x in 0..mask_w {
-            let cx = (x as u64 * cw as u64 / mask_w as u64) as usize;
-            let g = correction.grid[row_base + cx];
-            if g != 0 {
-                apply_one(&mut mask[m_row + x], g);
-            }
-        }
-    }
+    correction.for_each_resampled(mask_w as u32, mask_h as u32, |i, g| apply_one(&mut mask[i], g));
 }
 
 #[inline]
@@ -147,7 +83,7 @@ fn apply_one(m: &mut f32, g: i8) {
 /// Overlapping stamps keep the strongest magnitude in the active mode's
 /// direction — painting twice over the same pixel doesn't double up.
 fn stamp_with<D>(
-    target: &mut MaskCorrection,
+    target: &mut MaskArtifact,
     cx: f32, cy: f32,
     outer: f32,
     stamp: Stamp,
@@ -174,7 +110,7 @@ where
         return;
     }
 
-    let grid = &mut target.grid;
+    let grid = target.cells_mut();
     for y in ymin..ymax {
         for x in xmin..xmax {
             let dx = (x as f32 + 0.5) - cx;
@@ -200,13 +136,13 @@ where
     }
 }
 
-pub fn paint_circle(target: &mut MaskCorrection, cx: f32, cy: f32, radius: f32, stamp: Stamp) {
+pub fn paint_circle(target: &mut MaskArtifact, cx: f32, cy: f32, radius: f32, stamp: Stamp) {
     stamp_with(target, cx, cy, radius, stamp, |dx, dy| (dx * dx + dy * dy).sqrt());
 }
 
 /// Chebyshev-distance variant: `hardness=1` is a sharp square,
 /// `hardness=0` softens toward a diamond.
-pub fn paint_square(target: &mut MaskCorrection, cx: f32, cy: f32, half_size: f32, stamp: Stamp) {
+pub fn paint_square(target: &mut MaskArtifact, cx: f32, cy: f32, half_size: f32, stamp: Stamp) {
     stamp_with(target, cx, cy, half_size, stamp, |dx, dy| dx.abs().max(dy.abs()));
 }
 
@@ -214,7 +150,7 @@ pub fn paint_square(target: &mut MaskCorrection, cx: f32, cy: f32, half_size: f3
 /// for invocation cadence — the Line tool calls this once at
 /// `commit_stroke`, not per pointer event.
 pub fn paint_line(
-    target: &mut MaskCorrection,
+    target: &mut MaskArtifact,
     x1: f32, y1: f32,
     x2: f32, y2: f32,
     radius: f32,
@@ -234,26 +170,6 @@ pub fn paint_line(
     }
 }
 
-/// Merge `addition` into `target` using max-magnitude in the additive
-/// direction — positive stamps from either source keep the strongest
-/// foreground push; negative stamps keep the strongest background push.
-/// Untouched cells in `addition` (== 0) leave `target` unchanged.
-///
-/// Skips silently on dimension mismatch.
-pub fn merge(target: &mut MaskCorrection, addition: &MaskCorrection) {
-    if target.width != addition.width || target.height != addition.height {
-        tracing::warn!(
-            target_dims = format!("{}x{}", target.width, target.height),
-            addition_dims = format!("{}x{}", addition.width, addition.height),
-            "merge: dimension mismatch, skipping"
-        );
-        return;
-    }
-    for (t, &a) in target.grid.iter_mut().zip(addition.grid.iter()) {
-        *t = merge_cell(*t, a);
-    }
-}
-
 /// How a newer stroke cell lands on an existing one: zero leaves the
 /// existing cell, same sign keeps the stronger magnitude (painting twice
 /// does not double up), opposite sign lets the newer stroke win.
@@ -266,18 +182,6 @@ pub(crate) fn merge_cell(existing: i8, newer: i8) -> i8 {
     }
 }
 
-/// Stable hash of the correction's content (width, height, grid bytes).
-/// Uses `DefaultHasher` (`SipHasher13`) which is deterministic across
-/// runs, so persisted hashes survive load.
-pub fn content_hash(c: &MaskCorrection) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    c.width.hash(&mut h);
-    c.height.hash(&mut h);
-    c.grid.hash(&mut h);
-    h.finish()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -287,9 +191,17 @@ mod tests {
             && mask.iter().zip(expected).all(|(a, b)| (a - b).abs() < tol)
     }
 
+    fn plane(w: u32, h: u32, cells: Vec<i8>) -> MaskArtifact {
+        MaskArtifact::from_cells(w, h, cells)
+    }
+
+    fn add(hardness: f32, strength: f32) -> Stamp {
+        Stamp { hardness, strength, mode: BrushMode::Add }
+    }
+
     #[test]
     fn empty_correction_is_no_op() {
-        let c = MaskCorrection::empty(10, 10);
+        let c = MaskArtifact::new_empty(10, 10);
         let mut mask = vec![0.5f32; 100];
         apply_correction(&mut mask, 10, 10, &c);
         assert!(mask.iter().all(|&v| v == 0.5));
@@ -298,24 +210,21 @@ mod tests {
     #[test]
     fn dimension_mismatch_resamples_inline() {
         // 5×5 correction with one painted cell at (2, 2): nearest-neighbour
-        // resample into a 10×10 mask should land paint in a 2×2 block at
-        // (4..6, 4..6). Replaces the old "skip on mismatch" semantics so
-        // a stale correction (e.g. from a previous model resolution) gets
-        // applied instead of silently dropped + log-spammed.
-        let mut c = MaskCorrection::empty(5, 5);
-        c.grid[2 * 5 + 2] = 127; // full add at centre cell
+        // resample into a 10×10 mask lands paint in a 2×2 block at
+        // (4..6, 4..6) instead of being dropped.
+        let mut cells = vec![0i8; 25];
+        cells[2 * 5 + 2] = 127;
+        let c = plane(5, 5, cells);
         let mut mask = vec![0.0f32; 100];
         apply_correction(&mut mask, 10, 10, &c);
-        // The 2×2 block centred on (4, 4)..(5, 5) should be 1.0; rest 0.
         let painted = mask.iter().filter(|&&v| v > 0.0).count();
-        assert!(painted >= 1, "expected at least one mask pixel painted, got 0");
+        assert_eq!(painted, 4);
         assert!(mask.iter().all(|&v| v == 0.0 || (v - 1.0).abs() < 1e-6));
     }
 
     #[test]
     fn full_add_drives_to_one() {
-        let mut c = MaskCorrection::empty(2, 2);
-        c.grid = vec![127, 127, 127, 127];
+        let c = plane(2, 2, vec![127; 4]);
         let mut mask = vec![0.3f32; 4];
         apply_correction(&mut mask, 2, 2, &c);
         assert!(approx(&mask, &[1.0, 1.0, 1.0, 1.0], 1e-6));
@@ -323,8 +232,7 @@ mod tests {
 
     #[test]
     fn full_subtract_drives_to_zero() {
-        let mut c = MaskCorrection::empty(2, 2);
-        c.grid = vec![-127, -127, -127, -127];
+        let c = plane(2, 2, vec![-127; 4]);
         let mut mask = vec![0.95f32; 4];
         apply_correction(&mut mask, 2, 2, &c);
         assert!(approx(&mask, &[0.0, 0.0, 0.0, 0.0], 1e-6));
@@ -333,8 +241,7 @@ mod tests {
     #[test]
     fn half_subtract_halves_the_value() {
         // s = -64/127 ≈ -0.504, so m → m * (1 - 0.504) = m * 0.496.
-        let mut c = MaskCorrection::empty(2, 1);
-        c.grid = vec![-64, -64];
+        let c = plane(2, 1, vec![-64, -64]);
         let mut mask = vec![1.0f32, 0.6];
         apply_correction(&mut mask, 2, 1, &c);
         let expected_factor = 1.0 - 64.0 / 127.0;
@@ -344,8 +251,7 @@ mod tests {
     #[test]
     fn half_add_lerps_toward_one() {
         // s = +64/127 ≈ 0.504, so m → m + (1 - m) * 0.504.
-        let mut c = MaskCorrection::empty(2, 1);
-        c.grid = vec![64, 64];
+        let c = plane(2, 1, vec![64, 64]);
         let mut mask = vec![0.0f32, 0.5];
         apply_correction(&mut mask, 2, 1, &c);
         let s = 64.0 / 127.0;
@@ -354,8 +260,7 @@ mod tests {
 
     #[test]
     fn apply_correction_non_uniform_grid() {
-        let mut c = MaskCorrection::empty(3, 1);
-        c.grid = vec![64, 0, -64];
+        let c = plane(3, 1, vec![64, 0, -64]);
         let mut mask = vec![0.5f32, 0.5, 0.5];
         apply_correction(&mut mask, 3, 1, &c);
         let s = 64.0 / 127.0;
@@ -364,20 +269,22 @@ mod tests {
 
     #[test]
     fn paint_circle_centered_pixel_only() {
-        let mut c = MaskCorrection::empty(5, 5);
-        paint_circle(&mut c, 2.5, 2.5, 0.5, Stamp { hardness: 1.0, strength: 1.0, mode: BrushMode::Add });
-        assert_eq!(c.grid[12], 127);
-        let neighbours = [c.grid[11], c.grid[13], c.grid[7], c.grid[17]];
+        let mut c = MaskArtifact::new_empty(5, 5);
+        paint_circle(&mut c, 2.5, 2.5, 0.5, add(1.0, 1.0));
+        let g = c.cells();
+        assert_eq!(g[12], 127);
+        let neighbours = [g[11], g[13], g[7], g[17]];
         assert!(neighbours.iter().all(|&v| v == 0), "only center should be hit, got {:?}", neighbours);
     }
 
     #[test]
     fn paint_circle_radius_10_covers_disc() {
-        let mut c = MaskCorrection::empty(32, 32);
-        paint_circle(&mut c, 16.0, 16.0, 10.0, Stamp { hardness: 1.0, strength: 1.0, mode: BrushMode::Add });
-        assert_eq!(c.grid[16 * 32 + 16], 127);
-        assert_eq!(c.grid[0], 0);
-        let nonzero = c.grid.iter().filter(|&&v| v != 0).count();
+        let mut c = MaskArtifact::new_empty(32, 32);
+        paint_circle(&mut c, 16.0, 16.0, 10.0, add(1.0, 1.0));
+        let g = c.cells();
+        assert_eq!(g[16 * 32 + 16], 127);
+        assert_eq!(g[0], 0);
+        let nonzero = g.iter().filter(|&&v| v != 0).count();
         let area = std::f32::consts::PI * 100.0;
         assert!(
             (nonzero as f32 - area).abs() < area * 0.2,
@@ -389,44 +296,44 @@ mod tests {
 
     #[test]
     fn paint_circle_subtract_writes_negative() {
-        let mut c = MaskCorrection::empty(8, 8);
+        let mut c = MaskArtifact::new_empty(8, 8);
         paint_circle(&mut c, 4.0, 4.0, 2.0, Stamp { hardness: 1.0, strength: 1.0, mode: BrushMode::Subtract });
-        assert_eq!(c.grid[4 * 8 + 4], -127);
+        assert_eq!(c.cells()[4 * 8 + 4], -127);
     }
 
     #[test]
     fn paint_circle_overlapping_keeps_strongest() {
-        let mut c = MaskCorrection::empty(8, 8);
-        paint_circle(&mut c, 4.0, 4.0, 2.0, Stamp { hardness: 1.0, strength: 1.0, mode: BrushMode::Add });
-        let after_first = c.grid[4 * 8 + 4];
-        paint_circle(&mut c, 4.0, 4.0, 2.0, Stamp { hardness: 0.5, strength: 1.0, mode: BrushMode::Add });
-        let after_second = c.grid[4 * 8 + 4];
+        let mut c = MaskArtifact::new_empty(8, 8);
+        paint_circle(&mut c, 4.0, 4.0, 2.0, add(1.0, 1.0));
+        let after_first = c.cells()[4 * 8 + 4];
+        paint_circle(&mut c, 4.0, 4.0, 2.0, add(0.5, 1.0));
+        let after_second = c.cells()[4 * 8 + 4];
         assert_eq!(after_first, 127);
         assert_eq!(after_second, 127, "second weaker stroke must not lower the strong stamp");
     }
 
     #[test]
     fn paint_circle_zero_radius_no_op() {
-        let mut c = MaskCorrection::empty(4, 4);
-        paint_circle(&mut c, 2.0, 2.0, 0.0, Stamp { hardness: 1.0, strength: 1.0, mode: BrushMode::Add });
-        assert!(c.grid.iter().all(|&v| v == 0));
+        let mut c = MaskArtifact::new_empty(4, 4);
+        paint_circle(&mut c, 2.0, 2.0, 0.0, add(1.0, 1.0));
+        assert!(c.cells().iter().all(|&v| v == 0));
     }
 
     #[test]
     fn paint_circle_zero_strength_no_op() {
-        let mut c = MaskCorrection::empty(8, 8);
-        paint_circle(&mut c, 4.0, 4.0, 3.0, Stamp { hardness: 1.0, strength: 0.0, mode: BrushMode::Add });
-        assert!(c.grid.iter().all(|&v| v == 0), "strength = 0 produces no stamp");
+        let mut c = MaskArtifact::new_empty(8, 8);
+        paint_circle(&mut c, 4.0, 4.0, 3.0, add(1.0, 0.0));
+        assert!(c.cells().iter().all(|&v| v == 0), "strength = 0 produces no stamp");
     }
 
     #[test]
     fn paint_circle_half_strength_halves_stamp() {
-        let mut full = MaskCorrection::empty(8, 8);
-        paint_circle(&mut full, 4.0, 4.0, 3.0, Stamp { hardness: 1.0, strength: 1.0, mode: BrushMode::Add });
-        let mut half = MaskCorrection::empty(8, 8);
-        paint_circle(&mut half, 4.0, 4.0, 3.0, Stamp { hardness: 1.0, strength: 0.5, mode: BrushMode::Add });
-        let center_full = full.grid[4 * 8 + 4];
-        let center_half = half.grid[4 * 8 + 4];
+        let mut full = MaskArtifact::new_empty(8, 8);
+        paint_circle(&mut full, 4.0, 4.0, 3.0, add(1.0, 1.0));
+        let mut half = MaskArtifact::new_empty(8, 8);
+        paint_circle(&mut half, 4.0, 4.0, 3.0, add(1.0, 0.5));
+        let center_full = full.cells()[4 * 8 + 4];
+        let center_half = half.cells()[4 * 8 + 4];
         assert_eq!(center_full, 127, "full strength stamps the maximum");
         // Half-strength halves the magnitude (within rounding).
         assert!(
@@ -438,21 +345,22 @@ mod tests {
 
     #[test]
     fn paint_circle_outside_bounds_no_panic() {
-        let mut c = MaskCorrection::empty(4, 4);
-        paint_circle(&mut c, -10.0, -10.0, 5.0, Stamp { hardness: 1.0, strength: 1.0, mode: BrushMode::Add });
-        paint_circle(&mut c, 100.0, 100.0, 5.0, Stamp { hardness: 1.0, strength: 1.0, mode: BrushMode::Add });
-        assert!(c.grid.iter().all(|&v| v == 0));
+        let mut c = MaskArtifact::new_empty(4, 4);
+        paint_circle(&mut c, -10.0, -10.0, 5.0, add(1.0, 1.0));
+        paint_circle(&mut c, 100.0, 100.0, 5.0, add(1.0, 1.0));
+        assert!(c.cells().iter().all(|&v| v == 0));
     }
 
     #[test]
     fn paint_circle_hardness_zero_falls_off_smoothly() {
-        let mut c = MaskCorrection::empty(16, 16);
+        let mut c = MaskArtifact::new_empty(16, 16);
         // Half-pixel offset places the center exactly on pixel (8, 8), so
         // we can compare the perfectly-radial profile.
-        paint_circle(&mut c, 8.5, 8.5, 6.0, Stamp { hardness: 0.0, strength: 1.0, mode: BrushMode::Add });
-        let center = c.grid[8 * 16 + 8];
-        let mid = c.grid[8 * 16 + 11];
-        let edge = c.grid[8 * 16 + 13];
+        paint_circle(&mut c, 8.5, 8.5, 6.0, add(0.0, 1.0));
+        let g = c.cells();
+        let center = g[8 * 16 + 8];
+        let mid = g[8 * 16 + 11];
+        let edge = g[8 * 16 + 13];
         assert_eq!(center, 127, "center should be full-strength at zero distance");
         assert!(
             mid > 0 && mid < 127,
@@ -468,122 +376,64 @@ mod tests {
 
     #[test]
     fn paint_circle_corner_clamps_safely() {
-        let mut c = MaskCorrection::empty(8, 8);
-        paint_circle(&mut c, 0.5, 0.5, 4.0, Stamp { hardness: 1.0, strength: 1.0, mode: BrushMode::Add });
-        assert_eq!(c.grid[0], 127, "in-frame center pixel is hit");
-        let in_disc_corner = c.grid[2 * 8 + 2];
-        let outside = c.grid[7 * 8 + 7];
+        let mut c = MaskArtifact::new_empty(8, 8);
+        paint_circle(&mut c, 0.5, 0.5, 4.0, add(1.0, 1.0));
+        let g = c.cells();
+        assert_eq!(g[0], 127, "in-frame center pixel is hit");
+        let in_disc_corner = g[2 * 8 + 2];
+        let outside = g[7 * 8 + 7];
         assert!(in_disc_corner > 0, "pixel inside the truncated disc should be painted");
         assert_eq!(outside, 0, "pixel outside the disc should be untouched");
     }
 
     #[test]
-    fn is_empty_detects_zero_grid() {
-        let c = MaskCorrection::empty(8, 8);
-        assert!(c.is_empty());
-        let mut c2 = c.clone();
-        c2.grid[3] = 1;
-        assert!(!c2.is_empty());
-    }
-
-    #[test]
-    fn merge_takes_max_magnitude_per_direction() {
-        let mut a = MaskCorrection::empty(2, 1);
-        a.grid = vec![10, -50];
-        let mut b = MaskCorrection::empty(2, 1);
-        b.grid = vec![80, -20];
-        merge(&mut a, &b);
-        assert_eq!(a.grid, vec![80, -50]);
-    }
-
-    #[test]
-    fn merge_skips_zero_cells() {
-        let mut a = MaskCorrection::empty(3, 1);
-        a.grid = vec![5, -5, 0];
-        let b_zero = MaskCorrection::empty(3, 1);
-        let snapshot = a.grid.clone();
-        merge(&mut a, &b_zero);
-        assert_eq!(a.grid, snapshot, "zero addition leaves target intact");
-    }
-
-    #[test]
-    fn merge_dim_mismatch_is_no_op() {
-        let mut a = MaskCorrection::empty(4, 4);
-        a.grid[0] = 33;
-        let b = MaskCorrection::empty(2, 2);
-        merge(&mut a, &b);
-        assert_eq!(a.grid[0], 33);
-    }
-
-    #[test]
-    fn content_hash_changes_on_grid_edit() {
-        let mut a = MaskCorrection::empty(8, 8);
-        let h1 = content_hash(&a);
-        a.grid[5] = 1;
-        let h2 = content_hash(&a);
-        assert_ne!(h1, h2);
-    }
-
-    #[test]
-    fn content_hash_changes_on_dim_change() {
-        let a = MaskCorrection::empty(8, 8);
-        let b = MaskCorrection::empty(16, 4);
-        assert_ne!(content_hash(&a), content_hash(&b));
-    }
-
-    #[test]
-    fn content_hash_deterministic_across_calls() {
-        let mut a = MaskCorrection::empty(4, 4);
-        a.grid[3] = 7;
-        a.grid[10] = -7;
-        assert_eq!(content_hash(&a), content_hash(&a));
-    }
-
-    #[test]
     fn paint_square_fills_chebyshev_disc() {
-        let mut c = MaskCorrection::empty(16, 16);
-        paint_square(&mut c, 8.0, 8.0, 3.0, Stamp { hardness: 1.0, strength: 1.0, mode: BrushMode::Add });
+        let mut c = MaskArtifact::new_empty(16, 16);
+        paint_square(&mut c, 8.0, 8.0, 3.0, add(1.0, 1.0));
+        let g = c.cells();
         // Inside the 6×6 chebyshev ball: full strength.
-        assert_eq!(c.grid[8 * 16 + 8], 127);
-        assert_eq!(c.grid[6 * 16 + 6], 127);
-        assert_eq!(c.grid[10 * 16 + 10], 127);
+        assert_eq!(g[8 * 16 + 8], 127);
+        assert_eq!(g[6 * 16 + 6], 127);
+        assert_eq!(g[10 * 16 + 10], 127);
         // Outside: untouched.
-        assert_eq!(c.grid[2 * 16 + 2], 0);
-        assert_eq!(c.grid[14 * 16 + 14], 0);
+        assert_eq!(g[2 * 16 + 2], 0);
+        assert_eq!(g[14 * 16 + 14], 0);
     }
 
     #[test]
     fn paint_line_zero_length_stamps_one_circle() {
-        let mut c = MaskCorrection::empty(8, 8);
-        paint_line(&mut c, 4.0, 4.0, 4.0, 4.0, 1.5, Stamp { hardness: 1.0, strength: 1.0, mode: BrushMode::Add });
+        let mut c = MaskArtifact::new_empty(8, 8);
+        paint_line(&mut c, 4.0, 4.0, 4.0, 4.0, 1.5, add(1.0, 1.0));
         // Same as a single paint_circle stamp at (4, 4).
-        assert!(c.grid[4 * 8 + 4] > 0, "zero-length line still stamps a circle");
+        assert!(c.cells()[4 * 8 + 4] > 0, "zero-length line still stamps a circle");
     }
 
     #[test]
     fn paint_line_covers_intermediate_pixels() {
-        let mut c = MaskCorrection::empty(32, 32);
-        paint_line(&mut c, 4.0, 16.0, 28.0, 16.0, 1.0, Stamp { hardness: 1.0, strength: 1.0, mode: BrushMode::Add });
-        assert!(c.grid[16 * 32 + 16] > 0, "midpoint of a horizontal line must be painted");
-        assert_eq!(c.grid[5 * 32 + 16], 0, "well above the line stays untouched");
+        let mut c = MaskArtifact::new_empty(32, 32);
+        paint_line(&mut c, 4.0, 16.0, 28.0, 16.0, 1.0, add(1.0, 1.0));
+        let g = c.cells();
+        assert!(g[16 * 32 + 16] > 0, "midpoint of a horizontal line must be painted");
+        assert_eq!(g[5 * 32 + 16], 0, "well above the line stays untouched");
     }
 
     #[test]
     fn paint_line_diagonal_has_no_gaps() {
-        let mut c = MaskCorrection::empty(32, 32);
-        paint_line(&mut c, 0.5, 0.5, 24.5, 24.5, 1.0, Stamp { hardness: 1.0, strength: 1.0, mode: BrushMode::Add });
+        let mut c = MaskArtifact::new_empty(32, 32);
+        paint_line(&mut c, 0.5, 0.5, 24.5, 24.5, 1.0, add(1.0, 1.0));
         for d in 1..=23 {
-            assert!(c.grid[(d * 32 + d) as usize] > 0, "diagonal pixel ({d}, {d}) must be painted");
+            assert!(c.cells()[(d * 32 + d) as usize] > 0, "diagonal pixel ({d}, {d}) must be painted");
         }
     }
 
     #[test]
     fn paint_square_hardness_zero_falls_off_smoothly() {
-        let mut c = MaskCorrection::empty(16, 16);
-        paint_square(&mut c, 8.5, 8.5, 6.0, Stamp { hardness: 0.0, strength: 1.0, mode: BrushMode::Add });
-        let center = c.grid[8 * 16 + 8];
-        let mid = c.grid[8 * 16 + 11];
-        let edge = c.grid[8 * 16 + 13];
+        let mut c = MaskArtifact::new_empty(16, 16);
+        paint_square(&mut c, 8.5, 8.5, 6.0, add(0.0, 1.0));
+        let g = c.cells();
+        let center = g[8 * 16 + 8];
+        let mid = g[8 * 16 + 11];
+        let edge = g[8 * 16 + 13];
         assert_eq!(center, 127, "chebyshev = 0 at center is full strength");
         assert!(mid > 0 && mid < 127, "mid radius is partial under smoothstep, got {mid}");
         assert!(edge < mid, "outer pixel weaker than mid (edge={edge}, mid={mid})");

@@ -2416,14 +2416,9 @@ impl PrunrApp {
             let seg_model_match = seg_tensor.as_ref().is_some_and(|s| s.model == *model);
             (*recipe == current_recipe && seg_model_match).then(|| base.clone())
         });
-        // Build correction from selection_mask at tensor resolution (not source
-        // resolution — postprocess_from_flat runs at tensor dims). When no
-        // seg tensor is available, correction is irrelevant (filter-only path).
-        let correction = item.selection_mask.as_ref().and_then(|sel| {
-            seg_tensor.as_ref().map(|seg| {
-                std::sync::Arc::new(sel.to_mask_correction(seg.width as u16, seg.height as u16))
-            })
-        });
+        // Without a seg tensor the correction has nothing to apply to
+        // (filter-only path).
+        let correction = seg_tensor.as_ref().and_then(|_| item.selection_mask.clone());
         Some(DispatchInputs {
             kind, original, settings: item.settings,
             seg_tensor, edge_tensor, secondary_edge_tensor,
@@ -4464,11 +4459,7 @@ mod selection_action_tests {
 
     fn make_mask(w: u32, h: u32, selected: bool) -> MaskArtifact {
         let v = if selected { prunr_core::selection::FULL } else { 0 };
-        MaskArtifact {
-            width: w,
-            height: h,
-            data: Arc::new(vec![v; (w * h) as usize]),
-        }
+        MaskArtifact::from_cells(w, h, vec![v; (w * h) as usize])
     }
 
     fn make_item_done() -> BatchItem {
@@ -4568,14 +4559,10 @@ mod selection_action_tests {
         use prunr_core::selection::FULL;
         let original = make_mask(4, 4, true);
         let inverted = original.invert(BrushMode::Subtract);
-        assert!(inverted.data.iter().all(|&v| v == 0), "inverted all-selected mask must be all-zero");
-        let partial = MaskArtifact {
-            width: 2,
-            height: 2,
-            data: Arc::new(vec![0, FULL, 0, FULL]),
-        };
-        assert_eq!(partial.invert(BrushMode::Subtract).data.as_slice(), &[-FULL, 0, -FULL, 0]);
-        assert_eq!(partial.invert(BrushMode::Add).data.as_slice(), &[FULL, 0, FULL, 0]);
+        assert!(inverted.cells().iter().all(|&v| v == 0), "inverted all-selected mask must be all-zero");
+        let partial = MaskArtifact::from_cells(2, 2, vec![0, FULL, 0, FULL]);
+        assert_eq!(partial.invert(BrushMode::Subtract).cells(), &[-FULL, 0, -FULL, 0]);
+        assert_eq!(partial.invert(BrushMode::Add).cells(), &[FULL, 0, FULL, 0]);
     }
 
     /// Cut: one archive call produces one history entry (not two).
