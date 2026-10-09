@@ -28,14 +28,6 @@ fn mode_label(mode: LineMode) -> &'static str {
     }
 }
 
-fn sketch_button_label(mode: LineMode) -> &'static str {
-    match mode {
-        LineMode::Off => "Sketch: Off",
-        LineMode::EdgesOnly => "Sketch: Full",
-        LineMode::SubjectOutline => "Sketch: Subject",
-    }
-}
-
 /// Short description for the dropdown list (shown beneath the title).
 fn mode_description(mode: LineMode) -> &'static str {
     match mode {
@@ -86,11 +78,10 @@ pub fn render(
     subject_available: bool,
 ) -> LinesChange {
     let pop_id = egui::Id::new("lines_popover");
-    let label = sketch_button_label(settings.line_mode);
     let accent = settings.line_mode != LineMode::Off;
 
     let resp = chip::tooltip(
-        chip::chip_button(ui, ICON_DRAW.codepoint, label, accent),
+        chip::chip_button(ui, ICON_DRAW.codepoint, mode_label(settings.line_mode), accent),
         "Sketch",
         "Stage 1 of 4 in the lines pipeline. Picks what DexiNed sees: Off (skipped), Subject (seg model masks to subject-on-white first, then DexiNed), Full (DexiNed runs on the whole scene). The knobs to the right are no-ops when Sketch is Off.",
         None,

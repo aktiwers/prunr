@@ -25,7 +25,7 @@ use crate::gui::theme;
 use crate::gui::views::{chip, fmt, hint, preset_dropdown};
 use prunr_core::LineMode;
 
-use super::model_info;
+use super::{installed_models, model_info};
 
 /// Append the "Press F3 for the full pipeline." hint to a chip tooltip at
 /// compile time. Single-point of truth for the hint suffix so an F3 rebind
@@ -307,7 +307,6 @@ pub(crate) fn render(
                     // Paint, Magic — so the settings chip appearing never
                     // moves the toggles.
                     let paint_active = brush_state.is_enabled();
-                    let magic_active = magic_brush_active;
                     if model_uses_seg && has_selection {
                         let resp = chip::tooltip(
                             chip::icon_toggle_button(ui, ICON_LOCK.codepoint, protect_selection),
@@ -319,7 +318,7 @@ pub(crate) fn render(
                             change.protect_selection = Some(!protect_selection);
                         }
                     }
-                    if brush_available && magic_active {
+                    if brush_available && magic_brush_active {
                         let outcome = super::magic_brush_chip::render(
                             ui,
                             &mut app_settings.brush,
@@ -350,7 +349,7 @@ pub(crate) fn render(
                             change.toggle_paint = true;
                         }
                         let magic_resp = chip::tooltip(
-                            chip::icon_toggle_button(ui, ICON_AUTO_AWESOME.codepoint, magic_active),
+                            chip::icon_toggle_button(ui, ICON_AUTO_AWESOME.codepoint, magic_brush_active),
                             "Magic Brush",
                             "Click or stroke to select an object; Shift adds, Alt subtracts.",
                             None,
@@ -1345,8 +1344,8 @@ pub(super) fn render_model_dropdown(
     // made the dropdown unreachable in EdgesOnly.
     let enabled = !processing;
     ui.add_enabled_ui(enabled, |ui| {
-        let (icon, name, _) = model_info(app_settings.model);
-        let resp = chip::chip_button(ui, icon, name, false);
+        let info = model_info(app_settings.model);
+        let resp = chip::chip_button(ui, info.icon, info.name, false);
         let (heading, body) = if app_settings.model.is_inpaint() {
             (
                 "Eraser (LaMa inpaint)",
@@ -1368,15 +1367,7 @@ pub(super) fn render_model_dropdown(
         chip::popup_for(ui, pop_id, &resp, |ui| {
             ui.label(RichText::new("Model").strong().color(theme::TEXT_PRIMARY));
             ui.add_space(theme::SPACE_XS);
-            // Installed models only — `None` (filter-only) and Bundled
-            // descriptors are always available; OnDemand entries appear
-            // once downloaded. `None` is pinned last.
-            let installed = SettingsModel::ALL.iter()
-                .copied()
-                .filter(|v| *v != SettingsModel::None)
-                .filter(|v| v.to_model_id().is_none_or(prunr_models::is_available))
-                .chain(std::iter::once(SettingsModel::None));
-            for variant in installed {
+            for variant in installed_models() {
                 if variant == SettingsModel::None {
                     ui.separator();
                 }
@@ -1384,8 +1375,8 @@ pub(super) fn render_model_dropdown(
                     .to_model_id()
                     .and_then(prunr_models::descriptor)
                     .and_then(|d| d.hardware_advisory(&app_settings.active_backend));
-                let (_, name, blurb) = model_info(variant);
-                let row = chip::picker_row(ui, app_settings.model == variant, name, blurb);
+                let info = model_info(variant);
+                let row = chip::picker_row(ui, app_settings.model == variant, info.name, info.blurb);
                 let row = match advisory {
                     Some(tip) => row.on_hover_text(tip),
                     None => row,
