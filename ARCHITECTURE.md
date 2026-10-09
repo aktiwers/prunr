@@ -441,7 +441,8 @@ Tier 2 path uses postprocess_from_flat(tensor: &[f32], h, w, original, mask, mod
 - Alpha composition row-parallel via `par_chunks_mut` above 256k pixels (memory-bandwidth-bound, so the ceiling is ~1.1-1.2× on 4K regardless of core count)
 - Guided filter uses `f32` prefix sums (halved bandwidth vs f64)
 - Guided filter drops each f32 plane at its last use; peak stays at the four parallel box filters (12 planes, 576 MB at 4K) because pairing them measured ~9 % slower (open trade)
-- Edge shift is two separable window passes (van Herk / Gil-Werman), constant time per pixel whatever the shift; a fractional shift blends with the next integer shift computed in place in the same two scratch planes
+- Edge shift is two separable window passes (van Herk / Gil-Werman), constant time per pixel whatever the shift; a fractional shift blends with the next integer shift computed in place in the same two scratch planes. `morphology::shifted` writes a new image so the Lines path dilates its cached mask without cloning it first
+- Edge composition runs row-parallel with the compose-mode alpha rule inlined per mode (a macro expands the loop once per rule) and the line style's colour rule inlined per style; before the rewrite a styled 4K composition cost 120–410 ms per live-preview tick
 - Single RGBA allocation in `postprocess()` — shared across guided filter and mask application (saves ~48 MB per Tier 2 run on a 4000×3000 image)
 
 #### Benchmark numbers (4000×3000 image, 8-core x86_64, `cargo test --release`)
@@ -459,7 +460,7 @@ these numbers.
 
 #### Criterion microbenches
 
-`crates/prunr-core/benches/` ships criterion benches for the seven
+`crates/prunr-core/benches/` ships criterion benches for the eight
 kernels regression most likely to hide under E2E noise. Run with
 `cargo bench -p prunr-core --bench <name>`. CI does NOT run them —
 runner wall-clock variance produces false regressions cheaper to
@@ -476,6 +477,9 @@ ignore than to investigate. Reference numbers (8-core x86_64,
 | `morphology::shift_mask`            | 4K mask, 50 px           |         16 ms |
 | `sam::decode_to_mask_artifact`      | 256² logits → 4K plane   |          8 ms |
 | `sam::preprocess_for_sam`           | 4K photo → 1024² tensor  |         48 ms |
+| `compose_edges_styled`              | 4K, Solid / GradientY    |  57 / 68 ms   |
+| `compose_edges_styled`              | 4K, Rainbow / Noise      |  98 / 108 ms  |
+| `compose_edges_dual_styled`         | 4K                       |         76 ms |
 
 Before the separable rewrite the same 4K mask took 52 ms at 1 px,
 156 ms at 2.5 px, 493 ms at 10 px and 2.46 s at 50 px. The other
