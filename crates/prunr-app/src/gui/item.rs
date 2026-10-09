@@ -380,6 +380,9 @@ pub(crate) struct SelectionTexture {
     pub(crate) key: super::background_io::SelectionTextureKey,
     pub(crate) handle: egui::TextureHandle,
     pub(crate) shown: Arc<prunr_core::selection::MaskArtifact>,
+    /// With Feather on, the feathered plane the texture was built from, so
+    /// Delete / Copy / Cut act on it without filtering again.
+    pub(crate) feathered: Option<Arc<prunr_core::selection::MaskArtifact>>,
 }
 
 impl BatchItem {
