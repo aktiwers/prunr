@@ -712,9 +712,8 @@ fn render_loaded(ui: &mut egui::Ui, app: &PrunrApp) {
         // shows but the user sees no mask. See `33-UI-SPEC.md` §"Selection
         // Visualization — Render gating".
         if let Some(it) = app.batch.selected_item() {
-            let (src_w, src_h) = it.dimensions;
             super::selection_overlay::render_selection_overlay(
-                ui, it, &app.settings.brush, img_rect, src_w, src_h,
+                ui, it, &app.settings.brush, img_rect,
             );
         }
 
@@ -849,9 +848,8 @@ fn render_done(ui: &mut egui::Ui, app: &PrunrApp) {
             // here too. Per 33-UI-SPEC §"Selection Visualization — Render
             // gating".
             if let Some(it) = item {
-                let (src_w, src_h) = it.dimensions;
                 super::selection_overlay::render_selection_overlay(
-                    ui, it, &app.settings.brush, img_rect, src_w, src_h,
+                    ui, it, &app.settings.brush, img_rect,
                 );
             }
         }
@@ -901,13 +899,11 @@ fn render_done(ui: &mut egui::Ui, app: &PrunrApp) {
             Color32::from_rgba_unmultiplied(255, 255, 255, result_alpha),
         );
 
-        // Selection overlay: outline + fill, zero-alloc read of pre-built texture +
-        // polyline. render_selection_overlay is RENDER-ONLY — no I/O, no decode,
-        // no GPU upload (all pre-computed via background_io channels).
+        // Selection overlay: one pre-built texture, RENDER-ONLY — no I/O,
+        // no decode, no GPU upload here.
         if let Some(it) = app.batch.selected_item() {
-            let (src_w, src_h) = it.dimensions;
             super::selection_overlay::render_selection_overlay(
-                ui, it, &app.settings.brush, img_rect, src_w, src_h,
+                ui, it, &app.settings.brush, img_rect,
             );
         }
     }

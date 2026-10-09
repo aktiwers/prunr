@@ -915,31 +915,38 @@ impl PrunrApp {
         }
     }
 
-    /// Single-source-of-truth call for writing a new selection and triggering
-    /// all three lockstep side-effects: persist mask, fire per-model dispatch
-    /// rule, spawn off-thread visualization build (outline + texture).
+    /// Single-source-of-truth call for writing a new selection: persist the
+    /// mask and fire the per-model dispatch rule. The commit drops the old
+    /// texture, so `ensure_selection_texture` rebuilds it next frame.
     ///
-    /// Every call site that authors a selection (Paint Brush, Magic Brush Plan
-    /// 07, Invert action, any future tool) calls THIS method — never the three
-    /// methods individually.
+    /// Every call site that authors a selection (Paint Brush, Magic Brush,
+    /// Invert, any future tool) calls THIS method.
     pub(crate) fn commit_selection_and_dispatch(
         &mut self,
         item_id: u64,
         mask: prunr_core::selection::MaskArtifact,
     ) {
-        let Some(hash) = self.batch.commit_selection(item_id, mask) else { return };
-        self.apply_selection_to_active_model(item_id);
-        if let Some(item) = self.batch.find_by_id(item_id) {
-            if let Some(mask_arc) = item.selection_mask.clone() {
-                let feather_px = self.settings.brush.edge_feather as u32;
-                self.batch.bg_io.request_selection_visualization(
-                    item_id,
-                    mask_arc,
-                    hash,
-                    feather_px,
-                );
-            }
+        if self.batch.commit_selection(item_id, mask).is_none() {
+            return;
         }
+        self.apply_selection_to_active_model(item_id);
+    }
+
+    /// The selected item's selection texture is rebuilt whenever it is
+    /// missing — after a commit, undo/redo, image switch or a style-knob
+    /// change. One path for every producer; `selection_tex_pending` keeps
+    /// it to one in-flight build.
+    fn ensure_selection_texture(&mut self) {
+        let Some(idx) = self.batch.selected_idx_clamped() else { return };
+        let item = &mut self.batch.items[idx];
+        if item.selection_texture.is_some() || item.selection_tex_pending {
+            return;
+        }
+        let (Some(mask), Some(hash)) = (item.selection_mask.clone(), item.selection_hash) else { return };
+        item.selection_tex_pending = true;
+        let (item_id, source) = (item.id, item.source_rgba.clone());
+        let style = super::background_io::SelectionStyle::from_brush(&self.settings.brush);
+        self.batch.bg_io.request_selection_visualization(item_id, mask, hash, source, style);
     }
 
     /// Dispatch a selection action (Delete / Copy / Cut / Invert / Clear).
@@ -1006,6 +1013,13 @@ impl PrunrApp {
         let item = &self.batch.items[idx];
         let mask = item.selection_mask.clone()?;
         let base = item.result_rgba.clone().or_else(|| item.source_rgba.clone())?;
+        // Edge feather acts on what the user sees cut, so it applies here
+        // as well as in the visualization.
+        let feather_px = self.settings.brush.edge_feather.round().max(0.0) as u32;
+        let mask = match (feather_px, item.source_rgba.as_ref()) {
+            (0, _) | (_, None) => mask,
+            (px, Some(src)) => Arc::new(prunr_core::selection::refine::feather_edges(&mask, src, px)),
+        };
         Some((mask, base))
     }
 
@@ -3311,22 +3325,14 @@ impl PrunrApp {
         self.pump_thumbnail_results(ctx);
         self.pump_history_demote_results();
 
-        // Drain off-thread outline polylines. Hash guard: if
-        // item.selection_hash no longer matches, a newer commit superseded
-        // this result — silently drop it.
-        while let Ok(result) = self.batch.bg_io.selection_outline_rx.try_recv() {
-            if let Some(item) = self.batch.find_by_id_mut(result.item_id) {
-                if item.selection_hash == Some(result.hash) {
-                    item.selection_outline = Some(std::sync::Arc::new(result.outline));
-                }
-            }
-        }
-
-        // Drain off-thread selection-visualization textures.
-        // `ctx.load_texture` is allowed here — this drain runs from
-        // `logic()`, not a render closure.
+        // Drain off-thread selection textures. `ctx.load_texture` is
+        // allowed here — this drain runs from `logic()`, not a render
+        // closure. A result whose hash no longer matches was superseded by
+        // a newer commit; dropping it clears `pending` so the next frame
+        // rebuilds from the current mask.
         while let Ok(result) = self.batch.bg_io.selection_texture_rx.try_recv() {
             if let Some(item) = self.batch.find_by_id_mut(result.item_id) {
+                item.selection_tex_pending = false;
                 if item.selection_hash == Some(result.hash) {
                     let tex = ctx.load_texture(
                         format!("selection_{}", result.item_id),
@@ -3337,6 +3343,7 @@ impl PrunrApp {
                 }
             }
         }
+        self.ensure_selection_texture();
 
         // Drain bg-image texture preps. Hash match guards against a
         // user pick that swapped to a different bg image while the
@@ -3691,6 +3698,8 @@ impl PrunrApp {
         }
         if toolbar_change.brush_settings_committed {
             self.settings.save();
+            // Fill / outline / feather knobs are baked into the texture.
+            self.batch.items[idx].selection_texture = None;
         }
         if let Some(req) = toolbar_change.open_model_store {
             self.model_store = Some(req);
