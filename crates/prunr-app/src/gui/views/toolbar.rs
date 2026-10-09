@@ -8,7 +8,7 @@ use crate::gui::item::BatchStatus;
 use crate::gui::state::AppState;
 use crate::gui::theme;
 
-use super::chip::tooltip;
+use super::chip::{tooltip, with_fill};
 use super::shortcuts::Action;
 
 pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
@@ -23,10 +23,9 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
         let open_btn = egui::Button::new(
             RichText::new(format!("{}  Open", ICON_FOLDER_OPEN.codepoint)).color(theme::TEXT_PRIMARY),
         )
-        .fill(theme::BG_SECONDARY)
         .corner_radius(theme::BUTTON_ROUNDING)
         .min_size(egui::vec2(0.0, theme::BTN_HEIGHT));
-        if tooltip(ui.add(open_btn), "Open", "Open one or more images.", Some(Action::Open)).clicked() {
+        if tooltip(with_fill(ui, theme::BG_SECONDARY, |ui| ui.add(open_btn)), "Open", "Open one or more images.", Some(Action::Open)).clicked() {
             app.pending_open_dialog = true;
         }
 
@@ -37,10 +36,9 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                 .size(theme::ICON_SIZE_BUTTON)
                 .color(theme::TEXT_PRIMARY),
         )
-        .fill(theme::BG_SECONDARY)
         .corner_radius(theme::BUTTON_ROUNDING)
         .min_size(egui::vec2(theme::BTN_HEIGHT, theme::BTN_HEIGHT));
-        if tooltip(ui.add(gear_btn), "Settings", "Hardware, performance and behavior.", Some(Action::Settings)).clicked() {
+        if tooltip(with_fill(ui, theme::BG_SECONDARY, |ui| ui.add(gear_btn)), "Settings", "Hardware, performance and behavior.", Some(Action::Settings)).clicked() {
             if app.show_settings {
                 app.close_settings(ui.ctx());
             } else {
@@ -58,16 +56,15 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
             let icon_btn = |icon: &'static str| egui::Button::new(
                 RichText::new(icon).size(theme::ICON_SIZE_BUTTON).color(theme::TEXT_PRIMARY),
             )
-            .fill(theme::BG_SECONDARY)
             .corner_radius(theme::BUTTON_ROUNDING)
             .min_size(egui::vec2(theme::BTN_HEIGHT, theme::BTN_HEIGHT));
 
-            if tooltip(ui.add_enabled(can_undo, icon_btn(ICON_UNDO.codepoint)), "Undo", "", Some(Action::Undo))
+            if tooltip(with_fill(ui, theme::BG_SECONDARY, |ui| ui.add_enabled(can_undo, icon_btn(ICON_UNDO.codepoint))), "Undo", "", Some(Action::Undo))
                 .clicked()
             {
                 app.handle_undo(ui.ctx());
             }
-            if tooltip(ui.add_enabled(can_redo, icon_btn(ICON_REDO.codepoint)), "Redo", "", Some(Action::Redo))
+            if tooltip(with_fill(ui, theme::BG_SECONDARY, |ui| ui.add_enabled(can_redo, icon_btn(ICON_REDO.codepoint))), "Redo", "", Some(Action::Redo))
                 .clicked()
             {
                 app.handle_redo(ui.ctx());
@@ -80,9 +77,8 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                 let remove_sel_btn = egui::Button::new(
                     RichText::new(format!("{}  Remove Selected", ICON_DELETE.codepoint)).color(Color32::WHITE),
                 )
-                .fill(theme::DESTRUCTIVE)
                 .corner_radius(theme::BUTTON_ROUNDING);
-                if tooltip(ui.add(remove_sel_btn), "Remove selected", "Take the selected images out of the queue.", None).clicked() {
+                if tooltip(with_fill(ui, theme::DESTRUCTIVE, |ui| ui.add(remove_sel_btn)), "Remove selected", "Take the selected images out of the queue.", None).clicked() {
                     app.remove_selected();
                 }
             }
@@ -99,9 +95,8 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                 let save_btn = egui::Button::new(
                     RichText::new(save_label).color(theme::TEXT_PRIMARY),
                 )
-                .fill(theme::BG_SECONDARY)
                 .corner_radius(theme::BUTTON_ROUNDING);
-                if tooltip(ui.add(save_btn), save_title, "Save the result as PNG.", Some(Action::Save)).clicked() {
+                if tooltip(with_fill(ui, theme::BG_SECONDARY, |ui| ui.add(save_btn)), save_title, "Save the result as PNG.", Some(Action::Save)).clicked() {
                     app.handle_save_selected();
                 }
             }
@@ -117,7 +112,6 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                 let cancel_btn = egui::Button::new(
                     RichText::new(format!("{}  {cancel_label}", ICON_CANCEL.codepoint)).color(Color32::WHITE),
                 )
-                .fill(theme::DESTRUCTIVE)
                 .corner_radius(theme::BUTTON_ROUNDING)
                 .min_size(egui::vec2(0.0, theme::BTN_HEIGHT));
                 let (title, body) = if partial {
@@ -125,7 +119,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                 } else {
                     ("Cancel all", "Stop all processing.")
                 };
-                if tooltip(ui.add(cancel_btn), title, body, Some(Action::Cancel)).clicked() {
+                if tooltip(with_fill(ui, theme::DESTRUCTIVE, |ui| ui.add(cancel_btn)), title, body, Some(Action::Cancel)).clicked() {
                     if partial {
                         app.handle_cancel_selected();
                     } else {
@@ -167,7 +161,6 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                 .fit_to_exact_size(egui::vec2(22.0, 22.0));
 
                 let btn = egui::Button::image_and_text(icon, RichText::new(label_text).color(text_color))
-                    .fill(fill)
                     .corner_radius(theme::BUTTON_ROUNDING)
                     .min_size(egui::vec2(0.0, theme::BTN_HEIGHT));
 
@@ -195,7 +188,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                     }
                 };
 
-                if tooltip(ui.add_enabled(has_processable, btn), "Process", &body, Some(Action::Process)).clicked() {
+                if tooltip(with_fill(ui, fill, |ui| ui.add_enabled(has_processable, btn)), "Process", &body, Some(Action::Process)).clicked() {
                     app.handle_process_intent();
                 }
             }
