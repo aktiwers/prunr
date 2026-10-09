@@ -619,7 +619,9 @@ impl BrushState {
         if !active.dirty {
             return None;
         }
-        Some(active.grid)
+        let mut grid = active.grid;
+        grid.rescan_flags();
+        Some(grid)
     }
 
 }
