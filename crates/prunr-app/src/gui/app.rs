@@ -2394,6 +2394,7 @@ impl PrunrApp {
                 edge_tensor: None,
                 secondary_edge_tensor: None,
                 cached_edge_mask: None,
+                cached_bold_mask: None,
                 cached_masked_base: None,
                 correction: None,
                 upscale_raw: Some(upscale_raw),
@@ -2409,11 +2410,16 @@ impl PrunrApp {
             PreviewKind::Edge if edge_tensor.is_none() => return None,
             _ => {}
         }
-        let cached_edge_mask = item.cached_edge_mask.as_ref().and_then(|(m, bits, scale)| {
-            let strength_match = *bits == item.settings.line_strength.to_bits();
-            let scale_match = *scale == item.settings.edge_scale;
-            (strength_match && scale_match).then(|| m.clone())
-        });
+        let plane_key = |scale: prunr_core::EdgeScale| super::live_preview::EdgePlaneKey {
+            strength_bits: item.settings.line_strength.to_bits(),
+            scale,
+            thickness: u32::from(item.settings.edge_thickness),
+        };
+        let cached_plane = |slot: &Option<(Arc<image::GrayImage>, super::live_preview::EdgePlaneKey)>, key| {
+            slot.as_ref().filter(|(_, k)| *k == key).map(|(m, _)| Arc::clone(m))
+        };
+        let cached_edge_mask = cached_plane(&item.cached_edge_mask, plane_key(item.settings.edge_scale));
+        let cached_bold_mask = cached_plane(&item.cached_bold_edge_mask, plane_key(prunr_core::EdgeScale::Bold));
         let cached_masked_base = item.cached_masked_base.as_ref().and_then(|(base, recipe, model)| {
             let current_recipe = prunr_core::MaskRecipe::from(&item.settings.mask_settings());
             let seg_model_match = seg_tensor.as_ref().is_some_and(|s| s.model == *model);
@@ -2427,7 +2433,7 @@ impl PrunrApp {
         Some(DispatchInputs {
             kind, original, settings: item.settings,
             seg_tensor, edge_tensor, secondary_edge_tensor,
-            cached_edge_mask, cached_masked_base,
+            cached_edge_mask, cached_bold_mask, cached_masked_base,
             correction,
             upscale_raw: None,
             bicubic_source: None,
@@ -2504,8 +2510,11 @@ impl PrunrApp {
                 // Mark pending so reconcile_selected doesn't also
                 // spawn its own prep on this same frame.
                 item.result_tex_pending = true;
-                if let Some((mask, bits, scale)) = r.new_edge_mask {
-                    item.cached_edge_mask = Some((mask, bits, scale));
+                if let Some(plane) = r.new_edge_mask {
+                    item.cached_edge_mask = Some(plane);
+                }
+                if let Some(plane) = r.new_bold_mask {
+                    item.cached_bold_edge_mask = Some(plane);
                 }
                 if let Some((base, recipe, model)) = r.new_masked_base {
                     item.cached_masked_base = Some((base, recipe, model));
