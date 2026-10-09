@@ -1,14 +1,15 @@
 //! Phase 23-05: brush correction strokes affect the postprocess result.
 //!
 //! Drives the full Tier-1 + Tier-2 path: `infer_only` → tensor → two
-//! `postprocess_from_flat` runs (without and with a `MaskCorrection`).
+//! `postprocess_from_flat` runs (without and with a selection applied).
 //! Asserts the corrected result differs in the painted region and
 //! matches outside it.
 
 mod test_common;
 
 use prunr_core::{
-    brush::{paint_circle, BrushMode, MaskCorrection, Stamp},
+    brush::{paint_circle, BrushMode, Stamp},
+    selection::MaskArtifact,
     infer_only, postprocess_from_flat, MaskSettings, ModelKind, OrtEngine,
     PostprocessOpts, ProgressStage,
 };
@@ -39,7 +40,7 @@ fn brush_correction_stroke_alters_the_painted_region_only() {
     // Step 2b: apply a `Subtract` brush stroke covering a small disk.
     // Subtract drives mask alpha → 0 in the painted region, so the
     // result's alpha there should drop noticeably.
-    let mut correction = MaskCorrection::empty(SIZE as u16, SIZE as u16);
+    let mut correction = MaskArtifact::new_empty(SIZE, SIZE);
     let stamp = Stamp { hardness: 1.0, strength: 1.0, mode: BrushMode::Subtract };
     paint_circle(&mut correction, 80.0, 128.0, 25.0, stamp);
     let opts_with_corr = opts.with_correction(Some(&correction));
@@ -99,7 +100,7 @@ fn brush_correction_is_deterministic_across_runs() {
         .expect("infer_only");
     let opts = PostprocessOpts::new(&mask_settings, ModelKind::Silueta);
 
-    let mut correction = MaskCorrection::empty(SIZE as u16, SIZE as u16);
+    let mut correction = MaskArtifact::new_empty(SIZE, SIZE);
     let stamp = Stamp { hardness: 1.0, strength: 1.0, mode: BrushMode::Subtract };
     paint_circle(&mut correction, 80.0, 128.0, 25.0, stamp);
 

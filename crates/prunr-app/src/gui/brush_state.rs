@@ -3,7 +3,8 @@
 //! `BatchManager.items` — the caller hands it the active grid size
 //! and writes the committed strokes back via `BatchItem`'s mutator.
 
-use prunr_core::brush::{paint_circle, paint_line, paint_square, BrushMode, BrushShape, MaskCorrection, Stamp};
+use prunr_core::brush::{paint_circle, paint_line, paint_square, BrushMode, BrushShape, Stamp};
+use prunr_core::selection::MaskArtifact;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -463,7 +464,7 @@ impl Default for BrushSettings {
 
 /// Mid-drag stroke buffer at the active item's model resolution.
 struct ActiveStroke {
-    grid: MaskCorrection,
+    grid: MaskArtifact,
     /// Set the first time the stamp runs against `grid`. Lets
     /// `commit_stroke` skip an O(W·H) is_empty scan on click-without-drag.
     dirty: bool,
@@ -518,7 +519,7 @@ impl BrushState {
 
     pub fn begin_stroke(&mut self, width: u16, height: u16, shape: BrushShape) {
         self.active = Some(ActiveStroke {
-            grid: MaskCorrection::empty(width, height),
+            grid: MaskArtifact::new_empty(u32::from(width), u32::from(height)),
             dirty: false,
             trail: Vec::new(),
             shape,
@@ -587,7 +588,7 @@ impl BrushState {
         }
     }
 
-    pub fn commit_stroke(&mut self, stamp: Stamp) -> Option<MaskCorrection> {
+    pub fn commit_stroke(&mut self, stamp: Stamp) -> Option<MaskArtifact> {
         let mut active = self.active.take()?;
         if let Some(line) = active.line {
             paint_line(
@@ -876,7 +877,7 @@ mod tests {
         let c = s.commit_stroke(default_stamp()).expect("populated stroke");
         assert_eq!(c.width, 64);
         assert_eq!(c.height, 64);
-        assert!(!c.is_empty());
+        assert!(c.has_selected_region());
         assert!(!s.has_active_stroke());
     }
 

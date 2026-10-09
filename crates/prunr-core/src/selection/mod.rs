@@ -1,9 +1,10 @@
 //! Selection-mask artifact + pure action primitives.
 //!
-//! `MaskArtifact` is the single shared representation written by both
-//! Paint Brush and Magic Brush: a signed `i8` plane at source-image
-//! resolution, wrapped in `Arc<Vec<i8>>` so undo snapshots and
-//! cross-thread reads are refcount bumps, not memcpy.
+//! `MaskArtifact` is the one signed `i8` plane: the Paint Brush paints
+//! into it, the Magic Brush decodes into it, the item keeps it as the
+//! selection, and postprocess applies it to the segmentation mask. It
+//! lives at source-image resolution, wrapped in `Arc<Vec<i8>>` so undo
+//! snapshots and cross-thread reads are refcount bumps, not memcpy.
 //!
 //! Each cell is a signed coverage in `-CELL_MAX..=CELL_MAX`:
 //! - magnitude / `CELL_MAX` = how selected the pixel is. Soft values come
@@ -17,13 +18,10 @@
 //!   box) use `is_selected`, i.e. at least half coverage;
 //! - continuous consumers (Delete / Copy alpha, the segmentation
 //!   correction, invert) use the coverage or the signed cell as-is.
-//!
-//! The layout is bit-compatible with `brush::MaskCorrection`, so a Paint
-//! stroke round-trips to the postprocess correction without loss.
 
 use std::sync::Arc;
 
-use crate::brush::{merge_cell, BrushMode, MaskCorrection};
+use crate::brush::{merge_cell, BrushMode};
 
 pub mod refine;
 
@@ -34,11 +32,13 @@ pub const FULL: i8 = crate::brush::CELL_MAX;
 /// consumers (≈ 0.5 coverage).
 const SELECTED_THRESHOLD: u8 = 64;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct MaskArtifact {
     pub width: u32,
     pub height: u32,
-    pub data: Arc<Vec<i8>>,
+    /// `width × height` cells; writers go through the brush painters or
+    /// `from_cells`, which pin that invariant.
+    data: Arc<Vec<i8>>,
 }
 
 /// Returned by add_mask / subtract_mask when dimensions disagree.
@@ -58,14 +58,19 @@ impl MaskArtifact {
         }
     }
 
-    /// A committed Paint stroke, cell-for-cell. The correction already
-    /// carries sign (mode), hardness falloff and strength.
-    pub fn from_correction(correction: MaskCorrection) -> Self {
-        Self {
-            width: correction.width as u32,
-            height: correction.height as u32,
-            data: Arc::new(correction.grid),
-        }
+    pub fn from_cells(width: u32, height: u32, cells: Vec<i8>) -> Self {
+        debug_assert_eq!(cells.len(), (width as usize) * (height as usize), "cell count != width × height");
+        Self { width, height, data: Arc::new(cells) }
+    }
+
+    pub fn cells(&self) -> &[i8] {
+        &self.data
+    }
+
+    /// Mutable cells; copies the plane first only when a snapshot still
+    /// shares it, so the mid-stroke buffer paints in place.
+    pub(crate) fn cells_mut(&mut self) -> &mut [i8] {
+        Arc::make_mut(&mut self.data).as_mut_slice()
     }
 
     #[inline]
@@ -166,30 +171,36 @@ impl MaskArtifact {
         out
     }
 
-    fn resample<T: Copy>(&self, out_w: u32, out_h: u32, cell: impl Fn(i8) -> T, out: &mut [T]) {
+    /// Visit every cell of an `out_w × out_h` nearest-neighbour resample
+    /// as `(output index, cell)`, row by row. Same-size planes stream
+    /// straight through.
+    pub(crate) fn for_each_resampled(&self, out_w: u32, out_h: u32, mut f: impl FnMut(usize, i8)) {
         if (out_w, out_h) == (self.width, self.height) {
-            for (o, &v) in out.iter_mut().zip(self.data.iter()) {
-                *o = cell(v);
+            for (i, &v) in self.data.iter().enumerate() {
+                f(i, v);
             }
+            return;
+        }
+        if self.width == 0 || self.height == 0 {
             return;
         }
         let (sw, sh) = (self.width as u64, self.height as u64);
         let xs: Vec<usize> = (0..out_w as u64).map(|tx| ((tx * sw) / out_w as u64) as usize).collect();
         for ty in 0..out_h as u64 {
             let src_row = &self.data[(((ty * sh) / out_h as u64) * sw) as usize..];
-            let row = &mut out[(ty * out_w as u64) as usize..][..out_w as usize];
-            for (o, &sx) in row.iter_mut().zip(xs.iter()) {
-                *o = cell(src_row[sx]);
+            let row_base = (ty * out_w as u64) as usize;
+            for (dx, &sx) in xs.iter().enumerate() {
+                f(row_base + dx, src_row[sx]);
             }
         }
     }
 
-    /// Nearest-neighbour resample to model tensor resolution, cell values
-    /// carried as-is (sign, hardness falloff and strength intact).
-    pub fn to_mask_correction(&self, tensor_w: u16, tensor_h: u16) -> MaskCorrection {
-        let mut correction = MaskCorrection::empty(tensor_w, tensor_h);
-        self.resample(tensor_w as u32, tensor_h as u32, |v| v, &mut correction.grid);
-        correction
+    /// Nearest-neighbour resample to `w × h`, cell values carried as-is
+    /// (sign, hardness falloff and strength intact).
+    pub fn resampled(&self, w: u32, h: u32) -> Self {
+        let mut cells = vec![0i8; (w as usize) * (h as usize)];
+        self.for_each_resampled(w, h, |i, v| cells[i] = v);
+        Self::from_cells(w, h, cells)
     }
 
     /// The selected region as a binary mask (255 where `is_selected`),
@@ -197,7 +208,8 @@ impl MaskArtifact {
     /// the same contour the overlay and outline show.
     pub fn region_mask(&self, w: u32, h: u32) -> image::GrayImage {
         let mut out = image::GrayImage::new(w, h);
-        self.resample(w, h, |v| if Self::is_selected(v) { 255 } else { 0 }, out.as_mut());
+        let px = out.as_mut();
+        self.for_each_resampled(w, h, |i, v| px[i] = if Self::is_selected(v) { 255 } else { 0 });
         out
     }
 }
@@ -208,7 +220,7 @@ mod tests {
     use crate::brush::{paint_circle, Stamp};
 
     fn mask(w: u32, h: u32, data: Vec<i8>) -> MaskArtifact {
-        MaskArtifact { width: w, height: h, data: Arc::new(data) }
+        MaskArtifact::from_cells(w, h, data)
     }
 
     #[test]
@@ -347,7 +359,7 @@ mod tests {
     }
 
     #[test]
-    fn to_mask_correction_downsamples_with_nearest_neighbour() {
+    fn resampled_downsamples_with_nearest_neighbour() {
         let mut data = vec![0i8; 16];
         for y in 0..2usize {
             for x in 0..2usize {
@@ -355,26 +367,35 @@ mod tests {
             }
         }
         let m = mask(4, 4, data);
-        let corr = m.to_mask_correction(2, 2);
-        assert_eq!((corr.width, corr.height), (2, 2));
-        assert_eq!(corr.grid.as_slice(), &[-90, 0, 0, 0]);
+        let small = m.resampled(2, 2);
+        assert_eq!((small.width, small.height), (2, 2));
+        assert_eq!(small.cells(), &[-90, 0, 0, 0]);
+        assert_eq!(m.resampled(4, 4), m, "same size is the identity");
     }
 
-    /// A soft stroke survives the trip stroke → selection → correction
-    /// bit-for-bit, so hardness, strength and direction all reach
-    /// `apply_correction` unchanged.
+    /// A soft stroke keeps hardness, strength and direction in the plane
+    /// `apply_correction` reads, cell for cell.
     #[test]
-    fn paint_stroke_round_trips_through_selection_losslessly() {
-        let mut stroke = MaskCorrection::empty(32, 32);
+    fn paint_stroke_keeps_sign_and_softness() {
+        let mut stroke = MaskArtifact::new_empty(32, 32);
         let stamp = Stamp { hardness: 0.3, strength: 0.8, mode: BrushMode::Subtract };
         paint_circle(&mut stroke, 16.0, 16.0, 10.0, stamp);
-        let selection = MaskArtifact::from_correction(stroke.clone());
-        assert!(selection.data.iter().any(|&v| v < 0), "subtract stroke must be negative");
+        assert!(stroke.cells().iter().any(|&v| v < 0), "subtract stroke must be negative");
         assert!(
-            selection.data.iter().any(|&v| v < 0 && v > -FULL),
+            stroke.cells().iter().any(|&v| v < 0 && v > -FULL),
             "soft falloff must survive as intermediate magnitudes"
         );
-        assert_eq!(selection.to_mask_correction(32, 32), stroke);
+    }
+
+    /// Painting into a plane an undo snapshot still shares must not
+    /// change the snapshot.
+    #[test]
+    fn painting_a_shared_plane_leaves_the_snapshot_untouched() {
+        let mut live = MaskArtifact::new_empty(8, 8);
+        let snapshot = live.clone();
+        paint_circle(&mut live, 4.0, 4.0, 2.0, Stamp { hardness: 1.0, strength: 1.0, mode: BrushMode::Add });
+        assert!(snapshot.cells().iter().all(|&v| v == 0));
+        assert!(live.has_selected_region());
     }
 
     /// The inpaint region is the thresholded contour the overlay shows,
@@ -382,10 +403,9 @@ mod tests {
     /// excluded from both, consistently.
     #[test]
     fn region_mask_uses_the_same_selected_predicate_as_the_overlay() {
-        let mut stroke = MaskCorrection::empty(32, 32);
+        let mut selection = MaskArtifact::new_empty(32, 32);
         let stamp = Stamp { hardness: 0.3, strength: 0.8, mode: BrushMode::Subtract };
-        paint_circle(&mut stroke, 16.0, 16.0, 10.0, stamp);
-        let selection = MaskArtifact::from_correction(stroke);
+        paint_circle(&mut selection, 16.0, 16.0, 10.0, stamp);
         let region = selection.region_mask(32, 32);
         let mut faint_touched = 0;
         for (&cell, px) in selection.data.iter().zip(region.pixels()) {

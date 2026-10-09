@@ -990,11 +990,7 @@ mod tests {
         let mut data = vec![0i8; (w * h) as usize];
         // Tag the first cell so masks with different tags hash differently.
         data[0] = tag as i8;
-        Arc::new(prunr_core::selection::MaskArtifact {
-            width: w,
-            height: h,
-            data: Arc::new(data),
-        })
+        Arc::new(prunr_core::selection::MaskArtifact::from_cells(w, h, data))
     }
 
     #[test]
