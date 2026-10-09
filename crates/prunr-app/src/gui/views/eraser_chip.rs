@@ -83,11 +83,12 @@ fn render_quality_preset_chip(
 ) -> bool {
     let pop_id = egui::Id::new("eraser_preset_popover");
     let active = SdQualityPreset::detect_from(&app_settings.brush);
-    let resp = chip::chip_tooltip(
+    let resp = chip::tooltip(
         chip::chip_button(ui, ICON_AUTO_AWESOME.codepoint, active.label(), false),
         "Quality",
         "Picks scheduler + steps + CFG + Karras. Tweaking individual sliders flips to Custom.",
-    );
+    None,
+);
     let mut changed = false;
     chip::popup_for(ui, pop_id, &resp, |ui| {
         ui.label(RichText::new("Quality").strong().color(theme::TEXT_PRIMARY));
@@ -102,16 +103,17 @@ fn render_quality_preset_chip(
                 matches!(preset_scheduler, SdScheduler::Lcm) && !lcm_bundle_installed;
             if !preset_scheduler.is_available() {
                 ui.add_enabled_ui(false, |ui| {
-                    let _ = ui.selectable_label(false, format!("{label} (coming soon)"));
+                    chip::picker_row(ui, false, &format!("{label} (coming soon)"), "");
                 });
             } else if preset_bundle_gated {
-                let resp = ui.add_enabled_ui(false, |ui| {
-                    ui.selectable_label(false, format!("{label} (download required)"))
-                }).inner;
-                resp.on_hover_text(LCM_DOWNLOAD_HINT);
+                ui.add_enabled_ui(false, |ui| {
+                    chip::picker_row(ui, false, &format!("{label} (download required)"), "")
+                })
+                .inner
+                .on_disabled_hover_text(LCM_DOWNLOAD_HINT);
             } else {
                 let selected = active == preset;
-                if ui.selectable_label(selected, label).clicked() {
+                if chip::picker_row(ui, selected, label, "").clicked() {
                     preset.apply_to_settings(app_settings);
                     changed = true;
                     egui::Popup::close_id(ui.ctx(), pop_id);
@@ -127,11 +129,12 @@ fn render_prompt_chip(ui: &mut egui::Ui, brush: &mut BrushSettings) -> bool {
     let lcm = brush.sd_scheduler == SdScheduler::Lcm;
     let neg_color = if lcm { theme::TEXT_SECONDARY } else { theme::TEXT_PRIMARY };
 
-    let resp = chip::chip_tooltip(
+    let resp = chip::tooltip(
         chip::chip_button(ui, ICON_EDIT_NOTE.codepoint, "Prompt", !brush.sd_prompt.is_empty()),
         "Prompt",
         "Text prompt + negative + guidance. Empty prompt = unconditional inpaint (often noisy on flat surrounds).",
-    );
+    None,
+);
     let mut changed = false;
     chip::popup_for(ui, pop_id, &resp, |ui| {
         ui.set_min_width(theme::POPOVER_WIDTH_WIDE);
@@ -191,11 +194,12 @@ fn render_prompt_chip(ui: &mut egui::Ui, brush: &mut BrushSettings) -> bool {
 
 fn render_scheduler_chip(ui: &mut egui::Ui, app_settings: &mut Settings, lcm_bundle_installed: bool) -> bool {
     let pop_id = egui::Id::new("eraser_scheduler_popover");
-    let resp = chip::chip_tooltip(
+    let resp = chip::tooltip(
         chip::chip_button(ui, ICON_TUNE.codepoint, app_settings.brush.sd_scheduler.label(), false),
         "Scheduler",
         "Denoise math. LCM = fast (4-8 steps); DDIM = conservative; DPM++ 2M Karras = quality at 15-25 steps; Euler-A = creative per-seed variation; UniPC = best quality at 8-12 steps.",
-    );
+    None,
+);
     let mut changed = false;
     chip::popup_for(ui, pop_id, &resp, |ui| {
         ui.label(RichText::new("Scheduler").strong().color(theme::TEXT_PRIMARY));
@@ -287,11 +291,12 @@ fn render_taesd_chip(
         resp.on_hover_text(TAESD_DOWNLOAD_HINT);
         return false;
     }
-    let resp = chip::chip_tooltip(
+    let resp = chip::tooltip(
         chip::chip_button(ui, ICON_BOLT.codepoint, "Fast VAE", taesd_effective),
         "Fast VAE (TAESD)",
         "Drop-in fast VAE replacement, ~3× faster decode at slight quality cost. Works with any scheduler.",
-    );
+    None,
+);
     if resp.clicked() {
         // Snap to explicit state on first click — preserves auto/None across reinstall
         brush.sd_use_taesd = Some(!taesd_effective);
@@ -314,11 +319,12 @@ fn render_seed_chip(ui: &mut egui::Ui, brush: &mut BrushSettings) -> bool {
         }
         None => "Random",
     };
-    let resp = chip::chip_tooltip(
+    let resp = chip::tooltip(
         chip::chip_button(ui, icon, label, pinned),
         "Seed",
         "Random by default — every stroke explores a different fill. Click to pin a single seed; the same prompt + scheduler + steps will then produce the exact same fill across strokes (useful for tweaking the prompt while comparing to a previous result, or for re-running an inpaint reproducibly).",
-    );
+    None,
+);
     if resp.clicked() {
         brush.sd_seed = if pinned {
             None

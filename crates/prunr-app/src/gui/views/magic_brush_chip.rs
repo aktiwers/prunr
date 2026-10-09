@@ -33,11 +33,12 @@ pub(crate) fn render(
     encoder_pending: bool,
 ) -> MagicChipOutcome {
     let resp = chip::chip_button(ui, "\u{2728}", "Magic", /*accent=*/ true);
-    let resp = chip::chip_tooltip(
+    let resp = chip::tooltip(
         resp,
         "Magic Brush",
         "Click or stroke to select objects automatically. Requires reprocessing.",
-    );
+    None,
+);
 
     let mut outcome = MagicChipOutcome::default();
     chip::popup_for(

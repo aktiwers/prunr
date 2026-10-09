@@ -5,7 +5,7 @@
 use egui::{Color32, RichText, Stroke, Ui};
 
 use super::chip::tooltip;
-use super::shortcuts::{keys, Action};
+use super::shortcuts::Action;
 use crate::gui::theme::{
     ACCENT, BG_SECONDARY, BUTTON_ROUNDING, CHIP_HEIGHT, DESTRUCTIVE, FONT_SIZE_BODY, SPACE_XS,
     STROKE_DEFAULT, TEXT_PRIMARY,
@@ -41,13 +41,13 @@ pub(crate) fn render_selection_action_bar(ui: &mut Ui) -> Option<SelectionAction
     ui.add_space(SPACE_XS);
 
     ui.horizontal(|ui| {
-        if action_button(ui, "🗑  Delete", "Delete", keys(Action::Delete), Some(DESTRUCTIVE)).clicked() {
+        if action_button(ui, "🗑  Delete", "Delete", Action::Delete, Some(DESTRUCTIVE)).clicked() {
             chosen = Some(SelectionAction::Delete);
         }
-        if action_button(ui, "📋  Copy", "Copy", keys(Action::Copy), None).clicked() {
+        if action_button(ui, "📋  Copy", "Copy", Action::Copy, None).clicked() {
             chosen = Some(SelectionAction::Copy);
         }
-        if action_button(ui, "✂  Cut", "Cut", keys(Action::Cut), None).clicked() {
+        if action_button(ui, "✂  Cut", "Cut", Action::Cut, None).clicked() {
             chosen = Some(SelectionAction::Cut);
         }
 
@@ -59,10 +59,10 @@ pub(crate) fn render_selection_action_bar(ui: &mut Ui) -> Option<SelectionAction
         );
         ui.add_space(SPACE_XS);
 
-        if action_button(ui, "⇄  Invert", "Invert", keys(Action::Invert), None).clicked() {
+        if action_button(ui, "⇄  Invert", "Invert", Action::Invert, None).clicked() {
             chosen = Some(SelectionAction::Invert);
         }
-        if action_button(ui, "✕  Clear", "Clear", keys(Action::Cancel), None).clicked() {
+        if action_button(ui, "✕  Clear", "Clear", Action::Cancel, None).clicked() {
             chosen = Some(SelectionAction::Clear);
         }
     });
@@ -79,7 +79,7 @@ fn action_button(
     ui: &mut Ui,
     text: &'static str,
     label: &'static str,
-    keyboard_hint: &'static str,
+    shortcut: Action,
     border_color: Option<Color32>,
 ) -> egui::Response {
     let border = border_color.unwrap_or(Color32::from_rgb(0x50, 0x50, 0x50));
@@ -98,7 +98,7 @@ fn action_button(
     );
     ui.spacing_mut().button_padding = saved_padding;
 
-    tooltip(resp, label, "", Some(keyboard_hint))
+    tooltip(resp, label, "", Some(shortcut))
 }
 
 #[cfg(test)]

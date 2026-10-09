@@ -367,11 +367,12 @@ pub(crate) fn render(
                     if model_uses_seg && has_selection {
                         let accent = protect_selection;
                         let icon = egui_material_icons::icons::ICON_LOCK.codepoint;
-                        let resp = chip::chip_tooltip(
+                        let resp = chip::tooltip(
                             chip::icon_toggle_button(ui, icon, accent),
                             "Protect selection",
                             "Prevent the selection from being overwritten by background removal.",
-                        );
+                        None,
+                    );
                         if resp.clicked() {
                             change.protect_selection = Some(!protect_selection);
                         }
@@ -538,9 +539,9 @@ fn render_seg_mask_chips(
             -50.0..=50.0, defaults.template.edge_shift,
             false,
             |v| {
-                if v > 0.05 { format!("erode {}", fmt::px(v, 1)) }
-                else if v < -0.05 { format!("dilate {}", fmt::px(v.abs(), 1)) }
-                else { fmt::px(0.0, 0) }
+                if v > 0.05 { format!("erode {v:.1} px") }
+                else if v < -0.05 { format!("dilate {:.1} px", v.abs()) }
+                else { "0 px".to_string() }
             },
         ), StaticKnob::EdgeShift, change);
 
@@ -795,12 +796,13 @@ fn mark_input_transform_change(acc: &mut ToolbarChange) {
 fn render_input_transform_chip(ui: &mut Ui, transform: &mut prunr_core::InputTransform) -> bool {
     use prunr_core::InputTransform;
     let accent = !matches!(transform, InputTransform::None);
-    let resp = chip::chip_tooltip(
+    let resp = chip::tooltip(
         chip::chip_button(ui, ICON_TUNE.codepoint, transform.name(), accent),
         "Pre-inference transform",
         "Transform applied to the image BEFORE edge detection. Changing this\
          invalidates the edge cache and re-runs DexiNed on the next Process.",
-    );
+    None,
+);
 
     let popup_id = ui.make_persistent_id("input_transform_popup");
     let mut changed = false;
@@ -838,11 +840,12 @@ fn render_input_transform_chip(ui: &mut Ui, transform: &mut prunr_core::InputTra
 fn render_line_style_chip(ui: &mut Ui, style: &mut prunr_core::LineStyle) -> bool {
     use prunr_core::LineStyle;
     let accent = !matches!(style, LineStyle::Solid);
-    let resp = chip::chip_tooltip(
+    let resp = chip::tooltip(
         chip::chip_button(ui, ICON_GRADIENT.codepoint, style.name(), accent),
         "Line style",
         "How line pixels are coloured.",
-    );
+    None,
+);
 
     let popup_id = ui.make_persistent_id("line_style_popup");
     let mut changed = false;
@@ -908,11 +911,12 @@ fn line_style_params(ui: &mut Ui, style: &mut prunr_core::LineStyle) -> bool {
 fn render_fill_style_chip(ui: &mut Ui, style: &mut prunr_core::FillStyle) -> bool {
     use prunr_core::FillStyle;
     let accent = !matches!(style, FillStyle::None);
-    let resp = chip::chip_tooltip(
+    let resp = chip::tooltip(
         chip::chip_button(ui, ICON_FORMAT_PAINT.codepoint, style.name(), accent),
         "Fill style",
         "How the subject RGB is transformed before compose.",
-    );
+    None,
+);
 
     let popup_id = ui.make_persistent_id("fill_style_popup");
     let mut changed = false;
@@ -1115,12 +1119,13 @@ fn render_background_chip(
 
     let current = BgKind::current(bg, bg_effect, has_bg_image);
     let accent = current != BgKind::Transparent;
-    let resp = chip::chip_tooltip(
+    let resp = chip::tooltip(
         chip::chip_button(ui, ICON_PALETTE.codepoint, current.name(), accent),
         "Background",
         "What fills transparent areas behind the subject: a solid colour, \
          a chosen image, or a source-derived effect (blurred / inverted / desaturated).",
-    );
+    None,
+);
 
     let popup_id = ui.make_persistent_id("background_popup");
     chip::popup_for(ui, popup_id, &resp, |ui| {
@@ -1190,10 +1195,12 @@ fn render_background_chip(
                             ui.label(RichText::new(label).color(theme::TEXT_SECONDARY).size(theme::FONT_SIZE_MONO));
                             ui.add_space(theme::SPACE_XS);
                         }
-                        if ui.button("Choose image\u{2026}").clicked() {
+                        if chip::button(ui, chip::ButtonKind::Secondary, "Choose image\u{2026}").clicked() {
                             change.pick_bg_image = true;
                         }
-                        if has_bg_image && ui.button("Remove image").clicked() {
+                        if has_bg_image
+                            && chip::button(ui, chip::ButtonKind::Secondary, "Remove image").clicked()
+                        {
                             change.clear_bg_image = true;
                         }
                         if has_bg_image {
@@ -1279,7 +1286,7 @@ fn rgb_picker_row(ui: &mut Ui, label: &str, rgb: &mut [u8; 3]) -> bool {
 fn render_compose_mode_chip(ui: &mut Ui, mode: &mut prunr_core::ComposeMode) -> bool {
     use prunr_core::ComposeMode;
     let accent = *mode != ComposeMode::default();
-    let resp = chip::chip_tooltip(
+    let resp = chip::tooltip(
         chip::chip_button(ui, ICON_LAYERS.codepoint, &mode.to_string(), accent),
         "Style",
         "How the subject mask and outline combine.\n\
@@ -1288,7 +1295,8 @@ fn render_compose_mode_chip(ui: &mut Ui, mode: &mut prunr_core::ComposeMode) -> 
          • Engraving — outline cut through the filled subject.\n\
          • Ghost — faded subject with a strong outline.\n\
          • Inverse mask — outline in the background, subject invisible.",
-    );
+    None,
+);
 
     let popup_id = ui.make_persistent_id("compose_mode_popup");
     let mut changed = false;
@@ -1309,10 +1317,7 @@ fn render_compose_mode_chip(ui: &mut Ui, mode: &mut prunr_core::ComposeMode) -> 
     changed
 }
 
-/// Reset-to-default-preset button + preset dropdown. The reset tooltip
-/// embeds the user's default-preset name; it is built lazily inside
-/// `on_hover_ui` so the `format!` only fires when the button is hovered,
-/// not on every frame.
+/// Reset-to-default-preset button + preset dropdown.
 pub(super) fn render_reset_preset_cluster(
     ui: &mut Ui,
     app_settings: &mut Settings,
@@ -1320,13 +1325,12 @@ pub(super) fn render_reset_preset_cluster(
     applied_preset: &mut String,
     change: &mut ToolbarChange,
 ) {
-    let reset_resp = chip::icon_toggle_button(ui, ICON_RESTART_ALT.codepoint, false);
-    let reset_resp = reset_resp.on_hover_ui(|ui| {
-        ui.label(format!(
-            "Reset all knobs to the \"{}\" preset (your default)",
-            app_settings.default_preset
-        ));
-    });
+    let reset_resp = chip::tooltip(
+        chip::icon_toggle_button(ui, ICON_RESTART_ALT.codepoint, false),
+        "Reset",
+        "Return every knob to your default preset.",
+        None,
+    );
     if reset_resp.clicked() {
         let reset_target = app_settings.default_preset.clone();
         let resolved = app_settings.resolve_active_preset(None);
@@ -1382,7 +1386,7 @@ pub(super) fn render_model_dropdown(
         } else {
             BYPASSED_LABEL.clone()
         };
-        egui::ComboBox::from_id_salt("adjustments_model")
+        let combo = egui::ComboBox::from_id_salt("adjustments_model")
             .selected_text(
                 RichText::new(selected_text)
                     .color(theme::TEXT_PRIMARY),
@@ -1424,38 +1428,28 @@ pub(super) fn render_model_dropdown(
                         .color(theme::TEXT_PRIMARY),
                 );
                 ui.separator();
-                if ui.button(
-                    RichText::new("More models…").color(theme::TEXT_PRIMARY),
-                ).clicked() {
+                if chip::button(ui, chip::ButtonKind::Secondary, "More models…").clicked() {
                     change.open_model_store = Some(ModelStoreRequest::default());
                 }
             })
-            .response
-            .on_hover_ui(|ui| {
-                let (heading, body) = if app_settings.model.is_inpaint() {
-                    (
-                        "Eraser (LaMa inpaint)",
-                        "Object-removal mode. Paint over an unwanted area with the brush; LaMa fills it in. Brush is auto-enabled in this mode.",
-                    )
-                } else if mask_active {
-                    (
-                        "Segmentation model",
-                        "Which AI model extracts the subject. Trade quality, speed, and memory footprint — per-row labels show each option's position on those three axes.",
-                    )
-                } else {
-                    (
-                        "Mask model bypassed",
-                        "Sketch is set to Full, so DexiNed runs over the whole image and the subject-extraction model isn't needed. Switch Sketch to Off or Subject to re-enable.",
-                    )
-                };
-                ui.label(RichText::new(heading).strong().color(theme::TEXT_PRIMARY));
-                ui.add_space(theme::SPACE_XS);
-                ui.label(
-                    RichText::new(body)
-                        .color(theme::TEXT_PRIMARY)
-                        .size(theme::FONT_SIZE_MONO),
-                );
-            });
+            .response;
+        let (heading, body) = if app_settings.model.is_inpaint() {
+            (
+                "Eraser (LaMa inpaint)",
+                "Object-removal mode. Paint over an unwanted area with the brush; LaMa fills it in. Brush is auto-enabled in this mode.",
+            )
+        } else if mask_active {
+            (
+                "Segmentation model",
+                "Which AI model extracts the subject. Trade quality, speed, and memory footprint — per-row labels show each option's position on those three axes.",
+            )
+        } else {
+            (
+                "Mask model bypassed",
+                "Sketch is set to Full, so DexiNed runs over the whole image and the subject-extraction model isn't needed. Switch Sketch to Off or Subject to re-enable.",
+            )
+        };
+        chip::tooltip(combo, heading, body, None);
     });
 
     if app_settings.model != prev_model {

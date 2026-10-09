@@ -9,7 +9,7 @@ use crate::gui::state::AppState;
 use crate::gui::theme;
 
 use super::chip::tooltip;
-use super::shortcuts::{keys, Action};
+use super::shortcuts::Action;
 
 pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
     ui.horizontal_centered(|ui| {
@@ -26,7 +26,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
         .fill(theme::BG_SECONDARY)
         .corner_radius(theme::BUTTON_ROUNDING)
         .min_size(egui::vec2(0.0, theme::BTN_HEIGHT));
-        if tooltip(ui.add(open_btn), "Open", "Open one or more images.", Some(keys(Action::Open))).clicked() {
+        if tooltip(ui.add(open_btn), "Open", "Open one or more images.", Some(Action::Open)).clicked() {
             app.pending_open_dialog = true;
         }
 
@@ -40,7 +40,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
         .fill(theme::BG_SECONDARY)
         .corner_radius(theme::BUTTON_ROUNDING)
         .min_size(egui::vec2(theme::BTN_HEIGHT, theme::BTN_HEIGHT));
-        if tooltip(ui.add(gear_btn), "Settings", "Hardware, performance and behavior.", Some(keys(Action::Settings))).clicked() {
+        if tooltip(ui.add(gear_btn), "Settings", "Hardware, performance and behavior.", Some(Action::Settings)).clicked() {
             if app.show_settings {
                 app.close_settings(ui.ctx());
             } else {
@@ -62,12 +62,12 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
             .corner_radius(theme::BUTTON_ROUNDING)
             .min_size(egui::vec2(theme::BTN_HEIGHT, theme::BTN_HEIGHT));
 
-            if tooltip(ui.add_enabled(can_undo, icon_btn(ICON_UNDO.codepoint)), "Undo", "", Some(keys(Action::Undo)))
+            if tooltip(ui.add_enabled(can_undo, icon_btn(ICON_UNDO.codepoint)), "Undo", "", Some(Action::Undo))
                 .clicked()
             {
                 app.handle_undo(ui.ctx());
             }
-            if tooltip(ui.add_enabled(can_redo, icon_btn(ICON_REDO.codepoint)), "Redo", "", Some(keys(Action::Redo)))
+            if tooltip(ui.add_enabled(can_redo, icon_btn(ICON_REDO.codepoint)), "Redo", "", Some(Action::Redo))
                 .clicked()
             {
                 app.handle_redo(ui.ctx());
@@ -101,7 +101,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                 )
                 .fill(theme::BG_SECONDARY)
                 .corner_radius(theme::BUTTON_ROUNDING);
-                if tooltip(ui.add(save_btn), save_title, "Save the result as PNG.", Some(keys(Action::Save))).clicked() {
+                if tooltip(ui.add(save_btn), save_title, "Save the result as PNG.", Some(Action::Save)).clicked() {
                     app.handle_save_selected();
                 }
             }
@@ -125,7 +125,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                 } else {
                     ("Cancel all", "Stop all processing.")
                 };
-                if tooltip(ui.add(cancel_btn), title, body, Some(keys(Action::Cancel))).clicked() {
+                if tooltip(ui.add(cancel_btn), title, body, Some(Action::Cancel)).clicked() {
                     if partial {
                         app.handle_cancel_selected();
                     } else {
@@ -195,7 +195,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                     }
                 };
 
-                if tooltip(ui.add_enabled(has_processable, btn), "Process", &body, Some(keys(Action::Process))).clicked() {
+                if tooltip(ui.add_enabled(has_processable, btn), "Process", &body, Some(Action::Process)).clicked() {
                     app.handle_process_intent();
                 }
             }

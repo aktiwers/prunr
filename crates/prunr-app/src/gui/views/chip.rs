@@ -16,6 +16,7 @@ use egui::{Color32, RichText, Response, Ui};
 use egui::widgets::color_picker::{color_picker_color32, Alpha};
 use egui_material_icons::icons::*;
 
+use super::shortcuts::{self, Action};
 use crate::gui::theme;
 
 /// Horizontal padding inside a chip.
@@ -192,9 +193,9 @@ pub(super) fn guarded<R>(
 }
 
 /// The one hover tooltip for every control: strong title, one-sentence
-/// body, and the shortcut when the action has one. Pass an empty body
-/// for icon buttons whose title says it all.
-pub(super) fn tooltip(resp: Response, title: &str, body: &str, shortcut: Option<&str>) -> Response {
+/// body, and the keys when the control has a shortcut. Pass an empty
+/// body for icon buttons whose title says it all.
+pub(super) fn tooltip(resp: Response, title: &str, body: &str, shortcut: Option<Action>) -> Response {
     resp.on_hover_ui(|ui| {
         ui.label(RichText::new(title).strong().color(theme::TEXT_PRIMARY));
         if !body.is_empty() {
@@ -205,20 +206,15 @@ pub(super) fn tooltip(resp: Response, title: &str, body: &str, shortcut: Option<
                     .size(theme::FONT_SIZE_MONO),
             );
         }
-        if let Some(keys) = shortcut {
+        if let Some(action) = shortcut {
             ui.add_space(theme::SPACE_XS);
             ui.label(
-                RichText::new(keys)
+                RichText::new(shortcuts::keys(action))
                     .color(theme::TEXT_SECONDARY)
                     .size(theme::FONT_SIZE_MONO),
             );
         }
     })
-}
-
-/// `tooltip` for chips, which never carry a shortcut.
-pub(super) fn chip_tooltip(resp: Response, label: &str, body: &str) -> Response {
-    tooltip(resp, label, body, None)
 }
 
 /// Render the standard reset-to-default button at the bottom of a popover.
@@ -276,7 +272,7 @@ pub fn chip_f32(
     let pop_id = egui::Id::new(("chip_f32", meta.id_salt));
     let accent = (*value - default_value).abs() > f32::EPSILON;
     let display = format(*value);
-    let resp = chip_tooltip(chip_button(ui, meta.icon, &display, accent), meta.label, meta.tooltip);
+    let resp = tooltip(chip_button(ui, meta.icon, &display, accent), meta.label, meta.tooltip, None);
 
     let mut out = ChipChange::default();
     popup_for(ui, pop_id, &resp, |ui| {
@@ -318,7 +314,7 @@ pub fn chip_u32(
     let pop_id = egui::Id::new(("chip_u32", meta.id_salt));
     let accent = *value != default_value;
     let display = format(*value);
-    let resp = chip_tooltip(chip_button(ui, meta.icon, &display, accent), meta.label, meta.tooltip);
+    let resp = tooltip(chip_button(ui, meta.icon, &display, accent), meta.label, meta.tooltip, None);
 
     let mut out = ChipChange::default();
     popup_for(ui, pop_id, &resp, |ui| {
@@ -354,7 +350,7 @@ pub fn chip_option_f32(
         Some(v) => format(*v),
         None => off_label.to_string(),
     };
-    let resp = chip_tooltip(chip_button(ui, meta.icon, &display, accent), meta.label, meta.tooltip);
+    let resp = tooltip(chip_button(ui, meta.icon, &display, accent), meta.label, meta.tooltip, None);
 
     let mut out = ChipChange::default();
     popup_for(ui, pop_id, &resp, |ui| {
@@ -391,7 +387,7 @@ pub fn chip_option_f32(
 pub fn chip_bool(ui: &mut Ui, meta: ChipMeta<'_>, value: &mut bool) -> ChipChange {
     let pop_id = egui::Id::new(("chip_bool", meta.id_salt));
     let display = if *value { "On" } else { "Off" };
-    let resp = chip_tooltip(chip_button(ui, meta.icon, display, *value), meta.label, meta.tooltip);
+    let resp = tooltip(chip_button(ui, meta.icon, display, *value), meta.label, meta.tooltip, None);
 
     let mut out = ChipChange::default();
     popup_for(ui, pop_id, &resp, |ui| {
@@ -417,7 +413,7 @@ pub fn chip_bool_with_extras(
 ) -> ChipChange {
     let pop_id = egui::Id::new(("chip_bool_with_extras", meta.id_salt));
     let display = if *value { "On" } else { "Off" };
-    let resp = chip_tooltip(chip_button(ui, meta.icon, display, *value), meta.label, meta.tooltip);
+    let resp = tooltip(chip_button(ui, meta.icon, display, *value), meta.label, meta.tooltip, None);
 
     let mut out = ChipChange::default();
     popup_for(ui, pop_id, &resp, |ui| {
@@ -440,7 +436,7 @@ pub fn chip_bool_with_extras(
     out
 }
 
-/// Label + f32 slider without the surrounding chip button.
+/// Float slider row with the log scale and formatter float knobs need.
 pub fn slider_row_f32(
     ui: &mut Ui,
     label: &str,
@@ -449,34 +445,30 @@ pub fn slider_row_f32(
     logarithmic: bool,
     format: impl Fn(f32) -> String,
 ) -> ChipChange {
-    let mut out = ChipChange::default();
-    ui.label(RichText::new(label).color(theme::TEXT_SECONDARY).size(theme::FONT_SIZE_MONO));
-    let slider = ui.add(
+    labelled_slider(
+        ui,
+        label,
         egui::Slider::new(value, range)
-            .show_value(true)
             .custom_formatter(move |v, _| format(v as f32))
             .logarithmic(logarithmic),
-    );
-    if slider.changed() { out.changed = true; }
-    if slider_settled(&slider) { out.commit = true; }
-    out
+    )
 }
 
 /// Label above a full-width slider whose box shows the value — the one
-/// slider layout for popovers and Settings. `slider_row_f32` adds the
-/// log scale and formatter that float knobs need.
+/// slider layout for popovers and Settings.
 pub fn slider_row<T: egui::emath::Numeric>(
     ui: &mut Ui,
     label: &str,
     value: &mut T,
     range: std::ops::RangeInclusive<T>,
 ) -> ChipChange {
-    let mut out = ChipChange::default();
+    labelled_slider(ui, label, egui::Slider::new(value, range))
+}
+
+fn labelled_slider(ui: &mut Ui, label: &str, slider: egui::Slider<'_>) -> ChipChange {
     ui.label(RichText::new(label).color(theme::TEXT_SECONDARY).size(theme::FONT_SIZE_MONO));
-    let slider = ui.add(egui::Slider::new(value, range).show_value(true));
-    if slider.changed() { out.changed = true; }
-    if slider_settled(&slider) { out.commit = true; }
-    out
+    let resp = ui.add(slider.show_value(true));
+    ChipChange { changed: resp.changed(), commit: slider_settled(&resp) }
 }
 
 /// A selectable option with a title and a one-line description, for
@@ -576,7 +568,7 @@ pub fn chip_option_rgba(
         Some(_) => "Set".to_string(),
         None => off_label.to_string(),
     };
-    let resp = chip_tooltip(chip_button(ui, meta.icon, &display, accent), meta.label, meta.tooltip);
+    let resp = tooltip(chip_button(ui, meta.icon, &display, accent), meta.label, meta.tooltip, None);
 
     let mut out = ChipChange::default();
     popup_for(ui, pop_id, &resp, |ui| {
@@ -622,7 +614,7 @@ pub fn chip_option_rgb(
         Some(_) => "Set".to_string(),
         None => "Original".to_string(),
     };
-    let resp = chip_tooltip(chip_button(ui, meta.icon, &display, accent), meta.label, meta.tooltip);
+    let resp = tooltip(chip_button(ui, meta.icon, &display, accent), meta.label, meta.tooltip, None);
 
     let mut out = ChipChange::default();
     popup_for(ui, pop_id, &resp, |ui| {

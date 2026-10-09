@@ -106,17 +106,12 @@ pub fn render(
     })
     .corner_radius(theme::BUTTON_ROUNDING)
     .min_size(egui::vec2(0.0, theme::CHIP_HEIGHT));
-    let resp = ui.add(btn).on_hover_ui(|ui| {
-        ui.label(RichText::new("Sketch").strong().color(theme::TEXT_PRIMARY));
-        ui.add_space(theme::SPACE_XS);
-        ui.label(
-            RichText::new(
-                "Stage 1 of 4 in the lines pipeline. Picks what DexiNed sees: Off (skipped), Subject (seg model masks to subject-on-white first, then DexiNed), Full (DexiNed runs on the whole scene). The knobs to the right are no-ops when Sketch is Off.",
-            )
-            .color(theme::TEXT_PRIMARY)
-            .size(theme::FONT_SIZE_MONO),
-        );
-    });
+    let resp = chip::tooltip(
+        ui.add(btn),
+        "Sketch",
+        "Stage 1 of 4 in the lines pipeline. Picks what DexiNed sees: Off (skipped), Subject (seg model masks to subject-on-white first, then DexiNed), Full (DexiNed runs on the whole scene). The knobs to the right are no-ops when Sketch is Off.",
+        None,
+    );
 
     if resp.clicked() {
         ui.memory_mut(|m| m.toggle_popup(pop_id));
@@ -211,11 +206,12 @@ pub fn render_scale_chip(ui: &mut egui::Ui, settings: &mut ItemSettings) -> bool
     let pop_id = egui::Id::new("edge_scale_popover");
     let accent = settings.edge_scale != EdgeScale::Fused;
     let icon_str = ICON_TUNE.codepoint;
-    let resp = chip::chip_tooltip(
+    let resp = chip::tooltip(
         chip::chip_button(ui, icon_str, scale_label(settings.edge_scale), accent),
         "Scale",
         TOOLTIP,
-    );
+    None,
+);
 
     let mut changed = false;
     chip::popup_for(ui, pop_id, &resp, |ui| {

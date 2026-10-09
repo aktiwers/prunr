@@ -47,14 +47,15 @@ pub(crate) fn render_output_scale_chip(
     );
     let accent = !matches!(*value, OutputScale::X4);
     let resp = chip::chip_button(ui, ICON_OPEN_IN_FULL.codepoint, &label, accent);
-    let resp = chip::chip_tooltip(
+    let resp = chip::tooltip(
         resp,
         "Output Scale",
         "How much to enlarge the image. 4\u{00d7} is the model's native size. \
          2\u{00d7} and 3\u{00d7} shrink the 4\u{00d7} output with high-quality \
          resampling. 4\u{00d7} (two-pass) runs the upscale in two halves for \
          cleaner results on noisy or low-light photos \u{2014} Real-ESRGAN only.",
-    );
+    None,
+);
 
     let mut changed = false;
     let popup_id = egui::Id::new("upscale_output_scale_popup");
@@ -74,21 +75,12 @@ pub(crate) fn render_output_scale_chip(
                 _ => true,
             };
             ui.add_enabled_ui(available, |ui| {
-                let label_owned;
-                let row_label: &str = match option {
-                    OutputScale::X4TwoPass if !arch_ok => {
-                        label_owned = format!("{} \u{2014} Real-ESRGAN only", output_scale_label(option));
-                        &label_owned
-                    }
-                    OutputScale::X4TwoPass if !is_x2plus_installed => {
-                        label_owned = format!("{} \u{2014} install x2plus from Model Store", output_scale_label(option));
-                        &label_owned
-                    }
-                    _ => output_scale_label(option),
+                let reason = match option {
+                    OutputScale::X4TwoPass if !arch_ok => "Real-ESRGAN only",
+                    OutputScale::X4TwoPass if !is_x2plus_installed => "Install x2plus from the Model Store",
+                    _ => "",
                 };
-                if ui
-                    .selectable_label(*value == option, row_label)
-                    .clicked()
+                if chip::picker_row(ui, *value == option, output_scale_label(option), reason).clicked()
                     && *value != option
                 {
                     *value = option;

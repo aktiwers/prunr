@@ -48,11 +48,12 @@ pub(super) fn render(
             chip::chip_button(ui, "🖌", &label, /*accent=*/ true)
         })
         .inner;
-    let resp = chip::chip_tooltip(
+    let resp = chip::tooltip(
         resp,
         "Brush settings",
         "Configure brush radius, edge hardness, and add/subtract mode. Click strokes to remove or restore subject regions on the result.",
-    );
+    None,
+);
 
     let mut outcome = BrushChipOutcome::default();
     chip::popup_for(ui, ui.id().with("brush_chip_popover"), &resp, |ui| {

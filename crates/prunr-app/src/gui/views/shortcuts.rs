@@ -56,41 +56,63 @@ const fn chord(mods: Mods, key: Key) -> Chord {
     Chord { mods, key }
 }
 
+/// How a row's chords reach the app.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Delivery {
+    /// Key press, including OS key repeat (held navigation and undo keys).
+    Press,
+    /// Once per physical press — toggles must not flicker while held.
+    FreshPress,
+    /// egui turns the chord into its own event (`Event::Copy`), which the
+    /// app intercepts in `raw_input_hook`; the row exists for display.
+    Event,
+}
+
 pub struct Shortcut {
     pub action: Action,
     pub chords: &'static [Chord],
     /// Verb phrase for the shortcut lists and tips ("Open images").
     pub label: &'static str,
-    /// Fire once per physical press, ignoring OS key repeat. Toggles need
-    /// this; held navigation and undo keys want the repeat.
-    pub fresh: bool,
+    pub delivery: Delivery,
 }
 
+impl Action {
+    /// Discriminant order; `keys` indexes by it.
+    pub const ALL: [Action; 22] = [
+        Action::Open, Action::Process, Action::Save, Action::Copy, Action::Cut,
+        Action::Delete, Action::Invert, Action::Cancel, Action::Undo, Action::Redo,
+        Action::Shortcuts, Action::CliHelp, Action::PipelineFlow, Action::Screenshot,
+        Action::FitToWindow, Action::ActualSize, Action::Settings, Action::BeforeAfter,
+        Action::PrevImage, Action::NextImage, Action::ToggleQueue, Action::ToggleAdjustments,
+    ];
+}
+
+use Delivery::{Event as ByEvent, FreshPress, Press};
 use Mods::{Command, CommandShift, None as NoMods, Shift};
 
 pub const SHORTCUTS: &[Shortcut] = &[
-    Shortcut { action: Action::Open, chords: &[chord(Command, Key::O)], label: "Open images", fresh: false },
-    Shortcut { action: Action::Process, chords: &[chord(Command, Key::R)], label: "Process the image", fresh: false },
-    Shortcut { action: Action::Save, chords: &[chord(Command, Key::S)], label: "Save the result", fresh: false },
-    Shortcut { action: Action::Copy, chords: &[chord(Command, Key::C)], label: "Copy the result or selection", fresh: false },
-    Shortcut { action: Action::Cut, chords: &[chord(Command, Key::X)], label: "Cut the selection", fresh: false },
-    Shortcut { action: Action::Delete, chords: &[chord(NoMods, Key::Delete)], label: "Delete the selection", fresh: false },
-    Shortcut { action: Action::Invert, chords: &[chord(NoMods, Key::Enter)], label: "Invert the selection", fresh: false },
-    Shortcut { action: Action::Cancel, chords: &[chord(NoMods, Key::Escape)], label: "Cancel, clear or close", fresh: false },
-    Shortcut { action: Action::Undo, chords: &[chord(Command, Key::Z)], label: "Undo", fresh: false },
-    Shortcut { action: Action::Redo, chords: &[chord(CommandShift, Key::Z), chord(Command, Key::Y)], label: "Redo", fresh: false },
-    Shortcut { action: Action::BeforeAfter, chords: &[chord(NoMods, Key::B)], label: "Compare with the original", fresh: true },
-    Shortcut { action: Action::PrevImage, chords: &[chord(NoMods, Key::ArrowLeft), chord(NoMods, Key::A)], label: "Previous image", fresh: false },
-    Shortcut { action: Action::NextImage, chords: &[chord(NoMods, Key::ArrowRight), chord(NoMods, Key::D)], label: "Next image", fresh: false },
-    Shortcut { action: Action::FitToWindow, chords: &[chord(Command, Key::Num0)], label: "Fit to window", fresh: false },
-    Shortcut { action: Action::ActualSize, chords: &[chord(Command, Key::Num1)], label: "Actual size", fresh: false },
-    Shortcut { action: Action::ToggleQueue, chords: &[chord(NoMods, Key::H), chord(NoMods, Key::Tab)], label: "Show or hide the queue", fresh: true },
-    Shortcut { action: Action::ToggleAdjustments, chords: &[chord(Shift, Key::H)], label: "Show or hide the adjustments", fresh: true },
-    Shortcut { action: Action::Settings, chords: &[chord(Command, Key::Space)], label: "Open settings", fresh: true },
-    Shortcut { action: Action::Shortcuts, chords: &[chord(NoMods, Key::F1)], label: "Show keyboard shortcuts", fresh: true },
-    Shortcut { action: Action::CliHelp, chords: &[chord(NoMods, Key::F2)], label: "Show the command-line reference", fresh: true },
-    Shortcut { action: Action::PipelineFlow, chords: &[chord(NoMods, Key::F3)], label: "Show the mask pipeline", fresh: true },
-    Shortcut { action: Action::Screenshot, chords: &[chord(Shift, Key::F12)], label: "Save a window screenshot", fresh: true },
+    Shortcut { action: Action::Open, chords: &[chord(Command, Key::O)], label: "Open images", delivery: Press },
+    Shortcut { action: Action::Process, chords: &[chord(Command, Key::R)], label: "Process the image", delivery: Press },
+    Shortcut { action: Action::Save, chords: &[chord(Command, Key::S)], label: "Save the result", delivery: Press },
+    Shortcut { action: Action::Copy, chords: &[chord(Command, Key::C)], label: "Copy the result or selection", delivery: ByEvent },
+    Shortcut { action: Action::Cut, chords: &[chord(Command, Key::X)], label: "Cut the selection", delivery: Press },
+    Shortcut { action: Action::Delete, chords: &[chord(NoMods, Key::Delete)], label: "Delete the selection", delivery: Press },
+    Shortcut { action: Action::Invert, chords: &[chord(NoMods, Key::Enter)], label: "Invert the selection", delivery: Press },
+    Shortcut { action: Action::Cancel, chords: &[chord(NoMods, Key::Escape)], label: "Cancel, clear or close", delivery: Press },
+    Shortcut { action: Action::Undo, chords: &[chord(Command, Key::Z)], label: "Undo", delivery: Press },
+    Shortcut { action: Action::Redo, chords: &[chord(CommandShift, Key::Z), chord(Command, Key::Y)], label: "Redo", delivery: Press },
+    Shortcut { action: Action::BeforeAfter, chords: &[chord(NoMods, Key::B)], label: "Compare with the original", delivery: FreshPress },
+    Shortcut { action: Action::PrevImage, chords: &[chord(NoMods, Key::ArrowLeft), chord(NoMods, Key::A)], label: "Previous image", delivery: Press },
+    Shortcut { action: Action::NextImage, chords: &[chord(NoMods, Key::ArrowRight), chord(NoMods, Key::D)], label: "Next image", delivery: Press },
+    Shortcut { action: Action::FitToWindow, chords: &[chord(Command, Key::Num0)], label: "Fit to window", delivery: Press },
+    Shortcut { action: Action::ActualSize, chords: &[chord(Command, Key::Num1)], label: "Actual size", delivery: Press },
+    Shortcut { action: Action::ToggleQueue, chords: &[chord(NoMods, Key::H), chord(NoMods, Key::Tab)], label: "Show or hide the queue", delivery: FreshPress },
+    Shortcut { action: Action::ToggleAdjustments, chords: &[chord(Shift, Key::H)], label: "Show or hide the adjustments", delivery: FreshPress },
+    Shortcut { action: Action::Settings, chords: &[chord(Command, Key::Space)], label: "Open settings", delivery: FreshPress },
+    Shortcut { action: Action::Shortcuts, chords: &[chord(NoMods, Key::F1)], label: "Show keyboard shortcuts", delivery: FreshPress },
+    Shortcut { action: Action::CliHelp, chords: &[chord(NoMods, Key::F2)], label: "Show the command-line reference", delivery: FreshPress },
+    Shortcut { action: Action::PipelineFlow, chords: &[chord(NoMods, Key::F3)], label: "Show the mask pipeline", delivery: FreshPress },
+    Shortcut { action: Action::Screenshot, chords: &[chord(Shift, Key::F12)], label: "Save a window screenshot", delivery: FreshPress },
 ];
 
 /// Pointer gestures listed with the shortcuts. Not key chords, so they
@@ -114,18 +136,18 @@ impl Pressed {
     }
 }
 
-/// Collect the shortcuts pressed this frame. `Copy` is left to egui's
-/// `Event::Copy`, which the app intercepts in `raw_input_hook` so text
-/// fields keep their native copy.
+/// Collect the shortcuts pressed this frame.
 pub fn pressed(ctx: &egui::Context) -> Pressed {
-    let text_focused = ctx.memory(|m| m.focused().is_some());
     let mut out = Pressed::default();
+    // Read before `ctx.input`: egui's context lock is not re-entrant.
+    let text_focused = ctx.memory(|m| m.focused().is_some());
     ctx.input(|i| {
-        for s in SHORTCUTS {
-            if s.action == Action::Copy {
-                continue;
-            }
-            if s.chords.iter().any(|c| chord_pressed(i, *c, s.fresh, text_focused)) {
+        if i.events.is_empty() {
+            return;
+        }
+        for s in SHORTCUTS.iter().filter(|s| s.delivery != ByEvent) {
+            let fresh = s.delivery == FreshPress;
+            if s.chords.iter().any(|c| chord_pressed(i, *c, fresh, text_focused)) {
                 out.set(s.action);
             }
         }
@@ -187,24 +209,26 @@ fn chord_display(c: Chord) -> String {
     s
 }
 
+fn row(action: Action) -> &'static Shortcut {
+    // Every action has exactly one row — pinned by `every_action_has_one_row`.
+    SHORTCUTS.iter().find(|s| s.action == action).expect("shortcut row")
+}
+
 /// Platform-resolved key text for `action` ("Ctrl+O", "\u{2190} / A"),
 /// built once and shared so tooltips stay allocation-free per frame.
 pub fn keys(action: Action) -> &'static str {
-    static DISPLAY: OnceLock<Vec<String>> = OnceLock::new();
+    static DISPLAY: OnceLock<[String; Action::ALL.len()]> = OnceLock::new();
     let table = DISPLAY.get_or_init(|| {
-        SHORTCUTS
-            .iter()
-            .map(|s| s.chords.iter().map(|c| chord_display(*c)).collect::<Vec<_>>().join(" / "))
-            .collect()
+        Action::ALL.map(|a| {
+            row(a).chords.iter().map(|c| chord_display(*c)).collect::<Vec<_>>().join(" / ")
+        })
     });
-    // Every action has exactly one row — pinned by `every_action_has_one_row`.
-    let idx = SHORTCUTS.iter().position(|s| s.action == action).unwrap_or(0);
-    &table[idx]
+    &table[action as usize]
 }
 
 /// Label for `action`, as in the shortcut lists.
 pub fn label(action: Action) -> &'static str {
-    SHORTCUTS.iter().find(|s| s.action == action).map_or("", |s| s.label)
+    row(action).label
 }
 
 /// Returns true if the modal should close.
@@ -244,15 +268,9 @@ mod tests {
 
     #[test]
     fn every_action_has_one_row() {
-        let all = [
-            Action::Open, Action::Process, Action::Save, Action::Copy, Action::Cut,
-            Action::Delete, Action::Invert, Action::Cancel, Action::Undo, Action::Redo,
-            Action::Shortcuts, Action::CliHelp, Action::PipelineFlow, Action::Screenshot,
-            Action::FitToWindow, Action::ActualSize, Action::Settings, Action::BeforeAfter,
-            Action::PrevImage, Action::NextImage, Action::ToggleQueue, Action::ToggleAdjustments,
-        ];
-        assert_eq!(all.len(), SHORTCUTS.len());
-        for a in all {
+        assert_eq!(Action::ALL.len(), SHORTCUTS.len());
+        for (i, a) in Action::ALL.into_iter().enumerate() {
+            assert_eq!(a as usize, i, "ALL must follow discriminant order: {a:?}");
             assert_eq!(SHORTCUTS.iter().filter(|s| s.action == a).count(), 1, "{a:?}");
             assert!(!keys(a).is_empty(), "{a:?}");
             assert!(!label(a).is_empty(), "{a:?}");
@@ -349,6 +367,7 @@ mod tests {
 
     #[test]
     fn copy_is_delivered_by_the_copy_event_not_the_table() {
+        assert_eq!(row(Action::Copy).delivery, Delivery::Event);
         let p = pressed_for(press(Key::C, Modifiers::COMMAND));
         assert!(!p.is(Action::Copy));
     }
