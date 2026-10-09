@@ -93,37 +93,49 @@ pub fn decode_to_mask_artifact(
         .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
         .map(|(i, _)| i)?;
 
-    let m = SAM_MASK_RESOLUTION as usize;
-    let m_max = SAM_MASK_RESOLUTION - 1;
-    let m_max_f = m_max as f32;
-    let mask_logits: &[f32] = &output.masks[best_idx * m * m..(best_idx + 1) * m * m];
+    const M: usize = SAM_MASK_RESOLUTION as usize;
+    let mask_logits: &[f32] = &output.masks[best_idx * M * M..(best_idx + 1) * M * M];
+    let logit_row = |i: u8| -> &[f32; M] {
+        // M logits per row by construction of the slice above.
+        mask_logits[i as usize * M..][..M].try_into().expect("row of M logits")
+    };
 
     let selected = mode.sign() * FULL;
     // Bilinear taps are separable: the x taps repeat on every row and
-    // the y taps on every column, so each is computed once. Half-pixel
-    // offset for correct bilinear alignment.
-    let taps = |i: u32, n: u32| -> (usize, usize, f32) {
+    // the y taps on every column, so each is computed once.
+    let taps = |i: u32, n: u32| -> Tap {
         let scale = SAM_MASK_RESOLUTION as f32 / n as f32;
-        let s = (i as f32 + 0.5) * scale - 0.5;
-        let i0 = s.floor().clamp(0.0, m_max_f) as u32;
-        let i1 = (i0 + 1).min(m_max);
-        (i0 as usize, i1 as usize, (s - i0 as f32).clamp(0.0, 1.0))
+        let s = (i as f32 + 0.5) * scale - 0.5; // half-pixel centre
+        let i0 = s.floor().clamp(0.0, (M - 1) as f32) as u8;
+        let f = (s - i0 as f32).clamp(0.0, 1.0);
+        Tap { i0, i1: i0.saturating_add(1), f, g: 1.0 - f }
     };
-    let xs: Vec<(usize, usize, f32)> = (0..source_w).map(|x| taps(x, source_w)).collect();
+    let xs: Vec<Tap> = (0..source_w).map(|x| taps(x, source_w)).collect();
     let mut data = vec![0i8; (source_w * source_h) as usize];
     data.par_chunks_mut(source_w as usize).enumerate().for_each(|(y, row)| {
-        let (y0, y1, fy) = taps(y as u32, source_h);
-        let (top, bottom) = (&mask_logits[y0 * m..(y0 + 1) * m], &mask_logits[y1 * m..(y1 + 1) * m]);
-        for (cell, &(x0, x1, fx)) in row.iter_mut().zip(&xs) {
-            let v = top[x0] * (1.0 - fx) * (1.0 - fy)
-                + top[x1] * fx * (1.0 - fy)
-                + bottom[x0] * (1.0 - fx) * fy
-                + bottom[x1] * fx * fy;
+        let Tap { i0: y0, i1: y1, f: fy, g: gy } = taps(y as u32, source_h);
+        let (top, bottom) = (logit_row(y0), logit_row(y1));
+        for (cell, &Tap { i0: x0, i1: x1, f: fx, g: gx }) in row.iter_mut().zip(&xs) {
+            let v = top[x0 as usize] * gx * gy
+                + top[x1 as usize] * fx * gy
+                + bottom[x0 as usize] * gx * fy
+                + bottom[x1 as usize] * fx * fy;
             *cell = if v >= 0.0 { selected } else { 0 };
         }
     });
 
     Some(crate::selection::MaskArtifact::from_cells(source_w, source_h, data))
+}
+
+/// One axis of a bilinear sample: the two logit indices and the
+/// weights of the far (`f`) and near (`g = 1 - f`) tap. `u8` indices
+/// into `[f32; 256]` rows need no bounds check.
+#[derive(Clone, Copy)]
+struct Tap {
+    i0: u8,
+    i1: u8,
+    f: f32,
+    g: f32,
 }
 
 #[cfg(test)]
@@ -199,8 +211,8 @@ mod tests {
         assert!(result.is_none());
     }
 
-    /// Per-pixel bilinear sample written the long way, as the spec for
-    /// the row-parallel decode.
+    /// Per-pixel bilinear sample written the long way: pins the hoisted
+    /// taps and the row-parallel indexing against the plain formula.
     fn brute_force_decode(logits: &[f32], w: u32, h: u32, selected: i8) -> Vec<i8> {
         let m = SAM_MASK_RESOLUTION as usize;
         let m_max_f = (SAM_MASK_RESOLUTION - 1) as f32;

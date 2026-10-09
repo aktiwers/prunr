@@ -58,9 +58,8 @@ pub fn guided_filter_alpha(
 
     // --- Box filter calls 1-4 in parallel ---
     // Four integral scratches alive at once is the peak of the whole
-    // filter; two at a time would drop two planes but measured ~9 %
-    // slower at 2048², so the pairing is a RAM-for-speed trade that
-    // stays open rather than applied.
+    // filter. Do NOT pair them to save planes: measured slower (an open
+    // RAM-for-speed trade, see ARCHITECTURE.md).
     let ((mean_i, mean_p), (mean_ii, mean_ip)) = rayon::join(
         || rayon::join(|| box_filter(&guide_f, w, h, radius), || box_filter(&mask_f, w, h, radius)),
         || rayon::join(|| box_filter(&ii, w, h, radius), || box_filter(&ip, w, h, radius)),
@@ -90,19 +89,21 @@ pub fn guided_filter_alpha(
             *b = mp - *a * mi;
         });
 
-    drop((mean_i, mean_p, mean_ii, mean_ip));
+    drop((mean_ii, mean_ip));
 
-    // --- Box filter calls 5-6 in parallel ---
-    let (mean_a, mean_b) = rayon::join(
-        || box_filter(&a_buf, w, h, radius),
-        || box_filter(&b_buf, w, h, radius),
+    // --- Box filter calls 5-6 in parallel, into the two means that are
+    // no longer needed (saves faulting in two fresh planes) ---
+    let (mut mean_a, mut mean_b) = (mean_i, mean_p);
+    rayon::join(
+        || box_filter_into(&a_buf, w, h, radius, &mut mean_a),
+        || box_filter_into(&b_buf, w, h, radius, &mut mean_b),
     );
+    drop((a_buf, b_buf));
 
     // Output: q = mean_a * I_original + mean_b. Reuse the `guide_f`
     // luminance buffer instead of recomputing 0.299·R + 0.587·G +
     // 0.114·B per output pixel — saves ~3 mul + 2 add per pixel
-    // (~36 M FMAs at 4K). Buffer is alive through this point and
-    // dropped at function end.
+    // (~36 M FMAs at 4K); every other plane is already freed.
     let mut out = GrayImage::new(w, h);
     out.as_mut()
         .par_iter_mut()
