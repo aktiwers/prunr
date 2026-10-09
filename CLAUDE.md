@@ -399,11 +399,11 @@ Reach for these before writing the equivalent inline:
 | Per-status counts (done/processing/errored)    | `BatchManager::status_counts()`            |
 | Clear all result-derived caches on an item     | `BatchItem::reset_result_caches()`         |
 | Invalidate edge cache (tensor + mask together) | `BatchItem::invalidate_edge_cache()`       |
-| Item's cache footprint (bytes)                 | `BatchItem::cache_size()`                  |
+| Item's evictable tensor bytes (budget)         | `BatchItem::evictable_tensor_bytes()`      |
 | Request a thumbnail build                      | `BatchManager::request_thumbnail(...)`     |
 | Pre-decode source bytes                        | `BatchManager::request_decode_source(...)` |
-| Merge brush strokes into the per-item correction | `BatchItem::commit_correction(strokes)`  |
-| Wipe per-item brush correction (undoable)      | `BatchItem::clear_correction()`            |
+| Commit a selection mask (undoable, every author) | `BatchItem::commit_selection_mask(mask)` |
+| Wipe the per-item selection                    | `BatchManager::clear_selection(id)`        |
 | Pop / push brush stroke history                | `BatchItem::undo_stroke()` / `redo_stroke()` |
 | Read/write brush settings                      | `app.settings.brush: BrushSettings` (single source of truth) |
 
