@@ -16,21 +16,7 @@ pub(crate) fn render(ctx: &egui::Context, toasts: &mut crate::gui::toasts::Toast
             let tab_id = egui::Id::new("cli_help_tab");
             let mut tab: usize = ui.data(|d| d.get_temp(tab_id).unwrap_or(0));
 
-            ui.horizontal(|ui| {
-                for (i, label) in ["Quick Start", "Lines", "Mask", "Eraser", "Advanced"].iter().enumerate() {
-                    let selected = tab == i;
-                    let text = RichText::new(*label)
-                        .size(theme::FONT_SIZE_BODY)
-                        .color(if selected { theme::TEXT_PRIMARY } else { theme::TEXT_SECONDARY });
-                    let btn = egui::Button::new(text)
-                        .fill(if selected { theme::BG_SECONDARY } else { egui::Color32::TRANSPARENT })
-                        .corner_radius(theme::BUTTON_ROUNDING)
-                        .min_size(egui::vec2(0.0, theme::CHIP_HEIGHT));
-                    if ui.add(btn).clicked() {
-                        tab = i;
-                    }
-                }
-            });
+            super::chip::tab_strip(ui, &["Quick Start", "Lines", "Mask", "Eraser", "Advanced"], &mut tab);
             ui.separator();
             ui.add_space(theme::SPACE_SM);
 
