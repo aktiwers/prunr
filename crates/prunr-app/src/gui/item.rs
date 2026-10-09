@@ -217,6 +217,79 @@ pub(crate) struct PresetSnapshot {
     pub(crate) applied_preset: String,
 }
 
+pub(crate) struct BatchItem {
+    pub(crate) id: u64,
+    pub(crate) filename: String,
+    pub(crate) source: ImageSource,
+    pub(crate) dimensions: (u32, u32),
+    /// Pre-decoded source RGBA (decoded on background thread for instant switching)
+    pub(crate) source_rgba: Option<Arc<image::RgbaImage>>,
+    /// Same pixels as `source_rgba`, pre-wrapped in `DynamicImage::ImageRgba8`
+    /// and shared via `Arc`. Built lazily by `build_preview_inputs` on the
+    /// first live-preview dispatch for this item and reused for every
+    /// subsequent dispatch in the session, so each drag-tweak avoids a ~15ms,
+    /// ~48MB memcpy clone. Cleared whenever `source_rgba` is re-populated
+    /// (re-decode) so the cache can't go stale.
+    pub(crate) source_dyn: Option<Arc<image::DynamicImage>>,
+    pub(crate) source_texture: Option<egui::TextureHandle>,
+    pub(crate) thumb_texture: Option<egui::TextureHandle>,
+    pub(crate) thumb_pending: bool,
+    pub(crate) result_rgba: Option<Arc<image::RgbaImage>>,
+    /// Chain-mode mirror of `source_dyn`: caches a `DynamicImage` wrapping
+    /// the current `result_rgba` so chain-mode live-preview dispatches
+    /// don't re-clone the full RGBA buffer every tick. The tuple stores
+    /// the `result_rgba` Arc that produced the cached `DynamicImage`;
+    /// `Arc::ptr_eq` against the current `result_rgba` is the staleness
+    /// check, so no manual invalidation is needed — every site that
+    /// replaces `result_rgba` with a fresh Arc automatically misses.
+    pub(crate) chain_dyn_cache: Option<(Arc<image::RgbaImage>, Arc<image::DynamicImage>)>,
+    pub(crate) result_texture: Option<egui::TextureHandle>,
+    /// True while a background thread is building the source ColorImage.
+    pub(crate) source_tex_pending: bool,
+    /// True while a background thread is building the result ColorImage.
+    pub(crate) result_tex_pending: bool,
+    /// True while a background thread is decoding source bytes to RGBA.
+    pub(crate) decode_pending: bool,
+    /// History stack for undo: previous results + their recipes, newest last.
+    pub(crate) history: VecDeque<HistoryEntry>,
+    /// Redo stack: results undone, newest last. Cleared on new processing.
+    pub(crate) redo_stack: VecDeque<HistoryEntry>,
+    pub(crate) status: BatchStatus,
+    pub(crate) selected: bool,
+    /// Per-image processing settings. Edited via the adjustments toolbar.
+    pub(crate) settings: super::item_settings::ItemSettings,
+    /// The recipe that produced the current result_rgba. None if never processed.
+    pub(crate) applied_recipe: Option<prunr_core::ProcessingRecipe>,
+    /// Compressed cached tensor from Tier 1 inference (for Tier 2 mask reruns).
+    pub(crate) cached_tensor: Option<super::worker::CompressedTensor>,
+    /// Tier-1 upscale output cached for Tier-2 reprocess. Set by
+    /// pump_upscale_results after a successful upscale dispatch.
+    /// Mirrors `cached_tensor`'s contract: NOT cleared by
+    /// `reset_result_caches()`; only cleared explicitly on Tier-1
+    /// invalidation (model swap, output_scale / pre_denoise /
+    /// brightness_lift change). Holds the raw model output BEFORE
+    /// any postprocess (sharpen, ai_blend, saturation, color_match) —
+    /// the postprocess functions are re-run on every Tier-2 dispatch.
+    ///
+    /// RAM impact: at 4K source × 4× upscale = 15360×8640 RGBA ≈ 500 MB.
+    /// Not under the tensor budget (`evictable_tensor_bytes`). The Arc
+    /// wraps the buffer so cheap clones in live-preview snapshots
+    /// don't duplicate.
+    pub(crate) upscale_raw: Option<Arc<image::RgbaImage>>,
+    /// Bicubic resize of the original source at upscale_raw's dimensions.
+    /// Used by apply_ai_blend and apply_color_match. Built lazily by the
+    /// first Tier-2 dispatch that needs it; invalidated alongside upscale_raw.
+    pub(crate) bicubic_source: Option<Arc<image::RgbaImage>>,
+    /// All 4 DexiNed scales from one inference (Tier 2 edge reruns read
+    /// whichever scale the user has picked without re-inferring).
+    pub(crate) cached_edge_tensors: Option<super::worker::CompressedEdgeTensors>,
+    /// Decompressed hot copy of the active scale. Lets a slider drag reuse
+    /// the same Arc instead of paying zstd per dispatch.
+    pub(crate) volatile_edge_tensor: Option<(prunr_core::EdgeScale, Arc<Vec<f32>>)>,
+    /// Decompressed segmentation tensor kept across the ticks of one
+    /// slider drag; cleared with `cached_tensor` and when the item
+    /// leaves the selection.
+    pub(crate) volatile_seg_tensor: Option<Arc<super::live_preview::SegTensor>>,
     /// Live-preview cache: the dilated edge plane and the strength, scale
     /// and thickness it was built with. Colour, style and compose tweaks
     /// then skip the tensor→mask resize and the dilation; any of the three
