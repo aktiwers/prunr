@@ -2,8 +2,6 @@
 //! Renders below the adjustments toolbar when a selection exists.
 //! Keyboard hints come from the shortcut table.
 
-use std::sync::LazyLock;
-
 use egui::{Color32, RichText, Stroke, Ui};
 use egui_material_icons::icons::{ICON_CLOSE, ICON_CONTENT_COPY, ICON_CONTENT_CUT, ICON_DELETE, ICON_FLIP};
 
@@ -32,17 +30,6 @@ pub(crate) enum SelectionAction {
 /// Layout: `[ Delete ]  [ Copy ]  [ Cut ]  |  [ Invert ]  [ Clear ]`
 /// Separator between Cut and Invert divides destructive-adjacent (left group)
 /// from selection-modifying (right group) per 33-UI-SPEC.md.
-/// Button faces, built once so the 60 Hz render path never formats.
-static FACES: LazyLock<[String; 5]> = LazyLock::new(|| {
-    [
-        format!("{}  Delete", ICON_DELETE.codepoint),
-        format!("{}  Copy", ICON_CONTENT_COPY.codepoint),
-        format!("{}  Cut", ICON_CONTENT_CUT.codepoint),
-        format!("{}  Invert", ICON_FLIP.codepoint),
-        format!("{}  Clear", ICON_CLOSE.codepoint),
-    ]
-});
-
 pub(crate) fn render_selection_action_bar(ui: &mut Ui) -> Option<SelectionAction> {
     let mut chosen = None;
 
@@ -55,13 +42,13 @@ pub(crate) fn render_selection_action_bar(ui: &mut Ui) -> Option<SelectionAction
     ui.add_space(SPACE_XS);
 
     ui.horizontal(|ui| {
-        if action_button(ui, &FACES[0], "Delete", Action::Delete, Some(DESTRUCTIVE)).clicked() {
+        if action_button(ui, ICON_DELETE.codepoint, "Delete", Action::Delete, Some(DESTRUCTIVE)).clicked() {
             chosen = Some(SelectionAction::Delete);
         }
-        if action_button(ui, &FACES[1], "Copy", Action::Copy, None).clicked() {
+        if action_button(ui, ICON_CONTENT_COPY.codepoint, "Copy", Action::Copy, None).clicked() {
             chosen = Some(SelectionAction::Copy);
         }
-        if action_button(ui, &FACES[2], "Cut", Action::Cut, None).clicked() {
+        if action_button(ui, ICON_CONTENT_CUT.codepoint, "Cut", Action::Cut, None).clicked() {
             chosen = Some(SelectionAction::Cut);
         }
 
@@ -73,10 +60,10 @@ pub(crate) fn render_selection_action_bar(ui: &mut Ui) -> Option<SelectionAction
         );
         ui.add_space(SPACE_XS);
 
-        if action_button(ui, &FACES[3], "Invert", Action::Invert, None).clicked() {
+        if action_button(ui, ICON_FLIP.codepoint, "Invert", Action::Invert, None).clicked() {
             chosen = Some(SelectionAction::Invert);
         }
-        if action_button(ui, &FACES[4], "Clear", Action::Cancel, None).clicked() {
+        if action_button(ui, ICON_CLOSE.codepoint, "Clear", Action::Cancel, None).clicked() {
             chosen = Some(SelectionAction::Clear);
         }
     });
@@ -84,12 +71,11 @@ pub(crate) fn render_selection_action_bar(ui: &mut Ui) -> Option<SelectionAction
     chosen
 }
 
-/// Render a single action button. `text` is the pre-built "icon + label"
-/// face; `label` is the bare action name used as the tooltip title.
+/// Render a single action button; `label` doubles as the tooltip title.
 /// Delete uses DESTRUCTIVE border; others use the standard stroke color.
 fn action_button(
     ui: &mut Ui,
-    text: &str,
+    icon: &str,
     label: &'static str,
     shortcut: Action,
     border_color: Option<Color32>,
@@ -101,7 +87,7 @@ fn action_button(
     ui.spacing_mut().button_padding = egui::vec2(8.0, 4.0);
     let resp = ui.add(
         egui::Button::new(
-            RichText::new(text).color(TEXT_PRIMARY).size(FONT_SIZE_BODY),
+            RichText::new(format!("{icon}  {label}")).color(TEXT_PRIMARY).size(FONT_SIZE_BODY),
         )
         .fill(BG_SECONDARY)
         .stroke(stroke)

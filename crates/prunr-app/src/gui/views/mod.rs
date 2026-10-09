@@ -92,12 +92,18 @@ pub fn format_byte_size(bytes: u64) -> String {
 
 /// Model display name (no icon).
 pub fn model_name(model: SettingsModel) -> &'static str {
-    model_info(model).1
+    model_info(model).name
 }
 
-/// Icon, display name and one-line blurb (strength · size) for a model.
-pub fn model_info(model: SettingsModel) -> (&'static str, &'static str, &'static str) {
-    match model {
+pub struct ModelInfo {
+    pub icon: &'static str,
+    pub name: &'static str,
+    /// One line of strength and download size for picker rows.
+    pub blurb: &'static str,
+}
+
+pub fn model_info(model: SettingsModel) -> ModelInfo {
+    let (icon, name, blurb) = match model {
         SettingsModel::Silueta => (ICON_SPRINT.codepoint, "Silueta", "fast \u{00b7} ~4 MB"),
         SettingsModel::U2net => (ICON_SMART_TOY.codepoint, "U2Net", "quality \u{00b7} ~170 MB"),
         SettingsModel::BiRefNetLite => (ICON_NEUROLOGY.codepoint, "BiRefNet", "detail \u{00b7} ~214 MB"),
@@ -110,7 +116,19 @@ pub fn model_info(model: SettingsModel) -> (&'static str, &'static str, &'static
         SettingsModel::Nomos8kUpscale => (ICON_ARROW_UPWARD.codepoint, "Upscale (Nomos8k)", "4\u{00d7} photos \u{00b7} ~155 MB"),
         SettingsModel::FourXNmkdSiaxCxUpscale => (ICON_ARROW_UPWARD.codepoint, "Upscale (NMKD Siax-CX)", "4\u{00d7} clean photos \u{00b7} ~64 MB"),
         SettingsModel::FourXNmkdSuperscaleUpscale => (ICON_ARROW_UPWARD.codepoint, "Upscale (NMKD Superscale)", "4\u{00d7} restoration \u{00b7} ~64 MB"),
-    }
+    };
+    ModelInfo { icon, name, blurb }
+}
+
+/// Models the dropdown offers, in display order: installed AI models,
+/// then "No model" pinned last.
+pub fn installed_models() -> impl Iterator<Item = SettingsModel> {
+    SettingsModel::ALL
+        .iter()
+        .copied()
+        .filter(|v| *v != SettingsModel::None)
+        .filter(|v| v.to_model_id().is_none_or(prunr_models::is_available))
+        .chain(std::iter::once(SettingsModel::None))
 }
 
 #[cfg(test)]

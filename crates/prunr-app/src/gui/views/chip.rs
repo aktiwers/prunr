@@ -163,27 +163,26 @@ pub(super) fn paint_falloff_square(
 /// `char` directly, so a `char` parameter would force a single-char
 /// `String` allocation per call.
 pub(super) fn icon_toggle_button(ui: &mut Ui, icon: &str, active: bool) -> Response {
-    let btn = egui::Button::new(
-        RichText::new(icon)
-            .color(if active { theme::TEXT_PRIMARY } else { theme::TEXT_SECONDARY })
-            .size(theme::ICON_SIZE_SMALL),
-    )
-    .fill(if active { theme::ACCENT } else { theme::BG_SECONDARY })
-    .corner_radius(theme::BUTTON_ROUNDING)
-    .min_size(egui::vec2(theme::CHIP_HEIGHT, theme::CHIP_HEIGHT));
-    ui.add(btn)
+    if active {
+        icon_square_button(ui, icon, theme::TEXT_PRIMARY, theme::ACCENT)
+    } else {
+        icon_square_button(ui, icon, theme::TEXT_SECONDARY, theme::BG_SECONDARY)
+    }
 }
 
 /// Momentary icon button (Reset, Help). Same size as `icon_toggle_button`
 /// but never filled with the accent — the fill is the toggle's "on" state.
 pub(super) fn icon_action_button(ui: &mut Ui, icon: &str) -> Response {
-    let btn = egui::Button::new(
-        RichText::new(icon).color(theme::TEXT_PRIMARY).size(theme::ICON_SIZE_SMALL),
+    icon_square_button(ui, icon, theme::TEXT_PRIMARY, theme::BG_SECONDARY)
+}
+
+fn icon_square_button(ui: &mut Ui, icon: &str, color: Color32, fill: Color32) -> Response {
+    ui.add(
+        egui::Button::new(RichText::new(icon).color(color).size(theme::ICON_SIZE_SMALL))
+            .fill(fill)
+            .corner_radius(theme::BUTTON_ROUNDING)
+            .min_size(egui::vec2(theme::CHIP_HEIGHT, theme::CHIP_HEIGHT)),
     )
-    .fill(theme::BG_SECONDARY)
-    .corner_radius(theme::BUTTON_ROUNDING)
-    .min_size(egui::vec2(theme::CHIP_HEIGHT, theme::CHIP_HEIGHT));
-    ui.add(btn)
 }
 
 /// Wrap a chip render in `add_enabled_ui(active, ...)` and, when disabled,
