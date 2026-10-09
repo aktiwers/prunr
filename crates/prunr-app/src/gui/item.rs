@@ -50,14 +50,19 @@ pub(crate) fn push_action_bounded(stack: &mut VecDeque<ActionType>, kind: Action
 /// have already been dropped (`try_undo_one_action` pops orphans).
 const STROKE_HISTORY_DEPTH: usize = 32;
 
+/// Push a snapshot; returns `true` when the oldest one was dropped to
+/// stay within `STROKE_HISTORY_DEPTH`.
 fn push_stroke_bounded(
     stack: &mut VecDeque<Option<Arc<prunr_core::selection::MaskArtifact>>>,
     snap: Option<Arc<prunr_core::selection::MaskArtifact>>,
-) {
+) -> bool {
     stack.push_back(snap);
+    let mut dropped = false;
     while stack.len() > STROKE_HISTORY_DEPTH {
         stack.pop_front();
+        dropped = true;
     }
+    dropped
 }
 
 /// `image` is `Arc`-wrapped so cloning across threads (canvas paint and
@@ -408,16 +413,30 @@ impl BatchItem {
         self.selection_tex_pending = false;
     }
 
-    /// Prepare for a stroke commit: snapshot the current selection_mask onto
-    /// the undo stack, clear the redo stack, and push a Stroke marker onto
-    /// the action ordering layer. Must be called BEFORE
-    /// `BatchManager::commit_selection` writes the new mask — pairing the
-    /// two calls is what keeps undo correct.
-    pub(crate) fn begin_stroke_commit(&mut self) {
-        let pre = self.selection_mask.clone();
-        push_stroke_bounded(&mut self.stroke_undo_stack, pre);
+    /// Make `mask` the selection and register the change for undo: the
+    /// previous mask is snapshotted onto the stroke stack with a Stroke
+    /// marker on the ordering layer, redo is cleared. Every author — Paint
+    /// strokes, Magic Brush candidates, Invert — goes through here, so all
+    /// of them are undoable. Returns `false` and changes nothing when
+    /// `mask` is byte-identical to the current selection: a no-op stroke
+    /// must not create an undo step.
+    pub(crate) fn commit_selection_mask(&mut self, mask: Arc<prunr_core::selection::MaskArtifact>) -> bool {
+        let hash = mask.content_hash();
+        if self.selection_hash == Some(hash) {
+            return false;
+        }
+        let pre = self.selection_mask.replace(mask);
+        self.selection_hash = Some(hash);
+        self.selection_texture = None;
+        if push_stroke_bounded(&mut self.stroke_undo_stack, pre) {
+            // The dropped snapshot's marker would otherwise undo nothing.
+            if let Some(pos) = self.actions_undo.iter().position(|a| matches!(a, ActionType::Stroke)) {
+                self.actions_undo.remove(pos);
+            }
+        }
         self.stroke_redo_stack.clear();
         self.push_action_marker(ActionType::Stroke);
+        true
     }
 
     /// Roll back the most-recent stroke commit as if it never happened.
@@ -1021,23 +1040,31 @@ mod tests {
         })
     }
 
-    /// Simulate a stroke commit: push pre-state, write new mask,
-    /// push Stroke marker, clear redo stacks.
-    fn simulate_stroke_commit(item: &mut BatchItem, mask: Arc<prunr_core::selection::MaskArtifact>) {
-        let pre = item.selection_mask.clone();
-        push_stroke_bounded(&mut item.stroke_undo_stack, pre);
-        item.stroke_redo_stack.clear();
-        item.push_action_marker(ActionType::Stroke);
-        item.selection_mask = Some(mask);
-        item.selection_hash = item.selection_mask.as_ref().map(|m| m.content_hash());
-        item.selection_texture = None;
+    #[test]
+    fn identical_commit_is_a_no_op_without_an_undo_step() {
+        let mut item = fixture_item(1);
+        assert!(item.commit_selection_mask(make_mask(1, 8, 8)));
+        assert!(!item.commit_selection_mask(make_mask(1, 8, 8)), "same bytes: no commit");
+        assert_eq!(item.stroke_undo_stack.len(), 1);
+        assert_eq!(item.actions_undo.iter().filter(|a| matches!(a, ActionType::Stroke)).count(), 1);
+    }
+
+    #[test]
+    fn dropping_the_oldest_snapshot_also_drops_its_marker() {
+        let mut item = fixture_item(1);
+        for tag in 0..(STROKE_HISTORY_DEPTH as u64 + 3) {
+            assert!(item.commit_selection_mask(make_mask(tag, 8, 8)));
+        }
+        assert_eq!(item.stroke_undo_stack.len(), STROKE_HISTORY_DEPTH);
+        let markers = item.actions_undo.iter().filter(|a| matches!(a, ActionType::Stroke)).count();
+        assert_eq!(markers, STROKE_HISTORY_DEPTH, "one marker per surviving snapshot");
     }
 
     #[test]
     fn stroke_commit_pushes_pre_state_onto_undo_stack() {
         let mut item = fixture_item(1);
         assert!(!item.has_stroke_undo());
-        simulate_stroke_commit(&mut item, make_mask(1, 8, 8));
+        item.commit_selection_mask(make_mask(1, 8, 8));
         assert!(item.has_stroke_undo(), "first stroke must register an undo entry (pre = None)");
         assert!(!item.has_stroke_redo());
     }
@@ -1050,7 +1077,7 @@ mod tests {
     #[test]
     fn revert_last_stroke_commit_clears_state_and_marker() {
         let mut item = fixture_item(1);
-        simulate_stroke_commit(&mut item, make_mask(1, 8, 8));
+        item.commit_selection_mask(make_mask(1, 8, 8));
         assert!(item.selection_mask.is_some(), "post-commit selection_mask is set");
         assert_eq!(item.actions_undo.len(), 1, "post-commit Stroke marker pushed");
         assert!(matches!(item.actions_undo.back(), Some(ActionType::Stroke)));
@@ -1069,9 +1096,9 @@ mod tests {
     #[test]
     fn revert_last_stroke_commit_only_pops_the_most_recent() {
         let mut item = fixture_item(1);
-        simulate_stroke_commit(&mut item, make_mask(1, 8, 8));
+        item.commit_selection_mask(make_mask(1, 8, 8));
         let after_first_hash = item.selection_hash;
-        simulate_stroke_commit(&mut item, make_mask(2, 8, 8));
+        item.commit_selection_mask(make_mask(2, 8, 8));
         assert_ne!(item.selection_hash, after_first_hash);
         assert_eq!(item.actions_undo.len(), 2);
 
@@ -1086,9 +1113,9 @@ mod tests {
     #[test]
     fn undo_stroke_restores_previous_selection_mask() {
         let mut item = fixture_item(1);
-        simulate_stroke_commit(&mut item, make_mask(1, 8, 8));
+        item.commit_selection_mask(make_mask(1, 8, 8));
         let after_first_hash = item.selection_hash;
-        simulate_stroke_commit(&mut item, make_mask(2, 8, 8));
+        item.commit_selection_mask(make_mask(2, 8, 8));
         assert_ne!(item.selection_hash, after_first_hash, "second stroke changed hash");
 
         assert!(item.undo_stroke(), "stroke 2 must be undoable");
@@ -1099,8 +1126,8 @@ mod tests {
     #[test]
     fn redo_stroke_replays_selection_mask() {
         let mut item = fixture_item(1);
-        simulate_stroke_commit(&mut item, make_mask(1, 8, 8));
-        simulate_stroke_commit(&mut item, make_mask(2, 8, 8));
+        item.commit_selection_mask(make_mask(1, 8, 8));
+        item.commit_selection_mask(make_mask(2, 8, 8));
         let after_two_hash = item.selection_hash;
 
         item.undo_stroke();
@@ -1112,7 +1139,7 @@ mod tests {
     fn stroke_history_caps_at_depth() {
         let mut item = fixture_item(1);
         for i in 0..(STROKE_HISTORY_DEPTH + 5) {
-            simulate_stroke_commit(&mut item, make_mask(i as u64, 8, 8));
+            item.commit_selection_mask(make_mask(i as u64, 8, 8));
         }
         assert_eq!(
             item.stroke_undo_stack.len(),
@@ -1124,9 +1151,9 @@ mod tests {
     #[test]
     fn undo_stroke_rederives_selection_hash() {
         let mut item = fixture_item(1);
-        simulate_stroke_commit(&mut item, make_mask(1, 8, 8));
+        item.commit_selection_mask(make_mask(1, 8, 8));
         let expected_hash = item.selection_hash;
-        simulate_stroke_commit(&mut item, make_mask(2, 8, 8));
+        item.commit_selection_mask(make_mask(2, 8, 8));
 
         item.undo_stroke();
         assert_eq!(
@@ -1141,7 +1168,7 @@ mod tests {
     fn stroke_commit_pushes_marker_and_clears_actions_redo() {
         let mut item = fixture_item(1);
         item.actions_redo.push_back(ActionType::Stroke);
-        simulate_stroke_commit(&mut item, make_mask(1, 8, 8));
+        item.commit_selection_mask(make_mask(1, 8, 8));
         assert_eq!(item.actions_undo.back(), Some(&ActionType::Stroke),
             "stroke commit must push a Stroke marker onto actions_undo");
         assert!(item.actions_redo.is_empty(),
@@ -1151,8 +1178,8 @@ mod tests {
     #[test]
     fn action_markers_ordered_across_action_types() {
         let mut item = fixture_item(1);
-        simulate_stroke_commit(&mut item, make_mask(1, 8, 8));
-        simulate_stroke_commit(&mut item, make_mask(2, 8, 8));
+        item.commit_selection_mask(make_mask(1, 8, 8));
+        item.commit_selection_mask(make_mask(2, 8, 8));
         let order: Vec<ActionType> = item.actions_undo.iter().copied().collect();
         assert_eq!(order, vec![ActionType::Stroke, ActionType::Stroke],
             "two strokes produce two Stroke markers in order");
@@ -1161,14 +1188,14 @@ mod tests {
     #[test]
     fn divergence_clears_redo_in_actions_layer() {
         let mut item = fixture_item(1);
-        simulate_stroke_commit(&mut item, make_mask(1, 8, 8));
+        item.commit_selection_mask(make_mask(1, 8, 8));
         // Simulate an undo (normally done via try_undo_one_action, here manually).
         let kind = item.actions_undo.pop_back().unwrap();
         item.actions_redo.push_back(kind);
         assert!(!item.actions_redo.is_empty());
 
         // New commit branches the timeline.
-        simulate_stroke_commit(&mut item, make_mask(3, 8, 8));
+        item.commit_selection_mask(make_mask(3, 8, 8));
         assert!(item.actions_redo.is_empty(),
             "fresh commit after undo must wipe actions_redo");
     }

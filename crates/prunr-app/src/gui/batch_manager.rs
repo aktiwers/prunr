@@ -487,28 +487,19 @@ impl BatchManager {
         }
     }
 
-    /// Commit a new selection mask to the named item. Recomputes the
-    /// content hash and drops the outline + texture caches — both are
-    /// rebuilt off-thread after this call. Does NOT fire any model
+    /// Commit a new selection mask to the named item, registering it for
+    /// undo (`BatchItem::commit_selection_mask`). Does NOT fire any model
     /// dispatch; `apply_selection_to_active_model` owns that decision.
     ///
-    /// Returns `Some(hash)` on success, `None` if the item was not found
-    /// OR the new mask is byte-identical to the existing selection (in
-    /// which case nothing is mutated, so callers can early-return).
+    /// Returns `false` if the item was not found or the mask is
+    /// byte-identical to the current selection (nothing mutated).
     pub(crate) fn commit_selection(
         &mut self,
         item_id: u64,
         mask: prunr_core::selection::MaskArtifact,
-    ) -> Option<u64> {
-        let item = self.find_by_id_mut(item_id)?;
-        let hash = mask.content_hash();
-        if item.selection_hash == Some(hash) {
-            return None;
-        }
-        item.selection_mask = Some(Arc::new(mask));
-        item.selection_hash = Some(hash);
-        item.selection_texture = None;
-        Some(hash)
+    ) -> bool {
+        self.find_by_id_mut(item_id)
+            .is_some_and(|item| item.commit_selection_mask(Arc::new(mask)))
     }
 
     /// Drop the entire selection state on the named item (Esc, Clear button,
@@ -1107,7 +1098,7 @@ mod tests {
         bm.items.push(item_with_cache(1, 0));
         let mask = prunr_core::selection::MaskArtifact::new_empty(32, 32);
         let expected_hash = mask.content_hash();
-        assert_eq!(bm.commit_selection(1, mask), Some(expected_hash));
+        assert!(bm.commit_selection(1, mask));
         let item = bm.find_by_id(1).unwrap();
         assert_eq!(
             item.selection_hash,
@@ -1122,12 +1113,10 @@ mod tests {
         let mut bm = fixture();
         bm.items.push(item_with_cache(1, 0));
         let mask = prunr_core::selection::MaskArtifact::new_empty(32, 32);
-        let hash = mask.content_hash();
-        assert_eq!(bm.commit_selection(1, mask), Some(hash));
+        assert!(bm.commit_selection(1, mask));
         let identical = prunr_core::selection::MaskArtifact::new_empty(32, 32);
-        assert_eq!(
-            bm.commit_selection(1, identical),
-            None,
+        assert!(
+            !bm.commit_selection(1, identical),
             "byte-identical mask must early-return without mutating caches",
         );
     }
