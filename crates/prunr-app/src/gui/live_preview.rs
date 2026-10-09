@@ -31,7 +31,7 @@ use std::time::{Duration, Instant};
 
 use image::{DynamicImage, GrayImage, RgbaImage};
 
-use prunr_core::{LineMode, ModelKind, postprocess_from_flat, tensor_to_edge_mask, compose_edges, compose_edges_styled, compose_edges_dual_styled};
+use prunr_core::{LineMode, ModelKind, postprocess_from_flat, tensor_to_edge_mask, thickened_edges, compose_edges, compose_edges_styled, compose_edges_dual_styled};
 
 /// Build the "masked base" for SubjectOutline live preview — run Tier 2 mask
 /// from the cached seg tensor to reproduce the segmented subject, so edges
@@ -102,14 +102,12 @@ pub struct PreviewResult {
     /// Generation counter — used to discard results from stale dispatches
     /// that completed after a newer tweak cancelled them.
     pub generation: u64,
-    /// Edge mask built during this dispatch, for the parent to cache so
-    /// subsequent edge_thickness / solid_line_color tweaks skip the resize.
-    /// Some only when Kind was Edge and the mask was built (not reused).
-    /// Keyed by (line_strength bits, scale) so scale switches don't reuse a
-    /// stale mask built from a different tensor.
-    pub new_edge: (EdgePlanes, EdgePlaneKey),
+    /// The edge planes an Edge dispatch built (not the ones it reused), with
+    /// the key they were built for, for the item's cache. `None` for the
+    /// other kinds.
+    pub new_edge: Option<(EdgePlanes, EdgePlaneKey)>,
     /// The Bold planes a dual-scale composition built, for the same cache.
-    pub new_bold: (EdgePlanes, EdgePlaneKey),
+    pub new_bold: Option<(EdgePlanes, EdgePlaneKey)>,
     /// Masked subject base built during this dispatch (SubjectOutline only),
     /// for the parent to cache so subsequent Edge tweaks whose mask recipe
     /// matches can skip `postprocess_from_flat`. Keyed by (MaskRecipe, model).
@@ -312,12 +310,8 @@ impl LivePreview {
                     return;
                 }
                 if let Some(rgba) = output.rgba {
-                    let (new_edge, new_bold) = if is_edge {
-                        (output.built_edge, output.built_bold)
-                    } else {
-                        (EdgePlanes::default(), EdgePlanes::default())
-                    };
-                    let (new_edge, new_bold) = ((new_edge, primary_key), (new_bold, bold_key));
+                    let new_edge = is_edge.then_some((output.built_edge, primary_key));
+                    let new_bold = is_edge.then_some((output.built_bold, bold_key));
                     let new_masked_base = output.built_masked_base
                         .zip(seg_model)
                         .map(|(base, model)| (base, mask_recipe, model));
@@ -427,10 +421,12 @@ pub struct EdgePlaneKey {
     pub thickness: u32,
 }
 
+/// What the undilated plane depends on: strength and scale, not thickness.
+type EdgeBaseKey = (u32, prunr_core::EdgeScale);
+
 impl EdgePlaneKey {
-    /// The undilated plane depends on strength and scale only.
-    fn same_base(self, o: Self) -> bool {
-        self.strength_bits == o.strength_bits && self.scale == o.scale
+    fn base_key(self) -> EdgeBaseKey {
+        (self.strength_bits, self.scale)
     }
 }
 
@@ -448,7 +444,7 @@ pub struct EdgePlanes {
 /// only; a colour or compose drag keeps both.
 #[derive(Default)]
 pub(crate) struct EdgePlaneCache {
-    pub(crate) base: Option<(Arc<GrayImage>, EdgePlaneKey)>,
+    pub(crate) base: Option<(Arc<GrayImage>, EdgeBaseKey)>,
     pub(crate) dilated: Option<(Arc<GrayImage>, EdgePlaneKey)>,
 }
 
@@ -456,7 +452,7 @@ impl EdgePlaneCache {
     /// The planes usable for `key`.
     pub(crate) fn lookup(&self, key: EdgePlaneKey) -> EdgePlanes {
         EdgePlanes {
-            base: self.base.as_ref().filter(|(_, k)| k.same_base(key)).map(|(m, _)| Arc::clone(m)),
+            base: self.base.as_ref().filter(|(_, k)| *k == key.base_key()).map(|(m, _)| Arc::clone(m)),
             dilated: self.dilated.as_ref().filter(|(_, k)| *k == key).map(|(m, _)| Arc::clone(m)),
         }
     }
@@ -464,7 +460,7 @@ impl EdgePlaneCache {
     /// Keep what a dispatch built.
     pub(crate) fn store(&mut self, built: EdgePlanes, key: EdgePlaneKey) {
         if let Some(b) = built.base {
-            self.base = Some((b, key));
+            self.base = Some((b, key.base_key()));
         }
         if let Some(d) = built.dilated {
             self.dilated = Some((d, key));
@@ -504,9 +500,9 @@ pub fn decompress_seg(ct: &CompressedTensor) -> Option<SegTensor> {
 /// slows accordingly — but the user opted into that cost when they toggled
 /// Refine Edges on, and without running the filter the three refine knobs
 /// (toggle, guided_radius, guided_epsilon) would be no-ops in live preview.
-/// What `run_preview` produces. `built_edge_mask` / `built_masked_base` are
-/// `Some` only when newly constructed this dispatch so the parent caches
-/// them — reused inputs pass through as `None` to avoid re-publishing.
+/// What `run_preview` produces. The built planes and `built_masked_base`
+/// hold only what this dispatch constructed, so the parent caches them —
+/// reused inputs pass through empty to avoid re-publishing.
 struct RunOutput {
     rgba: Option<RgbaImage>,
     built_edge: EdgePlanes,
@@ -567,12 +563,7 @@ fn run_preview(inputs: DispatchInputs, cancel: &AtomicBool) -> RunOutput {
             elapsed_ms,
             "run_preview: Tier-2 postprocess complete"
         );
-        return RunOutput {
-            rgba: Some(out),
-            built_edge: EdgePlanes::default(),
-            built_bold: EdgePlanes::default(),
-            built_masked_base: None,
-        };
+        return RunOutput { rgba: Some(out), ..RunOutput::empty() };
     }
 
     // Pipeline shape follows the user's CURRENT `line_mode`, not tensor
@@ -630,22 +621,12 @@ fn run_preview(inputs: DispatchInputs, cancel: &AtomicBool) -> RunOutput {
                 let Some(seg) = inputs.seg_tensor.as_ref() else {
                     let mut rgba = inputs.original.to_rgba8();
                     prunr_core::apply_fill_style(&mut rgba, inputs.settings.fill_style);
-                    return RunOutput {
-                        rgba: Some(rgba),
-                        built_edge: EdgePlanes::default(),
-                        built_bold: EdgePlanes::default(),
-                        built_masked_base: None,
-                    };
+                    return RunOutput { rgba: Some(rgba), ..RunOutput::empty() };
                 };
                 // Off mode with seg tensor: rebuild masked RGBA (no edge compose).
                 let Some(masked) = build_masked_base(seg, &inputs.original, &inputs.settings, inputs.correction.as_deref())
                 else { return RunOutput::empty(); };
-                return RunOutput {
-                    rgba: Some(masked.to_rgba8()),
-                    built_edge: EdgePlanes::default(),
-                    built_bold: EdgePlanes::default(),
-                    built_masked_base: None,
-                };
+                return RunOutput { rgba: Some(masked.to_rgba8()), ..RunOutput::empty() };
             }
             // SubjectOutline: compose subject + edges via the selected mode.
             // All modes are compose-time only — no re-inference.
@@ -660,7 +641,7 @@ fn run_preview(inputs: DispatchInputs, cancel: &AtomicBool) -> RunOutput {
                 inputs.secondary_edge_tensor.as_ref(), &inputs.cached_bold,
                 out_dims,
             );
-            RunOutput { rgba: Some(rgba), built_edge: EdgePlanes::default(), built_bold: EdgePlanes::default(), built_masked_base }
+            RunOutput { rgba: Some(rgba), built_masked_base, ..RunOutput::empty() }
         }
         PreviewKind::Edge => {
             let Some(edge) = inputs.edge_tensor.as_ref() else { return RunOutput::empty(); };
@@ -750,21 +731,13 @@ fn resolve_edge_mask(
     if let Some(d) = &cached.dilated {
         return (Arc::clone(d), EdgePlanes::default());
     }
-    let (base, built_base) = match &cached.base {
-        Some(b) => (Arc::clone(b), None),
-        None => {
-            let (out_w, out_h) = out_dims;
-            let b = Arc::new(tensor_to_edge_mask(&edge.data, edge.height, edge.width, out_w, out_h, edge_settings.line_strength));
-            (Arc::clone(&b), Some(b))
-        }
-    };
-    let dilated = if edge_settings.edge_thickness > 0 {
-        let mut m = (*base).clone();
-        prunr_core::morphology::shift_mask(&mut m, -(edge_settings.edge_thickness as f32));
-        Arc::new(m)
-    } else {
-        Arc::clone(&base)
-    };
+    let built_base = cached.base.is_none().then(|| {
+        let (out_w, out_h) = out_dims;
+        Arc::new(tensor_to_edge_mask(&edge.data, edge.height, edge.width, out_w, out_h, edge_settings.line_strength))
+    });
+    // one of the two is Some: built_base is None only when cached.base is Some
+    let base = built_base.as_ref().or(cached.base.as_ref()).unwrap();
+    let dilated = thickened_edges(base, edge_settings.edge_thickness).map_or_else(|| Arc::clone(base), Arc::new);
     (Arc::clone(&dilated), EdgePlanes { base: built_base, dilated: Some(dilated) })
 }
 
@@ -954,8 +927,8 @@ mod tests {
             rgba: RgbaImage::new(1, 1),
             kind: PreviewKind::Mask,
             generation: 1,
-            new_edge: (EdgePlanes::default(), EdgePlaneKey { strength_bits: 0, scale: prunr_core::EdgeScale::Fused, thickness: 0 }),
-            new_bold: (EdgePlanes::default(), EdgePlaneKey { strength_bits: 0, scale: prunr_core::EdgeScale::Bold, thickness: 0 }),
+            new_edge: None,
+            new_bold: None,
             new_masked_base: None,
             applied_mask: prunr_core::MaskRecipe::from(&prunr_core::MaskSettings::default()),
             applied_tier2_knobs: None,
@@ -982,8 +955,8 @@ mod tests {
             rgba: RgbaImage::new(2, 2),
             kind: PreviewKind::Mask,
             generation: 7,
-            new_edge: (EdgePlanes::default(), EdgePlaneKey { strength_bits: 0, scale: prunr_core::EdgeScale::Fused, thickness: 0 }),
-            new_bold: (EdgePlanes::default(), EdgePlaneKey { strength_bits: 0, scale: prunr_core::EdgeScale::Bold, thickness: 0 }),
+            new_edge: None,
+            new_bold: None,
             new_masked_base: None,
             applied_mask: prunr_core::MaskRecipe::from(&prunr_core::MaskSettings::default()),
             applied_tier2_knobs: None,
@@ -1009,8 +982,8 @@ mod tests {
             rgba: RgbaImage::new(1, 1),
             kind: PreviewKind::Mask,
             generation: 1,
-            new_edge: (EdgePlanes::default(), EdgePlaneKey { strength_bits: 0, scale: prunr_core::EdgeScale::Fused, thickness: 0 }),
-            new_bold: (EdgePlanes::default(), EdgePlaneKey { strength_bits: 0, scale: prunr_core::EdgeScale::Bold, thickness: 0 }),
+            new_edge: None,
+            new_bold: None,
             new_masked_base: None,
             applied_mask: prunr_core::MaskRecipe::from(&prunr_core::MaskSettings::default()),
             applied_tier2_knobs: None,
@@ -1033,8 +1006,8 @@ mod tests {
             rgba: RgbaImage::new(1, 1),
             kind: PreviewKind::Mask,
             generation: 3,
-            new_edge: (EdgePlanes::default(), EdgePlaneKey { strength_bits: 0, scale: prunr_core::EdgeScale::Fused, thickness: 0 }),
-            new_bold: (EdgePlanes::default(), EdgePlaneKey { strength_bits: 0, scale: prunr_core::EdgeScale::Bold, thickness: 0 }),
+            new_edge: None,
+            new_bold: None,
             new_masked_base: None,
             applied_mask: prunr_core::MaskRecipe::from(&prunr_core::MaskSettings::default()),
             applied_tier2_knobs: None,
@@ -1064,8 +1037,8 @@ mod tests {
             rgba: RgbaImage::new(1, 1),
             kind: PreviewKind::Mask,
             generation: 2,
-            new_edge: (EdgePlanes::default(), EdgePlaneKey { strength_bits: 0, scale: prunr_core::EdgeScale::Fused, thickness: 0 }),
-            new_bold: (EdgePlanes::default(), EdgePlaneKey { strength_bits: 0, scale: prunr_core::EdgeScale::Bold, thickness: 0 }),
+            new_edge: None,
+            new_bold: None,
             new_masked_base: None,
             applied_mask: prunr_core::MaskRecipe::from(&prunr_core::MaskSettings::default()),
             applied_tier2_knobs: None,

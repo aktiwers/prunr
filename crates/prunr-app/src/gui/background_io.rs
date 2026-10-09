@@ -211,9 +211,9 @@ impl BackgroundIO {
                 Some(SelectionImage::Patch { base_hash, pos, image })
             });
             let image = patch.unwrap_or_else(|| {
-                let shown = style.feathered(Arc::clone(&mask), source.as_deref());
-                let feathered = (!Arc::ptr_eq(&shown, &mask)).then(|| Arc::clone(&shown));
-                SelectionImage::Full { image: build_selection_image(&shown, style), feathered }
+                let feathered = style.feather(&mask, source.as_deref());
+                let shown = feathered.as_ref().unwrap_or(&mask);
+                SelectionImage::Full { image: build_selection_image(shown, style), feathered }
             });
             let _ = texture_tx.send(SelectionTextureResult { item_id, image, key });
             // Some compositors drop thread-initiated wake-ups while the
@@ -248,16 +248,18 @@ impl SelectionStyle {
     /// The mask as the user sees it: feathered against `source` when the
     /// feather knob is on and a source is available. Both the texture
     /// build and Delete / Copy / Cut go through here.
-    pub(crate) fn feathered(
+    /// The feathered selection, or `None` when this style shows `mask`
+    /// as it is (no feather, or no photo to feather against).
+    pub(crate) fn feather(
         &self,
-        mask: std::sync::Arc<prunr_core::selection::MaskArtifact>,
+        mask: &prunr_core::selection::MaskArtifact,
         source: Option<&image::RgbaImage>,
-    ) -> std::sync::Arc<prunr_core::selection::MaskArtifact> {
+    ) -> Option<std::sync::Arc<prunr_core::selection::MaskArtifact>> {
         match (self.edge_feather_px, source) {
-            (0, _) | (_, None) => mask,
-            (px, Some(src)) => std::sync::Arc::new(
-                prunr_core::selection::refine::feather_edges(&mask, src, px),
-            ),
+            (0, _) | (_, None) => None,
+            (px, Some(src)) => Some(std::sync::Arc::new(
+                prunr_core::selection::refine::feather_edges(mask, src, px),
+            )),
         }
     }
 
