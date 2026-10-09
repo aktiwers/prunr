@@ -117,6 +117,9 @@ fn probe_load_dynamic() -> anyhow::Result<()> {
     let silueta = prunr_models::silueta_bytes();
     println!("Building session against bundled Silueta ({} bytes)", silueta.len());
 
+    // The probe loads exactly the dylib it was handed, bypassing the
+    // resolver on purpose, so it cannot go through `session_builder()`.
+    #[allow(clippy::disallowed_methods)]
     let mut session = Session::builder().map_err(ort_err("Session::builder"))?
         .with_optimization_level(GraphOptimizationLevel::Level3).map_err(ort_err("opt level"))?
         .commit_from_memory(silueta).map_err(ort_err("commit_from_memory"))?;

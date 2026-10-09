@@ -187,8 +187,8 @@ type SamSessionSlot = Arc<Mutex<Option<Arc<SamSessions>>>>;
 fn build_sam_session(part: &str) -> Result<ort::session::Session, String> {
     let bytes = prunr_models::resolve_part_bytes(prunr_models::ModelId::Sam2HieraSmall, part)
         .map_err(|e| format!("resolve {part} bytes: {e:?}"))?;
-    ort::session::Session::builder()
-        .map_err(|e| format!("ORT builder: {e}"))?
+    prunr_core::ort_runtime::session_builder()
+        .map_err(|e| e.to_string())?
         .commit_from_memory(&bytes)
         .map_err(|e| format!("ORT session ({part}): {e}"))
 }
@@ -2092,10 +2092,8 @@ mod upscale_dispatch_tests {
 // Tests 1-3 inject a sentinel Arc<OrtEngine> via the test-only accessor and
 // assert pointer-identity or slot emptiness. Test 4 needs no engine at all.
 //
-// OrtEngine construction requires ort_runtime::init() (the ORT dylib must be
-// loaded). Tests 1-3 call `ensure_ort_for_test()` which skips gracefully when
-// the dylib isn't available — matching the pattern from prunr-core's
-// integration test suite. Test 4 has no ORT dependency and always runs.
+// OrtEngine construction needs the ORT dylib. Tests 1-3 skip gracefully
+// when none is installed; test 4 has no ORT dependency and always runs.
 #[cfg(test)]
 mod warm_cache_tests {
     use super::*;
@@ -2108,13 +2106,9 @@ mod warm_cache_tests {
         Processor::new(tx, rx)
     }
 
-    /// Call `ort_runtime::init()` once per process, then return whether
-    /// the ORT runtime is available. `false` means the dylib wasn't found
-    /// and the caller should skip. Matching the `skip_if_no_ort` pattern
-    /// from `prunr-core/tests/test_common/mod.rs`.
+    /// `false` means no dylib was found and the caller should skip.
     fn ensure_ort_for_test() -> bool {
-        static INIT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        *INIT.get_or_init(|| crate::ort_runtime::init().is_ok())
+        prunr_core::ort_runtime::ensure_initialized().is_ok()
     }
 
     /// Construct one real engine (Silueta, ~4 MB bundled) and reuse it
