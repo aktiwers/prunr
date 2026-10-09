@@ -640,13 +640,13 @@ fn build_lama_session(
         let registered = match ep {
             #[cfg(not(target_os = "macos"))]
             EpKind::Cuda => builder.with_execution_providers([
-                ort::execution_providers::CUDAExecutionProvider::default()
+                ort::ep::CUDA::default()
                     .with_device_id(0)
                     .build(),
             ]),
             #[cfg(target_os = "macos")]
             EpKind::CoreMl => {
-                let mut p = ort::execution_providers::CoreMLExecutionProvider::default();
+                let mut p = ort::ep::CoreML::default();
                 if let Some(dir) = crate::cache::cache_dir_for(id, ep.as_str()) {
                     p = p.with_model_cache_dir(dir.to_string_lossy().into_owned());
                 }
@@ -654,7 +654,7 @@ fn build_lama_session(
             }
             #[cfg(windows)]
             EpKind::DirectMl => builder.with_execution_providers([
-                ort::execution_providers::DirectMLExecutionProvider::default().build(),
+                ort::ep::DirectML::default().build(),
             ]),
             // Default device "AUTO" lets OpenVINO pick the best target
             // (iGPU when present + driver works, NPU on newer Intel,
@@ -664,7 +664,7 @@ fn build_lama_session(
             // engine.rs for the empirical retest finding.)
             #[cfg(not(target_os = "macos"))]
             EpKind::OpenVino => builder.with_execution_providers([
-                ort::execution_providers::OpenVINOExecutionProvider::default()
+                ort::ep::OpenVINO::default()
                     .with_num_threads(threads.max(1))
                     .build(),
             ]),
