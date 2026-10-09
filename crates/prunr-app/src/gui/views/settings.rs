@@ -302,24 +302,23 @@ fn render_tab_general(
         ui.label(RichText::new("Parallel jobs")
             .color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui.add_enabled(
-                settings.parallel_jobs < max_jobs,
-                egui::Button::new(RichText::new("+")
-                    .color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY))
-                    .fill(theme::BG_SECONDARY)
-                    .min_size(egui::vec2(theme::CHIP_HEIGHT, theme::CHIP_HEIGHT)),
-            ).clicked() {
+            let stepper = |ui: &mut egui::Ui, enabled: bool, glyph: &str| {
+                super::chip::with_fill(ui, theme::BG_SECONDARY, |ui| {
+                    ui.add_enabled(
+                        enabled,
+                        egui::Button::new(RichText::new(glyph)
+                            .color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY))
+                            .min_size(egui::vec2(theme::CHIP_HEIGHT, theme::CHIP_HEIGHT)),
+                    )
+                })
+                .clicked()
+            };
+            if stepper(ui, settings.parallel_jobs < max_jobs, "+") {
                 settings.parallel_jobs += 1;
             }
             ui.label(RichText::new(format!("{}", settings.parallel_jobs))
                 .color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY).strong());
-            if ui.add_enabled(
-                settings.parallel_jobs > 1,
-                egui::Button::new(RichText::new("\u{2212}")
-                    .color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY))
-                    .fill(theme::BG_SECONDARY)
-                    .min_size(egui::vec2(theme::CHIP_HEIGHT, theme::CHIP_HEIGHT)),
-            ).clicked() {
+            if stepper(ui, settings.parallel_jobs > 1, "\u{2212}") {
                 settings.parallel_jobs -= 1;
             }
         });

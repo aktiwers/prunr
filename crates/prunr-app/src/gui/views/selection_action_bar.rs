@@ -5,10 +5,10 @@
 use egui::{Color32, RichText, Stroke, Ui};
 use egui_material_icons::icons::{ICON_CLOSE, ICON_CONTENT_COPY, ICON_CONTENT_CUT, ICON_DELETE, ICON_FLIP};
 
-use super::chip::tooltip;
+use super::chip::{tooltip, with_fill};
 use super::shortcuts::Action;
 use crate::gui::theme::{
-    ACCENT, BG_SECONDARY, BUTTON_ROUNDING, CHIP_HEIGHT, DESTRUCTIVE, FONT_SIZE_BODY, SPACE_XS,
+    BG_SECONDARY, BUTTON_ROUNDING, CHIP_HEIGHT, DESTRUCTIVE, FONT_SIZE_BODY, SPACE_XS,
     STROKE_DEFAULT, TEXT_PRIMARY,
 };
 
@@ -33,12 +33,6 @@ pub(crate) enum SelectionAction {
 pub(crate) fn render_selection_action_bar(ui: &mut Ui) -> Option<SelectionAction> {
     let mut chosen = None;
 
-    // 1px ACCENT top border anchors the bar to the active selection state.
-    let bar_rect = ui.available_rect_before_wrap();
-    ui.painter().line_segment(
-        [bar_rect.left_top(), bar_rect.right_top()],
-        Stroke::new(1.0, ACCENT),
-    );
     ui.add_space(SPACE_XS);
 
     ui.horizontal(|ui| {
@@ -85,15 +79,16 @@ fn action_button(
 
     let saved_padding = ui.spacing().button_padding;
     ui.spacing_mut().button_padding = egui::vec2(8.0, 4.0);
-    let resp = ui.add(
-        egui::Button::new(
-            RichText::new(format!("{icon}  {label}")).color(TEXT_PRIMARY).size(FONT_SIZE_BODY),
+    let resp = with_fill(ui, BG_SECONDARY, |ui| {
+        ui.add(
+            egui::Button::new(
+                RichText::new(format!("{icon}  {label}")).color(TEXT_PRIMARY).size(FONT_SIZE_BODY),
+            )
+            .stroke(stroke)
+            .corner_radius(BUTTON_ROUNDING)
+            .min_size(egui::vec2(0.0, CHIP_HEIGHT)),
         )
-        .fill(BG_SECONDARY)
-        .stroke(stroke)
-        .corner_radius(BUTTON_ROUNDING)
-        .min_size(egui::vec2(0.0, CHIP_HEIGHT)),
-    );
+    });
     ui.spacing_mut().button_padding = saved_padding;
 
     tooltip(resp, label, "", Some(shortcut))
