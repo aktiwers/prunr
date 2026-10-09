@@ -5,6 +5,8 @@
 //! embedding cache (also BatchItem). This struct is purely transient UI
 //! state — active tool + "preparing..." spinner gate + stroke buffer.
 
+use super::brush_state::Trail;
+
 /// Magic Brush tool coordinator.
 #[derive(Default)]
 pub(crate) struct MagicBrushState {
@@ -17,14 +19,13 @@ pub(crate) struct MagicBrushState {
     /// pixel coordinates. Populated while the user drags with Magic Brush
     /// active; dispatched on mouse-up via build_stroke_prompt.
     pub(crate) active_stroke: Vec<(f32, f32)>,
-    /// In-progress trail stamps in SCREEN coordinates `(x, y, radius)`,
-    /// drawn at 60 Hz via `brush_overlay::draw_trail_for` for visual
-    /// feedback during the drag. Cleared at the same lifecycle points as
-    /// `active_stroke`. Distinct buffer because the SAM prompt path needs
-    /// source-pixel points but the visual layer needs zoom-aware screen
-    /// pixels — keeping the transform out of the dispatch path means a
-    /// pan / zoom mid-stroke doesn't corrupt the SAM points.
-    pub(crate) active_trail: Vec<(f32, f32, f32)>,
+    /// The in-progress trail in SCREEN coordinates, cleared at the same
+    /// lifecycle points as `active_stroke`. Distinct buffer because the
+    /// SAM prompt path needs source-pixel points but the visual layer
+    /// needs zoom-aware screen pixels — keeping the transform out of the
+    /// dispatch path means a pan / zoom mid-stroke doesn't corrupt the
+    /// SAM points.
+    pub(crate) active_trail: Trail,
 }
 
 impl MagicBrushState {
@@ -104,7 +105,7 @@ mod tests {
     fn clear_stroke_clears_both_buffers() {
         let mut m = MagicBrushState::default();
         m.active_stroke.push((10.0, 20.0));
-        m.active_trail.push((100.0, 200.0, 8.0));
+        m.active_trail.push_spaced(100.0, 200.0, 8.0);
         m.clear_stroke();
         assert!(m.active_stroke.is_empty());
         assert!(m.active_trail.is_empty());

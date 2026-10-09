@@ -370,7 +370,7 @@ fn handle_magic_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: 
         ui,
         &app.settings.brush,
         app.settings.brush.shape,
-        app.magic_brush_state.active_trail.iter().copied(),
+        app.magic_brush_state.active_trail.stamps(),
     );
     super::brush_overlay::draw_cursor(
         ui, img_rect, &app.settings.brush, pointer_on_img.is_some(),
@@ -438,7 +438,6 @@ fn handle_magic_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: 
     let Some(embedding) = embedding else { return };
 
     let screen_radius = app.settings.brush.radius;
-    let min_trail_step_sq = (screen_radius * 0.5).max(1.0).powi(2);
 
     if drag_started {
         app.magic_brush_state.clear_stroke();
@@ -455,17 +454,7 @@ fn handle_magic_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: 
                 if state.active_stroke.last() != Some(&(px, py)) {
                     state.active_stroke.push((px, py));
                 }
-                // Dedup the screen-coords trail on half-radius steps —
-                // matches BrushState.record_trail_stamp's policy so the
-                // two tools render visually identical trails.
-                let push_trail = state.active_trail.last().is_none_or(|&(lx, ly, _)| {
-                    let dx = pos.x - lx;
-                    let dy = pos.y - ly;
-                    dx * dx + dy * dy >= min_trail_step_sq
-                });
-                if push_trail {
-                    state.active_trail.push((pos.x, pos.y, screen_radius));
-                }
+                state.active_trail.push_spaced(pos.x, pos.y, screen_radius);
             }
         }
     }
