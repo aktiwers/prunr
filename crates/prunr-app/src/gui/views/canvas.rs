@@ -320,9 +320,6 @@ fn handle_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: Rect) 
         }
 
         tracing::info!(item_id, "brush stroke committed; writing to selection_mask");
-        // commit_selection_and_dispatch is the single-source-of-truth entry:
-        // persists mask, fires per-model dispatch rule, spawns off-thread
-        // outline + texture visualization build.
         app.commit_selection_and_dispatch(item_id, merged);
     }
 }

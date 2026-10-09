@@ -88,14 +88,11 @@ pub struct BrushSettings {
     /// with both standard SD and LCM checkpoints.
     #[serde(default)]
     pub sd_use_taesd: Option<bool>,
-    /// Phase 33 shared selection visualization knob: edge feather in
-    /// pixels. 0 = sharp edges. Applied via
-    /// `prunr_core::selection::refine::feather_edges` at consumer
-    /// action time (Delete/Copy/Cut) AND before outline polyline
-    /// extraction.
+    /// Shared selection knob: edge feather in pixels, 0 = sharp. Applied to
+    /// what the overlay shows and to what Delete / Copy / Cut act on.
     #[serde(default)]
     pub edge_feather: f32,
-    /// Outline stroke width in pixels.
+    /// Outline stroke width in image pixels.
     #[serde(default = "default_outline_thickness")]
     pub outline_thickness: f32,
     /// Outline stroke alpha. 0 = hidden, 1 = solid.
