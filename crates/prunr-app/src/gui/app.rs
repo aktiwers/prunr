@@ -1533,7 +1533,7 @@ impl PrunrApp {
                 }
                 (None, _) => {
                     item.status = BatchStatus::Error("Seg tensor cache corrupt".into());
-                    item.cached_tensor = None;
+                    item.set_cached_tensor(None);
                     item.applied_recipe = None;
                 }
                 (_, Err(e)) => {
@@ -1571,7 +1571,7 @@ impl PrunrApp {
             // Chain mode with an existing result feeds the output back in,
             // so the input changes each time → always full.
             if chain && item.result_rgba.is_some() {
-                item.cached_tensor = None;
+                item.set_cached_tensor(None);
                 tiers.tier1.insert(item.id);
                 continue;
             }
@@ -1697,12 +1697,12 @@ impl PrunrApp {
                 }
                 (None, _) => {
                     item.status = BatchStatus::Error("Tensor cache corrupt".into());
-                    item.cached_tensor = None;
+                    item.set_cached_tensor(None);
                     item.applied_recipe = None;
                 }
                 (_, Err(e)) => {
                     item.status = BatchStatus::Error(format!("Failed to load: {e}"));
-                    item.cached_tensor = None;
+                    item.set_cached_tensor(None);
                     item.applied_recipe = None;
                 }
             }
@@ -2315,7 +2315,7 @@ impl PrunrApp {
     /// Lazily builds (and then reuses) `item.source_dyn` — the first dispatch
     /// of a drag session pays the ~15ms / 48 MB clone to wrap `source_rgba`
     /// in a `DynamicImage`, every subsequent dispatch is just an `Arc::clone`.
-    fn build_preview_inputs(
+    pub(crate) fn build_preview_inputs(
         items: &mut [BatchItem],
         id: u64,
         kind: super::live_preview::PreviewKind,
@@ -2324,7 +2324,16 @@ impl PrunrApp {
     ) -> Option<super::live_preview::DispatchInputs> {
         use super::live_preview::{DispatchInputs, PreviewKind, decompress_seg};
         let item = items.iter_mut().find(|b| b.id == id)?;
-        let seg_tensor = item.cached_tensor.as_ref().and_then(decompress_seg);
+        // Decompress once per drag, not once per tick.
+        let seg_tensor = match (&item.cached_tensor, &item.volatile_seg_tensor) {
+            (None, _) => None,
+            (Some(_), Some(hot)) => Some(Arc::clone(hot)),
+            (Some(ct), None) => {
+                let hot = decompress_seg(ct).map(Arc::new);
+                item.volatile_seg_tensor = hot.clone();
+                hot
+            }
+        };
         // A Mask dispatch in a seg model with no cached tensor falls
         // through to `run_preview`'s source+fill_style fallback and
         // overwrites any existing `result_rgba`. Filter-only mode is
@@ -2598,7 +2607,11 @@ impl PrunrApp {
     /// for ~2.5 s on every selection change.
     fn evict_result_rgba_for_background_items(&mut self, selected_idx: usize) {
         for (i, item) in self.batch.items.iter_mut().enumerate() {
-            if i == selected_idx || item.result_rgba.is_none() || item.status != BatchStatus::Done {
+            if i == selected_idx {
+                continue;
+            }
+            item.drop_hot_tensors();
+            if item.result_rgba.is_none() || item.status != BatchStatus::Done {
                 continue;
             }
             if let Some(rgba) = item.result_rgba.take() {
