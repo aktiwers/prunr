@@ -83,6 +83,12 @@ impl BrushMode {
     }
 }
 
+/// `(any cell non-zero, any cell selected)` in one short-circuiting pass each.
+fn scan_flags(cells: &[i8]) -> (bool, bool) {
+    let painted = cells.iter().any(|&v| v != 0);
+    (painted, painted && cells.iter().any(|&v| MaskArtifact::is_selected(v)))
+}
+
 /// How a newer stroke cell lands on an existing one: zero leaves the
 /// existing cell, same sign keeps the stronger magnitude (painting twice
 /// does not double up), opposite sign lets the newer stroke win.
@@ -106,6 +112,10 @@ pub struct MaskArtifact {
     /// without looking, so it can be true for a blank plane; the
     /// dispatch path only uses it to skip the correction work.
     painted: bool,
+    /// Whether any cell is selected (half coverage or more). Exact for
+    /// every plane built by `from_cells`; painting sets it without
+    /// looking and `rescan_flags` makes it exact again.
+    selected: bool,
 }
 
 /// Returned by add_mask / subtract_mask when dimensions disagree.
@@ -119,13 +129,13 @@ impl MaskArtifact {
     /// All-zero mask at source image resolution.
     pub fn new_empty(width: u32, height: u32) -> Self {
         let cells = vec![0; (width as usize) * (height as usize)];
-        Self { width, height, data: Arc::new(cells), painted: false }
+        Self { width, height, data: Arc::new(cells), painted: false, selected: false }
     }
 
     pub fn from_cells(width: u32, height: u32, cells: Vec<i8>) -> Self {
         debug_assert_eq!(cells.len(), (width as usize) * (height as usize), "cell count != width × height");
-        let painted = cells.iter().any(|&v| v != 0);
-        Self { width, height, data: Arc::new(cells), painted }
+        let (painted, selected) = scan_flags(&cells);
+        Self { width, height, data: Arc::new(cells), painted, selected }
     }
 
     pub fn cells(&self) -> &[i8] {
@@ -133,10 +143,18 @@ impl MaskArtifact {
     }
 
     /// Mutable cells; copies the plane first only when a snapshot still
-    /// shares it, so the mid-stroke buffer paints in place.
+    /// shares it, so the mid-stroke buffer paints in place. The flags
+    /// turn conservative until `rescan_flags`.
     pub(crate) fn cells_mut(&mut self) -> &mut [i8] {
         self.painted = true;
+        self.selected = true;
         Arc::make_mut(&mut self.data).as_mut_slice()
+    }
+
+    /// Make `is_blank` and `has_selected_region` exact again after
+    /// painting; one pass, meant for the end of a stroke.
+    pub fn rescan_flags(&mut self) {
+        (self.painted, self.selected) = scan_flags(&self.data);
     }
 
     /// True when every cell is zero, so applying the plane changes
@@ -192,8 +210,9 @@ impl MaskArtifact {
     /// True when at least one cell is selected — the gate for region
     /// actions and inpaint dispatch. Distinct from "all cells zero": a
     /// stroke below half coverage still feeds the segmentation correction.
+    /// O(1): the toolbar reads it every frame.
     pub fn has_selected_region(&self) -> bool {
-        self.data.iter().any(|&v| Self::is_selected(v))
+        self.selected
     }
 
     fn map_with(&self, other: &Self, f: impl Fn(i8, i8) -> i8) -> Result<Self, SelectionError> {
@@ -233,15 +252,27 @@ impl MaskArtifact {
         self.map(|v| sign * (FULL - v.unsigned_abs() as i8))
     }
 
-    /// Stable content hash. Uses DefaultHasher (SipHasher13) — deterministic
-    /// across runs so persisted hashes survive load.
+    /// Stable content hash: SipHash-1-3 (`DefaultHasher`) over fixed
+    /// 1 MiB chunks in parallel, then over the chunk digests and the
+    /// dimensions. Deterministic across runs and machines, so persisted
+    /// hashes survive load; the chunking is part of the format.
     pub fn content_hash(&self) -> u64 {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
+        const CHUNK: usize = 1 << 20;
+        let digests: Vec<u64> = self
+            .data
+            .par_chunks(CHUNK)
+            .map(|chunk| {
+                let mut h = DefaultHasher::new();
+                chunk.hash(&mut h);
+                h.finish()
+            })
+            .collect();
         let mut h = DefaultHasher::new();
         self.width.hash(&mut h);
         self.height.hash(&mut h);
-        self.data.as_slice().hash(&mut h);
+        digests.hash(&mut h);
         h.finish()
     }
 
@@ -572,6 +603,33 @@ mod tests {
             }
         }
         assert!(faint_touched > 0, "a soft stroke must have cells below the threshold");
+    }
+
+    #[test]
+    fn flags_are_exact_after_build_and_after_rescan() {
+        let faint = mask(2, 1, vec![0, 30]);
+        assert!(!faint.is_blank() && !faint.has_selected_region());
+        let mut live = MaskArtifact::new_empty(8, 8);
+        paint_circle(&mut live, 4.0, 4.0, 2.0, Stamp { hardness: 1.0, strength: 0.1, mode: BrushMode::Add });
+        assert!(live.has_selected_region(), "conservative while painting");
+        live.rescan_flags();
+        assert!(!live.is_blank() && !live.has_selected_region(), "10 % strength never reaches half coverage");
+        paint_circle(&mut live, 4.0, 4.0, 2.0, Stamp { hardness: 1.0, strength: 1.0, mode: BrushMode::Add });
+        live.rescan_flags();
+        assert!(live.has_selected_region());
+    }
+
+    #[test]
+    fn content_hash_is_stable_across_chunk_boundaries() {
+        // 2.5 MiB: three chunks, the last partial; the value must not depend
+        // on anything but the bytes and the dimensions.
+        let n = 5 * (1 << 19);
+        let cells: Vec<i8> = (0..n).map(|i| (i % 251) as i8).collect();
+        let a = mask(n as u32, 1, cells.clone());
+        assert_eq!(a.content_hash(), mask(n as u32, 1, cells.clone()).content_hash());
+        let mut flipped = cells;
+        flipped[(1 << 20) + 7] ^= 1;
+        assert_ne!(a.content_hash(), mask(n as u32, 1, flipped).content_hash());
     }
 
     #[test]
