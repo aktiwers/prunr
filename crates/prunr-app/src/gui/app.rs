@@ -1003,9 +1003,14 @@ impl PrunrApp {
         let item = &self.batch.items[idx];
         let mask = item.selection_mask.clone()?;
         let base = item.source_for_inpaint()?;
-        // What gets cut is what the overlay shows: the feathered mask.
+        // What gets cut is what the overlay shows: the feathered mask, which
+        // the texture build already computed when it is current.
         let style = super::background_io::SelectionStyle::from_brush(&self.settings.brush);
-        Some((style.feathered(mask, item.source_rgba.as_deref()), base))
+        let shown = item.selection_texture.as_ref()
+            .filter(|t| item.selection_hash.is_some_and(|h| t.key == (h, style)))
+            .and_then(|t| t.feathered.clone())
+            .unwrap_or_else(|| style.feathered(mask, item.source_rgba.as_deref()));
+        Some((shown, base))
     }
 
     /// Cut the selection out of `base` and publish it as the item's result,
@@ -3388,13 +3393,13 @@ impl PrunrApp {
                 }
                 let Some(shown) = item.selection_mask.clone() else { continue };
                 match result.image {
-                    super::background_io::SelectionImage::Full(image) => {
+                    super::background_io::SelectionImage::Full { image, feathered } => {
                         let handle = ctx.load_texture(
                             format!("selection_{}", result.item_id),
                             image,
                             egui::TextureOptions::LINEAR,
                         );
-                        item.selection_texture = Some(super::item::SelectionTexture { key: result.key, handle, shown });
+                        item.selection_texture = Some(super::item::SelectionTexture { key: result.key, handle, shown, feathered });
                     }
                     // A patch whose base texture has moved on is dropped; the
                     // per-frame check asks again against the new base.
