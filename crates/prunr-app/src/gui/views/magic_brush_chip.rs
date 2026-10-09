@@ -18,8 +18,8 @@ use crate::gui::views::{chip, fmt};
 /// reflow the popover anchor while the slider is dragged.
 const LABEL_PAD_WIDTH: f32 = 72.0;
 
-/// Minimum popover width so the confidence slider has room to render cleanly.
-const MAGIC_POPOVER_MIN_WIDTH: f32 = 220.0;
+/// Minimum popover width so the two-column cursor block fits.
+const MAGIC_POPOVER_MIN_WIDTH: f32 = 320.0;
 
 /// Outcome reported back to the toolbar's change accumulator.
 #[derive(Default, Clone, Copy)]
@@ -50,7 +50,7 @@ pub(crate) fn render(
     let resp = chip::tooltip(
         resp,
         "Magic Brush settings",
-        "Stroke size, confidence and how the selection is shown.",
+        "Cursor size and shape, confidence, and how the selection is shown.",
         None,
     );
 
@@ -75,10 +75,10 @@ pub(crate) fn render(
                 ui.add_space(6.0);
             }
 
-            // The stroke size is shared with the Paint Brush: one brush, two tools.
-            let size = chip::slider_row_f32(ui, "Size", &mut bs.radius, 1.0..=200.0, true, |v| fmt::px(v, 0));
-            outcome.committed |= size.commit;
-            super::hint(ui, "Stroke width for drag-selecting; clicks ignore it.");
+            // One brush, two tools: the cursor block is shared with Paint.
+            outcome.committed |= super::brush_chip::render_cursor_section(ui, bs);
+            ui.add_space(4.0);
+            ui.separator();
             ui.add_space(4.0);
 
             let sel_committed = super::brush_chip::render_shared_selection_section(ui, bs);
