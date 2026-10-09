@@ -462,15 +462,48 @@ impl Default for BrushSettings {
     }
 }
 
+/// Screen-space stamps `(x, y, radius)` of an in-progress stroke, drawn
+/// each frame as the trail. Paint and Magic Brush share it so both tools
+/// render the same trail.
+#[derive(Default)]
+pub(crate) struct Trail(Vec<(f32, f32, f32)>);
+
+impl Trail {
+    /// Skips the stamp when it lies within half a radius of the previous
+    /// one: pointer events at 60+ Hz over a slow drag stack near-identical
+    /// stamps that paint the same pixels, and dropping them cuts the
+    /// per-frame paint count without changing what the user sees.
+    pub fn push_spaced(&mut self, sx: f32, sy: f32, screen_radius: f32) {
+        if let Some(&(px, py, _)) = self.0.last() {
+            let (dx, dy) = (sx - px, sy - py);
+            if dx * dx + dy * dy < (screen_radius * 0.5).max(1.0).powi(2) {
+                return;
+            }
+        }
+        self.0.push((sx, sy, screen_radius));
+    }
+
+    pub fn stamps(&self) -> impl Iterator<Item = (f32, f32, f32)> + '_ {
+        self.0.iter().copied()
+    }
+
+    pub fn clear(&mut self) {
+        self.0.clear();
+    }
+
+    #[cfg(test)]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
 /// Mid-drag stroke buffer at the active item's model resolution.
 struct ActiveStroke {
     grid: MaskArtifact,
     /// Set the first time the stamp runs against `grid`. Lets
     /// `commit_stroke` skip an O(W·H) any-nonzero scan on click-without-drag.
     dirty: bool,
-    /// Screen-space stamps painted so far. Drawn each frame as the
-    /// in-progress trail until the stroke commits.
-    trail: Vec<(f32, f32, f32)>,
+    trail: Trail,
     /// Stroke-time snapshot of the brush shape — pinned at begin_stroke
     /// so a mid-stroke shape switch doesn't desync the grid.
     shape: BrushShape,
@@ -521,7 +554,7 @@ impl BrushState {
         self.active = Some(ActiveStroke {
             grid: MaskArtifact::new_empty(width, height),
             dirty: false,
-            trail: Vec::new(),
+            trail: Trail::default(),
             shape,
             line: None,
         });
@@ -534,23 +567,10 @@ impl BrushState {
     /// Record a screen-space stamp for the in-progress stroke trail.
     /// Caller is the canvas-side overlay; `BrushState` doesn't compute
     /// screen coords itself.
-    ///
-    /// Spatial dedup: skip the push if the new stamp is within half-radius
-    /// of the previous one. Pointer events at 60+ Hz over a slow drag
-    /// stack near-identical stamps that paint to the same pixels — keeping
-    /// only every-half-radius cuts the per-frame paint count without
-    /// changing what the user sees.
     pub fn record_trail_stamp(&mut self, sx: f32, sy: f32, screen_radius: f32) {
-        let Some(active) = self.active.as_mut() else { return };
-        if let Some(&(px, py, _)) = active.trail.last() {
-            let dx = sx - px;
-            let dy = sy - py;
-            let min_step_sq = (screen_radius * 0.5).max(1.0).powi(2);
-            if dx * dx + dy * dy < min_step_sq {
-                return;
-            }
+        if let Some(active) = self.active.as_mut() {
+            active.trail.push_spaced(sx, sy, screen_radius);
         }
-        active.trail.push((sx, sy, screen_radius));
     }
 
     /// Iterator over `(sx, sy, screen_radius)` stamps in the active
@@ -559,7 +579,7 @@ impl BrushState {
         self.active
             .as_ref()
             .into_iter()
-            .flat_map(|a| a.trail.iter().copied())
+            .flat_map(|a| a.trail.stamps())
     }
 
     /// Extend the active stroke at model-space coordinates. Caller
@@ -612,6 +632,17 @@ impl BrushState {
 #[allow(clippy::field_reassign_with_default)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn trail_keeps_only_stamps_half_a_radius_apart() {
+        let mut t = Trail::default();
+        t.push_spaced(10.0, 10.0, 8.0);
+        t.push_spaced(12.0, 10.0, 8.0); // 2 px < 4 px: dropped
+        t.push_spaced(15.0, 10.0, 8.0); // 5 px from the first: kept
+        assert_eq!(t.stamps().collect::<Vec<_>>(), vec![(10.0, 10.0, 8.0), (15.0, 10.0, 8.0)]);
+        t.clear();
+        assert!(t.is_empty());
+    }
 
     #[test]
     fn brush_settings_default_edge_feather_is_zero() {
