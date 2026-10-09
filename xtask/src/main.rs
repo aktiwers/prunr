@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 mod models;
 use models::MODELS;
 
+const XTASK_USER_AGENT: &str = "prunr-xtask/0.1";
+
 /// OnDemand filename from the registry, or `None` for Bundled models.
 /// Single source of truth — bumping a model's version in REGISTRY
 /// automatically updates xtask's mirror target.
@@ -108,6 +110,9 @@ fn probe_load_dynamic() -> anyhow::Result<()> {
     println!("=== Phase 19-02b probe: load-dynamic verification ===");
     println!("Loading: {}", dylib_path.display());
 
+    // The probe loads exactly the dylib it was handed, bypassing the
+    // resolver on purpose, so it cannot go through `ensure_initialized()`.
+    #[allow(clippy::disallowed_methods)]
     let env = ort::init_from(&dylib_path).map_err(ort_err("ort::init_from"))?;
     if !env.commit() {
         anyhow::bail!("ort env commit returned false (already committed?)");
@@ -117,9 +122,7 @@ fn probe_load_dynamic() -> anyhow::Result<()> {
     let silueta = prunr_models::silueta_bytes();
     println!("Building session against bundled Silueta ({} bytes)", silueta.len());
 
-    // The probe loads exactly the dylib it was handed, bypassing the
-    // resolver on purpose, so it cannot go through `session_builder()`.
-    #[allow(clippy::disallowed_methods)]
+    #[allow(clippy::disallowed_methods)] // same reason as the init_from above
     let mut session = Session::builder().map_err(ort_err("Session::builder"))?
         .with_optimization_level(GraphOptimizationLevel::Level3).map_err(ort_err("opt level"))?
         .commit_from_memory(silueta).map_err(ort_err("commit_from_memory"))?;
@@ -143,10 +146,6 @@ fn probe_load_dynamic() -> anyhow::Result<()> {
     println!("and built+ran a Session against it. This is the mechanism Phase 19's");
     println!("Runtime Store will use to swap in EP-specific ORT bundles per-user.");
     Ok(())
-}
-
-fn http_client() -> reqwest::Result<reqwest::blocking::Client> {
-    prunr_runtime_install::http_client("prunr-xtask/0.1")
 }
 
 enum FetchError {
@@ -204,7 +203,7 @@ fn download(client: &reqwest::blocking::Client, url: &str) -> anyhow::Result<Vec
 
 fn fetch_models() -> anyhow::Result<()> {
     std::fs::create_dir_all("models")?;
-    let client = http_client()?;
+    let client = prunr_runtime_install::http_client(XTASK_USER_AGENT)?;
 
     for spec in MODELS {
         let dest = std::path::Path::new("models").join(spec.name);
@@ -378,9 +377,8 @@ fn install_runtime() -> anyhow::Result<()> {
         let target_name = target_name
             .unwrap_or_else(|| ri::install_subdir(short, &version));
         ri::validate_subdir(&target_name).map_err(|e| anyhow::anyhow!(e))?;
-        let dir = prunr_models::data_dir()
+        let dir = prunr_models::runtime_store_dir()
             .ok_or_else(|| anyhow::anyhow!("could not resolve user data dir"))?
-            .join("runtimes")
             .join(&target_name);
         println!("Target:   {}", dir.display());
         dir
@@ -388,7 +386,7 @@ fn install_runtime() -> anyhow::Result<()> {
 
     let json_url = format!("https://pypi.org/pypi/{package}/{version}/json");
     println!("Querying {json_url}");
-    let client = http_client()?;
+    let client = prunr_runtime_install::http_client(XTASK_USER_AGENT)?;
     let metadata: serde_json::Value = client.get(&json_url).send()?.json()?;
     let urls = metadata["urls"].as_array()
         .ok_or_else(|| anyhow::anyhow!("PyPI metadata missing `urls`"))?;

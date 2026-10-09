@@ -59,7 +59,7 @@ fn main() {
         std::process::exit(0);
     }
 
-    if let Err(e) = prunr_app::ort_runtime::ensure_initialized() {
+    if let Err(e) = prunr_core::ort_runtime::ensure_initialized() {
         tracing::error!(%e, "ORT runtime init failed");
         std::process::exit(2);
     }

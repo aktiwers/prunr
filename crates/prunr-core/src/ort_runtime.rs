@@ -57,31 +57,29 @@ pub fn ensure_initialized() -> Result<DylibSource, String> {
 /// A session builder on the loaded runtime.
 pub fn session_builder() -> Result<SessionBuilder, CoreError> {
     ensure_initialized().map_err(CoreError::Inference)?;
-    #[allow(clippy::disallowed_methods)] // the one site the lint routes everyone to
+    #[allow(clippy::disallowed_methods)] // the sanctioned wrapper: the runtime is loaded one line above
     Session::builder().map_err(|e| CoreError::Inference(format!("ORT builder init failed: {e}")))
 }
 
 fn init() -> Result<DylibSource, String> {
     let (path, source) = resolve_dylib_path()?;
+    #[allow(clippy::disallowed_methods)] // the sanctioned init: guarded by the OnceLock in ensure_initialized
     let env = ort::init_from(&path)
         .map_err(|e| format!("ort::init_from({}): {e}", path.display()))?;
-    // `commit()` returns false when an env was already committed (e.g.
-    // double-init in tests, or future re-entry). ORT is initialized
-    // either way — treat as success.
+    // false means an env was already committed; ORT is initialised either way.
     let _ = env.commit();
     tracing::info!(path = %path.display(), %source, "ORT runtime loaded");
     Ok(source)
 }
 
 pub fn resolve_dylib_path() -> Result<(PathBuf, DylibSource), String> {
-    if let Some(env_path) = std::env::var_os("ORT_DYLIB_PATH") {
-        let path = PathBuf::from(env_path);
+    if let Some(path) = env_override() {
         if !path.is_file() {
             return Err(format!("ORT_DYLIB_PATH={} is not a file", path.display()));
         }
         return Ok((path, DylibSource::EnvVar));
     }
-    if let Some(path) = runtime_store_dylib() {
+    if let Some((_, path)) = store_entries().into_iter().find(|(_, p)| p.is_file()) {
         return Ok((path, DylibSource::RuntimeStore));
     }
     if let Some(path) = bundled_dylib() {
@@ -94,25 +92,24 @@ pub fn resolve_dylib_path() -> Result<(PathBuf, DylibSource), String> {
     ))
 }
 
-fn runtime_store_root() -> Option<PathBuf> {
-    prunr_models::data_dir().map(|d| d.join("runtimes"))
+fn env_override() -> Option<PathBuf> {
+    std::env::var_os("ORT_DYLIB_PATH").map(PathBuf::from)
 }
 
-fn runtime_store_dylib() -> Option<PathBuf> {
-    let root = runtime_store_root()?;
-    if !root.is_dir() {
-        return None;
-    }
-    let mut entries: Vec<_> = std::fs::read_dir(&root).ok()?
+/// Every runtime-store entry as `(dir name, path the dylib would have)`,
+/// sorted by name so logs reproduce; meaningful EP selection happens at
+/// the per-session ladder, not at this layer.
+fn store_entries() -> Vec<(String, PathBuf)> {
+    let Some(read) = prunr_models::runtime_store_dir().and_then(|root| std::fs::read_dir(root).ok()) else {
+        return Vec::new();
+    };
+    let mut entries: Vec<(String, PathBuf)> = read
         .filter_map(Result::ok)
         .filter(|e| e.file_type().ok().is_some_and(|ft| ft.is_dir()))
+        .map(|e| (e.file_name().to_string_lossy().into_owned(), e.path().join(DYLIB_NAME)))
         .collect();
-    // Deterministic order so logs reproduce; meaningful EP selection
-    // happens at the per-session ladder, not at this layer.
-    entries.sort_by_key(|e| e.file_name());
-    entries.into_iter()
-        .map(|e| e.path().join(DYLIB_NAME))
-        .find(|p| p.is_file())
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    entries
 }
 
 /// Structured snapshot of runtime resolution state for `prunr doctor`.
@@ -127,29 +124,11 @@ pub struct Diagnostics {
 }
 
 pub fn diagnose() -> Diagnostics {
-    let env_path = std::env::var_os("ORT_DYLIB_PATH").map(PathBuf::from);
-    let store_root = runtime_store_root();
-    let store_entries = store_root.as_ref()
-        .filter(|p| p.is_dir())
-        .and_then(|root| std::fs::read_dir(root).ok())
-        .map(|read| {
-            let mut v: Vec<(String, bool)> = read
-                .filter_map(Result::ok)
-                .filter(|e| e.file_type().ok().is_some_and(|ft| ft.is_dir()))
-                .map(|e| {
-                    let has_dylib = e.path().join(DYLIB_NAME).is_file();
-                    (e.file_name().to_string_lossy().into_owned(), has_dylib)
-                })
-                .collect();
-            v.sort_by(|a, b| a.0.cmp(&b.0));
-            v
-        })
-        .unwrap_or_default();
-    let bundled = std::env::current_exe().ok()
-        .and_then(|exe| exe.parent().map(|p| p.join("runtime").join(DYLIB_NAME)))
-        .map(|p| { let exists = p.is_file(); (p, exists) });
     Diagnostics {
-        env_path, store_root, store_entries, bundled,
+        env_path: env_override(),
+        store_root: prunr_models::runtime_store_dir(),
+        store_entries: store_entries().into_iter().map(|(name, p)| { let exists = p.is_file(); (name, exists) }).collect(),
+        bundled: bundled_nested_path().map(|p| { let exists = p.is_file(); (p, exists) }),
         resolved: resolve_dylib_path().ok(),
     }
 }
@@ -160,39 +139,29 @@ pub fn diagnose() -> Diagnostics {
 /// case where there's no bundled fallback next to the executable, and
 /// the user's runtime-store entry is their only ORT.
 pub fn has_fallback_excluding(excluding: &Path) -> bool {
-    if let Some(env) = std::env::var_os("ORT_DYLIB_PATH") {
-        let p = PathBuf::from(env);
-        if p.is_file() && p != excluding { return true; }
-    }
-    if let Some(root) = runtime_store_root() {
-        if let Ok(read) = std::fs::read_dir(&root) {
-            for e in read.flatten() {
-                let p = e.path().join(DYLIB_NAME);
-                if p.is_file() && p != excluding && !p.starts_with(excluding) {
-                    return true;
-                }
-            }
-        }
-    }
-    bundled_dylib().is_some()
+    env_override().is_some_and(|p| p.is_file() && p != excluding)
+        || store_entries().iter().any(|(_, p)| p.is_file() && p != excluding && !p.starts_with(excluding))
+        || bundled_dylib().is_some()
+}
+
+/// Release CI's `cargo xtask install-runtime --stage-to <pkg>/runtime/`
+/// puts shared libs in a `runtime/` sibling of the binary.
+fn bundled_nested_path() -> Option<PathBuf> {
+    Some(std::env::current_exe().ok()?.parent()?.join("runtime").join(DYLIB_NAME))
 }
 
 fn bundled_dylib() -> Option<PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    let parent = exe.parent()?;
-    // Release CI's `cargo xtask install-runtime --stage-to <pkg>/runtime/`
-    // puts shared libs in a `runtime/` sibling of the binary. Some
-    // packagers flatten this, hence the exe-dir fallback.
+    // Some packagers flatten the `runtime/` dir, hence the exe-dir fallback.
     //
     // macOS .app skips both: the binary's rpath
     // (`@executable_path/../Frameworks`, set in `.cargo/config.toml`)
-    // resolves the dylib at link time, so `bundled_dylib` returns
-    // `None` and the dlopen falls through to rpath. Documented for
-    // future readers — there's no Frameworks/ check here on purpose.
-    let nested = parent.join("runtime").join(DYLIB_NAME);
+    // resolves the dylib at link time, so this returns `None` and the
+    // dlopen falls through to rpath. There's no Frameworks/ check here
+    // on purpose.
+    let nested = bundled_nested_path()?;
     if nested.is_file() {
         return Some(nested);
     }
-    let flat = parent.join(DYLIB_NAME);
+    let flat = nested.parent()?.parent()?.join(DYLIB_NAME);
     flat.is_file().then_some(flat)
 }

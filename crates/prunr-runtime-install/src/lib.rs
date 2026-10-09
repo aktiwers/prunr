@@ -227,9 +227,12 @@ impl Retryable for DlError {
     fn cancelled() -> Self { DlError::fatal("cancelled") }
 }
 
-/// The HTTP client every download site shares. `timeout` is the budget
-/// per socket operation, re-armed on each read while a body streams, so
-/// a slow link still finishes and a stalled one fails within a minute.
+/// The HTTP client every download site shares. The blocking client
+/// applies `timeout` per operation: once for the request headers, then
+/// again for each `Read` call on a streamed body, so a slow link still
+/// finishes and a stalled one fails within a minute. Whole-body helpers
+/// such as `json()` get it as a total, which only the small PyPI
+/// metadata query uses.
 pub fn http_client(user_agent: &str) -> reqwest::Result<reqwest::blocking::Client> {
     reqwest::blocking::Client::builder()
         .user_agent(user_agent)
