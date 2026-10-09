@@ -965,44 +965,23 @@ impl PrunrApp {
 
         match action {
             SelectionAction::Delete => {
-                let Some(mask) = self.batch.items[idx].selection_mask.clone() else { return };
-                let Some(result) = self.batch.items[idx].result_rgba.clone() else { return };
-                // Archive pre-delete snapshot so Cmd+Z restores it.
-                let max_depth = self.settings.history_depth;
-                HistoryManager::archive_current_result(&mut self.batch.items[idx], max_depth, false);
-                let mut new_result: image::RgbaImage = (*result).clone();
-                mask.alpha_cut(&mut new_result);
-                let new_arc = Arc::new(new_result);
-                self.batch.items[idx].result_rgba = Some(new_arc.clone());
-                let source = self.batch.items[idx].source.clone();
-                self.batch.request_thumbnail(item_id, &source, Some(&new_arc));
-                ctx.request_repaint();
+                let Some((mask, base)) = self.selection_edit_inputs(idx) else { return };
+                let mut edited: image::RgbaImage = (*base).clone();
+                mask.alpha_cut(&mut edited);
+                self.apply_selection_edit(idx, edited, ctx);
             }
             SelectionAction::Copy => {
-                let Some(mask) = self.batch.items[idx].selection_mask.clone() else { return };
-                let Some(result) = self.batch.items[idx].result_rgba.clone() else { return };
-                let cropped = mask.copy_to_rgba(&result);
-                let cropped = Arc::new(cropped);
-                self.system.copy_image(&cropped);
+                let Some((mask, base)) = self.selection_edit_inputs(idx) else { return };
+                self.system.copy_image(&Arc::new(mask.copy_to_rgba(&base)));
                 self.set_temporary_status("Selection copied to clipboard");
             }
             SelectionAction::Cut => {
-                let Some(mask) = self.batch.items[idx].selection_mask.clone() else { return };
-                let Some(result) = self.batch.items[idx].result_rgba.clone() else { return };
-                // Archive pre-cut snapshot — one history entry covers both copy and delete.
-                let max_depth = self.settings.history_depth;
-                HistoryManager::archive_current_result(&mut self.batch.items[idx], max_depth, false);
-                let cropped = mask.copy_to_rgba(&result);
-                let cropped = Arc::new(cropped);
-                self.system.copy_image(&cropped);
-                let mut new_result: image::RgbaImage = (*result).clone();
-                mask.alpha_cut(&mut new_result);
-                let new_arc = Arc::new(new_result);
-                self.batch.items[idx].result_rgba = Some(new_arc.clone());
-                let source = self.batch.items[idx].source.clone();
-                self.batch.request_thumbnail(item_id, &source, Some(&new_arc));
+                let Some((mask, base)) = self.selection_edit_inputs(idx) else { return };
+                self.system.copy_image(&Arc::new(mask.copy_to_rgba(&base)));
+                let mut edited: image::RgbaImage = (*base).clone();
+                mask.alpha_cut(&mut edited);
+                self.apply_selection_edit(idx, edited, ctx);
                 self.set_temporary_status("Selection cut to clipboard");
-                ctx.request_repaint();
             }
             SelectionAction::Invert => {
                 let Some(mask) = self.batch.items[idx].selection_mask.clone() else { return };
@@ -1015,6 +994,39 @@ impl PrunrApp {
                 ctx.request_repaint();
             }
         }
+    }
+
+    /// The selection plus the image a Delete / Copy / Cut acts on: the
+    /// current result, or the source when the image has not been
+    /// processed yet.
+    fn selection_edit_inputs(
+        &self,
+        idx: usize,
+    ) -> Option<(Arc<prunr_core::selection::MaskArtifact>, Arc<image::RgbaImage>)> {
+        let item = &self.batch.items[idx];
+        let mask = item.selection_mask.clone()?;
+        let base = item.result_rgba.clone().or_else(|| item.source_rgba.clone())?;
+        Some((mask, base))
+    }
+
+    /// Install an edited image as the item's result: archive the previous
+    /// result for Cmd+Z, drop the stale result texture so the canvas
+    /// rebuilds it, refresh the thumbnail.
+    fn apply_selection_edit(&mut self, idx: usize, edited: image::RgbaImage, ctx: &egui::Context) {
+        let max_depth = self.settings.history_depth;
+        HistoryManager::archive_current_result(&mut self.batch.items[idx], max_depth, false);
+        let new_arc = Arc::new(edited);
+        let item = &mut self.batch.items[idx];
+        item.result_rgba = Some(new_arc.clone());
+        item.result_texture = None;
+        if item.status == BatchStatus::Pending {
+            item.status = BatchStatus::Done;
+        }
+        let (item_id, source) = (item.id, item.source.clone());
+        self.batch.request_thumbnail(item_id, &source, Some(&new_arc));
+        self.result_switch_id += 1;
+        self.sync_selected_batch_textures(ctx);
+        ctx.request_repaint();
     }
 
     pub(crate) fn dispatch_inpaint_for_item(&mut self, idx: usize) {
@@ -4573,6 +4585,29 @@ mod selection_action_tests {
         for px in new_result.pixels() {
             assert_eq!(px.0[3], 0, "alpha_cut must zero alpha in selected region");
         }
+    }
+
+    /// Delete on an image that has not been processed cuts the source and
+    /// becomes the item's result; the stale result texture is dropped so
+    /// the canvas rebuilds it.
+    #[test]
+    fn delete_on_unprocessed_item_cuts_the_source_into_a_result() {
+        use crate::gui::views::selection_action_bar::SelectionAction;
+        let mut app = super::PrunrApp::new_for_test();
+        let mut item = make_item_done();
+        let source = item.result_rgba.take().unwrap();
+        item.status = BatchStatus::Pending;
+        item.source_rgba = Some(source);
+        item.selection_mask = Some(Arc::new(make_mask(4, 4, true)));
+        app.batch.items.push(item);
+
+        app.handle_selection_action(0, SelectionAction::Delete, &egui::Context::default());
+
+        let item = &app.batch.items[0];
+        let result = item.result_rgba.as_ref().expect("Delete must produce a result from the source");
+        assert!(result.pixels().all(|px| px.0[3] == 0), "selected region must be cut");
+        assert_eq!(item.status, BatchStatus::Done);
+        assert!(item.result_texture.is_none(), "stale texture must be dropped for rebuild");
     }
 
     /// Invert: coverage complement, signed by the active brush mode.
