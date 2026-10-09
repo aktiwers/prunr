@@ -1263,14 +1263,18 @@ impl PrunrApp {
         // Decode still pending: try again next frame.
         let Some(source) = item.source_rgba.clone() else { return };
         let item_id = item.id;
-        let avail_ram = (crate::hardware::available_ram_bytes_throttled() / (1024 * 1024)) as u32;
+        let avail_ram = crate::hardware::available_ram_mb_throttled();
         match self.processor.dispatch_sam_encoder(item_id, source, avail_ram) {
             Ok(()) => self.magic_brush_state.set_encoder_pending(true),
-            Err(err) => {
-                self.toasts.error(format!("Magic Brush unavailable: {err}"));
-                self.deactivate_magic_brush();
-            }
+            Err(err) => self.magic_brush_unavailable(&err),
         }
+    }
+
+    /// Admission or encoder failure: tell the user and turn the tool off,
+    /// which also stops the per-frame encoder check from retrying.
+    fn magic_brush_unavailable(&mut self, err: &str) {
+        self.toasts.error(format!("Magic Brush unavailable: {err}"));
+        self.deactivate_magic_brush();
     }
 
     /// Turn Magic Brush off and drop its ORT sessions (~180 MB). Cached
@@ -1300,8 +1304,7 @@ impl PrunrApp {
                 }
                 Err(err) => {
                     tracing::error!(item_id = result.item_id, %err, "SAM encoder failed");
-                    self.toasts.error(format!("Magic Brush unavailable: {err}"));
-                    self.deactivate_magic_brush();
+                    self.magic_brush_unavailable(&err);
                 }
             }
         }
@@ -3641,6 +3644,9 @@ impl PrunrApp {
             // where the brush canvas overlay is hidden.
             if self.settings.model.is_upscale() {
                 self.brush_state.disable();
+                // No Magic toggle in the upscale row either; leaving the
+                // tool active would keep encoding every selected image.
+                self.deactivate_magic_brush();
             }
             // Cancel any in-flight upscale dispatch when the user
             // changes model mid-run — the result would land on the

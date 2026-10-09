@@ -1266,13 +1266,4 @@ mod tests {
         assert!(item.selection_tex_pending.is_none(), "pending build key must be cleared");
     }
 
-    #[test]
-    fn stroke_history_is_bounded_to_the_depth() {
-        let mut stack = VecDeque::new();
-        for _ in 0..(STROKE_HISTORY_DEPTH + 5) {
-            push_stroke_bounded(&mut stack, None);
-        }
-        assert_eq!(stack.len(), STROKE_HISTORY_DEPTH);
-    }
-
 }

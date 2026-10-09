@@ -566,8 +566,11 @@ mod tests {
         let elapsed = started.elapsed();
         assert!(result.is_err());
         assert_eq!(attempts.load(Ordering::SeqCst), 1);
-        assert!(elapsed < std::time::Duration::from_millis(200),
-            "cancel during backoff must abort promptly, took {elapsed:?}");
+        // An un-aborted run sleeps 200 ms + 400 ms before its third attempt;
+        // anything under that proves the abort, with room for CI scheduling
+        // jitter (a 231 ms run was observed on a loaded macOS runner).
+        assert!(elapsed < std::time::Duration::from_millis(500),
+            "cancel during backoff must abort before the schedule completes, took {elapsed:?}");
     }
 
     // ── Multi-part dispatch ──────────────────────────────────────────────
