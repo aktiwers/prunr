@@ -462,7 +462,10 @@ impl BatchManager {
     /// Drops BOTH caches on eviction — partial eviction would leave a partially-stale
     /// item (segmentation cached but edges gone, or vice versa) which is useless.
     pub(crate) fn enforce_tensor_budget(&mut self) {
-        let total: usize = self.items.iter().map(BatchItem::cache_size).sum();
+        // Budget only what eviction can free — selection planes and
+        // embeddings would otherwise force tensor evictions they never
+        // relieve.
+        let total: usize = self.items.iter().map(BatchItem::evictable_tensor_bytes).sum();
         if total <= TENSOR_BUDGET { return; }
         let selected_id = self.selected_item().map(|b| b.id);
         let mut remaining = total;
@@ -470,10 +473,32 @@ impl BatchManager {
             if remaining <= TENSOR_BUDGET { break; }
             // Preserve the selected item's tensors (most likely to be reused).
             if Some(item.id) == selected_id { continue; }
-            remaining -= item.cache_size();
+            remaining -= item.evictable_tensor_bytes();
             item.cached_tensor = None;
             item.invalidate_edge_cache();
         }
+    }
+
+    /// Keep the selected item's selection texture current: request a
+    /// rebuild whenever the mask or the baked style differs from what the
+    /// texture (or the build in flight) was made from. One path for every
+    /// producer — commits, undo/redo, image switch, knob changes.
+    pub(crate) fn ensure_selection_texture(
+        &mut self,
+        style: super::background_io::SelectionStyle,
+        ctx: &egui::Context,
+    ) {
+        let Some(idx) = self.selected_idx_clamped() else { return };
+        let item = &mut self.items[idx];
+        let (Some(mask), Some(hash)) = (item.selection_mask.clone(), item.selection_hash) else { return };
+        let key = (hash, style);
+        let current = item.selection_texture.as_ref().is_some_and(|t| t.key == key);
+        if current || item.selection_tex_pending == Some(key) {
+            return;
+        }
+        item.selection_tex_pending = Some(key);
+        let (item_id, source) = (item.id, item.source_rgba.clone());
+        self.bg_io.request_selection_visualization(item_id, mask, key, source, ctx.clone());
     }
 
     /// Evict all tensor caches except the selected item (called under memory pressure).
@@ -1091,6 +1116,33 @@ mod tests {
     }
 
     // ── selection lifecycle ─────────────────────────────────────────────
+
+    fn style(fill: f32) -> crate::gui::background_io::SelectionStyle {
+        crate::gui::background_io::SelectionStyle {
+            fill_opacity: fill, outline_opacity: 1.0, outline_thickness: 2.0, edge_feather_px: 0,
+        }
+    }
+
+    #[test]
+    fn ensure_selection_texture_requests_once_per_key() {
+        let mut bm = fixture();
+        bm.items.push(item_with_cache(1, 0));
+        let ctx = egui::Context::default();
+        bm.ensure_selection_texture(style(0.15), &ctx);
+        assert!(bm.items[0].selection_tex_pending.is_none(), "no selection: nothing to build");
+
+        let mask = prunr_core::selection::MaskArtifact::new_empty(8, 8);
+        let hash = mask.content_hash();
+        bm.commit_selection(1, mask);
+        bm.ensure_selection_texture(style(0.15), &ctx);
+        assert_eq!(bm.items[0].selection_tex_pending, Some((hash, style(0.15))));
+        bm.ensure_selection_texture(style(0.15), &ctx);
+        assert_eq!(bm.items[0].selection_tex_pending, Some((hash, style(0.15))), "same key: single-flight");
+
+        // A style change while the first build is in flight re-keys the request.
+        bm.ensure_selection_texture(style(0.5), &ctx);
+        assert_eq!(bm.items[0].selection_tex_pending, Some((hash, style(0.5))));
+    }
 
     #[test]
     fn commit_selection_sets_hash_in_lockstep() {

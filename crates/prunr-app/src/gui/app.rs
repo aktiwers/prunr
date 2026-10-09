@@ -932,23 +932,6 @@ impl PrunrApp {
         self.apply_selection_to_active_model(item_id);
     }
 
-    /// The selected item's selection texture is rebuilt whenever it is
-    /// missing — after a commit, undo/redo, image switch or a style-knob
-    /// change. One path for every producer; `selection_tex_pending` keeps
-    /// it to one in-flight build.
-    fn ensure_selection_texture(&mut self) {
-        let Some(idx) = self.batch.selected_idx_clamped() else { return };
-        let item = &mut self.batch.items[idx];
-        if item.selection_texture.is_some() || item.selection_tex_pending {
-            return;
-        }
-        let (Some(mask), Some(hash)) = (item.selection_mask.clone(), item.selection_hash) else { return };
-        item.selection_tex_pending = true;
-        let (item_id, source) = (item.id, item.source_rgba.clone());
-        let style = super::background_io::SelectionStyle::from_brush(&self.settings.brush);
-        self.batch.bg_io.request_selection_visualization(item_id, mask, hash, source, style);
-    }
-
     /// Dispatch a selection action (Delete / Copy / Cut / Invert / Clear).
     /// Called from `apply_toolbar_change` and from keyboard shortcuts that
     /// have a live selection.
@@ -1016,14 +999,9 @@ impl PrunrApp {
         let item = &self.batch.items[idx];
         let mask = item.selection_mask.clone()?;
         let base = item.source_for_inpaint()?;
-        // Edge feather acts on what the user sees cut, so it applies here
-        // as well as in the visualization.
-        let feather_px = self.settings.brush.edge_feather.round().max(0.0) as u32;
-        let mask = match (feather_px, item.source_rgba.as_ref()) {
-            (0, _) | (_, None) => mask,
-            (px, Some(src)) => Arc::new(prunr_core::selection::refine::feather_edges(&mask, src, px)),
-        };
-        Some((mask, base))
+        // What gets cut is what the overlay shows: the feathered mask.
+        let style = super::background_io::SelectionStyle::from_brush(&self.settings.brush);
+        Some((style.feathered(mask, item.source_rgba.as_deref()), base))
     }
 
     /// Cut the selection out of `base` and publish it as the item's result,
@@ -3335,23 +3313,25 @@ impl PrunrApp {
 
         // Drain off-thread selection textures. `ctx.load_texture` is
         // allowed here — this drain runs from `logic()`, not a render
-        // closure. A result whose hash no longer matches was superseded by
-        // a newer commit; dropping it clears `pending` so the next frame
-        // rebuilds from the current mask.
+        // closure. A result for a mask that has since changed is dropped;
+        // `ensure_selection_texture` already requested the current one.
         while let Ok(result) = self.batch.bg_io.selection_texture_rx.try_recv() {
             if let Some(item) = self.batch.find_by_id_mut(result.item_id) {
-                item.selection_tex_pending = false;
-                if item.selection_hash == Some(result.hash) {
-                    let tex = ctx.load_texture(
+                if item.selection_tex_pending == Some(result.key) {
+                    item.selection_tex_pending = None;
+                }
+                if item.selection_hash == Some(result.key.0) {
+                    let handle = ctx.load_texture(
                         format!("selection_{}", result.item_id),
                         result.color_image,
                         egui::TextureOptions::LINEAR,
                     );
-                    item.selection_texture = Some(tex);
+                    item.selection_texture = Some(super::item::SelectionTexture { key: result.key, handle });
                 }
             }
         }
-        self.ensure_selection_texture();
+        let style = super::background_io::SelectionStyle::from_brush(&self.settings.brush);
+        self.batch.ensure_selection_texture(style, ctx);
 
         // Drain bg-image texture preps. Hash match guards against a
         // user pick that swapped to a different bg image while the
@@ -3474,6 +3454,7 @@ impl eframe::App for PrunrApp {
         // the full incident analysis.
         let any_tex_pending = self.batch.items.iter().any(|it| {
             it.result_tex_pending || it.source_tex_pending || it.decode_pending
+                || it.selection_tex_pending.is_some()
         });
         if any_tex_pending {
             ctx.request_repaint_after(std::time::Duration::from_millis(50));
@@ -3706,8 +3687,6 @@ impl PrunrApp {
         }
         if toolbar_change.brush_settings_committed {
             self.settings.save();
-            // Fill / outline / feather knobs are baked into the texture.
-            self.batch.items[idx].selection_texture = None;
         }
         if let Some(req) = toolbar_change.open_model_store {
             self.model_store = Some(req);

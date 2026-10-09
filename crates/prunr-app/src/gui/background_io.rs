@@ -21,6 +21,11 @@ pub type HistoryDemoteResult = (
     Option<prunr_core::ProcessingRecipe>,
 );
 
+/// What a selection texture was built from: the mask's content hash and
+/// the style baked into it. The item compares this against the current
+/// pair to decide whether a rebuild is due.
+pub(crate) type SelectionTextureKey = (u64, SelectionStyle);
+
 /// Selection texture (fill + outline, ACCENT-tinted ColorImage) built
 /// off-thread. Peak RAM on a 4K image: 8.3M pixels × 4 bytes = ~33 MB
 /// briefly on the rayon worker; drops after `ctx.load_texture` in
@@ -28,7 +33,7 @@ pub type HistoryDemoteResult = (
 pub(crate) struct SelectionTextureResult {
     pub(crate) item_id: u64,
     pub(crate) color_image: egui::ColorImage,
-    pub(crate) hash: u64,
+    pub(crate) key: SelectionTextureKey,
 }
 
 /// Counting semaphore used to bound the number of simultaneously-decoding
@@ -172,39 +177,34 @@ impl BackgroundIO {
 
     /// Spawn an off-thread job to build the selection texture for a mask.
     ///
-    /// Peak RAM on the worker: the ColorImage (4 B/px, ~33 MB at 4K) plus
-    /// the outline band (1 B/px) and, with feather > 0, the bbox-sized
-    /// guided-filter scratch documented on `feather_edges`.
-    ///
-    /// Results carry the mask's `content_hash`. The drain path discards any
-    /// result whose hash no longer matches `item.selection_hash` — guards
-    /// against a newer commit racing a still-running worker.
+    /// Peak RAM on the worker: the ColorImage (4 B/px, ~33 MB at 4K) plus,
+    /// with feather > 0, the bbox-sized guided-filter scratch documented on
+    /// `feather_edges`. The result carries its key; the drain installs it
+    /// only while the item's mask still matches.
     pub(crate) fn request_selection_visualization(
         &self,
         item_id: u64,
         mask: std::sync::Arc<prunr_core::selection::MaskArtifact>,
-        hash: u64,
+        key: SelectionTextureKey,
         source: Option<std::sync::Arc<image::RgbaImage>>,
-        style: SelectionStyle,
+        ctx: egui::Context,
     ) {
         let texture_tx = self.selection_texture_tx.clone();
         rayon::spawn(move || {
-            let shown = match (style.edge_feather_px, source) {
-                (0, _) | (_, None) => mask,
-                (px, Some(src)) => std::sync::Arc::new(
-                    prunr_core::selection::refine::feather_edges(&mask, &src, px),
-                ),
-            };
+            let style = key.1;
+            let shown = style.feathered(mask, source.as_deref());
             let color_image = build_selection_image(&shown, style);
-            let _ = texture_tx.send(SelectionTextureResult { item_id, color_image, hash });
+            let _ = texture_tx.send(SelectionTextureResult { item_id, color_image, key });
+            // Some compositors drop thread-initiated wake-ups while the
+            // window is idle; the pending key's poll in `logic()` is the
+            // fallback.
+            ctx.request_repaint();
         });
     }
 }
 
-/// The style knobs a selection texture bakes in. Fill and outline alpha
-/// are stored relative to the larger of the two, so one render-time tint
-/// (`tint_alpha`) scales both and the overlay stays a single textured
-/// quad per frame.
+/// The style knobs a selection texture bakes in. All four apply on
+/// commit: the overlay is a single textured quad drawn untinted.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct SelectionStyle {
     pub(crate) fill_opacity: f32,
@@ -224,58 +224,64 @@ impl SelectionStyle {
         }
     }
 
-    /// Alpha of the single tint applied at render time.
-    pub(crate) fn tint_alpha(&self) -> f32 {
-        self.fill_opacity.max(self.outline_opacity).clamp(0.0, 1.0)
+    /// The mask as the user sees it: feathered against `source` when the
+    /// feather knob is on and a source is available. Both the texture
+    /// build and Delete / Copy / Cut go through here.
+    pub(crate) fn feathered(
+        &self,
+        mask: std::sync::Arc<prunr_core::selection::MaskArtifact>,
+        source: Option<&image::RgbaImage>,
+    ) -> std::sync::Arc<prunr_core::selection::MaskArtifact> {
+        match (self.edge_feather_px, source) {
+            (0, _) | (_, None) => mask,
+            (px, Some(src)) => std::sync::Arc::new(
+                prunr_core::selection::refine::feather_edges(&mask, src, px),
+            ),
+        }
     }
 
-    fn relative_alpha(&self, opacity: f32) -> u8 {
-        let scale = self.tint_alpha();
-        if scale <= 0.0 {
-            return 0;
-        }
-        (opacity / scale * 255.0).round().clamp(0.0, 255.0) as u8
+    fn alpha(opacity: f32) -> u8 {
+        (opacity * 255.0).round().clamp(0.0, 255.0) as u8
     }
 
     /// Dilation radius for the outline band: thickness 1 → the boundary
-    /// pixels only, 10 → an 11 px band.
+    /// pixels only, 10 → an 11 px band. `None` when no outline is drawn.
     fn band_radius(&self) -> Option<u32> {
-        if self.outline_thickness < 0.5 || self.relative_alpha(self.outline_opacity) == 0 {
+        if self.outline_thickness < 0.5 || Self::alpha(self.outline_opacity) == 0 {
             return None;
         }
         Some(((self.outline_thickness - 1.0) / 2.0).round().max(0.0) as u32)
     }
 }
 
-/// ACCENT-tinted image with the outline band at the outline's relative
-/// alpha, the selected interior at the fill's, and transparent elsewhere.
+/// ACCENT-tinted image: the selected interior at the fill alpha, the
+/// outline band stamped over it at the outline alpha, transparent
+/// elsewhere.
 pub(crate) fn build_selection_image(
     mask: &prunr_core::selection::MaskArtifact,
     style: SelectionStyle,
 ) -> egui::ColorImage {
     use prunr_core::selection::MaskArtifact;
     let (w, h) = (mask.width as usize, mask.height as usize);
-    let band = style
-        .band_radius()
-        .map(|r| prunr_core::selection::refine::outline_band(mask, r))
-        .unwrap_or_default();
     let accent = super::theme::ACCENT;
     let paint = |a: u8| egui::Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), a);
-    let (fill, outline) = (paint(style.relative_alpha(style.fill_opacity)), paint(style.relative_alpha(style.outline_opacity)));
-    let pixels = mask
+    let fill = paint(SelectionStyle::alpha(style.fill_opacity));
+    let mut pixels: Vec<egui::Color32> = mask
         .data
         .iter()
-        .enumerate()
-        .map(|(i, &v)| {
-            if band.get(i).is_some_and(|&b| b != 0) {
-                outline
-            } else if MaskArtifact::is_selected(v) {
-                fill
-            } else {
-                egui::Color32::TRANSPARENT
-            }
-        })
+        .map(|&v| if MaskArtifact::is_selected(v) { fill } else { egui::Color32::TRANSPARENT })
         .collect();
+    if let Some(r) = style.band_radius() {
+        let outline = paint(SelectionStyle::alpha(style.outline_opacity));
+        let r = r as usize;
+        for (x, y) in prunr_core::selection::refine::outline_polyline(mask) {
+            let (x, y) = (x as usize, y as usize);
+            let (x0, x1) = (x.saturating_sub(r), (x + r).min(w - 1));
+            for row in y.saturating_sub(r)..=(y + r).min(h - 1) {
+                pixels[row * w + x0..=row * w + x1].fill(outline);
+            }
+        }
+    }
     egui::ColorImage::new([w, h], pixels)
 }
 
@@ -300,16 +306,15 @@ mod tests {
     }
 
     #[test]
-    fn texture_stores_fill_and_outline_alpha_relative_to_the_tint() {
+    fn texture_bakes_fill_and_outline_alpha() {
         let img = build_selection_image(&centre_block(), style(0.15, 1.0, 1.0));
         assert_eq!(img.pixels[2 * 8 + 2].a(), 255, "boundary pixel carries the outline alpha");
-        assert_eq!(img.pixels[3 * 8 + 3].a(), 38, "interior carries fill/tint = 0.15");
+        assert_eq!(img.pixels[3 * 8 + 3].a(), 38, "interior carries the fill alpha (0.15)");
         assert_eq!(img.pixels[0].a(), 0, "outside is transparent");
 
         let img = build_selection_image(&centre_block(), style(0.5, 0.25, 1.0));
-        assert!((style(0.5, 0.25, 1.0).tint_alpha() - 0.5).abs() < 1e-6);
-        assert_eq!(img.pixels[3 * 8 + 3].a(), 255, "fill is the stronger knob here");
-        assert_eq!(img.pixels[2 * 8 + 2].a(), 128, "outline at half the tint");
+        assert_eq!(img.pixels[3 * 8 + 3].a(), 128);
+        assert_eq!(img.pixels[2 * 8 + 2].a(), 64);
     }
 
     #[test]
@@ -317,7 +322,7 @@ mod tests {
         let img = build_selection_image(&centre_block(), style(0.15, 1.0, 0.0));
         assert_eq!(img.pixels[2 * 8 + 2].a(), 38, "no band: boundary pixel is plain fill");
         let img = build_selection_image(&centre_block(), style(0.15, 0.0, 4.0));
-        assert_eq!(img.pixels[2 * 8 + 2].a(), 255, "fill is the only knob, so it is the tint");
+        assert_eq!(img.pixels[2 * 8 + 2].a(), 38, "invisible outline: boundary pixel is plain fill");
     }
 
     #[test]
