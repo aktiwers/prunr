@@ -366,9 +366,7 @@ fn download_attempt(
     // nicer but it's a v2 polish.)
     let _ = std::fs::remove_file(&partial);
 
-    let client = reqwest::blocking::Client::builder()
-        .user_agent(concat!("prunr/", env!("CARGO_PKG_VERSION")))
-        .build()
+    let client = prunr_runtime_install::http_client(crate::runtime_install::USER_AGENT)
         .map_err(|e| DownloadError::fatal(format!("HTTP client init failed: {e}")))?;
 
     let response = client.get(url).send()
