@@ -131,6 +131,15 @@ pub enum SdScheduler {
 }
 
 impl SdScheduler {
+    /// Display order for the scheduler picker.
+    pub const ALL: [SdScheduler; 5] = [
+        SdScheduler::Lcm,
+        SdScheduler::Ddim,
+        SdScheduler::DpmPlusPlus2MKarras,
+        SdScheduler::UniPc,
+        SdScheduler::EulerA,
+    ];
+
     /// Returns `false` for schedulers that don't have a dispatch
     /// backend wired yet. UI gates the dropdown on this so users
     /// can't pick something the worker can't run; dispatch should

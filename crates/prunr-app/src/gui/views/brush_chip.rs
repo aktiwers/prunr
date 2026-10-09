@@ -1,7 +1,7 @@
 //! Brush settings chip — radius / hardness / mode + Reset brush
 //! + a live preview of the brush stamp.
 //!
-//! Rendered next to the brush toggle in Row 2 when brush mode is on.
+//! Rendered next to the brush toggle while Paint Brush is on.
 
 use egui::{Color32, Sense, Stroke, Ui};
 use egui_material_icons::icons::ICON_BRUSH;
@@ -35,17 +35,17 @@ pub(super) struct BrushChipOutcome {
     /// True on slider release / mode / shape click. Caller persists
     /// app-level brush settings on this signal.
     pub committed: bool,
-    /// The "Auto-apply strokes" switch flipped to this value.
-    pub auto_apply: Option<bool>,
+    /// New value of `Settings::protect_selection` when its switch flipped.
+    pub protect_selection: Option<bool>,
 }
 
-/// `auto_apply` is `Some(current)` for models whose strokes can apply on
-/// their own (background removal); `None` hides the switch.
+/// `protect` is `Some(current protect_selection)` for models whose strokes
+/// can apply on their own (background removal); `None` hides the switch.
 pub(super) fn render(
     ui: &mut Ui,
     s: &mut BrushSettings,
     is_inpaint_mode: bool,
-    auto_apply: Option<bool>,
+    protect: Option<bool>,
 ) -> BrushChipOutcome {
     let label = chip_label(s);
     let resp = ui
@@ -162,7 +162,7 @@ pub(super) fn render(
         // render_shared_selection_section.
         let sel_committed = render_shared_selection_section(ui, s);
         outcome.committed |= sel_committed;
-        outcome.auto_apply = render_auto_apply_row(ui, auto_apply);
+        outcome.protect_selection = render_auto_apply_row(ui, protect);
 
         ui.add_space(4.0);
         ui.separator();
@@ -176,15 +176,15 @@ pub(super) fn render(
     outcome
 }
 
-/// The "Auto-apply strokes" switch, shared by both brush popovers. Returns
-/// the new value when flipped.
-pub(super) fn render_auto_apply_row(ui: &mut egui::Ui, auto_apply: Option<bool>) -> Option<bool> {
-    let current = auto_apply?;
+/// The "Auto-apply strokes" switch, shared by both brush popovers. It is
+/// the inverse of `Settings::protect_selection`; returns the new
+/// `protect_selection` when flipped so no caller has to negate it.
+pub(super) fn render_auto_apply_row(ui: &mut egui::Ui, protect: Option<bool>) -> Option<bool> {
+    let mut auto_apply = !protect?;
     ui.add_space(4.0);
-    let mut on = current;
-    let flipped = chip::toggle_row(ui, "Auto-apply strokes", &mut on).changed;
+    let flipped = chip::toggle_row(ui, "Auto-apply strokes", &mut auto_apply).changed;
     super::hint(ui, "Apply each stroke to the result at once. Off: paint freely, then click Process.");
-    flipped.then_some(on)
+    flipped.then_some(!auto_apply)
 }
 
 /// Selection visualization knobs shared between the Paint Brush chip and
@@ -216,14 +216,12 @@ pub(super) fn render_shared_selection_section(ui: &mut egui::Ui, s: &mut BrushSe
         fmt::percent,
     );
     committed |= oo.commit;
-
     ui.add_space(2.0);
     let fo = chip::slider_row_f32(
         ui, "Fill opacity", &mut s.fill_opacity, 0.0..=1.0, false,
         fmt::percent,
     );
     committed |= fo.commit;
-
     committed
 }
 

@@ -77,6 +77,11 @@ pub fn kv_row(ui: &mut egui::Ui, key: &str, value: &str, key_color: egui::Color3
     ui.end_row();
 }
 
+/// Float "is off its default" test shared by every chip and group.
+pub(super) fn differs(a: f32, b: f32) -> bool {
+    (a - b).abs() > f32::EPSILON
+}
+
 /// Format a byte count for human display. Used by the Model Store
 /// (download progress, disk-usage footer) and stays here so future
 /// callers don't reinvent it.

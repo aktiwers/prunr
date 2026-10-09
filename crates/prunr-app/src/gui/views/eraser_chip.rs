@@ -1,4 +1,4 @@
-//! SD-eraser chips for row 2: Quality, Prompt, and an Advanced group
+//! SD-eraser chips: Quality, Prompt, and an Advanced group
 //! holding the scheduler, steps, denoising strength, Karras, seed and the
 //! fast decoder.
 
@@ -14,8 +14,7 @@ use crate::gui::settings::Settings;
 use crate::gui::theme;
 
 use super::chip::{self, GroupChip};
-use super::fmt;
-use super::hint;
+use super::{differs, fmt, hint};
 
 const LCM_DOWNLOAD_HINT: &str =
     "Download Eraser (SD 1.5 LCM, fast) in the Model Store to enable.";
@@ -53,7 +52,7 @@ fn render_advanced_group(ui: &mut egui::Ui, app_settings: &mut Settings, lcm_bun
     let (max_steps, default_steps) = steps_range(&mut app_settings.brush);
     let brush = &app_settings.brush;
     let tuned = usize::from(brush.sd_steps != default_steps)
-        + usize::from((brush.sd_strength - 1.0).abs() > f32::EPSILON)
+        + usize::from(differs(brush.sd_strength, 1.0))
         + usize::from(brush.sd_use_karras_sigmas)
         + usize::from(brush.sd_seed.is_some())
         + usize::from(brush.sd_use_taesd == Some(false));
@@ -79,14 +78,8 @@ fn render_advanced_group(ui: &mut egui::Ui, app_settings: &mut Settings, lcm_bun
             committed = true;
         }
 
-        ui.label(RichText::new("Scheduler").color(theme::TEXT_SECONDARY).size(theme::FONT_SIZE_MONO));
-        for sched in [
-            SdScheduler::Lcm,
-            SdScheduler::Ddim,
-            SdScheduler::DpmPlusPlus2MKarras,
-            SdScheduler::UniPc,
-            SdScheduler::EulerA,
-        ] {
+        chip::section_label(ui, "Scheduler");
+        for sched in SdScheduler::ALL {
             let label = sched.label();
             let desc = sched.description();
             let bundle_gated = matches!(sched, SdScheduler::Lcm) && !lcm_bundle_installed;
