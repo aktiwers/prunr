@@ -43,15 +43,12 @@ pub(crate) fn push_action_bounded(stack: &mut VecDeque<ActionType>, kind: Action
 }
 
 
-/// Per-item brush stroke history depth. Bounded to match `ACTION_HIST_DEPTH`
-/// (the ordering layer cap) so the ordering log and stroke stack stay in sync.
-/// Memory: each entry is `Option<Arc<MaskArtifact>>` at source resolution,
-/// one byte per pixel — ~4 MB per snapshot at 2048², ~8 MB at 4K. A
-/// 100-deep stack peaks at 0.4 GB on 2K content, 0.8 GB on 4K — the
-/// user's trade for a generous undo depth on hi-res images. The Arc
-/// wrapping makes snapshots O(1) refcount bumps; payload is shared until
-/// mutated (it never is, since MaskArtifact is immutable through `Arc`).
-const STROKE_HISTORY_DEPTH: usize = ACTION_HIST_DEPTH;
+/// Per-item brush stroke history depth. Each entry is a full source-
+/// resolution plane (1 B/px: ~4 MB at 2048², ~8 MB at 4K), so 32 strokes
+/// cap the stack at ~0.26 GB on 4K content. Shallower than
+/// `ACTION_HIST_DEPTH`: the ordering log tolerates stroke entries that
+/// have already been dropped (`try_undo_one_action` pops orphans).
+const STROKE_HISTORY_DEPTH: usize = 32;
 
 fn push_stroke_bounded(
     stack: &mut VecDeque<Option<Arc<prunr_core::selection::MaskArtifact>>>,
@@ -616,10 +613,30 @@ impl BatchItem {
         });
         // Selection mask: source-res i8, Arc-wrapped (count refcount once)
         let selection_bytes = self.selection_mask.as_ref().map_or(0, |m| m.data.len());
+        // Undo/redo snapshots share Arcs with each other and with the live
+        // mask; count each distinct plane once.
+        let mut seen: Vec<*const Vec<i8>> = self
+            .selection_mask
+            .iter()
+            .map(|m| Arc::as_ptr(&m.data))
+            .collect();
+        let stroke_bytes: usize = self
+            .stroke_undo_stack
+            .iter()
+            .chain(self.stroke_redo_stack.iter())
+            .flatten()
+            .filter_map(|m| {
+                let ptr = Arc::as_ptr(&m.data);
+                (!seen.contains(&ptr)).then(|| {
+                    seen.push(ptr);
+                    m.data.len()
+                })
+            })
+            .sum();
         let embedding_bytes = if self.magic_brush_embedding.is_some() {
             prunr_core::sam::SamEmbedding::expected_bytes()
         } else { 0 };
-        seg + edge + upscale + bicubic + selection_bytes + embedding_bytes
+        seg + edge + upscale + bicubic + selection_bytes + stroke_bytes + embedding_bytes
     }
 
     /// Test-only constructor: returns a BatchItem with all fields at their
@@ -1268,6 +1285,28 @@ mod tests {
         assert!(item.selection_hash.is_none(), "selection_hash must be cleared");
         assert!(item.selection_texture.is_none(), "selection_texture must be cleared");
         assert!(!item.selection_tex_pending, "pending build flag must be cleared");
+    }
+
+    #[test]
+    fn cache_size_counts_each_undo_snapshot_plane_once() {
+        let base = fixture_item(1).cache_size();
+        let mut item = fixture_item(2);
+        let first = Arc::new(prunr_core::selection::MaskArtifact::new_empty(16, 16));
+        item.selection_mask = Some(first.clone());
+        // The live mask is also the top undo snapshot: shared plane, counted once.
+        item.stroke_undo_stack.push_back(Some(first.clone()));
+        // A distinct older snapshot adds its own bytes.
+        item.stroke_undo_stack.push_back(Some(Arc::new(prunr_core::selection::MaskArtifact::new_empty(16, 16))));
+        assert_eq!(item.cache_size() - base, 2 * 256, "two distinct 16×16 planes");
+    }
+
+    #[test]
+    fn stroke_history_is_bounded_to_the_depth() {
+        let mut stack = VecDeque::new();
+        for _ in 0..(STROKE_HISTORY_DEPTH + 5) {
+            push_stroke_bounded(&mut stack, None);
+        }
+        assert_eq!(stack.len(), STROKE_HISTORY_DEPTH);
     }
 
     #[test]
