@@ -45,15 +45,11 @@ pub fn plain(v: f32, decimals: usize) -> String {
 }
 
 fn signed(v: f32, decimals: usize, unit: &str) -> String {
-    let rounded = format!("{:.decimals$}", v.abs());
-    let is_zero = rounded.trim_matches(|c| c == '0' || c == '.').is_empty();
-    if is_zero {
-        format!("0{unit}")
-    } else if v > 0.0 {
-        format!("+{rounded}{unit}")
-    } else {
-        format!("\u{2212}{rounded}{unit}")
+    if (v * 10f32.powi(decimals as i32)).round() == 0.0 {
+        return format!("0{unit}");
     }
+    let sign = if v > 0.0 { "+" } else { "\u{2212}" };
+    format!("{sign}{:.decimals$}{unit}", v.abs())
 }
 
 #[cfg(test)]
