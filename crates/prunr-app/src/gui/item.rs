@@ -295,10 +295,9 @@ pub(crate) struct BatchItem {
     /// styles.
     pub(crate) cached_edge: super::live_preview::EdgePlaneCache,
     pub(crate) cached_bold: super::live_preview::EdgePlaneCache,
-    /// The selection resampled to the segmentation tensor's size, keyed by
-    /// the selection hash and that size, so a live-preview tick applies a
-    /// same-size plane instead of resampling the source-resolution one.
-    pub(crate) selection_tensor_plane: Option<(Arc<prunr_core::selection::MaskArtifact>, u64, (u32, u32))>,
+    /// The selection resampled to the segmentation tensor's size, with the
+    /// selection hash it came from; see `selection_plane_at`.
+    pub(crate) selection_tensor_plane: Option<(Arc<prunr_core::selection::MaskArtifact>, u64)>,
     /// SubjectOutline live-preview cache: the "masked subject" base
     /// (`postprocess_from_flat` output) that edge composition draws onto.
     /// Keyed by `(MaskRecipe, ModelKind)` — when mask settings change, the
@@ -414,6 +413,36 @@ impl BatchItem {
         self.volatile_seg_tensor = None;
         self.volatile_edge_tensor = None;
         self.selection_tensor_plane = None;
+        if let Some(t) = &mut self.selection_texture {
+            t.feathered = None;
+        }
+    }
+
+    /// The selection at `dims` (the segmentation tensor's size) for a
+    /// live-preview tick, resampled once per selection change rather than
+    /// per tick. `None` without a selection or with a blank one.
+    pub(crate) fn selection_plane_at(&mut self, dims: (u32, u32)) -> Option<Arc<prunr_core::selection::MaskArtifact>> {
+        let hash = self.selection_hash?;
+        let sel = self.selection_mask.as_ref().filter(|m| !m.is_blank())?;
+        if let Some((plane, h)) = &self.selection_tensor_plane {
+            if *h == hash && (plane.width, plane.height) == dims {
+                return Some(Arc::clone(plane));
+            }
+        }
+        let plane = if (sel.width, sel.height) == dims {
+            Arc::clone(sel)
+        } else {
+            Arc::new(sel.resampled(dims.0, dims.1))
+        };
+        self.selection_tensor_plane = Some((Arc::clone(&plane), hash));
+        Some(plane)
+    }
+
+    /// The overlay texture, when it was built from the current selection
+    /// in `style`.
+    pub(crate) fn current_selection_texture(&self, style: super::background_io::SelectionStyle) -> Option<&SelectionTexture> {
+        let hash = self.selection_hash?;
+        self.selection_texture.as_ref().filter(|t| t.key == (hash, style))
     }
 
     /// Clear the cached upscale_raw buffer and the derived bicubic_source.
@@ -442,6 +471,7 @@ impl BatchItem {
         self.selection_hash = None;
         self.selection_texture = None;
         self.selection_tex_pending = None;
+        self.selection_tensor_plane = None;
     }
 
     /// True while a background thread owes this item a decode, a texture
