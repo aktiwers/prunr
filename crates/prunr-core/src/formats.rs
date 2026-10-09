@@ -7,27 +7,43 @@ use fast_image_resize::{images::{Image, ImageRef}, PixelType, ResizeAlg, ResizeO
 pub use fast_image_resize::FilterType as ResizeFilter;
 use crate::types::{CoreError, LARGE_IMAGE_LIMIT};
 
-/// SIMD-accelerated Lanczos3 resize for single-channel (gray) images.
-/// Source buffer is borrowed via `ImageRef` — no clone needed.
-pub fn resize_gray_lanczos3(src: &GrayImage, dst_width: u32, dst_height: u32) -> GrayImage {
-    let src_image = ImageRef::new(
-        src.width(), src.height(), src.as_raw(), PixelType::U8,
-    ).expect("valid gray image buffer");
-    let mut dst_image = Image::new(dst_width, dst_height, PixelType::U8);
-    Resizer::new().resize(&src_image, &mut dst_image, None).expect("resize failed");
-    GrayImage::from_raw(dst_width, dst_height, dst_image.into_vec()).expect("valid dimensions")
+/// SIMD convolution resize of a borrowed interleaved buffer; the
+/// channels are resampled independently (straight alpha, like the rest
+/// of the pipeline).
+fn resize_raw(src: &[u8], w: u32, h: u32, pixel: PixelType, dst_w: u32, dst_h: u32, filter: ResizeFilter) -> Vec<u8> {
+    let src = ImageRef::new(w, h, src, pixel).expect("buffer matches its dimensions");
+    let mut dst = Image::new(dst_w, dst_h, pixel);
+    let options = ResizeOptions::new().resize_alg(ResizeAlg::Convolution(filter));
+    Resizer::new().resize(&src, &mut dst, Some(&options)).expect("resize failed");
+    dst.into_vec()
 }
 
-/// SIMD-accelerated resize of an RGBA image with the given filter, on
-/// straight (un-premultiplied) alpha like the rest of the pipeline. The
+/// SIMD-accelerated Lanczos3 resize for single-channel (gray) images.
+pub fn resize_gray_lanczos3(src: &GrayImage, dst_width: u32, dst_height: u32) -> GrayImage {
+    let out = resize_raw(src.as_raw(), src.width(), src.height(), PixelType::U8, dst_width, dst_height, ResizeFilter::Lanczos3);
+    GrayImage::from_raw(dst_width, dst_height, out).expect("valid dimensions")
+}
+
+/// SIMD-accelerated resize of an RGBA image with the given filter. The
 /// source is borrowed, so a 4K photo costs one pass, no copy.
 pub fn resize_rgba(src: &RgbaImage, dst_width: u32, dst_height: u32, filter: ResizeFilter) -> RgbaImage {
-    let src_image = ImageRef::new(src.width(), src.height(), src.as_raw(), PixelType::U8x4)
-        .expect("valid RGBA buffer");
-    let mut dst = Image::new(dst_width, dst_height, PixelType::U8x4);
-    let options = ResizeOptions::new().resize_alg(ResizeAlg::Convolution(filter));
-    Resizer::new().resize(&src_image, &mut dst, Some(&options)).expect("resize failed");
-    RgbaImage::from_raw(dst_width, dst_height, dst.into_vec()).expect("valid dimensions")
+    let out = resize_raw(src.as_raw(), src.width(), src.height(), PixelType::U8x4, dst_width, dst_height, filter);
+    RgbaImage::from_raw(dst_width, dst_height, out).expect("valid dimensions")
+}
+
+/// Resize a decoded image to RGBA in its own layout: RGB8 and RGBA8
+/// sources are resampled as they are and only the small result is
+/// expanded, so a 12 MP JPEG never materialises as a 48 MB RGBA buffer.
+pub fn resize_to_rgba(img: &DynamicImage, dst_width: u32, dst_height: u32, filter: ResizeFilter) -> RgbaImage {
+    match img {
+        DynamicImage::ImageRgba8(rgba) => resize_rgba(rgba, dst_width, dst_height, filter),
+        DynamicImage::ImageRgb8(rgb) => {
+            let out = resize_raw(rgb.as_raw(), rgb.width(), rgb.height(), PixelType::U8x3, dst_width, dst_height, filter);
+            let rgb = image::RgbImage::from_raw(dst_width, dst_height, out).expect("valid dimensions");
+            DynamicImage::ImageRgb8(rgb).to_rgba8()
+        }
+        other => resize_rgba(&other.to_rgba8(), dst_width, dst_height, filter),
+    }
 }
 
 /// SIMD-accelerated Lanczos3 resize for RGB images. The `to_rgb8` call
@@ -36,11 +52,8 @@ pub fn resize_rgba(src: &RgbaImage, dst_width: u32, dst_height: u32, filter: Res
 /// resizer rather than copied again.
 pub fn resize_rgb_lanczos3(img: &DynamicImage, dst_width: u32, dst_height: u32) -> image::RgbImage {
     let rgb = img.to_rgb8();
-    let src = ImageRef::new(rgb.width(), rgb.height(), rgb.as_raw(), PixelType::U8x3)
-        .expect("valid RGB buffer");
-    let mut dst = Image::new(dst_width, dst_height, PixelType::U8x3);
-    Resizer::new().resize(&src, &mut dst, None).expect("resize failed");
-    image::RgbImage::from_raw(dst_width, dst_height, dst.into_vec()).expect("valid dimensions")
+    let out = resize_raw(rgb.as_raw(), rgb.width(), rgb.height(), PixelType::U8x3, dst_width, dst_height, ResizeFilter::Lanczos3);
+    image::RgbImage::from_raw(dst_width, dst_height, out).expect("valid dimensions")
 }
 
 /// Load an image from a file path. Format detected by file extension.

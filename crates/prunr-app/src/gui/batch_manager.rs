@@ -445,10 +445,8 @@ impl BatchManager {
                     let bytes = source.load_bytes().ok()?;
                     let img = image::load_from_memory(&bytes).ok()?;
                     drop(bytes);
-                    let rgba = img.to_rgba8();
-                    drop(img);
-                    let (w, h) = fit_dimensions(rgba.width(), rgba.height(), THUMB_MAX_PX, THUMB_MAX_PX);
-                    Some(prunr_core::formats::resize_rgba(&rgba, w, h, prunr_core::formats::ResizeFilter::Bilinear))
+                    let (w, h) = fit_dimensions(img.width(), img.height(), THUMB_MAX_PX, THUMB_MAX_PX);
+                    Some(prunr_core::formats::resize_to_rgba(&img, w, h, prunr_core::formats::ResizeFilter::Bilinear))
                 })();
                 if let Some(thumb) = thumb {
                     let _ = tx.send((item_id, thumb.width(), thumb.height(), thumb.into_raw()));
