@@ -10,6 +10,9 @@ use std::sync::{mpsc, Arc};
 
 use prunr_runtime_install as ri;
 
+/// User agent for every HTTP request the app makes.
+pub const USER_AGENT: &str = concat!("prunr/", env!("CARGO_PKG_VERSION"));
+
 #[derive(Debug, Clone)]
 pub enum InstallEvent {
     /// Pre-download work (PyPI metadata query, post-download SHA verify).
@@ -189,10 +192,7 @@ fn query_pypi(rt: RuntimeId) -> Result<ri::WheelInfo, String> {
         "https://pypi.org/pypi/{}/{}/json",
         rt.pypi_package(), rt.pypi_version(),
     );
-    let client = reqwest::blocking::Client::builder()
-        .user_agent(concat!("prunr/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .map_err(|e| format!("HTTP client: {e}"))?;
+    let client = ri::http_client(USER_AGENT).map_err(|e| format!("HTTP client: {e}"))?;
     let resp = client.get(&url).send()
         .map_err(|e| format!("PyPI query failed: {e}"))?;
     let metadata: serde_json::Value = resp.json()
