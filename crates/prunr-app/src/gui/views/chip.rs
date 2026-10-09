@@ -486,6 +486,8 @@ pub(super) fn choice_row<T: Copy + PartialEq>(
     section_label(ui, label);
     let mut changed = false;
     ui.horizontal_wrapped(|ui| {
+        // Break the row between options, never inside a label.
+        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
         for opt in options {
             let selected = *value == opt.value;
             let resp = ui
