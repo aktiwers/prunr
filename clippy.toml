@@ -1,3 +1,5 @@
 disallowed-methods = [
     { path = "ort::session::Session::builder", reason = "use prunr_core::ort_runtime::session_builder(), which loads the runtime first; a builder on an unloaded runtime hangs instead of failing" },
+    { path = "ort::session::builder::SessionBuilder::new", reason = "use prunr_core::ort_runtime::session_builder(), which loads the runtime first; a builder on an unloaded runtime hangs instead of failing" },
+    { path = "ort::environment::init_from", reason = "prunr_core::ort_runtime::ensure_initialized() is the one runtime init; it resolves the dylib and runs once per process" },
 ]

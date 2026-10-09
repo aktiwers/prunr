@@ -1124,6 +1124,12 @@ pub fn on_demand_dir() -> Option<std::path::PathBuf> {
     data_dir().map(|d| d.join("models"))
 }
 
+/// Where user-installed ONNX Runtime builds live, one subdir per
+/// runtime. Subdir of `data_dir()`.
+pub fn runtime_store_dir() -> Option<std::path::PathBuf> {
+    data_dir().map(|d| d.join("runtimes"))
+}
+
 /// Pure helper: read `dir/filename` as bytes, or None if missing/unreadable.
 /// SHA verification happens at download time, not load time — re-hashing
 /// 200+ MB on every app launch would be wasteful.
