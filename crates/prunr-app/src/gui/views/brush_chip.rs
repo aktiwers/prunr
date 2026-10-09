@@ -4,6 +4,7 @@
 //! Rendered next to the brush toggle in Row 2 when brush mode is on.
 
 use egui::{Color32, Sense, Stroke, Ui};
+use egui_material_icons::icons::ICON_BRUSH;
 
 use crate::gui::brush_state::BrushSettings;
 use prunr_core::brush::{BrushMode, BrushShape};
@@ -45,15 +46,15 @@ pub(super) fn render(
     let resp = ui
         .scope(|ui| {
             ui.set_min_width(LABEL_PAD_WIDTH);
-            chip::chip_button(ui, "🖌", &label, /*accent=*/ true)
+            chip::chip_button(ui, ICON_BRUSH.codepoint, &label, /*accent=*/ true)
         })
         .inner;
     let resp = chip::tooltip(
         resp,
         "Brush settings",
         "Configure brush radius, edge hardness, and add/subtract mode. Click strokes to remove or restore subject regions on the result.",
-    None,
-);
+        None,
+    );
 
     let mut outcome = BrushChipOutcome::default();
     chip::popup_for(ui, ui.id().with("brush_chip_popover"), &resp, |ui| {
