@@ -425,7 +425,7 @@ Tier 2 path uses postprocess_from_flat(tensor: &[f32], h, w, original, mask, mod
 - Uniform-output detection before the per-pixel loop
 - Alpha composition row-parallel via `par_chunks_mut` above 256k pixels (memory-bandwidth-bound, so the ceiling is ~1.1-1.2× on 4K regardless of core count)
 - Guided filter uses `f32` prefix sums (halved bandwidth vs f64)
-- Edge shift's ring buffers allocated once, swapped via `std::mem::swap`
+- Edge shift is two separable window passes (van Herk / Gil-Werman), constant time per pixel whatever the shift; a fractional shift blends with the next integer shift computed in place in the same two scratch planes
 - Single RGBA allocation in `postprocess()` — shared across guided filter and mask application (saves ~48 MB per Tier 2 run on a 4000×3000 image)
 
 #### Benchmark numbers (4000×3000 image, 8-core x86_64, `cargo test --release`)
@@ -443,7 +443,7 @@ these numbers.
 
 #### Criterion microbenches
 
-`crates/prunr-core/benches/` ships criterion benches for the four
+`crates/prunr-core/benches/` ships criterion benches for the five
 kernels regression most likely to hide under E2E noise. Run with
 `cargo bench -p prunr-core --bench <name>`. CI does NOT run them —
 runner wall-clock variance produces false regressions cheaper to
@@ -454,9 +454,15 @@ ignore than to investigate. Reference numbers (8-core x86_64,
 |-------------------------------------|--------------------------|--------------:|
 | `guided_filter_alpha`               | 512² guide + mask        |        9.9 ms |
 | `guided_filter_alpha`               | 2048² guide + mask       |        243 ms |
+| `apply_edge_shift`                  | 4K mask, 1 px            |         30 ms |
+| `apply_edge_shift`                  | 4K mask, 2.5 px          |         60 ms |
+| `apply_edge_shift`                  | 4K mask, 10 px           |         29 ms |
+| `apply_edge_shift`                  | 4K mask, 50 px           |         29 ms |
 
-The other three benches (`tile_compose`, `resize_lanczos3`,
-`tensor_to_mask`) are committed and runnable; their reference numbers
+Before the separable rewrite the same 4K mask took 52 ms at 1 px,
+156 ms at 2.5 px, 493 ms at 10 px and 2.46 s at 50 px. The other
+three benches (`tile_compose`, `resize_lanczos3`, `tensor_to_mask`)
+are committed and runnable; their reference numbers
 land here on the next perf sweep when they're actually measured.
 
 ## Upscale
