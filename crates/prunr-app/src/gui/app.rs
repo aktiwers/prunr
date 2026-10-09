@@ -2398,8 +2398,8 @@ impl PrunrApp {
                 seg_tensor: None,
                 edge_tensor: None,
                 secondary_edge_tensor: None,
-                cached_edge_mask: None,
-                cached_bold_mask: None,
+                cached_edge: Default::default(),
+                cached_bold: Default::default(),
                 cached_masked_base: None,
                 correction: None,
                 upscale_raw: Some(upscale_raw),
@@ -2420,11 +2420,8 @@ impl PrunrApp {
             scale,
             thickness: u32::from(item.settings.edge_thickness),
         };
-        let cached_plane = |slot: &Option<(Arc<image::GrayImage>, super::live_preview::EdgePlaneKey)>, key| {
-            slot.as_ref().filter(|(_, k)| *k == key).map(|(m, _)| Arc::clone(m))
-        };
-        let cached_edge_mask = cached_plane(&item.cached_edge_mask, plane_key(item.settings.edge_scale));
-        let cached_bold_mask = cached_plane(&item.cached_bold_edge_mask, plane_key(prunr_core::EdgeScale::Bold));
+        let cached_edge = item.cached_edge.lookup(plane_key(item.settings.edge_scale));
+        let cached_bold = item.cached_bold.lookup(plane_key(prunr_core::EdgeScale::Bold));
         let cached_masked_base = item.cached_masked_base.as_ref().and_then(|(base, recipe, model)| {
             let current_recipe = prunr_core::MaskRecipe::from(&item.settings.mask_settings());
             let seg_model_match = seg_tensor.as_ref().is_some_and(|s| s.model == *model);
@@ -2454,7 +2451,7 @@ impl PrunrApp {
         Some(DispatchInputs {
             kind, original, settings: item.settings,
             seg_tensor, edge_tensor, secondary_edge_tensor,
-            cached_edge_mask, cached_bold_mask, cached_masked_base,
+            cached_edge, cached_bold, cached_masked_base,
             correction,
             upscale_raw: None,
             bicubic_source: None,
@@ -2531,12 +2528,8 @@ impl PrunrApp {
                 // Mark pending so reconcile_selected doesn't also
                 // spawn its own prep on this same frame.
                 item.result_tex_pending = true;
-                if let Some(plane) = r.new_edge_mask {
-                    item.cached_edge_mask = Some(plane);
-                }
-                if let Some(plane) = r.new_bold_mask {
-                    item.cached_bold_edge_mask = Some(plane);
-                }
+                item.cached_edge.store(r.new_edge.0, r.new_edge.1);
+                item.cached_bold.store(r.new_bold.0, r.new_bold.1);
                 if let Some((base, recipe, model)) = r.new_masked_base {
                     item.cached_masked_base = Some((base, recipe, model));
                 }
