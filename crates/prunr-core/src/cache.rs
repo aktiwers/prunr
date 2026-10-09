@@ -241,6 +241,10 @@ fn walk_dir_size(dir: &Path, depth: u32) -> std::io::Result<u64> {
 mod tests {
     use super::*;
 
+    /// The tests below write to the real cache directory, so they must not
+    /// interleave with each other.
+    static DIR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// Cross-EP collision would corrupt a load if e.g. CPU-optimized
     /// IR were handed to OpenVINO. Same `model_id`, different EP →
     /// different paths.
@@ -293,6 +297,7 @@ mod tests {
     /// silently `mkdir`-ing an empty directory.
     #[test]
     fn cache_populated_does_not_create_directory() {
+        let _dir = DIR_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let Some(path) = cache_path_for(ModelId::DexiNed, "CPU") else { return };
         let _ = std::fs::remove_dir_all(&path);
         let exists_before = path.exists();
@@ -313,6 +318,7 @@ mod tests {
     /// `Migan`.
     #[test]
     fn gc_stale_for_model_removes_siblings_only() {
+        let _dir = DIR_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let Some(current) = cache_dir_for(ModelId::LaMaFp32, "CPU") else { return };
         let Some(ep_root) = cache_root().map(|r| r.join("cpu")) else { return };
         let stale = ep_root.join(format!("{}-0.0.1-v0", ModelId::LaMaFp32.stable_name()));
@@ -339,6 +345,7 @@ mod tests {
     /// races with parallel test runs.
     #[test]
     fn clear_for_model_removes_across_all_eps() {
+        let _dir = DIR_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let Some(root) = cache_root() else { return };
         let stable = ModelId::BigLaMa.stable_name();
         let cpu_dir = root.join("cpu").join(format!("{stable}-1.0.0-v1"));
@@ -364,6 +371,7 @@ mod tests {
     /// subdir of the cache root).
     #[test]
     fn cache_populated_distinguishes_empty_from_nonempty() {
+        let _dir = DIR_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let Some(dir) = cache_dir_for(ModelId::Migan, "CPU") else { return };
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
