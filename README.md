@@ -45,13 +45,17 @@ All releases: [github.com/aktiwers/prunr/releases](https://github.com/aktiwers/p
 
 ## Features
 
-- **Three bundled models** — Silueta (fast), BiRefNet-lite (best detail at 1024×1024), DexiNed (edges)
-- **Line extraction** — edges/outlines via DexiNed, standalone or combined with background removal
-- **Object removal (Eraser)** — paint over an unwanted area and let LaMa fill it in
-- **Custom backgrounds** — fill the cutout with a solid colour or a picked image (cover / contain / stretch / tile / center)
+- **Four bundled models** — Silueta (fast), BiRefNet-lite (best detail at 1024×1024), DexiNed (lines), SAM 2 (Magic Brush)
+- **Magic Brush** — click or drag over anything and SAM 2 selects it; Shift adds, Alt subtracts. Then Delete, Copy, Cut or Invert the selection, or let it correct the cut-out
+- **Paint Brush** — manual touch-ups with size, hardness, opacity and shape; every stroke is undoable
+- **Line extraction** — edges/outlines via DexiNed at four scales, standalone or combined with background removal, with colour styles and compositions
+- **Eraser** — paint over an unwanted area and let LaMa, Big-LaMa, MI-GAN or Stable Diffusion 1.5 (with prompts) fill it in
+- **Upscale** — Real-ESRGAN, NMKD and HAT models at 2×, 3× or 4×, with denoise, sharpen, AI blend, saturation and colour match
+- **Custom backgrounds** — fill the cutout with a solid colour, a picked image (cover / contain / stretch / tile / center) or a blurred / inverted / desaturated version of the photo
 - **Hardware acceleration** — CUDA (NVIDIA), CoreML (Apple), DirectML (Windows), OpenVINO (Intel iGPU/NPU), automatic CPU fallback
-- **Batch processing** — parallel inference across multiple images, switch between them while they work
-- **Mask tuning** — removal strength, hard cutoff, edge shift, guided filter for fine detail
+- **Batch processing** — parallel inference across multiple images, switch between them while they work, chain background removal into lines or upscale
+- **Mask tuning** — removal strength, hard cutoff, edge shift, feather, guided filter for fine detail, all previewed live
+- **Presets and undo** — per-model presets, Compare toggle, undo across strokes, results and presets
 - **Drag-and-drop** — in and out of the window (drop into Finder/Explorer/Word/PowerPoint)
 - **No cloud** — everything runs locally, no telemetry, no API keys
 
@@ -80,16 +84,24 @@ Common flags:
 | `--cpu` | Force CPU inference |
 | `--gamma <N>` | Removal strength (default: 1.0) |
 | `--threshold <N>` | Hard cutoff (0.0–1.0) |
+| `--edge-shift <N>` | Shrink (positive) or grow (negative) the cut-out by N pixels |
 | `--refine-edges` | Guided filter for fine detail (hair, leaves) |
 | `--lines` | Extract lines/edges only |
+| `--lines-after-bg` | Remove the background, then draw lines on the result |
+| `--line-strength <N>` | Line sensitivity, 0.0–1.0 (default 0.5) |
+| `--line-scale <S>` | `fine`, `balanced`, `bold`, `fused` (default) |
+| `--line-color <HEX>` | Paint all lines one colour |
+| `--large-image <P>` | Images above 8000 px: `downscale` (default, to 4096 px) or `process` (keep the original size) |
 | `--bg-color <HEX>` | Fill transparent background with a colour (e.g. `ffffff`) |
 | `--bg-image <PATH>` | Fill transparent background with a chosen image (wins over `--bg-color`) |
 | `--bg-image-fit <MODE>` | `cover` (default), `contain`, `stretch`, `tile`, `center` |
 | `--inpaint --mask <PATH>` | Eraser mode — fill a masked region using LaMa |
+| `--open <PATH>` | Start the GUI with an image already loaded |
+| `--debug` | Verbose diagnostics for bug reports |
 | `--doctor` | Diagnostic dump for support tickets (hardware, ORT, models, paths) |
 | `--clear-ep-cache` | Wipe persistent EP failure cache (after driver/runtime updates) |
 
-`prunr --help` for the full list.
+`prunr --help` for the full list. Magic Brush, Eraser prompts and Upscale are GUI features; the CLI covers background removal, lines and mask-driven erasing.
 
 ## Models
 
@@ -98,13 +110,19 @@ Common flags:
 | BiRefNet-lite | ~214 MB | yes | 1024×1024 | Fine detail (hair, leaves) — **default** |
 | Silueta | ~4 MB | yes | 320×320 | Fast, clean subjects |
 | DexiNed | ~140 MB | yes | full-res | Line / edge extraction |
+| SAM 2 Hiera Small | encoder + decoder | yes | 1024 input | Magic Brush selections |
 | U2Net | ~170 MB | **on-demand** | 320×320 | Better edges than Silueta |
 | LaMa (Eraser) | ~199 MB | **on-demand** | 512×512 (tiled) | Object removal — paint over a region, fill it in |
 | Big-LaMa (Eraser) | ~199 MB | **on-demand** | 512×512 (tiled) | Sharper fills than LaMa, same architecture trained on more data |
 | MI-GAN (Eraser) | ~26 MB | **on-demand** | 512×512 (tiled) | Lightweight GAN — sharper detail, less smooth on flat backgrounds |
-| Stable Diffusion 1.5 Inpaint | ~2 GB | **on-demand** | 512×512 (tiled) | Generative inpaint — phone-app-class quality. **GPU strongly recommended.** |
+| Stable Diffusion 1.5 Inpaint | ~2 GB | **on-demand** | 512×512 (tiled) | Generative inpaint with prompts — phone-app-class quality. **GPU strongly recommended.** |
+| SD 1.5 LCM Inpaint | ~2 GB | **on-demand** | 512×512 (tiled) | Same, distilled to converge in 4–8 steps — the Fast quality preset |
+| TAESD | ~5 MB | **on-demand** | — | Fast VAE decoder for the SD erasers (about 3× faster decode) |
+| Real-ESRGAN x4plus / x2plus | see Model Store | **on-demand** | tiled | Upscale photos; x2plus also powers the 4× two-pass look |
+| 4x NMKD Siax-CX / Superscale | see Model Store | **on-demand** | tiled | Upscale with a sharper, more textured character |
+| 4xNomos8kSCHAT-L | see Model Store | **on-demand** | tiled | Transformer upscale for the finest detail; slowest |
 
-The default install bundles Silueta + BiRefNet-lite + DexiNed for the common cases. Heavier models download on first use from prunr's GitHub releases. Open the model dropdown and pick **More models…** for the Model Store, where you can browse, download, view progress, retry, and delete installed models. SHA256 is verified after every download; partial files clean up automatically on cancel.
+The default install bundles Silueta + BiRefNet-lite + DexiNed + SAM 2 for the common cases. Heavier models download on first use from prunr's GitHub releases. Open the model dropdown and pick **More models…** for the Model Store, where you can browse, download, view progress, retry, and delete installed models. SHA256 is verified after every download; partial files clean up automatically on cancel.
 
 ## Hardware Acceleration
 
@@ -126,7 +144,7 @@ The active backend is shown in the status bar. For diagnostics, run `prunr --doc
 
 ## Build from Source
 
-Requires Rust 1.75+ and (on Linux) GTK3 development libraries.
+The pinned toolchain (`rust-toolchain.toml`) installs itself through rustup; on Linux you also need the GTK3 development libraries.
 
 ```bash
 cargo xtask fetch-models                          # one-time model download, ~174 MB
