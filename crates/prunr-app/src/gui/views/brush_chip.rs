@@ -7,7 +7,8 @@ use egui::{Color32, Sense, Stroke, Ui};
 use egui_material_icons::icons::ICON_BRUSH;
 
 use crate::gui::brush_state::BrushSettings;
-use prunr_core::brush::{BrushMode, BrushShape};
+use prunr_core::brush::BrushShape;
+use prunr_core::selection::BrushMode;
 
 use super::chip;
 use super::fmt;

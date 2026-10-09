@@ -4,7 +4,6 @@
 //! newly reached cells the selection's dominant sign.
 
 use super::{MaskArtifact, FULL};
-use std::sync::Arc;
 
 /// 8-connected boundary scan. Returns source-pixel coords of selected
 /// pixels with at least one unselected or out-of-bounds neighbour.
@@ -17,7 +16,7 @@ pub fn outline_polyline(mask: &MaskArtifact) -> Vec<(u32, u32)> {
     // One byte per cell so the neighbour probes are plain compares, and a
     // per-row "all three vertical neighbours selected" line so each cell
     // needs three reads instead of eight.
-    let sel: Vec<u8> = mask.data.iter().map(|&v| MaskArtifact::is_selected(v) as u8).collect();
+    let sel: Vec<u8> = mask.cells().iter().map(|&v| MaskArtifact::is_selected(v) as u8).collect();
     let zero = vec![0u8; w];
     let row = |y: usize| -> &[u8] { &sel[y * w..(y + 1) * w] };
     let mut vertical = vec![0u8; w];
@@ -49,7 +48,7 @@ pub fn outline_polyline(mask: &MaskArtifact) -> Vec<(u32, u32)> {
 fn selected_bbox(mask: &MaskArtifact) -> Option<(u32, u32, u32, u32)> {
     let w = mask.width as usize;
     let mut bbox: Option<(u32, u32, u32, u32)> = None;
-    for (y, row) in mask.data.chunks_exact(w.max(1)).enumerate() {
+    for (y, row) in mask.cells().chunks_exact(w.max(1)).enumerate() {
         let Some(first) = row.iter().position(|&v| MaskArtifact::is_selected(v)) else { continue };
         // just found one, so rposition is Some
         let last = row.iter().rposition(|&v| MaskArtifact::is_selected(v)).unwrap_or(first);
@@ -116,7 +115,7 @@ pub fn feather_edges(
         let r = crop_row(y);
         guide.as_mut()[y as usize * bw_us * 4..][..bw_us * 4]
             .copy_from_slice(&source.as_raw()[r.start * 4..r.end * 4]);
-        let cells = &mask.data[r];
+        let cells = &mask.cells()[r];
         for (b, &v) in binary.as_mut()[y as usize * bw_us..][..bw_us].iter_mut().zip(cells) {
             if MaskArtifact::is_selected(v) {
                 *b = 255;
@@ -131,7 +130,7 @@ pub fn feather_edges(
         .map(|v| (v as f32 / 255.0 * FULL as f32).round() as i8)
         .collect();
 
-    let mut out: Vec<i8> = (*mask.data).clone();
+    let mut out: Vec<i8> = mask.cells().to_vec();
     for y in 0..bh {
         let r = crop_row(y);
         let refined_row = &refined.as_raw()[y as usize * bw_us..][..bw_us];
@@ -143,7 +142,7 @@ pub fn feather_edges(
             *cell = sign * magnitude[rv as usize];
         }
     }
-    MaskArtifact { width: w, height: h, data: Arc::new(out) }
+    MaskArtifact::from_cells(w, h, out)
 }
 
 #[cfg(test)]
@@ -151,7 +150,7 @@ mod tests {
     use super::*;
 
     fn make_mask(w: u32, h: u32, data: Vec<i8>) -> MaskArtifact {
-        MaskArtifact { width: w, height: h, data: Arc::new(data) }
+        MaskArtifact::from_cells(w, h, data)
     }
 
     #[test]
@@ -231,7 +230,7 @@ mod tests {
         let mask = make_mask(4, 4, vec![64; 16]);
         let source = image::RgbaImage::from_pixel(4, 4, image::Rgba([128u8, 64, 32, 200]));
         let result = feather_edges(&mask, &source, 0);
-        assert_eq!(result.data, mask.data);
+        assert_eq!(result.cells(), mask.cells());
     }
 
     #[test]
@@ -246,14 +245,14 @@ mod tests {
         let mask = make_mask(16, 16, data.clone());
         let source = image::RgbaImage::new(16, 16);
         let result = feather_edges(&mask, &source, 2);
-        let changed = result.data.iter().zip(data.iter()).any(|(&a, &b)| a != b);
+        let changed = result.cells().iter().zip(data.iter()).any(|(&a, &b)| a != b);
         assert!(changed, "feather with radius > 0 must alter at least one pixel");
         assert!(
-            result.data.iter().all(|&v| v <= 0),
+            result.cells().iter().all(|&v| v <= 0),
             "a Subtract selection must stay non-positive after feathering"
         );
         assert!(
-            result.data.iter().any(|&v| v < 0 && v > -FULL),
+            result.cells().iter().any(|&v| v < 0 && v > -FULL),
             "feathered edge must contain intermediate magnitudes"
         );
     }

@@ -31,14 +31,6 @@ pub(crate) enum BrushAction {
     None,
 }
 
-fn brush_grid_dims(item: &BatchItem) -> Option<(u16, u16)> {
-    // Strokes are authored at SOURCE resolution because the selection lives
-    // there; painting at tensor resolution misaligned strokes once they were
-    // resampled back. u16 max is 65535; fine for any reasonable image.
-    let (w, h) = item.dimensions;
-    Some((w as u16, h as u16))
-}
-
 /// Handle pointer input + paint cursor for one frame. The canvas calls
 /// this after rendering the image. `img_rect` is the on-screen rect of
 /// the displayed texture (post-zoom, post-pan); the brush works in that
@@ -52,13 +44,17 @@ pub(crate) fn handle_input(
     item: &BatchItem,
     img_rect: Rect,
 ) -> BrushAction {
-    let Some((model_w, model_h)) = brush_grid_dims(item) else {
-        // Item has no dimensions yet (zero-dim source). Render a muted
-        // cursor so the user gets feedback that brush is ON, but skip wiring.
+    // Strokes are authored at SOURCE resolution because the selection lives
+    // there; painting at tensor resolution misaligned strokes once they were
+    // resampled back.
+    let (model_w, model_h) = item.dimensions;
+    if model_w == 0 || model_h == 0 {
+        // Render a muted cursor so the user gets feedback that brush is
+        // ON, but skip wiring.
         tracing::debug!(item_id = item.id, "brush active but item has no dimensions — cursor only");
         draw_cursor(ui, img_rect, settings, /*armed=*/ false);
         return BrushAction::None;
-    };
+    }
 
     // No `ui.interact` here: it would set `egui_wants_pointer_input`,
     // which the canvas pan handler reads to decide whether to ignore
@@ -118,7 +114,7 @@ pub(crate) fn handle_input(
 }
 
 /// Convert a screen-space pointer to model-grid coordinates.
-fn screen_to_model(p: Pos2, img_rect: Rect, model_w: u16, model_h: u16) -> Pos2 {
+fn screen_to_model(p: Pos2, img_rect: Rect, model_w: u32, model_h: u32) -> Pos2 {
     let in_img_x = (p.x - img_rect.min.x) / img_rect.width().max(1.0);
     let in_img_y = (p.y - img_rect.min.y) / img_rect.height().max(1.0);
     Pos2::new(in_img_x * model_w as f32, in_img_y * model_h as f32)
@@ -227,7 +223,7 @@ mod tests {
     #[test]
     fn screen_to_model_corners_and_center() {
         let img_rect = Rect::from_min_size(Pos2::new(100.0, 200.0), egui::vec2(400.0, 300.0));
-        let (mw, mh) = (320u16, 240u16);
+        let (mw, mh) = (320u32, 240u32);
 
         let top_left = screen_to_model(img_rect.min, img_rect, mw, mh);
         assert!((top_left.x - 0.0).abs() < 1e-3);
