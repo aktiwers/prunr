@@ -294,12 +294,11 @@ fn fit_to_scale(native: RgbaImage, input: &RgbaImage, scale: u32) -> RgbaImage {
     if native.dimensions() == (w, h) {
         return native;
     }
-    let rgb = crate::formats::resize_rgb_lanczos3(&image::DynamicImage::ImageRgba8(native), w, h);
+    let mut out = crate::formats::resize_rgba(&native, w, h, crate::formats::ResizeFilter::Lanczos3);
+    drop(native);
     let alpha = upscale_alpha_lanczos3(input, w, h);
-    let mut out = RgbaImage::new(w, h);
-    for (x, y, p) in out.enumerate_pixels_mut() {
-        let rgb = rgb.get_pixel(x, y).0;
-        *p = image::Rgba([rgb[0], rgb[1], rgb[2], alpha.get_pixel(x, y).0[0]]);
+    for (p, &a) in out.pixels_mut().zip(alpha.as_raw()) {
+        p.0[3] = a;
     }
     out
 }

@@ -30,14 +30,20 @@ pub fn preprocess_for_sam(source: &image::RgbaImage) -> Vec<f32> {
         SAM_ENCODER_INPUT,
         crate::formats::ResizeFilter::Lanczos3,
     );
+    // One 256-entry table per channel: the same expression per entry,
+    // so the values are bit-identical to computing it per pixel.
+    let table = |c: usize| -> [f32; 256] {
+        std::array::from_fn(|v| (v as f32 / 255.0 - IMAGENET_MEAN[c]) / IMAGENET_STD[c])
+    };
+    let (tr, tg, tb) = (table(0), table(1), table(2));
     let n = (SAM_ENCODER_INPUT * SAM_ENCODER_INPUT) as usize;
     let mut out = vec![0.0f32; 3 * n];
     let (r, gb) = out.split_at_mut(n);
     let (g, b) = gb.split_at_mut(n);
     for (((r, g), b), px) in r.iter_mut().zip(g).zip(b).zip(resized.as_raw().chunks_exact(4)) {
-        *r = (px[0] as f32 / 255.0 - IMAGENET_MEAN[0]) / IMAGENET_STD[0];
-        *g = (px[1] as f32 / 255.0 - IMAGENET_MEAN[1]) / IMAGENET_STD[1];
-        *b = (px[2] as f32 / 255.0 - IMAGENET_MEAN[2]) / IMAGENET_STD[2];
+        *r = tr[px[0] as usize];
+        *g = tg[px[1] as usize];
+        *b = tb[px[2] as usize];
     }
     out
 }
