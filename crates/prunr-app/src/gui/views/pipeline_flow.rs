@@ -20,7 +20,7 @@ struct Stage {
 const STAGES: &[Stage] = &[
     Stage {
         number: 1,
-        icon: "γ",
+        icon: ICON_TONALITY.codepoint,
         title: "Gamma",
         tagline: "How hard the mask cuts. Feeds every stage below — a higher gamma produces a more aggressive mask, so threshold / edge shift / refine / feather all operate on a darker silhouette.",
     },

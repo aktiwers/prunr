@@ -104,7 +104,7 @@ pub fn render(
     )
     .fill(theme::BG_SECONDARY)
     .corner_radius(theme::BUTTON_ROUNDING)
-    .min_size(egui::vec2(0.0, theme::BTN_HEIGHT));
+    .min_size(egui::vec2(0.0, theme::CHIP_HEIGHT));
     let resp = crate::gui::views::chip::tooltip(
         ui.add(btn),
         "Preset",
