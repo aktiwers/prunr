@@ -1,6 +1,6 @@
 //! Magic Brush settings chip + popover.
 //!
-//! Rendered next to the [ Magic ] toggle in Row 2 when Magic Brush mode is
+//! Rendered next to the [ Magic ] toggle while Magic Brush mode is
 //! on. Contains the shared Selection section (delegated to the brush-chip
 //! helper) plus a Magic-only Confidence threshold slider.
 //!
@@ -22,8 +22,8 @@ const MAGIC_POPOVER_MIN_WIDTH: f32 = 220.0;
 pub(crate) struct MagicChipOutcome {
     /// True on slider release / toggle — caller persists brush settings.
     pub(crate) committed: bool,
-    /// The "Auto-apply strokes" switch flipped to this value.
-    pub(crate) auto_apply: Option<bool>,
+    /// New value of `Settings::protect_selection` when its switch flipped.
+    pub(crate) protect_selection: Option<bool>,
 }
 
 /// Render the Magic Brush chip button + popover.
@@ -34,7 +34,7 @@ pub(crate) fn render(
     ui: &mut Ui,
     bs: &mut BrushSettings,
     encoder_pending: bool,
-    auto_apply: Option<bool>,
+    protect: Option<bool>,
 ) -> MagicChipOutcome {
     let resp = chip::chip_button(ui, ICON_AUTO_AWESOME.codepoint, "Magic", /*accent=*/ true);
     let resp = chip::tooltip(
@@ -76,7 +76,7 @@ pub(crate) fn render(
             // outline opacity, fill opacity) — same as Paint Brush chip.
             let sel_committed = super::brush_chip::render_shared_selection_section(ui, bs);
             outcome.committed |= sel_committed;
-            outcome.auto_apply = super::brush_chip::render_auto_apply_row(ui, auto_apply);
+            outcome.protect_selection = super::brush_chip::render_auto_apply_row(ui, protect);
 
             ui.add_space(4.0);
             ui.separator();

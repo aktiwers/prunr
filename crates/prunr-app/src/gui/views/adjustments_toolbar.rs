@@ -1,4 +1,4 @@
-//! Row 2 of the persistent toolbar: `Model`, then one group chip per
+//! The adjustments toolbar: `Model`, then one group chip per
 //! pipeline stage for the active mode, then the tool cluster and the
 //! preset controls. Each group popover lists its knobs in the order the
 //! pipeline applies them.
@@ -18,8 +18,7 @@ use super::shortcuts::Action;
 use crate::gui::brush_state::BrushState;
 use crate::gui::item_settings::ItemSettings;
 use crate::gui::knob_catalog::{
-    self, CacheImpact, DispatchKind, KnobContext, KnobRequirement, KnobSet, LineModeChange,
-    StaticKnob,
+    self, CacheImpact, DispatchKind, KnobContext, KnobRequirement, LineModeChange, StaticKnob,
 };
 use crate::gui::settings::{Settings, SettingsModel};
 use crate::gui::theme;
@@ -27,7 +26,7 @@ use crate::gui::views::{chip, fmt, hint, preset_dropdown};
 use prunr_core::{EdgeScale, LineMode};
 
 use super::lines_popover::{compose_description, mode_description, mode_label, scale_description, scale_label};
-use super::{installed_models, model_info};
+use super::{differs, installed_models, model_info};
 
 /// Summary of what a toolbar render cycle changed.
 ///
@@ -47,17 +46,12 @@ pub struct ToolbarChange {
     /// A preset was applied — archive the pre-apply snapshot for undo.
     /// The dispatcher resolves subprocess vs skip from the recipe diff.
     pub preset_applied: bool,
-    /// Which static knobs were touched (`Copy` bitset). Provides a
-    /// single-allocation record for downstream passes that want to
-    /// audit "was X touched this frame?" without a salad of booleans.
-    pub touched: KnobSet,
     /// Previous `line_mode` when it changed this frame. Drives the
     /// context-sensitive `line_mode_spec(from, current, cached_edge)` path.
     /// `None` means no transition this frame.
     pub line_mode_from: Option<LineMode>,
     /// `input_transform` flipped this frame. Drives `input_transform_spec`
-    /// for precise dispatch. The bool is here because `StaticKnob` (and
-    /// thus `KnobSet`) intentionally excludes context-sensitive knobs.
+    /// for precise dispatch; `StaticKnob` excludes context-sensitive knobs.
     pub input_transform_changed: bool,
 
     /// Catalog-derived aggregate cache invalidation — union over all knobs.
@@ -133,7 +127,6 @@ impl Default for ToolbarChange {
             commit: false,
             model_changed: false,
             preset_applied: false,
-            touched: KnobSet::default(),
             line_mode_from: None,
             input_transform_changed: false,
             cache_impact: CacheImpact::Nothing,
@@ -154,31 +147,11 @@ impl Default for ToolbarChange {
     }
 }
 
-/// Per-chip kebab reset reverts ONE knob to ItemSettings::default()
-/// regardless of the active preset — predictable single-knob undo.
-/// The top-right ↻ button (above) is the OPPOSITE: it resolves
-/// EVERY knob (item_settings + brush + SD bundle) through the
-/// active preset. Two scopes, two anchors.
-struct Defaults {
-    template: ItemSettings,
-    /// "Pick this when user toggles enabled" fallback for Option chips that
-    /// have no factory value (threshold/bg/line_color are None by default but
-    /// the color/slider inside the popover needs a starting value).
-    threshold_value: f32,
-    bg_value: [u8; 4],
-    solid_line_color_value: [u8; 3],
-}
-
-impl Defaults {
-    fn new() -> Self {
-        Self {
-            template: ItemSettings::default(),
-            threshold_value: 0.5,
-            bg_value: [255, 255, 255, 255],
-            solid_line_color_value: [0, 0, 0],
-        }
-    }
-}
+// Starting values for knobs whose factory default is "off": the slider
+// or picker needs something to show the moment the user switches them on.
+const THRESHOLD_FALLBACK: f32 = 0.5;
+const BG_COLOR_FALLBACK: [u8; 4] = [255, 255, 255, 255];
+const LINE_COLOR_FALLBACK: [u8; 3] = [0, 0, 0];
 
 /// Render row 2. Returns a `ToolbarChange` summarizing what was edited.
 /// `app_settings` exposes model + preset map. `applied_preset` is read for
@@ -193,7 +166,7 @@ pub(crate) fn render(
     state: ToolbarState<'_>,
 ) -> ToolbarChange {
     let mut change = ToolbarChange::default();
-    let defaults = Defaults::new();
+    let defaults = ItemSettings::default();
 
     ui.spacing_mut().item_spacing.x = theme::SPACE_SM;
 
@@ -243,28 +216,28 @@ pub(crate) fn render(
             } else {
                 None
             };
-            render_mask_group(ui, item_settings, &defaults, mask_inactive_reason, &mut change);
+            chip::gated(ui, mask_inactive_reason, |ui| {
+                render_mask_group(ui, item_settings, &defaults, &mut change);
+            });
             render_lines_group(ui, item_settings, &defaults, model_uses_seg, &mut change);
             // Fill works without a mask (filter-only mode); only Full sketch
             // has no subject to fill.
-            ui.add_enabled_ui(fill_style_active, |ui| {
+            let fill_reason = (!fill_style_active).then_some("Sketch is set to Full, so there is no subject to fill.");
+            chip::gated(ui, fill_reason, |ui| {
                 let changed = render_fill_style_chip(ui, &mut item_settings.fill_style);
                 aggregate_bool(changed, StaticKnob::FillStyle, &mut change);
-            })
-            .response
-            .on_disabled_hover_text("Sketch is set to Full, so there is no subject to fill.");
-            ui.add_enabled_ui(bg_active, |ui| {
+            });
+            let bg_reason = (!bg_active).then_some("Nothing is transparent in this mode, so there is no background to fill.");
+            chip::gated(ui, bg_reason, |ui| {
                 render_background_chip(ui, BgChipState {
                     bg: &mut item_settings.bg,
                     bg_effect: &mut item_settings.bg_effect,
                     bg_image_fit: &mut item_settings.bg_image_fit,
-                    default_color: defaults.bg_value,
+                    default_color: BG_COLOR_FALLBACK,
                     has_bg_image: state.has_bg_image,
                     bg_image_label: state.bg_image_label,
                 }, &mut change);
-            })
-            .response
-            .on_disabled_hover_text("Nothing is transparent in this mode, so there is no background to fill.");
+            });
         }
 
         // Right-aligned cluster. Right-to-left layout fills from the right
@@ -273,7 +246,7 @@ pub(crate) fn render(
             render_reset_preset_cluster(ui, app_settings, item_settings, applied_preset, &mut change);
             ui.separator();
 
-            ui.add_enabled_ui(state.has_result, |ui| {
+            chip::gated(ui, (!state.has_result).then_some("Process the image first."), |ui| {
                 let resp = chip::tooltip(
                     chip::icon_toggle_button(ui, ICON_VISIBILITY.codepoint, state.show_original),
                     "Compare",
@@ -283,9 +256,7 @@ pub(crate) fn render(
                 if resp.clicked() {
                     change.toggle_compare = true;
                 }
-            })
-            .response
-            .on_disabled_hover_text("Process the image first.");
+            });
 
             if upscale_mode {
                 return;
@@ -300,35 +271,26 @@ pub(crate) fn render(
             // Tool cluster, right-to-left: tool settings, Paint, Magic — so
             // the settings chip appearing never moves the toggles.
             let paint_active = brush_state.is_enabled();
-            let auto_apply = model_uses_seg.then_some(!state.protect_selection);
+            // Only background removal can apply strokes on its own.
+            let protect = model_uses_seg.then_some(state.protect_selection);
             if state.brush_available && state.magic_brush_active {
                 let outcome = super::magic_brush_chip::render(
                     ui,
                     &mut app_settings.brush,
                     state.magic_encoder_pending,
-                    auto_apply,
+                    protect,
                 );
-                if outcome.committed {
-                    change.brush_settings_committed = true;
-                }
-                if let Some(on) = outcome.auto_apply {
-                    change.protect_selection = Some(!on);
-                }
+                change.brush_settings_committed |= outcome.committed;
+                change.protect_selection = outcome.protect_selection;
             } else if state.brush_available && paint_active {
                 let outcome = super::brush_chip::render(
-                    ui, &mut app_settings.brush, app_settings.model.is_inpaint(), auto_apply,
+                    ui, &mut app_settings.brush, app_settings.model.is_inpaint(), protect,
                 );
-                if outcome.reset_brush_requested {
-                    change.reset_brush_requested = true;
-                }
-                if outcome.committed {
-                    change.brush_settings_committed = true;
-                }
-                if let Some(on) = outcome.auto_apply {
-                    change.protect_selection = Some(!on);
-                }
+                change.reset_brush_requested |= outcome.reset_brush_requested;
+                change.brush_settings_committed |= outcome.committed;
+                change.protect_selection = outcome.protect_selection;
             }
-            ui.add_enabled_ui(state.brush_available, |ui| {
+            chip::gated(ui, (!state.brush_available).then_some("Open an image first."), |ui| {
                 let paint_resp = chip::tooltip(
                     chip::icon_toggle_button(ui, ICON_BRUSH.codepoint, paint_active),
                     "Paint Brush",
@@ -347,9 +309,7 @@ pub(crate) fn render(
                 if magic_resp.clicked() {
                     change.toggle_magic = true;
                 }
-            })
-            .response
-            .on_disabled_hover_text("Open an image first.");
+            });
         });
     });
 
@@ -426,28 +386,44 @@ const LINES_POPOVER_WIDTH: f32 = 560.0;
 const LINES_LEFT_COLUMN_WIDTH: f32 = 260.0;
 const LINES_COLOR_LIST_WIDTH: f32 = 170.0;
 
-fn differs(a: f32, b: f32) -> bool {
-    (a - b).abs() > f32::EPSILON
+/// Every mask knob, in processing order.
+const MASK_FIELDS: &[chip::Field<ItemSettings>] = &[
+    chip::Field { knob: Some(StaticKnob::Gamma), differs: |s, d| differs(s.gamma, d.gamma), reset: |s, d| s.gamma = d.gamma },
+    chip::Field { knob: Some(StaticKnob::Threshold), differs: |s, d| s.threshold.is_some() != d.threshold.is_some(), reset: |s, d| s.threshold = d.threshold },
+    chip::Field { knob: Some(StaticKnob::EdgeShift), differs: |s, d| differs(s.edge_shift, d.edge_shift), reset: |s, d| s.edge_shift = d.edge_shift },
+    chip::Field { knob: Some(StaticKnob::RefineEdges), differs: |s, d| s.refine_edges != d.refine_edges, reset: |s, d| s.refine_edges = d.refine_edges },
+    chip::Field { knob: Some(StaticKnob::GuidedRadius), differs: |s, d| s.refine_edges && s.guided_radius != d.guided_radius, reset: |s, d| s.guided_radius = d.guided_radius },
+    chip::Field { knob: Some(StaticKnob::GuidedEpsilon), differs: |s, d| s.refine_edges && differs(s.guided_epsilon, d.guided_epsilon), reset: |s, d| s.guided_epsilon = d.guided_epsilon },
+    chip::Field { knob: Some(StaticKnob::Feather), differs: |s, d| differs(s.feather, d.feather), reset: |s, d| s.feather = d.feather },
+];
+
+/// Every line knob except the mode, which the chip face shows instead.
+const LINES_FIELDS: &[chip::Field<ItemSettings>] = &[
+    chip::Field { knob: Some(StaticKnob::EdgeScale), differs: |s, d| s.edge_scale != d.edge_scale, reset: |s, d| s.edge_scale = d.edge_scale },
+    chip::Field { knob: Some(StaticKnob::LineStrength), differs: |s, d| differs(s.line_strength, d.line_strength), reset: |s, d| s.line_strength = d.line_strength },
+    chip::Field { knob: Some(StaticKnob::EdgeThickness), differs: |s, d| s.edge_thickness != d.edge_thickness, reset: |s, d| s.edge_thickness = d.edge_thickness },
+    chip::Field { knob: Some(StaticKnob::ComposeMode), differs: |s, d| s.compose_mode != d.compose_mode, reset: |s, d| s.compose_mode = d.compose_mode },
+    chip::Field { knob: Some(StaticKnob::LineStyle), differs: |s, d| s.line_style != d.line_style, reset: |s, d| s.line_style = d.line_style },
+    chip::Field { knob: Some(StaticKnob::SolidLineColor), differs: |s, d| s.solid_line_color != d.solid_line_color, reset: |s, d| s.solid_line_color = d.solid_line_color },
+    chip::Field { knob: None, differs: |s, d| s.input_transform != d.input_transform, reset: |s, d| s.input_transform = d.input_transform },
+];
+
+/// Put a group back to its defaults and dispatch every knob that changed.
+fn reset_group(fields: &[chip::Field<ItemSettings>], s: &mut ItemSettings, d: &ItemSettings, change: &mut ToolbarChange) {
+    chip::reset_fields(fields, s, d);
+    for knob in fields.iter().filter_map(|f| f.knob) {
+        aggregate_bool(true, knob, change);
+    }
 }
 
 /// The five mask stages, in the order the pipeline applies them.
 fn render_mask_group(
     ui: &mut Ui,
     s: &mut ItemSettings,
-    defaults: &Defaults,
-    inactive_reason: Option<&str>,
+    d: &ItemSettings,
     change: &mut ToolbarChange,
 ) {
-    let d = &defaults.template;
-    let tuned = usize::from(differs(s.gamma, d.gamma))
-        + usize::from(s.threshold.is_some())
-        + usize::from(differs(s.edge_shift, d.edge_shift))
-        + usize::from(s.refine_edges != d.refine_edges)
-        + usize::from(
-            s.refine_edges
-                && (s.guided_radius != d.guided_radius || differs(s.guided_epsilon, d.guided_epsilon)),
-        )
-        + usize::from(differs(s.feather, d.feather));
+    let tuned = chip::tuned_count(MASK_FIELDS, s, d);
     let summary = chip::tuned_summary(tuned);
     let group = chip::GroupChip {
         id_salt: "mask",
@@ -458,28 +434,9 @@ fn render_mask_group(
         tuned: tuned > 0,
         width: theme::POPOVER_WIDTH,
     };
-    if let Some(reason) = inactive_reason {
-        ui.add_enabled_ui(false, |ui| chip::group_chip(ui, group, |_, _| ()))
-            .response
-            .on_disabled_hover_text(reason);
-        return;
-    }
     chip::group_chip(ui, group, |ui, reset| {
         if reset {
-            s.gamma = d.gamma;
-            s.threshold = d.threshold;
-            s.edge_shift = d.edge_shift;
-            s.refine_edges = d.refine_edges;
-            s.guided_radius = d.guided_radius;
-            s.guided_epsilon = d.guided_epsilon;
-            s.feather = d.feather;
-            for knob in [
-                StaticKnob::Gamma, StaticKnob::Threshold, StaticKnob::EdgeShift,
-                StaticKnob::RefineEdges, StaticKnob::GuidedRadius, StaticKnob::GuidedEpsilon,
-                StaticKnob::Feather,
-            ] {
-                aggregate_bool(true, knob, change);
-            }
+            reset_group(MASK_FIELDS, s, d, change);
         }
 
         aggregate_knob(
@@ -492,7 +449,7 @@ fn render_mask_group(
         let mut hard = s.threshold.is_some();
         let t = chip::toggle_row(ui, "Hard threshold", &mut hard);
         if t.changed {
-            s.threshold = hard.then_some(defaults.threshold_value);
+            s.threshold = hard.then_some(THRESHOLD_FALLBACK);
         }
         aggregate_knob(t, StaticKnob::Threshold, change);
         if let Some(v) = s.threshold.as_mut() {
@@ -545,21 +502,13 @@ fn render_mask_group(
 fn render_lines_group(
     ui: &mut Ui,
     s: &mut ItemSettings,
-    defaults: &Defaults,
+    d: &ItemSettings,
     subject_available: bool,
     change: &mut ToolbarChange,
 ) {
     use prunr_core::{ComposeMode, InputTransform, LineStyle};
-    let d = &defaults.template;
     let on = s.line_mode != LineMode::Off;
-    let tuned = on
-        && (s.edge_scale != d.edge_scale
-            || differs(s.line_strength, d.line_strength)
-            || s.edge_thickness != d.edge_thickness
-            || s.compose_mode != d.compose_mode
-            || s.line_style != d.line_style
-            || s.solid_line_color != d.solid_line_color
-            || s.input_transform != d.input_transform);
+    let tuned = on && chip::tuned_count(LINES_FIELDS, s, d) > 0;
     let group = chip::GroupChip {
         id_salt: "lines",
         icon: ICON_DRAW.codepoint,
@@ -571,20 +520,9 @@ fn render_lines_group(
     };
     chip::group_chip(ui, group, |ui, reset| {
         if reset {
+            // The mode transition is recorded by the caller after the render.
             s.line_mode = d.line_mode;
-            s.edge_scale = d.edge_scale;
-            s.line_strength = d.line_strength;
-            s.edge_thickness = d.edge_thickness;
-            s.compose_mode = d.compose_mode;
-            s.line_style = d.line_style;
-            s.solid_line_color = d.solid_line_color;
-            s.input_transform = d.input_transform;
-            for knob in [
-                StaticKnob::EdgeScale, StaticKnob::LineStrength, StaticKnob::EdgeThickness,
-                StaticKnob::ComposeMode, StaticKnob::LineStyle, StaticKnob::SolidLineColor,
-            ] {
-                aggregate_bool(true, knob, change);
-            }
+            reset_group(LINES_FIELDS, s, d, change);
             mark_input_transform_change(change);
         }
 
@@ -645,7 +583,7 @@ fn render_lines_group(
                     ui.add_space(theme::SPACE_XS);
                 }
 
-                ui.label(RichText::new("Pre-filter").color(theme::TEXT_SECONDARY).size(theme::FONT_SIZE_MONO));
+                chip::section_label(ui, "Pre-filter");
                 let mut filter_changed = false;
                 ui.horizontal_wrapped(|ui| {
                     for option in InputTransform::ALL {
@@ -677,7 +615,7 @@ fn render_lines_group(
             ui.separator();
             ui.vertical(|ui| {
                 ui.set_min_width(LINES_COLOR_LIST_WIDTH);
-                ui.label(RichText::new("Line color").color(theme::TEXT_SECONDARY).size(theme::FONT_SIZE_MONO));
+                chip::section_label(ui, "Line color");
                 let is_solid = matches!(s.line_style, LineStyle::Solid);
                 if chip::picker_row(ui, is_solid && s.solid_line_color.is_none(), "Original", "the photo's own colors").clicked() {
                     s.line_style = LineStyle::Solid;
@@ -687,7 +625,7 @@ fn render_lines_group(
                 }
                 if chip::picker_row(ui, is_solid && s.solid_line_color.is_some(), "Solid color", "one color for every line").clicked() {
                     s.line_style = LineStyle::Solid;
-                    s.solid_line_color = Some(defaults.solid_line_color_value);
+                    s.solid_line_color = Some(LINE_COLOR_FALLBACK);
                     aggregate_bool(true, StaticKnob::LineStyle, change);
                     aggregate_bool(true, StaticKnob::SolidLineColor, change);
                 }
@@ -736,7 +674,6 @@ fn aggregate_knob(ch: chip::ChipChange, knob: StaticKnob, acc: &mut ToolbarChang
         return;
     }
     let spec = knob_catalog::spec(knob);
-    acc.touched.insert(knob);
     acc.cache_impact = acc.cache_impact.union(spec.cache_impact);
     if matches!(spec.dispatch, DispatchKind::Render) {
         acc.render_repaint = true;
@@ -1214,7 +1151,7 @@ pub(super) fn render_reset_preset_cluster(
     }
 }
 
-/// Row 2 leftmost: model dropdown. Edits `app_settings.model` directly and
+/// Leftmost on the toolbar: the model picker. Edits `app_settings.model` directly and
 /// sets `change.model_changed` + `commit` when the selection flips so caller
 /// can invalidate tensor caches and fire a fresh Tier 1.
 pub(super) fn render_model_dropdown(
@@ -1316,7 +1253,6 @@ mod tests {
         let c = ToolbarChange::default();
         assert_eq!(c.cache_impact, CacheImpact::Nothing);
         assert_eq!(c.auto_dispatch, DispatchKind::None);
-        assert!(c.touched.is_empty());
         assert!(!c.render_repaint);
         assert!(c.line_mode_from.is_none());
         assert!(!c.auto_chain_on);
