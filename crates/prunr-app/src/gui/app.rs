@@ -2322,18 +2322,9 @@ impl PrunrApp {
         is_filter_only: bool,
         chain_mode: bool,
     ) -> Option<super::live_preview::DispatchInputs> {
-        use super::live_preview::{DispatchInputs, PreviewKind, decompress_seg};
+        use super::live_preview::{DispatchInputs, PreviewKind};
         let item = items.iter_mut().find(|b| b.id == id)?;
-        // Decompress once per drag, not once per tick.
-        let seg_tensor = match (&item.cached_tensor, &item.volatile_seg_tensor) {
-            (None, _) => None,
-            (Some(_), Some(hot)) => Some(Arc::clone(hot)),
-            (Some(ct), None) => {
-                let hot = decompress_seg(ct).map(Arc::new);
-                item.volatile_seg_tensor = hot.clone();
-                hot
-            }
-        };
+        let seg_tensor = item.hot_seg_tensor();
         // A Mask dispatch in a seg model with no cached tensor falls
         // through to `run_preview`'s source+fill_style fallback and
         // overwrites any existing `result_rgba`. Filter-only mode is
@@ -2582,7 +2573,7 @@ impl PrunrApp {
         if selected != self.synced_selected {
             self.synced_selected = selected;
             if let Some(idx) = idx {
-                self.evict_result_rgba_for_background_items(idx);
+                self.evict_background_item_caches(idx);
                 self.restore_selected_result_from_history(idx);
             }
             self.show_original = false;
@@ -2597,7 +2588,9 @@ impl PrunrApp {
         self.ensure_magic_embedding_for_selected();
     }
 
-    /// Free full-resolution `result_rgba` for every Done item that isn't
+    /// For every item that is not selected: drop the decoded tensors kept
+    /// for slider drags, and free the full-resolution `result_rgba` of Done
+    /// items. Places an in-memory placeholder at
     /// the selected one. Places an in-memory placeholder at
     /// `history.back()` so `restore_selected_result_from_history` can
     /// read pixels back instantly, then kicks an off-thread zstd
@@ -2605,7 +2598,7 @@ impl PrunrApp {
     /// once it returns (drained by `pump_history_demote_results`).
     /// Pre-fix this ran zstd inline — a 50-image 4K batch froze the UI
     /// for ~2.5 s on every selection change.
-    fn evict_result_rgba_for_background_items(&mut self, selected_idx: usize) {
+    fn evict_background_item_caches(&mut self, selected_idx: usize) {
         for (i, item) in self.batch.items.iter_mut().enumerate() {
             if i == selected_idx {
                 continue;

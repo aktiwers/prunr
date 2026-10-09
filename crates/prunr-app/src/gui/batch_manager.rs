@@ -590,7 +590,7 @@ mod tests {
             // Real CompressedTensor: zstd-compress f32 data via from_raw.
             let data: Vec<f32> = vec![0.5; tensor_floats];
             let cache = TensorCache { data, height: 10, width: 10, model: ModelKind::Silueta };
-            item.cached_tensor = CompressedTensor::from_raw(cache);
+            item.set_cached_tensor(CompressedTensor::from_raw(cache));
         }
         item
     }

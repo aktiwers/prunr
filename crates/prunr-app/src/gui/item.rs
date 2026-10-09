@@ -395,8 +395,7 @@ impl BatchItem {
         self.cached_edge_mask = None;
     }
 
-    /// The one writer of `cached_tensor`: the decompressed copy the
-    /// live preview keeps hot is tied to it.
+    /// Replaces the compressed tensor and the decoded copy tied to it.
     pub(crate) fn set_cached_tensor(&mut self, tensor: Option<super::worker::CompressedTensor>) {
         self.cached_tensor = tensor;
         self.volatile_seg_tensor = None;
@@ -648,7 +647,19 @@ impl BatchItem {
     pub(crate) fn evictable_tensor_bytes(&self) -> usize {
         let seg = self.cached_tensor.as_ref().map_or(0, |ct| ct.compressed_size());
         let edge = self.cached_edge_tensors.as_ref().map_or(0, |ct| ct.compressed_size());
-        seg + edge
+        let hot_seg = self.volatile_seg_tensor.as_ref().map_or(0, |t| t.data.len() * 4);
+        let hot_edge = self.volatile_edge_tensor.as_ref().map_or(0, |(_, d)| d.len() * 4);
+        seg + edge + hot_seg + hot_edge
+    }
+
+    /// The decoded segmentation tensor for live preview, decoded on the
+    /// first call of a drag and shared by the following ticks.
+    pub(crate) fn hot_seg_tensor(&mut self) -> Option<Arc<super::live_preview::SegTensor>> {
+        let ct = self.cached_tensor.as_ref()?;
+        if self.volatile_seg_tensor.is_none() {
+            self.volatile_seg_tensor = super::live_preview::decompress_seg(ct).map(Arc::new);
+        }
+        self.volatile_seg_tensor.clone()
     }
 
     /// Test-only constructor: returns a BatchItem with all fields at their
