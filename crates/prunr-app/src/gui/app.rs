@@ -3110,9 +3110,13 @@ impl PrunrApp {
             self.apply_cancel_shortcut(ctx);
         }
 
-        if pressed.is(Action::Shortcuts) { self.show_shortcuts = !self.show_shortcuts; }
-        if pressed.is(Action::CliHelp)  { self.show_cli_help  = !self.show_cli_help;  }
-        if pressed.is(Action::PipelineFlow) { self.show_pipeline_flow = !self.show_pipeline_flow; }
+        for action in [Action::Shortcuts, Action::CliHelp, Action::PipelineFlow] {
+            if pressed.is(action) {
+                if let Some(open) = self.help_modal_mut(action) {
+                    *open = !*open;
+                }
+            }
+        }
         if pressed.is(Action::Settings)  { self.toggle_settings_panel(ctx); }
 
         if pressed.is(Action::PrevImage) { self.navigate_batch(ctx, NavDir::Prev); }
@@ -3130,6 +3134,19 @@ impl PrunrApp {
         if self.pending_batch_sync {
             self.pending_batch_sync = false;
             self.sync_selected_batch_textures(ctx);
+        }
+    }
+
+    /// The visibility flag behind a help modal's shortcut action; `None`
+    /// for actions that are not help modals. The keyboard toggles it, the
+    /// Help menu sets it.
+    pub(crate) fn help_modal_mut(&mut self, action: crate::gui::views::shortcuts::Action) -> Option<&mut bool> {
+        use crate::gui::views::shortcuts::Action;
+        match action {
+            Action::Shortcuts => Some(&mut self.show_shortcuts),
+            Action::CliHelp => Some(&mut self.show_cli_help),
+            Action::PipelineFlow => Some(&mut self.show_pipeline_flow),
+            _ => None,
         }
     }
 

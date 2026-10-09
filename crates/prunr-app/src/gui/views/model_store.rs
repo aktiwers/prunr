@@ -251,12 +251,8 @@ fn render_card(
                     CardAction::Download | CardAction::Retry { .. } => ButtonKind::Primary,
                     _ => ButtonKind::Secondary,
                 };
-                let mut resp = ui
-                    .add_enabled_ui(action_enabled(action), |ui| button(ui, kind, label))
-                    .inner;
-                if let Some(tip) = advisory {
-                    resp = resp.on_disabled_hover_text(tip);
-                }
+                let reason = (!action_enabled(action)).then_some(advisory.unwrap_or("Nothing to do yet."));
+                let resp = super::chip::gated(ui, reason, |ui| button(ui, kind, label));
                 if resp.clicked() {
                     clicked = Some(action);
                 }

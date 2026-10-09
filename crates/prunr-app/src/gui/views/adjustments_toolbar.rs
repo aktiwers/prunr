@@ -87,8 +87,8 @@ pub struct ToolbarChange {
     /// User clicked a selection action button (Delete/Copy/Cut/Invert/Clear).
     /// `None` when no action was clicked this frame.
     pub(crate) selection_action: Option<SelectionAction>,
-    /// User toggled the "Protect selection" chip. `Some(true/false)` when
-    /// flipped; `None` when unchanged.
+    /// The "Auto-apply strokes" switch flipped; carries the new
+    /// `protect_selection` (its inverse). `None` when unchanged.
     pub protect_selection: Option<bool>,
     /// User clicked the Paint Brush toggle button.
     pub(crate) toggle_paint: bool,
@@ -153,7 +153,7 @@ const THRESHOLD_FALLBACK: f32 = 0.5;
 const BG_COLOR_FALLBACK: [u8; 4] = [255, 255, 255, 255];
 const LINE_COLOR_FALLBACK: [u8; 3] = [0, 0, 0];
 
-/// Render row 2. Returns a `ToolbarChange` summarizing what was edited.
+/// Render the adjustments toolbar. Returns a `ToolbarChange` summarizing what was edited.
 /// `app_settings` exposes model + preset map. `applied_preset` is read for
 /// the button's modified/clean icon and written in place when the user
 /// applies or saves a preset.
@@ -766,7 +766,7 @@ fn render_fill_style_chip(ui: &mut Ui, style: &mut prunr_core::FillStyle) -> boo
         // instead of stacking above it — otherwise 4-stop GradientMap makes
         // the popover taller than most screens.
         ui.set_min_width(FILL_STYLE_POPOVER_WIDTH);
-        if chip::popover_header(ui, "Fill style", Some("Back to the subject's own colors")) && !matches!(style, FillStyle::None) {
+        if chip::popover_header(ui, "Fill style", Some(("Back to the subject's own colors", matches!(style, FillStyle::None)))) {
             *style = FillStyle::None;
             changed = true;
         }
@@ -972,7 +972,7 @@ fn render_background_chip(
     let popup_id = ui.make_persistent_id("background_popup");
     chip::popup_for(ui, popup_id, &resp, |ui| {
         ui.set_min_width(BACKGROUND_POPOVER_WIDTH);
-        if chip::popover_header(ui, "Background", Some("Back to transparent")) && current != BgKind::Transparent {
+        if chip::popover_header(ui, "Background", Some(("Back to transparent", current == BgKind::Transparent))) {
             apply_bg_kind(bg, bg_effect, BgKind::Transparent, default_color);
             if has_bg_image {
                 change.clear_bg_image = true;

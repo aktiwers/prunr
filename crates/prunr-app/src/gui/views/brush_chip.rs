@@ -63,7 +63,7 @@ pub(super) fn render(
 
     let mut outcome = BrushChipOutcome::default();
     chip::popup_for(ui, ui.id().with("brush_chip_popover"), &resp, |ui| {
-        if chip::popover_header(ui, "Brush", Some("Reset size, hardness, expand, edge blend, sharpen and shape")) {
+        if chip::popover_header(ui, "Brush", Some(("Reset size, hardness, expand, edge blend, sharpen and shape", false))) {
             outcome.reset_brush_requested = true;
         }
         ui.horizontal(|ui| {
@@ -120,20 +120,14 @@ pub(super) fn render(
                     super::hint(ui, "Sharpen the filled area, which comes out slightly soft.");
                 }
                 if !is_inpaint_mode {
-                    // Inpaint has only one direction (paint = erase). Hide
-                    // the toggle so the user doesn't see a knob with no
-                    // effect; mode stays pinned to whatever it was.
+                    // The eraser has one direction (paint = erase), so the
+                    // mode switch is hidden there.
                     ui.add_space(6.0);
-                    ui.horizontal(|ui| {
-                        if ui.selectable_label(matches!(s.mode, BrushMode::Add), "Add").clicked() {
-                            s.mode = BrushMode::Add;
-                            outcome.committed = true;
-                        }
-                        if ui.selectable_label(matches!(s.mode, BrushMode::Subtract), "Subtract").clicked() {
-                            s.mode = BrushMode::Subtract;
-                            outcome.committed = true;
-                        }
-                    });
+                    let modes = [
+                        chip::Choice { value: BrushMode::Add, name: "Add", description: "Strokes add to the selection", enabled: true },
+                        chip::Choice { value: BrushMode::Subtract, name: "Subtract", description: "Strokes remove from the selection", enabled: true },
+                    ];
+                    outcome.committed |= chip::choice_row(ui, "Mode", &modes, &mut s.mode);
                 }
             });
 
@@ -141,18 +135,12 @@ pub(super) fn render(
             ui.vertical(|ui| {
                 draw_preview(ui, s);
                 ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    for (shape, label) in [
-                        (BrushShape::Circle, "Circle"),
-                        (BrushShape::Square, "Square"),
-                        (BrushShape::Line, "Line"),
-                    ] {
-                        if ui.selectable_label(s.shape == shape, label).clicked() {
-                            s.shape = shape;
-                            outcome.committed = true;
-                        }
-                    }
-                });
+                let shapes = [
+                    chip::Choice { value: BrushShape::Circle, name: "Circle", description: "", enabled: true },
+                    chip::Choice { value: BrushShape::Square, name: "Square", description: "", enabled: true },
+                    chip::Choice { value: BrushShape::Line, name: "Line", description: "", enabled: true },
+                ];
+                outcome.committed |= chip::choice_row(ui, "Shape", &shapes, &mut s.shape);
             });
         });
 

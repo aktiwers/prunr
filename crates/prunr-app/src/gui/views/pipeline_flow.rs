@@ -24,7 +24,7 @@ struct Pipeline {
     stages: &'static [Stage],
 }
 
-const PIPELINES: &[Pipeline] = &[
+const PIPELINES: [Pipeline; 4] = [
     Pipeline {
         tab: "Mask",
         input: "Model output: a soft mask of the subject",
@@ -85,12 +85,12 @@ pub fn render(ctx: &egui::Context) -> bool {
         |ui| {
             let tab_id = egui::Id::new("pipeline_flow_tab");
             let mut tab: usize = ui.data(|d| d.get_temp(tab_id).unwrap_or(0));
-            let labels = [PIPELINES[0].tab, PIPELINES[1].tab, PIPELINES[2].tab, PIPELINES[3].tab];
+            let labels: [&str; PIPELINES.len()] = std::array::from_fn(|i| PIPELINES[i].tab);
             chip::tab_strip(ui, &labels, &mut tab);
             ui.data_mut(|d| d.insert_temp(tab_id, tab));
             ui.separator();
 
-            let pipeline = &PIPELINES[tab.min(PIPELINES.len() - 1)];
+            let pipeline = &PIPELINES[tab];
             ui.vertical(|ui| {
                 ui.add_space(theme::SPACE_SM);
                 endpoint_label(ui, pipeline.input);

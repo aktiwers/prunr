@@ -113,7 +113,7 @@ pub struct Settings {
     #[serde(default)]
     pub brush: BrushSettings,
 
-    /// Global "Protect selection" toggle. When true, the BG-removal
+    /// Inverse of the "Auto-apply strokes" switch. When true, the BG-removal
     /// continuous auto-apply rule does NOT fire on stroke commit — the
     /// user can paint without immediate visual feedback, then click
     /// Process to commit. SD / LaMa already require explicit Process;
