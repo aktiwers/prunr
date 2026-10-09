@@ -973,21 +973,17 @@ impl PrunrApp {
         match action {
             SelectionAction::Delete => {
                 let Some((mask, base)) = self.selection_edit_inputs(idx) else { return };
-                let mut edited: image::RgbaImage = (*base).clone();
-                mask.alpha_cut(&mut edited);
-                self.apply_selection_edit(idx, edited, ctx);
+                self.apply_selection_cut(idx, &mask, &base, ctx);
             }
             SelectionAction::Copy => {
                 let Some((mask, base)) = self.selection_edit_inputs(idx) else { return };
-                self.system.copy_image(&Arc::new(mask.copy_to_rgba(&base)));
+                self.system.copy_image(&mask.copy_to_rgba(&base));
                 self.set_temporary_status("Selection copied to clipboard");
             }
             SelectionAction::Cut => {
                 let Some((mask, base)) = self.selection_edit_inputs(idx) else { return };
-                self.system.copy_image(&Arc::new(mask.copy_to_rgba(&base)));
-                let mut edited: image::RgbaImage = (*base).clone();
-                mask.alpha_cut(&mut edited);
-                self.apply_selection_edit(idx, edited, ctx);
+                self.system.copy_image(&mask.copy_to_rgba(&base));
+                self.apply_selection_cut(idx, &mask, &base, ctx);
                 self.set_temporary_status("Selection cut to clipboard");
             }
             SelectionAction::Invert => {
@@ -1003,16 +999,23 @@ impl PrunrApp {
         }
     }
 
-    /// The selection plus the image a Delete / Copy / Cut acts on: the
-    /// current result, or the source when the image has not been
-    /// processed yet.
+    /// Selection actions act on the latest result or, before processing,
+    /// on the source. Shared by the action bar, the keyboard shortcuts and
+    /// the actions themselves.
+    pub(crate) fn can_selection_action(&self) -> bool {
+        self.batch.selected_item().is_some_and(|i| {
+            i.selection_mask.is_some() && (i.result_rgba.is_some() || i.source_rgba.is_some())
+        })
+    }
+
+    /// The selection plus the image a Delete / Copy / Cut acts on.
     fn selection_edit_inputs(
         &self,
         idx: usize,
     ) -> Option<(Arc<prunr_core::selection::MaskArtifact>, Arc<image::RgbaImage>)> {
         let item = &self.batch.items[idx];
         let mask = item.selection_mask.clone()?;
-        let base = item.result_rgba.clone().or_else(|| item.source_rgba.clone())?;
+        let base = item.source_for_inpaint()?;
         // Edge feather acts on what the user sees cut, so it applies here
         // as well as in the visualization.
         let feather_px = self.settings.brush.edge_feather.round().max(0.0) as u32;
@@ -1023,24 +1026,25 @@ impl PrunrApp {
         Some((mask, base))
     }
 
-    /// Install an edited image as the item's result: archive the previous
-    /// result for Cmd+Z, drop the stale result texture so the canvas
-    /// rebuilds it, refresh the thumbnail.
-    fn apply_selection_edit(&mut self, idx: usize, edited: image::RgbaImage, ctx: &egui::Context) {
+    /// Cut the selection out of `base` and publish it as the item's result,
+    /// archiving the previous state so Cmd+Z restores it. An unprocessed
+    /// image first seeds its history with the source so there is a state
+    /// to go back to.
+    fn apply_selection_cut(
+        &mut self,
+        idx: usize,
+        mask: &prunr_core::selection::MaskArtifact,
+        base: &image::RgbaImage,
+        ctx: &egui::Context,
+    ) {
         let max_depth = self.settings.history_depth;
-        HistoryManager::archive_current_result(&mut self.batch.items[idx], max_depth, false);
-        let new_arc = Arc::new(edited);
         let item = &mut self.batch.items[idx];
-        item.result_rgba = Some(new_arc.clone());
-        item.result_texture = None;
-        if item.status == BatchStatus::Pending {
-            item.status = BatchStatus::Done;
-        }
-        let (item_id, source) = (item.id, item.source.clone());
-        self.batch.request_thumbnail(item_id, &source, Some(&new_arc));
-        self.result_switch_id += 1;
-        self.sync_selected_batch_textures(ctx);
-        ctx.request_repaint();
+        HistoryManager::seed_with_source(item);
+        HistoryManager::archive_current_result(item, max_depth, false);
+        let item_id = item.id;
+        let mut edited = base.clone();
+        mask.alpha_cut(&mut edited);
+        self.publish_result(item_id, Arc::new(edited), "edit", ctx);
     }
 
     pub(crate) fn dispatch_inpaint_for_item(&mut self, idx: usize) {
@@ -1134,14 +1138,9 @@ impl PrunrApp {
         if results.is_empty() {
             return;
         }
-        let handles = self.batch.bg_io.tex_prep_handles();
-        let switch = self.result_switch_id;
         let max_depth = self.settings.history_depth;
         for r in results {
-            // Keep old texture visible until tex_prep lands so the canvas
-            // doesn't flash empty for one frame between RGBA arriving and
-            // GPU upload finishing.
-            let (item_id, source, result_rgba) = {
+            let (item_id, new_rgba) = {
                 let Some(item) = self.batch.find_by_id_mut(r.item_id) else { continue };
                 let new_rgba = Arc::new(r.rgba);
                 // Archive the previous result_rgba so Cmd+Z can swap stored
@@ -1162,22 +1161,39 @@ impl PrunrApp {
                         entry.cleanup();
                     }
                 }
-                item.result_rgba = Some(new_rgba.clone());
-                if item.status == BatchStatus::Pending {
-                    item.status = BatchStatus::Done;
-                }
-                item.result_tex_pending = true;
-                item.thumb_pending = true;
                 // selection_mask intentionally persists — the region stays
                 // highlighted and is available for Reprocess.
-                Self::spawn_tex_prep(
-                    new_rgba.clone(), item.id, Self::tex_name("inpaint", item.id, Some(switch)),
-                    true, handles.clone(), ctx.clone(),
-                );
-                (item.id, item.source.clone(), Some(new_rgba))
+                (item.id, new_rgba)
             };
-            self.batch.request_thumbnail(item_id, &source, result_rgba.as_ref());
+            self.publish_result(item_id, new_rgba, "inpaint", ctx);
         }
+    }
+
+    /// Install a new result the way every result producer must: the old
+    /// texture stays on screen until the new one lands (a cleared texture
+    /// paints nothing for a frame), the thumbnail is refreshed, and a
+    /// Pending item becomes Done.
+    fn publish_result(
+        &mut self,
+        item_id: u64,
+        rgba: Arc<image::RgbaImage>,
+        tag: &str,
+        ctx: &egui::Context,
+    ) {
+        let handles = self.batch.bg_io.tex_prep_handles();
+        let switch = self.result_switch_id;
+        let Some(item) = self.batch.find_by_id_mut(item_id) else { return };
+        item.result_rgba = Some(rgba.clone());
+        if item.status == BatchStatus::Pending {
+            item.status = BatchStatus::Done;
+        }
+        item.result_tex_pending = true;
+        item.thumb_pending = true;
+        let source = item.source.clone();
+        Self::spawn_tex_prep(
+            rgba.clone(), item_id, Self::tex_name(tag, item_id, Some(switch)), true, handles, ctx.clone(),
+        );
+        self.batch.request_thumbnail(item_id, &source, Some(&rgba));
         ctx.request_repaint();
     }
 
@@ -3080,33 +3096,25 @@ impl PrunrApp {
         if intents.save_requested && app_state == AppState::Done {
             self.handle_save_selected();
         }
-        // Ctrl+C: if there's an active selection and the item is Done, copy the
-        // selection region; otherwise fall through to normal whole-result copy.
-        let has_selection = self.batch.selected_item()
-            .map(|i| i.selection_mask.is_some())
-            .unwrap_or(false);
-        if copy_requested && app_state == AppState::Done {
-            if has_selection {
-                if let Some(idx) = self.batch.selected_idx_clamped() {
-                    self.handle_selection_action(idx, SelectionAction::Copy, ctx);
+        // Selection shortcuts share the action bar's gate; Ctrl+C without
+        // a usable selection is the whole-result copy.
+        let selection_idx = self.batch.selected_idx_clamped().filter(|_| self.can_selection_action());
+        if copy_requested {
+            match selection_idx {
+                Some(idx) => self.handle_selection_action(idx, SelectionAction::Copy, ctx),
+                None if app_state == AppState::Done => self.handle_copy(),
+                None => {}
+            }
+        }
+        if let Some(idx) = selection_idx {
+            for (wanted, action) in [
+                (intents.cut_selection, SelectionAction::Cut),
+                (intents.delete_selection, SelectionAction::Delete),
+                (intents.invert_selection, SelectionAction::Invert),
+            ] {
+                if wanted {
+                    self.handle_selection_action(idx, action, ctx);
                 }
-            } else {
-                self.handle_copy();
-            }
-        }
-        if intents.cut_selection && app_state == AppState::Done && has_selection {
-            if let Some(idx) = self.batch.selected_idx_clamped() {
-                self.handle_selection_action(idx, SelectionAction::Cut, ctx);
-            }
-        }
-        if intents.delete_selection && app_state == AppState::Done && has_selection {
-            if let Some(idx) = self.batch.selected_idx_clamped() {
-                self.handle_selection_action(idx, SelectionAction::Delete, ctx);
-            }
-        }
-        if intents.invert_selection && app_state == AppState::Done && has_selection {
-            if let Some(idx) = self.batch.selected_idx_clamped() {
-                self.handle_selection_action(idx, SelectionAction::Invert, ctx);
             }
         }
         if intents.toggle_before_after && app_state == AppState::Done {
@@ -4616,7 +4624,26 @@ mod selection_action_tests {
         let result = item.result_rgba.as_ref().expect("Delete must produce a result from the source");
         assert!(result.pixels().all(|px| px.0[3] == 0), "selected region must be cut");
         assert_eq!(item.status, BatchStatus::Done);
-        assert!(item.result_texture.is_none(), "stale texture must be dropped for rebuild");
+        assert!(item.result_tex_pending, "a texture build must be in flight for the new result");
+        assert_eq!(item.history.len(), 1, "the source is archived so Cmd+Z has a state to return to");
+        assert!(matches!(item.actions_undo.back(), Some(crate::gui::item::ActionType::Result)));
+    }
+
+    /// Cut through the real action path: the result is cut like Delete and
+    /// exactly one history entry is archived (copy + cut is one undo step).
+    #[test]
+    fn cut_action_through_the_real_path_archives_once() {
+        use crate::gui::views::selection_action_bar::SelectionAction;
+        let mut app = super::PrunrApp::new_for_test();
+        let mut item = make_item_done();
+        item.selection_mask = Some(Arc::new(make_mask(4, 4, true)));
+        app.batch.items.push(item);
+
+        app.handle_selection_action(0, SelectionAction::Cut, &egui::Context::default());
+
+        let item = &app.batch.items[0];
+        assert!(item.result_rgba.as_ref().unwrap().pixels().all(|px| px.0[3] == 0));
+        assert_eq!(item.history.len(), 1, "Cut archives the previous result exactly once");
     }
 
     /// Invert: coverage complement, signed by the active brush mode.
