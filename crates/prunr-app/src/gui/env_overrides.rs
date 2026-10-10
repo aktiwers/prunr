@@ -46,6 +46,7 @@ pub fn sd_tuning() -> prunr_core::inpaint_sd::SdTuning {
         ov_device: std::env::var("PRUNR_SD_OV_DEVICE").ok().filter(|s| !s.is_empty()),
         ov_dynamic: read_bool("PRUNR_SD_OV_DYNAMIC").unwrap_or(false),
         ov_threads: std::env::var("PRUNR_SD_OV_THREADS").ok().and_then(|s| s.parse().ok()),
+        tall_crop: read_bool("PRUNR_SD_TALL_CROP").unwrap_or(false),
     }
 }
 
