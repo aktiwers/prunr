@@ -26,6 +26,12 @@ fn give_tensor(item: &mut BatchItem) {
     item.set_cached_tensor(CompressedTensor::from_raw(cache));
 }
 
+/// A processed item: the cut-out is on screen and its tensor is cached.
+fn give_cutout(item: &mut BatchItem) {
+    give_tensor(item);
+    item.status = crate::gui::item::BatchStatus::Done;
+}
+
 /// The live preview decompresses the segmentation tensor once per drag:
 /// consecutive dispatch inputs share one plane, and replacing the cached
 /// tensor drops it.
@@ -159,7 +165,7 @@ fn bg_removal_fires_rerun_on_selection_commit() {
 
     let item = push_test_item(&mut app, 1);
     item.dimensions = (64, 64);
-    give_tensor(item);
+    give_cutout(item);
     let item_id = 1u64;
 
     let mask = make_mask(64, 64);
@@ -281,7 +287,7 @@ fn paint_brush_bg_removal_keeps_stroke_direction_and_softness() {
     let mut app = app_with_model(SettingsModel::BiRefNetLite);
     let item = push_test_item(&mut app, 7);
     item.dimensions = (32, 32);
-    give_tensor(item);
+    give_cutout(item);
     let item_id = 7u64;
 
     let mut committed = prunr_core::selection::MaskArtifact::new_empty(32, 32);
@@ -323,7 +329,7 @@ fn bg_removal_without_tensor_waits_until_a_result_lands() {
     );
     assert!(app.batch.find_by_id(item_id).unwrap().selection_mask.is_some());
 
-    give_tensor(app.batch.find_by_id_mut(item_id).unwrap());
+    give_cutout(app.batch.find_by_id_mut(item_id).unwrap());
     app.apply_selection_to_active_model(item_id);
     assert!(
         app.processor.live_preview.is_pending_for(item_id),
@@ -400,4 +406,28 @@ fn a_chain_mode_stroke_undo_brings_the_archived_result_back() {
     let item = &app.batch.items[0];
     assert!(item.selection_mask.is_some());
     assert!(item.result_rgba.as_ref().is_some_and(|r| **r == recut), "redo restores the re-cut");
+}
+
+/// Undoing back to the original keeps the model output cached; a stroke
+/// there edits the selection only and must not re-cut, which would bring
+/// the undone result back.
+#[test]
+fn a_stroke_after_undoing_the_result_does_not_bring_it_back() {
+    use std::sync::Arc;
+    let ctx = egui::Context::default();
+    let mut app = app_with_model(SettingsModel::BiRefNetLite);
+    let item = push_test_item(&mut app, 6);
+    item.dimensions = (8, 8);
+    item.source_rgba = Some(Arc::new(image::RgbaImage::new(8, 8)));
+    give_tensor(item);
+    // The state after undoing a Process: the tensor stays, the result is gone.
+    item.status = crate::gui::item::BatchStatus::Pending;
+
+    app.commit_selection_and_dispatch(6, make_mask(8, 8));
+    assert!(!app.processor.live_preview.is_pending_for(6), "a stroke on the original must not re-cut");
+
+    app.handle_undo(&ctx);
+    app.handle_redo(&ctx);
+    assert!(!app.processor.live_preview.is_pending_for(6), "nor may stepping that stroke");
+    assert_eq!(app.batch.items[0].status, crate::gui::item::BatchStatus::Pending);
 }
