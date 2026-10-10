@@ -300,7 +300,7 @@ pub fn process_inpaint_with(
     // Hold an Arc through the run so the idle sweep can't drop sessions
     // mid-inference.
     let get_started = Instant::now();
-    let bundle = SdSession::get(id, &req.tuning.session_key())?;
+    let bundle = SdSession::get(id, &req.tuning.session_key(), req.tuning.keep_loaded)?;
     let session_ms = get_started.elapsed().as_millis() as u64;
     // RAII drop-on-completion (unless `keep_loaded`): when this guard goes
     // out of scope (any return path) the cache's Arc is removed; once `bundle` (declared
@@ -610,7 +610,7 @@ fn padded_dims(w: u32, h: u32) -> (u32, u32) {
 /// Eagerly initialise the SD session so the first stroke doesn't pay
 /// the cumulative ~10-30s session-build latency for 4 ONNX files.
 pub fn prewarm(id: prunr_models::ModelId) -> Result<(), CoreError> {
-    SdSession::get(id, &SdSessionKey::default()).map(|_| ())
+    SdSession::get(id, &SdSessionKey::default(), false).map(|_| ())
 }
 
 // ── Per-tile pipeline ───────────────────────────────────────────────────
@@ -969,6 +969,8 @@ const TEXT_CACHE_ENTRIES: usize = 8;
 pub(crate) struct CacheEntry<T> {
     pub(crate) value: T,
     pub(crate) last_used: Instant,
+    /// Kept through the idle sweep (`SdTuning::keep_loaded`).
+    pub(crate) pinned: bool,
 }
 
 /// Per-id deferred bundle. The outer `Arc<OnceLock<...>>` is what closes
@@ -1017,7 +1019,7 @@ pub(crate) fn sweep_idle<K: std::hash::Hash + Eq, T>(
     idle: Duration,
 ) -> usize {
     let before = cache.len();
-    cache.retain(|_, e| now.duration_since(e.last_used) < idle);
+    cache.retain(|_, e| e.pinned || now.duration_since(e.last_used) < idle);
     before - cache.len()
 }
 
@@ -1059,7 +1061,7 @@ fn ensure_sweeper_running() {
 }
 
 impl SdSession {
-    fn get(id: prunr_models::ModelId, key: &SdSessionKey) -> Result<Arc<SdSession>, CoreError> {
+    fn get(id: prunr_models::ModelId, key: &SdSessionKey, pin: bool) -> Result<Arc<SdSession>, CoreError> {
         ensure_sweeper_running();
         let cache = sd_cache();
         let now = Instant::now();
@@ -1081,7 +1083,9 @@ impl SdSession {
             let entry = guard.entry((id, key.clone())).or_insert_with(|| CacheEntry {
                 value: Arc::new(std::sync::OnceLock::new()),
                 last_used: now,
+                pinned: false,
             });
+            entry.pinned = pin;
             // Don't refresh last_used when the slot already holds an
             // Err — otherwise a sticky build failure would keep
             // refreshing its idle timer on every retry and never
@@ -3871,6 +3875,20 @@ mod tests {
     }
 
     #[test]
+    fn sweep_idle_keeps_pinned_entries() {
+        let now = Instant::now() + Duration::from_secs(3600);
+        let mut cache: HashMap<prunr_models::ModelId, CacheEntry<u8>> = HashMap::new();
+        cache.insert(prunr_models::ModelId::SdV15InpaintFp16, CacheEntry {
+            value: 1, last_used: now - Duration::from_secs(600), pinned: true,
+        });
+        cache.insert(prunr_models::ModelId::LaMaFp32, CacheEntry {
+            value: 2, last_used: now - Duration::from_secs(600), pinned: false,
+        });
+        assert_eq!(sweep_idle(&mut cache, now, Duration::from_secs(300)), 1);
+        assert!(cache.contains_key(&prunr_models::ModelId::SdV15InpaintFp16));
+    }
+
+    #[test]
     fn sweep_idle_drops_only_stale_entries() {
         use prunr_models::ModelId;
         let now = sweep_now();
@@ -3882,10 +3900,12 @@ mod tests {
         cache.insert(ModelId::SdV15InpaintFp16, CacheEntry {
             value: Arc::new(()),
             last_used: stale,
+            pinned: false,
         });
         cache.insert(ModelId::LaMaFp32, CacheEntry {
             value: Arc::new(()),
             last_used: fresh,
+            pinned: false,
         });
 
         let dropped = sweep_idle(&mut cache, now, idle);
@@ -3907,6 +3927,7 @@ mod tests {
         let mut cache: HashMap<ModelId, CacheEntry<Arc<()>>> = HashMap::new();
         cache.insert(ModelId::SdV15InpaintFp16, CacheEntry {
             value: payload,
+            pinned: false,
             last_used: now - Duration::from_secs(600),
         });
 
@@ -3927,6 +3948,7 @@ mod tests {
         // Just-under-the-boundary entry must NOT evict.
         cache.insert(ModelId::SdV15InpaintFp16, CacheEntry {
             value: Arc::new(()),
+            pinned: false,
             last_used: now - Duration::from_secs(299),
         });
         let dropped = sweep_idle(&mut cache, now, idle);
