@@ -451,12 +451,11 @@ fn handle_magic_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: 
     } else if clicked {
         if let Some(pos) = hover_pos {
             let (px, py) = screen_to_src(pos);
-            // The `.is_empty()` guard below distinguishes a real click from
-            // the synthetic tail-click that fires at drag release.
+            // A stroke's own release was taken by the branch above, so
+            // what is left is a click, even when its press and release
+            // fell in different frames and left one point behind.
             let prompt = prunr_core::sam::prompt::build_click_prompt(px, py, source_w, source_h);
-            if app.magic_brush_state.active_stroke.is_empty() {
-                app.processor.dispatch_sam_decoder(sam_request(app, item_id, embedding, prompt, mode));
-            }
+            app.processor.dispatch_sam_decoder(sam_request(app, item_id, embedding, prompt, mode));
         }
         app.magic_brush_state.clear_stroke();
     }
