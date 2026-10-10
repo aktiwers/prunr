@@ -276,6 +276,8 @@ pub(super) fn flyout_for(id: egui::Id, resp: &Response, body: impl FnOnce(&mut U
         .id(id)
         .close_behavior(egui::PopupCloseBehavior::IgnoreClicks)
         .align(egui::RectAlign::BOTTOM_START)
+        // A chip near the right edge (the strip's dots) opens leftwards.
+        .align_alternatives(&[egui::RectAlign::BOTTOM_END, egui::RectAlign::TOP_START, egui::RectAlign::TOP_END])
         .frame(egui::Frame::NONE)
         .show(|ui| {
             theme::register_flyout(ui.ctx(), id);
@@ -294,9 +296,14 @@ pub(super) fn flyout_for(id: egui::Id, resp: &Response, body: impl FnOnce(&mut U
 /// A drag that began on this layer is still held.
 fn scrubbing_in(ui: &Ui) -> bool {
     let ctx = ui.ctx();
-    let layer = ui.layer_id();
-    ctx.dragged_id().is_some()
-        && ctx.input(|i| i.pointer.primary_down() && i.pointer.press_origin().is_some_and(|o| ctx.layer_id_at(o) == Some(layer)))
+    if ctx.dragged_id().is_none() {
+        return false;
+    }
+    // Read the input first, then ask for the layer: `layer_id_at` takes
+    // the context lock again, and a nested read deadlocks against a
+    // writer waiting on another thread.
+    let origin = ctx.input(|i| i.pointer.primary_down().then_some(i.pointer.press_origin()).flatten());
+    origin.is_some_and(|o| ctx.layer_id_at(o) == Some(ui.layer_id()))
 }
 
 /// Float slider row with the log scale and formatter float knobs need.

@@ -35,6 +35,10 @@ pub enum Request {
         #[serde(default)]
         secondary: bool,
     },
+    /// Press on a control and keep holding; `Move` drags, `Release` lets go.
+    Hold { name: String },
+    Move { dx: f32, dy: f32 },
+    Release,
     /// A chord in the settings form: "Mod+Shift+Z", "Escape", "A".
     Key { chord: String },
     Type { text: String },
@@ -100,6 +104,8 @@ pub struct Automation {
     /// Input batches, one per frame, handed to `raw_input_hook`.
     frames: std::collections::VecDeque<Vec<egui::Event>>,
     deferred: Vec<Deferred>,
+    /// Where a `Hold` left the pointer, until `Release`.
+    held_at: Option<egui::Pos2>,
 }
 
 impl Automation {
@@ -110,7 +116,7 @@ impl Automation {
         let tree = tree::Mirror::default();
         ctx.enable_accesskit();
         ctx.add_plugin(tree.clone());
-        Some(Self { tree, inbox, frames: Default::default(), deferred: Vec::new() })
+        Some(Self { tree, inbox, frames: Default::default(), deferred: Vec::new(), held_at: None })
     }
 
     pub fn take_events(&mut self) -> Vec<egui::Event> {
@@ -125,6 +131,20 @@ impl Automation {
         self.tree.snapshot().ok_or_else(|| "no frame rendered yet".to_string())
     }
 
+    /// The one control named `name`, with its centre.
+    fn target(&self, name: &str) -> Result<(ControlNode, egui::Pos2), String> {
+        let root = self.snapshot()?;
+        let found = find(&root, name);
+        let [target] = found.as_slice() else {
+            return Err(format!("{} controls named {name:?}", found.len()));
+        };
+        if target.disabled {
+            return Err(format!("{name:?} is disabled"));
+        }
+        let pos = target.center().ok_or_else(|| format!("{name:?} has no rectangle"))?;
+        Ok((target.clone(), pos))
+    }
+
     /// The reply and how many frames to wait before sending it.
     fn run(&mut self, app: &mut PrunrApp, ctx: &egui::Context, request: Request) -> Result<(u32, Response), String> {
         Ok(match request {
@@ -133,15 +153,7 @@ impl Automation {
             Request::Tree { all: false } => (0, Response::ok(controls(&self.snapshot()?))),
             Request::Find { name } => (0, Response::ok(find(&self.snapshot()?, &name))),
             Request::Click { name, secondary } => {
-                let root = self.snapshot()?;
-                let found = find(&root, &name);
-                let [target] = found.as_slice() else {
-                    return Err(format!("{} controls named {name:?}", found.len()));
-                };
-                if target.disabled {
-                    return Err(format!("{name:?} is disabled"));
-                }
-                let pos = target.center().ok_or_else(|| format!("{name:?} has no rectangle"))?;
+                let (target, pos) = self.target(&name)?;
                 let button = if secondary { egui::PointerButton::Secondary } else { egui::PointerButton::Primary };
                 let modifiers = egui::Modifiers::NONE;
                 self.frames.extend([
@@ -149,7 +161,25 @@ impl Automation {
                     vec![egui::Event::PointerButton { pos, button, pressed: true, modifiers }],
                     vec![egui::Event::PointerButton { pos, button, pressed: false, modifiers }],
                 ]);
-                (4, Response::ok(target.clone()))
+                (4, Response::ok(target))
+            }
+            Request::Hold { name } => {
+                let (target, pos) = self.target(&name)?;
+                self.frames.extend([vec![egui::Event::PointerMoved(pos)], vec![press(pos, true)]]);
+                self.held_at = Some(pos);
+                (3, Response::ok(target))
+            }
+            Request::Move { dx, dy } => {
+                let from = self.held_at.ok_or("nothing is held")?;
+                let to = from + egui::vec2(dx, dy);
+                self.frames.push_back(vec![egui::Event::PointerMoved(to)]);
+                self.held_at = Some(to);
+                (2, Response::ok([to.x, to.y]))
+            }
+            Request::Release => {
+                let pos = self.held_at.take().ok_or("nothing is held")?;
+                self.frames.push_back(vec![press(pos, false)]);
+                (3, Response::ok(()))
             }
             Request::Key { chord } => {
                 let chord = Chord::parse(&chord).ok_or_else(|| format!("unknown chord {chord:?}"))?;
@@ -205,6 +235,10 @@ pub fn pump(app: &mut PrunrApp, ctx: &egui::Context) {
     }
     ctx.request_repaint_after(if auto.busy() { FRAME_INTERVAL } else { POLL_INTERVAL });
     app.automation = Some(auto);
+}
+
+fn press(pos: egui::Pos2, pressed: bool) -> egui::Event {
+    egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE }
 }
 
 /// The controls in the tree, flat, without their children.
