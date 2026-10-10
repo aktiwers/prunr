@@ -297,28 +297,6 @@ fn handle_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: Rect) 
             None => stroke_mask,
         };
 
-        // Chain mode: archive the pre-stroke result before dispatch so
-        // undo can swap stored RGBAs instantly. Mirrors the seg-path
-        // archive from Phase 15; inpaint archives at result-land time.
-        let is_inpaint = app.settings.model.is_inpaint();
-        if !is_inpaint && app.settings.chain_mode && app.batch.items[idx].result_rgba.is_some() {
-            let max_depth = app.settings.history_depth;
-            let item = &mut app.batch.items[idx];
-            if let Some(rgba) = item.result_rgba.as_ref().cloned() {
-                item.history.push_back(crate::gui::item::HistoryEntry::new(
-                    rgba, item.applied_recipe.clone(),
-                ));
-                while item.history.len() > max_depth {
-                    if let Some(old) = item.history.pop_front() {
-                        old.cleanup();
-                    }
-                }
-                for entry in item.redo_stack.drain(..) {
-                    entry.cleanup();
-                }
-            }
-        }
-
         tracing::info!(item_id, "brush stroke committed; writing to selection_mask");
         app.commit_selection_and_dispatch(item_id, merged);
     }
