@@ -92,6 +92,9 @@ pub struct PrunrApp {
     pub(crate) pending_reset_confirm: bool,
     /// The Hotkeys tab is waiting for a key press for this action's slot.
     pub(crate) hotkey_capture: Option<(super::views::shortcuts::Action, usize)>,
+    /// The live key bindings: the shipped table plus `settings.hotkeys`.
+    /// Installed into the egui context each frame for the views.
+    pub(crate) bindings: Arc<super::views::shortcuts::Bindings>,
 
     pub(crate) model_store: Option<super::views::adjustments_toolbar::ModelStoreRequest>,
     /// When `Some(id)`, the license-acceptance dialog is open for that
@@ -274,7 +277,6 @@ impl PrunrApp {
         worker_tx: mpsc::Sender<WorkerMessage>,
         worker_rx: mpsc::Receiver<WorkerResult>,
     ) -> Self {
-        super::views::shortcuts::install(super::views::shortcuts::Bindings::from_overrides(&settings.hotkeys));
         let mut app = Self {
             last_open_dir: None,
             processor: super::processor::Processor::new(worker_tx, worker_rx),
@@ -299,6 +301,7 @@ impl PrunrApp {
             settings_tab: super::views::settings::SettingsTab::General,
             pending_reset_confirm: false,
             hotkey_capture: None,
+            bindings: Arc::new(super::views::shortcuts::Bindings::from_overrides(&settings.hotkeys)),
             model_store: None,
             pending_license_request: None,
             pending_onboarding_toast: None,
@@ -1329,10 +1332,11 @@ impl PrunrApp {
 
     /// Make `bindings` the live ones and persist what differs from the
     /// shipped table.
-    pub(crate) fn apply_hotkeys(&mut self, bindings: super::views::shortcuts::Bindings) {
+    pub(crate) fn apply_hotkeys(&mut self, ctx: &egui::Context, bindings: super::views::shortcuts::Bindings) {
         self.settings.hotkeys = bindings.to_overrides();
         self.settings.save();
-        super::views::shortcuts::install(bindings);
+        self.bindings = Arc::new(bindings);
+        super::views::shortcuts::install(ctx, Arc::clone(&self.bindings));
     }
 
     /// Turn Magic Brush off. The sessions stay warm and the selected
@@ -3198,7 +3202,7 @@ impl PrunrApp {
         if cancel {
             self.hotkey_capture = None;
         } else if clear || chord.is_some() {
-            let mut next = (*shortcuts::current()).clone();
+            let mut next = (*self.bindings).clone();
             if let Some(c) = chord {
                 if let Some(other) = next.bind(action, slot, c) {
                     self.toasts.info(format!(
@@ -3208,7 +3212,7 @@ impl PrunrApp {
             } else {
                 next.clear_slot(action, slot);
             }
-            self.apply_hotkeys(next);
+            self.apply_hotkeys(ctx, next);
             self.hotkey_capture = None;
         }
         true
@@ -3608,6 +3612,7 @@ impl eframe::App for PrunrApp {
     }
 
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        super::views::shortcuts::install(ctx, Arc::clone(&self.bindings));
         let popup_open = super::theme::any_popup_open(ctx);
         let pointer_down = ctx.input(|i| i.pointer.any_down());
         self.popup_open_at_frame_start = popup_open || (self.popup_open_at_frame_start && pointer_down);

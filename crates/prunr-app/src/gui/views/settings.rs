@@ -7,6 +7,8 @@
 //! Per-image knobs (gamma, threshold, line mode, …) live on the persistent
 //! adjustments toolbar (rows 2 + 3), not here.
 
+use std::sync::Arc;
+
 use egui::RichText;
 
 use crate::gui::app::PrunrApp;
@@ -426,7 +428,7 @@ fn render_tab_behavior(ui: &mut egui::Ui, settings: &mut Settings) {
 fn render_tab_hotkeys(ui: &mut egui::Ui, app: &mut PrunrApp) {
     use super::shortcuts::{self, Bindings, SHORTCUTS, SLOTS};
 
-    let current = shortcuts::current();
+    let current = Arc::clone(&app.bindings);
     let mut reset: Option<Bindings> = None;
 
     section_heading(ui, "Hotkeys");
@@ -478,7 +480,7 @@ fn render_tab_hotkeys(ui: &mut egui::Ui, app: &mut PrunrApp) {
         reset = Some(Bindings::shipped());
     }
     if let Some(next) = reset {
-        app.apply_hotkeys(next);
+        app.apply_hotkeys(ui.ctx(), next);
     }
 }
 
