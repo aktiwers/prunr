@@ -218,14 +218,31 @@ pub(crate) enum PromptModifier {
     Subtract,
 }
 
-/// Result from a background SAM decoder thread. Carries the raw decoder
-/// output (masks + IoU scores) or a human-readable error. The modifier
-/// tells pump_sam_decoder_results how to combine with the existing mask.
+/// Result from a background SAM decoder thread: the selection decoded at
+/// `confidence`, or a human-readable error. The modifier tells the pump
+/// how to combine it with the existing mask.
 pub(crate) struct SamDecoderResult {
     pub(crate) item_id: u64,
     pub(crate) modifier: PromptModifier,
-    /// `Ok(None)` when no candidate met the confidence threshold.
-    pub(crate) result: Result<Option<prunr_core::selection::MaskArtifact>, String>,
+    pub(crate) mode: prunr_core::selection::BrushMode,
+    pub(crate) source_dims: (u32, u32),
+    pub(crate) confidence: f32,
+    pub(crate) result: Result<prunr_core::selection::MaskArtifact, String>,
+    /// The decoder logits the mask came from, kept so a Confidence change
+    /// can re-threshold the same stroke without running the decoder again.
+    /// `None` on a re-threshold result (the caller still holds them).
+    pub(crate) output: Option<Arc<prunr_core::sam::SamDecoderOutput>>,
+    pub(crate) rethreshold: bool,
+}
+
+/// Re-threshold the logits of the last stroke at a new confidence.
+pub(crate) struct SamRethresholdRequest {
+    pub(crate) item_id: u64,
+    pub(crate) output: Arc<prunr_core::sam::SamDecoderOutput>,
+    pub(crate) modifier: PromptModifier,
+    pub(crate) mode: prunr_core::selection::BrushMode,
+    pub(crate) source_dims: (u32, u32),
+    pub(crate) confidence: f32,
 }
 
 /// One Magic Brush click or stroke, captured at request time so a chip
@@ -1345,14 +1362,32 @@ impl Processor {
         let sessions = Arc::clone(&self.sam_sessions);
         rayon::spawn(move || {
             let (w, h) = req.source_dims;
-            let result = ensure_sam_sessions(&sessions)
+            let output = ensure_sam_sessions(&sessions)
                 .and_then(|s| run_sam_decoder_inline(&s, &req.embedding, &req.prompt))
-                .map(|out| {
-                    prunr_core::sam::decode_to_mask_artifact(
-                        &out, w, h, req.confidence_threshold, req.mode,
-                    )
-                });
-            let _ = tx.send(SamDecoderResult { item_id: req.item_id, modifier: req.modifier, result });
+                .map(Arc::new);
+            let result = output.as_ref().map(|out| {
+                prunr_core::sam::decode_to_mask_artifact(out, w, h, req.confidence_threshold, req.mode)
+            }).map_err(Clone::clone);
+            let _ = tx.send(SamDecoderResult {
+                item_id: req.item_id, modifier: req.modifier, mode: req.mode,
+                source_dims: req.source_dims, confidence: req.confidence_threshold,
+                result, output: output.ok(), rethreshold: false,
+            });
+        });
+    }
+
+    /// Re-threshold a kept decoder output on the pool; the result arrives
+    /// through the decoder channel flagged `rethreshold`.
+    pub(crate) fn dispatch_sam_rethreshold(&self, req: SamRethresholdRequest) {
+        let tx = self.sam_decoder_tx.clone();
+        rayon::spawn(move || {
+            let (w, h) = req.source_dims;
+            let mask = prunr_core::sam::decode_to_mask_artifact(&req.output, w, h, req.confidence, req.mode);
+            let _ = tx.send(SamDecoderResult {
+                item_id: req.item_id, modifier: req.modifier, mode: req.mode,
+                source_dims: req.source_dims, confidence: req.confidence,
+                result: Ok(mask), output: None, rethreshold: true,
+            });
         });
     }
 
@@ -1573,7 +1608,12 @@ mod sam_dispatch_tests {
         tx.send(SamDecoderResult {
             item_id: 77,
             modifier: PromptModifier::Add,
+            mode: prunr_core::selection::BrushMode::Add,
+            source_dims: (8, 8),
+            confidence: 0.5,
             result: Err("decoder test".to_string()),
+            output: None,
+            rethreshold: false,
         }).unwrap();
         let out = rx.try_recv().unwrap();
         assert_eq!(out.item_id, 77);
