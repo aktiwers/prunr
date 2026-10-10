@@ -38,6 +38,16 @@ fn read_f32(var: &str) -> Option<f32> {
     std::env::var(var).ok()?.parse().ok()
 }
 
+/// The SD measurement switches (scripts/sd_bench.sh), from
+/// `PRUNR_SD_BATCH2`, `PRUNR_SD_KEEP_LOADED` and `PRUNR_SD_OV_DEVICE`.
+pub fn sd_tuning() -> prunr_core::inpaint_sd::SdTuning {
+    prunr_core::inpaint_sd::SdTuning {
+        batch2: read_bool("PRUNR_SD_BATCH2").unwrap_or(false),
+        keep_loaded: read_bool("PRUNR_SD_KEEP_LOADED").unwrap_or(false),
+        ov_device: std::env::var("PRUNR_SD_OV_DEVICE").ok().filter(|s| !s.is_empty()),
+    }
+}
+
 fn read_bool(var: &str) -> Option<bool> {
     let s = std::env::var(var).ok()?;
     match s.trim().to_ascii_lowercase().as_str() {
