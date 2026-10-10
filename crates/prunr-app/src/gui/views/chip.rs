@@ -248,6 +248,7 @@ pub(super) fn popup_for(
     if resp.clicked() {
         ui.memory_mut(|m| m.toggle_popup(id));
     }
+    outline_when_open(resp, id);
     egui::popup_below_widget(
         ui,
         id,
@@ -272,6 +273,7 @@ const GHOST_OPACITY: f32 = 0.35;
 /// it, never a click elsewhere. While one of its sliders is held it fades
 /// so the image under it stays readable.
 pub(super) fn flyout_for(id: egui::Id, resp: &Response, body: impl FnOnce(&mut Ui)) {
+    outline_when_open(resp, id);
     egui::Popup::from_toggle_button_response(resp)
         .id(id)
         .close_behavior(egui::PopupCloseBehavior::IgnoreClicks)
@@ -291,6 +293,19 @@ pub(super) fn flyout_for(id: egui::Id, resp: &Response, body: impl FnOnce(&mut U
                 body(ui);
             });
         });
+}
+
+/// The accent outline on the chip whose popup is open, so the eye finds
+/// its way back from the panel to the control that opened it.
+fn outline_when_open(resp: &Response, id: egui::Id) {
+    if egui::Popup::is_id_open(&resp.ctx, id) {
+        resp.ctx.layer_painter(resp.layer_id).rect_stroke(
+            resp.rect,
+            theme::BUTTON_ROUNDING,
+            egui::Stroke::new(theme::STROKE_DEFAULT, theme::ACCENT),
+            egui::StrokeKind::Outside,
+        );
+    }
 }
 
 /// A drag that began on this layer is still held.
