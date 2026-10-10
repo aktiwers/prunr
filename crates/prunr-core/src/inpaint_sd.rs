@@ -135,60 +135,89 @@ pub struct SdInpaintRequest {
 /// worker needs no settings of its own. Measured on an i7-6700: the
 /// tall crop takes 21 % off a 328×607 erase and removes the seam for
 /// 2.8 GB more peak RSS; the CPU plugin beats the HD 530 iGPU by half.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct SdTuning {
     /// Leave the bundle resident after the stroke (about 16 GB) so the
     /// next one skips the ~24 s session build.
     pub keep_loaded: bool,
     /// OpenVINO device for the SD parts ("CPU", "GPU"); `None` is the
-    /// EP's default, the CPU. An override for machines with a strong
-    /// Intel GPU; a session built for it never records EP failures.
+    /// EP's default, the CPU. A bench-only override for machines with a
+    /// strong Intel GPU: a session built for it never records EP
+    /// failures, so a broken override cannot poison the default path.
     pub ov_device: Option<String>,
     /// Run a region up to `SD_CROP_MAX` on its long side as one crop
-    /// instead of 512² tiles. The sessions are then built with dynamic
-    /// shapes so the second size needs no rebuild.
+    /// instead of 512² tiles.
     pub tall_crop: bool,
+    /// Headroom the RAM gate adds to the model's working set.
+    #[serde(default = "default_margin_mb")]
+    pub margin_mb: u64,
+}
+
+/// The headroom when the caller names none.
+pub const SD_DEFAULT_MARGIN_MB: u64 = 2_000;
+
+fn default_margin_mb() -> u64 { SD_DEFAULT_MARGIN_MB }
+
+impl Default for SdTuning {
+    fn default() -> Self {
+        Self { keep_loaded: false, ov_device: None, tall_crop: false, margin_mb: SD_DEFAULT_MARGIN_MB }
+    }
 }
 
 /// RAM the tall crop needs beyond the model's gate (measured peak RSS
 /// 18.8 GB against 16.1 GB).
 pub const SD_TALL_CROP_EXTRA_MB: u64 = 3_072;
 
-/// The tuning for a stroke: the tall crop when `available_mb` covers
-/// the model's gate plus `SD_TALL_CROP_EXTRA_MB`, tiles otherwise.
-/// Unknown free RAM counts as enough, as in `check_ram_for`.
-pub fn plan_tuning(id: prunr_models::ModelId, keep_loaded: bool, available_mb: Option<u64>) -> SdTuning {
-    let tall_crop = available_mb.is_none_or(|free| free >= sd_gate_mb(id) + SD_TALL_CROP_EXTRA_MB);
-    SdTuning { keep_loaded, ov_device: None, tall_crop }
+/// The tuning for a stroke, from the free RAM right now: the tall crop
+/// when it fits (see `ram_need_mb`), tiles otherwise.
+pub fn plan_tuning(id: prunr_models::ModelId, keep_loaded: bool, margin_mb: u64) -> SdTuning {
+    plan_with(id, keep_loaded, margin_mb, available_ram_mb(), resident(id))
 }
 
-/// Free RAM the model asks for before it loads: its working set plus
-/// the safety headroom.
-fn sd_gate_mb(id: prunr_models::ModelId) -> u64 {
-    prunr_models::descriptor(id).map_or(0, |d| d.working_set_mb as u64) + SAFETY_MARGIN_MB
+/// `plan_tuning` with the RAM facts passed in. Unknown free RAM counts
+/// as enough, as in `check_ram_for`.
+fn plan_with(id: prunr_models::ModelId, keep_loaded: bool, margin_mb: u64, available_mb: Option<u64>, resident: bool) -> SdTuning {
+    let tall_crop = available_mb.is_none_or(|free| free >= ram_need_mb(id, margin_mb, resident, true));
+    SdTuning { keep_loaded, ov_device: None, tall_crop, margin_mb }
+}
+
+/// Free RAM a stroke needs: the model's working set unless its bundle
+/// is already resident, the headroom, and the tall crop's extra.
+fn ram_need_mb(id: prunr_models::ModelId, margin_mb: u64, resident: bool, tall: bool) -> u64 {
+    let working_set = if resident { 0 } else { prunr_models::descriptor(id).map_or(0, |d| d.working_set_mb as u64) };
+    working_set + margin_mb + if tall { SD_TALL_CROP_EXTRA_MB } else { 0 }
+}
+
+fn available_ram_mb() -> Option<u64> {
+    available_ram_bytes().map(|b| b / (1024 * 1024))
+}
+
+/// A built bundle for `id` is in the cache, so its working set is
+/// already counted in the RSS rather than in the free RAM.
+fn resident(id: prunr_models::ModelId) -> bool {
+    sd_cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+        .any(|((cached, _), e)| *cached == id && matches!(e.value.get(), Some(Ok(_))))
 }
 
 impl SdTuning {
     fn session_key(&self) -> SdSessionKey {
-        SdSessionKey { ov_device: self.ov_device.clone(), dynamic: self.tall_crop }
+        SdSessionKey { ov_device: self.ov_device.clone() }
     }
 }
 
-/// What a built session bundle depends on besides the model.
+/// What a built session bundle depends on besides the model. Shapes are
+/// not part of it: the OpenVINO sessions are built dynamic, so one
+/// bundle serves tiles and tall crops alike.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub(crate) struct SdSessionKey {
     ov_device: Option<String>,
-    /// OpenVINO keeps the graph dynamic (any crop size) instead of
-    /// fixing it to the first input shape.
-    dynamic: bool,
 }
 
 impl SdSessionKey {
-    /// A device override is an experiment: its failures say nothing
-    /// about the shipped configuration, so they are not recorded
-    /// against the EP.
-    fn is_experiment(&self) -> bool {
-        self.ov_device.is_some()
+    /// A device override is bench-only (see `SdTuning::ov_device`).
+    fn records_ep_failures(&self) -> bool {
+        self.ov_device.is_none()
     }
 }
 
@@ -233,10 +262,11 @@ pub fn process_inpaint_with(
     image: &RgbaImage,
     mask: &GrayImage,
     id: prunr_models::ModelId,
-    req: SdInpaintRequest,
+    mut req: SdInpaintRequest,
     hooks: &crate::inpaint::InpaintHooks,
 ) -> Result<RgbaImage, CoreError> {
     use std::sync::atomic::Ordering;
+    check_ram_for(id, &mut req.tuning).map_err(CoreError::Inference)?;
     let cancel = hooks.cancel.as_ref();
     let progress = hooks.progress.as_ref();
     if let Some(p) = progress {
@@ -302,8 +332,8 @@ pub fn process_inpaint_with(
     let get_started = Instant::now();
     let bundle = SdSession::get(id, &req.tuning.session_key(), req.tuning.keep_loaded)?;
     let session_ms = get_started.elapsed().as_millis() as u64;
-    // RAII drop-on-completion (unless `keep_loaded`): when this guard goes
-    // out of scope (any return path) the cache's Arc is removed; once `bundle` (declared
+    // RAII drop-on-completion: when this guard goes out of scope (any
+    // return path) the cache's unpinned Arc is removed; once `bundle` (declared
     // ABOVE so it drops AFTER the guard) drops too, the SdSession's
     // last reference goes away and the ORT bundle releases. Trades
     // first-stroke responsiveness on a repeat for instant RAM reclaim
@@ -315,7 +345,7 @@ pub fn process_inpaint_with(
             release(self.0);
         }
     }
-    let _release_guard = (!req.tuning.keep_loaded).then_some(DropOnComplete(id));
+    let _release_guard = DropOnComplete(id);
     let run_started = Instant::now();
     // VAE backend selection: TAESD when fast mode is on AND the bundle
     // is installed (the request flag carries that decision from
@@ -588,11 +618,17 @@ fn crop_side(span: u32, max_side: u32) -> Option<u32> {
 
 /// One crop centred on the bbox, clamped to image bounds, each side the
 /// smallest that covers the region (see `crop_side`); `None` when the
-/// region exceeds `max_side` on an axis. For images smaller than the crop
-/// on an axis, the crop shrinks to that dimension (`pad_to` pads it back).
+/// region exceeds `max_side` on an axis or `SD_TILE` on both (only one
+/// long side was measured; a 768² crop goes to tiles). For images
+/// smaller than the crop on an axis, the crop shrinks to that dimension
+/// (`pad_to` pads it back).
 fn compute_sd_crop(bbox: &MaskBbox, img_w: u32, img_h: u32, max_side: u32) -> Option<(u32, u32, u32, u32)> {
-    let cw = crop_side(bbox.x_max - bbox.x_min + 1, max_side)?.min(img_w);
-    let ch = crop_side(bbox.y_max - bbox.y_min + 1, max_side)?.min(img_h);
+    let cw = crop_side(bbox.x_max - bbox.x_min + 1, max_side)?;
+    let ch = crop_side(bbox.y_max - bbox.y_min + 1, max_side)?;
+    if cw > SD_TILE && ch > SD_TILE {
+        return None;
+    }
+    let (cw, ch) = (cw.min(img_w), ch.min(img_h));
     let cx_centre = (bbox.x_min + bbox.x_max) / 2;
     let cy_centre = (bbox.y_min + bbox.y_max) / 2;
     let x = cx_centre.saturating_sub(cw / 2).min(img_w - cw);
@@ -1002,7 +1038,7 @@ pub(crate) fn release(id: prunr_models::ModelId) {
     let cache = sd_cache();
     let mut guard = cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let before = guard.len();
-    guard.retain(|(cached, _), _| *cached != id);
+    guard.retain(|(cached, _), e| *cached != id || e.pinned);
     if guard.len() < before {
         tracing::info!(?id, "SD: cache entry released after dispatch");
     }
@@ -1106,7 +1142,7 @@ impl SdSession {
         // Defense-in-depth: prewarm builds bypass `process_inpaint_with`,
         // so the gate has to fire here too. Same helper as the dispatch
         // entry — single source of truth for threshold + wording.
-        check_ram_for(id)?;
+        check_ram_for(id, &mut SdTuning::default())?;
         let rss_before_mb = process_rss_mb();
         let parts = prunr_models::multi_part_paths(id)
             .ok_or_else(|| prunr_models::not_installed_error(id))?;
@@ -1256,14 +1292,13 @@ fn build_part_with_ep_ladder(
                 // `num_streams=1` disables per-stream buffer duplication
                 // (the bundle sits at ~16 GB RSS on an i7-6700 either
                 // way; measured 2026-10). Dynamic shapes cost nothing
-                // per step and are on whenever the tall crop is, so the
-                // 512×768 crop needs no second session; static shapes
-                // stay for the tiles-only plan. (No `with_cache_dir` —
-                // see engine.rs for the SD UNet empirical retest.)
+                // per step, so one bundle serves 512² tiles and the
+                // 512×768 crop. (No `with_cache_dir` — see engine.rs
+                // for the SD UNet empirical retest.)
                 {
                     let mut p = ort::execution_providers::OpenVINOExecutionProvider::default()
                         .with_num_streams(1)
-                        .with_dynamic_shapes(session_key.dynamic);
+                        .with_dynamic_shapes(true);
                     if let Some(dev) = &session_key.ov_device {
                         p = p.with_device_type(dev);
                     }
@@ -1286,7 +1321,7 @@ fn build_part_with_ep_ladder(
             }
             Err(e) => {
                 tracing::warn!(part = %key, ep = %ep, %e, "SD: GPU session commit failed — trying next");
-                if !session_key.is_experiment() {
+                if session_key.records_ep_failures() {
                     crate::engine::handle_commit_failure(
                         matches!(load_path, Cow::Owned(_)),
                         ep, id,
@@ -1304,7 +1339,7 @@ fn build_part_with_ep_ladder(
             }
             Err(e) => {
                 tracing::warn!(part = %key, ep = %ep, %e, "SD: smoke test failed — falling back");
-                if !session_key.is_experiment() {
+                if session_key.records_ep_failures() {
                     crate::engine::handle_commit_failure(
                         matches!(load_path, Cow::Owned(_)),
                         ep, id,
@@ -2066,21 +2101,19 @@ fn process_rss_mb() -> Option<u64> {
 /// "free RAM at gate time minus free RAM during build" delta we see
 /// in practice without being so large the gate becomes unfriendly to
 /// 16-GB machines. Phase 4 / E1 will surface this as a Settings slider.
-const SAFETY_MARGIN_MB: u64 = 2_000;
-
-/// Shared RAM pre-flight gate. Resolves the model's `working_set_mb`,
-/// adds a `SAFETY_MARGIN_MB` headroom, and errors with a user-facing
-/// message when free RAM is below the combined threshold. Returns
-/// `Ok(())` when sysinfo can't read the system (the gate fail-open in
-/// that case mirrors `available_ram_bytes`'s `None`-as-skip contract).
-/// Single source of truth for the wording — `process_inpaint_with`
-/// calls it on every dispatch; `SdSession::new_inner` calls it on
-/// bundle build for the prewarm path that bypasses the inpaint entry.
-pub(crate) fn check_ram_for(id: prunr_models::ModelId) -> Result<(), String> {
+/// The run-time RAM gate for a stroke. Refuses when the model's base
+/// need is not free; when only the tall crop's extra is missing, the
+/// plan falls back to tiles instead. Unknown free RAM passes.
+pub(crate) fn check_ram_for(id: prunr_models::ModelId, tuning: &mut SdTuning) -> Result<(), String> {
     let Some(desc) = prunr_models::descriptor(id) else { return Ok(()) };
-    let need = sd_gate_mb(id) * 1024 * 1024;
-    let Some(free) = available_ram_bytes() else { return Ok(()) };
-    if free >= need {
+    let Some(free_mb) = available_ram_mb() else { return Ok(()) };
+    let res = resident(id);
+    if tuning.tall_crop && free_mb < ram_need_mb(id, tuning.margin_mb, res, true) {
+        tracing::info!(free_mb, "SD: tall crop no longer fits; tiling instead");
+        tuning.tall_crop = false;
+    }
+    let need_mb = ram_need_mb(id, tuning.margin_mb, res, false);
+    if free_mb >= need_mb {
         return Ok(());
     }
     Err(format!(
@@ -2089,9 +2122,9 @@ pub(crate) fn check_ram_for(id: prunr_models::ModelId) -> Result<(), String> {
          headroom). Close other apps or use LaMa instead — \
          Settings → Eraser.",
         desc.display_name,
-        free as f64 / 1e9,
-        need as f64 / 1e9,
-        SAFETY_MARGIN_MB as f64 / 1024.0,
+        free_mb as f64 / 1024.0,
+        need_mb as f64 / 1024.0,
+        tuning.margin_mb as f64 / 1024.0,
     ))
 }
 
@@ -3774,14 +3807,20 @@ mod tests {
     #[test]
     fn plan_takes_the_tall_crop_only_with_the_extra_ram() {
         let id = prunr_models::ModelId::SdV15InpaintFp16;
-        let gate = sd_gate_mb(id);
-        assert!(plan_tuning(id, false, None).tall_crop, "unknown RAM counts as enough");
-        assert!(plan_tuning(id, false, Some(gate + SD_TALL_CROP_EXTRA_MB)).tall_crop);
-        assert!(!plan_tuning(id, false, Some(gate + SD_TALL_CROP_EXTRA_MB - 1)).tall_crop);
-        let t = plan_tuning(id, true, Some(gate));
-        assert!(t.keep_loaded && !t.tall_crop && t.ov_device.is_none());
-        assert!(t.session_key() == SdSessionKey::default());
-        assert!(!t.session_key().is_experiment());
+        let m = SD_DEFAULT_MARGIN_MB;
+        let base = ram_need_mb(id, m, false, false);
+        assert!(base > m, "the working set counts when the bundle is not resident");
+        assert_eq!(ram_need_mb(id, m, true, false), m, "a resident bundle needs only the headroom");
+        assert_eq!(ram_need_mb(id, m, true, true), m + SD_TALL_CROP_EXTRA_MB);
+        assert!(plan_with(id, false, m, None, false).tall_crop, "unknown RAM counts as enough");
+        assert!(plan_with(id, false, m, Some(base + SD_TALL_CROP_EXTRA_MB), false).tall_crop);
+        assert!(!plan_with(id, false, m, Some(base + SD_TALL_CROP_EXTRA_MB - 1), false).tall_crop);
+        assert!(plan_with(id, false, m, Some(m + SD_TALL_CROP_EXTRA_MB), true).tall_crop, "resident: the extra alone decides");
+        let t = plan_with(id, true, m, Some(base), false);
+        assert!(t.keep_loaded && !t.tall_crop && t.ov_device.is_none() && t.margin_mb == m);
+        assert_eq!(t.session_key(), SdSessionKey::default());
+        assert!(t.session_key().records_ep_failures());
+        assert!(!SdTuning { ov_device: Some("GPU".into()), ..Default::default() }.session_key().records_ep_failures());
     }
 
     #[test]
@@ -3794,6 +3833,8 @@ mod tests {
         assert_eq!((x, y), (1727 - 256, 773 - 384));
         let wide = MaskBbox { x_min: 0, y_min: 0, x_max: 800, y_max: 100 };
         assert_eq!(compute_sd_crop(&wide, 4096, 4096, SD_CROP_MAX), None, "beyond the max side");
+        let square = MaskBbox { x_min: 0, y_min: 0, x_max: 600, y_max: 600 };
+        assert_eq!(compute_sd_crop(&square, 4096, 4096, SD_CROP_MAX), None, "one long side only");
         assert_eq!(crop_side(512, SD_CROP_MAX), Some(512));
         assert_eq!(crop_side(513, SD_CROP_MAX), Some(768));
         assert_eq!(padded_dims(700, 300), (704, 512));
