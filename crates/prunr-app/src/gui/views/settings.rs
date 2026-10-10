@@ -35,7 +35,7 @@ impl SettingsTab {
             Self::ModelCredits => "Model credits",
         }
     }
-    const ALL: [SettingsTab; 4] = [Self::General, Self::Behavior, Self::Hotkeys, Self::ModelCredits];
+    pub(crate) const ALL: [SettingsTab; 4] = [Self::General, Self::Behavior, Self::Hotkeys, Self::ModelCredits];
 
     /// Parse a label string into a tab. Used by PRUNR_OPEN_TAB.
     pub fn from_label(s: &str) -> Option<Self> {
@@ -420,7 +420,7 @@ fn render_tab_behavior(ui: &mut egui::Ui, settings: &mut Settings) {
     ui.horizontal(|ui| {
         ui.label(RichText::new("Default preset")
             .color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY));
-        egui::ComboBox::from_id_salt("default_preset")
+        let combo = egui::ComboBox::from_id_salt("default_preset")
             .selected_text(RichText::new(&current).color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY))
             .show_ui(ui, |ui| {
                 for name in &preset_names {
@@ -430,6 +430,7 @@ fn render_tab_behavior(ui: &mut egui::Ui, settings: &mut Settings) {
                     }
                 }
             });
+        super::chip::named(combo.response, "Default preset");
     });
     hint(ui, "New images inherit this preset. The reset button on the toolbar restores its values.");
 }

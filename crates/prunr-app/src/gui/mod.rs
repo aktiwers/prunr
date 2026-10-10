@@ -29,6 +29,7 @@ pub mod download_manager;
 pub mod hardware_cache;
 pub mod env_overrides;
 pub mod dispatch_progress;
+pub mod automation;
 
 #[cfg(test)]
 mod tests;

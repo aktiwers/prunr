@@ -194,7 +194,7 @@ fn icon_square_button(ui: &mut Ui, icon: &str, color: Color32, fill: Color32) ->
 /// body, and the keys when the control has a shortcut. Pass an empty
 /// body for icon buttons whose title says it all.
 pub(super) fn tooltip(resp: Response, title: &str, body: &str, shortcut: Option<Action>) -> Response {
-    resp.on_hover_ui(|ui| {
+    named(resp, title).on_hover_ui(|ui| {
         ui.label(RichText::new(title).strong().color(theme::TEXT_PRIMARY));
         if !body.is_empty() {
             ui.add_space(theme::SPACE_XS);
@@ -213,6 +213,15 @@ pub(super) fn tooltip(resp: Response, title: &str, body: &str, shortcut: Option<
             );
         }
     })
+}
+
+/// Names a control for the accessibility tree, which is what the test
+/// harness and the control socket find widgets by. Icon-only buttons and
+/// bare sliders have no readable name of their own; the tooltip title or
+/// the row label is it. Free when the tree is off.
+pub(super) fn named(resp: Response, name: &str) -> Response {
+    resp.ctx.accesskit_node_builder(resp.id, |node| node.set_label(name));
+    resp
 }
 
 /// Render the standard reset-to-default button at the bottom of a popover.
@@ -286,7 +295,7 @@ pub fn slider_row<T: egui::emath::Numeric>(
 
 fn labelled_slider(ui: &mut Ui, label: &str, slider: egui::Slider<'_>) -> ChipChange {
     ui.label(RichText::new(label).color(theme::TEXT_SECONDARY).size(theme::FONT_SIZE_MONO));
-    let resp = ui.add(slider.show_value(true));
+    let resp = named(ui.add(slider.show_value(true)), label);
     ChipChange { changed: resp.changed(), commit: slider_settled(&resp) }
 }
 
