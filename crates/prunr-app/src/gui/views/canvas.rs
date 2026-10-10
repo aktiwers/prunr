@@ -187,6 +187,17 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
         ui.ctx().request_repaint();
     }
 
+    let strip = super::tool_strip::render(ui, app, canvas_rect);
+    if strip.reset_brush_requested {
+        app.reset_brush_popover_fields();
+    }
+    if let Some(protect) = strip.protect_selection {
+        app.settings.protect_selection = protect;
+    }
+    if strip.committed || strip.protect_selection.is_some() {
+        app.settings.save();
+    }
+
     if brush_active && !pointer_blocked {
         handle_brush_input(ui, app, canvas_rect);
     }

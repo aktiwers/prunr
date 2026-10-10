@@ -64,10 +64,6 @@ pub struct ToolbarChange {
     /// A render-only knob (bg color) fired — request a repaint even when
     /// no other dispatch kicks in.
     pub render_repaint: bool,
-    /// User clicked "Reset brush" in the brush popover. Resets the
-    /// brush-popover-visible fields on `app_settings.brush` to defaults
-    /// via `BrushSettings::reset_popover_fields`.
-    pub reset_brush_requested: bool,
     /// Brush popover settled a change AND `app_settings.brush` was synced.
     pub brush_settings_committed: bool,
     /// Set when the user clicked "More models…" or a not-yet-installed
@@ -87,9 +83,6 @@ pub struct ToolbarChange {
     /// User clicked a selection action button (Delete/Copy/Cut/Invert/Clear).
     /// `None` when no action was clicked this frame.
     pub(crate) selection_action: Option<SelectionAction>,
-    /// The "Auto-apply strokes" switch flipped; carries the new
-    /// `protect_selection` (its inverse). `None` when unchanged.
-    pub protect_selection: Option<bool>,
     /// User clicked the Paint Brush toggle button.
     pub(crate) toggle_paint: bool,
     /// User clicked the Magic Brush toggle button.
@@ -102,7 +95,6 @@ pub struct ToolbarChange {
 /// app from the selected item and the coordinators.
 pub(crate) struct ToolbarState<'a> {
     pub magic_brush_active: bool,
-    pub magic_encoder_pending: bool,
     pub brush_available: bool,
     pub processing: bool,
     pub has_bg_image: bool,
@@ -111,7 +103,6 @@ pub(crate) struct ToolbarState<'a> {
     /// when chain mode is on and a result exists, else the source.
     pub source_dims: (u32, u32),
     pub has_selection: bool,
-    pub protect_selection: bool,
     /// On-disk install state, refreshed on events rather than per frame.
     pub installed: crate::gui::hardware_cache::HardwareInstallCache,
     pub show_original: bool,
@@ -134,14 +125,12 @@ impl Default for ToolbarChange {
             cache_impact: CacheImpact::Nothing,
             auto_dispatch: DispatchKind::None,
             render_repaint: false,
-            reset_brush_requested: false,
             brush_settings_committed: false,
             open_model_store: None,
             pick_bg_image: false,
             clear_bg_image: false,
             auto_chain_on: false,
             selection_action: None,
-            protect_selection: None,
             toggle_paint: false,
             toggle_magic: false,
             toggle_compare: false,
@@ -270,28 +259,9 @@ pub(crate) fn render(
                 }
             }
 
-            // Tool cluster, right-to-left: tool settings, Paint, Magic — so
-            // the settings chip appearing never moves the toggles.
+            // Tool cluster, right-to-left: Paint, Magic. Their settings
+            // live in the strip over the canvas while a tool is on.
             let paint_active = brush_state.is_enabled();
-            // Only background removal can apply strokes on its own.
-            let protect = model_uses_seg.then_some(state.protect_selection);
-            if state.brush_available && state.magic_brush_active {
-                let outcome = super::magic_brush_chip::render(
-                    ui,
-                    &mut app_settings.brush,
-                    state.magic_encoder_pending,
-                    protect,
-                );
-                change.brush_settings_committed |= outcome.committed;
-                change.protect_selection = outcome.protect_selection;
-            } else if state.brush_available && paint_active {
-                let outcome = super::brush_chip::render(
-                    ui, &mut app_settings.brush, app_settings.model.is_inpaint(), protect,
-                );
-                change.reset_brush_requested |= outcome.reset_brush_requested;
-                change.brush_settings_committed |= outcome.committed;
-                change.protect_selection = outcome.protect_selection;
-            }
             chip::gated(ui, (!state.brush_available).then_some("Open an image first."), |ui| {
                 let paint_resp = chip::tooltip(
                     chip::icon_toggle_button(ui, ICON_BRUSH.codepoint, paint_active),

@@ -11,6 +11,7 @@ pub mod lines_popover;
 pub mod preset_dropdown;
 pub mod adjustments_toolbar;
 pub mod brush_chip;
+pub mod tool_strip;
 pub(crate) mod magic_brush_chip;
 pub mod eraser_chip;
 pub mod brush_overlay;

@@ -37,13 +37,13 @@ pub(super) fn click(harness: &mut Harness<'_, PrunrApp>, name: &str) {
     settle(harness);
 }
 
-fn names(harness: &Harness<'_, PrunrApp>) -> Vec<String> {
+pub(super) fn names(harness: &Harness<'_, PrunrApp>) -> Vec<String> {
     tree(harness).iter().filter(|n| n.is_control()).filter_map(|n| n.name.clone()).collect()
 }
 
 /// Every control in the tree has a readable name. Fails with the list of
 /// nameless controls: an icon-only button, an unlabelled slider.
-fn assert_all_controls_named(harness: &Harness<'_, PrunrApp>, surface: &str) {
+pub(super) fn assert_all_controls_named(harness: &Harness<'_, PrunrApp>, surface: &str) {
     let root = tree(harness);
     let nameless: Vec<String> = root
         .iter()
