@@ -137,11 +137,16 @@ pub struct SdTuning {
     /// OpenVINO device for the SD parts ("CPU", "GPU"); `None` is the
     /// EP's default, the CPU.
     pub ov_device: Option<String>,
+    /// Let OpenVINO keep the graph dynamic instead of fixing it to the
+    /// first input shape (more RAM, any crop shape without a rebuild).
+    pub ov_dynamic: bool,
+    /// OpenVINO CPU thread count; `None` is the plugin's default.
+    pub ov_threads: Option<usize>,
 }
 
 impl SdTuning {
     fn session_key(&self) -> SdSessionKey {
-        SdSessionKey { ov_device: self.ov_device.clone() }
+        SdSessionKey { ov_device: self.ov_device.clone(), ov_dynamic: self.ov_dynamic, ov_threads: self.ov_threads }
     }
 }
 
@@ -149,6 +154,8 @@ impl SdTuning {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub(crate) struct SdSessionKey {
     ov_device: Option<String>,
+    ov_dynamic: bool,
+    ov_threads: Option<usize>,
 }
 
 impl SdSessionKey {
@@ -1219,9 +1226,12 @@ fn build_part_with_ep_ladder(
                 {
                     let mut p = ort::execution_providers::OpenVINOExecutionProvider::default()
                         .with_num_streams(1)
-                        .with_dynamic_shapes(false);
+                        .with_dynamic_shapes(session_key.ov_dynamic);
                     if let Some(dev) = &session_key.ov_device {
                         p = p.with_device_type(dev);
+                    }
+                    if let Some(n) = session_key.ov_threads {
+                        p = p.with_num_threads(n);
                     }
                     p.build()
                 },

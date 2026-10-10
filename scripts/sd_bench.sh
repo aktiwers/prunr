@@ -10,6 +10,8 @@
 #   base    current behaviour (OpenVINO on its default device, the CPU)
 #   gpu     OpenVINO on the iGPU (PRUNR_SD_OV_DEVICE=GPU)
 #   keep    bundle kept loaded (session build shows only on the first run)
+#   dyn     OpenVINO with dynamic shapes (PRUNR_SD_OV_DYNAMIC=1)
+#   t4      OpenVINO CPU plugin on 4 threads (PRUNR_SD_OV_THREADS=4)
 set -u
 cd "$(dirname "$0")/.."
 variants=("$@")
@@ -26,6 +28,8 @@ for v in "${variants[@]}"; do
     base)   run base ;;
     gpu)    run gpu PRUNR_SD_OV_DEVICE=GPU ;;
     keep)   run keep PRUNR_SD_KEEP_LOADED=1 ;;
+    dyn)    run dyn PRUNR_SD_OV_DYNAMIC=1 ;;
+    t4)     run t4 PRUNR_SD_OV_THREADS=4 ;;
     *) echo "unknown variant: $v" ;;
   esac
 done
