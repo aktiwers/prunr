@@ -29,7 +29,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
     // the popover would also start panning the canvas, and slider drag would
     // drag both the slider AND the image.
     #[allow(deprecated)]
-    let popup_open = ui.ctx().memory(|m| m.any_popup_open());
+    let popup_open = ui.ctx().memory(|m| m.any_popup_open()) || app.popup_open_at_frame_start;
     // Also check egui's global "wants pointer input" — this is true when any
     // widget (slider, button, text field) is currently capturing the pointer.
     let widget_has_pointer = ui.ctx().egui_wants_pointer_input();

@@ -111,6 +111,10 @@ pub struct PrunrApp {
     /// Once-per-session guard so we don't re-evaluate hardware + snooze
     /// state every frame after the prompt is dismissed.
     runtime_prompt_evaluated: bool,
+    /// Whether a popover was open when this frame began. A click outside a
+    /// popover closes it while the toolbar renders, before the canvas runs,
+    /// so the canvas needs this to keep that click from starting a stroke.
+    pub(crate) popup_open_at_frame_start: bool,
 
     // Canvas fade-in: incremented on every image switch
     pub(crate) canvas_switch_id: u64,
@@ -296,6 +300,7 @@ impl PrunrApp {
             hardware_install_cache: super::hardware_cache::HardwareInstallCache::default(),
             runtime_prompt: None,
             runtime_prompt_evaluated: false,
+            popup_open_at_frame_start: false,
             settings,
             canvas_switch_id: 0,
             result_switch_id: 0,
@@ -3502,6 +3507,10 @@ impl eframe::App for PrunrApp {
     }
 
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        #[allow(deprecated)]
+        {
+            self.popup_open_at_frame_start = ctx.memory(|m| m.any_popup_open());
+        }
         self.poll_worker_results(ctx);
         self.handle_drag_and_drop(ctx);
         self.handle_keyboard_shortcuts(ctx);
