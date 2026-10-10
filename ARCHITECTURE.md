@@ -72,10 +72,23 @@ prunr/
 | `SystemBridge`     | `gui/system_bridge.rs`       | `arboard::Clipboard` handle + thin shim around `rfd::FileDialog` — the only module that imports the foreign platform deps                 |
 | `BrushState`       | `gui/brush_state.rs`         | Paint Brush toggle, in-progress `ActiveStroke` plane and its `Trail`; the settings live on `app.settings.brush: BrushSettings` (one source for both brushes) |
 | `MagicBrushState`  | `gui/magic_brush_state.rs`   | Magic Brush toggle, encoder-pending flag, in-progress stroke points in source coordinates plus their `Trail`                              |
+| `Automation`       | `gui/automation/`            | The control socket (`PRUNR_CONTROL_PORT`): the AccessKit tree mirror, queued requests, injected input batches, deferred replies. `None` unless the port is set. |
 
 **Dependency shape:** `PrunrApp` owns all of them by `&mut self`; the coordinators don't know about each other. Cross-coordinator work happens on `PrunrApp` as the orchestrator — e.g., `on_batch_item_done` writes the result via `BatchManager::find_by_id_mut`, records history via `HistoryManager::record(&mut item, ...)`, and asks the `Processor` whether more work can be admitted.
 
 **Adding state:** before adding a new field to `PrunrApp`, ask which coordinator owns the domain — new business state belongs on a coordinator; `PrunrApp` only adds UI visibility flags and transient view state.
+
+## Automation
+
+The app can be driven without a person at the keyboard, from two sides that share one mechanism.
+
+**The control tree** is the AccessKit tree egui builds from the real widgets when accessibility is enabled: every button, slider, checkbox and picker with its role, name, value, enabled state and rectangle. Names come from the widgets themselves (button text, slider text); icon-only buttons and bare sliders get theirs from `chip::tooltip` / `chip::slider_row` / `chip::named`, so the tooltip title is the control's name. `automation::tree::ControlNode` reads the tree as plain data.
+
+**In tests** (`gui/tests/tree_tests.rs`) `egui_kittest` runs the real `PrunrApp` with no display. Tests query by name, click, step frames and assert on app state. One test renders every surface and fails on any control without a readable name, so the naming rule enforces itself.
+
+**At run time** `PRUNR_CONTROL_PORT=<port>` opens a line-JSON socket on localhost (`scripts/prunrctl.py` is the client). A `Mirror` plugin keeps the tree current from each frame's output; `click` and `key` are injected as egui input one batch per frame, with the reply held until those frames have run; `intent` calls `PrunrApp::perform`, the one routing method every intent goes through (the keyboard loops `Action::ALL` into it); `state` is a serde dump; `open` and `screenshot` reuse the app's own paths. The UI thread polls the inbox because a wake-up from another thread does not reach an idle Wayland window.
+
+The window must be getting frames: with the output powered off, a Wayland compositor sends no frame callbacks, the surface never gets configured and nothing answers. Headless rendering (snapshots through kittest's `wgpu` feature) is not wired yet.
 
 ## Process Architecture
 
