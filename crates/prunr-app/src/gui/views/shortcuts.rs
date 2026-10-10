@@ -134,11 +134,11 @@ impl Chord {
 }
 
 impl Mods {
-    fn command(self) -> bool {
+    pub(crate) fn command(self) -> bool {
         matches!(self, Mods::Command | Mods::CommandShift)
     }
 
-    fn shift(self) -> bool {
+    pub(crate) fn shift(self) -> bool {
         matches!(self, Mods::Shift | Mods::CommandShift)
     }
 

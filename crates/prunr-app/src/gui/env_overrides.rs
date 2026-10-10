@@ -34,6 +34,11 @@ pub fn auto_process_override() -> Option<bool> {
     read_bool("PRUNR_AUTO_PROCESS")
 }
 
+/// `PRUNR_CONTROL_PORT=<port>` opens the control socket on localhost.
+pub fn control_port() -> Option<u16> {
+    std::env::var("PRUNR_CONTROL_PORT").ok()?.trim().parse().ok()
+}
+
 fn read_f32(var: &str) -> Option<f32> {
     std::env::var(var).ok()?.parse().ok()
 }

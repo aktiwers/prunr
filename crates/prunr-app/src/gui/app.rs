@@ -136,6 +136,9 @@ pub struct PrunrApp {
 
     // ── Drag-out (OS drag to external apps) ────────────────────────────────
     pub(crate) drag_export: super::drag_export_state::DragExportState,
+
+    /// The control socket, when `PRUNR_CONTROL_PORT` is set.
+    pub(crate) automation: Option<super::automation::Automation>,
 }
 
 impl PrunrApp {
@@ -231,7 +234,71 @@ impl PrunrApp {
         let mut app = Self::init_state(settings, super::system_bridge::SystemBridge::new(), worker_tx, worker_rx);
         app.processor.warm_sam_sessions();
         app.pending_onboarding_toast = onboarding_toast;
+        app.automation = super::env_overrides::control_port()
+            .and_then(|port| super::automation::Automation::start(&cc.egui_ctx, port));
         app
+    }
+
+    /// Every user intent with its gate, in one place: the keyboard, the
+    /// control socket and any menu route here, so a gate cannot drift
+    /// between surfaces.
+    pub(crate) fn perform(&mut self, action: crate::gui::views::shortcuts::Action, ctx: &egui::Context) {
+        use crate::gui::views::shortcuts::Action;
+        let app_state = self.batch.app_state();
+        // Selection actions share the action bar's gate; Copy without a
+        // usable selection is the whole-result copy.
+        let selection_idx = self.batch.selected_idx_clamped().filter(|_| self.can_selection_action());
+        match action {
+            Action::Open => self.handle_open_dialog(),
+            Action::Process => {
+                if matches!(app_state, AppState::Loaded | AppState::Done) {
+                    self.handle_process_intent();
+                }
+            }
+            Action::Save => {
+                if app_state == AppState::Done {
+                    self.handle_save_selected();
+                }
+            }
+            Action::Copy => match selection_idx {
+                Some(idx) => self.handle_selection_action(idx, SelectionAction::Copy, ctx),
+                None if app_state == AppState::Done => self.handle_copy(),
+                None => {}
+            },
+            Action::Cut | Action::Delete | Action::Invert => {
+                if let Some(idx) = selection_idx {
+                    let selection = match action {
+                        Action::Cut => SelectionAction::Cut,
+                        Action::Delete => SelectionAction::Delete,
+                        _ => SelectionAction::Invert,
+                    };
+                    self.handle_selection_action(idx, selection, ctx);
+                }
+            }
+            Action::BeforeAfter => {
+                if app_state == AppState::Done {
+                    self.show_original = !self.show_original;
+                }
+            }
+            Action::FitToWindow => self.zoom_state.pending_fit_zoom = true,
+            Action::ActualSize => self.zoom_state.pending_actual_size = true,
+            Action::Cancel => self.apply_cancel_shortcut(ctx),
+            Action::Shortcuts | Action::CliHelp | Action::PipelineFlow => {
+                if let Some(open) = self.help_modal_mut(action) {
+                    *open = !*open;
+                }
+            }
+            Action::Settings => self.toggle_settings_panel(ctx),
+            Action::PrevImage => self.navigate_batch(ctx, NavDir::Prev),
+            Action::NextImage => self.navigate_batch(ctx, NavDir::Next),
+            Action::ToggleQueue => self.sidebar_hidden = !self.sidebar_hidden,
+            Action::ToggleAdjustments => self.adjustments_hidden = !self.adjustments_hidden,
+            Action::Undo => self.handle_undo(ctx),
+            Action::Redo => self.handle_redo(ctx),
+            Action::Screenshot => {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
+            }
+        }
     }
 
     /// Build the pre-warm subprocess config for startup, or `None` when
@@ -320,6 +387,7 @@ impl PrunrApp {
                 egui::vec2(theme::SPACE_SM, theme::STATUS_BAR_HEIGHT + theme::SPACE_SM),
             ),
             drag_export: super::drag_export_state::DragExportState::new(),
+            automation: None,
         };
         // `--open <path>` (or PRUNR_OPEN_FILE env var) — pre-load on launch.
         // Reads the env once; clears it so a child subprocess doesn't inherit
@@ -3228,69 +3296,17 @@ impl PrunrApp {
     fn handle_keyboard_shortcuts(&mut self, ctx: &egui::Context) {
         use crate::gui::views::shortcuts::{self, Action};
         let pressed = shortcuts::pressed(ctx);
-        let copy_requested = std::mem::take(&mut self.pending_copy);
-        let pending_open = std::mem::take(&mut self.pending_open_dialog);
-
-        if pressed.is(Action::Open) || pending_open {
+        if std::mem::take(&mut self.pending_open_dialog) {
             self.handle_open_dialog();
         }
-        let app_state = self.batch.app_state();
-        if pressed.is(Action::Process) && matches!(app_state, AppState::Loaded | AppState::Done) {
-            self.handle_process_intent();
+        // Ctrl+C arrives as egui's Copy event, intercepted in raw_input_hook.
+        if std::mem::take(&mut self.pending_copy) {
+            self.perform(Action::Copy, ctx);
         }
-        if pressed.is(Action::Save) && app_state == AppState::Done {
-            self.handle_save_selected();
-        }
-        // Selection shortcuts share the action bar's gate; Ctrl+C without
-        // a usable selection is the whole-result copy.
-        let selection_idx = self.batch.selected_idx_clamped().filter(|_| self.can_selection_action());
-        if copy_requested {
-            match selection_idx {
-                Some(idx) => self.handle_selection_action(idx, SelectionAction::Copy, ctx),
-                None if app_state == AppState::Done => self.handle_copy(),
-                None => {}
-            }
-        }
-        if let Some(idx) = selection_idx {
-            for (wanted, action) in [
-                (pressed.is(Action::Cut), SelectionAction::Cut),
-                (pressed.is(Action::Delete), SelectionAction::Delete),
-                (pressed.is(Action::Invert), SelectionAction::Invert),
-            ] {
-                if wanted {
-                    self.handle_selection_action(idx, action, ctx);
-                }
-            }
-        }
-        if pressed.is(Action::BeforeAfter) && app_state == AppState::Done {
-            self.show_original = !self.show_original;
-        }
-        if pressed.is(Action::FitToWindow) { self.zoom_state.pending_fit_zoom = true; }
-        if pressed.is(Action::ActualSize)   { self.zoom_state.pending_actual_size = true; }
-
-        if pressed.is(Action::Cancel) {
-            self.apply_cancel_shortcut(ctx);
-        }
-
-        for action in [Action::Shortcuts, Action::CliHelp, Action::PipelineFlow] {
+        for action in Action::ALL {
             if pressed.is(action) {
-                if let Some(open) = self.help_modal_mut(action) {
-                    *open = !*open;
-                }
+                self.perform(action, ctx);
             }
-        }
-        if pressed.is(Action::Settings)  { self.toggle_settings_panel(ctx); }
-
-        if pressed.is(Action::PrevImage) { self.navigate_batch(ctx, NavDir::Prev); }
-        if pressed.is(Action::NextImage) { self.navigate_batch(ctx, NavDir::Next); }
-
-        if pressed.is(Action::ToggleQueue)     { self.sidebar_hidden     = !self.sidebar_hidden; }
-        if pressed.is(Action::ToggleAdjustments) { self.adjustments_hidden = !self.adjustments_hidden; }
-
-        if pressed.is(Action::Undo) { self.handle_undo(ctx); }
-        if pressed.is(Action::Redo) { self.handle_redo(ctx); }
-        if pressed.is(Action::Screenshot) {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
         }
 
         if self.pending_batch_sync {
@@ -3606,6 +3622,9 @@ impl Drop for PrunrApp {
 
 impl eframe::App for PrunrApp {
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        if let Some(auto) = self.automation.as_mut() {
+            raw_input.events.extend(auto.take_events());
+        }
         // egui_winit converts Ctrl+C to Event::Copy. Intercept it so we can
         // use it for image clipboard copy (egui's Copy is for text widgets).
         raw_input.events.retain(|event| {
@@ -3628,6 +3647,7 @@ impl eframe::App for PrunrApp {
         if !self.handle_hotkey_capture(ctx) {
             self.handle_keyboard_shortcuts(ctx);
         }
+        super::automation::pump(self, ctx);
         drain_screenshot_replies(ctx);
         self.drain_background_channels(ctx);
         self.update_window_title(ctx);
@@ -4174,6 +4194,13 @@ fn action_toast_label(
 /// directory is `$PRUNR_SCREENSHOT_DIR` (test-harness sets this) or
 /// `<temp>/prunr-screenshots/`. Filename is the unix-millis timestamp
 /// so a scenario that fires Shift+F12 multiple times never collides.
+/// Where `Action::Screenshot` writes: `PRUNR_SCREENSHOT_DIR` or the temp dir.
+pub(crate) fn screenshot_dir() -> PathBuf {
+    std::env::var_os("PRUNR_SCREENSHOT_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::temp_dir().join("prunr-screenshots"))
+}
+
 fn drain_screenshot_replies(ctx: &egui::Context) {
     let images: Vec<std::sync::Arc<egui::ColorImage>> = ctx.input(|i| {
         i.events.iter().filter_map(|e| match e {
@@ -4182,9 +4209,7 @@ fn drain_screenshot_replies(ctx: &egui::Context) {
         }).collect()
     });
     if images.is_empty() { return; }
-    let dir = std::env::var_os("PRUNR_SCREENSHOT_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| std::env::temp_dir().join("prunr-screenshots"));
+    let dir = screenshot_dir();
     if let Err(e) = std::fs::create_dir_all(&dir) {
         tracing::warn!(%e, ?dir, "screenshot dir create failed");
         return;
