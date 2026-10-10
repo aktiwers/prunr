@@ -12,6 +12,9 @@ use super::{chip, fmt, magic_brush_chip};
 
 const TOP_INSET: f32 = 12.0;
 const SLIDER_WIDTH: f32 = 110.0;
+const SLIDER_WIDTH_MIN: f32 = 56.0;
+/// Everything in the strip but its three sliders, at the widest.
+const FIXED_WIDTH: f32 = 760.0;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Tool {
@@ -54,10 +57,12 @@ pub(crate) fn render(ui: &mut Ui, canvas_rect: Rect, tool: Tool, brush: &mut Bru
         .pivot(Align2::CENTER_TOP)
         .fixed_pos(egui::pos2(canvas_rect.center().x, canvas_rect.top() + TOP_INSET))
         .show(ui.ctx(), |ui| {
+            let available = canvas_rect.width() - 2.0 * TOP_INSET;
+            ui.set_max_width(available);
             theme::strip_frame().show(ui, |ui| {
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing.x = theme::SPACE_SM;
-                    ui.spacing_mut().slider_width = SLIDER_WIDTH;
+                    ui.spacing_mut().slider_width = ((available - FIXED_WIDTH) / 3.0).clamp(SLIDER_WIDTH_MIN, SLIDER_WIDTH);
                     ui.label(RichText::new(tool.title()).strong().color(theme::TEXT_PRIMARY));
                     ui.separator();
                     change.committed |= match tool {
