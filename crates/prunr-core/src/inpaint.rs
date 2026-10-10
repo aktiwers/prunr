@@ -355,12 +355,10 @@ pub fn process_inpaint_with(
         return Ok(image.clone());
     }
     if id.is_sd_family() {
-        // RAM pre-flight is SD-only: the check probes for the 4+ GB working
-        // set the SD pipeline needs. LaMa / MI-GAN require < 1 GB and the
-        // sysinfo refresh (~5 ms) costs more than it saves on those paths.
-        crate::inpaint_sd::check_ram_for(id).map_err(CoreError::Inference)?;
+        // The SD pipeline gates RAM itself; LaMa / MI-GAN need < 1 GB.
         let req = sd_req.unwrap_or_else(|| crate::inpaint_sd::SdInpaintRequest {
             num_inference_steps: 20,
+            tuning: crate::inpaint_sd::plan_tuning(id, false, crate::inpaint_sd::SD_DEFAULT_MARGIN_MB),
             ..Default::default()
         });
         return crate::inpaint_sd::process_inpaint_with(image, mask, id, req, hooks);

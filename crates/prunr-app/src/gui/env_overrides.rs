@@ -45,6 +45,7 @@ pub fn sd_tuning(planned: prunr_core::inpaint_sd::SdTuning) -> prunr_core::inpai
         keep_loaded: read_bool("PRUNR_SD_KEEP_LOADED").unwrap_or(planned.keep_loaded),
         tall_crop: read_bool("PRUNR_SD_TALL_CROP").unwrap_or(planned.tall_crop),
         ov_device: std::env::var("PRUNR_SD_OV_DEVICE").ok().filter(|s| !s.is_empty()).or(planned.ov_device),
+        margin_mb: planned.margin_mb,
     }
 }
 

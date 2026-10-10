@@ -63,6 +63,7 @@ pub(crate) enum HardwareSectionIntent {
 
 pub fn render(ctx: &egui::Context, app: &mut PrunrApp) {
     let mut hardware_intent: Option<HardwareSectionIntent> = None;
+    let keep_sd_before = app.settings.keep_sd_loaded;
     let closed = theme::standard_modal_window(
         ctx,
         "settings",
@@ -104,6 +105,11 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) {
 
     if let Some(intent) = hardware_intent {
         dispatch_hardware_intent(app, intent);
+    }
+    // Turning the switch off frees the resident bundle now, not on the
+    // next stroke.
+    if keep_sd_before && !app.settings.keep_sd_loaded {
+        app.processor.release_inpaint_subprocess();
     }
     if closed {
         app.close_settings(ctx);
