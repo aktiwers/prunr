@@ -6,22 +6,24 @@ pub(crate) fn any_popup_open(ctx: &egui::Context) -> bool {
     ctx.memory(|m| m.any_popup_open())
 }
 
-fn pinned_popup_key() -> egui::Id {
-    egui::Id::new("pinned_popup_pass")
+/// The popup ids that are flyouts, so the canvas can tell them from
+/// popovers. egui only knows "a popup is open".
+#[derive(Clone, Default)]
+struct Flyouts(std::sync::Arc<std::sync::Mutex<std::collections::HashSet<egui::Id>>>);
+
+fn flyouts(ctx: &egui::Context) -> Flyouts {
+    ctx.data_mut(|d| d.get_temp_mut_or_default::<Flyouts>(egui::Id::new("flyout_ids")).clone())
 }
 
-/// Called by a flyout every pass it shows, so `pinned_popup_open` can
-/// tell the open popup is one the canvas stays live under.
-pub(crate) fn mark_pinned_popup_open(ctx: &egui::Context) {
-    let pass = ctx.cumulative_pass_nr();
-    ctx.data_mut(|d| d.insert_temp(pinned_popup_key(), pass));
+pub(crate) fn register_flyout(ctx: &egui::Context, id: egui::Id) {
+    flyouts(ctx).0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(id);
 }
 
-/// Whether the open popup is a pinned flyout. Valid from the pass after
-/// the flyout showed, which is where `logic` reads it, through this one.
+/// Whether the open popup is a flyout the canvas stays live under.
 pub(crate) fn pinned_popup_open(ctx: &egui::Context) -> bool {
-    let pass = ctx.cumulative_pass_nr();
-    ctx.data(|d| d.get_temp::<u64>(pinned_popup_key()).is_some_and(|marked| marked + 1 >= pass))
+    let flyouts = flyouts(ctx);
+    let ids = flyouts.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    ids.iter().any(|id| egui::Popup::is_id_open(ctx, *id))
 }
 
 /// A popup that closes on a click outside is open: the canvas holds
@@ -70,6 +72,17 @@ pub fn overlay_frame() -> egui::Frame {
         corner_radius: egui::CornerRadius::same(8),
         inner_margin: egui::Margin::same(SPACE_MD as i8),
         ..Default::default()
+    }
+}
+
+/// The tool strip over the canvas: the overlay frame with the accent
+/// border and a tighter margin.
+pub fn strip_frame() -> egui::Frame {
+    egui::Frame {
+        fill: BG_SECONDARY,
+        stroke: Stroke::new(STROKE_DEFAULT, ACCENT),
+        inner_margin: egui::Margin::symmetric(SPACE_MD as i8 - SPACE_XS as i8, SPACE_XS as i8 + 2),
+        ..overlay_frame()
     }
 }
 

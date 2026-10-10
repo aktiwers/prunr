@@ -187,15 +187,21 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
         ui.ctx().request_repaint();
     }
 
-    let strip = super::tool_strip::render(ui, app, canvas_rect);
-    if strip.reset_brush_requested {
-        app.reset_brush_popover_fields();
-    }
-    if let Some(protect) = strip.protect_selection {
-        app.settings.protect_selection = protect;
-    }
-    if strip.committed || strip.protect_selection.is_some() {
-        app.settings.save();
+    let tool = if app.magic_brush_state.is_active() {
+        Some(super::tool_strip::Tool::Magic)
+    } else if app.brush_state.is_enabled() {
+        Some(super::tool_strip::Tool::Paint)
+    } else {
+        None
+    };
+    if let Some(tool) = tool {
+        let facts = super::tool_strip::StripFacts {
+            is_inpaint: app.settings.model.is_inpaint(),
+            protect: app.settings.model.uses_segmentation().then_some(app.settings.protect_selection),
+            encoder_pending: app.magic_brush_state.has_pending_encoder(),
+        };
+        let change = super::tool_strip::render(ui, canvas_rect, tool, &mut app.settings.brush, facts);
+        app.apply_brush_change(change);
     }
 
     if brush_active && !pointer_blocked {

@@ -425,6 +425,14 @@ impl BrushSettings {
     /// alone — those carry user intent across reset (the Add/Subtract
     /// toggle and seg-mode strength) — and SD-tuning fields are owned
     /// by the SD chip popover.
+    /// One size step is a quarter of the radius, at least a pixel, so
+    /// small brushes still move and large ones do not crawl.
+    pub fn step_radius(&mut self, larger: bool) {
+        let step = (self.radius * 0.25).max(1.0);
+        let next = if larger { self.radius + step } else { self.radius - step };
+        self.radius = next.round().clamp(*BRUSH_RADIUS_RANGE.start(), *BRUSH_RADIUS_RANGE.end());
+    }
+
     pub fn reset_popover_fields_from(&mut self, source: &Self) {
         self.radius = source.radius;
         self.hardness = source.hardness;
@@ -629,6 +637,23 @@ impl BrushState {
 #[cfg(test)]
 #[allow(clippy::field_reassign_with_default)]
 mod tests {
+    #[test]
+    fn step_radius_moves_at_least_a_pixel_and_stays_in_range() {
+        let mut b = super::BrushSettings::default();
+        b.radius = 1.0;
+        b.step_radius(true);
+        assert_eq!(b.radius, 2.0, "a pixel at the small end");
+        b.step_radius(false);
+        b.step_radius(false);
+        assert_eq!(b.radius, 1.0, "clamped at the floor");
+        b.radius = 100.0;
+        b.step_radius(true);
+        assert_eq!(b.radius, 125.0, "a quarter of the radius");
+        b.radius = 190.0;
+        b.step_radius(true);
+        assert_eq!(b.radius, 200.0, "clamped at the ceiling");
+    }
+
     use super::*;
 
     #[test]
