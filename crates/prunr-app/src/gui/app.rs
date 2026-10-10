@@ -1111,7 +1111,7 @@ impl PrunrApp {
             use_taesd: bs.sd_use_taesd_effective(),
             sd_tuning: super::env_overrides::sd_tuning(prunr_core::inpaint_sd::plan_tuning(
                 backend,
-                false,
+                self.settings.keep_sd_loaded,
                 Some(u64::from(crate::hardware::available_ram_mb_throttled())),
             )),
         };

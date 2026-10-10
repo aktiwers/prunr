@@ -498,7 +498,7 @@ impl LamaSession {
             }
             let entry = guard.entry(id).or_insert_with(|| crate::inpaint_sd::CacheEntry {
                 value: Arc::new(OnceLock::new()),
-                last_used: now,
+                last_used: now, pinned: false,
             });
             // Don't refresh last_used on Err entries — sticky failures
             // shouldn't keep refreshing their idle timer (mirrors SD).

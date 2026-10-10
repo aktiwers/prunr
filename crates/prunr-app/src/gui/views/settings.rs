@@ -382,6 +382,12 @@ fn render_tab_behavior(ui: &mut egui::Ui, settings: &mut Settings) {
     hint(ui, "Modal: centered pill with step details + Esc hint. Banner: top strip with inline Cancel.");
     ui.add_space(theme::SPACE_MD);
 
+    section_heading(ui, "Eraser");
+    ui.checkbox(&mut settings.keep_sd_loaded, RichText::new("Keep the Stable Diffusion eraser loaded")
+        .color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY));
+    hint(ui, "Faster repeated erases. Holds about 16 GB of RAM while the app is open.");
+    ui.add_space(theme::SPACE_MD);
+
     section_heading(ui, "Stack passes (chain mode)");
     ui.checkbox(&mut settings.chain_mode, RichText::new("Use last result as input")
         .color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY));
