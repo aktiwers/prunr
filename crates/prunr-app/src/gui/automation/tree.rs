@@ -3,8 +3,10 @@
 //! the tree is derived from the real UI every frame. A control a test can
 //! find by name, the control socket can find too.
 
+use std::sync::{Arc, Mutex, MutexGuard};
+
 use accesskit::Role;
-use accesskit_consumer::Node;
+use accesskit_consumer::{Node, Tree};
 use serde::Serialize;
 
 #[derive(Debug, Clone, Serialize)]
@@ -63,6 +65,11 @@ impl ControlNode {
         })
     }
 
+    /// This node without its children.
+    pub fn leaf(&self) -> Self {
+        Self { children: Vec::new(), ..self.clone() }
+    }
+
     /// The centre of the node's rectangle, for a pointer click.
     pub fn center(&self) -> Option<egui::Pos2> {
         self.rect.map(|[x0, y0, x1, y1]| egui::pos2((x0 + x1) / 2.0, (y0 + y1) / 2.0))
@@ -80,6 +87,51 @@ fn name_slider_value_boxes(mut children: Vec<ControlNode>) -> Vec<ControlNode> {
         }
     }
     children
+}
+
+/// The full tree, kept current from the update egui puts in each frame's
+/// output: the same source the test harness reads. An egui plugin, so it
+/// sees the output before eframe hands it to the platform.
+#[derive(Clone, Default)]
+pub struct Mirror(Arc<Mutex<Option<Tree>>>);
+
+struct Silent;
+
+impl accesskit_consumer::TreeChangeHandler for Silent {
+    fn node_added(&mut self, _: &Node<'_>) {}
+    fn node_updated(&mut self, _: &Node<'_>, _: &Node<'_>) {}
+    fn focus_moved(&mut self, _: Option<&Node<'_>>, _: Option<&Node<'_>>) {}
+    fn node_removed(&mut self, _: &Node<'_>) {}
+}
+
+impl Mirror {
+    fn lock(&self) -> MutexGuard<'_, Option<Tree>> {
+        self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    pub fn apply(&self, update: accesskit::TreeUpdate) {
+        let mut tree = self.lock();
+        match tree.as_mut() {
+            Some(tree) => tree.update_and_process_changes(update, &mut Silent),
+            None => *tree = Some(Tree::new(update, true)),
+        }
+    }
+
+    pub fn snapshot(&self) -> Option<ControlNode> {
+        self.lock().as_ref().map(|t| ControlNode::from_node(&t.state().root()))
+    }
+}
+
+impl egui::plugin::Plugin for Mirror {
+    fn debug_name(&self) -> &'static str {
+        "prunr-control-tree"
+    }
+
+    fn output_hook(&mut self, output: &mut egui::FullOutput) {
+        if let Some(update) = output.platform_output.accesskit_update.clone() {
+            self.apply(update);
+        }
+    }
 }
 
 /// A label with its icon glyphs (private-use codepoints) and the padding
