@@ -44,8 +44,9 @@ impl Tool {
 pub(crate) struct StripFacts {
     pub is_inpaint: bool,
     pub encoder_pending: bool,
-    /// The eraser's painted region waits for the user: offer Apply.
-    pub strokes_waiting: bool,
+    /// The eraser shows Apply strokes, enabled while a region waits.
+    /// Always present there, so the strip never changes width mid-drag.
+    pub apply: Option<bool>,
 }
 
 pub(crate) fn render(ui: &mut Ui, canvas_rect: Rect, tool: Tool, brush: &mut BrushSettings, facts: StripFacts) -> BrushChipOutcome {
@@ -65,11 +66,12 @@ pub(crate) fn render(ui: &mut Ui, canvas_rect: Rect, tool: Tool, brush: &mut Bru
                     ui.separator();
                     change.committed |= match tool {
                         Tool::Paint => paint_knobs(ui, brush, facts.is_inpaint),
-                        Tool::Magic => magic_knobs(ui, brush),
+                        Tool::Magic => magic_knobs(ui, brush, facts.is_inpaint),
                     };
-                    if facts.strokes_waiting {
+                    if let Some(enabled) = facts.apply {
                         ui.separator();
-                        let apply = chip::tooltip(chip::button(ui, chip::ButtonKind::Primary, "Apply strokes"), "Apply strokes", "Erase the painted region.", Some(Action::Process));
+                        let apply = ui.add_enabled_ui(enabled, |ui| chip::button(ui, chip::ButtonKind::Primary, "Apply strokes")).inner;
+                        let apply = chip::tooltip(apply, "Apply strokes", "Erase the painted region.", Some(Action::Process));
                         change.apply_requested |= apply.clicked();
                     }
                     ui.separator();
@@ -91,7 +93,7 @@ pub(crate) fn render(ui: &mut Ui, canvas_rect: Rect, tool: Tool, brush: &mut Bru
 fn panel(ui: &mut Ui, tool: Tool, brush: &mut BrushSettings, facts: StripFacts) -> BrushChipOutcome {
     match tool {
         Tool::Paint => brush_chip::flyout_body(ui, brush, facts.is_inpaint),
-        Tool::Magic => magic_brush_chip::flyout_body(ui, brush, facts.encoder_pending),
+        Tool::Magic => magic_brush_chip::flyout_body(ui, brush, facts.encoder_pending, facts.is_inpaint),
     }
 }
 
@@ -111,8 +113,9 @@ fn paint_knobs(ui: &mut Ui, s: &mut BrushSettings, is_inpaint: bool) -> bool {
     committed
 }
 
-fn magic_knobs(ui: &mut Ui, s: &mut BrushSettings) -> bool {
-    let mut committed = chip::slider_row_f32(ui, "Size", &mut s.radius, BRUSH_RADIUS_RANGE, true, |v| fmt::px(v, 0)).commit;
+fn magic_knobs(ui: &mut Ui, s: &mut BrushSettings, is_inpaint: bool) -> bool {
+    let mut committed = chip::choice_buttons(ui, brush_chip::mode_choices(is_inpaint), &mut s.mode);
+    committed |= chip::slider_row_f32(ui, "Size", &mut s.radius, BRUSH_RADIUS_RANGE, true, |v| fmt::px(v, 0)).commit;
     committed |= chip::slider_row_f32(ui, "Confidence", &mut s.magic_confidence_threshold, 0.0..=1.0, false, fmt::percent).commit;
     committed |= chip::choice_buttons(ui, &BRUSH_SHAPES, &mut s.shape);
     committed
