@@ -67,6 +67,7 @@ fn render_advanced_group(ui: &mut egui::Ui, app_settings: &mut Settings, lcm_bun
         tooltip: "How the eraser generates the fill: scheduler, steps, strength, seed.",
         tuned: tuned > 0,
         width: theme::POPOVER_WIDTH,
+        live: false,
     };
     let mut committed = false;
     chip::group_chip(ui, group, |ui, reset| {

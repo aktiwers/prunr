@@ -6,6 +6,30 @@ pub(crate) fn any_popup_open(ctx: &egui::Context) -> bool {
     ctx.memory(|m| m.any_popup_open())
 }
 
+fn pinned_popup_key() -> egui::Id {
+    egui::Id::new("pinned_popup_pass")
+}
+
+/// Called by a flyout every pass it shows, so `pinned_popup_open` can
+/// tell the open popup is one the canvas stays live under.
+pub(crate) fn mark_pinned_popup_open(ctx: &egui::Context) {
+    let pass = ctx.cumulative_pass_nr();
+    ctx.data_mut(|d| d.insert_temp(pinned_popup_key(), pass));
+}
+
+/// Whether the open popup is a pinned flyout. Valid from the pass after
+/// the flyout showed, which is where `logic` reads it, through this one.
+pub(crate) fn pinned_popup_open(ctx: &egui::Context) -> bool {
+    let pass = ctx.cumulative_pass_nr();
+    ctx.data(|d| d.get_temp::<u64>(pinned_popup_key()).is_some_and(|marked| marked + 1 >= pass))
+}
+
+/// A popup that closes on a click outside is open: the canvas holds
+/// still so that click, and the drag after it, is spent on the dismissal.
+pub(crate) fn dismissable_popup_open(ctx: &egui::Context) -> bool {
+    any_popup_open(ctx) && !pinned_popup_open(ctx)
+}
+
 use egui::{Color32, Stroke};
 
 /// Draw a semi-transparent backdrop behind a modal.

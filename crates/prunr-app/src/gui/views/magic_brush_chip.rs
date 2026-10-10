@@ -55,8 +55,7 @@ pub(crate) fn render(
     );
 
     let mut outcome = MagicChipOutcome::default();
-    chip::popup_for(
-        ui,
+    chip::flyout_for(
         egui::Id::new("magic_brush_chip_popup"),
         &resp,
         |ui| {
