@@ -551,12 +551,12 @@ fn run_one_tile(
     // distinct session mutex (or none) so they run concurrently.
     let prompt = req.prompt.clone();
     let neg_prompt = if use_cfg { Some(req.negative_prompt.clone()) } else { None };
-    let (text_emb_cond, text_emb_uncond, masked_latent, mask_latent) =
+    let (text_emb_cond_f16, text_emb_uncond_f16, masked_latent, mask_latent) =
         std::thread::scope(|s| -> Result<_, CoreError> {
-            let cond_h = s.spawn(|| encode_text(bundle, &prompt));
+            let cond_h = s.spawn(|| text_embedding_f16(bundle, &prompt));
             let uncond_h = neg_prompt.as_ref().map(|np| {
                 let np = np.clone();
-                s.spawn(move || encode_text(bundle, &np))
+                s.spawn(move || text_embedding_f16(bundle, &np))
             });
             let vae_h = s.spawn(|| vae_encode_masked(vae, &padded_image, &padded_mask));
             let mask_lat = mask_to_latent(&padded_mask);
@@ -572,16 +572,11 @@ fn run_one_tile(
             Ok((cond, uncond, vae, mask_lat))
         })?;
 
-    let text_emb_cond_f16 = f32_to_f16_3d(&text_emb_cond);
-    let text_emb_uncond_f16 = text_emb_uncond.as_ref().map(f32_to_f16_3d);
     let masked_latent_f16 = f32_to_f16_4d(&masked_latent);
     let mask_latent_f16 = f32_to_f16_4d(&mask_latent);
     // Free the f32 originals — the loop only needs the f16 mirrors,
-    // and these buffers (~600 KB combined: 2 × 237 KB text emb + 2 ×
-    // 64 KB latent) would otherwise sit alive across the entire
+    // and these buffers would otherwise sit alive across the entire
     // 20-step UNet loop, the longest-lived stage of the pipeline.
-    drop(text_emb_cond);
-    drop(text_emb_uncond);
     drop(masked_latent);
     drop(mask_latent);
 
@@ -847,7 +842,13 @@ pub(crate) struct SdSession {
     /// stays flipped for the session's lifetime; cleared on session
     /// rebuild (idle release).
     cfg_fallback_to_sequential: std::sync::atomic::AtomicBool,
+    /// CLIP embeddings by prompt, in f16. The encoder is deterministic, so
+    /// a repeated prompt (every tile, every stroke) skips it. Bounded by
+    /// `TEXT_CACHE_ENTRIES`; ~118 KB each.
+    text_cache: Mutex<Vec<(String, Arc<Array3<f16>>)>>,
 }
+
+const TEXT_CACHE_ENTRIES: usize = 8;
 
 /// `Arc<T>` so idle eviction can drop the cache's ref while in-flight
 /// callers keep their own clone — no use-after-free.
@@ -1067,6 +1068,7 @@ impl SdSession {
             vae_decoder_input,
             text_encoder_input,
             cfg_fallback_to_sequential: std::sync::atomic::AtomicBool::new(false),
+            text_cache: Mutex::new(Vec::new()),
         })
     }
 }
@@ -1370,6 +1372,23 @@ fn clip_tokenize(text: &str) -> Array2<i32> {
         out[(0, 1 + i)] = tok.to_u16() as i32;
     }
     out
+}
+
+/// The prompt's CLIP embedding in f16, from the bundle's cache when the
+/// prompt was encoded before.
+fn text_embedding_f16(bundle: &SdSession, prompt: &str) -> Result<Arc<Array3<f16>>, CoreError> {
+    let hit = bundle.text_cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter().find(|(p, _)| p == prompt).map(|(_, e)| Arc::clone(e));
+    if let Some(e) = hit {
+        return Ok(e);
+    }
+    let emb = Arc::new(f32_to_f16_3d(&encode_text(bundle, prompt)?));
+    let mut cache = bundle.text_cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if cache.len() >= TEXT_CACHE_ENTRIES {
+        cache.remove(0);
+    }
+    cache.push((prompt.to_string(), Arc::clone(&emb)));
+    Ok(emb)
 }
 
 fn encode_text(bundle: &SdSession, prompt: &str) -> Result<Array3<f32>, CoreError> {
