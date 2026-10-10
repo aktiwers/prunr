@@ -278,7 +278,7 @@ pub(super) fn flyout_for(id: egui::Id, resp: &Response, body: impl FnOnce(&mut U
         .align(egui::RectAlign::BOTTOM_START)
         .frame(egui::Frame::NONE)
         .show(|ui| {
-            theme::mark_pinned_popup_open(ui.ctx());
+            theme::register_flyout(ui.ctx(), id);
             if scrubbing_in(ui) {
                 ui.set_opacity(GHOST_OPACITY);
             }
@@ -536,22 +536,29 @@ pub(super) fn choice_row<T: Copy + PartialEq>(
     value: &mut T,
 ) -> bool {
     section_label(ui, label);
-    let mut changed = false;
     ui.horizontal_wrapped(|ui| {
         // Break the row between options, never inside a label.
         ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-        for opt in options {
-            let selected = *value == opt.value;
-            let resp = ui
-                .add_enabled_ui(opt.enabled, |ui| ui.selectable_label(selected, opt.name))
-                .inner;
-            let resp = if opt.description.is_empty() { resp } else { resp.on_hover_text(opt.description) };
-            if resp.clicked() && !selected {
-                *value = opt.value;
-                changed = true;
-            }
+        choice_buttons(ui, options, value)
+    })
+    .inner
+}
+
+/// The option buttons of a `choice_row`, inline: for a strip or a row
+/// that carries its own label.
+pub(super) fn choice_buttons<T: Copy + PartialEq>(ui: &mut Ui, options: &[Choice<T>], value: &mut T) -> bool {
+    let mut changed = false;
+    for opt in options {
+        let selected = *value == opt.value;
+        let resp = ui
+            .add_enabled_ui(opt.enabled, |ui| ui.selectable_label(selected, opt.name))
+            .inner;
+        let resp = if opt.description.is_empty() { resp } else { resp.on_hover_text(opt.description) };
+        if resp.clicked() && !selected {
+            *value = opt.value;
+            changed = true;
         }
-    });
+    }
     changed
 }
 

@@ -1,10 +1,9 @@
 //! The Paint Brush panel: cursor block, stroke knobs, selection look,
-//! and a live preview of the brush stamp. Opens from the tool strip.
+//! and a live preview of the brush stamp.
 
 use egui::{Color32, Sense, Stroke, Ui};
 
 use crate::gui::brush_state::{BrushSettings, BRUSH_RADIUS_RANGE};
-use crate::gui::theme;
 use prunr_core::brush::BrushShape;
 use prunr_core::selection::BrushMode;
 
@@ -24,19 +23,37 @@ const PREVIEW_SIZE: f32 = 80.0;
 const INPAINT_FEATHER_MAX: f32 = 32.0;
 const FEATHER_HARDNESS_REDUCTION_CAP: f32 = 0.5;
 
+/// What a brush panel or the tool strip changed this frame.
 #[derive(Default, Clone, Copy)]
 pub(crate) struct BrushChipOutcome {
     pub reset_brush_requested: bool,
-    /// True on slider release / mode / shape click. Caller persists
-    /// app-level brush settings on this signal.
+    /// A slider settled or a choice was made: the brush settings persist.
     pub committed: bool,
     /// New value of `Settings::protect_selection` when its switch flipped.
     pub protect_selection: Option<bool>,
 }
 
-/// The full panel behind the strip's dots. `protect` is `Some(current
-/// protect_selection)` for models whose strokes can apply on their own
-/// (background removal); `None` hides the switch.
+impl BrushChipOutcome {
+    pub fn merge(&mut self, other: Self) {
+        self.reset_brush_requested |= other.reset_brush_requested;
+        self.committed |= other.committed;
+        self.protect_selection = other.protect_selection.or(self.protect_selection);
+    }
+}
+
+pub(super) const BRUSH_MODES: [chip::Choice<BrushMode>; 2] = [
+    chip::Choice { value: BrushMode::Add, name: "Add", description: "Strokes add to the selection", enabled: true },
+    chip::Choice { value: BrushMode::Subtract, name: "Subtract", description: "Strokes remove from the selection", enabled: true },
+];
+
+pub(super) const BRUSH_SHAPES: [chip::Choice<BrushShape>; 3] = [
+    chip::Choice { value: BrushShape::Circle, name: "Circle", description: "", enabled: true },
+    chip::Choice { value: BrushShape::Square, name: "Square", description: "", enabled: true },
+    chip::Choice { value: BrushShape::Line, name: "Line", description: "", enabled: true },
+];
+
+/// `protect` is `Some(current protect_selection)` for models whose strokes
+/// can apply on their own (background removal); `None` hides the switch.
 pub(super) fn flyout_body(
     ui: &mut Ui,
     s: &mut BrushSettings,
@@ -44,7 +61,6 @@ pub(super) fn flyout_body(
     protect: Option<bool>,
 ) -> BrushChipOutcome {
     let mut outcome = BrushChipOutcome::default();
-    ui.set_min_width(theme::POPOVER_WIDTH);
     if chip::popover_header(ui, "Brush", Some(("Reset size, hardness, expand, edge blend, sharpen and shape", false))) {
         outcome.reset_brush_requested = true;
     }
@@ -57,11 +73,7 @@ pub(super) fn flyout_body(
         outcome.committed |= st.commit;
         super::hint(ui, "How strongly each stroke changes the selection.");
         ui.add_space(6.0);
-        let modes = [
-            chip::Choice { value: BrushMode::Add, name: "Add", description: "Strokes add to the selection", enabled: true },
-            chip::Choice { value: BrushMode::Subtract, name: "Subtract", description: "Strokes remove from the selection", enabled: true },
-        ];
-        outcome.committed |= chip::choice_row(ui, "Mode", &modes, &mut s.mode);
+        outcome.committed |= chip::choice_row(ui, "Mode", &BRUSH_MODES, &mut s.mode);
     } else {
         let g = chip::slider_row_f32(ui, "Expand region", &mut s.inpaint_grow, -16.0..=16.0, false, |v| fmt::signed_px(v, 0));
         outcome.committed |= g.commit;
@@ -107,12 +119,7 @@ pub(super) fn render_cursor_section(ui: &mut Ui, s: &mut BrushSettings) -> bool 
         ui.vertical(|ui| {
             draw_preview(ui, s);
             ui.add_space(6.0);
-            let shapes = [
-                chip::Choice { value: BrushShape::Circle, name: "Circle", description: "", enabled: true },
-                chip::Choice { value: BrushShape::Square, name: "Square", description: "", enabled: true },
-                chip::Choice { value: BrushShape::Line, name: "Line", description: "", enabled: true },
-            ];
-            committed |= chip::choice_row(ui, "Shape", &shapes, &mut s.shape);
+            committed |= chip::choice_row(ui, "Shape", &BRUSH_SHAPES, &mut s.shape);
         });
     });
     committed

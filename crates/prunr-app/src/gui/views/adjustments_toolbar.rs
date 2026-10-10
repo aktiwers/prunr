@@ -152,7 +152,7 @@ pub(crate) fn render(
     ui: &mut Ui,
     item_settings: &mut ItemSettings,
     app_settings: &mut Settings,
-    applied_preset: &mut String,
+    mut presets: super::preset_dropdown::PresetUi<'_>,
     brush_state: &mut BrushState,
     state: ToolbarState<'_>,
 ) -> ToolbarChange {
@@ -234,7 +234,7 @@ pub(crate) fn render(
         // Right-aligned cluster. Right-to-left layout fills from the right
         // edge: [Magic][Paint][tool chip][selection actions][Compare] | [Preset][Reset].
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            render_reset_preset_cluster(ui, app_settings, item_settings, applied_preset, &mut change);
+            render_reset_preset_cluster(ui, app_settings, item_settings, &mut presets, &mut change);
             ui.separator();
 
             chip::gated(ui, (!state.has_result).then_some("Process the image first."), |ui| {
@@ -1108,7 +1108,7 @@ pub(super) fn render_reset_preset_cluster(
     ui: &mut Ui,
     app_settings: &mut Settings,
     item_settings: &mut ItemSettings,
-    applied_preset: &mut String,
+    presets: &mut super::preset_dropdown::PresetUi<'_>,
     change: &mut ToolbarChange,
 ) {
     let reset_resp = chip::tooltip(
@@ -1122,13 +1122,13 @@ pub(super) fn render_reset_preset_cluster(
         let resolved = app_settings.resolve_active_preset(None);
         *item_settings = resolved.item_settings;
         app_settings.brush = resolved.brush;
-        *applied_preset = reset_target;
+        *presets.applied = reset_target;
         change.brush_settings_committed = true;
         mark_preset_apply(change);
     }
 
-    if let Some(name) = preset_dropdown::render(ui, app_settings, item_settings, applied_preset) {
-        *applied_preset = name;
+    if let Some(name) = preset_dropdown::render(ui, app_settings, item_settings, presets) {
+        *presets.applied = name;
         mark_preset_apply(change);
     }
 }
