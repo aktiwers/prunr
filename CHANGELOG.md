@@ -14,6 +14,7 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 - **Unified progress** banner or modal (your choice in Settings) for processing, erasing and upscaling, with step-level progress for SD.
 - **Compiled-model cache** per hardware backend, so the second session with a model on OpenVINO or DirectML skips graph compilation; Settings can clear it.
 - **Help menu** with keyboard shortcuts, the command-line reference and pipeline diagrams; `prunr --open <path>` starts the app with an image loaded.
+- **Rebindable hotkeys.** Settings › Hotkeys lists every action with two key slots; click one and press the new keys. A key already in use moves over, and the F1 list and tooltips show your bindings.
 
 ### Changed
 
@@ -33,6 +34,7 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 - The guided filter frees its planes as soon as they are consumed; BiRefNet postprocess and the guided filter's interior loop gained row-parallel fast paths.
 - A per-frame step keeps the selected image's textures, embedding and overlay current, replacing three ad-hoc polls.
 - Live preview reuses the chained image across dispatches; SD schedulers reuse their scratch buffers; the upscale engine stays warm between runs.
+- SD erases encode a prompt once per session instead of once per tile, and log the time of each stage.
 - One ONNX Runtime init and one session builder for the whole app: a missing or broken runtime now fails with a message instead of hanging.
 
 ### Fixed
