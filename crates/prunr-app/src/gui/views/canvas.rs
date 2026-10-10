@@ -1,4 +1,4 @@
-use std::sync::{LazyLock, OnceLock};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 use egui::{Color32, Pos2, Rect, Stroke, TextureHandle, TextureOptions, Vec2};
 
 use crate::gui::app::PrunrApp;
@@ -514,33 +514,55 @@ fn fit_zoom(canvas_size: Vec2, tex_size: Vec2) -> f32 {
 const TIP_CYCLE_SECS: f64 = 5.0;
 const TIP_FADE_SECS: f64 = 0.5;
 
-static TIPS: LazyLock<Vec<String>> = LazyLock::new(|| {
-    use super::shortcuts::{keys, label, Action};
-    let press = |a: Action| {
-        let mut chars = label(a).chars();
-        let first = chars.next().map(|c| c.to_lowercase().to_string()).unwrap_or_default();
-        format!("Press {} to {first}{}", keys(a), chars.as_str())
-    };
-    vec![
-        press(Action::Shortcuts),
-        press(Action::CliHelp),
-        press(Action::Process),
-        press(Action::BeforeAfter),
-        format!("Use {} or {} to switch images", keys(Action::PrevImage), keys(Action::NextImage)),
-        press(Action::FitToWindow),
-        "Scroll to zoom, drag to pan".to_string(),
-        press(Action::ToggleQueue),
-        press(Action::Settings),
-        press(Action::Save),
-        press(Action::Copy),
-        press(Action::Undo),
-        "Open multiple images for batch processing".to_string(),
-    ]
-});
+/// The empty-canvas texts, built from the bindings they name and rebuilt
+/// when those change, so a rebind shows here too.
+struct TipText {
+    bindings: Arc<super::shortcuts::Bindings>,
+    tips: Vec<String>,
+    open_hint: String,
+}
 
-static OPEN_HINT: LazyLock<String> = LazyLock::new(|| {
-    format!("or press {} to open a file", super::shortcuts::keys(super::shortcuts::Action::Open))
-});
+impl TipText {
+    fn build(bindings: Arc<super::shortcuts::Bindings>) -> Self {
+        use super::shortcuts::{keys, label, Action};
+        let press = |a: Action| {
+            let mut chars = label(a).chars();
+            let first = chars.next().map(|c| c.to_lowercase().to_string()).unwrap_or_default();
+            format!("Press {} to {first}{}", keys(a), chars.as_str())
+        };
+        let tips = vec![
+            press(Action::Shortcuts),
+            press(Action::CliHelp),
+            press(Action::Process),
+            press(Action::BeforeAfter),
+            format!("Use {} or {} to switch images", keys(Action::PrevImage), keys(Action::NextImage)),
+            press(Action::FitToWindow),
+            "Scroll to zoom, drag to pan".to_string(),
+            press(Action::ToggleQueue),
+            press(Action::Settings),
+            press(Action::Save),
+            press(Action::Copy),
+            press(Action::Undo),
+            "Open multiple images for batch processing".to_string(),
+        ];
+        let open_hint = format!("or press {} to open a file", keys(Action::Open));
+        Self { bindings, tips, open_hint }
+    }
+}
+
+fn tip_text() -> Arc<TipText> {
+    static CACHE: Mutex<Option<Arc<TipText>>> = Mutex::new(None);
+    let live = super::shortcuts::current();
+    let mut cache = CACHE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    match cache.as_ref() {
+        Some(t) if Arc::ptr_eq(&t.bindings, &live) => Arc::clone(t),
+        _ => {
+            let built = Arc::new(TipText::build(live));
+            *cache = Some(Arc::clone(&built));
+            built
+        }
+    }
+}
 
 fn render_empty(ui: &mut egui::Ui, _app: &PrunrApp) {
     let avail = ui.available_size();
@@ -594,7 +616,7 @@ fn render_empty(ui: &mut egui::Ui, _app: &PrunrApp) {
     painter.text(
         Pos2::new(center.x, text_y + 28.0),
         egui::Align2::CENTER_CENTER,
-        OPEN_HINT.as_str(),
+        tip_text().open_hint.as_str(),
         egui::FontId::proportional(theme::FONT_SIZE_BODY),
         theme::TEXT_SECONDARY,
     );
@@ -613,7 +635,8 @@ fn render_empty(ui: &mut egui::Ui, _app: &PrunrApp) {
     };
 
     let time = ui.ctx().input(|i| i.time);
-    let tip_index = ((time / TIP_CYCLE_SECS) as usize) % TIPS.len();
+    let tips = tip_text();
+    let tip_index = ((time / TIP_CYCLE_SECS) as usize) % tips.tips.len();
     let phase = time % TIP_CYCLE_SECS; // 0..TIP_CYCLE_SECS
 
     let alpha = if phase < TIP_FADE_SECS {
@@ -637,7 +660,7 @@ fn render_empty(ui: &mut egui::Ui, _app: &PrunrApp) {
     painter.text(
         Pos2::new(center.x, tip_y),
         egui::Align2::CENTER_CENTER,
-        &TIPS[tip_index],
+        &tips.tips[tip_index],
         egui::FontId::proportional(theme::FONT_SIZE_BODY * 0.9),
         tip_color,
     );
