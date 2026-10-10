@@ -40,6 +40,8 @@ rayon = { workspace = true }
 egui-notify = { workspace = true }
 egui_material_icons = { workspace = true }
 egui_animation = { workspace = true }
+accesskit = { workspace = true }
+accesskit_consumer = { workspace = true }
 dirs = { workspace = true }
 zstd = { workspace = true }
 bytemuck = { workspace = true }
@@ -57,6 +59,7 @@ bytes = { workspace = true }
 [dev-dependencies]
 proptest = { workspace = true }
 tempfile = { workspace = true }
+egui_kittest = { workspace = true }
 
 # OS drag-out: supported on Windows and macOS. On Linux the crate requires a
 # GTK window (winit/eframe cannot supply one), and pulls in gtk/gdk native

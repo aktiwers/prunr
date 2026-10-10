@@ -6,3 +6,4 @@ mod zoom_pan_tests;
 mod settings_tests;
 mod batch_tests;
 mod per_model_interpretation_tests;
+mod tree_tests;
