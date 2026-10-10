@@ -239,6 +239,21 @@ impl PrunrApp {
         app
     }
 
+    pub(crate) fn reset_brush_popover_fields(&mut self) {
+        let resolved = self.settings.resolve_active_preset(None);
+        self.settings.brush.reset_popover_fields_from(&resolved.brush);
+    }
+
+    /// One size step is a quarter of the radius, at least a pixel, so
+    /// small brushes still move and large ones do not crawl.
+    fn step_brush_size(&mut self, larger: bool) {
+        let radius = &mut self.settings.brush.radius;
+        let step = (*radius * 0.25).max(1.0);
+        let next = if larger { *radius + step } else { *radius - step };
+        *radius = next.round().clamp(*super::brush_state::BRUSH_RADIUS_RANGE.start(), *super::brush_state::BRUSH_RADIUS_RANGE.end());
+        self.settings.save();
+    }
+
     /// Every user intent with its gate, in one place: the keyboard, the
     /// control socket and any menu route here, so a gate cannot drift
     /// between surfaces.
@@ -304,6 +319,8 @@ impl PrunrApp {
             Action::Screenshot => {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
             }
+            Action::BrushSmaller => self.step_brush_size(false),
+            Action::BrushLarger => self.step_brush_size(true),
         }
     }
 
@@ -3813,14 +3830,12 @@ impl PrunrApp {
                 };
                 let state = adjustments_toolbar::ToolbarState {
                     magic_brush_active: self.magic_brush_state.is_active(),
-                    magic_encoder_pending: self.magic_brush_state.has_pending_encoder(),
                     brush_available,
                     processing: is_processing,
                     has_bg_image,
                     bg_image_label,
                     source_dims,
                     has_selection: item.selection_mask.is_some(),
-                    protect_selection: settings_ref.protect_selection,
                     installed: self.hardware_install_cache,
                     show_original: self.show_original,
                     has_result: item.has_result(),
@@ -3834,10 +3849,6 @@ impl PrunrApp {
                     state,
                 );
             });
-        if toolbar_change.reset_brush_requested {
-            let resolved = self.settings.resolve_active_preset(None);
-            self.settings.brush.reset_popover_fields_from(&resolved.brush);
-        }
         self.apply_toolbar_change(ui.ctx(), toolbar_change, pre_apply_snapshot);
     }
 
@@ -3925,10 +3936,6 @@ impl PrunrApp {
         } else if toolbar_change.clear_bg_image {
             self.batch.items[idx].clear_bg_image();
             ctx.request_repaint();
-        }
-        if let Some(new_protect) = toolbar_change.protect_selection {
-            self.settings.protect_selection = new_protect;
-            self.settings.save();
         }
         if let Some(action) = toolbar_change.selection_action {
             self.handle_selection_action(idx, action, ctx);
