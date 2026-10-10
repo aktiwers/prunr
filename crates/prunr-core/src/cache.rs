@@ -33,6 +33,10 @@ const MAX_WALK_DEPTH: u32 = 16;
 /// platforms where `data_dir()` itself is unavailable; callers fall
 /// back to no-cache rather than erroring out.
 pub fn cache_root() -> Option<PathBuf> {
+    #[cfg(test)]
+    if let Some(root) = tests::temp_root() {
+        return Some(root);
+    }
     prunr_models::data_dir().map(|d| d.join("ep_cache"))
 }
 
@@ -241,9 +245,22 @@ fn walk_dir_size(dir: &Path, depth: u32) -> std::io::Result<u64> {
 mod tests {
     use super::*;
 
-    /// The tests below write to the real cache directory, so they must not
-    /// interleave with each other.
+    /// The directory-writing tests share one temp root (never the user's
+    /// cache), so they still must not interleave with each other.
     static DIR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// One temp directory per test process, in place of the real cache
+    /// root for every `cache_root()` call made under `cfg(test)`.
+    pub(super) fn temp_root() -> Option<PathBuf> {
+        static ROOT: std::sync::OnceLock<Option<tempfile::TempDir>> = std::sync::OnceLock::new();
+        ROOT.get_or_init(|| tempfile::tempdir().ok()).as_ref().map(|d| d.path().join("ep_cache"))
+    }
+
+    #[test]
+    fn tests_never_touch_the_real_cache() {
+        let root = cache_root().unwrap();
+        assert!(root.starts_with(std::env::temp_dir()), "{root:?}");
+    }
 
     /// Cross-EP collision would corrupt a load if e.g. CPU-optimized
     /// IR were handed to OpenVINO. Same `model_id`, different EP →
