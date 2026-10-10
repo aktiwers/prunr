@@ -50,7 +50,10 @@ fn serve(stream: TcpStream, tx: &mpsc::Sender<Pending>, ctx: &egui::Context) {
                     break;
                 }
                 ctx.request_repaint();
-                reply_rx.recv_timeout(REPLY_TIMEOUT).unwrap_or_else(|_| Response::err("timed out"))
+                tracing::debug!(request = %line.trim(), "control request queued");
+                let response = reply_rx.recv_timeout(REPLY_TIMEOUT).unwrap_or_else(|_| Response::err("timed out"));
+                tracing::debug!(ok = response.ok, "control reply");
+                response
             }
         };
         let Ok(mut json) = serde_json::to_string(&response) else { break };
