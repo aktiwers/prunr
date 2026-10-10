@@ -820,6 +820,7 @@ impl Processor {
                         scheduler,
                         strength: tuning.sd_strength,
                         use_karras_sigmas: tuning.sd_use_karras_sigmas,
+                        tuning: crate::gui::env_overrides::sd_tuning(),
                     })
                 }
                 _ => None,

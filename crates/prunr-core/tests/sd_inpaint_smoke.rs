@@ -110,11 +110,17 @@ fn sd_bench() {
             mask.put_pixel(x, y, Luma([255]));
         }
     }
+    let flag = |name: &str| std::env::var(name).is_ok_and(|v| v == "1");
     let req = SdInpaintRequest {
         prompt: "clean background".to_string(),
         num_inference_steps: 20,
         guidance_scale: 7.5,
         seed: Some(42),
+        tuning: inpaint_sd::SdTuning {
+            batch2: flag("PRUNR_SD_BATCH2"),
+            keep_loaded: flag("PRUNR_SD_KEEP_LOADED"),
+            ov_device: std::env::var("PRUNR_SD_OV_DEVICE").ok().filter(|s| !s.is_empty()),
+        },
         ..Default::default()
     };
     let hooks = prunr_core::inpaint::InpaintHooks::default();
