@@ -468,3 +468,39 @@ fn a_recut_queued_before_the_undo_never_reaches_the_original() {
     assert_eq!(item.status, crate::gui::item::BatchStatus::Pending, "a re-cut in flight must not land on the original");
     assert!(item.result_rgba.is_none());
 }
+
+/// Switching away parks an image's result and switching back restores it;
+/// neither may cost an undo step.
+#[test]
+fn switching_images_keeps_every_undo_step() {
+    use crate::gui::item::{ActionType, BatchStatus, HistoryEntry};
+    use std::sync::Arc;
+    let ctx = egui::Context::default();
+    let mut app = app_with_model(SettingsModel::BiRefNetLite);
+    let px = |v: u8| image::RgbaImage::from_pixel(8, 8, image::Rgba([v, v, v, 255]));
+    let item = push_test_item(&mut app, 1);
+    item.dimensions = (8, 8);
+    item.source_rgba = Some(Arc::new(px(0)));
+    item.history.push_back(HistoryEntry::new(Arc::new(px(0)), None));
+    item.history.push_back(HistoryEntry::new(Arc::new(px(1)), None));
+    item.result_rgba = Some(Arc::new(px(2)));
+    item.status = BatchStatus::Done;
+    item.push_action_marker(ActionType::Result);
+    item.push_action_marker(ActionType::Result);
+    push_test_item(&mut app, 2).dimensions = (8, 8);
+
+    app.batch.select_item(0);
+    app.sync_selected_batch_textures(&ctx);
+    app.batch.select_item(1);
+    app.sync_selected_batch_textures(&ctx);
+    assert!(app.batch.items[0].result_rgba.is_none(), "the background result is parked");
+    app.batch.select_item(0);
+    app.sync_selected_batch_textures(&ctx);
+    assert!(app.batch.items[0].result_rgba.as_ref().is_some_and(|r| **r == px(2)), "and back on return");
+
+    app.handle_undo(&ctx);
+    let item = &app.batch.items[0];
+    assert!(item.result_rgba.as_ref().is_some_and(|r| **r == px(1)), "undo shows the first result");
+    app.handle_undo(&ctx);
+    assert_eq!(app.batch.items[0].status, BatchStatus::Pending, "and the next undo the original");
+}

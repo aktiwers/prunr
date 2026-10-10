@@ -91,6 +91,7 @@ impl HistoryManager {
     /// files. In chain mode, keep `result_rgba` populated so the next chain
     /// step has its input.
     pub(crate) fn archive_current_result(item: &mut BatchItem, max_depth: usize, chain_mode: bool) {
+        item.unpark_result();
         if item.status != BatchStatus::Done {
             return;
         }
@@ -125,6 +126,7 @@ impl HistoryManager {
     /// gate by status (this method does the check internally and returns
     /// false if not Done — keeps callers branch-light).
     pub(crate) fn undo_result(item: &mut BatchItem) -> bool {
+        item.unpark_result();
         if item.status != BatchStatus::Done {
             return false;
         }
@@ -161,6 +163,7 @@ impl HistoryManager {
     /// Inverse of `undo_result`: pushes current to `history`, restores from
     /// redo top, transitions status to Done.
     pub(crate) fn redo_result(item: &mut BatchItem) -> bool {
+        item.unpark_result();
         if item.redo_stack.is_empty() {
             return false;
         }

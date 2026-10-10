@@ -8,7 +8,7 @@ use egui::ViewportCommand;
 use prunr_core::ProgressStage;
 use super::drag_export_state::DragExportState;
 use super::history_manager::{HistoryDir, HistoryManager};
-use super::item::{ActionType, BatchItem, BatchStatus, HistoryEntry, HistorySlot, ImageSource, PresetSnapshot};
+use super::item::{ActionType, BatchItem, BatchStatus, HistorySlot, ImageSource, PresetSnapshot};
 use super::settings::Settings;
 use super::state::AppState;
 use super::theme;
@@ -1260,6 +1260,7 @@ impl PrunrApp {
             let (item_id, new_rgba) = {
                 let Some(item) = self.batch.find_by_id_mut(r.item_id) else { continue };
                 let new_rgba = Arc::new(r.rgba);
+                item.unpark_result();
                 // Archive the previous image so Cmd+Z swaps it back instead
                 // of re-running the inpaint; its own Result step, apart
                 // from the strokes that shaped the region.
@@ -1300,6 +1301,7 @@ impl PrunrApp {
         let handles = self.batch.bg_io.tex_prep_handles();
         let switch = self.result_switch_id;
         let Some(item) = self.batch.find_by_id_mut(item_id) else { return };
+        item.unpark_result();
         item.result_rgba = Some(rgba.clone());
         if item.status == BatchStatus::Pending {
             item.status = BatchStatus::Done;
@@ -2703,6 +2705,7 @@ impl PrunrApp {
                 }
                 let is_upscale_tier2 = matches!(r.kind, PreviewKind::UpscaleTier2);
                 let new_rgba = Arc::new(r.rgba);
+                item.unpark_result();
                 item.result_rgba = Some(new_rgba.clone());
                 // Filter-only mode (model=None) never clicks Process — the
                 // first live preview result IS the processed result. Promote
@@ -2787,7 +2790,7 @@ impl PrunrApp {
             self.synced_selected = selected;
             if let Some(idx) = idx {
                 self.evict_background_item_caches(idx);
-                self.restore_selected_result_from_history(idx);
+                self.batch.items[idx].unpark_result();
             }
             self.show_original = false;
         }
@@ -2802,14 +2805,10 @@ impl PrunrApp {
     }
 
     /// For every item that is not selected: drop the decoded tensors kept
-    /// for slider drags, and free the full-resolution `result_rgba` of Done
-    /// items, placing an in-memory placeholder at
-    /// `history.back()` so `restore_selected_result_from_history` can
-    /// read pixels back instantly, then kicks an off-thread zstd
-    /// compression that swaps the placeholder for `HistorySlot::Compressed`
-    /// once it returns (drained by `pump_history_demote_results`).
-    /// Pre-fix this ran zstd inline — a 50-image 4K batch froze the UI
-    /// for ~2.5 s on every selection change.
+    /// for slider drags, and park the full-resolution result of Done items
+    /// on top of history (`BatchItem::park_result`), then compress it off
+    /// thread (drained by `pump_history_demote_results`). Inline zstd froze
+    /// the UI for ~2.5 s per selection change on a 50-image 4K batch.
     fn evict_background_item_caches(&mut self, selected_idx: usize) {
         // With the tool off, only the selected image keeps its 16 MB
         // embedding; with it on, visited images keep theirs for paging.
@@ -2822,21 +2821,8 @@ impl PrunrApp {
             if !keep_embeddings {
                 item.magic_brush_embedding = None;
             }
-            if item.result_rgba.is_none() || item.status != BatchStatus::Done {
-                continue;
-            }
-            if let Some(rgba) = item.result_rgba.take() {
-                let recipe = item.applied_recipe.clone();
-                let placeholder = HistoryEntry {
-                    slot: HistorySlot::InMemory(rgba.clone()),
-                    recipe: recipe.clone(),
-                };
-                if let Some(back) = item.history.back_mut() {
-                    back.cleanup();
-                    *back = placeholder;
-                } else {
-                    item.history.push_back(placeholder);
-                }
+            if let Some(rgba) = item.park_result() {
+                let parked = Arc::downgrade(&rgba);
                 let id = item.id;
                 let tx = self.batch.bg_io.history_demote_tx.clone();
                 let slots = self.batch.bg_io.decode_slots.clone();
@@ -2846,15 +2832,14 @@ impl PrunrApp {
                     // burst can't fan out N zstd encoders simultaneously.
                     let _slot = slots.acquire();
                     if let Ok(entry) = super::history_disk::compress_to_ram(&rgba) {
-                        let _ = tx.send((id, entry, recipe));
+                        let _ = tx.send((id, entry, parked));
                     }
                     // On compression failure (rare — disk-full / OOM), the
-                    // InMemory placeholder stays. Memory is still freed on
-                    // the result side because `result_rgba` was dropped.
+                    // in-memory entry stays.
                 });
+                item.result_texture = None;
+                item.result_tex_pending = false;
             }
-            item.result_texture = None;
-            item.result_tex_pending = false;
         }
     }
 
@@ -2892,37 +2877,16 @@ impl PrunrApp {
     /// compression was in flight — in that case we drop the result
     /// rather than clobber the user's current state.
     fn pump_history_demote_results(&mut self) {
-        while let Ok((id, entry, recipe)) = self.batch.bg_io.history_demote_rx.try_recv() {
+        while let Ok((id, entry, parked)) = self.batch.bg_io.history_demote_rx.try_recv() {
             let Some(item) = self.batch.find_by_id_mut(id) else { continue };
+            if !item.result_parked { continue; }
             let Some(back) = item.history.back_mut() else { continue };
-            if back.recipe != recipe { continue; }
-            if !matches!(&back.slot, HistorySlot::InMemory(_)) { continue; }
-            back.slot = HistorySlot::Compressed(entry);
-        }
-    }
-
-    /// Restore `result_rgba` for the selected item if it was previously evicted
-    /// by the background-eviction pass. Peeks the latest history slot
-    /// (non-destructive) and decompresses / reads from disk as needed.
-    fn restore_selected_result_from_history(&mut self, idx: usize) {
-        if self.batch.items[idx].status != BatchStatus::Done
-            || self.batch.items[idx].result_rgba.is_some()
-        {
-            return;
-        }
-        let Some(entry) = self.batch.items[idx].history.back() else { return };
-        let restored = match &entry.slot {
-            HistorySlot::InMemory(rgba) => Some(rgba.clone()),
-            HistorySlot::Compressed(ce) => {
-                super::history_disk::decompress_from_ram(ce).ok().map(Arc::new)
+            let still_parked = matches!(&back.slot, HistorySlot::InMemory(rgba)
+                if parked.upgrade().is_some_and(|p| Arc::ptr_eq(&p, rgba)));
+            if still_parked {
+                back.slot = HistorySlot::Compressed(entry);
             }
-            HistorySlot::OnDisk(de) => {
-                super::history_disk::read_history(de).ok().map(Arc::new)
-            }
-        };
-        let recipe = entry.recipe.clone();
-        self.batch.items[idx].result_rgba = restored;
-        self.batch.items[idx].applied_recipe = recipe;
+        }
     }
 
     /// Kick off background decode if the selected item has no decoded source
@@ -3537,6 +3501,7 @@ impl PrunrApp {
             let Some(item) = self.batch.find_by_id_mut(item_id) else { continue };
             match result {
                 Ok(rgba) => {
+                    item.unpark_result();
                     item.result_rgba = Some(rgba);
                     item.result_texture = None;
                     item.thumb_texture = None;
