@@ -114,13 +114,12 @@ pub struct Settings {
     pub brush: BrushSettings,
 
     /// Inverse of the "Auto-apply strokes" switch. When true, the BG-removal
-    /// continuous auto-apply rule does NOT fire on stroke commit — the
-    /// user can paint without immediate visual feedback, then click
-    /// Process to commit. SD / LaMa already require explicit Process;
+    /// rerun does NOT fire on stroke commit — the user paints or selects,
+    /// then clicks Process. SD / LaMa already require explicit Process;
     /// this toggle ONLY affects Segmentation-category models. Default
-    /// false preserves the historical immediate-feedback UX where
-    /// strokes auto-trigger a BG-removal rerun.
-    #[serde(default)]
+    /// true: a Magic Brush selection on a processed image re-cutting it
+    /// at once surprised users, so applying is opt-in.
+    #[serde(default = "default_protect_selection")]
     pub protect_selection: bool,
 
     /// Free RAM the SD pre-flight gate requires *on top of* the model's
@@ -131,6 +130,8 @@ pub struct Settings {
     #[serde(default = "default_ram_safety_margin_gb")]
     pub ram_safety_margin_gb: f32,
 }
+
+fn default_protect_selection() -> bool { true }
 
 fn default_ram_safety_margin_gb() -> f32 { 2.0 }
 
@@ -664,7 +665,7 @@ impl Default for Settings {
             active_backend: "CPU".to_string(),
             brush: BrushSettings::default(),
             ram_safety_margin_gb: default_ram_safety_margin_gb(),
-            protect_selection: false,
+            protect_selection: default_protect_selection(),
         }
     }
 }
