@@ -239,7 +239,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
     // before they need them. Active modifier tints to ACCENT; the rest stays
     // TEXT_SECONDARY. Mono 12px per 33-UI-SPEC §Selection Visualization.
     if app.magic_brush_state.is_active() {
-        let (shift, alt) = ui.ctx().input(|i| (i.modifiers.shift, i.modifiers.alt));
+        let (shift, alt) = ui.ctx().input(|i| (i.modifiers.shift, super::shortcuts::is_subtract_modifier(&i.modifiers)));
         let base_color = theme::TEXT_SECONDARY;
         let active_color = theme::ACCENT;
         let pos = egui::pos2(
@@ -259,7 +259,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
         let alt_color = if alt { active_color } else { base_color };
         painter.text(
             egui::pos2(sep_rect.max.x, pos.y), egui::Align2::LEFT_TOP,
-            "Alt = subtract", font, alt_color,
+            super::shortcuts::SUBTRACT_HINT, font, alt_color,
         );
     }
 }
@@ -358,7 +358,7 @@ fn handle_magic_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: 
     let modifier = ui.ctx().input(|i| {
         if i.modifiers.shift {
             PromptModifier::Add
-        } else if i.modifiers.alt {
+        } else if super::shortcuts::is_subtract_modifier(&i.modifiers) {
             PromptModifier::Subtract
         } else {
             PromptModifier::Replace
