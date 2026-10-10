@@ -128,6 +128,11 @@ pub struct Settings {
     #[serde(default)]
     pub hotkeys: BTreeMap<String, Vec<String>>,
 
+    /// Keep the Stable Diffusion eraser resident between strokes (about
+    /// 16 GB) so each one after the first skips the session build.
+    #[serde(default)]
+    pub keep_sd_loaded: bool,
+
     /// Free RAM the SD pre-flight gate requires *on top of* the model's
     /// declared `working_set_mb`. Default 2 GB matches the historical
     /// hardcoded `SAFETY_MARGIN_MB`. Lower → SD runs in tighter
@@ -673,6 +678,7 @@ impl Default for Settings {
             ram_safety_margin_gb: default_ram_safety_margin_gb(),
             protect_selection: default_protect_selection(),
             hotkeys: BTreeMap::new(),
+            keep_sd_loaded: false,
         }
     }
 }
