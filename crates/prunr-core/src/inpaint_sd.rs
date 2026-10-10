@@ -151,11 +151,17 @@ pub struct SdTuning {
     /// instead of 512² tiles. Needs sessions that accept the shape
     /// (`ov_dynamic`, or a non-OpenVINO provider).
     pub tall_crop: bool,
+    /// ONNX Runtime graph optimisation level for the SD sessions, 0
+    /// (none) to 3 (all); `None` is the shipped level 3.
+    pub ort_opt_level: Option<u8>,
 }
 
 impl SdTuning {
     fn session_key(&self) -> SdSessionKey {
-        SdSessionKey { ov_device: self.ov_device.clone(), ov_dynamic: self.ov_dynamic, ov_threads: self.ov_threads }
+        SdSessionKey {
+            ov_device: self.ov_device.clone(), ov_dynamic: self.ov_dynamic,
+            ov_threads: self.ov_threads, ort_opt_level: self.ort_opt_level,
+        }
     }
 }
 
@@ -165,6 +171,18 @@ pub(crate) struct SdSessionKey {
     ov_device: Option<String>,
     ov_dynamic: bool,
     ov_threads: Option<usize>,
+    ort_opt_level: Option<u8>,
+}
+
+impl SdSessionKey {
+    fn opt_level(&self) -> GraphOptimizationLevel {
+        match self.ort_opt_level {
+            Some(0) => GraphOptimizationLevel::Disable,
+            Some(1) => GraphOptimizationLevel::Level1,
+            Some(2) => GraphOptimizationLevel::Level2,
+            _ => GraphOptimizationLevel::Level3,
+        }
+    }
 }
 
 impl SdSessionKey {
@@ -1193,7 +1211,7 @@ fn build_part_with_ep_ladder(
             continue;
         }
         crate::cache::gc_stale_for_model(id, ep.as_str());
-        let builder = match sd_base_builder() {
+        let builder = match sd_base_builder(session_key.opt_level()) {
             Ok(b) => b,
             Err(e) => {
                 tracing::warn!(part = %key, ep = %ep, %e, "SD: builder init failed");
@@ -1318,7 +1336,7 @@ fn build_part_with_ep_ladder(
         );
     }
     crate::cache::gc_stale_for_model(id, "CPU");
-    let builder = sd_base_builder()
+    let builder = sd_base_builder(GraphOptimizationLevel::Level3)
         .map_err(|e| format!("SD {key}: builder init: {e}"))?;
     let (mut builder, load_path) = sd_apply_path_cache(builder, path.as_path(), id, "CPU", key);
     let started = Instant::now();
@@ -1329,10 +1347,10 @@ fn build_part_with_ep_ladder(
     Ok((session, "CPU".to_string()))
 }
 
-fn sd_base_builder() -> Result<ort::session::builder::SessionBuilder, String> {
+fn sd_base_builder(level: GraphOptimizationLevel) -> Result<ort::session::builder::SessionBuilder, String> {
     crate::ort_runtime::session_builder()
         .map_err(|e| format!("SD: {e}"))?
-        .with_optimization_level(GraphOptimizationLevel::Level3)
+        .with_optimization_level(level)
         .map_err(|e| format!("SD: optimization level: {e}"))
 }
 
