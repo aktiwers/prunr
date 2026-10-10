@@ -119,6 +119,8 @@ fn sd_bench() {
         tuning: inpaint_sd::SdTuning {
             keep_loaded: flag("PRUNR_SD_KEEP_LOADED"),
             ov_device: std::env::var("PRUNR_SD_OV_DEVICE").ok().filter(|s| !s.is_empty()),
+            ov_dynamic: flag("PRUNR_SD_OV_DYNAMIC"),
+            ov_threads: std::env::var("PRUNR_SD_OV_THREADS").ok().and_then(|s| s.parse().ok()),
         },
         ..Default::default()
     };
