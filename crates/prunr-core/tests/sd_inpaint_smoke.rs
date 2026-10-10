@@ -122,6 +122,7 @@ fn sd_bench() {
             ov_dynamic: flag("PRUNR_SD_OV_DYNAMIC"),
             ov_threads: std::env::var("PRUNR_SD_OV_THREADS").ok().and_then(|s| s.parse().ok()),
             tall_crop: flag("PRUNR_SD_TALL_CROP"),
+            ort_opt_level: std::env::var("PRUNR_SD_ORT_OPT").ok().and_then(|s| s.parse().ok()),
         },
         ..Default::default()
     };
