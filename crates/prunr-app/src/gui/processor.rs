@@ -22,7 +22,6 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
-use std::time::Instant;
 
 use prunr_core::ProcessingRecipe;
 
@@ -440,8 +439,6 @@ pub(crate) struct Processor {
     pub(crate) admission_tx: Option<mpsc::Sender<WorkItem>>,
     /// In-flight batch: recipe + pending IDs. `None` between batches.
     in_flight: Option<InFlightBatch>,
-    /// Last time periodic history cleanup ran.
-    pub(crate) last_history_cleanup: Instant,
     /// Inpaint dispatch state. Per-item generation counter discards
     /// stale results when the user paints a fresh stroke before the
     /// previous one finishes. `inpaint_pending` is the count of
@@ -534,7 +531,6 @@ impl Processor {
             admission: None,
             admission_tx: None,
             in_flight: None,
-            last_history_cleanup: Instant::now(),
             inpaint_tx,
             inpaint_rx,
             inpaint_latest_gen: HashMap::new(),
@@ -1775,13 +1771,6 @@ mod tests {
         Processor::new(tx, rx)
     }
 
-    #[test]
-    fn new_initialises_last_history_cleanup_recent() {
-        // Verifies the periodic 600s cleanup gate isn't accidentally
-        // triggered at startup — the Instant must be effectively-now.
-        let p = fixture();
-        assert!(p.last_history_cleanup.elapsed().as_secs() < 5);
-    }
 
     #[test]
     fn drain_filters_stale_generations() {

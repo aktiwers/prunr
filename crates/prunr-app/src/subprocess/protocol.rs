@@ -222,7 +222,9 @@ pub fn ipc_temp_dir() -> &'static std::path::Path {
     DIR.get_or_init(|| {
         let pid = std::process::id();
         let dir = init_temp_dir_for_pid(pid);
-        sweep_stale_pid_dirs(&dir, pid);
+        if let Some(parent) = dir.parent() {
+            crate::fs_util::sweep_dead_pid_dirs(parent, "prunr-ipc-", pid);
+        }
         dir
     }).as_path()
 }
@@ -237,44 +239,6 @@ fn init_temp_dir_for_pid(pid: u32) -> std::path::PathBuf {
     let _ = std::fs::create_dir_all(&dir);
     crate::fs_util::sweep_dir_files(&dir);
     dir
-}
-
-/// Remove `prunr-ipc-{old_pid}` dirs in the same parent whose PID owner is
-/// no longer running. Without this, a parent crash / OOM-kill leaves the
-/// dir behind permanently and `/dev/shm` slowly fills over weeks.
-///
-/// Liveness check is `/proc/{pid}` on Linux. Other platforms fall back to
-/// "older than 24h", which is conservative enough to avoid clobbering a
-/// concurrent prunr instance without sleeping forever on stale dirs.
-fn sweep_stale_pid_dirs(self_dir: &std::path::Path, self_pid: u32) {
-    let Some(parent) = self_dir.parent() else { return };
-    let Ok(entries) = std::fs::read_dir(parent) else { return };
-    for entry in entries.flatten() {
-        let name_os = entry.file_name();
-        let Some(name) = name_os.to_str() else { continue };
-        let Some(pid_str) = name.strip_prefix("prunr-ipc-") else { continue };
-        let Ok(other_pid) = pid_str.parse::<u32>() else { continue };
-        if other_pid == self_pid { continue; }
-        if !is_pid_dead(other_pid, &entry) { continue; }
-        let _ = std::fs::remove_dir_all(entry.path());
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn is_pid_dead(pid: u32, _entry: &std::fs::DirEntry) -> bool {
-    // `/proc/{pid}` is the authoritative liveness check on Linux.
-    !std::path::Path::new(&format!("/proc/{pid}")).exists()
-}
-
-#[cfg(not(target_os = "linux"))]
-fn is_pid_dead(_pid: u32, entry: &std::fs::DirEntry) -> bool {
-    // Fallback: drop dirs untouched for >24h. Fresh siblings of a running
-    // prunr instance are spared; truly stale dirs from past crashes get
-    // reclaimed without polling kernel APIs per platform.
-    let Ok(meta) = entry.metadata() else { return false };
-    let Ok(modified) = meta.modified() else { return false };
-    let Ok(age) = modified.elapsed() else { return false };
-    age > std::time::Duration::from_secs(86_400)
 }
 
 fn resolve_temp_dir_path(pid: u32) -> std::path::PathBuf {
@@ -899,7 +863,7 @@ mod tests {
     }
 
     #[test]
-    fn sweep_stale_pid_dirs_removes_dead_pids_keeps_self_and_unrelated() {
+    fn sweep_dead_pid_dirs_removes_dead_pids_keeps_self_and_unrelated() {
         // Stage three siblings under a fresh parent dir: own pid (keep),
         // a guaranteed-dead pid (remove), and a non-prunr name (keep).
         // On non-Linux the dead-pid removal is gated out — only the
@@ -913,7 +877,7 @@ mod tests {
         for d in [&self_dir, &dead_dir, &foreign] {
             std::fs::create_dir_all(d).unwrap();
         }
-        sweep_stale_pid_dirs(&self_dir, self_pid);
+        crate::fs_util::sweep_dead_pid_dirs(self_dir.parent().unwrap(), "prunr-ipc-", self_pid);
         assert!(self_dir.exists(), "own pid dir must survive");
         assert!(foreign.exists(), "non-prunr names must be ignored");
         // On non-Linux the 24h fallback won't kill a fresh dir; only assert
@@ -926,7 +890,7 @@ mod tests {
     fn pick_definitely_dead_pid() -> u32 {
         // Iterate down from a high pid. The first `/proc/{pid}` miss
         // wins. Theoretical race: kernel could re-allocate the picked
-        // pid before `sweep_stale_pid_dirs` runs, leaving the dir
+        // pid before `sweep_dead_pid_dirs` runs, leaving the dir
         // intact. In practice the window is microseconds and Linux
         // doesn't reuse pids that fast under normal load. Worst case
         // is a flaky test, not a correctness bug.

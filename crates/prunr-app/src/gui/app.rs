@@ -2961,10 +2961,6 @@ const WORKER_POLL_PER_FRAME: usize = 8;
 /// Same rationale as `WORKER_POLL_PER_FRAME`.
 const FILE_LOAD_DRAIN_PER_FRAME: usize = 5;
 
-/// How often `eframe::App::logic` triggers a sweep of stale on-disk history
-/// files (Tier 3). 10 minutes is conservative — short enough that a long
-/// session doesn't accumulate, long enough that the sweep cost is invisible.
-const HISTORY_CLEANUP_INTERVAL_SECS: u64 = 600;
 
 impl PrunrApp {
     fn poll_worker_results(&mut self, ctx: &egui::Context) {
@@ -3683,11 +3679,6 @@ impl eframe::App for PrunrApp {
         // async work is in flight, then self-extinguishes.
         if self.batch.items.iter().any(|it| it.has_pending_work()) {
             ctx.request_repaint_after(std::time::Duration::from_millis(50));
-        }
-        // Periodic cleanup of stale on-disk history files.
-        if self.processor.last_history_cleanup.elapsed().as_secs() >= HISTORY_CLEANUP_INTERVAL_SECS {
-            self.processor.last_history_cleanup = std::time::Instant::now();
-            super::history_disk::cleanup_stale();
         }
     }
 
