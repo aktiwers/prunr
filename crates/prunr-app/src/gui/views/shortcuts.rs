@@ -5,7 +5,7 @@
 //! them can drift from the keys that actually work.
 
 use std::collections::BTreeMap;
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{Arc, OnceLock};
 
 use egui::{Event, InputState, Key};
 
@@ -111,16 +111,26 @@ impl Chord {
     }
 
     /// The chord a fresh key press carries this frame, for the capture
-    /// field. `None` while nothing was pressed and for Alt chords, which
-    /// Linux window managers tend to keep.
+    /// field. `None` while nothing was pressed and under a modifier the
+    /// table does not express (see `foreign_modifier_held`).
     pub fn from_input(i: &InputState) -> Option<Chord> {
         i.events.iter().find_map(|e| match e {
-            Event::Key { key, pressed: true, repeat: false, modifiers, .. } if !modifiers.alt => {
+            Event::Key { key, pressed: true, repeat: false, modifiers, .. } if !foreign_modifier_held(modifiers) => {
                 Some(Chord { mods: Mods::from_flags(modifiers.command, modifiers.shift), key: *key })
             }
             _ => None,
         })
     }
+}
+
+/// Alt, which Linux window managers tend to keep, and the macOS Control
+/// key (Ctrl held without it being the command key): chords never
+/// include them, so a press under them is neither captured nor a command.
+fn foreign_modifier_held(m: &egui::Modifiers) -> bool {
+    m.alt || (m.ctrl && !m.command)
+}
+
+impl Chord {
 }
 
 impl Mods {
@@ -267,6 +277,11 @@ impl Bindings {
         &self.rows[action as usize].chords
     }
 
+    /// All of an action's chords as one text ("Ctrl+Shift+Z / Ctrl+Y").
+    pub fn display(&self, action: Action) -> &Arc<str> {
+        &self.rows[action as usize].display
+    }
+
     /// The text of each bound chord, in slot order.
     pub fn chord_texts(&self, action: Action) -> &[Arc<str>] {
         &self.rows[action as usize].texts
@@ -321,18 +336,24 @@ impl Bindings {
     }
 }
 
-fn bindings_slot() -> &'static RwLock<Arc<Bindings>> {
-    static SLOT: OnceLock<RwLock<Arc<Bindings>>> = OnceLock::new();
-    SLOT.get_or_init(|| RwLock::new(Arc::new(Bindings::shipped())))
+fn bindings_id() -> egui::Id {
+    egui::Id::new("prunr_bindings")
 }
 
-/// Make `bindings` the ones the key handler and every label use.
-pub fn install(bindings: Bindings) {
-    *bindings_slot().write().unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::new(bindings);
+fn shipped_shared() -> Arc<Bindings> {
+    static SHIPPED: OnceLock<Arc<Bindings>> = OnceLock::new();
+    Arc::clone(SHIPPED.get_or_init(|| Arc::new(Bindings::shipped())))
 }
 
-pub fn current() -> Arc<Bindings> {
-    Arc::clone(&bindings_slot().read().unwrap_or_else(std::sync::PoisonError::into_inner))
+/// Hand this frame's bindings to the views through the egui context;
+/// the app owns them and installs them once per frame.
+pub fn install(ctx: &egui::Context, bindings: Arc<Bindings>) {
+    ctx.data_mut(|d| d.insert_temp(bindings_id(), bindings));
+}
+
+/// The installed bindings, or the shipped table before any install.
+pub fn current(ctx: &egui::Context) -> Arc<Bindings> {
+    ctx.data(|d| d.get_temp::<Arc<Bindings>>(bindings_id())).unwrap_or_else(shipped_shared)
 }
 
 /// Pointer gestures listed with the shortcuts. Not key chords, so they
@@ -361,7 +382,7 @@ pub fn pressed(ctx: &egui::Context) -> Pressed {
     if ctx.input(|i| i.events.is_empty()) {
         return Pressed::default();
     }
-    pressed_with(ctx, &current())
+    pressed_with(ctx, &current(ctx))
 }
 
 fn pressed_with(ctx: &egui::Context, bindings: &Bindings) -> Pressed {
@@ -369,7 +390,7 @@ fn pressed_with(ctx: &egui::Context, bindings: &Bindings) -> Pressed {
     // Read before `ctx.input`: egui's context lock is not re-entrant.
     let text_focused = ctx.memory(|m| m.focused().is_some());
     ctx.input(|i| {
-        if i.events.is_empty() {
+        if i.events.is_empty() || foreign_modifier_held(&i.modifiers) {
             return;
         }
         for s in SHORTCUTS.iter().filter(|s| s.delivery != ByEvent) {
@@ -431,9 +452,9 @@ fn row(action: Action) -> &'static Shortcut {
 }
 
 /// Platform-resolved key text for `action` ("Ctrl+O", "\u{2190} / A")
-/// under the current bindings, shared so tooltips allocate nothing.
-pub fn keys(action: Action) -> Arc<str> {
-    Arc::clone(&current().rows[action as usize].display)
+/// under the installed bindings, shared so tooltips allocate nothing.
+pub fn keys(ctx: &egui::Context, action: Action) -> Arc<str> {
+    Arc::clone(current(ctx).display(action))
 }
 
 /// Whether the user can rebind `action`: Copy arrives as egui's own
@@ -468,8 +489,9 @@ pub fn render_shortcut_grid(ui: &mut egui::Ui) {
         .num_columns(2)
         .spacing([theme::SPACE_LG, theme::SPACE_SM])
         .show(ui, |ui| {
+            let bindings = current(ui.ctx());
             for s in SHORTCUTS {
-                kv_row(ui, &keys(s.action), s.label, theme::TEXT_PRIMARY);
+                kv_row(ui, bindings.display(s.action), s.label, theme::TEXT_PRIMARY);
             }
             for (gesture, what) in GESTURES {
                 kv_row(ui, gesture, what, theme::TEXT_PRIMARY);
@@ -485,10 +507,11 @@ mod tests {
     #[test]
     fn every_action_has_one_row() {
         assert_eq!(Action::ALL.len(), SHORTCUTS.len());
+        let shipped = Bindings::shipped();
         for (i, a) in Action::ALL.into_iter().enumerate() {
             assert_eq!(a as usize, i, "ALL must follow discriminant order: {a:?}");
             assert_eq!(SHORTCUTS.iter().filter(|s| s.action == a).count(), 1, "{a:?}");
-            assert!(!keys(a).is_empty(), "{a:?}");
+            assert!(!shipped.display(a).is_empty(), "{a:?}");
             assert!(!label(a).is_empty(), "{a:?}");
         }
     }
@@ -508,12 +531,39 @@ mod tests {
 
     #[test]
     fn display_strings_are_platform_resolved() {
+        let ctx = egui::Context::default();
         let expect_mod = if cfg!(target_os = "macos") { "Cmd+O" } else { "Ctrl+O" };
-        assert_eq!(&*keys(Action::Open), expect_mod);
-        assert_eq!(&*keys(Action::Redo), format!("{MOD_NAME}+Shift+Z / {MOD_NAME}+Y"));
-        assert_eq!(&*keys(Action::PrevImage), "\u{2190} / A");
-        assert_eq!(&*keys(Action::Cancel), "Esc");
-        assert_eq!(&*keys(Action::ToggleAdjustments), "Shift+H");
+        assert_eq!(&*keys(&ctx, Action::Open), expect_mod);
+        assert_eq!(&*keys(&ctx, Action::Redo), format!("{MOD_NAME}+Shift+Z / {MOD_NAME}+Y"));
+        assert_eq!(&*keys(&ctx, Action::PrevImage), "\u{2190} / A");
+        assert_eq!(&*keys(&ctx, Action::Cancel), "Esc");
+        assert_eq!(&*keys(&ctx, Action::ToggleAdjustments), "Shift+H");
+    }
+
+    /// The app installs its bindings into the context; before that the
+    /// shipped table answers, after it the handler and the labels agree.
+    #[test]
+    fn installed_bindings_drive_the_handler_and_the_labels() {
+        let ctx = egui::Context::default();
+        assert_eq!(&*keys(&ctx, Action::Undo), &format!("{MOD_NAME}+Z"));
+        install(&ctx, Arc::new(overridden()));
+        assert_eq!(&*keys(&ctx, Action::Undo), &format!("{MOD_NAME}+U"));
+        ctx.begin_pass(press(Key::U, Modifiers::COMMAND));
+        assert!(pressed(&ctx).is(Action::Undo));
+        let _ = ctx.end_pass();
+    }
+
+    /// Alt and the macOS Control key are outside the table: a press under
+    /// them is no command and is not captured as a chord.
+    #[test]
+    fn foreign_modifiers_block_commands_and_capture() {
+        assert!(!pressed_for(press(Key::B, Modifiers::ALT)).is(Action::BeforeAfter));
+        let mac_control = Modifiers { ctrl: true, command: false, ..Modifiers::NONE };
+        assert!(!pressed_for(press(Key::B, mac_control)).is(Action::BeforeAfter));
+        let ctx = egui::Context::default();
+        ctx.begin_pass(press(Key::K, mac_control));
+        assert_eq!(ctx.input(Chord::from_input), None);
+        let _ = ctx.end_pass();
     }
 
     #[test]
@@ -614,7 +664,7 @@ mod tests {
     }
 
     fn pressed_after(frames: Vec<RawInput>) -> Pressed {
-        pressed_after_with(frames, &current())
+        pressed_after_with(frames, &Bindings::shipped())
     }
 
     fn pressed_for(raw: RawInput) -> Pressed {
