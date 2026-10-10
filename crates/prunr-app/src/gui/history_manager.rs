@@ -61,11 +61,7 @@ impl HistoryManager {
     /// No-op if either stack is non-empty (history already exists) or the
     /// source hasn't been decoded yet.
     pub(crate) fn seed_with_source(item: &mut BatchItem) {
-        if !item.history.is_empty() || !item.redo_stack.is_empty() {
-            return;
-        }
-        if let Some(ref src_rgba) = item.source_rgba {
-            item.history.push_back(HistoryEntry::new(src_rgba.clone(), None));
+        if Self::seed_floor(item) {
             // First Process action — push a Result marker so undo can
             // revert from the upcoming result back to the un-processed
             // source. archive_current_result early-returns on the first
@@ -74,6 +70,18 @@ impl HistoryManager {
             // shows "Nothing to undo" even after a completed Process.
             item.push_action_marker(ActionType::Result);
         }
+    }
+
+    /// The seed entry alone, for an archive that is a stroke's, not a
+    /// Process step's: the stroke's own marker is the undo step.
+    /// Returns whether the seed was pushed.
+    pub(crate) fn seed_floor(item: &mut BatchItem) -> bool {
+        if !item.history.is_empty() || !item.redo_stack.is_empty() {
+            return false;
+        }
+        let Some(src_rgba) = item.source_rgba.clone() else { return false };
+        item.history.push_back(HistoryEntry::new(src_rgba, None));
+        true
     }
 
     /// Before reprocessing a Done item: archive the current result + recipe
