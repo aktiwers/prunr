@@ -86,20 +86,15 @@ impl HistoryManager {
         if item.status != BatchStatus::Done {
             return;
         }
-        if let Some(current) = item.result_rgba.take() {
-            if chain_mode {
-                item.result_rgba = Some(current.clone());
-            }
-            item.history.push_back(HistoryEntry::new(current, item.applied_recipe.clone()));
-            while item.history.len() > max_depth {
-                if let Some(old) = item.history.pop_front() {
-                    old.cleanup();
+        match item.result_rgba.take() {
+            Some(current) => {
+                if chain_mode {
+                    item.result_rgba = Some(current.clone());
                 }
+                push_history_trimmed(item, current, max_depth);
+                item.push_action_marker(ActionType::Result);
             }
-            item.push_action_marker(ActionType::Result);
-        }
-        for entry in item.redo_stack.drain(..) {
-            entry.cleanup();
+            None => drain_redo(item),
         }
     }
 
@@ -109,15 +104,8 @@ impl HistoryManager {
     /// commit owns the marker) and always keeps `result_rgba` as the chain
     /// base for the rerun.
     pub(crate) fn archive_result_for_stroke(item: &mut BatchItem, max_depth: usize) {
-        let Some(rgba) = item.result_rgba.clone() else { return };
-        item.history.push_back(HistoryEntry::new(rgba, item.applied_recipe.clone()));
-        while item.history.len() > max_depth {
-            if let Some(old) = item.history.pop_front() {
-                old.cleanup();
-            }
-        }
-        for entry in item.redo_stack.drain(..) {
-            entry.cleanup();
+        if let Some(rgba) = item.result_rgba.clone() {
+            push_history_trimmed(item, rgba, max_depth);
         }
     }
 
@@ -265,6 +253,24 @@ mod preset_stack_tests {
         assert_eq!(stack.len(), 3);
         assert_eq!(stack.front().unwrap().settings.gamma, 1.0);
         assert_eq!(stack.back().unwrap().settings.gamma, 3.0);
+    }
+}
+
+/// Push `rgba` onto history under the current recipe, demote the oldest
+/// entries past `max_depth`, and drop redo (a new branch of the timeline).
+fn push_history_trimmed(item: &mut BatchItem, rgba: std::sync::Arc<image::RgbaImage>, max_depth: usize) {
+    item.history.push_back(HistoryEntry::new(rgba, item.applied_recipe.clone()));
+    while item.history.len() > max_depth {
+        if let Some(old) = item.history.pop_front() {
+            old.cleanup();
+        }
+    }
+    drain_redo(item);
+}
+
+fn drain_redo(item: &mut BatchItem) {
+    for entry in item.redo_stack.drain(..) {
+        entry.cleanup();
     }
 }
 
