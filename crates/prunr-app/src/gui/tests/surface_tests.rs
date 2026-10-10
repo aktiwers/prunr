@@ -227,12 +227,32 @@ fn the_strip_offers_apply_while_strokes_wait() {
     {
         let item = &mut h.state_mut().batch.items[0];
         item.selection_mask = Some(std::sync::Arc::new(prunr_core::selection::MaskArtifact::from_cells(1, 1, vec![100])));
+    }
+    settle(&mut h);
+    assert!(names(&h).iter().any(|n| n == "Apply strokes"), "before the first result: {:?}", names(&h));
+    {
+        let item = &mut h.state_mut().batch.items[0];
         let cache = crate::gui::worker::TensorCache { data: vec![0.0; 4], height: 2, width: 2, model: prunr_core::ModelKind::Silueta };
         item.set_cached_tensor(crate::gui::worker::CompressedTensor::from_raw(cache));
     }
     settle(&mut h);
-    assert!(names(&h).iter().any(|n| n == "Apply strokes"), "{:?}", names(&h));
+    assert!(names(&h).iter().any(|n| n == "Apply strokes"), "with a result to correct: {:?}", names(&h));
     h.state_mut().settings.protect_selection = false;
     settle(&mut h);
     assert!(!names(&h).iter().any(|n| n == "Apply strokes"), "auto-apply needs no button");
+}
+
+#[test]
+fn the_strip_offers_apply_for_the_erasers_region() {
+    use super::tree_tests::names;
+    let mut h = loaded();
+    {
+        let app = h.state_mut();
+        app.settings.model = crate::gui::settings::SettingsModel::Inpaint;
+        app.brush_state.toggle();
+        app.batch.items[0].selection_mask =
+            Some(std::sync::Arc::new(prunr_core::selection::MaskArtifact::from_cells(1, 1, vec![100])));
+    }
+    settle(&mut h);
+    assert!(names(&h).iter().any(|n| n == "Apply strokes"), "{:?}", names(&h));
 }

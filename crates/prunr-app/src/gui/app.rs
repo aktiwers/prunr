@@ -260,9 +260,7 @@ impl PrunrApp {
             self.settings.save();
         }
         if change.apply_requested {
-            if let Some(idx) = self.batch.selected_idx_clamped() {
-                self.rerun_with_strokes(idx);
-            }
+            self.apply_waiting_strokes();
         }
     }
 
@@ -1088,13 +1086,33 @@ impl PrunrApp {
         self.dispatch_brush_rerun(idx);
     }
 
-    /// A painted selection on a segmentation model with Auto-apply off.
+    /// A painted selection that nothing will act on until the user asks:
+    /// the eraser's region, or a correction on a background-removal
+    /// model with Auto-apply off (before the first result as well; that
+    /// run applies it when it lands).
     pub(crate) fn strokes_waiting_for_apply(&self) -> bool {
-        self.settings.model.uses_segmentation()
-            && self.settings.protect_selection
-            && self.batch.selected_item().is_some_and(|i| {
-                i.cached_tensor.is_some() && i.selection_mask.as_ref().is_some_and(|m| m.has_selected_region())
-            })
+        let Some(item) = self.batch.selected_item() else { return false };
+        let has_region = item.selection_mask.as_ref().is_some_and(|m| m.has_selected_region());
+        if self.settings.model.is_inpaint() {
+            has_region && !self.processor.is_inpaint_in_flight(item.id)
+        } else {
+            self.settings.model.uses_segmentation()
+                && self.settings.protect_selection
+                && has_region
+                && !matches!(item.status, BatchStatus::Processing)
+        }
+    }
+
+    /// The strip's Apply button: the eraser runs on its region; a
+    /// background-removal model reruns with the correction, or runs for
+    /// the first time when there is no result to correct yet.
+    fn apply_waiting_strokes(&mut self) {
+        let Some(idx) = self.batch.selected_idx_clamped() else { return };
+        if !self.settings.model.is_inpaint() && self.batch.items[idx].cached_tensor.is_some() {
+            self.rerun_with_strokes(idx);
+        } else {
+            self.handle_process_intent();
+        }
     }
 
     /// Single-source-of-truth call for writing a new selection: persist the
