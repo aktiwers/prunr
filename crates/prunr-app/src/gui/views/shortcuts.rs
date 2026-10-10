@@ -27,7 +27,18 @@ pub(crate) const MAGIC_BRUSH_TIP: &str = if cfg!(target_os = "macos") {
     "Click or stroke to select an object; Shift adds, Alt or Ctrl subtracts."
 };
 
-pub(crate) const SUBTRACT_HINT: &str = if cfg!(target_os = "macos") { "Alt = subtract" } else { "Alt/Ctrl = subtract" };
+/// The bottom-left hint while a brush is on: what Shift and Alt do for
+/// this model. A background-removal cut-out is restored or erased; the
+/// eraser's region is added to or subtracted from.
+pub(crate) fn modifier_hints(is_inpaint: bool) -> (&'static str, &'static str) {
+    let mac = cfg!(target_os = "macos");
+    match (is_inpaint, mac) {
+        (true, true) => ("Shift = add", "Alt = subtract"),
+        (true, false) => ("Shift = add", "Alt/Ctrl = subtract"),
+        (false, true) => ("Shift = restore", "Alt = erase"),
+        (false, false) => ("Shift = restore", "Alt/Ctrl = erase"),
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {

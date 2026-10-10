@@ -113,14 +113,6 @@ pub struct Settings {
     #[serde(default)]
     pub brush: BrushSettings,
 
-    /// Inverse of the "Auto-apply strokes" switch. When true, the BG-removal
-    /// rerun does NOT fire on stroke commit — the user paints or selects,
-    /// then clicks Process. SD / LaMa already require explicit Process;
-    /// this toggle ONLY affects Segmentation-category models. Default
-    /// true: a Magic Brush selection on a processed image re-cutting it
-    /// at once surprised users, so applying is opt-in.
-    #[serde(default = "default_protect_selection")]
-    pub protect_selection: bool,
 
     /// Hotkey overrides by action name ("Undo"), chords in the form
     /// "Mod+Shift+Z". Only the actions the user changed; an empty list
@@ -142,7 +134,6 @@ pub struct Settings {
     pub ram_safety_margin_gb: f32,
 }
 
-fn default_protect_selection() -> bool { true }
 
 fn default_ram_safety_margin_gb() -> f32 { 2.0 }
 
@@ -676,7 +667,6 @@ impl Default for Settings {
             active_backend: "CPU".to_string(),
             brush: BrushSettings::default(),
             ram_safety_margin_gb: default_ram_safety_margin_gb(),
-            protect_selection: default_protect_selection(),
             hotkeys: BTreeMap::new(),
             keep_sd_loaded: false,
         }
