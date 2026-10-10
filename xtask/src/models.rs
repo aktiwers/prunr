@@ -71,8 +71,8 @@ pub(crate) const MODELS: &[ModelSpec] = &[
     ModelSpec {
         id: prunr_models::ModelId::BigLaMa,
         name: "big_lama.onnx",
-        url: "https://github.com/aktiwers/prunr/releases/download/models-v1/big_lama-1.0.0.onnx",
-        sha256: "523e84eb2ec2df933714cbab6983627a9909f9f23cd848fbbe977356c54bdaa0",
+        url: "https://github.com/aktiwers/prunr/releases/download/models-v1/big_lama-1.0.1.onnx",
+        sha256: "c9660fc4aea2e62ffbaf3932024c1f4ce29f360e464fc71e1b708f1ad3bfea2e",
     },
     // RRDB upscale models. xtask fetches only the fp32 main file; the
     // registry's `OnDemand.fp16` companion is downloaded at runtime by
