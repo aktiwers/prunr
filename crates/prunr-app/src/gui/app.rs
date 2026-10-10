@@ -90,6 +90,8 @@ pub struct PrunrApp {
     /// Inline "Reset to defaults" confirmation. Set when the user clicks
     /// the reset button; the next render shows a confirm/cancel pair.
     pub(crate) pending_reset_confirm: bool,
+    /// The Hotkeys tab is waiting for a key press for this action's slot.
+    pub(crate) hotkey_capture: Option<(super::views::shortcuts::Action, usize)>,
 
     pub(crate) model_store: Option<super::views::adjustments_toolbar::ModelStoreRequest>,
     /// When `Some(id)`, the license-acceptance dialog is open for that
@@ -272,6 +274,7 @@ impl PrunrApp {
         worker_tx: mpsc::Sender<WorkerMessage>,
         worker_rx: mpsc::Receiver<WorkerResult>,
     ) -> Self {
+        super::views::shortcuts::install(super::views::shortcuts::Bindings::from_overrides(&settings.hotkeys));
         let mut app = Self {
             last_open_dir: None,
             processor: super::processor::Processor::new(worker_tx, worker_rx),
@@ -295,6 +298,7 @@ impl PrunrApp {
             show_settings: false,
             settings_tab: super::views::settings::SettingsTab::General,
             pending_reset_confirm: false,
+            hotkey_capture: None,
             model_store: None,
             pending_license_request: None,
             pending_onboarding_toast: None,
@@ -1321,6 +1325,14 @@ impl PrunrApp {
     fn magic_brush_unavailable(&mut self, err: &str) {
         self.toasts.error(format!("Magic Brush unavailable: {err}"));
         self.deactivate_magic_brush();
+    }
+
+    /// Make `bindings` the live ones and persist what differs from the
+    /// shipped table.
+    pub(crate) fn apply_hotkeys(&mut self, bindings: super::views::shortcuts::Bindings) {
+        self.settings.hotkeys = bindings.to_overrides();
+        self.settings.save();
+        super::views::shortcuts::install(bindings);
     }
 
     /// Turn Magic Brush off. The sessions stay warm and the selected
@@ -3176,6 +3188,10 @@ impl PrunrApp {
 
     fn handle_keyboard_shortcuts(&mut self, ctx: &egui::Context) {
         use crate::gui::views::shortcuts::{self, Action};
+        // A press meant for the Hotkeys capture field is not a command.
+        if self.hotkey_capture.is_some() {
+            return;
+        }
         let pressed = shortcuts::pressed(ctx);
         let copy_requested = std::mem::take(&mut self.pending_copy);
         let pending_open = std::mem::take(&mut self.pending_open_dialog);

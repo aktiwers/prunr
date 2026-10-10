@@ -1,9 +1,11 @@
-//! The shipped keyboard bindings. One table feeds the key handler, the F1
-//! overlay, the Settings › Hotkeys tab, button tooltips, the selection
-//! action-bar hints and the empty-canvas tips, so none of them can drift
-//! from the keys that actually work.
+//! The keyboard bindings. One shipped table plus the user's overrides
+//! (`Settings.hotkeys`) resolve into one `Bindings`, which feeds the key
+//! handler, the F1 overlay, the Settings › Hotkeys tab, button tooltips,
+//! the selection action-bar hints and the empty-canvas tips, so none of
+//! them can drift from the keys that actually work.
 
-use std::sync::OnceLock;
+use std::collections::BTreeMap;
+use std::sync::{Arc, OnceLock, RwLock};
 
 use egui::{Event, InputState, Key};
 
@@ -71,6 +73,62 @@ const fn chord(mods: Mods, key: Key) -> Chord {
     Chord { mods, key }
 }
 
+impl Chord {
+    /// The platform-neutral settings form: "Mod+Shift+Z", "Delete".
+    pub fn to_setting(self) -> String {
+        let mut s = String::new();
+        if matches!(self.mods, Mods::Command | Mods::CommandShift) {
+            s.push_str("Mod+");
+        }
+        if matches!(self.mods, Mods::Shift | Mods::CommandShift) {
+            s.push_str("Shift+");
+        }
+        s.push_str(self.key.name());
+        s
+    }
+
+    pub fn parse(s: &str) -> Option<Chord> {
+        let mut command = false;
+        let mut shift = false;
+        let mut key = None;
+        for token in s.split('+') {
+            match token.trim() {
+                "Mod" => command = true,
+                "Shift" => shift = true,
+                // Exactly one key, and it must be one egui knows.
+                name => key = match (key, Key::from_name(name)) {
+                    (None, Some(k)) => Some(k),
+                    _ => return None,
+                },
+            }
+        }
+        Some(Chord { mods: Mods::from_flags(command, shift), key: key? })
+    }
+
+    /// The chord a fresh key press carries this frame, for the capture
+    /// field. `None` while nothing was pressed and for Alt chords, which
+    /// Linux window managers tend to keep.
+    pub fn from_input(i: &InputState) -> Option<Chord> {
+        i.events.iter().find_map(|e| match e {
+            Event::Key { key, pressed: true, repeat: false, modifiers, .. } if !modifiers.alt => {
+                Some(Chord { mods: Mods::from_flags(modifiers.command, modifiers.shift), key: *key })
+            }
+            _ => None,
+        })
+    }
+}
+
+impl Mods {
+    fn from_flags(command: bool, shift: bool) -> Self {
+        match (command, shift) {
+            (false, false) => Mods::None,
+            (true, false) => Mods::Command,
+            (false, true) => Mods::Shift,
+            (true, true) => Mods::CommandShift,
+        }
+    }
+}
+
 /// How a row's chords reach the app.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Delivery {
@@ -92,6 +150,15 @@ pub struct Shortcut {
 }
 
 impl Action {
+    /// The settings key for an action's override.
+    pub fn name(self) -> String {
+        format!("{self:?}")
+    }
+
+    pub fn from_name(name: &str) -> Option<Action> {
+        Self::ALL.into_iter().find(|a| a.name() == name)
+    }
+
     /// Discriminant order; `keys` indexes by it.
     pub const ALL: [Action; 22] = [
         Action::Open, Action::Process, Action::Save, Action::Copy, Action::Cut,
@@ -130,6 +197,85 @@ pub const SHORTCUTS: &[Shortcut] = &[
     Shortcut { action: Action::Screenshot, chords: &[chord(Shift, Key::F12)], label: "Save a window screenshot", delivery: FreshPress },
 ];
 
+/// Every action's chords: the shipped table with the user's overrides
+/// applied, plus the display text each tooltip shows.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Bindings {
+    chords: Vec<Vec<Chord>>,
+    display: Vec<Arc<str>>,
+}
+
+impl Bindings {
+    pub fn shipped() -> Self {
+        let chords = Action::ALL.iter().map(|a| row(*a).chords.to_vec()).collect();
+        let mut b = Self { chords, display: Vec::new() };
+        b.display = Action::ALL.iter().map(|a| b.render_display(*a)).collect();
+        b
+    }
+
+    /// The shipped bindings with `overrides` applied; an override that
+    /// parses to nothing leaves the shipped chords, an empty list unbinds.
+    pub fn from_overrides(overrides: &BTreeMap<String, Vec<String>>) -> Self {
+        let mut b = Self::shipped();
+        for (name, list) in overrides {
+            let Some(action) = Action::from_name(name) else { continue };
+            let parsed: Vec<Chord> = list.iter().filter_map(|s| Chord::parse(s)).collect();
+            if parsed.is_empty() && !list.is_empty() {
+                continue;
+            }
+            b.set(action, parsed);
+        }
+        b
+    }
+
+    pub fn chords(&self, action: Action) -> &[Chord] {
+        &self.chords[action as usize]
+    }
+
+    pub fn is_default(&self, action: Action) -> bool {
+        self.chords[action as usize] == row(action).chords
+    }
+
+    /// The other action `c` is bound to, if any.
+    pub fn conflict(&self, c: Chord, except: Action) -> Option<Action> {
+        Action::ALL.into_iter()
+            .find(|a| *a != except && self.chords[*a as usize].contains(&c))
+    }
+
+    pub fn set(&mut self, action: Action, chords: Vec<Chord>) {
+        self.chords[action as usize] = chords;
+        self.display[action as usize] = self.render_display(action);
+    }
+
+    /// Only the actions that differ from the shipped table.
+    pub fn to_overrides(&self) -> BTreeMap<String, Vec<String>> {
+        Action::ALL.into_iter()
+            .filter(|a| !self.is_default(*a))
+            .map(|a| (a.name(), self.chords(a).iter().map(|c| c.to_setting()).collect()))
+            .collect()
+    }
+
+    fn render_display(&self, action: Action) -> Arc<str> {
+        let text = self.chords[action as usize].iter()
+            .map(|c| chord_display(*c)).collect::<Vec<_>>().join(" / ");
+        Arc::from(if text.is_empty() { "Unbound".to_string() } else { text })
+    }
+}
+
+fn bindings_slot() -> &'static RwLock<Arc<Bindings>> {
+    static SLOT: OnceLock<RwLock<Arc<Bindings>>> = OnceLock::new();
+    SLOT.get_or_init(|| RwLock::new(Arc::new(Bindings::shipped())))
+}
+
+/// Make `bindings` the ones the key handler and every label use.
+pub fn install(bindings: Bindings) {
+    *bindings_slot().write().unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::new(bindings);
+}
+
+pub fn current() -> Arc<Bindings> {
+    Arc::clone(&bindings_slot().read().unwrap_or_else(std::sync::PoisonError::into_inner))
+}
+
 /// Pointer gestures listed with the shortcuts. Not key chords, so they
 /// live outside the table but render in the same grid.
 const GESTURES: &[(&str, &str)] = &[
@@ -153,6 +299,10 @@ impl Pressed {
 
 /// Collect the shortcuts pressed this frame.
 pub fn pressed(ctx: &egui::Context) -> Pressed {
+    pressed_with(ctx, &current())
+}
+
+fn pressed_with(ctx: &egui::Context, bindings: &Bindings) -> Pressed {
     let mut out = Pressed::default();
     // Read before `ctx.input`: egui's context lock is not re-entrant.
     let text_focused = ctx.memory(|m| m.focused().is_some());
@@ -162,7 +312,7 @@ pub fn pressed(ctx: &egui::Context) -> Pressed {
         }
         for s in SHORTCUTS.iter().filter(|s| s.delivery != ByEvent) {
             let fresh = s.delivery == FreshPress;
-            if s.chords.iter().any(|c| chord_pressed(i, *c, fresh, text_focused)) {
+            if bindings.chords(s.action).iter().any(|c| chord_pressed(i, *c, fresh, text_focused)) {
                 out.set(s.action);
             }
         }
@@ -211,7 +361,7 @@ fn key_name(key: Key) -> &'static str {
     }
 }
 
-fn chord_display(c: Chord) -> String {
+pub fn chord_display(c: Chord) -> String {
     let mut s = String::new();
     if matches!(c.mods, Mods::Command | Mods::CommandShift) {
         s.push_str(MOD_NAME);
@@ -229,16 +379,16 @@ fn row(action: Action) -> &'static Shortcut {
     SHORTCUTS.iter().find(|s| s.action == action).expect("shortcut row")
 }
 
-/// Platform-resolved key text for `action` ("Ctrl+O", "\u{2190} / A"),
-/// built once and shared so tooltips stay allocation-free per frame.
-pub fn keys(action: Action) -> &'static str {
-    static DISPLAY: OnceLock<[String; Action::ALL.len()]> = OnceLock::new();
-    let table = DISPLAY.get_or_init(|| {
-        Action::ALL.map(|a| {
-            row(a).chords.iter().map(|c| chord_display(*c)).collect::<Vec<_>>().join(" / ")
-        })
-    });
-    &table[action as usize]
+/// Platform-resolved key text for `action` ("Ctrl+O", "\u{2190} / A")
+/// under the current bindings, shared so tooltips allocate nothing.
+pub fn keys(action: Action) -> Arc<str> {
+    Arc::clone(&current().display[action as usize])
+}
+
+/// Whether the user can rebind `action`: Copy arrives as egui's own
+/// event and Escape is the universal cancel.
+pub fn rebindable(action: Action) -> bool {
+    row(action).delivery != ByEvent && action != Action::Cancel
 }
 
 /// Label for `action`, as in the shortcut lists.
@@ -268,7 +418,7 @@ pub fn render_shortcut_grid(ui: &mut egui::Ui) {
         .spacing([theme::SPACE_LG, theme::SPACE_SM])
         .show(ui, |ui| {
             for s in SHORTCUTS {
-                kv_row(ui, keys(s.action), s.label, theme::TEXT_PRIMARY);
+                kv_row(ui, &keys(s.action), s.label, theme::TEXT_PRIMARY);
             }
             for (gesture, what) in GESTURES {
                 kv_row(ui, gesture, what, theme::TEXT_PRIMARY);
@@ -308,11 +458,73 @@ mod tests {
     #[test]
     fn display_strings_are_platform_resolved() {
         let expect_mod = if cfg!(target_os = "macos") { "Cmd+O" } else { "Ctrl+O" };
-        assert_eq!(keys(Action::Open), expect_mod);
-        assert_eq!(keys(Action::Redo), format!("{MOD_NAME}+Shift+Z / {MOD_NAME}+Y"));
-        assert_eq!(keys(Action::PrevImage), "\u{2190} / A");
-        assert_eq!(keys(Action::Cancel), "Esc");
-        assert_eq!(keys(Action::ToggleAdjustments), "Shift+H");
+        assert_eq!(&*keys(Action::Open), expect_mod);
+        assert_eq!(&*keys(Action::Redo), format!("{MOD_NAME}+Shift+Z / {MOD_NAME}+Y"));
+        assert_eq!(&*keys(Action::PrevImage), "\u{2190} / A");
+        assert_eq!(&*keys(Action::Cancel), "Esc");
+        assert_eq!(&*keys(Action::ToggleAdjustments), "Shift+H");
+    }
+
+    #[test]
+    fn settings_form_round_trips_every_shipped_chord() {
+        for s in SHORTCUTS {
+            for c in s.chords {
+                let text = c.to_setting();
+                assert_eq!(Chord::parse(&text), Some(*c), "{text}");
+            }
+        }
+        assert_eq!(Chord::parse("Mod+Shift+Z"), Some(chord(CommandShift, Key::Z)));
+        assert_eq!(Chord::parse("Mod+"), None);
+        assert_eq!(Chord::parse("Hyper+Q"), None);
+    }
+
+    #[test]
+    fn overrides_replace_the_shipped_chord_and_store_only_changes() {
+        let mut overrides = BTreeMap::new();
+        overrides.insert("Undo".to_string(), vec!["Mod+U".to_string()]);
+        overrides.insert("Nonsense".to_string(), vec!["Mod+Q".to_string()]);
+        overrides.insert("Save".to_string(), vec!["Hyper+S".to_string()]);
+        overrides.insert("Screenshot".to_string(), Vec::new());
+        let b = Bindings::from_overrides(&overrides);
+        assert_eq!(b.chords(Action::Undo), &[chord(Command, Key::U)]);
+        assert!(b.is_default(Action::Save), "an unparsable override keeps the shipped chord");
+        assert!(b.chords(Action::Screenshot).is_empty(), "an empty list unbinds");
+        assert_eq!(&*b.display[Action::Screenshot as usize], "Unbound");
+        let back = b.to_overrides();
+        assert_eq!(back.len(), 2);
+        assert_eq!(back["Undo"], vec!["Mod+U".to_string()]);
+        assert!(back["Screenshot"].is_empty());
+
+        let ctx = egui::Context::default();
+        ctx.begin_pass(press(Key::U, Modifiers::COMMAND));
+        let p = pressed_with(&ctx, &b);
+        assert!(p.is(Action::Undo));
+        let _ = ctx.end_pass();
+        ctx.begin_pass(press(Key::Z, Modifiers::COMMAND));
+        let p = pressed_with(&ctx, &b);
+        assert!(!p.is(Action::Undo), "the shipped chord no longer fires");
+        let _ = ctx.end_pass();
+    }
+
+    #[test]
+    fn conflict_names_the_other_action() {
+        let b = Bindings::shipped();
+        assert_eq!(b.conflict(chord(Command, Key::Z), Action::Redo), Some(Action::Undo));
+        assert_eq!(b.conflict(chord(Command, Key::Z), Action::Undo), None);
+        assert_eq!(b.conflict(chord(Command, Key::U), Action::Undo), None);
+        assert!(rebindable(Action::Undo) && !rebindable(Action::Copy) && !rebindable(Action::Cancel));
+    }
+
+    #[test]
+    fn capture_reads_one_fresh_press_and_skips_alt_chords() {
+        let ctx = egui::Context::default();
+        ctx.begin_pass(press(Key::K, Modifiers::COMMAND | Modifiers::SHIFT));
+        let c = ctx.input(Chord::from_input);
+        assert_eq!(c, Some(chord(CommandShift, Key::K)));
+        let _ = ctx.end_pass();
+        ctx.begin_pass(press(Key::K, Modifiers::ALT));
+        assert_eq!(ctx.input(Chord::from_input), None);
+        let _ = ctx.end_pass();
     }
 
     fn press(key: Key, modifiers: Modifiers) -> RawInput {

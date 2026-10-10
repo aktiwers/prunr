@@ -64,7 +64,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
             ];
             let mut chosen = false;
             for (label, action) in entries {
-                if picker_row(ui, false, label, keys(action)).clicked() {
+                if picker_row(ui, false, label, &keys(action)).clicked() {
                     if let Some(open) = app.help_modal_mut(action) {
                         *open = true;
                     }
