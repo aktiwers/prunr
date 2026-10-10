@@ -111,9 +111,10 @@ pub struct PrunrApp {
     /// Once-per-session guard so we don't re-evaluate hardware + snooze
     /// state every frame after the prompt is dismissed.
     runtime_prompt_evaluated: bool,
-    /// Whether a popover was open when this frame began. A click outside a
-    /// popover closes it while the toolbar renders, before the canvas runs,
-    /// so the canvas needs this to keep that click from starting a stroke.
+    /// A popover was open when this frame began, or the click that closed
+    /// one is still held down. A click outside a popover closes it while
+    /// the toolbar renders, before the canvas runs, so the canvas needs
+    /// this to keep that click, and a drag starting from it, off the image.
     pub(crate) popup_open_at_frame_start: bool,
 
     // Canvas fade-in: incremented on every image switch
@@ -922,6 +923,12 @@ impl PrunrApp {
                 // selection waits and `on_batch_item_done` applies it when
                 // the first result lands.
                 if !self.settings.protect_selection && self.batch.items[idx].cached_tensor.is_some() {
+                    // Chain mode: the rerun replaces the result in place, so
+                    // undoing the stroke needs the pre-stroke image archived
+                    // now. Inpaint archives when its result lands.
+                    if self.settings.chain_mode {
+                        HistoryManager::archive_result_for_stroke(&mut self.batch.items[idx], self.settings.history_depth);
+                    }
                     self.dispatch_brush_rerun(idx);
                 }
             }
@@ -952,15 +959,6 @@ impl PrunrApp {
     ) {
         if !self.batch.commit_selection(item_id, mask) {
             return;
-        }
-        // Chain mode: the rerun replaces the result in place, so undoing
-        // the stroke needs the pre-stroke image archived now. Inpaint
-        // archives when its result lands.
-        if !self.settings.model.is_inpaint() && self.settings.chain_mode {
-            let max_depth = self.settings.history_depth;
-            if let Some(item) = self.batch.find_by_id_mut(item_id) {
-                HistoryManager::archive_result_for_stroke(item, max_depth);
-            }
         }
         self.apply_selection_to_active_model(item_id);
     }
@@ -3582,9 +3580,9 @@ impl eframe::App for PrunrApp {
 
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         #[allow(deprecated)]
-        {
-            self.popup_open_at_frame_start = ctx.memory(|m| m.any_popup_open());
-        }
+        let popup_open = ctx.memory(|m| m.any_popup_open());
+        let pointer_down = ctx.input(|i| i.pointer.any_down());
+        self.popup_open_at_frame_start = popup_open || (self.popup_open_at_frame_start && pointer_down);
         self.poll_worker_results(ctx);
         self.handle_drag_and_drop(ctx);
         self.handle_keyboard_shortcuts(ctx);
