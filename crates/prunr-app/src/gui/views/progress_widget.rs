@@ -34,6 +34,7 @@ const CANCELLING_LABEL: &str = "Cancelling\u{2026}";
 const BANNER_HEIGHT_PX: f32 = 44.0;
 const MODAL_WIDTH_PX: f32 = 320.0;
 const MODAL_HEIGHT_PX: f32 = 120.0;
+const MODAL_INSET_PX: f32 = 16.0;
 const PULSE_DOT_RADIUS_PX: f32 = 3.5;
 const PULSE_DOTS_SPACING_PX: f32 = 10.0;
 const CANCEL_BUTTON_WIDTH_PX: f32 = 90.0;
@@ -92,8 +93,12 @@ pub(crate) fn render_modal(
     cancelling: bool,
 ) -> bool {
     let t = ui.ctx().input(|i| i.time) as f32;
-    let center = canvas_rect.center();
-    let pill_rect = Rect::from_center_size(center, Vec2::new(MODAL_WIDTH_PX, MODAL_HEIGHT_PX));
+    // Bottom-right corner, where it covers the least of the subject.
+    let pill_rect = Rect::from_min_size(
+        canvas_rect.right_bottom() - Vec2::new(MODAL_WIDTH_PX + MODAL_INSET_PX, MODAL_HEIGHT_PX + MODAL_INSET_PX),
+        Vec2::new(MODAL_WIDTH_PX, MODAL_HEIGHT_PX),
+    );
+    let center = pill_rect.center();
     ui.painter().rect_filled(pill_rect, 14.0, Color32::from_rgba_unmultiplied(0, 0, 0, 180));
 
     let headline = modal_headline(progress, cancelling, t);

@@ -83,6 +83,7 @@ pub(crate) fn render_output_scale_chip(
             if clicked && *value != option {
                 *value = option;
                 changed = true;
+                egui::Popup::close_id(ui.ctx(), popup_id);
             }
         }
 
