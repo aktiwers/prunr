@@ -13,12 +13,7 @@ use super::brush_chip::BrushChipOutcome;
 const MAGIC_POPOVER_MIN_WIDTH: f32 = 320.0;
 
 /// `encoder_pending` shows the "Preparing…" spinner while the encoder runs.
-pub(crate) fn flyout_body(
-    ui: &mut Ui,
-    bs: &mut BrushSettings,
-    encoder_pending: bool,
-    protect: Option<bool>,
-) -> BrushChipOutcome {
+pub(crate) fn flyout_body(ui: &mut Ui, bs: &mut BrushSettings, encoder_pending: bool) -> BrushChipOutcome {
     let mut outcome = BrushChipOutcome::default();
     ui.set_min_width(MAGIC_POPOVER_MIN_WIDTH);
     chip::popover_header(ui, "Magic Brush", None);
@@ -41,7 +36,6 @@ pub(crate) fn flyout_body(
     ui.add_space(4.0);
 
     outcome.committed |= super::brush_chip::render_shared_selection_section(ui, bs);
-    outcome.protect_selection = super::brush_chip::render_auto_apply_row(ui, protect);
 
     ui.add_space(4.0);
     ui.separator();

@@ -120,7 +120,7 @@ fn the_tool_strip_follows_the_paint_brush() {
     h.state_mut().brush_state.toggle();
     settle(&mut h);
     let present = names(&h);
-    for knob in ["Add", "Subtract", "Size", "Hardness", "Opacity", "More Paint Brush settings"] {
+    for knob in ["Restore", "Erase", "Size", "Hardness", "Opacity", "More Paint Brush settings"] {
         assert!(present.iter().any(|n| n == knob), "{knob} missing from the strip: {present:?}");
     }
     assert_all_controls_named(&h, "paint brush strip");
@@ -213,34 +213,6 @@ fn escape_closes_a_modal_before_touching_the_selection() {
     assert!(h.state().batch.items[0].selection_mask.is_none(), "the next Escape clears it");
 }
 
-#[test]
-fn the_strip_offers_apply_while_strokes_wait() {
-    use super::tree_tests::names;
-    let mut h = loaded();
-    {
-        let app = h.state_mut();
-        app.settings.protect_selection = true;
-        app.brush_state.toggle();
-    }
-    settle(&mut h);
-    assert!(!names(&h).iter().any(|n| n == "Apply strokes"), "nothing painted yet");
-    {
-        let item = &mut h.state_mut().batch.items[0];
-        item.selection_mask = Some(std::sync::Arc::new(prunr_core::selection::MaskArtifact::from_cells(1, 1, vec![100])));
-    }
-    settle(&mut h);
-    assert!(names(&h).iter().any(|n| n == "Apply strokes"), "before the first result: {:?}", names(&h));
-    {
-        let item = &mut h.state_mut().batch.items[0];
-        let cache = crate::gui::worker::TensorCache { data: vec![0.0; 4], height: 2, width: 2, model: prunr_core::ModelKind::Silueta };
-        item.set_cached_tensor(crate::gui::worker::CompressedTensor::from_raw(cache));
-    }
-    settle(&mut h);
-    assert!(names(&h).iter().any(|n| n == "Apply strokes"), "with a result to correct: {:?}", names(&h));
-    h.state_mut().settings.protect_selection = false;
-    settle(&mut h);
-    assert!(!names(&h).iter().any(|n| n == "Apply strokes"), "auto-apply needs no button");
-}
 
 #[test]
 fn the_strip_offers_apply_for_the_erasers_region() {

@@ -29,8 +29,6 @@ pub(crate) struct BrushChipOutcome {
     pub reset_brush_requested: bool,
     /// A slider settled or a choice was made: the brush settings persist.
     pub committed: bool,
-    /// New value of `Settings::protect_selection` when its switch flipped.
-    pub protect_selection: Option<bool>,
     /// The strip's Apply button: run the model with the painted selection.
     pub apply_requested: bool,
 }
@@ -40,14 +38,24 @@ impl BrushChipOutcome {
         self.reset_brush_requested |= other.reset_brush_requested;
         self.apply_requested |= other.apply_requested;
         self.committed |= other.committed;
-        self.protect_selection = other.protect_selection.or(self.protect_selection);
     }
 }
 
-pub(super) const BRUSH_MODES: [chip::Choice<BrushMode>; 2] = [
-    chip::Choice { value: BrushMode::Add, name: "Add", description: "Strokes add to the selection", enabled: true },
-    chip::Choice { value: BrushMode::Subtract, name: "Subtract", description: "Strokes remove from the selection", enabled: true },
+/// On a background-removal model a stroke edits the cut-out.
+pub(super) const CUTOUT_MODES: [chip::Choice<BrushMode>; 2] = [
+    chip::Choice { value: BrushMode::Add, name: "Restore", description: "Bring back what the model took away", enabled: true },
+    chip::Choice { value: BrushMode::Subtract, name: "Erase", description: "Remove what the model left behind", enabled: true },
 ];
+
+/// On the eraser a stroke shapes the region to fill.
+pub(super) const REGION_MODES: [chip::Choice<BrushMode>; 2] = [
+    chip::Choice { value: BrushMode::Add, name: "Add", description: "Add to the region", enabled: true },
+    chip::Choice { value: BrushMode::Subtract, name: "Subtract", description: "Take away from the region", enabled: true },
+];
+
+pub(super) fn mode_choices(is_inpaint: bool) -> &'static [chip::Choice<BrushMode>; 2] {
+    if is_inpaint { &REGION_MODES } else { &CUTOUT_MODES }
+}
 
 pub(super) const BRUSH_SHAPES: [chip::Choice<BrushShape>; 3] = [
     chip::Choice { value: BrushShape::Circle, name: "Circle", description: "", enabled: true },
@@ -55,14 +63,7 @@ pub(super) const BRUSH_SHAPES: [chip::Choice<BrushShape>; 3] = [
     chip::Choice { value: BrushShape::Line, name: "Line", description: "", enabled: true },
 ];
 
-/// `protect` is `Some(current protect_selection)` for models whose strokes
-/// can apply on their own (background removal); `None` hides the switch.
-pub(super) fn flyout_body(
-    ui: &mut Ui,
-    s: &mut BrushSettings,
-    is_inpaint_mode: bool,
-    protect: Option<bool>,
-) -> BrushChipOutcome {
+pub(super) fn flyout_body(ui: &mut Ui, s: &mut BrushSettings, is_inpaint_mode: bool) -> BrushChipOutcome {
     let mut outcome = BrushChipOutcome::default();
     if chip::popover_header(ui, "Brush", Some(("Reset size, hardness, expand, edge blend, sharpen and shape", false))) {
         outcome.reset_brush_requested = true;
@@ -76,7 +77,7 @@ pub(super) fn flyout_body(
         outcome.committed |= st.commit;
         super::hint(ui, "How strongly each stroke changes the selection.");
         ui.add_space(6.0);
-        outcome.committed |= chip::choice_row(ui, "Mode", &BRUSH_MODES, &mut s.mode);
+        outcome.committed |= chip::choice_row(ui, "Mode", &CUTOUT_MODES, &mut s.mode);
     } else {
         let g = chip::slider_row_f32(ui, "Expand region", &mut s.inpaint_grow, -16.0..=16.0, false, |v| fmt::signed_px(v, 0));
         outcome.committed |= g.commit;
@@ -97,7 +98,6 @@ pub(super) fn flyout_body(
     ui.add_space(4.0);
 
     outcome.committed |= render_shared_selection_section(ui, s);
-    outcome.protect_selection = render_auto_apply_row(ui, protect);
     outcome
 }
 
@@ -126,17 +126,6 @@ pub(super) fn render_cursor_section(ui: &mut Ui, s: &mut BrushSettings) -> bool 
         });
     });
     committed
-}
-
-/// The "Auto-apply strokes" switch, shared by both brush popovers. It is
-/// the inverse of `Settings::protect_selection`; returns the new
-/// `protect_selection` when flipped so no caller has to negate it.
-pub(super) fn render_auto_apply_row(ui: &mut egui::Ui, protect: Option<bool>) -> Option<bool> {
-    let mut auto_apply = !protect?;
-    ui.add_space(4.0);
-    let flipped = chip::toggle_row(ui, "Auto-apply strokes", &mut auto_apply).changed;
-    super::hint(ui, "Apply each stroke to the result at once. Off: paint freely, then click Process.");
-    flipped.then_some(!auto_apply)
 }
 
 /// Selection visualization knobs shared between the Paint Brush chip and
