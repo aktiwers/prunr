@@ -84,8 +84,8 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
         // row stays minimal: Open, Settings, Help, and the action cluster.
 
         if !app.batch.items.is_empty() {
-            let can_undo = app.batch.any_target_can(HistoryManager::can_undo);
-            let can_redo = app.batch.any_target_can(HistoryManager::can_redo);
+            let can_undo = app.batch.any_target_can(|i| HistoryManager::can_undo(i) || !i.actions_undo.is_empty());
+            let can_redo = app.batch.any_target_can(|i| HistoryManager::can_redo(i) || !i.actions_redo.is_empty());
             if tooltip(ui.add_enabled_ui(can_undo, |ui| icon_button(ui, ICON_UNDO.codepoint)).inner, "Undo", "", Some(Action::Undo))
                 .clicked()
             {
