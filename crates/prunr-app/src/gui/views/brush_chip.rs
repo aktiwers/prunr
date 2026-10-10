@@ -31,11 +31,14 @@ pub(crate) struct BrushChipOutcome {
     pub committed: bool,
     /// New value of `Settings::protect_selection` when its switch flipped.
     pub protect_selection: Option<bool>,
+    /// The strip's Apply button: run the model with the painted selection.
+    pub apply_requested: bool,
 }
 
 impl BrushChipOutcome {
     pub fn merge(&mut self, other: Self) {
         self.reset_brush_requested |= other.reset_brush_requested;
+        self.apply_requested |= other.apply_requested;
         self.committed |= other.committed;
         self.protect_selection = other.protect_selection.or(self.protect_selection);
     }

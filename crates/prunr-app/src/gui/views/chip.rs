@@ -265,7 +265,7 @@ pub(super) fn popup_for(
 }
 
 /// Opacity of a flyout while one of its sliders is held.
-const GHOST_OPACITY: f32 = 0.12;
+const GHOST_OPACITY: f32 = 0.35;
 
 /// A popover for knobs that change the image live. It stays open while
 /// the user works on the canvas: its chip, Escape or another chip closes

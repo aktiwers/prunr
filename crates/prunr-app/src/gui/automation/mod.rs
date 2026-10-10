@@ -37,6 +37,8 @@ pub enum Request {
     },
     /// Press on a control and keep holding; `Move` drags, `Release` lets go.
     Hold { name: String },
+    /// Press at a window position (points) and keep holding: a brush stroke.
+    HoldAt { x: f32, y: f32 },
     Move { dx: f32, dy: f32 },
     Release,
     /// A chord in the settings form: "Mod+Shift+Z", "Escape", "A".
@@ -168,6 +170,12 @@ impl Automation {
                 self.frames.extend([vec![egui::Event::PointerMoved(pos)], vec![press(pos, true)]]);
                 self.held_at = Some(pos);
                 (3, Response::ok(target))
+            }
+            Request::HoldAt { x, y } => {
+                let pos = egui::pos2(x, y);
+                self.frames.extend([vec![egui::Event::PointerMoved(pos)], vec![press(pos, true)]]);
+                self.held_at = Some(pos);
+                (3, Response::ok(()))
             }
             Request::Move { dx, dy } => {
                 let from = self.held_at.ok_or("nothing is held")?;

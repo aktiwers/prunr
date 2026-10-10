@@ -199,6 +199,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
             is_inpaint: app.settings.model.is_inpaint(),
             protect: app.settings.model.uses_segmentation().then_some(app.settings.protect_selection),
             encoder_pending: app.magic_brush_state.has_pending_encoder(),
+            strokes_waiting: app.strokes_waiting_for_apply(),
         };
         let change = super::tool_strip::render(ui, canvas_rect, tool, &mut app.settings.brush, facts);
         app.apply_brush_change(change);
@@ -245,7 +246,8 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
     // tool (regardless of encoder state) so users discover Shift / Alt
     // before they need them. Active modifier tints to ACCENT; the rest stays
     // TEXT_SECONDARY. Mono 12px per 33-UI-SPEC §Selection Visualization.
-    if app.magic_brush_state.is_active() {
+    let paint_on_selection = app.brush_state.is_enabled() && !app.settings.model.is_inpaint();
+    if app.magic_brush_state.is_active() || paint_on_selection {
         let (shift, alt) = ui.ctx().input(|i| (i.modifiers.shift, super::shortcuts::is_subtract_modifier(&i.modifiers)));
         let base_color = theme::TEXT_SECONDARY;
         let active_color = theme::ACCENT;
@@ -271,6 +273,13 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
     }
 }
 
+/// The held modifier's glyph below-right of the pointer, the macOS
+/// modifier-indicator convention.
+fn draw_modifier_glyph(ui: &egui::Ui, canvas_rect: Rect, glyph: &str) {
+    let Some(p) = ui.ctx().input(|i| i.pointer.hover_pos()).filter(|p| canvas_rect.contains(*p)) else { return };
+    ui.painter().text(p + egui::vec2(12.0, 12.0), egui::Align2::CENTER_CENTER, glyph, egui::FontId::proportional(14.0), theme::ACCENT);
+}
+
 /// Run the brush overlay (cursor + pointer events) and commit any
 /// finished stroke onto the active item. Pan is suppressed in this mode
 /// — `render_done`'s pan logic already runs with `is_panning = false`
@@ -283,15 +292,22 @@ fn handle_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: Rect) 
     let img_rect = compute_img_rect(canvas_rect, tex.size_vec2(), app.zoom_state.zoom, app.zoom_state.pan_offset);
 
     let Some(idx) = app.batch.selected_idx_clamped() else { return };
+    let (shift, subtract) = ui.ctx().input(|i| (i.modifiers.shift, super::shortcuts::is_subtract_modifier(&i.modifiers)));
     let stamp = if app.settings.model.is_inpaint() {
         app.settings.brush.region_stamp()
     } else {
-        app.settings.brush.stamp()
+        let mut stamp = app.settings.brush.stamp();
+        stamp.mode = app.settings.brush.mode_under(shift, subtract);
+        stamp
     };
     let action = {
         let item = &app.batch.items[idx];
         brush_overlay::handle_input(ui, &mut app.brush_state, &app.settings.brush, stamp, item, img_rect)
     };
+    if !app.settings.model.is_inpaint() && (shift || subtract) {
+        let glyph = if shift { "+" } else { "\u{2212}" };
+        draw_modifier_glyph(ui, canvas_rect, glyph);
+    }
     if let BrushAction::Committed(stroke_mask) = action {
         let item_id = app.batch.items[idx].id;
 
@@ -372,26 +388,13 @@ fn handle_magic_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: 
         }
     });
 
-    // Modifier glyph at the cursor — `+` for Shift, `−` for Alt. Painted
-    // below-right of the hover position per 33-UI-SPEC §"Modifier cursor
-    // annotation" (offset matches the macOS modifier-indicator convention).
-    if let Some(p) = hover_pos_for_cursor {
-        if canvas_rect.contains(p) {
-            let glyph = match modifier {
-                PromptModifier::Add => Some("+"),
-                PromptModifier::Subtract => Some("\u{2212}"), // U+2212 MINUS SIGN — visually heavier than ASCII hyphen.
-                PromptModifier::Replace => None,
-            };
-            if let Some(g) = glyph {
-                ui.painter().text(
-                    p + egui::vec2(12.0, 12.0),
-                    egui::Align2::CENTER_CENTER,
-                    g,
-                    egui::FontId::proportional(14.0),
-                    theme::ACCENT,
-                );
-            }
-        }
+    let glyph = match modifier {
+        PromptModifier::Add => Some("+"),
+        PromptModifier::Subtract => Some("\u{2212}"), // U+2212 MINUS SIGN — visually heavier than ASCII hyphen.
+        PromptModifier::Replace => None,
+    };
+    if let Some(glyph) = glyph {
+        draw_modifier_glyph(ui, canvas_rect, glyph);
     }
 
     // Convert screen position to source-image pixel coordinates.

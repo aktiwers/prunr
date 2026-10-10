@@ -259,6 +259,11 @@ impl PrunrApp {
         if change.committed || change.protect_selection.is_some() {
             self.settings.save();
         }
+        if change.apply_requested {
+            if let Some(idx) = self.batch.selected_idx_clamped() {
+                self.rerun_with_strokes(idx);
+            }
+        }
     }
 
     /// Persists the settings once input has paused: a held key repeats
@@ -1047,17 +1052,8 @@ impl PrunrApp {
             .map(|d| d.category);
         match category {
             Some(prunr_models::ModelCategory::Segmentation) => {
-                // Without a tensor there is nothing to correct yet; the
-                // selection waits and `on_batch_item_done` applies it when
-                // the first result lands.
-                if !self.settings.protect_selection && self.batch.items[idx].cached_tensor.is_some() {
-                    // Chain mode: the rerun replaces the result in place, so
-                    // undoing the stroke needs the pre-stroke image archived
-                    // now. Inpaint archives when its result lands.
-                    if self.settings.chain_mode {
-                        HistoryManager::archive_result_for_stroke(&mut self.batch.items[idx], self.settings.history_depth);
-                    }
-                    self.dispatch_brush_rerun(idx);
+                if !self.settings.protect_selection {
+                    self.rerun_with_strokes(idx);
                 }
             }
             Some(prunr_models::ModelCategory::Inpaint) => {
@@ -1072,6 +1068,33 @@ impl PrunrApp {
                 // Mask-only actions work; no model dispatch.
             }
         }
+    }
+
+    /// Runs the segmentation model again with the painted selection:
+    /// what Auto-apply does on every stroke and the strip's Apply button
+    /// does on demand. Without a tensor there is nothing to correct yet;
+    /// the selection waits and `on_batch_item_done` applies it when the
+    /// first result lands.
+    fn rerun_with_strokes(&mut self, idx: usize) {
+        if self.batch.items[idx].cached_tensor.is_none() {
+            return;
+        }
+        // Chain mode: the rerun replaces the result in place, so undoing
+        // the stroke needs the pre-stroke image archived now. Inpaint
+        // archives when its result lands.
+        if self.settings.chain_mode {
+            HistoryManager::archive_result_for_stroke(&mut self.batch.items[idx], self.settings.history_depth);
+        }
+        self.dispatch_brush_rerun(idx);
+    }
+
+    /// A painted selection on a segmentation model with Auto-apply off.
+    pub(crate) fn strokes_waiting_for_apply(&self) -> bool {
+        self.settings.model.uses_segmentation()
+            && self.settings.protect_selection
+            && self.batch.selected_item().is_some_and(|i| {
+                i.cached_tensor.is_some() && i.selection_mask.as_ref().is_some_and(|m| m.has_selected_region())
+            })
     }
 
     /// Single-source-of-truth call for writing a new selection: persist the
