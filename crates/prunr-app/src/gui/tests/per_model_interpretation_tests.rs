@@ -91,6 +91,14 @@ fn chain_mode_commit_archives_the_pre_stroke_result_for_undo() {
     assert!(HistoryManager::can_undo(item));
     assert!(item.result_rgba.is_some(), "chain base stays in place for the rerun");
     assert_eq!(item.actions_undo.len(), 1, "one Stroke marker, no Result marker");
+
+    // Auto-apply off: no rerun will replace the result, so nothing is
+    // archived (an orphan entry would make a later undo a no-op).
+    app.settings.protect_selection = true;
+    let mut other = make_mask(8, 8);
+    other = other.invert(prunr_core::selection::BrushMode::Add);
+    app.commit_selection_and_dispatch(7, other);
+    assert_eq!(app.batch.items[0].history.len(), archived_before + 1);
 }
 
 /// Moving the Confidence knob re-thresholds the last Magic Brush stroke
