@@ -139,7 +139,14 @@ pub struct PrunrApp {
 
     /// The control socket, when `PRUNR_CONTROL_PORT` is set.
     pub(crate) automation: Option<super::automation::Automation>,
+
+    /// The Save-preset dialog's name field; `Some` while the dialog is up.
+    pub(crate) save_preset: Option<String>,
+    /// When a pending settings save falls due (see `save_settings_soon`).
+    settings_save_due: Option<std::time::Instant>,
 }
+
+const SETTINGS_SAVE_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
 
 impl PrunrApp {
     pub fn new(cc: &eframe::CreationContext) -> Self {
@@ -239,19 +246,36 @@ impl PrunrApp {
         app
     }
 
-    pub(crate) fn reset_brush_popover_fields(&mut self) {
-        let resolved = self.settings.resolve_active_preset(None);
-        self.settings.brush.reset_popover_fields_from(&resolved.brush);
+    /// What the tool strip or a brush panel changed: persist on a
+    /// settle, reset from the active preset, flip Auto-apply.
+    pub(crate) fn apply_brush_change(&mut self, change: super::views::brush_chip::BrushChipOutcome) {
+        if change.reset_brush_requested {
+            let resolved = self.settings.resolve_active_preset(None);
+            self.settings.brush.reset_popover_fields_from(&resolved.brush);
+        }
+        if let Some(protect) = change.protect_selection {
+            self.settings.protect_selection = protect;
+        }
+        if change.committed || change.protect_selection.is_some() {
+            self.settings.save();
+        }
     }
 
-    /// One size step is a quarter of the radius, at least a pixel, so
-    /// small brushes still move and large ones do not crawl.
-    fn step_brush_size(&mut self, larger: bool) {
-        let radius = &mut self.settings.brush.radius;
-        let step = (*radius * 0.25).max(1.0);
-        let next = if larger { *radius + step } else { *radius - step };
-        *radius = next.round().clamp(*super::brush_state::BRUSH_RADIUS_RANGE.start(), *super::brush_state::BRUSH_RADIUS_RANGE.end());
-        self.settings.save();
+    /// Persists the settings once input has paused: a held key repeats
+    /// at 30 Hz, and each save rewrites the whole file.
+    fn save_settings_soon(&mut self) {
+        self.settings_save_due = Some(std::time::Instant::now() + SETTINGS_SAVE_DELAY);
+    }
+
+    fn flush_settings_save(&mut self, ctx: &egui::Context) {
+        let Some(due) = self.settings_save_due else { return };
+        let now = std::time::Instant::now();
+        if now >= due {
+            self.settings_save_due = None;
+            self.settings.save();
+        } else {
+            ctx.request_repaint_after(due - now);
+        }
     }
 
     /// Every user intent with its gate, in one place: the keyboard, the
@@ -298,10 +322,9 @@ impl PrunrApp {
             Action::FitToWindow => self.zoom_state.pending_fit_zoom = true,
             Action::ActualSize => self.zoom_state.pending_actual_size = true,
             Action::Cancel => {
-                // egui closes an open popup, and the Save-preset dialog
-                // closes itself, on this Escape during render; the press
-                // goes no further.
-                if !super::theme::any_popup_open(ctx) && !super::views::preset_dropdown::save_dialog_open(ctx) {
+                if super::theme::any_popup_open(ctx) {
+                    egui::Popup::close_all(ctx);
+                } else {
                     self.apply_cancel_shortcut(ctx);
                 }
             }
@@ -320,8 +343,10 @@ impl PrunrApp {
             Action::Screenshot => {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
             }
-            Action::BrushSmaller => self.step_brush_size(false),
-            Action::BrushLarger => self.step_brush_size(true),
+            Action::BrushSmaller | Action::BrushLarger => {
+                self.settings.brush.step_radius(action == Action::BrushLarger);
+                self.save_settings_soon();
+            }
         }
     }
 
@@ -412,6 +437,8 @@ impl PrunrApp {
             ),
             drag_export: super::drag_export_state::DragExportState::new(),
             automation: None,
+            save_preset: None,
+            settings_save_due: None,
         };
         // `--open <path>` (or PRUNR_OPEN_FILE env var) — pre-load on launch.
         // Reads the env once; clears it so a child subprocess doesn't inherit
@@ -769,6 +796,7 @@ impl PrunrApp {
             (self.show_pipeline_flow, "pipeline_flow"),
             (self.model_store.is_some(), "model_store"),
             (self.pending_license_request.is_some(), "license"),
+            (self.save_preset.is_some(), "save_preset"),
             (self.runtime_prompt.is_some(), "runtime_prompt"),
             (self.pending_reset_confirm, "reset_confirm"),
         ]
@@ -3396,7 +3424,9 @@ impl PrunrApp {
 
     /// Closes the modal on top, in stacking order; false when none is open.
     fn close_top_modal(&mut self, ctx: &egui::Context) -> bool {
-        if self.pending_license_request.is_some() {
+        if self.save_preset.is_some() {
+            self.save_preset = None;
+        } else if self.pending_license_request.is_some() {
             self.pending_license_request = None;
         } else if self.model_store.is_some() {
             self.model_store = None;
@@ -3708,6 +3738,7 @@ impl eframe::App for PrunrApp {
             self.handle_keyboard_shortcuts(ctx);
         }
         super::automation::pump(self, ctx);
+        self.flush_settings_save(ctx);
         drain_screenshot_replies(ctx);
         self.drain_background_channels(ctx);
         self.update_window_title(ctx);
@@ -3865,7 +3896,7 @@ impl PrunrApp {
                     ui,
                     &mut item.settings,
                     settings_ref,
-                    &mut item.applied_preset,
+                    super::views::preset_dropdown::PresetUi { applied: &mut item.applied_preset, save_dialog: &mut self.save_preset },
                     brush_state_ref,
                     state,
                 );

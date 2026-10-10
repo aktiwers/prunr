@@ -1,5 +1,5 @@
 //! The Magic Brush panel: the shared cursor block and selection look,
-//! plus the Confidence threshold. Opens from the tool strip.
+//! plus the Confidence threshold.
 
 use egui::Ui;
 
@@ -7,27 +7,19 @@ use crate::gui::brush_state::BrushSettings;
 use crate::gui::theme;
 use crate::gui::views::{chip, fmt};
 
-/// Minimum popover width so the two-column cursor block fits.
+use super::brush_chip::BrushChipOutcome;
+
+/// Wider than a popover so the two-column cursor block fits.
 const MAGIC_POPOVER_MIN_WIDTH: f32 = 320.0;
 
-/// Outcome reported back to the toolbar's change accumulator.
-#[derive(Default, Clone, Copy)]
-pub(crate) struct MagicChipOutcome {
-    /// True on slider release / toggle — caller persists brush settings.
-    pub(crate) committed: bool,
-    /// New value of `Settings::protect_selection` when its switch flipped.
-    pub(crate) protect_selection: Option<bool>,
-}
-
-/// The full panel behind the strip's dots. `encoder_pending` shows the
-/// "Preparing…" spinner while the encoder runs.
+/// `encoder_pending` shows the "Preparing…" spinner while the encoder runs.
 pub(crate) fn flyout_body(
     ui: &mut Ui,
     bs: &mut BrushSettings,
     encoder_pending: bool,
     protect: Option<bool>,
-) -> MagicChipOutcome {
-    let mut outcome = MagicChipOutcome::default();
+) -> BrushChipOutcome {
+    let mut outcome = BrushChipOutcome::default();
     ui.set_min_width(MAGIC_POPOVER_MIN_WIDTH);
     chip::popover_header(ui, "Magic Brush", None);
 
@@ -43,7 +35,6 @@ pub(crate) fn flyout_body(
         ui.add_space(6.0);
     }
 
-    // One brush, two tools: the cursor block is shared with Paint.
     outcome.committed |= super::brush_chip::render_cursor_section(ui, bs);
     ui.add_space(4.0);
     ui.separator();

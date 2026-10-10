@@ -83,13 +83,16 @@ pub(super) fn all_preset_names(settings: &Settings) -> Vec<String> {
     names
 }
 
-/// The "Save preset" modal's egui id; its open flag lives in egui memory.
-pub(crate) const SAVE_DIALOG_ID: &str = "preset_save_dialog";
+/// The dialog's egui id for `standard_modal_window`.
+const SAVE_DIALOG_ID: &str = "preset_save_dialog";
 const SAVE_DIALOG_SIZE: [f32; 2] = [420.0, 380.0];
 const OVERWRITE_LIST_HEIGHT: f32 = 120.0;
 
-pub(crate) fn save_dialog_open(ctx: &egui::Context) -> bool {
-    ctx.memory(|m| m.data.get_temp::<bool>(egui::Id::new(SAVE_DIALOG_ID).with("open")).unwrap_or(false))
+/// The preset state the toolbar edits: the item's applied preset name
+/// and the Save-preset dialog (`Some(name field)` while it is up).
+pub(crate) struct PresetUi<'a> {
+    pub applied: &'a mut String,
+    pub save_dialog: &'a mut Option<String>,
 }
 
 /// Render the Preset dropdown. Returns `Some(name)` when the user applied a
@@ -97,16 +100,15 @@ pub(crate) fn save_dialog_open(ctx: &egui::Context) -> bool {
 /// can update `BatchItem.applied_preset`. Returns `None` for no-op frames or
 /// non-apply interactions (saves, deletes, star toggles).
 #[allow(deprecated)]
-pub fn render(
+pub(crate) fn render(
     ui: &mut Ui,
     settings: &mut Settings,
     current_item: &mut ItemSettings,
-    applied_preset: &str,
+    presets: &mut PresetUi<'_>,
 ) -> Option<String> {
     let pop_id = egui::Id::new("preset_popover");
-    let save_dialog_id = egui::Id::new(SAVE_DIALOG_ID);
 
-    let label = button_label(settings, current_item, applied_preset);
+    let label = button_label(settings, current_item, presets.applied);
     let resp = crate::gui::views::chip::tooltip(
         crate::gui::views::chip::chip_button(ui, ICON_BOOKMARK.codepoint, &label, false),
         "Preset",
@@ -202,10 +204,7 @@ pub fn render(
 
             let save_label = format!("{}  Save current as…", ICON_BOOKMARK_ADD.codepoint);
             if button(ui, ButtonKind::Secondary, &save_label).clicked() {
-                ui.memory_mut(|m| m.data.insert_temp::<String>(save_dialog_id, String::new()));
-                ui.memory_mut(|m| {
-                    m.data.insert_temp::<bool>(save_dialog_id.with("open"), true);
-                });
+                *presets.save_dialog = Some(String::new());
                 egui::Popup::close_id(ui.ctx(), pop_id);
             }
 
@@ -219,13 +218,7 @@ pub fn render(
     );
 
     // ── Naming dialog ──
-    let dialog_open = ui
-        .ctx()
-        .memory(|m| m.data.get_temp::<bool>(save_dialog_id.with("open")).unwrap_or(false));
-    if dialog_open {
-        let mut name_buf = ui
-            .ctx()
-            .memory(|m| m.data.get_temp::<String>(save_dialog_id).unwrap_or_default());
+    if let Some(name_buf) = presets.save_dialog.as_mut() {
         let mut commit = false;
         let mut cancel = false;
         let mut overwrite_target: Option<String> = None;
@@ -236,7 +229,7 @@ pub fn render(
 
         let backdrop_closed = theme::standard_modal_window(ui.ctx(), SAVE_DIALOG_ID, "Save preset", SAVE_DIALOG_SIZE, |ui| {
                 let name_label = ui.label("Name for this preset:");
-                let text_resp = ui.text_edit_singleline(&mut name_buf).labelled_by(name_label.id);
+                let text_resp = ui.text_edit_singleline(name_buf).labelled_by(name_label.id);
                 if text_resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                     commit = true;
                 }
@@ -291,14 +284,7 @@ pub fn render(
                     });
                 }
         });
-        cancel |= backdrop_closed || ui.ctx().input(|i| i.key_pressed(egui::Key::Escape));
-
-        let close_dialog = || {
-            ui.ctx().memory_mut(|m| {
-                m.data.insert_temp::<bool>(save_dialog_id.with("open"), false);
-                m.data.remove::<String>(save_dialog_id);
-            });
-        };
+        cancel |= backdrop_closed;
 
         let trimmed = name_buf.trim();
         let is_overwrite = overwrite_target.is_some();
@@ -353,12 +339,10 @@ pub fn render(
             }
 
             applied = Some(name);
-            close_dialog();
-        } else if cancel {
-            close_dialog();
-        } else {
-            ui.ctx()
-                .memory_mut(|m| m.data.insert_temp::<String>(save_dialog_id, name_buf));
+            cancel = true;
+        }
+        if cancel {
+            *presets.save_dialog = None;
         }
     }
 
