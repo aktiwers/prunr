@@ -380,22 +380,24 @@ fn a_chain_mode_stroke_undo_brings_the_archived_result_back() {
     let item = push_test_item(&mut app, 5);
     item.dimensions = (8, 8);
     item.status = crate::gui::item::BatchStatus::Done;
-    let before = Arc::new(image::RgbaImage::new(8, 8));
+    // History entries may be stored compressed, so compare pixels, not Arcs.
+    let before = image::RgbaImage::from_pixel(8, 8, image::Rgba([1, 2, 3, 255]));
+    let recut = image::RgbaImage::from_pixel(8, 8, image::Rgba([9, 9, 9, 255]));
     item.source_rgba = Some(Arc::new(image::RgbaImage::new(8, 8)));
-    item.result_rgba = Some(Arc::clone(&before));
+    item.result_rgba = Some(Arc::new(before.clone()));
     give_tensor(item);
     app.commit_selection_and_dispatch(5, make_mask(8, 8));
     // The re-cut replaced the result in place.
-    app.batch.items[0].result_rgba = Some(Arc::new(image::RgbaImage::new(8, 8)));
+    app.batch.items[0].result_rgba = Some(Arc::new(recut.clone()));
 
     app.handle_undo(&ctx);
     let item = &app.batch.items[0];
     assert!(item.selection_mask.is_none());
-    assert!(item.result_rgba.as_ref().is_some_and(|r| Arc::ptr_eq(r, &before)), "the pre-stroke image is back");
+    assert!(item.result_rgba.as_ref().is_some_and(|r| **r == before), "the pre-stroke image is back");
     assert_eq!(item.status, crate::gui::item::BatchStatus::Done);
 
     app.handle_redo(&ctx);
     let item = &app.batch.items[0];
     assert!(item.selection_mask.is_some());
-    assert!(item.result_rgba.as_ref().is_some_and(|r| !Arc::ptr_eq(r, &before)), "redo restores the re-cut");
+    assert!(item.result_rgba.as_ref().is_some_and(|r| **r == recut), "redo restores the re-cut");
 }

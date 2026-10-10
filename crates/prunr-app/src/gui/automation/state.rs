@@ -29,6 +29,8 @@ pub struct ItemDump {
     pub selected: bool,
     pub dimensions: (u32, u32),
     pub has_result: bool,
+    pub has_selection: bool,
+    pub undo_steps: usize,
     pub settings: ItemSettings,
 }
 
@@ -64,6 +66,8 @@ pub fn dump(app: &PrunrApp) -> StateDump {
                 selected: it.selected,
                 dimensions: it.dimensions,
                 has_result: it.result_rgba.is_some(),
+                has_selection: it.selection_mask.is_some(),
+                undo_steps: it.actions_undo.len(),
                 settings: it.settings,
             })
             .collect(),
