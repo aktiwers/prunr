@@ -52,6 +52,11 @@ use crate::types::CoreError;
 pub const SD_TILE: u32 = 512;
 /// Latent space side length after VAE downsampling.
 pub const SD_LATENT_SIDE: u32 = SD_TILE / 8;
+/// Longest crop side with `SdTuning::tall_crop`: a region up to this
+/// long runs as one 512×768 / 768×512 / 768² crop instead of tiles.
+pub const SD_CROP_MAX: u32 = 768;
+/// The UNet downsamples three times, so a crop side is a multiple of 64.
+const SD_SIDE_STEP: u32 = 64;
 /// SD 1.5 latent scaling factor. Diffusers calls this `vae.config.scaling_factor`.
 const VAE_SCALING_FACTOR: f32 = 0.18215;
 
@@ -142,6 +147,10 @@ pub struct SdTuning {
     pub ov_dynamic: bool,
     /// OpenVINO CPU thread count; `None` is the plugin's default.
     pub ov_threads: Option<usize>,
+    /// Run a region up to `SD_CROP_MAX` on its long side as one crop
+    /// instead of 512² tiles. Needs sessions that accept the shape
+    /// (`ov_dynamic`, or a non-OpenVINO provider).
+    pub tall_crop: bool,
 }
 
 impl SdTuning {
@@ -254,12 +263,11 @@ pub fn process_inpaint_with(
     // a bbox abuts an image edge and `tile_bbox`'s anchor clamping
     // collapses the grid.
     let (img_w_for_count, img_h_for_count) = image.dimensions();
+    let max_side = if req.tuning.tall_crop { SD_CROP_MAX } else { SD_TILE };
     let outer_total: u32 = components
         .iter()
         .map(|comp| {
-            let w = comp.x_max - comp.x_min + 1;
-            let h = comp.y_max - comp.y_min + 1;
-            if w <= SD_TILE && h <= SD_TILE {
+            if compute_sd_crop(comp, img_w_for_count, img_h_for_count, max_side).is_some() {
                 1
             } else {
                 tile_bbox(comp, img_w_for_count, img_h_for_count).len() as u32
@@ -307,13 +315,10 @@ pub fn process_inpaint_with(
 
     for component in &components {
         if is_cancelled() { return Err(CoreError::Cancelled); }
-        let painted_w = component.x_max - component.x_min + 1;
-        let painted_h = component.y_max - component.y_min + 1;
-        if painted_w <= SD_TILE && painted_h <= SD_TILE {
-            // Fast path: single 512×512 crop centred on the component.
+        if let Some((cx, cy, cw, ch)) = compute_sd_crop(component, img_w, img_h, max_side) {
+            // Fast path: one crop centred on the component.
             tile_idx += 1;
             if let Some(p) = progress { p.set_outer_step(tile_idx); }
-            let (cx, cy, cw, ch) = compute_sd_crop(component, img_w, img_h);
             let cropped_img = image::imageops::crop_imm(&out, cx, cy, cw, ch).to_image();
             let cropped_mask = image::imageops::crop_imm(mask, cx, cy, cw, ch).to_image();
             match run_one_tile(&bundle, &vae, &cropped_img, &cropped_mask, &req, hooks) {
@@ -376,7 +381,7 @@ struct TileWindow {
 /// overlap between neighbours. Tiles always anchor inside the image
 /// (no out-of-bounds access at composite time) — for image axes
 /// shorter than SD_TILE, the tile width/height collapses to the image
-/// extent and pad_to_tile handles the rest at the ORT boundary.
+/// extent and `pad_to` handles the rest at the ORT boundary.
 fn tile_bbox(bbox: &MaskBbox, img_w: u32, img_h: u32) -> Vec<TileWindow> {
     let span_x = bbox.x_max - bbox.x_min + 1;
     let span_y = bbox.y_max - bbox.y_min + 1;
@@ -558,17 +563,31 @@ fn push_if_unvisited(
     }
 }
 
-/// Centre an SD_TILE-sized crop on the bbox centre, clamped to image
-/// bounds. For images smaller than SD_TILE on an axis, the crop shrinks
-/// to that dimension on that axis (pad_to_tile pads it back to 512).
-fn compute_sd_crop(bbox: &MaskBbox, img_w: u32, img_h: u32) -> (u32, u32, u32, u32) {
-    let cw = SD_TILE.min(img_w);
-    let ch = SD_TILE.min(img_h);
+/// The smallest crop side from `SD_TILE` up to `max_side` in `SD_TILE / 2`
+/// steps that covers `span`; `None` when the region needs tiles.
+fn crop_side(span: u32, max_side: u32) -> Option<u32> {
+    (SD_TILE..=max_side).step_by((SD_TILE / 2) as usize).find(|&side| side >= span)
+}
+
+/// One crop centred on the bbox, clamped to image bounds, each side the
+/// smallest that covers the region (see `crop_side`); `None` when the
+/// region exceeds `max_side` on an axis. For images smaller than the crop
+/// on an axis, the crop shrinks to that dimension (`pad_to` pads it back).
+fn compute_sd_crop(bbox: &MaskBbox, img_w: u32, img_h: u32, max_side: u32) -> Option<(u32, u32, u32, u32)> {
+    let cw = crop_side(bbox.x_max - bbox.x_min + 1, max_side)?.min(img_w);
+    let ch = crop_side(bbox.y_max - bbox.y_min + 1, max_side)?.min(img_h);
     let cx_centre = (bbox.x_min + bbox.x_max) / 2;
     let cy_centre = (bbox.y_min + bbox.y_max) / 2;
     let x = cx_centre.saturating_sub(cw / 2).min(img_w - cw);
     let y = cy_centre.saturating_sub(ch / 2).min(img_h - ch);
-    (x, y, cw, ch)
+    Some((x, y, cw, ch))
+}
+
+/// The model-side size of a crop: at least `SD_TILE`, rounded up to a
+/// multiple of `SD_SIDE_STEP` on each axis.
+fn padded_dims(w: u32, h: u32) -> (u32, u32) {
+    let up = |v: u32| v.max(SD_TILE).div_ceil(SD_SIDE_STEP) * SD_SIDE_STEP;
+    (up(w), up(h))
 }
 
 /// Eagerly initialise the SD session so the first stroke doesn't pay
@@ -590,8 +609,10 @@ fn run_one_tile(
     let cancel = hooks.cancel.as_ref();
     let progress = hooks.progress.as_ref();
     let (w, h) = image.dimensions();
-    let padded_image = pad_to_tile(image);
-    let padded_mask = pad_mask_to_tile(mask);
+    let (pw, ph) = padded_dims(w, h);
+    let padded_image = pad_to(image, pw, ph);
+    let padded_mask = pad_mask_to(mask, pw, ph);
+    let (lw, lh) = ((pw / 8) as usize, (ph / 8) as usize);
 
 
     // CFG threshold: above 1.0 we run the UNet TWICE per step (cond +
@@ -680,10 +701,9 @@ fn run_one_tile(
     // Hold denoising state as Vec<f32> + captured dim. f16 conversion
     // uses ArrayView4::from_shape (zero-copy on the f32 side); the
     // scheduler writes via step_array_into into a reused scratch buffer.
-    let latent_dim = (1_usize, 4_usize,
-        SD_LATENT_SIDE as usize, SD_LATENT_SIDE as usize);
+    let latent_dim = (1_usize, 4_usize, lh, lw);
     let mut latent_buf: Vec<f32> = if t_start == 0 {
-        let mut l = sample_initial_noise(&mut rng);
+        let mut l = sample_initial_noise(&mut rng, lw, lh);
         // σ-space schedulers (Euler-A) lift the initial sample onto
         // their σ_max scale; α-space schedulers leave unit variance.
         let init_scale = scheduler.init_noise_sigma();
@@ -809,6 +829,7 @@ fn run_one_tile(
         w, h, steps = steps_run, prelude_ms,
         unet_ms_per_step = unet_ms / u64::from(steps_run.max(1)),
         decode_ms, total_ms = tile_started.elapsed().as_millis() as u64,
+        rss_mb = process_rss_mb(),
         cfg = use_cfg,
         batched = use_cfg && !bundle.cfg_fallback_to_sequential.load(std::sync::atomic::Ordering::Relaxed),
         "SD: tile done",
@@ -1711,23 +1732,22 @@ fn extract_4d(value: &ort::value::DynValue, label: &str) -> Result<Array4<f32>, 
 /// produce a visible grey ghost at inference. `None` mask encodes
 /// the full image without any masking.
 fn image_to_minus1_plus1_inner(image: &RgbaImage, mask: Option<&GrayImage>) -> Array4<f32> {
-    let s = SD_TILE as usize;
     let (w, h) = image.dimensions();
     let (w_us, h_us) = (w as usize, h as usize);
-    let mut a = Array4::<f32>::zeros((1, 3, s, s));
+    let mut a = Array4::<f32>::zeros((1, 3, h_us, w_us));
     let buf = a.as_slice_mut().unwrap();
-    let plane = s * s;
+    let plane = w_us * h_us;
     let raw = image.as_raw();
     let m = mask.map(|m| m.as_raw());
     // Match the byte-128 path's bit pattern: same f32 division as the
     // unmasked branch, just on a constant input. Hardcoding `0.0`
     // would diverge by ~0.00392.
     let v_fill = (128.0_f32 / 127.5) - 1.0;
-    for y in 0..h_us.min(s) {
+    for y in 0..h_us {
         let src_row = y * w_us * 4;
-        let dst_row = y * s;
+        let dst_row = y * w_us;
         let mask_row = y * w_us;
-        for x in 0..w_us.min(s) {
+        for x in 0..w_us {
             let dst = dst_row + x;
             let src = src_row + x * 4;
             let r = (raw[src]     as f32 / 127.5) - 1.0;
@@ -1772,14 +1792,14 @@ fn image_to_minus1_plus1_masked(image: &RgbaImage, mask: &GrayImage) -> Array4<f
 }
 
 fn minus1_plus1_to_image(arr: &Array4<f32>) -> RgbaImage {
-    let s = SD_TILE as usize;
-    let plane = s * s;
+    let (_, _, h, w) = arr.dim();
+    let plane = w * h;
     let buf = arr.as_slice().unwrap_or(&[]);
     if buf.len() < plane * 3 {
         tracing::warn!(buf_len = buf.len(), "SD vae decode: buffer smaller than tile");
-        return RgbaImage::new(SD_TILE, SD_TILE);
+        return RgbaImage::new(w as u32, h as u32);
     }
-    let mut out = RgbaImage::new(SD_TILE, SD_TILE);
+    let mut out = RgbaImage::new(w as u32, h as u32);
     let dst = out.as_mut();
     for i in 0..plane {
         let r = ((buf[i]              + 1.0) * 127.5).clamp(0.0, 255.0) as u8;
@@ -1793,7 +1813,7 @@ fn minus1_plus1_to_image(arr: &Array4<f32>) -> RgbaImage {
     out
 }
 
-/// Mask 512×512 → latent space (1, 1, 64, 64) f32 in [0, 1].
+/// Mask → latent space (1, 1, h/8, w/8) f32 in [0, 1].
 /// Average-pool 8×8 → 1 (equivalent to `F.interpolate(mode="area")`
 /// in PyTorch, which is what Diffusers uses for mask preprocessing).
 ///
@@ -1803,15 +1823,15 @@ fn minus1_plus1_to_image(arr: &Array4<f32>) -> RgbaImage {
 /// Center-sampling throws away that information, producing a jaggy
 /// latent boundary that doesn't faithfully represent the pixel mask.
 fn mask_to_latent(mask: &GrayImage) -> Array4<f32> {
-    let l = SD_LATENT_SIDE as usize;
-    let mut a = Array4::<f32>::zeros((1, 1, l, l));
-    let buf = a.as_slice_mut().unwrap();
-    let raw = mask.as_raw();
     let (w, h) = mask.dimensions();
     let (w_us, h_us) = (w as usize, h as usize);
+    let (lw, lh) = (w_us.div_ceil(8), h_us.div_ceil(8));
+    let mut a = Array4::<f32>::zeros((1, 1, lh, lw));
+    let buf = a.as_slice_mut().unwrap();
+    let raw = mask.as_raw();
     let inv = 1.0_f32 / (64.0 * 255.0);
-    for ly in 0..l {
-        for lx in 0..l {
+    for ly in 0..lh {
+        for lx in 0..lw {
             let mut sum = 0_u32;
             for dy in 0..8 {
                 let sy = ly * 8 + dy;
@@ -1823,7 +1843,7 @@ fn mask_to_latent(mask: &GrayImage) -> Array4<f32> {
                     sum += raw[row + sx] as u32;
                 }
             }
-            buf[ly * l + lx] = sum as f32 * inv;
+            buf[ly * lw + lx] = sum as f32 * inv;
         }
     }
     a
@@ -1851,16 +1871,15 @@ fn concat_inpaint_input_f16(
 /// For DDIM with the SD 1.5 schedule, that's 1.0 — the latent itself
 /// starts as plain N(0, 1). Pad here so future schedulers (Euler, DPM++)
 /// that need a different sigma can plug in via the scheduler API.
-fn sample_initial_noise(rng: &mut ChaCha8Rng) -> Array4<f32> {
-    let l = SD_LATENT_SIDE as usize;
+fn sample_initial_noise(rng: &mut ChaCha8Rng, lw: usize, lh: usize) -> Array4<f32> {
     let dist = StandardNormal;
-    let n = 4 * l * l;
+    let n = 4 * lw * lh;
     let mut buf = Vec::with_capacity(n);
     for _ in 0..n {
         let v: f32 = dist.sample(rng);
         buf.push(v);
     }
-    Array4::from_shape_vec((1, 4, l, l), buf)
+    Array4::from_shape_vec((1, 4, lh, lw), buf)
         .expect("shape pre-computed; buf length matches")
 }
 
@@ -1965,22 +1984,20 @@ fn step_array_into(
 /// Returns `Cow::Borrowed` on the fast path (already-tile-sized input,
 /// the common case for small strokes) — saves the ~1 MB image clone +
 /// ~256 KB mask clone the previous version always did.
-fn pad_to_tile(image: &RgbaImage) -> std::borrow::Cow<'_, RgbaImage> {
-    let (w, h) = image.dimensions();
-    if w == SD_TILE && h == SD_TILE {
+fn pad_to(image: &RgbaImage, w: u32, h: u32) -> std::borrow::Cow<'_, RgbaImage> {
+    if image.dimensions() == (w, h) {
         return std::borrow::Cow::Borrowed(image);
     }
-    let mut out = RgbaImage::new(SD_TILE, SD_TILE);
+    let mut out = RgbaImage::new(w, h);
     image::imageops::overlay(&mut out, image, 0, 0);
     std::borrow::Cow::Owned(out)
 }
 
-fn pad_mask_to_tile(mask: &GrayImage) -> std::borrow::Cow<'_, GrayImage> {
-    let (w, h) = mask.dimensions();
-    if w == SD_TILE && h == SD_TILE {
+fn pad_mask_to(mask: &GrayImage, w: u32, h: u32) -> std::borrow::Cow<'_, GrayImage> {
+    if mask.dimensions() == (w, h) {
         return std::borrow::Cow::Borrowed(mask);
     }
-    let mut out = GrayImage::new(SD_TILE, SD_TILE);
+    let mut out = GrayImage::new(w, h);
     image::imageops::overlay(&mut out, mask, 0, 0);
     std::borrow::Cow::Owned(out)
 }
@@ -3609,10 +3626,10 @@ mod tests {
         let mut r1 = ChaCha8Rng::seed_from_u64(42);
         let mut r2 = ChaCha8Rng::seed_from_u64(42);
         let mut r3 = ChaCha8Rng::seed_from_u64(43);
-        let a = sample_initial_noise(&mut r1);
-        let b = sample_initial_noise(&mut r2);
+        let a = sample_initial_noise(&mut r1, 64, 64);
+        let b = sample_initial_noise(&mut r2, 64, 64);
         assert_eq!(a, b, "same seed must give identical noise");
-        let c = sample_initial_noise(&mut r3);
+        let c = sample_initial_noise(&mut r3, 64, 64);
         assert_ne!(a, c, "different seed must give different noise");
     }
 
@@ -3743,9 +3760,45 @@ mod tests {
     }
 
     #[test]
+    fn tall_regions_get_one_crop_up_to_the_max_side() {
+        // 328×607: one 512-wide, 768-tall crop when tall crops are on.
+        let bbox = MaskBbox { x_min: 1564, y_min: 470, x_max: 1891, y_max: 1076 };
+        assert_eq!(compute_sd_crop(&bbox, 4096, 4096, SD_TILE), None, "tiles without tall crops");
+        let (x, y, w, h) = compute_sd_crop(&bbox, 4096, 4096, SD_CROP_MAX).unwrap();
+        assert_eq!((w, h), (512, 768));
+        assert_eq!((x, y), (1727 - 256, 773 - 384));
+        let wide = MaskBbox { x_min: 0, y_min: 0, x_max: 800, y_max: 100 };
+        assert_eq!(compute_sd_crop(&wide, 4096, 4096, SD_CROP_MAX), None, "beyond the max side");
+        assert_eq!(crop_side(512, SD_CROP_MAX), Some(512));
+        assert_eq!(crop_side(513, SD_CROP_MAX), Some(768));
+        assert_eq!(padded_dims(700, 300), (704, 512));
+    }
+
+    #[test]
+    fn non_square_crops_round_trip_through_the_conversions() {
+        let (w, h) = (128u32, 192u32);
+        let img = RgbaImage::from_fn(w, h, |x, y| Rgba([(x * 2) as u8, (y) as u8, 7, 255]));
+        let arr = image_to_minus1_plus1(&img);
+        assert_eq!(arr.dim(), (1, 3, h as usize, w as usize));
+        let back = minus1_plus1_to_image(&arr);
+        assert_eq!(back.dimensions(), (w, h));
+        // The u8 → [-1, 1] → u8 trip truncates, so odd values land one low.
+        let off = back.as_raw().iter().zip(img.as_raw()).filter(|(a, b)| a.abs_diff(**b) > 1).count();
+        assert_eq!(off, 0);
+        let mut mask = GrayImage::new(w, h);
+        for y in 0..8 { for x in 0..8 { mask.put_pixel(x, y + 184, Luma([255])); } }
+        let lat = mask_to_latent(&mask);
+        assert_eq!(lat.dim(), (1, 1, 24, 16));
+        assert!((lat[(0, 0, 23, 0)] - 1.0).abs() < 1e-6);
+        assert_eq!(lat[(0, 0, 0, 0)], 0.0);
+        let noise = sample_initial_noise(&mut ChaCha8Rng::seed_from_u64(1), 16, 24);
+        assert_eq!(noise.dim(), (1, 4, 24, 16));
+    }
+
+    #[test]
     fn compute_sd_crop_centres_on_bbox_in_large_image() {
         let bbox = MaskBbox { x_min: 1000, y_min: 1000, x_max: 1100, y_max: 1100 };
-        let (x, y, w, h) = compute_sd_crop(&bbox, 4096, 4096);
+        let (x, y, w, h) = compute_sd_crop(&bbox, 4096, 4096, SD_TILE).unwrap();
         assert_eq!((w, h), (SD_TILE, SD_TILE));
         // Centre of bbox is (1050, 1050); crop top-left should land at
         // 1050 - 256 = 794.
@@ -3756,7 +3809,7 @@ mod tests {
     #[test]
     fn compute_sd_crop_clamps_to_right_edge() {
         let bbox = MaskBbox { x_min: 3900, y_min: 100, x_max: 3990, y_max: 200 };
-        let (x, y, w, h) = compute_sd_crop(&bbox, 4096, 4096);
+        let (x, y, w, h) = compute_sd_crop(&bbox, 4096, 4096, SD_TILE).unwrap();
         // Crop must fit inside image; right-edge crop starts at img_w - SD_TILE.
         assert_eq!(x + w, 4096, "crop must end at right edge");
         assert_eq!((w, h), (SD_TILE, SD_TILE));
@@ -3767,7 +3820,7 @@ mod tests {
     #[test]
     fn compute_sd_crop_clamps_to_top_left_corner() {
         let bbox = MaskBbox { x_min: 5, y_min: 10, x_max: 50, y_max: 60 };
-        let (x, y, _, _) = compute_sd_crop(&bbox, 4096, 4096);
+        let (x, y, _, _) = compute_sd_crop(&bbox, 4096, 4096, SD_TILE).unwrap();
         // Centre is (27, 35); centre - 256 underflows → saturates at 0.
         assert_eq!(x, 0);
         assert_eq!(y, 0);
@@ -3776,7 +3829,7 @@ mod tests {
     #[test]
     fn compute_sd_crop_shrinks_to_image_for_small_inputs() {
         let bbox = MaskBbox { x_min: 10, y_min: 10, x_max: 100, y_max: 100 };
-        let (x, y, w, h) = compute_sd_crop(&bbox, 200, 300);
+        let (x, y, w, h) = compute_sd_crop(&bbox, 200, 300, SD_TILE).unwrap();
         // Image smaller than SD_TILE on both axes → crop is the whole
         // image.
         assert_eq!((x, y, w, h), (0, 0, 200, 300));
@@ -3785,7 +3838,7 @@ mod tests {
     #[test]
     fn sample_initial_noise_has_correct_shape() {
         let mut rng = ChaCha8Rng::seed_from_u64(0);
-        let n = sample_initial_noise(&mut rng);
+        let n = sample_initial_noise(&mut rng, 64, 64);
         assert_eq!(n.shape(), &[1, 4, SD_LATENT_SIDE as usize, SD_LATENT_SIDE as usize]);
     }
 
