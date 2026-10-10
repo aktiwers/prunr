@@ -16,6 +16,7 @@ use std::sync::OnceLock;
 use std::time::{Duration, SystemTime};
 
 const HISTORY_SUBDIR: &str = "prunr-history";
+/// Age past which a loose file from a pre-per-process build is dropped.
 const STALE_AGE: Duration = Duration::from_secs(30 * 60);
 const ZSTD_LEVEL: i32 = 1; // fastest compression, ~3:1 on RGBA data
 
@@ -73,14 +74,17 @@ pub fn demote_to_disk(entry: &CompressedEntry, item_id: u64, seq: usize) -> std:
     Ok(DiskHistoryEntry { path })
 }
 
-/// Return (and create if needed) the history cache directory.
-/// Cached after first call to avoid repeated getenv + stat syscalls.
+fn history_root() -> PathBuf {
+    dirs::cache_dir().unwrap_or_else(std::env::temp_dir).join(HISTORY_SUBDIR)
+}
+
+/// This process's history directory, `prunr-history/{pid}/`, created on
+/// first use. Per process, so two running instances never share, sweep
+/// or overwrite each other's files (names are only item id and sequence).
 fn cache_dir() -> &'static PathBuf {
     static DIR: OnceLock<PathBuf> = OnceLock::new();
     DIR.get_or_init(|| {
-        let dir = dirs::cache_dir()
-            .unwrap_or_else(std::env::temp_dir)
-            .join(HISTORY_SUBDIR);
+        let dir = history_root().join(std::process::id().to_string());
         let _ = std::fs::create_dir_all(&dir);
         dir
     })
@@ -139,27 +143,30 @@ pub fn delete_entry(entry: &DiskHistoryEntry) {
     let _ = std::fs::remove_file(&entry.path);
 }
 
-/// Remove stale history files left behind by previous sessions or crashes.
+/// Startup housekeeping: drop the history dirs of instances that are no
+/// longer running, and loose files from builds that predate per-process
+/// dirs. Never touches a live session's files: they back undo steps for
+/// as long as the session runs, however old they are.
 pub fn cleanup_stale() {
-    let dir = cache_dir();
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let root = history_root();
+    crate::fs_util::sweep_dead_pid_dirs(&root, "", std::process::id());
+    let Ok(entries) = std::fs::read_dir(&root) else { return };
     let now = SystemTime::now();
     for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_file() { continue; }
-        let Ok(meta) = entry.metadata() else { continue };
-        let age = meta
-            .modified()
-            .ok()
+        if !entry.file_type().ok().is_some_and(|t| t.is_file()) { continue; }
+        let age = entry.metadata().ok()
+            .and_then(|m| m.modified().ok())
             .and_then(|m| now.duration_since(m).ok())
             .unwrap_or(Duration::ZERO);
         if age > STALE_AGE {
-            let _ = std::fs::remove_file(&path);
+            let _ = std::fs::remove_file(entry.path());
         }
     }
 }
 
-/// Remove ALL history files. Called on graceful app exit.
+/// Empty this session's history dir on graceful exit. The dir itself
+/// stays (later writes in this process rely on it) and is removed by the
+/// next startup's sweep once this process is gone.
 pub fn cleanup_all() {
     crate::fs_util::sweep_dir_files_async(cache_dir().clone());
 }
@@ -178,6 +185,20 @@ mod tests {
         assert_eq!(rgba.as_raw(), recovered.as_raw());
         delete_entry(&entry);
         assert!(!entry.path.exists());
+    }
+
+    /// A session's own cold history is in use for as long as the session
+    /// runs, however old the file: the sweep must leave it alone.
+    #[test]
+    fn the_sweep_keeps_this_session_s_history_however_old() {
+        let rgba = image::RgbaImage::from_pixel(4, 4, image::Rgba([1, 2, 3, 255]));
+        let entry = write_history(99998, 0, &rgba).unwrap();
+        let hours_ago = SystemTime::now() - Duration::from_secs(2 * 3600);
+        std::fs::File::options().write(true).open(&entry.path).unwrap().set_modified(hours_ago).unwrap();
+        cleanup_stale();
+        assert!(entry.path.exists(), "an undo step still pointing at this file would be lost");
+        assert!(entry.path.parent().unwrap().ends_with(std::process::id().to_string()), "files live in a per-process dir");
+        delete_entry(&entry);
     }
 
     #[test]
