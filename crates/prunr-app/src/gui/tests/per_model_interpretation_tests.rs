@@ -106,8 +106,8 @@ fn chain_mode_commit_archives_the_pre_stroke_result_for_undo() {
 /// undo entry, and the retune follows the selection it committed.
 #[test]
 fn confidence_change_retunes_the_last_stroke_in_place() {
-    use crate::gui::magic_brush_state::LastDecode;
-    use crate::gui::processor::PromptModifier;
+    use crate::gui::item::LastDecode;
+    use crate::gui::processor::{DecodedSelection, PromptModifier};
     use prunr_core::selection::BrushMode;
     use std::sync::Arc;
     let mut app = app_with_model(SettingsModel::Silueta);
@@ -128,9 +128,9 @@ fn confidence_change_retunes_the_last_stroke_in_place() {
         }
     }
     let output = Arc::new(prunr_core::sam::SamDecoderOutput { masks, iou_predictions: [0.9, 0.1, 0.1] });
-    app.magic_brush_state.last_decode = Some(LastDecode {
-        item_id: 9, output, modifier: PromptModifier::Replace, mode: BrushMode::Add,
-        source_dims: (8, 8), committed_hash: first_hash, confidence: 0.5,
+    app.batch.items[0].last_decode = Some(LastDecode {
+        output, modifier: PromptModifier::Replace, mode: BrushMode::Add,
+        committed_hash: first_hash, confidence: 0.5,
     });
 
     app.settings.brush.magic_confidence_threshold = 0.9;
@@ -142,16 +142,17 @@ fn confidence_change_retunes_the_last_stroke_in_place() {
         assert!(std::time::Instant::now() < deadline, "re-threshold never landed");
         std::thread::sleep(std::time::Duration::from_millis(5));
     };
-    assert!(result.rethreshold);
-    let mask = result.result.expect("re-threshold decodes without a session");
-    app.apply_rethreshold(9, mask, result.confidence);
+    let Ok(DecodedSelection::Retuned { merged, hash }) = result.result else {
+        panic!("re-threshold decodes without a session");
+    };
+    app.apply_rethreshold(9, merged, hash, result.confidence);
 
     let item = &app.batch.items[0];
     let new_hash = item.selection_hash.unwrap();
     assert_ne!(new_hash, first_hash, "the selection follows the knob");
     assert_eq!(item.stroke_undo_stack.len(), 1, "still one undo entry for the stroke");
     assert_eq!(item.actions_undo.len(), 1);
-    let ld = app.magic_brush_state.last_decode.as_ref().unwrap();
+    let ld = item.last_decode.as_ref().unwrap();
     assert_eq!(ld.committed_hash, new_hash);
     assert!((ld.confidence - 0.9).abs() < 1e-6);
     // The retuned selection keeps only the right-hand columns.

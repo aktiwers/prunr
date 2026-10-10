@@ -28,8 +28,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
     // dropdown) is open — otherwise the press that lands on a slider inside
     // the popover would also start panning the canvas, and slider drag would
     // drag both the slider AND the image.
-    #[allow(deprecated)]
-    let popup_open = ui.ctx().memory(|m| m.any_popup_open()) || app.popup_open_at_frame_start;
+    let popup_open = theme::any_popup_open(ui.ctx()) || app.popup_open_at_frame_start;
     // Also check egui's global "wants pointer input" — this is true when any
     // widget (slider, button, text field) is currently capturing the pointer.
     let widget_has_pointer = ui.ctx().egui_wants_pointer_input();
@@ -476,8 +475,9 @@ fn handle_magic_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: 
     }
 }
 
-/// Snapshot everything a decoder run needs at click time: a chip change
-/// while SAM runs must not re-polarise or re-threshold the result.
+/// Snapshot everything a decoder run needs at click time, so a mode
+/// change while SAM runs cannot re-polarise the result. Confidence is
+/// the exception by design: a later change re-thresholds the stroke.
 fn sam_request(
     app: &PrunrApp,
     item_id: u64,
@@ -493,7 +493,7 @@ fn sam_request(
         modifier,
         mode: app.settings.brush.mode,
         source_dims,
-        confidence_threshold: app.settings.brush.magic_confidence_threshold,
+        confidence: app.settings.brush.magic_confidence_threshold,
     }
 }
 

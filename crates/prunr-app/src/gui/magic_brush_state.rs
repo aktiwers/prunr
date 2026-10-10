@@ -7,31 +7,13 @@
 
 use super::brush_state::Trail;
 
-/// The last decoded stroke, kept so the Confidence knob re-thresholds it
-/// in place instead of needing another click.
-pub(crate) struct LastDecode {
-    pub(crate) item_id: u64,
-    pub(crate) output: std::sync::Arc<prunr_core::sam::SamDecoderOutput>,
-    pub(crate) modifier: super::processor::PromptModifier,
-    pub(crate) mode: prunr_core::selection::BrushMode,
-    pub(crate) source_dims: (u32, u32),
-    /// The selection hash the stroke committed. Any other author changing
-    /// the selection breaks the match and ends the retune.
-    pub(crate) committed_hash: u64,
-    pub(crate) confidence: f32,
-}
-
 /// Magic Brush tool coordinator.
 #[derive(Default)]
 pub(crate) struct MagicBrushState {
     active: bool,
-    pub(crate) last_decode: Option<LastDecode>,
     /// A re-threshold is on the pool; the next Confidence value waits for
     /// its result so a drag never queues more than one.
     pub(crate) rethreshold_in_flight: bool,
-    /// An item whose background pre-encode was refused (RAM gate or
-    /// encoder error) while the tool was off; not retried every frame.
-    pub(crate) preencode_skipped: Option<u64>,
     /// True while Processor::dispatch_sam_encoder is in flight for the
     /// current item. Set on dispatch, cleared by pump_sam_encoder_results
     /// when the embedding lands.
@@ -64,7 +46,6 @@ impl MagicBrushState {
     pub fn deactivate(&mut self) {
         self.active = false;
         self.encoder_pending = false;
-        self.last_decode = None;
         self.clear_stroke();
     }
 

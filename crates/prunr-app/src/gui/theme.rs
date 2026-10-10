@@ -1,3 +1,11 @@
+/// Whether an egui popup (chip popover, combo box, color picker) is open.
+/// The legacy popup API is the one the chip popovers use; the deprecation
+/// is isolated here.
+#[allow(deprecated)]
+pub(crate) fn any_popup_open(ctx: &egui::Context) -> bool {
+    ctx.memory(|m| m.any_popup_open())
+}
+
 use egui::{Color32, Stroke};
 
 /// Draw a semi-transparent backdrop behind a modal.
@@ -18,9 +26,7 @@ pub fn backdrop_clicked(ctx: &egui::Context, window_response: &Option<egui::Inne
     if !clicked { return false; }
 
     // If any popup is open (color picker, combo box), don't close
-    #[allow(deprecated)]
-    let popup_open = ctx.memory(|m| m.any_popup_open());
-    if popup_open { return false; }
+    if any_popup_open(ctx) { return false; }
 
     // Check click position is outside the window rect
     let click_pos = ctx.input(|i| i.pointer.interact_pos());
