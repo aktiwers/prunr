@@ -7,6 +7,9 @@ Start the app with PRUNR_CONTROL_PORT=7340 (any free port), then:
     prunrctl.py tree                  # the whole tree as JSON
     prunrctl.py find Settings
     prunrctl.py click Settings        # by readable name; --secondary for right-click
+    prunrctl.py hold Gamma            # press and keep holding (then move / release)
+    prunrctl.py move 40 0             # drag the held pointer by dx dy
+    prunrctl.py release
     prunrctl.py key Mod+Shift+Z       # a chord in the settings form
     prunrctl.py type "hello"
     prunrctl.py intent ToggleQueue    # an action by name
@@ -46,6 +49,11 @@ def main() -> int:
     click = sub.add_parser("click")
     click.add_argument("name")
     click.add_argument("--secondary", action="store_true")
+    sub.add_parser("hold").add_argument("name")
+    mv = sub.add_parser("move")
+    mv.add_argument("dx", type=float)
+    mv.add_argument("dy", type=float)
+    sub.add_parser("release")
     sub.add_parser("key").add_argument("chord")
     sub.add_parser("type").add_argument("text")
     sub.add_parser("intent").add_argument("action")
@@ -61,6 +69,9 @@ def main() -> int:
         "tree": lambda: {"cmd": "tree", "all": True},
         "find": lambda: {"cmd": "find", "name": a.name},
         "click": lambda: {"cmd": "click", "name": a.name, "secondary": a.secondary},
+        "hold": lambda: {"cmd": "hold", "name": a.name},
+        "move": lambda: {"cmd": "move", "dx": a.dx, "dy": a.dy},
+        "release": lambda: {"cmd": "release"},
         "key": lambda: {"cmd": "key", "chord": a.chord},
         "type": lambda: {"cmd": "type", "text": a.text},
         "intent": lambda: {"cmd": "intent", "action": a.action},
