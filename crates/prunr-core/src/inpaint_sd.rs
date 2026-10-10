@@ -120,6 +120,39 @@ pub struct SdInpaintRequest {
     /// than a silent default.
     #[serde(default)]
     pub use_karras_sigmas: bool,
+    /// Measurement switches; see `SdTuning`.
+    #[serde(default)]
+    pub tuning: SdTuning,
+}
+
+/// Pipeline variants under measurement (scripts/sd_bench.sh). Callers
+/// fill it (the GUI from `PRUNR_SD_*` env vars, the bench test from the
+/// same); core only reads it. A session is built for one `batch2` /
+/// `ov_device` pair and cached under that pair.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct SdTuning {
+    /// Pin the UNet session to batch 2 so a guided step is one call. Such
+    /// a session cannot serve an unguided request.
+    pub batch2: bool,
+    /// Leave the bundle to the idle sweep instead of dropping it after
+    /// the stroke.
+    pub keep_loaded: bool,
+    /// OpenVINO device for the SD parts ("CPU", "GPU"); `None` is the
+    /// EP's default, the CPU.
+    pub ov_device: Option<String>,
+}
+
+impl SdTuning {
+    fn session_key(&self) -> SdSessionKey {
+        SdSessionKey { batch2: self.batch2, ov_device: self.ov_device.clone() }
+    }
+}
+
+/// What a built session bundle depends on besides the model.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub(crate) struct SdSessionKey {
+    batch2: bool,
+    ov_device: Option<String>,
 }
 
 fn default_strength() -> f32 { 1.0 }
@@ -136,6 +169,7 @@ impl Default for SdInpaintRequest {
             scheduler: SchedulerKind::Lcm,
             strength: default_strength(),
             use_karras_sigmas: false,
+            tuning: SdTuning::default(),
         }
     }
 }
@@ -230,10 +264,10 @@ pub fn process_inpaint_with(
     // Hold an Arc through the run so the idle sweep can't drop sessions
     // mid-inference.
     let get_started = Instant::now();
-    let bundle = SdSession::get(id)?;
+    let bundle = SdSession::get(id, &req.tuning.session_key())?;
     let session_ms = get_started.elapsed().as_millis() as u64;
-    // RAII drop-on-completion: when this guard goes out of scope (any
-    // return path) the cache's Arc is removed; once `bundle` (declared
+    // RAII drop-on-completion (unless `keep_loaded`): when this guard goes
+    // out of scope (any return path) the cache's Arc is removed; once `bundle` (declared
     // ABOVE so it drops AFTER the guard) drops too, the SdSession's
     // last reference goes away and the ORT bundle releases. Trades
     // first-stroke responsiveness on a repeat for instant RAM reclaim
@@ -245,8 +279,7 @@ pub fn process_inpaint_with(
             release(self.0);
         }
     }
-    // `PRUNR_SD_KEEP_LOADED` leaves the bundle to the idle sweep instead.
-    let _release_guard = (!sd_keep_loaded()).then_some(DropOnComplete(id));
+    let _release_guard = (!req.tuning.keep_loaded).then_some(DropOnComplete(id));
     let run_started = Instant::now();
     // VAE backend selection: TAESD when fast mode is on AND the bundle
     // is installed (the request flag carries that decision from
@@ -303,8 +336,7 @@ pub fn process_inpaint_with(
     if is_cancelled() { return Err(CoreError::Cancelled); }
     tracing::info!(
         tiles = tile_idx, session_ms, run_ms = run_started.elapsed().as_millis() as u64,
-        keep_loaded = sd_keep_loaded(), batch_pinned = bundle.batch_pinned,
-        ov_device = sd_ov_device().unwrap_or("default"),
+        tuning = ?req.tuning,
         "SD: inpaint done",
     );
     Ok(out)
@@ -531,7 +563,7 @@ fn compute_sd_crop(bbox: &MaskBbox, img_w: u32, img_h: u32) -> (u32, u32, u32, u
 /// Eagerly initialise the SD session so the first stroke doesn't pay
 /// the cumulative ~10-30s session-build latency for 4 ONNX files.
 pub fn prewarm(id: prunr_models::ModelId) -> Result<(), CoreError> {
-    SdSession::get(id).map(|_| ())
+    SdSession::get(id, &SdSessionKey::default()).map(|_| ())
 }
 
 // ── Per-tile pipeline ───────────────────────────────────────────────────
@@ -555,6 +587,11 @@ fn run_one_tile(
     // uncond) and blend by `guidance_scale`. At ≤1.0 the cond pass is
     // all the user wants, so we skip the second to halve UNet cost.
     let use_cfg = req.guidance_scale > 1.0 + 1e-3;
+    if bundle.batch_pinned && !use_cfg {
+        return Err(CoreError::Inference(
+            "SD: a batch-2 session serves guided requests only (guidance above 1)".into(),
+        ));
+    }
 
     // Pre-loop independent ops in parallel: text encode (cond + uncond
     // when CFG), VAE encode, mask-to-latent. Each ORT call holds a
@@ -675,11 +712,10 @@ fn run_one_tile(
     // mem::swap reuses the allocation across steps (no per-step alloc).
     let mut step_out_buf: Vec<f32> = Vec::with_capacity(latent_buf.len());
     let loop_started = Instant::now();
-    let mut steps_run = 0u32;
+    let steps_run = timesteps.len().saturating_sub(t_start) as u32;
     // Skip the first `t_start` entries when strength<1: those are
     // the high-noise steps we're bypassing.
     for (i, &t) in timesteps.iter().enumerate().skip(t_start) {
-        steps_run += 1;
         // Check cancel between UNet steps. ORT has no per-op cancel, so
         // worst-case latency on cancel is one UNet step (multi-second).
         if is_cancelled() {
@@ -869,10 +905,11 @@ pub(crate) struct SdSession {
     /// a static batch=1. Subsequent CFG steps skip the batched attempt
     /// and call `unet_step` twice instead. Once flipped per process,
     /// stays flipped for the session's lifetime; cleared on session
-    /// rebuild (idle release).
+    /// rebuild (idle release). Never set on a `batch_pinned` session,
+    /// where a batched failure is an error.
     cfg_fallback_to_sequential: std::sync::atomic::AtomicBool,
-    /// The UNet session was built for batch 2 only (`PRUNR_SD_BATCH2`), so
-    /// every call goes through the batched path.
+    /// The UNet session was built for batch 2 only (`SdTuning::batch2`):
+    /// guided steps make one call and an unguided request is refused.
     batch_pinned: bool,
     /// CLIP embeddings by prompt, in f16. The encoder is deterministic, so
     /// a repeated prompt (every tile, every stroke) skips it. Bounded by
@@ -882,30 +919,6 @@ pub(crate) struct SdSession {
 
 const TEXT_CACHE_ENTRIES: usize = 8;
 
-/// Measurement switches for the SD pipeline (scripts/sd_bench.sh): read
-/// once per process, so a session built under one setting stays
-/// consistent with the calls made on it.
-fn sd_env_flag(name: &'static str) -> bool {
-    std::env::var_os(name).is_some_and(|v| v == "1")
-}
-
-fn sd_batch2_requested() -> bool {
-    static FLAG: OnceLock<bool> = OnceLock::new();
-    *FLAG.get_or_init(|| sd_env_flag("PRUNR_SD_BATCH2"))
-}
-
-fn sd_keep_loaded() -> bool {
-    static FLAG: OnceLock<bool> = OnceLock::new();
-    *FLAG.get_or_init(|| sd_env_flag("PRUNR_SD_KEEP_LOADED"))
-}
-
-/// OpenVINO device for the SD parts ("CPU", "GPU"); unset leaves the EP's
-/// default, which is the CPU.
-fn sd_ov_device() -> Option<&'static str> {
-    static DEV: OnceLock<Option<String>> = OnceLock::new();
-    DEV.get_or_init(|| std::env::var("PRUNR_SD_OV_DEVICE").ok().filter(|s| !s.is_empty()))
-        .as_deref()
-}
 
 /// `Arc<T>` so idle eviction can drop the cache's ref while in-flight
 /// callers keep their own clone — no use-after-free.
@@ -929,7 +942,7 @@ pub(crate) struct CacheEntry<T> {
 /// nearly OOMing the box (`SD session bundle dropped` immediately after
 /// `SD session bundle loaded` in the trace).
 type SdBundleSlot = Arc<std::sync::OnceLock<Result<Arc<SdSession>, String>>>;
-type SdCache = HashMap<prunr_models::ModelId, CacheEntry<SdBundleSlot>>;
+type SdCache = HashMap<(prunr_models::ModelId, SdSessionKey), CacheEntry<SdBundleSlot>>;
 
 fn sd_cache() -> &'static Mutex<SdCache> {
     static CACHE: OnceLock<Mutex<SdCache>> = OnceLock::new();
@@ -947,7 +960,9 @@ fn sd_cache() -> &'static Mutex<SdCache> {
 pub(crate) fn release(id: prunr_models::ModelId) {
     let cache = sd_cache();
     let mut guard = cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    if guard.remove(&id).is_some() {
+    let before = guard.len();
+    guard.retain(|(cached, _), _| *cached != id);
+    if guard.len() < before {
         tracing::info!(?id, "SD: cache entry released after dispatch");
     }
 }
@@ -957,8 +972,8 @@ pub(crate) fn release(id: prunr_models::ModelId) {
 /// sweep without spinning up a real ORT session.
 ///
 /// `pub(crate)` so `inpaint::LamaSession`'s sweeper reuses this directly.
-pub(crate) fn sweep_idle<T>(
-    cache: &mut HashMap<prunr_models::ModelId, CacheEntry<T>>,
+pub(crate) fn sweep_idle<K: std::hash::Hash + Eq, T>(
+    cache: &mut HashMap<K, CacheEntry<T>>,
     now: Instant,
     idle: Duration,
 ) -> usize {
@@ -1005,7 +1020,7 @@ fn ensure_sweeper_running() {
 }
 
 impl SdSession {
-    fn get(id: prunr_models::ModelId) -> Result<Arc<SdSession>, CoreError> {
+    fn get(id: prunr_models::ModelId, key: &SdSessionKey) -> Result<Arc<SdSession>, CoreError> {
         ensure_sweeper_running();
         let cache = sd_cache();
         let now = Instant::now();
@@ -1024,7 +1039,7 @@ impl SdSession {
                     "SD: released idle session bundle(s)",
                 );
             }
-            let entry = guard.entry(id).or_insert_with(|| CacheEntry {
+            let entry = guard.entry((id, key.clone())).or_insert_with(|| CacheEntry {
                 value: Arc::new(std::sync::OnceLock::new()),
                 last_used: now,
             });
@@ -1039,12 +1054,12 @@ impl SdSession {
         };
 
         // Build outside the cache lock — see `SdBundleSlot` docs.
-        slot.get_or_init(|| Self::new_inner(id).map(Arc::new))
+        slot.get_or_init(|| Self::new_inner(id, key).map(Arc::new))
             .clone()
             .map_err(CoreError::Inference)
     }
 
-    fn new_inner(id: prunr_models::ModelId) -> Result<SdSession, String> {
+    fn new_inner(id: prunr_models::ModelId, session_key: &SdSessionKey) -> Result<SdSession, String> {
         // Defense-in-depth: prewarm builds bypass `process_inpaint_with`,
         // so the gate has to fire here too. Same helper as the dispatch
         // entry — single source of truth for threshold + wording.
@@ -1071,7 +1086,7 @@ impl SdSession {
 
         let build = |&(key, smoke): &(&'static str, SmokeFn)|
             -> Result<(&'static str, Session, String), String> {
-                let (s, ep) = build_part_with_ep_ladder(id, key, &by_key, smoke)?;
+                let (s, ep) = build_part_with_ep_ladder(id, key, &by_key, smoke, session_key)?;
                 Ok((key, s, ep))
             };
 
@@ -1125,7 +1140,7 @@ impl SdSession {
             vae_decoder_input,
             text_encoder_input,
             cfg_fallback_to_sequential: std::sync::atomic::AtomicBool::new(false),
-            batch_pinned: sd_batch2_requested(),
+            batch_pinned: session_key.batch2,
             text_cache: Mutex::new(Vec::new()),
         })
     }
@@ -1140,6 +1155,7 @@ fn build_part_with_ep_ladder(
     key: &str,
     by_key: &HashMap<&str, PathBuf>,
     smoke_test: fn(&mut Session, &str) -> Result<(), String>,
+    session_key: &SdSessionKey,
 ) -> Result<(Session, String), String> {
     let path = by_key.get(key)
         .ok_or_else(|| format!("SD bundle missing required part: {key}"))?;
@@ -1174,7 +1190,7 @@ fn build_part_with_ep_ladder(
             }
             _ => builder,
         };
-        let builder = if key == "unet" && sd_batch2_requested() {
+        let builder = if key == "unet" && session_key.batch2 {
             match builder.with_dimension_override("batch", 2) {
                 Ok(b) => b,
                 Err(_) => {
@@ -1222,7 +1238,7 @@ fn build_part_with_ep_ladder(
                     let mut p = ort::execution_providers::OpenVINOExecutionProvider::default()
                         .with_num_streams(1)
                         .with_dynamic_shapes(false);
-                    if let Some(dev) = sd_ov_device() {
+                    if let Some(dev) = &session_key.ov_device {
                         p = p.with_device_type(dev);
                     }
                     p.build()
@@ -1458,6 +1474,10 @@ fn text_embedding_f16(bundle: &SdSession, prompt: &str) -> Result<Arc<Array3<f16
     }
     let emb = Arc::new(f32_to_f16_3d(&encode_text(bundle, prompt)?));
     let mut cache = bundle.text_cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    // Cond and uncond encode in parallel; the same prompt twice keeps one.
+    if let Some((_, e)) = cache.iter().find(|(p, _)| p == prompt) {
+        return Ok(Arc::clone(e));
+    }
     if cache.len() >= TEXT_CACHE_ENTRIES {
         cache.remove(0);
     }
@@ -1573,11 +1593,6 @@ fn unet_step(
     t: i64,
     text_emb_f16: &Array3<f16>,
 ) -> Result<Array4<f32>, CoreError> {
-    if bundle.batch_pinned {
-        // The session accepts batch 2 only: run the prompt twice, keep one.
-        let pair = unet_step_batched(bundle, &latent_9ch_f16, t, text_emb_f16, text_emb_f16)?;
-        return Ok(pair.slice(ndarray::s![0..1, .., .., ..]).to_owned());
-    }
     // Timestep is integer-valued at the diffusers level but flows through
     // sinusoidal embeddings inside the UNet, so the f16 cast is precision-
     // safe (timesteps fit in the f16 mantissa for SD's 1000-step grid).
