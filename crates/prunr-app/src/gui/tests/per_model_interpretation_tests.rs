@@ -330,3 +330,72 @@ fn bg_removal_without_tensor_waits_until_a_result_lands() {
         "once a tensor exists the waiting selection must be applied"
     );
 }
+
+// ── Strokes undo and redo on their own ──────────────────────────────────────
+//
+// A stroke is one step in the one history whatever the model and whether
+// or not a result exists yet. Only a stroke that archived a pre-stroke
+// result (chain mode) brings that result back with it.
+
+#[test]
+fn a_stroke_before_the_first_result_undoes_and_redoes() {
+    let ctx = egui::Context::default();
+    let mut app = app_with_model(SettingsModel::BiRefNetLite);
+    let item = push_test_item(&mut app, 3);
+    item.dimensions = (8, 8);
+    app.commit_selection_and_dispatch(3, make_mask(8, 8));
+    assert!(app.batch.items[0].selection_mask.is_some());
+
+    app.handle_undo(&ctx);
+    assert!(app.batch.items[0].selection_mask.is_none(), "undo reverts the stroke");
+    assert_eq!(app.batch.items[0].status, crate::gui::item::BatchStatus::Pending, "and touches no result");
+
+    app.handle_redo(&ctx);
+    assert!(app.batch.items[0].selection_mask.is_some(), "redo paints it again");
+}
+
+#[test]
+fn an_eraser_stroke_undo_keeps_the_result() {
+    use std::sync::Arc;
+    let ctx = egui::Context::default();
+    let mut app = app_with_model(SettingsModel::Inpaint);
+    let item = push_test_item(&mut app, 4);
+    item.dimensions = (8, 8);
+    item.status = crate::gui::item::BatchStatus::Done;
+    item.result_rgba = Some(Arc::new(image::RgbaImage::new(8, 8)));
+    app.commit_selection_and_dispatch(4, make_mask(8, 8));
+
+    app.handle_undo(&ctx);
+    let item = &app.batch.items[0];
+    assert!(item.selection_mask.is_none(), "the region stroke is undone");
+    assert!(item.result_rgba.is_some() && item.status == crate::gui::item::BatchStatus::Done, "the result stays");
+}
+
+#[test]
+fn a_chain_mode_stroke_undo_brings_the_archived_result_back() {
+    use std::sync::Arc;
+    let ctx = egui::Context::default();
+    let mut app = app_with_model(SettingsModel::Silueta);
+    app.settings.chain_mode = true;
+    let item = push_test_item(&mut app, 5);
+    item.dimensions = (8, 8);
+    item.status = crate::gui::item::BatchStatus::Done;
+    let before = Arc::new(image::RgbaImage::new(8, 8));
+    item.source_rgba = Some(Arc::new(image::RgbaImage::new(8, 8)));
+    item.result_rgba = Some(Arc::clone(&before));
+    give_tensor(item);
+    app.commit_selection_and_dispatch(5, make_mask(8, 8));
+    // The re-cut replaced the result in place.
+    app.batch.items[0].result_rgba = Some(Arc::new(image::RgbaImage::new(8, 8)));
+
+    app.handle_undo(&ctx);
+    let item = &app.batch.items[0];
+    assert!(item.selection_mask.is_none());
+    assert!(item.result_rgba.as_ref().is_some_and(|r| Arc::ptr_eq(r, &before)), "the pre-stroke image is back");
+    assert_eq!(item.status, crate::gui::item::BatchStatus::Done);
+
+    app.handle_redo(&ctx);
+    let item = &app.batch.items[0];
+    assert!(item.selection_mask.is_some());
+    assert!(item.result_rgba.as_ref().is_some_and(|r| !Arc::ptr_eq(r, &before)), "redo restores the re-cut");
+}

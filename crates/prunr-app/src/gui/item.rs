@@ -50,10 +50,16 @@ const STROKE_HISTORY_DEPTH: usize = 32;
 
 /// Push a snapshot; returns `true` when the oldest one was dropped to
 /// stay within `STROKE_HISTORY_DEPTH`.
-fn push_stroke_bounded(
-    stack: &mut VecDeque<Option<Arc<prunr_core::selection::MaskArtifact>>>,
-    snap: Option<Arc<prunr_core::selection::MaskArtifact>>,
-) -> bool {
+/// One stroke's place in the history: the selection it replaced, and
+/// whether its re-cut archived the pre-stroke image (chain mode), which
+/// an undo then brings back instead of re-cutting.
+#[derive(Clone)]
+pub(crate) struct StrokeSnapshot {
+    pub(crate) plane: Option<Arc<prunr_core::selection::MaskArtifact>>,
+    pub(crate) result_archived: bool,
+}
+
+fn push_stroke_bounded(stack: &mut VecDeque<StrokeSnapshot>, snap: StrokeSnapshot) -> bool {
     stack.push_back(snap);
     let mut dropped = false;
     while stack.len() > STROKE_HISTORY_DEPTH {
@@ -323,8 +329,8 @@ pub(crate) struct BatchItem {
     /// Bounded to STROKE_HISTORY_DEPTH; oldest entries dropped when full.
     /// Snapshots live at source resolution so Paint Brush and Magic Brush
     /// share one undo stack.
-    pub(crate) stroke_undo_stack: VecDeque<Option<Arc<prunr_core::selection::MaskArtifact>>>,
-    pub(crate) stroke_redo_stack: VecDeque<Option<Arc<prunr_core::selection::MaskArtifact>>>,
+    pub(crate) stroke_undo_stack: VecDeque<StrokeSnapshot>,
+    pub(crate) stroke_redo_stack: VecDeque<StrokeSnapshot>,
     /// Ordering layer: commit-order sequence of action types. Each entry is a
     /// tag pointing at the per-type stack that holds the corresponding pre-state.
     /// `handle_undo` pops from the back (most-recent) and dispatches; new commits
@@ -526,7 +532,7 @@ impl BatchItem {
         }
         let pre = self.selection_mask.replace(mask);
         self.selection_hash = Some(hash);
-        if push_stroke_bounded(&mut self.stroke_undo_stack, pre) {
+        if push_stroke_bounded(&mut self.stroke_undo_stack, StrokeSnapshot { plane: pre, result_archived: false }) {
             // The dropped snapshot's marker would otherwise undo nothing.
             if let Some(pos) = self.actions_undo.iter().position(|a| matches!(a, ActionType::Stroke)) {
                 self.actions_undo.remove(pos);
@@ -539,7 +545,14 @@ impl BatchItem {
 
     /// The selection the last stroke commit replaced.
     pub(crate) fn pre_stroke_selection(&self) -> Option<Arc<prunr_core::selection::MaskArtifact>> {
-        self.stroke_undo_stack.back().cloned().flatten()
+        self.stroke_undo_stack.back().and_then(|s| s.plane.clone())
+    }
+
+    /// The last stroke's re-cut archived the pre-stroke image.
+    pub(crate) fn mark_last_stroke_archived(&mut self) {
+        if let Some(last) = self.stroke_undo_stack.back_mut() {
+            last.result_archived = true;
+        }
     }
 
     /// Replace the selection without touching the stroke history: a retune
@@ -568,7 +581,7 @@ impl BatchItem {
     /// reversible) and explicitly drops the action marker.
     pub(crate) fn revert_last_stroke_commit(&mut self) {
         if let Some(prev) = self.stroke_undo_stack.pop_back() {
-            self.selection_mask = prev;
+            self.selection_mask = prev.plane;
             self.selection_hash = self.selection_mask.as_ref().map(|m| m.content_hash());
         }
         // Pop the matching marker. rposition handles edge cases where
@@ -581,26 +594,26 @@ impl BatchItem {
         }
     }
 
-    /// Pop the last stroke snapshot, push the current state onto the
-    /// redo stack, and restore the snapshot. Returns `true` if anything
-    /// changed (caller invalidates caches and re-dispatches).
-    pub(crate) fn undo_stroke(&mut self) -> bool {
-        let Some(prev) = self.stroke_undo_stack.pop_back() else { return false };
-        let current = self.selection_mask.clone();
+    /// Steps the selection back one stroke. `Some(result_archived)` when
+    /// a stroke was there to undo, so the caller knows whether to bring
+    /// the archived image back or to re-cut.
+    pub(crate) fn undo_stroke(&mut self) -> Option<bool> {
+        let prev = self.stroke_undo_stack.pop_back()?;
+        let current = StrokeSnapshot { plane: self.selection_mask.clone(), result_archived: prev.result_archived };
         push_stroke_bounded(&mut self.stroke_redo_stack, current);
-        self.selection_mask = prev;
+        self.selection_mask = prev.plane;
         self.selection_hash = self.selection_mask.as_ref().map(|m| m.content_hash());
-        true
+        Some(prev.result_archived)
     }
 
     /// Inverse of `undo_stroke`.
-    pub(crate) fn redo_stroke(&mut self) -> bool {
-        let Some(next) = self.stroke_redo_stack.pop_back() else { return false };
-        let current = self.selection_mask.clone();
+    pub(crate) fn redo_stroke(&mut self) -> Option<bool> {
+        let next = self.stroke_redo_stack.pop_back()?;
+        let current = StrokeSnapshot { plane: self.selection_mask.clone(), result_archived: next.result_archived };
         push_stroke_bounded(&mut self.stroke_undo_stack, current);
-        self.selection_mask = next;
+        self.selection_mask = next.plane;
         self.selection_hash = self.selection_mask.as_ref().map(|m| m.content_hash());
-        true
+        Some(next.result_archived)
     }
 
     // Test-only — non-test paths use the unified actions_undo/redo log
@@ -1204,7 +1217,7 @@ mod tests {
         item.commit_selection_mask(make_mask(2, 8, 8));
         assert_ne!(item.selection_hash, after_first_hash, "second stroke changed hash");
 
-        assert!(item.undo_stroke(), "stroke 2 must be undoable");
+        assert!(item.undo_stroke().is_some(), "stroke 2 must be undoable");
         assert_eq!(item.selection_hash, after_first_hash, "undo restored the post-stroke-1 hash");
         assert!(item.has_stroke_redo(), "undone stroke goes onto the redo stack");
     }
@@ -1217,7 +1230,7 @@ mod tests {
         let after_two_hash = item.selection_hash;
 
         item.undo_stroke();
-        assert!(item.redo_stroke(), "redo available after undo");
+        assert!(item.redo_stroke().is_some(), "redo available after undo");
         assert_eq!(item.selection_hash, after_two_hash, "redo replays the second selection");
     }
 
