@@ -163,3 +163,52 @@ fn bracket_keys_step_the_brush_size() {
     settle(&mut h);
     assert!(h.state().settings.brush.radius < larger, "[ shrinks it");
 }
+
+#[test]
+fn applying_a_preset_closes_the_popover() {
+    let mut h = loaded();
+    click(&mut h, "Preset");
+    assert!(egui::Popup::is_any_open(&h.ctx));
+    click(&mut h, "Prunr");
+    assert!(!egui::Popup::is_any_open(&h.ctx), "a pick closes a set-and-go popover");
+}
+
+#[test]
+fn the_save_preset_dialog_is_a_modal_that_escape_closes() {
+    use super::tree_tests::{assert_all_controls_named, names};
+    let mut h = loaded();
+    {
+        let item = &mut h.state_mut().batch.items[0];
+        item.selection_mask = Some(std::sync::Arc::new(prunr_core::selection::MaskArtifact::from_cells(1, 1, vec![100])));
+    }
+    click(&mut h, "Preset");
+    click(&mut h, "Save current as…");
+    assert!(!egui::Popup::is_any_open(&h.ctx), "opening the dialog closed the popover");
+    let present = names(&h);
+    for n in ["Save", "Cancel", "Close window"] {
+        assert!(present.iter().any(|x| x == n), "{n} missing: {present:?}");
+    }
+    assert_all_controls_named(&h, "save preset dialog");
+    h.key_press(egui::Key::Escape);
+    settle(&mut h);
+    assert!(!names(&h).iter().any(|x| x == "Close window"), "Escape closed the dialog");
+    assert!(h.state().batch.items[0].selection_mask.is_some(), "and kept the selection");
+}
+
+#[test]
+fn escape_closes_a_modal_before_touching_the_selection() {
+    let mut h = loaded();
+    {
+        let app = h.state_mut();
+        app.batch.items[0].selection_mask = Some(std::sync::Arc::new(prunr_core::selection::MaskArtifact::from_cells(1, 1, vec![100])));
+        app.model_store = Some(crate::gui::views::adjustments_toolbar::ModelStoreRequest { filter: None });
+    }
+    settle(&mut h);
+    h.key_press(egui::Key::Escape);
+    settle(&mut h);
+    assert!(h.state().model_store.is_none(), "Escape closed the Model Store");
+    assert!(h.state().batch.items[0].selection_mask.is_some(), "the selection survived");
+    h.key_press(egui::Key::Escape);
+    settle(&mut h);
+    assert!(h.state().batch.items[0].selection_mask.is_none(), "the next Escape clears it");
+}
