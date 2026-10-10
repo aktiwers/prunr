@@ -94,8 +94,12 @@ enum Outcome {
     After(u32, Response),
 }
 
-/// Cap on the idle repaint rate while a reply is pending.
+/// Frame pacing while a reply is pending.
 const FRAME_INTERVAL: std::time::Duration = std::time::Duration::from_millis(16);
+/// How often an idle window checks the inbox. The socket thread's
+/// `request_repaint` is not enough: Wayland compositors drop wake-ups
+/// from other threads while the window is idle, so the UI thread polls.
+const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
 
 pub struct Automation {
     tree: tree::Mirror,
@@ -217,6 +221,7 @@ pub fn pump(app: &mut PrunrApp, ctx: &egui::Context) {
         false
     });
     while let Ok(Pending { request, reply }) = auto.inbox.try_recv() {
+        tracing::debug!(?request, "control request");
         match auto.execute(app, ctx, request) {
             Outcome::Now(response) => {
                 let _ = reply.send(response);
@@ -226,9 +231,7 @@ pub fn pump(app: &mut PrunrApp, ctx: &egui::Context) {
             }
         }
     }
-    if auto.busy() {
-        ctx.request_repaint_after(FRAME_INTERVAL);
-    }
+    ctx.request_repaint_after(if auto.busy() { FRAME_INTERVAL } else { POLL_INTERVAL });
     app.automation = Some(auto);
 }
 
