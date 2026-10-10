@@ -78,6 +78,20 @@ prunr/
 
 **Adding state:** before adding a new field to `PrunrApp`, ask which coordinator owns the domain — new business state belongs on a coordinator; `PrunrApp` only adds UI visibility flags and transient view state.
 
+## Secondary surfaces
+
+Every popover, panel and dialog is one of five kinds, chosen by how the user works with it (after artcraft's placement rules):
+
+| Kind | Mechanism | Used for |
+|---|---|---|
+| Tool strip | `egui::Area` over the top of the canvas while a brush tool is on (`views/tool_strip.rs`); no close, the tool's toggle removes it | The knobs touched every stroke: mode, size, hardness, opacity or expand/blend; size, confidence, shape |
+| Flyout | `chip::flyout_for` / `GroupChip { live: true }`: pinned popover; its chip, Escape or another chip closes it; fades to 12 % while a slider is held | Knobs that change the image while open: Mask, Lines, Fill style, Background, Refine, the strip's full panels |
+| Popover | `chip::popup_for`: closes on a click outside; a single pick closes it | Set-and-go choices: Model, Preset, Quality, Scale, Prompt, Advanced, Help |
+| Modal | `theme::standard_modal_window`: backdrop, close button, Escape, in `PrunrApp::open_modals` | Rare and global: Settings, Model Store, licence, runtime prompt, references, Save preset |
+| Status | Painted on the canvas edge or corner | Progress banner and pill, Magic "Preparing", toasts |
+
+The canvas stays live under strips and flyouts (`theme::dismissable_popup_open` is what holds it still, and only for popovers), and Escape does one thing per press: close the open popup or dialog, else the top-most modal, else cancel a run, else clear the selection (`PrunrApp::perform(Cancel)`). `gui/tests/surface_tests.rs` pins these contracts.
+
 ## Automation
 
 The app can be driven without a person at the keyboard, from two sides that share one mechanism.
