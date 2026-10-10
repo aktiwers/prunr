@@ -24,6 +24,39 @@ pub(crate) fn sweep_dir_files_async(dir: std::path::PathBuf) {
     std::thread::spawn(move || sweep_dir_files(&dir));
 }
 
+/// Remove `{prefix}{pid}` dirs directly inside `parent` whose owning
+/// process is no longer running, sparing `self_pid`. A crash or OOM kill
+/// skips graceful cleanup, so without this such dirs pile up forever.
+///
+/// Liveness is `/proc/{pid}` on Linux. Other platforms fall back to
+/// "untouched for more than 24 h", conservative enough not to clobber a
+/// concurrent prunr instance.
+pub(crate) fn sweep_dead_pid_dirs(parent: &Path, prefix: &str, self_pid: u32) {
+    let Ok(entries) = std::fs::read_dir(parent) else { return };
+    for entry in entries.flatten() {
+        if !entry.file_type().ok().is_some_and(|t| t.is_dir()) { continue; }
+        let name_os = entry.file_name();
+        let Some(name) = name_os.to_str() else { continue };
+        let Some(pid_str) = name.strip_prefix(prefix) else { continue };
+        let Ok(other_pid) = pid_str.parse::<u32>() else { continue };
+        if other_pid == self_pid || !is_pid_dead(other_pid, &entry) { continue; }
+        let _ = std::fs::remove_dir_all(entry.path());
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn is_pid_dead(pid: u32, _entry: &std::fs::DirEntry) -> bool {
+    !Path::new(&format!("/proc/{pid}")).exists()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn is_pid_dead(_pid: u32, entry: &std::fs::DirEntry) -> bool {
+    let Ok(meta) = entry.metadata() else { return false };
+    let Ok(modified) = meta.modified() else { return false };
+    let Ok(age) = modified.elapsed() else { return false };
+    age > std::time::Duration::from_secs(86_400)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
