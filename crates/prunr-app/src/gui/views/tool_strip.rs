@@ -6,6 +6,7 @@ use egui_material_icons::icons::ICON_MORE_HORIZ;
 
 use crate::gui::brush_state::{BrushSettings, BRUSH_RADIUS_RANGE};
 use crate::gui::theme;
+use crate::gui::views::shortcuts::Action;
 
 use super::brush_chip::{self, BrushChipOutcome, BRUSH_MODES, BRUSH_SHAPES};
 use super::{chip, fmt, magic_brush_chip};
@@ -46,7 +47,7 @@ pub(crate) struct StripFacts {
     /// their own; `None` hides the Auto-apply switch.
     pub protect: Option<bool>,
     pub encoder_pending: bool,
-    /// A selection is painted and Auto-apply is off: offer Apply.
+    /// A painted selection waits for the user: offer Apply.
     pub strokes_waiting: bool,
 }
 
@@ -71,12 +72,12 @@ pub(crate) fn render(ui: &mut Ui, canvas_rect: Rect, tool: Tool, brush: &mut Bru
                     };
                     if facts.strokes_waiting {
                         ui.separator();
-                        let apply = chip::tooltip(
-                            chip::button(ui, chip::ButtonKind::Primary, "Apply strokes"),
-                            "Apply strokes",
-                            "Run the model with the painted selection. Auto-apply in the panel does this on every stroke.",
-                            None,
-                        );
+                        let body = if facts.is_inpaint {
+                            "Erase the painted region."
+                        } else {
+                            "Run the model with the painted selection. Auto-apply in the panel does this on every stroke."
+                        };
+                        let apply = chip::tooltip(chip::button(ui, chip::ButtonKind::Primary, "Apply strokes"), "Apply strokes", body, Some(Action::Process));
                         change.apply_requested |= apply.clicked();
                     }
                     ui.separator();
