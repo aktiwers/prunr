@@ -13,6 +13,8 @@
 #   dyn     OpenVINO with dynamic shapes (PRUNR_SD_OV_DYNAMIC=1)
 #   t4      OpenVINO CPU plugin on 4 threads (PRUNR_SD_OV_THREADS=4)
 #   tall    dynamic shapes and one 512×768 crop instead of two tiles
+#   opt0    ONNX Runtime graph optimiser off (PRUNR_SD_ORT_OPT=0)
+#   opt0tall  opt0 with the tall crop
 set -u
 cd "$(dirname "$0")/.."
 variants=("$@")
@@ -32,6 +34,8 @@ for v in "${variants[@]}"; do
     dyn)    run dyn PRUNR_SD_OV_DYNAMIC=1 ;;
     t4)     run t4 PRUNR_SD_OV_THREADS=4 ;;
     tall)   run tall PRUNR_SD_OV_DYNAMIC=1 PRUNR_SD_TALL_CROP=1 ;;
+    opt0)   run opt0 PRUNR_SD_ORT_OPT=0 ;;
+    opt0tall) run opt0tall PRUNR_SD_ORT_OPT=0 PRUNR_SD_OV_DYNAMIC=1 PRUNR_SD_TALL_CROP=1 ;;
     *) echo "unknown variant: $v" ;;
   esac
 done
