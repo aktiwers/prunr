@@ -27,12 +27,15 @@ pub struct EraserRowChange {
 }
 
 /// Render the SD-eraser chips. Caller decides placement.
-pub fn render(ui: &mut egui::Ui, app_settings: &mut Settings) -> EraserRowChange {
+pub(crate) fn render(
+    ui: &mut egui::Ui,
+    app_settings: &mut Settings,
+    installed: crate::gui::hardware_cache::HardwareInstallCache,
+) -> EraserRowChange {
     let mut change = EraserRowChange::default();
-    let lcm_bundle_installed = Settings::can_select_lcm_scheduler();
-    change.committed |= render_quality_preset_chip(ui, app_settings, lcm_bundle_installed);
+    change.committed |= render_quality_preset_chip(ui, app_settings, installed.lcm_bundle);
     change.committed |= render_prompt_chip(ui, &mut app_settings.brush);
-    change.committed |= render_advanced_group(ui, app_settings, lcm_bundle_installed);
+    change.committed |= render_advanced_group(ui, app_settings, installed.lcm_bundle, installed.taesd);
     change
 }
 
@@ -47,8 +50,7 @@ fn steps_range(brush: &mut BrushSettings) -> (u32, u32) {
     (max, if lcm { 8 } else { 20 })
 }
 
-fn render_advanced_group(ui: &mut egui::Ui, app_settings: &mut Settings, lcm_bundle_installed: bool) -> bool {
-    let taesd_installed = prunr_models::is_available(prunr_models::ModelId::TaesdFp16);
+fn render_advanced_group(ui: &mut egui::Ui, app_settings: &mut Settings, lcm_bundle_installed: bool, taesd_installed: bool) -> bool {
     let (max_steps, default_steps) = steps_range(&mut app_settings.brush);
     let brush = &app_settings.brush;
     let tuned = usize::from(brush.sd_steps != default_steps)

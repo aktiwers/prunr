@@ -306,7 +306,7 @@ impl PrunrApp {
             pending_license_request: None,
             pending_onboarding_toast: None,
             runtime_install: None,
-            hardware_install_cache: super::hardware_cache::HardwareInstallCache::default(),
+            hardware_install_cache: super::hardware_cache::HardwareInstallCache::refresh(),
             runtime_prompt: None,
             runtime_prompt_evaluated: false,
             popup_open_at_frame_start: false,
@@ -1492,11 +1492,13 @@ impl PrunrApp {
                     let name = prunr_models::descriptor(id)
                         .map_or("Model", |d| d.display_name);
                     self.toasts.success(format!("{name} ready"));
+                    self.hardware_install_cache = super::hardware_cache::HardwareInstallCache::refresh();
                 }
                 DownloadEvent::Failed { id, error, .. } => {
                     let name = prunr_models::descriptor(id)
                         .map_or("Model", |d| d.display_name);
                     self.toasts.error(format!("{name} download failed: {error}"));
+                    self.hardware_install_cache = super::hardware_cache::HardwareInstallCache::refresh();
                 }
                 DownloadEvent::Progress { .. } | DownloadEvent::Verifying { .. } => {}
             }
@@ -3777,6 +3779,7 @@ impl PrunrApp {
                     source_dims,
                     has_selection: item.selection_mask.is_some(),
                     protect_selection: settings_ref.protect_selection,
+                    installed: self.hardware_install_cache,
                     show_original: self.show_original,
                     has_result: item.has_result(),
                 };
