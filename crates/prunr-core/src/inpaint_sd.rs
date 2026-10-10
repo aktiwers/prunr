@@ -178,8 +178,16 @@ pub fn plan_tuning(id: prunr_models::ModelId, keep_loaded: bool, margin_mb: u64)
 /// `plan_tuning` with the RAM facts passed in. Unknown free RAM counts
 /// as enough, as in `check_ram_for`.
 fn plan_with(id: prunr_models::ModelId, keep_loaded: bool, margin_mb: u64, available_mb: Option<u64>, resident: bool) -> SdTuning {
-    let tall_crop = available_mb.is_none_or(|free| free >= ram_need_mb(id, margin_mb, resident, true));
+    let tall_crop = accepts_tall_crop(id)
+        && available_mb.is_none_or(|free| free >= ram_need_mb(id, margin_mb, resident, true));
     SdTuning { keep_loaded, ov_device: None, tall_crop, margin_mb }
+}
+
+/// Whether the bundle's UNet takes a crop other than 512². The LCM
+/// export hard-codes batch 1 and a 64×64 latent in hundreds of reshape
+/// constants, so it runs tiles only; the SD 1.5 export is dynamic.
+fn accepts_tall_crop(id: prunr_models::ModelId) -> bool {
+    matches!(id, prunr_models::ModelId::SdV15InpaintFp16)
 }
 
 /// Free RAM a stroke needs: the model's working set unless its bundle
@@ -3841,6 +3849,8 @@ mod tests {
         assert!(plan_with(id, false, m, Some(m + SD_TALL_CROP_EXTRA_MB), true).tall_crop, "resident: the extra alone decides");
         let t = plan_with(id, true, m, Some(base), false);
         assert!(t.keep_loaded && !t.tall_crop && t.ov_device.is_none() && t.margin_mb == m);
+        let lcm = prunr_models::ModelId::SdV15LcmInpaintFp16;
+        assert!(!plan_with(lcm, false, m, None, false).tall_crop, "the static LCM export tiles only");
         assert_eq!(t.session_key(), SdSessionKey::default());
         assert!(t.session_key().records_ep_failures());
         assert!(!SdTuning { ov_device: Some("GPU".into()), ..Default::default() }.session_key().records_ep_failures());
