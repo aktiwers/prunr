@@ -742,6 +742,13 @@ impl BatchItem {
         self.result_rgba.is_some()
     }
 
+    /// A stroke re-cuts this item from its tensor only while a cut-out is
+    /// on screen. After undoing back to the original the tensor stays
+    /// cached, and a re-cut there would bring the undone result back.
+    pub(crate) fn shows_cutout(&self) -> bool {
+        self.status == BatchStatus::Done && self.cached_tensor.is_some()
+    }
+
     /// What `enforce_tensor_budget` can free: the compressed segmentation
     /// and edge tensors.
     pub(crate) fn evictable_tensor_bytes(&self) -> usize {

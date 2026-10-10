@@ -988,10 +988,10 @@ impl PrunrApp {
 
     /// Re-cuts the image with the painted selection: Restore and Erase
     /// strokes take effect at once, from the cached tensor. Without a
-    /// tensor there is nothing to correct yet; the selection waits and
-    /// `on_batch_item_done` applies it when the first result lands.
+    /// cut-out on screen there is nothing to correct yet; the selection
+    /// waits and `on_batch_item_done` applies it when a result lands.
     fn rerun_with_strokes(&mut self, idx: usize) {
-        if self.batch.items[idx].cached_tensor.is_none() {
+        if !self.batch.items[idx].shows_cutout() {
             return;
         }
         // Chain mode: the rerun replaces the result in place, so undoing
@@ -1028,7 +1028,7 @@ impl PrunrApp {
                 item.reset_result_caches();
                 item.source_texture = None;
             }
-        } else if self.settings.model.uses_segmentation() && item.cached_tensor.is_some() {
+        } else if self.settings.model.uses_segmentation() && item.shows_cutout() {
             self.dispatch_brush_rerun(idx);
         }
         true
