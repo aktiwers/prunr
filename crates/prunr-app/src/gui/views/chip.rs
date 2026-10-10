@@ -264,6 +264,41 @@ pub(super) fn popup_for(
     );
 }
 
+/// Opacity of a flyout while one of its sliders is held.
+const GHOST_OPACITY: f32 = 0.12;
+
+/// A popover for knobs that change the image live. It stays open while
+/// the user works on the canvas: its chip, Escape or another chip closes
+/// it, never a click elsewhere. While one of its sliders is held it fades
+/// so the image under it stays readable.
+pub(super) fn flyout_for(id: egui::Id, resp: &Response, body: impl FnOnce(&mut Ui)) {
+    egui::Popup::from_toggle_button_response(resp)
+        .id(id)
+        .close_behavior(egui::PopupCloseBehavior::IgnoreClicks)
+        .align(egui::RectAlign::BOTTOM_START)
+        .frame(egui::Frame::NONE)
+        .show(|ui| {
+            theme::mark_pinned_popup_open(ui.ctx());
+            if scrubbing_in(ui) {
+                ui.set_opacity(GHOST_OPACITY);
+            }
+            // The frame is drawn inside so it fades with the contents.
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.visuals_mut().selection.bg_fill = theme::ACCENT;
+                ui.set_min_width(theme::POPOVER_WIDTH);
+                body(ui);
+            });
+        });
+}
+
+/// A drag that began on this layer is still held.
+fn scrubbing_in(ui: &Ui) -> bool {
+    let ctx = ui.ctx();
+    let layer = ui.layer_id();
+    ctx.dragged_id().is_some()
+        && ctx.input(|i| i.pointer.primary_down() && i.pointer.press_origin().is_some_and(|o| ctx.layer_id_at(o) == Some(layer)))
+}
+
 /// Float slider row with the log scale and formatter float knobs need.
 pub fn slider_row_f32(
     ui: &mut Ui,
@@ -387,6 +422,9 @@ pub(super) struct GroupChip<'a> {
     pub tooltip: &'a str,
     pub tuned: bool,
     pub width: f32,
+    /// Its knobs change the image live, so it is a flyout the canvas
+    /// stays live under; otherwise a popover that closes on click outside.
+    pub live: bool,
 }
 
 /// Render a group chip. `body` receives `reset == true` on the frame the
@@ -405,11 +443,16 @@ pub(super) fn group_chip<R>(
     let resp = tooltip(chip_button(ui, g.icon, &face, g.tuned), g.label, g.tooltip, None);
     let pop_id = egui::Id::new(("group_chip", g.id_salt));
     let mut out = None;
-    popup_for(ui, pop_id, &resp, |ui| {
+    let contents = |ui: &mut Ui| {
         ui.set_min_width(g.width);
         let reset = popover_header(ui, g.label, Some(("Reset every knob in this group", !g.tuned)));
         out = Some(body(ui, reset));
-    });
+    };
+    if g.live {
+        flyout_for(pop_id, &resp, contents);
+    } else {
+        popup_for(ui, pop_id, &resp, contents);
+    }
     out
 }
 

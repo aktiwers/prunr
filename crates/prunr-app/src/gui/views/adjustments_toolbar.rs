@@ -435,6 +435,7 @@ fn render_mask_group(
         tooltip: "How the subject is cut out, in five steps. Each step works on the result of the one above it.",
         tuned: tuned > 0,
         width: theme::POPOVER_WIDTH,
+        live: true,
     };
     chip::group_chip(ui, group, |ui, reset| {
         if reset {
@@ -519,6 +520,7 @@ fn render_lines_group(
         tooltip: "Trace the outlines of the image or of the subject, then style the lines.",
         tuned,
         width: if on { LINES_POPOVER_WIDTH } else { theme::POPOVER_WIDTH },
+        live: true,
     };
     chip::group_chip(ui, group, |ui, reset| {
         if reset {
@@ -763,7 +765,7 @@ fn render_fill_style_chip(ui: &mut Ui, style: &mut prunr_core::FillStyle) -> boo
 
     let popup_id = ui.make_persistent_id("fill_style_popup");
     let mut changed = false;
-    chip::popup_for(ui, popup_id, &resp, |ui| {
+    chip::flyout_for(popup_id, &resp, |ui| {
         // Wider popover so the variant list sits next to the parameter column
         // instead of stacking above it — otherwise 4-stop GradientMap makes
         // the popover taller than most screens.
@@ -972,7 +974,7 @@ fn render_background_chip(
 );
 
     let popup_id = ui.make_persistent_id("background_popup");
-    chip::popup_for(ui, popup_id, &resp, |ui| {
+    chip::flyout_for(popup_id, &resp, |ui| {
         ui.set_min_width(BACKGROUND_POPOVER_WIDTH);
         if chip::popover_header(ui, "Background", Some(("Back to transparent", current == BgKind::Transparent))) {
             apply_bg_kind(bg, bg_effect, BgKind::Transparent, default_color);

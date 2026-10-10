@@ -35,6 +35,7 @@ pub(crate) fn render_refine_group(ui: &mut Ui, s: &mut ItemSettings) {
         tooltip: "Clean the photo before upscaling and tune the result after.",
         tuned: tuned > 0,
         width: theme::POPOVER_WIDTH,
+        live: true,
     };
     chip::group_chip(ui, group, |ui, reset| {
         if reset {
