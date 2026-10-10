@@ -29,6 +29,9 @@ pub(crate) struct MagicBrushState {
     /// A re-threshold is on the pool; the next Confidence value waits for
     /// its result so a drag never queues more than one.
     pub(crate) rethreshold_in_flight: bool,
+    /// An item whose background pre-encode was refused (RAM gate or
+    /// encoder error) while the tool was off; not retried every frame.
+    pub(crate) preencode_skipped: Option<u64>,
     /// True while Processor::dispatch_sam_encoder is in flight for the
     /// current item. Set on dispatch, cleared by pump_sam_encoder_results
     /// when the embedding lands.

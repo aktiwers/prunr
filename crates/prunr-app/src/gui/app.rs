@@ -237,6 +237,7 @@ impl PrunrApp {
         let (worker_tx, worker_rx) = spawn_worker(worker_ctx, prewarm);
 
         let mut app = Self::init_state(settings, super::system_bridge::SystemBridge::new(), worker_tx, worker_rx);
+        app.processor.warm_sam_sessions();
         app.pending_onboarding_toast = onboarding_toast;
         app
     }
@@ -1284,17 +1285,22 @@ impl PrunrApp {
         ctx.request_repaint();
     }
 
-    /// Eager encoder: while Magic Brush is active, the selected image gets
-    /// an embedding as soon as it has a decoded source. Runs on activation
-    /// and from `reconcile_selected` every frame, so switching images keeps
-    /// the tool usable without toggling it off and on. Admission or encoder
-    /// failure turns the tool off, so this cannot retry in a loop.
+    /// Eager encoder: the selected image gets an embedding as soon as it
+    /// has a decoded source, so Magic Brush is ready the moment it is
+    /// turned on. Runs from `reconcile_selected` every frame. With the tool
+    /// off it waits for the warm sessions and an idle item, and a refusal
+    /// is remembered instead of retried; with the tool on, admission or
+    /// encoder failure turns the tool off, so this cannot retry in a loop.
     fn ensure_magic_embedding_for_selected(&mut self) {
-        if !self.magic_brush_state.is_active() || self.magic_brush_state.has_pending_encoder() {
+        let active = self.magic_brush_state.is_active();
+        if self.magic_brush_state.has_pending_encoder() {
+            return;
+        }
+        if !active && (!self.processor.sam_sessions_ready() || self.batch.app_state() == AppState::Processing) {
             return;
         }
         let Some(item) = self.batch.selected_item() else { return };
-        if item.magic_brush_embedding.is_some() {
+        if item.magic_brush_embedding.is_some() || (!active && self.magic_brush_state.preencode_skipped == Some(item.id)) {
             return;
         }
         // Decode still pending: try again next frame.
@@ -1303,7 +1309,11 @@ impl PrunrApp {
         let avail_ram = crate::hardware::available_ram_mb_throttled();
         match self.processor.dispatch_sam_encoder(item_id, source, avail_ram) {
             Ok(()) => self.magic_brush_state.set_encoder_pending(true),
-            Err(err) => self.magic_brush_unavailable(&err),
+            Err(err) if active => self.magic_brush_unavailable(&err),
+            Err(err) => {
+                tracing::debug!(item_id, %err, "Magic Brush pre-encode skipped");
+                self.magic_brush_state.preencode_skipped = Some(item_id);
+            }
         }
     }
 
@@ -1314,11 +1324,11 @@ impl PrunrApp {
         self.deactivate_magic_brush();
     }
 
-    /// Turn Magic Brush off and drop its ORT sessions (~180 MB). Cached
-    /// embeddings stay on their items, so re-activating is cheap.
+    /// Turn Magic Brush off. The sessions stay warm and the selected
+    /// image keeps its embedding, so turning it back on is instant;
+    /// background images drop theirs on the next eviction pass.
     pub(crate) fn deactivate_magic_brush(&mut self) {
         self.magic_brush_state.deactivate();
-        self.processor.release_sam_sessions();
     }
 
     /// Keep the selected image's embedding current, then drain SAM encoder
@@ -1337,9 +1347,13 @@ impl PrunrApp {
                     }
                     ctx.request_repaint();
                 }
-                Err(err) => {
+                Err(err) if self.magic_brush_state.is_active() => {
                     tracing::error!(item_id = result.item_id, %err, "SAM encoder failed");
                     self.magic_brush_unavailable(&err);
+                }
+                Err(err) => {
+                    tracing::debug!(item_id = result.item_id, %err, "Magic Brush pre-encode failed");
+                    self.magic_brush_state.preencode_skipped = Some(result.item_id);
                 }
             }
         }
@@ -2675,11 +2689,17 @@ impl PrunrApp {
     /// Pre-fix this ran zstd inline — a 50-image 4K batch froze the UI
     /// for ~2.5 s on every selection change.
     fn evict_background_item_caches(&mut self, selected_idx: usize) {
+        // With the tool off, only the selected image keeps its 16 MB
+        // embedding; with it on, visited images keep theirs for paging.
+        let keep_embeddings = self.magic_brush_state.is_active();
         for (i, item) in self.batch.items.iter_mut().enumerate() {
             if i == selected_idx {
                 continue;
             }
             item.drop_hot_tensors();
+            if !keep_embeddings {
+                item.magic_brush_embedding = None;
+            }
             if item.result_rgba.is_none() || item.status != BatchStatus::Done {
                 continue;
             }
