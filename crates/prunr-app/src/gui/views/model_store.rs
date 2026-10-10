@@ -307,6 +307,7 @@ fn delete_installed_model(app: &mut PrunrApp, id: ModelId) {
             });
             app.toasts.success(format!("{} removed", desc.display_name));
             tracing::info!(?id, "deleted on-demand model");
+            app.hardware_install_cache = crate::gui::hardware_cache::HardwareInstallCache::refresh();
         }
         Err(e) => {
             app.toasts.error(format!("Could not delete {}: {e}", desc.display_name));

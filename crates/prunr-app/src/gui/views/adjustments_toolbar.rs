@@ -112,6 +112,8 @@ pub(crate) struct ToolbarState<'a> {
     pub source_dims: (u32, u32),
     pub has_selection: bool,
     pub protect_selection: bool,
+    /// On-disk install state, refreshed on events rather than per frame.
+    pub installed: crate::gui::hardware_cache::HardwareInstallCache,
     pub show_original: bool,
     pub has_result: bool,
 }
@@ -200,10 +202,10 @@ pub(crate) fn render(
         }
 
         if upscale_mode {
-            super::upscale_toolbar::render_upscale_chips(ui, app_settings, item_settings, state.source_dims);
+            super::upscale_toolbar::render_upscale_chips(ui, app_settings, item_settings, state.source_dims, state.installed.x2plus);
         } else if inpaint_mode {
             if matches!(app_settings.model, SettingsModel::SdInpaint) {
-                let outcome = super::eraser_chip::render(ui, app_settings);
+                let outcome = super::eraser_chip::render(ui, app_settings, state.installed);
                 if outcome.committed {
                     change.brush_settings_committed = true;
                 }
