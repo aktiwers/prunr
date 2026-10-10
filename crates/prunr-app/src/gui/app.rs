@@ -1112,7 +1112,7 @@ impl PrunrApp {
             sd_tuning: super::env_overrides::sd_tuning(prunr_core::inpaint_sd::plan_tuning(
                 backend,
                 self.settings.keep_sd_loaded,
-                Some(u64::from(crate::hardware::available_ram_mb_throttled())),
+                (self.settings.ram_safety_margin_gb.max(0.0) * 1024.0) as u64,
             )),
         };
         self.processor.dispatch_inpaint(item_id, source, selection, tuning);

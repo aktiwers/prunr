@@ -110,9 +110,14 @@ fn sd_bench() {
             mask.put_pixel(x, y, Luma([255]));
         }
     }
-    // The shipped plan, with the same overrides the app honours.
-    let flag = |name: &str| std::env::var(name).ok().map(|v| v == "1");
-    let planned = inpaint_sd::plan_tuning(id, false, None);
+    // The shipped plan, with the same overrides the app honours (same
+    // spellings as the app's `read_bool`).
+    let flag = |name: &str| match std::env::var(name).ok()?.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    };
+    let planned = inpaint_sd::plan_tuning(id, false, inpaint_sd::SD_DEFAULT_MARGIN_MB);
     let req = SdInpaintRequest {
         prompt: "clean background".to_string(),
         num_inference_steps: 20,
@@ -122,6 +127,7 @@ fn sd_bench() {
             keep_loaded: flag("PRUNR_SD_KEEP_LOADED").unwrap_or(planned.keep_loaded),
             tall_crop: flag("PRUNR_SD_TALL_CROP").unwrap_or(planned.tall_crop),
             ov_device: std::env::var("PRUNR_SD_OV_DEVICE").ok().filter(|s| !s.is_empty()),
+            ..planned
         },
         ..Default::default()
     };
