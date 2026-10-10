@@ -1346,10 +1346,19 @@ impl Processor {
         Ok(())
     }
 
-    /// Drop the cached SAM sessions (~180 MB). Call when Magic Brush is
-    /// deactivated; the next activation rebuilds them on first use.
-    pub(crate) fn release_sam_sessions(&self) {
-        *self.sam_sessions.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    /// Build the SAM sessions (~180 MB resident, ~1 s parse) on the pool
+    /// at startup so the first Magic Brush use never waits for them.
+    pub(crate) fn warm_sam_sessions(&self) {
+        let sessions = Arc::clone(&self.sam_sessions);
+        rayon::spawn(move || {
+            if let Err(err) = ensure_sam_sessions(&sessions) {
+                tracing::warn!(%err, "SAM session warm-up failed");
+            }
+        });
+    }
+
+    pub(crate) fn sam_sessions_ready(&self) -> bool {
+        self.sam_sessions.lock().unwrap_or_else(std::sync::PoisonError::into_inner).is_some()
     }
 
     /// Dispatch the SAM 2 decoder for a click or stroke. No admission gate —
