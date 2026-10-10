@@ -679,34 +679,6 @@ fn render_loaded(ui: &mut egui::Ui, app: &PrunrApp) {
                 ui, it, img_rect,
             );
         }
-
-        // Empty-state hint — guides discovery when a brush tool is active
-        // but no selection exists yet. Per 33-UI-SPEC §"Empty-state hint":
-        // 50% alpha so it sits under the imagery without competing.
-        let has_selection = app.batch
-            .selected_item()
-            .is_some_and(|i| i.selection_mask.is_some());
-        if !has_selection {
-            let hint = if app.magic_brush_state.is_active()
-                && !app.magic_brush_state.has_pending_encoder()
-            {
-                Some("Click or stroke to select")
-            } else if app.brush_state.is_enabled() {
-                Some("Paint to select")
-            } else {
-                None
-            };
-            if let Some(text) = hint {
-                let color = theme::TEXT_SECONDARY.linear_multiply(0.5);
-                ui.painter().text(
-                    img_rect.center(),
-                    egui::Align2::CENTER_CENTER,
-                    text,
-                    egui::FontId::monospace(theme::FONT_SIZE_MONO),
-                    color,
-                );
-            }
-        }
     } else {
         // Source not decoded yet — show spinner
         let center = canvas_rect.center();
