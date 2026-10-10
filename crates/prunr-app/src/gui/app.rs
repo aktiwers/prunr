@@ -1001,7 +1001,7 @@ impl PrunrApp {
             // The seed keeps the archive above the "back to the source"
             // floor, as a Process run does, so undoing the stroke lands on
             // the archived image rather than on nothing.
-            HistoryManager::seed_with_source(&mut self.batch.items[idx]);
+            HistoryManager::seed_floor(&mut self.batch.items[idx]);
             HistoryManager::archive_result_for_stroke(&mut self.batch.items[idx], self.settings.history_depth);
             self.batch.items[idx].mark_last_stroke_archived();
         }
