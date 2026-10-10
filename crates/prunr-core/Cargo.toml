@@ -37,6 +37,7 @@ sysinfo = { workspace = true }
 [dev-dependencies]
 prunr-models = { path = "../prunr-models", features = ["dev-models"] }
 tracing-subscriber = { workspace = true }
+tempfile = { workspace = true }
 # criterion: microbench harness for the perf-sensitive kernels in this
 # crate. Benches are run manually (`cargo bench -p prunr-core`); CI
 # does not invoke them — runner noise + wall-clock variance would
