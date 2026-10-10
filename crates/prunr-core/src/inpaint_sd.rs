@@ -50,8 +50,9 @@ use crate::types::CoreError;
 
 /// SD 1.5 native input side length. Latent space is 1/8 on each axis.
 pub const SD_TILE: u32 = 512;
-/// Latent space side length after VAE downsampling.
-pub const SD_LATENT_SIDE: u32 = SD_TILE / 8;
+/// Latent side of a 512² tile; the pipeline derives its own from the
+/// crop, this only shapes the session smoke tests.
+const SD_LATENT_SIDE: u32 = SD_TILE / 8;
 /// Longest crop side with `SdTuning::tall_crop`: a region up to this
 /// long runs as one 512×768 / 768×512 / 768² crop instead of tiles.
 pub const SD_CROP_MAX: u32 = 768;
@@ -299,28 +300,13 @@ pub fn process_inpaint_with(
         return Ok(image.clone());
     }
 
-    // Pre-count tiles across all components so the outer progress
-    // counter advances monotonically over the full stroke. Without
-    // this, the inner `set_step(0..N)` would reset every time we
-    // move from one tile to the next and the banner would appear
-    // to start over. Components that fit in SD_TILE count as one
-    // tile each. The multi-tile branch calls `tile_bbox` directly
-    // (rather than recomputing `tile_count(w) * tile_count(h)`) so
-    // the pre-count cannot diverge from the actual loop count when
-    // a bbox abuts an image edge and `tile_bbox`'s anchor clamping
-    // collapses the grid.
-    let (img_w_for_count, img_h_for_count) = image.dimensions();
+    // One plan per component, made once: the outer progress total and
+    // the loop read the same value, so they cannot disagree about how
+    // many tiles a region near an image edge really gets.
+    let (img_w, img_h) = image.dimensions();
     let max_side = if req.tuning.tall_crop { SD_CROP_MAX } else { SD_TILE };
-    let outer_total: u32 = components
-        .iter()
-        .map(|comp| {
-            if compute_sd_crop(comp, img_w_for_count, img_h_for_count, max_side).is_some() {
-                1
-            } else {
-                tile_bbox(comp, img_w_for_count, img_h_for_count).len() as u32
-            }
-        })
-        .sum();
+    let plans: Vec<RegionPlan> = components.iter().map(|c| plan_region(c, img_w, img_h, max_side)).collect();
+    let outer_total: u32 = plans.iter().map(|p| p.tile_count()).sum();
     if let Some(p) = progress {
         p.set_outer_total(outer_total);
         p.set_outer_step(0);
@@ -332,20 +318,10 @@ pub fn process_inpaint_with(
     let get_started = Instant::now();
     let bundle = SdSession::get(id, &req.tuning.session_key(), req.tuning.keep_loaded)?;
     let session_ms = get_started.elapsed().as_millis() as u64;
-    // RAII drop-on-completion: when this guard goes out of scope (any
-    // return path) the cache's unpinned Arc is removed; once `bundle` (declared
-    // ABOVE so it drops AFTER the guard) drops too, the SdSession's
-    // last reference goes away and the ORT bundle releases. Trades
-    // first-stroke responsiveness on a repeat for instant RAM reclaim
-    // — appropriate when single SD strokes are heavy enough that
-    // users typically wait between strokes anyway.
-    struct DropOnComplete(prunr_models::ModelId);
-    impl Drop for DropOnComplete {
-        fn drop(&mut self) {
-            release(self.0);
-        }
-    }
-    let _release_guard = DropOnComplete(id);
+    // `bundle` is declared above the guard so it drops after it: the
+    // guard removes the cache's Arc (unless the entry is pinned), then
+    // the last reference goes and the ORT bundle is freed.
+    let _release_guard = ReleaseOnDrop(id);
     let run_started = Instant::now();
     // VAE backend selection: TAESD when fast mode is on AND the bundle
     // is installed (the request flag carries that decision from
@@ -356,29 +332,28 @@ pub fn process_inpaint_with(
         Some(t) => VaeBackend::Taesd(t),
         None => VaeBackend::Standard(&bundle),
     };
-    let (img_w, img_h) = image.dimensions();
     let mut out = image.clone();
     let is_cancelled = || cancel.as_ref().is_some_and(|c| c.load(Ordering::Acquire));
 
-    for component in &components {
+    for (component, plan) in components.iter().zip(plans) {
         if is_cancelled() { return Err(CoreError::Cancelled); }
-        if let Some((cx, cy, cw, ch)) = compute_sd_crop(component, img_w, img_h, max_side) {
-            // Fast path: one crop centred on the component.
-            tile_idx += 1;
-            if let Some(p) = progress { p.set_outer_step(tile_idx); }
-            let cropped_img = image::imageops::crop_imm(&out, cx, cy, cw, ch).to_image();
-            let cropped_mask = image::imageops::crop_imm(mask, cx, cy, cw, ch).to_image();
-            match run_one_tile(&bundle, &vae, &cropped_img, &cropped_mask, &req, hooks) {
-                Ok(painted) => image::imageops::replace(&mut out, &painted, cx as i64, cy as i64),
-                Err(CoreError::Cancelled) => return Err(CoreError::Cancelled),
-                Err(e) => tracing::error!(%e, "SD inference failed for component; skipping"),
+        let tiles = match plan {
+            RegionPlan::Crop { x: cx, y: cy, w: cw, h: ch } => {
+                tile_idx += 1;
+                if let Some(p) = progress { p.set_outer_step(tile_idx); }
+                let cropped_img = image::imageops::crop_imm(&out, cx, cy, cw, ch).to_image();
+                let cropped_mask = image::imageops::crop_imm(mask, cx, cy, cw, ch).to_image();
+                match run_one_tile(&bundle, &vae, &cropped_img, &cropped_mask, &req, hooks) {
+                    Ok(painted) => image::imageops::replace(&mut out, &painted, cx as i64, cy as i64),
+                    Err(CoreError::Cancelled) => return Err(CoreError::Cancelled),
+                    Err(e) => tracing::error!(%e, "SD inference failed for component; skipping"),
+                }
+                continue;
             }
-            continue;
-        }
-
-        // Tile path: component exceeds 512×512 in some axis. Split into
-        // overlapping 512×512 tiles and alpha-blend the seams.
-        let tiles = tile_bbox(component, img_w, img_h);
+            RegionPlan::Tiles(tiles) => tiles,
+        };
+        // Longer than `max_side` on an axis: overlapping 512² tiles with
+        // alpha-blended seams.
         tracing::info!(
             comp = ?component, n_tiles = tiles.len(),
             "SD: tiling oversized component",
@@ -610,6 +585,38 @@ fn push_if_unvisited(
     }
 }
 
+/// Releases the stroke's cache entry when the stroke ends, however it
+/// ends; a pinned entry (`SdTuning::keep_loaded`) stays.
+struct ReleaseOnDrop(prunr_models::ModelId);
+
+impl Drop for ReleaseOnDrop {
+    fn drop(&mut self) {
+        release(self.0);
+    }
+}
+
+/// How one painted region runs: as a single crop or as tiles.
+enum RegionPlan {
+    Crop { x: u32, y: u32, w: u32, h: u32 },
+    Tiles(Vec<TileWindow>),
+}
+
+impl RegionPlan {
+    fn tile_count(&self) -> u32 {
+        match self {
+            Self::Crop { .. } => 1,
+            Self::Tiles(t) => t.len() as u32,
+        }
+    }
+}
+
+fn plan_region(bbox: &MaskBbox, img_w: u32, img_h: u32, max_side: u32) -> RegionPlan {
+    match compute_sd_crop(bbox, img_w, img_h, max_side) {
+        Some((x, y, w, h)) => RegionPlan::Crop { x, y, w, h },
+        None => RegionPlan::Tiles(tile_bbox(bbox, img_w, img_h)),
+    }
+}
+
 /// The smallest crop side from `SD_TILE` up to `max_side` in `SD_TILE / 2`
 /// steps that covers `span`; `None` when the region needs tiles.
 fn crop_side(span: u32, max_side: u32) -> Option<u32> {
@@ -664,8 +671,9 @@ fn run_one_tile(
     let (w, h) = image.dimensions();
     let (pw, ph) = padded_dims(w, h);
     let padded_image = pad_to(image, pw, ph);
-    let padded_mask = pad_mask_to(mask, pw, ph);
+    let padded_mask = pad_to(mask, pw, ph);
     let (lw, lh) = ((pw / 8) as usize, (ph / 8) as usize);
+    let mut timer = TileTimer::start();
 
 
     // CFG threshold: above 1.0 we run the UNet TWICE per step (cond +
@@ -678,7 +686,6 @@ fn run_one_tile(
     // distinct session mutex (or none) so they run concurrently.
     let prompt = req.prompt.clone();
     let neg_prompt = if use_cfg { Some(req.negative_prompt.clone()) } else { None };
-    let tile_started = Instant::now();
     let (text_emb_cond_f16, text_emb_uncond_f16, masked_latent, mask_latent) =
         std::thread::scope(|s| -> Result<_, CoreError> {
             let cond_h = s.spawn(|| text_embedding_f16(bundle, &prompt));
@@ -707,7 +714,7 @@ fn run_one_tile(
     // 20-step UNet loop, the longest-lived stage of the pipeline.
     drop(masked_latent);
     drop(mask_latent);
-    let prelude_ms = tile_started.elapsed().as_millis() as u64;
+    let prelude_ms = timer.lap();
 
     let steps = req.num_inference_steps as usize;
     let mut scheduler = match req.scheduler {
@@ -790,8 +797,6 @@ fn run_one_tile(
     // Scratch buffer for step output — hoisted outside the loop so
     // mem::swap reuses the allocation across steps (no per-step alloc).
     let mut step_out_buf: Vec<f32> = Vec::with_capacity(latent_buf.len());
-    let loop_started = Instant::now();
-    let steps_run = timesteps.len().saturating_sub(t_start) as u32;
     // Skip the first `t_start` entries when strength<1: those are
     // the high-noise steps we're bypassing.
     for (i, &t) in timesteps.iter().enumerate().skip(t_start) {
@@ -821,40 +826,9 @@ fn run_one_tile(
         let latent_in_f16 = concat_inpaint_input_f16(
             &latent_f16, &mask_latent_f16, &masked_latent_f16,
         );
-        let noise_pred = if let Some(uncond_f16) = text_emb_uncond_f16.as_ref() {
-            // CFG path: prefer batched UNet (one ORT call instead of two)
-            // when the export supports a dynamic batch dim. On
-            // first-time failure we flip a per-session flag and fall
-            // back to sequential for the rest of this stroke + future
-            // strokes on this bundle.
-            use std::sync::atomic::Ordering;
-            let try_batched = !bundle.cfg_fallback_to_sequential.load(Ordering::Relaxed);
-            if try_batched {
-                match unet_step_batched(bundle, &latent_in_f16, t, &text_emb_cond_f16, uncond_f16) {
-                    Ok(pred_pair) => {
-                        // Pass slice views directly — cfg_blend now
-                        // accepts ArrayView4, no `.to_owned()` needed.
-                        let pred_cond = pred_pair.slice(ndarray::s![0..1, .., .., ..]);
-                        let pred_uncond = pred_pair.slice(ndarray::s![1..2, .., .., ..]);
-                        cfg_blend(pred_uncond, pred_cond, scale)
-                    }
-                    Err(e) => {
-                        tracing::warn!(%e,
-                            "SD: batched CFG UNet rejected (likely static batch=1 ONNX); \
-                             falling back to sequential cond+uncond for this session");
-                        bundle.cfg_fallback_to_sequential.store(true, Ordering::Relaxed);
-                        let pred_cond = unet_step(bundle, latent_in_f16.clone(), t, &text_emb_cond_f16)?;
-                        let pred_uncond = unet_step(bundle, latent_in_f16, t, uncond_f16)?;
-                        cfg_blend(pred_uncond.view(), pred_cond.view(), scale)
-                    }
-                }
-            } else {
-                let pred_cond = unet_step(bundle, latent_in_f16.clone(), t, &text_emb_cond_f16)?;
-                let pred_uncond = unet_step(bundle, latent_in_f16, t, uncond_f16)?;
-                cfg_blend(pred_uncond.view(), pred_cond.view(), scale)
-            }
-        } else {
-            unet_step(bundle, latent_in_f16, t, &text_emb_cond_f16)?
+        let noise_pred = match text_emb_uncond_f16.as_ref() {
+            Some(uncond_f16) => cfg_noise_pred(bundle, latent_in_f16, t, &text_emb_cond_f16, uncond_f16, scale)?,
+            None => unet_step(bundle, latent_in_f16, t, &text_emb_cond_f16)?,
         };
         let t_prev = timesteps.get(i + 1).copied().unwrap_or(-1);
         let is_final = i + 1 == timesteps.len();
@@ -869,25 +843,81 @@ fn run_one_tile(
         std::mem::swap(&mut latent_buf, &mut step_out_buf);
     }
 
-    let unet_ms = loop_started.elapsed().as_millis() as u64;
+    let unet_ms = timer.lap();
 
     // VAE decode — wrap final buf into Array4 (no extra allocation).
     let final_array = ndarray::Array4::from_shape_vec(latent_dim, latent_buf)
         .expect("latent_dim matches latent_buf length by construction");
-    let decode_started = Instant::now();
     let painted = vae_decode(vae, &final_array)?;
-    let decode_ms = decode_started.elapsed().as_millis() as u64;
+    let decode_ms = timer.lap();
     let out = composite(image, &painted, mask, w, h);
+    let steps_run = timesteps.len().saturating_sub(t_start) as u64;
     tracing::info!(
         w, h, steps = steps_run, prelude_ms,
-        unet_ms_per_step = unet_ms / u64::from(steps_run.max(1)),
-        decode_ms, total_ms = tile_started.elapsed().as_millis() as u64,
+        unet_ms_per_step = unet_ms / steps_run.max(1),
+        decode_ms, total_ms = timer.total(),
         rss_mb = process_rss_mb(),
         cfg = use_cfg,
-        batched = use_cfg && !bundle.cfg_fallback_to_sequential.load(std::sync::atomic::Ordering::Relaxed),
         "SD: tile done",
     );
     Ok(out)
+}
+
+/// Stage clock for one tile's log line.
+struct TileTimer {
+    start: Instant,
+    mark: Instant,
+}
+
+impl TileTimer {
+    fn start() -> Self {
+        let now = Instant::now();
+        Self { start: now, mark: now }
+    }
+
+    /// Milliseconds since the previous lap (or the start).
+    fn lap(&mut self) -> u64 {
+        let now = Instant::now();
+        let ms = now.duration_since(self.mark).as_millis() as u64;
+        self.mark = now;
+        ms
+    }
+
+    fn total(&self) -> u64 {
+        self.start.elapsed().as_millis() as u64
+    }
+}
+
+/// One guided step: the batched UNet call (cond and uncond together)
+/// when the export allows it, else two calls. The first batched
+/// failure (a static batch-1 export) switches the session to two calls
+/// for good.
+fn cfg_noise_pred(
+    bundle: &SdSession,
+    latent_in: Array4<f16>,
+    t: i64,
+    cond: &Array3<f16>,
+    uncond: &Array3<f16>,
+    scale: f32,
+) -> Result<Array4<f32>, CoreError> {
+    use std::sync::atomic::Ordering;
+    if !bundle.cfg_fallback_to_sequential.load(Ordering::Relaxed) {
+        match unet_step_batched(bundle, &latent_in, t, cond, uncond) {
+            Ok(pair) => {
+                let pred_cond = pair.slice(ndarray::s![0..1, .., .., ..]);
+                let pred_uncond = pair.slice(ndarray::s![1..2, .., .., ..]);
+                return Ok(cfg_blend(pred_uncond, pred_cond, scale));
+            }
+            Err(e) => {
+                tracing::warn!(%e, "SD: batched CFG UNet rejected (static batch=1 export); \
+                                   running cond and uncond separately for this session");
+                bundle.cfg_fallback_to_sequential.store(true, Ordering::Relaxed);
+            }
+        }
+    }
+    let pred_cond = unet_step(bundle, latent_in.clone(), t, cond)?;
+    let pred_uncond = unet_step(bundle, latent_in, t, uncond)?;
+    Ok(cfg_blend(pred_uncond.view(), pred_cond.view(), scale))
 }
 
 // ── Session bundle ──────────────────────────────────────────────────────
@@ -979,12 +1009,9 @@ pub(crate) struct SdSession {
     vae_encoder_input: String,
     vae_decoder_input: String,
     text_encoder_input: String,
-    /// Set to `true` after the first batched UNet call fails on this
-    /// session — typically because the underlying ONNX export declared
-    /// a static batch=1 (the LCM bundle). Subsequent CFG steps skip the
-    /// batched attempt and call `unet_step` twice instead. Once flipped
-    /// per process, stays flipped for the session's lifetime; cleared on
-    /// session rebuild (idle release).
+    /// Set once a batched UNet call fails (a static batch-1 export, the
+    /// LCM bundle); guided steps then run cond and uncond one after the
+    /// other for this session's lifetime.
     cfg_fallback_to_sequential: std::sync::atomic::AtomicBool,
     /// CLIP embeddings by prompt, in f16. The encoder is deterministic, so
     /// a repeated prompt (every tile, every stroke) skips it. Bounded by
@@ -1005,8 +1032,15 @@ const TEXT_CACHE_ENTRIES: usize = 8;
 pub(crate) struct CacheEntry<T> {
     pub(crate) value: T,
     pub(crate) last_used: Instant,
-    /// Kept through the idle sweep (`SdTuning::keep_loaded`).
+    /// Kept through the idle sweep and the end-of-stroke release
+    /// (`SdTuning::keep_loaded`).
     pub(crate) pinned: bool,
+}
+
+impl<T> CacheEntry<T> {
+    pub(crate) fn new(value: T, now: Instant) -> Self {
+        Self { value, last_used: now, pinned: false }
+    }
 }
 
 /// Per-id deferred bundle. The outer `Arc<OnceLock<...>>` is what closes
@@ -1116,11 +1150,8 @@ impl SdSession {
                     "SD: released idle session bundle(s)",
                 );
             }
-            let entry = guard.entry((id, key.clone())).or_insert_with(|| CacheEntry {
-                value: Arc::new(std::sync::OnceLock::new()),
-                last_used: now,
-                pinned: false,
-            });
+            let entry = guard.entry((id, key.clone()))
+                .or_insert_with(|| CacheEntry::new(Arc::new(std::sync::OnceLock::new()), now));
             entry.pinned = pin;
             // Don't refresh last_used when the slot already holds an
             // Err — otherwise a sticky build failure would keep
@@ -1268,6 +1299,16 @@ fn build_part_with_ep_ladder(
             }
             _ => builder,
         };
+        let record_failure = |msg: &str| {
+            if session_key.records_ep_failures() {
+                crate::engine::handle_commit_failure(
+                    matches!(load_path, Cow::Owned(_)),
+                    ep, id,
+                    || crate::cache::optimized_model_path_for_part(id, ep.as_str(), key),
+                    msg,
+                );
+            }
+        };
         let registered = match ep {
             #[cfg(not(target_os = "macos"))]
             EpKind::Cuda => builder.with_execution_providers([
@@ -1321,14 +1362,7 @@ fn build_part_with_ep_ladder(
             }
             Err(e) => {
                 tracing::warn!(part = %key, ep = %ep, %e, "SD: GPU session commit failed — trying next");
-                if session_key.records_ep_failures() {
-                    crate::engine::handle_commit_failure(
-                        matches!(load_path, Cow::Owned(_)),
-                        ep, id,
-                        || crate::cache::optimized_model_path_for_part(id, ep.as_str(), key),
-                        &format!("{e}"),
-                    );
-                }
+                record_failure(&format!("{e}"));
                 continue;
             }
         };
@@ -1339,14 +1373,7 @@ fn build_part_with_ep_ladder(
             }
             Err(e) => {
                 tracing::warn!(part = %key, ep = %ep, %e, "SD: smoke test failed — falling back");
-                if session_key.records_ep_failures() {
-                    crate::engine::handle_commit_failure(
-                        matches!(load_path, Cow::Owned(_)),
-                        ep, id,
-                        || crate::cache::optimized_model_path_for_part(id, ep.as_str(), key),
-                        &e,
-                    );
-                }
+                record_failure(&e);
             }
         }
     }
@@ -2032,21 +2059,17 @@ fn step_array_into(
 /// Returns `Cow::Borrowed` on the fast path (already-tile-sized input,
 /// the common case for small strokes) — saves the ~1 MB image clone +
 /// ~256 KB mask clone the previous version always did.
-fn pad_to(image: &RgbaImage, w: u32, h: u32) -> std::borrow::Cow<'_, RgbaImage> {
+/// `image` zero-padded to `w × h` (borrowed when it already is).
+fn pad_to<P>(image: &image::ImageBuffer<P, Vec<P::Subpixel>>, w: u32, h: u32) -> std::borrow::Cow<'_, image::ImageBuffer<P, Vec<P::Subpixel>>>
+where
+    P: image::Pixel + 'static,
+    P::Subpixel: 'static,
+{
     if image.dimensions() == (w, h) {
         return std::borrow::Cow::Borrowed(image);
     }
-    let mut out = RgbaImage::new(w, h);
+    let mut out = image::ImageBuffer::new(w, h);
     image::imageops::overlay(&mut out, image, 0, 0);
-    std::borrow::Cow::Owned(out)
-}
-
-fn pad_mask_to(mask: &GrayImage, w: u32, h: u32) -> std::borrow::Cow<'_, GrayImage> {
-    if mask.dimensions() == (w, h) {
-        return std::borrow::Cow::Borrowed(mask);
-    }
-    let mut out = GrayImage::new(w, h);
-    image::imageops::overlay(&mut out, mask, 0, 0);
     std::borrow::Cow::Owned(out)
 }
 
@@ -3835,6 +3858,8 @@ mod tests {
         assert_eq!(compute_sd_crop(&wide, 4096, 4096, SD_CROP_MAX), None, "beyond the max side");
         let square = MaskBbox { x_min: 0, y_min: 0, x_max: 600, y_max: 600 };
         assert_eq!(compute_sd_crop(&square, 4096, 4096, SD_CROP_MAX), None, "one long side only");
+        assert!(matches!(plan_region(&square, 4096, 4096, SD_CROP_MAX), RegionPlan::Tiles(t) if t.len() == 4));
+        assert_eq!(plan_region(&bbox, 4096, 4096, SD_CROP_MAX).tile_count(), 1);
         assert_eq!(crop_side(512, SD_CROP_MAX), Some(512));
         assert_eq!(crop_side(513, SD_CROP_MAX), Some(768));
         assert_eq!(padded_dims(700, 300), (704, 512));
@@ -3919,12 +3944,10 @@ mod tests {
     fn sweep_idle_keeps_pinned_entries() {
         let now = Instant::now() + Duration::from_secs(3600);
         let mut cache: HashMap<prunr_models::ModelId, CacheEntry<u8>> = HashMap::new();
-        cache.insert(prunr_models::ModelId::SdV15InpaintFp16, CacheEntry {
-            value: 1, last_used: now - Duration::from_secs(600), pinned: true,
-        });
-        cache.insert(prunr_models::ModelId::LaMaFp32, CacheEntry {
-            value: 2, last_used: now - Duration::from_secs(600), pinned: false,
-        });
+        let mut pinned = CacheEntry::new(1, now - Duration::from_secs(600));
+        pinned.pinned = true;
+        cache.insert(prunr_models::ModelId::SdV15InpaintFp16, pinned);
+        cache.insert(prunr_models::ModelId::LaMaFp32, CacheEntry::new(2, now - Duration::from_secs(600)));
         assert_eq!(sweep_idle(&mut cache, now, Duration::from_secs(300)), 1);
         assert!(cache.contains_key(&prunr_models::ModelId::SdV15InpaintFp16));
     }
@@ -3938,16 +3961,8 @@ mod tests {
         let stale = now - Duration::from_secs(600);
 
         let mut cache: HashMap<ModelId, CacheEntry<Arc<()>>> = HashMap::new();
-        cache.insert(ModelId::SdV15InpaintFp16, CacheEntry {
-            value: Arc::new(()),
-            last_used: stale,
-            pinned: false,
-        });
-        cache.insert(ModelId::LaMaFp32, CacheEntry {
-            value: Arc::new(()),
-            last_used: fresh,
-            pinned: false,
-        });
+        cache.insert(ModelId::SdV15InpaintFp16, CacheEntry::new(Arc::new(()), stale));
+        cache.insert(ModelId::LaMaFp32, CacheEntry::new(Arc::new(()), fresh));
 
         let dropped = sweep_idle(&mut cache, now, idle);
         assert_eq!(dropped, 1, "exactly one stale entry should evict");
