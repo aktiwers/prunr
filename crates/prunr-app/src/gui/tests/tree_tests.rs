@@ -48,7 +48,7 @@ fn assert_all_controls_named(harness: &Harness<'_, PrunrApp>, surface: &str) {
     let nameless: Vec<String> = root
         .iter()
         .filter(|n| n.is_control() && n.name.is_none())
-        .map(|n| format!("{} {:?} at {:?}", n.role, n.id, n.rect))
+        .map(|n| format!("{:?} {:?} at {:?}", n.role, n.id, n.rect))
         .collect();
     assert!(nameless.is_empty(), "{surface}: controls without a readable name:\n{}", nameless.join("\n"));
 }

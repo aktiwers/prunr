@@ -9,10 +9,11 @@ use accesskit::Role;
 use accesskit_consumer::{Node, Tree};
 use serde::Serialize;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct ControlNode {
     pub id: u64,
-    pub role: String,
+    #[serde(serialize_with = "role_name")]
+    pub role: Role,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -29,11 +30,16 @@ pub struct ControlNode {
     pub children: Vec<ControlNode>,
 }
 
+fn role_name<S: serde::Serializer>(role: &Role, s: S) -> Result<S::Ok, S::Error> {
+    s.serialize_str(&format!("{role:?}"))
+}
+
 impl ControlNode {
     pub fn from_node(node: &Node<'_>) -> Self {
         Self {
+            // The consumer packs its tree index below the AccessKit id.
             id: (u128::from(node.id()) >> 64) as u64,
-            role: format!("{:?}", node.role()),
+            role: node.role(),
             name: node.label().as_deref().and_then(readable_name),
             value: node.value(),
             number: node.numeric_value(),
@@ -44,14 +50,23 @@ impl ControlNode {
         }
     }
 
-    /// Whether the user can act on this node: the roles egui gives to
-    /// buttons, toggles, sliders, pickers and text fields.
+    /// The roles egui gives to buttons, toggles, sliders, pickers and text fields.
     pub fn is_control(&self) -> bool {
         matches!(
-            self.role.as_str(),
-            "Button" | "CheckBox" | "Switch" | "RadioButton" | "Slider"
-                | "SpinButton" | "ComboBox" | "TextInput" | "MultilineTextInput" | "Tab"
-                | "MenuItem" | "Link" | "ListBoxOption"
+            self.role,
+            Role::Button
+                | Role::CheckBox
+                | Role::Switch
+                | Role::RadioButton
+                | Role::Slider
+                | Role::SpinButton
+                | Role::ComboBox
+                | Role::TextInput
+                | Role::MultilineTextInput
+                | Role::Tab
+                | Role::MenuItem
+                | Role::Link
+                | Role::ListBoxOption
         )
     }
 
@@ -65,24 +80,23 @@ impl ControlNode {
         })
     }
 
-    /// This node without its children.
     pub fn leaf(&self) -> Self {
         Self { children: Vec::new(), ..self.clone() }
     }
 
-    /// The centre of the node's rectangle, for a pointer click.
     pub fn center(&self) -> Option<egui::Pos2> {
         self.rect.map(|[x0, y0, x1, y1]| egui::pos2((x0 + x1) / 2.0, (y0 + y1) / 2.0))
     }
 }
 
 /// egui lays a slider's value box out as the sibling after the slider,
-/// with no label of its own; it takes the slider's name plus "value".
+/// with no label of its own and no way to name it from outside; it
+/// takes the slider's name plus "value".
 fn name_slider_value_boxes(mut children: Vec<ControlNode>) -> Vec<ControlNode> {
     for i in 1..children.len() {
         let (before, after) = children.split_at_mut(i);
         let (slider, value_box) = (&before[i - 1], &mut after[0]);
-        if slider.role == "Slider" && value_box.role == "SpinButton" && value_box.name.is_none() {
+        if slider.role == Role::Slider && value_box.role == Role::SpinButton && value_box.name.is_none() {
             value_box.name = slider.name.as_ref().map(|n| format!("{n} value"));
         }
     }
@@ -128,6 +142,8 @@ impl egui::plugin::Plugin for Mirror {
     }
 
     fn output_hook(&mut self, output: &mut egui::FullOutput) {
+        // Cloned, not taken: a screen reader attached to the window
+        // still gets the update.
         if let Some(update) = output.platform_output.accesskit_update.clone() {
             self.apply(update);
         }
@@ -142,23 +158,10 @@ pub fn readable_name(label: &str) -> Option<String> {
     (!text.is_empty()).then(|| text.to_string())
 }
 
-/// Roles whose nodes the readable-name rule applies to; kept next to
-/// `is_control` so a role added to one is added to the other.
-pub const CONTROL_ROLES: &[Role] = &[
-    Role::Button,
-    Role::CheckBox,
-    Role::Switch,
-    Role::RadioButton,
-    Role::Slider,
-    Role::SpinButton,
-    Role::ComboBox,
-    Role::TextInput,
-    Role::MultilineTextInput,
-    Role::Tab,
-    Role::MenuItem,
-    Role::Link,
-    Role::ListBoxOption,
-];
+#[cfg(test)]
+pub(crate) fn test_node(role: Role, name: Option<&str>) -> ControlNode {
+    ControlNode { role, name: name.map(str::to_string), rect: Some([0.0, 0.0, 10.0, 10.0]), ..Default::default() }
+}
 
 #[cfg(test)]
 mod tests {
@@ -173,54 +176,19 @@ mod tests {
     }
 
     #[test]
-    fn control_roles_and_is_control_agree() {
-        for role in CONTROL_ROLES {
-            let node = ControlNode {
-                id: 0,
-                role: format!("{role:?}"),
-                name: None,
-                value: None,
-                number: None,
-                toggled: None,
-                disabled: false,
-                rect: None,
-                children: Vec::new(),
-            };
-            assert!(node.is_control(), "{role:?}");
-        }
-    }
-
-    #[test]
     fn slider_value_box_takes_the_slider_name() {
-        let node = |role: &str, name: Option<&str>| ControlNode {
-            id: 0,
-            role: role.into(),
-            name: name.map(str::to_string),
-            value: None,
-            number: None,
-            toggled: None,
-            disabled: false,
-            rect: None,
-            children: Vec::new(),
-        };
-        let named = name_slider_value_boxes(vec![node("Slider", Some("Size")), node("SpinButton", None), node("SpinButton", None)]);
+        let named = name_slider_value_boxes(vec![
+            test_node(Role::Slider, Some("Size")),
+            test_node(Role::SpinButton, None),
+            test_node(Role::SpinButton, None),
+        ]);
         assert_eq!(named[1].name.as_deref(), Some("Size value"));
         assert_eq!(named[2].name, None, "only the box right after the slider");
     }
 
     #[test]
     fn iter_walks_parents_first() {
-        let leaf = |id| ControlNode {
-            id,
-            role: "Label".into(),
-            name: None,
-            value: None,
-            number: None,
-            toggled: None,
-            disabled: false,
-            rect: None,
-            children: Vec::new(),
-        };
+        let leaf = |id| ControlNode { id, ..Default::default() };
         let mut root = leaf(1);
         let mut mid = leaf(2);
         mid.children.push(leaf(3));
