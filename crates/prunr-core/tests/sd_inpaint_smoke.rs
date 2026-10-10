@@ -95,10 +95,13 @@ fn sd_inpaint_modifies_painted_region() {
 fn sd_bench() {
     let _ = tracing_subscriber::fmt::try_init();
     if skip_if_no_ort("sd_bench") { return; }
-    // `PRUNR_SD_BENCH_MODEL=lcm` runs the LCM bundle (its scheduler, 8 steps,
-    // guidance 2) instead of SD 1.5.
-    let lcm = std::env::var("PRUNR_SD_BENCH_MODEL").is_ok_and(|v| v == "lcm");
-    let id = if lcm { prunr_models::ModelId::SdV15LcmInpaintFp16 } else { prunr_models::ModelId::SdV15InpaintFp16 };
+    // `PRUNR_SD_BENCH_MODEL=lcm` runs the LCM bundle at the app's defaults
+    // for it instead of SD 1.5.
+    let (id, steps, guidance, scheduler) = if std::env::var("PRUNR_SD_BENCH_MODEL").is_ok_and(|v| v == "lcm") {
+        (prunr_models::ModelId::SdV15LcmInpaintFp16, 8, 1.5, inpaint_sd::SchedulerKind::Lcm)
+    } else {
+        (prunr_models::ModelId::SdV15InpaintFp16, 20, 7.5, inpaint_sd::SchedulerKind::Ddim)
+    };
     if !prunr_models::is_available(id) {
         eprintln!("SKIP: {id:?} bundle not installed");
         return;
@@ -112,13 +115,13 @@ fn sd_bench() {
         .and_then(|v| { let (a, b) = v.split_once('x')?; Some((a.parse::<u32>().ok()?, b.parse::<u32>().ok()?)) })
         .unwrap_or((328, 607));
     let mut mask = GrayImage::new(w, h);
-    for y in (h - rh) / 2..(h - rh) / 2 + rh {
-        for x in (w - rw) / 2..(w - rw) / 2 + rw {
+    let (x0, y0) = ((w - rw) / 2, (h - rh) / 2);
+    for y in y0..y0 + rh {
+        for x in x0..x0 + rw {
             mask.put_pixel(x, y, Luma([255]));
         }
     }
-    // The shipped plan, with the same overrides the app honours (same
-    // spellings as the app's `read_bool`).
+    // The shipped plan, with the same overrides the app honours.
     let flag = |name: &str| match std::env::var(name).ok()?.trim().to_ascii_lowercase().as_str() {
         "1" | "true" | "yes" | "on" => Some(true),
         "0" | "false" | "no" | "off" => Some(false),
@@ -127,9 +130,9 @@ fn sd_bench() {
     let planned = inpaint_sd::plan_tuning(id, false, inpaint_sd::SD_DEFAULT_MARGIN_MB);
     let req = SdInpaintRequest {
         prompt: "clean background".to_string(),
-        num_inference_steps: if lcm { 8 } else { 20 },
-        guidance_scale: if lcm { 2.0 } else { 7.5 },
-        scheduler: if lcm { inpaint_sd::SchedulerKind::Lcm } else { inpaint_sd::SchedulerKind::Ddim },
+        num_inference_steps: steps,
+        guidance_scale: guidance,
+        scheduler,
         seed: Some(42),
         tuning: inpaint_sd::SdTuning {
             keep_loaded: flag("PRUNR_SD_KEEP_LOADED").unwrap_or(planned.keep_loaded),
