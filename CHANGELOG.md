@@ -37,6 +37,13 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 
 ### Fixed
 
+- Magic Brush Confidence does what its hint says: it is the probability a pixel must reach, so higher keeps the sure core and lower grows into the rim, and moving it retunes the last click or stroke live. It used to gate the candidate choice and change nothing.
+- Undo restores the cut-out after a Magic Brush or Invert stroke in chain mode; only Paint strokes archived the previous result.
+- The click that closes a brush popover no longer paints a stroke.
+- Ctrl+click also subtracts with Magic Brush on Linux and Windows, where window managers often take Alt+click.
+- Magic Brush is ready on first use: its sessions warm at startup and the selected image is encoded in the background.
+- The "Click or stroke to select" text is no longer painted over the image.
+- Big-LaMa downloads load again (the release asset was an unpatched export).
 - Delete and Cut work before an image is processed, and Delete is undoable.
 - Stroke direction, softness and strength survive the trip into the selection and the correction.
 - The selection and the Magic Brush embedding reset when an image's source is replaced.
