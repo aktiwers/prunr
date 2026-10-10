@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use prunr_core::ModelKind;
 
@@ -121,6 +121,12 @@ pub struct Settings {
     /// at once surprised users, so applying is opt-in.
     #[serde(default = "default_protect_selection")]
     pub protect_selection: bool,
+
+    /// Hotkey overrides by action name ("Undo"), chords in the form
+    /// "Mod+Shift+Z". Only the actions the user changed; an empty list
+    /// unbinds the action.
+    #[serde(default)]
+    pub hotkeys: BTreeMap<String, Vec<String>>,
 
     /// Free RAM the SD pre-flight gate requires *on top of* the model's
     /// declared `working_set_mb`. Default 2 GB matches the historical
@@ -666,6 +672,7 @@ impl Default for Settings {
             brush: BrushSettings::default(),
             ram_safety_margin_gb: default_ram_safety_margin_gb(),
             protect_selection: default_protect_selection(),
+            hotkeys: BTreeMap::new(),
         }
     }
 }
