@@ -372,6 +372,9 @@ pub(crate) struct InpaintTuning {
     /// caller against user preference + install state. Dispatch
     /// consumes verbatim; no further gating, no scheduler coupling.
     pub use_taesd: bool,
+    /// SD-only: how the pipeline runs, planned by the caller from the
+    /// settings and the free RAM.
+    pub sd_tuning: prunr_core::inpaint_sd::SdTuning,
 }
 
 impl Default for InpaintTuning {
@@ -390,6 +393,7 @@ impl Default for InpaintTuning {
             sd_strength: 1.0,
             sd_use_karras_sigmas: false,
             use_taesd: false,
+            sd_tuning: Default::default(),
         }
     }
 }
@@ -820,7 +824,7 @@ impl Processor {
                         scheduler,
                         strength: tuning.sd_strength,
                         use_karras_sigmas: tuning.sd_use_karras_sigmas,
-                        tuning: crate::gui::env_overrides::sd_tuning(),
+                        tuning: tuning.sd_tuning.clone(),
                     })
                 }
                 _ => None,
