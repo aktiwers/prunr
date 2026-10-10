@@ -13,20 +13,23 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 - **Eraser with Stable Diffusion.** SD 1.5 Inpaint and its LCM fast variant join LaMa, Big-LaMa and MI-GAN. Prompt and negative prompt, guidance, five schedulers (LCM, DDIM, DPM++ 2M Karras, Euler-A, UniPC), steps, denoising strength, pinned seed, and the TAESD fast decoder. Quality presets (Fast / Balanced / Quality) pick scheduler and steps. SD runs in its own subprocess, so an out-of-memory stop never takes the app down.
 - **Presets v2.** Per-model presets with brush settings, merge-save that keeps other models' entries, and automatic migration of v1 files.
 - **Unified progress** banner or modal (your choice in Settings) for processing, erasing and upscaling, with step-level progress for SD.
-- **Compiled-model cache** per hardware backend, so the second session with a model on OpenVINO or DirectML skips graph compilation; Settings can clear it.
+- **Compiled-model cache** on CPU, CUDA and CoreML, so the second session with a model skips graph optimisation; Settings can clear it.
 - **Help menu** with keyboard shortcuts, the command-line reference and pipeline diagrams; `prunr --open <path>` starts the app with an image loaded.
 - **Keep the Stable Diffusion eraser loaded** (Settings › Behavior): repeated erases skip the session build, at the cost of about 16 GB of RAM while the app is open.
+- **Screen-reader names.** Every control, icon buttons and sliders included, carries a readable name.
 - **Rebindable hotkeys.** Settings › Hotkeys lists every action with two key slots; click one and press the new keys. A key already in use moves over, and the F1 list and tooltips show your bindings.
 
 ### Changed
 
-- **One toolbar row.** Every pipeline stage is a group chip (Mask, Lines, Fill style, Background, Refine, Quality, Prompt, Advanced) that opens a popover with a header and a reset; the tool cluster is Magic, Paint, the tool's chip, the selection actions and Compare, then Preset and Reset.
+- **One toolbar row.** Every pipeline stage is a group chip (Mask, Lines, Fill style, Background, Refine, Quality, Prompt, Advanced) with a header and a reset; the tool cluster is Magic, Paint, the selection actions and Compare, then Preset and Reset.
+- **Panels that stay out of the way.** Mask, Lines, Fill style, Background and Refine stay open while you work on the image and fade while a slider is held; the chip whose panel is open keeps its accent outline. Picks in Model, Preset, Quality and Scale close their list. Escape closes one thing per press: the open panel, then the top dialog, then a running job, then the selection.
 - Knob names follow the words other editors use: Opacity, Expand region, Edge blend, Feather, Edge shift, Denoise, Sharpen. American spelling throughout.
-- Both brush popovers share the cursor block (size, hardness, shape, live preview); changing it in either changes both tools.
+- Paint Brush and Magic Brush share size and shape; while either is on, its knobs sit in a strip over the image, and `[` / `]` change the size.
 - Undo is one timeline across strokes, results and presets, with Cmd+Shift+Z as an alternate redo; stroke history is bounded at 32 snapshots per image.
 - Chain mode defaults on; switching to an upscale model turns it on so the cut-out feeds the upscaler.
 - Eraser models are on-demand downloads; LaMa is no longer embedded in the binary.
-- Line color choices (Original, Solid color, styles) live in one list; Protect selection became the Auto-apply strokes switch.
+- Line color choices (Original, Solid color, styles) live in one list.
+- The Protect selection lock is gone: on a background-removal result a stroke applies at once, and the eraser's region waits for Apply strokes.
 
 ### Performance
 
@@ -46,6 +49,9 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 - Magic Brush Confidence does what its hint says: it is the probability a pixel must reach, so higher keeps the sure core and lower grows into the rim, and moving it retunes the last click or stroke live. It used to gate the candidate choice and change nothing.
 - Undo restores the cut-out after a Magic Brush or Invert stroke in chain mode; only Paint strokes archived the previous result.
 - The click that closes a brush popover no longer paints a stroke.
+- Undo and redo step every stroke on every model, before or after a result, and a stroke is one step.
+- A stroke on an image undone back to the original no longer brings the cut-out back.
+- Switching to another image and back no longer costs an undo step.
 - Ctrl+click also subtracts with Magic Brush on Linux and Windows, where window managers often take Alt+click.
 - Magic Brush is ready on first use: its sessions warm at startup and the selected image is encoded in the background.
 - The "Click or stroke to select" text is no longer painted over the image.
