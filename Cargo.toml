@@ -83,6 +83,9 @@ egui_extras = { version = "0.34", features = ["image"] }
 egui-notify = "0.22"
 egui_material_icons = "0.6"
 egui_animation = "0.11"
+egui_kittest = { version = "0.34", features = ["eframe"] }
+accesskit = "0.24"
+accesskit_consumer = "0.35"
 
 # Platform integration
 clap = { version = "4.5", features = ["derive"] }

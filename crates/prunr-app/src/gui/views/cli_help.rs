@@ -235,11 +235,12 @@ fn example_row(ui: &mut egui::Ui, toasts: &mut crate::gui::toasts::Toasts, cmd: 
         } else {
             ICON_CONTENT_COPY.codepoint
         };
-        if ui.add(
+        let copy = ui.add(
             egui::Button::new(RichText::new(icon_text).size(12.0).color(icon_color))
                 .frame(false)
                 .min_size(egui::vec2(18.0, 18.0)),
-        ).on_hover_text("Copy to clipboard").clicked() {
+        );
+        if super::chip::named(copy, "Copy to clipboard").on_hover_text("Copy to clipboard").clicked() {
             ui.ctx().copy_text(cmd.to_string());
             ui.ctx().animate_bool_with_time(flash_id, true, 0.0);
             toasts.info("Copied to clipboard");
