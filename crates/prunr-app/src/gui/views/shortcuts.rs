@@ -12,6 +12,21 @@ use crate::gui::theme;
 
 const MOD_NAME: &str = if cfg!(target_os = "macos") { "Cmd" } else { "Ctrl" };
 
+/// Magic Brush subtract modifier. Alt on macOS; Alt or Ctrl elsewhere,
+/// because Linux window managers commonly bind Alt+click to window moves
+/// and the app never receives the click.
+pub(crate) fn is_subtract_modifier(m: &egui::Modifiers) -> bool {
+    m.alt || (!cfg!(target_os = "macos") && m.ctrl)
+}
+
+pub(crate) const MAGIC_BRUSH_TIP: &str = if cfg!(target_os = "macos") {
+    "Click or stroke to select an object; Shift adds, Alt subtracts."
+} else {
+    "Click or stroke to select an object; Shift adds, Alt or Ctrl subtracts."
+};
+
+pub(crate) const SUBTRACT_HINT: &str = if cfg!(target_os = "macos") { "Alt = subtract" } else { "Alt/Ctrl = subtract" };
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
     Open,

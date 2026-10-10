@@ -303,7 +303,7 @@ pub(crate) fn render(
                 let magic_resp = chip::tooltip(
                     chip::icon_toggle_button(ui, ICON_AUTO_AWESOME.codepoint, state.magic_brush_active),
                     "Magic Brush",
-                    "Click or stroke to select an object; Shift adds, Alt subtracts.",
+                    super::shortcuts::MAGIC_BRUSH_TIP,
                     None,
                 );
                 if magic_resp.clicked() {
