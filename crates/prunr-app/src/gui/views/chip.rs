@@ -43,7 +43,7 @@ pub struct ChipChange {
 /// Returns true when a slider interaction has "settled" — drag released or
 /// value changed without an active drag (keyboard, click-jump). Used to
 /// flip the `commit` flag so live preview flushes instead of debouncing.
-fn slider_settled(resp: &egui::Response) -> bool {
+pub(super) fn slider_settled(resp: &egui::Response) -> bool {
     resp.drag_stopped() || (resp.changed() && !resp.dragged())
 }
 
@@ -180,7 +180,7 @@ pub(super) fn icon_action_button(ui: &mut Ui, icon: &str, color: Color32) -> Res
     icon_square_button(ui, icon, color, theme::BG_SECONDARY)
 }
 
-fn icon_square_button(ui: &mut Ui, icon: &str, color: Color32, fill: Color32) -> Response {
+pub(super) fn icon_square_button(ui: &mut Ui, icon: &str, color: Color32, fill: Color32) -> Response {
     with_fill(ui, fill, |ui| {
         ui.add(
             egui::Button::new(RichText::new(icon).color(color).size(theme::ICON_SIZE_SMALL))

@@ -53,6 +53,8 @@ pub enum Action {
     NextImage,
     ToggleQueue,
     ToggleAdjustments,
+    BrushSmaller,
+    BrushLarger,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -193,12 +195,13 @@ impl Action {
     /// Discriminant order; `keys` indexes by it, and the keyboard
     /// dispatches pressed actions in it (Cancel before the modals it
     /// closes).
-    pub const ALL: [Action; 22] = [
+    pub const ALL: [Action; 24] = [
         Action::Open, Action::Process, Action::Save, Action::Copy, Action::Cut,
         Action::Delete, Action::Invert, Action::Cancel, Action::Undo, Action::Redo,
         Action::Shortcuts, Action::CliHelp, Action::PipelineFlow, Action::Screenshot,
         Action::FitToWindow, Action::ActualSize, Action::Settings, Action::BeforeAfter,
         Action::PrevImage, Action::NextImage, Action::ToggleQueue, Action::ToggleAdjustments,
+        Action::BrushSmaller, Action::BrushLarger,
     ];
 }
 
@@ -223,6 +226,8 @@ pub const SHORTCUTS: &[Shortcut] = &[
     Shortcut { action: Action::ActualSize, chords: &[chord(Command, Key::Num1)], label: "Actual size", delivery: Press },
     Shortcut { action: Action::ToggleQueue, chords: &[chord(NoMods, Key::H), chord(NoMods, Key::Tab)], label: "Show or hide the queue", delivery: FreshPress },
     Shortcut { action: Action::ToggleAdjustments, chords: &[chord(Shift, Key::H)], label: "Show or hide the adjustments", delivery: FreshPress },
+    Shortcut { action: Action::BrushSmaller, chords: &[chord(NoMods, Key::OpenBracket)], label: "Smaller brush", delivery: Press },
+    Shortcut { action: Action::BrushLarger, chords: &[chord(NoMods, Key::CloseBracket)], label: "Larger brush", delivery: Press },
     Shortcut { action: Action::Settings, chords: &[chord(Command, Key::Space)], label: "Open settings", delivery: FreshPress },
     Shortcut { action: Action::Shortcuts, chords: &[chord(NoMods, Key::F1)], label: "Show keyboard shortcuts", delivery: FreshPress },
     Shortcut { action: Action::CliHelp, chords: &[chord(NoMods, Key::F2)], label: "Show the command-line reference", delivery: FreshPress },

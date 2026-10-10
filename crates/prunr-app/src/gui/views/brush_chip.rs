@@ -1,21 +1,15 @@
-//! Brush settings chip — radius / hardness / mode + Reset brush
-//! + a live preview of the brush stamp.
-//!
-//! Rendered next to the brush toggle while Paint Brush is on.
+//! The Paint Brush panel: cursor block, stroke knobs, selection look,
+//! and a live preview of the brush stamp. Opens from the tool strip.
 
 use egui::{Color32, Sense, Stroke, Ui};
-use egui_material_icons::icons::ICON_BRUSH;
 
-use crate::gui::brush_state::BrushSettings;
+use crate::gui::brush_state::{BrushSettings, BRUSH_RADIUS_RANGE};
+use crate::gui::theme;
 use prunr_core::brush::BrushShape;
 use prunr_core::selection::BrushMode;
 
 use super::chip;
 use super::fmt;
-
-/// Width budget for the chip label, padded so 1- to 3-digit radii
-/// don't reflow the popover anchor as the user drags the slider.
-const LABEL_PAD_WIDTH: f32 = 88.0;
 
 /// Preview area inside the popover. Brush radius clamps to fit so a
 /// large brush still renders cleanly inside this box.
@@ -31,7 +25,7 @@ const INPAINT_FEATHER_MAX: f32 = 32.0;
 const FEATHER_HARDNESS_REDUCTION_CAP: f32 = 0.5;
 
 #[derive(Default, Clone, Copy)]
-pub(super) struct BrushChipOutcome {
+pub(crate) struct BrushChipOutcome {
     pub reset_brush_requested: bool,
     /// True on slider release / mode / shape click. Caller persists
     /// app-level brush settings on this signal.
@@ -40,73 +34,55 @@ pub(super) struct BrushChipOutcome {
     pub protect_selection: Option<bool>,
 }
 
-/// `protect` is `Some(current protect_selection)` for models whose strokes
-/// can apply on their own (background removal); `None` hides the switch.
-pub(super) fn render(
+/// The full panel behind the strip's dots. `protect` is `Some(current
+/// protect_selection)` for models whose strokes can apply on their own
+/// (background removal); `None` hides the switch.
+pub(super) fn flyout_body(
     ui: &mut Ui,
     s: &mut BrushSettings,
     is_inpaint_mode: bool,
     protect: Option<bool>,
 ) -> BrushChipOutcome {
-    let label = chip_label(s);
-    let resp = ui
-        .scope(|ui| {
-            ui.set_min_width(LABEL_PAD_WIDTH);
-            chip::chip_button(ui, ICON_BRUSH.codepoint, &label, /*accent=*/ true)
-        })
-        .inner;
-    let resp = chip::tooltip(
-        resp,
-        "Brush settings",
-        "Size, hardness and whether strokes add to or subtract from the selection.",
-        None,
-    );
-
     let mut outcome = BrushChipOutcome::default();
-    chip::flyout_for(ui.id().with("brush_chip_popover"), &resp, |ui| {
-        if chip::popover_header(ui, "Brush", Some(("Reset size, hardness, expand, edge blend, sharpen and shape", false))) {
-            outcome.reset_brush_requested = true;
-        }
-        outcome.committed |= render_cursor_section(ui, s);
+    ui.set_min_width(theme::POPOVER_WIDTH);
+    if chip::popover_header(ui, "Brush", Some(("Reset size, hardness, expand, edge blend, sharpen and shape", false))) {
+        outcome.reset_brush_requested = true;
+    }
+    outcome.committed |= render_cursor_section(ui, s);
+    ui.add_space(4.0);
+    if !is_inpaint_mode {
+        // The eraser binarizes the region and paints in one direction,
+        // so opacity and mode would have no effect there.
+        let st = chip::slider_row_f32(ui, "Opacity", &mut s.strength, 0.0..=1.0, false, fmt::percent);
+        outcome.committed |= st.commit;
+        super::hint(ui, "How strongly each stroke changes the selection.");
+        ui.add_space(6.0);
+        let modes = [
+            chip::Choice { value: BrushMode::Add, name: "Add", description: "Strokes add to the selection", enabled: true },
+            chip::Choice { value: BrushMode::Subtract, name: "Subtract", description: "Strokes remove from the selection", enabled: true },
+        ];
+        outcome.committed |= chip::choice_row(ui, "Mode", &modes, &mut s.mode);
+    } else {
+        let g = chip::slider_row_f32(ui, "Expand region", &mut s.inpaint_grow, -16.0..=16.0, false, |v| fmt::signed_px(v, 0));
+        outcome.committed |= g.commit;
+        super::hint(ui, "Grow or shrink the painted region before the fill.");
         ui.add_space(4.0);
-        if !is_inpaint_mode {
-            // The eraser binarizes the region and paints in one direction,
-            // so opacity and mode would have no effect there.
-            let st = chip::slider_row_f32(ui, "Opacity", &mut s.strength, 0.0..=1.0, false, fmt::percent);
-            outcome.committed |= st.commit;
-            super::hint(ui, "How strongly each stroke changes the selection.");
-            ui.add_space(6.0);
-            let modes = [
-                chip::Choice { value: BrushMode::Add, name: "Add", description: "Strokes add to the selection", enabled: true },
-                chip::Choice { value: BrushMode::Subtract, name: "Subtract", description: "Strokes remove from the selection", enabled: true },
-            ];
-            outcome.committed |= chip::choice_row(ui, "Mode", &modes, &mut s.mode);
-        } else {
-            let g = chip::slider_row_f32(ui, "Expand region", &mut s.inpaint_grow, -16.0..=16.0, false, |v| fmt::signed_px(v, 0));
-            outcome.committed |= g.commit;
-            super::hint(ui, "Grow or shrink the painted region before the fill.");
-            ui.add_space(4.0);
-            let f = chip::slider_row_f32(ui, "Edge blend", &mut s.inpaint_feather, 0.0..=32.0, false, |v| fmt::px(v, 0));
-            outcome.committed |= f.commit;
-            super::hint(ui, "Width of the band where the fill blends into the photo.");
-            ui.add_space(4.0);
-            // Sharpen displays as 0-100% on a 0-2 internal range.
-            let sh = chip::slider_row_f32(ui, "Sharpen", &mut s.inpaint_sharpen, 0.0..=2.0, false, |v| fmt::percent(v / 2.0));
-            outcome.committed |= sh.commit;
-            super::hint(ui, "Sharpen the filled area, which comes out slightly soft.");
-        }
-
+        let f = chip::slider_row_f32(ui, "Edge blend", &mut s.inpaint_feather, 0.0..=32.0, false, |v| fmt::px(v, 0));
+        outcome.committed |= f.commit;
+        super::hint(ui, "Width of the band where the fill blends into the photo.");
         ui.add_space(4.0);
-        ui.separator();
-        ui.add_space(4.0);
+        // Sharpen displays as 0-100% on a 0-2 internal range.
+        let sh = chip::slider_row_f32(ui, "Sharpen", &mut s.inpaint_sharpen, 0.0..=2.0, false, |v| fmt::percent(v / 2.0));
+        outcome.committed |= sh.commit;
+        super::hint(ui, "Sharpen the filled area, which comes out slightly soft.");
+    }
 
-        // Selection visualization knobs — shared with Magic Brush chip via
-        // render_shared_selection_section.
-        let sel_committed = render_shared_selection_section(ui, s);
-        outcome.committed |= sel_committed;
-        outcome.protect_selection = render_auto_apply_row(ui, protect);
-    });
+    ui.add_space(4.0);
+    ui.separator();
+    ui.add_space(4.0);
 
+    outcome.committed |= render_shared_selection_section(ui, s);
+    outcome.protect_selection = render_auto_apply_row(ui, protect);
     outcome
 }
 
@@ -119,7 +95,7 @@ pub(super) fn render_cursor_section(ui: &mut Ui, s: &mut BrushSettings) -> bool 
         ui.vertical(|ui| {
             ui.set_min_width(220.0);
             ui.set_max_width(280.0);
-            let r = chip::slider_row_f32(ui, "Size", &mut s.radius, 1.0..=200.0, true, |v| fmt::px(v, 0));
+            let r = chip::slider_row_f32(ui, "Size", &mut s.radius, BRUSH_RADIUS_RANGE, true, |v| fmt::px(v, 0));
             committed |= r.commit;
             ui.add_space(4.0);
             // tenths give ~0.5% drag granularity for fine edge tuning
@@ -189,18 +165,6 @@ pub(super) fn render_shared_selection_section(ui: &mut egui::Ui, s: &mut BrushSe
     );
     committed |= fo.commit;
     committed
-}
-
-/// Right-padded label so 1-, 2-, 3-digit radius values render at the
-/// same visual width and don't shift the popover anchor while the
-/// user drags the slider. Combined with the chip's `min_width` scope,
-/// the chip stays put even as the digit count changes.
-fn chip_label(s: &BrushSettings) -> String {
-    let mode = match s.mode {
-        BrushMode::Add => "Add",
-        BrushMode::Subtract => "Sub",
-    };
-    format!("{:>3} px {mode}", s.radius as u32)
 }
 
 /// Concentric-ring rendering of the brush stamp at current settings.

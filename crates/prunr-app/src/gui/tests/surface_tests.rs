@@ -111,3 +111,55 @@ fn escape_closes_the_flyout_and_keeps_the_selection() {
     settle(&mut h);
     assert!(h.state().batch.items[0].selection_mask.is_none(), "the next Escape clears it");
 }
+
+#[test]
+fn the_tool_strip_follows_the_paint_brush() {
+    use super::tree_tests::{assert_all_controls_named, names};
+    let mut h = loaded();
+    assert!(!names(&h).iter().any(|n| n == "Hardness"), "no strip without a tool");
+    h.state_mut().brush_state.toggle();
+    settle(&mut h);
+    let present = names(&h);
+    for knob in ["Add", "Subtract", "Size", "Hardness", "Opacity", "More Paint Brush settings"] {
+        assert!(present.iter().any(|n| n == knob), "{knob} missing from the strip: {present:?}");
+    }
+    assert_all_controls_named(&h, "paint brush strip");
+    click(&mut h, "More Paint Brush settings");
+    assert!(egui::Popup::is_any_open(&h.ctx), "the dots open the full panel");
+    assert!(names(&h).iter().any(|n| n == "Feather"), "{:?}", names(&h));
+    assert_all_controls_named(&h, "paint brush panel");
+    h.state_mut().brush_state.disable();
+    settle(&mut h);
+    assert!(!names(&h).iter().any(|n| n == "Hardness"), "the strip leaves with the tool");
+}
+
+#[test]
+fn the_tool_strip_follows_the_magic_brush() {
+    use super::tree_tests::{assert_all_controls_named, names};
+    let mut h = loaded();
+    h.state_mut().magic_brush_state.activate();
+    settle(&mut h);
+    let present = names(&h);
+    for knob in ["Size", "Confidence", "Circle", "Square", "Line", "More Magic Brush settings"] {
+        assert!(present.iter().any(|n| n == knob), "{knob} missing from the strip: {present:?}");
+    }
+    assert_all_controls_named(&h, "magic brush strip");
+    click(&mut h, "More Magic Brush settings");
+    assert!(egui::Popup::is_any_open(&h.ctx));
+    assert_all_controls_named(&h, "magic brush panel");
+}
+
+#[test]
+fn bracket_keys_step_the_brush_size() {
+    let mut h = loaded();
+    h.state_mut().brush_state.toggle();
+    settle(&mut h);
+    let start = h.state().settings.brush.radius;
+    h.key_press(egui::Key::CloseBracket);
+    settle(&mut h);
+    let larger = h.state().settings.brush.radius;
+    assert!(larger > start, "] grows the brush: {start} -> {larger}");
+    h.key_press(egui::Key::OpenBracket);
+    settle(&mut h);
+    assert!(h.state().settings.brush.radius < larger, "[ shrinks it");
+}
