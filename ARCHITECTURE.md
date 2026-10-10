@@ -1,763 +1,514 @@
 # Prunr Architecture
 
-Living document describing how Prunr is built. For user-facing info see [README.md](README.md).
+How Prunr is built. For user-facing info see [README.md](README.md).
 
 ## Design Principles
 
-1. **The UI thread never waits** — inference, file I/O, decoding, PNG encoding, texture prep all run on background threads or subprocesses. All communication is via `mpsc` channels drained non-blockingly each frame.
-2. **Single binary** — one `prunr` executable hosts GUI, CLI, and subprocess worker (`--worker`). Models are embedded as zstd blobs decompressed at runtime.
-3. **Platform parity** — every feature works on Linux x86_64, macOS aarch64, and Windows x86_64. Platform-specific code is isolated behind `#[cfg(...)]`.
-4. **Progressive performance** — start fast, improve in place. Use real hardware (GPU/NE) when available, fall back gracefully to CPU, never block startup on compilation.
-5. **Crash isolation** — AI inference runs in a subprocess. If it OOMs, the main app survives, re-queues work with reduced concurrency, and continues.
+1. **The UI thread never waits.** Inference, I/O, decoding and texture prep run off-thread; results come back over `mpsc` channels drained with `try_recv` each frame.
+2. **One executable.** `prunr` is the GUI, the CLI and the worker (`--worker`). Core models are embedded as zstd blobs, the rest download on demand; ONNX Runtime is loaded at run time from `runtime/` beside it or a user-installed GPU runtime.
+3. **Platform parity.** Every feature on Linux x86_64, macOS aarch64 and Windows x86_64; platform code behind `#[cfg]`.
+4. **Progressive performance.** GPU or Neural Engine when present, CPU otherwise; startup never waits on graph compilation.
+5. **Crash isolation where memory is unpredictable.** Batch segmentation and the Stable Diffusion eraser each run in a subprocess, so an OOM kill takes the child, not the app. Bounded models (LaMa, MI-GAN, SAM 2, upscalers) run in-process on background threads.
 
 ## Workspace
 
 ```
-prunr/
-├── crates/
-│   ├── prunr-models/         # Embedded zstd-compressed ONNX blobs + runtime decompression
-│   ├── prunr-core/           # Inference pipeline, image I/O, batch processing
-│   ├── prunr-runtime-install/# PyPI wheel fetch + repackage (shared between xtask and GUI)
-│   └── prunr-app/            # Single binary: GUI (eframe/egui) + CLI (clap) + subprocess worker
-│       └── src/
-│           ├── main.rs             # Entry point: --worker / CLI / GUI dispatch
-│           ├── cli.rs              # CLI batch processing
-│           ├── worker_process.rs   # Subprocess child entry point
-│           ├── lib.rs              # Library root (gui + subprocess modules)
-│           ├── subprocess/         # IPC protocol, framing, parent-side manager
-│           │   ├── protocol.rs     # SubprocessCommand / SubprocessEvent types
-│           │   ├── ipc.rs          # Length-prefixed bincode framing
-│           │   └── manager.rs      # SubprocessManager (spawn, send, poll, kill)
-│           └── gui/                # GUI application
-│               ├── app.rs             # PrunrApp coordinator (UI flags + handles to coordinators)
-│               ├── item.rs            # Pure data types: BatchItem, HistorySlot, ImageSource, …
-│               ├── history_manager.rs # Per-item undo/redo + preset history (no own state)
-│               ├── drag_export_state.rs # OS drag-out lifecycle state (4 fields + reset)
-│               ├── batch_manager.rs   # batch items, selection, bg_io, memory governance, decode/thumb requests
-│               ├── processor.rs       # worker channels, cancel flag, admission, live preview, in-flight recipe slot
-│               ├── system_bridge.rs   # Thin shim over rfd (file dialogs) + arboard (clipboard)
-│               ├── item_settings.rs   # Per-image processing settings
-│               ├── knob_catalog.rs    # Declarative per-knob (tier, cache_impact, dispatch) routing table
-│               ├── live_preview.rs    # In-process Tier 2 dispatcher
-│               ├── presets_fs.rs      # On-disk preset store (one JSON per preset)
-│               ├── worker.rs          # Bridge thread (subprocess ↔ app)
-│               ├── memory.rs          # Admission control, RSS monitoring
-│               ├── history_disk.rs    # Cold-tier history on disk
-│               ├── settings.rs        # App-wide settings
-│               └── views/             # UI components (canvas, sidebar, toolbar,
-│                                      #   adjustments_toolbar, chip, lines_popover,
-│                                      #   preset_dropdown, settings, …)
-├── xtask/                  # Developer tooling (cargo xtask fetch-models)
-├── packaging/              # AUR PKGBUILD, Homebrew formula template
-├── scripts/                # Model conversion (FP16/INT8 variants, DexiNed export)
-├── assets/                 # Icon, Info.plist, .desktop file
-├── .github/workflows/      # CI + multi-platform release packaging
-├── ARCHITECTURE.md         # This file
-├── README.md
-└── LICENSE                 # Apache-2.0
+crates/
+  prunr-models/            # Model registry + embedded zstd blobs; no workspace deps
+  prunr-core/              # Pure pipeline: segmentation, edges, selection, SAM 2,
+                           #   inpaint (LaMa, SD), upscale, image I/O, ORT runtime
+  prunr-runtime-install/   # PyPI wheel fetch + repackage for GPU runtimes
+  prunr-app/src/
+    main.rs                # --worker / CLI / GUI dispatch
+    cli.rs                 # CLI frontend
+    worker_process.rs      # Subprocess child
+    subprocess/            # IPC protocol, framing, parent-side manager
+    gui/                   # egui app: coordinators, views/, automation/, tests/
+xtask/                     # fetch-models, install-runtime, golden diffs
+scripts/                   # Model export/conversion, prunrctl.py
+packaging/                 # AUR, Homebrew
+assets/                    # Icon, Info.plist, .desktop
 ```
 
-**Dependency direction:** `prunr-models` → `prunr-core` → `prunr-app`. Reverse deps are forbidden; `prunr-models` has no workspace-internal dependencies so its ~380 MB embed blob only recompiles when models change. `prunr-runtime-install` is a leaf crate consumed by both `prunr-app` (GUI install button) and `xtask` (CI runtime staging) — keeps the wheel-fetch + repackage logic single-sourced.
+**Dependency direction:** `prunr-models` → `prunr-core` → `prunr-app`, never back; `prunr-models` depends on nothing in the workspace so its blobs recompile only when models change. `prunr-runtime-install` is a leaf shared by the GUI and `xtask`.
 
 ## GUI Coordinators
 
-`PrunrApp` (in `crates/prunr-app/src/gui/app.rs`) is a **coordinator, not an owner**. It holds UI visibility flags, view state with no natural home (zoom, toasts, transient status), and handles to the domain coordinators that own business logic and mutable state.
+`PrunrApp` (`gui/app.rs`) is a **coordinator, not an owner**: it holds UI visibility flags, view state with no other home, and the domain coordinators below. The coordinators don't know about each other; cross-domain work (a finished image updating the batch, the history and admission) is orchestrated on `PrunrApp`.
 
-| Coordinator        | File                         | Owns                                                                                                                                     |
-|--------------------|------------------------------|------------------------------------------------------------------------------------------------------------------------------------------|
-| `BatchManager`     | `gui/batch_manager.rs`       | `Vec<BatchItem>`, selection index, next-id counter, `BackgroundIO` (thumb / decode / tex-prep / save-done / file-load channels), memory-governance passes, `progress() -> StatusReport` |
-| `Processor`        | `gui/processor.rs`           | Worker IPC tx/rx, `AdmissionController`, live-preview dispatch state, cancel flag, in-flight recipe slot (`InFlightBatch`) for single-owner attribution of completed results |
-| `HistoryManager`   | `gui/history_manager.rs`     | Unit struct; exposes methods on `&mut BatchItem` for result-history push/undo/redo and preset snapshots                                   |
-| `DragExportState`  | `gui/drag_export_state.rs`   | `Arc<AtomicBool>` active flag, `Mutex<HashSet<u64>>` dragged-ids, `Option<Vec<u64>>` pending queue                                        |
-| `SystemBridge`     | `gui/system_bridge.rs`       | `arboard::Clipboard` handle + thin shim around `rfd::FileDialog` — the only module that imports the foreign platform deps                 |
-| `BrushState`       | `gui/brush_state.rs`         | Paint Brush toggle, in-progress `ActiveStroke` plane and its `Trail`; the settings live on `app.settings.brush: BrushSettings` (one source for both brushes) |
-| `MagicBrushState`  | `gui/magic_brush_state.rs`   | Magic Brush toggle, encoder-pending flag, in-progress stroke points in source coordinates plus their `Trail`                              |
-| `Automation`       | `gui/automation/`            | The control socket (`PRUNR_CONTROL_PORT`): the AccessKit tree mirror, queued requests, injected input batches, deferred replies. `None` unless the port is set. |
+| Coordinator        | Owns                                                                                                   |
+|--------------------|--------------------------------------------------------------------------------------------------------|
+| `BatchManager`     | Batch items, selection, `BackgroundIO` (decode, thumbnail, texture-prep, save channels), memory governance, progress counts |
+| `Processor`        | Every dispatch: worker IPC and admission, live preview, cancellation, eraser (in-process and the SD bridge), upscale, SAM 2 sessions, the shared progress slot |
+| `HistoryManager`   | Unit struct; result-history and preset undo/redo as methods on `&mut BatchItem`                         |
+| `BrushState` / `MagicBrushState` | Tool on/off and the in-progress stroke; brush settings live once on `settings.brush` for both |
+| `DownloadManager`  | On-demand model downloads, one at a time                                                                |
+| `DragExportState`  | OS drag-out lifecycle, shared with the drag crate's callback thread                                     |
+| `SystemBridge`     | The only importer of `rfd` (file dialogs) and `arboard` (clipboard)                                     |
+| `Automation`       | The control socket; `None` unless `PRUNR_CONTROL_PORT` is set                                          |
 
-**Dependency shape:** `PrunrApp` owns all of them by `&mut self`; the coordinators don't know about each other. Cross-coordinator work happens on `PrunrApp` as the orchestrator — e.g., `on_batch_item_done` writes the result via `BatchManager::find_by_id_mut`, records history via `HistoryManager::record(&mut item, ...)`, and asks the `Processor` whether more work can be admitted.
+**Frame loop.** `logic()` drains channels, handles input, then runs `reconcile_selected`, one idempotent step that tops up the selected image's lazy state (decoded source, textures, Magic Brush embedding) and, on a selection change, frees the other items' results. `ui()` only renders. Wayland drops other threads' wake-ups while the window is idle, so the UI thread polls every 50 ms while work is pending.
 
-**Adding state:** before adding a new field to `PrunrApp`, ask which coordinator owns the domain — new business state belongs on a coordinator; `PrunrApp` only adds UI visibility flags and transient view state.
+**Intents.** Every keyboard action is an `Action`, routed with its gates through `PrunrApp::perform`, which the control socket calls too; toolbar buttons call the same `handle_*` methods, so a gate cannot drift between surfaces. `views/shortcuts.rs::SHORTCUTS` is the one binding table; user rebinds (`settings.hotkeys`) layer over it into `Bindings`, installed into the egui context each frame so tooltips and the F1 list show the live keys.
 
 ## Secondary surfaces
 
-Every popover, panel and dialog is one of five kinds, chosen by how the user works with it (after artcraft's placement rules):
+Every popover, panel and dialog is one of five kinds, chosen by how the user works with it:
 
 | Kind | Mechanism | Used for |
 |---|---|---|
-| Tool strip | `egui::Area` over the top of the canvas while a brush tool is on (`views/tool_strip.rs`); no close, the tool's toggle removes it | The knobs touched every stroke: mode, size, hardness, opacity or expand/blend; size, confidence, shape |
-| Flyout | `chip::flyout_for` / `GroupChip { live: true }`: pinned popover; its chip, Escape or another chip closes it; fades to 12 % while a slider is held | Knobs that change the image while open: Mask, Lines, Fill style, Background, Refine, the strip's full panels |
-| Popover | `chip::popup_for`: closes on a click outside; a single pick closes it | Set-and-go choices: Model, Preset, Quality, Scale, Prompt, Advanced, Help |
-| Modal | `theme::standard_modal_window`: backdrop, close button, Escape, in `PrunrApp::open_modals` | Rare and global: Settings, Model Store, licence, runtime prompt, references, Save preset |
+| Tool strip | `egui::Area` over the canvas top while a brush is on; the tool's toggle removes it | Knobs touched every stroke (mode, size, hardness or confidence, opacity or expand/blend) |
+| Flyout | `chip::flyout_for` / `GroupChip { live: true }`; its chip, Escape or another chip closes it; fades while a slider is held | Knobs that change the image while open: Mask, Lines, Fill style, Background, Refine, the strip's full panels |
+| Popover | `chip::popup_for`; a click outside or a pick closes it | Set-and-go choices: Model, Preset, Quality, Scale, Prompt, Advanced, Help |
+| Modal | `theme::standard_modal_window`, listed in `PrunrApp::open_modals` | Rare and global: Settings, Model Store, licence, runtime prompt, help references, Save preset |
 | Status | Painted on the canvas edge or corner | Progress banner and pill, Magic "Preparing", toasts |
 
-The canvas stays live under strips and flyouts (`theme::dismissable_popup_open` is what holds it still, and only for popovers), and Escape does one thing per press: close the open popup or dialog, else the top-most modal, else cancel a run, else clear the selection (`PrunrApp::perform(Cancel)`). `gui/tests/surface_tests.rs` pins these contracts.
+The canvas stays live under strips and flyouts; only a popover holds it still, so the click that dismisses one is not also a stroke. Escape does one thing per press: close the open popup, else the top-most modal, else cancel a run, else clear the selection. `gui/tests/surface_tests.rs` pins these contracts.
 
 ## Automation
 
-The app can be driven without a person at the keyboard, from two sides that share one mechanism.
+Tests and outside tools drive the app through **the control tree**: the AccessKit tree egui builds from the real widgets (role, name, value, enabled, rectangle). A control's name is its text; icon-only buttons and bare sliders get theirs from `chip::tooltip` / `chip::slider_row` / `chip::named`.
 
-**The control tree** is the AccessKit tree egui builds from the real widgets when accessibility is enabled: every button, slider, checkbox and picker with its role, name, value, enabled state and rectangle. Names come from the widgets themselves (button text, slider text); icon-only buttons and bare sliders get theirs from `chip::tooltip` / `chip::slider_row` / `chip::named`, so the tooltip title is the control's name. `automation::tree::ControlNode` reads the tree as plain data.
+**In tests**, `egui_kittest` runs the real `PrunrApp` without a display; tests find controls by name, click, step frames and assert on state. `gui/tests/tree_tests.rs` renders every surface and fails on any nameless control, so the naming rule enforces itself.
 
-**In tests** (`gui/tests/tree_tests.rs`) `egui_kittest` runs the real `PrunrApp` with no display. Tests query by name, click, step frames and assert on app state. One test renders every surface and fails on any control without a readable name, so the naming rule enforces itself.
-
-**At run time** `PRUNR_CONTROL_PORT=<port>` opens a line-JSON socket on localhost (`scripts/prunrctl.py` is the client). A `Mirror` plugin keeps the tree current from each frame's output; `click` and `key` are injected as egui input one batch per frame, with the reply held until those frames have run; `intent` calls `PrunrApp::perform`, the one routing method every intent goes through (the keyboard loops `Action::ALL` into it); `state` is a serde dump; `open` and `screenshot` reuse the app's own paths. The UI thread polls the inbox because a wake-up from another thread does not reach an idle Wayland window.
-
-The window must be getting frames: with the output powered off, a Wayland compositor sends no frame callbacks, the surface never gets configured and nothing answers. Headless rendering (snapshots through kittest's `wgpu` feature) is not wired yet.
+**At run time**, `PRUNR_CONTROL_PORT=<port>` opens a line-JSON socket on localhost (client: `scripts/prunrctl.py`). Clicks, drags and keys are injected as egui input, one batch per frame, and the reply waits until those frames have run, so the app reacts exactly as to a user. `intent` goes through `PrunrApp::perform`; `state` is a serde dump; `open` and `screenshot` reuse the app's own paths. The window must be receiving frames: with the output powered off a Wayland compositor sends no frame callbacks and nothing answers.
 
 ## Process Architecture
 
-Prunr uses a **two-process model** for batch inference, inspired by Chrome's renderer isolation:
+ONNX Runtime's memory use is unpredictable, and its arena and GPU contexts hold allocations until the session dies, so process exit is the only guaranteed reclaim. Work that can OOM runs in a `prunr --worker` child, where an OOM kills the child, not the window; small or interactive work stays in-process.
 
-```
-Parent process (GUI/CLI)                  Child process (prunr --worker)
-┌──────────────────────┐                 ┌──────────────────────┐
-│ PrunrApp             │   stdin/stdout  │ worker_process       │
-│                      │   (bincode)     │                      │
-│ Bridge thread ───────┼────────────────►│ Read commands        │
-│   - translate msgs   │                 │ Load ORT engine pool │
-│   - retry on crash   │◄───────────────┤│ Process images       │
-│   - RSS-based pace   │                 │ Report RSS           │
-│                      │   exit code     │                      │
-│ Crash → re-queue ◄───┼────────────────┤│ OOM → process dies   │
-│   reduce concurrency │                 └──────────────────────┘
-│   spawn new child    │
-└──────────────────────┘
-```
+| Work | Runs in | Lifetime |
+|------|---------|----------|
+| Segmentation + edges (Process, CLI) | seg worker subprocess | pre-warmed at startup and used by the first batch if its config matches; later batches spawn their own child; shut down when the batch ends or on model switch |
+| SD erases | inpaint-only worker subprocess (no seg engines) | spawned on first SD erase; killed after 5 min idle, on model switch, or on Cancel |
+| LaMa / MI-GAN erases, SAM, live preview | in-process, rayon | sessions cached; LaMa released after 5 min idle |
+| Upscale | in-process, one thread per run | engine kept warm until model or hardware change |
+| Filters only (no model) | background thread per item | — |
 
-### Why subprocess isolation?
+SD has its own process because its multi-GB bundle is the likeliest OOM and a UNet step can't be interrupted: Cancel kills the process so RAM frees at once, and a watchdog kills it if free system RAM drops below 1 GB mid-erase.
 
-ONNX Runtime allocates unpredictable amounts of memory at runtime (varies by model, input size, graph optimization, arena behaviour). Static memory estimates are always wrong. The subprocess model means:
-- **OOM kills only the child** — the parent stays responsive, the desktop never freezes
-- **Auto-retry with reduced concurrency** — crash at 4 jobs → retry at 2 → retry at 1
-- **Memory can only be fully reclaimed by process exit** — ORT's arena allocator + CUDA/CoreML contexts keep allocations alive for the lifetime of the session, so process exit is the only guaranteed reclaim mechanism
+### IPC
 
-### IPC Protocol
+Length-prefixed bincode frames over the child's stdin/stdout (`subprocess/protocol.rs`):
 
-Communication uses **length-prefixed bincode frames** over stdin/stdout:
+| Direction | Kinds |
+|-----------|-------|
+| Parent → child | `Init`; work (`ProcessImage`, `RePostProcess`, `AddEdgeInference`, `Inpaint`); `CancelItem`, `Shutdown` |
+| Child → parent | `Ready` / `InitError`; progress; results / errors per work kind; `RssUpdate`; `Finished` |
 
-| Direction | Message | Purpose |
-|-----------|---------|---------|
-| Parent → Child | `Init` | Load model, create engine pool |
-| Parent → Child | `ProcessImage` | Full pipeline: decode + infer + postprocess |
-| Parent → Child | `RePostProcess` | Tier 2 mask rerun from cached tensor (batched reruns only — live preview runs in-process) |
-| Parent → Child | `Cancel` / `Shutdown` | Graceful stop |
-| Parent → Child | `CancelItem { item_id }` | Drop one item at the next dispatch check — others in flight keep running |
-| Child → Parent | `Ready` | Engines loaded |
-| Child → Parent | `Progress` | Per-stage progress (Decode, Infer, etc.) |
-| Child → Parent | `ImageDone` | Result + optional seg-tensor path and DexiNed-tensor path for Tier 2 caches |
-| Child → Parent | `ImageError` | Non-fatal error |
-| Child → Parent | `RssUpdate` | Current process RSS (for admission throttling) |
+Payloads (image bytes, result RGBA, seg and edge tensors for the Tier 2 caches) go through temp files in `prunr-ipc-{parent pid}`, under `/dev/shm` on Linux and the OS temp dir elsewhere; the reader deletes each file (sweep rules in [Temp File Lifecycle](#temp-file-lifecycle)).
 
-**Image data transfer:** Large payloads (image bytes, result RGBA, raw tensors) go via temp files, not through the pipe. On Linux, temp files are placed in `/dev/shm/prunr-ipc-{pid}/` (RAM-backed tmpfs — zero disk I/O). On Windows/macOS, `std::env::temp_dir()` is used. Cancel path calls `cleanup_ipc_temp()` to prevent tmpfs leaks.
-
-**Cancellation.** `processor::CancelRegistry` holds a global `Arc<AtomicBool>` plus a `HashMap<u64, Arc<AtomicBool>>` for per-item flags, shared by clone between the UI thread and the bridge thread. `handle_cancel` raises the global flag (stops the whole batch); `handle_cancel_selected` raises per-item flags for selected+Processing items. The bridge drops cancelled items from its pending queues (emitting `BatchItemDone(Err("Cancelled"))` directly) and forwards `SubprocessCommand::CancelItem` for any cancelled in-flight items. The worker keeps its own `HashSet<u64>` and checks membership before each pool job — matched ids skip with `ImageError { error: "Cancelled" }`. Items that come back as "Cancelled" revert to `BatchStatus::Pending` (not `Error`), so caches stay intact for a follow-up Process.
+Cancel is per item: the bridge drops queued items and sends `CancelItem` for in-flight ones, which the worker checks before and during inference. A cancelled item reverts to Pending, not Error, so its caches survive.
 
 ## Threading Model
 
-| Thread / Process | Spawned | Lives for | Purpose |
-|------------------|---------|-----------|---------|
-| UI (egui render loop) | main | app lifetime | Render frames, handle input, drain channels |
-| Bridge thread | startup | app lifetime | Receives `WorkerMessage`, spawns subprocess, translates IPC, handles crash+retry |
-| Subprocess (prunr --worker) | per batch | one batch | Loads ORT engines, processes images, reports RSS |
-| Subprocess reader thread | per subprocess | subprocess lifetime | Reads child stdout events non-blockingly |
-| File loader | per drag-drop / open | until paths sent | Sends `(PathBuf, name)` via mpsc (lazy — no file read) |
-| Image decoder | on demand | ~20-80ms | `image::load_from_memory` → `Arc<RgbaImage>` |
-| Thumbnail builder | per imported image | ~5-50ms | Lanczos resize to 160px (bg fill happens at render time, not here) |
-| Texture prep | per canvas texture | ~5-50ms | Builds `egui::ColorImage` off the UI thread (transparent — bg is render-time) |
-| Live-preview rayon job | per tweak dispatch | ~20-500ms | Tier 2 postprocess or edge rerun; shared rayon pool |
-| Save writer | per save | until PNG written | Background PNG encode + `fs::write` (with bg composited) |
-| Temp file cleanup | app exit + periodic | brief | Removes `prunr-drag/*`, `prunr-history/*`, `prunr-ipc/*` |
+| Thread | Purpose |
+|--------|---------|
+| UI (egui) | Render, input, drain result channels with `try_recv` |
+| `prunr-bridge` | Owns the seg worker: spawn, IPC, RSS pacing, crash retry, hang detection (60 s silent = crash) |
+| `prunr-inpaint-bridge` | Owns the SD worker; spawns it on a helper thread so Cancel works during Init |
+| `subprocess-reader` | One per child; blocking reads of child stdout |
+| `prunr-control` | Only with `PRUNR_CONTROL_PORT`: local JSON socket; requests are answered on the UI thread |
+| Upscale | Builds the session off the UI thread (a cold OpenVINO compile takes tens of seconds); Cancel terminates the running ORT call |
+| Background I/O | Short-lived: file listing, decode, thumbnails, texture prep, history spill, save, downloads. Decode-heavy ones share a slot pool capped at the core count so a big batch doesn't stack per-image peaks |
+| rayon global pool | Live preview, LaMa / MI-GAN, SAM |
 
-### Engine pooling (in subprocess)
+### Engine pool (seg worker)
 
-| Backend | Pool size | Intra-op threads |
-|---------|-----------|------------------|
-| CPU | user's `parallel_jobs` setting | `num_cpus / pool_size` |
-| GPU (CUDA/DirectML/CoreML) | `min(jobs, 2)` | `num_cpus / pool_size` |
+| Backend | Engines | ORT intra-op threads |
+|---------|---------|----------------------|
+| CPU | parallel-jobs setting | `num_cpus / engines` |
+| GPU | `min(jobs, 2)` (VRAM) | same |
 
-GPU is capped at 2 engines — more doesn't help because the GPU driver serializes anyway. CPU respects the user's setting; the admission controller manages overall memory pressure.
+The ORT CPU arena is off to lower the baseline; the subprocess absorbs any OOM. Jobs share a 64-unit semaphore weighted by megapixels, so small images run in parallel, a 40 MP image runs nearly alone, and FIFO order keeps small arrivals from starving it.
 
-**Postprocess serialization:** A global `POSTPROCESS_LOCK` mutex in the subprocess ensures only one image runs the CPU-intensive Lanczos3 resize at a time. This prevents concurrent resize spikes from causing OOM when multiple engines finish inference simultaneously.
+### Crash retry
 
-**ORT CPU arena disabled:** `CPUExecutionProvider::with_arena_allocator(false)` reduces baseline memory. The subprocess isolation handles any resulting OOM.
-
-### Retry flow on crash
-
-```
-Attempt 1: N engines → crash → re-queue ALL in-flight images
-Attempt 2: N/2 engines → success → continue at N/2
-         or → crash → re-queue ALL in-flight
-Attempt 3: 1 engine → success → continue at 1
-         or → crash → mark remaining images as "insufficient memory"
-```
-
-The parent shows a toast: "Memory pressure — retrying X images with Y parallel jobs". Crash diagnostics detect the exit signal (SIGKILL = "Process killed by OS (out of memory)", SIGSEGV = "segmentation fault") for user-facing messages.
+On a crash or hang the bridge re-queues unfinished images, halves the job count and spawns a new child (toast: "Memory pressure — retrying…"). In-flight Tier 2 items error instead, since their tensor temp file is gone; the next Process reruns them in full. A crash at one job fails the rest with the cause from the exit signal (SIGKILL = out of memory, SIGSEGV = segfault) and "try a smaller model".
 
 ## Tiered Recipe Pipeline
 
-Re-processing avoids redundant work by classifying each change into a tier:
+Each `BatchItem` keeps the `ProcessingRecipe` that produced its result (`applied_recipe`). On Process, `prunr_core::resolve_tier(old, new)` picks the cheapest tier that covers the change (the most expensive change wins):
 
-| Tier | Name | When | Cost |
-|------|------|------|------|
-| 1 | FullPipeline | Model, line mode, or chain changed | Full inference |
-| 1b | AddEdgeInference | Only `uses_edge_detection` flipped false→true and seg cache hot | Reuse cached seg, run DexiNed only |
-| 2a | MaskRerun | Mask params changed (gamma, threshold, edge_shift, refine_edges, fill_style, bg_effect) | Postprocess cached seg tensor (~50-200ms; BgEffect adds ~30-100 ms for the backdrop compose) |
-| 2b | EdgeRerun | Line params changed (line_strength, solid_line_color, compose_mode, line_style) | Re-threshold cached DexiNed tensor (~20-100ms) |
-| 2c | UpscaleRerun | Upscale model or scale changed | Re-runs `upscale_rgba` in-process on a background thread; bypasses subprocess |
-| 3 | CompositeOnly | bg_color changed | Render-time GPU rect — zero CPU |
-| — | Skip | Recipe identical | No work |
+| Tier | When | Work |
+|------|------|------|
+| `FullPipeline` | Model, chain mode, segmentation on/off, or a line-mode switch that changes DexiNed's input | Full inference |
+| `AddEdgeInference` | Lines turned on, or `InputTransform` changed, with the seg tensor cached | DexiNed only |
+| `MaskRerun` | Mask knobs (incl. fill style, bg effect, brush correction), or lines turned off | Postprocess the cached seg tensor |
+| `EdgeRerun` | Line knobs (strength, colour, thickness, scale, compose mode, style) | Re-threshold the cached DexiNed tensor |
+| `UpscaleRerun` / `UpscaleTier2` | Upscale knobs before / after the model | See [Upscale](#upscale) |
+| `CompositeOnly` | Background colour or image | Render-time only |
+| `Skip` | Nothing output-relevant | None |
 
-Each `BatchItem` stores its `applied_recipe` (the recipe that produced its current result). The dispatch-time snapshot — used to attribute completed results back to the settings that ran — lives on `Processor::in_flight` as a single-owner per-batch record, so a late `ImageDone` after a settings edit can't reattribute. See `## GUI Coordinators` for the ownership rule.
+The recipe of an in-flight batch lives on `Processor` (`InFlightBatch`), not on the item, so a result landing after a settings edit is stamped with what actually ran.
 
-**Two independent tensor caches.** A `BatchItem` holds a segmentation tensor (for MaskRerun) and a DexiNed tensor (for EdgeRerun) as separate zstd-compressed fields — a model swap invalidates only the seg cache, a line_mode change only the edge cache. Combined budget: 512 MB, oldest-evicted first.
+**Two tensor caches.** The seg tensor and the DexiNed tensors are separate zstd-compressed fields on the item, so a model swap invalidates only one and a line-mode change only the other; both share a 512 MB budget, evicted in batch order, the selected item exempt.
 
-**Two Tier 2 paths.** Batched reruns (e.g. preset applied across many selected items) go through the subprocess. Live-preview reruns run in-process on the rayon pool to avoid IPC overhead — see [Live Preview](#live-preview).
+**Batch vs interactive Tier 2.** Batch reruns go through the subprocess (a mask rerun with lines on takes the AddEdge path so the outline is recomposed; edge reruns run the full pipeline). Interactive reruns of the selected item run in-process; see [Live Preview](#live-preview).
 
-**Two sources of tier truth.** `resolve_tier` compares two `ProcessingRecipe`s for batch classification (`classify_candidates`). The `gui/knob_catalog.rs` catalog exposes the same knowledge per knob (`Gamma`, `LineMode`, `InputTransform`, …) for toolbar dispatch — every chip reads the catalog to decide its cache impact and runtime path instead of hand-setting flags. A cross-check test asserts the two agree on single-knob mutations; any drift fails the build.
+**Two sources of tier truth, one test.** `resolve_tier` compares whole recipes; `gui/knob_catalog.rs` maps each toolbar knob to `(tier, cache impact, dispatch)`, with context-aware specs for knobs whose cost depends on what is cached (Off → Subject outline is a live recompose with the edge tensor warm, an AddEdge run otherwise). A test mutates every knob and asserts the two agree.
 
 ## Per-Image Settings
 
-Each `BatchItem` owns its own processing settings, so tweaking the adjustments toolbar edits one image instead of broadcasting to the whole batch. App-wide config (parallel_jobs, chain_mode, live_preview, etc.) stays separate on `AppSettings`. Per-image settings are `Copy`-sized and forward-compatible: older preset files load cleanly when new fields are added.
-
-**Knob catalog.** `gui/knob_catalog.rs` is the single table mapping each knob to `(tier, cache_impact, dispatch)`. Chips fold their `ChipChange` events via `aggregate_knob(knob, change)`; the resulting `ToolbarChange` carries the aggregate cache invalidation, subprocess dispatch, live-preview signal, and render-repaint hint. `apply_toolbar_change` is table-driven over those fields. Context-sensitive knobs (`LineMode`, `InputTransform`) have dedicated helpers (`line_mode_spec`, `input_transform_spec`) that consume item state for precise dispatch — e.g. Off → SubjectOutline takes the LivePreviewMask fast path when the edge tensor is cached, otherwise a subprocess DexiNed rerun.
+Every `BatchItem` owns its `ItemSettings`, so a toolbar edit changes one image; app-wide behaviour (parallel jobs, chain mode, brush) lives on `Settings`. `ItemSettings` is `Copy` and `#[serde(default)]`, so older presets load when fields are added.
 
 ### Creative compose layer
 
-On top of the AI pipeline sit four orthogonal compose-time enums, all stored on `ItemSettings` and all pure per-pixel ops on the cached tensors (no re-inference):
+Five per-item enums sit on top of the AI output, applied in one `postprocess → compose` step in `prunr-core` from cached tensors:
 
-| Enum | What it drives | Applies when | Tier |
-|---|---|---|---|
-| `ComposeMode` | How the subject mask α and edge mask α combine (LinesOnly / SubjectFilled / Engraving / Ghost / InverseMask) | `LineMode::SubjectOutline` | EdgeRerun |
-| `LineStyle` | How edge pixels are coloured (Solid / GradientY / GradientX / RadialGradient / Rainbow / Chromatic / Noise / DualScale) | Any mode with lines | EdgeRerun |
-| `FillStyle` | RGB transform on the masked subject before compose (Desaturate / Invert / Sepia / Duotone / Threshold / Posterize / Solarize / HueShift / Saturate / ColorSplash / Pixelate / CrossProcess / ChannelSwap / Halftone / GradientMap) | Any mode with a subject | MaskRerun |
-| `BgEffect` | Source-derived backdrop baked into transparent areas (BlurredSource / InvertedSource / DesaturatedSource) | Any mode | MaskRerun |
-| `InputTransform` | Pre-inference image transform (Grayscale / ContrastBoost / Posterize). Changes what DexiNed sees | EdgesOnly, SubjectOutline | FullPipeline (edge cache invalid) |
+| Enum | Drives | Tier |
+|---|---|---|
+| `ComposeMode` | How subject α and edge α combine (Subject outline mode) | EdgeRerun |
+| `LineStyle` | Edge colouring (solid, gradients, rainbow, noise, DualScale, …) | EdgeRerun |
+| `FillStyle` | RGB transform of the masked subject (desaturate, duotone, halftone, …) | MaskRerun |
+| `BgEffect` | Source-derived backdrop baked into transparent areas | MaskRerun |
+| `InputTransform` | Transform of DexiNed's input | AddEdgeInference |
 
-All four land in the same `postprocess → compose` step in `prunr-core`; live preview threads them through `DispatchInputs`. Shared helpers: `luma_u8`, `rgb_to_hsv`, `hsv_to_rgb`, `blend_rgb`, `lerp_rgb` in `prunr-core`. `#[inline]` on every per-pixel primitive; `ComposeMode::alpha` is inlined into the row loop, which the compiler unswitches on the loop-invariant mode.
-
-**Dual-scale edge overlay.** `LineStyle::DualScale` uses TWO DexiNed scales at once — Fine for micro-details in one colour, Bold for structure in another. The worker builds both masks from the cached `EdgeInferenceResult` and calls `compose_edges_dual_styled`. Live preview decompresses the Bold tensor on demand (only when DualScale is active), and `edge_tensor_for_scale` keeps the `volatile_edge_tensor` hot cache pinned to the active scale so the Bold decompress doesn't evict it — otherwise the next Edge tweak would miss the cache.
+`DualScale` draws the Fine and Bold DexiNed scales at once. The Bold tensor is decompressed only while it is on, and never replaces the hot active-scale tensor, so the next edge tweak still hits the cache.
 
 ### Selection and brushes
 
-One plane type, `prunr_core::selection::MaskArtifact`: a signed `i8` grid at source-image resolution, held as `Arc<Vec<i8>>` so undo snapshots and cross-thread reads are refcount bumps. Positive cells push toward subject, negative toward background; magnitude is coverage, and cells at or above half coverage count as "selected" for region consumers (outline, fill, inpaint region, bounding box), while continuous consumers (Delete / Copy alpha, the segmentation correction, Invert) read the signed cell as-is. The Paint Brush paints into it (mid-drag buffer on `BrushState.active`, committed on release), the Magic Brush decodes into it, Invert maps it, and `BatchItem.selection_mask` keeps it. Every author commits through `BatchItem::commit_selection_mask`, which snapshots the previous plane onto the stroke undo stack and writes the plane's `content_hash` to `ItemSettings.correction_hash` — the single source of truth the recipe diff reads to fire MaskRerun. Every commit is followed by `apply_selection_to_active_model`: background-removal models re-cut at once from the cached tensor (a stroke is Restore or Erase, as in remove.bg and Canva), eraser models wait for Apply strokes or Process because a run costs minutes.
+**One plane.** Every selection is a `prunr_core::selection::MaskArtifact`: a signed `i8` grid at source resolution behind an `Arc`, so undo snapshots and cross-thread reads are refcount bumps. Sign is direction (toward subject or background), magnitude is coverage. Region consumers (outline, inpaint region, bounding box) count a cell at half coverage or more as selected; continuous consumers (Delete / Copy / Cut alpha, the segmentation correction, Invert) read the signed value. Paint strokes, Magic Brush results and Invert all merge onto `BatchItem.selection_mask` by one rule: zero leaves a cell, the same sign keeps the stronger value, the opposite sign lets the newer stroke win.
 
-**Selection actions.** Delete, Copy, Cut, Invert and Clear (`SelectionAction`) share one handler and the keyboard bindings of the shortcut table. Delete and Cut scale alpha by coverage (`alpha_cut`), Copy puts the coverage-masked pixels on the clipboard (`copy_to_rgba`), Invert is `FULL - |v|` with the active brush mode's sign. With Feather on, the action and the overlay both go through `SelectionStyle::feathered`, so what is cut is what was shown.
+**One commit path, one rule per model.** Every author calls `PrunrApp::commit_selection_and_dispatch`: `BatchItem::commit_selection_mask` swaps the plane and records the undo step, then `apply_selection_to_active_model` decides what the stroke means:
 
-**Overlay texture.** `SelectionStyle` (fill opacity, outline opacity and width, feather) is baked off-thread into one RGBA texture per item, keyed by `(content_hash, style)`; the canvas draws it as a single untinted quad. The texture remembers the plane it shows, so a stroke uploads only a patch: the worker takes `MaskArtifact::diff_bbox` against that plane, grows it by the outline radius plus one, renders the crop and uploads it with `set_partial`. Feathered styles, style changes and size changes rebuild the whole texture. Builds are single-flight per key; a result for a plane that has since changed is dropped and the per-frame check asks again.
+| Active model | A stroke is | Applied |
+|---|---|---|
+| Background removal | Restore or Erase on the cut-out | At once, by an in-process mask rerun from the cached seg tensor, but only while a cut-out is on screen (`BatchItem::shows_cutout`); otherwise the selection waits for the next result |
+| Eraser | Add to / subtract from the region to fill | On Apply strokes or Process, since a run costs seconds to minutes |
+| Upscale | — | Selection actions only |
 
-**Correction.** `MaskArtifact::apply_to_mask` runs **pre-gamma in normalized [0, 1] space**, nearest-neighbour resampled from source to tensor resolution inline: subtract at strength `s` does `m → m * (1 - s)`, add does `m → lerp(m, 1.0, s)`. Gamma + threshold then compose naturally over painted regions, so dragging gamma after painting modulates the painted area too. A blank plane is known at build time (`is_blank`) and skips the correction path entirely.
+**Correction.** `MaskArtifact::apply_to_mask` runs on the normalized mask *before* gamma and threshold (Erase scales toward 0, Restore lerps toward 1, by magnitude), so gamma dragged after painting still modulates the painted area. A blank plane is known in O(1) and skips the pass.
 
-**Painters.** Three primitives in `prunr-core::brush` (Circle / Square / Line) share a generic `stamp_with` helper that takes a distance closure (euclidean for Circle, Chebyshev for Square); Line stamps `paint_circle` along a swept segment at `commit_stroke`, not per-frame. The cell vector is private — the `width × height == cells.len()` invariant is enforced by routing all writes through the paint primitives and `from_cells`; painting into a plane an undo snapshot still shares copies it first (`Arc::make_mut`).
+**Actions and overlay.** Delete, Copy, Cut, Invert and Clear share one handler. Fill, outline and feather are baked off-thread into one texture per item keyed by `(plane hash, style)`; a stroke uploads only the changed patch. With Feather on, the actions use the same guided-filter-feathered plane the overlay shows, so what is cut is what was shown.
 
-A safety net (`recipe_drift_tripwire` in `pump_live_preview`) catches drift between `applied_recipe.mask` and the current recipe for the selected item — covers state mutators that don't go through the toolbar dispatch path (brush commits, hotkeys, stroke undo/redo). Tagged `tracing::debug!` when it fires so a future feature that forgets to wire dispatch is auditable.
+**Painters.** `prunr_core::brush` has Circle, Square and Line stamps; an in-progress stroke paints into its own plane on `BrushState` and merges on release. Paint and Magic Brush are mutually exclusive tools sharing `Settings.brush`.
 
-Per-stroke history lives on `BatchItem.stroke_undo_stack` / `stroke_redo_stack` — bounded at `STROKE_HISTORY_DEPTH` (32) snapshots of `Option<Arc<MaskArtifact>>` (each snapshot is one Arc bump, not a full clone, and counted in `cache_size()`). Each push site (stroke commit, clear, result archive, preset apply) also writes a tag to a single per-item ordering log (`BatchItem.actions_undo` / `actions_redo`, `VecDeque<ActionType>`). Cmd+Z pops the most-recent tag from `actions_undo` and dispatches to the matching per-type stack, regardless of the current mode — painting strokes and then disabling the brush no longer causes Cmd+Z to skip over the strokes. The on-screen trail (`Trail`, one type behind both brushes with one spacing rule) and the popover preview share one falloff renderer in `gui/views/chip.rs::paint_falloff_{circle,square}` so any tweak to the smoothstep curve shows up in both places at once.
+### Undo timeline
+
+Each item has one undo timeline over three kinds of step, each with its own stack: `Stroke` (selection snapshots, capped at 32 since each is a full plane), `Result` (the result history; see Memory Management) and `PresetApply`. Every push appends its type to `actions_undo`; Cmd+Z pops the newest marker and steps that stack, whatever tool is active.
+
+A stroke is one step. Undoing it steps the selection back, then: if its re-cut archived the pre-stroke image (chain mode, where the re-cut replaces the chain input; `StrokeSnapshot.result_archived`) that image returns; otherwise a stroke on a cut-out re-cuts from the tensor; an eraser region stroke moves nothing else, because each erase result is its own `Result` step. An erase cancelled before it lands rolls back its stroke and marker.
+
+Undoing back to the original makes the item Pending but keeps its seg tensor for redo (`BatchItem::cut_is_undone`). While that holds, live-preview runs and late preview results are dropped, so a re-cut queued before the undo cannot bring the cut back.
 
 ### Magic Brush (SAM 2)
 
-SAM 2 Hiera Small ships bundled as an encoder + decoder pair (`ModelSource::MultiPartBundled`, category `Selection`): it authors a selection rather than a final cut-out, so it never enters the background-removal pipeline. `prunr-core::sam` is pure (preprocessing, prompt builders, logits → plane); the ORT sessions live on `Processor` (`SamSessions`, ~180 MB, built on first use and dropped on deactivation).
+SAM 2 Hiera Small ships bundled as an encoder + decoder pair (category `Selection`); it authors selections and never enters the background-removal pipeline. `prunr_core::sam` is pure; the two CPU sessions (~180 MB) live on `Processor`, built on the rayon pool at startup and kept resident.
 
-**Encoder.** While the tool is active, the per-frame reconcile step asks for an embedding of the selected image as soon as its source is decoded (`ensure_magic_embedding_for_selected`): one rayon job per image, admission-gated on free RAM, result cached as `BatchItem.magic_brush_embedding` (16 MiB) and invalidated when the source is replaced. Switching images therefore keeps the tool usable without toggling it; a failed admission turns the tool off instead of retrying every frame.
+**Encoder.** The selected image is encoded in the background once its source is decoded, even before the tool is on: refused below ~800 MB free RAM, cached as `BatchItem.magic_brush_embedding` (16 MB), dropped when the source changes. With the tool off only the selected image keeps its embedding; a refused speculative encode is not retried.
 
-**Decoder.** A click or a stroke (up to 8 points, decimated) becomes a `SamPrompt`; the decoder runs on a rayon worker and `decode_to_mask_artifact` picks the best candidate above the Confidence threshold, bilinearly upsamples the 256² logits to source resolution (row-parallel, ~8 ms at 4K) and thresholds to ±`FULL` by brush mode. The mask carries the chosen mode's polarity (Restore or Erase on a cut-out, Add or Subtract on the eraser's region; Shift and Alt override it for one click) and merges onto the selection exactly like a paint stroke (`merge_stroke`, `add_mask`), so undo, the overlay and the re-cut behave identically for both brushes.
+**Decoder.** A click, or a stroke decimated to 8 points, is decoded on the pool; the best candidate's 256² logits are upsampled to source size (~8 ms at 4K) and pixels reaching the Confidence probability get the mode's sign (Restore / Erase on a cut-out, Add / Subtract on the eraser). The result merges like a paint stroke, so undo, overlay and re-cut behave the same for both brushes. The last decoder output is kept, so a Confidence drag re-thresholds it in place without a new undo step.
 
-### Eraser (LaMa inpaint)
+### Eraser (inpaint)
 
-A separate model entry — `SettingsModel::Inpaint` ("Eraser") — turns the same brush into an object-removal tool. Selecting it auto-enables the brush; the popover hides Add/Subtract because there is no mask to add to or subtract from. The selected region (cells at or above half coverage) becomes LaMa's binary mask via `MaskArtifact::region_mask`.
+Eraser models are on-demand downloads. The region is `MaskArtifact::region_mask`, grown or shrunk by Expand region; each run starts from the previous result so earlier erases stay, and its output is archived as a `Result` step while the selection stays for Reprocess. A per-item generation counter drops superseded results.
 
-Stroke commit dispatches via `Processor::dispatch_inpaint` onto rayon (in-process, not subprocess) and delivers an `InpaintResult` through an mpsc channel. A per-item generation counter (`inpaint_latest_gen`) discards stale results when a fresh stroke supersedes one mid-flight. `pump_inpaint_results` drains each frame and swaps `result_rgba` + `result_texture` atomically, mirroring `apply_completed_previews`.
+| Family | Runs | Why |
+|---|---|---|
+| LaMa, Big-LaMa, MI-GAN | In-process on rayon (`prunr_core::inpaint`) | Under 1 GB |
+| Stable Diffusion 1.5 / LCM | Inpaint-only subprocess (`gui/inpaint_bridge.rs`), spawned on first use, dropped after 5 min idle | Multi-GB; an OOM must kill the worker, not the GUI |
 
-The pipeline lives in `prunr-core::inpaint`. LaMa-family weights are on-demand downloads (Model Store) read from the user data dir on first use. `process_inpaint(image, mask)` empty-mask short-circuits *before* the session-builder step, then walks `plan_tiles` over the image with TILE = 512, OVERLAP = 64. Tile masks that are all-zero skip inference. Surviving tiles run through `LamaSession::run_tile` (one ORT session per process, behind a Mutex — do NOT parallelise tiles, ORT is multi-threaded internally), and contributions feather-blend into a per-pixel f32 accumulator via `tile_compose`'s smoothstep weight. The blend skips unmasked pixels (they keep source byte-identical via the `image.clone()` initial buffer) — float division would otherwise drift unmasked u8 values by 1.
+**LaMa family.** 512 px tiles with 64 px feathered overlap; empty masks return before the session loads. Tiles run sequentially on one session (ORT already uses every core; do not parallelise). Sessions try GPU EPs through the same compatibility cache as seg models and are released after 5 min idle or on a model switch.
 
-`encode_tile` packs RGBA → NCHW [1, 3, 512, 512] f32 in [0, 1] with zero-padding; `decode_tile` heuristically detects [0, 1] vs [0, 255] output range by sampling the max across all three planes, then writes only inside the mask (unmasked pixels copy from source byte-identical so the feather blend isn't fighting model perturbation). Input names are matched case-insensitively (`image` / `mask` keywords) with positional fallback. The LaMa session is cached in a `OnceLock<Result<_, String>>` so a missing-model failure stays sticky — no repeat 208 MB load attempts.
+**Stable Diffusion.** CLIP, VAE, the 9-channel UNet and five schedulers (LCM, DDIM, DPM++ 2M Karras, Euler-A, UniPC) are in `inpaint_sd.rs`, checked against Diffusers. The UNet always gets a binary mask, as SD 1.5 was trained on. Free RAM picks one tall crop up to 768 px or 512² tiles (see [SD RAM policy](#sd-ram-policy)); CPU fallback is refused. Inside the worker, sessions are dropped after each stroke unless "Keep the Stable Diffusion eraser loaded" is on (~16 GB resident); the worker itself stays until 5 min idle.
 
-CPU-only for now; GPU EP support deferred until a measured win justifies the EP-fallback ladder that `OrtEngine` already carries for seg/edge models.
+**Cancel and progress.** `InpaintHooks` carries a cancel flag, checked between tiles and SD steps (ORT has no per-op cancel), and an atomic step counter the banner reads.
 
-**Cancel + progress.** `process_inpaint_with` accepts an `InpaintHooks` bundle: optional `Arc<AtomicBool>` cancel flag (checked between LaMa tiles / SD UNet steps — ORT has no per-op cancel hook) and optional `Arc<InpaintProgress>` (atomic step/total). The GUI's Esc-to-cancel and canvas Cancel button both flip the flag; the banner reads the progress atomic each frame to render "Erasing — step N of M" or "Cancelling…" once the flag is set. Latency to actually-stopping is one tile (LaMa) or one UNet step (SD) — multi-second on CPU.
-
-**SD subprocess isolation.** Stable-Diffusion-family inpaint runs in a **dedicated subprocess** spawned via `SubprocessManager::spawn_inpaint_only` (the seg engine pool is skipped in the worker — `inpaint_only: bool` on the `Init` command). `gui/inpaint_bridge.rs` owns the long-lived bridge thread: lazy-spawn on first SD dispatch, drop after 5 min idle to release the ~5 GB resident set, route `InpaintProgress` / `InpaintDone` / `InpaintError` events back into the same `inpaint_rx` channel the in-process path uses so the rest of the GUI can't tell which dispatch served. LaMa / Big-LaMa / MI-GAN stay in-process via rayon — small footprint, no isolation pressure. An OOM during SD inference now kills the subprocess (auto-restarted on the next stroke) instead of taking the GUI down. Worker-side post-processing (color match + seam blend + sharpen) takes `feather_px` + `sharpen` over IPC so SD strokes honor the same toolbar knobs the in-process path applies.
-
-**SD scheduler set.** Five schedulers ship; the user picks via the Scheduler chip:
-
-| Scheduler | Best for |
-|-----------|----------|
-| LCM (default) | Fast results at 4–8 steps; distilled, bakes CFG into training |
-| DDIM | Conservative, deterministic baseline; aligned to Diffusers SD-1.5 reference |
-| DPM++ 2M Karras | Best quality at 15–25 steps; Karras sigma curve always on |
-| Euler-A | Creative variation — different seeds produce meaningfully different results |
-| UniPC | Best quality at 8–12 steps; corrector step on each iteration |
-
-Karras sigma schedule is also user-toggleable for LCM and UniPC (off by default for LCM — it was distilled against linear spacing; on by default for UniPC). The **Strength** slider (0–100%) controls how far the denoiser walks away from the masked region: 100% = full creative fill, lower = more source-texture preservation.
-
-**SD eraser toolbar.** Three group chips sit in the single toolbar row next to the model picker: Quality (Fast / Balanced / Quality presets that pick scheduler and steps; hand edits show Custom), Prompt (prompt, negative prompt and guidance, with a reset to the shipped defaults) and Advanced (scheduler with a one-line description each, steps, denoising strength, Karras where the scheduler honours it, pinned seed, fast decoder). The Brush popover carries size / hardness / shape plus Expand region, Edge blend and Sharpen. Math for the full SD pipeline (CLIP, VAE, schedulers, CFG, 9-channel inpaint UNet) is verified against the Diffusers reference.
-
-**Edge softness (inpaint_feather).** A single `inpaint_feather` value (0–32 px, default 4 px) drives boundary softness for inpaint pipelines (LaMa-family + SD; seg postprocess uses its own `feather_mask`). The UNet always receives a binary mask (canonical; SD-1.5 was trained only on binary masks). Softness is composite-time only, applied by `inpaint_blend::finalize_inpaint`: color-match against the ring of source pixels just outside the mask, then `seam_guided_blend` runs an edge-preserving guided filter in a band of width `inpaint_feather` around the seam (radius 6 px, ε=1e-3, sequential per RGB channel, bbox-cropped for memory). Pixels deeper than the band stay as the model's raw output; band pixels get the guided-filter blend so detail is preserved while statistics shift toward the source. Optional unsharp-mask sharpen pass after. This is more sophisticated than the canonical A1111 Gaussian-blur composite — preserves edges, color-matched. The slider lives in the brush popover under "Edge softness".
+**Seam.** Softness is composite-time only (`inpaint_blend::finalize_inpaint`, both families): colour-match to a ring of source pixels, then an edge-preserving guided filter over a band of Edge blend width around the seam, then optional sharpen. Edges survive where a Gaussian-blur composite would smear them.
 
 ## Live Preview
 
-Mask and edge tweaks auto-rerun Tier 2 during slider drag. A tweak is debounced ~150 ms; a new tweak on the same item cancels the in-flight one and dispatches a fresh rerun on the rayon pool.
+Mask, edge and post-upscale knob changes on the selected item, and brush re-cuts, rerun Tier 2 in-process on the rayon pool; the subprocess's ~20-50 ms of IPC per run would ruin a drag, while batch reruns amortise it.
 
-**Why in-process.** The subprocess path costs ~20-50 ms per rerun in IPC alone; live preview needs 60 fps feel during drag. Batched Tier 2 reruns still go through the subprocess — that overhead amortizes across many images.
+**Throttle, not cancel.** The first tweak of a drag opens a 150 ms window and the item dispatches when it closes, so a drag yields a frame every ~150 ms; releasing a slider flushes at once. Runs are never cancelled mid-drag (the pipeline can't stop between stages, so cancelling only threw away finished frames); each dispatch carries a generation and stale results are dropped. Previews honour every mask setting, guided-filter refine included. `UpscaleRerun` is refused here: a multi-second job would look like a hang.
 
-**Preview trades quality for speed.** Guided-filter edge refinement is skipped in preview and restored on commit. Cancel drops the result but doesn't interrupt the CPU pipeline mid-run — a dispatch started just before cancel completes and its output is discarded.
+**Reuse.** A drag decompresses the seg tensor once and caches the masked base and edge planes keyed on the knobs that built them, so e.g. a Lines thickness drag only re-dilates.
 
 ## Presets
 
-A preset is a named snapshot of per-image settings, stored as one JSON file per preset in the platform config dir. Human-readable and self-contained: a user sends a `.json` to a friend, the friend drops it in the folder, the preset appears in their dropdown next launch.
-
-A reserved `"Prunr"` entry is the factory default (cannot be overwritten or deleted). Preset applies are recorded in the unified action log alongside strokes and result archives, so Cmd+Z pops them in commit order — an accidental preset swap is undone without touching any later strokes or results.
+A preset is one JSON file in the platform config dir (`prunr/presets/`), readable and shared by sending the file. It holds an entry per model (keyed by name so unknown future models round-trip): item settings, brush settings and, for SD, the prompt and a bundle per scheduler. Saving merges into the file, keeping other models' entries; v1 files migrate on load. Curated built-ins are seeded once (a marker keeps deleted ones deleted). `"Prunr"` is the synthetic factory default and cannot be saved over or deleted; `default_preset` is what new imports inherit. Applying a preset is a `PresetApply` undo step.
 
 ## Memory Management
 
-### Three-tiered history cache
+Estimate before loading, release what the user isn't looking at, and let a subprocess die instead of the GUI when the estimate is wrong.
 
-Undo/redo history uses a tiered strategy to bound RAM while preserving Ctrl+Z:
+### Where pixels live
 
-| Tier | Storage | Size vs raw | Access time | When |
-|------|---------|-------------|-------------|------|
-| Hot | `Arc<RgbaImage>` in RAM | 100% | instant | Currently viewed result |
-| Warm | Zstd-compressed `Vec<u8>` in RAM | ~25-30% | ~8ms decompress | Non-visible history entries |
-| Cold | Zstd file on disk (`~/.cache/prunr/history/`) | 0% RAM | ~50-100ms | Under memory pressure |
+| Data | Kept as | Released |
+|------|---------|----------|
+| Source | A path (`ImageSource::Path`), read only at dispatch; paste keeps bytes | Decoded copy stays once viewed |
+| Non-selected result | Parked on top of the undo history (not as a step), zstd'd off the UI thread | Taken back off on reselect, or by any history step or new result |
+| Undo history | Hot `Arc` → warm zstd in RAM → cold file in `<cache dir>/prunr-history/{pid}/` | `history_depth` (default 10); warm → cold under pressure |
+| Seg / edge tensors | zstd on the item; decoded only during a drag | See [Tiered Recipe Pipeline](#tiered-recipe-pipeline) |
+| Thumbnail (160 px) | RAM, always | With the item |
+| Magic Brush embedding (16 MB) | On the item | Non-selected items drop it unless the tool is active |
 
-History seeding is lazy: for images that haven't been decoded yet (lazy file loading), the seed is skipped at process time and created on demand during the first undo. This eliminates UI freezes when processing large batches.
+History entries carry their recipe, so undo also restores what the next Process tier-routes from. Memory pressure (available < 20 % of total) demotes history to disk and evicts all non-selected tensors.
 
-History entries compress to Tier 2 (warm) by default. Demotion to Tier 3 (cold) happens automatically when the subprocess reports high RSS via `under_memory_pressure()`.
+### Admission and parallel jobs
 
-Each history entry carries its recipe alongside the pixels, so undoing restores the recipe too — a subsequent reprocess can tier-route correctly from the restored state.
+Budget = 85 % of available RAM − `working_set_mb` × engines (GPU pools cap at 2). Per-image cost (`2 × W × H × 4` + file + history residue) is pessimistic on purpose: undercounting OOMs long batches, overcounting only slows them. Best-fit admits the largest image that fits; with nothing in flight the smallest is forced in, so oversized images can't deadlock. Admission also pauses while the child's RSS exceeds 80 % of available RAM (resume at 70 % of that). `safe_max_jobs` (half of available RAM ÷ `working_set_mb`) caps the jobs slider, clamps on model switch and at batch start.
 
-### Lazy file loading (ImageSource)
+### Per-model working set
 
-Batch items store file paths, not bytes:
+`ModelDescriptor.working_set_mb` is the one RAM figure per model, derived from the architecture (weights + ORT workspace + load transient + worst-case EP) so it holds across hardware. Batch admission, `safe_max_jobs`, the upscale gate and the SD gate all read it; a new model is one registry entry.
 
-```rust
-pub(crate) enum ImageSource {
-    Path(PathBuf),           // File-opened images — zero RAM until processed
-    Bytes(Arc<Vec<u8>>),     // Clipboard/paste — bytes already in memory
-}
-```
+### SD RAM policy
 
-74 images at idle: ~0 MB instead of ~700 MB. Bytes are read on demand when the admission controller admits an image for processing.
-
-### Result eviction
-
-Non-visible processed results are compressed to Tier 2 (warm) on sidebar navigation. When the user clicks back, the result is decompressed from the compressed history entry (~8ms). Thumbnails (160px, ~100KB each) remain in RAM.
-
-### Admission controller
-
-The `AdmissionController` uses a **sliding window with greedy best-fit** to pace how many images are sent to the subprocess:
-
-1. Estimate per-image cost from dimensions: `W × H × 4 × 2 + file_size`
-2. Query available RAM, subtract model overhead — **per-engine** overhead is `ModelDescriptor.working_set_mb` from the registry, not a hardcoded match
-3. Admit largest pending image that fits remaining budget
-4. On each `ImageDone`: release budget, admit next
-5. Force-admit if nothing is in-flight (prevents deadlock on oversized images)
-
-Additionally, the subprocess reports its own RSS after each image. The parent pauses admission when child RSS exceeds 80% of available RAM, resumes at 70% (hysteresis).
-
-### Per-model memory metadata
-
-`ModelDescriptor.working_set_mb` is the steady-state resident RSS contribution per model. Two consumers, one source of truth:
-
-- **Segmentation/edge** (`memory.rs::per_engine_cost`): multiplied by engine pool size during batch admission
-- **Inpaint** (`inpaint_sd.rs::check_ram_for`): direct min-free-RAM gate; refuses dispatch when free RAM falls below `working_set_mb`
-
-A new model needs one registry entry — admission, the inpaint pre-flight, and `safe_max_jobs` all read it without touching `memory.rs` or `inpaint_sd.rs`. Values are derived from model architecture (weights + ORT workspace + worst-case EP overhead) so they hold cross-hardware: SD 1.5 = 10 GB (5 GB resident + 3 GB load transient + 2 GB EP worst-case), BiRefNet-lite = 2.5 GB, LaMa = 700 MB, Silueta = 200 MB.
-
-### Model-aware parallel jobs
-
-`Settings::max_jobs()` limits the settings slider based on available RAM and selected model. Switching to a heavier model auto-clamps `parallel_jobs` if needed. At batch start, `safe_max_jobs()` provides a final safety clamp.
-
-### Zero-copy model bytes
-
-Model decompression happens once (via `OnceLock<Vec<u8>>`). All callers receive `&'static [u8]` — no 250 MB clones per engine creation. This eliminated ~2 GB of redundant allocations that previously caused OOM at "Loading model 0%".
+One gate, `prunr_core::inpaint_sd::check_ram_for`, run by the process that runs the stroke: need = `working_set_mb` (zero if the bundle is already resident) + the user's safety margin (default 2 GB), + 3 GB for a tall crop. A region up to 768 px long runs as one crop instead of 512² tiles when that fits (faster, no seam), as tiles when only they fit, and is refused otherwise. The GUI never decides: a kept bundle lives in the SD subprocess, so only that process can see it is loaded rather than count it twice.
 
 ## Data Flow
 
-### Batch GUI processing (subprocess path)
+### Segmentation batch
 
 ```
-User opens 74 images
-  ↓ (UI thread)
-add_to_batch_path(PathBuf) → BatchItem with ImageSource::Path (zero RAM)
-  ↓ (sidebar thumbnail generation on background thread)
-
-User clicks "Process All"
-  ↓ (UI thread: process_items)
-evict_all_tensors() — clear stale tensor caches
-For each item: resolve_tier(applied_recipe, current_recipe) → Skip/Tier2/MaskRerun/FullPipeline
-dispatch_recipe = snapshot of current settings
-Tier 1 items: AdmissionController estimates costs, admits initial window
-Tier 2 items: dispatched directly as Tier2WorkItem (no admission needed)
-  ↓ (bridge thread)
-Spawn `prunr --worker` subprocess (if Tier 1 work exists)
-Send Init { model, jobs, ProcessingConfig }
-  ↓ (subprocess)
-create_engine_pool → ORT sessions loaded
-Ready { active_provider }
-  ↓ Tier 1: bridge sends ProcessImage
-  ↓ Tier 2: bridge sends RePostProcess (tensor from BatchItem.cached_tensor)
-  ↓ (subprocess processes one at a time, locked by POSTPROCESS_LOCK)
-ImageDone { result_path, tensor_cache_path?, ... }
-  ↓ (bridge reads result, reads tensor if present → compresses → WorkerResult::BatchItemDone)
-item.result_rgba = Some(Arc::new(rgba))
-item.cached_tensor = Some(CompressedTensor)     ← Tier 1 only
-item.applied_recipe = dispatch_recipe           ← snapshot, not current settings
-  ↓ (background texture prep → canvas crossfade)
-
-If subprocess crashes:
-  → Bridge re-queues ALL in-flight items
-  → Reduces concurrency (4 → 2 → 1)
-  → Spawns new subprocess
-  → Continues from where it left off
+UI      resolve_tier per item → skip | RePostProcess (cached tensor) | DexiNed-only | full pipeline
+        archive results, snapshot dispatch recipe, admit full-pipeline items
+bridge  inputs / tensors / chain input → IPC temp files → commands
+worker  ImageDone { result, tensor + edge cache paths }
+UI      store result + compressed tensors, applied_recipe = snapshot, admit next
 ```
+
+A crash or 60 s of silence triggers [Crash retry](#crash-retry).
 
 ### Chain mode
 
-When "chain mode" is on, processing feeds the previous result as input. The bridge thread writes the chain input RGBA to a temp file (in `/dev/shm` on Linux) and passes the path in `ProcessImage`. The subprocess reads it, wraps in `DynamicImage`, and passes to `process_image_from_decoded()`.
+On by default, and switched on with an upscale model so the cut-out feeds the upscaler. Process reads the current result instead of the source (segmentation then always runs the full pipeline); the result is archived but kept as the next input, and brush reruns archive the pre-stroke result so strokes stay undoable.
 
 ### CLI
 
-```
-main.rs
-  ↓ Cli::parse()
-  ↓ inputs non-empty → cli::run_remove(&cli)
-  ↓
-single image: pipeline::process_image_with_mask() → PNG encode → fs::write (in-process)
-batch (2+ images): spawn `prunr --worker` subprocess → IPC → results → PNG encode → fs::write
-  ↓
-exit code: 0 all ok / 1 all fail / 2 partial
-```
-
-All CLI processing (single and batch) uses subprocess isolation for OOM protection. File paths are passed directly to the subprocess — image bytes are never loaded into the parent process. Only oversized images that need downscaling are loaded temporarily. Auto-retry with concurrency reduction (4→2→1) on OOM.
+`main.rs` routes `--worker`, `--doctor`, `--open <path>` and plain inputs. `--inpaint` runs LaMa in-process; every other input, single or batch, goes to a `prunr --worker` subprocess by path, so the parent never holds image bytes (only `--large-image downscale` rewrites oversized inputs to a temp file). Crashes halve the jobs and retry. Exit code: 0 all ok, 1 all failed, 2 partial.
 
 ## Inference Pipeline
 
 ```
-1.  load_image_from_bytes()             → DynamicImage
-       - Sniffs leading bytes for SVG (XML prologue / `<svg`); SVGs
-         rasterize via resvg + tiny_skia at the SVG's intrinsic size,
-         capped at LARGE_IMAGE_LIMIT. Premultiplied output is
-         demultiplied to match the rest of the pipeline's straight-RGBA
-         convention.
-2.  check_large_image()                 → error if > 8000px (configurable via --large-image)
-3.  preprocess(img, model)              → Array4<f32> [1, 3, H, H] NCHW
-      - Silueta/U2Net: divide by max_pixel, ImageNet normalize
-      - BiRefNet-lite: divide by 255, ImageNet normalize
-4.  engine.with_session(|s| s.run(...)) → raw output tensor [1, 1, H, H]  ← Tier 1 only
-5.  postprocess(raw_output.view(), img, mask, model):
-      - Allocates RGBA once (shared by guided filter + mask application)
-      - Normalize to [0, 1] (min-max for Silueta/U2Net, sigmoid for BiRefNet)
-      - Short-circuit uniform output (skip per-pixel loop)
-      - Apply gamma + optional hard threshold
-      - Resize mask to original dimensions (SIMD Lanczos3 via `fast_image_resize`)
-      - Optional: apply_edge_shift (morphological erode/dilate)
-      - Optional: guided_filter_alpha (O(1) box filter)
-      - Write mask as alpha channel into the shared RGBA buffer
-6.  Optional: apply_background_color()
-
-Tier 2 path uses postprocess_from_flat(tensor: &[f32], h, w, original, mask, model)
-  → reshapes flat bytes from IPC into ArrayView4 → calls postprocess() directly
-  → eliminates inference entirely
+load_image_from_bytes  → DynamicImage (SVG sniffed, rasterized via resvg)
+check_large_image      → error above 8000 px per side (CLI --large-image overrides)
+preprocess             → NCHW f32: Silueta/U2Net 320², ÷ max pixel; BiRefNet 1024², ÷ 255; ImageNet norm
+infer                  → raw [1,1,S,S]                                ← Tier 1
+postprocess            → RGBA                                         ← Tier 2 starts here
+  normalize (min-max; BiRefNet: sigmoid, then min-max) → selection correction
+  → gamma / threshold → Lanczos3 to source size → edge shift → guided filter → feather
+  → alpha into the one RGBA buffer → fill style → source backdrop
 ```
 
-### Postprocess fast paths
+Feather runs after the guided filter: sharpen to colour edges first, then soften. The full pipeline postprocesses the output while it is still borrowed from ORT's `IoBinding` buffer, so the tensor is never copied. Tier 2 (`postprocess_from_flat`) starts from a cached tensor and skips inference entirely.
 
-- All Lanczos3 resizes use `fast_image_resize` (SSE4.1, AVX2, NEON) — 10-20x faster than `image` crate
-- Division by range → precomputed `inv_range` multiplier
-- Uniform-output detection before the per-pixel loop
-- Alpha composition row-parallel via `par_chunks_mut` above 256k pixels (memory-bandwidth-bound, so the ceiling is ~1.1-1.2× on 4K regardless of core count)
-- Guided filter uses `f32` prefix sums (halved bandwidth vs f64)
-- Guided filter drops each f32 plane at its last use; peak stays at the four parallel box filters (12 planes, 576 MB at 4K) because pairing them measured ~9 % slower (open trade)
-- Edge shift is two separable window passes (van Herk / Gil-Werman), constant time per pixel whatever the shift; a fractional shift blends with the next integer shift computed in place in the same two scratch planes. `morphology::shifted` writes a new image so the Lines path dilates its cached mask without cloning it first
-- Edge composition runs row-parallel: each row copies RGB and writes alpha through `ComposeMode::alpha` in one branch-free pass, then blends the style colour (a 360-entry hue table for Rainbow / Noise) only at edge pixels. The dilated edge plane is cached per (strength, scale, thickness), the Bold plane of a dual-scale style too, so a colour or compose tweak costs the composition alone; before this a styled 4K composition cost 120–410 ms per live-preview tick, now 19–37 ms
-- Single RGBA allocation in `postprocess()` — shared across guided filter and mask application (saves ~48 MB per Tier 2 run on a 4000×3000 image)
+### Postprocess performance choices
 
-#### Benchmark numbers (4000×3000 image, 8-core x86_64, `cargo test --release`)
+- **One resizer.** Every resize goes through `fast_image_resize` (SIMD, rayon rows) from a borrowed buffer. Its pool nests safely inside the subprocess worker.
+- **One RGBA allocation** per `postprocess`, shared by the guided filter and the alpha write.
+- **Row-parallel only above 512² pixels.** Alpha writes are memory-bound, so the gain caps at about 1.2× (`apply_mask_inplace` 5.7 → 4.8 ms at 4000×3000, 1.05× end to end). The `#[ignore]` tests `apply_mask_inplace_4k_bench` and `postprocess_4k_bench` reproduce these numbers.
+- **Guided filter**: O(1) box filters over f32 integral images, with each plane freed at its last use. Peak is the four parallel first-stage filters (12 planes, about 576 MB at 4K). Pairing them saves two planes but runs about 9 % slower, so that RAM-for-speed trade is left open.
+- **Edge shift** (`morphology::shift_mask`): N iterated 3×3 min/max passes equal one separable (2N+1)² window, computed with van Herk / Gil-Werman passes. Cost per pixel is the same at any shift, and RAM stays at two mask planes. Line thickness uses the same kernel.
 
-| Stage                         | Serial (median) | Row-parallel (median) | Speedup |
-|-------------------------------|----------------:|----------------------:|--------:|
-| `apply_mask_inplace` (alone)  |          5.68ms |                4.83ms |   1.18× |
-| `postprocess_from_flat` (E2E) |         94.45ms |               89.80ms |   1.05× |
+### Criterion microbenches
 
-End-to-end delta is small because the mask-to-alpha loop is ~5-6% of
-total postprocess time (the dominant costs are the 48 MB RGBA allocation
-and the SIMD Lanczos resize). The `apply_mask_inplace_4k_bench` and
-`postprocess_4k_bench` `#[ignore]` tests in `postprocess.rs` reproduce
-these numbers.
+`crates/prunr-core/benches/`, run with `cargo bench -p prunr-core --bench <name>`. CI skips them because runner variance causes false alarms. Reference numbers are from an 8-core x86_64 machine at 4K unless noted.
 
-#### Criterion microbenches
+| `--bench`        | Configuration                                         | Median |
+|------------------|-------------------------------------------------------|-------:|
+| `guided_filter`  | 512² / 2048²                                          | 4.4 / 74 ms |
+| `edge_shift`     | 1 / 2.5 / 10 / 50 px                                  | 16 / 35 / 15 / 16 ms |
+| `sam_decode`     | 256² logits → selection plane                         | 8 ms |
+| `sam_preprocess` | photo → 1024² tensor                                  | 48 ms |
+| `edge_compose`   | `edge_plane` (2 px); lines only plain / solid          | 32; 11 / 9 ms |
+| `edge_compose`   | Solid / Gradient Y / Radial / Rainbow / Noise; dual   | 19 / 32 / 36 / 36 / 37; 34 ms |
 
-`crates/prunr-core/benches/` ships criterion benches for the eight
-kernels regression most likely to hide under E2E noise. Run with
-`cargo bench -p prunr-core --bench <name>`. CI does NOT run them —
-runner wall-clock variance produces false regressions cheaper to
-ignore than to investigate. Reference numbers (8-core x86_64,
-`bench` profile = release):
-
-| Kernel                              | Configuration            | Time (median) |
-|-------------------------------------|--------------------------|--------------:|
-| `guided_filter_alpha`               | 512² guide + mask        |        4.4 ms |
-| `guided_filter_alpha`               | 2048² guide + mask       |         74 ms |
-| `morphology::shift_mask`            | 4K mask, 1 px            |         16 ms |
-| `morphology::shift_mask`            | 4K mask, 2.5 px          |         35 ms |
-| `morphology::shift_mask`            | 4K mask, 10 px           |         15 ms |
-| `morphology::shift_mask`            | 4K mask, 50 px           |         16 ms |
-| `sam::decode_to_mask_artifact`      | 256² logits → 4K plane   |          8 ms |
-| `sam::preprocess_for_sam`           | 4K photo → 1024² tensor  |         48 ms |
-| `edge_plane`                        | 640×480 tensor → 4K, 2 px |        32 ms |
-| `compose_edges`                     | 4K, lines only           |   11 / 9 ms   |
-| `compose_edges_styled`              | 4K, Solid / GradientY    |  19 / 32 ms   |
-| `compose_edges_styled`              | 4K, Rainbow / Noise      |  36 / 37 ms   |
-| `compose_edges_dual_styled`         | 4K                       |         34 ms |
-
-Before the separable rewrite the same 4K mask took 52 ms at 1 px,
-156 ms at 2.5 px, 493 ms at 10 px and 2.46 s at 50 px. The other
-three benches (`tile_compose`, `resize_lanczos3`, `tensor_to_mask`)
-are committed and runnable; their reference numbers
-land here on the next perf sweep when they're actually measured.
 
 ## Upscale
 
-Tile-based super-resolution that runs **in-process** via `OrtEngine` on a background thread — not through the subprocess. The upscale module (`crates/prunr-core/src/upscale/`) is distinct from the LaMa inpaint tiler: same smoothstep overlap-blend, but a different IO shape (`RgbaImage → scale × size` vs `(RgbaImage, GrayMask) → same-size`). Sharing the tiler would obscure both; the smoothstep weight is intentionally duplicated because it is coincidental shape, not shared meaning.
+Upscaling runs **in-process**: tiled `OrtEngine` inference on a background thread, outside the subprocess (`crates/prunr-core/src/upscale/`). Its tiler is separate from the LaMa inpaint tiler because the two have different shapes: upscale maps an image to scale × its size, while inpaint maps an image and mask to the same size. They share only the smoothstep seam weight.
 
-Two model families today:
+Models are registry data: tile size, tile multiple, `working_set_mb`, an optional fp16 sibling, and `UpscaleModelKnobs` (native scale, window attention, input name, dtype).
 
-| Model | Tile | Overlap | ORT level | Why |
-|-------|------|---------|-----------|-----|
-| Real-ESRGAN x4plus | 512 | 16 px | Level3 | CNN; no window constraint |
-| 4xNomos8kSCHAT-L | 256 | 32 px | **Level2** | Window-attention transformer; Level3 bakes the first tile's input shape into the graph, breaking subsequent tiles with different padded dimensions |
+| Model | Native | Tile | Overlap | ORT level |
+|-------|-------:|-----:|--------:|-----------|
+| Real-ESRGAN x4plus, 4x NMKD Siax-CX, 4x NMKD Superscale | 4× | 512 | 16 | Level3 |
+| Real-ESRGAN x2plus | 2× | 512, even | 16 | Level2 |
+| 4xNomos8kSCHAT-L (fp16) | 4× | 256, ×16 | 32 | Level2 |
 
-Real-ESRGAN x2plus (native 2×), 4x NMKD Siax-CX and 4x NMKD Superscale are registry entries only: `UpscaleModelKnobs` (`native_scale`, `uses_window_attention`, `tile_size_multiple`, `input_name`, `is_fp16`) drives tile size, overlap and optimization level, so a new model is a descriptor, not code. A model may name an fp16 sibling that downloads automatically when a GPU EP is active (about 2× faster). A single-slot warm engine on `Processor` keeps the last session alive, so the second run of the same model skips the load.
-
-**Alpha companion.** Models are 3-channel. Alpha is upscaled independently via Lanczos3 at the output dimensions and recombined at the end — the RGB tiling path never sees the alpha channel.
-
-**Output scale.** `OutputScale` is X2 / X3 / X4 / X4 two-pass. The model runs at its native scale and `fit_to_scale` Lanczos3-resamples the result to the requested factor when the two differ (down to 2× or 3× from a 4× model; the full native buffer lives briefly during the resample — ~768 MB of transient scratch for a 4K input on top of the tiling accumulators). X4 two-pass runs Real-ESRGAN x2plus twice; it is offered only for Real-ESRGAN x4plus, and only when x2plus is installed. Per-tile scratch and the full ONNX session footprint are documented in the module doc-comment.
-
-**Refinement knobs.** Six knobs ride on `UpscaleRecipe` in processing order. Before the model, Denoise (median / bilateral) and Brightness lift are Tier 1: a change reprocesses. After it, Sharpen (unsharp mask; negative softens), AI blend (lerp toward a CatmullRom resize of the source, cached per item as `bicubic_source`), Saturation (HSL) and Color match (Reinhard Lab transfer) are `UpscaleTier2`: live preview re-runs them on the cached model output (`BatchItem.upscale_raw`) with no inference. Sharpen defaults to 0.2.
-
-**Single-flight dispatch.** `Processor::dispatch_upscale` uses an atomic cancel flag and a dedicated mpsc channel; only one upscale job runs at a time. The tile callback writes progress to the shared `DispatchProgressSlot`; the progress banner or modal reads it each frame. Cancel also calls `RunOptions::terminate` on the shared handle, so the C++ run aborts mid-tile (~50 ms) instead of at the next tile boundary; OpenVINO ignores terminate, so there the latency is one tile.
-
-**Live preview.** `RequiredTier::UpscaleRerun` (a model or Tier-1 knob change) is refused by the 10 Hz preview path — a multi-second job at 10 Hz would appear to hang, so the user commits with Process. `UpscaleTier2` changes do preview live.
-
-**Admission.** `Processor` refuses dispatch when system free RAM falls below `descriptor.working_set_mb` — same field the subprocess admission controller reads for segmentation/inpaint.
+- **Level2 for any model with a tile multiple.** Level3 bakes the first tile's shape into the graph, and the next differently padded tile fails.
+- **Overlap follows window attention, not the tile multiple.** Window-attention models need two windows of overlap to hide seams; CNNs need only their receptive field.
+- **fp16 siblings** download automatically when a GPU EP is active. Dispatch reads the loaded session's input dtype, not the registry flag.
+- **Warm engine.** `Processor` caches one session and builds it on the dispatch thread, so a cold EP compile never freezes the window. Upscale uses the normal EP ladder.
+- **Alpha** bypasses the 3-channel model. It is Lanczos3-resampled from the source and recombined at the end.
+- **Output scale.** The model runs at its native scale, and `fit_to_scale` Lanczos3-resamples to the requested 2×, 3× or 4× whenever the two differ. 4× two-pass chains x2plus twice and is offered only on Real-ESRGAN x4plus once x2plus is installed.
+- **Knobs.** Denoise and Brightness lift run before the model, so changing either is an `UpscaleRerun`: live preview refuses it, and the user commits with Process. Sharpen (default 0.2), AI blend (toward a cached CatmullRom resize), Saturation and Color match run after the model as `UpscaleTier2` and preview live on the cached output.
+- **Single flight, fast cancel.** One job runs at a time. Cancel also calls `RunOptions::terminate`, which stops the running tile in about 50 ms; OpenVINO checks only between tiles.
+- **Admission.** Dispatch is refused when free RAM is below `working_set_mb`, the same field subprocess admission uses.
 
 ## Edge Detection (DexiNed)
 
-A separate `EdgeEngine` handles line extraction with its own ONNX session. Three line modes:
+`EdgeEngine` owns its own DexiNed session. Input is 640×480 BGR with mean subtraction, alpha flattened onto white, after the user's input transform (Grayscale, Contrast boost, Posterize).
 
-| Mode | User-facing label | Behaviour |
-|------|-------------------|-----------|
-| `Off` | "Off" | Normal background removal only |
-| `EdgesOnly` | "Edges only (full image)" | Skip segmentation, run DexiNed on original image |
-| `SubjectOutline` | "Outline only (no fill)" | Segmentation first, then DexiNed on the result — edges only within subject, body transparent |
+| `LineMode` | Label | Behaviour |
+|------------|-------|-----------|
+| `Off` | Off | Background removal only |
+| `EdgesOnly` | Full | Skip segmentation; lines of the whole image |
+| `SubjectOutline` | Subject | Segment first, then draw lines over the masked subject |
 
-Inference is split from the threshold-and-composite step so the raw DexiNed tensor can be cached and re-thresholded without re-running the model. This powers EdgeRerun Tier 2.
+**One inference, four scales.** `Fine`, `Balanced`, `Bold` and `Fused` are DexiNed's `block0`, `block3`, `block5` and `block_cat`, and `EdgeEngine::new` rejects any other output layout. All four tensors are kept zstd-compressed on the item, so a scale switch costs a decompress (`EdgeRerun`), never an inference.
 
-**Scale selection.** DexiNed produces 7 outputs per inference (6 side blocks + fused `block_cat`). The UI exposes 4 scales (`Fine`, `Balanced`, `Bold`, `Fused`); all 4 are extracted from one inference pass and cached together in `CompressedEdgeTensors`. Switching scales is a cache lookup, never a re-inference — so a scale-change recipe diff returns `EdgeRerun`, not `FullPipeline`.
+**Live-preview plane caches.** A Lines tweak redoes only the stage whose inputs changed:
+
+| Cached on the item | Key |
+|--------------------|-----|
+| Undilated edge plane (threshold, then Lanczos) | strength, scale |
+| Dilated plane (a thickness drag is about 32 ms at 4K) | strength, scale, thickness |
+| Bold planes for the dual-scale style | same |
+| Masked-subject base (SubjectOutline) | mask recipe, model |
+
+A colour, style or compose change costs only the composition. The composition is row-parallel and branch-free per row, and it blends colour only at edge pixels.
 
 ## GPU Execution Providers
 
-EP ladder (per session): `available_gpu_eps()` returns only EPs the loaded `libonnxruntime` actually has compiled in (filtered via `ort::ep::ExecutionProvider::is_available`). The session-build loop iterates this ladder and short-circuits on first success.
+### ONNX Runtime loading
 
-| Platform | EPs in ladder (when their libs are present) |
+`ort` (2.0.0-rc.13) is built with `load-dynamic`: no ONNX Runtime is linked in. `prunr_core::ort_runtime` resolves `libonnxruntime` once per process, first hit wins:
+
+1. `ORT_DYLIB_PATH` (developer override; set but missing is an error, never a fall-through)
+2. **Runtime Store**: `<data>/prunr/runtimes/<name>-<ver>-<rid>/` (first entry by name that holds the dylib)
+3. **Bundled**: `<exe>/runtime/` (macOS `.app`: `Frameworks/` via rpath)
+
+Every session in the workspace starts from `ort_runtime::session_builder()`, which initialises first; `clippy.toml` disallows the raw `Session::builder` and `ort::init_from`. Under `load-dynamic` a builder on an unloaded runtime hangs instead of failing, so the one entry point turns a missing runtime into an error. The app exits at startup if the runtime cannot load; `prunr --doctor` runs before that check.
+
+| Platform | Shipped runtime | GPU route |
+|---|---|---|
+| Linux / Windows | CPU-only ORT 1.24.1 (PyPI wheel) | OpenVINO build via Settings → Hardware (Runtime Store); CUDA / DirectML builds via `cargo xtask install-runtime` or `ORT_DYLIB_PATH` |
+| macOS | ORT 1.20.0 built from source with CoreML (no PyPI wheel has it) | built in |
+
+Runtime Store entries come from the official PyPI wheels; `prunr-runtime-install` (shared by the GUI installer and xtask) verifies the SHA and repackages the EP's shared libs under the canonical dylib name. On Linux, an Intel iGPU without OpenVINO triggers a first-launch install prompt (14-day snooze). GPU detection reads `/sys/class/drm`, so it needs no graphics context; Windows detection is a stub, so the prompt never fires there.
+
+### EP ladder
+
+Each session walks a ladder of the GPU EPs the loaded runtime actually has compiled in (`is_available`), registering one EP per attempt so the log names the winner and a crashing EP cannot abort the CPU fallback. If every GPU EP fails the engine retries CPU-only.
+
+| Platform | Ladder |
 |---|---|
 | Linux | OpenVINO → CUDA → CPU |
 | Windows | OpenVINO → CUDA → DirectML → CPU |
 | macOS | CoreML → CPU |
 
-OpenVINO ships ahead of CUDA on Linux/Windows because **most non-NVIDIA Linux desktop machines are Intel**; CUDA users have OpenVINO Runtime not installed (`is_available()` returns false), so the ladder falls cleanly to CUDA.
+OpenVINO goes first because the common non-NVIDIA desktop is Intel; NVIDIA machines don't have an OpenVINO runtime loaded, so they fall through to CUDA. OpenVINO's thread pool is capped to the rayon budget to avoid oversubscription. `force_cpu` (Settings, CLI) skips the ladder.
 
 ### Per-(model, EP) compatibility filter
 
-Two layers, applied before any session-load attempt:
+Two layers skip a doomed EP before paying the failed-load cost (~5 s for OpenVINO + Silueta):
 
-1. **Static catalog** — `ModelDescriptor.incompatible_eps: &'static [&str]` declared next to each REGISTRY entry. Verified known-bad combos only (e.g. Silueta + OpenVINO fails on graph cycles). Matches the lifecycle of the model — adding a new model already touches REGISTRY, declaring incompatible EPs at the same site has zero extra friction.
-2. **Dynamic cache** — `<data>/prunr/ep_compat.json`, populated when a non-cataloged EP fails on a user's machine. Versioned by `CARGO_PKG_VERSION` so app upgrades invalidate stale entries (loaded ORT may have new capabilities).
+1. **Static**: `ModelDescriptor.incompatible_eps` next to the registry entry, for verified-bad pairs (Silueta + OpenVINO: graph cycles).
+2. **Dynamic**: `<data>/prunr/ep_compat.json`, written when an uncached session commit fails. Keyed on the app version, so an upgrade retries everything. `prunr --clear-ep-cache` wipes it.
 
-Both layers skip the EP entirely instead of paying the failed-load tax. CLI: `prunr --clear-ep-cache` wipes the dynamic cache after upstream changes.
+### Compiled-model cache
 
-### `load-dynamic` ORT + Runtime Store
-
-The app uses `ort` with the `load-dynamic` feature — no ORT is statically linked at compile time. `prunr_core::ort_runtime::ensure_initialized()` runs once per process (at startup, and from every `session_builder()` call, so a session can never be built on an unloaded runtime — under `load-dynamic` that hangs instead of failing) and resolves a `libonnxruntime` from this chain:
-
-1. `ORT_DYLIB_PATH` env var (developer override)
-2. **User Runtime Store**: `<data>/prunr/runtimes/<id>/libonnxruntime.so` — populated on demand via Settings → Hardware install or `cargo xtask install-runtime`
-3. **Bundled fallback**: `<exe>/runtime/libonnxruntime.{so,dylib,dll}` — `release.yml` stages this via `cargo xtask install-runtime --stage-to runtime-stage` and the per-platform packaging steps copy the dylib into `<package>/runtime/`
-
-Each EP-specific Runtime Store entry contains `libonnxruntime.so` (built with that EP) + the EP runtime libs (e.g. OpenVINO bundles `libopenvino.so` + GPU/NPU plugins). Sourced from official PyPI wheels (`onnxruntime-openvino` etc.) — `xtask install-runtime` extracts the relevant `.so`/`.dll` files and renames the versioned `libonnxruntime.so.X.Y.Z` → canonical `libonnxruntime.so` so the resolver picks it up.
-
-Hardware detection (`prunr_app::hardware`) classifies the machine on first launch: CPU vendor + brand via `sysinfo`, GPU vendors via `/sys/class/drm` (Linux), DXGI (Windows, stubbed), IORegistry (macOS, stubbed). The first-launch prompt fires on Intel iGPU machines without OpenVINO installed, with a 14-day snooze on dismiss.
+`<data>/prunr/ep_cache/<ep>/<model>-<version>-v<format>/` holds the compiled artefact so the second session build skips graph optimisation: ORT's optimised graph for CPU and CUDA, CoreML's compiled model on macOS. OpenVINO and DirectML are not cached (OpenVINO re-keys its cache every launch and rewrote ~3 GB per build for no speedup; DirectML relies on the OS shader cache). The format version is bumped with every `ort` upgrade because cached graphs are not portable across ORT versions. A commit that fails on a cached graph deletes the cache file instead of marking the EP incompatible. Stale versions are collected at session build; model uninstall and a Settings button clear it.
 
 ### Model variants
 
-`OrtEngine::new_with_fallback()` tries the optimized variant first, falls back to FP32:
-
-| Platform | Preferred | Fallback |
-|----------|-----------|----------|
-| Linux/Windows GPU | FP16 | FP32 |
-| Linux/Windows CPU | INT8 | FP32 |
-| **macOS (all)** | **FP32 always** | n/a |
-
-macOS uses FP32 because CoreML silently converts to FP16 internally — feeding our FP16 stacks two conversions, causing precision loss.
-
-When all GPU EPs fail, `new_with_fallback` recurses with `cpu_only=true` so the CPU-targeted INT8 variant gets its turn before falling back to FP32.
-
-### Model bytes cache
-
-Decompressed ONNX bytes are cached in `OnceLock<Vec<u8>>` per model. Callers receive `&'static [u8]` (zero-copy borrow). Previously every engine creation cloned ~250 MB — now it borrows.
-
-### Diagnostics
-
-`prunr --doctor` dumps the full hardware profile, runtime resolution chain, installed models, and environment. Designed as the first thing to paste into a bug report when hardware acceleration misbehaves.
+`OrtEngine` tries an optimised variant from disk before the FP32 bytes: FP16 on a GPU EP, INT8 on CPU. macOS always uses FP32 because CoreML converts to FP16 internally and a second conversion loses precision. The CPU retry after a GPU failure also tries INT8 first.
 
 ## GUI State Machine
 
-```
-      Empty  ──(add_to_batch)──►  Loaded  ──(process)──►  Processing  ──(done)──►  Done
-        ▲                            ▲                        │                      │
-        │                            │                        │ (cancel/Escape)      │
-        │                            └────────────────────────┤                      │
-        │                                                     │                      │
-        │                                                     ▼                      │
-        │                                              Back to Loaded                │
-        │                                                                            │
-        └────────────────────── (remove all batch items) ────────────────────────────┘
-```
+`AppState` (Empty / Loaded / Processing / Done) is derived each frame from the selected item's `BatchStatus`, never stored: no item is Empty, Pending and Error read as Loaded. Cancel returns in-flight items to Pending; removing the last item returns to Empty.
 
 ## Canvas & Texture Lifecycle
 
-- Textures built on background threads via `spawn_tex_prep()` — `ColorImage::from_rgba_unmultiplied()` runs off the UI thread
-- Previous texture stays visible until the new one is ready (no flash on sidebar switch)
-- Zoom resets only on explicit user navigation (sidebar click, arrow keys), not on background texture arrivals
-- Checkerboard behind transparent results: single 256×256 pre-generated texture, tiled
-- Off-screen sidebar items skip painting entirely (viewport virtualization)
-- `result_switch_id` is used as the animation seed for the result crossfade
+- **Off-thread prep, on-thread upload.** `ColorImage` conversion runs on worker threads behind the shared decode slot pool (bounding peak RAM during a batch-completion burst); the upload happens in the per-frame channel drain, never in a render closure.
+- **One reconcile step.** Textures for the selected item (source, result, background image, selection) are requested by `reconcile_selected` (see [GUI Coordinators](#gui-coordinators)), each behind a pending flag.
+- The old texture stays bound until its replacement uploads, so result arrivals and preview ticks never blank the canvas. A result switch bumps `result_switch_id`, which seeds the 0.4 s crossfade.
+- Zoom resets on navigation (selecting an item, a fresh decode), never on a result arriving.
+- Checkerboard: one 256×256 texture, tiled. Off-screen sidebar rows skip painting.
 
-### Render-time bg_color fill
+### Backgrounds
 
-**bg_color is never composited into pixels for display.** The result texture stays transparent where pixels were removed; at draw time the canvas paints a filled rect (or the checkerboard) *behind* the texture, and the GPU alpha-blends the result on top. Changing the bg color costs one rect repaint — no CPU compositing, no texture rebuild, no subprocess dispatch.
+One Background chip picks transparent, solid colour, image, or a source-derived effect; the choices are mutually exclusive.
 
-The sidebar thumbnail uses the same pattern. Save/export is the exception: PNG has no separate canvas-bg concept, so the bg is composited into pixels on demand at save time. Display and export paths diverge intentionally.
+| Kind | Stored on | Display | Export | Tier |
+|---|---|---|---|---|
+| Colour | `ItemSettings.bg` | rect painted under the result texture | composited at save | CompositeOnly |
+| Image | `BatchItem.bg_image` (`Arc` + content hash); hash and fit on `ItemSettings` | textured quad under the result | `apply_background_image` at save | CompositeOnly |
+| Effect (Blurred / Inverted / Desaturated source) | `ItemSettings.bg_effect` | baked into the result RGBA | already in the pixels | MaskRerun |
 
-### Per-image background image
+**Colour and image are render-time.** The result texture keeps its transparency; the canvas paints checkerboard, then the backdrop, then the result, and the GPU blends. A change costs a repaint: no compositing, no texture rebuild, no dispatch. Only export bakes it in, because PNG has no separate backdrop. The sidebar thumbnail uses the same layering. Image bytes live on the item (they don't fit the `Copy` settings) with only the hash on settings, the same shape as brush corrections. `BgImageFit` (Cover / Contain / Stretch / Tile / Center) is UV math on one texture uploaded with repeat wrap, so changing the fit never re-uploads. The CLI's `--bg-image` beats `--bg-color` when both are set.
 
-A user-picked image can replace bg_color as the canvas backdrop. Bytes live on `BatchItem.bg_image` (`Arc<DynamicImage>` + source path + content hash); a `u64` hash on `ItemSettings.bg_image_hash` drives the recipe diff. Both `bg_image_hash` and `bg_image_fit` ride on `CompositeRecipe` (CompositeOnly tier — same class as bg_color since neither re-runs inference). The same shape as the brush-correction pattern (Arc bytes on item, hash on settings).
+**Effects are baked** because they need source pixels behind the subject, not a flat rect; a per-frame backdrop texture would double render bandwidth and complicate the compositor. They are applied inside postprocess, so live preview of mask knobs shows the current backdrop.
 
-`BgImageFit` (Cover / Contain / Stretch / Tile / Center; default Cover) is a `StaticKnob` in the catalog so chip changes route via the standard `aggregate_bool` path. Canvas + sidebar share `paint_bg_image` — UV-only math (no texture re-upload on fit change): Cover crops in UV, Contain/Center letterbox via inner-rect, Stretch is unit UV on full bounds, Tile uses UV > 1.0 (texture uploaded with `WrapMode::Repeat` so the wrap actually triggers). Save/export bakes via the `apply_background_image` core helper, which dispatches per-fit through a `build_bg_layer` builder (Lanczos3 for the scaled variants; per-row indexing for Tile).
+## Drag-Out and Layer Export
 
-The toolbar bg chip enforces mutual exclusion: picking the Image kind clears bg_color and bg_effect; picking any non-image kind clears the image. The CLI mirrors this at `--bg-image`/`--bg-image-fit`/`--bg-color` (image wins when both are set).
+Dragging a sidebar thumbnail out hands the OS real PNGs written to `{temp_dir}/prunr-drag/` (`drag` crate, Windows and macOS; on Linux it needs a GTK window winit cannot give, so it is excluded and a toast explains). Drops from that folder are rejected so our own drag is not re-imported; such a drop also clears the drag state, since the completion callback does not always fire on Windows.
 
-### BgEffect (source-derived backdrops)
+A drag is one PNG matching the canvas, background baked in like Save and Copy. With `export_split_layers` it is up to three layers (subject, lines, mask) re-rendered from cached tensors, subject without fill or background effect; missing tensors skip a layer, and none falls back to the composite. Save writes the same layers to a folder, which is the Linux path.
 
-The `bg` colour is render-time and cheap; **BgEffect variants (BlurredSource, InvertedSource, DesaturatedSource) are destructive and bake into the output RGBA** at postprocess time. Rationale: source-derived backdrops need actual pixels behind the subject, not a single GPU rect. Building a separate backdrop texture per frame would double render bandwidth and complicate the canvas compositor; baking into output pixels keeps the render path unchanged.
+## Where Data Lives
 
-Consequence: a BgEffect change triggers MaskRerun (Tier 2a) — the postprocess step rebuilds the output with the new backdrop blended in where alpha < 255. Live preview of mask knobs in a BgEffect-enabled recipe keeps working: `postprocess_from_flat` already calls `apply_bg_effect` after `apply_fill_style`, so every tick reflects the current backdrop.
+| What | Location |
+|------|----------|
+| `settings.json`, `presets/*.json` | `{config_dir}/prunr/` |
+| On-demand models | `{data_dir}/prunr/models/` |
+| Runtime Store, compiled-model cache, EP compatibility | `{data_dir}/prunr/runtimes/`, `ep_cache/`, `ep_compat.json` |
 
-Solid `bg` colour stays orthogonal to BgEffect — effects win when non-`None`, colour is the fallback at render time when effects are `None`. Both coexist on `ItemSettings` for zero migration churn.
-
-## Drag-Out (OS-level drag to external apps)
-
-Implemented via the `drag` crate (Windows/macOS only). Files written to `temp_dir/prunr-drag/*.png`.
-
-Self-drop rejection prevents re-ingesting thumbnails. Stuck-drag recovery clears state when the drag callback doesn't fire.
-
-**Export paths** — `drag_export::prepare_for_drag(item, split)` returns `Vec<PathBuf>`:
-
-| Mode | Output | Cached-tensor requirement |
-|------|--------|---------------------------|
-| Composite (default) | `{stem}.prunr.png` (bg removed), `{stem}-lines.png` (lines only), `{stem}.prunr-lines.png` (combined) | None — uses `result_rgba` or raw source |
-| Split (`export_split_layers`) | `{stem}-subject.png` + `{stem}-lines.png` + `{stem}-mask.png` | Subject / Mask need `cached_tensor`; Lines needs `cached_edge_tensors` |
-
-Split mode skips layers whose tensor isn't cached (e.g. LineMode::Off items have no edge tensor → 2 files, not 3). Falls back to the composite path when nothing is cached so drags of unprocessed items still work. Subject layer re-runs `postprocess_from_flat` with `fill_style=None`, `bg_effect=None` forced so the receiving app sees clean pixels; other mask tweaks (gamma, threshold, refine, feather, edge_shift) are preserved. The same rendering backs the **Save** button when `export_split_layers` is on — Save asks for a folder and writes the same layer set to it, so Linux users (no drag-out) have a first-class path.
-
-## Persistent Config
-
-User data lives in the platform config dir (`dirs::config_dir()`):
-
-| File / Folder | Linux | macOS | Windows |
-|---|---|---|---|
-| `settings.json` | `~/.config/prunr/` | `~/Library/Application Support/prunr/` | `%APPDATA%\prunr\` |
-| `presets/*.json` | `~/.config/prunr/presets/` | `~/Library/Application Support/prunr/presets/` | `%APPDATA%\prunr\presets\` |
-
-`Settings::save()` resolves the path then delegates to a path-injectable `save_to_path` helper, which makes the round-trip tests platform-agnostic. The schema-stability contract is enforced by three unit tests: write+read round-trip preserves persisted fields, the resolved path always lands under `<config_dir>/prunr/`, and `save` mkdir's the parent on first run. `force_cpu` and `active_backend` are `#[serde(skip)]` — machine-state, reset every launch.
+Directories come from `dirs` (`~/.config` and `~/.local/share` on Linux, `~/Library/Application Support` on macOS, `%APPDATA%` on Windows). Settings hold user choices only, hotkey overrides and accepted model licenses included; CPU forcing and the active backend reset every launch. Old files load through serde defaults and a v1 migration.
 
 ## Model Registry & Distribution
 
-Models are declared in a single `prunr_models::REGISTRY` table. `ModelDescriptor` carries identity, display metadata, source, GPU requirement, EP compatibility, and a working-set RAM estimate. `source` is either `Bundled` (compiled in via `include_bytes!` + zstd) or `OnDemand` (downloaded to user data dir on first use).
+Every model is one row in `prunr_models::REGISTRY` (source, GPU requirement, known-bad EPs, RAM working set, upscale knobs), so adding a model is a data edit.
 
-`resolve_bytes(id) -> Option<Cow<'static, [u8]>>` is the single byte-access entry point. Bundled returns `Cow::Borrowed(&'static [u8])` (zero-copy from the embedded zstd cache); OnDemand reads from disk, returns `Cow::Owned(Vec<u8>)`, or `None` if the file isn't there. `is_available(id)` reports installation state. `OrtEngine::new` and `LamaSession::get` both go through `resolve_bytes` and surface `prunr_models::not_installed_error(id)` ("Open the Model Store…") when the file is missing.
+| Source | Models |
+|--------|--------|
+| `Bundled` (zstd `include_bytes!`) | Silueta, BiRefNet-lite, DexiNed |
+| `MultiPartBundled` | SAM 2 Hiera Small, so Magic Brush works offline on first click |
+| `OnDemand` | U2Net, LaMa, Big-LaMa, MI-GAN, five upscale models (with an fp16 sibling for GPU EPs) |
+| `MultiPartOnDemand` | SD 1.5 Inpaint, its LCM variant, TAESD; restrictive licenses need an explicit accept |
 
-**Default bundle:** Silueta + BiRefNet-lite + DexiNed (the three `.zst` blobs in `models/`; bundle size tracks model release artefacts and isn't pinned in this doc). **On-demand:** see `crates/prunr-models/src/lib.rs::REGISTRY` for the full list (currently U2Net, Big-LaMa, MI-GAN, LaMa-fp32, SD 1.5 inpaint variants, TAESD VAE). Hosted at `https://github.com/aktiwers/prunr/releases/tag/models-v1` with versioned filenames (`u2net-1.0.0.onnx`, `.sha256` sidecar) and a `manifest.json` listing every model's metadata. Asset URLs are stable forever — old apps keep resolving old URLs.
+`resolve_bytes` / `resolve_part_bytes` are the only byte entry points. Bundled blobs decompress once and on-demand files are read once per process; SHA-256 is checked at download, not load. A missing model errors with a pointer to the Model Store, the only install surface. `DownloadManager` runs one download at a time (`.partial`, verify, rename; transient errors retry, multi-part bundles keep finished parts across a cancel).
 
-**Storage** (gitignored, never bundled in installer): `dirs::data_dir() / "prunr" / "models"`. Linux: `~/.local/share/prunr/models/`; macOS: `~/Library/Application Support/prunr/models/`; Windows: `%APPDATA%\prunr\models\`. Dev mode (`--features dev-models`) accepts the unversioned `models/u2net.onnx` produced by `cargo xtask fetch-models` as a fallback so the dev workflow doesn't need the user data dir mirrored.
+Our exports live on this repo's GitHub releases (`models-v1`, `lcm-inpaint-v1.0.1`, `taesd-v1.0.0`) under versioned names, so a URL an old build knows never changes; a fixed export gets a new name. SD 1.5 Inpaint comes from Hugging Face.
 
-**`DownloadManager`** coordinator (`gui/download_manager.rs`) — owns per-id `DownloadState`, a 1-active-at-a-time queue, and per-id cancel flags. Atomic write via `<dest>.partial` → SHA verify → `rename`. Transient errors retry with exponential backoff; fatal errors (404, SHA mismatch, user cancel) fail fast.
-
-**Model Store** modal (`gui/views/model_store.rs`) is the single user-facing surface. Pure card-state derivation `card_action(source, is_installed, &DownloadState) -> CardAction` keeps the Store and dropdown agreement testable. Entry point: "More models…" at the bottom of the model dropdown.
+`--features dev-models` reads `models/*.onnx` (or its `.zst`) instead of embedding; `cargo xtask fetch-models` fetches the list in `xtask/src/models.rs`, writes the blobs and mirrors on-demand models into the data dir. xtask is outside `default-members`, or its `dev-models` dependency would unify into a release build and ship no models.
 
 ## Temp File Lifecycle
 
-| Directory | Purpose | Created by | Cleaned by |
-|-----------|---------|------------|------------|
-| `{temp_dir}/prunr-drag/` | OS drag-out PNG files | drag_export | Stale at startup (>10 min), all at exit |
-| `{cache_dir}/prunr-history/` | Tier 3 history (cold) | history_disk | Stale at startup (>30 min), periodic (10 min), all at exit |
-| `/dev/shm/prunr-ipc/` (Linux) or `{temp_dir}/prunr-ipc/` | Subprocess image transfer | manager/worker_process | Per-image after read, all on new subprocess spawn |
+| Directory | Purpose | Cleanup |
+|-----------|---------|---------|
+| `{temp_dir}/prunr-drag/` | Drag-out PNGs | >10 min at startup; all on exit |
+| `{cache_dir}/prunr-history/{pid}/` | Cold undo history | Emptied on exit; dead PIDs' dirs at startup; never while the session runs |
+| `/dev/shm/prunr-ipc-{pid}/` (Linux), else `{temp_dir}/prunr-ipc-{pid}/` | Subprocess transfer | After read; own dir at startup; dead PIDs' dirs |
 
-## Windows-Specific: Console Subsystem
+The IPC and history dirs are per PID so two instances never sweep each other (`fs_util::sweep_dead_pid_dirs`), and crash recovery deletes only the crashed subprocess's file prefixes, sparing the SD subprocess and the CLI's staged retry inputs.
 
-Release builds use `#[windows_subsystem = "windows"]`. CLI mode calls `AttachConsole(ATTACH_PARENT_PROCESS)`. GUI has a renderer fallback chain: glow (OpenGL) → wgpu (DX12/Vulkan).
+## Windows Console and Renderer Fallback
+
+Windows release builds use the GUI subsystem so no empty console opens; CLI mode and `--debug` attach to the parent console. On every platform the GUI tries glow (OpenGL), then wgpu, for VMs and old drivers.
 
 ## Build & Release
 
-### Build profile
+Release profile: fat LTO, one codegen unit, `panic = "abort"`, stripped. Rust is pinned to 1.92.0 in `rust-toolchain.toml` and the workflows so clippy `-D warnings` does not drift.
 
-```toml
-[profile.release]
-strip = true
-lto = "fat"
-opt-level = 3
-panic = "abort"
-codegen-units = 1
-```
+CI on pushes to master: clippy, then build and test with `dev-models` on Linux, macOS (x86_64, aarch64) and Windows. Only Linux installs ONNX Runtime and sets `PRUNR_REQUIRE_ORT`, so its inference tests fail instead of soft-skipping.
 
-### GitHub Actions release pipeline
+A `v*` tag builds and publishes; `workflow_dispatch` builds without publishing.
 
-Tag push (`v*`) and manual `workflow_dispatch` both trigger parallel builds on three runners. Manual dispatch is for testing CI changes (CoreML build, dylib bundling, etc.) without polluting the release history.
+| Target | Artifacts |
+|--------|-----------|
+| linux-x86_64 | `.tar.gz`, `.AppImage`, `.deb`, `.rpm` |
+| macos-aarch64 | `.dmg`, `.tar.gz` |
+| windows-x86_64 | `.zip`, Inno Setup `.exe` |
 
-| Matrix target | Runner | Artifacts |
-|---------------|--------|-----------|
-| linux-x86_64 | ubuntu-latest | `.tar.gz`, `.AppImage`, `.deb`, `.rpm` |
-| macos-aarch64 | macos-latest | `.dmg`, `.tar.gz` |
-| windows-x86_64 | windows-latest | `.zip`, Inno Setup `.exe` |
+Each artifact ships an ONNX Runtime so a clean machine needs no Runtime Store install. Linux and Windows stage the CPU wheel with `cargo xtask install-runtime` (the in-app store's code) into `<exe dir>/runtime/`, hence `/usr/bin/runtime/` in the `.deb` / `.rpm`; macOS builds ORT with CoreML and ships it in `Contents/Frameworks/`.
 
-**ORT runtime bundling.** Each artifact ships the platform-specific `libonnxruntime` next to the binary so a clean machine without system ORT can run the app. Linux/Windows: CI runs `cargo xtask install-runtime onnxruntime <ver> --stage-to runtime-stage/` to download + extract the CPU-only PyPI wheel, then each package step copies `runtime-stage/<DYLIB>` into `<package>/runtime/<DYLIB>` (matching `bundled_dylib`'s nested-layout lookup). macOS replaces this with a custom CoreML-enabled build (see `## GPU Execution Providers`) bundled into `Prunr.app/Contents/Frameworks/` via rpath. The xtask staging path is the same code the GUI's "Settings → Hardware → Install runtime" uses, so the bundled fallback and the runtime store can't drift in their install layout. Each package step fails-loud with `::error::` if the staged dylib is missing.
-
-**`.deb` / `.rpm` runtime placement caveat.** The `bundled_dylib` lookup is `<exe parent>/runtime/<DYLIB>`. Standard FHS dictates `/usr/lib` for shared libs; the .deb/.rpm currently install at `/usr/bin/runtime/libonnxruntime.so` — non-idiomatic but functional, since the binary at `/usr/bin/prunr` finds it there via the bundled lookup. A proper FHS layout (binary wrapper at `/usr/bin/prunr` invoking the real binary at `/usr/lib/prunr/prunr` with `LD_LIBRARY_PATH` set) is a pending follow-up.
-
-**Linux runtime deps** declared in the .deb / .rpm Depends list: `libgtk-3-0` (rfd file dialogs), `libxkbcommon0` (winit keyboard input), `libfontconfig1` (text rendering). Already present on Ubuntu 22.04+, Fedora 40+, openSUSE Tumbleweed; AppImage / tar.gz users on minimal installs may need to install them manually.
-
-### Version sync
-
-Workspace `Cargo.toml` `version` is the single source of truth. CLI reads `CARGO_PKG_VERSION`; platform packages read the git tag. Manual `workflow_dispatch` runs skip the macOS Info.plist version patch and keep the in-repo placeholder.
+The workspace `version` is the app version; packages take theirs from the tag. ORT versions pinned in the workflow YAML are mirrored in Rust consts, and a test fails when they differ.
 
 ## Key Dependencies
 
-| Crate | Version | Purpose |
-|-------|---------|---------|
-| `ort` | 2.0.0-rc.12 | ONNX Runtime bindings |
-| `eframe` / `egui` | 0.34 | Immediate-mode GUI + windowing |
-| `image` | 0.25 | PNG/JPEG/WebP/BMP decode/encode |
-| `resvg` | 0.45 | SVG → RGBA rasterization on load |
-| `ndarray` | 0.17 | ORT-compatible tensor manipulation |
-| `rayon` | 1.11 | Work-stealing parallelism |
-| `zstd` | 0.13 | Model decompression + history compression |
-| `bincode` | 2 | Subprocess IPC serialization |
-| `sysinfo` | 0.37 | Cross-platform available RAM query |
-| `memory-stats` | 1 | Process RSS monitoring (subprocess self-reporting) |
-| `fast_image_resize` | 6 | SIMD-accelerated Lanczos3 resize (SSE4.1/AVX2/NEON) |
-| `clap` | 4.5 | CLI argument parsing |
-| `serde` / `serde_json` | 1.x | Settings + IPC serialization |
-| `rfd` | 0.15 | Native file dialogs |
-| `arboard` | 3.x | Cross-platform clipboard |
-| `dirs` | 6.x | Platform config/cache dirs |
-| `drag` | 2.1 | OS drag-out (Windows/macOS only) |
+| Crate | Why |
+|-------|-----|
+| `ort` =2.0.0-rc.13 | ONNX Runtime with `load-dynamic` and the CUDA / CoreML / DirectML / OpenVINO EPs; exact pin, the RC API moves |
+| `eframe` / `egui` 0.34 | GUI |
+| `accesskit`; `egui_kittest` (dev) | Widget tree for the control socket and headless GUI tests |
+| `image`, `resvg`, `fast_image_resize` | Decode / encode, SVG, SIMD Lanczos3 |
+| `ndarray`, `half`, `rand_chacha`, `instant-clip-tokenizer` | Tensors; SD fp16, seeded noise, prompts |
+| `zstd`, `bincode` | Model blobs and cold history; IPC wire format |
+| `sysinfo`, `memory-stats` | Free RAM for gates; subprocess RSS |
+| `reqwest`, `sha2`, `zip` | Downloads, verification, wheel extraction |
+| `drag` | OS drag-out, Windows and macOS only |
