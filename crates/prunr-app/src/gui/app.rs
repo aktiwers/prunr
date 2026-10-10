@@ -1109,6 +1109,11 @@ impl PrunrApp {
             sd_strength: bs.sd_strength,
             sd_use_karras_sigmas: bs.sd_use_karras_sigmas,
             use_taesd: bs.sd_use_taesd_effective(),
+            sd_tuning: super::env_overrides::sd_tuning(prunr_core::inpaint_sd::plan_tuning(
+                backend,
+                false,
+                Some(u64::from(crate::hardware::available_ram_mb_throttled())),
+            )),
         };
         self.processor.dispatch_inpaint(item_id, source, selection, tuning);
     }
