@@ -2526,6 +2526,9 @@ impl PrunrApp {
     ) -> Option<super::live_preview::DispatchInputs> {
         use super::live_preview::{DispatchInputs, PreviewKind};
         let item = items.iter_mut().find(|b| b.id == id)?;
+        if !is_filter_only && item.cut_is_undone() {
+            return None;
+        }
         let seg_tensor = item.hot_seg_tensor();
         // A Mask dispatch in a seg model with no cached tensor falls
         // through to `run_preview`'s source+fill_style fallback and
@@ -2682,18 +2685,22 @@ impl PrunrApp {
     /// Clearing it causes the canvas to flash black for a frame (no texture
     /// to draw → BG_PRIMARY shows). Instead we spawn a tex prep for the new
     /// RGBA directly and let drain swap it in atomically when ready.
-    fn apply_completed_previews(
+    pub(crate) fn apply_completed_previews(
         &mut self,
         ctx: &egui::Context,
         results: Vec<super::live_preview::PreviewResult>,
     ) {
         use super::live_preview::PreviewKind;
         let handles = self.batch.bg_io.tex_prep_handles();
+        let is_filter_only = self.settings.model.to_model_kind().is_none();
         for r in results {
             let (item_id, source, is_final) = {
                 let Some(item) = self.batch.find_by_id_mut(r.item_id) else {
                     continue;
                 };
+                if !is_filter_only && item.cut_is_undone() {
+                    continue;
+                }
                 let is_upscale_tier2 = matches!(r.kind, PreviewKind::UpscaleTier2);
                 let new_rgba = Arc::new(r.rgba);
                 item.result_rgba = Some(new_rgba.clone());

@@ -749,6 +749,12 @@ impl BatchItem {
         self.status == BatchStatus::Done && self.cached_tensor.is_some()
     }
 
+    /// The cached tensor belongs to a result the user undid. A re-cut from
+    /// it, queued or already running, would bring that result back.
+    pub(crate) fn cut_is_undone(&self) -> bool {
+        self.status == BatchStatus::Pending && self.cached_tensor.is_some()
+    }
+
     /// What `enforce_tensor_budget` can free: the compressed segmentation
     /// and edge tensors.
     pub(crate) fn evictable_tensor_bytes(&self) -> usize {

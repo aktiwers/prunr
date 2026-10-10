@@ -43,7 +43,7 @@ fn preview_inputs_reuse_the_decompressed_tensor_until_it_changes() {
     let item = push_test_item(&mut app, 3);
     item.dimensions = (8, 8);
     item.source_rgba = Some(Arc::new(image::RgbaImage::new(8, 8)));
-    give_tensor(item);
+    give_cutout(item);
     let first = crate::gui::app::PrunrApp::build_preview_inputs(&mut app.batch.items, 3, PreviewKind::Mask, false, false)
         .expect("inputs").seg_tensor.expect("tensor");
     let second = crate::gui::app::PrunrApp::build_preview_inputs(&mut app.batch.items, 3, PreviewKind::Mask, false, false)
@@ -430,4 +430,41 @@ fn a_stroke_after_undoing_the_result_does_not_bring_it_back() {
     app.handle_redo(&ctx);
     assert!(!app.processor.live_preview.is_pending_for(6), "nor may stepping that stroke");
     assert_eq!(app.batch.items[0].status, crate::gui::item::BatchStatus::Pending);
+}
+
+/// A re-cut queued before the undo (a stroke's, a Magic Brush click's, a
+/// Mask slider's) must neither start on the original nor land on it.
+#[test]
+fn a_recut_queued_before_the_undo_never_reaches_the_original() {
+    use crate::gui::live_preview::{PreviewKind, PreviewResult};
+    use std::sync::Arc;
+    let ctx = egui::Context::default();
+    let mut app = app_with_model(SettingsModel::BiRefNetLite);
+    let item = push_test_item(&mut app, 8);
+    item.dimensions = (8, 8);
+    item.source_rgba = Some(Arc::new(image::RgbaImage::new(8, 8)));
+    give_tensor(item);
+    item.status = crate::gui::item::BatchStatus::Pending;
+
+    assert!(
+        PrunrApp::build_preview_inputs(&mut app.batch.items, 8, PreviewKind::Mask, false, false).is_none(),
+        "a queued re-cut must not start on the original"
+    );
+
+    let landed = PreviewResult {
+        item_id: 8,
+        rgba: image::RgbaImage::new(8, 8),
+        kind: PreviewKind::Mask,
+        generation: 0,
+        new_edge: None,
+        new_bold: None,
+        new_masked_base: None,
+        applied_mask: prunr_core::MaskRecipe::from(&prunr_core::MaskSettings::default()),
+        applied_tier2_knobs: None,
+        is_final: true,
+    };
+    app.apply_completed_previews(&ctx, vec![landed]);
+    let item = &app.batch.items[0];
+    assert_eq!(item.status, crate::gui::item::BatchStatus::Pending, "a re-cut in flight must not land on the original");
+    assert!(item.result_rgba.is_none());
 }
