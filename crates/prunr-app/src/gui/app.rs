@@ -872,50 +872,7 @@ impl PrunrApp {
         loop {
             let kind = self.batch.items[idx].actions_undo.pop_back()?;
             let success = match kind {
-                ActionType::Stroke => {
-                    if self.settings.model.is_inpaint() {
-                        // Inpaint mode: each stroke archived its prev result_rgba
-                        // at result-receive time. Undo swaps stored RGBAs — instant,
-                        // no re-dispatch (which would re-run the multi-second SD
-                        // UNet pipeline). Sync the mask_correction stack so a
-                        // subsequent stroke commit doesn't drift.
-                        let _ = self.batch.items[idx].undo_stroke();
-                        if HistoryManager::undo_result(&mut self.batch.items[idx]) {
-                            self.batch.items[idx].reset_result_caches();
-                            self.batch.items[idx].source_texture = None;
-                            true
-                        } else {
-                            false
-                        }
-                    } else if self.settings.chain_mode
-                        && HistoryManager::can_undo(&self.batch.items[idx])
-                    {
-                        // Chain-mode seg: the brush handler archived the
-                        // pre-stroke `result_rgba` at commit. Pop it
-                        // (instant) instead of `dispatch_brush_rerun` —
-                        // the rerun would rebuild against the post-stroke
-                        // chain base and never reach the pre-stroke state.
-                        let _ = self.batch.items[idx].undo_stroke();
-                        if HistoryManager::undo_result(&mut self.batch.items[idx]) {
-                            self.batch.items[idx].reset_result_caches();
-                            self.batch.items[idx].source_texture = None;
-                            true
-                        } else {
-                            false
-                        }
-                    } else {
-                        // Non-chain seg: mask_correction state IS the input
-                        // to the pipeline — re-dispatch is required to
-                        // recompute the result. (Seg pipelines are
-                        // sub-second; rerun cost is tolerable.)
-                        if self.batch.items[idx].undo_stroke() {
-                            self.dispatch_brush_rerun(idx);
-                            true
-                        } else {
-                            false
-                        }
-                    }
-                }
+                ActionType::Stroke => self.step_stroke(idx, HistoryDir::Undo),
                 ActionType::Result => {
                     if HistoryManager::undo_result(&mut self.batch.items[idx]) {
                         self.batch.items[idx].reset_result_caches();
@@ -961,39 +918,7 @@ impl PrunrApp {
         loop {
             let kind = self.batch.items[idx].actions_redo.pop_back()?;
             let success = match kind {
-                ActionType::Stroke => {
-                    if self.settings.model.is_inpaint() {
-                        // Inpaint redo: swap stored RGBAs (instant; mirror of
-                        // try_undo_one_action). See comment there.
-                        let _ = self.batch.items[idx].redo_stroke();
-                        if HistoryManager::redo_result(&mut self.batch.items[idx]) {
-                            self.batch.items[idx].reset_result_caches();
-                            self.batch.items[idx].source_texture = None;
-                            true
-                        } else {
-                            false
-                        }
-                    } else if self.settings.chain_mode
-                        && HistoryManager::can_redo(&self.batch.items[idx])
-                    {
-                        // Chain-mode seg redo mirror of the undo path:
-                        // the post-stroke result lives on `redo_stack`;
-                        // pop it back instead of re-running the brush.
-                        let _ = self.batch.items[idx].redo_stroke();
-                        if HistoryManager::redo_result(&mut self.batch.items[idx]) {
-                            self.batch.items[idx].reset_result_caches();
-                            self.batch.items[idx].source_texture = None;
-                            true
-                        } else {
-                            false
-                        }
-                    } else if self.batch.items[idx].redo_stroke() {
-                        self.dispatch_brush_rerun(idx);
-                        true
-                    } else {
-                        false
-                    }
-                }
+                ActionType::Stroke => self.step_stroke(idx, HistoryDir::Redo),
                 ActionType::Result => {
                     if HistoryManager::redo_result(&mut self.batch.items[idx]) {
                         self.batch.items[idx].reset_result_caches();
@@ -1073,9 +998,40 @@ impl PrunrApp {
         // the stroke needs the pre-stroke image archived now. Inpaint
         // archives when its result lands.
         if self.settings.chain_mode {
+            // The seed keeps the archive above the "back to the source"
+            // floor, as a Process run does, so undoing the stroke lands on
+            // the archived image rather than on nothing.
+            HistoryManager::seed_with_source(&mut self.batch.items[idx]);
             HistoryManager::archive_result_for_stroke(&mut self.batch.items[idx], self.settings.history_depth);
+            self.batch.items[idx].mark_last_stroke_archived();
         }
         self.dispatch_brush_rerun(idx);
+    }
+
+    /// One stroke step of the history, either way: the selection steps;
+    /// a stroke whose re-cut archived the pre-stroke image (chain mode)
+    /// brings that image with it; any other stroke on a cut-out re-cuts
+    /// from the tensor; the eraser's region stroke moves nothing else.
+    fn step_stroke(&mut self, idx: usize, dir: HistoryDir) -> bool {
+        let item = &mut self.batch.items[idx];
+        let stepped = match dir {
+            HistoryDir::Undo => item.undo_stroke(),
+            HistoryDir::Redo => item.redo_stroke(),
+        };
+        let Some(archived) = stepped else { return false };
+        if archived {
+            let restored = match dir {
+                HistoryDir::Undo => HistoryManager::undo_result(item),
+                HistoryDir::Redo => HistoryManager::redo_result(item),
+            };
+            if restored {
+                item.reset_result_caches();
+                item.source_texture = None;
+            }
+        } else if self.settings.model.uses_segmentation() && item.cached_tensor.is_some() {
+            self.dispatch_brush_rerun(idx);
+        }
+        true
     }
 
     /// The eraser's painted region waits for the user, since a run costs
@@ -1304,10 +1260,9 @@ impl PrunrApp {
             let (item_id, new_rgba) = {
                 let Some(item) = self.batch.find_by_id_mut(r.item_id) else { continue };
                 let new_rgba = Arc::new(r.rgba);
-                // Archive the previous result_rgba so Cmd+Z can swap stored
-                // RGBAs instantly instead of re-running the inpaint pipeline.
-                // The Stroke marker was already pushed at commit_correction;
-                // this just stages the snapshot the marker undoes to.
+                // Archive the previous image so Cmd+Z swaps it back instead
+                // of re-running the inpaint; its own Result step, apart
+                // from the strokes that shaped the region.
                 if let Some(prev) = item.result_rgba.take() {
                     item.history.push_back(super::item::HistoryEntry::new(
                         prev, item.applied_recipe.clone(),
@@ -1321,6 +1276,7 @@ impl PrunrApp {
                     for entry in item.redo_stack.drain(..) {
                         entry.cleanup();
                     }
+                    item.push_action_marker(super::item::ActionType::Result);
                 }
                 // selection_mask intentionally persists — the region stays
                 // highlighted and is available for Reprocess.
