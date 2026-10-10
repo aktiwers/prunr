@@ -7,18 +7,14 @@
 #   scripts/sd_bench.sh base gpu   # a subset
 #
 # Variants:
-#   base    current behaviour (OpenVINO on its default device, the CPU)
+#   base    the shipped plan (CPU plugin, one 512×768 crop for the region)
+#   tiles   tall crop off: two 512² tiles (PRUNR_SD_TALL_CROP=0)
 #   gpu     OpenVINO on the iGPU (PRUNR_SD_OV_DEVICE=GPU)
 #   keep    bundle kept loaded (session build shows only on the first run)
-#   dyn     OpenVINO with dynamic shapes (PRUNR_SD_OV_DYNAMIC=1)
-#   t4      OpenVINO CPU plugin on 4 threads (PRUNR_SD_OV_THREADS=4)
-#   tall    dynamic shapes and one 512×768 crop instead of two tiles
-#   opt0    ONNX Runtime graph optimiser off (PRUNR_SD_ORT_OPT=0)
-#   opt0tall  opt0 with the tall crop
 set -u
 cd "$(dirname "$0")/.."
 variants=("$@")
-[ ${#variants[@]} -eq 0 ] && variants=(base gpu)
+[ ${#variants[@]} -eq 0 ] && variants=(base tiles)
 run() {
   local name=$1; shift
   echo "== $name"
@@ -29,13 +25,9 @@ run() {
 for v in "${variants[@]}"; do
   case $v in
     base)   run base ;;
+    tiles)  run tiles PRUNR_SD_TALL_CROP=0 ;;
     gpu)    run gpu PRUNR_SD_OV_DEVICE=GPU ;;
     keep)   run keep PRUNR_SD_KEEP_LOADED=1 ;;
-    dyn)    run dyn PRUNR_SD_OV_DYNAMIC=1 ;;
-    t4)     run t4 PRUNR_SD_OV_THREADS=4 ;;
-    tall)   run tall PRUNR_SD_OV_DYNAMIC=1 PRUNR_SD_TALL_CROP=1 ;;
-    opt0)   run opt0 PRUNR_SD_ORT_OPT=0 ;;
-    opt0tall) run opt0tall PRUNR_SD_ORT_OPT=0 PRUNR_SD_OV_DYNAMIC=1 PRUNR_SD_TALL_CROP=1 ;;
     *) echo "unknown variant: $v" ;;
   esac
 done

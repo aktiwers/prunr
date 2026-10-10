@@ -125,43 +125,52 @@ pub struct SdInpaintRequest {
     /// than a silent default.
     #[serde(default)]
     pub use_karras_sigmas: bool,
-    /// Measurement switches; see `SdTuning`.
+    /// How the pipeline runs for this stroke; see `plan_tuning`.
     #[serde(default)]
     pub tuning: SdTuning,
 }
 
-/// Pipeline variants under measurement (scripts/sd_bench.sh). Callers
-/// fill it (the GUI from `PRUNR_SD_*` env vars, the bench test from the
-/// same); core only reads it. A session is built for one `ov_device`
-/// and cached under it.
+/// How the SD pipeline runs, decided at dispatch (`plan_tuning`) from
+/// the settings and the free RAM and carried on the request, so the
+/// worker needs no settings of its own. Measured on an i7-6700: the
+/// tall crop takes 21 % off a 328×607 erase and removes the seam for
+/// 2.8 GB more peak RSS; the CPU plugin beats the HD 530 iGPU by half.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct SdTuning {
-    /// Leave the bundle to the idle sweep instead of dropping it after
-    /// the stroke.
+    /// Leave the bundle resident after the stroke (about 16 GB) so the
+    /// next one skips the ~24 s session build.
     pub keep_loaded: bool,
     /// OpenVINO device for the SD parts ("CPU", "GPU"); `None` is the
-    /// EP's default, the CPU.
+    /// EP's default, the CPU. An override for machines with a strong
+    /// Intel GPU; a session built for it never records EP failures.
     pub ov_device: Option<String>,
-    /// Let OpenVINO keep the graph dynamic instead of fixing it to the
-    /// first input shape (more RAM, any crop shape without a rebuild).
-    pub ov_dynamic: bool,
-    /// OpenVINO CPU thread count; `None` is the plugin's default.
-    pub ov_threads: Option<usize>,
     /// Run a region up to `SD_CROP_MAX` on its long side as one crop
-    /// instead of 512² tiles. Needs sessions that accept the shape
-    /// (`ov_dynamic`, or a non-OpenVINO provider).
+    /// instead of 512² tiles. The sessions are then built with dynamic
+    /// shapes so the second size needs no rebuild.
     pub tall_crop: bool,
-    /// ONNX Runtime graph optimisation level for the SD sessions, 0
-    /// (none) to 3 (all); `None` is the shipped level 3.
-    pub ort_opt_level: Option<u8>,
+}
+
+/// RAM the tall crop needs beyond the model's gate (measured peak RSS
+/// 18.8 GB against 16.1 GB).
+pub const SD_TALL_CROP_EXTRA_MB: u64 = 3_072;
+
+/// The tuning for a stroke: the tall crop when `available_mb` covers
+/// the model's gate plus `SD_TALL_CROP_EXTRA_MB`, tiles otherwise.
+/// Unknown free RAM counts as enough, as in `check_ram_for`.
+pub fn plan_tuning(id: prunr_models::ModelId, keep_loaded: bool, available_mb: Option<u64>) -> SdTuning {
+    let tall_crop = available_mb.is_none_or(|free| free >= sd_gate_mb(id) + SD_TALL_CROP_EXTRA_MB);
+    SdTuning { keep_loaded, ov_device: None, tall_crop }
+}
+
+/// Free RAM the model asks for before it loads: its working set plus
+/// the safety headroom.
+fn sd_gate_mb(id: prunr_models::ModelId) -> u64 {
+    prunr_models::descriptor(id).map_or(0, |d| d.working_set_mb as u64) + SAFETY_MARGIN_MB
 }
 
 impl SdTuning {
     fn session_key(&self) -> SdSessionKey {
-        SdSessionKey {
-            ov_device: self.ov_device.clone(), ov_dynamic: self.ov_dynamic,
-            ov_threads: self.ov_threads, ort_opt_level: self.ort_opt_level,
-        }
+        SdSessionKey { ov_device: self.ov_device.clone(), dynamic: self.tall_crop }
     }
 }
 
@@ -169,27 +178,17 @@ impl SdTuning {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub(crate) struct SdSessionKey {
     ov_device: Option<String>,
-    ov_dynamic: bool,
-    ov_threads: Option<usize>,
-    ort_opt_level: Option<u8>,
+    /// OpenVINO keeps the graph dynamic (any crop size) instead of
+    /// fixing it to the first input shape.
+    dynamic: bool,
 }
 
 impl SdSessionKey {
-    fn opt_level(&self) -> GraphOptimizationLevel {
-        match self.ort_opt_level {
-            Some(0) => GraphOptimizationLevel::Disable,
-            Some(1) => GraphOptimizationLevel::Level1,
-            Some(2) => GraphOptimizationLevel::Level2,
-            _ => GraphOptimizationLevel::Level3,
-        }
-    }
-}
-
-impl SdSessionKey {
-    /// An experiment's session: its failures say nothing about the
-    /// shipped configuration, so they are not recorded against the EP.
+    /// A device override is an experiment: its failures say nothing
+    /// about the shipped configuration, so they are not recorded
+    /// against the EP.
     fn is_experiment(&self) -> bool {
-        *self != Self::default()
+        self.ov_device.is_some()
     }
 }
 
@@ -1211,7 +1210,7 @@ fn build_part_with_ep_ladder(
             continue;
         }
         crate::cache::gc_stale_for_model(id, ep.as_str());
-        let builder = match sd_base_builder(session_key.opt_level()) {
+        let builder = match sd_base_builder() {
             Ok(b) => b,
             Err(e) => {
                 tracing::warn!(part = %key, ep = %ep, %e, "SD: builder init failed");
@@ -1250,27 +1249,19 @@ fn build_part_with_ep_ladder(
             ]),
             #[cfg(not(target_os = "macos"))]
             EpKind::OpenVino => builder.with_execution_providers([
-                // SD bundle peaked at ~15 GB RSS delta on a user system
-                // (rss_before=4994 → rss_after=19909 in the reported
-                // trace) — well above the ~3-4 GB the fp16 weights
-                // would predict. Two OpenVINO knobs cap the worst-case
-                // arena: `num_streams=1` disables per-stream buffer
-                // duplication, and `dynamic_shapes=false` lets
-                // OpenVINO size the working memory to the actual
-                // 512² SD tile rather than reserving for arbitrary
-                // input shapes. Both are safe — SD's UNet is run
-                // sequentially under a Mutex, and our tile pipeline
-                // is fixed-shape. (No `with_cache_dir` — see engine.rs
-                // for the SD UNet empirical retest finding.)
+                // `num_streams=1` disables per-stream buffer duplication
+                // (the bundle sits at ~16 GB RSS on an i7-6700 either
+                // way; measured 2026-10). Dynamic shapes cost nothing
+                // per step and are on whenever the tall crop is, so the
+                // 512×768 crop needs no second session; static shapes
+                // stay for the tiles-only plan. (No `with_cache_dir` —
+                // see engine.rs for the SD UNet empirical retest.)
                 {
                     let mut p = ort::execution_providers::OpenVINOExecutionProvider::default()
                         .with_num_streams(1)
-                        .with_dynamic_shapes(session_key.ov_dynamic);
+                        .with_dynamic_shapes(session_key.dynamic);
                     if let Some(dev) = &session_key.ov_device {
                         p = p.with_device_type(dev);
-                    }
-                    if let Some(n) = session_key.ov_threads {
-                        p = p.with_num_threads(n);
                     }
                     p.build()
                 },
@@ -1336,7 +1327,7 @@ fn build_part_with_ep_ladder(
         );
     }
     crate::cache::gc_stale_for_model(id, "CPU");
-    let builder = sd_base_builder(GraphOptimizationLevel::Level3)
+    let builder = sd_base_builder()
         .map_err(|e| format!("SD {key}: builder init: {e}"))?;
     let (mut builder, load_path) = sd_apply_path_cache(builder, path.as_path(), id, "CPU", key);
     let started = Instant::now();
@@ -1347,10 +1338,10 @@ fn build_part_with_ep_ladder(
     Ok((session, "CPU".to_string()))
 }
 
-fn sd_base_builder(level: GraphOptimizationLevel) -> Result<ort::session::builder::SessionBuilder, String> {
+fn sd_base_builder() -> Result<ort::session::builder::SessionBuilder, String> {
     crate::ort_runtime::session_builder()
         .map_err(|e| format!("SD: {e}"))?
-        .with_optimization_level(level)
+        .with_optimization_level(GraphOptimizationLevel::Level3)
         .map_err(|e| format!("SD: optimization level: {e}"))
 }
 
@@ -2083,8 +2074,7 @@ const SAFETY_MARGIN_MB: u64 = 2_000;
 /// bundle build for the prewarm path that bypasses the inpaint entry.
 pub(crate) fn check_ram_for(id: prunr_models::ModelId) -> Result<(), String> {
     let Some(desc) = prunr_models::descriptor(id) else { return Ok(()) };
-    let need_mb = desc.working_set_mb as u64 + SAFETY_MARGIN_MB;
-    let need = need_mb * 1024 * 1024;
+    let need = sd_gate_mb(id) * 1024 * 1024;
     let Some(free) = available_ram_bytes() else { return Ok(()) };
     if free >= need {
         return Ok(());
@@ -3775,6 +3765,19 @@ mod tests {
         let comps = mask_components(&m);
         assert_eq!(comps.len(), 1);
         assert_eq!(comps[0], MaskBbox { x_min: 1900, y_min: 1850, x_max: 1901, y_max: 1850 });
+    }
+
+    #[test]
+    fn plan_takes_the_tall_crop_only_with_the_extra_ram() {
+        let id = prunr_models::ModelId::SdV15InpaintFp16;
+        let gate = sd_gate_mb(id);
+        assert!(plan_tuning(id, false, None).tall_crop, "unknown RAM counts as enough");
+        assert!(plan_tuning(id, false, Some(gate + SD_TALL_CROP_EXTRA_MB)).tall_crop);
+        assert!(!plan_tuning(id, false, Some(gate + SD_TALL_CROP_EXTRA_MB - 1)).tall_crop);
+        let t = plan_tuning(id, true, Some(gate));
+        assert!(t.keep_loaded && !t.tall_crop && t.ov_device.is_none());
+        assert!(t.session_key() == SdSessionKey::default());
+        assert!(!t.session_key().is_experiment());
     }
 
     #[test]

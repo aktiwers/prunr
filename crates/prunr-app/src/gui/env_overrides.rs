@@ -38,16 +38,13 @@ fn read_f32(var: &str) -> Option<f32> {
     std::env::var(var).ok()?.parse().ok()
 }
 
-/// The SD measurement switches (scripts/sd_bench.sh), from
-/// `PRUNR_SD_KEEP_LOADED` and `PRUNR_SD_OV_DEVICE`.
-pub fn sd_tuning() -> prunr_core::inpaint_sd::SdTuning {
+/// `planned` with the SD overrides applied (scripts/sd_bench.sh):
+/// `PRUNR_SD_KEEP_LOADED`, `PRUNR_SD_TALL_CROP` and `PRUNR_SD_OV_DEVICE`.
+pub fn sd_tuning(planned: prunr_core::inpaint_sd::SdTuning) -> prunr_core::inpaint_sd::SdTuning {
     prunr_core::inpaint_sd::SdTuning {
-        keep_loaded: read_bool("PRUNR_SD_KEEP_LOADED").unwrap_or(false),
-        ov_device: std::env::var("PRUNR_SD_OV_DEVICE").ok().filter(|s| !s.is_empty()),
-        ov_dynamic: read_bool("PRUNR_SD_OV_DYNAMIC").unwrap_or(false),
-        ov_threads: std::env::var("PRUNR_SD_OV_THREADS").ok().and_then(|s| s.parse().ok()),
-        tall_crop: read_bool("PRUNR_SD_TALL_CROP").unwrap_or(false),
-        ort_opt_level: std::env::var("PRUNR_SD_ORT_OPT").ok().and_then(|s| s.parse().ok()),
+        keep_loaded: read_bool("PRUNR_SD_KEEP_LOADED").unwrap_or(planned.keep_loaded),
+        tall_crop: read_bool("PRUNR_SD_TALL_CROP").unwrap_or(planned.tall_crop),
+        ov_device: std::env::var("PRUNR_SD_OV_DEVICE").ok().filter(|s| !s.is_empty()).or(planned.ov_device),
     }
 }
 
