@@ -420,75 +420,40 @@ fn render_tab_behavior(ui: &mut egui::Ui, settings: &mut Settings) {
     hint(ui, "New images inherit this preset. The reset button on the toolbar restores its values.");
 }
 
-/// One row per action: label, two chord slots, Reset. Clicking a slot
-/// waits for the next key press; Escape cancels, Backspace clears the
-/// slot. A chord already bound elsewhere moves here and the other action
-/// loses it.
+/// One row per action: label, the key slots, Reset. Clicking a slot
+/// starts a capture that `PrunrApp::handle_hotkey_capture` completes on
+/// the next key press.
 fn render_tab_hotkeys(ui: &mut egui::Ui, app: &mut PrunrApp) {
-    use super::shortcuts::{self, Action, Bindings, Chord, SHORTCUTS};
-    use egui::Key;
+    use super::shortcuts::{self, Bindings, SHORTCUTS, SLOTS};
 
     let current = shortcuts::current();
-    let mut changed: Option<Bindings> = None;
-    let mut capture = app.hotkey_capture;
-
-    if let Some((action, slot)) = capture {
-        let (cancel, clear, chord) = ui.ctx().input(|i| {
-            (i.key_pressed(Key::Escape), i.key_pressed(Key::Backspace), Chord::from_input(i))
-        });
-        if cancel {
-            capture = None;
-        } else if clear {
-            let mut next = (*current).clone();
-            let mut chords = current.chords(action).to_vec();
-            if slot < chords.len() {
-                chords.remove(slot);
-            }
-            next.set(action, chords);
-            changed = Some(next);
-            capture = None;
-        } else if let Some(c) = chord {
-            let mut next = (*current).clone();
-            if let Some(other) = current.conflict(c, action) {
-                let kept: Vec<Chord> = current.chords(other).iter().copied().filter(|k| *k != c).collect();
-                next.set(other, kept);
-                app.toasts.info(format!(
-                    "{} moved from \"{}\"", shortcuts::chord_display(c), shortcuts::label(other),
-                ));
-            }
-            let mut chords: Vec<Chord> = current.chords(action).iter().copied().filter(|k| *k != c).collect();
-            let at = slot.min(chords.len());
-            chords.insert(at, c);
-            next.set(action, chords);
-            changed = Some(next);
-            capture = None;
-        }
-    }
+    let mut reset: Option<Bindings> = None;
 
     section_heading(ui, "Hotkeys");
     hint(ui, "Click a key to change it, then press the new keys. Escape cancels, Backspace clears.");
     ui.add_space(theme::SPACE_SM);
     egui::Grid::new("hotkeys_grid")
-        .num_columns(4)
+        .num_columns(2 + SLOTS)
         .spacing([theme::SPACE_MD, theme::SPACE_XS])
         .show(ui, |ui| {
             for s in SHORTCUTS {
-                let action: Action = s.action;
+                let action = s.action;
                 let rebindable = shortcuts::rebindable(action);
                 ui.label(RichText::new(s.label).color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY));
-                let chords = current.chords(action);
-                for slot in 0..2 {
-                    let waiting = capture == Some((action, slot));
-                    let text = if waiting {
-                        "Press keys\u{2026}".to_string()
+                let texts = current.chord_texts(action);
+                for slot in 0..SLOTS {
+                    let waiting = app.hotkey_capture == Some((action, slot));
+                    let text: &str = if waiting {
+                        "Press keys\u{2026}"
                     } else {
-                        chords.get(slot).map(|c| shortcuts::chord_display(*c)).unwrap_or_else(|| "\u{2014}".to_string())
+                        texts.get(slot).map_or("\u{2014}", |t| t)
                     };
                     let color = if waiting { theme::ACCENT } else if rebindable { theme::TEXT_PRIMARY } else { theme::TEXT_HINT };
                     let label = RichText::new(text).monospace().size(theme::FONT_SIZE_MONO).color(color);
                     if rebindable {
-                        if ui.add(egui::Button::new(label).min_size(egui::vec2(110.0, 0.0))).clicked() {
-                            capture = Some((action, slot));
+                        let slot_button = egui::Button::new(label).min_size(egui::vec2(theme::HOTKEY_SLOT_WIDTH, 0.0));
+                        if ui.add(slot_button).clicked() {
+                            app.hotkey_capture = Some((action, slot));
                         }
                     } else {
                         ui.label(label);
@@ -497,8 +462,8 @@ fn render_tab_hotkeys(ui: &mut egui::Ui, app: &mut PrunrApp) {
                 if rebindable && !current.is_default(action) {
                     if button(ui, ButtonKind::Secondary, "Reset").clicked() {
                         let mut next = (*current).clone();
-                        next.set(action, Bindings::shipped().chords(action).to_vec());
-                        changed = Some(next);
+                        next.reset(action);
+                        reset = Some(next);
                     }
                 } else {
                     ui.label("");
@@ -510,11 +475,9 @@ fn render_tab_hotkeys(ui: &mut egui::Ui, app: &mut PrunrApp) {
     if app.settings.hotkeys.is_empty() {
         ui.label(RichText::new("Copy and Escape are fixed.").color(theme::TEXT_HINT).size(theme::FONT_SIZE_MONO));
     } else if button(ui, ButtonKind::Secondary, "Reset all hotkeys").clicked() {
-        changed = Some(Bindings::shipped());
+        reset = Some(Bindings::shipped());
     }
-
-    app.hotkey_capture = capture;
-    if let Some(next) = changed {
+    if let Some(next) = reset {
         app.apply_hotkeys(next);
     }
 }

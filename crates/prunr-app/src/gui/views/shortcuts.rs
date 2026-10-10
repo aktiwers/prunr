@@ -76,14 +76,19 @@ const fn chord(mods: Mods, key: Key) -> Chord {
 impl Chord {
     /// The platform-neutral settings form: "Mod+Shift+Z", "Delete".
     pub fn to_setting(self) -> String {
+        self.write("Mod", self.key.name())
+    }
+
+    fn write(self, mod_name: &str, key: &str) -> String {
         let mut s = String::new();
-        if matches!(self.mods, Mods::Command | Mods::CommandShift) {
-            s.push_str("Mod+");
+        if self.mods.command() {
+            s.push_str(mod_name);
+            s.push('+');
         }
-        if matches!(self.mods, Mods::Shift | Mods::CommandShift) {
+        if self.mods.shift() {
             s.push_str("Shift+");
         }
-        s.push_str(self.key.name());
+        s.push_str(key);
         s
     }
 
@@ -119,6 +124,14 @@ impl Chord {
 }
 
 impl Mods {
+    fn command(self) -> bool {
+        matches!(self, Mods::Command | Mods::CommandShift)
+    }
+
+    fn shift(self) -> bool {
+        matches!(self, Mods::Shift | Mods::CommandShift)
+    }
+
     fn from_flags(command: bool, shift: bool) -> Self {
         match (command, shift) {
             (false, false) => Mods::None,
@@ -198,53 +211,105 @@ pub const SHORTCUTS: &[Shortcut] = &[
 ];
 
 /// Every action's chords: the shipped table with the user's overrides
-/// applied, plus the display text each tooltip shows.
+/// applied, plus the text each tooltip and slot shows.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Bindings {
-    chords: Vec<Vec<Chord>>,
-    display: Vec<Arc<str>>,
+    rows: Vec<Row>,
 }
+
+#[derive(Clone, Debug, PartialEq)]
+struct Row {
+    chords: Vec<Chord>,
+    /// Per chord, for the Hotkeys tab's slots.
+    texts: Vec<Arc<str>>,
+    /// All chords joined, for tooltips and lists.
+    display: Arc<str>,
+}
+
+impl Row {
+    fn new(chords: Vec<Chord>) -> Self {
+        let texts: Vec<Arc<str>> = chords.iter().map(|c| Arc::from(chord_display(*c))).collect();
+        let display = if texts.is_empty() {
+            Arc::from(UNBOUND)
+        } else {
+            Arc::from(texts.iter().map(|t| &**t).collect::<Vec<_>>().join(" / "))
+        };
+        Self { chords, texts, display }
+    }
+}
+
+/// Shown wherever an action has no key.
+pub const UNBOUND: &str = "Unbound";
+
+/// Slots an action offers in the Hotkeys tab: a key and an alternate.
+pub const SLOTS: usize = 2;
 
 impl Bindings {
     pub fn shipped() -> Self {
-        let chords = Action::ALL.iter().map(|a| row(*a).chords.to_vec()).collect();
-        let mut b = Self { chords, display: Vec::new() };
-        b.display = Action::ALL.iter().map(|a| b.render_display(*a)).collect();
-        b
+        Self { rows: Action::ALL.iter().map(|a| Row::new(row(*a).chords.to_vec())).collect() }
     }
 
-    /// The shipped bindings with `overrides` applied; an override that
-    /// parses to nothing leaves the shipped chords, an empty list unbinds.
+    /// The shipped bindings with `overrides` applied: an empty list
+    /// unbinds, a list that parses to nothing keeps the shipped chords.
     pub fn from_overrides(overrides: &BTreeMap<String, Vec<String>>) -> Self {
         let mut b = Self::shipped();
         for (name, list) in overrides {
             let Some(action) = Action::from_name(name) else { continue };
             let parsed: Vec<Chord> = list.iter().filter_map(|s| Chord::parse(s)).collect();
-            if parsed.is_empty() && !list.is_empty() {
-                continue;
+            if list.is_empty() || !parsed.is_empty() {
+                b.set(action, parsed);
             }
-            b.set(action, parsed);
         }
         b
     }
 
     pub fn chords(&self, action: Action) -> &[Chord] {
-        &self.chords[action as usize]
+        &self.rows[action as usize].chords
+    }
+
+    /// The text of each bound chord, in slot order.
+    pub fn chord_texts(&self, action: Action) -> &[Arc<str>] {
+        &self.rows[action as usize].texts
     }
 
     pub fn is_default(&self, action: Action) -> bool {
-        self.chords[action as usize] == row(action).chords
+        self.rows[action as usize].chords == row(action).chords
     }
 
     /// The other action `c` is bound to, if any.
     pub fn conflict(&self, c: Chord, except: Action) -> Option<Action> {
         Action::ALL.into_iter()
-            .find(|a| *a != except && self.chords[*a as usize].contains(&c))
+            .find(|a| *a != except && self.rows[*a as usize].chords.contains(&c))
     }
 
     pub fn set(&mut self, action: Action, chords: Vec<Chord>) {
-        self.chords[action as usize] = chords;
-        self.display[action as usize] = self.render_display(action);
+        self.rows[action as usize] = Row::new(chords);
+    }
+
+    /// Put `c` in `action`'s slot, taking it away from any other action.
+    /// Returns the action that lost it.
+    pub fn bind(&mut self, action: Action, slot: usize, c: Chord) -> Option<Action> {
+        let other = self.conflict(c, action);
+        if let Some(o) = other {
+            let kept = self.chords(o).iter().copied().filter(|k| *k != c).collect();
+            self.set(o, kept);
+        }
+        let mut chords: Vec<Chord> = self.chords(action).iter().copied().filter(|k| *k != c).collect();
+        chords.insert(slot.min(chords.len()), c);
+        self.set(action, chords);
+        other
+    }
+
+    pub fn clear_slot(&mut self, action: Action, slot: usize) {
+        let mut chords = self.chords(action).to_vec();
+        if slot < chords.len() {
+            chords.remove(slot);
+            self.set(action, chords);
+        }
+    }
+
+    pub fn reset(&mut self, action: Action) {
+        self.set(action, row(action).chords.to_vec());
     }
 
     /// Only the actions that differ from the shipped table.
@@ -253,12 +318,6 @@ impl Bindings {
             .filter(|a| !self.is_default(*a))
             .map(|a| (a.name(), self.chords(a).iter().map(|c| c.to_setting()).collect()))
             .collect()
-    }
-
-    fn render_display(&self, action: Action) -> Arc<str> {
-        let text = self.chords[action as usize].iter()
-            .map(|c| chord_display(*c)).collect::<Vec<_>>().join(" / ");
-        Arc::from(if text.is_empty() { "Unbound".to_string() } else { text })
     }
 }
 
@@ -299,6 +358,9 @@ impl Pressed {
 
 /// Collect the shortcuts pressed this frame.
 pub fn pressed(ctx: &egui::Context) -> Pressed {
+    if ctx.input(|i| i.events.is_empty()) {
+        return Pressed::default();
+    }
     pressed_with(ctx, &current())
 }
 
@@ -331,9 +393,7 @@ fn chord_pressed(i: &InputState, c: Chord, fresh: bool, text_focused: bool) -> b
     if text_focused && blocked_by_text_focus(c) {
         return false;
     }
-    let want_command = matches!(c.mods, Mods::Command | Mods::CommandShift);
-    let want_shift = matches!(c.mods, Mods::Shift | Mods::CommandShift);
-    if i.modifiers.command != want_command || i.modifiers.shift != want_shift {
+    if i.modifiers.command != c.mods.command() || i.modifiers.shift != c.mods.shift() {
         return false;
     }
     if fresh {
@@ -362,16 +422,7 @@ fn key_name(key: Key) -> &'static str {
 }
 
 pub fn chord_display(c: Chord) -> String {
-    let mut s = String::new();
-    if matches!(c.mods, Mods::Command | Mods::CommandShift) {
-        s.push_str(MOD_NAME);
-        s.push('+');
-    }
-    if matches!(c.mods, Mods::Shift | Mods::CommandShift) {
-        s.push_str("Shift+");
-    }
-    s.push_str(key_name(c.key));
-    s
+    c.write(MOD_NAME, key_name(c.key))
 }
 
 fn row(action: Action) -> &'static Shortcut {
@@ -382,7 +433,7 @@ fn row(action: Action) -> &'static Shortcut {
 /// Platform-resolved key text for `action` ("Ctrl+O", "\u{2190} / A")
 /// under the current bindings, shared so tooltips allocate nothing.
 pub fn keys(action: Action) -> Arc<str> {
-    Arc::clone(&current().display[action as usize])
+    Arc::clone(&current().rows[action as usize].display)
 }
 
 /// Whether the user can rebind `action`: Copy arrives as egui's own
@@ -478,40 +529,48 @@ mod tests {
         assert_eq!(Chord::parse("Hyper+Q"), None);
     }
 
-    #[test]
-    fn overrides_replace_the_shipped_chord_and_store_only_changes() {
+    fn overridden() -> Bindings {
         let mut overrides = BTreeMap::new();
         overrides.insert("Undo".to_string(), vec!["Mod+U".to_string()]);
         overrides.insert("Nonsense".to_string(), vec!["Mod+Q".to_string()]);
         overrides.insert("Save".to_string(), vec!["Hyper+S".to_string()]);
         overrides.insert("Screenshot".to_string(), Vec::new());
-        let b = Bindings::from_overrides(&overrides);
+        Bindings::from_overrides(&overrides)
+    }
+
+    #[test]
+    fn overrides_replace_the_shipped_chord_and_store_only_changes() {
+        let b = overridden();
         assert_eq!(b.chords(Action::Undo), &[chord(Command, Key::U)]);
         assert!(b.is_default(Action::Save), "an unparsable override keeps the shipped chord");
         assert!(b.chords(Action::Screenshot).is_empty(), "an empty list unbinds");
-        assert_eq!(&*b.display[Action::Screenshot as usize], "Unbound");
+        assert_eq!(&*b.rows[Action::Screenshot as usize].display, UNBOUND);
         let back = b.to_overrides();
         assert_eq!(back.len(), 2);
         assert_eq!(back["Undo"], vec!["Mod+U".to_string()]);
         assert!(back["Screenshot"].is_empty());
-
-        let ctx = egui::Context::default();
-        ctx.begin_pass(press(Key::U, Modifiers::COMMAND));
-        let p = pressed_with(&ctx, &b);
-        assert!(p.is(Action::Undo));
-        let _ = ctx.end_pass();
-        ctx.begin_pass(press(Key::Z, Modifiers::COMMAND));
-        let p = pressed_with(&ctx, &b);
-        assert!(!p.is(Action::Undo), "the shipped chord no longer fires");
-        let _ = ctx.end_pass();
     }
 
     #[test]
-    fn conflict_names_the_other_action() {
-        let b = Bindings::shipped();
+    fn overridden_chords_fire_and_shipped_ones_stop() {
+        let b = overridden();
+        assert!(pressed_after_with(vec![press(Key::U, Modifiers::COMMAND)], &b).is(Action::Undo));
+        assert!(!pressed_after_with(vec![press(Key::Z, Modifiers::COMMAND)], &b).is(Action::Undo));
+    }
+
+    #[test]
+    fn bind_moves_a_chord_from_its_other_action() {
+        let mut b = Bindings::shipped();
         assert_eq!(b.conflict(chord(Command, Key::Z), Action::Redo), Some(Action::Undo));
         assert_eq!(b.conflict(chord(Command, Key::Z), Action::Undo), None);
-        assert_eq!(b.conflict(chord(Command, Key::U), Action::Undo), None);
+        assert_eq!(b.bind(Action::Redo, 0, chord(Command, Key::Z)), Some(Action::Undo));
+        assert!(b.chords(Action::Undo).is_empty());
+        assert_eq!(b.chords(Action::Redo)[0], chord(Command, Key::Z));
+        assert_eq!(b.chord_texts(Action::Redo).len(), 3);
+        b.clear_slot(Action::Redo, 0);
+        assert_eq!(b.chords(Action::Redo).len(), 2);
+        b.reset(Action::Undo);
+        assert!(b.is_default(Action::Undo));
         assert!(rebindable(Action::Undo) && !rebindable(Action::Copy) && !rebindable(Action::Cancel));
     }
 
@@ -543,15 +602,19 @@ mod tests {
 
     /// Run `frames` as consecutive passes; return what the last one pressed.
     /// egui sets `repeat` itself when a key was already down last frame.
-    fn pressed_after(frames: Vec<RawInput>) -> Pressed {
+    fn pressed_after_with(frames: Vec<RawInput>, bindings: &Bindings) -> Pressed {
         let ctx = egui::Context::default();
         let mut last = Pressed::default();
         for raw in frames {
             ctx.begin_pass(raw);
-            last = pressed(&ctx);
+            last = pressed_with(&ctx, bindings);
             let _ = ctx.end_pass();
         }
         last
+    }
+
+    fn pressed_after(frames: Vec<RawInput>) -> Pressed {
+        pressed_after_with(frames, &current())
     }
 
     fn pressed_for(raw: RawInput) -> Pressed {
