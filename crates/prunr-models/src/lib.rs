@@ -608,42 +608,44 @@ pub const REGISTRY: &[ModelDescriptor] = &[
     // steps instead of 20 — ~5× faster on CPU/iGPU at slight quality
     // cost. Selected when the user picks the LCM scheduler and the
     // bundle is installed. Released at
-    // https://github.com/aktiwers/prunr/releases/tag/lcm-inpaint-v1.0.0.
+    // https://github.com/aktiwers/prunr/releases/tag/lcm-inpaint-v1.0.1
+    // (1.0.1: exported with dynamic batch and spatial axes, so guided
+    // steps batch into one UNet call and crops other than 512² load).
     ModelDescriptor {
         id: ModelId::SdV15LcmInpaintFp16,
         display_name: "Eraser (SD 1.5 LCM, fast)",
         description: "Latent Consistency Model variant of SD 1.5 inpaint. ~5\u{00d7} faster on CPU/iGPU; lower fidelity. Active when scheduler = LCM (selected on the SD chip).",
         category: ModelCategory::Inpaint,
         source: ModelSource::MultiPartOnDemand {
-            subdir: "sd15-lcm-inpaint-fp16-1.0.0",
+            subdir: "sd15-lcm-inpaint-fp16-1.0.1",
             parts: &[
                 ModelPart {
                     key: "unet",
                     filename: "unet.onnx",
-                    url: "https://github.com/aktiwers/prunr/releases/download/lcm-inpaint-v1.0.0/unet.onnx",
-                    sha256: "bd62a44265e8610921d98fa851fb9507cc5ec16eebf359b8e10b0a043f17d4d7",
-                    size_bytes: 1723163151,
+                    url: "https://github.com/aktiwers/prunr/releases/download/lcm-inpaint-v1.0.1/unet.onnx",
+                    sha256: "00708cf68318fb5df5e3dfb112ab6964af0fa739f7e2f6cbba1d7c7df7e2f91c",
+                    size_bytes: 1720185037,
                 },
                 ModelPart {
                     key: "vae_encoder",
                     filename: "vae_encoder.onnx",
-                    url: "https://github.com/aktiwers/prunr/releases/download/lcm-inpaint-v1.0.0/vae_encoder.onnx",
-                    sha256: "9a5f1ade2a09a69496e1c48532fc54f11c8d118686115226c0de2698523b7826",
-                    size_bytes: 68826952,
+                    url: "https://github.com/aktiwers/prunr/releases/download/lcm-inpaint-v1.0.1/vae_encoder.onnx",
+                    sha256: "33247c04059dff4f7a15ac5fc5525ae46eb13a5f5b121b00b7bcd608a5f169f7",
+                    size_bytes: 68427657,
                 },
                 ModelPart {
                     key: "vae_decoder",
                     filename: "vae_decoder.onnx",
-                    url: "https://github.com/aktiwers/prunr/releases/download/lcm-inpaint-v1.0.0/vae_decoder.onnx",
-                    sha256: "fbe8a7ab071fe0d63484ac9764423505585c4db650cbe7734fb456cf415f7896",
-                    size_bytes: 99634701,
+                    url: "https://github.com/aktiwers/prunr/releases/download/lcm-inpaint-v1.0.1/vae_decoder.onnx",
+                    sha256: "8cbf506018e52e7339fb3a4ed6bf8ac1d8b9e3108c4e015705e8d1074888129f",
+                    size_bytes: 99095895,
                 },
                 ModelPart {
                     key: "text_encoder",
                     filename: "text_encoder.onnx",
-                    url: "https://github.com/aktiwers/prunr/releases/download/lcm-inpaint-v1.0.0/text_encoder.onnx",
-                    sha256: "76c497febe21922a096f368558a18b3549f1fe1b08f7a49267a14d0184c8155f",
-                    size_bytes: 246346236,
+                    url: "https://github.com/aktiwers/prunr/releases/download/lcm-inpaint-v1.0.1/text_encoder.onnx",
+                    sha256: "5877aeae786c49c139b549f29b61ce7afd51639c25a19d94bf492bd78824f297",
+                    size_bytes: 246350850,
                 },
             ],
             license: LicenseInfo {
