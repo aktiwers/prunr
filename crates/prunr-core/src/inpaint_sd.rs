@@ -229,7 +229,9 @@ pub fn process_inpaint_with(
 
     // Hold an Arc through the run so the idle sweep can't drop sessions
     // mid-inference.
+    let get_started = Instant::now();
     let bundle = SdSession::get(id)?;
+    let session_ms = get_started.elapsed().as_millis() as u64;
     // RAII drop-on-completion: when this guard goes out of scope (any
     // return path) the cache's Arc is removed; once `bundle` (declared
     // ABOVE so it drops AFTER the guard) drops too, the SdSession's
@@ -243,7 +245,9 @@ pub fn process_inpaint_with(
             release(self.0);
         }
     }
-    let _release_guard = DropOnComplete(id);
+    // `PRUNR_SD_KEEP_LOADED` leaves the bundle to the idle sweep instead.
+    let _release_guard = (!sd_keep_loaded()).then_some(DropOnComplete(id));
+    let run_started = Instant::now();
     // VAE backend selection: TAESD when fast mode is on AND the bundle
     // is installed (the request flag carries that decision from
     // dispatch). Until the TAESD artifact ships, get() errors and we
@@ -297,6 +301,12 @@ pub fn process_inpaint_with(
         }
     }
     if is_cancelled() { return Err(CoreError::Cancelled); }
+    tracing::info!(
+        tiles = tile_idx, session_ms, run_ms = run_started.elapsed().as_millis() as u64,
+        keep_loaded = sd_keep_loaded(), batch_pinned = bundle.batch_pinned,
+        ov_device = sd_ov_device().unwrap_or("default"),
+        "SD: inpaint done",
+    );
     Ok(out)
 }
 
@@ -551,6 +561,7 @@ fn run_one_tile(
     // distinct session mutex (or none) so they run concurrently.
     let prompt = req.prompt.clone();
     let neg_prompt = if use_cfg { Some(req.negative_prompt.clone()) } else { None };
+    let tile_started = Instant::now();
     let (text_emb_cond_f16, text_emb_uncond_f16, masked_latent, mask_latent) =
         std::thread::scope(|s| -> Result<_, CoreError> {
             let cond_h = s.spawn(|| text_embedding_f16(bundle, &prompt));
@@ -579,6 +590,7 @@ fn run_one_tile(
     // 20-step UNet loop, the longest-lived stage of the pipeline.
     drop(masked_latent);
     drop(mask_latent);
+    let prelude_ms = tile_started.elapsed().as_millis() as u64;
 
     let steps = req.num_inference_steps as usize;
     let mut scheduler = match req.scheduler {
@@ -662,9 +674,12 @@ fn run_one_tile(
     // Scratch buffer for step output — hoisted outside the loop so
     // mem::swap reuses the allocation across steps (no per-step alloc).
     let mut step_out_buf: Vec<f32> = Vec::with_capacity(latent_buf.len());
+    let loop_started = Instant::now();
+    let mut steps_run = 0u32;
     // Skip the first `t_start` entries when strength<1: those are
     // the high-noise steps we're bypassing.
     for (i, &t) in timesteps.iter().enumerate().skip(t_start) {
+        steps_run += 1;
         // Check cancel between UNet steps. ORT has no per-op cancel, so
         // worst-case latency on cancel is one UNet step (multi-second).
         if is_cancelled() {
@@ -708,6 +723,7 @@ fn run_one_tile(
                         let pred_uncond = pred_pair.slice(ndarray::s![1..2, .., .., ..]);
                         cfg_blend(pred_uncond, pred_cond, scale)
                     }
+                    Err(e) if bundle.batch_pinned => return Err(e),
                     Err(e) => {
                         tracing::warn!(%e,
                             "SD: batched CFG UNet rejected (likely static batch=1 ONNX); \
@@ -739,11 +755,24 @@ fn run_one_tile(
         std::mem::swap(&mut latent_buf, &mut step_out_buf);
     }
 
+    let unet_ms = loop_started.elapsed().as_millis() as u64;
+
     // VAE decode — wrap final buf into Array4 (no extra allocation).
     let final_array = ndarray::Array4::from_shape_vec(latent_dim, latent_buf)
         .expect("latent_dim matches latent_buf length by construction");
+    let decode_started = Instant::now();
     let painted = vae_decode(vae, &final_array)?;
-    Ok(composite(image, &painted, mask, w, h))
+    let decode_ms = decode_started.elapsed().as_millis() as u64;
+    let out = composite(image, &painted, mask, w, h);
+    tracing::info!(
+        w, h, steps = steps_run, prelude_ms,
+        unet_ms_per_step = unet_ms / u64::from(steps_run.max(1)),
+        decode_ms, total_ms = tile_started.elapsed().as_millis() as u64,
+        cfg = use_cfg,
+        batched = use_cfg && !bundle.cfg_fallback_to_sequential.load(std::sync::atomic::Ordering::Relaxed),
+        "SD: tile done",
+    );
+    Ok(out)
 }
 
 // ── Session bundle ──────────────────────────────────────────────────────
@@ -842,6 +871,9 @@ pub(crate) struct SdSession {
     /// stays flipped for the session's lifetime; cleared on session
     /// rebuild (idle release).
     cfg_fallback_to_sequential: std::sync::atomic::AtomicBool,
+    /// The UNet session was built for batch 2 only (`PRUNR_SD_BATCH2`), so
+    /// every call goes through the batched path.
+    batch_pinned: bool,
     /// CLIP embeddings by prompt, in f16. The encoder is deterministic, so
     /// a repeated prompt (every tile, every stroke) skips it. Bounded by
     /// `TEXT_CACHE_ENTRIES`; ~118 KB each.
@@ -849,6 +881,31 @@ pub(crate) struct SdSession {
 }
 
 const TEXT_CACHE_ENTRIES: usize = 8;
+
+/// Measurement switches for the SD pipeline (scripts/sd_bench.sh): read
+/// once per process, so a session built under one setting stays
+/// consistent with the calls made on it.
+fn sd_env_flag(name: &'static str) -> bool {
+    std::env::var_os(name).is_some_and(|v| v == "1")
+}
+
+fn sd_batch2_requested() -> bool {
+    static FLAG: OnceLock<bool> = OnceLock::new();
+    *FLAG.get_or_init(|| sd_env_flag("PRUNR_SD_BATCH2"))
+}
+
+fn sd_keep_loaded() -> bool {
+    static FLAG: OnceLock<bool> = OnceLock::new();
+    *FLAG.get_or_init(|| sd_env_flag("PRUNR_SD_KEEP_LOADED"))
+}
+
+/// OpenVINO device for the SD parts ("CPU", "GPU"); unset leaves the EP's
+/// default, which is the CPU.
+fn sd_ov_device() -> Option<&'static str> {
+    static DEV: OnceLock<Option<String>> = OnceLock::new();
+    DEV.get_or_init(|| std::env::var("PRUNR_SD_OV_DEVICE").ok().filter(|s| !s.is_empty()))
+        .as_deref()
+}
 
 /// `Arc<T>` so idle eviction can drop the cache's ref while in-flight
 /// callers keep their own clone — no use-after-free.
@@ -1068,6 +1125,7 @@ impl SdSession {
             vae_decoder_input,
             text_encoder_input,
             cfg_fallback_to_sequential: std::sync::atomic::AtomicBool::new(false),
+            batch_pinned: sd_batch2_requested(),
             text_cache: Mutex::new(Vec::new()),
         })
     }
@@ -1116,6 +1174,17 @@ fn build_part_with_ep_ladder(
             }
             _ => builder,
         };
+        let builder = if key == "unet" && sd_batch2_requested() {
+            match builder.with_dimension_override("batch", 2) {
+                Ok(b) => b,
+                Err(_) => {
+                    tracing::warn!(part = %key, ep = %ep, "SD: batch=2 override refused");
+                    continue;
+                }
+            }
+        } else {
+            builder
+        };
         let registered = match ep {
             #[cfg(not(target_os = "macos"))]
             EpKind::Cuda => builder.with_execution_providers([
@@ -1149,10 +1218,15 @@ fn build_part_with_ep_ladder(
                 // sequentially under a Mutex, and our tile pipeline
                 // is fixed-shape. (No `with_cache_dir` — see engine.rs
                 // for the SD UNet empirical retest finding.)
-                ort::execution_providers::OpenVINOExecutionProvider::default()
-                    .with_num_streams(1)
-                    .with_dynamic_shapes(false)
-                    .build(),
+                {
+                    let mut p = ort::execution_providers::OpenVINOExecutionProvider::default()
+                        .with_num_streams(1)
+                        .with_dynamic_shapes(false);
+                    if let Some(dev) = sd_ov_device() {
+                        p = p.with_device_type(dev);
+                    }
+                    p.build()
+                },
             ]),
         };
         let mut built = match registered {
@@ -1499,6 +1573,11 @@ fn unet_step(
     t: i64,
     text_emb_f16: &Array3<f16>,
 ) -> Result<Array4<f32>, CoreError> {
+    if bundle.batch_pinned {
+        // The session accepts batch 2 only: run the prompt twice, keep one.
+        let pair = unet_step_batched(bundle, &latent_9ch_f16, t, text_emb_f16, text_emb_f16)?;
+        return Ok(pair.slice(ndarray::s![0..1, .., .., ..]).to_owned());
+    }
     // Timestep is integer-valued at the diffusers level but flows through
     // sinusoidal embeddings inside the UNet, so the f16 cast is precision-
     // safe (timesteps fit in the f16 mantissa for SD's 1000-step grid).
