@@ -117,7 +117,6 @@ fn sd_bench() {
         guidance_scale: 7.5,
         seed: Some(42),
         tuning: inpaint_sd::SdTuning {
-            batch2: flag("PRUNR_SD_BATCH2"),
             keep_loaded: flag("PRUNR_SD_KEEP_LOADED"),
             ov_device: std::env::var("PRUNR_SD_OV_DEVICE").ok().filter(|s| !s.is_empty()),
         },

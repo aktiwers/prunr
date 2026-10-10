@@ -127,13 +127,10 @@ pub struct SdInpaintRequest {
 
 /// Pipeline variants under measurement (scripts/sd_bench.sh). Callers
 /// fill it (the GUI from `PRUNR_SD_*` env vars, the bench test from the
-/// same); core only reads it. A session is built for one `batch2` /
-/// `ov_device` pair and cached under that pair.
+/// same); core only reads it. A session is built for one `ov_device`
+/// and cached under it.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct SdTuning {
-    /// Pin the UNet session to batch 2 so a guided step is one call. Such
-    /// a session cannot serve an unguided request.
-    pub batch2: bool,
     /// Leave the bundle to the idle sweep instead of dropping it after
     /// the stroke.
     pub keep_loaded: bool,
@@ -144,15 +141,22 @@ pub struct SdTuning {
 
 impl SdTuning {
     fn session_key(&self) -> SdSessionKey {
-        SdSessionKey { batch2: self.batch2, ov_device: self.ov_device.clone() }
+        SdSessionKey { ov_device: self.ov_device.clone() }
     }
 }
 
 /// What a built session bundle depends on besides the model.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub(crate) struct SdSessionKey {
-    batch2: bool,
     ov_device: Option<String>,
+}
+
+impl SdSessionKey {
+    /// An experiment's session: its failures say nothing about the
+    /// shipped configuration, so they are not recorded against the EP.
+    fn is_experiment(&self) -> bool {
+        *self != Self::default()
+    }
 }
 
 fn default_strength() -> f32 { 1.0 }
@@ -587,11 +591,6 @@ fn run_one_tile(
     // uncond) and blend by `guidance_scale`. At ≤1.0 the cond pass is
     // all the user wants, so we skip the second to halve UNet cost.
     let use_cfg = req.guidance_scale > 1.0 + 1e-3;
-    if bundle.batch_pinned && !use_cfg {
-        return Err(CoreError::Inference(
-            "SD: a batch-2 session serves guided requests only (guidance above 1)".into(),
-        ));
-    }
 
     // Pre-loop independent ops in parallel: text encode (cond + uncond
     // when CFG), VAE encode, mask-to-latent. Each ORT call holds a
@@ -759,7 +758,6 @@ fn run_one_tile(
                         let pred_uncond = pred_pair.slice(ndarray::s![1..2, .., .., ..]);
                         cfg_blend(pred_uncond, pred_cond, scale)
                     }
-                    Err(e) if bundle.batch_pinned => return Err(e),
                     Err(e) => {
                         tracing::warn!(%e,
                             "SD: batched CFG UNet rejected (likely static batch=1 ONNX); \
@@ -902,15 +900,11 @@ pub(crate) struct SdSession {
     text_encoder_input: String,
     /// Set to `true` after the first batched UNet call fails on this
     /// session — typically because the underlying ONNX export declared
-    /// a static batch=1. Subsequent CFG steps skip the batched attempt
-    /// and call `unet_step` twice instead. Once flipped per process,
-    /// stays flipped for the session's lifetime; cleared on session
-    /// rebuild (idle release). Never set on a `batch_pinned` session,
-    /// where a batched failure is an error.
+    /// a static batch=1 (the LCM bundle). Subsequent CFG steps skip the
+    /// batched attempt and call `unet_step` twice instead. Once flipped
+    /// per process, stays flipped for the session's lifetime; cleared on
+    /// session rebuild (idle release).
     cfg_fallback_to_sequential: std::sync::atomic::AtomicBool,
-    /// The UNet session was built for batch 2 only (`SdTuning::batch2`):
-    /// guided steps make one call and an unguided request is refused.
-    batch_pinned: bool,
     /// CLIP embeddings by prompt, in f16. The encoder is deterministic, so
     /// a repeated prompt (every tile, every stroke) skips it. Bounded by
     /// `TEXT_CACHE_ENTRIES`; ~118 KB each.
@@ -1140,7 +1134,6 @@ impl SdSession {
             vae_decoder_input,
             text_encoder_input,
             cfg_fallback_to_sequential: std::sync::atomic::AtomicBool::new(false),
-            batch_pinned: session_key.batch2,
             text_cache: Mutex::new(Vec::new()),
         })
     }
@@ -1189,17 +1182,6 @@ fn build_part_with_ep_ladder(
                 b
             }
             _ => builder,
-        };
-        let builder = if key == "unet" && session_key.batch2 {
-            match builder.with_dimension_override("batch", 2) {
-                Ok(b) => b,
-                Err(_) => {
-                    tracing::warn!(part = %key, ep = %ep, "SD: batch=2 override refused");
-                    continue;
-                }
-            }
-        } else {
-            builder
         };
         let registered = match ep {
             #[cfg(not(target_os = "macos"))]
@@ -1260,12 +1242,14 @@ fn build_part_with_ep_ladder(
             }
             Err(e) => {
                 tracing::warn!(part = %key, ep = %ep, %e, "SD: GPU session commit failed — trying next");
-                crate::engine::handle_commit_failure(
-                    matches!(load_path, Cow::Owned(_)),
-                    ep, id,
-                    || crate::cache::optimized_model_path_for_part(id, ep.as_str(), key),
-                    &format!("{e}"),
-                );
+                if !session_key.is_experiment() {
+                    crate::engine::handle_commit_failure(
+                        matches!(load_path, Cow::Owned(_)),
+                        ep, id,
+                        || crate::cache::optimized_model_path_for_part(id, ep.as_str(), key),
+                        &format!("{e}"),
+                    );
+                }
                 continue;
             }
         };
@@ -1276,12 +1260,14 @@ fn build_part_with_ep_ladder(
             }
             Err(e) => {
                 tracing::warn!(part = %key, ep = %ep, %e, "SD: smoke test failed — falling back");
-                crate::engine::handle_commit_failure(
-                    matches!(load_path, Cow::Owned(_)),
-                    ep, id,
-                    || crate::cache::optimized_model_path_for_part(id, ep.as_str(), key),
-                    &e,
-                );
+                if !session_key.is_experiment() {
+                    crate::engine::handle_commit_failure(
+                        matches!(load_path, Cow::Owned(_)),
+                        ep, id,
+                        || crate::cache::optimized_model_path_for_part(id, ep.as_str(), key),
+                        &e,
+                    );
+                }
             }
         }
     }
