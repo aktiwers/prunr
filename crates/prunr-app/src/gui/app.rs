@@ -132,6 +132,20 @@ pub struct PrunrApp {
     pub(crate) drag_export: super::drag_export_state::DragExportState,
 }
 
+/// Combine a decoded prompt mask with the selection it was made against.
+fn merge_prompt_result(
+    modifier: super::processor::PromptModifier,
+    existing: Option<Arc<prunr_core::selection::MaskArtifact>>,
+    new_mask: prunr_core::selection::MaskArtifact,
+) -> prunr_core::selection::MaskArtifact {
+    use super::processor::PromptModifier;
+    match (modifier, existing) {
+        (PromptModifier::Add, Some(existing)) => existing.add_mask(&new_mask).unwrap_or(new_mask),
+        (PromptModifier::Subtract, Some(existing)) => existing.subtract_mask(&new_mask).unwrap_or(new_mask),
+        _ => new_mask,
+    }
+}
+
 impl PrunrApp {
     pub fn new(cc: &eframe::CreationContext) -> Self {
         // Worker is spawned below after prewarm_engine is created
@@ -1312,8 +1326,6 @@ impl PrunrApp {
     /// Encoder results: write embedding to BatchItem, clear encoder_pending.
     /// Decoder results: convert to MaskArtifact, apply modifier, commit.
     fn pump_sam_results(&mut self, ctx: &egui::Context) {
-        use crate::gui::processor::PromptModifier;
-
         let encoder_results = self.processor.pump_sam_encoder_results();
         for result in encoder_results {
             self.magic_brush_state.set_encoder_pending(false);
@@ -1332,35 +1344,77 @@ impl PrunrApp {
             }
         }
 
+        self.maybe_rethreshold_last_stroke();
         let decoder_results = self.processor.pump_sam_decoder_results();
         for result in decoder_results {
             let new_mask = match result.result {
-                Ok(Some(mask)) => mask,
-                Ok(None) => {
-                    self.toasts.info("No selection candidate met the confidence threshold.");
-                    continue;
-                }
+                Ok(mask) => mask,
                 Err(err) => {
                     tracing::error!(item_id = result.item_id, %err, "SAM decoder failed");
                     self.toasts.error(format!("Magic Brush decoder failed: {err}"));
                     continue;
                 }
             };
+            if result.rethreshold {
+                self.magic_brush_state.rethreshold_in_flight = false;
+                self.apply_rethreshold(result.item_id, new_mask, result.confidence);
+                continue;
+            }
             let existing = self.batch
                 .find_by_id(result.item_id)
                 .and_then(|i| i.selection_mask.clone());
-            let final_mask = match (result.modifier, existing) {
-                (PromptModifier::Replace, _) => new_mask,
-                (PromptModifier::Add, Some(existing)) => {
-                    existing.add_mask(&new_mask).unwrap_or(new_mask)
-                }
-                (PromptModifier::Subtract, Some(existing)) => {
-                    existing.subtract_mask(&new_mask).unwrap_or(new_mask)
-                }
-                (PromptModifier::Add, None) | (PromptModifier::Subtract, None) => new_mask,
-            };
+            let final_mask = merge_prompt_result(result.modifier, existing, new_mask);
             tracing::info!(item_id = result.item_id, modifier = ?result.modifier, "SAM decoder mask committed");
             self.commit_selection_and_dispatch(result.item_id, final_mask);
+            let committed = self.batch.find_by_id(result.item_id).and_then(|i| i.selection_hash);
+            self.magic_brush_state.last_decode = result.output.zip(committed).map(|(output, committed_hash)| {
+                super::magic_brush_state::LastDecode {
+                    item_id: result.item_id, output, modifier: result.modifier, mode: result.mode,
+                    source_dims: result.source_dims, committed_hash, confidence: result.confidence,
+                }
+            });
+        }
+    }
+
+    /// The last stroke still owns the selection and the Confidence knob
+    /// moved: re-threshold its logits at the new value.
+    pub(crate) fn maybe_rethreshold_last_stroke(&mut self) {
+        if self.magic_brush_state.rethreshold_in_flight {
+            return;
+        }
+        let want = self.settings.brush.magic_confidence_threshold;
+        let Some(ld) = self.magic_brush_state.last_decode.as_ref() else { return };
+        if (ld.confidence - want).abs() < 1e-4 {
+            return;
+        }
+        let still_ours = self.batch.find_by_id(ld.item_id)
+            .is_some_and(|i| i.selection_hash == Some(ld.committed_hash));
+        if !still_ours {
+            self.magic_brush_state.last_decode = None;
+            return;
+        }
+        self.processor.dispatch_sam_rethreshold(super::processor::SamRethresholdRequest {
+            item_id: ld.item_id, output: Arc::clone(&ld.output), modifier: ld.modifier,
+            mode: ld.mode, source_dims: ld.source_dims, confidence: want,
+        });
+        self.magic_brush_state.rethreshold_in_flight = true;
+    }
+
+    /// Swap the last stroke's selection for its re-thresholded version:
+    /// merged onto the pre-stroke selection exactly as the stroke was, and
+    /// replaced in place so the stroke's undo entry stays the one entry.
+    pub(crate) fn apply_rethreshold(&mut self, item_id: u64, mask: prunr_core::selection::MaskArtifact, confidence: f32) {
+        let Some(ld) = self.magic_brush_state.last_decode.as_mut() else { return };
+        let Some(item) = self.batch.find_by_id_mut(item_id) else { return };
+        if ld.item_id != item_id || item.selection_hash != Some(ld.committed_hash) {
+            self.magic_brush_state.last_decode = None;
+            return;
+        }
+        let merged = merge_prompt_result(ld.modifier, item.pre_stroke_selection(), mask);
+        ld.confidence = confidence;
+        if item.replace_selection_in_place(Arc::new(merged)) {
+            ld.committed_hash = item.selection_hash.unwrap_or(ld.committed_hash);
+            self.apply_selection_to_active_model(item_id);
         }
     }
 

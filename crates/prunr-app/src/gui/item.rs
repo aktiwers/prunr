@@ -507,6 +507,24 @@ impl BatchItem {
         true
     }
 
+    /// The selection the last stroke commit replaced.
+    pub(crate) fn pre_stroke_selection(&self) -> Option<Arc<prunr_core::selection::MaskArtifact>> {
+        self.stroke_undo_stack.back().cloned().flatten()
+    }
+
+    /// Replace the selection without touching the stroke history: a retune
+    /// of the last commit, whose undo entry stays valid. Returns false when
+    /// the mask is unchanged.
+    pub(crate) fn replace_selection_in_place(&mut self, mask: Arc<prunr_core::selection::MaskArtifact>) -> bool {
+        let hash = mask.content_hash();
+        if self.selection_hash == Some(hash) {
+            return false;
+        }
+        self.selection_mask = Some(mask);
+        self.selection_hash = Some(hash);
+        true
+    }
+
     /// Roll back the most-recent stroke commit as if it never happened.
     /// Used when an inpaint dispatch is cancelled before its result lands —
     /// the committed `selection_mask` was the input that would have driven

@@ -70,11 +70,19 @@ pub struct SamDecoderOutput {
     pub iou_predictions: [f32; 3],
 }
 
-/// Pick the highest-IoU candidate above `confidence_threshold`; bilinear-
-/// upsample its 256×256 logits to source resolution; threshold at logit
-/// 0.0 (sigmoid 0.5) into a binary MaskArtifact signed by `mode`.
-///
-/// Returns `None` if no candidate passes the confidence threshold.
+/// The logit a pixel must reach to count as selected at `confidence`,
+/// the probability the knob exposes. 0.5 is the model's own decision
+/// boundary (logit 0); the clamp keeps the extremes finite.
+pub fn confidence_logit(confidence: f32) -> f32 {
+    let c = confidence.clamp(0.02, 0.98);
+    (c / (1.0 - c)).ln()
+}
+
+/// Pick the candidate with the highest predicted IoU; bilinear-upsample
+/// its 256×256 logits to source resolution; keep the pixels whose
+/// probability reaches `confidence` (see `confidence_logit`), signed by
+/// `mode`. Higher confidence keeps the sure core of the object, lower
+/// grows into the uncertain rim.
 ///
 /// Peak working set: source_w * source_h bytes output + 256*256*4 bytes
 /// slice view (read-only). At 4K source: ~8 MB output.
@@ -82,16 +90,16 @@ pub fn decode_to_mask_artifact(
     output: &SamDecoderOutput,
     source_w: u32,
     source_h: u32,
-    confidence_threshold: f32,
+    confidence: f32,
     mode: BrushMode,
-) -> Option<crate::selection::MaskArtifact> {
+) -> crate::selection::MaskArtifact {
+    let threshold = confidence_logit(confidence);
     let best_idx = output
         .iou_predictions
         .iter()
         .enumerate()
-        .filter(|(_, &iou)| iou >= confidence_threshold)
         .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-        .map(|(i, _)| i)?;
+        .map_or(0, |(i, _)| i);
 
     const M: usize = SAM_MASK_RESOLUTION as usize;
     let mask_logits: &[f32] = &output.masks[best_idx * M * M..(best_idx + 1) * M * M];
@@ -120,11 +128,11 @@ pub fn decode_to_mask_artifact(
                 + top[x1 as usize] * fx * gy
                 + bottom[x0 as usize] * gx * fy
                 + bottom[x1 as usize] * fx * fy;
-            *cell = if v >= 0.0 { selected } else { 0 };
+            *cell = if v >= threshold { selected } else { 0 };
         }
     });
 
-    Some(crate::selection::MaskArtifact::from_cells(source_w, source_h, data))
+    crate::selection::MaskArtifact::from_cells(source_w, source_h, data)
 }
 
 /// One axis of a bilinear sample: the two logit indices and the
@@ -180,8 +188,8 @@ mod tests {
     }
 
     #[test]
-    fn decode_picks_highest_iou_above_threshold() {
-        // 3 candidates, IoUs 0.3 / 0.7 / 0.5; threshold 0.4 → candidate 1 wins
+    fn decode_picks_the_highest_iou_candidate() {
+        // 3 candidates, IoUs 0.3 / 0.7 / 0.5 → candidate 1 wins
         let mut masks = vec![0.0f32; 3 * 256 * 256];
         // Candidate 1 (index 1): all +1.0 logits → all selected after upsample
         for v in &mut masks[256 * 256..2 * 256 * 256] {
@@ -191,24 +199,36 @@ mod tests {
             masks,
             iou_predictions: [0.3, 0.7, 0.5],
         };
-        let result = decode_to_mask_artifact(&output, 64, 64, 0.4, BrushMode::Add).unwrap();
+        let result = decode_to_mask_artifact(&output, 64, 64, 0.5, BrushMode::Add);
         assert_eq!(result.width, 64);
         assert_eq!(result.height, 64);
         // All upsampled pixels are fully selected (candidate 1, all +1 logits)
         assert!(result.cells().iter().all(|&v| v == FULL));
-        let result = decode_to_mask_artifact(&output, 64, 64, 0.4, BrushMode::Subtract).unwrap();
+        let result = decode_to_mask_artifact(&output, 64, 64, 0.5, BrushMode::Subtract);
         assert!(result.cells().iter().all(|&v| v == -FULL), "Subtract mode signs the region negative");
     }
 
+    /// The knob is a probability: 0.5 is the model's decision boundary,
+    /// higher values select a subset, lower values a superset.
     #[test]
-    fn decode_returns_none_if_all_below_threshold() {
-        let masks = vec![1.0f32; 3 * 256 * 256];
-        let output = SamDecoderOutput {
-            masks,
-            iou_predictions: [0.1, 0.2, 0.3],
-        };
-        let result = decode_to_mask_artifact(&output, 64, 64, 0.5, BrushMode::Add);
-        assert!(result.is_none());
+    fn confidence_moves_the_pixel_threshold_monotonically() {
+        assert!(confidence_logit(0.5).abs() < 1e-6);
+        assert!(confidence_logit(0.9) > 0.0 && confidence_logit(0.1) < 0.0);
+        let m = 256usize;
+        // Logits ramp from -4 (left) to +4 (right) on every row.
+        let mut masks = vec![0.0f32; 3 * m * m];
+        for y in 0..m {
+            for x in 0..m {
+                masks[y * m + x] = -4.0 + 8.0 * x as f32 / (m - 1) as f32;
+            }
+        }
+        let output = SamDecoderOutput { masks, iou_predictions: [0.9, 0.1, 0.1] };
+        let count = |c: f32| decode_to_mask_artifact(&output, 64, 64, c, BrushMode::Add)
+            .cells().iter().filter(|&&v| v == FULL).count();
+        let (low, mid, high) = (count(0.1), count(0.5), count(0.9));
+        assert!(low > mid && mid > high, "{low} > {mid} > {high}");
+        assert_eq!(mid, 64 * 32, "0.5 splits the ramp at logit 0");
+        assert_eq!(count(0.0), count(0.02), "extremes clamp instead of selecting everything");
     }
 
     /// Per-pixel bilinear sample written the long way: pins the hoisted
@@ -248,7 +268,7 @@ mod tests {
         }
         let output = SamDecoderOutput { masks, iou_predictions: [0.1, 0.9, 0.2] };
         for (w, h) in [(1, 1), (7, 3), (300, 200), (641, 97), (1024, 1024)] {
-            let result = decode_to_mask_artifact(&output, w, h, 0.5, BrushMode::Subtract).unwrap();
+            let result = decode_to_mask_artifact(&output, w, h, 0.5, BrushMode::Subtract);
             let expected = brute_force_decode(&output.masks[n..2 * n], w, h, -FULL);
             assert!(result.cells() == expected.as_slice(), "{w}x{h}");
         }
@@ -265,7 +285,7 @@ mod tests {
             masks,
             iou_predictions: [0.9, 0.1, 0.1],
         };
-        let result = decode_to_mask_artifact(&output, 32, 32, 0.5, BrushMode::Subtract).unwrap();
+        let result = decode_to_mask_artifact(&output, 32, 32, 0.5, BrushMode::Subtract);
         assert!(result.cells().iter().all(|&v| v == 0));
     }
 }

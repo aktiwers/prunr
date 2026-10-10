@@ -93,6 +93,64 @@ fn chain_mode_commit_archives_the_pre_stroke_result_for_undo() {
     assert_eq!(item.actions_undo.len(), 1, "one Stroke marker, no Result marker");
 }
 
+/// Moving the Confidence knob re-thresholds the last Magic Brush stroke
+/// from its kept logits: the selection changes, the stroke keeps its single
+/// undo entry, and the retune follows the selection it committed.
+#[test]
+fn confidence_change_retunes_the_last_stroke_in_place() {
+    use crate::gui::magic_brush_state::LastDecode;
+    use crate::gui::processor::PromptModifier;
+    use prunr_core::selection::BrushMode;
+    use std::sync::Arc;
+    let mut app = app_with_model(SettingsModel::Silueta);
+    app.settings.brush.magic_confidence_threshold = 0.5;
+    let item = push_test_item(&mut app, 9);
+    item.dimensions = (8, 8);
+    give_tensor(item);
+    app.commit_selection_and_dispatch(9, make_mask(8, 8));
+    let first_hash = app.batch.items[0].selection_hash.unwrap();
+    assert_eq!(app.batch.items[0].stroke_undo_stack.len(), 1);
+
+    // Logits ramp left→right: a higher confidence keeps fewer columns.
+    let m = prunr_core::sam::SAM_MASK_RESOLUTION as usize;
+    let mut masks = vec![-9.0f32; 3 * m * m];
+    for y in 0..m {
+        for x in 0..m {
+            masks[y * m + x] = -4.0 + 8.0 * x as f32 / (m - 1) as f32;
+        }
+    }
+    let output = Arc::new(prunr_core::sam::SamDecoderOutput { masks, iou_predictions: [0.9, 0.1, 0.1] });
+    app.magic_brush_state.last_decode = Some(LastDecode {
+        item_id: 9, output, modifier: PromptModifier::Replace, mode: BrushMode::Add,
+        source_dims: (8, 8), committed_hash: first_hash, confidence: 0.5,
+    });
+
+    app.settings.brush.magic_confidence_threshold = 0.9;
+    app.maybe_rethreshold_last_stroke();
+    assert!(app.magic_brush_state.rethreshold_in_flight);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let result = loop {
+        if let Some(r) = app.processor.pump_sam_decoder_results().pop() { break r; }
+        assert!(std::time::Instant::now() < deadline, "re-threshold never landed");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    };
+    assert!(result.rethreshold);
+    let mask = result.result.expect("re-threshold decodes without a session");
+    app.apply_rethreshold(9, mask, result.confidence);
+
+    let item = &app.batch.items[0];
+    let new_hash = item.selection_hash.unwrap();
+    assert_ne!(new_hash, first_hash, "the selection follows the knob");
+    assert_eq!(item.stroke_undo_stack.len(), 1, "still one undo entry for the stroke");
+    assert_eq!(item.actions_undo.len(), 1);
+    let ld = app.magic_brush_state.last_decode.as_ref().unwrap();
+    assert_eq!(ld.committed_hash, new_hash);
+    assert!((ld.confidence - 0.9).abs() < 1e-6);
+    // The retuned selection keeps only the right-hand columns.
+    let sel = item.selection_mask.as_ref().unwrap();
+    assert!(sel.cells()[7] == prunr_core::selection::FULL && sel.cells()[0] == 0);
+}
+
 // ── Segmentation + !protect → rerun fires ────────────────────────────────────
 
 #[test]
