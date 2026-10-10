@@ -145,35 +145,6 @@ pub fn ram_verdict(working_set_bytes: u64, available_bytes: u64) -> RamVerdict {
     }
 }
 
-pub fn pre_flight_sd_ram(
-    working_set_mb: u32,
-    available_bytes: u64,
-    safety_margin_gb: f32,
-) -> Result<(), String> {
-    // sysinfo returns 0 when /proc/meminfo etc. is unreadable. Treat as
-    // unknown and pass — refusing on missing data would be unhelpful.
-    if available_bytes == 0 {
-        return Ok(());
-    }
-    const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
-    let working_set = working_set_mb as u64 * 1024 * 1024;
-    let margin = (safety_margin_gb.max(0.0) * GIB as f32) as u64;
-    let need = working_set + margin;
-    if available_bytes >= need {
-        return Ok(());
-    }
-    // Display in GiB for consistency with the comparison units above.
-    Err(format!(
-        "Not enough free RAM: {:.1} GB available, {:.1} GB recommended \
-         (model needs {:.1} GB + {:.1} GB safety margin). \
-         Close other apps or lower the safety margin in Settings.",
-        available_bytes as f64 / GIB,
-        need as f64 / GIB,
-        working_set as f64 / GIB,
-        margin as f64 / GIB,
-    ))
-}
-
 fn detect_now() -> HardwareProfile {
     let (cpu_vendor, cpu_brand) = detect_cpu();
     let (dgpu, igpu) = detect_gpus(cpu_vendor);
@@ -403,41 +374,6 @@ mod tests {
         assert_eq!(ram_verdict(WS, WS * 3 / 2), RamVerdict::Comfortable);
         // Way above → comfortable
         assert_eq!(ram_verdict(WS, WS * 4), RamVerdict::Comfortable);
-    }
-
-    #[test]
-    fn pre_flight_sd_ram_passes_when_within_budget() {
-        // 7 GB working set + 2 GB margin = 9 GB needed, 10 GB available.
-        let avail = 10 * 1024 * 1024 * 1024;
-        assert!(pre_flight_sd_ram(7000, avail, 2.0).is_ok());
-    }
-
-    #[test]
-    fn pre_flight_sd_ram_rejects_when_under_budget() {
-        // 7 GB + 4 GB = 11 GB needed, 10 GB available.
-        let avail = 10 * 1024 * 1024 * 1024;
-        let err = pre_flight_sd_ram(7000, avail, 4.0).unwrap_err();
-        assert!(err.contains("Not enough free RAM"), "got: {err}");
-    }
-
-    #[test]
-    fn pre_flight_sd_ram_treats_negative_margin_as_zero() {
-        // 7 GB working set + clamped-0 margin = 7 GB needed, 8 GB free.
-        let avail = 8 * 1024 * 1024 * 1024;
-        assert!(pre_flight_sd_ram(7000, avail, -1.0).is_ok());
-    }
-
-    #[test]
-    fn pre_flight_sd_ram_passes_when_sysinfo_unreadable() {
-        // sysinfo returning 0 must not falsely reject.
-        assert!(pre_flight_sd_ram(7000, 0, 2.0).is_ok());
-    }
-
-    #[test]
-    fn pre_flight_sd_ram_passes_at_exact_threshold() {
-        // The gate uses `>=`; available == need must pass.
-        let need: u64 = 7000u64 * 1024 * 1024 + 2 * 1024 * 1024 * 1024;
-        assert!(pre_flight_sd_ram(7000, need, 2.0).is_ok());
     }
 
     #[test]
