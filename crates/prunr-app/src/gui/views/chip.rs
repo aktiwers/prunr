@@ -207,7 +207,7 @@ pub(super) fn tooltip(resp: Response, title: &str, body: &str, shortcut: Option<
         if let Some(action) = shortcut {
             ui.add_space(theme::SPACE_XS);
             ui.label(
-                RichText::new(shortcuts::keys(action))
+                RichText::new(&*shortcuts::keys(action))
                     .color(theme::TEXT_SECONDARY)
                     .size(theme::FONT_SIZE_MONO),
             );
