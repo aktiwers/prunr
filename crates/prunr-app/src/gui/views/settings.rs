@@ -49,6 +49,7 @@ pub(crate) struct HardwareSectionContext {
     pub openvino_installed: bool,
     pub install_in_progress: bool,
     pub install_status_text: Option<String>,
+    pub active_provider: String,
 }
 
 /// View-layer intent the General tab returns so platform side effects
@@ -88,6 +89,7 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) {
                                 install_in_progress: app.runtime_install.is_some(),
                                 install_status_text: app.runtime_install.as_ref()
                                     .map(|p| p.last_event.status_text()),
+                                active_provider: app.settings.active_backend.clone(),
                             };
                             render_tab_general(ui, &mut app.settings, &hw_ctx)
                         }
@@ -204,8 +206,7 @@ fn render_hardware_section(
                 (None, None) => "none detected".to_string(),
             };
             kv_row(ui, "GPU", &gpu_label, theme::TEXT_SECONDARY);
-            let active_provider = prunr_core::OrtEngine::detect_active_provider();
-            kv_row(ui, "Accelerator", &active_provider, theme::TEXT_SECONDARY);
+            kv_row(ui, "Accelerator", &ctx.active_provider, theme::TEXT_SECONDARY);
             let total_ram = hardware::total_ram_bytes();
             kv_row(ui, "RAM",
                 &format!("{:.1} / {:.1} GB free",
@@ -339,8 +340,7 @@ fn render_tab_general(
     hint(ui, &jobs_hint);
     ui.add_space(theme::SPACE_MD);
 
-    let has_gpu = !prunr_core::OrtEngine::detect_active_provider().eq_ignore_ascii_case("CPU");
-    if has_gpu {
+    if settings.is_gpu() {
         ui.checkbox(&mut settings.force_cpu, RichText::new("Force CPU this session")
             .color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY));
         hint(ui, "Resets to GPU on next launch. Useful for debugging GPU misbehaviour.");
