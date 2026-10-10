@@ -21,11 +21,16 @@ pub(crate) fn is_subtract_modifier(m: &egui::Modifiers) -> bool {
     m.alt || (!cfg!(target_os = "macos") && m.ctrl)
 }
 
-pub(crate) const MAGIC_BRUSH_TIP: &str = if cfg!(target_os = "macos") {
-    "Click or stroke to select an object; Shift adds, Alt subtracts."
-} else {
-    "Click or stroke to select an object; Shift adds, Alt or Ctrl subtracts."
-};
+/// The Magic Brush toggle's tooltip for this model.
+pub(crate) fn magic_brush_tip(is_inpaint: bool) -> &'static str {
+    let mac = cfg!(target_os = "macos");
+    match (is_inpaint, mac) {
+        (true, true) => "Click or stroke an object to add it to the region; Alt takes it away.",
+        (true, false) => "Click or stroke an object to add it to the region; Alt or Ctrl takes it away.",
+        (false, true) => "Click or stroke an object to restore it; Alt erases it.",
+        (false, false) => "Click or stroke an object to restore it; Alt or Ctrl erases it.",
+    }
+}
 
 /// The bottom-left hint while a brush is on: what Shift and Alt do for
 /// this model. A background-removal cut-out is restored or erased; the

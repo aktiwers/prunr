@@ -379,7 +379,6 @@ pub(crate) struct BatchItem {
 /// The logits of a Magic Brush stroke and how they were applied.
 pub(crate) struct LastDecode {
     pub(crate) output: Arc<prunr_core::sam::SamDecoderOutput>,
-    pub(crate) modifier: super::processor::PromptModifier,
     pub(crate) mode: prunr_core::selection::BrushMode,
     /// The selection hash the stroke committed.
     pub(crate) committed_hash: u64,

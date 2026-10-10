@@ -105,23 +105,6 @@ pub fn build_stroke_prompt(
     })
 }
 
-/// Alt modifier — background hint (label 0.0). Caller applies the resulting
-/// MaskArtifact via `MaskArtifact::subtract_mask` to remove from selection.
-pub fn build_alt_modifier_prompt(
-    x_pixel: f32,
-    y_pixel: f32,
-    source_w: u32,
-    source_h: u32,
-) -> SamPrompt {
-    let (nx, ny) = normalize(x_pixel, y_pixel, source_w, source_h);
-    SamPrompt {
-        point_coords: vec![nx, ny, 0.0, 0.0],
-        point_labels: vec![0.0, -1.0], // background hint + padding
-        mask_input: empty_mask_input(),
-        has_mask_input: 0.0,
-    }
-}
-
 /// Uniform stride decimation: pick `cap` evenly-spaced samples from input.
 /// If input length ≤ cap, returns all points unchanged.
 fn decimate(points: &[(f32, f32)], cap: usize) -> Vec<(f32, f32)> {
@@ -198,13 +181,6 @@ mod tests {
     fn stroke_empty_returns_err() {
         let result = build_stroke_prompt(&[], 100, 100);
         assert!(matches!(result, Err(PromptError::EmptyStroke)));
-    }
-
-    #[test]
-    fn alt_prompt_uses_label_zero_not_one() {
-        let p = build_alt_modifier_prompt(50.0, 50.0, 100, 100);
-        assert_eq!(p.point_labels[0], 0.0, "alt hint should be bg (0.0)");
-        assert_eq!(p.point_labels[1], -1.0, "second slot should be padding");
     }
 
     #[test]

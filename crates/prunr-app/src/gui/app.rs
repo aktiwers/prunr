@@ -1505,7 +1505,7 @@ impl PrunrApp {
     /// Encoder results: write embedding to BatchItem, clear encoder_pending.
     /// Decoder results: convert to MaskArtifact, apply modifier, commit.
     fn pump_sam_results(&mut self, ctx: &egui::Context) {
-        use super::processor::{merge_prompt_result, DecodedSelection};
+        use super::processor::{merge_stroke, DecodedSelection};
         let encoder_results = self.processor.pump_sam_encoder_results();
         for result in encoder_results {
             self.magic_brush_state.set_encoder_pending(false);
@@ -1529,12 +1529,12 @@ impl PrunrApp {
                     let existing = self.batch
                         .find_by_id(result.item_id)
                         .and_then(|i| i.selection_mask.clone());
-                    let final_mask = merge_prompt_result(result.modifier, existing, mask);
-                    tracing::info!(item_id = result.item_id, modifier = ?result.modifier, "SAM decoder mask committed");
+                    let final_mask = merge_stroke(existing, mask);
+                    tracing::info!(item_id = result.item_id, mode = ?result.mode, "SAM decoder mask committed");
                     self.commit_selection_and_dispatch(result.item_id, final_mask);
                     if let Some(item) = self.batch.find_by_id_mut(result.item_id) {
                         item.last_decode = item.selection_hash.map(|committed_hash| super::item::LastDecode {
-                            output, modifier: result.modifier, mode: result.mode, committed_hash,
+                            output, mode: result.mode, committed_hash,
                             confidence: result.confidence,
                         });
                     }
@@ -1566,7 +1566,7 @@ impl PrunrApp {
             return;
         }
         self.processor.dispatch_sam_rethreshold(super::processor::SamRethresholdRequest {
-            item_id, output: Arc::clone(&ld.output), modifier: ld.modifier, mode: ld.mode,
+            item_id, output: Arc::clone(&ld.output), mode: ld.mode,
             source_dims, confidence: want, base,
         });
         self.magic_brush_state.rethreshold_in_flight = true;

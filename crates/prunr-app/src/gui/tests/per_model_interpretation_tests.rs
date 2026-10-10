@@ -98,7 +98,7 @@ fn chain_mode_commit_archives_the_pre_stroke_result_for_undo() {
 #[test]
 fn confidence_change_retunes_the_last_stroke_in_place() {
     use crate::gui::item::LastDecode;
-    use crate::gui::processor::{DecodedSelection, PromptModifier};
+    use crate::gui::processor::DecodedSelection;
     use prunr_core::selection::BrushMode;
     use std::sync::Arc;
     let mut app = app_with_model(SettingsModel::Silueta);
@@ -120,7 +120,7 @@ fn confidence_change_retunes_the_last_stroke_in_place() {
     }
     let output = Arc::new(prunr_core::sam::SamDecoderOutput { masks, iou_predictions: [0.9, 0.1, 0.1] });
     app.batch.items[0].last_decode = Some(LastDecode {
-        output, modifier: PromptModifier::Replace, mode: BrushMode::Add,
+        output, mode: BrushMode::Add,
         committed_hash: first_hash, confidence: 0.5,
     });
 
