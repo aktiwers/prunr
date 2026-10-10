@@ -65,6 +65,34 @@ fn app_with_model(model: SettingsModel) -> PrunrApp {
     app
 }
 
+/// Every selection author (Paint, Magic Brush, Invert) commits through
+/// `commit_selection_and_dispatch`; in chain mode that commit archives the
+/// pre-stroke result so undoing the stroke can restore the image instead
+/// of rerunning against the already-corrected chain base.
+#[test]
+fn chain_mode_commit_archives_the_pre_stroke_result_for_undo() {
+    use crate::gui::history_manager::HistoryManager;
+    use crate::gui::item::BatchStatus;
+    use std::sync::Arc;
+    let mut app = app_with_model(SettingsModel::Silueta);
+    app.settings.chain_mode = true;
+    app.settings.protect_selection = false;
+    let item = push_test_item(&mut app, 7);
+    item.dimensions = (8, 8);
+    item.status = BatchStatus::Done;
+    item.result_rgba = Some(Arc::new(image::RgbaImage::new(8, 8)));
+    give_tensor(item);
+    let archived_before = app.batch.items[0].history.len();
+
+    app.commit_selection_and_dispatch(7, make_mask(8, 8));
+
+    let item = &app.batch.items[0];
+    assert_eq!(item.history.len(), archived_before + 1, "the pre-stroke result must be archived");
+    assert!(HistoryManager::can_undo(item));
+    assert!(item.result_rgba.is_some(), "chain base stays in place for the rerun");
+    assert_eq!(item.actions_undo.len(), 1, "one Stroke marker, no Result marker");
+}
+
 // ── Segmentation + !protect → rerun fires ────────────────────────────────────
 
 #[test]

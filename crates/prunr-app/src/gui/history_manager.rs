@@ -103,6 +103,24 @@ impl HistoryManager {
         }
     }
 
+    /// Archive the current result before a stroke's rerun replaces it, so
+    /// undoing the stroke swaps the stored image back instantly. Unlike
+    /// `archive_current_result` this pushes no action marker (the stroke
+    /// commit owns the marker) and always keeps `result_rgba` as the chain
+    /// base for the rerun.
+    pub(crate) fn archive_result_for_stroke(item: &mut BatchItem, max_depth: usize) {
+        let Some(rgba) = item.result_rgba.clone() else { return };
+        item.history.push_back(HistoryEntry::new(rgba, item.applied_recipe.clone()));
+        while item.history.len() > max_depth {
+            if let Some(old) = item.history.pop_front() {
+                old.cleanup();
+            }
+        }
+        for entry in item.redo_stack.drain(..) {
+            entry.cleanup();
+        }
+    }
+
     /// Walk the result history backward. Returns true iff anything was
     /// undone. Updates `result_rgba`, `applied_recipe`, `status` accordingly;
     /// pushes the current result onto `redo_stack` so Ctrl+Y can restore it.

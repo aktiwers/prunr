@@ -933,6 +933,15 @@ impl PrunrApp {
         if !self.batch.commit_selection(item_id, mask) {
             return;
         }
+        // Chain mode: the rerun replaces the result in place, so undoing
+        // the stroke needs the pre-stroke image archived now. Inpaint
+        // archives when its result lands.
+        if !self.settings.model.is_inpaint() && self.settings.chain_mode {
+            let max_depth = self.settings.history_depth;
+            if let Some(item) = self.batch.find_by_id_mut(item_id) {
+                HistoryManager::archive_result_for_stroke(item, max_depth);
+            }
+        }
         self.apply_selection_to_active_model(item_id);
     }
 
