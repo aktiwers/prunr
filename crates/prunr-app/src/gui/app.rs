@@ -3680,8 +3680,11 @@ impl Drop for PrunrApp {
 
 impl eframe::App for PrunrApp {
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
-        if let Some(auto) = self.automation.as_mut() {
-            raw_input.events.extend(auto.take_events());
+        if let Some(frame) = self.automation.as_mut().and_then(|auto| auto.take_frame()) {
+            raw_input.events.extend(frame.events);
+            if let Some(modifiers) = frame.modifiers {
+                raw_input.modifiers = modifiers;
+            }
         }
         // egui_winit converts Ctrl+C to Event::Copy. Intercept it so we can
         // use it for image clipboard copy (egui's Copy is for text widgets).

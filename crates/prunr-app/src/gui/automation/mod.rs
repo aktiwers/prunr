@@ -100,11 +100,25 @@ const FRAME_INTERVAL: std::time::Duration = std::time::Duration::from_millis(16)
 /// from other threads while the window is idle, so the UI thread polls.
 const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
 
+/// One frame of injected input. egui reads held modifiers from the raw
+/// input's modifier state, not from the key event, so a chord carries
+/// the modifiers to hold for that frame.
+pub struct InputFrame {
+    pub events: Vec<egui::Event>,
+    pub modifiers: Option<egui::Modifiers>,
+}
+
+impl From<Vec<egui::Event>> for InputFrame {
+    fn from(events: Vec<egui::Event>) -> Self {
+        Self { events, modifiers: None }
+    }
+}
+
 pub struct Automation {
     tree: tree::Mirror,
     inbox: mpsc::Receiver<Pending>,
-    /// Input batches, one per frame, handed to `raw_input_hook`.
-    frames: std::collections::VecDeque<Vec<egui::Event>>,
+    /// Input, one batch per frame, handed to `raw_input_hook`.
+    frames: std::collections::VecDeque<InputFrame>,
     deferred: Vec<Deferred>,
     /// Where a `Hold` left the pointer, until `Release`.
     held_at: Option<egui::Pos2>,
@@ -121,8 +135,8 @@ impl Automation {
         Some(Self { tree, inbox, frames: Default::default(), deferred: Vec::new(), held_at: None })
     }
 
-    pub fn take_events(&mut self) -> Vec<egui::Event> {
-        self.frames.pop_front().unwrap_or_default()
+    pub fn take_frame(&mut self) -> Option<InputFrame> {
+        self.frames.pop_front()
     }
 
     fn busy(&self) -> bool {
@@ -159,45 +173,49 @@ impl Automation {
                 let button = if secondary { egui::PointerButton::Secondary } else { egui::PointerButton::Primary };
                 let modifiers = egui::Modifiers::NONE;
                 self.frames.extend([
-                    vec![egui::Event::PointerMoved(pos)],
-                    vec![egui::Event::PointerButton { pos, button, pressed: true, modifiers }],
-                    vec![egui::Event::PointerButton { pos, button, pressed: false, modifiers }],
+                    vec![egui::Event::PointerMoved(pos)].into(),
+                    vec![egui::Event::PointerButton { pos, button, pressed: true, modifiers }].into(),
+                    vec![egui::Event::PointerButton { pos, button, pressed: false, modifiers }].into(),
                 ]);
                 (4, Response::ok(target))
             }
             Request::Hold { name } => {
                 let (target, pos) = self.target(&name)?;
-                self.frames.extend([vec![egui::Event::PointerMoved(pos)], vec![press(pos, true)]]);
+                self.frames.extend([vec![egui::Event::PointerMoved(pos)].into(), vec![press(pos, true)].into()]);
                 self.held_at = Some(pos);
                 (3, Response::ok(target))
             }
             Request::HoldAt { x, y } => {
                 let pos = egui::pos2(x, y);
-                self.frames.extend([vec![egui::Event::PointerMoved(pos)], vec![press(pos, true)]]);
+                self.frames.extend([vec![egui::Event::PointerMoved(pos)].into(), vec![press(pos, true)].into()]);
                 self.held_at = Some(pos);
                 (3, Response::ok(()))
             }
             Request::Move { dx, dy } => {
                 let from = self.held_at.ok_or("nothing is held")?;
                 let to = from + egui::vec2(dx, dy);
-                self.frames.push_back(vec![egui::Event::PointerMoved(to)]);
+                self.frames.push_back(vec![egui::Event::PointerMoved(to)].into());
                 self.held_at = Some(to);
                 (2, Response::ok([to.x, to.y]))
             }
             Request::Release => {
                 let pos = self.held_at.take().ok_or("nothing is held")?;
-                self.frames.push_back(vec![press(pos, false)]);
+                self.frames.push_back(vec![press(pos, false)].into());
                 (3, Response::ok(()))
             }
             Request::Key { chord } => {
                 let chord = Chord::parse(&chord).ok_or_else(|| format!("unknown chord {chord:?}"))?;
                 let modifiers = chord.modifiers();
                 let key = |pressed| egui::Event::Key { key: chord.key, physical_key: None, pressed, repeat: false, modifiers };
-                self.frames.extend([vec![key(true)], vec![key(false)]]);
-                (3, Response::ok(()))
+                self.frames.extend([
+                    InputFrame { events: vec![key(true)], modifiers: Some(modifiers) },
+                    InputFrame { events: vec![key(false)], modifiers: Some(modifiers) },
+                    InputFrame { events: Vec::new(), modifiers: Some(egui::Modifiers::NONE) },
+                ]);
+                (4, Response::ok(()))
             }
             Request::Type { text } => {
-                self.frames.push_back(vec![egui::Event::Text(text)]);
+                self.frames.push_back(vec![egui::Event::Text(text)].into());
                 (2, Response::ok(()))
             }
             Request::Intent { action } => {

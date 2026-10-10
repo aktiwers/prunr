@@ -179,8 +179,12 @@ fn control_socket_clicks_by_name_and_reports_state() {
     // harness the way raw_input_hook does for eframe.
     let mut result = None;
     for _ in 0..3000 {
-        let events = harness.state_mut().automation.as_mut().unwrap().take_events();
-        harness.input_mut().events.extend(events);
+        if let Some(frame) = harness.state_mut().automation.as_mut().unwrap().take_frame() {
+            harness.input_mut().events.extend(frame.events);
+            if let Some(modifiers) = frame.modifiers {
+                harness.input_mut().modifiers = modifiers;
+            }
+        }
         harness.step();
         if let Ok(r) = done_rx.try_recv() {
             result = Some(r);
