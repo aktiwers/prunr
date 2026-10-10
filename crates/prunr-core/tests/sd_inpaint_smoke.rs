@@ -95,18 +95,25 @@ fn sd_inpaint_modifies_painted_region() {
 fn sd_bench() {
     let _ = tracing_subscriber::fmt::try_init();
     if skip_if_no_ort("sd_bench") { return; }
-    let id = prunr_models::ModelId::SdV15InpaintFp16;
+    // `PRUNR_SD_BENCH_MODEL=lcm` runs the LCM bundle (its scheduler, 8 steps,
+    // guidance 2) instead of SD 1.5.
+    let lcm = std::env::var("PRUNR_SD_BENCH_MODEL").is_ok_and(|v| v == "lcm");
+    let id = if lcm { prunr_models::ModelId::SdV15LcmInpaintFp16 } else { prunr_models::ModelId::SdV15InpaintFp16 };
     if !prunr_models::is_available(id) {
-        eprintln!("SKIP: SD 1.5 Inpaint bundle not installed");
+        eprintln!("SKIP: {id:?} bundle not installed");
         return;
     }
     let (w, h) = (1200u32, 900u32);
     let image = RgbaImage::from_fn(w, h, |x, y| {
         Rgba([(x / 5 % 256) as u8, (y / 4 % 256) as u8, ((x + y) / 9 % 256) as u8, 255])
     });
+    // `PRUNR_SD_BENCH_REGION=WxH` sizes the painted region (default 328×607).
+    let (rw, rh) = std::env::var("PRUNR_SD_BENCH_REGION").ok()
+        .and_then(|v| { let (a, b) = v.split_once('x')?; Some((a.parse::<u32>().ok()?, b.parse::<u32>().ok()?)) })
+        .unwrap_or((328, 607));
     let mut mask = GrayImage::new(w, h);
-    for y in 150..757 {
-        for x in 436..764 {
+    for y in (h - rh) / 2..(h - rh) / 2 + rh {
+        for x in (w - rw) / 2..(w - rw) / 2 + rw {
             mask.put_pixel(x, y, Luma([255]));
         }
     }
@@ -120,8 +127,9 @@ fn sd_bench() {
     let planned = inpaint_sd::plan_tuning(id, false, inpaint_sd::SD_DEFAULT_MARGIN_MB);
     let req = SdInpaintRequest {
         prompt: "clean background".to_string(),
-        num_inference_steps: 20,
-        guidance_scale: 7.5,
+        num_inference_steps: if lcm { 8 } else { 20 },
+        guidance_scale: if lcm { 2.0 } else { 7.5 },
+        scheduler: if lcm { inpaint_sd::SchedulerKind::Lcm } else { inpaint_sd::SchedulerKind::Ddim },
         seed: Some(42),
         tuning: inpaint_sd::SdTuning {
             keep_loaded: flag("PRUNR_SD_KEEP_LOADED").unwrap_or(planned.keep_loaded),

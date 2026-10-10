@@ -32,8 +32,55 @@ import sys
 from pathlib import Path
 
 OUT_DIR = Path("out/sd-15-lcm-inpaint-fp16")
+# Dynamic batch and spatial axes: the runtime batches cond+uncond into one
+# UNet call and runs crops up to 512×768, so every part must accept them.
+# (v1.0.0 was exported static and fell back to two calls per step and
+# 512² tiles only.)
+BATCH_HW = {0: "batch", 2: "height", 3: "width"}
+# `dynamo=False`: the TorchScript exporter honours `dynamic_axes` and
+# produced the SD 1.5 graph the runtime is tuned for; torch >= 2.9
+# defaults to the dynamo exporter, which warns that dynamic_axes may
+# violate its constraints and failed converting Pad to opset 17.
 BASE_INPAINT = "botp/stable-diffusion-v1-5-inpainting"
 LCM_LORA = "latent-consistency/lcm-lora-sdv1-5"
+
+
+def repair_fp16_graph(g, block):
+    """onnxconverter_common leaves three things inconsistent without shape
+    inference: the model's own `Cast(to=FLOAT)` nodes (from `.float()`
+    calls) keep producing fp32 into fp16 consumers, constants feeding the
+    ops it keeps in fp32 (Resize scales, Range limits) were narrowed to
+    fp16, and stale value_info still declares fp32. onnxruntime refuses
+    all three at load."""
+    import numpy as np
+    from onnx import TensorProto, numpy_helper
+    consumers = {}
+    for n in g.node:
+        for i in n.input:
+            consumers.setdefault(i, []).append(n)
+    for n in g.node:
+        if n.op_type != "Cast":
+            continue
+        feeds_blocked = any(c.op_type in block for o in n.output for c in consumers.get(o, []))
+        for a in n.attribute:
+            if a.name != "to":
+                continue
+            if feeds_blocked and a.i == TensorProto.FLOAT16:
+                a.i = TensorProto.FLOAT
+            elif not feeds_blocked and a.i == TensorProto.FLOAT:
+                a.i = TensorProto.FLOAT16
+    producers = {o: n for n in g.node for o in n.output}
+    inits = {i.name: i for i in g.initializer}
+    for n in g.node:
+        if n.op_type not in block:
+            continue
+        for i in n.input:
+            t = inits.get(i)
+            if t is None and i in producers and producers[i].op_type == "Constant":
+                t = next((a.t for a in producers[i].attribute if a.name == "value"), None)
+            if t is not None and t.data_type == TensorProto.FLOAT16:
+                t.CopyFrom(numpy_helper.from_array(numpy_helper.to_array(t).astype(np.float32), t.name))
+    del g.value_info[:]
 
 
 def main() -> int:
@@ -51,7 +98,10 @@ def main() -> int:
     print(f"[1/6] Loading base inpaint pipeline: {BASE_INPAINT}")
     pipe = StableDiffusionInpaintPipeline.from_pretrained(
         BASE_INPAINT,
-        torch_dtype=torch.float16,
+        # Trace in fp32: PyTorch's CPU fp16 convolutions are so slow that
+        # the VAE alone took over half an hour. The graphs are converted to
+        # fp16 below, which is how the published SD 1.5 export was made.
+        torch_dtype=torch.float32,
         safety_checker=None,
         feature_extractor=None,
         requires_safety_checker=False,
@@ -80,11 +130,13 @@ def main() -> int:
         TextEncWrap(text_encoder), sample_ids, str(OUT_DIR / "text_encoder.onnx"),
         input_names=["input_ids"], output_names=["last_hidden_state"], opset_version=17,
         do_constant_folding=True,
+        dynamo=False,
+        dynamic_axes={"input_ids": {0: "batch"}, "last_hidden_state": {0: "batch"}},
     )
 
     print("[5/6] Exporting VAE encoder + decoder…")
-    sample_image = torch.randn(1, 3, 512, 512, dtype=torch.float16)
-    sample_latent = torch.randn(1, 4, 64, 64, dtype=torch.float16)
+    sample_image = torch.randn(1, 3, 512, 512, dtype=torch.float32)
+    sample_latent = torch.randn(1, 4, 64, 64, dtype=torch.float32)
 
     class VaeEncWrap(torch.nn.Module):
         def __init__(self, vae): super().__init__(); self.vae = vae
@@ -99,6 +151,8 @@ def main() -> int:
         VaeEncWrap(vae), sample_image, str(OUT_DIR / "vae_encoder.onnx"),
         input_names=["sample"], output_names=["latent_sample"], opset_version=17,
         do_constant_folding=True,
+        dynamo=False,
+        dynamic_axes={"sample": BATCH_HW, "latent_sample": BATCH_HW},
     )
 
     class VaeDecWrap(torch.nn.Module):
@@ -109,13 +163,15 @@ def main() -> int:
         VaeDecWrap(vae), sample_latent, str(OUT_DIR / "vae_decoder.onnx"),
         input_names=["latent_sample"], output_names=["sample"], opset_version=17,
         do_constant_folding=True,
+        dynamo=False,
+        dynamic_axes={"latent_sample": BATCH_HW, "sample": BATCH_HW},
     )
 
     print("[6/6] Exporting UNet (~860M params; ~5 min on CPU)…")
     # SD 1.5 INPAINT UNet takes 9-channel input: 4 latent + 1 mask + 4 masked-image-latent.
-    sample_unet = torch.randn(1, 9, 64, 64, dtype=torch.float16)
-    timestep = torch.tensor([1], dtype=torch.float16)  # f16 for SD-15-fp16 export
-    encoder_hidden_states = torch.randn(1, 77, 768, dtype=torch.float16)
+    sample_unet = torch.randn(1, 9, 64, 64, dtype=torch.float32)
+    timestep = torch.tensor([1], dtype=torch.float32)
+    encoder_hidden_states = torch.randn(1, 77, 768, dtype=torch.float32)
 
     class UnetWrap(torch.nn.Module):
         def __init__(self, unet): super().__init__(); self.unet = unet
@@ -127,20 +183,36 @@ def main() -> int:
         input_names=["sample", "timestep", "encoder_hidden_states"],
         output_names=["out_sample"], opset_version=17,
         do_constant_folding=True,
+        dynamo=False,
+        dynamic_axes={
+            "sample": BATCH_HW, "timestep": {0: "batch"},
+            "encoder_hidden_states": {0: "batch"}, "out_sample": BATCH_HW,
+        },
     )
 
     # Inline external-data weights so each .onnx is single-file (matches
     # our loader). torch's exporter writes weights as sidecar .onnx.data
     # files when models are large; we round-trip through onnx.save with
     # save_as_external_data=False to fold them in.
-    print("\nInlining external data into single-file ONNX…")
+    print("\nConverting to fp16 (f16 inputs and outputs, as the runtime expects) and inlining…")
+    import numpy as np
     import onnx
+    from onnx import TensorProto, numpy_helper
+    from onnxconverter_common import float16
+    from onnxconverter_common.float16 import DEFAULT_OP_BLOCK_LIST
     for part in ["text_encoder", "vae_encoder", "vae_decoder", "unet"]:
         p = OUT_DIR / f"{part}.onnx"
         m = onnx.load(str(p), load_external_data=True)
+        # The text encoder's token ids stay int32; everything float goes f16.
+        # Shape inference is off: it cannot run on the >2 GB UNet proto.
+        m = float16.convert_float_to_float16(m, keep_io_types=False, disable_shape_infer=True)
+        repair_fp16_graph(m.graph, set(DEFAULT_OP_BLOCK_LIST))
         onnx.save_model(m, str(p), save_as_external_data=False)
         data = p.with_suffix(".onnx.data")
         if data.exists(): data.unlink()
+        for stale in OUT_DIR.glob("onnx__*"):
+            stale.unlink()
+        print(f"  {part}: converted")
 
     print("\n=== SHA256 (paste into prunr-models registry) ===")
     for part in ["text_encoder", "vae_encoder", "vae_decoder", "unet"]:

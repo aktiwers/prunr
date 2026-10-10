@@ -183,11 +183,11 @@ fn plan_with(id: prunr_models::ModelId, keep_loaded: bool, margin_mb: u64, avail
     SdTuning { keep_loaded, ov_device: None, tall_crop, margin_mb }
 }
 
-/// Whether the bundle's UNet takes a crop other than 512². The LCM
-/// export hard-codes batch 1 and a 64×64 latent in hundreds of reshape
-/// constants, so it runs tiles only; the SD 1.5 export is dynamic.
+/// Whether the bundle's UNet takes a crop other than 512². Both shipped
+/// exports are dynamic (the LCM bundle since 1.0.1; 1.0.0 hard-coded a
+/// 64×64 latent in hundreds of reshape constants).
 fn accepts_tall_crop(id: prunr_models::ModelId) -> bool {
-    matches!(id, prunr_models::ModelId::SdV15InpaintFp16)
+    matches!(id, prunr_models::ModelId::SdV15InpaintFp16 | prunr_models::ModelId::SdV15LcmInpaintFp16)
 }
 
 /// Free RAM a stroke needs: the model's working set unless its bundle
@@ -3850,7 +3850,7 @@ mod tests {
         let t = plan_with(id, true, m, Some(base), false);
         assert!(t.keep_loaded && !t.tall_crop && t.ov_device.is_none() && t.margin_mb == m);
         let lcm = prunr_models::ModelId::SdV15LcmInpaintFp16;
-        assert!(!plan_with(lcm, false, m, None, false).tall_crop, "the static LCM export tiles only");
+        assert!(plan_with(lcm, false, m, None, false).tall_crop, "the 1.0.1 LCM export is dynamic too");
         assert_eq!(t.session_key(), SdSessionKey::default());
         assert!(t.session_key().records_ep_failures());
         assert!(!SdTuning { ov_device: Some("GPU".into()), ..Default::default() }.session_key().records_ep_failures());
