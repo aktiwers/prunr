@@ -9,16 +9,14 @@ pub type FilterOnlyResult = (u64, Result<std::sync::Arc<image::RgbaImage>, Strin
 /// image clears `decode_pending` instead of leaving the item stuck.
 pub type DecodeResult = (u64, Result<std::sync::Arc<image::RgbaImage>, String>);
 
-/// History-eviction → off-thread compress → drain payload. The bg
-/// thread sends `(item_id, compressed_entry, recipe)` once
-/// `compress_to_ram` returns; the drain swaps the in-memory placeholder
-/// at `history.back()` for the compressed slot. Recipe is matched at
-/// drain time so a freshly-processed result can't be clobbered by a
-/// stale eviction.
+/// History-eviction → off-thread compress → drain payload:
+/// `(item_id, compressed_entry, parked)`. The drain swaps the parked
+/// entry for the compressed slot only while `parked` is still the very
+/// image on top of history, so a stale compression clobbers nothing.
 pub type HistoryDemoteResult = (
     u64,
     super::history_disk::CompressedEntry,
-    Option<prunr_core::ProcessingRecipe>,
+    std::sync::Weak<image::RgbaImage>,
 );
 
 /// What a selection texture was built from: the mask's content hash and
@@ -114,9 +112,9 @@ pub struct BackgroundIO {
     pub filter_only_tx: mpsc::Sender<FilterOnlyResult>,
     pub filter_only_rx: mpsc::Receiver<FilterOnlyResult>,
     /// Off-thread zstd compression of evicted background-item RGBAs.
-    /// Eviction places an in-memory placeholder at `history.back()` and
-    /// kicks a worker that compresses + posts here; drain swaps the
-    /// placeholder for `HistorySlot::Compressed`. Without this the
+    /// Eviction parks the result on top of history and kicks a worker
+    /// that compresses + posts here; drain swaps the parked entry for
+    /// `HistorySlot::Compressed`. Without this the
     /// zstd encode (~10–50 ms per 4K image × N items) ran inline on
     /// every selection change.
     pub history_demote_tx: mpsc::Sender<HistoryDemoteResult>,

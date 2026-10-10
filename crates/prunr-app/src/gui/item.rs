@@ -260,6 +260,9 @@ pub(crate) struct BatchItem {
     pub(crate) history: VecDeque<HistoryEntry>,
     /// Redo stack: results undone, newest last. Cleared on new processing.
     pub(crate) redo_stack: VecDeque<HistoryEntry>,
+    /// The current result sits on top of `history` while the item is in
+    /// the background (`park_result`), not as an undo step.
+    pub(crate) result_parked: bool,
     pub(crate) status: BatchStatus,
     pub(crate) selected: bool,
     /// Per-image processing settings. Edited via the adjustments toolbar.
@@ -691,6 +694,7 @@ impl BatchItem {
         match result {
             Ok(pr) => {
                 self.reset_result_caches();
+                self.unpark_result();
                 self.result_rgba = Some(Arc::new(pr.rgba_image));
                 self.status = BatchStatus::Done;
                 self.applied_recipe = Some(recipe_snapshot);
@@ -747,6 +751,36 @@ impl BatchItem {
     /// cached, and a re-cut there would bring the undone result back.
     pub(crate) fn shows_cutout(&self) -> bool {
         self.status == BatchStatus::Done && self.cached_tensor.is_some()
+    }
+
+    /// Move the current result onto the history stack while the item is in
+    /// the background, so its RAM can be compressed away. It goes on top
+    /// of the undo steps, never over one.
+    pub(crate) fn park_result(&mut self) -> Option<Arc<image::RgbaImage>> {
+        if self.result_parked || self.status != BatchStatus::Done {
+            return None;
+        }
+        let rgba = self.result_rgba.take()?;
+        self.history.push_back(HistoryEntry::new(Arc::clone(&rgba), self.applied_recipe.clone()));
+        self.result_parked = true;
+        Some(rgba)
+    }
+
+    /// Take a parked result back off the history stack. Every history
+    /// operation and every result writer calls this first, so a parked
+    /// entry is never undone; a result that landed meanwhile wins.
+    pub(crate) fn unpark_result(&mut self) {
+        if !std::mem::take(&mut self.result_parked) {
+            return;
+        }
+        let Some(entry) = self.history.pop_back() else { return };
+        if self.result_rgba.is_some() {
+            entry.cleanup();
+            return;
+        }
+        let (slot, recipe) = entry.into_parts();
+        self.result_rgba = slot.into_rgba();
+        self.applied_recipe = recipe;
     }
 
     /// The cached tensor belongs to a result the user undid. A re-cut from
@@ -816,6 +850,7 @@ impl BatchItem {
             decode_pending: false,
             history: VecDeque::new(),
             redo_stack: VecDeque::new(),
+            result_parked: false,
             status: BatchStatus::Pending,
             selected: false,
             settings,
