@@ -76,7 +76,6 @@ fn chain_mode_commit_archives_the_pre_stroke_result_for_undo() {
     use std::sync::Arc;
     let mut app = app_with_model(SettingsModel::Silueta);
     app.settings.chain_mode = true;
-    app.settings.protect_selection = false;
     let item = push_test_item(&mut app, 7);
     item.dimensions = (8, 8);
     item.status = BatchStatus::Done;
@@ -91,14 +90,6 @@ fn chain_mode_commit_archives_the_pre_stroke_result_for_undo() {
     assert!(HistoryManager::can_undo(item));
     assert!(item.result_rgba.is_some(), "chain base stays in place for the rerun");
     assert_eq!(item.actions_undo.len(), 1, "one Stroke marker, no Result marker");
-
-    // Auto-apply off: no rerun will replace the result, so nothing is
-    // archived (an orphan entry would make a later undo a no-op).
-    app.settings.protect_selection = true;
-    let mut other = make_mask(8, 8);
-    other = other.invert(prunr_core::selection::BrushMode::Add);
-    app.commit_selection_and_dispatch(7, other);
-    assert_eq!(app.batch.items[0].history.len(), archived_before + 1);
 }
 
 /// Moving the Confidence knob re-thresholds the last Magic Brush stroke
@@ -160,12 +151,11 @@ fn confidence_change_retunes_the_last_stroke_in_place() {
     assert!(sel.cells()[7] == prunr_core::selection::FULL && sel.cells()[0] == 0);
 }
 
-// ── Segmentation + !protect → rerun fires ────────────────────────────────────
+// ── Segmentation → the re-cut fires at once ─────────────────────────────────
 
 #[test]
 fn bg_removal_fires_rerun_on_selection_commit() {
     let mut app = app_with_model(SettingsModel::BiRefNetLite);
-    app.settings.protect_selection = false;
 
     let item = push_test_item(&mut app, 1);
     item.dimensions = (64, 64);
@@ -178,29 +168,7 @@ fn bg_removal_fires_rerun_on_selection_commit() {
 
     assert!(
         app.processor.live_preview.is_pending_for(item_id),
-        "Segmentation + !protect_selection must queue a live-preview rerun"
-    );
-}
-
-// ── Segmentation + protect → rerun suppressed ────────────────────────────────
-
-#[test]
-fn bg_removal_with_protect_selection_does_not_fire_rerun() {
-    let mut app = app_with_model(SettingsModel::BiRefNetLite);
-    app.settings.protect_selection = true;
-
-    let item = push_test_item(&mut app, 2);
-    item.dimensions = (64, 64);
-    give_tensor(item);
-    let item_id = 2u64;
-
-    let mask = make_mask(64, 64);
-    app.batch.commit_selection(item_id, mask);
-    app.apply_selection_to_active_model(item_id);
-
-    assert!(
-        !app.processor.live_preview.is_pending_for(item_id),
-        "Segmentation + protect_selection must NOT queue a rerun"
+        "a stroke on a background-removal model must queue the re-cut"
     );
 }
 
@@ -311,7 +279,6 @@ fn paint_brush_bg_removal_keeps_stroke_direction_and_softness() {
     use prunr_core::selection::BrushMode;
 
     let mut app = app_with_model(SettingsModel::BiRefNetLite);
-    app.settings.protect_selection = false;
     let item = push_test_item(&mut app, 7);
     item.dimensions = (32, 32);
     give_tensor(item);
@@ -344,7 +311,6 @@ fn paint_brush_bg_removal_keeps_stroke_direction_and_softness() {
 #[test]
 fn bg_removal_without_tensor_waits_until_a_result_lands() {
     let mut app = app_with_model(SettingsModel::BiRefNetLite);
-    app.settings.protect_selection = false;
 
     let item = push_test_item(&mut app, 9);
     item.dimensions = (64, 64);

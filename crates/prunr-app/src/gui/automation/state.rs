@@ -38,7 +38,6 @@ pub struct SettingsDump {
     pub parallel_jobs: usize,
     pub live_preview: bool,
     pub chain_mode: bool,
-    pub protect_selection: bool,
     pub keep_sd_loaded: bool,
 }
 
@@ -77,7 +76,6 @@ pub fn dump(app: &PrunrApp) -> StateDump {
             parallel_jobs: app.settings.parallel_jobs,
             live_preview: app.settings.live_preview,
             chain_mode: app.settings.chain_mode,
-            protect_selection: app.settings.protect_selection,
             keep_sd_loaded: app.settings.keep_sd_loaded,
         },
     }

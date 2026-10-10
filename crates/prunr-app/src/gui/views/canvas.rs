@@ -197,7 +197,6 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
     if let Some(tool) = tool {
         let facts = super::tool_strip::StripFacts {
             is_inpaint: app.settings.model.is_inpaint(),
-            protect: app.settings.model.uses_segmentation().then_some(app.settings.protect_selection),
             encoder_pending: app.magic_brush_state.has_pending_encoder(),
             strokes_waiting: app.strokes_waiting_for_apply(),
         };
@@ -257,9 +256,10 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
         );
         let font = egui::FontId::monospace(theme::FONT_SIZE_MONO);
         let painter = ui.painter();
+        let (shift_hint, alt_hint) = super::shortcuts::modifier_hints(app.settings.model.is_inpaint());
         let shift_color = if shift { active_color } else { base_color };
         let shift_rect = painter.text(
-            pos, egui::Align2::LEFT_TOP, "Shift = add", font.clone(), shift_color,
+            pos, egui::Align2::LEFT_TOP, shift_hint, font.clone(), shift_color,
         );
         let sep_rect = painter.text(
             egui::pos2(shift_rect.max.x, pos.y), egui::Align2::LEFT_TOP,
@@ -268,7 +268,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
         let alt_color = if alt { active_color } else { base_color };
         painter.text(
             egui::pos2(sep_rect.max.x, pos.y), egui::Align2::LEFT_TOP,
-            super::shortcuts::SUBTRACT_HINT, font, alt_color,
+            alt_hint, font, alt_color,
         );
     }
 }
