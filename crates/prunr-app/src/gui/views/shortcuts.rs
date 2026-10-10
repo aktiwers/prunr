@@ -110,6 +110,14 @@ impl Chord {
         Some(Chord { mods: Mods::from_flags(command, shift), key: key? })
     }
 
+    /// The modifiers a press of this chord carries, as egui reports them
+    /// on this platform (the inverse of `from_input`).
+    pub fn modifiers(self) -> egui::Modifiers {
+        let command = self.mods.command();
+        let mac = cfg!(target_os = "macos");
+        egui::Modifiers { alt: false, ctrl: command && !mac, shift: self.mods.shift(), mac_cmd: command && mac, command }
+    }
+
     /// The chord a fresh key press carries this frame, for the capture
     /// field. `None` while nothing was pressed and under a modifier the
     /// table does not express (see `foreign_modifier_held`).
@@ -134,11 +142,11 @@ impl Chord {
 }
 
 impl Mods {
-    pub(crate) fn command(self) -> bool {
+    fn command(self) -> bool {
         matches!(self, Mods::Command | Mods::CommandShift)
     }
 
-    pub(crate) fn shift(self) -> bool {
+    fn shift(self) -> bool {
         matches!(self, Mods::Shift | Mods::CommandShift)
     }
 
@@ -182,7 +190,9 @@ impl Action {
         Self::ALL.into_iter().find(|a| a.name() == name)
     }
 
-    /// Discriminant order; `keys` indexes by it.
+    /// Discriminant order; `keys` indexes by it, and the keyboard
+    /// dispatches pressed actions in it (Cancel before the modals it
+    /// closes).
     pub const ALL: [Action; 22] = [
         Action::Open, Action::Process, Action::Save, Action::Copy, Action::Cut,
         Action::Delete, Action::Invert, Action::Cancel, Action::Undo, Action::Redo,
@@ -502,6 +512,15 @@ pub fn render_shortcut_grid(ui: &mut egui::Ui) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chord_modifiers_follow_the_platform() {
+        let m = Chord::parse("Mod+Shift+Z").unwrap().modifiers();
+        assert!(m.command && m.shift && !m.alt);
+        assert_eq!(m.ctrl, !cfg!(target_os = "macos"));
+        assert_eq!(m.mac_cmd, cfg!(target_os = "macos"));
+        assert_eq!(Chord::parse("A").unwrap().modifiers(), Modifiers::NONE);
+    }
     use egui::{Modifiers, RawInput};
 
     #[test]

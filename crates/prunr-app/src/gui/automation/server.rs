@@ -1,7 +1,5 @@
 //! The control socket: one JSON request per line on 127.0.0.1:port, one
-//! JSON reply per line. Requests are handed to the UI thread and answered
-//! from there; the thread wakes the event loop so an idle app still
-//! renders the frames a reply waits for.
+//! JSON reply per line, answered from the UI thread.
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
@@ -42,8 +40,13 @@ fn serve(stream: TcpStream, tx: &mpsc::Sender<Pending>, ctx: &egui::Context) {
         if line.trim().is_empty() {
             continue;
         }
+        // A line that is not a request ends the connection, so a web
+        // page's HTTP request to this port never reaches its body.
         let response = match serde_json::from_str::<Request>(&line) {
-            Err(e) => Response::err(format!("bad request: {e}")),
+            Err(e) => {
+                let _ = writeln!(writer, "{}", serde_json::to_string(&Response::err(format!("bad request: {e}"))).unwrap_or_default());
+                break;
+            }
             Ok(request) => {
                 let (reply, reply_rx) = mpsc::channel();
                 if tx.send(Pending { request, reply }).is_err() {

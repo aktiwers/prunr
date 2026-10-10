@@ -43,15 +43,6 @@ pub struct SettingsDump {
 }
 
 pub fn dump(app: &PrunrApp) -> StateDump {
-    let modals = [
-        (app.show_settings, "settings"),
-        (app.show_shortcuts, "shortcuts"),
-        (app.show_cli_help, "cli_help"),
-        (app.show_pipeline_flow, "pipeline_flow"),
-        (app.model_store.is_some(), "model_store"),
-        (app.runtime_prompt.is_some(), "runtime_prompt"),
-        (app.pending_reset_confirm, "reset_confirm"),
-    ];
     StateDump {
         app_state: format!("{:?}", app.batch.app_state()),
         model: format!("{:?}", app.settings.model),
@@ -80,7 +71,7 @@ pub fn dump(app: &PrunrApp) -> StateDump {
         show_original: app.show_original,
         sidebar_hidden: app.sidebar_hidden,
         adjustments_hidden: app.adjustments_hidden,
-        modals: modals.into_iter().filter(|(open, _)| *open).map(|(_, name)| name).collect(),
+        modals: app.open_modals(),
         settings: SettingsDump {
             auto_process_on_import: app.settings.auto_process_on_import,
             parallel_jobs: app.settings.parallel_jobs,
