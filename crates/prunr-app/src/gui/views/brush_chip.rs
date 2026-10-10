@@ -63,7 +63,7 @@ pub(super) fn render(
     );
 
     let mut outcome = BrushChipOutcome::default();
-    chip::popup_for(ui, ui.id().with("brush_chip_popover"), &resp, |ui| {
+    chip::flyout_for(ui.id().with("brush_chip_popover"), &resp, |ui| {
         if chip::popover_header(ui, "Brush", Some(("Reset size, hardness, expand, edge blend, sharpen and shape", false))) {
             outcome.reset_brush_requested = true;
         }

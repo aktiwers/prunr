@@ -282,7 +282,13 @@ impl PrunrApp {
             }
             Action::FitToWindow => self.zoom_state.pending_fit_zoom = true,
             Action::ActualSize => self.zoom_state.pending_actual_size = true,
-            Action::Cancel => self.apply_cancel_shortcut(ctx),
+            Action::Cancel => {
+                // egui closes an open popup on this Escape during render;
+                // the press goes no further.
+                if !super::theme::any_popup_open(ctx) {
+                    self.apply_cancel_shortcut(ctx);
+                }
+            }
             Action::Shortcuts | Action::CliHelp | Action::PipelineFlow => {
                 if let Some(open) = self.help_modal_mut(action) {
                     *open = !*open;
@@ -3653,7 +3659,9 @@ impl eframe::App for PrunrApp {
 
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         super::views::shortcuts::install(ctx, Arc::clone(&self.bindings));
-        let popup_open = super::theme::any_popup_open(ctx);
+        // Held while the pointer stays down, so the press that dismissed a
+        // popover is spent in full (see canvas.rs).
+        let popup_open = super::theme::dismissable_popup_open(ctx);
         let pointer_down = ctx.input(|i| i.pointer.any_down());
         self.popup_open_at_frame_start = popup_open || (self.popup_open_at_frame_start && pointer_down);
         self.poll_worker_results(ctx);

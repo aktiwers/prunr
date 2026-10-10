@@ -24,14 +24,14 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
     // existing bg-color fallback paints below.
 
     let modal_open = app.any_modal_open();
-    // Block canvas pan/zoom when an egui popup (chip popover, combo box,
-    // dropdown) is open — otherwise the press that lands on a slider inside
-    // the popover would also start panning the canvas, and slider drag would
-    // drag both the slider AND the image.
-    let popup_open = theme::any_popup_open(ui.ctx()) || app.popup_open_at_frame_start;
-    // Also check egui's global "wants pointer input" — this is true when any
-    // widget (slider, button, text field) is currently capturing the pointer.
+    // A click-outside popover holds the canvas still, so the press that
+    // dismisses it (and the drag after it) never pans or paints. A pinned
+    // flyout does not: the canvas stays live under it. A pointer over any
+    // popup, or a slider drag that leaves the popup's rectangle, is
+    // egui's, which `egui_wants_pointer_input` reports.
+    let dismissable_popup = theme::dismissable_popup_open(ui.ctx()) || app.popup_open_at_frame_start;
     let widget_has_pointer = ui.ctx().egui_wants_pointer_input();
+    let pointer_blocked = modal_open || widget_has_pointer || dismissable_popup;
     // The brush authors the selection against the source, so it is live
     // as soon as an image is loaded; segmentation corrections apply once
     // a result exists.
@@ -60,7 +60,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
     let any_brush_tool_active = brush_active || magic_brush_active;
     // Scroll-zoom always works: it doesn't conflict with brush strokes
     // and the zoom feedback is reassuring even mid-painting.
-    let canvas_gets_zoom = !modal_open && !popup_open && !widget_has_pointer;
+    let canvas_gets_zoom = !pointer_blocked;
     // Pan binding: primary (left) drag normally; secondary (right) drag
     // in any brush-tool mode so left-click is free for the brush stroke.
     let canvas_gets_pan = canvas_gets_zoom;
@@ -187,22 +187,13 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
         ui.ctx().request_repaint();
     }
 
-    // Suppress brush input + cursor + trail when a popup or widget has
-    // claimed the pointer — the brush popover floats over the canvas, so
-    // its sliders sit inside `img_rect` geographically and would otherwise
-    // get painted over and double-handle clicks.
-    if brush_active && !modal_open && !popup_open && !widget_has_pointer {
+    if brush_active && !pointer_blocked {
         handle_brush_input(ui, app, canvas_rect);
     }
 
     // Magic Brush click/stroke input. Suppressed during encoder run (silently —
     // per UI-SPEC, clicks while encoder_pending are ignored without a toast).
-    if app.magic_brush_state.is_active()
-        && !app.magic_brush_state.has_pending_encoder()
-        && !modal_open
-        && !popup_open
-        && !widget_has_pointer
-    {
+    if app.magic_brush_state.is_active() && !app.magic_brush_state.has_pending_encoder() && !pointer_blocked {
         handle_magic_brush_input(ui, app, canvas_rect);
     }
 
