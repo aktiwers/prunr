@@ -179,6 +179,8 @@ pub const BTN_HEIGHT: f32 = 32.0;
 /// Chip / compact-button height on the adjustments rows, modal +/– steppers,
 /// and the CLI help tab strip.
 pub const CHIP_HEIGHT: f32 = 28.0;
+/// A key slot in Settings › Hotkeys, wide enough for "Ctrl+Shift+F12".
+pub const HOTKEY_SLOT_WIDTH: f32 = 110.0;
 /// Shared popover width for chip / preset dropdowns.
 pub const POPOVER_WIDTH: f32 = 260.0;
 /// Wider popover for chips that host multi-line text (prompt + negative).

@@ -3186,12 +3186,36 @@ impl PrunrApp {
         }
     }
 
+    /// While the Hotkeys tab waits for a key, this frame's press is the
+    /// new chord (Escape cancels, Backspace clears the slot), never a
+    /// command. Returns true while capture is active.
+    fn handle_hotkey_capture(&mut self, ctx: &egui::Context) -> bool {
+        use crate::gui::views::shortcuts::{self, Chord};
+        let Some((action, slot)) = self.hotkey_capture else { return false };
+        let (cancel, clear, chord) = ctx.input(|i| {
+            (i.key_pressed(egui::Key::Escape), i.key_pressed(egui::Key::Backspace), Chord::from_input(i))
+        });
+        if cancel {
+            self.hotkey_capture = None;
+        } else if clear || chord.is_some() {
+            let mut next = (*shortcuts::current()).clone();
+            if let Some(c) = chord {
+                if let Some(other) = next.bind(action, slot, c) {
+                    self.toasts.info(format!(
+                        "{} moved from \"{}\"", shortcuts::chord_display(c), shortcuts::label(other),
+                    ));
+                }
+            } else {
+                next.clear_slot(action, slot);
+            }
+            self.apply_hotkeys(next);
+            self.hotkey_capture = None;
+        }
+        true
+    }
+
     fn handle_keyboard_shortcuts(&mut self, ctx: &egui::Context) {
         use crate::gui::views::shortcuts::{self, Action};
-        // A press meant for the Hotkeys capture field is not a command.
-        if self.hotkey_capture.is_some() {
-            return;
-        }
         let pressed = shortcuts::pressed(ctx);
         let copy_requested = std::mem::take(&mut self.pending_copy);
         let pending_open = std::mem::take(&mut self.pending_open_dialog);
@@ -3589,7 +3613,9 @@ impl eframe::App for PrunrApp {
         self.popup_open_at_frame_start = popup_open || (self.popup_open_at_frame_start && pointer_down);
         self.poll_worker_results(ctx);
         self.handle_drag_and_drop(ctx);
-        self.handle_keyboard_shortcuts(ctx);
+        if !self.handle_hotkey_capture(ctx) {
+            self.handle_keyboard_shortcuts(ctx);
+        }
         drain_screenshot_replies(ctx);
         self.drain_background_channels(ctx);
         self.update_window_title(ctx);
@@ -4750,5 +4776,38 @@ mod tool_mutual_exclusion_tests {
 
         assert!(brush.is_enabled(), "paint brush must be enabled");
         assert!(!magic.is_active(), "magic brush must be deactivated when paint activates");
+    }
+}
+
+#[cfg(test)]
+mod hotkey_capture_tests {
+    use super::PrunrApp;
+    use crate::gui::views::shortcuts::Action;
+
+    /// A key pressed for the Hotkeys capture field never reaches the
+    /// command handler in that frame: Escape cancels the capture and
+    /// leaves the settings modal open.
+    #[test]
+    fn escape_during_hotkey_capture_cancels_without_closing_settings() {
+        let mut app = PrunrApp::new_for_test();
+        app.show_settings = true;
+        app.hotkey_capture = Some((Action::Undo, 0));
+        let ctx = egui::Context::default();
+        let modifiers = egui::Modifiers::NONE;
+        ctx.begin_pass(egui::RawInput {
+            modifiers,
+            events: vec![egui::Event::Key {
+                key: egui::Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers,
+            }],
+            ..Default::default()
+        });
+        let captured = app.handle_hotkey_capture(&ctx);
+        if !captured {
+            app.handle_keyboard_shortcuts(&ctx);
+        }
+        let _ = ctx.end_pass();
+        assert!(captured);
+        assert!(app.hotkey_capture.is_none());
+        assert!(app.show_settings, "Escape went to the capture field, not to the modal");
     }
 }
