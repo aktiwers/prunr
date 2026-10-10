@@ -524,7 +524,8 @@ struct TipText {
 
 impl TipText {
     fn build(bindings: Arc<super::shortcuts::Bindings>) -> Self {
-        use super::shortcuts::{keys, label, Action};
+        use super::shortcuts::{label, Action};
+        let keys = |a: Action| Arc::clone(bindings.display(a));
         let press = |a: Action| {
             let mut chars = label(a).chars();
             let first = chars.next().map(|c| c.to_lowercase().to_string()).unwrap_or_default();
@@ -550,9 +551,9 @@ impl TipText {
     }
 }
 
-fn tip_text() -> Arc<TipText> {
+fn tip_text(ctx: &egui::Context) -> Arc<TipText> {
     static CACHE: Mutex<Option<Arc<TipText>>> = Mutex::new(None);
-    let live = super::shortcuts::current();
+    let live = super::shortcuts::current(ctx);
     let mut cache = CACHE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     match cache.as_ref() {
         Some(t) if Arc::ptr_eq(&t.bindings, &live) => Arc::clone(t),
@@ -616,7 +617,7 @@ fn render_empty(ui: &mut egui::Ui, _app: &PrunrApp) {
     painter.text(
         Pos2::new(center.x, text_y + 28.0),
         egui::Align2::CENTER_CENTER,
-        tip_text().open_hint.as_str(),
+        tip_text(ui.ctx()).open_hint.as_str(),
         egui::FontId::proportional(theme::FONT_SIZE_BODY),
         theme::TEXT_SECONDARY,
     );
@@ -635,7 +636,7 @@ fn render_empty(ui: &mut egui::Ui, _app: &PrunrApp) {
     };
 
     let time = ui.ctx().input(|i| i.time);
-    let tips = tip_text();
+    let tips = tip_text(ui.ctx());
     let tip_index = ((time / TIP_CYCLE_SECS) as usize) % tips.tips.len();
     let phase = time % TIP_CYCLE_SECS; // 0..TIP_CYCLE_SECS
 
