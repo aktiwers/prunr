@@ -198,7 +198,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
         let facts = super::tool_strip::StripFacts {
             is_inpaint: app.settings.model.is_inpaint(),
             encoder_pending: app.magic_brush_state.has_pending_encoder(),
-            strokes_waiting: app.strokes_waiting_for_apply(),
+            apply: app.settings.model.is_inpaint().then_some(app.strokes_waiting_for_apply()),
         };
         let change = super::tool_strip::render(ui, canvas_rect, tool, &mut app.settings.brush, facts);
         app.apply_brush_change(change);
@@ -335,7 +335,6 @@ fn handle_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: Rect) 
 /// trail rendering during drag (via `brush_overlay::draw_trail_for`),
 /// and the modifier glyph (+ / −) at the cursor when Shift / Alt is held.
 fn handle_magic_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: Rect) {
-    use crate::gui::processor::PromptModifier;
 
     let Some(item) = app.batch.selected_item() else { return };
     let Some(tex) = item.result_texture.as_ref().or(item.source_texture.as_ref()) else { return };
@@ -377,24 +376,10 @@ fn handle_magic_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: 
         ui, img_rect, &app.settings.brush, pointer_on_img.is_some(),
     );
 
-    // Determine modifier from held keys. Read once to avoid per-call InputState borrow.
-    let modifier = ui.ctx().input(|i| {
-        if i.modifiers.shift {
-            PromptModifier::Add
-        } else if super::shortcuts::is_subtract_modifier(&i.modifiers) {
-            PromptModifier::Subtract
-        } else {
-            PromptModifier::Replace
-        }
-    });
-
-    let glyph = match modifier {
-        PromptModifier::Add => Some("+"),
-        PromptModifier::Subtract => Some("\u{2212}"), // U+2212 MINUS SIGN — visually heavier than ASCII hyphen.
-        PromptModifier::Replace => None,
-    };
-    if let Some(glyph) = glyph {
-        draw_modifier_glyph(ui, canvas_rect, glyph);
+    let (shift, subtract) = ui.ctx().input(|i| (i.modifiers.shift, super::shortcuts::is_subtract_modifier(&i.modifiers)));
+    let mode = app.settings.brush.mode_under(shift, subtract);
+    if shift || subtract {
+        draw_modifier_glyph(ui, canvas_rect, if shift { "+" } else { "\u{2212}" });
     }
 
     // Convert screen position to source-image pixel coordinates.
@@ -457,7 +442,7 @@ fn handle_magic_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: 
             source_h,
         ) {
             Ok(prompt) => {
-                app.processor.dispatch_sam_decoder(sam_request(app, item_id, embedding, prompt, modifier));
+                app.processor.dispatch_sam_decoder(sam_request(app, item_id, embedding, prompt, mode));
             }
             Err(e) => {
                 tracing::warn!(item_id, "SAM stroke prompt failed: {e:?}");
@@ -468,18 +453,9 @@ fn handle_magic_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: 
             let (px, py) = screen_to_src(pos);
             // The `.is_empty()` guard below distinguishes a real click from
             // the synthetic tail-click that fires at drag release.
-            let prompt = match modifier {
-                PromptModifier::Subtract => prunr_core::sam::prompt::build_alt_modifier_prompt(
-                    px, py, source_w, source_h,
-                ),
-                PromptModifier::Add | PromptModifier::Replace => {
-                    prunr_core::sam::prompt::build_click_prompt(
-                        px, py, source_w, source_h,
-                    )
-                }
-            };
+            let prompt = prunr_core::sam::prompt::build_click_prompt(px, py, source_w, source_h);
             if app.magic_brush_state.active_stroke.is_empty() {
-                app.processor.dispatch_sam_decoder(sam_request(app, item_id, embedding, prompt, modifier));
+                app.processor.dispatch_sam_decoder(sam_request(app, item_id, embedding, prompt, mode));
             }
         }
         app.magic_brush_state.clear_stroke();
@@ -494,15 +470,14 @@ fn sam_request(
     item_id: u64,
     embedding: std::sync::Arc<prunr_core::sam::SamEmbedding>,
     prompt: prunr_core::sam::prompt::SamPrompt,
-    modifier: crate::gui::processor::PromptModifier,
+    mode: prunr_core::selection::BrushMode,
 ) -> crate::gui::processor::SamDecodeRequest {
     let source_dims = app.batch.find_by_id(item_id).map(|i| i.dimensions).unwrap_or((0, 0));
     crate::gui::processor::SamDecodeRequest {
         item_id,
         embedding,
         prompt,
-        modifier,
-        mode: app.settings.brush.mode,
+        mode,
         source_dims,
         confidence: app.settings.brush.magic_confidence_threshold,
     }

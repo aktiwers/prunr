@@ -208,20 +208,9 @@ fn ensure_sam_sessions(slot: &SamSessionSlot) -> Result<Arc<SamSessions>, String
     Ok(Arc::clone(guard.get_or_insert(built)))
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum PromptModifier {
-    /// Plain click / plain stroke — replaces the current selection.
-    Replace,
-    /// Shift + click/stroke — union with the current selection.
-    Add,
-    /// Alt + click/stroke — difference from the current selection.
-    Subtract,
-}
-
 /// Result from a background SAM decoder thread, or a human-readable error.
 pub(crate) struct SamDecoderResult {
     pub(crate) item_id: u64,
-    pub(crate) modifier: PromptModifier,
     pub(crate) mode: prunr_core::selection::BrushMode,
     pub(crate) confidence: f32,
     pub(crate) result: Result<DecodedSelection, String>,
@@ -241,7 +230,6 @@ pub(crate) enum DecodedSelection {
 pub(crate) struct SamRethresholdRequest {
     pub(crate) item_id: u64,
     pub(crate) output: Arc<prunr_core::sam::SamDecoderOutput>,
-    pub(crate) modifier: PromptModifier,
     pub(crate) mode: prunr_core::selection::BrushMode,
     pub(crate) source_dims: (u32, u32),
     pub(crate) confidence: f32,
@@ -250,15 +238,15 @@ pub(crate) struct SamRethresholdRequest {
 }
 
 /// Combine a decoded prompt mask with the selection it was made against.
-pub(crate) fn merge_prompt_result(
-    modifier: PromptModifier,
+/// A Magic Brush result merges like a paint stroke: its polarity (restore
+/// or erase) is baked into the mask, and where it lands it wins.
+pub(crate) fn merge_stroke(
     existing: Option<Arc<prunr_core::selection::MaskArtifact>>,
     new_mask: prunr_core::selection::MaskArtifact,
 ) -> prunr_core::selection::MaskArtifact {
-    match (modifier, existing) {
-        (PromptModifier::Add, Some(existing)) => existing.add_mask(&new_mask).unwrap_or(new_mask),
-        (PromptModifier::Subtract, Some(existing)) => existing.subtract_mask(&new_mask).unwrap_or(new_mask),
-        _ => new_mask,
+    match existing {
+        Some(existing) => existing.add_mask(&new_mask).unwrap_or(new_mask),
+        None => new_mask,
     }
 }
 
@@ -268,7 +256,6 @@ pub(crate) struct SamDecodeRequest {
     pub(crate) item_id: u64,
     pub(crate) embedding: Arc<prunr_core::sam::SamEmbedding>,
     pub(crate) prompt: prunr_core::sam::prompt::SamPrompt,
-    pub(crate) modifier: PromptModifier,
     pub(crate) mode: prunr_core::selection::BrushMode,
     pub(crate) source_dims: (u32, u32),
     pub(crate) confidence: f32,
@@ -1401,7 +1388,7 @@ impl Processor {
                     DecodedSelection::Fresh { mask, output: Arc::new(out) }
                 });
             let _ = tx.send(SamDecoderResult {
-                item_id: req.item_id, modifier: req.modifier, mode: req.mode, confidence: req.confidence, result,
+                item_id: req.item_id, mode: req.mode, confidence: req.confidence, result,
             });
         });
     }
@@ -1414,10 +1401,10 @@ impl Processor {
         rayon::spawn(move || {
             let (w, h) = req.source_dims;
             let mask = prunr_core::sam::decode_to_mask_artifact(&req.output, w, h, req.confidence, req.mode);
-            let merged = Arc::new(merge_prompt_result(req.modifier, req.base, mask));
+            let merged = Arc::new(merge_stroke(req.base, mask));
             let hash = merged.content_hash();
             let _ = tx.send(SamDecoderResult {
-                item_id: req.item_id, modifier: req.modifier, mode: req.mode, confidence: req.confidence,
+                item_id: req.item_id, mode: req.mode, confidence: req.confidence,
                 result: Ok(DecodedSelection::Retuned { merged, hash }),
             });
         });
@@ -1616,10 +1603,15 @@ mod sam_dispatch_tests {
     }
 
     #[test]
-    fn prompt_modifier_variants_are_distinct() {
-        assert_ne!(PromptModifier::Replace, PromptModifier::Add);
-        assert_ne!(PromptModifier::Replace, PromptModifier::Subtract);
-        assert_ne!(PromptModifier::Add, PromptModifier::Subtract);
+    fn an_erase_result_on_an_empty_selection_stays_negative() {
+        use prunr_core::selection::{BrushMode, MaskArtifact};
+        let erase = MaskArtifact::from_cells(2, 1, vec![-100, 0]);
+        let merged = merge_stroke(None, erase.clone());
+        assert!(merged.cells()[0] < 0, "nothing to subtract from: the stroke itself is the selection");
+        let restore = MaskArtifact::from_cells(2, 1, vec![100, 100]);
+        let merged = merge_stroke(Some(Arc::new(merged)), restore);
+        assert!(merged.cells()[0] > 0, "a later restore wins where it lands");
+        let _ = BrushMode::Add;
     }
 
     #[test]
@@ -1639,14 +1631,12 @@ mod sam_dispatch_tests {
         let (tx, rx) = mpsc::channel::<SamDecoderResult>();
         tx.send(SamDecoderResult {
             item_id: 77,
-            modifier: PromptModifier::Add,
             mode: prunr_core::selection::BrushMode::Add,
             confidence: 0.5,
             result: Err("decoder test".to_string()),
         }).unwrap();
         let out = rx.try_recv().unwrap();
         assert_eq!(out.item_id, 77);
-        assert_eq!(out.modifier, PromptModifier::Add);
         assert!(out.result.is_err());
     }
 }

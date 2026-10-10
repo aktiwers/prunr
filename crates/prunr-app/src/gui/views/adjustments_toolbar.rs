@@ -275,7 +275,7 @@ pub(crate) fn render(
                 let magic_resp = chip::tooltip(
                     chip::icon_toggle_button(ui, ICON_AUTO_AWESOME.codepoint, state.magic_brush_active),
                     "Magic Brush",
-                    super::shortcuts::MAGIC_BRUSH_TIP,
+                    super::shortcuts::magic_brush_tip(app_settings.model.is_inpaint()),
                     None,
                 );
                 if magic_resp.clicked() {
