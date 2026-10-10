@@ -133,20 +133,6 @@ pub struct PrunrApp {
     pub(crate) drag_export: super::drag_export_state::DragExportState,
 }
 
-/// Combine a decoded prompt mask with the selection it was made against.
-fn merge_prompt_result(
-    modifier: super::processor::PromptModifier,
-    existing: Option<Arc<prunr_core::selection::MaskArtifact>>,
-    new_mask: prunr_core::selection::MaskArtifact,
-) -> prunr_core::selection::MaskArtifact {
-    use super::processor::PromptModifier;
-    match (modifier, existing) {
-        (PromptModifier::Add, Some(existing)) => existing.add_mask(&new_mask).unwrap_or(new_mask),
-        (PromptModifier::Subtract, Some(existing)) => existing.subtract_mask(&new_mask).unwrap_or(new_mask),
-        _ => new_mask,
-    }
-}
-
 impl PrunrApp {
     pub fn new(cc: &eframe::CreationContext) -> Self {
         // Worker is spawned below after prewarm_engine is created
@@ -1290,15 +1276,19 @@ impl PrunrApp {
     /// is remembered instead of retried; with the tool on, admission or
     /// encoder failure turns the tool off, so this cannot retry in a loop.
     fn ensure_magic_embedding_for_selected(&mut self) {
-        let active = self.magic_brush_state.is_active();
         if self.magic_brush_state.has_pending_encoder() {
             return;
         }
-        if !active && (!self.processor.sam_sessions_ready() || self.batch.app_state() == AppState::Processing) {
+        let Some(item) = self.batch.selected_item() else { return };
+        if item.magic_brush_embedding.is_some() {
             return;
         }
-        let Some(item) = self.batch.selected_item() else { return };
-        if item.magic_brush_embedding.is_some() || (!active && self.magic_brush_state.preencode_skipped == Some(item.id)) {
+        let active = self.magic_brush_state.is_active();
+        if !active
+            && (item.magic_preencode_refused
+                || !self.processor.sam_sessions_ready()
+                || self.batch.app_state() == AppState::Processing)
+        {
             return;
         }
         // Decode still pending: try again next frame.
@@ -1307,10 +1297,21 @@ impl PrunrApp {
         let avail_ram = crate::hardware::available_ram_mb_throttled();
         match self.processor.dispatch_sam_encoder(item_id, source, avail_ram) {
             Ok(()) => self.magic_brush_state.set_encoder_pending(true),
-            Err(err) if active => self.magic_brush_unavailable(&err),
-            Err(err) => {
-                tracing::debug!(item_id, %err, "Magic Brush pre-encode skipped");
-                self.magic_brush_state.preencode_skipped = Some(item_id);
+            Err(err) => self.on_encoder_failure(item_id, &err),
+        }
+    }
+
+    /// With the tool on, the user asked for it: say so and turn it off.
+    /// With it off, the pre-encode was speculative: remember the refusal
+    /// on the item so it is not retried every frame.
+    fn on_encoder_failure(&mut self, item_id: u64, err: &str) {
+        if self.magic_brush_state.is_active() {
+            tracing::error!(item_id, %err, "SAM encoder failed");
+            self.magic_brush_unavailable(err);
+        } else {
+            tracing::debug!(item_id, %err, "Magic Brush pre-encode skipped");
+            if let Some(item) = self.batch.find_by_id_mut(item_id) {
+                item.magic_preencode_refused = true;
             }
         }
     }
@@ -1334,6 +1335,7 @@ impl PrunrApp {
     /// Encoder results: write embedding to BatchItem, clear encoder_pending.
     /// Decoder results: convert to MaskArtifact, apply modifier, commit.
     fn pump_sam_results(&mut self, ctx: &egui::Context) {
+        use super::processor::{merge_prompt_result, DecodedSelection};
         let encoder_results = self.processor.pump_sam_encoder_results();
         for result in encoder_results {
             self.magic_brush_state.set_encoder_pending(false);
@@ -1345,87 +1347,74 @@ impl PrunrApp {
                     }
                     ctx.request_repaint();
                 }
-                Err(err) if self.magic_brush_state.is_active() => {
-                    tracing::error!(item_id = result.item_id, %err, "SAM encoder failed");
-                    self.magic_brush_unavailable(&err);
-                }
-                Err(err) => {
-                    tracing::debug!(item_id = result.item_id, %err, "Magic Brush pre-encode failed");
-                    self.magic_brush_state.preencode_skipped = Some(result.item_id);
-                }
+                Err(err) => self.on_encoder_failure(result.item_id, &err),
             }
         }
 
         self.maybe_rethreshold_last_stroke();
         let decoder_results = self.processor.pump_sam_decoder_results();
         for result in decoder_results {
-            let new_mask = match result.result {
-                Ok(mask) => mask,
+            match result.result {
+                Ok(DecodedSelection::Fresh { mask, output }) => {
+                    let existing = self.batch
+                        .find_by_id(result.item_id)
+                        .and_then(|i| i.selection_mask.clone());
+                    let final_mask = merge_prompt_result(result.modifier, existing, mask);
+                    tracing::info!(item_id = result.item_id, modifier = ?result.modifier, "SAM decoder mask committed");
+                    self.commit_selection_and_dispatch(result.item_id, final_mask);
+                    if let Some(item) = self.batch.find_by_id_mut(result.item_id) {
+                        item.last_decode = item.selection_hash.map(|committed_hash| super::item::LastDecode {
+                            output, modifier: result.modifier, mode: result.mode, committed_hash,
+                            confidence: result.confidence,
+                        });
+                    }
+                }
+                Ok(DecodedSelection::Retuned { merged, hash }) => {
+                    self.magic_brush_state.rethreshold_in_flight = false;
+                    self.apply_rethreshold(result.item_id, merged, hash, result.confidence);
+                }
                 Err(err) => {
                     tracing::error!(item_id = result.item_id, %err, "SAM decoder failed");
                     self.toasts.error(format!("Magic Brush decoder failed: {err}"));
-                    continue;
                 }
-            };
-            if result.rethreshold {
-                self.magic_brush_state.rethreshold_in_flight = false;
-                self.apply_rethreshold(result.item_id, new_mask, result.confidence);
-                continue;
             }
-            let existing = self.batch
-                .find_by_id(result.item_id)
-                .and_then(|i| i.selection_mask.clone());
-            let final_mask = merge_prompt_result(result.modifier, existing, new_mask);
-            tracing::info!(item_id = result.item_id, modifier = ?result.modifier, "SAM decoder mask committed");
-            self.commit_selection_and_dispatch(result.item_id, final_mask);
-            let committed = self.batch.find_by_id(result.item_id).and_then(|i| i.selection_hash);
-            self.magic_brush_state.last_decode = result.output.zip(committed).map(|(output, committed_hash)| {
-                super::magic_brush_state::LastDecode {
-                    item_id: result.item_id, output, modifier: result.modifier, mode: result.mode,
-                    source_dims: result.source_dims, committed_hash, confidence: result.confidence,
-                }
-            });
         }
     }
 
-    /// The last stroke still owns the selection and the Confidence knob
-    /// moved: re-threshold its logits at the new value.
+    /// The selected image's last stroke still owns the selection and the
+    /// Confidence knob moved: re-threshold its logits at the new value.
     pub(crate) fn maybe_rethreshold_last_stroke(&mut self) {
         if self.magic_brush_state.rethreshold_in_flight {
             return;
         }
         let want = self.settings.brush.magic_confidence_threshold;
-        let Some(ld) = self.magic_brush_state.last_decode.as_ref() else { return };
-        if (ld.confidence - want).abs() < 1e-4 {
-            return;
-        }
-        let still_ours = self.batch.find_by_id(ld.item_id)
-            .is_some_and(|i| i.selection_hash == Some(ld.committed_hash));
-        if !still_ours {
-            self.magic_brush_state.last_decode = None;
+        let Some(idx) = self.batch.selected_idx_clamped() else { return };
+        let item = &mut self.batch.items[idx];
+        let (item_id, source_dims, base) = (item.id, item.dimensions, item.pre_stroke_selection());
+        let Some(ld) = item.retunable_decode() else { return };
+        if ld.confidence.to_bits() == want.to_bits() {
             return;
         }
         self.processor.dispatch_sam_rethreshold(super::processor::SamRethresholdRequest {
-            item_id: ld.item_id, output: Arc::clone(&ld.output), modifier: ld.modifier,
-            mode: ld.mode, source_dims: ld.source_dims, confidence: want,
+            item_id, output: Arc::clone(&ld.output), modifier: ld.modifier, mode: ld.mode,
+            source_dims, confidence: want, base,
         });
         self.magic_brush_state.rethreshold_in_flight = true;
     }
 
-    /// Swap the last stroke's selection for its re-thresholded version:
-    /// merged onto the pre-stroke selection exactly as the stroke was, and
+    /// Swap the last stroke's selection for its re-thresholded version,
     /// replaced in place so the stroke's undo entry stays the one entry.
-    pub(crate) fn apply_rethreshold(&mut self, item_id: u64, mask: prunr_core::selection::MaskArtifact, confidence: f32) {
-        let Some(ld) = self.magic_brush_state.last_decode.as_mut() else { return };
+    pub(crate) fn apply_rethreshold(&mut self, item_id: u64, merged: Arc<prunr_core::selection::MaskArtifact>, hash: u64, confidence: f32) {
         let Some(item) = self.batch.find_by_id_mut(item_id) else { return };
-        if ld.item_id != item_id || item.selection_hash != Some(ld.committed_hash) {
-            self.magic_brush_state.last_decode = None;
+        if item.retunable_decode().is_none() {
             return;
         }
-        let merged = merge_prompt_result(ld.modifier, item.pre_stroke_selection(), mask);
-        ld.confidence = confidence;
-        if item.replace_selection_in_place(Arc::new(merged)) {
-            ld.committed_hash = item.selection_hash.unwrap_or(ld.committed_hash);
+        let changed = item.replace_selection_in_place(merged, hash);
+        if let Some(ld) = item.last_decode.as_mut() {
+            ld.confidence = confidence;
+            ld.committed_hash = hash;
+        }
+        if changed {
             self.apply_selection_to_active_model(item_id);
         }
     }
@@ -3579,8 +3568,7 @@ impl eframe::App for PrunrApp {
     }
 
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        #[allow(deprecated)]
-        let popup_open = ctx.memory(|m| m.any_popup_open());
+        let popup_open = super::theme::any_popup_open(ctx);
         let pointer_down = ctx.input(|i| i.pointer.any_down());
         self.popup_open_at_frame_start = popup_open || (self.popup_open_at_frame_start && pointer_down);
         self.poll_worker_results(ctx);

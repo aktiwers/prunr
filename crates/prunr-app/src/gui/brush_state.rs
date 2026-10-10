@@ -102,10 +102,9 @@ pub struct BrushSettings {
     /// Selection fill alpha (tinted ACCENT). 0 = no fill, 1 = solid.
     #[serde(default = "default_fill_opacity")]
     pub fill_opacity: f32,
-    /// Magic Brush only: SAM decoder confidence threshold. Plan 07
-    /// reads. Lives in shared BrushSettings to mirror the
-    /// inpaint_sharpen / inpaint_feather pattern (per-tool knobs on a
-    /// shared settings struct).
+    /// Magic Brush only: the probability a pixel must reach to be
+    /// selected (0.5 is the model's decision boundary). Lives in shared
+    /// BrushSettings like the other per-tool knobs.
     #[serde(default = "default_magic_confidence_threshold")]
     pub magic_confidence_threshold: f32,
 }

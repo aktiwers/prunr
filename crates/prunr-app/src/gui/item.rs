@@ -367,6 +367,23 @@ pub(crate) struct BatchItem {
     /// Cached SAM 2 image embedding, filled whenever Magic Brush is active
     /// and this item is selected. Invalidated on source change.
     pub(crate) magic_brush_embedding: Option<std::sync::Arc<prunr_core::sam::SamEmbedding>>,
+    /// The last Magic Brush stroke decoded on this image, kept so the
+    /// Confidence knob re-thresholds it in place instead of needing
+    /// another click.
+    pub(crate) last_decode: Option<LastDecode>,
+    /// A background pre-encode was refused (RAM gate or encoder error);
+    /// not retried every frame. Cleared with the embedding.
+    pub(crate) magic_preencode_refused: bool,
+}
+
+/// The logits of a Magic Brush stroke and how they were applied.
+pub(crate) struct LastDecode {
+    pub(crate) output: Arc<prunr_core::sam::SamDecoderOutput>,
+    pub(crate) modifier: super::processor::PromptModifier,
+    pub(crate) mode: prunr_core::selection::BrushMode,
+    /// The selection hash the stroke committed.
+    pub(crate) committed_hash: u64,
+    pub(crate) confidence: f32,
 }
 
 /// A selection overlay texture and what it was built from. `shown` is
@@ -413,6 +430,7 @@ impl BatchItem {
         self.volatile_seg_tensor = None;
         self.volatile_edge_tensor = None;
         self.selection_tensor_plane = None;
+        self.last_decode = None;
         if let Some(t) = &mut self.selection_texture {
             t.feathered = None;
         }
@@ -461,6 +479,18 @@ impl BatchItem {
     /// change and on model switch to a non-Selection category.
     pub(crate) fn invalidate_magic_brush_embedding(&mut self) {
         self.magic_brush_embedding = None;
+        self.magic_preencode_refused = false;
+        self.last_decode = None;
+    }
+
+    /// The last decode while its stroke still owns the selection; any
+    /// other author changing the selection ends the retune.
+    pub(crate) fn retunable_decode(&mut self) -> Option<&mut LastDecode> {
+        let hash = self.selection_hash;
+        if self.last_decode.as_ref().is_some_and(|ld| hash != Some(ld.committed_hash)) {
+            self.last_decode = None;
+        }
+        self.last_decode.as_mut()
     }
 
     /// Clear every selection-related cache: mask, hash, texture, pending build.
@@ -472,6 +502,7 @@ impl BatchItem {
         self.selection_texture = None;
         self.selection_tex_pending = None;
         self.selection_tensor_plane = None;
+        self.last_decode = None;
     }
 
     /// True while a background thread owes this item a decode, a texture
@@ -513,10 +544,10 @@ impl BatchItem {
     }
 
     /// Replace the selection without touching the stroke history: a retune
-    /// of the last commit, whose undo entry stays valid. Returns false when
-    /// the mask is unchanged.
-    pub(crate) fn replace_selection_in_place(&mut self, mask: Arc<prunr_core::selection::MaskArtifact>) -> bool {
-        let hash = mask.content_hash();
+    /// of the last commit, whose undo entry stays valid. `hash` is the
+    /// mask's content hash, computed where the mask was built. Returns
+    /// false when the mask is unchanged.
+    pub(crate) fn replace_selection_in_place(&mut self, mask: Arc<prunr_core::selection::MaskArtifact>, hash: u64) -> bool {
         if self.selection_hash == Some(hash) {
             return false;
         }
@@ -789,6 +820,8 @@ impl BatchItem {
             selection_tex_pending: None,
             selection_texture: None,
             magic_brush_embedding: None,
+            last_decode: None,
+            magic_preencode_refused: false,
         }
     }
 

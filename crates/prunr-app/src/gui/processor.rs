@@ -218,21 +218,23 @@ pub(crate) enum PromptModifier {
     Subtract,
 }
 
-/// Result from a background SAM decoder thread: the selection decoded at
-/// `confidence`, or a human-readable error. The modifier tells the pump
-/// how to combine it with the existing mask.
+/// Result from a background SAM decoder thread, or a human-readable error.
 pub(crate) struct SamDecoderResult {
     pub(crate) item_id: u64,
     pub(crate) modifier: PromptModifier,
     pub(crate) mode: prunr_core::selection::BrushMode,
-    pub(crate) source_dims: (u32, u32),
     pub(crate) confidence: f32,
-    pub(crate) result: Result<prunr_core::selection::MaskArtifact, String>,
-    /// The decoder logits the mask came from, kept so a Confidence change
-    /// can re-threshold the same stroke without running the decoder again.
-    /// `None` on a re-threshold result (the caller still holds them).
-    pub(crate) output: Option<Arc<prunr_core::sam::SamDecoderOutput>>,
-    pub(crate) rethreshold: bool,
+    pub(crate) result: Result<DecodedSelection, String>,
+}
+
+pub(crate) enum DecodedSelection {
+    /// A click or stroke: the prompt's mask, still to be merged onto the
+    /// current selection, with the logits it came from so a Confidence
+    /// change can re-threshold the same stroke without the decoder.
+    Fresh { mask: prunr_core::selection::MaskArtifact, output: Arc<prunr_core::sam::SamDecoderOutput> },
+    /// A re-threshold: already merged onto the pre-stroke selection and
+    /// hashed on the pool, ready to replace the stroke's selection.
+    Retuned { merged: Arc<prunr_core::selection::MaskArtifact>, hash: u64 },
 }
 
 /// Re-threshold the logits of the last stroke at a new confidence.
@@ -243,6 +245,21 @@ pub(crate) struct SamRethresholdRequest {
     pub(crate) mode: prunr_core::selection::BrushMode,
     pub(crate) source_dims: (u32, u32),
     pub(crate) confidence: f32,
+    /// The selection the stroke was merged onto.
+    pub(crate) base: Option<Arc<prunr_core::selection::MaskArtifact>>,
+}
+
+/// Combine a decoded prompt mask with the selection it was made against.
+pub(crate) fn merge_prompt_result(
+    modifier: PromptModifier,
+    existing: Option<Arc<prunr_core::selection::MaskArtifact>>,
+    new_mask: prunr_core::selection::MaskArtifact,
+) -> prunr_core::selection::MaskArtifact {
+    match (modifier, existing) {
+        (PromptModifier::Add, Some(existing)) => existing.add_mask(&new_mask).unwrap_or(new_mask),
+        (PromptModifier::Subtract, Some(existing)) => existing.subtract_mask(&new_mask).unwrap_or(new_mask),
+        _ => new_mask,
+    }
 }
 
 /// One Magic Brush click or stroke, captured at request time so a chip
@@ -254,7 +271,7 @@ pub(crate) struct SamDecodeRequest {
     pub(crate) modifier: PromptModifier,
     pub(crate) mode: prunr_core::selection::BrushMode,
     pub(crate) source_dims: (u32, u32),
-    pub(crate) confidence_threshold: f32,
+    pub(crate) confidence: f32,
 }
 
 /// Result delivered from a background upscale thread back to the main thread.
@@ -1365,37 +1382,38 @@ impl Processor {
     /// the decoder model is small (~20 MB) and runs quickly. The embedding
     /// is the cached output from a prior `dispatch_sam_encoder` call.
     /// Decoding the logits into a source-resolution mask happens on the
-    /// worker too, so the UI thread only merges the result.
+    /// worker too, so the UI thread only merges the result; the logits
+    /// come back with it for later re-thresholding.
     pub(crate) fn dispatch_sam_decoder(&self, req: SamDecodeRequest) {
         let tx = self.sam_decoder_tx.clone();
         let sessions = Arc::clone(&self.sam_sessions);
         rayon::spawn(move || {
             let (w, h) = req.source_dims;
-            let output = ensure_sam_sessions(&sessions)
+            let result = ensure_sam_sessions(&sessions)
                 .and_then(|s| run_sam_decoder_inline(&s, &req.embedding, &req.prompt))
-                .map(Arc::new);
-            let result = output.as_ref().map(|out| {
-                prunr_core::sam::decode_to_mask_artifact(out, w, h, req.confidence_threshold, req.mode)
-            }).map_err(Clone::clone);
+                .map(|out| {
+                    let mask = prunr_core::sam::decode_to_mask_artifact(&out, w, h, req.confidence, req.mode);
+                    DecodedSelection::Fresh { mask, output: Arc::new(out) }
+                });
             let _ = tx.send(SamDecoderResult {
-                item_id: req.item_id, modifier: req.modifier, mode: req.mode,
-                source_dims: req.source_dims, confidence: req.confidence_threshold,
-                result, output: output.ok(), rethreshold: false,
+                item_id: req.item_id, modifier: req.modifier, mode: req.mode, confidence: req.confidence, result,
             });
         });
     }
 
-    /// Re-threshold a kept decoder output on the pool; the result arrives
-    /// through the decoder channel flagged `rethreshold`.
+    /// Re-threshold a kept decoder output on the pool, merge it onto the
+    /// pre-stroke selection and hash it there, so the UI thread only swaps
+    /// the plane in. The result arrives through the decoder channel.
     pub(crate) fn dispatch_sam_rethreshold(&self, req: SamRethresholdRequest) {
         let tx = self.sam_decoder_tx.clone();
         rayon::spawn(move || {
             let (w, h) = req.source_dims;
             let mask = prunr_core::sam::decode_to_mask_artifact(&req.output, w, h, req.confidence, req.mode);
+            let merged = Arc::new(merge_prompt_result(req.modifier, req.base, mask));
+            let hash = merged.content_hash();
             let _ = tx.send(SamDecoderResult {
-                item_id: req.item_id, modifier: req.modifier, mode: req.mode,
-                source_dims: req.source_dims, confidence: req.confidence,
-                result: Ok(mask), output: None, rethreshold: true,
+                item_id: req.item_id, modifier: req.modifier, mode: req.mode, confidence: req.confidence,
+                result: Ok(DecodedSelection::Retuned { merged, hash }),
             });
         });
     }
@@ -1618,11 +1636,8 @@ mod sam_dispatch_tests {
             item_id: 77,
             modifier: PromptModifier::Add,
             mode: prunr_core::selection::BrushMode::Add,
-            source_dims: (8, 8),
             confidence: 0.5,
             result: Err("decoder test".to_string()),
-            output: None,
-            rethreshold: false,
         }).unwrap();
         let out = rx.try_recv().unwrap();
         assert_eq!(out.item_id, 77);
