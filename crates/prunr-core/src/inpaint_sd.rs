@@ -131,9 +131,9 @@ pub struct SdInpaintRequest {
     pub tuning: SdTuning,
 }
 
-/// How the SD pipeline runs, decided at dispatch (`plan_tuning`) from
-/// the settings and the free RAM and carried on the request, so the
-/// worker needs no settings of its own. Measured on an i7-6700: the
+/// How the SD pipeline runs, built at dispatch (`plan_tuning`) from the
+/// settings and carried on the request, so the worker needs no settings
+/// of its own; the RAM gate trims it where the stroke runs. Measured on an i7-6700: the
 /// tall crop takes 21 % off a 328×607 erase and removes the seam for
 /// 2.8 GB more peak RSS; the CPU plugin beats the HD 530 iGPU by half.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -147,7 +147,7 @@ pub struct SdTuning {
     /// failures, so a broken override cannot poison the default path.
     pub ov_device: Option<String>,
     /// Run a region up to `SD_CROP_MAX` on its long side as one crop
-    /// instead of 512² tiles.
+    /// instead of 512² tiles, if the RAM gate finds room for it.
     pub tall_crop: bool,
     /// Headroom the RAM gate adds to the model's working set.
     #[serde(default = "default_margin_mb")]
@@ -169,17 +169,12 @@ impl Default for SdTuning {
 /// 18.8 GB against 16.1 GB).
 pub const SD_TALL_CROP_EXTRA_MB: u64 = 3_072;
 
-/// The tuning for a stroke, from the free RAM right now: the tall crop
-/// when it fits (see `ram_need_mb`), tiles otherwise.
-pub fn plan_tuning(id: prunr_models::ModelId, keep_loaded: bool, margin_mb: u64) -> SdTuning {
-    plan_with(id, keep_loaded, margin_mb, available_ram_mb(), resident(id))
-}
-
-/// `plan_tuning` with the RAM facts passed in. Unknown free RAM counts
-/// as enough, as in `check_ram_for`.
-fn plan_with(id: prunr_models::ModelId, keep_loaded: bool, margin_mb: u64, available_mb: Option<u64>, resident: bool) -> SdTuning {
-    let tall_crop = available_mb.is_none_or(|free| free >= ram_need_mb(id, margin_mb, resident, true));
-    SdTuning { keep_loaded, ov_device: None, tall_crop, margin_mb }
+/// The tuning for a stroke: the tall crop wherever it fits. Whether it
+/// fits is decided by `check_ram_for` in the process that runs the
+/// stroke, because only there is a kept bundle visible as loaded; the
+/// GUI's own view would count a kept 16 GB bundle twice.
+pub fn plan_tuning(keep_loaded: bool, margin_mb: u64) -> SdTuning {
+    SdTuning { keep_loaded, ov_device: None, tall_crop: true, margin_mb }
 }
 
 /// Free RAM a stroke needs: the model's working set unless its bundle
@@ -2128,14 +2123,18 @@ fn process_rss_mb() -> Option<u64> {
 /// need is not free; when only the tall crop's extra is missing, the
 /// plan falls back to tiles instead. Unknown free RAM passes.
 pub(crate) fn check_ram_for(id: prunr_models::ModelId, tuning: &mut SdTuning) -> Result<(), String> {
-    let Some(desc) = prunr_models::descriptor(id) else { return Ok(()) };
     let Some(free_mb) = available_ram_mb() else { return Ok(()) };
-    let res = resident(id);
-    if tuning.tall_crop && free_mb < ram_need_mb(id, tuning.margin_mb, res, true) {
-        tracing::info!(free_mb, "SD: tall crop no longer fits; tiling instead");
+    fit_ram(id, tuning, free_mb, resident(id))
+}
+
+/// `check_ram_for` with the RAM facts passed in.
+fn fit_ram(id: prunr_models::ModelId, tuning: &mut SdTuning, free_mb: u64, resident: bool) -> Result<(), String> {
+    let Some(desc) = prunr_models::descriptor(id) else { return Ok(()) };
+    if tuning.tall_crop && free_mb < ram_need_mb(id, tuning.margin_mb, resident, true) {
+        tracing::info!(free_mb, "SD: no room for the tall crop; tiling instead");
         tuning.tall_crop = false;
     }
-    let need_mb = ram_need_mb(id, tuning.margin_mb, res, false);
+    let need_mb = ram_need_mb(id, tuning.margin_mb, resident, false);
     if free_mb >= need_mb {
         return Ok(());
     }
@@ -3828,19 +3827,26 @@ mod tests {
     }
 
     #[test]
-    fn plan_takes_the_tall_crop_only_with_the_extra_ram() {
+    fn the_gate_takes_the_tall_crop_only_with_the_extra_ram() {
         let id = prunr_models::ModelId::SdV15InpaintFp16;
         let m = SD_DEFAULT_MARGIN_MB;
         let base = ram_need_mb(id, m, false, false);
         assert!(base > m, "the working set counts when the bundle is not resident");
         assert_eq!(ram_need_mb(id, m, true, false), m, "a resident bundle needs only the headroom");
         assert_eq!(ram_need_mb(id, m, true, true), m + SD_TALL_CROP_EXTRA_MB);
-        assert!(plan_with(id, false, m, None, false).tall_crop, "unknown RAM counts as enough");
-        assert!(plan_with(id, false, m, Some(base + SD_TALL_CROP_EXTRA_MB), false).tall_crop);
-        assert!(!plan_with(id, false, m, Some(base + SD_TALL_CROP_EXTRA_MB - 1), false).tall_crop);
-        assert!(plan_with(id, false, m, Some(m + SD_TALL_CROP_EXTRA_MB), true).tall_crop, "resident: the extra alone decides");
-        let t = plan_with(id, true, m, Some(base), false);
-        assert!(t.keep_loaded && !t.tall_crop && t.ov_device.is_none() && t.margin_mb == m);
+        let fit = |free: u64, resident: bool| {
+            let mut t = plan_tuning(false, m);
+            fit_ram(id, &mut t, free, resident).map(|()| t.tall_crop)
+        };
+        assert_eq!(fit(base + SD_TALL_CROP_EXTRA_MB, false), Ok(true));
+        assert_eq!(fit(base + SD_TALL_CROP_EXTRA_MB - 1, false), Ok(false), "short of the extra: tiles");
+        assert!(fit(base - 1, false).is_err(), "short of the base: refused");
+        // A kept bundle lowers the free RAM by its own size; the gate in
+        // the process holding it must not count it again.
+        assert_eq!(fit(m + SD_TALL_CROP_EXTRA_MB, true), Ok(true), "resident: the extra alone decides");
+        assert_eq!(fit(m, true), Ok(false));
+        let t = plan_tuning(true, m);
+        assert!(t.keep_loaded && t.tall_crop && t.ov_device.is_none() && t.margin_mb == m);
         assert_eq!(t.session_key(), SdSessionKey::default());
         assert!(t.session_key().records_ep_failures());
         assert!(!SdTuning { ov_device: Some("GPU".into()), ..Default::default() }.session_key().records_ep_failures());

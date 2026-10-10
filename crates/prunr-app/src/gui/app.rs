@@ -1185,20 +1185,6 @@ impl PrunrApp {
         } else {
             raw_backend
         };
-        if backend.is_sd_family() {
-            if let Some(desc) = prunr_models::descriptor(backend) {
-                let avail = crate::hardware::available_ram_bytes_throttled();
-                if let Err(msg) = crate::hardware::pre_flight_sd_ram(
-                    desc.working_set_mb,
-                    avail,
-                    self.settings.ram_safety_margin_gb,
-                ) {
-                    tracing::warn!(item_id, ?backend, %msg, "SD pre-flight gate refused dispatch");
-                    self.toasts.error(msg);
-                    return;
-                }
-            }
-        }
         tracing::info!(item_id, ?backend, ?raw_backend, "inpaint stroke committed; dispatching");
         let tuning = super::processor::InpaintTuning {
             sharpen: bs.inpaint_sharpen,
@@ -1215,7 +1201,6 @@ impl PrunrApp {
             sd_use_karras_sigmas: bs.sd_use_karras_sigmas,
             use_taesd: bs.sd_use_taesd_effective(),
             sd_tuning: super::env_overrides::sd_tuning(prunr_core::inpaint_sd::plan_tuning(
-                backend,
                 self.settings.keep_sd_loaded,
                 (self.settings.ram_safety_margin_gb.max(0.0) * 1024.0) as u64,
             )),

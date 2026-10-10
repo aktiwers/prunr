@@ -358,7 +358,7 @@ pub fn process_inpaint_with(
         // The SD pipeline gates RAM itself; LaMa / MI-GAN need < 1 GB.
         let req = sd_req.unwrap_or_else(|| crate::inpaint_sd::SdInpaintRequest {
             num_inference_steps: 20,
-            tuning: crate::inpaint_sd::plan_tuning(id, false, crate::inpaint_sd::SD_DEFAULT_MARGIN_MB),
+            tuning: crate::inpaint_sd::plan_tuning(false, crate::inpaint_sd::SD_DEFAULT_MARGIN_MB),
             ..Default::default()
         });
         return crate::inpaint_sd::process_inpaint_with(image, mask, id, req, hooks);
