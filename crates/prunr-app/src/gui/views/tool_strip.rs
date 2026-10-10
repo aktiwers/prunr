@@ -43,6 +43,8 @@ pub(crate) struct StripFacts {
     /// their own; `None` hides the Auto-apply switch.
     pub protect: Option<bool>,
     pub encoder_pending: bool,
+    /// A selection is painted and Auto-apply is off: offer Apply.
+    pub strokes_waiting: bool,
 }
 
 pub(crate) fn render(ui: &mut Ui, canvas_rect: Rect, tool: Tool, brush: &mut BrushSettings, facts: StripFacts) -> BrushChipOutcome {
@@ -62,6 +64,16 @@ pub(crate) fn render(ui: &mut Ui, canvas_rect: Rect, tool: Tool, brush: &mut Bru
                         Tool::Paint => paint_knobs(ui, brush, facts.is_inpaint),
                         Tool::Magic => magic_knobs(ui, brush),
                     };
+                    if facts.strokes_waiting {
+                        ui.separator();
+                        let apply = chip::tooltip(
+                            chip::button(ui, chip::ButtonKind::Primary, "Apply strokes"),
+                            "Apply strokes",
+                            "Run the model with the painted selection. Auto-apply in the panel does this on every stroke.",
+                            None,
+                        );
+                        change.apply_requested |= apply.clicked();
+                    }
                     ui.separator();
                     let dots = chip::tooltip(
                         chip::icon_square_button(ui, ICON_MORE_HORIZ.codepoint, theme::TEXT_PRIMARY, theme::BG_SECONDARY),

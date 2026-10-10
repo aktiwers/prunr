@@ -425,6 +425,18 @@ impl BrushSettings {
     /// alone — those carry user intent across reset (the Add/Subtract
     /// toggle and seg-mode strength) — and SD-tuning fields are owned
     /// by the SD chip popover.
+    /// The mode a stroke paints with: Shift adds and Alt (or Ctrl)
+    /// subtracts for the stroke's duration, else the chosen mode.
+    pub fn mode_under(&self, shift: bool, subtract: bool) -> BrushMode {
+        if shift {
+            BrushMode::Add
+        } else if subtract {
+            BrushMode::Subtract
+        } else {
+            self.mode
+        }
+    }
+
     /// One size step is a quarter of the radius, at least a pixel, so
     /// small brushes still move and large ones do not crawl.
     pub fn step_radius(&mut self, larger: bool) {
@@ -637,6 +649,17 @@ impl BrushState {
 #[cfg(test)]
 #[allow(clippy::field_reassign_with_default)]
 mod tests {
+    #[test]
+    fn modifiers_override_the_chosen_mode_for_a_stroke() {
+        let mut b = super::BrushSettings::default();
+        b.mode = super::BrushMode::Subtract;
+        assert_eq!(b.mode_under(false, false), super::BrushMode::Subtract);
+        assert_eq!(b.mode_under(true, false), super::BrushMode::Add);
+        assert_eq!(b.mode_under(true, true), super::BrushMode::Add, "Shift wins over Alt");
+        b.mode = super::BrushMode::Add;
+        assert_eq!(b.mode_under(false, true), super::BrushMode::Subtract);
+    }
+
     #[test]
     fn step_radius_moves_at_least_a_pixel_and_stays_in_range() {
         let mut b = super::BrushSettings::default();

@@ -8,6 +8,7 @@ Start the app with PRUNR_CONTROL_PORT=7340 (any free port), then:
     prunrctl.py find Settings
     prunrctl.py click Settings        # by readable name; --secondary for right-click
     prunrctl.py hold Gamma            # press and keep holding (then move / release)
+    prunrctl.py hold-at 600 400       # press at a window position (a brush stroke)
     prunrctl.py move 40 0             # drag the held pointer by dx dy
     prunrctl.py release
     prunrctl.py key Mod+Shift+Z       # a chord in the settings form
@@ -50,6 +51,9 @@ def main() -> int:
     click.add_argument("name")
     click.add_argument("--secondary", action="store_true")
     sub.add_parser("hold").add_argument("name")
+    ha = sub.add_parser("hold-at")
+    ha.add_argument("x", type=float)
+    ha.add_argument("y", type=float)
     mv = sub.add_parser("move")
     mv.add_argument("dx", type=float)
     mv.add_argument("dy", type=float)
@@ -70,6 +74,7 @@ def main() -> int:
         "find": lambda: {"cmd": "find", "name": a.name},
         "click": lambda: {"cmd": "click", "name": a.name, "secondary": a.secondary},
         "hold": lambda: {"cmd": "hold", "name": a.name},
+        "hold-at": lambda: {"cmd": "hold_at", "x": a.x, "y": a.y},
         "move": lambda: {"cmd": "move", "dx": a.dx, "dy": a.dy},
         "release": lambda: {"cmd": "release"},
         "key": lambda: {"cmd": "key", "chord": a.chord},
