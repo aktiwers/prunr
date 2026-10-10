@@ -733,10 +733,24 @@ impl PrunrApp {
     }
 
     pub(crate) fn any_modal_open(&self) -> bool {
-        self.show_settings
-            || self.show_shortcuts
-            || self.show_cli_help
-            || self.show_pipeline_flow
+        !self.open_modals().is_empty()
+    }
+
+    /// The modals up this frame, by name.
+    pub(crate) fn open_modals(&self) -> Vec<&'static str> {
+        [
+            (self.show_settings, "settings"),
+            (self.show_shortcuts, "shortcuts"),
+            (self.show_cli_help, "cli_help"),
+            (self.show_pipeline_flow, "pipeline_flow"),
+            (self.model_store.is_some(), "model_store"),
+            (self.runtime_prompt.is_some(), "runtime_prompt"),
+            (self.pending_reset_confirm, "reset_confirm"),
+        ]
+        .into_iter()
+        .filter(|(open, _)| *open)
+        .map(|(_, name)| name)
+        .collect()
     }
 
     /// Undo the most-recent action on selected items (or current item if none
