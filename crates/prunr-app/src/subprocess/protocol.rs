@@ -679,7 +679,7 @@ mod tests {
                 scheduler: prunr_core::inpaint_sd::SchedulerKind::Ddim,
                 strength: 0.85,
                 use_karras_sigmas: false,
-                tuning: prunr_core::inpaint_sd::SdTuning { keep_loaded: true, ov_device: Some("GPU".into()) },
+                tuning: prunr_core::inpaint_sd::SdTuning { keep_loaded: true, ov_device: Some("GPU".into()), ov_dynamic: true, ov_threads: Some(4) },
             }),
             feather_px: 4.5,
             sharpen: 0.6,
