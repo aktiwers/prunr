@@ -127,7 +127,7 @@ fn sd_bench() {
         "0" | "false" | "no" | "off" => Some(false),
         _ => None,
     };
-    let planned = inpaint_sd::plan_tuning(id, false, inpaint_sd::SD_DEFAULT_MARGIN_MB);
+    let planned = inpaint_sd::plan_tuning(false, inpaint_sd::SD_DEFAULT_MARGIN_MB);
     let req = SdInpaintRequest {
         prompt: "clean background".to_string(),
         num_inference_steps: steps,
