@@ -298,9 +298,10 @@ impl PrunrApp {
             Action::FitToWindow => self.zoom_state.pending_fit_zoom = true,
             Action::ActualSize => self.zoom_state.pending_actual_size = true,
             Action::Cancel => {
-                // egui closes an open popup on this Escape during render;
-                // the press goes no further.
-                if !super::theme::any_popup_open(ctx) {
+                // egui closes an open popup, and the Save-preset dialog
+                // closes itself, on this Escape during render; the press
+                // goes no further.
+                if !super::theme::any_popup_open(ctx) && !super::views::preset_dropdown::save_dialog_open(ctx) {
                     self.apply_cancel_shortcut(ctx);
                 }
             }
@@ -767,6 +768,7 @@ impl PrunrApp {
             (self.show_cli_help, "cli_help"),
             (self.show_pipeline_flow, "pipeline_flow"),
             (self.model_store.is_some(), "model_store"),
+            (self.pending_license_request.is_some(), "license"),
             (self.runtime_prompt.is_some(), "runtime_prompt"),
             (self.pending_reset_confirm, "reset_confirm"),
         ]
@@ -3369,7 +3371,12 @@ impl PrunrApp {
     /// in-flight upscale → in-flight eraser stroke → active batch processing
     /// → active selection → open modal. Selection clear sits above modal
     /// dismissal so Esc is the natural "cancel what I just drew" key.
+    /// Escape: the top-most modal first, then a run in flight, then
+    /// the selection. One press does one thing.
     fn apply_cancel_shortcut(&mut self, ctx: &egui::Context) {
+        if self.close_top_modal(ctx) {
+            return;
+        }
         if self.processor.is_upscale_in_flight() {
             self.processor.cancel_upscale();
         } else if self.processor.any_inpaint_in_flight() {
@@ -3384,6 +3391,17 @@ impl PrunrApp {
             if let Some(idx) = self.batch.selected_idx_clamped() {
                 self.handle_selection_action(idx, SelectionAction::Clear, ctx);
             }
+        }
+    }
+
+    /// Closes the modal on top, in stacking order; false when none is open.
+    fn close_top_modal(&mut self, ctx: &egui::Context) -> bool {
+        if self.pending_license_request.is_some() {
+            self.pending_license_request = None;
+        } else if self.model_store.is_some() {
+            self.model_store = None;
+        } else if let Some(rt) = self.runtime_prompt.take() {
+            self.settings.snooze_runtime_prompt(rt, RUNTIME_PROMPT_SNOOZE_DAYS);
         } else if self.show_settings {
             self.close_settings(ctx);
         } else if self.show_shortcuts {
@@ -3392,7 +3410,10 @@ impl PrunrApp {
             self.show_cli_help = false;
         } else if self.show_pipeline_flow {
             self.show_pipeline_flow = false;
+        } else {
+            return false;
         }
+        true
     }
 
     fn toggle_settings_panel(&mut self, ctx: &egui::Context) {

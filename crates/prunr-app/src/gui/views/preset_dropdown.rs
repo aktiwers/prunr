@@ -83,6 +83,15 @@ pub(super) fn all_preset_names(settings: &Settings) -> Vec<String> {
     names
 }
 
+/// The "Save preset" modal's egui id; its open flag lives in egui memory.
+pub(crate) const SAVE_DIALOG_ID: &str = "preset_save_dialog";
+const SAVE_DIALOG_SIZE: [f32; 2] = [420.0, 380.0];
+const OVERWRITE_LIST_HEIGHT: f32 = 120.0;
+
+pub(crate) fn save_dialog_open(ctx: &egui::Context) -> bool {
+    ctx.memory(|m| m.data.get_temp::<bool>(egui::Id::new(SAVE_DIALOG_ID).with("open")).unwrap_or(false))
+}
+
 /// Render the Preset dropdown. Returns `Some(name)` when the user applied a
 /// preset (click on a row, or Save that swaps in the new name), so the caller
 /// can update `BatchItem.applied_preset`. Returns `None` for no-op frames or
@@ -95,7 +104,7 @@ pub fn render(
     applied_preset: &str,
 ) -> Option<String> {
     let pop_id = egui::Id::new("preset_popover");
-    let save_dialog_id = egui::Id::new("preset_save_dialog");
+    let save_dialog_id = egui::Id::new(SAVE_DIALOG_ID);
 
     let label = button_label(settings, current_item, applied_preset);
     let resp = crate::gui::views::chip::tooltip(
@@ -135,6 +144,7 @@ pub fn render(
                     {
                         *current_item = settings.preset_values(&name);
                         applied = Some(name.clone());
+                        egui::Popup::close_id(ui.ctx(), pop_id);
                     }
                     ui.with_layout(
                         egui::Layout::right_to_left(egui::Align::Center),
@@ -196,6 +206,7 @@ pub fn render(
                 ui.memory_mut(|m| {
                     m.data.insert_temp::<bool>(save_dialog_id.with("open"), true);
                 });
+                egui::Popup::close_id(ui.ctx(), pop_id);
             }
 
             ui.add_space(theme::SPACE_XS);
@@ -223,13 +234,9 @@ pub fn render(
         // without holding a borrow on `settings.presets` across the dialog.
         let existing_names = sorted_preset_names(settings);
 
-        egui::Window::new("Save preset")
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
-            .show(ui.ctx(), |ui| {
-                ui.label("Name for this preset:");
-                let text_resp = ui.text_edit_singleline(&mut name_buf);
+        let backdrop_closed = theme::standard_modal_window(ui.ctx(), SAVE_DIALOG_ID, "Save preset", SAVE_DIALOG_SIZE, |ui| {
+                let name_label = ui.label("Name for this preset:");
+                let text_resp = ui.text_edit_singleline(&mut name_buf).labelled_by(name_label.id);
                 if text_resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                     commit = true;
                 }
@@ -273,15 +280,18 @@ pub fn render(
                             .size(theme::FONT_SIZE_MONO),
                     );
                     ui.add_space(theme::SPACE_XS);
-                    for name in &existing_names {
-                        let label = format!("{}  {name}", ICON_BOOKMARK.codepoint);
-                        let btn = button(ui, ButtonKind::Secondary, &label);
-                        if btn.on_hover_text("Overwrite with current settings").clicked() {
-                            overwrite_target = Some(name.clone());
+                    egui::ScrollArea::vertical().max_height(OVERWRITE_LIST_HEIGHT).show(ui, |ui| {
+                        for name in &existing_names {
+                            let label = format!("{}  {name}", ICON_BOOKMARK.codepoint);
+                            let btn = button(ui, ButtonKind::Secondary, &label);
+                            if btn.on_hover_text("Overwrite with current settings").clicked() {
+                                overwrite_target = Some(name.clone());
+                            }
                         }
-                    }
+                    });
                 }
-            });
+        });
+        cancel |= backdrop_closed || ui.ctx().input(|i| i.key_pressed(egui::Key::Escape));
 
         let close_dialog = || {
             ui.ctx().memory_mut(|m| {
