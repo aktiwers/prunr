@@ -504,7 +504,7 @@ fn a_recut_for_a_state_left_behind_never_lands() {
     app.handle_undo(&ctx);
     let landed = PreviewResult {
         item_id: 8,
-        rgba: px(9),
+        rgba: std::sync::Arc::new(px(9)),
         kind: PreviewKind::Mask,
         generation: 0,
         version: inputs.version,
