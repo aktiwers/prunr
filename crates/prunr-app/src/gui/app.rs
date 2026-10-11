@@ -828,7 +828,6 @@ impl PrunrApp {
             self.cancel_runs_on(id);
             self.processor.live_preview.cancel(id);
             if let Some(kind) = step(&mut self.batch.items[idx]) {
-                self.batch.items[idx].source_texture = None;
                 if self.batch.items[idx].settings.bg_image_hash != preset_before {
                     self.reconcile_bg_image_after_preset(idx, ctx);
                 }
@@ -840,7 +839,6 @@ impl PrunrApp {
             return;
         }
         self.result_switch_id += 1;
-        self.canvas_switch_id += 1;
         self.sync_selected_batch_textures(ctx);
         self.toasts.info(step_toast(&stepped, verb));
     }
@@ -1116,7 +1114,6 @@ impl PrunrApp {
                 // Undone, redone or edited since the run started.
                 continue;
             }
-            item.result_fades_in = true;
             self.publish_result(r.item_id, Arc::new(r.rgba), "inpaint", ctx);
             if let Some(item) = self.batch.find_by_id_mut(r.item_id) {
                 // The region is filled: the step shows the result without
@@ -1141,6 +1138,7 @@ impl PrunrApp {
         let handles = self.batch.bg_io.tex_prep_handles();
         let switch = self.result_switch_id;
         let Some(item) = self.batch.find_by_id_mut(item_id) else { return };
+        item.hold_for_reveal();
         item.unpark_result();
         item.result_rgba = Some(rgba.clone());
         if item.status == BatchStatus::Pending {
@@ -1203,8 +1201,8 @@ impl PrunrApp {
                     item.result_rgba = Some(new_rgba.clone());
                     item.applied_recipe = Some(result_recipe);
                     item.status = BatchStatus::Done;
+                    item.hold_for_reveal();
                     item.result_tex_pending = true;
-                    item.result_fades_in = true;
                     item.thumb_pending = true;
                     let source = item.source.clone();
                     Self::spawn_tex_prep(
@@ -2629,6 +2627,10 @@ impl PrunrApp {
             self.show_original = false;
         }
         if let (Some(idx), Some(id)) = (idx, selected) {
+            let item = &mut self.batch.items[idx];
+            if item.reveal.as_ref().is_some_and(|(_, at)| at.elapsed().as_secs_f64() > super::views::effects::REVEAL_SECS) {
+                item.reveal = None;
+            }
             self.ensure_selected_source_decoded(idx);
             self.request_selected_textures(idx, ctx);
             self.kick_bg_image_tex_prep(id, ctx);
@@ -2647,6 +2649,8 @@ impl PrunrApp {
                 continue;
             }
             item.drop_hot_tensors();
+            item.reveal = None;
+            item.reveal_from = None;
             // 16 MB each: the shown image keeps its embedding, and with the
             // tool on so does the one shown before it.
             if !self.magic_brush_state.keeps_embedding(item.id) {
@@ -2859,6 +2863,9 @@ impl PrunrApp {
             return;
         }
         let succeeded = result.is_ok();
+        if succeeded {
+            item.hold_for_reveal();
+        }
         let backend_update = item.apply_tier_result(result, tensor_cache, edge_cache, recipe_snapshot, is_selected);
         if succeeded {
             item.finish_job();
@@ -3252,14 +3259,11 @@ impl PrunrApp {
 
         while let Ok((item_id, name, color_image, is_result)) = self.batch.bg_io.tex_prep_rx.try_recv() {
             let tex = ctx.load_texture(name, color_image, egui::TextureOptions::default());
-            let selected = self.batch.is_selected(item_id);
             if let Some(item) = self.batch.find_by_id_mut(item_id) {
                 if is_result {
                     item.result_texture = Some(tex);
                     item.result_tex_pending = false;
-                    if std::mem::take(&mut item.result_fades_in) && selected {
-                        self.result_switch_id += 1;
-                    }
+                    item.start_reveal();
                     tracing::info!(item_id, kind = "result", "texture uploaded");
                 } else {
                     item.source_texture = Some(tex);
@@ -3276,6 +3280,7 @@ impl PrunrApp {
             match result {
                 _ if !item.job_is_current() => continue,
                 Ok(rgba) => {
+                    item.hold_for_reveal();
                     item.unpark_result();
                     item.result_rgba = Some(rgba);
                     item.result_texture = None;

@@ -8,19 +8,15 @@ use crate::gui::item::BatchItem;
 
 /// Called from canvas render after the item image is painted. `img_rect`
 /// is the on-screen rect of the displayed texture (post-zoom).
-/// `working`: a run is filling this region, and the overlay breathes.
+/// `working`: a run is filling this region, which then breathes in soft
+/// light with a sheen crossing it, inside the brushed shape.
 pub(crate) fn render_selection_overlay(ui: &Ui, item: &BatchItem, img_rect: Rect, working: bool) {
     let Some(tex) = item.selection_texture.as_ref() else { return };
-    let tint = if working {
+    let full_uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
+    if working {
         let t = ui.ctx().input(|i| i.time) as f32;
-        Color32::WHITE.gamma_multiply(0.4 + 0.6 * super::progress_widget::breath(t))
+        super::effects::paint_working_masked(ui.painter(), img_rect, tex.handle.id(), t);
     } else {
-        Color32::WHITE
-    };
-    ui.painter().image(
-        tex.handle.id(),
-        img_rect,
-        Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-        tint,
-    );
+        ui.painter().image(tex.handle.id(), img_rect, full_uv, Color32::WHITE);
+    }
 }
