@@ -3,6 +3,7 @@
 
 use egui::Ui;
 
+use super::chip;
 use super::refinement_row::render_refine_group;
 use super::upscale_chip::render_output_scale_chip;
 use crate::gui::item_settings::ItemSettings;
@@ -15,6 +16,7 @@ pub(crate) fn render_upscale_chips(
     app_settings: &Settings,
     item_settings: &mut ItemSettings,
     source_dims: (u32, u32),
+    processing: bool,
 ) {
     let factor = item_settings.output_scale.factor();
     let out_w = source_dims.0.saturating_mul(factor);
@@ -22,6 +24,10 @@ pub(crate) fn render_upscale_chips(
     if app_settings.model.to_model_id().is_none() {
         return;
     }
-    render_output_scale_chip(ui, &mut item_settings.output_scale, (out_w, out_h));
-    render_refine_group(ui, item_settings);
+    // A change mid-run would make the landing result stale and drop it.
+    let reason = processing.then_some("Wait for the upscale to finish, or cancel it.");
+    chip::gated(ui, reason, |ui| {
+        render_output_scale_chip(ui, &mut item_settings.output_scale, (out_w, out_h));
+        render_refine_group(ui, item_settings);
+    });
 }
