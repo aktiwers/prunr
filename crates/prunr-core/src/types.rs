@@ -123,10 +123,6 @@ pub struct MaskSettings {
     /// GPU-rect fast path at display time).
     #[serde(default)]
     pub bg_effect: BgEffect,
-    /// Fingerprint of the active brush correction. The bytes live on the
-    /// GUI's `BatchItem`; this is just the change-detection handle.
-    #[serde(default)]
-    pub correction_hash: Option<u64>,
 }
 
 impl Default for MaskSettings {
@@ -141,7 +137,6 @@ impl Default for MaskSettings {
             feather: 0.0,
             fill_style: FillStyle::default(),
             bg_effect: BgEffect::default(),
-            correction_hash: None,
         }
     }
 }
