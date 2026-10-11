@@ -58,7 +58,7 @@ const PIPELINES: [Pipeline; 4] = [
             Stage { icon: ICON_BRUSH.codepoint, title: "Paint region", tagline: "Everything under the brush is replaced." },
             Stage { icon: ICON_OPEN_IN_FULL.codepoint, title: "Expand region", tagline: "Grows or shrinks the region first; a little growth gives the fill more context." },
             Stage { icon: ICON_AUTO_AWESOME.codepoint, title: "Fill", tagline: "The eraser model invents what belongs there. SD models follow the prompt." },
-            Stage { icon: ICON_BLUR_LINEAR.codepoint, title: "Edge blend", tagline: "Blends the fill into the photo across a band at the boundary." },
+            Stage { icon: ICON_BLUR_LINEAR.codepoint, title: "Feather", tagline: "Blends the fill into the photo across a band at the boundary." },
             Stage { icon: ICON_DEBLUR.codepoint, title: "Sharpen", tagline: "Sharpens the filled area, which comes out slightly soft." },
         ],
     },

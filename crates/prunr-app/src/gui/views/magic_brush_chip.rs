@@ -4,6 +4,7 @@
 use egui::Ui;
 
 use crate::gui::brush_state::BrushSettings;
+use crate::gui::knob_catalog::{shows, Surface};
 use crate::gui::theme;
 use crate::gui::views::{chip, fmt};
 
@@ -35,7 +36,9 @@ pub(crate) fn flyout_body(ui: &mut Ui, bs: &mut BrushSettings, encoder_pending: 
     ui.separator();
     ui.add_space(4.0);
 
-    outcome.committed |= super::brush_chip::render_shared_selection_section(ui, bs);
+    if shows(model, Surface::SelectionStrokes) {
+        outcome.committed |= super::brush_chip::render_shared_selection_section(ui, bs);
+    }
 
     ui.add_space(4.0);
     ui.separator();
