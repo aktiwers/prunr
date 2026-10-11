@@ -10,6 +10,7 @@ use std::sync::{Arc, OnceLock};
 use egui::{Event, InputState, Key};
 
 use super::kv_row;
+use crate::gui::knob_catalog::ModelRole;
 use crate::gui::theme;
 
 const MOD_NAME: &str = if cfg!(target_os = "macos") { "Cmd" } else { "Ctrl" };
@@ -22,26 +23,26 @@ pub(crate) fn is_subtract_modifier(m: &egui::Modifiers) -> bool {
 }
 
 /// The Magic Brush toggle's tooltip for this model.
-pub(crate) fn magic_brush_tip(is_inpaint: bool) -> &'static str {
+pub(crate) fn magic_brush_tip(role: ModelRole) -> &'static str {
     let mac = cfg!(target_os = "macos");
-    match (is_inpaint, mac) {
-        (true, true) => "Click or stroke an object to add it to the region; Alt takes it away.",
-        (true, false) => "Click or stroke an object to add it to the region; Alt or Ctrl takes it away.",
-        (false, true) => "Click or stroke an object to restore it; Alt erases it.",
-        (false, false) => "Click or stroke an object to restore it; Alt or Ctrl erases it.",
+    match (role == ModelRole::Cutout, mac) {
+        (false, true) => "Click or stroke an object to add it to the selection; Alt takes it away.",
+        (false, false) => "Click or stroke an object to add it to the selection; Alt or Ctrl takes it away.",
+        (true, true) => "Click or stroke an object to restore it; Alt erases it.",
+        (true, false) => "Click or stroke an object to restore it; Alt or Ctrl erases it.",
     }
 }
 
 /// The bottom-left hint while a brush is on: what Shift and Alt do for
-/// this model. A background-removal cut-out is restored or erased; the
-/// eraser's region is added to or subtracted from.
-pub(crate) fn modifier_hints(is_inpaint: bool) -> (&'static str, &'static str) {
+/// this model. A background-removal cut-out is restored or erased; any
+/// other selection is added to or subtracted from.
+pub(crate) fn modifier_hints(role: ModelRole) -> (&'static str, &'static str) {
     let mac = cfg!(target_os = "macos");
-    match (is_inpaint, mac) {
-        (true, true) => ("Shift = add", "Alt = subtract"),
-        (true, false) => ("Shift = add", "Alt/Ctrl = subtract"),
-        (false, true) => ("Shift = restore", "Alt = erase"),
-        (false, false) => ("Shift = restore", "Alt/Ctrl = erase"),
+    match (role == ModelRole::Cutout, mac) {
+        (false, true) => ("Shift = add", "Alt = subtract"),
+        (false, false) => ("Shift = add", "Alt/Ctrl = subtract"),
+        (true, true) => ("Shift = restore", "Alt = erase"),
+        (true, false) => ("Shift = restore", "Alt/Ctrl = erase"),
     }
 }
 

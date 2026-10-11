@@ -21,6 +21,7 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 
 ### Changed
 
+- Each model shows only the controls that act on its image: no Mask chip without a background-removal model, no selection on an upscaler, and brushes say Add / Subtract wherever they shape a selection rather than a cut-out.
 - **Undo rebuilt on one timeline per image**, the way Krita, GIMP and Photoshop do it. Every step stores its whole state, so undo shows the stored image instantly instead of re-running a model. Knob changes are now undoable (a slider drag is one step), Clear selection is undoable, and an erase that lands removes its brush marks, which undo brings back. A result that finishes after you undo or move on is dropped instead of landing on the wrong state, and undo stops a run in progress.
 
 - **One toolbar row.** Every pipeline stage is a group chip (Mask, Lines, Fill style, Background, Refine, Quality, Prompt, Advanced) with a header and a reset; the tool cluster is Magic, Paint, the selection actions and Compare, then Preset and Reset.

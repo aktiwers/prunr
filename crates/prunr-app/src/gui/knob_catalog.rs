@@ -15,6 +15,8 @@
 
 use prunr_core::{LineMode, ProcessingRecipe, RequiredTier};
 
+use crate::gui::settings::SettingsModel;
+
 /// Knobs whose `KnobSpec` is a pure function of the knob identity.
 /// Context-sensitive knobs (line_mode transition, input_transform) live
 /// in their own types so callers can't accidentally ask the catalog for
@@ -104,6 +106,57 @@ pub struct LineModeChange {
     pub to: LineMode,
 }
 
+
+/// What the selected model does to the image.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ModelRole {
+    /// Background removal: cuts the subject out.
+    Cutout,
+    /// No model: filters and lines on the photo.
+    Filters,
+    /// Fills a painted region.
+    Erase,
+    /// Enlarges the image.
+    Upscale,
+}
+
+/// A surface or control that exists only for some models.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Surface {
+    Mask,
+    Lines,
+    Effect,
+    Background,
+    Scale,
+    Refine,
+    /// The Stable Diffusion eraser's Quality, Prompt and Advanced chips.
+    SdChips,
+    /// Paint and Magic Brush, the selection on the image and its actions.
+    Brushes,
+    /// The Paint Brush's Restore/Erase or Add/Subtract choice.
+    PaintMode,
+    /// How strongly a stroke changes the selection.
+    BrushOpacity,
+    /// Expand region, Edge blend and Sharpen for the filled region.
+    FillRegionKnobs,
+}
+
+/// Whether `surface` shows for `model`: only where it has an effect. A
+/// surface that shows but is inactive under another setting (Mask with
+/// Sketch on Full) is greyed with a reason instead, via `knob_enabled`.
+pub fn shows(model: SettingsModel, surface: Surface) -> bool {
+    use ModelRole::*;
+    let role = model.role();
+    match surface {
+        Surface::Mask => role == Cutout,
+        Surface::Lines | Surface::Effect | Surface::Background => matches!(role, Cutout | Filters),
+        Surface::Scale | Surface::Refine => role == Upscale,
+        Surface::SdChips => model == SettingsModel::SdInpaint,
+        Surface::Brushes => role != Upscale,
+        Surface::PaintMode | Surface::BrushOpacity => matches!(role, Cutout | Filters),
+        Surface::FillRegionKnobs => role == Erase,
+    }
+}
 
 /// Runtime condition under which a knob's chip is enabled.
 /// Declared on each `StaticKnob` via `requirement()` so new knobs
@@ -434,6 +487,40 @@ mod tests {
         assert_eq!(expected.len(), StaticKnob::ALL.len(), "table covers all variants");
         for &(knob, req) in expected {
             assert_eq!(knob.requirement(), req, "{knob:?}");
+        }
+    }
+
+    /// Every model shows exactly the surfaces that act on its image. One
+    /// row per model, written out rather than derived, so a new model or
+    /// a moved surface has to be decided here.
+    #[test]
+    fn each_model_shows_only_what_works_with_it() {
+        use Surface::*;
+        let all = [Mask, Lines, Effect, Background, Scale, Refine, SdChips, Brushes, PaintMode, BrushOpacity, FillRegionKnobs];
+        let cutout: &[Surface] = &[Mask, Lines, Effect, Background, Brushes, PaintMode, BrushOpacity];
+        let filters: &[Surface] = &[Lines, Effect, Background, Brushes, PaintMode, BrushOpacity];
+        let erase: &[Surface] = &[Brushes, FillRegionKnobs];
+        let sd: &[Surface] = &[Brushes, FillRegionKnobs, SdChips];
+        let upscale: &[Surface] = &[Scale, Refine];
+        let rows: &[(SettingsModel, &[Surface])] = &[
+            (SettingsModel::Silueta, cutout),
+            (SettingsModel::U2net, cutout),
+            (SettingsModel::BiRefNetLite, cutout),
+            (SettingsModel::None, filters),
+            (SettingsModel::Inpaint, erase),
+            (SettingsModel::BigInpaint, erase),
+            (SettingsModel::MiganInpaint, erase),
+            (SettingsModel::SdInpaint, sd),
+            (SettingsModel::RealEsrganUpscale, upscale),
+            (SettingsModel::Nomos8kUpscale, upscale),
+            (SettingsModel::FourXNmkdSiaxCxUpscale, upscale),
+            (SettingsModel::FourXNmkdSuperscaleUpscale, upscale),
+        ];
+        assert_eq!(rows.len(), SettingsModel::ALL.len(), "every model has a row");
+        for &(model, shown) in rows {
+            for surface in all {
+                assert_eq!(shows(model, surface), shown.contains(&surface), "{model:?} {surface:?}");
+            }
         }
     }
 
