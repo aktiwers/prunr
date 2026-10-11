@@ -52,7 +52,7 @@ pub(crate) fn handle_input(
         // Render a muted cursor so the user gets feedback that brush is
         // ON, but skip wiring.
         tracing::debug!(item_id = item.id, "brush active but item has no dimensions — cursor only");
-        draw_cursor(ui, img_rect, settings, /*armed=*/ false);
+        draw_cursor(ui, img_rect, CursorLook::of(settings), /*armed=*/ false);
         return BrushAction::None;
     }
 
@@ -75,7 +75,7 @@ pub(crate) fn handle_input(
     draw_trail(ui, brush_state, settings);
 
     // Cursor circle — armed only when the pointer is over the image.
-    draw_cursor(ui, img_rect, settings, pointer_on_img.is_some());
+    draw_cursor(ui, img_rect, CursorLook::of(settings), pointer_on_img.is_some());
 
     // Brush radius in model-pixel space — derived from the on-screen
     // img_rect width vs model width. One isotropic factor is enough:
@@ -120,6 +120,30 @@ pub(super) fn screen_to_model(p: Pos2, img_rect: Rect, model_w: u32, model_h: u3
     Pos2::new(in_img_x * model_w as f32, in_img_y * model_h as f32)
 }
 
+/// How a brush's cursor and trail are drawn.
+#[derive(Clone, Copy)]
+pub(crate) struct CursorLook {
+    pub(crate) radius: f32,
+    pub(crate) hardness: f32,
+    pub(crate) strength: f32,
+    pub(crate) shape: prunr_core::brush::BrushShape,
+}
+
+impl CursorLook {
+    pub(crate) fn of(s: &BrushSettings) -> Self {
+        Self { radius: s.radius, hardness: s.hardness, strength: s.strength, shape: s.shape }
+    }
+}
+
+/// Magic Brush picks objects, so its size and shape change nothing: it
+/// draws a small fixed cursor and trail.
+pub(crate) const MAGIC_CURSOR: CursorLook = CursorLook {
+    radius: 10.0,
+    hardness: 1.0,
+    strength: 1.0,
+    shape: prunr_core::brush::BrushShape::Circle,
+};
+
 /// Translucent ACCENT-purple stamps along the in-progress stroke's
 /// trail. Drawn on a foreground layer so the image rendered earlier
 /// in the same frame can't accidentally cover them, and tinted
@@ -127,7 +151,7 @@ pub(super) fn screen_to_model(p: Pos2, img_rect: Rect, model_w: u32, model_h: u3
 /// images too.
 fn draw_trail(ui: &Ui, brush_state: &BrushState, s: &BrushSettings) {
     let Some(shape) = brush_state.active_shape() else { return };
-    draw_trail_for(ui, s, shape, brush_state.trail_stamps());
+    draw_trail_for(ui, CursorLook::of(s), shape, brush_state.trail_stamps());
 }
 
 /// Paint the in-progress trail from an arbitrary stamp iterator. Shared
@@ -136,7 +160,7 @@ fn draw_trail(ui: &Ui, brush_state: &BrushState, s: &BrushSettings) {
 /// only difference between the two tools is what they commit on release.
 pub(crate) fn draw_trail_for(
     ui: &Ui,
-    s: &BrushSettings,
+    s: CursorLook,
     shape: prunr_core::brush::BrushShape,
     stamps: impl IntoIterator<Item = (f32, f32, f32)>,
 ) {
@@ -180,7 +204,7 @@ pub(crate) fn draw_trail_for(
     let _ = solid;
 }
 
-pub(crate) fn draw_cursor(ui: &Ui, img_rect: Rect, s: &BrushSettings, armed: bool) {
+pub(crate) fn draw_cursor(ui: &Ui, img_rect: Rect, s: CursorLook, armed: bool) {
     let pointer = ui.input(|i| i.pointer.hover_pos());
     let Some(p) = pointer else { return };
     if !img_rect.contains(p) {

@@ -327,20 +327,10 @@ fn handle_magic_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: 
         ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
     }
 
-    // Brush-shape cursor outline + in-progress trail. Same helpers Paint
-    // Brush uses, reading the same BrushSettings — single source of truth
-    // for size / shape / hardness / strength means a tweak in either
-    // popover applies to both tools.
+    let look = super::brush_overlay::MAGIC_CURSOR;
     let pointer_on_img = hover_pos_for_cursor.filter(|p| img_rect.contains(*p));
-    super::brush_overlay::draw_trail_for(
-        ui,
-        &app.settings.brush,
-        app.settings.brush.shape,
-        app.magic_brush_state.active_trail.stamps(),
-    );
-    super::brush_overlay::draw_cursor(
-        ui, img_rect, &app.settings.brush, pointer_on_img.is_some(),
-    );
+    super::brush_overlay::draw_trail_for(ui, look, look.shape, app.magic_brush_state.active_trail.stamps());
+    super::brush_overlay::draw_cursor(ui, img_rect, look, pointer_on_img.is_some());
 
     let (shift, subtract) = ui.ctx().input(|i| (i.modifiers.shift, super::shortcuts::is_subtract_modifier(&i.modifiers)));
     let mode = app.settings.brush.mode_under(shift, subtract);
@@ -364,7 +354,7 @@ fn handle_magic_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: 
     // the encoder must finish before a SAM prompt can run.
     let Some(embedding) = embedding else { return };
 
-    let screen_radius = app.settings.brush.radius;
+    let screen_radius = look.radius;
 
     if drag_started {
         app.magic_brush_state.clear_stroke();
