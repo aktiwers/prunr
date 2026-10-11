@@ -456,21 +456,23 @@ pub fn apply_input_transform<'a>(
 ) -> std::borrow::Cow<'a, DynamicImage> {
     use crate::types::InputTransform;
     use std::borrow::Cow;
-    if matches!(transform, InputTransform::None) {
-        return Cow::Borrowed(img);
+    const SMOOTH_SIGMA: f32 = 1.2;
+    match transform {
+        InputTransform::None => return Cow::Borrowed(img),
+        InputTransform::Smooth => {
+            let rgba = crate::formats::rgba_view(img);
+            return Cow::Owned(DynamicImage::ImageRgba8(image::imageops::blur(&*rgba, SMOOTH_SIGMA)));
+        }
+        _ => {}
     }
     let mut rgba = img.to_rgba8();
     match transform {
-        InputTransform::None => unreachable!(),
+        InputTransform::None | InputTransform::Smooth => unreachable!("returned above"),
         InputTransform::Grayscale => {
             for p in rgba.pixels_mut() {
                 let y = ((p.0[0] as u32 * 2126 + p.0[1] as u32 * 7152 + p.0[2] as u32 * 722) / 10000) as u8;
                 p.0[0] = y; p.0[1] = y; p.0[2] = y;
             }
-        }
-        InputTransform::Smooth => {
-            const SMOOTH_SIGMA: f32 = 1.2;
-            rgba = image::imageops::blur(&rgba, SMOOTH_SIGMA);
         }
         InputTransform::ContrastBoost { percent } => {
             let factor = percent.clamp(50, 300) as i32;
