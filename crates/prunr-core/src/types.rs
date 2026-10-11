@@ -243,7 +243,7 @@ impl Default for EdgeSettings {
 
 /// Transform applied to the image BEFORE it reaches DexiNed. Changes what
 /// DexiNed "sees", so switching `InputTransform` invalidates the edge tensor
-/// cache and triggers a FullPipeline rerun. Not live-previewable.
+/// cache and reruns the detector.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Hash,
     serde::Serialize, serde::Deserialize, Default,
@@ -256,6 +256,8 @@ pub enum InputTransform {
     /// Convert to grayscale before edge detection — colour-edge artefacts
     /// collapse into pure luminance edges, producing ink-like lines.
     Grayscale,
+    /// A light blur, so photo grain and noise don't become stray lines.
+    Smooth,
     /// Scale contrast by `percent / 100` around luma 128. 100 = neutral,
     /// 150 = punchy, 50 = muted. Clamped 50..=300.
     ContrastBoost { percent: u16 },
@@ -268,6 +270,7 @@ impl InputTransform {
     pub const ALL: &'static [Self] = &[
         InputTransform::None,
         InputTransform::Grayscale,
+        InputTransform::Smooth,
         InputTransform::ContrastBoost { percent: 150 },
         InputTransform::Posterize { levels: 4 },
     ];
@@ -276,6 +279,7 @@ impl InputTransform {
         match self {
             InputTransform::None => "None",
             InputTransform::Grayscale => "Grayscale",
+            InputTransform::Smooth => "Smooth",
             InputTransform::ContrastBoost { .. } => "Contrast boost",
             InputTransform::Posterize { .. } => "Posterize",
         }

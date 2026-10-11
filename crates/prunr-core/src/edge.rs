@@ -492,6 +492,10 @@ pub fn apply_input_transform<'a>(
                 p.0[0] = y; p.0[1] = y; p.0[2] = y;
             }
         }
+        InputTransform::Smooth => {
+            const SMOOTH_SIGMA: f32 = 1.2;
+            rgba = image::imageops::blur(&rgba, SMOOTH_SIGMA);
+        }
         InputTransform::ContrastBoost { percent } => {
             let factor = percent.clamp(50, 300) as i32;
             for p in rgba.pixels_mut() {
@@ -577,6 +581,16 @@ fn preprocess(img: &DynamicImage) -> Array4<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Smooth softens a hard step, so single-pixel noise fades before the
+    /// detector sees it.
+    #[test]
+    fn the_smooth_prefilter_softens_a_step() {
+        let img = DynamicImage::ImageRgba8(RgbaImage::from_fn(16, 1, |x, _| if x < 8 { image::Rgba([0, 0, 0, 255]) } else { image::Rgba([255, 255, 255, 255]) }));
+        let out = apply_input_transform(&img, crate::types::InputTransform::Smooth).to_rgba8();
+        let at = |x| out.get_pixel(x, 0)[0];
+        assert!(at(7) > 0 && at(8) < 255, "the step is softened: {} {}", at(7), at(8));
+    }
 
     // The compositions as shipped before the row-parallel rewrite: the
     // bit-exact oracle for every style and compose mode. They dilate the

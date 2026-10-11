@@ -53,8 +53,8 @@ pub struct ItemSettings {
     pub line_strength: f32,
     /// Solid color override for edges. `None` = preserve original RGB.
     pub solid_line_color: Option<[u8; 3]>,
-    /// Dilate edge mask by N pixels after threshold — thickens thin lines.
-    /// Range 0-10 in the UI; stored as u8 to fit the ItemSettings byte budget.
+    /// Line width: the edge mask grown by N pixels. Range 0-20 in the UI;
+    /// stored as u8 to fit the ItemSettings byte budget.
     pub edge_thickness: u8,
     /// Which DexiNed output scale to read from the cached tensor set.
     pub edge_scale: EdgeScale,
@@ -79,9 +79,9 @@ pub struct ItemSettings {
     /// the render-time fallback via the GPU rect behind the texture.
     #[serde(default)]
     pub bg_effect: prunr_core::BgEffect,
-    /// Transform applied to the image before DexiNed inference. Not live-
-    /// previewable — changes invalidate the edge tensor cache and trigger
-    /// a FullPipeline rerun on the next Process.
+    /// Transform applied to the image before DexiNed inference. A change
+    /// drops the edge tensor cache and reruns the detector at once (on the
+    /// cached cut-out when there is one).
     #[serde(default)]
     pub input_transform: prunr_core::InputTransform,
     /// Drives the CompositeOnly recipe diff when the user picks a different
