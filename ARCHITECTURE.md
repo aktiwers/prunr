@@ -357,10 +357,9 @@ Models are registry data: tile size, tile multiple, `working_set_mb`, an optiona
 |--------------------|-----|
 | Undilated edge plane (threshold, then Lanczos) | strength, scale |
 | Dilated plane (a thickness drag is about 32 ms at 4K) | strength, scale, thickness |
-| Bold planes for the dual-scale style | same |
 | Masked-subject base (SubjectOutline) | mask recipe, model |
 
-A colour, style or compose change costs only the composition. The composition is row-parallel and branch-free per row, and it blends colour only at edge pixels.
+Edge planes are kept per scale for the two scales built last: the shown scale and Bold for the dual-scale style, or the previous scale, so switching back is free. A colour, style or compose change costs only the composition. The composition is row-parallel and branch-free per row, and it blends colour only at edge pixels.
 
 ## GPU Execution Providers
 

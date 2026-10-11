@@ -564,7 +564,7 @@ mod tests {
         use prunr_core::LineMode;
         let mut item = fixture(1);
         item.settings.line_mode = LineMode::Off;
-        item.cached_edge.dilated = Some((Arc::new(image::GrayImage::new(1, 1)), crate::gui::live_preview::EdgePlaneKey { strength_bits: 0, scale: prunr_core::EdgeScale::Fused, thickness: 0 }));
+        item.edge_planes.store(crate::gui::live_preview::EdgePlanes { base: None, dilated: Some(Arc::new(image::GrayImage::new(1, 1))) }, crate::gui::live_preview::EdgePlaneKey { strength_bits: 0, scale: prunr_core::EdgeScale::Fused, thickness: 0 });
         let snap_with_edges = item_with_line_mode(LineMode::EdgesOnly);
         item.preset_undo_stack.push_back(PresetSnapshot {
             settings: snap_with_edges,
@@ -573,7 +573,7 @@ mod tests {
 
         assert!(HistoryManager::swap_preset(&mut item, HistoryDir::Undo));
         assert_eq!(item.settings.line_mode, LineMode::EdgesOnly);
-        assert!(item.cached_edge.dilated.is_none(), "line_mode change must invalidate edge cache");
+        assert!(item.edge_planes.is_empty(), "line_mode change must invalidate edge cache");
     }
 
     // ── source_texture invariant across archive → undo → redo ──────────────
