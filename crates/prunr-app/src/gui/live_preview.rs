@@ -86,13 +86,14 @@ pub enum PreviewKind {
 #[derive(Debug, Clone, Copy)]
 pub struct UpscaleTier2Knobs {
     pub sharpen: f32,
+    pub sharpen_sigma: f32,
     pub ai_blend: f32,
     pub color_match: bool,
 }
 
 impl UpscaleTier2Knobs {
     pub fn of(s: &crate::gui::item_settings::ItemSettings) -> Self {
-        Self { sharpen: s.sharpen, ai_blend: s.ai_blend, color_match: s.color_match }
+        Self { sharpen: s.sharpen, sharpen_sigma: s.output_scale.sharpen_sigma(), ai_blend: s.ai_blend, color_match: s.color_match }
     }
 }
 
@@ -1159,6 +1160,7 @@ mod tests {
 
         let knobs = UpscaleTier2Knobs {
             sharpen: 0.0,
+            sharpen_sigma: 2.0,
             ai_blend: 1.0,
             color_match: false,
         };
