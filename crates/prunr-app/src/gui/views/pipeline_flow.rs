@@ -64,7 +64,7 @@ const PIPELINES: [Pipeline; 4] = [
     },
     Pipeline {
         tab: "Upscale",
-        input: "The photo, or the current result in chain mode",
+        input: "The photo, or the current result",
         output: "The enlarged photo",
         stages: &[
             Stage { icon: ICON_BLUR_ON.codepoint, title: "Denoise", tagline: "Smooths grain first so it is not enlarged along with the detail. Requires reprocessing." },

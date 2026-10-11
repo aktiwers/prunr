@@ -508,7 +508,7 @@ fn a_recut_for_a_state_left_behind_never_lands() {
         kind: PreviewKind::Mask,
         generation: 0,
         version: inputs.version,
-        base: None,
+        start: None,
         new_edge: None,
         new_bold: None,
         new_masked_base: None,

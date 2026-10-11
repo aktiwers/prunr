@@ -105,8 +105,8 @@ pub struct PreviewResult {
     /// The item's timeline version at dispatch: the result lands only on
     /// the state it was computed for.
     pub version: u64,
-    /// The image the preview started from (`None`: the source).
-    pub base: Option<Arc<RgbaImage>>,
+    /// Where the preview started (`None`: the source).
+    pub(crate) start: Option<crate::gui::timeline::RunStart>,
     /// The edge planes an Edge dispatch built (not the ones it reused), with
     /// the key they were built for, for the item's cache. `None` for the
     /// other kinds.
@@ -311,7 +311,7 @@ impl LivePreview {
                 // after the user stops dragging.
                 let applied_tier2_knobs = inputs.upscale_tier2_knobs;
                 let version = inputs.version;
-                let base = inputs.base.clone();
+                let start = inputs.start.clone();
                 let output = run_preview(inputs, &cancel);
                 if cancel.load(Ordering::Acquire) {
                     return;
@@ -326,7 +326,7 @@ impl LivePreview {
                     // thread can read `self.pending` atomically. The worker
                     // ships a placeholder and doesn't care.
                     let _ = tx.send(PreviewResult {
-                        item_id: id, rgba, kind: dispatch_kind, generation, version, base,
+                        item_id: id, rgba, kind: dispatch_kind, generation, version, start,
                         new_edge, new_bold, new_masked_base,
                         applied_mask: mask_recipe,
                         applied_tier2_knobs,
@@ -395,9 +395,9 @@ pub struct DispatchInputs {
     /// The item's timeline version, carried to the result.
     pub version: u64,
     pub original: Arc<DynamicImage>,
-    /// The image `original` wraps when the preview starts from an earlier
-    /// result (`None`: the source), recorded as the step's start on landing.
-    pub base: Option<Arc<RgbaImage>>,
+    /// Where the preview starts when that is an earlier result (`None`: the
+    /// source), recorded as the step's start on landing.
+    pub(crate) start: Option<crate::gui::timeline::RunStart>,
     pub settings: ItemSettings,
     /// Segmentation tensor (decompressed) + dimensions + model. Required for
     /// `PreviewKind::Mask` *or* `PreviewKind::Edge` in SubjectOutline mode
@@ -1000,7 +1000,7 @@ mod tests {
             42,
             InFlight { cancel: Arc::new(AtomicBool::new(false)), generation: 5 },
         );
-        lp.result_tx.send(PreviewResult { version: 0, base: None,
+        lp.result_tx.send(PreviewResult { version: 0, start: None,
             item_id: 42,
             rgba: RgbaImage::new(1, 1),
             kind: PreviewKind::Mask,
@@ -1028,7 +1028,7 @@ mod tests {
             99,
             InFlight { cancel: Arc::new(AtomicBool::new(false)), generation: 7 },
         );
-        lp.result_tx.send(PreviewResult { version: 0, base: None,
+        lp.result_tx.send(PreviewResult { version: 0, start: None,
             item_id: 99,
             rgba: RgbaImage::new(2, 2),
             kind: PreviewKind::Mask,
@@ -1055,7 +1055,7 @@ mod tests {
         // No in-flight entry at all (user cancel_all'd or never dispatched).
         // A late result arriving for an unknown id must be dropped cleanly.
         let mut lp = LivePreview::default();
-        lp.result_tx.send(PreviewResult { version: 0, base: None,
+        lp.result_tx.send(PreviewResult { version: 0, start: None,
             item_id: 777,
             rgba: RgbaImage::new(1, 1),
             kind: PreviewKind::Mask,
@@ -1079,7 +1079,7 @@ mod tests {
             11,
             InFlight { cancel: Arc::new(AtomicBool::new(false)), generation: 3 },
         );
-        lp.result_tx.send(PreviewResult { version: 0, base: None,
+        lp.result_tx.send(PreviewResult { version: 0, start: None,
             item_id: 11,
             rgba: RgbaImage::new(1, 1),
             kind: PreviewKind::Mask,
@@ -1110,7 +1110,7 @@ mod tests {
             22,
             Pending { last_tweak_at: Instant::now(), kind: PreviewKind::Mask },
         );
-        lp.result_tx.send(PreviewResult { version: 0, base: None,
+        lp.result_tx.send(PreviewResult { version: 0, start: None,
             item_id: 22,
             rgba: RgbaImage::new(1, 1),
             kind: PreviewKind::Mask,
@@ -1175,7 +1175,7 @@ mod tests {
                 version: 0,
                 kind: PreviewKind::UpscaleTier2,
                 original: Arc::new(image::DynamicImage::ImageRgba8((*raw_arc).clone())),
-                base: None,
+                start: None,
                 settings: ItemSettings::default(),
                 seg_tensor: None,
                 edge_tensor: None,

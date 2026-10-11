@@ -48,7 +48,7 @@ pub enum SubprocessCommand {
         item_id: u64,
         /// Path to temp file containing the source image bytes.
         image_path: std::path::PathBuf,
-        /// For chain mode: path to temp file with previous result RGBA + dimensions.
+        /// For a run that starts from an earlier result: path to temp file with its RGBA + dimensions.
         chain_input: Option<ChainInput>,
     },
     /// Tier 2: Re-run postprocess from a cached tensor (skip inference).
@@ -117,7 +117,7 @@ pub enum SubprocessCommand {
     Shutdown,
 }
 
-/// Chain mode input: previous result as raw RGBA in a temp file.
+/// The image a run starts from when it is an earlier result: raw RGBA in a temp file.
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub struct ChainInput {
     pub path: std::path::PathBuf,

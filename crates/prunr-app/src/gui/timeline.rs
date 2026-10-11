@@ -269,14 +269,21 @@ pub(crate) struct DocState {
     pub(crate) at: Instant,
 }
 
-/// What made a step's image: the engine, and the image its run started
-/// from (`None`: the original). Running the same engine again redoes the
-/// step from that image instead of stacking on its own output.
+/// What made a step's image: the engine, and where its run started
+/// (`None`: the original). Running the same engine again redoes the step
+/// from there instead of stacking on its own output.
 #[derive(Clone)]
 pub(crate) struct Origin {
     pub(crate) engine: Engine,
-    pub(crate) base: Option<StoredImage>,
-    pub(crate) base_dims: Option<(u32, u32)>,
+    pub(crate) start: Option<RunStart>,
+}
+
+/// An image a run starts from: a stored timeline image, loaded only when
+/// the run reads it, and its size.
+#[derive(Clone)]
+pub(crate) struct RunStart {
+    pub(crate) image: StoredImage,
+    pub(crate) dims: (u32, u32),
 }
 
 impl DocState {
@@ -380,8 +387,12 @@ impl Timeline {
         self.cursor
     }
 
+    /// Every stored image: each step's result, and each step's start
+    /// that is no longer any step's result (its step fell off the end).
     pub(crate) fn stored_images(&self) -> impl Iterator<Item = &StoredImage> {
+        let is_a_result = |b: &StoredImage| self.states.iter().any(|s| s.result.as_ref().is_some_and(|r| Arc::ptr_eq(r, b)));
         self.states.iter().filter_map(|s| s.result.as_ref())
+            .chain(self.states.iter().filter_map(|s| Some(&s.origin.as_ref()?.start.as_ref()?.image)).filter(move |b| !is_a_result(b)))
     }
 
     pub(crate) fn stored_selections(&self) -> impl Iterator<Item = &StoredSelection> {

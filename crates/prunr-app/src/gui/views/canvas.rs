@@ -695,7 +695,7 @@ fn render_processing_canvas(ui: &mut egui::Ui, app: &PrunrApp) -> Option<Rect> {
     // A run that builds on an earlier result shows that result while it works.
     let item = app.batch.selected_item();
     let result_tex = item.and_then(|i| i.result_texture.as_ref());
-    let on_result = item.is_some_and(|i| i.job.as_ref().is_some_and(|j| j.base.is_some()));
+    let on_result = item.is_some_and(|i| i.job_builds_on_shown_result());
     let display_texture = if on_result && result_tex.is_some() {
         result_tex
     } else {

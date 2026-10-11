@@ -406,18 +406,17 @@ impl BatchManager {
             // Drop bytes / DynamicImage / RGBA before send so concurrent
             // threads don't pile per-image peaks.
             let result: Result<Arc<image::RgbaImage>, String> = (|| {
-                if let Some(base) = base {
-                    let mut rgba = (*base).clone();
-                    prunr_core::apply_fill_style(&mut rgba, fill_style);
-                    return Ok(Arc::new(rgba));
-                }
-                let bytes = source.load_bytes()
-                    .map_err(|e| format!("Failed to load: {e}"))?;
-                let original = prunr_core::load_image_from_bytes(&bytes)
-                    .map_err(|_| "Decode failed".to_string())?;
-                drop(bytes);
-                let mut rgba = original.to_rgba8();
-                drop(original);
+                let mut rgba = match base {
+                    Some(base) => Arc::unwrap_or_clone(base),
+                    None => {
+                        let bytes = source.load_bytes()
+                            .map_err(|e| format!("Failed to load: {e}"))?;
+                        let original = prunr_core::load_image_from_bytes(&bytes)
+                            .map_err(|_| "Decode failed".to_string())?;
+                        drop(bytes);
+                        original.to_rgba8()
+                    }
+                };
                 prunr_core::apply_fill_style(&mut rgba, fill_style);
                 Ok(Arc::new(rgba))
             })();
