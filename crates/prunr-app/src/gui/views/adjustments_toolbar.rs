@@ -856,9 +856,7 @@ fn fill_style_params(ui: &mut Ui, style: &mut prunr_core::FillStyle) -> bool {
     changed
 }
 
-/// The five backgrounds a user can choose. Derived from the two
-/// orthogonal data fields (`bg`, `bg_effect`) — effects take precedence
-/// over solid color at render time, and the chip mirrors that precedence.
+/// The backgrounds a user can choose, read from `ItemSettings::backdrop`.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum BgKind { Transparent, Solid, Image, BlurredSource, DesaturatedSource }
 

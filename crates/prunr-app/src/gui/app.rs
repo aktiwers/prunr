@@ -610,38 +610,28 @@ impl PrunrApp {
     /// background as one undo step; a preset's fills in the picture its
     /// settings name, if they still do.
     pub(crate) fn land_bg_image(&mut self, load: super::background_io::BgImageLoad) {
-        let super::background_io::BgImageLoad { item_id, path, picked, result } = load;
-        let Some(item) = self.batch.find_by_id_mut(item_id) else { return };
-        match result {
-            Ok((img, hash)) if picked => {
-                item.settings.bg = None;
-                item.settings.bg_effect = prunr_core::BgEffect::None;
-                item.set_bg_image_hashed(img, Some(path.clone()), hash);
-                item.commit(StepKind::Adjust);
+        use super::batch_manager::BgLanded;
+        match self.batch.land_bg_image(load) {
+            BgLanded::Picked { hash, path } => {
                 // A preset that captured this hash can reload the picture
                 // later, or after a restart.
                 self.settings.bg_image_paths.insert(hash, path);
                 self.settings.save();
             }
-            Ok((img, hash)) => {
-                if item.settings.bg_image_hash.map(|h| h.get()) == Some(hash) {
-                    item.set_bg_image_hashed(img, Some(path), hash);
-                }
+            BgLanded::Failed { picked: true, error } => {
+                self.toasts.error(format!("Couldn't load background image: {error}"));
             }
-            Err(err) if picked => {
-                self.toasts.error(format!("Couldn't load background image: {err}"));
+            BgLanded::Failed { picked: false, error } => {
+                self.toasts.error(format!("Couldn't load preset background: {error}"));
             }
-            Err(err) => {
-                item.clear_bg_image();
-                self.toasts.error(format!("Couldn't load preset background: {err}"));
-            }
+            BgLanded::Filled | BgLanded::Gone => {}
         }
     }
 
     /// Reconcile `BatchItem.bg_image` with `settings.bg_image_hash` after a
     /// preset apply. Preset apply copies `ItemSettings` (which includes the
-    /// hash) but doesn't touch the bytes on the BatchItem; this restores
-    /// the lockstep `set_bg_image` / `clear_bg_image` invariant.
+    /// hash) but not the picture; this loads it from the path the hash was
+    /// saved with, or drops the hash.
     fn reconcile_bg_image_after_preset(&mut self, idx: usize) {
         let Some(item) = self.batch.items.get_mut(idx) else { return };
         let want = item.settings.bg_image_hash;

@@ -227,8 +227,8 @@ pub(crate) struct BatchItem {
     /// across unrelated tweaks — so "Portrait ✎" keeps saying Portrait even
     /// after the user modifies something.
     pub(crate) applied_preset: String,
-    /// Never mutate outside `set_bg_image` / `clear_bg_image` — those are
-    /// the only writers that keep `settings.bg_image_hash` in lockstep,
+    /// Never mutate outside `set_bg_image_hashed` / `clear_bg_image` /
+    /// `adopt_settings`: the writers that keep `settings.bg_image_hash` in step,
     /// which the recipe-diff dispatch reads to fire CompositeOnly.
     pub(crate) bg_image: Option<Arc<BgImage>>,
     /// The picture behind the result (a background image or an effect
@@ -891,6 +891,13 @@ impl BatchItem {
             hash,
         }));
         self.settings.bg_image_hash = std::num::NonZeroU64::new(hash);
+    }
+
+    /// Take another image's settings and its background picture together,
+    /// keeping the picture in step with the settings' reference to it.
+    pub(crate) fn adopt_settings(&mut self, settings: super::item_settings::ItemSettings, bg_image: Option<Arc<BgImage>>) {
+        self.settings = settings;
+        self.bg_image = bg_image;
     }
 
     pub(crate) fn clear_bg_image(&mut self) {
