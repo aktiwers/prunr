@@ -110,8 +110,8 @@ pub(crate) fn render(ctx: &egui::Context, toasts: &mut crate::gui::toasts::Toast
                         .show(ui, |ui| {
                             opt_row(ui, "--gamma <n>",
                                 "Removal strength (default 1.0, >1 aggressive)");
-                            opt_row(ui, "--threshold <n>",
-                                "Hard cutoff 0\u{2013}1 (off by default)");
+                            opt_row(ui, "--contrast <n>",
+                                "Edge contrast 0\u{2013}1, 1 is a hard edge (default 0)");
                             opt_row(ui, "--edge-shift <n>",
                                 "Trim (+) or expand (\u{2212}) edges, in px");
                             opt_row(ui, "--refine-edges",
@@ -120,7 +120,7 @@ pub(crate) fn render(ctx: &egui::Context, toasts: &mut crate::gui::toasts::Toast
 
                     ui.add_space(theme::SPACE_MD);
                     section_heading(ui, "Examples");
-                    example_row(ui, toasts, "prunr --gamma 2.0 --threshold 0.5 photo.jpg",
+                    example_row(ui, toasts, "prunr --gamma 2.0 --contrast 1 photo.jpg",
                         "Aggressive removal with crisp edges");
                     example_row(ui, toasts, "prunr --gamma 0.5 --edge-shift -2 portrait.jpg",
                         "Gentle removal with expanded edges");

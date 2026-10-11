@@ -83,7 +83,7 @@ Common flags:
 | `-f, --force` | Overwrite existing output |
 | `--cpu` | Force CPU inference |
 | `--gamma <N>` | Removal strength (default: 1.0) |
-| `--threshold <N>` | Hard cutoff (0.0–1.0) |
+| `--contrast <N>` | Edge contrast (0.0–1.0); 1 is a hard edge |
 | `--edge-shift <N>` | Shrink (positive) or grow (negative) the cut-out by N pixels |
 | `--refine-edges` | Guided filter for fine detail (hair, leaves) |
 | `--lines` | Extract lines/edges only |

@@ -33,8 +33,8 @@ use serde::{Deserialize, Serialize};
 pub struct ItemSettings {
     /// Gamma curve applied to the mask. >1.0 = more aggressive removal, <1.0 = gentler.
     pub gamma: f32,
-    /// Optional binary threshold (0.0-1.0). `None` = soft mask.
-    pub threshold: Option<f32>,
+    /// Edge contrast (0.0-1.0): 0 keeps the soft edge, 1 cuts it hard.
+    pub contrast: f32,
     /// Edge shift in pixels: >0 erodes, <0 dilates.
     pub edge_shift: f32,
     /// Guided-filter refinement of mask edges.
@@ -143,7 +143,7 @@ impl Default for ItemSettings {
     fn default() -> Self {
         Self {
             gamma: 1.0,
-            threshold: None,
+            contrast: 0.0,
             edge_shift: 0.0,
             refine_edges: false,
             guided_radius: 8,
@@ -185,7 +185,7 @@ impl ItemSettings {
     pub fn mask_settings(&self) -> MaskSettings {
         MaskSettings {
             gamma: self.gamma,
-            threshold: self.threshold,
+            contrast: self.contrast,
             edge_shift: self.edge_shift,
             refine_edges: self.refine_edges,
             guided_radius: self.guided_radius as u32,
@@ -288,15 +288,46 @@ pub(crate) fn item_with_line_mode(line_mode: prunr_core::LineMode) -> ItemSettin
     ItemSettings { line_mode, ..ItemSettings::default() }
 }
 
+/// Rewrite settings saved before Contrast replaced the hard threshold:
+/// anywhere in `value`, an item's `threshold` (a number when it was on)
+/// becomes `contrast` 1.0, the hard edge it was. Runs before parsing.
+pub(crate) fn migrate_threshold_to_contrast(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            if let Some(old) = map.remove("threshold") {
+                if old.is_number() && !map.contains_key("contrast") {
+                    map.insert("contrast".into(), serde_json::json!(1.0));
+                }
+            }
+            map.values_mut().for_each(migrate_threshold_to_contrast);
+        }
+        serde_json::Value::Array(items) => items.iter_mut().for_each(migrate_threshold_to_contrast),
+        _ => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A preset saved with the hard threshold on loads as a hard edge;
+    /// one saved with it off loads soft.
+    #[test]
+    fn an_old_hard_threshold_loads_as_full_contrast() {
+        let mut v = serde_json::json!({ "models": { "silueta": { "item_settings": { "gamma": 1.2, "threshold": 0.3 } },
+                                                     "birefnet": { "item_settings": { "gamma": 1.0, "threshold": null } } } });
+        migrate_threshold_to_contrast(&mut v);
+        let hard: ItemSettings = serde_json::from_value(v["models"]["silueta"]["item_settings"].clone()).unwrap();
+        let soft: ItemSettings = serde_json::from_value(v["models"]["birefnet"]["item_settings"].clone()).unwrap();
+        assert_eq!((hard.contrast, hard.gamma), (1.0, 1.2));
+        assert_eq!(soft.contrast, 0.0);
+    }
 
     #[test]
     fn default_matches_v1_defaults() {
         let s = ItemSettings::default();
         assert_eq!(s.gamma, 1.0);
-        assert!(s.threshold.is_none());
+        assert_eq!(s.contrast, 0.0);
         assert_eq!(s.edge_shift, 0.0);
         assert!(!s.refine_edges);
         assert_eq!(s.line_mode, LineMode::Off);
@@ -330,14 +361,14 @@ mod tests {
     fn mask_settings_roundtrip() {
         let s = ItemSettings {
             gamma: 1.5,
-            threshold: Some(0.3),
+            contrast: 0.3,
             edge_shift: 2.0,
             refine_edges: true,
             ..ItemSettings::default()
         };
         let m = s.mask_settings();
         assert_eq!(m.gamma, 1.5);
-        assert_eq!(m.threshold, Some(0.3));
+        assert_eq!(m.contrast, 0.3);
         assert_eq!(m.edge_shift, 2.0);
         assert!(m.refine_edges);
     }
@@ -354,7 +385,7 @@ mod tests {
         let s = ItemSettings {
             line_mode: LineMode::EdgesOnly,
             gamma: 2.0, // should NOT affect recipe in EdgesOnly mode
-            threshold: Some(0.8),
+            contrast: 0.8,
             ..ItemSettings::default()
         };
         let r = s.current_recipe(prunr_core::ModelKind::Silueta);
@@ -369,7 +400,7 @@ mod tests {
         // to `EdgeScale::Fused` (the previous hardcoded block_cat output).
         let old_json = r#"{
             "gamma": 1.2,
-            "threshold": null,
+            "contrast": 0.0,
             "edge_shift": 0.0,
             "refine_edges": false,
             "guided_radius": 8,
@@ -390,7 +421,7 @@ mod tests {
     fn serde_json_roundtrip_all_fields_populated() {
         let s = ItemSettings {
             gamma: 2.3,
-            threshold: Some(0.75),
+            contrast: 0.75,
             edge_shift: -1.5,
             refine_edges: true,
             guided_radius: 12,
@@ -430,7 +461,7 @@ mod tests {
         // cleanly. Missing `output_scale` defaults to X4 (native).
         let old_json = r#"{
             "gamma": 1.0,
-            "threshold": null,
+            "contrast": 0.0,
             "edge_shift": 0.0,
             "refine_edges": false,
             "guided_radius": 8,
@@ -493,7 +524,7 @@ mod tests {
         // and defaults `output_scale` to X4.
         let old_json = r#"{
             "gamma": 1.0,
-            "threshold": null,
+            "contrast": 0.0,
             "edge_shift": 0.0,
             "refine_edges": false,
             "guided_radius": 8,
@@ -574,7 +605,7 @@ mod tests {
         // ai_blend=1 (the critical one — zero here would disable AI output).
         let old_json = r#"{
             "gamma": 1.0,
-            "threshold": null,
+            "contrast": 0.0,
             "edge_shift": 0.0,
             "refine_edges": false,
             "guided_radius": 8,

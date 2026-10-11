@@ -54,9 +54,9 @@ pub struct Cli {
     #[arg(long, default_value_t = 1.0)]
     pub gamma: f32,
 
-    /// Binary threshold (0.0–1.0). Pixels below become fully transparent.
-    #[arg(long)]
-    pub threshold: Option<f32>,
+    /// Edge contrast (0.0–1.0): 0 keeps the soft edge, 1 cuts it hard.
+    #[arg(long, default_value_t = 0.0)]
+    pub contrast: f32,
 
     /// Edge refinement in pixels. Positive erodes (shrinks), negative dilates (expands).
     #[arg(long, default_value_t = 0.0)]
@@ -190,7 +190,7 @@ impl Cli {
     fn mask_settings(&self) -> MaskSettings {
         MaskSettings {
             gamma: self.gamma,
-            threshold: self.threshold,
+            contrast: self.contrast,
             edge_shift: self.edge_shift,
             refine_edges: self.refine_edges,
             ..Default::default()
@@ -246,7 +246,7 @@ pub fn run_remove(args: &Cli) -> i32 {
         if args.line_color.is_some() { conflicts.push("--line-color"); }
         if args.bg_color.is_some() { conflicts.push("--bg-color"); }
         if args.bg_image.is_some() { conflicts.push("--bg-image"); }
-        if args.threshold.is_some() { conflicts.push("--threshold"); }
+        if args.contrast > 0.0 { conflicts.push("--contrast"); }
         if !conflicts.is_empty() {
             eprintln!(
                 "error: --inpaint cannot be combined with {} \u{2014} those flags belong to background-removal mode.",

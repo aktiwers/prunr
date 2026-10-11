@@ -55,13 +55,13 @@ impl From<&crate::EdgeSettings> for EdgeRecipe {
     }
 }
 
-/// Tier 2: mask postprocessing settings (gamma, threshold, edge refinement).
+/// Tier 2: mask postprocessing settings (gamma, contrast, edge refinement).
 /// Uses `f32::to_bits()` for exact float comparison.
 /// All fields are `Copy` types (u32, bool, enums), so `MaskRecipe: Copy`.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct MaskRecipe {
     gamma_bits: u32,
-    threshold_bits: Option<u32>,
+    contrast_bits: u32,
     edge_shift_bits: u32,
     pub refine_edges: bool,
     guided_radius: u32,
@@ -77,7 +77,7 @@ impl From<&crate::MaskSettings> for MaskRecipe {
     fn from(m: &crate::MaskSettings) -> Self {
         Self {
             gamma_bits: m.gamma.to_bits(),
-            threshold_bits: m.threshold.map(|t| t.to_bits()),
+            contrast_bits: m.contrast.to_bits(),
             edge_shift_bits: m.edge_shift.to_bits(),
             refine_edges: m.refine_edges,
             guided_radius: m.guided_radius,
@@ -93,7 +93,7 @@ impl From<&crate::MaskSettings> for MaskRecipe {
 impl PartialEq for MaskRecipe {
     fn eq(&self, other: &Self) -> bool {
         self.gamma_bits == other.gamma_bits
-            && self.threshold_bits == other.threshold_bits
+            && self.contrast_bits == other.contrast_bits
             && self.edge_shift_bits == other.edge_shift_bits
             && self.refine_edges == other.refine_edges
             && self.guided_radius == other.guided_radius
@@ -109,7 +109,7 @@ impl Eq for MaskRecipe {}
 impl std::hash::Hash for MaskRecipe {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.gamma_bits.hash(state);
-        self.threshold_bits.hash(state);
+        self.contrast_bits.hash(state);
         self.edge_shift_bits.hash(state);
         self.refine_edges.hash(state);
         self.guided_radius.hash(state);
@@ -345,10 +345,10 @@ mod tests {
     use super::*;
 
     /// Build a MaskRecipe for tests — other MaskSettings fields default.
-    fn mask(gamma: f32, threshold: Option<f32>, edge_shift: f32, refine: bool) -> MaskRecipe {
+    fn mask(gamma: f32, contrast: f32, edge_shift: f32, refine: bool) -> MaskRecipe {
         MaskRecipe::from(&crate::MaskSettings {
             gamma,
-            threshold,
+            contrast,
             edge_shift,
             refine_edges: refine,
             ..Default::default()
@@ -371,7 +371,7 @@ mod tests {
                 compose_mode: ComposeMode::LinesOnly,
                 line_style: LineStyle::Solid,
             },
-            mask: mask(gamma, None, 0.0, false),
+            mask: mask(gamma, 0.0, 0.0, false),
             composite: CompositeRecipe {
                 bg_color: bg,
                 bg_image_hash: None,
@@ -430,15 +430,15 @@ mod tests {
 
     #[test]
     fn float_bits_equality() {
-        let a = mask(1.0, Some(0.5), 0.0, true);
-        let b = mask(1.0, Some(0.5), 0.0, true);
+        let a = mask(1.0, 0.5, 0.0, true);
+        let b = mask(1.0, 0.5, 0.0, true);
         assert_eq!(a, b);
     }
 
     #[test]
     fn float_bits_inequality() {
-        let a = mask(1.0, Some(0.5), 0.0, true);
-        let b = mask(1.0, Some(0.50001), 0.0, true);
+        let a = mask(1.0, 0.5, 0.0, true);
+        let b = mask(1.0, 0.50001, 0.0, true);
         assert_ne!(a, b);
     }
 
@@ -516,10 +516,10 @@ mod tests {
     }
 
     #[test]
-    fn threshold_change_mask_rerun() {
+    fn contrast_change_mask_rerun() {
         let a = make_recipe(ModelKind::Silueta, 1.0, None);
         let mut b = a.clone();
-        b.mask = mask(1.0, Some(0.5), 0.0, false);
+        b.mask = mask(1.0, 0.5, 0.0, false);
         assert_eq!(resolve_tier(&a, &b), RequiredTier::MaskRerun);
     }
 
@@ -527,7 +527,7 @@ mod tests {
     fn edge_shift_change_mask_rerun() {
         let a = make_recipe(ModelKind::Silueta, 1.0, None);
         let mut b = a.clone();
-        b.mask = mask(1.0, None, 2.0, false);
+        b.mask = mask(1.0, 0.0, 2.0, false);
         assert_eq!(resolve_tier(&a, &b), RequiredTier::MaskRerun);
     }
 
@@ -535,7 +535,7 @@ mod tests {
     fn refine_edges_change_mask_rerun() {
         let a = make_recipe(ModelKind::Silueta, 1.0, None);
         let mut b = a.clone();
-        b.mask = mask(1.0, None, 0.0, true);
+        b.mask = mask(1.0, 0.0, 0.0, true);
         assert_eq!(resolve_tier(&a, &b), RequiredTier::MaskRerun);
     }
 
@@ -584,7 +584,7 @@ mod tests {
         let a = make_recipe(ModelKind::Silueta, 1.0, None);
         let mut b = a.clone();
         b.inference.uses_edge_detection = true;
-        b.mask = mask(1.5, None, 0.0, false); // mask also changed
+        b.mask = mask(1.5, 0.0, 0.0, false); // mask also changed
         assert_eq!(resolve_tier(&a, &b), RequiredTier::AddEdgeInference);
     }
 
@@ -624,7 +624,7 @@ mod tests {
 
         let with_gamma = |g: f32| {
             let mut r = base.clone();
-            r.mask = mask(g, None, 0.0, false);
+            r.mask = mask(g, 0.0, 0.0, false);
             r
         };
         let with_line = |s: f32| {
@@ -690,7 +690,7 @@ mod tests {
             // Priority: AddEdgeInference dominates mask + edge + composite.
             ("input_transform+gamma+line+bg → add_edge", edges_on(), {
                 let mut r = with_input_transform(InputTransform::Grayscale);
-                r.mask = mask(1.5, None, 0.0, false);
+                r.mask = mask(1.5, 0.0, 0.0, false);
                 r.edge.line_strength_bits = 0.2f32.to_bits();
                 r.composite.bg_color = Some([9, 9, 9]);
                 r
@@ -773,7 +773,7 @@ mod tests {
     fn mask_rerun_when_mask_and_upscale_both_changed() {
         let a = make_recipe(ModelKind::Silueta, 1.0, None);
         let mut b = a.clone();
-        b.mask = mask(2.2, None, 0.0, false);
+        b.mask = mask(2.2, 0.0, 0.0, false);
         b.upscale = upscale_with_scale(Some(prunr_models::ModelId::RealEsrganX4Plus), OutputScale::X2);
         assert_eq!(resolve_tier(&a, &b), RequiredTier::MaskRerun);
     }

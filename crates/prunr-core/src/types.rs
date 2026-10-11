@@ -100,8 +100,11 @@ pub struct ProcessResult {
 pub struct MaskSettings {
     /// Gamma curve applied to the mask. >1.0 = more aggressive removal, <1.0 = gentler.
     pub gamma: f32,
-    /// Optional binary threshold (0.0–1.0). When set, alpha below this becomes 0, above becomes 255.
-    pub threshold: Option<f32>,
+    /// Edge contrast, 0.0–1.0: 0 leaves the mask's soft edge, 1 cuts it
+    /// hard at half coverage. Applied at full resolution after refine and
+    /// feather.
+    #[serde(default)]
+    pub contrast: f32,
     /// Edge hardness: >0 erodes (shrinks) the mask, <0 dilates (expands) it. In pixels.
     pub edge_shift: f32,
     /// Refine mask edges using guided filter (color-aware edge refinement).
@@ -130,7 +133,7 @@ impl Default for MaskSettings {
     fn default() -> Self {
         Self {
             gamma: 1.0,
-            threshold: None,
+            contrast: 0.0,
             edge_shift: 0.0,
             refine_edges: false,
             guided_radius: 8,
