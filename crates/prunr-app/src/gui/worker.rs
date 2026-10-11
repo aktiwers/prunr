@@ -110,6 +110,18 @@ impl CompressedEdgeTensors {
         Some(crate::subprocess::ipc::le_bytes_to_f32s(&bytes))
     }
 
+    /// The scales `edge` draws, decompressed for a compose: its primary
+    /// scale, plus Bold for Dual scale. The other slots stay empty.
+    pub fn for_compose(&self, edge: &EdgeSettings) -> Option<prunr_core::EdgeInferenceResult> {
+        let mut tensors: [Vec<f32>; EDGE_SCALE_COUNT] = Default::default();
+        let primary = edge.primary_scale();
+        tensors[primary as usize] = self.decompress(primary)?;
+        if matches!(edge.line_style, prunr_core::LineStyle::DualScale { .. }) {
+            tensors[EdgeScale::Bold as usize] = self.decompress(EdgeScale::Bold)?;
+        }
+        Some(prunr_core::EdgeInferenceResult { tensors, height: self.height, width: self.width })
+    }
+
     /// Total compressed bytes across all 4 scales (for budget tracking).
     pub fn compressed_size(&self) -> usize {
         self.tensors.iter().map(|t| t.len()).sum()

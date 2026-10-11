@@ -1694,8 +1694,8 @@ impl PrunrApp {
                 }
                 RequiredTier::EdgeRerun => {
                     // Edge rerun via the subprocess isn't wired for batch
-                    // dispatch — fall through to a full pipeline run (live-
-                    // preview handles the in-process path via finalize_edges).
+                    // dispatch — fall through to a full pipeline run (live
+                    // preview handles the in-process path).
                     tiers.tier1.insert(item.id);
                 }
                 RequiredTier::AddEdgeInference => {

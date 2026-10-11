@@ -88,10 +88,9 @@ impl EdgeEngine {
         Ok(Self { session: Mutex::new(session) })
     }
 
-    /// One-shot: inference + finalize_edges for CLI / single-shot flows.
+    /// One-shot: the lines over the whole photo.
     pub fn detect(&self, original: &DynamicImage, edge: &crate::EdgeSettings) -> Result<RgbaImage, CoreError> {
-        let (tensor, h, w) = self.infer_tensor(original, edge.edge_scale)?;
-        Ok(finalize_edges(&tensor, h, w, original, edge))
+        Ok(compose_whole_photo(&self.infer_all_tensors(original)?, original, edge))
     }
 
     /// Extract a single scale from one inference run. Use when the caller
@@ -433,28 +432,6 @@ pub fn compose_subject_outline(
     }
 }
 
-/// Tier 2 edge convenience: tensor → mask → RGBA in one call. Prefer the two
-/// split functions when you want to cache the mask between dispatches.
-pub fn finalize_edges(
-    edge_tensor: &[f32],
-    tensor_h: u32,
-    tensor_w: u32,
-    original: &DynamicImage,
-    edge: &crate::EdgeSettings,
-) -> RgbaImage {
-    let mask = edge_plane(
-        edge_tensor,
-        tensor_h,
-        tensor_w,
-        original.width(),
-        original.height(),
-        edge.line_strength,
-        edge.edge_thickness,
-    );
-    let base = original.to_rgba8();
-    compose_edges_styled(&mask, &base, crate::types::ComposeMode::LinesOnly, edge.line_style, edge.solid_line_color)
-}
-
 /// The lines over the whole photo (Sketch on Full): every line colour
 /// style, Dual scale included, on transparent. The same compose as the
 /// subject's outline with Lines only.
@@ -463,9 +440,8 @@ pub fn compose_whole_photo(
     original: &DynamicImage,
     edge: &crate::EdgeSettings,
 ) -> RgbaImage {
-    let base = original.to_rgba8();
     let lines_only = crate::EdgeSettings { compose_mode: crate::types::ComposeMode::LinesOnly, ..*edge };
-    compose_subject_outline(edge_res, &base, &lines_only)
+    compose_subject_outline(edge_res, &crate::formats::rgba_view(original), &lines_only)
 }
 
 /// Pre-process an image according to the user's `InputTransform`. The
@@ -792,8 +768,13 @@ mod tests {
         DynamicImage::ImageRgb8(RgbImage::from_pixel(w, h, Rgb([120, 120, 120])))
     }
 
+    fn every_scale(tensor: Vec<f32>) -> EdgeInferenceResult {
+        let tensors = std::array::from_fn(|_| tensor.clone());
+        EdgeInferenceResult { tensors, height: DEXINED_H, width: DEXINED_W }
+    }
+
     #[test]
-    fn finalize_edges_solid_color_paints_edges() {
+    fn whole_photo_solid_color_paints_edges() {
         // Synthetic edge tensor: half high logits, half zero.
         let w = DEXINED_W as usize;
         let h = DEXINED_H as usize;
@@ -803,7 +784,7 @@ mod tests {
         }
         let original = solid_rgb(64, 48);
         let edge = crate::EdgeSettings { line_strength: 0.5, solid_line_color: Some([255, 0, 0]), edge_thickness: 0, edge_scale: crate::EdgeScale::Fused, compose_mode: crate::ComposeMode::default(), line_style: crate::LineStyle::default(), input_transform: crate::InputTransform::default() };
-        let out = finalize_edges(&tensor, h as u32, w as u32, &original, &edge);
+        let out = compose_whole_photo(&every_scale(tensor), &original, &edge);
         assert_eq!(out.width(), 64);
         assert_eq!(out.height(), 48);
         // With high-logit side → opaque red, zero-logit → transparent.
@@ -913,7 +894,7 @@ mod tests {
     /// big enough to cross the overflow threshold and assert the call
     /// completes (post-fix uses i64).
     #[test]
-    fn noise_line_style_does_not_overflow_above_6m_pixels() {
+    fn rainbow_line_style_does_not_overflow_above_6m_pixels() {
         let w = 4096_u32;
         let h = 1500_u32; // 6.144 M pixels — past the i32 threshold
         let mask = image::GrayImage::from_pixel(w, h, image::Luma([255]));
@@ -1031,13 +1012,13 @@ mod tests {
     }
 
     #[test]
-    fn finalize_edges_preserves_original_rgb_when_no_line_color() {
+    fn whole_photo_preserves_original_rgb_when_no_line_color() {
         let w = DEXINED_W as usize;
         let h = DEXINED_H as usize;
         let tensor = vec![10.0_f32; h * w]; // all edges
         let original = solid_rgb(32, 32);
         let edge = crate::EdgeSettings { line_strength: 0.5, solid_line_color: None, edge_thickness: 0, edge_scale: crate::EdgeScale::Fused, compose_mode: crate::ComposeMode::default(), line_style: crate::LineStyle::default(), input_transform: crate::InputTransform::default() };
-        let out = finalize_edges(&tensor, h as u32, w as u32, &original, &edge);
+        let out = compose_whole_photo(&every_scale(tensor), &original, &edge);
         // Original color preserved
         assert_eq!(out.get_pixel(0, 0)[0], 120);
         assert_eq!(out.get_pixel(0, 0)[1], 120);
