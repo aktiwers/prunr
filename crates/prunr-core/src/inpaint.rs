@@ -912,6 +912,9 @@ where
     let total = work.len() as u32;
     progress.step(Step::Erasing);
     progress.tiles(work.iter().map(|t| TileRect::of_pixels(t.x, t.y, t.w, t.h, w, h)).collect());
+    if total > 0 {
+        progress.inner(0, total, Unit::Tile);
+    }
     for (i, tile) in work.iter().enumerate() {
         if progress.is_cancelled() {
             return Err(CoreError::Cancelled);

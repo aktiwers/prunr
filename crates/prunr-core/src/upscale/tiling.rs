@@ -140,6 +140,7 @@ where
     let total = tiles.len() as u32;
     progress.step(Step::Upscaling);
     progress.tiles(tiles.iter().map(|t| TileRect::of_pixels(t.x, t.y, t.w, t.h, in_w, in_h)).collect());
+    progress.inner(0, total, Unit::Tile);
 
     // RGB f32 accumulator (channels interleaved: R, G, B per pixel).
     let pixel_count = (out_w as usize) * (out_h as usize);
@@ -374,8 +375,8 @@ mod tests {
     }
 
     /// The tiler reports a contract-clean run: the step, the layout of
-    /// every tile inside the image, and each tile started, counted and
-    /// finished in order.
+    /// every tile inside the image, the count from zero, and each tile
+    /// started, counted and finished in order.
     #[test]
     fn upscale_tiled_reports_every_tile() {
         use crate::progress::{check_contract, ProgressUpdate, RecordingSink};
@@ -395,7 +396,7 @@ mod tests {
             ProgressUpdate::Inner { done, total, .. } if *total == expected_total => Some(*done),
             _ => None,
         }).collect();
-        assert_eq!(counts, (1..=expected_total).collect::<Vec<_>>());
+        assert_eq!(counts, (0..=expected_total).collect::<Vec<_>>(), "the count shows before the first tile runs");
         assert!(updates.iter().any(|u| matches!(u, ProgressUpdate::Tiles(t) if t.len() as u32 == expected_total)));
     }
 
