@@ -61,7 +61,7 @@ Every popover, panel and dialog is one of five kinds, chosen by how the user wor
 | Flyout | `chip::flyout_for` / `GroupChip { live: true }`; its chip, Escape or another chip closes it; fades while a slider is held | Knobs that change the image while open: Mask, Lines, Fill style, Background, Refine, the strip's full panels |
 | Popover | `chip::popup_for`; a click outside or a pick closes it | Set-and-go choices: Model, Preset, Quality, Scale, Prompt, Advanced, Help |
 | Modal | `theme::standard_modal_window`, listed in `PrunrApp::open_modals` | Rare and global: Settings, Model Store, licence, runtime prompt, help references, Save preset |
-| Status | Painted on the canvas edge or corner | Progress banner and pill, Magic "Preparing", toasts |
+| Status | Painted on the canvas | Progress capsule and tile map, the Loading Magic Brush pill, toasts |
 
 The canvas stays live under strips and flyouts; only a popover holds it still, so the click that dismisses one is not also a stroke. Escape does one thing per press: close the open popup, else the top-most modal, else cancel a run, else clear the selection. `gui/tests/surface_tests.rs` pins these contracts.
 
@@ -72,6 +72,12 @@ Tests and outside tools drive the app through **the control tree**: the AccessKi
 **In tests**, `egui_kittest` runs the real `PrunrApp` without a display; tests find controls by name, click, step frames and assert on state. `gui/tests/tree_tests.rs` renders every surface and fails on any nameless control, so the naming rule enforces itself.
 
 **At run time**, `PRUNR_CONTROL_PORT=<port>` opens a line-JSON socket on localhost (client: `scripts/prunrctl.py`). Clicks, drags and keys are injected as egui input, one batch per frame, and the reply waits until those frames have run, so the app reacts exactly as to a user. `intent` goes through `PrunrApp::perform`; `state` is a serde dump; `open` and `screenshot` reuse the app's own paths. The window must be receiving frames: with the output powered off a Wayland compositor sends no frame callbacks and nothing answers.
+
+## Progress
+
+Every long-running pipeline takes a `prunr_core::Progress` handle. It names its steps from one table of user words (`Step`), counts at two levels (outer: crops, passes; inner: tiles, steps, images), lays out the tiles it works on, and checks cancel on the same handle. Listeners implement `ProgressSink`: the subprocess sends each report as one `Report` event, in order with its results; the GUI folds reports into one `DispatchProgress` through a run-scoped sink, so a replaced run's late reports never land; the CLI sets its spinner text. The capsule and tile map draw that snapshot without knowing the pipeline, so a new model needs no widget work. `progress::check_contract` is the shape every finished run must have.
+
+Time left runs from the moment the count first moves, so model loading and graph compiles never inflate it.
 
 ## Process Architecture
 
@@ -94,7 +100,7 @@ Length-prefixed bincode frames over the child's stdin/stdout (`subprocess/protoc
 | Direction | Kinds |
 |-----------|-------|
 | Parent → child | `Init`; work (`ProcessImage`, `RePostProcess`, `AddEdgeInference`, `Inpaint`); `CancelItem`, `Shutdown` |
-| Child → parent | `Ready` / `InitError`; progress; results / errors per work kind; `RssUpdate`; `Finished` |
+| Child → parent | `Ready` / `InitError`; `Report` (any progress update); results / errors per work kind; `RssUpdate`; `Finished` |
 
 Payloads (image bytes, result RGBA, seg and edge tensors for the Tier 2 caches) go through temp files in `prunr-ipc-{parent pid}`, under `/dev/shm` on Linux and the OS temp dir elsewhere; the reader deletes each file (sweep rules in [Temp File Lifecycle](#temp-file-lifecycle)).
 
@@ -213,7 +219,7 @@ Eraser models are on-demand downloads. The region is `MaskArtifact::region_mask`
 
 **Stable Diffusion.** CLIP, VAE, the 9-channel UNet and five schedulers (LCM, DDIM, DPM++ 2M Karras, Euler-A, UniPC) are in `inpaint_sd.rs`, checked against Diffusers. The UNet always gets a binary mask, as SD 1.5 was trained on. Free RAM picks one tall crop up to 768 px or 512² tiles (see [SD RAM policy](#sd-ram-policy)); CPU fallback is refused. Inside the worker, sessions are dropped after each stroke unless "Keep the Stable Diffusion eraser loaded" is on (~16 GB resident); the worker itself stays until 5 min idle.
 
-**Cancel and progress.** `InpaintHooks` carries a cancel flag, checked between tiles and SD steps (ORT has no per-op cancel), and an atomic step counter the banner reads.
+**Cancel and progress.** The `Progress` handle carries the cancel flag, checked between tiles and SD steps (ORT has no per-op cancel), and reports the masked tiles, crops and denoising steps.
 
 **Seam.** Softness is composite-time only (`inpaint_blend::finalize_inpaint`, both families): colour-match to a ring of source pixels, then an edge-preserving guided filter over a band of Edge blend width around the seam, then optional sharpen. Edges survive where a Gaussian-blur composite would smear them.
 
