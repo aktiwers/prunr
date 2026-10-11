@@ -528,8 +528,8 @@ impl BgEffect {
     pub fn name(&self) -> &'static str {
         match self {
             BgEffect::None => "Transparent",
-            BgEffect::BlurredSource { .. } => "Blurred source",
-            BgEffect::DesaturatedSource => "Desaturated source",
+            BgEffect::BlurredSource { .. } => "Blurred photo",
+            BgEffect::DesaturatedSource => "Black & white photo",
         }
     }
 }
