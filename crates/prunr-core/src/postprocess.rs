@@ -230,7 +230,7 @@ fn tensor_to_mask_core(
     // Feather runs AFTER refine_edges: guided filter snaps the mask to color
     // edges first (sharpening); feather is the final softening pass on top.
     // Running feather first and then refine would have them fight each other.
-    if mask_settings.feather >= 0.1 {
+    if mask_settings.feather > 0.0 {
         feather_mask(&mut mask, mask_settings.feather);
     }
 
@@ -668,20 +668,34 @@ fn apply_mask_inplace(rgba: &mut RgbaImage, mask: &GrayImage) {
     }
 }
 
-/// Erode (positive shift) or dilate (negative shift) the mask.
-///
-/// Integer iterations of a 3×3 min/max filter; each shifts the boundary by
-/// ~1px. Fractional shifts run `floor` full iterations then linearly blend
-/// with one extra iteration for sub-pixel precision (e.g. 2.5 = 50% 2-iter +
-/// 50% 3-iter).
-/// Gaussian blur approximation via 3-pass O(1) box filter. For σ → radius
-/// the 3-box theorem gives `r ≈ σ`. Bbox-cropped: pixels outside the
-/// `mask + 3·radius` margin can't receive any non-zero blur weight from
-/// inside, so the full-image variant just walks zeros there. Bit-exact
-/// output, ~96 MB → bbox-sized peak working set on 4K masks with small
-/// painted regions.
+/// Feather: a Gaussian blur approximated by a 3-pass box filter (the
+/// 3-box theorem gives `r ≈ σ`). A fractional `sigma` blends the blurs at
+/// the two whole radii around it, so the slider is continuous and values
+/// under 1 px soften too. Peak working set: one full-size u8 copy of the
+/// mask when `sigma` is fractional, plus the bbox scratch of `box_blur`.
 fn feather_mask(mask: &mut GrayImage, sigma: f32) {
-    let radius = sigma.round() as u32;
+    if sigma <= 0.0 {
+        return;
+    }
+    let lo = sigma.floor() as u32;
+    let t = sigma - lo as f32;
+    if t < 1e-3 {
+        box_blur(mask, lo);
+        return;
+    }
+    let mut wider = mask.clone();
+    box_blur(&mut wider, lo + 1);
+    box_blur(mask, lo);
+    mask.as_mut().par_iter_mut().zip(wider.as_raw().par_iter()).for_each(|(a, &b)| {
+        *a = (*a as f32 * (1.0 - t) + b as f32 * t).round() as u8;
+    });
+}
+
+/// Bbox-cropped 3-box blur at `radius`: pixels outside the `mask +
+/// 3·radius` margin can't receive any weight from inside, so the
+/// full-image variant would just walk zeros there. Bit-exact output,
+/// ~96 MB → bbox-sized peak working set on 4K masks with small regions.
+fn box_blur(mask: &mut GrayImage, radius: u32) {
     if radius == 0 { return; }
     // 3-box kernel total reach is 3·radius from each source pixel.
     let margin = 3 * radius;
@@ -717,6 +731,18 @@ fn feather_mask(mask: &mut GrayImage, sigma: f32) {
 
 #[cfg(test)]
 mod tests {
+
+    /// Feather is continuous: half a pixel softens an edge, and 1.5 px
+    /// lands between 1 and 2.
+    #[test]
+    fn feather_is_continuous_below_and_between_whole_pixels() {
+        let edge = || GrayImage::from_fn(16, 1, |x, _| image::Luma([if x < 8 { 255 } else { 0 }]));
+        let at = |sigma: f32| { let mut m = edge(); feather_mask(&mut m, sigma); m.get_pixel(8, 0)[0] };
+        assert!(at(0.5) > 0, "half a pixel softens the edge");
+        let (one, mid, two) = (at(1.0), at(1.5), at(2.0));
+        assert!(one.min(two) <= mid && mid <= one.max(two), "1.5 lies between 1 and 2: {one} {mid} {two}");
+        assert_eq!(at(0.0), 0);
+    }
 
     /// Contrast steepens the edge around half coverage and leaves the
     /// rest: 0 changes nothing, 100 % cuts it hard at full resolution.
