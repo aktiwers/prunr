@@ -179,6 +179,16 @@ pub fn tensor_to_edge_mask(
         let edge = ((prob - lo) / 0.2).clamp(0.0, 1.0);
         mask_buf[i] = (crate::math::smoothstep(edge) * 255.0) as u8;
     }
+    // DexiNed marks a tiny patch in each corner of every input, a flat grey
+    // one too; drawn wide it becomes a dot in each corner of the photo.
+    const CORNER: usize = 3;
+    if h >= 2 * CORNER && w >= 2 * CORNER {
+        for y in (0..CORNER).chain(h - CORNER..h) {
+            for x in (0..CORNER).chain(w - CORNER..w) {
+                mask_buf[y * w + x] = 0;
+            }
+        }
+    }
 
     let mask = image::GrayImage::from_raw(w as u32, h as u32, mask_buf)
         .expect("edge mask buffer size matches dimensions");
@@ -573,6 +583,24 @@ mod tests {
             let (p, s) = (plain.get_pixel(x, 240)[0], smooth.get_pixel(x, 240)[0]);
             assert!(s > p.saturating_add(10), "{w}×{h}: Smooth lightens the dark side next to the step: {p} → {s}");
         }
+    }
+
+    /// The detector marks a tiny patch in each corner of any input, a flat
+    /// one too; those are not lines. A real line along the border stays.
+    #[test]
+    fn the_detectors_corner_marks_are_not_lines() {
+        let (h, w) = (DEXINED_H as usize, DEXINED_W as usize);
+        let mut tensor = vec![-10.0_f32; h * w];
+        for (y, x) in [(0, 0), (1, 1), (0, w - 2), (1, w - 1), (h - 2, 0), (h - 1, 1), (h - 1, w - 1), (h - 2, w - 2)] {
+            tensor[y * w + x] = 10.0;
+        }
+        let mask = tensor_to_edge_mask(&tensor, h as u32, w as u32, 1600, 1200, 0.5);
+        assert!(mask.as_raw().iter().all(|&v| v == 0), "no mark left at the corners");
+
+        let mut border = vec![-10.0_f32; h * w];
+        border[..w].fill(10.0);
+        let mask = tensor_to_edge_mask(&border, h as u32, w as u32, w as u32, h as u32, 0.5);
+        assert_eq!(mask.get_pixel(w as u32 / 2, 0)[0], 255, "a line along the top edge stays");
     }
 
     // The compositions as shipped before the row-parallel rewrite: the
