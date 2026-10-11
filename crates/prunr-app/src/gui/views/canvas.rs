@@ -630,9 +630,11 @@ fn paint_image_or_reveal(ui: &egui::Ui, img_rect: Rect, item: &crate::gui::item:
     match item.reveal_progress() {
         Some((from, p, order)) => {
             super::effects::paint_reveal(ui.painter(), img_rect, from.id(), texture.id(), p, order);
-            // The subject's outline fades as the cut-out grows from it.
+            // The subject's outline is gone by the time the cut-out has
+            // grown halfway out from it.
             if let Some(subject) = item.subject.as_ref() {
-                ui.painter().image(subject.texture.id(), img_rect, super::effects::UNIT_UV, Color32::WHITE.gamma_multiply(1.0 - p));
+                let fade = (1.0 - 2.0 * p).max(0.0);
+                ui.painter().image(subject.texture.id(), img_rect, super::effects::UNIT_UV, Color32::WHITE.gamma_multiply(fade * fade));
             }
             ui.ctx().request_repaint();
         }
