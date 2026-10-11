@@ -129,12 +129,12 @@ pub fn model_info(model: SettingsModel) -> ModelInfo {
 
 /// Models the dropdown offers, in display order: installed AI models,
 /// then "No model" pinned last.
-pub fn installed_models() -> impl Iterator<Item = SettingsModel> {
+pub(crate) fn installed_models(installed: crate::gui::hardware_cache::HardwareInstallCache) -> impl Iterator<Item = SettingsModel> {
     SettingsModel::ALL
         .iter()
         .copied()
         .filter(|v| *v != SettingsModel::None)
-        .filter(|v| v.to_model_id().is_none_or(prunr_models::is_available))
+        .filter(move |v| installed.has_model(*v))
         .chain(std::iter::once(SettingsModel::None))
 }
 
