@@ -465,6 +465,14 @@ fn lines_in_photo_colors(s: &ItemSettings) -> bool {
     s.line_style == prunr_core::LineStyle::Solid && s.solid_line_color.is_none()
 }
 
+fn contrast_step_name(percent: u16) -> &'static str {
+    match percent { 125 => "125%", 150 => "150%", 200 => "200%", _ => "300%" }
+}
+
+fn level_step_name(levels: u8) -> &'static str {
+    match levels { 2 => "2", 3 => "3", 4 => "4", 6 => "6", _ => "8" }
+}
+
 /// What a line color style looks like, for its row in the list.
 fn line_style_description(style: &prunr_core::LineStyle) -> &'static str {
     use prunr_core::LineStyle;
@@ -550,13 +558,16 @@ fn render_lines_group(
                         }
                     }
                 });
+                // Steps, not sliders: each pick reruns the line detector once.
                 match &mut s.input_transform {
-                    InputTransform::None | InputTransform::Grayscale => {}
+                    InputTransform::None | InputTransform::Grayscale | InputTransform::Smooth => {}
                     InputTransform::ContrastBoost { percent } => {
-                        filter_changed |= chip::slider_row(ui, "Contrast (%)", percent, 50..=300).changed;
+                        let steps = [125u16, 150, 200, 300].map(|p| chip::Choice { value: p, name: contrast_step_name(p), description: "", enabled: true });
+                        filter_changed |= chip::choice_row(ui, "Contrast", &steps, percent);
                     }
                     InputTransform::Posterize { levels } => {
-                        filter_changed |= chip::slider_row(ui, "Levels", levels, 2..=8).changed;
+                        let steps = [2u8, 3, 4, 6, 8].map(|n| chip::Choice { value: n, name: level_step_name(n), description: "", enabled: true });
+                        filter_changed |= chip::choice_row(ui, "Levels", &steps, levels);
                     }
                 }
                 if filter_changed {
@@ -588,7 +599,7 @@ fn render_lines_group(
                 ui.add_space(theme::SPACE_XS);
 
                 let mut thickness = s.edge_thickness as u32;
-                let t = chip::slider_row(ui, "Line thickness (px)", &mut thickness, 0..=20);
+                let t = chip::slider_row(ui, "Line width (px)", &mut thickness, 0..=20);
                 s.edge_thickness = thickness.min(255) as u8;
                 aggregate_knob(t, StaticKnob::EdgeThickness, change);
                 ui.add_space(theme::SPACE_XS);
@@ -711,10 +722,7 @@ fn line_style_params(ui: &mut Ui, style: &mut prunr_core::LineStyle) -> bool {
     use prunr_core::LineStyle;
     let mut changed = false;
     match style {
-        LineStyle::Solid => {
-            ui.label(RichText::new("Uses Solid line color chip.").color(theme::TEXT_SECONDARY)
-                .size(theme::FONT_SIZE_MONO));
-        }
+        LineStyle::Solid => {}
         LineStyle::GradientY { top, bottom } => {
             changed |= rgb_picker_row(ui, "Top", top);
             changed |= rgb_picker_row(ui, "Bottom", bottom);
