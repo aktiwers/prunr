@@ -37,5 +37,5 @@ pub use types::{ComposeMode, LineStyle, FillStyle, BgEffect, BgImageFit, Channel
 pub use edge::apply_input_transform;
 pub use postprocess::{apply_fill_style, apply_bg_effect};
 pub use selection::{MaskArtifact, SelectionError};
-pub use sam::{SamEmbedding, SamDecoderOutput, decode_to_mask_artifact, SAM_ENCODER_INPUT, SAM_MASK_RESOLUTION};
+pub use sam::{SamEmbedding, SamDecoderOutput, decode_to_mask_artifact, MaskReading, SAM_ENCODER_INPUT, SAM_MASK_RESOLUTION};
 pub use sam::prompt::{SamPrompt, PromptError, build_click_prompt, build_stroke_prompt, MAX_STROKE_POINTS};

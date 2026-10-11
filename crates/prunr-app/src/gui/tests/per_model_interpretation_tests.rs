@@ -125,9 +125,10 @@ fn confidence_change_retunes_the_last_stroke_in_place() {
         }
     }
     let output = Arc::new(prunr_core::sam::SamDecoderOutput { masks, iou_predictions: [0.9, 0.1, 0.1] });
+    let committed_reading = app.settings.brush.magic_reading();
     app.batch.items[0].last_decode = Some(LastDecode {
         output, mode: BrushMode::Add,
-        committed_hash: first_hash, confidence: 0.5,
+        committed_hash: first_hash, reading: committed_reading,
     });
 
     app.settings.brush.magic_confidence_threshold = 0.9;
@@ -142,7 +143,7 @@ fn confidence_change_retunes_the_last_stroke_in_place() {
     let Ok(DecodedSelection::Retuned { merged, hash }) = result.result else {
         panic!("re-threshold decodes without a session");
     };
-    app.apply_rethreshold(9, merged, hash, result.confidence);
+    app.apply_rethreshold(9, merged, hash, result.reading);
 
     let item = &app.batch.items[0];
     let new_hash = item.selection_hash.unwrap();
@@ -151,10 +152,18 @@ fn confidence_change_retunes_the_last_stroke_in_place() {
     assert_eq!(item.actions_undo.len(), 1);
     let ld = item.last_decode.as_ref().unwrap();
     assert_eq!(ld.committed_hash, new_hash);
-    assert!((ld.confidence - 0.9).abs() < 1e-6);
+    assert!((ld.reading.confidence - 0.9).abs() < 1e-6);
     // The retuned selection keeps only the right-hand columns.
     let sel = item.selection_mask.as_ref().unwrap();
     assert!(sel.cells()[7] == prunr_core::selection::FULL && sel.cells()[0] == 0);
+
+    // The speck switch retunes the last stroke the same way.
+    app.magic_brush_state.rethreshold_in_flight = false;
+    app.maybe_rethreshold_last_stroke();
+    assert!(!app.magic_brush_state.rethreshold_in_flight, "nothing changed, nothing to retune");
+    app.settings.brush.magic_remove_specks = !app.settings.brush.magic_remove_specks;
+    app.maybe_rethreshold_last_stroke();
+    assert!(app.magic_brush_state.rethreshold_in_flight, "flipping Remove specks retunes the last stroke");
 }
 
 // ── Segmentation → the re-cut fires at once ─────────────────────────────────

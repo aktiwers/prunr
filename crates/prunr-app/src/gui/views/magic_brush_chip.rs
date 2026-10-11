@@ -54,5 +54,8 @@ pub(crate) fn flyout_body(ui: &mut Ui, bs: &mut BrushSettings, encoder_pending: 
     let ct = chip::slider_row_f32(ui, "Confidence", &mut bs.magic_confidence_threshold, 0.0..=1.0, false, fmt::percent);
     outcome.committed |= ct.commit;
     super::hint(ui, "Keep only the parts the model is sure about. Lower selects more.");
+    let specks = chip::toggle_row(ui, "Remove specks", &mut bs.magic_remove_specks);
+    outcome.committed |= specks.commit;
+    super::hint(ui, "Drop tiny islands and fill pinholes where the model is unsure.");
     outcome
 }

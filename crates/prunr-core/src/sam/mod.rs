@@ -78,11 +78,88 @@ pub fn confidence_logit(confidence: f32) -> f32 {
     (c / (1.0 - c)).ln()
 }
 
+/// How decoder logits become a selection: the probability a pixel must
+/// reach (`confidence_logit`), and whether specks are cleaned away
+/// (`smooth3`, then `remove_small_regions`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MaskReading {
+    pub confidence: f32,
+    pub remove_specks: bool,
+}
+
+/// Smallest region, in cells of the decoder's 256² grid (about 0.05 % of
+/// the image), a cleaned selection keeps: smaller islands go and smaller
+/// holes fill, as Meta's SAM reference cleans its masks. Where the model
+/// is unsure its logits hover at the threshold cell by cell, which reads
+/// as a grid of specks.
+pub const MIN_REGION_CELLS: usize = 32;
+
+/// 3×3 mean of the 256² logits, edges clamped. Where SAM is unsure it
+/// dithers around the threshold in a period-2 checkerboard; the mean
+/// cancels the dither and settles each area by its local average, while a
+/// real edge (a step of several logits) stays on the same cells.
+fn smooth3(logits: &[f32]) -> Vec<f32> {
+    const M: usize = SAM_MASK_RESOLUTION as usize;
+    let at = |x: usize, y: usize| logits[y * M + x];
+    let mut out = vec![0.0; M * M];
+    for y in 0..M {
+        let (y0, y1) = (y.saturating_sub(1), (y + 1).min(M - 1));
+        for x in 0..M {
+            let (x0, x1) = (x.saturating_sub(1), (x + 1).min(M - 1));
+            let mut sum = 0.0;
+            for yy in [y0, y, y1] {
+                sum += at(x0, yy) + at(x, yy) + at(x1, yy);
+            }
+            out[y * M + x] = sum / 9.0;
+        }
+    }
+    out
+}
+
+/// Push every region of the thresholded grid smaller than
+/// `MIN_REGION_CELLS` (8-connected) to the other side of `threshold`,
+/// by a margin that bilinear upsampling cannot cross: an island's
+/// neighbours are all below the threshold, a hole's all above.
+fn remove_small_regions(logits: &mut [f32], threshold: f32) {
+    const M: usize = SAM_MASK_RESOLUTION as usize;
+    let inside: Vec<bool> = logits.iter().map(|&v| v >= threshold).collect();
+    let mut seen = vec![false; M * M];
+    let (mut stack, mut region) = (Vec::new(), Vec::new());
+    for start in 0..M * M {
+        if seen[start] {
+            continue;
+        }
+        let side = inside[start];
+        seen[start] = true;
+        stack.push(start);
+        region.clear();
+        while let Some(i) = stack.pop() {
+            region.push(i);
+            let (x, y) = (i % M, i / M);
+            for ny in y.saturating_sub(1)..=(y + 1).min(M - 1) {
+                for nx in x.saturating_sub(1)..=(x + 1).min(M - 1) {
+                    let j = ny * M + nx;
+                    if !seen[j] && inside[j] == side {
+                        seen[j] = true;
+                        stack.push(j);
+                    }
+                }
+            }
+        }
+        if region.len() < MIN_REGION_CELLS {
+            let flipped = if side { threshold - 1.0 } else { threshold + 1.0 };
+            for &i in &region {
+                logits[i] = flipped;
+            }
+        }
+    }
+}
+
 /// Pick the candidate with the highest predicted IoU; bilinear-upsample
 /// its 256×256 logits to source resolution; keep the pixels whose
-/// probability reaches `confidence` (see `confidence_logit`), signed by
-/// `mode`. Higher confidence keeps the sure core of the object, lower
-/// grows into the uncertain rim.
+/// probability reaches the reading's confidence (see `confidence_logit`),
+/// signed by `mode`. Higher confidence keeps the sure core of the object,
+/// lower grows into the uncertain rim.
 ///
 /// Peak working set: source_w * source_h bytes output + 256*256*4 bytes
 /// slice view (read-only). At 4K source: ~8 MB output.
@@ -90,10 +167,10 @@ pub fn decode_to_mask_artifact(
     output: &SamDecoderOutput,
     source_w: u32,
     source_h: u32,
-    confidence: f32,
+    reading: MaskReading,
     mode: BrushMode,
 ) -> crate::selection::MaskArtifact {
-    let threshold = confidence_logit(confidence);
+    let threshold = confidence_logit(reading.confidence);
     let best_idx = output
         .iou_predictions
         .iter()
@@ -102,7 +179,14 @@ pub fn decode_to_mask_artifact(
         .map_or(0, |(i, _)| i);
 
     const M: usize = SAM_MASK_RESOLUTION as usize;
-    let mask_logits: &[f32] = &output.masks[best_idx * M * M..(best_idx + 1) * M * M];
+    let raw = &output.masks[best_idx * M * M..(best_idx + 1) * M * M];
+    let cleaned;
+    let mask_logits: &[f32] = if reading.remove_specks {
+        cleaned = { let mut l = smooth3(raw); remove_small_regions(&mut l, threshold); l };
+        &cleaned
+    } else {
+        raw
+    };
     let logit_row = |i: u8| -> &[f32; M] {
         // M logits per row by construction of the slice above.
         mask_logits[i as usize * M..][..M].try_into().expect("row of M logits")
@@ -149,6 +233,54 @@ struct Tap {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn plain(confidence: f32) -> MaskReading {
+        MaskReading { confidence, remove_specks: false }
+    }
+
+    /// Measured on a real stroke: where SAM is unsure its logits dither
+    /// ±0.2 around the threshold in a period-2 checkerboard. Every dot
+    /// touches the next diagonally, so they join into big regions no area
+    /// filter removes; the cleanup must read the local average instead.
+    #[test]
+    fn cleaning_settles_a_dithered_area_by_its_average() {
+        let mut masks = vec![-2.0f32; 3 * 256 * 256];
+        for y in 0..256 {
+            for x in 0..256 {
+                let dither = if (x + y) % 2 == 0 { 0.2 } else { -0.2 };
+                let bias = if x < 128 { 0.1 } else { -0.1 };
+                masks[y * 256 + x] = dither + bias;
+            }
+        }
+        let output = SamDecoderOutput { masks, iou_predictions: [0.9, 0.1, 0.1] };
+        let raw = decode_to_mask_artifact(&output, 256, 256, plain(0.5), BrushMode::Add);
+        let stripes = |m: &crate::selection::MaskArtifact, x0: usize| (0..256).filter(|&y| m.cells()[y * 256 + x0] != m.cells()[y * 256 + x0 + 1]).count();
+        assert!(stripes(&raw, 40) > 100, "the raw read is a checkerboard");
+        let clean = decode_to_mask_artifact(&output, 256, 256, MaskReading { confidence: 0.5, remove_specks: true }, BrushMode::Add);
+        assert!((10..118).all(|x| (10..246).all(|y| clean.cells()[y * 256 + x] == FULL)), "the leaning-in half is solid");
+        assert!((138..246).all(|x| (10..246).all(|y| clean.cells()[y * 256 + x] == 0)), "the leaning-out half is empty");
+    }
+
+    #[test]
+    fn cleaning_drops_specks_and_fills_pinholes_but_keeps_the_object() {
+        let mut masks = vec![-2.0f32; 3 * 256 * 256];
+        for y in 100..160 {
+            for x in 100..160 {
+                masks[y * 256 + x] = 2.0;
+            }
+        }
+        masks[130 * 256 + 130] = -2.0; // a pinhole in the object
+        masks[20 * 256 + 20] = 2.0; // a speck far from it
+        let output = SamDecoderOutput { masks, iou_predictions: [0.9, 0.1, 0.1] };
+        let cell = |m: &crate::selection::MaskArtifact, x: usize, y: usize| m.cells()[y * 256 + x];
+        let raw = decode_to_mask_artifact(&output, 256, 256, plain(0.5), BrushMode::Add);
+        assert_eq!((cell(&raw, 20, 20), cell(&raw, 130, 130)), (FULL, 0), "without cleaning both show");
+        let clean = decode_to_mask_artifact(&output, 256, 256, MaskReading { confidence: 0.5, remove_specks: true }, BrushMode::Add);
+        assert_eq!(cell(&clean, 20, 20), 0, "the speck is gone");
+        assert_eq!(cell(&clean, 130, 130), FULL, "the pinhole is filled");
+        assert_eq!(cell(&clean, 110, 110), FULL, "the object stays");
+        assert_eq!(cell(&clean, 200, 200), 0, "the background stays");
+    }
 
     #[test]
     fn expected_bytes_is_16_mb() {
@@ -199,12 +331,12 @@ mod tests {
             masks,
             iou_predictions: [0.3, 0.7, 0.5],
         };
-        let result = decode_to_mask_artifact(&output, 64, 64, 0.5, BrushMode::Add);
+        let result = decode_to_mask_artifact(&output, 64, 64, plain(0.5), BrushMode::Add);
         assert_eq!(result.width, 64);
         assert_eq!(result.height, 64);
         // All upsampled pixels are fully selected (candidate 1, all +1 logits)
         assert!(result.cells().iter().all(|&v| v == FULL));
-        let result = decode_to_mask_artifact(&output, 64, 64, 0.5, BrushMode::Subtract);
+        let result = decode_to_mask_artifact(&output, 64, 64, plain(0.5), BrushMode::Subtract);
         assert!(result.cells().iter().all(|&v| v == -FULL), "Subtract mode signs the region negative");
     }
 
@@ -223,7 +355,7 @@ mod tests {
             }
         }
         let output = SamDecoderOutput { masks, iou_predictions: [0.9, 0.1, 0.1] };
-        let count = |c: f32| decode_to_mask_artifact(&output, 64, 64, c, BrushMode::Add)
+        let count = |c: f32| decode_to_mask_artifact(&output, 64, 64, plain(c), BrushMode::Add)
             .cells().iter().filter(|&&v| v == FULL).count();
         let (low, mid, high) = (count(0.1), count(0.5), count(0.9));
         assert!(low > mid && mid > high, "{low} > {mid} > {high}");
@@ -268,7 +400,7 @@ mod tests {
         }
         let output = SamDecoderOutput { masks, iou_predictions: [0.1, 0.9, 0.2] };
         for (w, h) in [(1, 1), (7, 3), (300, 200), (641, 97), (1024, 1024)] {
-            let result = decode_to_mask_artifact(&output, w, h, 0.5, BrushMode::Subtract);
+            let result = decode_to_mask_artifact(&output, w, h, plain(0.5), BrushMode::Subtract);
             let expected = brute_force_decode(&output.masks[n..2 * n], w, h, -FULL);
             assert!(result.cells() == expected.as_slice(), "{w}x{h}");
         }
@@ -285,7 +417,7 @@ mod tests {
             masks,
             iou_predictions: [0.9, 0.1, 0.1],
         };
-        let result = decode_to_mask_artifact(&output, 32, 32, 0.5, BrushMode::Subtract);
+        let result = decode_to_mask_artifact(&output, 32, 32, plain(0.5), BrushMode::Subtract);
         assert!(result.cells().iter().all(|&v| v == 0));
     }
 }

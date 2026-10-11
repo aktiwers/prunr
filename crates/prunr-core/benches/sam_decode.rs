@@ -5,7 +5,7 @@
 //! Run: `cargo bench -p prunr-core --bench sam_decode`.
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
-use prunr_core::sam::{decode_to_mask_artifact, SamDecoderOutput, SAM_MASK_RESOLUTION};
+use prunr_core::sam::{decode_to_mask_artifact, MaskReading, SamDecoderOutput, SAM_MASK_RESOLUTION};
 use prunr_core::selection::BrushMode;
 
 pub fn bench(c: &mut Criterion) {
@@ -24,7 +24,7 @@ pub fn bench(c: &mut Criterion) {
     let mut group = c.benchmark_group("sam_decode");
     group.throughput(Throughput::Elements((w * h) as u64));
     group.bench_function("4K", |b| {
-        b.iter(|| black_box(decode_to_mask_artifact(black_box(&output), w, h, 0.5, BrushMode::Add)));
+        b.iter(|| black_box(decode_to_mask_artifact(black_box(&output), w, h, MaskReading { confidence: 0.5, remove_specks: true }, BrushMode::Add)));
     });
     group.finish();
 }

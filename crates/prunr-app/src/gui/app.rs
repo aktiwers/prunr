@@ -1494,13 +1494,13 @@ impl PrunrApp {
                     if let Some(item) = self.batch.find_by_id_mut(result.item_id) {
                         item.last_decode = item.selection_hash.map(|committed_hash| super::item::LastDecode {
                             output, mode: result.mode, committed_hash,
-                            confidence: result.confidence,
+                            reading: result.reading,
                         });
                     }
                 }
                 Ok(DecodedSelection::Retuned { merged, hash }) => {
                     self.magic_brush_state.rethreshold_in_flight = false;
-                    self.apply_rethreshold(result.item_id, merged, hash, result.confidence);
+                    self.apply_rethreshold(result.item_id, merged, hash, result.reading);
                 }
                 Err(err) => {
                     tracing::error!(item_id = result.item_id, %err, "SAM decoder failed");
@@ -1516,31 +1516,31 @@ impl PrunrApp {
         if self.magic_brush_state.rethreshold_in_flight {
             return;
         }
-        let want = self.settings.brush.magic_confidence_threshold;
+        let want = self.settings.brush.magic_reading();
         let Some(idx) = self.batch.selected_idx_clamped() else { return };
         let item = &mut self.batch.items[idx];
         let (item_id, source_dims, base) = (item.id, item.dimensions, item.pre_stroke_selection());
         let Some(ld) = item.retunable_decode() else { return };
-        if ld.confidence.to_bits() == want.to_bits() {
+        if ld.reading == want {
             return;
         }
         self.processor.dispatch_sam_rethreshold(super::processor::SamRethresholdRequest {
             item_id, output: Arc::clone(&ld.output), mode: ld.mode,
-            source_dims, confidence: want, base,
+            source_dims, reading: want, base,
         });
         self.magic_brush_state.rethreshold_in_flight = true;
     }
 
     /// Swap the last stroke's selection for its re-thresholded version,
     /// replaced in place so the stroke's undo entry stays the one entry.
-    pub(crate) fn apply_rethreshold(&mut self, item_id: u64, merged: Arc<prunr_core::selection::MaskArtifact>, hash: u64, confidence: f32) {
+    pub(crate) fn apply_rethreshold(&mut self, item_id: u64, merged: Arc<prunr_core::selection::MaskArtifact>, hash: u64, reading: prunr_core::MaskReading) {
         let Some(item) = self.batch.find_by_id_mut(item_id) else { return };
         if item.retunable_decode().is_none() {
             return;
         }
         let changed = item.replace_selection_in_place(merged, hash);
         if let Some(ld) = item.last_decode.as_mut() {
-            ld.confidence = confidence;
+            ld.reading = reading;
             ld.committed_hash = hash;
         }
         if changed {
