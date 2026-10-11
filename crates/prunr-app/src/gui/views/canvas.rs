@@ -649,7 +649,7 @@ fn render_loaded(ui: &mut egui::Ui, app: &PrunrApp) -> Option<Rect> {
         // Visualization — Render gating".
         if let Some(it) = app.batch.selected_item() {
             super::selection_overlay::render_selection_overlay(
-                ui, it, img_rect,
+                ui, it, img_rect, app.processor.is_inpaint_in_flight(it.id),
             );
         }
         Some(img_rect)
@@ -740,7 +740,7 @@ fn render_done(ui: &mut egui::Ui, app: &PrunrApp) -> Option<Rect> {
             // gating".
             if let Some(it) = item {
                 super::selection_overlay::render_selection_overlay(
-                    ui, it, img_rect,
+                    ui, it, img_rect, app.processor.is_inpaint_in_flight(it.id),
                 );
             }
             painted = Some(img_rect);
@@ -795,7 +795,7 @@ fn render_done(ui: &mut egui::Ui, app: &PrunrApp) -> Option<Rect> {
         // no decode, no GPU upload here.
         if let Some(it) = app.batch.selected_item() {
             super::selection_overlay::render_selection_overlay(
-                ui, it, img_rect,
+                ui, it, img_rect, app.processor.is_inpaint_in_flight(it.id),
             );
         }
         painted = Some(img_rect);

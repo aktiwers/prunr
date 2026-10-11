@@ -226,6 +226,9 @@ pub(crate) struct BatchItem {
     pub(crate) source_tex_pending: bool,
     /// True while a background thread is building the result ColorImage.
     pub(crate) result_tex_pending: bool,
+    /// The next result texture crossfades in: a finished erase or upscale,
+    /// as against a slider re-cut, which must swap at once.
+    pub(crate) result_fades_in: bool,
     /// True while a background thread is decoding source bytes to RGBA.
     pub(crate) decode_pending: bool,
     /// History stack for undo: previous results + their recipes, newest last.
@@ -814,6 +817,7 @@ impl BatchItem {
             result_texture: None,
             source_tex_pending: false,
             result_tex_pending: false,
+            result_fades_in: false,
             decode_pending: false,
             history: VecDeque::new(),
             redo_stack: VecDeque::new(),
