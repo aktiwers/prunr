@@ -85,6 +85,8 @@ Common flags:
 | `--gamma <N>` | Removal strength (default: 1.0) |
 | `--contrast <N>` | Edge contrast (0.0–1.0); 1 is a hard edge |
 | `--edge-shift <N>` | Grow (positive) or shrink (negative) the cut-out by N pixels |
+| `--edge-width <N>` | How far `--refine-edges` looks from the edge, in pixels (default 8) |
+| `--feather <N>` | Soften the edge by N pixels; fractions allowed |
 | `--refine-edges` | Guided filter for fine detail (hair, leaves) |
 | `--lines` | Extract lines/edges only |
 | `--lines-after-bg` | Remove the background, then draw lines on the result |

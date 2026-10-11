@@ -67,6 +67,14 @@ pub struct Cli {
     #[arg(long)]
     pub refine_edges: bool,
 
+    /// How far from the edge --refine-edges looks, in pixels.
+    #[arg(long, default_value_t = 8)]
+    pub edge_width: u32,
+
+    /// Soften the cut-out's edge by this many pixels (fractions allowed).
+    #[arg(long, default_value_t = 0.0)]
+    pub feather: f32,
+
     /// Extract lines/edges instead of removing background (uses DexiNed model).
     #[arg(long)]
     pub lines: bool,
@@ -195,6 +203,8 @@ impl Cli {
             // The pipeline's shift erodes for positive values.
             edge_shift: -self.edge_shift,
             refine_edges: self.refine_edges,
+            guided_radius: self.edge_width.clamp(1, 64),
+            feather: self.feather.max(0.0),
             ..Default::default()
         }
     }
@@ -976,5 +986,16 @@ mod tests {
         assert_eq!(grow.mask_settings().edge_shift, -3.0);
         let shrink = super::Cli::try_parse_from(["prunr", "--edge-shift", "-2", "x.png"]).unwrap();
         assert_eq!(shrink.mask_settings().edge_shift, 2.0);
+    }
+
+    /// Every Mask panel knob has a flag: Feather and Edge width reach the
+    /// pipeline, defaulting to the panel's defaults.
+    #[test]
+    fn feather_and_edge_width_reach_the_mask() {
+        let m = super::Cli::try_parse_from(["prunr", "--feather", "1.5", "--edge-width", "12", "x.png"]).unwrap().mask_settings();
+        assert_eq!((m.feather, m.guided_radius), (1.5, 12));
+        let d = super::Cli::try_parse_from(["prunr", "x.png"]).unwrap().mask_settings();
+        let panel = prunr_core::MaskSettings::default();
+        assert_eq!((d.feather, d.guided_radius), (panel.feather, panel.guided_radius));
     }
 }
