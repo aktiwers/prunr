@@ -988,6 +988,17 @@ impl PrunrApp {
         }
     }
 
+    /// A selection authored before this result, or kept across Process, is
+    /// applied now there is a tensor to correct: as part of the run that
+    /// produced the result, so it archives nothing and marks no stroke.
+    pub(crate) fn apply_kept_selection_to_new_result(&mut self, item_id: u64) {
+        let Some(idx) = self.batch.items.iter().position(|i| i.id == item_id) else { return };
+        let item = &self.batch.items[idx];
+        if item.selection_mask.is_some() && item.shows_cutout() && self.settings.model.uses_segmentation() {
+            self.dispatch_brush_rerun(idx);
+        }
+    }
+
     /// Re-cuts the image with the painted selection: Restore and Erase
     /// strokes take effect at once, from the cached tensor. Without a
     /// cut-out on screen there is nothing to correct yet; the selection
@@ -3038,15 +3049,7 @@ impl PrunrApp {
 
         self.refresh_batch_progress_status();
 
-        // A selection authored before this result, or kept across Process,
-        // is applied now that there is a tensor to correct.
-        let has_selection = self
-            .batch
-            .find_by_id(item_id)
-            .is_some_and(|i| i.status == BatchStatus::Done && i.selection_mask.is_some());
-        if has_selection {
-            self.apply_selection_to_active_model(item_id);
-        }
+        self.apply_kept_selection_to_new_result(item_id);
 
         if is_selected {
             self.result_switch_id += 1;
