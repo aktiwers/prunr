@@ -6,6 +6,7 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 
 ### Added
 
+- `--feather` and `--edge-width` on the command line, so every Mask setting has a flag.
 - **Magic Brush.** Click or drag over anything and SAM 2 (Hiera Small, bundled) finds it. On a background-removal result it restores or erases that object at once; on the eraser it adds to or takes away from the region. Shift and Alt override the mode for one click, a Confidence knob filters weak candidates. The encoder runs once per image in the background, so switching images keeps the tool ready.
 - **Restore and Erase brushes.** On a background-removal result the Paint Brush restores what the model took or erases what it left, the moment the stroke ends, with Shift and Alt overriding the mode. The knobs touched every stroke sit in a strip over the image while a brush is on; its dots open the full panel.
 - **Selections as a first-class object.** Paint Brush and Magic Brush author the same selection. Delete, Copy, Cut, Invert and Clear act on it, with keyboard shortcuts; Feather softens its edge against the photo.

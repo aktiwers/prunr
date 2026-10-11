@@ -116,6 +116,10 @@ pub(crate) fn render(ctx: &egui::Context, toasts: &mut crate::gui::toasts::Toast
                                 "Grow (+) or shrink (\u{2212}) the edge, in px");
                             opt_row(ui, "--refine-edges",
                                 "Guided filter for fine edge detail");
+                            opt_row(ui, "--edge-width <n>",
+                                "How far refinement looks from the edge, in px (default 8)");
+                            opt_row(ui, "--feather <n>",
+                                "Soften the edge by n px; fractions allowed");
                         });
 
                     ui.add_space(theme::SPACE_MD);
