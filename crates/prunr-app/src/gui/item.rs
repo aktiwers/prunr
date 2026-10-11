@@ -55,7 +55,7 @@ impl ImageSource {
     }
 }
 
-use super::timeline::{store, DocState, Origin, StepKind, Timeline};
+use super::timeline::{store, DocState, Origin, RunStart, StepKind, Timeline};
 
 /// A transition to a new image: first the image on screen is held while
 /// the new one's texture is built, then the new one reveals over it.
@@ -77,13 +77,13 @@ pub(crate) struct SubjectOutline {
 
 /// A run awaited by an item: the timeline version it started at, the
 /// step its result records (`None`: it fills in the shown step), the
-/// engine running it, and the image it started from (`None`: the original).
+/// engine running it, and where it started (`None`: the original).
 #[derive(Clone)]
 pub(crate) struct Job {
     pub(crate) version: u64,
     pub(crate) step: Option<StepKind>,
     pub(crate) engine: Engine,
-    pub(crate) base: Option<Arc<image::RgbaImage>>,
+    pub(crate) start: Option<RunStart>,
 }
 
 /// What runs a job, and so what cancelling it stops.
@@ -113,14 +113,11 @@ pub(crate) struct BatchItem {
     pub(crate) thumb_texture: Option<egui::TextureHandle>,
     pub(crate) thumb_pending: bool,
     pub(crate) result_rgba: Option<Arc<image::RgbaImage>>,
-    /// Chain-mode mirror of `source_dyn`: caches a `DynamicImage` wrapping
-    /// the current `result_rgba` so chain-mode live-preview dispatches
-    /// don't re-clone the full RGBA buffer every tick. The tuple stores
-    /// the `result_rgba` Arc that produced the cached `DynamicImage`;
-    /// `Arc::ptr_eq` against the current `result_rgba` is the staleness
-    /// check, so no manual invalidation is needed — every site that
-    /// replaces `result_rgba` with a fresh Arc automatically misses.
-    pub(crate) chain_dyn_cache: Option<(Arc<image::RgbaImage>, Arc<image::DynamicImage>)>,
+    /// `source_dyn` for a live preview that starts from an earlier result:
+    /// a `DynamicImage` wrapping that start, so drag ticks don't re-clone
+    /// the full RGBA buffer. Keyed by the start's Arc (`Arc::ptr_eq`), so a
+    /// new start misses; cleared when previews start from the source.
+    pub(crate) start_dyn_cache: Option<(Arc<image::RgbaImage>, Arc<image::DynamicImage>)>,
     pub(crate) result_texture: Option<egui::TextureHandle>,
     /// True while a background thread is building the source ColorImage.
     pub(crate) source_tex_pending: bool,
@@ -521,8 +518,8 @@ impl BatchItem {
     /// Note a run starting now; `step` is the step its result records,
     /// `None` to fill in the shown one (a re-run a knob change asked for).
     pub(crate) fn start_job(&mut self, step: Option<StepKind>, engine: Engine) {
-        let base = self.run_input(engine);
-        self.job = Some(Job { version: self.timeline.version(), step, engine, base });
+        let start = self.run_start(engine);
+        self.job = Some(Job { version: self.timeline.version(), step, engine, start });
     }
 
     /// Whether a landing result belongs to the state this item shows:
@@ -543,62 +540,77 @@ impl BatchItem {
 
     /// Record a landed run's result, now in the working copy.
     pub(crate) fn finish_job(&mut self) {
-        let Some(job) = self.job.take() else { return self.amend() };
-        match job.step {
+        let job = self.job.take();
+        match job.as_ref().and_then(|j| j.step) {
             Some(kind) => self.commit(kind),
             None => self.amend(),
         }
-        self.record_origin(job.engine, job.base);
-    }
-
-    /// Record that `engine` made the shown step's image, starting from
-    /// `base` (`None`: the original).
-    pub(crate) fn record_origin(&mut self, engine: Engine, base: Option<Arc<image::RgbaImage>>) {
-        // Share the stored copy when the start is unchanged (a live tweak)
-        // or is the step before's image (a new run).
-        let unchanged = self.timeline.current().origin.as_ref()
-            .and_then(|o| o.base.clone())
-            .filter(|b| base.as_ref().is_some_and(|v| b.holds(v)));
-        let shown_before = self.timeline.previous().and_then(|p| p.result.clone());
-        let origin = Origin {
-            engine,
-            base_dims: base.as_ref().map(|b| b.dimensions()),
-            base: unchanged.or_else(|| store(base.as_ref(), shown_before.as_ref())),
-        };
-        self.timeline.current_mut().origin = Some(origin);
-    }
-
-    /// The image a run of `engine` starts from (`None`: the original). A
-    /// run of the engine that made the shown step redoes that step from
-    /// the image it started from; any other run builds on the shown
-    /// result. The eraser always builds on the result: each erase adds to
-    /// the last.
-    pub(crate) fn run_input(&self, engine: Engine) -> Option<Arc<image::RgbaImage>> {
-        let shown = self.timeline.current();
-        match shown.origin.as_ref() {
-            Some(o) if o.engine == engine && engine != Engine::Erase => o.base.as_ref().and_then(|b| b.load()),
-            _ => self.result_rgba.clone().or_else(|| shown.result.as_ref().and_then(|r| r.load())),
+        if let Some(job) = job {
+            self.record_origin(job.engine, job.start);
         }
     }
 
-    /// The size of `run_input(engine)` without loading it.
+    /// Record that `engine` made the shown step's image, starting from
+    /// `start` (`None`: the original). The start is a stored timeline
+    /// image, so the history sweep keeps compressing it.
+    pub(crate) fn record_origin(&mut self, engine: Engine, start: Option<RunStart>) {
+        self.timeline.current_mut().origin = Some(Origin { engine, start });
+    }
+
+    /// The shown step's origin when a run of `engine` would redo that step.
+    /// The eraser never redoes: each erase adds to the last.
+    fn redo_origin(&self, engine: Engine) -> Option<&Origin> {
+        self.timeline.current().origin.as_ref().filter(|o| o.engine == engine && engine != Engine::Erase)
+    }
+
+    /// Whether a run of `engine` redoes the shown step rather than
+    /// building on it.
+    pub(crate) fn redoes_shown_step(&self, engine: Engine) -> bool {
+        self.redo_origin(engine).is_some()
+    }
+
+    /// Where a run of `engine` starts (`None`: the original): the shown
+    /// step's own start when the run redoes it, the shown result otherwise.
+    /// Nothing is loaded.
+    pub(crate) fn run_start(&self, engine: Engine) -> Option<RunStart> {
+        match self.redo_origin(engine) {
+            Some(o) => o.start.clone(),
+            None => self.timeline.current().result.clone().map(|image| RunStart {
+                image,
+                dims: self.result_rgba.as_ref().map_or(self.dimensions, |r| r.dimensions()),
+            }),
+        }
+    }
+
+    /// The pixels a run of `engine` starts from (`None`: the original).
+    pub(crate) fn run_input(&self, engine: Engine) -> Option<Arc<image::RgbaImage>> {
+        self.run_start(engine).and_then(|s| s.image.load())
+    }
+
+    /// The size of the image a run of `engine` starts from.
     pub(crate) fn run_input_dims(&self, engine: Engine) -> (u32, u32) {
-        let shown = self.timeline.current();
-        let dims = match shown.origin.as_ref() {
-            Some(o) if o.engine == engine && engine != Engine::Erase => o.base_dims,
-            _ => self.result_rgba.as_ref().map(|r| r.dimensions()),
-        };
-        dims.unwrap_or(self.dimensions)
+        self.run_start(engine).map_or(self.dimensions, |s| s.dims)
     }
 
     /// Whether a run of `engine` starts from an earlier result rather than
     /// the original; cheap, for recipes and labels.
     pub(crate) fn starts_from_result(&self, engine: Engine) -> bool {
-        let shown = self.timeline.current();
-        match shown.origin.as_ref() {
-            Some(o) if o.engine == engine && engine != Engine::Erase => o.base.is_some(),
-            _ => self.result_rgba.is_some() || shown.result.is_some(),
-        }
+        self.run_start(engine).is_some()
+    }
+
+    /// The pixels the awaited run starts from (`None`: the original),
+    /// loaded when the run is sent.
+    pub(crate) fn job_input(&self) -> Option<Arc<image::RgbaImage>> {
+        self.job.as_ref()?.start.as_ref()?.image.load()
+    }
+
+    /// Whether the awaited run works on the result on screen, so the
+    /// canvas shows that result while it runs.
+    pub(crate) fn job_builds_on_shown_result(&self) -> bool {
+        let shown = self.timeline.current().result.as_ref();
+        self.job.as_ref().and_then(|j| j.start.as_ref())
+            .zip(shown)
+            .is_some_and(|(start, shown)| Arc::ptr_eq(&start.image, shown))
     }
 
     /// Drop whatever caches a `CacheImpact` says are stale. Single entry
@@ -803,7 +815,7 @@ impl BatchItem {
             thumb_texture: None,
             thumb_pending: false,
             result_rgba: None,
-            chain_dyn_cache: None,
+            start_dyn_cache: None,
             result_texture: None,
             source_tex_pending: false,
             result_tex_pending: false,
@@ -1189,7 +1201,7 @@ mod tests {
     /// Lands a run of `engine` that produced `v`, recording `step`.
     fn land(item: &mut BatchItem, engine: Engine, step: Option<StepKind>, v: u8) -> Option<u8> {
         item.start_job(step, engine);
-        let base = item.job.as_ref().and_then(|j| j.base.as_ref()).map(|b| b.get_pixel(0, 0).0[0]);
+        let base = item.job_input().map(|b| b.get_pixel(0, 0).0[0]);
         item.result_rgba = Some(px(v));
         item.status = BatchStatus::Done;
         item.finish_job();
@@ -1231,8 +1243,8 @@ mod tests {
     fn a_live_tweak_records_its_start_so_the_next_one_does_not_stack() {
         let mut item = fixture_item(1);
         land(&mut item, Engine::Upscale, Some(StepKind::Upscale), 3);
-        let start = item.run_input(Engine::Segment);
-        assert_eq!(start.as_ref().map(|b| b.get_pixel(0, 0).0[0]), Some(3), "an effect starts from the upscale");
+        let start = item.run_start(Engine::Segment);
+        assert_eq!(item.run_input(Engine::Segment).map(|b| b.get_pixel(0, 0).0[0]), Some(3), "an effect starts from the upscale");
 
         item.result_rgba = Some(px(4)); // the first tweak's preview landed
         item.amend();

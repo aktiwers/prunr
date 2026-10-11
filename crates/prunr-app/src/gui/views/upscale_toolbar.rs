@@ -8,9 +8,8 @@ use super::upscale_chip::render_output_scale_chip;
 use crate::gui::item_settings::ItemSettings;
 use crate::gui::settings::Settings;
 
-/// `source_dims` is `(w, h)` of the active item's input image —
-/// `result_rgba` dimensions when chain mode is on and a result exists,
-/// otherwise the raw source image dimensions. Resolved by the caller.
+/// `source_dims` is `(w, h)` of the image the next upscale starts from,
+/// resolved by the caller.
 pub(crate) fn render_upscale_chips(
     ui: &mut Ui,
     app_settings: &Settings,
