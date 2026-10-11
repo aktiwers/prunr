@@ -38,7 +38,7 @@ const PIPELINES: [Pipeline; 4] = [
         ],
     },
     Pipeline {
-        tab: "Lines",
+        tab: "Sketch",
         input: "The photo, or the cut-out subject when Sketch is Subject",
         output: "Lines, composed with the subject as chosen",
         stages: &[

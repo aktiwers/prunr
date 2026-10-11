@@ -83,9 +83,19 @@ pub struct Cli {
     #[arg(long)]
     pub lines_after_bg: bool,
 
-    /// Line detection sensitivity (0.0–1.0). Lower = bold outlines, higher = fine detail.
-    #[arg(long, default_value_t = 0.5)]
+    /// How much of the detected edges become lines (0.0–1.0): lower draws
+    /// bold outlines only, higher adds fine detail.
+    #[arg(long = "line-detail", visible_alias = "line-strength", default_value_t = 0.5)]
     pub line_strength: f32,
+
+    /// Line width in pixels (0–20).
+    #[arg(long, default_value_t = 0)]
+    pub line_width: u32,
+
+    /// How the lines combine with the subject (with --lines-after-bg):
+    /// lines-only, subject-filled, engraving or ghost.
+    #[arg(long, default_value = "lines-only", value_parser = parse_composition)]
+    pub line_composition: prunr_core::ComposeMode,
 
     /// Paint all lines a solid color (hex, e.g. "000000" for black, "ff0000" for red).
     #[arg(long)]
@@ -585,9 +595,9 @@ fn run_batch(args: &Cli) -> i32 {
     let edge = prunr_core::EdgeSettings {
         line_strength: args.line_strength,
         solid_line_color,
-        edge_thickness: 0,
+        edge_thickness: args.line_width.min(20),
         edge_scale: args.line_scale,
-        compose_mode: prunr_core::ComposeMode::default(),
+        compose_mode: args.line_composition,
         line_style: prunr_core::LineStyle::default(),
         input_transform: prunr_core::InputTransform::default(),
     };
@@ -968,6 +978,17 @@ fn section(title: &str) {
     println!("{}", "-".repeat(title.len()));
 }
 
+fn parse_composition(s: &str) -> Result<prunr_core::ComposeMode, String> {
+    use prunr_core::ComposeMode;
+    match s {
+        "lines-only" => Ok(ComposeMode::LinesOnly),
+        "subject-filled" => Ok(ComposeMode::SubjectFilled),
+        "engraving" => Ok(ComposeMode::Engraving),
+        "ghost" => Ok(ComposeMode::Ghost),
+        _ => Err(format!("'{s}' is not one of lines-only, subject-filled, engraving, ghost")),
+    }
+}
+
 fn path_or_unknown(p: Option<std::path::PathBuf>) -> String {
     p.map_or("(unresolvable on this platform)".to_string(),
         |p| p.display().to_string())
@@ -985,6 +1006,17 @@ mod tests {
         assert_eq!(grow.mask_settings().edge_shift, -3.0);
         let shrink = super::Cli::try_parse_from(["prunr", "--edge-shift", "-2", "x.png"]).unwrap();
         assert_eq!(shrink.mask_settings().edge_shift, 2.0);
+    }
+
+    /// The Sketch flags: --line-detail (and its old name), --line-width
+    /// and --line-composition.
+    #[test]
+    fn sketch_flags_parse() {
+        let a = super::Cli::try_parse_from(["prunr", "--line-detail", "0.8", "--line-width", "3", "--line-composition", "ghost", "x.png"]).unwrap();
+        assert_eq!((a.line_strength, a.line_width, a.line_composition), (0.8, 3, prunr_core::ComposeMode::Ghost));
+        let old = super::Cli::try_parse_from(["prunr", "--line-strength", "0.2", "x.png"]).unwrap();
+        assert_eq!(old.line_strength, 0.2);
+        assert!(super::Cli::try_parse_from(["prunr", "--line-composition", "inverse", "x.png"]).is_err());
     }
 
     /// Every Mask panel knob has a flag: Feather and Edge width reach the
