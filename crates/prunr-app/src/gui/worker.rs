@@ -198,6 +198,10 @@ pub enum WorkerMessage {
 }
 
 pub enum WorkerResult {
+    Report {
+        item_id: u64,
+        update: prunr_core::ProgressUpdate,
+    },
     BatchProgress {
         item_id: u64,
         stage: ProgressStage,
@@ -686,6 +690,10 @@ fn handle_subprocess_event(
     ctx: &egui::Context,
 ) {
     match event {
+        SubprocessEvent::Report { item_id, update } => {
+            let _ = res_tx.send(WorkerResult::Report { item_id, update });
+            ctx.request_repaint();
+        }
         SubprocessEvent::Progress { item_id, stage, pct } => {
             let _ = res_tx.send(WorkerResult::BatchProgress { item_id, stage, pct });
             ctx.request_repaint();

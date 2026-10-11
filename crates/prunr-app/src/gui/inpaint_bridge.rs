@@ -76,6 +76,7 @@ pub enum InpaintBridgeMsg {
 /// `SubprocessEvent` — the bridge filters out seg events the inpaint-
 /// only subprocess can't emit anyway.
 pub enum InpaintBridgeResult {
+    Report { item_id: u64, update: prunr_core::ProgressUpdate },
     Progress {
         item_id: u64,
         current: u32,
@@ -244,6 +245,9 @@ fn run(msg_rx: mpsc::Receiver<InpaintBridgeMsg>, res_tx: mpsc::Sender<InpaintBri
         if let SubState::Ready(s) = &mut sub_state {
             for evt in s.poll_events() {
                 match evt {
+                    SubprocessEvent::Report { item_id, update } => {
+                        let _ = res_tx.send(InpaintBridgeResult::Report { item_id, update });
+                    }
                     SubprocessEvent::InpaintProgress {
                         item_id, current, total, outer_current, outer_total,
                     } => {

@@ -145,6 +145,18 @@ pub struct DispatchProgress {
 }
 
 impl DispatchProgress {
+    /// Fold one pipeline report into the snapshot the widgets draw.
+    pub fn apply(&mut self, update: &prunr_core::ProgressUpdate) {
+        use prunr_core::ProgressUpdate;
+        match *update {
+            // A cancelling run keeps saying so until it ends.
+            ProgressUpdate::Step(step) if !self.is_cancelling() => self.step_label = Cow::Borrowed(step.label()),
+            ProgressUpdate::Outer { done, total, .. } => self.outer = Some((done, total)),
+            ProgressUpdate::Inner { done, total, .. } => self.inner = (done, total),
+            ProgressUpdate::Step(_) | ProgressUpdate::Tiles(_) | ProgressUpdate::Tile { .. } => {}
+        }
+    }
+
     /// A cancel was requested and the run is finishing its current step.
     pub fn is_cancelling(&self) -> bool {
         self.step_label == step_labels::CANCELLING
@@ -558,6 +570,19 @@ mod tests {
             Some(CancelTarget::InpaintForItem(7)),
         );
         assert_eq!(cancel_target_for(ProgressKind::SdInpaint, None), None);
+    }
+
+    #[test]
+    fn a_report_updates_the_snapshot_but_never_hides_a_cancel() {
+        use prunr_core::{ProgressUpdate, Step, Unit};
+        let mut p = upscale((0, 48));
+        p.apply(&ProgressUpdate::Step(Step::Upscaling));
+        p.apply(&ProgressUpdate::Inner { done: 3, total: 48, unit: Unit::Tile });
+        p.apply(&ProgressUpdate::Outer { done: 1, total: 2, unit: Unit::Pass });
+        assert_eq!((p.step_label.as_ref(), p.inner, p.outer), ("Upscaling", (3, 48), Some((1, 2))));
+        p.step_label = std::borrow::Cow::Borrowed(step_labels::CANCELLING);
+        p.apply(&ProgressUpdate::Step(Step::Finishing));
+        assert!(p.is_cancelling(), "a late step name must not hide the cancel");
     }
 
     /// The upscale cancel says so through its step label; the widgets
