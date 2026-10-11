@@ -890,8 +890,8 @@ impl BgKind {
             Self::Transparent => "Transparent",
             Self::Solid => "Solid color",
             Self::Image => "Image",
-            Self::BlurredSource => "Blurred source",
-            Self::DesaturatedSource => "Desaturated source",
+            Self::BlurredSource => "Blurred photo",
+            Self::DesaturatedSource => "Black & white photo",
         }
     }
 
@@ -944,7 +944,7 @@ fn render_background_chip(
     let resp = chip::tooltip(
         chip::chip_button(ui, ICON_PALETTE.codepoint, current.name(), accent),
         "Background",
-        "What fills the transparent area behind the subject: a solid color, an image, or a blurred or desaturated copy of the photo.",
+        "What fills the transparent area behind the subject: a solid color, an image, or a blurred or black-and-white copy of the photo.",
     None,
 );
 
@@ -1030,7 +1030,7 @@ fn render_background_chip(
                         hint(ui, "A blurred copy of the photo fills the transparent area.");
                     }
                     BgKind::DesaturatedSource => {
-                        hint(ui, "A grayscale copy of the photo fills the transparent area.");
+                        hint(ui, "A black-and-white copy of the photo fills the transparent area.");
                     }
                 }
             });
