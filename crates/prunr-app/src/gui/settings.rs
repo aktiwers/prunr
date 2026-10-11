@@ -344,16 +344,14 @@ impl Settings {
         self.brush.take_model_tuning_from(&resolved);
     }
 
-    /// Update only the SD-tuning fields on `Settings.brush` to match
-    /// the active preset's bundle for `scheduler`. Called from the
-    /// SD-popover scheduler-change handler — non-SD brush fields stay
-    /// owned by the brush popover.
+    /// Switch the eraser to `scheduler`'s steps and guidance from the
+    /// active preset. The prompt, seed and brush stay as the user set them.
     pub(crate) fn on_scheduler_change_resolve_sd(
         &mut self,
         scheduler: super::brush_state::SdScheduler,
     ) {
         let resolved = self.resolve_active_preset(Some(scheduler));
-        self.brush.take_sd_tuning_from(&resolved.brush);
+        self.brush.take_sd_quality_from(&resolved.brush);
     }
 
     /// ItemSettings template for new batch items — the default_preset's
@@ -916,7 +914,7 @@ mod tests {
     fn lcm_routing_inactive_for_non_lcm_scheduler() {
         use crate::gui::brush_state::SdScheduler;
         let mut s = Settings::default();
-        s.brush.sd_scheduler = SdScheduler::Ddim;
+        s.brush.sd_scheduler = SdScheduler::DpmPlusPlus2MKarras;
         assert!(!s.lcm_routing_active(prunr_models::ModelId::SdV15InpaintFp16));
     }
 
@@ -1039,10 +1037,10 @@ mod tests {
         s.model = SettingsModel::SdInpaint;
         let mut schedulers = HashMap::new();
         schedulers.insert(SdScheduler::Lcm, SdSchedulerBundle {
-            steps: 8, guidance_scale: 1.5, use_karras_sigmas: false, strength: 1.0,
+            steps: 8, guidance_scale: 1.5,
         });
-        schedulers.insert(SdScheduler::Ddim, SdSchedulerBundle {
-            steps: 25, guidance_scale: 6.0, use_karras_sigmas: false, strength: 1.0,
+        schedulers.insert(SdScheduler::DpmPlusPlus2MKarras, SdSchedulerBundle {
+            steps: 25, guidance_scale: 6.0,
         });
         let sd = SdPreset {
             active_scheduler: SdScheduler::Lcm,
@@ -1062,14 +1060,20 @@ mod tests {
         s.brush.sd_scheduler = SdScheduler::Lcm;
         s.brush.sd_steps = 8;
         s.brush.radius = 42.0;
+        s.brush.sd_prompt = "a red brick wall".into();
+        s.brush.sd_negative_prompt = "people".into();
+        s.brush.sd_seed = Some(77);
 
-        s.on_scheduler_change_resolve_sd(SdScheduler::Ddim);
+        s.on_scheduler_change_resolve_sd(SdScheduler::DpmPlusPlus2MKarras);
 
-        assert_eq!(s.brush.sd_scheduler, SdScheduler::Ddim);
+        assert_eq!(s.brush.sd_scheduler, SdScheduler::DpmPlusPlus2MKarras);
         assert_eq!(s.brush.sd_steps, 25);
         assert!((s.brush.sd_guidance_scale - 6.0).abs() < f32::EPSILON);
         // Non-SD field stays put — owned by the brush popover.
         assert!((s.brush.radius - 42.0).abs() < f32::EPSILON);
+        assert_eq!(s.brush.sd_prompt, "a red brick wall", "picking a quality keeps the prompt");
+        assert_eq!(s.brush.sd_negative_prompt, "people");
+        assert_eq!(s.brush.sd_seed, Some(77), "and the pinned seed");
     }
 
     #[test]

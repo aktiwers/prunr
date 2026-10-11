@@ -59,32 +59,16 @@ pub struct BrushSettings {
     /// cost per step (cond + uncond passes blended).
     #[serde(default = "default_cfg")]
     pub sd_guidance_scale: f32,
-    /// SD-only: which scheduler runs the denoise loop. LCM is the
-    /// default — proven good after the LcmScheduler port; DDIM kept
-    /// as a conservative baseline. Other variants gated by
-    /// `is_available()` until they have a dispatch backend wired.
+    /// SD-only: the quality (sampler); Fast is the default.
     #[serde(default = "default_sd_scheduler")]
     pub sd_scheduler: SdScheduler,
-    /// SD-only: number of denoise steps. LCM ranges 1-8; standard SD
-    /// 15-30. UI clamps the slider per scheduler.
+    /// SD-only: number of denoise steps, within `SdScheduler::steps_range`.
     #[serde(default = "default_sd_steps")]
     pub sd_steps: u32,
-    /// SD-only: use the Karras sigma noise schedule on top of the
-    /// chosen scheduler. Disabled for LCM (which has its own fixed
-    /// schedule).
-    #[serde(default)]
-    pub sd_use_karras_sigmas: bool,
     /// SD-only: pinned RNG seed for reproducibility. `None` = fresh
     /// random per stroke (the historical behavior).
     #[serde(default)]
     pub sd_seed: Option<u64>,
-    /// SD-only: inpaint strength in [0, 1]. 1.0 = pure noise init,
-    /// fully creative rewrite (default). Lower values preserve the
-    /// original masked pixels proportionally — the dispatcher VAE-
-    /// encodes the source, mixes with scaled noise, and skips the
-    /// corresponding number of early denoise steps.
-    #[serde(default = "default_strength")]
-    pub sd_strength: f32,
     /// SD-only: TAESD fast VAE preference. `None` = auto (on when
     /// the TAESD bundle is installed). `Some(false)` = explicit
     /// opt-out. `Some(true)` = explicit opt-in (still gated by
@@ -107,71 +91,49 @@ pub struct BrushSettings {
     pub magic_remove_specks: bool,
 }
 
-/// SD eraser scheduler choice. Wired into `SdInpaintRequest` at
-/// dispatch time so the worker picks the right denoise math.
+/// The SD eraser's quality: which sampler runs the fill. Wired into
+/// `SdInpaintRequest` at dispatch time.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SdScheduler {
-    /// LCM-distilled multistep. 4-8 steps typical.
+    /// Fast: the LCM-distilled model, a few steps.
     Lcm,
-    /// DDIM (Denoising Diffusion Implicit Models) — conservative
-    /// baseline. 20-30 steps typical.
-    Ddim,
-    /// DPM-Solver++ 2M with Karras sigmas — modern Standard SD
-    /// default in A1111 / ComfyUI / InvokeAI. 15-25 steps.
+    /// Quality: DPM-Solver++ 2M with Karras spacing on the full model.
+    /// Settings saved with the retired DDIM, UniPC or Euler-A load as this.
+    #[serde(alias = "Ddim", alias = "UniPc", alias = "EulerA")]
     DpmPlusPlus2MKarras,
-    /// UniPC predictor-corrector multistep — best quality at low step
-    /// counts (8-12). Corrector solves a 2×2 system to compensate for
-    /// the predictor's hardcoded rhos_p=0.5 approximation.
-    UniPc,
-    /// Euler-Ancestral — adds noise per step → creative variation per
-    /// seed (non-deterministic).
-    EulerA,
 }
 
 impl SdScheduler {
-    /// Display order for the scheduler picker.
-    pub const ALL: [SdScheduler; 5] = [
-        SdScheduler::Lcm,
-        SdScheduler::Ddim,
-        SdScheduler::DpmPlusPlus2MKarras,
-        SdScheduler::UniPc,
-        SdScheduler::EulerA,
-    ];
+    pub const ALL: [SdScheduler; 2] = [SdScheduler::Lcm, SdScheduler::DpmPlusPlus2MKarras];
 
-    /// Returns `false` for schedulers that don't have a dispatch
-    /// backend wired yet. UI gates the dropdown on this so users
-    /// can't pick something the worker can't run; dispatch should
-    /// also gate as a defensive fallback.
-    pub fn is_available(&self) -> bool {
-        matches!(
-            self,
-            SdScheduler::Lcm
-                | SdScheduler::Ddim
-                | SdScheduler::DpmPlusPlus2MKarras
-                | SdScheduler::EulerA
-                | SdScheduler::UniPc,
-        )
-    }
-
-    /// Short user-facing label for dropdowns. Matches A1111 conventions.
+    /// The quality's name in the Quality chip.
     pub fn label(&self) -> &'static str {
         match self {
-            SdScheduler::Lcm => "LCM",
-            SdScheduler::Ddim => "DDIM",
-            SdScheduler::DpmPlusPlus2MKarras => "DPM++ 2M Karras",
-            SdScheduler::UniPc => "UniPC",
-            SdScheduler::EulerA => "Euler-A",
+            SdScheduler::Lcm => "Fast",
+            SdScheduler::DpmPlusPlus2MKarras => "Quality",
         }
     }
 
-    /// One-line use-case hint shown under each entry in the scheduler dropdown.
     pub fn description(&self) -> &'static str {
         match self {
-            SdScheduler::Lcm => "Distilled — fast preview tier (4-8 steps)",
-            SdScheduler::Ddim => "Conservative baseline (20-30 steps)",
-            SdScheduler::DpmPlusPlus2MKarras => "Best quality at standard SD (15-25 steps)",
-            SdScheduler::UniPc => "Best quality at low step counts (8-12 steps)",
-            SdScheduler::EulerA => "Creative variation per seed (20-30 steps)",
+            SdScheduler::Lcm => "a few seconds per fill",
+            SdScheduler::DpmPlusPlus2MKarras => "the best fill, several times slower",
+        }
+    }
+
+    /// Steps the sampler is made for.
+    pub fn steps_range(&self) -> std::ops::RangeInclusive<u32> {
+        match self {
+            SdScheduler::Lcm => 2..=8,
+            SdScheduler::DpmPlusPlus2MKarras => 10..=40,
+        }
+    }
+
+    /// Guidance that suits the sampler: the distilled model breaks above 2.
+    pub fn guidance_range(&self) -> std::ops::RangeInclusive<f32> {
+        match self {
+            SdScheduler::Lcm => 1.0..=2.0,
+            SdScheduler::DpmPlusPlus2MKarras => 1.0..=10.0,
         }
     }
 }
@@ -181,176 +143,7 @@ impl From<SdScheduler> for prunr_core::inpaint_sd::SchedulerKind {
         use prunr_core::inpaint_sd::SchedulerKind;
         match s {
             SdScheduler::Lcm => SchedulerKind::Lcm,
-            SdScheduler::Ddim => SchedulerKind::Ddim,
             SdScheduler::DpmPlusPlus2MKarras => SchedulerKind::DpmPp2MKarras,
-            SdScheduler::UniPc => SchedulerKind::UniPc,
-            SdScheduler::EulerA => SchedulerKind::EulerA,
-        }
-    }
-}
-
-/// Built-in SD quality presets — bundles scheduler + steps + CFG +
-/// Karras into one knob for users who don't want to tune individually.
-/// Industry-standard pattern (A1111 / Lightroom / DaVinci): touching
-/// any individual slider auto-switches the displayed preset to
-/// `Custom`.
-///
-/// **Stateless.** The "active preset" is computed from the current
-/// brush field values via `detect_from`. There's no persisted
-/// `sd_quality_preset` — picking a preset writes the bundled values
-/// into the individual fields and that's it. This eliminates the
-/// "stored preset says Balanced but values say Custom" desync class
-/// of bug.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum SdQualityPreset {
-    /// LCM @ 4 steps, CFG=1.0, feather=4 — instant preview tier.
-    Fast,
-    /// LCM @ 8 steps, CFG=1.5, feather=4 — current shipped default.
-    /// Good balance of speed + quality on iGPU.
-    Balanced,
-    /// DPM++ 2M Karras @ 25 steps, CFG=4.0, feather=8 — best quality.
-    /// Requires the DPM++ scheduler to be available (`is_available()`);
-    /// UI gates picking and dispatch falls back to LCM otherwise.
-    Quality,
-    /// Computed: current brush values don't match any built-in.
-    /// Never an input to `apply_to` — it has no bundled config.
-    Custom,
-}
-
-impl SdQualityPreset {
-    /// In-memory-only apply: writes the preset's bundled values
-    /// directly to a `BrushSettings`. Used by tests that want to
-    /// exercise the value table without touching disk. Production
-    /// callers go through `apply_to_settings` for write-through.
-    /// `Custom` is a no-op.
-    #[cfg(test)]
-    pub fn apply_to(self, brush: &mut BrushSettings) {
-        match self {
-            SdQualityPreset::Fast => {
-                brush.sd_scheduler = SdScheduler::Lcm;
-                brush.sd_steps = 4;
-                brush.sd_guidance_scale = 1.0;
-                brush.sd_use_karras_sigmas = false;
-                brush.inpaint_feather = 4.0;
-            }
-            SdQualityPreset::Balanced => {
-                brush.sd_scheduler = SdScheduler::Lcm;
-                brush.sd_steps = 8;
-                brush.sd_guidance_scale = 1.5;
-                brush.sd_use_karras_sigmas = false;
-                brush.inpaint_feather = 4.0;
-            }
-            SdQualityPreset::Quality => {
-                brush.sd_scheduler = SdScheduler::DpmPlusPlus2MKarras;
-                brush.sd_steps = 25;
-                brush.sd_guidance_scale = 4.0;
-                brush.sd_use_karras_sigmas = true;
-                brush.inpaint_feather = 8.0;
-            }
-            SdQualityPreset::Custom => {}
-        }
-    }
-
-    /// Write this preset's bundled values into the active preset's
-    /// SD-scheduler bundle, flush the change to disk, then re-resolve
-    /// the live brush so the toolbar reflects it. `inpaint_feather`
-    /// is a brush-popover knob (not part of the SD bundle) and is
-    /// applied directly.
-    ///
-    /// `Custom` is a no-op. When the active preset is "Prunr"
-    /// (synthetic, never written) or the active model isn't SD-family,
-    /// the function falls through to in-memory-only mutation — no
-    /// preset entry is created and no disk flush happens.
-    pub fn apply_to_settings(self, settings: &mut crate::gui::settings::Settings) {
-        if matches!(self, SdQualityPreset::Custom) { return; }
-        let (sched, steps, cfg, karras, feather) = match self {
-            SdQualityPreset::Fast =>
-                (SdScheduler::Lcm, 4u32, 1.0_f32, false, 4.0_f32),
-            SdQualityPreset::Balanced =>
-                (SdScheduler::Lcm, 8, 1.5, false, 4.0),
-            SdQualityPreset::Quality =>
-                (SdScheduler::DpmPlusPlus2MKarras, 25, 4.0, true, 8.0),
-            SdQualityPreset::Custom => unreachable!(),
-        };
-
-        settings.brush.inpaint_feather = feather;
-
-        let prunr_or_non_sd = settings.default_preset
-            == crate::gui::settings::PRUNR_PRESET
-            || settings.model.to_model_id().map(|id| !id.is_sd_family()).unwrap_or(true);
-        if prunr_or_non_sd {
-            settings.brush.sd_scheduler = sched;
-            settings.brush.sd_steps = steps;
-            settings.brush.sd_guidance_scale = cfg;
-            settings.brush.sd_use_karras_sigmas = karras;
-            return;
-        }
-
-        let model_id = settings.model.to_model_id()
-            .expect("non-prunr_or_non_sd branch implies SD-family model_id is Some");
-
-        let preset_name = settings.default_preset.clone();
-        let key = crate::gui::presets::model_id_key(model_id);
-        let file = settings.presets.entry(preset_name.clone()).or_default();
-        let mp = file.models.entry(key).or_default();
-        let sd = mp.sd.get_or_insert_with(crate::gui::presets::SdPreset::default);
-        sd.active_scheduler = sched;
-        sd.schedulers.insert(sched, crate::gui::presets::SdSchedulerBundle {
-            steps,
-            guidance_scale: cfg,
-            use_karras_sigmas: karras,
-            strength: settings.brush.sd_strength,
-        });
-
-        let mp_clone = mp.clone();
-        if let Err(e) = crate::gui::presets_fs::save_merged(&preset_name, model_id, mp_clone) {
-            tracing::error!(preset = %preset_name, %e, "failed to persist quality-preset click");
-        }
-
-        let resolved = settings.resolve_active_preset(None);
-        settings.brush = resolved.brush;
-        settings.brush.inpaint_feather = feather;
-    }
-
-    /// Detect which preset (if any) the current `BrushSettings`
-    /// match. Returns `Custom` when the values don't fit any
-    /// built-in. Used after individual-slider edits to update the
-    /// preset dropdown's displayed value.
-    pub fn detect_from(brush: &BrushSettings) -> SdQualityPreset {
-        const EPS: f32 = 1e-3;
-        let cfg_eq = |a: f32, b: f32| (a - b).abs() < EPS;
-        if brush.sd_scheduler == SdScheduler::Lcm
-            && brush.sd_steps == 4
-            && cfg_eq(brush.sd_guidance_scale, 1.0)
-            && !brush.sd_use_karras_sigmas
-            && cfg_eq(brush.inpaint_feather, 4.0)
-        {
-            SdQualityPreset::Fast
-        } else if brush.sd_scheduler == SdScheduler::Lcm
-            && brush.sd_steps == 8
-            && cfg_eq(brush.sd_guidance_scale, 1.5)
-            && !brush.sd_use_karras_sigmas
-            && cfg_eq(brush.inpaint_feather, 4.0)
-        {
-            SdQualityPreset::Balanced
-        } else if brush.sd_scheduler == SdScheduler::DpmPlusPlus2MKarras
-            && brush.sd_steps == 25
-            && cfg_eq(brush.sd_guidance_scale, 4.0)
-            && brush.sd_use_karras_sigmas
-            && cfg_eq(brush.inpaint_feather, 8.0)
-        {
-            SdQualityPreset::Quality
-        } else {
-            SdQualityPreset::Custom
-        }
-    }
-
-    pub fn label(&self) -> &'static str {
-        match self {
-            SdQualityPreset::Fast => "Fast",
-            SdQualityPreset::Balanced => "Balanced",
-            SdQualityPreset::Quality => "Quality",
-            SdQualityPreset::Custom => "Custom",
         }
     }
 }
@@ -359,11 +152,7 @@ fn default_feather() -> f32 { 4.0 }
 fn default_grow() -> f32 { 2.0 }
 fn default_magic_confidence_threshold() -> f32 { 0.5 }
 fn default_magic_remove_specks() -> bool { true }
-/// 1.5 matches the `Balanced` preset's CFG (LCM scheduler, CFG up to
-/// 2.0 per Diffusers LCM guidance — community consensus is values
-/// \>2.0 degrade LCM output quality). For Standard SD via DDIM /
-/// DPM++ the user can bump to 4.0–7.5 via the toolbar slider; the
-/// `Quality` preset auto-fills 4.0 when picked.
+/// Fast's guidance; LCM output degrades above 2.
 pub(crate) fn default_cfg() -> f32 { 1.5 }
 
 /// Defaults for SD eraser prompts. Style-agnostic — works whether the
@@ -383,7 +172,6 @@ fn default_sd_negative_prompt() -> String { DEFAULT_SD_NEGATIVE_PROMPT.to_string
 
 fn default_sd_scheduler() -> SdScheduler { SdScheduler::Lcm }
 fn default_sd_steps() -> u32 { 8 }
-fn default_strength() -> f32 { 1.0 }
 
 impl BrushSettings {
     pub fn stamp(&self) -> Stamp {
@@ -456,17 +244,31 @@ impl BrushSettings {
         self.inpaint_grow = source.inpaint_grow;
     }
 
-    /// The Stable Diffusion eraser's sampler, prompt and seed settings.
+    /// The Stable Diffusion eraser's quality, prompt and seed settings.
     pub fn take_sd_tuning_from(&mut self, source: &Self) {
-        self.sd_scheduler = source.sd_scheduler;
-        self.sd_steps = source.sd_steps;
-        self.sd_guidance_scale = source.sd_guidance_scale;
-        self.sd_use_karras_sigmas = source.sd_use_karras_sigmas;
-        self.sd_strength = source.sd_strength;
+        self.take_sd_quality_from(source);
         self.sd_prompt = source.sd_prompt.clone();
         self.sd_negative_prompt = source.sd_negative_prompt.clone();
         self.sd_seed = source.sd_seed;
         self.sd_use_taesd = source.sd_use_taesd;
+    }
+
+    /// A quality's sampler settings only: picking Fast or Quality keeps
+    /// the prompt and seed.
+    pub fn take_sd_quality_from(&mut self, source: &Self) {
+        self.sd_scheduler = source.sd_scheduler;
+        self.sd_steps = source.sd_steps;
+        self.sd_guidance_scale = source.sd_guidance_scale;
+        self.fit_sd_to_quality();
+    }
+
+    /// Steps and guidance inside what the quality is made for; a value
+    /// saved under the other quality or a retired sampler can sit outside.
+    pub fn fit_sd_to_quality(&mut self) {
+        let steps = self.sd_scheduler.steps_range();
+        let guidance = self.sd_scheduler.guidance_range();
+        self.sd_steps = self.sd_steps.clamp(*steps.start(), *steps.end());
+        self.sd_guidance_scale = self.sd_guidance_scale.clamp(*guidance.start(), *guidance.end());
     }
 
     pub fn reset_popover_fields_from(&mut self, source: &Self) {
@@ -493,9 +295,7 @@ impl Default for BrushSettings {
             sd_guidance_scale: default_cfg(),
             sd_scheduler: default_sd_scheduler(),
             sd_steps: default_sd_steps(),
-            sd_use_karras_sigmas: false,
             sd_seed: None,
-            sd_strength: default_strength(),
             sd_use_taesd: None,
             edge_feather: 0.0,
             magic_confidence_threshold: default_magic_confidence_threshold(),
@@ -741,80 +541,26 @@ mod tests {
         assert!(!s.has_active_stroke());
     }
 
-    /// `BrushSettings::default()` must round-trip cleanly through
-    /// `SdQualityPreset::detect_from` to `Balanced` — i.e. default
-    /// values match the Balanced preset's bundled config. If they
-    /// drift, new users see "Custom" in the dropdown on first launch
-    /// which is misleading.
+    /// Settings saved with a retired sampler open on Quality.
     #[test]
-    fn default_brush_settings_match_balanced_preset() {
-        let s = BrushSettings::default();
-        assert_eq!(SdQualityPreset::detect_from(&s), SdQualityPreset::Balanced,
-            "default BrushSettings must align with Balanced preset");
-    }
-
-    /// Each preset's `apply_to` must produce a `BrushSettings` that
-    /// `detect_from` round-trips back to the same preset. Pins the
-    /// auto-fill ↔ detection invariant so a future tweak to one side
-    /// can't silently break the other.
-    #[test]
-    fn quality_presets_round_trip_apply_then_detect() {
-        for preset in [SdQualityPreset::Fast, SdQualityPreset::Balanced, SdQualityPreset::Quality] {
-            let mut s = BrushSettings::default();
-            preset.apply_to(&mut s);
-            assert_eq!(SdQualityPreset::detect_from(&s), preset,
-                "apply→detect mismatch for {preset:?}");
+    fn retired_samplers_load_as_quality() {
+        for old in ["\"Ddim\"", "\"UniPc\"", "\"EulerA\""] {
+            let s: SdScheduler = serde_json::from_str(old).expect("retired sampler still loads");
+            assert_eq!(s, SdScheduler::DpmPlusPlus2MKarras, "{old}");
         }
     }
 
-    /// `apply_to(Custom)` is a true no-op — Custom has no bundled
-    /// config, so no fields are mutated. Pinned because the
-    /// alternative interpretation (silently set a "preset field") was
-    /// flagged as ambiguous in review.
+    /// Each quality's shipped steps and guidance sit inside the slider it shows.
     #[test]
-    fn apply_to_custom_is_noop() {
-        let mut s = BrushSettings::default();
-        let before = s.clone();
-        SdQualityPreset::Custom.apply_to(&mut s);
-        assert_eq!(s, before, "apply_to(Custom) must not mutate any field");
-    }
-
-    /// Touching any individual SD knob away from the active preset's
-    /// bundled values must mark the preset as `Custom`. This is the
-    /// industry-standard pattern (Lightroom, A1111) — the user's
-    /// tweak is preserved without bouncing them between presets.
-    #[test]
-    fn individual_slider_edit_detects_as_custom() {
-        let mut s = BrushSettings::default();
-        // Default == Balanced (LCM, 8 steps, CFG=1.5, no Karras).
-        // Bump CFG to a non-preset value:
-        s.sd_guidance_scale = 3.0;
-        assert_eq!(SdQualityPreset::detect_from(&s), SdQualityPreset::Custom,
-            "off-preset CFG must detect as Custom");
-
-        // Change scheduler away from the preset:
-        let mut s = BrushSettings::default();
-        s.sd_scheduler = SdScheduler::Ddim;
-        assert_eq!(SdQualityPreset::detect_from(&s), SdQualityPreset::Custom,
-            "off-preset scheduler must detect as Custom");
-
-        // Toggle Karras (Balanced has it off; flipping on → Custom):
-        let mut s = BrushSettings::default();
-        s.sd_use_karras_sigmas = true;
-        assert_eq!(SdQualityPreset::detect_from(&s), SdQualityPreset::Custom,
-            "off-preset Karras toggle must detect as Custom");
-    }
-
-    /// `is_available()` reflects which schedulers have a dispatch
-    /// backend wired today. UI gates the dropdown on this; dispatch
-    /// should also gate as a defensive fallback.
-    #[test]
-    fn scheduler_availability_reflects_dispatch_readiness() {
-        assert!(SdScheduler::Lcm.is_available());
-        assert!(SdScheduler::Ddim.is_available());
-        assert!(SdScheduler::DpmPlusPlus2MKarras.is_available());
-        assert!(SdScheduler::EulerA.is_available());
-        assert!(SdScheduler::UniPc.is_available());
+    fn each_quality_ships_steps_and_guidance_inside_its_range() {
+        for q in SdScheduler::ALL {
+            let b = crate::gui::presets::SdSchedulerBundle::default_for(q);
+            assert!(q.steps_range().contains(&b.steps), "{q:?} steps");
+            assert!(q.guidance_range().contains(&b.guidance_scale), "{q:?} guidance");
+        }
+        let d = BrushSettings::default();
+        assert!(d.sd_scheduler.steps_range().contains(&d.sd_steps));
+        assert!(d.sd_scheduler.guidance_range().contains(&d.sd_guidance_scale));
     }
 
     /// Old persisted JSON without the new SD-tuning fields must
@@ -839,14 +585,9 @@ mod tests {
         // Missing fields fill with serde defaults:
         assert_eq!(s.sd_scheduler, SdScheduler::Lcm);
         assert_eq!(s.sd_steps, 8);
-        assert!(!s.sd_use_karras_sigmas);
         assert_eq!(s.sd_seed, None);
         assert_eq!(s.sd_use_taesd, None);
-        // The persisted CFG=4.0 is kept; semantically that means the
-        // user's effective preset is Custom (CFG mismatch with all
-        // built-ins). The UI reads detect_from on every render so
-        // this is reported correctly to the dropdown.
-        assert_eq!(SdQualityPreset::detect_from(&s), SdQualityPreset::Custom);
+        assert!((s.sd_guidance_scale - 4.0).abs() < f32::EPSILON);
     }
 
     /// Forward-compat tripwire: a JSON literal with only `{"radius":24}`
@@ -861,9 +602,7 @@ mod tests {
         assert_eq!(s.sd_use_taesd, None);
         assert_eq!(s.sd_seed, None);
         assert_eq!(s.sd_steps, 8);
-        assert!(!s.sd_use_karras_sigmas);
         assert_eq!(s.sd_scheduler, SdScheduler::Lcm);
-        assert!((s.sd_strength - 1.0).abs() < f32::EPSILON);
         assert!((s.sd_guidance_scale - 1.5).abs() < f32::EPSILON);
         assert_eq!(s.sd_prompt, DEFAULT_SD_PROMPT);
         assert_eq!(s.sd_negative_prompt, DEFAULT_SD_NEGATIVE_PROMPT);
@@ -1020,9 +759,7 @@ mod tests {
             sd_guidance_scale: 5.5,
             sd_scheduler: SdScheduler::DpmPlusPlus2MKarras,
             sd_steps: 30,
-            sd_use_karras_sigmas: true,
             sd_seed: Some(42),
-            sd_strength: 0.6,
             sd_use_taesd: Some(true),
             edge_feather: 5.0,
             magic_confidence_threshold: 0.7,
@@ -1048,9 +785,7 @@ mod tests {
         assert!((s.sd_guidance_scale - 5.5).abs() < f32::EPSILON);
         assert_eq!(s.sd_scheduler, SdScheduler::DpmPlusPlus2MKarras);
         assert_eq!(s.sd_steps, 30);
-        assert!(s.sd_use_karras_sigmas);
         assert_eq!(s.sd_seed, Some(42));
-        assert!((s.sd_strength - 0.6).abs() < f32::EPSILON);
     }
 
     #[test]
@@ -1081,71 +816,6 @@ mod tests {
         // strength + mode carry user intent across reset — must not change.
         assert!((target.strength - 0.42).abs() < f32::EPSILON);
         assert_eq!(target.mode, BrushMode::Add);
-    }
-
-    #[test]
-    fn sd_quality_preset_apply_to_settings_writes_through_active_preset() {
-        use crate::gui::presets::{model_id_key, ModelPreset, PresetFile, PRESET_FORMAT_VERSION, SdPreset};
-        use crate::gui::settings::{Settings, SettingsModel};
-
-        let mut s = Settings::default();
-        s.model = SettingsModel::SdInpaint;
-        let mp = ModelPreset {
-            item_settings: Default::default(),
-            brush: BrushSettings::default(),
-            sd: Some(SdPreset::default()),
-        };
-        let mut models = std::collections::HashMap::new();
-        models.insert(model_id_key(prunr_models::ModelId::SdV15InpaintFp16), mp);
-        let file = PresetFile { format_version: PRESET_FORMAT_VERSION, models };
-        // Unique name per test so the on-disk side effect of save_merged
-        // doesn't collide with siblings (the disk write is a best-effort
-        // side effect; this test asserts in-memory state only).
-        let preset_name = "TestApplyToSettingsWriteThrough";
-        s.presets.insert(preset_name.to_string(), file);
-        s.default_preset = preset_name.to_string();
-
-        SdQualityPreset::Quality.apply_to_settings(&mut s);
-
-        assert_eq!(s.brush.sd_scheduler, SdScheduler::DpmPlusPlus2MKarras);
-        assert_eq!(s.brush.sd_steps, 25);
-        assert!((s.brush.sd_guidance_scale - 4.0).abs() < f32::EPSILON);
-        assert!(s.brush.sd_use_karras_sigmas);
-
-        let key = model_id_key(prunr_models::ModelId::SdV15InpaintFp16);
-        let mp_back = s.presets.get(preset_name)
-            .expect("preset stays in map")
-            .models.get(&key)
-            .expect("SD entry");
-        let sd_back = mp_back.sd.as_ref().expect("sd entry written");
-        assert_eq!(sd_back.active_scheduler, SdScheduler::DpmPlusPlus2MKarras);
-        let bundle = sd_back.schedulers.get(&SdScheduler::DpmPlusPlus2MKarras)
-            .copied().expect("bundle written");
-        assert_eq!(bundle.steps, 25);
-        assert!((bundle.guidance_scale - 4.0).abs() < f32::EPSILON);
-        assert!(bundle.use_karras_sigmas);
-
-        // Best-effort: clean up the disk file written as a side effect.
-        let _ = crate::gui::presets_fs::delete(preset_name);
-    }
-
-    #[test]
-    fn sd_quality_preset_apply_to_settings_with_prunr_falls_through_to_brush() {
-        use crate::gui::settings::{Settings, SettingsModel};
-
-        let mut s = Settings::default();
-        s.model = SettingsModel::SdInpaint;
-        // default_preset stays "Prunr" (synthetic, never written).
-        let presets_before = s.presets.clone();
-
-        SdQualityPreset::Fast.apply_to_settings(&mut s);
-
-        // Direct brush mutation — no preset write-through.
-        assert_eq!(s.brush.sd_scheduler, SdScheduler::Lcm);
-        assert_eq!(s.brush.sd_steps, 4);
-        assert!((s.brush.sd_guidance_scale - 1.0).abs() < f32::EPSILON);
-        assert!(!s.brush.sd_use_karras_sigmas);
-        assert_eq!(s.presets, presets_before, "Prunr branch must not touch presets map");
     }
 
     #[test]

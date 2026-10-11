@@ -343,12 +343,6 @@ pub(crate) struct InpaintTuning {
     pub sd_steps: u32,
     /// SD-only: pinned RNG seed for reproducibility. `None` = random.
     pub sd_seed: Option<u64>,
-    /// SD-only: inpaint strength in [0, 1]. 1.0 = pure noise init,
-    /// fully creative rewrite. <1.0 preserves the source proportionally.
-    pub sd_strength: f32,
-    /// LCM-only: Karras sigma schedule. Default false (linear, matches
-    /// distillation training).
-    pub sd_use_karras_sigmas: bool,
     /// SD-only: post-gate TAESD selection — already resolved by the
     /// caller against user preference + install state. Dispatch
     /// consumes verbatim; no further gating, no scheduler coupling.
@@ -371,8 +365,6 @@ impl Default for InpaintTuning {
             sd_scheduler: super::brush_state::SdScheduler::Lcm,
             sd_steps: 8,
             sd_seed: None,
-            sd_strength: 1.0,
-            sd_use_karras_sigmas: false,
             use_taesd: false,
             sd_tuning: Default::default(),
         }
@@ -831,9 +823,8 @@ impl Processor {
                         seed: tuning.sd_seed,
                         use_taesd: plan.use_taesd,
                         scheduler,
-                        strength: tuning.sd_strength,
-                        use_karras_sigmas: tuning.sd_use_karras_sigmas,
                         tuning: tuning.sd_tuning.clone(),
+                        ..Default::default()
                     })
                 }
                 _ => None,
