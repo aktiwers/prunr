@@ -19,7 +19,7 @@ pub(crate) const UNIT_UV: Rect = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1
 const GLOW: Color32 = theme::GLOW;
 
 /// Cells per side of an effect mesh; plenty for a gradient this soft.
-const GRID: usize = 24;
+pub(crate) const GRID: usize = 24;
 
 /// 0 → 1 → 0 over one slow breath, for anything that shows work under way.
 pub(crate) fn breath(t: f32) -> f32 {
@@ -38,21 +38,21 @@ fn sheen(t: f32, u: f32, v: f32) -> f32 {
     x * x * (3.0 - 2.0 * x)
 }
 
-/// How far a reveal has come at `p` (0..1) for the point `(u, v)`: the new
-/// image arrives corner to corner along a soft edge. Returns the new
-/// image's opacity and the glow riding the edge.
-fn reveal_at(p: f32, u: f32, v: f32) -> (f32, f32) {
+/// How far a reveal has come at `p` (0..1) for a point whose turn comes at
+/// `order` (0 first, 1 last): the new image arrives along a soft edge.
+/// Returns the new image's opacity and the glow riding the edge.
+fn reveal_at(p: f32, order: f32) -> (f32, f32) {
     const FEATHER: f32 = 0.35;
     let eased = p * p * (3.0 - 2.0 * p);
     let front = eased * (1.0 + FEATHER);
-    let opacity = ((front - (u + v) * 0.5) / FEATHER).clamp(0.0, 1.0);
+    let opacity = ((front - order) / FEATHER).clamp(0.0, 1.0);
     let glow = (1.0 - (2.0 * opacity - 1.0).abs()) * (1.0 - eased);
     (opacity, glow)
 }
 
 /// A `GRID × GRID` mesh over `rect` with `texture` mapped across it and
-/// each vertex coloured by `color(u, v)`.
-fn paint_mesh(painter: &Painter, rect: Rect, texture: TextureId, color: impl Fn(f32, f32) -> Color32) {
+/// each vertex coloured by `color(u, v, vertex index)`.
+fn paint_mesh(painter: &Painter, rect: Rect, texture: TextureId, color: impl Fn(f32, f32, usize) -> Color32) {
     let mut mesh = Mesh::with_texture(texture);
     mesh.reserve_vertices((GRID + 1) * (GRID + 1));
     mesh.reserve_triangles(2 * GRID * GRID);
@@ -61,7 +61,8 @@ fn paint_mesh(painter: &Painter, rect: Rect, texture: TextureId, color: impl Fn(
         for i in 0..=GRID {
             let (u, v) = (i as f32 / GRID as f32, j as f32 / GRID as f32);
             let uv = if texture == TextureId::default() { WHITE_UV } else { Pos2::new(u, v) };
-            mesh.vertices.push(Vertex { pos: rect.lerp_inside(egui::vec2(u, v)), uv, color: color(u, v) });
+            let index = mesh.vertices.len();
+            mesh.vertices.push(Vertex { pos: rect.lerp_inside(egui::vec2(u, v)), uv, color: color(u, v, index) });
         }
     }
     for j in 0..n {
@@ -78,7 +79,7 @@ fn paint_mesh(painter: &Painter, rect: Rect, texture: TextureId, color: impl Fn(
 /// what a region looks like while a model works on it.
 pub(crate) fn paint_working(painter: &Painter, rect: Rect, t: f32) {
     let s = breath(t);
-    paint_mesh(painter, rect, TextureId::default(), |u, v| {
+    paint_mesh(painter, rect, TextureId::default(), |u, v, _| {
         GLOW.gamma_multiply(0.06 + 0.16 * s + 0.22 * sheen(t, u, v))
     });
 }
@@ -87,16 +88,85 @@ pub(crate) fn paint_working(painter: &Painter, rect: Rect, t: f32) {
 /// brushed region breathes and the sheen stays inside it.
 pub(crate) fn paint_working_masked(painter: &Painter, rect: Rect, mask: TextureId, t: f32) {
     let s = breath(t);
-    paint_mesh(painter, rect, mask, |u, v| Color32::WHITE.gamma_multiply(0.35 + 0.35 * s + 0.6 * sheen(t, u, v)));
+    paint_mesh(painter, rect, mask, |u, v, _| Color32::WHITE.gamma_multiply(0.35 + 0.35 * s + 0.6 * sheen(t, u, v)));
 }
 
 /// `to` arriving where `from` was, at `p` (0..1), along a soft edge with a
 /// lavender glow; `from` leaves along the same edge, so where the new
 /// image is transparent the old one is already gone when the edge passes.
-pub(crate) fn paint_reveal(painter: &Painter, rect: Rect, from: TextureId, to: TextureId, p: f32) {
-    paint_mesh(painter, rect, from, |u, v| Color32::WHITE.gamma_multiply(1.0 - reveal_at(p, u, v).0));
-    paint_mesh(painter, rect, to, |u, v| Color32::WHITE.gamma_multiply(reveal_at(p, u, v).0));
-    paint_mesh(painter, rect, TextureId::default(), |u, v| GLOW.gamma_multiply(0.45 * reveal_at(p, u, v).1));
+/// `order` (one value per mesh vertex, see `subject_glow`) sets where it
+/// starts; without one it runs corner to corner.
+pub(crate) fn paint_reveal(painter: &Painter, rect: Rect, from: TextureId, to: TextureId, p: f32, order: Option<&[f32]>) {
+    let at = |u: f32, v: f32, i: usize| reveal_at(p, order.and_then(|o| o.get(i).copied()).unwrap_or((u + v) * 0.5));
+    paint_mesh(painter, rect, from, |u, v, i| Color32::WHITE.gamma_multiply(1.0 - at(u, v, i).0));
+    paint_mesh(painter, rect, to, |u, v, i| Color32::WHITE.gamma_multiply(at(u, v, i).0));
+    paint_mesh(painter, rect, TextureId::default(), |u, v, i| GLOW.gamma_multiply(0.45 * at(u, v, i).1));
+}
+
+/// A glowing outline around the subject in `hint`, and the order a reveal
+/// over it follows: per mesh vertex, 0 on the subject rising to 1 at the
+/// farthest point. `None` when the hint holds no subject.
+pub(crate) fn subject_glow(hint: &prunr_core::SubjectHint) -> Option<(egui::ColorImage, Vec<f32>)> {
+    let (w, h) = (hint.width as usize, hint.height as usize);
+    let inside: Vec<bool> = hint.coverage.iter().map(|&c| c >= 128).collect();
+    if inside.len() != w * h || !inside.iter().any(|&i| i) {
+        return None;
+    }
+    let to_subject = chamfer(&inside, w, h);
+    let to_background = chamfer(&inside.iter().map(|&i| !i).collect::<Vec<_>>(), w, h);
+    let pixels = (0..w * h)
+        .map(|i| {
+            let d = if inside[i] { to_background[i] } else { to_subject[i] };
+            let line = (1.0 - d / 1.5).max(0.0);
+            let glow = 0.5 * (1.0 - d / 6.0).max(0.0).powi(2);
+            GLOW.gamma_multiply(line.max(glow))
+        })
+        .collect();
+    let far = to_subject.iter().copied().fold(1.0, f32::max);
+    let order = (0..=GRID)
+        .flat_map(|j| (0..=GRID).map(move |i| (i, j)))
+        .map(|(i, j)| {
+            let x = (i * (w - 1)) / GRID;
+            let y = (j * (h - 1)) / GRID;
+            to_subject[y * w + x] / far
+        })
+        .collect();
+    Some((egui::ColorImage { size: [w, h], pixels, source_size: egui::vec2(w as f32, h as f32) }, order))
+}
+
+/// Distance, in pixels, from every pixel to the nearest `target` pixel
+/// (two-pass 3-4 chamfer).
+fn chamfer(target: &[bool], w: usize, h: usize) -> Vec<f32> {
+    const STRAIGHT: f32 = 1.0;
+    const DIAGONAL: f32 = 1.4;
+    let mut d: Vec<f32> = target.iter().map(|&t| if t { 0.0 } else { f32::INFINITY }).collect();
+    for y in 0..h {
+        for x in 0..w {
+            let i = y * w + x;
+            let mut best = d[i];
+            if x > 0 { best = best.min(d[i - 1] + STRAIGHT); }
+            if y > 0 {
+                best = best.min(d[i - w] + STRAIGHT);
+                if x > 0 { best = best.min(d[i - w - 1] + DIAGONAL); }
+                if x + 1 < w { best = best.min(d[i - w + 1] + DIAGONAL); }
+            }
+            d[i] = best;
+        }
+    }
+    for y in (0..h).rev() {
+        for x in (0..w).rev() {
+            let i = y * w + x;
+            let mut best = d[i];
+            if x + 1 < w { best = best.min(d[i + 1] + STRAIGHT); }
+            if y + 1 < h {
+                best = best.min(d[i + w] + STRAIGHT);
+                if x + 1 < w { best = best.min(d[i + w + 1] + DIAGONAL); }
+                if x > 0 { best = best.min(d[i + w - 1] + DIAGONAL); }
+            }
+            d[i] = best;
+        }
+    }
+    d
 }
 
 /// The steady frame of the tile a model is working on.
@@ -124,14 +194,34 @@ mod tests {
 
     #[test]
     fn a_reveal_starts_hidden_ends_whole_and_never_steps_back() {
-        assert_eq!(reveal_at(0.0, 0.0, 0.0).0, 0.0);
-        assert_eq!(reveal_at(1.0, 1.0, 1.0), (1.0, 0.0), "fully shown, no glow left");
+        assert_eq!(reveal_at(0.0, 0.0).0, 0.0);
+        assert_eq!(reveal_at(1.0, 1.0), (1.0, 0.0), "fully shown, no glow left");
         let mut last = 0.0;
         for i in 0..=20 {
-            let (o, _) = reveal_at(i as f32 / 20.0, 0.6, 0.4);
+            let (o, _) = reveal_at(i as f32 / 20.0, 0.5);
             assert!(o >= last);
             last = o;
         }
-        assert!(reveal_at(0.5, 0.0, 0.0).0 > reveal_at(0.5, 1.0, 1.0).0, "the top-left corner arrives first");
+        assert!(reveal_at(0.5, 0.0).0 > reveal_at(0.5, 1.0).0, "what comes first, arrives first");
+    }
+
+    /// The outline sits on the subject's edge, and a reveal over it starts
+    /// on the subject and spreads outward.
+    #[test]
+    fn the_subject_glow_rings_the_subject_and_orders_the_reveal_outward() {
+        let (w, h) = (32usize, 32usize);
+        let coverage = (0..w * h).map(|i| {
+            let (x, y) = (i % w, i / w);
+            if (12..20).contains(&x) && (12..20).contains(&y) { 255 } else { 0 }
+        }).collect();
+        let hint = prunr_core::SubjectHint { width: w as u32, height: h as u32, coverage };
+        let (image, order) = subject_glow(&hint).expect("there is a subject");
+        let alpha = |x: usize, y: usize| image.pixels[y * w + x].a();
+        assert!(alpha(12, 16) > alpha(16, 16), "brightest on the edge, not in the middle");
+        assert!(alpha(12, 16) > alpha(2, 2), "nor far outside");
+        let centre = order[(GRID / 2) * (GRID + 1) + GRID / 2];
+        assert_eq!(centre, 0.0, "the subject reveals first");
+        assert!((order[0] - 1.0).abs() < 0.2, "a far corner reveals last");
+        assert!(subject_glow(&prunr_core::SubjectHint { width: 2, height: 2, coverage: vec![0; 4] }).is_none());
     }
 }
