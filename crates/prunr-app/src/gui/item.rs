@@ -147,6 +147,8 @@ pub(crate) struct Job {
     pub(crate) step: Option<StepKind>,
     pub(crate) engine: Engine,
     pub(crate) start: Option<RunStart>,
+    /// The seed a generated fill runs with.
+    pub(crate) seed: Option<u64>,
 }
 
 /// What runs a job, and so what cancelling it stops.
@@ -557,7 +559,20 @@ impl BatchItem {
     /// `None` to fill in the shown one (a re-run a knob change asked for).
     pub(crate) fn start_job(&mut self, step: Option<StepKind>, engine: Engine) {
         let start = self.run_start(engine);
-        self.job = Some(Job { version: self.timeline.version(), step, engine, start });
+        self.job = Some(Job { version: self.timeline.version(), step, engine, start, seed: None });
+    }
+
+    /// Note an erase starting now; `seed` is the one a generated fill runs with.
+    pub(crate) fn start_erase(&mut self, seed: Option<u64>) {
+        self.start_job(Some(StepKind::Erase), Engine::Erase);
+        if let Some(job) = self.job.as_mut() {
+            job.seed = seed;
+        }
+    }
+
+    /// The seed of the generated fill on screen.
+    pub(crate) fn shown_seed(&self) -> Option<u64> {
+        self.timeline.current().origin.as_ref().and_then(|o| o.seed)
     }
 
     /// Whether a landing result belongs to the state this item shows:
@@ -584,7 +599,7 @@ impl BatchItem {
             None => self.amend(),
         }
         if let Some(job) = job {
-            self.record_origin(job.engine, job.start);
+            self.timeline.current_mut().origin = Some(Origin { engine: job.engine, start: job.start, upscale_run: None, seed: job.seed });
         }
     }
 
@@ -615,7 +630,7 @@ impl BatchItem {
     /// `start` (`None`: the original). The start is a stored timeline
     /// image, so the history sweep keeps compressing it.
     pub(crate) fn record_origin(&mut self, engine: Engine, start: Option<RunStart>) {
-        self.timeline.current_mut().origin = Some(Origin { engine, start, upscale_run: None });
+        self.timeline.current_mut().origin = Some(Origin { engine, start, upscale_run: None, seed: None });
     }
 
     /// The shown step's origin when a run of `engine` would redo that step.
@@ -1043,6 +1058,25 @@ mod tests {
         assert!(item.kept_upscale().is_some());
         item.commit(StepKind::Adjust);
         assert!(item.kept_upscale().is_some(), "a Refine knob step keeps its upscale's run");
+    }
+
+    /// Pin seed keeps the fill on screen: each fill's seed stays with its
+    /// step, so after an undo it is the earlier fill's.
+    #[test]
+    fn a_fills_seed_belongs_to_its_step() {
+        let mut item = fixture_item(1);
+        for (seed, v) in [(7, 1), (8, 2)] {
+            item.start_erase(Some(seed));
+            item.result_rgba = Some(px(v));
+            item.finish_job();
+        }
+        assert_eq!(item.shown_seed(), Some(8));
+        item.undo_step();
+        assert_eq!(item.shown_seed(), Some(7));
+        item.undo_step();
+        assert_eq!(item.shown_seed(), None, "the original has no fill");
+        item.redo_step();
+        assert_eq!(item.shown_seed(), Some(7));
     }
 
     #[test]

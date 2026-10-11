@@ -172,6 +172,13 @@ pub(crate) fn own_prompt<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Strin
 }
 fn default_sd_negative_prompt() -> String { DEFAULT_SD_NEGATIVE_PROMPT.to_string() }
 
+/// A seed for a fill nobody pinned.
+pub fn fresh_sd_seed() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos() as u64)
+}
+
 fn default_sd_scheduler() -> SdScheduler { SdScheduler::Lcm }
 fn default_sd_steps() -> u32 { 8 }
 
