@@ -39,8 +39,8 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
     // While an inpaint stroke is in flight on the selected item, the
     // brush is locked: another stroke would silently supersede the
     // first via dispatch_inpaint's generation counter, wasting the
-    // 5+ minutes of CPU work just performed. Visible signal is the
-    // banner with "Cancel (Esc)" button rendered below.
+    // 5+ minutes of CPU work just performed. The capsule's Cancel is
+    // the way out.
     let inpaint_in_flight_for_selected = app.batch
         .selected_idx_clamped()
         .map(|idx| app.batch.items[idx].id)
@@ -159,9 +159,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
         let active_inpaint_item = app.batch.selected_idx_clamped()
             .map(|idx| app.batch.items[idx].id)
             .filter(|&id| app.processor.is_inpaint_in_flight(id));
-        let cancelling = progress.is_cancelling()
-            || active_inpaint_item.is_some_and(|id| app.processor.is_inpaint_cancelling(id));
-        if super::progress_widget::render(ui, canvas_rect, img_rect, &progress, cancelling) {
+        if super::progress_widget::render(ui, canvas_rect, img_rect, &progress) {
             // Routing logic is the pure `cancel_target_for` fn — one
             // table-tested match instead of an inline copy.
             use crate::gui::dispatch_progress::{cancel_target_for, CancelTarget};

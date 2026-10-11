@@ -12,7 +12,7 @@ use egui::epaint::{PathShape, Shadow};
 use egui::text::{LayoutJob, TextWrapping};
 use egui::{Color32, FontId, Galley, Painter, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2};
 
-use crate::gui::dispatch_progress::{step_labels, DispatchProgress, TileState};
+use crate::gui::dispatch_progress::{DispatchProgress, TileState};
 use crate::gui::theme;
 
 const CAPSULE_HEIGHT: f32 = 56.0;
@@ -39,11 +39,12 @@ const WAITING_TILE: Color32 = Color32::from_rgba_premultiplied(9, 9, 11, 140);
 const TILE_GRID: Color32 = Color32::from_rgba_premultiplied(13, 13, 13, 13);
 
 const STOPPING: &str = "Stopping";
+const FINISHING_CURRENT: &str = "Finishing the current tile";
 
 /// The capsule's two lines: what is happening, then how far along.
-fn capsule_lines(progress: &DispatchProgress, cancelling: bool, now: Instant) -> (Cow<'_, str>, Option<String>) {
-    if cancelling {
-        return (Cow::Borrowed(STOPPING), Some(step_labels::CANCELLING.to_string()));
+fn capsule_lines(progress: &DispatchProgress, now: Instant) -> (Cow<'_, str>, Option<String>) {
+    if progress.cancelling {
+        return (Cow::Borrowed(STOPPING), Some(FINISHING_CURRENT.to_string()));
     }
     let detail: Vec<String> = progress.counter_text().into_iter().chain(progress.remaining_text(now)).collect();
     (Cow::Borrowed(progress.step_label.as_ref()), (!detail.is_empty()).then(|| detail.join(" \u{b7} ")))
@@ -56,15 +57,15 @@ pub(crate) fn render(
     canvas_rect: Rect,
     img_rect: Option<Rect>,
     progress: &DispatchProgress,
-    cancelling: bool,
 ) -> bool {
+    let cancelling = progress.cancelling;
     let t = ui.ctx().input(|i| i.time) as f32;
     let painter = ui.painter().with_clip_rect(canvas_rect);
     if let Some(img_rect) = img_rect {
         paint_tile_map(&painter, img_rect, progress, t);
     }
 
-    let (title, subtitle) = capsule_lines(progress, cancelling, Instant::now());
+    let (title, subtitle) = capsule_lines(progress, Instant::now());
     let max_text = (canvas_rect.width() - 260.0).max(CAPSULE_MIN_TEXT_WIDTH);
     let title = single_line(&painter, title.into_owned(), TITLE_SIZE, theme::TEXT_PRIMARY, max_text);
     let subtitle_color = if cancelling { CAUTION_TEXT } else { theme::TEXT_SECONDARY };
@@ -72,7 +73,7 @@ pub(crate) fn render(
     let text_w = subtitle.as_ref().map_or(0.0, |g| g.size().x).max(title.size().x).max(CAPSULE_MIN_TEXT_WIDTH);
 
     let cancel_label = single_line(&painter, "Cancel".into(), TITLE_SIZE, theme::TEXT_PRIMARY, f32::INFINITY);
-    let keycap = single_line(&painter, "Esc".into(), KEYCAP_SIZE, theme::TEXT_SECONDARY, f32::INFINITY);
+    let keycap = single_line(&painter, super::shortcuts::keys(ui.ctx(), super::shortcuts::Action::Cancel).to_string(), KEYCAP_SIZE, theme::TEXT_SECONDARY, f32::INFINITY);
     let keycap_size = keycap.size() + Vec2::new(12.0, 2.0);
     let button_w = 14.0 + cancel_label.size().x + 8.0 + keycap_size.x + 12.0;
     let with_button = !cancelling;
@@ -189,7 +190,7 @@ fn paint_ring(painter: &Painter, center: Pos2, radius: f32, width: f32, fraction
     if sweep <= 0.0 {
         return;
     }
-    let n = ((sweep / TAU) * 64.0).ceil() as usize + 1;
+    let n = ((sweep / TAU) * 32.0).ceil() as usize + 1;
     let points = (0..=n)
         .map(|i| {
             let a = start + sweep * i as f32 / n as f32;
@@ -208,7 +209,7 @@ mod tests {
     #[test]
     fn the_capsule_names_the_step_then_the_counts() {
         let p = DispatchProgress { inner: (12, 49), ..DispatchProgress::new(ProgressKind::Upscale, Step::Upscaling.label()) };
-        let (title, sub) = capsule_lines(&p, false, Instant::now());
+        let (title, sub) = capsule_lines(&p, Instant::now());
         assert_eq!(title, "Upscaling");
         assert_eq!(sub.as_deref(), Some("Step 12 of 49"));
     }
@@ -216,14 +217,14 @@ mod tests {
     #[test]
     fn a_step_with_nothing_counted_is_one_line() {
         let p = DispatchProgress::new(ProgressKind::Seg, Step::LoadingModel.label());
-        assert_eq!(capsule_lines(&p, false, Instant::now()), (Cow::Borrowed("Loading the model"), None));
+        assert_eq!(capsule_lines(&p, Instant::now()), (Cow::Borrowed("Loading the model"), None));
     }
 
     #[test]
     fn a_cancel_says_stopping_whatever_the_step() {
-        let p = DispatchProgress { inner: (3, 8), ..DispatchProgress::new(ProgressKind::SdInpaint, Step::Denoising.label()) };
-        let (title, sub) = capsule_lines(&p, true, Instant::now());
+        let p = DispatchProgress { inner: (3, 8), cancelling: true, ..DispatchProgress::new(ProgressKind::Inpaint, Step::Denoising.label()) };
+        let (title, sub) = capsule_lines(&p, Instant::now());
         assert_eq!(title, STOPPING);
-        assert_eq!(sub.as_deref(), Some(step_labels::CANCELLING));
+        assert_eq!(sub.as_deref(), Some(FINISHING_CURRENT));
     }
 }
