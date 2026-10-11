@@ -76,6 +76,7 @@ pub(crate) struct ModelPreset {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub(crate) struct SdPreset {
+    #[serde(deserialize_with = "super::brush_state::own_prompt")]
     pub prompt: String,
     pub negative_prompt: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -88,9 +89,9 @@ pub(crate) struct SdPreset {
 
 impl Default for SdPreset {
     fn default() -> Self {
-        use super::brush_state::{DEFAULT_SD_NEGATIVE_PROMPT, DEFAULT_SD_PROMPT};
+        use super::brush_state::DEFAULT_SD_NEGATIVE_PROMPT;
         Self {
-            prompt: DEFAULT_SD_PROMPT.to_string(),
+            prompt: String::new(),
             negative_prompt: DEFAULT_SD_NEGATIVE_PROMPT.to_string(),
             use_taesd: None,
             seed: None,

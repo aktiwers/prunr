@@ -1052,7 +1052,7 @@ impl PrunrApp {
             feather_px: bs.inpaint_feather,
             grow_px: bs.inpaint_grow,
             backend,
-            sd_prompt: bs.sd_prompt.clone(),
+            sd_prompt: bs.sd_prompt_for_run(),
             sd_negative_prompt: bs.sd_negative_prompt.clone(),
             sd_guidance_scale: bs.sd_guidance_scale,
             sd_scheduler: bs.sd_scheduler,
