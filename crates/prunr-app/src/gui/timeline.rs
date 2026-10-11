@@ -279,6 +279,8 @@ pub(crate) struct Origin {
     /// The upscale run kept for Refine when this step is one
     /// (`UpscaleCache::run`), so another step never re-finishes it.
     pub(crate) upscale_run: Option<u64>,
+    /// The seed a generated fill ran with, for Pin seed.
+    pub(crate) seed: Option<u64>,
 }
 
 /// An image a run starts from: a stored timeline image, loaded only when

@@ -5,7 +5,7 @@ use egui::RichText;
 use egui_material_icons::icons::*;
 
 use crate::gui::brush_state::{
-    BrushSettings, SdScheduler, DEFAULT_SD_NEGATIVE_PROMPT,
+    fresh_sd_seed, BrushSettings, SdScheduler, DEFAULT_SD_NEGATIVE_PROMPT,
 };
 use crate::gui::presets::SdSchedulerBundle;
 use crate::gui::settings::Settings;
@@ -29,15 +29,16 @@ pub(crate) fn render(
     ui: &mut egui::Ui,
     app_settings: &mut Settings,
     installed: crate::gui::hardware_cache::HardwareInstallCache,
+    shown_seed: Option<u64>,
 ) -> EraserRowChange {
     let mut change = EraserRowChange::default();
     change.committed |= render_quality_chip(ui, app_settings, installed.lcm_bundle);
     change.committed |= render_prompt_chip(ui, &mut app_settings.brush);
-    change.committed |= render_advanced_group(ui, &mut app_settings.brush, installed.taesd);
+    change.committed |= render_advanced_group(ui, &mut app_settings.brush, installed.taesd, shown_seed);
     change
 }
 
-fn render_advanced_group(ui: &mut egui::Ui, brush: &mut BrushSettings, taesd_installed: bool) -> bool {
+fn render_advanced_group(ui: &mut egui::Ui, brush: &mut BrushSettings, taesd_installed: bool, shown_seed: Option<u64>) -> bool {
     brush.fit_sd_to_quality();
     let quality = brush.sd_scheduler;
     let shipped = SdSchedulerBundle::default_for(quality);
@@ -83,15 +84,10 @@ fn render_advanced_group(ui: &mut egui::Ui, brush: &mut BrushSettings, taesd_ins
             None => "Pin seed".to_string(),
         };
         if chip::toggle_row(ui, &seed_label, &mut pinned).changed {
-            brush.sd_seed = pinned.then(|| {
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_nanos() as u64)
-                    .unwrap_or(0)
-            });
+            brush.sd_seed = pinned.then(|| shown_seed.unwrap_or_else(fresh_sd_seed));
             committed = true;
         }
-        hint(ui, "Pinned: the same prompt and settings give the same fill every time.");
+        hint(ui, "Keeps the seed of the fill on screen, so the same prompt and settings give that fill again.");
         ui.add_space(theme::SPACE_XS);
 
         let mut fast = brush.sd_use_taesd_effective_with_avail(taesd_installed);
