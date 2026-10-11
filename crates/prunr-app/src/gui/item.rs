@@ -879,8 +879,14 @@ impl BatchItem {
 
     /// Lockstep writer for `bg_image` + `settings.bg_image_hash`. Going
     /// through this path is the invariant the recipe diff relies on.
+    #[cfg(test)]
     pub(crate) fn set_bg_image(&mut self, img: image::DynamicImage, source_path: Option<PathBuf>) {
         let hash = bg_image_content_hash(&img);
+        self.set_bg_image_hashed(img, source_path, hash);
+    }
+
+    /// `set_bg_image` for a picture hashed already (off the UI thread).
+    pub(crate) fn set_bg_image_hashed(&mut self, img: image::DynamicImage, source_path: Option<PathBuf>, hash: u64) {
         self.bg_image = Some(Arc::new(BgImage {
             source_path,
             image: Arc::new(img),

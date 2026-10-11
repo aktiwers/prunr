@@ -388,6 +388,23 @@ impl BatchManager {
         }
     }
 
+    /// Load and hash a background picture off the UI thread; it lands on
+    /// `bg_io.bg_image_rx`.
+    pub(crate) fn request_bg_image(&self, item_id: u64, path: std::path::PathBuf, picked: bool) {
+        let tx = self.bg_io.bg_image_tx.clone();
+        let slots = self.bg_io.decode_slots.clone();
+        std::thread::spawn(move || {
+            let _slot = slots.acquire();
+            let result = prunr_core::load_image_from_path(&path)
+                .map(|img| {
+                    let hash = super::item::bg_image_content_hash(&img);
+                    (img, hash)
+                })
+                .map_err(|e| e.to_string());
+            let _ = tx.send(super::background_io::BgImageLoad { item_id, path, picked, result });
+        });
+    }
+
     /// Filter-only Process: load + decode + `apply_fill_style` on a background
     /// thread, deliver the result via `bg_io.filter_only_rx`. Keeps the UI
     /// thread free on large batches that the inline path used to freeze.
@@ -958,6 +975,20 @@ mod tests {
             .expect("decode_tx must produce a result within 2s");
         assert_eq!(id, 99);
         assert!(result.is_ok());
+    }
+
+    /// A background picture loads off the UI thread with its content hash.
+    #[test]
+    fn a_background_picture_loads_with_its_hash() {
+        let bm = fixture();
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("bg.png");
+        std::fs::write(&path, one_pixel_png()).unwrap();
+        bm.request_bg_image(5, path.clone(), true);
+        let load = bm.bg_io.bg_image_rx.recv_timeout(Duration::from_secs(2)).expect("lands within 2 s");
+        assert_eq!((load.item_id, load.picked, load.path), (5, true, path));
+        let (img, hash) = load.result.expect("decodes");
+        assert_eq!(hash, crate::gui::item::bg_image_content_hash(&img));
     }
 
     /// A malformed image must surface a recognisable error via `Err` so
