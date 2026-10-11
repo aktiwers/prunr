@@ -77,7 +77,7 @@ pub enum PreviewKind {
     /// line_strength / solid_line_color → Tier 2 edge rerun.
     Edge,
     /// sharpen / ai_blend / color_match → Tier-2 upscale postprocess
-    /// on the cached upscale_raw buffer. No ORT inference — snapshot provides
+    /// on the kept upscale run. No ORT inference — snapshot provides
     /// the cached buffer directly.
     UpscaleTier2,
 }
@@ -95,6 +95,47 @@ impl UpscaleTier2Knobs {
     pub fn of(s: &crate::gui::item_settings::ItemSettings) -> Self {
         Self { sharpen: s.sharpen, sharpen_sigma: s.output_scale.sharpen_sigma(), ai_blend: s.ai_blend, color_match: s.color_match }
     }
+
+    pub fn of_recipe(r: &prunr_core::UpscaleRecipe) -> Self {
+        Self { sharpen: r.sharpen(), sharpen_sigma: r.output_scale.sharpen_sigma(), ai_blend: r.ai_blend(), color_match: r.color_match }
+    }
+
+    /// AI blend and Color match compare against the upscaled image's input.
+    fn needs_reference(&self) -> bool {
+        self.ai_blend < 1.0 - f32::EPSILON || self.color_match
+    }
+
+    fn change_nothing(&self) -> bool {
+        self.sharpen == 0.0 && !self.needs_reference()
+    }
+}
+
+/// The upscale result to show, from the model's raw output and `input`, the
+/// image the model read: Refine's knobs applied after the model. AI blend
+/// and Color match compare against `input` enlarged to the output size,
+/// reused from `reference` when it already is that size and built (and
+/// returned for caching) otherwise. With every knob at its default the raw
+/// output is shown as is, not copied.
+///
+/// Peak working set with a knob on: a copy of the output, plus the
+/// enlarged input when AI blend or Color match is on (2-3 × w·h·4 bytes).
+pub(crate) fn finish_upscale(
+    raw: &Arc<RgbaImage>,
+    input: &RgbaImage,
+    reference: Option<Arc<RgbaImage>>,
+    knobs: &UpscaleTier2Knobs,
+) -> (Arc<RgbaImage>, Option<Arc<RgbaImage>>) {
+    if knobs.change_nothing() {
+        return (Arc::clone(raw), reference);
+    }
+    let reference = knobs.needs_reference().then(|| {
+        reference.filter(|r| r.dimensions() == raw.dimensions()).unwrap_or_else(|| {
+            Arc::new(prunr_core::formats::resize_rgba(input, raw.width(), raw.height(), prunr_core::formats::ResizeFilter::CatmullRom))
+        })
+    });
+    let mut shown = (**raw).clone();
+    super::app::apply_tier2_postprocess(&mut shown, knobs, reference.as_deref());
+    (Arc::new(shown), reference)
 }
 
 /// A completed Tier 2 rerun delivered back to the UI thread.
@@ -123,6 +164,9 @@ pub struct PreviewResult {
     /// for the parent to cache so subsequent Edge tweaks whose mask recipe
     /// matches can skip `postprocess_from_flat`. Keyed by (MaskRecipe, model).
     pub new_masked_base: Option<(Arc<image::RgbaImage>, prunr_core::MaskRecipe, prunr_core::ModelKind)>,
+    /// The upscale reference an UpscaleTier2 dispatch built, for the kept
+    /// upscale run.
+    pub new_reference: Option<Arc<image::RgbaImage>>,
     /// MaskRecipe snapshot taken when this dispatch was kicked off. The
     /// parent updates `applied_recipe.mask` to match so the recipe-drift
     /// tripwire doesn't immediately re-fire on a result it already
@@ -334,6 +378,7 @@ impl LivePreview {
                     let _ = tx.send(PreviewResult {
                         item_id: id, rgba, kind: dispatch_kind, generation, version, start,
                         new_edge, new_bold, new_masked_base,
+                        new_reference: output.built_reference,
                         applied_mask: mask_recipe,
                         applied_tier2_knobs,
                         is_final: false,
@@ -428,14 +473,9 @@ pub struct DispatchInputs {
     /// resize / refine / feather chain (resampled to tensor resolution
     /// inline). `None` when nothing is selected.
     pub correction: Option<Arc<prunr_core::selection::MaskArtifact>>,
-    /// For `PreviewKind::UpscaleTier2` only — cached raw upscale buffer from
-    /// Tier-1 inference. Tier-2 postprocess runs on a clone of this buffer.
-    /// `None` for other kinds.
-    pub upscale_raw: Option<Arc<RgbaImage>>,
-    /// For `PreviewKind::UpscaleTier2` only — bicubic baseline at upscale_raw's
-    /// dimensions, used by apply_ai_blend and apply_color_match. Wrapped in Arc
-    /// so repeated preview ticks don't re-resize.
-    pub bicubic_source: Option<Arc<RgbaImage>>,
+    /// For `PreviewKind::UpscaleTier2` only — the kept upscale run, which
+    /// Tier-2 re-finishes. `None` for other kinds.
+    pub(crate) upscale: Option<crate::gui::item::UpscaleCache>,
     /// For `PreviewKind::UpscaleTier2` only — snapshot of the four Tier-2 knobs.
     pub upscale_tier2_knobs: Option<UpscaleTier2Knobs>,
 }
@@ -570,11 +610,12 @@ struct RunOutput {
     built_edge: EdgePlanes,
     built_bold: EdgePlanes,
     built_masked_base: Option<Arc<image::RgbaImage>>,
+    built_reference: Option<Arc<image::RgbaImage>>,
 }
 
 impl RunOutput {
     fn empty() -> Self {
-        Self { rgba: None, built_edge: EdgePlanes::default(), built_bold: EdgePlanes::default(), built_masked_base: None }
+        Self { rgba: None, built_edge: EdgePlanes::default(), built_bold: EdgePlanes::default(), built_masked_base: None, built_reference: None }
     }
 }
 
@@ -582,42 +623,20 @@ fn run_preview(inputs: DispatchInputs, cancel: &AtomicBool) -> RunOutput {
     if cancel.load(Ordering::Acquire) { return RunOutput::empty(); }
 
     // UpscaleTier2: no seg/edge tensors involved — run postprocess directly
-    // on the cached upscale_raw buffer.
+    // on the kept upscale run.
     if matches!(inputs.kind, PreviewKind::UpscaleTier2) {
-        let Some(ref raw) = inputs.upscale_raw else {
-            tracing::debug!(event = "upscale_tier2_run_abort", reason = "upscale_raw is None");
-            return RunOutput::empty();
-        };
-        let Some(ref bicubic) = inputs.bicubic_source else {
-            tracing::debug!(event = "upscale_tier2_run_abort", reason = "bicubic_source is None");
+        let Some(upscale) = inputs.upscale else {
+            tracing::debug!(event = "upscale_tier2_run_abort", reason = "no upscale run kept");
             return RunOutput::empty();
         };
         let Some(knobs) = inputs.upscale_tier2_knobs else {
             tracing::debug!(event = "upscale_tier2_run_abort", reason = "upscale_tier2_knobs is None");
             return RunOutput::empty();
         };
-        let (w, h) = (raw.width(), raw.height());
-        tracing::debug!(
-            event = "upscale_tier2_run_start",
-            width = w,
-            height = h,
-            sharpen = knobs.sharpen,
-            ai_blend = knobs.ai_blend,
-            color_match = knobs.color_match,
-            "run_preview: starting Tier-2 postprocess"
-        );
-        let t0 = std::time::Instant::now();
-        let mut out = (**raw).clone();
-        super::app::apply_tier2_postprocess(&mut out, &knobs, bicubic);
-        let elapsed_ms = t0.elapsed().as_millis();
-        tracing::debug!(
-            event = "upscale_tier2_run_done",
-            width = out.width(),
-            height = out.height(),
-            elapsed_ms,
-            "run_preview: Tier-2 postprocess complete"
-        );
-        return RunOutput { rgba: Some(out), ..RunOutput::empty() };
+        let had_reference = upscale.reference.is_some();
+        let (shown, reference) = finish_upscale(&upscale.raw, &upscale.input, upscale.reference, &knobs);
+        let built_reference = reference.filter(|_| !had_reference);
+        return RunOutput { rgba: Some(Arc::unwrap_or_clone(shown)), built_reference, ..RunOutput::empty() };
     }
 
     // Pipeline shape follows the user's CURRENT `line_mode`, not tensor
@@ -722,7 +741,7 @@ fn run_preview(inputs: DispatchInputs, cancel: &AtomicBool) -> RunOutput {
                 &mask, &base, &compose_settings,
                 inputs.secondary_edge_tensor.as_ref(), &inputs.cached_bold, out_dims,
             );
-            RunOutput { rgba: Some(rgba), built_edge, built_bold, built_masked_base }
+            RunOutput { rgba: Some(rgba), built_edge, built_bold, built_masked_base, built_reference: None }
         }
         PreviewKind::UpscaleTier2 => unreachable!("UpscaleTier2 is handled by the early-return above"),
     }
@@ -1008,6 +1027,7 @@ mod tests {
             new_edge: None,
             new_bold: None,
             new_masked_base: None,
+            new_reference: None,
             applied_mask: prunr_core::MaskRecipe::from(&prunr_core::MaskSettings::default()),
             applied_tier2_knobs: None,
             is_final: false,
@@ -1036,6 +1056,7 @@ mod tests {
             new_edge: None,
             new_bold: None,
             new_masked_base: None,
+            new_reference: None,
             applied_mask: prunr_core::MaskRecipe::from(&prunr_core::MaskSettings::default()),
             applied_tier2_knobs: None,
             is_final: false,
@@ -1063,6 +1084,7 @@ mod tests {
             new_edge: None,
             new_bold: None,
             new_masked_base: None,
+            new_reference: None,
             applied_mask: prunr_core::MaskRecipe::from(&prunr_core::MaskSettings::default()),
             applied_tier2_knobs: None,
             is_final: false,
@@ -1087,6 +1109,7 @@ mod tests {
             new_edge: None,
             new_bold: None,
             new_masked_base: None,
+            new_reference: None,
             applied_mask: prunr_core::MaskRecipe::from(&prunr_core::MaskSettings::default()),
             applied_tier2_knobs: None,
             is_final: false,
@@ -1118,6 +1141,7 @@ mod tests {
             new_edge: None,
             new_bold: None,
             new_masked_base: None,
+            new_reference: None,
             applied_mask: prunr_core::MaskRecipe::from(&prunr_core::MaskSettings::default()),
             applied_tier2_knobs: None,
             is_final: false,
@@ -1147,16 +1171,37 @@ mod tests {
         assert_eq!(pending.kind, PreviewKind::UpscaleTier2);
     }
 
+    /// Refine's after-the-model knobs compare against the image the model
+    /// read, never the original photo (an erase or a Denoise before the
+    /// upscale would come back). With nothing on, the raw output shows
+    /// uncopied; a kept reference is reused.
     #[test]
-    fn live_preview_tier2_run_uses_upscale_raw_not_inference() {
-        // Build a 2×2 upscale_raw buffer: all channels = 100 (mid-grey).
+    fn finishing_an_upscale_compares_against_what_was_upscaled() {
+        let raw = Arc::new(RgbaImage::from_pixel(8, 8, image::Rgba([200, 30, 30, 255])));
+        let input = RgbaImage::from_pixel(2, 2, image::Rgba([20, 20, 220, 255]));
+        let knobs = |ai_blend, color_match| UpscaleTier2Knobs { sharpen: 0.0, sharpen_sigma: 2.0, ai_blend, color_match };
+
+        let (shown, reference) = finish_upscale(&raw, &input, None, &knobs(1.0, false));
+        assert!(Arc::ptr_eq(&shown, &raw), "nothing on: the raw output itself");
+        assert!(reference.is_none(), "and no reference built");
+
+        let (shown, reference) = finish_upscale(&raw, &input, None, &knobs(0.0, false));
+        assert_eq!(shown.get_pixel(4, 4).0, [20, 20, 220, 255], "all blend: the enlarged input");
+        let reference = reference.expect("built for AI blend");
+        assert_eq!(reference.dimensions(), raw.dimensions());
+
+        let (_, reused) = finish_upscale(&raw, &input, Some(Arc::clone(&reference)), &knobs(0.5, true));
+        assert!(Arc::ptr_eq(&reused.expect("kept"), &reference), "a kept reference is reused");
+    }
+
+    #[test]
+    fn live_preview_tier2_run_uses_the_kept_upscale_not_inference() {
+        // A kept 2×2 upscale output: all channels = 100 (mid-grey).
         let mut raw_buf = RgbaImage::new(2, 2);
         for p in raw_buf.pixels_mut() {
             *p = image::Rgba([100u8, 100, 100, 255]);
         }
         let raw_arc = Arc::new(raw_buf);
-        // Bicubic source identical (no ai_blend / color_match active).
-        let bicubic_arc = raw_arc.clone();
 
         let knobs = UpscaleTier2Knobs {
             sharpen: 0.0,
@@ -1184,8 +1229,7 @@ mod tests {
                 cached_bold: EdgePlanes::default(),
                 cached_masked_base: None,
                 correction: None,
-                upscale_raw: Some(raw_arc.clone()),
-                bicubic_source: Some(bicubic_arc),
+                upscale: Some(crate::gui::item::UpscaleCache { raw: raw_arc.clone(), input: raw_arc.clone(), reference: None }),
                 upscale_tier2_knobs: Some(knobs),
             },
             &cancel,
@@ -1242,8 +1286,7 @@ mod tests {
                     cached_bold: EdgePlanes::default(),
                     cached_masked_base: subject_mode.then(|| Arc::clone(&subject)),
                     correction: None,
-                    upscale_raw: None,
-                    bicubic_source: None,
+                    upscale: None,
                     upscale_tier2_knobs: None,
                 },
                 &std::sync::atomic::AtomicBool::new(false),

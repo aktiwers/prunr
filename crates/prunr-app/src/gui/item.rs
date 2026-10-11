@@ -8,6 +8,16 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+/// An upscale run kept for Refine: the model's `raw` output, the `input`
+/// it read (after Denoise), and that input enlarged to the output size
+/// (`reference`) once AI blend or Color match needed it.
+#[derive(Clone)]
+pub(crate) struct UpscaleCache {
+    pub(crate) raw: Arc<image::RgbaImage>,
+    pub(crate) input: Arc<image::RgbaImage>,
+    pub(crate) reference: Option<Arc<image::RgbaImage>>,
+}
+
 /// A result's background for export, baked by `bake` (in a save thread
 /// where there is one: an effect blurs the full photo).
 #[derive(Clone)]
@@ -183,23 +193,15 @@ pub(crate) struct BatchItem {
     pub(crate) applied_recipe: Option<prunr_core::ProcessingRecipe>,
     /// Compressed cached tensor from Tier 1 inference (for Tier 2 mask reruns).
     pub(crate) cached_tensor: Option<super::worker::CompressedTensor>,
-    /// Tier-1 upscale output cached for Tier-2 reprocess. Set by
-    /// pump_upscale_results after a successful upscale dispatch.
-    /// Mirrors `cached_tensor`'s contract: NOT cleared by
-    /// `reset_result_caches()`; only cleared explicitly on Tier-1
-    /// invalidation (model swap, output_scale / pre_denoise change). Holds the raw model output BEFORE
-    /// any postprocess (sharpen, ai_blend, color_match) —
-    /// the postprocess functions are re-run on every Tier-2 dispatch.
+    /// The last upscale run's model output and input, so Refine's
+    /// after-the-model knobs re-finish it without a model run. Mirrors
+    /// `cached_tensor`'s contract: NOT cleared by `reset_result_caches()`;
+    /// only cleared explicitly on Tier-1 invalidation (model swap).
     ///
-    /// RAM impact: at 4K source × 4× upscale = 15360×8640 RGBA ≈ 500 MB.
-    /// Not under the tensor budget (`evictable_tensor_bytes`). The Arc
-    /// wraps the buffer so cheap clones in live-preview snapshots
-    /// don't duplicate.
-    pub(crate) upscale_raw: Option<Arc<image::RgbaImage>>,
-    /// Bicubic resize of the original source at upscale_raw's dimensions.
-    /// Used by apply_ai_blend and apply_color_match. Built lazily by the
-    /// first Tier-2 dispatch that needs it; invalidated alongside upscale_raw.
-    pub(crate) bicubic_source: Option<Arc<image::RgbaImage>>,
+    /// RAM impact: at 4K source × 4× upscale = 15360×8640 RGBA ≈ 500 MB,
+    /// plus as much again while AI blend or Color match keep the enlarged
+    /// reference. Not under the tensor budget (`evictable_tensor_bytes`).
+    pub(crate) upscale: Option<UpscaleCache>,
     /// All 4 DexiNed scales from one inference (Tier 2 edge reruns read
     /// whichever scale the user has picked without re-inferring).
     pub(crate) cached_edge_tensors: Option<super::worker::CompressedEdgeTensors>,
@@ -335,7 +337,7 @@ impl BatchItem {
         self.selection_texture.as_ref().filter(|t| t.key == (hash, style))
     }
 
-    /// Clear the cached upscale_raw buffer and the derived bicubic_source.
+    /// Clear the cached upscale run.
     /// Called on model switch and on item error. Tier-1 knob changes do NOT
     /// call this — the next dispatch's pump_upscale_results overwrites the
     /// buffer in-place, so explicit invalidation would just drop work the
@@ -343,8 +345,7 @@ impl BatchItem {
     /// next dispatch may never happen (user may drag a Tier-2 knob first),
     /// and the stale buffer is from the wrong model.
     pub(crate) fn invalidate_upscale_cache(&mut self) {
-        self.upscale_raw = None;
-        self.bicubic_source = None;
+        self.upscale = None;
     }
 
     /// Clear the cached SAM encoder embedding. Called on source image
@@ -667,7 +668,7 @@ impl BatchItem {
         // Callers that actually invalidate the tensor (model swap, crash
         // retry) set `cached_tensor = None` explicitly.
         //
-        // Same rule for `upscale_raw` and `bicubic_source`: the upscale
+        // Same rule for `upscale`: the upscale
         // buffer is a function of (input × upscale_model × output_scale ×
         // pre_denoise). Tier-2 knobs (sharpen / ai_blend / color_match)
         // reprocess FROM this cached buffer;
@@ -853,8 +854,7 @@ impl BatchItem {
             settings,
             applied_recipe: None,
             cached_tensor: None,
-            upscale_raw: None,
-            bicubic_source: None,
+            upscale: None,
             cached_edge_tensors: None,
             volatile_edge_tensor: None,
             volatile_seg_tensor: None,
@@ -976,6 +976,19 @@ mod tests {
 
         item.settings.bg_effect = prunr_core::BgEffect::None;
         assert!(Arc::ptr_eq(&item.export_bg().bake(&result), &result), "nothing behind, nothing baked");
+    }
+
+    /// The upscale run survives a display reset (Refine re-finishes from
+    /// it) and goes on a model switch.
+    #[test]
+    fn the_upscale_run_outlives_a_display_reset_but_not_a_model_switch() {
+        let mut item = fixture_item(1);
+        let img = Arc::new(image::RgbaImage::from_pixel(4, 4, image::Rgba([1, 2, 3, 255])));
+        item.upscale = Some(UpscaleCache { raw: img.clone(), input: img.clone(), reference: Some(img) });
+        item.reset_result_caches();
+        assert!(item.upscale.is_some());
+        item.invalidate_upscale_cache();
+        assert!(item.upscale.is_none());
     }
 
     #[test]
@@ -1320,52 +1333,9 @@ mod tests {
         let mut item = fixture_item(1);
         assert_eq!(item.evictable_tensor_bytes(), 0);
         item.selection_mask = Some(Arc::new(prunr_core::selection::MaskArtifact::new_empty(16, 16)));
-        item.upscale_raw = Some(Arc::new(image::RgbaImage::new(4, 4)));
-        assert_eq!(item.evictable_tensor_bytes(), 0, "planes and upscale buffers are not evictable");
-    }
-
-    #[test]
-    fn upscale_raw_default_is_none() {
-        let item = fixture_item(1);
-        assert!(item.upscale_raw.is_none(), "new item must have no cached upscale buffer");
-        assert!(item.bicubic_source.is_none(), "new item must have no bicubic_source");
-    }
-
-    #[test]
-    fn reset_result_caches_preserves_upscale_raw() {
-        // reset_result_caches clears display fields only. It must NOT clear
-        // upscale_raw — the Tier-2 postprocess pipeline reads it.
-        let mut item = fixture_item(1);
-        let img = Arc::new(image::RgbaImage::from_pixel(4, 4, image::Rgba([1, 2, 3, 255])));
-        item.upscale_raw = Some(img.clone());
-        item.bicubic_source = Some(img.clone());
-        item.reset_result_caches();
-        assert!(item.upscale_raw.is_some(), "reset_result_caches must NOT clear upscale_raw");
-        assert!(item.bicubic_source.is_some(), "reset_result_caches must NOT clear bicubic_source");
-    }
-
-    #[test]
-    fn invalidate_upscale_cache_clears_field() {
-        let mut item = fixture_item(1);
-        let img = Arc::new(image::RgbaImage::from_pixel(4, 4, image::Rgba([10, 20, 30, 255])));
-        item.upscale_raw = Some(img.clone());
-        item.bicubic_source = Some(img.clone());
-        item.invalidate_upscale_cache();
-        assert!(item.upscale_raw.is_none(), "invalidate_upscale_cache must clear upscale_raw");
-        assert!(item.bicubic_source.is_none(), "invalidate_upscale_cache must clear bicubic_source");
-    }
-
-    #[test]
-    fn upscale_raw_arc_clone_zero_cost() {
-        let mut item = fixture_item(1);
         let img = Arc::new(image::RgbaImage::new(4, 4));
-        item.upscale_raw = Some(img.clone());
-        // Taking a second reference — clone is free (refcount bump, no memcpy).
-        let _second_ref = item.upscale_raw.as_ref().unwrap().clone();
-        assert!(
-            Arc::strong_count(item.upscale_raw.as_ref().unwrap()) >= 2,
-            "Arc::clone of upscale_raw must be free (refcount bump only)"
-        );
+        item.upscale = Some(UpscaleCache { raw: img.clone(), input: img, reference: None });
+        assert_eq!(item.evictable_tensor_bytes(), 0, "planes and upscale buffers are not evictable");
     }
 
     // ── selection_* fields ───────────────────────────────────────────────

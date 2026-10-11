@@ -512,6 +512,7 @@ fn a_recut_for_a_state_left_behind_never_lands() {
         new_edge: None,
         new_bold: None,
         new_masked_base: None,
+        new_reference: None,
         applied_mask: prunr_core::MaskRecipe::from(&prunr_core::MaskSettings::default()),
         applied_tier2_knobs: None,
         is_final: true,
