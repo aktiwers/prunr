@@ -171,7 +171,7 @@ pub(crate) fn render(
     let bg_active = knob_catalog::knob_enabled(KnobRequirement::TransparencyProduced, knob_ctx);
 
     ui.horizontal(|ui| {
-        render_model_dropdown(ui, app_settings, state.processing, mask_active, &mut change);
+        render_model_dropdown(ui, app_settings, state.processing, mask_active, state.installed, &mut change);
 
         // Picking "No model" while Sketch is Subject would be an invalid
         // combination (no mask to outline); fall back to Off.
@@ -1144,6 +1144,7 @@ pub(super) fn render_model_dropdown(
     app_settings: &mut Settings,
     processing: bool,
     mask_active: bool,
+    installed: crate::gui::hardware_cache::HardwareInstallCache,
     change: &mut ToolbarChange,
 ) {
     let prev_model = app_settings.model;
@@ -1168,7 +1169,7 @@ pub(super) fn render_model_dropdown(
         let pop_id = egui::Id::new("adjustments_model_popup");
         chip::popup_for(ui, pop_id, &resp, |ui| {
             chip::popover_header(ui, "Model", None);
-            for variant in installed_models() {
+            for variant in installed_models(installed) {
                 if variant == SettingsModel::None {
                     ui.separator();
                 }
