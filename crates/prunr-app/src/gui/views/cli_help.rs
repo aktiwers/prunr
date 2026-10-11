@@ -113,7 +113,7 @@ pub(crate) fn render(ctx: &egui::Context, toasts: &mut crate::gui::toasts::Toast
                             opt_row(ui, "--contrast <n>",
                                 "Edge contrast 0\u{2013}1, 1 is a hard edge (default 0)");
                             opt_row(ui, "--edge-shift <n>",
-                                "Trim (+) or expand (\u{2212}) edges, in px");
+                                "Grow (+) or shrink (\u{2212}) the edge, in px");
                             opt_row(ui, "--refine-edges",
                                 "Guided filter for fine edge detail");
                         });
@@ -122,11 +122,11 @@ pub(crate) fn render(ctx: &egui::Context, toasts: &mut crate::gui::toasts::Toast
                     section_heading(ui, "Examples");
                     example_row(ui, toasts, "prunr --gamma 2.0 --contrast 1 photo.jpg",
                         "Aggressive removal with crisp edges");
-                    example_row(ui, toasts, "prunr --gamma 0.5 --edge-shift -2 portrait.jpg",
+                    example_row(ui, toasts, "prunr --gamma 0.5 --edge-shift 2 portrait.jpg",
                         "Gentle removal with expanded edges");
                     example_row(ui, toasts, "prunr --refine-edges photo.jpg",
                         "Sharpen mask around hair and leaves");
-                    example_row(ui, toasts, "prunr --edge-shift 3 product.jpg",
+                    example_row(ui, toasts, "prunr --edge-shift -3 product.jpg",
                         "Trim 3px fringe around subject");
                 }
 

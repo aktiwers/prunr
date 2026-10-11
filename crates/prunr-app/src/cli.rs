@@ -58,8 +58,9 @@ pub struct Cli {
     #[arg(long, default_value_t = 0.0)]
     pub contrast: f32,
 
-    /// Edge refinement in pixels. Positive erodes (shrinks), negative dilates (expands).
-    #[arg(long, default_value_t = 0.0)]
+    /// Shift the cut-out's edge in pixels: positive grows the subject,
+    /// negative shrinks it.
+    #[arg(long, default_value_t = 0.0, allow_negative_numbers = true)]
     pub edge_shift: f32,
 
     /// Refine mask edges using guided filter for better detail on hair, leaves, etc.
@@ -191,7 +192,8 @@ impl Cli {
         MaskSettings {
             gamma: self.gamma,
             contrast: self.contrast,
-            edge_shift: self.edge_shift,
+            // The pipeline's shift erodes for positive values.
+            edge_shift: -self.edge_shift,
             refine_edges: self.refine_edges,
             ..Default::default()
         }
@@ -960,4 +962,19 @@ fn section(title: &str) {
 fn path_or_unknown(p: Option<std::path::PathBuf>) -> String {
     p.map_or("(unresolvable on this platform)".to_string(),
         |p| p.display().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    /// `--edge-shift` reads like the GUI's Shift edge: + grows the subject,
+    /// which the pipeline stores as a negative (dilating) shift.
+    #[test]
+    fn a_positive_edge_shift_grows_the_subject() {
+        let grow = super::Cli::try_parse_from(["prunr", "--edge-shift", "3", "x.png"]).unwrap();
+        assert_eq!(grow.mask_settings().edge_shift, -3.0);
+        let shrink = super::Cli::try_parse_from(["prunr", "--edge-shift", "-2", "x.png"]).unwrap();
+        assert_eq!(shrink.mask_settings().edge_shift, 2.0);
+    }
 }

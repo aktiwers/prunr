@@ -417,15 +417,15 @@ fn render_mask_group(
         hint(ui, "Sharpen the edge of the cut-out. 100% is a hard edge.");
         ui.add_space(theme::SPACE_XS);
 
-        aggregate_knob(
-            chip::slider_row_f32(ui, "Edge shift", &mut s.edge_shift, -50.0..=50.0, false, |v| {
-                if v > 0.05 { format!("erode {v:.1} px") }
-                else if v < -0.05 { format!("dilate {:.1} px", v.abs()) }
-                else { "0 px".to_string() }
-            }),
-            StaticKnob::EdgeShift, change,
-        );
-        hint(ui, "Erode trims fringe pixels; dilate keeps more of the edge.");
+        // Shown as every editor shows it, + grows the subject; stored as
+        // the pipeline's shift, + erodes.
+        let mut grow = 0.0 - s.edge_shift;
+        let shift = chip::slider_row_f32(ui, "Shift edge", &mut grow, -20.0..=20.0, false, |v| fmt::signed_px(v, 1));
+        if shift.changed {
+            s.edge_shift = -grow;
+        }
+        aggregate_knob(shift, StaticKnob::EdgeShift, change);
+        hint(ui, "Grow (+) or shrink (\u{2212}) the cut-out's edge.");
         ui.add_space(theme::SPACE_XS);
 
         aggregate_knob(chip::toggle_row(ui, "Refine edges", &mut s.refine_edges), StaticKnob::RefineEdges, change);

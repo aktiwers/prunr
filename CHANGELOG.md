@@ -21,6 +21,7 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 
 ### Changed
 
+- **Shift edge** (was Edge shift) reads the way other editors do: + grows the cut-out, − shrinks it, over ±20 px. `--edge-shift` on the command line follows, so a positive value now grows the subject.
 - **Contrast replaces Hard threshold** in the Mask panel: one slider that sharpens the cut-out's edge at the photo's full size, where 100% is a hard edge. Hard threshold cut at the model's lower resolution, so its edge was never really hard. Saved presets with it on load as Contrast 100%. On the command line `--contrast` replaces `--threshold`.
 - Magic Brush shows only what changes its result (mode, Confidence, Remove specks) and draws a small fixed cursor; its size, hardness and shape only ever changed the cursor.
 - How a selection looks on the image is one app setting (Settings › Behavior: Selection fill and Outline the selection) instead of three sliders in each brush panel; outline width is gone, since the outline already widens as you zoom out.
