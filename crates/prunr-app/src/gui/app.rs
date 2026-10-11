@@ -1249,7 +1249,7 @@ impl PrunrApp {
     /// Delete / Copy / Cut read this one value, so the actions find the
     /// feathered plane the overlay built.
     pub(crate) fn selection_style(&self) -> super::background_io::SelectionStyle {
-        super::background_io::SelectionStyle::from_brush(&self.settings.brush).at_zoom(self.zoom_state.zoom)
+        super::background_io::SelectionStyle::from_settings(&self.settings).at_zoom(self.zoom_state.zoom)
     }
 
     pub(crate) fn magic_brush_preparing(&self) -> bool {

@@ -227,12 +227,15 @@ pub(crate) struct SelectionStyle {
 }
 
 impl SelectionStyle {
-    pub(crate) fn from_brush(b: &super::brush_state::BrushSettings) -> Self {
+    /// Outline width in image pixels at 1:1; `at_zoom` widens it.
+    const OUTLINE_PX: f32 = 2.0;
+
+    pub(crate) fn from_settings(s: &super::settings::Settings) -> Self {
         Self {
-            fill_opacity: b.fill_opacity,
-            outline_opacity: b.outline_opacity,
-            outline_thickness: b.outline_thickness,
-            edge_feather_px: b.edge_feather.round().max(0.0) as u32,
+            fill_opacity: s.selection_fill,
+            outline_opacity: if s.selection_outline { 1.0 } else { 0.0 },
+            outline_thickness: Self::OUTLINE_PX,
+            edge_feather_px: s.brush.edge_feather.round().max(0.0) as u32,
         }
     }
 
