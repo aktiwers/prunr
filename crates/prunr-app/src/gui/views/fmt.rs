@@ -24,11 +24,6 @@ pub fn signed_px(v: f32, decimals: usize) -> String {
     signed(v, decimals, " px")
 }
 
-/// "+0.5 EV" / "0 EV".
-pub fn ev(v: f32) -> String {
-    if v == 0.0 { "0 EV".to_string() } else { signed(v, 1, " EV") }
-}
-
 /// 0–1 as "50%".
 pub fn percent(v01: f32) -> String {
     format!("{:.0}%", v01 * 100.0)
@@ -80,8 +75,6 @@ mod tests {
         assert_eq!(px(20.0, 0), "20 px");
         assert_eq!(percent(0.5), "50%");
         assert_eq!(percent_tenths(0.505), "50.5%");
-        assert_eq!(ev(0.5), "+0.5 EV");
-        assert_eq!(ev(0.0), "0 EV");
     }
 
     #[test]

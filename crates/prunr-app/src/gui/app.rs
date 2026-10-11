@@ -1176,15 +1176,7 @@ impl PrunrApp {
                     // upscaled bicubically to match upscale_raw's dimensions.
                     let bicubic = build_or_reuse_bicubic(item, &raw_arc);
                     let mut displayed = (*raw_arc).clone();
-                    let s = &item.settings;
-                    apply_tier2_postprocess(
-                        &mut displayed,
-                        s.sharpen,
-                        s.ai_blend,
-                        s.saturation,
-                        s.color_match,
-                        bicubic.as_ref(),
-                    );
+                    apply_tier2_postprocess(&mut displayed, &super::live_preview::UpscaleTier2Knobs::of(&item.settings), bicubic.as_ref());
                     let new_rgba = Arc::new(displayed);
                     item.result_rgba = Some(new_rgba.clone());
                     item.applied_recipe = Some(result_recipe);
@@ -1668,7 +1660,7 @@ impl PrunrApp {
                     tiers.skip_count += 1;
                 }
                 RequiredTier::UpscaleTier2 => {
-                    // Tier-2 upscale (sharpen/ai_blend/saturation/color_match)
+                    // Tier-2 upscale (sharpen/ai_blend/color_match)
                     // dispatches the cached-buffer postprocess via live preview
                     // — no subprocess admission, no re-inference.
                     if let Some(ref mut recipe) = item.applied_recipe {
@@ -2405,12 +2397,7 @@ impl PrunrApp {
             use super::live_preview::UpscaleTier2Knobs;
             let upscale_raw = item.upscale_raw.as_ref()?.clone();
             let bicubic_arc = build_or_reuse_bicubic(item, &upscale_raw);
-            let knobs = UpscaleTier2Knobs {
-                sharpen: item.settings.sharpen,
-                ai_blend: item.settings.ai_blend,
-                saturation: item.settings.saturation,
-                color_match: item.settings.color_match,
-            };
+            let knobs = UpscaleTier2Knobs::of(&item.settings);
             return Some(DispatchInputs {
                 version,
                 kind,
@@ -2552,7 +2539,6 @@ impl PrunrApp {
                     if let Some(knobs) = r.applied_tier2_knobs {
                         applied.upscale.sharpen_bits = knobs.sharpen.to_bits();
                         applied.upscale.ai_blend_bits = knobs.ai_blend.to_bits();
-                        applied.upscale.saturation_bits = knobs.saturation.to_bits();
                         applied.upscale.color_match = knobs.color_match;
                     }
                 }
@@ -3800,7 +3786,7 @@ impl PrunrApp {
             }
         }
 
-        // Upscale Tier-2 live preview: sharpen / ai_blend / saturation / color_match
+        // Upscale Tier-2 live preview: sharpen / ai_blend / color_match
         // tweaks don't produce a DispatchKind (they aren't in the knob catalog and
         // resolve_auto_dispatch returns None for them). Detect them by checking
         // the recipe diff directly: if the model is upscale, live preview is enabled,
@@ -3837,8 +3823,6 @@ impl PrunrApp {
                         new_sharpen_bits = new_recipe.upscale.sharpen_bits,
                         old_ai_blend_bits = old_recipe.upscale.ai_blend_bits,
                         new_ai_blend_bits = new_recipe.upscale.ai_blend_bits,
-                        old_saturation_bits = old_recipe.upscale.saturation_bits,
-                        new_saturation_bits = new_recipe.upscale.saturation_bits,
                         old_color_match = old_recipe.upscale.color_match,
                         new_color_match = new_recipe.upscale.color_match,
                         old_output_scale = ?old_recipe.upscale.output_scale,
@@ -4179,31 +4163,27 @@ impl ClassifiedTiers {
 }
 
 /// Apply all Tier-2 upscale postprocess knobs to `img` in the canonical order:
-/// ai_blend → sharpen → saturation → color_match.
+/// ai_blend → sharpen → color_match.
 ///
 /// Order rationale: ai_blend changes the underlying texture (blending AI output
 /// with bicubic baseline at low weights); sharpen amplifies whatever texture
-/// exists after the blend; saturation modifies perceived colour warmth; color_match
-/// snaps global statistics last so it operates on the fully-sharpened result.
+/// exists after the blend; color_match snaps global statistics last so it
+/// operates on the fully-sharpened result.
 ///
 /// `bicubic_source` is the original source image upscaled bicubically to match
 /// `img`'s dimensions. Used by `apply_ai_blend` (blending baseline) and
 /// `apply_color_match` (reference for Lab statistics).
 pub(crate) fn apply_tier2_postprocess(
     img: &mut image::RgbaImage,
-    sharpen: f32,
-    ai_blend: f32,
-    saturation: f32,
-    color_match: bool,
+    knobs: &super::live_preview::UpscaleTier2Knobs,
     bicubic_source: &image::RgbaImage,
 ) {
-    use prunr_core::upscale::{apply_sharpen, apply_ai_blend, apply_saturation, apply_color_match};
-    if ai_blend < 1.0 - f32::EPSILON {
-        apply_ai_blend(img, bicubic_source, ai_blend);
+    use prunr_core::upscale::{apply_sharpen, apply_ai_blend, apply_color_match};
+    if knobs.ai_blend < 1.0 - f32::EPSILON {
+        apply_ai_blend(img, bicubic_source, knobs.ai_blend);
     }
-    apply_sharpen(img, sharpen);
-    apply_saturation(img, saturation);
-    if color_match {
+    apply_sharpen(img, knobs.sharpen);
+    if knobs.color_match {
         apply_color_match(img, bicubic_source);
     }
 }
@@ -4349,11 +4329,10 @@ mod upscale_tier2_routing_tests {
     /// Same as above but for all four Tier-2 knobs, ensuring each independently
     /// triggers the live-preview dispatch.
     #[test]
-    fn tier2_chain_all_four_knobs_individually_route_to_upscale_tier2() {
+    fn tier2_chain_each_knob_individually_routes_to_upscale_tier2() {
         let base = ItemSettings {
             sharpen: 0.0,
             ai_blend: 1.0,
-            saturation: 0.0,
             color_match: false,
             ..ItemSettings::default()
         };
@@ -4361,7 +4340,6 @@ mod upscale_tier2_routing_tests {
         let cases: &[(&str, ItemSettings)] = &[
             ("sharpen",     ItemSettings { sharpen: 0.3, ..base }),
             ("ai_blend",    ItemSettings { ai_blend: 0.7, ..base }),
-            ("saturation",  ItemSettings { saturation: 0.2, ..base }),
             ("color_match", ItemSettings { color_match: true, ..base }),
         ];
 

@@ -12,14 +12,12 @@ use super::{differs, fmt, hint};
 use crate::gui::item_settings::ItemSettings;
 use crate::gui::theme;
 
-/// The six refinement knobs, in processing order. The recipe diff picks
+/// The refinement knobs, in processing order. The recipe diff picks
 /// up every change, so none needs a catalog knob.
 const REFINE_FIELDS: &[Field<ItemSettings>] = &[
     Field { knob: None, differs: |s, d| differs(s.pre_denoise, d.pre_denoise), reset: |s, d| s.pre_denoise = d.pre_denoise },
-    Field { knob: None, differs: |s, d| differs(s.brightness_lift, d.brightness_lift), reset: |s, d| s.brightness_lift = d.brightness_lift },
     Field { knob: None, differs: |s, d| differs(s.sharpen, d.sharpen), reset: |s, d| s.sharpen = d.sharpen },
     Field { knob: None, differs: |s, d| differs(s.ai_blend, d.ai_blend), reset: |s, d| s.ai_blend = d.ai_blend },
-    Field { knob: None, differs: |s, d| differs(s.saturation, d.saturation), reset: |s, d| s.saturation = d.saturation },
     Field { knob: None, differs: |s, d| s.color_match != d.color_match, reset: |s, d| s.color_match = d.color_match },
 ];
 
@@ -44,9 +42,6 @@ pub(crate) fn render_refine_group(ui: &mut Ui, s: &mut ItemSettings) {
         hint(ui, "Before upscaling. Requires reprocessing.");
         chip::slider_row_f32(ui, "Denoise", &mut s.pre_denoise, 0.0..=1.0, false, |v| fmt::off_or(v, f32::EPSILON, |v| fmt::plain(v, 2)));
         hint(ui, "Smooth grain and speckles first, so the upscaler does not sharpen them.");
-        ui.add_space(theme::SPACE_XS);
-        chip::slider_row_f32(ui, "Brightness lift", &mut s.brightness_lift, -2.0..=2.0, false, fmt::ev);
-        hint(ui, "Brighten shadows so more detail is seen, then restore the original brightness.");
         ui.add_space(theme::SPACE_SM);
         ui.separator();
         hint(ui, "After upscaling.");
@@ -55,8 +50,6 @@ pub(crate) fn render_refine_group(ui: &mut Ui, s: &mut ItemSettings) {
         ui.add_space(theme::SPACE_XS);
         chip::slider_row_f32(ui, "AI blend", &mut s.ai_blend, 0.0..=1.0, false, fmt::percent);
         hint(ui, "Below 100% mixes the plain enlargement back in to soften a plastic look.");
-        ui.add_space(theme::SPACE_XS);
-        chip::slider_row_f32(ui, "Saturation", &mut s.saturation, -1.0..=1.0, false, |v| fmt::off_or(v, f32::EPSILON, |v| fmt::signed_plain(v, 2)));
         ui.add_space(theme::SPACE_XS);
         chip::toggle_row(ui, "Color match", &mut s.color_match);
         hint(ui, "Match the result's color balance to the original photo.");
