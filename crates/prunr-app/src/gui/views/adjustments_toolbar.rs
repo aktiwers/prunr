@@ -738,15 +738,15 @@ fn line_style_params(ui: &mut Ui, style: &mut prunr_core::LineStyle) -> bool {
     changed
 }
 
-/// Fill-style picker. Variant list + inline param editor. Pick a variant to
-/// switch, tune the params below, click outside to dismiss.
+/// Effect picker ("Fill style" in settings and code). Variant list + inline
+/// param editor; "None" heads the list, so the header has no reset.
 fn render_fill_style_chip(ui: &mut Ui, style: &mut prunr_core::FillStyle) -> bool {
     use prunr_core::FillStyle;
     let accent = !matches!(style, FillStyle::None);
     let resp = chip::tooltip(
         chip::chip_button(ui, ICON_FORMAT_PAINT.codepoint, style.name(), accent),
-        "Fill style",
-        "Recolor the cut-out subject.",
+        "Effect",
+        "Restyle the subject's colors, or the whole photo with No model.",
         None,
     );
 
@@ -757,10 +757,7 @@ fn render_fill_style_chip(ui: &mut Ui, style: &mut prunr_core::FillStyle) -> boo
         // instead of stacking above it — otherwise 4-stop GradientMap makes
         // the popover taller than most screens.
         ui.set_min_width(FILL_STYLE_POPOVER_WIDTH);
-        if chip::popover_header(ui, "Fill style", Some(("Back to the subject's own colors", matches!(style, FillStyle::None)))) {
-            *style = FillStyle::None;
-            changed = true;
-        }
+        chip::popover_header(ui, "Effect", None);
         ui.horizontal_top(|ui| {
             ui.vertical(|ui| {
                 ui.set_min_width(FILL_STYLE_LIST_WIDTH);
@@ -951,13 +948,7 @@ fn render_background_chip(
     let popup_id = ui.make_persistent_id("background_popup");
     chip::flyout_for(popup_id, &resp, |ui| {
         ui.set_min_width(BACKGROUND_POPOVER_WIDTH);
-        if chip::popover_header(ui, "Background", Some(("Back to transparent", current == BgKind::Transparent))) {
-            apply_bg_kind(bg, bg_effect, BgKind::Transparent, default_color);
-            if has_bg_image {
-                change.clear_bg_image = true;
-            }
-            aggregate_bool(true, StaticKnob::BgColor, change);
-        }
+        chip::popover_header(ui, "Background", None);
         ui.horizontal_top(|ui| {
             ui.vertical(|ui| {
                 ui.set_min_width(BACKGROUND_LIST_WIDTH);
