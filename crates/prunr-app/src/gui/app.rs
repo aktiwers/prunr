@@ -1416,12 +1416,9 @@ impl PrunrApp {
         super::background_io::SelectionStyle::from_brush(&self.settings.brush).at_zoom(self.zoom_state.zoom)
     }
 
-    /// Magic Brush cannot take a click yet: the shown image is encoding,
-    /// or still settling before its encode starts.
     pub(crate) fn magic_brush_preparing(&self) -> bool {
-        self.magic_brush_state.has_pending_encoder()
-            || (self.magic_brush_state.is_active()
-                && self.batch.selected_item().is_some_and(|i| i.magic_brush_embedding.is_none()))
+        let has_embedding = self.batch.selected_item().is_none_or(|i| i.magic_brush_embedding.is_some());
+        self.magic_brush_state.preparing(has_embedding)
     }
 
     /// With the tool on, the user asked for it: say so and turn it off.

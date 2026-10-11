@@ -2,11 +2,8 @@
 //! with an image loaded, a selection and a brush on, no two toolbar
 //! controls overlap and none runs past the window's right edge.
 
-use egui_kittest::Harness;
-
 use super::fixtures::push_test_item;
-use super::tree_tests::{click, names, settle, tree};
-use crate::gui::app::PrunrApp;
+use super::tree_tests::{click, harness_sized, names, settle, tree};
 use crate::gui::item::BatchStatus;
 use crate::gui::settings::SettingsModel;
 use crate::gui::theme::MIN_WINDOW_SIZE;
@@ -23,12 +20,7 @@ const MODELS: [SettingsModel; 4] = [
 
 /// What is wrong with the toolbar at `width` for `model`, if anything.
 fn toolbar_clash(width: f32, model: SettingsModel) -> Option<String> {
-    let mut harness = Harness::builder()
-        .with_size(egui::vec2(width, MIN_WINDOW_SIZE[1]))
-        .build_eframe(|cc| {
-            egui_material_icons::initialize(&cc.egui_ctx);
-            PrunrApp::new_for_test()
-        });
+    let mut harness = harness_sized(egui::vec2(width, MIN_WINDOW_SIZE[1]));
     {
         let app = harness.state_mut();
         app.settings.model = model;
@@ -41,7 +33,7 @@ fn toolbar_clash(width: f32, model: SettingsModel) -> Option<String> {
         app.batch.commit_selection(1, prunr_core::selection::MaskArtifact::from_cells(64, 64, cells));
     }
     settle(&mut harness);
-    // Upscale has no brush; every other mode shows the tool's chip too.
+    // Upscale has no brush.
     if names(&harness).iter().any(|n| n == "Paint Brush") {
         click(&mut harness, "Paint Brush");
     }

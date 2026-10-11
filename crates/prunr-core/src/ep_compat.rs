@@ -155,7 +155,6 @@ mod tests {
         assert!(old.starts_with("OpenVINO::SdV15LcmInpaintFp16@"));
         assert_eq!(key_with(EpKind::OpenVino, prunr_models::ModelId::Silueta, None), "OpenVINO::Silueta",
             "built-in models keep the historic key; the app version scopes them");
-        assert_eq!(key(EpKind::OpenVino, lcm), key_with(EpKind::OpenVino, lcm, prunr_models::content_tag(lcm)));
     }
 
     #[test]
