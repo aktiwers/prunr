@@ -282,3 +282,18 @@ fn the_effect_flyout_names_every_control_for_each_effect() {
         assert_all_controls_named(&h, &format!("effect flyout, {style:?}"));
     }
 }
+
+/// The upscale row's Scale popover and Refine flyout name every control.
+#[test]
+fn the_upscale_surfaces_name_every_control() {
+    use super::tree_tests::{assert_all_controls_named, names};
+    for (chip, expect) in [("Scale", "2\u{00d7}"), ("Refine", "Sharpen")] {
+        let mut h = loaded();
+        h.state_mut().settings.model = crate::gui::settings::SettingsModel::RealEsrganUpscale;
+        settle(&mut h);
+        click(&mut h, chip);
+        assert!(egui::Popup::is_any_open(&h.ctx), "{chip} opened");
+        assert!(names(&h).iter().any(|n| n == expect), "{chip}: {expect} shown");
+        assert_all_controls_named(&h, &format!("{chip} on an upscaler"));
+    }
+}
