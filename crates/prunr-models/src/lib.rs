@@ -941,6 +941,33 @@ pub fn descriptor(id: ModelId) -> Option<&'static ModelDescriptor> {
     REGISTRY.iter().find(|d| d.id == id)
 }
 
+/// Identifies the downloaded files of a model by their checksums, so a
+/// fixed or re-exported download (whose version string may not move)
+/// is told apart from the one before it. `None` for models built into
+/// the binary: they change only with the app version.
+pub fn content_tag(id: ModelId) -> Option<u64> {
+    match descriptor(id)?.source {
+        ModelSource::Bundled | ModelSource::MultiPartBundled { .. } => None,
+        ModelSource::OnDemand { sha256, fp16, .. } => {
+            Some(tag_of_shas(std::iter::once(sha256).chain(fp16.map(|v| v.sha256))))
+        }
+        ModelSource::MultiPartOnDemand { parts, .. } => Some(tag_of_shas(parts.iter().map(|p| p.sha256))),
+    }
+}
+
+/// FNV-1a over the checksums: stable across builds and platforms, so a
+/// tag written to disk by one run matches the next.
+fn tag_of_shas<'a>(shas: impl IntoIterator<Item = &'a str>) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for sha in shas {
+        for b in sha.bytes().chain(std::iter::once(0)) {
+            h ^= u64::from(b);
+            h = h.wrapping_mul(0x0100_0000_01b3);
+        }
+    }
+    h
+}
+
 /// True when the static catalog says this (model, EP) pair should NOT
 /// be attempted. Cheap — pointer-walk a small `&'static [&str]`.
 pub fn is_ep_compatible(model: ModelId, ep: &str) -> bool {
@@ -1648,6 +1675,22 @@ mod tests {
     /// `incompatible_eps`. Silueta is the only model with a non-empty
     /// list today (`["OpenVINO"]`) — exercising both casings ensures
     /// callers passing "openvino" / "OPENVINO" / "OpenVINO" all match.
+    #[test]
+    fn downloaded_models_carry_a_content_tag_and_built_in_ones_none() {
+        let mut seen = std::collections::HashSet::new();
+        for d in REGISTRY {
+            let tag = content_tag(d.id);
+            match d.source {
+                ModelSource::Bundled | ModelSource::MultiPartBundled { .. } => assert_eq!(tag, None, "{:?}", d.id),
+                ModelSource::OnDemand { .. } | ModelSource::MultiPartOnDemand { .. } => {
+                    let tag = tag.unwrap_or_else(|| panic!("{:?} has no tag", d.id));
+                    assert!(seen.insert(tag), "{:?} shares a tag", d.id);
+                }
+            }
+        }
+        assert_ne!(tag_of_shas(["aa", "bb"]), tag_of_shas(["aa", "bc"]), "any part's checksum moves the tag");
+    }
+
     #[test]
     fn is_ep_compatible_silueta_openvino_blocked_case_insensitive() {
         assert!(!is_ep_compatible(ModelId::Silueta, "OpenVINO"));
