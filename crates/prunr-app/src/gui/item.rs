@@ -175,9 +175,6 @@ pub(crate) struct BatchItem {
     /// dilated, each with its key), and of the Bold scale for dual-scale
     /// styles.
     pub(crate) edge_planes: super::live_preview::EdgePlaneCache,
-    /// The selection resampled to the segmentation tensor's size, with the
-    /// selection hash it came from; see `selection_plane_at`.
-    pub(crate) selection_tensor_plane: Option<(Arc<prunr_core::selection::MaskArtifact>, u64)>,
     /// SubjectOutline live-preview cache: the "masked subject" base
     /// (`postprocess_from_flat` output) that edge composition draws onto.
     /// Keyed by `(MaskRecipe, ModelKind)` — when mask settings change, the
@@ -276,31 +273,20 @@ impl BatchItem {
     pub(crate) fn drop_hot_tensors(&mut self) {
         self.volatile_seg_tensor = None;
         self.volatile_edge_tensor = None;
-        self.selection_tensor_plane = None;
         self.last_decode = None;
         if let Some(t) = &mut self.selection_texture {
             t.feathered = None;
         }
     }
 
-    /// The selection at `dims` (the segmentation tensor's size) for a
-    /// live-preview tick, resampled once per selection change rather than
-    /// per tick. `None` without a selection or with a blank one.
-    pub(crate) fn selection_plane_at(&mut self, dims: (u32, u32)) -> Option<Arc<prunr_core::selection::MaskArtifact>> {
-        let hash = self.selection_hash?;
-        let sel = self.selection_mask.as_ref().filter(|m| !m.is_blank())?;
-        if let Some((plane, h)) = &self.selection_tensor_plane {
-            if *h == hash && (plane.width, plane.height) == dims {
-                return Some(Arc::clone(plane));
-            }
-        }
-        let plane = if (sel.width, sel.height) == dims {
-            Arc::clone(sel)
-        } else {
-            Arc::new(sel.resampled(dims.0, dims.1))
-        };
-        self.selection_tensor_plane = Some((Arc::clone(&plane), hash));
-        Some(plane)
+    /// The selection a re-cut applies, at full resolution: feathered when
+    /// Feather is on and the overlay has built the feathered plane (off
+    /// the UI thread; its landing re-cuts again). `None` without a
+    /// selection or with a blank one.
+    pub(crate) fn correction_plane(&self, style: super::background_io::SelectionStyle) -> Option<Arc<prunr_core::selection::MaskArtifact>> {
+        let selection = self.selection_mask.as_ref().filter(|m| !m.is_blank())?;
+        let feathered = self.current_selection_texture(style).and_then(|t| t.feathered.clone());
+        Some(feathered.unwrap_or_else(|| Arc::clone(selection)))
     }
 
     /// The overlay texture, when it was built from the current selection
@@ -348,7 +334,6 @@ impl BatchItem {
         self.selection_hash = None;
         self.selection_texture = None;
         self.selection_tex_pending = None;
-        self.selection_tensor_plane = None;
         self.last_decode = None;
     }
 
@@ -835,7 +820,6 @@ impl BatchItem {
             volatile_edge_tensor: None,
             volatile_seg_tensor: None,
             edge_planes: Default::default(),
-            selection_tensor_plane: None,
             cached_masked_base: None,
             applied_preset,
             bg_image: None,
