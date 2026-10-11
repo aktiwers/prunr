@@ -176,7 +176,7 @@ Five per-item enums sit on top of the AI output, applied in one `postprocess →
 |---|---|---|
 | Background removal | Restore or Erase on the cut-out | At once, by an in-process mask rerun from the cached seg tensor, but only while a cut-out is on screen (`BatchItem::shows_cutout`); otherwise the selection waits for the next result |
 | Eraser | Add to / subtract from the region to fill | On Apply strokes or Process, since a run costs seconds to minutes |
-| Upscale | — | Selection actions only |
+| Upscale | Not offered: the brushes and selection actions are hidden, since an upscale covers the whole image | — |
 
 **Correction.** `MaskArtifact::apply_to_mask` runs on the normalized mask *before* gamma and threshold (Erase scales toward 0, Restore lerps toward 1, by magnitude), so gamma dragged after painting still modulates the painted area. A blank plane is known in O(1) and skips the pass.
 
