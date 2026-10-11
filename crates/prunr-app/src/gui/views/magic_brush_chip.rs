@@ -13,7 +13,7 @@ use super::brush_chip::BrushChipOutcome;
 const MAGIC_POPOVER_MIN_WIDTH: f32 = 320.0;
 
 /// `encoder_pending` shows a spinner while the encoder runs.
-pub(crate) fn flyout_body(ui: &mut Ui, bs: &mut BrushSettings, encoder_pending: bool, is_inpaint: bool) -> BrushChipOutcome {
+pub(crate) fn flyout_body(ui: &mut Ui, bs: &mut BrushSettings, encoder_pending: bool, model: crate::gui::settings::SettingsModel) -> BrushChipOutcome {
     let mut outcome = BrushChipOutcome::default();
     ui.set_min_width(MAGIC_POPOVER_MIN_WIDTH);
     chip::popover_header(ui, "Magic Brush", None);
@@ -32,7 +32,7 @@ pub(crate) fn flyout_body(ui: &mut Ui, bs: &mut BrushSettings, encoder_pending: 
 
     outcome.committed |= super::brush_chip::render_cursor_section(ui, bs);
     ui.add_space(4.0);
-    outcome.committed |= chip::choice_row(ui, "Mode", super::brush_chip::mode_choices(is_inpaint), &mut bs.mode);
+    outcome.committed |= chip::choice_row(ui, "Mode", super::brush_chip::mode_choices(model), &mut bs.mode);
     ui.add_space(4.0);
     ui.separator();
     ui.add_space(4.0);

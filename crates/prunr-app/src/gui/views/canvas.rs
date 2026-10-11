@@ -183,7 +183,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
     };
     if let Some(tool) = tool {
         let facts = super::tool_strip::StripFacts {
-            is_inpaint: app.settings.model.is_inpaint(),
+            model: app.settings.model,
             encoder_pending: app.magic_brush_preparing(),
         };
         let change = super::tool_strip::render(ui, canvas_rect, tool, &mut app.settings.brush, facts);
@@ -224,7 +224,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
         );
         let font = egui::FontId::monospace(theme::FONT_SIZE_MONO);
         let painter = ui.painter();
-        let (shift_hint, alt_hint) = super::shortcuts::modifier_hints(app.settings.model.is_inpaint());
+        let (shift_hint, alt_hint) = super::shortcuts::modifier_hints(app.settings.model.role());
         let shift_color = if shift { active_color } else { base_color };
         let shift_rect = painter.text(
             pos, egui::Align2::LEFT_TOP, shift_hint, font.clone(), shift_color,
@@ -624,6 +624,13 @@ fn render_empty(ui: &mut egui::Ui, _app: &PrunrApp) {
     }
 }
 
+/// The item's selection over the image, on models that use one.
+fn draw_selection(ui: &egui::Ui, app: &PrunrApp, item: &crate::gui::item::BatchItem, img_rect: Rect) {
+    if crate::gui::knob_catalog::shows(app.settings.model, crate::gui::knob_catalog::Surface::Brushes) {
+        super::selection_overlay::render_selection_overlay(ui, item, img_rect, app.processor.is_inpaint_in_flight(item.id));
+    }
+}
+
 /// `texture` in `img_rect`, revealing over the held image while the
 /// item's reveal runs.
 fn paint_image_or_reveal(ui: &egui::Ui, img_rect: Rect, item: &crate::gui::item::BatchItem, texture: &egui::TextureHandle, tint: Color32) {
@@ -669,9 +676,7 @@ fn render_loaded(ui: &mut egui::Ui, app: &PrunrApp) -> Option<Rect> {
         // shows but the user sees no mask. See `33-UI-SPEC.md` §"Selection
         // Visualization — Render gating".
         if let Some(it) = app.batch.selected_item() {
-            super::selection_overlay::render_selection_overlay(
-                ui, it, img_rect, app.processor.is_inpaint_in_flight(it.id),
-            );
+            draw_selection(ui, app, it, img_rect);
         }
         Some(img_rect)
     } else {
@@ -755,9 +760,7 @@ fn render_done(ui: &mut egui::Ui, app: &PrunrApp) -> Option<Rect> {
             // The selection is authored against the source, so it shows
             // while comparing too.
             if let Some(it) = item {
-                super::selection_overlay::render_selection_overlay(
-                    ui, it, img_rect, app.processor.is_inpaint_in_flight(it.id),
-                );
+                draw_selection(ui, app, it, img_rect);
             }
             painted = Some(img_rect);
         }
@@ -777,9 +780,7 @@ fn render_done(ui: &mut egui::Ui, app: &PrunrApp) -> Option<Rect> {
             ui.painter().rect_filled(img_rect, 0.0, Color32::from_rgba_unmultiplied(bg[0], bg[1], bg[2], bg[3]));
         }
         paint_image_or_reveal(ui, img_rect, it, shown, Color32::WHITE);
-        super::selection_overlay::render_selection_overlay(
-            ui, it, img_rect, app.processor.is_inpaint_in_flight(it.id),
-        );
+        draw_selection(ui, app, it, img_rect);
         painted = Some(img_rect);
     }
 

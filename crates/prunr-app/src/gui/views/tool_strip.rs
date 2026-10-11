@@ -5,6 +5,8 @@ use egui::{Align2, Id, Order, Rect, RichText, Ui};
 use egui_material_icons::icons::ICON_MORE_HORIZ;
 
 use crate::gui::brush_state::{BrushSettings, BRUSH_RADIUS_RANGE};
+use crate::gui::knob_catalog::{shows, Surface};
+use crate::gui::settings::SettingsModel;
 use crate::gui::theme;
 
 use super::brush_chip::{self, BrushChipOutcome, BRUSH_SHAPES};
@@ -41,7 +43,7 @@ impl Tool {
 /// What the panels need besides the brush settings.
 #[derive(Clone, Copy)]
 pub(crate) struct StripFacts {
-    pub is_inpaint: bool,
+    pub model: SettingsModel,
     pub encoder_pending: bool,
 }
 
@@ -61,8 +63,8 @@ pub(crate) fn render(ui: &mut Ui, canvas_rect: Rect, tool: Tool, brush: &mut Bru
                     ui.label(RichText::new(tool.title()).strong().color(theme::TEXT_PRIMARY));
                     ui.separator();
                     change.committed |= match tool {
-                        Tool::Paint => paint_knobs(ui, brush, facts.is_inpaint),
-                        Tool::Magic => magic_knobs(ui, brush, facts.is_inpaint),
+                        Tool::Paint => paint_knobs(ui, brush, facts.model),
+                        Tool::Magic => magic_knobs(ui, brush, facts.model),
                     };
                     ui.separator();
                     let dots = chip::tooltip(
@@ -82,29 +84,30 @@ pub(crate) fn render(ui: &mut Ui, canvas_rect: Rect, tool: Tool, brush: &mut Bru
 
 fn panel(ui: &mut Ui, tool: Tool, brush: &mut BrushSettings, facts: StripFacts) -> BrushChipOutcome {
     match tool {
-        Tool::Paint => brush_chip::flyout_body(ui, brush, facts.is_inpaint),
-        Tool::Magic => magic_brush_chip::flyout_body(ui, brush, facts.encoder_pending, facts.is_inpaint),
+        Tool::Paint => brush_chip::flyout_body(ui, brush, facts.model),
+        Tool::Magic => magic_brush_chip::flyout_body(ui, brush, facts.encoder_pending, facts.model),
     }
 }
 
-fn paint_knobs(ui: &mut Ui, s: &mut BrushSettings, is_inpaint: bool) -> bool {
+fn paint_knobs(ui: &mut Ui, s: &mut BrushSettings, model: SettingsModel) -> bool {
     let mut committed = false;
-    if !is_inpaint {
-        committed |= chip::choice_buttons(ui, brush_chip::mode_choices(is_inpaint), &mut s.mode);
+    if shows(model, Surface::PaintMode) {
+        committed |= chip::choice_buttons(ui, brush_chip::mode_choices(model), &mut s.mode);
     }
     committed |= chip::slider_row_f32(ui, "Size", &mut s.radius, BRUSH_RADIUS_RANGE, true, |v| fmt::px(v, 0)).commit;
     committed |= chip::slider_row_f32(ui, "Hardness", &mut s.hardness, 0.0..=1.0, false, fmt::percent_tenths).commit;
-    if is_inpaint {
+    if shows(model, Surface::FillRegionKnobs) {
         committed |= chip::slider_row_f32(ui, "Expand region", &mut s.inpaint_grow, -16.0..=16.0, false, |v| fmt::signed_px(v, 0)).commit;
         committed |= chip::slider_row_f32(ui, "Edge blend", &mut s.inpaint_feather, 0.0..=32.0, false, |v| fmt::px(v, 0)).commit;
-    } else {
+    }
+    if shows(model, Surface::BrushOpacity) {
         committed |= chip::slider_row_f32(ui, "Opacity", &mut s.strength, 0.0..=1.0, false, fmt::percent).commit;
     }
     committed
 }
 
-fn magic_knobs(ui: &mut Ui, s: &mut BrushSettings, is_inpaint: bool) -> bool {
-    let mut committed = chip::choice_buttons(ui, brush_chip::mode_choices(is_inpaint), &mut s.mode);
+fn magic_knobs(ui: &mut Ui, s: &mut BrushSettings, model: SettingsModel) -> bool {
+    let mut committed = chip::choice_buttons(ui, brush_chip::mode_choices(model), &mut s.mode);
     committed |= chip::slider_row_f32(ui, "Size", &mut s.radius, BRUSH_RADIUS_RANGE, true, |v| fmt::px(v, 0)).commit;
     committed |= chip::slider_row_f32(ui, "Confidence", &mut s.magic_confidence_threshold, 0.0..=1.0, false, fmt::percent).commit;
     committed |= chip::choice_buttons(ui, &BRUSH_SHAPES, &mut s.shape);

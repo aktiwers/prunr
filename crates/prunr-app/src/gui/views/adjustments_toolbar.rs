@@ -18,7 +18,7 @@ use super::shortcuts::Action;
 use crate::gui::brush_state::BrushState;
 use crate::gui::item_settings::ItemSettings;
 use crate::gui::knob_catalog::{
-    self, CacheImpact, DispatchKind, KnobContext, KnobRequirement, LineModeChange, StaticKnob,
+    self, shows, CacheImpact, DispatchKind, KnobContext, KnobRequirement, LineModeChange, StaticKnob, Surface,
 };
 use crate::gui::settings::{Settings, SettingsModel};
 use crate::gui::theme;
@@ -160,8 +160,6 @@ pub(crate) fn render(
     let before_line_mode = item_settings.line_mode;
 
     let model_uses_seg = app_settings.model.uses_segmentation();
-    let inpaint_mode = app_settings.model.is_inpaint();
-    let upscale_mode = app_settings.model.is_upscale();
     let knob_ctx = KnobContext {
         model_uses_seg,
         model_is_none: matches!(app_settings.model, SettingsModel::None),
@@ -183,27 +181,26 @@ pub(crate) fn render(
             item_settings.line_mode = LineMode::Off;
         }
 
-        if upscale_mode {
+        let model = app_settings.model;
+        if shows(model, Surface::Scale) {
             super::upscale_toolbar::render_upscale_chips(ui, app_settings, item_settings, state.source_dims, state.installed.x2plus);
-        } else if inpaint_mode {
-            if matches!(app_settings.model, SettingsModel::SdInpaint) {
-                let outcome = super::eraser_chip::render(ui, app_settings, state.installed);
-                if outcome.committed {
-                    change.brush_settings_committed = true;
-                }
+        }
+        if shows(model, Surface::SdChips) {
+            let outcome = super::eraser_chip::render(ui, app_settings, state.installed);
+            if outcome.committed {
+                change.brush_settings_committed = true;
             }
-        } else {
-            let mask_inactive_reason = if matches!(app_settings.model, SettingsModel::None) {
-                Some("No model is selected, so there is no mask to adjust.")
-            } else if !mask_active {
-                Some("Sketch is set to Full, so the subject mask is not used.")
-            } else {
-                None
-            };
-            chip::gated(ui, mask_inactive_reason, |ui| {
+        }
+        if shows(model, Surface::Mask) {
+            let mask_reason = (!mask_active).then_some("Sketch is set to Full, so the subject mask is not used.");
+            chip::gated(ui, mask_reason, |ui| {
                 render_mask_group(ui, item_settings, &defaults, &mut change);
             });
+        }
+        if shows(model, Surface::Lines) {
             render_lines_group(ui, item_settings, &defaults, model_uses_seg, &mut change);
+        }
+        if shows(model, Surface::Effect) {
             // Fill works without a mask (filter-only mode); only Full sketch
             // has no subject to fill.
             let fill_reason = (!fill_style_active).then_some("Sketch is set to Full, so there is no subject to fill.");
@@ -211,6 +208,8 @@ pub(crate) fn render(
                 let changed = render_fill_style_chip(ui, &mut item_settings.fill_style);
                 aggregate_bool(changed, StaticKnob::FillStyle, &mut change);
             });
+        }
+        if shows(model, Surface::Background) {
             let bg_reason = (!bg_active).then_some("Nothing is transparent in this mode, so there is no background to fill.");
             chip::gated(ui, bg_reason, |ui| {
                 render_background_chip(ui, BgChipState {
@@ -242,7 +241,7 @@ pub(crate) fn render(
                 }
             });
 
-            if upscale_mode {
+            if !shows(app_settings.model, Surface::Brushes) {
                 return;
             }
 
@@ -268,7 +267,7 @@ pub(crate) fn render(
                 let magic_resp = chip::tooltip(
                     chip::icon_toggle_button(ui, ICON_AUTO_AWESOME.codepoint, state.magic_brush_active),
                     "Magic Brush",
-                    super::shortcuts::magic_brush_tip(app_settings.model.is_inpaint()),
+                    super::shortcuts::magic_brush_tip(app_settings.model.role()),
                     None,
                 );
                 if magic_resp.clicked() {

@@ -546,6 +546,20 @@ impl SettingsModel {
         )
     }
 
+    /// What this model does to the image, which decides what it shows.
+    pub fn role(self) -> crate::gui::knob_catalog::ModelRole {
+        use crate::gui::knob_catalog::ModelRole;
+        if self.uses_segmentation() {
+            ModelRole::Cutout
+        } else if self.is_inpaint() {
+            ModelRole::Erase
+        } else if self.is_upscale() {
+            ModelRole::Upscale
+        } else {
+            ModelRole::Filters
+        }
+    }
+
     /// Convert to `ModelKind`, or `None` for variants outside the
     /// seg memory-cap model (Inpaint and Upscale both return `None`).
     pub fn to_model_kind(self) -> Option<ModelKind> {
