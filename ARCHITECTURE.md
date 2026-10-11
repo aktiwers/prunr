@@ -180,7 +180,7 @@ Five per-item enums sit on top of the AI output, applied in one `postprocess →
 
 **Correction.** `MaskArtifact::apply_to_mask` runs on the normalized mask *before* gamma and threshold (Erase scales toward 0, Restore lerps toward 1, by magnitude), so gamma dragged after painting still modulates the painted area. A blank plane is known in O(1) and skips the pass.
 
-**Actions and overlay.** Delete, Copy, Cut, Invert and Clear share one handler. Fill, outline and feather are baked off-thread into one texture per item keyed by `(plane hash, style)`; a stroke uploads only the changed patch. With Feather on, the actions use the same guided-filter-feathered plane the overlay shows, so what is cut is what was shown.
+**Actions and overlay.** Delete, Copy, Cut, Invert and Clear share one handler. Fill, outline and feather are baked off-thread into one texture per item keyed by `(plane hash, style)`; a stroke uploads only the changed patch. The outline is in image pixels, so the style is taken at the current zoom: an outline keeps at least 1.5 screen points, widened in odd whole-pixel steps so zooming rebuilds the texture only a few times. With Feather on, the actions use the same guided-filter-feathered plane the overlay shows, so what is cut is what was shown.
 
 **Painters.** `prunr_core::brush` has Circle, Square and Line stamps; an in-progress stroke paints into its own plane on `BrushState` and merges on release. Paint and Magic Brush are mutually exclusive tools sharing `Settings.brush`.
 
