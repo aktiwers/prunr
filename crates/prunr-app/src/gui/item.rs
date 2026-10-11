@@ -3,45 +3,10 @@
 //! These types are GUI-agnostic in spirit (they hold egui texture handles
 //! because the texture lifecycle is per-item, but no rendering happens here).
 //! Logic that mutates these types lives in the coordinators
-//! (`HistoryManager`, `BatchManager`, `Processor`).
+//! (`BatchManager`, `Processor`); undo lives in `timeline`.
 
-use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::Arc;
-
-/// Cap for the action-ordering layer (`actions_undo` / `actions_redo`) and
-/// the preset stacks: 1-byte enum tags and ~100-byte `PresetSnapshot`s, so
-/// 100 entries cost nothing. Stroke snapshots hold planes and use the
-/// shallower `STROKE_HISTORY_DEPTH`.
-pub(crate) const ACTION_HIST_DEPTH: usize = 100;
-
-/// Tag identifying which per-type stack holds the pre-state for one commit in
-/// the ordering layer. `handle_undo` pops from `actions_undo` and dispatches
-/// to the matching stack's pop method; `handle_redo` mirrors via `actions_redo`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ActionType {
-    /// Brush stroke commit — pre-state lives in `stroke_undo_stack`.
-    Stroke,
-    /// Process / inpaint dispatch result — pre-state in `history` / `redo_stack`
-    /// (the result archive). Bounded by `MAX_HISTORY_DEPTH`, not
-    /// `ACTION_HIST_DEPTH`; result entries are large.
-    Result,
-    /// Preset apply — pre-state in `preset_undo_stack` / `preset_redo_stack`.
-    PresetApply,
-}
-
-/// Bounded push onto a `VecDeque<ActionType>` without clearing the opposite
-/// stack. Used by the undo/redo dispatchers when an action moves between
-/// stacks (same timeline, different end — no divergence).
-pub(crate) fn push_action_bounded(stack: &mut VecDeque<ActionType>, kind: ActionType) {
-    stack.push_back(kind);
-    while stack.len() > ACTION_HIST_DEPTH {
-        stack.pop_front();
-    }
-}
-
-
-use super::stroke_history::{StrokeSnapshot, StrokeStack};
 
 /// `image` is `Arc`-wrapped so cloning across threads (canvas paint and
 /// save worker each take a handle) is a refcount bump, not a memcpy of
@@ -62,102 +27,6 @@ pub(crate) fn bg_image_content_hash(img: &image::DynamicImage) -> u64 {
     img.as_bytes().hash(&mut h);
     h.finish()
 }
-
-/// Three-tiered history entry:
-/// - Tier 1 (Hot): Raw `Arc<RgbaImage>` — instant access, full RAM cost.
-/// - Tier 2 (Warm): Zstd-compressed bytes in RAM — ~3-4x smaller, ~8ms decompress.
-/// - Tier 3 (Cold): Zstd file on disk — zero RAM cost, ~50-100ms read.
-pub(crate) enum HistorySlot {
-    /// Tier 1: uncompressed RGBA in RAM. Every push lands here; the batch
-    /// compresses it off the UI thread.
-    InMemory(Arc<image::RgbaImage>),
-    /// Tier 1 with its compression running; swapped for `Compressed`
-    /// when it lands.
-    Compressing(Arc<image::RgbaImage>),
-    /// Tier 2: zstd-compressed in RAM (~3-4x smaller).
-    Compressed(super::history_disk::CompressedEntry),
-    /// Tier 3: zstd file on disk.
-    OnDisk(super::history_disk::DiskHistoryEntry),
-}
-
-impl HistorySlot {
-
-    /// Demote this slot to disk (Tier 3). Only affects Tier 1/2; Tier 3 is a no-op.
-    pub(crate) fn demote_to_disk(self, item_id: u64, seq: usize) -> Self {
-        match self {
-            Self::InMemory(rgba) | Self::Compressing(rgba) => {
-                super::history_disk::write_history(item_id, seq, &rgba)
-                    .map(Self::OnDisk)
-                    .unwrap_or(Self::InMemory(rgba))
-            }
-            Self::Compressed(entry) => {
-                super::history_disk::demote_to_disk(&entry, item_id, seq)
-                    .map(Self::OnDisk)
-                    .unwrap_or(Self::Compressed(entry))
-            }
-            Self::OnDisk(_) => self,
-        }
-    }
-
-    /// Materialise the RGBA image from any tier.
-    /// Deletes the backing file only on successful disk read.
-    pub(crate) fn into_rgba(self) -> Option<Arc<image::RgbaImage>> {
-        match self {
-            Self::InMemory(rgba) | Self::Compressing(rgba) => Some(rgba),
-            Self::Compressed(entry) => {
-                super::history_disk::decompress_from_ram(&entry)
-                    .ok()
-                    .map(Arc::new)
-            }
-            Self::OnDisk(entry) => match super::history_disk::read_history(&entry) {
-                Ok(img) => {
-                    super::history_disk::delete_entry(&entry);
-                    Some(Arc::new(img))
-                }
-                Err(_) => None,
-            },
-        }
-    }
-
-    /// Delete the backing disk file if Tier 3 (no-op for Tier 1/2).
-    pub(crate) fn cleanup(&self) {
-        if let Self::OnDisk(entry) = self {
-            super::history_disk::delete_entry(entry);
-        }
-    }
-}
-
-impl Default for HistorySlot {
-    fn default() -> Self {
-        Self::InMemory(Arc::new(image::RgbaImage::new(1, 1)))
-    }
-}
-
-/// A history entry: image data + the recipe that produced it.
-#[derive(Default)]
-pub(crate) struct HistoryEntry {
-    pub(crate) slot: HistorySlot,
-    pub(crate) recipe: Option<prunr_core::ProcessingRecipe>,
-}
-
-impl HistoryEntry {
-    pub(crate) fn new(rgba: Arc<image::RgbaImage>, recipe: Option<prunr_core::ProcessingRecipe>) -> Self {
-        Self { slot: HistorySlot::InMemory(rgba), recipe }
-    }
-
-    pub(crate) fn cleanup(&self) {
-        self.slot.cleanup();
-    }
-
-    pub(crate) fn demote_to_disk(self, item_id: u64, seq: usize) -> Self {
-        Self { slot: self.slot.demote_to_disk(item_id, seq), recipe: self.recipe }
-    }
-
-    pub(crate) fn into_parts(self) -> (HistorySlot, Option<prunr_core::ProcessingRecipe>) {
-        (self.slot, self.recipe)
-    }
-}
-
 
 /// Where an image's raw bytes live — file path (lazy) or in-memory (clipboard/paste).
 #[derive(Clone)]
@@ -186,13 +55,14 @@ impl ImageSource {
     }
 }
 
-/// Snapshot of everything a preset apply (or Reset All Knobs) replaces. Used
-/// by Ctrl+Shift+Z / Ctrl+Shift+Y to undo an accidental preset swap without
-/// touching the image-result history.
-#[derive(Clone)]
-pub(crate) struct PresetSnapshot {
-    pub(crate) settings: super::item_settings::ItemSettings,
-    pub(crate) applied_preset: String,
+use super::timeline::{store, DocState, StepKind, Timeline};
+
+/// A run awaited by an item: the timeline version it started at, and the
+/// step its result records (`None`: it fills in the shown step).
+#[derive(Clone, Copy)]
+pub(crate) struct Job {
+    pub(crate) version: u64,
+    pub(crate) step: Option<StepKind>,
 }
 
 pub(crate) struct BatchItem {
@@ -231,12 +101,14 @@ pub(crate) struct BatchItem {
     pub(crate) result_fades_in: bool,
     /// True while a background thread is decoding source bytes to RGBA.
     pub(crate) decode_pending: bool,
-    /// History stack for undo: previous results + their recipes, newest last.
-    pub(crate) history: VecDeque<HistoryEntry>,
-    /// Redo stack: results undone, newest last. Cleared on new processing.
-    pub(crate) redo_stack: VecDeque<HistoryEntry>,
-    /// The current result sits on top of `history` while the item is in
-    /// the background (`park_result`), not as an undo step.
+    /// Every state this image has been in, and which one is shown. The
+    /// fields above and below (result, recipe, selection, settings) are
+    /// the working copy of the shown state.
+    pub(crate) timeline: Timeline,
+    /// The run (Process, erase, upscale) whose result this item awaits.
+    pub(crate) job: Option<Job>,
+    /// The result is released while the item is in the background; the
+    /// timeline holds it.
     pub(crate) result_parked: bool,
     pub(crate) status: BatchStatus,
     pub(crate) selected: bool,
@@ -293,27 +165,6 @@ pub(crate) struct BatchItem {
     /// across unrelated tweaks — so "Portrait ✎" keeps saying Portrait even
     /// after the user modifies something.
     pub(crate) applied_preset: String,
-    /// Preset-apply undo stack — snapshots of (settings, applied_preset)
-    /// taken BEFORE each preset apply / Reset All on this image. Separate
-    /// from `history` (which is the image-result stack) so Ctrl+Shift+Z
-    /// rolls back an accidental preset swap without touching the pixels.
-    pub(crate) preset_undo_stack: VecDeque<PresetSnapshot>,
-    /// Redo counterpart — cleared on a fresh preset apply, fed by undos.
-    pub(crate) preset_redo_stack: VecDeque<PresetSnapshot>,
-    /// Snapshots of `selection_mask` taken BEFORE each stroke commit.
-    /// `Ctrl+Z` while brush mode is active pops the top entry and
-    /// restores the snapshot — the user undoes one stroke per press.
-    /// Bounded to STROKE_HISTORY_DEPTH; oldest entries dropped when full.
-    /// Planes are at source resolution so Paint Brush and Magic Brush share
-    /// one undo stack; below each stack's top they are kept as patches.
-    pub(crate) stroke_undo_stack: StrokeStack,
-    pub(crate) stroke_redo_stack: StrokeStack,
-    /// Ordering layer: commit-order sequence of action types. Each entry is a
-    /// tag pointing at the per-type stack that holds the corresponding pre-state.
-    /// `handle_undo` pops from the back (most-recent) and dispatches; new commits
-    /// push here in lockstep with pushing to the per-type stack.
-    pub(crate) actions_undo: VecDeque<ActionType>,
-    pub(crate) actions_redo: VecDeque<ActionType>,
     /// Never mutate outside `set_bg_image` / `clear_bg_image` — those are
     /// the only writers that keep `settings.bg_image_hash` in lockstep,
     /// which the recipe-diff dispatch reads to fire CompositeOnly.
@@ -328,11 +179,8 @@ pub(crate) struct BatchItem {
     /// Shared selection mask. Both Paint Brush and Magic Brush write
     /// here. Signed i8 plane at source image resolution.
     ///
-    /// LIFECYCLE: NOT cleared by `reset_result_caches()` — selection
-    /// survives Process clicks intentionally. Cleared by:
-    /// - `BatchManager::clear_selection` (Esc / Clear button)
-    /// - `invalidate_selection_on_source_change` (source replaced)
-    /// - Item destruction (image switch — per-BatchItem naturally clears)
+    /// Survives Process; an erase that lands clears it, as do Clear and a
+    /// source change.
     pub(crate) selection_mask: Option<Arc<prunr_core::selection::MaskArtifact>>,
 
     /// Content hash of `selection_mask`, set in lockstep with the mask by
@@ -382,13 +230,6 @@ pub(crate) struct SelectionTexture {
 }
 
 impl BatchItem {
-    /// Push a marker onto `actions_undo` and clear `actions_redo` — any new
-    /// edit branches the redo timeline.
-    pub(crate) fn push_action_marker(&mut self, kind: ActionType) {
-        push_action_bounded(&mut self.actions_undo, kind);
-        self.actions_redo.clear();
-    }
-
     /// Clear every edge cache tier together — compressed multi-scale set,
     /// the hot decompressed tensor, and the derived pre-dilation mask. The
     /// mask is always built from the tensor, so any tensor change invalidates
@@ -494,112 +335,123 @@ impl BatchItem {
             || self.selection_tex_pending.is_some()
     }
 
-    /// Make `mask` the selection and register the change for undo: the
-    /// previous mask is snapshotted onto the stroke stack with a Stroke
-    /// marker on the ordering layer, redo is cleared. Every author — Paint
-    /// strokes, Magic Brush candidates, Invert — goes through here, so all
-    /// of them are undoable. Returns `false` and changes nothing when
-    /// `mask` is byte-identical to the current selection: a no-op stroke
-    /// must not create an undo step.
-    pub(crate) fn commit_selection_mask(&mut self, mask: Arc<prunr_core::selection::MaskArtifact>) -> bool {
+    /// Make `mask` the selection as one undo step of `kind`. Every author
+    /// (Paint strokes, Magic Brush candidates, Invert) goes through here.
+    /// Returns `false` and changes nothing when `mask` is byte-identical
+    /// to the current selection: a no-op stroke must not be a step.
+    pub(crate) fn commit_selection_mask(&mut self, mask: Arc<prunr_core::selection::MaskArtifact>, kind: StepKind) -> bool {
         let hash = mask.content_hash();
         if self.selection_hash == Some(hash) {
             return false;
         }
-        let pre = self.selection_mask.replace(mask);
+        self.selection_mask = Some(mask);
         self.selection_hash = Some(hash);
-        if self.stroke_undo_stack.push(StrokeSnapshot { plane: pre, result_archived: false }) {
-            // The dropped snapshot's marker would otherwise undo nothing.
-            if let Some(pos) = self.actions_undo.iter().position(|a| matches!(a, ActionType::Stroke)) {
-                self.actions_undo.remove(pos);
-            }
-        }
-        self.stroke_redo_stack.clear();
-        self.push_action_marker(ActionType::Stroke);
+        self.commit(kind);
         true
     }
 
-    /// The selection the last stroke commit replaced.
+    /// The selection the shown step replaced, the base a Confidence
+    /// retune of the last stroke merges onto.
     pub(crate) fn pre_stroke_selection(&self) -> Option<Arc<prunr_core::selection::MaskArtifact>> {
-        self.stroke_undo_stack.top_plane()
+        self.timeline.previous()?.selection.as_ref()?.load()
     }
 
-    /// The last stroke's re-cut archived the pre-stroke image.
-    pub(crate) fn mark_last_stroke_archived(&mut self) {
-        self.stroke_undo_stack.mark_top_archived();
-    }
-
-    /// Replace the selection without touching the stroke history: a retune
-    /// of the last commit, whose undo entry stays valid. `hash` is the
-    /// mask's content hash, computed where the mask was built. Returns
-    /// false when the mask is unchanged.
+    /// Replace the selection within the shown step: a retune of the last
+    /// commit, which stays one step. `hash` is the mask's content hash,
+    /// computed where the mask was built. Returns false when unchanged.
     pub(crate) fn replace_selection_in_place(&mut self, mask: Arc<prunr_core::selection::MaskArtifact>, hash: u64) -> bool {
         if self.selection_hash == Some(hash) {
             return false;
         }
         self.selection_mask = Some(mask);
         self.selection_hash = Some(hash);
+        self.amend();
         true
     }
 
-    /// Roll back the most-recent stroke commit as if it never happened.
-    /// Used when an inpaint dispatch is cancelled before its result lands —
-    /// the committed `selection_mask` was the input that would have driven
-    /// the dispatch, so reverting both the state AND the matching
-    /// `ActionType::Stroke` marker prevents the cancelled stroke from:
-    ///   - rendering as a ghost brush overlay on canvas, OR
-    ///   - accumulating into the next stroke commit, OR
-    ///   - showing up as a phantom Cmd+Z entry in the action timeline.
-    ///
-    /// Differs from `undo_stroke`: no redo push (cancel is final, not
-    /// reversible) and explicitly drops the action marker.
-    pub(crate) fn revert_last_stroke_commit(&mut self) {
-        if let Some(prev) = self.stroke_undo_stack.pop() {
-            self.selection_mask = prev.plane;
-            self.selection_hash = self.selection_mask.as_ref().map(|m| m.content_hash());
-        }
-        // Pop the matching marker. rposition handles edge cases where
-        // a non-Stroke action was pushed between the commit and the
-        // cancel — unlikely with current code paths but defensive.
-        if let Some(idx) = self.actions_undo.iter().rposition(
-            |a| matches!(a, ActionType::Stroke),
-        ) {
-            self.actions_undo.remove(idx);
+    /// The working copy as a timeline state, sharing what the shown state
+    /// already stores.
+    fn snapshot(&self, kind: StepKind) -> DocState {
+        let shown = self.timeline.current();
+        DocState {
+            kind,
+            result: store(self.result_rgba.as_ref(), shown.result.as_ref()),
+            recipe: self.applied_recipe.clone(),
+            selection: store(self.selection_mask.as_ref(), shown.selection.as_ref()),
+            selection_hash: self.selection_hash,
+            settings: self.settings,
+            applied_preset: self.applied_preset.clone(),
+            at: std::time::Instant::now(),
         }
     }
 
-    /// Steps the selection back one stroke. `Some(result_archived)` when
-    /// a stroke was there to undo, so the caller knows whether to bring
-    /// the archived image back or to re-cut.
-    pub(crate) fn undo_stroke(&mut self) -> Option<bool> {
-        let prev = self.stroke_undo_stack.pop()?;
-        let current = StrokeSnapshot { plane: self.selection_mask.clone(), result_archived: prev.result_archived };
-        self.stroke_redo_stack.push(current);
-        self.selection_mask = prev.plane;
-        self.selection_hash = self.selection_mask.as_ref().map(|m| m.content_hash());
-        Some(prev.result_archived)
+    /// Record the working copy as a new step.
+    pub(crate) fn commit(&mut self, kind: StepKind) {
+        self.unpark_result();
+        let state = self.snapshot(kind);
+        self.timeline.push(state);
     }
 
-    /// Inverse of `undo_stroke`.
-    pub(crate) fn redo_stroke(&mut self) -> Option<bool> {
-        let next = self.stroke_redo_stack.pop()?;
-        let current = StrokeSnapshot { plane: self.selection_mask.clone(), result_archived: next.result_archived };
-        self.stroke_undo_stack.push(current);
-        self.selection_mask = next.plane;
-        self.selection_hash = self.selection_mask.as_ref().map(|m| m.content_hash());
-        Some(next.result_archived)
+    /// Fold the working copy into the shown step: a job it started landed.
+    pub(crate) fn amend(&mut self) {
+        self.unpark_result();
+        let shown = self.timeline.current();
+        let state = DocState { at: shown.at, ..self.snapshot(shown.kind) };
+        *self.timeline.current_mut() = state;
     }
 
-    // Test-only — non-test paths use the unified actions_undo/redo log
-    // via try_undo_one_action / try_redo_one_action.
-    #[cfg(test)]
-    pub(crate) fn has_stroke_undo(&self) -> bool {
-        !self.stroke_undo_stack.is_empty()
+    /// Make the working copy the shown state again.
+    pub(crate) fn restore(&mut self) {
+        let shown = self.timeline.current().clone();
+        self.result_parked = false;
+        self.result_rgba = shown.result.as_ref().and_then(|r| r.load());
+        self.applied_recipe = shown.recipe;
+        self.selection_mask = shown.selection.as_ref().and_then(|s| s.load());
+        self.selection_hash = self.selection_mask.as_ref().and(shown.selection_hash);
+        if self.settings.line_mode != shown.settings.line_mode {
+            self.invalidate_edge_cache();
+        }
+        self.settings = shown.settings;
+        self.applied_preset = shown.applied_preset;
+        self.status = if self.result_rgba.is_some() { BatchStatus::Done } else { BatchStatus::Pending };
+        self.job = None;
+        self.reset_result_caches();
     }
 
-    #[cfg(test)]
-    pub(crate) fn has_stroke_redo(&self) -> bool {
-        !self.stroke_redo_stack.is_empty()
+    /// Step back one state; returns what the undone step did.
+    pub(crate) fn undo_step(&mut self) -> Option<StepKind> {
+        self.unpark_result();
+        let undone = self.timeline.undo()?;
+        self.restore();
+        Some(undone)
+    }
+
+    /// Step forward one state; returns what the redone step did.
+    pub(crate) fn redo_step(&mut self) -> Option<StepKind> {
+        self.unpark_result();
+        let redone = self.timeline.redo()?;
+        self.restore();
+        Some(redone)
+    }
+
+    /// Note a run starting now; `step` is the step its result records,
+    /// `None` to fill in the shown one (a re-run a knob change asked for).
+    pub(crate) fn start_job(&mut self, step: Option<StepKind>) {
+        self.job = Some(Job { version: self.timeline.version(), step });
+    }
+
+    /// Whether a landing result belongs to the state this item shows:
+    /// an undo, a redo or another step since the run started makes it stale.
+    pub(crate) fn job_is_current(&self) -> bool {
+        self.job.is_some_and(|j| j.version == self.timeline.version())
+    }
+
+    /// Record a landed run's result, now in the working copy.
+    pub(crate) fn finish_job(&mut self) {
+        match self.job.take().and_then(|j| j.step) {
+            Some(kind) => self.commit(kind),
+            None => self.amend(),
+        }
     }
 
     /// Drop whatever caches a `CacheImpact` says are stale. Single entry
@@ -723,40 +575,28 @@ impl BatchItem {
         self.status == BatchStatus::Done && self.cached_tensor.is_some()
     }
 
-    /// Move the current result onto the history stack while the item is in
-    /// the background, so its RAM can be compressed away. It goes on top
-    /// of the undo steps, never over one.
-    pub(crate) fn park_result(&mut self) -> Option<Arc<image::RgbaImage>> {
+    /// Release the working result while the item is in the background;
+    /// the timeline keeps it and compresses it once nothing else holds it.
+    pub(crate) fn park_result(&mut self) -> bool {
         if self.result_parked || self.status != BatchStatus::Done {
-            return None;
+            return false;
         }
-        let rgba = self.result_rgba.take()?;
-        self.history.push_back(HistoryEntry::new(Arc::clone(&rgba), self.applied_recipe.clone()));
+        let Some(rgba) = self.result_rgba.as_ref() else { return false };
+        if !self.timeline.current().result.as_ref().is_some_and(|r| r.holds(rgba)) {
+            self.amend();
+        }
+        self.result_rgba = None;
         self.result_parked = true;
-        Some(rgba)
+        true
     }
 
-    /// Take a parked result back off the history stack. Every history
-    /// operation and every result writer calls this first, so a parked
-    /// entry is never undone; a result that landed meanwhile wins.
+    /// Bring a parked result back from the timeline. Every result reader
+    /// and writer calls this first; a result that landed meanwhile wins.
     pub(crate) fn unpark_result(&mut self) {
-        if !std::mem::take(&mut self.result_parked) {
+        if !std::mem::take(&mut self.result_parked) || self.result_rgba.is_some() {
             return;
         }
-        let Some(entry) = self.history.pop_back() else { return };
-        if self.result_rgba.is_some() {
-            entry.cleanup();
-            return;
-        }
-        let (slot, recipe) = entry.into_parts();
-        self.result_rgba = slot.into_rgba();
-        self.applied_recipe = recipe;
-    }
-
-    /// The cached tensor belongs to a result the user undid. A re-cut from
-    /// it, queued or already running, would bring that result back.
-    pub(crate) fn cut_is_undone(&self) -> bool {
-        self.status == BatchStatus::Pending && self.cached_tensor.is_some()
+        self.result_rgba = self.timeline.current().result.as_ref().and_then(|r| r.load());
     }
 
     /// What `enforce_tensor_budget` can free: the compressed segmentation
@@ -819,8 +659,17 @@ impl BatchItem {
             result_tex_pending: false,
             result_fades_in: false,
             decode_pending: false,
-            history: VecDeque::new(),
-            redo_stack: VecDeque::new(),
+            timeline: Timeline::new(DocState {
+                kind: StepKind::Original,
+                result: None,
+                recipe: None,
+                selection: None,
+                selection_hash: None,
+                settings,
+                applied_preset: applied_preset.clone(),
+                at: std::time::Instant::now(),
+            }),
+            job: None,
             result_parked: false,
             status: BatchStatus::Pending,
             selected: false,
@@ -836,12 +685,6 @@ impl BatchItem {
             selection_tensor_plane: None,
             cached_masked_base: None,
             applied_preset,
-            preset_undo_stack: VecDeque::new(),
-            preset_redo_stack: VecDeque::new(),
-            stroke_undo_stack: StrokeStack::default(),
-            stroke_redo_stack: StrokeStack::default(),
-            actions_undo: VecDeque::new(),
-            actions_redo: VecDeque::new(),
             bg_image: None,
             bg_image_texture: None,
             bg_image_tex_pending: false,
@@ -927,7 +770,6 @@ pub(crate) enum BatchStatus {
 
 #[cfg(test)]
 mod tests {
-    use crate::gui::stroke_history::STROKE_HISTORY_DEPTH;
     use super::*;
     use crate::gui::item_settings::ItemSettings;
 
@@ -1127,129 +969,94 @@ mod tests {
         assert_eq!(source.estimated_size(), 0);
     }
 
-    #[test]
-    fn history_entry_into_parts_round_trips_construction() {
-        let rgba = Arc::new(image::RgbaImage::from_pixel(2, 2, image::Rgba([10, 20, 30, 255])));
-        let entry = HistoryEntry::new(rgba.clone(), None);
-        let (slot, recipe) = entry.into_parts();
-        assert!(recipe.is_none());
-        let recovered = slot.into_rgba().expect("slot must rehydrate");
-        assert_eq!(recovered.dimensions(), (2, 2));
-        assert_eq!(recovered.as_raw(), rgba.as_raw());
-    }
-
-    #[test]
-    fn history_slot_default_is_inmemory_one_by_one_placeholder() {
-        let slot = HistorySlot::default();
-        match slot {
-            HistorySlot::InMemory(ref rgba) => assert_eq!(rgba.dimensions(), (1, 1)),
-            HistorySlot::Compressing(_) | HistorySlot::Compressed(_) => panic!("expected InMemory"),
-            HistorySlot::OnDisk(_) => panic!("expected InMemory, got OnDisk"),
-        }
-    }
-
-    /// Build a distinct MaskArtifact for testing. Uses hash to create
-    /// distinguishable masks without needing actual painted pixels.
+    /// Build a distinct MaskArtifact for testing; the tag sets the first cell.
     fn make_mask(tag: u64, w: u32, h: u32) -> Arc<prunr_core::selection::MaskArtifact> {
         let mut data = vec![0i8; (w * h) as usize];
-        // Tag the first cell so masks with different tags hash differently.
         data[0] = tag as i8;
         Arc::new(prunr_core::selection::MaskArtifact::from_cells(w, h, data))
+    }
+
+    fn px(v: u8) -> Arc<image::RgbaImage> {
+        Arc::new(image::RgbaImage::from_pixel(2, 2, image::Rgba([v, v, v, 255])))
+    }
+
+    fn shown(item: &BatchItem) -> Option<u8> {
+        item.result_rgba.as_ref().map(|r| r.get_pixel(0, 0)[0])
     }
 
     #[test]
     fn identical_commit_is_a_no_op_without_an_undo_step() {
         let mut item = fixture_item(1);
-        assert!(item.commit_selection_mask(make_mask(1, 8, 8)));
-        assert!(!item.commit_selection_mask(make_mask(1, 8, 8)), "same bytes: no commit");
-        assert_eq!(item.stroke_undo_stack.len(), 1);
-        assert_eq!(item.actions_undo.iter().filter(|a| matches!(a, ActionType::Stroke)).count(), 1);
+        assert!(item.commit_selection_mask(make_mask(1, 4, 4), StepKind::Stroke));
+        assert!(!item.commit_selection_mask(make_mask(1, 4, 4), StepKind::Stroke));
+        assert_eq!(item.timeline.undo_steps(), 1);
     }
 
+    /// Undo walks every kind of step on one list and shows the stored
+    /// state: the image, the selection with its hash, the settings.
     #[test]
-    fn dropping_the_oldest_snapshot_also_drops_its_marker() {
+    fn undo_and_redo_restore_the_whole_state_of_each_step() {
         let mut item = fixture_item(1);
-        for tag in 0..(STROKE_HISTORY_DEPTH as u64 + 3) {
-            assert!(item.commit_selection_mask(make_mask(tag, 8, 8)));
-        }
-        assert_eq!(item.stroke_undo_stack.len(), STROKE_HISTORY_DEPTH);
-        let markers = item.actions_undo.iter().filter(|a| matches!(a, ActionType::Stroke)).count();
-        assert_eq!(markers, STROKE_HISTORY_DEPTH, "one marker per surviving snapshot");
+        item.result_rgba = Some(px(1));
+        item.status = BatchStatus::Done;
+        item.commit(StepKind::Process);
+        item.commit_selection_mask(make_mask(5, 4, 4), StepKind::Stroke);
+        item.result_rgba = Some(px(2)); // the stroke's re-cut landed
+        item.amend();
+        item.settings.gamma = 1.7;
+        item.commit(StepKind::Adjust);
+
+        assert_eq!(item.undo_step(), Some(StepKind::Adjust));
+        assert_eq!((shown(&item), item.settings.gamma), (Some(2), ItemSettings::default().gamma));
+        assert_eq!(item.undo_step(), Some(StepKind::Stroke));
+        assert_eq!(shown(&item), Some(1), "the image before the stroke, stored, not re-cut");
+        assert!(item.selection_mask.is_none() && item.selection_hash.is_none());
+        assert_eq!(item.undo_step(), Some(StepKind::Process));
+        assert_eq!((shown(&item), &item.status), (None, &BatchStatus::Pending));
+        assert_eq!(item.undo_step(), None);
+
+        assert_eq!(item.redo_step(), Some(StepKind::Process));
+        assert_eq!(item.redo_step(), Some(StepKind::Stroke));
+        assert_eq!(item.selection_hash, Some(make_mask(5, 4, 4).content_hash()));
+        assert_eq!(shown(&item), Some(2));
+        assert_eq!(item.redo_step(), Some(StepKind::Adjust));
+        assert_eq!(item.settings.gamma, 1.7);
     }
 
+    /// A run lands only on the state it started from; landing records its
+    /// step, or fills in the shown one.
     #[test]
-    fn stroke_commit_pushes_pre_state_onto_undo_stack() {
+    fn a_run_lands_only_on_the_state_it_started_from() {
         let mut item = fixture_item(1);
-        assert!(!item.has_stroke_undo());
-        item.commit_selection_mask(make_mask(1, 8, 8));
-        assert!(item.has_stroke_undo(), "first stroke must register an undo entry (pre = None)");
-        assert!(!item.has_stroke_redo());
+        item.start_job(Some(StepKind::Process));
+        assert!(item.job_is_current());
+        item.result_rgba = Some(px(1));
+        item.status = BatchStatus::Done;
+        item.finish_job();
+        assert_eq!(item.timeline.undo_steps(), 1);
+
+        item.start_job(None);
+        item.result_rgba = Some(px(2));
+        item.finish_job();
+        assert_eq!(item.timeline.undo_steps(), 1, "a re-run fills in the shown step");
+
+        item.start_job(Some(StepKind::Process));
+        item.undo_step();
+        assert!(!item.job_is_current(), "an undo since the start makes the result stale");
     }
 
-    /// Cancel-mid-process cleanup. After commit the item holds the new
-    /// selection_mask + a Stroke marker on the action timeline.
-    /// If the dispatch is cancelled, revert_last_stroke_commit must
-    /// remove BOTH so the next stroke starts fresh and Cmd+Z doesn't
-    /// see a phantom action.
+    /// Parking releases the working image without a step; the timeline
+    /// brings it back.
     #[test]
-    fn revert_last_stroke_commit_clears_state_and_marker() {
+    fn a_parked_result_comes_back_from_the_timeline() {
         let mut item = fixture_item(1);
-        item.commit_selection_mask(make_mask(1, 8, 8));
-        assert!(item.selection_mask.is_some(), "post-commit selection_mask is set");
-        assert_eq!(item.actions_undo.len(), 1, "post-commit Stroke marker pushed");
-        assert!(matches!(item.actions_undo.back(), Some(ActionType::Stroke)));
-
-        item.revert_last_stroke_commit();
-        assert!(item.selection_mask.is_none(), "selection_mask reverted to pre-stroke state (None)");
-        assert!(
-            !item.actions_undo.iter().any(|a| matches!(a, ActionType::Stroke)),
-            "Stroke marker dropped — cancelled stroke must not appear in the undo timeline",
-        );
-        assert!(item.stroke_redo_stack.is_empty(), "no redo entry — cancel is final, not reversible");
-    }
-
-    /// Two committed strokes, the second one cancelled. Revert removes
-    /// only the most-recent stroke's state + marker; the first survives.
-    #[test]
-    fn revert_last_stroke_commit_only_pops_the_most_recent() {
-        let mut item = fixture_item(1);
-        item.commit_selection_mask(make_mask(1, 8, 8));
-        let after_first_hash = item.selection_hash;
-        item.commit_selection_mask(make_mask(2, 8, 8));
-        assert_ne!(item.selection_hash, after_first_hash);
-        assert_eq!(item.actions_undo.len(), 2);
-
-        item.revert_last_stroke_commit();
-        assert_eq!(
-            item.selection_hash, after_first_hash,
-            "revert restored the post-stroke-1 state — stroke 1 still in effect",
-        );
-        assert_eq!(item.actions_undo.len(), 1, "only the second Stroke marker dropped");
-    }
-
-    #[test]
-    fn undo_stroke_restores_previous_selection_mask() {
-        let mut item = fixture_item(1);
-        item.commit_selection_mask(make_mask(1, 8, 8));
-        let after_first_hash = item.selection_hash;
-        item.commit_selection_mask(make_mask(2, 8, 8));
-        assert_ne!(item.selection_hash, after_first_hash, "second stroke changed hash");
-
-        assert!(item.undo_stroke().is_some(), "stroke 2 must be undoable");
-        assert_eq!(item.selection_hash, after_first_hash, "undo restored the post-stroke-1 hash");
-        assert!(item.has_stroke_redo(), "undone stroke goes onto the redo stack");
-    }
-
-    #[test]
-    fn redo_stroke_replays_selection_mask() {
-        let mut item = fixture_item(1);
-        item.commit_selection_mask(make_mask(1, 8, 8));
-        item.commit_selection_mask(make_mask(2, 8, 8));
-        let after_two_hash = item.selection_hash;
-
-        item.undo_stroke();
-        assert!(item.redo_stroke().is_some(), "redo available after undo");
-        assert_eq!(item.selection_hash, after_two_hash, "redo replays the second selection");
+        item.result_rgba = Some(px(3));
+        item.status = BatchStatus::Done;
+        item.commit(StepKind::Process);
+        assert!(item.park_result());
+        assert!(item.result_rgba.is_none());
+        item.unpark_result();
+        assert_eq!((shown(&item), item.timeline.undo_steps()), (Some(3), 1));
     }
 
     #[test]
@@ -1260,97 +1067,6 @@ mod tests {
         item.upscale_raw = Some(Arc::new(image::RgbaImage::new(4, 4)));
         assert_eq!(item.evictable_tensor_bytes(), 0, "planes and upscale buffers are not evictable");
     }
-
-    #[test]
-    fn stroke_history_caps_at_depth() {
-        let mut item = fixture_item(1);
-        for i in 0..(STROKE_HISTORY_DEPTH + 5) {
-            item.commit_selection_mask(make_mask(i as u64, 8, 8));
-        }
-        assert_eq!(
-            item.stroke_undo_stack.len(),
-            STROKE_HISTORY_DEPTH,
-            "undo stack must cap at STROKE_HISTORY_DEPTH"
-        );
-    }
-
-    #[test]
-    fn undo_stroke_rederives_selection_hash() {
-        let mut item = fixture_item(1);
-        item.commit_selection_mask(make_mask(1, 8, 8));
-        let expected_hash = item.selection_hash;
-        item.commit_selection_mask(make_mask(2, 8, 8));
-
-        item.undo_stroke();
-        assert_eq!(
-            item.selection_hash, expected_hash,
-            "undo must re-derive selection_hash from the restored mask",
-        );
-    }
-
-    // ── Ordering layer (actions_undo / actions_redo) ─────────────────────────
-
-    #[test]
-    fn stroke_commit_pushes_marker_and_clears_actions_redo() {
-        let mut item = fixture_item(1);
-        item.actions_redo.push_back(ActionType::Stroke);
-        item.commit_selection_mask(make_mask(1, 8, 8));
-        assert_eq!(item.actions_undo.back(), Some(&ActionType::Stroke),
-            "stroke commit must push a Stroke marker onto actions_undo");
-        assert!(item.actions_redo.is_empty(),
-            "stroke commit must clear actions_redo — new edit branches the timeline");
-    }
-
-    #[test]
-    fn action_markers_ordered_across_action_types() {
-        let mut item = fixture_item(1);
-        item.commit_selection_mask(make_mask(1, 8, 8));
-        item.commit_selection_mask(make_mask(2, 8, 8));
-        let order: Vec<ActionType> = item.actions_undo.iter().copied().collect();
-        assert_eq!(order, vec![ActionType::Stroke, ActionType::Stroke],
-            "two strokes produce two Stroke markers in order");
-    }
-
-    #[test]
-    fn divergence_clears_redo_in_actions_layer() {
-        let mut item = fixture_item(1);
-        item.commit_selection_mask(make_mask(1, 8, 8));
-        // Simulate an undo (normally done via try_undo_one_action, here manually).
-        let kind = item.actions_undo.pop_back().unwrap();
-        item.actions_redo.push_back(kind);
-        assert!(!item.actions_redo.is_empty());
-
-        // New commit branches the timeline.
-        item.commit_selection_mask(make_mask(3, 8, 8));
-        assert!(item.actions_redo.is_empty(),
-            "fresh commit after undo must wipe actions_redo");
-    }
-
-    #[test]
-    fn push_action_bounded_does_not_clear_opposite_stack() {
-        // push_action_bounded is the move-between-stacks helper; it must not
-        // clear the opposite stack (that would break the undo↔redo round-trip).
-        let mut undo_stack: std::collections::VecDeque<ActionType> = Default::default();
-        let mut redo_stack: std::collections::VecDeque<ActionType> = Default::default();
-        redo_stack.push_back(ActionType::Stroke);
-        push_action_bounded(&mut undo_stack, ActionType::Result);
-        assert!(!redo_stack.is_empty(), "push_action_bounded must not clear the opposite stack");
-        assert_eq!(undo_stack.back(), Some(&ActionType::Result));
-    }
-
-    #[test]
-    fn action_hist_depth_caps_actions_undo() {
-        let mut item = fixture_item(1);
-        for _ in 0..(ACTION_HIST_DEPTH + 5) {
-            item.push_action_marker(ActionType::Stroke);
-            // Prevent stroke_undo_stack from overflow (not the subject here).
-            item.stroke_undo_stack.clear();
-        }
-        assert_eq!(item.actions_undo.len(), ACTION_HIST_DEPTH,
-            "actions_undo must be capped at ACTION_HIST_DEPTH");
-    }
-
-    // ── upscale_raw cache contracts ──────────────────────────────────────────
 
     #[test]
     fn upscale_raw_default_is_none() {

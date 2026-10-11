@@ -40,7 +40,6 @@ assets/                    # Icon, Info.plist, .desktop
 |--------------------|--------------------------------------------------------------------------------------------------------|
 | `BatchManager`     | Batch items, selection, `BackgroundIO` (decode, thumbnail, texture-prep, save channels), memory governance, progress counts |
 | `Processor`        | Every dispatch: worker IPC and admission, live preview, cancellation, eraser (in-process and the SD bridge), upscale, SAM 2 sessions, the shared progress slot |
-| `HistoryManager`   | Unit struct; result-history and preset undo/redo as methods on `&mut BatchItem`                         |
 | `BrushState` / `MagicBrushState` | Tool on/off and the in-progress stroke; brush settings live once on `settings.brush` for both |
 | `DownloadManager`  | On-demand model downloads, one at a time                                                                |
 | `DragExportState`  | OS drag-out lifecycle, shared with the drag crate's callback thread                                     |
@@ -192,11 +191,11 @@ Five per-item enums sit on top of the AI output, applied in one `postprocess →
 
 ### Undo timeline
 
-Each item has one undo timeline over three kinds of step, each with its own stack: `Stroke` (selection snapshots, 32 deep; only the newest is a full plane, older ones keep just the cells that differ from the one above, `gui/stroke_history.rs`), `Result` (the result history; see Memory Management) and `PresetApply`. Every push appends its type to `actions_undo`; Cmd+Z pops the newest marker and steps that stack, whatever tool is active.
+Each image has one timeline (`gui/timeline.rs`): the states it has been in and a cursor, the shape Krita, GIMP and Photoshop share. A state is complete: result, recipe, selection, item settings and applied preset. Undo and redo move the cursor and copy that state into the item's working fields; nothing re-runs, because the image is stored. Every other edit cuts the redo tail and appends one step: Process, Erase, Upscale, a stroke or Magic Brush click, Clear and Invert, Delete and Cut, a preset, and a knob change (changes within about a second are one step, so a slider drag is one). 64 steps per image, the oldest dropped first.
 
-A stroke is one step. Undoing it steps the selection back, then: if its re-cut archived the pre-stroke image (chain mode, where the re-cut replaces the chain input; `StrokeSnapshot.result_archived`) that image returns; otherwise a stroke on a cut-out re-cuts from the tensor; an eraser region stroke moves nothing else, because each erase result is its own `Result` step. An erase cancelled before it lands rolls back its stroke and marker.
+**Shared, tiered payloads.** A step points at the stored result and selection of the step before it when it did not change them, so a stroke copies no image. A stored payload stays as-is while anything else holds it (the canvas, a job), is zstd'd off-thread once nothing does, and moves to `<cache dir>/prunr-history/{pid}/` under memory pressure; a disk file goes with its last state.
 
-Undoing back to the original makes the item Pending but keeps its seg tensor for redo (`BatchItem::cut_is_undone`). While that holds, live-preview runs and late preview results are dropped, so a re-cut queued before the undo cannot bring the cut back.
+**Jobs bind to a version.** The timeline's version changes on every step, undo and redo. A run (Process, erase, upscale) notes it at dispatch and lands only if it still matches: as its own step, or, when a knob change or preset asked for it, folded into that step. A live-preview re-cut carries the version the same way and fills in the shown step. A result for a state the image has left is dropped, and undo asks a running job to stop. Switching images releases the working result; the timeline holds it.
 
 ### Magic Brush (SAM 2)
 
@@ -244,13 +243,13 @@ Estimate before loading, release what the user isn't looking at, and let a subpr
 | Data | Kept as | Released |
 |------|---------|----------|
 | Source | A path (`ImageSource::Path`), read only at dispatch; paste keeps bytes | Decoded copy stays once viewed |
-| Non-selected result | Parked on top of the undo history (not as a step), zstd'd off the UI thread | Taken back off on reselect, or by any history step or new result |
-| Undo history | Hot `Arc` → warm zstd in RAM → cold file in `<cache dir>/prunr-history/{pid}/` | `history_depth` (default 10); warm → cold under pressure |
+| Non-selected result | Released from the item; the timeline's stored copy is zstd'd off the UI thread | Restored from the timeline on reselect |
+| Undo timeline | Shared hot `Arc` → warm zstd in RAM → cold file in `<cache dir>/prunr-history/{pid}/` | 64 steps per image; warm → cold under pressure |
 | Seg / edge tensors | zstd on the item; decoded only during a drag | See [Tiered Recipe Pipeline](#tiered-recipe-pipeline) |
 | Thumbnail (160 px) | RAM, always | With the item |
 | Magic Brush embedding (16 MB) | On the item | Kept for the shown image, and with the tool on the previous one |
 
-History entries carry their recipe, so undo also restores what the next Process tier-routes from. Memory pressure (available < 20 % of total) demotes history to disk and evicts all non-selected tensors.
+Timeline states carry their recipe, so undo also restores what the next Process tier-routes from. Memory pressure (available < 20 % of total) demotes stored states to disk and evicts all non-selected tensors.
 
 ### Admission and parallel jobs
 
@@ -280,7 +279,7 @@ A crash or 60 s of silence triggers [Crash retry](#crash-retry).
 
 ### Chain mode
 
-On by default, and switched on with an upscale model so the cut-out feeds the upscaler. Process reads the current result instead of the source (segmentation then always runs the full pipeline); the result is archived but kept as the next input, and brush reruns archive the pre-stroke result so strokes stay undoable.
+On by default, and switched on with an upscale model so the cut-out feeds the upscaler. Process reads the current result instead of the source (segmentation then always runs the full pipeline).
 
 ### CLI
 
