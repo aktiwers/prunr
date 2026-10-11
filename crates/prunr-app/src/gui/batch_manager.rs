@@ -1172,9 +1172,7 @@ mod tests {
     // ── selection lifecycle ─────────────────────────────────────────────
 
     fn style(fill: f32) -> crate::gui::background_io::SelectionStyle {
-        crate::gui::background_io::SelectionStyle {
-            fill_opacity: fill, outline_opacity: 1.0, outline_thickness: 2.0, edge_feather_px: 0,
-        }
+        crate::gui::background_io::SelectionStyle::with_fill(fill)
     }
 
     #[test]

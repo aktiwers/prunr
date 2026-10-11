@@ -7,7 +7,7 @@ use egui::ViewportCommand;
 
 use super::drag_export_state::DragExportState;
 use super::item::{BatchItem, BatchStatus, Engine, ImageSource};
-use super::knob_catalog::{shows, ModelRole, Surface};
+use super::knob_catalog::{shows, Surface};
 use super::background_io::TexTarget;
 use super::timeline::StepKind;
 use super::settings::Settings;
@@ -865,18 +865,24 @@ impl PrunrApp {
         let Some(idx) = self.batch.items.iter().position(|i| i.id == item_id) else { return };
         // A cut-out re-cuts at once; the eraser's region waits for Process;
         // elsewhere the selection only feeds Delete / Copy / Cut.
-        if self.settings.model.role() == ModelRole::Cutout {
+        if !self.settings.model.edits_cutout() {
+            return;
+        }
+        // With Feather on, the feathered plane is built off the UI thread
+        // and its landing re-cuts; cutting now would flash the hard edge.
+        let waits_for_feather = self.settings.brush.edge_feather >= 0.5 && self.batch.items[idx].selection_mask.is_some();
+        if !waits_for_feather {
             self.rerun_with_strokes(idx);
         }
     }
 
-    /// A selection authored before this result, or kept across Process, is
-    /// applied now there is a tensor to correct: as part of the run that
-    /// produced the result, so it adds no step of its own.
-    pub(crate) fn apply_kept_selection_to_new_result(&mut self, item_id: u64) {
+    /// Re-cut a shown cut-out with its selection: when a result lands with a
+    /// selection kept across Process (part of that run, so no step of its
+    /// own), and when the selection's feathered plane lands.
+    pub(crate) fn recut_with_selection(&mut self, item_id: u64) {
         let Some(idx) = self.batch.items.iter().position(|i| i.id == item_id) else { return };
         let item = &self.batch.items[idx];
-        if item.selection_mask.is_some() && item.shows_cutout() && self.settings.model.role() == ModelRole::Cutout {
+        if item.selection_mask.is_some() && item.shows_cutout() && self.settings.model.edits_cutout() {
             self.dispatch_brush_rerun(idx);
         }
     }
@@ -951,7 +957,7 @@ impl PrunrApp {
                 let Some(mask) = self.batch.items[idx].selection_mask.clone() else { return };
                 // On a cut-out the inverted area restores or erases as the
                 // mode says; elsewhere a selection keeps the erase sign.
-                let mode = if self.settings.model.role() == ModelRole::Cutout {
+                let mode = if self.settings.model.edits_cutout() {
                     self.settings.brush.mode
                 } else {
                     prunr_core::selection::BrushMode::Subtract
@@ -1331,7 +1337,7 @@ impl PrunrApp {
                     let existing = self.batch
                         .find_by_id(result.item_id)
                         .and_then(|i| i.selection_mask.clone());
-                    let final_mask = merge_stroke(existing, mask, self.settings.model.role() == ModelRole::Cutout);
+                    let final_mask = merge_stroke(existing, mask, self.settings.model.edits_cutout());
                     tracing::info!(item_id = result.item_id, mode = ?result.mode, "SAM decoder mask committed");
                     self.commit_selection_and_dispatch(result.item_id, final_mask, StepKind::Stroke);
                     if let Some(item) = self.batch.find_by_id_mut(result.item_id) {
@@ -1370,7 +1376,7 @@ impl PrunrApp {
         self.processor.dispatch_sam_rethreshold(super::processor::SamRethresholdRequest {
             item_id, output: Arc::clone(&ld.output), mode: ld.mode,
             source_dims, reading: want, base,
-            signed: self.settings.model.role() == ModelRole::Cutout,
+            signed: self.settings.model.edits_cutout(),
         });
         self.magic_brush_state.rethreshold_in_flight = true;
     }
@@ -2886,7 +2892,7 @@ impl PrunrApp {
 
         self.refresh_batch_progress_status();
 
-        self.apply_kept_selection_to_new_result(item_id);
+        self.recut_with_selection(item_id);
 
         if is_selected {
             self.result_switch_id += 1;
@@ -3332,7 +3338,12 @@ impl PrunrApp {
                             image,
                             egui::TextureOptions::LINEAR,
                         );
-                        if feathered.is_some() {
+                        // Re-cut only for a feathered plane the cut-out has not
+                        // had yet; a rebuild for zoom keeps the same one.
+                        let had_it = item.selection_texture.as_ref().is_some_and(|t| {
+                            t.feathered.is_some() && t.key.0 == result.key.0 && t.key.1.edge_feather_px == result.key.1.edge_feather_px
+                        });
+                        if feathered.is_some() && !had_it {
                             feathered_landed.push(result.item_id);
                         }
                         item.selection_texture = Some(super::item::SelectionTexture { key: result.key, handle, shown, feathered });
@@ -3353,7 +3364,7 @@ impl PrunrApp {
         // A feathered selection that just landed changes what the cut-out
         // applies; re-cut with it.
         for id in feathered_landed {
-            self.apply_kept_selection_to_new_result(id);
+            self.recut_with_selection(id);
         }
 
         // Drain bg-image texture preps. Hash match guards against a
