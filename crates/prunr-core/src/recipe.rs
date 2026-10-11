@@ -69,8 +69,6 @@ pub struct MaskRecipe {
     feather_bits: u32,
     pub fill_style: FillStyle,
     pub bg_effect: BgEffect,
-    #[serde(default)]
-    correction_hash: Option<u64>,
 }
 
 impl From<&crate::MaskSettings> for MaskRecipe {
@@ -85,7 +83,6 @@ impl From<&crate::MaskSettings> for MaskRecipe {
             feather_bits: m.feather.to_bits(),
             fill_style: m.fill_style,
             bg_effect: m.bg_effect,
-            correction_hash: m.correction_hash,
         }
     }
 }
@@ -101,7 +98,6 @@ impl PartialEq for MaskRecipe {
             && self.feather_bits == other.feather_bits
             && self.fill_style == other.fill_style
             && self.bg_effect == other.bg_effect
-            && self.correction_hash == other.correction_hash
     }
 }
 impl Eq for MaskRecipe {}
@@ -117,7 +113,6 @@ impl std::hash::Hash for MaskRecipe {
         self.feather_bits.hash(state);
         self.fill_style.hash(state);
         self.bg_effect.hash(state);
-        self.correction_hash.hash(state);
     }
 }
 
@@ -448,45 +443,6 @@ mod tests {
         let mut b = a.clone();
         b.edge.line_strength_bits = 0.8f32.to_bits();
         assert_eq!(resolve_tier(&a, &b), RequiredTier::EdgeRerun);
-    }
-
-    fn mask_with_correction(hash: Option<u64>) -> MaskRecipe {
-        MaskRecipe::from(&crate::MaskSettings {
-            correction_hash: hash,
-            ..Default::default()
-        })
-    }
-
-    #[test]
-    fn correction_hash_some_to_other_some_triggers_mask_rerun() {
-        let a = make_recipe(ModelKind::Silueta, 1.0, None);
-        let mut b = a.clone();
-        b.mask = mask_with_correction(Some(42));
-        assert_eq!(resolve_tier(&a, &b), RequiredTier::MaskRerun);
-    }
-
-    #[test]
-    fn equal_correction_hashes_skip() {
-        let mut a = make_recipe(ModelKind::Silueta, 1.0, None);
-        a.mask = mask_with_correction(Some(7));
-        let b = a.clone();
-        assert_eq!(resolve_tier(&a, &b), RequiredTier::Skip);
-    }
-
-    #[test]
-    fn correction_hash_none_to_some_triggers_mask_rerun() {
-        let a = make_recipe(ModelKind::Silueta, 1.0, None);
-        let mut b = a.clone();
-        b.mask = mask_with_correction(Some(1));
-        assert_eq!(resolve_tier(&a, &b), RequiredTier::MaskRerun);
-    }
-
-    #[test]
-    fn correction_hash_some_to_none_triggers_mask_rerun() {
-        let mut a = make_recipe(ModelKind::Silueta, 1.0, None);
-        a.mask = mask_with_correction(Some(99));
-        let b = make_recipe(ModelKind::Silueta, 1.0, None);
-        assert_eq!(resolve_tier(&a, &b), RequiredTier::MaskRerun);
     }
 
     #[test]
