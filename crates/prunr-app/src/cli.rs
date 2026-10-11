@@ -200,8 +200,7 @@ impl Cli {
         MaskSettings {
             gamma: self.gamma,
             contrast: self.contrast,
-            // The pipeline's shift erodes for positive values.
-            edge_shift: -self.edge_shift,
+            edge_shift: MaskSettings::edge_shift_for_grow(self.edge_shift),
             refine_edges: self.refine_edges,
             guided_radius: self.edge_width.clamp(1, 64),
             feather: self.feather.max(0.0),

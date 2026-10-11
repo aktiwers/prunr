@@ -11,8 +11,8 @@ pub(crate) struct HardwareInstallCache {
     /// The LCM eraser bundle, as `Settings::can_select_lcm_scheduler` sees it.
     pub lcm_bundle: bool,
     pub x2plus: bool,
-    /// Bit `i` set when `SettingsModel::ALL[i]` is installed.
-    models: u16,
+    /// Bit `SettingsModel::index()` set when that model is installed.
+    models: u32,
 }
 
 impl HardwareInstallCache {
@@ -23,15 +23,16 @@ impl HardwareInstallCache {
             taesd: prunr_models::is_available(ModelId::TaesdFp16),
             lcm_bundle: crate::gui::settings::Settings::can_select_lcm_scheduler(),
             x2plus: prunr_models::is_available(ModelId::RealEsrganX2Plus),
-            models: crate::gui::settings::SettingsModel::ALL.iter().enumerate()
-                .filter(|(_, m)| m.to_model_id().is_none_or(prunr_models::is_available))
-                .fold(0, |bits, (i, _)| bits | 1 << i),
+            models: crate::gui::settings::SettingsModel::ALL.iter()
+                .filter(|m| m.to_model_id().is_none_or(prunr_models::is_available))
+                .fold(0, |bits, m| bits | 1 << m.index()),
         }
     }
 
     /// Whether `model` can be picked: bundled, downloaded, or No model.
     pub fn has_model(&self, model: crate::gui::settings::SettingsModel) -> bool {
-        crate::gui::settings::SettingsModel::ALL.iter().position(|m| *m == model)
-            .is_some_and(|i| self.models & (1 << i) != 0)
+        self.models & (1 << model.index()) != 0
     }
 }
+
+const _: () = assert!(crate::gui::settings::SettingsModel::ALL.len() <= 32, "one bit per model in HardwareInstallCache::models");
