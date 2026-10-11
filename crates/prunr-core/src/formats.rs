@@ -334,6 +334,11 @@ pub fn encode_gray_png(img: &GrayImage) -> Result<Vec<u8>, CoreError> {
     Ok(buf)
 }
 
+/// `img` as RGBA, borrowed when it already is and converted otherwise.
+pub fn rgba_view(img: &DynamicImage) -> std::borrow::Cow<'_, RgbaImage> {
+    img.as_rgba8().map_or_else(|| std::borrow::Cow::Owned(img.to_rgba8()), std::borrow::Cow::Borrowed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -585,5 +590,15 @@ mod tests {
         for x in 0..8 {
             assert_eq!(decoded.get_pixel(x, 0).0[0], (x * 32) as u8);
         }
+    }
+
+    #[test]
+    fn rgba_view_borrows_rgba_and_converts_the_rest() {
+        let rgba = DynamicImage::ImageRgba8(RgbaImage::new(2, 2));
+        assert!(matches!(rgba_view(&rgba), std::borrow::Cow::Borrowed(_)));
+        let rgb = DynamicImage::ImageRgb8(image::RgbImage::new(2, 2));
+        let view = rgba_view(&rgb);
+        assert!(matches!(view, std::borrow::Cow::Owned(_)));
+        assert_eq!(view.dimensions(), (2, 2));
     }
 }

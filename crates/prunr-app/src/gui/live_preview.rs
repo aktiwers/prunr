@@ -402,7 +402,7 @@ pub struct DispatchInputs {
     /// Segmentation tensor (decompressed) + dimensions + model. Required for
     /// `PreviewKind::Mask` *or* `PreviewKind::Edge` in SubjectOutline mode
     /// (the edge was computed on top of a segmented subject; preview reuses
-    /// that as the base image for finalize_edges).
+    /// that as the base image).
     pub seg_tensor: Option<Arc<SegTensor>>,
     pub edge_tensor: Option<EdgeTensor>,
     /// Secondary edge tensor for multi-scale LineStyle variants
