@@ -1247,17 +1247,13 @@ impl PrunrApp {
     /// so nothing encodes behind an upscale; one with brushes warms it.
     fn fit_brush_models_to_model(&mut self) {
         if self.magic_brush_wanted() {
-            if !self.processor.sam_sessions_ready() {
-                self.processor.warm_sam_sessions();
-            }
+            self.processor.warm_sam_sessions();
             return;
         }
         self.brush_state.disable();
         self.deactivate_magic_brush();
         self.processor.release_sam_sessions();
-        for item in &mut self.batch.items {
-            item.magic_brush_embedding = None;
-        }
+        self.batch.clear_magic_embeddings();
     }
 
     /// The selection overlay's style at the current zoom. The overlay and
@@ -3661,12 +3657,8 @@ impl PrunrApp {
     /// Whether the image at `idx` changed only in Refine's after-the-model
     /// knobs since its upscale, so its kept run can be re-finished.
     fn wants_upscale_tier2(&self, idx: usize) -> bool {
-        let Some(item) = self.batch.items.get(idx) else { return false };
-        let (Some(_), Some(old), Some(model)) = (item.kept_upscale(), &item.applied_recipe, self.settings.model.dispatch_model_kind()) else {
-            return false;
-        };
-        self.settings.model.is_upscale()
-            && prunr_core::resolve_tier(old, &item.settings.current_recipe(model)) == prunr_core::RequiredTier::UpscaleTier2
+        let model = self.settings.model.dispatch_model_kind();
+        self.batch.items.get(idx).zip(model).is_some_and(|(item, model)| item.refine_only_changed(model))
     }
 
     fn apply_toolbar_change(
