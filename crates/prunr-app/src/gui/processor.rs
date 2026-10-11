@@ -274,8 +274,15 @@ pub(crate) struct SamDecodeRequest {
 /// running dispatch and a user mid-edit is invisible to the recipe.
 pub(crate) struct UpscaleResult {
     pub item_id: u64,
-    pub result: Result<image::RgbaImage, prunr_core::CoreError>,
+    pub result: Result<UpscaleOutput, prunr_core::CoreError>,
     pub recipe: ProcessingRecipe,
+}
+
+/// A finished upscale: the run kept for Refine, and the image to show
+/// (Refine's knobs applied in the upscale thread, not on the UI thread).
+pub(crate) struct UpscaleOutput {
+    pub run: super::item::UpscaleCache,
+    pub shown: Arc<image::RgbaImage>,
 }
 
 /// Pure admission check: returns `true` when `free_ram_mb >= working_set_mb`.
@@ -1186,7 +1193,13 @@ impl Processor {
                 scale_factor,
                 &progress,
                 Some(&run_options_for_thread),
-            );
+            )
+            .map(|raw| {
+                let raw = Arc::new(raw);
+                let knobs = super::live_preview::UpscaleTier2Knobs::of_recipe(&recipe.upscale);
+                let (shown, reference) = super::live_preview::finish_upscale(&raw, &input_for_inference, None, &knobs);
+                UpscaleOutput { run: super::item::UpscaleCache { raw, input: input_for_inference, reference }, shown }
+            });
             // Send the result BEFORE clearing the active flag. Reversed
             // ordering would let the UI thread observe `is_in_flight=false`
             // and enable Process before the previous result has landed in
