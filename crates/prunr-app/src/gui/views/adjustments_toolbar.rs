@@ -966,13 +966,9 @@ fn render_background_chip(
                 for kind in BgKind::ALL {
                     let selected = kind == current;
                     if ui.selectable_label(selected, kind.name()).clicked() && !selected {
-                        // Image is owned by BatchItem (Arc bytes don't fit in
-                        // the Copy ItemSettings) — emit an intent and let the
-                        // app handle the file dialog + decode side effects.
+                        // The picture lives on the item and loads off the UI
+                        // thread; it replaces the background when it lands.
                         if matches!(kind, BgKind::Image) {
-                            *bg = None;
-                            *bg_effect = prunr_core::BgEffect::None;
-                            aggregate_bool(true, StaticKnob::BgColor, change);
                             change.pick_bg_image = true;
                             continue;
                         }

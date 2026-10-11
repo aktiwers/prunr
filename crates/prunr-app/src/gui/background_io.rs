@@ -7,6 +7,17 @@ pub type FilterOnlyResult = (u64, Result<std::sync::Arc<image::RgbaImage>, Strin
 
 /// Pre-decode result: `Ok(rgba)` on success, `Err(msg)` so a malformed
 /// image clears `decode_pending` instead of leaving the item stuck.
+/// A background picture loaded off the UI thread: the item, the file,
+/// whether the user picked it (it then becomes the background) or a preset
+/// names it (it fills in the picture the preset's settings refer to), and
+/// the decoded image with its content hash.
+pub struct BgImageLoad {
+    pub item_id: u64,
+    pub path: std::path::PathBuf,
+    pub picked: bool,
+    pub result: Result<(image::DynamicImage, u64), String>,
+}
+
 pub type DecodeResult = (u64, Result<std::sync::Arc<image::RgbaImage>, String>);
 
 /// What a selection texture was built from: the mask's content hash and
@@ -109,6 +120,8 @@ pub struct BackgroundIO {
     /// the first frame after every bg-image pick.
     pub bg_tex_prep_tx: mpsc::Sender<(u64, u64, egui::ColorImage)>,
     pub bg_tex_prep_rx: mpsc::Receiver<(u64, u64, egui::ColorImage)>,
+    pub bg_image_tx: mpsc::Sender<BgImageLoad>,
+    pub bg_image_rx: mpsc::Receiver<BgImageLoad>,
     /// Bounds simultaneous decode/thumbnail/filter threads to
     /// `available_parallelism()`. Threads spawn immediately but park here
     /// until a slot opens, capping transient RAM at N × per-thread peak.
@@ -155,6 +168,7 @@ impl BackgroundIO {
         let (tex_prep_tx, tex_prep_rx) = mpsc::channel();
         let (filter_only_tx, filter_only_rx) = mpsc::channel();
         let (bg_tex_prep_tx, bg_tex_prep_rx) = mpsc::channel();
+        let (bg_image_tx, bg_image_rx) = mpsc::channel();
         let (selection_texture_tx, selection_texture_rx) = mpsc::channel();
         let cap = std::thread::available_parallelism()
             .map(|n| n.get())
@@ -167,6 +181,7 @@ impl BackgroundIO {
             tex_prep_tx, tex_prep_rx,
             filter_only_tx, filter_only_rx,
             bg_tex_prep_tx, bg_tex_prep_rx,
+            bg_image_tx, bg_image_rx,
             decode_slots: Arc::new(DecodeSlots::new(cap)),
             selection_texture_tx, selection_texture_rx,
         }

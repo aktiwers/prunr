@@ -593,35 +593,47 @@ impl PrunrApp {
         }
     }
 
-    /// Open a file picker for a per-item background image. Decode + hash
-    /// run synchronously on the UI thread — once per pick, after a modal
-    /// file dialog already blocked. An async pipeline would need a
-    /// pending-state machine for marginal benefit on a user-initiated event.
-    pub(crate) fn handle_pick_bg_image(&mut self, idx: usize, ctx: &egui::Context) {
+    /// Pick a background picture for the image at `idx`. It loads off the
+    /// UI thread and becomes the background when it lands
+    /// (`land_bg_image`); a cancelled pick changes nothing.
+    pub(crate) fn handle_pick_bg_image(&mut self, idx: usize) {
         let Some(path) = self.system.pick_image_dialog(
             self.last_open_dir.as_deref(),
             "Choose background image",
         ) else { return };
-        match prunr_core::load_image_from_path(&path) {
-            Ok(img) => {
-                let kick_id = if let Some(item) = self.batch.items.get_mut(idx) {
-                    item.set_bg_image(img, Some(path.clone()));
-                    // Remember the path keyed by the bg's content hash so a
-                    // preset that captured this hash can reload the image
-                    // when applied later (or after a restart).
-                    if let Some(bg) = item.bg_image.as_ref() {
-                        self.settings.bg_image_paths.insert(bg.hash, path);
-                        self.settings.save();
-                    }
-                    Some(item.id)
-                } else { None };
-                if let Some(id) = kick_id {
-                    self.kick_backdrop_tex_prep(id, ctx);
-                    ctx.request_repaint();
+        if let Some(id) = self.batch.items.get(idx).map(|i| i.id) {
+            self.batch.request_bg_image(id, path, true);
+        }
+    }
+
+    /// A background picture finished loading. A picked one replaces the
+    /// background as one undo step; a preset's fills in the picture its
+    /// settings name, if they still do.
+    pub(crate) fn land_bg_image(&mut self, load: super::background_io::BgImageLoad) {
+        let super::background_io::BgImageLoad { item_id, path, picked, result } = load;
+        let Some(item) = self.batch.find_by_id_mut(item_id) else { return };
+        match result {
+            Ok((img, hash)) if picked => {
+                item.settings.bg = None;
+                item.settings.bg_effect = prunr_core::BgEffect::None;
+                item.set_bg_image_hashed(img, Some(path.clone()), hash);
+                item.commit(StepKind::Adjust);
+                // A preset that captured this hash can reload the picture
+                // later, or after a restart.
+                self.settings.bg_image_paths.insert(hash, path);
+                self.settings.save();
+            }
+            Ok((img, hash)) => {
+                if item.settings.bg_image_hash.map(|h| h.get()) == Some(hash) {
+                    item.set_bg_image_hashed(img, Some(path), hash);
                 }
             }
-            Err(err) => {
+            Err(err) if picked => {
                 self.toasts.error(format!("Couldn't load background image: {err}"));
+            }
+            Err(err) => {
+                item.clear_bg_image();
+                self.toasts.error(format!("Couldn't load preset background: {err}"));
             }
         }
     }
@@ -630,7 +642,7 @@ impl PrunrApp {
     /// preset apply. Preset apply copies `ItemSettings` (which includes the
     /// hash) but doesn't touch the bytes on the BatchItem; this restores
     /// the lockstep `set_bg_image` / `clear_bg_image` invariant.
-    fn reconcile_bg_image_after_preset(&mut self, idx: usize, ctx: &egui::Context) {
+    fn reconcile_bg_image_after_preset(&mut self, idx: usize) {
         let Some(item) = self.batch.items.get_mut(idx) else { return };
         let want = item.settings.bg_image_hash;
         let have = item.bg_image.as_ref().map(|b| b.hash);
@@ -651,17 +663,8 @@ impl PrunrApp {
             self.toasts.info("Preset references a background image we don't have on disk.");
             return;
         };
-        match prunr_core::load_image_from_path(&path) {
-            Ok(img) => {
-                item.set_bg_image(img, Some(path));
-                let id = item.id;
-                self.kick_backdrop_tex_prep(id, ctx);
-            }
-            Err(err) => {
-                item.clear_bg_image();
-                self.toasts.error(format!("Couldn't load preset background: {err}"));
-            }
-        }
+        let id = item.id;
+        self.batch.request_bg_image(id, path, false);
     }
 
     pub fn handle_remove_bg(&mut self) {
@@ -818,7 +821,7 @@ impl PrunrApp {
             self.processor.live_preview.cancel(id);
             if let Some(kind) = step(&mut self.batch.items[idx]) {
                 if self.batch.items[idx].settings.bg_image_hash != preset_before {
-                    self.reconcile_bg_image_after_preset(idx, ctx);
+                    self.reconcile_bg_image_after_preset(idx);
                 }
                 stepped.push(kind);
             }
@@ -3391,6 +3394,11 @@ impl PrunrApp {
             self.recut_with_selection(id);
         }
 
+        while let Ok(load) = self.batch.bg_io.bg_image_rx.try_recv() {
+            self.land_bg_image(load);
+            ctx.request_repaint();
+        }
+
         // A picture that is no longer the item's backdrop (changed while it
         // was built) is dropped; the next kick builds the current one.
         while let Ok((item_id, key, ci)) = self.batch.bg_io.bg_tex_prep_rx.try_recv() {
@@ -3675,7 +3683,7 @@ impl PrunrApp {
             // any captured bg_image_hash. Reload the matching bytes from
             // the persisted path map (or clear if missing) so the recipe
             // diff invariant holds and the canvas paints the right image.
-            self.reconcile_bg_image_after_preset(idx, ctx);
+            self.reconcile_bg_image_after_preset(idx);
         }
         if toolbar_change.model_changed {
             self.batch.fit_line_modes_to(self.settings.model);
@@ -3727,7 +3735,7 @@ impl PrunrApp {
             self.model_store = Some(req);
         }
         if toolbar_change.pick_bg_image {
-            self.handle_pick_bg_image(idx, ctx);
+            self.handle_pick_bg_image(idx);
         } else if toolbar_change.clear_bg_image {
             self.batch.items[idx].clear_bg_image();
             ctx.request_repaint();
@@ -4426,6 +4434,31 @@ mod timeline_contract_tests {
         app.process_items(|_| true, Some(StepKind::Process));
         assert!(app.batch.items.iter().all(|i| matches!(i.status, BatchStatus::Processing)), "both run as filters");
         assert_eq!(app.batch.items[1].settings.line_mode, prunr_core::LineMode::Off, "and show the settings they ran with");
+    }
+
+    /// A picked background picture replaces the background as one step;
+    /// a pick that fails to load leaves the old one; a preset's picture
+    /// lands only while the settings still name it.
+    #[test]
+    fn a_background_picture_lands_as_one_step_or_not_at_all() {
+        use crate::gui::background_io::BgImageLoad;
+        let mut app = app_with_processed_item(SettingsModel::Silueta);
+        app.batch.items[0].settings.bg = Some([9, 9, 9, 255]);
+        let load = |picked, result| BgImageLoad { item_id: 1, path: "bg.png".into(), picked, result };
+
+        let steps = app.batch.items[0].timeline.undo_steps();
+        app.land_bg_image(load(true, Err("unreadable".into())));
+        assert_eq!(app.batch.items[0].settings.bg, Some([9, 9, 9, 255]), "a failed pick keeps the colour");
+        assert_eq!(app.batch.items[0].timeline.undo_steps(), steps);
+
+        app.land_bg_image(load(true, Ok((image::DynamicImage::new_rgba8(2, 2), 42))));
+        let item = &app.batch.items[0];
+        assert_eq!(item.settings.backdrop(), super::super::item_settings::Backdrop::Image(std::num::NonZeroU64::new(42).unwrap()));
+        assert_eq!(item.settings.bg, None, "the picture replaces the colour");
+        assert_eq!(item.timeline.undo_steps(), steps + 1, "as one step");
+
+        app.land_bg_image(load(false, Ok((image::DynamicImage::new_rgba8(3, 3), 77))));
+        assert_eq!(app.batch.items[0].bg_image.as_ref().map(|b| b.hash), Some(42), "a picture no setting names is dropped");
     }
 
     /// A Full-lines run draws on the whole photo: a Pre-filter change must
