@@ -2,7 +2,7 @@
 //! outline and feather are already baked into the item's selection
 //! texture off-thread. RENDER-ONLY — no I/O, no decode, no GPU upload.
 
-use egui::{Color32, Pos2, Rect, Ui};
+use egui::{Color32, Rect, Ui};
 
 use crate::gui::item::BatchItem;
 
@@ -12,11 +12,10 @@ use crate::gui::item::BatchItem;
 /// light with a sheen crossing it, inside the brushed shape.
 pub(crate) fn render_selection_overlay(ui: &Ui, item: &BatchItem, img_rect: Rect, working: bool) {
     let Some(tex) = item.selection_texture.as_ref() else { return };
-    let full_uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
     if working {
         let t = ui.ctx().input(|i| i.time) as f32;
         super::effects::paint_working_masked(ui.painter(), img_rect, tex.handle.id(), t);
     } else {
-        ui.painter().image(tex.handle.id(), img_rect, full_uv, Color32::WHITE);
+        ui.painter().image(tex.handle.id(), img_rect, super::effects::UNIT_UV, Color32::WHITE);
     }
 }

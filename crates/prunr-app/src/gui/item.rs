@@ -57,6 +57,13 @@ impl ImageSource {
 
 use super::timeline::{store, DocState, StepKind, Timeline};
 
+/// A transition to a new image: first the image on screen is held while
+/// the new one's texture is built, then the new one reveals over it.
+pub(crate) enum Reveal {
+    Held(egui::TextureHandle),
+    Running(egui::TextureHandle, std::time::Instant),
+}
+
 /// A run awaited by an item: the timeline version it started at, and the
 /// step its result records (`None`: it fills in the shown step).
 #[derive(Clone, Copy)]
@@ -96,12 +103,9 @@ pub(crate) struct BatchItem {
     pub(crate) source_tex_pending: bool,
     /// True while a background thread is building the result ColorImage.
     pub(crate) result_tex_pending: bool,
-    /// The image on screen before a discrete change (a run, an edit, an
-    /// undo), kept so the canvas shows it until the new one can reveal
-    /// over it. A slider re-cut sets none and swaps at once.
-    pub(crate) reveal_from: Option<egui::TextureHandle>,
-    /// A reveal under way: the image it reveals over, and its start.
-    pub(crate) reveal: Option<(egui::TextureHandle, std::time::Instant)>,
+    /// The transition to the next image after a discrete change (a run,
+    /// an edit, an undo). A slider re-cut makes none and swaps at once.
+    pub(crate) reveal: Option<Reveal>,
     /// True while a background thread is decoding source bytes to RGBA.
     pub(crate) decode_pending: bool,
     /// Every state this image has been in, and which one is shown. The
@@ -405,15 +409,38 @@ impl BatchItem {
 
     /// Keep what is on screen to reveal the next image over.
     pub(crate) fn hold_for_reveal(&mut self) {
-        if self.reveal_from.is_none() {
-            self.reveal_from = self.result_texture.clone().or_else(|| self.source_texture.clone());
+        if !matches!(self.reveal, Some(Reveal::Held(_))) {
+            self.reveal = self.result_texture.clone().or_else(|| self.source_texture.clone()).map(Reveal::Held);
         }
     }
 
     /// The new result's texture has landed: reveal it over the held image.
     pub(crate) fn start_reveal(&mut self) {
-        if let Some(from) = self.reveal_from.take() {
-            self.reveal = Some((from, std::time::Instant::now()));
+        if let Some(Reveal::Held(from)) = self.reveal.take() {
+            self.reveal = Some(Reveal::Running(from, std::time::Instant::now()));
+        }
+    }
+
+    /// The image shown until the new one's texture lands.
+    pub(crate) fn held_texture(&self) -> Option<&egui::TextureHandle> {
+        match &self.reveal {
+            Some(Reveal::Held(t)) => Some(t),
+            _ => None,
+        }
+    }
+
+    /// A reveal under way: the image it reveals over, and how far it has
+    /// come (0..1). A finished one is dropped by `settle_reveal`.
+    pub(crate) fn reveal_progress(&self) -> Option<(&egui::TextureHandle, f32)> {
+        let Some(Reveal::Running(from, at)) = &self.reveal else { return None };
+        let p = (at.elapsed().as_secs_f64() / super::views::effects::REVEAL_SECS) as f32;
+        (p < 1.0).then_some((from, p))
+    }
+
+    /// Release a finished reveal's texture.
+    pub(crate) fn settle_reveal(&mut self) {
+        if matches!(self.reveal, Some(Reveal::Running(..))) && self.reveal_progress().is_none() {
+            self.reveal = None;
         }
     }
 
@@ -472,6 +499,7 @@ impl BatchItem {
     /// current state again.
     pub(crate) fn abandon_job(&mut self) {
         self.job = None;
+        self.reveal = None;
         let has_result = self.result_rgba.is_some() || self.result_parked;
         self.status = if has_result { BatchStatus::Done } else { BatchStatus::Pending };
     }
@@ -687,7 +715,6 @@ impl BatchItem {
             result_texture: None,
             source_tex_pending: false,
             result_tex_pending: false,
-            reveal_from: None,
             reveal: None,
             decode_pending: false,
             timeline: Timeline::new(DocState::original(settings, applied_preset.clone())),

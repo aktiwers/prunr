@@ -13,8 +13,10 @@ use crate::gui::theme;
 /// Seconds a new result takes to reveal.
 pub(crate) const REVEAL_SECS: f64 = 0.9;
 
-/// Lavender light: the accent lifted toward white, for glows over a photo.
-const GLOW: Color32 = Color32::from_rgb(0xe6, 0xd2, 0xfa);
+/// The whole texture, for `Painter::image`.
+pub(crate) const UNIT_UV: Rect = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
+
+const GLOW: Color32 = theme::GLOW;
 
 /// Cells per side of an effect mesh; plenty for a gradient this soft.
 const GRID: usize = 24;
@@ -52,6 +54,8 @@ fn reveal_at(p: f32, u: f32, v: f32) -> (f32, f32) {
 /// each vertex coloured by `color(u, v)`.
 fn paint_mesh(painter: &Painter, rect: Rect, texture: TextureId, color: impl Fn(f32, f32) -> Color32) {
     let mut mesh = Mesh::with_texture(texture);
+    mesh.reserve_vertices((GRID + 1) * (GRID + 1));
+    mesh.reserve_triangles(2 * GRID * GRID);
     let n = GRID as u32;
     for j in 0..=GRID {
         for i in 0..=GRID {

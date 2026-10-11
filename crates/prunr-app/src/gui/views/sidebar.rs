@@ -338,7 +338,7 @@ fn paint_thumbnail(
     ui.painter().image(
         thumb_tex.id(),
         thumb_rect,
-        Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+        super::effects::UNIT_UV,
         Color32::from_rgba_unmultiplied(255, 255, 255, alpha),
     );
 }
