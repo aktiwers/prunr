@@ -1196,4 +1196,69 @@ mod tests {
         assert!(output.built_edge.dilated.is_none(), "UpscaleTier2 must not build an edge mask");
         assert!(output.built_masked_base.is_none(), "UpscaleTier2 must not build a masked base");
     }
+
+    /// A Sketch tweak previews exactly what Process makes: the same
+    /// planes, scale and compose, for every line style, both modes and
+    /// every Subject composition.
+    #[test]
+    fn the_sketch_preview_matches_process() {
+        use crate::gui::item_settings::ItemSettings;
+        use prunr_core::{ComposeMode, EdgeInferenceResult, EdgeScale, LineMode, LineStyle};
+        let (th, tw) = (12u32, 16u32);
+        let pattern = |seed: usize| -> Vec<f32> {
+            (0..(th * tw) as usize).map(|i| if (i * 7 + seed * 3) % 5 < 2 { 6.0 } else { -6.0 }).collect()
+        };
+        let res = EdgeInferenceResult { tensors: std::array::from_fn(pattern), height: th, width: tw };
+        let (w, h) = (40u32, 30u32);
+        let photo = image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(w, h, |x, y| image::Rgb([(x * 6) as u8, (y * 8) as u8, 90])));
+        let subject = Arc::new(RgbaImage::from_fn(w, h, |x, y| image::Rgba([(x * 6) as u8, (y * 8) as u8, 90, if x > 10 { 255 } else { 40 }])));
+        let tensor = |scale: EdgeScale| EdgeTensor { data: Arc::new(res.tensors[scale as usize].clone()), height: th, width: tw };
+
+        let cases = LineStyle::ALL.iter().flat_map(|style| {
+            ComposeMode::ALL.iter().map(move |c| (LineMode::SubjectOutline, *style, *c))
+                .chain(std::iter::once((LineMode::EdgesOnly, *style, ComposeMode::default())))
+        });
+        for (mode, style, compose) in cases {
+            let settings = ItemSettings {
+                line_mode: mode,
+                line_style: style,
+                compose_mode: compose,
+                edge_scale: EdgeScale::Bold,
+                edge_thickness: 2,
+                solid_line_color: Some([200, 30, 30]),
+                ..ItemSettings::default()
+            };
+            let edge = settings.edge_settings();
+            let subject_mode = mode == LineMode::SubjectOutline;
+            let preview = run_preview(
+                DispatchInputs {
+                    version: 0,
+                    kind: PreviewKind::Edge,
+                    original: Arc::new(photo.clone()),
+                    start: None,
+                    settings,
+                    seg_tensor: subject_mode.then(|| Arc::new(SegTensor { data: vec![0.0; 4], height: 2, width: 2, model: ModelKind::Silueta })),
+                    edge_tensor: Some(tensor(edge.primary_scale())),
+                    secondary_edge_tensor: matches!(style, LineStyle::DualScale { .. }).then(|| tensor(EdgeScale::Bold)),
+                    cached_edge: EdgePlanes::default(),
+                    cached_bold: EdgePlanes::default(),
+                    cached_masked_base: subject_mode.then(|| Arc::clone(&subject)),
+                    correction: None,
+                    upscale_raw: None,
+                    bicubic_source: None,
+                    upscale_tier2_knobs: None,
+                },
+                &std::sync::atomic::AtomicBool::new(false),
+            )
+            .rgba
+            .unwrap_or_else(|| panic!("{mode:?} {style:?} {compose:?}: the preview renders"));
+            let process = if subject_mode {
+                prunr_core::compose_subject_outline(&res, &subject, &edge)
+            } else {
+                prunr_core::compose_whole_photo(&res, &photo, &edge)
+            };
+            assert!(preview.as_raw() == process.as_raw(), "{mode:?} {style:?} {compose:?}: preview differs from Process");
+        }
+    }
 }
+
