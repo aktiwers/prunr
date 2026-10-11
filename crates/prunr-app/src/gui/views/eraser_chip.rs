@@ -111,6 +111,7 @@ fn render_quality_chip(
     lcm_bundle_installed: bool,
 ) -> bool {
     let pop_id = egui::Id::new("eraser_preset_popover");
+    app_settings.fit_sd_quality_to_install(lcm_bundle_installed);
     let active = app_settings.brush.sd_scheduler;
     let resp = chip::tooltip(
         chip::chip_button(ui, ICON_AUTO_AWESOME.codepoint, active.label(), false),
