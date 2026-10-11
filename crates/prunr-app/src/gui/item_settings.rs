@@ -282,9 +282,10 @@ pub(crate) fn item_with_line_mode(line_mode: prunr_core::LineMode) -> ItemSettin
 
 /// Rewrite item settings saved by older versions: a `threshold` (a
 /// number when it was on) becomes `contrast` at a hard edge, a retired
-/// line style becomes solid and a retired composition lines only. Only item settings are touched: each
-/// preset entry's `item_settings`, and a v1 preset file, which is item
-/// settings at the top (it has no `format_version`).
+/// line style becomes solid and a retired composition lines only. Only
+/// item settings are touched: each preset entry's `item_settings`, and a
+/// v1 preset file, which is item settings at the top (it has no
+/// `format_version`).
 pub(crate) fn migrate_old_item_settings(value: &mut serde_json::Value) {
     fn item(map: &mut serde_json::Map<String, serde_json::Value>) {
         if let Some(old) = map.remove("threshold") {
@@ -293,9 +294,9 @@ pub(crate) fn migrate_old_item_settings(value: &mut serde_json::Value) {
             }
         }
         // The Chromatic and Noise line styles are gone; their lines draw solid.
-        let retired = map.get("line_style").and_then(|v| v.as_object())
-            .is_some_and(|o| o.contains_key("chromatic") || o.contains_key("noise"));
-        if retired {
+        if map.get("line_style").and_then(|v| v.as_object())
+            .is_some_and(|o| o.contains_key("chromatic") || o.contains_key("noise"))
+        {
             map.insert("line_style".into(), serde_json::json!("solid"));
         }
         // Inverse mask is gone; Lines only is the nearest composition.
