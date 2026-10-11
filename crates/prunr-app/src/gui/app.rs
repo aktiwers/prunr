@@ -706,10 +706,8 @@ impl PrunrApp {
         };
         // Share the input via Arc — full RGBA payload would otherwise
         // be deep-cloned (tens of MB at 4K) for every Process click.
-        let Some(input) = item.run_input(Engine::Upscale).or_else(|| item.source_rgba.clone()) else {
-            tracing::warn!(item_id, "upscale dispatch skipped: source RGBA unavailable");
-            return;
-        };
+        let input = item.run_input(Engine::Upscale).or_else(|| item.source_rgba.clone())
+            .map_or_else(|| super::processor::UpscaleInput::Source(item.source.clone()), super::processor::UpscaleInput::Decoded);
         let output_scale = item.settings.output_scale;
         let intra_threads = prunr_core::batch::ort_intra_threads(self.settings.parallel_jobs);
         // Capture the recipe at dispatch time so the pump can stamp

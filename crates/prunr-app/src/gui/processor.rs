@@ -292,6 +292,23 @@ pub(crate) fn admission_check(working_set_mb: u32, free_ram_mb: u32) -> bool {
     free_ram_mb >= working_set_mb
 }
 
+/// What an upscale starts from: the image, or its source when it is not
+/// decoded yet (Process right after opening a large photo), which the
+/// upscale thread decodes instead of the run being skipped.
+pub(crate) enum UpscaleInput {
+    Decoded(Arc<image::RgbaImage>),
+    Source(super::item::ImageSource),
+}
+
+impl UpscaleInput {
+    fn load(self) -> Result<Arc<image::RgbaImage>, prunr_core::CoreError> {
+        match self {
+            UpscaleInput::Decoded(img) => Ok(img),
+            UpscaleInput::Source(source) => source.decode().map(|img| Arc::new(img.into_rgba8())).map_err(prunr_core::CoreError::ImageFormat),
+        }
+    }
+}
+
 /// The image the upscale model reads: the input, denoised first when
 /// `pre_denoise` is above 0, else the same `Arc` (no copy).
 pub(crate) fn build_inference_input(input: &Arc<image::RgbaImage>, pre_denoise: f32) -> Arc<image::RgbaImage> {
@@ -1096,7 +1113,7 @@ impl Processor {
     pub(crate) fn dispatch_upscale(
         &mut self,
         item_id: u64,
-        input: Arc<image::RgbaImage>,
+        input: UpscaleInput,
         model_id: prunr_models::ModelId,
         output_scale: prunr_core::OutputScale,
         intra_threads: usize,
@@ -1116,12 +1133,6 @@ impl Processor {
         }
 
         let scale_factor = output_scale.factor();
-
-        // Tier-1 pre-inference pass — runs OUTSIDE the ORT session, so the
-        // row-parallel rayon inside apply_denoise is not nested in the inference
-        // thread pool (the nested-rayon pattern that deadlocked apply_background_color
-        // in b2306bb). Do not move this below upscale_active.store(true).
-        let input_for_inference = build_inference_input(&input, recipe.upscale.pre_denoise());
 
         // Resolve ModelKind + optimization level so we can look up the
         // warm-engine cache.
@@ -1174,6 +1185,19 @@ impl Processor {
         let run_options_for_thread = Arc::clone(run_options);
 
         std::thread::spawn(move || {
+            // Decode and Denoise run before the model: the row-parallel
+            // rayon inside apply_denoise must not nest in ORT's thread pool
+            // (the pattern that deadlocked apply_background_color, b2306bb).
+            let input_for_inference = match input.load() {
+                Ok(input) => build_inference_input(&input, recipe.upscale.pre_denoise()),
+                Err(err) => {
+                    tracing::error!(item_id, %err, "upscale dispatch: input unreadable");
+                    let _ = result_tx.send(UpscaleResult { item_id, result: Err(err), recipe });
+                    active_flag.store(false, Ordering::Release);
+                    run.end();
+                    return;
+                }
+            };
             // Session construction runs here, not on the GUI thread: a cold
             // EP (OpenVINO compiles the graph) can take tens of seconds and
             // the window must stay responsive so Cancel is reachable. The
@@ -2019,6 +2043,20 @@ mod upscale_dispatch_tests {
 
     fn grey_image(w: u32, h: u32, v: u8) -> image::RgbaImage {
         image::RgbaImage::from_pixel(w, h, image::Rgba([v, v, v, 255]))
+    }
+
+    /// An upscale started before its photo is decoded decodes it in the
+    /// upscale thread rather than being skipped.
+    #[test]
+    fn an_undecoded_upscale_input_decodes_from_its_source() {
+        use super::UpscaleInput;
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgba8(grey_image(3, 2, 77)).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+        let source = crate::gui::item::ImageSource::Bytes(Arc::new(png));
+        let img = UpscaleInput::Source(source).load().expect("decodes");
+        assert_eq!((img.dimensions(), img.get_pixel(0, 0).0[0]), ((3, 2), 77));
+        let broken = crate::gui::item::ImageSource::Bytes(Arc::new(vec![1, 2, 3]));
+        assert!(UpscaleInput::Source(broken).load().is_err());
     }
 
     #[test]
