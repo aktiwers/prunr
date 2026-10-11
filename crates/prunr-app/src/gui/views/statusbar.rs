@@ -57,19 +57,15 @@ pub fn render(ui: &mut egui::Ui, app: &PrunrApp) {
         ui.label(RichText::new(&status_text).color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY));
 
         // Steps Cmd+Z can walk back.
-        if app.settings.chain_mode {
-            if let Some(item) = app.batch.selected_item() {
-                let depth = item.timeline.undo_steps();
-                if depth > 0 {
-                    ui.add_space(theme::SPACE_SM);
-                    ui.label(
-                        RichText::new(format!("{depth} undo"))
-                            .monospace()
-                            .size(theme::FONT_SIZE_MONO)
-                            .color(theme::TEXT_SECONDARY),
-                    );
-                }
-            }
+        let depth = app.batch.selected_item().map_or(0, |item| item.timeline.undo_steps());
+        if depth > 0 {
+            ui.add_space(theme::SPACE_SM);
+            ui.label(
+                RichText::new(format!("{depth} undo"))
+                    .monospace()
+                    .size(theme::FONT_SIZE_MONO)
+                    .color(theme::TEXT_SECONDARY),
+            );
         }
 
         if app_state == AppState::Processing {

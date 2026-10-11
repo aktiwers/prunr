@@ -263,19 +263,6 @@ impl BatchManager {
         })
     }
 
-    /// First (in batch order) item in the action target set, by reference —
-    /// no Vec<u64> allocation. Per-frame toolbar tooltip code uses this
-    /// instead of `items_to_process().first()` so the Process button label
-    /// path doesn't churn ~400 B per frame. Same target-set rule as
-    /// `items_to_process` and `any_target_can`.
-    pub(crate) fn first_target_item(&self) -> Option<&BatchItem> {
-        let has_selected = self.has_any_selected();
-        let current_id = self.selected_item().map(|b| b.id);
-        self.items.iter().find(|item| {
-            if has_selected { item.selected } else { Some(item.id) == current_id }
-        })
-    }
-
     /// Indices of items in the current dispatch target set — all
     /// `selected == true` items when any are checked, or the single
     /// currently-viewed item when none are. Mirrors the target-set rule
@@ -408,6 +395,7 @@ impl BatchManager {
         &self,
         item_id: u64,
         source: &ImageSource,
+        base: Option<Arc<image::RgbaImage>>,
         fill_style: prunr_core::FillStyle,
     ) {
         let tx = self.bg_io.filter_only_tx.clone();
@@ -418,6 +406,11 @@ impl BatchManager {
             // Drop bytes / DynamicImage / RGBA before send so concurrent
             // threads don't pile per-image peaks.
             let result: Result<Arc<image::RgbaImage>, String> = (|| {
+                if let Some(base) = base {
+                    let mut rgba = (*base).clone();
+                    prunr_core::apply_fill_style(&mut rgba, fill_style);
+                    return Ok(Arc::new(rgba));
+                }
                 let bytes = source.load_bytes()
                     .map_err(|e| format!("Failed to load: {e}"))?;
                 let original = prunr_core::load_image_from_bytes(&bytes)
@@ -1088,7 +1081,7 @@ mod tests {
     fn request_filter_only_emits_processed_rgba_to_filter_only_rx() {
         let bm = fixture();
         let source = ImageSource::Bytes(Arc::new(one_pixel_png()));
-        bm.request_filter_only(7, &source, prunr_core::FillStyle::default());
+        bm.request_filter_only(7, &source, None, prunr_core::FillStyle::default());
 
         let (id, result) = bm.bg_io.filter_only_rx.recv_timeout(Duration::from_secs(2))
             .expect("filter_only_tx must produce a result within 2s");
@@ -1106,7 +1099,7 @@ mod tests {
         let source = ImageSource::Path(std::path::PathBuf::from(
             "/nonexistent/prunr-test-missing.png"
         ));
-        bm.request_filter_only(11, &source, prunr_core::FillStyle::default());
+        bm.request_filter_only(11, &source, None, prunr_core::FillStyle::default());
 
         let (id, result) = bm.bg_io.filter_only_rx.recv_timeout(Duration::from_secs(2))
             .expect("filter_only_tx must produce a result within 2s");

@@ -39,7 +39,6 @@ pub struct SettingsDump {
     pub auto_process_on_import: bool,
     pub parallel_jobs: usize,
     pub live_preview: bool,
-    pub chain_mode: bool,
     pub keep_sd_loaded: bool,
 }
 
@@ -79,7 +78,6 @@ pub fn dump(app: &PrunrApp) -> StateDump {
             auto_process_on_import: app.settings.auto_process_on_import,
             parallel_jobs: app.settings.parallel_jobs,
             live_preview: app.settings.live_preview,
-            chain_mode: app.settings.chain_mode,
             keep_sd_loaded: app.settings.keep_sd_loaded,
         },
     }

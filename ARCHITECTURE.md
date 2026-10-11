@@ -137,7 +137,7 @@ Each `BatchItem` keeps the `ProcessingRecipe` that produced its result (`applied
 
 | Tier | When | Work |
 |------|------|------|
-| `FullPipeline` | Model, chain mode, segmentation on/off, or a line-mode switch that changes DexiNed's input | Full inference |
+| `FullPipeline` | Model, segmentation on/off, or a line-mode switch that changes DexiNed's input | Full inference |
 | `AddEdgeInference` | Lines turned on, or `InputTransform` changed, with the seg tensor cached | DexiNed only |
 | `MaskRerun` | Mask knobs (incl. fill style, bg effect, brush correction), or lines turned off | Postprocess the cached seg tensor |
 | `EdgeRerun` | Line knobs (strength, colour, thickness, scale, compose mode, style) | Re-threshold the cached DexiNed tensor |
@@ -155,7 +155,7 @@ The recipe of an in-flight batch lives on `Processor` (`InFlightBatch`), not on 
 
 ## Per-Image Settings
 
-Every `BatchItem` owns its `ItemSettings`, so a toolbar edit changes one image; app-wide behaviour (parallel jobs, chain mode, brush) lives on `Settings`. `ItemSettings` is `Copy` and `#[serde(default)]`, so older presets load when fields are added.
+Every `BatchItem` owns its `ItemSettings`, so a toolbar edit changes one image; app-wide behaviour (parallel jobs, brush) lives on `Settings`. `ItemSettings` is `Copy` and `#[serde(default)]`, so older presets load when fields are added.
 
 ### Creative compose layer
 
@@ -277,9 +277,9 @@ UI      store result + compressed tensors, applied_recipe = snapshot, admit next
 
 A crash or 60 s of silence triggers [Crash retry](#crash-retry).
 
-### Chain mode
+### Starting image
 
-On by default, and switched on with an upscale model so the cut-out feeds the upscaler. Process reads the current result instead of the source (segmentation then always runs the full pipeline).
+There is no switch for what a run reads; the undo timeline decides. Each step records the engine that made it and the image that run started from (`Origin`). A run of that same engine redoes the step from that image, so a re-cut or a second upscale never stacks on its own output; any other engine builds on the shown result, and the eraser always does, since each erase adds to the last. A hand edit (Delete, Cut) has no origin, so the next run keeps it. `BatchItem::run_input` is the one place this is decided; Process, the live preview, filter-only runs and upscale all ask it. A segmentation run that starts from an earlier result always runs the full pipeline, since the cached tensor never saw those pixels.
 
 ### CLI
 

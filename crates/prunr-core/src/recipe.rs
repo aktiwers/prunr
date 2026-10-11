@@ -238,8 +238,6 @@ pub struct ProcessingRecipe {
     pub edge: EdgeRecipe,
     pub mask: MaskRecipe,
     pub composite: CompositeRecipe,
-    /// True if this result was produced in chain mode (previous result as input).
-    pub was_chain: bool,
     #[serde(default)]
     pub upscale: UpscaleRecipe,
 }
@@ -290,10 +288,6 @@ fn only_tier2_changed(old: &UpscaleRecipe, new: &UpscaleRecipe) -> bool {
 pub fn resolve_tier(old: &ProcessingRecipe, new: &ProcessingRecipe) -> RequiredTier {
     if old == new {
         return RequiredTier::Skip;
-    }
-    // Chain mode changes the input image, not settings — always needs full pipeline.
-    if old.was_chain != new.was_chain {
-        return RequiredTier::FullPipeline;
     }
     if old.inference != new.inference {
         // Model change forces everything (seg tensor from old model is wrong shape / scale).
@@ -384,7 +378,6 @@ mod tests {
                 bg_image_fit: crate::types::BgImageFit::default(),
             },
             upscale: UpscaleRecipe::default(),
-            was_chain: false,
         }
     }
 
@@ -432,14 +425,6 @@ mod tests {
     fn model_change_full_pipeline() {
         let a = make_recipe(ModelKind::Silueta, 1.0, None);
         let b = make_recipe(ModelKind::BiRefNetLite, 1.0, None);
-        assert_eq!(resolve_tier(&a, &b), RequiredTier::FullPipeline);
-    }
-
-    #[test]
-    fn chain_mode_change_full_pipeline() {
-        let a = make_recipe(ModelKind::Silueta, 1.0, None);
-        let mut b = a.clone();
-        b.was_chain = true;
         assert_eq!(resolve_tier(&a, &b), RequiredTier::FullPipeline);
     }
 

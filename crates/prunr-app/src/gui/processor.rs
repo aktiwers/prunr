@@ -1880,7 +1880,6 @@ mod tests {
             mask: (&MaskSettings { fill_style: FillStyle::None, ..Default::default() }).into(),
             composite: CompositeRecipe::default(),
             upscale: UpscaleRecipe::default(),
-            was_chain: false,
         }
     }
 

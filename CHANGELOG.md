@@ -28,7 +28,7 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 - Knob names follow the words other editors use: Opacity, Expand region, Edge blend, Feather, Edge shift, Denoise, Sharpen. American spelling throughout.
 - Paint Brush and Magic Brush share size and shape; while either is on, its knobs sit in a strip over the image, and `[` / `]` change the size.
 - Cmd+Shift+Z is an alternate redo; up to 64 undo steps per image.
-- Chain mode defaults on; switching to an upscale model turns it on so the cut-out feeds the upscaler.
+- The "Use last result as input" switch is gone: each step remembers what it started from, so a new tool builds on the result while changing a setting or running the same tool again redoes the step instead of stacking on it. Undo goes back to the original.
 - Eraser models are on-demand downloads; LaMa is no longer embedded in the binary.
 - Line color choices (Original, Solid color, styles) live in one list.
 - The window can be made narrower: 1020 px minimum, down from 1100.
@@ -41,7 +41,7 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 - The selection overlay uploads only the changed region per stroke instead of a full-size texture.
 - The guided filter frees its planes as soon as they are consumed; BiRefNet postprocess and the guided filter's interior loop gained row-parallel fast paths.
 - A per-frame step keeps the selected image's textures, embedding and overlay current, replacing three ad-hoc polls.
-- Live preview reuses the chained image across dispatches; SD schedulers reuse their scratch buffers; the upscale engine stays warm between runs.
+- Live preview reuses its starting image across dispatches; SD schedulers reuse their scratch buffers; the upscale engine stays warm between runs.
 - SD erases encode a prompt once per session instead of once per tile, and log the time of each stage.
 - SD erases run a region up to 768 px long as one crop instead of two blended tiles when enough RAM is free: 21 percent faster on a 328 by 607 region, and no seam.
 - The LCM eraser bundle (1.0.1) is re-exported with dynamic batch and size axes: a guided step is one UNet call instead of two, and it takes the single tall crop too. Existing installs download the new bundle, 2.1 GB.
@@ -54,7 +54,8 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 
 - Restore and Erase strokes on a cut-out land exactly where you paint them; edge refinement no longer pulls them onto nearby edges.
 - Magic Brush Confidence does what its hint says: it is the probability a pixel must reach, so higher keeps the sure core and lower grows into the rim, and moving it retunes the last click or stroke live. It used to gate the candidate choice and change nothing.
-- Undo restores the cut-out after a Magic Brush or Invert stroke in chain mode; only Paint strokes archived the previous result.
+- Undo restores the cut-out after a Magic Brush or Invert stroke; only Paint strokes archived the previous result.
+- Upscaling an upscaled image again, or dragging an effect or background slider, no longer stacks on its own output (grainy 16x upscales, effects piling up).
 - The selection outline stays visible when a large image is zoomed out to fit.
 - Magic Brush no longer gets stuck on Preparing when Paint Brush is turned on while an image is being prepared.
 - A fast Paint Brush stroke is continuous instead of a row of dots between pointer samples.
