@@ -579,6 +579,7 @@ fn apply_event_state(
         }
         // Non-terminal / one-off variants — no state change here.
         SubprocessEvent::Ready { .. }
+        | SubprocessEvent::Report { .. }
         | SubprocessEvent::Progress { .. }
         | SubprocessEvent::InpaintProgress { .. }
         | SubprocessEvent::Finished
@@ -679,6 +680,11 @@ mod tests {
                 outer_current: 0,
                 outer_total: 0,
             },
+        );
+
+        step(
+            (&mut in_flight, &mut rss_paused),
+            &SubprocessEvent::Report { item_id: 1, update: prunr_core::ProgressUpdate::Step(prunr_core::Step::FindingSubject) },
         );
 
         assert!(in_flight.contains(&1), "Progress is mid-flight — in_flight must NOT change");

@@ -852,11 +852,22 @@ impl Processor {
         });
     }
 
+    /// Fold a pipeline's progress report into the running dispatch's
+    /// snapshot; none running, nothing to show it on.
+    pub(crate) fn apply_report(&self, update: &prunr_core::ProgressUpdate) {
+        self.dispatch_progress.update(|p| {
+            if let Some(p) = p {
+                p.apply(update);
+            }
+        });
+    }
+
     /// Drain bridge events, forward into the existing inpaint result
     /// channel + progress sinks. Called once per frame from app pump.
     pub(crate) fn pump_inpaint_subprocess(&mut self) {
         while let Ok(evt) = self.inpaint_bridge_rx.try_recv() {
             match evt {
+                InpaintBridgeResult::Report { update, .. } => self.apply_report(&update),
                 InpaintBridgeResult::Progress {
                     item_id, current, total, outer_current, outer_total,
                 } => {

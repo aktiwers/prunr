@@ -125,12 +125,37 @@ pub struct ChainInput {
     pub height: u32,
 }
 
+/// Sends a pipeline's progress reports as `SubprocessEvent::Report` for
+/// `item_id`, on the same channel as its result, so a report never
+/// arrives after the result.
+struct IpcProgress {
+    item_id: u64,
+    tx: std::sync::mpsc::Sender<SubprocessEvent>,
+}
+
+impl prunr_core::ProgressSink for IpcProgress {
+    fn report(&self, update: prunr_core::ProgressUpdate) {
+        let _ = self.tx.send(SubprocessEvent::Report { item_id: self.item_id, update });
+    }
+}
+
+/// A progress handle whose reports go to the parent as events.
+pub fn ipc_progress(item_id: u64, tx: std::sync::mpsc::Sender<SubprocessEvent>) -> prunr_core::Progress {
+    prunr_core::Progress::new(std::sync::Arc::new(IpcProgress { item_id, tx }))
+}
+
 /// Child → Parent events (sent over child's stdout).
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub enum SubprocessEvent {
     /// Engine pool created successfully.
     Ready {
         active_provider: String,
+    },
+    /// Any progress report from a pipeline (`prunr_core::Progress`): a
+    /// new step or count needs no new variant.
+    Report {
+        item_id: u64,
+        update: prunr_core::ProgressUpdate,
     },
     /// Per-stage progress for an image.
     Progress {
@@ -661,6 +686,30 @@ mod tests {
         roundtrip(&SubprocessEvent::InpaintError {
             item_id: 11,
             error: "lama session failed: tensor shape mismatch".into(),
+        });
+    }
+
+    #[test]
+    fn event_report_roundtrips_every_update() {
+        use prunr_core::{ProgressUpdate, Step, TileRect, Unit};
+        for update in [
+            ProgressUpdate::Step(Step::Denoising),
+            ProgressUpdate::Outer { done: 1, total: 2, unit: Unit::Crop },
+            ProgressUpdate::Inner { done: 12, total: 20, unit: Unit::Step },
+            ProgressUpdate::Tiles(vec![TileRect { x: 0.0, y: 0.5, w: 0.25, h: 0.5 }]),
+            ProgressUpdate::Tile { index: 0, done: true },
+        ] {
+            roundtrip(&SubprocessEvent::Report { item_id: 9, update });
+        }
+    }
+
+    #[test]
+    fn ipc_progress_sends_reports_for_its_item() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let p = ipc_progress(4, tx);
+        p.step(prunr_core::Step::FindingSubject);
+        assert_eq!(rx.try_recv().unwrap(), SubprocessEvent::Report {
+            item_id: 4, update: prunr_core::ProgressUpdate::Step(prunr_core::Step::FindingSubject),
         });
     }
 
