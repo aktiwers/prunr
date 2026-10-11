@@ -1040,7 +1040,7 @@ impl Processor {
         let pending: HashSet<u64> = ids.into_iter().collect();
         let total = pending.len();
         self.in_flight = Some(InFlightBatch { recipe, pending, total });
-        self.set_seg_counts(self.current_dispatch_progress(), prunr_core::Step::ReadingImage.label().into());
+        self.set_seg_counts(self.current_dispatch_progress(), "Starting".into());
     }
 
     /// `(done, total)` for the currently in-flight dispatch, or `None`
