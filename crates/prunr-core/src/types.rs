@@ -34,6 +34,19 @@ pub enum ModelKind {
     FourXNmkdSuperscale,
 }
 
+impl ModelKind {
+    pub fn is_upscale(self) -> bool {
+        match self {
+            ModelKind::Silueta | ModelKind::U2net | ModelKind::BiRefNetLite => false,
+            ModelKind::RealEsrganX4Plus
+            | ModelKind::Nomos8kSchatL
+            | ModelKind::RealEsrganX2Plus
+            | ModelKind::FourXNmkdSiaxCx
+            | ModelKind::FourXNmkdSuperscale => true,
+        }
+    }
+}
+
 impl From<ModelKind> for prunr_models::ModelId {
     fn from(kind: ModelKind) -> Self {
         match kind {

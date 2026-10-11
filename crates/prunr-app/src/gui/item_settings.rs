@@ -274,11 +274,7 @@ impl ItemSettings {
                 bg_effect: self.bg_effect,
             },
             upscale: prunr_core::UpscaleRecipe {
-                model: match model {
-                    prunr_core::ModelKind::RealEsrganX4Plus
-                    | prunr_core::ModelKind::Nomos8kSchatL => Some(model.into()),
-                    _ => None,
-                },
+                model: model.is_upscale().then(|| model.into()),
                 output_scale: self.output_scale,
                 pre_denoise_bits: self.pre_denoise.to_bits(),
                 sharpen_bits: self.sharpen.to_bits(),
@@ -695,6 +691,17 @@ mod tests {
         assert_eq!(loaded.sharpen, prunr_core::DEFAULT_SHARPEN);
         assert_eq!(loaded.ai_blend, 1.0);
         assert!(!loaded.color_match);
+    }
+
+    /// The recipe names the upscale model for every upscaler (the NMKD
+    /// ones read as "no upscale"), and none for a background-removal model.
+    #[test]
+    fn the_recipe_names_every_upscale_model() {
+        use prunr_core::ModelKind;
+        for kind in [ModelKind::RealEsrganX4Plus, ModelKind::Nomos8kSchatL, ModelKind::FourXNmkdSiaxCx, ModelKind::FourXNmkdSuperscale] {
+            assert_eq!(ItemSettings::default().current_recipe(kind).upscale.model, Some(kind.into()), "{kind:?}");
+        }
+        assert_eq!(ItemSettings::default().current_recipe(ModelKind::Silueta).upscale.model, None);
     }
 
     /// Brightness lift and Saturation are gone; presets that saved them
