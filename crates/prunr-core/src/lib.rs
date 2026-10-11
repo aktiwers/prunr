@@ -37,7 +37,7 @@ pub use formats::{load_image_from_path, load_image_from_bytes, check_large_image
 pub use edge::{EdgeEngine, EdgeInferenceResult, EDGE_SCALE_COUNT, tensor_to_edge_mask, edge_plane, thickened_edges, compose_edges_styled, compose_edges_dual_styled, compose_subject_outline, compose_whole_photo};
 pub use types::{ComposeMode, LineStyle, FillStyle, BgEffect, BgImageFit, ChannelSwapVariant, InputTransform};
 pub use edge::apply_input_transform;
-pub use postprocess::{apply_fill_style, apply_bg_effect};
+pub use postprocess::{apply_fill_style, effect_backdrop};
 pub use selection::{MaskArtifact, SelectionError};
 pub use sam::{SamEmbedding, SamDecoderOutput, decode_to_mask_artifact, MaskReading, SAM_ENCODER_INPUT, SAM_MASK_RESOLUTION};
 pub use progress::{Progress, ProgressSink, ProgressUpdate, Step, Unit, TileRect};
