@@ -243,7 +243,9 @@ impl PrunrApp {
         let (worker_tx, worker_rx) = spawn_worker(worker_ctx, prewarm);
 
         let mut app = Self::init_state(settings, super::system_bridge::SystemBridge::new(), worker_tx, worker_rx);
-        app.processor.warm_sam_sessions();
+        if app.magic_brush_wanted() {
+            app.processor.warm_sam_sessions();
+        }
         app.pending_onboarding_toast = onboarding_toast;
         app.automation = super::env_overrides::control_port()
             .and_then(|port| super::automation::Automation::start(&cc.egui_ctx, port));
@@ -1206,7 +1208,7 @@ impl PrunrApp {
     /// is remembered instead of retried; with the tool on, admission or
     /// encoder failure turns the tool off, so this cannot retry in a loop.
     fn ensure_magic_embedding_for_selected(&mut self, ctx: &egui::Context) {
-        if self.magic_brush_state.has_pending_encoder() {
+        if !self.magic_brush_wanted() || self.magic_brush_state.has_pending_encoder() {
             return;
         }
         if let Some(wait) = self.magic_brush_state.settle_remaining(std::time::Instant::now()) {
@@ -1232,6 +1234,30 @@ impl PrunrApp {
         match self.processor.dispatch_sam_encoder(item_id, source, avail_ram) {
             Ok(()) => self.magic_brush_state.set_encoder_pending(true),
             Err(err) => self.on_encoder_failure(item_id, &err),
+        }
+    }
+
+    /// Whether the selected model has brushes, so Magic Brush's models
+    /// belong in memory.
+    pub(crate) fn magic_brush_wanted(&self) -> bool {
+        shows(self.settings.model, Surface::Brushes)
+    }
+
+    /// After a model switch: a model without brushes turns them off and
+    /// frees Magic Brush (its sessions and each image's 16 MB embedding),
+    /// so nothing encodes behind an upscale; one with brushes warms it.
+    fn fit_brush_models_to_model(&mut self) {
+        if self.magic_brush_wanted() {
+            if !self.processor.sam_sessions_ready() {
+                self.processor.warm_sam_sessions();
+            }
+            return;
+        }
+        self.brush_state.disable();
+        self.deactivate_magic_brush();
+        self.processor.release_sam_sessions();
+        for item in &mut self.batch.items {
+            item.magic_brush_embedding = None;
         }
     }
 
@@ -3666,12 +3692,7 @@ impl PrunrApp {
         if toolbar_change.model_changed {
             self.batch.fit_line_modes_to(self.settings.model);
             self.settings.on_model_change_resolve_brush();
-            // A model without brushes turns them off, so a tool left on
-            // doesn't keep encoding every selected image.
-            if !shows(self.settings.model, Surface::Brushes) {
-                self.brush_state.disable();
-                self.deactivate_magic_brush();
-            }
+            self.fit_brush_models_to_model();
             // Cancel any in-flight upscale dispatch when the user
             // changes model mid-run — the result would land on the
             // wrong selection otherwise.
@@ -4388,6 +4409,24 @@ mod timeline_contract_tests {
         let inputs = PrunrApp::build_preview_inputs(&mut app.batch.items, 1, PreviewKind::UpscaleTier2, false, style);
         assert!(inputs.is_some_and(|i| i.upscale.is_some()), "dispatched from the kept run");
         assert!(app.batch.items[0].source_dyn.is_none() && app.batch.items[0].start_dyn_cache.is_none(), "without decoding or copying the photo");
+    }
+
+    /// A model without brushes loads none of Magic Brush: switching to an
+    /// upscaler drops every image's embedding and the encoder stays off.
+    #[test]
+    fn an_upscale_model_keeps_magic_brush_unloaded() {
+        let mut app = app_with_processed_item(SettingsModel::Silueta);
+        app.batch.items[0].magic_brush_embedding = Some(Arc::new(prunr_core::sam::SamEmbedding {
+            image_embed: vec![0.0; 4],
+            high_res_feats_0: vec![0.0; 4],
+            high_res_feats_1: vec![0.0; 4],
+        }));
+        app.settings.model = SettingsModel::RealEsrganUpscale;
+        app.fit_brush_models_to_model();
+        assert!(app.batch.items[0].magic_brush_embedding.is_none(), "its embedding is freed");
+        assert!(!app.magic_brush_wanted(), "and the encoder stays off");
+        app.settings.model = SettingsModel::Silueta;
+        assert!(app.magic_brush_wanted());
     }
 
     /// A Full-lines run draws on the whole photo: a Pre-filter change must
