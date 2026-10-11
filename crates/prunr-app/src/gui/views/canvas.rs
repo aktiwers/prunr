@@ -382,26 +382,16 @@ fn handle_magic_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: 
         draw_modifier_glyph(ui, canvas_rect, if shift { "+" } else { "\u{2212}" });
     }
 
-    // Convert screen position to source-image pixel coordinates.
-    let screen_to_src = |pos: egui::Pos2| -> (f32, f32) {
-        if img_rect.width() <= 0.0 || img_rect.height() <= 0.0 {
-            return (0.0, 0.0);
-        }
-        let rel_x = (pos.x - img_rect.min.x) / img_rect.width();
-        let rel_y = (pos.y - img_rect.min.y) / img_rect.height();
-        let px = rel_x * source_w as f32;
-        let py = rel_y * source_h as f32;
-        (px.clamp(0.0, source_w as f32 - 1.0), py.clamp(0.0, source_h as f32 - 1.0))
-    };
+    let screen_to_src = |pos: egui::Pos2| source_point(pos, img_rect, (source_w, source_h));
 
+    // Only the image takes prompts: a press beside it on the canvas would
+    // otherwise clamp onto the nearest edge and select whatever is there.
     let (clicked, drag_started, dragging, released, hover_pos) = ui.ctx().input(|i| {
         let hover = i.pointer.hover_pos();
-        let clicked = i.pointer.primary_clicked()
-            && hover.is_some_and(|p| canvas_rect.contains(p));
-        let drag_started = i.pointer.primary_pressed()
-            && hover.is_some_and(|p| canvas_rect.contains(p));
-        let dragging = i.pointer.primary_down()
-            && hover.is_some_and(|p| canvas_rect.contains(p));
+        let on_image = hover.is_some_and(|p| img_rect.contains(p));
+        let clicked = i.pointer.primary_clicked() && on_image;
+        let drag_started = i.pointer.primary_pressed() && on_image;
+        let dragging = i.pointer.primary_down() && on_image;
         let released = i.pointer.primary_released();
         (clicked, drag_started, dragging, released, hover)
     });
@@ -418,8 +408,7 @@ fn handle_magic_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: 
 
     if dragging {
         if let Some(pos) = hover_pos {
-            if canvas_rect.contains(pos) {
-                let (px, py) = screen_to_src(pos);
+            if let Some((px, py)) = screen_to_src(pos) {
                 let state = &mut app.magic_brush_state;
                 // Dedup the source-coords list on bit-exact repeats; SAM
                 // doesn't benefit from duplicate points and we cap at 8
@@ -449,8 +438,7 @@ fn handle_magic_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: 
             }
         }
     } else if clicked {
-        if let Some(pos) = hover_pos {
-            let (px, py) = screen_to_src(pos);
+        if let Some((px, py)) = hover_pos.and_then(screen_to_src) {
             // A stroke's own release was taken by the branch above, so
             // what is left is a click, even when its press and release
             // fell in different frames and left one point behind.
@@ -459,6 +447,16 @@ fn handle_magic_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: 
         }
         app.magic_brush_state.clear_stroke();
     }
+}
+
+/// A screen position as a source pixel, or `None` off the image.
+fn source_point(pos: egui::Pos2, img_rect: Rect, (w, h): (u32, u32)) -> Option<(f32, f32)> {
+    if !img_rect.contains(pos) || img_rect.width() <= 0.0 || img_rect.height() <= 0.0 {
+        return None;
+    }
+    let px = (pos.x - img_rect.min.x) / img_rect.width() * w as f32;
+    let py = (pos.y - img_rect.min.y) / img_rect.height() * h as f32;
+    Some((px.min(w as f32 - 1.0), py.min(h as f32 - 1.0)))
 }
 
 /// Snapshot everything a decoder run needs at click time, so a mode
@@ -979,5 +977,23 @@ fn draw_checkerboard(ui: &egui::Ui, bounds: Rect, dark: bool) {
             x += tile_px;
         }
         y += tile_px;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A Magic Brush press beside the image used to clamp onto the edge
+    /// and select whatever sat there.
+    #[test]
+    fn only_points_on_the_image_become_source_pixels() {
+        let img = Rect::from_min_size(egui::pos2(100.0, 50.0), egui::vec2(200.0, 100.0));
+        let dims = (400, 200);
+        assert_eq!(source_point(egui::pos2(100.0, 50.0), img, dims), Some((0.0, 0.0)));
+        assert_eq!(source_point(egui::pos2(200.0, 100.0), img, dims), Some((200.0, 100.0)));
+        assert_eq!(source_point(egui::pos2(300.0, 150.0), img, dims), Some((399.0, 199.0)), "the far edge stays in range");
+        assert_eq!(source_point(egui::pos2(301.0, 100.0), img, dims), None, "beside the image");
+        assert_eq!(source_point(egui::pos2(200.0, 10.0), img, dims), None, "above it");
     }
 }
