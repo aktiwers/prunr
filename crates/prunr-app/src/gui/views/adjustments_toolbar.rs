@@ -939,7 +939,6 @@ fn render_background_chip(
         has_bg_image,
         bg_image_label,
     } = state;
-    use egui::widgets::color_picker::{color_picker_color32, Alpha};
     use prunr_core::BgEffect;
 
     let current = BgKind::of(backdrop);
@@ -995,13 +994,12 @@ fn render_background_chip(
                     }
                     BgKind::Solid => {
                         if let Some(rgba) = bg.as_mut() {
-                            let mut c = egui::Color32::from_rgba_unmultiplied(rgba[0], rgba[1], rgba[2], rgba[3]);
-                            if color_picker_color32(ui, &mut c, Alpha::OnlyBlend) {
-                                let [r, g, b, a] = c.to_srgba_unmultiplied();
-                                *rgba = [r, g, b, a];
+                            let mut rgb = [rgba[0], rgba[1], rgba[2]];
+                            if chip::rgb_picker(ui, &mut rgb) {
+                                *rgba = [rgb[0], rgb[1], rgb[2], 255];
                                 aggregate_bool(true, StaticKnob::BgColor, change);
                             }
-                            hint(ui, "Solid color fills transparent areas at render / export.");
+                            hint(ui, "One color fills the transparent area on screen and in the export.");
                         }
                     }
                     BgKind::Image => {
