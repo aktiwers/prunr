@@ -1227,7 +1227,7 @@ impl Processor {
                 let raw = Arc::new(raw);
                 let knobs = super::live_preview::UpscaleTier2Knobs::of_recipe(&recipe.upscale);
                 let (shown, reference) = super::live_preview::finish_upscale(&raw, &input_for_inference, None, &knobs);
-                UpscaleOutput { run: super::item::UpscaleCache { raw, input: input_for_inference, reference }, shown }
+                UpscaleOutput { run: super::item::UpscaleCache::new(raw, input_for_inference, reference), shown }
             });
             // Send the result BEFORE clearing the active flag. Reversed
             // ordering would let the UI thread observe `is_in_flight=false`
