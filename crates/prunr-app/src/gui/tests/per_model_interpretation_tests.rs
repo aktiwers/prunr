@@ -504,3 +504,28 @@ fn switching_images_keeps_every_undo_step() {
     app.handle_undo(&ctx);
     assert_eq!(app.batch.items[0].status, BatchStatus::Pending, "and the next undo the original");
 }
+
+/// With Magic Brush on, the shown image and the one before it keep their
+/// embeddings, so flipping between two is instant; paging further drops
+/// the rest instead of holding 16 MB per visited image.
+#[test]
+fn magic_brush_keeps_the_shown_and_the_previous_embedding_only() {
+    use std::sync::Arc;
+    let ctx = egui::Context::default();
+    let mut app = app_with_model(SettingsModel::BiRefNetLite);
+    let embedding = Arc::new(prunr_core::sam::SamEmbedding {
+        image_embed: Vec::new(), high_res_feats_0: Vec::new(), high_res_feats_1: Vec::new(),
+    });
+    for id in 1..=3 {
+        push_test_item(&mut app, id).dimensions = (8, 8);
+    }
+    app.magic_brush_state.activate();
+    // Each image is encoded while it is shown.
+    for idx in 0..3 {
+        app.batch.select_item(idx);
+        app.sync_selected_batch_textures(&ctx);
+        app.batch.items[idx].magic_brush_embedding = Some(Arc::clone(&embedding));
+    }
+    let kept: Vec<bool> = app.batch.items.iter().map(|i| i.magic_brush_embedding.is_some()).collect();
+    assert_eq!(kept, [false, true, true], "A dropped; B (previous) and C (shown) kept");
+}

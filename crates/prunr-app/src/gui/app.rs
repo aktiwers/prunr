@@ -1379,8 +1379,12 @@ impl PrunrApp {
     /// off it waits for the warm sessions and an idle item, and a refusal
     /// is remembered instead of retried; with the tool on, admission or
     /// encoder failure turns the tool off, so this cannot retry in a loop.
-    fn ensure_magic_embedding_for_selected(&mut self) {
+    fn ensure_magic_embedding_for_selected(&mut self, ctx: &egui::Context) {
         if self.magic_brush_state.has_pending_encoder() {
+            return;
+        }
+        if let Some(wait) = self.magic_brush_state.settle_remaining(std::time::Instant::now()) {
+            ctx.request_repaint_after(wait);
             return;
         }
         let Some(item) = self.batch.selected_item() else { return };
@@ -1403,6 +1407,14 @@ impl PrunrApp {
             Ok(()) => self.magic_brush_state.set_encoder_pending(true),
             Err(err) => self.on_encoder_failure(item_id, &err),
         }
+    }
+
+    /// Magic Brush cannot take a click yet: the shown image is encoding,
+    /// or still settling before its encode starts.
+    pub(crate) fn magic_brush_preparing(&self) -> bool {
+        self.magic_brush_state.has_pending_encoder()
+            || (self.magic_brush_state.is_active()
+                && self.batch.selected_item().is_some_and(|i| i.magic_brush_embedding.is_none()))
     }
 
     /// With the tool on, the user asked for it: say so and turn it off.
@@ -2771,6 +2783,7 @@ impl PrunrApp {
     fn reconcile_selected(&mut self, ctx: &egui::Context) {
         let selected = self.batch.selected_item().map(|i| i.id);
         let idx = self.batch.selected_idx_clamped();
+        self.magic_brush_state.note_shown(selected, std::time::Instant::now());
         if selected != self.synced_selected {
             self.synced_selected = selected;
             if let Some(idx) = idx {
@@ -2786,7 +2799,7 @@ impl PrunrApp {
         }
         let style = super::background_io::SelectionStyle::from_brush(&self.settings.brush);
         self.batch.ensure_selection_texture(style, ctx);
-        self.ensure_magic_embedding_for_selected();
+        self.ensure_magic_embedding_for_selected(ctx);
     }
 
     /// For every item that is not selected: drop the decoded tensors kept
@@ -2795,15 +2808,14 @@ impl PrunrApp {
     /// thread (drained by `pump_history_demote_results`). Inline zstd froze
     /// the UI for ~2.5 s per selection change on a 50-image 4K batch.
     fn evict_background_item_caches(&mut self, selected_idx: usize) {
-        // With the tool off, only the selected image keeps its 16 MB
-        // embedding; with it on, visited images keep theirs for paging.
-        let keep_embeddings = self.magic_brush_state.is_active();
         for (i, item) in self.batch.items.iter_mut().enumerate() {
             if i == selected_idx {
                 continue;
             }
             item.drop_hot_tensors();
-            if !keep_embeddings {
+            // 16 MB each: the shown image keeps its embedding, and with the
+            // tool on so does the one shown before it.
+            if !self.magic_brush_state.keeps_embedding(item.id) {
                 item.magic_brush_embedding = None;
             }
             if let Some(rgba) = item.park_result() {
@@ -3927,7 +3939,7 @@ impl PrunrApp {
                 self.deactivate_magic_brush();
             } else if self.magic_brush_state.activate() {
                 self.brush_state.disable();
-                self.ensure_magic_embedding_for_selected();
+                self.ensure_magic_embedding_for_selected(ctx);
             }
         }
 
