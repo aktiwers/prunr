@@ -399,7 +399,7 @@ fn paint_processing_animation(ui: &egui::Ui, item_rect: Rect, anim_time: f32) {
         ui.painter().rect_filled(
             shimmer,
             theme::THUMBNAIL_ROUNDING,
-            Color32::from_rgba_unmultiplied(0x7b, 0x2d, 0x8e, 50),
+            theme::PROCESSING_SWEEP,
         );
     }
     // Pulsing blue border.
