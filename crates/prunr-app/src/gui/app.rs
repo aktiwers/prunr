@@ -2521,7 +2521,7 @@ impl PrunrApp {
                     continue;
                 }
                 let is_upscale_tier2 = matches!(r.kind, PreviewKind::UpscaleTier2);
-                let new_rgba = Arc::new(r.rgba);
+                let new_rgba = r.rgba;
                 item.unpark_result();
                 item.result_rgba = Some(new_rgba.clone());
                 // Filter-only mode (model=None) never clicks Process — the
@@ -4134,31 +4134,6 @@ impl ClassifiedTiers {
             .chain(self.tier2.iter())
             .chain(self.tier_add_edge.iter())
             .copied().collect()
-    }
-}
-
-/// Apply all Tier-2 upscale postprocess knobs to `img` in the canonical order:
-/// ai_blend → sharpen → color_match.
-///
-/// Order rationale: ai_blend changes the underlying texture (blending AI output
-/// with bicubic baseline at low weights); sharpen amplifies whatever texture
-/// exists after the blend; color_match snaps global statistics last so it
-/// operates on the fully-sharpened result.
-///
-/// `reference` is the upscale's input enlarged to `img`'s size: AI blend's
-/// baseline and Color match's statistics. `None` when neither is on.
-pub(crate) fn apply_tier2_postprocess(
-    img: &mut image::RgbaImage,
-    knobs: &super::live_preview::UpscaleTier2Knobs,
-    reference: Option<&image::RgbaImage>,
-) {
-    use prunr_core::upscale::{apply_sharpen, apply_ai_blend, apply_color_match};
-    if let Some(reference) = reference.filter(|_| knobs.ai_blend < 1.0 - f32::EPSILON) {
-        apply_ai_blend(img, reference, knobs.ai_blend);
-    }
-    apply_sharpen(img, knobs.sharpen, knobs.sharpen_sigma);
-    if let Some(reference) = reference.filter(|_| knobs.color_match) {
-        apply_color_match(img, reference);
     }
 }
 

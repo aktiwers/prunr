@@ -119,24 +119,28 @@ fn lab_to_srgb(l: f32, a: f32, b_lab: f32) -> (u8, u8, u8) {
 
 // ── Public API ─────────────────────────────────────────────────────────────
 
-/// Unsharp mask. `strength` in [-1.0, 1.0]: 0 changes nothing, positive
-/// sharpens (`in + strength · (in − blur)`), negative blends toward the
-/// blur. `sigma` is the blur radius in output pixels; detail narrower
-/// than it is left alone. Alpha is unchanged.
+/// `src` through an unsharp mask. `strength` in [-1.0, 1.0]: 0 changes
+/// nothing, positive sharpens (`in + strength · (in − blur)`), negative
+/// blends toward the blur. `sigma` is the blur radius in output pixels;
+/// detail narrower than it is left alone. Alpha is unchanged.
 ///
-/// Peak working set: one blurred copy of the image (w·h·4 bytes).
-pub fn apply_sharpen(img: &mut RgbaImage, strength: f32, sigma: f32) {
+/// Peak working set: `src` plus the result, which is the blur buffer
+/// written over (2 × w·h·4 bytes).
+pub fn sharpened(src: &RgbaImage, strength: f32, sigma: f32) -> RgbaImage {
     if strength == 0.0 {
-        return;
+        return src.clone();
     }
-    let blurred = image::imageops::fast_blur(img, sigma.max(0.3));
-    for (p, b) in img.pixels_mut().zip(blurred.pixels()) {
+    // reused as the result, pixel by pixel after reading its blur value
+    let mut out = image::imageops::fast_blur(src, sigma.max(0.3));
+    for (o, p) in out.pixels_mut().zip(src.pixels()) {
         for c in 0..3 {
-            let (v, bv) = (p.0[c] as f32, b.0[c] as f32);
-            let out = if strength > 0.0 { v + strength * (v - bv) } else { v - strength * (bv - v) };
-            p.0[c] = out.round().clamp(0.0, 255.0) as u8;
+            let (v, bv) = (p.0[c] as f32, o.0[c] as f32);
+            let mixed = if strength > 0.0 { v + strength * (v - bv) } else { v - strength * (bv - v) };
+            o.0[c] = mixed.round().clamp(0.0, 255.0) as u8;
         }
+        o.0[3] = p.0[3];
     }
+    out
 }
 
 /// Per-pixel lerp from the AI upscale toward a bicubic-resized
@@ -271,7 +275,7 @@ mod tests {
         img
     }
 
-    // ── apply_sharpen ─────────────────────────────────────────────────────
+    // ── sharpened ─────────────────────────────────────────────────────
 
     /// A wider radius sharpens detail as wide as itself: after a 4x
     /// upscale that is ~4 output pixels, not the per-pixel grain a 1 px
@@ -280,8 +284,8 @@ mod tests {
     fn a_wider_sharpen_radius_reaches_farther_from_an_edge() {
         let step = || RgbaImage::from_fn(32, 4, |x, _| if x < 16 { Rgba([60, 60, 60, 255]) } else { Rgba([180, 180, 180, 255]) });
         let (mut narrow, mut wide) = (step(), step());
-        apply_sharpen(&mut narrow, 1.0, 0.5);
-        apply_sharpen(&mut wide, 1.0, 2.0);
+        narrow = sharpened(&narrow, 1.0, 0.5);
+        wide = sharpened(&wide, 1.0, 2.0);
         let three_px_out = |img: &RgbaImage| img.get_pixel(12, 1).0[0];
         assert_eq!(three_px_out(&narrow), 60, "a narrow radius leaves it alone");
         assert!(three_px_out(&wide) < 60, "a wide radius darkens the dark side 3 px out: {}", three_px_out(&wide));
@@ -291,7 +295,7 @@ mod tests {
     fn apply_sharpen_zero_strength_is_identity() {
         let orig = gradient_image(32, 32);
         let mut img = orig.clone();
-        apply_sharpen(&mut img, 0.0, 1.0);
+        img = sharpened(&img, 0.0, 1.0);
         assert_eq!(img.as_raw(), orig.as_raw());
     }
 
@@ -302,7 +306,7 @@ mod tests {
         for p in img.pixels_mut() {
             p.0[3] = 192;
         }
-        apply_sharpen(&mut img, 0.7, 1.0);
+        img = sharpened(&img, 0.7, 1.0);
         for p in img.pixels() {
             assert_eq!(p.0[3], 192, "alpha must be preserved after sharpen");
         }
@@ -315,7 +319,7 @@ mod tests {
         let mut img = make_image(7, 7, [10, 10, 10, 255]);
         img.put_pixel(3, 3, Rgba([200, 200, 200, 255]));
         let center_before = img.get_pixel(3, 3).0[0];
-        apply_sharpen(&mut img, -1.0, 1.0);
+        img = sharpened(&img, -1.0, 1.0);
         let center_after = img.get_pixel(3, 3).0[0];
         let neighbor_after = img.get_pixel(3, 2).0[0];
         assert!(
@@ -335,7 +339,7 @@ mod tests {
         let mut img = make_image(7, 7, [10, 10, 10, 255]);
         img.put_pixel(3, 3, Rgba([200, 200, 200, 255]));
         let center_before = img.get_pixel(3, 3).0[0];
-        apply_sharpen(&mut img, 1.0, 1.0);
+        img = sharpened(&img, 1.0, 1.0);
         let center_after = img.get_pixel(3, 3).0[0];
         // After sharpening the center is boosted (clamped at 255) and
         // neighbours are pulled down.

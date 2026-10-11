@@ -117,8 +117,12 @@ impl UpscaleTier2Knobs {
 /// returned for caching) otherwise. With every knob at its default the raw
 /// output is shown as is, not copied.
 ///
-/// Peak working set with a knob on: a copy of the output, plus the
-/// enlarged input when AI blend or Color match is on (2-3 × w·h·4 bytes).
+/// Order: AI blend, then Sharpen (it sharpens what the blend left), then
+/// Color match (global statistics last).
+///
+/// Peak working set besides `raw`: the result, a blur buffer while AI
+/// blend and Sharpen are both on, and the enlarged input for AI blend or
+/// Color match (1-3 × w·h·4 bytes).
 pub(crate) fn finish_upscale(
     raw: &Arc<RgbaImage>,
     input: &RgbaImage,
@@ -133,15 +137,26 @@ pub(crate) fn finish_upscale(
             Arc::new(prunr_core::formats::resize_rgba(input, raw.width(), raw.height(), prunr_core::formats::ResizeFilter::CatmullRom))
         })
     });
-    let mut shown = (**raw).clone();
-    super::app::apply_tier2_postprocess(&mut shown, knobs, reference.as_deref());
+    use prunr_core::upscale::{apply_ai_blend, apply_color_match, sharpened};
+    let blend = reference.as_deref().filter(|_| knobs.ai_blend < 1.0 - f32::EPSILON);
+    let mut shown = match blend {
+        Some(reference) => {
+            let mut blended = (**raw).clone();
+            apply_ai_blend(&mut blended, reference, knobs.ai_blend);
+            if knobs.sharpen == 0.0 { blended } else { sharpened(&blended, knobs.sharpen, knobs.sharpen_sigma) }
+        }
+        None => sharpened(raw, knobs.sharpen, knobs.sharpen_sigma),
+    };
+    if let Some(reference) = reference.as_deref().filter(|_| knobs.color_match) {
+        apply_color_match(&mut shown, reference);
+    }
     (Arc::new(shown), reference)
 }
 
 /// A completed Tier 2 rerun delivered back to the UI thread.
 pub struct PreviewResult {
     pub item_id: u64,
-    pub rgba: RgbaImage,
+    pub rgba: Arc<RgbaImage>,
     /// The preview kind that produced this result. Used by
     /// `apply_completed_previews` to route kind-specific side-effects
     /// (e.g. advancing `applied_recipe.upscale` for UpscaleTier2 results).
@@ -606,7 +621,7 @@ pub fn decompress_seg(ct: &CompressedTensor) -> Option<SegTensor> {
 /// hold only what this dispatch constructed, so the parent caches them —
 /// reused inputs pass through empty to avoid re-publishing.
 struct RunOutput {
-    rgba: Option<RgbaImage>,
+    rgba: Option<Arc<RgbaImage>>,
     built_edge: EdgePlanes,
     built_bold: EdgePlanes,
     built_masked_base: Option<Arc<image::RgbaImage>>,
@@ -636,7 +651,7 @@ fn run_preview(inputs: DispatchInputs, cancel: &AtomicBool) -> RunOutput {
         let had_reference = upscale.reference.is_some();
         let (shown, reference) = finish_upscale(&upscale.raw, &upscale.input, upscale.reference, &knobs);
         let built_reference = reference.filter(|_| !had_reference);
-        return RunOutput { rgba: Some(Arc::unwrap_or_clone(shown)), built_reference, ..RunOutput::empty() };
+        return RunOutput { rgba: Some(shown), built_reference, ..RunOutput::empty() };
     }
 
     // Pipeline shape follows the user's CURRENT `line_mode`, not tensor
@@ -694,12 +709,12 @@ fn run_preview(inputs: DispatchInputs, cancel: &AtomicBool) -> RunOutput {
                 let Some(seg) = inputs.seg_tensor.as_ref() else {
                     let mut rgba = inputs.original.to_rgba8();
                     prunr_core::apply_fill_style(&mut rgba, inputs.settings.fill_style);
-                    return RunOutput { rgba: Some(rgba), ..RunOutput::empty() };
+                    return RunOutput { rgba: Some(Arc::new(rgba)), ..RunOutput::empty() };
                 };
                 // Off mode with seg tensor: rebuild masked RGBA (no edge compose).
                 let Some(masked) = build_masked_base(seg, &inputs.original, &inputs.settings, inputs.correction.as_deref())
                 else { return RunOutput::empty(); };
-                return RunOutput { rgba: Some(masked.to_rgba8()), ..RunOutput::empty() };
+                return RunOutput { rgba: Some(Arc::new(masked.to_rgba8())), ..RunOutput::empty() };
             }
             // SubjectOutline: compose subject + edges via the selected mode.
             // All modes are compose-time only — no re-inference.
@@ -714,7 +729,7 @@ fn run_preview(inputs: DispatchInputs, cancel: &AtomicBool) -> RunOutput {
                 inputs.secondary_edge_tensor.as_ref(), &inputs.cached_bold,
                 out_dims,
             );
-            RunOutput { rgba: Some(rgba), built_masked_base, ..RunOutput::empty() }
+            RunOutput { rgba: Some(Arc::new(rgba)), built_masked_base, ..RunOutput::empty() }
         }
         PreviewKind::Edge => {
             let Some(edge) = inputs.edge_tensor.as_ref() else { return RunOutput::empty(); };
@@ -741,7 +756,7 @@ fn run_preview(inputs: DispatchInputs, cancel: &AtomicBool) -> RunOutput {
                 &mask, &base, &compose_settings,
                 inputs.secondary_edge_tensor.as_ref(), &inputs.cached_bold, out_dims,
             );
-            RunOutput { rgba: Some(rgba), built_edge, built_bold, built_masked_base, built_reference: None }
+            RunOutput { rgba: Some(Arc::new(rgba)), built_edge, built_bold, built_masked_base, built_reference: None }
         }
         PreviewKind::UpscaleTier2 => unreachable!("UpscaleTier2 is handled by the early-return above"),
     }
@@ -1021,7 +1036,7 @@ mod tests {
         );
         lp.result_tx.send(PreviewResult { version: 0, start: None,
             item_id: 42,
-            rgba: RgbaImage::new(1, 1),
+            rgba: Arc::new(RgbaImage::new(1, 1)),
             kind: PreviewKind::Mask,
             generation: 1,
             new_edge: None,
@@ -1050,7 +1065,7 @@ mod tests {
         );
         lp.result_tx.send(PreviewResult { version: 0, start: None,
             item_id: 99,
-            rgba: RgbaImage::new(2, 2),
+            rgba: Arc::new(RgbaImage::new(2, 2)),
             kind: PreviewKind::Mask,
             generation: 7,
             new_edge: None,
@@ -1078,7 +1093,7 @@ mod tests {
         let mut lp = LivePreview::default();
         lp.result_tx.send(PreviewResult { version: 0, start: None,
             item_id: 777,
-            rgba: RgbaImage::new(1, 1),
+            rgba: Arc::new(RgbaImage::new(1, 1)),
             kind: PreviewKind::Mask,
             generation: 1,
             new_edge: None,
@@ -1103,7 +1118,7 @@ mod tests {
         );
         lp.result_tx.send(PreviewResult { version: 0, start: None,
             item_id: 11,
-            rgba: RgbaImage::new(1, 1),
+            rgba: Arc::new(RgbaImage::new(1, 1)),
             kind: PreviewKind::Mask,
             generation: 3,
             new_edge: None,
@@ -1135,7 +1150,7 @@ mod tests {
         );
         lp.result_tx.send(PreviewResult { version: 0, start: None,
             item_id: 22,
-            rgba: RgbaImage::new(1, 1),
+            rgba: Arc::new(RgbaImage::new(1, 1)),
             kind: PreviewKind::Mask,
             generation: 2,
             new_edge: None,
