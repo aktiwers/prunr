@@ -18,10 +18,16 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 - **Help menu** with keyboard shortcuts, the command-line reference and pipeline diagrams; `prunr --open <path>` starts the app with an image loaded.
 - **Keep the Stable Diffusion eraser loaded** (Settings › Behavior): repeated erases skip the session build, at the cost of about 16 GB of RAM while the app is open.
 - **Screen-reader names.** Every control, icon buttons and sliders included, carries a readable name.
+- `--effect <name>` and `--bg-effect blur[:N]|bw` on the command line, matching the app's Effect list and background effects.
+- Sketch's Pre-filter gains **Smooth**, which calms skin and noise before the lines are traced; Contrast boost and Posterize pick from a few steps.
+- Wide Sketch lines draw with a round pen: round ends and corners instead of square ones.
+- Color splash shows which hues it keeps on a strip under its sliders.
 - **Rebindable hotkeys.** Settings › Hotkeys lists every action with two key slots; click one and press the new keys. A key already in use moves over, and the F1 list and tooltips show your bindings.
 
 ### Changed
 
+- The Fill style chip is called **Effect**, with None first in its list. The Channel swap effect is gone (saved presets with it load as None); Duotone looks as before, now drawn as a two-color gradient map.
+- **Backgrounds are one choice**: Transparent, Solid color, Image, Blurred photo or Black & white photo. Picking one replaces the others. The Inverted background is gone. A solid color is opaque, as it is saved. Image fit is Cover, Contain or Tile: presets with Stretch load as Cover, with Center as Contain.
 - The lines feature is called **Sketch** everywhere, with modes Off, Subject and Whole photo (was Full). Picking No model with Sketch on Subject switches to Whole photo, so the lines stay. A greyed-out Subject says why. On the command line `--line-detail` names `--line-strength`, and `--line-width` and `--line-composition` are new.
 - The Inverse mask composition is gone: it only ever drew a ring just outside the subject. Presets that used it load as Lines only.
 - Picking Subject filled while lines are in the photo's own colors switches them to black, since those lines are invisible on the filled subject.
@@ -35,8 +41,8 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 - Each model shows only the controls that act on its image: no Mask chip without a background-removal model, no selection on an upscaler, and brushes say Add / Subtract wherever they shape a selection rather than a cut-out.
 - **Undo rebuilt on one timeline per image**, the way Krita, GIMP and Photoshop do it. Every step stores its whole state, so undo shows the stored image instantly instead of re-running a model. Knob changes are now undoable (a slider drag is one step), Clear selection is undoable, and an erase that lands removes its brush marks, which undo brings back. A result that finishes after you undo or move on is dropped instead of landing on the wrong state, and undo stops a run in progress.
 
-- **One toolbar row.** Every pipeline stage is a group chip (Mask, Lines, Fill style, Background, Refine, Quality, Prompt, Advanced) with a header and a reset; the tool cluster is Magic, Paint, the selection actions and Compare, then Preset and Reset.
-- **Panels that stay out of the way.** Mask, Lines, Fill style, Background and Refine stay open while you work on the image and fade while a slider is held; the chip whose panel is open keeps its accent outline. Picks in Model, Preset, Quality and Scale close their list. Escape closes one thing per press: the open panel, then the top dialog, then a running job, then the selection.
+- **One toolbar row.** Every pipeline stage is a group chip (Mask, Sketch, Effect, Background, Refine, Quality, Prompt, Advanced) with a header and a reset; the tool cluster is Magic, Paint, the selection actions and Compare, then Preset and Reset.
+- **Panels that stay out of the way.** Mask, Sketch, Effect, Background and Refine stay open while you work on the image and fade while a slider is held; the chip whose panel is open keeps its accent outline. Picks in Model, Preset, Quality and Scale close their list. Escape closes one thing per press: the open panel, then the top dialog, then a running job, then the selection.
 - Knob names follow the words other editors use: Opacity, Expand region, Edge blend, Feather, Edge shift, Denoise, Sharpen. American spelling throughout.
 - Paint Brush and Magic Brush share size and shape; while either is on, its knobs sit in a strip over the image, and `[` / `]` change the size.
 - Cmd+Shift+Z is an alternate redo; up to 64 undo steps per image.
@@ -64,6 +70,13 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 
 ### Fixed
 
+- Background effects work under Sketch: lines over a blurred or black-and-white photo, on Whole photo and Subject alike. They used to do nothing on Whole photo, break the Subject compositions and make the lines trace the backdrop. Changing one is instant instead of a re-run, and saving does the blur off the UI thread.
+- A background image applies to every image in a run, not only the one on screen; it loads off the UI thread, and cancelling the file dialog keeps the background you had.
+- Tile backgrounds tile by image pixels, so the screen matches the export at any zoom; a see-through background image keeps its color instead of darkening.
+- With an effect on Sketch Subject, the lines are traced from the plain subject, so Pixelate or Halftone no longer turns them into steps after Process.
+- The exported Lines layer of a split drag-out matches the canvas, Dual scale included.
+- With No model, Process never runs a cut-out: an image left on Sketch Subject switches to Whole photo, and a batch takes the filter path whenever the shown image has no lines.
+- Smooth softens large photos too (it blurred at full size, which shrank to nothing at the size the line detector reads), and the line detector's dots in the photo's corners are gone.
 - Lines no longer mix modes: in Full a Pre-filter change no longer produces a subject outline, and going Full → Off → Subject traces the subject again instead of reusing lines from the whole photo.
 - Compare after an upscale shows the original at the result's size instead of a quarter of it, and the B key follows the same rule as the button.
 - The model chip's hint describes the selected kind of model; it said LaMa for every eraser and talked about Sketch with No model selected.
