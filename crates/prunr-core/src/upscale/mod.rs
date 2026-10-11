@@ -11,7 +11,8 @@ pub use alpha::upscale_alpha_lanczos3;
 pub use tiling::{plan_upscale_tiles, upscale_tiled, TilingConfig, UpscaleTilePlacement};
 
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+
+use crate::progress::{Progress, Unit};
 
 use half::f16;
 use image::{RgbImage, RgbaImage};
@@ -142,18 +143,14 @@ fn tile_for_provider(recommended: u32, provider: &str) -> u32 {
 ///
 /// Alpha is NOT handled here — it is composed by the public callers
 /// (`upscale_rgba` for single-pass, `upscale_two_pass` for the final pass).
-fn run_upscale_native<F>(
+fn run_upscale_native(
     input: &RgbaImage,
     engine: &OrtEngine,
     descriptor: &prunr_models::ModelDescriptor,
     native_scale: u32,
-    on_tile_done: F,
-    cancel: Option<Arc<AtomicBool>>,
+    progress: &Progress,
     terminate: Option<&Arc<UpscaleRunOptions>>,
-) -> Result<RgbaImage, CoreError>
-where
-    F: Fn(u32, u32),
-{
+) -> Result<RgbaImage, CoreError> {
     let tile_size = descriptor
         .recommended_tile
         .map(|tile| tile_for_provider(tile, engine.active_provider()))
@@ -249,7 +246,7 @@ where
     };
 
     let cfg = TilingConfig { tile_size, tile_multiple, overlap };
-    upscale_tiled(input, ns, cfg, run_tile, on_tile_done, cancel)
+    upscale_tiled(input, ns, cfg, run_tile, progress)
 }
 
 /// Map an ORT run-time error to a `CoreError`. ORT reports a session
@@ -278,25 +275,21 @@ fn classify_run_error(err: ort::Error) -> CoreError {
 ///   - Alpha is upscaled independently via Lanczos3.
 ///
 /// Peak working-set RAM: same as `upscale_rgba` (see that doc).
-pub fn upscale_rgba_with_engine<F>(
+pub fn upscale_rgba_with_engine(
     input: &RgbaImage,
     engine: &OrtEngine,
     model_id: prunr_models::ModelId,
     scale: u32,
-    on_tile_done: F,
-    cancel: Option<Arc<AtomicBool>>,
+    progress: &Progress,
     terminate: Option<&Arc<UpscaleRunOptions>>,
-) -> Result<RgbaImage, CoreError>
-where
-    F: Fn(u32, u32),
-{
+) -> Result<RgbaImage, CoreError> {
     let descriptor = prunr_models::REGISTRY
         .iter()
         .find(|d| d.id == model_id)
         .ok_or_else(|| CoreError::Model(format!("{model_id:?} not found in REGISTRY")))?;
 
     let knobs = upscale_knobs(descriptor)?;
-    let native_result = run_upscale_native(input, engine, descriptor, knobs.native_scale, on_tile_done, cancel, terminate)?;
+    let native_result = run_upscale_native(input, engine, descriptor, knobs.native_scale, progress, terminate)?;
     Ok(fit_to_scale(native_result, input, scale))
 }
 
@@ -331,17 +324,13 @@ fn fit_to_scale(native: RgbaImage, input: &RgbaImage, scale: u32) -> RgbaImage {
 ///   - scale=2 with a 4× model only: the full 4× RgbaImage (~16× input
 ///     bytes) lives until the Lanczos3 downscale completes.
 ///   - ONNX session: model-dependent (see `ModelDescriptor.working_set_mb`).
-pub fn upscale_rgba<F>(
+pub fn upscale_rgba(
     input: &RgbaImage,
     model_id: prunr_models::ModelId,
     scale: u32,
     intra_threads: usize,
-    on_tile_done: F,
-    cancel: Option<Arc<AtomicBool>>,
-) -> Result<RgbaImage, CoreError>
-where
-    F: Fn(u32, u32),
-{
+    progress: &Progress,
+) -> Result<RgbaImage, CoreError> {
     let descriptor = prunr_models::REGISTRY
         .iter()
         .find(|d| d.id == model_id)
@@ -355,7 +344,7 @@ where
         ))
     })?;
     let engine = OrtEngine::new_with_optimization_level(model_kind, intra_threads, level)?;
-    upscale_rgba_with_engine(input, &engine, model_id, scale, on_tile_done, cancel, None)
+    upscale_rgba_with_engine(input, &engine, model_id, scale, progress, None)
 }
 
 /// Engine-parameterized two-pass 4× upscale via `RealEsrganX2Plus`
@@ -369,23 +358,15 @@ where
 /// The engine must have been constructed for `ModelKind::RealEsrganX2Plus`.
 ///
 /// Peak RAM: same as `upscale_two_pass` (see that doc).
-pub fn upscale_two_pass_with_engine<F>(
+pub fn upscale_two_pass_with_engine(
     input: &RgbaImage,
     engine: &OrtEngine,
-    on_tile_done: F,
-    cancel: Option<Arc<AtomicBool>>,
+    progress: &Progress,
     terminate: Option<&Arc<UpscaleRunOptions>>,
-) -> Result<RgbaImage, CoreError>
-where
-    F: Fn(u32, u32) + Clone,
-{
-    use std::sync::atomic::Ordering;
-
+) -> Result<RgbaImage, CoreError> {
     // Honor cancel before allocating the first pass.
-    if let Some(c) = cancel.as_ref() {
-        if c.load(Ordering::Acquire) {
-            return Err(CoreError::Cancelled);
-        }
+    if progress.is_cancelled() {
+        return Err(CoreError::Cancelled);
     }
 
     let model_id = prunr_models::ModelId::RealEsrganX2Plus;
@@ -396,34 +377,19 @@ where
 
     let knobs = upscale_knobs(descriptor)?;
     // Pass 1: source → 2×
-    let intermediate = run_upscale_native(
-        input,
-        engine,
-        descriptor,
-        knobs.native_scale,
-        on_tile_done.clone(),
-        cancel.clone(),
-        terminate,
-    )?;
+    progress.outer(0, 2, Unit::Pass);
+    let intermediate = run_upscale_native(input, engine, descriptor, knobs.native_scale, progress, terminate)?;
 
     // Honor cancel between passes.
-    if let Some(c) = cancel.as_ref() {
-        if c.load(Ordering::Acquire) {
-            return Err(CoreError::Cancelled);
-        }
+    if progress.is_cancelled() {
+        return Err(CoreError::Cancelled);
     }
 
     // Pass 2: intermediate → 4× (intermediate is moved, not cloned).
-    let final_rgb = run_upscale_native(
-        &intermediate,
-        engine,
-        descriptor,
-        knobs.native_scale,
-        on_tile_done,
-        cancel,
-        terminate,
-    )?;
+    progress.outer(1, 2, Unit::Pass);
+    let final_rgb = run_upscale_native(&intermediate, engine, descriptor, knobs.native_scale, progress, terminate)?;
     drop(intermediate);
+    progress.outer(2, 2, Unit::Pass);
 
     // Compose alpha into final_rgb in place: take RGB from pass-2 output,
     // overwrite its alpha with the Lanczos3-upscaled alpha from the original
@@ -458,28 +424,20 @@ where
 /// Compose stage allocates a 4× GrayImage for alpha (input × 4) and mutates
 /// pass-2's RgbaImage in place — no parallel 4× RgbaImage allocation.
 ///
-/// Progress callback fires from BOTH passes. The `(done, total)` pair
-/// reflects per-pass tile counts — total is per-pass, not combined.
+/// Progress reports the pass as its outer count and each pass's tiles
+/// as the inner count.
 ///
 /// Callable only via the `OutputScale::X4TwoPass` recipe variant.
 /// Nomos8k cannot use this path — its scale is fixed at 4×; the chip UI
 /// dims X4TwoPass for non-RealEsrgan models via `x4twopass_available`.
-pub fn upscale_two_pass<F>(
+pub fn upscale_two_pass(
     input: &RgbaImage,
     intra_threads: usize,
-    on_tile_done: F,
-    cancel: Option<Arc<AtomicBool>>,
-) -> Result<RgbaImage, CoreError>
-where
-    F: Fn(u32, u32) + Clone,
-{
-    use std::sync::atomic::Ordering as _Ordering;
-
+    progress: &Progress,
+) -> Result<RgbaImage, CoreError> {
     // Honor cancel before constructing the engine.
-    if let Some(c) = cancel.as_ref() {
-        if c.load(_Ordering::Acquire) {
-            return Err(CoreError::Cancelled);
-        }
+    if progress.is_cancelled() {
+        return Err(CoreError::Cancelled);
     }
 
     let model_id = prunr_models::ModelId::RealEsrganX2Plus;
@@ -494,7 +452,7 @@ where
         intra_threads,
         level,
     )?;
-    upscale_two_pass_with_engine(input, &engine, on_tile_done, cancel, None)
+    upscale_two_pass_with_engine(input, &engine, progress, None)
 }
 
 /// Returns `true` when `model_id` supports `OutputScale::X4TwoPass`
@@ -600,13 +558,8 @@ mod tests {
     #[allow(clippy::type_complexity)] // the explicit fn-pointer type IS the test — it pins the signature
     fn two_pass_has_no_model_id_parameter() {
         // If this test compiles, the signature is correct: no model_id arg.
-        let _fn: fn(
-            &RgbaImage,
-            usize,
-            fn(u32, u32),
-            Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
-        ) -> Result<RgbaImage, CoreError> = |input, threads, cb, cancel| {
-            upscale_two_pass(input, threads, cb, cancel)
+        let _fn: fn(&RgbaImage, usize, &Progress) -> Result<RgbaImage, CoreError> = |input, threads, progress| {
+            upscale_two_pass(input, threads, progress)
         };
     }
 
@@ -618,7 +571,7 @@ mod tests {
 
         let cancel = Arc::new(AtomicBool::new(true));
         let input = RgbaImage::from_pixel(8, 8, image::Rgba([128, 64, 32, 255]));
-        let result = upscale_two_pass(&input, 1, |_, _| {}, Some(cancel.clone()));
+        let result = upscale_two_pass(&input, 1, &Progress::none().with_cancel(cancel.clone()));
 
         match result {
             Err(CoreError::Cancelled) => {}

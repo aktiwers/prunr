@@ -40,7 +40,7 @@ fn real_esrgan_and_nomos8k_upscale_128x128_to_512x512() {
             continue;
         }
         let input = gradient_test_image(128, 128);
-        let out = upscale_rgba(&input, id, 4, 2, |_, _| {}, None)
+        let out = upscale_rgba(&input, id, 4, 2, &prunr_core::Progress::none())
             .expect("upscale_rgba should succeed");
         assert_eq!(out.width(), 512, "{id:?} width");
         assert_eq!(out.height(), 512, "{id:?} height");
@@ -56,7 +56,7 @@ fn nomos_8k_schatl_upscales_non_multiple_of_16() {
         return;
     }
     let input = gradient_test_image(120, 120); // NOT a multiple of 16
-    let out = upscale_rgba(&input, ModelId::Nomos8kSchatL, 4, 2, |_, _| {}, None)
+    let out = upscale_rgba(&input, ModelId::Nomos8kSchatL, 4, 2, &prunr_core::Progress::none())
         .expect("upscale_rgba should pad+trim for non-multiple-of-16 input");
     assert_eq!(out.width(), 480); // 120 * 4
     assert_eq!(out.height(), 480);
@@ -71,7 +71,7 @@ fn scale_2_downscales_to_half_of_native() {
         return;
     }
     let input = gradient_test_image(256, 256);
-    let out = upscale_rgba(&input, ModelId::RealEsrganX4Plus, 2, 2, |_, _| {}, None)
+    let out = upscale_rgba(&input, ModelId::RealEsrganX4Plus, 2, 2, &prunr_core::Progress::none())
         .expect("upscale_rgba scale=2 should succeed");
     // upscale_rgba always runs the model at 4×, then halves: 256 → 1024 → 512.
     assert_eq!(out.width(), 256 * 4 / 2);
