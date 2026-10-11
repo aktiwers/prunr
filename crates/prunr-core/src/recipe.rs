@@ -299,8 +299,10 @@ pub fn resolve_tier(old: &ProcessingRecipe, new: &ProcessingRecipe) -> RequiredT
         match (old.inference.uses_edge_detection, new.inference.uses_edge_detection) {
             // Enabling edges (or already on with `input_transform` flipped):
             // seg tensor cached → skip seg inference, run DexiNed on the
-            // masked image.
-            (false, true) | (true, true) => return RequiredTier::AddEdgeInference,
+            // masked image. Lines over the whole photo have no cut-out to
+            // build on, so they rerun whole.
+            (false, true) | (true, true) if new.inference.uses_segmentation => return RequiredTier::AddEdgeInference,
+            (false, true) | (true, true) => return RequiredTier::FullPipeline,
             // Disabling edges: seg tensor still cached. Concurrent edge-recipe
             // or input_transform drift is dead state — regenerate the mask
             // without lines instead of dispatching wasted EdgeRerun work.
@@ -614,6 +616,15 @@ mod tests {
             ("line only", base.clone(), with_line(0.9), RequiredTier::EdgeRerun),
             ("model only", base.clone(), make_recipe(ModelKind::BiRefNetLite, 1.0, None), RequiredTier::FullPipeline),
             ("input_transform+edges → add_edge", edges_on(), with_input_transform(InputTransform::Grayscale), RequiredTier::AddEdgeInference),
+            ("input_transform on whole-photo lines → full", {
+                let mut r = edges_on();
+                r.inference.uses_segmentation = false;
+                r
+            }, {
+                let mut r = with_input_transform(InputTransform::Smooth);
+                r.inference.uses_segmentation = false;
+                r
+            }, RequiredTier::FullPipeline),
             // input_transform with edges off both sides: dead state (the
             // field only affects the DexiNed input), so output is bit-
             // identical → Skip rather than MaskRerun.

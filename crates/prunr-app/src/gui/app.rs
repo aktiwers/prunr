@@ -1702,9 +1702,7 @@ impl PrunrApp {
                     tiers.tier1.insert(item.id);
                 }
                 RequiredTier::AddEdgeInference => {
-                    // Adding lines composes them onto the cached cut-out, so
-                    // only a run that uses one (Subject) may; Full redraws.
-                    if item.cached_tensor.is_some() && current_recipe.inference.uses_segmentation {
+                    if item.cached_tensor.is_some() {
                         tiers.tier_add_edge.insert(item.id);
                     } else {
                         tiers.tier1.insert(item.id);
