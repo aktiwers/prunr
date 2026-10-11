@@ -10,7 +10,7 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 - **Magic Brush.** Click or drag over anything and SAM 2 (Hiera Small, bundled) finds it. On a background-removal result it restores or erases that object at once; on the eraser it adds to or takes away from the region. Shift and Alt override the mode for one click, a Confidence knob filters weak candidates. The encoder runs once per image in the background, so switching images keeps the tool ready.
 - **Restore and Erase brushes.** On a background-removal result the Paint Brush restores what the model took or erases what it left, the moment the stroke ends, with Shift and Alt overriding the mode. The knobs touched every stroke sit in a strip over the image while a brush is on; its dots open the full panel.
 - **Selections as a first-class object.** Paint Brush and Magic Brush author the same selection. Delete, Copy, Cut, Invert and Clear act on it, with keyboard shortcuts; Feather softens its edge against the photo.
-- **Upscale.** Real-ESRGAN x4plus and x2plus, 4x NMKD Siax-CX and Superscale, and 4xNomos8kSCHAT-L, at 2×, 3×, 4× or a 4× two-pass look. Six refinement knobs: Denoise and Brightness lift before the model, Sharpen, AI blend, Saturation and Color match after it, the last four previewed live. fp16 variants download automatically on GPUs. Cancel aborts mid-tile.
+- **Upscale.** Real-ESRGAN x4plus, 4x NMKD Siax-CX and Superscale, and 4xNomos8kSCHAT-L, at 2×, 3× or 4×; a 2× Real-ESRGAN upscale runs Real-ESRGAN's own 2× model when it is installed, about four times faster. Refine: Denoise before the model; Sharpen, AI blend and Color match after it, previewed live. fp16 variants download automatically on GPUs. Cancel aborts mid-tile.
 - **Eraser with Stable Diffusion.** SD 1.5 Inpaint and its LCM fast variant join LaMa, Big-LaMa and MI-GAN. Prompt and negative prompt, guidance, five schedulers (LCM, DDIM, DPM++ 2M Karras, Euler-A, UniPC), steps, denoising strength, pinned seed, and the TAESD fast decoder. Quality presets (Fast / Balanced / Quality) pick scheduler and steps. SD runs in its own subprocess, so an out-of-memory stop never takes the app down.
 - **Presets v2.** Per-model presets with brush settings, merge-save that keeps other models' entries, and automatic migration of v1 files.
 - **Progress you can follow.** A capsule at the bottom of the canvas names each step for every model, counts tiles, steps, crops or images, and estimates the time left. A tile map over the image shows which tiles are done and which one is running. Magic Brush says "Loading Magic Brush" beside the cursor while it gets ready.
@@ -26,6 +26,7 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 
 ### Changed
 
+- Refine's Brightness lift and Saturation are gone (Brightness lift clipped highlights and banded shadows; no upscaler offers either), and so is the 4× two-pass Scale.
 - The Fill style chip is called **Effect**, with None first in its list. The Channel swap effect is gone (saved presets with it load as None); Duotone looks as before, now drawn as a two-color gradient map.
 - **Backgrounds are one choice**: Transparent, Solid color, Image, Blurred photo or Black & white photo. Picking one replaces the others. The Inverted background is gone. A solid color is opaque, as it is saved. Image fit is Cover, Contain or Tile: presets with Stretch load as Cover, with Center as Contain.
 - The lines feature is called **Sketch** everywhere, with modes Off, Subject and Whole photo (was Full). Picking No model with Sketch on Subject switches to Whole photo, so the lines stay. A greyed-out Subject says why. On the command line `--line-detail` names `--line-strength`, and `--line-width` and `--line-composition` are new.
@@ -70,6 +71,11 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 
 ### Fixed
 
+- Upscale Sharpen starts off and sharpens detail rather than grain: it defaulted on with a one-pixel radius that boosted the model's texture on every upscale. Its radius now follows the enlargement.
+- Upscale AI blend and Color match compare with the image that was upscaled, not the original photo: an erased object no longer ghosts back, and noise Denoise removed stays gone. The result is finished in the upscale thread instead of the UI thread.
+- Scale and Refine hold still while an upscale runs; moving one used to throw the run away. Refine previews whatever the Live preview setting, and after an undo only re-finishes the shown step's own upscale.
+- Process on an upscale model right after opening a large photo runs instead of doing nothing.
+- An upscale model loads nothing of Magic Brush, so it no longer competes with the upscale for the CPU.
 - Background effects work under Sketch: lines over a blurred or black-and-white photo, on Whole photo and Subject alike. They used to do nothing on Whole photo, break the Subject compositions and make the lines trace the backdrop. Changing one is instant instead of a re-run, and saving does the blur off the UI thread.
 - A background image applies to every image in a run, not only the one on screen; it loads off the UI thread, and cancelling the file dialog keeps the background you had.
 - Tile backgrounds tile by image pixels, so the screen matches the export at any zoom; a see-through background image keeps its color instead of darkening.
