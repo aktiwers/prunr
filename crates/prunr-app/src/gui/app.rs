@@ -1164,7 +1164,6 @@ impl PrunrApp {
                     if !item.job_is_current() {
                         continue;
                     }
-                    item.upscale = Some(output.run);
                     let new_rgba = output.shown;
                     item.result_rgba = Some(new_rgba.clone());
                     item.applied_recipe = Some(result_recipe);
@@ -1180,7 +1179,7 @@ impl PrunrApp {
                     );
                     self.batch.request_thumbnail(item_id, &source, Some(&new_rgba));
                     if let Some(item) = self.batch.find_by_id_mut(item_id) {
-                        item.finish_job();
+                        item.land_upscale(output.run);
                     }
                     tracing::info!(item_id, "upscale result applied");
                 }
@@ -2362,7 +2361,7 @@ impl PrunrApp {
         // upscale run yet (Tier-1 must run first).
         if matches!(kind, PreviewKind::UpscaleTier2) {
             use super::live_preview::UpscaleTier2Knobs;
-            let upscale = item.upscale.clone()?;
+            let upscale = item.kept_upscale()?.clone();
             let knobs = UpscaleTier2Knobs::of(&item.settings);
             return Some(DispatchInputs {
                 version,
@@ -3663,7 +3662,7 @@ impl PrunrApp {
     /// knobs since its upscale, so its kept run can be re-finished.
     fn wants_upscale_tier2(&self, idx: usize) -> bool {
         let Some(item) = self.batch.items.get(idx) else { return false };
-        let (Some(_), Some(old), Some(model)) = (&item.upscale, &item.applied_recipe, self.settings.model.dispatch_model_kind()) else {
+        let (Some(_), Some(old), Some(model)) = (item.kept_upscale(), &item.applied_recipe, self.settings.model.dispatch_model_kind()) else {
             return false;
         };
         self.settings.model.is_upscale()
@@ -4388,7 +4387,8 @@ mod timeline_contract_tests {
         assert!(!app.wants_upscale_tier2(0), "no kept run yet");
 
         let img = Arc::new(image::RgbaImage::new(4, 4));
-        app.batch.items[0].upscale = Some(UpscaleCache { raw: img.clone(), input: img, reference: None });
+        app.batch.items[0].start_job(Some(StepKind::Upscale), Engine::Upscale);
+        app.batch.items[0].land_upscale(UpscaleCache::new(img.clone(), img, None));
         assert!(app.wants_upscale_tier2(0), "a Sharpen change re-finishes the kept run");
         app.batch.items[0].settings.output_scale = prunr_core::OutputScale::X2;
         assert!(!app.wants_upscale_tier2(0), "a Scale change needs a new run");
@@ -4404,7 +4404,8 @@ mod timeline_contract_tests {
         let item = &mut app.batch.items[0];
         item.source_rgba = None;
         let img = Arc::new(image::RgbaImage::new(4, 4));
-        item.upscale = Some(UpscaleCache { raw: img.clone(), input: img, reference: None });
+        item.start_job(Some(StepKind::Upscale), Engine::Upscale);
+        item.land_upscale(UpscaleCache::new(img.clone(), img, None));
         let style = app.selection_style();
         let inputs = PrunrApp::build_preview_inputs(&mut app.batch.items, 1, PreviewKind::UpscaleTier2, false, style);
         assert!(inputs.is_some_and(|i| i.upscale.is_some()), "dispatched from the kept run");

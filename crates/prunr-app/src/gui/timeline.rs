@@ -276,6 +276,9 @@ pub(crate) struct DocState {
 pub(crate) struct Origin {
     pub(crate) engine: Engine,
     pub(crate) start: Option<RunStart>,
+    /// The upscale run kept for Refine when this step is one
+    /// (`UpscaleCache::run`), so another step never re-finishes it.
+    pub(crate) upscale_run: Option<u64>,
 }
 
 /// An image a run starts from: a stored timeline image, loaded only when

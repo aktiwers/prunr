@@ -16,6 +16,15 @@ pub(crate) struct UpscaleCache {
     pub(crate) raw: Arc<image::RgbaImage>,
     pub(crate) input: Arc<image::RgbaImage>,
     pub(crate) reference: Option<Arc<image::RgbaImage>>,
+    /// Which run this is, for the step it lands on to claim.
+    run: u64,
+}
+
+impl UpscaleCache {
+    pub(crate) fn new(raw: Arc<image::RgbaImage>, input: Arc<image::RgbaImage>, reference: Option<Arc<image::RgbaImage>>) -> Self {
+        static RUNS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        Self { raw, input, reference, run: RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) }
+    }
 }
 
 /// A result's background for export, baked by `bake` (in a save thread
@@ -575,11 +584,27 @@ impl BatchItem {
         }
     }
 
+    /// An upscale lands: its step is recorded, and the run is kept for
+    /// Refine as that step's own.
+    pub(crate) fn land_upscale(&mut self, run: UpscaleCache) {
+        self.finish_job();
+        if let Some(origin) = self.timeline.current_mut().origin.as_mut() {
+            origin.upscale_run = Some(run.run);
+        }
+        self.upscale = Some(run);
+    }
+
+    /// The kept upscale run, when it is the shown step's own.
+    pub(crate) fn kept_upscale(&self) -> Option<&UpscaleCache> {
+        let shown = self.timeline.current().origin.as_ref().and_then(|o| o.upscale_run);
+        self.upscale.as_ref().filter(|run| shown == Some(run.run))
+    }
+
     /// Record that `engine` made the shown step's image, starting from
     /// `start` (`None`: the original). The start is a stored timeline
     /// image, so the history sweep keeps compressing it.
     pub(crate) fn record_origin(&mut self, engine: Engine, start: Option<RunStart>) {
-        self.timeline.current_mut().origin = Some(Origin { engine, start });
+        self.timeline.current_mut().origin = Some(Origin { engine, start, upscale_run: None });
     }
 
     /// The shown step's origin when a run of `engine` would redo that step.
@@ -984,11 +1009,32 @@ mod tests {
     fn the_upscale_run_outlives_a_display_reset_but_not_a_model_switch() {
         let mut item = fixture_item(1);
         let img = Arc::new(image::RgbaImage::from_pixel(4, 4, image::Rgba([1, 2, 3, 255])));
-        item.upscale = Some(UpscaleCache { raw: img.clone(), input: img.clone(), reference: Some(img) });
+        item.upscale = Some(UpscaleCache::new(img.clone(), img.clone(), Some(img)));
         item.reset_result_caches();
         assert!(item.upscale.is_some());
         item.invalidate_upscale_cache();
         assert!(item.upscale.is_none());
+    }
+
+    /// The kept upscale run belongs to the step it landed on: undo to an
+    /// earlier upscale and Refine has no run to re-finish (it would be a
+    /// later run's output); redo brings it back.
+    #[test]
+    fn the_kept_upscale_run_belongs_to_its_step() {
+        let mut item = fixture_item(1);
+        let img = || Arc::new(image::RgbaImage::new(4, 4));
+        for _ in 0..2 {
+            item.start_job(Some(StepKind::Upscale), Engine::Upscale);
+            item.result_rgba = Some(img());
+            item.land_upscale(UpscaleCache::new(img(), img(), None));
+        }
+        assert!(item.kept_upscale().is_some(), "the shown step's own run");
+        item.undo_step();
+        assert!(item.kept_upscale().is_none(), "an earlier upscale step: the kept run is not its own");
+        item.redo_step();
+        assert!(item.kept_upscale().is_some());
+        item.commit(StepKind::Adjust);
+        assert!(item.kept_upscale().is_some(), "a Refine knob step keeps its upscale's run");
     }
 
     #[test]
@@ -1334,7 +1380,7 @@ mod tests {
         assert_eq!(item.evictable_tensor_bytes(), 0);
         item.selection_mask = Some(Arc::new(prunr_core::selection::MaskArtifact::new_empty(16, 16)));
         let img = Arc::new(image::RgbaImage::new(4, 4));
-        item.upscale = Some(UpscaleCache { raw: img.clone(), input: img, reference: None });
+        item.upscale = Some(UpscaleCache::new(img.clone(), img, None));
         assert_eq!(item.evictable_tensor_bytes(), 0, "planes and upscale buffers are not evictable");
     }
 
