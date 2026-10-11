@@ -55,7 +55,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
     // Brush. Suppressed while encoder is pending so the "Preparing..."
     // overlay doesn't accidentally steal pan from a frustrated user.
     let magic_brush_active = app.magic_brush_state.is_active()
-        && !app.magic_brush_state.has_pending_encoder()
+        && !app.magic_brush_preparing()
         && matches!(app_state, AppState::Loaded | AppState::Done);
     let any_brush_tool_active = brush_active || magic_brush_active;
     // Scroll-zoom always works: it doesn't conflict with brush strokes
@@ -197,7 +197,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
     if let Some(tool) = tool {
         let facts = super::tool_strip::StripFacts {
             is_inpaint: app.settings.model.is_inpaint(),
-            encoder_pending: app.magic_brush_state.has_pending_encoder(),
+            encoder_pending: app.magic_brush_preparing(),
             apply: app.settings.model.is_inpaint().then_some(app.strokes_waiting_for_apply()),
         };
         let change = super::tool_strip::render(ui, canvas_rect, tool, &mut app.settings.brush, facts);
@@ -210,14 +210,14 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
 
     // Magic Brush click/stroke input. Suppressed during encoder run (silently —
     // per UI-SPEC, clicks while encoder_pending are ignored without a toast).
-    if app.magic_brush_state.is_active() && !app.magic_brush_state.has_pending_encoder() && !pointer_blocked {
+    if app.magic_brush_state.is_active() && !app.magic_brush_preparing() && !pointer_blocked {
         handle_magic_brush_input(ui, app, canvas_rect);
     }
 
     // Magic Brush "Preparing..." overlay — shown while the SAM encoder is
     // in flight for the selected item. Canvas centre, TEXT_SECONDARY text +
     // ACCENT spinner below.
-    if app.magic_brush_state.is_active() && app.magic_brush_state.has_pending_encoder() {
+    if app.magic_brush_state.is_active() && app.magic_brush_preparing() {
         // Cursor over the canvas reads as Wait while the encoder is in
         // flight (secondary cue to the centered "Preparing…" overlay).
         if ui.ctx().input(|i| i.pointer.hover_pos().is_some_and(|p| canvas_rect.contains(p))) {

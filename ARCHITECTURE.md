@@ -196,7 +196,7 @@ Undoing back to the original makes the item Pending but keeps its seg tensor for
 
 SAM 2 Hiera Small ships bundled as an encoder + decoder pair (category `Selection`); it authors selections and never enters the background-removal pipeline. `prunr_core::sam` is pure; the two CPU sessions (~180 MB) live on `Processor`, built on the rayon pool at startup and kept resident.
 
-**Encoder.** The selected image is encoded in the background once its source is decoded, even before the tool is on: refused below ~800 MB free RAM, cached as `BatchItem.magic_brush_embedding` (16 MB), dropped when the source changes. With the tool off only the selected image keeps its embedding; a refused speculative encode is not retried.
+**Encoder.** The selected image is encoded in the background once its source is decoded and it has stayed on screen for 250 ms (paging past images must not queue an encode each; an encode cannot be cancelled), even before the tool is on: refused below ~800 MB free RAM, cached as `BatchItem.magic_brush_embedding` (16 MB), dropped when the source changes. The shown image keeps its embedding, and with the tool on so does the one shown before it, so flipping between two stays instant; a refused speculative encode is not retried. Until the shown image has an embedding the tool reads as Preparing and holds clicks.
 
 **Decoder.** A click, or a stroke decimated to 8 points, is decoded on the pool; the best candidate's 256² logits are upsampled to source size (~8 ms at 4K) and pixels reaching the Confidence probability get the mode's sign (Restore / Erase on a cut-out, Add / Subtract on the eraser). The result merges like a paint stroke, so undo, overlay and re-cut behave the same for both brushes. The last decoder output is kept, so a Confidence drag re-thresholds it in place without a new undo step.
 
@@ -242,7 +242,7 @@ Estimate before loading, release what the user isn't looking at, and let a subpr
 | Undo history | Hot `Arc` → warm zstd in RAM → cold file in `<cache dir>/prunr-history/{pid}/` | `history_depth` (default 10); warm → cold under pressure |
 | Seg / edge tensors | zstd on the item; decoded only during a drag | See [Tiered Recipe Pipeline](#tiered-recipe-pipeline) |
 | Thumbnail (160 px) | RAM, always | With the item |
-| Magic Brush embedding (16 MB) | On the item | Non-selected items drop it unless the tool is active |
+| Magic Brush embedding (16 MB) | On the item | Kept for the shown image, and with the tool on the previous one |
 
 History entries carry their recipe, so undo also restores what the next Process tier-routes from. Memory pressure (available < 20 % of total) demotes history to disk and evicts all non-selected tensors.
 
