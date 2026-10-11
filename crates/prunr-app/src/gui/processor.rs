@@ -1040,6 +1040,7 @@ impl Processor {
         let pending: HashSet<u64> = ids.into_iter().collect();
         let total = pending.len();
         self.in_flight = Some(InFlightBatch { recipe, pending, total });
+        self.set_seg_counts(self.current_dispatch_progress(), prunr_core::Step::ReadingImage.label().into());
     }
 
     /// `(done, total)` for the currently in-flight dispatch, or `None`
@@ -1893,6 +1894,15 @@ mod tests {
             upscale: UpscaleRecipe::default(),
             was_chain: false,
         }
+    }
+
+    #[test]
+    fn a_background_removal_run_shows_progress_from_the_start() {
+        let mut p = fixture();
+        p.track_dispatch(fixture_recipe(), [10, 20].iter().copied());
+        p.apply_report(&prunr_core::ProgressUpdate::Step(prunr_core::Step::LoadingModel));
+        let shown = p.dispatch_progress().expect("the capsule shows before any image is done");
+        assert_eq!((shown.inner, shown.step_label.as_ref()), ((0, 2), "Loading the model"));
     }
 
     #[test]
