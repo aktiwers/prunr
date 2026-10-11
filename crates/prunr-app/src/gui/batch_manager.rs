@@ -74,6 +74,51 @@ pub(crate) struct BatchManager {
 }
 
 impl BatchManager {
+    /// Start compressing every history entry still held raw, one worker
+    /// per entry behind the decode slots so a burst can't fan out N zstd
+    /// encoders. Raw entries are what history pushes leave behind; doing
+    /// the zstd inline cost ~0.1-0.6 s per switch, undo or redo.
+    pub(crate) fn compress_history_off_thread(&mut self) {
+        use super::item::HistorySlot;
+        for item in &mut self.items {
+            let id = item.id;
+            for entry in item.history.iter_mut().chain(item.redo_stack.iter_mut()) {
+                let HistorySlot::InMemory(rgba) = &entry.slot else { continue };
+                // The 1x1 default is a placeholder mid-swap, not an image.
+                if rgba.width() <= 1 && rgba.height() <= 1 {
+                    continue;
+                }
+                let rgba = Arc::clone(rgba);
+                entry.slot = HistorySlot::Compressing(Arc::clone(&rgba));
+                let tx = self.bg_io.history_demote_tx.clone();
+                let slots = self.bg_io.decode_slots.clone();
+                std::thread::spawn(move || {
+                    let _slot = slots.acquire();
+                    // On failure (rare: OOM) the entry stays in RAM, uncompressed.
+                    if let Ok(compressed) = super::history_disk::compress_to_ram(&rgba) {
+                        let _ = tx.send((id, compressed, Arc::downgrade(&rgba)));
+                    }
+                });
+            }
+        }
+    }
+
+    /// Swap in finished compressions. One for an entry that has since been
+    /// popped (undone, unparked, trimmed) finds nothing and is dropped.
+    pub(crate) fn land_compressed_history(&mut self) {
+        use super::item::HistorySlot;
+        while let Ok((id, compressed, source)) = self.bg_io.history_demote_rx.try_recv() {
+            let Some(source) = source.upgrade() else { continue };
+            let Some(item) = self.find_by_id_mut(id) else { continue };
+            let slot = item.history.iter_mut().chain(item.redo_stack.iter_mut())
+                .map(|e| &mut e.slot)
+                .find(|s| matches!(s, HistorySlot::Compressing(r) if Arc::ptr_eq(r, &source)));
+            if let Some(slot) = slot {
+                *slot = HistorySlot::Compressed(compressed);
+            }
+        }
+    }
+
     pub(crate) fn new() -> Self {
         Self {
             items: Vec::new(),
@@ -578,6 +623,35 @@ mod tests {
 
     fn fixture() -> BatchManager {
         BatchManager::new()
+    }
+
+    /// Pushing onto history (a switch, an undo, a new result) must cost the
+    /// UI thread nothing: entries start in memory and are compressed off
+    /// thread, then swapped in.
+    #[test]
+    fn history_is_compressed_off_the_ui_thread() {
+        use crate::gui::item::{HistoryEntry, HistorySlot};
+        let mut batch = fixture();
+        let mut item = item_with_cache(1, 0);
+        let rgba = Arc::new(image::RgbaImage::from_pixel(64, 64, image::Rgba([9, 8, 7, 255])));
+        item.history.push_back(HistoryEntry::new(Arc::clone(&rgba), None));
+        item.redo_stack.push_back(HistoryEntry::new(Arc::clone(&rgba), None));
+        assert!(matches!(item.history[0].slot, HistorySlot::InMemory(_)), "a push does no compression");
+        batch.items.push(item);
+
+        batch.compress_history_off_thread();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let compressed = |b: &BatchManager| {
+            let it = &b.items[0];
+            matches!(it.history[0].slot, HistorySlot::Compressed(_)) && matches!(it.redo_stack[0].slot, HistorySlot::Compressed(_))
+        };
+        while !compressed(&batch) && std::time::Instant::now() < deadline {
+            batch.land_compressed_history();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(compressed(&batch), "both stacks end up compressed");
+        let back = std::mem::take(&mut batch.items[0].history[0]).into_parts().0.into_rgba().unwrap();
+        assert_eq!(back.as_raw(), rgba.as_raw());
     }
 
     /// Construct a BatchItem with optional cached tensor of `bytes_uncompressed`

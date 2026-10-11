@@ -111,12 +111,8 @@ pub struct BackgroundIO {
     /// while load + decode + `apply_fill_style` runs per item.
     pub filter_only_tx: mpsc::Sender<FilterOnlyResult>,
     pub filter_only_rx: mpsc::Receiver<FilterOnlyResult>,
-    /// Off-thread zstd compression of evicted background-item RGBAs.
-    /// Eviction parks the result on top of history and kicks a worker
-    /// that compresses + posts here; drain swaps the parked entry for
-    /// `HistorySlot::Compressed`. Without this the
-    /// zstd encode (~10–50 ms per 4K image × N items) ran inline on
-    /// every selection change.
+    /// Off-thread zstd compression of history entries
+    /// (`BatchManager::compress_history_off_thread` / `land_compressed_history`).
     pub history_demote_tx: mpsc::Sender<HistoryDemoteResult>,
     pub history_demote_rx: mpsc::Receiver<HistoryDemoteResult>,
     /// Off-thread RGBA decode + ColorImage build for a per-item bg
