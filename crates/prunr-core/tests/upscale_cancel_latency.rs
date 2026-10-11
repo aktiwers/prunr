@@ -5,6 +5,17 @@
 
 mod test_common;
 
+/// Prints each finished tile's time, for reading the cancel latency.
+struct TilePrinter(Instant);
+
+impl prunr_core::ProgressSink for TilePrinter {
+    fn report(&self, update: prunr_core::ProgressUpdate) {
+        if let prunr_core::ProgressUpdate::Inner { done, total, .. } = update {
+            eprintln!("tile {done}/{total} done at {:?}", self.0.elapsed());
+        }
+    }
+}
+
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -45,11 +56,8 @@ fn terminate_aborts_a_running_tile() {
         let run_options = Arc::clone(&run_options);
         std::thread::spawn(move || {
             let started = Instant::now();
-            let on_tile = |done: u32, total: u32| {
-                eprintln!("tile {done}/{total} done at {:?}", started.elapsed());
-            };
             let result = upscale_rgba_with_engine(
-                &input, &engine, id, 4, on_tile, Some(cancel), Some(&run_options),
+                &input, &engine, id, 4, &prunr_core::Progress::new(Arc::new(TilePrinter(started))).with_cancel(cancel), Some(&run_options),
             );
             (result.map(|_| ()), started.elapsed())
         })
@@ -88,11 +96,9 @@ fn full_run_time() {
         image::Rgba([(x % 256) as u8, (y % 256) as u8, 128, 255])
     });
     let started = Instant::now();
-    let tiles = std::sync::atomic::AtomicU32::new(0);
-    let out = upscale_rgba_with_engine(&input, &engine, id, 4, |_, total| { tiles.store(total, Ordering::Relaxed); }, None, None)
+    let sink = Arc::new(prunr_core::progress::RecordingSink::default());
+    let out = upscale_rgba_with_engine(&input, &engine, id, 4, &prunr_core::Progress::new(sink.clone()), None)
         .expect("upscale");
-    eprintln!(
-        "{} on {}: {} tiles in {:?}",
-        out.width(), engine.active_provider(), tiles.load(Ordering::Relaxed), started.elapsed()
-    );
+    let tiles = sink.updates().iter().filter(|u| matches!(u, prunr_core::ProgressUpdate::Tile { done: true, .. })).count();
+    eprintln!("{} on {}: {tiles} tiles in {:?}", out.width(), engine.active_provider(), started.elapsed());
 }
