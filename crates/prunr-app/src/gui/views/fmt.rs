@@ -4,6 +4,11 @@
 //! no Greek prefixes.
 
 /// "Off" below `off_below`, otherwise `f(v)`.
+/// "1 image", "3 images".
+pub fn count(n: usize, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
+}
+
 pub fn off_or(v: f32, off_below: f32, f: impl FnOnce(f32) -> String) -> String {
     if v.abs() < off_below { "Off".to_string() } else { f(v) }
 }
@@ -55,6 +60,13 @@ fn signed(v: f32, decimals: usize, unit: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn count_says_one_image_and_two_images() {
+        assert_eq!(count(1, "image", "images"), "1 image");
+        assert_eq!(count(0, "image", "images"), "0 images");
+        assert_eq!(count(2, "image", "images"), "2 images");
+    }
 
     #[test]
     fn off_is_capitalized_and_threshold_respected() {
