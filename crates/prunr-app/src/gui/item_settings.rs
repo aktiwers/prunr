@@ -165,6 +165,9 @@ impl Default for ItemSettings {
 }
 
 impl ItemSettings {
+    /// Contrast for a hard edge, what the old hard threshold was.
+    pub const HARD_EDGE: f32 = 1.0;
+
     /// bg color as RGB triple (alpha stripped) for pipeline/compositing.
     /// `None` when bg is disabled.
     pub fn bg_rgb(&self) -> Option<[u8; 3]> {
@@ -277,22 +280,37 @@ pub(crate) fn item_with_line_mode(line_mode: prunr_core::LineMode) -> ItemSettin
     ItemSettings { line_mode, ..ItemSettings::default() }
 }
 
-/// Rewrite settings saved before Contrast replaced the hard threshold:
-/// anywhere in `value`, an item's `threshold` (a number when it was on)
-/// becomes `contrast` 1.0, the hard edge it was. Runs before parsing.
+/// Rewrite item settings saved before Contrast replaced the hard
+/// threshold: an item's `threshold` (a number when it was on) becomes
+/// `contrast` at a hard edge. Only item settings are touched: each
+/// preset entry's `item_settings`, and a v1 preset file, which is item
+/// settings at the top (it has no `format_version`).
 pub(crate) fn migrate_threshold_to_contrast(value: &mut serde_json::Value) {
-    match value {
-        serde_json::Value::Object(map) => {
-            if let Some(old) = map.remove("threshold") {
-                if old.is_number() && !map.contains_key("contrast") {
-                    map.insert("contrast".into(), serde_json::json!(1.0));
-                }
+    fn item(map: &mut serde_json::Map<String, serde_json::Value>) {
+        if let Some(old) = map.remove("threshold") {
+            if old.is_number() && !map.contains_key("contrast") {
+                map.insert("contrast".into(), serde_json::json!(ItemSettings::HARD_EDGE));
             }
-            map.values_mut().for_each(migrate_threshold_to_contrast);
         }
-        serde_json::Value::Array(items) => items.iter_mut().for_each(migrate_threshold_to_contrast),
-        _ => {}
     }
+    fn walk(value: &mut serde_json::Value) {
+        match value {
+            serde_json::Value::Object(map) => {
+                if let Some(serde_json::Value::Object(settings)) = map.get_mut("item_settings") {
+                    item(settings);
+                }
+                map.values_mut().for_each(walk);
+            }
+            serde_json::Value::Array(items) => items.iter_mut().for_each(walk),
+            _ => {}
+        }
+    }
+    if let serde_json::Value::Object(map) = value {
+        if map.contains_key("gamma") && !map.contains_key("format_version") {
+            item(map);
+        }
+    }
+    walk(value);
 }
 
 #[cfg(test)]
@@ -305,11 +323,17 @@ mod tests {
     fn an_old_hard_threshold_loads_as_full_contrast() {
         let mut v = serde_json::json!({ "models": { "silueta": { "item_settings": { "gamma": 1.2, "threshold": 0.3 } },
                                                      "birefnet": { "item_settings": { "gamma": 1.0, "threshold": null } } } });
+        v["brush"] = serde_json::json!({ "threshold": 0.4 });
         migrate_threshold_to_contrast(&mut v);
         let hard: ItemSettings = serde_json::from_value(v["models"]["silueta"]["item_settings"].clone()).unwrap();
         let soft: ItemSettings = serde_json::from_value(v["models"]["birefnet"]["item_settings"].clone()).unwrap();
         assert_eq!((hard.contrast, hard.gamma), (1.0, 1.2));
         assert_eq!(soft.contrast, 0.0);
+        assert_eq!(v["brush"]["threshold"], 0.4, "a threshold outside item settings is left alone");
+
+        let mut v1 = serde_json::json!({ "gamma": 1.0, "threshold": 0.5 });
+        migrate_threshold_to_contrast(&mut v1);
+        assert_eq!(v1["contrast"], 1.0, "a v1 preset is item settings at the top");
     }
 
     #[test]

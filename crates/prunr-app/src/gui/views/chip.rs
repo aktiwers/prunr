@@ -219,6 +219,24 @@ pub(super) fn tooltip(resp: Response, title: &str, body: &str, shortcut: Option<
 /// harness and the control socket find widgets by. Icon-only buttons
 /// have no readable name of their own; the tooltip title is it. Free
 /// when the tree is off.
+/// A destructive button that needs two clicks: the first arms it (it then
+/// reads `armed_text`), the second returns true. Arming is held under
+/// `scope`, so arming another `key` disarms this one, and the caller
+/// clears `scope` when its surface closes.
+pub(super) fn confirm_button(ui: &mut Ui, scope: egui::Id, key: &str, idle: RichText, armed_text: RichText, name: &str) -> bool {
+    let armed = ui.data(|d| d.get_temp::<String>(scope)).as_deref() == Some(key);
+    let clicked = named(ui.small_button(if armed { armed_text } else { idle }), name)
+        .on_hover_text(if armed { "Click again to confirm" } else { name })
+        .clicked();
+    if clicked && !armed {
+        ui.data_mut(|d| d.insert_temp(scope, key.to_string()));
+    }
+    if clicked && armed {
+        ui.data_mut(|d| d.remove::<String>(scope));
+    }
+    clicked && armed
+}
+
 pub(super) fn named(resp: Response, name: &str) -> Response {
     resp.ctx.accesskit_node_builder(resp.id, |node| node.set_label(name));
     resp

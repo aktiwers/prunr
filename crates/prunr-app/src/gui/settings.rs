@@ -317,9 +317,7 @@ impl Settings {
     /// The model a preset entry is read for; No model reads the default
     /// model's entry (its filters and lines are the same knobs).
     fn preset_model(&self) -> prunr_models::ModelId {
-        self.model.to_model_id()
-            .or_else(|| Self::default().model.to_model_id())
-            .expect("Settings::default().model always has a model_id")
+        self.model.to_model_id().unwrap_or(prunr_models::ModelId::BiRefNetLite)
     }
 
     /// Resolve the active preset to the live `ResolvedView` for the
@@ -424,9 +422,8 @@ fn migrate_v1_item_settings(v: &serde_json::Value) -> ItemSettings {
 
     let mut s = ItemSettings::default();
     if let Some(x) = v.get("mask_gamma").and_then(|x| x.as_f64()) { s.gamma = x as f32; }
-    // The old hard threshold was a binary cut: full contrast.
     if v.get("mask_threshold_enabled").and_then(|x| x.as_bool()) == Some(true) {
-        s.contrast = 1.0;
+        s.contrast = ItemSettings::HARD_EDGE;
     }
     if let Some(x) = v.get("edge_shift").and_then(|x| x.as_f64()) { s.edge_shift = x as f32; }
     if let Some(x) = v.get("refine_edges").and_then(|x| x.as_bool()) { s.refine_edges = x; }
@@ -514,6 +511,12 @@ impl SettingsModel {
         Self::FourXNmkdSiaxCxUpscale,
         Self::FourXNmkdSuperscaleUpscale,
     ];
+
+    /// This model's position in `ALL`.
+    pub fn index(self) -> usize {
+        // every variant is listed in ALL
+        Self::ALL.iter().position(|m| *m == self).unwrap_or(0)
+    }
 
     /// Parse a Debug-style name ("Silueta", "U2net", "BiRefNetLite", …) into
     /// a variant. Used by the harness escape hatch (PRUNR_OPEN_MODEL env

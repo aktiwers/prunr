@@ -101,7 +101,7 @@ pub(crate) struct ToolbarState<'a> {
     /// On-disk install state, refreshed on events rather than per frame.
     pub installed: crate::gui::hardware_cache::HardwareInstallCache,
     pub show_original: bool,
-    pub has_result: bool,
+    pub can_compare: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -230,7 +230,7 @@ pub(crate) fn render(
             render_reset_preset_cluster(ui, app_settings, item_settings, &mut presets, &mut change);
             ui.separator();
 
-            chip::gated(ui, (!state.has_result).then_some("Process the image first."), |ui| {
+            chip::gated(ui, (!state.can_compare).then_some("Process the image first."), |ui| {
                 let resp = chip::tooltip(
                     chip::icon_toggle_button(ui, ICON_VISIBILITY.codepoint, state.show_original),
                     "Compare",
@@ -413,12 +413,10 @@ fn render_mask_group(
         ui.add_space(theme::SPACE_XS);
 
 
-        // Shown as every editor shows it, + grows the subject; stored as
-        // the pipeline's shift, + erodes.
-        let mut grow = 0.0 - s.edge_shift;
+        let mut grow = prunr_core::MaskSettings::edge_shift_for_grow(s.edge_shift);
         let shift = chip::slider_row_f32(ui, "Shift edge", &mut grow, -20.0..=20.0, false, |v| fmt::signed_px(v, 1));
         if shift.changed {
-            s.edge_shift = -grow;
+            s.edge_shift = prunr_core::MaskSettings::edge_shift_for_grow(grow);
         }
         aggregate_knob(shift, StaticKnob::EdgeShift, change);
         hint(ui, "Grow (+) or shrink (\u{2212}) the cut-out's edge.");
@@ -1164,8 +1162,7 @@ pub(super) fn render_model_dropdown(
             ModelRole::Upscale => "Enlarges the photo. Each model in the list shows what it is best at and its download size.",
             ModelRole::Filters => "No model runs: only the effect, lines and background apply to the photo.",
         };
-        let heading = "Model";
-        let resp = chip::tooltip(resp, heading, body, None);
+        let resp = chip::tooltip(resp, "Model", body, None);
         let pop_id = egui::Id::new("adjustments_model_popup");
         chip::popup_for(ui, pop_id, &resp, |ui| {
             chip::popover_header(ui, "Model", None);
@@ -1211,6 +1208,8 @@ pub(super) fn render_model_dropdown(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
 
     /// Detail maps the guided filter's epsilon onto 0-100 % and back.
     #[test]
@@ -1222,7 +1221,6 @@ mod tests {
             assert!((detail_from_epsilon(epsilon_from_detail(d)) - d).abs() < 1e-4);
         }
     }
-    use super::*;
 
     #[test]
     fn toolbar_change_default_is_empty() {

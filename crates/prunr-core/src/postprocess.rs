@@ -671,8 +671,9 @@ fn apply_mask_inplace(rgba: &mut RgbaImage, mask: &GrayImage) {
 /// Feather: a Gaussian blur approximated by a 3-pass box filter (the
 /// 3-box theorem gives `r ≈ σ`). A fractional `sigma` blends the blurs at
 /// the two whole radii around it, so the slider is continuous and values
-/// under 1 px soften too. Peak working set: one full-size u8 copy of the
-/// mask when `sigma` is fractional, plus the bbox scratch of `box_blur`.
+/// under 1 px soften too. Peak working set: two u8 copies of the mask's
+/// bbox (plus the blur margin) when `sigma` is fractional, plus the bbox
+/// scratch of `box_blur`.
 fn feather_mask(mask: &mut GrayImage, sigma: f32) {
     if sigma <= 0.0 {
         return;
@@ -683,12 +684,20 @@ fn feather_mask(mask: &mut GrayImage, sigma: f32) {
         box_blur(mask, lo);
         return;
     }
-    let mut wider = mask.clone();
+    // Both blurs stay inside the wider one's reach; blend only there.
+    let Some(reach) = crate::inpaint::mask_bbox(mask, 1, 3 * (lo + 1)) else { return };
+    let (x0, y0, w) = (reach.x as usize, reach.y as usize, mask.width() as usize);
+    let mut wider = image::imageops::crop_imm(mask, reach.x, reach.y, reach.w, reach.h).to_image();
+    let mut narrow = wider.clone();
     box_blur(&mut wider, lo + 1);
-    box_blur(mask, lo);
-    mask.as_mut().par_iter_mut().zip(wider.as_raw().par_iter()).for_each(|(a, &b)| {
-        *a = (*a as f32 * (1.0 - t) + b as f32 * t).round() as u8;
-    });
+    box_blur(&mut narrow, lo);
+    let out = mask.as_mut();
+    for (row, (n, wd)) in narrow.as_raw().chunks(reach.w as usize).zip(wider.as_raw().chunks(reach.w as usize)).enumerate() {
+        let dst = &mut out[(y0 + row) * w + x0..][..reach.w as usize];
+        for (d, (&a, &b)) in dst.iter_mut().zip(n.iter().zip(wd)) {
+            *d = (a as f32 * (1.0 - t) + b as f32 * t).round() as u8;
+        }
+    }
 }
 
 /// Bbox-cropped 3-box blur at `radius`: pixels outside the `mask +
@@ -731,6 +740,8 @@ fn box_blur(mask: &mut GrayImage, radius: u32) {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
 
     /// Gamma above 1 removes more of the soft edge and below 1 keeps
     /// more; 1 leaves the mask as the model gave it.
@@ -773,7 +784,6 @@ mod tests {
         apply_contrast(&mut hard, 1.0);
         assert_eq!(hard.as_raw(), &[0, 0, 255, 255, 255]);
     }
-    use super::*;
 
     use image::{DynamicImage, RgbImage, Rgb};
     use ndarray::Array4;
