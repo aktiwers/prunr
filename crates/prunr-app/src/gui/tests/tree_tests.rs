@@ -92,7 +92,7 @@ fn each_model_toolbar_shows_only_its_chips() {
     let chips: &[(&str, Surface)] = &[
         ("Mask", Surface::Mask),
         ("Sketch", Surface::Lines),
-        ("Fill style", Surface::Effect),
+        ("Effect", Surface::Effect),
         ("Background", Surface::Background),
         ("Scale", Surface::Upscale),
         ("Refine", Surface::Upscale),

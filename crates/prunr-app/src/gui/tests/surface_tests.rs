@@ -267,3 +267,18 @@ fn the_background_flyout_names_every_control_for_each_choice() {
         assert_all_controls_named(&h, &format!("background flyout, {name}"));
     }
 }
+
+/// The Effect flyout names every control for each effect, "None" first.
+#[test]
+fn the_effect_flyout_names_every_control_for_each_effect() {
+    use super::tree_tests::{assert_all_controls_named, names};
+    for style in prunr_core::FillStyle::ALL {
+        let mut h = loaded();
+        h.state_mut().batch.items[0].settings.fill_style = *style;
+        settle(&mut h);
+        click(&mut h, "Effect");
+        assert!(egui::Popup::is_any_open(&h.ctx), "{style:?}: the Effect flyout opened");
+        assert!(names(&h).iter().any(|n| n == "None"), "{style:?}: None is in the list");
+        assert_all_controls_named(&h, &format!("effect flyout, {style:?}"));
+    }
+}
