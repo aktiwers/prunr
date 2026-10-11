@@ -1,4 +1,4 @@
-//! Pure data types for batch items and the per-image history they carry.
+//! Pure data types for batch items and the undo timeline each carries.
 //!
 //! These types are GUI-agnostic in spirit (they hold egui texture handles
 //! because the texture lifecycle is per-item, but no rendering happens here).
@@ -446,6 +446,14 @@ impl BatchItem {
         self.job.is_some_and(|j| j.version == self.timeline.version())
     }
 
+    /// The awaited run will not land (cancelled): the item shows its
+    /// current state again.
+    pub(crate) fn abandon_job(&mut self) {
+        self.job = None;
+        let has_result = self.result_rgba.is_some() || self.result_parked;
+        self.status = if has_result { BatchStatus::Done } else { BatchStatus::Pending };
+    }
+
     /// Record a landed run's result, now in the working copy.
     pub(crate) fn finish_job(&mut self) {
         match self.job.take().and_then(|j| j.step) {
@@ -659,16 +667,7 @@ impl BatchItem {
             result_tex_pending: false,
             result_fades_in: false,
             decode_pending: false,
-            timeline: Timeline::new(DocState {
-                kind: StepKind::Original,
-                result: None,
-                recipe: None,
-                selection: None,
-                selection_hash: None,
-                settings,
-                applied_preset: applied_preset.clone(),
-                at: std::time::Instant::now(),
-            }),
+            timeline: Timeline::new(DocState::original(settings, applied_preset.clone())),
             job: None,
             result_parked: false,
             status: BatchStatus::Pending,

@@ -381,11 +381,6 @@ fn render_tab_behavior(ui: &mut egui::Ui, settings: &mut Settings) {
     ui.checkbox(&mut settings.chain_mode, RichText::new("Use last result as input")
         .color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY));
     hint(ui, "Process feeds on the previous output instead of the original — stack effects.");
-    if settings.chain_mode {
-        ui.add_space(theme::SPACE_SM);
-        super::chip::slider_row(ui, "History depth", &mut settings.history_depth, 1..=50);
-        hint(ui, "Maximum undo steps per image. Higher = more memory.");
-    }
     ui.add_space(theme::SPACE_MD);
 
     section_heading(ui, "Defaults");

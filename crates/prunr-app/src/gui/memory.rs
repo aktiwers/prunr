@@ -27,6 +27,10 @@ pub struct AdmissionController {
     pending: Vec<ImageMemCost>,
 }
 
+/// Compressed undo states per image the admission estimate counts in
+/// RAM; older ones spill to disk under pressure.
+pub(crate) const RESIDENT_HISTORY_STEPS: usize = 10;
+
 impl AdmissionController {
     /// Create a new controller. Queries available system RAM and applies safety margin.
     pub fn new(model: ModelKind, jobs: usize) -> Self {
@@ -43,12 +47,11 @@ impl AdmissionController {
     }
 
     /// Estimate memory cost for a single image from dimensions, file size,
-    /// and the (max) number of compressed history slots that will accumulate
-    /// in RAM as Tier-2/3 reruns archive prior results.
+    /// and the number of compressed undo states expected to sit in RAM.
     ///
     /// Cost = `2 × rgba_size + file_bytes + history_residue`, where the
     /// history residue uses a conservative ~2 : 1 zstd ratio on RGBA per
-    /// archived slot — zstd-level-1 (the level `history_disk` uses) sees
+    /// stored state — zstd-level-1 (the level `history_disk` uses) sees
     /// roughly 2:1 on natural-image RGBA, so dividing by 2 keeps admission
     /// honest under sustained pressure rather than under-counting and
     /// over-admitting. Without this term, long batches with deep history
