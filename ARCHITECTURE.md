@@ -183,7 +183,7 @@ Five per-item enums sit on top of the AI output, applied in one `postprocess →
 | Eraser | Add to / subtract from the region to fill | On Process, since a run costs seconds to minutes |
 | Upscale | Not offered: the brushes and selection actions are hidden, since an upscale covers the whole image | — |
 
-**Correction.** `MaskArtifact::apply_to_mask` runs on the normalized mask *before* gamma and threshold (Erase scales toward 0, Restore lerps toward 1, by magnitude), so gamma dragged after painting still modulates the painted area. A blank plane is known in O(1) and skips the pass.
+**Correction.** `MaskArtifact::apply_to_alpha` runs last, on the full-resolution mask after edge refinement and feather (Erase scales toward 0, Restore lifts toward 1, by magnitude): a stroke is exact intent, and refining it would pull it onto nearby image edges. A blank plane is known in O(1) and skips the pass.
 
 **Actions and overlay.** Delete, Copy, Cut, Invert and Clear share one handler. Fill, outline and feather are baked off-thread into one texture per item keyed by `(plane hash, style)`; a stroke uploads only the changed patch. The outline is in image pixels, so the style is taken at the current zoom: an outline keeps at least 1.5 screen points, widened in odd whole-pixel steps so zooming rebuilds the texture only a few times. With Feather on, the actions use the same guided-filter-feathered plane the overlay shows, so what is cut is what was shown.
 

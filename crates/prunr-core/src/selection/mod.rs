@@ -346,7 +346,7 @@ impl MaskArtifact {
     }
 
     /// Nearest-neighbour resample to `w × h`, cell values carried as-is.
-    /// The same index rule as `apply_to_mask`, so applying the result at
+    /// The same index rule as `apply_to_alpha`, so applying the result at
     /// its own size equals applying `self` resampled inline.
     pub fn resampled(&self, w: u32, h: u32) -> Self {
         let mut cells = vec![0i8; (w as usize) * (h as usize)];
@@ -364,27 +364,20 @@ impl MaskArtifact {
         out
     }
 
-    /// In-place multiplicative correction of a `mask_w × mask_h` mask in
-    /// normalized [0, 1] space, applied BEFORE gamma/threshold so later
-    /// gamma tweaks modulate the painted regions naturally — a 50%
-    /// subtract stroke halves the local mask, then a higher gamma further
-    /// attenuates. The plane is resampled to the mask's size inline.
-    ///
-    /// Per cell: `g > 0` does `m → lerp(m, 1.0, g/FULL)`, `g < 0` does
-    /// `m → m * (1 + g/FULL)`, `g == 0` leaves `m`.
-    pub fn apply_to_mask(&self, mask: &mut [f32], mask_w: usize, mask_h: usize) {
-        debug_assert_eq!(mask.len(), mask_w * mask_h, "apply_to_mask: mask len != w*h");
+    /// Apply the plane to a `mask_w × mask_h` alpha mask in place,
+    /// resampled to its size inline. Per cell, with `s = g / FULL`:
+    /// `g > 0` lifts alpha toward opaque (`a + (1 - a) s`), `g < 0`
+    /// scales it toward clear (`a (1 + s)`), `g == 0` leaves it.
+    pub fn apply_to_alpha(&self, alpha: &mut [u8], mask_w: usize, mask_h: usize) {
+        debug_assert_eq!(alpha.len(), mask_w * mask_h, "apply_to_alpha: mask len != w*h");
         self.for_each_resampled(mask_w as u32, mask_h as u32, |i, g| {
             if g == 0 {
                 return;
             }
-            let s = (g as f32) / FULL as f32;
-            let m = &mut mask[i];
-            if s > 0.0 {
-                *m += (1.0 - *m) * s;
-            } else {
-                *m *= 1.0 + s;
-            }
+            let s = g as f32 / FULL as f32;
+            let a = alpha[i] as f32 / 255.0;
+            let out = if s > 0.0 { a + (1.0 - a) * s } else { a * (1.0 + s) };
+            alpha[i] = (out * 255.0).round().clamp(0.0, 255.0) as u8;
         });
     }
 }
@@ -398,18 +391,14 @@ mod tests {
         MaskArtifact::from_cells(w, h, data)
     }
 
-    fn approx(mask: &[f32], expected: &[f32], tol: f32) -> bool {
-        mask.len() == expected.len()
-            && mask.iter().zip(expected).all(|(a, b)| (a - b).abs() < tol)
-    }
 
     #[test]
     fn blank_plane_is_a_no_op_correction() {
         let c = MaskArtifact::new_empty(10, 10);
         assert!(c.is_blank());
-        let mut m = vec![0.5f32; 100];
-        c.apply_to_mask(&mut m, 10, 10);
-        assert!(m.iter().all(|&v| v == 0.5));
+        let mut m = vec![128u8; 100];
+        c.apply_to_alpha(&mut m, 10, 10);
+        assert!(m.iter().all(|&v| v == 128));
         assert!(!mask(2, 1, vec![0, 1]).is_blank());
         assert!(mask(2, 1, vec![0, 0]).is_blank());
     }
@@ -421,20 +410,20 @@ mod tests {
         let mut cells = vec![0i8; 25];
         cells[2 * 5 + 2] = 127;
         let c = mask(5, 5, cells);
-        let mut m = vec![0.0f32; 100];
-        c.apply_to_mask(&mut m, 10, 10);
-        assert_eq!(m.iter().filter(|&&v| v > 0.0).count(), 4);
-        assert!(m.iter().all(|&v| v == 0.0 || (v - 1.0).abs() < 1e-6));
+        let mut m = vec![0u8; 100];
+        c.apply_to_alpha(&mut m, 10, 10);
+        assert_eq!(m.iter().filter(|&&v| v > 0).count(), 4);
+        assert!(m.iter().all(|&v| v == 0 || v == 255));
     }
 
     #[test]
     fn apply_full_add_and_subtract_saturate() {
-        let mut m = vec![0.3f32; 4];
-        mask(2, 2, vec![127; 4]).apply_to_mask(&mut m, 2, 2);
-        assert!(approx(&m, &[1.0; 4], 1e-6));
-        let mut m = vec![0.95f32; 4];
-        mask(2, 2, vec![-127; 4]).apply_to_mask(&mut m, 2, 2);
-        assert!(approx(&m, &[0.0; 4], 1e-6));
+        let mut m = vec![77u8; 4];
+        mask(2, 2, vec![127; 4]).apply_to_alpha(&mut m, 2, 2);
+        assert_eq!(m, [255; 4]);
+        let mut m = vec![242u8; 4];
+        mask(2, 2, vec![-127; 4]).apply_to_alpha(&mut m, 2, 2);
+        assert_eq!(m, [0; 4]);
     }
 
     #[test]
@@ -442,12 +431,13 @@ mod tests {
         // s = 64/127 ≈ 0.504: subtract does m * (1 - s), add does
         // m + (1 - m) * s, zero leaves m.
         let s = 64.0 / 127.0;
-        let mut m = vec![1.0f32, 0.6, 0.5];
-        mask(3, 1, vec![-64, -64, 0]).apply_to_mask(&mut m, 3, 1);
-        assert!(approx(&m, &[1.0 - s, 0.6 * (1.0 - s), 0.5], 1e-5));
-        let mut m = vec![0.0f32, 0.5];
-        mask(2, 1, vec![64, 64]).apply_to_mask(&mut m, 2, 1);
-        assert!(approx(&m, &[s, 0.5 + 0.5 * s], 1e-5));
+        let byte = |v: f32| (v * 255.0).round() as u8;
+        let mut m = vec![255u8, 153, 128];
+        mask(3, 1, vec![-64, -64, 0]).apply_to_alpha(&mut m, 3, 1);
+        assert_eq!(m, [byte(1.0 - s), byte(0.6 * (1.0 - s)), 128]);
+        let mut m = vec![0u8, 255];
+        mask(2, 1, vec![64, 64]).apply_to_alpha(&mut m, 2, 1);
+        assert_eq!(m, [byte(s), 255]);
     }
 
     #[test]
@@ -661,9 +651,9 @@ mod tests {
         data[2 * 8 + 3] = -90;
         data[5 * 8 + 6] = 120;
         let m = mask(8, 8, data);
-        let (mut inline, mut pre) = (vec![0.5f32; 9], vec![0.5f32; 9]);
-        m.apply_to_mask(&mut inline, 3, 3);
-        m.resampled(3, 3).apply_to_mask(&mut pre, 3, 3);
+        let (mut inline, mut pre) = (vec![128u8; 9], vec![128u8; 9]);
+        m.apply_to_alpha(&mut inline, 3, 3);
+        m.resampled(3, 3).apply_to_alpha(&mut pre, 3, 3);
         assert_eq!(inline, pre);
     }
 
