@@ -402,7 +402,7 @@ fn render_mask_group(
             chip::slider_row_f32(ui, "Gamma", &mut s.gamma, 0.01..=10.0, true, |v| fmt::plain(v, 2)),
             StaticKnob::Gamma, change,
         );
-        hint(ui, "How hard the mask cuts. Above 1 removes more; below 1 keeps more of the edge.");
+        hint(ui, "How hard the mask cuts. Above 1 removes more; below 1 keeps more of the photo.");
         ui.add_space(theme::SPACE_XS);
 
 
