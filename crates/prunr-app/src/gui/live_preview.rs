@@ -713,21 +713,17 @@ fn run_preview(inputs: DispatchInputs, cancel: &AtomicBool) -> RunOutput {
             let (mask, built_edge) = resolve_edge_mask(&inputs.cached_edge, edge, out_dims, &edge_settings);
             // SubjectOutline: the chosen composition over the subject.
             // EdgesOnly: the same compose over the photo, lines only.
-            let (rgba, built_bold) = if let Some(ref base_arc) = masked_base {
-                dispatch_compose(
-                    &mask, base_arc, &edge_settings,
-                    inputs.secondary_edge_tensor.as_ref(), &inputs.cached_bold,
-                    (base_arc.width(), base_arc.height()),
-                )
-            } else {
-                let lines_only = prunr_core::EdgeSettings { compose_mode: prunr_core::ComposeMode::LinesOnly, ..edge_settings };
-                let owned;
-                let photo = match inputs.original.as_rgba8() {
-                    Some(rgba) => rgba,
-                    None => { owned = inputs.original.to_rgba8(); &owned }
-                };
-                dispatch_compose(&mask, photo, &lines_only, inputs.secondary_edge_tensor.as_ref(), &inputs.cached_bold, out_dims)
+            let (base, compose_settings) = match masked_base.as_deref() {
+                Some(subject) => (std::borrow::Cow::Borrowed(subject), edge_settings),
+                None => (
+                    prunr_core::rgba_view(&inputs.original),
+                    prunr_core::EdgeSettings { compose_mode: prunr_core::ComposeMode::LinesOnly, ..edge_settings },
+                ),
             };
+            let (rgba, built_bold) = dispatch_compose(
+                &mask, &base, &compose_settings,
+                inputs.secondary_edge_tensor.as_ref(), &inputs.cached_bold, out_dims,
+            );
             RunOutput { rgba: Some(rgba), built_edge, built_bold, built_masked_base }
         }
         PreviewKind::UpscaleTier2 => unreachable!("UpscaleTier2 is handled by the early-return above"),
