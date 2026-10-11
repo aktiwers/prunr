@@ -454,6 +454,27 @@ impl BrushSettings {
         prunr_core::MaskReading { confidence: self.magic_confidence_threshold, remove_specks: self.magic_remove_specks }
     }
 
+    /// The settings that belong to a model rather than to the brush: the
+    /// eraser's region knobs and the Stable Diffusion tuning.
+    pub fn take_model_tuning_from(&mut self, source: &Self) {
+        self.inpaint_sharpen = source.inpaint_sharpen;
+        self.inpaint_feather = source.inpaint_feather;
+        self.inpaint_grow = source.inpaint_grow;
+        self.take_sd_tuning_from(source);
+    }
+
+    pub fn take_sd_tuning_from(&mut self, source: &Self) {
+        self.sd_scheduler = source.sd_scheduler;
+        self.sd_steps = source.sd_steps;
+        self.sd_guidance_scale = source.sd_guidance_scale;
+        self.sd_use_karras_sigmas = source.sd_use_karras_sigmas;
+        self.sd_strength = source.sd_strength;
+        self.sd_prompt = source.sd_prompt.clone();
+        self.sd_negative_prompt = source.sd_negative_prompt.clone();
+        self.sd_seed = source.sd_seed;
+        self.sd_use_taesd = source.sd_use_taesd;
+    }
+
     pub fn reset_popover_fields_from(&mut self, source: &Self) {
         self.radius = source.radius;
         self.hardness = source.hardness;
