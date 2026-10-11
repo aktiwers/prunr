@@ -287,9 +287,9 @@ impl SelectionStyle {
     }
 }
 
-/// ACCENT-tinted image: the selected interior at the fill alpha, the
-/// outline band stamped over it at the outline alpha, transparent
-/// elsewhere.
+/// ACCENT-tinted image: each cell at the fill alpha scaled by its
+/// coverage, so a feathered edge or a faint stroke shows as such, and
+/// the outline band stamped over it at the outline alpha.
 pub(crate) fn build_selection_image(
     mask: &prunr_core::selection::MaskArtifact,
     style: SelectionStyle,
@@ -298,11 +298,14 @@ pub(crate) fn build_selection_image(
     let (w, h) = (mask.width as usize, mask.height as usize);
     let accent = super::theme::ACCENT;
     let paint = |a: u8| egui::Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), a);
-    let fill = paint(SelectionStyle::alpha(style.fill_opacity));
+    let fill_alpha = SelectionStyle::alpha(style.fill_opacity) as f32;
     let mut pixels: Vec<egui::Color32> = mask
         .cells()
         .iter()
-        .map(|&v| if MaskArtifact::is_selected(v) { fill } else { egui::Color32::TRANSPARENT })
+        .map(|&v| match (fill_alpha * MaskArtifact::coverage(v)).round() as u8 {
+            0 => egui::Color32::TRANSPARENT,
+            a => paint(a),
+        })
         .collect();
     if let Some(r) = style.band_radius() {
         let outline = paint(SelectionStyle::alpha(style.outline_opacity));
@@ -353,6 +356,19 @@ fn sub_rect<T: Copy>(src: &[T], stride: usize, x: usize, y: usize, w: usize, h: 
 
 #[cfg(test)]
 mod tests {
+
+    /// A faint or feathered cell shows faintly: the fill is scaled by
+    /// coverage, so strokes under half coverage are visible too.
+    #[test]
+    fn the_overlay_fill_follows_coverage() {
+        use prunr_core::selection::{MaskArtifact, FULL};
+        let mask = MaskArtifact::from_cells(3, 1, vec![FULL, -(FULL / 4), 0]);
+        let no_outline = SelectionStyle { fill_opacity: 0.8, outline_opacity: 0.0, outline_thickness: 0.0, edge_feather_px: 0 };
+        let img = build_selection_image(&mask, no_outline);
+        let (full, faint, none) = (img.pixels[0].a(), img.pixels[1].a(), img.pixels[2].a());
+        assert!(faint > 0 && faint < full, "a quarter-coverage stroke shows, fainter ({faint} vs {full})");
+        assert_eq!(none, 0);
+    }
     use super::*;
     use prunr_core::selection::{MaskArtifact, FULL};
 

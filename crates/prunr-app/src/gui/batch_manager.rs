@@ -1217,6 +1217,31 @@ mod tests {
         assert!(bm.items[0].selection_texture.is_none());
     }
 
+    /// A cut-out's re-cut applies the selection at the photo's own size,
+    /// feathered once the overlay has built the feathered plane; never a
+    /// copy shrunk to the model's working size.
+    #[test]
+    fn a_recut_applies_the_full_size_selection_and_its_feather() {
+        let mut bm = fixture();
+        bm.items.push(item_with_cache(1, 0));
+        let ctx = egui::Context::default();
+        let cells: Vec<i8> = (0..64).map(|i| if i % 8 < 4 { -127 } else { 0 }).collect();
+        let selection = std::sync::Arc::new(prunr_core::selection::MaskArtifact::from_cells(8, 8, cells));
+        let feathered = std::sync::Arc::new(prunr_core::selection::MaskArtifact::from_cells(8, 8, vec![-60; 64]));
+        let item = &mut bm.items[0];
+        item.commit_selection_mask(std::sync::Arc::clone(&selection), crate::gui::timeline::StepKind::Stroke);
+        let hash = item.selection_hash.expect("committed");
+        let plane = item.correction_plane(style(0.15)).expect("a selection");
+        assert_eq!((plane.width, plane.height), (8, 8), "the photo's size, not the model's");
+        assert!(std::sync::Arc::ptr_eq(&plane, &selection));
+
+        let handle = ctx.load_texture("sel", egui::ColorImage::new([8, 8], vec![egui::Color32::WHITE; 64]), Default::default());
+        item.selection_texture = Some(crate::gui::item::SelectionTexture {
+            key: (hash, style(0.15)), handle, shown: selection, feathered: Some(std::sync::Arc::clone(&feathered)),
+        });
+        assert!(std::sync::Arc::ptr_eq(&item.correction_plane(style(0.15)).unwrap(), &feathered), "the feathered plane once built");
+    }
+
     #[test]
     fn commit_selection_sets_hash_in_lockstep() {
         let mut bm = fixture();
