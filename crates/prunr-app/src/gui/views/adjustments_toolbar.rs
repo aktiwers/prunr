@@ -460,6 +460,19 @@ fn render_mask_group(
     });
 }
 
+/// What a line color style looks like, for its row in the list.
+fn line_style_description(style: &prunr_core::LineStyle) -> &'static str {
+    use prunr_core::LineStyle;
+    match style {
+        LineStyle::Solid => "one color for every line",
+        LineStyle::GradientY { .. } => "one color at the top fading to another at the bottom",
+        LineStyle::GradientX { .. } => "one color on the left fading to another on the right",
+        LineStyle::RadialGradient { .. } => "one color at a center point fading outward",
+        LineStyle::Rainbow { .. } => "colors cycling across the image",
+        LineStyle::DualScale { .. } => "fine detail and bold shapes, each in its own color",
+    }
+}
+
 /// Refine's precision (the guided filter's epsilon, 1e-2 to 1e-6 on a log
 /// scale) as a 0-1 Detail amount: more detail is a smaller epsilon.
 fn detail_from_epsilon(epsilon: f32) -> f32 {
@@ -606,7 +619,7 @@ fn render_lines_group(
                 }
                 for option in &LineStyle::ALL[1..] {
                     let selected = std::mem::discriminant(option) == std::mem::discriminant(&s.line_style);
-                    if chip::picker_row(ui, selected, option.name(), "").clicked() && !selected {
+                    if chip::picker_row(ui, selected, option.name(), line_style_description(option)).clicked() && !selected {
                         s.line_style = *option;
                         aggregate_bool(true, StaticKnob::LineStyle, change);
                     }
@@ -706,12 +719,6 @@ fn line_style_params(ui: &mut Ui, style: &mut prunr_core::LineStyle) -> bool {
         }
         LineStyle::Rainbow { cycles } => {
             changed |= chip::slider_row(ui, "Cycles", cycles, 1..=10).changed;
-        }
-        LineStyle::Chromatic { offset } => {
-            changed |= chip::slider_row(ui, "Offset (px)", offset, 1..=16).changed;
-        }
-        LineStyle::Noise { amount } => {
-            changed |= chip::slider_row(ui, "Amount", amount, 0..=255).changed;
         }
         LineStyle::DualScale { fine_color, bold_color } => {
             changed |= rgb_picker_row(ui, "Fine (detail)", fine_color);

@@ -22,6 +22,7 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 
 ### Changed
 
+- Line color styles work with Sketch on Full (gradients, Rainbow, Dual scale), and Dual scale's preview matches Process. The Chromatic and Noise styles are gone; presets that used them draw solid lines. Every style in the list says what it looks like.
 - Presets: one Reset everywhere (a panel's Reset returns to your default preset, like the toolbar's); a background-removal preset applies on every background-removal model; applying a preset sets its brush settings as Reset does; deleting one asks for a second click.
 - Refine edges reads Edge width (was Refine radius); its precision is a Detail percentage under Advanced instead of a number in scientific notation. The Mask panel and its F3 diagram list the steps in the order they run, Contrast last.
 - **Shift edge** (was Edge shift) reads the way other editors do: + grows the cut-out, − shrinks it, over ±20 px. `--edge-shift` on the command line follows, so a positive value now grows the subject.
