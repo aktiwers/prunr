@@ -173,6 +173,12 @@ pub enum Backdrop {
 }
 
 impl Backdrop {
+    /// How a picture backdrop sits in the frame: an effect is made from the
+    /// photo itself, so it covers exactly; an image follows its Fit.
+    pub fn fit(self, image_fit: BgImageFit) -> BgImageFit {
+        if matches!(self, Backdrop::Image(_)) { image_fit } else { BgImageFit::Cover }
+    }
+
     /// What a picture backdrop shows, to tell whether a built texture is
     /// still current; `None` for no picture.
     pub fn picture_key(self) -> Option<u64> {

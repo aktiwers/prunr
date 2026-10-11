@@ -118,8 +118,8 @@ pub struct BackgroundIO {
     /// Without this the `to_rgba8()` clone (~32 MB on a 4K bg) +
     /// `ctx.load_texture` ran inline in `views/canvas.rs::render` on
     /// the first frame after every bg-image pick.
-    pub bg_tex_prep_tx: mpsc::Sender<(u64, u64, egui::ColorImage)>,
-    pub bg_tex_prep_rx: mpsc::Receiver<(u64, u64, egui::ColorImage)>,
+    pub bg_tex_prep_tx: mpsc::Sender<(u64, u64, Option<egui::ColorImage>)>,
+    pub bg_tex_prep_rx: mpsc::Receiver<(u64, u64, Option<egui::ColorImage>)>,
     pub bg_image_tx: mpsc::Sender<BgImageLoad>,
     pub bg_image_rx: mpsc::Receiver<BgImageLoad>,
     /// Bounds simultaneous decode/thumbnail/filter threads to
