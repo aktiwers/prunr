@@ -877,12 +877,12 @@ fn fill_style_params(ui: &mut Ui, style: &mut prunr_core::FillStyle) -> bool {
 /// orthogonal data fields (`bg`, `bg_effect`) — effects take precedence
 /// over solid color at render time, and the chip mirrors that precedence.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum BgKind { Transparent, Solid, Image, BlurredSource, InvertedSource, DesaturatedSource }
+enum BgKind { Transparent, Solid, Image, BlurredSource, DesaturatedSource }
 
 impl BgKind {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 5] = [
         Self::Transparent, Self::Solid, Self::Image,
-        Self::BlurredSource, Self::InvertedSource, Self::DesaturatedSource,
+        Self::BlurredSource, Self::DesaturatedSource,
     ];
 
     fn name(self) -> &'static str {
@@ -891,7 +891,6 @@ impl BgKind {
             Self::Solid => "Solid color",
             Self::Image => "Image",
             Self::BlurredSource => "Blurred source",
-            Self::InvertedSource => "Inverted source",
             Self::DesaturatedSource => "Desaturated source",
         }
     }
@@ -903,7 +902,6 @@ impl BgKind {
             Backdrop::Color(_) => Self::Solid,
             Backdrop::Image(_) => Self::Image,
             Backdrop::Effect(BgEffect::BlurredSource { .. }) => Self::BlurredSource,
-            Backdrop::Effect(BgEffect::InvertedSource) => Self::InvertedSource,
             Backdrop::Effect(BgEffect::DesaturatedSource) => Self::DesaturatedSource,
             Backdrop::Effect(BgEffect::None) => Self::Transparent,
         }
@@ -946,7 +944,7 @@ fn render_background_chip(
     let resp = chip::tooltip(
         chip::chip_button(ui, ICON_PALETTE.codepoint, current.name(), accent),
         "Background",
-        "What fills the transparent area behind the subject: a solid color, an image, or a blurred, inverted or desaturated copy of the photo.",
+        "What fills the transparent area behind the subject: a solid color, an image, or a blurred or desaturated copy of the photo.",
     None,
 );
 
@@ -1031,9 +1029,6 @@ fn render_background_chip(
                         }
                         hint(ui, "A blurred copy of the photo fills the transparent area.");
                     }
-                    BgKind::InvertedSource => {
-                        hint(ui, "An inverted copy of the photo fills the transparent area.");
-                    }
                     BgKind::DesaturatedSource => {
                         hint(ui, "A grayscale copy of the photo fills the transparent area.");
                     }
@@ -1067,10 +1062,6 @@ fn apply_bg_kind(
         BgKind::BlurredSource => {
             *bg = None;
             *bg_effect = BgEffect::BlurredSource { radius: 12 };
-        }
-        BgKind::InvertedSource => {
-            *bg = None;
-            *bg_effect = BgEffect::InvertedSource;
         }
         BgKind::DesaturatedSource => {
             *bg = None;

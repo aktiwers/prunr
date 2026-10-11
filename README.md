@@ -51,7 +51,7 @@ All releases: [github.com/aktiwers/prunr/releases](https://github.com/aktiwers/p
 - **Line extraction** — edges/outlines via DexiNed at four scales, standalone or combined with background removal, with colour styles and compositions
 - **Eraser** — paint over an unwanted area and let LaMa, Big-LaMa, MI-GAN or Stable Diffusion 1.5 (with prompts) fill it in
 - **Upscale** — Real-ESRGAN, NMKD and HAT models at 2×, 3× or 4×, with denoise, sharpen, AI blend, saturation and colour match
-- **Custom backgrounds** — fill the cutout with a solid colour, a picked image (cover / contain / stretch / tile / center) or a blurred / inverted / desaturated version of the photo
+- **Custom backgrounds** — fill the cutout with a solid colour, a picked image (cover / contain / tile) or a blurred or black-and-white version of the photo
 - **Hardware acceleration** — CUDA (NVIDIA), CoreML (Apple), DirectML (Windows), OpenVINO (Intel iGPU/NPU), automatic CPU fallback
 - **Batch processing** — parallel inference across multiple images, switch between them while they work, chain background removal into lines or upscale
 - **Mask tuning** — removal strength, hard cutoff, edge shift, feather, guided filter for fine detail, all previewed live

@@ -506,14 +506,14 @@ impl ChannelSwapVariant {
 )]
 #[serde(rename_all = "snake_case")]
 pub enum BgEffect {
-    /// Keep transparency. Solid `bg` colour (if set) paints at render/export time.
+    /// No picture. Settings saved with the retired Inverted source load
+    /// as this.
     #[default]
+    #[serde(alias = "inverted_source")]
     None,
     /// Fill transparent areas with the source image, blurred. `radius` is the
     /// Gaussian sigma in pixels — higher = softer. Clamped 1..=64.
     BlurredSource { radius: u32 },
-    /// Fill transparent areas with the negative of the source.
-    InvertedSource,
     /// Fill transparent areas with the luma grayscale of the source.
     DesaturatedSource,
 }
@@ -522,7 +522,6 @@ impl BgEffect {
     pub const ALL: &'static [Self] = &[
         BgEffect::None,
         BgEffect::BlurredSource { radius: 12 },
-        BgEffect::InvertedSource,
         BgEffect::DesaturatedSource,
     ];
 
@@ -530,7 +529,6 @@ impl BgEffect {
         match self {
             BgEffect::None => "Transparent",
             BgEffect::BlurredSource { .. } => "Blurred source",
-            BgEffect::InvertedSource => "Inverted source",
             BgEffect::DesaturatedSource => "Desaturated source",
         }
     }
@@ -738,6 +736,11 @@ mod tests {
 
     /// Stretch and Center are retired: saved settings load as the nearest
     /// fit, and the CLI names the ones left.
+    #[test]
+    fn the_retired_inverted_background_loads_as_none() {
+        assert_eq!(serde_json::from_str::<BgEffect>("\"inverted_source\"").unwrap(), BgEffect::None);
+    }
+
     #[test]
     fn retired_fits_load_as_their_nearest() {
         use std::str::FromStr;

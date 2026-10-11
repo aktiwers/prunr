@@ -730,7 +730,7 @@ mod tests {
             }
             StaticKnob::BgEffect => {
                 new.bg_effect = match base.bg_effect {
-                    prunr_core::BgEffect::None => prunr_core::BgEffect::InvertedSource,
+                    prunr_core::BgEffect::None => prunr_core::BgEffect::DesaturatedSource,
                     _ => prunr_core::BgEffect::None,
                 };
             }
