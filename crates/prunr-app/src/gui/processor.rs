@@ -571,6 +571,11 @@ impl Processor {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn set_upscale_in_flight_for_test(&self, active: bool) {
+        self.upscale_active.store(active, Ordering::Release);
+    }
+
     /// `true` while an upscale dispatch is in flight. The intent
     /// gates (`can_process_intent`, `apply_cancel_shortcut`) read this.
     pub fn is_upscale_in_flight(&self) -> bool {

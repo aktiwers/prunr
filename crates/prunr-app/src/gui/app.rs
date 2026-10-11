@@ -3582,7 +3582,7 @@ impl PrunrApp {
         let Some(idx) = self.batch.selected_idx_clamped() else { return };
         let height = theme::CHIP_HEIGHT + theme::SPACE_SM * 2.0;
         let mut toolbar_change = adjustments_toolbar::ToolbarChange::default();
-        let is_processing = self.batch.app_state() == AppState::Processing;
+        let is_processing = self.batch.app_state() == AppState::Processing || self.processor.is_upscale_in_flight();
         // Compared after the toolbar ran: a changed knob or preset is a step.
         let settings_before = self.batch.items[idx].settings;
         egui::Panel::top("adjustments_toolbar")
