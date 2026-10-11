@@ -170,7 +170,7 @@ pub(crate) fn resolve_preset_for_model(
     let mp = entry_for(file, model);
 
     let item_settings = mp.map(|m| m.item_settings).unwrap_or_default();
-    let mut brush = mp.map(|m| m.brush.clone()).unwrap_or_default();
+    let mut brush = mp.map_or_else(|| BrushSettings::floor_for(model), |m| m.brush.clone());
 
     if model.is_sd_family() {
         let sd_default = SdPreset::default();
@@ -465,6 +465,18 @@ mod tests {
         assert!((r.item_settings.gamma - 2.5).abs() < f32::EPSILON);
         assert_eq!(r.item_settings.contrast, ItemSettings::default().contrast);
         assert_eq!(r.brush, BrushSettings::default());
+    }
+
+    /// SD draws its own detail; the eraser's sharpening starts off there,
+    /// and on for the other erasers.
+    #[test]
+    fn sd_erasers_start_with_sharpen_off() {
+        let file = PresetFile::default();
+        for model in [ModelId::SdV15InpaintFp16, ModelId::SdV15LcmInpaintFp16] {
+            assert_eq!(resolve_preset_for_model(&file, model, None).brush.inpaint_sharpen, 0.0, "{model:?}");
+        }
+        let lama = resolve_preset_for_model(&file, ModelId::LaMaFp32, None).brush.inpaint_sharpen;
+        assert_eq!(lama, BrushSettings::default().inpaint_sharpen);
     }
 
     #[test]

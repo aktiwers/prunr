@@ -44,7 +44,7 @@ fn render_advanced_group(ui: &mut egui::Ui, brush: &mut BrushSettings, taesd_ins
     let tuned = usize::from(brush.sd_steps != shipped.steps)
         + usize::from(differs(brush.sd_guidance_scale, shipped.guidance_scale))
         + usize::from(brush.sd_seed.is_some())
-        + usize::from(brush.sd_use_taesd == Some(false));
+        + usize::from(brush.sd_use_taesd.is_some());
     let summary = chip::tuned_summary(tuned);
     let group = GroupChip {
         id_salt: "eraser_advanced",
@@ -94,7 +94,7 @@ fn render_advanced_group(ui: &mut egui::Ui, brush: &mut BrushSettings, taesd_ins
         hint(ui, "Pinned: the same prompt and settings give the same fill every time.");
         ui.add_space(theme::SPACE_XS);
 
-        let mut fast = brush.sd_use_taesd.unwrap_or(true) && taesd_installed;
+        let mut fast = brush.sd_use_taesd_effective_with_avail(taesd_installed);
         let reason = (!taesd_installed).then_some(TAESD_DOWNLOAD_HINT);
         if chip::gated(ui, reason, |ui| chip::toggle_row(ui, "Fast decoder", &mut fast)).changed {
             brush.sd_use_taesd = Some(fast);
