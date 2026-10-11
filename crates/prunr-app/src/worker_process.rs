@@ -467,23 +467,17 @@ pub fn run_worker() -> ! {
                         }
                         LineMode::SubjectOutline => {
                             if let Some(ref img) = chain_img {
-                                // Chain: chain input is already a masked RGBA from a prior
-                                // tier, so run DexiNed on it directly. No seg cache — we
-                                // don't have the seg tensor that produced the chain input.
+                                // A run on an earlier result: that image already is the
+                                // cut-out, effect included, so the lines are traced from
+                                // it directly. No seg cache — no seg tensor made it.
                                 progress.step(prunr_core::Step::DrawingLines);
                                 // invariant: line_mode == SubjectOutline → needs_edge → edge_eng loaded.
                                 let eng_ref = edge_eng.as_ref().unwrap();
-                                let transformed = prunr_core::apply_input_transform(img, edge.input_transform);
-                                eng_ref.infer_all_tensors(&transformed).map(|res| {
-                                    // The chained image is a cut-out: its lines compose onto it
-                                    // like any subject's, with the chosen composition and style.
-                                    let rgba_image = prunr_core::compose_subject_outline(&res, &img.to_rgba8(), &edge);
-                                    edge_tensor_for_cache = Some(res);
-                                    ProcessResult {
-                                        rgba_image,
-                                        active_provider: provider.clone(),
-                                    }
-                                })
+                                prunr_core::outline_subject(img.to_rgba8(), prunr_core::FillStyle::None, &edge, |i| eng_ref.infer_all_tensors(i))
+                                    .map(|(rgba_image, res)| {
+                                        edge_tensor_for_cache = Some(res);
+                                        ProcessResult { rgba_image, active_provider: provider.clone() }
+                                    })
                             } else {
                                 // Non-chain: split pipeline so the seg tensor is captured
                                 // for Tier 2 mask reruns and cross-mode transitions (the
@@ -517,20 +511,20 @@ pub fn run_worker() -> ! {
                                         let th = ir.tensor_height;
                                         let tw = ir.tensor_width;
                                         let active_provider = ir.active_provider.clone();
-                                        let masked_rgba = prunr_core::postprocess_from_flat(
+                                        let plain = prunr_core::MaskSettings { fill_style: prunr_core::FillStyle::None, ..mask };
+                                        let subject = prunr_core::postprocess_from_flat(
                                             &ir.tensor_data, th, tw, original,
-                                            &prunr_core::PostprocessOpts::new(&mask, model),
+                                            &prunr_core::PostprocessOpts::new(&plain, model),
                                         )?;
                                         // Seg tensor captured → Tier 2 mask reruns work in
                                         // SubjectOutline; Off ↔ SubjectOutline can reuse it.
                                         tensor_for_cache = Some((ir.tensor_data, th as u32, tw as u32));
-                                        let masked_img = image::DynamicImage::ImageRgba8(masked_rgba.clone());
                                         progress.step(prunr_core::Step::DrawingLines);
                                         // invariant: line_mode == SubjectOutline → needs_edge → edge_eng loaded.
                                         let eng_ref = edge_eng.as_ref().unwrap();
-                                        let transformed = prunr_core::apply_input_transform(&masked_img, edge.input_transform);
-                                        let edge_res = eng_ref.infer_all_tensors(&transformed)?;
-                                        let rgba_image = prunr_core::compose_subject_outline(&edge_res, &masked_rgba, &edge);
+                                        let (rgba_image, edge_res) = prunr_core::outline_subject(
+                                            subject, mask.fill_style, &edge, |img| eng_ref.infer_all_tensors(img),
+                                        )?;
                                         edge_tensor_for_cache = Some(edge_res);
                                         Ok(ProcessResult { rgba_image, active_provider })
                                     })
@@ -831,21 +825,17 @@ pub fn run_worker() -> ! {
                             .map_err(|e| format!("Failed to decode image: {e}"))?;
 
                         progress.step(prunr_core::Step::RefiningEdges);
-                        let masked_rgba = prunr_core::postprocess_from_flat(
+                        let plain = prunr_core::MaskSettings { fill_style: prunr_core::FillStyle::None, ..mask_settings };
+                        let subject = prunr_core::postprocess_from_flat(
                             &seg_data, seg_tensor_height as usize, seg_tensor_width as usize,
-                            &original, &prunr_core::PostprocessOpts::new(&mask_settings, cmd_model),
+                            &original, &prunr_core::PostprocessOpts::new(&plain, cmd_model),
                         ).map_err(|e| e.to_string())?;
 
-                        let masked_img = image::DynamicImage::ImageRgba8(masked_rgba.clone());
                         progress.step(prunr_core::Step::DrawingLines);
                         let eng_ref = edge_eng.as_ref()
                             .ok_or_else(|| "edge engine not initialized in this subprocess".to_string())?;
-                        let transformed = prunr_core::apply_input_transform(&masked_img, edge_settings.input_transform);
-                        let edge_res = eng_ref.infer_all_tensors(&transformed)
-                            .map_err(|e| e.to_string())?;
-
-                        let rgba_image = prunr_core::compose_subject_outline(&edge_res, &masked_rgba, &edge_settings);
-                        Ok((rgba_image, edge_res))
+                        prunr_core::outline_subject(subject, mask_settings.fill_style, &edge_settings, |img| eng_ref.infer_all_tensors(img))
+                            .map_err(|e| e.to_string())
                     })();
 
                     match produce {

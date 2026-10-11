@@ -438,6 +438,23 @@ pub fn compose_subject_outline(
     }
 }
 
+/// Lines over the subject (Sketch on Subject): `trace` (the line
+/// detector) reads the plain cut-out after the pre-filter, so an effect
+/// never moves the lines; then `fill` colours the subject and the lines
+/// are drawn over it. Returns the result and the traced tensors.
+pub fn outline_subject(
+    subject: RgbaImage,
+    fill: crate::FillStyle,
+    edge: &crate::EdgeSettings,
+    trace: impl FnOnce(&DynamicImage) -> Result<EdgeInferenceResult, CoreError>,
+) -> Result<(RgbaImage, EdgeInferenceResult), CoreError> {
+    let plain = DynamicImage::ImageRgba8(subject);
+    let traced = trace(&apply_input_transform(&plain, edge.input_transform))?;
+    let mut subject = plain.into_rgba8();
+    crate::postprocess::apply_fill_style(&mut subject, fill);
+    Ok((compose_subject_outline(&traced, &subject, edge), traced))
+}
+
 /// The lines over the whole photo (Sketch on Full): every line colour
 /// style, Dual scale included, on transparent. The same compose as the
 /// subject's outline with Lines only.
@@ -798,6 +815,23 @@ mod tests {
         }
     }
     use image::{DynamicImage, RgbImage, Rgb};
+
+    /// In Subject mode the lines are traced from the plain cut-out, so an
+    /// effect never moves them; the effect then colours the subject the
+    /// lines are drawn over.
+    #[test]
+    fn subject_lines_are_traced_before_the_effect() {
+        let subject = RgbaImage::from_pixel(4, 4, image::Rgba([200, 40, 40, 255]));
+        let mut traced_from = None;
+        let edge = crate::EdgeSettings { compose_mode: crate::ComposeMode::SubjectFilled, ..crate::EdgeSettings::default() };
+        let (out, _) = outline_subject(subject.clone(), crate::FillStyle::Invert, &edge, |img| {
+            traced_from = Some(img.to_rgba8());
+            Ok(EdgeInferenceResult { tensors: std::array::from_fn(|_| vec![-10.0; 4]), height: 2, width: 2 })
+        })
+        .expect("traces");
+        assert_eq!(traced_from.expect("traced").get_pixel(0, 0).0, [200, 40, 40, 255], "the plain subject");
+        assert_eq!(out.get_pixel(0, 0).0, [55, 215, 215, 255], "drawn over the subject with its effect");
+    }
 
     /// Wide lines end and turn in round caps, like a pen, not squares.
     #[test]
