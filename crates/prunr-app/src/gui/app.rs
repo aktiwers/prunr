@@ -2450,7 +2450,7 @@ impl PrunrApp {
             scale,
             thickness: u32::from(item.settings.edge_thickness),
         };
-        let cached_edge = item.edge_planes.lookup(plane_key(item.settings.edge_scale));
+        let cached_edge = item.edge_planes.lookup(plane_key(item.settings.edge_settings().primary_scale()));
         let cached_bold = item.edge_planes.lookup(plane_key(prunr_core::EdgeScale::Bold));
         let cached_masked_base = item.cached_masked_base.as_ref().and_then(|(base, recipe, model)| {
             let current_recipe = prunr_core::MaskRecipe::from(&item.settings.mask_settings());
@@ -2477,7 +2477,7 @@ impl PrunrApp {
     /// drag. The tensor rides through as `Arc<Vec<f32>>` so hot hits are a
     /// pointer bump, not a 1.2 MB memcpy per dispatch.
     fn edge_tensor_for_active_scale(item: &mut BatchItem) -> Option<super::live_preview::EdgeTensor> {
-        Self::edge_tensor_for_scale(item, item.settings.edge_scale)
+        Self::edge_tensor_for_scale(item, item.settings.edge_settings().primary_scale())
     }
 
     /// Decompress the edge tensor for a specific scale. Uses the
@@ -2505,7 +2505,7 @@ impl PrunrApp {
             let d = Arc::new(cache.decompress(scale)?);
             (d, cache.height, cache.width)
         };
-        if scale == item.settings.edge_scale {
+        if scale == item.settings.edge_settings().primary_scale() {
             item.volatile_edge_tensor = Some((scale, data.clone()));
         }
         Some(super::live_preview::EdgeTensor { data, height, width })

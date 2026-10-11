@@ -218,6 +218,15 @@ pub struct EdgeSettings {
     pub input_transform: InputTransform,
 }
 
+impl EdgeSettings {
+    /// The scale the main line layer comes from: Dual scale layers Fine
+    /// under Bold whatever the Scale chip says (presets or the CLI can
+    /// still carry Bold there, which would collapse both layers into one).
+    pub fn primary_scale(&self) -> EdgeScale {
+        if matches!(self.line_style, LineStyle::DualScale { .. }) { EdgeScale::Fine } else { self.edge_scale }
+    }
+}
+
 impl Default for EdgeSettings {
     fn default() -> Self {
         Self {
@@ -367,12 +376,6 @@ pub enum LineStyle {
     /// Hue rotates through the colour wheel along pixel index —
     /// `cycles` = how many full rotations across the image.
     Rainbow { cycles: u16 },
-    /// Offset RGB channels of the edge — classic chromatic aberration.
-    /// `offset` is pixels of R/B shift (G stays centred). 1..=8 feels good.
-    Chromatic { offset: u32 },
-    /// Per-edge-pixel hue noise. `amount` = jitter magnitude 0..=255 applied
-    /// to a deterministic per-pixel hash — feels hand-drawn without dithering.
-    Noise { amount: u8 },
     /// Two DexiNed scales layered — Fine at `fine_color` for micro-details,
     /// Bold at `bold_color` for structural edges. Both sets share
     /// `line_strength` and `edge_thickness` from the chip; colours are
@@ -387,8 +390,6 @@ impl LineStyle {
         LineStyle::GradientX { left: [255, 50, 50], right: [50, 50, 255] },
         LineStyle::RadialGradient { center: [128, 128], inner: [255, 200, 50], outer: [30, 20, 60] },
         LineStyle::Rainbow { cycles: 3 },
-        LineStyle::Chromatic { offset: 3 },
-        LineStyle::Noise { amount: 80 },
         LineStyle::DualScale { fine_color: [50, 180, 230], bold_color: [30, 20, 60] },
     ];
 
@@ -399,8 +400,6 @@ impl LineStyle {
             LineStyle::GradientX { .. } => "Horizontal gradient",
             LineStyle::RadialGradient { .. } => "Radial gradient",
             LineStyle::Rainbow { .. } => "Rainbow",
-            LineStyle::Chromatic { .. } => "Chromatic",
-            LineStyle::Noise { .. } => "Noise",
             LineStyle::DualScale { .. } => "Dual scale",
         }
     }
