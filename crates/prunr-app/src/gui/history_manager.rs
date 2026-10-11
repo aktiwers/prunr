@@ -57,19 +57,19 @@ impl HistoryManager {
         !item.redo_stack.is_empty()
     }
 
-    /// Seed history with the source RGBA as an initial no-recipe entry.
-    /// No-op if history already exists or the source hasn't been decoded
-    /// yet.
+    /// Before the first result from the original: the source as the
+    /// history floor (when decoded) and the result's undo step.
     pub(crate) fn seed_with_source(item: &mut BatchItem) {
-        if Self::seed_floor(item) {
-            // First Process action — push a Result marker so undo can
-            // revert from the upcoming result back to the un-processed
-            // source. archive_current_result early-returns on the first
-            // run (item.status != Done yet); without this push, the
-            // action timeline never records the first Process and Cmd+Z
-            // shows "Nothing to undo" even after a completed Process.
-            item.push_action_marker(ActionType::Result);
+        // A result that replaces another gets its step from
+        // `archive_current_result`; the first one from the original gets
+        // it here. `undo_result` returns to the unprocessed image with or
+        // without the seed, so a source still decoding costs no step.
+        if !item.history.is_empty() || item.status == BatchStatus::Done {
+            return;
         }
+        Self::seed_floor(item);
+        drain_redo(item);
+        item.push_action_marker(ActionType::Result);
     }
 
     /// The seed entry alone, for an archive that is a stroke's, not a
@@ -395,16 +395,6 @@ mod tests {
         );
     }
 
-    /// No marker pushed when source isn't decoded yet — there'd be
-    /// nothing to undo to.
-    #[test]
-    fn seed_with_source_skips_marker_when_no_source() {
-        let mut item = fixture(1);
-        // source_rgba defaults to None
-        HistoryManager::seed_with_source(&mut item);
-        assert!(item.actions_undo.is_empty());
-    }
-
     /// Second seed call (history already non-empty) must not double-push
     /// a marker — only the first Process gets the seed-time marker.
     #[test]
@@ -500,6 +490,22 @@ mod tests {
         assert_eq!(item.actions_undo.len(), markers + 1, "the new result gets its undo step");
         assert_eq!(item.history.len(), 1, "with the original to return to");
         assert!(item.redo_stack.is_empty(), "the old branch is gone");
+    }
+
+    /// Process clicked before the source finished decoding: there are no
+    /// pixels to seed, but the first result is still its own undo step,
+    /// back to the unprocessed image.
+    #[test]
+    fn the_first_result_is_undoable_before_the_source_is_decoded() {
+        let mut item = fixture(1);
+        assert!(item.source_rgba.is_none());
+        HistoryManager::seed_with_source(&mut item);
+        assert_eq!(item.actions_undo.len(), 1, "the first Process gets its undo step");
+        item.status = BatchStatus::Done;
+        item.result_rgba = Some(rgba(7));
+        assert!(HistoryManager::undo_result(&mut item));
+        assert_eq!(item.status, BatchStatus::Pending);
+        assert!(item.result_rgba.is_none());
     }
 
     #[test]
