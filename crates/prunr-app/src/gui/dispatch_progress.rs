@@ -10,20 +10,15 @@
 //! For dispatches with no nesting `outer` is `None` and `inner` is
 //! the sole counter.
 //!
-//! Widgets choose: render the nested form `"Tile 2 of 3 — step 5 of 8"`,
-//! or the flat form `"step 13 of 24"` derived from
-//! `outer × inner_total + inner`. Either keeps the user aware of the
-//! true remaining work; the prior surfaces silently reset `inner` at
-//! each `outer` boundary, hiding the rest of the stroke.
+//! The fraction runs across both levels (`outer × inner_total + inner`),
+//! so it never swings back when the next outer unit starts.
 
 use std::borrow::Cow;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use std::sync::{Arc, Mutex};
 
-/// Which dispatch is publishing — drives the headline label and the
-/// per-step text source. New variants (depth, mat-cutting, …) extend
-/// this enum and the widget match.
+/// Which dispatch is publishing; decides what Cancel stops.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProgressKind {
     /// Background-removal segmentation pipeline (BiRefNet, Silueta, …).
@@ -36,46 +31,10 @@ pub enum ProgressKind {
     Upscale,
 }
 
-impl ProgressKind {
-    /// Verb form for the headline ("Erasing", "Upscaling", …).
-    pub fn headline(self) -> &'static str {
-        match self {
-            ProgressKind::Seg => "Processing",
-            ProgressKind::Eraser => "Erasing",
-            ProgressKind::SdInpaint => "Erasing",
-            ProgressKind::Upscale => "Upscaling",
-        }
-    }
-
-    /// Singular noun for the inner counter ("tile" / "step"). The
-    /// eraser + SD path uses "step" for the denoise loop; the upscale
-    /// path uses "tile". Seg has multiple internal stages so "step"
-    /// reads cleanly.
-    pub fn inner_noun(self) -> &'static str {
-        match self {
-            ProgressKind::Upscale => "tile",
-            ProgressKind::Seg | ProgressKind::Eraser | ProgressKind::SdInpaint => "step",
-        }
-    }
-
-    /// Singular noun for the outer counter when set. `Some` only for
-    /// kinds that meaningfully nest today (SD/Eraser tile-of-stroke);
-    /// `None` for kinds that never set `outer`. Returning `Option`
-    /// rather than a placeholder string means a caller reaching for
-    /// the noun without first checking `outer.is_some()` fails at
-    /// the type level instead of rendering a misleading "Tile 0 of 0".
-    pub fn outer_noun(self) -> Option<&'static str> {
-        match self {
-            ProgressKind::SdInpaint | ProgressKind::Eraser => Some("tile"),
-            ProgressKind::Seg | ProgressKind::Upscale => None,
-        }
-    }
-}
-
 pub mod step_labels {
     /// Cancel was requested but the EP finishes its current tile first
     /// (OpenVINO ignores `RunOptions::terminate` mid-run).
-    pub const CANCELLING: &str = "Cancelling… finishing current tile";
+    pub const CANCELLING: &str = "Finishing the current tile";
 }
 
 /// What a banner-Cancel click should target, derived purely from the
@@ -127,7 +86,8 @@ pub struct DispatchProgress {
     pub outer_unit: Option<prunr_core::Unit>,
     pub inner_unit: Option<prunr_core::Unit>,
     /// The tile map: where the work happens, and how far each tile is.
-    pub tiles: Vec<prunr_core::TileRect>,
+    /// Tile cells, overlaps split down the middle so they tile the image.
+    pub tiles: Arc<[prunr_core::TileRect]>,
     pub tile_states: Vec<TileState>,
     /// When work started moving and how far along it was then.
     pub pace: Option<(Instant, f32)>,
@@ -153,7 +113,7 @@ impl DispatchProgress {
             step_label: step_label.into(),
             outer_unit: None,
             inner_unit: None,
-            tiles: Vec::new(),
+            tiles: Arc::new([]),
             tile_states: Vec::new(),
             pace: None,
         }
@@ -177,7 +137,7 @@ impl DispatchProgress {
             }
             &ProgressUpdate::Inner { done, total, unit } => self.set_inner(done, total, unit, now),
             ProgressUpdate::Tiles(rects) => {
-                self.tiles = rects.clone();
+                self.tiles = split_overlaps(rects).into();
                 self.tile_states = vec![TileState::Waiting; rects.len()];
             }
             &ProgressUpdate::Tile { index, done } => {
@@ -249,37 +209,6 @@ impl DispatchProgress {
         Self { inner: (tile_done, tile_total), ..Self::new(ProgressKind::Upscale, label) }
     }
 
-    /// Render the counter in the flat form: `"step 13 of 24"` (counting
-    /// inner across outer iterations). Returns `None` when there's no
-    /// meaningful counter yet — widgets fall back to the spinner-only
-    /// form.
-    pub fn flat_counter_text(&self) -> Option<String> {
-        let (cur, total) = self.flat_counter()?;
-        Some(format!("{noun} {cur} of {total}", noun = self.kind.inner_noun()))
-    }
-
-    /// Render the counter in the nested form: `"Tile 2 of 3 — step 5
-    /// of 8"`. Returns `None` when `outer` is `None` (no nesting) or
-    /// when inner is indeterminate.
-    pub fn nested_counter_text(&self) -> Option<String> {
-        let (oc, ot) = self.outer?;
-        let (ic, it) = self.inner;
-        if it == 0 {
-            return None;
-        }
-        // `outer_noun` is `Some` only when `outer.is_some()` makes
-        // sense for the kind. We already short-circuited above when
-        // `self.outer` was `None`; if `outer_noun` is `None` here the
-        // kind set `outer` despite having no noun (mis-wiring at the
-        // dispatch site) — fall back to "outer" for visibility.
-        let outer_noun = capitalise_first(self.kind.outer_noun().unwrap_or("outer"));
-        let inner_noun = self.kind.inner_noun();
-        let running = (oc + 1).min(ot);
-        Some(format!(
-            "{outer_noun} {running} of {ot} \u{2014} {inner_noun} {ic} of {it}",
-        ))
-    }
-
     /// Flattened `(current, total)` across the outer × inner space.
     /// `None` when indeterminate. Monotonic — every step that lands
     /// advances `current` and never resets, even at outer boundaries.
@@ -303,6 +232,22 @@ impl DispatchProgress {
                 Some((current_step.min(total_steps), total_steps))
             }
         }
+    }
+
+    /// "Crop 2 of 3 · step 5 of 20", or `None` while nothing is counted.
+    /// The outer count names the unit in progress; the inner count what
+    /// is done. A count of one says nothing and is left out.
+    pub fn counter_text(&self) -> Option<String> {
+        use prunr_core::Unit;
+        let outer = self.outer.filter(|&(_, total)| total > 1).map(|(done, total)| {
+            (self.outer_unit.unwrap_or(Unit::Crop), (done + 1).min(total), total)
+        });
+        let (done, total) = self.inner;
+        let inner = (total > 1).then(|| (self.inner_unit.unwrap_or(Unit::Step), done, total));
+        let parts: Vec<String> = outer.into_iter().chain(inner)
+            .map(|(unit, n, total)| format!("{} {n} of {total}", unit.noun(1)))
+            .collect();
+        (!parts.is_empty()).then(|| capitalise_first(&parts.join(" \u{b7} ")))
     }
 
     /// Fraction in `0.0..=1.0` for the progress-bar fill. `None` when
@@ -417,6 +362,31 @@ impl DispatchProgressSlot {
 /// Capitalise the first ASCII char — small helper for the nested-form
 /// outer noun ("tile" → "Tile"). Stays inside the module rather than
 /// pulling in a `heck`-style dependency for one site.
+/// Trim each tile where it overlaps a neighbour, at the middle of the
+/// overlap, so overlapping tiles paint as cells that meet edge to edge.
+fn split_overlaps(rects: &[prunr_core::TileRect]) -> Vec<prunr_core::TileRect> {
+    rects.iter().map(|t| {
+        let mut cell = *t;
+        for o in rects {
+            let (ox1, oy1) = (o.x + o.w, o.y + o.h);
+            if std::ptr::eq(o, t) || o.x >= t.x + t.w || ox1 <= t.x || o.y >= t.y + t.h || oy1 <= t.y {
+                continue;
+            }
+            if o.x < t.x {
+                let mid = (t.x + ox1) / 2.0;
+                if mid > cell.x { cell.w -= mid - cell.x; cell.x = mid; }
+            }
+            if o.x > t.x { cell.w = cell.w.min((o.x + t.x + t.w) / 2.0 - cell.x); }
+            if o.y < t.y {
+                let mid = (t.y + oy1) / 2.0;
+                if mid > cell.y { cell.h -= mid - cell.y; cell.y = mid; }
+            }
+            if o.y > t.y { cell.h = cell.h.min((o.y + t.y + t.h) / 2.0 - cell.y); }
+        }
+        cell
+    }).collect()
+}
+
 fn capitalise_first(s: &str) -> String {
     let mut chars = s.chars();
     match chars.next() {
@@ -439,40 +409,29 @@ mod tests {
     }
 
     #[test]
-    fn flat_counter_for_unnested_dispatch_is_inner() {
-        let p = upscale((12, 49));
-        assert_eq!(p.flat_counter(), Some((12, 49)));
-        assert_eq!(p.flat_counter_text().as_deref(), Some("tile 12 of 49"));
+    fn counts_accumulate_across_the_outer_unit() {
+        // One crop of three done (8 steps) plus 5 steps of the next = 13 of 24.
+        assert_eq!(sd_nested((1, 3), (5, 8)).flat_counter(), Some((13, 24)));
+        assert_eq!(upscale((12, 49)).flat_counter(), Some((12, 49)));
     }
 
     #[test]
-    fn flat_counter_for_nested_dispatch_accumulates_across_outer() {
-        // One tile of three done (8 steps) plus 5 steps of the next = 13 of 24.
-        let p = sd_nested((1, 3), (5, 8));
-        assert_eq!(p.flat_counter(), Some((13, 24)));
-        assert_eq!(p.flat_counter_text().as_deref(), Some("step 13 of 24"));
-    }
-
-    #[test]
-    fn nested_counter_text_uses_outer_noun_capitalised() {
-        let p = sd_nested((1, 3), (5, 8));
-        assert_eq!(
-            p.nested_counter_text().as_deref(),
-            Some("Tile 2 of 3 \u{2014} step 5 of 8"),
-        );
-    }
-
-    #[test]
-    fn nested_counter_text_is_none_when_no_outer() {
-        let p = upscale((12, 49));
-        assert!(p.nested_counter_text().is_none());
+    fn the_counter_names_the_reported_units_and_leaves_out_counts_of_one() {
+        use prunr_core::Unit;
+        let mut p = sd_nested((1, 3), (5, 8));
+        assert_eq!(p.counter_text().as_deref(), Some("Crop 2 of 3 \u{b7} step 5 of 8"), "units default per level");
+        p.outer_unit = Some(Unit::Pass);
+        p.inner_unit = Some(Unit::Tile);
+        assert_eq!(p.counter_text().as_deref(), Some("Pass 2 of 3 \u{b7} tile 5 of 8"));
+        assert_eq!(sd_nested((0, 1), (5, 8)).counter_text().as_deref(), Some("Step 5 of 8"));
+        assert_eq!(DispatchProgress::seg(0, 1, "x").counter_text(), None);
     }
 
     #[test]
     fn indeterminate_inner_returns_none_counters() {
         let p = upscale((0, 0));
         assert!(p.flat_counter().is_none());
-        assert!(p.flat_counter_text().is_none());
+        assert!(p.counter_text().is_none());
         assert!(p.fraction().is_none());
     }
 
@@ -540,29 +499,6 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_kind_headlines_and_nouns_are_distinct() {
-        // Pin the strings — widgets concatenate them, so a rename would
-        // be a user-visible label change.
-        assert_eq!(ProgressKind::Seg.headline(), "Processing");
-        assert_eq!(ProgressKind::Eraser.headline(), "Erasing");
-        assert_eq!(ProgressKind::SdInpaint.headline(), "Erasing");
-        assert_eq!(ProgressKind::Upscale.headline(), "Upscaling");
-        assert_eq!(ProgressKind::Upscale.inner_noun(), "tile");
-        assert_eq!(ProgressKind::Seg.inner_noun(), "step");
-    }
-
-    #[test]
-    fn outer_noun_is_some_only_for_nesting_kinds() {
-        // Pinning the variant set that has an outer dimension —
-        // adding a new ProgressKind variant forces an explicit
-        // decision here.
-        assert_eq!(ProgressKind::SdInpaint.outer_noun(), Some("tile"));
-        assert_eq!(ProgressKind::Eraser.outer_noun(), Some("tile"));
-        assert_eq!(ProgressKind::Seg.outer_noun(), None);
-        assert_eq!(ProgressKind::Upscale.outer_noun(), None);
-    }
-
-    #[test]
     fn seg_builder_accepts_owned_string_for_dynamic_stage() {
         // `BatchManager::progress()` returns `stage: String`. The
         // builder must accept that without forcing the caller into a
@@ -596,6 +532,20 @@ mod tests {
         assert_eq!(p.tile_states, [TileState::Done, TileState::Waiting]);
         p.apply(&ProgressUpdate::Tiles(vec![half(0.0)]));
         assert_eq!(p.tile_states, [TileState::Waiting], "a new layout starts over");
+    }
+
+    #[test]
+    fn overlapping_tiles_meet_in_the_middle_of_the_overlap() {
+        use prunr_core::TileRect;
+        // Two columns overlapping by 0.1, two rows overlapping by 0.2.
+        let t = |x, y| TileRect { x, y, w: 0.55, h: 0.6 };
+        let cells = split_overlaps(&[t(0.0, 0.0), t(0.45, 0.0), t(0.0, 0.4), t(0.45, 0.4)]);
+        let close = |a: f32, b: f32| (a - b).abs() < 1e-6;
+        assert!(close(cells[0].w, 0.5) && close(cells[0].h, 0.5), "{:?}", cells[0]);
+        assert!(close(cells[1].x, 0.5) && close(cells[1].x + cells[1].w, 1.0), "{:?}", cells[1]);
+        assert!(close(cells[3].y, 0.5) && close(cells[3].y + cells[3].h, 1.0), "{:?}", cells[3]);
+        let apart = [TileRect { x: 0.0, y: 0.0, w: 0.2, h: 0.2 }, TileRect { x: 0.5, y: 0.5, w: 0.2, h: 0.2 }];
+        assert_eq!(split_overlaps(&apart), apart, "tiles that do not touch stay whole");
     }
 
     #[test]

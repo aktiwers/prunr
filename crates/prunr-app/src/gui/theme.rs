@@ -157,6 +157,12 @@ pub const BG_PRIMARY: Color32 = Color32::from_rgb(0x1c, 0x1c, 0x1e);
 /// Toolbar and status bar background
 pub const BG_SECONDARY: Color32 = Color32::from_rgb(0x26, 0x24, 0x28);
 
+/// The accent lifted for marks drawn over a photo, where plum is too dark.
+pub const ACCENT_BRIGHT: Color32 = Color32::from_rgb(0x9b, 0x4f, 0xd1);
+
+/// Amber for a run that is stopping.
+pub const CAUTION: Color32 = Color32::from_rgb(0xe8, 0xa8, 0x4c);
+
 /// Primary accent — plum purple (buttons, selections, progress)
 pub const ACCENT: Color32 = Color32::from_rgb(0x7b, 0x2d, 0x8e);
 

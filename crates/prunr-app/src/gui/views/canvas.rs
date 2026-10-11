@@ -145,29 +145,23 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
         }
     }
 
-    match app_state {
-        AppState::Empty => render_empty(ui, app),
+    let img_rect = match app_state {
+        AppState::Empty => {
+            render_empty(ui, app);
+            None
+        }
         AppState::Loaded => render_loaded(ui, app),
         AppState::Processing => render_processing_canvas(ui, app),
         AppState::Done => render_done(ui, app),
-    }
+    };
 
-    // Unified progress overlay: every dispatch reports into one slot.
     if let Some(progress) = app.processor.dispatch_progress() {
         let active_inpaint_item = app.batch.selected_idx_clamped()
             .map(|idx| app.batch.items[idx].id)
             .filter(|&id| app.processor.is_inpaint_in_flight(id));
         let cancelling = progress.is_cancelling()
             || active_inpaint_item.is_some_and(|id| app.processor.is_inpaint_cancelling(id));
-        let cancelled = match app.settings.progress_style {
-            crate::gui::settings::ProgressStyle::Banner => {
-                super::progress_widget::render_banner(ui, canvas_rect, &progress, cancelling)
-            }
-            crate::gui::settings::ProgressStyle::Modal => {
-                super::progress_widget::render_modal(ui, canvas_rect, &progress, cancelling)
-            }
-        };
-        if cancelled {
+        if super::progress_widget::render(ui, canvas_rect, img_rect, &progress, cancelling) {
             // Routing logic is the pure `cancel_target_for` fn — one
             // table-tested match instead of an inline copy.
             use crate::gui::dispatch_progress::{cancel_target_for, CancelTarget};
@@ -209,31 +203,13 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
         handle_magic_brush_input(ui, app, canvas_rect);
     }
 
-    // Magic Brush "Preparing..." overlay — shown while the SAM encoder is
-    // in flight for the selected item. Canvas centre, TEXT_SECONDARY text +
-    // ACCENT spinner below.
     if app.magic_brush_state.is_active() && app.magic_brush_preparing() {
-        // Cursor over the canvas reads as Wait while the encoder is in
-        // flight (secondary cue to the centered "Preparing…" overlay).
-        if ui.ctx().input(|i| i.pointer.hover_pos().is_some_and(|p| canvas_rect.contains(p))) {
+        let hover = ui.ctx().input(|i| i.pointer.hover_pos()).filter(|p| canvas_rect.contains(*p));
+        if hover.is_some() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::Wait);
         }
-        let center = canvas_rect.center();
-        ui.painter().text(
-            center,
-            egui::Align2::CENTER_CENTER,
-            "Preparing\u{2026}",
-            egui::FontId::proportional(14.0),
-            theme::TEXT_SECONDARY,
-        );
-        egui::Area::new(egui::Id::new("magic_preparing_spinner"))
-            .fixed_pos(center + egui::vec2(0.0, 24.0))
-            .show(ui.ctx(), |ui| {
-                ui.spinner();
-            });
-        // 10 Hz polling while the encoder runs — a 60 Hz busy-render of a
-        // static spinner spins up the fan for no visible benefit.
-        ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+        super::progress_widget::render_loading_pill(ui, canvas_rect, hover, prunr_core::Step::LoadingMagicBrush.label());
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
     }
 
     // Bottom-left modifier hint — shown whenever Magic Brush is the active
@@ -651,7 +627,7 @@ fn render_empty(ui: &mut egui::Ui, _app: &PrunrApp) {
     }
 }
 
-fn render_loaded(ui: &mut egui::Ui, app: &PrunrApp) {
+fn render_loaded(ui: &mut egui::Ui, app: &PrunrApp) -> Option<Rect> {
     let canvas_rect = ui.available_rect_before_wrap();
     if let Some(texture) = app.batch.selected_item().and_then(|i| i.source_texture.as_ref()) {
         let img_rect = compute_img_rect(canvas_rect, texture.size_vec2(), app.zoom_state.zoom, app.zoom_state.pan_offset);
@@ -679,6 +655,7 @@ fn render_loaded(ui: &mut egui::Ui, app: &PrunrApp) {
                 ui, it, img_rect,
             );
         }
+        Some(img_rect)
     } else {
         // Source not decoded yet — show spinner
         let center = canvas_rect.center();
@@ -687,15 +664,13 @@ fn render_loaded(ui: &mut egui::Ui, app: &PrunrApp) {
             egui::Spinner::new().size(40.0).color(theme::ACCENT),
         );
         ui.ctx().request_repaint();
+        None
     }
 }
 
 /// Paint the canvas-background "work in progress" effect: gentle
 /// wiggle/breathing of the source image + horizontal shimmer sweep.
-/// The progress pill that used to live here moved to the unified
-/// `progress_widget` (banner / modal); the canvas effect stays as
-/// its own visual cue.
-fn render_processing_canvas(ui: &mut egui::Ui, app: &PrunrApp) {
+fn render_processing_canvas(ui: &mut egui::Ui, app: &PrunrApp) -> Option<Rect> {
     let canvas_rect = ui.available_rect_before_wrap();
     let t = ui.ctx().input(|i| i.time) as f32;
 
@@ -709,7 +684,7 @@ fn render_processing_canvas(ui: &mut egui::Ui, app: &PrunrApp) {
         item.and_then(|i| i.source_texture.as_ref())
     };
 
-    if let Some(texture) = display_texture {
+    let painted = display_texture.map(|texture| {
         let tex_size = texture.size_vec2();
         let wiggle_zoom = 1.0 + (t * 1.5).sin() * 0.003;
         let wiggle_x = (t * 0.8).sin() * 2.0;
@@ -732,12 +707,14 @@ fn render_processing_canvas(ui: &mut egui::Ui, app: &PrunrApp) {
             ui.painter().rect_filled(shimmer_rect, 0.0,
                 Color32::from_rgba_unmultiplied(255, 255, 255, 18));
         }
-    }
+        img_rect
+    });
 
     ui.ctx().request_repaint_after(std::time::Duration::from_millis(66));
+    painted
 }
 
-fn render_done(ui: &mut egui::Ui, app: &PrunrApp) {
+fn render_done(ui: &mut egui::Ui, app: &PrunrApp) -> Option<Rect> {
     let canvas_rect = ui.available_rect_before_wrap();
 
     // Crossfade: result fades in over 0.4s when processing completes
@@ -749,6 +726,7 @@ fn render_done(ui: &mut egui::Ui, app: &PrunrApp) {
     if fade < 1.0 { ui.ctx().request_repaint(); }
 
     let item = app.batch.selected_item();
+    let mut painted = None;
     if app.show_original {
         if let Some(texture) = item.and_then(|i| i.source_texture.as_ref()) {
             let img_rect =
@@ -769,6 +747,7 @@ fn render_done(ui: &mut egui::Ui, app: &PrunrApp) {
                     ui, it, img_rect,
                 );
             }
+            painted = Some(img_rect);
         }
     } else if let Some(result_tex) = item.and_then(|i| i.result_texture.as_ref()) {
         let img_rect =
@@ -823,6 +802,7 @@ fn render_done(ui: &mut egui::Ui, app: &PrunrApp) {
                 ui, it, img_rect,
             );
         }
+        painted = Some(img_rect);
     }
 
     if app.show_original {
@@ -834,6 +814,7 @@ fn render_done(ui: &mut egui::Ui, app: &PrunrApp) {
             theme::TEXT_SECONDARY,
         );
     }
+    painted
 }
 
 fn build_checker_image(light: Color32, dark: Color32) -> egui::ColorImage {
