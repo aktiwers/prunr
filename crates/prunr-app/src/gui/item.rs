@@ -1329,9 +1329,7 @@ mod tests {
         let hash = mask.content_hash();
         item.selection_mask = Some(Arc::new(mask));
         item.selection_hash = Some(hash);
-        item.selection_tex_pending = Some((hash, crate::gui::background_io::SelectionStyle {
-            fill_opacity: 0.15, outline_opacity: 1.0, outline_thickness: 2.0, edge_feather_px: 0,
-        }));
+        item.selection_tex_pending = Some((hash, crate::gui::background_io::SelectionStyle::with_fill(0.15)));
         item.invalidate_selection();
         assert!(item.selection_mask.is_none(), "selection_mask must be cleared");
         assert!(item.selection_hash.is_none(), "selection_hash must be cleared");

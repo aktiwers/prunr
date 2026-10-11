@@ -559,6 +559,11 @@ impl SettingsModel {
         }
     }
 
+    /// See `ModelRole::edits_cutout`.
+    pub fn edits_cutout(self) -> bool {
+        self.role().edits_cutout()
+    }
+
     /// Convert to `ModelKind`, or `None` for variants outside the
     /// seg memory-cap model (Inpaint and Upscale both return `None`).
     pub fn to_model_kind(self) -> Option<ModelKind> {

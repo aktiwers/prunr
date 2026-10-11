@@ -86,6 +86,19 @@ impl BrushMode {
 /// Cells per parallel hash chunk; part of the hash format.
 const HASH_CHUNK: usize = 1 << 20;
 
+/// `a` with a correction cell `g` applied: `g > 0` lifts it toward
+/// opaque by `g / FULL`, `g < 0` scales it toward clear, 0 leaves it.
+#[inline]
+fn corrected_alpha(a: u8, g: i8) -> u8 {
+    if g == 0 {
+        return a;
+    }
+    let s = g as f32 / FULL as f32;
+    let a = a as f32 / 255.0;
+    let out = if s > 0.0 { a + (1.0 - a) * s } else { a * (1.0 + s) };
+    (out * 255.0).round().clamp(0.0, 255.0) as u8
+}
+
 fn scan_flags(cells: &[i8]) -> (bool, bool) {
     let painted = cells.iter().any(|&v| v != 0);
     (painted, painted && cells.iter().any(|&v| MaskArtifact::is_selected(v)))
@@ -353,9 +366,9 @@ impl MaskArtifact {
         }
     }
 
-    /// Nearest-neighbour resample to `w × h`, cell values carried as-is.
-    /// The same index rule as `apply_to_alpha`, so applying the result at
-    /// its own size equals applying `self` resampled inline.
+    /// Nearest-neighbour resample to `w × h`, cell values carried as-is,
+    /// by the same index rule as `apply_to_alpha`.
+    #[cfg(test)]
     pub fn resampled(&self, w: u32, h: u32) -> Self {
         let mut cells = vec![0i8; (w as usize) * (h as usize)];
         self.for_each_resampled(w, h, |i, v| cells[i] = v);
@@ -378,15 +391,29 @@ impl MaskArtifact {
     /// scales it toward clear (`a (1 + s)`), `g == 0` leaves it.
     pub fn apply_to_alpha(&self, alpha: &mut [u8], mask_w: usize, mask_h: usize) {
         debug_assert_eq!(alpha.len(), mask_w * mask_h, "apply_to_alpha: mask len != w*h");
-        self.for_each_resampled(mask_w as u32, mask_h as u32, |i, g| {
-            if g == 0 {
-                return;
-            }
-            let s = g as f32 / FULL as f32;
-            let a = alpha[i] as f32 / 255.0;
-            let out = if s > 0.0 { a + (1.0 - a) * s } else { a * (1.0 + s) };
-            alpha[i] = (out * 255.0).round().clamp(0.0, 255.0) as u8;
-        });
+        if self.is_blank() {
+            return;
+        }
+        if (mask_w, mask_h) == (self.width as usize, self.height as usize) {
+            // Full resolution on every live tick: rows in parallel, and the
+            // untouched rows (most of a typical selection) skipped.
+            alpha.par_chunks_mut(mask_w.max(1)).zip(self.data.par_chunks(mask_w.max(1))).for_each(|(row, cells)| {
+                if cells.iter().all(|&g| g == 0) {
+                    return;
+                }
+                for (a, &g) in row.iter_mut().zip(cells) {
+                    *a = corrected_alpha(*a, g);
+                }
+            });
+            return;
+        }
+        self.for_each_resampled(mask_w as u32, mask_h as u32, |i, g| alpha[i] = corrected_alpha(alpha[i], g));
+    }
+
+    /// The plane a first stroke makes on an empty selection: the stroke
+    /// itself on a cut-out, its Add part kept as an erase elsewhere.
+    pub fn into_selection(self, signed: bool) -> Self {
+        if signed { self } else { self.map(|b| if b > 0 { -b } else { 0 }) }
     }
 }
 
@@ -412,6 +439,10 @@ mod tests {
         assert_eq!(held.merge_stroke(&add, false).unwrap().cells(), &[-127, -127, -100, -127], "add grows the selection");
         assert_eq!(held.merge_stroke(&sub, false).unwrap().cells(), &[0, -27, -60, 0], "subtract carves it away");
         assert!(!MaskArtifact::new_empty(4, 1).merge_stroke(&sub, false).unwrap().has_selected_region(), "nothing to carve");
+        for stroke in [add, sub] {
+            let first = MaskArtifact::new_empty(4, 1).merge_stroke(&stroke, false).unwrap();
+            assert_eq!(stroke.into_selection(false), first, "a first stroke equals merging onto nothing");
+        }
     }
 
     #[test]

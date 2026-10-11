@@ -441,7 +441,7 @@ fn a_process_run_with_a_kept_selection_undoes_in_order() {
     item.start_job(Some(StepKind::Process), crate::gui::item::Engine::Segment);
     item.result_rgba = Some(Arc::new(px(3)));
     item.finish_job();
-    app.apply_kept_selection_to_new_result(9);
+    app.recut_with_selection(9);
     assert!(app.processor.live_preview.is_pending_for(9), "the kept selection re-cuts the new result");
     app.batch.items[0].result_rgba = Some(Arc::new(px(4)));
     app.batch.items[0].amend();

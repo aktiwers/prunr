@@ -445,12 +445,18 @@ impl BrushSettings {
     /// The settings that belong to a model rather than to the brush: the
     /// eraser's region knobs and the Stable Diffusion tuning.
     pub fn take_model_tuning_from(&mut self, source: &Self) {
-        self.inpaint_sharpen = source.inpaint_sharpen;
-        self.inpaint_feather = source.inpaint_feather;
-        self.inpaint_grow = source.inpaint_grow;
+        self.take_inpaint_tuning_from(source);
         self.take_sd_tuning_from(source);
     }
 
+    /// The eraser's region knobs: Expand region, Feather, Sharpen.
+    pub fn take_inpaint_tuning_from(&mut self, source: &Self) {
+        self.inpaint_sharpen = source.inpaint_sharpen;
+        self.inpaint_feather = source.inpaint_feather;
+        self.inpaint_grow = source.inpaint_grow;
+    }
+
+    /// The Stable Diffusion eraser's sampler, prompt and seed settings.
     pub fn take_sd_tuning_from(&mut self, source: &Self) {
         self.sd_scheduler = source.sd_scheduler;
         self.sd_steps = source.sd_steps;
@@ -467,9 +473,7 @@ impl BrushSettings {
         self.radius = source.radius;
         self.hardness = source.hardness;
         self.shape = source.shape;
-        self.inpaint_sharpen = source.inpaint_sharpen;
-        self.inpaint_feather = source.inpaint_feather;
-        self.inpaint_grow = source.inpaint_grow;
+        self.take_inpaint_tuning_from(source);
     }
 }
 

@@ -120,6 +120,14 @@ pub enum ModelRole {
     Upscale,
 }
 
+impl ModelRole {
+    /// Brush strokes edit a cut-out, each with a direction (restore or
+    /// erase), rather than shape a selection.
+    pub fn edits_cutout(self) -> bool {
+        self == ModelRole::Cutout
+    }
+}
+
 /// A surface or control that exists only for some models.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Surface {
