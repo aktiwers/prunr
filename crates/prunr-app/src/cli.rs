@@ -782,6 +782,14 @@ fn run_batch_subprocess(
 
             for event in events {
                 match event {
+                    SubprocessEvent::Report { item_id, update: prunr_core::ProgressUpdate::Step(step) } => {
+                        let orig_idx = item_id as usize;
+                        if !quiet {
+                            if let Some(Some(pb)) = spinners.get(orig_idx) {
+                                pb.set_message(format!("{} \u{2014} {}", inputs[orig_idx].display(), step.label()));
+                            }
+                        }
+                    }
                     SubprocessEvent::Progress { item_id, stage, .. } => {
                         let orig_idx = item_id as usize;
                         if !quiet {

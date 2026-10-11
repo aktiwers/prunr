@@ -2983,6 +2983,7 @@ impl PrunrApp {
         for _ in 0..WORKER_POLL_PER_FRAME {
             let Ok(msg) = self.processor.worker_rx.try_recv() else { break };
             match msg {
+                WorkerResult::Report { update, .. } => self.processor.apply_report(&update),
                 WorkerResult::BatchProgress { item_id, stage, pct } => {
                     self.on_batch_progress(item_id, stage, pct);
                 }
