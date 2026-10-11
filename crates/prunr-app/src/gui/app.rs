@@ -1518,6 +1518,7 @@ impl PrunrApp {
     /// `step`: the undo step the results record, or `None` to fill in the
     /// shown one (a re-run a knob change asked for).
     fn process_items(&mut self, filter: impl Fn(&BatchItem) -> bool, step: Option<StepKind>) {
+        self.batch.fit_line_modes_to(self.settings.model);
         // Pure filter mode: No model AND line_mode = Off. Skip inference +
         // subprocess entirely. (No model + EdgesOnly still needs DexiNed,
         // so falls through to the normal path with a dummy ModelKind — the
@@ -3665,6 +3666,7 @@ impl PrunrApp {
             self.reconcile_bg_image_after_preset(idx, ctx);
         }
         if toolbar_change.model_changed {
+            self.batch.fit_line_modes_to(self.settings.model);
             self.settings.on_model_change_resolve_brush();
             // A model without brushes turns them off, so a tool left on
             // doesn't keep encoding every selected image.
