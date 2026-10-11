@@ -172,8 +172,7 @@ pub struct UpscaleRecipe {
 }
 
 /// Off: an upscale model's output is sharp already, and an unsharp mask on
-/// top boosts its grain (no upscaler sharpens by default). Mirrored by
-/// `ItemSettings::default().sharpen`.
+/// top boosts its grain (no upscaler sharpens by default).
 pub const DEFAULT_SHARPEN: f32 = 0.0;
 
 impl Default for UpscaleRecipe {
@@ -236,9 +235,8 @@ pub enum RequiredTier {
     Skip,
     /// Only compositing changed (bg_color) — parent-local, instant.
     CompositeOnly,
-    /// Only Tier-2 upscale fields (sharpen / ai_blend /
-    /// color_match) changed — re-apply postprocess on the cached
-    /// `upscale_raw` buffer; no re-inference needed.
+    /// Only Tier-2 upscale fields (sharpen / ai_blend / color_match)
+    /// changed — re-finish the kept upscale run; no re-inference needed.
     UpscaleTier2,
     /// Only the upscale recipe changed (Tier-1 fields) — re-composite then
     /// re-upscale; no mask or inference work needed.
