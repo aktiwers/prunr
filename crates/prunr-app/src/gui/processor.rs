@@ -577,7 +577,7 @@ impl Processor {
             return;
         };
         self.dispatch_progress.update(|p| match p {
-            Some(p) if p.kind == ProgressKind::Seg => p.inner = (done, total),
+            Some(p) if p.kind == ProgressKind::Seg => p.set_inner(done, total, prunr_core::Unit::Image, std::time::Instant::now()),
             _ => *p = Some(DispatchProgress::seg(done, total, label)),
         });
     }
@@ -621,11 +621,8 @@ impl Processor {
         // a new stroke starts (and avoids the banner showing the prior
         // stroke's last step count for one frame).
         let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let initial = if tuning.backend.is_sd_family() {
-            super::dispatch_progress::DispatchProgress::sd_inpaint(0, 0, (0, 0))
-        } else {
-            super::dispatch_progress::DispatchProgress::lama_inpaint(0, 0, (0, 0))
-        };
+        let kind = if tuning.backend.is_sd_family() { super::dispatch_progress::ProgressKind::SdInpaint } else { super::dispatch_progress::ProgressKind::Eraser };
+        let initial = super::dispatch_progress::DispatchProgress::new(kind, prunr_core::Step::LoadingModel.label());
         let (progress, run) = self.dispatch_progress.progress_for(initial, cancel.clone());
         self.inpaint_cancels.insert(item_id, cancel.clone());
         self.inpaint_runs.insert(item_id, run.clone());
