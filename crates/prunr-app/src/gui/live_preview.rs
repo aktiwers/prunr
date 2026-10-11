@@ -429,6 +429,11 @@ impl LivePreview {
         out
     }
 
+    /// True while a preview waits for its debounce or runs.
+    pub fn is_busy(&self) -> bool {
+        !self.pending.is_empty() || !self.in_flight.is_empty()
+    }
+
     /// True while a rayon dispatch hasn't drained yet.
     pub fn has_in_flight(&self) -> bool {
         !self.in_flight.is_empty()
