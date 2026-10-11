@@ -1324,6 +1324,11 @@ impl Processor {
         });
     }
 
+    /// Drop the warm Magic Brush sessions; a decode in flight keeps its own.
+    pub(crate) fn release_sam_sessions(&self) {
+        *self.sam_sessions.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    }
+
     pub(crate) fn sam_sessions_ready(&self) -> bool {
         self.sam_sessions.lock().unwrap_or_else(std::sync::PoisonError::into_inner).is_some()
     }
