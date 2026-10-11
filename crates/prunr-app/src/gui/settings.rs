@@ -326,14 +326,13 @@ impl Settings {
         super::presets::resolve_preset_for_model(file, model_id, scheduler)
     }
 
-    /// Re-resolve `Settings.brush` from the active preset's per-model
-    /// values for the active model_id. Called after the model dropdown
-    /// flips so the brush state swaps with the model. Item-level
-    /// `ItemSettings` already swap via the existing per-item path; this
-    /// only handles the global brush state.
+    /// Take the new model's tuning from the active preset after the model
+    /// dropdown flips: the eraser's region knobs and the Stable Diffusion
+    /// settings. What the user set for the brush itself (size, hardness,
+    /// opacity, mode, feather, the selection look, Magic Brush) stays.
     pub(crate) fn on_model_change_resolve_brush(&mut self) {
-        let resolved = self.resolve_active_preset(None);
-        self.brush = resolved.brush;
+        let resolved = self.resolve_active_preset(None).brush;
+        self.brush.take_model_tuning_from(&resolved);
     }
 
     /// Update only the SD-tuning fields on `Settings.brush` to match
@@ -345,15 +344,7 @@ impl Settings {
         scheduler: super::brush_state::SdScheduler,
     ) {
         let resolved = self.resolve_active_preset(Some(scheduler));
-        self.brush.sd_scheduler = resolved.brush.sd_scheduler;
-        self.brush.sd_steps = resolved.brush.sd_steps;
-        self.brush.sd_guidance_scale = resolved.brush.sd_guidance_scale;
-        self.brush.sd_use_karras_sigmas = resolved.brush.sd_use_karras_sigmas;
-        self.brush.sd_strength = resolved.brush.sd_strength;
-        self.brush.sd_prompt = resolved.brush.sd_prompt.clone();
-        self.brush.sd_negative_prompt = resolved.brush.sd_negative_prompt.clone();
-        self.brush.sd_seed = resolved.brush.sd_seed;
-        self.brush.sd_use_taesd = resolved.brush.sd_use_taesd;
+        self.brush.take_sd_tuning_from(&resolved.brush);
     }
 
     /// ItemSettings template for new batch items — the default_preset's
@@ -976,7 +967,7 @@ mod tests {
     }
 
     #[test]
-    fn on_model_change_resolve_brush_swaps_via_resolver() {
+    fn a_model_switch_takes_the_models_tuning_and_keeps_the_users_brush() {
         use crate::gui::brush_state::BrushSettings;
         use super::super::presets::{model_id_key, ModelPreset, PresetFile, PRESET_FORMAT_VERSION};
 
@@ -986,6 +977,7 @@ mod tests {
         silueta_brush.radius = 80.0;
         let mut u2net_brush = BrushSettings::default();
         u2net_brush.radius = 120.0;
+        u2net_brush.inpaint_feather = 9.0;
         let mut models = HashMap::new();
         models.insert(model_id_key(prunr_models::ModelId::Silueta), ModelPreset {
             item_settings: ItemSettings::default(),
@@ -1000,11 +992,13 @@ mod tests {
         let file = PresetFile { format_version: PRESET_FORMAT_VERSION, models };
         s.presets.insert("Foo".to_string(), file);
         s.default_preset = "Foo".to_string();
-        s.brush.radius = 80.0;
+        s.brush.radius = 33.0;
+        s.brush.fill_opacity = 0.2;
 
         s.model = SettingsModel::U2net;
         s.on_model_change_resolve_brush();
-        assert!((s.brush.radius - 120.0).abs() < f32::EPSILON);
+        assert_eq!((s.brush.radius, s.brush.fill_opacity), (33.0, 0.2), "what the user set for the brush survives a model switch");
+        assert_eq!(s.brush.inpaint_feather, 9.0, "the new model's tuning comes from the preset");
     }
 
     #[test]
