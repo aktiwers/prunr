@@ -231,10 +231,12 @@ pub fn apply_background_image(
         let bg_a = raw_bg[bi + 3] as f32 / 255.0;
         if bg_a <= 0.0 { continue; }
         let inv = (1.0 - a) * bg_a;
-        pixel[0] = (pixel[0] as f32 * a + raw_bg[bi] as f32 * inv) as u8;
-        pixel[1] = (pixel[1] as f32 * a + raw_bg[bi + 1] as f32 * inv) as u8;
-        pixel[2] = (pixel[2] as f32 * a + raw_bg[bi + 2] as f32 * inv) as u8;
-        pixel[3] = ((a + inv) * 255.0).min(255.0) as u8;
+        // Straight alpha: the blended colour is divided by the new alpha.
+        let out_a = a + inv;
+        for c in 0..3 {
+            pixel[c] = ((pixel[c] as f32 * a + raw_bg[bi + c] as f32 * inv) / out_a).round().clamp(0.0, 255.0) as u8;
+        }
+        pixel[3] = (out_a * 255.0).round().clamp(0.0, 255.0) as u8;
     }
 }
 
@@ -586,4 +588,17 @@ mod tests {
         assert!(matches!(view, std::borrow::Cow::Owned(_)));
         assert_eq!(view.dimensions(), (2, 2));
     }
+
+    /// Images hold straight alpha: where a see-through picture shows
+    /// through, its colour stays its colour at its own transparency.
+    #[test]
+    fn a_see_through_background_keeps_its_colour() {
+        let mut img = RgbaImage::from_pixel(2, 2, image::Rgba([0, 0, 0, 0]));
+        let bg = DynamicImage::ImageRgba8(RgbaImage::from_pixel(1, 1, image::Rgba([200, 100, 50, 128])));
+        apply_background_image(&mut img, &bg, crate::types::BgImageFit::Tile);
+        let p = img.get_pixel(1, 1).0;
+        assert_eq!(p[3], 128);
+        assert!((p[0] as i32 - 200).abs() <= 1 && (p[1] as i32 - 100).abs() <= 1, "not darkened: {p:?}");
+    }
 }
+
