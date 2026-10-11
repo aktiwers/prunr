@@ -59,7 +59,7 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 - Undo and redo step every stroke on every model, before or after a result, and a stroke is one step.
 - A stroke on an image undone back to the original no longer brings the cut-out back.
 - Switching to another image and back no longer costs an undo step.
-- Processing again or deleting after undoing back to the original can itself be undone.
+- Processing again or deleting after undoing back to the original can itself be undone, and so can a Process started before a large image has finished loading.
 - Undo steps older than half an hour no longer vanish, and two open Prunr windows no longer clear each other's undo files.
 - With the Stable Diffusion eraser kept loaded, later erases keep the faster single crop instead of falling back to tiles.
 - Ctrl+click also subtracts with Magic Brush on Linux and Windows, where window managers often take Alt+click.
