@@ -250,7 +250,8 @@ fn the_sketch_flyout_names_every_control_in_every_mode() {
 fn the_background_flyout_names_every_control_for_each_choice() {
     use super::tree_tests::assert_all_controls_named;
     use prunr_core::BgEffect;
-    let set: [(&str, fn(&mut crate::gui::item::BatchItem)); 6] = [
+    type Choose = fn(&mut crate::gui::item::BatchItem);
+    let set: [(&str, Choose); 6] = [
         ("transparent", |_| {}),
         ("solid", |i| i.settings.bg = Some([10, 20, 30, 255])),
         ("image", |i| i.set_bg_image(image::DynamicImage::new_rgba8(4, 4), None)),
