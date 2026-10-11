@@ -21,6 +21,7 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 
 ### Changed
 
+- Magic Brush shows only what changes its result (mode, Confidence, Remove specks) and draws a small fixed cursor; its size, hardness and shape only ever changed the cursor.
 - How a selection looks on the image is one app setting (Settings › Behavior: Selection fill and Outline the selection) instead of three sliders in each brush panel; outline width is gone, since the outline already widens as you zoom out.
 - Each model shows only the controls that act on its image: no Mask chip without a background-removal model, no selection on an upscaler, and brushes say Add / Subtract wherever they shape a selection rather than a cut-out.
 - **Undo rebuilt on one timeline per image**, the way Krita, GIMP and Photoshop do it. Every step stores its whole state, so undo shows the stored image instantly instead of re-running a model. Knob changes are now undoable (a slider drag is one step), Clear selection is undoable, and an erase that lands removes its brush marks, which undo brings back. A result that finishes after you undo or move on is dropped instead of landing on the wrong state, and undo stops a run in progress.

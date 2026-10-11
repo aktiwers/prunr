@@ -9,7 +9,7 @@ use crate::gui::knob_catalog::{shows, Surface};
 use crate::gui::settings::SettingsModel;
 use crate::gui::theme;
 
-use super::brush_chip::{self, BrushChipOutcome, BRUSH_SHAPES};
+use super::brush_chip::{self, BrushChipOutcome};
 use super::{chip, fmt, magic_brush_chip};
 
 const TOP_INSET: f32 = 12.0;
@@ -108,8 +108,6 @@ fn paint_knobs(ui: &mut Ui, s: &mut BrushSettings, model: SettingsModel) -> bool
 
 fn magic_knobs(ui: &mut Ui, s: &mut BrushSettings, model: SettingsModel) -> bool {
     let mut committed = chip::choice_buttons(ui, brush_chip::mode_choices(model), &mut s.mode);
-    committed |= chip::slider_row_f32(ui, "Size", &mut s.radius, BRUSH_RADIUS_RANGE, true, |v| fmt::px(v, 0)).commit;
     committed |= chip::slider_row_f32(ui, "Confidence", &mut s.magic_confidence_threshold, 0.0..=1.0, false, fmt::percent).commit;
-    committed |= chip::choice_buttons(ui, &BRUSH_SHAPES, &mut s.shape);
     committed
 }

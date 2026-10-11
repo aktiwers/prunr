@@ -30,8 +30,6 @@ pub(crate) fn flyout_body(ui: &mut Ui, bs: &mut BrushSettings, encoder_pending: 
         ui.add_space(6.0);
     }
 
-    outcome.committed |= super::brush_chip::render_cursor_section(ui, bs);
-    ui.add_space(4.0);
     outcome.committed |= chip::choice_row(ui, "Mode", super::brush_chip::mode_choices(model), &mut bs.mode);
     ui.add_space(4.0);
     ui.separator();
