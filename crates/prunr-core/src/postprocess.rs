@@ -57,6 +57,53 @@ pub fn postprocess_from_flat(
     Ok(postprocess(view, original, opts))
 }
 
+/// How a segmentation model's raw output reads as subject coverage in
+/// 0..1: sigmoid for BiRefNet (whose output is logits), then stretched
+/// over the output's range. rembg's birefnet_general.py and BiRefNet's
+/// inference.py both stretch after the sigmoid, not before.
+pub(crate) struct SegNormaliser {
+    use_sigmoid: bool,
+    min: f32,
+    inv_range: f32,
+    /// A flat output: every value is this, subject (1) or not (0).
+    pub(crate) uniform: Option<f32>,
+}
+
+impl SegNormaliser {
+    /// From the raw output's own minimum and maximum.
+    pub(crate) fn new(lo: f32, hi: f32, model: ModelKind) -> Self {
+        let use_sigmoid = matches!(model, ModelKind::BiRefNetLite);
+        // Sigmoid is monotonic, so min(sigmoid(x)) == sigmoid(min(x)):
+        // one exp per bound instead of one per value.
+        let (lo, hi) = if use_sigmoid { (sigmoid(lo), sigmoid(hi)) } else { (lo, hi) };
+        let range = hi - lo;
+        if range < 1e-6 {
+            // Uniform output: a value past one half means all subject.
+            let uniform = Some(if hi > 0.5 { 1.0 } else { 0.0 });
+            return Self { use_sigmoid, min: lo, inv_range: 1.0, uniform };
+        }
+        Self { use_sigmoid, min: lo, inv_range: 1.0 / range, uniform: None }
+    }
+
+    /// Coverage of one raw value, ignoring `uniform`.
+    #[inline]
+    pub(crate) fn stretch(&self, raw: f32) -> f32 {
+        let v = if self.use_sigmoid { sigmoid(raw) } else { raw };
+        ((v - self.min) * self.inv_range).clamp(0.0, 1.0)
+    }
+
+    /// Coverage of one raw value.
+    #[inline]
+    pub(crate) fn apply(&self, raw: f32) -> f32 {
+        self.uniform.unwrap_or_else(|| self.stretch(raw))
+    }
+}
+
+#[inline]
+fn sigmoid(x: f32) -> f32 {
+    1.0 / (1.0 + (-x).exp())
+}
+
 /// Flat-slice variant of `tensor_to_mask`. Reshapes `[1,1,H,W]` and forwards.
 pub fn tensor_to_mask_from_flat(
     tensor: &[f32],
@@ -96,8 +143,6 @@ fn tensor_to_mask_core(
     let correction = opts.correction;
     let pred = raw.slice(ndarray::s![0, 0, .., ..]);
 
-    let use_sigmoid = matches!(model, ModelKind::BiRefNetLite);
-
     let (sh, sw) = (pred.nrows(), pred.ncols());
     let contiguous;
     let pred_slice = match pred.as_slice() {
@@ -131,45 +176,13 @@ fn tensor_to_mask_core(
         )
     };
 
-    let (mi, range, uniform_val) = if !use_sigmoid {
-        let r = hi - lo;
-        if r < 1e-6 {
-            // Uniform output — use the absolute value to decide:
-            // rembg models output ~0 for background, ~1 for foreground
-            // after min-max normalization. A uniform value > 0.5 means
-            // "everything is foreground" → full opacity.
-            (lo, 1.0, Some(if hi > 0.5 { 1.0f32 } else { 0.0 }))
-        } else {
-            (lo, r, None)
-        }
-    } else {
-        // Optimization: sigmoid is monotonic, so min(sigmoid(x)) == sigmoid(min(x)).
-        // Folding over raw logits and applying sigmoid once at the end saves
-        // ~1.05M exp() calls for a 1024² BiRefNet tensor.
-        let sigmoid = |x: f32| 1.0f32 / (1.0 + (-x).exp());
-        let si_mi = sigmoid(lo);
-        let si_ma = sigmoid(hi);
-        let r = si_ma - si_mi;
-        if r < 1e-6 {
-            // Uniform sigmoid output — high confidence (>0.5) means foreground.
-            (si_mi, 1.0, Some(if si_ma > 0.5 { 1.0f32 } else { 0.0 }))
-        } else {
-            (si_mi, r, None)
-        }
-    };
+    let norm = SegNormaliser::new(lo, hi, model);
+    let uniform_val = norm.uniform;
     let gamma = mask_settings.gamma;
     let threshold = mask_settings.threshold;
 
     let mut mask_buf = vec![0u8; sw * sh];
-    let inv_range = 1.0 / range;
-    let normalize = |raw_val: f32| -> f32 {
-        if use_sigmoid {
-            let s = 1.0 / (1.0 + (-raw_val).exp());
-            ((s - mi) * inv_range).clamp(0.0, 1.0)
-        } else {
-            ((raw_val - mi) * inv_range).clamp(0.0, 1.0)
-        }
-    };
+    let normalize = |raw_val: f32| norm.stretch(raw_val);
     let finalise = |val: f32| -> u8 {
         let mut v = val;
         if gamma != 1.0 { v = v.powf(gamma); }

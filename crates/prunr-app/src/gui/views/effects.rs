@@ -13,6 +13,13 @@ use crate::gui::theme;
 /// Seconds a new result takes to reveal.
 pub(crate) const REVEAL_SECS: f64 = 0.6;
 
+/// Seconds the subject outline takes to fade in.
+pub(crate) const SUBJECT_FADE_SECS: f32 = 0.35;
+
+/// Half-widths, in subject-hint pixels, of the outline's line and its glow.
+const OUTLINE_LINE_PX: f32 = 1.5;
+const OUTLINE_GLOW_PX: f32 = 6.0;
+
 /// The whole texture, for `Painter::image`.
 pub(crate) const UNIT_UV: Rect = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
 
@@ -112,13 +119,13 @@ pub(crate) fn subject_glow(hint: &prunr_core::SubjectHint) -> Option<(egui::Colo
     if inside.len() != w * h || !inside.iter().any(|&i| i) {
         return None;
     }
-    let to_subject = chamfer(&inside, w, h);
-    let to_background = chamfer(&inside.iter().map(|&i| !i).collect::<Vec<_>>(), w, h);
+    let to_subject = prunr_core::math::distance_to_nearest(&inside, w, h);
+    let to_background = prunr_core::math::distance_to_nearest(&inside.iter().map(|&i| !i).collect::<Vec<_>>(), w, h);
     let pixels = (0..w * h)
         .map(|i| {
             let d = if inside[i] { to_background[i] } else { to_subject[i] };
-            let line = (1.0 - d / 1.5).max(0.0);
-            let glow = 0.5 * (1.0 - d / 6.0).max(0.0).powi(2);
+            let line = (1.0 - d / OUTLINE_LINE_PX).max(0.0);
+            let glow = 0.5 * (1.0 - d / OUTLINE_GLOW_PX).max(0.0).powi(2);
             GLOW.gamma_multiply(line.max(glow))
         })
         .collect();
@@ -132,41 +139,6 @@ pub(crate) fn subject_glow(hint: &prunr_core::SubjectHint) -> Option<(egui::Colo
         })
         .collect();
     Some((egui::ColorImage { size: [w, h], pixels, source_size: egui::vec2(w as f32, h as f32) }, order))
-}
-
-/// Distance, in pixels, from every pixel to the nearest `target` pixel
-/// (two-pass 3-4 chamfer).
-fn chamfer(target: &[bool], w: usize, h: usize) -> Vec<f32> {
-    const STRAIGHT: f32 = 1.0;
-    const DIAGONAL: f32 = 1.4;
-    let mut d: Vec<f32> = target.iter().map(|&t| if t { 0.0 } else { f32::INFINITY }).collect();
-    for y in 0..h {
-        for x in 0..w {
-            let i = y * w + x;
-            let mut best = d[i];
-            if x > 0 { best = best.min(d[i - 1] + STRAIGHT); }
-            if y > 0 {
-                best = best.min(d[i - w] + STRAIGHT);
-                if x > 0 { best = best.min(d[i - w - 1] + DIAGONAL); }
-                if x + 1 < w { best = best.min(d[i - w + 1] + DIAGONAL); }
-            }
-            d[i] = best;
-        }
-    }
-    for y in (0..h).rev() {
-        for x in (0..w).rev() {
-            let i = y * w + x;
-            let mut best = d[i];
-            if x + 1 < w { best = best.min(d[i + 1] + STRAIGHT); }
-            if y + 1 < h {
-                best = best.min(d[i + w] + STRAIGHT);
-                if x + 1 < w { best = best.min(d[i + w + 1] + DIAGONAL); }
-                if x > 0 { best = best.min(d[i + w - 1] + DIAGONAL); }
-            }
-            d[i] = best;
-        }
-    }
-    d
 }
 
 /// The steady frame of the tile a model is working on.

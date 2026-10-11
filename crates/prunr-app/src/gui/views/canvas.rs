@@ -624,9 +624,6 @@ fn render_empty(ui: &mut egui::Ui, _app: &PrunrApp) {
     }
 }
 
-/// Seconds the subject outline takes to fade in.
-const SUBJECT_FADE_SECS: f32 = 0.35;
-
 /// `texture` in `img_rect`, revealing over the held image while the
 /// item's reveal runs.
 fn paint_image_or_reveal(ui: &egui::Ui, img_rect: Rect, item: &crate::gui::item::BatchItem, texture: &egui::TextureHandle, tint: Color32) {
@@ -727,7 +724,7 @@ fn render_processing_canvas(ui: &mut egui::Ui, app: &PrunrApp) -> Option<Rect> {
         }
         // The subject, outlined as soon as the model has found it.
         if let Some(subject) = item.and_then(|i| i.subject.as_ref()) {
-            let shown = (subject.shown_at.elapsed().as_secs_f32() / SUBJECT_FADE_SECS).min(1.0);
+            let shown = (subject.shown_at.elapsed().as_secs_f32() / super::effects::SUBJECT_FADE_SECS).min(1.0);
             let breath = 0.75 + 0.25 * super::effects::breath(t);
             ui.painter().image(subject.texture.id(), img_rect, super::effects::UNIT_UV, Color32::WHITE.gamma_multiply(shown * breath));
             ui.ctx().request_repaint();

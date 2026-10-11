@@ -97,45 +97,11 @@ fn morphology_step(mask: &GrayImage, dilate: bool) -> GrayImage {
     out
 }
 
-/// Forward + backward chamfer pass returning, for each pixel, the
-/// distance to the nearest mask==0 pixel (0.0 if outside). Diagonal
-/// step uses √2 to keep the metric near-Euclidean.
+/// For each pixel, the distance to the nearest mask==0 pixel (0.0 if
+/// outside).
 pub(crate) fn chamfer_distance_inside(mask: &GrayImage) -> Vec<f32> {
-    let (w, h) = mask.dimensions();
-    let w_us = w as usize;
-    let h_us = h as usize;
-    let large = (w + h) as f32;
-    let mut d: Vec<f32> = mask.as_raw().iter()
-        .map(|&v| if v > 127 { large } else { 0.0 })
-        .collect();
-    const DIAG: f32 = std::f32::consts::SQRT_2;
-    // Forward pass: top-left → bottom-right.
-    for y in 0..h_us {
-        for x in 0..w_us {
-            let i = y * w_us + x;
-            if d[i] == 0.0 { continue; }
-            let mut best = d[i];
-            if x > 0 { best = best.min(d[i - 1] + 1.0); }
-            if y > 0 { best = best.min(d[i - w_us] + 1.0); }
-            if x > 0 && y > 0 { best = best.min(d[i - w_us - 1] + DIAG); }
-            if x + 1 < w_us && y > 0 { best = best.min(d[i - w_us + 1] + DIAG); }
-            d[i] = best;
-        }
-    }
-    // Backward pass: bottom-right → top-left.
-    for y in (0..h_us).rev() {
-        for x in (0..w_us).rev() {
-            let i = y * w_us + x;
-            if d[i] == 0.0 { continue; }
-            let mut best = d[i];
-            if x + 1 < w_us { best = best.min(d[i + 1] + 1.0); }
-            if y + 1 < h_us { best = best.min(d[i + w_us] + 1.0); }
-            if x + 1 < w_us && y + 1 < h_us { best = best.min(d[i + w_us + 1] + DIAG); }
-            if x > 0 && y + 1 < h_us { best = best.min(d[i + w_us - 1] + DIAG); }
-            d[i] = best;
-        }
-    }
-    d
+    let outside: Vec<bool> = mask.as_raw().iter().map(|&v| v <= 127).collect();
+    crate::math::distance_to_nearest(&outside, mask.width() as usize, mask.height() as usize)
 }
 
 /// Apply an unsharp-mask sharpen pass over the inpainted region. LaMa

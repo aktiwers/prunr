@@ -40,6 +40,41 @@ pub fn slice_stats(s: &[f32]) -> (f32, f32, f32) {
     (lo, hi, mean)
 }
 
+/// Distance from every pixel of a `w × h` grid to the nearest `target`
+/// pixel: a forward and a backward chamfer pass, √2 on the diagonals so the
+/// metric stays near Euclidean. With no target anywhere every distance is
+/// `w + h`, longer than any real one.
+pub fn distance_to_nearest(target: &[bool], w: usize, h: usize) -> Vec<f32> {
+    const DIAG: f32 = std::f32::consts::SQRT_2;
+    let far = (w + h) as f32;
+    let mut d: Vec<f32> = target.iter().map(|&t| if t { 0.0 } else { far }).collect();
+    for y in 0..h {
+        for x in 0..w {
+            let i = y * w + x;
+            if d[i] == 0.0 { continue; }
+            let mut best = d[i];
+            if x > 0 { best = best.min(d[i - 1] + 1.0); }
+            if y > 0 { best = best.min(d[i - w] + 1.0); }
+            if x > 0 && y > 0 { best = best.min(d[i - w - 1] + DIAG); }
+            if x + 1 < w && y > 0 { best = best.min(d[i - w + 1] + DIAG); }
+            d[i] = best;
+        }
+    }
+    for y in (0..h).rev() {
+        for x in (0..w).rev() {
+            let i = y * w + x;
+            if d[i] == 0.0 { continue; }
+            let mut best = d[i];
+            if x + 1 < w { best = best.min(d[i + 1] + 1.0); }
+            if y + 1 < h { best = best.min(d[i + w] + 1.0); }
+            if x + 1 < w && y + 1 < h { best = best.min(d[i + w + 1] + DIAG); }
+            if x > 0 && y + 1 < h { best = best.min(d[i + w - 1] + DIAG); }
+            d[i] = best;
+        }
+    }
+    d
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -87,5 +122,17 @@ mod tests {
         assert_eq!(lo, -5.0);
         assert_eq!(hi, 10.0);
         assert_eq!(mean, (n as f32 + 3.0) / n as f32);
+    }
+
+    #[test]
+    fn distance_to_nearest_is_zero_on_targets_and_grows_away() {
+        let mut target = vec![false; 25];
+        target[12] = true; // centre of 5x5
+        let d = distance_to_nearest(&target, 5, 5);
+        assert_eq!(d[12], 0.0);
+        assert_eq!(d[11], 1.0);
+        assert!((d[6] - std::f32::consts::SQRT_2).abs() < 1e-6, "diagonal neighbour");
+        assert!(d[0] > d[6], "farther corners are farther");
+        assert!(distance_to_nearest(&[false; 4], 2, 2).iter().all(|&v| v == 4.0), "no target: w + h");
     }
 }
