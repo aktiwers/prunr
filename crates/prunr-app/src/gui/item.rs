@@ -68,8 +68,12 @@ pub(crate) fn bg_image_content_hash(img: &image::DynamicImage) -> u64 {
 /// - Tier 2 (Warm): Zstd-compressed bytes in RAM — ~3-4x smaller, ~8ms decompress.
 /// - Tier 3 (Cold): Zstd file on disk — zero RAM cost, ~50-100ms read.
 pub(crate) enum HistorySlot {
-    /// Tier 1: uncompressed RGBA in RAM.
+    /// Tier 1: uncompressed RGBA in RAM. Every push lands here; the batch
+    /// compresses it off the UI thread.
     InMemory(Arc<image::RgbaImage>),
+    /// Tier 1 with its compression running; swapped for `Compressed`
+    /// when it lands.
+    Compressing(Arc<image::RgbaImage>),
     /// Tier 2: zstd-compressed in RAM (~3-4x smaller).
     Compressed(super::history_disk::CompressedEntry),
     /// Tier 3: zstd file on disk.
@@ -77,17 +81,11 @@ pub(crate) enum HistorySlot {
 }
 
 impl HistorySlot {
-    /// Compress an RGBA image to RAM (Tier 2), falling back to uncompressed (Tier 1).
-    pub(crate) fn compress(rgba: Arc<image::RgbaImage>) -> Self {
-        super::history_disk::compress_to_ram(&rgba)
-            .map(Self::Compressed)
-            .unwrap_or(Self::InMemory(rgba))
-    }
 
     /// Demote this slot to disk (Tier 3). Only affects Tier 1/2; Tier 3 is a no-op.
     pub(crate) fn demote_to_disk(self, item_id: u64, seq: usize) -> Self {
         match self {
-            Self::InMemory(rgba) => {
+            Self::InMemory(rgba) | Self::Compressing(rgba) => {
                 super::history_disk::write_history(item_id, seq, &rgba)
                     .map(Self::OnDisk)
                     .unwrap_or(Self::InMemory(rgba))
@@ -105,7 +103,7 @@ impl HistorySlot {
     /// Deletes the backing file only on successful disk read.
     pub(crate) fn into_rgba(self) -> Option<Arc<image::RgbaImage>> {
         match self {
-            Self::InMemory(rgba) => Some(rgba),
+            Self::InMemory(rgba) | Self::Compressing(rgba) => Some(rgba),
             Self::Compressed(entry) => {
                 super::history_disk::decompress_from_ram(&entry)
                     .ok()
@@ -144,7 +142,7 @@ pub(crate) struct HistoryEntry {
 
 impl HistoryEntry {
     pub(crate) fn new(rgba: Arc<image::RgbaImage>, recipe: Option<prunr_core::ProcessingRecipe>) -> Self {
-        Self { slot: HistorySlot::compress(rgba), recipe }
+        Self { slot: HistorySlot::InMemory(rgba), recipe }
     }
 
     pub(crate) fn cleanup(&self) {
@@ -1131,8 +1129,7 @@ mod tests {
         let entry = HistoryEntry::new(rgba.clone(), None);
         let (slot, recipe) = entry.into_parts();
         assert!(recipe.is_none());
-        // Slot was compressed; rehydrate and check pixel equality.
-        let recovered = slot.into_rgba().expect("compressed slot must rehydrate");
+        let recovered = slot.into_rgba().expect("slot must rehydrate");
         assert_eq!(recovered.dimensions(), (2, 2));
         assert_eq!(recovered.as_raw(), rgba.as_raw());
     }
@@ -1142,7 +1139,7 @@ mod tests {
         let slot = HistorySlot::default();
         match slot {
             HistorySlot::InMemory(ref rgba) => assert_eq!(rgba.dimensions(), (1, 1)),
-            HistorySlot::Compressed(_) => panic!("expected InMemory, got Compressed"),
+            HistorySlot::Compressing(_) | HistorySlot::Compressed(_) => panic!("expected InMemory"),
             HistorySlot::OnDisk(_) => panic!("expected InMemory, got OnDisk"),
         }
     }

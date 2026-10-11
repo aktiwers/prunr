@@ -2802,9 +2802,8 @@ impl PrunrApp {
 
     /// For every item that is not selected: drop the decoded tensors kept
     /// for slider drags, and park the full-resolution result of Done items
-    /// on top of history (`BatchItem::park_result`), then compress it off
-    /// thread (drained by `pump_history_demote_results`). Inline zstd froze
-    /// the UI for ~2.5 s per selection change on a 50-image 4K batch.
+    /// on top of history (`BatchItem::park_result`); the batch compresses
+    /// it off thread like any other history entry.
     fn evict_background_item_caches(&mut self, selected_idx: usize) {
         for (i, item) in self.batch.items.iter_mut().enumerate() {
             if i == selected_idx {
@@ -2816,22 +2815,7 @@ impl PrunrApp {
             if !self.magic_brush_state.keeps_embedding(item.id) {
                 item.magic_brush_embedding = None;
             }
-            if let Some(rgba) = item.park_result() {
-                let parked = Arc::downgrade(&rgba);
-                let id = item.id;
-                let tx = self.batch.bg_io.history_demote_tx.clone();
-                let slots = self.batch.bg_io.decode_slots.clone();
-                std::thread::spawn(move || {
-                    // Park if every decode slot is busy — same backpressure as
-                    // the texture-prep / decode workers, so a Process All
-                    // burst can't fan out N zstd encoders simultaneously.
-                    let _slot = slots.acquire();
-                    if let Ok(entry) = super::history_disk::compress_to_ram(&rgba) {
-                        let _ = tx.send((id, entry, parked));
-                    }
-                    // On compression failure (rare — disk-full / OOM), the
-                    // in-memory entry stays.
-                });
+            if item.park_result().is_some() {
                 item.result_texture = None;
                 item.result_tex_pending = false;
             }
@@ -2864,24 +2848,6 @@ impl PrunrApp {
             let _ = tx.send((id, bg.hash, ci));
             ctx.request_repaint();
         });
-    }
-
-    /// Replace each in-memory placeholder at `history.back()` with the
-    /// compressed slot just produced off-thread. Recipe match guards
-    /// against a fresh re-Process having pushed a new entry while the
-    /// compression was in flight — in that case we drop the result
-    /// rather than clobber the user's current state.
-    fn pump_history_demote_results(&mut self) {
-        while let Ok((id, entry, parked)) = self.batch.bg_io.history_demote_rx.try_recv() {
-            let Some(item) = self.batch.find_by_id_mut(id) else { continue };
-            if !item.result_parked { continue; }
-            let Some(back) = item.history.back_mut() else { continue };
-            let still_parked = matches!(&back.slot, HistorySlot::InMemory(rgba)
-                if parked.upgrade().is_some_and(|p| Arc::ptr_eq(&p, rgba)));
-            if still_parked {
-                back.slot = HistorySlot::Compressed(entry);
-            }
-        }
     }
 
     /// Kick off background decode if the selected item has no decoded source
@@ -3497,7 +3463,8 @@ impl PrunrApp {
         }
 
         self.pump_thumbnail_results(ctx);
-        self.pump_history_demote_results();
+        self.batch.compress_history_off_thread();
+        self.batch.land_compressed_history();
 
         // Drain off-thread selection textures. `ctx.load_texture` is
         // allowed here — this drain runs from `logic()`, not a render
