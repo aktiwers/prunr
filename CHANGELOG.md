@@ -22,6 +22,8 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 
 ### Changed
 
+- The Inverse mask composition is gone: it only ever drew a ring just outside the subject. Presets that used it load as Lines only.
+- Picking Subject filled while lines are in the photo's own colors switches them to black, since those lines are invisible on the filled subject.
 - Line color styles work with Sketch on Full (gradients, Rainbow, Dual scale), and Dual scale's preview matches Process. The Chromatic and Noise styles are gone; presets that used them draw solid lines. Every style in the list says what it looks like.
 - Presets: one Reset everywhere (a panel's Reset returns to your default preset, like the toolbar's); a background-removal preset applies on every background-removal model; applying a preset sets its brush settings as Reset does; deleting one asks for a second click.
 - Refine edges reads Edge width (was Refine radius); its precision is a Detail percentage under Advanced instead of a number in scientific notation. The Mask panel and its F3 diagram list the steps in the order they run, Contrast last.
