@@ -949,7 +949,14 @@ impl PrunrApp {
             }
             SelectionAction::Invert => {
                 let Some(mask) = self.batch.items[idx].selection_mask.clone() else { return };
-                let inverted = mask.invert(self.settings.brush.mode);
+                // On a cut-out the inverted area restores or erases as the
+                // mode says; elsewhere a selection keeps the erase sign.
+                let mode = if self.settings.model.role() == ModelRole::Cutout {
+                    self.settings.brush.mode
+                } else {
+                    prunr_core::selection::BrushMode::Subtract
+                };
+                let inverted = mask.invert(mode);
                 self.commit_selection_and_dispatch(item_id, inverted, StepKind::Selection);
                 ctx.request_repaint();
             }
