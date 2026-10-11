@@ -796,7 +796,7 @@ mod tests {
     fn evict_all_tensors_clears_edge_cache_too() {
         let mut bm = fixture();
         let mut item = item_with_cache(1, 100);
-        item.edge_planes.store(crate::gui::live_preview::EdgePlanes { base: None, dilated: Some(Arc::new(image::GrayImage::new(1, 1))) }, crate::gui::live_preview::EdgePlaneKey { strength_bits: 0, scale: prunr_core::EdgeScale::Fused, thickness: 0 });
+        item.edge_planes.store_placeholder();
         bm.items.push(item);
         bm.items.push(item_with_cache(2, 100));
         bm.selected_index = 1; // selected = id=2
