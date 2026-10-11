@@ -36,10 +36,9 @@ pub(crate) struct MagicBrushState {
     /// dispatch path means a pan / zoom mid-stroke doesn't corrupt the
     /// SAM points.
     pub(crate) active_trail: Trail,
-    /// The image on screen, the one before it, and when it changed.
-    shown: Option<u64>,
+    /// The image on screen and since when, and the one before it.
+    shown: Option<(u64, Instant)>,
     previous: Option<u64>,
-    shown_since: Option<Instant>,
 }
 
 impl MagicBrushState {
@@ -73,10 +72,9 @@ impl MagicBrushState {
 
     /// Record the image on screen; a change starts the encode settle.
     pub(crate) fn note_shown(&mut self, id: Option<u64>, now: Instant) {
-        if id != self.shown {
-            self.previous = self.shown.take();
-            self.shown = id;
-            self.shown_since = Some(now);
+        if id != self.shown.map(|(shown, _)| shown) {
+            self.previous = self.shown.map(|(shown, _)| shown);
+            self.shown = id.map(|id| (id, now));
         }
     }
 
@@ -86,9 +84,16 @@ impl MagicBrushState {
         self.active && self.previous == Some(id)
     }
 
+    /// The tool cannot take a click yet: an encode runs, or the shown
+    /// image (on with the tool) has no embedding, which covers the settle
+    /// before its encode starts.
+    pub(crate) fn preparing(&self, shown_has_embedding: bool) -> bool {
+        self.encoder_pending || (self.active && !shown_has_embedding)
+    }
+
     /// Time left before the shown image may start encoding.
     pub(crate) fn settle_remaining(&self, now: Instant) -> Option<Duration> {
-        let since = self.shown_since?;
+        let (_, since) = self.shown?;
         ENCODE_SETTLE.checked_sub(now.saturating_duration_since(since)).filter(|d| !d.is_zero())
     }
 

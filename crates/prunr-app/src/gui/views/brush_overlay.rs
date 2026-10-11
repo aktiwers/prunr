@@ -114,7 +114,7 @@ pub(crate) fn handle_input(
 }
 
 /// Convert a screen-space pointer to model-grid coordinates.
-fn screen_to_model(p: Pos2, img_rect: Rect, model_w: u32, model_h: u32) -> Pos2 {
+pub(super) fn screen_to_model(p: Pos2, img_rect: Rect, model_w: u32, model_h: u32) -> Pos2 {
     let in_img_x = (p.x - img_rect.min.x) / img_rect.width().max(1.0);
     let in_img_y = (p.y - img_rect.min.y) / img_rect.height().max(1.0);
     Pos2::new(in_img_x * model_w as f32, in_img_y * model_h as f32)

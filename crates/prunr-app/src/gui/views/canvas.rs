@@ -384,8 +384,6 @@ fn handle_magic_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: 
 
     let screen_to_src = |pos: egui::Pos2| source_point(pos, img_rect, (source_w, source_h));
 
-    // Only the image takes prompts: a press beside it on the canvas would
-    // otherwise clamp onto the nearest edge and select whatever is there.
     let (clicked, drag_started, dragging, released, hover_pos) = ui.ctx().input(|i| {
         let hover = i.pointer.hover_pos();
         let on_image = hover.is_some_and(|p| img_rect.contains(p));
@@ -449,14 +447,14 @@ fn handle_magic_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: 
     }
 }
 
-/// A screen position as a source pixel, or `None` off the image.
+/// A screen position as a source pixel, or `None` off the image: only
+/// the image takes Magic Brush prompts, since a press beside it would
+/// otherwise clamp onto the nearest edge and select whatever sits there.
 fn source_point(pos: egui::Pos2, img_rect: Rect, (w, h): (u32, u32)) -> Option<(f32, f32)> {
-    if !img_rect.contains(pos) || img_rect.width() <= 0.0 || img_rect.height() <= 0.0 {
-        return None;
-    }
-    let px = (pos.x - img_rect.min.x) / img_rect.width() * w as f32;
-    let py = (pos.y - img_rect.min.y) / img_rect.height() * h as f32;
-    Some((px.min(w as f32 - 1.0), py.min(h as f32 - 1.0)))
+    img_rect.contains(pos).then(|| {
+        let p = super::brush_overlay::screen_to_model(pos, img_rect, w, h);
+        (p.x.min(w as f32 - 1.0), p.y.min(h as f32 - 1.0))
+    })
 }
 
 /// Snapshot everything a decoder run needs at click time, so a mode
@@ -984,8 +982,6 @@ fn draw_checkerboard(ui: &egui::Ui, bounds: Rect, dark: bool) {
 mod tests {
     use super::*;
 
-    /// A Magic Brush press beside the image used to clamp onto the edge
-    /// and select whatever sat there.
     #[test]
     fn only_points_on_the_image_become_source_pixels() {
         let img = Rect::from_min_size(egui::pos2(100.0, 50.0), egui::vec2(200.0, 100.0));

@@ -37,6 +37,10 @@ pub(crate) enum EpKind {
     DirectMl,
 }
 
+/// OpenVINO's provider name, defined on every platform so code that
+/// reads a provider string needs no per-platform branch.
+pub(crate) const OPENVINO_NAME: &str = "OpenVINO";
+
 impl EpKind {
     /// Stable display string used by logs, the active-provider label,
     /// and the `ep_compat.json` cache keys. Returned as `&'static str`
@@ -45,7 +49,7 @@ impl EpKind {
     pub(crate) fn as_str(&self) -> &'static str {
         match self {
             #[cfg(not(target_os = "macos"))]
-            EpKind::OpenVino => "OpenVINO",
+            EpKind::OpenVino => OPENVINO_NAME,
             #[cfg(not(target_os = "macos"))]
             EpKind::Cuda => "CUDA",
             #[cfg(target_os = "macos")]
