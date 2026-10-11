@@ -488,7 +488,13 @@ impl BatchManager {
     ) {
         let Some(idx) = self.selected_idx_clamped() else { return };
         let item = &mut self.items[idx];
-        let Some(hash) = item.selection_hash else { return };
+        // No selection left: nothing will replace the old texture, which
+        // the overlay would keep drawing.
+        let Some(hash) = item.selection_hash else {
+            item.selection_texture = None;
+            item.selection_tex_pending = None;
+            return;
+        };
         let key = (hash, style);
         if item.current_selection_texture(style).is_some() || item.selection_tex_pending == Some(key) {
             return;
@@ -1145,6 +1151,25 @@ mod tests {
         // A style change while the first build is in flight re-keys the request.
         bm.ensure_selection_texture(style(0.5), &ctx);
         assert_eq!(bm.items[0].selection_tex_pending, Some((hash, style(0.5))));
+    }
+
+    /// The overlay keeps its last texture while a new one builds, so it
+    /// never flickers. With no selection left (undo of the first stroke)
+    /// nothing replaces it: the texture must go, or the stroke stays drawn.
+    #[test]
+    fn the_overlay_texture_goes_with_the_last_selection() {
+        let mut bm = fixture();
+        bm.items.push(item_with_cache(1, 0));
+        let ctx = egui::Context::default();
+        let mask = std::sync::Arc::new(prunr_core::selection::MaskArtifact::new_empty(8, 8));
+        let handle = ctx.load_texture("sel", egui::ColorImage::new([8, 8], vec![egui::Color32::WHITE; 64]), Default::default());
+        let item = &mut bm.items[0];
+        item.selection_texture = Some(crate::gui::item::SelectionTexture {
+            key: (1, style(0.15)), handle, shown: mask, feathered: None,
+        });
+        assert!(item.selection_hash.is_none(), "the selection was undone");
+        bm.ensure_selection_texture(style(0.15), &ctx);
+        assert!(bm.items[0].selection_texture.is_none());
     }
 
     #[test]
