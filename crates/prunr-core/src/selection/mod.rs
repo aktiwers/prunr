@@ -190,6 +190,19 @@ impl MaskArtifact {
         Self::from_cells(r.width(), r.height(), cells)
     }
 
+    /// A copy of this plane with `patch` written over the cells at `r`;
+    /// the inverse of `crop`. `patch` must be `r`'s size.
+    pub fn paste(&self, r: CellRect, patch: &Self) -> Self {
+        debug_assert_eq!((patch.width, patch.height), (r.width(), r.height()), "patch != rect size");
+        let (w, cw) = (self.width as usize, r.width() as usize);
+        let mut cells = self.data.as_ref().clone();
+        for (row, y) in (r.y0..=r.y1).enumerate() {
+            let start = y as usize * w + r.x0 as usize;
+            cells[start..start + cw].copy_from_slice(&patch.data[row * cw..(row + 1) * cw]);
+        }
+        Self::from_cells(self.width, self.height, cells)
+    }
+
     #[inline]
     pub fn is_selected(v: i8) -> bool {
         v.unsigned_abs() >= SELECTED_THRESHOLD
@@ -661,6 +674,18 @@ mod tests {
         let c = b.crop(r);
         assert_eq!((c.width, c.height), (3, 3));
         assert_eq!(c.cells(), &[50, 0, 0, 0, 0, 0, 0, 0, -70]);
+    }
+
+    #[test]
+    fn paste_undoes_a_change_inside_its_rect() {
+        let a = mask(6, 5, (0..30).map(|i| i as i8).collect());
+        let mut cells = a.cells().to_vec();
+        cells[6 + 2] = 99;
+        cells[3 * 6 + 4] = -70;
+        let b = mask(6, 5, cells);
+        let r = a.diff_bbox(&b).unwrap();
+        assert_eq!(b.paste(r, &a.crop(r)), a, "the old cells restore the old plane");
+        assert_eq!(a.paste(r, &b.crop(r)), b, "and the new ones the new plane");
     }
 
     #[test]

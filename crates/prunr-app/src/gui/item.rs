@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 /// Cap for the action-ordering layer (`actions_undo` / `actions_redo`) and
 /// the preset stacks: 1-byte enum tags and ~100-byte `PresetSnapshot`s, so
-/// 100 entries cost nothing. Stroke snapshots are full planes and use the
+/// 100 entries cost nothing. Stroke snapshots hold planes and use the
 /// shallower `STROKE_HISTORY_DEPTH`.
 pub(crate) const ACTION_HIST_DEPTH: usize = 100;
 
@@ -41,33 +41,10 @@ pub(crate) fn push_action_bounded(stack: &mut VecDeque<ActionType>, kind: Action
 }
 
 
-/// Per-item brush stroke history depth. Each entry is a full source-
-/// resolution plane (1 B/px: ~4 MB at 2048², ~8 MB at 4K), so 32 strokes
-/// cap the stack at ~0.26 GB on 4K content. Shallower than
-/// `ACTION_HIST_DEPTH`; `commit_selection_mask` drops the matching Stroke
-/// marker whenever a snapshot falls off the stack.
-const STROKE_HISTORY_DEPTH: usize = 32;
-
-/// Push a snapshot; returns `true` when the oldest one was dropped to
-/// stay within `STROKE_HISTORY_DEPTH`.
-/// One stroke's place in the history: the selection it replaced, and
-/// whether its re-cut archived the pre-stroke image (chain mode), which
-/// an undo then brings back instead of re-cutting.
-#[derive(Clone)]
-pub(crate) struct StrokeSnapshot {
-    pub(crate) plane: Option<Arc<prunr_core::selection::MaskArtifact>>,
-    pub(crate) result_archived: bool,
-}
-
-fn push_stroke_bounded(stack: &mut VecDeque<StrokeSnapshot>, snap: StrokeSnapshot) -> bool {
-    stack.push_back(snap);
-    let mut dropped = false;
-    while stack.len() > STROKE_HISTORY_DEPTH {
-        stack.pop_front();
-        dropped = true;
-    }
-    dropped
-}
+pub(crate) use super::stroke_history::StrokeSnapshot;
+use super::stroke_history::StrokeStack;
+#[cfg(test)]
+use super::stroke_history::STROKE_HISTORY_DEPTH;
 
 /// `image` is `Arc`-wrapped so cloning across threads (canvas paint and
 /// save worker each take a handle) is a refcount bump, not a memcpy of
@@ -332,8 +309,8 @@ pub(crate) struct BatchItem {
     /// Bounded to STROKE_HISTORY_DEPTH; oldest entries dropped when full.
     /// Snapshots live at source resolution so Paint Brush and Magic Brush
     /// share one undo stack.
-    pub(crate) stroke_undo_stack: VecDeque<StrokeSnapshot>,
-    pub(crate) stroke_redo_stack: VecDeque<StrokeSnapshot>,
+    pub(crate) stroke_undo_stack: StrokeStack,
+    pub(crate) stroke_redo_stack: StrokeStack,
     /// Ordering layer: commit-order sequence of action types. Each entry is a
     /// tag pointing at the per-type stack that holds the corresponding pre-state.
     /// `handle_undo` pops from the back (most-recent) and dispatches; new commits
@@ -535,7 +512,7 @@ impl BatchItem {
         }
         let pre = self.selection_mask.replace(mask);
         self.selection_hash = Some(hash);
-        if push_stroke_bounded(&mut self.stroke_undo_stack, StrokeSnapshot { plane: pre, result_archived: false }) {
+        if self.stroke_undo_stack.push(StrokeSnapshot { plane: pre, result_archived: false }) {
             // The dropped snapshot's marker would otherwise undo nothing.
             if let Some(pos) = self.actions_undo.iter().position(|a| matches!(a, ActionType::Stroke)) {
                 self.actions_undo.remove(pos);
@@ -548,14 +525,12 @@ impl BatchItem {
 
     /// The selection the last stroke commit replaced.
     pub(crate) fn pre_stroke_selection(&self) -> Option<Arc<prunr_core::selection::MaskArtifact>> {
-        self.stroke_undo_stack.back().and_then(|s| s.plane.clone())
+        self.stroke_undo_stack.top_plane()
     }
 
     /// The last stroke's re-cut archived the pre-stroke image.
     pub(crate) fn mark_last_stroke_archived(&mut self) {
-        if let Some(last) = self.stroke_undo_stack.back_mut() {
-            last.result_archived = true;
-        }
+        self.stroke_undo_stack.mark_top_archived();
     }
 
     /// Replace the selection without touching the stroke history: a retune
@@ -583,7 +558,7 @@ impl BatchItem {
     /// Differs from `undo_stroke`: no redo push (cancel is final, not
     /// reversible) and explicitly drops the action marker.
     pub(crate) fn revert_last_stroke_commit(&mut self) {
-        if let Some(prev) = self.stroke_undo_stack.pop_back() {
+        if let Some(prev) = self.stroke_undo_stack.pop() {
             self.selection_mask = prev.plane;
             self.selection_hash = self.selection_mask.as_ref().map(|m| m.content_hash());
         }
@@ -601,9 +576,9 @@ impl BatchItem {
     /// a stroke was there to undo, so the caller knows whether to bring
     /// the archived image back or to re-cut.
     pub(crate) fn undo_stroke(&mut self) -> Option<bool> {
-        let prev = self.stroke_undo_stack.pop_back()?;
+        let prev = self.stroke_undo_stack.pop()?;
         let current = StrokeSnapshot { plane: self.selection_mask.clone(), result_archived: prev.result_archived };
-        push_stroke_bounded(&mut self.stroke_redo_stack, current);
+        self.stroke_redo_stack.push(current);
         self.selection_mask = prev.plane;
         self.selection_hash = self.selection_mask.as_ref().map(|m| m.content_hash());
         Some(prev.result_archived)
@@ -611,9 +586,9 @@ impl BatchItem {
 
     /// Inverse of `undo_stroke`.
     pub(crate) fn redo_stroke(&mut self) -> Option<bool> {
-        let next = self.stroke_redo_stack.pop_back()?;
+        let next = self.stroke_redo_stack.pop()?;
         let current = StrokeSnapshot { plane: self.selection_mask.clone(), result_archived: next.result_archived };
-        push_stroke_bounded(&mut self.stroke_undo_stack, current);
+        self.stroke_undo_stack.push(current);
         self.selection_mask = next.plane;
         self.selection_hash = self.selection_mask.as_ref().map(|m| m.content_hash());
         Some(next.result_archived)
@@ -868,8 +843,8 @@ impl BatchItem {
             applied_preset,
             preset_undo_stack: VecDeque::new(),
             preset_redo_stack: VecDeque::new(),
-            stroke_undo_stack: VecDeque::new(),
-            stroke_redo_stack: VecDeque::new(),
+            stroke_undo_stack: StrokeStack::default(),
+            stroke_redo_stack: StrokeStack::default(),
             actions_undo: VecDeque::new(),
             actions_redo: VecDeque::new(),
             bg_image: None,
