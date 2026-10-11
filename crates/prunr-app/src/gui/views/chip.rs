@@ -255,10 +255,6 @@ pub(super) fn popup_for(
         resp,
         egui::PopupCloseBehavior::CloseOnClickOutside,
         |ui| {
-            // Match `selectable_label` selection highlight to the app accent
-            // — egui's default blue clashed in chip popovers (fill-style
-            // list, channel-swap variants, etc.).
-            ui.visuals_mut().selection.bg_fill = theme::ACCENT;
             ui.set_min_width(theme::POPOVER_WIDTH);
             body(ui);
         },
@@ -288,7 +284,6 @@ pub(super) fn flyout_for(id: egui::Id, resp: &Response, body: impl FnOnce(&mut U
             }
             // The frame is drawn inside so it fades with the contents.
             egui::Frame::popup(ui.style()).show(ui, |ui| {
-                ui.visuals_mut().selection.bg_fill = theme::ACCENT;
                 ui.set_min_width(theme::POPOVER_WIDTH);
                 body(ui);
             });

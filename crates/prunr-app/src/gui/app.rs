@@ -172,6 +172,9 @@ impl PrunrApp {
         visuals.widgets.open.bg_stroke = subtle; // ComboBox "open" state
         visuals.window_stroke = subtle;
         visuals.error_fg_color = theme::DESTRUCTIVE;
+        // Selected choices (Restore / Erase, shapes, lists) wear the accent
+        // everywhere, the tool strip included, not egui's blue.
+        visuals.selection.bg_fill = theme::ACCENT;
         cc.egui_ctx.set_visuals(visuals);
 
         // Override font sizes and suppress debug red-border warnings
