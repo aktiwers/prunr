@@ -99,7 +99,7 @@ pub(crate) fn paint_working_masked(painter: &Painter, rect: Rect, mask: TextureI
 }
 
 /// `to` arriving where `from` was, at `p` (0..1), along a soft edge with a
-/// lavender glow; `from` leaves along the same edge, so where the new
+/// purple glow; `from` leaves along the same edge, so where the new
 /// image is transparent the old one is already gone when the edge passes.
 /// `order` (one value per mesh vertex, see `subject_glow`) sets where it
 /// starts; without one it runs corner to corner.
@@ -107,7 +107,7 @@ pub(crate) fn paint_reveal(painter: &Painter, rect: Rect, from: TextureId, to: T
     let at = |u: f32, v: f32, i: usize| reveal_at(p, order.and_then(|o| o.get(i).copied()).unwrap_or((u + v) * 0.5));
     paint_mesh(painter, rect, from, |u, v, i| Color32::WHITE.gamma_multiply(1.0 - at(u, v, i).0));
     paint_mesh(painter, rect, to, |u, v, i| Color32::WHITE.gamma_multiply(at(u, v, i).0));
-    paint_mesh(painter, rect, TextureId::default(), |u, v, i| GLOW.gamma_multiply(0.45 * at(u, v, i).1));
+    paint_mesh(painter, rect, TextureId::default(), |u, v, i| theme::ACCENT_BRIGHT.gamma_multiply(0.25 * at(u, v, i).1));
 }
 
 /// A glowing outline around the subject in `hint`, and the order a reveal
@@ -126,7 +126,7 @@ pub(crate) fn subject_glow(hint: &prunr_core::SubjectHint) -> Option<(egui::Colo
             let d = if inside[i] { to_background[i] } else { to_subject[i] };
             let line = (1.0 - d / OUTLINE_LINE_PX).max(0.0);
             let glow = 0.5 * (1.0 - d / OUTLINE_GLOW_PX).max(0.0).powi(2);
-            GLOW.gamma_multiply(line.max(glow))
+            theme::ACCENT_BRIGHT.gamma_multiply(line.max(glow))
         })
         .collect();
     let far = to_subject.iter().copied().fold(1.0, f32::max);
