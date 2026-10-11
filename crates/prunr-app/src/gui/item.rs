@@ -75,12 +75,23 @@ pub(crate) struct SubjectOutline {
     pub(crate) order: Arc<[f32]>,
 }
 
-/// A run awaited by an item: the timeline version it started at, and the
-/// step its result records (`None`: it fills in the shown step).
+/// A run awaited by an item: the timeline version it started at, the
+/// step its result records (`None`: it fills in the shown step), and the
+/// engine running it.
 #[derive(Clone, Copy)]
 pub(crate) struct Job {
     pub(crate) version: u64,
     pub(crate) step: Option<StepKind>,
+    pub(crate) engine: Engine,
+}
+
+/// What runs a job, and so what cancelling it stops.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Engine {
+    /// Background removal, and the filters-only pass.
+    Segment,
+    Erase,
+    Upscale,
 }
 
 pub(crate) struct BatchItem {
@@ -506,8 +517,8 @@ impl BatchItem {
 
     /// Note a run starting now; `step` is the step its result records,
     /// `None` to fill in the shown one (a re-run a knob change asked for).
-    pub(crate) fn start_job(&mut self, step: Option<StepKind>) {
-        self.job = Some(Job { version: self.timeline.version(), step });
+    pub(crate) fn start_job(&mut self, step: Option<StepKind>, engine: Engine) {
+        self.job = Some(Job { version: self.timeline.version(), step, engine });
     }
 
     /// Whether a landing result belongs to the state this item shows:
@@ -1102,19 +1113,19 @@ mod tests {
     #[test]
     fn a_run_lands_only_on_the_state_it_started_from() {
         let mut item = fixture_item(1);
-        item.start_job(Some(StepKind::Process));
+        item.start_job(Some(StepKind::Process), Engine::Segment);
         assert!(item.job_is_current());
         item.result_rgba = Some(px(1));
         item.status = BatchStatus::Done;
         item.finish_job();
         assert_eq!(item.timeline.undo_steps(), 1);
 
-        item.start_job(None);
+        item.start_job(None, Engine::Segment);
         item.result_rgba = Some(px(2));
         item.finish_job();
         assert_eq!(item.timeline.undo_steps(), 1, "a re-run fills in the shown step");
 
-        item.start_job(Some(StepKind::Process));
+        item.start_job(Some(StepKind::Process), Engine::Segment);
         item.undo_step();
         assert!(!item.job_is_current(), "an undo since the start makes the result stale");
     }
@@ -1129,7 +1140,7 @@ mod tests {
         item.commit(StepKind::Process);
         assert!(item.park_result());
         assert!(item.result_rgba.is_none());
-        item.start_job(None);
+        item.start_job(None, Engine::Segment);
         item.abandon_job();
         assert_eq!(item.status, BatchStatus::Done, "a parked result still counts as shown");
         item.unpark_result();
