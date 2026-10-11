@@ -701,8 +701,7 @@ fn render_processing_canvas(ui: &mut egui::Ui, app: &PrunrApp) -> Option<Rect> {
             Pos2::new(sweep_x + 40.0, img_rect.max.y),
         ).intersect(img_rect);
         if shimmer_rect.width() > 0.0 && shimmer_rect.height() > 0.0 {
-            ui.painter().rect_filled(shimmer_rect, 0.0,
-                Color32::from_rgba_unmultiplied(255, 255, 255, 18));
+            ui.painter().rect_filled(shimmer_rect, 0.0, theme::PROCESSING_SWEEP);
         }
         img_rect
     });
