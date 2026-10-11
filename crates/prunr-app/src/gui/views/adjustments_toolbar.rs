@@ -150,7 +150,9 @@ pub(crate) fn render(
     state: ToolbarState<'_>,
 ) -> ToolbarChange {
     let mut change = ToolbarChange::default();
-    let defaults = ItemSettings::default();
+    // A group's Reset returns to the user's default preset, like the
+    // toolbar Reset, not to factory values.
+    let defaults = app_settings.preset_values(&app_settings.default_preset);
 
     ui.spacing_mut().item_spacing.x = theme::SPACE_SM;
 
@@ -1129,6 +1131,7 @@ pub(super) fn render_reset_preset_cluster(
 
     if let Some(name) = preset_dropdown::render(ui, app_settings, item_settings, presets) {
         *presets.applied = name;
+        change.brush_settings_committed = true;
         mark_preset_apply(change);
     }
 }

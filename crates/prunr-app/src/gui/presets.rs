@@ -200,8 +200,7 @@ pub(crate) fn resolve_preset_for_model(
     model: ModelId,
     scheduler: Option<SdScheduler>,
 ) -> ResolvedView {
-    let key = model_id_key(model);
-    let mp = file.models.get(&key);
+    let mp = entry_for(file, model);
 
     let item_settings = mp.map(|m| m.item_settings).unwrap_or_default();
     let mut brush = mp.map(|m| m.brush.clone()).unwrap_or_default();
@@ -213,6 +212,21 @@ pub(crate) fn resolve_preset_for_model(
     }
 
     ResolvedView { item_settings, brush }
+}
+
+/// The background-removal models, in the order a preset's entry for one
+/// stands in for another.
+const CUTOUT_MODELS: [ModelId; 3] = [ModelId::BiRefNetLite, ModelId::Silueta, ModelId::U2net];
+
+/// `file`'s entry for `model`. The mask knobs mean the same on every
+/// background-removal model, so one without an entry of its own uses
+/// another's.
+pub(crate) fn entry_for(file: &PresetFile, model: ModelId) -> Option<&ModelPreset> {
+    file.models.get(&model_id_key(model)).or_else(|| {
+        CUTOUT_MODELS.contains(&model)
+            .then(|| CUTOUT_MODELS.iter().find_map(|m| file.models.get(&model_id_key(*m))))
+            .flatten()
+    })
 }
 
 /// Save-time split: produce the on-disk shape from a unified live
