@@ -455,9 +455,12 @@ pub fn apply_input_transform<'a>(
     const SMOOTH_SIGMA: f32 = 1.2;
     match transform {
         InputTransform::None => return Cow::Borrowed(img),
+        // At the detector's size: blurred at full size, the softening
+        // would shrink away with the photo before the detector sees it.
         InputTransform::Smooth => {
-            let rgba = crate::formats::rgba_view(img);
-            return Cow::Owned(DynamicImage::ImageRgba8(image::imageops::blur(&*rgba, SMOOTH_SIGMA)));
+            let flat = if img.color().has_alpha() { Cow::Owned(flatten_on_white(img)) } else { Cow::Borrowed(img) };
+            let seen = crate::formats::resize_rgb_lanczos3(&flat, DEXINED_W, DEXINED_H);
+            return Cow::Owned(DynamicImage::ImageRgb8(image::imageops::blur(&seen, SMOOTH_SIGMA)));
         }
         _ => {}
     }
@@ -556,14 +559,20 @@ fn preprocess(img: &DynamicImage) -> Array4<f32> {
 mod tests {
     use super::*;
 
-    /// Smooth softens a hard step, so single-pixel noise fades before the
-    /// detector sees it.
+    /// The detector sees a 640×480 copy, so Smooth must soften that copy
+    /// alike on a large photo and a small one.
     #[test]
-    fn the_smooth_prefilter_softens_a_step() {
-        let img = DynamicImage::ImageRgba8(RgbaImage::from_fn(16, 1, |x, _| if x < 8 { image::Rgba([0, 0, 0, 255]) } else { image::Rgba([255, 255, 255, 255]) }));
-        let out = apply_input_transform(&img, crate::types::InputTransform::Smooth).to_rgba8();
-        let at = |x| out.get_pixel(x, 0)[0];
-        assert!(at(7) > 0 && at(8) < 255, "the step is softened: {} {}", at(7), at(8));
+    fn smooth_softens_what_the_detector_sees_at_any_photo_size() {
+        for (w, h) in [(3200u32, 2400u32), (320, 240)] {
+            let step = |x: u32| if x < w / 2 { image::Rgba([0, 0, 0, 255]) } else { image::Rgba([255, 255, 255, 255]) };
+            let img = DynamicImage::ImageRgba8(RgbaImage::from_fn(w, h, |x, _| step(x)));
+            let seen = |i: &DynamicImage| crate::formats::resize_rgb_lanczos3(i, DEXINED_W, DEXINED_H);
+            let plain = seen(&img);
+            let smooth = seen(&apply_input_transform(&img, crate::types::InputTransform::Smooth));
+            let x = DEXINED_W / 2 - 2;
+            let (p, s) = (plain.get_pixel(x, 240)[0], smooth.get_pixel(x, 240)[0]);
+            assert!(s > p.saturating_add(10), "{w}×{h}: Smooth lightens the dark side next to the step: {p} → {s}");
+        }
     }
 
     // The compositions as shipped before the row-parallel rewrite: the
