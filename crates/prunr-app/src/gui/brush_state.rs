@@ -390,12 +390,12 @@ impl BrushSettings {
         Stamp { hardness: self.hardness, strength: self.strength, mode: self.mode }
     }
 
-    /// Stamp for the eraser's region. Its Opacity and Mode chips are
-    /// hidden, so their values must not leak in: full strength, adding to
-    /// the region unless the subtract modifier is held.
+    /// Stamp for the eraser's region, which is all or nothing: hard and
+    /// full strength, so the region covers exactly the cursor, adding
+    /// unless the subtract modifier is held.
     pub fn region_stamp(&self, subtract: bool) -> Stamp {
         let mode = if subtract { BrushMode::Subtract } else { BrushMode::Add };
-        Stamp { hardness: self.hardness, strength: 1.0, mode }
+        Stamp { hardness: 1.0, strength: 1.0, mode }
     }
 
     #[cfg(test)]
@@ -985,6 +985,20 @@ mod tests {
         assert!(!s.has_active_stroke());
     }
 
+
+    /// The eraser fills what the cursor covers, whatever Hardness says:
+    /// a soft stamp cut at half coverage used to shrink the region to
+    /// half the cursor at 0 %.
+    #[test]
+    fn the_eraser_region_reaches_the_cursor_edge_at_any_hardness() {
+        use prunr_core::selection::MaskArtifact;
+        let s = BrushSettings { hardness: 0.0, ..BrushSettings::default() };
+        let mut plane = MaskArtifact::new_empty(101, 101);
+        prunr_core::brush::paint_circle(&mut plane, 50.0, 50.0, 40.0, s.region_stamp(false));
+        let region = plane.region_mask(101, 101);
+        assert_eq!(region.get_pixel(50 + 37, 50)[0], 255, "near the rim is filled");
+        assert_eq!(region.get_pixel(50 + 44, 50)[0], 0, "outside the cursor is not");
+    }
 
     #[test]
     fn reset_popover_fields_from_default_restores_visible_sliders_and_shape_only() {

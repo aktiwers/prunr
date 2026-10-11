@@ -16,15 +16,6 @@ use super::fmt;
 /// large brush still renders cleanly inside this box.
 const PREVIEW_SIZE: f32 = 80.0;
 
-/// Maximum inpaint_feather value exposed in the UI, used to normalize
-/// the hardness-reduction preview. At feather=INPAINT_FEATHER_MAX the
-/// stamp's effective hardness is cut in half — visualizes the soft-edge
-/// effect approximately. (Production uses an edge-preserving guided
-/// filter, not a literal Gaussian — the preview just gives the user a
-/// rough sense of how the slider value affects the boundary.)
-const INPAINT_FEATHER_MAX: f32 = 32.0;
-const FEATHER_HARDNESS_REDUCTION_CAP: f32 = 0.5;
-
 /// What a brush panel or the tool strip changed this frame.
 #[derive(Default, Clone, Copy)]
 pub(crate) struct BrushChipOutcome {
@@ -65,18 +56,17 @@ pub(super) const BRUSH_SHAPES: [chip::Choice<BrushShape>; 3] = [
 
 pub(super) fn flyout_body(ui: &mut Ui, s: &mut BrushSettings, model: SettingsModel) -> BrushChipOutcome {
     let mut outcome = BrushChipOutcome::default();
-    if chip::popover_header(ui, "Brush", Some(("Reset size, hardness, expand, edge blend, sharpen and shape", false))) {
+    if chip::popover_header(ui, "Brush", Some(("Reset the brush", false))) {
         outcome.reset_brush_requested = true;
     }
-    outcome.committed |= render_cursor_section(ui, s);
+    let selection_strokes = shows(model, Surface::SelectionStrokes);
+    outcome.committed |= render_cursor_section(ui, s, selection_strokes);
     ui.add_space(4.0);
-    if shows(model, Surface::SelectionStrokes) {
+    if selection_strokes {
         let st = chip::slider_row_f32(ui, "Opacity", &mut s.strength, 0.0..=1.0, false, fmt::percent);
         outcome.committed |= st.commit;
         super::hint(ui, "How strongly each stroke changes the selection.");
         ui.add_space(6.0);
-    }
-    if shows(model, Surface::SelectionStrokes) {
         outcome.committed |= chip::choice_row(ui, "Mode", mode_choices(model), &mut s.mode);
     }
     if shows(model, Surface::FillRegionKnobs) {
@@ -84,9 +74,9 @@ pub(super) fn flyout_body(ui: &mut Ui, s: &mut BrushSettings, model: SettingsMod
         outcome.committed |= g.commit;
         super::hint(ui, "Grow or shrink the painted region before the fill.");
         ui.add_space(4.0);
-        let f = chip::slider_row_f32(ui, "Edge blend", &mut s.inpaint_feather, 0.0..=32.0, false, |v| fmt::px(v, 0));
+        let f = chip::slider_row_f32(ui, "Feather", &mut s.inpaint_feather, 0.0..=32.0, false, |v| fmt::px(v, 0));
         outcome.committed |= f.commit;
-        super::hint(ui, "Width of the band where the fill blends into the photo.");
+        super::hint(ui, "Soften where the fill meets the photo.");
         ui.add_space(4.0);
         // Sharpen displays as 0-100% on a 0-2 internal range.
         let sh = chip::slider_row_f32(ui, "Sharpen", &mut s.inpaint_sharpen, 0.0..=2.0, false, |v| fmt::percent(v / 2.0));
@@ -94,18 +84,19 @@ pub(super) fn flyout_body(ui: &mut Ui, s: &mut BrushSettings, model: SettingsMod
         super::hint(ui, "Sharpen the filled area, which comes out slightly soft.");
     }
 
-    ui.add_space(4.0);
-    ui.separator();
-    ui.add_space(4.0);
-
-    outcome.committed |= render_shared_selection_section(ui, s);
+    if selection_strokes {
+        ui.add_space(4.0);
+        ui.separator();
+        ui.add_space(4.0);
+        outcome.committed |= render_shared_selection_section(ui, s);
+    }
     outcome
 }
 
-/// The cursor block shared by both brushes: Size and Hardness on the
-/// left, the live stamp preview and Shape on the right. Returns true if
-/// anything committed this frame.
-pub(super) fn render_cursor_section(ui: &mut Ui, s: &mut BrushSettings) -> bool {
+/// The Paint Brush's cursor block: Size and, where strokes are graded,
+/// Hardness on the left, the stamp preview and Shape on the right.
+/// Returns true if anything committed this frame.
+fn render_cursor_section(ui: &mut Ui, s: &mut BrushSettings, with_hardness: bool) -> bool {
     let mut committed = false;
     ui.horizontal(|ui| {
         ui.vertical(|ui| {
@@ -113,15 +104,17 @@ pub(super) fn render_cursor_section(ui: &mut Ui, s: &mut BrushSettings) -> bool 
             ui.set_max_width(280.0);
             let r = chip::slider_row_f32(ui, "Size", &mut s.radius, BRUSH_RADIUS_RANGE, true, |v| fmt::px(v, 0));
             committed |= r.commit;
-            ui.add_space(4.0);
-            // tenths give ~0.5% drag granularity for fine edge tuning
-            let h = chip::slider_row_f32(ui, "Hardness", &mut s.hardness, 0.0..=1.0, false, fmt::percent_tenths);
-            committed |= h.commit;
-            super::hint(ui, "0% is a soft edge, 100% a hard one.");
+            if with_hardness {
+                ui.add_space(4.0);
+                // tenths give ~0.5% drag granularity for fine edge tuning
+                let h = chip::slider_row_f32(ui, "Hardness", &mut s.hardness, 0.0..=1.0, false, fmt::percent_tenths);
+                committed |= h.commit;
+                super::hint(ui, "0% is a soft edge, 100% a hard one.");
+            }
         });
         ui.add_space(8.0);
         ui.vertical(|ui| {
-            draw_preview(ui, s);
+            draw_preview(ui, s, if with_hardness { s.hardness } else { 1.0 });
             ui.add_space(6.0);
             committed |= chip::choice_row(ui, "Shape", &BRUSH_SHAPES, &mut s.shape);
         });
@@ -153,7 +146,7 @@ pub(super) fn render_shared_selection_section(ui: &mut egui::Ui, s: &mut BrushSe
 /// The brush radius is scaled to fit `PREVIEW_SIZE` regardless of the
 /// user-chosen pixel value, so a 200 px brush and a 4 px brush both
 /// render readably inside the popover.
-fn draw_preview(ui: &mut Ui, settings: &BrushSettings) {
+fn draw_preview(ui: &mut Ui, settings: &BrushSettings, hardness: f32) {
     let (rect, _) = ui.allocate_exact_size(
         egui::vec2(PREVIEW_SIZE, PREVIEW_SIZE),
         Sense::hover(),
@@ -191,12 +184,7 @@ fn draw_preview(ui: &mut Ui, settings: &BrushSettings) {
         BrushMode::Subtract => (230, 150, 150),
     };
 
-    // Visually hint at the Edge softness setting by softening the
-    // falloff edge proportional to inpaint_feather.
-    let feather_norm = (settings.inpaint_feather / INPAINT_FEATHER_MAX).clamp(0.0, 1.0);
-    let effective_hardness = (settings.hardness
-        * (1.0 - FEATHER_HARDNESS_REDUCTION_CAP * feather_norm))
-        .clamp(0.0, 1.0);
+    let effective_hardness = hardness.clamp(0.0, 1.0);
 
     let color = Color32::from_rgb(cr, cg, cb);
     match settings.shape {

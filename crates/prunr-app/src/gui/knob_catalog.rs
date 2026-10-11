@@ -133,10 +133,11 @@ pub enum Surface {
     SdChips,
     /// Paint and Magic Brush, the selection on the image and its actions.
     Brushes,
-    /// The Paint Brush's mode (Restore/Erase or Add/Subtract) and
-    /// Opacity: strokes that edit a cut-out or a selection by degree.
+    /// The Paint Brush's mode (Restore/Erase or Add/Subtract), Hardness
+    /// and Opacity: strokes that edit a cut-out or a selection by degree.
+    /// The eraser's region is all or nothing, so none of them act there.
     SelectionStrokes,
-    /// Expand region, Edge blend and Sharpen for the filled region.
+    /// Expand region, Feather and Sharpen for the filled region.
     FillRegionKnobs,
 }
 
