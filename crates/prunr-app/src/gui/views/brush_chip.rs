@@ -70,13 +70,13 @@ pub(super) fn flyout_body(ui: &mut Ui, s: &mut BrushSettings, model: SettingsMod
     }
     outcome.committed |= render_cursor_section(ui, s);
     ui.add_space(4.0);
-    if shows(model, Surface::BrushOpacity) {
+    if shows(model, Surface::SelectionStrokes) {
         let st = chip::slider_row_f32(ui, "Opacity", &mut s.strength, 0.0..=1.0, false, fmt::percent);
         outcome.committed |= st.commit;
         super::hint(ui, "How strongly each stroke changes the selection.");
         ui.add_space(6.0);
     }
-    if shows(model, Surface::PaintMode) {
+    if shows(model, Surface::SelectionStrokes) {
         outcome.committed |= chip::choice_row(ui, "Mode", mode_choices(model), &mut s.mode);
     }
     if shows(model, Surface::FillRegionKnobs) {

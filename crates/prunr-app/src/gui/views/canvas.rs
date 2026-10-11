@@ -2,6 +2,7 @@ use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 use egui::{Color32, Pos2, Rect, Stroke, TextureHandle, TextureOptions, Vec2};
 
 use crate::gui::app::PrunrApp;
+use crate::gui::knob_catalog::{shows, Surface};
 use crate::gui::state::AppState;
 use crate::gui::theme;
 
@@ -46,7 +47,9 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
         .map(|idx| app.batch.items[idx].id)
         .is_some_and(|id| app.processor.is_inpaint_in_flight(id));
     let app_state = app.batch.app_state();
-    let brush_active = app.brush_state.is_enabled()
+    let model_has_brushes = shows(app.settings.model, Surface::Brushes);
+    let brush_active = model_has_brushes
+        && app.brush_state.is_enabled()
         && !inpaint_in_flight_for_selected
         && matches!(app_state, AppState::Loaded | AppState::Done);
     // Magic Brush is treated as a brush tool for pan-gate purposes — when
@@ -54,7 +57,8 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
     // brush and pan moves to secondary (right) button, matching Paint
     // Brush. Suppressed while encoder is pending so the "Preparing..."
     // overlay doesn't accidentally steal pan from a frustrated user.
-    let magic_brush_active = app.magic_brush_state.is_active()
+    let magic_brush_active = model_has_brushes
+        && app.magic_brush_state.is_active()
         && !app.magic_brush_preparing()
         && matches!(app_state, AppState::Loaded | AppState::Done);
     let any_brush_tool_active = brush_active || magic_brush_active;
@@ -213,7 +217,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
     // tool (regardless of encoder state) so users discover Shift / Alt
     // before they need them. Active modifier tints to ACCENT; the rest stays
     // TEXT_SECONDARY. Mono 12px per 33-UI-SPEC §Selection Visualization.
-    let paint_on_selection = app.brush_state.is_enabled() && !app.settings.model.is_inpaint();
+    let paint_on_selection = app.brush_state.is_enabled() && shows(app.settings.model, Surface::SelectionStrokes);
     if app.magic_brush_state.is_active() || paint_on_selection {
         let (shift, alt) = ui.ctx().input(|i| (i.modifiers.shift, super::shortcuts::is_subtract_modifier(&i.modifiers)));
         let base_color = theme::TEXT_SECONDARY;
@@ -261,18 +265,19 @@ fn handle_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: Rect) 
 
     let Some(idx) = app.batch.selected_idx_clamped() else { return };
     let (shift, subtract) = ui.ctx().input(|i| (i.modifiers.shift, super::shortcuts::is_subtract_modifier(&i.modifiers)));
-    let stamp = if app.settings.model.is_inpaint() {
-        app.settings.brush.region_stamp()
-    } else {
+    let selection_strokes = shows(app.settings.model, Surface::SelectionStrokes);
+    let stamp = if selection_strokes {
         let mut stamp = app.settings.brush.stamp();
         stamp.mode = app.settings.brush.mode_under(shift, subtract);
         stamp
+    } else {
+        app.settings.brush.region_stamp()
     };
     let action = {
         let item = &app.batch.items[idx];
         brush_overlay::handle_input(ui, &mut app.brush_state, &app.settings.brush, stamp, item, img_rect)
     };
-    if !app.settings.model.is_inpaint() && (shift || subtract) {
+    if selection_strokes && (shift || subtract) {
         let glyph = if shift { "+" } else { "\u{2212}" };
         draw_modifier_glyph(ui, canvas_rect, glyph);
     }
@@ -626,7 +631,7 @@ fn render_empty(ui: &mut egui::Ui, _app: &PrunrApp) {
 
 /// The item's selection over the image, on models that use one.
 fn draw_selection(ui: &egui::Ui, app: &PrunrApp, item: &crate::gui::item::BatchItem, img_rect: Rect) {
-    if crate::gui::knob_catalog::shows(app.settings.model, crate::gui::knob_catalog::Surface::Brushes) {
+    if shows(app.settings.model, Surface::Brushes) {
         super::selection_overlay::render_selection_overlay(ui, item, img_rect, app.processor.is_inpaint_in_flight(item.id));
     }
 }

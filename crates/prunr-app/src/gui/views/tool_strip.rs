@@ -91,7 +91,7 @@ fn panel(ui: &mut Ui, tool: Tool, brush: &mut BrushSettings, facts: StripFacts) 
 
 fn paint_knobs(ui: &mut Ui, s: &mut BrushSettings, model: SettingsModel) -> bool {
     let mut committed = false;
-    if shows(model, Surface::PaintMode) {
+    if shows(model, Surface::SelectionStrokes) {
         committed |= chip::choice_buttons(ui, brush_chip::mode_choices(model), &mut s.mode);
     }
     committed |= chip::slider_row_f32(ui, "Size", &mut s.radius, BRUSH_RADIUS_RANGE, true, |v| fmt::px(v, 0)).commit;
@@ -100,7 +100,7 @@ fn paint_knobs(ui: &mut Ui, s: &mut BrushSettings, model: SettingsModel) -> bool
         committed |= chip::slider_row_f32(ui, "Expand region", &mut s.inpaint_grow, -16.0..=16.0, false, |v| fmt::signed_px(v, 0)).commit;
         committed |= chip::slider_row_f32(ui, "Edge blend", &mut s.inpaint_feather, 0.0..=32.0, false, |v| fmt::px(v, 0)).commit;
     }
-    if shows(model, Surface::BrushOpacity) {
+    if shows(model, Surface::SelectionStrokes) {
         committed |= chip::slider_row_f32(ui, "Opacity", &mut s.strength, 0.0..=1.0, false, fmt::percent).commit;
     }
     committed
