@@ -130,13 +130,15 @@ pub(crate) fn render_modal(
         theme::TEXT_SECONDARY,
     );
 
-    ui.painter().text(
-        center + Vec2::new(0.0, 44.0),
-        egui::Align2::CENTER_CENTER,
-        "Press Esc to cancel",
-        FontId::proportional(theme::FONT_SIZE_MONO),
-        theme::TEXT_SECONDARY,
-    );
+    if !cancelling {
+        ui.painter().text(
+            center + Vec2::new(0.0, 44.0),
+            egui::Align2::CENTER_CENTER,
+            "Press Esc to cancel",
+            FontId::proportional(theme::FONT_SIZE_MONO),
+            theme::TEXT_SECONDARY,
+        );
+    }
 
     ui.ctx().request_repaint_after(std::time::Duration::from_millis(66));
     false
