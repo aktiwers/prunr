@@ -258,9 +258,6 @@ impl PrunrApp {
         if change.committed {
             self.settings.save();
         }
-        if change.apply_requested {
-            self.handle_process_intent();
-        }
     }
 
     /// Persists the settings once input has paused: a held key repeats
@@ -1045,16 +1042,6 @@ impl PrunrApp {
             self.dispatch_brush_rerun(idx);
         }
         true
-    }
-
-    /// The eraser's painted region waits for the user, since a run costs
-    /// minutes; on a background-removal model strokes apply at once.
-    pub(crate) fn strokes_waiting_for_apply(&self) -> bool {
-        self.settings.model.is_inpaint()
-            && self.batch.selected_item().is_some_and(|item| {
-                item.selection_mask.as_ref().is_some_and(|m| m.has_selected_region())
-                    && !self.processor.is_inpaint_in_flight(item.id)
-            })
     }
 
     /// Single-source-of-truth call for writing a new selection: persist the
