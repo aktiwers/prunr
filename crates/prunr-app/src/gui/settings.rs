@@ -288,27 +288,38 @@ impl Settings {
         }
     }
 
-    /// Resolve a preset name to its `ItemSettings` for the active model.
-    /// "Prunr" is always `ItemSettings::default()`; user presets come from
-    /// the per-model entry keyed by `Settings.model.to_model_id()`. Missing
-    /// preset, missing model entry, or filter-only mode (no model id) all
-    /// fall back to factory defaults.
+    /// A preset's image settings for the active model; factory values for
+    /// "Prunr", a missing preset or a missing entry. Cheap: no brush clone.
     pub fn preset_values(&self, name: &str) -> ItemSettings {
-        if name == PRUNR_PRESET {
-            return ItemSettings::default();
-        }
-        let Some(file) = self.presets.get(name) else { return ItemSettings::default() };
-        let Some(model_id) = self.model.to_model_id() else {
-            // Filter-only mode has no model id. The active item still has
-            // an ItemSettings — fall back to whichever model entry the
-            // preset stored, or to factory defaults if none.
-            return file.models.values().next()
-                .map(|mp| mp.item_settings)
-                .unwrap_or_default();
-        };
-        file.models.get(&super::presets::model_id_key(model_id))
+        self.preset_file(name)
+            .and_then(|f| super::presets::entry_for(f, self.preset_model()))
             .map(|mp| mp.item_settings)
             .unwrap_or_default()
+    }
+
+    /// A preset's image and brush settings for the active model: what
+    /// applying it, or Reset to it, sets. Falls back to factory values at
+    /// every level.
+    pub(crate) fn resolve_preset(
+        &self,
+        name: &str,
+        scheduler: Option<super::brush_state::SdScheduler>,
+    ) -> super::presets::ResolvedView {
+        let empty = super::presets::PresetFile::default();
+        let file = self.preset_file(name).unwrap_or(&empty);
+        super::presets::resolve_preset_for_model(file, self.preset_model(), scheduler)
+    }
+
+    fn preset_file(&self, name: &str) -> Option<&super::presets::PresetFile> {
+        (name != PRUNR_PRESET).then(|| self.presets.get(name)).flatten()
+    }
+
+    /// The model a preset entry is read for; No model reads the default
+    /// model's entry (its filters and lines are the same knobs).
+    fn preset_model(&self) -> prunr_models::ModelId {
+        self.model.to_model_id()
+            .or_else(|| Self::default().model.to_model_id())
+            .expect("Settings::default().model always has a model_id")
     }
 
     /// Resolve the active preset to the live `ResolvedView` for the
@@ -323,16 +334,7 @@ impl Settings {
         &self,
         scheduler: Option<super::brush_state::SdScheduler>,
     ) -> super::presets::ResolvedView {
-        let empty = super::presets::PresetFile::default();
-        let file = if self.default_preset == PRUNR_PRESET {
-            &empty
-        } else {
-            self.presets.get(&self.default_preset).unwrap_or(&empty)
-        };
-        let model_id = self.model.to_model_id()
-            .or_else(|| Self::default().model.to_model_id())
-            .expect("Settings::default().model always has a model_id");
-        super::presets::resolve_preset_for_model(file, model_id, scheduler)
+        self.resolve_preset(&self.default_preset, scheduler)
     }
 
     /// Take the new model's tuning from the active preset after the model
@@ -958,7 +960,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_active_preset_returns_prunr_when_named_preset_missing_model_entry() {
+    fn a_cutout_preset_is_shared_by_the_cutout_models_and_no_other() {
         let mut s = Settings::default();
         s.model = SettingsModel::U2net;
         let mut brush = super::BrushSettings::default();
@@ -979,8 +981,12 @@ mod tests {
         s.default_preset = "Foo".to_string();
 
         let r = s.resolve_active_preset(None);
-        assert_eq!(r.item_settings, ItemSettings::default());
-        assert_eq!(r.brush, super::BrushSettings::default());
+        assert_eq!((r.item_settings.gamma, r.brush.radius), (2.0, 80.0), "U2net uses the Silueta entry");
+        s.model = SettingsModel::BigInpaint;
+        let r = s.resolve_active_preset(None);
+        assert_eq!(r.item_settings, ItemSettings::default(), "an eraser has no entry: factory values");
+        s.model = SettingsModel::None;
+        assert_eq!(s.preset_values("Foo").gamma, 2.0, "No model reads the default model's entry, which Silueta's stands in for");
     }
 
     #[test]
