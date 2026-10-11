@@ -459,7 +459,8 @@ pub(crate) struct Processor {
     /// reads `(current, total)` to show "Erasing — step N of M". Same
     /// lifetime as `inpaint_cancels` — both are replaced on every
     /// dispatch.
-    inpaint_progress: HashMap<u64, std::sync::Arc<prunr_core::inpaint::InpaintProgress>>,
+    /// The progress run each in-flight eraser stroke reports to.
+    inpaint_runs: HashMap<u64, super::dispatch_progress::RunSink>,
     /// Channels to the dedicated SD-inpaint subprocess bridge thread.
     /// LaMa / Big-LaMa / MI-GAN stay on the in-process rayon path; only
     /// SD-family dispatches go through these. Bridge spawns the
@@ -536,7 +537,7 @@ impl Processor {
             inpaint_latest_gen: HashMap::new(),
             inpaint_pending: HashMap::new(),
             inpaint_cancels: HashMap::new(),
-            inpaint_progress: HashMap::new(),
+            inpaint_runs: HashMap::new(),
             inpaint_bridge_tx,
             inpaint_bridge_rx,
             upscale_active: Arc::new(AtomicBool::new(false)),
@@ -608,10 +609,16 @@ impl Processor {
         // a new stroke starts (and avoids the banner showing the prior
         // stroke's last step count for one frame).
         let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let progress = std::sync::Arc::new(prunr_core::inpaint::InpaintProgress::new());
+        let initial = if tuning.backend.is_sd_family() {
+            super::dispatch_progress::DispatchProgress::sd_inpaint(0, 0, (0, 0))
+        } else {
+            super::dispatch_progress::DispatchProgress::lama_inpaint(0, 0, (0, 0))
+        };
+        let (progress, run) = self.dispatch_progress.progress_for(initial, cancel.clone());
         self.inpaint_cancels.insert(item_id, cancel.clone());
-        self.inpaint_progress.insert(item_id, progress.clone());
+        self.inpaint_runs.insert(item_id, run.clone());
         if tuning.backend.is_sd_family() {
+            // The SD subprocess reports through the bridge to `run`.
             self.dispatch_inpaint_sd(item_id, gen, &image, &correction, &tuning);
             return;
         }
@@ -626,15 +633,16 @@ impl Processor {
             };
             // This path only sees LaMa / Big-LaMa / MI-GAN — sd_req is unread.
             let sd_req = None;
-            let hooks = prunr_core::inpaint::InpaintHooks {
-                cancel: Some(cancel.clone()),
-                progress: Some(progress.clone()),
-            };
-            match prunr_core::inpaint::process_inpaint_with(&image, &mask, tuning.backend, sd_req, &hooks) {
-                Ok(rgba) => {
-                    let out = prunr_core::inpaint_blend::finalize_inpaint(
-                        &rgba, &image, &mask, tuning.feather_px, tuning.sharpen,
-                    );
+            let outcome = prunr_core::inpaint::process_inpaint_with(&image, &mask, tuning.backend, sd_req, &progress);
+            if outcome.is_ok() {
+                progress.step(prunr_core::Step::Blending);
+            }
+            let outcome = outcome.map(|rgba| prunr_core::inpaint_blend::finalize_inpaint(
+                &rgba, &image, &mask, tuning.feather_px, tuning.sharpen,
+            ));
+            run.end();
+            match outcome {
+                Ok(out) => {
                     let _ = tx.send(InpaintResult { item_id, rgba: out, generation: gen, cancelled: false, error: None });
                 }
                 Err(prunr_core::CoreError::Cancelled) => {
@@ -867,23 +875,10 @@ impl Processor {
     pub(crate) fn pump_inpaint_subprocess(&mut self) {
         while let Ok(evt) = self.inpaint_bridge_rx.try_recv() {
             match evt {
-                InpaintBridgeResult::Report { update, .. } => self.apply_report(&update),
-                InpaintBridgeResult::Progress {
-                    item_id, current, total, outer_current, outer_total,
-                } => {
-                    if let Some(p) = self.inpaint_progress.get(&item_id) {
-                        p.set_total(total);
-                        p.set_step(current);
-                        p.set_outer_total(outer_total);
-                        p.set_outer_step(outer_current);
+                InpaintBridgeResult::Report { item_id, update } => {
+                    if let Some(run) = self.inpaint_runs.get(&item_id) {
+                        prunr_core::ProgressSink::report(run, update);
                     }
-                    // Mirror into the unified slot so the banner / modal
-                    // sees the SD inpaint's two-level counter.
-                    self.dispatch_progress.set(Some(
-                        super::dispatch_progress::DispatchProgress::sd_inpaint(
-                            outer_current, outer_total, (current, total),
-                        ),
-                    ));
                 }
                 InpaintBridgeResult::Done { item_id, gen, rgba_path, width, height } => {
                     let result = match super::worker::read_and_delete(&rgba_path) {
@@ -915,10 +910,7 @@ impl Processor {
                         },
                     };
                     let _ = self.inpaint_tx.send(result);
-                    // Clear the unified slot — the dispatch is done from
-                    // the bridge's perspective. The GUI's drain will
-                    // surface the result on the next frame.
-                    self.dispatch_progress.set(None);
+                    self.end_inpaint_run(item_id);
                 }
                 InpaintBridgeResult::Error { item_id, error } => {
                     // Translate bridge sentinels to user-facing text at
@@ -945,22 +937,17 @@ impl Processor {
                         cancelled,
                         error: user_error,
                     });
-                    self.dispatch_progress.set(None);
+                    self.end_inpaint_run(item_id);
                 }
             }
         }
     }
 
-    /// Read the in-flight inpaint stroke's progress as
-    /// `((outer_current, outer_total), (inner_current, inner_total))`.
-    /// Used by the unified progress widget when the slot is empty but
-    /// an in-process LaMa dispatch is mid-flight (LaMa writes
-    /// `InpaintProgress` directly via the hooks and doesn't go
-    /// through the subprocess bridge that publishes the slot).
-    pub(crate) fn inpaint_progress_nested(&self, item_id: u64) -> ((u32, u32), (u32, u32)) {
-        self.inpaint_progress.get(&item_id)
-            .map(|p| p.read_nested())
-            .unwrap_or(((0, 0), (0, 0)))
+    /// The SD stroke's run is over: clear the progress it showed.
+    fn end_inpaint_run(&self, item_id: u64) {
+        if let Some(run) = self.inpaint_runs.get(&item_id) {
+            run.end();
+        }
     }
 
     /// Drain in-flight inpaint results.
@@ -994,7 +981,7 @@ impl Processor {
             // no-op IPC cancels.
             if self.inpaint_pending.get(&item_id).copied().unwrap_or(0) == 0 {
                 self.inpaint_cancels.remove(&item_id);
-                self.inpaint_progress.remove(&item_id);
+                self.inpaint_runs.remove(&item_id);
             }
             if result.cancelled {
                 cancelled.push(item_id);
@@ -1197,19 +1184,14 @@ impl Processor {
         });
         // Clear any sticky terminate flag from the prior dispatch's cancel.
         let _ = run_options.unterminate();
-        // Seed the unified slot before the first tile so an early render
-        // already shows "Upscaling — tile 0 of …" rather than the prior
-        // dispatch's stale data.
-        self.dispatch_progress.set(Some(
-            super::dispatch_progress::DispatchProgress::upscale(
-                0, 0, super::dispatch_progress::step_labels::LOADING_MODEL,
-            ),
-        ));
+        // The run shows "Loading the model" until the first tile reports.
+        let (progress, run) = self.dispatch_progress.progress_for(
+            super::dispatch_progress::DispatchProgress::upscale(0, 0, prunr_core::Step::LoadingModel.label()),
+            Arc::clone(&self.upscale_cancel),
+        );
 
         let active_flag = Arc::clone(&self.upscale_active);
-        let cancel_flag = Arc::clone(&self.upscale_cancel);
         let result_tx = self.upscale_result_tx.clone();
-        let progress_slot = self.dispatch_progress.clone();
         let engine_slot = Arc::clone(&self.warm_upscale_engine);
         // Shared with the GUI thread's `cancel_upscale()` — terminating
         // this RunOptions aborts the running `Session::run` mid-tile.
@@ -1229,11 +1211,10 @@ impl Processor {
                     tracing::error!(model = ?model_id, %err, "upscale dispatch: engine construction failed");
                     let _ = result_tx.send(UpscaleResult { item_id, result: Err(err), recipe });
                     active_flag.store(false, Ordering::Release);
-                    progress_slot.set(None);
+                    run.end();
                     return;
                 }
             };
-            let progress = prunr_core::Progress::new(Arc::new(progress_slot.clone())).with_cancel(cancel_flag);
             let result = if use_two_pass {
                 prunr_core::upscale::upscale_two_pass_with_engine(
                     &input_for_inference,
@@ -1264,8 +1245,7 @@ impl Processor {
             // the channel.
             let _ = result_tx.send(UpscaleResult { item_id, result, recipe });
             active_flag.store(false, Ordering::Release);
-            // Clear the unified slot — widgets fall back to idle state.
-            progress_slot.set(None);
+            run.end();
         });
     }
 

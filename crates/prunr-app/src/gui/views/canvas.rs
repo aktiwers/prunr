@@ -152,12 +152,8 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
         AppState::Done => render_done(ui, app),
     }
 
-    // Unified progress overlay — reads `Processor.dispatch_progress`
-    // for seg / SD inpaint / upscale, falls back to synthesising from
-    // the in-process LaMa inpaint state (the LaMa rayon path writes
-    // `InpaintProgress` directly without going through the
-    // subprocess bridge that populates the slot).
-    if let Some(progress) = read_dispatch_progress(app) {
+    // Unified progress overlay: every dispatch reports into one slot.
+    if let Some(progress) = app.processor.dispatch_progress() {
         let active_inpaint_item = app.batch.selected_idx_clamped()
             .map(|idx| app.batch.items[idx].id)
             .filter(|&id| app.processor.is_inpaint_in_flight(id));
@@ -739,24 +735,6 @@ fn render_processing_canvas(ui: &mut egui::Ui, app: &PrunrApp) {
     }
 
     ui.ctx().request_repaint_after(std::time::Duration::from_millis(66));
-}
-
-/// Synthesise a `DispatchProgress` for the canvas overlay. Reads the
-/// unified slot first; if empty, falls back to the in-process LaMa
-/// inpaint state for the selected item (LaMa's rayon dispatch writes
-/// `InpaintProgress` directly and never publishes to the slot).
-fn read_dispatch_progress(app: &PrunrApp) -> Option<crate::gui::dispatch_progress::DispatchProgress> {
-    if let Some(slot) = app.processor.dispatch_progress() {
-        return Some(slot);
-    }
-
-    let idx = app.batch.selected_idx_clamped()?;
-    let item_id = app.batch.items[idx].id;
-    if !app.processor.is_inpaint_in_flight(item_id) {
-        return None;
-    }
-    let ((oc, ot), inner) = app.processor.inpaint_progress_nested(item_id);
-    Some(crate::gui::dispatch_progress::DispatchProgress::lama_inpaint(oc, ot, inner))
 }
 
 fn render_done(ui: &mut egui::Ui, app: &PrunrApp) {
