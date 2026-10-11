@@ -551,34 +551,30 @@ impl std::fmt::Display for BgEffect {
 #[serde(rename_all = "snake_case")]
 pub enum BgImageFit {
     /// Fills both target dimensions (uniform scale, may crop overhang).
+    /// Settings saved with the retired Stretch load as Cover.
     #[default]
+    #[serde(alias = "stretch")]
     Cover,
     /// Fits inside both target dimensions (uniform scale, may letterbox).
+    /// Settings saved with the retired Center load as Contain.
+    #[serde(alias = "center")]
     Contain,
-    /// Distorts to fill exactly (non-uniform scale).
-    Stretch,
     /// Repeated at native size.
     Tile,
-    /// Native size, centred. May overflow bounds (clipped) or leave gaps.
-    Center,
 }
 
 impl BgImageFit {
     pub const ALL: &'static [Self] = &[
         BgImageFit::Cover,
         BgImageFit::Contain,
-        BgImageFit::Stretch,
         BgImageFit::Tile,
-        BgImageFit::Center,
     ];
 
     pub fn name(self) -> &'static str {
         match self {
             BgImageFit::Cover => "Cover",
             BgImageFit::Contain => "Contain",
-            BgImageFit::Stretch => "Stretch",
             BgImageFit::Tile => "Tile",
-            BgImageFit::Center => "Center",
         }
     }
 }
@@ -590,9 +586,7 @@ impl std::fmt::Display for BgImageFit {
         let s = match self {
             BgImageFit::Cover => "cover",
             BgImageFit::Contain => "contain",
-            BgImageFit::Stretch => "stretch",
             BgImageFit::Tile => "tile",
-            BgImageFit::Center => "center",
         };
         f.write_str(s)
     }
@@ -604,10 +598,8 @@ impl std::str::FromStr for BgImageFit {
         match s.trim().to_ascii_lowercase().as_str() {
             "cover" => Ok(BgImageFit::Cover),
             "contain" => Ok(BgImageFit::Contain),
-            "stretch" => Ok(BgImageFit::Stretch),
             "tile" => Ok(BgImageFit::Tile),
-            "center" => Ok(BgImageFit::Center),
-            _ => Err(format!("unknown bg-image fit: {s}")),
+            _ => Err(format!("'{s}' is not one of cover, contain, tile")),
         }
     }
 }
@@ -742,6 +734,21 @@ mod tests {
         }
         assert_eq!(ComposeMode::from_str("Subject filled"), Ok(ComposeMode::SubjectFilled));
         assert!(ComposeMode::from_str("inverse-mask").is_err(), "retired");
+    }
+
+    /// Stretch and Center are retired: saved settings load as the nearest
+    /// fit, and the CLI names the ones left.
+    #[test]
+    fn retired_fits_load_as_their_nearest() {
+        use std::str::FromStr;
+        let load = |s: &str| serde_json::from_str::<BgImageFit>(&format!("\"{s}\"")).unwrap();
+        assert_eq!(load("stretch"), BgImageFit::Cover);
+        assert_eq!(load("center"), BgImageFit::Contain);
+        assert_eq!(load("tile"), BgImageFit::Tile);
+        assert!(BgImageFit::from_str("stretch").is_err());
+        for fit in BgImageFit::ALL {
+            assert_eq!(BgImageFit::from_str(&fit.to_string()), Ok(*fit));
+        }
     }
 
     #[test]

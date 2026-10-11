@@ -3409,9 +3409,7 @@ impl PrunrApp {
             if item.settings.backdrop().picture_key() != Some(key) { continue; }
             // WrapMode::Repeat enables BgImageFit::Tile (UV > 1.0
             // wraps); other fits keep UVs in [0, 1] so the wrap is a
-            // no-op. LINEAR for smooth scale modes (Cover/Contain
-            // /Stretch); Tile + Center read 1:1 so the filter doesn't
-            // matter there.
+            // no-op.
             let opts = egui::TextureOptions {
                 magnification: egui::TextureFilter::Linear,
                 minification: egui::TextureFilter::Linear,

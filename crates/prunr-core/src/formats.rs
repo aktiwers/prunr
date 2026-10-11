@@ -209,9 +209,8 @@ pub fn apply_background_color(img: &mut RgbaImage, bg: [u8; 3]) {
 /// inside the foreground frame:
 ///
 /// - `Cover`: scaled to fill, may crop (every alpha-zero pixel covered)
-/// - `Contain` / `Center`: bg may not cover the whole frame; uncovered
-///   transparent pixels stay transparent
-/// - `Stretch`: distorted to fill exactly
+/// - `Contain`: bg may not cover the whole frame; uncovered transparent
+///   pixels stay transparent
 /// - `Tile`: repeated at native size, fully covers
 ///
 /// Sequential for the same reason as `apply_background_color` (subprocess
@@ -263,10 +262,6 @@ fn build_bg_layer(
             let cropped = image::imageops::crop_imm(&scaled, ox, oy, dst_w, dst_h).to_image();
             image::imageops::replace(&mut out, &rgb_to_rgba(&cropped), 0, 0);
         }
-        BgImageFit::Stretch => {
-            let scaled = resize_rgb_lanczos3(bg, dst_w, dst_h);
-            image::imageops::replace(&mut out, &rgb_to_rgba(&scaled), 0, 0);
-        }
         BgImageFit::Contain => {
             let scale = (dst_w as f32 / sw as f32).min(dst_h as f32 / sh as f32);
             let inner_w = ((sw as f32 * scale).round() as u32).max(1).min(dst_w);
@@ -275,16 +270,6 @@ fn build_bg_layer(
             let ox = ((dst_w - inner_w) / 2) as i64;
             let oy = ((dst_h - inner_h) / 2) as i64;
             image::imageops::replace(&mut out, &rgb_to_rgba(&scaled), ox, oy);
-        }
-        BgImageFit::Center => {
-            let inner_w = sw.min(dst_w);
-            let inner_h = sh.min(dst_h);
-            let src_x = sw.saturating_sub(dst_w) / 2;
-            let src_y = sh.saturating_sub(dst_h) / 2;
-            let cropped = image::imageops::crop_imm(&bg.to_rgb8(), src_x, src_y, inner_w, inner_h).to_image();
-            let ox = ((dst_w - inner_w) / 2) as i64;
-            let oy = ((dst_h - inner_h) / 2) as i64;
-            image::imageops::replace(&mut out, &rgb_to_rgba(&cropped), ox, oy);
         }
         BgImageFit::Tile => {
             image::imageops::tile(&mut out, &bg.to_rgba8());
