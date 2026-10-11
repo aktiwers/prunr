@@ -188,17 +188,21 @@ impl BrushSettings {
         Stamp { hardness: 1.0, strength: 1.0, mode }
     }
 
-    #[cfg(test)]
-    fn sd_use_taesd_effective_with_avail(&self, taesd_available: bool) -> bool {
-        self.sd_use_taesd.unwrap_or(true) && taesd_available
+    /// Whether the fast decoder runs, given whether it is installed. Left
+    /// on auto it runs with Fast; Quality is for the best fill.
+    pub fn sd_use_taesd_effective_with_avail(&self, taesd_available: bool) -> bool {
+        self.sd_use_taesd.unwrap_or(self.sd_scheduler == SdScheduler::Lcm) && taesd_available
     }
 
-    /// True when the user wants TAESD AND the bundle is installed.
-    /// Pinned in one place so the dispatch path and the UI checkbox
-    /// state can't disagree.
     pub fn sd_use_taesd_effective(&self) -> bool {
-        self.sd_use_taesd.unwrap_or(true)
-            && prunr_models::is_available(prunr_models::ModelId::TaesdFp16)
+        self.sd_use_taesd_effective_with_avail(prunr_models::is_available(prunr_models::ModelId::TaesdFp16))
+    }
+
+    /// The settings `model` starts from when no preset has an entry for it.
+    pub fn floor_for(model: prunr_models::ModelId) -> Self {
+        // SD draws its own detail; sharpening on top crunches it.
+        let inpaint_sharpen = if model.is_sd_family() { 0.0 } else { Self::default().inpaint_sharpen };
+        Self { inpaint_sharpen, ..Self::default() }
     }
 
     /// Reset the brush popover's slider knobs (radius / hardness /
@@ -683,6 +687,18 @@ mod tests {
             "explicit opt-in + installed must dispatch TAESD");
         assert!(!s.sd_use_taesd_effective_with_avail(false),
             "explicit opt-in but not installed must fall back");
+    }
+
+    /// Left on auto, the fast decoder runs with Fast and not with Quality,
+    /// whose point is the best fill.
+    #[test]
+    fn the_fast_decoder_follows_the_quality_until_set() {
+        let mut s = BrushSettings { sd_scheduler: SdScheduler::DpmPlusPlus2MKarras, ..BrushSettings::default() };
+        assert!(!s.sd_use_taesd_effective_with_avail(true), "Quality: off");
+        s.sd_scheduler = SdScheduler::Lcm;
+        assert!(s.sd_use_taesd_effective_with_avail(true), "Fast: on");
+        s.sd_use_taesd = Some(false);
+        assert!(!s.sd_use_taesd_effective_with_avail(true), "the user's choice wins");
     }
 
     #[test]
