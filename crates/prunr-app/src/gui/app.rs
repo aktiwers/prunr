@@ -1268,6 +1268,9 @@ impl PrunrApp {
                 // highlighted and is available for Reprocess.
                 (item.id, new_rgba)
             };
+            if let Some(item) = self.batch.find_by_id_mut(item_id) {
+                item.result_fades_in = true;
+            }
             self.publish_result(item_id, new_rgba, "inpaint", ctx);
         }
     }
@@ -1349,6 +1352,7 @@ impl PrunrApp {
                     item.applied_recipe = Some(result_recipe);
                     item.status = BatchStatus::Done;
                     item.result_tex_pending = true;
+                    item.result_fades_in = true;
                     item.thumb_pending = true;
                     let source = item.source.clone();
                     Self::spawn_tex_prep(
@@ -3407,10 +3411,14 @@ impl PrunrApp {
 
         while let Ok((item_id, name, color_image, is_result)) = self.batch.bg_io.tex_prep_rx.try_recv() {
             let tex = ctx.load_texture(name, color_image, egui::TextureOptions::default());
+            let selected = self.batch.is_selected(item_id);
             if let Some(item) = self.batch.find_by_id_mut(item_id) {
                 if is_result {
                     item.result_texture = Some(tex);
                     item.result_tex_pending = false;
+                    if std::mem::take(&mut item.result_fades_in) && selected {
+                        self.result_switch_id += 1;
+                    }
                     tracing::info!(item_id, kind = "result", "texture uploaded");
                 } else {
                     item.source_texture = Some(tex);
