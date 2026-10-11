@@ -377,12 +377,6 @@ fn render_tab_behavior(ui: &mut egui::Ui, settings: &mut Settings) {
     hint(ui, "Faster repeated erases. Holds about 16 GB of RAM while the app is open.");
     ui.add_space(theme::SPACE_MD);
 
-    section_heading(ui, "Stack passes (chain mode)");
-    ui.checkbox(&mut settings.chain_mode, RichText::new("Use last result as input")
-        .color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY));
-    hint(ui, "Process feeds on the previous output instead of the original — stack effects.");
-    ui.add_space(theme::SPACE_MD);
-
     section_heading(ui, "Defaults");
     ui.checkbox(&mut settings.export_split_layers, RichText::new("Split exports into layers")
         .color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY))

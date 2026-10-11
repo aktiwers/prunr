@@ -202,15 +202,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                         ProcessButtonLabel::ProcessSelected(n) if n > 1 => {
                             format!("Process the {n} selected images.").into()
                         }
-                        _ => {
-                            let target_has_result = app.batch.first_target_item()
-                                .is_some_and(|i| i.result_rgba.is_some());
-                            if app.settings.chain_mode && target_has_result {
-                                "Process the current result again.".into()
-                            } else {
-                                "Process the current image.".into()
-                            }
-                        }
+                        _ => "Process the current image.".into(),
                     }
                 };
 

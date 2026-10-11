@@ -697,7 +697,7 @@ impl PrunrApp {
     }
 
     /// Upscale branch of `handle_process_intent`. Resolves the input image
-    /// (chain mode: use existing result; otherwise: source), then hands off
+    /// from the timeline (`BatchItem::run_input`), then hands off
     /// to `Processor::dispatch_upscale`. Must only be called after
     /// `can_process_intent()` confirms the model is installed and idle.
     fn dispatch_upscale_intent(&mut self) {
@@ -712,22 +712,9 @@ impl PrunrApp {
         };
         // Share the input via Arc — full RGBA payload would otherwise
         // be deep-cloned (tens of MB at 4K) for every Process click.
-        let input: std::sync::Arc<image::RgbaImage> = if self.settings.chain_mode {
-            match item.result_rgba.as_ref().or(item.source_rgba.as_ref()) {
-                Some(arc) => std::sync::Arc::clone(arc),
-                None => {
-                    tracing::warn!(item_id, "upscale dispatch skipped: no source RGBA available");
-                    return;
-                }
-            }
-        } else {
-            match item.source_rgba.as_ref() {
-                Some(arc) => std::sync::Arc::clone(arc),
-                None => {
-                    tracing::warn!(item_id, "upscale dispatch skipped: source RGBA unavailable");
-                    return;
-                }
-            }
+        let Some(input) = item.run_input(Engine::Upscale).or_else(|| item.source_rgba.clone()) else {
+            tracing::warn!(item_id, "upscale dispatch skipped: source RGBA unavailable");
+            return;
         };
         let output_scale = item.settings.output_scale;
         let intra_threads = prunr_core::batch::ort_intra_threads(self.settings.parallel_jobs);
@@ -741,7 +728,7 @@ impl PrunrApp {
                 return;
             }
         };
-        let recipe = item.settings.current_recipe(model_kind, self.settings.chain_mode);
+        let recipe = item.settings.current_recipe(model_kind);
         tracing::info!(item_id, ?model_id, ?output_scale, "upscale dispatched");
         if let Some(item) = self.batch.find_by_id_mut(item_id) {
             item.start_job(Some(StepKind::Upscale), Engine::Upscale);
@@ -850,7 +837,7 @@ impl PrunrApp {
         if item.status != BatchStatus::Processing && item.job.is_none() {
             return;
         }
-        match item.job.map(|j| j.engine) {
+        match item.job.as_ref().map(|j| j.engine) {
             Some(Engine::Erase) => self.cancel_inpaint_for(item_id),
             Some(Engine::Upscale) => self.processor.cancel_upscale(),
             Some(Engine::Segment) | None => self.processor.cancels.request_item_cancel(item_id),
@@ -1518,7 +1505,6 @@ impl PrunrApp {
     /// `step`: the undo step the results record, or `None` to fill in the
     /// shown one (a re-run a knob change asked for).
     fn process_items(&mut self, filter: impl Fn(&BatchItem) -> bool, step: Option<StepKind>) {
-        let chain = self.settings.chain_mode;
         // Pure filter mode: No model AND line_mode = Off. Skip inference +
         // subprocess entirely. (No model + EdgesOnly still needs DexiNed,
         // so falls through to the normal path with a dummy ModelKind — the
@@ -1541,12 +1527,12 @@ impl PrunrApp {
             .map(|i| i.id)
             .collect();
         if candidate_ids.is_empty() { return; }
-        // A background image's result is released; chain mode feeds it in.
+        // A background image's result is released; a run may start from it.
         for item in self.batch.items.iter_mut().filter(|i| candidate_ids.contains(&i.id)) {
             item.unpark_result();
         }
 
-        let tiers = self.classify_candidates(&candidate_ids, model, chain);
+        let tiers = self.classify_candidates(&candidate_ids, model);
         let process_count = tiers.tier1.len() + tiers.tier2.len() + tiers.tier_add_edge.len();
         self.notify_skip(tiers.skip_count, process_count);
         if process_count == 0 { return; }
@@ -1562,9 +1548,9 @@ impl PrunrApp {
 
         let jobs = self.settings.parallel_jobs.min(super::memory::safe_max_jobs(model));
         if tiers.tier1.len() > 1 {
-            self.dispatch_with_admission(&tiers.tier1, tier2_work, add_edge_work, model, jobs, chain);
+            self.dispatch_with_admission(&tiers.tier1, tier2_work, add_edge_work, model, jobs);
         } else {
-            self.dispatch_small_batch(&tiers.tier1, tier2_work, add_edge_work, model, jobs, chain);
+            self.dispatch_small_batch(&tiers.tier1, tier2_work, add_edge_work, model, jobs);
         }
     }
 
@@ -1578,11 +1564,11 @@ impl PrunrApp {
             .map(|i| (i.id, i.source.clone(), i.settings.fill_style))
             .collect();
         for (id, source, fill_style) in dispatches {
-            if let Some(item) = self.batch.find_by_id_mut(id) {
-                item.status = BatchStatus::Processing;
-                item.start_job(step, Engine::Segment);
-            }
-            self.batch.request_filter_only(id, &source, fill_style);
+            let Some(item) = self.batch.find_by_id_mut(id) else { continue };
+            item.status = BatchStatus::Processing;
+            item.start_job(step, Engine::Segment);
+            let base = item.job.as_ref().and_then(|j| j.base.clone());
+            self.batch.request_filter_only(id, &source, base, fill_style);
         }
     }
 
@@ -1628,7 +1614,6 @@ impl PrunrApp {
         &mut self,
         candidate_ids: &HashSet<u64>,
         model: prunr_core::ModelKind,
-        chain: bool,
     ) -> ClassifiedTiers {
         use crate::gui::knob_catalog;
         use prunr_core::RequiredTier;
@@ -1643,15 +1628,19 @@ impl PrunrApp {
                 continue;
             };
 
-            // Chain mode with an existing result feeds the output back in,
-            // so the input changes each time → always full.
-            if chain && item.result_rgba.is_some() {
-                item.set_cached_tensor(None);
+            // A run that starts from an earlier result works on pixels the
+            // cached tensor never saw, unless it redoes the shown cut-out
+            // from that cut-out's own starting image.
+            if item.starts_from_result(Engine::Segment) {
+                let redo = item.timeline.current().origin.as_ref().is_some_and(|o| o.engine == Engine::Segment);
+                if !redo {
+                    item.set_cached_tensor(None);
+                }
                 tiers.tier1.insert(item.id);
                 continue;
             }
 
-            let current_recipe = item.settings.current_recipe(model, chain);
+            let current_recipe = item.settings.current_recipe(model);
             let tier = prunr_core::resolve_tier(old_recipe, &current_recipe);
             let impact = knob_catalog::cache_impact_for_recipe_diff(old_recipe, &current_recipe);
             item.apply_cache_impact(impact);
@@ -1774,7 +1763,6 @@ impl PrunrApp {
         add_edge_work: Vec<super::worker::AddEdgeWorkItem>,
         model: prunr_core::ModelKind,
         jobs: usize,
-        chain: bool,
     ) {
         use super::memory::{AdmissionController, ImageMemCost};
 
@@ -1791,7 +1779,7 @@ impl PrunrApp {
         while let Some(admitted_id) = ctrl.try_admit_next() {
             if let Some(item) = self.batch.find_by_id_mut(admitted_id) {
                 if let Ok(bytes) = item.source.load_bytes() {
-                    let chain_input = if chain { item.result_rgba.clone() } else { None };
+                    let chain_input = item.job.as_ref().and_then(|j| j.base.clone());
                     initial_items.push((item.id, bytes, chain_input));
                     item.status = BatchStatus::Processing;
                 }
@@ -1822,13 +1810,12 @@ impl PrunrApp {
         add_edge_work: Vec<super::worker::AddEdgeWorkItem>,
         model: prunr_core::ModelKind,
         jobs: usize,
-        chain: bool,
     ) {
         let items: Vec<_> = self.batch.items.iter_mut()
             .filter(|i| tier1_ids.contains(&i.id))
             .filter_map(|i| {
                 let bytes = i.source.load_bytes().ok()?;
-                let chain_input = if chain { i.result_rgba.clone() } else { None };
+                let chain_input = i.job.as_ref().and_then(|j| j.base.clone());
                 i.status = BatchStatus::Processing;
                 Some((i.id, bytes, chain_input))
             })
@@ -1873,7 +1860,7 @@ impl PrunrApp {
             }
         }
 
-        let recipe = current_settings.current_recipe(model, self.settings.chain_mode);
+        let recipe = current_settings.current_recipe(model);
         self.processor.track_dispatch(recipe, process_ids.iter().copied());
 
         self.status.pct = 0.0;
@@ -2272,12 +2259,11 @@ impl PrunrApp {
         let Some(ref mut ctrl) = self.processor.admission else { return; };
         ctrl.release(completed_id);
 
-        let chain = self.settings.chain_mode;
         let mut streamed_ids = Vec::new();
         while let Some(next_id) = ctrl.try_admit_next() {
             if let Some(item) = self.batch.find_by_id_mut(next_id) {
                 let Ok(bytes) = item.source.load_bytes() else { continue; };
-                let chain_input = if chain { item.result_rgba.clone() } else { None };
+                let chain_input = item.job.as_ref().and_then(|j| j.base.clone());
                 let tuple = (next_id, bytes, chain_input);
                 item.status = BatchStatus::Processing;
 
@@ -2320,10 +2306,9 @@ impl PrunrApp {
         // `Arc<DynamicImage>` on the item (built once, reused across every
         // subsequent dispatch of the drag session — see `source_dyn`).
         let is_filter_only = self.settings.model.to_model_kind().is_none();
-        let chain_mode = self.settings.chain_mode;
         let batch_items = &mut self.batch.items;
         let wait = self.processor.live_preview.tick(|id, kind| {
-            Self::build_preview_inputs(batch_items, id, kind, is_filter_only, chain_mode)
+            Self::build_preview_inputs(batch_items, id, kind, is_filter_only)
         });
         // If a future dispatch is waiting, schedule a repaint when the
         // debounce elapses so tick() can fire on its own.
@@ -2356,7 +2341,6 @@ impl PrunrApp {
         id: u64,
         kind: super::live_preview::PreviewKind,
         is_filter_only: bool,
-        chain_mode: bool,
     ) -> Option<super::live_preview::DispatchInputs> {
         use super::live_preview::{DispatchInputs, PreviewKind};
         let item = items.iter_mut().find(|b| b.id == id)?;
@@ -2375,16 +2359,14 @@ impl PrunrApp {
         {
             return None;
         }
-        // Chain mode + prior result: apply the live-preview mask to the
-        // chained `result_rgba` so stacked edits (e.g. an SD inpaint
-        // stroke) survive a subsequent seg brush stroke. Without this,
-        // Tier-2 mask rerun rebuilds against `source_dyn` and silently
-        // discards every chain step. The `chain_dyn_cache` keeps the
-        // wrapped `DynamicImage` across dispatches so a slider drag at
-        // 4K doesn't re-clone ~50 MB per tick; `Arc::ptr_eq` against the
-        // current `result_rgba` is the self-invalidation check.
-        let original = if chain_mode && item.result_rgba.is_some() {
-            let rgba = item.result_rgba.as_ref().unwrap();
+        // A run on top of an earlier result (an erase, a hand edit) keeps
+        // it: the preview starts from the same image Process would, the
+        // shown step's own starting image when it redoes that step. The
+        // `chain_dyn_cache` keeps the wrapped `DynamicImage` across ticks
+        // so a slider drag at 4K doesn't re-clone ~50 MB per tick;
+        // `Arc::ptr_eq` against the input is the self-invalidation check.
+        let base = item.run_input(Engine::Segment);
+        let original = if let Some(rgba) = base.as_ref() {
             let cached = item.chain_dyn_cache.as_ref()
                 .and_then(|(src, dyn_img)| Arc::ptr_eq(rgba, src).then(|| Arc::clone(dyn_img)));
             match cached {
@@ -2427,6 +2409,7 @@ impl PrunrApp {
                 version,
                 kind,
                 original,
+                base: None,
                 settings: item.settings,
                 seg_tensor: None,
                 edge_tensor: None,
@@ -2465,7 +2448,7 @@ impl PrunrApp {
         let correction = seg_tensor.as_ref().and_then(|seg| item.selection_plane_at((seg.width, seg.height)));
         Some(DispatchInputs {
             version,
-            kind, original, settings: item.settings,
+            kind, original, base, settings: item.settings,
             seg_tensor, edge_tensor, secondary_edge_tensor,
             cached_edge, cached_bold, cached_masked_base,
             correction,
@@ -2568,6 +2551,9 @@ impl PrunrApp {
                     }
                 }
                 item.amend();
+                if !is_upscale_tier2 {
+                    item.record_origin(Engine::Segment, r.base);
+                }
                 tracing::debug!(
                     event = "upscale_tier2_apply",
                     item_id = item.id,
@@ -2931,9 +2917,8 @@ impl PrunrApp {
         let model: prunr_core::ModelKind = self.settings.model
             .to_model_kind()
             .unwrap_or(prunr_core::ModelKind::BiRefNetLite);
-        let chain = self.settings.chain_mode;
         self.batch.find_by_id(item_id)
-            .map(|b| b.settings.current_recipe(model, chain))
+            .map(|b| b.settings.current_recipe(model))
     }
 
     fn refresh_batch_progress_status(&mut self) {
@@ -3603,16 +3588,9 @@ impl PrunrApp {
                     .and_then(|bg| bg.source_path.as_deref())
                     .and_then(|p| p.file_name())
                     .and_then(|n| n.to_str());
-                // Upscale row shows projected output size. When chain mode is
-                // on and a result exists, the upscale input is the result image,
-                // not the source — reflect that in the dimension chip.
-                let source_dims = if settings_ref.chain_mode {
-                    item.result_rgba.as_ref()
-                        .map(|r| r.dimensions())
-                        .unwrap_or(item.dimensions)
-                } else {
-                    item.dimensions
-                };
+                // Upscale row shows projected output size: the size of the
+                // image the next upscale starts from.
+                let source_dims = item.run_input_dims(Engine::Upscale);
                 let state = adjustments_toolbar::ToolbarState {
                     magic_brush_active: self.magic_brush_state.is_active(),
                     brush_available,
@@ -3700,15 +3678,6 @@ impl PrunrApp {
             // covers the switch-away-from-upscale case where ensure is never
             // called again.
             self.processor.release_upscale_engine();
-        }
-        if toolbar_change.auto_chain_on {
-            let item_has_result = self
-                .batch
-                .selected_item()
-                .map(|i| i.has_result())
-                .unwrap_or(false);
-            self.settings.chain_mode =
-                resolve_auto_chain_on(true, item_has_result, self.settings.chain_mode);
         }
         if toolbar_change.brush_settings_committed {
             self.settings.save();
@@ -3813,7 +3782,7 @@ impl PrunrApp {
                     let model = self.settings.model
                         .dispatch_model_kind()
                         .unwrap_or(prunr_core::ModelKind::BiRefNetLite);
-                    let new_recipe = item.settings.current_recipe(model, self.settings.chain_mode);
+                    let new_recipe = item.settings.current_recipe(model);
                     let tier = prunr_core::resolve_tier(old_recipe, &new_recipe);
                     tracing::debug!(
                         event = "upscale_tier2_resolve",
@@ -3896,7 +3865,7 @@ impl PrunrApp {
             let preset_dispatch = match &item.applied_recipe {
                 None => knob_catalog::DispatchKind::SubprocessFullPipeline,
                 Some(old) => {
-                    let new = item.settings.current_recipe(model, self.settings.chain_mode);
+                    let new = item.settings.current_recipe(model);
                     match prunr_core::resolve_tier(old, &new) {
                         // UpscaleRerun (Tier-1): user must re-click Process.
                         RequiredTier::Skip
@@ -4248,41 +4217,6 @@ mod can_process_upscale_tests {
     }
 }
 
-/// The view emits `auto_chain_on = true` on an upscale-entry model switch.
-/// No fresh-item upscale should silently flip chain mode on with no prior
-/// result to chain from — so the application gates the flip on `item_has_result`.
-pub(crate) fn resolve_auto_chain_on(
-    auto_chain_on: bool,
-    item_has_result: bool,
-    current_chain_mode: bool,
-) -> bool {
-    if auto_chain_on && item_has_result {
-        true
-    } else {
-        current_chain_mode
-    }
-}
-
-#[cfg(test)]
-mod auto_chain_on_tests {
-    use super::resolve_auto_chain_on;
-
-    #[test]
-    fn auto_chain_on_sets_when_result_exists() {
-        assert!(resolve_auto_chain_on(true, true, false));
-    }
-
-    #[test]
-    fn auto_chain_on_noop_without_result() {
-        assert!(!resolve_auto_chain_on(true, false, false));
-    }
-
-    #[test]
-    fn auto_chain_on_unchanged_when_view_did_not_emit() {
-        assert!(resolve_auto_chain_on(false, true, true));
-    }
-}
-
 #[cfg(test)]
 mod upscale_tier2_routing_tests {
     use prunr_core::{RequiredTier, resolve_tier};
@@ -4290,11 +4224,11 @@ mod upscale_tier2_routing_tests {
     use prunr_core::OutputScale;
 
     fn recipe_for(settings: &ItemSettings) -> prunr_core::ProcessingRecipe {
-        settings.current_recipe(prunr_core::ModelKind::BiRefNetLite, false)
+        settings.current_recipe(prunr_core::ModelKind::BiRefNetLite)
     }
 
     fn upscale_recipe_for(settings: &ItemSettings) -> prunr_core::ProcessingRecipe {
-        settings.current_recipe(prunr_core::ModelKind::RealEsrganX4Plus, false)
+        settings.current_recipe(prunr_core::ModelKind::RealEsrganX4Plus)
     }
 
     #[test]

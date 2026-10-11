@@ -187,7 +187,6 @@ pub(crate) fn render(ctx: &egui::Context, toasts: &mut crate::gui::toasts::Toast
                         .spacing([theme::SPACE_LG, theme::SPACE_SM])
                         .show(ui, |ui| {
                             opt_row(ui, "--debug", "Verbose tracing (use when reporting bugs)");
-                            opt_row(ui, "--chain", "Process previous result instead of original");
                         });
 
                     ui.add_space(theme::SPACE_MD);

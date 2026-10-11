@@ -46,7 +46,6 @@ pub enum StaticKnob {
 
     // Inference-level — needs worker subprocess.
     Model,
-    ChainMode,
 }
 
 impl StaticKnob {
@@ -71,7 +70,6 @@ impl StaticKnob {
             StaticKnob::BgColor => 15,
             StaticKnob::BgImageFit => 16,
             StaticKnob::Model => 17,
-            StaticKnob::ChainMode => 18,
         }
     }
 
@@ -95,7 +93,6 @@ impl StaticKnob {
         StaticKnob::BgColor,
         StaticKnob::BgImageFit,
         StaticKnob::Model,
-        StaticKnob::ChainMode,
     ];
 }
 
@@ -116,7 +113,7 @@ pub enum KnobRequirement {
     /// Always enabled (when not mid-processing).
     Always,
     /// Enabled when the model produces a segmentation mask:
-    /// `model_uses_seg && (line_mode != EdgesOnly || chain_mode)`.
+    /// `model_uses_seg && line_mode != EdgesOnly`.
     MaskProduced,
     /// Enabled when a subject channel is present: `line_mode != EdgesOnly`.
     SubjectPresent,
@@ -133,7 +130,6 @@ pub struct KnobContext {
     /// True when `SettingsModel::None` is active (filter-only, no AI).
     pub model_is_none: bool,
     pub line_mode: LineMode,
-    pub chain_mode: bool,
 }
 
 /// Returns `true` when `req` is satisfied under `ctx`.
@@ -141,7 +137,7 @@ pub fn knob_enabled(req: KnobRequirement, ctx: KnobContext) -> bool {
     match req {
         KnobRequirement::Always => true,
         KnobRequirement::MaskProduced =>
-            ctx.model_uses_seg && (ctx.line_mode != LineMode::EdgesOnly || ctx.chain_mode),
+            ctx.model_uses_seg && ctx.line_mode != LineMode::EdgesOnly,
         KnobRequirement::SubjectPresent =>
             ctx.line_mode != LineMode::EdgesOnly,
         KnobRequirement::TransparencyProduced =>
@@ -173,8 +169,7 @@ impl StaticKnob {
             | StaticKnob::SolidLineColor
             | StaticKnob::ComposeMode
             | StaticKnob::LineStyle
-            | StaticKnob::Model
-            | StaticKnob::ChainMode => KnobRequirement::Always,
+            | StaticKnob::Model => KnobRequirement::Always,
         }
     }
 }
@@ -267,7 +262,7 @@ pub struct KnobSpec {
     pub dispatch: DispatchKind,
     /// Whether a committed change to this knob auto-fires its dispatch.
     /// True for LineMode + InputTransform (intent is "flip and go"); false
-    /// for Model / ChainMode (user should review and click Process).
+    /// for Model (user should review and click Process).
     pub auto_trigger_on_commit: bool,
 }
 
@@ -306,9 +301,8 @@ pub fn spec(knob: StaticKnob) -> KnobSpec {
         StaticKnob::BgColor
         | StaticKnob::BgImageFit => s(CompositeOnly, Nothing, Render, true),
 
-        // Model / ChainMode: user must click Process.
+        // Model: user must click Process.
         StaticKnob::Model => s(FullPipeline, SegCache, SubprocessFullPipeline, false),
-        StaticKnob::ChainMode => s(FullPipeline, Both, SubprocessFullPipeline, false),
     }
 }
 
@@ -373,9 +367,6 @@ pub fn input_transform_spec(cached_seg: bool) -> KnobSpec {
 /// input_transform change, edge stays valid on a model swap).
 pub fn cache_impact_for_recipe_diff(old: &ProcessingRecipe, new: &ProcessingRecipe) -> CacheImpact {
     let mut impact = CacheImpact::Nothing;
-    if old.was_chain != new.was_chain {
-        impact = impact.union(spec(StaticKnob::ChainMode).cache_impact);
-    }
     if old.inference.model != new.inference.model {
         impact = impact.union(spec(StaticKnob::Model).cache_impact);
     }
@@ -439,7 +430,6 @@ mod tests {
             (StaticKnob::BgColor, TransparencyProduced),
             (StaticKnob::BgImageFit, TransparencyProduced),
             (StaticKnob::Model, Always),
-            (StaticKnob::ChainMode, Always),
         ];
         assert_eq!(expected.len(), StaticKnob::ALL.len(), "table covers all variants");
         for &(knob, req) in expected {
@@ -450,25 +440,24 @@ mod tests {
     #[test]
     fn knob_enabled_matches_toolbar_boolean_formulas() {
         use LineMode::*;
-        let cases: &[(bool, bool, LineMode, bool)] = &[
-            // (uses_seg, model_is_none, line_mode, chain_mode)
-            (true,  false, Off,            false),
-            (true,  false, SubjectOutline, false),
-            (true,  false, EdgesOnly,      false),
-            (true,  false, EdgesOnly,      true),  // chain rescues mask
-            (false, false, Off,            false),  // inpaint model
-            (false, true,  Off,            false),  // No-model + Off
-            (false, true,  SubjectOutline, false),
-            (false, true,  EdgesOnly,      false),
+        let cases: &[(bool, bool, LineMode)] = &[
+            // (uses_seg, model_is_none, line_mode)
+            (true,  false, Off),
+            (true,  false, SubjectOutline),
+            (true,  false, EdgesOnly),     // Full lines: no mask is made
+            (false, false, Off),           // inpaint model
+            (false, true,  Off),           // No-model + Off
+            (false, true,  SubjectOutline),
+            (false, true,  EdgesOnly),
         ];
-        for &(uses_seg, is_none, line_mode, chain_mode) in cases {
-            let ctx = KnobContext { model_uses_seg: uses_seg, model_is_none: is_none, line_mode, chain_mode };
-            let expected_mask = uses_seg && (line_mode != EdgesOnly || chain_mode);
+        for &(uses_seg, is_none, line_mode) in cases {
+            let ctx = KnobContext { model_uses_seg: uses_seg, model_is_none: is_none, line_mode };
+            let expected_mask = uses_seg && line_mode != EdgesOnly;
             let expected_subject = line_mode != EdgesOnly;
             let expected_bg = !(is_none && line_mode == Off);
             assert_eq!(
                 knob_enabled(KnobRequirement::MaskProduced, ctx), expected_mask,
-                "MaskProduced uses_seg={uses_seg} is_none={is_none} {line_mode:?} chain={chain_mode}",
+                "MaskProduced uses_seg={uses_seg} is_none={is_none} {line_mode:?}",
             );
             assert_eq!(
                 knob_enabled(KnobRequirement::SubjectPresent, ctx), expected_subject,
@@ -686,8 +675,8 @@ mod tests {
                     _ => prunr_core::BgImageFit::Cover,
                 };
             }
-            StaticKnob::Model | StaticKnob::ChainMode => {
-                // Model + ChainMode live outside ItemSettings; tested via
+            StaticKnob::Model => {
+                // Model lives outside ItemSettings; tested via
                 // dedicated recipe-level mutations in the integration tests.
             }
         }
@@ -717,13 +706,13 @@ mod tests {
             }
         };
         for knob in StaticKnob::ALL {
-            if matches!(knob, StaticKnob::Model | StaticKnob::ChainMode) {
+            if matches!(knob, StaticKnob::Model) {
                 continue;
             }
             let new = mutate_static(*knob, base);
             let model = ModelKind::Silueta;
-            let old_recipe = base.current_recipe(model, false);
-            let new_recipe = new.current_recipe(model, false);
+            let old_recipe = base.current_recipe(model);
+            let new_recipe = new.current_recipe(model);
 
             let tier_from_resolve = prunr_core::resolve_tier(&old_recipe, &new_recipe);
             let impact_from_diff = cache_impact_for_recipe_diff(&old_recipe, &new_recipe);
@@ -763,8 +752,8 @@ mod tests {
                 line_mode: to,
                 ..Default::default()
             };
-            let old_recipe = old.current_recipe(ModelKind::Silueta, false);
-            let new_recipe = new.current_recipe(ModelKind::Silueta, false);
+            let old_recipe = old.current_recipe(ModelKind::Silueta);
+            let new_recipe = new.current_recipe(ModelKind::Silueta);
             let cat = line_mode_spec(lmc(from, to), false);
             let diff = cache_impact_for_recipe_diff(&old_recipe, &new_recipe);
             assert_eq!(cat.cache_impact, diff, "{from:?} -> {to:?}");
@@ -781,8 +770,8 @@ mod tests {
             ..Default::default()
         };
         let diff = cache_impact_for_recipe_diff(
-            &old.current_recipe(ModelKind::Silueta, false),
-            &new.current_recipe(ModelKind::Silueta, false),
+            &old.current_recipe(ModelKind::Silueta),
+            &new.current_recipe(ModelKind::Silueta),
         );
         assert_eq!(
             input_transform_spec(true).cache_impact,
@@ -805,7 +794,6 @@ mod tests {
                 proptest::prelude::Just(LineMode::EdgesOnly),
                 proptest::prelude::Just(LineMode::SubjectOutline),
             ],
-            chain in proptest::prelude::any::<bool>(),
         ) {
             let s = crate::gui::item_settings::ItemSettings {
                 gamma,
@@ -814,7 +802,7 @@ mod tests {
                 line_mode,
                 ..Default::default()
             };
-            let r = s.current_recipe(prunr_core::ModelKind::Silueta, chain);
+            let r = s.current_recipe(prunr_core::ModelKind::Silueta);
             proptest::prop_assert_eq!(prunr_core::resolve_tier(&r, &r), RequiredTier::Skip);
         }
 
@@ -822,27 +810,23 @@ mod tests {
         /// matches the union of their individual impacts.
         #[test]
         fn cache_impact_is_additive(
-            chain_flip in proptest::prelude::any::<bool>(),
             transform_flip in proptest::prelude::any::<bool>(),
             model_flip in proptest::prelude::any::<bool>(),
         ) {
             use prunr_core::{InputTransform, ModelKind};
             let base = crate::gui::item_settings::item_with_line_mode(LineMode::SubjectOutline);
-            let old_recipe = base.current_recipe(ModelKind::Silueta, false);
+            let old_recipe = base.current_recipe(ModelKind::Silueta);
 
             let mut new_settings = base;
             if transform_flip {
                 new_settings.input_transform = InputTransform::Grayscale;
             }
             let new_model = if model_flip { ModelKind::BiRefNetLite } else { ModelKind::Silueta };
-            let new_recipe = new_settings.current_recipe(new_model, chain_flip);
+            let new_recipe = new_settings.current_recipe(new_model);
 
             let actual = cache_impact_for_recipe_diff(&old_recipe, &new_recipe);
 
             let mut expected = CacheImpact::Nothing;
-            if chain_flip {
-                expected = expected.union(spec(StaticKnob::ChainMode).cache_impact);
-            }
             if model_flip {
                 expected = expected.union(spec(StaticKnob::Model).cache_impact);
             }
@@ -881,7 +865,6 @@ mod tests {
             }).into(),
             composite: CompositeRecipe::default(),
             upscale: UpscaleRecipe::default(),
-            was_chain: false,
         };
 
         assert_eq!(
@@ -901,13 +884,6 @@ mod tests {
         assert_eq!(
             cache_impact_for_recipe_diff(&base, &transform_change),
             CacheImpact::EdgeCache,
-        );
-
-        let mut chain_flip = base.clone();
-        chain_flip.was_chain = true;
-        assert_eq!(
-            cache_impact_for_recipe_diff(&base, &chain_flip),
-            CacheImpact::Both,
         );
 
         // Off → SubjectOutline: seg valid, edge tensor still valid (Off

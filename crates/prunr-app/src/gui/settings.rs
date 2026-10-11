@@ -23,11 +23,6 @@ pub struct Settings {
     #[serde(alias = "auto_remove_on_import")]
     pub auto_process_on_import: bool,
     pub parallel_jobs: usize,
-    /// When true, Process uses the current result as input instead of the
-    /// original. Defaults ON — the common workflow (seg → upscale, mask →
-    /// erase → upscale) stacks naturally; opting *out* is the rare case.
-    #[serde(default = "default_chain_mode")]
-    pub chain_mode: bool,
     /// Canvas transparency checkerboard uses dark tones instead of light.
     #[serde(default)]
     pub dark_checker: bool,
@@ -140,7 +135,6 @@ impl Settings {
 }
 
 fn default_live_preview() -> bool { true }
-fn default_chain_mode() -> bool { true }
 fn default_preset_name() -> String { PRUNR_PRESET.to_string() }
 
 impl Settings {
@@ -627,7 +621,6 @@ impl Default for Settings {
             model: SettingsModel::BiRefNetLite,
             auto_process_on_import: false,
             parallel_jobs: (num_cpus::get() / 2).max(1),
-            chain_mode: default_chain_mode(),
             dark_checker: false,
             live_preview: true,
             auto_hide_adjustments: false,
@@ -716,9 +709,8 @@ mod tests {
     /// helper tests (`progress_style_default_is_modal`,
     /// `default_preset_is_prunr`, …) each pin one field — a new
     /// field that lands without a default-aware test slips through.
-    /// This pins the entire surface so a `parallel_jobs: 0` or
-    /// `chain_mode: false` regression has to break this test on the
-    /// way out.
+    /// This pins the entire surface so a `parallel_jobs: 0` regression
+    /// has to break this test on the way out.
     ///
     /// `parallel_jobs` is host-dependent (CPU count), so its row
     /// asserts a lower bound rather than an exact value.
@@ -729,7 +721,6 @@ mod tests {
         assert!(!s.auto_process_on_import);
         assert!(s.parallel_jobs >= 1,
             "parallel_jobs must clamp to >= 1 even on a single-core host");
-        assert!(s.chain_mode, "chain_mode default flipped to true in Phase 30");
         assert!(!s.dark_checker);
         assert!(s.live_preview);
         assert!(!s.auto_hide_adjustments);
@@ -812,7 +803,6 @@ mod tests {
         let original = Settings {
             parallel_jobs: 7,
             auto_process_on_import: true,
-            chain_mode: true,
             ..Settings::default()
         };
         original.save_to_path(&path);
@@ -821,7 +811,6 @@ mod tests {
         let restored: Settings = serde_json::from_str(&json).expect("schema round-trip");
         assert_eq!(restored.parallel_jobs, 7);
         assert!(restored.auto_process_on_import);
-        assert!(restored.chain_mode);
         // `force_cpu` and `active_backend` are #[serde(skip)] by design
         // (machine-specific runtime state, reset on every launch). The
         // round-trip must not preserve them.

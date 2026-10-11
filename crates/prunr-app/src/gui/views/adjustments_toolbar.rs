@@ -76,10 +76,6 @@ pub struct ToolbarChange {
     /// User picked a non-image bg kind (color or effect) while a bg image
     /// was active — drop the image so the chosen kind takes over.
     pub clear_bg_image: bool,
-    /// Set when the toolbar switches TO an upscale model from a non-upscale
-    /// one. The application checks `item.has_result()` before promoting this
-    /// to `chain_mode = true` — the view does not have access to per-item state.
-    pub auto_chain_on: bool,
     /// User clicked a selection action button (Delete/Copy/Cut/Invert/Clear).
     /// `None` when no action was clicked this frame.
     pub(crate) selection_action: Option<SelectionAction>,
@@ -129,7 +125,6 @@ impl Default for ToolbarChange {
             open_model_store: None,
             pick_bg_image: false,
             clear_bg_image: false,
-            auto_chain_on: false,
             selection_action: None,
             toggle_paint: false,
             toggle_magic: false,
@@ -172,7 +167,6 @@ pub(crate) fn render(
         model_uses_seg,
         model_is_none: matches!(app_settings.model, SettingsModel::None),
         line_mode: item_settings.line_mode,
-        chain_mode: app_settings.chain_mode,
     };
     let mask_active = knob_catalog::knob_enabled(KnobRequirement::MaskProduced, knob_ctx);
     let fill_style_active = knob_catalog::knob_enabled(KnobRequirement::SubjectPresent, knob_ctx);
@@ -1208,21 +1202,7 @@ pub(super) fn render_model_dropdown(
         }
         change.model_changed = true;
         aggregate_bool(true, StaticKnob::Model, change);
-        if should_auto_chain_on_model_switch(prev_model, app_settings.model) {
-            change.auto_chain_on = true;
-        }
     }
-}
-
-/// Predicate: emit `auto_chain_on = true` only when the model switch
-/// *enters* the upscale family. Stays-in-family (upscale→upscale) or
-/// leaving the family (upscale→non-upscale) must not retrigger
-/// chain-mode, or the user would see the chain toggle flip back on
-/// every time they cycle through the upscale dropdown. Extracted as
-/// a free function so the four-case truth table can be unit-pinned
-/// without standing up the full toolbar render path.
-fn should_auto_chain_on_model_switch(prev: SettingsModel, next: SettingsModel) -> bool {
-    next.is_upscale() && !prev.is_upscale()
 }
 
 #[cfg(test)]
@@ -1236,36 +1216,6 @@ mod tests {
         assert_eq!(c.auto_dispatch, DispatchKind::None);
         assert!(!c.render_repaint);
         assert!(c.line_mode_from.is_none());
-        assert!(!c.auto_chain_on);
-    }
-
-    /// Truth table for `should_auto_chain_on_model_switch`. The
-    /// emission must fire only on the *entering-upscale-family*
-    /// transition; staying in the family or leaving it must not
-    /// retrigger chain-mode (else cycling through upscale models
-    /// would resurrect the toggle every dropdown click).
-    #[test]
-    fn auto_chain_on_fires_only_when_entering_upscale_family() {
-        // Non-upscale → upscale: fire.
-        assert!(should_auto_chain_on_model_switch(
-            SettingsModel::BiRefNetLite,
-            SettingsModel::RealEsrganUpscale,
-        ));
-        // Already in upscale family: do not fire (user is just
-        // switching between Real-ESRGAN and Nomos8kSCHAT).
-        assert!(!should_auto_chain_on_model_switch(
-            SettingsModel::RealEsrganUpscale,
-            SettingsModel::Nomos8kUpscale,
-        ));
-        // Leaving upscale family: do not fire.
-        assert!(!should_auto_chain_on_model_switch(
-            SettingsModel::RealEsrganUpscale,
-            SettingsModel::BiRefNetLite,
-        ));
-        // Seg → seg: no upscale involved, no fire.
-        assert!(!should_auto_chain_on_model_switch(
-            SettingsModel::Silueta,
-            SettingsModel::BiRefNetLite,
-        ));
     }
 }
+

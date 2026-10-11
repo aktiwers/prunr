@@ -45,9 +45,9 @@ fn preview_inputs_reuse_the_decompressed_tensor_until_it_changes() {
     item.dimensions = (8, 8);
     item.source_rgba = Some(Arc::new(image::RgbaImage::new(8, 8)));
     give_cutout(item);
-    let first = crate::gui::app::PrunrApp::build_preview_inputs(&mut app.batch.items, 3, PreviewKind::Mask, false, false)
+    let first = crate::gui::app::PrunrApp::build_preview_inputs(&mut app.batch.items, 3, PreviewKind::Mask, false)
         .expect("inputs").seg_tensor.expect("tensor");
-    let second = crate::gui::app::PrunrApp::build_preview_inputs(&mut app.batch.items, 3, PreviewKind::Mask, false, false)
+    let second = crate::gui::app::PrunrApp::build_preview_inputs(&mut app.batch.items, 3, PreviewKind::Mask, false)
         .expect("inputs").seg_tensor.expect("tensor");
     assert!(Arc::ptr_eq(&first, &second), "second tick must reuse the hot tensor");
     let item = app.batch.find_by_id_mut(3).unwrap();
@@ -387,7 +387,6 @@ fn a_stroke_undo_brings_the_stored_result_back() {
     use std::sync::Arc;
     let ctx = egui::Context::default();
     let mut app = app_with_model(SettingsModel::Silueta);
-    app.settings.chain_mode = true;
     let item = push_test_item(&mut app, 5);
     item.dimensions = (8, 8);
     item.status = crate::gui::item::BatchStatus::Done;
@@ -425,7 +424,6 @@ fn a_process_run_with_a_kept_selection_undoes_in_order() {
     let ctx = egui::Context::default();
     let px = |v: u8| image::RgbaImage::from_pixel(8, 8, image::Rgba([v, v, v, 255]));
     let mut app = app_with_model(SettingsModel::BiRefNetLite);
-    app.settings.chain_mode = true;
     let item = push_test_item(&mut app, 9);
     item.dimensions = (8, 8);
     item.status = crate::gui::item::BatchStatus::Done;
@@ -500,7 +498,7 @@ fn a_recut_for_a_state_left_behind_never_lands() {
     item.commit(StepKind::Process);
     give_tensor(item);
     app.commit_selection_and_dispatch(8, make_mask(8, 8), StepKind::Stroke);
-    let inputs = PrunrApp::build_preview_inputs(&mut app.batch.items, 8, PreviewKind::Mask, false, false)
+    let inputs = PrunrApp::build_preview_inputs(&mut app.batch.items, 8, PreviewKind::Mask, false)
         .expect("the stroke's re-cut starts");
 
     app.handle_undo(&ctx);
@@ -510,6 +508,7 @@ fn a_recut_for_a_state_left_behind_never_lands() {
         kind: PreviewKind::Mask,
         generation: 0,
         version: inputs.version,
+        base: None,
         new_edge: None,
         new_bold: None,
         new_masked_base: None,

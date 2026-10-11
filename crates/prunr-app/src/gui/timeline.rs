@@ -18,6 +18,7 @@ use std::time::{Duration, Instant};
 
 use prunr_core::selection::MaskArtifact;
 
+use super::item::Engine;
 use super::item_settings::ItemSettings;
 
 /// Steps kept per image; the oldest go first.
@@ -262,7 +263,20 @@ pub(crate) struct DocState {
     pub(crate) selection_hash: Option<u64>,
     pub(crate) settings: ItemSettings,
     pub(crate) applied_preset: String,
+    /// The run that made this step's image; `None` for the original and
+    /// for edits made by hand.
+    pub(crate) origin: Option<Origin>,
     pub(crate) at: Instant,
+}
+
+/// What made a step's image: the engine, and the image its run started
+/// from (`None`: the original). Running the same engine again redoes the
+/// step from that image instead of stacking on its own output.
+#[derive(Clone)]
+pub(crate) struct Origin {
+    pub(crate) engine: Engine,
+    pub(crate) base: Option<StoredImage>,
+    pub(crate) base_dims: Option<(u32, u32)>,
 }
 
 impl DocState {
@@ -276,6 +290,7 @@ impl DocState {
             selection_hash: None,
             settings,
             applied_preset,
+            origin: None,
             at: Instant::now(),
         }
     }
@@ -397,6 +412,7 @@ mod tests {
             selection_hash: None,
             settings: super::super::item_settings::item_with_gamma(gamma),
             applied_preset: String::new(),
+            origin: None,
             at: Instant::now(),
         }
     }
