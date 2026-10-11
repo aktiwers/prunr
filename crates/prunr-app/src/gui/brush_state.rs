@@ -3,7 +3,7 @@
 //! `BatchManager.items` — the caller hands it the active grid size
 //! and writes the committed strokes back via `BatchItem`'s mutator.
 
-use prunr_core::brush::{paint_circle, paint_line, paint_square, BrushShape, Stamp};
+use prunr_core::brush::{paint_circle, paint_line, paint_square, paint_square_line, BrushShape, Stamp};
 use prunr_core::selection::{BrushMode, MaskArtifact};
 use serde::{Deserialize, Serialize};
 
@@ -528,6 +528,9 @@ struct ActiveStroke {
     /// Line-tool state: present iff `shape == Line`. Tracks the press +
     /// most recent positions so `commit_stroke` can paint one segment.
     line: Option<LineState>,
+    /// The last Circle / Square sample: the next one paints the segment
+    /// from here, since a fast drag samples the pointer far apart.
+    last: Option<(f32, f32)>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -575,6 +578,7 @@ impl BrushState {
             trail: Trail::default(),
             shape,
             line: None,
+            last: None,
         });
     }
 
@@ -607,11 +611,17 @@ impl BrushState {
         let Some(active) = self.active.as_mut() else { return };
         match active.shape {
             BrushShape::Circle => {
-                paint_circle(&mut active.grid, x, y, radius, stamp);
+                match active.last.replace((x, y)) {
+                    Some((lx, ly)) => paint_line(&mut active.grid, lx, ly, x, y, radius, stamp),
+                    None => paint_circle(&mut active.grid, x, y, radius, stamp),
+                }
                 active.dirty = true;
             }
             BrushShape::Square => {
-                paint_square(&mut active.grid, x, y, radius, stamp);
+                match active.last.replace((x, y)) {
+                    Some((lx, ly)) => paint_square_line(&mut active.grid, lx, ly, x, y, radius, stamp),
+                    None => paint_square(&mut active.grid, x, y, radius, stamp),
+                }
                 active.dirty = true;
             }
             BrushShape::Line => {
@@ -927,6 +937,21 @@ mod tests {
         assert!(s.has_active_stroke());
         s.toggle();
         assert!(!s.has_active_stroke());
+    }
+
+    /// A fast drag samples the pointer far apart; the stroke must still
+    /// be continuous between samples, not a row of dots.
+    #[test]
+    fn a_fast_stroke_is_continuous_between_samples() {
+        for shape in [BrushShape::Circle, BrushShape::Square] {
+            let mut s = BrushState::default();
+            s.begin_stroke(64, 64, shape);
+            s.extend_stroke_with_radius(4.0, 30.0, 2.0, default_stamp());
+            s.extend_stroke_with_radius(60.0, 30.0, 2.0, default_stamp());
+            let c = s.commit_stroke(default_stamp()).expect("populated stroke");
+            let gaps = (4..=60).filter(|&x| c.cells()[30 * 64 + x] == 0).count();
+            assert_eq!(gaps, 0, "{shape:?} left {gaps} unpainted cells between the samples");
+        }
     }
 
     #[test]
