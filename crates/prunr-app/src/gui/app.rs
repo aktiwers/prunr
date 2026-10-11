@@ -1037,6 +1037,7 @@ impl PrunrApp {
             tracing::warn!(item_id, "inpaint dispatch skipped: source RGBA unavailable");
             return;
         };
+        self.settings.fit_sd_quality_to_install(Settings::can_select_lcm_scheduler());
         let bs = &self.settings.brush;
         let raw_backend = self.settings.model.to_model_id()
             .unwrap_or(prunr_models::ModelId::LaMaFp32);

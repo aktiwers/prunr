@@ -354,6 +354,14 @@ impl Settings {
         self.brush.take_sd_quality_from(&resolved.brush);
     }
 
+    /// Fast needs its own download; without it the eraser runs Quality.
+    pub(crate) fn fit_sd_quality_to_install(&mut self, lcm_installed: bool) {
+        use super::brush_state::SdScheduler;
+        if self.brush.sd_scheduler == SdScheduler::Lcm && !lcm_installed {
+            self.on_scheduler_change_resolve_sd(SdScheduler::DpmPlusPlus2MKarras);
+        }
+    }
+
     /// ItemSettings template for new batch items — the default_preset's
     /// values, with any `PRUNR_*` knob env-var overrides applied on top
     /// (test-harness only; production env is empty).
@@ -1023,6 +1031,25 @@ mod tests {
         s.on_model_change_resolve_brush();
         assert_eq!((s.brush.radius, s.brush.hardness), (33.0, 0.2), "what the user set for the brush survives a model switch");
         assert_eq!(s.brush.inpaint_feather, 9.0, "the new model's tuning comes from the preset");
+    }
+
+    /// Without the Fast download, Fast's few steps would run on the full
+    /// model and leave a half-made fill; the eraser runs Quality instead.
+    #[test]
+    fn fast_without_its_download_runs_quality() {
+        use crate::gui::brush_state::SdScheduler;
+        let mut s = Settings::default();
+        s.model = SettingsModel::SdInpaint;
+        s.brush.sd_scheduler = SdScheduler::Lcm;
+        s.brush.sd_prompt = "kept".into();
+
+        s.fit_sd_quality_to_install(true);
+        assert_eq!(s.brush.sd_scheduler, SdScheduler::Lcm, "installed: Fast stays");
+
+        s.fit_sd_quality_to_install(false);
+        assert_eq!(s.brush.sd_scheduler, SdScheduler::DpmPlusPlus2MKarras);
+        assert!(SdScheduler::DpmPlusPlus2MKarras.steps_range().contains(&s.brush.sd_steps));
+        assert_eq!(s.brush.sd_prompt, "kept");
     }
 
     #[test]
