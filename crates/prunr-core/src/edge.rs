@@ -613,7 +613,6 @@ mod tests {
             // 0.3 * subject + 0.8 * edge, clamped. Sums to > 1.0 on purpose —
             // saturates to fully opaque where subject AND edge both contribute.
             ComposeMode::Ghost => |s, e| ((s * 77 + e * 204) / 255).clamp(0, 255) as u8,
-            ComposeMode::InverseMask => |s, e| ((255 - s) * e / 255) as u8,
         };
 
         // LineStyle gradients supersede `solid_line_color` — they compute the
@@ -710,7 +709,6 @@ mod tests {
             ComposeMode::SubjectFilled => |s, e| s.max(e) as u8,
             ComposeMode::Engraving => |s, e| (s - e).max(0) as u8,
             ComposeMode::Ghost => |s, e| ((s * 77 + e * 204) / 255).clamp(0, 255) as u8,
-            ComposeMode::InverseMask => |s, e| ((255 - s) * e / 255) as u8,
         };
 
         for i in 0..pixel_count {

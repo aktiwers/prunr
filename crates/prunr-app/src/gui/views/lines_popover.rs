@@ -43,7 +43,6 @@ pub(super) fn compose_description(mode: ComposeMode) -> &'static str {
         ComposeMode::SubjectFilled => "The cut-out subject with lines on top",
         ComposeMode::Engraving => "Lines cut through the filled subject",
         ComposeMode::Ghost => "A faded subject with strong lines",
-        ComposeMode::InverseMask => "Lines in the background, subject hidden",
     }
 }
 
