@@ -732,6 +732,20 @@ fn box_blur(mask: &mut GrayImage, radius: u32) {
 #[cfg(test)]
 mod tests {
 
+    /// Gamma above 1 removes more of the soft edge and below 1 keeps
+    /// more; 1 leaves the mask as the model gave it.
+    #[test]
+    fn gamma_darkens_or_lightens_the_soft_edge() {
+        let tensor = ndarray::Array4::from_shape_fn((1, 1, 1, 64), |(_, _, _, x)| x as f32 / 63.0 * 8.0 - 4.0);
+        let original = DynamicImage::ImageRgb8(RgbImage::new(64, 1));
+        let mean = |gamma: f32| {
+            let settings = MaskSettings { gamma, ..MaskSettings::default() };
+            let m = tensor_to_mask(tensor.view(), &original, &PostprocessOpts::new(&settings, ModelKind::Silueta));
+            m.as_raw().iter().map(|&v| v as f32).sum::<f32>() / 64.0
+        };
+        assert!(mean(2.0) < mean(1.0) && mean(1.0) < mean(0.5), "{} {} {}", mean(2.0), mean(1.0), mean(0.5));
+    }
+
     /// Feather is continuous: half a pixel softens an edge, and 1.5 px
     /// lands between 1 and 2.
     #[test]
