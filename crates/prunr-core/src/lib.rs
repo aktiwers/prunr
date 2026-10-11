@@ -22,6 +22,7 @@ pub mod denoise;
 pub mod selection;
 pub mod sam;
 pub mod progress;
+pub mod subject;
 
 pub use engine::{InferenceEngine, OrtEngine};
 pub use recipe::{ProcessingRecipe, InferenceRecipe, EdgeRecipe, MaskRecipe, CompositeRecipe, UpscaleRecipe, OutputScale, RequiredTier, resolve_tier, DEFAULT_SHARPEN};
@@ -40,4 +41,5 @@ pub use postprocess::{apply_fill_style, apply_bg_effect};
 pub use selection::{MaskArtifact, SelectionError};
 pub use sam::{SamEmbedding, SamDecoderOutput, decode_to_mask_artifact, MaskReading, SAM_ENCODER_INPUT, SAM_MASK_RESOLUTION};
 pub use progress::{Progress, ProgressSink, ProgressUpdate, Step, Unit, TileRect};
+pub use subject::{subject_hint, SubjectHint};
 pub use sam::prompt::{SamPrompt, PromptError, build_click_prompt, build_stroke_prompt, MAX_STROKE_POINTS};

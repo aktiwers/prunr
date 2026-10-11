@@ -61,7 +61,18 @@ use super::timeline::{store, DocState, StepKind, Timeline};
 /// the new one's texture is built, then the new one reveals over it.
 pub(crate) enum Reveal {
     Held(egui::TextureHandle),
-    Running(egui::TextureHandle, std::time::Instant),
+    /// The image revealed over, the start, and where the reveal starts
+    /// (the subject, when one was found; corner to corner otherwise).
+    Running(egui::TextureHandle, std::time::Instant, Option<Arc<[f32]>>),
+}
+
+/// The subject a background-removal run found, outlined on the image
+/// while its edges are refined.
+pub(crate) struct SubjectOutline {
+    pub(crate) texture: egui::TextureHandle,
+    pub(crate) shown_at: std::time::Instant,
+    /// Per reveal-mesh vertex: 0 on the subject, rising outward.
+    pub(crate) order: Arc<[f32]>,
 }
 
 /// A run awaited by an item: the timeline version it started at, and the
@@ -106,6 +117,7 @@ pub(crate) struct BatchItem {
     /// The transition to the next image after a discrete change (a run,
     /// an edit, an undo). A slider re-cut makes none and swaps at once.
     pub(crate) reveal: Option<Reveal>,
+    pub(crate) subject: Option<SubjectOutline>,
     /// True while a background thread is decoding source bytes to RGBA.
     pub(crate) decode_pending: bool,
     /// Every state this image has been in, and which one is shown. The
@@ -417,7 +429,8 @@ impl BatchItem {
     /// The new result's texture has landed: reveal it over the held image.
     pub(crate) fn start_reveal(&mut self) {
         if let Some(Reveal::Held(from)) = self.reveal.take() {
-            self.reveal = Some(Reveal::Running(from, std::time::Instant::now()));
+            let order = self.subject.as_ref().map(|s| Arc::clone(&s.order));
+            self.reveal = Some(Reveal::Running(from, std::time::Instant::now(), order));
         }
     }
 
@@ -431,22 +444,25 @@ impl BatchItem {
 
     /// A reveal under way: the image it reveals over, and how far it has
     /// come (0..1). A finished one is dropped by `settle_reveal`.
-    pub(crate) fn reveal_progress(&self) -> Option<(&egui::TextureHandle, f32)> {
-        let Some(Reveal::Running(from, at)) = &self.reveal else { return None };
+    pub(crate) fn reveal_progress(&self) -> Option<(&egui::TextureHandle, f32, Option<&[f32]>)> {
+        let Some(Reveal::Running(from, at, order)) = &self.reveal else { return None };
         let p = (at.elapsed().as_secs_f64() / super::views::effects::REVEAL_SECS) as f32;
-        (p < 1.0).then_some((from, p))
+        (p < 1.0).then_some((from, p, order.as_deref()))
     }
 
-    /// Release a finished reveal's texture.
+    /// Release a finished reveal's textures, and the subject outline it
+    /// grew from.
     pub(crate) fn settle_reveal(&mut self) {
         if matches!(self.reveal, Some(Reveal::Running(..))) && self.reveal_progress().is_none() {
             self.reveal = None;
+            self.subject = None;
         }
     }
 
     /// Make the working copy the shown state again.
     pub(crate) fn restore(&mut self) {
         self.hold_for_reveal();
+        self.subject = None;
         let shown = self.timeline.current().clone();
         self.result_parked = false;
         self.result_rgba = shown.result.as_ref().and_then(|r| r.load());
@@ -500,6 +516,7 @@ impl BatchItem {
     pub(crate) fn abandon_job(&mut self) {
         self.job = None;
         self.reveal = None;
+        self.subject = None;
         let has_result = self.result_rgba.is_some() || self.result_parked;
         self.status = if has_result { BatchStatus::Done } else { BatchStatus::Pending };
     }
@@ -716,6 +733,7 @@ impl BatchItem {
             source_tex_pending: false,
             result_tex_pending: false,
             reveal: None,
+            subject: None,
             decode_pending: false,
             timeline: Timeline::new(DocState::original(settings, applied_preset.clone())),
             job: None,

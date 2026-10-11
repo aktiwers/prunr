@@ -105,6 +105,8 @@ pub enum ProgressUpdate {
     Tiles(Vec<TileRect>),
     /// Tile `index` of the last layout started (`done: false`) or finished.
     Tile { index: u32, done: bool },
+    /// Where the subject is, as soon as segmentation has found it.
+    Subject(crate::subject::SubjectHint),
 }
 
 /// Whoever listens to a pipeline's reports.
@@ -170,6 +172,13 @@ impl Progress {
 
     pub fn tile(&self, index: u32, done: bool) {
         self.report(ProgressUpdate::Tile { index, done });
+    }
+
+    /// Report where the subject is; `hint` runs only when someone listens.
+    pub fn subject(&self, hint: impl FnOnce() -> crate::subject::SubjectHint) {
+        if self.sink.is_some() {
+            self.report(ProgressUpdate::Subject(hint()));
+        }
     }
 }
 
@@ -258,7 +267,7 @@ pub fn check_contract(updates: &[ProgressUpdate]) -> Result<(), String> {
                     return Err(format!("tile {index} of a layout of {tiles}"));
                 }
             }
-            ProgressUpdate::Step(_) => {}
+            ProgressUpdate::Step(_) | ProgressUpdate::Subject(_) => {}
         }
     }
     for (done, total, unit) in last.into_iter().flatten() {
