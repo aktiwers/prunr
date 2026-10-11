@@ -52,6 +52,7 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 - Undo restores the cut-out after a Magic Brush or Invert stroke in chain mode; only Paint strokes archived the previous result.
 - The selection outline stays visible when a large image is zoomed out to fit.
 - The click that closes a brush popover no longer paints a stroke.
+- A Magic Brush click beside the image no longer selects whatever sits at the image's edge.
 - Undo and redo step every stroke on every model, before or after a result, and a stroke is one step.
 - A stroke on an image undone back to the original no longer brings the cut-out back.
 - Switching to another image and back no longer costs an undo step.
