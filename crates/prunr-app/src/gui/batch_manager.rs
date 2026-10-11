@@ -74,47 +74,22 @@ pub(crate) struct BatchManager {
 }
 
 impl BatchManager {
-    /// Start compressing every history entry still held raw, one worker
-    /// per entry behind the decode slots so a burst can't fan out N zstd
-    /// encoders. Raw entries are what history pushes leave behind; doing
-    /// the zstd inline cost ~0.1-0.6 s per switch, undo or redo.
-    pub(crate) fn compress_history_off_thread(&mut self) {
-        use super::item::HistorySlot;
-        for item in &mut self.items {
-            let id = item.id;
-            for entry in item.history.iter_mut().chain(item.redo_stack.iter_mut()) {
-                let HistorySlot::InMemory(rgba) = &entry.slot else { continue };
-                // The 1x1 default is a placeholder mid-swap, not an image.
-                if rgba.width() <= 1 && rgba.height() <= 1 {
-                    continue;
-                }
-                let rgba = Arc::clone(rgba);
-                entry.slot = HistorySlot::Compressing(Arc::clone(&rgba));
-                let tx = self.bg_io.history_demote_tx.clone();
-                let slots = self.bg_io.decode_slots.clone();
-                std::thread::spawn(move || {
-                    let _slot = slots.acquire();
-                    // On failure (rare: OOM) the entry stays in RAM, uncompressed.
-                    if let Ok(compressed) = super::history_disk::compress_to_ram(&rgba) {
-                        let _ = tx.send((id, compressed, Arc::downgrade(&rgba)));
-                    }
-                });
-            }
+    /// Compress every stored undo state nothing else holds, off-thread,
+    /// behind the decode slots so a burst can't fan out N zstd encoders.
+    /// Doing it inline cost ~0.1-0.6 s per switch, undo or redo.
+    pub(crate) fn compress_history_off_thread(&self) {
+        let slots = &self.bg_io.decode_slots;
+        for item in &self.items {
+            item.timeline.stored_images().for_each(|c| c.compress_when_idle(slots));
+            item.timeline.stored_selections().for_each(|c| c.compress_when_idle(slots));
         }
     }
 
-    /// Swap in finished compressions. One for an entry that has since been
-    /// popped (undone, unparked, trimmed) finds nothing and is dropped.
-    pub(crate) fn land_compressed_history(&mut self) {
-        use super::item::HistorySlot;
-        while let Ok((id, compressed, source)) = self.bg_io.history_demote_rx.try_recv() {
-            let Some(source) = source.upgrade() else { continue };
-            let Some(item) = self.find_by_id_mut(id) else { continue };
-            let slot = item.history.iter_mut().chain(item.redo_stack.iter_mut())
-                .map(|e| &mut e.slot)
-                .find(|s| matches!(s, HistorySlot::Compressing(r) if Arc::ptr_eq(r, &source)));
-            if let Some(slot) = slot {
-                *slot = HistorySlot::Compressed(compressed);
+    /// Under memory pressure: move compressed undo states to disk.
+    pub(crate) fn demote_history_to_disk(&self) {
+        for item in &self.items {
+            for cell in item.timeline.stored_images() {
+                cell.demote_to_disk();
             }
         }
     }
@@ -305,28 +280,23 @@ impl BatchManager {
             .collect()
     }
 
-    /// Remove the item at `idx`, cleaning up any on-disk history /
-    /// redo entries it owned. Returns `false` (without doing anything)
-    /// when `idx` is out of bounds. Caller is responsible for clamping
-    /// `selected_index` and triggering any downstream sync — this helper
-    /// only mutates `items` and the removed entries' on-disk state.
+    /// Remove the item at `idx`; its undo files go with its timeline.
+    /// Returns `false` when `idx` is out of bounds. Caller is responsible
+    /// for clamping `selected_index` and any downstream sync.
     pub(crate) fn remove(&mut self, idx: usize) -> bool {
         if idx >= self.items.len() { return false; }
-        let item = self.items.remove(idx);
-        for entry in item.history { entry.cleanup(); }
-        for entry in item.redo_stack { entry.cleanup(); }
+        self.items.remove(idx);
         true
     }
 
-    /// Flip every `Processing` item back to `Pending`. Used after a
-    /// Cancel-All so spinners stop and items can be re-Processed without
-    /// going through the error path. Late `ImageDone` arrivals from the
-    /// worker / subprocess are silently dropped by the Processing-only
-    /// guard in `on_batch_item_done`.
+    /// Return every `Processing` item to the state it shows, after a
+    /// Cancel-All. Late arrivals from the worker are dropped by the job
+    /// check in `on_batch_item_done`.
     pub(crate) fn reset_processing_to_pending(&mut self) {
         for item in &mut self.items {
             if item.status == BatchStatus::Processing {
-                item.status = BatchStatus::Pending;
+                item.job = None;
+                item.status = if item.result_rgba.is_some() || item.result_parked { BatchStatus::Done } else { BatchStatus::Pending };
             }
         }
     }
@@ -576,20 +546,21 @@ impl BatchManager {
         &mut self,
         item_id: u64,
         mask: prunr_core::selection::MaskArtifact,
+        kind: super::timeline::StepKind,
     ) -> bool {
         self.find_by_id_mut(item_id)
-            .is_some_and(|item| item.commit_selection_mask(Arc::new(mask)))
+            .is_some_and(|item| item.commit_selection_mask(Arc::new(mask), kind))
     }
 
-    /// Drop the entire selection state on the named item (Esc, Clear button,
-    /// image switch is implicit via per-item ownership). Returns true if
-    /// anything was cleared.
+    /// Drop the selection on the named item (Esc, Clear button) as an
+    /// undo step. Returns true if there was one.
     pub(crate) fn clear_selection(&mut self, item_id: u64) -> bool {
         let Some(item) = self.find_by_id_mut(item_id) else { return false };
-        let was_present = item.selection_mask.is_some()
-            || item.selection_hash.is_some()
-            || item.selection_texture.is_some();
+        let was_present = item.selection_mask.is_some();
         item.invalidate_selection();
+        if was_present {
+            item.commit(super::timeline::StepKind::Selection);
+        }
         was_present
     }
 
@@ -625,33 +596,32 @@ mod tests {
         BatchManager::new()
     }
 
-    /// Pushing onto history (a switch, an undo, a new result) must cost the
-    /// UI thread nothing: entries start in memory and are compressed off
-    /// thread, then swapped in.
+    /// Recording a step (a switch, an undo, a new result) must cost the UI
+    /// thread nothing: a stored state is compressed off-thread once nothing
+    /// else holds it, and reads back unchanged.
     #[test]
-    fn history_is_compressed_off_the_ui_thread() {
-        use crate::gui::item::{HistoryEntry, HistorySlot};
+    fn undo_states_are_compressed_off_the_ui_thread() {
         let mut batch = fixture();
         let mut item = item_with_cache(1, 0);
         let rgba = Arc::new(image::RgbaImage::from_pixel(64, 64, image::Rgba([9, 8, 7, 255])));
-        item.history.push_back(HistoryEntry::new(Arc::clone(&rgba), None));
-        item.redo_stack.push_back(HistoryEntry::new(Arc::clone(&rgba), None));
-        assert!(matches!(item.history[0].slot, HistorySlot::InMemory(_)), "a push does no compression");
+        item.result_rgba = Some(Arc::clone(&rgba));
+        item.status = BatchStatus::Done;
+        item.commit(crate::gui::timeline::StepKind::Process);
+        item.result_rgba = Some(Arc::new(image::RgbaImage::new(64, 64)));
+        item.commit(crate::gui::timeline::StepKind::Edit);
         batch.items.push(item);
+        drop(rgba);
 
-        batch.compress_history_off_thread();
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        let compressed = |b: &BatchManager| {
-            let it = &b.items[0];
-            matches!(it.history[0].slot, HistorySlot::Compressed(_)) && matches!(it.redo_stack[0].slot, HistorySlot::Compressed(_))
-        };
-        while !compressed(&batch) && std::time::Instant::now() < deadline {
-            batch.land_compressed_history();
+        let first_compressed = |b: &BatchManager| b.items[0].timeline.stored_images().next().is_some_and(|c| c.is_compressed());
+        while !first_compressed(&batch) && std::time::Instant::now() < deadline {
+            batch.compress_history_off_thread();
             std::thread::sleep(Duration::from_millis(5));
         }
-        assert!(compressed(&batch), "both stacks end up compressed");
-        let back = std::mem::take(&mut batch.items[0].history[0]).into_parts().0.into_rgba().unwrap();
-        assert_eq!(back.as_raw(), rgba.as_raw());
+        assert!(first_compressed(&batch), "the earlier result, held by nothing else, is compressed");
+        let item = &mut batch.items[0];
+        item.undo_step();
+        assert_eq!(item.result_rgba.as_ref().unwrap().get_pixel(5, 5), &image::Rgba([9, 8, 7, 255]));
     }
 
     /// Construct a BatchItem with optional cached tensor of `bytes_uncompressed`
@@ -1216,7 +1186,7 @@ mod tests {
 
         let mask = prunr_core::selection::MaskArtifact::new_empty(8, 8);
         let hash = mask.content_hash();
-        bm.commit_selection(1, mask);
+        bm.commit_selection(1, mask, crate::gui::timeline::StepKind::Stroke);
         bm.ensure_selection_texture(style(0.15), &ctx);
         assert_eq!(bm.items[0].selection_tex_pending, Some((hash, style(0.15))));
         bm.ensure_selection_texture(style(0.15), &ctx);
@@ -1252,7 +1222,7 @@ mod tests {
         bm.items.push(item_with_cache(1, 0));
         let mask = prunr_core::selection::MaskArtifact::new_empty(32, 32);
         let expected_hash = mask.content_hash();
-        assert!(bm.commit_selection(1, mask));
+        assert!(bm.commit_selection(1, mask, crate::gui::timeline::StepKind::Stroke));
         let item = bm.find_by_id(1).unwrap();
         assert_eq!(
             item.selection_hash,
@@ -1267,10 +1237,10 @@ mod tests {
         let mut bm = fixture();
         bm.items.push(item_with_cache(1, 0));
         let mask = prunr_core::selection::MaskArtifact::new_empty(32, 32);
-        assert!(bm.commit_selection(1, mask));
+        assert!(bm.commit_selection(1, mask, crate::gui::timeline::StepKind::Stroke));
         let identical = prunr_core::selection::MaskArtifact::new_empty(32, 32);
         assert!(
-            !bm.commit_selection(1, identical),
+            !bm.commit_selection(1, identical, crate::gui::timeline::StepKind::Stroke),
             "byte-identical mask must early-return without mutating caches",
         );
     }
@@ -1280,7 +1250,7 @@ mod tests {
         let mut bm = fixture();
         bm.items.push(item_with_cache(1, 0));
         let mask = prunr_core::selection::MaskArtifact::new_empty(16, 16);
-        bm.commit_selection(1, mask);
+        bm.commit_selection(1, mask, crate::gui::timeline::StepKind::Stroke);
         assert!(bm.clear_selection(1), "first clear must return true (was present)");
         assert!(!bm.clear_selection(1), "second clear must return false (nothing to clear)");
     }

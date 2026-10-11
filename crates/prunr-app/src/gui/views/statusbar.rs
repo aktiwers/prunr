@@ -63,7 +63,7 @@ pub fn render(ui: &mut egui::Ui, app: &PrunrApp) {
         // landed orphans across mode switches).
         if app.settings.chain_mode {
             if let Some(item) = app.batch.selected_item() {
-                let depth = item.actions_undo.len();
+                let depth = item.timeline.undo_steps();
                 if depth > 0 {
                     ui.add_space(theme::SPACE_SM);
                     ui.label(

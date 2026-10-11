@@ -1,7 +1,6 @@
 pub mod app;
 pub mod toasts;
 pub mod item;
-pub mod history_manager;
 pub mod drag_export_state;
 pub mod batch_manager;
 pub mod processor;
@@ -17,7 +16,6 @@ pub mod views;
 pub mod zoom_state;
 pub mod brush_state;
 pub(crate) mod magic_brush_state;
-pub(crate) mod stroke_history;
 pub(crate) mod timeline;
 pub mod status_state;
 pub mod background_io;

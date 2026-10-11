@@ -67,7 +67,7 @@ pub fn dump(app: &PrunrApp) -> StateDump {
                 dimensions: it.dimensions,
                 has_result: it.result_rgba.is_some(),
                 has_selection: it.selection_mask.is_some(),
-                undo_steps: it.actions_undo.len(),
+                undo_steps: it.timeline.undo_steps(),
                 settings: it.settings,
             })
             .collect(),

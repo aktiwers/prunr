@@ -14,6 +14,7 @@
 
 use crate::gui::app::PrunrApp;
 use crate::gui::settings::SettingsModel;
+use crate::gui::timeline::StepKind;
 
 use super::fixtures::push_test_item;
 use crate::gui::item::BatchItem;
@@ -71,31 +72,27 @@ fn app_with_model(model: SettingsModel) -> PrunrApp {
     app
 }
 
-/// Every selection author (Paint, Magic Brush, Invert) commits through
-/// `commit_selection_and_dispatch`; in chain mode that commit archives the
-/// pre-stroke result so undoing the stroke can restore the image instead
-/// of rerunning against the already-corrected chain base.
+/// A stroke is one step that shares the shown result with the step
+/// before it: recording it copies no image.
 #[test]
-fn chain_mode_commit_archives_the_pre_stroke_result_for_undo() {
-    use crate::gui::history_manager::HistoryManager;
+fn a_stroke_is_one_step_sharing_the_result_before_it() {
     use crate::gui::item::BatchStatus;
     use std::sync::Arc;
     let mut app = app_with_model(SettingsModel::Silueta);
-    app.settings.chain_mode = true;
     let item = push_test_item(&mut app, 7);
     item.dimensions = (8, 8);
     item.status = BatchStatus::Done;
     item.result_rgba = Some(Arc::new(image::RgbaImage::new(8, 8)));
+    item.commit(StepKind::Process);
     give_tensor(item);
-    let archived_before = app.batch.items[0].history.len();
 
-    app.commit_selection_and_dispatch(7, make_mask(8, 8));
+    app.commit_selection_and_dispatch(7, make_mask(8, 8), StepKind::Stroke);
 
     let item = &app.batch.items[0];
-    assert_eq!(item.history.len(), archived_before + 1, "the pre-stroke result must be archived");
-    assert!(HistoryManager::can_undo(item));
-    assert!(item.result_rgba.is_some(), "chain base stays in place for the rerun");
-    assert_eq!(item.actions_undo.len(), 1, "one Stroke marker, no Result marker");
+    assert_eq!(item.timeline.undo_steps(), 2);
+    let stored: Vec<_> = item.timeline.stored_images().collect();
+    assert!(Arc::ptr_eq(stored[0], stored[1]), "both steps point at one stored image");
+    assert!(app.processor.live_preview.is_pending_for(7), "the re-cut is queued");
 }
 
 /// Moving the Confidence knob re-thresholds the last Magic Brush stroke
@@ -112,9 +109,9 @@ fn confidence_change_retunes_the_last_stroke_in_place() {
     let item = push_test_item(&mut app, 9);
     item.dimensions = (8, 8);
     give_tensor(item);
-    app.commit_selection_and_dispatch(9, make_mask(8, 8));
+    app.commit_selection_and_dispatch(9, make_mask(8, 8), StepKind::Stroke);
     let first_hash = app.batch.items[0].selection_hash.unwrap();
-    assert_eq!(app.batch.items[0].stroke_undo_stack.len(), 1);
+    assert_eq!(app.batch.items[0].timeline.undo_steps(), 1);
 
     // Logits ramp left→right: a higher confidence keeps fewer columns.
     let m = prunr_core::sam::SAM_MASK_RESOLUTION as usize;
@@ -148,8 +145,7 @@ fn confidence_change_retunes_the_last_stroke_in_place() {
     let item = &app.batch.items[0];
     let new_hash = item.selection_hash.unwrap();
     assert_ne!(new_hash, first_hash, "the selection follows the knob");
-    assert_eq!(item.stroke_undo_stack.len(), 1, "still one undo entry for the stroke");
-    assert_eq!(item.actions_undo.len(), 1);
+    assert_eq!(item.timeline.undo_steps(), 1, "still one undo step for the stroke");
     let ld = item.last_decode.as_ref().unwrap();
     assert_eq!(ld.committed_hash, new_hash);
     assert!((ld.reading.confidence - 0.9).abs() < 1e-6);
@@ -178,7 +174,7 @@ fn bg_removal_fires_rerun_on_selection_commit() {
     let item_id = 1u64;
 
     let mask = make_mask(64, 64);
-    app.batch.commit_selection(item_id, mask);
+    app.batch.commit_selection(item_id, mask, StepKind::Stroke);
     app.apply_selection_to_active_model(item_id);
 
     assert!(
@@ -198,7 +194,7 @@ fn inpaint_does_not_auto_dispatch_on_selection_commit() {
     let item_id = 3u64;
 
     let mask = make_mask(64, 64);
-    app.batch.commit_selection(item_id, mask);
+    app.batch.commit_selection(item_id, mask, StepKind::Stroke);
     app.apply_selection_to_active_model(item_id);
 
     assert!(
@@ -218,7 +214,7 @@ fn upscale_does_not_auto_dispatch_on_selection_commit() {
     let item_id = 4u64;
 
     let mask = make_mask(64, 64);
-    app.batch.commit_selection(item_id, mask);
+    app.batch.commit_selection(item_id, mask, StepKind::Stroke);
     app.apply_selection_to_active_model(item_id);
 
     assert!(
@@ -238,7 +234,7 @@ fn no_model_loaded_does_not_dispatch() {
     let item_id = 5u64;
 
     let mask = make_mask(64, 64);
-    app.batch.commit_selection(item_id, mask);
+    app.batch.commit_selection(item_id, mask, StepKind::Stroke);
     app.apply_selection_to_active_model(item_id);
 
     assert!(
@@ -273,7 +269,7 @@ fn selection_category_arm_exists_no_dispatch() {
     let item_id = 6u64;
 
     let mask = make_mask(64, 64);
-    app.batch.commit_selection(item_id, mask);
+    app.batch.commit_selection(item_id, mask, StepKind::Stroke);
     app.apply_selection_to_active_model(item_id);
 
     assert!(
@@ -303,7 +299,7 @@ fn paint_brush_bg_removal_keeps_stroke_direction_and_softness() {
     let stamp = Stamp { hardness: 0.3, strength: 0.8, mode: BrushMode::Subtract };
     paint_circle(&mut committed, 16.0, 16.0, 8.0, stamp);
 
-    app.commit_selection_and_dispatch(item_id, committed.clone());
+    app.commit_selection_and_dispatch(item_id, committed.clone(), StepKind::Stroke);
     assert!(
         app.processor.live_preview.is_pending_for(item_id),
         "a Paint stroke on a BG-removal model must queue the immediate rerun"
@@ -331,7 +327,7 @@ fn bg_removal_without_tensor_waits_until_a_result_lands() {
     item.dimensions = (64, 64);
     let item_id = 9u64;
 
-    app.commit_selection_and_dispatch(item_id, make_mask(64, 64));
+    app.commit_selection_and_dispatch(item_id, make_mask(64, 64), StepKind::Stroke);
     assert!(
         !app.processor.live_preview.is_pending_for(item_id),
         "no tensor: a stroke must author the selection without dispatching"
@@ -358,7 +354,7 @@ fn a_stroke_before_the_first_result_undoes_and_redoes() {
     let mut app = app_with_model(SettingsModel::BiRefNetLite);
     let item = push_test_item(&mut app, 3);
     item.dimensions = (8, 8);
-    app.commit_selection_and_dispatch(3, make_mask(8, 8));
+    app.commit_selection_and_dispatch(3, make_mask(8, 8), StepKind::Stroke);
     assert!(app.batch.items[0].selection_mask.is_some());
 
     app.handle_undo(&ctx);
@@ -378,7 +374,8 @@ fn an_eraser_stroke_undo_keeps_the_result() {
     item.dimensions = (8, 8);
     item.status = crate::gui::item::BatchStatus::Done;
     item.result_rgba = Some(Arc::new(image::RgbaImage::new(8, 8)));
-    app.commit_selection_and_dispatch(4, make_mask(8, 8));
+    item.commit(StepKind::Erase);
+    app.commit_selection_and_dispatch(4, make_mask(8, 8), StepKind::Stroke);
 
     app.handle_undo(&ctx);
     let item = &app.batch.items[0];
@@ -387,7 +384,7 @@ fn an_eraser_stroke_undo_keeps_the_result() {
 }
 
 #[test]
-fn a_chain_mode_stroke_undo_brings_the_archived_result_back() {
+fn a_stroke_undo_brings_the_stored_result_back() {
     use std::sync::Arc;
     let ctx = egui::Context::default();
     let mut app = app_with_model(SettingsModel::Silueta);
@@ -401,9 +398,11 @@ fn a_chain_mode_stroke_undo_brings_the_archived_result_back() {
     item.source_rgba = Some(Arc::new(image::RgbaImage::new(8, 8)));
     item.result_rgba = Some(Arc::new(before.clone()));
     give_tensor(item);
-    app.commit_selection_and_dispatch(5, make_mask(8, 8));
-    // The re-cut replaced the result in place.
+    app.batch.items[0].commit(StepKind::Process);
+    app.commit_selection_and_dispatch(5, make_mask(8, 8), StepKind::Stroke);
+    // The re-cut landed.
     app.batch.items[0].result_rgba = Some(Arc::new(recut.clone()));
+    app.batch.items[0].amend();
 
     app.handle_undo(&ctx);
     let item = &app.batch.items[0];
@@ -417,15 +416,12 @@ fn a_chain_mode_stroke_undo_brings_the_archived_result_back() {
     assert!(item.result_rgba.as_ref().is_some_and(|r| **r == recut), "redo restores the re-cut");
 }
 
-/// A Process run that lands with the selection kept applies it within
-/// the run's own step. Undo then walks back exactly: first the run, to
-/// the corrected image it replaced (selection still on), then the stroke,
-/// to the image before it. Re-cutting the landed result as if it were a
-/// fresh stroke archived the raw cut and re-marked the old stroke, so the
-/// first undo showed the raw cut under a selection it no longer matched.
+/// A Process run that lands with the selection kept applies it within the
+/// run's own step. Undo walks back exactly: first the run, to the corrected
+/// image it replaced (selection still on), then the stroke, to the image
+/// before it.
 #[test]
 fn a_process_run_with_a_kept_selection_undoes_in_order() {
-    use crate::gui::history_manager::HistoryManager;
     use std::sync::Arc;
     let ctx = egui::Context::default();
     let px = |v: u8| image::RgbaImage::from_pixel(8, 8, image::Rgba([v, v, v, 255]));
@@ -436,19 +432,22 @@ fn a_process_run_with_a_kept_selection_undoes_in_order() {
     item.status = crate::gui::item::BatchStatus::Done;
     item.source_rgba = Some(Arc::new(px(0)));
     item.result_rgba = Some(Arc::new(px(1)));
+    item.commit(StepKind::Process);
     give_tensor(item);
 
-    app.commit_selection_and_dispatch(9, make_mask(8, 8));
+    app.commit_selection_and_dispatch(9, make_mask(8, 8), StepKind::Stroke);
     app.batch.items[0].result_rgba = Some(Arc::new(px(2))); // the stroke's re-cut
+    app.batch.items[0].amend();
 
-    // Process: archive the current result, then the run lands raw.
-    HistoryManager::archive_current_result(&mut app.batch.items[0], 10, true);
-    app.batch.items[0].status = crate::gui::item::BatchStatus::Processing;
-    app.batch.items[0].result_rgba = Some(Arc::new(px(3)));
-    app.batch.items[0].status = crate::gui::item::BatchStatus::Done;
+    // Process: the run lands raw, then the kept selection re-cuts it.
+    let item = &mut app.batch.items[0];
+    item.start_job(Some(StepKind::Process));
+    item.result_rgba = Some(Arc::new(px(3)));
+    item.finish_job();
     app.apply_kept_selection_to_new_result(9);
     assert!(app.processor.live_preview.is_pending_for(9), "the kept selection re-cuts the new result");
-    app.batch.items[0].result_rgba = Some(Arc::new(px(4))); // that re-cut lands
+    app.batch.items[0].result_rgba = Some(Arc::new(px(4)));
+    app.batch.items[0].amend();
 
     app.handle_undo(&ctx);
     let item = &app.batch.items[0];
@@ -476,7 +475,7 @@ fn a_stroke_after_undoing_the_result_does_not_bring_it_back() {
     // The state after undoing a Process: the tensor stays, the result is gone.
     item.status = crate::gui::item::BatchStatus::Pending;
 
-    app.commit_selection_and_dispatch(6, make_mask(8, 8));
+    app.commit_selection_and_dispatch(6, make_mask(8, 8), StepKind::Stroke);
     assert!(!app.processor.live_preview.is_pending_for(6), "a stroke on the original must not re-cut");
 
     app.handle_undo(&ctx);
@@ -485,30 +484,33 @@ fn a_stroke_after_undoing_the_result_does_not_bring_it_back() {
     assert_eq!(app.batch.items[0].status, crate::gui::item::BatchStatus::Pending);
 }
 
-/// A re-cut queued before the undo (a stroke's, a Magic Brush click's, a
-/// Mask slider's) must neither start on the original nor land on it.
+/// A re-cut computed for a state the image has left (by undo, redo or
+/// another step) never lands: its result is for a state no longer shown.
 #[test]
-fn a_recut_queued_before_the_undo_never_reaches_the_original() {
+fn a_recut_for_a_state_left_behind_never_lands() {
     use crate::gui::live_preview::{PreviewKind, PreviewResult};
     use std::sync::Arc;
     let ctx = egui::Context::default();
+    let px = |v: u8| image::RgbaImage::from_pixel(8, 8, image::Rgba([v, v, v, 255]));
     let mut app = app_with_model(SettingsModel::BiRefNetLite);
     let item = push_test_item(&mut app, 8);
     item.dimensions = (8, 8);
-    item.source_rgba = Some(Arc::new(image::RgbaImage::new(8, 8)));
+    item.source_rgba = Some(Arc::new(px(0)));
+    item.status = crate::gui::item::BatchStatus::Done;
+    item.result_rgba = Some(Arc::new(px(1)));
+    item.commit(StepKind::Process);
     give_tensor(item);
-    item.status = crate::gui::item::BatchStatus::Pending;
+    app.commit_selection_and_dispatch(8, make_mask(8, 8), StepKind::Stroke);
+    let inputs = PrunrApp::build_preview_inputs(&mut app.batch.items, 8, PreviewKind::Mask, false, false)
+        .expect("the stroke's re-cut starts");
 
-    assert!(
-        PrunrApp::build_preview_inputs(&mut app.batch.items, 8, PreviewKind::Mask, false, false).is_none(),
-        "a queued re-cut must not start on the original"
-    );
-
+    app.handle_undo(&ctx);
     let landed = PreviewResult {
         item_id: 8,
-        rgba: image::RgbaImage::new(8, 8),
+        rgba: px(9),
         kind: PreviewKind::Mask,
         generation: 0,
+        version: inputs.version,
         new_edge: None,
         new_bold: None,
         new_masked_base: None,
@@ -518,15 +520,15 @@ fn a_recut_queued_before_the_undo_never_reaches_the_original() {
     };
     app.apply_completed_previews(&ctx, vec![landed]);
     let item = &app.batch.items[0];
-    assert_eq!(item.status, crate::gui::item::BatchStatus::Pending, "a re-cut in flight must not land on the original");
-    assert!(item.result_rgba.is_none());
+    assert!(item.result_rgba.as_ref().is_some_and(|r| **r == px(1)), "the undone stroke's re-cut does not land");
+    assert!(app.batch.items[0].timeline.can_redo(), "and the redo step is intact");
 }
 
-/// Switching away parks an image's result and switching back restores it;
-/// neither may cost an undo step.
+/// Switching away releases an image's result and switching back restores
+/// it from the timeline; neither costs or moves an undo step.
 #[test]
 fn switching_images_keeps_every_undo_step() {
-    use crate::gui::item::{ActionType, BatchStatus, HistoryEntry};
+    use crate::gui::item::BatchStatus;
     use std::sync::Arc;
     let ctx = egui::Context::default();
     let mut app = app_with_model(SettingsModel::BiRefNetLite);
@@ -534,19 +536,18 @@ fn switching_images_keeps_every_undo_step() {
     let item = push_test_item(&mut app, 1);
     item.dimensions = (8, 8);
     item.source_rgba = Some(Arc::new(px(0)));
-    item.history.push_back(HistoryEntry::new(Arc::new(px(0)), None));
-    item.history.push_back(HistoryEntry::new(Arc::new(px(1)), None));
-    item.result_rgba = Some(Arc::new(px(2)));
     item.status = BatchStatus::Done;
-    item.push_action_marker(ActionType::Result);
-    item.push_action_marker(ActionType::Result);
+    item.result_rgba = Some(Arc::new(px(1)));
+    item.commit(StepKind::Process);
+    item.result_rgba = Some(Arc::new(px(2)));
+    item.commit(StepKind::Process);
     push_test_item(&mut app, 2).dimensions = (8, 8);
 
     app.batch.select_item(0);
     app.sync_selected_batch_textures(&ctx);
     app.batch.select_item(1);
     app.sync_selected_batch_textures(&ctx);
-    assert!(app.batch.items[0].result_rgba.is_none(), "the background result is parked");
+    assert!(app.batch.items[0].result_rgba.is_none(), "the background result is released");
     app.batch.select_item(0);
     app.sync_selected_batch_textures(&ctx);
     assert!(app.batch.items[0].result_rgba.as_ref().is_some_and(|r| **r == px(2)), "and back on return");

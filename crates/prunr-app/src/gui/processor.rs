@@ -555,6 +555,12 @@ impl Processor {
     }
 
     #[cfg(test)]
+    pub(crate) fn land_inpaint_for_test(&mut self, item_id: u64, rgba: image::RgbaImage) {
+        let generation = *self.inpaint_latest_gen.entry(item_id).and_modify(|g| *g += 1).or_insert(1);
+        let _ = self.inpaint_tx.send(InpaintResult { item_id, rgba, generation, cancelled: false, error: None });
+    }
+
+    #[cfg(test)]
     pub(crate) fn show_progress_for_test(&self, progress: super::dispatch_progress::DispatchProgress) {
         self.dispatch_progress.set(Some(progress));
     }

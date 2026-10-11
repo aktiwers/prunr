@@ -6,8 +6,8 @@ use std::sync::{mpsc, Arc};
 use egui::ViewportCommand;
 
 use super::drag_export_state::DragExportState;
-use super::history_manager::{HistoryDir, HistoryManager};
-use super::item::{ActionType, BatchItem, BatchStatus, HistorySlot, ImageSource, PresetSnapshot};
+use super::item::{BatchItem, BatchStatus, ImageSource};
+use super::timeline::StepKind;
 use super::settings::Settings;
 use super::state::AppState;
 use super::theme;
@@ -668,7 +668,7 @@ impl PrunrApp {
         if ids.is_empty() {
             return;
         }
-        self.process_items(|item| ids.contains(&item.id));
+        self.process_items(|item| ids.contains(&item.id), Some(StepKind::Process));
     }
 
     /// Single source of truth for the Process / Reprocess action.
@@ -742,12 +742,9 @@ impl PrunrApp {
         };
         let recipe = item.settings.current_recipe(model_kind, self.settings.chain_mode);
         tracing::info!(item_id, ?model_id, ?output_scale, "upscale dispatched");
-        // Seed the action timeline so Cmd+Z can revert this Process. Seg/inpaint
-        // routes through process_items → seed_history_for_reprocess; the upscale
-        // path bypasses that, so the marker push lives here.
-        let mut ids = HashSet::new();
-        ids.insert(item_id);
-        self.seed_history_for_reprocess(&ids, self.settings.chain_mode);
+        if let Some(item) = self.batch.find_by_id_mut(item_id) {
+            item.start_job(Some(StepKind::Upscale));
+        }
         self.processor.dispatch_upscale(item_id, input, model_id, output_scale, intra_threads, recipe);
     }
 
@@ -805,146 +802,61 @@ impl PrunrApp {
         .collect()
     }
 
-    /// Undo the most-recent action on selected items (or current item if none
-    /// selected). Pops one `ActionType` marker from the ordering layer and
-    /// dispatches to the matching per-type stack — mode-agnostic. A stroke
-    /// undo triggers a brush rerun so the canvas reflects the popped state.
+    /// Step the targeted images (the checked ones, else the shown one) one
+    /// state back on their timelines. A run still going on one is cancelled
+    /// first: its result belongs to the state being left.
     pub fn handle_undo(&mut self, ctx: &egui::Context) {
-        let mut type_counts = [0u32; 3];
-        let mut total = 0u32;
-        for idx in self.batch.targeted_indices() {
-            if let Some(action) = self.try_undo_one_action(idx, ctx) {
-                total += 1;
-                type_counts[action as usize] += 1;
-            }
-        }
-        if total > 0 {
-            self.result_switch_id += 1;
-            self.canvas_switch_id += 1;
-            self.sync_selected_batch_textures(ctx);
-            self.toasts.info(action_toast_label(
-                total, type_counts,
-                ["Stroke undone", "Undone", "Preset undone"],
-                "undone",
-            ));
-        } else {
-            self.toasts.info("Nothing to undo");
-        }
+        self.step_targets(ctx, BatchItem::undo_step, "undone", "Nothing to undo");
     }
 
-    /// Redo the most-recently undone action on selected items. Mirrors
-    /// `handle_undo` via the `actions_redo` ordering layer.
+    /// Mirror of `handle_undo`.
     pub fn handle_redo(&mut self, ctx: &egui::Context) {
-        let mut type_counts = [0u32; 3];
-        let mut total = 0u32;
+        self.step_targets(ctx, BatchItem::redo_step, "redone", "Nothing to redo");
+    }
+
+    fn step_targets(
+        &mut self,
+        ctx: &egui::Context,
+        step: fn(&mut BatchItem) -> Option<StepKind>,
+        verb: &str,
+        nothing: &str,
+    ) {
+        let mut stepped = Vec::new();
         for idx in self.batch.targeted_indices() {
-            if let Some(action) = self.try_redo_one_action(idx, ctx) {
-                total += 1;
-                type_counts[action as usize] += 1;
+            let id = self.batch.items[idx].id;
+            let preset_before = self.batch.items[idx].settings.bg_image_hash;
+            self.cancel_runs_on(id);
+            self.processor.live_preview.cancel(id);
+            if let Some(kind) = step(&mut self.batch.items[idx]) {
+                self.batch.items[idx].source_texture = None;
+                if self.batch.items[idx].settings.bg_image_hash != preset_before {
+                    self.reconcile_bg_image_after_preset(idx, ctx);
+                }
+                stepped.push(kind);
             }
         }
-        if total > 0 {
-            self.result_switch_id += 1;
-            self.canvas_switch_id += 1;
-            self.sync_selected_batch_textures(ctx);
-            self.toasts.info(action_toast_label(
-                total, type_counts,
-                ["Stroke restored", "Result restored", "Preset restored"],
-                "restored",
-            ));
-        } else {
-            self.toasts.info("Nothing to redo");
+        if stepped.is_empty() {
+            self.toasts.info(nothing);
+            return;
         }
+        self.result_switch_id += 1;
+        self.canvas_switch_id += 1;
+        self.sync_selected_batch_textures(ctx);
+        self.toasts.info(step_toast(&stepped, verb));
     }
 
-    /// Pop the most-recent marker from `actions_undo` for item at `idx` and
-    /// apply the inverse. Returns the popped ActionType on success.
-    ///
-    /// The ordering log (`actions_undo`) is capped at `ACTION_HIST_DEPTH`, but
-    /// per-type stacks have their own caps — Result history is smaller because
-    /// each entry is a full RGBA archive. When the result stack rotates an
-    /// oldest entry out, the corresponding marker in `actions_undo` becomes an
-    /// orphan. The loop pops orphans silently and tries the next action rather
-    /// than reporting false failure.
-    fn try_undo_one_action(&mut self, idx: usize, ctx: &egui::Context) -> Option<ActionType> {
-        use super::item::push_action_bounded;
-        loop {
-            let kind = self.batch.items[idx].actions_undo.pop_back()?;
-            let success = match kind {
-                ActionType::Stroke => self.step_stroke(idx, HistoryDir::Undo),
-                ActionType::Result => {
-                    if HistoryManager::undo_result(&mut self.batch.items[idx]) {
-                        self.batch.items[idx].reset_result_caches();
-                        // Source view may now show the unprocessed source.
-                        self.batch.items[idx].source_texture = None;
-                        true
-                    } else {
-                        false
-                    }
-                }
-                ActionType::PresetApply => {
-                    if HistoryManager::swap_preset(&mut self.batch.items[idx], HistoryDir::Undo) {
-                        let target_id = self.batch.items[idx].id;
-                        let should_reprocess = self.batch.items[idx].status == BatchStatus::Done;
-                        self.reconcile_bg_image_after_preset(idx, ctx);
-                        if should_reprocess {
-                            self.process_items(|i| i.id == target_id);
-                        }
-                        true
-                    } else {
-                        false
-                    }
-                }
-            };
-            if success {
-                push_action_bounded(&mut self.batch.items[idx].actions_redo, kind);
-                return Some(kind);
-            }
+    /// Stop whatever run `item_id` is waiting on, so its result cannot land.
+    fn cancel_runs_on(&mut self, item_id: u64) {
+        let Some(item) = self.batch.find_by_id(item_id) else { return };
+        if item.status != BatchStatus::Processing && item.job.is_none() {
+            return;
         }
-    }
-
-    /// Pop the most-recent marker from `actions_redo` for item at `idx` and
-    /// re-apply. Returns the popped ActionType on success.
-    ///
-    /// The ordering log (`actions_redo`) is capped at `ACTION_HIST_DEPTH`, but
-    /// per-type stacks have their own caps — Result history is smaller because
-    /// each entry is a full RGBA archive. When the result stack rotates an
-    /// oldest entry out, the corresponding marker in `actions_redo` becomes an
-    /// orphan. The loop pops orphans silently and tries the next action rather
-    /// than reporting false failure.
-    fn try_redo_one_action(&mut self, idx: usize, ctx: &egui::Context) -> Option<ActionType> {
-        use super::item::push_action_bounded;
-        loop {
-            let kind = self.batch.items[idx].actions_redo.pop_back()?;
-            let success = match kind {
-                ActionType::Stroke => self.step_stroke(idx, HistoryDir::Redo),
-                ActionType::Result => {
-                    if HistoryManager::redo_result(&mut self.batch.items[idx]) {
-                        self.batch.items[idx].reset_result_caches();
-                        self.batch.items[idx].source_texture = None;
-                        true
-                    } else {
-                        false
-                    }
-                }
-                ActionType::PresetApply => {
-                    if HistoryManager::swap_preset(&mut self.batch.items[idx], HistoryDir::Redo) {
-                        let target_id = self.batch.items[idx].id;
-                        let should_reprocess = self.batch.items[idx].status == BatchStatus::Done;
-                        self.reconcile_bg_image_after_preset(idx, ctx);
-                        if should_reprocess {
-                            self.process_items(|i| i.id == target_id);
-                        }
-                        true
-                    } else {
-                        false
-                    }
-                }
-            };
-            if success {
-                push_action_bounded(&mut self.batch.items[idx].actions_undo, kind);
-                return Some(kind);
-            }
+        self.processor.cancels.request_item_cancel(item_id);
+        if self.processor.is_inpaint_in_flight(item_id) {
+            self.processor.cancel_inpaint(item_id);
+        }
+        if item.job.is_some_and(|j| j.step == Some(StepKind::Upscale)) {
+            self.processor.cancel_upscale();
         }
     }
 
@@ -1004,44 +916,7 @@ impl PrunrApp {
         if !self.batch.items[idx].shows_cutout() {
             return;
         }
-        // Chain mode: the rerun replaces the result in place, so undoing
-        // the stroke needs the pre-stroke image archived now. Inpaint
-        // archives when its result lands.
-        if self.settings.chain_mode {
-            // The seed keeps the archive above the "back to the source"
-            // floor, as a Process run does, so undoing the stroke lands on
-            // the archived image rather than on nothing.
-            HistoryManager::seed_floor(&mut self.batch.items[idx]);
-            HistoryManager::archive_result_for_stroke(&mut self.batch.items[idx], self.settings.history_depth);
-            self.batch.items[idx].mark_last_stroke_archived();
-        }
         self.dispatch_brush_rerun(idx);
-    }
-
-    /// One stroke step of the history, either way: the selection steps;
-    /// a stroke whose re-cut archived the pre-stroke image (chain mode)
-    /// brings that image with it; any other stroke on a cut-out re-cuts
-    /// from the tensor; the eraser's region stroke moves nothing else.
-    fn step_stroke(&mut self, idx: usize, dir: HistoryDir) -> bool {
-        let item = &mut self.batch.items[idx];
-        let stepped = match dir {
-            HistoryDir::Undo => item.undo_stroke(),
-            HistoryDir::Redo => item.redo_stroke(),
-        };
-        let Some(archived) = stepped else { return false };
-        if archived {
-            let restored = match dir {
-                HistoryDir::Undo => HistoryManager::undo_result(item),
-                HistoryDir::Redo => HistoryManager::redo_result(item),
-            };
-            if restored {
-                item.reset_result_caches();
-                item.source_texture = None;
-            }
-        } else if self.settings.model.uses_segmentation() && item.shows_cutout() {
-            self.dispatch_brush_rerun(idx);
-        }
-        true
     }
 
     /// Single-source-of-truth call for writing a new selection: persist the
@@ -1054,8 +929,9 @@ impl PrunrApp {
         &mut self,
         item_id: u64,
         mask: prunr_core::selection::MaskArtifact,
+        kind: StepKind,
     ) {
-        if !self.batch.commit_selection(item_id, mask) {
+        if !self.batch.commit_selection(item_id, mask, kind) {
             return;
         }
         self.apply_selection_to_active_model(item_id);
@@ -1101,11 +977,13 @@ impl PrunrApp {
             SelectionAction::Invert => {
                 let Some(mask) = self.batch.items[idx].selection_mask.clone() else { return };
                 let inverted = mask.invert(self.settings.brush.mode);
-                self.commit_selection_and_dispatch(item_id, inverted);
+                self.commit_selection_and_dispatch(item_id, inverted, StepKind::Selection);
                 ctx.request_repaint();
             }
             SelectionAction::Clear => {
-                self.batch.clear_selection(item_id);
+                if self.batch.clear_selection(item_id) {
+                    self.apply_selection_to_active_model(item_id);
+                }
                 ctx.request_repaint();
             }
         }
@@ -1149,14 +1027,11 @@ impl PrunrApp {
         base: &image::RgbaImage,
         ctx: &egui::Context,
     ) {
-        let max_depth = self.settings.history_depth;
-        let item = &mut self.batch.items[idx];
-        HistoryManager::seed_with_source(item);
-        HistoryManager::archive_current_result(item, max_depth, false);
-        let item_id = item.id;
+        let item_id = self.batch.items[idx].id;
         let mut edited = base.clone();
         mask.alpha_cut(&mut edited);
         self.publish_result(item_id, Arc::new(edited), "edit", ctx);
+        self.batch.items[idx].commit(StepKind::Edit);
     }
 
     pub(crate) fn dispatch_inpaint_for_item(&mut self, idx: usize) {
@@ -1206,21 +1081,18 @@ impl PrunrApp {
             )),
         };
         self.processor.dispatch_inpaint(item_id, source, selection, tuning);
+        self.batch.items[idx].start_job(Some(StepKind::Erase));
     }
 
     fn pump_inpaint_results(&mut self, ctx: &egui::Context) {
         // Bridge → inpaint_rx fan-in must run before the drain.
         self.processor.pump_inpaint_subprocess();
         let (results, cancelled, errors) = self.processor.drain_inpaint_results();
-        // For each cancelled stroke: roll back the committed
-        // mask_correction + drop its Stroke marker so the cancelled
-        // stroke doesn't ghost on canvas, accumulate into the next
-        // commit, or pollute the undo timeline. The user's mental
-        // model is "cancel = the stroke never happened."
+        // A cancelled erase records nothing; the painted region stays.
         let cancelled_count = cancelled.len();
         for &item_id in &cancelled {
             if let Some(item) = self.batch.find_by_id_mut(item_id) {
-                item.revert_last_stroke_commit();
+                item.job = None;
             }
             self.toasts.info("Erase cancelled");
         }
@@ -1240,38 +1112,20 @@ impl PrunrApp {
         if results.is_empty() {
             return;
         }
-        let max_depth = self.settings.history_depth;
         for r in results {
-            let (item_id, new_rgba) = {
-                let Some(item) = self.batch.find_by_id_mut(r.item_id) else { continue };
-                let new_rgba = Arc::new(r.rgba);
-                item.unpark_result();
-                // Archive the previous image so Cmd+Z swaps it back instead
-                // of re-running the inpaint; its own Result step, apart
-                // from the strokes that shaped the region.
-                if let Some(prev) = item.result_rgba.take() {
-                    item.history.push_back(super::item::HistoryEntry::new(
-                        prev, item.applied_recipe.clone(),
-                    ));
-                    while item.history.len() > max_depth {
-                        if let Some(old) = item.history.pop_front() {
-                            old.cleanup();
-                        }
-                    }
-                    // New edit invalidates the linear redo timeline.
-                    for entry in item.redo_stack.drain(..) {
-                        entry.cleanup();
-                    }
-                    item.push_action_marker(super::item::ActionType::Result);
-                }
-                // selection_mask intentionally persists — the region stays
-                // highlighted and is available for Reprocess.
-                (item.id, new_rgba)
-            };
-            if let Some(item) = self.batch.find_by_id_mut(item_id) {
-                item.result_fades_in = true;
+            let Some(item) = self.batch.find_by_id_mut(r.item_id) else { continue };
+            if !item.job_is_current() {
+                // Undone, redone or edited since the run started.
+                continue;
             }
-            self.publish_result(item_id, new_rgba, "inpaint", ctx);
+            item.result_fades_in = true;
+            self.publish_result(r.item_id, Arc::new(r.rgba), "inpaint", ctx);
+            if let Some(item) = self.batch.find_by_id_mut(r.item_id) {
+                // The region is filled: the step shows the result without
+                // its brush marks; undoing it brings both back.
+                item.invalidate_selection();
+                item.finish_job();
+            }
         }
     }
 
@@ -1325,6 +1179,9 @@ impl PrunrApp {
                     // Tier-2 tweaks can reprocess without re-inferring.
                     let raw_arc = Arc::new(raw_rgba);
                     let Some(item) = self.batch.find_by_id_mut(item_id) else { continue };
+                    if !item.job_is_current() {
+                        continue;
+                    }
                     item.upscale_raw = Some(raw_arc.clone());
                     // Invalidate the stale bicubic_source — the upscale output
                     // dimensions changed (new Tier-1 run), so any prior bicubic
@@ -1361,9 +1218,15 @@ impl PrunrApp {
                         true, handles.clone(), ctx.clone(),
                     );
                     self.batch.request_thumbnail(item_id, &source, Some(&new_rgba));
+                    if let Some(item) = self.batch.find_by_id_mut(item_id) {
+                        item.finish_job();
+                    }
                     tracing::info!(item_id, "upscale result applied");
                 }
                 Err(prunr_core::CoreError::Cancelled) => {
+                    if let Some(item) = self.batch.find_by_id_mut(item_id) {
+                        item.job = None;
+                    }
                     tracing::info!(item_id, "upscale cancelled by user");
                     self.toasts.info("Upscale cancelled");
                 }
@@ -1494,7 +1357,7 @@ impl PrunrApp {
                         .and_then(|i| i.selection_mask.clone());
                     let final_mask = merge_stroke(existing, mask);
                     tracing::info!(item_id = result.item_id, mode = ?result.mode, "SAM decoder mask committed");
-                    self.commit_selection_and_dispatch(result.item_id, final_mask);
+                    self.commit_selection_and_dispatch(result.item_id, final_mask, StepKind::Stroke);
                     if let Some(item) = self.batch.find_by_id_mut(result.item_id) {
                         item.last_decode = item.selection_hash.map(|committed_hash| super::item::LastDecode {
                             output, mode: result.mode, committed_hash,
@@ -1660,7 +1523,9 @@ impl PrunrApp {
     /// Collect and send batch items matching `filter` for processing.
     /// Uses tier routing: compares each item's applied_recipe against current
     /// settings to determine the minimum work needed (skip / mask rerun / full).
-    fn process_items(&mut self, filter: impl Fn(&BatchItem) -> bool) {
+    /// `step`: the undo step the results record, or `None` to fill in the
+    /// shown one (a re-run a knob change asked for).
+    fn process_items(&mut self, filter: impl Fn(&BatchItem) -> bool, step: Option<StepKind>) {
         let chain = self.settings.chain_mode;
         // Pure filter mode: No model AND line_mode = Off. Skip inference +
         // subprocess entirely. (No model + EdgesOnly still needs DexiNed,
@@ -1669,7 +1534,7 @@ impl PrunrApp {
         let is_pure_filter = self.settings.model.to_model_kind().is_none()
             && self.batch.items.iter().all(|i| i.settings.line_mode == prunr_core::LineMode::Off);
         if is_pure_filter {
-            self.process_filter_only(filter);
+            self.process_filter_only(filter, step);
             return;
         }
         // No-model-but-EdgesOnly falls through with a placeholder. The
@@ -1684,13 +1549,21 @@ impl PrunrApp {
             .map(|i| i.id)
             .collect();
         if candidate_ids.is_empty() { return; }
+        // A background image's result is released; chain mode feeds it in.
+        for item in self.batch.items.iter_mut().filter(|i| candidate_ids.contains(&i.id)) {
+            item.unpark_result();
+        }
 
         let tiers = self.classify_candidates(&candidate_ids, model, chain);
         let process_count = tiers.tier1.len() + tiers.tier2.len() + tiers.tier_add_edge.len();
         self.notify_skip(tiers.skip_count, process_count);
         if process_count == 0 { return; }
 
-        self.seed_history_for_reprocess(&tiers.all_process_ids(), chain);
+        for id in tiers.all_process_ids() {
+            if let Some(item) = self.batch.find_by_id_mut(id) {
+                item.start_job(step);
+            }
+        }
 
         let tier2_work = self.build_tier2_work(&tiers.tier2);
         let add_edge_work = self.build_add_edge_work(&tiers.tier_add_edge);
@@ -1707,7 +1580,7 @@ impl PrunrApp {
     /// to a background thread via `BatchManager::request_filter_only` so the
     /// UI stays responsive on large batches. Results land on
     /// `bg_io.filter_only_rx`, drained in `drain_background_channels`.
-    fn process_filter_only(&mut self, filter: impl Fn(&BatchItem) -> bool) {
+    fn process_filter_only(&mut self, filter: impl Fn(&BatchItem) -> bool, step: Option<StepKind>) {
         let dispatches: Vec<(u64, ImageSource, prunr_core::FillStyle)> = self.batch.items.iter()
             .filter(|i| filter(i) && !matches!(i.status, BatchStatus::Processing))
             .map(|i| (i.id, i.source.clone(), i.settings.fill_style))
@@ -1715,6 +1588,7 @@ impl PrunrApp {
         for (id, source, fill_style) in dispatches {
             if let Some(item) = self.batch.find_by_id_mut(id) {
                 item.status = BatchStatus::Processing;
+                item.start_job(step);
             }
             self.batch.request_filter_only(id, &source, fill_style);
         }
@@ -1860,28 +1734,6 @@ impl PrunrApp {
             format!("{skipped} up to date, processing {processing}")
         };
         self.toasts.info(msg);
-    }
-
-    fn seed_history_for_reprocess(&mut self, process_ids: &HashSet<u64>, chain: bool) {
-        let max_depth = self.settings.history_depth;
-        for item in &mut self.batch.items {
-            if !process_ids.contains(&item.id) { continue; }
-            HistoryManager::seed_with_source(item);
-            let was_done = item.status == BatchStatus::Done;
-            HistoryManager::archive_current_result(item, max_depth, chain);
-            if was_done {
-                // Rebuild textures from the (possibly new) result. In chain
-                // mode, result_rgba stays populated for the next chain step,
-                // so keep result_texture; otherwise drop it.
-                if !chain {
-                    item.result_texture = None;
-                }
-                item.thumb_texture = None;
-                item.thumb_pending = false;
-                item.source_tex_pending = false;
-                item.result_tex_pending = false;
-            }
-        }
     }
 
     fn build_tier2_work(&mut self, tier2_ids: &HashSet<u64>) -> Vec<super::worker::Tier2WorkItem> {
@@ -2457,17 +2309,6 @@ impl PrunrApp {
         }
     }
 
-    /// Demote Tier 2 (compressed RAM) history to Tier 3 (disk) under memory pressure.
-    fn demote_history_to_disk(&mut self) {
-        for item in &mut self.batch.items {
-            for (seq, entry) in item.history.iter_mut().chain(item.redo_stack.iter_mut()).enumerate() {
-                if matches!(entry.slot, HistorySlot::Compressed(_)) {
-                    *entry = std::mem::take(entry).demote_to_disk(item.id, seq);
-                }
-            }
-        }
-    }
-
     /// Live-preview pump: dispatch debounced Tier 2 reruns + apply completed ones.
     /// Called once per frame at the start of `ui()` so the current frame renders
     /// with the newest available results.
@@ -2528,9 +2369,7 @@ impl PrunrApp {
     ) -> Option<super::live_preview::DispatchInputs> {
         use super::live_preview::{DispatchInputs, PreviewKind};
         let item = items.iter_mut().find(|b| b.id == id)?;
-        if !is_filter_only && item.cut_is_undone() {
-            return None;
-        }
+        let version = item.timeline.version();
         let seg_tensor = item.hot_seg_tensor();
         // A Mask dispatch in a seg model with no cached tensor falls
         // through to `run_preview`'s source+fill_style fallback and
@@ -2594,6 +2433,7 @@ impl PrunrApp {
                 color_match: item.settings.color_match,
             };
             return Some(DispatchInputs {
+                version,
                 kind,
                 original,
                 settings: item.settings,
@@ -2633,6 +2473,7 @@ impl PrunrApp {
         // (filter-only path).
         let correction = seg_tensor.as_ref().and_then(|seg| item.selection_plane_at((seg.width, seg.height)));
         Some(DispatchInputs {
+            version,
             kind, original, settings: item.settings,
             seg_tensor, edge_tensor, secondary_edge_tensor,
             cached_edge, cached_bold, cached_masked_base,
@@ -2694,13 +2535,13 @@ impl PrunrApp {
     ) {
         use super::live_preview::PreviewKind;
         let handles = self.batch.bg_io.tex_prep_handles();
-        let is_filter_only = self.settings.model.to_model_kind().is_none();
         for r in results {
             let (item_id, source, is_final) = {
                 let Some(item) = self.batch.find_by_id_mut(r.item_id) else {
                     continue;
                 };
-                if !is_filter_only && item.cut_is_undone() {
+                if r.version != item.timeline.version() {
+                    // Computed for a state the item has since left.
                     continue;
                 }
                 let is_upscale_tier2 = matches!(r.kind, PreviewKind::UpscaleTier2);
@@ -2735,6 +2576,7 @@ impl PrunrApp {
                         applied.upscale.color_match = knobs.color_match;
                     }
                 }
+                item.amend();
                 tracing::debug!(
                     event = "upscale_tier2_apply",
                     item_id = item.id,
@@ -2817,7 +2659,7 @@ impl PrunrApp {
             if !self.magic_brush_state.keeps_embedding(item.id) {
                 item.magic_brush_embedding = None;
             }
-            if item.park_result().is_some() {
+            if item.park_result() {
                 item.result_texture = None;
                 item.result_tex_pending = false;
             }
@@ -3005,12 +2847,12 @@ impl PrunrApp {
         let is_selected = self.batch.is_selected(item_id);
         let Some(recipe_snapshot) = self.take_dispatch_recipe(item_id) else { return };
 
-        // User-initiated cancel reverts to Pending (not Error) so caches and
-        // recipe stay intact for a re-Process.
+        // A cancelled run leaves the item on the state it shows.
         if matches!(result.as_ref(), Err(e) if e == crate::subprocess::protocol::CANCELLED_ERR_MSG) {
             if let Some(item) = self.batch.find_by_id_mut(item_id) {
                 if item.status == BatchStatus::Processing {
-                    item.status = BatchStatus::Pending;
+                    item.job = None;
+                    item.status = if item.result_rgba.is_some() || item.result_parked { BatchStatus::Done } else { BatchStatus::Pending };
                 }
             }
             self.admission_release_and_admit(item_id);
@@ -3019,11 +2861,18 @@ impl PrunrApp {
         }
 
         let Some(item) = self.batch.find_by_id_mut(item_id) else { return };
-        // Skip results for items that were already cancelled (reset to Pending).
-        if item.status != BatchStatus::Processing {
+        // Skip results the item no longer waits for: cancelled, or undone,
+        // redone or edited since the run started.
+        if item.status != BatchStatus::Processing || !item.job_is_current() {
             return;
         }
+        let succeeded = result.is_ok();
         let backend_update = item.apply_tier_result(result, tensor_cache, edge_cache, recipe_snapshot, is_selected);
+        if succeeded {
+            item.finish_job();
+        } else {
+            item.job = None;
+        }
         // Single completion event — useful for `RUST_LOG=prunr=debug` bug
         // reports (when did inference actually finish?) and as a stable
         // signal for any external observer (e.g. a smoke driver) that a
@@ -3051,7 +2900,7 @@ impl PrunrApp {
         self.batch.enforce_tensor_budget();
 
         if super::memory::under_memory_pressure() {
-            self.demote_history_to_disk();
+            self.batch.demote_history_to_disk();
             self.batch.evict_all_tensors();
         }
     }
@@ -3196,7 +3045,7 @@ impl PrunrApp {
                     self.pending_batch_sync = true;
                 }
                 if self.settings.auto_process_on_import && self.batch.next_id > id_floor {
-                    self.process_items(|item| item.id >= id_floor);
+                    self.process_items(|item| item.id >= id_floor, Some(StepKind::Process));
                 }
             }
         }
@@ -3433,14 +3282,17 @@ impl PrunrApp {
         while let Ok((item_id, result)) = self.batch.bg_io.filter_only_rx.try_recv() {
             let Some(item) = self.batch.find_by_id_mut(item_id) else { continue };
             match result {
+                Ok(_) if !item.job_is_current() => continue,
                 Ok(rgba) => {
                     item.unpark_result();
                     item.result_rgba = Some(rgba);
                     item.result_texture = None;
                     item.thumb_texture = None;
                     item.status = BatchStatus::Done;
+                    item.finish_job();
                 }
                 Err(msg) => {
+                    item.job = None;
                     item.status = BatchStatus::Error(msg);
                 }
             }
@@ -3462,7 +3314,6 @@ impl PrunrApp {
 
         self.pump_thumbnail_results(ctx);
         self.batch.compress_history_off_thread();
-        self.batch.land_compressed_history();
 
         // Drain off-thread selection textures. `ctx.load_texture` is
         // allowed here — this drain runs from `logic()`, not a render
@@ -3544,7 +3395,7 @@ impl PrunrApp {
                 self.sync_selected_batch_textures(ctx);
             }
             if self.settings.auto_process_on_import && self.batch.next_id > id_floor {
-                self.process_items(|item| item.id >= id_floor);
+                self.process_items(|item| item.id >= id_floor, Some(StepKind::Process));
             }
         }
     }
@@ -3715,14 +3566,8 @@ impl PrunrApp {
         let height = theme::CHIP_HEIGHT + theme::SPACE_SM * 2.0;
         let mut toolbar_change = adjustments_toolbar::ToolbarChange::default();
         let is_processing = self.batch.app_state() == AppState::Processing;
-        // Snapshot taken BEFORE adjustments_toolbar::render runs — if the
-        // user ends up applying a preset this frame, the snapshot goes onto
-        // the preset undo stack so Ctrl+Shift+Z can roll back an accidental pick.
-        let item = &self.batch.items[idx];
-        let pre_apply_snapshot = PresetSnapshot {
-            settings: item.settings,
-            applied_preset: item.applied_preset.clone(),
-        };
+        // Compared after the toolbar ran: a changed knob or preset is a step.
+        let settings_before = self.batch.items[idx].settings;
         egui::Panel::top("adjustments_toolbar")
             .exact_size(height)
             .frame(panel_frame)
@@ -3775,14 +3620,14 @@ impl PrunrApp {
                     state,
                 );
             });
-        self.apply_toolbar_change(ui.ctx(), toolbar_change, pre_apply_snapshot);
+        self.apply_toolbar_change(ui.ctx(), toolbar_change, settings_before);
     }
 
     fn apply_toolbar_change(
         &mut self,
         ctx: &egui::Context,
         toolbar_change: adjustments_toolbar::ToolbarChange,
-        pre_apply_snapshot: PresetSnapshot,
+        settings_before: super::item_settings::ItemSettings,
     ) {
         use crate::gui::knob_catalog::DispatchKind;
         use crate::gui::live_preview::PreviewKind;
@@ -3790,7 +3635,7 @@ impl PrunrApp {
         let Some(idx) = self.batch.selected_idx_clamped() else { return };
 
         if toolbar_change.preset_applied {
-            HistoryManager::push_preset(&mut self.batch.items[idx], pre_apply_snapshot);
+            self.batch.items[idx].commit(StepKind::Preset);
             // Preset apply copied an ItemSettings into the item — including
             // any captured bg_image_hash. Reload the matching bytes from
             // the persisted path map (or clear if missing) so the recipe
@@ -3885,6 +3730,9 @@ impl PrunrApp {
         }
 
         self.batch.items[idx].apply_cache_impact(toolbar_change.cache_impact);
+        if !toolbar_change.preset_applied && self.batch.items[idx].settings != settings_before {
+            self.batch.items[idx].commit(StepKind::Adjust);
+        }
 
         let dispatch = self.resolve_auto_dispatch(idx, &toolbar_change);
         let item_id = self.batch.items[idx].id;
@@ -3921,7 +3769,7 @@ impl PrunrApp {
             }
             DispatchKind::SubprocessAddEdge | DispatchKind::SubprocessFullPipeline => {
                 if is_done {
-                    self.process_items(|item| item.id == item_id);
+                    self.process_items(|item| item.id == item_id, None);
                 }
             }
         }
@@ -4116,32 +3964,11 @@ impl PrunrApp {
     }
 }
 
-/// Build a human-readable toast label for a multi-item undo or redo.
-///
-/// - Single item, known type: matches the existing per-type single-item labels.
-/// - Multiple items, uniform type: "N strokes undone", "N results restored", etc.
-/// - Multiple items, mixed types: "N actions undone" (safe fallback).
-///
-/// `single_labels` is `[stroke, result, preset]` — the three per-type
-/// labels for the single-item case. `multi_verb` is the trailing word
-/// for the multi-item form (e.g. "undone" / "restored").
-fn action_toast_label(
-    total: u32,
-    type_counts: [u32; 3], // indexed by ActionType as usize: Stroke=0, Result=1, PresetApply=2
-    single_labels: [&str; 3],
-    multi_verb: &str,
-) -> String {
-    let dominant = type_counts.iter().enumerate()
-        .find(|(_, &c)| c == total)
-        .map(|(i, _)| i);
-    match (total, dominant) {
-        (1, Some(i)) => single_labels[i].into(),
-        (1, None)    => format!("Action {multi_verb}"),
-        (n, Some(0)) => format!("{n} strokes {multi_verb}"),
-        (n, Some(1)) => format!("{n} results {multi_verb}"),
-        (n, Some(2)) => format!("{n} presets {multi_verb}"),
-        (n, None)    => format!("{n} actions {multi_verb}"),
-        _            => format!("{total} actions {multi_verb}"),
+/// "Stroke undone" for one image; "3 steps undone" across several.
+fn step_toast(steps: &[StepKind], verb: &str) -> String {
+    match steps {
+        [one] => format!("{} {verb}", one.noun()),
+        many => format!("{} steps {verb}", many.len()),
     }
 }
 
@@ -4560,41 +4387,153 @@ mod upscale_tier2_routing_tests {
     }
 }
 
+/// Every kind of step on the one timeline: what it records, what undo
+/// brings back, and that a result computed for a state left behind never
+/// lands.
+#[cfg(test)]
+mod timeline_contract_tests {
+    use std::sync::Arc;
+    use super::PrunrApp;
+    use crate::gui::item::BatchStatus;
+    use crate::gui::settings::SettingsModel;
+    use crate::gui::tests::fixtures::push_test_item;
+    use crate::gui::timeline::StepKind;
+
+    fn px(v: u8) -> Arc<image::RgbaImage> {
+        Arc::new(image::RgbaImage::from_pixel(4, 4, image::Rgba([v, v, v, 255])))
+    }
+
+    fn shown(app: &PrunrApp) -> Option<u8> {
+        app.batch.items[0].result_rgba.as_ref().map(|r| r.get_pixel(0, 0)[0])
+    }
+
+    fn mask() -> prunr_core::selection::MaskArtifact {
+        let mut cells = vec![0i8; 16];
+        cells[5] = prunr_core::selection::FULL;
+        prunr_core::selection::MaskArtifact::from_cells(4, 4, cells)
+    }
+
+    fn app_with_processed_item(model: SettingsModel) -> PrunrApp {
+        let mut app = PrunrApp::new_for_test();
+        app.settings.model = model;
+        let item = push_test_item(&mut app, 1);
+        item.dimensions = (4, 4);
+        item.source_rgba = Some(px(0));
+        item.result_rgba = Some(px(1));
+        item.status = BatchStatus::Done;
+        item.commit(StepKind::Process);
+        app.batch.select_item(0);
+        app
+    }
+
+    /// An erase lands as one step that shows the filled image without its
+    /// brush marks; undoing it brings back both the image and the marks.
+    #[test]
+    fn an_erase_lands_as_one_step_and_undo_brings_the_strokes_back() {
+        let ctx = egui::Context::default();
+        let mut app = app_with_processed_item(SettingsModel::Inpaint);
+        app.commit_selection_and_dispatch(1, mask(), StepKind::Stroke);
+        app.batch.items[0].start_job(Some(StepKind::Erase));
+        app.processor.land_inpaint_for_test(1, (*px(7)).clone());
+        app.pump_inpaint_results(&ctx);
+
+        let item = &app.batch.items[0];
+        assert_eq!(shown(&app), Some(7));
+        assert!(item.selection_mask.is_none(), "the filled region's marks are gone");
+        assert_eq!(item.timeline.undo_steps(), 3);
+
+        app.handle_undo(&ctx);
+        assert_eq!(shown(&app), Some(1));
+        assert!(app.batch.items[0].selection_mask.is_some(), "undo brings the marks back with the image");
+    }
+
+    /// An erase result that lands after an undo is dropped.
+    #[test]
+    fn an_erase_after_an_undo_does_not_land() {
+        let ctx = egui::Context::default();
+        let mut app = app_with_processed_item(SettingsModel::Inpaint);
+        app.commit_selection_and_dispatch(1, mask(), StepKind::Stroke);
+        app.batch.items[0].start_job(Some(StepKind::Erase));
+        app.handle_undo(&ctx);
+        app.processor.land_inpaint_for_test(1, (*px(7)).clone());
+        app.pump_inpaint_results(&ctx);
+        assert_eq!(shown(&app), Some(1));
+        assert!(app.batch.items[0].timeline.can_redo(), "the undone stroke is still there to redo");
+    }
+
+    /// A Process result that lands after an undo is dropped, and the undo
+    /// asked the worker to stop.
+    #[test]
+    fn a_process_result_after_an_undo_does_not_land() {
+        let ctx = egui::Context::default();
+        let mut app = app_with_processed_item(SettingsModel::BiRefNetLite);
+        let item = &mut app.batch.items[0];
+        item.start_job(Some(StepKind::Process));
+        item.status = BatchStatus::Processing;
+        app.handle_undo(&ctx);
+        assert!(app.processor.cancels.is_cancelled(1), "the run is asked to stop");
+
+        let late = prunr_core::ProcessResult { rgba_image: (*px(9)).clone(), active_provider: String::new() };
+        app.on_batch_item_done(&ctx, 1, Ok(late), None, None);
+        assert_eq!(shown(&app), None, "undo went back to the original and stays there");
+        assert_eq!(app.batch.items[0].status, BatchStatus::Pending);
+    }
+
+    /// A Process result that lands on the state it started from is a step.
+    #[test]
+    fn a_process_result_lands_as_its_own_step() {
+        let ctx = egui::Context::default();
+        let mut app = app_with_processed_item(SettingsModel::BiRefNetLite);
+        let item = &mut app.batch.items[0];
+        item.start_job(Some(StepKind::Process));
+        item.status = BatchStatus::Processing;
+        let fresh = prunr_core::ProcessResult { rgba_image: (*px(9)).clone(), active_provider: String::new() };
+        app.on_batch_item_done(&ctx, 1, Ok(fresh), None, None);
+        assert_eq!(shown(&app), Some(9));
+        app.handle_undo(&ctx);
+        assert_eq!(shown(&app), Some(1), "undo shows the result it replaced");
+    }
+
+    /// A knob change is an Adjust step; undo brings the old value back,
+    /// with the image that went with it.
+    #[test]
+    fn a_knob_change_is_a_step_and_undo_restores_it() {
+        let ctx = egui::Context::default();
+        let mut app = app_with_processed_item(SettingsModel::BiRefNetLite);
+        let before = app.batch.items[0].settings;
+        app.batch.items[0].settings.gamma = 1.8;
+        app.apply_toolbar_change(&ctx, Default::default(), before);
+        assert_eq!(app.batch.items[0].timeline.undo_steps(), 2);
+
+        app.handle_undo(&ctx);
+        assert_eq!(app.batch.items[0].settings.gamma, before.gamma);
+        app.handle_redo(&ctx);
+        assert_eq!(app.batch.items[0].settings.gamma, 1.8);
+    }
+
+    /// Clearing the selection is a step: undo brings it back.
+    #[test]
+    fn clearing_the_selection_is_a_step() {
+        let ctx = egui::Context::default();
+        let mut app = app_with_processed_item(SettingsModel::Inpaint);
+        app.commit_selection_and_dispatch(1, mask(), StepKind::Stroke);
+        assert!(app.batch.clear_selection(1));
+        assert!(app.batch.items[0].selection_mask.is_none());
+        app.handle_undo(&ctx);
+        assert!(app.batch.items[0].selection_mask.is_some());
+    }
+}
+
 #[cfg(test)]
 mod toast_label_tests {
-    use super::action_toast_label;
-
-    const UNDO_LABELS: [&str; 3] = ["Stroke undone", "Undone", "Preset undone"];
-    const REDO_LABELS: [&str; 3] = ["Stroke restored", "Result restored", "Preset restored"];
+    use super::step_toast;
+    use crate::gui::timeline::StepKind;
 
     #[test]
-    fn single_item_stroke_undo() {
-        assert_eq!(action_toast_label(1, [1, 0, 0], UNDO_LABELS, "undone"), "Stroke undone");
-    }
-
-    #[test]
-    fn single_item_result_undo() {
-        assert_eq!(action_toast_label(1, [0, 1, 0], UNDO_LABELS, "undone"), "Undone");
-    }
-
-    #[test]
-    fn single_item_preset_redo() {
-        assert_eq!(action_toast_label(1, [0, 0, 1], REDO_LABELS, "restored"), "Preset restored");
-    }
-
-    #[test]
-    fn multi_item_uniform_strokes_undone() {
-        assert_eq!(action_toast_label(3, [3, 0, 0], UNDO_LABELS, "undone"), "3 strokes undone");
-    }
-
-    #[test]
-    fn multi_item_uniform_results_restored() {
-        assert_eq!(action_toast_label(2, [0, 2, 0], REDO_LABELS, "restored"), "2 results restored");
-    }
-
-    #[test]
-    fn multi_item_mixed_types_falls_back_to_count() {
-        assert_eq!(action_toast_label(3, [2, 1, 0], UNDO_LABELS, "undone"), "3 actions undone");
+    fn one_image_names_the_step_and_several_count_them() {
+        assert_eq!(step_toast(&[StepKind::Stroke], "undone"), "Stroke undone");
+        assert_eq!(step_toast(&[StepKind::Erase], "redone"), "Erase redone");
+        assert_eq!(step_toast(&[StepKind::Stroke, StepKind::Process], "undone"), "2 steps undone");
     }
 }
 
@@ -4603,7 +4542,6 @@ mod selection_action_tests {
     use std::sync::Arc;
     use prunr_core::selection::MaskArtifact;
     use crate::gui::item::{BatchItem, BatchStatus, ImageSource};
-    use crate::gui::history_manager::HistoryManager;
 
     fn make_mask(w: u32, h: u32, selected: bool) -> MaskArtifact {
         let v = if selected { prunr_core::selection::FULL } else { 0 };
@@ -4629,35 +4567,6 @@ mod selection_action_tests {
         item
     }
 
-    /// Delete: `alpha_cut` zeros the selected region; history depth grows by 1.
-    ///
-    /// `archive_current_result` moves `result_rgba` into the history entry
-    /// (chain_mode=false). Save the result Arc before archiving so the
-    /// alpha_cut operation has something to work on — exactly as
-    /// `handle_selection_action` does (it clones `result_rgba` before
-    /// calling `archive_current_result`).
-    #[test]
-    fn delete_action_alpha_cuts_result_and_pushes_history() {
-        let mut item = make_item_done();
-        let mask = make_mask(4, 4, true);
-
-        // Capture result before archive moves it into history.
-        let result = item.result_rgba.clone().unwrap();
-        assert_eq!(item.history.len(), 0, "no history before archive");
-
-        HistoryManager::archive_current_result(&mut item, 10, false);
-        assert_eq!(item.history.len(), 1, "archive pushes exactly one entry");
-
-        // Apply alpha_cut to a clone of the saved result.
-        let mut new_result = (*result).clone();
-        mask.alpha_cut(&mut new_result);
-
-        // All pixels in the selected region must have alpha == 0.
-        for px in new_result.pixels() {
-            assert_eq!(px.0[3], 0, "alpha_cut must zero alpha in selected region");
-        }
-    }
-
     /// Delete on an image that has not been processed cuts the source and
     /// becomes the item's result; the stale result texture is dropped so
     /// the canvas rebuilds it.
@@ -4679,12 +4588,11 @@ mod selection_action_tests {
         assert!(result.pixels().all(|px| px.0[3] == 0), "selected region must be cut");
         assert_eq!(item.status, BatchStatus::Done);
         assert!(item.result_tex_pending, "a texture build must be in flight for the new result");
-        assert_eq!(item.history.len(), 1, "the source is archived so Cmd+Z has a state to return to");
-        assert!(matches!(item.actions_undo.back(), Some(crate::gui::item::ActionType::Result)));
+        assert_eq!(item.timeline.undo_steps(), 1, "one Edit step, back to the unprocessed source");
     }
 
     /// Cut through the real action path: the result is cut like Delete and
-    /// exactly one history entry is archived (copy + cut is one undo step).
+    /// copy + cut is one undo step.
     #[test]
     fn cut_action_through_the_real_path_archives_once() {
         use crate::gui::views::selection_action_bar::SelectionAction;
@@ -4697,7 +4605,7 @@ mod selection_action_tests {
 
         let item = &app.batch.items[0];
         assert!(item.result_rgba.as_ref().unwrap().pixels().all(|px| px.0[3] == 0));
-        assert_eq!(item.history.len(), 1, "Cut archives the previous result exactly once");
+        assert_eq!(item.timeline.undo_steps(), 1, "Cut is exactly one step");
     }
 
     /// Invert: coverage complement, signed by the active brush mode.
@@ -4711,21 +4619,6 @@ mod selection_action_tests {
         let partial = MaskArtifact::from_cells(2, 2, vec![0, FULL, 0, FULL]);
         assert_eq!(partial.invert(BrushMode::Subtract).cells(), &[-FULL, 0, -FULL, 0]);
         assert_eq!(partial.invert(BrushMode::Add).cells(), &[FULL, 0, FULL, 0]);
-    }
-
-    /// Cut: one archive call produces one history entry (not two).
-    /// Verifies that Cut doesn't call archive_current_result twice (which
-    /// would produce one redundant entry with an identical result).
-    #[test]
-    fn cut_action_pushes_only_one_history_marker() {
-        let mut item = make_item_done();
-        assert_eq!(item.history.len(), 0, "fresh item has no history");
-
-        // Simulate the Cut path: archive once, then apply Cut transformations.
-        HistoryManager::archive_current_result(&mut item, 10, false);
-
-        // Only one entry should exist.
-        assert_eq!(item.history.len(), 1, "Cut must archive exactly once (not twice)");
     }
 }
 

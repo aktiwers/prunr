@@ -9,16 +9,6 @@ pub type FilterOnlyResult = (u64, Result<std::sync::Arc<image::RgbaImage>, Strin
 /// image clears `decode_pending` instead of leaving the item stuck.
 pub type DecodeResult = (u64, Result<std::sync::Arc<image::RgbaImage>, String>);
 
-/// History-eviction → off-thread compress → drain payload:
-/// `(item_id, compressed_entry, parked)`. The drain swaps the parked
-/// entry for the compressed slot only while `parked` is still the very
-/// image on top of history, so a stale compression clobbers nothing.
-pub type HistoryDemoteResult = (
-    u64,
-    super::history_disk::CompressedEntry,
-    std::sync::Weak<image::RgbaImage>,
-);
-
 /// What a selection texture was built from: the mask's content hash and
 /// the style baked into it. The item compares this against the current
 /// pair to decide whether a rebuild is due.
@@ -111,10 +101,6 @@ pub struct BackgroundIO {
     /// while load + decode + `apply_fill_style` runs per item.
     pub filter_only_tx: mpsc::Sender<FilterOnlyResult>,
     pub filter_only_rx: mpsc::Receiver<FilterOnlyResult>,
-    /// Off-thread zstd compression of history entries
-    /// (`BatchManager::compress_history_off_thread` / `land_compressed_history`).
-    pub history_demote_tx: mpsc::Sender<HistoryDemoteResult>,
-    pub history_demote_rx: mpsc::Receiver<HistoryDemoteResult>,
     /// Off-thread RGBA decode + ColorImage build for a per-item bg
     /// image. Drain calls `ctx.load_texture` with the bg-specific
     /// options (Linear filter + Repeat wrap for `BgImageFit::Tile`).
@@ -158,7 +144,6 @@ impl BackgroundIO {
         let (save_done_tx, save_done_rx) = mpsc::channel();
         let (tex_prep_tx, tex_prep_rx) = mpsc::channel();
         let (filter_only_tx, filter_only_rx) = mpsc::channel();
-        let (history_demote_tx, history_demote_rx) = mpsc::channel();
         let (bg_tex_prep_tx, bg_tex_prep_rx) = mpsc::channel();
         let (selection_texture_tx, selection_texture_rx) = mpsc::channel();
         let cap = std::thread::available_parallelism()
@@ -171,7 +156,6 @@ impl BackgroundIO {
             save_done_tx, save_done_rx,
             tex_prep_tx, tex_prep_rx,
             filter_only_tx, filter_only_rx,
-            history_demote_tx, history_demote_rx,
             bg_tex_prep_tx, bg_tex_prep_rx,
             decode_slots: Arc::new(DecodeSlots::new(cap)),
             selection_texture_tx, selection_texture_rx,
