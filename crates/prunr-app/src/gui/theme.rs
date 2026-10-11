@@ -207,6 +207,10 @@ pub const CHECKER_DARK_MODE: (Color32, Color32) = (
 /// Progress bar fill
 pub const PROGRESS_FILL: Color32 = ACCENT;
 
+/// The sweep over an image being processed, on the canvas and its thumbnail:
+/// `ACCENT` at about 20% opacity.
+pub const PROCESSING_SWEEP: Color32 = Color32::from_rgba_premultiplied(24, 9, 28, 50);
+
 /// Drop zone border on drag hover
 pub const DROP_HOVER_BORDER: Color32 = ACCENT;
 
