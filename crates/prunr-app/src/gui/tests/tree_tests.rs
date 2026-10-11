@@ -10,8 +10,12 @@ use crate::gui::item::BatchStatus;
 use crate::gui::views::settings::SettingsTab;
 
 pub(super) fn harness() -> Harness<'static, PrunrApp> {
+    harness_sized(egui::vec2(1400.0, 900.0))
+}
+
+pub(super) fn harness_sized(size: egui::Vec2) -> Harness<'static, PrunrApp> {
     Harness::builder()
-        .with_size(egui::vec2(1400.0, 900.0))
+        .with_size(size)
         .build_eframe(|cc| {
             egui_material_icons::initialize(&cc.egui_ctx);
             PrunrApp::new_for_test()

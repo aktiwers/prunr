@@ -125,12 +125,11 @@ fn pack_output(
 const OPENVINO_TILE_CAP: u32 = 256;
 
 fn tile_for_provider(recommended: u32, provider: &str) -> u32 {
-    #[cfg(not(target_os = "macos"))]
-    if provider == crate::engine::EpKind::OpenVino.as_str() {
-        return recommended.min(OPENVINO_TILE_CAP);
+    if provider == crate::engine::OPENVINO_NAME {
+        recommended.min(OPENVINO_TILE_CAP)
+    } else {
+        recommended
     }
-    let _ = provider;
-    recommended
 }
 
 /// Run a model at its native output scale (no downscale). Internal only.
@@ -506,20 +505,16 @@ pub fn x4twopass_available(model_id: prunr_models::ModelId) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
 
     #[test]
     fn openvino_tiles_cap_at_256_for_a_prompt_cancel() {
-        #[cfg(not(target_os = "macos"))]
-        {
-            assert_eq!(tile_for_provider(512, "OpenVINO"), 256);
-            assert_eq!(tile_for_provider(256, "OpenVINO"), 256);
-        }
+        assert_eq!(tile_for_provider(512, "OpenVINO"), 256);
+        assert_eq!(tile_for_provider(256, "OpenVINO"), 256);
         assert_eq!(tile_for_provider(512, "CPU"), 512);
         assert_eq!(tile_for_provider(512, "CUDA"), 512);
         assert_eq!(OPENVINO_TILE_CAP % 16, 0, "window-attention models need a multiple of 16");
     }
-
-    use super::*;
 
     /// `pick_optimization_level` gates Level2 on `tile_size_multiple.is_some()`.
     /// Without this, HAT-family models panic on the second tile in the same

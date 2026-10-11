@@ -1671,10 +1671,6 @@ mod tests {
         assert!(read_on_demand(dir.path(), "nope.onnx").is_none());
     }
 
-    /// Pins the case-insensitive `eq_ignore_ascii_case` contract on
-    /// `incompatible_eps`. Silueta is the only model with a non-empty
-    /// list today (`["OpenVINO"]`) — exercising both casings ensures
-    /// callers passing "openvino" / "OPENVINO" / "OpenVINO" all match.
     #[test]
     fn downloaded_models_carry_a_content_tag_and_built_in_ones_none() {
         let mut seen = std::collections::HashSet::new();
@@ -1691,6 +1687,10 @@ mod tests {
         assert_ne!(tag_of_shas(["aa", "bb"]), tag_of_shas(["aa", "bc"]), "any part's checksum moves the tag");
     }
 
+    /// Pins the case-insensitive `eq_ignore_ascii_case` contract on
+    /// `incompatible_eps`. Silueta is the only model with a non-empty
+    /// list today (`["OpenVINO"]`) — exercising both casings ensures
+    /// callers passing "openvino" / "OPENVINO" / "OpenVINO" all match.
     #[test]
     fn is_ep_compatible_silueta_openvino_blocked_case_insensitive() {
         assert!(!is_ep_compatible(ModelId::Silueta, "OpenVINO"));
