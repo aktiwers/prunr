@@ -94,7 +94,7 @@ pub struct Cli {
 
     /// How the lines combine with the subject (with --lines-after-bg):
     /// lines-only, subject-filled, engraving or ghost.
-    #[arg(long, default_value = "lines-only", value_parser = parse_composition)]
+    #[arg(long, default_value = "lines-only", value_parser = str::parse::<prunr_core::ComposeMode>)]
     pub line_composition: prunr_core::ComposeMode,
 
     /// Paint all lines a solid color (hex, e.g. "000000" for black, "ff0000" for red).
@@ -976,17 +976,6 @@ pub fn run_doctor() {
 fn section(title: &str) {
     println!("{title}");
     println!("{}", "-".repeat(title.len()));
-}
-
-fn parse_composition(s: &str) -> Result<prunr_core::ComposeMode, String> {
-    use prunr_core::ComposeMode;
-    match s {
-        "lines-only" => Ok(ComposeMode::LinesOnly),
-        "subject-filled" => Ok(ComposeMode::SubjectFilled),
-        "engraving" => Ok(ComposeMode::Engraving),
-        "ghost" => Ok(ComposeMode::Ghost),
-        _ => Err(format!("'{s}' is not one of lines-only, subject-filled, engraving, ghost")),
-    }
 }
 
 fn path_or_unknown(p: Option<std::path::PathBuf>) -> String {
