@@ -4,7 +4,8 @@
 //! pipeline that reports through `prunr_core::Progress` shows up here
 //! without widget changes.
 
-use std::borrow::Cow;
+use std::hash::{Hash, Hasher};
+use std::sync::Arc;
 use std::f32::consts::{FRAC_PI_2, TAU};
 use std::time::Instant;
 
@@ -28,26 +29,51 @@ const TITLE_SIZE: f32 = 13.5;
 const SUBTITLE_SIZE: f32 = 12.0;
 const KEYCAP_SIZE: f32 = 11.0;
 
-const CAPSULE_FILL: Color32 = Color32::from_rgba_premultiplied(18, 18, 22, 214);
-const CAPSULE_BORDER: Color32 = Color32::from_rgba_premultiplied(20, 20, 20, 20);
-const BUTTON_FILL: Color32 = Color32::from_rgba_premultiplied(18, 18, 18, 18);
-const BUTTON_HOVER_FILL: Color32 = Color32::from_rgba_premultiplied(36, 36, 36, 36);
-const KEYCAP_BORDER: Color32 = Color32::from_rgb(0x52, 0x52, 0x5b);
-const RING_TRACK: Color32 = Color32::from_rgb(0x3f, 0x3f, 0x46);
-const CAUTION_TEXT: Color32 = Color32::from_rgb(0xc9, 0xa7, 0x7a);
-const WAITING_TILE: Color32 = Color32::from_rgba_premultiplied(9, 9, 11, 140);
-const TILE_GRID: Color32 = Color32::from_rgba_premultiplied(13, 13, 13, 13);
-
 const STOPPING: &str = "Stopping";
 const FINISHING_CURRENT: &str = "Finishing the current tile";
 
 /// The capsule's two lines: what is happening, then how far along.
-fn capsule_lines(progress: &DispatchProgress, now: Instant) -> (Cow<'_, str>, Option<String>) {
+fn capsule_lines(progress: &DispatchProgress, now: Instant) -> (&str, Option<String>) {
     if progress.cancelling {
-        return (Cow::Borrowed(STOPPING), Some(FINISHING_CURRENT.to_string()));
+        return (STOPPING, Some(FINISHING_CURRENT.to_string()));
     }
     let detail: Vec<String> = progress.counter_text().into_iter().chain(progress.remaining_text(now)).collect();
-    (Cow::Borrowed(progress.step_label.as_ref()), (!detail.is_empty()).then(|| detail.join(" \u{b7} ")))
+    (progress.step_label.as_ref(), (!detail.is_empty()).then(|| detail.join(" \u{b7} ")))
+}
+
+/// The capsule's laid-out text, kept between frames: it changes a few
+/// times a second at most, the capsule paints sixty.
+#[derive(Clone)]
+struct CapsuleText {
+    key: u64,
+    title: Arc<Galley>,
+    subtitle: Option<Arc<Galley>>,
+    cancel: Arc<Galley>,
+    keycap: Arc<Galley>,
+}
+
+fn capsule_text(ui: &egui::Ui, painter: &Painter, progress: &DispatchProgress, max_text: f32, now: Instant) -> CapsuleText {
+    let keys = super::shortcuts::keys(ui.ctx(), super::shortcuts::Action::Cancel);
+    let mut h = std::hash::DefaultHasher::new();
+    (progress.step_label.as_ref(), progress.cancelling, progress.outer, progress.inner).hash(&mut h);
+    (progress.outer_unit, progress.inner_unit, progress.time_left(now), keys.as_ref(), max_text.to_bits()).hash(&mut h);
+    let key = h.finish();
+    let id = egui::Id::new("progress_capsule_text");
+    let cached = ui.ctx().data(|d| d.get_temp::<CapsuleText>(id));
+    if let Some(text) = cached.filter(|c| c.key == key) {
+        return text;
+    }
+    let (title, subtitle) = capsule_lines(progress, now);
+    let subtitle_color = if progress.cancelling { theme::CAUTION_TEXT } else { theme::TEXT_SECONDARY };
+    let text = CapsuleText {
+        key,
+        title: single_line(painter, title.to_string(), TITLE_SIZE, theme::TEXT_PRIMARY, max_text),
+        subtitle: subtitle.map(|s| single_line(painter, s, SUBTITLE_SIZE, subtitle_color, max_text)),
+        cancel: single_line(painter, "Cancel".into(), TITLE_SIZE, theme::TEXT_PRIMARY, f32::INFINITY),
+        keycap: single_line(painter, keys.to_string(), KEYCAP_SIZE, theme::TEXT_SECONDARY, f32::INFINITY),
+    };
+    ui.ctx().data_mut(|d| d.insert_temp(id, text.clone()));
+    text
 }
 
 /// Paint the tile map and the capsule. Returns `true` when Cancel was
@@ -65,15 +91,11 @@ pub(crate) fn render(
         paint_tile_map(&painter, img_rect, progress, t);
     }
 
-    let (title, subtitle) = capsule_lines(progress, Instant::now());
     let max_text = (canvas_rect.width() - 260.0).max(CAPSULE_MIN_TEXT_WIDTH);
-    let title = single_line(&painter, title.into_owned(), TITLE_SIZE, theme::TEXT_PRIMARY, max_text);
-    let subtitle_color = if cancelling { CAUTION_TEXT } else { theme::TEXT_SECONDARY };
-    let subtitle = subtitle.map(|s| single_line(&painter, s, SUBTITLE_SIZE, subtitle_color, max_text));
+    let CapsuleText { title, subtitle, cancel: cancel_label, keycap, .. } = capsule_text(ui, &painter, progress, max_text, Instant::now());
+    let subtitle_color = if cancelling { theme::CAUTION_TEXT } else { theme::TEXT_SECONDARY };
     let text_w = subtitle.as_ref().map_or(0.0, |g| g.size().x).max(title.size().x).max(CAPSULE_MIN_TEXT_WIDTH);
 
-    let cancel_label = single_line(&painter, "Cancel".into(), TITLE_SIZE, theme::TEXT_PRIMARY, f32::INFINITY);
-    let keycap = single_line(&painter, super::shortcuts::keys(ui.ctx(), super::shortcuts::Action::Cancel).to_string(), KEYCAP_SIZE, theme::TEXT_SECONDARY, f32::INFINITY);
     let keycap_size = keycap.size() + Vec2::new(12.0, 2.0);
     let button_w = 14.0 + cancel_label.size().x + 8.0 + keycap_size.x + 12.0;
     let with_button = !cancelling;
@@ -87,8 +109,8 @@ pub(crate) fn render(
     let radius = CAPSULE_HEIGHT / 2.0;
     let shadow = Shadow { offset: [0, 14], blur: 36, spread: 0, color: Color32::from_black_alpha(128) };
     painter.add(shadow.as_shape(capsule, radius as u8));
-    let border = if cancelling { theme::CAUTION.gamma_multiply(0.35) } else { CAPSULE_BORDER };
-    painter.rect(capsule, radius, CAPSULE_FILL, Stroke::new(1.0, border), StrokeKind::Inside);
+    let border = if cancelling { theme::CAUTION.gamma_multiply(0.35) } else { theme::OVERLAY_CAPSULE_BORDER };
+    painter.rect(capsule, radius, theme::OVERLAY_CAPSULE_FILL, Stroke::new(1.0, border), StrokeKind::Inside);
 
     let ring_center = Pos2::new(capsule.left() + CAPSULE_PAD_LEFT + RING_RADIUS + RING_STROKE / 2.0, capsule.center().y);
     let ring_color = if cancelling { theme::CAUTION } else { theme::ACCENT_BRIGHT };
@@ -119,7 +141,7 @@ pub(crate) fn render(
     );
     let resp = ui.interact(button, ui.id().with("progress_cancel"), Sense::click());
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Cancel"));
-    let fill = if resp.hovered() { BUTTON_HOVER_FILL } else { BUTTON_FILL };
+    let fill = if resp.hovered() { theme::OVERLAY_BUTTON_HOVER_FILL } else { theme::OVERLAY_BUTTON_FILL };
     painter.rect_filled(button, BUTTON_HEIGHT / 2.0, fill);
     let label_pos = Pos2::new(button.left() + 14.0, button.center().y - cancel_label.size().y / 2.0);
     let cap = Rect::from_min_size(
@@ -127,7 +149,7 @@ pub(crate) fn render(
         keycap_size,
     );
     painter.galley(label_pos, cancel_label, theme::TEXT_PRIMARY);
-    painter.rect_stroke(cap, 4.0, Stroke::new(1.0, KEYCAP_BORDER), StrokeKind::Inside);
+    painter.rect_stroke(cap, 4.0, Stroke::new(1.0, theme::KEYCAP_BORDER), StrokeKind::Inside);
     painter.galley(cap.center() - keycap.size() / 2.0, keycap, theme::TEXT_SECONDARY);
     resp.clicked()
 }
@@ -144,12 +166,12 @@ pub(crate) fn render_loading_pill(ui: &egui::Ui, canvas_rect: Rect, cursor: Opti
     let pill = Rect::from_min_size(min, size);
     let shadow = Shadow { offset: [0, 8], blur: 22, spread: 0, color: Color32::from_black_alpha(115) };
     painter.add(shadow.as_shape(pill, 15));
-    painter.rect(pill, 15.0, CAPSULE_FILL, Stroke::new(1.0, CAPSULE_BORDER), StrokeKind::Inside);
+    painter.rect(pill, 15.0, theme::OVERLAY_CAPSULE_FILL, Stroke::new(1.0, theme::OVERLAY_CAPSULE_BORDER), StrokeKind::Inside);
     paint_ring(&painter, Pos2::new(pill.left() + 9.0 + 8.0, pill.center().y), 6.0, 2.0, None, t, theme::ACCENT_BRIGHT);
     painter.galley(Pos2::new(pill.left() + 33.0, pill.center().y - text.size().y / 2.0), text, theme::TEXT_PRIMARY);
 }
 
-fn single_line(painter: &Painter, text: String, size: f32, color: Color32, max_width: f32) -> std::sync::Arc<Galley> {
+fn single_line(painter: &Painter, text: String, size: f32, color: Color32, max_width: f32) -> Arc<Galley> {
     let mut job = LayoutJob::simple_singleline(text, FontId::proportional(size), color);
     job.wrap = TextWrapping::truncate_at_width(max_width);
     painter.layout_job(job)
@@ -162,11 +184,11 @@ fn paint_tile_map(painter: &Painter, img_rect: Rect, progress: &DispatchProgress
         Vec2::new(r.w * img_rect.width(), r.h * img_rect.height()),
     );
     let pulse = 0.75 + 0.25 * (t * 3.0).sin();
-    for (cell, state) in progress.tiles.iter().zip(&progress.tile_states) {
+    for (cell, state) in progress.tiles.iter().zip(progress.tile_states.iter()) {
         let r = to_screen(cell);
         match state {
             TileState::Waiting => {
-                painter.rect(r, 0.0, WAITING_TILE, Stroke::new(0.5, TILE_GRID), StrokeKind::Inside);
+                painter.rect(r, 0.0, theme::TILE_WAITING, Stroke::new(0.5, theme::TILE_GRID), StrokeKind::Inside);
             }
             TileState::Running => {
                 for (width, alpha) in [(10.0, 0.08), (5.0, 0.18)] {
@@ -182,7 +204,7 @@ fn paint_tile_map(painter: &Painter, img_rect: Rect, progress: &DispatchProgress
 /// A ring filled to `fraction` from twelve o'clock, or a turning arc
 /// when there is nothing to count yet.
 fn paint_ring(painter: &Painter, center: Pos2, radius: f32, width: f32, fraction: Option<f32>, t: f32, color: Color32) {
-    painter.circle_stroke(center, radius, Stroke::new(width, RING_TRACK));
+    painter.circle_stroke(center, radius, Stroke::new(width, theme::PROGRESS_RING_TRACK));
     let (start, sweep) = match fraction {
         Some(f) => (-FRAC_PI_2, f * TAU),
         None => (t * TAU * 0.8, 0.28 * TAU),
@@ -217,7 +239,7 @@ mod tests {
     #[test]
     fn a_step_with_nothing_counted_is_one_line() {
         let p = DispatchProgress::new(ProgressKind::Seg, Step::LoadingModel.label());
-        assert_eq!(capsule_lines(&p, Instant::now()), (Cow::Borrowed("Loading the model"), None));
+        assert_eq!(capsule_lines(&p, Instant::now()), ("Loading the model", None));
     }
 
     #[test]

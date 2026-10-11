@@ -2327,7 +2327,7 @@ impl PrunrApp {
         self.batch.reset_processing_to_pending();
         // The capsule reads the slot, not the app state, so the reset
         // has to clear it.
-        self.processor.set_seg_counts(None, String::new());
+        self.processor.end_seg_run();
         self.status.text = "Cancelled".to_string();
     }
 
@@ -3003,7 +3003,7 @@ impl PrunrApp {
             let text = self.loading_model_status_text(item_id);
             self.processor.set_seg_step_text(text);
         } else {
-            self.processor.apply_report(&update);
+            self.processor.apply_seg_report(update);
         }
     }
 
@@ -3115,16 +3115,8 @@ impl PrunrApp {
 
     fn refresh_batch_progress_status(&mut self) {
         let report = self.batch.progress();
-        self.status.stage = report.stage.clone();
+        self.status.stage = report.stage;
         self.status.pct = report.pct;
-
-        // Scope the seg slot counter to the *current* dispatch via
-        // `processor.current_dispatch_progress()` — not whole-batch
-        // status_counts, which would inflate the total with items
-        // Done from a previous dispatch (e.g. reprocessing one image
-        // after the other was already finished).
-        let counts = self.processor.current_dispatch_progress();
-        self.processor.set_seg_counts(counts, report.stage);
     }
 
     fn on_batch_complete(&mut self) {
@@ -3151,10 +3143,6 @@ impl PrunrApp {
         self.processor.drain_recipes();
         self.status.text = "Cancelled".to_string();
         self.processor.clear_admission();
-        // Drop the seg dispatch_progress entry so the canvas overlay
-        // disappears with the cancel acknowledgement. Same reason
-        // as `handle_cancel_all_and_reset`.
-        self.processor.set_seg_counts(None, String::new());
     }
 
     fn on_subprocess_retry(&mut self, reduced_jobs: usize, re_queued_count: usize) {

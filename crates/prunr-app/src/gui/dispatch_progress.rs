@@ -65,12 +65,18 @@ pub struct DispatchProgress {
     /// What the counts count, as the pipeline reported it.
     pub outer_unit: Option<prunr_core::Unit>,
     pub inner_unit: Option<prunr_core::Unit>,
-    /// The tile map: cells with overlaps split down the middle, and how
-    /// far each one is.
+    /// The tile map: where the work happens, and how far each tile is.
     pub tiles: Arc<[prunr_core::TileRect]>,
-    pub tile_states: Vec<TileState>,
+    pub tile_states: Arc<Vec<TileState>>,
     /// When work started moving and how far along it was then.
     pub pace: Option<(Instant, f32)>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TimeLeft {
+    FewSeconds,
+    Seconds(u32),
+    Minutes(u32),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -95,7 +101,7 @@ impl DispatchProgress {
             outer_unit: None,
             inner_unit: None,
             tiles: Arc::new([]),
-            tile_states: Vec::new(),
+            tile_states: Arc::default(),
             pace: None,
         }
     }
@@ -116,11 +122,11 @@ impl DispatchProgress {
             }
             &ProgressUpdate::Inner { done, total, unit } => self.set_inner(done, total, unit, now),
             ProgressUpdate::Tiles(rects) => {
-                self.tiles = split_overlaps(rects).into();
-                self.tile_states = vec![TileState::Waiting; rects.len()];
+                self.tiles = rects.as_slice().into();
+                self.tile_states = Arc::new(vec![TileState::Waiting; rects.len()]);
             }
             &ProgressUpdate::Tile { index, done } => {
-                if let Some(state) = self.tile_states.get_mut(index as usize) {
+                if let Some(state) = Arc::make_mut(&mut self.tile_states).get_mut(index as usize) {
                     *state = if done { TileState::Done } else { TileState::Running };
                 }
             }
@@ -156,24 +162,25 @@ impl DispatchProgress {
         Some(elapsed.mul_f32((1.0 - f) / gained))
     }
 
-    /// "a few seconds left", "about 40 s left", "about 2 min left".
-    pub fn remaining_text(&self, now: Instant) -> Option<String> {
+    /// Time left as a person would round it.
+    pub fn time_left(&self, now: Instant) -> Option<TimeLeft> {
         let secs = self.remaining(now)?.as_secs_f32();
         Some(if secs < 10.0 {
-            "a few seconds left".to_string()
+            TimeLeft::FewSeconds
         } else if secs < 60.0 {
-            format!("about {} s left", ((secs / 10.0).round() * 10.0) as u32)
+            TimeLeft::Seconds(((secs / 10.0).round() * 10.0) as u32)
         } else {
-            format!("about {} min left", (secs / 60.0).ceil() as u32)
+            TimeLeft::Minutes((secs / 60.0).ceil() as u32)
         })
     }
 
-    /// Builder for the seg / batch pipeline. `step` is whatever
-    /// `BatchManager::progress().stage` reports ("Processing 3/5").
-    pub fn seg(done: u32, total: u32, step: impl Into<Cow<'static, str>>) -> Self {
-        let mut p = Self::new(ProgressKind::Seg, step);
-        p.set_inner(done, total, prunr_core::Unit::Image, Instant::now());
-        p
+    /// "a few seconds left", "about 40 s left", "about 2 min left".
+    pub fn remaining_text(&self, now: Instant) -> Option<String> {
+        self.time_left(now).map(|t| match t {
+            TimeLeft::FewSeconds => "a few seconds left".to_string(),
+            TimeLeft::Seconds(s) => format!("about {s} s left"),
+            TimeLeft::Minutes(m) => format!("about {m} min left"),
+        })
     }
 
     /// Flattened `(current, total)` across the outer × inner space.
@@ -181,22 +188,15 @@ impl DispatchProgress {
     /// advances `current` and never resets, even at outer boundaries.
     pub fn flat_counter(&self) -> Option<(u32, u32)> {
         let (ic, it) = self.inner;
-        if it == 0 {
-            return None;
-        }
         match self.outer {
-            // No nesting: inner is the full picture.
+            None if it == 0 => None,
             None => Some((ic, it)),
-            // Nested: total steps = outer_total * inner_total; `oc` is
-            // the outer units already done.
+            Some((_, 0)) => None,
+            // Only the outer level counts (images of a batch).
+            Some((oc, ot)) if it == 0 => Some((oc.min(ot), ot)),
             Some((oc, ot)) => {
-                if ot == 0 {
-                    return None;
-                }
-                let completed_outer = oc;
-                let total_steps = ot.saturating_mul(it);
-                let current_step = completed_outer.saturating_mul(it).saturating_add(ic);
-                Some((current_step.min(total_steps), total_steps))
+                let total = ot.saturating_mul(it);
+                Some((oc.saturating_mul(it).saturating_add(ic).min(total), total))
             }
         }
     }
@@ -258,6 +258,18 @@ impl RunSink {
     pub fn end(&self) {
         if self.current() {
             self.slot.set(None);
+        }
+    }
+
+    /// Show `text` as the step, for wording only the app can give
+    /// (which models are loading).
+    pub fn set_step_text(&self, text: String) {
+        if self.current() {
+            self.slot.update(|p| {
+                if let Some(p) = p {
+                    p.step_label = Cow::Owned(text);
+                }
+            });
         }
     }
 }
@@ -322,31 +334,6 @@ impl DispatchProgressSlot {
     }
 }
 
-/// Trim each tile where it overlaps a neighbour, at the middle of the
-/// overlap, so overlapping tiles paint as cells that meet edge to edge.
-fn split_overlaps(rects: &[prunr_core::TileRect]) -> Vec<prunr_core::TileRect> {
-    rects.iter().map(|t| {
-        let mut cell = *t;
-        for o in rects {
-            let (ox1, oy1) = (o.x + o.w, o.y + o.h);
-            if std::ptr::eq(o, t) || o.x >= t.x + t.w || ox1 <= t.x || o.y >= t.y + t.h || oy1 <= t.y {
-                continue;
-            }
-            if o.x < t.x {
-                let mid = (t.x + ox1) / 2.0;
-                if mid > cell.x { cell.w -= mid - cell.x; cell.x = mid; }
-            }
-            if o.x > t.x { cell.w = cell.w.min((o.x + t.x + t.w) / 2.0 - cell.x); }
-            if o.y < t.y {
-                let mid = (t.y + oy1) / 2.0;
-                if mid > cell.y { cell.h -= mid - cell.y; cell.y = mid; }
-            }
-            if o.y > t.y { cell.h = cell.h.min((o.y + t.y + t.h) / 2.0 - cell.y); }
-        }
-        cell
-    }).collect()
-}
-
 fn capitalise_first(s: &str) -> String {
     let mut chars = s.chars();
     match chars.next() {
@@ -369,6 +356,12 @@ mod tests {
     }
 
     #[test]
+    fn a_batch_counted_only_at_the_outer_level_has_a_fraction() {
+        let p = DispatchProgress { outer: Some((1, 4)), ..DispatchProgress::new(ProgressKind::Seg, "x") };
+        assert_eq!(p.fraction(), Some(0.25));
+    }
+
+    #[test]
     fn counts_accumulate_across_the_outer_unit() {
         // One crop of three done (8 steps) plus 5 steps of the next = 13 of 24.
         assert_eq!(sd_nested((1, 3), (5, 8)).flat_counter(), Some((13, 24)));
@@ -384,7 +377,8 @@ mod tests {
         p.inner_unit = Some(Unit::Tile);
         assert_eq!(p.counter_text().as_deref(), Some("Pass 2 of 3 \u{b7} tile 5 of 8"));
         assert_eq!(sd_nested((0, 1), (5, 8)).counter_text().as_deref(), Some("Step 5 of 8"));
-        assert_eq!(DispatchProgress::seg(0, 1, "x").counter_text(), None);
+        let one_image = DispatchProgress { outer: Some((0, 1)), ..DispatchProgress::new(ProgressKind::Seg, "x") };
+        assert_eq!(one_image.counter_text(), None);
     }
 
     #[test]
@@ -459,44 +453,19 @@ mod tests {
     }
 
     #[test]
-    fn seg_builder_accepts_owned_string_for_dynamic_stage() {
-        // `BatchManager::progress()` returns `stage: String`. The
-        // builder must accept that without forcing the caller into a
-        // `.into()` dance.
-        let stage: String = "Processing 3 of 5".to_string();
-        let p = DispatchProgress::seg(3, 5, stage);
-        assert_eq!(p.inner, (3, 5));
-        assert_eq!(p.step_label.as_ref(), "Processing 3 of 5");
-    }
-
-    #[test]
     fn the_tile_map_follows_tile_reports() {
         use prunr_core::{ProgressUpdate, TileRect};
         let mut p = upscale((0, 0));
         let half = |x| TileRect { x, y: 0.0, w: 0.5, h: 1.0 };
         p.apply(&ProgressUpdate::Tiles(vec![half(0.0), half(0.5)]));
-        assert_eq!(p.tile_states, [TileState::Waiting; 2]);
+        assert_eq!(*p.tile_states, [TileState::Waiting; 2]);
         p.apply(&ProgressUpdate::Tile { index: 0, done: false });
         p.apply(&ProgressUpdate::Tile { index: 7, done: true });
-        assert_eq!(p.tile_states, [TileState::Running, TileState::Waiting]);
+        assert_eq!(*p.tile_states, [TileState::Running, TileState::Waiting]);
         p.apply(&ProgressUpdate::Tile { index: 0, done: true });
-        assert_eq!(p.tile_states, [TileState::Done, TileState::Waiting]);
+        assert_eq!(*p.tile_states, [TileState::Done, TileState::Waiting]);
         p.apply(&ProgressUpdate::Tiles(vec![half(0.0)]));
-        assert_eq!(p.tile_states, [TileState::Waiting], "a new layout starts over");
-    }
-
-    #[test]
-    fn overlapping_tiles_meet_in_the_middle_of_the_overlap() {
-        use prunr_core::TileRect;
-        // Two columns overlapping by 0.1, two rows overlapping by 0.2.
-        let t = |x, y| TileRect { x, y, w: 0.55, h: 0.6 };
-        let cells = split_overlaps(&[t(0.0, 0.0), t(0.45, 0.0), t(0.0, 0.4), t(0.45, 0.4)]);
-        let close = |a: f32, b: f32| (a - b).abs() < 1e-6;
-        assert!(close(cells[0].w, 0.5) && close(cells[0].h, 0.5), "{:?}", cells[0]);
-        assert!(close(cells[1].x, 0.5) && close(cells[1].x + cells[1].w, 1.0), "{:?}", cells[1]);
-        assert!(close(cells[3].y, 0.5) && close(cells[3].y + cells[3].h, 1.0), "{:?}", cells[3]);
-        let apart = [TileRect { x: 0.0, y: 0.0, w: 0.2, h: 0.2 }, TileRect { x: 0.5, y: 0.5, w: 0.2, h: 0.2 }];
-        assert_eq!(split_overlaps(&apart), apart, "tiles that do not touch stay whole");
+        assert_eq!(*p.tile_states, [TileState::Waiting], "a new layout starts over");
     }
 
     #[test]
@@ -594,17 +563,5 @@ mod tests {
             Some(CancelTarget::SegBatchAndReset),
             "seg routes to batch reset regardless of selection",
         );
-    }
-
-    #[test]
-    fn seg_builder_borrowed_arm_works_for_static_str() {
-        // The Owned arm is covered by the dynamic-stage test above; this
-        // pins the Borrowed arm so the `impl Into<Cow>` signature can't
-        // silently regress to `String`-only.
-        let p = DispatchProgress::seg(0, 0, "Ready");
-        assert_eq!(p.inner, (0, 0));
-        assert_eq!(p.step_label.as_ref(), "Ready");
-        assert!(matches!(p.step_label, Cow::Borrowed(_)),
-            "static-str literal must produce Cow::Borrowed (zero alloc)");
     }
 }

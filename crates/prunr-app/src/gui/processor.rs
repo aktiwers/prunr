@@ -439,6 +439,8 @@ pub(crate) struct Processor {
     pub(crate) admission_tx: Option<mpsc::Sender<WorkItem>>,
     /// In-flight batch: recipe + pending IDs. `None` between batches.
     in_flight: Option<InFlightBatch>,
+    /// The progress run the in-flight batch shows through.
+    seg_run: Option<super::dispatch_progress::RunSink>,
     /// Inpaint dispatch state. Per-item generation counter discards
     /// stale results when the user paints a fresh stroke before the
     /// previous one finishes. `inpaint_pending` is the count of
@@ -524,6 +526,7 @@ impl Processor {
             admission: None,
             admission_tx: None,
             in_flight: None,
+            seg_run: None,
             inpaint_tx,
             inpaint_rx,
             inpaint_latest_gen: HashMap::new(),
@@ -556,32 +559,32 @@ impl Processor {
         self.dispatch_progress.set(Some(progress));
     }
 
-    /// Keep the background-removal run's image counts current; called
-    /// whenever batch state could have changed. The step the worker last
-    /// reported stays; `label` shows until the first step arrives. With
-    /// no batch running the slot is cleared, and the idle case takes no
-    /// write.
-    pub(crate) fn set_seg_counts(&self, counts: Option<(u32, u32)>, label: String) {
-        use super::dispatch_progress::{DispatchProgress, ProgressKind};
-        let Some((done, total)) = counts else {
-            if self.dispatch_progress.read().is_some_and(|p| p.kind == ProgressKind::Seg) {
-                self.dispatch_progress.set(None);
-            }
-            return;
-        };
-        self.dispatch_progress.update(|p| match p {
-            Some(p) if p.kind == ProgressKind::Seg => p.set_inner(done, total, prunr_core::Unit::Image, std::time::Instant::now()),
-            _ => *p = Some(DispatchProgress::seg(done, total, label)),
-        });
-    }
-
     /// Show `text` as the background-removal run's current step.
     pub(crate) fn set_seg_step_text(&self, text: String) {
-        self.dispatch_progress.update(|p| {
-            if let Some(p) = p {
-                p.step_label = std::borrow::Cow::Owned(text);
-            }
-        });
+        if let Some(run) = &self.seg_run {
+            run.set_step_text(text);
+        }
+    }
+
+    /// Fold a background-removal worker report into its run.
+    pub(crate) fn apply_seg_report(&self, update: prunr_core::ProgressUpdate) {
+        if let Some(run) = &self.seg_run {
+            prunr_core::ProgressSink::report(run, update);
+        }
+    }
+
+    fn report_seg_count(&self) {
+        if let (Some(run), Some((done, total))) = (&self.seg_run, self.current_dispatch_progress()) {
+            let update = prunr_core::ProgressUpdate::Outer { done, total, unit: prunr_core::Unit::Image };
+            prunr_core::ProgressSink::report(run, update);
+        }
+    }
+
+    /// The batch is over or cancelled: stop showing it.
+    pub(crate) fn end_seg_run(&mut self) {
+        if let Some(run) = self.seg_run.take() {
+            run.end();
+        }
     }
 
     /// `true` while an upscale dispatch is in flight. The intent
@@ -869,16 +872,6 @@ impl Processor {
         });
     }
 
-    /// Fold a pipeline's progress report into the running dispatch's
-    /// snapshot; none running, nothing to show it on.
-    pub(crate) fn apply_report(&self, update: &prunr_core::ProgressUpdate) {
-        self.dispatch_progress.update(|p| {
-            if let Some(p) = p {
-                p.apply(update);
-            }
-        });
-    }
-
     /// Drain bridge events, forward into the existing inpaint result
     /// channel + progress sinks. Called once per frame from app pump.
     pub(crate) fn pump_inpaint_subprocess(&mut self) {
@@ -1031,7 +1024,9 @@ impl Processor {
         let pending: HashSet<u64> = ids.into_iter().collect();
         let total = pending.len();
         self.in_flight = Some(InFlightBatch { recipe, pending, total });
-        self.set_seg_counts(self.current_dispatch_progress(), "Starting".into());
+        let initial = super::dispatch_progress::DispatchProgress::new(super::dispatch_progress::ProgressKind::Seg, "Starting");
+        self.seg_run = Some(self.dispatch_progress.begin(initial));
+        self.report_seg_count();
     }
 
     /// `(done, total)` for the currently in-flight dispatch, or `None`
@@ -1057,6 +1052,7 @@ impl Processor {
             Some(b) => {
                 if b.pending.insert(id) {
                     b.total += 1;
+                    self.report_seg_count();
                 }
             }
             None => debug_assert!(false, "track_streamed called without active batch"),
@@ -1072,8 +1068,10 @@ impl Processor {
             return None;
         }
         let recipe = batch.recipe.clone();
-        if batch.pending.is_empty() {
+        self.report_seg_count();
+        if self.in_flight.as_ref().is_some_and(|b| b.pending.is_empty()) {
             self.in_flight = None;
+            self.end_seg_run();
         }
         Some(recipe)
     }
@@ -1082,6 +1080,7 @@ impl Processor {
     /// or batch-complete signals so a late delivery can't reattribute.
     pub(crate) fn drain_recipes(&mut self) {
         self.in_flight = None;
+        self.end_seg_run();
     }
 
     /// Drop admission state so no further items are admitted. Called on
@@ -1633,27 +1632,26 @@ mod tests {
         assert!(p.is_upscale_in_flight());
     }
 
-    /// Batch counts refresh every frame; they must update the count and
-    /// keep the step the worker reported, and clearing them must not wipe
-    /// another kind of run.
+    /// The batch's image count comes from its own bookkeeping, steps from
+    /// the worker; ending the batch must not clear another kind of run.
     #[test]
-    fn seg_counts_keep_the_reported_step() {
-        use crate::gui::dispatch_progress::DispatchProgress;
-        let p = fixture();
-        p.set_seg_counts(None, String::new());
-        assert!(p.dispatch_progress().is_none(), "nothing running, nothing shown");
-
-        p.set_seg_counts(Some((0, 3)), "Processing 0/3".into());
-        p.apply_report(&prunr_core::ProgressUpdate::Step(prunr_core::Step::FindingSubject));
-        p.set_seg_counts(Some((1, 3)), "Processing 1/3".into());
+    fn a_batch_counts_its_images_and_keeps_the_reported_step() {
+        use crate::gui::dispatch_progress::{DispatchProgress, ProgressKind};
+        let mut p = fixture();
+        p.track_dispatch(fixture_recipe(), [1, 2, 3].iter().copied());
+        p.apply_seg_report(prunr_core::ProgressUpdate::Step(prunr_core::Step::FindingSubject));
+        assert!(p.take_recipe(1).is_some());
         let shown = p.dispatch_progress().unwrap();
-        assert_eq!((shown.inner, shown.step_label.as_ref()), ((1, 3), "Finding the subject"));
+        assert_eq!((shown.outer, shown.step_label.as_ref()), (Some((1, 3)), "Finding the subject"));
+        p.track_streamed(4);
+        assert_eq!(p.dispatch_progress().unwrap().outer, Some((1, 4)), "a streamed image grows the total");
 
-        p.set_seg_counts(None, String::new());
+        p.drain_recipes();
         assert!(p.dispatch_progress().is_none());
-        let _upscale = p.dispatch_progress.begin(DispatchProgress::new(crate::gui::dispatch_progress::ProgressKind::Upscale, "Upscaling"));
-        p.set_seg_counts(None, String::new());
-        assert!(p.dispatch_progress().is_some(), "an upscale run is not the batch's to clear");
+        let _upscale = p.dispatch_progress.begin(DispatchProgress::new(ProgressKind::Upscale, "Upscaling"));
+        p.end_seg_run();
+        p.apply_seg_report(prunr_core::ProgressUpdate::Step(prunr_core::Step::RefiningEdges));
+        assert_eq!(p.dispatch_progress().unwrap().step_label.as_ref(), "Upscaling", "a finished batch reaches no other run");
     }
 
     #[test]
@@ -1885,9 +1883,9 @@ mod tests {
     fn a_background_removal_run_shows_progress_from_the_start() {
         let mut p = fixture();
         p.track_dispatch(fixture_recipe(), [10, 20].iter().copied());
-        p.apply_report(&prunr_core::ProgressUpdate::Step(prunr_core::Step::LoadingModel));
+        p.apply_seg_report(prunr_core::ProgressUpdate::Step(prunr_core::Step::LoadingModel));
         let shown = p.dispatch_progress().expect("the capsule shows before any image is done");
-        assert_eq!((shown.inner, shown.step_label.as_ref()), ((0, 2), "Loading the model"));
+        assert_eq!((shown.outer, shown.step_label.as_ref()), (Some((0, 2)), "Loading the model"));
     }
 
     #[test]

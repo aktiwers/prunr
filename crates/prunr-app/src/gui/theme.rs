@@ -162,6 +162,19 @@ pub const ACCENT_BRIGHT: Color32 = Color32::from_rgb(0x9b, 0x4f, 0xd1);
 
 /// Amber for a run that is stopping.
 pub const CAUTION: Color32 = Color32::from_rgb(0xe8, 0xa8, 0x4c);
+/// Amber text, softer than `CAUTION` so a line of it stays readable.
+pub const CAUTION_TEXT: Color32 = Color32::from_rgb(0xc9, 0xa7, 0x7a);
+
+// Floating overlays over the canvas: the progress capsule and its pills.
+pub const OVERLAY_CAPSULE_FILL: Color32 = Color32::from_rgba_premultiplied(18, 18, 22, 214);
+pub const OVERLAY_CAPSULE_BORDER: Color32 = Color32::from_rgba_premultiplied(20, 20, 20, 20);
+pub const OVERLAY_BUTTON_FILL: Color32 = Color32::from_rgba_premultiplied(18, 18, 18, 18);
+pub const OVERLAY_BUTTON_HOVER_FILL: Color32 = Color32::from_rgba_premultiplied(36, 36, 36, 36);
+pub const KEYCAP_BORDER: Color32 = Color32::from_rgb(0x52, 0x52, 0x5b);
+pub const PROGRESS_RING_TRACK: Color32 = Color32::from_rgb(0x3f, 0x3f, 0x46);
+/// Tiles of the tile map still to come: dimmed, with a faint grid.
+pub const TILE_WAITING: Color32 = Color32::from_rgba_premultiplied(9, 9, 11, 140);
+pub const TILE_GRID: Color32 = Color32::from_rgba_premultiplied(13, 13, 13, 13);
 
 /// Primary accent — plum purple (buttons, selections, progress)
 pub const ACCENT: Color32 = Color32::from_rgb(0x7b, 0x2d, 0x8e);
